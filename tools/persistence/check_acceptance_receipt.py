@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from pathlib import PurePosixPath, PureWindowsPath
 import re
 import sys
 
@@ -365,14 +366,126 @@ def _check_edit_roundtrip(receipt: dict) -> dict:
     )
 
 
+OBSOLETE_WORLD_MESSAGE = (
+    "This world predates the v0.3.0 format and cannot be opened. Create a new world; "
+    "migration is not supported."
+)
+MISSING_METADATA_MESSAGE = "World unavailable: its save directory or metadata is missing or unreadable."
+_REFUSAL_HASHES = ("fixture_manifest_sha256", "expected_tree_digest", "before_tree_digest", "after_tree_digest")
+_REFUSAL_BINDING = (*_REFUSAL_HASHES, "expected_reason", "observed_reason", "jobs_drained", "shutdown",
+                    "staged_world_dir", "world_type", "mutation_path", "atlas_fallback_absent")
+
+
 def _refusal_ok(refusal) -> bool:
-    return (
-        isinstance(refusal, dict)
-        and isinstance(refusal.get("variant"), str)
-        and _is_int(refusal.get("exit_code"))
-        and isinstance(refusal.get("diagnostic"), bool)
-        and ("timed_out" not in refusal or isinstance(refusal["timed_out"], bool))
-    )
+    if not (isinstance(refusal, dict) and isinstance(refusal.get("variant"), str)
+            and _is_int(refusal.get("exit_code")) and isinstance(refusal.get("diagnostic"), bool)
+            and ("timed_out" not in refusal or isinstance(refusal["timed_out"], bool))):
+        return False
+    for name in _REFUSAL_HASHES:
+        if name in refusal and not _is_hex64(refusal[name]):
+            return False
+    for name in ("observed_reason", "staged_world_dir", "world_type", "mutation_path"):
+        if name in refusal and refusal[name] is not None and not isinstance(refusal[name], str):
+            return False
+    for name in ("jobs_drained", "atlas_fallback_absent"):
+        if name in refusal and refusal[name] is not None and not isinstance(refusal[name], bool):
+            return False
+    world_text = refusal.get("staged_world_dir")
+    if world_text is not None:
+        try:
+            world = _runtime_path(world_text)
+        except ValueError:
+            return False
+        if world.name != refusal["variant"] or world.parent.name != "saves" or world.parent.parent.name != "worlds":
+            return False
+    world_type = refusal.get("world_type")
+    if world_type is not None and (not world_type or world_type in (".", "..") or re.search(r"[/\\:]", world_type)):
+        return False
+    mutation = refusal.get("mutation_path")
+    if mutation is not None and refusal["variant"] in REQUIRED_REFUSAL_VARIANTS:
+        if refusal["variant"] == "truncated-region":
+            if not re.fullmatch(r"chunks/region/r\.-?[0-9]+\.-?[0-9]+\.lmr", mutation):
+                return False
+        elif mutation != ("preset.json" if refusal["variant"] == "missing-preset" else WORLD_INFO):
+            return False
+    reason = refusal.get("expected_reason")
+    if reason is not None:
+        if not isinstance(reason, dict) or reason.get("kind") != refusal["variant"]:
+            return False
+        versioned = refusal["variant"] in ("obsolete-metadata", "future-metadata")
+        if set(reason) != ({"kind", "version"} if versioned else {"kind"}):
+            return False
+        if versioned and (not _is_int(reason["version"]) or reason["version"] < 1):
+            return False
+        if refusal["variant"] == "obsolete-metadata" and reason["version"] != 1:
+            return False
+        if refusal["variant"] == "future-metadata" and reason["version"] <= 1:
+            return False
+    shutdown = refusal.get("shutdown")
+    if shutdown is not None:
+        if not isinstance(shutdown, dict) or (shutdown.get("schema") is not None and not isinstance(shutdown["schema"], str)):
+            return False
+        for name in ("complete", "jobs_drained"):
+            if name in shutdown and shutdown[name] is not None and not isinstance(shutdown[name], bool):
+                return False
+    return True
+
+
+def _runtime_path(text):
+    if not _is_nonempty_str(text):
+        raise ValueError("missing runtime path")
+    path = PureWindowsPath(text) if PureWindowsPath(text).drive else PurePosixPath(text)
+    if not path.is_absolute() or ".." in path.parts:
+        raise ValueError("runtime path must be absolute without parent traversal")
+    return path
+
+
+def _same_runtime_path(observed, expected) -> bool:
+    try:
+        actual = _runtime_path(observed)
+    except ValueError:
+        return False
+    return type(actual) is type(expected) and actual == expected
+
+
+def _reason_matches(refusal) -> bool:
+    variant, observed = refusal["variant"], refusal["observed_reason"]
+    if not _is_nonempty_str(observed):
+        return False
+    if variant == "obsolete-metadata":
+        return observed == OBSOLETE_WORLD_MESSAGE
+    if variant == "future-metadata":
+        return observed == "unsupported future world metadata container version " + str(refusal["expected_reason"]["version"])
+    if variant == "corrupt-metadata":
+        # The producer writes exactly '{', so catalog validation must fail at
+        # the next object-key token, rather than at a size/type/spawn check.
+        return re.fullmatch(
+            r"Corrupt world metadata: \[json\.exception\.parse_error\.101\] "
+            r"parse error at line 1, column 2: syntax error while parsing object key - "
+            r"unexpected end of input; expected string literal", observed) is not None
+    if variant == "missing-metadata":
+        return observed == MISSING_METADATA_MESSAGE
+    try:
+        world = _runtime_path(refusal["staged_world_dir"])
+        if world.name != variant or world.parent.name != "saves" or world.parent.parent.name != "worlds":
+            return False
+        if variant == "missing-preset":
+            world_type = refusal["world_type"]
+            if not _is_nonempty_str(world_type) or world_type in (".", "..") or re.search(r"[/\\:]", world_type):
+                return False
+            prefix = "failed to open world preset: "
+            expected = world.parent.parent / "atlas" / "presets" / (world_type + ".json")
+        elif variant == "truncated-region":
+            relative = refusal["mutation_path"]
+            if not isinstance(relative, str) or not re.fullmatch(r"chunks/region/r\.-?[0-9]+\.-?[0-9]+\.lmr", relative):
+                return False
+            prefix = "region file record payload is truncated: "
+            expected = world.joinpath(*relative.split("/"))
+        else:
+            return False
+        return observed.startswith(prefix) and _same_runtime_path(observed[len(prefix):], expected)
+    except (KeyError, ValueError, TypeError):
+        return False
 
 
 def _check_refusals(receipt: dict, required: tuple) -> dict:
@@ -382,38 +495,74 @@ def _check_refusals(receipt: dict, required: tuple) -> dict:
         return _missing(check_id, "refusals")
     if not all(_refusal_ok(refusal) for refusal in refusals):
         return _malformed(check_id, "refusals")
-    failed = []
+    variants = [refusal["variant"] for refusal in refusals]
+    if len(set(variants)) != len(variants):
+        return _result(check_id, FAIL, "duplicate refusal variants")
+    hashes = {refusal["fixture_manifest_sha256"] for refusal in refusals if "fixture_manifest_sha256" in refusal}
+    if len(hashes) > 1:
+        return _result(check_id, FAIL, "mixed refusal fixture manifests")
+    known = [variant for variant in variants if variant in REQUIRED_REFUSAL_VARIANTS]
+    if known != [variant for variant in REQUIRED_REFUSAL_VARIANTS if variant in known]:
+        return _result(check_id, FAIL, "refusal variants out of registry order")
+    failed, pending = [], []
+    missing = [variant for variant in required if variant not in variants]
+    if missing:
+        pending.append("missing variants: " + ", ".join(missing))
+    untimed = [refusal["variant"] for refusal in refusals if "timed_out" not in refusal]
+    if untimed:
+        pending.append("timed_out absent for: " + ", ".join(untimed))
     for refusal in refusals:
+        variant = refusal["variant"]
         reasons = []
-        if refusal["exit_code"] == 0:
-            reasons.append("exit code 0")
+        if refusal["exit_code"] != 2:
+            reasons.append(f"exit code {refusal['exit_code']} (expected 2)")
         if refusal["diagnostic"] is not True:
             reasons.append("no diagnostic")
         if refusal.get("timed_out") is True:
             reasons.append("timed out")
+        absent = [name for name in _REFUSAL_BINDING if name not in refusal or
+                  (refusal[name] is None and name != "atlas_fallback_absent")]
+        if absent:
+            pending.append(variant + " evidence absent: " + ", ".join(absent))
+        if variant not in REQUIRED_REFUSAL_VARIANTS:
+            pending.append("unknown native refusal contract: " + variant)
+        if ("before_tree_digest" in refusal and "after_tree_digest" in refusal
+                and refusal["before_tree_digest"] != refusal["after_tree_digest"]):
+            reasons.append("before/after staged bytes differ")
+        if "expected_tree_digest" in refusal:
+            for name in ("before_tree_digest", "after_tree_digest"):
+                if name in refusal and refusal[name] != refusal["expected_tree_digest"]:
+                    reasons.append(name + " differs from staged manifest inventory")
+        if refusal.get("jobs_drained") is False:
+            reasons.append("jobs not drained")
+        shutdown = refusal.get("shutdown")
+        if shutdown is not None:
+            if (shutdown.get("schema") is not None and shutdown["schema"] != SHUTDOWN_SCHEMA) or shutdown.get("complete") is False or shutdown.get("jobs_drained") is False:
+                reasons.append("shutdown not complete and drained")
+            if any(shutdown.get(name) is None for name in ("schema", "complete", "jobs_drained")):
+                pending.append(variant + " complete shutdown evidence absent")
+            if shutdown.get("jobs_drained") is not None and refusal.get("jobs_drained") is not None and shutdown["jobs_drained"] != refusal["jobs_drained"]:
+                reasons.append("jobs_drained differs from shutdown record")
+        if variant == "missing-preset":
+            if refusal.get("atlas_fallback_absent") is False:
+                reasons.append("atlas preset fallback was present")
+            elif refusal.get("atlas_fallback_absent") is None:
+                pending.append(variant + " atlas fallback absence not observed")
+        elif "atlas_fallback_absent" in refusal and refusal["atlas_fallback_absent"] is not None:
+            reasons.append("unexpected atlas fallback condition")
+        if (variant in REQUIRED_REFUSAL_VARIANTS and refusal.get("expected_reason") is not None
+                and refusal.get("observed_reason") is not None
+                and (variant not in ("missing-preset", "truncated-region") or
+                     all(refusal.get(name) is not None for name in ("staged_world_dir", "world_type", "mutation_path")))
+                and not _reason_matches(refusal)):
+            reasons.append("wrong World open refused reason")
         if reasons:
-            failed.append(f"{refusal['variant']} ({', '.join(reasons)})")
-    present = {refusal["variant"] for refusal in refusals}
-    missing = [variant for variant in required if variant not in present]
-    # timed_out is required evidence: an entry without it cannot be judged clean.
-    untimed = [refusal["variant"] for refusal in refusals if "timed_out" not in refusal]
+            failed.append(f"{variant} ({', '.join(reasons)})")
     if failed:
-        detail = "refusals not clean: " + "; ".join(failed)
-        if missing:
-            detail += "; missing variants: " + ", ".join(missing)
-        if untimed:
-            detail += "; timed_out absent for: " + ", ".join(untimed)
-        return _result(check_id, FAIL, detail)
-    pending = []
-    if missing:
-        pending.append("missing variants: " + ", ".join(missing))
-    if untimed:
-        pending.append("timed_out absent for: " + ", ".join(untimed))
+        return _result(check_id, FAIL, "; ".join(["refusals not clean: " + "; ".join(failed), *pending]))
     if pending:
         return _result(check_id, UNEVALUATED, "; ".join(pending))
-    return _result(
-        check_id, PASS, f"{len(refusals)} refusals exit nonzero with diagnostics; all required variants present"
-    )
+    return _result(check_id, PASS, f"{len(refusals)} manifest-bound refusals exit 2 with exact reasons, unchanged bytes and drained shutdown")
 
 
 def _top_level_problem(receipt) -> str | None:

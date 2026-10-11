@@ -54,6 +54,8 @@ $ExeName = "luminumbra_client_qa_app.exe"
 $repoRoot = Get-AbsolutePath (Join-Path (Join-Path $PSScriptRoot "..") "..")
 $saveReceiptPy = Join-Path $repoRoot "tools/persistence/save_receipt.py"
 $checkerPy = Join-Path $repoRoot "tools/persistence/check_acceptance_receipt.py"
+$refusalProducerPy = Join-Path $repoRoot "tools/persistence/refusal_fixtures.py"
+$requiredRefusals = @("obsolete-metadata", "future-metadata", "corrupt-metadata", "missing-metadata", "missing-preset", "truncated-region")
 
 $PackageAbs = Get-AbsolutePath $Package
 $FixtureAbs = Get-AbsolutePath $FixtureDir
@@ -120,6 +122,8 @@ function Invoke-Snapshot {
         [Parameter(Mandatory = $true)][string]$OutFile,
         [Parameter(Mandatory = $true)][string]$Label
     )
+    Assert-NoReparseTree -Path $WorldDir
+    Assert-NoReparsePath -Path $OutFile
     $result = Invoke-PythonTool -ScriptPath $saveReceiptPy -ArgumentList @("snapshot", $WorldDir, "--out", $OutFile)
     if ($result.exit_code -ne 0) {
         throw "save_receipt snapshot failed for $Label (exit $($result.exit_code)): $($result.stderr)"
@@ -225,10 +229,62 @@ function Test-GBufferProbeDocument {
     return $true
 }
 
-function Get-RefusalDiagnostic {
+function Get-RefusalReason {
     param([string]$Text)
-    return [regex]::IsMatch($Text, '(?i)refus|cannot open|invalid')
+    # Logs may have timestamps/colour prefixes. Preserve only the actual record
+    # payload; conflicting records cannot provide one unambiguous reason.
+    $plain = [regex]::Replace($Text, '\x1B\[[0-?]*[ -/]*[@-~]', '')
+    $records = @([regex]::Matches($plain, 'World open refused: ([^\r\n]+)') |
+        ForEach-Object { $_.Groups[1].Value.TrimEnd() } | Select-Object -Unique)
+    if ($records.Count -eq 1) { return [string]$records[0] }
+    return $null
 }
+
+function Assert-NoReparsePath {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    # Check every existing ancestor, including the disposable package root.
+    $current = Get-AbsolutePath $Path
+    while ($current.Length -gt 0) {
+        if (Test-Path -LiteralPath $current) {
+            $item = Get-Item -LiteralPath $current -Force
+            if ($item.PSProvider.Name -ne "FileSystem" -or
+                ($item -isnot [System.IO.FileInfo] -and $item -isnot [System.IO.DirectoryInfo]) -or
+                (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0)) {
+                throw "refusing special/reparse path: $current"
+            }
+        }
+        $parent = [System.IO.Path]::GetDirectoryName($current)
+        if ($null -eq $parent -or $parent -eq $current) { break }
+        $current = $parent
+    }
+}
+
+function Assert-NoReparseTree {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    Assert-NoReparsePath -Path $Path
+    if (-not (Test-Path -LiteralPath $Path)) { throw "tree is absent: $Path" }
+    $pending = New-Object 'System.Collections.Generic.Queue[string]'
+    $pending.Enqueue($Path)
+    while ($pending.Count -gt 0) {
+        $current = $pending.Dequeue()
+        $item = Get-Item -LiteralPath $current -Force
+        if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0 -or
+            $item.PSProvider.Name -ne "FileSystem" -or
+            ($item -isnot [System.IO.FileInfo] -and $item -isnot [System.IO.DirectoryInfo])) {
+            throw "refusing special/reparse tree entry: $current"
+        }
+        if ($item -is [System.IO.DirectoryInfo]) {
+            foreach ($child in @(Get-ChildItem -LiteralPath $current -Force)) {
+                # Inspect the entry before enumerating a directory's children.
+                if (($child.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+                    throw "refusing reparse tree entry: $($child.FullName)"
+                }
+                $pending.Enqueue($child.FullName)
+            }
+        }
+    }
+}
+
 
 # ---------------------------------------------------------------------------
 # Plan (dry run) - placeholders stand in for world ids that are only known at run time.
@@ -240,6 +296,8 @@ $secondArtifact = Join-Path $artifactsDir "second_seed"
 
 if ($DryRun) {
     Write-Host "[dry-run] no files will be written"
+    Show-PlannedCommand -Label "verify refusal producer manifest" -Exe "python" -Arguments @($refusalProducerPy, "verify", $FixtureAbs)
+    Write-Host "[dry-run] missing-preset: move only its atlas fallback leaf into fresh evidence, observe absence, restore in finally"
     Write-Host ("[dry-run] stage: copy {0}\* into {1} (refuse if a target exists)" -f $fixtureSaves, $savesRoot)
     Show-PlannedCommand -Label "snapshot before_edit" -Exe "python" -Arguments @($saveReceiptPy, "snapshot", (Join-Path $savesRoot $fixtureWorldPlaceholder), "--out", (Join-Path $receiptsDir "before_edit.json"))
     Show-PlannedCommand -Label "create_edit_save" -Exe $exePath -Arguments (@("--scenario", "persistence_roundtrip_smoke", "--persistence-phase", "save", "--persistence-session-dir", $sessionDir, "--auto-create-world", "--auto-enter-world") + (Get-CommonFlags -ArtifactDir $persistenceArtifact))
@@ -265,6 +323,10 @@ if ($DryRun) {
 # Real run
 # ---------------------------------------------------------------------------
 try {
+    Assert-NoReparsePath -Path $PackageAbs
+    Assert-NoReparsePath -Path $OutAbs
+    Assert-NoReparsePath -Path $savesRoot
+    Assert-NoReparseTree -Path $fixtureSaves
     $exePath = Get-ClientExe -Package $PackageAbs -Name $ExeName
 
     if (Test-Path -LiteralPath $OutAbs -PathType Container) {
@@ -282,7 +344,44 @@ try {
         throw "fixture world directory missing: $fixtureWorldSource"
     }
 
+    # Validate producer evidence before any native session. Missing evidence
+    # leaves the refusal matrix unevaluated; malformed evidence is an early error.
+    $refusalManifest = $null
+    $refusalManifestPath = Join-Path $FixtureAbs "refusal-manifest.json"
+    $refusalManifestSha = $null
+    if (Test-Path -LiteralPath $refusalManifestPath -PathType Leaf) {
+        if (-not (Test-Path -LiteralPath $refusalProducerPy -PathType Leaf)) {
+            Write-Host "unevaluated: refusal producer verifier is unavailable"
+            exit 3
+        }
+        $refusalManifestSha = Get-FileSha256Hex -Path $refusalManifestPath
+        $verified = Invoke-PythonTool -ScriptPath $refusalProducerPy -ArgumentList @("verify", $FixtureAbs)
+        if ($verified.exit_code -ne 0) { throw "refusal producer verification failed: $($verified.stderr)" }
+        $refusalManifest = ConvertFrom-Json -InputObject (Read-TextOrEmpty -Path $refusalManifestPath)
+        if ((Get-FileSha256Hex -Path $refusalManifestPath) -ne $refusalManifestSha) { throw "refusal manifest changed during verification" }
+        if ($refusalManifest.schema -ne "luminumbra.refusal_fixtures.v1" -or
+            $refusalManifest.variants -isnot [System.Array] -or @($refusalManifest.variants).Count -ne $requiredRefusals.Count) {
+            throw "invalid refusal manifest registry"
+        }
+        for ($index = 0; $index -lt $requiredRefusals.Count; $index++) {
+            if ($refusalManifest.variants[$index].id -cne $requiredRefusals[$index] -or
+                $refusalManifest.variants[$index].world_id -cne $requiredRefusals[$index]) {
+                throw "refusal manifest registry is duplicated, unknown or reordered"
+            }
+        }
+    } else {
+        Write-Host "unevaluated: refusal-manifest.json is absent; no refusal cases will be qualified"
+    }
+
+    foreach ($directory in @($savesRoot, $logsDir, $artifactsDir, $receiptsDir, $crashDir, $sessionDir)) {
+        Assert-NoReparsePath -Path $directory
+    }
     New-Item -ItemType Directory -Force -Path $savesRoot, $logsDir, $artifactsDir, $receiptsDir, $crashDir, $sessionDir | Out-Null
+    if ($null -ne $refusalManifest) {
+        $copiedManifest = Join-Path $receiptsDir "refusal-manifest.json"
+        Copy-Item -LiteralPath $refusalManifestPath -Destination $copiedManifest
+        if ((Get-FileSha256Hex -Path $copiedManifest) -ne $refusalManifestSha) { throw "refusal manifest changed before evidence copy" }
+    }
 
     # 1. Stage the fixture into the package and take the before_edit receipt.
     $stagedItems = @(Get-ChildItem -LiteralPath $fixtureSaves -Force)
@@ -291,6 +390,8 @@ try {
         if (Test-Path -LiteralPath $target) { throw "refusing to stage: $target already exists" }
     }
     foreach ($item in $stagedItems) {
+        Assert-NoReparseTree -Path $item.FullName
+        Assert-NoReparsePath -Path (Join-Path $savesRoot $item.Name)
         Copy-Item -LiteralPath $item.FullName -Destination $savesRoot -Recurse
     }
     $stagedFixture = Join-Path $savesRoot $fixtureWorldId
@@ -360,46 +461,115 @@ try {
     $fixtureAfterLoads = Invoke-Snapshot -WorldDir $stagedFixture -OutFile (Join-Path $receiptsDir "fixture_after_loads.json") -Label "fixture_after_loads"
     $fixtureChanges = Get-DiffChanges -AFile (Join-Path $receiptsDir "before_edit.json") -BFile (Join-Path $receiptsDir "fixture_after_loads.json")
 
-    # 6. Refusal matrix: each FixtureDir\refusals\<variant> must fail cleanly and leave bytes unchanged.
+    # 6. Only the verified fixed registry may enter the native refusal loop.
     $refusals = @()
-    if (Test-Path -LiteralPath $refusalsRoot -PathType Container) {
-        $variantDirs = @(Get-ChildItem -LiteralPath $refusalsRoot -Directory | Sort-Object -Property Name)
-        foreach ($variantDir in $variantDirs) {
-            $variant = $variantDir.Name
+    if ($null -ne $refusalManifest) {
+        foreach ($variantRecord in $refusalManifest.variants) {
+            $variant = [string]$variantRecord.id
             $target = Join-Path $savesRoot $variant
+            Assert-NoReparsePath -Path $target
             if (Test-Path -LiteralPath $target) { throw "refusing to stage refusal variant: $target already exists" }
-            Copy-Item -LiteralPath $variantDir.FullName -Destination $savesRoot -Recurse
-
+            $variantSource = Join-Path $refusalsRoot $variant
+            Assert-NoReparseTree -Path $variantSource
+            Copy-Item -LiteralPath $variantSource -Destination $savesRoot -Recurse
+            Assert-NoReparseTree -Path $target
+            $expectedFile = Join-Path $receiptsDir ("refusal_" + $variant + "_expected.json")
+            Write-JsonFile -Object $variantRecord.inventory -Path $expectedFile
+            $stagedCheck = Invoke-PythonTool -ScriptPath $saveReceiptPy -ArgumentList @("verify", $target, $expectedFile)
+            if ($stagedCheck.exit_code -ne 0) { throw "staged refusal inventory differs from manifest: $variant" }
             $preFile = Join-Path $receiptsDir ("refusal_" + $variant + "_before.json")
             $postFile = Join-Path $receiptsDir ("refusal_" + $variant + "_after.json")
             $preEntry = Invoke-Snapshot -WorldDir $target -OutFile $preFile -Label ("refusal_" + $variant + "_before")
+            if ($preEntry.tree_digest -ne $variantRecord.inventory.tree_digest) { throw "refusal pre-inventory changed: $variant" }
 
             $refusalArtifact = Join-Path $artifactsDir ("refusal_" + $variant)
             New-Item -ItemType Directory -Force -Path $refusalArtifact | Out-Null
-            $run = Invoke-ClientSession -Exe $exePath `
-                -ArgumentList @("--load-world", $variant, "--no-ui", "--hidden-window", "--render-benchmark", (Join-Path $refusalArtifact "benchmark.json")) `
-                -WorkingDirectory $PackageAbs `
-                -StdoutPath (Join-Path $logsDir ("refusal_" + $variant + ".stdout.log")) `
-                -StderrPath (Join-Path $logsDir ("refusal_" + $variant + ".stderr.log")) `
-                -TimeoutSeconds 120
-
-            $logText = (Read-TextOrEmpty -Path (Join-Path $logsDir ("refusal_" + $variant + ".stdout.log"))) + "`n" + (Read-TextOrEmpty -Path (Join-Path $logsDir ("refusal_" + $variant + ".stderr.log")))
-            $diagnostic = Get-RefusalDiagnostic -Text $logText
-            $entry = [ordered]@{
-                variant = $variant
-                exit_code = [int]$run.exit_code
-                diagnostic = $diagnostic
-                timed_out = [bool]$run.timed_out
+            $fallback = $null
+            $backup = $null
+            $fallbackSha = $null
+            $atlasAbsent = $null
+            $movedFallback = $false
+            try {
+                if ($variant -eq "missing-preset") {
+                    $worldType = [string]$variantRecord.world_type
+                    if ($worldType.Length -eq 0 -or $worldType -eq "." -or $worldType -eq ".." -or $worldType -match '[\\/:]') {
+                        throw "unsafe fallback world type"
+                    }
+                    if ($variantRecord.runtime_requirements.atlas_preset_absent -cne $worldType) { throw "missing atlas fallback requirement" }
+                    $fallback = Join-Path (Join-Path (Join-Path (Join-Path $PackageAbs "worlds") "atlas") "presets") ($worldType + ".json")
+                    $backup = Join-Path (Join-Path (Join-Path $OutAbs "fallback-backups") $variant) ($worldType + ".json")
+                    Assert-NoReparsePath -Path $fallback
+                    Assert-NoReparsePath -Path $backup
+                    if (Test-Path -LiteralPath $backup) { throw "refusing existing atlas fallback backup" }
+                    # Removing default.json changes ResolveRuntimeRoot's asset probe.
+                    # Refuse packages whose ancestors could become the selected root.
+                    if ($worldType -ieq "default") {
+                        $ancestor = [System.IO.Path]::GetDirectoryName($PackageAbs)
+                        while ($null -ne $ancestor -and $ancestor.Length -gt 0) {
+                            if ((Test-Path -LiteralPath (Join-Path $ancestor "res/shaders/g_buffer.vert")) -and
+                                (Test-Path -LiteralPath (Join-Path $ancestor "data/audio/music.bank.json")) -and
+                                (Test-Path -LiteralPath (Join-Path $ancestor "worlds/atlas/presets/default.json"))) {
+                                throw "missing-preset would redirect the native runtime root to an ancestor; use an isolated disposable package"
+                            }
+                            $parent = [System.IO.Path]::GetDirectoryName($ancestor)
+                            if ($null -eq $parent -or $parent -eq $ancestor) { break }
+                            $ancestor = $parent
+                        }
+                    }
+                    if (Test-Path -LiteralPath $fallback) {
+                        if ((Get-Item -LiteralPath $fallback -Force) -isnot [System.IO.FileInfo]) { throw "atlas fallback is not a regular file" }
+                        New-Item -ItemType Directory -Force -Path ([System.IO.Path]::GetDirectoryName($backup)) | Out-Null
+                        $fallbackSha = Get-FileSha256Hex -Path $fallback
+                        Move-Item -LiteralPath $fallback -Destination $backup
+                        $movedFallback = $true
+                        if ((Get-FileSha256Hex -Path $backup) -ne $fallbackSha) { throw "atlas fallback backup differs" }
+                    }
+                    $atlasAbsent = -not (Test-Path -LiteralPath $fallback)
+                }
+                $run = Invoke-ClientSession -Exe $exePath `
+                    -ArgumentList (@("--load-world", $variant, "--render-benchmark", (Join-Path $refusalArtifact "benchmark.json")) + (Get-CommonFlags -ArtifactDir $refusalArtifact)) `
+                    -WorkingDirectory $PackageAbs `
+                    -StdoutPath (Join-Path $logsDir ("refusal_" + $variant + ".stdout.log")) `
+                    -StderrPath (Join-Path $logsDir ("refusal_" + $variant + ".stderr.log")) `
+                    -TimeoutSeconds 120
+                if ($variant -eq "missing-preset") { $atlasAbsent = $atlasAbsent -and (-not (Test-Path -LiteralPath $fallback)) }
+                $shutdown = Read-ShutdownRecord -ArtifactDir $refusalArtifact
+                $drained = $null
+                if ($null -ne $shutdown) { $drained = $shutdown["jobs_drained"] }
+                $logText = (Read-TextOrEmpty -Path (Join-Path $logsDir ("refusal_" + $variant + ".stdout.log"))) + "`n" + (Read-TextOrEmpty -Path (Join-Path $logsDir ("refusal_" + $variant + ".stderr.log")))
+                $reason = Get-RefusalReason -Text $logText
+                $postEntry = Invoke-Snapshot -WorldDir $target -OutFile $postFile -Label ("refusal_" + $variant + "_after")
+                $refusals += [ordered]@{
+                    variant = $variant
+                    exit_code = [int]$run.exit_code
+                    diagnostic = ($null -ne $reason)
+                    timed_out = [bool]$run.timed_out
+                    fixture_manifest_sha256 = $refusalManifestSha
+                    expected_tree_digest = [string]$variantRecord.inventory.tree_digest
+                    before_tree_digest = $preEntry.tree_digest
+                    after_tree_digest = $postEntry.tree_digest
+                    expected_reason = $variantRecord.reason
+                    observed_reason = $reason
+                    jobs_drained = $drained
+                    shutdown = $shutdown
+                    atlas_fallback_absent = $atlasAbsent
+                    staged_world_dir = $target
+                    world_type = [string]$variantRecord.world_type
+                    mutation_path = [string]$variantRecord.mutation.path
+                }
+                Write-Host ("refusal {0}: exit {1}, observed reason {2}" -f $variant, $run.exit_code, $reason)
+            } finally {
+                if ($movedFallback) {
+                    Assert-NoReparsePath -Path $fallback
+                    Assert-NoReparsePath -Path $backup
+                    if (Test-Path -LiteralPath $fallback) { throw "cannot restore atlas fallback: target unexpectedly exists; backup retained" }
+                    if (-not (Test-Path -LiteralPath $backup -PathType Leaf) -or (Get-FileSha256Hex -Path $backup) -ne $fallbackSha) {
+                        throw "cannot restore atlas fallback: backup missing or changed"
+                    }
+                    Move-Item -LiteralPath $backup -Destination $fallback
+                    if ((Get-FileSha256Hex -Path $fallback) -ne $fallbackSha) { throw "restored atlas fallback differs" }
+                }
             }
-
-            $postEntry = Invoke-Snapshot -WorldDir $target -OutFile $postFile -Label ("refusal_" + $variant + "_after")
-            if ($preEntry.tree_digest -ne $postEntry.tree_digest) {
-                $entry["diagnostic"] = $false
-                $moved = Get-DiffChanges -AFile $preFile -BFile $postFile
-                $entry["note"] = "save tree changed during refusal run: added=" + ($moved.added -join ",") + " removed=" + ($moved.removed -join ",") + " changed=" + ($moved.changed -join ",")
-            }
-            $refusals += $entry
-            Write-Host ("refusal {0}: exit {1}, diagnostic {2}" -f $variant, $entry.exit_code, $entry.diagnostic)
         }
     }
 

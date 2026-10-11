@@ -9,7 +9,7 @@ import io
 import json
 import tempfile
 import unittest
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 import check_acceptance_receipt as tool
 
@@ -18,6 +18,37 @@ HEX_B = "b" * 64
 HEX_C = "c" * 64
 HEX_D = "d" * 64
 HEX_E = "e" * 64
+
+
+def bound_refusal(variant: str) -> dict:
+    package = Path(tempfile.gettempdir()).resolve() / "acceptance-receipt-package"
+    world = package / "worlds" / "saves" / variant
+    reason = {"kind": variant}
+    if variant == "obsolete-metadata":
+        reason["version"] = 1
+        observed = tool.OBSOLETE_WORLD_MESSAGE
+    elif variant == "future-metadata":
+        reason["version"] = 3
+        observed = "unsupported future world metadata container version 3"
+    elif variant == "corrupt-metadata":
+        observed = ("Corrupt world metadata: [json.exception.parse_error.101] "
+                    "parse error at line 1, column 2: syntax error while parsing object key - "
+                    "unexpected end of input; expected string literal")
+    elif variant == "missing-metadata":
+        observed = tool.MISSING_METADATA_MESSAGE
+    elif variant == "missing-preset":
+        observed = "failed to open world preset: " + str(package / "worlds/atlas/presets/default.json")
+    else:
+        observed = "region file record payload is truncated: " + str(world / "chunks/region/r.0.0.lmr")
+    return {"variant": variant, "exit_code": 2, "diagnostic": True, "timed_out": False,
+            "fixture_manifest_sha256": HEX_A, "expected_tree_digest": HEX_B,
+            "before_tree_digest": HEX_B, "after_tree_digest": HEX_B,
+            "expected_reason": reason, "observed_reason": observed, "jobs_drained": True,
+            "shutdown": {"schema": tool.SHUTDOWN_SCHEMA, "complete": True, "jobs_drained": True},
+            "staged_world_dir": str(world), "world_type": "default",
+            "mutation_path": "chunks/region/r.0.0.lmr" if variant == "truncated-region" else
+                             "preset.json" if variant == "missing-preset" else "world_info.json",
+            "atlas_fallback_absent": True if variant == "missing-preset" else None}
 
 
 def valid_receipt() -> dict:
@@ -58,8 +89,7 @@ def valid_receipt() -> dict:
         "fixture_changes": {"added": [], "removed": [], "changed": []},
         "switches": switches,
         "refusals": [
-            {"variant": variant, "exit_code": 2 + index, "diagnostic": True, "timed_out": False}
-            for index, variant in enumerate(tool.REQUIRED_REFUSAL_VARIANTS)
+            bound_refusal(variant) for variant in tool.REQUIRED_REFUSAL_VARIANTS
         ],
     }
 
@@ -621,22 +651,134 @@ class AcceptanceReceiptContract(unittest.TestCase):
 
     def test_refusal_variants_option_overrides_required_list(self) -> None:
         receipt = valid_receipt()
-        receipt["refusals"] = [
-            {"variant": "alpha", "exit_code": 2, "diagnostic": True, "timed_out": False},
-            {"variant": "beta", "exit_code": 3, "diagnostic": True, "timed_out": False},
-        ]
-        verdict = tool.evaluate(receipt, 6, ("alpha", "beta"))
-        self.assertEqual(_check(verdict, "refusal_matrix")["verdict"], "pass")
-        verdict = tool.evaluate(receipt, 6, ("alpha", "beta", "gamma"))
-        self.assertEqual(_check(verdict, "refusal_matrix")["detail"], "missing variants: gamma")
-
+        receipt["refusals"] = [bound_refusal("obsolete-metadata"), bound_refusal("future-metadata")]
+        required = ("obsolete-metadata", "future-metadata")
+        self.assertEqual(_check(tool.evaluate(receipt, 6, required), "refusal_matrix")["verdict"], "pass")
+        verdict = tool.evaluate(receipt, 6, (*required, "corrupt-metadata"))
+        self.assertEqual(_check(verdict, "refusal_matrix")["detail"], "missing variants: corrupt-metadata")
         path = self._write_obj(receipt)
-        self.assertEqual(_run([str(path), "--refusal-variants", "alpha,beta"])[0], 0)
-        code, out, _ = _run([str(path), "--refusal-variants", "alpha, beta ,gamma"])
+        self.assertEqual(_run([str(path), "--refusal-variants", "obsolete-metadata,future-metadata"])[0], 0)
+        code, out, _ = _run([str(path), "--refusal-variants", "obsolete-metadata, future-metadata ,corrupt-metadata"])
         self.assertEqual(code, 3)
-        self.assertIn("missing variants: gamma", out)
+        self.assertIn("missing variants: corrupt-metadata", out)
         self.assertEqual(_run([str(path)])[0], 3)
         self.assertEqual(_run([str(path), "--refusal-variants", " , "])[0], 2)
+
+    def test_unknown_native_contract_never_qualifies_even_with_override(self) -> None:
+        receipt = valid_receipt()
+        receipt["refusals"] = [{"variant": "alpha", "exit_code": 2, "diagnostic": True, "timed_out": False}]
+        verdict = tool.evaluate(receipt, 6, ("alpha",))
+        self.assertEqual(_check(verdict, "refusal_matrix")["verdict"], "unevaluated")
+        self.assertIn("unknown native refusal contract", _check(verdict, "refusal_matrix")["detail"])
+
+    def test_legacy_nonzero_receipts_are_unevaluated_and_crashes_fail(self) -> None:
+        receipt = valid_receipt()
+        receipt["refusals"] = [{"variant": variant, "exit_code": 2, "diagnostic": True, "timed_out": False}
+                               for variant in tool.REQUIRED_REFUSAL_VARIANTS]
+        self._expect(receipt, "refusal_matrix", "unevaluated")
+        for exit_code in (1, 3, -1073741819):
+            candidate = copy.deepcopy(receipt)
+            candidate["refusals"][0]["exit_code"] = exit_code
+            self._expect(candidate, "refusal_matrix", "fail")
+
+    def test_wrong_case_reason_changed_bytes_or_undrained_shutdown_fails(self) -> None:
+        for field, value in (("observed_reason", "cannot open invalid world"),
+                             ("observed_reason", tool.MISSING_METADATA_MESSAGE),
+                             ("expected_tree_digest", HEX_C), ("after_tree_digest", HEX_D),
+                             ("before_tree_digest", HEX_D), ("jobs_drained", False),
+                             ("shutdown", {"schema": tool.SHUTDOWN_SCHEMA, "complete": False, "jobs_drained": True}),
+                             ("shutdown", {"schema": tool.SHUTDOWN_SCHEMA, "complete": True, "jobs_drained": False})):
+            with self.subTest(field=field, value=value):
+                receipt = valid_receipt()
+                receipt["refusals"][0][field] = value
+                self._expect(receipt, "refusal_matrix", "fail")
+        receipt = valid_receipt()
+        receipt["refusals"][1]["expected_reason"]["version"] = 4
+        self._expect(receipt, "refusal_matrix", "fail")
+
+    def test_corrupt_metadata_requires_the_exact_object_key_parser_failure(self) -> None:
+        for detail in ("exceeds the 1 MiB limit.", "spawn point must be finite.",
+                       "invalid water simulation cursor.", "invalid world type.",
+                       "unexpected end of JSON input", "[json.exception.type_error.302] type must be string"):
+            with self.subTest(detail=detail):
+                receipt = valid_receipt()
+                receipt["refusals"][2]["observed_reason"] = "Corrupt world metadata: " + detail
+                self._expect(receipt, "refusal_matrix", "fail")
+        receipt = valid_receipt()
+        receipt["refusals"][2]["observed_reason"] = receipt["refusals"][2]["observed_reason"].replace("column 2", "column 3")
+        self._expect(receipt, "refusal_matrix", "fail")
+
+    def test_changed_bytes_fail_even_without_expected_inventory_binding(self) -> None:
+        for variant in range(len(tool.REQUIRED_REFUSAL_VARIANTS)):
+            with self.subTest(variant=variant):
+                receipt = valid_receipt()
+                del receipt["refusals"][variant]["expected_tree_digest"]
+                receipt["refusals"][variant]["after_tree_digest"] = HEX_D
+                self._expect(receipt, "refusal_matrix", "fail")
+
+    def test_incomplete_new_evidence_remains_unevaluated(self) -> None:
+        for field in ("fixture_manifest_sha256", "expected_tree_digest", "observed_reason", "shutdown", "jobs_drained"):
+            with self.subTest(field=field):
+                receipt = valid_receipt()
+                del receipt["refusals"][0][field]
+                self._expect(receipt, "refusal_matrix", "unevaluated")
+        receipt = valid_receipt()
+        receipt["refusals"][0]["shutdown"] = {"schema": tool.SHUTDOWN_SCHEMA, "jobs_drained": None}
+        receipt["refusals"][0]["jobs_drained"] = None
+        self._expect(receipt, "refusal_matrix", "unevaluated")
+        receipt = valid_receipt()
+        del receipt["refusals"][4]["staged_world_dir"]
+        self._expect(receipt, "refusal_matrix", "unevaluated")
+
+    def test_missing_preset_requires_actual_atlas_absence(self) -> None:
+        for value, verdict in ((False, "fail"), (None, "unevaluated")):
+            receipt = valid_receipt()
+            receipt["refusals"][4]["atlas_fallback_absent"] = value
+            self._expect(receipt, "refusal_matrix", verdict)
+        receipt = valid_receipt()
+        receipt["refusals"][4]["observed_reason"] += ".foreign"
+        self._expect(receipt, "refusal_matrix", "fail")
+
+    def test_truncated_reason_must_name_exact_staged_region(self) -> None:
+        receipt = valid_receipt()
+        receipt["refusals"][5]["observed_reason"] = "region file record payload is truncated: " + str(self.base / "r.0.0.lmr")
+        self._expect(receipt, "refusal_matrix", "fail")
+        receipt = valid_receipt()
+        receipt["refusals"][5]["mutation_path"] = "../foreign/r.0.0.lmr"
+        self._expect(receipt, "refusal_matrix", "fail")
+
+    def test_windows_runtime_path_separators_compare_without_rewriting_reasons(self) -> None:
+        package = PureWindowsPath("C:/") / "acceptance-package"
+        refusal = bound_refusal("missing-preset")
+        refusal["staged_world_dir"] = (package / "worlds/saves/missing-preset").as_posix()
+        refusal["observed_reason"] = "failed to open world preset: " + str(package / "worlds/atlas/presets/default.json")
+        self.assertTrue(tool._reason_matches(refusal))
+        refusal = bound_refusal("truncated-region")
+        world = package / "worlds/saves/truncated-region"
+        refusal["staged_world_dir"] = world.as_posix()
+        refusal["observed_reason"] = "region file record payload is truncated: " + str(world / "chunks/region/r.0.0.lmr")
+        self.assertTrue(tool._reason_matches(refusal))
+
+    def test_duplicate_reordered_or_mixed_manifest_cases_fail(self) -> None:
+        receipt = valid_receipt()
+        receipt["refusals"].append(copy.deepcopy(receipt["refusals"][0]))
+        self._expect(receipt, "refusal_matrix", "fail")
+        receipt = valid_receipt()
+        receipt["refusals"][0], receipt["refusals"][1] = receipt["refusals"][1], receipt["refusals"][0]
+        self._expect(receipt, "refusal_matrix", "fail")
+        receipt = valid_receipt()
+        receipt["refusals"][2]["fixture_manifest_sha256"] = HEX_C
+        self._expect(receipt, "refusal_matrix", "fail")
+
+    def test_malformed_binding_fields_fail(self) -> None:
+        for field, value in (("fixture_manifest_sha256", "sha"), ("before_tree_digest", True),
+                             ("jobs_drained", "yes"), ("observed_reason", 2),
+                             ("expected_reason", {"kind": "missing-metadata"}),
+                             ("expected_reason", {"kind": "obsolete-metadata", "version": True})):
+            with self.subTest(field=field):
+                receipt = valid_receipt()
+                receipt["refusals"][0][field] = value
+                self._expect(receipt, "refusal_matrix", "fail")
 
     def test_every_check_id_is_present_in_order(self) -> None:
         ids = [check["id"] for check in _verdict(valid_receipt())["checks"]]
