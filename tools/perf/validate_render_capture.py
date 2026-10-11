@@ -4,11 +4,13 @@
 Checks observed linked-program state against both the requested pose/TOD and
 reported camera. This is a report-frame check, not evidence that every program
 executed a draw or every measured frame had the same state.
+With --enforce-floor a v3 capture is additionally held to the 16.67 ms frame_wall p99 floor (exit 4).
 """
 import argparse
 import json
 import math
 from pathlib import Path
+import render_budget
 import render_contract
 
 
@@ -169,14 +171,30 @@ def main():
     parser.add_argument('--qualified-vendor', help='Optional exact GL_VENDOR')
     parser.add_argument('--traversal', type=Path, help='Expected committed traversal script')
     parser.add_argument('--workload-manifest', type=Path, help='Expected workload fields as a JSON object')
+    parser.add_argument('--enforce-floor', action='store_true',
+                        help='v3 only: exit 4 when frame_wall_ms p99 exceeds 16.67 ms')
+    parser.add_argument('--verdict-out', type=Path,
+                        help='Write the floor verdict JSON here (requires --enforce-floor)')
     args = parser.parse_args()
+    if args.verdict_out is not None and not args.enforce_floor:
+        parser.error('--verdict-out requires --enforce-floor')
     try:
         data = json.loads(args.artifact.read_text(encoding='utf-8-sig'))
         result = validate(data, args)
-    except (ValueError, KeyError, TypeError, ZeroDivisionError, OSError) as error:
+        if args.enforce_floor:
+            if data.get('schema') != render_contract.SCHEMA:
+                print(json.dumps({'verdict': 'FAIL', 'reason': '--enforce-floor requires a v3 capture'}, indent=2))
+                return 1
+            floor = render_budget.evaluate(data)
+            result['floor'] = floor
+            if args.verdict_out is not None:
+                args.verdict_out.write_text(json.dumps(floor, indent=2) + '\n', encoding='utf-8')
+    except (ValueError, KeyError, TypeError, ZeroDivisionError, OSError, render_budget.BudgetInputError) as error:
         print(json.dumps({'verdict': 'FAIL', 'reason': str(error)}, indent=2))
         return 1
     print(json.dumps(result, indent=2))
+    if args.enforce_floor and not render_budget.verdict_passes(result['floor']):
+        return 4
     return 0
 
 
