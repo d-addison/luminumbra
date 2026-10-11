@@ -1,12 +1,19 @@
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <cfloat>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <fstream>
 #include <iostream>
+#include <iterator>
+#include <stdexcept>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
+#include <utility>
 #include <vector>
 
 #define CGLTF_IMPLEMENTATION
@@ -49,8 +56,6 @@ namespace {
 using luminumbra::animation::AnimTargetType;
 using luminumbra::animation::HashJointName;
 using luminumbra::animation::kMaxJointsPerSkeleton;
-using luminumbra::animation::LanimHeader;
-using luminumbra::animation::LanimTrackHeader;
 using luminumbra::animation::Lms2Header;
 using luminumbra::animation::Lms2Joint;
 using luminumbra::animation::SkinnedVertexData;
@@ -109,219 +114,726 @@ std::string OutputStem(const std::string& output_path) {
     return output_path;
 }
 
-bool WriteAnimationClips(const cgltf_data* data, const std::string& output_path) {
-    const std::string stem = OutputStem(output_path);
+using ImportMatrix = std::array<float, 16>;
+constexpr ImportMatrix kImportIdentity = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
 
-    for (size_t anim_idx = 0; anim_idx < data->animations_count; ++anim_idx) {
-        const cgltf_animation* anim = &data->animations[anim_idx];
+struct StaticInstance {
+    const cgltf_mesh* mesh = nullptr;
+    ImportMatrix world = kImportIdentity;
+    size_t nodeIndex = SIZE_MAX; // No node for a mesh-only library document.
+};
 
-        LanimHeader header;
-        std::vector<LanimTrackHeader> trackHeaders;
-        std::vector<std::vector<float>> trackTimes;
-        std::vector<std::vector<float>> trackValues;
+bool ImportError(const char* rule, const std::string& message) {
+    std::cerr << "Error [" << rule << "]: " << message << '\n';
+    return false;
+}
 
-        for (size_t ch = 0; ch < anim->channels_count; ++ch) {
-            const cgltf_animation_channel* channel = &anim->channels[ch];
-            if (!channel->target_node || !channel->sampler)
-                continue;
+bool FiniteAffine(const ImportMatrix& matrix) {
+    return std::all_of(matrix.begin(), matrix.end(), [](float v) { return std::isfinite(v); }) &&
+           matrix[3] == 0 && matrix[7] == 0 && matrix[11] == 0 && matrix[15] == 1;
+}
 
-            AnimTargetType targetType;
-            uint32_t componentCount;
-            switch (channel->target_path) {
-                case cgltf_animation_path_type_translation:
-                    targetType = AnimTargetType::Translation;
-                    componentCount = 3;
-                    break;
-                case cgltf_animation_path_type_rotation:
-                    targetType = AnimTargetType::Rotation;
-                    componentCount = 4;
-                    break;
-                case cgltf_animation_path_type_scale:
-                    targetType = AnimTargetType::Scale;
-                    componentCount = 3;
-                    break;
-                default:
-                    continue; // morph weights unsupported in v1.lanim
-            }
+bool CollectStaticInstances(const cgltf_data* data, std::vector<StaticInstance>& instances) {
+    for (size_t i = 0; i < data->extensions_required_count; ++i) {
+        if (std::strcmp(data->extensions_required[i], "KHR_texture_transform") != 0)
+            return ImportError("extension.unsupported", data->extensions_required[i]);
+    }
+    if (data->animations_count != 0)
+        return ImportError("static.animation",
+                           "Bake a selected static pose before mesh conversion.");
 
-            const cgltf_accessor* input = channel->sampler->input;
-            const cgltf_accessor* output = channel->sampler->output;
-            if (!input || !output || input->count == 0 || output->count < input->count)
-                continue;
+    const cgltf_scene* scene = data->scene;
+    if (!scene && data->scenes_count > 1)
+        return ImportError("scene.ambiguous",
+                           "Select a default scene before exporting multiple scenes.");
+    if (!scene && data->scenes_count == 1)
+        scene = &data->scenes[0];
 
-            const size_t nodeIndex = static_cast<size_t>(channel->target_node - data->nodes);
-            const uint32_t nameHash = HashJointName(JointName(channel->target_node, nodeIndex));
-
-            std::vector<float> times(input->count);
-            std::vector<float> values(static_cast<size_t>(input->count) * componentCount);
-            for (size_t k = 0; k < input->count; ++k) {
-                cgltf_accessor_read_float(input, k, &times[k], 1);
-                cgltf_accessor_read_float(output, k, &values[k * componentCount], componentCount);
-                header.duration = std::max(header.duration, times[k]);
-            }
-
-            LanimTrackHeader trackHeader;
-            trackHeader.jointNameHash = nameHash;
-            trackHeader.targetType = static_cast<uint32_t>(targetType);
-            trackHeader.keyCount = static_cast<uint32_t>(input->count);
-            trackHeader.componentCount = componentCount;
-            trackHeaders.push_back(trackHeader);
-            trackTimes.push_back(std::move(times));
-            trackValues.push_back(std::move(values));
+    struct Pending {
+        const cgltf_node* node;
+        ImportMatrix parent;
+    };
+    std::vector<Pending> pending;
+    if (scene) {
+        for (size_t i = scene->nodes_count; i > 0; --i)
+            pending.push_back({scene->nodes[i - 1], kImportIdentity});
+    } else if (data->nodes_count) {
+        for (size_t i = data->nodes_count; i > 0; --i) {
+            if (!data->nodes[i - 1].parent)
+                pending.push_back({&data->nodes[i - 1], kImportIdentity});
         }
-
-        if (trackHeaders.empty())
-            continue;
-        header.trackCount = static_cast<uint32_t>(trackHeaders.size());
-
-        const std::string animName = (anim->name && anim->name[0] != '\0')
-                                         ? std::string(anim->name)
-                                         : ("anim" + std::to_string(anim_idx));
-        const std::string animPath = stem + "." + animName + ".lanim";
-
-        std::ofstream outFile(animPath, std::ios::binary);
-        if (!outFile) {
-            std::cerr << "Error: Could not open animation output file " << animPath << std::endl;
-            return false;
-        }
-        outFile.write(reinterpret_cast<const char*>(&header), sizeof(header));
-        for (size_t t = 0; t < trackHeaders.size(); ++t) {
-            outFile.write(reinterpret_cast<const char*>(&trackHeaders[t]),
-                          sizeof(LanimTrackHeader));
-            outFile.write(reinterpret_cast<const char*>(trackTimes[t].data()),
-                          static_cast<std::streamsize>(trackTimes[t].size() * sizeof(float)));
-            outFile.write(reinterpret_cast<const char*>(trackValues[t].data()),
-                          static_cast<std::streamsize>(trackValues[t].size() * sizeof(float)));
-        }
-
-        std::cout << "  - Animation clip '" << animName << "' -> '" << animPath << "' ("
-                  << header.trackCount << " tracks, " << header.duration << "s)" << std::endl;
+    } else {
+        // Preserve the legacy library path only when there are no scene nodes
+        // whose placement or membership could be discarded.
+        for (size_t i = 0; i < data->meshes_count; ++i)
+            instances.push_back({&data->meshes[i], kImportIdentity, SIZE_MAX});
     }
 
+    std::vector<bool> visited(data->nodes_count, false);
+    while (!pending.empty()) {
+        const Pending entry = pending.back();
+        pending.pop_back();
+        const auto* node = entry.node;
+        const size_t index = static_cast<size_t>(node - data->nodes);
+        if (visited[index])
+            return ImportError("scene.hierarchy",
+                               "Repeated or cyclic node " + std::to_string(index));
+        visited[index] = true;
+        if (node->has_mesh_gpu_instancing)
+            return ImportError("scene.gpu_instances",
+                               "Realize GPU instances on node " + std::to_string(index));
+        if (node->has_matrix && (node->has_translation || node->has_rotation || node->has_scale))
+            return ImportError("scene.transform",
+                               "Use matrix or TRS, not both, on node " + std::to_string(index));
+        ImportMatrix local;
+        cgltf_node_transform_local(node, local.data());
+        if (!FiniteAffine(local))
+            return ImportError("scene.transform",
+                               "Expected finite affine transform on node " + std::to_string(index));
+        ImportMatrix world{};
+        for (size_t col = 0; col < 4; ++col) {
+            for (size_t row = 0; row < 4; ++row) {
+                for (size_t k = 0; k < 4; ++k)
+                    world[col * 4 + row] += entry.parent[k * 4 + row] * local[col * 4 + k];
+            }
+        }
+        if (!FiniteAffine(world))
+            return ImportError("scene.transform",
+                               "World transform overflows on node " + std::to_string(index));
+        if (node->mesh)
+            instances.push_back({node->mesh, world, index});
+        for (size_t i = node->children_count; i > 0; --i)
+            pending.push_back({node->children[i - 1], world});
+    }
+    return true;
+}
+
+class StaticTransform {
+    const ImportMatrix& matrix;
+    double cofactors[9]{};
+    double determinant = 0;
+
+public:
+    explicit StaticTransform(const ImportMatrix& m)
+        : matrix(m) {
+        for (size_t col = 0; col < 3; ++col) {
+            const size_t a = ((col + 1) % 3) * 4;
+            const size_t b = ((col + 2) % 3) * 4;
+            cofactors[col * 3] = double(m[a + 1]) * m[b + 2] - double(m[a + 2]) * m[b + 1];
+            cofactors[col * 3 + 1] = double(m[a + 2]) * m[b] - double(m[a]) * m[b + 2];
+            cofactors[col * 3 + 2] = double(m[a]) * m[b + 1] - double(m[a + 1]) * m[b];
+        }
+        determinant = m[0] * cofactors[0] + m[1] * cofactors[1] + m[2] * cofactors[2];
+    }
+
+    bool Apply(Vertex& vertex) const {
+        for (const float v : vertex.pos)
+            if (!std::isfinite(v))
+                return false;
+        for (const float v : vertex.norm)
+            if (!std::isfinite(v))
+                return false;
+        for (const float v : vertex.uv)
+            if (!std::isfinite(v))
+                return false;
+        double length = 0;
+        for (const float v : vertex.norm)
+            length += double(v) * v;
+        if (length == 0)
+            return false;
+        // Avoid changing previously supported identity geometry's exact bytes.
+        if (matrix == kImportIdentity)
+            return true;
+        const Vertex source = vertex;
+        double normal[3]{};
+        length = 0;
+        for (size_t row = 0; row < 3; ++row) {
+            double position = matrix[12 + row];
+            for (size_t col = 0; col < 3; ++col) {
+                position += double(matrix[col * 4 + row]) * source.pos[col];
+                normal[row] += cofactors[col * 3 + row] * source.norm[col] / determinant;
+            }
+            vertex.pos[row] = static_cast<float>(position);
+            if (!std::isfinite(vertex.pos[row]))
+                return false;
+            length += normal[row] * normal[row];
+        }
+        if (!std::isfinite(length) || length == 0)
+            return false;
+        const double inverseLength = 1 / std::sqrt(length);
+        for (size_t row = 0; row < 3; ++row)
+            vertex.norm[row] = static_cast<float>(normal[row] * inverseLength);
+        return true;
+    }
+
+    bool IsSingular() const {
+        return determinant == 0 || !std::isfinite(determinant);
+    }
+
+    bool IsMirrored() const {
+        return determinant < 0;
+    }
+};
+
+bool AppendStaticPrimitive(const cgltf_primitive& primitive,
+                           const StaticInstance& instance,
+                           size_t primitiveIndex,
+                           std::vector<Vertex>& vertices,
+                           std::vector<uint32_t>& indices) {
+    const std::string owner = instance.nodeIndex == SIZE_MAX
+                                  ? "mesh library"
+                                  : "node " + std::to_string(instance.nodeIndex);
+    const std::string location = owner + ", primitive " + std::to_string(primitiveIndex) + ": ";
+    const auto fail = [&](const char* rule, const char* message) {
+        return ImportError(rule, location + message);
+    };
+    if (primitive.type != cgltf_primitive_type_triangles)
+        return fail("mesh.topology", "Export indexed triangles.");
+    if (primitive.targets_count)
+        return fail("mesh.morph_targets", "Bake shape keys before static mesh conversion.");
+    const StaticTransform transform(instance.world);
+    if (transform.IsSingular())
+        return fail("scene.singular_transform", "Remove zero-scale or singular transforms.");
+    const cgltf_texture_view* color = nullptr;
+    int wantedUv = 0;
+    if (primitive.material && primitive.material->has_pbr_metallic_roughness) {
+        color = &primitive.material->pbr_metallic_roughness.base_color_texture;
+        wantedUv = color->has_transform && color->transform.has_texcoord ? color->transform.texcoord
+                                                                         : color->texcoord;
+    }
+    const cgltf_accessor *position = nullptr, *normal = nullptr, *uv = nullptr;
+    for (size_t i = 0; i < primitive.attributes_count; ++i) {
+        const auto& attr = primitive.attributes[i];
+        if (attr.type == cgltf_attribute_type_position)
+            position = attr.data;
+        if (attr.type == cgltf_attribute_type_normal)
+            normal = attr.data;
+        if (attr.type == cgltf_attribute_type_texcoord && attr.index == wantedUv)
+            uv = attr.data;
+    }
+    const auto* index = primitive.indices;
+    if (!position || !normal || !uv || !index)
+        return fail("mesh.attributes",
+                    "Supply POSITION, NORMAL, the material's TEXCOORD set, and indices.");
+    if (position->is_sparse || normal->is_sparse || uv->is_sparse || index->is_sparse)
+        return fail("mesh.sparse_accessor",
+                    "Expand sparse attributes and indices before conversion.");
+    if (position->type != cgltf_type_vec3 || normal->type != cgltf_type_vec3 ||
+        uv->type != cgltf_type_vec2 || position->count == 0 || normal->count != position->count ||
+        uv->count != position->count)
+        return fail("mesh.attributes", "Attribute types and vertex counts must agree.");
+    if (index->count == 0 || index->count % 3 != 0)
+        return fail("mesh.indices", "Triangle index count must be a nonzero multiple of three.");
+    const size_t offset = vertices.size();
+    if (offset > UINT32_MAX || position->count > UINT32_MAX - offset ||
+        indices.size() > UINT32_MAX || index->count > UINT32_MAX - indices.size())
+        return fail("mesh.limit", "Geometry exceeds the 32-bit mesh format.");
+    for (size_t i = 0; i < position->count; ++i) {
+        Vertex vertex{};
+        if (!cgltf_accessor_read_float(position, i, vertex.pos, 3) ||
+            !cgltf_accessor_read_float(normal, i, vertex.norm, 3) ||
+            !cgltf_accessor_read_float(uv, i, vertex.uv, 2))
+            return fail("mesh.accessor", "Cannot decode a required vertex attribute.");
+        if (color && color->has_transform) {
+            const auto& t = color->transform;
+            const float u = vertex.uv[0] * t.scale[0];
+            const float v = vertex.uv[1] * t.scale[1];
+            const float c = std::cos(t.rotation), s = std::sin(t.rotation);
+            vertex.uv[0] = c * u - s * v + t.offset[0];
+            vertex.uv[1] = s * u + c * v + t.offset[1];
+        }
+        if (!transform.Apply(vertex))
+            return fail(
+                "mesh.nonfinite",
+                "Export finite attributes and nonzero normals within representable bounds.");
+        vertices.push_back(vertex);
+    }
+    for (size_t i = 0; i < index->count; i += 3) {
+        uint32_t triangle[3];
+        for (size_t lane = 0; lane < 3; ++lane) {
+            const size_t local = cgltf_accessor_read_index(index, i + lane);
+            if (local >= position->count)
+                return fail("mesh.indices", "Index is outside the primitive's vertex range.");
+            triangle[lane] = static_cast<uint32_t>(local + offset);
+        }
+        if (transform.IsMirrored())
+            std::swap(triangle[1], triangle[2]);
+        indices.insert(indices.end(), std::begin(triangle), std::end(triangle));
+    }
+    return true;
+}
+
+struct PreparedClip {
+    std::string path;
+    luminumbra::animation::AnimClipAsset asset;
+};
+
+bool PrepareAnimationClips(const cgltf_data* data,
+                           const std::string& outputPath,
+                           const std::vector<Lms2Joint>& joints,
+                           std::vector<PreparedClip>& clips) {
+    using luminumbra::animation::AnimInterpolation;
+    using luminumbra::animation::AnimTrack;
+    std::unordered_set<std::string> paths;
+    for (size_t a = 0; a < data->animations_count; ++a) {
+        const auto& source = data->animations[a];
+        PreparedClip clip;
+        const std::string name =
+            source.name && source.name[0] ? source.name : "anim" + std::to_string(a);
+        if (name.back() == '.' || name.back() == ' ' ||
+            !std::all_of(name.begin(), name.end(), [](unsigned char c) {
+                return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+                       c == '_' || c == '-' || c == '.' || c == ' ';
+            }))
+            return ImportError(
+                "animation.name",
+                "Use portable ASCII clip names without path separators or trailing dots/spaces.");
+        auto folded = name;
+        for (char& c : folded)
+            if (c >= 'A' && c <= 'Z')
+                c += 'a' - 'A';
+        if (!paths.insert(folded).second)
+            return ImportError("animation.name",
+                               "Clip names must be distinct on case-insensitive filesystems.");
+        clip.path = OutputStem(outputPath) + "." + name + ".lanim";
+        std::unordered_set<uint64_t> targets;
+        for (size_t c = 0; c < source.channels_count; ++c) {
+            const auto& channel = source.channels[c];
+            if (!channel.target_node)
+                continue; // Optional target node, per glTF.
+            if (!channel.sampler)
+                return ImportError("animation.sampler",
+                                   "Supply a sampler for every animation channel.");
+            AnimTrack track;
+            auto& header = track.header;
+            header.jointNameHash = HashJointName(JointName(
+                channel.target_node, static_cast<size_t>(channel.target_node - data->nodes)));
+            // Resolve by node identity as well as the name hash: an unrelated
+            // same-named node must not acquire authority over this skeleton.
+            bool targetFound = false;
+            for (const auto& joint : joints) {
+                if (joint.nameHash != header.jointNameHash)
+                    continue;
+                for (size_t n = 0; n < data->nodes_count; ++n) {
+                    const auto* node = &data->nodes[n];
+                    if (node != channel.target_node &&
+                        HashJointName(JointName(node, n)) == header.jointNameHash)
+                        return ImportError(
+                            "animation.target",
+                            "Animation target names must resolve to one source node.");
+                }
+                targetFound = true;
+            }
+            if (!targetFound)
+                return ImportError("animation.target",
+                                   "Export clips targeting this skin's joints and ancestors only.");
+            switch (channel.target_path) {
+                case cgltf_animation_path_type_translation:
+                    header.targetType = static_cast<uint32_t>(AnimTargetType::Translation);
+                    header.componentCount = 3;
+                    break;
+                case cgltf_animation_path_type_rotation:
+                    header.targetType = static_cast<uint32_t>(AnimTargetType::Rotation);
+                    header.componentCount = 4;
+                    break;
+                case cgltf_animation_path_type_scale:
+                    header.targetType = static_cast<uint32_t>(AnimTargetType::Scale);
+                    header.componentCount = 3;
+                    break;
+                default:
+                    return ImportError("animation.target",
+                                       "Morph weights need the separate morph asset profile.");
+            }
+            if (!targets.insert((uint64_t(header.jointNameHash) << 32) | header.targetType).second)
+                return ImportError("animation.duplicate_track",
+                                   "Use one channel per joint property in a clip.");
+            switch (channel.sampler->interpolation) {
+                case cgltf_interpolation_type_linear:
+                    track.interpolation = AnimInterpolation::Linear;
+                    break;
+                case cgltf_interpolation_type_step:
+                    track.interpolation = AnimInterpolation::Step;
+                    break;
+                case cgltf_interpolation_type_cubic_spline:
+                    track.interpolation = AnimInterpolation::CubicSpline;
+                    break;
+                default:
+                    return ImportError("animation.interpolation",
+                                       "Use LINEAR, STEP or CUBICSPLINE interpolation.");
+            }
+            const auto* input = channel.sampler->input;
+            const auto* output = channel.sampler->output;
+            const size_t factor = track.interpolation == AnimInterpolation::CubicSpline ? 3 : 1;
+            if (!input || !output || input->is_sparse || output->is_sparse || input->count == 0 ||
+                input->count > UINT32_MAX || input->type != cgltf_type_scalar ||
+                input->component_type != cgltf_component_type_r_32f || input->normalized ||
+                output->type != (header.componentCount == 4 ? cgltf_type_vec4 : cgltf_type_vec3) ||
+                output->component_type != cgltf_component_type_r_32f || output->normalized ||
+                output->count != input->count * factor)
+                return ImportError("animation.accessor",
+                                   "Supply dense float keys with matching time/value counts.");
+            header.keyCount = static_cast<uint32_t>(input->count);
+            track.times.resize(input->count);
+            track.values.resize(output->count * header.componentCount);
+            for (size_t k = 0; k < input->count; ++k) {
+                if (!cgltf_accessor_read_float(input, k, &track.times[k], 1))
+                    return ImportError("animation.accessor", "Cannot read animation times.");
+                clip.asset.header.duration = std::max(clip.asset.header.duration, track.times[k]);
+            }
+            for (size_t k = 0; k < output->count; ++k)
+                if (!cgltf_accessor_read_float(
+                        output, k, &track.values[k * header.componentCount], header.componentCount))
+                    return ImportError("animation.accessor", "Cannot read animation values.");
+            if (!luminumbra::animation::ValidateAnimTrack(track, clip.asset.header.duration))
+                return ImportError("animation.keys",
+                                   "Use finite values, unit rotations and strictly increasing "
+                                   "nonnegative key times.");
+            clip.asset.tracks.push_back(std::move(track));
+        }
+        if (clip.asset.tracks.empty())
+            continue;
+        if (clip.asset.tracks.size() > UINT32_MAX)
+            return ImportError("animation.limit", "Too many animation tracks.");
+        clip.asset.header.trackCount = static_cast<uint32_t>(clip.asset.tracks.size());
+        clips.push_back(std::move(clip));
+    }
+    return true;
+}
+
+bool WriteAnimationClips(const std::vector<PreparedClip>& clips) {
+    for (const auto& clip : clips) {
+        std::ofstream output(clip.path, std::ios::binary);
+        if (!output)
+            return ImportError("animation.write", "Cannot open " + clip.path);
+        output.write(reinterpret_cast<const char*>(&clip.asset.header), sizeof(clip.asset.header));
+        for (const auto& track : clip.asset.tracks) {
+            const luminumbra::animation::LanimTrackHeaderV2 header{
+                track.header, static_cast<uint32_t>(track.interpolation)};
+            output.write(reinterpret_cast<const char*>(&header), sizeof(header));
+            output.write(reinterpret_cast<const char*>(track.times.data()),
+                         static_cast<std::streamsize>(track.times.size() * sizeof(float)));
+            output.write(reinterpret_cast<const char*>(track.values.data()),
+                         static_cast<std::streamsize>(track.values.size() * sizeof(float)));
+        }
+        output.close();
+        if (!output)
+            return ImportError("animation.write", "Cannot finish " + clip.path);
+        std::cout << "  - Animation clip -> '" << clip.path << "' (" << clip.asset.header.trackCount
+                  << " tracks, " << clip.asset.header.duration << "s)\n";
+    }
+    return true;
+}
+
+// A compiled LMS2 contains one skin and all of its transform ancestors.
+// Other skins must be exported separately rather than sharing the wrong palette.
+bool SelectedSceneNodes(const cgltf_data* data, std::vector<const cgltf_node*>& nodes) {
+    const cgltf_scene* scene = data->scene;
+    if (!scene && data->scenes_count > 1)
+        return ImportError("scene.ambiguous", "Select a default scene before conversion.");
+    if (!scene && data->scenes_count == 1)
+        scene = data->scenes;
+    std::vector<const cgltf_node*> pending;
+    if (scene) {
+        for (size_t i = scene->nodes_count; i > 0; --i)
+            pending.push_back(scene->nodes[i - 1]);
+    } else {
+        for (size_t i = data->nodes_count; i > 0; --i)
+            if (!data->nodes[i - 1].parent)
+                pending.push_back(&data->nodes[i - 1]);
+    }
+    std::vector<bool> visited(data->nodes_count, false);
+    while (!pending.empty()) {
+        const auto* node = pending.back();
+        pending.pop_back();
+        const size_t index = static_cast<size_t>(node - data->nodes);
+        if (visited[index])
+            return ImportError("scene.hierarchy", "A scene node is referenced more than once.");
+        visited[index] = true;
+        nodes.push_back(node);
+        for (size_t i = node->children_count; i > 0; --i)
+            pending.push_back(node->children[i - 1]);
+    }
+    return true;
+}
+
+bool JointLocalPose(const cgltf_node* node, Lms2Joint& joint) {
+    ImportMatrix matrix;
+    cgltf_node_transform_local(node, matrix.data());
+    if (!FiniteAffine(matrix) || StaticTransform(matrix).IsSingular() ||
+        (node->has_matrix && (node->has_translation || node->has_rotation || node->has_scale)))
+        return ImportError("skin.transform", "Joint transforms must be finite, nonsingular TRS.");
+    if (!node->has_matrix) {
+        double length = 0;
+        for (const float value : node->rotation)
+            length += double(value) * value;
+        if (std::abs(length - 1) > 1e-4)
+            return ImportError("skin.rotation", "Normalize the joint's rotation quaternion.");
+        std::copy_n(node->translation, 3, joint.localTranslation);
+        std::copy_n(node->rotation, 4, joint.localRotation);
+        std::copy_n(node->scale, 3, joint.localScale);
+        return true;
+    }
+
+    double rotation[3][3]; // [column][row]
+    for (size_t col = 0; col < 3; ++col) {
+        double length = 0;
+        for (size_t row = 0; row < 3; ++row)
+            length += double(matrix[col * 4 + row]) * matrix[col * 4 + row];
+        const double scale =
+            std::sqrt(length) * (col == 0 && StaticTransform(matrix).IsMirrored() ? -1 : 1);
+        joint.localScale[col] = static_cast<float>(scale);
+        for (size_t row = 0; row < 3; ++row)
+            rotation[col][row] = matrix[col * 4 + row] / scale;
+    }
+    for (size_t a = 0; a < 3; ++a) {
+        for (size_t b = a + 1; b < 3; ++b) {
+            double dot = 0;
+            for (size_t row = 0; row < 3; ++row)
+                dot += rotation[a][row] * rotation[b][row];
+            if (std::abs(dot) > 1e-5)
+                return ImportError("skin.shear", "Bake joint shear into a TRS rig before export.");
+        }
+    }
+    double q[4]{};
+    const double trace = rotation[0][0] + rotation[1][1] + rotation[2][2];
+    if (trace > 0) {
+        const double s = 2 * std::sqrt(trace + 1);
+        q[3] = s / 4;
+        q[0] = (rotation[1][2] - rotation[2][1]) / s;
+        q[1] = (rotation[2][0] - rotation[0][2]) / s;
+        q[2] = (rotation[0][1] - rotation[1][0]) / s;
+    } else {
+        size_t a = 0;
+        if (rotation[1][1] > rotation[a][a])
+            a = 1;
+        if (rotation[2][2] > rotation[a][a])
+            a = 2;
+        const size_t b = (a + 1) % 3, c = (a + 2) % 3;
+        const double s = 2 * std::sqrt(1 + rotation[a][a] - rotation[b][b] - rotation[c][c]);
+        q[a] = s / 4;
+        q[b] = (rotation[a][b] + rotation[b][a]) / s;
+        q[c] = (rotation[a][c] + rotation[c][a]) / s;
+        q[3] = (rotation[b][c] - rotation[c][b]) / s;
+    }
+    double length = 0;
+    for (const double value : q)
+        length += value * value;
+    const double norm = (q[3] < 0 ? -1 : 1) / std::sqrt(length);
+    for (size_t i = 0; i < 4; ++i) {
+        joint.localRotation[i] = static_cast<float>(q[i] * norm);
+        if (joint.localRotation[i] == 0)
+            joint.localRotation[i] = 0; // Canonical positive zero.
+    }
+    std::copy_n(matrix.data() + 12, 3, joint.localTranslation);
+    return true;
+}
+
+bool ImportSkeleton(const cgltf_data* data,
+                    const cgltf_skin* skin,
+                    const std::vector<const cgltf_node*>& selected,
+                    std::vector<Lms2Joint>& joints,
+                    std::vector<uint8_t>& remap,
+                    std::vector<ImportMatrix>& bindPalette) {
+    if (skin->joints_count == 0 || skin->joints_count > kMaxJointsPerSkeleton)
+        return ImportError("skin.limit", "Export between 1 and 256 joints per skin.");
+    const auto* inverse = skin->inverse_bind_matrices;
+    if (inverse && (inverse->type != cgltf_type_mat4 ||
+                    inverse->component_type != cgltf_component_type_r_32f ||
+                    inverse->count < skin->joints_count || inverse->is_sparse))
+        return ImportError("skin.inverse_bind",
+                           "Supply a dense float MAT4 inverse bind for every joint.");
+    std::unordered_map<const cgltf_node*, size_t> original;
+    for (size_t j = 0; j < skin->joints_count; ++j)
+        if (!original.emplace(skin->joints[j], j).second)
+            return ImportError("skin.duplicate_joint",
+                               "Each skin joint must refer to a distinct node.");
+    std::vector<const cgltf_node*> ordered;
+    std::unordered_map<const cgltf_node*, int32_t> index;
+    std::unordered_map<uint32_t, const cgltf_node*> names;
+    const cgltf_node* commonRoot = nullptr;
+    for (size_t j = 0; j < skin->joints_count; ++j) {
+        std::vector<const cgltf_node*> chain;
+        const auto* root = skin->joints[j];
+        while (root->parent)
+            root = root->parent;
+        if (commonRoot && commonRoot != root)
+            return ImportError("skin.hierarchy", "Skin joints must share a scene root.");
+        commonRoot = root;
+        for (const auto* node = skin->joints[j]; node && !index.contains(node);
+             node = node->parent) {
+            if (std::find(selected.begin(), selected.end(), node) == selected.end())
+                return ImportError("skin.scene",
+                                   "All joint ancestors must belong to the selected scene.");
+            chain.push_back(node);
+        }
+        while (!chain.empty()) {
+            const auto* node = chain.back();
+            chain.pop_back();
+            if (ordered.size() == kMaxJointsPerSkeleton)
+                return ImportError("skin.limit",
+                                   "Joint ancestors exceed the 256-transform palette.");
+            Lms2Joint joint;
+            joint.nameHash =
+                HashJointName(JointName(node, static_cast<size_t>(node - data->nodes)));
+            if (!names.emplace(joint.nameHash, node).second)
+                return ImportError("skin.joint_identity",
+                                   "Use distinct joint/ancestor names without hash collisions.");
+            if (node->parent)
+                joint.parentIndex = index.at(node->parent);
+            if (!JointLocalPose(node, joint))
+                return false;
+            const auto source = original.find(node);
+            if (source != original.end() && inverse) {
+                ImportMatrix matrix;
+                if (!cgltf_accessor_read_float(inverse, source->second, matrix.data(), 16) ||
+                    !FiniteAffine(matrix) || StaticTransform(matrix).IsSingular())
+                    return ImportError("skin.inverse_bind",
+                                       "Inverse binds must be finite, affine and nonsingular.");
+                std::copy(matrix.begin(), matrix.end(), joint.inverseBind);
+            }
+            ImportMatrix global;
+            cgltf_node_transform_world(node, global.data());
+            ImportMatrix palette{};
+            for (size_t col = 0; col < 4; ++col)
+                for (size_t row = 0; row < 4; ++row)
+                    for (size_t k = 0; k < 4; ++k)
+                        palette[col * 4 + row] +=
+                            global[k * 4 + row] * joint.inverseBind[col * 4 + k];
+            if (!FiniteAffine(palette))
+                return ImportError("skin.bounds", "The joint bind palette overflows.");
+            index.emplace(node, static_cast<int32_t>(ordered.size()));
+            ordered.push_back(node);
+            joints.push_back(joint);
+            bindPalette.push_back(palette);
+        }
+    }
+    remap.resize(skin->joints_count);
+    for (size_t j = 0; j < skin->joints_count; ++j)
+        remap[j] = static_cast<uint8_t>(index.at(skin->joints[j]));
     return true;
 }
 
 // Skinned (.lmesh v2 / LMS2) path: preserves joints/weights through the
 // meshoptimizer remap and writes the skeleton block plus sibling.lanim clips.
-void process_skinned_gltf(cgltf_data* data,
+bool process_skinned_gltf(cgltf_data* data,
                           const std::string& input_path,
                           const std::string& output_path) {
-    const cgltf_skin* skin = &data->skins[0];
-    if (skin->joints_count == 0 || skin->joints_count > kMaxJointsPerSkeleton) {
-        std::cerr << "Error: Skin in " << input_path << " has " << skin->joints_count
-                  << " joints (supported: 1.." << kMaxJointsPerSkeleton << ")." << std::endl;
-        return;
+    for (size_t i = 0; i < data->extensions_required_count; ++i)
+        if (std::strcmp(data->extensions_required[i], "KHR_texture_transform") != 0)
+            return ImportError("extension.unsupported", data->extensions_required[i]);
+    std::vector<const cgltf_node*> selected;
+    if (!SelectedSceneNodes(data, selected))
+        return false;
+    const cgltf_skin* skin = nullptr;
+    for (const auto* node : selected) {
+        if (!node->mesh)
+            continue;
+        if (!node->skin)
+            return ImportError("skin.mixed_geometry",
+                               "Export unskinned attachments as separate assets.");
+        if (node->has_mesh_gpu_instancing)
+            return ImportError("skin.gpu_instances",
+                               "Realize GPU instances before skin conversion.");
+        if (skin && skin != node->skin)
+            return ImportError("skin.multiple",
+                               "Export each active skin as a separate LMS2 asset.");
+        skin = node->skin;
     }
-
-    // Map node pointer -> joint index for parent lookups.
-    std::unordered_map<const cgltf_node*, int32_t> jointIndexByNode;
-    for (size_t j = 0; j < skin->joints_count; ++j) {
-        jointIndexByNode.emplace(skin->joints[j], static_cast<int32_t>(j));
-    }
-
-    std::vector<Lms2Joint> joints(skin->joints_count);
-    for (size_t j = 0; j < skin->joints_count; ++j) {
-        const cgltf_node* node = skin->joints[j];
-        Lms2Joint& joint = joints[j];
-        const size_t nodeIndex = static_cast<size_t>(node - data->nodes);
-        joint.nameHash = HashJointName(JointName(node, nodeIndex));
-        joint.parentIndex = -1;
-        if (node->parent) {
-            const auto found = jointIndexByNode.find(node->parent);
-            if (found != jointIndexByNode.end())
-                joint.parentIndex = found->second;
-        }
-        if (skin->inverse_bind_matrices) {
-            cgltf_accessor_read_float(skin->inverse_bind_matrices, j, joint.inverseBind, 16);
-        }
-        if (node->has_translation) {
-            for (int c = 0; c < 3; ++c)
-                joint.localTranslation[c] = node->translation[c];
-        }
-        if (node->has_rotation) {
-            for (int c = 0; c < 4; ++c)
-                joint.localRotation[c] = node->rotation[c];
-        }
-        if (node->has_scale) {
-            for (int c = 0; c < 3; ++c)
-                joint.localScale[c] = node->scale[c];
-        }
-    }
+    if (!skin)
+        return ImportError("skin.missing", "No skinned mesh belongs to the selected scene.");
+    std::vector<Lms2Joint> joints;
+    std::vector<uint8_t> jointRemap;
+    std::vector<ImportMatrix> bindPalette;
+    if (!ImportSkeleton(data, skin, selected, joints, jointRemap, bindPalette))
+        return false;
 
     std::vector<SkinnedVertexData> master_raw_vertices;
     std::vector<uint32_t> master_indices;
-    size_t vertex_offset = 0;
-
-    for (size_t mesh_idx = 0; mesh_idx < data->meshes_count; ++mesh_idx) {
-        for (size_t prim_idx = 0; prim_idx < data->meshes[mesh_idx].primitives_count; ++prim_idx) {
-            cgltf_primitive* primitive = &data->meshes[mesh_idx].primitives[prim_idx];
-
-            cgltf_accessor* index_accessor = primitive->indices;
-            cgltf_accessor* pos_accessor = nullptr;
-            cgltf_accessor* norm_accessor = nullptr;
-            cgltf_accessor* uv_accessor = nullptr;
-            cgltf_accessor* joints_accessor = nullptr;
-            cgltf_accessor* weights_accessor = nullptr;
-
-            for (size_t i = 0; i < primitive->attributes_count; ++i) {
-                cgltf_attribute* attr = &primitive->attributes[i];
-                if (attr->type == cgltf_attribute_type_position)
-                    pos_accessor = attr->data;
-                if (attr->type == cgltf_attribute_type_normal)
-                    norm_accessor = attr->data;
-                if (attr->type == cgltf_attribute_type_texcoord)
-                    uv_accessor = attr->data;
-                if (attr->type == cgltf_attribute_type_joints && attr->index == 0)
-                    joints_accessor = attr->data;
-                if (attr->type == cgltf_attribute_type_weights && attr->index == 0)
-                    weights_accessor = attr->data;
-            }
-
-            if (!index_accessor || !pos_accessor || !norm_accessor || !uv_accessor ||
-                !joints_accessor || !weights_accessor) {
-                std::cerr << "Warning: Skipping skinned primitive " << prim_idx << " in mesh "
-                          << mesh_idx << " due to missing attributes." << std::endl;
-                continue;
-            }
-
-            for (size_t i = 0; i < index_accessor->count; ++i) {
-                master_indices.push_back(
-                    static_cast<uint32_t>(cgltf_accessor_read_index(index_accessor, i)) +
-                    static_cast<uint32_t>(vertex_offset));
-            }
-
-            const size_t current_vertex_count = pos_accessor->count;
-            for (size_t v = 0; v < current_vertex_count; ++v) {
-                SkinnedVertexData vert{};
-                cgltf_accessor_read_float(pos_accessor, v, vert.pos, 3);
-                cgltf_accessor_read_float(norm_accessor, v, vert.norm, 3);
-                cgltf_accessor_read_float(uv_accessor, v, vert.uv, 2);
-
-                cgltf_uint jointIndices[4] = {0, 0, 0, 0};
-                cgltf_accessor_read_uint(joints_accessor, v, jointIndices, 4);
-                for (int c = 0; c < 4; ++c) {
-                    if (jointIndices[c] >= skin->joints_count) {
-                        std::cerr << "Error: Vertex joint index " << jointIndices[c]
-                                  << " out of range in " << input_path << std::endl;
-                        return;
-                    }
-                    vert.joints[c] = static_cast<uint8_t>(jointIndices[c]);
+    for (const auto* node : selected) {
+        if (!node->mesh)
+            continue;
+        for (size_t p = 0; p < node->mesh->primitives_count; ++p) {
+            const auto& primitive = node->mesh->primitives[p];
+            const cgltf_accessor *jointAccessor = nullptr, *weightAccessor = nullptr;
+            for (size_t a = 0; a < primitive.attributes_count; ++a) {
+                const auto& attribute = primitive.attributes[a];
+                if (attribute.type == cgltf_attribute_type_joints ||
+                    attribute.type == cgltf_attribute_type_weights) {
+                    if (attribute.index != 0)
+                        return ImportError(
+                            "skin.influences",
+                            "Use an explicit reduction to four influences per vertex.");
+                    if (attribute.type == cgltf_attribute_type_joints)
+                        jointAccessor = attribute.data;
+                    else
+                        weightAccessor = attribute.data;
                 }
-
-                float rawWeights[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-                cgltf_accessor_read_float(weights_accessor, v, rawWeights, 4);
-                QuantizeWeights(rawWeights, vert.weights);
-
-                master_raw_vertices.push_back(vert);
             }
-
-            vertex_offset += current_vertex_count;
+            if (!jointAccessor || !weightAccessor || jointAccessor->is_sparse ||
+                weightAccessor->is_sparse || jointAccessor->type != cgltf_type_vec4 ||
+                weightAccessor->type != cgltf_type_vec4 || jointAccessor->normalized ||
+                (jointAccessor->component_type != cgltf_component_type_r_8u &&
+                 jointAccessor->component_type != cgltf_component_type_r_16u) ||
+                !((weightAccessor->component_type == cgltf_component_type_r_32f &&
+                   !weightAccessor->normalized) ||
+                  ((weightAccessor->component_type == cgltf_component_type_r_8u ||
+                    weightAccessor->component_type == cgltf_component_type_r_16u) &&
+                   weightAccessor->normalized)))
+                return ImportError(
+                    "skin.attributes",
+                    "Supply dense VEC4 joint indices and float or normalized weights.");
+            std::vector<Vertex> geometry;
+            std::vector<uint32_t> indices;
+            // glTF skinning ignores the mesh node's transform; joint globals
+            // provide placement. Reuse static geometry/UV validation at identity.
+            const StaticInstance instance{
+                node->mesh, kImportIdentity, static_cast<size_t>(node - data->nodes)};
+            if (!AppendStaticPrimitive(primitive, instance, p, geometry, indices))
+                return false;
+            const size_t offset = master_raw_vertices.size();
+            if (geometry.size() > UINT32_MAX - offset ||
+                indices.size() > UINT32_MAX - master_indices.size())
+                return ImportError("skin.limit", "Geometry exceeds the 32-bit mesh format.");
+            for (size_t v = 0; v < geometry.size(); ++v) {
+                SkinnedVertexData vertex{};
+                std::copy_n(geometry[v].pos, 3, vertex.pos);
+                std::copy_n(geometry[v].norm, 3, vertex.norm);
+                std::copy_n(geometry[v].uv, 2, vertex.uv);
+                cgltf_uint indices4[4]{};
+                float weights[4]{};
+                if (!cgltf_accessor_read_uint(jointAccessor, v, indices4, 4) ||
+                    !cgltf_accessor_read_float(weightAccessor, v, weights, 4))
+                    return ImportError("skin.accessor",
+                                       "Cannot decode the skin's vertex attributes.");
+                double total = 0;
+                for (size_t lane = 0; lane < 4; ++lane) {
+                    if (indices4[lane] >= jointRemap.size() || !std::isfinite(weights[lane]) ||
+                        weights[lane] < 0)
+                        return ImportError(
+                            "skin.weights",
+                            "Weights must be finite and nonnegative with valid joint indices.");
+                    for (size_t previous = 0; previous < lane; ++previous)
+                        if (indices4[lane] == indices4[previous] && weights[lane] > 0 &&
+                            weights[previous] > 0)
+                            return ImportError("skin.weights",
+                                               "Merge duplicate nonzero influences before export.");
+                    total += weights[lane];
+                    vertex.joints[lane] = jointRemap[indices4[lane]];
+                }
+                if (total == 0 || total > FLT_MAX)
+                    return ImportError("skin.weights",
+                                       "Provide a positive, representable weight sum.");
+                QuantizeWeights(weights, vertex.weights);
+                master_raw_vertices.push_back(vertex);
+            }
+            for (const uint32_t index : indices)
+                master_indices.push_back(static_cast<uint32_t>(offset + index));
         }
     }
 
     if (master_raw_vertices.empty()) {
         std::cerr << "Error: No valid skinned primitives found in " << input_path << std::endl;
-        return;
+        return false;
     }
 
     // meshoptimizer pipeline with the skinned stride so joints/weights survive
@@ -366,9 +878,22 @@ void process_skinned_gltf(cgltf_data* data,
     float min_ext[3] = {FLT_MAX, FLT_MAX, FLT_MAX};
     float max_ext[3] = {-FLT_MAX, -FLT_MAX, -FLT_MAX};
     for (const auto& v : optimized_vertices) {
-        for (int c = 0; c < 3; ++c) {
-            min_ext[c] = std::min(min_ext[c], v.pos[c]);
-            max_ext[c] = std::max(max_ext[c], v.pos[c]);
+        for (size_t row = 0; row < 3; ++row) {
+            float position = 0;
+            for (size_t lane = 0; lane < 4; ++lane) {
+                if (v.weights[lane] == 0)
+                    continue;
+                const auto& matrix = bindPalette[v.joints[lane]];
+                float component = matrix[12 + row];
+                for (size_t col = 0; col < 3; ++col)
+                    component += matrix[col * 4 + row] * v.pos[col];
+                position += component * (static_cast<float>(v.weights[lane]) / 255.0f);
+            }
+            if (!std::isfinite(position))
+                return ImportError("skin.bounds",
+                                   "Skinned bind positions overflow the mesh format.");
+            min_ext[row] = std::min(min_ext[row], position);
+            max_ext[row] = std::max(max_ext[row], position);
         }
     }
 
@@ -384,10 +909,19 @@ void process_skinned_gltf(cgltf_data* data,
     const float dz = max_ext[2] - header.boundingSphere[2];
     header.boundingSphere[3] = sqrtf(dx * dx + dy * dy + dz * dz);
 
+    if (!std::all_of(std::begin(header.boundingSphere),
+                     std::end(header.boundingSphere),
+                     [](float v) { return std::isfinite(v); }))
+        return ImportError("skin.bounds", "The bind-pose bounding sphere overflows.");
+
+    std::vector<PreparedClip> clips;
+    if (!PrepareAnimationClips(data, output_path, joints, clips))
+        return false;
+
     std::ofstream outFile(output_path, std::ios::binary);
     if (!outFile) {
         std::cerr << "Error: Could not open output file " << output_path << std::endl;
-        return;
+        return false;
     }
 
     outFile.write(reinterpret_cast<const char*>(&header), sizeof(header));
@@ -406,7 +940,7 @@ void process_skinned_gltf(cgltf_data* data,
     std::cout << "  - Indices: " << optimized_indices.size() << std::endl;
     std::cout << "  - Joints: " << joints.size() << std::endl;
 
-    WriteAnimationClips(data, output_path);
+    return static_cast<bool>(outFile) && WriteAnimationClips(clips);
 }
 
 // ----------------------------------------------------------------------------
@@ -522,10 +1056,22 @@ bool WriteLtex(const std::string& output_path,
 // plate is committable/reviewable as a PNG alongside the binary.ltex.
 // 4-arg worker. The 2-arg public overload below preserves the
 // ABI/declaration the round-trip test links against.
-bool process_texture_resized(const std::string& input_path,
-                             const std::string& output_path,
-                             uint32_t target_size,
-                             bool emit_preview_png) {
+bool process_material_texture_with_cutoff(const std::string& input_path,
+                                          const std::string& output_path,
+                                          uint32_t target_size,
+                                          bool emit_preview_png,
+                                          bool normal_map,
+                                          const std::string& alpha_mask,
+                                          bool material_mips,
+                                          bool linear_data,
+                                          float alpha_cutoff) {
+    const bool inline_coverage = alpha_cutoff >= 0;
+    if (!std::isfinite(alpha_cutoff) || alpha_cutoff > 1 ||
+        (inline_coverage && (normal_map || linear_data))) {
+        std::cerr << "Error: Alpha coverage needs a color texture and a cutoff in [0, 1]"
+                  << std::endl;
+        return false;
+    }
     int width = 0;
     int height = 0;
     int source_channels = 0;
@@ -545,6 +1091,21 @@ bool process_texture_resized(const std::string& input_path,
         stbi_image_free(data);
         return false;
     }
+    if (!alpha_mask.empty()) {
+        int mask_width = 0, mask_height = 0, mask_channels = 0;
+        unsigned char* mask =
+            stbi_load(alpha_mask.c_str(), &mask_width, &mask_height, &mask_channels, 1);
+        if (!mask || mask_width != width || mask_height != height || normal_map) {
+            std::cerr << "Error: Alpha mask must match the albedo dimensions: " << alpha_mask
+                      << std::endl;
+            stbi_image_free(mask);
+            stbi_image_free(data);
+            return false;
+        }
+        for (size_t p = 0; p < static_cast<size_t>(width) * height; ++p)
+            data[p * 4 + 3] = mask[p];
+        stbi_image_free(mask);
+    }
 
     const uint32_t channels = static_cast<uint32_t>(kForcedChannels);
     LtexMip base;
@@ -552,15 +1113,17 @@ bool process_texture_resized(const std::string& input_path,
     if (target_size > 0 && (static_cast<uint32_t>(width) != target_size ||
                             static_cast<uint32_t>(height) != target_size)) {
         std::vector<uint8_t> resized(static_cast<size_t>(target_size) * target_size * channels);
-        unsigned char* out = stbir_resize_uint8_srgb(data,
-                                                     width,
-                                                     height,
-                                                     0,
-                                                     resized.data(),
-                                                     static_cast<int>(target_size),
-                                                     static_cast<int>(target_size),
-                                                     0,
-                                                     STBIR_RGBA);
+        const auto resize =
+            (normal_map || linear_data) ? stbir_resize_uint8_linear : stbir_resize_uint8_srgb;
+        unsigned char* out = resize(data,
+                                    width,
+                                    height,
+                                    0,
+                                    resized.data(),
+                                    static_cast<int>(target_size),
+                                    static_cast<int>(target_size),
+                                    0,
+                                    STBIR_RGBA);
         if (!out) {
             std::cerr << "Error: Could not resize image: " << input_path << std::endl;
             stbi_image_free(data);
@@ -578,6 +1141,27 @@ bool process_texture_resized(const std::string& input_path,
     }
     stbi_image_free(data);
 
+    auto normalize_normals = [](LtexMip& mip) {
+        for (size_t p = 0; p < mip.pixels.size(); p += 4) {
+            float n[3];
+            float length_squared = 0.0f;
+            for (int c = 0; c < 3; ++c) {
+                n[c] = mip.pixels[p + c] / 127.5f - 1.0f;
+                length_squared += n[c] * n[c];
+            }
+            const float inverse_length =
+                length_squared > 1e-8f ? 1.0f / std::sqrt(length_squared) : 0.0f;
+            for (int c = 0; c < 3; ++c) {
+                const float component =
+                    inverse_length > 0.0f ? n[c] * inverse_length : (c == 2 ? 1.0f : 0.0f);
+                mip.pixels[p + c] = static_cast<uint8_t>(
+                    std::clamp(std::lround((component + 1.0f) * 127.5f), 0l, 255l));
+            }
+        }
+    };
+    if (normal_map)
+        normalize_normals(base);
+
     if (emit_preview_png) {
         const std::string preview = OutputStem(output_path) + ".png";
         if (!stbi_write_png(preview.c_str(),
@@ -592,7 +1176,68 @@ bool process_texture_resized(const std::string& input_path,
         }
     }
 
-    const std::vector<LtexMip> mips = BuildMipChain(std::move(base), channels);
+    std::vector<LtexMip> mips;
+    if (!normal_map && alpha_mask.empty() && !material_mips && !linear_data && !inline_coverage) {
+        // Preserve the existing native texture import ABI and its byte-level fixtures.
+        mips = BuildMipChain(std::move(base), channels);
+    } else {
+        auto coverage = [alpha_cutoff, inline_coverage](const LtexMip& mip, float scale) {
+            size_t covered = 0;
+            for (size_t p = 3; p < mip.pixels.size(); p += 4) {
+                if (inline_coverage) {
+                    // Measure the quantized bytes that the shader will sample.
+                    const auto alpha = std::clamp(std::lround(mip.pixels[p] * scale), 0l, 255l);
+                    covered += alpha >= alpha_cutoff * 255.0f;
+                } else {
+                    // Retain the existing external-mask path's exact arithmetic.
+                    covered += mip.pixels[p] * scale >= 127.5f;
+                }
+            }
+            return static_cast<float>(covered) / static_cast<float>(mip.width * mip.height);
+        };
+        const float base_coverage = coverage(base, 1.0f);
+        mips.push_back(std::move(base));
+        while (mips.back().width > 1 || mips.back().height > 1) {
+            const auto& source = mips.back();
+            LtexMip mip;
+            mip.width = std::max(1u, source.width / 2);
+            mip.height = std::max(1u, source.height / 2);
+            mip.pixels.resize(static_cast<size_t>(mip.width) * mip.height * channels);
+            const auto resize =
+                (normal_map || linear_data) ? stbir_resize_uint8_linear : stbir_resize_uint8_srgb;
+            if (!resize(source.pixels.data(),
+                        static_cast<int>(source.width),
+                        static_cast<int>(source.height),
+                        0,
+                        mip.pixels.data(),
+                        static_cast<int>(mip.width),
+                        static_cast<int>(mip.height),
+                        0,
+                        STBIR_RGBA))
+                return false;
+            if (normal_map) {
+                normalize_normals(mip);
+            } else if ((!alpha_mask.empty() && !inline_coverage) || alpha_cutoff > 0) {
+                // Preserve cutout coverage at the declared shader threshold.
+                float lo = 0.0f, hi = 256.0f;
+                for (int iteration = 0; iteration < 16; ++iteration) {
+                    const float mid = (lo + hi) * 0.5f;
+                    if (coverage(mip, mid) < base_coverage)
+                        lo = mid;
+                    else
+                        hi = mid;
+                }
+                const float scale = std::abs(coverage(mip, lo) - base_coverage) <
+                                            std::abs(coverage(mip, hi) - base_coverage)
+                                        ? lo
+                                        : hi;
+                for (size_t p = 3; p < mip.pixels.size(); p += 4)
+                    mip.pixels[p] = static_cast<uint8_t>(
+                        std::clamp(std::lround(mip.pixels[p] * scale), 0l, 255l));
+            }
+            mips.push_back(std::move(mip));
+        }
+    }
     if (!WriteLtex(output_path,
                    static_cast<uint32_t>(width),
                    static_cast<uint32_t>(height),
@@ -607,6 +1252,33 @@ bool process_texture_resized(const std::string& input_path,
               << std::endl;
     std::cout << "  - Mip levels: " << mips.size() << std::endl;
     return true;
+}
+
+bool process_material_texture(const std::string& input_path,
+                              const std::string& output_path,
+                              uint32_t target_size,
+                              bool emit_preview_png,
+                              bool normal_map,
+                              const std::string& alpha_mask,
+                              bool material_mips,
+                              bool linear_data) {
+    return process_material_texture_with_cutoff(input_path,
+                                                output_path,
+                                                target_size,
+                                                emit_preview_png,
+                                                normal_map,
+                                                alpha_mask,
+                                                material_mips,
+                                                linear_data,
+                                                -1.0f);
+}
+
+bool process_texture_resized(const std::string& input_path,
+                             const std::string& output_path,
+                             uint32_t target_size,
+                             bool emit_preview_png) {
+    return process_material_texture(
+        input_path, output_path, target_size, emit_preview_png, false, {}, false, false);
 }
 
 //  ABI: native-size PNG ->.ltex import. Stable signature the round-trip
@@ -627,112 +1299,79 @@ static size_t g_max_tris = 0;
 // model UV lane. -1 = merge all (default, unchanged behaviour).
 static int g_only_primitive = -1;
 
-void process_gltf(const std::string& input_path, const std::string& output_path) {
+bool process_gltf_checked(const std::string& input_path, const std::string& output_path) {
     cgltf_options options = {};
     cgltf_data* data = nullptr;
     if (cgltf_parse_file(&options, input_path.c_str(), &data) != cgltf_result_success) {
         std::cerr << "Error: Could not parse glTF file: " << input_path << std::endl;
-        return;
+        return false;
     }
 
     if (cgltf_load_buffers(&options, data, input_path.c_str()) != cgltf_result_success) {
         std::cerr << "Error: Could not load glTF buffers for: " << input_path << std::endl;
         cgltf_free(data);
-        return;
+        return false;
+    }
+
+    if (cgltf_validate(data) != cgltf_result_success) {
+        std::cerr << "Error: Invalid glTF data: " << input_path << std::endl;
+        cgltf_free(data);
+        return false;
     }
 
     // Skinned assets take the LMS2 path; unskinned input continues through the
-    // original v1 writer below, byte-identical to previous releases.
+    // LMSH writer below. Identity geometry retains its existing byte layout;
+    // scene instances and transforms are now baked into the static geometry.
     if (data->skins_count > 0) {
-        process_skinned_gltf(data, input_path, output_path);
-        cgltf_free(data);
-        return;
+        std::vector<const cgltf_node*> selected;
+        if (!SelectedSceneNodes(data, selected)) {
+            cgltf_free(data);
+            return false;
+        }
+        const bool skinned =
+            std::any_of(selected.begin(), selected.end(), [](const cgltf_node* node) {
+                return node->mesh && node->skin;
+            });
+        if (skinned) {
+            const bool ok = process_skinned_gltf(data, input_path, output_path);
+            cgltf_free(data);
+            return ok;
+        }
     }
 
-    // FIX: Create master lists to hold combined geometry from all primitives.
+    std::vector<StaticInstance> instances;
+    if (!CollectStaticInstances(data, instances)) {
+        cgltf_free(data);
+        return false;
+    }
     std::vector<Vertex> master_raw_vertices;
     std::vector<uint32_t> master_indices;
-    size_t vertex_offset = 0;
-
-    // FIX: Loop through all meshes and all primitives to combine them.
-    int global_prim_index = -1;
-    for (size_t mesh_idx = 0; mesh_idx < data->meshes_count; ++mesh_idx) {
-        for (size_t prim_idx = 0; prim_idx < data->meshes[mesh_idx].primitives_count; ++prim_idx) {
-            ++global_prim_index;
-            // per-part export — skip primitives that aren't the requested one.
-            if (g_only_primitive >= 0 && global_prim_index != g_only_primitive)
+    // --primitive keeps identifying a source mesh primitive, independently of
+    // node traversal order. Every selected instance of that primitive is baked.
+    std::vector<size_t> primitiveOffsets(data->meshes_count, 0);
+    for (size_t i = 1; i < data->meshes_count; ++i)
+        primitiveOffsets[i] = primitiveOffsets[i - 1] + data->meshes[i - 1].primitives_count;
+    for (const auto& instance : instances) {
+        const size_t meshIndex = static_cast<size_t>(instance.mesh - data->meshes);
+        for (size_t i = 0; i < instance.mesh->primitives_count; ++i) {
+            const size_t primitiveIndex = primitiveOffsets[meshIndex] + i;
+            if (g_only_primitive >= 0 && primitiveIndex != static_cast<size_t>(g_only_primitive))
                 continue;
-            cgltf_primitive* primitive = &data->meshes[mesh_idx].primitives[prim_idx];
-
-            cgltf_accessor* index_accessor = primitive->indices;
-            cgltf_accessor* pos_accessor = nullptr;
-            cgltf_accessor* norm_accessor = nullptr;
-            cgltf_accessor* uv_accessor = nullptr;
-
-            // pick the UV SET the base-color texture actually uses (gltf
-            // texCoord index). The tree's branches sample TEXCOORD_1; trunk/leaves
-            // sample TEXCOORD_0. Taking "the first texcoord" textures branches with
-            // the wrong UVs. Fall back to set 0 when no material/texture.
-            int wanted_uv_set = 0;
-            if (primitive->material && primitive->material->has_pbr_metallic_roughness) {
-                wanted_uv_set =
-                    primitive->material->pbr_metallic_roughness.base_color_texture.texcoord;
+            if (!AppendStaticPrimitive(instance.mesh->primitives[i],
+                                       instance,
+                                       primitiveIndex,
+                                       master_raw_vertices,
+                                       master_indices)) {
+                cgltf_free(data);
+                return false;
             }
-            cgltf_accessor* uv_fallback = nullptr;
-            for (size_t i = 0; i < primitive->attributes_count; ++i) {
-                cgltf_attribute* attr = &primitive->attributes[i];
-                if (attr->type == cgltf_attribute_type_position)
-                    pos_accessor = attr->data;
-                if (attr->type == cgltf_attribute_type_normal)
-                    norm_accessor = attr->data;
-                if (attr->type == cgltf_attribute_type_texcoord) {
-                    if (attr->index == wanted_uv_set)
-                        uv_accessor = attr->data;
-                    if (!uv_fallback)
-                        uv_fallback = attr->data;
-                }
-            }
-            if (!uv_accessor)
-                uv_accessor = uv_fallback;
-
-            if (!index_accessor || !pos_accessor || !norm_accessor || !uv_accessor) {
-                std::cerr << "Warning: Skipping primitive " << prim_idx << " in mesh " << mesh_idx
-                          << " due to missing attributes." << std::endl;
-                continue;
-            }
-
-            // Read indices for this primitive
-            for (size_t i = 0; i < index_accessor->count; ++i) {
-                // Add the current vertex offset to each index before adding it to the master list
-                const size_t local_index = cgltf_accessor_read_index(index_accessor, i);
-                if (vertex_offset > UINT32_MAX || local_index > UINT32_MAX - vertex_offset) {
-                    std::cerr << "Error: Mesh index exceeds the 32-bit output format in "
-                              << input_path << '\n';
-                    cgltf_free(data);
-                    return;
-                }
-                master_indices.push_back(static_cast<uint32_t>(local_index + vertex_offset));
-            }
-
-            // Read vertices for this primitive
-            size_t current_vertex_count = pos_accessor->count;
-            for (size_t v = 0; v < current_vertex_count; ++v) {
-                Vertex vert;
-                cgltf_accessor_read_float(pos_accessor, v, vert.pos, 3);
-                cgltf_accessor_read_float(norm_accessor, v, vert.norm, 3);
-                cgltf_accessor_read_float(uv_accessor, v, vert.uv, 2);
-                master_raw_vertices.push_back(vert);
-            }
-
-            // Update the vertex offset for the next primitive
-            vertex_offset += current_vertex_count;
         }
     }
 
     if (master_raw_vertices.empty()) {
         std::cerr << "Error: No valid primitives found in " << input_path << std::endl;
         cgltf_free(data);
-        return;
+        return false;
     }
 
     // Now, run the optimization pipeline on the combined geometry
@@ -782,9 +1421,9 @@ void process_gltf(const std::string& input_path, const std::string& output_path)
         const size_t target_index_count = g_max_tris * 3;
         std::vector<unsigned int> simplified(optimized_indices.size());
         float result_error = 0.0f;
-        // meshopt_SimplifySparse: the asset may be many DISCONNECTED components
-        // (foliage leaf cards). Without it, isolated small cards are collapsed as
-        // "small features" and the canopy vanishes; with it, coverage is preserved.
+        // Sparse computes relative error against the referenced subset extents.
+        // Preserve disconnected components. Topology and error limits may stop
+        // above the target; record actual counts instead of pruning canopy coverage.
         const size_t simplified_count = meshopt_simplify(simplified.data(),
                                                          optimized_indices.data(),
                                                          optimized_indices.size(),
@@ -835,11 +1474,18 @@ void process_gltf(const std::string& input_path, const std::string& output_path)
     float dz = max_ext[2] - sphere[2];
     sphere[3] = sqrtf(dx * dx + dy * dy + dz * dz);
 
+    if (!std::all_of(
+            std::begin(sphere), std::end(sphere), [](float v) { return std::isfinite(v); })) {
+        cgltf_free(data);
+        return ImportError("mesh.bounds",
+                           "Compiled bounding sphere exceeds the finite mesh format.");
+    }
+
     std::ofstream outFile(output_path, std::ios::binary);
     if (!outFile) {
         std::cerr << "Error: Could not open output file " << output_path << std::endl;
         cgltf_free(data);
-        return;
+        return false;
     }
 
     LMeshHeader header;
@@ -862,14 +1508,22 @@ void process_gltf(const std::string& input_path, const std::string& output_path)
     std::cout << "  - Indices: " << optimized_indices.size() << std::endl;
 
     cgltf_free(data);
+    return static_cast<bool>(outFile);
+}
+
+void process_gltf(const std::string& input_path, const std::string& output_path) {
+    (void)process_gltf_checked(input_path, output_path);
 }
 
 int main(int argc, char* argv[]) {
+    g_only_primitive = -1;
+    g_max_tris = 0;
     if (argc < 3) {
         std::cerr << "Usage: AssetProcessor.exe <input.glb|input.png> <output.lmesh|output.ltex> "
                      "[target_size] [--preview-png] [--max-tris N]"
                   << std::endl;
-        std::cerr << "  --max-tris N: for.lmesh output, decimate the mesh to <= N triangles (LOD0)"
+        std::cerr << "  --max-tris N: for.lmesh output, simplify toward N triangles, bounded by "
+                     "topology and error (LOD0)"
                   << std::endl;
         std::cerr << "  --emit-lods: for.lmesh output, also write coarser <stem>.lod1.lmesh /"
                      " <stem>.lod2.lmesh distance LODs (render-only; renderer falls back to LOD0"
@@ -885,6 +1539,12 @@ int main(int argc, char* argv[]) {
         std::cerr << "  --preview-png: for.ltex output, also write a sibling <stem>.png of the "
                      "(resized) mip-0 image"
                   << std::endl;
+        std::cerr
+            << "  --srgb: filter color mips in linear light\n"
+               "  --linear: filter non-color data without gamma conversion\n"
+               "  --normal-map: filter linear normals and renormalize\n"
+               "  --alpha-mask <image>: merge an opacity map and preserve cutout coverage\n"
+               "  --alpha-cutoff <0..1>: preserve inline RGBA cutout coverage at this threshold\n";
         return 1;
     }
 
@@ -901,10 +1561,36 @@ int main(int argc, char* argv[]) {
     if (ends_with(output_path, ".ltex")) {
         uint32_t target_size = 0;
         bool emit_preview_png = false;
+        bool normal_map = false;
+        bool material_mips = false;
+        bool linear_data = false;
+        float alpha_cutoff = -1;
+        std::string alpha_mask;
         for (int a = 3; a < argc; ++a) {
             const std::string arg = argv[a];
             if (arg == "--preview-png") {
                 emit_preview_png = true;
+            } else if (arg == "--linear") {
+                linear_data = true;
+            } else if (arg == "--srgb") {
+                material_mips = true;
+            } else if (arg == "--normal-map") {
+                normal_map = true;
+            } else if (arg == "--alpha-mask" && a + 1 < argc) {
+                alpha_mask = argv[++a];
+            } else if (arg == "--alpha-cutoff" && a + 1 < argc) {
+                try {
+                    const std::string value = argv[++a];
+                    size_t consumed = 0;
+                    alpha_cutoff = std::stof(value, &consumed);
+                    if (consumed != value.size() || !std::isfinite(alpha_cutoff) ||
+                        alpha_cutoff < 0 || alpha_cutoff > 1)
+                        throw std::invalid_argument("cutoff");
+                } catch (...) {
+                    std::cerr << "Error: --alpha-cutoff needs a finite number in [0, 1]"
+                              << std::endl;
+                    return 1;
+                }
             } else {
                 try {
                     target_size = static_cast<uint32_t>(std::stoul(arg));
@@ -914,7 +1600,21 @@ int main(int argc, char* argv[]) {
                 }
             }
         }
-        return process_texture_resized(argv[1], output_path, target_size, emit_preview_png) ? 0 : 1;
+        if (target_size > 16384) {
+            std::cerr << "Error: target size exceeds 16384" << std::endl;
+            return 1;
+        }
+        return process_material_texture_with_cutoff(argv[1],
+                                                    output_path,
+                                                    target_size,
+                                                    emit_preview_png,
+                                                    normal_map,
+                                                    alpha_mask,
+                                                    material_mips,
+                                                    linear_data,
+                                                    alpha_cutoff)
+                   ? 0
+                   : 1;
     }
 
     // optional triangle budget for the static (.lmesh) path. --max-tris N
@@ -952,7 +1652,8 @@ int main(int argc, char* argv[]) {
         }
     }
     g_max_tris = max_tris;
-    process_gltf(argv[1], output_path);
+    if (!process_gltf_checked(argv[1], output_path))
+        return 1;
 
     if (emit_lods) {
         // Derive "<stem>.lodN.lmesh" from the LOD0 output path (matches the
@@ -972,9 +1673,10 @@ int main(int argc, char* argv[]) {
             const size_t budget = lod_budgets[lod - 1];
             g_max_tris = (budget > 0) ? budget : 1;
             const std::string lod_path = stem + ".lod" + std::to_string(lod) + kExt;
-            std::cout << "Emitting LOD" << lod << " (<= " << g_max_tris << " tris) -> '" << lod_path
-                      << "'" << std::endl;
-            process_gltf(argv[1], lod_path);
+            std::cout << "Emitting LOD" << lod << " (target " << g_max_tris << " tris) -> '"
+                      << lod_path << "'" << std::endl;
+            if (!process_gltf_checked(argv[1], lod_path))
+                return 1;
         }
     }
     return 0;

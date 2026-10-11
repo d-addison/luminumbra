@@ -2,6 +2,7 @@
 
 #include "../ecs/EntitySnapshot.h" //  plant entity snapshot persistence
 #include "WorldPersistenceRoundtrip.h"
+#include "world/FarLodStore.h"
 
 #include "nlohmann/json.hpp"
 
@@ -9,7 +10,10 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cassert>
 #include <cerrno>
+#include <charconv>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -17,6 +21,7 @@
 #include <iomanip>
 #include <limits>
 #include <map>
+#include <set>
 #include <sstream>
 #include <system_error>
 #include <utility>
@@ -47,7 +52,7 @@ constexpr const char* kRegionFileExtension = ".lmr";
 
 // Container constants (the deterministic runtime contract section 3).
 constexpr char kRegionMagic[4] = {'L', 'M', 'R', '1'};
-constexpr std::uint16_t kRegionVersion = 1;
+constexpr std::uint16_t kRegionVersion = WorldSaveService::kContainerVersion;
 // Header: magic u32 | version u16 | record_count u16.
 constexpr std::size_t kRegionFileHeaderSize = 8;
 // Record header: u64 id | u8 lod_level | u8 flags | u32 uncompressed_size |
@@ -66,6 +71,34 @@ std::atomic<bool>& InterruptBeforeRegionReplaceForTesting() {
     static std::atomic<bool> interrupt{false};
     return interrupt;
 }
+
+using ActiveRegionsReplaceHook = bool (*)();
+ActiveRegionsReplaceHook& BeforeActiveRegionsReplaceForTesting() {
+    static ActiveRegionsReplaceHook hook = nullptr;
+    return hook;
+}
+
+#ifndef NDEBUG
+// Production pair saves are synchronous on the process's host thread. Detect
+// concurrent or reentrant callers instead of silently serializing a violated
+// ownership contract. This guard does not wait and is absent in release builds.
+class PairedSaveGuard {
+public:
+    PairedSaveGuard() {
+        const bool already_saving = saving().test_and_set(std::memory_order_acquire);
+        assert(!already_saving && "Clock/ledger saves must not overlap");
+    }
+    ~PairedSaveGuard() {
+        saving().clear(std::memory_order_release);
+    }
+
+private:
+    static std::atomic_flag& saving() {
+        static std::atomic_flag flag = ATOMIC_FLAG_INIT;
+        return flag;
+    }
+};
+#endif
 
 // One record of an LMR1 region file kept in its on-disk (compressed) form so
 // untouched records survive a merge byte-for-byte without a decode pass.
@@ -124,6 +157,35 @@ void AddError(std::vector<std::string>* errors, std::string message) {
     }
 }
 
+bool ReadAmbientAnchor(const nlohmann::json& metadata,
+                       std::optional<Vec3>& anchor,
+                       std::string& error) {
+    anchor.reset();
+    if (!metadata.contains("simulationTick") && !metadata.contains("calendar"))
+        return true;
+    // Older clock snapshots used spawnPoint itself as the ambient anchor.
+    const char* key = metadata.contains("ambientFieldAnchor") ? "ambientFieldAnchor" : "spawnPoint";
+    if (!metadata.contains(key))
+        return true;
+    const auto& value = metadata.at(key);
+    Vec3 point{};
+    for (int i = 0; i < 3; ++i) {
+        const char* axis = i == 0 ? "x" : (i == 1 ? "y" : "z");
+        if (!value.is_object() || value.size() != 3 || !value.contains(axis) ||
+            !value.at(axis).is_number()) {
+            error = "Corrupt world metadata: invalid ambient field anchor.";
+            return false;
+        }
+        point[i] = value.at(axis).get<float>();
+        if (!std::isfinite(point[i])) {
+            error = "Corrupt world metadata: ambient field anchor must be finite.";
+            return false;
+        }
+    }
+    anchor = point;
+    return true;
+}
+
 std::uint64_t CurrentProcessIdValue() {
 #if defined(_WIN32)
     return static_cast<std::uint64_t>(::GetCurrentProcessId());
@@ -143,6 +205,33 @@ std::filesystem::path NextRegionTempPath(const std::filesystem::path& destinatio
 void RemoveTemporaryFile(const std::filesystem::path& path) {
     std::error_code remove_error;
     std::filesystem::remove(path, remove_error);
+}
+
+// Reclaim staging files abandoned by a terminated save. Saves are serialized per
+// destination by construction, so any staging file that already exists for this
+// destination was left by a process that is no longer writing it. Without this,
+// every interruption leaks a full ledger copy and repeated crashes exhaust the
+// volume. Best effort: a file that cannot be removed is left alone and never
+// blocks the save, because staging lives outside every scanned directory.
+std::size_t ReclaimAbandonedStaging(const std::filesystem::path& destination) {
+    std::error_code list_error;
+    const auto directory = destination.parent_path();
+    const auto prefix = destination.filename().string() + ".tmp.";
+    std::size_t reclaimed = 0;
+    std::filesystem::directory_iterator it(directory, list_error);
+    if (list_error)
+        return 0;
+    for (const auto& entry : it) {
+        std::error_code kind_error;
+        if (!entry.is_regular_file(kind_error) || kind_error)
+            continue;
+        if (entry.path().filename().string().rfind(prefix, 0) != 0)
+            continue;
+        std::error_code remove_error;
+        if (std::filesystem::remove(entry.path(), remove_error) && !remove_error)
+            ++reclaimed;
+    }
+    return reclaimed;
 }
 
 #if defined(_WIN32)
@@ -340,7 +429,8 @@ bool ReplaceRegionFileAtomically(const std::filesystem::path& temp,
                                  const std::filesystem::path& destination,
                                  std::vector<std::string>* errors) {
     // POSIX rename replaces an existing same-filesystem destination atomically.
-    // The temporary file is always created beside the live LMR1 file.
+    // LMR1 staging is beside the live file; ledger staging is in the save root,
+    // outside the chunks scan. A cross-filesystem rename fails without replacing.
     if (std::rename(temp.c_str(), destination.c_str()) != 0) {
         const int error = errno;
         AddError(errors,
@@ -413,10 +503,14 @@ bool CompressPayload(const std::string& payload,
 bool DecompressPayload(const RegionRecord& record,
                        std::string& out_payload,
                        std::vector<std::string>* errors) {
-    out_payload.assign(record.uncompressed_size, '\0');
-    if (record.uncompressed_size == 0) {
-        return record.compressed_payload.empty();
+    // Bound allocation before trusting an on-disk length or narrowing to LZ4's int API.
+    constexpr std::uint32_t kMaxRecordBytes = 64u * 1024u * 1024u;
+    if (record.uncompressed_size == 0 || record.uncompressed_size > kMaxRecordBytes ||
+        record.compressed_payload.empty() || record.compressed_payload.size() > kMaxRecordBytes) {
+        AddError(errors, "corrupt region record payload length");
+        return false;
     }
+    out_payload.assign(record.uncompressed_size, '\0');
     const int produced = LZ4_decompress_safe(record.compressed_payload.data(),
                                              out_payload.data(),
                                              static_cast<int>(record.compressed_payload.size()),
@@ -430,7 +524,8 @@ bool DecompressPayload(const RegionRecord& record,
 
 bool ReadRegionFile(const std::filesystem::path& path,
                     std::vector<RegionRecord>& out_records,
-                    std::vector<std::string>* errors) {
+                    std::vector<std::string>* errors,
+                    const std::stop_token& stop = {}) {
     out_records.clear();
 
     std::ifstream input(path, std::ios::binary);
@@ -439,7 +534,15 @@ bool ReadRegionFile(const std::filesystem::path& path,
         return false;
     }
     std::ostringstream buffer;
-    buffer << input.rdbuf();
+    char read_buffer[64 * 1024];
+    while (input) {
+        if (stop.stop_requested()) {
+            AddError(errors, "Saved-world validation cancelled.");
+            return false;
+        }
+        input.read(read_buffer, sizeof(read_buffer));
+        buffer.write(read_buffer, input.gcount());
+    }
     if (input.bad()) {
         AddError(errors, "failed to read region file: " + path.string());
         return false;
@@ -455,8 +558,9 @@ bool ReadRegionFile(const std::filesystem::path& path,
     const std::uint16_t version = ReadU16(data + 4);
     if (version != kRegionVersion) {
         AddError(errors,
-                 "unsupported LMR1 container version " + std::to_string(version) + ": " +
-                     path.string());
+                 version < kRegionVersion ? WorldSaveService::kObsoleteWorldMessage
+                                          : "unsupported future LMR1 container version " +
+                                                std::to_string(version) + ": " + path.string());
         return false;
     }
     const std::uint16_t record_count = ReadU16(data + 6);
@@ -467,15 +571,27 @@ bool ReadRegionFile(const std::filesystem::path& path,
         return false;
     }
 
+    std::set<std::pair<u8, u64>> keys;
     out_records.resize(record_count);
     std::size_t payload_offset = kRegionFileHeaderSize + manifest_bytes;
     for (std::uint16_t i = 0; i < record_count; ++i) {
+        if (stop.stop_requested()) {
+            AddError(errors, "Saved-world validation cancelled.");
+            out_records.clear();
+            return false;
+        }
         const unsigned char* header =
             data + kRegionFileHeaderSize + static_cast<std::size_t>(i) * kRecordHeaderSize;
         RegionRecord& record = out_records[i];
         record.id = ReadU64(header);
         record.lod_level = header[8];
         record.flags = header[9];
+        if (record.lod_level > 2 || (record.flags & ~3u) != 0u ||
+            !keys.emplace(record.lod_level, record.id).second) {
+            AddError(errors, "corrupt or unknown region record header: " + path.string());
+            out_records.clear();
+            return false;
+        }
         record.uncompressed_size = ReadU32(header + 10);
         const std::uint32_t compressed_size = ReadU32(header + 14);
         if (payload_offset + compressed_size > bytes.size()) {
@@ -552,11 +668,7 @@ bool WriteRegionFile(const std::filesystem::path& path,
     return true;
 }
 
-// A lod_level 0 record payload is the v1 chunk snapshot record: the canonical
-// single-chunk world_state_snapshot.v1 JSON. Reusing the v1 serializer keeps
-// the migration gate trivially true (identical field set and float formatting
-// in both formats) and handles empty/band SDF chunks as plain empty
-// arrays.
+// Current lod-0 records retain canonical in-memory chunk serialization.
 std::string SerializeSingleChunkSnapshot(const std::shared_ptr<Chunk>& chunk) {
     WorldStreamingState single;
     single.insert_chunk(chunk);
@@ -615,12 +727,21 @@ std::uint8_t ChunkRecordFlags(const Chunk& chunk, std::uint8_t previous_flags) {
     return flags;
 }
 
-bool IsRegionFileName(const std::filesystem::path& path) {
-    if (path.extension() != kRegionFileExtension) {
+bool ParseRegionFileName(const std::filesystem::path& path, int& rx, int& rz) {
+    if (path.extension() != kRegionFileExtension)
         return false;
-    }
     const std::string stem = path.stem().string();
-    return stem.rfind("r.", 0) == 0;
+    if (stem.rfind("r.", 0) != 0)
+        return false;
+    const auto split = stem.find('.', 2);
+    if (split == std::string::npos)
+        return false;
+    const char* begin = stem.data();
+    const auto x = std::from_chars(begin + 2, begin + split, rx);
+    const auto z = std::from_chars(begin + split + 1, begin + stem.size(), rz);
+    return x.ec == std::errc{} && x.ptr == begin + split && z.ec == std::errc{} &&
+           z.ptr == begin + stem.size() &&
+           stem == "r." + std::to_string(rx) + "." + std::to_string(rz);
 }
 
 bool WriteWorldManifest(const std::filesystem::path& manifest_path,
@@ -629,21 +750,130 @@ bool WriteWorldManifest(const std::filesystem::path& manifest_path,
                                      {"container", "LMR1"},
                                      {"container_version", kRegionVersion}};
 
-    std::ofstream output(manifest_path, std::ios::binary | std::ios::trunc);
-    if (!output.is_open()) {
-        AddError(errors, "failed to open world manifest for writing: " + manifest_path.string());
+    const std::string bytes = manifest.dump(4) + "\n";
+    std::filesystem::path temp;
+    if (!WriteDurableRegionTemp(manifest_path, bytes, temp, errors))
         return false;
-    }
-    output << std::setw(4) << manifest << '\n';
-    output.flush();
-    if (!output.good()) {
-        AddError(errors, "failed to write world manifest: " + manifest_path.string());
+    if (!ReplaceRegionFileAtomically(temp, manifest_path, errors)) {
+        RemoveTemporaryFile(temp);
         return false;
     }
     return true;
 }
 
 } // namespace
+
+bool WorldSaveService::save_metadata(const std::string& bytes,
+                                     const std::filesystem::path& save_dir,
+                                     std::vector<std::string>* errors) {
+    if (!validate_save(save_dir, errors))
+        return false;
+    world::WorldClock clock;
+    std::string clock_error;
+    const auto metadata = nlohmann::json::parse(bytes, nullptr, false);
+    // Legacy metadata is opaque input to this helper. Only clock-bearing input
+    // opts into the new validation; the existing destination is still validated.
+    const bool has_clock = metadata.contains("simulationTick") || metadata.contains("calendar");
+    std::optional<Vec3> ambient_anchor;
+    if (has_clock && (!world::WorldClock::from_metadata(metadata, clock, clock_error) ||
+                      !ReadAmbientAnchor(metadata, ambient_anchor, clock_error))) {
+        AddError(errors, clock_error);
+        return false;
+    }
+    world::WorldClock previous_clock;
+    bool requires_active_regions = false;
+    if (!read_clock_metadata(save_dir, previous_clock, requires_active_regions, errors))
+        return false;
+    if (requires_active_regions && !has_clock) {
+        AddError(errors, "Incompatible configuration: this world requires sim.active_regions.");
+        return false;
+    }
+    const auto destination = save_dir / "world_info.json";
+    std::filesystem::path temp;
+    if (!WriteDurableRegionTemp(destination, bytes, temp, errors))
+        return false;
+    if (InterruptBeforeRegionReplaceForTesting().exchange(false)) {
+        RemoveTemporaryFile(temp);
+        AddError(errors, "interrupted before metadata replacement");
+        return false;
+    }
+    if (!ReplaceRegionFileAtomically(temp, destination, errors)) {
+        RemoveTemporaryFile(temp);
+        return false;
+    }
+    return true;
+}
+
+bool WorldSaveService::save_metadata_and_active_regions(const std::string& bytes,
+                                                        world::ActiveRegionLedger& ledger,
+                                                        const std::filesystem::path& save_dir,
+                                                        std::vector<std::string>* errors) {
+#ifndef NDEBUG
+    const PairedSaveGuard guard;
+#endif
+    const auto metadata = nlohmann::json::parse(bytes, nullptr, false);
+    world::WorldClock clock;
+    std::optional<Vec3> ambient_anchor;
+    std::string error;
+    if (!world::WorldClock::from_metadata(metadata, clock, error) ||
+        !ReadAmbientAnchor(metadata, ambient_anchor, error)) {
+        AddError(errors, error);
+        return false;
+    }
+    auto saved = ledger;
+    saved.mark_saved(clock);
+    world::ActiveRegionLedger checked;
+    if (!world::ActiveRegionLedger::decode(saved.encode(), checked, error) ||
+        ledger.header_tick() > clock.tick()) {
+        AddError(errors, world::ActiveRegionLedger::kCorruptMessage);
+        return false;
+    }
+    world::WorldClock previous_clock;
+    bool requires_active_regions = false;
+    if (!read_clock_metadata(save_dir, previous_clock, requires_active_regions, errors))
+        return false;
+    // Each writer validates the installed pair. On rewind, replace the ledger
+    // first so it cannot be newer than the clock, even if metadata writing fails.
+    if (clock.tick() < previous_clock.tick())
+        return save_active_regions(ledger, clock, save_dir, errors) &&
+               save_metadata(bytes, save_dir, errors);
+    return save_metadata(bytes, save_dir, errors) &&
+           save_active_regions(ledger, clock, save_dir, errors);
+}
+
+bool WorldSaveService::read_clock_metadata(const std::filesystem::path& save_dir,
+                                           world::WorldClock& clock,
+                                           bool& requires_active_regions,
+                                           std::vector<std::string>* errors,
+                                           std::optional<Vec3>* ambient_anchor) {
+    clock = world::WorldClock{};
+    requires_active_regions = false;
+    if (ambient_anchor)
+        ambient_anchor->reset();
+    try {
+        requires_active_regions = std::filesystem::exists(active_regions_path(save_dir));
+        const auto path = save_dir / "world_info.json";
+        if (!std::filesystem::exists(path))
+            return true;
+        std::ifstream input(path, std::ios::binary);
+        const auto metadata = nlohmann::json::parse(input);
+        std::string error;
+        std::optional<Vec3> anchor;
+        if (!world::WorldClock::from_metadata(metadata, clock, error) ||
+            !ReadAmbientAnchor(metadata, anchor, error)) {
+            AddError(errors, error);
+            return false;
+        }
+        requires_active_regions = requires_active_regions || metadata.contains("simulationTick") ||
+                                  metadata.contains("calendar");
+        if (ambient_anchor)
+            *ambient_anchor = anchor;
+        return true;
+    } catch (const std::exception& e) {
+        AddError(errors, std::string("Corrupt world metadata: ") + e.what());
+        return false;
+    }
+}
 
 std::filesystem::path WorldSaveService::world_state_path(const std::filesystem::path& save_dir) {
     return save_dir / kChunksDirectoryName / kWorldStateFileName;
@@ -670,6 +900,8 @@ std::filesystem::path WorldSaveService::plant_entities_path(const std::filesyste
 bool WorldSaveService::save_plant_entities(const Luminumbra::Ecs::EntityRegistrySnapshot& snapshot,
                                            const std::filesystem::path& save_dir,
                                            std::vector<std::string>* errors) {
+    if (!validate_save(save_dir, errors))
+        return false;
     const std::filesystem::path path = plant_entities_path(save_dir);
     std::error_code ec;
     if (snapshot.entities.empty()) {
@@ -717,6 +949,114 @@ bool WorldSaveService::load_plant_entities(Luminumbra::Ecs::EntityRegistrySnapsh
     return true;
 }
 
+std::filesystem::path WorldSaveService::active_regions_path(const std::filesystem::path& save_dir) {
+    return region_directory(save_dir) / "active-regions.arl";
+}
+
+bool WorldSaveService::load_active_regions(world::ActiveRegionLedger& ledger,
+                                           const std::filesystem::path& save_dir,
+                                           std::vector<std::string>* errors,
+                                           const world::WorldClock& absent_clock) {
+    try {
+        const auto path = active_regions_path(save_dir);
+        if (!std::filesystem::exists(path)) {
+            ledger = world::ActiveRegionLedger({}, absent_clock);
+            return true;
+        }
+        const auto length = std::filesystem::file_size(path);
+        if (length > world::ActiveRegionLedger::kMaxFileBytes) {
+            AddError(errors, world::ActiveRegionLedger::kCorruptMessage);
+            return false;
+        }
+        std::ifstream input(path, std::ios::binary);
+        std::string bytes(static_cast<std::size_t>(length), '\0');
+        input.read(bytes.data(), static_cast<std::streamsize>(length));
+        std::string error;
+        if (!input || !world::ActiveRegionLedger::decode(bytes, ledger, error)) {
+            AddError(errors, error.empty() ? world::ActiveRegionLedger::kCorruptMessage : error);
+            return false;
+        }
+        return true;
+    } catch (const std::exception&) {
+        AddError(errors, world::ActiveRegionLedger::kCorruptMessage);
+        return false;
+    }
+}
+
+bool WorldSaveService::save_active_regions(world::ActiveRegionLedger& ledger,
+                                           const world::WorldClock& clock,
+                                           const std::filesystem::path& save_dir,
+                                           std::vector<std::string>* errors) {
+    if (!validate_save(save_dir, errors))
+        return false;
+    // Keep an anchor-only ledger: it restores last walking feet before activation.
+    if (ledger.records().empty() && !ledger.local_anchor() &&
+        !std::filesystem::exists(active_regions_path(save_dir)))
+        return true;
+    auto saved = ledger;
+    saved.mark_saved(clock);
+    const auto bytes = saved.encode();
+    world::ActiveRegionLedger checked;
+    std::string error;
+    if (!world::ActiveRegionLedger::decode(bytes, checked, error) ||
+        ledger.header_tick() > clock.tick()) {
+        AddError(errors, world::ActiveRegionLedger::kCorruptMessage);
+        return false;
+    }
+    try {
+        const auto path = active_regions_path(save_dir);
+        std::filesystem::create_directories(path.parent_path());
+        std::filesystem::path temp;
+        // Keep abandoned staging files outside the strict region integrity scan.
+        // The save root is on the save filesystem; replacement refuses EXDEV
+        // if a separately mounted chunks/region/ directory violates that layout.
+        const auto staging = save_dir / path.filename();
+        ReclaimAbandonedStaging(staging);
+        if (!WriteDurableRegionTemp(staging, bytes, temp, errors))
+            return false;
+        if (const auto hook = BeforeActiveRegionsReplaceForTesting(); hook && !hook()) {
+            RemoveTemporaryFile(temp);
+            AddError(errors, "interrupted before active-region ledger replacement");
+            return false;
+        }
+        if (!ReplaceRegionFileAtomically(temp, path, errors)) {
+            RemoveTemporaryFile(temp);
+            return false;
+        }
+        ledger = std::move(saved);
+        return true;
+    } catch (const std::exception& e) {
+        AddError(errors, std::string("Cannot save active-region ledger: ") + e.what());
+        return false;
+    }
+}
+
+std::uint64_t
+WorldSaveService::region_simulation_digest(const std::filesystem::path& save_dir,
+                                           world::RegionKey key,
+                                           const std::vector<std::shared_ptr<Chunk>>& live_chunks) {
+    WorldStreamingState region;
+    for (const auto& chunk : live_chunks) {
+        if (!chunk)
+            continue;
+        int rx = 0, rz = 0;
+        region_coords_for_chunk(chunk->get_coords(), rx, rz);
+        if (rx == key.x && rz == key.z)
+            region.insert_chunk(chunk);
+    }
+    if (!save_dir.empty()) {
+        std::vector<std::shared_ptr<Chunk>> durable_chunks;
+        std::vector<std::string> errors;
+        if (!read_region_chunks(region_file_path(save_dir, key.x, key.z), durable_chunks, &errors))
+            throw std::runtime_error(errors.empty() ? "Cannot read durable region records"
+                                                    : errors.front());
+        // insert_chunk preserves the first record for an id: live simulation wins.
+        for (const auto& chunk : durable_chunks)
+            region.insert_chunk(chunk);
+    }
+    return std::stoull(ComputeRegionContentHash(region), nullptr, 16);
+}
+
 void WorldSaveService::region_coords_for_chunk(const IVec3& chunk_coords,
                                                int& out_rx,
                                                int& out_rz) {
@@ -725,23 +1065,26 @@ void WorldSaveService::region_coords_for_chunk(const IVec3& chunk_coords,
 }
 
 bool WorldSaveService::has_world_save(const std::filesystem::path& save_dir) {
-    std::error_code ec;
-    if (std::filesystem::exists(world_manifest_path(save_dir), ec) && !ec) {
-        return true;
-    }
-    if (std::filesystem::exists(world_state_path(save_dir), ec) && !ec) {
-        return true;
-    }
-    const std::filesystem::path region_dir = region_directory(save_dir);
-    if (!std::filesystem::exists(region_dir, ec) || ec) {
-        return false;
-    }
-    for (const auto& entry : std::filesystem::directory_iterator(region_dir, ec)) {
-        if (!ec && entry.is_regular_file() && IsRegionFileName(entry.path())) {
-            return true;
-        }
-    }
-    return false;
+    WorldStreamingState state;
+    std::vector<std::string> errors;
+    return WorldSaveService{}.load_world(state, save_dir, errors);
+}
+
+bool WorldSaveService::has_chunk_snapshot(const std::filesystem::path& save_dir) {
+    WorldStreamingState state;
+    std::vector<std::string> errors;
+    return WorldSaveService{}.load_world(state, save_dir, errors) && !state.empty();
+}
+
+bool WorldSaveService::validate_save(const std::filesystem::path& save_dir,
+                                     std::vector<std::string>* errors,
+                                     const std::stop_token& stop) {
+    WorldStreamingState state;
+    std::vector<std::string> diagnostics;
+    WorldSaveService{}.load_world(state, save_dir, diagnostics, stop);
+    for (const auto& message : diagnostics)
+        AddError(errors, message);
+    return diagnostics.empty();
 }
 
 bool WorldSaveService::read_container_records(const std::filesystem::path& region_file,
@@ -749,9 +1092,13 @@ bool WorldSaveService::read_container_records(const std::filesystem::path& regio
                                               std::vector<std::string>* errors) {
     out_records.clear();
     std::error_code exists_error;
-    if (!std::filesystem::exists(region_file, exists_error) || exists_error) {
-        return true; // clean miss
+    const bool exists = std::filesystem::exists(region_file, exists_error);
+    if (exists_error) {
+        AddError(errors, "failed to inspect region file: " + exists_error.message());
+        return false;
     }
+    if (!exists)
+        return true; // clean miss
 
     std::vector<RegionRecord> raw_records;
     if (!ReadRegionFile(region_file, raw_records, errors)) {
@@ -777,9 +1124,13 @@ bool WorldSaveService::read_region_chunks(const std::filesystem::path& region_fi
                                           std::vector<std::string>* errors) {
     out_chunks.clear();
     std::error_code exists_error;
-    if (!std::filesystem::exists(region_file, exists_error) || exists_error) {
-        return true; // clean miss
+    const bool exists = std::filesystem::exists(region_file, exists_error);
+    if (exists_error) {
+        AddError(errors, "failed to inspect region file: " + exists_error.message());
+        return false;
     }
+    if (!exists)
+        return true; // clean miss
 
     std::vector<RegionRecord> raw_records;
     if (!ReadRegionFile(region_file, raw_records, errors)) {
@@ -817,9 +1168,13 @@ bool WorldSaveService::read_authoritative_region_chunks(
         return false;
     }
     std::error_code exists_error;
-    if (!std::filesystem::exists(region_file, exists_error) || exists_error) {
-        return true; // clean miss
+    const bool exists = std::filesystem::exists(region_file, exists_error);
+    if (exists_error) {
+        AddError(errors, "failed to inspect region file: " + exists_error.message());
+        return false;
     }
+    if (!exists)
+        return true; // clean miss
 
     std::vector<RegionRecord> raw_records;
     if (!ReadRegionFile(region_file, raw_records, errors)) {
@@ -898,6 +1253,10 @@ void WorldSaveService::set_interrupt_before_region_replace_for_testing(bool enab
     InterruptBeforeRegionReplaceForTesting().store(enabled, std::memory_order_release);
 }
 
+void WorldSaveService::set_before_active_regions_replace_for_testing(bool (*hook)()) {
+    BeforeActiveRegionsReplaceForTesting() = hook;
+}
+
 bool WorldSaveService::save_world(const WorldStreamingState& state,
                                   const std::filesystem::path& save_dir,
                                   std::vector<std::string>* errors) const {
@@ -906,90 +1265,174 @@ bool WorldSaveService::save_world(const WorldStreamingState& state,
 
 bool WorldSaveService::load_world(WorldStreamingState& state,
                                   const std::filesystem::path& save_dir,
-                                  std::vector<std::string>& errors) const {
-    // v2 sniff: a world manifest or any LMR1 region file selects the region
-    // container; otherwise fall back to the legacy v1 single snapshot.
-    const std::filesystem::path region_dir = region_directory(save_dir);
-    std::error_code ec;
-    std::vector<std::filesystem::path> region_files;
-    bool v2_present = std::filesystem::exists(world_manifest_path(save_dir), ec) && !ec;
-    if (std::filesystem::exists(region_dir, ec) && !ec) {
-        for (const auto& entry : std::filesystem::directory_iterator(region_dir, ec)) {
-            if (!ec && entry.is_regular_file() && IsRegionFileName(entry.path())) {
-                region_files.push_back(entry.path());
-            }
-        }
-    }
-    if (!region_files.empty()) {
-        v2_present = true;
-    }
-
-    if (v2_present) {
-        std::sort(region_files.begin(), region_files.end());
+                                  std::vector<std::string>& errors,
+                                  const std::stop_token& stop) const {
+    state.clear();
+    const auto reject = [&state, &errors](const std::string& message) {
         state.clear();
-        // A torn/corrupt region that fails partway (truncated payload, bit-flipped
-        // LZ4, a bad record after good ones) must NOT leave the caller with a
-        // partially-populated world it would mistake for a real one. Every hard-error
-        // exit clears the state so a rejected load is always observably empty (the
-        // load_world contract: false => no usable world). The clean-miss / success
-        // paths are unaffected.
-        const auto reject = [&state]() {
-            state.clear();
+        if (!message.empty())
+            errors.push_back(message);
+        return false;
+    };
+    try {
+        if (stop.stop_requested())
+            return reject("Saved-world validation cancelled.");
+        const auto metadata_path = save_dir / "world_info.json";
+        if (std::filesystem::exists(metadata_path)) {
+            std::ifstream input(metadata_path, std::ios::binary);
+            const auto metadata = nlohmann::json::parse(input);
+            if (!metadata.is_object())
+                return reject("corrupt world metadata: expected an object");
+            // Old worlds can contain only metadata: no chunk container exists yet
+            // to reveal their version. Refuse them before the clean-miss path.
+            if (!metadata.contains("container_version"))
+                return reject(kObsoleteWorldMessage);
+            const auto& version = metadata.at("container_version");
+            if (!version.is_number_integer())
+                return reject("corrupt world metadata container version");
+            if (version != kContainerVersion) {
+                if (version >= 0 && version < kContainerVersion)
+                    return reject(kObsoleteWorldMessage);
+                if (version > kContainerVersion)
+                    return reject("unsupported future world metadata container version " +
+                                  version.dump());
+                return reject("corrupt world metadata container version");
+            }
+            if (metadata.contains("simulationTick") || metadata.contains("calendar")) {
+                world::WorldClock clock;
+                std::string error;
+                std::optional<Vec3> anchor;
+                if (!world::WorldClock::from_metadata(metadata, clock, error) ||
+                    !ReadAmbientAnchor(metadata, anchor, error))
+                    return reject(error);
+            }
+        }
+        const auto chunks_dir = save_dir / kChunksDirectoryName;
+        const auto region_dir = region_directory(save_dir);
+        if (std::filesystem::exists(world_state_path(save_dir)) ||
+            std::filesystem::exists(chunks_dir / kWorldStateBackupFileName)) {
+            return reject(kObsoleteWorldMessage);
+        }
+        if (!std::filesystem::exists(chunks_dir))
             return false;
-        };
-        for (const std::filesystem::path& path : region_files) {
+        for (const auto& entry : std::filesystem::directory_iterator(chunks_dir)) {
+            if (stop.stop_requested())
+                return reject("Saved-world validation cancelled.");
+            if (entry.path() != region_dir || !entry.is_directory())
+                return reject("corrupt or unknown world persistence artifact: " +
+                              entry.path().string());
+        }
+        if (!std::filesystem::exists(region_dir))
+            return false;
+        std::vector<std::filesystem::path> region_files;
+        bool present = false;
+        for (const auto& entry : std::filesystem::directory_iterator(region_dir)) {
+            if (stop.stop_requested())
+                return reject("Saved-world validation cancelled.");
+            int rx = 0, rz = 0;
+            if (!entry.is_regular_file())
+                return reject("corrupt world persistence artifact: " + entry.path().string());
+            if (entry.path() == world_manifest_path(save_dir) ||
+                entry.path() == plant_entities_path(save_dir) ||
+                entry.path() == active_regions_path(save_dir)) {
+                present = true;
+            } else if (ParseRegionFileName(entry.path(), rx, rz)) {
+                region_files.push_back(entry.path());
+                present = true;
+            } else {
+                return reject("corrupt or unknown region file: " + entry.path().string());
+            }
+        }
+        if (!present)
+            return false;
+        if (std::filesystem::exists(world_manifest_path(save_dir))) {
+            std::ifstream input(world_manifest_path(save_dir), std::ios::binary);
+            const auto manifest = nlohmann::json::parse(input);
+            if (manifest.is_object() && manifest.contains("schema") &&
+                manifest.at("schema").is_string()) {
+                const auto schema = manifest.at("schema").get<std::string>();
+                const std::string prefix = "luminumbra.persistence.world_manifest.v";
+                if (schema.rfind(prefix, 0) == 0 && schema != kWorldManifestSchema) {
+                    unsigned version = 0;
+                    const auto parsed = std::from_chars(
+                        schema.data() + prefix.size(), schema.data() + schema.size(), version);
+                    if (parsed.ec == std::errc{} && parsed.ptr == schema.data() + schema.size()) {
+                        if (version > 1)
+                            return reject("unsupported future world manifest schema: " + schema);
+                        if (version == 0)
+                            return reject(kObsoleteWorldMessage);
+                    }
+                }
+            }
+            if (!manifest.is_object() || !manifest.contains("schema") ||
+                manifest.at("schema") != kWorldManifestSchema || !manifest.contains("container") ||
+                manifest.at("container") != "LMR1" || !manifest.contains("container_version") ||
+                !manifest.at("container_version").is_number_integer())
+                return reject("corrupt or unknown world manifest identity/version");
+            const auto& version = manifest.at("container_version");
+            if (version != kRegionVersion) {
+                if (version >= 0 && version < kRegionVersion)
+                    return reject(kObsoleteWorldMessage);
+                if (version > kRegionVersion)
+                    return reject("unsupported future world manifest container version " +
+                                  version.dump());
+                return reject("corrupt world manifest container version");
+            }
+        }
+        std::sort(region_files.begin(), region_files.end());
+        for (const auto& path : region_files) {
+            if (stop.stop_requested())
+                return reject("Saved-world validation cancelled.");
+            int rx = 0, rz = 0;
+            ParseRegionFileName(path, rx, rz);
             std::vector<RegionRecord> records;
-            if (!ReadRegionFile(path, records, &errors)) {
-                return reject();
-            }
-            for (const RegionRecord& record : records) {
-                if (record.lod_level != 0) {
-                    continue; // far-LOD tile records are read via FarLodStore
-                }
-                const std::shared_ptr<Chunk> chunk = DecodeChunkRecord(record, path, &errors);
-                if (!chunk) {
-                    return reject();
-                }
-                if (!state.insert_chunk(chunk)) {
-                    errors.push_back("duplicate chunk id across region files: " + path.string());
-                    return reject();
+            if (!ReadRegionFile(path, records, &errors, stop))
+                return reject("");
+            for (const auto& record : records) {
+                if (stop.stop_requested())
+                    return reject("Saved-world validation cancelled.");
+                if (record.lod_level == 0) {
+                    const auto chunk = DecodeChunkRecord(record, path, &errors);
+                    if (!chunk)
+                        return reject("");
+                    int chunk_rx = 0, chunk_rz = 0;
+                    region_coords_for_chunk(chunk->get_coords(), chunk_rx, chunk_rz);
+                    if (chunk_rx != rx || chunk_rz != rz || !state.insert_chunk(chunk))
+                        return reject("corrupt chunk region identity or duplicate id: " +
+                                      path.string());
+                } else {
+                    const auto tier = static_cast<World::FarLodTier>(record.lod_level);
+                    if (record.id != World::FarLodStore::tile_record_id(tier, rx, rz))
+                        return reject("corrupt far-LOD region identity: " + path.string());
+                    std::string payload;
+                    World::FarLodTile tile;
+                    if (!DecompressPayload(record, payload, &errors) ||
+                        !World::FarLodStore::decode_payload(
+                            payload, tier, rx, rz, record.flags, tile, &errors))
+                        return reject("");
                 }
             }
         }
+        world::ActiveRegionLedger ledger;
+        if (!load_active_regions(ledger, save_dir, &errors))
+            return reject("");
+        if (std::filesystem::exists(active_regions_path(save_dir))) {
+            world::WorldClock clock;
+            bool required = false;
+            if (!read_clock_metadata(save_dir, clock, required, &errors))
+                return reject("");
+            if (ledger.header_tick() > clock.tick())
+                return reject(world::ActiveRegionLedger::kCorruptMessage);
+        }
+        Ecs::EntityRegistrySnapshot plants;
+        if (stop.stop_requested())
+            return reject("Saved-world validation cancelled.");
+        if (!load_plant_entities(plants, save_dir, &errors))
+            return reject("");
         return true;
+    } catch (const std::exception& e) {
+        return reject(std::string("corrupt or unreadable world persistence: ") + e.what());
     }
-
-    // Legacy v1 single-snapshot load (migration path; still fully supported).
-    const std::filesystem::path snapshot_path = world_state_path(save_dir);
-    std::error_code exists_error;
-    if (!std::filesystem::exists(snapshot_path, exists_error) || exists_error) {
-        // Fresh world: nothing has been persisted yet. Not an error.
-        return false;
-    }
-
-    std::ifstream input(snapshot_path, std::ios::binary);
-    if (!input.is_open()) {
-        errors.push_back("failed to open world state snapshot for reading: " +
-                         snapshot_path.string());
-        return false;
-    }
-
-    std::ostringstream buffer;
-    buffer << input.rdbuf();
-    if (input.bad()) {
-        errors.push_back("failed to read world state snapshot: " + snapshot_path.string());
-        return false;
-    }
-
-    const bool loaded = LoadWorldStreamingStateSnapshotJson(buffer.str(), state, errors);
-    if (loaded) {
-        for (const auto& chunk : state.snapshot_chunks()) {
-            if (chunk) {
-                chunk->mark_sdf_loaded_or_edited();
-            }
-        }
-    }
-    return loaded;
 }
 
 std::string WorldSaveService::world_hash(const WorldStreamingState& state) const {
@@ -1051,6 +1494,8 @@ bool WorldSaveService::write_snapshot(const std::vector<std::shared_ptr<Chunk>>&
                                       std::vector<std::string>* errors,
                                       std::size_t* regions_written) const {
     try {
+        if (!validate_save(save_dir, errors))
+            return false;
         const std::filesystem::path region_dir = region_directory(save_dir);
         std::filesystem::create_directories(region_dir);
 
@@ -1118,23 +1563,6 @@ bool WorldSaveService::write_snapshot(const std::vector<std::shared_ptr<Chunk>>&
 
         if (!WriteWorldManifest(world_manifest_path(save_dir), errors)) {
             return false;
-        }
-
-        // First v2 save over a v1 world: retire the legacy snapshot to.bak
-        // so the migration is reversible and the v2 files are authoritative.
-        const std::filesystem::path v1_path = world_state_path(save_dir);
-        std::error_code v1_exists_error;
-        if (std::filesystem::exists(v1_path, v1_exists_error) && !v1_exists_error) {
-            const std::filesystem::path backup_path =
-                v1_path.parent_path() / kWorldStateBackupFileName;
-            std::error_code rename_error;
-            std::filesystem::remove(backup_path, rename_error);
-            rename_error.clear();
-            std::filesystem::rename(v1_path, backup_path, rename_error);
-            if (rename_error) {
-                AddError(errors, "failed to retire v1 snapshot to.bak: " + rename_error.message());
-                return false;
-            }
         }
 
         if (regions_written) {

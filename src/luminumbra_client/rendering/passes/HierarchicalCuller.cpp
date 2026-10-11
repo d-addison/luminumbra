@@ -49,16 +49,6 @@ void RenderPipeline::HierarchicalCuller::BuildRecursive(CullingNode* node,
     // Split the node into 4 quadrants (X-Z plane)
     glm::vec3 center = (node->bounds.min + node->bounds.max) * 0.5f;
 
-    // Create child bounds
-    AABB child_bounds[4] = {
-        AABB(node->bounds.min, glm::vec3(center.x, node->bounds.max.y, center.z)), // Bottom-left
-        AABB(glm::vec3(center.x, node->bounds.min.y, node->bounds.min.z),
-             glm::vec3(node->bounds.max.x, node->bounds.max.y, center.z)), // Bottom-right
-        AABB(glm::vec3(node->bounds.min.x, node->bounds.min.y, center.z),
-             glm::vec3(center.x, node->bounds.max.y, node->bounds.max.z)),        // Top-left
-        AABB(glm::vec3(center.x, node->bounds.min.y, center.z), node->bounds.max) // Top-right
-    };
-
     // Distribute chunks to children
     std::vector<std::vector<ChunkCullEntry>> child_chunks(4);
 
@@ -81,7 +71,16 @@ void RenderPipeline::HierarchicalCuller::BuildRecursive(CullingNode* node,
     node->is_leaf = false;
     for (int i = 0; i < 4; ++i) {
         if (!child_chunks[i].empty()) {
-            node->children[i] = std::make_unique<CullingNode>(child_bounds[i]);
+            // Center-based partitioning can assign a chunk that straddles the split.
+            // Its child must enclose the complete chunk, including the portion across
+            // that plane. Clipped partition-cell bounds can hide visible near geometry.
+            glm::vec3 child_min(std::numeric_limits<float>::max());
+            glm::vec3 child_max(std::numeric_limits<float>::lowest());
+            for (const auto& chunk : child_chunks[i]) {
+                child_min = glm::min(child_min, chunk.bounds.min);
+                child_max = glm::max(child_max, chunk.bounds.max);
+            }
+            node->children[i] = std::make_unique<CullingNode>(AABB(child_min, child_max));
             BuildRecursive(node->children[i].get(), child_chunks[i], depth + 1);
         }
     }

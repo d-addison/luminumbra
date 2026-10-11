@@ -151,20 +151,24 @@ TEST(AsyncReadbackRing, SlotRotationDeliversNewestResult) {
     const void* p = nullptr;
     std::size_t n = 0;
 
+    std::uint64_t tag = 0;
+
     // First readback -> 0xAA.
     ASSERT_TRUE(ring.begin());
     ring.copy_region(sa, 0, 0, kN);
-    ring.submit();
+    ring.submit(41);
     glFinish();
-    ASSERT_TRUE(ring.consume(&p, &n));
+    ASSERT_TRUE(ring.consume(&p, &n, &tag));
+    EXPECT_EQ(tag, 41u);
     EXPECT_EQ(static_cast<const std::uint8_t*>(p)[0], 0xAA);
 
     // Second readback into the NEXT slot -> 0xBB; consume returns the newer one.
     ASSERT_TRUE(ring.begin());
     ring.copy_region(sb, 0, 0, kN);
-    ring.submit();
+    ring.submit(73);
     glFinish();
-    ASSERT_TRUE(ring.consume(&p, &n));
+    ASSERT_TRUE(ring.consume(&p, &n, &tag));
+    EXPECT_EQ(tag, 73u);
     EXPECT_EQ(static_cast<const std::uint8_t*>(p)[0], 0xBB)
         << "consume must deliver the newest completed slot";
 

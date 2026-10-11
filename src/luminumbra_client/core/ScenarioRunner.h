@@ -103,6 +103,9 @@ public:
     virtual InGameDrive onGameStateInGame(float deltaTime) = 0;
     virtual void onPreRenderWorldSweep() = 0;
     virtual void onPreRenderCapturePins() = 0;
+    // Final foliage owner, after simulation and capture camera overrides. Returns
+    // true only when the QA scenario replaced the ordinary scatter update.
+    virtual bool onPreRenderFoliage() = 0;
     virtual void onPostRenderCapture(float deltaTime) = 0;
     virtual void onShutdown() = 0;
 };

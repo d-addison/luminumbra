@@ -2,10 +2,12 @@
 
 // Far-LOD region tile store (, the deterministic runtime contract sections 3/4).
 //
-// Far tiers extend the visible horizon past the live chunk ring with packed
-// per-region heightfield tiles:
-//   F1: 4 m samples, intended coverage 512-768 m
-//   F2: 8 m samples, intended coverage 768-1536 m
+// The legacy two-tier path extends the horizon with packed per-region
+// heightfield tiles (horizontal camera-to-nearest-region distance):
+//   F1: 4 m samples, selected inside 768 m, including beneath the live ring
+//   F2: 8 m samples, selected from 768 through 3000 m
+// FarTierTable.h declares the volumetric ladder that supersedes these ranges
+// when implemented; the F1/F2 store and its payload remain unchanged here.
 // Region = 32x32 chunks = 512 m, addressed like the persistence container
 // (rx = floor(chunk_x/32), rz = floor(chunk_z/32)). A tile spans its full
 // region INCLUDING a shared border row/column (samples_per_side =
@@ -16,8 +18,7 @@
 // surface material classification the coarse chunk mesher uses - a pure
 // function of (seed, params) with a deterministic fnv1a64 tile hash. They are
 // a regenerable cache keyed (seed, params_hash, tier, region). Authoritative
-// far data is stored as aligned, decimated full-SDF bricks; height-only edits
-// are retained solely as a named legacy migration path.
+// far data is stored as aligned, decimated full-SDF bricks.
 //
 // Persistence: tiles ride the LMR1 region container alongside chunk records
 // (<save_dir>/chunks/region/r.<rx>.<rz>.lmr) as lod_level 1/2 records; the
@@ -40,8 +41,8 @@ struct TerrainGenParams;
 namespace Luminumbra::World {
 
 enum class FarLodTier : u8 {
-    F1 = 1, // 4 m samples, 512-768 m
-    F2 = 2, // 8 m samples, 768-1536 m
+    F1 = 1, // Legacy heightfield: 4 m samples, inside 768 m
+    F2 = 2, // Legacy heightfield: 8 m samples, 768-3000 m; see FarTierTable.h
 };
 
 // Region edge length in meters (32 chunks x 16 m).
@@ -105,16 +106,6 @@ struct FarLodWorldSdfBrickDescriptor {
     u32 payload_crc32 = 0;
 };
 
-struct FarLodWorldLegacySurfaceSample {
-    i32 world_x = 0;
-    i32 world_z = 0;
-    u16 height_q = 0;
-    u8 material = 0;
-    // Retain migrated water authority while this sample is synthesized into an
-    // SDF-owned halo. A real SDF footprint is the only supersession path.
-    u8 flags = 0;
-};
-
 // An owned, transient world-coordinate SDF view passed from a far worker to
 // the mesher.  It is deliberately separate from FarLodTile: neighbours and
 // generated halo support are mesh inputs only and can never be persisted in
@@ -132,12 +123,6 @@ struct FarLodRegionSdfAssembly {
     std::vector<FarLodWorldSdfBrickDescriptor> bricks;
     std::vector<i16> density_q;
     std::vector<u8> material;
-    // Canonically sorted by (world_z, world_x). Before finalization these
-    // height-only migration samples are synthesized as d = world_y -
-    // saved_height into regenerable scratch bricks. The metadata retained here
-    // validates that promotion and carries only saved surface-water authority;
-    // it never enters the persisted 3D density stream.
-    std::vector<FarLodWorldLegacySurfaceSample> legacy_surface_samples;
 };
 
 // An owned full-lattice snapshot. Far workers consume this value instead of a
@@ -170,9 +155,6 @@ struct FarLodTile {
     // authoritative and never regenerated).
     u64 params_hash = 0;
     bool edited = false;
-    // Legacy height-only edited samples are retained only to migrate old
-    // records. New authority is always represented by a full SDF brick.
-    bool legacy_surface_authority = false;
     std::vector<u16> height_q;
     std::vector<u8> material;
     std::vector<u8> flags;
@@ -217,9 +199,7 @@ struct FarLodRegionMesh {
 // component shared with worldgen.
 u64 ComputeTerrainParamsHash(const Systems::TerrainGenParams& params, int seed);
 
-// Deterministic fnv1a64 over the legacy tile header and packed background
-// streams. Zero-brick tiles retain the pre-FSD2 hash exactly; tiles carrying
-// SDF bricks append the versioned authority metadata and payload streams.
+// Deterministic fnv1a64 over all current tile metadata and payload streams.
 u64 ComputeFarLodTileHash(const FarLodTile& tile);
 
 // Builds a pristine tile analytically (batch-friendly row-major loops over
@@ -234,12 +214,6 @@ FarLodTile BuildPristineFarLodTile(const Systems::SHIELD_WorldSystem& world_syst
                                    i32 rz,
                                    u64 params_hash);
 
-// Legacy migration helper: downsamples a chunk's 17x17 heightmap_data into
-// the covering tile samples. New authoritative far data must use
-// ReduceChunkSdfIntoFarTile instead. Returns the number of samples written;
-// 0 when the chunk lies outside the tile's region or carries no heightmap.
-std::size_t ApplyChunkHeightmapToFarLodTile(FarLodTile& tile, const Chunk& chunk, bool mark_edited);
-
 // Persists far-LOD tiles through the LMR1 container beside the chunk records.
 class FarLodStore {
 public:
@@ -252,6 +226,15 @@ public:
     // Record id for a tile inside its region file (the (lod_level, id) pair
     // keys the record; lod_level carries the tier).
     static u64 tile_record_id(FarLodTier tier, i32 rx, i32 rz);
+
+    // Strict current payload decoder shared with whole-world validation.
+    static bool decode_payload(const std::string& payload,
+                               FarLodTier tier,
+                               i32 rx,
+                               i32 rz,
+                               u8 record_flags,
+                               FarLodTile& out_tile,
+                               std::vector<std::string>* errors = nullptr);
 
     bool save_tile(const FarLodTile& tile, std::vector<std::string>* errors = nullptr) const;
 

@@ -443,6 +443,13 @@ std::string EnergyFieldState::SerializeRecord(std::uint64_t save_tick) {
     return out.str();
 }
 
+void EnergyFieldState::ResetEmptyAtTick(std::uint64_t tick) {
+    m_pages.clear();
+    m_pending.clear();
+    m_fires_completed = 0;
+    m_next_fire_tick = tick + (kEnergyCadenceTicks - tick % kEnergyCadenceTicks);
+}
+
 bool EnergyFieldState::DeserializeRecord(const std::string& record, std::uint64_t load_tick_base) {
     std::istringstream in(record);
     std::string magic;

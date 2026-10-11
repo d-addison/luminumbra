@@ -176,10 +176,6 @@
                                     <input type="range" class="worldgen-param settings-slider" data-path="terrain.height_offset" data-type="float" min="-50" max="100" step="1" value="5" />
                                     <span class="param-value">5</span>
                                 </div>
-                                <div class="settings-row-inline param-row">
-                                    <label>shaping</label>
-                                    <span class="toggle worldgen-param on" data-path="terrain.shaping.enabled" data-type="bool"><span class="toggle-knob"></span></span>
-                                </div>
                                 <div class="settings-row param-row">
                                     <label>peak height</label>
                                     <input type="range" class="worldgen-param settings-slider" data-path="terrain.shaping.peaks_amplitude" data-type="float" min="0" max="150" step="1" value="20" />

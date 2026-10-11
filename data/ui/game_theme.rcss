@@ -19,6 +19,17 @@ body {
     decorator: linear-gradient(180deg, rgba(11,9,6,90) 0%, rgba(11,9,6,40) 35%, rgba(11,9,6,120) 100%);
 }
 
+/* RmlUi needs explicit scrollbar dimensions; an auto-width vertical scrollbar
+   otherwise consumes the entire scroll container's content width. */
+scrollbarvertical { width: 12px; }
+scrollbarvertical slidertrack { background-color: rgba(22, 19, 14, 140); }
+scrollbarvertical sliderbar {
+    width: 12px;
+    min-height: 30px;
+    background-color: rgba(201, 168, 106, 110);
+}
+scrollbarvertical sliderbar:hover { background-color: #C9A86A; }
+
 /* Main menu: centre the hero + nav, raised toward the upper third. */
 body#main_menu {
     display: flex;
@@ -516,6 +527,13 @@ body#world_selection h1 {
     text-align: center;
 }
 
+/* Save lists remain usable with more than three worlds. */
+body#world_selection .list-container { max-height: 55vh; overflow-y: auto; }
+body#world_selection .cards-row { flex-direction: column; align-items: center; }
+body#world_selection .list-item { width: 80%; height: auto; margin: 6px 0; line-height: 140%; }
+body#world_selection .list-item.unavailable .list-item-description { color: #D8A39A; }
+body#world_selection .list-item-description { white-space: normal; }
+
 /* Thumbnail styling used while a capture is loading or unavailable. */
 .world-thumbnail {
     display: block;
@@ -589,17 +607,17 @@ button:disabled { color: #6E6656; border-color: #2A2620; }
    preset chips, single wide create.
    ============================================================================ */
 body#world_creation {
-    display: flex;
-    flex-direction: column;
-    justify-content: center;
-    align-items: center;
+    display: block;
 }
 
 .creation-panel {
     width: 64%;
     max-width: 1000px;
-    margin: 0 auto;
-    padding: 48px 72px 52px;
+    box-sizing: border-box;
+    height: 94vh;
+    overflow-y: auto;
+    margin: 3vh auto;
+    padding: 24px 36px;
     text-align: center;
     background-color: rgba(22, 19, 14, 140);
     backdrop-filter: blur(22px);
@@ -616,7 +634,8 @@ body#world_creation {
     margin: 4px 0 6px;
 }
 
-#world_creation.title-ornament { margin-bottom: 34px; }
+#world_creation .title-ornament { margin-bottom: 34px; }
+#world_creation .preview-hint { position: static; display: block; margin-top: 12px; }
 
 /*   — live world-preview diorama. The pane is a TRANSPARENT
    framed hole: the host blits the rendered candidate world into this rect under
@@ -700,16 +719,16 @@ body#world_creation {
     letter-spacing: 3px;
 }
 
-#world_creation.form-container {
+#world_creation .form-container {
     width: 100%;
     text-align: left;
 }
 
-#world_creation.form-group {
+#world_creation .form-group {
     margin-bottom: 28px;
 }
 
-#world_creation.form-group label {
+#world_creation .form-group label {
     display: block;
     color: #C3B9A2;
     font-size: 13px;
@@ -718,7 +737,7 @@ body#world_creation {
 }
 
 /* Underline-style inputs. */
-#world_creation.form-control {
+#world_creation .form-control {
     background-color: transparent;
     border-width: 0;
     border-bottom-width: 1px;
@@ -727,7 +746,7 @@ body#world_creation {
     font-size: 18px;
     padding: 0;
 }
-#world_creation.form-control:focus {
+#world_creation .form-control:focus {
     border-bottom-color: #C9A86A;
 }
 

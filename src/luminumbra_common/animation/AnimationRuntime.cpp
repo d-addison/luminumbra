@@ -1,7 +1,15 @@
 #include "AnimationRuntime.h"
 
+#include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <cstring>
+#include <utility>
+#include <vector>
+
+#include "SkinnedMeshFormat.h"
+
+#include "../core/DeterministicMath.h"
 
 // Determinism note ( gate): this translation unit is compiled with
 // -ffp-contract=off (see sources.cmake) so the compiler cannot fuse
@@ -42,6 +50,49 @@ void NlerpQuat(const float a[4], const float b[4], float u, float out[4]) {
         out[2] = 0.0f;
         out[3] = 1.0f;
     }
+}
+
+void NormalizeQuat(float value[4]) {
+    const float norm =
+        value[0] * value[0] + value[1] * value[1] + value[2] * value[2] + value[3] * value[3];
+    if (std::isfinite(norm) && norm > 0) {
+        const float scale = 1.0f / std::sqrt(norm);
+        for (size_t i = 0; i < 4; ++i)
+            value[i] *= scale;
+    } else {
+        value[0] = value[1] = value[2] = 0;
+        value[3] = 1;
+    }
+}
+
+void SlerpQuat(const float a[4], const float b[4], float u, float out[4]) {
+    float qa[4], qb[4];
+    std::copy_n(a, 4, qa);
+    std::copy_n(b, 4, qb);
+    NormalizeQuat(qa);
+    NormalizeQuat(qb);
+    float dot = 0;
+    for (size_t c = 0; c < 4; ++c)
+        dot += qa[c] * qb[c];
+    if (dot < 0) {
+        for (float& value : qb)
+            value = -value;
+        dot = -dot;
+    }
+    dot = std::min(dot, 1.0f);
+    if (dot > 0.9995f) {
+        NlerpQuat(qa, qb, u, out);
+        return;
+    }
+    // Use the engine's deterministic approximations, never platform libm trig.
+    namespace math = Luminumbra::DeterministicMath;
+    const float theta = math::Atan2(std::sqrt(1 - dot * dot), dot);
+    const float denominator = math::Sin(theta);
+    const float left = math::Sin((1 - u) * theta) / denominator;
+    const float right = math::Sin(u * theta) / denominator;
+    for (size_t c = 0; c < 4; ++c)
+        out[c] = left * qa[c] + right * qb[c];
+    NormalizeQuat(out);
 }
 
 // Column-major 4x4 = translation * rotation * scale.
@@ -98,24 +149,27 @@ void MatrixMultiply(const float a[16], const float b[16], float out[16]) {
 void SampleTrack(const ClipTrack& track, float time, float* out) {
     const size_t keyCount = track.times.size();
     const uint32_t comps = track.componentCount;
-    if (keyCount == 0)
+    const bool cubic = track.interpolation == AnimInterpolation::CubicSpline;
+    const size_t stride = size_t(comps) * (cubic ? 3u : 1u);
+    const size_t offset = cubic ? comps : 0;
+    if (keyCount == 0 || comps != (track.targetType == AnimTargetType::Rotation ? 4u : 3u) ||
+        track.values.size() != uint64_t(keyCount) * stride)
         return;
 
     if (time <= track.times.front() || keyCount == 1) {
         for (uint32_t c = 0; c < comps; ++c)
-            out[c] = track.values[c];
+            out[c] = track.values[offset + c];
         return;
     }
     if (time >= track.times.back()) {
-        const size_t base = (keyCount - 1) * comps;
+        const size_t base = (keyCount - 1) * stride + offset;
         for (uint32_t c = 0; c < comps; ++c)
             out[c] = track.values[base + c];
         return;
     }
 
-    size_t next = 1;
-    while (next < keyCount - 1 && track.times[next] <= time)
-        ++next;
+    const size_t next = static_cast<size_t>(
+        std::upper_bound(track.times.begin(), track.times.end(), time) - track.times.begin());
     const size_t prev = next - 1;
 
     const float t0 = track.times[prev];
@@ -123,10 +177,26 @@ void SampleTrack(const ClipTrack& track, float time, float* out) {
     const float span = t1 - t0;
     const float u = (span > 0.0f) ? ((time - t0) / span) : 0.0f;
 
-    const float* a = &track.values[prev * comps];
-    const float* b = &track.values[next * comps];
-    if (track.targetType == AnimTargetType::Rotation) {
-        NlerpQuat(a, b, u, out);
+    const float* a = &track.values[prev * stride + offset];
+    const float* b = &track.values[next * stride + offset];
+    if (track.interpolation == AnimInterpolation::Step) {
+        std::copy_n(a, comps, out);
+    } else if (cubic) {
+        const float u2 = u * u, u3 = u2 * u;
+        const float h00 = 2 * u3 - 3 * u2 + 1;
+        const float h10 = u3 - 2 * u2 + u;
+        const float h01 = -2 * u3 + 3 * u2;
+        const float h11 = u3 - u2;
+        for (size_t c = 0; c < comps; ++c)
+            out[c] = h00 * a[c] + h10 * span * a[comps + c] + h01 * b[c] +
+                     h11 * span * track.values[next * stride + c];
+        if (track.targetType == AnimTargetType::Rotation)
+            NormalizeQuat(out);
+    } else if (track.targetType == AnimTargetType::Rotation) {
+        if (track.interpolation == AnimInterpolation::Linear)
+            SlerpQuat(a, b, u, out);
+        else
+            NlerpQuat(a, b, u, out);
     } else {
         LerpVec3(a, b, u, out);
     }
@@ -168,6 +238,7 @@ AnimationClip BuildClip(const AnimClipAsset& asset) {
         track.jointNameHash = src.header.jointNameHash;
         track.targetType = static_cast<AnimTargetType>(src.header.targetType);
         track.componentCount = src.header.componentCount;
+        track.interpolation = src.interpolation;
         track.times = src.times;
         track.values = src.values;
         clip.tracks.push_back(std::move(track));
@@ -187,7 +258,7 @@ Pose MakeBindPose(const Skeleton& skeleton) {
 Pose SamplePose(const Skeleton& skeleton, const AnimationClip& clip, float time) {
     Pose pose = MakeBindPose(skeleton);
 
-    float clamped = time;
+    float clamped = std::isnan(time) ? 0.0f : time;
     if (clamped < 0.0f)
         clamped = 0.0f;
     if (clamped > clip.duration)

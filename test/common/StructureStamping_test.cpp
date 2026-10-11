@@ -40,8 +40,8 @@ using namespace Luminumbra;
 
 constexpr int kSeed = 4242;
 
-// A FIXED terrain so the gate is independent of any shipped preset. Shaping /
-// caves / islands / biomes / hydro all OFF, a small flat-ish surface lifted well
+// A FIXED terrain so the gate is independent of any shipped preset.
+// Caves / islands / biomes / hydro are off, with small relief lifted well
 // above SEA_LEVEL so every cairn site stamps (height = 40 + small noise term).
 Systems::TerrainGenParams FixedParams() {
     Systems::TerrainGenParams p; // start from the documented defaults
@@ -51,7 +51,6 @@ Systems::TerrainGenParams FixedParams() {
     p.caves_enabled = false;
     p.surface_breaks_enabled = false;
     p.island_mask_enabled = false;
-    p.shaping_enabled = false;
     p.biomes_enabled = false;
     p.hydro_enabled = false;
     p.structures_enabled = true;

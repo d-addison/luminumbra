@@ -205,9 +205,13 @@ std::optional<DebugCamPose> FindEnclosedCave(const Systems::SHIELD_WorldSystem& 
     // -best_dir to the cavity mouth, then nudge up off the floor to eye height.
     const float back = std::min(best_cavity * 0.5f, 6.0f);
     glm::vec3 cam = best_air - best_dir * back + glm::vec3(0.0f, 1.6f, 0.0f);
-    // Guard: if that nudge pushed the camera into solid, fall back to the air sample.
-    if (IsSolid(world, cam))
-        cam = best_air + glm::vec3(0.0f, 1.0f, 0.0f);
+    // Stay in sampled air. Raising the fallback by another metre could put it
+    // in the roof too, so captures showed solid rock from the inside.
+    if (IsSolid(world, cam)) {
+        cam = best_air + best_dir * 2.0f; // this step was checked by AirRunLength
+        if (IsSolid(world, cam))
+            cam = best_air;
+    }
 
     const glm::vec3 look_target = best_air + best_dir * std::min(best_cavity, 12.0f);
 

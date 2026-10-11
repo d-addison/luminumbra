@@ -1,0 +1,259 @@
+{
+  "schema": "luminumbra.prefab_runtime.qualification.v1",
+  "executed_source_commit": "d15e62ea669a6bb7ec148da3410ef261fefe5c50",
+  "executed_source_tree": "f20f3d4caa1a04c45962f334586cd43b85418630",
+  "integrated_base_commit": "945ecd295835a838eed0169ff709e7aabc134fa1",
+  "execution_date": "2026-09-13",
+  "source_identity_policy": "This record describes the exact executed integration source. Later documentation and composition commits do not relabel execution. The September 9 record is retained unchanged.",
+  "engine_rendered": false,
+  "visual_approval": "not_applicable_headless_consumer",
+  "gpu_performance_qualified": false,
+  "source_inputs": [
+    {
+      "path": "include/luminumbra/core/Types.h",
+      "sha256": "287611cc7f551b10041df6c2a9285ce18cd3c052666f750d77b8893773520a1f"
+    },
+    {
+      "path": "src/luminumbra_common/authoring/PrefabAsset.cpp",
+      "sha256": "bcd64211da0bcf6f38bad3216bacc39e9a167b4ccbde911d511af2bfe0885959"
+    },
+    {
+      "path": "src/luminumbra_common/authoring/PrefabDigest.cpp",
+      "sha256": "efc588db1402d2140c8f25b5425c33a1c428c2c8e8397b0dcce58c35cb7d9bb7"
+    },
+    {
+      "path": "src/luminumbra_common/authoring/PrefabDigest.h",
+      "sha256": "3dde2bcf416bb50526c1aeee6b394530c520b90c560b2e78e5246b9e84f7fe9c"
+    },
+    {
+      "path": "src/luminumbra_common/authoring/PrefabRuntime.h",
+      "sha256": "4c5a3b6dde22be90021e04389df96046079b84eb206da776dde200c8e66af2a1"
+    },
+    {
+      "path": "src/luminumbra_common/authoring/PrefabScene.cpp",
+      "sha256": "ba1a39b1d2a5746ce1c80317a8dfc4cf2aab2f2bbea5ac2e5491ecd4451ce5e7"
+    },
+    {
+      "path": "src/luminumbra_common/authoring/PrefabValidation.h",
+      "sha256": "ed8a160a8da65041851be3ff3a5b588ab5e44d47d641efa5c876adf5e3730bf5"
+    },
+    {
+      "path": "src/luminumbra_common/components/CoreComponents.h",
+      "sha256": "43b5280f78473c293278ac11ba01358a2aabaaeaee3622b34de17018473f1eac"
+    },
+    {
+      "path": "src/luminumbra_common/core/FilesystemPath.cpp",
+      "sha256": "9888353fdd5be448e753576d6a4438f9bd8323fef739a4aed49b85593111676e"
+    },
+    {
+      "path": "src/luminumbra_common/core/FilesystemPath.h",
+      "sha256": "0b9484e95488b2eb71cc8ae74e85c0fd161a38b7536f81d31817c4cc71df0900"
+    },
+    {
+      "path": "test/authoring/installed_prefab_runtime.py",
+      "sha256": "2dcd762251ac8a33c61f82606fe05023fb9dda8364d100b0e50d4a6218f83bbf"
+    },
+    {
+      "path": "test/authoring/prefab_runtime_test.cpp",
+      "sha256": "18535a295254a607651d02fc3d3f5d1dc2a0db0a3ffc719c3ee65c050a670cdf"
+    },
+    {
+      "path": "tools/blender/authoring/service/tests/prefab_fixture.py",
+      "sha256": "933e44e69f4a127108df1c9b82c56bc8eaf55440ef4caddde76bd9b4937736b4"
+    },
+    {
+      "path": "tools/prefab_runtime/CMakeLists.txt",
+      "sha256": "2ddbb856c624618e33e6aed372c0f24af53ca82657f54b0032a9013d32f176e4"
+    },
+    {
+      "path": "tools/prefab_runtime/main.cpp",
+      "sha256": "72af4cf33d2eb5f3a2e39d577a14f6c519461c12e14568555f976797eae89c6b"
+    }
+  ],
+  "linux": {
+    "profile": "GCC 13.3.0 Release; actual top-level optional targets and freshly installed service, compiler and consumer; maximum two build workers.",
+    "receipt_sha256": "94466f8f411926ea9d51c485cc096d2a5a1baeb37b214bfc46d84827130b78af",
+    "cpp_cases": [
+      "PrefabDigest.MatchesIndependentSha256Vectors",
+      "PrefabRuntimeTest.DestructionRemovesOnlyOwnedEntities",
+      "PrefabRuntimeTest.EqualCountReplacementRefreshesTransformsAndStableIdentities",
+      "PrefabRuntimeTest.FailedReloadAndInvalidPlacementRetainPreviousInstance",
+      "PrefabRuntimeTest.Full4096NodeChainIsIterativeAndBounded",
+      "PrefabRuntimeTest.InstantiatesRealHierarchyShearNormalsMirroringAndWorldBounds",
+      "PrefabRuntimeTest.LoadsOwnedSharedGeometryAndExactMaterialBindings",
+      "PrefabRuntimeTest.RefusesBadIndexAndNonfiniteMeshEvenWithMatchingHashes",
+      "PrefabRuntimeTest.RefusesCyclesMissingParentsAndDuplicateIds",
+      "PrefabRuntimeTest.RefusesDuplicateJsonKeysEvenWithMatchingPin",
+      "PrefabRuntimeTest.RefusesIncompleteTextureMipsAndManifestMetricDrift",
+      "PrefabRuntimeTest.RefusesInvalidSamplerAndMixedUvTransforms",
+      "PrefabRuntimeTest.RefusesMissingAndUnlistedGenerationMembers",
+      "PrefabRuntimeTest.RefusesMissingMeshMaterialAndTextureReferences",
+      "PrefabRuntimeTest.RefusesSingularLocalShearAndIncorrectWinding",
+      "PrefabRuntimeTest.RefusesSymlinkedMembersAndGenerationAncestors",
+      "PrefabRuntimeTest.RefusesTraversalAndLinksInReferencedMembers",
+      "PrefabRuntimeTest.RefusesUnknownSchemaComponentsAndMaterialFields",
+      "PrefabRuntimeTest.RefusesUnpinnedOrArbitraryGenerationPaths",
+      "PrefabRuntimeTest.RegistryConstructionFailureRollsBackOnlyCandidateEntities"
+    ],
+    "installed_checks": [
+      "command 0 succeeds",
+      "command 1 succeeds",
+      "actual registry preserves node IDs and hierarchy",
+      "parent and caller transforms compose once",
+      "mirrored instance retains winding and normal transform",
+      "instances share two compiled primitive bindings",
+      "all exact authored material and texture bindings survive",
+      "headless inspection refuses to claim renderer qualification",
+      "command 2 succeeds",
+      "command 3 succeeds",
+      "new generation preserves identities with edited placement",
+      "command 4 succeeds",
+      "explicit original generation ignores changed current pointer",
+      "command 5 refuses",
+      "corrupt compiled generation refuses with no partial instance report",
+      "command 6 succeeds",
+      "old generation still loads after another generation is corrupted",
+      "consumer and service binaries remain unchanged",
+      "compiler dependencies remain pinned"
+    ],
+    "failed": 0,
+    "skipped": 0,
+    "ctest_report_sha256": "ad23b0f66f27b8ff4c85b756f97d7a0e703d259d5e36de8cc867fdd2a678f72d",
+    "consumer_sha256": "e392f0d0b73ecbabaf7f5c9e844ee125cfe90276d9fd649555bc6888ed72b51a",
+    "processor_sha256": "2b27371f145b6a60e54e94d1b590b39f5d5252d41bfd6b7a4e0dbb905fa063eb",
+    "service_sha256": "7087dde7bb5def61fd16eb993179f655963f50f19948deb3f4a5756e6576608f"
+  },
+  "windows": {
+    "profile": "UCRT64 Release; isolated optional targets rebuilt and installed; newly packaged current service; maximum two build workers.",
+    "compiler_policy": "Compiler and runtime libraries reused from the preserved qualified toolchain after verifying all recorded compiler source digests and Git blobs against the executed integration source.",
+    "compiler_source_parity": [
+      {
+        "path": "tools/asset_processor.cpp",
+        "git_blob": "adba47ad8d4bdd84cc11b7cfa59a939e0b38d984",
+        "sha256": "ef05c9f5fd06ee10267ff6235257d04ad39319c39d9030eff2a1b53d8019b229"
+      },
+      {
+        "path": "src/luminumbra_common/animation/SkinnedMeshFormat.h",
+        "git_blob": "ecc23868bb01adf4c627e355562172a1508aadc5",
+        "sha256": "dd3a5a14b27eb42b1fda5098ad707cc33370169390e41e8e5f3847c3f1fbffd4"
+      },
+      {
+        "path": "vendor/cgltf/cgltf.h",
+        "git_blob": "224958d8b902a2c36d8cee53edc924965862ea21",
+        "sha256": "fc7156608eba709ec3e529162cf4e2043c66d195efe6dd8da8817ac69c554b8a"
+      },
+      {
+        "path": "cmake/stb_resize.cmake",
+        "git_blob": "cd5ac84f77f974b6c1b86cc22053b5840a9dd3a5",
+        "sha256": "d7f778e1296b862abef88e09a7faea9428e61d4a1fafb06de5a9be19336d3613"
+      }
+    ],
+    "completion_sha256": "59422b42c4fe7ad4c6f1fa76a97754622369f8c41f9778df7fe2a5e2a62f4e1d",
+    "job_sha256": "9a9f60339c4c7e575bbf78754b16d83ee79539c9394d1f8dc0b39b422f9e0019",
+    "runner_sha256": "cfffe944966dfe8c2d3e81924d1e171865b8502f2f5041b764a40d3673b22d45",
+    "payload_files_verified": 555,
+    "payload_unchanged": true,
+    "tools_unchanged": true,
+    "cpp_cases": [
+      "PrefabDigest.MatchesIndependentSha256Vectors",
+      "PrefabRuntimeTest.LoadsOwnedSharedGeometryAndExactMaterialBindings",
+      "PrefabRuntimeTest.InstantiatesRealHierarchyShearNormalsMirroringAndWorldBounds",
+      "PrefabRuntimeTest.EqualCountReplacementRefreshesTransformsAndStableIdentities",
+      "PrefabRuntimeTest.FailedReloadAndInvalidPlacementRetainPreviousInstance",
+      "PrefabRuntimeTest.RegistryConstructionFailureRollsBackOnlyCandidateEntities",
+      "PrefabRuntimeTest.DestructionRemovesOnlyOwnedEntities",
+      "PrefabRuntimeTest.RefusesUnpinnedOrArbitraryGenerationPaths",
+      "PrefabRuntimeTest.RefusesMissingAndUnlistedGenerationMembers",
+      "PrefabRuntimeTest.RefusesTraversalAndLinksInReferencedMembers",
+      "PrefabRuntimeTest.RefusesUnknownSchemaComponentsAndMaterialFields",
+      "PrefabRuntimeTest.RefusesMissingMeshMaterialAndTextureReferences",
+      "PrefabRuntimeTest.RefusesCyclesMissingParentsAndDuplicateIds",
+      "PrefabRuntimeTest.RefusesSingularLocalShearAndIncorrectWinding",
+      "PrefabRuntimeTest.RefusesBadIndexAndNonfiniteMeshEvenWithMatchingHashes",
+      "PrefabRuntimeTest.RefusesIncompleteTextureMipsAndManifestMetricDrift",
+      "PrefabRuntimeTest.RefusesInvalidSamplerAndMixedUvTransforms",
+      "PrefabRuntimeTest.RefusesDuplicateJsonKeysEvenWithMatchingPin",
+      "PrefabRuntimeTest.Full4096NodeChainIsIterativeAndBounded"
+    ],
+    "installed_checks": [
+      "command 0 succeeds",
+      "command 1 succeeds",
+      "actual registry preserves node IDs and hierarchy",
+      "parent and caller transforms compose once",
+      "mirrored instance retains winding and normal transform",
+      "instances share two compiled primitive bindings",
+      "all exact authored material and texture bindings survive",
+      "headless inspection refuses to claim renderer qualification",
+      "command 2 succeeds",
+      "actual NTFS directory junction exists",
+      "command 3 refuses",
+      "installed Windows consumer refuses actual generation junction",
+      "command 4 succeeds",
+      "command 5 succeeds",
+      "new generation preserves identities with edited placement",
+      "command 6 succeeds",
+      "explicit original generation ignores changed current pointer",
+      "command 7 refuses",
+      "corrupt compiled generation refuses with no partial instance report",
+      "command 8 succeeds",
+      "old generation still loads after another generation is corrupted",
+      "consumer and service binaries remain unchanged",
+      "compiler dependencies remain pinned"
+    ],
+    "failed": 0,
+    "skipped": 0,
+    "xml_sha256": "42f84d0df12bee0787bc00aec5ca00e73898bcef3360b14120473f9350b22dcd",
+    "installed_acceptance": {
+      "checks": 23,
+      "receipt_sha256": "ea3aa8f15100534653d6d461b13a426d7969110d564a560887072cf31a415367",
+      "first_instance_sha256": "a51f87fa1f660685b56594c4e67454ff252a1b1cb1184bf6f20c3b3845d6011c",
+      "first_manifest_sha256": "b7f569830b25987a62d26faa5cf252397086655377f828b56bd22eb7444bfb15"
+    },
+    "binaries": {
+      "build/bin/prefab_runtime_test.exe": {
+        "bytes": 1807679,
+        "sha256": "712bb5c104419cf406beb066b38d66c221e6a43e0c9356836e391b5bb8639f8f"
+      },
+      "build/bin/luminumbra_prefab_inspect.exe": {
+        "bytes": 1004036,
+        "sha256": "fb56f02a5f252d55c9db10b106f0dff7672bad7dbf8690d6ebd1e9f697824d56"
+      },
+      "install/bin/luminumbra_prefab_inspect.exe": {
+        "bytes": 1004036,
+        "sha256": "fb56f02a5f252d55c9db10b106f0dff7672bad7dbf8690d6ebd1e9f697824d56"
+      }
+    },
+    "tools": [
+      {
+        "name": "cmake.exe",
+        "bytes": 13028804,
+        "sha256": "b87a05b13b8ec5f00084d498c70ef44f1a84ba353719fbb5d784c52246553096"
+      },
+      {
+        "name": "ninja.exe",
+        "bytes": 418922,
+        "sha256": "eff807f651044be4cac09fe28c9b25c3d116cf0a96ca3f0f08cae1ab9866691f"
+      },
+      {
+        "name": "g++.exe",
+        "bytes": 3098147,
+        "sha256": "29374f0c8a7544f13e25ac3c7d30797d737f316931aa9de1012a7918945f1580"
+      },
+      {
+        "name": "python.exe",
+        "bytes": 101477,
+        "sha256": "6571a0ca4a65dbfc3dbae701791eba204898b0a5af13723b770dd8b861290e22"
+      },
+      {
+        "name": "cmd.exe",
+        "bytes": 344064,
+        "sha256": "97ac98b1a92c286054cce55239cfccdfc23a5517bd07fe693072c9ca96c7dabb"
+      },
+      {
+        "name": "taskkill.exe",
+        "bytes": 118784,
+        "sha256": "1249717315fc8f4d2df17d5db9da0444795fdb9fb83dfb1f763c3f39282244f7"
+      }
+    ]
+  }
+}

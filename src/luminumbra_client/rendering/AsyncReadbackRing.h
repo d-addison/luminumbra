@@ -69,8 +69,9 @@ public:
                      std::size_t num_bytes);
 
     // Fence the current slot's copies and advance the cursor. Returns immediately
-    // -- never waits on the GPU.
-    void submit();
+    // -- never waits on the GPU. The optional opaque tag is returned with the
+    // exact completed payload; it is not the ring's internal sequence number.
+    void submit(std::uint64_t user_tag = 0);
 
     // Non-blocking, NON-DESTRUCTIVE readiness check: polls every
     // in-flight fence with a ZERO timeout and returns true iff a result newer than
@@ -83,8 +84,9 @@ public:
     // *out_ptr / *out_bytes to its mapped payload and returns true. Otherwise
     // returns false ("no new completed result yet") -- an ordinary, non-blocking
     // state. The pointer stays valid until that slot is reused (`num_slots`
-    // submits later); copy what you need out promptly.
-    bool consume(const void** out_ptr, std::size_t* out_bytes);
+    // submits later); copy what you need out promptly. When supplied, out_tag
+    // receives the opaque tag submitted with that exact payload.
+    bool consume(const void** out_ptr, std::size_t* out_bytes, std::uint64_t* out_tag = nullptr);
 
     int depth() const {
         return m_num_slots;
@@ -100,6 +102,7 @@ private:
         void* fence = nullptr;         // GLsync; non-null while in flight
         std::size_t payload_bytes = 0; // bytes written by the last submit
         std::uint64_t seq = 0;         // submit sequence number
+        std::uint64_t user_tag = 0;    // caller identity retained with this exact payload
         bool completed = false;        // fence signalled; holds a result
     };
 

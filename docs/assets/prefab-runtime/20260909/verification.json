@@ -1,0 +1,248 @@
+{
+  "schema": "luminumbra.prefab_runtime.qualification.v1",
+  "executed_source_commit": "6d34b27a9effafda1df144128dac6211fe3918b7",
+  "executed_source_tree": "c2d797983d3b1475bd333180fc5f00b265677188",
+  "execution_date": "2026-09-09",
+  "source_identity_policy": "These results describe the exact executed source above. Later documentation and composition commits do not relabel those executions.",
+  "source_inputs": [
+    {
+      "path": "src/luminumbra_common/authoring/PrefabAsset.cpp",
+      "sha256": "bcd64211da0bcf6f38bad3216bacc39e9a167b4ccbde911d511af2bfe0885959"
+    },
+    {
+      "path": "src/luminumbra_common/authoring/PrefabDigest.cpp",
+      "sha256": "efc588db1402d2140c8f25b5425c33a1c428c2c8e8397b0dcce58c35cb7d9bb7"
+    },
+    {
+      "path": "src/luminumbra_common/authoring/PrefabDigest.h",
+      "sha256": "3dde2bcf416bb50526c1aeee6b394530c520b90c560b2e78e5246b9e84f7fe9c"
+    },
+    {
+      "path": "src/luminumbra_common/authoring/PrefabRuntime.h",
+      "sha256": "4c5a3b6dde22be90021e04389df96046079b84eb206da776dde200c8e66af2a1"
+    },
+    {
+      "path": "src/luminumbra_common/authoring/PrefabScene.cpp",
+      "sha256": "ba1a39b1d2a5746ce1c80317a8dfc4cf2aab2f2bbea5ac2e5491ecd4451ce5e7"
+    },
+    {
+      "path": "src/luminumbra_common/authoring/PrefabValidation.h",
+      "sha256": "ed8a160a8da65041851be3ff3a5b588ab5e44d47d641efa5c876adf5e3730bf5"
+    },
+    {
+      "path": "test/authoring/installed_prefab_runtime.py",
+      "sha256": "2dcd762251ac8a33c61f82606fe05023fb9dda8364d100b0e50d4a6218f83bbf"
+    },
+    {
+      "path": "test/authoring/prefab_runtime_test.cpp",
+      "sha256": "18535a295254a607651d02fc3d3f5d1dc2a0db0a3ffc719c3ee65c050a670cdf"
+    },
+    {
+      "path": "tools/CMakeLists.txt",
+      "sha256": "03ad92e907c913f817e2055f5354d3500c966f1d67f7f3a4ff172aef404cc8d9"
+    },
+    {
+      "path": "tools/blender/authoring/service/PREFABS.md",
+      "sha256": "35bd17f0d3acb694e760c852e78a33c4b3d49264f9e69d90be643996b54959c2"
+    },
+    {
+      "path": "tools/blender/authoring/service/README.md",
+      "sha256": "6433ba52f3005c32e61cf298a8eba4d53136cc8777b2abd6364ef9e04be12775"
+    },
+    {
+      "path": "tools/prefab_runtime/CMakeLists.txt",
+      "sha256": "2ddbb856c624618e33e6aed372c0f24af53ca82657f54b0032a9013d32f176e4"
+    },
+    {
+      "path": "tools/prefab_runtime/README.md",
+      "sha256": "79f8ab878bfd83d0ab8987328e8fa7006de1eac4effc337040858526a8393d82"
+    },
+    {
+      "path": "tools/prefab_runtime/main.cpp",
+      "sha256": "72af4cf33d2eb5f3a2e39d577a14f6c519461c12e14568555f976797eae89c6b"
+    }
+  ],
+  "linux": {
+    "release": {
+      "cases": 20,
+      "failed": 0,
+      "skipped": 0,
+      "xml_sha256": "69c1dcb6080a48c70740f04e51bbda4b305bfb3710be729a3df605f98431dbd6",
+      "case_names": [
+        "PrefabDigest.MatchesIndependentSha256Vectors.PrefabDigest.MatchesIndependentSha256Vectors",
+        "PrefabRuntimeTest.LoadsOwnedSharedGeometryAndExactMaterialBindings.PrefabRuntimeTest.LoadsOwnedSharedGeometryAndExactMaterialBindings",
+        "PrefabRuntimeTest.InstantiatesRealHierarchyShearNormalsMirroringAndWorldBounds.PrefabRuntimeTest.InstantiatesRealHierarchyShearNormalsMirroringAndWorldBounds",
+        "PrefabRuntimeTest.EqualCountReplacementRefreshesTransformsAndStableIdentities.PrefabRuntimeTest.EqualCountReplacementRefreshesTransformsAndStableIdentities",
+        "PrefabRuntimeTest.FailedReloadAndInvalidPlacementRetainPreviousInstance.PrefabRuntimeTest.FailedReloadAndInvalidPlacementRetainPreviousInstance",
+        "PrefabRuntimeTest.RegistryConstructionFailureRollsBackOnlyCandidateEntities.PrefabRuntimeTest.RegistryConstructionFailureRollsBackOnlyCandidateEntities",
+        "PrefabRuntimeTest.DestructionRemovesOnlyOwnedEntities.PrefabRuntimeTest.DestructionRemovesOnlyOwnedEntities",
+        "PrefabRuntimeTest.RefusesUnpinnedOrArbitraryGenerationPaths.PrefabRuntimeTest.RefusesUnpinnedOrArbitraryGenerationPaths",
+        "PrefabRuntimeTest.RefusesMissingAndUnlistedGenerationMembers.PrefabRuntimeTest.RefusesMissingAndUnlistedGenerationMembers",
+        "PrefabRuntimeTest.RefusesTraversalAndLinksInReferencedMembers.PrefabRuntimeTest.RefusesTraversalAndLinksInReferencedMembers",
+        "PrefabRuntimeTest.RefusesSymlinkedMembersAndGenerationAncestors.PrefabRuntimeTest.RefusesSymlinkedMembersAndGenerationAncestors",
+        "PrefabRuntimeTest.RefusesUnknownSchemaComponentsAndMaterialFields.PrefabRuntimeTest.RefusesUnknownSchemaComponentsAndMaterialFields",
+        "PrefabRuntimeTest.RefusesMissingMeshMaterialAndTextureReferences.PrefabRuntimeTest.RefusesMissingMeshMaterialAndTextureReferences",
+        "PrefabRuntimeTest.RefusesCyclesMissingParentsAndDuplicateIds.PrefabRuntimeTest.RefusesCyclesMissingParentsAndDuplicateIds",
+        "PrefabRuntimeTest.RefusesSingularLocalShearAndIncorrectWinding.PrefabRuntimeTest.RefusesSingularLocalShearAndIncorrectWinding",
+        "PrefabRuntimeTest.RefusesBadIndexAndNonfiniteMeshEvenWithMatchingHashes.PrefabRuntimeTest.RefusesBadIndexAndNonfiniteMeshEvenWithMatchingHashes",
+        "PrefabRuntimeTest.RefusesIncompleteTextureMipsAndManifestMetricDrift.PrefabRuntimeTest.RefusesIncompleteTextureMipsAndManifestMetricDrift",
+        "PrefabRuntimeTest.RefusesInvalidSamplerAndMixedUvTransforms.PrefabRuntimeTest.RefusesInvalidSamplerAndMixedUvTransforms",
+        "PrefabRuntimeTest.RefusesDuplicateJsonKeysEvenWithMatchingPin.PrefabRuntimeTest.RefusesDuplicateJsonKeysEvenWithMatchingPin",
+        "PrefabRuntimeTest.Full4096NodeChainIsIterativeAndBounded.PrefabRuntimeTest.Full4096NodeChainIsIterativeAndBounded"
+      ]
+    },
+    "sanitizer": {
+      "cases": 20,
+      "failed": 0,
+      "skipped": 0,
+      "xml_sha256": "28ad888b0b14f46726ba2a8dec1bf47b1e5e2f81ed884b873b67b2bedddab32d",
+      "case_names": [
+        "PrefabDigest.MatchesIndependentSha256Vectors.PrefabDigest.MatchesIndependentSha256Vectors",
+        "PrefabRuntimeTest.LoadsOwnedSharedGeometryAndExactMaterialBindings.PrefabRuntimeTest.LoadsOwnedSharedGeometryAndExactMaterialBindings",
+        "PrefabRuntimeTest.InstantiatesRealHierarchyShearNormalsMirroringAndWorldBounds.PrefabRuntimeTest.InstantiatesRealHierarchyShearNormalsMirroringAndWorldBounds",
+        "PrefabRuntimeTest.EqualCountReplacementRefreshesTransformsAndStableIdentities.PrefabRuntimeTest.EqualCountReplacementRefreshesTransformsAndStableIdentities",
+        "PrefabRuntimeTest.FailedReloadAndInvalidPlacementRetainPreviousInstance.PrefabRuntimeTest.FailedReloadAndInvalidPlacementRetainPreviousInstance",
+        "PrefabRuntimeTest.RegistryConstructionFailureRollsBackOnlyCandidateEntities.PrefabRuntimeTest.RegistryConstructionFailureRollsBackOnlyCandidateEntities",
+        "PrefabRuntimeTest.DestructionRemovesOnlyOwnedEntities.PrefabRuntimeTest.DestructionRemovesOnlyOwnedEntities",
+        "PrefabRuntimeTest.RefusesUnpinnedOrArbitraryGenerationPaths.PrefabRuntimeTest.RefusesUnpinnedOrArbitraryGenerationPaths",
+        "PrefabRuntimeTest.RefusesMissingAndUnlistedGenerationMembers.PrefabRuntimeTest.RefusesMissingAndUnlistedGenerationMembers",
+        "PrefabRuntimeTest.RefusesTraversalAndLinksInReferencedMembers.PrefabRuntimeTest.RefusesTraversalAndLinksInReferencedMembers",
+        "PrefabRuntimeTest.RefusesSymlinkedMembersAndGenerationAncestors.PrefabRuntimeTest.RefusesSymlinkedMembersAndGenerationAncestors",
+        "PrefabRuntimeTest.RefusesUnknownSchemaComponentsAndMaterialFields.PrefabRuntimeTest.RefusesUnknownSchemaComponentsAndMaterialFields",
+        "PrefabRuntimeTest.RefusesMissingMeshMaterialAndTextureReferences.PrefabRuntimeTest.RefusesMissingMeshMaterialAndTextureReferences",
+        "PrefabRuntimeTest.RefusesCyclesMissingParentsAndDuplicateIds.PrefabRuntimeTest.RefusesCyclesMissingParentsAndDuplicateIds",
+        "PrefabRuntimeTest.RefusesSingularLocalShearAndIncorrectWinding.PrefabRuntimeTest.RefusesSingularLocalShearAndIncorrectWinding",
+        "PrefabRuntimeTest.RefusesBadIndexAndNonfiniteMeshEvenWithMatchingHashes.PrefabRuntimeTest.RefusesBadIndexAndNonfiniteMeshEvenWithMatchingHashes",
+        "PrefabRuntimeTest.RefusesIncompleteTextureMipsAndManifestMetricDrift.PrefabRuntimeTest.RefusesIncompleteTextureMipsAndManifestMetricDrift",
+        "PrefabRuntimeTest.RefusesInvalidSamplerAndMixedUvTransforms.PrefabRuntimeTest.RefusesInvalidSamplerAndMixedUvTransforms",
+        "PrefabRuntimeTest.RefusesDuplicateJsonKeysEvenWithMatchingPin.PrefabRuntimeTest.RefusesDuplicateJsonKeysEvenWithMatchingPin",
+        "PrefabRuntimeTest.Full4096NodeChainIsIterativeAndBounded.PrefabRuntimeTest.Full4096NodeChainIsIterativeAndBounded"
+      ]
+    },
+    "installed": {
+      "checks": 19,
+      "receipt_sha256": "6a99f8819fc93a44670268a35031301c6f20188fe8705daf084d6bddd74668cb",
+      "consumer_sha256": "e392f0d0b73ecbabaf7f5c9e844ee125cfe90276d9fd649555bc6888ed72b51a",
+      "compiler_sha256": "2b27371f145b6a60e54e94d1b590b39f5d5252d41bfd6b7a4e0dbb905fa063eb",
+      "service_sha256": "fe4330ed81838b72eafe5121ae9b299d213fa4ddbe6ac027e027068ca2870593"
+    }
+  },
+  "windows": {
+    "profile": "MSYS2 UCRT64 C++20",
+    "cases": 19,
+    "failed": 0,
+    "skipped": 0,
+    "case_names": [
+      "PrefabDigest.MatchesIndependentSha256Vectors",
+      "PrefabRuntimeTest.LoadsOwnedSharedGeometryAndExactMaterialBindings",
+      "PrefabRuntimeTest.InstantiatesRealHierarchyShearNormalsMirroringAndWorldBounds",
+      "PrefabRuntimeTest.EqualCountReplacementRefreshesTransformsAndStableIdentities",
+      "PrefabRuntimeTest.FailedReloadAndInvalidPlacementRetainPreviousInstance",
+      "PrefabRuntimeTest.RegistryConstructionFailureRollsBackOnlyCandidateEntities",
+      "PrefabRuntimeTest.DestructionRemovesOnlyOwnedEntities",
+      "PrefabRuntimeTest.RefusesUnpinnedOrArbitraryGenerationPaths",
+      "PrefabRuntimeTest.RefusesMissingAndUnlistedGenerationMembers",
+      "PrefabRuntimeTest.RefusesTraversalAndLinksInReferencedMembers",
+      "PrefabRuntimeTest.RefusesUnknownSchemaComponentsAndMaterialFields",
+      "PrefabRuntimeTest.RefusesMissingMeshMaterialAndTextureReferences",
+      "PrefabRuntimeTest.RefusesCyclesMissingParentsAndDuplicateIds",
+      "PrefabRuntimeTest.RefusesSingularLocalShearAndIncorrectWinding",
+      "PrefabRuntimeTest.RefusesBadIndexAndNonfiniteMeshEvenWithMatchingHashes",
+      "PrefabRuntimeTest.RefusesIncompleteTextureMipsAndManifestMetricDrift",
+      "PrefabRuntimeTest.RefusesInvalidSamplerAndMixedUvTransforms",
+      "PrefabRuntimeTest.RefusesDuplicateJsonKeysEvenWithMatchingPin",
+      "PrefabRuntimeTest.Full4096NodeChainIsIterativeAndBounded"
+    ],
+    "installed_checks": 23,
+    "installed_check_names": [
+      "actual NTFS directory junction exists",
+      "actual registry preserves node IDs and hierarchy",
+      "all exact authored material and texture bindings survive",
+      "command 0 succeeds",
+      "command 1 succeeds",
+      "command 2 succeeds",
+      "command 3 refuses",
+      "command 4 succeeds",
+      "command 5 succeeds",
+      "command 6 succeeds",
+      "command 7 refuses",
+      "command 8 succeeds",
+      "compiler dependencies remain pinned",
+      "consumer and service binaries remain unchanged",
+      "corrupt compiled generation refuses with no partial instance report",
+      "explicit original generation ignores changed current pointer",
+      "headless inspection refuses to claim renderer qualification",
+      "installed Windows consumer refuses actual generation junction",
+      "instances share two compiled primitive bindings",
+      "mirrored instance retains winding and normal transform",
+      "new generation preserves identities with edited placement",
+      "old generation still loads after another generation is corrupted",
+      "parent and caller transforms compose once"
+    ],
+    "installed_receipt_sha256": "684b0366c46733930904a94db433414d33571a30deb9e9ae3c74f8e65fa84323",
+    "payload_files_verified": 555,
+    "job_sha256": "b325cfbf989df27818da9101f9fbbb9b035dab8ecf9ee923ff2546b85066e961",
+    "binaries": {
+      "build/bin/prefab_runtime_test.exe": {
+        "bytes": 1807679,
+        "sha256": "a7c2dcb833928f4658cb69f9d73117de40810ba43979953474b749a221bb6594"
+      },
+      "build/bin/luminumbra_prefab_inspect.exe": {
+        "bytes": 1004036,
+        "sha256": "d77e8885246446375fe1eed1e93b57e5c9413512c77299a9d7145b83d0cbf643"
+      },
+      "install/bin/luminumbra_prefab_inspect.exe": {
+        "bytes": 1004036,
+        "sha256": "d77e8885246446375fe1eed1e93b57e5c9413512c77299a9d7145b83d0cbf643"
+      }
+    },
+    "tools": [
+      {
+        "name": "cmake.exe",
+        "sha256": "b87a05b13b8ec5f00084d498c70ef44f1a84ba353719fbb5d784c52246553096",
+        "bytes": 13028804
+      },
+      {
+        "name": "ninja.exe",
+        "sha256": "eff807f651044be4cac09fe28c9b25c3d116cf0a96ca3f0f08cae1ab9866691f",
+        "bytes": 418922
+      },
+      {
+        "name": "g++.exe",
+        "sha256": "29374f0c8a7544f13e25ac3c7d30797d737f316931aa9de1012a7918945f1580",
+        "bytes": 3098147
+      },
+      {
+        "name": "python.exe",
+        "sha256": "6571a0ca4a65dbfc3dbae701791eba204898b0a5af13723b770dd8b861290e22",
+        "bytes": 101477
+      },
+      {
+        "name": "cmd.exe",
+        "sha256": "97ac98b1a92c286054cce55239cfccdfc23a5517bd07fe693072c9ca96c7dabb",
+        "bytes": 344064
+      },
+      {
+        "name": "taskkill.exe",
+        "sha256": "1249717315fc8f4d2df17d5db9da0444795fdb9fb83dfb1f763c3f39282244f7",
+        "bytes": 118784
+      }
+    ],
+    "completion_sha256": "b674f417eb2fa0fc3e39c5758ccaa55398c3c7125f6b3921315bd5182aa5c335",
+    "collector_audit_sha256": "9b1c8794fbfb64fe917ce0ef710d947b01baad7990beb237b16a1029bfacce22",
+    "independent_audit_sha256": "17cfc22842452d1a721f92b17d4b5871ea75d0af8f3ce8180a83d4ce65fd8584",
+    "real_ntfs_junction_refused": true
+  },
+  "maximum_build_workers": 2,
+  "evidence_storage": "Original logs, XML, payload manifests and receipts are retained in the qualification campaign; this public record summarizes and hashes them.",
+  "scope": {
+    "compiled_static_generation_loading": true,
+    "real_ecs_instantiation": true,
+    "installed_headless_consumer": true,
+    "renderer_integration": false,
+    "blender_preview": false,
+    "saved_world_placement": false,
+    "gpu_performance_qualified": false,
+    "visual_approved": false
+  }
+}

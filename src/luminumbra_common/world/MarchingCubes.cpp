@@ -1221,7 +1221,7 @@ FarLodRegionMeshStats GenerateFarLodRegionMesh(const World::FarLodTile& tile,
         if (assembly.tier != tile.tier || assembly.rx != tile.rx || assembly.rz != tile.rz ||
             assembly.params_hash != tile.params_hash || !assembly.authority_columns.empty() ||
             !assembly.owned_columns.empty() || !assembly.density_q.empty() ||
-            !assembly.material.empty() || !assembly.legacy_surface_samples.empty()) {
+            !assembly.material.empty()) {
             out_mesh.vertices.clear();
             out_mesh.indices.clear();
             return {};
@@ -1274,30 +1274,6 @@ FarLodRegionMeshStats GenerateFarLodRegionMesh(const World::FarLodTile& tile,
             assembly.owned_columns.end()) {
         return fail();
     }
-    const auto legacy_less = [](const World::FarLodWorldLegacySurfaceSample& lhs,
-                                const World::FarLodWorldLegacySurfaceSample& rhs) {
-        return std::tie(lhs.world_z, lhs.world_x) < std::tie(rhs.world_z, rhs.world_x);
-    };
-    if (!std::is_sorted(assembly.legacy_surface_samples.begin(),
-                        assembly.legacy_surface_samples.end(),
-                        legacy_less) ||
-        std::adjacent_find(assembly.legacy_surface_samples.begin(),
-                           assembly.legacy_surface_samples.end(),
-                           [](const auto& lhs, const auto& rhs) {
-                               return lhs.world_x == rhs.world_x && lhs.world_z == rhs.world_z;
-                           }) != assembly.legacy_surface_samples.end())
-        return fail();
-    std::map<std::pair<int, int>, World::FarLodWorldLegacySurfaceSample> legacy_metadata;
-    for (const auto& sample : assembly.legacy_surface_samples) {
-        constexpr u8 kKnownLegacyFlags =
-            World::kFarLodSampleFlagWater | World::kFarLodSampleFlagEdited;
-        if ((sample.flags & World::kFarLodSampleFlagEdited) == 0u ||
-            (sample.flags & static_cast<u8>(~kKnownLegacyFlags)) != 0u ||
-            sample.world_x % step_i != 0 || sample.world_z % step_i != 0) {
-            return fail();
-        }
-        legacy_metadata.emplace(std::make_pair(sample.world_z, sample.world_x), sample);
-    }
     const std::set<std::pair<i32, i32>> authority_columns(assembly.authority_columns.begin(),
                                                           assembly.authority_columns.end());
     if (authority_columns.empty())
@@ -1335,26 +1311,6 @@ FarLodRegionMeshStats GenerateFarLodRegionMesh(const World::FarLodTile& tile,
         const int remainder = value % divisor;
         return remainder < 0 ? quotient - 1 : quotient;
     };
-    const auto sample_touches_owned_cell = [&](int world_x, int world_z) {
-        const int chunk_x = floor_div(world_x, CHUNK_SIZE_X);
-        const int chunk_z = floor_div(world_z, CHUNK_SIZE_Z);
-        const int first_x = world_x % CHUNK_SIZE_X == 0 ? chunk_x - 1 : chunk_x;
-        const int first_z = world_z % CHUNK_SIZE_Z == 0 ? chunk_z - 1 : chunk_z;
-        for (int z = first_z; z <= chunk_z; ++z) {
-            for (int x = first_x; x <= chunk_x; ++x) {
-                if (owned.count({z, x}) != 0u)
-                    return true;
-            }
-        }
-        return false;
-    };
-    if (std::any_of(assembly.legacy_surface_samples.begin(),
-                    assembly.legacy_surface_samples.end(),
-                    [&](const auto& sample) {
-                        return !sample_touches_owned_cell(sample.world_x, sample.world_z);
-                    }))
-        return fail();
-
     struct Sample {
         i16 density;
         u8 material;
@@ -1364,7 +1320,6 @@ FarLodRegionMeshStats GenerateFarLodRegionMesh(const World::FarLodTile& tile,
     std::set<std::pair<i32, i32>> seen_authority_columns;
     std::map<std::pair<i32, i32>, std::vector<i32>> stack_levels;
     std::vector<World::FarLodWorldSdfBrickDescriptor> authority_bricks;
-    std::set<std::pair<int, int>> seen_legacy_metadata;
     bool have_previous_brick = false;
     std::tuple<i32, i32, i32> previous_brick{};
     for (std::size_t brick_index = 0; brick_index < assembly.bricks.size(); ++brick_index) {
@@ -1408,21 +1363,6 @@ FarLodRegionMeshStats GenerateFarLodRegionMesh(const World::FarLodTile& tile,
                     const int world_y = brick.chunk_y * CHUNK_SIZE_Y + static_cast<int>(y) * step_i;
                     const int world_z = brick.chunk_z * CHUNK_SIZE_Z + static_cast<int>(z) * step_i;
                     const Sample value{assembly.density_q[offset], assembly.material[offset]};
-                    const auto legacy = legacy_metadata.find({world_z, world_x});
-                    if (legacy != legacy_metadata.end()) {
-                        // Legacy columns must already have been promoted into scratch
-                        // regenerable streams. Metadata may never overlay or coexist
-                        // with a real authoritative footprint in the mesher.
-                        if (brick.source_kind != World::FarLodBrickSourceKind::RegenerableCache ||
-                            value.density !=
-                                World::QuantizeFarLodSdf(
-                                    static_cast<float>(world_y) -
-                                    World::DequantizeFarLodHeight(legacy->second.height_q)) ||
-                            value.material != legacy->second.material) {
-                            return fail();
-                        }
-                        seen_legacy_metadata.emplace(world_z, world_x);
-                    }
                     const auto key = std::make_tuple(world_x, world_y, world_z);
                     const auto inserted = samples.emplace(key, value);
                     if (!inserted.second && (inserted.first->second.density != value.density ||
@@ -1430,8 +1370,6 @@ FarLodRegionMeshStats GenerateFarLodRegionMesh(const World::FarLodTile& tile,
                         return fail();
                 }
     }
-    if (seen_legacy_metadata.size() != legacy_metadata.size())
-        return fail();
     if (seen_authority_columns != authority_columns)
         return fail();
     for (const auto& column : owned) {

@@ -1,7 +1,7 @@
 {
   "name": "Archipelago",
   "description": "Scattered islands across a deep ocean — rolling shores and walkable interiors, not spiky blades.",
-  "schema_rev": 2,
+  "schema_rev": 6,
   "generation_params": {
     "terrain": {
       "base_frequency": 0.008,
@@ -13,7 +13,6 @@
       "island_mask_enabled": true,
       "island_mask_frequency": 0.0032,
       "shaping": {
-        "enabled": true,
         "continentalness_frequency": 0.0011,
         "erosion_frequency": 0.0016,
         "peaks_frequency": 0.003,

@@ -1,7 +1,10 @@
 #include "LuaApiManifest.h"
 
+#include <cstddef>
 #include <iomanip>
+#include <ios>
 #include <sstream>
+#include <string>
 
 namespace Luminumbra::scripting {
 namespace {
@@ -75,61 +78,20 @@ bool IsSortedByModuleThenName(const LuaApiManifest& manifest) {
 const LuaApiManifest& GetLuaApiManifest() {
     static const LuaApiManifest manifest{
         kLuaApiManifestSchema,
-        "1.0.0",
+        "1.1.0",
         kDeterministicOrder,
         {
-            {"core",
-             "log",
+            {"",
+             "sample_energy_field",
              "function",
-             "core.log(level: string, message: string)",
-             "Emit a script log line through the engine logger."},
-            {"core",
-             "version",
-             "function",
-             "core.version() -> string",
-             "Return the engine contract version visible to scripts."},
-            {"entity",
-             "destroy",
-             "function",
-             "entity.destroy(entity_id: integer)",
-             "Queue an entity for deterministic removal."},
-            {"entity",
-             "spawn",
-             "function",
-             "entity.spawn(archetype: string, position: vec3) -> integer",
-             "Spawn an entity from an authored archetype."},
-            {"simulation",
-             "emit_event",
-             "function",
-             "simulation.emit_event(topic: string, payload: table, tick: integer?)",
-             "Publish a deterministic simulation event."},
-            {"simulation",
-             "subscribe",
-             "function",
-             "simulation.subscribe(topic: string, callback: function)",
-             "Register a script callback for a simulation event topic."},
-            {"time",
-             "delta_seconds",
-             "function",
-             "time.delta_seconds() -> number",
-             "Return the fixed simulation step for the current script tick."},
-            {"world",
-             "get_block",
-             "function",
-             "world.get_block(x: integer, y: integer, z: integer) -> integer",
-             "Read a block id from the active world."},
+             "sample_energy_field(x: number, y: number, z: number) -> number",
+             "Read-only energy-field sampler; alias of world.sample_energy_field."},
             {"world",
              "sample_energy_field",
              "function",
              "world.sample_energy_field(x: number, y: number, z: number) -> number",
              "Read-only sample of the stateful energy field at a world position, in gameplay "
-             "units; 0 when the layer is absent. Also exposed as the bare global "
-             "sample_energy_field ( -5)."},
-            {"world",
-             "set_block",
-             "function",
-             "world.set_block(x: integer, y: integer, z: integer, block_id: integer)",
-             "Queue a block write in the active world."},
+             "units; 0 when the layer is absent."},
         },
     };
     return manifest;
@@ -179,18 +141,20 @@ bool LuaApiManifestMeetsBaseline(const LuaApiManifest& manifest) {
         return false;
     }
 
+    // This baseline is the current read-only host, including its bare alias.
+    // Adding an operation requires changing the host and its live tests too.
     constexpr const char* requiredEntries[][2] = {
-        {"core", "log"},
-        {"core", "version"},
-        {"entity", "destroy"},
-        {"entity", "spawn"},
-        {"simulation", "emit_event"},
-        {"simulation", "subscribe"},
-        {"time", "delta_seconds"},
-        {"world", "get_block"},
+        {"", "sample_energy_field"},
         {"world", "sample_energy_field"},
-        {"world", "set_block"},
     };
+    if (manifest.manifest_version != "1.1.0" || manifest.entries.size() != 2) {
+        return false;
+    }
+    for (const auto& entry : manifest.entries) {
+        if (entry.kind != "function" || entry.signature.empty()) {
+            return false;
+        }
+    }
 
     for (const auto& requiredEntry : requiredEntries) {
         if (!ContainsEntry(manifest, requiredEntry[0], requiredEntry[1])) {

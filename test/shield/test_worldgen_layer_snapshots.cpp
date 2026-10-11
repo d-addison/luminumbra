@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <chrono>
 #include <cmath>
 #include <cstddef>
@@ -17,6 +18,7 @@
 #include <utility>
 #include <vector>
 
+#include "core/Environment.h"
 #include "core/JobSystem.h"
 #include "entt/entt.hpp"
 #include "nlohmann/json.hpp"
@@ -752,7 +754,6 @@ TEST(WorldGenLayerSnapshotTest, LakePreviewBuildWithNullSystemsDoesNotCrash) {
     params.lacunarity = 2.0f;
     params.height_offset = 2.0f; // low -> basins dip below sea level (real lake water)
     params.caves_enabled = true;
-    params.shaping_enabled = true;     // builds the continentalness generator lakes require
     params.island_mask_enabled = true; // archipelago
     params.lakes_enabled = true;       // the lakes toggle the user set
     params.lake_depth = 6.0f;
@@ -806,9 +807,64 @@ TEST(WorldGenLayerSnapshotTest, SpawnCollisionBootstrapPreparesWalkingStart) {
     }
 
     const glm::vec3 final_position = physics.get_player_position();
-    EXPECT_GT(final_position.y, terrain_height - 1.0f);
-    EXPECT_LT(final_position.y, terrain_height + 4.0f);
+    // Compare feet with the collider below their current position. The old
+    // centered capsule was embedded at spawn; a safely placed capsule follows
+    // this same downhill path, whose surface is below the original hill height.
+    const auto support =
+        physics.audio_raycast({final_position.x, terrain_height + 10.0f, final_position.z},
+                              {final_position.x, terrain_height - 10.0f, final_position.z});
+    ASSERT_TRUE(support.hit);
+    EXPECT_TRUE(physics.is_player_grounded());
+    EXPECT_GT(final_position.y, support.hit_point.y - 0.25f);
+    EXPECT_LT(final_position.y, support.hit_point.y + 0.4f);
     physics.shutdown();
+}
+
+TEST(WorldGenLayerSnapshotTest, DefaultWalkingSpawnRemainsSupportedAtClampedFrameStep) {
+    const auto params = LoadPresetParams(SourceRoot() / "worlds/atlas/presets/default.json");
+    for (float dt : {1.0f / 60.0f, 0.05f}) {
+        SCOPED_TRACE(dt);
+        SHIELD_WorldSystem world(nullptr, nullptr, params, kSeed);
+        WaterSystem water(nullptr, &world);
+        world.SetWaterSystem(&water);
+        PhysicsSystem physics;
+        physics.startup();
+        const float terrain_height = world.GetTerrainHeightAt(8.0f, 8.0f);
+        const Vec3 camera_spawn(8.0f, terrain_height + 1.95f, 8.0f);
+        ASSERT_TRUE(world.EnsureCollisionReadyNear(camera_spawn, &physics, 1));
+        const auto surface = physics.audio_raycast({8.0f, terrain_height + 10.0f, 8.0f},
+                                                   {8.0f, terrain_height - 10.0f, 8.0f});
+        ASSERT_TRUE(surface.hit) << "walking start requires a real collider, not a creation count";
+        ASSERT_NEAR(surface.hit_point.y, terrain_height, 0.02f);
+        // Production camera spawn minus the local controller's 1.71 m eye height.
+        physics.create_player_controller({8.0f, terrain_height + 0.24f, 8.0f});
+        float lowest_clearance = 1.0f;
+        float highest_clearance = -1.0f;
+        for (int frame = 0; frame < 600; ++frame) {
+            physics.update_player(glm::vec3(0.0f), false, 0.0f, dt);
+            physics.update(dt);
+            const auto feet = physics.get_player_position();
+            ASSERT_TRUE(std::isfinite(feet.x) && std::isfinite(feet.y) && std::isfinite(feet.z));
+            // The current controller can slide downhill while idle. Compare its
+            // feet to the real collider at its current X/Z, not the original height.
+            const auto support = physics.audio_raycast({feet.x, terrain_height + 10.0f, feet.z},
+                                                       {feet.x, terrain_height - 100.0f, feet.z});
+            ASSERT_TRUE(support.hit) << "frame " << frame;
+            const float clearance = feet.y - support.hit_point.y;
+            lowest_clearance = std::min(lowest_clearance, clearance);
+            highest_clearance = std::max(highest_clearance, clearance);
+        }
+        EXPECT_GT(lowest_clearance, -0.25f)
+            << "the production walking spawn must not fall through its confirmed collider";
+        EXPECT_LT(highest_clearance, 0.4f);
+        EXPECT_TRUE(physics.is_player_grounded());
+        const auto feet = physics.get_player_position();
+        const auto support = physics.audio_raycast({feet.x, terrain_height + 10.0f, feet.z},
+                                                   {feet.x, terrain_height - 100.0f, feet.z});
+        ASSERT_TRUE(support.hit);
+        EXPECT_NEAR(feet.y, support.hit_point.y, 0.3f);
+        physics.shutdown();
+    }
 }
 
 TEST(WorldGenLayerSnapshotTest, InitialChunkLoadListCoversSpawnSurfaceNeighborhood) {
@@ -1221,7 +1277,57 @@ std::uint64_t HashTerrainHeightGrid(const SHIELD_WorldSystem& world) {
     return hash;
 }
 
-struct LegacyPresetHeightFixture {
+// Preserve the actual samples behind the hash so compiler/host drift can be
+// diagnosed numerically without changing the pinned compatibility expectation.
+void WriteHeightGridDiagnostic(const SHIELD_WorldSystem& world, const char* fixture) {
+    const auto diagnostic_directory = Core::ReadEnvironment("LUMINUMBRA_WORLDGEN_DIAGNOSTIC_DIR");
+    fs::path directory = ArtifactRoot() / "height_grids";
+    if (diagnostic_directory.has_value()) {
+        directory = *diagnostic_directory;
+    }
+    fs::create_directories(directory);
+    nlohmann::json report;
+    report["fixture"] = fixture;
+    report["seed"] = kSeed;
+    report["grid"] = {{"side", 64}, {"start", -512.0f}, {"step", 16.25f}};
+#ifdef _MSC_FULL_VER
+    report["msvc_full_ver"] = _MSC_FULL_VER;
+#else
+    report["compiler"] = __VERSION__;
+#endif
+    report["columns"] = {"terrain_height",
+                         "base_noise",
+                         "base_height",
+                         "island_noise",
+                         "island_mask",
+                         "final_height"};
+    auto& rows = report["float32_bits"] = nlohmann::json::array();
+    for (int j = 0; j < 64; ++j) {
+        for (int i = 0; i < 64; ++i) {
+            const float x = -512.0f + static_cast<float>(i) * 16.25f;
+            const float z = -512.0f + static_cast<float>(j) * 16.25f;
+            const auto sample = world.SampleWorldGenLayers(Vec3(x, 0.0f, z));
+            nlohmann::json bits = nlohmann::json::array();
+            for (float value : {world.GetTerrainHeightAt(x, z),
+                                sample.base_noise,
+                                sample.base_height,
+                                sample.island_noise,
+                                sample.island_mask,
+                                sample.final_height}) {
+                bits.push_back(std::bit_cast<std::uint32_t>(value));
+            }
+            rows.push_back(std::move(bits));
+        }
+    }
+    const fs::path path = directory / (std::string(fixture) + ".json");
+    std::ofstream output(path);
+    ASSERT_TRUE(output) << path.string();
+    output << report.dump() << '\n';
+    output.close();
+    ASSERT_TRUE(output) << path.string();
+}
+
+struct DefaultShapingHeightFixture {
     const char* name;
     TerrainGenParams params;
     std::uint64_t expected_hash;
@@ -1237,14 +1343,11 @@ constexpr std::uint64_t ToolchainHeightHash(std::uint64_t msvc, std::uint64_t gc
 #endif
 }
 
-// Frozen copies of the five shipped presets' terrain params as of the commit
-// BEFORE  (shaping defaults off). These fixtures deliberately do NOT
-// load the preset JSON files: shipped presets may later opt into shaping
-//, but legacy params must keep producing bit-identical heights
-// forever. The expected hashes were captured by running this exact grid hash
-// against the pre-shaping GetTerrainHeightAt implementation.
-std::vector<LegacyPresetHeightFixture> LegacyPresetHeightFixtures() {
-    std::vector<LegacyPresetHeightFixture> fixtures;
+// Synthetic parameter sets covering the five original terrain envelopes.
+// Fixed hashes are re-pinned for retirement of the pre-shaping algorithm.
+// Sampler agreement and repeatability cover the same terrain envelopes.
+std::vector<DefaultShapingHeightFixture> DefaultShapingHeightFixtures() {
+    std::vector<DefaultShapingHeightFixture> fixtures;
 
     TerrainGenParams default_params;
     default_params.base_frequency = 0.01f;
@@ -1257,7 +1360,7 @@ std::vector<LegacyPresetHeightFixture> LegacyPresetHeightFixtures() {
     default_params.cave_frequency = 0.02f;
     fixtures.push_back({"default",
                         default_params,
-                        ToolchainHeightHash(0xabc65d0aa0350cebull, 0x1be02aac5ca74d60ull)});
+                        ToolchainHeightHash(0x5b1177b7f0cd121full, 0xaec140c43a735f9eull)});
 
     TerrainGenParams flat_params;
     flat_params.base_frequency = 0.02f;
@@ -1270,7 +1373,7 @@ std::vector<LegacyPresetHeightFixture> LegacyPresetHeightFixtures() {
     flat_params.cave_frequency = 0.0f;
     fixtures.push_back({"flat_lands",
                         flat_params,
-                        ToolchainHeightHash(0x5c5975fed81dfd26ull, 0xd3f8cb61b8f85576ull)});
+                        ToolchainHeightHash(0x499fac5a81a7784bull, 0x6b50de342336674aull)});
 
     TerrainGenParams mountains_params;
     mountains_params.base_frequency = 0.008f;
@@ -1283,7 +1386,7 @@ std::vector<LegacyPresetHeightFixture> LegacyPresetHeightFixtures() {
     mountains_params.cave_frequency = 0.03f;
     fixtures.push_back({"mountains",
                         mountains_params,
-                        ToolchainHeightHash(0xd5bd8812a5013e9cull, 0xec0cbc88ac710c4bull)});
+                        ToolchainHeightHash(0x1373155178dab3c8ull, 0xd8f3adb6564f52d4ull)});
 
     TerrainGenParams archipelago_params;
     archipelago_params.base_frequency = 0.009f;
@@ -1298,7 +1401,7 @@ std::vector<LegacyPresetHeightFixture> LegacyPresetHeightFixtures() {
     archipelago_params.cave_frequency = 0.03f;
     fixtures.push_back({"archipelago",
                         archipelago_params,
-                        ToolchainHeightHash(0xa3a51481233d998cull, 0xb17c0effd27aa30full)});
+                        ToolchainHeightHash(0x7f4ee46cde9fe0d4ull, 0xc4110e0446935b91ull)});
 
     TerrainGenParams forest_params;
     forest_params.base_frequency = 0.008f;
@@ -1311,48 +1414,53 @@ std::vector<LegacyPresetHeightFixture> LegacyPresetHeightFixtures() {
     forest_params.cave_frequency = 0.025f;
     fixtures.push_back({"temperate_forest",
                         forest_params,
-                        ToolchainHeightHash(0x7cdbfe2d641162f3ull, 0xf04d73a238d3b456ull)});
+                        ToolchainHeightHash(0x1cd96596ec25f7beull, 0xd656d367f306b8f3ull)});
 
     return fixtures;
 }
 
 } // namespace
 
-//  zero-hash-drift proof: legacy params (shaping_enabled == false, the
-// default) must produce heights bit-identical to the pre-shaping
-// implementation. Hashes captured pre-change; any drift here is a
-// review-blocking defect, never a update the baseline.
-TEST(WorldGenLayerSnapshotTest, LegacyPresetHeightsAreBitIdenticalToPreShaping) {
-    for (const LegacyPresetHeightFixture& fixture : LegacyPresetHeightFixtures()) {
+// Selector retirement preserves coverage with current sampler agreement and
+// independent-world determinism across all five synthetic terrain envelopes.
+TEST(WorldGenLayerSnapshotTest, DefaultShapingIsDeterministicAndAllSamplersAgree) {
+    for (const DefaultShapingHeightFixture& fixture : DefaultShapingHeightFixtures()) {
+        SCOPED_TRACE(fixture.name);
         SHIELD_WorldSystem world(nullptr, nullptr, fixture.params, kSeed);
-        const std::uint64_t hash = HashTerrainHeightGrid(world);
-        std::cout << "[ LEGACYHEIGHT ] " << fixture.name << " seed=" << kSeed << " hash=0x"
-                  << std::hex << std::setfill('0') << std::setw(16) << hash << std::dec
-                  << std::setfill(' ') << std::endl;
-        EXPECT_EQ(hash, fixture.expected_hash)
-            << fixture.name << ": legacy (shaping-off) terrain heights drifted from the "
-            << "pre-shaping implementation - this is a hard determinism break";
+        SHIELD_WorldSystem reference(nullptr, nullptr, fixture.params, kSeed);
+        const auto hash = HashTerrainHeightGrid(world);
+        WriteHeightGridDiagnostic(world, fixture.name);
+        std::cout << "[ DEFAULTSHAPING ] " << fixture.name << " hash=0x" << std::hex << hash
+                  << std::dec << std::endl;
+        EXPECT_EQ(hash, fixture.expected_hash);
+        EXPECT_EQ(hash, HashTerrainHeightGrid(reference));
+        for (const IVec3 coords : {IVec3(0, 0, 0), IVec3(-3, 1, 2)}) {
+            Chunk full(coords), coarse(coords);
+            world.GenerateChunkData(full, 1);
+            world.GenerateChunkData(coarse, 4);
+            EXPECT_EQ(full.heightmap_data, coarse.heightmap_data);
+            for (int z = 0; z <= CHUNK_SIZE_Z; ++z) {
+                for (int x = 0; x <= CHUNK_SIZE_X; ++x) {
+                    const float wx = static_cast<float>(coords.x * CHUNK_SIZE_X + x);
+                    const float wz = static_cast<float>(coords.z * CHUNK_SIZE_Z + z);
+                    const auto i = static_cast<std::size_t>(x + z * (CHUNK_SIZE_X + 1));
+                    EXPECT_EQ(full.heightmap_data[i], world.GetTerrainHeightAt(wx, wz));
+                    EXPECT_EQ(full.heightmap_data[i],
+                              world.SampleWorldGenLayers(Vec3(wx, 0.0f, wz)).final_height);
+                }
+            }
+        }
     }
 }
 
-//  slice polish: CURRENT shipped-preset terrain hash. Unlike the
-// legacy fixture above (frozen pre-shaping params, must NEVER change), this
-// gate loads the LIVE preset JSON through the canonical loader and hashes the
-// resulting GetTerrainHeightAt grid. It catches accidental drift in a shipped
-// preset's generated terrain AND forces any deliberate preset edit to bump the
-// expected hash in the same commit (documented in the commit message).
-//
-// The archipelago hash was bumped deliberately in  when the schema_rev
-// 2 `shaping` block was added (spiky-blade shores -> rolling shores / walkable
-// interiors). The pre-shaping archipelago hash (0xc075cf55c182393c) is frozen
-// forever in the LEGACY fixture above as the default-off shaping proof.
+// The current shipped preset's height hash stays pinned across schema-only edits.
 TEST(WorldGenLayerSnapshotTest, CurrentShippedArchipelagoPresetHeightHash) {
     const fs::path preset = SourceRoot() / "worlds/atlas/presets/archipelago.json";
     const TerrainGenParams params = LoadPresetParams(preset);
-    ASSERT_TRUE(params.shaping_enabled)
-        << "archipelago.json must carry an enabled shaping block ()";
+    ASSERT_FALSE(params.continental_spline.empty());
     SHIELD_WorldSystem world(nullptr, nullptr, params, kSeed);
     const std::uint64_t hash = HashTerrainHeightGrid(world);
+    WriteHeightGridDiagnostic(world, "shipped_archipelago");
     std::cout << "[ CURRENTHASH ] archipelago seed=" << kSeed << " hash=0x" << std::hex
               << std::setfill('0') << std::setw(16) << hash << std::dec << std::setfill(' ')
               << std::endl;
@@ -1386,7 +1494,6 @@ TerrainGenParams ShapingTestParams() {
     params.height_offset = 12.0f;
     params.caves_enabled = true;
     params.cave_frequency = 0.03f;
-    params.shaping_enabled = true;
     params.continentalness_frequency = 0.0008f;
     params.erosion_frequency = 0.0015f;
     params.peaks_frequency = 0.004f;
@@ -1402,15 +1509,8 @@ TerrainGenParams ShapingTestParams() {
 
 } // namespace
 
-//  batch-vs-scalar parity: with shaping enabled, every generation path
-// computes heights through the one shared scalar helper (GenSingle* APIs in
-// both the scalar and batch paths), so the batch heightmap bytes must be
-// EXACTLY equal (==, no epsilon) to GetTerrainHeightAt at the same world
-// coordinates - for the full-SDF path, the step>1 heightmap-only path, and
-// SampleWorldGenLayers. FastNoise SIMD grid batches (GenUniformGrid2D) are
-// deliberately NOT used for shaped heights precisely so no SIMD-lane epsilon
-// is needed here; the legacy (shaping-off) grid batches stay covered by the
-// existing max_sdf_sample_error < 1e-4 snapshot gate.
+// Full-SDF, coarse heightmap and scalar layer samples must agree exactly.
+// SIMD grid/position-array noise uses the same arithmetic as scalar shaping.
 TEST(WorldGenLayerSnapshotTest, ShapedHeightBatchPathsExactlyMatchScalarPath) {
     const TerrainGenParams params = ShapingTestParams();
     SHIELD_WorldSystem world(nullptr, nullptr, params, kSeed);

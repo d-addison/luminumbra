@@ -10,6 +10,7 @@
 #include <RmlUi/Core/Elements/ElementFormControl.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <filesystem>
 #include <fstream>
@@ -19,8 +20,10 @@
 #include <set>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
 
+#include "audio/NullAudioManager.h"
 #include "ui/Rml_UIManager.h"
 #include "ui/components/common/Button.h"
 #include "ui/components/common/Input.h"
@@ -212,11 +215,24 @@ Rml::ElementDocument* FindDocumentByElementId(Rml::Context* context, const char*
     return nullptr;
 }
 
+void AwaitWorldCatalog(Luminumbra::Client::Rml_UIManager& ui) {
+    auto* document = FindDocumentByElementId(ui.GetContext(), "world_selection");
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (document && document->HasAttribute("data-worlds-pending") &&
+           std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        ui.Update();
+    }
+    if (document)
+        EXPECT_FALSE(document->HasAttribute("data-worlds-pending"));
+}
+
 Rml::ElementDocument* LoadDocumentAndFind(Luminumbra::Client::Rml_UIManager& ui,
                                           const char* path,
                                           const char* required_id) {
     ui.RequestLoadDocument(path);
     ui.Update();
+    AwaitWorldCatalog(ui);
     return FindDocumentByElementId(ui.GetContext(), required_id);
 }
 
@@ -224,6 +240,7 @@ void ClickAndUpdate(Luminumbra::Client::Rml_UIManager& ui, Rml::Element* element
     ASSERT_NE(element, nullptr);
     element->Click();
     ui.Update();
+    AwaitWorldCatalog(ui);
 }
 
 void SetControlValue(Rml::ElementDocument* document, const char* id, const std::string& value) {
@@ -312,6 +329,17 @@ TEST(UiSmokeTest, CapturesMaintainedMenuScreenshots) {
     ui.Shutdown();
 }
 
+static Luminumbra::Persistence::SavedWorldCatalog SavedWorldFixture() {
+    Luminumbra::Persistence::SavedWorldCatalog catalog;
+    Luminumbra::Persistence::SavedWorld world;
+    world.metadata.worldId = "interaction_fixture";
+    world.metadata.name = "Interaction Test World";
+    world.metadata.worldType = "default";
+    world.metadata.seed = "424242";
+    catalog.worlds.push_back(world);
+    return catalog;
+}
+
 TEST(UiSmokeTest, AuthoredRmlDocumentsLoadAndExposeRequiredElements) {
     HiddenGlContext context;
     if (!context.ready()) {
@@ -341,12 +369,13 @@ TEST(UiSmokeTest, AuthoredRmlDocumentsLoadAndExposeRequiredElements) {
         {"world_creation.rml",
          {"world_name", "world_seed", "world_type", "back_btn", "create_btn"}},
         {"world_selection.rml",
-         {"filter_all",
-          "filter_recent",
-          "filter_favorites",
+         {"world_selection",
+          "world_list_items",
+          "world_list_status",
+          "no_worlds",
           "back_btn",
           "load_selected_btn",
-          "import_world_btn"}},
+          "new_world_btn"}},
         {"settings.rml",
          {"settings",
           "setting_resolution",
@@ -588,6 +617,7 @@ TEST(UiSmokeTest, AuthoredMenuInteractionsNavigateAndInvokeCallbacks) {
         created_world = CreatedWorld{name, seed, type, params};
     });
     ui.SetLoadWorldCallback([&](const std::string& world_id) { loaded_world_id = world_id; });
+    ui.SetSavedWorldList(SavedWorldFixture);
 
     int navigation_clicks_checked = 0;
     int form_fields_checked = 0;
@@ -798,6 +828,59 @@ TEST(UiSmokeTest, SettingsScreenRoundTripsThroughTheBridge) {
     EXPECT_EQ(model.save_count, 1) << "Apply & Save must invoke the bridge Save()";
 
     ui.Shutdown();
+}
+
+TEST(UiSmokeTest, DisabledAudioShowsStatusAndPreservesSavedVolumes) {
+    HiddenGlContext context;
+    if (!context.ready()) {
+        GTEST_SKIP() << context.error();
+    }
+    Luminumbra::Client::NullAudioManager audio;
+    ASSERT_TRUE(audio.Init());
+    audio.SetMasterVolume(1.0f);
+    Luminumbra::Client::Rml_UIManager ui(SourceRoot().string() + "/");
+    ui.Init(context.window(), &audio);
+    ASSERT_NE(ui.GetContext(), nullptr);
+    int audio_set_calls = 0;
+    int save_calls = 0;
+    Luminumbra::Client::SettingsBridge bridge;
+    bridge.GetAudioMaster = bridge.GetAudioMusic = bridge.GetAudioSfx = [] {
+        return 1.0f;
+    };
+    bridge.SetAudioMaster = bridge.SetAudioMusic = bridge.SetAudioSfx = [&](float) {
+        ++audio_set_calls;
+    };
+    bridge.Save = [&] {
+        ++save_calls;
+        return true;
+    };
+    ui.SetSettingsBridge(std::move(bridge));
+    auto* menu = LoadDocumentAndFind(ui, "main_menu.rml", "main_menu");
+    ASSERT_NE(menu, nullptr);
+    ClickAndUpdate(ui, menu->GetElementById("settings_btn"));
+    auto* settings = FindDocumentByElementId(ui.GetContext(), "settings");
+    ASSERT_NE(settings, nullptr);
+    auto* status = settings->GetElementById("setting_audio_status");
+    ASSERT_NE(status, nullptr);
+    EXPECT_NE(status->GetInnerRML().find("Audio is disabled for this release."), std::string::npos);
+    for (const char* id : {"setting_audio_master", "setting_audio_music", "setting_audio_sfx"}) {
+        auto* control = dynamic_cast<Rml::ElementFormControl*>(settings->GetElementById(id));
+        ASSERT_NE(control, nullptr);
+        EXPECT_TRUE(control->HasAttribute("disabled"));
+        EXPECT_FLOAT_EQ(std::stof(control->GetValue()), 1.0f);
+        // Even a programmatic change or Apply & Save cannot edit a disabled level.
+        control->SetValue("0.25");
+        Rml::Dictionary parameters;
+        control->DispatchEvent(Rml::EventId::Change, parameters);
+        ui.Update();
+    }
+    ClickAndUpdate(ui, settings->GetElementById("apply_settings_btn"));
+    EXPECT_EQ(audio_set_calls, 0);
+    EXPECT_EQ(save_calls, 1);
+    EXPECT_FALSE(audio.IsPlaybackEnabled());
+    EXPECT_EQ(audio.RecordedRequestCount(), 0u);
+    ui.Shutdown();
+    audio.Shutdown();
 }
 
 // The cinematic redesign's custom widgets are FUNCTIONAL (not just decorative): the vsync
@@ -1161,6 +1244,7 @@ TEST(UiSmokeTest, WorldSelectEmptyGuardAndHotReload) {
 
     int load_calls = 0;
     ui.SetLoadWorldCallback([&](const std::string&) { ++load_calls; });
+    ui.SetSavedWorldList(SavedWorldFixture);
 
     Rml::ElementDocument* ws = LoadDocumentAndFind(ui, "world_selection.rml", "world_selection");
     ASSERT_NE(ws, nullptr);
@@ -1175,6 +1259,7 @@ TEST(UiSmokeTest, WorldSelectEmptyGuardAndHotReload) {
     // The manager tracks selection internally; reloading the doc resets it to empty.
     ui.ReloadActiveDocument();
     ui.Update();
+    AwaitWorldCatalog(ui);
     ws = FindDocumentByElementId(ui.GetContext(), "world_selection");
     ASSERT_NE(ws, nullptr) << "ReloadActiveDocument must re-load the world-selection screen";
 

@@ -37,6 +37,9 @@ public:
     virtual bool Init() = 0;
     virtual void Update() = 0;
     virtual void Shutdown() = 0;
+    // Backend availability, independent of saved volume levels. This does not
+    // assert that a particular sound is audible or that an output device works.
+    virtual bool IsPlaybackEnabled() const = 0;
 
     virtual bool LoadBank(const std::string& bankPath) = 0;
     virtual void UnloadBank(const std::string& bankPath) = 0;

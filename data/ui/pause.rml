@@ -20,5 +20,8 @@
                 </div>
             </div>
         </div>
+        <div id="notification" class="notification hidden">
+            <span id="notification_text"></span>
+        </div>
     </body>
 </rml>

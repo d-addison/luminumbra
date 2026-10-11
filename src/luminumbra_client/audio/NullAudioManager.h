@@ -18,10 +18,18 @@
 
 namespace Luminumbra::Client {
 
+enum class NullAudioActivation {
+    ReleaseDefaultOff,
+    ExplicitNoAudio
+};
+
 class NullAudioManager final : public IAudioManager {
 public:
-    explicit NullAudioManager(std::filesystem::path telemetry_path)
+    explicit NullAudioManager(
+        std::filesystem::path telemetry_path = {},
+        NullAudioActivation activation = NullAudioActivation::ReleaseDefaultOff)
         : m_telemetry_path(std::move(telemetry_path))
+        , m_activation(activation)
         , m_started_at(std::chrono::steady_clock::now()) {}
 
     ~NullAudioManager() override {
@@ -41,6 +49,16 @@ public:
         ++m_update_calls;
     }
 
+    bool IsPlaybackEnabled() const override {
+        return false;
+    }
+
+    // Runtime diagnostics: ordinary disabled playback retains no request history.
+    std::size_t RecordedRequestCount() const {
+        return m_bank_paths.size() + m_unloaded_bank_paths.size() + m_event_ids.size() +
+               m_music_ids.size();
+    }
+
     void Shutdown() override {
         if (m_shutdown_written) {
             return;
@@ -53,14 +71,16 @@ public:
 
     bool LoadBank(const std::string& bankPath) override {
         ++m_load_bank_calls;
-        m_bank_paths.push_back(bankPath);
+        if (!m_telemetry_path.empty())
+            m_bank_paths.push_back(bankPath);
         WriteTelemetry("load_bank");
         return true;
     }
 
     void UnloadBank(const std::string& bankPath) override {
         ++m_unload_bank_calls;
-        m_unloaded_bank_paths.push_back(bankPath);
+        if (!m_telemetry_path.empty())
+            m_unloaded_bank_paths.push_back(bankPath);
         WriteTelemetry("unload_bank");
     }
 
@@ -71,7 +91,8 @@ public:
 
     bool PlayEvent(const AudioEventID& eventID, AudioEventHandle& outHandle) override {
         ++m_play_event_calls;
-        m_event_ids.push_back(eventID);
+        if (!m_telemetry_path.empty())
+            m_event_ids.push_back(eventID);
         outHandle = {};
         WriteTelemetry("play_event");
         return true;
@@ -81,21 +102,24 @@ public:
     // holding a concrete NullAudioManager* keep compiling with two-arg calls).
     bool PlayOneShot(const AudioEventID& eventID, const glm::vec3&, BusId = BusId::Sfx) override {
         ++m_play_one_shot_calls;
-        m_event_ids.push_back(eventID);
+        if (!m_telemetry_path.empty())
+            m_event_ids.push_back(eventID);
         WriteTelemetry("play_one_shot");
         return true;
     }
 
     bool PlayOneShot2D(const AudioEventID& eventID, BusId = BusId::Sfx) override {
         ++m_play_one_shot_2d_calls;
-        m_event_ids.push_back(eventID);
+        if (!m_telemetry_path.empty())
+            m_event_ids.push_back(eventID);
         WriteTelemetry("play_one_shot_2d");
         return true;
     }
 
     void PlayMusic(const AudioEventID& musicEventID) override {
         ++m_play_music_calls;
-        m_music_ids.push_back(musicEventID);
+        if (!m_telemetry_path.empty())
+            m_music_ids.push_back(musicEventID);
         WriteTelemetry("play_music");
     }
 
@@ -177,7 +201,10 @@ private:
             {"passed", true},
             {"initialized", m_initialized},
             {"activation",
-             {{"flag", "--no-audio"},
+             {{"flag", m_activation == NullAudioActivation::ExplicitNoAudio ? "--no-audio" : ""},
+              {"reason",
+               m_activation == NullAudioActivation::ExplicitNoAudio ? "explicit_no_audio"
+                                                                    : "release_default_off"},
               {"selected", true},
               {"manager_type", "NullAudioManager"},
               {"hardware_backend_initialized", false},
@@ -222,6 +249,7 @@ private:
     }
 
     std::filesystem::path m_telemetry_path;
+    NullAudioActivation m_activation;
     std::chrono::steady_clock::time_point m_started_at;
     bool m_initialized = false;
     bool m_shutdown_written = false;

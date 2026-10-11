@@ -1048,164 +1048,118 @@ void ScenarioRunnerImpl::captureAtmosMotion(std::chrono::steady_clock::time_poin
 }
 
 void ScenarioRunnerImpl::captureFoliageVisual(std::chrono::steady_clock::time_point now) {
-    if (scenario_config.foliage_visual_smoke() && scenario_ready && !foliage_capture_written) {
-        // record the CALM-phase max sway (~0) during
-        // the first half, then at the late WINDY phase snapshot the
-        // instance set, assert determinism (two rebuilds byte-equal),
-        // measure coverage density / distance-fade / wind-sway, and
-        // write the FoliageInstancing analysis + a render capture.
-        const double elapsed_play_seconds =
-            std::chrono::duration<double>(now - scenario_play_started_at).count();
-        const double duration = static_cast<double>(std::max(1, scenario_config.timed_run_seconds));
-        const double progress = std::clamp(elapsed_play_seconds / duration, 0.0, 1.0);
-        const auto& render_pass_stats = renderPipeline.get_last_render_pass_stats();
-        auto* foliage = renderPipeline.foliage();
-        // Sample the calm-phase max sway (zero wind) once mid-first-half.
-        if (foliage != nullptr && !foliage_calm_sampled && progress >= 0.30 && progress < 0.45 &&
-            render_pass_stats.foliage_draws > 0) {
-            foliage_calm_max_sway = static_cast<double>(foliage->max_sway_displacement());
-            foliage_calm_sampled = true;
+    if (!scenario_config.foliage_visual_smoke() || !scenario_ready || foliage_capture_written) {
+        return;
+    }
+    const double elapsed = std::chrono::duration<double>(now - scenario_play_started_at).count();
+    const double duration = static_cast<double>(std::max(1, scenario_config.timed_run_seconds));
+    const double progress = std::clamp(elapsed / duration, 0.0, 1.0);
+    const auto& stats = renderPipeline.get_last_render_pass_stats();
+    auto* foliage = renderPipeline.foliage();
+    const bool fresh = foliage && foliage->readback_enabled() &&
+                       FoliageInstanceMatches(foliage->build_generation(),
+                                              foliage->instance_generation(),
+                                              foliage->build_frame(),
+                                              foliage->instance_available_frame(),
+                                              scenario_frame_count);
+    const std::uint32_t phase = foliage_calm.sampled ? 2u : 1u;
+    const bool capture_due = phase == 1 ? progress >= 0.30 : progress >= 0.85;
+    if (fresh && capture_due && foliage->build_phase() == phase && stats.foliage_draws > 0 &&
+        stats.foliage_instances_drawn > 0 && g_camera && gameSession) {
+        FoliagePhaseEvidence sample;
+        sample.phase = phase;
+        sample.from_gpu_readback = foliage->instances_from_gpu_readback();
+        sample.capture_frame = scenario_frame_count;
+        sample.simulation_tick = gameSession->GetSimulationTickCount();
+        sample.build_generation = foliage->build_generation();
+        sample.instance_generation = foliage->instance_generation();
+        sample.build_frame = foliage->build_frame();
+        sample.available_frame = foliage->instance_available_frame();
+        sample.instance_hash = foliage->instance_hash();
+        sample.shader_time_seconds = foliage->last_draw_shader_time();
+        sample.camera = {g_camera->Position.x, g_camera->Position.y, g_camera->Position.z};
+        sample.terrain_height_m = foliage_terrain_height;
+        sample.yaw_degrees = g_camera->Yaw;
+        sample.pitch_degrees = g_camera->Pitch;
+        sample.fov_degrees = g_camera->Zoom;
+        sample.time_of_day = renderPipeline.get_time_of_day();
+        sample.fade_start_m = foliage->fade_start_m();
+        sample.fade_end_m = foliage->fade_end_m();
+        sample.density_scale = foliage->density_scale();
+        sample.wind_input = {foliage->wind_input().x, foliage->wind_input().y};
+        sample.maximum_instance_wind = foliage->max_instance_wind_magnitude();
+        sample.screenshot = phase == 1 ? "screenshots/foliage-instancing-calm.ppm"
+                                       : "screenshots/foliage-instancing.ppm";
+        glfwGetFramebufferSize(window, &sample.width, &sample.height);
+        if (sample.width > 0 && sample.height > 0) {
+            std::vector<unsigned char> pixels(static_cast<std::size_t>(sample.width) *
+                                              static_cast<std::size_t>(sample.height) * 3u);
+            glReadBuffer(GL_BACK);
+            glPixelStorei(GL_PACK_ALIGNMENT, 1);
+            glReadPixels(
+                0, 0, sample.width, sample.height, GL_RGB, GL_UNSIGNED_BYTE, pixels.data());
+            sample.sampled = WritePixelBufferPpm(scenario_config.artifact_dir / sample.screenshot,
+                                                 sample.width,
+                                                 sample.height,
+                                                 pixels);
         }
-        if (foliage != nullptr && progress >= 0.85 && foliage->readback_enabled() &&
-            render_pass_stats.foliage_draws > 0 && render_pass_stats.foliage_instances_drawn > 0) {
-            // The placement hash is a pure function of the chunk
-            // inputs; the instance-set hash from the just-built
-            // frame is the determinism surface. Snapshot it twice
-            // off the SAME live instance set (already rebuilt this
-            // frame) -- byte-equal by construction; the run==run
-            // assertion documents the surface.
-            const std::uint64_t hash_a = foliage->instance_hash();
-            const std::uint64_t hash_b = foliage->instance_hash();
-
-            std::uint64_t world_seed = 0;
-            Luminumbra::u8 probe_biome = 255;
-            double biome_density = 0.0;
+        if (sample.sampled && phase == 1) {
+            foliage_calm = sample;
+        } else if (sample.sampled) {
+            FoliageInstancingResult result;
+            result.calm = foliage_calm;
+            result.windy = sample;
+            result.density_multiplier = scenario_config.foliage_density_scale;
             if (auto* ws = gameSession->GetWorldSystem()) {
-                world_seed = static_cast<std::uint64_t>(static_cast<std::uint32_t>(ws->get_seed()));
-                // Biome density at the camera column (the scatter's
-                // dominant local biome) for the coverage band check.
-                const Luminumbra::Vec3 cam(
-                    g_camera->Position.x, g_camera->Position.y, g_camera->Position.z);
-                probe_biome = ws->BiomeIdAt(cam.x, cam.z);
-                biome_density = ws->biomes_enabled()
-                                    ? ws->biome_table().vegetation_for(probe_biome).density
-                                    : 0.3;
+                result.world_seed =
+                    static_cast<std::uint64_t>(static_cast<std::uint32_t>(ws->get_seed()));
+                const auto biome = ws->BiomeIdAt(g_camera->Position.x, g_camera->Position.z);
+                result.biome_density =
+                    ws->biomes_enabled() ? ws->biome_table().vegetation_for(biome).density : 0.3;
             }
-
-            Luminumbra::Client::ScenarioHarness::FoliageInstancingResult result;
-            result.world_seed = world_seed;
-            result.instance_hash_run_a = hash_a;
-            result.instance_hash_run_b = hash_b;
-            result.hash_byte_equal = (hash_a == hash_b);
             result.instances_total = foliage->instances().size();
-            const float ring_radius = foliage->fade_end_m();
-            result.live_ring_radius_m = ring_radius;
+            result.live_ring_radius_m = foliage->fade_end_m();
             result.fade_start_m = foliage->fade_start_m();
             result.fade_end_m = foliage->fade_end_m();
             result.instances_within_ring =
-                foliage->instances_within(g_camera->Position, ring_radius);
+                foliage->instances_within(g_camera->Position, foliage->fade_end_m());
             result.instances_beyond_fade =
-                foliage->instances_beyond(g_camera->Position, ring_radius);
-            // Measured density: live in-ring instances normalized by
-            // a nominal full-cover count (so it tracks biome_density
-            // on the same [0,1] scale; banded loosely since scatter
-            // also depends on slope/moisture + the visible footprint).
-            //  (defect 2): the candidate
-            // budget per chunk was raised 256 -> 2048 to make the
-            // ground read as real grass cover, so the in-ring instance
-            // COUNT scales up proportionally. Re-bless the normalizer
-            // (nominal full-cover count) to the new ~8x denser scatter
-            // so measured_density still lands on the biome [0,1] scale,
-            // and keep the loose band. DELIBERATE update the baseline (logged).
-            //  update the baseline (2026-06-21): the prior 32768 under-shot —
-            // the dense flat_lands scatter emits ~70k in-ring instances, so
-            // measured saturated at 1.0 (gate off-band 1.0 vs biome 0.3).
-            // Calibrate so measured ~= biome_density for the real ~70k
-            // scatter (70000 / 0.3); the loose 0.6 band absorbs run-to-run
-            // chunk-churn variance (scatter can ~2.9x before the band edge).
-            //  update the baseline (2026-07-02): the #1b-lush density default
-            // (FoliagePass m_density_scale 1.35) + the 48/92 m carpet fade
-            // deliberately SATURATE the 262144 instance budget in flat_lands —
-            // measured in-ring == kMaxInstances on the first green run after
-            // the defoliation fix. Calibrate so measured ~= biome_density (0.3)
-            // at saturation (262144 / 0.3); the gate separately asserts a hard
-            // in-ring FLOOR so decimation-class regressions stay RED.
-            const double nominal_full = 873813.0;
-            result.measured_density = std::clamp(
-                static_cast<double>(result.instances_within_ring) / nominal_full, 0.0, 1.0);
-            result.biome_density = biome_density;
-            result.biome_density_band = 0.6; // loose band (footprint-dependent)
-            result.calm_max_sway = foliage_calm_max_sway;
-            result.windy_max_sway = static_cast<double>(foliage->max_sway_displacement());
-            result.sway_responds = result.windy_max_sway > result.calm_max_sway;
-            result.foliage_gpu_ms = render_pass_stats.foliage_gpu_ms;
-            result.foliage_budget_ms = 0.6;
-            result.gpu_timers_supported =
-                render_pass_stats.gpu_timers_supported && render_pass_stats.foliage_gpu_ms > 0.0;
-            result.foliage_draws = render_pass_stats.foliage_draws;
-            result.foliage_instances_drawn = render_pass_stats.foliage_instances_drawn;
-
-            int screenshot_width = 0;
-            int screenshot_height = 0;
-            glfwGetFramebufferSize(window, &screenshot_width, &screenshot_height);
-            if (screenshot_width > 0 && screenshot_height > 0) {
-                std::vector<unsigned char> frame_pixels(
-                    static_cast<std::size_t>(screenshot_width) *
-                    static_cast<std::size_t>(screenshot_height) * 3u);
-                glReadBuffer(GL_BACK);
-                glPixelStorei(GL_PACK_ALIGNMENT, 1);
-                glReadPixels(0,
-                             0,
-                             screenshot_width,
-                             screenshot_height,
-                             GL_RGB,
-                             GL_UNSIGNED_BYTE,
-                             frame_pixels.data());
-                const std::string screenshot_path = "screenshots/foliage-instancing.ppm";
-                if (WritePixelBufferPpm(scenario_config.artifact_dir / screenshot_path,
-                                        screenshot_width,
-                                        screenshot_height,
-                                        frame_pixels)) {
-                    foliage_capture_written = true;
-                    Luminumbra::Client::ScenarioHarness::WriteFoliageInstancingAnalysis(
-                        scenario_config.artifact_dir, screenshot_path, result, render_pass_stats);
-                }
-            }
-        }
-        // never end a gate run SILENT. If the analysis was not
-        // written by the tail of the run, write an explicit REFUSAL analysis
-        // naming why — a readback-disabled run must fail loudly (its instance
-        // probes are vacuous: play mode publishes the kMaxInstances marker),
-        // and a zero-instance scatter must fail as EMPTY (the defoliation
-        // class), not as a mysteriously missing artifact.
-        if (!foliage_capture_written && progress >= 0.97) {
+                foliage->instances_beyond(g_camera->Position, foliage->fade_end_m());
+            // Historical saturated-workload calibration, not a measured emission fraction.
+            result.measured_density =
+                std::clamp(static_cast<double>(result.instances_within_ring) / 873813.0, 0.0, 1.0);
+            result.foliage_gpu_ms = stats.foliage_gpu_ms;
+            result.gpu_timers_supported = stats.gpu_timers_supported;
+            result.foliage_draws = stats.foliage_draws;
+            result.foliage_instances_drawn = stats.foliage_instances_drawn;
+            WriteFoliageInstancingAnalysis(
+                scenario_config.artifact_dir, sample.screenshot, result, stats);
             foliage_capture_written = true;
-            std::string refusal_reason;
-            if (foliage == nullptr) {
-                refusal_reason = "foliage pass unavailable in this run";
-            } else if (!foliage->readback_enabled()) {
-                refusal_reason = "readback-disabled: instance probes are vacuous (play-mode "
-                                 "kMaxInstances marker); run the gate scenario with "
-                                 "readback enabled";
-            } else if (render_pass_stats.foliage_draws <= 0) {
-                refusal_reason = "no foliage draws reached the render pass";
-            } else {
-                refusal_reason = "scatter emitted zero instances "
-                                 "(defoliation-class regression)";
-            }
-            const nlohmann::json refusal = {
-                {"schema", "luminumbra.foliage_instancing.v1"},
-                {"passed", false},
-                {"refusal", refusal_reason},
-                {"render_pass",
-                 {{"foliage_draws", render_pass_stats.foliage_draws},
-                  {"foliage_instances_drawn", render_pass_stats.foliage_instances_drawn}}}};
-            std::ofstream refusal_out(scenario_config.artifact_dir /
-                                      "foliage-instancing-analysis.json");
-            refusal_out << std::setw(2) << refusal << '\n';
-            LUMINUMBRA_CORE_ERROR("FoliageInstancing: REFUSAL analysis written ({})",
-                                  refusal_reason);
         }
+    }
+    if (!foliage_capture_written && progress >= 0.97) {
+        foliage_capture_written = true;
+        const std::string reason =
+            !foliage                       ? "foliage pass unavailable"
+            : !foliage->readback_enabled() ? "readback disabled; play-path captures do not qualify"
+            : !foliage_calm.sampled        ? "no fresh calm sample and screenshot before deadline"
+            : !fresh ? "windy readback generation did not match the rendered build before deadline"
+                     : "windy draw, instance data or screenshot unavailable before deadline";
+        const nlohmann::json refusal = {
+            {"schema", "luminumbra.foliage_instancing.v2"},
+            {"profile", FoliageVisualProfile::id},
+            {"passed", false},
+            {"refusal", reason},
+            {"phases",
+             {{"calm", FoliagePhaseReport(foliage_calm)},
+              {"windy", FoliagePhaseReport(FoliagePhaseEvidence{})}}},
+            {"capture_frame", scenario_frame_count},
+            {"render_pass",
+             {{"foliage_draws", stats.foliage_draws},
+              {"foliage_instances_drawn", stats.foliage_instances_drawn}}}};
+        std::ofstream output(scenario_config.artifact_dir / "foliage-instancing-analysis.json");
+        output << std::setw(2) << refusal << '\n';
+        LUMINUMBRA_CORE_ERROR("FoliageInstancing: REFUSAL analysis written ({})", reason);
     }
 }
 

@@ -141,6 +141,10 @@ RunPersistenceRoundtripSavePhase(const RuntimeScenarioConfig& config,
         result.failure_reason = "world_system_missing";
         return result;
     }
+    if (!game_session->GetWorldOpenError().empty()) {
+        result.failure_reason = game_session->GetWorldOpenError();
+        return result;
+    }
     if (config.persistence_session_dir.empty()) {
         result.failure_reason = "session_dir_missing";
         return result;
@@ -212,6 +216,7 @@ RunPersistenceRoundtripSavePhase(const RuntimeScenarioConfig& config,
     const std::string world_hash = save_service.world_hash(restricted);
 
     Luminumbra::world::WorldStateSaveReport save_report;
+    // This scenario runs synchronously on the client host thread, like quit saves.
     if (!game_session->SaveWorldStateTo(config.persistence_session_dir, &save_report) ||
         !save_report.saved) {
         result.failure_reason = "world_state_save_failed";
@@ -257,6 +262,10 @@ RunPersistenceRoundtripLoadPhase(const RuntimeScenarioConfig& config,
     PersistenceRoundtripPhaseResult result;
     if (!game_session || !game_session->GetWorldSystem()) {
         result.failure_reason = "world_system_missing";
+        return result;
+    }
+    if (!game_session->GetWorldOpenError().empty()) {
+        result.failure_reason = game_session->GetWorldOpenError();
         return result;
     }
     if (config.persistence_session_dir.empty()) {

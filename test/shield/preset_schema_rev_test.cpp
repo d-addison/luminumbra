@@ -48,19 +48,17 @@ int main() {
         return 1;
     }
 
-    // The oldest supported revision must still load: worlds/atlas/presets/archipelago.json
-    // is authored at it, pinned there by a hash-locked worldgen snapshot test.
-    if (!Accepts(kMinTerrainPresetSchemaRevision, "oldest-supported")) {
-        std::cerr << "oldest supported preset schema revision was rejected\n";
+    if (kTerrainPresetSchemaRevision != 6 || kMinTerrainPresetSchemaRevision != 6) {
+        std::cerr << "the sole explicit preset revision must be 6\n";
         return 1;
     }
 
-    // Below the supported floor: content older than anything the loader understands.
-    {
-        constexpr std::int64_t kTooOld = kMinTerrainPresetSchemaRevision - 1;
-        const auto rejected = LoadTerrainPresetFromJson(ValidPreset(kTooOld), {}, "too-old");
-        if (rejected.ok || !Contains(rejected.errors, "found " + std::to_string(kTooOld))) {
-            std::cerr << "a revision below the supported floor was not rejected\n";
+    // Retirement rejects every formerly supported explicit revision, including
+    // the previously shipped archipelago revision and the previous current revision.
+    for (std::int64_t revision : {-1, 0, 1, 2, 3, 4, 5}) {
+        const auto rejected = LoadTerrainPresetFromJson(ValidPreset(revision), {}, "too-old");
+        if (rejected.ok || !Contains(rejected.errors, "found " + std::to_string(revision))) {
+            std::cerr << "a retired preset revision was not rejected\n";
             return 1;
         }
     }

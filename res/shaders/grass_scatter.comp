@@ -13,19 +13,13 @@
 // UNCHANGED -- only WHERE generation happens moves to the GPU, removing the
 // per-candidate CPU work + the per-rebuild ~9 MB memcpy into the ring VBO.
 //
-// Per-candidate surface (height/slope/moisture/valid) comes from a coarse
-// (kGrid+1)^2 per-chunk grid uploaded once per rebuild (CPU samples the world
-// ~81x/chunk instead of up to 4096x), bilinearly interpolated here; slope is the
-// grid height gradient. This shifts placement vs the exact CPU query slightly
-// (coverage stays in the FoliageInstancing biome band) but is fully
-// deterministic run-to-run (the gate's requirement).: nothing here
-// writes back to sim/world_hash.
+// Per-candidate surface hits use the exact deterministic candidate XZ and the
+// currently uploaded terrain triangles. They are cached per chunk and refreshed
+// on terrain mesh replacement/removal; there is no bilinear height approximation.
 // ===========================================================================
 
 layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 
-const int   kGrid = 8;                 // surface grid cells per chunk side
-const int   kGridVerts = kGrid + 1;    // 9 samples/side -> 81 samples/chunk
 const uint  kWordsPerBlade = 9u;       // 36-byte InstanceRecord = 9 uint words
 const float kSeaLevel = 0.0;
 const float kWaterMargin = 0.4;
@@ -37,11 +31,7 @@ struct GpuChunk {
 };
 
 layout(std430, binding = 0) readonly buffer ChunkParams { GpuChunk chunks[]; };
-// Per-chunk surface grid: chunk c base = c * kGridVerts*kGridVerts; each sample
-// is vec4(height, moisture, slope, valid). slope is the SAME [0,1] estimate the
-// CPU SurfaceQuery returns (uploaded per vert, bilinearly interpolated here) so
-// the GPU accept uses the identical slope source as the CPU path. valid<0.5 ->
-// underwater/no-ground (the candidate is skipped).
+// Exact (height, moisture, slope, valid) for every candidate in every chunk.
 layout(std430, binding = 1) readonly buffer SurfaceGrid { vec4 surf[]; };
 layout(std430, binding = 2) writeonly buffer GrassBlades { uint blades[]; };
 // One append counter followed by DrawArraysIndirectCommand:
@@ -107,31 +97,6 @@ uint encode_f16(float value) {
     return sign | (uint(exponent) << 10) | (mantissa >> 13);
 }
 
-// Bilinear height/moisture/slope from a chunk's surface grid (slope is the
-// query's own [0,1] estimate, so the GPU accept matches the CPU path).
-void sample_surface(int c, vec2 local01, out float height, out float moisture, out float slope, out bool valid) {
-    int base = c * (kGridVerts * kGridVerts);
-    vec2 g = clamp(local01, 0.0, 1.0) * float(kGrid);
-    ivec2 gi = ivec2(floor(g));
-    gi = clamp(gi, ivec2(0), ivec2(kGrid - 1));
-    vec2 f = fract(g);
-
-    vec4 s00 = surf[base + (gi.y) * kGridVerts + (gi.x)];
-    vec4 s10 = surf[base + (gi.y) * kGridVerts + (gi.x + 1)];
-    vec4 s01 = surf[base + (gi.y + 1) * kGridVerts + (gi.x)];
-    vec4 s11 = surf[base + (gi.y + 1) * kGridVerts + (gi.x + 1)];
-
-    // Conservative validity: every corner of the cell must be on valid ground.
-    valid = (s00.w > 0.5) && (s10.w > 0.5) && (s01.w > 0.5) && (s11.w > 0.5);
-
-    vec4 a = mix(s00, s10, f.x);
-    vec4 b = mix(s01, s11, f.x);
-    vec4 s = mix(a, b, f.y);
-    height = s.x;
-    moisture = s.y;
-    slope = clamp(s.z, 0.0, 1.0);
-}
-
 void main() {
     uint cand = gl_GlobalInvocationID.x;
     uint c = gl_GlobalInvocationID.y;
@@ -164,10 +129,11 @@ void main() {
     float inst_dist = length(vec2(wx - u_camera_xz.x, wz - u_camera_xz.y));
     if (inst_dist > u_fade_end_m) return;
 
-    float height, moisture, slope;
-    bool valid;
-    sample_surface(int(c), vec2(fx, fz), height, moisture, slope, valid);
-    if (!valid) return;
+    vec4 surface = surf[c * uint(u_max_candidates) + cand];
+    if (surface.w < 0.5) return;
+    float height = surface.x;
+    float moisture = surface.y;
+    float slope = surface.z;
     if (height <= kSeaLevel + kWaterMargin) return;
     if (slope >= kMaxFoliageSlope) return;
 

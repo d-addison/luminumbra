@@ -140,3 +140,73 @@ TEST(JoltRuntimeLifetime, OverlappingWorldsShareTheProcessFactory) {
 
     second.shutdown();
 }
+
+TEST(LocalPlayerCollision, StanceChangesPreserveFeetAndRefuseLowCeilings) {
+    PhysicsSystem physics;
+    physics.startup();
+    ASSERT_TRUE(physics.is_started());
+    constexpr float kFloorY = 14.0f;
+    auto floor = MakeFlatFloorChunk(IVec3(0, 0, 0), kFloorY);
+    physics.add_chunk_collision(*floor);
+    physics.create_player_controller({8.0f, kFloorY + 0.24f, 8.0f});
+    for (int frame = 0; frame < 120; ++frame) {
+        physics.update_player(glm::vec3(0.0f), false, 0.0f, 0.05f);
+        physics.update(0.05f);
+    }
+    ASSERT_TRUE(physics.is_player_grounded());
+    const auto feet = physics.get_player_position();
+    ASSERT_NEAR(feet.y, kFloorY, 0.05f);
+    for (int transition = 0; transition < 5; ++transition) {
+        ASSERT_TRUE(physics.set_player_crouched(true));
+        EXPECT_EQ(physics.get_player_position(), feet);
+        EXPECT_TRUE(physics.player_has_space_to_stand());
+        ASSERT_TRUE(physics.set_player_crouched(false));
+        EXPECT_EQ(physics.get_player_position(), feet);
+    }
+
+    ASSERT_TRUE(physics.set_player_crouched(true));
+    // A 2.1 m clearance fits the existing 1.7 m crouched capsule but blocks the
+    // 2.6 m standing capsule. A separate vertical chunk keeps both colliders live.
+    auto ceiling = MakeFlatFloorChunk(IVec3(0, 1, 0), kFloorY + 2.1f);
+    physics.add_chunk_collision(*ceiling);
+    EXPECT_FALSE(physics.player_has_space_to_stand());
+    EXPECT_FALSE(physics.set_player_crouched(false));
+    EXPECT_EQ(physics.get_player_position(), feet);
+    EXPECT_TRUE(physics.set_player_crouched(true));
+    physics.remove_chunk_collision(ceiling->get_id());
+    EXPECT_TRUE(physics.player_has_space_to_stand());
+    EXPECT_TRUE(physics.set_player_crouched(false));
+    EXPECT_EQ(physics.get_player_position(), feet);
+    physics.shutdown();
+}
+
+TEST(LocalPlayerCollision, LowerSphereSupportsWalkingOnFortyFiveDegreeSlope) {
+    PhysicsSystem physics;
+    physics.startup();
+    ASSERT_TRUE(physics.is_started());
+    auto ramp = MakeFlatFloorChunk(IVec3(0, 0, 0), 0.0f);
+    constexpr int kSide = Luminumbra::CHUNK_SIZE_X + 1;
+    for (int z = 0; z < kSide; ++z) {
+        for (int x = 0; x < kSide; ++x) {
+            ramp->heightmap_data[static_cast<std::size_t>(z * kSide + x)] = static_cast<float>(x);
+        }
+    }
+    physics.add_chunk_collision(*ramp);
+    physics.create_player_controller({8.0f, 8.24f, 8.0f});
+    for (int frame = 0; frame < 60; ++frame) {
+        physics.update_player(glm::vec3(0.0f), false, 0.0f, 1.0f / 60.0f);
+        physics.update(1.0f / 60.0f);
+    }
+    ASSERT_TRUE(physics.is_player_grounded());
+    const auto before = physics.get_player_position();
+    for (int frame = 0; frame < 30; ++frame) {
+        physics.update_player({3.0f, 0.0f, 0.0f}, false, 0.0f, 1.0f / 60.0f);
+        physics.update(1.0f / 60.0f);
+        EXPECT_TRUE(physics.is_player_grounded());
+    }
+    const auto after = physics.get_player_position();
+    EXPECT_GT(after.x, before.x);
+    EXPECT_GT(after.y, before.y);
+    EXPECT_NEAR(after.y - after.x, 0.0f, 0.3f);
+    physics.shutdown();
+}

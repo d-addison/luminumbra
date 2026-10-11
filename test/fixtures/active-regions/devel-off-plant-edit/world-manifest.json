@@ -1,0 +1,5 @@
+{
+    "container": "LMR1",
+    "container_version": 2,
+    "schema": "luminumbra.persistence.world_manifest.v1"
+}

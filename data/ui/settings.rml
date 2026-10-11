@@ -60,6 +60,7 @@
                         </div>
 
                         <div class="form-group settings-row">
+                            <div id="setting_audio_status">Audio is disabled for this release.</div>
                             <label for="setting_audio_master">master volume <span id="setting_audio_master_value" class="settings-value">100%</span></label>
                             <input type="range" id="setting_audio_master" name="audio_master"
                                    min="0" max="1" step="0.01" value="1" class="form-control settings-slider" />

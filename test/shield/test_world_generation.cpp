@@ -130,6 +130,74 @@ TEST_F(WorldGenerationTest, SurfaceIsGeneratedAtCorrectHeight) {
     EXPECT_GT(outside_density, 0.0f);
 }
 
+TEST_F(WorldGenerationTest, UnderwaterRequiresWaterAboveItsBedInsteadOfAHeightCutoff) {
+    SHIELD_WorldSystem land(nullptr, nullptr, params_guaranteed_surface, 1337);
+    EXPECT_FALSE(land.IsUnderwater({8, -10, 8})) << "dry underground must not become an ocean";
+    SHIELD_WorldSystem sea(nullptr, nullptr, params_underwater_world, 1337);
+    const float bed = sea.GetTerrainHeightAt(8, 8);
+    ASSERT_LT(bed, -1.0f);
+    EXPECT_TRUE(sea.IsUnderwater({8, -1, 8}));
+    EXPECT_FALSE(sea.IsUnderwater({8, 1, 8}));
+    EXPECT_FALSE(sea.IsUnderwater({8, bed - 1, 8})) << "space below the seabed is not water";
+
+    // A live edited basin above sea level, including negative chunk coordinates.
+    const IVec3 coords{-1, 2, -1};
+    land.dispatch_generation_jobs({coords});
+    const auto chunk = land.find_streamed_chunk(coords);
+    ASSERT_NE(chunk, nullptr);
+    chunk->current_water_resolution.store(2);
+    chunk->water_bed_mm.assign(4, 10000);
+    chunk->water_depth_mm.assign(4, 4000);
+    chunk->has_water_sim.store(true);
+    EXPECT_TRUE(land.IsUnderwater({-8, 12, -8}));
+    EXPECT_FALSE(land.IsUnderwater({-8, 9, -8}));
+    EXPECT_FALSE(land.IsUnderwater({-8, 14, -8}));
+    chunk->water_depth_mm.assign(4, 0);
+    EXPECT_FALSE(land.IsUnderwater({-8, 12, -8}))
+        << "drained live water must immediately become dry";
+    chunk->water_bed_mm.assign(4, -10000);
+    EXPECT_FALSE(land.IsUnderwater({-8, -5, -8})) << "dry live basins below sea level stay dry";
+}
+
+TEST_F(WorldGenerationTest, UndergroundStreamingFollowsTheAnchorAndBuildsCaveMeshes) {
+    auto params = params_guaranteed_surface;
+    params.caves_enabled = true;
+    params.cave_frequency = 0.06f;
+    params.cave_threshold = 0.5f;
+    JobSystem jobs;
+    jobs.startup();
+    {
+        SHIELD_WorldSystem world(&jobs, nullptr, params, 1337);
+        world.debug_set_streaming_radius_cap(2);
+        entt::registry registry;
+        for (float height : {-128.0f, -256.0f}) {
+            const Vec3 anchor(-8, height, -8);
+            for (int frame = 0; frame < 48; ++frame) {
+                world.update(registry, anchor, nullptr);
+                world.wait_for_streaming_jobs();
+            }
+            const auto center = SHIELD_WorldSystem::world_to_chunk_coords(anchor);
+            const auto chunk = world.find_streamed_chunk(center);
+            ASSERT_NE(chunk, nullptr) << "underground streaming must follow camera Y " << height;
+            EXPECT_EQ(chunk->sdf_data.size(),
+                      static_cast<std::size_t>(CHUNK_SIZE_X + 1) * (CHUNK_SIZE_Y + 1) *
+                          (CHUNK_SIZE_Z + 1));
+            std::size_t cave_triangles = 0;
+            for (const auto* rendered : world.get_renderable_chunks()) {
+                const auto coords = rendered->get_coords();
+                if (std::abs(coords.x - center.x) <= 2 && std::abs(coords.z - center.z) <= 2 &&
+                    std::abs(coords.y - center.y) <= 2)
+                    cave_triangles += rendered->mesh_indices.size() / 3;
+            }
+            EXPECT_GT(cave_triangles, 0u) << "real cave geometry must reach the renderable set";
+            EXPECT_LT(world.get_runtime_chunk_stats().total_chunks, 350u)
+                << "a descent keeps a bounded local volume, not every intervening height";
+        }
+        world.wait_for_streaming_jobs();
+    }
+    jobs.shutdown();
+}
+
 TEST_F(WorldGenerationTest, HeightmapIsCorrectForFlatSurface) {
     SHIELD_WorldSystem world_system(nullptr, nullptr, params_guaranteed_surface, 1337);
     Chunk chunk({0, 0, 0});

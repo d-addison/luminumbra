@@ -24,7 +24,10 @@ float Clamp01(float value) noexcept {
 // Day fraction in [0, 1): 0 == cycle start (midnight), 0.5 == midday. Integer
 // epoch math first (exact), then to float -- a pure function of the integer tick,
 // no float accumulator (the  / critique- rule).
-float DayFraction(std::uint64_t tick) noexcept {
+float DayFraction(const StimulusContext& context) noexcept {
+    if (context.world_clock)
+        return static_cast<float>(context.world_clock->day_phase(context.tick));
+    const auto tick = context.tick;
     const std::uint64_t tick_in_day = tick % kTicksPerDayCycle;
     return static_cast<float>(static_cast<double>(tick_in_day) /
                               static_cast<double>(kTicksPerDayCycle));
@@ -33,7 +36,10 @@ float DayFraction(std::uint64_t tick) noexcept {
 // Season phase in [0, 1): 0 == spring equinox, 0.25 == summer solstice, 0.75 ==
 // winter solstice. Mirrors the  render-side derivation so the engine Season
 // channel and the render palette agree on the same tick.
-float SeasonPhase(std::uint64_t tick) noexcept {
+float SeasonPhase(const StimulusContext& context) noexcept {
+    if (context.world_clock)
+        return static_cast<float>(context.world_clock->spring_phase(context.tick));
+    const auto tick = context.tick;
     const std::uint64_t tick_in_year = tick % kTicksPerSeasonCycle;
     return static_cast<float>(static_cast<double>(tick_in_year) /
                               static_cast<double>(kTicksPerSeasonCycle));
@@ -78,9 +84,9 @@ float StimulusChannelRegistry::SampleTemperature() const noexcept {
     // precipitation (rain/snow cools) and by the night side of the day cycle.
     // Pure function of the tick + replicated weather; DeterministicMath trig.
     const float season_wave =
-        DeterministicMath::Sin(SeasonPhase(m_context.tick) * DeterministicMath::kTwoPi); // [-1, 1]
+        DeterministicMath::Sin(SeasonPhase(m_context) * DeterministicMath::kTwoPi); // [-1, 1]
     // Day warmth: warmest at midday, coolest at night. cos over the day phase.
-    const float day_phase = DayFraction(m_context.tick) * DeterministicMath::kTwoPi;
+    const float day_phase = DayFraction(m_context) * DeterministicMath::kTwoPi;
     const float day_warmth =
         0.5f * (1.0f - DeterministicMath::Cos(day_phase)); // 0 at midnight, 1 at midday
     // Base around a temperate 0.5, +/- 0.25 for the season, +/- 0.12 for the day.
@@ -93,7 +99,7 @@ float StimulusChannelRegistry::SampleTemperature() const noexcept {
 float StimulusChannelRegistry::SampleTimeOfDay() const noexcept {
     // Day fraction stimulus: 0 at night (cycle start/end), 1 at midday. A raised
     // cosine over the day cycle so the curve is smooth and tick-deterministic.
-    const float day_phase = DayFraction(m_context.tick) * DeterministicMath::kTwoPi;
+    const float day_phase = DayFraction(m_context) * DeterministicMath::kTwoPi;
     return Clamp01(0.5f * (1.0f - DeterministicMath::Cos(day_phase)));
 }
 
@@ -101,7 +107,7 @@ float StimulusChannelRegistry::SampleSeason() const noexcept {
     // Season phase stimulus mapped to [0, 1]: 0 == deep winter, 1 == high summer,
     // ~0.5 at the equinoxes. (season_wave + 1) / 2 of the  season sine.
     const float season_wave =
-        DeterministicMath::Sin(SeasonPhase(m_context.tick) * DeterministicMath::kTwoPi);
+        DeterministicMath::Sin(SeasonPhase(m_context) * DeterministicMath::kTwoPi);
     return Clamp01(0.5f * (season_wave + 1.0f));
 }
 
@@ -114,7 +120,7 @@ float StimulusChannelRegistry::SampleLightLevel() const noexcept {
     if (m_context.ambient_light >= 0.0f) {
         light = m_context.ambient_light;
     } else {
-        const float day_phase = DayFraction(m_context.tick) * DeterministicMath::kTwoPi;
+        const float day_phase = DayFraction(m_context) * DeterministicMath::kTwoPi;
         light = 0.5f * (1.0f - DeterministicMath::Cos(day_phase));
     }
     // Precipitation/overcast dims the light.

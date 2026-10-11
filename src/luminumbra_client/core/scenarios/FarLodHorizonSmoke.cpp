@@ -836,6 +836,9 @@ void WriteFarLodHorizonAnalysis(const std::filesystem::path& artifact_dir,
              {"max_boundary_band_sand_flat_ratio", kFarLodBoundaryMaxSandFlatRatio},
              {"boundary_band_inner_m", kFarLodBoundaryBandInnerMeters},
              {"boundary_band_outer_m", kFarLodBoundaryBandOuterMeters},
+             // Historical v1 metadata, preserved byte-for-byte: the runtime
+             // F2 wanted range is 3000 m and the gate does not read this field.
+             // Future volumetric ranges come from world/FarTierTable.h.
              {"f2_outer_range_m", 1536.0},
              {"sky_ratio_enforced", enforce_sky_ratio},
          }},

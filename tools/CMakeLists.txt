@@ -16,6 +16,11 @@ target_include_directories(asset_processor SYSTEM PRIVATE
 # is not held to the project's -Werror warning policy.
 target_link_libraries(asset_processor PRIVATE meshoptimizer stb_headers)
 
+option(LUMINUMBRA_ENABLE_PREFAB_RUNTIME "Build the optional compiled prefab ECS runtime and inspector" OFF)
+if(LUMINUMBRA_ENABLE_PREFAB_RUNTIME)
+    add_subdirectory(prefab_runtime)
+endif()
+
 if(BUILD_TESTING)
     find_package(Python3 COMPONENTS Interpreter REQUIRED)
     add_test(

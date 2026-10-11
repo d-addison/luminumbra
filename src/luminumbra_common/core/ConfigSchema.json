@@ -75,6 +75,12 @@
       "json_name": "water_high_res"
     },
     {
+      "enum": "SimActiveRegions",
+      "section": "sim",
+      "residency": "hashed",
+      "json_name": "active_regions"
+    },
+    {
       "enum": "RenderMoonlight",
       "section": "render",
       "residency": "excluded",

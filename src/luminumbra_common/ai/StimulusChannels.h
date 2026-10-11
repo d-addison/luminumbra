@@ -28,6 +28,7 @@
 
 #include "../../../include/luminumbra/core/Types.h"
 #include "../systems/WeatherSystem.h"
+#include "../world/WorldClock.h"
 
 namespace luminumbra::ai {
 
@@ -68,6 +69,8 @@ inline constexpr std::uint64_t kTicksPerSeasonCycle = 432000ull;
 // replicated state) -- reproducible on every client/replay.
 struct StimulusContext {
     std::uint64_t tick = 0;
+    // Non-null only under sim.active_regions; the session owns the calendar.
+    const Luminumbra::world::WorldClock* world_clock = nullptr;
     Luminumbra::Vec3 sample_position = Luminumbra::Vec3(0.0f);
     // Replicated weather state (read-only, one-way). May be null.
     const Luminumbra::Systems::WeatherSystem* weather = nullptr;

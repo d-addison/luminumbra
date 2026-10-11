@@ -5982,6 +5982,11 @@ static int cgltf_parse_json_animation_sampler(cgltf_options* options, jsmntok_t 
 			{
 				out_sampler->interpolation = cgltf_interpolation_type_cubic_spline;
 			}
+			else
+			{
+				/* Preserve invalid modes so consumers can refuse them. */
+				out_sampler->interpolation = cgltf_interpolation_type_max_enum;
+			}
 			++i;
 		}
 		else if (cgltf_json_strcmp(tokens + i, json_chunk, "extras") == 0)

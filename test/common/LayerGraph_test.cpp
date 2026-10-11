@@ -45,7 +45,6 @@ nlohmann::json FixedRichPreset() {
                 "height_offset": 7.0,
                 "island_mask_enabled": false,
                 "shaping": {
-                    "enabled": true,
                     "continentalness_frequency": 0.0012,
                     "erosion_frequency": 0.0018,
                     "peaks_frequency": 0.004,

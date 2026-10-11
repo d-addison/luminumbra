@@ -7,6 +7,7 @@
 #endif
 
 #include "VecTools.h"
+#include "PreciseAVX.h"
 
 namespace FastSIMD
 {
@@ -396,12 +397,12 @@ namespace FastSIMD
 
         FS_INLINE static float32v InvSqrt_f32( float32v a )
         {
-            return _mm256_rsqrt_ps( a );
+            return PreciseInvSqrtAVX( a );
         }
 
         FS_INLINE static float32v Reciprocal_f32( float32v a )
         {
-            return _mm256_rcp_ps( a );
+            return PreciseReciprocalAVX( a );
         }
 
         // Floor, Ceil, Round

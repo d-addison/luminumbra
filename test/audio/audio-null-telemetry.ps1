@@ -6,6 +6,8 @@ $ErrorActionPreference = "Stop"
 
 $MainPath = "src/luminumbra_client/main_client.cpp"
 $HarnessPath = "src/luminumbra_client/core/RuntimeScenarioHarness.cpp"
+$ConfigPath = "src/luminumbra_client/core/RuntimeScenarioConfig.cpp"
+$ConfigHeaderPath = "src/luminumbra_client/core/RuntimeScenarioConfig.h"
 $NullAudioPath = "src/luminumbra_client/audio/NullAudioManager.h"
 $ArtifactPath = "build/$BuildPreset/test-artifacts/audio/audio-telemetry.json"
 
@@ -29,6 +31,8 @@ $main = if ($mainExists) { Get-Content $MainPath -Raw } else { "" }
 if (Test-Path $HarnessPath) {
     $main += "`n" + (Get-Content $HarnessPath -Raw)
 }
+$config = if (Test-Path $ConfigPath) { Get-Content $ConfigPath -Raw } else { "" }
+$configHeader = if (Test-Path $ConfigHeaderPath) { Get-Content $ConfigHeaderPath -Raw } else { "" }
 $nullAudio = if ($nullAudioExists) { Get-Content $NullAudioPath -Raw } else { "" }
 
 $checks = @(
@@ -38,7 +42,7 @@ $checks = @(
         -Detail "NullAudioManager must be owned by src/luminumbra_client/audio, not embedded in main_client.cpp"),
     (New-Check `
         -Name "--no-audio selects null manager" `
-        -Passed ($main -match 'HasCommandLineFlag\(argc,\s*argv,\s*"--no-audio"\)' -and $main -match 'scenario_config\.no_audio[\s\S]{0,320}NullAudioManager') `
+        -Passed ($config -match 'HasCommandLineFlag\(argc,\s*argv,\s*"--no-audio"\)' -and $configHeader -match 'return\s+enable_audio\s*&&\s*!no_audio' -and $main -match '!scenario_config\.audio_playback_enabled\(\)[\s\S]{0,320}NullAudioManager') `
         -Detail "The --no-audio launch flag must construct NullAudioManager"),
     (New-Check `
         -Name "null manager emits telemetry schema" `

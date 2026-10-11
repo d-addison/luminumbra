@@ -126,10 +126,10 @@ bool DecodeBye(const std::vector<std::uint8_t>& frame, ByeMsg& out);
 //  a per-frame delivery
 // selector. State replication (Usercmd/Snapshot/Ack) sends UNRELIABLE (most-recent-
 // wins; a dropped datagram is superseded); events/handshake/world-edits/chat send
-// RELIABLE. Steam's ISteamNetworkingSockets carries BOTH on one connection
-// (k_nSteamNetworkingSend_Unreliable / _Reliable). The Loopback/Tcp transports are
-// always-reliable (a safe superset), so they ignore the flag; only a future
-// SteamNetworkingTransport / GameNetworkingSockets impl honours it.
+// RELIABLE. The shared NetSocketsTransport used by GNS and Steam honours BOTH
+// on one connection (k_nSteamNetworkingSend_Unreliable / _Reliable). Loopback/Tcp
+// are always-reliable (a safe superset), so they ignore the flag. CI builds the
+// GNS implementation; live GNS/Steam sessions require separate transport testing.
 enum class FrameDelivery {
     Unreliable,
     Reliable

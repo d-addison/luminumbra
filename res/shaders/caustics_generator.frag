@@ -104,7 +104,10 @@ float causticIntensity(vec2 uv, float time) {
         }
     }
 
-    return intensity;
+    // Each ray samples the same incident field. Normalize the 4x4 quadrature
+    // so increasing sample density does not multiply energy and saturate the
+    // normalized render target into a nearly uniform white plate.
+    return intensity / 16.0;
 }
 
 // Add animated caustic patterns

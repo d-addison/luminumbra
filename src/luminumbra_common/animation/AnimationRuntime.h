@@ -43,8 +43,9 @@ struct ClipTrack {
     uint32_t jointNameHash = 0;
     AnimTargetType targetType = AnimTargetType::Translation;
     uint32_t componentCount = 0; // 3 for T/S, 4 for R
-    std::vector<float> times;    // ascending keyframe times (seconds)
-    std::vector<float> values;   // keyCount * componentCount
+    AnimInterpolation interpolation = AnimInterpolation::LegacyLinear;
+    std::vector<float> times;  // ascending keyframe times (seconds)
+    std::vector<float> values; // keyCount * componentCount; cubic uses triples
 };
 
 struct AnimationClip {
@@ -61,7 +62,7 @@ Pose MakeBindPose(const Skeleton& skeleton);
 
 // Pure: samples the clip at time t (seconds, clamped to [0, duration]).
 // Joints without a track keep their bind-local pose. Keyframes interpolate
-// linearly; rotations use neighborhood-corrected normalized lerp.
+// according to their interpolation mode. Legacy clips retain quaternion nlerp.
 Pose SamplePose(const Skeleton& skeleton, const AnimationClip& clip, float time);
 
 // Pure: per-joint blend of two same-size poses. alpha = 0 returns a,

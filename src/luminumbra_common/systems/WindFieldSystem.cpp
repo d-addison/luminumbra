@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "../core/DeterministicMath.h"
+#include "AmbientNoiseDispatch.h"
 
 // NOTE: call the wrappers via the fully-qualified DeterministicMath:: name (not
 // a short alias) so the SimDeterminismLint trig allow-check (which looks for the
@@ -78,8 +79,8 @@ WindFieldSystem::WindFieldSystem(int world_seed)
     // Low-frequency FBm simplex, the same family the worldgen climate noises use,
     // so the FastNoise batch path (GenPositionArray2D / GenUniformGrid2D) and the
     // single-sample path (GenSingle2D) produce identical float bits.
-    auto fractal = FastNoise::New<FastNoise::FractalFBm>();
-    fractal->SetSource(FastNoise::New<FastNoise::Simplex>());
+    auto fractal = NewAmbientNoise<FastNoise::FractalFBm>();
+    fractal->SetSource(NewAmbientNoise<FastNoise::Simplex>());
     fractal->SetOctaveCount(2);
     m_direction_noise = fractal;
 
@@ -138,10 +139,14 @@ void WindFieldSystem::Update(std::uint64_t tick, const Vec3& region_anchor) {
     // gently around 1. tick is exact-in-double for the coordinate.
     const double drift = static_cast<double>(tick) * kBaseDriftPerTick;
     // Two distinct probe points in noise space (separated so x/y decorrelate).
-    float base_in_x[2] = {static_cast<float>(drift) * kBaseNoiseFrequency,
-                          static_cast<float>(drift + 137.0) * kBaseNoiseFrequency};
-    float base_in_y[2] = {static_cast<float>(0.0) * kBaseNoiseFrequency,
-                          static_cast<float>(53.0) * kBaseNoiseFrequency};
+    // FastNoise's tail loads a full SIMD vector from each input. Zero-initialize
+    // spare lanes through its widest supported vector (AVX-512 = 16 floats),
+    // while requesting and consuming only the two original samples.
+    constexpr std::size_t kNoiseInputWidth = 16;
+    float base_in_x[kNoiseInputWidth] = {static_cast<float>(drift) * kBaseNoiseFrequency,
+                                         static_cast<float>(drift + 137.0) * kBaseNoiseFrequency};
+    float base_in_y[kNoiseInputWidth] = {static_cast<float>(0.0) * kBaseNoiseFrequency,
+                                         static_cast<float>(53.0) * kBaseNoiseFrequency};
     float base_out[2] = {0.0f, 0.0f};
     m_direction_noise->GenPositionArray2D(
         base_out, 2, base_in_x, base_in_y, 0.0f, 0.0f, m_wind_seed);

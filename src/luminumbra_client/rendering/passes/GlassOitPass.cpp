@@ -65,8 +65,8 @@ void GlassOitPass::execute_accum(const RenderContext& ctx, const GlassOitPassInp
         glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_accum_tex, 0);
         glFramebufferTexture2D(
             GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1, GL_TEXTURE_2D, m_reveal_tex, 0);
-        glFramebufferTexture2D(
-            GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, ctx.lit_scene_depth.id, 0);
+        glFramebufferRenderbuffer(
+            GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, ctx.lit_scene_depth.id);
         PassGl::label_gl_object(GL_FRAMEBUFFER, m_fbo, "oit.fbo");
         if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
             LUMINUMBRA_CORE_ERROR("glass_oit: MRT FBO incomplete; OIT disabled");
@@ -91,7 +91,7 @@ void GlassOitPass::execute_accum(const RenderContext& ctx, const GlassOitPassInp
     glClearBufferfv(GL_COLOR, 1, clear_reveal);
 
     glEnable(GL_DEPTH_TEST);
-    glDepthFunc(GL_LESS);
+    glDepthFunc(GL_GREATER);
     glDepthMask(GL_FALSE);
     glDisable(GL_CULL_FACE);
     glEnable(GL_BLEND);
@@ -106,7 +106,7 @@ void GlassOitPass::execute_accum(const RenderContext& ctx, const GlassOitPassInp
     m_accum_shader->setInt("u_opaqueScene", 0);
     m_accum_shader->setVec2(
         "u_screenSize",
-        glm::vec2(static_cast<float>(ctx.screen_width), static_cast<float>(ctx.screen_height)));
+        glm::vec2(static_cast<float>(ctx.internal_w()), static_cast<float>(ctx.internal_h())));
     m_accum_shader->setVec3("u_cameraPos", ctx.camera->Position);
     m_accum_shader->setFloat("u_refractionStrength", 0.35f);
     glBindVertexArray(input.glass_vao);

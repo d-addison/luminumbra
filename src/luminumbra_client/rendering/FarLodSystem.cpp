@@ -52,16 +52,6 @@ float region_nearest_distance(int rx, int rz, const glm::vec3& position) {
     return std::sqrt(dx * dx + dz * dz);
 }
 
-float region_farthest_distance(int rx, int rz, const glm::vec3& position) {
-    const float min_x = static_cast<float>(rx) * kRegionSize;
-    const float min_z = static_cast<float>(rz) * kRegionSize;
-    const float dx =
-        std::max(std::abs(position.x - min_x), std::abs(position.x - (min_x + kRegionSize)));
-    const float dz =
-        std::max(std::abs(position.z - min_z), std::abs(position.z - (min_z + kRegionSize)));
-    return std::sqrt(dx * dx + dz * dz);
-}
-
 bool aabb_outside_frustum(const glm::vec3& aabb_min,
                           const glm::vec3& aabb_max,
                           const glm::vec4 frustum_planes[6]) {
@@ -159,19 +149,6 @@ rebase_authoritative_tile(const Luminumbra::Systems::SHIELD_WorldSystem& world,
                           int rz,
                           u64 params_hash) {
     auto fresh = Luminumbra::World::BuildPristineFarLodTile(world, tier, rx, rz, params_hash);
-    if (stale.legacy_surface_authority) {
-        for (std::size_t i = 0; i < stale.sample_count(); ++i) {
-            if ((stale.flags[i] & Luminumbra::World::kFarLodSampleFlagEdited) == 0u) {
-                continue;
-            }
-            fresh.height_q[i] = stale.height_q[i];
-            fresh.material[i] = stale.material[i];
-            fresh.flags[i] = stale.flags[i];
-        }
-        fresh.legacy_surface_authority = true;
-        fresh.edited = true;
-    }
-
     const std::size_t samples = Luminumbra::World::FarLodSdfBrickSampleCount(tier);
     for (std::size_t brick_index = 0; brick_index < stale.sdf_bricks.size(); ++brick_index) {
         const auto& descriptor = stale.sdf_bricks[brick_index];
@@ -569,242 +546,6 @@ struct PendingWorldBrick {
     bool persisted = false;
 };
 
-struct LegacySurfaceSample {
-    u16 height_q = 0;
-    u8 material = 0;
-    u8 flags = 0;
-};
-
-using LegacySurfaceMap = std::map<std::pair<int, int>, LegacySurfaceSample>; // (world_z, world_x)
-
-bool collect_legacy_surface_samples(const World::FarLodTile& source,
-                                    LegacySurfaceMap& samples,
-                                    std::string& error) {
-    if (!source.legacy_surface_authority)
-        return true;
-    if (!valid_region_coordinate(source.rx) || !valid_region_coordinate(source.rz) ||
-        source.samples_per_side != World::FarLodSamplesPerSide(source.tier) ||
-        source.height_q.size() != source.sample_count() ||
-        source.material.size() != source.sample_count() ||
-        source.flags.size() != source.sample_count()) {
-        error = "legacy far surface has invalid coordinates or sample streams";
-        return false;
-    }
-    const int step = World::FarLodSampleStepMeters(source.tier);
-    const std::int64_t origin_x =
-        static_cast<std::int64_t>(source.rx) * World::kFarLodRegionSizeMeters;
-    const std::int64_t origin_z =
-        static_cast<std::int64_t>(source.rz) * World::kFarLodRegionSizeMeters;
-    for (u32 z = 0; z < source.samples_per_side; ++z) {
-        for (u32 x = 0; x < source.samples_per_side; ++x) {
-            const std::size_t index =
-                static_cast<std::size_t>(x) + static_cast<std::size_t>(z) * source.samples_per_side;
-            if ((source.flags[index] & World::kFarLodSampleFlagEdited) == 0u)
-                continue;
-            constexpr u8 kKnownLegacyFlags =
-                World::kFarLodSampleFlagWater | World::kFarLodSampleFlagEdited;
-            if ((source.flags[index] & static_cast<u8>(~kKnownLegacyFlags)) != 0u) {
-                error = "legacy far surface sample has unknown flag bits";
-                return false;
-            }
-            const std::int64_t world_x = origin_x + static_cast<std::int64_t>(x) * step;
-            const std::int64_t world_z = origin_z + static_cast<std::int64_t>(z) * step;
-            if (world_x < std::numeric_limits<int>::min() ||
-                world_x > std::numeric_limits<int>::max() ||
-                world_z < std::numeric_limits<int>::min() ||
-                world_z > std::numeric_limits<int>::max()) {
-                error = "legacy far surface sample coordinate overflows";
-                return false;
-            }
-            const LegacySurfaceSample value{
-                source.height_q[index], source.material[index], source.flags[index]};
-            const auto inserted = samples.emplace(
-                std::make_pair(static_cast<int>(world_z), static_cast<int>(world_x)), value);
-            if (!inserted.second && (inserted.first->second.height_q != value.height_q ||
-                                     inserted.first->second.material != value.material ||
-                                     inserted.first->second.flags != value.flags)) {
-                error = "legacy far surfaces disagree on a shared world sample";
-                return false;
-            }
-        }
-    }
-    return true;
-}
-
-void erase_legacy_surface_footprint(const IVec3& coords,
-                                    World::FarLodTier tier,
-                                    LegacySurfaceMap& samples) {
-    const int step = World::FarLodSampleStepMeters(tier);
-    const std::int64_t origin_x = static_cast<std::int64_t>(coords.x) * CHUNK_SIZE_X;
-    const std::int64_t origin_z = static_cast<std::int64_t>(coords.z) * CHUNK_SIZE_Z;
-    for (int local_z = 0; local_z <= CHUNK_SIZE_Z; local_z += step) {
-        for (int local_x = 0; local_x <= CHUNK_SIZE_X; local_x += step) {
-            samples.erase(
-                {static_cast<int>(origin_z + local_z), static_cast<int>(origin_x + local_x)});
-        }
-    }
-}
-
-// A sample on a chunk face is a corner of cells on both sides of that face.
-// Using floor(world / 16) alone would incorrectly drop the max-face sample of
-// the lower chunk (most visibly, world x=512 from region 1 while chunk 31 is
-// part of the region-0 SDF halo).
-bool legacy_sample_touches_owned_cell(int world_x,
-                                      int world_z,
-                                      const std::vector<std::pair<i32, i32>>& owned_columns) {
-    const int chunk_x = floor_divide(world_x, CHUNK_SIZE_X);
-    const int chunk_z = floor_divide(world_z, CHUNK_SIZE_Z);
-    const bool x_boundary = world_x % CHUNK_SIZE_X == 0;
-    const bool z_boundary = world_z % CHUNK_SIZE_Z == 0;
-    const int x_begin = x_boundary ? chunk_x - 1 : chunk_x;
-    const int z_begin = z_boundary ? chunk_z - 1 : chunk_z;
-    for (int z = z_begin; z <= chunk_z; ++z) {
-        for (int x = x_begin; x <= chunk_x; ++x) {
-            if (std::binary_search(
-                    owned_columns.begin(), owned_columns.end(), std::make_pair(z, x))) {
-                return true;
-            }
-        }
-    }
-    return false;
-}
-
-// All records have now been merged when this runs.  Repeating supersession at
-// this point is intentional: a later neighbour record may have contributed a
-// legacy sample after an earlier authoritative record erased the same world
-// coordinate.  Authority wins independently of region/load order.
-bool supersede_legacy_with_final_authority(World::FarLodTile& tile,
-                                           World::FarLodTier tier,
-                                           const std::vector<PendingWorldBrick>& pending,
-                                           LegacySurfaceMap& samples,
-                                           bool& changed,
-                                           std::string& error) {
-    const int step = World::FarLodSampleStepMeters(tier);
-    const std::int64_t tile_origin_x =
-        static_cast<std::int64_t>(tile.rx) * World::kFarLodRegionSizeMeters;
-    const std::int64_t tile_origin_z =
-        static_cast<std::int64_t>(tile.rz) * World::kFarLodRegionSizeMeters;
-    for (const PendingWorldBrick& brick : pending) {
-        if (brick.descriptor.source_kind != World::FarLodBrickSourceKind::Authoritative) {
-            continue;
-        }
-        if (!valid_world_brick(brick.descriptor)) {
-            error = "final far-SDF authority footprint exceeds the supported world range";
-            return false;
-        }
-        const std::int64_t origin_x =
-            static_cast<std::int64_t>(brick.descriptor.chunk_x) * CHUNK_SIZE_X;
-        const std::int64_t origin_z =
-            static_cast<std::int64_t>(brick.descriptor.chunk_z) * CHUNK_SIZE_Z;
-        for (int local_z = 0; local_z <= CHUNK_SIZE_Z; local_z += step) {
-            for (int local_x = 0; local_x <= CHUNK_SIZE_X; local_x += step) {
-                const std::int64_t world_x = origin_x + local_x;
-                const std::int64_t world_z = origin_z + local_z;
-                samples.erase({static_cast<int>(world_z), static_cast<int>(world_x)});
-
-                // A foreign brick can supersede an edited sample on this
-                // tile's shared border even though it must never be persisted
-                // as a brick in this tile. Clear only the legacy ownership bit;
-                // the canonical SDF pass below derives water independently.
-                const std::int64_t tile_x = world_x - tile_origin_x;
-                const std::int64_t tile_z = world_z - tile_origin_z;
-                if (tile_x < 0 || tile_z < 0 || tile_x > World::kFarLodRegionSizeMeters ||
-                    tile_z > World::kFarLodRegionSizeMeters || tile_x % step != 0 ||
-                    tile_z % step != 0) {
-                    continue;
-                }
-                const std::size_t sx = static_cast<std::size_t>(tile_x / step);
-                const std::size_t sz = static_cast<std::size_t>(tile_z / step);
-                if (sx >= tile.samples_per_side || sz >= tile.samples_per_side) {
-                    error = "final far-SDF authority footprint exceeded the requested tile";
-                    return false;
-                }
-                u8& flags = tile.flags[sx + sz * tile.samples_per_side];
-                const u8 next = static_cast<u8>(flags & ~World::kFarLodSampleFlagEdited);
-                changed = changed || next != flags;
-                flags = next;
-            }
-        }
-    }
-    const bool legacy_authority = std::any_of(tile.flags.begin(), tile.flags.end(), [](u8 flags) {
-        return (flags & World::kFarLodSampleFlagEdited) != 0u;
-    });
-    changed = changed || tile.legacy_surface_authority != legacy_authority;
-    tile.legacy_surface_authority = legacy_authority;
-    return true;
-}
-
-// Surviving height-only authority is promoted into every regenerable scratch
-// brick that contains its world column.  This happens before canonicalization,
-// so shared samples use the ordinary density/material conflict rules and the
-// mesher consumes one representation instead of a local overlay side channel.
-bool synthesize_legacy_surfaces_into_regenerable_bricks(World::FarLodTier tier,
-                                                        const LegacySurfaceMap& samples,
-                                                        std::vector<PendingWorldBrick>& pending,
-                                                        std::string& error) {
-    const int step = World::FarLodSampleStepMeters(tier);
-    const u32 side = World::FarLodSdfBrickSamplesPerSide(tier);
-    const std::size_t count = World::FarLodSdfBrickSampleCount(tier);
-    for (PendingWorldBrick& brick : pending) {
-        if (brick.descriptor.source_kind != World::FarLodBrickSourceKind::RegenerableCache) {
-            continue;
-        }
-        if (!valid_world_brick(brick.descriptor) || brick.density.size() != count ||
-            brick.material.size() != count) {
-            error = "legacy far surface encountered an invalid regenerable brick";
-            return false;
-        }
-        bool patched = false;
-        for (u32 z = 0; z < side; ++z) {
-            for (u32 x = 0; x < side; ++x) {
-                const std::int64_t world_x =
-                    static_cast<std::int64_t>(brick.descriptor.chunk_x) * CHUNK_SIZE_X +
-                    static_cast<int>(x) * step;
-                const std::int64_t world_z =
-                    static_cast<std::int64_t>(brick.descriptor.chunk_z) * CHUNK_SIZE_Z +
-                    static_cast<int>(z) * step;
-                if (world_x < std::numeric_limits<int>::min() ||
-                    world_x > std::numeric_limits<int>::max() ||
-                    world_z < std::numeric_limits<int>::min() ||
-                    world_z > std::numeric_limits<int>::max()) {
-                    error = "legacy far surface synthesis coordinate overflows";
-                    return false;
-                }
-                const auto legacy =
-                    samples.find({static_cast<int>(world_z), static_cast<int>(world_x)});
-                if (legacy == samples.end())
-                    continue;
-                const float height = World::DequantizeFarLodHeight(legacy->second.height_q);
-                for (u32 y = 0; y < side; ++y) {
-                    const std::int64_t world_y =
-                        static_cast<std::int64_t>(brick.descriptor.chunk_y) * CHUNK_SIZE_Y +
-                        static_cast<int>(y) * step;
-                    if (world_y < std::numeric_limits<int>::min() ||
-                        world_y > std::numeric_limits<int>::max()) {
-                        error = "legacy far surface synthesis height overflows";
-                        return false;
-                    }
-                    const std::size_t index = static_cast<std::size_t>(x) +
-                                              static_cast<std::size_t>(y) * side +
-                                              static_cast<std::size_t>(z) * side * side;
-                    brick.density[index] =
-                        World::QuantizeFarLodSdf(static_cast<float>(world_y) - height);
-                    if (brick.density[index] == World::kFarLodSdfInvalid) {
-                        error = "legacy far surface synthesis produced an invalid density";
-                        return false;
-                    }
-                    brick.material[index] = legacy->second.material;
-                }
-                patched = true;
-            }
-        }
-        if (patched) {
-            brick.descriptor.payload_crc32 = world_brick_crc(brick.density, brick.material);
-        }
-    }
-    return true;
-}
-
 bool add_or_overlay_world_brick(std::vector<PendingWorldBrick>& bricks,
                                 PendingWorldBrick incoming,
                                 bool snapshot_overlay,
@@ -1016,56 +757,10 @@ bool derive_assembly_water(World::FarLodTile& tile,
     const u32 side = World::FarLodSdfBrickSamplesPerSide(assembly.tier);
     const std::size_t count = World::FarLodSdfBrickSampleCount(assembly.tier);
     std::map<std::pair<int, int>, std::map<int, i16>> vertical_columns; // (z,x) -> (y,density)
-    std::set<std::pair<int, int>> legacy_surface_coordinates;
     const std::int64_t tile_origin_x =
         static_cast<std::int64_t>(tile.rx) * World::kFarLodRegionSizeMeters;
     const std::int64_t tile_origin_z =
         static_cast<std::int64_t>(tile.rz) * World::kFarLodRegionSizeMeters;
-    std::pair<int, int> previous_legacy{};
-    bool have_previous_legacy = false;
-    for (const auto& legacy : assembly.legacy_surface_samples) {
-        const std::pair<int, int> key(legacy.world_z, legacy.world_x);
-        constexpr u8 kKnownLegacyFlags =
-            World::kFarLodSampleFlagWater | World::kFarLodSampleFlagEdited;
-        if ((legacy.flags & World::kFarLodSampleFlagEdited) == 0u ||
-            (legacy.flags & static_cast<u8>(~kKnownLegacyFlags)) != 0u ||
-            legacy.world_x % step != 0 || legacy.world_z % step != 0 ||
-            (have_previous_legacy && !(previous_legacy < key)) ||
-            !legacy_sample_touches_owned_cell(
-                legacy.world_x, legacy.world_z, assembly.owned_columns)) {
-            error = "far-SDF legacy surface metadata is invalid or irrelevant";
-            return false;
-        }
-        previous_legacy = key;
-        have_previous_legacy = true;
-        legacy_surface_coordinates.emplace(key);
-
-        // Legacy ownership can originate in a neighbouring region at this
-        // tile's shared max face. Transfer exactly its saved water bit; Edited
-        // remains local persistence metadata and is never imported.
-        const std::int64_t local_x = static_cast<std::int64_t>(legacy.world_x) - tile_origin_x;
-        const std::int64_t local_z = static_cast<std::int64_t>(legacy.world_z) - tile_origin_z;
-        if (local_x < 0 || local_z < 0 || local_x > World::kFarLodRegionSizeMeters ||
-            local_z > World::kFarLodRegionSizeMeters) {
-            continue;
-        }
-        if (local_x % step != 0 || local_z % step != 0) {
-            error = "far-SDF legacy water sample is not tile-aligned";
-            return false;
-        }
-        const std::size_t sx = static_cast<std::size_t>(local_x / step);
-        const std::size_t sz = static_cast<std::size_t>(local_z / step);
-        if (sx >= tile.samples_per_side || sz >= tile.samples_per_side) {
-            error = "far-SDF legacy water sample exceeded the requested tile";
-            return false;
-        }
-        u8& flags = tile.flags[sx + sz * tile.samples_per_side];
-        const u8 next = (legacy.flags & World::kFarLodSampleFlagWater) != 0u
-                            ? static_cast<u8>(flags | World::kFarLodSampleFlagWater)
-                            : static_cast<u8>(flags & ~World::kFarLodSampleFlagWater);
-        changed = changed || flags != next;
-        flags = next;
-    }
     for (std::size_t i = 0; i < assembly.bricks.size(); ++i) {
         const auto& brick = assembly.bricks[i];
         if (!valid_world_brick(brick)) {
@@ -1103,10 +798,6 @@ bool derive_assembly_water(World::FarLodTile& tile,
                                                 static_cast<int>(x) * step);
                 const int wz = static_cast<int>(static_cast<std::int64_t>(z_chunk) * CHUNK_SIZE_Z +
                                                 static_cast<int>(z) * step);
-                // A surviving legacy height sample owns both its geometry and water
-                // state until a real SDF footprint removes it from the assembly.
-                if (legacy_surface_coordinates.count({wz, wx}) != 0u)
-                    continue;
                 const auto column = vertical_columns.find({wz, wx});
                 if (column == vertical_columns.end()) {
                     error = "far-SDF water derivation is missing a vertical column";
@@ -1172,7 +863,6 @@ FarLodWorkerBuildOutcome BuildFarLodWorkerTile(const Systems::SHIELD_WorldSystem
     assembly.rz = rz;
     assembly.params_hash = snapshot.params_hash;
     std::vector<PendingWorldBrick> pending;
-    LegacySurfaceMap legacy_surface_samples;
     bool loaded = false;
     if (!save_dir.empty()) {
         std::vector<std::string> errors;
@@ -1204,9 +894,7 @@ FarLodWorkerBuildOutcome BuildFarLodWorkerTile(const Systems::SHIELD_WorldSystem
             outcome.error = "persisted far-SDF tile has invalid coordinates or streams";
             return false;
         }
-        if (!collect_legacy_surface_samples(source, legacy_surface_samples, outcome.error)) {
-            return false;
-        }
+
         for (std::size_t i = 0; i < source.sdf_bricks.size(); ++i) {
             const auto& brick = source.sdf_bricks[i];
             const std::int64_t chunk_x64 =
@@ -1251,8 +939,6 @@ FarLodWorkerBuildOutcome BuildFarLodWorkerTile(const Systems::SHIELD_WorldSystem
                 source.sdf_material.begin() + static_cast<std::ptrdiff_t>(begin),
                 source.sdf_material.begin() + static_cast<std::ptrdiff_t>(begin + count));
             incoming.persisted = true;
-            erase_legacy_surface_footprint(
-                IVec3(chunk_x, brick.chunk_y, chunk_z), tier, legacy_surface_samples);
             if (!add_or_overlay_world_brick(pending, std::move(incoming), false, outcome.error))
                 return false;
         }
@@ -1276,7 +962,6 @@ FarLodWorkerBuildOutcome BuildFarLodWorkerTile(const Systems::SHIELD_WorldSystem
         if (!add_or_overlay_world_brick(pending, std::move(incoming), true, outcome.error)) {
             return false;
         }
-        erase_legacy_surface_footprint(reduction.coords, tier, legacy_surface_samples);
         if (update_home) {
             std::string reduction_error;
             const auto reduced =
@@ -1381,11 +1066,6 @@ FarLodWorkerBuildOutcome BuildFarLodWorkerTile(const Systems::SHIELD_WorldSystem
         }
     }
 
-    if (!supersede_legacy_with_final_authority(
-            tile, tier, pending, legacy_surface_samples, outcome.changed, outcome.error)) {
-        return outcome;
-    }
-
     // Complete every authority stack plus its horizontal halo in absolute
     // chunk coordinates.  Support is transient; only the home tile above is
     // ever modified or returned for persistence.
@@ -1430,7 +1110,7 @@ FarLodWorkerBuildOutcome BuildFarLodWorkerTile(const Systems::SHIELD_WorldSystem
                     const int chunk_x = static_cast<int>(chunk_x64);
                     const int chunk_z = static_cast<int>(chunk_z64);
                     // Inspect the complete tier lattice, not merely the chunk
-                    // origin.  A steep or legacy-edited column may cross a vertical
+                    // origin.  A steep column may cross a vertical
                     // chunk boundary between its corners.
                     for (int local_z = 0; local_z <= CHUNK_SIZE_Z; local_z += sample_step) {
                         for (int local_x = 0; local_x <= CHUNK_SIZE_X; local_x += sample_step) {
@@ -1438,12 +1118,8 @@ FarLodWorkerBuildOutcome BuildFarLodWorkerTile(const Systems::SHIELD_WorldSystem
                                 static_cast<std::int64_t>(chunk_x) * CHUNK_SIZE_X + local_x);
                             const int world_z = static_cast<int>(
                                 static_cast<std::int64_t>(chunk_z) * CHUNK_SIZE_Z + local_z);
-                            const auto legacy = legacy_surface_samples.find({world_z, world_x});
-                            const float height =
-                                legacy != legacy_surface_samples.end()
-                                    ? World::DequantizeFarLodHeight(legacy->second.height_q)
-                                    : world.GetTerrainHeightAt(static_cast<float>(world_x),
-                                                               static_cast<float>(world_z));
+                            const float height = world.GetTerrainHeightAt(
+                                static_cast<float>(world_x), static_cast<float>(world_z));
                             if (!std::isfinite(height)) {
                                 outcome.error = "far-SDF halo surface height is non-finite";
                                 return outcome;
@@ -1521,25 +1197,8 @@ FarLodWorkerBuildOutcome BuildFarLodWorkerTile(const Systems::SHIELD_WorldSystem
                 return outcome;
         }
     }
-    if (!synthesize_legacy_surfaces_into_regenerable_bricks(
-            tier, legacy_surface_samples, pending, outcome.error)) {
-        return outcome;
-    }
     if (!finalize_assembly(assembly, pending, outcome.error))
         return outcome;
-    if (!assembly.bricks.empty()) {
-        for (const auto& [world_key, sample] : legacy_surface_samples) {
-            if (!legacy_sample_touches_owned_cell(
-                    world_key.second, world_key.first, assembly.owned_columns)) {
-                continue;
-            }
-            assembly.legacy_surface_samples.push_back({world_key.second,
-                                                       world_key.first,
-                                                       sample.height_q,
-                                                       sample.material,
-                                                       sample.flags});
-        }
-    }
     if (!derive_assembly_water(tile, assembly, outcome.changed, outcome.error))
         return outcome;
     World::MarchingCubes::GenerateFarLodRegionMesh(tile, assembly, outcome.mesh);
@@ -1811,6 +1470,13 @@ void FarLodSystem::integrate_completed_builds() {
         region.last_wanted_frame = m_frame;
         region.region_authority_revision = result.region_authority_revision;
         region.persistence_pending = persistence_pending;
+        if (m_coverage_enabled) {
+            region.edited_samples_observed = true;
+            region.has_edited_samples =
+                std::any_of(result.tile.flags.begin(), result.tile.flags.end(), [](u8 flags) {
+                    return (flags & World::kFarLodSampleFlagEdited) != 0;
+                });
+        }
 
         auto existing = m_residents.find(key);
         if (existing != m_residents.end()) {
@@ -1828,6 +1494,16 @@ void FarLodSystem::update(const Systems::SHIELD_WorldSystem& world_system,
                           const glm::vec3& camera_position) {
     ++m_frame;
     m_last_camera_position = camera_position;
+    if (m_coverage_enabled) {
+        m_coverage = {};
+        m_coverage.enabled = true;
+        m_coverage.update_frame = m_frame;
+        m_coverage.camera = camera_position;
+        m_coverage.preview_anchored = m_preview_mode;
+        m_coverage.camera_region_guard_bypassed = m_coverage_camera_region_guard_bypass;
+        m_coverage.preview_anchor = m_preview_anchor;
+        m_coverage.preview_inner_radius = m_preview_inner_radius;
+    }
     m_stats.enabled = m_enabled;
     m_stats.region_draws = 0;
     m_stats.indices_drawn = 0;
@@ -1874,13 +1550,9 @@ void FarLodSystem::update(const Systems::SHIELD_WorldSystem& world_system,
             if (nearest > kF2OuterRangeMeters) {
                 continue;
             }
-            // Live wins: a region the live chunk ring covers entirely is
-            // never drawn far. (In preview mode the live slice is sub-region, so
-            // every region around the centre is wanted — its far mesh draws under
-            // the slice and the centre-relative inner discard hides it there.)
-            if (region_farthest_distance(rx, rz, stream_pos) <= kLiveRingRadiusMeters) {
-                continue;
-            }
+            // Retain far coverage beneath the live ring too. A camera above
+            // the surface can outlive/cull its live terrain; horizontal ring
+            // ownership alone must not leave an unrendered square below it.
             const World::FarLodTier tier =
                 nearest < kF1OuterRangeMeters ? World::FarLodTier::F1 : World::FarLodTier::F2;
             wanted.push_back({rx, rz, tier, nearest});
@@ -2058,6 +1730,57 @@ void FarLodSystem::update(const Systems::SHIELD_WorldSystem& world_system,
         ++m_stats.evictions_this_frame;
     }
 
+    if (m_coverage_enabled) {
+        m_coverage.wanted = wanted.size();
+        m_coverage.pending = m_pending.size();
+        const int eye_rx = static_cast<int>(std::floor(camera_position.x / kRegionSize));
+        const int eye_rz = static_cast<int>(std::floor(camera_position.z / kRegionSize));
+        for (const Wanted& want : wanted) {
+            const u64 key = region_key(want.rx, want.rz);
+            const auto resident = m_residents.find(key);
+            const u64 revision = world_system.far_lod_region_authority_revision(want.rx, want.rz);
+            const bool current = resident != m_residents.end() &&
+                                 resident->second.tier == want.tier &&
+                                 resident->second.region_authority_revision == revision &&
+                                 !resident->second.persistence_pending;
+            m_coverage.resident += resident != m_residents.end();
+            m_coverage.missing += resident == m_residents.end();
+            m_coverage.stale += resident != m_residents.end() && !current;
+            if (std::abs(want.rx - eye_rx) > 1 || std::abs(want.rz - eye_rz) > 1)
+                continue;
+            RegionCoverage row;
+            row.rx = want.rx;
+            row.rz = want.rz;
+            row.wanted = true;
+            row.wanted_tier = want.tier;
+            row.pending = m_pending.count(key) != 0;
+            row.resident = resident != m_residents.end();
+            row.current = current;
+            row.authority_revision = revision;
+            if (row.resident) {
+                const auto& region = resident->second;
+                row.resident_tier = region.tier;
+                row.resident_authority_revision = region.region_authority_revision;
+                row.persistence_pending = region.persistence_pending;
+                row.has_edited_samples = region.has_edited_samples;
+                row.edited_samples_observed = region.edited_samples_observed;
+                row.aabb_min = region.aabb_min;
+                row.aabb_max = region.aabb_max;
+                row.terrain_indices = region.element_count;
+                row.water_indices = region.water_element_count;
+            } else {
+                row.terrain_decision = "not_resident";
+                row.water_decision = "not_resident";
+            }
+            m_coverage.neighbourhood.push_back(row);
+        }
+        std::sort(m_coverage.neighbourhood.begin(),
+                  m_coverage.neighbourhood.end(),
+                  [](const RegionCoverage& a, const RegionCoverage& b) {
+                      return std::tie(a.rz, a.rx) < std::tie(b.rz, b.rx);
+                  });
+    }
+
     m_stats.regions_wanted = wanted.size();
     m_stats.regions_missing = missing;
     m_stats.regions_building = m_pending.size();
@@ -2083,13 +1806,13 @@ void FarLodSystem::draw_gbuffer(Shader& geometry_shader,
     // discard far fragments inside the guaranteed-live ring so the
     // under-terrain fill cannot peek through live seam cracks at close range.
     glEnable(GL_POLYGON_OFFSET_FILL);
-    glPolygonOffset(2.0f, 4.0f);
+    glPolygonOffset(-2.0f, -4.0f);
     geometry_shader.setFloat("u_farClipInnerRadius", kFarClipInnerRadiusMeters);
     // clip far geometry at the GEOMETRY level
     // (gl_ClipDistance[0]) to a radial band. The near radius removes the camera-
     // straddling triangles; the far radius removes the far-plane/frustum-edge
     // triangles - both rasterized as the horizon sky-sliver. The clipped band is
-    // invisible (inside the live ring / past the 1000 m far plane), so nothing is
+    // invisible (inside the live ring / beyond the far draw radius), so nothing is
     // lost. Camera-region skip also drops the one region the camera sits in,
     // whose near triangles straddle the camera even after the radial clip.
     glEnable(GL_CLIP_DISTANCE0);
@@ -2116,8 +1839,36 @@ void FarLodSystem::draw_gbuffer(Shader& geometry_shader,
     const auto is_camera_region = [&](const ResidentRegion& region) {
         // Preview mode (external orbit camera over a fixed sub-region slice): skip
         // no region — the centre region carries the diorama's far field.
-        return !m_preview_mode && region.rx == camera_rx && region.rz == camera_rz;
+        // The first-person near-plane guard applies only near this region's
+        // vertical bounds. Flying above it must retain its ground and water.
+        return !(m_coverage_enabled && m_coverage_camera_region_guard_bypass) && !m_preview_mode &&
+               region.rx == camera_rx && region.rz == camera_rz &&
+               m_last_camera_position.y >= region.aabb_min.y - kFarClipInnerRadiusMeters &&
+               m_last_camera_position.y <= region.aabb_max.y + kFarClipInnerRadiusMeters;
     };
+
+    if (m_coverage_enabled) {
+        m_coverage.draw_observed = true;
+        m_coverage.camera_region_guard_bypassed = m_coverage_camera_region_guard_bypass;
+        // Same predicates, priority and frustum used by the two draw loops below.
+        for (auto& row : m_coverage.neighbourhood) {
+            const auto found = m_residents.find(region_key(row.rx, row.rz));
+            if (found == m_residents.end())
+                continue;
+            const auto& region = found->second;
+            const auto decision = [&](u32 count) {
+                if (count == 0)
+                    return "empty_mesh";
+                if (is_camera_region(region))
+                    return "camera_region_guard";
+                if (aabb_outside_frustum(region.aabb_min, region.aabb_max, frustum_planes))
+                    return "outside_frustum";
+                return "submitted";
+            };
+            row.terrain_decision = decision(region.element_count);
+            row.water_decision = decision(region.water_element_count);
+        }
+    }
 
     std::size_t water_draws = 0;
     std::size_t water_indices = 0;
