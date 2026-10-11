@@ -60,6 +60,7 @@ set(COMMON_SOURCES
 
     # Simulation
     ${CMAKE_CURRENT_LIST_DIR}/simulation/SimulationEventBus.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/simulation/SimBudgetProfile.cpp
 
     # Shield
 
