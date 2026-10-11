@@ -496,6 +496,37 @@ if os.name == "posix":
             self.assertEqual(receipt["collection_error_count"], len(iteration["collection_errors"]))
             self.assertEqual(receipt["first_failure"]["index"], 1)
 
+        def test_post_crash_listing_error_keeps_the_classified_iteration(self) -> None:
+            args = self.in_process_args(1)
+            real_snapshot = rq.snapshot_files
+            recursive_calls: list[Path] = []
+
+            def listing_fails_after_crash(root, recursive, skip=None):  # type: ignore[no-untyped-def]
+                # The first recursive snapshot is taken before the child runs; the next is post-crash.
+                if recursive:
+                    recursive_calls.append(root)
+                    if len(recursive_calls) > 1:
+                        raise PermissionError("listing denied")
+                return real_snapshot(root, recursive, skip)
+
+            with mock.patch.object(rq, "snapshot_files", side_effect=listing_fails_after_crash):
+                code = rq.run_qualification(
+                    args,
+                    ["--fake=segv_core"],
+                    core_limits=lambda: (4096, 4096),
+                    read_pattern=lambda: "core.%p",
+                )
+            self.assertEqual(code, 1)
+            receipt = self.load_receipt()
+            self.assertEqual(receipt["status"], "failed")
+            self.assertEqual(len(receipt["iterations"]), 1)
+            iteration = receipt["iterations"][0]
+            self.assertEqual(iteration["status"], "signal:SIGSEGV")
+            self.assertEqual(iteration["signal"], "SIGSEGV")
+            self.assertTrue(iteration["failed"])
+            self.assertTrue(any("listing denied" in error for error in iteration["collection_errors"]))
+            self.assertEqual(receipt["first_failure"]["index"], 1)
+
         def in_process_args(self, count: int, *extra: str) -> object:
             return rq.parse_args(
                 [
@@ -772,6 +803,29 @@ class CorePatternTest(unittest.TestCase):
 
         literal = rq.core_name_regex("100%%.core")
         self.assertIsNotNone(literal.fullmatch("100%.core"))
+
+    def test_pid_suffix_is_accepted_for_patterns_without_pid(self) -> None:
+        # The kernel appends .PID when core_uses_pid is set and the pattern has no %p.
+        executable = rq.core_name_regex("%e.core")
+        self.assertIsNotNone(executable.fullmatch("world_test.core"))
+        self.assertIsNotNone(executable.fullmatch("world_test.core.123"))
+        self.assertIsNone(executable.fullmatch("world_test.core.123.4"))
+        self.assertIsNone(executable.fullmatch("world_test.core.x"))
+
+        literal = rq.core_name_regex("100%%.core")
+        self.assertIsNotNone(literal.fullmatch("100%.core.7"))
+
+    def test_pattern_with_pid_takes_no_extra_suffix(self) -> None:
+        names = rq.core_name_regex("core.%p")
+        self.assertIsNotNone(names.fullmatch("core.123"))
+        self.assertIsNone(names.fullmatch("core.123.4"))
+        self.assertIsNone(names.fullmatch("core.123.bak"))
+
+        # %%p is a literal "%p", not a pid specifier, so the pid suffix still applies.
+        literal_percent_p = rq.core_name_regex("core.%%p")
+        self.assertIsNotNone(literal_percent_p.fullmatch("core.%p"))
+        self.assertIsNotNone(literal_percent_p.fullmatch("core.%p.9"))
+        self.assertIsNone(literal_percent_p.fullmatch("core.%p.9.9"))
 
     def test_core_collection_copies_only_core_named_files(self) -> None:
         skip = rq.core_collection_skip(self.root / "run", self.root / "out" / "receipt.json", "core.%p")

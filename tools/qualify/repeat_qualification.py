@@ -222,13 +222,12 @@ def core_name_regex(pattern: str) -> re.Pattern[str]:
     """Regex for the file names core_pattern can produce, matched against the pattern's basename.
 
     %p becomes digits, %% a literal percent sign, and every other % specifier one path-free run of
-    characters. A pattern without any % is Linux's default naming: the name itself, optionally
-    followed by .<pid> when core_uses_pid is set.
+    characters. When the pattern has no %p, the kernel appends .<pid> whenever core_uses_pid is set,
+    so an optional .<digits> suffix is accepted; a pattern containing %p already carries the pid.
     """
     name = pattern.rsplit("/", 1)[-1]
-    if "%" not in name:
-        return re.compile(re.escape(name) + r"(?:\.\d+)?")
     parts: list[str] = []
+    has_pid = False
     index = 0
     while index < len(name):
         char = name[index]
@@ -238,12 +237,15 @@ def core_name_regex(pattern: str) -> re.Pattern[str]:
             if specifier == "%":
                 parts.append(re.escape("%"))
             elif specifier == "p":
+                has_pid = True
                 parts.append(r"\d+")
             else:
                 parts.append(r"[^/]+")
             continue
         parts.append(re.escape(char))
         index += 1
+    if not has_pid:
+        parts.append(r"(?:\.\d+)?")
     return re.compile("".join(parts))
 
 
@@ -274,11 +276,19 @@ def copy_changed_files(
 ) -> list[str]:
     """Copy new or rewritten files under root, keeping their path relative to root.
 
-    A file that cannot be copied is left out and described in errors when a list is given, so one
-    unreadable file does not discard the rest of the iteration. Without a list the error propagates.
+    A file that cannot be copied, or a directory that cannot be listed, is described in errors when a
+    list is given, so one unreadable entry does not discard the rest of the iteration. Without a list
+    the error propagates.
     """
     copies: list[str] = []
-    for source in changed_files(before, snapshot_files(root, recursive, skip)):
+    try:
+        changed = changed_files(before, snapshot_files(root, recursive, skip))
+    except OSError as exc:
+        if errors is None:
+            raise
+        errors.append(f"{root} listing: {type(exc).__name__}: {exc}")
+        return copies
+    for source in changed:
         relative = Path(source).relative_to(root) if root is not None else Path(source).name
         target = destination / relative
         try:
@@ -799,7 +809,10 @@ def run_indexed_iteration(
     except OSError as exc:
         collection_errors.append(f"crash directory listing: {type(exc).__name__}: {exc}")
     if IS_WINDOWS and dump_folder is not None and result["status"] not in ("exit:0", "timeout"):
-        wait_for_dump_settle(dump_folder, dump_before, DUMP_SETTLE_SECONDS)
+        try:
+            wait_for_dump_settle(dump_folder, dump_before, DUMP_SETTLE_SECONDS)
+        except OSError as exc:
+            collection_errors.append(f"dump folder settle: {type(exc).__name__}: {exc}")
     artifacts += copy_changed_files(
         dump_folder, dump_before, iter_dir / "wer", errors=collection_errors
     )
