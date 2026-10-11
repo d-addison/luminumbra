@@ -136,9 +136,7 @@ public:
         }) {}
 
     ~Worker() {
-        if (m_thread.joinable()) {
-            m_thread.join();
-        }
+        Join();
     }
 
     Worker(const Worker&) = delete;
@@ -146,6 +144,14 @@ public:
 
     bool FinishedWithin(std::chrono::milliseconds timeout) {
         return m_result.wait_for(timeout) == std::future_status::ready;
+    }
+
+    // Joins the thread. Callers only join after FinishedWithin() has succeeded, or
+    // after the output has been released, so the join cannot wait on a stalled write.
+    void Join() {
+        if (m_thread.joinable()) {
+            m_thread.join();
+        }
     }
 
 private:
@@ -191,6 +197,76 @@ bool WaitUntil(const std::function<bool()>& predicate, std::chrono::milliseconds
     }
     return predicate();
 }
+
+// State shared by the drop-notice write hook. The hook runs on the writer thread
+// and holds only this object (by shared_ptr) and a weak reference to the logger,
+// so it never touches the test's locals. Close() stops new calls and waits, with
+// a bounded wait, for calls already in flight.
+class NoticeHook {
+public:
+    std::weak_ptr<spdlog::logger> logger;
+
+    void OnWrite(const std::string& chunk) {
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            if (m_closed) {
+                return;
+            }
+            ++m_active;
+        }
+        if (!chunk.empty() && chunk[0] == '[' && !m_overflowed.exchange(true)) {
+            // The strong reference from lock() is released before this call returns.
+            if (auto locked = logger.lock()) {
+                locked->info("line 4");
+            }
+        }
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            --m_active;
+        }
+        m_cv.notify_all();
+    }
+
+    // Returns false if in-flight calls did not finish within the timeout.
+    bool Close(std::chrono::milliseconds timeout) {
+        std::unique_lock<std::mutex> lock(m_mutex);
+        m_closed = true;
+        return m_cv.wait_for(lock, timeout, [this] { return m_active == 0; });
+    }
+
+private:
+    std::mutex m_mutex;
+    std::condition_variable m_cv;
+    std::atomic<bool> m_overflowed{false};
+    bool m_closed = false;
+    std::size_t m_active = 0;
+};
+
+// Ends a NoticeHook on every exit path. Declared after the logger, so it runs
+// before the logger is released.
+class NoticeHookCloser {
+public:
+    explicit NoticeHookCloser(std::shared_ptr<NoticeHook> hook)
+        : m_hook(std::move(hook)) {}
+    ~NoticeHookCloser() {
+        if (!m_hook->Close(5000ms)) {
+            ADD_FAILURE() << "write hook still running after the bounded wait";
+        }
+    }
+
+    NoticeHookCloser(const NoticeHookCloser&) = delete;
+    NoticeHookCloser& operator=(const NoticeHookCloser&) = delete;
+
+private:
+    std::shared_ptr<NoticeHook> m_hook;
+};
+
+// Records what the destruction worker observed. Shared with the worker by value,
+// so it outlives the test body if the worker is still running.
+struct DestructionProbe {
+    std::atomic<bool> last_reference{false};
+    std::atomic<bool> destroyed{false};
+};
 
 #ifndef _WIN32
 
@@ -284,6 +360,7 @@ public:
         Finish();
     }
 
+    PipeHarness() = default;
     PipeHarness(const PipeHarness&) = delete;
     PipeHarness& operator=(const PipeHarness&) = delete;
 
@@ -435,13 +512,25 @@ TEST_F(BoundedConsoleSinkTest, DestroyingSinkWhileWriterBlockedReturnsPromptly) 
     Worker& second = scope.Run([logger] { logger->info("second"); });
     ASSERT_TRUE(second.FinishedWithin(1000ms));
 
+    // Join the logging workers first, so that their copies of the logger are gone
+    // and the destruction worker holds the only references.
+    first.Join();
+    second.Join();
+
     // Drop the last references on a worker so the destructor's bounded wait is
-    // measured without blocking the test.
-    Worker& destroy = scope.Run([s = std::move(sink), l = std::move(logger)]() mutable {
+    // measured without blocking the test. The worker reports completion only after
+    // s.reset() has returned, that is, after the sink destructor has run.
+    auto probe = std::make_shared<DestructionProbe>();
+    Worker& destroy = scope.Run([s = std::move(sink), l = std::move(logger), probe]() mutable {
+        const bool logger_last = l.use_count() == 1;
         l.reset();
+        probe->last_reference = logger_last && s.use_count() == 1;
         s.reset();
+        probe->destroyed = true;
     });
     EXPECT_TRUE(destroy.FinishedWithin(1000ms));
+    EXPECT_TRUE(probe->last_reference);
+    EXPECT_TRUE(probe->destroyed);
 
     // The writer outlives the sink. Once the fake is released, the in-flight and
     // queued lines are still delivered without a crash.
@@ -457,14 +546,12 @@ TEST_F(BoundedConsoleSinkTest, DropNoticeDoesNotStarveQueuedMessages) {
     auto logger = MakeLogger(sink);
 
     // The first notice is written while line 4 overflows the queue again. The hook
-    // runs on the writer thread, and the sink never blocks on it.
-    std::atomic<bool> overflowed{false};
-    spdlog::logger* raw_logger = logger.get();
-    out->SetOnWrite([raw_logger, &overflowed](const std::string& chunk) {
-        if (!chunk.empty() && chunk[0] == '[' && !overflowed.exchange(true)) {
-            raw_logger->info("line 4");
-        }
-    });
+    // runs on the writer thread, and the sink never blocks on it. The hook holds
+    // shared state only, and the closer below waits for it before the logger goes.
+    auto hook = std::make_shared<NoticeHook>();
+    hook->logger = logger;
+    out->SetOnWrite([hook](const std::string& chunk) { hook->OnWrite(chunk); });
+    NoticeHookCloser hook_closer(hook);
     StallScope scope(out);
 
     out->Stall();
