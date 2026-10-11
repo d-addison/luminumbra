@@ -110,7 +110,7 @@ pristine pages remain distinct from durable authority tombstones. This extension
 does not choose a cave alternative or qualify continuous descent or rendering.
 
 The explicit-window design and independent analytic control ideas were compared
-with PR177 at `3d77fc9962f03c3385b3b2ec6f4bef1efab5f4fe`. Its conflicting public
+with the separate tile-generation kernel at `3d77fc9962f03c3385b3b2ec6f4bef1efab5f4fe`. Its conflicting public
 types, float payload and Z/X/Y traversal are not imported. The canonical
 sign-preserving quantizer changes magnitudes/interpolation; it does not erase
 finite nonzero signs merely because they are subnormal.
