@@ -115,6 +115,23 @@ POSIX_LAUNCHER = "#!{python}\n"
 WINDOWS_LAUNCHER = '@"{python}" -I "{child}" %*\r\n'
 
 
+def posix_crash_capture_ready(cwd: Path) -> bool:
+    """True when this host's core pattern and core limit let the harness collect cores."""
+    if os.name == "nt":
+        return False
+    pattern = rq.read_core_pattern()
+    current = rq.resource.getrlimit(rq.resource.RLIMIT_CORE)
+    child_soft = rq.core_limit_target(current)[0]
+    return not rq.posix_preflight_problems(
+        {
+            "core_pattern": pattern,
+            "core_pattern_piped": bool(pattern and pattern.startswith("|")),
+            "core_directory": rq.core_directory_for_pattern(pattern, cwd),
+        },
+        child_soft,
+    )
+
+
 def pid_alive(pid: int) -> bool:
     if os.name == "nt":
         listing = subprocess.run(
@@ -144,7 +161,8 @@ class HarnessTestCase(unittest.TestCase):
         self.root = Path(self._tmp.name)
         self.work = self.root / "work"
         self.work.mkdir()
-        self.receipt = self.root / "out" / "receipt.json"
+        # The receipt directory contains a space so the output path is exercised with spaces.
+        self.receipt = self.root / "out dir" / "receipt.json"
         self.exe = self._write_fake_child()
 
     def tearDown(self) -> None:
@@ -181,6 +199,10 @@ class HarnessTestCase(unittest.TestCase):
         ]
         if os.name == "nt":
             # Dump preflight is covered by the unit tests below; the run itself needs no dumps.
+            args.append("--allow-no-dumps")
+        elif not posix_crash_capture_ready(self.work):
+            # Hosts whose core_pattern is piped or whose core limit is zero cannot collect cores.
+            # The fail-closed preflight is covered by the unit tests; these runs record the override.
             args.append("--allow-no-dumps")
         return args
 
@@ -409,11 +431,63 @@ if os.name == "posix":
             self.assertEqual(result.returncode, 1)
             receipt = self.load_receipt()
             environment = receipt["environment"]
-            self.assertEqual(environment["rlimit_core_child"], "unlimited")
+            # The child's soft limit is raised to the parent's hard limit and nothing else changes.
+            self.assertEqual(environment["rlimit_core_child"]["soft"], environment["rlimit_core_parent"]["hard"])
+            self.assertEqual(environment["rlimit_core_child"]["hard"], environment["rlimit_core_parent"]["hard"])
             self.assertIn("core_pattern", environment)
             for artifact in receipt["iterations"][0]["crash_artifacts"]:
                 self.assertTrue(Path(artifact).is_file(), artifact)
                 self.assertTrue(artifact.startswith(str(self.run_dir())), artifact)
+
+        def in_process_args(self, count: int, *extra: str) -> object:
+            return rq.parse_args(
+                [
+                    "--exe",
+                    str(self.exe),
+                    "--cwd",
+                    str(self.work),
+                    "--receipt",
+                    str(self.receipt),
+                    "--count",
+                    str(count),
+                    *extra,
+                ]
+            )
+
+        def test_zero_hard_core_limit_fails_preflight_without_allow(self) -> None:
+            args = self.in_process_args(1)
+            code = rq.run_qualification(args, ["--fake=pass"], core_limits=lambda: (0, 0))
+            self.assertEqual(code, rq.PREFLIGHT_EXIT_CODE)
+            receipt = self.load_receipt()
+            self.assertEqual(receipt["status"], "PREFLIGHT_FAILED")
+            self.assertEqual(receipt["iterations"], [])
+            self.assertIn("soft limit is 0", receipt["failure_reason"])
+            self.assertIn("--allow-no-dumps", receipt["failure_reason"])
+            self.assertIn("kernel.core_pattern", receipt["failure_reason"])
+
+        def test_zero_hard_core_limit_runs_with_allow_and_records_child_limit(self) -> None:
+            args = self.in_process_args(1, "--allow-no-dumps")
+            code = rq.run_qualification(args, ["--fake=pass"], core_limits=lambda: (0, 0))
+            self.assertEqual(code, 0)
+            receipt = self.load_receipt()
+            self.assertEqual(receipt["status"], "passed")
+            self.assertEqual(receipt["environment"]["rlimit_core_child"], {"soft": 0, "hard": 0})
+            self.assertTrue(any("soft limit is 0" in p for p in receipt["environment"]["core_problems"]))
+            self.assertEqual(receipt["iterations"][0]["status"], "exit:0")
+
+        def test_spawn_time_setup_error_is_a_launch_error_iteration(self) -> None:
+            args = self.in_process_args(2, "--allow-no-dumps")
+            with mock.patch.object(rq, "apply_core_limit", side_effect=OSError("setrlimit denied")):
+                code = rq.run_qualification(args, ["--fake=pass"], core_limits=lambda: (1024, 4096))
+            self.assertEqual(code, 1)
+            receipt = self.load_receipt()
+            self.assertEqual(receipt["status"], "failed")
+            self.assertNotIn("abort_reason", receipt)
+            self.assertEqual(len(receipt["iterations"]), 2)
+            self.assertTrue(receipt["iterations"][0]["status"].startswith("launch_error"))
+            # CPython reports any exception raised in preexec_fn to the parent as SubprocessError.
+            self.assertIn("preexec_fn", receipt["iterations"][0]["launch_error"] or "")
+            self.assertTrue(receipt["first_failure"]["failure_reason"].startswith("launch_error"))
 
 
 class RunDirectoryAndSnapshotTest(unittest.TestCase):
@@ -528,6 +602,174 @@ class WerPreflightTest(unittest.TestCase):
         path = Path(self._tmp.name) / "world.exe"
         path.write_bytes(b"placeholder")
         return path
+
+    def test_application_key_with_only_dump_type_keeps_global_folder(self) -> None:
+        app_key = f"{REGISTRY_ROOT}\\world.exe"
+        outputs = {
+            app_key: "\r\n    DumpType    REG_DWORD    0x1\r\n",
+            REGISTRY_ROOT: self.reg_output(str(self.folder), dump_type="2"),
+        }
+
+        def query(key: str) -> tuple[int, str]:
+            return (0, outputs[key]) if key in outputs else (1, "")
+
+        result = rq.evaluate_wer_preflight("world.exe", self.folder, query)
+        self.assertTrue(result["configured"], result)
+        self.assertEqual(result["dump_type"], "0x1")
+        self.assertEqual(result["dump_type_value"], 1)
+        self.assertEqual(result["sources"], {"DumpFolder": REGISTRY_ROOT, "DumpType": app_key})
+        self.assertEqual(result["key"], REGISTRY_ROOT)
+
+    def test_application_value_overrides_global_value_individually(self) -> None:
+        app_key = f"{REGISTRY_ROOT}\\world.exe"
+        other = self.folder.parent / "other"
+        outputs = {
+            app_key: "\r\n    DumpFolder    REG_EXPAND_SZ    " + str(other) + "\r\n",
+            REGISTRY_ROOT: self.reg_output(str(self.folder), dump_type="2"),
+        }
+
+        def query(key: str) -> tuple[int, str]:
+            return (0, outputs[key]) if key in outputs else (1, "")
+
+        result = rq.evaluate_wer_preflight("world.exe", self.folder, query)
+        self.assertFalse(result["configured"])
+        self.assertIn("does not match", result["reason"])
+        self.assertEqual(result["sources"]["DumpFolder"], app_key)
+        self.assertEqual(result["sources"]["DumpType"], REGISTRY_ROOT)
+        self.assertEqual(result["dump_type"], "0x2")
+
+    def test_invalid_application_dump_type_fails_validation(self) -> None:
+        app_key = f"{REGISTRY_ROOT}\\world.exe"
+        outputs = {app_key: self.reg_output(str(self.folder), dump_type="99")}
+
+        def query(key: str) -> tuple[int, str]:
+            return (0, outputs[key]) if key in outputs else (1, "")
+
+        result = rq.evaluate_wer_preflight("world.exe", self.folder, query)
+        self.assertFalse(result["configured"])
+        self.assertIn("not one of 0, 1, 2", result["reason"])
+        self.assertEqual(result["dump_type_value"], 0x99)
+
+    def test_invalid_global_dump_type_is_used_when_application_key_is_silent(self) -> None:
+        app_key = f"{REGISTRY_ROOT}\\world.exe"
+        outputs = {
+            app_key: "\r\n    DumpFolder    REG_EXPAND_SZ    " + str(self.folder) + "\r\n",
+            REGISTRY_ROOT: self.reg_output(str(self.folder), dump_type="99"),
+        }
+
+        def query(key: str) -> tuple[int, str]:
+            return (0, outputs[key]) if key in outputs else (1, "")
+
+        result = rq.evaluate_wer_preflight("world.exe", self.folder, query)
+        self.assertFalse(result["configured"])
+        self.assertIn("not one of 0, 1, 2", result["reason"])
+        self.assertEqual(result["sources"]["DumpType"], REGISTRY_ROOT)
+
+    def test_empty_dump_folder_fails_validation(self) -> None:
+        app_key = f"{REGISTRY_ROOT}\\world.exe"
+        outputs = {app_key: "\r\n    DumpFolder    REG_SZ    \r\n"}
+
+        def query(key: str) -> tuple[int, str]:
+            return (0, outputs[key]) if key in outputs else (1, "")
+
+        result = rq.evaluate_wer_preflight("world.exe", self.folder, query)
+        self.assertFalse(result["configured"])
+        self.assertEqual(result["reason"], "effective DumpFolder is empty")
+
+
+class CorePatternTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory(prefix="repeat-qualification-core-")
+        self.root = Path(self._tmp.name)
+        self.work = self.root / "work"
+        self.work.mkdir()
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def test_relative_parent_resolves_against_child_cwd(self) -> None:
+        self.assertEqual(
+            rq.core_directory_for_pattern("cores/core.%p", self.work),
+            os.path.normpath(str(self.work / "cores")),
+        )
+
+    def test_bare_relative_pattern_uses_child_cwd(self) -> None:
+        self.assertEqual(rq.core_directory_for_pattern("core.%p", self.work), os.path.normpath(str(self.work)))
+
+    def test_absolute_parent_is_used_as_is(self) -> None:
+        absolute = self.root / "abs" / "core.%p"
+        self.assertEqual(
+            rq.core_directory_for_pattern(str(absolute), self.work),
+            os.path.normpath(str(self.root / "abs")),
+        )
+
+    def test_piped_and_unresolvable_patterns_have_no_directory(self) -> None:
+        self.assertIsNone(rq.core_directory_for_pattern("|/wsl-capture-crash %p", self.work))
+        self.assertIsNone(rq.core_directory_for_pattern(str(self.root / "%e" / "core"), self.work))
+        self.assertIsNone(rq.core_directory_for_pattern(None, self.work))
+
+    def test_preflight_problems_fail_closed_for_each_gap(self) -> None:
+        good = {
+            "core_pattern": "core.%p",
+            "core_pattern_piped": False,
+            "core_directory": str(self.work),
+        }
+        self.assertEqual(rq.posix_preflight_problems(good, 4096), [])
+
+        piped = dict(good, core_pattern="|/wsl-capture-crash %p", core_pattern_piped=True, core_directory=None)
+        self.assertIn("pipes cores", rq.posix_preflight_problems(piped, 4096)[0])
+
+        unknown = dict(good, core_directory=None)
+        self.assertIn("cannot be determined", rq.posix_preflight_problems(unknown, 4096)[0])
+
+        zero = rq.posix_preflight_problems(good, 0)
+        self.assertIn("soft limit is 0", zero[0])
+
+    def test_core_limit_target_raises_soft_to_hard_only(self) -> None:
+        self.assertEqual(rq.core_limit_target((100, 4096)), (4096, 4096))
+        self.assertEqual(rq.core_limit_target((0, 0)), (0, 0))
+
+    def test_relative_core_directory_collects_nested_cores(self) -> None:
+        cores = self.work / "cores"
+        nested = cores / "nested"
+        nested.mkdir(parents=True)
+        before = rq.snapshot_files(cores, recursive=True)
+        (nested / "core.1234").write_bytes(b"core")
+        copies = rq.copy_changed_files(cores, before, self.root / "iter-1" / "core", recursive=True)
+        self.assertEqual(len(copies), 1, copies)
+        self.assertEqual(Path(copies[0]).relative_to(self.root / "iter-1" / "core"), Path("nested") / "core.1234")
+        self.assertEqual(Path(copies[0]).read_bytes(), b"core")
+
+    def test_harness_output_inside_core_directory_is_not_collected(self) -> None:
+        cores = self.work / "cores"
+        receipt = cores / "out" / "receipt.json"
+        run_dir = cores / "out" / "run-1"
+        run_dir.mkdir(parents=True)
+        skip = rq.harness_output_skip(run_dir, receipt)
+        before = rq.snapshot_files(cores, recursive=True, skip=skip)
+        (run_dir / "iter-1.log").write_text("log")
+        (cores / "out" / receipt.name).write_text("{}")
+        (cores / "out" / f".{receipt.name}.abc.tmp").write_text("{}")
+        self.assertEqual(rq.copy_changed_files(cores, before, self.root / "dest", True, skip), [])
+
+
+class WindowsCommandTest(unittest.TestCase):
+    def test_batch_launcher_with_spaced_launcher_and_output_directories(self) -> None:
+        exe = Path(r"C:\Test Bin\fake child.cmd")
+        json_path = Path(r"C:\Out Dir\run 1\iter-1\gtest.json")
+        with mock.patch.object(rq, "IS_WINDOWS", True):
+            target = rq.spawn_target(rq.build_command(exe, "Fake.Filter", [], json_path))
+        self.assertEqual(
+            target,
+            'cmd.exe /d /s /c ""C:\\Test Bin\\fake child.cmd" --gtest_filter=Fake.Filter '
+            '"--gtest_output=json:C:\\Out Dir\\run 1\\iter-1\\gtest.json" --gtest_catch_exceptions=0"',
+        )
+
+    def test_executable_launcher_is_passed_as_an_argument_list(self) -> None:
+        with mock.patch.object(rq, "IS_WINDOWS", True):
+            command = rq.build_command(Path(r"C:\Test Bin\world.exe"), "Fake.Filter", [], Path("g.json"))
+            target = rq.spawn_target(command)
+        self.assertEqual(target, command)
 
 
 if __name__ == "__main__":

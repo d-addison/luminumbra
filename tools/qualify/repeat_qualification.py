@@ -12,15 +12,19 @@ other outcome counts as a failure. The receipt is rewritten atomically after eve
 iteration, and the script exits non-zero when any iteration failed.
 
 Crash capture: the child receives LUMINUMBRA_CRASH_DIR pointing at its iteration's crash
-directory. On POSIX the child runs with RLIMIT_CORE set to unlimited and the new core files
-in its working directory are copied into the iteration. On Windows the executable must have
+directory. On POSIX the child's RLIMIT_CORE soft limit is raised to its hard limit (the hard limit
+is never changed), and new core files under the directory the kernel writes to, resolved
+against the child's working directory, are copied into the iteration. A piped core_pattern or
+an undeterminable core directory is a preflight failure. On Windows the executable must have
 a WER LocalDumps DumpFolder that matches --wer-dump-folder, and new dumps are copied into the
-iteration. Without that setup the run fails closed with status PREFLIGHT_FAILED.
+iteration. Without that setup the run fails closed with status PREFLIGHT_FAILED, unless
+--allow-no-dumps is given, which is recorded in the receipt.
 """
 
 from __future__ import annotations
 
 import argparse
+import functools
 import hashlib
 import json
 import math
@@ -176,7 +180,11 @@ def make_run_directory(parent: Path, stamp: str, pid: int) -> Path:
     return run_dir
 
 
-def snapshot_files(root: Path | None, recursive: bool) -> dict[str, tuple[int, int]]:
+def snapshot_files(
+    root: Path | None,
+    recursive: bool,
+    skip: Callable[[Path], bool] | None = None,
+) -> dict[str, tuple[int, int]]:
     """Map each file path to (size, mtime_ns). Rewritten files change their entry."""
     if root is None or not root.is_dir():
         return {}
@@ -184,13 +192,28 @@ def snapshot_files(root: Path | None, recursive: bool) -> dict[str, tuple[int, i
     result: dict[str, tuple[int, int]] = {}
     for path in paths:
         try:
-            if not path.is_file():
+            if not path.is_file() or (skip is not None and skip(path)):
                 continue
             stat = path.stat()
         except OSError:
             continue
         result[str(path)] = (stat.st_size, stat.st_mtime_ns)
     return result
+
+
+def harness_output_skip(run_dir: Path, receipt: Path) -> Callable[[Path], bool]:
+    """Skip this harness's own output (run directory, receipt, receipt temp files) when scanning cores."""
+
+    def skip(path: Path) -> bool:
+        if path == receipt or path == run_dir or run_dir in path.parents:
+            return True
+        return (
+            path.parent == receipt.parent
+            and path.name.startswith(f".{receipt.name}.")
+            and path.name.endswith(".tmp")
+        )
+
+    return skip
 
 
 def changed_files(before: dict[str, tuple[int, int]], after: dict[str, tuple[int, int]]) -> list[str]:
@@ -202,11 +225,14 @@ def copy_changed_files(
     before: dict[str, tuple[int, int]],
     destination: Path,
     recursive: bool = False,
+    skip: Callable[[Path], bool] | None = None,
 ) -> list[str]:
+    """Copy new or rewritten files under root, keeping their path relative to root."""
     copies: list[str] = []
-    for source in changed_files(before, snapshot_files(root, recursive)):
-        destination.mkdir(parents=True, exist_ok=True)
-        target = destination / Path(source).name
+    for source in changed_files(before, snapshot_files(root, recursive, skip)):
+        relative = Path(source).relative_to(root) if root is not None else Path(source).name
+        target = destination / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, target)
         copies.append(str(target))
     return copies
@@ -219,10 +245,19 @@ def signal_name(signum: int) -> str:
         return f"SIG{signum}"
 
 
-def allow_core_dumps() -> None:
-    if resource is None:
-        return
-    resource.setrlimit(resource.RLIMIT_CORE, (resource.RLIM_INFINITY, resource.RLIM_INFINITY))
+def core_limit_target(current: tuple[int, int]) -> tuple[int, int]:
+    """Limits the child runs with: soft raised to the hard limit, the highest value it may take.
+
+    The hard limit is left unchanged. A finite hard limit caps the soft limit, an infinite hard
+    limit yields an unlimited soft limit, and a hard limit of zero leaves the child with zero.
+    """
+    _soft, hard = current
+    return hard, hard
+
+
+def apply_core_limit(target: tuple[int, int]) -> None:
+    """Runs in the child before exec. An error here surfaces in the parent as a launch error."""
+    resource.setrlimit(resource.RLIMIT_CORE, target)
 
 
 def limit_text(value: int) -> int | str:
@@ -231,24 +266,55 @@ def limit_text(value: int) -> int | str:
     return value
 
 
-def posix_crash_environment(cwd: Path) -> dict[str, Any]:
+def read_core_pattern() -> str | None:
     pattern_file = Path("/proc/sys/kernel/core_pattern")
-    pattern = pattern_file.read_text(encoding="utf-8").strip() if pattern_file.is_file() else None
-    soft, hard = resource.getrlimit(resource.RLIMIT_CORE) if resource is not None else (None, None)
-    core_directory: str | None = None
-    if pattern and not pattern.startswith("|"):
-        candidate = Path(pattern).parent if os.path.isabs(pattern) else cwd
-        if "%" not in str(candidate):
-            core_directory = str(candidate)
+    return pattern_file.read_text(encoding="utf-8").strip() if pattern_file.is_file() else None
+
+
+def core_directory_for_pattern(pattern: str | None, cwd: Path) -> str | None:
+    """Directory the kernel writes cores into, or None when it cannot be determined.
+
+    The kernel resolves a relative core_pattern against the crashing process's working
+    directory, so a relative parent is resolved against the child's cwd. Piped patterns and
+    directories still holding % specifiers are reported as None.
+    """
+    if not pattern or pattern.startswith("|"):
+        return None
+    parent = Path(pattern).parent
+    if "%" in str(parent):
+        return None
+    directory = parent if parent.is_absolute() else cwd / parent
+    return os.path.normpath(str(directory))
+
+
+def posix_crash_environment(
+    cwd: Path,
+    pattern: str | None,
+    current: tuple[int, int],
+    child: tuple[int, int],
+) -> dict[str, Any]:
     return {
         "core_pattern": pattern,
-        "core_directory": core_directory,
-        "rlimit_core_parent": {
-            "soft": None if soft is None else limit_text(soft),
-            "hard": None if hard is None else limit_text(hard),
-        },
-        "rlimit_core_child": "unlimited",
+        "core_pattern_piped": bool(pattern and pattern.startswith("|")),
+        "core_directory": core_directory_for_pattern(pattern, cwd),
+        "rlimit_core_parent": {"soft": limit_text(current[0]), "hard": limit_text(current[1])},
+        "rlimit_core_child": {"soft": limit_text(child[0]), "hard": limit_text(child[1])},
     }
+
+
+def posix_preflight_problems(posix: dict[str, Any], child_soft: int) -> list[str]:
+    """Reasons the POSIX run cannot collect crash evidence; empty when it can."""
+    problems: list[str] = []
+    pattern = posix["core_pattern"]
+    if pattern is None:
+        problems.append("core_pattern could not be read from /proc/sys/kernel/core_pattern")
+    elif posix["core_pattern_piped"]:
+        problems.append(f"core_pattern {pattern!r} pipes cores to a handler the harness cannot collect from")
+    elif posix["core_directory"] is None:
+        problems.append(f"the core directory for core_pattern {pattern!r} cannot be determined")
+    if child_soft == 0:
+        problems.append("the child's effective core soft limit is 0 because the RLIMIT_CORE hard limit is 0")
+    return problems
 
 
 def parse_reg_values(output: str) -> dict[str, str]:
@@ -279,39 +345,71 @@ def same_directory(first: str, second: str) -> bool:
     return os.path.normcase(os.path.normpath(first)) == os.path.normcase(os.path.normpath(second))
 
 
+WER_DEFAULTS = {"DumpFolder": "", "DumpType": "1"}
+VALID_WER_DUMP_TYPES = (0, 1, 2)
+
+
+def parse_dump_type(text: str) -> int | None:
+    """Parse a REG_DWORD as reg.exe prints it ("0x2" or decimal). None when it is not a number."""
+    try:
+        if text.lower().startswith("0x"):
+            return int(text, 16)
+        return int(text, 10)
+    except ValueError:
+        return None
+
+
 def evaluate_wer_preflight(
     exe_name: str,
     expected_folder: Path,
     query: Callable[[str], tuple[int, str]] = query_registry_key,
 ) -> dict[str, Any]:
-    """Check the LocalDumps configuration for exe_name, then the global LocalDumps key."""
+    """Merge defaults, the global LocalDumps values and the executable's values, then validate.
+
+    The application key overrides each global value individually, so an application key that
+    sets only DumpType still takes DumpFolder from the global key.
+    """
+    layers: list[tuple[str, dict[str, str]]] = []
     for key in (f"{WER_KEY_ROOT}\\{exe_name}", WER_KEY_ROOT):
         returncode, output = query(key)
-        if returncode != 0:
-            continue
-        values = parse_reg_values(output)
-        folder = values.get("DumpFolder")
-        if folder is None:
-            continue
-        actual = os.path.expandvars(folder)
-        configured = same_directory(actual, str(expected_folder))
-        reason = None
-        if not configured:
-            reason = f"DumpFolder {actual!r} does not match --wer-dump-folder {str(expected_folder)!r}"
-        return {
-            "configured": configured,
-            "key": key,
-            "dump_folder": actual,
-            "dump_type": values.get("DumpType"),
-            "reason": reason,
-        }
-    return {
-        "configured": False,
-        "key": None,
-        "dump_folder": None,
-        "dump_type": None,
-        "reason": f"no LocalDumps DumpFolder under {WER_KEY_ROOT} for {exe_name} or globally",
+        if returncode == 0:
+            layers.append((key, parse_reg_values(output)))
+
+    effective = dict(WER_DEFAULTS)
+    sources: dict[str, str] = {name: "default" for name in WER_DEFAULTS}
+    for name in WER_DEFAULTS:
+        for key, values in layers:
+            if name in values:
+                effective[name] = values[name]
+                sources[name] = key
+                break
+
+    folder = os.path.expandvars(effective["DumpFolder"])
+    dump_type_text = effective["DumpType"]
+    dump_type = parse_dump_type(dump_type_text)
+    problems: list[str] = []
+    if not folder:
+        if sources["DumpFolder"] == "default":
+            problems.append(f"no LocalDumps DumpFolder under {WER_KEY_ROOT} for {exe_name} or globally")
+        else:
+            problems.append("effective DumpFolder is empty")
+    if dump_type not in VALID_WER_DUMP_TYPES:
+        problems.append(f"effective DumpType {dump_type_text!r} is not one of 0, 1, 2")
+
+    base = {
+        "key": None if sources["DumpFolder"] == "default" else sources["DumpFolder"],
+        "sources": sources,
+        "dump_folder": folder or None,
+        "dump_type": dump_type_text,
+        "dump_type_value": dump_type,
     }
+    if problems:
+        return {**base, "configured": False, "reason": "; ".join(problems)}
+    configured = same_directory(folder, str(expected_folder))
+    reason = None
+    if not configured:
+        reason = f"DumpFolder {folder!r} does not match --wer-dump-folder {str(expected_folder)!r}"
+    return {**base, "configured": configured, "reason": reason}
 
 
 def windows_dump_preflight(
@@ -331,16 +429,25 @@ def windows_dump_preflight(
 
 
 def build_command(exe: Path, gtest_filter: str, extra: list[str], json_path: Path) -> list[str]:
-    prefix = [str(exe)]
-    if IS_WINDOWS and exe.suffix.lower() in (".cmd", ".bat"):
-        prefix = ["cmd.exe", "/d", "/c", str(exe)]
+    """The argument vector, as recorded in the receipt."""
     return [
-        *prefix,
+        str(exe),
         f"--gtest_filter={gtest_filter}",
         f"--gtest_output=json:{json_path}",
         "--gtest_catch_exceptions=0",
         *extra,
     ]
+
+
+def spawn_target(command: list[str]) -> str | list[str]:
+    """What Popen receives. A batch launcher must run through cmd.exe as one command string.
+
+    Passing a list would make subprocess quote the cmd.exe /c text a second time, and cmd.exe
+    cannot parse that. With /s and one enclosing quote pair, cmd.exe strips exactly that pair.
+    """
+    if IS_WINDOWS and Path(command[0]).suffix.lower() in (".cmd", ".bat"):
+        return f'cmd.exe /d /s /c "{subprocess.list2cmdline(command)}"'
+    return command
 
 
 def build_child_environment(base: dict[str, str], crash_dir: Path) -> dict[str, str]:
@@ -394,13 +501,15 @@ def run_iteration(
     env: dict[str, str],
     log_path: Path,
     timeout: float,
+    core_target: tuple[int, int] | None = None,
 ) -> dict[str, Any]:
     popen_options: dict[str, Any] = {}
     if IS_WINDOWS:
         popen_options["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
     else:
         popen_options["start_new_session"] = True
-        popen_options["preexec_fn"] = allow_core_dumps
+        if core_target is not None:
+            popen_options["preexec_fn"] = functools.partial(apply_core_limit, core_target)
 
     started = time.monotonic()
     timed_out = False
@@ -408,7 +517,7 @@ def run_iteration(
     try:
         with log_path.open("wb") as log:
             process = subprocess.Popen(
-                command,
+                spawn_target(command),
                 cwd=cwd,
                 env=env,
                 stdin=subprocess.DEVNULL,
@@ -422,7 +531,7 @@ def run_iteration(
                 timed_out = True
                 cleanup_errors = terminate_process_tree(process)
                 returncode = process.returncode
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
         return {
             "exit_code": None,
             "signal": None,
@@ -535,6 +644,8 @@ def run_indexed_iteration(
     expected_tests: int,
     dump_folder: Path | None,
     core_directory: Path | None,
+    core_target: tuple[int, int] | None,
+    core_skip: Callable[[Path], bool] | None,
 ) -> dict[str, Any]:
     iter_dir = run_dir / f"iter-{index}"
     log_path = run_dir / f"iter-{index}.log"
@@ -555,10 +666,10 @@ def run_indexed_iteration(
         return build_entry(index, log_path, gtest_json, crash_dir, [], result, None)
 
     dump_before = snapshot_files(dump_folder, recursive=False)
-    core_before = snapshot_files(core_directory, recursive=False)
+    core_before = snapshot_files(core_directory, recursive=True, skip=core_skip)
     command = build_command(exe, gtest_filter, extra, gtest_json)
     env = build_child_environment(dict(os.environ), crash_dir)
-    result = run_iteration(command, cwd, env, log_path, timeout)
+    result = run_iteration(command, cwd, env, log_path, timeout, core_target)
 
     problem: str | None = None
     if result["status"] == "exit:0":
@@ -570,7 +681,9 @@ def run_indexed_iteration(
     if IS_WINDOWS and dump_folder is not None and result["status"] not in ("exit:0", "timeout"):
         wait_for_dump_settle(dump_folder, dump_before, DUMP_SETTLE_SECONDS)
     artifacts += copy_changed_files(dump_folder, dump_before, iter_dir / "wer")
-    artifacts += copy_changed_files(core_directory, core_before, iter_dir / "core")
+    artifacts += copy_changed_files(
+        core_directory, core_before, iter_dir / "core", recursive=True, skip=core_skip
+    )
     return build_entry(index, log_path, gtest_json, crash_dir, sorted(artifacts), result, problem)
 
 
@@ -612,6 +725,7 @@ def run_qualification(
     args: argparse.Namespace,
     extra: list[str],
     query: Callable[[str], tuple[int, str]] = query_registry_key,
+    core_limits: Callable[[], tuple[int, int]] | None = None,
 ) -> int:
     exe = Path(os.path.abspath(args.exe))
     if not exe.is_file():
@@ -639,7 +753,9 @@ def run_qualification(
     }
     dump_folder: Path | None = None
     core_directory: Path | None = None
-    preflight_failed = False
+    core_target: tuple[int, int] | None = None
+    core_skip: Callable[[Path], bool] | None = None
+    preflight_reason: str | None = None
     if IS_WINDOWS:
         preflight = windows_dump_preflight(exe, args.wer_dump_folder, query)
         environment["wer"] = preflight
@@ -647,12 +763,21 @@ def run_qualification(
             dump_folder = Path(os.path.abspath(args.wer_dump_folder))
             dump_folder.mkdir(parents=True, exist_ok=True)
         elif not args.allow_no_dumps:
-            preflight_failed = True
+            preflight_reason = preflight["reason"]
     else:
-        posix = posix_crash_environment(base_cwd)
+        current = core_limits() if core_limits is not None else resource.getrlimit(resource.RLIMIT_CORE)
+        core_target = core_limit_target(current)
+        posix = posix_crash_environment(base_cwd, read_core_pattern(), current, core_target)
         environment.update(posix)
+        problems = posix_preflight_problems(posix, core_target[0])
+        environment["core_problems"] = problems
+        if problems and not args.allow_no_dumps:
+            preflight_reason = "; ".join(problems) + (
+                "; set `sysctl kernel.core_pattern=core.%p` or use --allow-no-dumps"
+            )
         if posix["core_directory"] is not None:
             core_directory = Path(posix["core_directory"])
+            core_skip = harness_output_skip(run_dir, receipt_path)
 
     receipt: dict[str, Any] = {
         "schema": SCHEMA,
@@ -679,12 +804,12 @@ def run_qualification(
         "failure_count": 0,
         "first_failure": None,
     }
-    if preflight_failed:
+    if preflight_reason is not None:
         receipt["status"] = "PREFLIGHT_FAILED"
-        receipt["failure_reason"] = environment["wer"]["reason"]
+        receipt["failure_reason"] = preflight_reason
         receipt["end_time"] = utc_now()
         write_receipt(receipt_path, receipt)
-        print(f"error: crash dumps are not configured: {receipt['failure_reason']}", file=sys.stderr)
+        print(f"error: crash capture is not available: {preflight_reason}", file=sys.stderr)
         print(f"receipt {receipt_path}", file=sys.stderr)
         return PREFLIGHT_EXIT_CODE
 
@@ -704,6 +829,8 @@ def run_qualification(
                 args.expected_tests,
                 dump_folder,
                 core_directory,
+                core_target,
+                core_skip,
             )
             receipt["iterations"].append(entry)
             histogram[entry["status"]] += 1

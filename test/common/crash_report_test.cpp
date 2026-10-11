@@ -47,10 +47,12 @@ std::string FirstLine(const fs::path& file) {
     return line;
 }
 
+#if !defined(_WIN32)
 std::string ReadAll(const fs::path& file) {
     std::ifstream in(file);
     return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
 }
+#endif
 
 } // namespace
 
