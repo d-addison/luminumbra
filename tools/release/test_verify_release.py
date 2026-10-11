@@ -9,11 +9,13 @@ import gzip
 import hashlib
 import io
 import json
+import os
 import tarfile
 import tempfile
 import unittest
 import sys
 from pathlib import Path
+from unittest import mock
 from typing import Dict, List, Optional, Sequence, Tuple
 
 # Import from this directory even under `python3 -I`, which drops the script directory from sys.path.
@@ -30,6 +32,23 @@ ARCHIVE = f"luminumbra-{VERSION}-source.tar.gz"
 SPDX = f"luminumbra-{VERSION}-source.spdx.json"
 SUMS = "SHA256SUMS"
 SIGNER = f"https://github.com/{REPO}/.github/workflows/release.yml@refs/tags/{TAG}"
+SLSA_PRED = verifier.SLSA_PREDICATE
+SIGNER_CHECKS = ("attestation-provenance-archive", "attestation-provenance-spdx",
+                 "attestation-provenance-sha256sums", "attestation-sbom")
+
+
+def certificate(signer: str = SIGNER, source: str = COMMIT, build: str = COMMIT) -> dict:
+    """Certificate fields as gh reports them; the digests default to the expected commit."""
+    return {"buildSignerURI": signer, "sourceRepositoryDigest": source, "buildSignerDigest": build}
+
+
+def attestation_json(predicate_type: str, predicate: object, cert: Optional[dict] = None) -> str:
+    return json.dumps([{
+        "verificationResult": {
+            "signature": {"certificate": certificate() if cert is None else cert},
+            "statement": {"predicateType": predicate_type, "predicate": predicate},
+        }
+    }])
 
 
 def source_tar() -> bytes:
@@ -59,13 +78,8 @@ def build_scenario() -> Dict[str, object]:
     sums = (f"{hashlib.sha256(archive).hexdigest()}  {ARCHIVE}\n"
             f"{hashlib.sha256(spdx).hexdigest()}  {SPDX}\n").encode("utf-8")
 
-    def attestation(predicate_type: str, predicate: object, signer: str = SIGNER) -> str:
-        return json.dumps([{
-            "verificationResult": {
-                "signature": {"certificate": {"buildSignerURI": signer}},
-                "statement": {"predicateType": predicate_type, "predicate": predicate},
-            }
-        }])
+    def attestation(predicate_type: str, predicate: object) -> str:
+        return attestation_json(predicate_type, predicate)
 
     return {
         "tar": tar,
@@ -229,9 +243,7 @@ class VerifyReleaseTests(unittest.TestCase):
         scenario = copy.deepcopy(self.scenario)
         tampered = {"spdxVersion": "SPDX-2.3", "name": "tampered"}
         scenario["attest"][(ARCHIVE, verifier.SPDX_PREDICATE)] = (
-            0, json.dumps([{"verificationResult": {
-                "signature": {"certificate": {"buildSignerURI": SIGNER}},
-                "statement": {"predicateType": verifier.SPDX_PREDICATE, "predicate": tampered}}}]))
+            0, attestation_json(verifier.SPDX_PREDICATE, tampered))
         results = self.run_with(scenario)
         self.assertEqual(results["attestation-sbom"].status, "PASS")
         self.assertFailed(results, "sbom-predicate-matches-spdx")
@@ -295,6 +307,245 @@ class VerifyReleaseTests(unittest.TestCase):
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
             verifier.parse_args(["--repo", REPO, "--tag", TAG, "--expected-commit", "ABC",
                                  "--out", "x"])
+
+    # Helpers for the regressions below.
+
+    def cli_args(self) -> List[str]:
+        return ["--repo", REPO, "--tag", TAG, "--expected-commit", COMMIT,
+                "--out", str(self.out), "--source-root", self.tmp.name, "--python", "/usr/bin/true"]
+
+    def archive_attestation(self, body: str) -> Dict[str, object]:
+        scenario = copy.deepcopy(self.scenario)
+        scenario["attest"][(ARCHIVE, SLSA_PRED)] = (0, body)
+        return scenario
+
+    def all_attestations_with(self, cert: dict) -> Dict[str, object]:
+        """Every attestation carries `cert`; predicates are kept as in the clean scenario."""
+        scenario = copy.deepcopy(self.scenario)
+        for key, (rc, body) in list(scenario["attest"].items()):
+            predicate_type = key[1]
+            predicate = json.loads(body)[0]["verificationResult"]["statement"]["predicate"]
+            scenario["attest"][key] = (rc, attestation_json(predicate_type, predicate, cert))
+        return scenario
+
+    # Finding 1: exact signer identity.
+
+    def test_signer_with_suffixed_tag_rejected(self) -> None:
+        # v9.9.90 contains v9.9.9 as a prefix, so a substring search would accept it.
+        suffixed = SIGNER + "0"
+        self.assertTrue(suffixed.endswith("release.yml@refs/tags/v9.9.90"))
+        scenario = self.archive_attestation(attestation_json(SLSA_PRED, {}, certificate(signer=suffixed)))
+        self.assertFailed(self.run_with(scenario), "attestation-provenance-archive")
+
+    def test_signer_with_prefix_or_suffix_rejected(self) -> None:
+        for signer in ("https://evil.example/" + SIGNER, SIGNER + "/../x", " " + SIGNER):
+            with self.subTest(signer=signer):
+                scenario = self.archive_attestation(
+                    attestation_json(SLSA_PRED, {}, certificate(signer=signer)))
+                self.assertFailed(self.run_with(scenario), "attestation-provenance-archive")
+
+    def test_misleading_unrelated_field_rejected(self) -> None:
+        cert = certificate(signer=f"https://github.com/{REPO}/.github/workflows/other.yml@refs/tags/{TAG}")
+        cert["sourceRepositoryRef"] = SIGNER
+        cert["githubWorkflowRef"] = SIGNER
+        cert["workflowRef"] = f"refs/tags/{TAG}"
+        scenario = self.archive_attestation(attestation_json(SLSA_PRED, {}, cert))
+        self.assertFailed(self.run_with(scenario), "attestation-provenance-archive")
+
+    def test_signer_field_missing_rejected(self) -> None:
+        cert = certificate()
+        del cert["buildSignerURI"]
+        cert["githubWorkflowRef"] = SIGNER
+        self.assertFailed(self.run_with(self.archive_attestation(attestation_json(SLSA_PRED, {}, cert))),
+                          "attestation-provenance-archive")
+
+    def test_signer_workflow_field_must_be_exact_when_present(self) -> None:
+        bad = certificate()
+        bad["signerWorkflow"] = f"{REPO}/{verifier.SIGNER_WORKFLOW}@refs/tags/v9.9.90"
+        self.assertFailed(self.run_with(self.archive_attestation(attestation_json(SLSA_PRED, {}, bad))),
+                          "attestation-provenance-archive")
+        good = certificate()
+        good["signerWorkflow"] = f"{REPO}/{verifier.SIGNER_WORKFLOW}@refs/tags/{TAG}"
+        results = self.run_with(self.archive_attestation(attestation_json(SLSA_PRED, {}, good)))
+        self.assertEqual(results["attestation-provenance-archive"].status, "PASS",
+                         results["attestation-provenance-archive"].detail)
+
+    # Finding 2: commit pin via --source-digest and certificate digests.
+
+    def test_every_attestation_call_passes_source_digest(self) -> None:
+        runner = FakeRunner(self.scenario)
+        verifier.run_checks(verifier.parse_args(self.cli_args()), runner)
+        attest = [c for c in runner.calls if c[:3] == ["gh", "attestation", "verify"]]
+        self.assertEqual(len(attest), 4)
+        for argv in attest:
+            with self.subTest(argv=argv):
+                self.assertIn("--source-digest", argv)
+                self.assertEqual(argv[argv.index("--source-digest") + 1], COMMIT)
+
+    def test_dry_run_plan_pins_source_digest(self) -> None:
+        args = verifier.parse_args(["--repo", REPO, "--tag", TAG, "--expected-commit", COMMIT,
+                                    "--out", str(self.out)])
+        attest = [c for c in verifier.plan_commands(args) if "attestation" in c]
+        self.assertEqual(len(attest), 4)
+        for argv in attest:
+            self.assertEqual(argv[argv.index("--source-digest") + 1], COMMIT)
+
+    def test_source_digest_mismatch_fails_all_attestations(self) -> None:
+        results = self.run_with(self.all_attestations_with(certificate(source="f" * 40)))
+        for name in SIGNER_CHECKS:
+            with self.subTest(check=name):
+                self.assertFailed(results, name)
+
+    def test_build_signer_digest_mismatch_fails_all_attestations(self) -> None:
+        results = self.run_with(self.all_attestations_with(certificate(build="e" * 40)))
+        for name in SIGNER_CHECKS:
+            with self.subTest(check=name):
+                self.assertFailed(results, name)
+
+    def test_missing_source_digest_fails_all_attestations(self) -> None:
+        cert = certificate()
+        del cert["sourceRepositoryDigest"]
+        results = self.run_with(self.all_attestations_with(cert))
+        for name in SIGNER_CHECKS:
+            with self.subTest(check=name):
+                self.assertFailed(results, name)
+
+    def test_absent_build_signer_digest_is_allowed(self) -> None:
+        cert = certificate()
+        del cert["buildSignerDigest"]
+        results = self.run_with(self.all_attestations_with(cert))
+        for name in SIGNER_CHECKS:
+            with self.subTest(check=name):
+                self.assertEqual(results[name].status, "PASS", results[name].detail)
+
+    # Finding 3: malformed responses become FAIL checks, never escaping exceptions.
+
+    def test_non_object_asset_entry_fails(self) -> None:
+        scenario = copy.deepcopy(self.scenario)
+        scenario["release"]["assets"].append(f"luminumbra-{VERSION}-extra.tar.gz")
+        results = self.run_with(scenario)
+        self.assertFailed(results, "release-assets")
+        self.assertIn("malformed", results["release-assets"].detail)
+
+    def test_asset_without_string_name_fails(self) -> None:
+        for entry in ({"size": 3}, {"name": 7}):
+            with self.subTest(entry=entry):
+                scenario = copy.deepcopy(self.scenario)
+                scenario["release"]["assets"].append(entry)
+                results = self.run_with(scenario)
+                self.assertFailed(results, "release-assets")
+                self.assertIn("no string name", results["release-assets"].detail)
+
+    def test_assets_not_a_list_fails(self) -> None:
+        scenario = copy.deepcopy(self.scenario)
+        scenario["release"]["assets"] = {"name": ARCHIVE}
+        results = self.run_with(scenario)
+        self.assertFailed(results, "release-assets")
+        self.assertIn("assets must be a list", results["release-assets"].detail)
+
+    def test_tag_object_not_an_object_fails(self) -> None:
+        scenario = copy.deepcopy(self.scenario)
+        scenario["ref"]["object"] = "abc"
+        results = self.run_with(scenario)
+        self.assertFailed(results, "tag-annotated-commit")
+        self.assertFailed(results, "tag-github-verified")
+
+    def test_tag_verification_not_an_object_fails(self) -> None:
+        scenario = copy.deepcopy(self.scenario)
+        scenario["tag"]["verification"] = True
+        self.assertFailed(self.run_with(scenario), "tag-github-verified")
+
+    def test_verification_result_not_an_object_fails(self) -> None:
+        scenario = self.archive_attestation(json.dumps([{"verificationResult": "x"}]))
+        results = self.run_with(scenario)
+        self.assertFailed(results, "attestation-provenance-archive")
+        self.assertIn("malformed", results["attestation-provenance-archive"].detail)
+
+    def test_certificate_not_an_object_fails(self) -> None:
+        body = json.dumps([{"verificationResult": {
+            "signature": {"certificate": ["not", "an", "object"]},
+            "statement": {"predicateType": SLSA_PRED, "predicate": {}}}}])
+        self.assertFailed(self.run_with(self.archive_attestation(body)), "attestation-provenance-archive")
+
+    def test_invalid_utf8_sums_is_reported_as_fail(self) -> None:
+        scenario = copy.deepcopy(self.scenario)
+        scenario["assets"][SUMS] = b"\xff\xfe  not utf-8\n"
+        results = self.run_with(scenario)
+        self.assertEqual(len(results), 14)
+        self.assertFailed(results, "sha256sums-manifest")
+        self.assertIn("UTF-8", results["sha256sums-manifest"].detail)
+
+    def test_unexpected_error_is_recorded_not_raised(self) -> None:
+        with mock.patch.object(verifier, "signer_matches", side_effect=RuntimeError("boom")):
+            results = self.run_with()
+        self.assertEqual(len(results), 14)
+        for name in SIGNER_CHECKS:
+            with self.subTest(check=name):
+                self.assertFailed(results, name)
+                self.assertIn("RuntimeError", results[name].detail)
+
+    def test_malformed_response_still_writes_report(self) -> None:
+        scenario = copy.deepcopy(self.scenario)
+        scenario["tag"]["verification"] = "bad"
+        scenario["release"]["assets"].append("stray")
+        scenario["attest"][(ARCHIVE, SLSA_PRED)] = (0, json.dumps([{"verificationResult": "x"}]))
+        with contextlib.redirect_stdout(io.StringIO()):
+            rc = verifier.main(self.cli_args(), runner=FakeRunner(scenario))
+        self.assertEqual(rc, 1)
+        report = json.loads((self.out / verifier.REPORT_NAME).read_text(encoding="utf-8"))
+        self.assertEqual(report["overall"], "FAIL")
+        by_name = {c["name"]: c for c in report["checks"]}
+        self.assertEqual(by_name["tag-github-verified"]["status"], "FAIL")
+        self.assertEqual(by_name["release-assets"]["status"], "FAIL")
+
+    # Finding 4: refuse an existing report path (symlink or any file) before network work.
+
+    def test_symlinked_report_refused_before_network(self) -> None:
+        self.out.mkdir(parents=True)
+        victim = Path(self.tmp.name) / "victim.txt"
+        victim.write_text("keep", encoding="utf-8")
+        link = verifier.report_path(self.out)
+        os.symlink(str(victim), str(link))
+        runner = FakeRunner(self.scenario)
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            rc = verifier.main(self.cli_args(), runner=runner)
+        self.assertEqual(rc, 2)
+        self.assertEqual(runner.calls, [])
+        self.assertIn("symlink", stderr.getvalue())
+        self.assertEqual(victim.read_text(encoding="utf-8"), "keep")
+        self.assertTrue(link.is_symlink())
+
+    def test_dangling_symlink_report_refused_without_creating_target(self) -> None:
+        self.out.mkdir(parents=True)
+        target = Path(self.tmp.name) / "nowhere.json"
+        os.symlink(str(target), str(verifier.report_path(self.out)))
+        runner = FakeRunner(self.scenario)
+        with contextlib.redirect_stderr(io.StringIO()):
+            rc = verifier.main(self.cli_args(), runner=runner)
+        self.assertEqual(rc, 2)
+        self.assertEqual(runner.calls, [])
+        self.assertFalse(target.exists())
+
+    def test_existing_regular_report_refused(self) -> None:
+        self.out.mkdir(parents=True)
+        report = verifier.report_path(self.out)
+        report.write_text("old", encoding="utf-8")
+        runner = FakeRunner(self.scenario)
+        with contextlib.redirect_stderr(io.StringIO()):
+            rc = verifier.main(self.cli_args(), runner=runner)
+        self.assertEqual(rc, 2)
+        self.assertEqual(runner.calls, [])
+        self.assertEqual(report.read_text(encoding="utf-8"), "old")
+
+    def test_fresh_output_writes_regular_report(self) -> None:
+        with contextlib.redirect_stdout(io.StringIO()):
+            rc = verifier.main(self.cli_args(), runner=FakeRunner(self.scenario))
+        self.assertEqual(rc, 0)
+        report = verifier.report_path(self.out)
+        self.assertTrue(report.is_file())
+        self.assertFalse(report.is_symlink())
+        self.assertEqual(json.loads(report.read_text(encoding="utf-8"))["overall"], "PASS")
 
 
 if __name__ == "__main__":

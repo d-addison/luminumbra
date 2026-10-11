@@ -89,8 +89,11 @@ point at the expected commit, and to be GitHub-verified; the release must be nei
 a draft nor a prerelease and must contain exactly the archive, the SPDX document, and
 `SHA256SUMS`. It downloads those assets, checks `SHA256SUMS`, regenerates the archive
 with `git archive` and deterministic gzip, runs the package and SBOM validators, and
-verifies the provenance and SBOM attestations with `gh attestation verify`. The signer
-identity must name `release.yml@refs/tags/<tag>`.
+verifies the provenance and SBOM attestations with `gh attestation verify --source-digest
+<commit>`. The certificate's `buildSignerURI` must equal
+`https://github.com/<repo>/.github/workflows/release.yml@refs/tags/<tag>` exactly, its
+`sourceRepositoryDigest` must equal the expected commit, and `buildSignerDigest` must
+equal it when present. Malformed responses are reported as FAIL checks.
 
 ```sh
 python3 tools/release/verify_release.py --repo OWNER/NAME --tag vX.Y.Z \
@@ -102,4 +105,6 @@ python3 tools/release/test_verify_release.py                 # offline, fake run
 
 The `--python` interpreter must have the pinned schema dependencies from
 `requirements-sbom.txt` installed. The script exits 0 only when every check passes and
-writes `verify-report.json` with the SHA-256 of each asset.
+writes `verify-report.json` with the SHA-256 of each asset. The script refuses, before any
+network work, an `--out` directory where `verify-report.json` already exists, including as
+a symlink; use a fresh or empty directory.

@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import shlex
 import subprocess
@@ -29,6 +30,7 @@ SIGNER_WORKFLOW = ".github/workflows/release.yml"
 SLSA_PREDICATE = "https://slsa.dev/provenance/v1"
 SPDX_PREDICATE = "https://spdx.dev/Document/v2.3"
 SUMS_NAME = "SHA256SUMS"
+REPORT_NAME = "verify-report.json"
 SHA_LINE = re.compile(r"^([0-9a-f]{64}) [ *](.+)$")
 REPO_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 TAG_PATTERN = re.compile(r"^v[0-9]+\.[0-9]+\.[0-9]+$")
@@ -78,9 +80,29 @@ class Check:
     detail: str
 
 
+class ShapeError(Exception):
+    """A response parsed as JSON but does not have the nested shape the checks rely on."""
+
+
 def add_check(checks: List[Check], name: str, ok: bool, detail: str) -> bool:
     checks.append(Check(name, "PASS" if ok else "FAIL", detail))
     return ok
+
+
+def record_failure(checks: List[Check], names: Sequence[str], exc: Exception) -> None:
+    """Turn an exception raised while evaluating a section into FAIL checks for its names.
+
+    Names that were already recorded before the exception are left alone, so a partial
+    section never produces duplicate entries.
+    """
+    if isinstance(exc, ShapeError):
+        detail = f"malformed response: {exc}"
+    else:
+        detail = f"unexpected response shape: {type(exc).__name__}: {exc}"
+    recorded = {c.name for c in checks}
+    for name in names:
+        if name not in recorded:
+            add_check(checks, name, False, detail)
 
 
 def sha256_bytes(data: bytes) -> str:
@@ -118,15 +140,56 @@ def api_json(runner: Runner, argv: Sequence[str]) -> Tuple[bool, dict, str]:
     return True, data, ""
 
 
-def signer_matches(result: dict, tag: str) -> bool:
-    needle = f"{SIGNER_WORKFLOW}@refs/tags/{tag}"
-    verification = result.get("verificationResult") or {}
-    certificate = (verification.get("signature") or {}).get("certificate") or {}
-    return any(isinstance(value, str) and needle in value for value in certificate.values())
+def _obj(parent: dict, key: str) -> dict:
+    """Return parent[key] as a dict; missing or null means {}; any other type is malformed."""
+    value = parent.get(key)
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ShapeError(f"{key} must be a JSON object, got {type(value).__name__}")
+    return value
+
+
+def expected_signer(repo: str, tag: str) -> str:
+    return f"https://github.com/{repo}/{SIGNER_WORKFLOW}@refs/tags/{tag}"
+
+
+def certificate_of(result: dict) -> dict:
+    verification = _obj(result, "verificationResult")
+    return _obj(_obj(verification, "signature"), "certificate")
+
+
+def signer_matches(result: dict, repo: str, tag: str) -> bool:
+    """Exact signer identity check. Substring or other-field matches never count.
+
+    buildSignerURI must be present and equal the expected workflow URI exactly. If a
+    signerWorkflow field is present it must be the exact `<repo>/<workflow>@refs/tags/<tag>`.
+    """
+    certificate = certificate_of(result)
+    if certificate.get("buildSignerURI") != expected_signer(repo, tag):
+        return False
+    if "signerWorkflow" in certificate:
+        if certificate["signerWorkflow"] != f"{repo}/{SIGNER_WORKFLOW}@refs/tags/{tag}":
+            return False
+    return True
+
+
+def commit_pinned(result: dict, commit: str) -> bool:
+    """The attestation certificate must name the expected commit as its source digest.
+
+    buildSignerDigest is checked too when present; a mismatch is a failure.
+    """
+    certificate = certificate_of(result)
+    if certificate.get("sourceRepositoryDigest") != commit:
+        return False
+    build_digest = certificate.get("buildSignerDigest")
+    if build_digest is not None and build_digest != commit:
+        return False
+    return True
 
 
 def statement_of(result: dict) -> dict:
-    return (result.get("verificationResult") or {}).get("statement") or {}
+    return _obj(_obj(result, "verificationResult"), "statement")
 
 
 # Command builders. Shared by live execution and --dry-run-plan.
@@ -160,8 +223,10 @@ def cmd_gzip(tar_path: Path) -> List[str]:
     return ["gzip", "-n", "-c", str(tar_path)]
 
 
-def cmd_attest(repo: str, subject: Path, predicate: str, signer_workflow: bool) -> List[str]:
-    argv = ["gh", "attestation", "verify", str(subject), "--repo", repo]
+def cmd_attest(repo: str, subject: Path, predicate: str, signer_workflow: bool,
+               commit: str) -> List[str]:
+    argv = ["gh", "attestation", "verify", str(subject), "--repo", repo,
+            "--source-digest", commit]
     if signer_workflow:
         argv += ["--signer-workflow", f"{repo}/{SIGNER_WORKFLOW}"]
     return argv + ["--predicate-type", predicate, "--format", "json"]
@@ -185,17 +250,18 @@ def plan_commands(args: argparse.Namespace) -> List[List[str]]:
     out = Path(args.out)
     python = args.python or sys.executable
     archive, spdx = out / archive_name, out / spdx_name
+    commit = args.expected_commit
     plan = [cmd_tag_ref(args.repo, args.tag), cmd_tag_object(args.repo, "<tag-object-sha>"),
             cmd_release(args.repo, args.tag)]
     plan += [cmd_download(args.repo, args.tag, out, name) for name in (archive_name, spdx_name, SUMS_NAME)]
-    plan.append(cmd_git_archive(Path("<tmp>/source.tar"), args.expected_commit, version))
+    plan.append(cmd_git_archive(Path("<tmp>/source.tar"), commit, version))
     plan.append(cmd_gzip(Path("<tmp>/source.tar")))
     plan.append(cmd_validate_package(archive))
     plan.append(cmd_validate_sbom(python, spdx, archive))
-    plan.append(cmd_attest(args.repo, archive, SLSA_PREDICATE, True))
-    plan.append(cmd_attest(args.repo, spdx, SLSA_PREDICATE, True))
-    plan.append(cmd_attest(args.repo, out / SUMS_NAME, SLSA_PREDICATE, True))
-    plan.append(cmd_attest(args.repo, archive, SPDX_PREDICATE, False))
+    plan.append(cmd_attest(args.repo, archive, SLSA_PREDICATE, True, commit))
+    plan.append(cmd_attest(args.repo, spdx, SLSA_PREDICATE, True, commit))
+    plan.append(cmd_attest(args.repo, out / SUMS_NAME, SLSA_PREDICATE, True, commit))
+    plan.append(cmd_attest(args.repo, archive, SPDX_PREDICATE, False, commit))
     return plan
 
 
@@ -210,32 +276,58 @@ def run_checks(args: argparse.Namespace, runner: Runner) -> Tuple[List[Check], D
     checks: List[Check] = []
 
     # Tag object: annotated, pointing at the expected commit, and GitHub-verified.
-    ok, ref, err = api_json(runner, cmd_tag_ref(repo, tag))
-    ref_obj = (ref.get("object") or {}) if ok else {}
-    tag_sha = ref_obj.get("sha") if ref_obj.get("type") == "tag" else None
-    tag_data: dict = {}
-    if tag_sha:
-        _, tag_data, err2 = api_json(runner, cmd_tag_object(repo, tag_sha))
-        err = err or err2
-    tag_obj = tag_data.get("object") or {}
-    add_check(checks, "tag-annotated-commit",
-              bool(tag_sha) and tag_obj.get("type") == "commit" and tag_obj.get("sha") == expected,
-              f"ref type={ref_obj.get('type')!r}; tag object -> {tag_obj.get('type')!r} "
-              f"{tag_obj.get('sha')!r}; expected commit {expected}" + (f"; {err}" if err else ""))
-    verification = tag_data.get("verification") or {}
-    add_check(checks, "tag-github-verified", verification.get("verified") is True,
-              f"verification.verified={verification.get('verified')!r} "
-              f"reason={verification.get('reason')!r}")
+    try:
+        ok, ref, err = api_json(runner, cmd_tag_ref(repo, tag))
+        ref_obj = _obj(ref, "object") if ok else {}
+        tag_sha = ref_obj.get("sha") if ref_obj.get("type") == "tag" else None
+        if tag_sha is not None and not isinstance(tag_sha, str):
+            raise ShapeError("object.sha must be a string")
+        tag_data: dict = {}
+        if tag_sha:
+            _, tag_data, err2 = api_json(runner, cmd_tag_object(repo, tag_sha))
+            err = err or err2
+        tag_obj = _obj(tag_data, "object")
+        verification = _obj(tag_data, "verification")
+        add_check(checks, "tag-annotated-commit",
+                  bool(tag_sha) and tag_obj.get("type") == "commit" and tag_obj.get("sha") == expected,
+                  f"ref type={ref_obj.get('type')!r}; tag object -> {tag_obj.get('type')!r} "
+                  f"{tag_obj.get('sha')!r}; expected commit {expected}" + (f"; {err}" if err else ""))
+        add_check(checks, "tag-github-verified", verification.get("verified") is True,
+                  f"verification.verified={verification.get('verified')!r} "
+                  f"reason={verification.get('reason')!r}")
+    except Exception as exc:
+        record_failure(checks, ["tag-annotated-commit", "tag-github-verified"], exc)
 
     # Release metadata: published, not draft or prerelease, exactly three assets.
-    ok, release, err = api_json(runner, cmd_release(repo, tag))
-    add_check(checks, "release-state",
-              ok and release.get("draft") is False and release.get("prerelease") is False,
-              f"draft={release.get('draft')!r} prerelease={release.get('prerelease')!r}"
-              + (f"; {err}" if err else ""))
-    observed = sorted(a.get("name") for a in release.get("assets", []) if isinstance(a, dict)) if ok else []
-    add_check(checks, "release-assets", ok and observed == sorted(expected_assets),
-              f"observed={observed} expected={sorted(expected_assets)}")
+    try:
+        ok, release, err = api_json(runner, cmd_release(repo, tag))
+        add_check(checks, "release-state",
+                  ok and release.get("draft") is False and release.get("prerelease") is False,
+                  f"draft={release.get('draft')!r} prerelease={release.get('prerelease')!r}"
+                  + (f"; {err}" if err else ""))
+        observed: List[str] = []
+        asset_problems: List[str] = []
+        if ok:
+            raw_assets = release.get("assets", [])
+            if not isinstance(raw_assets, list):
+                raise ShapeError(f"assets must be a list, got {type(raw_assets).__name__}")
+            for index, entry in enumerate(raw_assets):
+                if not isinstance(entry, dict):
+                    asset_problems.append(f"entry {index} is {type(entry).__name__}, not an object")
+                elif not isinstance(entry.get("name"), str):
+                    asset_problems.append(f"entry {index} has no string name")
+                else:
+                    observed.append(entry["name"])
+        observed.sort()
+        if asset_problems:
+            add_check(checks, "release-assets", False,
+                      "malformed asset entries: " + "; ".join(asset_problems))
+        else:
+            add_check(checks, "release-assets", ok and observed == sorted(expected_assets),
+                      f"observed={observed} expected={sorted(expected_assets)}"
+                      + (f"; {err}" if err else ""))
+    except Exception as exc:
+        record_failure(checks, ["release-state", "release-assets"], exc)
 
     # Download the exact assets into the output directory.
     out.mkdir(parents=True, exist_ok=True)
@@ -256,20 +348,29 @@ def run_checks(args: argparse.Namespace, runner: Runner) -> Tuple[List[Check], D
     add_check(checks, "download-assets", download_ok, download_detail)
 
     # SHA256SUMS must list exactly the archive and SPDX, with matching digests.
-    if present[SUMS_NAME]:
-        entries = parse_sums(paths[SUMS_NAME].read_text(encoding="utf-8"))
-    else:
-        entries = None
-    if entries is None:
-        add_check(checks, "sha256sums-manifest", False, "SHA256SUMS missing or not sha256sum format")
-    else:
-        listed = sorted(name for _, name in entries)
-        names_ok = listed == sorted([archive_name, spdx_name])
-        mismatches = [name for digest, name in entries
-                      if name not in digests or digests[name] != digest]
-        add_check(checks, "sha256sums-manifest", names_ok and not mismatches,
-                  f"listed={listed}; mismatched={mismatches or 'none'}; "
-                  + ", ".join(f"{n}={d}" for n, d in sorted(digests.items())))
+    try:
+        entries: Optional[List[Tuple[str, str]]] = None
+        sums_reason = "SHA256SUMS missing or not sha256sum format"
+        if present[SUMS_NAME]:
+            try:
+                sums_text = paths[SUMS_NAME].read_bytes().decode("utf-8")
+            except UnicodeDecodeError as exc:
+                sums_text = None
+                sums_reason = f"SHA256SUMS is not valid UTF-8 ({exc.reason} at byte {exc.start})"
+            if sums_text is not None:
+                entries = parse_sums(sums_text)
+        if entries is None:
+            add_check(checks, "sha256sums-manifest", False, sums_reason)
+        else:
+            listed = sorted(name for _, name in entries)
+            names_ok = listed == sorted([archive_name, spdx_name])
+            mismatches = [name for digest, name in entries
+                          if name not in digests or digests[name] != digest]
+            add_check(checks, "sha256sums-manifest", names_ok and not mismatches,
+                      f"listed={listed}; mismatched={mismatches or 'none'}; "
+                      + ", ".join(f"{n}={d}" for n, d in sorted(digests.items())))
+    except Exception as exc:
+        record_failure(checks, ["sha256sums-manifest"], exc)
 
     # The archive must be byte-identical to `git archive | gzip -n` run on the expected commit.
     archive_path, spdx_path = paths[archive_name], paths[spdx_name]
@@ -314,36 +415,47 @@ def run_checks(args: argparse.Namespace, runner: Runner) -> Tuple[List[Check], D
 
     # Provenance attestations for the three release files.
     for label, name in (("archive", archive_name), ("spdx", spdx_name), ("sha256sums", SUMS_NAME)):
+        check_name = f"attestation-provenance-{label}"
         if not present[name]:
-            add_check(checks, f"attestation-provenance-{label}", False, f"{name} not downloaded")
+            add_check(checks, check_name, False, f"{name} not downloaded")
             continue
-        argv = cmd_attest(repo, paths[name], SLSA_PREDICATE, True)
-        ok, results, detail = attestation_results(runner, argv)
-        signer_ok = ok and all(signer_matches(r, tag) for r in results)
-        pred_ok = ok and all(statement_of(r).get("predicateType") == SLSA_PREDICATE for r in results)
-        add_check(checks, f"attestation-provenance-{label}", ok and signer_ok and pred_ok,
-                  detail or f"{len(results)} attestation(s); signer identity "
-                  f"{'matches' if signer_ok else 'does NOT match'} "
-                  f"{SIGNER_WORKFLOW}@refs/tags/{tag}")
+        try:
+            argv = cmd_attest(repo, paths[name], SLSA_PREDICATE, True, expected)
+            ok, results, detail = attestation_results(runner, argv)
+            signer_ok = ok and all(signer_matches(r, repo, tag) for r in results)
+            commit_ok = ok and all(commit_pinned(r, expected) for r in results)
+            pred_ok = ok and all(statement_of(r).get("predicateType") == SLSA_PREDICATE for r in results)
+            add_check(checks, check_name, ok and signer_ok and commit_ok and pred_ok,
+                      detail or f"{len(results)} attestation(s); signer identity "
+                      f"{'matches' if signer_ok else 'does NOT match'} "
+                      f"{expected_signer(repo, tag)}; source digest "
+                      f"{'pinned' if commit_ok else 'NOT pinned'} to {expected}")
+        except Exception as exc:
+            record_failure(checks, [check_name], exc)
 
     # SBOM attestation: archive subject, SPDX predicate, equal to the downloaded SPDX.
     if present[archive_name] and present[spdx_name]:
-        argv = cmd_attest(repo, archive_path, SPDX_PREDICATE, False)
-        ok, results, detail = attestation_results(runner, argv)
-        signer_ok = ok and all(signer_matches(r, tag) for r in results)
-        add_check(checks, "attestation-sbom", ok and signer_ok,
-                  detail or f"{len(results)} SBOM attestation(s); signer identity "
-                  f"{'matches' if signer_ok else 'does NOT match'} "
-                  f"{SIGNER_WORKFLOW}@refs/tags/{tag}")
         try:
-            local_spdx = json.loads(spdx_path.read_text(encoding="utf-8"))
-        except ValueError:
-            local_spdx = None
-        predicates = [statement_of(r).get("predicate") for r in results] if ok else []
-        pred_ok = ok and local_spdx is not None and all(p == local_spdx for p in predicates)
-        add_check(checks, "sbom-predicate-matches-spdx", pred_ok,
-                  f"{len(predicates)} attested predicate(s) compared with downloaded SPDX JSON"
-                  if pred_ok else "attested SBOM predicate differs from downloaded SPDX or was unavailable")
+            argv = cmd_attest(repo, archive_path, SPDX_PREDICATE, False, expected)
+            ok, results, detail = attestation_results(runner, argv)
+            signer_ok = ok and all(signer_matches(r, repo, tag) for r in results)
+            commit_ok = ok and all(commit_pinned(r, expected) for r in results)
+            add_check(checks, "attestation-sbom", ok and signer_ok and commit_ok,
+                      detail or f"{len(results)} SBOM attestation(s); signer identity "
+                      f"{'matches' if signer_ok else 'does NOT match'} "
+                      f"{expected_signer(repo, tag)}; source digest "
+                      f"{'pinned' if commit_ok else 'NOT pinned'} to {expected}")
+            try:
+                local_spdx = json.loads(spdx_path.read_text(encoding="utf-8"))
+            except ValueError:
+                local_spdx = None
+            predicates = [statement_of(r).get("predicate") for r in results] if ok else []
+            pred_ok = ok and local_spdx is not None and all(p == local_spdx for p in predicates)
+            add_check(checks, "sbom-predicate-matches-spdx", pred_ok,
+                      f"{len(predicates)} attested predicate(s) compared with downloaded SPDX JSON"
+                      if pred_ok else "attested SBOM predicate differs from downloaded SPDX or was unavailable")
+        except Exception as exc:
+            record_failure(checks, ["attestation-sbom", "sbom-predicate-matches-spdx"], exc)
     else:
         add_check(checks, "attestation-sbom", False, "archive or SPDX not downloaded")
         add_check(checks, "sbom-predicate-matches-spdx", False, "archive or SPDX not downloaded")
@@ -366,6 +478,24 @@ def attestation_results(runner: Runner, argv: Sequence[str]) -> Tuple[bool, List
     return True, data, ""
 
 
+def report_path(out: Path) -> Path:
+    return out / REPORT_NAME
+
+
+def refuse_existing_report(out: Path) -> Optional[str]:
+    """Return an error message if the report path already exists in any form.
+
+    Checked before any network work. A symlink (even a dangling one) or any existing file
+    is refused, so the report is only ever created fresh inside --out.
+    """
+    target = report_path(out)
+    if os.path.lexists(target):
+        kind = "symlink" if target.is_symlink() else "existing file"
+        return (f"refusing to write {target}: {kind} already present; "
+                f"use a fresh or empty --out directory")
+    return None
+
+
 def write_report(out: Path, args: argparse.Namespace, checks: List[Check],
                  assets: Dict[str, dict]) -> bool:
     overall = all(c.status == "PASS" for c in checks)
@@ -378,8 +508,10 @@ def write_report(out: Path, args: argparse.Namespace, checks: List[Check],
         "assets": assets,
         "checks": [asdict(c) for c in checks],
     }
-    (out / "verify-report.json").write_text(json.dumps(report, indent=2, sort_keys=True) + "\n",
-                                            encoding="utf-8")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(str(report_path(out)), flags, 0o644)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(json.dumps(report, indent=2, sort_keys=True) + "\n")
     return overall
 
 
@@ -419,13 +551,21 @@ def main(argv: Optional[Sequence[str]] = None, runner: Optional[Runner] = None) 
         for command in plan_commands(args):
             print(shlex.join(command))
         return 0
-    runner = runner or Runner()
     out = Path(args.out)
+    refusal = refuse_existing_report(out)
+    if refusal is not None:
+        print(refusal, file=sys.stderr)
+        return 2
+    runner = runner or Runner()
     checks, assets = run_checks(args, runner)
     out.mkdir(parents=True, exist_ok=True)
-    overall = write_report(out, args, checks, assets)
+    try:
+        overall = write_report(out, args, checks, assets)
+    except OSError as exc:
+        print(f"could not write {report_path(out)}: {exc}", file=sys.stderr)
+        return 2
     print(format_table(checks))
-    print(f"overall: {'PASS' if overall else 'FAIL'}; report: {out / 'verify-report.json'}")
+    print(f"overall: {'PASS' if overall else 'FAIL'}; report: {report_path(out)}")
     return 0 if overall else 1
 
 
