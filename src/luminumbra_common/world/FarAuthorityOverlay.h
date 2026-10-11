@@ -103,7 +103,8 @@ std::filesystem::path FarOverlayPath(const std::filesystem::path& save_dir, cons
 std::optional<FarTileKey> ParseFarOverlayFileName(std::string_view file_name);
 
 // Encodes the tile and writes it with WorldSaveService::write_file_durably. A
-// failure leaves any previous file for that key in place.
+// failed write never leaves a partial file: the file for that key is the previous
+// complete overlay, or the new one when only the final directory flush failed.
 bool WriteFarOverlay(const std::filesystem::path& save_dir,
                      const FarOverlayTile& tile,
                      std::vector<std::string>* errors = nullptr);

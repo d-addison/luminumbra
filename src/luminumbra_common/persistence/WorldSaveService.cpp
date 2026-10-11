@@ -1320,6 +1320,11 @@ bool WorldSaveService::write_file_durably(const std::filesystem::path& destinati
         return false;
     }
 #if !defined(_WIN32)
+    // A retry after a failed flush finds the directories already present, so the
+    // destination directory's own parent entry is always flushed too.
+    if (destination.has_parent_path()) {
+        created_directories.push_back(destination.parent_path());
+    }
     for (const std::filesystem::path& created : created_directories) {
         if (!FlushDirectoryEntry(created.has_parent_path() ? created.parent_path()
                                                            : std::filesystem::path("."),

@@ -1,5 +1,7 @@
 #include "FarAuthorityOverlay.h"
 
+#include "FarTierTable.h"
+#include "FarWantedSet.h"
 #include "core/Crc32.h"
 #include "persistence/WorldSaveService.h"
 
@@ -577,6 +579,7 @@ bool ValidateFarOverlayDirectory(const std::filesystem::path& save_dir,
     struct Candidate {
         std::string file_name;
         FarTileKey key;
+        bool regular = false;
     };
     std::vector<Candidate> candidates;
     bool failed = false;
@@ -597,12 +600,7 @@ bool ValidateFarOverlayDirectory(const std::filesystem::path& save_dir,
         }
         const std::string file_name = entry.path().filename().string();
         if (const auto key = ParseFarOverlayFileName(file_name)) {
-            if (!regular) {
-                Report(errors, "far overlay " + file_name + ": not a regular file");
-                failed = true;
-            } else {
-                candidates.push_back(Candidate{file_name, *key});
-            }
+            candidates.push_back(Candidate{file_name, *key, regular});
         }
         iterator.increment(ec);
         if (ec) {
@@ -616,6 +614,11 @@ bool ValidateFarOverlayDirectory(const std::filesystem::path& save_dir,
     });
 
     for (const Candidate& candidate : candidates) {
+        if (!candidate.regular) {
+            Report(errors, "far overlay " + candidate.file_name + ": not a regular file");
+            failed = true;
+            continue;
+        }
         const FarOverlayDecodeResult decoded = ReadFarOverlay(save_dir, candidate.key);
         if (decoded.error != FarOverlayError::None) {
             Report(errors,

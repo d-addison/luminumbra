@@ -1,7 +1,6 @@
 #include "luminumbra_common/core/Crc32.h"
 #include "luminumbra_common/persistence/WorldSaveService.h"
 #include "luminumbra_common/world/FarAuthorityOverlay.h"
-#include "luminumbra_common/world/FarTierTable.h"
 #include "luminumbra_common/world/FarWantedSet.h"
 
 #include <gtest/gtest.h>
@@ -13,6 +12,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <ios>
 #include <iterator>
 #include <limits>
 #include <optional>
