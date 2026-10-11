@@ -311,6 +311,21 @@ try {
     try { Read-JsonArtifact $readerPath "luminumbra.farlod_horizon.v1" | Out-Null }
     catch { $message = $_.Exception.Message }
     Assert-Test ($null -ne $message -and $message.Contains($readerPath)) "reader refuses invalid UTF-8 bytes"
+    $bom = [byte[]]@(239, 187, 191)
+    [System.IO.File]::WriteAllBytes($readerPath, [byte[]]($bom + $prefix + [byte[]]@(255) + $suffix))
+    $message = $null
+    try { Read-JsonArtifact $readerPath "luminumbra.farlod_horizon.v1" | Out-Null }
+    catch { $message = $_.Exception.Message }
+    Assert-Test ($null -ne $message -and $message.Contains($readerPath)) "reader refuses invalid UTF-8 after a BOM"
+    [System.IO.File]::WriteAllBytes($readerPath, [byte[]]($bom + $prefix + [byte[]]@(97) + $suffix))
+    $read = Read-JsonArtifact $readerPath "luminumbra.farlod_horizon.v1"
+    Assert-Test ($read.x -ceq "a") "reader accepts a UTF-8 BOM"
+    $utf16 = [System.Text.Encoding]::Unicode.GetBytes('{"schema":"luminumbra.farlod_horizon.v1"}')
+    [System.IO.File]::WriteAllBytes($readerPath, [byte[]](@(255, 254) + $utf16))
+    $message = $null
+    try { Read-JsonArtifact $readerPath "luminumbra.farlod_horizon.v1" | Out-Null }
+    catch { $message = $_.Exception.Message }
+    Assert-Test ($null -ne $message -and $message.Contains($readerPath)) "reader refuses UTF-16 input"
     $oversized = [System.IO.File]::OpenWrite($readerPath)
     try { $oversized.SetLength(16777217) } finally { $oversized.Dispose() }
     $message = $null

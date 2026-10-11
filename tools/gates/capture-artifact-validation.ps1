@@ -9,7 +9,6 @@ function Read-JsonArtifact {
     )
 
     $stream = $null
-    $reader = $null
     try {
         if ([string]::IsNullOrWhiteSpace($Schema)) { throw "expected a nonempty schema" }
         $resolved = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path)
@@ -17,10 +16,21 @@ function Read-JsonArtifact {
         if ($stream.Length -le 0 -or $stream.Length -gt 16777216) {
             throw "expected a JSON artifact between 1 byte and 16 MiB"
         }
-        # Strict decoding: invalid bytes throw instead of becoming U+FFFD.
+        # Strict UTF-8 without encoding sniffing: invalid bytes throw instead of
+        # becoming U+FFFD, and UTF-16/32 byte-order marks are refused.
+        $bytes = New-Object byte[] ([int]$stream.Length)
+        $read = 0
+        while ($read -lt $bytes.Length) {
+            $count = $stream.Read($bytes, $read, $bytes.Length - $read)
+            if ($count -le 0) { throw "artifact ended while reading" }
+            $read += $count
+        }
+        $offset = 0
+        if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) {
+            $offset = 3
+        }
         $strictUtf8 = New-Object System.Text.UTF8Encoding($false, $true)
-        $reader = New-Object System.IO.StreamReader($stream, $strictUtf8, $true)
-        $json = $reader.ReadToEnd()
+        $json = $strictUtf8.GetString($bytes, $offset, $bytes.Length - $offset)
         if ($json -notmatch '^\s*\{') { throw "artifact root must be a JSON object" }
         $artifact = $json | ConvertFrom-Json -ErrorAction Stop
         if ($artifact -isnot [pscustomobject] -or
@@ -32,7 +42,6 @@ function Read-JsonArtifact {
     } catch {
         throw "JSON artifact '$Path': $($_.Exception.Message)"
     } finally {
-        if ($null -ne $reader) { $reader.Dispose() }
         if ($null -ne $stream) { $stream.Dispose() }
     }
 }
