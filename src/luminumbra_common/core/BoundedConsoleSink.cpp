@@ -85,8 +85,9 @@ private:
 
 class FdOutput final : public ConsoleOutput {
 public:
-    explicit FdOutput(int fd)
-        : m_fd(fd) {}
+    FdOutput(int fd, FileDescriptorWriteFn write_fn)
+        : m_fd(fd)
+        , m_write(write_fn) {}
     ~FdOutput() override {
         ::close(m_fd);
     }
@@ -96,7 +97,7 @@ public:
 
     Status write(const char* data, std::size_t length) override {
         while (length > 0) {
-            const ssize_t written = ::write(m_fd, data, length);
+            const ssize_t written = m_write(m_fd, data, length);
             if (written < 0) {
                 if (errno == EINTR) {
                     continue;
@@ -120,6 +121,7 @@ public:
 
 private:
     int m_fd;
+    FileDescriptorWriteFn m_write;
 };
 
 #endif
@@ -130,6 +132,8 @@ BoundedConsoleSink::BoundedConsoleSink(std::shared_ptr<ConsoleOutput> output, Li
     : m_state(std::make_shared<State>()) {
     m_state->output = std::move(output);
     m_state->limits = limits;
+    // A null output starts Dead: sink_it_ counts every message as dropped, and
+    // the writer exits without ever calling into a null output.
     m_state->dead = !m_state->output;
     m_writer = std::thread(&BoundedConsoleSink::RunWriter, m_state);
 }
@@ -203,16 +207,25 @@ void BoundedConsoleSink::RunWriter(const std::shared_ptr<State>& state) {
         state->queued_bytes = 0;
     };
 
+    // A drop notice may be written only after a queued line has been delivered
+    // since the previous notice. Otherwise a sustained overflow could keep the
+    // writer emitting notices and never reach the queue. The one exception is
+    // shutdown with an empty queue, where the pending count is still reported.
+    bool notice_allowed = true;
+
     while (!state->dead) {
-        state->cv.wait(lock, [&state] {
+        state->cv.wait(lock, [&state, &notice_allowed] {
             return state->stop || !state->queue.empty() ||
-                   state->reported != state->dropped.load(std::memory_order_relaxed);
+                   (notice_allowed &&
+                    state->reported != state->dropped.load(std::memory_order_relaxed));
         });
 
         const std::uint64_t total_dropped = state->dropped.load(std::memory_order_relaxed);
-        if (state->reported != total_dropped) {
+        const bool notice_due = state->reported != total_dropped;
+        if (notice_due && (notice_allowed || (state->stop && state->queue.empty()))) {
             const std::uint64_t count = total_dropped - state->reported;
             state->reported = total_dropped;
+            notice_allowed = false;
             lock.unlock();
             const std::string notice = "[" + std::to_string(count) + " console lines dropped]\n";
             const ConsoleOutput::Status status = state->output->write(notice.data(), notice.size());
@@ -238,6 +251,8 @@ void BoundedConsoleSink::RunWriter(const std::shared_ptr<State>& state) {
         lock.lock();
         if (status == ConsoleOutput::Status::Dead) {
             mark_dead(1);
+        } else {
+            notice_allowed = true;
         }
     }
 
@@ -272,12 +287,13 @@ std::shared_ptr<ConsoleOutput> BoundedConsoleSink::MakeStdoutOutput() {
 }
 
 #ifndef _WIN32
-std::shared_ptr<ConsoleOutput> BoundedConsoleSink::MakeFileDescriptorOutput(int fd) {
+std::shared_ptr<ConsoleOutput>
+BoundedConsoleSink::MakeFileDescriptorOutput(int fd, FileDescriptorWriteFn write_fn) {
     const int duplicate = ::dup(fd);
     if (duplicate < 0) {
         return nullptr;
     }
-    return std::make_shared<FdOutput>(duplicate);
+    return std::make_shared<FdOutput>(duplicate, write_fn);
 }
 #endif
 

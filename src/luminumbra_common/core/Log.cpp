@@ -23,16 +23,15 @@ std::shared_ptr<spdlog::logger> create_default_logger() {
     }
 
     std::vector<spdlog::sink_ptr> sinks;
-    // A terminal keeps the synchronous coloured sink. Redirected output (pipe, file)
-    // goes through the bounded sink so a stalled reader cannot block logging callers.
-    std::shared_ptr<ConsoleOutput> bounded_output;
-    if (!BoundedConsoleSink::StdoutIsCharacterDevice()) {
-        bounded_output = BoundedConsoleSink::MakeStdoutOutput();
-    }
+    // The choice depends only on the destination. A terminal keeps the synchronous
+    // coloured sink. Redirected output (pipe, file) goes through the bounded sink so
+    // a stalled reader cannot block logging callers. If the output cannot be
+    // duplicated, the bounded sink starts Dead and drops console messages, while the
+    // file sink keeps recording them.
     std::shared_ptr<spdlog::sinks::sink> console;
-    if (bounded_output) {
-        console =
-            std::make_shared<BoundedConsoleSink>(bounded_output, BoundedConsoleSink::Limits{});
+    if (!BoundedConsoleSink::StdoutIsCharacterDevice()) {
+        console = std::make_shared<BoundedConsoleSink>(BoundedConsoleSink::MakeStdoutOutput(),
+                                                       BoundedConsoleSink::Limits{});
     } else {
         console = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
     }

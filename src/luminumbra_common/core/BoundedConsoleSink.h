@@ -6,6 +6,11 @@
 #include <spdlog/sinks/base_sink.h>
 #include <thread>
 
+#ifndef _WIN32
+#include <sys/types.h>
+#include <unistd.h>
+#endif
+
 // Destination for console text. The sink hands it complete, already formatted
 // lines from a single writer thread. Returning Dead marks the destination as
 // unusable; every later message is counted as dropped and never written.
@@ -20,11 +25,21 @@ public:
     virtual Status write(const char* data, std::size_t length) = 0;
 };
 
+#ifndef _WIN32
+// Signature of the raw write call used by the descriptor output. The default is
+// ::write; tests substitute scripted results to exercise short writes and EINTR.
+using FileDescriptorWriteFn = ssize_t (*)(int, const void*, std::size_t);
+#endif
+
 // Console sink that never lets a logging call wait on console I/O. Each
 // formatted line is queued (bounded by message count and total bytes) and a
 // writer thread delivers it to a ConsoleOutput. When the queue is full the
-// newest message is dropped and counted; once output resumes, the writer emits
-// "[N console lines dropped]" before the next line.
+// newest message is dropped and counted. Once output resumes, the writer emits
+// one "[N console lines dropped]" notice, and it emits another only after a
+// queued line has been delivered.
+//
+// A null output is treated as Dead: every message is counted as dropped and
+// nothing is ever written.
 //
 // SIGPIPE: MakeStdoutOutput() sets SIGPIPE to ignored when its disposition is
 // SIG_DFL, so a closed reader surfaces as a write error instead of terminating
@@ -51,8 +66,10 @@ public:
     static std::shared_ptr<ConsoleOutput> MakeStdoutOutput();
 
 #ifndef _WIN32
-    // Duplicates an arbitrary file descriptor. Returns nullptr if dup fails.
-    static std::shared_ptr<ConsoleOutput> MakeFileDescriptorOutput(int fd);
+    // Duplicates an arbitrary file descriptor and writes through write_fn.
+    // Returns nullptr if dup fails.
+    static std::shared_ptr<ConsoleOutput>
+    MakeFileDescriptorOutput(int fd, FileDescriptorWriteFn write_fn = &::write);
 #endif
 
     // True when standard output is a character device (terminal) or its type
