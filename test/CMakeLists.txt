@@ -1315,6 +1315,7 @@ add_executable(frontier_gates_test
     persistence/world_save_region_format_test.cpp
     persistence/persistence_hardening_test.cpp
     persistence/save_load_corruption_corpus_test.cpp
+    persistence/SaveTransaction_test.cpp
 )
 
 target_compile_definitions(frontier_gates_test PRIVATE
