@@ -404,6 +404,7 @@ struct ScriptedWriter {
     std::string delivered;
 };
 
+// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
 ScriptedWriter g_scripted;
 
 ssize_t ScriptedWrite(int /*fd*/, const void* data, std::size_t length) {
