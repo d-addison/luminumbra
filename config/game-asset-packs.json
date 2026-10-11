@@ -1,0 +1,281 @@
+{
+  "schema": "luminumbra.game.asset-packs.v1",
+  "packs": {
+    "tree-small-02-runtime": {
+      "version": "1.0.0",
+      "install_dir": "game-assets/tree-small-02/1.0.0",
+      "archive": {
+        "url": "https://github.com/d-addison/luminumbra-game/releases/download/tree-small-02-runtime-v1.0.0/tree-small-02-runtime-v1.0.0.tar.gz",
+        "size": 15194266,
+        "sha256": "d443c9873a6e0f1e00927a2550b6bdb9240f76c3d8508b96fde4685f7989c20d",
+        "uncompressed_size": 29982720
+      },
+      "files": [
+        {
+          "path": "CONVERSION.md",
+          "size": 3632,
+          "sha256": "ca6b7d2a5293116879cb84366c7715d163f03e87f36cd177776ec9afc035fc3c"
+        },
+        {
+          "path": "LICENSE.txt",
+          "size": 198,
+          "sha256": "138cc05b2ac638b319b360114c859a7b17f14dc5d77f86a3486cc1fa6476bc4c"
+        },
+        {
+          "path": "conversion-receipt.json",
+          "size": 9206,
+          "sha256": "b93974b7d6a6c67529ff879f589bd05295b304368e9e0aa3102c7a4ebc105410"
+        },
+        {
+          "path": "data/models/trees/tree_small_02_branches.lmesh",
+          "size": 1574460,
+          "sha256": "a75313ee29bcaebb55d2c2f41f2cffc4c40d168eb14bc2f58003b5b34ed17534",
+          "vertices": 31951,
+          "triangles": 46000,
+          "bounding_sphere": [
+            0.16174417734146118,
+            3.0087785720825195,
+            0.7647926807403564,
+            2.7579989433288574
+          ]
+        },
+        {
+          "path": "data/models/trees/tree_small_02_branches.lod1.lmesh",
+          "size": 994764,
+          "sha256": "2f3708b7420fa7b92bf6ad701cedd31642abe235bbb8dfda701fbc71b87e2bf8",
+          "vertices": 20773,
+          "triangles": 27500,
+          "bounding_sphere": [
+            0.16174417734146118,
+            3.0087785720825195,
+            0.7647926807403564,
+            2.7579989433288574
+          ]
+        },
+        {
+          "path": "data/models/trees/tree_small_02_branches.lod2.lmesh",
+          "size": 548060,
+          "sha256": "1d9d7c400e95c70c86cc4b1738416d589da49cfc22faf937226b34e534599f34",
+          "vertices": 12251,
+          "triangles": 13000,
+          "bounding_sphere": [
+            0.16174417734146118,
+            3.0087785720825195,
+            0.7647926807403564,
+            2.7579989433288574
+          ]
+        },
+        {
+          "path": "data/models/trees/tree_small_02_leaves.lmesh",
+          "size": 4598028,
+          "sha256": "3581c046b685027e4cdf1125cba35bccbcdb3e6d9caf96bf5b64c51024a5aa4e",
+          "vertices": 121000,
+          "triangles": 60500,
+          "bounding_sphere": [
+            0.14935654401779175,
+            2.9954919815063477,
+            0.7636117935180664,
+            3.0159475803375244
+          ]
+        },
+        {
+          "path": "data/models/trees/tree_small_02_leaves.lod1.lmesh",
+          "size": 4598028,
+          "sha256": "3581c046b685027e4cdf1125cba35bccbcdb3e6d9caf96bf5b64c51024a5aa4e",
+          "vertices": 121000,
+          "triangles": 60500,
+          "bounding_sphere": [
+            0.14935654401779175,
+            2.9954919815063477,
+            0.7636117935180664,
+            3.0159475803375244
+          ]
+        },
+        {
+          "path": "data/models/trees/tree_small_02_leaves.lod2.lmesh",
+          "size": 4598028,
+          "sha256": "3581c046b685027e4cdf1125cba35bccbcdb3e6d9caf96bf5b64c51024a5aa4e",
+          "vertices": 121000,
+          "triangles": 60500,
+          "bounding_sphere": [
+            0.14935654401779175,
+            2.9954919815063477,
+            0.7636117935180664,
+            3.0159475803375244
+          ]
+        },
+        {
+          "path": "data/models/trees/tree_small_02_trunk.lmesh",
+          "size": 317612,
+          "sha256": "de9e2226f83e00d315e1b00fac20d6312ee4d637b1a0d7aaad8877c6a4d960b9",
+          "vertices": 6176,
+          "triangles": 9996,
+          "bounding_sphere": [
+            0.08198681473731995,
+            1.8184467554092407,
+            0.7649637460708618,
+            2.3354475498199463
+          ]
+        },
+        {
+          "path": "data/models/trees/tree_small_02_trunk.lod1.lmesh",
+          "size": 92632,
+          "sha256": "5b1a8c02ef1b464822020825d211d52c17b726d49305d1e8529d5dddd239e395",
+          "vertices": 1920,
+          "triangles": 2597,
+          "bounding_sphere": [
+            0.08317261934280396,
+            1.8177803754806519,
+            0.7660642266273499,
+            2.3339459896087646
+          ]
+        },
+        {
+          "path": "data/models/trees/tree_small_02_trunk.lod2.lmesh",
+          "size": 40292,
+          "sha256": "dac80d04502da379689c332525e531fdda6cb0962da5c6c5605c5361f4fbe567",
+          "vertices": 884,
+          "triangles": 998,
+          "bounding_sphere": [
+            0.08317261934280396,
+            1.8143457174301147,
+            0.764881432056427,
+            2.329341173171997
+          ]
+        },
+        {
+          "path": "data/textures/models/tree_branch_albedo_512.ltex",
+          "size": 1398117,
+          "sha256": "1193631ba5cac2d5ed589d54181bb0d451c9957d334a138b7bcab534e3c7b7f9"
+        },
+        {
+          "path": "data/textures/models/tree_branch_arm_512.ltex",
+          "size": 1398117,
+          "sha256": "870a76a98d215b033ba54151f498539d25740edebdcef8a13973b8acd582870d"
+        },
+        {
+          "path": "data/textures/models/tree_branch_normal_512.ltex",
+          "size": 1398117,
+          "sha256": "2ecfee044ef739a903e0ce4317114ac01e1ddec7dfc92c5dfd46589fe977e54f"
+        },
+        {
+          "path": "data/textures/models/tree_leaves_albedo_512.ltex",
+          "size": 1398117,
+          "sha256": "12af70783d2d79e1f83151ed4819cce4f5ac3980f2bce37dacb793c7ecea164d"
+        },
+        {
+          "path": "data/textures/models/tree_leaves_arm_512.ltex",
+          "size": 1398117,
+          "sha256": "4e99735963cdc9cb3aa9ccb31e7550ced3465c8188937495c0d8395110817e75"
+        },
+        {
+          "path": "data/textures/models/tree_leaves_normal_512.ltex",
+          "size": 1398117,
+          "sha256": "772127f91359c94d88b855a146a5fb816c279f03984fa8bfb3370b8b2b87fb94"
+        },
+        {
+          "path": "data/textures/models/tree_trunk_albedo_512.ltex",
+          "size": 1398117,
+          "sha256": "559d42d4364d4dd73dd5174688e81c736de3fe11bf9771c40fb47ceb0a676ca5"
+        },
+        {
+          "path": "data/textures/models/tree_trunk_arm_512.ltex",
+          "size": 1398117,
+          "sha256": "d9f3d3f4b31adaf1234e2c10fce2483f6604b4c77b22f8b52b215d278f590038"
+        },
+        {
+          "path": "data/textures/models/tree_trunk_normal_512.ltex",
+          "size": 1398117,
+          "sha256": "e2e0ae26a9bb3481bd9ea45c029d1f0272c6dfcf69d47485b728d492ebe0c4bb"
+        },
+        {
+          "path": "source-manifest.json",
+          "size": 5335,
+          "sha256": "32a689ddc1614294acd6e10b6221536b0aed4a3e3bc7e3a45fab120e747c1731"
+        }
+      ]
+    },
+    "tree-small-02-source": {
+      "version": "1.0.0",
+      "install_dir": "game-assets/sources/tree-small-02/1.0.0",
+      "archive": {
+        "url": "https://github.com/d-addison/luminumbra-game/releases/download/tree-small-02-source-v1.0.0/tree-small-02-source-1.0.0.tar.gz",
+        "size": 64772126,
+        "sha256": "c128b8d93463f4f7676294533b6808b21e6481f16a31b2d3c3dc2300eead6004",
+        "uncompressed_size": 115988480
+      },
+      "files": [
+        {
+          "path": "source/tree_small_02_2k.gltf",
+          "size": 9075,
+          "sha256": "a1a7c8a145c811392457c111bff8192146f655a75b5de163ec659cd32af17726"
+        },
+        {
+          "path": "source/textures/tree_small_02_branch_nor_gl_2k.jpg",
+          "size": 1781975,
+          "sha256": "368505992d867bb50eccc00d77940a7a3eaf32f42de9f536d105407b0d6df3fd"
+        },
+        {
+          "path": "source/textures/tree_small_02_branch_diff_2k.jpg",
+          "size": 1425692,
+          "sha256": "9032de9e063ee7e3763a6b10d19d89302f5776e85a966b6dd1c3a5634b2a80e1"
+        },
+        {
+          "path": "source/textures/tree_small_02_branch_arm_2k.jpg",
+          "size": 1147503,
+          "sha256": "82da928cc4e8a45c559f6abe8053227c7ae6cc14eb8d026a30c203aedd087042"
+        },
+        {
+          "path": "source/textures/tree_small_02_leaves_nor_gl_2k.jpg",
+          "size": 2395771,
+          "sha256": "40c956e345430562cdb4d0470c7d499aa160f1fa3dd7555d88be2dedf0d7ff2e"
+        },
+        {
+          "path": "source/textures/tree_small_02_leaves_diff_2k.jpg",
+          "size": 961870,
+          "sha256": "6c984a46861562f2a20381c54106aa5e07ce0d3fce785907f8d263157e7561af"
+        },
+        {
+          "path": "source/textures/tree_small_02_leaves_arm_2k.jpg",
+          "size": 2191542,
+          "sha256": "a126c0d92b60c44c0664e4d3651831970e259b0d5a1fb39ebb67081cbecaca96"
+        },
+        {
+          "path": "source/textures/tree_small_02_nor_gl_2k.jpg",
+          "size": 4555311,
+          "sha256": "cb7897fc0aea602964836116ecf631614ece2970f579647fe1070bccb428fe89"
+        },
+        {
+          "path": "source/textures/tree_small_02_diff_2k.jpg",
+          "size": 3170612,
+          "sha256": "4ab3210b6ec6bb1181145500bca71d1c1f81ead6baaa8600f5979c2cec50c6a4"
+        },
+        {
+          "path": "source/textures/tree_small_02_arm_2k.jpg",
+          "size": 2586815,
+          "sha256": "e96b4e84e9786b982d01562e0d249f6e58db1b656dd511db7c034d6ed60b1c92"
+        },
+        {
+          "path": "source/tree_small_02.bin",
+          "size": 95102324,
+          "sha256": "8da6c3c389ad8748286d1b7488cd827f75ebdad9d8f59ef7dfb0916df5edc634"
+        },
+        {
+          "path": "source/textures/tree_small_02_leaves_alpha_2k.png",
+          "size": 636661,
+          "sha256": "566484c7047ce67af5a4435c1e4da2b773578d73f83ae45dfad0fd442df7b9d5"
+        },
+        {
+          "path": "source-manifest.json",
+          "size": 5335,
+          "sha256": "32a689ddc1614294acd6e10b6221536b0aed4a3e3bc7e3a45fab120e747c1731"
+        },
+        {
+          "path": "LICENSE.txt",
+          "size": 198,
+          "sha256": "138cc05b2ac638b319b360114c859a7b17f14dc5d77f86a3486cc1fa6476bc4c"
+        }
+      ]
+    }
+  }
+}

@@ -48,6 +48,8 @@ struct GBufferPassInput {
     //  static-model UV texture lane (bark/leaf plates). Raw GL array name +
     // per-meshPath layer/alpha lookup (returns nullptr when the mesh has none).
     u32 static_model_texture_array = 0;
+    u32 static_model_normal_array = 0;
+    u32 static_model_surface_array = 0;
     std::function<const StaticModelTex*(const std::string&)> static_model_tex;
 
     //  far-field tree impostors (opt-in; all 0/false when disabled).
@@ -56,7 +58,7 @@ struct GBufferPassInput {
     u32 tree_impostor_normal = 0; // raw GL texture name (bound directly)
     int tree_impostor_grid = 0;
     float tree_impostor_radius = 0.0f;
-    float tree_impostor_sphere_y = 0.0f;
+    glm::vec3 tree_impostor_center{0.0f};
 };
 
 // Returned by GBufferPass::execute so the call site applies the EXACT current

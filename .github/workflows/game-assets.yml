@@ -1,0 +1,36 @@
+name: Game asset acquisition
+
+on:
+  push:
+    branches: [main, devel]
+  pull_request:
+    branches: [main, devel]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  acquire:
+    name: Verified game assets / ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2022]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Verify refusal, bounded extraction and interrupted installation
+        run: python tools/assets/test_acquire.py -v
+      - name: Acquire pinned runtime pack
+        run: python tools/assets/acquire.py --root "${{ runner.temp }}/game-assets-clean" --cache "${{ runner.temp }}/game-assets-cache"
+      - name: Reuse verified runtime archive offline
+        run: python tools/assets/acquire.py --offline --root "${{ runner.temp }}/game-assets-offline" --cache "${{ runner.temp }}/game-assets-cache"
+      - name: Acquire pinned source pack
+        run: python tools/assets/acquire.py --pack tree-small-02-source --root "${{ runner.temp }}/game-source-clean" --cache "${{ runner.temp }}/game-assets-cache"

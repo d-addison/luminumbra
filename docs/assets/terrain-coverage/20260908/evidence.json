@@ -1,0 +1,1289 @@
+{
+  "schema": "luminumbra.terrain_coverage_example.v1",
+  "recorded_date": "2026-09-08",
+  "visual_approved": false,
+  "performance_approved": false,
+  "qualification": "Diagnostic comparison; bypass is not a production terrain ownership policy.",
+  "source_commit": "773f60d4b8770616265fa93c1fb0756ea5324603",
+  "source_tree": "6dfafa3a8464313cef16ce4081c2e0cb8786b682",
+  "executable": {
+    "name": "luminumbra_client_app.exe",
+    "bytes": 22085582,
+    "sha256": "a1ac93825a78d484153a536fb7079d389cb90b4f07de935ff252b9e0aedc0ae9"
+  },
+  "build_configuration": {
+    "schema": "luminumbra.performance_build.v1",
+    "compiler": {
+      "id": "GNU",
+      "version": "15.1.0",
+      "target": "AMD64"
+    },
+    "configuration": {
+      "build_type": "Release",
+      "effective_flags_sha256": "4dd59be449eea44ea9b80469a10392d694a053e017b50b00a65198b9c3010c60",
+      "asan": "OFF",
+      "coverage": "OFF",
+      "diligent": "OFF",
+      "frame_pointers": "OFF",
+      "tracy": "OFF",
+      "warnings_as_errors": "ON"
+    },
+    "system": {
+      "name": "Windows",
+      "processor": "AMD64"
+    }
+  },
+  "runtime_libraries": {
+    "libstdc++-6.dll": {
+      "bytes": 2462473,
+      "sha256": "5fc9ecdb4902bee4b4011ea39d5d94c747dfe6a527a29a5561d6939d05af5f76"
+    },
+    "libgcc_s_seh-1.dll": {
+      "bytes": 150852,
+      "sha256": "4b62ad1a9a934598b086add9551f035259b6754f71482231e377dcc4332069bb"
+    },
+    "libwinpthread-1.dll": {
+      "bytes": 63675,
+      "sha256": "5df04e91b01fca90ecd50e37a5472c32a066c2bd4a1f8af5672d8513389c544b"
+    }
+  },
+  "input_manifest_sha256": "08f1c0e42233179098564aab9cee4586048a7a1f3d0ec937d44ed3235ffb3bb4",
+  "input_file_count": 261,
+  "published_pack_files_verified": 22,
+  "private_audio_payloads": false,
+  "saved_worlds_copied": false,
+  "hardware": {
+    "operating_system": "Windows",
+    "gpu": "NVIDIA GeForce RTX 5070 Ti",
+    "driver": "595.97",
+    "gpu_index": 0,
+    "observation_scope": "Startup process table joined to each capture PID; shared hardware environment, not evidence of interference."
+  },
+  "settings": {
+    "world_preset": "default",
+    "seed": 424242,
+    "position": [
+      8,
+      56,
+      8
+    ],
+    "yaw_degrees": 35,
+    "pitch_degrees": -6,
+    "vertical_fov_degrees": 45,
+    "time_of_day": 0.03999999910593033,
+    "warmup_frames": 400,
+    "measured_frames": 240,
+    "capture_render_frame": 641,
+    "color_dimensions": [
+      3840,
+      1600
+    ],
+    "gbuffer_dimensions": [
+      3840,
+      1600
+    ],
+    "taau_enabled": false,
+    "jitter_ndc": [
+      0.0,
+      0.0
+    ],
+    "view": [
+      -0.5735765695571899,
+      0.08562619984149933,
+      -0.8146644234657288,
+      0.0,
+      1.1175870895385742e-08,
+      0.9945217370986938,
+      0.10453028231859207,
+      0.0,
+      0.8191519975662231,
+      0.05995611473917961,
+      -0.5704342722892761,
+      0.0,
+      -1.9646039009094238,
+      -56.85787582397461,
+      5.227093696594238,
+      1.0
+    ],
+    "gbuffer_projection": [
+      1.0059221982955933,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      2.4142134189605713,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      -1.0000625848770142,
+      -1.0,
+      0.0,
+      0.0,
+      -0.20000626146793365,
+      0.0
+    ],
+    "matrix_layout": "column_major",
+    "audio_enabled": false,
+    "ui_enabled": false
+  },
+  "comparison": {
+    "newly_covered_pixels": 257075,
+    "newly_clear_pixels": 0,
+    "capture_camera_matrices_exact_equal": true,
+    "capture_live_records_exact_equal": true,
+    "capture_far_record_changes": [
+      {
+        "field": "/camera_neighbourhood/4/terrain_decision",
+        "guard": "camera_region_guard",
+        "bypass": "submitted"
+      },
+      {
+        "field": "/camera_neighbourhood/4/water_decision",
+        "guard": "camera_region_guard",
+        "bypass": "submitted"
+      },
+      {
+        "field": "/camera_region_guard_bypassed",
+        "guard": false,
+        "bypass": true
+      },
+      {
+        "field": "/draws",
+        "guard": 78,
+        "bypass": 80
+      },
+      {
+        "field": "/indices",
+        "guard": 1601970,
+        "bypass": 1731642
+      }
+    ],
+    "measured_frame_comparison": {
+      "count": 240,
+      "different_far_field_counts": {
+        "/camera_neighbourhood/4/terrain_decision": 240,
+        "/camera_neighbourhood/4/water_decision": 240,
+        "/camera_region_guard_bypassed": 240,
+        "/draws": 240,
+        "/indices": 240
+      },
+      "max_far_missing": {
+        "guard": 0,
+        "bypass": 0
+      },
+      "max_far_pending": {
+        "guard": 0,
+        "bypass": 0
+      }
+    },
+    "warmup_residency_identical": false,
+    "probes": [
+      {
+        "pixel_top_left": [
+          2199,
+          734
+        ],
+        "guard_depth": 1.0,
+        "bypass_depth": 0.9998810291290283,
+        "view_position": [
+          95.8125,
+          22.453125,
+          -662.0
+        ],
+        "world_position_approximate_rgb16f": [
+          494.2746275294131,
+          9.13106811522163,
+          465.45873074736204
+        ],
+        "material": 2
+      },
+      {
+        "pixel_top_left": [
+          2603,
+          793
+        ],
+        "guard_depth": 1.0,
+        "bypass_depth": 0.9998531937599182,
+        "view_position": [
+          196.0,
+          1.8642578125,
+          -554.0
+        ],
+        "world_position_approximate_rgb16f": [
+          347.0627295926788,
+          -0.055734644266969724,
+          484.6861814926579
+        ],
+        "material": 200
+      },
+      {
+        "pixel_top_left": [
+          2047,
+          814
+        ],
+        "guard_depth": 1.0,
+        "bypass_depth": 0.9998313188552856,
+        "view_position": [
+          32.8125,
+          -3.732421875,
+          -497.0
+        ],
+        "world_position_approximate_rgb16f": [
+          393.7481473392372,
+          0.33647176687944125,
+          318.16050780785423
+        ],
+        "material": 4
+      },
+      {
+        "pixel_top_left": [
+          2037,
+          830
+        ],
+        "guard_depth": 1.0,
+        "bypass_depth": 0.9998191595077515,
+        "view_position": [
+          28.359375,
+          -7.36328125,
+          -466.25
+        ],
+        "world_position_approximate_rgb16f": [
+          370.9405274172,
+          -0.06019017796035797,
+          296.7541736448277
+        ],
+        "material": 200
+      },
+      {
+        "pixel_top_left": [
+          1361,
+          843
+        ],
+        "guard_depth": 1.0,
+        "bypass_depth": 0.9997769594192505,
+        "view_position": [
+          -113.375,
+          -8.828125,
+          -392.0
+        ],
+        "world_position_approximate_rgb16f": [
+          391.62176924382663,
+          6.244364224818419,
+          138.20960595138155
+        ],
+        "material": 4
+      },
+      {
+        "pixel_top_left": [
+          2593,
+          855
+        ],
+        "guard_depth": 1.0,
+        "bypass_depth": 0.9997383952140808,
+        "view_position": [
+          117.0,
+          -9.640625,
+          -335.5
+        ],
+        "world_position_approximate_rgb16f": [
+          213.38597579577927,
+          11.34227797061402,
+          294.6434855555535
+        ],
+        "material": 4
+      },
+      {
+        "pixel_top_left": [
+          887,
+          867
+        ],
+        "guard_depth": 1.0,
+        "bypass_depth": 0.9997401833534241,
+        "view_position": [
+          -182.375,
+          -11.921875,
+          -341.0
+        ],
+        "world_position_approximate_rgb16f": [
+          389.385754901698,
+          8.498607215083887,
+          52.410479940765796
+        ],
+        "material": 4
+      },
+      {
+        "pixel_top_left": [
+          704,
+          879
+        ],
+        "guard_depth": 1.0,
+        "bypass_depth": 0.9997318983078003,
+        "view_position": [
+          -209.625,
+          -13.7109375,
+          -333.0
+        ],
+        "world_position_approximate_rgb16f": [
+          398.3452080568238,
+          7.55558796127422,
+          25.41784896467148
+        ],
+        "material": 4
+      },
+      {
+        "pixel_top_left": [
+          1084,
+          895
+        ],
+        "guard_depth": 1.0,
+        "bypass_depth": 0.9997113943099976,
+        "view_position": [
+          -134.875,
+          -15.421875,
+          -311.75
+        ],
+        "world_position_approximate_rgb16f": [
+          338.01224590012305,
+          8.075292597697008,
+          74.4251475471086
+        ],
+        "material": 4
+      },
+      {
+        "pixel_top_left": [
+          677,
+          915
+        ],
+        "guard_depth": 1.0,
+        "bypass_depth": 0.9997199177742004,
+        "view_position": [
+          -206.125,
+          -19.15625,
+          -320.25
+        ],
+        "world_position_approximate_rgb16f": [
+          385.4844575911398,
+          3.472867890573987,
+          20.685363296653936
+        ],
+        "material": 4
+      },
+      {
+        "pixel_top_left": [
+          754,
+          942
+        ],
+        "guard_depth": 1.0,
+        "bypass_depth": 0.9997162222862244,
+        "view_position": [
+          -190.125,
+          -23.25,
+          -315.0
+        ],
+        "world_position_approximate_rgb16f": [
+          371.6797134201619,
+          -0.04967109115955992,
+          30.551569151215052
+        ],
+        "material": 200
+      },
+      {
+        "pixel_top_left": [
+          818,
+          1144
+        ],
+        "guard_depth": 1.0,
+        "bypass_depth": 0.9995306730270386,
+        "view_position": [
+          -113.375,
+          -35.46875,
+          -198.75
+        ],
+        "world_position_approximate_rgb16f": [
+          231.90673405677066,
+          -0.04983615817845788,
+          26.375902083073132
+        ],
+        "material": 200
+      }
+    ]
+  },
+  "capture_live": {
+    "scope": "prepared_renderable_snapshots_not_all_requested_chunks",
+    "snapshot_count": 2234,
+    "streaming": {
+      "generation_pending": 0,
+      "meshing_pending": 0,
+      "requested_radius_chunks": 32,
+      "target_radius_chunks": 0,
+      "terrain_uploads_pending": 0
+    },
+    "submit_observed": true,
+    "truncated": false
+  },
+  "capture_live_counts": {
+    "rows": 2234,
+    "pool_resident": 2234,
+    "submitted": 570,
+    "snapshot_uploaded_version_mismatches": 0
+  },
+  "entries": [
+    {
+      "role": "guard",
+      "image": "forest-guard.png",
+      "image_sha256": "c0f7a71dbca9754800b9944fa380fc04b4a06d38cd4a91c6c9f54691fc81b00e",
+      "image_dimensions": [
+        3840,
+        1600
+      ],
+      "image_decoded_rgb_sha256": "ae29adde4a36dc21e9b6bb4bcf2f0a8e5739efcf3a2ac50e3b4f0a0c6dfe5521",
+      "original_ppm_sha256": "cedff111db801251cc8dab77a6dc4e014afb59789c201545cb5ab38c0848f0bd",
+      "original_ppm_decoded_rgb_equal": true,
+      "image_retouched": false,
+      "preview": "forest-guard-preview.png",
+      "preview_sha256": "5170c286eb5687e3b6a3536ee6e8dcb68550de2a978440490f6bcb2faabcec79",
+      "preview_dimensions": [
+        960,
+        400
+      ],
+      "preview_filter": "Pillow LANCZOS",
+      "process": {
+        "started_utc": "2026-09-08T23:22:00.241199+00:00",
+        "pid": 51780,
+        "seconds": 22.54700000002049,
+        "exit_code": 0,
+        "timeout_seconds": 420,
+        "source_commit": "773f60d4b8770616265fa93c1fb0756ea5324603",
+        "job_sha256": "7bd33bfda2273e8903725a20aa5fe5fda3434a391549bf35f3cdffcbc9e10168"
+      },
+      "nvidia_pid_observed": true,
+      "gpu_observer": {
+        "started_seconds": 5.030999999959022,
+        "finished_seconds": 5.390999999945052,
+        "exit_code": 0,
+        "policy": "startup process-table observation; check PID before attributing GPU"
+      },
+      "changed_inputs_after_capture": [],
+      "coverage": {
+        "render_frame": 641,
+        "coverage_fraction": 0.56663427734375,
+        "clear_depth_pixels": 2662599,
+        "center_depth": 1.0,
+        "center_material": 255
+      },
+      "far": {
+        "authority_build_failures": 0,
+        "builds_failed_total": 0,
+        "camera": [
+          8.0,
+          56.0,
+          8.0
+        ],
+        "camera_neighbourhood": [
+          {
+            "aabb_max": [
+              0.0,
+              31.4375,
+              0.0
+            ],
+            "aabb_min": [
+              -512.0,
+              -12.375,
+              -512.0
+            ],
+            "authority_revision": 0,
+            "current": true,
+            "has_edited_samples": false,
+            "pending": false,
+            "persistence_pending": false,
+            "region": [
+              -1,
+              -1
+            ],
+            "resident": true,
+            "resident_authority_revision": 0,
+            "resident_tier": 1,
+            "terrain_decision": "outside_frustum",
+            "terrain_indices": 101376,
+            "wanted": true,
+            "wanted_tier": 1,
+            "water_decision": "outside_frustum",
+            "water_indices": 8868
+          },
+          {
+            "aabb_max": [
+              512.0,
+              29.1875,
+              0.0
+            ],
+            "aabb_min": [
+              0.0,
+              -16.125,
+              -512.0
+            ],
+            "authority_revision": 0,
+            "current": true,
+            "has_edited_samples": false,
+            "pending": false,
+            "persistence_pending": false,
+            "region": [
+              0,
+              -1
+            ],
+            "resident": true,
+            "resident_authority_revision": 0,
+            "resident_tier": 1,
+            "terrain_decision": "submitted",
+            "terrain_indices": 101376,
+            "wanted": true,
+            "wanted_tier": 1,
+            "water_decision": "submitted",
+            "water_indices": 14490
+          },
+          {
+            "aabb_max": [
+              1024.0,
+              30.5625,
+              0.0
+            ],
+            "aabb_min": [
+              512.0,
+              -15.8125,
+              -512.0
+            ],
+            "authority_revision": 0,
+            "current": true,
+            "has_edited_samples": false,
+            "pending": false,
+            "persistence_pending": false,
+            "region": [
+              1,
+              -1
+            ],
+            "resident": true,
+            "resident_authority_revision": 0,
+            "resident_tier": 1,
+            "terrain_decision": "submitted",
+            "terrain_indices": 101376,
+            "wanted": true,
+            "wanted_tier": 1,
+            "water_decision": "submitted",
+            "water_indices": 7056
+          },
+          {
+            "aabb_max": [
+              0.0,
+              32.6875,
+              512.0
+            ],
+            "aabb_min": [
+              -512.0,
+              -12.0625,
+              0.0
+            ],
+            "authority_revision": 0,
+            "current": true,
+            "has_edited_samples": false,
+            "pending": false,
+            "persistence_pending": false,
+            "region": [
+              -1,
+              0
+            ],
+            "resident": true,
+            "resident_authority_revision": 0,
+            "resident_tier": 1,
+            "terrain_decision": "outside_frustum",
+            "terrain_indices": 101376,
+            "wanted": true,
+            "wanted_tier": 1,
+            "water_decision": "outside_frustum",
+            "water_indices": 11784
+          },
+          {
+            "aabb_max": [
+              512.0,
+              25.25,
+              512.0
+            ],
+            "aabb_min": [
+              0.0,
+              -15.125,
+              0.0
+            ],
+            "authority_revision": 0,
+            "current": true,
+            "has_edited_samples": false,
+            "pending": false,
+            "persistence_pending": false,
+            "region": [
+              0,
+              0
+            ],
+            "resident": true,
+            "resident_authority_revision": 0,
+            "resident_tier": 1,
+            "terrain_decision": "camera_region_guard",
+            "terrain_indices": 101376,
+            "wanted": true,
+            "wanted_tier": 1,
+            "water_decision": "camera_region_guard",
+            "water_indices": 28296
+          },
+          {
+            "aabb_max": [
+              1024.0,
+              28.375,
+              512.0
+            ],
+            "aabb_min": [
+              512.0,
+              -15.8125,
+              0.0
+            ],
+            "authority_revision": 0,
+            "current": true,
+            "has_edited_samples": false,
+            "pending": false,
+            "persistence_pending": false,
+            "region": [
+              1,
+              0
+            ],
+            "resident": true,
+            "resident_authority_revision": 0,
+            "resident_tier": 1,
+            "terrain_decision": "submitted",
+            "terrain_indices": 101376,
+            "wanted": true,
+            "wanted_tier": 1,
+            "water_decision": "submitted",
+            "water_indices": 2730
+          },
+          {
+            "aabb_max": [
+              0.0,
+              34.125,
+              1024.0
+            ],
+            "aabb_min": [
+              -512.0,
+              -14.0,
+              512.0
+            ],
+            "authority_revision": 0,
+            "current": true,
+            "has_edited_samples": false,
+            "pending": false,
+            "persistence_pending": false,
+            "region": [
+              -1,
+              1
+            ],
+            "resident": true,
+            "resident_authority_revision": 0,
+            "resident_tier": 1,
+            "terrain_decision": "outside_frustum",
+            "terrain_indices": 101376,
+            "wanted": true,
+            "wanted_tier": 1,
+            "water_decision": "outside_frustum",
+            "water_indices": 13980
+          },
+          {
+            "aabb_max": [
+              512.0,
+              36.0625,
+              1024.0
+            ],
+            "aabb_min": [
+              0.0,
+              -12.25,
+              512.0
+            ],
+            "authority_revision": 0,
+            "current": true,
+            "has_edited_samples": false,
+            "pending": false,
+            "persistence_pending": false,
+            "region": [
+              0,
+              1
+            ],
+            "resident": true,
+            "resident_authority_revision": 0,
+            "resident_tier": 1,
+            "terrain_decision": "submitted",
+            "terrain_indices": 101376,
+            "wanted": true,
+            "wanted_tier": 1,
+            "water_decision": "submitted",
+            "water_indices": 16386
+          },
+          {
+            "aabb_max": [
+              1024.0,
+              36.5625,
+              1024.0
+            ],
+            "aabb_min": [
+              512.0,
+              -11.6875,
+              512.0
+            ],
+            "authority_revision": 0,
+            "current": true,
+            "has_edited_samples": false,
+            "pending": false,
+            "persistence_pending": false,
+            "region": [
+              1,
+              1
+            ],
+            "resident": true,
+            "resident_authority_revision": 0,
+            "resident_tier": 1,
+            "terrain_decision": "submitted",
+            "terrain_indices": 101376,
+            "wanted": true,
+            "wanted_tier": 1,
+            "water_decision": "submitted",
+            "water_indices": 6048
+          }
+        ],
+        "camera_region_guard_bypassed": false,
+        "clip_inner_radius_m": 176.0,
+        "clip_outer_radius_m": 3050.0,
+        "draw_observed": true,
+        "draws": 78,
+        "enabled": true,
+        "indices": 1601970,
+        "missing_after_eviction": 0,
+        "pending": 0,
+        "preview_anchor": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "preview_anchored": false,
+        "preview_inner_radius_m": 0.0,
+        "resident_bytes": 63936368,
+        "resident_wanted": 132,
+        "stale_after_eviction": 0,
+        "stale_results_rejected": 0,
+        "update_frame": 641,
+        "wanted": 132
+      },
+      "benchmark_mean": {
+        "cpu_gbuffer_ms": 0.7377695833333332,
+        "cpu_post_ms": 0.9178316666666672,
+        "cpu_prepare_ms": 0.678986666666667,
+        "cpu_shadow_ms": 0.21768458333333338,
+        "cpu_static_prop_ms": 0.5442975,
+        "cpu_submit_ms": 3.7095579166666663,
+        "foliage_rebuild_ms": 0.022329166666666667,
+        "frame_wall_ms": 17.004703750000008,
+        "gpu_clock_mhz": 2833.2166666666667,
+        "gpu_pass_sum_ms": 10.18574013333333,
+        "gpu_power_w": 242.50881250000035,
+        "poll_ms": 0.0010737499999999998,
+        "present_ms": 13.212085833333331,
+        "render_frame_wall_ms": 2.569039166666667,
+        "scatter_build_ms": 0.11829333333333332,
+        "sim_tick_ms": 0.18099208333333336,
+        "streaming_ms": 0.6843987499999996,
+        "ui_render_ms": 0.0003145833333333333
+      },
+      "gpu_pass_mean_ms": {
+        "aerial": 0.15772200000000006,
+        "final_blit": 0.09073293333333335,
+        "foliage": 0.13838226666666673,
+        "gbuffer": 1.0649212000000008,
+        "lighting": 3.4705901333333324,
+        "particle": 0.04179333333333335,
+        "shadow": 0.6903142666666667,
+        "skybox": 0.48922893333333356,
+        "ssao": 0.10950373333333328,
+        "ssao_blur": 3.7137750666666665,
+        "ssao_total": 3.8232787999999998,
+        "total": 10.18574013333333,
+        "water": 0.21877626666666664
+      },
+      "raw_source_sha256": {
+        "aovs/manifest.json": "cc13958124364c64008ba3188f8032a48c1cade2e6a1ee544d7d8e7ad26a0d7d",
+        "benchmark.json": "1ed2313efe3872931bf10f8d20dd3bc34303267758ccdb6b7ca55763fd67be07",
+        "process-receipt.json": "78b89235ff439e6ac5e8cfb108e19e1fff007122af88e8bf1148c52c13faf423",
+        "engine.log": "bafda00f48658ad9176a57b5e0cf7b2f72f715aecd3cf8410f583ff6e8619eb1",
+        "inputs.json": "de5cd09fa1041e73259a68baddcea6d0964c9117488e4591ebe9cebc00a94c57",
+        "input-integrity-after.json": "e8836a50ba3c34a375bb5dc5087bf4a3572bb96701edd3e671f2e296f95d47d6",
+        "prepared.json": "5e8652710c7d948775e6f19f1070c4deb09472b9eff57f96a1ea0a73cf0baf07",
+        "job.json": "7bd33bfda2273e8903725a20aa5fe5fda3434a391549bf35f3cdffcbc9e10168",
+        "capture-build-receipt.json": "8d54144acfd1b34987e1543f2303d1296bec443895872fc82a2a9a0e6b060606",
+        "native_capture.py": "2b9822e2d254610d96e4ee853227ab377eb8dc822e34d526e333db3a0ebb86dc",
+        "nvidia-process-observation.txt": "de95fc57ff90fc0a7df5ffbcff70f11da75a3d47e72bd2e8e73583de501ff032"
+      },
+      "raw_attachments": {
+        "color.ppm": {
+          "bytes": 18432017,
+          "sha256": "cedff111db801251cc8dab77a6dc4e014afb59789c201545cb5ab38c0848f0bd"
+        },
+        "depth.pfm": {
+          "bytes": 24576018,
+          "sha256": "520267b91be1083ea833101163899f25fb3ca67e56b70aaaae8b0a7bf87145e2"
+        },
+        "position.pfm": {
+          "bytes": 73728018,
+          "sha256": "de38ea968277218617f423586ef46d3614f6459f640e0e293e11bb5d73b62258"
+        },
+        "normal.pfm": {
+          "bytes": 73728018,
+          "sha256": "6af200ee6c839f9e33609a74749518089c461ac31bc077306e77bbc5d15da4da"
+        },
+        "albedo.pfm": {
+          "bytes": 73728018,
+          "sha256": "921825344261097c3965629a28da70abc178807f66e8e0a82d1947a2ba551153"
+        },
+        "material.pgm": {
+          "bytes": 6144017,
+          "sha256": "653dc1cce874dba3aac1d91deaee84b06f7d1c1c7f91d6c8f768ef8d6af8767d"
+        }
+      },
+      "visual_approved": false
+    },
+    {
+      "role": "bypass",
+      "image": "forest-bypass.png",
+      "image_sha256": "d66324b37896ce5ae857af12f98522abb31f6f4e9ef78485d9b787da5d6b838c",
+      "image_dimensions": [
+        3840,
+        1600
+      ],
+      "image_decoded_rgb_sha256": "b57d69600d6cd5bbf00d148fc0bca8483ce6f97ec88ebed5be827f4209b102eb",
+      "original_ppm_sha256": "e7987e58a1fb36eeb37f6ffa14dd151f39144080fc0ed31523b899390d1aad80",
+      "original_ppm_decoded_rgb_equal": true,
+      "image_retouched": false,
+      "preview": "forest-bypass-preview.png",
+      "preview_sha256": "cf9b5b745ffefc18c9b14b54fa879e007199e3228b8998766fb99e3666e8b43c",
+      "preview_dimensions": [
+        960,
+        400
+      ],
+      "preview_filter": "Pillow LANCZOS",
+      "process": {
+        "started_utc": "2026-09-08T23:25:02.668702+00:00",
+        "pid": 87308,
+        "seconds": 23.875,
+        "exit_code": 0,
+        "timeout_seconds": 420,
+        "source_commit": "773f60d4b8770616265fa93c1fb0756ea5324603",
+        "job_sha256": "f1614979d0a72d4ee52a6e69b43b89de04c2236a122766eb52a0b1c2980a0215"
+      },
+      "nvidia_pid_observed": true,
+      "gpu_observer": {
+        "started_seconds": 5.030999999959022,
+        "finished_seconds": 5.280999999959022,
+        "exit_code": 0,
+        "policy": "startup process-table observation; check PID before attributing GPU"
+      },
+      "changed_inputs_after_capture": [],
+      "coverage": {
+        "render_frame": 641,
+        "coverage_fraction": 0.6084759114583334,
+        "clear_depth_pixels": 2405524,
+        "center_depth": 0.9998369812965393,
+        "center_material": 4
+      },
+      "far": {
+        "authority_build_failures": 0,
+        "builds_failed_total": 0,
+        "camera": [
+          8.0,
+          56.0,
+          8.0
+        ],
+        "camera_neighbourhood": [
+          {
+            "aabb_max": [
+              0.0,
+              31.4375,
+              0.0
+            ],
+            "aabb_min": [
+              -512.0,
+              -12.375,
+              -512.0
+            ],
+            "authority_revision": 0,
+            "current": true,
+            "has_edited_samples": false,
+            "pending": false,
+            "persistence_pending": false,
+            "region": [
+              -1,
+              -1
+            ],
+            "resident": true,
+            "resident_authority_revision": 0,
+            "resident_tier": 1,
+            "terrain_decision": "outside_frustum",
+            "terrain_indices": 101376,
+            "wanted": true,
+            "wanted_tier": 1,
+            "water_decision": "outside_frustum",
+            "water_indices": 8868
+          },
+          {
+            "aabb_max": [
+              512.0,
+              29.1875,
+              0.0
+            ],
+            "aabb_min": [
+              0.0,
+              -16.125,
+              -512.0
+            ],
+            "authority_revision": 0,
+            "current": true,
+            "has_edited_samples": false,
+            "pending": false,
+            "persistence_pending": false,
+            "region": [
+              0,
+              -1
+            ],
+            "resident": true,
+            "resident_authority_revision": 0,
+            "resident_tier": 1,
+            "terrain_decision": "submitted",
+            "terrain_indices": 101376,
+            "wanted": true,
+            "wanted_tier": 1,
+            "water_decision": "submitted",
+            "water_indices": 14490
+          },
+          {
+            "aabb_max": [
+              1024.0,
+              30.5625,
+              0.0
+            ],
+            "aabb_min": [
+              512.0,
+              -15.8125,
+              -512.0
+            ],
+            "authority_revision": 0,
+            "current": true,
+            "has_edited_samples": false,
+            "pending": false,
+            "persistence_pending": false,
+            "region": [
+              1,
+              -1
+            ],
+            "resident": true,
+            "resident_authority_revision": 0,
+            "resident_tier": 1,
+            "terrain_decision": "submitted",
+            "terrain_indices": 101376,
+            "wanted": true,
+            "wanted_tier": 1,
+            "water_decision": "submitted",
+            "water_indices": 7056
+          },
+          {
+            "aabb_max": [
+              0.0,
+              32.6875,
+              512.0
+            ],
+            "aabb_min": [
+              -512.0,
+              -12.0625,
+              0.0
+            ],
+            "authority_revision": 0,
+            "current": true,
+            "has_edited_samples": false,
+            "pending": false,
+            "persistence_pending": false,
+            "region": [
+              -1,
+              0
+            ],
+            "resident": true,
+            "resident_authority_revision": 0,
+            "resident_tier": 1,
+            "terrain_decision": "outside_frustum",
+            "terrain_indices": 101376,
+            "wanted": true,
+            "wanted_tier": 1,
+            "water_decision": "outside_frustum",
+            "water_indices": 11784
+          },
+          {
+            "aabb_max": [
+              512.0,
+              25.25,
+              512.0
+            ],
+            "aabb_min": [
+              0.0,
+              -15.125,
+              0.0
+            ],
+            "authority_revision": 0,
+            "current": true,
+            "has_edited_samples": false,
+            "pending": false,
+            "persistence_pending": false,
+            "region": [
+              0,
+              0
+            ],
+            "resident": true,
+            "resident_authority_revision": 0,
+            "resident_tier": 1,
+            "terrain_decision": "submitted",
+            "terrain_indices": 101376,
+            "wanted": true,
+            "wanted_tier": 1,
+            "water_decision": "submitted",
+            "water_indices": 28296
+          },
+          {
+            "aabb_max": [
+              1024.0,
+              28.375,
+              512.0
+            ],
+            "aabb_min": [
+              512.0,
+              -15.8125,
+              0.0
+            ],
+            "authority_revision": 0,
+            "current": true,
+            "has_edited_samples": false,
+            "pending": false,
+            "persistence_pending": false,
+            "region": [
+              1,
+              0
+            ],
+            "resident": true,
+            "resident_authority_revision": 0,
+            "resident_tier": 1,
+            "terrain_decision": "submitted",
+            "terrain_indices": 101376,
+            "wanted": true,
+            "wanted_tier": 1,
+            "water_decision": "submitted",
+            "water_indices": 2730
+          },
+          {
+            "aabb_max": [
+              0.0,
+              34.125,
+              1024.0
+            ],
+            "aabb_min": [
+              -512.0,
+              -14.0,
+              512.0
+            ],
+            "authority_revision": 0,
+            "current": true,
+            "has_edited_samples": false,
+            "pending": false,
+            "persistence_pending": false,
+            "region": [
+              -1,
+              1
+            ],
+            "resident": true,
+            "resident_authority_revision": 0,
+            "resident_tier": 1,
+            "terrain_decision": "outside_frustum",
+            "terrain_indices": 101376,
+            "wanted": true,
+            "wanted_tier": 1,
+            "water_decision": "outside_frustum",
+            "water_indices": 13980
+          },
+          {
+            "aabb_max": [
+              512.0,
+              36.0625,
+              1024.0
+            ],
+            "aabb_min": [
+              0.0,
+              -12.25,
+              512.0
+            ],
+            "authority_revision": 0,
+            "current": true,
+            "has_edited_samples": false,
+            "pending": false,
+            "persistence_pending": false,
+            "region": [
+              0,
+              1
+            ],
+            "resident": true,
+            "resident_authority_revision": 0,
+            "resident_tier": 1,
+            "terrain_decision": "submitted",
+            "terrain_indices": 101376,
+            "wanted": true,
+            "wanted_tier": 1,
+            "water_decision": "submitted",
+            "water_indices": 16386
+          },
+          {
+            "aabb_max": [
+              1024.0,
+              36.5625,
+              1024.0
+            ],
+            "aabb_min": [
+              512.0,
+              -11.6875,
+              512.0
+            ],
+            "authority_revision": 0,
+            "current": true,
+            "has_edited_samples": false,
+            "pending": false,
+            "persistence_pending": false,
+            "region": [
+              1,
+              1
+            ],
+            "resident": true,
+            "resident_authority_revision": 0,
+            "resident_tier": 1,
+            "terrain_decision": "submitted",
+            "terrain_indices": 101376,
+            "wanted": true,
+            "wanted_tier": 1,
+            "water_decision": "submitted",
+            "water_indices": 6048
+          }
+        ],
+        "camera_region_guard_bypassed": true,
+        "clip_inner_radius_m": 176.0,
+        "clip_outer_radius_m": 3050.0,
+        "draw_observed": true,
+        "draws": 80,
+        "enabled": true,
+        "indices": 1731642,
+        "missing_after_eviction": 0,
+        "pending": 0,
+        "preview_anchor": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "preview_anchored": false,
+        "preview_inner_radius_m": 0.0,
+        "resident_bytes": 63936368,
+        "resident_wanted": 132,
+        "stale_after_eviction": 0,
+        "stale_results_rejected": 0,
+        "update_frame": 641,
+        "wanted": 132
+      },
+      "benchmark_mean": {
+        "cpu_gbuffer_ms": 0.7894116666666667,
+        "cpu_post_ms": 1.0049629166666667,
+        "cpu_prepare_ms": 0.7507283333333333,
+        "cpu_shadow_ms": 0.2823516666666668,
+        "cpu_static_prop_ms": 0.5773279166666664,
+        "cpu_submit_ms": 4.072593333333331,
+        "foliage_rebuild_ms": 0.022486666666666655,
+        "frame_wall_ms": 21.450736249999995,
+        "gpu_clock_mhz": 2813.070833333333,
+        "gpu_pass_sum_ms": 11.186071199999999,
+        "gpu_power_w": 268.23545000000036,
+        "poll_ms": 0.002092916666666667,
+        "present_ms": 17.282333750000006,
+        "render_frame_wall_ms": 2.8485254166666656,
+        "scatter_build_ms": 0.05126958333333335,
+        "sim_tick_ms": 0.24164250000000018,
+        "streaming_ms": 0.7546554166666659,
+        "ui_render_ms": 0.0004079166666666664
+      },
+      "gpu_pass_mean_ms": {
+        "aerial": 0.19350840000000014,
+        "final_blit": 0.26635159999999997,
+        "foliage": 0.21411666666666662,
+        "gbuffer": 1.6998054666666678,
+        "lighting": 0.7307381333333335,
+        "particle": 0.010068933333333339,
+        "shadow": 0.7404236000000003,
+        "skybox": 0.5357049333333331,
+        "ssao": 1.3401374666666663,
+        "ssao_blur": 5.041184133333335,
+        "ssao_total": 6.3813216000000015,
+        "total": 11.186071199999999,
+        "water": 0.4140318666666665
+      },
+      "raw_source_sha256": {
+        "aovs/manifest.json": "23e2f59180a3f7ebf8ad53f97e191d6a22e23b92a7eb398fcc761d740af07bae",
+        "benchmark.json": "e3a9ff5d1f727d039383b1564a4081abe1768f4c50979bc911c856d929a95345",
+        "process-receipt.json": "f220097ae999038491364bc0a2092d407f0ba9df2e06f613d5f2c1112e6c6506",
+        "engine.log": "b7481a8a6f2720274f4e63ee6b951bac0dd371db301fbf94e9704b2ecb3a7f11",
+        "inputs.json": "c7131735463d4d2fb87813ec0f8d57367ae3427ff8c661a4c74e3e73258a00ed",
+        "input-integrity-after.json": "e8836a50ba3c34a375bb5dc5087bf4a3572bb96701edd3e671f2e296f95d47d6",
+        "prepared.json": "736f987784884d45a3cd6cb59a10b4b5655a77e3fd694eb1750f37e0378fbd12",
+        "job.json": "f1614979d0a72d4ee52a6e69b43b89de04c2236a122766eb52a0b1c2980a0215",
+        "capture-build-receipt.json": "8d54144acfd1b34987e1543f2303d1296bec443895872fc82a2a9a0e6b060606",
+        "native_capture.py": "2b9822e2d254610d96e4ee853227ab377eb8dc822e34d526e333db3a0ebb86dc",
+        "nvidia-process-observation.txt": "0cdece1128986210a2cc07021fd11355b9486bda7af70685ab38f76078859f33"
+      },
+      "raw_attachments": {
+        "color.ppm": {
+          "bytes": 18432017,
+          "sha256": "e7987e58a1fb36eeb37f6ffa14dd151f39144080fc0ed31523b899390d1aad80"
+        },
+        "depth.pfm": {
+          "bytes": 24576018,
+          "sha256": "681a9d929c368893f359f791e4fbad059efab1d98c8a7e83618fafe4e6902169"
+        },
+        "position.pfm": {
+          "bytes": 73728018,
+          "sha256": "e16c659ac4bb055f0cf60455e6ae4de93e51579c6ad56cadcb2f06f20a4a9a25"
+        },
+        "normal.pfm": {
+          "bytes": 73728018,
+          "sha256": "67d0446e5296579b49fc96e61b468607e12c731a8e5e26cd9b8383f9f94b0383"
+        },
+        "albedo.pfm": {
+          "bytes": 73728018,
+          "sha256": "1e2c585d043902b76d8f122836ad3a1a977fdd595db919bb01175425c560dd6c"
+        },
+        "material.pgm": {
+          "bytes": 6144017,
+          "sha256": "9b37afe1869591315f272e97471d25db6600ea6a56f9105b5e8129e438be0e1d"
+        }
+      },
+      "visual_approved": false
+    }
+  ],
+  "limitations": [
+    "Raw AOV planes, per-frame JSON and native process receipts are retained outside Git; hashes identify those exact bytes but do not make them downloadable here.",
+    "This compact document contains selected values and validation results, not copies of complete raw receipts.",
+    "PPM to full PNG conversion preserves every decoded RGB byte; previews are resized with Pillow LANCZOS to 960x400.",
+    "Clear deferred depth includes sky and is not itself a count of terrain defects.",
+    "Deferred attachments do not capture every transparent-surface contribution.",
+    "Position values were expanded from RGB16F; reconstructed world probes are approximate.",
+    "Separate processes differed during warmup; measured far-region records and capture live records were explicitly compared.",
+    "Diagnostic instrumentation was enabled, and timing output contains means rather than raw distributions or p95/p99.",
+    "No whole-frame performance target or visual approval is established by this example.",
+    "Bypass changes both camera-region terrain and water submission; cave, edit and water ownership correctness is not qualified."
+  ]
+}

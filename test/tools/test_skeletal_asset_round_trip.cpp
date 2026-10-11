@@ -16,13 +16,19 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <ios>
+#include <iterator>
 #include <sstream>
 #include <string>
+#include <system_error>
+#include <utility>
 #include <vector>
 
+#include "luminumbra_common/animation/AnimationRuntime.h"
 #include "luminumbra_common/animation/SkinnedMeshFormat.h"
 
 void process_gltf(const std::string& input_path, const std::string& output_path);
+bool process_gltf_checked(const std::string& input_path, const std::string& output_path);
 
 namespace {
 
@@ -120,7 +126,9 @@ const std::vector<float> kSpineTranslationKeys = {
     0.0f,
 };
 
-void WriteRiggedTriangleGltf(const std::filesystem::path& path) {
+void WriteRiggedTriangleGltf(const std::filesystem::path& path,
+                             bool childFirst = false,
+                             const std::string& interpolation = "LINEAR") {
     const std::vector<float> positions = {
         0.0f,
         0.0f,
@@ -151,7 +159,7 @@ void WriteRiggedTriangleGltf(const std::filesystem::path& path) {
         0.0f,
         1.0f,
     };
-    const std::vector<uint8_t> jointIndices = {
+    std::vector<uint8_t> jointIndices = {
         0,
         0,
         0,
@@ -187,7 +195,21 @@ void WriteRiggedTriangleGltf(const std::filesystem::path& path) {
     inverseBind[0] = inverseBind[5] = inverseBind[10] = inverseBind[15] = 1.0f;
     inverseBind[16] = inverseBind[21] = inverseBind[26] = inverseBind[31] = 1.0f;
     inverseBind[29] = -1.0f; // head: translate(0, -1, 0)
+    if (childFirst) {
+        for (auto& index : jointIndices)
+            index = 1 - index;
+        std::swap_ranges(inverseBind.begin(), inverseBind.begin() + 16, inverseBind.begin() + 16);
+    }
 
+    auto times = kAnimTimes;
+    auto rotationKeys = kHeadRotationKeys;
+    auto translationKeys = kSpineTranslationKeys;
+    if (interpolation == "CUBICSPLINE") {
+        times = {0, 2};
+        rotationKeys = {0, 0, 0, 0, 0, 0, 0,          1,          0, 0, 0, 0,
+                        0, 0, 0, 0, 0, 0, 0.7071068f, 0.7071068f, 0, 0, 0, 0};
+        translationKeys = {0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0.25f, 0, 0, 0, 0};
+    }
     std::vector<unsigned char> buffer;
     const std::array<BufferView, 10> views = {
         AppendValues(buffer, positions),
@@ -197,9 +219,9 @@ void WriteRiggedTriangleGltf(const std::filesystem::path& path) {
         AppendValues(buffer, jointWeights),
         AppendValues(buffer, indices),
         AppendValues(buffer, inverseBind),
-        AppendValues(buffer, kAnimTimes),
-        AppendValues(buffer, kHeadRotationKeys),
-        AppendValues(buffer, kSpineTranslationKeys),
+        AppendValues(buffer, times),
+        AppendValues(buffer, rotationKeys),
+        AppendValues(buffer, translationKeys),
     };
 
     std::ostringstream gltf;
@@ -261,7 +283,23 @@ void WriteRiggedTriangleGltf(const std::filesystem::path& path) {
 )";
 
     std::ofstream out(path);
-    out << gltf.str();
+    auto json = gltf.str();
+    if (childFirst)
+        json.replace(json.find("\"joints\": [0, 1]"), 16, "\"joints\": [1, 0]");
+    for (size_t at = 0; (at = json.find("LINEAR", at)) != std::string::npos;) {
+        json.replace(at, 6, interpolation);
+        at += interpolation.size();
+    }
+    if (interpolation == "CUBICSPLINE") {
+        const auto timeMax = json.find("\"max\": [1.0]", json.find("\"bufferView\": 7"));
+        json.replace(timeMax, 12, "\"max\": [2.0]");
+        for (const auto view : {8, 9}) {
+            const auto at =
+                json.find("\"count\": 2", json.find("\"bufferView\": " + std::to_string(view)));
+            json.replace(at, 10, "\"count\": 6");
+        }
+    }
+    out << json;
 }
 
 std::vector<char> ReadAllBytes(const std::filesystem::path& path) {
@@ -369,7 +407,7 @@ TEST(SkeletalAssetRoundTrip, RiggedGltfImportsToLms2AndLanimWithFieldEquality) {
     AnimClipAsset clip;
     ASSERT_TRUE(LoadAnimClipAsset(animOutput.string(), clip));
     EXPECT_EQ(clip.header.magic, kLanimMagic);
-    EXPECT_EQ(clip.header.version, 1u);
+    EXPECT_EQ(clip.header.version, 2u);
     EXPECT_EQ(clip.header.trackCount, 2u);
     EXPECT_FLOAT_EQ(clip.header.duration, 1.0f);
 
@@ -421,4 +459,291 @@ TEST(SkeletalAssetRoundTrip, ReimportIsBitwiseDeterministic) {
     const auto animB = ReadAllBytes(temp.path() / "run_b.wiggle.lanim");
     ASSERT_FALSE(animA.empty());
     EXPECT_EQ(animA, animB);
+}
+
+namespace {
+
+bool ChangeRig(const std::filesystem::path& path, const std::string& from, const std::string& to) {
+    auto bytes = ReadAllBytes(path);
+    std::string text(bytes.begin(), bytes.end());
+    const auto at = text.find(from);
+    if (at == std::string::npos)
+        return false;
+    text.replace(at, from.size(), to);
+    std::ofstream output(path);
+    output << text;
+    return static_cast<bool>(output);
+}
+
+std::vector<float> BindPalette(const SkinnedMeshAsset& mesh) {
+    const auto skeleton = luminumbra::animation::BuildSkeleton(mesh);
+    std::vector<float> palette;
+    luminumbra::animation::ComputeJointPalette(
+        skeleton, luminumbra::animation::MakeBindPose(skeleton), palette);
+    return palette;
+}
+
+} // namespace
+
+TEST(SkeletalSceneImport, NormalizesJointOrderAndRemapsInfluencesAndInverseBinds) {
+    const TempDirectory temp;
+    const auto source = temp.path() / "rig.gltf";
+    const auto output = temp.path() / "rig.lmesh";
+    WriteRiggedTriangleGltf(source);
+    ASSERT_TRUE(process_gltf_checked(source.string(), output.string()));
+    const auto expected = ReadAllBytes(output);
+    WriteRiggedTriangleGltf(source, true);
+    ASSERT_TRUE(process_gltf_checked(source.string(), output.string()));
+    EXPECT_EQ(ReadAllBytes(output), expected);
+    SkinnedMeshAsset mesh;
+    ASSERT_TRUE(LoadSkinnedMeshAsset(output.string(), mesh));
+    const auto palette = BindPalette(mesh);
+    for (size_t i = 0; i < palette.size(); ++i)
+        EXPECT_NEAR(palette[i], (i % 16) % 5 == 0 ? 1.0f : 0.0f, 1e-6f);
+}
+
+TEST(SkeletalSceneImport, MatrixBindMatchesEquivalentTrs) {
+    const TempDirectory temp;
+    const auto source = temp.path() / "rig.gltf";
+    const auto output = temp.path() / "rig.lmesh";
+    WriteRiggedTriangleGltf(source);
+    ASSERT_TRUE(process_gltf_checked(source.string(), output.string()));
+    const auto expected = ReadAllBytes(output);
+    ASSERT_TRUE(ChangeRig(source,
+                          R"("translation": [0.0, 1.0, 0.0])",
+                          R"("matrix": [1,0,0,0,0,1,0,0,0,0,1,0,0,1,0,1])"));
+    ASSERT_TRUE(process_gltf_checked(source.string(), output.string()));
+    EXPECT_EQ(ReadAllBytes(output), expected);
+}
+
+TEST(SkeletalSceneImport, RetainsNonJointAncestorsAndTheirAnimation) {
+    const TempDirectory temp;
+    const auto source = temp.path() / "rig.gltf";
+    const auto output = temp.path() / "rig.lmesh";
+    WriteRiggedTriangleGltf(source);
+    ASSERT_TRUE(ChangeRig(
+        source,
+        R"({"name": "body", "mesh": 0, "skin": 0})",
+        R"({"name": "body", "mesh": 0, "skin": 0}, {"name": "armature", "translation": [2,0,0], "children": [0]})"));
+    ASSERT_TRUE(ChangeRig(source, R"("nodes": [0, 2])", R"("nodes": [3, 2])"));
+    ASSERT_TRUE(ChangeRig(
+        source, R"("node": 0, "path": "translation")", R"("node": 3, "path": "translation")"));
+    ASSERT_TRUE(process_gltf_checked(source.string(), output.string()));
+    SkinnedMeshAsset mesh;
+    ASSERT_TRUE(LoadSkinnedMeshAsset(output.string(), mesh));
+    ASSERT_EQ(mesh.joints.size(), 3u);
+    EXPECT_EQ(mesh.joints[0].nameHash, HashJointName("armature"));
+    EXPECT_EQ(mesh.joints[1].parentIndex, 0);
+    EXPECT_EQ(mesh.joints[2].parentIndex, 1);
+    const auto palette = BindPalette(mesh);
+    EXPECT_FLOAT_EQ(palette[16 + 12], 2.0f);
+    EXPECT_FLOAT_EQ(palette[32 + 12], 2.0f);
+    AnimClipAsset clip;
+    ASSERT_TRUE(LoadAnimClipAsset((temp.path() / "rig.wiggle.lanim").string(), clip));
+    const auto skeleton = luminumbra::animation::BuildSkeleton(mesh);
+    const auto pose =
+        luminumbra::animation::SamplePose(skeleton, luminumbra::animation::BuildClip(clip), 0.5f);
+    EXPECT_FLOAT_EQ(pose.joints[0].translation[1], 0.125f);
+}
+
+TEST(SkeletalSceneImport, UsesSkinReferencedBySceneMesh) {
+    const TempDirectory temp;
+    const auto source = temp.path() / "rig.gltf";
+    const auto output = temp.path() / "rig.lmesh";
+    WriteRiggedTriangleGltf(source);
+    ASSERT_TRUE(process_gltf_checked(source.string(), output.string()));
+    const auto expected = ReadAllBytes(output);
+    ASSERT_TRUE(ChangeRig(source, R"("skins": [)", R"("skins": [{"joints": [1]}, )"));
+    ASSERT_TRUE(ChangeRig(source, R"("skin": 0)", R"("skin": 1)"));
+    ASSERT_TRUE(process_gltf_checked(source.string(), output.string()));
+    EXPECT_EQ(ReadAllBytes(output), expected);
+}
+
+TEST(SkeletalSceneImport, InvalidRigPreservesExistingMesh) {
+    const TempDirectory temp;
+    const auto source = temp.path() / "rig.gltf";
+    const auto output = temp.path() / "rig.lmesh";
+    const std::vector<std::pair<std::string, std::string>> changes = {
+        {R"("name": "head")", R"("name": "spine")"},
+        {R"("JOINTS_0": 3)", R"("JOINTS_0": 3, "JOINTS_1": 3, "WEIGHTS_1": 4)"},
+        {R"("translation": [0.0, 1.0, 0.0])", R"("matrix": [1,0,0,0,1,1,0,0,0,0,1,0,0,1,0,1])"},
+        {R"("NORMAL": 1, )", ""},
+        {R"("count": 2, "type": "MAT4")", R"("count": 1, "type": "MAT4")"},
+        {R"("joints": [0, 1])", R"("joints": [0, 0])"},
+    };
+    for (const auto& [from, to] : changes) {
+        SCOPED_TRACE(to);
+        WriteRiggedTriangleGltf(source);
+        ASSERT_TRUE(ChangeRig(source, from, to));
+        {
+            std::ofstream previous(output);
+            previous << "previous-mesh";
+        }
+        EXPECT_FALSE(process_gltf_checked(source.string(), output.string()));
+        const auto bytes = ReadAllBytes(output);
+        EXPECT_EQ(std::string(bytes.begin(), bytes.end()), "previous-mesh");
+    }
+}
+
+TEST(AnimationImport, StepHoldsUntilExactNextKey) {
+    const TempDirectory temp;
+    const auto source = temp.path() / "rig.gltf";
+    const auto output = temp.path() / "rig.lmesh";
+    WriteRiggedTriangleGltf(source, false, "STEP");
+    ASSERT_TRUE(process_gltf_checked(source.string(), output.string()));
+    SkinnedMeshAsset mesh;
+    AnimClipAsset clip;
+    ASSERT_TRUE(LoadSkinnedMeshAsset(output.string(), mesh));
+    ASSERT_TRUE(LoadAnimClipAsset((temp.path() / "rig.wiggle.lanim").string(), clip));
+    ASSERT_EQ(clip.header.version, 2u);
+    ASSERT_FALSE(clip.tracks.empty());
+    for (const auto& track : clip.tracks)
+        EXPECT_EQ(track.interpolation, luminumbra::animation::AnimInterpolation::Step);
+    const auto skeleton = luminumbra::animation::BuildSkeleton(mesh);
+    const auto runtime = luminumbra::animation::BuildClip(clip);
+    EXPECT_FLOAT_EQ(
+        luminumbra::animation::SamplePose(skeleton, runtime, 0.75f).joints[0].translation[1], 0);
+    EXPECT_FLOAT_EQ(
+        luminumbra::animation::SamplePose(skeleton, runtime, 1.0f).joints[0].translation[1], 0.25f);
+}
+
+TEST(AnimationImport, CubicSplineUsesValuesTangentsAndIntervalLength) {
+    const TempDirectory temp;
+    const auto source = temp.path() / "rig.gltf";
+    const auto output = temp.path() / "rig.lmesh";
+    WriteRiggedTriangleGltf(source, false, "CUBICSPLINE");
+    ASSERT_TRUE(process_gltf_checked(source.string(), output.string()));
+    SkinnedMeshAsset mesh;
+    AnimClipAsset clip;
+    ASSERT_TRUE(LoadSkinnedMeshAsset(output.string(), mesh));
+    ASSERT_TRUE(LoadAnimClipAsset((temp.path() / "rig.wiggle.lanim").string(), clip));
+    ASSERT_EQ(clip.header.version, 2u);
+    ASSERT_FALSE(clip.tracks.empty());
+    for (const auto& track : clip.tracks)
+        EXPECT_EQ(track.interpolation, luminumbra::animation::AnimInterpolation::CubicSpline);
+    const auto skeleton = luminumbra::animation::BuildSkeleton(mesh);
+    const auto runtime = luminumbra::animation::BuildClip(clip);
+    const auto middle = luminumbra::animation::SamplePose(skeleton, runtime, 1.0f);
+    EXPECT_FLOAT_EQ(middle.joints[0].translation[1], 0.375f);
+    EXPECT_NEAR(middle.joints[1].rotation[2], 0.38268343f, 1e-6f);
+    EXPECT_NEAR(middle.joints[1].rotation[3], 0.92387953f, 1e-6f);
+    EXPECT_FLOAT_EQ(luminumbra::animation::SamplePose(skeleton, runtime, 0).joints[1].rotation[3],
+                    1);
+    EXPECT_FLOAT_EQ(
+        luminumbra::animation::SamplePose(skeleton, runtime, 2).joints[0].translation[1], 0.25f);
+}
+
+TEST(AnimationImport, LinearRotationFollowsSphericalInterpolation) {
+    const TempDirectory temp;
+    const auto source = temp.path() / "rig.gltf";
+    const auto output = temp.path() / "rig.lmesh";
+    WriteRiggedTriangleGltf(source);
+    ASSERT_TRUE(process_gltf_checked(source.string(), output.string()));
+    SkinnedMeshAsset mesh;
+    AnimClipAsset clip;
+    ASSERT_TRUE(LoadSkinnedMeshAsset(output.string(), mesh));
+    ASSERT_TRUE(LoadAnimClipAsset((temp.path() / "rig.wiggle.lanim").string(), clip));
+    ASSERT_EQ(clip.header.version, 2u);
+    ASSERT_FALSE(clip.tracks.empty());
+    for (const auto& track : clip.tracks)
+        EXPECT_EQ(track.interpolation, luminumbra::animation::AnimInterpolation::Linear);
+    const auto pose = luminumbra::animation::SamplePose(
+        luminumbra::animation::BuildSkeleton(mesh), luminumbra::animation::BuildClip(clip), 0.25f);
+    EXPECT_NEAR(pose.joints[1].rotation[2], 0.19509032f, 1e-4f);
+    EXPECT_NEAR(pose.joints[1].rotation[3], 0.98078528f, 1e-4f);
+}
+
+TEST(AnimationImport, InvalidClipPreservesExistingMeshAndClips) {
+    const TempDirectory temp;
+    const auto source = temp.path() / "rig.gltf";
+    const auto output = temp.path() / "rig.lmesh";
+    const auto animation = temp.path() / "rig.wiggle.lanim";
+    WriteRiggedTriangleGltf(source);
+    ASSERT_TRUE(process_gltf_checked(source.string(), output.string()));
+    const auto originalMesh = ReadAllBytes(output);
+    const auto originalClip = ReadAllBytes(animation);
+    const std::vector<std::pair<std::string, std::string>> changes = {
+        {R"("interpolation": "LINEAR")", R"("interpolation": "UNKNOWN")"},
+        {R"("name": "wiggle")", R"("name": "../escape")"},
+        {R"("node": 0, "path": "translation")", R"("node": 2, "path": "translation")"},
+        {R"("input": 7, "output": 8)", R"("input": 7, "output": 9)"},
+    };
+    for (const auto& [from, to] : changes) {
+        SCOPED_TRACE(to);
+        WriteRiggedTriangleGltf(source);
+        ASSERT_TRUE(ChangeRig(source, from, to));
+        EXPECT_FALSE(process_gltf_checked(source.string(), output.string()));
+        EXPECT_EQ(ReadAllBytes(output), originalMesh);
+        EXPECT_EQ(ReadAllBytes(animation), originalClip);
+    }
+}
+
+TEST(SkeletalSceneImport, LoaderRejectsMalformedMeshWithoutReplacingAsset) {
+    const TempDirectory temp;
+    const auto source = temp.path() / "rig.gltf";
+    const auto output = temp.path() / "rig.lmesh";
+    WriteRiggedTriangleGltf(source);
+    ASSERT_TRUE(process_gltf_checked(source.string(), output.string()));
+    const auto valid = ReadAllBytes(output);
+    const std::vector<std::pair<size_t, uint32_t>> changes = {
+        {8, UINT32_MAX},
+        {16, 300},
+        {36 + 32, 255},
+        {36 + 36, 0},
+        {36 + 120, 99},
+        {36 + 120 + 12 + 4, 1},
+        {36 + 120 + 12 + 8 + 12, 1},
+    };
+    for (const auto& [offset, value] : changes) {
+        SCOPED_TRACE(offset);
+        auto bytes = valid;
+        std::memcpy(bytes.data() + offset, &value, sizeof(value));
+        {
+            std::ofstream file(output, std::ios::binary);
+            file.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+        }
+        SkinnedMeshAsset asset;
+        asset.header.vertexCount = 42;
+        EXPECT_FALSE(LoadSkinnedMeshAsset(output.string(), asset));
+        EXPECT_EQ(asset.header.vertexCount, 42u);
+    }
+}
+
+TEST(SkeletalSceneImport, DecomposesRotatedScaledAndMirroredMatrixBinds) {
+    const TempDirectory temp;
+    const auto source = temp.path() / "rig.gltf";
+    const auto output = temp.path() / "rig.lmesh";
+    for (const int scale : {2, -2}) {
+        SCOPED_TRACE(scale);
+        WriteRiggedTriangleGltf(source);
+        ASSERT_TRUE(ChangeRig(source,
+                              R"({"name": "spine", "children": [1]})",
+                              R"({"name": "spine", "children": [1], "matrix": [0,)" +
+                                  std::to_string(scale) + R"(,0,0,-3,0,0,0,0,0,4,0,5,6,7,1]})"));
+        ASSERT_TRUE(process_gltf_checked(source.string(), output.string()));
+        SkinnedMeshAsset mesh;
+        ASSERT_TRUE(LoadSkinnedMeshAsset(output.string(), mesh));
+        const auto palette = BindPalette(mesh);
+        const float expected[16] = {
+            0, static_cast<float>(scale), 0, 0, -3, 0, 0, 0, 0, 0, 4, 0, 5, 6, 7, 1};
+        for (size_t i = 0; i < palette.size(); ++i)
+            EXPECT_NEAR(palette[i], expected[i % 16], 2e-6f);
+        EXPECT_NEAR(mesh.header.boundingSphere[0], 3.5f, 2e-6f);
+        EXPECT_NEAR(mesh.header.boundingSphere[1], 6 + scale / 2.0f, 2e-6f);
+    }
+}
+
+TEST(SkeletalSceneImport, RefusesMultipleActiveSkinsBeforeOutput) {
+    const TempDirectory temp;
+    const auto source = temp.path() / "rig.gltf";
+    const auto output = temp.path() / "rig.lmesh";
+    WriteRiggedTriangleGltf(source);
+    ASSERT_TRUE(ChangeRig(source, R"("skins": [)", R"("skins": [{"joints": [0,1]}, )"));
+    ASSERT_TRUE(ChangeRig(
+        source,
+        R"({"name": "body", "mesh": 0, "skin": 0})",
+        R"({"name": "body", "mesh": 0, "skin": 0}, {"name": "second", "mesh": 0, "skin": 1})"));
+    ASSERT_TRUE(ChangeRig(source, R"("nodes": [0, 2])", R"("nodes": [0,2,3])"));
+    EXPECT_FALSE(process_gltf_checked(source.string(), output.string()));
+    EXPECT_FALSE(std::filesystem::exists(output));
 }

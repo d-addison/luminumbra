@@ -19,7 +19,10 @@ namespace Luminumbra::Rendering {
 struct StaticModelTex {
     int albedoLayer = -1;
     int normalLayer = -1;
+    int surfaceLayer = -1; // linear occlusion, roughness, metallic
     bool alphaTest = false;
+    bool doubleSided = false;
+    float metallicFactor = 1.0f;
 };
 
 } // namespace Luminumbra::Rendering

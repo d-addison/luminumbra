@@ -1,0 +1,57 @@
+{
+  "coverage_density": {
+    "biome_density": 0.3,
+    "density_band": 0.6,
+    "density_delta": 1.1444096165158513e-07,
+    "instances_total": 262144,
+    "instances_within_ring": 262144,
+    "measured_density": 0.30000011444096164,
+    "passed": true
+  },
+  "determinism": {
+    "global_rng": false,
+    "hash_byte_equal": true,
+    "instance_hash_run_a": 10059596930872203812,
+    "instance_hash_run_b": 10059596930872203812,
+    "passed": true,
+    "placement": "pure_hash(chunk_coords, biome_id, slope, moisture, instance_index)",
+    "seed_offset_consumed": false,
+    "world_hash_written": false,
+    "world_seed": 424242
+  },
+  "distance_fade": {
+    "fade_end_m": 92.0,
+    "fade_start_m": 48.0,
+    "instances_beyond_fade": 0,
+    "live_ring_radius_m": 92.0,
+    "passed": true
+  },
+  "foliage_screenshot": "screenshots/foliage-instancing.ppm",
+  "gl_debug": {
+    "errors": 0,
+    "messages": 0,
+    "notifications": 0,
+    "warnings": 0
+  },
+  "gpu_timer": {
+    "budget_ms": 0.6,
+    "foliage_gpu_ms": 0.23824,
+    "supported": true,
+    "within_budget": true
+  },
+  "passed": true,
+  "render_pass": {
+    "foliage_draws": 1,
+    "foliage_instances_drawn": 262144,
+    "skybox_draws": 1
+  },
+  "schema": "luminumbra.foliage_instancing.v1",
+  "timestamp_utc": "2026-09-08T13:07:05Z",
+  "wind_sway": {
+    "calm_max_sway": 0.0,
+    "min_sway_delta": 0.02,
+    "passed": true,
+    "sway_delta": 9.319230079650879,
+    "windy_max_sway": 9.319230079650879
+  }
+}

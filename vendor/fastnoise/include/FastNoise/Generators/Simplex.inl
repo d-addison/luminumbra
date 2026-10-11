@@ -14,16 +14,42 @@ class FS_T<FastNoise::Simplex, FS> : public virtual FastNoise::Simplex, public F
         const float F2 = 0.5f * (SQRT3 - 1.0f);
         const float G2 = (3.0f - SQRT3) / 6.0f;
 
-        float32v f = float32v( F2 ) * (x + y);
-        float32v x0 = FS_Floor_f32( x + f );
-        float32v y0 = FS_Floor_f32( y + f );
+        float32v x0;
+        float32v y0;
+#if defined( _MSC_VER )
+        if constexpr( FS::SIMD_Level == FastSIMD::Level_AVX2 )
+        {
+            // MSVC 19.51 contracts this AVX2 arithmetic; 19.50 does not.
+            // Preserve the established MSVC height contract explicitly.
+            const float32v skew_sum = x + y;
+            x0 = FS_Floor_f32( FS_FMulAdd_f32( float32v( F2 ), skew_sum, x ) );
+            y0 = FS_Floor_f32( FS_FMulAdd_f32( float32v( F2 ), skew_sum, y ) );
+        }
+        else
+#endif
+        {
+            float32v f = float32v( F2 ) * (x + y);
+            x0 = FS_Floor_f32( x + f );
+            y0 = FS_Floor_f32( y + f );
+        }
 
         int32v i = FS_Convertf32_i32( x0 ) * int32v( FnPrimes::X );
         int32v j = FS_Convertf32_i32( y0 ) * int32v( FnPrimes::Y );
 
-        float32v g = float32v( G2 ) * (x0 + y0);
-        x0 = x - (x0 - g);
-        y0 = y - (y0 - g);
+#if defined( _MSC_VER )
+        if constexpr( FS::SIMD_Level == FastSIMD::Level_AVX2 )
+        {
+            const float32v cell_sum = x0 + y0;
+            x0 = x - FS_FNMulAdd_f32( float32v( G2 ), cell_sum, x0 );
+            y0 = y - FS_FNMulAdd_f32( float32v( G2 ), cell_sum, y0 );
+        }
+        else
+#endif
+        {
+            float32v g = float32v( G2 ) * (x0 + y0);
+            x0 = x - (x0 - g);
+            y0 = y - (y0 - g);
+        }
 
         mask32v i1 = x0 > y0;
         //mask32v j1 = ~i1; //NMasked funcs
@@ -518,4 +544,3 @@ class FS_T<FastNoise::OpenSimplex2S, FS> : public virtual FastNoise::OpenSimplex
         return float32v( 144.736422163332608f ) * value;
     }
 };
-

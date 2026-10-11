@@ -1,0 +1,120 @@
+{
+  "schema": "luminumbra.authoring.recipe.evidence.v1",
+  "source_commit": "136e823e58baa5a908597f89dbc32757c3225001",
+  "extension_version": "0.3.0",
+  "blender_version": "5.1.0",
+  "blender_sha256": "f9d2e744702354e7d182861fb924bc128ea85d8cf0577b91dcb4d92f09cdc287",
+  "archive_sha256": "9bc18cc4333f94e1aee32c6a467446e9253944be5818fcb53d5d63aa05393dd0",
+  "probe_sha256": "7684234b55f9d2161ced9f3f3dee7b9c475215641f7ba83a4bec7a541cc08796",
+  "runner_sha256": "cafe441c85a801d25ad72f012c2b8454a024901b0d172d303320865195ddc7bf",
+  "qualification_sha256": "bf81ddc1d44f5be5f8eb2047ffeef19a3fcbb9d2c6e42c8e0177782ec1da4b3e",
+  "native_receipt_sha256": "18f07c5b92b0a92792613d5c6480c03d375bfce54bcc3382ac8d44efee2a474f",
+  "screenshot": {
+    "path": "review-dialog.png",
+    "sha256": "2d679234139e3cc17485e07a2842821aff569b84ba96d6807c7644ccd921c82e",
+    "bytes": 373552,
+    "width": 1400,
+    "height": 900,
+    "processing": "Original bpy.ops.screen.screenshot PNG; no resizing or edits"
+  },
+  "interactive": true,
+  "engine_rendered": false,
+  "native_checks": [
+    {
+      "name": "interactive editor",
+      "passed": true
+    },
+    {
+      "name": "isolated resource directories",
+      "passed": true
+    },
+    {
+      "name": "install actual archive",
+      "passed": true
+    },
+    {
+      "name": "recipe operator and callback registered",
+      "passed": true
+    },
+    {
+      "name": "manual marking bootstrap",
+      "passed": true
+    },
+    {
+      "name": "revision exists before any build session",
+      "passed": true
+    },
+    {
+      "name": "review dialog opens without editing",
+      "passed": true
+    },
+    {
+      "name": "actual review dialog screenshot",
+      "passed": true
+    },
+    {
+      "name": "cancel invalidates the dialog plan without editing",
+      "passed": true
+    },
+    {
+      "name": "planning is nonmutating",
+      "passed": true
+    },
+    {
+      "name": "exact duplicate and shared mesh changes",
+      "passed": true
+    },
+    {
+      "name": "apply reviewed operator",
+      "passed": true
+    },
+    {
+      "name": "original stable and duplicate repaired",
+      "passed": true
+    },
+    {
+      "name": "durable receipt matches live result",
+      "passed": true
+    },
+    {
+      "name": "one undo restores complete ID preimage",
+      "passed": true
+    },
+    {
+      "name": "undo advances revision and retains receipt",
+      "passed": true
+    },
+    {
+      "name": "request replay does not reapply undone data",
+      "passed": true
+    },
+    {
+      "name": "redo restores exact reviewed IDs",
+      "passed": true
+    },
+    {
+      "name": "ordinary scene edit invalidates review without build session",
+      "passed": true
+    },
+    {
+      "name": "native receipt failure rolls back scene mutation",
+      "passed": true
+    },
+    {
+      "name": "file load invalidates document and pending plans",
+      "passed": true
+    },
+    {
+      "name": "extension unload removes recipe and timer",
+      "passed": true
+    }
+  ],
+  "process": {
+    "exit_code": 0,
+    "elapsed_seconds": 4.530999999959022,
+    "deadline_seconds": 120,
+    "cpu_workers": 2
+  },
+  "visual_approval": "pending",
+  "scope": "Functional Blender identity-recipe UI. No engine viewport, GPU performance, newly authored production content or visual-quality acceptance claim."
+}

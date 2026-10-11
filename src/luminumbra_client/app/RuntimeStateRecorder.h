@@ -82,6 +82,10 @@ public:
 
     void mark_unhandled_exception(uint32_t exception_code);
 
+    // Incremental shutdown record: rewrites shutdown.json after every milestone with
+    // "complete": false so a hang during teardown localizes to the last stage reached.
+    void write_shutdown_progress(const std::vector<std::string>& milestones);
+
 private:
     static nlohmann::json MemoryToJson(const ProcessMemoryStats& memory);
     static nlohmann::json JobStatsToJson(const Luminumbra::JobSystem::RuntimeStats& stats);
@@ -105,6 +109,10 @@ private:
                                     const RuntimeReadinessReport& readiness) const;
 
     void write_last_known() const;
+
+    // True once an incremental shutdown record has been written (watchdog armed), so
+    // the final record adds "complete" only in that mode and is otherwise unchanged.
+    bool m_wrote_shutdown_progress = false;
 
     RuntimeScenarioConfig m_config;
     std::unique_ptr<Luminumbra::Rendering::Camera>& g_camera;

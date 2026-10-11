@@ -29,6 +29,7 @@
   KEY(SimWeatherEvents, Sim, "sim", "weather_events", hashed) \
   KEY(SimAetherState, Sim, "sim", "aether_state", hashed) \
   KEY(SimWaterHighRes, Sim, "sim", "water_high_res", hashed) \
+  KEY(SimActiveRegions, Sim, "sim", "active_regions", hashed) \
   KEY(RenderMoonlight, Render, "render", "moonlight", excluded) \
   KEY(RenderTreeWind, Render, "render", "tree_wind", excluded) \
   KEY(RenderPlantProcgen, Render, "render", "plant_procgen", excluded) \

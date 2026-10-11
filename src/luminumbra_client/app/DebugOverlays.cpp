@@ -1065,6 +1065,11 @@ void DrawSettingsWindow(ClientAppContext& app,
                     }
                 }
             }
+            const bool audio_disabled = audioManager && !audioManager->IsPlaybackEnabled();
+            ImGui::TextWrapped(audio_disabled ? "Audio is disabled for this release."
+                               : audioManager ? "Experimental audio enabled."
+                                              : "Saved audio levels.");
+            ImGui::BeginDisabled(audio_disabled);
             if (ImGui::SliderFloat("Master volume", &us.audio_master, 0.0f, 1.0f, "%.2f")) {
                 if (audioManager)
                     audioManager->SetMasterVolume(us.audio_master); // applied live
@@ -1077,6 +1082,7 @@ void DrawSettingsWindow(ClientAppContext& app,
                 if (audioManager)
                     audioManager->SetSfxVolume(us.audio_sfx); // applied live (sfx bus)
             }
+            ImGui::EndDisabled();
             if (ImGui::CollapsingHeader("Controls (keyboard)")) {
                 for (const auto& def : Luminumbra::Client::kInputActionDefs) {
                     const int idx = static_cast<int>(def.action);

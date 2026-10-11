@@ -197,7 +197,7 @@ void SkyboxPass::reset_shader() {
 void SkyboxPass::execute(const RenderContext& ctx,
                          const Camera& camera,
                          bool draw_weather_overlay) {
-    glDepthFunc(GL_LEQUAL);
+    glDepthFunc(GL_GEQUAL);
     // The camera sits inside the skybox cube, so its upward faces wind
     // clockwise from the inside view and were backface-culled (black wedges
     // above ~50 degrees elevation, first caught by skybox_visual_smoke).
@@ -239,10 +239,10 @@ void SkyboxPass::execute(const RenderContext& ctx,
         m_skybox_shader->setInt("u_backdropMode", backdrop_mode);
         m_skybox_shader->setVec3("u_backdropColor", backdrop_color);
     }
-    glm::mat4 projection = glm::perspective(glm::radians(camera.Zoom),
-                                            (float)ctx.screen_width / (float)ctx.screen_height,
-                                            camera.GetNearPlane(),
-                                            camera.GetFarPlane());
+    glm::mat4 projection = ReversedZPerspective(glm::radians(camera.Zoom),
+                                                (float)ctx.screen_width / (float)ctx.screen_height,
+                                                camera.GetNearPlane(),
+                                                camera.GetFarPlane());
     glm::mat4 view = glm::mat4(glm::mat3(camera.GetViewMatrix())); // remove translation
     m_skybox_shader->setMat4("view", view);
     m_skybox_shader->setMat4("projection", projection);
@@ -331,7 +331,7 @@ void SkyboxPass::execute(const RenderContext& ctx,
     if (cull_was_enabled) {
         glEnable(GL_CULL_FACE);
     }
-    glDepthFunc(GL_LESS);
+    glDepthFunc(GL_GREATER);
 
     if (draw_weather_overlay && ctx.weather_type != WeatherType::None &&
         ctx.weather_intensity > 0.0f) {
@@ -343,11 +343,11 @@ void SkyboxPass::execute_weather_overlay(const RenderContext& ctx, const Camera&
     if (ctx.weather_type == WeatherType::None || ctx.weather_intensity <= 0.0f) {
         return;
     }
-    const glm::mat4 projection = glm::perspective(glm::radians(camera.Zoom),
-                                                  static_cast<float>(ctx.screen_width) /
-                                                      static_cast<float>(ctx.screen_height),
-                                                  camera.GetNearPlane(),
-                                                  camera.GetFarPlane());
+    const glm::mat4 projection = ReversedZPerspective(glm::radians(camera.Zoom),
+                                                      static_cast<float>(ctx.screen_width) /
+                                                          static_cast<float>(ctx.screen_height),
+                                                      camera.GetNearPlane(),
+                                                      camera.GetFarPlane());
     execute_weather_overlay(ctx, camera, projection);
 }
 

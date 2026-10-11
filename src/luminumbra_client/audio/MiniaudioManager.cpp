@@ -915,9 +915,24 @@ float MiniaudioManager::CalculateOcclusion(const glm::vec3& source, const glm::v
 }
 
 void MiniaudioManager::SetPhysicsSystem(::Luminumbra::Systems::PhysicsSystem* physics_system) {
-    if (m_spatial_cluster) {
-        m_spatial_cluster->SetPhysicsSystem(physics_system);
+    if (!m_spatial_cluster) {
+        return;
+    }
+    m_spatial_cluster->SetPhysicsSystem(physics_system);
+    // The caller re-issues this binding every in-game frame (FrameAudio.cpp) so that a
+    // world (re)load rebinds without extra plumbing. Logging is edge-triggered: the
+    // previous unconditional INFO line produced one synchronous logger write per rendered
+    // frame on the render thread (77,659 lines in the PID 66604 session, see
+    // docs/v0.3-acceptance.md), which is a defect regardless of that session's hang cause.
+    if (physics_system == m_cluster_physics_system) {
+        return;
+    }
+    m_cluster_physics_system = physics_system;
+    ++m_cluster_physics_binding_changes;
+    if (physics_system) {
         LUMINUMBRA_CORE_INFO("Physics system integration established for audio spatial clustering");
+    } else {
+        LUMINUMBRA_CORE_INFO("Physics system detached from audio spatial clustering");
     }
 }
 

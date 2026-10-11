@@ -8,7 +8,10 @@
 #include <atomic>
 #include <chrono>
 #include <filesystem>
+#include <fstream>
 #include <memory>
+#include <nlohmann/json.hpp>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -213,4 +216,73 @@ TEST(ChunkDirtyTracking, GenerationAndMeshingLeaveChunkClean) {
     chunk.mark_voxel_data_dirty();
     world_system.GenerateChunkData(chunk);
     EXPECT_FALSE(chunk.is_voxel_data_dirty()) << "regeneration must reset the dirty flag";
+}
+
+TEST(WorldSaveService, ClockMetadataValidationPrecedesEveryWrite) {
+    TempSaveDir save_dir("clock_metadata");
+    const auto metadata_path = save_dir.path / "world_info.json";
+    const auto read = [&]() {
+        std::ifstream file(metadata_path, std::ios::binary);
+        std::ostringstream bytes;
+        bytes << file.rdbuf();
+        return bytes.str();
+    };
+    std::vector<std::string> errors;
+    EXPECT_FALSE(WorldSaveService::save_metadata(
+        R"({"container_version":2,"simulationTick":-1})", save_dir.path, &errors));
+    EXPECT_FALSE(std::filesystem::exists(metadata_path));
+    nlohmann::json metadata = {{"container_version", 2}};
+    Luminumbra::world::WorldClock(123, {12000, 4}).write_metadata(metadata);
+    const auto valid = metadata.dump(4) + "\n";
+    ASSERT_TRUE(WorldSaveService::save_metadata(valid, save_dir.path));
+    EXPECT_EQ(read(), valid);
+    EXPECT_FALSE(WorldSaveService::save_metadata(R"({"container_version":2})", save_dir.path));
+    EXPECT_EQ(read(), valid);
+    metadata["calendar"]["daysPerYear"] = 0;
+    EXPECT_FALSE(WorldSaveService::save_metadata(metadata.dump(), save_dir.path));
+    EXPECT_EQ(read(), valid);
+    // A pre-existing corrupt clock blocks chunk, entity and metadata writers.
+    {
+        std::ofstream output(metadata_path, std::ios::binary | std::ios::trunc);
+        output << metadata.dump();
+    }
+    const auto damaged = read();
+    WorldStreamingState state;
+    PopulateFixtureWorld(state);
+    EXPECT_FALSE(WorldSaveService{}.save_world(state, save_dir.path));
+    EXPECT_FALSE(WorldSaveService::save_metadata(valid, save_dir.path));
+    EXPECT_FALSE(std::filesystem::exists(save_dir.path / "chunks"));
+    EXPECT_EQ(read(), damaged);
+}
+
+TEST(WorldSaveService, LegacyMetadataWriterPreservesOpaqueBytesAndMissingDirectoryFailure) {
+    TempSaveDir root("legacy_metadata");
+    const auto missing = root.path / "missing";
+    EXPECT_FALSE(WorldSaveService::save_metadata(R"({"container_version":2})", missing));
+    EXPECT_FALSE(std::filesystem::exists(missing));
+    for (const std::string bytes : {"{", "[]", "null", "opaque legacy input"}) {
+        SCOPED_TRACE(bytes);
+        TempSaveDir destination("opaque_metadata");
+        ASSERT_TRUE(WorldSaveService::save_metadata(bytes, destination.path));
+        std::ifstream input(destination.path / "world_info.json", std::ios::binary);
+        std::ostringstream saved;
+        saved << input.rdbuf();
+        EXPECT_EQ(saved.str(), bytes);
+    }
+}
+
+TEST(WorldSaveService, DirectLegacySnapshotsKeepMetadataAboveCatalogSizeLimit) {
+    TempSaveDir destination("large_metadata");
+    const nlohmann::json metadata = {{"container_version", 2},
+                                     {"extension", std::string(1024 * 1024, 'x')}};
+    const auto bytes = metadata.dump();
+    ASSERT_TRUE(WorldSaveService::save_metadata(bytes, destination.path));
+    WorldStreamingState original, loaded;
+    PopulateFixtureWorld(original);
+    ASSERT_TRUE(WorldSaveService{}.save_world(original, destination.path));
+    std::vector<std::string> errors;
+    ASSERT_TRUE(WorldSaveService{}.load_world(loaded, destination.path, errors));
+    EXPECT_TRUE(errors.empty());
+    EXPECT_EQ(WorldSaveService{}.world_hash(loaded), WorldSaveService{}.world_hash(original));
+    EXPECT_TRUE(WorldSaveService::save_metadata(bytes, destination.path));
 }

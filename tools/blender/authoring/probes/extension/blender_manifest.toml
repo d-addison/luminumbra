@@ -1,0 +1,13 @@
+schema_version = "1.0.0"
+id = "luminumbra_author_mock"
+version = "0.0.1"
+name = "Luminumbra Author MOCK"
+tagline = "Exercise draft authoring jobs with a visibly labelled mock"
+maintainer = "Luminumbra contributors"
+type = "add-on"
+blender_version_min = "5.1.0"
+blender_version_max = "5.1.1"
+license = ["SPDX:MIT"]
+
+[permissions]
+files = "Read fixture sidecars and write isolated mock jobs and receipts"

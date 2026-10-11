@@ -13,11 +13,7 @@ void main()
     // Calculate the clip-space position as usual.
     vec4 pos = projection * view * vec4(aPos, 1.0);
 
-    // ===================== FIX IS HERE =====================
-    // Instead of the .xyww swizzle, we explicitly set the Z component
-    // to match the W component. This forces the depth to be 1.0 (the far plane)
-    // after the perspective divide, in a more robust way.
+    // The reversed-Z far plane is zero under GL_ZERO_TO_ONE.
     gl_Position = pos;
-    gl_Position.z = gl_Position.w;
-    // ====================== FIX ENDS HERE ======================
+    gl_Position.z = 0.0;
 }

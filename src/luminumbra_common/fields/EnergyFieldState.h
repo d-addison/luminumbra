@@ -132,6 +132,10 @@ public:
     [[nodiscard]] std::string SerializeRecord(std::uint64_t save_tick);
     bool DeserializeRecord(const std::string& record, std::uint64_t load_tick_base);
 
+    // Restore an absent record on an absolute clock without replaying empty history.
+    // Keeps the channel layout and anchor, and clears pages and queued deposits.
+    void ResetEmptyAtTick(std::uint64_t tick);
+
     // Diagnostics.
     [[nodiscard]] std::size_t page_count() const noexcept {
         return m_pages.size();

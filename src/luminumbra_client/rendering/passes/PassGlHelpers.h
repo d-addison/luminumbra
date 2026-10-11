@@ -6,6 +6,7 @@
 // intentional so the extraction stays a mechanical move with zero behavior
 // change.
 
+#include <array>
 #include <glad/glad.h>
 #include <glm/glm.hpp>
 #include <string>
@@ -98,7 +99,14 @@ struct ScopedDebugGroup {
     ScopedDebugGroup& operator=(const ScopedDebugGroup&) = delete;
 };
 
-inline void ExtractFrustumPlanes(const glm::mat4& m, glm::vec4 planes[6]) {
+enum class ClipDepth {
+    ReversedZeroToOne,
+    NegativeOneToOne
+};
+
+inline void ExtractFrustumPlanes(const glm::mat4& m,
+                                 glm::vec4 planes[6],
+                                 ClipDepth depth = ClipDepth::ReversedZeroToOne) {
     planes[0] =
         glm::vec4(m[0][3] + m[0][0], m[1][3] + m[1][0], m[2][3] + m[2][0], m[3][3] + m[3][0]);
     planes[1] =
@@ -111,10 +119,37 @@ inline void ExtractFrustumPlanes(const glm::mat4& m, glm::vec4 planes[6]) {
         glm::vec4(m[0][3] + m[0][2], m[1][3] + m[1][2], m[2][3] + m[2][2], m[3][3] + m[3][2]);
     planes[5] =
         glm::vec4(m[0][3] - m[0][2], m[1][3] - m[1][2], m[2][3] - m[2][2], m[3][3] - m[3][2]);
+    if (depth == ClipDepth::ReversedZeroToOne) {
+        // 0 <= clip.z <= clip.w: near is row 3 - row 2; far is row 2.
+        planes[4] = planes[5];
+        planes[5] = glm::vec4(m[0][2], m[1][2], m[2][2], m[3][2]);
+    }
     for (int i = 0; i < 6; ++i) {
         float inv_len = 1.0f / glm::length(glm::vec3(planes[i]));
         planes[i] *= inv_len;
     }
+}
+
+// World-space corners of one shadow cascade's frustum. Under reversed-Z the near
+// plane is clip z = 1 and the far plane is clip z = 0, so the NDC z endpoints are
+// 1 and 0 rather than the conventional -1 and 1. Shared by the production cascade
+// builder and its regression so the endpoints cannot drift apart.
+inline std::array<glm::vec4, 8> cascade_frustum_corners_world(const glm::mat4& projection,
+                                                              const glm::mat4& view) {
+    const glm::mat4 inverse_view_projection = glm::inverse(projection * view);
+    std::array<glm::vec4, 8> corners{};
+    std::size_t index = 0;
+    for (int x = 0; x < 2; ++x)
+        for (int y = 0; y < 2; ++y)
+            for (int z = 0; z < 2; ++z) {
+                const glm::vec4 point =
+                    inverse_view_projection * glm::vec4(2.0f * static_cast<float>(x) - 1.0f,
+                                                        2.0f * static_cast<float>(y) - 1.0f,
+                                                        1.0f - static_cast<float>(z),
+                                                        1.0f);
+                corners[index++] = point / point.w;
+            }
+    return corners;
 }
 
 inline void set_default_shadow_cascade_splits(ShadowMap& shadow_map) {

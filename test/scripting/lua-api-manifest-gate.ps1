@@ -13,16 +13,8 @@ $ArtifactDir = "build/$BuildPreset/test-artifacts/scripting"
 $ArtifactPath = Join-Path $ArtifactDir "lua-api-manifest.json"
 
 $RequiredEntries = @(
-    [pscustomobject]@{ module = "core"; name = "log"; qualified = "core.log" },
-    [pscustomobject]@{ module = "core"; name = "version"; qualified = "core.version" },
-    [pscustomobject]@{ module = "entity"; name = "destroy"; qualified = "entity.destroy" },
-    [pscustomobject]@{ module = "entity"; name = "spawn"; qualified = "entity.spawn" },
-    [pscustomobject]@{ module = "simulation"; name = "emit_event"; qualified = "simulation.emit_event" },
-    [pscustomobject]@{ module = "simulation"; name = "subscribe"; qualified = "simulation.subscribe" },
-    [pscustomobject]@{ module = "time"; name = "delta_seconds"; qualified = "time.delta_seconds" },
-    [pscustomobject]@{ module = "world"; name = "get_block"; qualified = "world.get_block" },
-    [pscustomobject]@{ module = "world"; name = "sample_energy_field"; qualified = "world.sample_energy_field" },
-    [pscustomobject]@{ module = "world"; name = "set_block"; qualified = "world.set_block" }
+    [pscustomobject]@{ module = ""; name = "sample_energy_field"; qualified = "sample_energy_field" },
+    [pscustomobject]@{ module = "world"; name = "sample_energy_field"; qualified = "world.sample_energy_field" }
 )
 
 $Checks = New-Object System.Collections.Generic.List[object]
@@ -109,6 +101,8 @@ New-Item -ItemType Directory -Force -Path $ArtifactDir | Out-Null
 
 $Artifact = [ordered]@{
     schema = "luminumbra.scripting.lua_api_manifest.v1"
+    evidence_kind = "source_structure_only"
+    live_binding_test = "LuaSandboxEscape.EveryAdvertisedEntryIsCallable"
     build_preset = $BuildPreset
     passed = $Passed
     manifest = [ordered]@{
@@ -119,7 +113,7 @@ $Artifact = [ordered]@{
         validation_api = "LuaApiManifestMeetsBaseline"
         deterministic_order = "module_then_name"
         entry_count = $RequiredEntries.Count
-        required_modules = @("core", "entity", "simulation", "time", "world")
+        required_modules = @("world")
         required_entries = $RequiredEntryNames
     }
     checks = $Checks.ToArray()
@@ -131,4 +125,4 @@ if (-not $Passed) {
     throw "Lua API manifest gate failed; see $ArtifactPath"
 }
 
-Write-Host "lua api manifest gate passed: $ArtifactPath"
+Write-Host "lua api manifest source gate passed (live behavior requires C++ tests): $ArtifactPath"

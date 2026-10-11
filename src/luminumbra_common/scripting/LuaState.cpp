@@ -4,9 +4,18 @@
 
 // The pimpl in LuaState.h keeps the sol2 dependency confined to this
 // translation unit.
-#include <sol/sol.hpp>
+#include <sol/error.hpp>
+#include <sol/forward.hpp>
+#include <sol/optional_implementation.hpp>
+#include <sol/protected_function_result.hpp>
+#include <sol/state.hpp>
+#include <sol/state_handling.hpp>
+#include <sol/types.hpp>
 
 #include <cmath>
+#include <memory>
+#include <optional>
+#include <string>
 
 #include "../fields/EnergyFieldState.h"
 #include "../systems/AetherFieldSystem.h" // kAetherCellSizeM — the shared 24 m grid identity
@@ -23,11 +32,7 @@ struct LuaState::Impl {
 
 LuaState::LuaState()
     : m_impl(std::make_unique<Impl>()) {
-    // -5: the read-only energy-field sampler. Registered under its
-    // manifest home (`world.sample_energy_field`) and as the bare global the
-    // spec names (`sample_energy_field`) — one implementation, one manifest
-    // entry. Read-only by construction: the lambda routes through the const
-    // host sampler; no binding writes sim state.
+    // Both manifest entry points share this read-only implementation.
     const auto sampler = [this](double x, double y, double z) {
         return sample_energy_field(x, y, z);
     };
@@ -61,17 +66,35 @@ double LuaState::sample_energy_field(double x, double y, double z) const {
            static_cast<double>(luminumbra::fields::kEnergyRawPerUnit);
 }
 
-bool LuaState::EvalNumber(const std::string& chunk, double& out_value) const {
+LuaEvaluationResult LuaState::Evaluate(const std::string& chunk) const {
     const sol::protected_function_result result =
         m_impl->lua.safe_script(chunk, sol::script_pass_on_error);
     if (!result.valid()) {
+        LuaEvaluationStatus status = LuaEvaluationStatus::OtherError;
+        if (result.status() == sol::call_status::syntax) {
+            status = LuaEvaluationStatus::SyntaxError;
+        } else if (result.status() == sol::call_status::runtime) {
+            status = LuaEvaluationStatus::RuntimeError;
+        }
+        const sol::error error = result;
+        return {status, std::nullopt, error.what()};
+    }
+    LuaEvaluationResult evaluation;
+    if (result.return_count() > 0) {
+        const sol::optional<double> value = result.get<sol::optional<double>>();
+        if (value) {
+            evaluation.number = *value;
+        }
+    }
+    return evaluation;
+}
+
+bool LuaState::EvalNumber(const std::string& chunk, double& out_value) const {
+    const auto result = Evaluate(chunk);
+    if (result.status != LuaEvaluationStatus::Succeeded || !result.number) {
         return false;
     }
-    const sol::optional<double> value = result.get<sol::optional<double>>();
-    if (!value) {
-        return false;
-    }
-    out_value = *value;
+    out_value = *result.number;
     return true;
 }
 

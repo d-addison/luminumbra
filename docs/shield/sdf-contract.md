@@ -4,6 +4,24 @@ This contract defines the Signed Distance Field (SDF) data shape consumed by
 SHIELD terrain generation, meshing, collision generation, and GPU generation
 callbacks.
 
+## v0.3.0 Format Boundary
+
+> This world predates the v0.3.0 format and cannot be opened. Create a new world; migration is not supported.
+
+Current durable storage uses LMR1 container v2, the
+`luminumbra.persistence.world_manifest.v1` manifest with `container_version: 2`,
+and FSD2 far-LOD payload v3. Explicit preset `schema_rev` must be `6`; in-memory
+callers may omit it. Older worlds have no migration path. Unknown future versions
+and corrupt data produce separate failures; see the
+[persistence contract](../engine-guide.md).
+
+Shaping is unconditional. `generation_params.terrain.shaping.enabled` and
+`generation_params.features.cave_style` are rejected whenever present, regardless
+of value. The optional shaping block tunes the current algorithm; omitting it
+uses defaults. `caves_enabled` remains a content control, and enabled caves
+always use the noise router. Island masks, cave tuning, surface breaks, cliffs,
+rivers, lakes, structures, hydrology and biome controls remain available.
+
 ## Density Semantics
 
 - `0.0f` is the terrain isolevel.
@@ -68,15 +86,26 @@ heightmap_count = size_x * size_z;
 
 ## Terrain Height
 
-`GetTerrainHeightAt(world_x, world_z)` returns:
+`GetTerrainHeightAt(world_x, world_z)` returns the final shaped height from
+`ComputeShapedHeightSample`. Before optional surface modifiers, the shared
+scalar/batch composition is:
 
 ```cpp
-height_offset + terrain_noise(world_x, world_z, seed) * base_amplitude
+height_offset + base_level
+    + amplitude_multiplier * (base_noise * base_amplitude) + ridge
 ```
 
-The generated heightmap stores this terrain height for each chunk column. The
-heightmap is not a density field; it is a cached surface-height value for
-systems that need a column lookup.
+Continentalness and erosion splines supply `base_level` and
+`amplitude_multiplier`. Domain warp shifts the base-noise and peaks/valleys
+coordinates; the peaks spline, amplitude and erosion attenuation form `ridge`.
+Biome relief can scale the ridge. Enabled cliffs terrace the height, then the
+island mask, river/lake carves, surface-break rim depression and optional
+hydraulic/thermal relief produce the final height in that order. Shaping is not
+an optional legacy branch.
+
+The generated heightmap stores this terrain height for each chunk column. It is
+a cached surface-height value, not a density field. Far sampling uses
+`GetTerrainHeightAtCoarse` and its coarse surface reconstruction.
 
 ## Optional Island Mask
 
@@ -93,17 +122,29 @@ must apply the same mask semantics when the flag is enabled.
 
 ## Optional Cave Field
 
-When `TerrainGenParams::caves_enabled` is true, caves modify the base terrain
-density after terrain height is applied:
+When `TerrainGenParams::caves_enabled` is true, `EvaluateCaveDensity` always
+uses the noise router: cheese noise, spaghetti tunnels and Worley caverns.
+The cheese term begins with:
 
 ```cpp
 cave_val = clamp((raw_cave_noise + 1.0f) * 0.5f, 0.0f, 1.0f);
 cave_density = (cave_val - cave_threshold) * cave_carve_value;
-density = max(terrain_density, cave_density);
+cap_blend = smoothstep01((depth_below_surface - effective_cap) / 6.0f);
+capped_density = terrain_density + (cave_density - terrain_density) * cap_blend;
+density = max(terrain_density, capped_density);
 ```
 
+Spaghetti noise near a tunnel centerline and Worley noise inside a cavern add
+positive carve terms through the same surface-cap blend and `max` composition.
+The default cap starts at 18 m below the surface and reaches full carving at
+24 m. Optional surface-break footprints lower the per-column cap and add an
+analytic sinkhole/cave-mouth carve. `caves_enabled=false` skips cave carving;
+there is no `cave_style` selector or shaping enable switch.
+
 Because negative density is solid and positive density is air, taking the
-maximum allows cave noise to raise solid terrain samples into air.
+maximum allows cave noise to raise solid terrain samples into air. Cave
+frequency, threshold, carve strength, spaghetti and Worley parameters remain
+content controls.
 
 ## Meshing Contract
 
@@ -119,7 +160,7 @@ been extracted.
 ## Two Producer Tiers
 
 A chunk's `Chunk::sdf_data` is produced at one of two tiers, selected by the
-meshing **sample step** the chunk needs (). The meshing promotion lane
+meshing **sample step** the chunk needs. The meshing promotion lane
 and every SDF producer must agree on which tier a chunk is in from its
 `sdf_data` size alone:
 
@@ -140,10 +181,12 @@ and every SDF producer must agree on which tier a chunk is in from its
 ### Malformed SDF — regeneration rule
 
 A `sdf_data` that is **non-empty but not exactly `kFullSdfLattice`** is treated as
-**malformed** (e.g. a wrong-version or truncated save). Before a unit-step
+**malformed** in-memory producer output. Before a unit-step
 polygonise — which assumes the full padded lattice and would otherwise read out of
 bounds — the promotion lane **clears the malformed field and regenerates** the full
-Tier-1 SDF. The three states are exhaustive and distinguishable by size alone:
+Tier-1 SDF. This in-memory repair rule is not a durable-save migration or a
+corruption fallback: obsolete/future/invalid persistence is refused at load.
+The three states are exhaustive and distinguishable by size alone:
 
 | `sdf_data` state | tier | meshing |
 | --- | --- | --- |
