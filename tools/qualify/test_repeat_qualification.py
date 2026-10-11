@@ -11,6 +11,8 @@ import hashlib
 import importlib.util
 import json
 import os
+import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -21,6 +23,10 @@ from types import ModuleType
 from unittest import mock
 
 SCRIPT = Path(__file__).resolve().with_name("repeat_qualification.py")
+FIXTURE_DIAGNOSTIC_ENV = "LUMINUMBRA_RQ_CONTRACT_DIAGNOSTIC_DIR"
+FIXTURE_MAX_WAIT_SECONDS = 120.0
+FIXTURE_STARTUP_ALLOWANCE_SECONDS = 15.0
+
 REGISTRY_ROOT = r"HKLM\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps"
 
 
@@ -88,6 +94,8 @@ if kind == "segv_core":
 if kind == "hang":
     grandchild = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)"])
     (crash_dir / "grandchild.pid").write_text(str(grandchild.pid))
+    if "LUMINUMBRA_FIXTURE_READY_FILE" in os.environ:
+        Path(os.environ["LUMINUMBRA_FIXTURE_READY_FILE"]).write_text("ready", encoding="utf-8")
     time.sleep(600)
 if kind == "probe":
     receipt = json.loads(Path(os.environ["LUMINUMBRA_TEST_RECEIPT"]).read_text())
@@ -161,6 +169,55 @@ def pid_alive(pid: int) -> bool:
     return True
 
 
+def terminate_fixture_tree(process) -> list[str]:
+    """The outer fixture owns iterations that start separate POSIX sessions."""
+    errors = []
+    if os.name == "posix":
+        try:
+            # Freeze the owning harness before inspecting descendants: otherwise
+            # a killed iteration can wake it and launch a new separate session.
+            if process.poll() is None:
+                os.kill(process.pid, signal.SIGSTOP)
+                stopped_deadline = time.monotonic() + rq.CLEANUP_TIMEOUT_SECONDS
+                while True:
+                    waited_pid, status = os.waitpid(process.pid, os.WNOHANG | os.WUNTRACED)
+                    if waited_pid:
+                        if os.WIFSTOPPED(status):
+                            break
+                        if os.WIFEXITED(status) or os.WIFSIGNALED(status):
+                            process.returncode = os.waitstatus_to_exitcode(status)
+                            break
+                    if time.monotonic() >= stopped_deadline:
+                        raise OSError("owned fixture did not stop within cleanup deadline")
+                    time.sleep(0.01)
+            listing = subprocess.run(
+                ["ps", "-e", "-o", "pid=,ppid=,pgid="], capture_output=True,
+                encoding="utf-8", check=True, timeout=rq.CLEANUP_TIMEOUT_SECONDS,
+            ).stdout
+            rows = [tuple(map(int, line.split())) for line in listing.splitlines() if line.strip()]
+            descendants = {process.pid}
+            while True:
+                found = {pid for pid, parent, _group in rows if parent in descendants}
+                if found <= descendants:
+                    break
+                descendants.update(found)
+            groups = {group for pid, _parent, group in rows if pid in descendants
+                      and group in descendants and group != os.getpgrp()}
+            # Iteration session leaders and their descendants are discovered
+            # while the owning harness is still alive; never scan command text.
+            for group in groups - {process.pid}:
+                try:
+                    os.killpg(group, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                except OSError as exc:
+                    errors.append(f"fixture descendant group {group}: {exc}")
+        except (OSError, ValueError, subprocess.SubprocessError) as exc:
+            errors.append(f"fixture descendant discovery: {type(exc).__name__}: {exc}")
+    errors.extend(rq.terminate_process_tree(process))
+    return errors
+
+
 class HarnessTestCase(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory(prefix="repeat-qualification-test-")
@@ -170,6 +227,7 @@ class HarnessTestCase(unittest.TestCase):
         # The receipt directory contains a space so the output path is exercised with spaces.
         self.receipt = self.root / "out dir" / "receipt.json"
         self.exe = self._write_fake_child()
+        self._fixture_sequence = 0
 
     def tearDown(self) -> None:
         self._tmp.cleanup()
@@ -212,17 +270,74 @@ class HarnessTestCase(unittest.TestCase):
             args.append("--allow-no-dumps")
         return args
 
-    def run_raw(self, args: list[str], extra_env: dict[str, str] | None = None, timeout: float = 120):
+    def preserve_fixture_failure(self) -> tuple[Path | None, list[str]]:
+        """Keep synthetic fixture evidence outside TemporaryDirectory cleanup."""
+        errors = []
+        base = os.environ.get(FIXTURE_DIAGNOSTIC_ENV)
+        try:
+            parent = Path(base).resolve() if base else Path(tempfile.gettempdir()).resolve()
+            # A descendant would recursively copy the copy itself.
+            if parent == self.root.resolve() or self.root.resolve() in parent.parents:
+                raise ValueError("fixture diagnostic directory must be outside its fixture")
+            parent.mkdir(parents=True, exist_ok=True)
+            retained = Path(tempfile.mkdtemp(prefix="fixture-watchdog-", dir=parent))
+            shutil.copytree(self.root, retained / "fixture")
+            return retained, errors
+        except (OSError, ValueError) as exc:
+            errors.append(f"fixture preservation: {type(exc).__name__}: {exc}")
+            return None, errors
+
+    def run_raw(self, args: list[str], extra_env: dict[str, str] | None = None,
+                timeout: float = 120, ready_file: Path | None = None):
         env = dict(os.environ)
         env.update(extra_env or {})
-        return subprocess.run(
-            [sys.executable, "-I", str(SCRIPT), *args],
-            capture_output=True,
-            text=True,
-            env=env,
-            timeout=timeout,
-            check=False,
-        )
+        command = [sys.executable, "-I", "-X", "utf8", str(SCRIPT), *args]
+        self._fixture_sequence += 1
+        logs = self.root / "outer-runs" / f"run-{self._fixture_sequence}"
+        logs.mkdir(parents=True)
+        stdout_path, stderr_path = logs / "stdout.log", logs / "stderr.log"
+        options = ({"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == "nt"
+                   else {"start_new_session": True})
+        expired = False
+        startup_failure = None
+        cleanup_errors = []
+        with stdout_path.open("wb") as stdout, stderr_path.open("wb") as stderr:
+            # File-backed streams cannot retain communicate() pipe readers after
+            # a fixture descendant outlives the direct harness process.
+            process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=stdout,
+                                       stderr=stderr, env=env, **options)
+            try:
+                if ready_file is not None:
+                    startup_deadline = time.monotonic() + 30
+                    while not ready_file.is_file():
+                        if process.poll() is not None:
+                            startup_failure = "fixture exited before readiness"
+                            break
+                        if time.monotonic() >= startup_deadline:
+                            startup_failure = "fixture startup watchdog expired after 30s"
+                            break
+                        time.sleep(0.05)
+                    if startup_failure is not None:
+                        expired = True
+                        cleanup_errors = terminate_fixture_tree(process)
+                if not expired:
+                    process.wait(timeout=min(timeout, FIXTURE_MAX_WAIT_SECONDS))
+            except subprocess.TimeoutExpired:
+                expired = True
+                # Kill separate iteration groups and the outer tree while owned.
+                cleanup_errors = terminate_fixture_tree(process)
+        output = stdout_path.read_text(encoding="utf-8", errors="replace")
+        error = stderr_path.read_text(encoding="utf-8", errors="replace")
+        if expired:
+            retained, preservation_errors = self.preserve_fixture_failure()
+            label = startup_failure or f"fixture watchdog expired after {min(timeout, FIXTURE_MAX_WAIT_SECONDS)}s"
+            self.fail(
+                f"{label}; "
+                f"harness PID={process.pid}; cleanup={cleanup_errors}; "
+                f"retained={retained}; preservation={preservation_errors}\n"
+                f"stdout:\n{output}\nstderr:\n{error}"
+            )
+        return subprocess.CompletedProcess(command, process.returncode, output, error)
 
     def run_script(
         self,
@@ -241,7 +356,12 @@ class HarnessTestCase(unittest.TestCase):
             "--",
             f"--fake={mode}",
         ]
-        return self.run_raw(args, extra_env=extra_env, timeout=timeout * 10 + 60)
+        # Budget the declared iteration count plus bounded tree cleanup and
+        # startup, with a hard fixture ceiling below CTest's suite deadline.
+        outer_timeout = min(FIXTURE_MAX_WAIT_SECONDS,
+                            count * timeout + 3 * rq.CLEANUP_TIMEOUT_SECONDS +
+                            FIXTURE_STARTUP_ALLOWANCE_SECONDS)
+        return self.run_raw(args, extra_env=extra_env, timeout=outer_timeout)
 
     def load_receipt(self) -> dict:
         return json.loads(self.receipt.read_text(encoding="utf-8"))
@@ -409,6 +529,43 @@ class RepeatQualificationTest(HarnessTestCase):
         result = self.run_raw(args)
         self.assertEqual(result.returncode, 2, result.stderr)
         self.assertFalse(self.receipt.exists())
+
+
+class FixtureWatchdogTest(HarnessTestCase):
+    def test_outer_watchdog_fails_preserves_output_and_reaps_descendant(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="rq-watchdog-retained-") as destination:
+            args = [*self.base_args(), "--count", "2", "--timeout-seconds", "600",
+                    "--", "--fake=hang"]
+            with mock.patch.dict(os.environ, {FIXTURE_DIAGNOSTIC_ENV: destination}):
+                with self.assertRaisesRegex(AssertionError, "fixture watchdog expired"):
+                    self.run_raw(args, timeout=1, ready_file=self.root / "ready",
+                                 extra_env={"LUMINUMBRA_FIXTURE_READY_FILE": str(self.root / "ready")})
+            retained = list(Path(destination).glob("fixture-watchdog-*/fixture"))
+            self.assertEqual(len(retained), 1)
+            receipt = json.loads((retained[0] / "out dir" / "receipt.json").read_text())
+            # POSIX iteration groups are stopped before their outer owner; it
+            # may truthfully record their signal failure before outer cleanup.
+            self.assertIn(receipt["status"], ("running", "failed", "aborted"))
+            self.assertTrue(all(entry["failed"] for entry in receipt["iterations"]))
+            self.assertLessEqual(len(receipt["iterations"]), 1)
+            pid_files = list(retained[0].rglob("grandchild.pid"))
+            self.assertEqual(len(pid_files), 1)
+            grandchild_pid = int(pid_files[0].read_text())
+            deadline = time.monotonic() + 5
+            while pid_alive(grandchild_pid) and time.monotonic() < deadline:
+                time.sleep(0.05)
+            self.assertFalse(pid_alive(grandchild_pid), "fixture descendant survived outer watchdog")
+            logs = list(retained[0].rglob("iter-1.log"))
+            self.assertEqual(len(logs), 1)
+            self.assertIn("fake child iteration 1 mode hang", logs[0].read_text())
+
+    def test_fixture_runner_keeps_separate_output_streams(self) -> None:
+        result = self.run_script(count=1, mode="pass")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        logs = self.root / "outer-runs" / "run-1"
+        self.assertEqual(result.stdout, (logs / "stdout.log").read_text(encoding="utf-8"))
+        self.assertEqual(result.stderr, (logs / "stderr.log").read_text(encoding="utf-8"))
+        self.assertTrue((logs / "stderr.log").is_file())
 
 
 if os.name == "posix":
@@ -990,4 +1147,6 @@ class WindowsCommandTest(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    unittest.main()
+    # Every passing case still runs. Stop on the first real failure so bounded
+    # fixture failures cannot accumulate until CTest erases their diagnostics.
+    unittest.main(failfast=True)
