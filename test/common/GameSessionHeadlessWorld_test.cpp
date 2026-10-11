@@ -1887,8 +1887,7 @@ constexpr Luminumbra::world::RegionKey kFaultRegion{40, -40};
 void ArmSchedulerFault(GameSession& session,
                        const HeadlessRoot& root,
                        JobSystem& jobs,
-                       std::uint64_t k,
-                       std::uint32_t frame) {
+                       std::uint64_t k) {
     session.SetRootPath(root.root_string());
     session.SetJobSystem(&jobs);
     session.SetActiveRegionsEnabled(true);
@@ -1903,7 +1902,7 @@ void ArmSchedulerFault(GameSession& session,
         if (event.tick == k || event.tick == k - 1)
             session.RecordActiveRegionWork({kFaultRegion, 5, 0, 0, 0});
     });
-    for (std::uint64_t t = 1; t <= frame; ++t)
+    for (std::uint64_t t = 1; t <= k + 1; ++t)
         session.GetSimulationEventBus().publish(t, "work", "");
 }
 
@@ -1916,20 +1915,27 @@ void RemoveFaultRegionFile(const GameSession& session) {
                error);
 }
 
-void RunSchedulerFaultCase(std::uint64_t k, std::uint32_t frame) {
-    SCOPED_TRACE("k=" + std::to_string(k) + " frame=" + std::to_string(frame));
+// The session clock produces at most two ticks per frame. Single-tick frames run
+// ticks 1..start-1, then one two-tick frame starts at tick `start` (k or k-1), so
+// the fault lands on the first or the second tick of that frame.
+void RunSchedulerFaultCase(std::uint64_t k, std::uint64_t start) {
+    SCOPED_TRACE("k=" + std::to_string(k) + " start=" + std::to_string(start));
     const HeadlessRoot root;
     JobSystem jobs;
     jobs.startup(1);
     GameSession session, loaded;
-    ASSERT_NO_FATAL_FAILURE(ArmSchedulerFault(session, root, jobs, k, frame));
+    ASSERT_NO_FATAL_FAILURE(ArmSchedulerFault(session, root, jobs, k));
     loaded.SetRootPath(root.root_string());
     loaded.SetJobSystem(&jobs);
     loaded.SetActiveRegionsEnabled(true);
     loaded.SetRegionSchedulerConfig({1, 1, 1});
     const auto dt = session.GetSimulationClock().fixed_dt();
-    // Half a tick of slack keeps the clock from rounding the frame down.
-    ASSERT_EQ(session.TickSimulation((frame + 0.5) * dt), k);
+    for (std::uint64_t t = 1; t < start; ++t)
+        ASSERT_EQ(session.TickSimulation(dt), 1u);
+    ASSERT_FALSE(session.GetRegionSchedulerFault().has_value());
+    // Half a tick of slack keeps the clock from rounding the frame down. A fault
+    // on the first tick of the frame stops the second tick from running.
+    ASSERT_EQ(session.TickSimulation(2.5 * dt), k - start + 1);
     ASSERT_TRUE(session.GetRegionSchedulerFault().has_value());
     const auto& fault = *session.GetRegionSchedulerFault();
     EXPECT_EQ(fault.tick, k);
@@ -1953,10 +1959,10 @@ void RunSchedulerFaultCase(std::uint64_t k, std::uint32_t frame) {
 } // namespace
 
 TEST(GameSessionHeadlessWorldTest, SchedulerFaultStopsTheFrameAndLeavesASavableConsistentSession) {
-    for (const auto [k, frame] : {std::pair<std::uint64_t, std::uint32_t>{3, 3},
-                                  std::pair<std::uint64_t, std::uint32_t>{3, 5},
-                                  std::pair<std::uint64_t, std::uint32_t>{4, 6}}) {
-        ASSERT_NO_FATAL_FAILURE(RunSchedulerFaultCase(k, frame));
+    for (const auto [k, start] : {std::pair<std::uint64_t, std::uint64_t>{3, 3},
+                                  std::pair<std::uint64_t, std::uint64_t>{3, 2},
+                                  std::pair<std::uint64_t, std::uint64_t>{4, 4}}) {
+        ASSERT_NO_FATAL_FAILURE(RunSchedulerFaultCase(k, start));
     }
 }
 
@@ -1965,9 +1971,11 @@ TEST(GameSessionHeadlessWorldTest, ThrowingDigestProviderWithQueuedWorkLeavesNoS
     JobSystem jobs;
     jobs.startup(1);
     GameSession session;
-    ASSERT_NO_FATAL_FAILURE(ArmSchedulerFault(session, root, jobs, 3, 3));
+    ASSERT_NO_FATAL_FAILURE(ArmSchedulerFault(session, root, jobs, 3));
     const auto dt = session.GetSimulationClock().fixed_dt();
-    ASSERT_EQ(session.TickSimulation((3 + 0.5) * dt), 3u);
+    ASSERT_EQ(session.TickSimulation(dt), 1u);
+    ASSERT_EQ(session.TickSimulation(dt), 1u);
+    ASSERT_EQ(session.TickSimulation(2.5 * dt), 1u);
     ASSERT_TRUE(session.GetRegionSchedulerFault().has_value());
     session.RecordActiveRegionWork({kFaultRegion, 5, 0, 0, 0});
     EXPECT_TRUE(session.IsSimulationTickBoundary());
