@@ -45,7 +45,7 @@ function Get-FarLadderTierTable {
             Wanted = $wanted
         })
     }
-    return ,@($rows.ToArray())
+    return @($rows.ToArray())
 }
 
 # Distance along one axis from a coordinate to the nearest point of the cell
@@ -90,7 +90,7 @@ function Get-FarLadderWantedTiles {
         [void]$keyStrings.Add([string]::Format([System.Globalization.CultureInfo]::InvariantCulture,
             "{0},{1},{2}", $key.Tier, $key.Tx, $key.Tz))
     }
-    return ,@($keyStrings.ToArray())
+    return @($keyStrings.ToArray())
 }
 
 # Number of 512 m legacy regions (keyed floor(x/512)) whose nearest point lies
@@ -138,7 +138,7 @@ function Get-FarOracleInteger {
 function Get-FarOracleCoordinate {
     param([object]$Value, [string]$Name, [string]$Path)
     if ($null -eq $Value) { throw "${Name}: ${Path} is non-finite (null)" }
-    if (($Value -isnot [double]) -and ($Value -isnot [int64]) -and ($Value -isnot [int32])) {
+    if (($Value -isnot [double]) -and ($Value -isnot [decimal]) -and ($Value -isnot [int64]) -and ($Value -isnot [int32])) {
         throw "${Name}: ${Path} must be a number"
     }
     $number = [double]$Value
@@ -171,7 +171,7 @@ function Get-FarOracleTileKeys {
         [void]$keys.Add($key)
         $index++
     }
-    return ,@($keys.ToArray())
+    return @($keys.ToArray())
 }
 
 function Assert-FarLadderOracleArtifact {
