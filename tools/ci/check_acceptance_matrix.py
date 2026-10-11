@@ -28,6 +28,13 @@ CMAKE_BRACKET_OPEN_RE = re.compile(r"#\[(=*)\[")
 C_COMMENT_RE = re.compile(r"/\*.*?\*/|//[^\n]*", re.DOTALL)
 GTEST_RE = re.compile(r"\bTEST(?:_F|_P)?\s*\(\s*([A-Za-z_]\w*)\s*,\s*([A-Za-z_]\w*)\s*\)")
 SUITE_REF_RE = re.compile(r"^([A-Za-z_]\w*)\.(\*|[A-Za-z_]\w*)$")
+C_DIRECTIVE_RE = re.compile(
+    r"^\s*#\s*(elifdef|elifndef|elif|ifdef|ifndef|if|else|endif)\b(.*)$"
+)
+C_STATIC_FALSE = frozenset({"0", "(0)"})
+CMAKE_FLOW_RE = re.compile(r"(elseif|else|endif|if)\s*\(", re.IGNORECASE)
+CMAKE_STRING_RE = re.compile(r'"(?:[^"\\\n]|\\.)*"')
+CMAKE_STATIC_FALSE = frozenset({"FALSE", "0", "OFF"})
 
 
 class MatrixError(Exception):
@@ -102,8 +109,9 @@ def _strip_cmake(text: str) -> str:
             if bracket:
                 closer = "]" + bracket.group(1) + "]"
                 end = text.find(closer, bracket.end())
-                i = n if end == -1 else end + len(closer)
-                out.append(" ")
+                stop = n if end == -1 else end + len(closer)
+                out.append(_blank(text[i:stop]))
+                i = stop
                 continue
             end = text.find("\n", i)
             i = n if end == -1 else end
@@ -113,9 +121,113 @@ def _strip_cmake(text: str) -> str:
     return "".join(out)
 
 
+def _blank(comment: str) -> str:
+    """Stand-in for a removed comment; keeps its newlines so line numbers survive."""
+    return "\n" * comment.count("\n") or " "
+
+
 def _strip_c(text: str) -> str:
     """Remove C/C++ block and line comments (approximate: ignores string literals)."""
-    return C_COMMENT_RE.sub(" ", text)
+    return C_COMMENT_RE.sub(lambda m: _blank(m.group(0)), text)
+
+
+def _drop_disabled_c(text: str) -> str:
+    """Drop lines inside `#if 0` blocks; the `#else`/`#elif` branch of such a block is kept."""
+    out: list[str] = []
+    # One entry per open conditional: [is_if_zero, branch_is_disabled].
+    stack: list[list[bool]] = []
+    for line in text.splitlines(keepends=True):
+        match = C_DIRECTIVE_RE.match(line)
+        if match is None:
+            if not any(dead for _, dead in stack):
+                out.append(line)
+            continue
+        kind, rest = match.group(1), match.group(2).strip()
+        if kind in ("if", "ifdef", "ifndef"):
+            zero = kind == "if" and rest in C_STATIC_FALSE
+            stack.append([zero, zero])
+        elif kind == "endif":
+            if stack:
+                stack.pop()
+        elif stack and stack[-1][0]:
+            stack[-1][1] = False
+        if not any(dead for _, dead in stack):
+            out.append(line)
+    return "".join(out)
+
+
+def _cmake_close_paren(text: str, open_idx: int) -> int | None:
+    depth = 0
+    j = open_idx
+    while j < len(text):
+        ch = text[j]
+        if ch == '"':
+            string = CMAKE_STRING_RE.match(text, j)
+            if string:
+                j = string.end()
+                continue
+        elif ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                return j
+        j += 1
+    return None
+
+
+def _cmake_flow_commands(text: str) -> list[tuple[str, str, int, int]]:
+    """Return (name, args, start, end) for each if/elseif/else/endif call outside quotes."""
+    found: list[tuple[str, str, int, int]] = []
+    i = 0
+    while i < len(text):
+        if text[i] == '"':
+            string = CMAKE_STRING_RE.match(text, i)
+            if string:
+                i = string.end()
+                continue
+        match = CMAKE_FLOW_RE.match(text, i)
+        if match and (i == 0 or not (text[i - 1].isalnum() or text[i - 1] == "_")):
+            close = _cmake_close_paren(text, match.end() - 1)
+            if close is not None:
+                args = text[match.end() : close].strip()
+                found.append((match.group(1).lower(), args, i, close + 1))
+                i = close + 1
+                continue
+        i += 1
+    return found
+
+
+def _drop_disabled_cmake(text: str) -> str:
+    """Drop if(FALSE)/if(0)/if(OFF) branches; an else()/elseif() branch of such an if is kept."""
+    # One entry per open if(): [is_static_false, branch_is_disabled].
+    stack: list[list[bool]] = []
+    spans: list[tuple[int, int]] = []
+    dead_from = 0
+    for name, args, start, end in _cmake_flow_commands(text):
+        was_dead = any(dead for _, dead in stack)
+        if name == "if":
+            static_false = args.upper() in CMAKE_STATIC_FALSE
+            stack.append([static_false, static_false])
+        elif name == "endif":
+            if stack:
+                stack.pop()
+        elif stack and stack[-1][0]:
+            stack[-1][1] = False
+        is_dead = any(dead for _, dead in stack)
+        if is_dead and not was_dead:
+            dead_from = end
+        elif was_dead and not is_dead:
+            spans.append((dead_from, start))
+    if any(dead for _, dead in stack):
+        spans.append((dead_from, len(text)))
+    out: list[str] = []
+    cursor = 0
+    for begin, stop in spans:
+        out.append(text[cursor:begin])
+        cursor = stop
+    out.append(text[cursor:])
+    return "".join(out)
 
 
 def _is_ctest_name(name: str | None) -> bool:
@@ -127,14 +239,14 @@ def _is_ctest_name(name: str | None) -> bool:
 def index_tests(root: Path) -> TestIndex:
     ctest_names: set[str] = set()
     for path in _cmake_files(root):
-        text = _strip_cmake(_read_text(path))
+        text = _drop_disabled_cmake(_strip_cmake(_read_text(path)))
         for match in ADD_TEST_RE.finditer(text):
             name = match.group("quoted") if match.group("quoted") is not None else match.group("bare")
             if _is_ctest_name(name):
                 ctest_names.add(name)
     gtest_cases: set[tuple[str, str]] = set()
     for path in _gtest_sources(root):
-        text = _strip_c(_read_text(path))
+        text = _drop_disabled_c(_strip_c(_read_text(path)))
         gtest_cases.update((match.group(1), match.group(2)) for match in GTEST_RE.finditer(text))
     return TestIndex(
         frozenset(ctest_names),

@@ -400,6 +400,108 @@ class AcceptanceMatrixTests(unittest.TestCase):
         ]
         self.assertEqual(MODULE.validate(matrix, index, self.root, False), [])
 
+    def test_cmake_if_false_branch_is_not_indexed(self) -> None:
+        (self.root / "tools" / "disabled.cmake").write_text(
+            "if(FALSE)\n"
+            "  add_test(NAME DeadIfFalse COMMAND x)\n"
+            "endif()\n"
+            "IF ( off )\n"
+            "  add_test(NAME DeadIfOff COMMAND x)\n"
+            "endif ( )\n"
+            "if(0)\n"
+            "  add_test(NAME DeadIfZero COMMAND x)\n"
+            "endif()\n"
+            "add_test(NAME LiveAfter COMMAND x)\n",
+            encoding="utf-8",
+        )
+        index = MODULE.index_tests(self.root)
+        for ghost in ("DeadIfFalse", "DeadIfOff", "DeadIfZero"):
+            self.assertNotIn(ghost, index.ctest_names)
+        self.assertIn("LiveAfter", index.ctest_names)
+
+    def test_cmake_if_false_else_branch_is_indexed(self) -> None:
+        (self.root / "tools" / "else.cmake").write_text(
+            "if(FALSE)\n"
+            "  add_test(NAME ElseDead COMMAND x)\n"
+            "else()\n"
+            "  add_test(NAME ElseLive COMMAND x)\n"
+            "endif()\n",
+            encoding="utf-8",
+        )
+        index = MODULE.index_tests(self.root)
+        self.assertNotIn("ElseDead", index.ctest_names)
+        self.assertIn("ElseLive", index.ctest_names)
+
+    def test_cmake_nested_if_inside_disabled_block(self) -> None:
+        (self.root / "tools" / "nested.cmake").write_text(
+            "if(FALSE)\n"
+            "  if(WIN32)\n"
+            "    add_test(NAME NestedDeadWin COMMAND x)\n"
+            "  else()\n"
+            "    add_test(NAME NestedDeadElse COMMAND x)\n"
+            "  endif()\n"
+            "  add_test(NAME StillDead COMMAND x)\n"
+            "else()\n"
+            "  if(UNIX)\n"
+            "    add_test(NAME ElseNestedLive COMMAND x)\n"
+            "  endif()\n"
+            "endif()\n"
+            "add_test(NAME AfterAll COMMAND x)\n",
+            encoding="utf-8",
+        )
+        index = MODULE.index_tests(self.root)
+        for ghost in ("NestedDeadWin", "NestedDeadElse", "StillDead"):
+            self.assertNotIn(ghost, index.ctest_names)
+        self.assertIn("ElseNestedLive", index.ctest_names)
+        self.assertIn("AfterAll", index.ctest_names)
+
+    def test_c_if_zero_block_is_not_indexed(self) -> None:
+        (self.root / "test" / "dead_test.cpp").write_text(
+            "#if 0\n"
+            "TEST(DeadZero, One) {}\n"
+            "#endif\n"
+            "TEST(LiveZero, Two) {}\n",
+            encoding="utf-8",
+        )
+        index = MODULE.index_tests(self.root)
+        self.assertNotIn(("DeadZero", "One"), index.gtest_cases)
+        self.assertNotIn("DeadZero", index.gtest_suites)
+        self.assertIn(("LiveZero", "Two"), index.gtest_cases)
+
+    def test_c_if_zero_else_branch_is_indexed(self) -> None:
+        (self.root / "test" / "else_test.cpp").write_text(
+            "#if 0\n"
+            "TEST(ElseDead, One) {}\n"
+            "#else\n"
+            "TEST(ElseLive, Two) {}\n"
+            "#endif\n",
+            encoding="utf-8",
+        )
+        index = MODULE.index_tests(self.root)
+        self.assertNotIn(("ElseDead", "One"), index.gtest_cases)
+        self.assertIn(("ElseLive", "Two"), index.gtest_cases)
+
+    def test_c_nested_conditionals_inside_if_zero(self) -> None:
+        (self.root / "test" / "nested_test.cpp").write_text(
+            "#if 0\n"
+            "#if FOO\n"
+            "TEST(NestedDeadIf, A) {}\n"
+            "#else\n"
+            "TEST(NestedDeadElse, B) {}\n"
+            "#endif\n"
+            "#ifdef BAR\n"
+            "TEST(NestedDeadIfdef, C) {}\n"
+            "#endif\n"
+            "TEST(DeadAfterNested, D) {}\n"
+            "#endif\n"
+            "TEST(LiveAfterZero, E) {}\n",
+            encoding="utf-8",
+        )
+        index = MODULE.index_tests(self.root)
+        for ghost in ("NestedDeadIf", "NestedDeadElse", "NestedDeadIfdef", "DeadAfterNested"):
+            self.assertNotIn(ghost, index.gtest_suites)
+        self.assertIn(("LiveAfterZero", "E"), index.gtest_cases)
+
     def test_covered_with_native_evidence_is_rejected(self) -> None:
         matrix = baseline_matrix()
         self.assertEqual(self.errors(matrix), [])
