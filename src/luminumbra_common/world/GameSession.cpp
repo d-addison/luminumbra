@@ -1347,8 +1347,8 @@ void GameSession::RunRegionScheduler(std::uint64_t current_tick) {
                     return Persistence::WorldSaveService::region_simulation_digest(
                         directory,
                         key,
-                        Persistence::RegionDigestInputs{
-                            m_worldSystem->snapshot_streamed_chunks(), {}});
+                        Persistence::RegionDigestInputs{m_worldSystem->snapshot_streamed_chunks(),
+                                                        {}});
                 },
                 // Later slices extend this probe with parked chunks, ground objects,
                 // pages, creatures, plants and water debt.
