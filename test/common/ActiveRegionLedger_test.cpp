@@ -450,8 +450,11 @@ TEST(ActiveRegionLedgerTest, TrySetLocalAnchorDoesNotThrowAndKeepsPreviousAnchor
     EXPECT_FALSE(ledger.try_set_local_anchor(Vec3(inf, 0, 0)));
     const std::optional<Vec3> anchor = ledger.local_anchor();
     ASSERT_TRUE(anchor.has_value());
-    EXPECT_EQ(anchor.value().x, 256.0f);
-    EXPECT_EQ(anchor.value().z, 256.0f);
+    if (anchor.has_value()) {
+        const Vec3 position = anchor.value();
+        EXPECT_EQ(position.x, 256.0f);
+        EXPECT_EQ(position.z, 256.0f);
+    }
 }
 
 TEST(ActiveRegionLedgerTest, AcknowledgeWorldClockRaisesOnlyTheCeiling) {

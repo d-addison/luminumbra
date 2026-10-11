@@ -127,7 +127,7 @@ for entry in json.load(open(sys.argv[1])):
     sys.stdout.write(entry["file"] + "\0")
 ' "$compile_db")
 
-# First-party translation units live under src/ and test/. The RmlUi GL3
+# First-party translation units live under src/, test/ and tools/. The RmlUi GL3
 # backend is vendored upstream code carried in-tree and is excluded from the
 # gate.
 is_first_party_tu() {
@@ -135,7 +135,9 @@ is_first_party_tu() {
         src/luminumbra_client/ui/gl3/*)
             return 1
             ;;
-        src/*.c|src/*.cc|src/*.cpp|src/*.cxx|test/*.c|test/*.cc|test/*.cpp|test/*.cxx)
+        src/*.c|src/*.cc|src/*.cpp|src/*.cxx| \
+            test/*.c|test/*.cc|test/*.cpp|test/*.cxx| \
+            tools/*.c|tools/*.cc|tools/*.cpp|tools/*.cxx)
             return 0
             ;;
     esac
@@ -154,14 +156,14 @@ if [[ -n "$changed_from" ]]; then
             [[ -n "${compile_db_files[$repo_root/$relative_path]:-}" ]]; then
             tidy_files+=("$repo_root/$relative_path")
         fi
-    done < <(git -C "$repo_root" diff --name-only --diff-filter=ACMR -z "$changed_from" -- src test)
+    done < <(git -C "$repo_root" diff --name-only --diff-filter=ACMR -z "$changed_from" -- src test tools)
 
     while IFS= read -r -d '' relative_path; do
         if is_first_party_tu "$relative_path" &&
             [[ -n "${compile_db_files[$repo_root/$relative_path]:-}" ]]; then
             tidy_files+=("$repo_root/$relative_path")
         fi
-    done < <(git -C "$repo_root" ls-files --others --exclude-standard -z -- src test)
+    done < <(git -C "$repo_root" ls-files --others --exclude-standard -z -- src test tools)
 else
     while IFS= read -r -d '' absolute_path; do
         if is_first_party_tu "${absolute_path#"$repo_root/"}"; then

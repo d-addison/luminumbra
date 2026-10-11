@@ -40,6 +40,8 @@
 #include "luminumbra_common/scripting/LuaState.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 #include "luminumbra_common/world/Chunk.h"
+#include "luminumbra_common/world/FarAuthorityOverlay.h"
+#include "luminumbra_common/world/FarWantedSet.h"
 #include "luminumbra_common/world/GameSession.h"
 #include "luminumbra_common/world/WorldStreamingState.h"
 
@@ -318,7 +320,9 @@ nlohmann::json SessionWorldSubHashes(GameSession& session) {
     const auto energy = session.ComputeAetherStateSubHash();
     if (!energy.empty())
         aether = P::StableChecksum(aether + "|state:" + energy);
-    return {{"chunk", P::ComputeWorldStreamingStateHash(state)},
+    return {{"chunk",
+             session.ActiveRegionsEnabled() ? session.ComputeChunkStateHash()
+                                            : P::ComputeWorldStreamingStateHash(state)},
             {"wind", session.GetWindFieldSystem()->ComputeWindSubHash()},
             {"weather", session.GetWeatherSystem()->ComputeWeatherSubHash()},
             {"aether", aether},
@@ -427,9 +431,7 @@ TEST(GameSessionHeadlessWorldTest, ActiveClockSaveLoadContinuationMatchesUninter
     const auto wrong_save = root.path() / "wrong-clock";
     fs::copy(save, missing_save, fs::copy_options::recursive);
     fs::copy(save, wrong_save, fs::copy_options::recursive);
-    // Deliberately edit members behind the snapshot index: express legacy semantics.
-    ASSERT_TRUE(P::WorldSaveService::forget_snapshot_index_for_testing(missing_save));
-    ASSERT_TRUE(fs::remove(missing_save / "aether_state.efs"));
+    ASSERT_TRUE(P::WorldSaveService::remove_member(missing_save, "aether_state.efs"));
     metadata = nlohmann::json::parse(ReadClockTestFile(wrong_save / "world_info.json"));
     Luminumbra::world::WorldClock(n + 1, calendar).write_metadata(metadata);
     ASSERT_TRUE(P::WorldSaveService::save_metadata(metadata.dump(), wrong_save));
@@ -482,8 +484,6 @@ void CheckPartialPairReloadAndSave(const HeadlessRoot& root,
                                    JobSystem& jobs,
                                    const std::string& world_id,
                                    const fs::path& save) {
-    // The partial pair is staged by raw member edits: drop the snapshot index first.
-    ASSERT_TRUE(P::WorldSaveService::forget_snapshot_index_for_testing(save));
     const auto metadata_bytes = ReadClockTestFile(save / "world_info.json");
     const auto ledger_path = P::WorldSaveService::active_regions_path(save);
     const auto ledger_bytes = ReadClockTestFile(ledger_path);
@@ -495,10 +495,15 @@ void CheckPartialPairReloadAndSave(const HeadlessRoot& root,
     for (const bool edit : {false, true}) {
         SCOPED_TRACE(edit);
         // Each fresh session must load the partial pair, including the edit case.
-        std::ofstream(save / "world_info.json", std::ios::binary) << metadata_bytes;
-        std::ofstream(ledger_path, std::ios::binary) << ledger_bytes;
-        // An earlier iteration's save re-indexed the directory; the staged pair is legacy.
-        ASSERT_TRUE(P::WorldSaveService::forget_snapshot_index_for_testing(save));
+        {
+            P::SaveTransaction staged(save, tick, {}, &P::WorldSaveService::member_digest);
+            ASSERT_TRUE(staged.begin(nullptr));
+            ASSERT_TRUE(
+                P::WorldSaveService::write_member_bytes(save, "world_info.json", metadata_bytes));
+            ASSERT_TRUE(P::WorldSaveService::write_member_bytes(
+                save, "chunks/region/active-regions.arl", ledger_bytes));
+            ASSERT_TRUE(staged.commit(nullptr));
+        }
         GameSession loaded, reloaded;
         for (auto* session : {&loaded, &reloaded}) {
             session->SetRootPath(root.root_string());
@@ -793,7 +798,6 @@ TEST(GameSessionHeadlessWorldTest, ClockAnchorMetadataUsesLegacySpawnAndRejectsI
     metadata = nlohmann::json::parse(ReadClockTestFile(save / "world_info.json"));
     EXPECT_EQ(metadata.at("ambientFieldAnchor"),
               (nlohmann::json{{"x", 2400.0f}, {"y", 100.0f}, {"z", -1200.0f}}));
-    ASSERT_TRUE(P::WorldSaveService::forget_snapshot_index_for_testing(save));
     const auto valid_bytes = ReadClockTestFile(save / "world_info.json");
     const std::vector<nlohmann::json> invalid{nullptr,
                                               true,
@@ -1371,11 +1375,8 @@ TEST(GameSessionHeadlessWorldTest, AbsentLedgerAtRestoredTickAllowsEditAndPinBef
         ASSERT_EQ(original.TickSimulation(original.GetSimulationClock().fixed_dt()), 1u);
     ASSERT_TRUE(original.SaveWorldState());
     for (const bool pin : {false, true}) {
-        // Removing the ledger behind the snapshot index is a legacy-world edit.
-        ASSERT_TRUE(
-            P::WorldSaveService::forget_snapshot_index_for_testing(original.GetWorldSaveDir()));
-        ASSERT_TRUE(
-            fs::remove(P::WorldSaveService::active_regions_path(original.GetWorldSaveDir())));
+        ASSERT_TRUE(P::WorldSaveService::remove_member(original.GetWorldSaveDir(),
+                                                       "chunks/region/active-regions.arl"));
         GameSession loaded, restored;
         for (auto* s : {&loaded, &restored}) {
             s->SetRootPath(root.root_string());
@@ -1648,6 +1649,7 @@ TEST(GameSessionHeadlessWorldTest, RegionDigestIgnoresLoadTimeCollisionNormaliza
     const auto digest = Digest({}, {0, 0}, {chunk});
     ASSERT_TRUE(session.SaveWorldState());
     ASSERT_TRUE(loaded.LoadWorld(session.GetMetadata().worldId));
+    ASSERT_TRUE(loaded.GetWorldSystem()->restore_authoritative_chunk({0, 0, 0}));
     const auto chunks = loaded.GetWorldSystem()->snapshot_streamed_chunks();
     ASSERT_EQ(chunks.size(), 1u);
     EXPECT_FALSE(chunks.front()->has_collision.load());
@@ -1684,7 +1686,7 @@ TEST(GameSessionHeadlessWorldTest, FirstEnabledChunkSaveIncludesCleanResidentReg
     EXPECT_TRUE(fs::exists(P::WorldSaveService::region_file_path(save, 0, 0)));
     EXPECT_TRUE(fs::exists(P::WorldSaveService::region_file_path(save, 1, 0)));
     ASSERT_TRUE(loaded.LoadWorld(session.GetMetadata().worldId));
-    EXPECT_EQ(loaded.GetWorldSystem()->snapshot_streamed_chunks().size(), 2u);
+    EXPECT_EQ(loaded.GetWorldSystem()->durable_chunk_inventory().size(), 1u);
     EXPECT_EQ(SessionWorldHash(loaded), before);
 }
 
@@ -1822,7 +1824,6 @@ TEST(GameSessionHeadlessWorldTest, LedgerFileAbsenceCorruptionFutureAndDisabledR
     const auto save = owner.GetWorldSaveDir();
     const auto path = P::WorldSaveService::active_regions_path(save);
     const auto good = ReadClockTestFile(path);
-    ASSERT_TRUE(P::WorldSaveService::forget_snapshot_index_for_testing(save));
     ASSERT_TRUE(P::WorldSaveService::validate_save(save));
     for (const bool future : {false, true}) {
         auto bytes = good;
@@ -1852,7 +1853,7 @@ TEST(GameSessionHeadlessWorldTest, LedgerFileAbsenceCorruptionFutureAndDisabledR
     disabled.SetJobSystem(&jobs);
     EXPECT_FALSE(disabled.LoadWorld(owner.GetMetadata().worldId));
     EXPECT_NE(disabled.GetWorldOpenError().find("Incompatible configuration"), std::string::npos);
-    ASSERT_TRUE(fs::remove(path));
+    ASSERT_TRUE(P::WorldSaveService::remove_member(save, "chunks/region/active-regions.arl"));
     Luminumbra::world::ActiveRegionLedger empty;
     EXPECT_TRUE(P::WorldSaveService::load_active_regions(empty, save));
     EXPECT_TRUE(empty.records().empty());
@@ -2012,10 +2013,13 @@ void RunSchedulerFaultCase(std::uint64_t k, std::uint64_t start) {
     // Half a tick of slack keeps the clock from rounding the frame down. A fault
     // on the first tick of the frame stops the second tick from running.
     ASSERT_EQ(session.TickSimulation(2.5 * dt), k - start + 1);
-    ASSERT_TRUE(session.GetRegionSchedulerFault().has_value());
-    const auto& fault = session.GetRegionSchedulerFault().value();
-    EXPECT_EQ(fault.tick, k);
-    EXPECT_FALSE(fault.message.empty());
+    const auto fault = session.GetRegionSchedulerFault();
+    ASSERT_TRUE(fault.has_value());
+    if (fault.has_value()) {
+        const auto snapshot = fault.value();
+        EXPECT_EQ(snapshot.tick, k);
+        EXPECT_FALSE(snapshot.message.empty());
+    }
     EXPECT_EQ(session.GetSimulationTickCount(), k);
     EXPECT_LT(session.GetActiveRegionLedger().tick(), k);
     EXPECT_EQ(session.GetActiveRegionLedger().header_tick(), k);
@@ -2083,7 +2087,6 @@ TEST(GameSessionHeadlessWorldTest, CorruptLedgerLoadClearsTheWorld) {
     const auto path = P::WorldSaveService::active_regions_path(save);
     auto bytes = ReadClockTestFile(path);
     bytes[8] ^= 1;
-    ASSERT_TRUE(P::WorldSaveService::forget_snapshot_index_for_testing(save));
     std::ofstream(path, std::ios::binary) << bytes;
     ASSERT_TRUE(victim.CreateWorld("Victim", "2", "default"));
     auto resident = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3(0, 0, 0));
@@ -2203,7 +2206,7 @@ TEST(GameSessionHeadlessWorldTest, SnapshotTamperedMemberIsRefused) {
     GameSession legacy;
     EnableSnapshotSession(legacy, root, jobs);
     (void)legacy.LoadWorld(worldId);
-    EXPECT_EQ(legacy.GetWorldOpenError().find("inconsistent snapshot"), std::string::npos);
+    EXPECT_NE(legacy.GetWorldOpenError().find("inconsistent snapshot"), std::string::npos);
 }
 
 TEST(GameSessionHeadlessWorldTest,
@@ -2212,12 +2215,13 @@ TEST(GameSessionHeadlessWorldTest,
     JobSystem jobs;
     jobs.startup(1);
     GameSession owner;
-    EnableSnapshotSession(owner, root, jobs);
+    owner.SetRootPath(root.root_string());
+    owner.SetJobSystem(&jobs);
     ASSERT_TRUE(owner.CreateWorld("Legacy upgrade", "1337", "default"));
     ASSERT_TRUE(owner.SaveWorldState());
     const auto save = owner.GetWorldSaveDir();
     const auto worldId = owner.GetMetadata().worldId;
-    ASSERT_TRUE(P::WorldSaveService::forget_snapshot_index_for_testing(save));
+    EXPECT_FALSE(P::snapshot_index_exists(save));
     GameSession legacy;
     EnableSnapshotSession(legacy, root, jobs);
     ASSERT_TRUE(legacy.LoadWorld(worldId));
@@ -2632,4 +2636,193 @@ TEST(GameSessionHeadlessWorldTest, GroundSpawnQuantizesAndProbesEditedTerrainBef
     EXPECT_EQ(quantized->y_mm, -2);
     EXPECT_EQ(session.SpawnGroundObject(kGroundType, Luminumbra::Vec3{16777216, 0, 0}, 0, 0), 0u);
     EXPECT_EQ(session.SpawnGroundObject(kGroundType, Luminumbra::Vec3{0, -1048576, 0}, 0, 0), 0u);
+}
+
+TEST(GameSessionHeadlessWorldTest, BoundedBootSaveAsTransfersDiskOnlyAuthorityAndFaultsOnLoss) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession owner, loaded, copied;
+    for (auto* session : {&owner, &loaded, &copied})
+        EnableSnapshotSession(*session, root, jobs);
+    ASSERT_TRUE(owner.CreateWorld("Disk authority", "1337", "default"));
+    const Luminumbra::IVec3 distant(1280, 0, -1280);
+    auto chunk = std::make_shared<Luminumbra::Chunk>(distant);
+    chunk->sdf_data.assign(17 * 17 * 17, -4.0f);
+    chunk->mark_voxel_data_dirty();
+    ASSERT_TRUE(owner.GetWorldSystem()->adopt_streamed_chunk(chunk));
+    const auto before = owner.ComputeChunkStateHash();
+    ASSERT_TRUE(owner.SaveWorldState());
+    ASSERT_TRUE(loaded.LoadWorld(owner.GetMetadata().worldId));
+    EXPECT_FALSE(loaded.GetWorldSystem()->find_streamed_chunk(distant));
+    EXPECT_EQ(loaded.GetWorldSystem()->durable_chunk_inventory().size(), 1u);
+    EXPECT_EQ(loaded.ComputeChunkStateHash(), before);
+    const auto destination = root.path() / "disk-authority-copy";
+    ASSERT_TRUE(loaded.SaveWorldStateTo(destination));
+    // Metadata-only persistence to the named world must retain the disk-only backing source.
+    ASSERT_TRUE(loaded.SaveWorld());
+    EXPECT_EQ(loaded.ComputeChunkStateHash(), before);
+    ASSERT_TRUE(copied.CreateTransientWorld("Copy", "1337", "default"));
+    ASSERT_TRUE(copied.LoadWorldStateFrom(destination));
+    EXPECT_FALSE(copied.GetWorldSystem()->find_streamed_chunk(distant));
+    EXPECT_EQ(copied.ComputeChunkStateHash(), before);
+    ASSERT_TRUE(copied.GetWorldSystem()->restore_authoritative_chunk(distant));
+    const auto restored = copied.GetWorldSystem()->find_streamed_chunk(distant);
+    ASSERT_NE(restored, nullptr);
+    EXPECT_EQ(restored->sdf_data, chunk->sdf_data);
+    const auto source_region = P::WorldSaveService::region_file_path(destination, 40, -40);
+    ASSERT_TRUE(fs::remove(source_region));
+    // A fresh bounded boot still refuses the lost distant member before adopting any chunk.
+    GameSession refused;
+    EnableSnapshotSession(refused, root, jobs);
+    ASSERT_TRUE(refused.CreateTransientWorld("Refused", "1337", "default"));
+    EXPECT_FALSE(refused.LoadWorldStateFrom(destination));
+    EXPECT_TRUE(refused.GetWorldSystem()->snapshot_streamed_chunks().empty());
+    // loaded remains disk-only at destination: rehydration latches a fault and cannot generate.
+    EXPECT_TRUE(loaded.GetWorldSystem()->restore_authoritative_chunk(distant));
+    EXPECT_TRUE(loaded.GetRegionSchedulerFault().has_value());
+    EXPECT_FALSE(loaded.GetWorldSystem()->find_streamed_chunk(distant));
+    EXPECT_EQ(loaded.GetWorldSystem()->EditTerrainVoxel({20488, 8, -20472}, 1, true, nullptr), 0);
+    EXPECT_EQ(loaded.TickSimulation(loaded.GetSimulationClock().fixed_dt()), 0u);
+}
+
+namespace {
+Luminumbra::Chunk* g_chunk_revision_during_commit = nullptr;
+void ChangeChunkAtIndexPublication(const char* step, const fs::path& path) {
+    if (g_chunk_revision_during_commit && std::string(step) == "before-replace" &&
+        path.filename() == "snapshot.json") {
+        g_chunk_revision_during_commit->sdf_data.front() -= 1.0f;
+        g_chunk_revision_during_commit->mark_voxel_data_dirty();
+        g_chunk_revision_during_commit->mark_water_state_dirty();
+    }
+}
+struct ChunkRevisionHook {
+    explicit ChunkRevisionHook(Luminumbra::Chunk* chunk) {
+        g_chunk_revision_during_commit = chunk;
+        P::set_snapshot_step_hook_for_testing(&ChangeChunkAtIndexPublication);
+    }
+    ~ChunkRevisionHook() {
+        P::set_snapshot_step_hook_for_testing(nullptr);
+        g_chunk_revision_during_commit = nullptr;
+    }
+};
+} // namespace
+
+TEST(GameSessionHeadlessWorldTest, FirstAndIncrementalSavePreserveChangesAfterSerialization) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession owner;
+    EnableSnapshotSession(owner, root, jobs);
+    ASSERT_TRUE(owner.CreateWorld("Revision acknowledgement", "1337", "default"));
+    auto chunk = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3(0, 0, 0));
+    chunk->sdf_data.assign(17 * 17 * 17, -1.0f);
+    chunk->mark_voxel_data_dirty();
+    chunk->mark_water_state_dirty();
+    ASSERT_TRUE(owner.GetWorldSystem()->adopt_streamed_chunk(chunk));
+    for (const bool first : {true, false}) {
+        SCOPED_TRACE(first);
+        const auto serialized_sdf = chunk->sdf_data;
+        {
+            ChunkRevisionHook hook(chunk.get());
+            ASSERT_TRUE(owner.SaveWorldState());
+        }
+        EXPECT_TRUE(chunk->is_voxel_data_dirty());
+        EXPECT_TRUE(chunk->is_water_state_dirty());
+        const auto durable =
+            P::WorldSaveService::read_chunk(owner.GetWorldSaveDir(), {0, 0, 0}, true);
+        ASSERT_EQ(durable.status, P::WorldSaveService::ChunkReadStatus::Found);
+        ASSERT_NE(durable.chunk, nullptr);
+        EXPECT_EQ(durable.chunk->sdf_data, serialized_sdf);
+        EXPECT_NE(chunk->sdf_data, serialized_sdf);
+    }
+    ASSERT_TRUE(owner.SaveWorldState());
+    EXPECT_FALSE(chunk->is_voxel_data_dirty());
+    EXPECT_FALSE(chunk->is_water_state_dirty());
+}
+
+TEST(GameSessionHeadlessWorldTest, WaterOnlyAuthorityHashDoesNotChangeWhenSaved) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession owner;
+    EnableSnapshotSession(owner, root, jobs);
+    ASSERT_TRUE(owner.CreateWorld("Water-only hash", "1337", "default"));
+    auto chunk = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3(0, 0, 0));
+    chunk->sdf_data.assign(17 * 17 * 17, 1.0f);
+    chunk->mark_sdf_generated_current_params();
+    chunk->water_depth_mm = {123};
+    chunk->mark_water_state_dirty();
+    ASSERT_TRUE(owner.GetWorldSystem()->adopt_streamed_chunk(chunk));
+    const auto before = owner.ComputeChunkStateHash();
+    ASSERT_TRUE(owner.SaveWorldState());
+    EXPECT_EQ(owner.ComputeChunkStateHash(), before);
+    const auto restored = P::WorldSaveService::read_chunk(owner.GetWorldSaveDir(), {0, 0, 0}, true);
+    ASSERT_EQ(restored.status, P::WorldSaveService::ChunkReadStatus::Found);
+    ASSERT_NE(restored.chunk, nullptr);
+    EXPECT_EQ(restored.chunk->water_depth_mm, chunk->water_depth_mm);
+}
+
+TEST(GameSessionHeadlessWorldTest, JoinedLedgerWriterDoesNotRetainCallerLocalReference) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession owner;
+    EnableSnapshotSession(owner, root, jobs);
+    ASSERT_TRUE(owner.CreateWorld("Ledger lifetime", "1337", "default"));
+    const auto save = owner.GetWorldSaveDir();
+    {
+        P::SaveTransaction transaction(save, 0, {}, &P::WorldSaveService::member_digest);
+        ASSERT_TRUE(transaction.begin(nullptr));
+        {
+            auto local = owner.GetActiveRegionLedger();
+            local.mark_edited({10, 10}, owner.GetWorldClock());
+            ASSERT_TRUE(
+                P::WorldSaveService::save_active_regions(local, owner.GetWorldClock(), save));
+        }
+        ASSERT_TRUE(transaction.commit(nullptr));
+    }
+    Luminumbra::world::ActiveRegionLedger durable;
+    ASSERT_TRUE(P::WorldSaveService::load_active_regions(durable, save));
+    EXPECT_TRUE(durable.records().contains({10, 10}));
+}
+
+TEST(GameSessionHeadlessWorldTest, FarOverlayFilesDoNotChangeTheWorldHash) {
+    using Luminumbra::World::FarBrickState;
+    using Luminumbra::World::FarOverlayBrick;
+    using Luminumbra::World::FarOverlayTile;
+    using Luminumbra::World::FarTileKey;
+
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession original, loaded, reloaded;
+    for (auto* session : {&original, &loaded, &reloaded}) {
+        session->SetRootPath(root.root_string());
+        session->SetJobSystem(&jobs);
+    }
+    ASSERT_TRUE(original.CreateWorld("Far overlay", "1337", "default"));
+    ASSERT_TRUE(original.SaveWorldState());
+    const auto save = original.GetWorldSaveDir();
+    const auto before = SessionWorldHash(original);
+
+    FarOverlayTile near_tile;
+    near_tile.key = FarTileKey{1, 0, 0};
+    near_tile.generation = 1;
+    near_tile.bricks.push_back(FarOverlayBrick{0, 0, 0, FarBrickState::HomogeneousAir});
+    FarOverlayTile coarse_tile;
+    coarse_tile.key = FarTileKey{3, -1, -1};
+    coarse_tile.generation = 1;
+    coarse_tile.bricks.push_back(FarOverlayBrick{-32, 1, -32, FarBrickState::HomogeneousSolid});
+    ASSERT_TRUE(Luminumbra::World::WriteFarOverlay(save, near_tile));
+    ASSERT_TRUE(Luminumbra::World::WriteFarOverlay(save, coarse_tile));
+    ASSERT_TRUE(P::WorldSaveService::validate_save(save));
+    ASSERT_TRUE(Luminumbra::World::ValidateFarOverlayDirectory(save));
+
+    ASSERT_TRUE(loaded.LoadWorld(original.GetMetadata().worldId)) << loaded.GetWorldOpenError();
+    EXPECT_EQ(SessionWorldHash(loaded), before);
+
+    fs::remove_all(save / "far");
+    ASSERT_TRUE(reloaded.LoadWorld(original.GetMetadata().worldId)) << reloaded.GetWorldOpenError();
+    EXPECT_EQ(SessionWorldHash(reloaded), before);
 }
