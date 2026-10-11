@@ -512,7 +512,7 @@ TEST(WorldDurableResidency, FailedSessionSaveRearmsDirtyChunkForRetry) {
     EXPECT_FALSE(edited->is_voxel_data_dirty());
 }
 
-TEST(WorldDurableResidency, ChunkOwnedByAJobIsNotParked) {
+TEST(WorldDurableResidency, NonQuiescentChunkIsNotParked) {
     DurableFixture fx(/*durable=*/true);
     ASSERT_TRUE(fx.created) << fx.error;
     fx.Settle(fx.SpawnAnchor(), kSettleIterations);
@@ -521,12 +521,14 @@ TEST(WorldDurableResidency, ChunkOwnedByAJobIsNotParked) {
     ASSERT_TRUE(edited);
     const IVec3 coords = edited->get_coords();
 
-    // A pending worker result makes the chunk non-quiescent: it must stay resident.
-    edited->pending_mesh_ready.store(true, std::memory_order_release);
+    // A completed mesh-result marker is consumed by update(), so it cannot hold a
+    // chunk non-quiescent across a settle loop. An unfinished generation state can.
+    edited->set_state(Luminumbra::ChunkState::Loading);
     fx.Settle(fx.FarAnchor(), kSettleIterations);
     EXPECT_EQ(fx.world->find_streamed_chunk(coords), edited);
-    EXPECT_EQ(fx.world->parking_status().parked_count, 0u);
-    edited->pending_mesh_ready.store(false, std::memory_order_release);
+    const auto parked = fx.world->snapshot_parked_chunks();
+    EXPECT_EQ(std::find(parked.begin(), parked.end(), edited), parked.end());
+    edited->set_state(Luminumbra::ChunkState::Idle);
 }
 
 } // namespace

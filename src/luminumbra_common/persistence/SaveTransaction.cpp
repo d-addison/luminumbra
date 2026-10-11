@@ -743,7 +743,7 @@ void report_snapshot_step(const char* step, const fs::path& path) {
     }
 }
 
-SaveTransaction::SaveTransaction(fs::path save_dir,
+SaveTransaction::SaveTransaction(std::filesystem::path save_dir,
                                  std::uint64_t tick,
                                  std::vector<std::array<float, 3>> anchors,
                                  MemberDigestFn digest_fn)

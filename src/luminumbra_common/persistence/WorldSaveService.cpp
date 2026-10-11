@@ -957,6 +957,17 @@ public:
         }
         if (!require_index && !snapshot_index_exists(save_dir) && !journal_pending(save_dir))
             return;
+        // Refuse a known invalid baseline before begin() creates journal/region directories.
+        // Pending recovery must still run first: installed metadata may be a partial new member.
+        if (!journal_pending(save_dir)) {
+            const auto metadata_error = CheckMetadataFile(save_dir);
+            if (!metadata_error.empty()) {
+                m_engaged = true;
+                m_ok = false;
+                AddError(errors, metadata_error);
+                return;
+            }
+        }
         SnapshotIndex previous;
         read_snapshot_index(save_dir, previous, nullptr);
         m_facts = std::make_unique<WorldSaveService::SaveFactsScope>(save_dir);
