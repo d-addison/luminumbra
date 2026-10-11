@@ -1,50 +1,89 @@
 # Coordinated delivery roadmap
 
-Updated September 8, 2026. This is a delivery/status map with actionable issues in
+Updated September 13, 2026. This is a delivery/status map with actionable issues in
 both repositories. Engine, game and art-pack versions need not share tag numbers.
 There are no assigned due dates or invented completion percentages.
 
 ## Current state
 
-- **Released:** engine v0.2.1; separate game Tree Small 02 source/runtime packs
-  `tree-small-02-source-v1.0.0` and `tree-small-02-runtime-v1.0.0`.
-- **Implemented, awaiting final integration/acceptance:** candidate `2c32211`
-  (repair branch, [#56](https://github.com/d-addison/luminumbra/pull/56)) contains devel `fdb16a8` plus asynchronous catalog
-  validation, saved-world selection/loading, content acquisition, culling/no-UI and
-  rendering repairs, the local-player feet-origin correction, explicit MSVC terrain
-  arithmetic, validated source-release inventory, the benchmark camera/time
-  ordering fix, the audio-off default and the refreshed public asset inventory.
-  Game source and runtime pack tags target `9f3a66d` and `addab429`. None is a
-  final verified engine v0.3 release.
-- **Merged:** format retirement and optional Blender authoring fixtures/service mock
-  are in `devel` (`fdb16a8`). Rendering/integration PR
-  [#56](https://github.com/d-addison/luminumbra/pull/56) and promotion PR
-  [#55](https://github.com/d-addison/luminumbra/pull/55) remain open at this update;
-  #55 is blocked until the expanded scope below is accepted.
-- **Verified in a bounded scope:** at `2c32211`, local Debug and ASan each pass all
-  1,987 named tests with zero failures/errors/skips; format, public-tree and
-  asset-inventory checks pass; the exact source-release rehearsal passes with a
-  byte-reproducible SPDX inventory. Published source/runtime pack downloads match
-  their pinned archives. Independent Astra/xhigh reviews accepted the bounded
-  source corrections. Final native, packaged and integrated checks remain distinct.
-- **Expanded before release (owner decision, 2026-09-08):** an unbounded world with a
-  16 km view radius including distant cave interiors and edits, distant simulation
-  over persistent active regions decided system by system, a measured 60 fps floor on
-  two profiles and two displays, and causal closure of the native client hang. The
-  accepted contract is [Distant world and distant simulation](distant-world.md);
-  its work packages are the new v0.3.0 issues below and are gated by one bounded
-  design review, not by the post-release Foundations approval.
-- **Not released:** engine v0.3.0. Signed publication, independent release download
-  verification and a newly named private preview remain outstanding. Preserve the
-  delivered `5daeb03` preview unchanged.
-- **Planned:** installed engine SDK, real game extraction and the shared
-  UI/tooling/authoring foundation. Game code currently remains in the engine
-  repository; the game repository initially supplies content and conversion tools.
+- **Recovery baseline:** engine `945ecd295835a838eed0169ff709e7aabc134fa1`
+  and game `552a26684215542b327a842104864dda14e31652`. Subsequent verified upstream
+  revisions are engine `devel` at `e60c6554c323f9fd8a8098bbac81e5ea1793cd7e`
+  and game `main` at `f266fe4e121b6a29361c70116ad82e89560b21a3` (September 13).
+- **Merged implementation:** repair PR [#56](https://github.com/d-addison/luminumbra/pull/56),
+  accepted distance contract, hang instrumentation, reversed-Z depth, persisted clock,
+  five-tier declaration, render measurements and simulation telemetry. The original
+  Blender stack was superseded by merged [#155](https://github.com/d-addison/luminumbra/pull/155).
+  The optional headless prefab runtime [#165](https://github.com/d-addison/luminumbra/pull/165)
+  has also merged after current-head checks and independent native evidence review.
+  Blender review/undo [#162](https://github.com/d-addison/luminumbra/pull/162)
+  and the restored [visual catalog](visual-catalog.md)
+  [#170](https://github.com/d-addison/luminumbra/pull/170) have merged.
+  These implementations still have the acceptance obligations listed below.
+- **Recovery in progress:** the SBOM repair [#169](https://github.com/d-addison/luminumbra/pull/169)
+  passes the actual MSYS Git/UCRT Python path-disagreement cases. Ambient SIMD
+  [#172](https://github.com/d-addison/luminumbra/pull/172), tracked by
+  [#163](https://github.com/d-addison/luminumbra/issues/163), passes actual Linux
+  and native UCRT Debug/Release controls at `e1080d7f`. Actual selected-ISA
+  evidence and failing original-dispatch controls preserve each configuration's
+  established goldens. Active-region
+  [#161](https://github.com/d-addison/luminumbra/pull/161) has been refreshed against
+  the recovery baseline and its scheduler, persistence, recovery and replay checks
+  pass. The composed candidate [#175](https://github.com/d-addison/luminumbra/pull/175)
+  awaits current-head integration checks and landing. The separate
+  wind input-padding defect is tracked by [#173](https://github.com/d-addison/luminumbra/issues/173).
+  The September 13 promotion UCRT job passed 2,245 of 2,250 cases at its recorded merge revision;
+  its surface-loading guard and three render-process timeouts remain unresolved.
+  All three timed-out render processes emitted their captures before termination;
+  shutdown diagnosis must establish the cause. Local native `e1080d7f` passes
+  the unchanged loading guard and original render cases on NVIDIA and verified
+  CI-pinned Mesa 26.1.7 llvmpipe. Different hardware and toolchain versions keep
+  these non-reproductions separate from CI and original-hang causal closure.
+  The candidate retains failed-process captures and adds shutdown-stage evidence;
+  its fresh native build and qualification remain in progress.
+  Historical results do not qualify a new candidate; discover its tests again.
+- **Verification:** later Debug/ASan and native records supersede the failed
+  `ff0362b` baseline. Expanded integrated, native and packaged acceptance is
+  outstanding; implementation, test evidence and merged state are distinct.
+- **Accepted pre-release scope:** five volumetric tiers through 16,384 m, qualified
+  within 32 km of the origin; per-system simulation policies over persistent active
+  regions; Quality (1.0) and Performance (0.67) at 3840×1600 and 3440×1440.
+  Both profiles require p99 frame time ≤16.67 ms; 120 fps remains the reported
+  target. The accepted [distance contract](distant-world.md) governs every slice;
+  its completed design interview is not a new implementation prerequisite.
+- **Remaining runtime implementation:** the tier table alone does not render 16 km;
+  the runtime still uses legacy far ranges and a 3,200 m far plane. Telemetry and
+  a region ledger alone do not schedule distant simulation consumers.
+  The pristine brick generator/mesher [#176](https://github.com/d-addison/luminumbra/pull/176)
+  has separate Debug/Release and boundary/cave controls; its CI correction and
+  landing are pending. A fixture-only asynchronous consumer is undergoing review
+  and verification. Runtime paging, graphical integration, final cave-filter
+  qualification and durable dirty residency remain subsequent work.
+- **Hang closure:** Windows reported the original `0xCFFFFFFF` application hang
+  and the operator closed it. The underlying mechanism remains unproven.
+  Instrumentation and successful non-reproductions do not close
+  [#127](https://github.com/d-addison/luminumbra/issues/127); the server-load
+  incident [#69](https://github.com/d-addison/luminumbra/issues/69) is separate.
+- **Publication:** v0.3.0 remains unpublished and promotion
+  [#55](https://github.com/d-addison/luminumbra/pull/55) is blocked. Strict promotion
+  requires all 15 contexts after expanded acceptance, followed by signed source-only
+  publication, independent artifact verification and a newly named private preview.
+  Audio stays off; the delivered `5daeb03` preview stays unchanged.
+- **Authoring ownership:** generic packages remain in the engine monorepo.
+  Merged [#162](https://github.com/d-addison/luminumbra/pull/162) supplies the Blender
+  identity review/undo package. Its refreshed package matches the retained Windows
+  archive byte-for-byte and has 22 recorded native checks. Visual approval and
+  Linux native editor qualification remain outstanding.
+  Merged [#165](https://github.com/d-addison/luminumbra/pull/165)
+  supplies optional compiled-prefab consumption. Headless consumption is not graphical qualification.
+  Full installed SDK delivery and game extraction retain the post-release
+  Foundations approval boundary.
 
 An implementation is code present in a revision. Verification identifies the
 tested revision, environment, scope and evidence. Merging integrates code into a
-branch. Release means published artifacts with independently checked identities.
-None of these states substitutes for the next.
+branch. Publication delivers artifacts with independently checked identities.
+
+Engine [#141](https://github.com/d-addison/luminumbra/issues/141) owns budget enforcement and qualification mechanisms; game [#31](https://github.com/d-addison/luminumbra-game/issues/31) owns authored rates, activation data and populator policy. Game [#34](https://github.com/d-addison/luminumbra-game/issues/34) retains future content/data distribution and optional non-Steam loading. All v0.4 commitments remain assigned.
 
 ## Milestones and ownership
 
@@ -59,11 +98,12 @@ None of these states substitutes for the next.
 | [v0.8.0 — Reconstruction and latency — provisional](https://github.com/d-addison/luminumbra/milestone/7) | Qualified reconstruction, dynamic resolution, latency and prerequisite-gated optional frame generation. | [Effective player settings and representative visual/input workloads.](https://github.com/d-addison/luminumbra-game/milestone/7) |
 | [v0.9.0 — Lighting and effects — provisional](https://github.com/d-addison/luminumbra/milestone/8) | Improved raster lighting, optional hybrid RT/denoising and reusable field-effect interfaces. | [Game lighting integration and proposed aether visuals, provisionally placed pending architecture review.](https://github.com/d-addison/luminumbra-game/milestone/8) |
 
-Foundations is dependent on independently verified v0.3 publication **and** the
-single implementation-roadmap approval after refreshed source/SDK architecture
+Full installed SDK delivery and game extraction in Foundations depend on
+independently verified v0.3 publication **and** the single implementation-roadmap approval after refreshed source/SDK architecture
 review with actual Astra/xhigh. Accepted ownership/authoring direction is recorded
 in [Engine/game ownership](engine-game-boundary.md). Roadmap population does not
-waive that implementation gate. v0.7–v0.9 remain provisional.
+waive that implementation gate. The already-authorized bounded optional authoring
+packages above may be refreshed and qualified before release. v0.7–v0.9 remain provisional.
 
 The foundation precedes substantial v0.4 work and does not renumber or reduce its
 commitments. Keep authoritative first-time joins, continuing reconnect, strict
@@ -74,17 +114,17 @@ imply host migration, matchmaking or private Steam relay availability.
 
 ## Limits and acceptance still tracked
 
-- Today surface terrain is finite (approximately 3 km and a 3200 m camera far
-  plane), local full-SDF cave residency is bounded (128 m horizontal/64 m vertical),
-  far tiles omit caves and player edits, and far-tile persistence is never attached
-  at runtime. The accepted v0.3 contract replaces this with a 16 km volumetric
+- Current far rendering reaches approximately 3 km with a 3200 m camera far
+  plane; world generation itself has no fixed edge. Pristine far tiles are
+  heightfields; bounded authoritative SDF overlays can carry resident edits, but
+  the far store is not attached to saves at runtime. The accepted v0.3 contract replaces this with a 16 km volumetric
   ladder over an unbounded world; until those slices land and are verified, the
   current limits stand.
-- Simulation today ticks every creature and plant regardless of distance, restarts
-  the simulation clock at zero on load, anchors weather/wind/aether on the spawn
-  point, does not persist creatures and drops dirty chunks on eviction. The accepted
-  contract replaces this with persistent active regions, a persisted clock and
-  per-system distant policies; until those slices land, the current behaviour stands.
+- With `sim.active_regions` disabled, the simulation clock retains its legacy
+  load-time reset; the landed enabled clock resumes the persisted absolute tick.
+  Creature/plant distance scheduling, durable field pages and wildlife, and dirty
+  eviction parking still require their consumer/residency slices. Wind/weather/aether
+  remain anchored grids; a clock or ledger alone does not implement these policies.
 - The native client exit 0xCFFFFFFF (PID 66604, package 2871c72) was a Windows
   Application Hang closed by the operator, not a crash; the hang mechanism is not yet
   established and its closure is a release gate.
@@ -143,22 +183,24 @@ verification.
 - [Resolve native MSVC terrain-height hash divergence without weakening pins](https://github.com/d-addison/luminumbra/issues/115)
 - [Generate and verify a conformant SPDX source-release inventory](https://github.com/d-addison/luminumbra/issues/119)
 - [Apply render benchmark camera and time before streaming and rendering](https://github.com/d-addison/luminumbra/issues/120)
-- [Review the distant-world and distant-simulation contract before implementation](https://github.com/d-addison/luminumbra/issues/126)
+- [Verify slice compliance with the accepted distant-world contract](https://github.com/d-addison/luminumbra/issues/126)
 - [Establish the cause of the native client hang and repair the per-frame audio log](https://github.com/d-addison/luminumbra/issues/127)
-- [Record per-frame render timing distributions, profiles, displays and traversal workloads](https://github.com/d-addison/luminumbra/issues/128)
-- [Measure per-system simulation tick budgets on representative worlds](https://github.com/d-addison/luminumbra/issues/129)
-- [Adopt reversed-Z float depth as the far-plane precision prerequisite](https://github.com/d-addison/luminumbra/issues/130)
+- [Qualify native profiles, displays and traversals using landed render measurements](https://github.com/d-addison/luminumbra/issues/128)
+- [Capture representative budgets using landed simulation telemetry](https://github.com/d-addison/luminumbra/issues/129)
+- [Qualify integrated depth ordering and visual parity](https://github.com/d-addison/luminumbra/issues/130)
 - [Stream volumetric coarse SDF tiers to a 16 km view radius with distant cave interiors](https://github.com/d-addison/luminumbra/issues/131)
 - [Bake terrain edits into every far tier and persist the far authority overlay](https://github.com/d-addison/luminumbra/issues/132)
 - [Measure, propose and enforce far-tier residency and streaming budgets](https://github.com/d-addison/luminumbra/issues/133)
-- [Persist the simulation clock and unify the calendar](https://github.com/d-addison/luminumbra/issues/134)
+- [Qualify persisted-clock continuation across simulation consumers](https://github.com/d-addison/luminumbra/issues/134)
 - [Track persistent active regions with ranked cadence, freeze and save-on-evict](https://github.com/d-addison/luminumbra/issues/135)
 - [Host wind, weather and aether ambience as stateful world-anchored pages](https://github.com/d-addison/luminumbra/issues/136)
 - [Persist creatures and simulate distant wildlife coarsely with promotion](https://github.com/d-addison/luminumbra/issues/137)
 - [Run plants and water in distant active regions under bounded cadence and budget](https://github.com/d-addison/luminumbra/issues/138)
 - [Add a minimal persisted ground-object entity](https://github.com/d-addison/luminumbra/issues/139)
 - [Fold distant-simulation state into world hashes and expose a region diagnostic panel](https://github.com/d-addison/luminumbra/issues/140)
-- [Activate the expanded v0.3 simulation through game data and record acceptance](https://github.com/d-addison/luminumbra/issues/141)
+- [Enforce engine budgets and qualify expanded v0.3 acceptance](https://github.com/d-addison/luminumbra/issues/141)
+
+- [Qualify ambient SIMD determinism without changing established goldens](https://github.com/d-addison/luminumbra/issues/163)
 
 ### Foundations — Engine/game separation and tooling
 
@@ -179,6 +221,9 @@ verification.
 - [Add the installed geometry build service with atomic generation publication](https://github.com/d-addison/luminumbra/issues/145)
 - [Add Blender geometry authoring through installed tools](https://github.com/d-addison/luminumbra/issues/146)
 - [Preserve inline texture alpha coverage at authored cutoffs](https://github.com/d-addison/luminumbra/issues/147)
+
+- [Qualify remaining visual and native Linux acceptance for the merged Blender identity review/undo package (#146)](https://github.com/d-addison/luminumbra/issues/146)
+- [Merged optional prefab runtime consumption package; graphical consumption remains separate (#145)](https://github.com/d-addison/luminumbra/pull/165)
 
 ### v0.4.0 — Continuing-world multiplayer
 
@@ -222,4 +267,3 @@ verification.
 - [Improve scalable raster lighting and shadows](https://github.com/d-addison/luminumbra/issues/101)
 - [Qualify optional hybrid ray tracing and denoising](https://github.com/d-addison/luminumbra/issues/102)
 - [Provide bounded field-to-render effect extension interfaces](https://github.com/d-addison/luminumbra/issues/103)
-

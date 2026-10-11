@@ -129,6 +129,7 @@ add_executable(common_tests
     common/ReplayStream_test.cpp
     common/ServerHeadlessHygiene_test.cpp
     common/SimulationClock_test.cpp
+    common/ActiveRegionLedger_test.cpp
     common/WorldClock_test.cpp
     common/StructurePlacement_test.cpp
     common/StructureStamping_test.cpp
@@ -1904,6 +1905,10 @@ foreach(_cand ${_vc_candidates})
     endif()
 endforeach()
 if(_sdf_python)
+    add_test(NAME RegionRecordingOverwrite
+        COMMAND "${_sdf_python}" ${CMAKE_SOURCE_DIR}/test/persistence/region_recording_overwrite.py
+            --server $<TARGET_FILE:luminumbra_server_app> --source ${CMAKE_SOURCE_DIR})
+    set_tests_properties(RegionRecordingOverwrite PROPERTIES LABELS "persistence" TIMEOUT 240)
     add_test(NAME SdfContractDocLint
         COMMAND "${_sdf_python}" ${CMAKE_SOURCE_DIR}/tools/check_sdf_contract_doc.py)
     set_tests_properties(SdfContractDocLint PROPERTIES LABELS "docs;shield" TIMEOUT 60)
@@ -2001,6 +2006,8 @@ if(NOT Python3_FOUND)
     message(FATAL_ERROR "RenderContractPython requires a Python3 interpreter")
 endif()
 add_test(NAME RenderContractPython COMMAND "${Python3_EXECUTABLE}" ${CMAKE_SOURCE_DIR}/tools/perf/test_render_contract.py)
+add_test(NAME RenderRunnerEvidencePython COMMAND "${Python3_EXECUTABLE}" ${CMAKE_SOURCE_DIR}/tools/perf/test_render_runner_evidence.py)
+set_tests_properties(RenderRunnerEvidencePython PROPERTIES TIMEOUT 60)
 
 # Ordinary test lanes need no downloaded game art. Generate valid synthetic
 # meshes/materials and their manifest solely for the isolated runner roots.
