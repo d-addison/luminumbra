@@ -2001,7 +2001,7 @@ void RunSchedulerFaultCase(std::uint64_t k, std::uint64_t start) {
     // on the first tick of the frame stops the second tick from running.
     ASSERT_EQ(session.TickSimulation(2.5 * dt), k - start + 1);
     ASSERT_TRUE(session.GetRegionSchedulerFault().has_value());
-    const auto& fault = *session.GetRegionSchedulerFault();
+    const auto& fault = session.GetRegionSchedulerFault().value();
     EXPECT_EQ(fault.tick, k);
     EXPECT_FALSE(fault.message.empty());
     EXPECT_EQ(session.GetSimulationTickCount(), k);

@@ -458,6 +458,7 @@ private:
     std::optional<RegionSchedulerFault> m_regionFault;
     RegionInputRejections m_regionInputRejections;
     void LatchRegionFault(std::uint64_t tick, std::string message);
+    void RunRegionScheduler(std::uint64_t current_tick);
     std::filesystem::path m_regionDurableDirectory;
     // Stable only in the clock slice; world-anchored pages replace this grid in C4.
     Vec3 m_ambientFieldAnchor{};

@@ -980,53 +980,7 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
         // The v2 events stage measures only the ordered drain. Region scheduling
         // has no telemetry stage or consumer work counter in this foundation.
         budget.Finish();
-        if (m_activeRegionsEnabled && !m_regionFault) {
-            const auto anchors =
-                m_replicatedSimulationAnchors
-                    ? std::optional<std::span<const Vec3>>(*m_replicatedSimulationAnchors)
-                    : std::nullopt;
-            // Built lazily on the first probe call of this tick.
-            std::optional<std::set<RegionKey>> resident_regions;
-            try {
-                m_regionSchedule = m_activeRegionLedger.schedule(
-                    m_worldClock,
-                    anchors,
-                    m_regionWork,
-                    [this](RegionKey key) {
-                        const auto directory = m_regionDurableDirectory.empty()
-                                                   ? GetWorldSaveDir()
-                                                   : m_regionDurableDirectory;
-                        return Persistence::WorldSaveService::region_simulation_digest(
-                            directory,
-                            key,
-                            Persistence::RegionDigestInputs{
-                                m_worldSystem->snapshot_streamed_chunks(), {}});
-                    },
-                    // Later slices extend this probe with parked chunks, ground objects,
-                    // pages, creatures, plants and water debt.
-                    [this, &resident_regions](RegionKey key) {
-                        for (const auto& entry : m_regionWork)
-                            if (entry.key == key)
-                                return true;
-                        if (!resident_regions) {
-                            resident_regions.emplace();
-                            for (const auto& chunk : m_worldSystem->snapshot_streamed_chunks()) {
-                                if (!chunk ||
-                                    chunk->sdf_provenance() != ChunkSdfProvenance::LoadedOrEdited)
-                                    continue;
-                                int rx = 0, rz = 0;
-                                Persistence::WorldSaveService::region_coords_for_chunk(
-                                    chunk->get_coords(), rx, rz);
-                                resident_regions->insert(RegionKey{rx, rz});
-                            }
-                        }
-                        return resident_regions->contains(key);
-                    });
-                m_regionWork.clear();
-            } catch (const std::exception& error) {
-                LatchRegionFault(current_tick, error.what());
-            }
-        }
+        RunRegionScheduler(current_tick);
         if (m_regionFault)
             return i + 1; // the faulting tick's systems ran; the clock was rewound to it
     }
@@ -1371,6 +1325,56 @@ bool GameSession::ClockConfigurationCompatible(const fs::path& save_dir) const {
     bool required = false;
     return Persistence::WorldSaveService::read_clock_metadata(save_dir, clock, required) &&
            (!required || m_activeRegionsEnabled);
+}
+
+void GameSession::RunRegionScheduler(std::uint64_t current_tick) {
+    if (m_activeRegionsEnabled && !m_regionFault) {
+        const auto anchors =
+            m_replicatedSimulationAnchors
+                ? std::optional<std::span<const Vec3>>(*m_replicatedSimulationAnchors)
+                : std::nullopt;
+        // Built lazily on the first probe call of this tick.
+        std::optional<std::set<RegionKey>> resident_regions;
+        try {
+            m_regionSchedule = m_activeRegionLedger.schedule(
+                m_worldClock,
+                anchors,
+                m_regionWork,
+                [this](RegionKey key) {
+                    const auto directory = m_regionDurableDirectory.empty()
+                                               ? GetWorldSaveDir()
+                                               : m_regionDurableDirectory;
+                    return Persistence::WorldSaveService::region_simulation_digest(
+                        directory,
+                        key,
+                        Persistence::RegionDigestInputs{
+                            m_worldSystem->snapshot_streamed_chunks(), {}});
+                },
+                // Later slices extend this probe with parked chunks, ground objects,
+                // pages, creatures, plants and water debt.
+                [this, &resident_regions](RegionKey key) {
+                    for (const auto& entry : m_regionWork)
+                        if (entry.key == key)
+                            return true;
+                    if (!resident_regions) {
+                        resident_regions.emplace();
+                        for (const auto& chunk : m_worldSystem->snapshot_streamed_chunks()) {
+                            if (!chunk ||
+                                chunk->sdf_provenance() != ChunkSdfProvenance::LoadedOrEdited)
+                                continue;
+                            int rx = 0, rz = 0;
+                            Persistence::WorldSaveService::region_coords_for_chunk(
+                                chunk->get_coords(), rx, rz);
+                            resident_regions->insert(RegionKey{rx, rz});
+                        }
+                    }
+                    return resident_regions->contains(key);
+                });
+            m_regionWork.clear();
+        } catch (const std::exception& error) {
+            LatchRegionFault(current_tick, error.what());
+        }
+    }
 }
 
 void GameSession::SetRegionSchedulerConfig(RegionSchedulerConfig config) {
