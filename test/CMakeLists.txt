@@ -123,6 +123,7 @@ add_executable(common_tests
     common/ResidencyContract_test.cpp
     common/FarLodStore_test.cpp
     common/FarTierTable_test.cpp
+    common/FarWantedSet_test.cpp
     common/GameSessionHeadlessWorld_test.cpp
     common/SimBudgetTelemetry_test.cpp
     ../src/luminumbra_server/modes/SmokeArtifact.cpp
@@ -353,6 +354,13 @@ target_link_libraries(forest_perf_budget_test PRIVATE
 # helper is a free template in FoliagePass.h precisely so it can be exercised
 # without a GL context.
 # Final foliage policy and receipt contracts are GL-free and do not link the engine.
+if(NOT TARGET render_view_test)
+    add_executable(render_view_test rendering/render_view_test.cpp
+        ../src/luminumbra_client/rendering/static_preview/RenderView.cpp)
+    target_include_directories(render_view_test PRIVATE ../include)
+    target_link_libraries(render_view_test PRIVATE gtest_main glm)
+endif()
+
 add_executable(foliage_visual_contract_test rendering/foliage_visual_contract_test.cpp)
 target_include_directories(foliage_visual_contract_test PRIVATE ../src/luminumbra_client)
 target_link_libraries(foliage_visual_contract_test PRIVATE gtest_main nlohmann_json)
@@ -1593,6 +1601,14 @@ add_test(
 # timeout" during the post-build gtest_discover_tests step (no test actually ran).
 # 120 s is generous headroom; it only affects the one-time list-tests probe.
 include(GoogleTest)
+if(LUMINUMBRA_ENABLE_STATIC_PREVIEW)
+    add_executable(viewport_protocol_test static_preview/viewport_protocol_test.cpp
+        ../tools/static_preview/ViewportProtocol.cpp)
+    target_include_directories(viewport_protocol_test PRIVATE ../tools/static_preview)
+    target_link_libraries(viewport_protocol_test PRIVATE luminumbra_prefab_runtime gtest_main)
+    luminumbra_configure_first_party_target(viewport_protocol_test)
+    gtest_discover_tests(viewport_protocol_test PROPERTIES LABELS "authoring;tools" TIMEOUT 30)
+endif()
 set(LUMINUMBRA_GTEST_TARGETS
     far_volume_tile_test
     far_volume_mesher_test
@@ -1617,6 +1633,7 @@ set(LUMINUMBRA_GTEST_TARGETS
     world_dressing_test
     foliage_cache_prune_test
     foliage_visual_contract_test
+    render_view_test
     render_smoke_test
     render_capture_test
     capture_sdk_trigger_test
@@ -1883,6 +1900,9 @@ if(_vc_python)
     add_test(NAME TerrainAovDepthContract
         COMMAND "${_vc_python}" ${CMAKE_SOURCE_DIR}/tools/perf/test_terrain_aovs.py)
     set_tests_properties(TerrainAovDepthContract PROPERTIES LABELS "visual;tools" TIMEOUT 60)
+    add_test(NAME StaticPreviewCaptureContract COMMAND "${Python3_EXECUTABLE}"
+        ${CMAKE_SOURCE_DIR}/test/static_preview/test_capture_validation.py)
+    set_tests_properties(StaticPreviewCaptureContract PROPERTIES LABELS "authoring;tools" TIMEOUT 90)
     add_test(NAME VisualCritiqueFlags
         COMMAND "${_vc_python}" ${CMAKE_SOURCE_DIR}/tools/test_visual_critique.py)
     set_tests_properties(VisualCritiqueFlags PROPERTIES LABELS "visual;critique" TIMEOUT 120)
@@ -2031,6 +2051,7 @@ endif()
 add_test(NAME RenderContractPython COMMAND "${Python3_EXECUTABLE}" ${CMAKE_SOURCE_DIR}/tools/perf/test_render_contract.py)
 add_test(NAME RenderRunnerEvidencePython COMMAND "${Python3_EXECUTABLE}" ${CMAKE_SOURCE_DIR}/tools/perf/test_render_runner_evidence.py)
 set_tests_properties(RenderRunnerEvidencePython PROPERTIES TIMEOUT 60)
+add_test(NAME RenderSceneMatrixPython COMMAND "${Python3_EXECUTABLE}" -B ${CMAKE_SOURCE_DIR}/tools/rendering/acceptance/test_scene_matrix.py)
 
 # Ordinary test lanes need no downloaded game art. Generate valid synthetic
 # meshes/materials and their manifest solely for the isolated runner roots.
