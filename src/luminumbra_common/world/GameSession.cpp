@@ -185,6 +185,7 @@ void GameSession::ResetWorldSystems() {
     m_worldClock = WorldClock{};
     m_activeRegionLedger = ActiveRegionLedger(m_regionSchedulerConfig);
     m_groundObjects.clear();
+    m_fieldPages.clear();
     m_regionSchedule = {};
     m_replicatedSimulationAnchors.reset();
     m_regionWork.clear();
@@ -1378,12 +1379,12 @@ void GameSession::RunRegionScheduler(std::uint64_t current_tick) {
         // Built lazily on the first probe call of this tick.
         std::optional<std::set<RegionKey>> resident_regions;
         try {
-            // Ground-object work is derived from persisted state each tick, never from a queue.
+            // Consumer work is derived from persisted state each tick, never from a queue.
+            const bool consumer_work = !m_groundObjects.empty() || !m_fieldPages.empty();
             std::vector<RegionWork> scheduled_work;
-            if (!m_groundObjects.empty())
-                scheduled_work = AppendGroundObjectWork(m_regionWork);
-            const std::vector<RegionWork>& work =
-                m_groundObjects.empty() ? m_regionWork : scheduled_work;
+            if (consumer_work)
+                scheduled_work = AppendConsumerWork(m_regionWork);
+            const std::vector<RegionWork>& work = consumer_work ? scheduled_work : m_regionWork;
             m_regionSchedule = m_activeRegionLedger.schedule(
                 m_worldClock,
                 anchors,
@@ -1397,14 +1398,17 @@ void GameSession::RunRegionScheduler(std::uint64_t current_tick) {
                         key,
                         Persistence::RegionDigestInputs{m_worldSystem->snapshot_streamed_chunks(),
                                                         m_worldSystem->snapshot_parked_chunks(),
-                                                        m_groundObjects.region_bytes(key)});
+                                                        m_groundObjects.region_bytes(key),
+                                                        m_fieldPages.region_bytes(key)});
                 },
-                // Later slices extend this probe with pages, creatures, plants and water debt.
+                // Later slices extend this probe with creatures, plants and water debt.
                 [this, &resident_regions](RegionKey key) {
                     for (const auto& entry : m_regionWork)
                         if (entry.key == key)
                             return true;
                     if (m_groundObjects.owns_region(key))
+                        return true;
+                    if (m_fieldPages.owns_region(key))
                         return true;
                     if (!resident_regions) {
                         resident_regions.emplace();
@@ -1421,17 +1425,17 @@ void GameSession::RunRegionScheduler(std::uint64_t current_tick) {
                     return resident_regions->contains(key);
                 });
             m_regionWork.clear();
-            if (!m_groundObjects.empty()) {
-                const std::uint64_t tick = m_worldClock.tick();
+            const std::uint64_t tick = m_worldClock.tick();
+            if (!m_groundObjects.empty())
                 AdvanceGroundObjects(tick);
-            }
+            AdvanceFieldPages(tick);
         } catch (const std::exception& error) {
             LatchRegionFault(current_tick, error.what());
         }
     }
 }
 
-std::vector<RegionWork> GameSession::AppendGroundObjectWork(std::vector<RegionWork> work) const {
+std::vector<RegionWork> GameSession::AppendConsumerWork(std::vector<RegionWork> work) const {
     const auto& records = m_activeRegionLedger.records();
     for (const RegionKey key : m_groundObjects.regions()) {
         const auto record = records.find(key);
@@ -1440,7 +1444,38 @@ std::vector<RegionWork> GameSession::AppendGroundObjectWork(std::vector<RegionWo
         const auto count = static_cast<std::uint64_t>(m_groundObjects.in_region(key).size());
         work.push_back(RegionWork{key, 0, count, 0, 0});
     }
+    if (m_fieldPages.empty())
+        return work;
+    for (const auto& [key, record] : records) {
+        if (record.state == RegionState::Frozen)
+            continue;
+        const auto count = static_cast<std::uint64_t>(m_fieldPages.owned_initialized_cells(key));
+        if (count != 0)
+            work.push_back(RegionWork{key, 0, 0, 0, count});
+    }
     return work;
+}
+
+std::vector<RegionKey> GameSession::SortedDueRegions() const {
+    // The schedule's own order is rank/proximity order and must not change; callers age in key
+    // order.
+    std::vector<RegionKey> due = m_regionSchedule.due;
+    std::sort(due.begin(), due.end());
+    due.erase(std::unique(due.begin(), due.end()), due.end());
+    return due;
+}
+
+void GameSession::AdvanceFieldPages(std::uint64_t tick) {
+    const std::uint64_t seed =
+        static_cast<std::uint64_t>(static_cast<std::uint32_t>(StringToSeed(m_metadata.seed)));
+    const auto& records = m_activeRegionLedger.records();
+    for (const RegionKey key : SortedDueRegions()) {
+        if (records.find(key) == records.end())
+            continue;
+        if (!m_fieldPages.activate_region(key, seed, tick))
+            ++m_regionInputRejections.field_pages;
+        m_fieldPages.step_region(key, seed, tick);
+    }
 }
 
 void GameSession::SetRegionSchedulerConfig(RegionSchedulerConfig config) {
@@ -1448,6 +1483,7 @@ void GameSession::SetRegionSchedulerConfig(RegionSchedulerConfig config) {
         throw std::logic_error("Set region scheduler configuration before creating a world");
     m_activeRegionLedger = ActiveRegionLedger(config);
     m_groundObjects.clear();
+    m_fieldPages.clear();
     m_regionSchedulerConfig = config;
 }
 void GameSession::LatchRegionFault(std::uint64_t tick, std::string message) {
@@ -1605,10 +1641,7 @@ bool GameSession::MarkGroundRegionEdited(const GroundObject& object) {
 }
 
 void GameSession::AdvanceGroundObjects(std::uint64_t tick) {
-    // The schedule's own order is rank/proximity order and must not change; age in key order.
-    std::vector<RegionKey> due = m_regionSchedule.due;
-    std::sort(due.begin(), due.end());
-    due.erase(std::unique(due.begin(), due.end()), due.end());
+    const std::vector<RegionKey> due = SortedDueRegions();
     // Resident chunk columns, built on the first unsettled object of this call.
     std::optional<std::set<std::pair<int, int>>> columns;
     const auto settle = [this, &columns](GroundObject& object) {
@@ -1713,7 +1746,8 @@ std::string GameSession::FoldClockIntoEcologyHash(const std::string& ecology_has
     return m_activeRegionsEnabled
                ? Persistence::StableChecksum(ecology_hash + m_worldClock.canonical_bytes() +
                                              m_activeRegionLedger.canonical_bytes() +
-                                             m_groundObjects.canonical_bytes())
+                                             m_groundObjects.canonical_bytes() +
+                                             m_fieldPages.canonical_bytes())
                : ecology_hash;
 }
 
@@ -1864,6 +1898,13 @@ bool GameSession::SaveWorldMetadataTo(const fs::path& save_dir) {
                 m_groundObjects, save_dir, &ground_errors)) {
             for (const std::string& error : ground_errors)
                 LUMINUMBRA_CORE_ERROR("Ground object save failed: {}", error);
+            return false;
+        }
+        std::vector<std::string> page_errors;
+        if (!Persistence::WorldSaveService::save_field_pages(
+                m_fieldPages, save_dir, &page_errors)) {
+            for (const std::string& error : page_errors)
+                LUMINUMBRA_CORE_ERROR("Field page save failed: {}", error);
             return false;
         }
         if (!Persistence::WorldSaveService::save_metadata_and_active_regions(
@@ -2167,7 +2208,17 @@ bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
             m_worldSystem->clear_world(m_physicsSystem.get());
             return false;
         }
+        FieldPageState field_pages;
+        std::vector<std::string> page_errors;
+        if (!Persistence::WorldSaveService::load_field_pages(field_pages, save_dir, &page_errors)) {
+            m_ambientFieldAnchor = previous_ambient_anchor;
+            m_worldOpenError =
+                page_errors.empty() ? std::string("Corrupt field pages.") : page_errors.front();
+            m_worldSystem->clear_world(m_physicsSystem.get());
+            return false;
+        }
         m_groundObjects = std::move(ground_objects);
+        m_fieldPages = std::move(field_pages);
         m_activeRegionLedger = std::move(ledger);
         if (!m_activeRegionLedger.local_anchor())
             m_activeRegionLedger.try_set_local_anchor(m_metadata.spawnPoint);

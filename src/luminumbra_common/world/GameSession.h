@@ -8,6 +8,7 @@
 #include "../ai/ThirstSystem.h"               // ai::ThirstTuning
 #include "../ai/WildlifeFoliageSystem.h"      // ai::WildlifeFoliageTuning (full-control)
 #include "../core/SimulationClock.h"
+#include "../fields/FieldPageState.h"
 #include "../simulation/SimBudgetTelemetry.h"
 #include "../simulation/SimulationEventBus.h"
 #include "../systems/PollinationSystem.h"
@@ -397,6 +398,9 @@ public:
     [[nodiscard]] const GroundObjectStore& GetGroundObjects() const {
         return m_groundObjects;
     }
+    [[nodiscard]] const FieldPageState& GetFieldPages() const {
+        return m_fieldPages;
+    }
     // A fatal scheduler/obligation fault. Once latched the session is fail-stop: the
     // simulation clock is rewound to the faulting tick, no further ticks run, and hosts
     // are expected to save and stop. Saving a faulted session is allowed.
@@ -408,6 +412,7 @@ public:
     struct RegionInputRejections {
         std::uint32_t anchors = 0, edits = 0, pins = 0;
         std::uint32_t ground_spawns = 0;
+        std::uint32_t field_pages = 0;
     };
     [[nodiscard]] const std::optional<RegionSchedulerFault>& GetRegionSchedulerFault() const {
         return m_regionFault;
@@ -509,14 +514,19 @@ private:
     RegionInputRejections m_regionInputRejections;
     // Authoritative in-memory ground objects (S5). Empty unless spawned with the flag on.
     GroundObjectStore m_groundObjects;
+    // Authoritative in-memory field pages (S6). Empty unless the region flag is on.
+    FieldPageState m_fieldPages;
     void LatchRegionFault(std::uint64_t tick, std::string message);
     void RunRegionScheduler(std::uint64_t current_tick);
-    // Returns `work` plus one entry per ground-object region that has a ledger record and is not
-    // frozen. Derived from persisted state only.
-    [[nodiscard]] std::vector<RegionWork>
-    AppendGroundObjectWork(std::vector<RegionWork> work) const;
+    // Returns `work` plus one entry per ground-object region and one per field-page region that
+    // has a ledger record and is not frozen. Derived from persisted state only.
+    [[nodiscard]] std::vector<RegionWork> AppendConsumerWork(std::vector<RegionWork> work) const;
+    // Sorted, de-duplicated due regions of the current schedule.
+    [[nodiscard]] std::vector<RegionKey> SortedDueRegions() const;
     // Ages the due, owned regions' ground objects by one tick and publishes despawns.
     void AdvanceGroundObjects(std::uint64_t tick);
+    // Activates and steps the due, ledger-backed regions' field pages by one tick.
+    void AdvanceFieldPages(std::uint64_t tick);
     // Ledger edit mark for a ground object's region. False when refused (fault or counted reject).
     bool MarkGroundRegionEdited(const GroundObject& object);
     std::filesystem::path m_regionDurableDirectory;

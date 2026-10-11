@@ -35,6 +35,7 @@
 
 #include "luminumbra_common/core/JobSystem.h"
 #include "luminumbra_common/fields/EnergyFieldState.h"
+#include "luminumbra_common/fields/FieldPageState.h"
 #include "luminumbra_common/persistence/SaveTransaction.h"
 #include "luminumbra_common/persistence/WorldSaveService.h"
 #include "luminumbra_common/scripting/LuaState.h"
@@ -2590,4 +2591,206 @@ TEST(GameSessionHeadlessWorldTest, FlagOnIndexedSaveWithGroundObjectsReloadsThro
     EnableSnapshotSession(loaded, root, jobs);
     ASSERT_TRUE(loaded.LoadWorld(owner.GetMetadata().worldId)) << loaded.GetWorldOpenError();
     EXPECT_EQ(loaded.GetGroundObjects().size(), 2u);
+}
+
+namespace {
+
+fs::path FieldPagePath(const fs::path& save) {
+    return save / Luminumbra::world::FieldPageState::kRelativePath;
+}
+
+} // namespace
+
+TEST(GameSessionHeadlessWorldTest, FieldPagesFlagOffLeavesNoFileAndNoPages) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    session.SetRootPath(root.root_string());
+    session.SetJobSystem(&jobs);
+    ASSERT_TRUE(session.CreateWorld("Field off", "1337", "default"));
+    ASSERT_NO_FATAL_FAILURE(AdoptRegionGoldenChunk(session, 0));
+    ASSERT_NO_FATAL_FAILURE(TickOnce(session));
+    ASSERT_TRUE(session.SaveWorld());
+    EXPECT_TRUE(session.GetFieldPages().empty());
+    EXPECT_FALSE(fs::exists(FieldPagePath(session.GetWorldSaveDir())));
+}
+
+TEST(GameSessionHeadlessWorldTest, FieldPagesInitializeOnFirstDueTick) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    CreateGroundWorld(session, root, jobs, "Field init");
+    ASSERT_EQ(SpawnGround(session, 5200, -1500), 1u);
+    ASSERT_NO_FATAL_FAILURE(TickOnce(session));
+    const auto& ledger = session.GetActiveRegionLedger().records();
+    ASSERT_EQ(ledger.count(kGroundRegion), 1u);
+    const auto& due = session.GetRegionSchedule().due;
+    ASSERT_NE(std::find(due.begin(), due.end(), kGroundRegion), due.end());
+    EXPECT_GT(session.GetFieldPages().owned_initialized_cells(kGroundRegion), 0u);
+    EXPECT_TRUE(session.GetFieldPages().owns_region(kGroundRegion));
+}
+
+TEST(GameSessionHeadlessWorldTest, FieldPagesStepOncePerDueTickTowardTarget) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session, twin;
+    CreateGroundWorld(session, root, jobs, "Field step");
+    CreateGroundWorld(twin, root, jobs, "Field step twin");
+    for (auto* s : {&session, &twin})
+        ASSERT_EQ(SpawnGround(*s, 5200, -1500), 1u);
+    ASSERT_NO_FATAL_FAILURE(TickOnce(session));
+    ASSERT_NO_FATAL_FAILURE(TickOnce(twin));
+    std::string previous = session.GetFieldPages().region_bytes(kGroundRegion);
+    ASSERT_FALSE(previous.empty());
+    std::size_t changes = 0;
+    for (int i = 0; i < 24; ++i) {
+        TickOnce(session);
+        TickOnce(twin);
+        const auto current = session.GetFieldPages().region_bytes(kGroundRegion);
+        if (current != previous)
+            ++changes;
+        previous = current;
+        EXPECT_EQ(current, twin.GetFieldPages().region_bytes(kGroundRegion)) << "tick " << i;
+    }
+    // The target changes every 8 ticks (new epoch), so the cells must move at some point.
+    EXPECT_GT(changes, 0u);
+}
+
+TEST(GameSessionHeadlessWorldTest, FieldPagesFrozenRegionDoesNotChange) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    EnableSnapshotSession(session, root, jobs);
+    session.SetRegionSchedulerConfig({0, 2, 1});
+    ASSERT_TRUE(session.CreateWorld("Field frozen", "1337", "default"));
+    ASSERT_EQ(SpawnGround(session, 5200, -1500), 1u);
+    std::string frozen_bytes;
+    std::size_t frozen_ticks = 0;
+    for (int i = 0; i < 10; ++i) {
+        TickOnce(session);
+        if (session.GetActiveRegionLedger().records().at(kGroundRegion).state ==
+            Luminumbra::world::RegionState::Frozen) {
+            const auto current = session.GetFieldPages().region_bytes(kGroundRegion);
+            if (frozen_ticks == 0)
+                frozen_bytes = current;
+            EXPECT_EQ(current, frozen_bytes) << "tick " << i;
+            ++frozen_ticks;
+        }
+    }
+    EXPECT_GT(frozen_ticks, 0u);
+    EXPECT_FALSE(session.GetFieldPages().empty());
+}
+
+TEST(GameSessionHeadlessWorldTest, FieldPagesSaveLoadContinueMatchesUninterruptedTwin) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession original, uninterrupted, loaded;
+    CreateGroundWorld(original, root, jobs, "Field resume");
+    CreateGroundWorld(uninterrupted, root, jobs, "Field twin");
+    for (auto* s : {&original, &uninterrupted})
+        ASSERT_EQ(SpawnGround(*s, 5200, -1500), 1u);
+    for (int i = 0; i < 3; ++i) {
+        TickOnce(original);
+        TickOnce(uninterrupted);
+    }
+    ASSERT_FALSE(original.GetFieldPages().empty());
+    ASSERT_TRUE(original.SaveWorldState());
+    EnableSnapshotSession(loaded, root, jobs);
+    ASSERT_TRUE(loaded.LoadWorld(original.GetMetadata().worldId)) << loaded.GetWorldOpenError();
+    EXPECT_EQ(loaded.GetFieldPages().serialize(), original.GetFieldPages().serialize());
+    for (int i = 0; i < 5; ++i) {
+        TickOnce(uninterrupted);
+        TickOnce(loaded);
+        EXPECT_EQ(loaded.GetRegionSchedule(), uninterrupted.GetRegionSchedule());
+        EXPECT_EQ(loaded.GetFieldPages().serialize(), uninterrupted.GetFieldPages().serialize());
+        EXPECT_EQ(SessionWorldHash(loaded), SessionWorldHash(uninterrupted));
+    }
+}
+
+TEST(GameSessionHeadlessWorldTest, FieldPagesMetadataOnlySaveWritesFile) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    CreateGroundWorld(session, root, jobs, "Field metadata");
+    ASSERT_EQ(SpawnGround(session, 5200, -1500), 1u);
+    ASSERT_NO_FATAL_FAILURE(TickOnce(session));
+    ASSERT_FALSE(session.GetFieldPages().empty());
+    ASSERT_TRUE(session.SaveWorld());
+    const auto path = FieldPagePath(session.GetWorldSaveDir());
+    ASSERT_TRUE(fs::exists(path));
+    EXPECT_EQ(ReadClockTestFile(path), session.GetFieldPages().serialize());
+}
+
+TEST(GameSessionHeadlessWorldTest, FieldPagesCorruptFileRefusesToOpen) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession owner, control, victim;
+    CreateGroundWorld(owner, root, jobs, "Field corrupt");
+    ASSERT_EQ(SpawnGround(owner, 5200, -1500), 1u);
+    ASSERT_NO_FATAL_FAILURE(TickOnce(owner));
+    ASSERT_TRUE(owner.SaveWorldState());
+    const auto save = owner.GetWorldSaveDir();
+    ASSERT_TRUE(P::WorldSaveService::forget_snapshot_index_for_testing(save));
+    EnableSnapshotSession(control, root, jobs);
+    ASSERT_TRUE(control.LoadWorld(owner.GetMetadata().worldId)) << control.GetWorldOpenError();
+    std::ofstream(FieldPagePath(save), std::ios::binary) << "FPG1";
+    EnableSnapshotSession(victim, root, jobs);
+    EXPECT_FALSE(victim.LoadWorld(owner.GetMetadata().worldId));
+    EXPECT_FALSE(victim.GetWorldOpenError().empty());
+    EXPECT_TRUE(victim.GetFieldPages().empty());
+}
+
+TEST(GameSessionHeadlessWorldTest, FieldPagesChangeTheWorldHash) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    CreateGroundWorld(session, root, jobs, "Field hash");
+    ASSERT_EQ(SpawnGround(session, 5200, -1500), 1u);
+    const auto before = SessionWorldHash(session);
+    ASSERT_NO_FATAL_FAILURE(TickOnce(session));
+    ASSERT_FALSE(session.GetFieldPages().empty());
+    EXPECT_NE(SessionWorldHash(session), before);
+}
+
+TEST(GameSessionHeadlessWorldTest, FieldPagesAreListedInTheSnapshotIndex) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession owner, loaded;
+    CreateGroundWorld(owner, root, jobs, "Field snapshot");
+    ASSERT_EQ(SpawnGround(owner, 5200, -1500), 1u);
+    ASSERT_NO_FATAL_FAILURE(TickOnce(owner));
+    ASSERT_TRUE(owner.SaveWorldState());
+    const auto save = owner.GetWorldSaveDir();
+    ASSERT_TRUE(P::snapshot_index_exists(save));
+    P::SnapshotIndex index;
+    ASSERT_TRUE(P::read_snapshot_index(save, index, nullptr));
+    EXPECT_TRUE(std::any_of(
+        index.members.begin(), index.members.end(), [](const P::SnapshotMember& member) {
+            return member.path == "chunks/region/field-pages.fpg" && member.present;
+        }));
+}
+
+TEST(GameSessionHeadlessWorldTest, FieldPagesAndGroundObjectsBothSchedule) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    CreateGroundWorld(session, root, jobs, "Field ground");
+    ASSERT_EQ(SpawnGround(session, 5200, -1500), 1u);
+    ASSERT_NO_FATAL_FAILURE(TickOnce(session));
+    ASSERT_EQ(SpawnGround(session, 5300, -1500), 2u);
+    ASSERT_NO_FATAL_FAILURE(TickOnce(session));
+    EXPECT_FALSE(session.GetRegionSchedulerFault().has_value());
+    EXPECT_FALSE(session.GetGroundObjects().empty());
+    EXPECT_FALSE(session.GetFieldPages().empty());
+    EXPECT_TRUE(session.GetFieldPages().owns_region(kGroundRegion));
 }
