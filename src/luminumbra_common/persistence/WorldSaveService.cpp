@@ -1278,7 +1278,12 @@ bool WorldSaveService::load_ground_objects(world::GroundObjectStore& out,
                                            std::vector<std::string>* errors) {
     const std::filesystem::path path = ground_objects_path(save_dir);
     std::error_code ec;
-    if (!std::filesystem::exists(path, ec)) {
+    const bool present = std::filesystem::exists(path, ec);
+    if (ec) {
+        AddError(errors, "failed to inspect ground objects file: " + ec.message());
+        return false;
+    }
+    if (!present) {
         out.clear();
         return true; // clean miss: a world without ground objects
     }
@@ -1290,6 +1295,10 @@ bool WorldSaveService::load_ground_objects(world::GroundObjectStore& out,
     // One byte past the cap so an oversized file is refused by parse rather than truncated.
     std::string bytes(world::GroundObjectStore::kMaxFileBytes + 1, '\0');
     in.read(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+    if (in.bad()) {
+        AddError(errors, "failed to read ground objects file: " + path.string());
+        return false;
+    }
     bytes.resize(static_cast<std::size_t>(in.gcount()));
     world::GroundObjectStore parsed;
     std::string error;
@@ -1326,9 +1335,19 @@ bool WorldSaveService::validate_ground_objects(const std::filesystem::path& save
                                                const world::ActiveRegionLedger& ledger,
                                                std::vector<std::string>* errors) {
     std::error_code ec;
-    if (!std::filesystem::exists(ground_objects_path(save_dir), ec))
+    const bool has_objects = std::filesystem::exists(ground_objects_path(save_dir), ec);
+    if (ec) {
+        AddError(errors, "failed to inspect ground objects file: " + ec.message());
+        return false;
+    }
+    if (!has_objects)
         return true;
-    if (!std::filesystem::exists(active_regions_path(save_dir), ec)) {
+    const bool has_ledger = std::filesystem::exists(active_regions_path(save_dir), ec);
+    if (ec) {
+        AddError(errors, "failed to inspect active regions file: " + ec.message());
+        return false;
+    }
+    if (!has_ledger) {
         // A ledger-less save has no records, so every ground object is orphaned.
         AddError(errors, "corrupt ground objects: orphaned object");
         return false;
