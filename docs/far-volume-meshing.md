@@ -65,6 +65,12 @@ Adjacent tiles therefore use the same coordinates and samples for both positions
 and normals, including curved boundaries, without accumulating unrelated faces.
 All unique resident and halo sample calls are cached and counted once.
 
+Normals are render-only data and are not part of any hash or cross-host identity.
+They are reproducible on one build (the tests compare bit patterns within a
+process), and the normalization uses a correctly rounded square root, but
+interpolation may still differ in the last bit between compilers or ISAs that
+contract multiply-adds differently. Vertex positions and densities are exact.
+
 A required halo coordinate outside signed 64-bit range refuses the operation.
 A zero interpolated gradient also refuses it; substituting a local face normal
 would not satisfy the shared-normal contract. These are concrete kernel limits,
