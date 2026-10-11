@@ -43,6 +43,14 @@ and content formats may still change.
 
   The resolution is baked into the hashed water grids, so every peer in a session
   must match and enabling the flag deliberately changes the world hash.
+- **Determinism is pinned for x86 hosts only.** Terrain generation and the
+  ambient (wind, weather, aether) fields cap FastNoise at its AVX2 implementation
+  on x86, so AVX2 and AVX-512 hosts produce the same world hashes. Non-x86
+  hosts (for example ARM with NEON) use FastNoise's other backends, whose
+  reciprocal and reciprocal-square-root math can differ from the x86 AVX2 path.
+  Bit-identical worlds across architectures are therefore not claimed, and the
+  world-hash fixtures are exercised on x86 hosts only. See
+  [active regions](active-regions.md) for the investigation of the x86 case.
 - **Physics acoustic materials use a limited classifier.** Raycasts return real
   Jolt body surface normals oriented against the ray. With a world attached,
   terrain hits use its voxel/biome-derived surface materials and dynamic bodies
