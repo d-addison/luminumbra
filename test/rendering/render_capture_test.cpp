@@ -1265,6 +1265,32 @@ TEST(RenderGraph, CanonicalGraphSchedulesToAuthoredOrderAndValidatesClean) {
     EXPECT_LT(index_of("god_rays"), index_of("final_blit"));
     // the tint cascade flows shadow -> lighting.
     EXPECT_LT(index_of("shadow"), index_of("lighting"));
+
+    // index_of returns scheduled.size() for a missing node, so existence is checked first.
+    const auto schedule_size = static_cast<std::ptrdiff_t>(scheduled.size());
+    EXPECT_LT(index_of("god_rays"), schedule_size) << "god_rays missing from schedule";
+    EXPECT_LT(index_of("foliage"), schedule_size) << "foliage missing from schedule";
+    EXPECT_LT(index_of("weather_overlay"), schedule_size) << "weather_overlay missing";
+    EXPECT_LT(index_of("aerial"), schedule_size) << "aerial missing from schedule";
+    EXPECT_LT(index_of("taau_resolve"), schedule_size) << "taau_resolve missing from schedule";
+    EXPECT_LT(index_of("particles"), schedule_size) << "particles missing from schedule";
+    EXPECT_LT(index_of("god_rays"), index_of("foliage"));
+    EXPECT_LT(index_of("foliage"), index_of("weather_overlay"));
+    EXPECT_LT(index_of("weather_overlay"), index_of("aerial"));
+    EXPECT_LT(index_of("aerial"), index_of("taau_resolve"));
+    EXPECT_LT(index_of("taau_resolve"), index_of("particles"));
+
+    // The foliage node must read and write the shared lighting depth.
+    const auto& nodes = g.nodes();
+    auto is_foliage = [](const R::RenderGraphNode& n) {
+        return n.name == "foliage";
+    };
+    const auto foliage_node = std::find_if(nodes.begin(), nodes.end(), is_foliage);
+    ASSERT_NE(foliage_node, nodes.end());
+    EXPECT_NE(std::find(foliage_node->reads.begin(), foliage_node->reads.end(), "lighting.depth"),
+              foliage_node->reads.end());
+    EXPECT_NE(std::find(foliage_node->writes.begin(), foliage_node->writes.end(), "lighting.depth"),
+              foliage_node->writes.end());
 }
 
 // the tinted-transmission model (GlassTintModel.h) is the

@@ -7,6 +7,7 @@
 //      documented disable value could refuse world entry.
 #include <gtest/gtest.h>
 
+#include "core/BenchmarkPose.h"
 #include "player/SaveAnchor.h"
 #include "rendering/TreeImpostorPolicy.h"
 
@@ -54,4 +55,75 @@ TEST(TreeImpostorPolicy, DocumentedDisableValuesDisableEverywhere) {
     EXPECT_FALSE(TreeImpostorsRequested(std::string("0abc")));
     EXPECT_TRUE(TreeImpostorsRequested(std::string("1")));
     EXPECT_TRUE(TreeImpostorsRequested(std::string("yes")));
+}
+
+namespace {
+using Luminumbra::BenchmarkPose::SelectStreamingPosition;
+using Luminumbra::BenchmarkPose::StreamingInputs;
+
+StreamingInputs BaseInputs() {
+    StreamingInputs in{};
+    in.fixed_cam_pos = glm::vec3(1.0f, 2.0f, 3.0f);
+    in.camera_pos = glm::vec3(30.0f, 40.0f, 50.0f);
+    in.player_pos = glm::vec3(-5.0f, -6.0f, -7.0f);
+    return in;
+}
+} // namespace
+
+TEST(BenchmarkPose, FixedCameraWinsOverEverything) {
+    StreamingInputs in = BaseInputs();
+    in.fixed_cam = true;
+    in.benchmark_active = true;
+    in.has_camera = true;
+    in.cam_anchored = true;
+    in.has_player = true;
+    EXPECT_EQ(SelectStreamingPosition(in), in.fixed_cam_pos);
+}
+
+TEST(BenchmarkPose, BenchmarkWithCameraUsesDefaultPose) {
+    StreamingInputs in = BaseInputs();
+    in.benchmark_active = true;
+    in.has_camera = true;
+    in.has_player = true;
+    EXPECT_EQ(SelectStreamingPosition(in), glm::vec3(8.0f, 56.0f, 8.0f));
+}
+
+TEST(BenchmarkPose, BenchmarkWithoutCameraFallsBackToPlayer) {
+    StreamingInputs in = BaseInputs();
+    in.benchmark_active = true;
+    in.has_camera = false;
+    in.has_player = true;
+    EXPECT_EQ(SelectStreamingPosition(in), in.player_pos);
+}
+
+TEST(BenchmarkPose, InactiveBenchmarkAnchoredUsesCamera) {
+    StreamingInputs in = BaseInputs();
+    in.has_camera = true;
+    in.cam_anchored = true;
+    in.has_player = true;
+    EXPECT_EQ(SelectStreamingPosition(in), in.camera_pos);
+}
+
+TEST(BenchmarkPose, UnanchoredWithPlayerUsesPlayer) {
+    StreamingInputs in = BaseInputs();
+    in.has_camera = true;
+    in.has_player = true;
+    EXPECT_EQ(SelectStreamingPosition(in), in.player_pos);
+}
+
+TEST(BenchmarkPose, UnanchoredWithoutPlayerUsesCamera) {
+    StreamingInputs in = BaseInputs();
+    in.has_camera = true;
+    in.has_player = false;
+    EXPECT_EQ(SelectStreamingPosition(in), in.camera_pos);
+}
+
+TEST(BenchmarkPose, ConstantsMatchRenderBenchmarkDefaults) {
+    namespace BP = Luminumbra::BenchmarkPose;
+    EXPECT_FLOAT_EQ(BP::kPosX, 8.0f);
+    EXPECT_FLOAT_EQ(BP::kPosY, 56.0f);
+    EXPECT_FLOAT_EQ(BP::kPosZ, 8.0f);
+    EXPECT_FLOAT_EQ(BP::kYaw, 35.0f);
+    EXPECT_FLOAT_EQ(BP::kPitch, -6.0f);
+    EXPECT_FLOAT_EQ(BP::kTimeOfDay, 0.04f);
 }
