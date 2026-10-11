@@ -23,6 +23,9 @@ jobs:
       ASAN_OPTIONS: detect_leaks=1:abort_on_error=1:symbolize=1
       CC: gcc
       CXX: g++
+      # content: hash the compiler binary, so a runner image upgrade misses instead of replaying objects from another compiler.
+      CCACHE_COMPILERCHECK: content
+      CCACHE_MAXSIZE: 600M
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -30,13 +33,40 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            build-essential cmake extra-cmake-modules libfreetype6-dev libgl1-mesa-dev \
-            libglu1-mesa-dev libwayland-dev libxkbcommon-dev ninja-build pkg-config \
-            python3-numpy python3-pil wayland-protocols xauth xorg-dev xvfb
+            build-essential ccache cmake extra-cmake-modules libfreetype6-dev \
+            libgl1-mesa-dev libglu1-mesa-dev libwayland-dev libxkbcommon-dev \
+            ninja-build pkg-config python3-numpy python3-pil wayland-protocols \
+            xauth xorg-dev xvfb
+      - name: Restore compiler cache
+        id: ccache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ccache
+          key: ccache-asan-gcc-${{ runner.os }}-${{ github.sha }}
+          restore-keys: ccache-asan-gcc-${{ runner.os }}-
+      - name: Reset compiler cache statistics
+        run: ccache --zero-stats
       - name: Configure
-        run: cmake --preset debug-asan
+        run: cmake --preset debug-asan -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
       - name: Build
         run: cmake --build --preset debug-asan --parallel 4
+      - name: Compiler cache statistics
+        if: ${{ !cancelled() }}
+        run: |
+          ccache --show-stats --verbose
+          {
+            echo '### ccache (ccache-asan-gcc)'
+            echo '```'
+            ccache --show-stats --verbose
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      # Saved even when the build failed (partial objects are still valid) and skipped after an exact-key hit, because cache keys are immutable. The cache only ever speeds up a build; every job still compiles and tests everything it misses.
+      - name: Save compiler cache
+        if: ${{ !cancelled() && steps.ccache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ccache
+          key: ccache-asan-gcc-${{ runner.os }}-${{ github.sha }}
       - name: Test
         run: |
           env -u WAYLAND_DISPLAY XDG_SESSION_TYPE=x11 LIBGL_ALWAYS_SOFTWARE=1 \
