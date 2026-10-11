@@ -1,7 +1,9 @@
 #include "gtest/gtest.h"
 
+#include "persistence/WorldPersistenceRoundtrip.h"
 #include "persistence/WorldSaveService.h"
 #include "systems/SHIELD_WorldSystem.h"
+#include "world/GroundObjectStore.h"
 #include "world/MarchingCubes.h"
 #include "world/WorldStreamingState.h"
 
@@ -285,4 +287,133 @@ TEST(WorldSaveService, DirectLegacySnapshotsKeepMetadataAboveCatalogSizeLimit) {
     EXPECT_TRUE(errors.empty());
     EXPECT_EQ(WorldSaveService{}.world_hash(loaded), WorldSaveService{}.world_hash(original));
     EXPECT_TRUE(WorldSaveService::save_metadata(bytes, destination.path));
+}
+
+// ---- Ground objects (S5) persistence ----
+
+namespace {
+
+Luminumbra::world::GroundObject
+MakeGroundObject(std::uint64_t id, std::int64_t x_mm, std::uint64_t spawn_tick) {
+    Luminumbra::world::GroundObject object;
+    object.id = id;
+    object.type = 3;
+    object.x_mm = x_mm;
+    object.y_mm = 1000;
+    object.z_mm = -2000;
+    object.spawn_tick = spawn_tick;
+    object.payload = 7;
+    return object;
+}
+
+std::string JoinErrors(const std::vector<std::string>& errors) {
+    std::string joined;
+    for (const std::string& message : errors)
+        joined += message + "\n";
+    return joined;
+}
+
+} // namespace
+
+TEST(WorldSaveService, GroundObjectsSaveLoadRoundTripAndEmptyStoreRemovesFile) {
+    namespace fs = std::filesystem;
+    using Luminumbra::world::GroundObjectStore;
+    TempSaveDir save_dir("ground_roundtrip");
+
+    GroundObjectStore store;
+    ASSERT_TRUE(store.insert(MakeGroundObject(1, 100, 0)));
+    ASSERT_TRUE(store.insert(MakeGroundObject(5, -600000, 2)));
+    std::vector<std::string> errors;
+    ASSERT_TRUE(WorldSaveService::save_ground_objects(store, save_dir.path, &errors))
+        << JoinErrors(errors);
+    EXPECT_TRUE(fs::exists(WorldSaveService::ground_objects_path(save_dir.path)));
+
+    GroundObjectStore loaded;
+    ASSERT_TRUE(WorldSaveService::load_ground_objects(loaded, save_dir.path, 100, &errors))
+        << JoinErrors(errors);
+    EXPECT_EQ(loaded.objects(), store.objects());
+
+    ASSERT_TRUE(WorldSaveService::save_ground_objects(GroundObjectStore{}, save_dir.path, &errors));
+    EXPECT_FALSE(fs::exists(WorldSaveService::ground_objects_path(save_dir.path)));
+    GroundObjectStore absent;
+    ASSERT_TRUE(WorldSaveService::load_ground_objects(absent, save_dir.path, 100, &errors));
+    EXPECT_TRUE(absent.empty());
+}
+
+TEST(WorldSaveService, GroundObjectIdAtOrAboveNextIdIsRefused) {
+    using Luminumbra::world::GroundObjectStore;
+    TempSaveDir save_dir("ground_next_id");
+    GroundObjectStore store;
+    ASSERT_TRUE(store.insert(MakeGroundObject(5, 100, 0)));
+    std::vector<std::string> errors;
+    ASSERT_TRUE(WorldSaveService::save_ground_objects(store, save_dir.path, &errors));
+
+    GroundObjectStore loaded;
+    EXPECT_FALSE(WorldSaveService::load_ground_objects(loaded, save_dir.path, 5, &errors));
+    EXPECT_TRUE(loaded.empty()) << "a refused load leaves the output untouched";
+    EXPECT_TRUE(WorldSaveService::load_ground_objects(loaded, save_dir.path, 6, &errors));
+    EXPECT_EQ(loaded.size(), 1u);
+}
+
+TEST(WorldSaveService, CorruptGroundObjectsFileIsRefusedByLoadAndMemberDigest) {
+    TempSaveDir save_dir("ground_corrupt");
+    const auto path = WorldSaveService::ground_objects_path(save_dir.path);
+    std::filesystem::create_directories(path.parent_path());
+    {
+        std::ofstream out(path, std::ios::binary);
+        out << "{\"schema\":\"luminumbra.ground_objects.v1\",\"objects\":[";
+    }
+    Luminumbra::world::GroundObjectStore loaded;
+    std::vector<std::string> errors;
+    EXPECT_FALSE(WorldSaveService::load_ground_objects(loaded, save_dir.path, 100, &errors));
+    EXPECT_FALSE(errors.empty());
+
+    Luminumbra::Persistence::MemberDigest digest;
+    std::string error;
+    EXPECT_FALSE(WorldSaveService::member_digest(
+        save_dir.path, "chunks/region/ground-objects.json", digest, error));
+    EXPECT_FALSE(error.empty());
+}
+
+TEST(WorldSaveService, GroundObjectWithoutLedgerIsRefusedByLoadWorld) {
+    TempSaveDir save_dir("ground_orphan");
+    WorldSaveService service;
+    WorldStreamingState original;
+    PopulateFixtureWorld(original);
+    std::vector<std::string> save_errors;
+    ASSERT_TRUE(service.save_world(original, save_dir.path, &save_errors));
+
+    Luminumbra::world::GroundObjectStore store;
+    ASSERT_TRUE(store.insert(MakeGroundObject(1, 100, 0)));
+    ASSERT_TRUE(WorldSaveService::save_ground_objects(store, save_dir.path, &save_errors));
+
+    WorldStreamingState restored;
+    std::vector<std::string> load_errors;
+    EXPECT_FALSE(service.load_world(restored, save_dir.path, load_errors));
+    EXPECT_NE(JoinErrors(load_errors).find("corrupt ground objects: orphaned object"),
+              std::string::npos)
+        << JoinErrors(load_errors);
+}
+
+TEST(WorldSaveService, RegionDigestIgnoresEmptyGroundBytesAndSeparatesNonEmptyBytes) {
+    using Luminumbra::world::RegionKey;
+    const std::filesystem::path no_dir;
+    const RegionKey key{0, 0};
+
+    const std::uint64_t plain = WorldSaveService::region_simulation_digest(no_dir, key, {});
+    WorldStreamingState empty_state;
+    EXPECT_EQ(
+        plain,
+        std::stoull(Luminumbra::Persistence::ComputeRegionContentHash(empty_state), nullptr, 16));
+
+    Luminumbra::Persistence::RegionDigestInputs first;
+    first.ground_object_bytes = "1,3,100,1000,-2000,0,0,0,7,0;";
+    Luminumbra::Persistence::RegionDigestInputs second;
+    second.ground_object_bytes = "1,3,101,1000,-2000,0,0,0,7,0;";
+    const std::uint64_t with_first = WorldSaveService::region_simulation_digest(no_dir, key, first);
+    const std::uint64_t with_second =
+        WorldSaveService::region_simulation_digest(no_dir, key, second);
+    EXPECT_NE(with_first, plain);
+    EXPECT_NE(with_second, plain);
+    EXPECT_NE(with_first, with_second);
 }

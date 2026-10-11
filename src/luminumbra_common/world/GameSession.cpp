@@ -184,6 +184,7 @@ void GameSession::ResetWorldSystems() {
     m_simBudgetTelemetry.Clear();
     m_worldClock = WorldClock{};
     m_activeRegionLedger = ActiveRegionLedger(m_regionSchedulerConfig);
+    m_groundObjects.clear();
     m_regionSchedule = {};
     m_replicatedSimulationAnchors.reset();
     m_regionWork.clear();
@@ -1377,10 +1378,16 @@ void GameSession::RunRegionScheduler(std::uint64_t current_tick) {
         // Built lazily on the first probe call of this tick.
         std::optional<std::set<RegionKey>> resident_regions;
         try {
+            // Ground-object work is derived from persisted state each tick, never from a queue.
+            std::vector<RegionWork> scheduled_work;
+            if (!m_groundObjects.empty())
+                scheduled_work = AppendGroundObjectWork(m_regionWork);
+            const std::vector<RegionWork>& work =
+                m_groundObjects.empty() ? m_regionWork : scheduled_work;
             m_regionSchedule = m_activeRegionLedger.schedule(
                 m_worldClock,
                 anchors,
-                m_regionWork,
+                work,
                 [this](RegionKey key) {
                     const auto directory = m_regionDurableDirectory.empty()
                                                ? GetWorldSaveDir()
@@ -1389,14 +1396,16 @@ void GameSession::RunRegionScheduler(std::uint64_t current_tick) {
                         directory,
                         key,
                         Persistence::RegionDigestInputs{m_worldSystem->snapshot_streamed_chunks(),
-                                                        m_worldSystem->snapshot_parked_chunks()});
+                                                        m_worldSystem->snapshot_parked_chunks(),
+                                                        m_groundObjects.region_bytes(key)});
                 },
-                // Later slices extend this probe with ground objects,
-                // pages, creatures, plants and water debt.
+                // Later slices extend this probe with pages, creatures, plants and water debt.
                 [this, &resident_regions](RegionKey key) {
                     for (const auto& entry : m_regionWork)
                         if (entry.key == key)
                             return true;
+                    if (m_groundObjects.owns_region(key))
+                        return true;
                     if (!resident_regions) {
                         resident_regions.emplace();
                         for (const auto& chunk : m_worldSystem->snapshot_authoritative_chunks()) {
@@ -1412,16 +1421,33 @@ void GameSession::RunRegionScheduler(std::uint64_t current_tick) {
                     return resident_regions->contains(key);
                 });
             m_regionWork.clear();
+            if (!m_groundObjects.empty()) {
+                const std::uint64_t tick = m_worldClock.tick();
+                AdvanceGroundObjects(tick);
+            }
         } catch (const std::exception& error) {
             LatchRegionFault(current_tick, error.what());
         }
     }
 }
 
+std::vector<RegionWork> GameSession::AppendGroundObjectWork(std::vector<RegionWork> work) const {
+    const auto& records = m_activeRegionLedger.records();
+    for (const RegionKey key : m_groundObjects.regions()) {
+        const auto record = records.find(key);
+        if (record == records.end() || record->second.state == RegionState::Frozen)
+            continue;
+        const auto count = static_cast<std::uint64_t>(m_groundObjects.in_region(key).size());
+        work.push_back(RegionWork{key, 0, count, 0, 0});
+    }
+    return work;
+}
+
 void GameSession::SetRegionSchedulerConfig(RegionSchedulerConfig config) {
     if (m_worldSystem)
         throw std::logic_error("Set region scheduler configuration before creating a world");
     m_activeRegionLedger = ActiveRegionLedger(config);
+    m_groundObjects.clear();
     m_regionSchedulerConfig = config;
 }
 void GameSession::LatchRegionFault(std::uint64_t tick, std::string message) {
@@ -1471,6 +1497,134 @@ void GameSession::RecordActiveRegionWork(RegionWork work) {
     if (m_activeRegionsEnabled && !m_regionFault)
         m_regionWork.push_back(work);
 }
+
+namespace {
+
+std::string GroundEventPayload(const GroundObject& object) {
+    return std::to_string(object.id) + "," + std::to_string(object.type) + "," +
+           std::to_string(object.x_mm) + "," + std::to_string(object.y_mm) + "," +
+           std::to_string(object.z_mm);
+}
+
+// Floor division for a positive divisor: negative quotients round toward minus infinity.
+std::int64_t FloorDivide(std::int64_t value, std::int64_t divisor) {
+    const std::int64_t quotient = value / divisor;
+    return (value % divisor != 0 && value < 0) ? quotient - 1 : quotient;
+}
+
+// (chunk x, chunk z) of every streamed chunk that is not still loading.
+std::set<std::pair<int, int>>
+ResidentChunkColumns(const std::vector<std::shared_ptr<Luminumbra::Chunk>>& chunks) {
+    std::set<std::pair<int, int>> columns;
+    for (const auto& chunk : chunks) {
+        if (!chunk || chunk->get_state() == ChunkState::Loading)
+            continue;
+        columns.emplace(chunk->get_coords().x, chunk->get_coords().z);
+    }
+    return columns;
+}
+
+// Settles an unsettled object onto the procedural terrain height (voxel edits are ignored, D6).
+// Returns false, leaving the object unchanged, when its chunk column is not resident or the
+// height is not finite.
+bool SettleGroundObjectOnTerrain(GroundObject& object,
+                                 const std::set<std::pair<int, int>>& columns,
+                                 const Systems::SHIELD_WorldSystem& world) {
+    if (object.settled())
+        return true;
+    const std::int64_t column_x_mm = static_cast<std::int64_t>(CHUNK_SIZE_X) * 1000;
+    const std::int64_t column_z_mm = static_cast<std::int64_t>(CHUNK_SIZE_Z) * 1000;
+    const std::pair<int, int> column{static_cast<int>(FloorDivide(object.x_mm, column_x_mm)),
+                                     static_cast<int>(FloorDivide(object.z_mm, column_z_mm))};
+    if (!columns.contains(column))
+        return false;
+    const float height = world.GetTerrainHeightAt(static_cast<float>(object.x_mm) / 1000.0f,
+                                                  static_cast<float>(object.z_mm) / 1000.0f);
+    if (!std::isfinite(height))
+        return false;
+    const double y_mm = std::clamp(static_cast<double>(height) * 1000.0, -1.6e10, 1.6e10);
+    object.y_mm = std::llround(y_mm);
+    object.flags = static_cast<std::uint16_t>(object.flags | GroundObject::kSettled);
+    return true;
+}
+
+} // namespace
+
+std::uint64_t GameSession::SpawnGroundObject(std::uint32_t type,
+                                             std::int64_t x_mm,
+                                             std::int64_t y_mm,
+                                             std::int64_t z_mm,
+                                             std::uint64_t despawn_after,
+                                             std::uint32_t payload) {
+    if (!m_activeRegionsEnabled)
+        return 0;
+    const std::uint64_t tick = m_worldClock.tick();
+    // Probe candidate: the real id is allocated only once the candidate is accepted.
+    GroundObject candidate;
+    candidate.id = 1;
+    candidate.type = type;
+    candidate.x_mm = x_mm;
+    candidate.y_mm = y_mm;
+    candidate.z_mm = z_mm;
+    candidate.spawn_tick = tick;
+    candidate.despawn_after = despawn_after;
+    candidate.payload = payload;
+    if (!m_worldSystem || m_regionFault.has_value() ||
+        m_groundObjects.size() >= GroundObjectStore::kMaxObjects ||
+        !GroundObjectStore::valid(candidate)) {
+        ++m_regionInputRejections.ground_spawns;
+        return 0;
+    }
+    std::uint64_t id = 0;
+    if (!m_activeRegionLedger.allocate_persistent_id(id)) {
+        LatchRegionFault(tick, "persistent id space exhausted");
+        return 0;
+    }
+    // A failure from here on still consumes the id.
+    candidate.id = id;
+    if (!m_groundObjects.insert(candidate))
+        return 0;
+    if (!MarkGroundRegionEdited(candidate)) {
+        m_groundObjects.erase(id);
+        return 0;
+    }
+    m_simulationEventBus.publish(tick, "ground.spawned", GroundEventPayload(candidate));
+    return id;
+}
+
+bool GameSession::MarkGroundRegionEdited(const GroundObject& object) {
+    try {
+        m_activeRegionLedger.mark_edited(GroundObjectStore::region_of(object), m_worldClock);
+        return true;
+    } catch (const std::length_error& error) {
+        LatchRegionFault(m_worldClock.tick(), error.what());
+    } catch (const std::invalid_argument&) {
+        ++m_regionInputRejections.edits;
+    }
+    return false;
+}
+
+void GameSession::AdvanceGroundObjects(std::uint64_t tick) {
+    // The schedule's own order is rank/proximity order and must not change; age in key order.
+    std::vector<RegionKey> due = m_regionSchedule.due;
+    std::sort(due.begin(), due.end());
+    due.erase(std::unique(due.begin(), due.end()), due.end());
+    // Resident chunk columns, built on the first unsettled object of this call.
+    std::optional<std::set<std::pair<int, int>>> columns;
+    const auto settle = [this, &columns](GroundObject& object) {
+        if (!columns.has_value())
+            columns = ResidentChunkColumns(m_worldSystem->snapshot_streamed_chunks());
+        return SettleGroundObjectOnTerrain(object, columns.value(), *m_worldSystem);
+    };
+    for (const RegionKey key : due) {
+        if (!m_groundObjects.owns_region(key))
+            continue;
+        const GroundObjectStore::AgeResult result = m_groundObjects.age_region(key, settle);
+        for (const GroundObject& object : result.despawned)
+            m_simulationEventBus.publish(tick, "ground.despawned", GroundEventPayload(object));
+    }
+}
+
 void GameSession::AttachRegionEditObserver() {
     if (m_activeRegionsEnabled && m_worldSystem) {
         m_worldSystem->set_durable_residency(true);
@@ -1558,7 +1712,8 @@ void GameSession::RecordPersistenceSaveOutcome(bool ok, double elapsed_ms) {
 std::string GameSession::FoldClockIntoEcologyHash(const std::string& ecology_hash) const {
     return m_activeRegionsEnabled
                ? Persistence::StableChecksum(ecology_hash + m_worldClock.canonical_bytes() +
-                                             m_activeRegionLedger.canonical_bytes())
+                                             m_activeRegionLedger.canonical_bytes() +
+                                             m_groundObjects.canonical_bytes())
                : ecology_hash;
 }
 
@@ -1703,6 +1858,14 @@ bool GameSession::SaveWorldMetadataTo(const fs::path& save_dir) {
         // All production callers save synchronously on the host thread: client
         // world creation/quit/shutdown and server autosave/snapshot/shutdown.
         // Do not dispatch this pair to workers; the writer asserts non-overlap.
+        // The object file joins the same transaction, so the id allocator and objects stay paired.
+        std::vector<std::string> ground_errors;
+        if (!Persistence::WorldSaveService::save_ground_objects(
+                m_groundObjects, save_dir, &ground_errors)) {
+            for (const std::string& error : ground_errors)
+                LUMINUMBRA_CORE_ERROR("Ground object save failed: {}", error);
+            return false;
+        }
         if (!Persistence::WorldSaveService::save_metadata_and_active_regions(
                 metadata_json.dump(4) + "\n", m_activeRegionLedger, save_dir))
             return false;
@@ -1992,6 +2155,19 @@ bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
         // pair can be strictly older. Rebase its header without scheduling work,
         // so immediate edits/save stamps at the restored clock remain decodable.
         ledger.restore_clock(saved_clock);
+        // Loaded before the ledger is adopted so a refusal leaves the session state as the
+        // ledger-failure path does.
+        GroundObjectStore ground_objects;
+        std::vector<std::string> ground_errors;
+        if (!Persistence::WorldSaveService::load_ground_objects(
+                ground_objects, save_dir, ledger.next_persistent_id(), &ground_errors)) {
+            m_ambientFieldAnchor = previous_ambient_anchor;
+            m_worldOpenError = ground_errors.empty() ? std::string("Corrupt ground objects.")
+                                                     : ground_errors.front();
+            m_worldSystem->clear_world(m_physicsSystem.get());
+            return false;
+        }
+        m_groundObjects = std::move(ground_objects);
         m_activeRegionLedger = std::move(ledger);
         if (!m_activeRegionLedger.local_anchor())
             m_activeRegionLedger.try_set_local_anchor(m_metadata.spawnPoint);

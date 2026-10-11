@@ -55,7 +55,8 @@ std::filesystem::path snapshot_index_path(const std::filesystem::path& save_dir)
 std::filesystem::path journal_directory(const std::filesystem::path& save_dir);
 
 // Allow-list for relative member paths: world_info.json, aether_state.efs and
-// chunks/region/{world-manifest.json, plant-entities.json, active-regions.arl, r.<int>.<int>.lmr}.
+// chunks/region/{world-manifest.json, plant-entities.json, ground-objects.json, active-regions.arl,
+// r.<int>.<int>.lmr}.
 // Rejects empty, absolute, drive/UNC, backslash and any ".." component. snapshot.json itself is not
 // a member.
 bool member_path_allowed(std::string_view relative_path);

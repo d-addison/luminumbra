@@ -12,6 +12,7 @@
 #include "../simulation/SimulationEventBus.h"
 #include "../systems/PollinationSystem.h"
 #include "ActiveRegionLedger.h"
+#include "GroundObjectStore.h"
 #include "WorldClock.h"
 #include "WorldMetadata.h"
 #include "entt/entt.hpp"
@@ -393,6 +394,9 @@ public:
     [[nodiscard]] const RegionSchedule& GetRegionSchedule() const {
         return m_regionSchedule;
     }
+    [[nodiscard]] const GroundObjectStore& GetGroundObjects() const {
+        return m_groundObjects;
+    }
     // A fatal scheduler/obligation fault. Once latched the session is fail-stop: the
     // simulation clock is rewound to the faulting tick, no further ticks run, and hosts
     // are expected to save and stop. Saving a faulted session is allowed.
@@ -403,6 +407,7 @@ public:
     // Observational counters of rejected host inputs; never hashed, digested or saved.
     struct RegionInputRejections {
         std::uint32_t anchors = 0, edits = 0, pins = 0;
+        std::uint32_t ground_spawns = 0;
     };
     [[nodiscard]] const std::optional<RegionSchedulerFault>& GetRegionSchedulerFault() const {
         return m_regionFault;
@@ -417,6 +422,14 @@ public:
     void NotifyGroundObjectEdit(const Vec3& position);
     void PinActiveRegion(RegionKey key, bool pinned);
     void RecordActiveRegionWork(RegionWork work);
+    // Main-thread only, like the other host inputs. Returns the new persistent id, or 0 when the
+    // flag is off (no state touched) or the spawn is refused.
+    std::uint64_t SpawnGroundObject(std::uint32_t type,
+                                    std::int64_t x_mm,
+                                    std::int64_t y_mm,
+                                    std::int64_t z_mm,
+                                    std::uint64_t despawn_after,
+                                    std::uint32_t payload);
 
     // Fold only when enabled, inside the existing ecology hash slot.
     [[nodiscard]] std::string FoldClockIntoEcologyHash(const std::string& ecology_hash) const;
@@ -494,8 +507,18 @@ private:
     std::vector<RegionWork> m_regionWork;
     std::optional<RegionSchedulerFault> m_regionFault;
     RegionInputRejections m_regionInputRejections;
+    // Authoritative in-memory ground objects (S5). Empty unless spawned with the flag on.
+    GroundObjectStore m_groundObjects;
     void LatchRegionFault(std::uint64_t tick, std::string message);
     void RunRegionScheduler(std::uint64_t current_tick);
+    // Returns `work` plus one entry per ground-object region that has a ledger record and is not
+    // frozen. Derived from persisted state only.
+    [[nodiscard]] std::vector<RegionWork>
+    AppendGroundObjectWork(std::vector<RegionWork> work) const;
+    // Ages the due, owned regions' ground objects by one tick and publishes despawns.
+    void AdvanceGroundObjects(std::uint64_t tick);
+    // Ledger edit mark for a ground object's region. False when refused (fault or counted reject).
+    bool MarkGroundRegionEdited(const GroundObject& object);
     std::filesystem::path m_regionDurableDirectory;
     // Stable only in the clock slice; world-anchored pages replace this grid in C4.
     Vec3 m_ambientFieldAnchor{};
