@@ -25,6 +25,8 @@ bool SourceMetadata(const World::FarVolumeMesh& source) {
     if (!World::ToFarTileKey(source.request.key, key))
         return false;
     const auto tier = World::FarTierAt(key.tier);
+    if (!tier)
+        return false;
     const auto edge = static_cast<std::int64_t>(tier->tile_edge_meters);
     const auto brick = static_cast<std::int64_t>(tier->brick_edge_meters);
     const auto& span = source.request.span;
@@ -76,7 +78,10 @@ bool AdaptFarVolumeRenderMesh(const World::FarVolumeMesh& source,
         if (!FloatVector(vertex.position, position) || !FloatVector(vertex.normal, normal) ||
             (normal.x == 0 && normal.y == 0 && normal.z == 0))
             return fail(FarVolumeRenderError::InvalidSource);
-        const auto edge = World::FarTierAt(source.request.key.tier)->tile_edge_meters;
+        const auto tier = World::FarTierAt(source.request.key.tier);
+        if (!tier)
+            return fail(FarVolumeRenderError::InvalidSource);
+        const auto edge = tier->tile_edge_meters;
         const auto height = source.request.span.max_y - source.request.span.min_y;
         if (vertex.position[0] < 0 || vertex.position[0] > edge || vertex.position[1] < 0 ||
             vertex.position[1] > static_cast<double>(height) || vertex.position[2] < 0 ||
