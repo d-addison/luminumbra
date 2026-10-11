@@ -7,8 +7,11 @@
 #include <bit>
 #include <cmath>
 #include <limits>
+#include <memory_resource>
+#include <optional>
 #include <stdexcept>
 #include <tuple>
+#include <vector>
 
 namespace Luminumbra::World {
 namespace {
@@ -33,9 +36,12 @@ bool TileOrigin(std::int64_t tile, std::uint32_t edge, std::int64_t& output) {
 
 class AuthoritySession {
 public:
-    AuthoritySession(const FarVolumeAuthority& authority, const FarVolumeAuthorityLimits& limits)
+    AuthoritySession(const FarVolumeAuthority& authority,
+                     const FarVolumeAuthorityLimits& limits,
+                     std::pmr::memory_resource* resource)
         : authority_(authority)
-        , limits_(limits) {}
+        , limits_(limits)
+        , heights_(resource) {}
 
     bool resolve(const FarVolumeCoverageIntent& intent, FarVolumeRequest& request) {
         const auto d = FarTierAt(intent.key.tier);
@@ -186,7 +192,7 @@ private:
     const FarVolumeAuthorityLimits limits_;
     FarTierDimensions dimensions_{};
     std::int64_t origin_x_ = 0, origin_z_ = 0;
-    std::vector<std::optional<float>> heights_;
+    std::pmr::vector<std::optional<float>> heights_;
     FarVolumeFacadeFailure failure_;
 };
 
@@ -281,6 +287,103 @@ bool ValidCompatibilityTile(const FarVolumeTile& tile, FarCaveMode caves) {
                 }
     return true;
 }
+
+enum class ChecksumStatus {
+    Ok,
+    Invalid,
+    Allocation
+};
+
+// Legacy integrity view; `resource` admits the ordering scratch.
+ChecksumStatus LegacyChecksumWith(const FarVolumeTile& tile,
+                                  FarCaveMode caves,
+                                  std::pmr::memory_resource* resource,
+                                  std::uint32_t& output) {
+    try {
+        if (!ValidCompatibilityTile(tile, caves))
+            return ChecksumStatus::Invalid;
+        const auto tier = FarTierAt(tile.request.key.tier);
+        if (!tier.has_value())
+            return ChecksumStatus::Invalid;
+        const auto edge = tier->brick_edge_meters;
+        std::pmr::vector<const FarVolumeBrick*> ordered(resource);
+        ordered.reserve(tile.bricks.size());
+        for (const auto& brick : tile.bricks)
+            ordered.push_back(&brick);
+        std::sort(ordered.begin(), ordered.end(), [](const auto* a, const auto* b) {
+            const auto& x = a->origin_meters;
+            const auto& y = b->origin_meters;
+            return std::tie(x.x, x.y, x.z) < std::tie(y.x, y.y, y.z);
+        });
+        Core::Crc32Accumulator crc;
+        Mix(crc, tile.request.key.tier, 4);
+        Mix(crc, static_cast<std::uint32_t>(tile.request.key.x), 4);
+        Mix(crc, static_cast<std::uint32_t>(tile.request.key.z), 4);
+        Mix(crc, static_cast<std::uint8_t>(caves), 1);
+        Mix(crc, static_cast<std::uint32_t>(tile.request.span.min_y / edge), 4);
+        Mix(crc, static_cast<std::uint32_t>(tile.request.span.max_y / edge), 4);
+        Mix(crc, tile.candidates_visited, 8);
+        Mix(crc, tile.bricks.size(), 8);
+        for (const auto* brick : ordered) {
+            MixBrick(crc, *brick, edge);
+            Core::Crc32Accumulator brick_crc;
+            MixBrick(brick_crc, *brick, edge);
+            Mix(crc, brick_crc.Value(), 4);
+        }
+        output = crc.Value();
+        return ChecksumStatus::Ok;
+    } catch (const std::bad_alloc&) {
+        return ChecksumStatus::Allocation;
+    }
+}
+
+FarVolumeFacadeError ChecksumFacadeCode(ChecksumStatus status) {
+    if (status == ChecksumStatus::Allocation)
+        return FarVolumeFacadeError::AllocationFailure;
+    return FarVolumeFacadeError::InvalidCompatibilityTile;
+}
+
+// Lease for one compilation phase; unbound when there is no pool.
+FarVolumeMemoryLease PhaseLease(const FarVolumeMemory& memory) {
+    return memory.pool != nullptr ? FarVolumeMemoryLease(*memory.pool) : FarVolumeMemoryLease();
+}
+
+// Memory for a sub-operation; the legacy path when there is no pool.
+FarVolumeMemory PhaseMemory(const FarVolumeMemory& memory, FarVolumeMemoryLease& lease) {
+    if (memory.pool == nullptr)
+        return {};
+    return {memory.pool, &lease, memory.upstream};
+}
+
+FarVolumeFacadeError GenerationFacadeCode(FarVolumeBuildError error) {
+    if (error == FarVolumeBuildError::AllocationFailure)
+        return FarVolumeFacadeError::AllocationFailure;
+    if (error == FarVolumeBuildError::InvalidMemory)
+        return FarVolumeFacadeError::InvalidMemory;
+    return FarVolumeFacadeError::GenerationRefused;
+}
+
+FarVolumeFacadeError MeshFacadeCode(FarVolumeMeshError error) {
+    if (error == FarVolumeMeshError::AllocationFailure)
+        return FarVolumeFacadeError::AllocationFailure;
+    if (error == FarVolumeMeshError::InvalidMemory)
+        return FarVolumeFacadeError::InvalidMemory;
+    return FarVolumeFacadeError::MeshRefused;
+}
+
+// Moves both phase leases into one retained lease. Call right after the output is
+// assigned (so the old output's buffers are freed before their charge is released);
+// it cannot fail.
+void PublishRetained(const FarVolumeMemory& memory,
+                     FarVolumeMemoryLease& tile_lease,
+                     FarVolumeMemoryLease& mesh_lease) noexcept {
+    if (memory.pool == nullptr)
+        return;
+    FarVolumeMemoryLease combined(*memory.pool);
+    combined.Absorb(std::move(tile_lease));
+    combined.Absorb(std::move(mesh_lease));
+    *memory.retained = std::move(combined);
+}
 } // namespace
 
 bool ResolveFarVolumeCoverage(const FarVolumeCoverageIntent& intent,
@@ -288,8 +391,19 @@ bool ResolveFarVolumeCoverage(const FarVolumeCoverageIntent& intent,
                               const FarVolumeAuthorityLimits& limits,
                               FarVolumeRequest& output,
                               FarVolumeFacadeFailure* failure) {
+    return ResolveFarVolumeCoverageCharged(
+        intent, authority, limits, FarVolumeMemory{}, output, failure);
+}
+
+bool ResolveFarVolumeCoverageCharged(const FarVolumeCoverageIntent& intent,
+                                     const FarVolumeAuthority& authority,
+                                     const FarVolumeAuthorityLimits& limits,
+                                     const FarVolumeMemory& memory,
+                                     FarVolumeRequest& output,
+                                     FarVolumeFacadeFailure* failure) {
     try {
-        AuthoritySession session(authority, limits);
+        FarVolumeMemoryScope scope(memory, false);
+        AuthoritySession session(authority, limits, scope.resource());
         FarVolumeRequest request;
         const bool success = session.resolve(intent, request);
         if (failure)
@@ -320,8 +434,28 @@ bool CompileFarVolume(const FarVolumeCoverageIntent& intent,
                       const FarVolumeCompilationLimits& limits,
                       FarVolumeCompilation& output,
                       FarVolumeFacadeFailure* failure) {
+    return CompileFarVolumeCharged(intent, authority, limits, FarVolumeMemory{}, output, failure);
+}
+
+bool CompileFarVolumeCharged(const FarVolumeCoverageIntent& intent,
+                             const FarVolumeAuthority& authority,
+                             const FarVolumeCompilationLimits& limits,
+                             const FarVolumeMemory& memory,
+                             FarVolumeCompilation& output,
+                             FarVolumeFacadeFailure* failure) {
     try {
-        AuthoritySession session(authority, limits.authority);
+        FarVolumeMemoryScope scope(memory, true);
+        if (!scope.valid()) {
+            if (failure)
+                *failure = {FarVolumeFacadeError::InvalidMemory,
+                            FarVolumeBuildError::None,
+                            FarVolumeMeshError::None,
+                            {}};
+            return false;
+        }
+        FarVolumeMemoryLease tile_lease = PhaseLease(memory);
+        FarVolumeMemoryLease mesh_lease = PhaseLease(memory);
+        AuthoritySession session(authority, limits.authority, scope.resource());
         const auto publish_failure = [&] {
             if (failure)
                 *failure = session.failure();
@@ -337,27 +471,31 @@ bool CompileFarVolume(const FarVolumeCoverageIntent& intent,
         const FarVolumeSampler sampler = [&](const FarVolumePosition& p) {
             return session.sample(p);
         };
-        if (!BuildFarVolumeTile(request,
-                                limits.generation,
-                                sampler,
-                                candidate.tile,
-                                &session.failure().generation)) {
-            session.fail(FarVolumeFacadeError::GenerationRefused);
+        if (!BuildFarVolumeTileCharged(request,
+                                       limits.generation,
+                                       PhaseMemory(memory, tile_lease),
+                                       sampler,
+                                       candidate.tile,
+                                       &session.failure().generation)) {
+            session.fail(GenerationFacadeCode(session.failure().generation));
             return publish_failure();
         }
-        if (!MeshFarVolumeTile(candidate.tile,
-                               request.field_identity,
-                               sampler,
-                               limits.mesh,
-                               candidate.mesh,
-                               &session.failure().mesh)) {
-            session.fail(FarVolumeFacadeError::MeshRefused);
+        if (!MeshFarVolumeTileCharged(candidate.tile,
+                                      request.field_identity,
+                                      sampler,
+                                      limits.mesh,
+                                      PhaseMemory(memory, mesh_lease),
+                                      candidate.mesh,
+                                      &session.failure().mesh)) {
+            session.fail(MeshFacadeCode(session.failure().mesh));
             return publish_failure();
         }
         if (session.authority().numeric == FarVolumeNumericProfile::LegacySigned16) {
             std::uint32_t crc = 0;
-            if (!FarVolumeLegacyChecksum(candidate.tile, session.authority().caves, crc)) {
-                session.fail(FarVolumeFacadeError::InvalidCompatibilityTile);
+            const auto status = LegacyChecksumWith(
+                candidate.tile, session.authority().caves, scope.resource(), crc);
+            if (status != ChecksumStatus::Ok) {
+                session.fail(ChecksumFacadeCode(status));
                 return publish_failure();
             }
             candidate.legacy_checksum = crc;
@@ -366,6 +504,7 @@ bool CompileFarVolume(const FarVolumeCoverageIntent& intent,
         if (failure)
             *failure = session.failure();
         output = std::move(candidate);
+        PublishRetained(memory, tile_lease, mesh_lease);
         return true;
     } catch (const std::bad_alloc&) {
         if (failure)
@@ -386,42 +525,18 @@ bool CompileFarVolume(const FarVolumeCoverageIntent& intent,
 }
 
 bool FarVolumeLegacyChecksum(const FarVolumeTile& tile, FarCaveMode caves, std::uint32_t& output) {
-    try {
-        if (!ValidCompatibilityTile(tile, caves))
-            return false;
-        const auto tier = FarTierAt(tile.request.key.tier);
-        if (!tier.has_value())
-            return false;
-        const auto edge = tier->brick_edge_meters;
-        std::vector<const FarVolumeBrick*> ordered;
-        ordered.reserve(tile.bricks.size());
-        for (const auto& brick : tile.bricks)
-            ordered.push_back(&brick);
-        std::sort(ordered.begin(), ordered.end(), [](const auto* a, const auto* b) {
-            const auto& x = a->origin_meters;
-            const auto& y = b->origin_meters;
-            return std::tie(x.x, x.y, x.z) < std::tie(y.x, y.y, y.z);
-        });
-        Core::Crc32Accumulator crc;
-        Mix(crc, tile.request.key.tier, 4);
-        Mix(crc, static_cast<std::uint32_t>(tile.request.key.x), 4);
-        Mix(crc, static_cast<std::uint32_t>(tile.request.key.z), 4);
-        Mix(crc, static_cast<std::uint8_t>(caves), 1);
-        Mix(crc, static_cast<std::uint32_t>(tile.request.span.min_y / edge), 4);
-        Mix(crc, static_cast<std::uint32_t>(tile.request.span.max_y / edge), 4);
-        Mix(crc, tile.candidates_visited, 8);
-        Mix(crc, tile.bricks.size(), 8);
-        for (const auto* brick : ordered) {
-            MixBrick(crc, *brick, edge);
-            Core::Crc32Accumulator brick_crc;
-            MixBrick(brick_crc, *brick, edge);
-            Mix(crc, brick_crc.Value(), 4);
-        }
-        output = crc.Value();
-        return true;
-    } catch (const std::bad_alloc&) {
+    return LegacyChecksumWith(tile, caves, std::pmr::new_delete_resource(), output) ==
+           ChecksumStatus::Ok;
+}
+
+bool FarVolumeLegacyChecksumCharged(const FarVolumeTile& tile,
+                                    FarCaveMode caves,
+                                    const FarVolumeMemory& memory,
+                                    std::uint32_t& output) {
+    FarVolumeMemoryScope scope(memory, false);
+    if (!scope.valid())
         return false;
-    }
+    return LegacyChecksumWith(tile, caves, scope.resource(), output) == ChecksumStatus::Ok;
 }
 
 float BoxFilterFarVolumeCarve(const glm::vec3& position,

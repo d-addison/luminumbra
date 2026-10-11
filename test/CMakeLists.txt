@@ -101,6 +101,7 @@ luminumbra_configure_first_party_target(far_volume_tile_test)
 
 add_executable(far_volume_mesher_test
     common/FarVolumeMesher_test.cpp
+    common/FarVolumeMemory_test.cpp
     ../src/luminumbra_common/world/FarVolumeTile.cpp
     ../src/luminumbra_common/world/FarVolumeMesher.cpp)
 target_include_directories(far_volume_mesher_test PRIVATE ../src)
@@ -109,6 +110,7 @@ luminumbra_configure_first_party_target(far_volume_mesher_test)
 
 add_executable(far_volume_facade_test
     common/FarVolumeFacade_test.cpp
+    common/FarVolumeFacadeMemory_test.cpp
     ../src/luminumbra_common/world/FarDensityQuantization.cpp
     ../src/luminumbra_common/world/FarVolume.cpp
     ../src/luminumbra_common/world/FarVolumeTile.cpp

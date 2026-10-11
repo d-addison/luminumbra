@@ -5,10 +5,12 @@
 #include <cmath>
 #include <limits>
 #include <map>
+#include <memory_resource>
 #include <new>
 #include <stdexcept>
 #include <tuple>
 #include <utility>
+#include <vector>
 
 namespace Luminumbra::World {
 namespace {
@@ -100,11 +102,26 @@ bool MeshFarVolumeTile(const FarVolumeTile& tile,
                        const FarVolumeMeshLimits& limits,
                        FarVolumeMesh& output,
                        FarVolumeMeshError* error) {
+    return MeshFarVolumeTileCharged(
+        tile, sampler_field_identity, sampler, limits, FarVolumeMemory{}, output, error);
+}
+
+bool MeshFarVolumeTileCharged(const FarVolumeTile& tile,
+                              std::uint64_t sampler_field_identity,
+                              const FarVolumeSampler& sampler,
+                              const FarVolumeMeshLimits& limits,
+                              const FarVolumeMemory& memory,
+                              FarVolumeMesh& output,
+                              FarVolumeMeshError* error) {
     const auto fail = [error](FarVolumeMeshError value) {
         if (error)
             *error = value;
         return false;
     };
+    // Declared before every container that draws from scope.resource().
+    FarVolumeMemoryScope scope(memory, true);
+    if (!scope.valid())
+        return fail(FarVolumeMeshError::InvalidMemory);
     try {
         validate_tile(tile, limits);
         if (sampler_field_identity != tile.request.field_identity)
@@ -122,7 +139,8 @@ bool MeshFarVolumeTile(const FarVolumeTile& tile,
         mesh.origin_meters = tile.min_meters;
         mesh.sampled_max_meters = tile.max_meters;
         mesh.content = tile.content;
-        std::map<FarVolumePosition, FarVolumeSample, PositionLess> sample_cache;
+        std::pmr::map<FarVolumePosition, FarVolumeSample, PositionLess> sample_cache(
+            PositionLess{}, scope.resource());
         const auto sample = [&](const FarVolumePosition& p) -> FarVolumeSample {
             const auto found = sample_cache.find(p);
             if (found != sample_cache.end())
@@ -143,7 +161,8 @@ bool MeshFarVolumeTile(const FarVolumeTile& tile,
             sample_cache.emplace(p, *value);
             return *value;
         };
-        std::vector<const FarVolumeBrick*> bricks;
+        std::pmr::vector<const FarVolumeBrick*> bricks(scope.resource());
+        bricks.reserve(tile.bricks.size());
         for (const auto& brick : tile.bricks) {
             const auto p = brick.origin_meters;
             if (p.x % edge != 0 || p.y % edge != 0 || p.z % edge != 0 || p.x < tile.min_meters.x ||
@@ -178,7 +197,8 @@ bool MeshFarVolumeTile(const FarVolumeTile& tile,
             if (!solid || !air)
                 refuse(FarVolumeMeshError::InvalidTile);
         }
-        std::map<FarVolumePosition, FarVolumeVector, PositionLess> gradient_cache;
+        std::pmr::map<FarVolumePosition, FarVolumeVector, PositionLess> gradient_cache(
+            PositionLess{}, scope.resource());
         const auto gradient = [&](const FarVolumePosition& p) -> FarVolumeVector {
             const auto found = gradient_cache.find(p);
             if (found != gradient_cache.end())
@@ -200,7 +220,17 @@ bool MeshFarVolumeTile(const FarVolumeTile& tile,
             gradient_cache.emplace(p, result);
             return result;
         };
-        std::map<Edge, std::uint32_t, EdgeLess> vertex_cache;
+        std::pmr::map<Edge, std::uint32_t, EdgeLess> vertex_cache(EdgeLess{}, scope.resource());
+        const auto reserve_vertex = [&]() {
+            if (!FarVolumeReserveCharged(
+                    mesh.vertices, mesh.vertices.size() + 1, limits.max_vertices, scope.output()))
+                refuse(FarVolumeMeshError::AllocationFailure);
+        };
+        const auto reserve_indices = [&]() {
+            if (!FarVolumeReserveCharged(
+                    mesh.indices, mesh.indices.size() + 3, limits.max_indices, scope.output()))
+                refuse(FarVolumeMeshError::AllocationFailure);
+        };
         struct Crossing {
             Edge key;
             FarVolumePosition end;
@@ -232,6 +262,7 @@ bool MeshFarVolumeTile(const FarVolumeTile& tile,
             for (auto& v : vertex.normal)
                 v /= length;
             const auto index = static_cast<std::uint32_t>(mesh.vertices.size());
+            reserve_vertex();
             mesh.vertices.push_back(vertex);
             vertex_cache.emplace(crossing.key, index);
             if (!mesh.bounds)
@@ -315,6 +346,7 @@ bool MeshFarVolumeTile(const FarVolumeTile& tile,
                                 continue;
                             if (limits.max_indices - mesh.indices.size() < 3)
                                 refuse(FarVolumeMeshError::IndexLimit);
+                            reserve_indices();
                             for (const auto* crossing : triangle)
                                 mesh.indices.push_back(vertex_index(*crossing));
                         }
@@ -323,6 +355,7 @@ bool MeshFarVolumeTile(const FarVolumeTile& tile,
             }
         }
         output = std::move(mesh);
+        scope.Commit(); // after the old output's buffers are freed
     } catch (const Refusal& refusal) {
         return fail(refusal.error);
     } catch (const std::bad_alloc&) {

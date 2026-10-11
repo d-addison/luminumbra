@@ -51,7 +51,8 @@ enum class FarVolumeMeshError {
     IndexLimit,
     SamplerFailure,
     ZeroGradient,
-    AllocationFailure
+    AllocationFailure,
+    InvalidMemory
 };
 
 // CPU Marching Cubes entry point. The sampler must supply the same immutable
@@ -69,5 +70,22 @@ bool MeshFarVolumeTile(const FarVolumeTile& tile,
                        const FarVolumeMeshLimits& limits,
                        FarVolumeMesh& output,
                        FarVolumeMeshError* error = nullptr);
+
+// Bytes held by the mesh's vertex and index buffers (capacities, not sizes).
+inline std::uint64_t FarVolumeMeshRetainedBytes(const FarVolumeMesh& mesh) {
+    return static_cast<std::uint64_t>(mesh.vertices.capacity()) * sizeof(FarVolumeVertex) +
+           static_cast<std::uint64_t>(mesh.indices.capacity()) * sizeof(std::uint32_t);
+}
+
+// MeshFarVolumeTile with admission before every allocation: the sample, gradient
+// and edge caches, brick ordering scratch, and the vertex/index output. Same
+// binding rules and transactional guarantees as BuildFarVolumeTileCharged.
+bool MeshFarVolumeTileCharged(const FarVolumeTile& tile,
+                              std::uint64_t sampler_field_identity,
+                              const FarVolumeSampler& sampler,
+                              const FarVolumeMeshLimits& limits,
+                              const FarVolumeMemory& memory,
+                              FarVolumeMesh& output,
+                              FarVolumeMeshError* error = nullptr);
 
 } // namespace Luminumbra::World

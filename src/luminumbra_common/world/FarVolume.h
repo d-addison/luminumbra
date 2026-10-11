@@ -79,7 +79,8 @@ enum class FarVolumeFacadeError {
     GenerationRefused,
     MeshRefused,
     InvalidCompatibilityTile,
-    AllocationFailure
+    AllocationFailure,
+    InvalidMemory
 };
 struct FarVolumeFacadeFailure {
     FarVolumeFacadeError code = FarVolumeFacadeError::None;
@@ -119,10 +120,43 @@ bool CompileFarVolume(const FarVolumeCoverageIntent& intent,
                       FarVolumeCompilation& output,
                       FarVolumeFacadeFailure* failure = nullptr);
 
+// Bytes retained by a compilation's tile and mesh buffers.
+inline std::uint64_t FarVolumeCompilationRetainedBytes(const FarVolumeCompilation& compilation) {
+    return FarVolumeTileRetainedBytes(compilation.tile) +
+           FarVolumeMeshRetainedBytes(compilation.mesh);
+}
+
+// ResolveFarVolumeCoverage with the height cache admitted by `memory`. It returns no
+// retained output, so only memory.pool is required; a null pool is the legacy path.
+bool ResolveFarVolumeCoverageCharged(const FarVolumeCoverageIntent& intent,
+                                     const FarVolumeAuthority& authority,
+                                     const FarVolumeAuthorityLimits& limits,
+                                     const FarVolumeMemory& memory,
+                                     FarVolumeRequest& output,
+                                     FarVolumeFacadeFailure* failure = nullptr);
+
+// CompileFarVolume with all scratch and outputs admitted by `memory`: the height
+// cache, tile, mesh caches and mesh, and the checksum scratch. memory.retained is
+// replaced with the tile and mesh bytes only when the whole compilation succeeds
+// and `output` is committed with it; every failure leaves output, the retained lease
+// and the pool unchanged. Peak charge is previous output + new transients + new output.
+bool CompileFarVolumeCharged(const FarVolumeCoverageIntent& intent,
+                             const FarVolumeAuthority& authority,
+                             const FarVolumeCompilationLimits& limits,
+                             const FarVolumeMemory& memory,
+                             FarVolumeCompilation& output,
+                             FarVolumeFacadeFailure* failure = nullptr);
+
 // Validates the canonical sparse stream before forming its legacy integrity
 // view. Refuses non-encoded density, invalid keys/spans/order, or broken shared
 // sample identity. Does not read/write or declare a new world format.
 bool FarVolumeLegacyChecksum(const FarVolumeTile& tile, FarCaveMode caves, std::uint32_t& output);
+// As above with the ordering scratch admitted by `memory` (pool only; no retained
+// output). Returns false, leaving `output` unchanged, if admission is refused.
+bool FarVolumeLegacyChecksumCharged(const FarVolumeTile& tile,
+                                    FarCaveMode caves,
+                                    const FarVolumeMemory& memory,
+                                    std::uint32_t& output);
 
 // Original finite eight-midpoint box quadrature, accumulated in double in Z/Y/X
 // order. Only the declared 16/32/64 m coarse spacings are valid; this is not an ideal
