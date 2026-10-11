@@ -261,8 +261,11 @@ jobs:
           Import-Module "$installPath\Common7\Tools\Microsoft.VisualStudio.DevShell.dll"
           Enter-VsDevShell -VsInstallPath $installPath -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'
           ccache --zero-stats
+          # ccache does not support MSVC precompiled-header translation units (RmlUi and Jolt use them: about a third of
+          # calls were uncacheable on the first run), so the PCH is disabled; this changes how headers are compiled only.
           cmake --preset release -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl `
-            -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache `
+            -DCMAKE_DISABLE_PRECOMPILE_HEADERS=ON
           cmake --build --preset release --parallel 4
           ccache --show-stats --verbose
           @('### ccache (msvc)', '```', (ccache --show-stats --verbose | Out-String), '```') | Add-Content -Path $env:GITHUB_STEP_SUMMARY
