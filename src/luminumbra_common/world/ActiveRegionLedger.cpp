@@ -549,7 +549,8 @@ bool ActiveRegionLedger::decode(std::string_view bytes,
             const std::string_view extension = bytes.substr(extension_begin, extension_length);
             // Each TLV is u16 type, u32 length, value. The TLVs must exactly fill the block.
             std::size_t at = 0;
-            std::optional<std::uint64_t> previous_type;
+            bool have_previous = false;
+            std::uint64_t previous_type = 0;
             while (at < extension.size()) {
                 if (extension.size() - at < 6)
                     return false;
@@ -562,8 +563,9 @@ bool ActiveRegionLedger::decode(std::string_view bytes,
                 const auto value = extension.substr(at, length);
                 at += length;
                 // Strictly ascending types refuse duplicates; type 2 is the only known type.
-                if ((previous_type && type <= *previous_type) || type != 2 || length != 1)
+                if ((have_previous && type <= previous_type) || type != 2 || length != 1)
                     return false;
+                have_previous = true;
                 previous_type = type;
                 const auto projection = static_cast<unsigned char>(value[0]);
                 if (projection > 2) {
