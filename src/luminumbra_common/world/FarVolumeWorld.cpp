@@ -14,6 +14,19 @@ bool CompilePristineFarVolume(const Systems::SHIELD_WorldSystem& world,
                               const FarVolumeCompilationLimits& limits,
                               FarVolumeCompilation& output,
                               FarVolumeFacadeFailure* failure) {
+    return CompilePristineFarVolumeCharged(
+        world, intent, field_identity, caves, numeric, limits, {}, output, failure);
+}
+
+bool CompilePristineFarVolumeCharged(const Systems::SHIELD_WorldSystem& world,
+                                     const FarVolumeCoverageIntent& intent,
+                                     std::uint64_t field_identity,
+                                     FarCaveMode caves,
+                                     FarVolumeNumericProfile numeric,
+                                     const FarVolumeCompilationLimits& limits,
+                                     const FarVolumeMemory& memory,
+                                     FarVolumeCompilation& output,
+                                     FarVolumeFacadeFailure* failure) {
     try {
         // One scope owns every world observation, including the normal halo. The
         // synchronous operation never hands a borrowed world pointer to a worker.
@@ -40,7 +53,7 @@ bool CompilePristineFarVolume(const Systems::SHIELD_WorldSystem& world,
             return FarVolumeSample{world.SamplePristineFarDensity(p, height, spacing, mode),
                                    static_cast<std::uint8_t>(material)};
         };
-        return CompileFarVolume(intent, authority, limits, output, failure);
+        return CompileFarVolumeCharged(intent, authority, limits, memory, output, failure);
     } catch (const std::bad_alloc&) {
         if (failure)
             *failure = {FarVolumeFacadeError::AllocationFailure,
