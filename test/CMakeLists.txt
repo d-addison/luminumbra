@@ -137,6 +137,7 @@ add_executable(common_tests
     common/ResidencyContract_test.cpp
     common/FarLodStore_test.cpp
     common/FarVolumeWorld_test.cpp
+    common/FarVolumeRuntime_test.cpp
     common/FarTierTable_test.cpp
     common/FarWantedSet_test.cpp
     common/FarAuthorityOverlay_test.cpp
