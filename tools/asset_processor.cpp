@@ -1291,12 +1291,16 @@ bool process_texture(const std::string& input_path, const std::string& output_pa
 // --max-tris. A file-static keeps process_gltf's 2-arg signature intact so the
 // asset round-trip tests (which forward-declare process_gltf(string,string)) and
 // the CMake auto-asset rule keep linking unchanged. 0 = no decimation.
+// Per-invocation option: main() resets it and the LOD loop rewrites it; tests call the renamed
+// main() repeatedly in one process.
+// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
 static size_t g_max_tris = 0;
 // when >= 0, export ONLY this global primitive index (counted across all
 // meshes) instead of merging every primitive. Multi-material assets (e.g. the
 // tree: trunk/branch/leaves, each with its OWN atlas + UV set) are split into
 // one.lmesh per part so each part samples its correct texture via the static-
 // model UV lane. -1 = merge all (default, unchanged behaviour).
+// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
 static int g_only_primitive = -1;
 
 bool process_gltf_checked(const std::string& input_path, const std::string& output_path) {
