@@ -1936,10 +1936,13 @@ void RunSchedulerFaultCase(std::uint64_t k, std::uint64_t start) {
     // Half a tick of slack keeps the clock from rounding the frame down. A fault
     // on the first tick of the frame stops the second tick from running.
     ASSERT_EQ(session.TickSimulation(2.5 * dt), k - start + 1);
-    ASSERT_TRUE(session.GetRegionSchedulerFault().has_value());
-    const auto& fault = session.GetRegionSchedulerFault().value();
-    EXPECT_EQ(fault.tick, k);
-    EXPECT_FALSE(fault.message.empty());
+    const auto fault = session.GetRegionSchedulerFault();
+    ASSERT_TRUE(fault.has_value());
+    if (fault.has_value()) {
+        const auto snapshot = fault.value();
+        EXPECT_EQ(snapshot.tick, k);
+        EXPECT_FALSE(snapshot.message.empty());
+    }
     EXPECT_EQ(session.GetSimulationTickCount(), k);
     EXPECT_LT(session.GetActiveRegionLedger().tick(), k);
     EXPECT_EQ(session.GetActiveRegionLedger().header_tick(), k);
