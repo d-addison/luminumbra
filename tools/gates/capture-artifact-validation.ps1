@@ -17,7 +17,9 @@ function Read-JsonArtifact {
         if ($stream.Length -le 0 -or $stream.Length -gt 16777216) {
             throw "expected a JSON artifact between 1 byte and 16 MiB"
         }
-        $reader = New-Object System.IO.StreamReader($stream, [System.Text.Encoding]::UTF8, $true)
+        # Strict decoding: invalid bytes throw instead of becoming U+FFFD.
+        $strictUtf8 = New-Object System.Text.UTF8Encoding($false, $true)
+        $reader = New-Object System.IO.StreamReader($stream, $strictUtf8, $true)
         $json = $reader.ReadToEnd()
         if ($json -notmatch '^\s*\{') { throw "artifact root must be a JSON object" }
         $artifact = $json | ConvertFrom-Json -ErrorAction Stop

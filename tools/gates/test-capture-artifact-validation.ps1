@@ -303,6 +303,14 @@ try {
         catch { $message = $_.Exception.Message }
         Assert-Test ($null -ne $message -and $message.Contains($readerPath)) "reader refuses invalid JSON/schema and identifies its input"
     }
+    # A raw 0xFF inside a quoted field must be refused, not repaired to U+FFFD.
+    $prefix = [System.Text.Encoding]::ASCII.GetBytes('{"schema":"luminumbra.farlod_horizon.v1","x":"')
+    $suffix = [System.Text.Encoding]::ASCII.GetBytes('"}')
+    [System.IO.File]::WriteAllBytes($readerPath, [byte[]]($prefix + [byte[]]@(255) + $suffix))
+    $message = $null
+    try { Read-JsonArtifact $readerPath "luminumbra.farlod_horizon.v1" | Out-Null }
+    catch { $message = $_.Exception.Message }
+    Assert-Test ($null -ne $message -and $message.Contains($readerPath)) "reader refuses invalid UTF-8 bytes"
     $oversized = [System.IO.File]::OpenWrite($readerPath)
     try { $oversized.SetLength(16777217) } finally { $oversized.Dispose() }
     $message = $null
