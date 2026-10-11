@@ -53,7 +53,9 @@ separate camera-relative set of pristine heightfield tiles to about 3 km with
 authoritative volumetric overlays captured from resident chunks; simulation
 systems tick every registry participant regardless of residency; wind, weather,
 aether ambience, scent, soil and irrigation are fixed grids anchored on the
-spawn point. There is no notion of an active region.
+spawn point. A host-side active-region ledger and scheduler foundation exists
+(`sim.active_regions`, off by default; see [active regions](active-regions.md)),
+but no distant-simulation consumer uses the schedule yet.
 
 This contract separates three sets that may overlap but are never equated.
 

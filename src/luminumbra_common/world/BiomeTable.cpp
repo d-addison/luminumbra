@@ -1,9 +1,13 @@
 #include "BiomeTable.h"
 
 #include <algorithm>
+#include <array>
+#include <bit>
+#include <cstring>
 #include <fstream>
 #include <initializer_list>
 #include <optional>
+#include <type_traits>
 
 #include "nlohmann/json.hpp"
 
@@ -23,9 +27,18 @@ void FnvMix(u64& hash, const void* data, std::size_t size) {
     }
 }
 
+// Mixes the value's object representation in canonical little-endian byte order so the hash does
+// not depend on the host byte order (identical to the previous native-order mixing on little-endian
+// hosts).
 template<typename T>
 void FnvMixValue(u64& hash, const T& value) {
-    FnvMix(hash, &value, sizeof(T));
+    static_assert(std::is_trivially_copyable_v<T>, "FnvMixValue hashes the object representation");
+    std::array<unsigned char, sizeof(T)> bytes{};
+    std::memcpy(bytes.data(), &value, sizeof(T));
+    if constexpr (std::endian::native == std::endian::big) {
+        std::reverse(bytes.begin(), bytes.end());
+    }
+    FnvMix(hash, bytes.data(), bytes.size());
 }
 
 // Climate range edges are quantized onto a fixed 1/1024 grid before hashing so
