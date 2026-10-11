@@ -235,11 +235,16 @@ TEST(WorldSaveService, ClockMetadataValidationPrecedesEveryWrite) {
     EXPECT_FALSE(WorldSaveService::save_metadata(
         R"({"container_version":2,"simulationTick":-1})", save_dir.path, &errors));
     EXPECT_FALSE(std::filesystem::exists(metadata_path));
+    EXPECT_FALSE(std::filesystem::exists(save_dir.path / "chunks"));
     nlohmann::json metadata = {{"container_version", 2}};
     Luminumbra::world::WorldClock(123, {12000, 4}).write_metadata(metadata);
     const auto valid = metadata.dump(4) + "\n";
     ASSERT_TRUE(WorldSaveService::save_metadata(valid, save_dir.path));
     EXPECT_EQ(read(), valid);
+    const auto index_path = WorldSaveService::snapshot_index_path(save_dir.path);
+    ASSERT_TRUE(std::filesystem::exists(index_path));
+    std::ifstream index_file(index_path, std::ios::binary);
+    const std::string index_before(std::istreambuf_iterator<char>{index_file}, {});
     EXPECT_FALSE(WorldSaveService::save_metadata(R"({"container_version":2})", save_dir.path));
     EXPECT_EQ(read(), valid);
     metadata["calendar"]["daysPerYear"] = 0;
@@ -255,8 +260,14 @@ TEST(WorldSaveService, ClockMetadataValidationPrecedesEveryWrite) {
     PopulateFixtureWorld(state);
     EXPECT_FALSE(WorldSaveService{}.save_world(state, save_dir.path));
     EXPECT_FALSE(WorldSaveService::save_metadata(valid, save_dir.path));
-    EXPECT_FALSE(std::filesystem::exists(save_dir.path / "chunks"));
+    // Clock-bearing metadata is an enabled indexed snapshot, so its region directory
+    // already exists. Refusal must preserve the published index, not remove that directory.
+    std::ifstream index_after_file(index_path, std::ios::binary);
+    EXPECT_EQ(std::string(std::istreambuf_iterator<char>{index_after_file}, {}), index_before);
     EXPECT_EQ(read(), damaged);
+    std::ofstream(metadata_path, std::ios::binary | std::ios::trunc) << "{";
+    EXPECT_NO_THROW(EXPECT_FALSE(WorldSaveService::save_metadata(valid, save_dir.path, &errors)));
+    EXPECT_EQ(read(), "{");
 }
 
 TEST(WorldSaveService, LegacyMetadataWriterPreservesOpaqueBytesAndMissingDirectoryFailure) {

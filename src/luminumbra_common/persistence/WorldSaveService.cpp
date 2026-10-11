@@ -957,6 +957,23 @@ public:
         }
         if (!require_index && !snapshot_index_exists(save_dir) && !journal_pending(save_dir))
             return;
+        // Refuse a known invalid baseline before begin() creates journal/region directories.
+        // Pending recovery must still run first: installed metadata may be a partial new member.
+        if (!journal_pending(save_dir)) {
+            std::string metadata_error;
+            try {
+                metadata_error = CheckMetadataFile(save_dir);
+            } catch (const std::exception& error) {
+                metadata_error =
+                    std::string("corrupt or unreadable world metadata: ") + error.what();
+            }
+            if (!metadata_error.empty()) {
+                m_engaged = true;
+                m_ok = false;
+                AddError(errors, metadata_error);
+                return;
+            }
+        }
         SnapshotIndex previous;
         read_snapshot_index(save_dir, previous, nullptr);
         m_facts = std::make_unique<WorldSaveService::SaveFactsScope>(save_dir);
@@ -1134,11 +1151,6 @@ bool WorldSaveService::save_metadata(const std::string& bytes,
                                      std::vector<std::string>* errors) {
     const auto metadata = nlohmann::json::parse(bytes, nullptr, false);
     const bool has_clock = metadata.contains("simulationTick") || metadata.contains("calendar");
-    TransactionScope scope(save_dir, {"world_info.json"}, errors, has_clock);
-    if (!scope.ok())
-        return false;
-    if (!validate_save(save_dir, errors))
-        return false;
     world::WorldClock clock;
     std::string clock_error;
     // Legacy metadata is opaque input to this helper. Only clock-bearing input
@@ -1149,6 +1161,11 @@ bool WorldSaveService::save_metadata(const std::string& bytes,
         AddError(errors, clock_error);
         return false;
     }
+    TransactionScope scope(save_dir, {"world_info.json"}, errors, has_clock);
+    if (!scope.ok())
+        return false;
+    if (!validate_save(save_dir, errors))
+        return false;
     world::WorldClock previous_clock;
     bool requires_active_regions = false;
     if (!read_clock_metadata(save_dir, previous_clock, requires_active_regions, errors))
