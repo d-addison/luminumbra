@@ -55,6 +55,7 @@ def _receipts_by_source(root):
     """Return (every receipt line, receipt lines taken from a failed testcase)."""
     found = set()
     failed = set()
+    any_unsuccessful = False
     for testcase in root.iter("testcase"):
         lines = _receipt_lines(testcase.get(PROPERTY_NAME) or "")
         for element in testcase.iter("property"):
@@ -65,11 +66,18 @@ def _receipts_by_source(root):
         found.update(lines)
         if any(child.tag in FAILURE_TAGS for child in testcase):
             failed.update(lines)
+            any_unsuccessful = True
+    # Suite-level output cannot be attributed to a testcase, so it is trusted only when no
+    # testcase in the report failed, errored or was skipped.
+    unattributed = set()
     for element in root.iter("system-out"):
-        found.update(_receipt_lines("".join(element.itertext())))
+        unattributed.update(_receipt_lines("".join(element.itertext())))
     for element in root.iter("property"):
         if element.get("name") == PROPERTY_NAME:
-            found.update(_receipt_lines(element.get("value") or ""))
+            unattributed.update(_receipt_lines(element.get("value") or ""))
+    if any_unsuccessful:
+        failed.update(unattributed)
+    found.update(unattributed)
     return found, failed
 
 

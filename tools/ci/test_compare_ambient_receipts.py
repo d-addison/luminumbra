@@ -229,6 +229,14 @@ class CompareAmbientReceiptsTests(unittest.TestCase):
         self.assertEqual(out, "")
         self.assertIn("failed, errored or skipped", err)
 
+    def test_suite_level_receipt_with_failed_testcase_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            lane = write_junit(directory, "a.xml", [receipt_line()], failed=True)
+            code, out, err = run_main([f"a={lane}"])
+        self.assertEqual(code, 2)
+        self.assertEqual(out, "")
+        self.assertIn("failed, errored or skipped", err)
+
     def test_attribute_form_receipt_is_accepted_and_compared(self):
         with tempfile.TemporaryDirectory() as directory:
             lane_a = write_junit(directory, "a.xml", attribute_value=receipt_line())
