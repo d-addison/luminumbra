@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import shutil
 import sys
 import tempfile
 from unittest import mock
@@ -209,6 +210,11 @@ class MatrixValidationTests(MatrixTestBase):
         matrix['time_of_day'] = 1.0
         self.assert_refused(json.dumps(matrix), 'time_of_day')
 
+    def test_time_of_day_other_than_client_fixed_value_refused(self):
+        matrix = copy.deepcopy(committed())
+        matrix['time_of_day'] = 0.5
+        self.assert_refused(json.dumps(matrix), 'time_of_day')
+
     def test_missing_refresh_hz_refused(self):
         matrix = copy.deepcopy(committed())
         del matrix['displays'][0]['refresh_hz']
@@ -274,6 +280,13 @@ class ExecutableResolutionTests(MatrixTestBase):
         resolved = runner.resolve_executable(name, self.tmp,
                                              {'PATH': str(Path(sys.executable).parent)})
         self.assertTrue(os.path.samefile(resolved, sys.executable))
+
+    def test_relative_path_entry_resolves_against_launch_cwd(self):
+        name = Path(sys.executable).name
+        (self.tmp / 'bin').mkdir()
+        shutil.copy2(sys.executable, self.tmp / 'bin' / name)
+        resolved = runner.resolve_executable(name, self.tmp, {'PATH': 'bin'})
+        self.assertEqual(resolved.parent, Path(os.path.abspath(self.tmp / 'bin')))
 
     def test_unresolved_name_raises(self):
         with self.assertRaises(FileNotFoundError):

@@ -93,7 +93,14 @@ def resolve_executable(program, cwd, environment=None):
         if candidate.is_file():
             return Path(os.path.abspath(candidate))
         raise FileNotFoundError(f'executable not found: {candidate}')
-    found = shutil.which(program, path=environment.get('PATH') if environment else None)
+    search = environment.get('PATH') if environment else None
+    if search is None:
+        search = os.environ.get('PATH', os.defpath)
+    entries = []
+    for entry in search.split(os.pathsep):
+        base = Path(entry) if entry else Path('.')
+        entries.append(str(base if base.is_absolute() else Path(cwd) / base))
+    found = shutil.which(program, path=os.pathsep.join(entries))
     if found is None:
         raise FileNotFoundError(f'executable not found on PATH: {program}')
     return Path(os.path.abspath(found))

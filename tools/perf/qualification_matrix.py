@@ -116,8 +116,9 @@ def _validate_world(world):
 
 
 def _validate_time_of_day(value):
-    if type(value) is not float or not math.isfinite(value) or not 0 <= value < 1:
-        raise MatrixError(f'matrix: time_of_day must be a float in [0, 1), got {value!r}')
+    # The client fixes benchmark time of day at 0.04 (main_client.cpp set_time_of_day).
+    if type(value) is not float or value != 0.04:
+        raise MatrixError(f'matrix: time_of_day must be 0.04 (client-fixed), got {value!r}')
 
 
 def _validate_profiles(profiles):
