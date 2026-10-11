@@ -1379,11 +1379,13 @@ void GameSession::RunRegionScheduler(std::uint64_t current_tick) {
         // Built lazily on the first probe call of this tick.
         std::optional<std::set<RegionKey>> resident_regions;
         try {
-            // Consumer work is derived from persisted state each tick, never from a queue.
-            const bool consumer_work = !m_groundObjects.empty() || !m_fieldPages.empty();
+            // Ground-object work is derived from persisted state each tick, never from a queue.
+            // Field pages are NOT charged to the scheduler in S6 (Q-DS-S6-6): their per-region
+            // cost is a constant placeholder rule, deferred until real dynamics exist.
+            const bool consumer_work = !m_groundObjects.empty();
             std::vector<RegionWork> scheduled_work;
             if (consumer_work)
-                scheduled_work = AppendConsumerWork(m_regionWork);
+                scheduled_work = AppendGroundObjectWork(m_regionWork);
             const std::vector<RegionWork>& work = consumer_work ? scheduled_work : m_regionWork;
             m_regionSchedule = m_activeRegionLedger.schedule(
                 m_worldClock,
@@ -1435,7 +1437,7 @@ void GameSession::RunRegionScheduler(std::uint64_t current_tick) {
     }
 }
 
-std::vector<RegionWork> GameSession::AppendConsumerWork(std::vector<RegionWork> work) const {
+std::vector<RegionWork> GameSession::AppendGroundObjectWork(std::vector<RegionWork> work) const {
     const auto& records = m_activeRegionLedger.records();
     for (const RegionKey key : m_groundObjects.regions()) {
         const auto record = records.find(key);
@@ -1443,15 +1445,6 @@ std::vector<RegionWork> GameSession::AppendConsumerWork(std::vector<RegionWork> 
             continue;
         const auto count = static_cast<std::uint64_t>(m_groundObjects.in_region(key).size());
         work.push_back(RegionWork{key, 0, count, 0, 0});
-    }
-    if (m_fieldPages.empty())
-        return work;
-    for (const auto& [key, record] : records) {
-        if (record.state == RegionState::Frozen)
-            continue;
-        const auto count = static_cast<std::uint64_t>(m_fieldPages.owned_initialized_cells(key));
-        if (count != 0)
-            work.push_back(RegionWork{key, 0, 0, 0, count});
     }
     return work;
 }

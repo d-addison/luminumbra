@@ -518,9 +518,10 @@ private:
     FieldPageState m_fieldPages;
     void LatchRegionFault(std::uint64_t tick, std::string message);
     void RunRegionScheduler(std::uint64_t current_tick);
-    // Returns `work` plus one entry per ground-object region and one per field-page region that
-    // has a ledger record and is not frozen. Derived from persisted state only.
-    [[nodiscard]] std::vector<RegionWork> AppendConsumerWork(std::vector<RegionWork> work) const;
+    // Returns `work` plus one entry per ground-object region that has a ledger record and is not
+    // frozen. Derived from persisted state only. Field pages are not charged (Q-DS-S6-6).
+    [[nodiscard]] std::vector<RegionWork>
+    AppendGroundObjectWork(std::vector<RegionWork> work) const;
     // Sorted, de-duplicated due regions of the current schedule.
     [[nodiscard]] std::vector<RegionKey> SortedDueRegions() const;
     // Ages the due, owned regions' ground objects by one tick and publishes despawns.

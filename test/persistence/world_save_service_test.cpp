@@ -334,7 +334,11 @@ TEST(WorldSaveService, GroundObjectsSaveLoadRoundTripAndEmptyStoreRemovesFile) {
         << JoinErrors(errors);
     EXPECT_EQ(loaded.objects(), store.objects());
 
-    ASSERT_TRUE(WorldSaveService::save_ground_objects(GroundObjectStore{}, save_dir.path, &errors));
+    // A stale file without a ledger is an orphan that validate_save refuses to write over, so the
+    // empty-store lane is exercised on a directory without the file.
+    ASSERT_TRUE(fs::remove(WorldSaveService::ground_objects_path(save_dir.path)));
+    ASSERT_TRUE(WorldSaveService::save_ground_objects(GroundObjectStore{}, save_dir.path, &errors))
+        << JoinErrors(errors);
     EXPECT_FALSE(fs::exists(WorldSaveService::ground_objects_path(save_dir.path)));
     GroundObjectStore absent;
     ASSERT_TRUE(WorldSaveService::load_ground_objects(absent, save_dir.path, 100, &errors));
@@ -457,7 +461,11 @@ TEST(WorldSaveService, FieldPagesSaveLoadRoundTripAndEmptyStateRemovesFile) {
     EXPECT_EQ(loaded.page_count(), state.page_count());
     EXPECT_EQ(loaded.serialize(), state.serialize());
 
-    ASSERT_TRUE(WorldSaveService::save_field_pages(FieldPageState{}, save_dir.path, &errors));
+    // A stale file without a ledger is an orphan that validate_save refuses to write over, so the
+    // empty-state lane is exercised on a directory without the file.
+    ASSERT_TRUE(fs::remove(WorldSaveService::field_pages_path(save_dir.path)));
+    ASSERT_TRUE(WorldSaveService::save_field_pages(FieldPageState{}, save_dir.path, &errors))
+        << JoinErrors(errors);
     EXPECT_FALSE(fs::exists(WorldSaveService::field_pages_path(save_dir.path)));
     FieldPageState absent = MakeFieldState();
     ASSERT_TRUE(WorldSaveService::load_field_pages(absent, save_dir.path, &errors));

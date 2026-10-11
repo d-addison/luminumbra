@@ -1432,7 +1432,8 @@ bool WorldSaveService::load_field_pages(world::FieldPageState& out,
         AddError(errors, "Field pages load failed: file exceeds size cap");
         return false;
     }
-    std::string bytes(static_cast<std::size_t>(length), '\0');
+    // One spare byte so a file that grew since the stat is parsed whole and refused as malformed.
+    std::string bytes(static_cast<std::size_t>(length) + 1, '\0');
     in.read(bytes.data(), static_cast<std::streamsize>(bytes.size()));
     if (in.bad()) {
         AddError(errors, "failed to read field pages file: " + path.string());
@@ -1534,7 +1535,9 @@ bool WorldSaveService::load_active_regions(world::ActiveRegionLedger& ledger,
             return false;
         }
         std::ifstream input(path, std::ios::binary);
-        std::string bytes(static_cast<std::size_t>(length), '\0');
+        // One spare byte so a file that grew since the stat is parsed whole and refused as
+        // malformed.
+        std::string bytes(static_cast<std::size_t>(length) + 1, '\0');
         input.read(bytes.data(), static_cast<std::streamsize>(length));
         std::string error;
         if (!input || !world::ActiveRegionLedger::decode(bytes, ledger, error)) {

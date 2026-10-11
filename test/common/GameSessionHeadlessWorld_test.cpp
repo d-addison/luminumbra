@@ -1377,6 +1377,9 @@ TEST(GameSessionHeadlessWorldTest, AbsentLedgerAtRestoredTickAllowsEditAndPinBef
             P::WorldSaveService::forget_snapshot_index_for_testing(original.GetWorldSaveDir()));
         ASSERT_TRUE(
             fs::remove(P::WorldSaveService::active_regions_path(original.GetWorldSaveDir())));
+        // Field pages without a ledger are orphans; a legacy-world edit removes them too.
+        std::error_code pages_ec;
+        fs::remove(P::WorldSaveService::field_pages_path(original.GetWorldSaveDir()), pages_ec);
         GameSession loaded, restored;
         for (auto* s : {&loaded, &restored}) {
             s->SetRootPath(root.root_string());
@@ -1854,6 +1857,8 @@ TEST(GameSessionHeadlessWorldTest, LedgerFileAbsenceCorruptionFutureAndDisabledR
     EXPECT_FALSE(disabled.LoadWorld(owner.GetMetadata().worldId));
     EXPECT_NE(disabled.GetWorldOpenError().find("Incompatible configuration"), std::string::npos);
     ASSERT_TRUE(fs::remove(path));
+    std::error_code pages_ec;
+    fs::remove(P::WorldSaveService::field_pages_path(save), pages_ec);
     Luminumbra::world::ActiveRegionLedger empty;
     EXPECT_TRUE(P::WorldSaveService::load_active_regions(empty, save));
     EXPECT_TRUE(empty.records().empty());
@@ -2294,6 +2299,8 @@ namespace {
 
 constexpr std::uint32_t kGroundType = 7;
 const Luminumbra::world::RegionKey kGroundRegion{0, -1};
+// Far from the spawn anchor's visitation disc, so a budget-limited run can freeze it.
+const Luminumbra::world::RegionKey kFarGroundRegion{10, -3};
 
 using GroundEvents = std::vector<std::pair<std::string, std::string>>;
 
@@ -2462,14 +2469,14 @@ TEST(GameSessionHeadlessWorldTest, FrozenRegionDoesNotAgeItsGroundObjects) {
     EnableSnapshotSession(session, root, jobs);
     session.SetRegionSchedulerConfig({0, 2, 1});
     ASSERT_TRUE(session.CreateWorld("Ground frozen", "1337", "default"));
-    const auto id = SpawnGround(session, 5200, -1500);
+    const auto id = SpawnGround(session, 5'200'000, -1'500'000);
     ASSERT_EQ(id, 1u);
     std::size_t frozen_ticks = 0;
     for (int i = 0; i < 10; ++i) {
         const auto before = session.GetGroundObjects().objects().at(id).active_age;
         TickOnce(session);
         // Frozen after a tick means it was not due in that tick, so its objects did not age.
-        if (session.GetActiveRegionLedger().records().at(kGroundRegion).state ==
+        if (session.GetActiveRegionLedger().records().at(kFarGroundRegion).state ==
             Luminumbra::world::RegionState::Frozen) {
             ++frozen_ticks;
             EXPECT_EQ(session.GetGroundObjects().objects().at(id).active_age, before)
@@ -2667,21 +2674,24 @@ TEST(GameSessionHeadlessWorldTest, FieldPagesFrozenRegionDoesNotChange) {
     EnableSnapshotSession(session, root, jobs);
     session.SetRegionSchedulerConfig({0, 2, 1});
     ASSERT_TRUE(session.CreateWorld("Field frozen", "1337", "default"));
-    ASSERT_EQ(SpawnGround(session, 5200, -1500), 1u);
-    std::string frozen_bytes;
-    std::size_t frozen_ticks = 0;
+    ASSERT_EQ(SpawnGround(session, 5'200'000, -1'500'000), 1u);
+    bool was_frozen = false;
+    std::string previous_bytes;
+    std::size_t consecutive_frozen_ticks = 0;
     for (int i = 0; i < 10; ++i) {
         TickOnce(session);
-        if (session.GetActiveRegionLedger().records().at(kGroundRegion).state ==
-            Luminumbra::world::RegionState::Frozen) {
-            const auto current = session.GetFieldPages().region_bytes(kGroundRegion);
-            if (frozen_ticks == 0)
-                frozen_bytes = current;
-            EXPECT_EQ(current, frozen_bytes) << "tick " << i;
-            ++frozen_ticks;
+        const bool frozen = session.GetActiveRegionLedger().records().at(kFarGroundRegion).state ==
+                            Luminumbra::world::RegionState::Frozen;
+        const auto current = session.GetFieldPages().region_bytes(kFarGroundRegion);
+        // A region that stays Frozen across a tick is not due in it, so its cells do not move.
+        if (frozen && was_frozen) {
+            EXPECT_EQ(current, previous_bytes) << "tick " << i;
+            ++consecutive_frozen_ticks;
         }
+        was_frozen = frozen;
+        previous_bytes = current;
     }
-    EXPECT_GT(frozen_ticks, 0u);
+    EXPECT_GT(consecutive_frozen_ticks, 0u);
     EXPECT_FALSE(session.GetFieldPages().empty());
 }
 
