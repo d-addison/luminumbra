@@ -325,6 +325,30 @@ class TidyCacheTests(unittest.TestCase):
             runs += 1
             self.assertRan(self.run_cache(), runs)
 
+    def test_unsupported_options_are_never_cached(self):
+        for option in ("-U__clang_analyzer__", "-ivfsoverlay", "-fmodules", "-Xclang", "--sysroot=/x"):
+            with self.subTest(option=option):
+                self.entries = [self.entry([option])]
+                self.write_db()
+                before = self.tidy_runs()
+                self.assertRan(self.run_cache(), before + 1)
+                self.assertRan(self.run_cache(), before + 2)
+        self.assertEqual(list(self.cache.rglob("*.json")), [])
+
+    def test_clock_dependent_macros_are_never_cached(self):
+        self.main.write_text(self.main.read_text(encoding="utf-8") + "const char* t = __TIMESTAMP__;\n", encoding="utf-8")
+        self.assertRan(self.run_cache(), 1)
+        self.assertRan(self.run_cache(), 2)
+        self.assertEqual(list(self.cache.rglob("*.json")), [])
+
+    def test_include_path_environment_is_part_of_the_key(self):
+        self.assertRan(self.run_cache(), 1)
+        self.env["CPATH"] = str(self.system)
+        self.assertRan(self.run_cache(), 2)
+        self.assertRan(self.run_cache(), 2)
+        self.env["CPATH"] = str(self.build)
+        self.assertRan(self.run_cache(), 3)
+
     def test_prune_removes_records_not_used_since_the_cutoff(self):
         self.assertRan(self.run_cache(), 1)
         record = list(self.cache.rglob("*.json"))[0]
@@ -364,7 +388,7 @@ class MakeDependencyParserTests(unittest.TestCase):
         command = MODULE.dependency_command(
             ["cc", "-DX", "-MD", "-MT", "t", "-MF", "t.d", "-o", "a.o", "-c", "a.cpp"]
         )
-        self.assertEqual(command, ["cc", "-DX", "a.cpp", "-D__clang_analyzer__", "-M"])
+        self.assertEqual(command, ["cc", "-D__clang_analyzer__", "-DX", "a.cpp", "-M"])
 
 
 if __name__ == "__main__":

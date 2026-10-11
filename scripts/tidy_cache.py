@@ -22,7 +22,10 @@ The analysis input of one translation unit (the cache key) is the SHA-256 of:
     a newly shadowing header are all seen). Response files (@file) are not
     expanded, so a unit that uses one is always a miss.
 
-Every dependency is hashed afresh for every key (no memoization across units),
+Every dependency is hashed afresh for every key (no memoization across units; executables
+are memoized per stat fingerprint), the key includes the include-path and clock environment
+variables, and any unit using clock macros, -U options, vfs overlays, modules, PCH or
+response files is never cached,
 and the key is recomputed from a freshly loaded compile database after the
 analysis; a record is written only if both keys are equal.
 
@@ -53,6 +56,23 @@ TIDY_TIMEOUT_SECONDS = 1800
 _DROP_WITH_VALUE = {"-o", "-MF", "-MT", "-MQ", "-MJ", "--serialize-diagnostics"}
 _DROP_ALONE = {"-c", "-MD", "-MMD", "-MG", "-MP", "-M", "-MM"}
 _DROP_PREFIXES = ("-MF", "-MT", "-MQ", "-MJ")
+# Options that make the compiler read files through a path the dependency scan
+# and clang-tidy might resolve differently, or that inject arbitrary frontend
+# behaviour: a unit using any of them is never cached.
+_UNSUPPORTED_PREFIXES = (
+    "@", "-ivfsoverlay", "-vfsoverlay", "-fmodule", "-fcxx-modules", "-fprebuilt",
+    "-include-pch", "-fpch", "-Xclang", "-cc1", "--sysroot", "-isysroot",
+)
+# Predefined macros whose value depends on the clock; a file mentioning one is
+# never cached, because its analysis can change with no change in its bytes.
+_VOLATILE_TOKENS = (b"__TIMESTAMP__", b"__TIME__", b"__DATE__")
+# Environment variables the compiler and clang-tidy read when locating headers
+# or evaluating time macros.
+_ENV_NAMES = (
+    "CPATH", "C_INCLUDE_PATH", "CPLUS_INCLUDE_PATH", "OBJC_INCLUDE_PATH",
+    "OBJCPLUS_INCLUDE_PATH", "SDKROOT", "SOURCE_DATE_EPOCH", "TZ",
+    "COMPILER_PATH", "GCC_EXEC_PREFIX", "CCC_OVERRIDE_OPTIONS", "CLANG_TIDY_ARGS",
+)
 
 
 class CacheMiss(Exception):
@@ -69,6 +89,10 @@ def sha256_file(path: str) -> str:
         for block in iter(lambda: handle.read(1 << 20), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def environment_fingerprint() -> str:
+    return json.dumps({name: os.environ.get(name) for name in _ENV_NAMES}, sort_keys=True)
 
 
 def parse_make_deps(text: str) -> list[str]:
@@ -132,11 +156,13 @@ def entry_arguments(entry: dict) -> list[str]:
 
 def dependency_command(arguments: list[str]) -> list[str]:
     """The entry's own command with output/dependency-file options replaced by -M."""
-    result = [arguments[0]]
+    # clang-tidy predefines __clang_analyzer__ before any user -D/-U, so the
+    # scan does the same; headers guarded by it must be seen.
+    result = [arguments[0], "-D__clang_analyzer__"]
     skip_next = False
     for argument in arguments[1:]:
-        if argument.startswith("@"):
-            raise CacheMiss("response files are not supported by the cache")
+        if argument.startswith(_UNSUPPORTED_PREFIXES) or argument.startswith("-U"):
+            raise CacheMiss(f"unsupported compile option {argument}")
         if skip_next:
             skip_next = False
             continue
@@ -150,17 +176,20 @@ def dependency_command(arguments: list[str]) -> list[str]:
         if argument.startswith("-o") and len(argument) > 2:
             continue
         result.append(argument)
-    # clang-tidy predefines this macro; headers guarded by it must be seen.
-    result.append("-D__clang_analyzer__")
     result.append("-M")
     return result
 
 
 class ToolIdentity:
-    """Executable identity (path, content hash, --version), computed once per run."""
+    """Executable identity: resolved path, content SHA-256 and --version output.
+
+    The (expensive) content hash and version query are memoized per executable
+    fingerprint (realpath, size, mtime_ns, inode), which is re-stat'ed for every
+    key, so replacing or rebuilding a tool invalidates its identity.
+    """
 
     def __init__(self) -> None:
-        self._cache: dict[tuple[str, str], str] = {}
+        self._cache: dict[tuple, str] = {}
         self._lock = threading.Lock()
 
     def describe(self, executable: str, directory: str) -> str:
@@ -171,8 +200,13 @@ class ToolIdentity:
         if not resolved or not os.path.isfile(resolved):
             raise CacheMiss(f"cannot resolve executable {executable}")
         resolved = os.path.realpath(resolved)
+        try:
+            info = os.stat(resolved)
+        except OSError as error:
+            raise CacheMiss(f"cannot stat {resolved}: {error}") from error
+        fingerprint = (resolved, info.st_size, info.st_mtime_ns, info.st_ino)
         with self._lock:
-            known = self._cache.get((resolved, directory))
+            known = self._cache.get(fingerprint)
         if known is not None:
             return known
         try:
@@ -191,7 +225,7 @@ class ToolIdentity:
         text = completed.stdout.decode("utf-8", "replace")
         value = f"{resolved}\n{content}\n{text}"
         with self._lock:
-            self._cache[(resolved, directory)] = value
+            self._cache[fingerprint] = value
         return value
 
 
@@ -204,9 +238,13 @@ class KeyBuilder:
     @staticmethod
     def _hash_dependency(path: str) -> str:
         try:
-            return sha256_file(path)
+            with open(path, "rb") as handle:
+                data = handle.read()
         except OSError as error:
             raise CacheMiss(f"cannot read dependency {path}: {error}") from error
+        if any(token in data for token in _VOLATILE_TOKENS):
+            raise CacheMiss(f"{path} uses a clock-dependent macro")
+        return sha256_bytes(data)
 
     def key_for(self, tu: str, entries: list[dict], config: str) -> str:
         if not entries:
@@ -215,6 +253,7 @@ class KeyBuilder:
             FORMAT_VERSION,
             self._tool_hash,
             f"config:{config}",
+            f"env:{environment_fingerprint()}",
             f"clang-tidy:{self._tools.describe(self._clang_tidy, os.getcwd())}",
             f"tu:{tu}",
         ]
@@ -240,11 +279,11 @@ class KeyBuilder:
             if completed.returncode != 0:
                 raise CacheMiss("dependency scan exited non-zero")
             deps = parse_make_deps(completed.stdout.decode("utf-8", "replace"))
-            absolute = []
-            for dep in deps:
-                path = dep if os.path.isabs(dep) else os.path.join(directory, dep)
-                absolute.append(os.path.normpath(path))
-            if os.path.normpath(tu) not in absolute:
+            # Paths are opened exactly as the compiler printed them (no lexical
+            # normalization: "link/../x.h" must follow the symlink like the
+            # compiler did).
+            absolute = [dep if os.path.isabs(dep) else os.path.join(directory, dep) for dep in deps]
+            if os.path.realpath(tu) not in {os.path.realpath(path) for path in absolute}:
                 raise CacheMiss("translation unit missing from its own dependency list")
             dep_lines = sorted({f"{path}:{self._hash_dependency(path)}" for path in absolute})
             entry_parts.append(
