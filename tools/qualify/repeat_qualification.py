@@ -45,9 +45,10 @@ from pathlib import Path
 from typing import Any, Callable
 
 try:
-    import resource
+    import resource as _resource_module
 except ImportError:  # Windows
-    resource = None
+    _resource_module = None  # type: ignore[assignment]
+resource: Any = _resource_module
 
 SCHEMA = "luminumbra.repeat_qualification.v1"
 LABEL = "process repetitions"
@@ -580,7 +581,7 @@ def build_child_environment(base: dict[str, str], crash_dir: Path) -> dict[str, 
     return env
 
 
-def terminate_process_tree(process: subprocess.Popen[bytes]) -> list[str]:
+def terminate_process_tree(process: subprocess.Popen[Any]) -> list[str]:
     """Kill the process tree, then the direct child if needed. Returns cleanup errors."""
     errors: list[str] = []
     if IS_WINDOWS:
@@ -629,7 +630,7 @@ def run_iteration(
 ) -> dict[str, Any]:
     popen_options: dict[str, Any] = {}
     if IS_WINDOWS:
-        popen_options["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+        popen_options["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
     else:
         popen_options["start_new_session"] = True
         if core_target is not None:
@@ -913,7 +914,7 @@ def run_qualification(
         posix = posix_crash_environment(base_cwd, pattern, current, core_target)
         environment.update(posix)
         problems = posix_preflight_problems(posix, core_target[0])
-        if posix["core_directory"] is not None:
+        if posix["core_directory"] is not None and pattern is not None:
             directory_check = core_directory_preflight(Path(posix["core_directory"]), base_cwd)
             environment["core_directory_preflight"] = directory_check
             if directory_check["problem"] is not None:
@@ -923,7 +924,7 @@ def run_qualification(
             preflight_reason = "; ".join(problems) + (
                 "; set `sysctl kernel.core_pattern=core.%p` or use --allow-no-dumps"
             )
-        if posix["core_directory"] is not None:
+        if posix["core_directory"] is not None and pattern is not None:
             core_directory = Path(posix["core_directory"])
             core_skip = core_collection_skip(run_dir, receipt_path, pattern)
 
