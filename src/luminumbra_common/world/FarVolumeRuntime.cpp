@@ -82,6 +82,8 @@ bool FarVolumeSpanLedger::Covers(const FarVolumeSpan& built) const {
     if (!key_)
         return false;
     const auto tier = FarTierAt(key_->tier);
+    if (!tier)
+        return false;
     const auto edge = static_cast<std::int64_t>(tier->brick_edge_meters);
     if (built.min_y <= -kFarVolumeExactCoordinateLimitMeters ||
         built.max_y >= kFarVolumeExactCoordinateLimitMeters || built.min_y >= built.max_y ||
