@@ -53,4 +53,9 @@ if(BUILD_TESTING)
                 "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_docs.py")
     set_tests_properties(DocumentationLinkValidatorContract
         PROPERTIES LABELS "docs;hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME SlowestTestsScriptContract
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_slowest_tests.py")
+    set_tests_properties(SlowestTestsScriptContract
+        PROPERTIES LABELS "ci;tools" TIMEOUT 30)
 endif()
