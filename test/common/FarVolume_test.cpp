@@ -34,7 +34,12 @@ TEST(FarVolume, SurfaceBandIsSparseAlignedAndExtensibleAtEveryTier) {
         SCOPED_TRACE(tier);
         FarVolumeRequest request{tier, -1, 0};
         const auto tile = BuildFarVolumeTile(request, Plane(10.25f));
-        const auto d = *FarTierAt(tier);
+        const auto dimensions = FarTierAt(tier);
+        if (!dimensions.has_value()) {
+            ADD_FAILURE() << "tier " << tier << " is absent from the table";
+            continue;
+        }
+        const auto d = *dimensions;
         ValidateFarVolumeTile(tile);
         EXPECT_LE(static_cast<float>(tile.first_brick_y * static_cast<int>(d.brick_edge_meters)),
                   10.25f - 256.0f);
@@ -279,7 +284,12 @@ std::multiset<SegmentBits> BoundarySegments(const FarVolumeMesh& mesh, int axis,
 }
 TEST(FarVolume, AmbiguousFacesHaveExactAdjacentTileConnectivity) {
     for (std::uint32_t tier = 1; tier <= 5; ++tier) {
-        const float spacing = static_cast<float>(FarTierAt(tier)->sample_spacing_meters);
+        const auto dimensions = FarTierAt(tier);
+        if (!dimensions.has_value()) {
+            ADD_FAILURE() << "tier " << tier << " is absent from the table";
+            continue;
+        }
+        const float spacing = static_cast<float>(dimensions->sample_spacing_meters);
         const auto field = FarVolumeSamplers{
             [](float, float) { return 0.25f; },
             [spacing](const Vec3& p, float h) {
@@ -368,7 +378,12 @@ TEST(FarVolume, CoarseAnalyticOpeningSurvivesNoiseCutoffAndOldSignControlFails) 
 namespace {
 TEST(FarVolume, SubspacingCavityVisibilityDependsOnSamplingPhase) {
     for (std::uint32_t tier = 1; tier <= 5; ++tier) {
-        const float s = static_cast<float>(FarTierAt(tier)->sample_spacing_meters);
+        const auto dimensions = FarTierAt(tier);
+        if (!dimensions.has_value()) {
+            ADD_FAILURE() << "tier " << tier << " is absent from the table";
+            continue;
+        }
+        const float s = static_cast<float>(dimensions->sample_spacing_meters);
         FarVolumeRequest request{tier, 0, 0, FarVolumeSpan{-12 * s, 8 * s}};
         std::array<std::size_t, 2> counts{};
         for (int phase = 0; phase < 2; ++phase) {

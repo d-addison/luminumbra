@@ -6,7 +6,7 @@ but **neither scenario has received visual approval**. The images expose defects
 that the recorded numeric checks did not reject. They are diagnostic baselines,
 not golden references or completed visual improvements.
 
-The September 8 visual catalog contains 70 scenario groups and their required
+The [restored visual catalog](visual-catalog.md) contains all 70 original scenario groups and their required
 variants. This page documents two deficient baseline groups, G04 and R14. There
 are zero review-ready packets and zero approved groups; the other 68 groups have
 no fresh qualified baseline in that catalog. Screenshot count is not group

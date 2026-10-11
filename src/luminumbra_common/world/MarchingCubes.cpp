@@ -1570,7 +1570,10 @@ FarVolumeMesh PolygoniseFarVolume(const FarVolumeTile& tile,
                                   const FarVolumeLimits& tile_limits,
                                   const FarVolumeMeshLimits& limits) {
     ValidateFarVolumeTile(tile, tile_limits);
-    const auto d = *FarTierAt(tile.tier);
+    const auto dimensions = FarTierAt(tile.tier);
+    if (!dimensions)
+        throw std::invalid_argument("Invalid far-volume tier or cave mode");
+    const auto d = *dimensions;
     const std::uint64_t cells = tile.bricks.size() * 64ull;
     const auto vertex_capacity =
         static_cast<std::size_t>(std::min<std::uint64_t>(cells * 12, limits.max_vertices));

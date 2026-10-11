@@ -14,7 +14,7 @@ the latest published source release is v0.2.1. Interfaces and content formats ma
 still change between releases. See the [coordinated roadmap](docs/roadmap.md) for
 release status and the populated engine/game milestones.
 
-The [September 13 recovery status](docs/roadmap.md#current-state) separates merged implementation, remaining verification and unpublished v0.3.0. The [promotion gate](https://github.com/d-addison/luminumbra/pull/55) remains blocked on expanded acceptance.
+The [September 13 recovery status](docs/roadmap.md#current-state) separates merged implementation, remaining verification and unpublished v0.3.0. The [recovery candidate](https://github.com/d-addison/luminumbra/pull/175) is undergoing integration checks; the [promotion gate](https://github.com/d-addison/luminumbra/pull/55) remains blocked on expanded acceptance.
 
 ## v0.3.0 world format break
 
@@ -75,8 +75,9 @@ See [Game assets](docs/game-assets.md) for provenance, offline setup and repair.
 The [documented visual baselines](docs/visual-baselines.md) include original
 screenshots, settings, measurements and visible failures. These September 8
 captures have **not received visual approval**; numeric test results alone do
-not establish scene quality. The catalog of 70 scenario groups currently has two
-deficient baseline groups and zero approved groups; these images show G04 and R14.
+not establish scene quality. The restored [visual catalog](docs/visual-catalog.md)
+preserves the original 70 scenario groups and records subsequent additions.
+Its two historical baseline groups have zero approvals; these images show G04 and R14.
 
 [![Forest baseline with a visible terrain discontinuity](docs/assets/visual-baselines/20260908/forest-reference-preview.png)](docs/visual-baselines.md#forest-reference)
 

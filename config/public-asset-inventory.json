@@ -1212,6 +1212,20 @@
       "source": "Luminumbra documentation assets"
     },
     {
+      "bytes": 6757,
+      "license": "MIT",
+      "path": "docs/assets/authoring-recipes/20260913/evidence.json",
+      "sha256": "900f80e5a4fa699e111810d8f0e74ab80a4175657a89022d02a82dd5ed4f6dee",
+      "source": "Luminumbra documentation assets"
+    },
+    {
+      "bytes": 373763,
+      "license": "MIT",
+      "path": "docs/assets/authoring-recipes/20260913/review-dialog.png",
+      "sha256": "06733ffc3367a2101628cb97f4276fc5e02cc5995127df582673114ee78c0721",
+      "source": "Luminumbra documentation assets"
+    },
+    {
       "bytes": 833,
       "license": "MIT",
       "path": "docs/assets/badges/language-cpp.svg",
