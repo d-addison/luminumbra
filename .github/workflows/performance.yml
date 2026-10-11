@@ -91,8 +91,9 @@ jobs:
   server-smoke-comparison:
     name: Server smoke observation / base versus head
     # Runs on pull requests that target main (the promotion gate, where the water
-    # verdict is required before release) and on pushes to main and devel (so every
-    # merged devel tip still gets a verdict after the fact). It is skipped on
+    # verdict is required before release) and on pushes to main and devel (so merged
+    # devel tips get a verdict after the fact; a newer push to the same branch can
+    # still cancel an in-flight run until the devel push concurrency change lands). It is skipped on
     # pull requests that target devel: it is not a required devel check and costs
     # about 48 runner-minutes per push. The event.before guard stays because a
     # first push to a branch has no base to compare against; schedule and manual
