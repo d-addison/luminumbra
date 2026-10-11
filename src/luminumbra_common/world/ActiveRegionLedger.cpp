@@ -388,11 +388,28 @@ std::string ActiveRegionLedger::payload(bool observational) const {
 std::string ActiveRegionLedger::canonical_bytes() const {
     return m_records.empty() ? std::string{} : "active_regions:v1:" + payload(false);
 }
+bool ActiveRegionLedger::any_frozen_history() const {
+    for (const auto& [key, r] : m_records) {
+        (void)key;
+        if (r.state == RegionState::Frozen || r.frozen_at != 0 || r.frozen_digest != 0)
+            return true;
+    }
+    return false;
+}
 std::string ActiveRegionLedger::encode() const {
+    constexpr std::uint8_t kDigestProjection = 2;
+    const bool frozen_history = any_frozen_history();
     std::string bytes = "ARL1";
-    Append(bytes, 1, 2);
+    Append(bytes, frozen_history ? 2 : 1, 2);
     Append(bytes, 0, 2);
     bytes += payload(true);
+    if (frozen_history) {
+        // Extension block: u32 length, then one TLV (u16 type, u32 length, value).
+        Append(bytes, 7, 4);
+        Append(bytes, 2, 2);
+        Append(bytes, 1, 4);
+        Append(bytes, kDigestProjection, 1);
+    }
     Append(bytes, Hash(bytes), 8);
     return bytes;
 }
@@ -404,11 +421,14 @@ bool ActiveRegionLedger::decode(std::string_view bytes,
         return false;
     Reader version_reader(bytes.substr(4));
     const auto version = version_reader.read(2);
-    if (version > 1) {
+    if (version > 2) {
         error = kFutureMessage;
         return false;
     }
-    if (version != 1 || bytes.size() < kHeaderBytes + 8 || bytes.size() > kMaxFileBytes)
+    // Version 2 carries a u32 extension length between the records and the checksum.
+    const std::size_t extension_prefix = version == 2 ? 4 : 0;
+    if (version == 0 || bytes.size() < kHeaderBytes + extension_prefix + 8 ||
+        bytes.size() > kMaxFileBytes)
         return false;
     try {
         Reader checksum(bytes.substr(bytes.size() - 8));
@@ -436,7 +456,12 @@ bool ActiveRegionLedger::decode(std::string_view bytes,
         if (has_anchor)
             result.set_local_anchor(anchor);
         const auto count = in.read(4);
-        if (count > kMaxRegions || bytes.size() != kHeaderBytes + count * kRecordBytes + 8)
+        if (count > kMaxRegions)
+            return false;
+        // Records end here; a version 2 extension length (checked below) follows them.
+        const std::uint64_t records_end = kHeaderBytes + count * kRecordBytes;
+        if (bytes.size() < records_end + extension_prefix + 8 ||
+            (version == 1 && bytes.size() != records_end + 8))
             return false;
         RegionKey previous{};
         for (std::uint64_t i = 0; i < count; ++i) {
@@ -487,6 +512,46 @@ bool ActiveRegionLedger::decode(std::string_view bytes,
                 (r.state == RegionState::Frozen && r.last_ticked >= r.frozen_at))
                 return false;
             result.m_records.emplace(key, r);
+        }
+        bool digest_projection = false;
+        if (version == 2) {
+            const auto extension_length = in.read(4);
+            const auto extension_begin = records_end + 4;
+            if (extension_length == 0 || bytes.size() != extension_begin + extension_length + 8)
+                return false;
+            const std::string_view extension = bytes.substr(extension_begin, extension_length);
+            // Each TLV is u16 type, u32 length, value. The TLVs must exactly fill the block.
+            std::size_t at = 0;
+            std::optional<std::uint64_t> previous_type;
+            while (at < extension.size()) {
+                if (extension.size() - at < 6)
+                    return false;
+                Reader tlv(extension.substr(at, 6));
+                const auto type = tlv.read(2);
+                const auto length = tlv.read(4);
+                at += 6;
+                if (length > extension.size() - at)
+                    return false;
+                const auto value = extension.substr(at, length);
+                at += length;
+                // Strictly ascending types refuse duplicates; type 2 is the only known type.
+                if ((previous_type && type <= *previous_type) || type != 2 || length != 1)
+                    return false;
+                previous_type = type;
+                const auto projection = static_cast<unsigned char>(value[0]);
+                if (projection > 2) {
+                    error = kProjectionMessage;
+                    return false;
+                }
+                if (projection < 2)
+                    return false;
+                digest_projection = true;
+            }
+        }
+        // Frozen history cannot be read without the digest projection declaration.
+        if (!digest_projection && result.any_frozen_history()) {
+            error = kProjectionMessage;
+            return false;
         }
         // Also refuses alternate encodings (negative zero, reserved bytes).
         if (result.encode() != bytes)

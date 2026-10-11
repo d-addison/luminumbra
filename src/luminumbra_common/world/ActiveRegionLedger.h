@@ -93,8 +93,11 @@ public:
     // Magic, version, reserved, canonical tick, validation ceiling, config,
     // anchor presence and anchor.
     static constexpr std::size_t kHeaderBytes = 56;
-    static constexpr std::size_t kMaxFileBytes = kHeaderBytes + kMaxRegions * kRecordBytes + 8;
+    // Version 2 adds u32 extension length and one TLV (type 2, length 1, value 2 = 7 bytes).
+    static constexpr std::size_t kMaxFileBytes =
+        kHeaderBytes + kMaxRegions * kRecordBytes + 4 + 7 + 8;
     static constexpr const char* kCorruptMessage = "Corrupt active-region ledger.";
+    static constexpr const char* kProjectionMessage = "Unsupported frozen digest projection.";
     static constexpr const char* kFutureMessage =
         "Unsupported future active-region ledger version.";
     using DurableDigest = std::function<std::uint64_t(RegionKey)>;
@@ -166,6 +169,8 @@ private:
     ActiveRegionRecord& activate(RegionKey key, const WorldClock& clock);
     void visit(const Vec3& anchor, const WorldClock& clock, RegionRejections& rejected);
     std::string payload(bool observational) const;
+    // True when any record has been frozen (now or in the past), which requires version 2.
+    bool any_frozen_history() const;
     RegionSchedulerConfig m_config;
     std::map<RegionKey, ActiveRegionRecord> m_records;
     std::optional<Vec3> m_localAnchor;

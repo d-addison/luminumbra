@@ -8,6 +8,7 @@
 #include <limits>
 #include <span>
 #include <string>
+#include <string_view>
 
 namespace {
 using namespace Luminumbra::world;
@@ -31,6 +32,39 @@ ActiveRegionLedger Reload(const ActiveRegionLedger& ledger) {
     std::string error;
     EXPECT_TRUE(ActiveRegionLedger::decode(ledger.encode(), restored, error)) << error;
     return restored;
+}
+// Same FNV-1a 64 as the implementation's Hash(), used to re-seal hand-crafted envelopes.
+std::uint64_t Fnv1a64(std::string_view bytes) {
+    std::uint64_t hash = 14695981039346656037ull;
+    for (const unsigned char byte : bytes) {
+        hash ^= byte;
+        hash *= 1099511628211ull;
+    }
+    return hash;
+}
+void Seal(std::string& bytes) {
+    const auto checksum = Fnv1a64(std::string_view(bytes).substr(0, bytes.size() - 8));
+    for (unsigned i = 0; i < 8; ++i)
+        bytes[bytes.size() - 8 + i] = static_cast<char>((checksum >> (8 * i)) & 255);
+}
+// One record that has been frozen (state Frozen, frozen_at 3, fake digest).
+ActiveRegionLedger FrozenLedger() {
+    auto ledger = Distant({0, 1, 1});
+    Step(ledger, 2, 1);
+    Step(ledger, 3, 1);
+    return ledger;
+}
+unsigned Version(std::string_view bytes) {
+    return static_cast<unsigned char>(bytes[4]) |
+           (static_cast<unsigned>(static_cast<unsigned char>(bytes[5])) << 8);
+}
+void ExpectRefused(const std::string& bytes, const char* expected) {
+    auto destination = Distant();
+    const auto before = destination.encode();
+    std::string error;
+    EXPECT_FALSE(ActiveRegionLedger::decode(bytes, destination, error));
+    EXPECT_EQ(error, expected);
+    EXPECT_EQ(destination.encode(), before);
 }
 
 TEST(ActiveRegionLedgerTest, RegionAddressingAndFixedDiscIgnoreHeight) {
@@ -324,7 +358,7 @@ TEST(ActiveRegionLedgerTest, CorruptTruncatedAndFuturePayloadsRefuseTransactiona
         EXPECT_EQ(error, ActiveRegionLedger::kCorruptMessage);
     }
     auto future = good;
-    future[4] = 2;
+    future[4] = 3;
     EXPECT_FALSE(ActiveRegionLedger::decode(future, destination, error));
     EXPECT_EQ(error, ActiveRegionLedger::kFutureMessage);
     EXPECT_EQ(destination.encode(), before);
@@ -503,6 +537,109 @@ TEST(ActiveRegionLedgerTest, ScheduleTraceMatchesTheHandBuiltByteOracle) {
     ASSERT_EQ(dirty.due.size(), 1u);
     EXPECT_EQ(dirty.rejected.anchors, 1u);
     EXPECT_EQ(dirty.digest, oracle(true));
+}
+
+TEST(ActiveRegionLedgerTest, EnvelopeIsV1WithoutFrozenHistory) {
+    auto ledger = Distant({0, 1, 1});
+    Step(ledger, 2, 1);
+    ASSERT_EQ(ledger.records().at(kFar).state, RegionState::Reduced);
+    const auto bytes = ledger.encode();
+    EXPECT_EQ(Version(bytes), 1u);
+    EXPECT_EQ(bytes.size(), 56u + 104u + 8u);
+    ActiveRegionLedger decoded;
+    std::string error;
+    ASSERT_TRUE(ActiveRegionLedger::decode(bytes, decoded, error)) << error;
+    EXPECT_EQ(decoded.encode(), bytes);
+}
+
+TEST(ActiveRegionLedgerTest, EnvelopeIsV2WithProjectionExtensionAfterAFreeze) {
+    const auto ledger = FrozenLedger();
+    ASSERT_EQ(ledger.records().at(kFar).state, RegionState::Frozen);
+    const auto bytes = ledger.encode();
+    EXPECT_EQ(Version(bytes), 2u);
+    EXPECT_EQ(bytes.size(), 56u + 104u + 4u + 7u + 8u);
+    // Little endian: u32 ext_len=7, u16 type=2, u32 length=1, u8 value=2.
+    EXPECT_EQ(bytes.substr(bytes.size() - 19, 11),
+              std::string("\x07\0\0\0\x02\0\x01\0\0\0\x02", 11));
+    ActiveRegionLedger decoded;
+    std::string error;
+    ASSERT_TRUE(ActiveRegionLedger::decode(bytes, decoded, error)) << error;
+    EXPECT_EQ(decoded.encode(), bytes);
+    EXPECT_EQ(decoded.canonical_bytes(), ledger.canonical_bytes());
+}
+
+TEST(ActiveRegionLedgerTest, FrozenHistoryPersistsAfterWake) {
+    auto ledger = FrozenLedger();
+    ledger.pin(kFar, true, WorldClock(4));
+    ledger.schedule(WorldClock(5));
+    const auto& record = ledger.records().at(kFar);
+    ASSERT_EQ(record.state, RegionState::Active);
+    ASSERT_NE(record.frozen_at, 0u);
+    const auto bytes = ledger.encode();
+    EXPECT_EQ(Version(bytes), 2u);
+    EXPECT_EQ(Reload(ledger).encode(), bytes);
+}
+
+TEST(ActiveRegionLedgerTest, V2RefusalMatrix) {
+    const auto good = FrozenLedger().encode();
+    ASSERT_EQ(Version(good), 2u);
+    // Extension block: ext_len at ext, TLV type at ext+4, length at ext+6, value at ext+10.
+    const std::size_t ext = good.size() - 8 - 11;
+    const auto edited = [&](std::size_t offset, unsigned char value) {
+        auto bytes = good;
+        bytes[offset] = static_cast<char>(value);
+        Seal(bytes);
+        return bytes;
+    };
+    {
+        // ext_len 0 with the TLV removed and the size adjusted.
+        auto bytes = good.substr(0, ext) + std::string(4, '\0') + std::string(8, '\0');
+        Seal(bytes);
+        ExpectRefused(bytes, ActiveRegionLedger::kCorruptMessage);
+    }
+    ExpectRefused(edited(ext + 4, 1), ActiveRegionLedger::kCorruptMessage);
+    ExpectRefused(edited(ext + 6, 2), ActiveRegionLedger::kCorruptMessage);
+    ExpectRefused(edited(ext + 10, 1), ActiveRegionLedger::kCorruptMessage);
+    ExpectRefused(edited(ext + 10, 3), ActiveRegionLedger::kProjectionMessage);
+    ExpectRefused(edited(4, 3), ActiveRegionLedger::kFutureMessage);
+    {
+        // Duplicate type 2 with ext_len 14.
+        auto bytes = good.substr(0, ext) + std::string("\x0e\0\0\0", 4) + good.substr(ext + 4, 7) +
+                     good.substr(ext + 4, 7) + good.substr(good.size() - 8);
+        Seal(bytes);
+        ExpectRefused(bytes, ActiveRegionLedger::kCorruptMessage);
+    }
+    {
+        // Garbage byte before the checksum, checksum re-sealed.
+        auto bytes = good.substr(0, good.size() - 8) + "x" + good.substr(good.size() - 8);
+        Seal(bytes);
+        ExpectRefused(bytes, ActiveRegionLedger::kCorruptMessage);
+    }
+    ExpectRefused(good + "x", ActiveRegionLedger::kCorruptMessage);
+    ExpectRefused(good.substr(0, good.size() - 1), ActiveRegionLedger::kCorruptMessage);
+    {
+        // A v2 file whose records hold no frozen history but declares the projection.
+        const auto plain = Distant().encode();
+        auto bytes = plain.substr(0, plain.size() - 8) +
+                     std::string("\x07\0\0\0\x02\0\x01\0\0\0\x02", 11) + std::string(8, '\0');
+        bytes[4] = 2;
+        Seal(bytes);
+        ExpectRefused(bytes, ActiveRegionLedger::kCorruptMessage);
+    }
+}
+
+TEST(ActiveRegionLedgerTest, V1FileWithFrozenHistoryIsRefused) {
+    const auto good = FrozenLedger().encode();
+    const std::size_t ext = good.size() - 8 - 11;
+    auto bytes = good.substr(0, ext) + std::string(8, '\0');
+    bytes[4] = 1;
+    Seal(bytes);
+    ActiveRegionLedger destination = Distant();
+    const auto before = destination.encode();
+    std::string error;
+    EXPECT_FALSE(ActiveRegionLedger::decode(bytes, destination, error));
+    EXPECT_EQ(error, ActiveRegionLedger::kProjectionMessage);
+    EXPECT_EQ(destination.encode(), before);
 }
 
 } // namespace
