@@ -1,6 +1,7 @@
 #include "WorldSaveService.h"
 
 #include "../ecs/EntitySnapshot.h" //  plant entity snapshot persistence
+#include "SaveTransaction.h"
 #include "WorldPersistenceRoundtrip.h"
 #include "world/FarLodStore.h"
 
@@ -1265,6 +1266,93 @@ bool WorldSaveService::upsert_container_records(const std::filesystem::path& reg
     }
 }
 
+namespace {
+std::atomic<std::uint64_t>& DecodeCounter() {
+    static std::atomic<std::uint64_t> counter{0};
+    return counter;
+}
+} // namespace
+
+std::uint64_t WorldSaveService::decode_count_for_testing() {
+    return DecodeCounter().load(std::memory_order_acquire);
+}
+
+bool WorldSaveService::durable_flush_directory(const std::filesystem::path& directory,
+                                               std::vector<std::string>* errors) {
+#if defined(_WIN32)
+    (void)directory;
+    (void)errors;
+    return true;
+#else
+    int flags = O_RDONLY;
+#if defined(O_DIRECTORY)
+    flags |= O_DIRECTORY;
+#endif
+    const int fd = ::open(directory.c_str(), flags);
+    if (fd < 0) {
+        const int error = errno;
+        AddError(errors,
+                 "failed to open directory for durable flush: " + directory.string() + ": " +
+                     PosixErrorMessage(error));
+        return false;
+    }
+    while (::fsync(fd) != 0) {
+        if (errno == EINTR)
+            continue;
+        const int error = errno;
+        ::close(fd);
+        AddError(errors,
+                 "directory flush failed: " + directory.string() + ": " + PosixErrorMessage(error));
+        return false;
+    }
+    if (::close(fd) != 0) {
+        const int error = errno;
+        AddError(errors,
+                 "directory close failed: " + directory.string() + ": " + PosixErrorMessage(error));
+        return false;
+    }
+    return true;
+#endif
+}
+
+bool WorldSaveService::durable_write_file(const std::filesystem::path& destination,
+                                          const std::string& bytes,
+                                          std::vector<std::string>* errors) {
+    std::filesystem::path temp;
+    if (!WriteDurableRegionTemp(destination, bytes, temp, errors))
+        return false;
+    report_snapshot_step("before-replace", destination);
+    if (!ReplaceRegionFileAtomically(temp, destination, errors)) {
+        RemoveTemporaryFile(temp);
+        return false;
+    }
+    report_snapshot_step("after-replace", destination);
+    return true;
+}
+
+bool WorldSaveService::durable_remove(const std::filesystem::path& path,
+                                      std::vector<std::string>* errors) {
+    std::error_code ec;
+    const bool existed = std::filesystem::exists(path, ec);
+    if (ec) {
+        AddError(errors, "failed to stat " + path.string() + ": " + ec.message());
+        return false;
+    }
+    if (!existed)
+        return true;
+    report_snapshot_step("before-delete", path);
+    std::filesystem::remove(path, ec);
+    if (ec) {
+        AddError(errors, "failed to remove " + path.string() + ": " + ec.message());
+        return false;
+    }
+    const auto parent = path.has_parent_path() ? path.parent_path() : std::filesystem::path(".");
+    if (!durable_flush_directory(parent, errors))
+        return false;
+    report_snapshot_step("after-delete", path);
+    return true;
+}
+
 void WorldSaveService::set_interrupt_before_region_replace_for_testing(bool enabled) {
     InterruptBeforeRegionReplaceForTesting().store(enabled, std::memory_order_release);
 }
@@ -1283,6 +1371,7 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
                                   const std::filesystem::path& save_dir,
                                   std::vector<std::string>& errors,
                                   const std::stop_token& stop) const {
+    DecodeCounter().fetch_add(1, std::memory_order_acq_rel);
     state.clear();
     const auto reject = [&state, &errors](const std::string& message) {
         state.clear();

@@ -178,6 +178,23 @@ public:
     // disables the hook.
     static void set_before_active_regions_replace_for_testing(bool (*hook)());
 
+    // --- S4 durable primitives (SaveTransaction and flag-on writers) ---
+    // Writes bytes beside `destination` (staged temp, file fsync), atomically replaces it and
+    // flushes the directory. Fires the snapshot step hook "before-replace"/"after-replace". Binary,
+    // no newline translation.
+    static bool durable_write_file(const std::filesystem::path& destination,
+                                   const std::string& bytes,
+                                   std::vector<std::string>* errors = nullptr);
+    // Unlinks `path` when it exists (a missing file is success) and flushes the parent directory.
+    // Fires "before-delete"/"after-delete".
+    static bool durable_remove(const std::filesystem::path& path,
+                               std::vector<std::string>* errors = nullptr);
+    // fsync of a directory (no-op success where the platform cannot open directories).
+    static bool durable_flush_directory(const std::filesystem::path& directory,
+                                        std::vector<std::string>* errors = nullptr);
+    // Number of full load_world decodes since process start (single-decode contract tests).
+    static std::uint64_t decode_count_for_testing();
+
     // Serializes the full streaming state into the save directory, creating
     // intermediate directories as needed. Returns false (with diagnostics in
     // errors when provided) if the snapshot could not be written.
