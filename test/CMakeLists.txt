@@ -108,6 +108,7 @@ add_executable(common_tests
     common/FarLodStore_test.cpp
     common/FarTierTable_test.cpp
     common/FarWantedSet_test.cpp
+    common/FarAuthorityOverlay_test.cpp
     common/GameSessionHeadlessWorld_test.cpp
     common/SimBudgetTelemetry_test.cpp
     ../src/luminumbra_server/modes/SmokeArtifact.cpp
