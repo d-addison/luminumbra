@@ -9,6 +9,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace {
 using namespace Luminumbra::world;
@@ -640,6 +641,146 @@ TEST(ActiveRegionLedgerTest, V1FileWithFrozenHistoryIsRefused) {
     EXPECT_FALSE(ActiveRegionLedger::decode(bytes, destination, error));
     EXPECT_EQ(error, ActiveRegionLedger::kProjectionMessage);
     EXPECT_EQ(destination.encode(), before);
+}
+
+const std::uint64_t kIdle = ActiveRegionLedger::kIdleEvictionTicks;
+const ActiveRegionLedger::OwnershipProbe kNobodyOwns = [](RegionKey) {
+    return false;
+};
+
+// One replicated visit at tick 1 near the origin; every record it creates has last_proximity 1.
+ActiveRegionLedger HomeVisit() {
+    ActiveRegionLedger ledger;
+    const std::array anchors{Vec3(100, 0, 100)};
+    ledger.schedule(WorldClock(1), anchors);
+    return ledger;
+}
+std::vector<RegionKey> Keys(const ActiveRegionLedger& ledger) {
+    std::vector<RegionKey> keys;
+    for (const auto& [key, record] : ledger.records()) {
+        (void)record;
+        keys.push_back(key);
+    }
+    return keys;
+}
+// Schedules an explicit empty anchor span, so nothing is visited and only retention can act.
+RegionSchedule Idle(ActiveRegionLedger& ledger,
+                    std::uint64_t tick,
+                    const ActiveRegionLedger::OwnershipProbe& owned = {}) {
+    return ledger.schedule(WorldClock(tick), std::span<const Vec3>{}, {}, {}, owned);
+}
+
+TEST(ActiveRegionLedgerTest, RetentionDropsOnlyIdleUnownedRecords) {
+    auto ledger = HomeVisit();
+    const auto visited = ledger.records().size();
+    ASSERT_GT(visited, 1u);
+    for (const auto& [key, record] : ledger.records()) {
+        (void)key;
+        ASSERT_EQ(record.last_proximity, 1u);
+    }
+    const auto before = Idle(ledger, 1 + kIdle - 1, kNobodyOwns);
+    EXPECT_EQ(ledger.records().size(), visited);
+    EXPECT_EQ(before.ledger_records, visited);
+    const auto after = Idle(ledger, 1 + kIdle, kNobodyOwns);
+    EXPECT_TRUE(ledger.records().empty());
+    EXPECT_EQ(after.ledger_records, 0u);
+}
+
+TEST(ActiveRegionLedgerTest, RetentionKeepsPinnedEditedPopulatedWaterAndOwnedRecords) {
+    auto ledger = HomeVisit();
+    const auto keys = Keys(ledger);
+    ASSERT_GE(keys.size(), 6u);
+    // Flags use tick 2, below the idle tick, so none of them re-stamp last_proximity.
+    ledger.pin(keys[0], true, WorldClock(2));
+    ledger.mark_edited(keys[1], WorldClock(2));
+    ledger.set_populated(keys[2], true);
+    ledger.set_water_cursor(keys[3], 5);
+    const RegionKey owned_key = keys[4];
+    const ActiveRegionLedger::OwnershipProbe owned = [&](RegionKey key) {
+        return key == owned_key;
+    };
+    const std::vector<RegionKey> kept(keys.begin(), keys.begin() + 5);
+
+    const auto before = Idle(ledger, kIdle, owned);
+    EXPECT_EQ(before.ledger_records, keys.size());
+    const auto after = Idle(ledger, 1 + kIdle, owned);
+    EXPECT_EQ(Keys(ledger), kept);
+    EXPECT_EQ(after.ledger_records, kept.size());
+}
+
+TEST(ActiveRegionLedgerTest, NoProbeNeverEvicts) {
+    auto ledger = HomeVisit();
+    const auto visited = ledger.records().size();
+    const auto schedule = Idle(ledger, 3 * kIdle);
+    EXPECT_EQ(ledger.records().size(), visited);
+    EXPECT_EQ(schedule.ledger_records, visited);
+}
+
+TEST(ActiveRegionLedgerTest, EvictedRegionStartsFreshWhenVisitedAgain) {
+    auto ledger = HomeVisit();
+    const std::uint64_t evicted_at = 1 + kIdle;
+    Idle(ledger, evicted_at, kNobodyOwns);
+    ASSERT_TRUE(ledger.records().empty());
+    const std::array anchors{Vec3(100, 0, 100)};
+    const std::uint64_t revisit = evicted_at + 4;
+    ledger.schedule(WorldClock(revisit), anchors);
+    ASSERT_TRUE(ledger.records().contains({0, 0}));
+    const auto& record = ledger.records().at({0, 0});
+    EXPECT_EQ(record.first_active, revisit);
+    EXPECT_EQ(record.last_proximity, revisit);
+    EXPECT_EQ(record.state, RegionState::Active);
+}
+
+TEST(ActiveRegionLedgerTest, RetentionKeepsTheLedgerBounded) {
+    std::vector<Vec3> grid;
+    for (int i = 0; i < 600; ++i)
+        grid.emplace_back(
+            static_cast<float>((i % 30) * 2048), 0.0f, static_cast<float>((i / 30) * 2048));
+    ActiveRegionLedger ledger;
+    ledger.schedule(WorldClock(1), std::span<const Vec3>(grid));
+    EXPECT_GT(ledger.records().size(), 1000u);
+    const std::array lone{Vec3(0, 0, 0)};
+    const auto schedule =
+        ledger.schedule(WorldClock(1 + kIdle), std::span<const Vec3>(lone), {}, {}, kNobodyOwns);
+    EXPECT_LT(ledger.records().size(), 20u);
+    EXPECT_EQ(schedule.ledger_records, ledger.records().size());
+}
+
+TEST(ActiveRegionLedgerTest, EvictionRoundTripsThroughEncodeDecode) {
+    auto ledger = HomeVisit();
+    const auto keys = Keys(ledger);
+    ledger.pin(keys.front(), true, WorldClock(2));
+    Idle(ledger, 1 + kIdle, kNobodyOwns);
+    ASSERT_EQ(ledger.records().size(), 1u);
+    const auto restored = Reload(ledger);
+    EXPECT_EQ(restored.encode(), ledger.encode());
+    EXPECT_EQ(restored.records(), ledger.records());
+}
+
+TEST(ActiveRegionLedgerTest, PointerRowsMatchACopyScheduledIdentically) {
+    ActiveRegionLedger ledger({0, 1, 1});
+    ledger.pin({1, 0}, true, WorldClock{});
+    ledger.mark_edited({2, 0}, WorldClock{});
+    const std::array anchors{Vec3(2304, 0, 2304)};
+    ledger.schedule(WorldClock(1), anchors);
+    const std::array work{RegionWork{{1, 0}, 3, 0, 0, 0}, RegionWork{{2, 0}, 5, 0, 0, 0}};
+    // Unvisited work with a zero work limit degrades regions each tick.
+    for (std::uint64_t tick = 2; tick <= 6; ++tick)
+        ledger.schedule(WorldClock(tick), {}, work, [](RegionKey) { return 42u; });
+    bool degraded = false;
+    for (const auto& [key, record] : ledger.records()) {
+        (void)key;
+        degraded = degraded || record.state != RegionState::Active;
+    }
+    ASSERT_TRUE(degraded);
+
+    auto copy = ledger;
+    const std::array next{Vec3(2304, 0, 2304)};
+    const auto a = ledger.schedule(WorldClock(7), next, work, [](RegionKey) { return 42u; });
+    const auto b = copy.schedule(WorldClock(7), next, work, [](RegionKey) { return 42u; });
+    EXPECT_EQ(a, b);
+    EXPECT_EQ(a.digest, b.digest);
+    EXPECT_EQ(ledger.encode(), copy.encode());
 }
 
 } // namespace

@@ -73,7 +73,9 @@
 #include <iomanip>
 #include <iterator> // (GCC-15 vague-linkage: must be visible at the GrazeableComponent storage
 #include <memory>   //  instantiation point, else std::__advance/iter_move get externalized)
+#include <optional>
 #include <random>
+#include <set>
 #include <sstream>
 #include <stdexcept>
 #include <utility>
@@ -983,9 +985,14 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
                 m_replicatedSimulationAnchors
                     ? std::optional<std::span<const Vec3>>(*m_replicatedSimulationAnchors)
                     : std::nullopt;
+            // Built lazily on the first probe call of this tick.
+            std::optional<std::set<RegionKey>> resident_regions;
             try {
                 m_regionSchedule = m_activeRegionLedger.schedule(
-                    m_worldClock, anchors, m_regionWork, [this](RegionKey key) {
+                    m_worldClock,
+                    anchors,
+                    m_regionWork,
+                    [this](RegionKey key) {
                         const auto directory = m_regionDurableDirectory.empty()
                                                    ? GetWorldSaveDir()
                                                    : m_regionDurableDirectory;
@@ -994,6 +1001,26 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
                             key,
                             Persistence::RegionDigestInputs{
                                 m_worldSystem->snapshot_streamed_chunks(), {}});
+                    },
+                    // Later slices extend this probe with parked chunks, ground objects,
+                    // pages, creatures, plants and water debt.
+                    [this, &resident_regions](RegionKey key) {
+                        for (const auto& entry : m_regionWork)
+                            if (entry.key == key)
+                                return true;
+                        if (!resident_regions) {
+                            resident_regions.emplace();
+                            for (const auto& chunk : m_worldSystem->snapshot_streamed_chunks()) {
+                                if (!chunk ||
+                                    chunk->sdf_provenance() != ChunkSdfProvenance::LoadedOrEdited)
+                                    continue;
+                                int rx = 0, rz = 0;
+                                Persistence::WorldSaveService::region_coords_for_chunk(
+                                    chunk->get_coords(), rx, rz);
+                                resident_regions->insert(RegionKey{rx, rz});
+                            }
+                        }
+                        return resident_regions->contains(key);
                     });
                 m_regionWork.clear();
             } catch (const std::exception& error) {

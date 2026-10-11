@@ -75,6 +75,8 @@ struct RegionSchedule {
     std::vector<RegionTransition> transitions;
     RegionRejections rejected;
     std::string digest;
+    // Measurement hook: ledger record count after retention ran this tick.
+    std::uint64_t ledger_records = 0;
     bool operator==(const RegionSchedule&) const = default;
 };
 
@@ -101,6 +103,10 @@ public:
     static constexpr const char* kFutureMessage =
         "Unsupported future active-region ledger version.";
     using DurableDigest = std::function<std::uint64_t(RegionKey)>;
+    // Reports whether a region is still owned by a consumer, so it must not be evicted.
+    using OwnershipProbe = std::function<bool(RegionKey)>;
+    // Idle ticks before an unowned record is dropped (one hour at 30 Hz).
+    static constexpr std::uint64_t kIdleEvictionTicks = 108000;
 
     // An absent ledger starts at the restored clock without scheduling a tick.
     explicit ActiveRegionLedger(RegionSchedulerConfig config = {},
@@ -155,7 +161,8 @@ public:
     RegionSchedule schedule(const WorldClock& clock,
                             std::optional<std::span<const Vec3>> replicated_anchors = std::nullopt,
                             std::span<const RegionWork> work = {},
-                            const DurableDigest& durable_digest = {});
+                            const DurableDigest& durable_digest = {},
+                            const OwnershipProbe& owned = {});
     [[nodiscard]] std::string canonical_bytes() const;
     [[nodiscard]] std::string encode() const;
     // Transactional decode: refuses without modifying out. No IO or migration.
@@ -165,7 +172,10 @@ private:
     RegionSchedule schedule_in_place(const WorldClock& clock,
                                      std::optional<std::span<const Vec3>> replicated_anchors,
                                      std::span<const RegionWork> work,
-                                     const DurableDigest& durable_digest);
+                                     const DurableDigest& durable_digest,
+                                     const OwnershipProbe& owned);
+    // Drops idle, unowned, non-pinned, unedited, unpopulated records with no water cursor.
+    void evict_idle(const WorldClock& clock, const OwnershipProbe& owned);
     ActiveRegionRecord& activate(RegionKey key, const WorldClock& clock);
     void visit(const Vec3& anchor, const WorldClock& clock, RegionRejections& rejected);
     std::string payload(bool observational) const;
