@@ -50,6 +50,8 @@ class WindowsProcessTests(unittest.TestCase):
             w.LPVOID, w.LPVOID, w.LPVOID, w.LPVOID, ctypes.POINTER(w.LPVOID)])
         api.bind(a, 'ConvertSecurityDescriptorToStringSecurityDescriptorW', w.BOOL,
             [w.LPVOID, w.DWORD, w.DWORD, ctypes.POINTER(w.LPWSTR), w.LPVOID])
+        api.bind(a, 'ConvertStringSecurityDescriptorToSecurityDescriptorW', w.BOOL,
+            [w.LPWSTR, w.DWORD, ctypes.POINTER(w.LPVOID), w.LPVOID])
         root = process_module.private_directory()
         token, sid, descriptor, rendered = w.HANDLE(), w.LPWSTR(), w.LPVOID(), w.LPWSTR()
         try:
@@ -64,12 +66,20 @@ class WindowsProcessTests(unittest.TestCase):
                                                      ctypes.byref(descriptor)), 0)
             api.check(a.ConvertSecurityDescriptorToStringSecurityDescriptorW(descriptor, 1, 4,
                                                                               ctypes.byref(rendered), None))
-            # SDDL renders well-known account RIDs as aliases (the hosted runner is the built-in
-            # Administrator, rendered as LA), so accept the alias for the current user's own SID.
-            aliases = {'500': 'LA', '501': 'LG', '512': 'DA'}
-            trustee = aliases.get(sid.value.rsplit('-', 1)[-1]) if sid.value.startswith('S-1-5-21-') else None
-            self.assertIn(rendered.value, tuple('D:P(A;OICI;FA;;;' + name + ')'
-                                                for name in (sid.value, trustee) if name))
+            # Canonicalize the expectation through the same Windows rendering: SDDL prints well-known
+            # accounts as aliases (the hosted runner is the built-in Administrator, rendered as LA),
+            # so compare against the expected descriptor parsed from the current user's SID string.
+            expected_descriptor, expected = w.LPVOID(), w.LPWSTR()
+            try:
+                api.check(a.ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                    'D:P(A;OICI;FA;;;' + sid.value + ')', 1, ctypes.byref(expected_descriptor), None))
+                api.check(a.ConvertSecurityDescriptorToStringSecurityDescriptorW(
+                    expected_descriptor, 1, 4, ctypes.byref(expected), None))
+                self.assertEqual(rendered.value, expected.value)
+            finally:
+                for allocation in (expected_descriptor, expected):
+                    if allocation:
+                        k.LocalFree(ctypes.cast(allocation, w.LPVOID))
         finally:
             for allocation in (sid, descriptor, rendered):
                 if allocation:
