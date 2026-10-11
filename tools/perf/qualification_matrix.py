@@ -13,8 +13,14 @@ import re
 SCHEMA = 'luminumbra.qualification_matrix.v1'
 PROFILE_IDS = ('quality', 'performance')
 TOP_KEYS = frozenset(('schema', 'qualified_renderer', 'floor_ms', 'target_ms', 'profiles',
-                      'displays', 'world', 'warmup_frames', 'fixed_view_measured_frames',
-                      'workloads'))
+                      'displays', 'world', 'time_of_day', 'warmup_frames',
+                      'fixed_view_measured_frames', 'workloads'))
+PROFILE_KEYS = frozenset(('id', 'resolution_scale'))
+PROFILE_SCALES = {'quality': 1.0, 'performance': 0.67}  # Hard-coded in main_client.cpp
+DISPLAY_KEYS = frozenset(('id', 'width', 'height', 'refresh_hz'))
+WORLD_KEYS = frozenset(('kind', 'note'))
+FLOOR_MS = 16.67
+TARGET_MS = 8.33
 FIXED_KEYS = frozenset(('id', 'kind', 'pose', 'pose_provenance'))
 TRAVERSAL_KEYS = frozenset(('id', 'kind', 'script', 'blocked_by'))
 POSE_KEYS = ('x', 'y', 'z', 'yaw', 'pitch')
@@ -64,6 +70,10 @@ def validate_matrix(matrix):
     if keys != TOP_KEYS:
         raise MatrixError(f'matrix: missing top-level keys {sorted(TOP_KEYS - keys)}, '
                           f'unexpected keys {sorted(keys - TOP_KEYS)}')
+    _validate_renderer(matrix['qualified_renderer'])
+    _validate_timing(matrix['floor_ms'], matrix['target_ms'])
+    _validate_world(matrix['world'])
+    _validate_time_of_day(matrix['time_of_day'])
     _validate_profiles(matrix['profiles'])
     _validate_displays(matrix['displays'])
     _validate_frames(matrix['warmup_frames'], 'warmup_frames')
@@ -71,17 +81,66 @@ def validate_matrix(matrix):
     _validate_workloads(matrix['workloads'])
 
 
+def _require_exact(obj, expected, label):
+    if not isinstance(obj, dict):
+        raise MatrixError(f'matrix: {label} must be an object')
+    keys = set(obj)
+    if keys != expected:
+        raise MatrixError(f'matrix: {label} missing keys {sorted(expected - keys)}, '
+                          f'unexpected keys {sorted(keys - expected)}')
+
+
+def _validate_renderer(value):
+    if not isinstance(value, str) or not value or value != value.strip():
+        raise MatrixError('matrix: qualified_renderer must be a non-empty string without '
+                          'leading or trailing spaces')
+
+
+def _validate_timing(floor_ms, target_ms):
+    for label, value in (('floor_ms', floor_ms), ('target_ms', target_ms)):
+        if type(value) is not float:
+            raise MatrixError(f'matrix: {label} must be a float')
+    if floor_ms != FLOOR_MS or target_ms != TARGET_MS:
+        raise MatrixError(f'matrix: floor_ms must be {FLOOR_MS} and target_ms {TARGET_MS}, '
+                          f'got {floor_ms!r} and {target_ms!r}')
+    if not floor_ms >= target_ms > 0:
+        raise MatrixError('matrix: require floor_ms >= target_ms > 0')
+
+
+def _validate_world(world):
+    _require_exact(world, WORLD_KEYS, 'world')
+    if world['kind'] != 'fresh':
+        raise MatrixError(f"matrix: world kind must be 'fresh', got {world['kind']!r}")
+    if not isinstance(world['note'], str):
+        raise MatrixError('matrix: world note must be a string')
+
+
+def _validate_time_of_day(value):
+    if type(value) is not float or not math.isfinite(value) or not 0 <= value < 1:
+        raise MatrixError(f'matrix: time_of_day must be a float in [0, 1), got {value!r}')
+
+
 def _validate_profiles(profiles):
     if not isinstance(profiles, list):
         raise MatrixError('matrix: profiles must be a list')
-    ids = []
     for profile in profiles:
-        if not isinstance(profile, dict):
-            raise MatrixError('matrix: profile entries must be objects')
-        ids.append(profile.get('id'))
+        _require_exact(profile, PROFILE_KEYS, 'profile')
+    ids = [profile['id'] for profile in profiles]
     if sorted(ids, key=str) != sorted(PROFILE_IDS):
         raise MatrixError(f'matrix: profiles must have exactly the ids {list(PROFILE_IDS)}, '
                           f'got {ids!r}')
+    for profile in profiles:
+        scale = profile['resolution_scale']
+        expected = PROFILE_SCALES[profile['id']]
+        if type(scale) is not float or scale != expected:
+            raise MatrixError(f"matrix: profile {profile['id']!r} resolution_scale must be "
+                              f'{expected}')
+
+
+def _validate_bounded_int(value, minimum, maximum, label):
+    if type(value) is not int or not minimum <= value <= maximum:
+        raise MatrixError(f'matrix: {label} must be an integer in {minimum}..{maximum}, '
+                          f'got {value!r}')
 
 
 def _validate_displays(displays):
@@ -89,14 +148,13 @@ def _validate_displays(displays):
         raise MatrixError('matrix: displays must be a non-empty list')
     seen = set()
     for display in displays:
-        if not isinstance(display, dict):
-            raise MatrixError('matrix: display entries must be objects')
-        display_id = display.get('id')
-        for label in ('width', 'height'):
-            value = display.get(label)
-            if type(value) is not int or value <= 0:
-                raise MatrixError(f'matrix: display {display_id!r} {label} must be a '
-                                  'positive integer')
+        _require_exact(display, DISPLAY_KEYS, 'display')
+        display_id = display['id']
+        _validate_bounded_int(display['width'], 1, 16384, f'display {display_id!r} width')
+        _validate_bounded_int(display['height'], 1, 16384, f'display {display_id!r} height')
+        refresh = display['refresh_hz']
+        if refresh is not None:
+            _validate_bounded_int(refresh, 1, 1000, f'display {display_id!r} refresh_hz')
         expected = f"{display['width']}x{display['height']}"
         if display_id != expected:
             raise MatrixError(f'matrix: display id {display_id!r} must be {expected!r}')
@@ -196,7 +254,8 @@ def cells(matrix):
                     script=None if fixed else workload['script'],
                     blocked_by=None if fixed else workload['blocked_by'],
                     warmup_frames=matrix['warmup_frames'],
-                    measured_frames=matrix['fixed_view_measured_frames'] if fixed else None))
+                    measured_frames=matrix['fixed_view_measured_frames'] if fixed else None,
+                    time_of_day=matrix['time_of_day']))
     return result
 
 
@@ -245,7 +304,8 @@ def checker_command(cell, *, artifact, qualified_renderer, root, python):
     if cell['kind'] == 'fixed_view':
         pose = cell['pose']
         command += ['--position', repr(pose['x']), repr(pose['y']), repr(pose['z']),
-                    '--yaw', repr(pose['yaw']), '--pitch', repr(pose['pitch'])]
+                    '--yaw', repr(pose['yaw']), '--pitch', repr(pose['pitch']),
+                    '--tod', repr(cell['time_of_day'])]
     else:
         command += ['--traversal', str(Path(root) / cell['script'])]
     return command

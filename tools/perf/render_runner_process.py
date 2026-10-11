@@ -8,7 +8,9 @@ so its evidence tests stay unchanged; keep the two in step by hand.
 """
 import hashlib
 import json
+import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -77,25 +79,49 @@ def retain_process_evidence(receipt, artifact, retained, receipt_path):
     return errors
 
 
+def resolve_executable(program, cwd, environment=None):
+    """Return the absolute executable that a spawn of `program` would run.
+
+    A name with a path separator resolves against `cwd` when relative; a bare name
+    resolves through PATH from `environment`. Raises FileNotFoundError when unresolved.
+    """
+    program = str(program)
+    if os.sep in program or (os.altsep and os.altsep in program):
+        candidate = Path(program)
+        if not candidate.is_absolute():
+            candidate = Path(cwd) / candidate
+        if candidate.is_file():
+            return Path(os.path.abspath(candidate))
+        raise FileNotFoundError(f'executable not found: {candidate}')
+    found = shutil.which(program, path=environment.get('PATH') if environment else None)
+    if found is None:
+        raise FileNotFoundError(f'executable not found on PATH: {program}')
+    return Path(os.path.abspath(found))
+
+
 def run_process(command, *, cwd, environment, log, artifact, retained, receipt_path,
                 timeout_seconds=180):
     """Run one client process; return (CompletedProcess, evidence_errors).
 
-    Raises subprocess.TimeoutExpired or OSError after writing the receipt.
+    The executable is resolved once; the hash and the spawned argv[0] use that
+    same file. Raises FileNotFoundError before any process starts when unresolved,
+    and subprocess.TimeoutExpired or OSError after writing the receipt.
     """
     artifact, retained, receipt_path, log = (Path(artifact), Path(retained),
                                              Path(receipt_path), Path(log))
+    executable = resolve_executable(command[0], cwd, environment)
+    command = [str(executable)] + list(command[1:])
     # Retire only this case's exact outputs, including a repeated invocation in
     # the same runtime root. Never let an earlier capture appear current.
     for path in (artifact, retained, receipt_path, log):
         path.unlink(missing_ok=True)
     receipt = dict(schema=RECEIPT_SCHEMA, command=command, cwd=str(cwd),
-                   binary_path=command[0], binary_sha256=None,
+                   binary_path=str(executable), binary_sha256=None,
                    timeout_seconds=timeout_seconds, elapsed_seconds=None,
                    outcome='spawn_error', return_code=None, capture_status='missing',
                    capture_path=None, capture_sha256=None, evidence_errors=[])
     try:
-        receipt['binary_sha256'] = file_sha256(Path(command[0]))
+        receipt['binary_sha256'] = file_sha256(executable)
         with log.open('wb') as output:
             started = time.monotonic()
             try:

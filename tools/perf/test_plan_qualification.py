@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 """Tests for the qualification matrix, planner CLI and parametrised process runner."""
+import contextlib
 import copy
+import io
 import json
 import os
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
+from unittest import mock
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -14,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import plan_qualification as planner  # noqa: E402
 import qualification_matrix as qm  # noqa: E402
 import render_runner_process as runner  # noqa: E402
+import validate_render_capture as capture  # noqa: E402
 
 ROOT = planner.ROOT
 MATRIX_PATH = planner.DEFAULT_MATRIX
@@ -139,7 +143,8 @@ class CommandGoldenTests(MatrixTestBase):
         self.assertEqual(fixed, [
             '/usr/bin/python3', str(ROOT / 'tools/perf/validate_render_capture.py'),
             '/out/a.json', '--qualified-renderer', RENDERER,
-            '--position', '100.5', '-2.25', '30.0', '--yaw', '45.0', '--pitch', '-10.5'])
+            '--position', '100.5', '-2.25', '30.0', '--yaw', '45.0', '--pitch', '-10.5',
+            '--tod', '0.04'])
         traversal = qm.checker_command(
             find_cell(cells, 'surface-flight.quality.3840x1600'), artifact='/out/a.json',
             qualified_renderer=RENDERER, root=ROOT, python='/usr/bin/python3')
@@ -149,7 +154,77 @@ class CommandGoldenTests(MatrixTestBase):
             '--traversal', str(ROOT / SURFACE_SCRIPT)])
 
 
+class CheckerArgparseTests(MatrixTestBase):
+    def test_fixed_checker_argv_parses_with_tod(self):
+        # Runs the real validator main() argument parsing; only validate() is replaced.
+        cells = qm.cells(with_pose(committed()))
+        artifact = self.tmp / 'capture.json'
+        artifact.write_text('{}', encoding='utf-8')
+        argv = qm.checker_command(find_cell(cells, 'forest-settled.quality.3840x1600'),
+                                  artifact=artifact, qualified_renderer=RENDERER,
+                                  root=ROOT, python=sys.executable)
+        seen = {}
+
+        def fake_validate(data, args):
+            seen['args'] = args
+            return {'verdict': 'PASS'}
+
+        with mock.patch.object(capture, 'validate', fake_validate), \
+                mock.patch.object(sys, 'argv', argv[1:]), \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(capture.main(), 0)
+        args = seen['args']
+        self.assertEqual(args.tod, 0.04)
+        self.assertEqual(args.position, [100.5, -2.25, 30.0])
+        self.assertEqual((args.yaw, args.pitch), (45.0, -10.5))
+        self.assertEqual(args.qualified_renderer, RENDERER)
+        self.assertIsNone(args.traversal)
+
+    def test_traversal_checker_argv_has_no_tod(self):
+        cells = qm.cells(committed())
+        argv = qm.checker_command(find_cell(cells, 'surface-flight.quality.3840x1600'),
+                                  artifact='a.json', qualified_renderer=RENDERER, root=ROOT,
+                                  python='python3')
+        self.assertNotIn('--tod', argv)
+
+
 class MatrixValidationTests(MatrixTestBase):
+    def test_null_renderer_refused(self):
+        matrix = copy.deepcopy(committed())
+        matrix['qualified_renderer'] = None
+        self.assert_refused(json.dumps(matrix), 'qualified_renderer')
+
+    def test_performance_scale_must_be_067(self):
+        matrix = copy.deepcopy(committed())
+        matrix['profiles'][1]['resolution_scale'] = 1.0
+        self.assert_refused(json.dumps(matrix), "resolution_scale")
+
+    def test_wrong_world_kind_refused(self):
+        matrix = copy.deepcopy(committed())
+        matrix['world']['kind'] = 'seeded'
+        self.assert_refused(json.dumps(matrix), "world kind")
+
+    def test_time_of_day_out_of_range_refused(self):
+        matrix = copy.deepcopy(committed())
+        matrix['time_of_day'] = 1.0
+        self.assert_refused(json.dumps(matrix), 'time_of_day')
+
+    def test_missing_refresh_hz_refused(self):
+        matrix = copy.deepcopy(committed())
+        del matrix['displays'][0]['refresh_hz']
+        self.assert_refused(json.dumps(matrix), 'refresh_hz')
+
+    def test_display_bounds_refused(self):
+        for label, change in (('width 16385', {'width': 16385}),
+                              ('refresh 0', {'refresh_hz': 0}),
+                              ('bool width', {'width': True})):
+            with self.subTest(label):
+                matrix = copy.deepcopy(committed())
+                matrix['displays'][0].update(change)
+                if 'width' in change:
+                    matrix['displays'][0]['id'] = f"{matrix['displays'][0]['width']}x1600"
+                self.assert_refused(json.dumps(matrix), 'display')
+
     def test_wrong_schema_refused(self):
         matrix = copy.deepcopy(committed())
         matrix['schema'] = 'luminumbra.qualification_matrix.v0'
@@ -184,6 +259,38 @@ class MatrixValidationTests(MatrixTestBase):
         matrix = copy.deepcopy(committed())
         matrix['displays'][0]['id'] = '3840x1601'
         self.assert_refused(json.dumps(matrix), "display id '3840x1601'")
+
+
+class ExecutableResolutionTests(MatrixTestBase):
+    def test_relative_path_resolves_against_cwd(self):
+        tool = self.tmp / 'bin' / 'tool'
+        tool.parent.mkdir()
+        tool.write_text('x', encoding='utf-8')
+        resolved = runner.resolve_executable('bin/tool', self.tmp)
+        self.assertEqual(resolved, Path(os.path.abspath(tool)))
+
+    def test_bare_name_resolves_through_path(self):
+        name = Path(sys.executable).name
+        resolved = runner.resolve_executable(name, self.tmp,
+                                             {'PATH': str(Path(sys.executable).parent)})
+        self.assertTrue(os.path.samefile(resolved, sys.executable))
+
+    def test_unresolved_name_raises(self):
+        with self.assertRaises(FileNotFoundError):
+            runner.resolve_executable('no-such-luminumbra-tool', self.tmp, {'PATH': ''})
+        with self.assertRaises(FileNotFoundError):
+            runner.resolve_executable('bin/no-such-tool', self.tmp)
+
+    def test_run_process_refuses_unresolved_before_spawn(self):
+        log = self.tmp / 'log.txt'
+        receipt = self.tmp / 'receipt.json'
+        with self.assertRaises(FileNotFoundError):
+            runner.run_process(['no-such-luminumbra-tool'], cwd=self.tmp,
+                               environment={'PATH': ''}, log=log,
+                               artifact=self.tmp / 'a.json', retained=self.tmp / 'r.json',
+                               receipt_path=receipt)
+        self.assertFalse(log.exists())
+        self.assertFalse(receipt.exists())
 
 
 class PlannerCliTests(MatrixTestBase):

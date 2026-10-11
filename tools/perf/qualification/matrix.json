@@ -15,6 +15,7 @@
   "kind": "fresh",
   "note": "v3 auto-creates a fresh world; poses are recorded against that world; no seed flag exists"
  },
+ "time_of_day": 0.04,
  "warmup_frames": 400,
  "fixed_view_measured_frames": 240,
  "workloads": [
