@@ -2,6 +2,7 @@
 
 #include <gtest/gtest.h>
 #include <imgui.h>
+#include <imgui_internal.h>
 
 namespace {
 using Luminumbra::Client::DrawLoadingOverlay;
@@ -43,6 +44,9 @@ TEST(LoadingOverlay, WithContextBuildsOneWindow) {
     io.Fonts->GetTexDataAsRGBA32(&pixels, &width, &height);
     ImGui::NewFrame();
     EXPECT_TRUE(DrawLoadingOverlay("Loading", 0.25f, 3, 10));
+    ImGuiWindow* window = ImGui::FindWindowByName("Loading");
+    ASSERT_NE(window, nullptr);
+    EXPECT_TRUE(window->Active);
     ImGui::EndFrame();
     ImGui::DestroyContext(context);
     ImGui::SetCurrentContext(previous);

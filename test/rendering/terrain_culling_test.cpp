@@ -33,6 +33,8 @@ struct TerrainCullingTestPeer {
 
 namespace {
 
+using Luminumbra::IVec3;
+
 std::vector<IVec3> FixtureGrid() {
     using namespace Luminumbra;
     std::vector<IVec3> chunks;
