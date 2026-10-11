@@ -75,6 +75,8 @@ struct RegionSchedule {
     std::vector<RegionTransition> transitions;
     RegionRejections rejected;
     std::string digest;
+    // Measurement hook: ledger record count after retention ran this tick.
+    std::uint64_t ledger_records = 0;
     bool operator==(const RegionSchedule&) const = default;
 };
 
@@ -93,11 +95,18 @@ public:
     // Magic, version, reserved, canonical tick, validation ceiling, config,
     // anchor presence and anchor.
     static constexpr std::size_t kHeaderBytes = 56;
-    static constexpr std::size_t kMaxFileBytes = kHeaderBytes + kMaxRegions * kRecordBytes + 8;
+    // Version 2 adds u32 extension length and one TLV (type 2, length 1, value 2 = 7 bytes).
+    static constexpr std::size_t kMaxFileBytes =
+        kHeaderBytes + kMaxRegions * kRecordBytes + 4 + 7 + 8;
     static constexpr const char* kCorruptMessage = "Corrupt active-region ledger.";
+    static constexpr const char* kProjectionMessage = "Unsupported frozen digest projection.";
     static constexpr const char* kFutureMessage =
         "Unsupported future active-region ledger version.";
     using DurableDigest = std::function<std::uint64_t(RegionKey)>;
+    // Reports whether a region is still owned by a consumer, so it must not be evicted.
+    using OwnershipProbe = std::function<bool(RegionKey)>;
+    // Idle ticks before an unowned record is dropped (one hour at 30 Hz).
+    static constexpr std::uint64_t kIdleEvictionTicks = 108000;
 
     // An absent ledger starts at the restored clock without scheduling a tick.
     explicit ActiveRegionLedger(RegionSchedulerConfig config = {},
@@ -152,7 +161,8 @@ public:
     RegionSchedule schedule(const WorldClock& clock,
                             std::optional<std::span<const Vec3>> replicated_anchors = std::nullopt,
                             std::span<const RegionWork> work = {},
-                            const DurableDigest& durable_digest = {});
+                            const DurableDigest& durable_digest = {},
+                            const OwnershipProbe& owned = {});
     [[nodiscard]] std::string canonical_bytes() const;
     [[nodiscard]] std::string encode() const;
     // Transactional decode: refuses without modifying out. No IO or migration.
@@ -162,10 +172,15 @@ private:
     RegionSchedule schedule_in_place(const WorldClock& clock,
                                      std::optional<std::span<const Vec3>> replicated_anchors,
                                      std::span<const RegionWork> work,
-                                     const DurableDigest& durable_digest);
+                                     const DurableDigest& durable_digest,
+                                     const OwnershipProbe& owned);
+    // Drops idle, unowned, non-pinned, unedited, unpopulated records with no water cursor.
+    void evict_idle(const WorldClock& clock, const OwnershipProbe& owned);
     ActiveRegionRecord& activate(RegionKey key, const WorldClock& clock);
     void visit(const Vec3& anchor, const WorldClock& clock, RegionRejections& rejected);
     std::string payload(bool observational) const;
+    // True when any record has been frozen (now or in the past), which requires version 2.
+    bool any_frozen_history() const;
     RegionSchedulerConfig m_config;
     std::map<RegionKey, ActiveRegionRecord> m_records;
     std::optional<Vec3> m_localAnchor;

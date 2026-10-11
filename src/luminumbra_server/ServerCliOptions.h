@@ -14,6 +14,9 @@ struct ServerCliOptions {
     int collision_radius = 2;
     int test_streaming_radius_cap = 0;
     std::uint64_t autosave_ticks = 0;
+    bool autosave_ticks_explicit = false; // --autosave-ticks was given (even as 0)
+    std::uint64_t parked_bytes_limit =
+        256ull * 1024ull * 1024ull; // --parked-bytes-limit (0 = unlimited)
     //  spawn N deterministic player avatars (phyllotaxis ring
     // around spawn). 0 = none (byte-identical to the zero-avatar lane). With --smoke the
     // double-run already asserts the entities sub-hash matches, so --smoke --avatars N

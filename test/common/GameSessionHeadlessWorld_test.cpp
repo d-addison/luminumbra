@@ -35,6 +35,7 @@
 
 #include "luminumbra_common/core/JobSystem.h"
 #include "luminumbra_common/fields/EnergyFieldState.h"
+#include "luminumbra_common/persistence/SaveTransaction.h"
 #include "luminumbra_common/persistence/WorldSaveService.h"
 #include "luminumbra_common/scripting/LuaState.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
@@ -426,6 +427,8 @@ TEST(GameSessionHeadlessWorldTest, ActiveClockSaveLoadContinuationMatchesUninter
     const auto wrong_save = root.path() / "wrong-clock";
     fs::copy(save, missing_save, fs::copy_options::recursive);
     fs::copy(save, wrong_save, fs::copy_options::recursive);
+    // Deliberately edit members behind the snapshot index: express legacy semantics.
+    ASSERT_TRUE(P::WorldSaveService::forget_snapshot_index_for_testing(missing_save));
     ASSERT_TRUE(fs::remove(missing_save / "aether_state.efs"));
     metadata = nlohmann::json::parse(ReadClockTestFile(wrong_save / "world_info.json"));
     Luminumbra::world::WorldClock(n + 1, calendar).write_metadata(metadata);
@@ -479,6 +482,8 @@ void CheckPartialPairReloadAndSave(const HeadlessRoot& root,
                                    JobSystem& jobs,
                                    const std::string& world_id,
                                    const fs::path& save) {
+    // The partial pair is staged by raw member edits: drop the snapshot index first.
+    ASSERT_TRUE(P::WorldSaveService::forget_snapshot_index_for_testing(save));
     const auto metadata_bytes = ReadClockTestFile(save / "world_info.json");
     const auto ledger_path = P::WorldSaveService::active_regions_path(save);
     const auto ledger_bytes = ReadClockTestFile(ledger_path);
@@ -492,6 +497,8 @@ void CheckPartialPairReloadAndSave(const HeadlessRoot& root,
         // Each fresh session must load the partial pair, including the edit case.
         std::ofstream(save / "world_info.json", std::ios::binary) << metadata_bytes;
         std::ofstream(ledger_path, std::ios::binary) << ledger_bytes;
+        // An earlier iteration's save re-indexed the directory; the staged pair is legacy.
+        ASSERT_TRUE(P::WorldSaveService::forget_snapshot_index_for_testing(save));
         GameSession loaded, reloaded;
         for (auto* session : {&loaded, &reloaded}) {
             session->SetRootPath(root.root_string());
@@ -786,6 +793,7 @@ TEST(GameSessionHeadlessWorldTest, ClockAnchorMetadataUsesLegacySpawnAndRejectsI
     metadata = nlohmann::json::parse(ReadClockTestFile(save / "world_info.json"));
     EXPECT_EQ(metadata.at("ambientFieldAnchor"),
               (nlohmann::json{{"x", 2400.0f}, {"y", 100.0f}, {"z", -1200.0f}}));
+    ASSERT_TRUE(P::WorldSaveService::forget_snapshot_index_for_testing(save));
     const auto valid_bytes = ReadClockTestFile(save / "world_info.json");
     const std::vector<nlohmann::json> invalid{nullptr,
                                               true,
@@ -1363,6 +1371,9 @@ TEST(GameSessionHeadlessWorldTest, AbsentLedgerAtRestoredTickAllowsEditAndPinBef
         ASSERT_EQ(original.TickSimulation(original.GetSimulationClock().fixed_dt()), 1u);
     ASSERT_TRUE(original.SaveWorldState());
     for (const bool pin : {false, true}) {
+        // Removing the ledger behind the snapshot index is a legacy-world edit.
+        ASSERT_TRUE(
+            P::WorldSaveService::forget_snapshot_index_for_testing(original.GetWorldSaveDir()));
         ASSERT_TRUE(
             fs::remove(P::WorldSaveService::active_regions_path(original.GetWorldSaveDir())));
         GameSession loaded, restored;
@@ -1512,47 +1523,109 @@ TEST(GameSessionHeadlessWorldTest, RegionScheduleAndWorldHashResumeAcrossBothHol
         EXPECT_TRUE(stage.empty());
 }
 
-TEST(GameSessionHeadlessWorldTest, RegionDigestMergesLiveAndDurableSimulationOnly) {
+static std::uint64_t Digest(const std::filesystem::path& save,
+                            Luminumbra::world::RegionKey key,
+                            std::vector<std::shared_ptr<Luminumbra::Chunk>> live,
+                            std::vector<std::shared_ptr<Luminumbra::Chunk>> parked = {}) {
+    return P::WorldSaveService::region_simulation_digest(
+        save, key, P::RegionDigestInputs{std::move(live), std::move(parked)});
+}
+
+TEST(GameSessionHeadlessWorldTest, RegionDigestExcludesPristineAndLoadingChunks) {
+    const auto empty = Digest({}, {0, 0}, {});
+    const auto chunk = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3(0, 0, 0));
+    chunk->heightmap_data = {1.0f};
+    EXPECT_EQ(Digest({}, {0, 0}, {chunk}), empty);
+    chunk->heightmap_data = {2.0f};
+    EXPECT_EQ(Digest({}, {0, 0}, {chunk}), empty);
+    chunk->mark_voxel_data_dirty();
+    EXPECT_NE(Digest({}, {0, 0}, {chunk}), empty);
+    chunk->set_state(Luminumbra::ChunkState::Loading);
+    EXPECT_EQ(Digest({}, {0, 0}, {chunk}), empty);
+    const auto other = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3(32, 0, 0));
+    other->heightmap_data = {3.0f};
+    other->mark_voxel_data_dirty();
+    EXPECT_EQ(Digest({}, {0, 0}, {other}), empty);
+}
+
+TEST(GameSessionHeadlessWorldTest, RegionDigestIsIndependentOfResidencyAndSaveHistory) {
+    const HeadlessRoot root;
+    const auto x = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3(0, 0, 0));
+    x->heightmap_data = {4.0f};
+    x->mark_voxel_data_dirty();
+    const auto live_only = Digest({}, {0, 0}, {x});
+    EXPECT_EQ(Digest({}, {0, 0}, {}, {x}), live_only);
+    Luminumbra::WorldStreamingState durable;
+    const auto stored = durable.get_or_create_chunk({0, 0, 0});
+    stored->heightmap_data = {4.0f};
+    stored->mark_voxel_data_dirty();
+    const auto save = root.path() / "digest-history";
+    ASSERT_TRUE(P::WorldSaveService{}.save_world(durable, save));
+    EXPECT_EQ(Digest(save, {0, 0}, {}), live_only);
+    EXPECT_EQ(Digest(save, {0, 0}, {x}), live_only);
+    x->clear_voxel_data_dirty();
+    EXPECT_EQ(Digest(save, {0, 0}, {x}), live_only);
+    EXPECT_EQ(Digest({}, {0, 0}, {x}), live_only);
+    x->heightmap_data[0] = 5.0f;
+    EXPECT_NE(Digest({}, {0, 0}, {x}), live_only);
+}
+
+TEST(GameSessionHeadlessWorldTest, RegionDigestPriorityIsLiveThenParkedThenDurable) {
     const HeadlessRoot root;
     Luminumbra::WorldStreamingState durable;
-    const auto old = durable.get_or_create_chunk({0, 0, 0});
-    old->heightmap_data = {1.0f};
-    const auto unloaded = durable.get_or_create_chunk({1, 0, 0});
-    unloaded->heightmap_data = {2.0f};
-    durable.get_or_create_chunk({32, 0, 0})->heightmap_data = {3.0f};
-    const auto save = root.path() / "digest";
+    const auto stored = durable.get_or_create_chunk({0, 0, 0});
+    stored->heightmap_data = {1.0f};
+    stored->mark_voxel_data_dirty();
+    const auto save = root.path() / "digest-priority";
     ASSERT_TRUE(P::WorldSaveService{}.save_world(durable, save));
+    const auto parked = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3(0, 0, 0));
+    parked->heightmap_data = {2.0f};
+    parked->mark_voxel_data_dirty();
+    const auto live = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3(0, 0, 0));
+    live->heightmap_data = {3.0f};
+    live->mark_voxel_data_dirty();
+    EXPECT_EQ(Digest(save, {0, 0}, {live}, {parked}), Digest({}, {0, 0}, {live}));
+    EXPECT_EQ(Digest(save, {0, 0}, {}, {parked}), Digest({}, {0, 0}, {}, {parked}));
+    const auto durable_only = Digest(save, {0, 0}, {});
+    EXPECT_NE(Digest(save, {0, 0}, {}, {parked}), durable_only);
+    EXPECT_NE(Digest({}, {0, 0}, {live}), Digest({}, {0, 0}, {parked}));
+    EXPECT_NE(Digest({}, {0, 0}, {live}), durable_only);
+    EXPECT_NE(Digest({}, {0, 0}, {parked}), durable_only);
+}
+
+TEST(GameSessionHeadlessWorldTest, RegionDigestIgnoresUnflaggedDurableRecords) {
+    const HeadlessRoot root;
+    Luminumbra::WorldStreamingState durable;
+    durable.get_or_create_chunk({0, 0, 0})->heightmap_data = {1.0f};
+    const auto save = root.path() / "digest-unflagged";
+    ASSERT_TRUE(P::WorldSaveService{}.save_world(durable, save));
+    EXPECT_EQ(Digest(save, {0, 0}, {}), Digest({}, {0, 0}, {}));
+}
+
+TEST(GameSessionHeadlessWorldTest, RegionDigestIgnoresRenderAndResidencyState) {
     const auto live = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3(0, 0, 0));
     live->heightmap_data = {4.0f};
     live->mark_voxel_data_dirty();
-    const auto digest = P::WorldSaveService::region_simulation_digest(save, {0, 0}, {live});
-    EXPECT_EQ(digest, P::WorldSaveService::region_simulation_digest({}, {0, 0}, {unloaded, live}));
-    EXPECT_NE(digest, P::WorldSaveService::region_simulation_digest(save, {0, 0}, {}));
-    // Both durable render data and live render data are outside the projection.
-    unloaded->mesh_vertices.resize(3);
-    unloaded->mesh_indices = {0, 1, 2};
-    unloaded->water_mesh_generated.store(true);
-    unloaded->water_mesh_dirty_ticks = 11;
-    ASSERT_TRUE(P::WorldSaveService{}.save_world(durable, save));
+    const auto digest = Digest({}, {0, 0}, {live});
     live->mesh_vertices.resize(3);
     live->mesh_indices = {2, 1, 0};
     live->water_mesh_dirty_ticks = 29;
-    EXPECT_EQ(P::WorldSaveService::region_simulation_digest(save, {0, 0}, {live}), digest);
+    EXPECT_EQ(Digest({}, {0, 0}, {live}), digest);
     for (const auto state : {Luminumbra::ChunkState::Meshing, Luminumbra::ChunkState::Ready}) {
         live->set_state(state);
         for (const bool collision : {true, false}) {
             live->has_collision.store(collision);
-            EXPECT_EQ(P::WorldSaveService::region_simulation_digest(save, {0, 0}, {live}), digest);
+            EXPECT_EQ(Digest({}, {0, 0}, {live}), digest);
         }
     }
     live->heightmap_data[0] = 5.0f;
-    EXPECT_NE(P::WorldSaveService::region_simulation_digest(save, {0, 0}, {live}), digest);
+    EXPECT_NE(Digest({}, {0, 0}, {live}), digest);
     live->heightmap_data[0] = 4.0f;
     live->material_data = {1};
-    EXPECT_NE(P::WorldSaveService::region_simulation_digest(save, {0, 0}, {live}), digest);
+    EXPECT_NE(Digest({}, {0, 0}, {live}), digest);
     live->material_data.clear();
     live->water_depth_mm = {1};
-    EXPECT_NE(P::WorldSaveService::region_simulation_digest(save, {0, 0}, {live}), digest);
+    EXPECT_NE(Digest({}, {0, 0}, {live}), digest);
 }
 
 TEST(GameSessionHeadlessWorldTest, RegionDigestIgnoresLoadTimeCollisionNormalization) {
@@ -1572,16 +1645,15 @@ TEST(GameSessionHeadlessWorldTest, RegionDigestIgnoresLoadTimeCollisionNormaliza
     chunk->heightmap_data = {8.0f};
     chunk->mark_voxel_data_dirty();
     ASSERT_TRUE(session.GetWorldSystem()->adopt_streamed_chunk(chunk));
-    const auto digest = P::WorldSaveService::region_simulation_digest({}, {0, 0}, {chunk});
+    const auto digest = Digest({}, {0, 0}, {chunk});
     ASSERT_TRUE(session.SaveWorldState());
     ASSERT_TRUE(loaded.LoadWorld(session.GetMetadata().worldId));
     const auto chunks = loaded.GetWorldSystem()->snapshot_streamed_chunks();
     ASSERT_EQ(chunks.size(), 1u);
     EXPECT_FALSE(chunks.front()->has_collision.load());
     EXPECT_EQ(chunks.front()->get_state(), Luminumbra::ChunkState::Idle);
-    EXPECT_EQ(P::WorldSaveService::region_simulation_digest({}, {0, 0}, chunks), digest);
-    EXPECT_EQ(P::WorldSaveService::region_simulation_digest(session.GetWorldSaveDir(), {0, 0}, {}),
-              digest);
+    EXPECT_EQ(Digest({}, {0, 0}, chunks), digest);
+    EXPECT_EQ(Digest(session.GetWorldSaveDir(), {0, 0}, {}), digest);
 }
 
 TEST(GameSessionHeadlessWorldTest, FirstEnabledChunkSaveIncludesCleanResidentRegions) {
@@ -1750,10 +1822,14 @@ TEST(GameSessionHeadlessWorldTest, LedgerFileAbsenceCorruptionFutureAndDisabledR
     const auto save = owner.GetWorldSaveDir();
     const auto path = P::WorldSaveService::active_regions_path(save);
     const auto good = ReadClockTestFile(path);
+    ASSERT_TRUE(P::WorldSaveService::forget_snapshot_index_for_testing(save));
     ASSERT_TRUE(P::WorldSaveService::validate_save(save));
     for (const bool future : {false, true}) {
         auto bytes = good;
-        bytes[future ? 4 : 8] ^= future ? 3 : 1;
+        if (future)
+            bytes[4] = 3;
+        else
+            bytes[8] ^= 1;
         std::ofstream(path, std::ios::binary) << bytes;
         std::vector<std::string> errors;
         EXPECT_FALSE(P::WorldSaveService::validate_save(save, &errors));
@@ -2010,6 +2086,7 @@ TEST(GameSessionHeadlessWorldTest, CorruptLedgerLoadClearsTheWorld) {
     const auto path = P::WorldSaveService::active_regions_path(save);
     auto bytes = ReadClockTestFile(path);
     bytes[8] ^= 1;
+    ASSERT_TRUE(P::WorldSaveService::forget_snapshot_index_for_testing(save));
     std::ofstream(path, std::ios::binary) << bytes;
     ASSERT_TRUE(victim.CreateWorld("Victim", "2", "default"));
     auto resident = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3(0, 0, 0));
@@ -2021,4 +2098,196 @@ TEST(GameSessionHeadlessWorldTest, CorruptLedgerLoadClearsTheWorld) {
     EXPECT_FALSE(victim.LoadWorldStateFrom(save));
     EXPECT_TRUE(victim.GetWorldSystem()->snapshot_streamed_chunks().empty());
     EXPECT_EQ(victim.GetWorldOpenError(), Luminumbra::world::ActiveRegionLedger::kCorruptMessage);
+}
+
+namespace {
+
+void EnableSnapshotSession(GameSession& session, const HeadlessRoot& root, JobSystem& jobs) {
+    session.SetRootPath(root.root_string());
+    session.SetJobSystem(&jobs);
+    session.SetActiveRegionsEnabled(true);
+}
+
+} // namespace
+
+TEST(GameSessionHeadlessWorldTest, SnapshotFlagOnSaveWritesIndexAndMarkerAndFlagOffDoesNot) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession owner;
+    EnableSnapshotSession(owner, root, jobs);
+    ASSERT_TRUE(owner.CreateWorld("Snapshot on", "1337", "default"));
+    ASSERT_TRUE(owner.SaveWorldState());
+    const auto save = owner.GetWorldSaveDir();
+    EXPECT_TRUE(P::snapshot_index_exists(save));
+    EXPECT_TRUE(fs::exists(save / "chunks/region/snapshot.json"));
+    EXPECT_FALSE(P::journal_pending(save));
+    const auto info = nlohmann::json::parse(ReadClockTestFile(save / "world_info.json"));
+    ASSERT_TRUE(info.contains("snapshotFormat"));
+    EXPECT_EQ(info.at("snapshotFormat"), 1);
+    P::SnapshotIndex index;
+    ASSERT_TRUE(P::read_snapshot_index(save, index, nullptr));
+    EXPECT_GE(index.generation, 1u);
+    EXPECT_TRUE(std::any_of(
+        index.members.begin(), index.members.end(), [](const P::SnapshotMember& member) {
+            return member.path == "world_info.json" && member.present;
+        }));
+
+    const HeadlessRoot plain_root;
+    GameSession plain;
+    plain.SetRootPath(plain_root.root_string());
+    plain.SetJobSystem(&jobs);
+    ASSERT_TRUE(plain.CreateWorld("Snapshot off", "1337", "default"));
+    ASSERT_TRUE(plain.SaveWorldState());
+    const auto plain_save = plain.GetWorldSaveDir();
+    EXPECT_FALSE(P::snapshot_index_exists(plain_save));
+    EXPECT_FALSE(fs::exists(P::journal_directory(plain_save)));
+    const auto plain_info =
+        nlohmann::json::parse(ReadClockTestFile(plain_save / "world_info.json"));
+    EXPECT_FALSE(plain_info.contains("snapshotFormat"));
+}
+
+TEST(GameSessionHeadlessWorldTest, SnapshotReloadRoundTripsAndEachSaveBumpsGeneration) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession owner, loaded;
+    EnableSnapshotSession(owner, root, jobs);
+    EnableSnapshotSession(loaded, root, jobs);
+    ASSERT_TRUE(owner.CreateWorld("Snapshot reload", "1337", "default"));
+    const auto save = owner.GetWorldSaveDir();
+    ASSERT_TRUE(owner.SaveWorldState());
+    P::SnapshotIndex first;
+    ASSERT_TRUE(P::read_snapshot_index(save, first, nullptr));
+    ASSERT_EQ(owner.TickSimulation(owner.GetSimulationClock().fixed_dt()), 1u);
+    ASSERT_TRUE(owner.SaveWorldState());
+    P::SnapshotIndex second;
+    ASSERT_TRUE(P::read_snapshot_index(save, second, nullptr));
+    EXPECT_GT(second.generation, first.generation);
+    EXPECT_TRUE(loaded.LoadWorld(owner.GetMetadata().worldId));
+}
+
+TEST(GameSessionHeadlessWorldTest, SnapshotMissingIndexWithMarkerIsRefused) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession owner;
+    EnableSnapshotSession(owner, root, jobs);
+    ASSERT_TRUE(owner.CreateWorld("Missing index", "1337", "default"));
+    ASSERT_TRUE(owner.SaveWorldState());
+    const auto save = owner.GetWorldSaveDir();
+    const auto worldId = owner.GetMetadata().worldId;
+    ASSERT_TRUE(fs::remove(P::snapshot_index_path(save)));
+    GameSession reopened;
+    EnableSnapshotSession(reopened, root, jobs);
+    EXPECT_FALSE(reopened.LoadWorld(worldId));
+    EXPECT_NE(reopened.GetWorldOpenError().find("inconsistent snapshot"), std::string::npos);
+}
+
+TEST(GameSessionHeadlessWorldTest, SnapshotTamperedMemberIsRefused) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession owner;
+    EnableSnapshotSession(owner, root, jobs);
+    ASSERT_TRUE(owner.CreateWorld("Tampered member", "1337", "default"));
+    ASSERT_TRUE(owner.SaveWorldState());
+    const auto save = owner.GetWorldSaveDir();
+    const auto worldId = owner.GetMetadata().worldId;
+    // Rewrite valid metadata behind the index: the member keeps its format but not its fingerprint.
+    auto info = nlohmann::json::parse(ReadClockTestFile(save / "world_info.json"));
+    info["name"] = "tampered behind the index";
+    std::ofstream(save / "world_info.json", std::ios::binary | std::ios::trunc) << info.dump(2);
+    GameSession refused;
+    EnableSnapshotSession(refused, root, jobs);
+    EXPECT_FALSE(refused.LoadWorld(worldId));
+    EXPECT_NE(refused.GetWorldOpenError().find("inconsistent snapshot"), std::string::npos);
+    ASSERT_TRUE(P::WorldSaveService::forget_snapshot_index_for_testing(save));
+    GameSession legacy;
+    EnableSnapshotSession(legacy, root, jobs);
+    (void)legacy.LoadWorld(worldId);
+    EXPECT_EQ(legacy.GetWorldOpenError().find("inconsistent snapshot"), std::string::npos);
+}
+
+TEST(GameSessionHeadlessWorldTest,
+     SnapshotLegacyWorldWithoutIndexOrMarkerLoadsAndUpgradesOnFirstFlagOnSave) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession owner;
+    EnableSnapshotSession(owner, root, jobs);
+    ASSERT_TRUE(owner.CreateWorld("Legacy upgrade", "1337", "default"));
+    ASSERT_TRUE(owner.SaveWorldState());
+    const auto save = owner.GetWorldSaveDir();
+    const auto worldId = owner.GetMetadata().worldId;
+    ASSERT_TRUE(P::WorldSaveService::forget_snapshot_index_for_testing(save));
+    GameSession legacy;
+    EnableSnapshotSession(legacy, root, jobs);
+    ASSERT_TRUE(legacy.LoadWorld(worldId));
+    ASSERT_TRUE(legacy.SaveWorldState());
+    EXPECT_TRUE(P::snapshot_index_exists(save));
+    const auto info = nlohmann::json::parse(ReadClockTestFile(save / "world_info.json"));
+    ASSERT_TRUE(info.contains("snapshotFormat"));
+    EXPECT_EQ(info.at("snapshotFormat"), 1);
+}
+
+TEST(GameSessionHeadlessWorldTest, SnapshotPendingJournalIsRolledBackAtOpen) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession owner;
+    EnableSnapshotSession(owner, root, jobs);
+    ASSERT_TRUE(owner.CreateWorld("Pending journal", "1337", "default"));
+    ASSERT_TRUE(owner.SaveWorldState());
+    const auto save = owner.GetWorldSaveDir();
+    const auto worldId = owner.GetMetadata().worldId;
+    const auto info_bytes = ReadClockTestFile(save / "world_info.json");
+    // Stage a PUBLISHED transaction: protect the metadata (journal + undo copy), keep a copy of
+    // the journal, roll the transaction back, then modify the metadata and restore the journal.
+    // The directory now looks like a crash between "member replaced" and "index published".
+    const auto side = root.path() / "journal-copy";
+    {
+        P::SaveTransaction txn(save, 0, {}, &P::WorldSaveService::member_digest);
+        ASSERT_TRUE(txn.begin(nullptr));
+        ASSERT_TRUE(txn.protect({"world_info.json"}, nullptr));
+        fs::copy(P::journal_directory(save), side, fs::copy_options::recursive);
+        txn.abort(nullptr);
+    }
+    ASSERT_FALSE(P::journal_pending(save));
+    auto info = nlohmann::json::parse(info_bytes);
+    info["name"] = "half written";
+    std::ofstream(save / "world_info.json", std::ios::binary | std::ios::trunc) << info.dump(2);
+    fs::copy(side, P::journal_directory(save), fs::copy_options::recursive);
+    const auto entry = Luminumbra::Persistence::InspectSavedWorld(root.path(), worldId);
+    EXPECT_TRUE(entry.pending_recovery);
+    EXPECT_TRUE(entry.error.empty());
+    EXPECT_TRUE(P::journal_pending(save));
+    GameSession reopened;
+    EnableSnapshotSession(reopened, root, jobs);
+    ASSERT_TRUE(reopened.LoadWorld(worldId));
+    EXPECT_FALSE(fs::exists(P::journal_directory(save)));
+    EXPECT_EQ(ReadClockTestFile(save / "world_info.json"), info_bytes);
+}
+
+TEST(GameSessionHeadlessWorldTest, SnapshotSaveDecodesTheWorldAtMostOnce) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession owner;
+    EnableSnapshotSession(owner, root, jobs);
+    ASSERT_TRUE(owner.CreateWorld("Decode once", "1337", "default"));
+    const auto dt = owner.GetSimulationClock().fixed_dt();
+    for (int tick = 0; tick < 3; ++tick)
+        ASSERT_EQ(owner.TickSimulation(dt), 1u);
+    auto chunk = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3(0, 0, 0));
+    chunk->set_state(Luminumbra::ChunkState::Meshing);
+    chunk->heightmap_data = {8.0f};
+    chunk->mark_voxel_data_dirty();
+    ASSERT_TRUE(owner.GetWorldSystem()->adopt_streamed_chunk(chunk));
+    ASSERT_TRUE(owner.SaveWorldState());
+    chunk->mark_voxel_data_dirty(); // the warm-up save cleared the dirty flag
+    const auto before = P::WorldSaveService::decode_count_for_testing();
+    ASSERT_TRUE(owner.SaveWorldState());
+    const auto after = P::WorldSaveService::decode_count_for_testing();
+    EXPECT_LE(after - before, std::uint64_t{1});
 }
