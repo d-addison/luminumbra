@@ -46,7 +46,8 @@ jobs:
           env -u WAYLAND_DISPLAY XDG_SESSION_TYPE=x11 LIBGL_ALWAYS_SOFTWARE=1 \
             xvfb-run -a ctest --preset debug-asan --no-tests=error -LE manual \
               --parallel 2 --timeout 300 --output-junit ctest.junit.xml
-          python3 tools/ci/check_ctest_junit.py build/debug-asan/ctest.junit.xml --minimum-tests 1700
+          # Inventory floor: measured 2281 tests on devel b56cdba1, minus ~1% margin (policy: see the Linux lane in ci.yml).
+          python3 tools/ci/check_ctest_junit.py build/debug-asan/ctest.junit.xml --minimum-tests 2260
       - name: Upload sanitizer evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
