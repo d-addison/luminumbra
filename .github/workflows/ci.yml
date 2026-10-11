@@ -423,7 +423,7 @@ jobs:
   tidy:
     name: Static analysis / clang-tidy
     runs-on: ubuntu-24.04
-    # The gate analyses 351 translation units across src/ and test/, and since it
+    # The gate analyses 351 translation units across src/, test/ and tools/, and since it
     # gained a real HeaderFilterRegex it also analyses first-party headers on every
     # one of them. That is a large multiple of the src/-only, headers-excluded scope
     # this job was originally sized for, and it overran the previous 30-minute limit
