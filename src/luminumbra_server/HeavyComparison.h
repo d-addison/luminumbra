@@ -43,7 +43,7 @@ struct HeavySubsystem {
 };
 
 inline std::span<const HeavySubsystem> HeavySubsystemTable() {
-    static const std::array<HeavySubsystem, 12> kTable{{
+    static const std::array<HeavySubsystem, 13> kTable{{
         {"terrain",
          true,
          false,
@@ -64,6 +64,13 @@ inline std::span<const HeavySubsystem> HeavySubsystemTable() {
          nullptr,
          [](HeavyHashes& h) {
              h.sub.entities += "x";
+         }},
+        {"active_regions",
+         true,
+         false,
+         nullptr,
+         [](HeavyHashes& h) {
+             h.active_regions = !h.active_regions;
          }},
         {"clock",
          true,

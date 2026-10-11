@@ -45,6 +45,7 @@ TEST(HeavyComparison, TableCoversEveryHashField) {
     const std::set<std::string> expected{"terrain",
                                          "water",
                                          "entities",
+                                         "active_regions",
                                          "clock",
                                          "ledger",
                                          "wind",
