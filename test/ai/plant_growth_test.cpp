@@ -330,3 +330,54 @@ TEST(PlantGrowth, IrrigationMoistensCellForGrowth) {
     const int moistFar = F::MoistureAt(grid, 14.5f, 14.5f, 0.0f, 0.0f, 1.0f);
     EXPECT_GT(moistNear, moistFar) << "irrigation raises moisture near the water source";
 }
+
+#include "luminumbra_common/systems/PlantCoarse.h"
+
+TEST(PlantCoarseGrowth, MatchesIndependentExistingSingleTickConsumer) {
+    namespace C = Luminumbra::Components;
+    using namespace luminumbra::foliage;
+    const std::array windows{0u, 1u, 2u, 255u, 256u, 36000u};
+    for (const auto elapsed : windows) {
+        for (const auto tended : {0u, 1u, 255u}) {
+            for (const auto initial : {0u, 999u, 17999u, 0xFFFFFFF0u}) {
+                entt::registry reg;
+                const auto e = reg.create();
+                reg.emplace<C::PlantTag>(e);
+                auto& genome = reg.emplace<C::PlantGenomeComponent>(e);
+                genome.genes.fill(0.6f);
+                auto& original = reg.emplace<C::PlantGrowthComponent>(e);
+                original.growth_points = initial;
+                original.stress_points = initial;
+                original.tended = static_cast<std::uint8_t>(tended);
+                reg.emplace<C::TransformComponent>(e);
+                auto& health = reg.emplace<C::PlantHealthComponent>(e);
+                health.infection = 437;
+                auto bulk = original;
+                const PlantEnvSample env{0.3f, 0.1f, 0.7f, 0.9f};
+                std::uint32_t oracle_advanced = 0;
+                for (std::uint32_t i = 0; i < elapsed; ++i)
+                    oracle_advanced += RunPlantGrowthSystemOnTick(reg, 100 + i, [&](const auto&) {
+                                           return env;
+                                       }).advanced;
+                const auto result = AdvancePlantGrowthCoarse(
+                    bulk, genome, env, health.infection, elapsed, elapsed ? 99 + elapsed : 0);
+                EXPECT_EQ(result, oracle_advanced);
+                EXPECT_EQ(bulk.growth_points, original.growth_points);
+                EXPECT_EQ(bulk.stress_points, original.stress_points);
+                EXPECT_EQ(bulk.stage, original.stage);
+                EXPECT_EQ(bulk.quality, original.quality);
+                EXPECT_EQ(bulk.tended, original.tended);
+                EXPECT_EQ(bulk.last_tick, original.last_tick);
+            }
+        }
+    }
+}
+
+TEST(PlantCoarseGrowth, RefusesBeyondDayBeforeChangingState) {
+    using namespace luminumbra::foliage;
+    Luminumbra::Components::PlantGrowthComponent growth;
+    Luminumbra::Components::PlantGenomeComponent genome;
+    EXPECT_THROW(AdvancePlantGrowthCoarse(growth, genome, {}, 0, 36001, 99), std::invalid_argument);
+    EXPECT_EQ(growth.last_tick, 0u);
+    EXPECT_EQ(growth.growth_points, 0u);
+}

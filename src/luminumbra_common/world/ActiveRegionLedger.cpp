@@ -117,6 +117,24 @@ void ActiveRegionLedger::set_populated(RegionKey key, bool populated) {
 void ActiveRegionLedger::set_water_cursor(RegionKey key, std::uint64_t cursor) {
     m_records.at(key).water_cursor = cursor;
 }
+bool ActiveRegionLedger::set_water_debts(const WaterDebts& debts) {
+    if (debts.size() > kMaxRegions)
+        return false;
+    for (const auto& [key, debt] : debts)
+        if (!m_records.contains(key) || debt == 0 || debt > kMaxWaterDebt)
+            return false;
+    auto next = debts;
+    m_waterDebts.swap(next);
+    return true;
+}
+bool ActiveRegionLedger::acknowledge_resume(RegionKey key, std::uint64_t frozen_at) {
+    const auto it = m_records.find(key);
+    if (it == m_records.end() || it->second.state == RegionState::Frozen || frozen_at == 0 ||
+        it->second.frozen_at != frozen_at)
+        return false;
+    it->second.frozen_at = 0;
+    return true;
+}
 void ActiveRegionLedger::mark_saved(const WorldClock& clock) {
     for (auto& [key, record] : m_records) {
         (void)key;
@@ -220,7 +238,7 @@ void ActiveRegionLedger::evict_idle(const WorldClock& clock, const OwnershipProb
                           clock.tick() - r.last_proximity >= kIdleEvictionTicks;
         if (!r.pinned && !r.edited && !r.populated && r.water_cursor == 0 && idle &&
             !m_completedWork.contains(it->first) && !m_energyAges.contains(it->first) &&
-            !owned(it->first))
+            !m_waterDebts.contains(it->first) && !owned(it->first))
             it = m_records.erase(it);
         else
             ++it;
@@ -466,6 +484,15 @@ std::string ActiveRegionLedger::canonical_bytes() const {
     std::string bytes = "active_regions:v1:" + payload(false);
     if (m_nextPersistentId != 1)
         bytes += "|next_id:" + std::to_string(m_nextPersistentId);
+    if (!m_waterDebts.empty()) {
+        bytes += "|water_debt:";
+        Append(bytes, m_waterDebts.size(), 4);
+        for (const auto& [key, debt] : m_waterDebts) {
+            Append(bytes, static_cast<std::uint32_t>(key.x), 4);
+            Append(bytes, static_cast<std::uint32_t>(key.z), 4);
+            Append(bytes, debt, 8);
+        }
+    }
     if (!m_energyAges.empty()) {
         bytes += "|energy_age:";
         Append(bytes, m_energyAges.size(), 4);
@@ -498,8 +525,8 @@ std::string ActiveRegionLedger::encode() const {
     constexpr std::uint8_t kDigestProjection = 2;
     const bool frozen_history = any_frozen_history();
     const bool allocator_advanced = m_nextPersistentId != 1;
-    const bool extension =
-        frozen_history || allocator_advanced || !m_energyAges.empty() || !m_completedWork.empty();
+    const bool extension = frozen_history || allocator_advanced || !m_waterDebts.empty() ||
+                           !m_energyAges.empty() || !m_completedWork.empty();
     std::string bytes = "ARL1";
     Append(bytes, extension ? 2 : 1, 2);
     Append(bytes, 0, 2);
@@ -516,6 +543,16 @@ std::string ActiveRegionLedger::encode() const {
             Append(tlvs, 2, 2);
             Append(tlvs, 1, 4);
             Append(tlvs, kDigestProjection, 1);
+        }
+        if (!m_waterDebts.empty()) {
+            Append(tlvs, 3, 2);
+            Append(tlvs, 4 + 16 * m_waterDebts.size(), 4);
+            Append(tlvs, m_waterDebts.size(), 4);
+            for (const auto& [key, debt] : m_waterDebts) {
+                Append(tlvs, static_cast<std::uint32_t>(key.x), 4);
+                Append(tlvs, static_cast<std::uint32_t>(key.z), 4);
+                Append(tlvs, debt, 8);
+            }
         }
         if (!m_energyAges.empty()) {
             Append(tlvs, 4, 2);
@@ -665,9 +702,9 @@ bool ActiveRegionLedger::decode(std::string_view bytes,
                     return false;
                 const auto value = extension.substr(at, length);
                 at += length;
-                // Types 3/5 remain reserved until their consumer decoders exist.
+                // Type 5 remains reserved until its consumer decoder exists.
                 if ((have_previous && type <= previous_type) ||
-                    (type != 1 && type != 2 && type != 4 && type != 6))
+                    (type != 1 && type != 2 && type != 3 && type != 4 && type != 6))
                     return false;
                 have_previous = true;
                 previous_type = type;
@@ -680,6 +717,28 @@ bool ActiveRegionLedger::decode(std::string_view bytes,
                     if (next < 2 || next > kPersistentIdLimit)
                         return false;
                     result.m_nextPersistentId = next;
+                    continue;
+                }
+                if (type == 3) {
+                    if (length < 4)
+                        return false;
+                    Reader debts(value);
+                    const auto owners = debts.read(4);
+                    if (owners == 0 || owners > result.m_records.size() ||
+                        length != 4 + 16 * owners)
+                        return false;
+                    std::optional<RegionKey> prior;
+                    for (std::uint64_t entry = 0; entry < owners; ++entry) {
+                        const RegionKey key{
+                            std::bit_cast<std::int32_t>(static_cast<std::uint32_t>(debts.read(4))),
+                            std::bit_cast<std::int32_t>(static_cast<std::uint32_t>(debts.read(4)))};
+                        const auto debt = debts.read(8);
+                        if (!result.m_records.contains(key) || (prior && key <= *prior) ||
+                            debt == 0 || debt > kMaxWaterDebt)
+                            return false;
+                        result.m_waterDebts.emplace(key, debt);
+                        prior = key;
+                    }
                     continue;
                 }
                 if (type == 4) {

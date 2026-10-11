@@ -652,6 +652,8 @@ RegionKey FieldPageState::region_of_scent_cell(ScentCellKey key) {
                 FloorDiv(static_cast<std::int64_t>(key.z) * 1000 + 500, kRegionMm))};
 }
 bool FieldPageState::owns_evolution_state(RegionKey key) const {
+    if (m_soil.owns_region(key) || m_irrigation.owns_region(key))
+        return true;
     if (m_weatherClocks.contains(key))
         return true;
     for (const auto& storm : m_storms)
@@ -680,12 +682,13 @@ std::string FieldPageState::serialize() const {
     std::string out = kMagic;
     AppendLe(out, kFormatVersion, 2);
     AppendLe(out, kChannelMask, 2);
-    AppendLe(out,
-             static_cast<unsigned>(!m_pages.empty()) + static_cast<unsigned>(!m_storms.empty()) +
-                 static_cast<unsigned>(!m_strikes.empty()) +
-                 static_cast<unsigned>(!m_scent.empty()) +
-                 static_cast<unsigned>(!m_weatherClocks.empty()),
-             4);
+    AppendLe(
+        out,
+        static_cast<unsigned>(!m_pages.empty()) + static_cast<unsigned>(!m_storms.empty()) +
+            static_cast<unsigned>(!m_strikes.empty()) + static_cast<unsigned>(!m_scent.empty()) +
+            static_cast<unsigned>(!m_weatherClocks.empty()) +
+            static_cast<unsigned>(!m_soil.empty()) + static_cast<unsigned>(!m_irrigation.empty()),
+        4);
     std::string records;
     for (const auto& [key, page] : m_pages)
         AppendPage(records, key, page);
@@ -703,6 +706,8 @@ std::string FieldPageState::serialize() const {
         AppendScent(records, key, cell);
     AppendSection(out, 4, m_scent.size(), records);
     records.clear();
+    AppendSection(out, 5, m_soil.pages().size(), m_soil.records());
+    AppendSection(out, 6, m_irrigation.pages().size(), m_irrigation.records());
     for (const auto& [owner, active_age] : m_weatherClocks) {
         AppendLe(records, static_cast<std::uint32_t>(owner.x), 4);
         AppendLe(records, static_cast<std::uint32_t>(owner.z), 4);
@@ -723,7 +728,7 @@ bool FieldPageState::parse(const std::string& bytes, FieldPageState& out, std::s
         if (ReadLe(bytes, footer, 8) != Fnv1a64(std::string_view(bytes).substr(0, footer)))
             return false;
         const auto sections = ReadLe(bytes, 8, 4);
-        if (sections == 0 || sections > 5)
+        if (sections == 0 || sections > 7)
             return false;
         FieldPageState temporary;
         std::size_t at = kHeaderBytes;
@@ -733,20 +738,22 @@ bool FieldPageState::parse(const std::string& bytes, FieldPageState& out, std::s
                 return false;
             const auto type = ReadLe(bytes, at, 2), length = ReadLe(bytes, at + 2, 4),
                        count = ReadLe(bytes, at + 6, 4);
-            if (type <= previous || (type > 4 && type != 7) || length < 4 ||
-                length > footer - at - 6 || count == 0)
+            if (type <= previous || type > 7 || length < 4 || length > footer - at - 6 ||
+                count == 0)
                 return false;
             previous = type;
-            const std::size_t width = type == 1   ? kPageBytes
-                                      : type == 2 ? 48
-                                      : type == 3 ? 36
-                                      : type == 4 ? 40
-                                                  : 16;
-            const std::size_t cap = type == 1   ? kMaxPages
-                                    : type == 2 ? kMaxStorms
-                                    : type == 3 ? kMaxStrikes
-                                    : type == 4 ? kMaxScentCells
-                                                : kMaxWeatherClocks;
+            const std::size_t width = type == 1                ? kPageBytes
+                                      : type == 2              ? 48
+                                      : type == 3              ? 36
+                                      : type == 4              ? 40
+                                      : type == 5 || type == 6 ? FoliageFieldPages::kRecordBytes
+                                                               : 16;
+            const std::size_t cap = type == 1                ? kMaxPages
+                                    : type == 2              ? kMaxStorms
+                                    : type == 3              ? kMaxStrikes
+                                    : type == 4              ? kMaxScentCells
+                                    : type == 5 || type == 6 ? FoliageFieldPages::kMaxPages
+                                                             : kMaxWeatherClocks;
             if (count > cap || length != 4 + count * width)
                 return false;
             const auto records_at = at + 10;
@@ -756,6 +763,15 @@ bool FieldPageState::parse(const std::string& bytes, FieldPageState& out, std::s
                                  records_at,
                                  temporary.m_pages,
                                  error))
+                    return false;
+            } else if (type == 5 || type == 6) {
+                auto& foliage = type == 5 ? temporary.m_soil : temporary.m_irrigation;
+                const auto limit = type == 5 ? kSoilBaseline : kIrrigationLimit;
+                if (!FoliageFieldPages::parse_records(
+                        std::string_view(bytes).substr(records_at, count * width),
+                        count,
+                        limit,
+                        foliage))
                     return false;
             } else {
                 SectionReader reader(bytes, records_at);
@@ -894,6 +910,14 @@ std::string FieldPageState::region_bytes(RegionKey key) const {
             AppendLe(age, clock->second, 8);
             AppendSection(out, 7, 1, age);
         }
+    }
+    const auto soil = m_soil.region_bytes(key), irrigation = m_irrigation.region_bytes(key);
+    if (!soil.empty() || !irrigation.empty()) {
+        out += "|foliage:v1:";
+        AppendLe(out, soil.size(), 4);
+        out += soil;
+        AppendLe(out, irrigation.size(), 4);
+        out += irrigation;
     }
     return out;
 }

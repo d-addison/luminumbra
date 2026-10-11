@@ -96,10 +96,10 @@ public:
     // anchor presence and anchor.
     static constexpr std::size_t kHeaderBytes = 56;
     // Version 2 adds a u32 extension length and ascending TLVs: type 1 allocator (14 bytes),
-    // type 2 digest projection (7 bytes), type 4 energy ages and type 6 completed work
-    // (each 10 + 16 bytes per owned key). Types 3/5 remain reserved and refuse.
+    // type 2 digest projection (7 bytes), type 3 water debt, type 4 energy ages and type 6
+    // completed work (each 10 + 16 bytes per owned key). Type 5 remains reserved and refuses.
     static constexpr std::size_t kMaxFileBytes =
-        kHeaderBytes + kMaxRegions * kRecordBytes + 4 + 7 + 14 + 2 * (6 + 4 + 16 * kMaxRegions) + 8;
+        kHeaderBytes + kMaxRegions * kRecordBytes + 4 + 7 + 14 + 3 * (6 + 4 + 16 * kMaxRegions) + 8;
     static constexpr const char* kCorruptMessage = "Corrupt active-region ledger.";
     static constexpr const char* kProjectionMessage = "Unsupported frozen digest projection.";
     static constexpr const char* kFutureMessage =
@@ -141,6 +141,17 @@ public:
     }
     // Returns false and changes nothing once next_persistent_id() reaches kPersistentIdLimit.
     bool allocate_persistent_id(std::uint64_t& id);
+    using WaterDebts = std::map<RegionKey, std::uint64_t>;
+    static constexpr std::uint64_t kMaxWaterDebt = std::uint64_t{1} << 62;
+    [[nodiscard]] const WaterDebts& water_debts() const noexcept {
+        return m_waterDebts;
+    }
+    // Sparse positive Q32 debt owned by known records; zero is represented by absence.
+    // Validation/cap failure changes nothing. Explicitly retain absent due claims.
+    bool set_water_debts(const WaterDebts& debts);
+    // Apply only after every resume consumer succeeds. Refuses frozen/unknown or stale
+    // stamps, so a saved frozen_at cannot cause catch-up twice.
+    bool acknowledge_resume(RegionKey key, std::uint64_t frozen_at);
     using EnergyAges = std::map<RegionKey, std::uint64_t>;
     [[nodiscard]] const EnergyAges& energy_ages() const noexcept {
         return m_energyAges;
@@ -214,6 +225,7 @@ private:
     bool any_frozen_history() const;
     std::map<RegionKey, std::uint64_t> m_completedWork;
     EnergyAges m_energyAges;
+    WaterDebts m_waterDebts;
     RegionSchedulerConfig m_config;
     std::map<RegionKey, ActiveRegionRecord> m_records;
     std::optional<Vec3> m_localAnchor;
