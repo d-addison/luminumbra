@@ -1,6 +1,7 @@
 #pragma once
 
 #include "SaveTransaction.h"
+#include "fields/FieldPageState.h"
 #include "world/ActiveRegionLedger.h"
 #include "world/GroundObjectStore.h"
 #include "world/WorldClock.h"
@@ -40,6 +41,9 @@ struct RegionDigestInputs {
     // Opaque ground object projection of the region (GroundObjectStore::region_bytes); empty when
     // the region holds no ground objects, which keeps the digest of such regions unchanged.
     std::string ground_object_bytes;
+    // Opaque field page projection of the region (FieldPageState::region_bytes); empty when the
+    // region owns no initialized field cells, which keeps the digest of such regions unchanged.
+    std::string field_page_bytes;
 };
 
 // Persists WorldStreamingState snapshots beneath a world save directory.
@@ -94,6 +98,21 @@ public:
     static bool validate_ground_objects(const std::filesystem::path& save_dir,
                                         const world::ActiveRegionLedger& ledger,
                                         std::vector<std::string>* errors);
+
+    // Field pages persisted as region/field-pages.fpg (SIBLING to the chunk container). An EMPTY
+    // state writes NO file (and removes a stale one). Absent file: out is cleared, true.
+    static std::filesystem::path field_pages_path(const std::filesystem::path& save_dir);
+    static bool save_field_pages(const world::FieldPageState& state,
+                                 const std::filesystem::path& save_dir,
+                                 std::vector<std::string>* errors = nullptr);
+    static bool load_field_pages(world::FieldPageState& out,
+                                 const std::filesystem::path& save_dir,
+                                 std::vector<std::string>* errors = nullptr);
+    // load_world refusal rules for field pages: a present file requires a present ledger and every
+    // initialized cell's owner region must have a ledger record. Absent file: true.
+    static bool validate_field_pages(const std::filesystem::path& save_dir,
+                                     const world::ActiveRegionLedger& ledger,
+                                     std::vector<std::string>* errors);
 
     static std::filesystem::path active_regions_path(const std::filesystem::path& save_dir);
     static bool save_active_regions(world::ActiveRegionLedger& ledger,

@@ -426,6 +426,7 @@ bool member_path_allowed(std::string_view relative_path) {
         relative_path == "chunks/region/world-manifest.json" ||
         relative_path == "chunks/region/plant-entities.json" ||
         relative_path == "chunks/region/ground-objects.json" ||
+        relative_path == "chunks/region/field-pages.fpg" ||
         relative_path == "chunks/region/active-regions.arl") {
         return true;
     }
@@ -941,6 +942,7 @@ bool SaveTransaction::commit(std::vector<std::string>* errors) {
                 "chunks/region/world-manifest.json",
                 "chunks/region/plant-entities.json",
                 "chunks/region/ground-objects.json",
+                "chunks/region/field-pages.fpg",
                 "chunks/region/active-regions.arl",
             };
             std::error_code ec;

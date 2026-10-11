@@ -290,6 +290,7 @@ TEST(SaveTransaction, MemberPathAllowListAcceptsOnlyKnownShapes) {
         "chunks/region/world-manifest.json",
         "chunks/region/plant-entities.json",
         "chunks/region/ground-objects.json",
+        "chunks/region/field-pages.fpg",
         "chunks/region/active-regions.arl",
         "chunks/region/r.0.0.lmr",
         "chunks/region/r.-3.12.lmr",

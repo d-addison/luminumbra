@@ -1,5 +1,6 @@
 #include "gtest/gtest.h"
 
+#include "fields/FieldPageState.h"
 #include "persistence/WorldPersistenceRoundtrip.h"
 #include "persistence/WorldSaveService.h"
 #include "systems/SHIELD_WorldSystem.h"
@@ -416,4 +417,163 @@ TEST(WorldSaveService, RegionDigestIgnoresEmptyGroundBytesAndSeparatesNonEmptyBy
     EXPECT_NE(with_first, plain);
     EXPECT_NE(with_second, plain);
     EXPECT_NE(with_first, with_second);
+}
+
+// ---- Field pages (S6) persistence ----
+
+namespace {
+
+void TouchFile(const std::filesystem::path& path) {
+    std::filesystem::create_directories(path.parent_path());
+    std::ofstream out(path, std::ios::binary);
+}
+
+// Regions (0,0) and (1,0) both own cells of page x=1: cells 16..20 belong to region 0 and cells
+// 21..31 to region 1.
+Luminumbra::world::FieldPageState MakeFieldState() {
+    Luminumbra::world::FieldPageState state;
+    state.activate_region({0, 0}, 42, 16);
+    state.activate_region({1, 0}, 42, 16);
+    return state;
+}
+
+} // namespace
+
+TEST(WorldSaveService, FieldPagesSaveLoadRoundTripAndEmptyStateRemovesFile) {
+    namespace fs = std::filesystem;
+    using Luminumbra::world::FieldPageState;
+    TempSaveDir save_dir("field_pages_roundtrip");
+
+    const FieldPageState state = MakeFieldState();
+    ASSERT_TRUE(state.owns_region({0, 0}));
+    std::vector<std::string> errors;
+    ASSERT_TRUE(WorldSaveService::save_field_pages(state, save_dir.path, &errors))
+        << JoinErrors(errors);
+    EXPECT_TRUE(fs::exists(WorldSaveService::field_pages_path(save_dir.path)));
+
+    FieldPageState loaded;
+    ASSERT_TRUE(WorldSaveService::load_field_pages(loaded, save_dir.path, &errors))
+        << JoinErrors(errors);
+    EXPECT_EQ(loaded.page_count(), state.page_count());
+    EXPECT_EQ(loaded.serialize(), state.serialize());
+
+    ASSERT_TRUE(WorldSaveService::save_field_pages(FieldPageState{}, save_dir.path, &errors));
+    EXPECT_FALSE(fs::exists(WorldSaveService::field_pages_path(save_dir.path)));
+    FieldPageState absent = MakeFieldState();
+    ASSERT_TRUE(WorldSaveService::load_field_pages(absent, save_dir.path, &errors));
+    EXPECT_TRUE(absent.empty());
+}
+
+TEST(WorldSaveService, CorruptFieldPagesFileIsRefusedByLoadAndMemberDigest) {
+    namespace fs = std::filesystem;
+    using Luminumbra::world::FieldPageState;
+    TempSaveDir save_dir("field_pages_corrupt");
+    const fs::path path = WorldSaveService::field_pages_path(save_dir.path);
+    fs::create_directories(path.parent_path());
+    {
+        std::ofstream out(path, std::ios::binary | std::ios::trunc);
+        out << "FPG1";
+    }
+
+    FieldPageState loaded = MakeFieldState();
+    const std::size_t before = loaded.page_count();
+    std::vector<std::string> errors;
+    EXPECT_FALSE(WorldSaveService::load_field_pages(loaded, save_dir.path, &errors));
+    EXPECT_NE(JoinErrors(errors).find("Field pages load failed: "), std::string::npos)
+        << JoinErrors(errors);
+    EXPECT_EQ(loaded.page_count(), before) << "a refused load leaves the output untouched";
+
+    Luminumbra::Persistence::MemberDigest digest;
+    std::string error;
+    EXPECT_FALSE(WorldSaveService::member_digest(
+        save_dir.path, "chunks/region/field-pages.fpg", digest, error));
+    EXPECT_FALSE(error.empty());
+}
+
+TEST(WorldSaveService, FieldPagesWithoutLedgerAreRefusedByLoadWorld) {
+    TempSaveDir save_dir("field_pages_orphan");
+    WorldSaveService service;
+    WorldStreamingState original;
+    PopulateFixtureWorld(original);
+    std::vector<std::string> save_errors;
+    ASSERT_TRUE(service.save_world(original, save_dir.path, &save_errors));
+
+    ASSERT_TRUE(WorldSaveService::save_field_pages(MakeFieldState(), save_dir.path, &save_errors))
+        << JoinErrors(save_errors);
+
+    WorldStreamingState restored;
+    std::vector<std::string> load_errors;
+    EXPECT_FALSE(service.load_world(restored, save_dir.path, load_errors));
+    EXPECT_NE(JoinErrors(load_errors).find("corrupt field pages: orphaned page"), std::string::npos)
+        << JoinErrors(load_errors);
+}
+
+TEST(WorldSaveService, FieldPageSpanningTwoRegionsNeedsEveryOwnerInTheLedger) {
+    using Luminumbra::world::ActiveRegionLedger;
+    using Luminumbra::world::RegionKey;
+    using Luminumbra::world::WorldClock;
+    TempSaveDir save_dir("field_pages_two_owners");
+    std::vector<std::string> errors;
+
+    ActiveRegionLedger ledger;
+    EXPECT_TRUE(WorldSaveService::validate_field_pages(save_dir.path, ledger, &errors))
+        << "an absent file is valid";
+
+    const Luminumbra::world::FieldPageState state = MakeFieldState();
+    ASSERT_TRUE(state.owns_region({0, 0}));
+    ASSERT_TRUE(state.owns_region({1, 0}));
+    ASSERT_TRUE(WorldSaveService::save_field_pages(state, save_dir.path, &errors))
+        << JoinErrors(errors);
+    // validate_field_pages only checks that the ledger file exists; it never decodes it here.
+    TouchFile(WorldSaveService::active_regions_path(save_dir.path));
+
+    ledger.mark_edited(RegionKey{0, 0}, WorldClock{});
+    EXPECT_FALSE(WorldSaveService::validate_field_pages(save_dir.path, ledger, &errors));
+    EXPECT_NE(JoinErrors(errors).find("corrupt field pages: orphaned page"), std::string::npos)
+        << JoinErrors(errors);
+
+    ledger.mark_edited(RegionKey{1, 0}, WorldClock{});
+    errors.clear();
+    EXPECT_TRUE(WorldSaveService::validate_field_pages(save_dir.path, ledger, &errors))
+        << JoinErrors(errors);
+}
+
+TEST(WorldSaveService, FieldPageDigestCompositionTable) {
+    using Luminumbra::Persistence::RegionDigestInputs;
+    using Luminumbra::Persistence::StableChecksum;
+    using Luminumbra::world::RegionKey;
+    const std::filesystem::path no_dir;
+    const RegionKey key{0, 0};
+    const std::string ground = "1,3,100,1000,-2000,0,0,0,7,0;";
+    const std::string pages = MakeFieldState().region_bytes(key);
+    ASSERT_FALSE(pages.empty());
+
+    WorldStreamingState empty_state;
+    const std::string content = Luminumbra::Persistence::ComputeRegionContentHash(empty_state);
+    const auto digest = [&](const std::string& ground_bytes, const std::string& page_bytes) {
+        RegionDigestInputs inputs;
+        inputs.ground_object_bytes = ground_bytes;
+        inputs.field_page_bytes = page_bytes;
+        return WorldSaveService::region_simulation_digest(no_dir, key, inputs);
+    };
+
+    const std::uint64_t neither = digest("", "");
+    const std::uint64_t ground_only = digest(ground, "");
+    const std::uint64_t pages_only = digest("", pages);
+    const std::uint64_t both = digest(ground, pages);
+
+    // Neither is the content hash; ground only is the S5 composition of the same inputs.
+    EXPECT_EQ(neither, std::stoull(content, nullptr, 16));
+    EXPECT_EQ(ground_only, std::stoull(StableChecksum(content + "|ground:" + ground), nullptr, 16));
+    EXPECT_EQ(pages_only, std::stoull(StableChecksum(content + "|pages:" + pages), nullptr, 16));
+    EXPECT_EQ(both,
+              std::stoull(
+                  StableChecksum(StableChecksum(content + "|ground:" + ground) + "|pages:" + pages),
+                  nullptr,
+                  16));
+    EXPECT_NE(neither, ground_only);
+    EXPECT_NE(neither, pages_only);
+    EXPECT_NE(ground_only, pages_only);
+    EXPECT_NE(both, ground_only);
+    EXPECT_NE(both, pages_only);
 }
