@@ -61,7 +61,9 @@ constexpr std::size_t kScalingRequests[] = {1u, 2u, 4u, 0u}; // 0 = startup() de
 using Clock = std::chrono::steady_clock;
 
 // Sinks keep computed results observable so the optimizer cannot discard them.
+// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
 volatile float g_probe_sink_f = 0.0f;
+// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
 volatile double g_probe_sink_d = 0.0;
 
 struct Options {
