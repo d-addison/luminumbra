@@ -228,17 +228,20 @@ TEST(WorldDurableResidency, EditedChunkParksAndReturnsIdentically) {
 
     fx.Settle(fx.SpawnAnchor(), kReturnIterations);
     EXPECT_EQ(fx.world->find_streamed_chunk(coords), edited);
-    EXPECT_EQ(fx.world->parking_status().parked_count, 0u);
     EXPECT_FALSE(Contains(fx.world->snapshot_parked_chunks(), edited.get()));
     EXPECT_EQ(HashVec(edited->sdf_data), recorded_hash);
 }
 
-TEST(WorldDurableResidency, PristineChunksAreNeverParked) {
+TEST(WorldDurableResidency, OnlyAuthoritativeChunksAreParked) {
     DurableFixture fx(/*durable=*/true);
     ASSERT_TRUE(fx.created) << fx.error;
     fx.Settle(fx.SpawnAnchor(), kSettleIterations);
     fx.Settle(fx.FarAnchor(), kSettleIterations);
-    EXPECT_EQ(fx.world->parking_status().parked_count, 0u);
+    // Water that moved makes a chunk authoritative; everything else is regenerable and erased.
+    for (const auto& parked : fx.world->snapshot_parked_chunks()) {
+        ASSERT_TRUE(parked);
+        EXPECT_TRUE(parked->needs_authority());
+    }
 }
 
 TEST(WorldDurableResidency, ByteLimitKeepsDirtyChunkResidentAndRequestsSave) {
