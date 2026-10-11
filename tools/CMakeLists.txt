@@ -40,6 +40,20 @@ if(BUILD_TESTING)
     set_tests_properties(PublicTreeValidatorContract
         PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
     add_test(
+        NAME AcceptanceMatrixContract
+        COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py")
+    set_tests_properties(AcceptanceMatrixContract
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixTree
+        COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/ci/check_acceptance_matrix.py"
+                --root "${CMAKE_SOURCE_DIR}"
+                --check-doc "${CMAKE_SOURCE_DIR}/docs/acceptance-matrix.md")
+    set_tests_properties(AcceptanceMatrixTree
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
         NAME PublicAssetInventory
         COMMAND "${Python3_EXECUTABLE}"
                 "${CMAKE_CURRENT_SOURCE_DIR}/ci/validate_assets.py"

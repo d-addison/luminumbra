@@ -464,6 +464,8 @@ jobs:
           python3 tools/ci/test_validate_public_tree.py
           python3 tools/ci/test_check_docs.py
           python3 tools/ci/test_check_ctest_junit.py
+          python3 tools/ci/test_check_acceptance_matrix.py
+          python3 tools/ci/check_acceptance_matrix.py --check-doc docs/acceptance-matrix.md
           python3 tools/ci/test_validate_visual_catalog.py
           python3 tools/ci/validate_visual_catalog.py
           python3 tools/ci/render_visual_catalog.py --check

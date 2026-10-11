@@ -1,0 +1,379 @@
+{
+  "schema": "luminumbra.acceptance_matrix.v1",
+  "description": "Requirement-to-evidence matrix for the expanded v0.3 contract. Rows are statements; evidence items are executable tests, scripts, native commands or documents. An item marked planned names the workstream or PR that will land it; planned items are visible but never count as covered.",
+  "rows": [
+    {
+      "id": "perf.floor-p99",
+      "source": "docs/distant-world.md#performance-measurement-contract",
+      "statement": "Both profiles meet p99 frame_wall of at most 16.67 ms on every workload.",
+      "status": "needs-native-run",
+      "evidence": [
+        {"kind": "ctest", "ref": "RenderContractPython"},
+        {"kind": "script", "ref": "tools/perf/validate_render_capture.py"},
+        {"kind": "script", "ref": "tools/perf/render_budget.py", "planned": {"owner": "ac", "pr": 184}},
+        {"kind": "native", "ref": "tools/gates/run-render-qualification.ps1", "planned": {"owner": "ac", "pr": 218},
+         "command": "pwsh tools/gates/run-render-qualification.ps1 -Package <dir> -OutDir <dir>",
+         "receipt_schema": "luminumbra.render_qualification.v1"}
+      ]
+    },
+    {
+      "id": "perf.target-report-only",
+      "source": "docs/distant-world.md#performance-measurement-contract",
+      "statement": "The 8.33 ms target is reported (p50 for Quality, p50 and p99 for Performance) and never fails a capture.",
+      "status": "partial",
+      "evidence": [
+        {"kind": "ctest", "ref": "RenderContractPython"},
+        {"kind": "script", "ref": "tools/perf/render_budget.py", "planned": {"owner": "ac", "pr": 184}}
+      ]
+    },
+    {
+      "id": "perf.adapter-identity",
+      "source": "docs/distant-world.md#performance-measurement-contract",
+      "statement": "Reports record the GL vendor and renderer strings and fail when the adapter is not the qualified RTX 5070 Ti.",
+      "status": "covered",
+      "evidence": [
+        {"kind": "ctest", "ref": "RenderContractPython"},
+        {"kind": "script", "ref": "tools/perf/validate_render_capture.py"}
+      ]
+    },
+    {
+      "id": "perf.timer-coverage",
+      "source": "docs/distant-world.md#performance-measurement-contract",
+      "statement": "Every frame records wall, CPU submit, present and GPU timestamp timings tagged with the originating frame; unavailable timers are unavailable, never zero.",
+      "status": "covered",
+      "evidence": [
+        {"kind": "ctest", "ref": "RenderMeasurementFrameRing"},
+        {"kind": "ctest", "ref": "RenderMeasurementGpuQueries"},
+        {"kind": "ctest", "ref": "RenderMeasurementStatistics"}
+      ]
+    },
+    {
+      "id": "perf.percentile-definition",
+      "source": "docs/distant-world.md#performance-measurement-contract",
+      "statement": "Reports carry p50, p95, p99, maximum and median absolute deviation using the percentile definition of tools/perf/perf.py.",
+      "status": "covered",
+      "evidence": [
+        {"kind": "ctest", "ref": "RenderMeasurementStatistics"},
+        {"kind": "ctest", "ref": "RenderContractPython"},
+        {"kind": "script", "ref": "tools/perf/perf.py"}
+      ]
+    },
+    {
+      "id": "perf.fixed-view-workload",
+      "source": "docs/distant-world.md#performance-measurement-contract",
+      "statement": "Fixed views run 400 warm-up and 240 measured frames at pinned seed, preset, time of day and field of view.",
+      "status": "needs-native-run",
+      "evidence": [
+        {"kind": "ctest", "ref": "RenderContractPython"},
+        {"kind": "script", "ref": "tools/perf/qualification/matrix.json", "planned": {"owner": "ac", "pr": 193}},
+        {"kind": "native", "ref": "tools/perf/run_qualification.py", "planned": {"owner": "ac", "pr": 215},
+         "command": "python tools/perf/run_qualification.py --package <dir> --out <dir> --declare-refresh 3840x1600=143",
+         "receipt_schema": "luminumbra.render_qualification.v1"}
+      ]
+    },
+    {
+      "id": "perf.traversal-60s",
+      "source": "docs/distant-world.md#performance-measurement-contract",
+      "statement": "Scripted 60 s traversals with pinned seeds, camera paths and cold-cache state meet the floor; streaming transients are included.",
+      "status": "partial",
+      "evidence": [
+        {"kind": "ctest", "ref": "RenderTraversalDeterministic"},
+        {"kind": "ctest", "ref": "RenderTraversalRefusal"},
+        {"kind": "native", "ref": "tools/perf/run_qualification.py", "planned": {"owner": "ac", "pr": 215},
+         "command": "python tools/perf/run_qualification.py --package <dir> --out <dir> --only surface-flight.quality.3840x1600",
+         "receipt_schema": "luminumbra.render_qualification.v1"}
+      ]
+    },
+    {
+      "id": "perf.cave-walk-and-edited-tour",
+      "source": "docs/distant-world.md#performance-measurement-contract",
+      "statement": "The cave-walk and edited-world-tour traversals exist, include an identified edit, a snapshot commit and the all-tier bake inside the measured window, and meet the floor.",
+      "status": "planned",
+      "evidence": [
+        {"kind": "script", "ref": "tools/perf/qualification/matrix.json", "planned": {"owner": "fw", "issue": 132, "note": "traversal v2 and cave poses; ac AC8 spec"}}
+      ]
+    },
+    {
+      "id": "perf.invalid-capture",
+      "source": "docs/distant-world.md#performance-measurement-contract",
+      "statement": "A capture is invalid, independent of thresholds, on incomplete timers, an undeclared calendar or render debug override, a workload manifest mismatch, or an unsettled far ladder.",
+      "status": "covered",
+      "evidence": [
+        {"kind": "ctest", "ref": "RenderContractPython"},
+        {"kind": "ctest", "ref": "RenderRunnerEvidencePython"},
+        {"kind": "script", "ref": "tools/perf/validate_render_capture.py"}
+      ]
+    },
+    {
+      "id": "perf.far-horizon-gate",
+      "source": "docs/distant-world.md#performance-measurement-contract",
+      "statement": "The far horizon gate requires complete per-tier coverage against an independently computed wanted set, below-horizon sky at most 2 percent, no seam band and no edge at the outer radius.",
+      "status": "planned",
+      "evidence": [
+        {"kind": "native", "ref": "tools/gates/validate-engine-frontier.ps1", "planned": {"owner": "fw", "note": "FarLodHorizon mode"},
+         "command": "pwsh tools/gates/validate-engine-frontier.ps1 -Mode FarLodHorizon",
+         "receipt_schema": "luminumbra.runtime_artifact.v2"}
+      ]
+    },
+    {
+      "id": "perf.requirement-matrix",
+      "source": "docs/distant-world.md#performance-measurement-contract",
+      "statement": "A requirement-to-evidence matrix names the executable tests, native commands, fixtures, thresholds and artifact schemas behind every contract statement.",
+      "status": "covered",
+      "evidence": [
+        {"kind": "script", "ref": "tools/ci/check_acceptance_matrix.py"},
+        {"kind": "ctest", "ref": "AcceptanceMatrixContract"},
+        {"kind": "doc", "ref": "docs/acceptance-matrix.md"}
+      ]
+    },
+    {
+      "id": "perf.save-load-oracle",
+      "source": "docs/distant-world.md#performance-measurement-contract",
+      "statement": "A world saved at tick N, loaded and advanced K ticks equals an uninterrupted N+K run over every persisted subsystem, with negative controls per subsystem.",
+      "status": "planned",
+      "evidence": [
+        {"kind": "ctest", "ref": "HeadlessServerTickHeavy.SaveLoadEqualsUninterrupted", "planned": {"owner": "ds"}}
+      ]
+    },
+    {
+      "id": "em.far-ladder",
+      "source": "docs/distant-world.md#evidence-map",
+      "statement": "The far ladder, caves and seams are covered on default, mountains, archipelago and cave-dense fixtures.",
+      "status": "planned",
+      "evidence": [
+        {"kind": "native", "ref": "tools/gates/validate-engine-frontier.ps1", "planned": {"owner": "fw"},
+         "command": "pwsh tools/gates/validate-engine-frontier.ps1 -Mode FarLodHorizon",
+         "receipt_schema": "luminumbra.runtime_artifact.v2"}
+      ]
+    },
+    {
+      "id": "em.edits-far-authority",
+      "source": "docs/distant-world.md#evidence-map",
+      "statement": "Edits bake to all tiers and far authority is preserved across save and load.",
+      "status": "partial",
+      "evidence": [
+        {"kind": "ctest", "ref": "WorldOpenRefusal.CreateEditSaveRestartAndSwitchPreserveAuthority"},
+        {"kind": "ctest", "ref": "WorldPersistenceRoundtripGate"},
+        {"kind": "ctest", "ref": "EditBakeAllTiers.*", "planned": {"owner": "fw", "issue": 132}}
+      ]
+    },
+    {
+      "id": "em.snapshot-commit",
+      "source": "docs/distant-world.md#evidence-map",
+      "statement": "Snapshot commit survives interruption after every rename and during the bake, and the catalog inspects read-only.",
+      "status": "partial",
+      "evidence": [
+        {"kind": "ctest", "ref": "WorldOpenRefusal.CatalogSeparatesEmptyUnavailableAndRealMetadataWithoutWriting"},
+        {"kind": "ctest", "ref": "SnapshotCommit.*", "planned": {"owner": "fw"}}
+      ]
+    },
+    {
+      "id": "em.clock-ledger-pages",
+      "source": "docs/distant-world.md#evidence-map",
+      "statement": "Clock, ledger, pages, creatures and water persist and round-trip with negative controls.",
+      "status": "partial",
+      "evidence": [
+        {"kind": "ctest", "ref": "WorldOpenRefusal.ServerAutosaveAndFullSnapshotCarryTheAbsoluteClock"},
+        {"kind": "ctest", "ref": "WorldOpenRefusal.ActiveClockSaveRefusesWithFeatureOffThroughEveryOpenPath"},
+        {"kind": "ctest", "ref": "HeadlessServerTickHeavy.SaveLoadEqualsUninterrupted", "planned": {"owner": "ds"}}
+      ]
+    },
+    {
+      "id": "em.hash-determinism",
+      "source": "docs/distant-world.md#evidence-map",
+      "statement": "Hash pins and additivity guards hold; replay and lockstep gates run with checkpoint exchange enabled.",
+      "status": "partial",
+      "evidence": [
+        {"kind": "ctest", "ref": "EcologyHash.AppendingEmptyEcologyAddsOnlyTheSuffix"},
+        {"kind": "script", "ref": "tools/gates/validate-determinism-matrix.ps1"},
+        {"kind": "ctest", "ref": "AmbientInputBounds.*", "planned": {"owner": "ac", "pr": 188}}
+      ]
+    },
+    {
+      "id": "em.performance",
+      "source": "docs/distant-world.md#evidence-map",
+      "statement": "Benchmark schema v3 artifacts exist for six fixed views and three traversals per profile per display, checked by the render contract tools.",
+      "status": "needs-native-run",
+      "evidence": [
+        {"kind": "ctest", "ref": "RenderContractPython"},
+        {"kind": "native", "ref": "tools/perf/run_qualification.py", "planned": {"owner": "ac", "pr": 215},
+         "command": "python tools/perf/run_qualification.py --package <dir> --out <dir> --declare-refresh 3840x1600=143",
+         "receipt_schema": "luminumbra.render_qualification.v1"}
+      ]
+    },
+    {
+      "id": "em.client-hang",
+      "source": "docs/distant-world.md#evidence-map",
+      "statement": "The client hang watchdog fires once per stall and its reports are archived with the campaign evidence.",
+      "status": "covered",
+      "evidence": [
+        {"kind": "ctest", "ref": "HangWatchdog.StalledHeartbeatFiresOnce"},
+        {"kind": "ctest", "ref": "HangWatchdog.AdvancingHeartbeatNeverFires"}
+      ]
+    },
+    {
+      "id": "sim.budget-capture",
+      "source": "docs/sim-budget-telemetry.md",
+      "statement": "Per-system simulation tick work counts are captured deterministically on representative worlds.",
+      "status": "covered",
+      "evidence": [
+        {"kind": "ctest", "ref": "SimBudgetCaptureContract"},
+        {"kind": "script", "ref": "tools/perf/capture_sim_budget.py"}
+      ]
+    },
+    {
+      "id": "sim.budget-enforcement",
+      "source": "docs/sim-budget-telemetry.md",
+      "statement": "A committed simulation budget profile is enforced against the server smoke capture; residency classes without samples are unevaluated, never passing.",
+      "status": "planned",
+      "evidence": [
+        {"kind": "script", "ref": "tools/perf/check_sim_budgets.py", "planned": {"owner": "ac", "pr": 189}},
+        {"kind": "ctest", "ref": "SimBudgetProfile.*", "planned": {"owner": "ac", "pr": 197}},
+        {"kind": "ctest", "ref": "SimBudgetTelemetry.*", "planned": {"owner": "ac", "pr": 214}}
+      ]
+    },
+    {
+      "id": "iss.60",
+      "source": "issue #60",
+      "statement": "Saved-world catalog validation is bounded and does not block the UI thread.",
+      "status": "partial",
+      "evidence": [
+        {"kind": "ctest", "ref": "AsyncSavedWorldCatalogTest.CoalescesRefreshesAndDiscardsLateResults"},
+        {"kind": "ctest", "ref": "SavedWorldCatalogResponsiveness.*", "planned": {"owner": "ac", "pr": 206}}
+      ]
+    },
+    {
+      "id": "iss.61",
+      "source": "issue #61",
+      "statement": "A packaged build completes create, edit, save, restart, select, load and world switching with byte-identical authority replacement.",
+      "status": "needs-native-run",
+      "evidence": [
+        {"kind": "ctest", "ref": "WorldOpenRefusal.CreateEditSaveRestartAndSwitchPreserveAuthority"},
+        {"kind": "native", "ref": "tools/gates/run-saved-world-lifecycle.ps1", "planned": {"owner": "ac", "note": "ac/native-drivers"},
+         "command": "pwsh tools/gates/run-saved-world-lifecycle.ps1 -Package <dir> -FixtureDir <dir>",
+         "receipt_schema": "luminumbra.saved_world_acceptance.v1"}
+      ]
+    },
+    {
+      "id": "iss.62",
+      "source": "issue #62",
+      "statement": "Saved terrain edits render identically across hierarchical culling boundaries and world switches.",
+      "status": "needs-native-run",
+      "evidence": [
+        {"kind": "ctest", "ref": "TerrainCulling.*", "planned": {"owner": "ac", "pr": 206}},
+        {"kind": "native", "ref": "tools/gates/run-saved-world-lifecycle.ps1", "planned": {"owner": "ac", "note": "ac/native-drivers"},
+         "command": "pwsh tools/gates/run-saved-world-lifecycle.ps1 -Package <dir> -FixtureDir <dir>",
+         "receipt_schema": "luminumbra.saved_world_acceptance.v1"}
+      ]
+    },
+    {
+      "id": "iss.63",
+      "source": "issue #63",
+      "statement": "A no-UI saved-world load exits cleanly and produces a nonblack capture whose context agrees with the artifact.",
+      "status": "needs-native-run",
+      "evidence": [
+        {"kind": "native", "ref": "tools/gates/run-noui-load.ps1", "planned": {"owner": "ac", "note": "ac/native-drivers"},
+         "command": "pwsh tools/gates/run-noui-load.ps1 -Package <dir> -FixtureDir <dir>",
+         "receipt_schema": "luminumbra.saved_world_acceptance.v1"}
+      ]
+    },
+    {
+      "id": "iss.68",
+      "source": "issue #68",
+      "statement": "Serial loading, the networking soak and the performance gates are qualified together in one v0.3 acceptance receipt.",
+      "status": "needs-native-run",
+      "evidence": [
+        {"kind": "ctest", "ref": "NetSoak"},
+        {"kind": "script", "ref": "tools/ci/check_v03_receipt.py", "planned": {"owner": "ac", "note": "ac/native-drivers"}},
+        {"kind": "native", "ref": "tools/gates/run-v03-acceptance.ps1", "planned": {"owner": "ac", "note": "ac/native-drivers"},
+         "command": "pwsh tools/gates/run-v03-acceptance.ps1 -Package <dir> -OutDir <dir>",
+         "receipt_schema": "luminumbra.v03_acceptance.v1"}
+      ]
+    },
+    {
+      "id": "iss.126",
+      "source": "issue #126",
+      "statement": "Every statement of the reviewed distant-world and distant-simulation contract has named evidence.",
+      "status": "covered",
+      "evidence": [
+        {"kind": "script", "ref": "tools/ci/check_acceptance_matrix.py"},
+        {"kind": "doc", "ref": "docs/acceptance-matrix.md"}
+      ]
+    },
+    {
+      "id": "iss.128",
+      "source": "issue #128",
+      "statement": "Per-frame render timing distributions, profiles, displays and traversal workloads are recorded and validated.",
+      "status": "needs-native-run",
+      "evidence": [
+        {"kind": "ctest", "ref": "RenderContractPython"},
+        {"kind": "ctest", "ref": "RenderMeasurementStatistics"},
+        {"kind": "native", "ref": "tools/perf/run_qualification.py", "planned": {"owner": "ac", "pr": 215},
+         "command": "python tools/perf/run_qualification.py --package <dir> --out <dir> --declare-refresh 3840x1600=143",
+         "receipt_schema": "luminumbra.render_qualification.v1"}
+      ]
+    },
+    {
+      "id": "iss.129",
+      "source": "issue #129",
+      "statement": "Per-system simulation tick budgets are measured on representative worlds and proposed from observed work.",
+      "status": "partial",
+      "evidence": [
+        {"kind": "ctest", "ref": "SimBudgetCaptureContract"},
+        {"kind": "script", "ref": "tools/perf/propose_sim_budgets.py", "planned": {"owner": "ac", "pr": 189}}
+      ]
+    },
+    {
+      "id": "iss.130",
+      "source": "issue #130",
+      "statement": "Reversed-Z float depth is adopted with no GL error-severity output on a fixed view.",
+      "status": "needs-native-run",
+      "evidence": [
+        {"kind": "native", "ref": "tools/perf/check_gl_debug_log.py", "planned": {"owner": "ac", "pr": 218},
+         "command": "python tools/perf/check_gl_debug_log.py <client-stdout.log>",
+         "receipt_schema": "luminumbra.gl_debug_verdict.v1"}
+      ]
+    },
+    {
+      "id": "iss.134",
+      "source": "issue #134",
+      "statement": "The simulation clock persists and the calendar is unified across save and load.",
+      "status": "covered",
+      "evidence": [
+        {"kind": "ctest", "ref": "WorldOpenRefusal.ServerAutosaveAndFullSnapshotCarryTheAbsoluteClock"},
+        {"kind": "ctest", "ref": "WorldOpenRefusal.CorruptClockMetadataOnlySaveRefusesBeforeFirstChunkSave"}
+      ]
+    },
+    {
+      "id": "iss.141",
+      "source": "issue #141",
+      "statement": "The expanded v0.3 contract is qualified and engine simulation and residency budgets are enforced; residency classes are unevaluated until the engine emits samples.",
+      "status": "needs-native-run",
+      "evidence": [
+        {"kind": "script", "ref": "tools/perf/check_residency.py", "planned": {"owner": "ac", "pr": 197}},
+        {"kind": "ctest", "ref": "SimBudgetTelemetry.*", "planned": {"owner": "ac", "pr": 214}},
+        {"kind": "native", "ref": "tools/gates/run-v03-acceptance.ps1", "planned": {"owner": "ac", "note": "ac/native-drivers"},
+         "command": "pwsh tools/gates/run-v03-acceptance.ps1 -Package <dir> -OutDir <dir>",
+         "receipt_schema": "luminumbra.v03_acceptance.v1"}
+      ]
+    },
+    {
+      "id": "iss.163",
+      "source": "issue #163",
+      "statement": "Ambient field hashes do not depend on the host processor's SIMD dispatch.",
+      "status": "planned",
+      "evidence": [
+        {"kind": "ctest", "ref": "AmbientInputBounds.*", "planned": {"owner": "ac", "pr": 188}}
+      ]
+    },
+    {
+      "id": "iss.173",
+      "source": "issue #173",
+      "statement": "Short wind position-array inputs are never read past their SIMD width.",
+      "status": "planned",
+      "evidence": [
+        {"kind": "ctest", "ref": "AmbientInputBounds.*", "planned": {"owner": "ac", "pr": 188}}
+      ]
+    }
+  ]
+}
