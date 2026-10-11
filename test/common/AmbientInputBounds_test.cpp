@@ -4,9 +4,10 @@
 // input whose length is not a whole vector can read past its end. The probe places each input so
 // it ends exactly at a page boundary, with the following page unmapped. The vendored tail load is
 // expected to fault for an exact-size 2-element input, and a 16-element padded input must not.
-// The fault probe is Linux only (other platforms run the padded call without a guard page). The
-// fault test is not applicable under AddressSanitizer, which intercepts the out-of-bounds read
-// itself; the asan lane instead runs the padded call (design decision recorded with the slice).
+// The fault probe is Linux only and also runs in the AddressSanitizer lane: the faulting read is
+// in FastNoise, which the project's ASan configuration does not instrument, so the guard page
+// (not ASan) detects it, and the process-wide SIGSEGV handler is allowed by ASan's default
+// allow_user_segv_handler. Other platforms run the padded call without a guard page.
 // Non-applicable cases pass and record a probe_status property, because CI rejects skipped tests.
 
 #include <gtest/gtest.h>
@@ -30,18 +31,6 @@
 #endif
 
 namespace {
-
-#if defined(__SANITIZE_ADDRESS__)
-constexpr bool kUnderAddressSanitizer = true;
-#elif defined(__has_feature)
-#if __has_feature(address_sanitizer)
-constexpr bool kUnderAddressSanitizer = true;
-#else
-constexpr bool kUnderAddressSanitizer = false;
-#endif
-#else
-constexpr bool kUnderAddressSanitizer = false;
-#endif
 
 #if defined(__linux__)
 
@@ -147,9 +136,6 @@ bool ProbeFaults(std::size_t buffer_floats, int count) {
 
 // Empty when the fault probe applies to this build and ISA; otherwise the reason it does not.
 std::string ProbeNotApplicableReason() {
-    if (kUnderAddressSanitizer) {
-        return "guard-page fault probe is not run under AddressSanitizer";
-    }
 #if defined(__linux__)
     if (!VectorTailLoadsBeyondCount()) {
         return "active SIMD level has no wide tail load";
