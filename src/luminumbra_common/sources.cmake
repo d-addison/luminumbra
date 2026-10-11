@@ -14,6 +14,7 @@ set(COMMON_SOURCES
 
     # Animation
     ${CMAKE_CURRENT_LIST_DIR}/animation/AnimationRuntime.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/animation/MorphMesh.cpp
 
     # Core
     ${CMAKE_CURRENT_LIST_DIR}/core/EngineContracts.cpp
