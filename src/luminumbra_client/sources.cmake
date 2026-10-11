@@ -54,12 +54,15 @@ set(CLIENT_INTERNAL_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/rendering/WaterfallDetect.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/RenderSystem.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/Shader.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/rendering/GBufferTargets.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/rendering/static_preview/RenderView.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/ShaderReflection.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/PassShaderLayouts.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/WorldLoadingVisualizer.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/passes/AerialPass.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/passes/ChunkGeometryPool.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/passes/GBufferPass.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/rendering/passes/StaticDrawPass.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/passes/HierarchicalCuller.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/passes/LightingPass.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/passes/LuminanceMeterPass.cpp
