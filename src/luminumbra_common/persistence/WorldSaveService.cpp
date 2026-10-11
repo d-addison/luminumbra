@@ -1345,7 +1345,7 @@ std::filesystem::path WorldSaveService::ground_objects_path(const std::filesyste
 bool WorldSaveService::save_ground_objects(const world::GroundObjectStore& store,
                                            const std::filesystem::path& save_dir,
                                            std::vector<std::string>* errors) {
-    TransactionScope scope(save_dir, {"chunks/region/ground-objects.json"}, errors);
+    TransactionScope scope(save_dir, {"chunks/region/ground-objects.json"}, errors, true);
     if (!scope.ok())
         return false;
     if (!validate_save(save_dir, errors))
@@ -1390,9 +1390,46 @@ bool WorldSaveService::load_ground_objects(world::GroundObjectStore& out,
         AddError(errors, "failed to inspect ground objects file: " + ec.message());
         return false;
     }
+    if (!SaveTransaction::active_for(save_dir)) {
+        if (snapshot_index_exists(save_dir)) {
+            SnapshotIndex index;
+            if (!read_snapshot_index(save_dir, index, errors))
+                return false;
+            const auto member = std::find_if(
+                index.members.begin(), index.members.end(), [](const SnapshotMember& value) {
+                    return value.path == "chunks/region/ground-objects.json";
+                });
+            std::uint64_t bytes = 0, fnv = 0;
+            bool exists = false;
+            if (!hash_file(path, bytes, fnv, exists, errors))
+                return false;
+            if ((member == index.members.end() && exists) ||
+                (member != index.members.end() &&
+                 (member->present != exists ||
+                  (exists && (member->bytes != bytes || member->fnv64 != fnv))))) {
+                AddError(errors, "inconsistent snapshot: chunks/region/ground-objects.json");
+                return false;
+            }
+        } else {
+            world::WorldClock clock;
+            bool required = false;
+            std::int64_t format = 0;
+            const auto metadata_error = CheckMetadataFile(save_dir, &format);
+            if (!metadata_error.empty() ||
+                !read_clock_metadata(save_dir, clock, required, errors)) {
+                AddError(errors,
+                         metadata_error.empty() ? "corrupt world metadata" : metadata_error);
+                return false;
+            }
+            if (present || required || format >= 1) {
+                AddError(errors, "inconsistent snapshot: ground authority without index");
+                return false;
+            }
+        }
+    }
     if (!present) {
         out.clear();
-        return true; // clean miss: a world without ground objects
+        return true; // A verified absent member is a clean miss.
     }
     std::ifstream in(path, std::ios::binary);
     if (!in) {

@@ -935,4 +935,52 @@ TEST(ActiveRegionLedgerTest, AllocatorOnlyLedgerIsSavedAndReloads) {
     std::filesystem::remove_all(dir);
 }
 
+TEST(ActiveRegionLedgerTest, CompletedWorkIsDurableConsumedOnceAndEmptyReplacesIt) {
+    auto ledger = Distant();
+    const auto empty = ledger.canonical_bytes();
+    const std::array completed{RegionWork{kFar, 1, 2, 3, 4}};
+    ledger.publish_completed_work(completed);
+    EXPECT_NE(ledger.canonical_bytes(), empty);
+    EXPECT_EQ(Version(ledger.encode()), 2u);
+    auto restored = Reload(ledger);
+    EXPECT_EQ(restored.completed_work().at(kFar), 10u);
+    EXPECT_EQ(restored.schedule(WorldClock(2)).work, 10u);
+    EXPECT_TRUE(restored.completed_work().empty());
+    restored.publish_completed_work(completed);
+    restored.publish_completed_work({});
+    EXPECT_EQ(restored.schedule(WorldClock(3)).work, 0u);
+    EXPECT_EQ(Version(restored.encode()), 1u);
+}
+
+TEST(ActiveRegionLedgerTest, RestoredClockGapExpiresStaleCompletedWorkOnlyAfterSuccess) {
+    auto ledger = Distant();
+    const std::array completed{RegionWork{kFar, 100, 0, 0, 0}};
+    ledger.publish_completed_work(completed);
+    ledger.restore_clock(WorldClock(3));
+    const auto before = ledger.canonical_bytes();
+    EXPECT_THROW(ledger.schedule(WorldClock(3)), std::invalid_argument);
+    EXPECT_EQ(ledger.canonical_bytes(), before);
+    EXPECT_EQ(ledger.schedule(WorldClock(4)).work, 0u);
+    EXPECT_TRUE(ledger.completed_work().empty());
+}
+
+TEST(ActiveRegionLedgerTest, CompletedWorkCodecRefusesUnknownOwnerAndZeroTotalAtomically) {
+    auto ledger = Distant();
+    const std::array completed{RegionWork{kFar, 1, 0, 0, 0}};
+    ledger.publish_completed_work(completed);
+    const auto good = ledger.encode();
+    const auto extension = ActiveRegionLedger::kHeaderBytes + ActiveRegionLedger::kRecordBytes;
+    // ext_len(4), type(2), length(4), count(4), key(8), total(8), checksum(8).
+    for (const bool unknown_owner : {false, true}) {
+        auto bytes = good;
+        if (unknown_owner)
+            bytes[extension + 14] = 99;
+        else
+            for (std::size_t i = 0; i < 8; ++i)
+                bytes[extension + 22 + i] = 0;
+        Seal(bytes);
+        ExpectRefused(bytes, ActiveRegionLedger::kCorruptMessage);
+    }
+}
+
 } // namespace

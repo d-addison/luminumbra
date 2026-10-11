@@ -188,6 +188,7 @@ void GameSession::ResetWorldSystems() {
     m_regionSchedule = {};
     m_replicatedSimulationAnchors.reset();
     m_regionWork.clear();
+    m_regionCompletedWork.clear();
     m_regionFault.reset();
     m_regionInputRejections = {};
     m_regionDurableDirectory.clear();
@@ -305,444 +306,471 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
                                                                      current_tick);
         if (m_activeRegionsEnabled)
             m_worldClock.set_tick(current_tick);
-
-        // Deterministic per-tick system order. The ordered event bus drains everything
-        // published for this tick after simulation systems finish (tick -> lane -> sequence).
-
-        budget.Next(Stage::Animation, [&] {
-            return SimParticipantCount<luminumbra::animation::AnimationPlayerComponent>(m_registry);
-        });
-        // 1. Animation pose sampling: FIRST in the tick order.
-        luminumbra::animation::SamplePosesOnTick(m_registry, m_simulationClock.fixed_dt());
-
-        budget.Next(Stage::Instinct, [&] {
-            return SimParticipantCount<TelemetryComp::InstinctAgentComponent,
-                                       TelemetryComp::NeedsComponent>(m_registry);
-        });
-        // 2. Instinct planning: need growth + deterministic
-        // replanning over the registry.
-        //
-        // the ecology stimulus-channel registry is supplied ONLY
-        // when at least one creature has OPTED IN via a game-data
-        // StimulusSubscriptionComponent. The canonical roster carries none, so
-        // the `view.empty` guard keeps the call BYTE-IDENTICAL to the pre-5b
-        // path (nullptr context) -- world_hash stays d950a6afc12a5cdc (critique
-        //  / ). When subscribers exist, the context reads the replicated
-        // weather state (one-way; weather updated on the PREVIOUS tick, slot 4)
-        // and the per-tick time-of-day/season/light channels derived from the
-        // tick. The engine still names no creature behavior.
-        if (m_registry.view<const Luminumbra::Components::StimulusSubscriptionComponent>()
-                .empty()) {
-            luminumbra::ai::RunInstinctSystemOnTick(m_registry, current_tick);
-        } else {
-            luminumbra::ai::StimulusContext stimulus_context;
-            stimulus_context.tick = current_tick;
-            stimulus_context.world_clock = m_activeRegionsEnabled ? &m_worldClock : nullptr;
-            stimulus_context.sample_position = m_metadata.spawnPoint;
-            stimulus_context.weather = m_weatherSystem.get();
-            //  (-7): the composite energy environment. Prefer the
-            // STATEFUL layer when sim.aether_state is ON (gameplay deposits are the
-            // truth creatures react to): the cell at the sample position, quantized
-            // by the shared 24 m grid identity and normalized by the PINNED
-            // fields::kEnergyRawPerUnit (1 gameplay unit == full stimulus; the
-            // channel clamps [0, 1]). Else the re-derivable ambience, whose
-            // emission is already [0, 1] by construction (identity pin -- the same
-            // scalar the render emissive tap consumes). Both reads are one-way
-            // PRIOR-tick state (the fields update later this tick at slot 5/5a),
-            // mirroring the weather slot-order rule above. Neither system present
-            // -> the -1 sentinel -> the channel's deterministic neutral 0.
-            if (m_energyFieldState) {
-                const int stim_cell_x = static_cast<int>(
-                    std::floor(m_metadata.spawnPoint.x / Systems::kAetherCellSizeM));
-                const int stim_cell_z = static_cast<int>(
-                    std::floor(m_metadata.spawnPoint.z / Systems::kAetherCellSizeM));
-                stimulus_context.aether_level =
-                    static_cast<float>(m_energyFieldState->at_cell(stim_cell_x, stim_cell_z)) /
-                    static_cast<float>(luminumbra::fields::kEnergyRawPerUnit);
-            } else if (m_aetherFieldSystem) {
-                stimulus_context.aether_level =
-                    m_aetherFieldSystem->SampleAether(m_metadata.spawnPoint);
+        try {
+            if (m_activeRegionsEnabled) {
+                m_regionCompletedWork.clear();
+                RunRegionScheduler(current_tick);
+                if (m_regionFault)
+                    return i + 1;
+                AdvanceGroundObjects(current_tick);
+                if (m_regionFault)
+                    return i + 1;
             }
-            const luminumbra::ai::StimulusChannelRegistry stimulus_registry(stimulus_context);
-            luminumbra::ai::RunInstinctSystemOnTick(m_registry, current_tick, &stimulus_registry);
-        }
 
-        budget.Next(Stage::Perception, [&] {
-            return SimParticipantCount<TelemetryComp::TransformComponent,
-                                       TelemetryComp::PerceptionComponent,
-                                       TelemetryComp::AwarenessComponent>(m_registry);
-        });
-        // 2b.  : perception fusion. Updates each perceiving creature's
-        // awareness (vision cone + hearing audiogram over Sensable entities of
-        // other factions -> detection meter/state + last-known memory). Runs after
-        // planning so awareness is fresh for the NEXT plan/locomotion. Operates
-        // ONLY on entities carrying PerceptionComponent+AwarenessComponent; the
-        // canonical headless roster carries none, so this is a no-op there and
-        // world_hash is UNCHANGED (byte-identical) -- same discipline as the
-        // stimulus-channel opt-in above. No RNG/wall-clock; id-ordered.
-        luminumbra::ai::RunPerceptionSystemOnTick(m_registry,
-                                                  static_cast<float>(m_simulationClock.fixed_dt()));
+            // Deterministic per-tick system order. The ordered event bus drains everything
+            // published for this tick after simulation systems finish (tick -> lane -> sequence).
 
-        budget.Next(Stage::Scent, [&] {
-            return (m_scentField &&
-                    (HasScentParticipants() ||
-                     SimParticipantCount<TelemetryComp::ForagerComponent>(m_registry) != 0))
-                       ? static_cast<std::uint64_t>(kScentFieldCells) * kScentFieldCells *
-                             kScentFieldChannels
-                       : 0ull;
-        });
-        // 2c.: scent stigmergy write/update. Game-data opt-in:
-        // no scent emitter/sensor components means no field mutation, while active
-        // ecology worlds get deterministic deposit -> diffuse/evaporate -> clamp.
-        const bool scent_active = HasScentParticipants();
-        // ant foraging deposits trails into the SAME scent field (channels 2/3), so it runs in
-        // this slot BEFORE the diffuse/evaporate Step (its deposits then diffuse + evaporate this
-        // tick, like creature scent). Opt-in via ForagerComponent: a roster with none is a no-op,
-        // so the canonical roster (and any scent-only world) is byte-identical.
-        // Integer/id-ordered/libm-free.
-        const auto foragers_view =
-            m_registry.view<const Luminumbra::Components::ForagerComponent>();
-        const bool foraging_active = foragers_view.begin() != foragers_view.end();
-        if ((scent_active || foraging_active) && m_scentField) {
-            if (scent_active) {
-                luminumbra::ai::RunScentDepositOnTick(m_registry,
-                                                      *m_scentField,
-                                                      ScentOriginFor(m_metadata.spawnPoint.x),
-                                                      ScentOriginFor(m_metadata.spawnPoint.z),
-                                                      kScentCellSize);
+            budget.Next(Stage::Animation, [&] {
+                return SimParticipantCount<luminumbra::animation::AnimationPlayerComponent>(
+                    m_registry);
+            });
+            // 1. Animation pose sampling: FIRST in the tick order.
+            luminumbra::animation::SamplePosesOnTick(m_registry, m_simulationClock.fixed_dt());
+
+            budget.Next(Stage::Instinct, [&] {
+                return SimParticipantCount<TelemetryComp::InstinctAgentComponent,
+                                           TelemetryComp::NeedsComponent>(m_registry);
+            });
+            // 2. Instinct planning: need growth + deterministic
+            // replanning over the registry.
+            //
+            // the ecology stimulus-channel registry is supplied ONLY
+            // when at least one creature has OPTED IN via a game-data
+            // StimulusSubscriptionComponent. The canonical roster carries none, so
+            // the `view.empty` guard keeps the call BYTE-IDENTICAL to the pre-5b
+            // path (nullptr context) -- world_hash stays d950a6afc12a5cdc (critique
+            //  / ). When subscribers exist, the context reads the replicated
+            // weather state (one-way; weather updated on the PREVIOUS tick, slot 4)
+            // and the per-tick time-of-day/season/light channels derived from the
+            // tick. The engine still names no creature behavior.
+            if (m_registry.view<const Luminumbra::Components::StimulusSubscriptionComponent>()
+                    .empty()) {
+                luminumbra::ai::RunInstinctSystemOnTick(m_registry, current_tick);
+            } else {
+                luminumbra::ai::StimulusContext stimulus_context;
+                stimulus_context.tick = current_tick;
+                stimulus_context.world_clock = m_activeRegionsEnabled ? &m_worldClock : nullptr;
+                stimulus_context.sample_position = m_metadata.spawnPoint;
+                stimulus_context.weather = m_weatherSystem.get();
+                //  (-7): the composite energy environment. Prefer the
+                // STATEFUL layer when sim.aether_state is ON (gameplay deposits are the
+                // truth creatures react to): the cell at the sample position, quantized
+                // by the shared 24 m grid identity and normalized by the PINNED
+                // fields::kEnergyRawPerUnit (1 gameplay unit == full stimulus; the
+                // channel clamps [0, 1]). Else the re-derivable ambience, whose
+                // emission is already [0, 1] by construction (identity pin -- the same
+                // scalar the render emissive tap consumes). Both reads are one-way
+                // PRIOR-tick state (the fields update later this tick at slot 5/5a),
+                // mirroring the weather slot-order rule above. Neither system present
+                // -> the -1 sentinel -> the channel's deterministic neutral 0.
+                if (m_energyFieldState) {
+                    const int stim_cell_x = static_cast<int>(
+                        std::floor(m_metadata.spawnPoint.x / Systems::kAetherCellSizeM));
+                    const int stim_cell_z = static_cast<int>(
+                        std::floor(m_metadata.spawnPoint.z / Systems::kAetherCellSizeM));
+                    stimulus_context.aether_level =
+                        static_cast<float>(m_energyFieldState->at_cell(stim_cell_x, stim_cell_z)) /
+                        static_cast<float>(luminumbra::fields::kEnergyRawPerUnit);
+                } else if (m_aetherFieldSystem) {
+                    stimulus_context.aether_level =
+                        m_aetherFieldSystem->SampleAether(m_metadata.spawnPoint);
+                }
+                const luminumbra::ai::StimulusChannelRegistry stimulus_registry(stimulus_context);
+                luminumbra::ai::RunInstinctSystemOnTick(
+                    m_registry, current_tick, &stimulus_registry);
             }
-            if (foraging_active) {
-                luminumbra::ai::RunForagingOnTick(m_registry, *m_scentField, m_foragingTuning);
+
+            budget.Next(Stage::Perception, [&] {
+                return SimParticipantCount<TelemetryComp::TransformComponent,
+                                           TelemetryComp::PerceptionComponent,
+                                           TelemetryComp::AwarenessComponent>(m_registry);
+            });
+            // 2b.  : perception fusion. Updates each perceiving creature's
+            // awareness (vision cone + hearing audiogram over Sensable entities of
+            // other factions -> detection meter/state + last-known memory). Runs after
+            // planning so awareness is fresh for the NEXT plan/locomotion. Operates
+            // ONLY on entities carrying PerceptionComponent+AwarenessComponent; the
+            // canonical headless roster carries none, so this is a no-op there and
+            // world_hash is UNCHANGED (byte-identical) -- same discipline as the
+            // stimulus-channel opt-in above. No RNG/wall-clock; id-ordered.
+            luminumbra::ai::RunPerceptionSystemOnTick(
+                m_registry, static_cast<float>(m_simulationClock.fixed_dt()));
+
+            budget.Next(Stage::Scent, [&] {
+                return (m_scentField &&
+                        (HasScentParticipants() ||
+                         SimParticipantCount<TelemetryComp::ForagerComponent>(m_registry) != 0))
+                           ? static_cast<std::uint64_t>(kScentFieldCells) * kScentFieldCells *
+                                 kScentFieldChannels
+                           : 0ull;
+            });
+            // 2c.: scent stigmergy write/update. Game-data opt-in:
+            // no scent emitter/sensor components means no field mutation, while active
+            // ecology worlds get deterministic deposit -> diffuse/evaporate -> clamp.
+            const bool scent_active = HasScentParticipants();
+            // ant foraging deposits trails into the SAME scent field (channels 2/3), so it runs in
+            // this slot BEFORE the diffuse/evaporate Step (its deposits then diffuse + evaporate
+            // this tick, like creature scent). Opt-in via ForagerComponent: a roster with none is a
+            // no-op, so the canonical roster (and any scent-only world) is byte-identical.
+            // Integer/id-ordered/libm-free.
+            const auto foragers_view =
+                m_registry.view<const Luminumbra::Components::ForagerComponent>();
+            const bool foraging_active = foragers_view.begin() != foragers_view.end();
+            if ((scent_active || foraging_active) && m_scentField) {
+                if (scent_active) {
+                    luminumbra::ai::RunScentDepositOnTick(m_registry,
+                                                          *m_scentField,
+                                                          ScentOriginFor(m_metadata.spawnPoint.x),
+                                                          ScentOriginFor(m_metadata.spawnPoint.z),
+                                                          kScentCellSize);
+                }
+                if (foraging_active) {
+                    luminumbra::ai::RunForagingOnTick(m_registry, *m_scentField, m_foragingTuning);
+                }
+                // advect the scent downwind by the PRIOR-tick wind (the wind field is updated
+                // later this tick at slot 3, so sampling here keeps the slot order stable). Convert
+                // world-units/sec -> cells/step via dt and the cell size. Scale 0 -> zero wind ->
+                // Step skips advection -> byte-identical (no re-pin until tuned on).
+                double wind_cx = 0.0, wind_cz = 0.0;
+                if (kScentWindAdvectionScale != 0.0 && m_windFieldSystem) {
+                    const Luminumbra::Vec2 w = m_windFieldSystem->SampleWind(m_metadata.spawnPoint);
+                    const double k = kScentWindAdvectionScale * m_simulationClock.fixed_dt() /
+                                     static_cast<double>(kScentCellSize);
+                    wind_cx = static_cast<double>(w.x) * k;
+                    wind_cz = static_cast<double>(w.y) * k;
+                }
+                m_scentField->Step(kScentDiffusionRate,
+                                   kScentDiffusionIterations,
+                                   kScentEvaporation,
+                                   wind_cx,
+                                   wind_cz);
+                m_scentField->Clamp(kScentTauMin, kScentTauMax);
             }
-            // advect the scent downwind by the PRIOR-tick wind (the wind field is updated
-            // later this tick at slot 3, so sampling here keeps the slot order stable). Convert
-            // world-units/sec -> cells/step via dt and the cell size. Scale 0 -> zero wind ->
-            // Step skips advection -> byte-identical (no re-pin until tuned on).
-            double wind_cx = 0.0, wind_cz = 0.0;
-            if (kScentWindAdvectionScale != 0.0 && m_windFieldSystem) {
-                const Luminumbra::Vec2 w = m_windFieldSystem->SampleWind(m_metadata.spawnPoint);
-                const double k = kScentWindAdvectionScale * m_simulationClock.fixed_dt() /
-                                 static_cast<double>(kScentCellSize);
-                wind_cx = static_cast<double>(w.x) * k;
-                wind_cz = static_cast<double>(w.y) * k;
+
+            budget.Next(Stage::Locomotion, [&] {
+                return SimParticipantCount<TelemetryComp::ActionPlanComponent,
+                                           TelemetryComp::TransformComponent,
+                                           TelemetryComp::LocomotionProfile>(m_registry);
+            });
+            // 2d.: action-plan locomotion, then scent gradient bias.
+            // The executor writes only LocomotionIntentComponent; physics/render owners
+            // consume that intent in their existing lanes.
+            luminumbra::ai::RunInstinctLocomotionOnTick(m_registry);
+            if (scent_active && m_scentField) {
+                luminumbra::ai::RunScentSteeringOnTick(m_registry,
+                                                       *m_scentField,
+                                                       ScentOriginFor(m_metadata.spawnPoint.x),
+                                                       ScentOriginFor(m_metadata.spawnPoint.z),
+                                                       kScentCellSize);
             }
-            m_scentField->Step(kScentDiffusionRate,
-                               kScentDiffusionIterations,
-                               kScentEvaporation,
-                               wind_cx,
-                               wind_cz);
-            m_scentField->Clamp(kScentTauMin, kScentTauMax);
-        }
 
-        budget.Next(Stage::Locomotion, [&] {
-            return SimParticipantCount<TelemetryComp::ActionPlanComponent,
-                                       TelemetryComp::TransformComponent,
-                                       TelemetryComp::LocomotionProfile>(m_registry);
-        });
-        // 2d.: action-plan locomotion, then scent gradient bias.
-        // The executor writes only LocomotionIntentComponent; physics/render owners
-        // consume that intent in their existing lanes.
-        luminumbra::ai::RunInstinctLocomotionOnTick(m_registry);
-        if (scent_active && m_scentField) {
-            luminumbra::ai::RunScentSteeringOnTick(m_registry,
-                                                   *m_scentField,
-                                                   ScentOriginFor(m_metadata.spawnPoint.x),
-                                                   ScentOriginFor(m_metadata.spawnPoint.z),
-                                                   kScentCellSize);
-        }
+            budget.Next(Stage::Creatures, [&] {
+                return SimParticipantCount<TelemetryComp::CreatureComponent,
+                                           TelemetryComp::TransformComponent>(m_registry);
+            });
+            // 2e. : Utility-AI creature brain (predator/prey movement). Per-entity opt-in
+            // via CreatureComponent -> a world with none is a no-op (canonical roster
+            // byte-identical, same discipline as plants/scent). Deterministic (id-ordered,
+            // libm-free).
+            {
+                auto creatures = m_registry.view<const Luminumbra::Components::CreatureComponent>();
+                if (creatures.begin() != creatures.end()) {
+                    // hand the brain the scent field so a predator without a
+                    // directly-perceived target tracks the prey-scent gradient (channel 0).
+                    // No scent participants -> the field is all-zero -> byte-identical.
+                    luminumbra::ai::RunCreatureBrainSystemOnTick(
+                        m_registry,
+                        static_cast<float>(m_simulationClock.fixed_dt()),
+                        m_ecologyTuning,
+                        m_scentField.get(),
+                        ScentOriginFor(m_metadata.spawnPoint.x),
+                        ScentOriginFor(m_metadata.spawnPoint.z),
+                        kScentCellSize,
+                        true,
+                        m_speciesTable.get());
 
-        budget.Next(Stage::Creatures, [&] {
-            return SimParticipantCount<TelemetryComp::CreatureComponent,
-                                       TelemetryComp::TransformComponent>(m_registry);
-        });
-        // 2e. : Utility-AI creature brain (predator/prey movement). Per-entity opt-in
-        // via CreatureComponent -> a world with none is a no-op (canonical roster byte-identical,
-        // same discipline as plants/scent). Deterministic (id-ordered, libm-free).
-        {
-            auto creatures = m_registry.view<const Luminumbra::Components::CreatureComponent>();
-            if (creatures.begin() != creatures.end()) {
-                // hand the brain the scent field so a predator without a
-                // directly-perceived target tracks the prey-scent gradient (channel 0).
-                // No scent participants -> the field is all-zero -> byte-identical.
-                luminumbra::ai::RunCreatureBrainSystemOnTick(
-                    m_registry,
-                    static_cast<float>(m_simulationClock.fixed_dt()),
-                    m_ecologyTuning,
-                    m_scentField.get(),
-                    ScentOriginFor(m_metadata.spawnPoint.x),
-                    ScentOriginFor(m_metadata.spawnPoint.z),
-                    kScentCellSize,
-                    true,
-                    m_speciesTable.get());
+                    // 2e-mate: SEXUAL reproduction, phase A. Ready creatures (mature, well-fed,
+                    // off cooldown) carrying a CreatureGenomeComponent steer toward the nearest
+                    // ready OPPOSITE-SEX mate by overriding the brain's wish velocity (unless
+                    // fleeing) — so the physics bridge below actually walks them together. Opt-in
+                    // (genome component); no genome -> untouched.
+                    luminumbra::ai::RunMateSeekingOnTick(m_registry, m_reproductionTuning);
 
-                // 2e-mate: SEXUAL reproduction, phase A. Ready creatures (mature, well-fed,
-                // off cooldown) carrying a CreatureGenomeComponent steer toward the nearest
-                // ready OPPOSITE-SEX mate by overriding the brain's wish velocity (unless
-                // fleeing) — so the physics bridge below actually walks them together. Opt-in
-                // (genome component); no genome -> untouched.
-                luminumbra::ai::RunMateSeekingOnTick(m_registry, m_reproductionTuning);
+                    // 2e-steer: blend the  bias systems' outputs (computed last tick, slot 7) into
+                    // the wish velocity before the physics bridge applies it -- pack flank steer,
+                    // migration drift, territory homing. Extracted to ai/SteeringConsumer.h so this
+                    // integration layer is unit-tested independently of the producers.
+                    luminumbra::ai::RunSteeringConsumerOnTick(m_registry);
 
-                // 2e-steer: blend the  bias systems' outputs (computed last tick, slot 7) into
-                // the wish velocity before the physics bridge applies it -- pack flank steer,
-                // migration drift, territory homing. Extracted to ai/SteeringConsumer.h so this
-                // integration layer is unit-tested independently of the producers.
-                luminumbra::ai::RunSteeringConsumerOnTick(m_registry);
-
-                // 2e-survival: water-seeking (THIRST) + carcass SCAVENGING — built sim
-                // systems wired into the live tick. Opt-in via ThirstComponent /
-                // ScavengerComponent (+ WaterHoleComponent water sources / carcasses); a
-                // roster carrying none is a pure no-op, so the canonical NetworkStateHash
-                // stays byte-identical. Thirst rises + drinks at water; hungry scavengers
-                // feed on carcasses (death -> food). Each writes its OWN component's wish,
-                // blended into the creature wish below so the physics bridge walks them there.
-                luminumbra::ai::RunThirstOnTick(
-                    m_registry, static_cast<float>(m_simulationClock.fixed_dt()), m_thirstTuning);
-                luminumbra::ai::RunScavengingOnTick(m_registry, current_tick, m_scavengingTuning);
-                {
-                    // Additive blend of the survival wishes into CreatureComponent.wish so a
-                    // thirsty/scavenging creature actually steers to water/carrion. Entities
-                    // without the opt-in components are untouched (try_get -> null), keeping
-                    // the baseline byte-identical; the physics bridge below consumes wish_x/z.
-                    auto sv = m_registry.view<Luminumbra::Components::CreatureComponent>();
-                    for (auto e : sv) {
-                        auto& cr = sv.get<Luminumbra::Components::CreatureComponent>(e);
-                        // the thirst pull applies ONLY when the arbiter
-                        // actually chose Drink — the old unconditional blend let a
-                        // FLEEING creature be simultaneously steered toward water
-                        // (the contract's exact defect). Thirst now competes inside
-                        // DecideCreatureAction; this blend is its motor output.
-                        if (cr.last_action ==
-                            static_cast<int>(luminumbra::ai::CreatureAction::Drink)) {
-                            if (const auto* th =
-                                    m_registry.try_get<Luminumbra::Components::ThirstComponent>(
+                    // 2e-survival: water-seeking (THIRST) + carcass SCAVENGING — built sim
+                    // systems wired into the live tick. Opt-in via ThirstComponent /
+                    // ScavengerComponent (+ WaterHoleComponent water sources / carcasses); a
+                    // roster carrying none is a pure no-op, so the canonical NetworkStateHash
+                    // stays byte-identical. Thirst rises + drinks at water; hungry scavengers
+                    // feed on carcasses (death -> food). Each writes its OWN component's wish,
+                    // blended into the creature wish below so the physics bridge walks them there.
+                    luminumbra::ai::RunThirstOnTick(
+                        m_registry,
+                        static_cast<float>(m_simulationClock.fixed_dt()),
+                        m_thirstTuning);
+                    luminumbra::ai::RunScavengingOnTick(
+                        m_registry, current_tick, m_scavengingTuning);
+                    {
+                        // Additive blend of the survival wishes into CreatureComponent.wish so a
+                        // thirsty/scavenging creature actually steers to water/carrion. Entities
+                        // without the opt-in components are untouched (try_get -> null), keeping
+                        // the baseline byte-identical; the physics bridge below consumes wish_x/z.
+                        auto sv = m_registry.view<Luminumbra::Components::CreatureComponent>();
+                        for (auto e : sv) {
+                            auto& cr = sv.get<Luminumbra::Components::CreatureComponent>(e);
+                            // the thirst pull applies ONLY when the arbiter
+                            // actually chose Drink — the old unconditional blend let a
+                            // FLEEING creature be simultaneously steered toward water
+                            // (the contract's exact defect). Thirst now competes inside
+                            // DecideCreatureAction; this blend is its motor output.
+                            if (cr.last_action ==
+                                static_cast<int>(luminumbra::ai::CreatureAction::Drink)) {
+                                if (const auto* th =
+                                        m_registry.try_get<Luminumbra::Components::ThirstComponent>(
+                                            e)) {
+                                    cr.wish_x += th->wish_x;
+                                    cr.wish_z += th->wish_z;
+                                }
+                            }
+                            if (const auto* scv =
+                                    m_registry.try_get<Luminumbra::Components::ScavengerComponent>(
                                         e)) {
-                                cr.wish_x += th->wish_x;
-                                cr.wish_z += th->wish_z;
+                                cr.wish_x += scv->wish_x;
+                                cr.wish_z += scv->wish_z;
                             }
                         }
-                        if (const auto* scv =
-                                m_registry.try_get<Luminumbra::Components::ScavengerComponent>(e)) {
-                            cr.wish_x += scv->wish_x;
-                            cr.wish_z += scv->wish_z;
+                    }
+
+                    // 2e-phys: TRUE-PHYSICS locomotion bridge. Creatures carrying a
+                    // CreaturePhysicsComponent are driven by the deterministic Jolt avatar
+                    // controller (the same one player/networked avatars use): push the brain's
+                    // wish velocity in, step the avatars once at the fixed dt (index-ordered =
+                    // deterministic same-binary, mirrors ServerWorldRunner), and read the
+                    // terrain-resolved position (gravity/collision/slopes) back into the
+                    // transform. Gated on a physics system + at least one physics creature, so
+                    // the canonical roster (none) keeps world_hash byte-identical.
+                    if (m_physicsSystem) {
+                        auto phys =
+                            m_registry.view<Luminumbra::Components::CreaturePhysicsComponent,
+                                            Luminumbra::Components::CreatureComponent,
+                                            Luminumbra::Components::TransformComponent>();
+                        if (phys.begin() != phys.end()) {
+                            std::vector<entt::entity> pe(phys.begin(), phys.end());
+                            std::sort(pe.begin(), pe.end(), [](entt::entity a, entt::entity b) {
+                                return entt::to_integral(a) < entt::to_integral(b);
+                            });
+                            for (auto e : pe) {
+                                const auto& cr =
+                                    phys.get<Luminumbra::Components::CreatureComponent>(e);
+                                const auto& cp =
+                                    phys.get<Luminumbra::Components::CreaturePhysicsComponent>(e);
+                                m_physicsSystem->set_avatar_wish_velocity(
+                                    cp.avatar_index, glm::vec2(cr.wish_x, cr.wish_z));
+                            }
+                            m_physicsSystem->update_avatars(
+                                static_cast<float>(m_simulationClock.fixed_dt()));
+                            for (auto e : pe) {
+                                const auto& cp =
+                                    phys.get<Luminumbra::Components::CreaturePhysicsComponent>(e);
+                                phys.get<Luminumbra::Components::TransformComponent>(e).position =
+                                    m_physicsSystem->get_avatar_position(cp.avatar_index);
+                            }
                         }
                     }
-                }
 
-                // 2e-phys: TRUE-PHYSICS locomotion bridge. Creatures carrying a
-                // CreaturePhysicsComponent are driven by the deterministic Jolt avatar
-                // controller (the same one player/networked avatars use): push the brain's
-                // wish velocity in, step the avatars once at the fixed dt (index-ordered =
-                // deterministic same-binary, mirrors ServerWorldRunner), and read the
-                // terrain-resolved position (gravity/collision/slopes) back into the
-                // transform. Gated on a physics system + at least one physics creature, so
-                // the canonical roster (none) keeps world_hash byte-identical.
-                if (m_physicsSystem) {
-                    auto phys = m_registry.view<Luminumbra::Components::CreaturePhysicsComponent,
-                                                Luminumbra::Components::CreatureComponent,
-                                                Luminumbra::Components::TransformComponent>();
-                    if (phys.begin() != phys.end()) {
-                        std::vector<entt::entity> pe(phys.begin(), phys.end());
-                        std::sort(pe.begin(), pe.end(), [](entt::entity a, entt::entity b) {
-                            return entt::to_integral(a) < entt::to_integral(b);
-                        });
-                        for (auto e : pe) {
-                            const auto& cr = phys.get<Luminumbra::Components::CreatureComponent>(e);
-                            const auto& cp =
-                                phys.get<Luminumbra::Components::CreaturePhysicsComponent>(e);
-                            m_physicsSystem->set_avatar_wish_velocity(
-                                cp.avatar_index, glm::vec2(cr.wish_x, cr.wish_z));
-                        }
-                        m_physicsSystem->update_avatars(
-                            static_cast<float>(m_simulationClock.fixed_dt()));
-                        for (auto e : pe) {
-                            const auto& cp =
-                                phys.get<Luminumbra::Components::CreaturePhysicsComponent>(e);
-                            phys.get<Luminumbra::Components::TransformComponent>(e).position =
-                                m_physicsSystem->get_avatar_position(cp.avatar_index);
-                        }
+                    // 2e-mate: SEXUAL reproduction, phase B (after the pair has moved together via
+                    // the bridge). Ready adjacent opposite-sex pairs accumulate courtship; once a
+                    // pair has courted long enough, ONE offspring is born from a SEEDED blend of
+                    // BOTH parents' genomes (caught prey leave none -> selection). Deterministic
+                    // (id-ordered, libm-free, RNG seeded from offset 16 + parent ids + tick).
+                    // Per-entity opt-in (genome component): no genome / no creatures -> nothing
+                    // created, so the canonical NetworkStateHash baseline stays byte-identical.
+                    // the REAL world seed feeds the per-birth RNG —
+                    // previously 0ull, so offspring genomes were identical across worlds
+                    // with the same entity ids and ticks. Same-seed worlds reproduce
+                    // identically; different seeds diverge (the reproduction test pins both).
+                    const auto repro = luminumbra::ai::RunMatingResolveOnTick(
+                        m_registry,
+                        current_tick,
+                        static_cast<std::uint64_t>(StringToSeed(m_metadata.seed)),
+                        m_reproductionTuning,
+                        m_speciesTable.get());
+                    if (repro.born > 0) {
+                        LUMINUMBRA_CORE_INFO(
+                            ": {} offspring born (sexual) at tick {}", repro.born, current_tick);
                     }
-                }
-
-                // 2e-mate: SEXUAL reproduction, phase B (after the pair has moved together via
-                // the bridge). Ready adjacent opposite-sex pairs accumulate courtship; once a
-                // pair has courted long enough, ONE offspring is born from a SEEDED blend of
-                // BOTH parents' genomes (caught prey leave none -> selection). Deterministic
-                // (id-ordered, libm-free, RNG seeded from offset 16 + parent ids + tick).
-                // Per-entity opt-in (genome component): no genome / no creatures -> nothing
-                // created, so the canonical NetworkStateHash baseline stays byte-identical.
-                // the REAL world seed feeds the per-birth RNG —
-                // previously 0ull, so offspring genomes were identical across worlds
-                // with the same entity ids and ticks. Same-seed worlds reproduce
-                // identically; different seeds diverge (the reproduction test pins both).
-                const auto repro = luminumbra::ai::RunMatingResolveOnTick(
-                    m_registry,
-                    current_tick,
-                    static_cast<std::uint64_t>(StringToSeed(m_metadata.seed)),
-                    m_reproductionTuning,
-                    m_speciesTable.get());
-                if (repro.born > 0) {
-                    LUMINUMBRA_CORE_INFO(
-                        ": {} offspring born (sexual) at tick {}", repro.born, current_tick);
                 }
             }
-        }
 
-        if (m_activeRegionsEnabled && m_windFieldSystem && m_weatherSystem) {
-            // A distinct stage owns the whole clock-driven wind/weather sequence.
-            // Count each input field cell once (wind + weather = 8192), not
-            // rebuild passes: UpdateFromClock rebuilds wind twice around weather.
-            // Wind and Weather have no samples on this path; see telemetry v2.
-            budget.Next(Stage::WindWeather, [] {
-                return static_cast<std::uint64_t>(Systems::kWindExtentCells) *
-                           Systems::kWindExtentCells +
-                       static_cast<std::uint64_t>(Systems::kWeatherExtentCells) *
-                           Systems::kWeatherExtentCells;
-            });
-            m_weatherSystem->UpdateFromClock(
-                current_tick, m_ambientFieldAnchor, *m_windFieldSystem);
-        } else {
-            budget.Next(Stage::Wind, [&] {
-                return m_windFieldSystem ? static_cast<std::uint64_t>(Systems::kWindExtentCells) *
-                                               Systems::kWindExtentCells
-                                         : 0ull;
-            });
-            // 3.  : wind field update. Deterministic (DeterministicMath +
-            // FastNoise batch path; no wall-clock/RNG). Anchored on the spawn/stream
-            // anchor so the streamed-region grid follows it. The wind cell values
-            // feed the world_hash `wind` sub-hash; the update must run every tick so
-            // run==replay and resim agree on the field at every checkpoint.
-            if (m_windFieldSystem) {
-                m_windFieldSystem->ClearStormPerturbations();
+            if (m_activeRegionsEnabled && m_windFieldSystem && m_weatherSystem) {
+                // A distinct stage owns the whole clock-driven wind/weather sequence.
+                // Count each input field cell once (wind + weather = 8192), not
+                // rebuild passes: UpdateFromClock rebuilds wind twice around weather.
+                // Wind and Weather have no samples on this path; see telemetry v2.
+                budget.Next(Stage::WindWeather, [] {
+                    return static_cast<std::uint64_t>(Systems::kWindExtentCells) *
+                               Systems::kWindExtentCells +
+                           static_cast<std::uint64_t>(Systems::kWeatherExtentCells) *
+                               Systems::kWeatherExtentCells;
+                });
+                m_weatherSystem->UpdateFromClock(
+                    current_tick, m_ambientFieldAnchor, *m_windFieldSystem);
+            } else {
+                budget.Next(Stage::Wind, [&] {
+                    return m_windFieldSystem
+                               ? static_cast<std::uint64_t>(Systems::kWindExtentCells) *
+                                     Systems::kWindExtentCells
+                               : 0ull;
+                });
+                // 3.  : wind field update. Deterministic (DeterministicMath +
+                // FastNoise batch path; no wall-clock/RNG). Anchored on the spawn/stream
+                // anchor so the streamed-region grid follows it. The wind cell values
+                // feed the world_hash `wind` sub-hash; the update must run every tick so
+                // run==replay and resim agree on the field at every checkpoint.
+                if (m_windFieldSystem) {
+                    m_windFieldSystem->ClearStormPerturbations();
+                    if (m_weatherSystem) {
+                        for (const Systems::StormCell& storm : m_weatherSystem->StormCells()) {
+                            m_windFieldSystem->InjectStormPerturbation({
+                                storm.center_world,
+                                96.0f,
+                                storm.velocity,
+                                storm.intensity,
+                            });
+                        }
+                    }
+                    m_windFieldSystem->Update(current_tick, m_metadata.spawnPoint);
+                }
+
+                budget.Next(Stage::Weather, [&] {
+                    return m_weatherSystem
+                               ? static_cast<std::uint64_t>(Systems::kWeatherExtentCells) *
+                                     Systems::kWeatherExtentCells
+                               : 0ull;
+                });
+                // 4.  : weather core update. Runs AFTER wind so storm cells
+                // advect by the freshly-updated wind grid. Deterministic (DeterministicMath
+                // + FastNoise batch path; no wall-clock/RNG, no std::random). The weather
+                // state (category map + storm cells + precip field) feeds the world_hash
+                // `weather` sub-hash; the update runs every tick so run==replay and resim
+                // agree on the state at every checkpoint.
                 if (m_weatherSystem) {
-                    for (const Systems::StormCell& storm : m_weatherSystem->StormCells()) {
-                        m_windFieldSystem->InjectStormPerturbation({
-                            storm.center_world,
-                            96.0f,
-                            storm.velocity,
-                            storm.intensity,
-                        });
-                    }
+                    m_weatherSystem->Update(
+                        current_tick, m_metadata.spawnPoint, m_windFieldSystem.get());
                 }
-                m_windFieldSystem->Update(current_tick, m_metadata.spawnPoint);
             }
 
-            budget.Next(Stage::Weather, [&] {
-                return m_weatherSystem ? static_cast<std::uint64_t>(Systems::kWeatherExtentCells) *
-                                             Systems::kWeatherExtentCells
-                                       : 0ull;
-            });
-            // 4.  : weather core update. Runs AFTER wind so storm cells
-            // advect by the freshly-updated wind grid. Deterministic (DeterministicMath
-            // + FastNoise batch path; no wall-clock/RNG, no std::random). The weather
-            // state (category map + storm cells + precip field) feeds the world_hash
-            // `weather` sub-hash; the update runs every tick so run==replay and resim
-            // agree on the state at every checkpoint.
-            if (m_weatherSystem) {
-                m_weatherSystem->Update(
-                    current_tick, m_metadata.spawnPoint, m_windFieldSystem.get());
-            }
-        }
-
-        budget.Next(Stage::Aether, [&] {
-            return m_aetherFieldSystem ? static_cast<std::uint64_t>(Systems::kAetherExtentCells) *
-                                             Systems::kAetherExtentCells
-                                       : 0ull;
-        });
-        // 5.: Aether scalar field update. Runs AFTER weather so it
-        // advects its emission source by the freshly-updated wind grid, keeping
-        // same-tick weather coupling current. Deterministic
-        // (pure function of seed+14, tick, origin[, wind]; DeterministicMath +
-        // FastNoise batch path; no wall-clock/RNG). The cell values feed the
-        // world_hash `aether` sub-hash; the update runs every tick so run==replay
-        // and resim agree on the field at every checkpoint.
-        if (m_aetherFieldSystem) {
-            m_aetherFieldSystem->Update(current_tick,
-                                        m_activeRegionsEnabled ? m_ambientFieldAnchor
-                                                               : m_metadata.spawnPoint,
-                                        m_windFieldSystem.get());
-        }
-
-        budget.Next(Stage::Energy,
-                    [&] { return m_energyFieldState ? m_energyFieldState->page_count() : 0ull; });
-        // 5a.: the STATEFUL energy layer ticks directly
-        // after the re-derivable field, anchored on the SAME replicated anchor
-        // quantized by the shared 24 m cell size (never camera state). Null
-        // unless sim.aether_state opted in — the canonical world skips this
-        // block entirely (byte-identical). Deposits are queued by emitters
-        // right below; Tick applies them sorted.
-        if (m_energyFieldState) {
-            const int anchor_cx =
-                static_cast<int>(std::floor(m_metadata.spawnPoint.x / Systems::kAetherCellSizeM));
-            const int anchor_cz =
-                static_cast<int>(std::floor(m_metadata.spawnPoint.z / Systems::kAetherCellSizeM));
-            m_energyFieldState->SetAnchorCell(anchor_cx, anchor_cz);
-            // gather this tick's FieldEmitterComponent deposits
-            // (id-sorted, two-phase) into the layer before it ticks.
-            // Participant-gated: no emitter component, no deposits, no bytes.
-            Systems::GatherFieldEmitterDeposits(m_registry, *m_energyFieldState);
-            m_energyFieldState->Tick(current_tick);
-        }
-
-        // 5b.: the soil-nutrient + irrigation-moisture FIELDS update BEFORE plant
-        // growth (slot 6) so growth reads FRESH availability, not last tick's (the prior order had
-        // growth at slot 6 reading grids that only updated at slot 7 -> a 1-tick-stale env). Opt-in
-        // via WaterSource/SoilFeeder; a world with none updates no grid, so the canonical roster is
-        // byte-identical. The shared foliage field anchor (origin + cell size) is hoisted here so
-        // both the growth env-sampler (slot 6) and the  living-world systems (slot 7) share it.
-        constexpr int kFoliageFieldCells = 256;   // grid extent (cells)
-        constexpr float kFoliageFieldCell = 1.0f; // metres / cell
-        const float foliageOriginX =
-            m_metadata.spawnPoint.x - kFoliageFieldCells * kFoliageFieldCell * 0.5f;
-        const float foliageOriginZ =
-            m_metadata.spawnPoint.z - kFoliageFieldCells * kFoliageFieldCell * 0.5f;
-        {
-            namespace Comp = Luminumbra::Components;
-            namespace fol = luminumbra::foliage;
-            budget.Next(Stage::Irrigation, [&] {
-                return SimParticipantCount<TelemetryComp::WaterSourceComponent>(m_registry) != 0
-                           ? static_cast<std::uint64_t>(kFoliageFieldCells) * kFoliageFieldCells
+            budget.Next(Stage::Aether, [&] {
+                return m_aetherFieldSystem
+                           ? static_cast<std::uint64_t>(Systems::kAetherExtentCells) *
+                                 Systems::kAetherExtentCells
                            : 0ull;
             });
-            if (!m_registry.view<Comp::WaterSourceComponent>().empty()) {
-                if (!m_irrigationGrid)
-                    m_irrigationGrid = std::make_unique<fol::IrrigationGrid>(kFoliageFieldCells,
-                                                                             kFoliageFieldCells);
-                fol::RunIrrigationOnTick(m_registry,
-                                         *m_irrigationGrid,
-                                         foliageOriginX,
-                                         foliageOriginZ,
-                                         kFoliageFieldCell);
+            // 5.: Aether scalar field update. Runs AFTER weather so it
+            // advects its emission source by the freshly-updated wind grid, keeping
+            // same-tick weather coupling current. Deterministic
+            // (pure function of seed+14, tick, origin[, wind]; DeterministicMath +
+            // FastNoise batch path; no wall-clock/RNG). The cell values feed the
+            // world_hash `aether` sub-hash; the update runs every tick so run==replay
+            // and resim agree on the field at every checkpoint.
+            if (m_aetherFieldSystem) {
+                m_aetherFieldSystem->Update(current_tick,
+                                            m_activeRegionsEnabled ? m_ambientFieldAnchor
+                                                                   : m_metadata.spawnPoint,
+                                            m_windFieldSystem.get());
             }
-            budget.Next(Stage::Soil, [&] {
-                return SimParticipantCount<TelemetryComp::SoilFeederComponent>(m_registry) != 0
-                           ? static_cast<std::uint64_t>(kFoliageFieldCells) * kFoliageFieldCells
-                           : 0ull;
-            });
-            if (!m_registry.view<Comp::SoilFeederComponent>().empty()) {
-                if (!m_soilGrid)
-                    m_soilGrid =
-                        std::make_unique<fol::SoilGrid>(kFoliageFieldCells, kFoliageFieldCells);
-                fol::RunSoilNutrientOnTick(
-                    m_registry, *m_soilGrid, foliageOriginX, foliageOriginZ, kFoliageFieldCell);
-            }
-        }
 
-        budget.Next(Stage::Plants, [&] {
-            return SimParticipantCount<TelemetryComp::PlantTag,
-                                       TelemetryComp::PlantGrowthComponent,
-                                       TelemetryComp::PlantGenomeComponent,
-                                       TelemetryComp::TransformComponent>(m_registry);
-        });
-        // 6. : deterministic plant GROWTH. Game-data opt-in (PlantTag):
-        // no plants -> the system never runs and world_hash stays byte-identical
-        // (same discipline as scent). The environment is ATMOSPHERIC — moisture is
-        // driven by the freshly-updated weather precip field (rain -> growth), so
-        // growth runs AFTER weather. Integer/fixed-point + id-ordered = run==replay.
-        // Temperature, light, soil, weather, and irrigation are sampled below.
-        if (HasPlantParticipants()) {
-            luminumbra::foliage::EnvSampler plant_env =
-                [this, foliageOriginX, foliageOriginZ, current_tick](
-                    const Luminumbra::Components::TransformComponent& tf) {
+            budget.Next(Stage::Energy, [&] {
+                return m_energyFieldState ? m_energyFieldState->page_count() : 0ull;
+            });
+            // 5a.: the STATEFUL energy layer ticks directly
+            // after the re-derivable field, anchored on the SAME replicated anchor
+            // quantized by the shared 24 m cell size (never camera state). Null
+            // unless sim.aether_state opted in — the canonical world skips this
+            // block entirely (byte-identical). Deposits are queued by emitters
+            // right below; Tick applies them sorted.
+            if (m_energyFieldState) {
+                const int anchor_cx = static_cast<int>(
+                    std::floor(m_metadata.spawnPoint.x / Systems::kAetherCellSizeM));
+                const int anchor_cz = static_cast<int>(
+                    std::floor(m_metadata.spawnPoint.z / Systems::kAetherCellSizeM));
+                m_energyFieldState->SetAnchorCell(anchor_cx, anchor_cz);
+                // gather this tick's FieldEmitterComponent deposits
+                // (id-sorted, two-phase) into the layer before it ticks.
+                // Participant-gated: no emitter component, no deposits, no bytes.
+                Systems::GatherFieldEmitterDeposits(m_registry, *m_energyFieldState);
+                m_energyFieldState->Tick(current_tick);
+            }
+
+            // 5b.: the soil-nutrient + irrigation-moisture FIELDS update BEFORE plant
+            // growth (slot 6) so growth reads FRESH availability, not last tick's (the prior order
+            // had growth at slot 6 reading grids that only updated at slot 7 -> a 1-tick-stale
+            // env). Opt-in via WaterSource/SoilFeeder; a world with none updates no grid, so the
+            // canonical roster is byte-identical. The shared foliage field anchor (origin + cell
+            // size) is hoisted here so both the growth env-sampler (slot 6) and the  living-world
+            // systems (slot 7) share it.
+            constexpr int kFoliageFieldCells = 256;   // grid extent (cells)
+            constexpr float kFoliageFieldCell = 1.0f; // metres / cell
+            const float foliageOriginX =
+                m_metadata.spawnPoint.x - kFoliageFieldCells * kFoliageFieldCell * 0.5f;
+            const float foliageOriginZ =
+                m_metadata.spawnPoint.z - kFoliageFieldCells * kFoliageFieldCell * 0.5f;
+            {
+                namespace Comp = Luminumbra::Components;
+                namespace fol = luminumbra::foliage;
+                budget.Next(Stage::Irrigation, [&] {
+                    return SimParticipantCount<TelemetryComp::WaterSourceComponent>(m_registry) != 0
+                               ? static_cast<std::uint64_t>(kFoliageFieldCells) * kFoliageFieldCells
+                               : 0ull;
+                });
+                if (!m_registry.view<Comp::WaterSourceComponent>().empty()) {
+                    if (!m_irrigationGrid)
+                        m_irrigationGrid = std::make_unique<fol::IrrigationGrid>(
+                            kFoliageFieldCells, kFoliageFieldCells);
+                    fol::RunIrrigationOnTick(m_registry,
+                                             *m_irrigationGrid,
+                                             foliageOriginX,
+                                             foliageOriginZ,
+                                             kFoliageFieldCell);
+                }
+                budget.Next(Stage::Soil, [&] {
+                    return SimParticipantCount<TelemetryComp::SoilFeederComponent>(m_registry) != 0
+                               ? static_cast<std::uint64_t>(kFoliageFieldCells) * kFoliageFieldCells
+                               : 0ull;
+                });
+                if (!m_registry.view<Comp::SoilFeederComponent>().empty()) {
+                    if (!m_soilGrid)
+                        m_soilGrid =
+                            std::make_unique<fol::SoilGrid>(kFoliageFieldCells, kFoliageFieldCells);
+                    fol::RunSoilNutrientOnTick(
+                        m_registry, *m_soilGrid, foliageOriginX, foliageOriginZ, kFoliageFieldCell);
+                }
+            }
+
+            budget.Next(Stage::Plants, [&] {
+                return SimParticipantCount<TelemetryComp::PlantTag,
+                                           TelemetryComp::PlantGrowthComponent,
+                                           TelemetryComp::PlantGenomeComponent,
+                                           TelemetryComp::TransformComponent>(m_registry);
+            });
+            // 6. : deterministic plant GROWTH. Game-data opt-in (PlantTag):
+            // no plants -> the system never runs and world_hash stays byte-identical
+            // (same discipline as scent). The environment is ATMOSPHERIC — moisture is
+            // driven by the freshly-updated weather precip field (rain -> growth), so
+            // growth runs AFTER weather. Integer/fixed-point + id-ordered = run==replay.
+            // Temperature, light, soil, weather, and irrigation are sampled below.
+            if (HasPlantParticipants()) {
+                luminumbra::foliage::EnvSampler plant_env = [this,
+                                                             foliageOriginX,
+                                                             foliageOriginZ,
+                                                             current_tick](
+                                                                const Luminumbra::Components::
+                                                                    TransformComponent& tf) {
                     luminumbra::foliage::PlantEnvSample s;
                     const Luminumbra::Vec3 p = tf.position;
                     // Moisture: weather precipitation (rain -> growth) + irrigation (player
@@ -844,152 +872,175 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
                         s.temperature + (warmth - 0.5f) * kSeasonAmplitude);
                     return s;
                 };
-            luminumbra::foliage::RunPlantGrowthSystemOnTick(m_registry, current_tick, plant_env);
-        }
+                luminumbra::foliage::RunPlantGrowthSystemOnTick(
+                    m_registry, current_tick, plant_env);
+            }
 
-        // 7. LIVING-WORLD SYSTEMS: pollination / disease / fire / wildlife-grazing / lifespan
-        // / … Each is per-entity OPT-IN via its own participant component, so a world carrying none
-        // runs ZERO of them and world_hash stays byte-identical (canonical NetworkStateHash
-        // baseline holds) — same discipline as plants/creatures/scent. Deterministic (id-ordered,
-        // libm-free, seeded-from-ints). Fixed run order for run==replay. NOTE: the soil-nutrient +
-        // irrigation FIELDS now update at slot 5b (BEFORE plant growth) so growth reads fresh
-        // availability; only the consumers remain here. Wind coupling (fire/pollination) drifts
-        // downwind.
-        {
-            namespace Comp = Luminumbra::Components;
-            namespace fol = luminumbra::foliage;
-            // Wind coupling: fire spreads + pollen drifts DOWNWIND, sampled from the
-            // (already deterministic, already-hashed) wind field at the anchor.
-            const ::Luminumbra::Vec2 windXZ =
-                m_windFieldSystem ? m_windFieldSystem->SampleWind(m_metadata.spawnPoint)
-                                  : ::Luminumbra::Vec2(0.0f);
+            // 7. LIVING-WORLD SYSTEMS: pollination / disease / fire / wildlife-grazing / lifespan
+            // / … Each is per-entity OPT-IN via its own participant component, so a world carrying
+            // none runs ZERO of them and world_hash stays byte-identical (canonical
+            // NetworkStateHash baseline holds) — same discipline as plants/creatures/scent.
+            // Deterministic (id-ordered, libm-free, seeded-from-ints). Fixed run order for
+            // run==replay. NOTE: the soil-nutrient + irrigation FIELDS now update at slot 5b
+            // (BEFORE plant growth) so growth reads fresh availability; only the consumers remain
+            // here. Wind coupling (fire/pollination) drifts downwind.
+            {
+                namespace Comp = Luminumbra::Components;
+                namespace fol = luminumbra::foliage;
+                // Wind coupling: fire spreads + pollen drifts DOWNWIND, sampled from the
+                // (already deterministic, already-hashed) wind field at the anchor.
+                const ::Luminumbra::Vec2 windXZ =
+                    m_windFieldSystem ? m_windFieldSystem->SampleWind(m_metadata.spawnPoint)
+                                      : ::Luminumbra::Vec2(0.0f);
 
-            budget.Next(Stage::Pollination, [&] {
-                return SimParticipantCount<TelemetryComp::PollinationTag,
-                                           TelemetryComp::PlantGenomeComponent,
-                                           TelemetryComp::PlantGrowthComponent,
-                                           TelemetryComp::TransformComponent,
-                                           TelemetryComp::PollinationComponent>(m_registry);
-            });
-            if (!m_registry.view<Comp::PlantGenomeComponent>().empty())
-                fol::RunPollinationOnTick(m_registry, current_tick, windXZ, 0, m_plantMutationRate);
-            budget.Next(Stage::Disease, [&] {
-                return SimParticipantCount<TelemetryComp::PlantTag,
-                                           TelemetryComp::PlantHealthComponent,
-                                           TelemetryComp::TransformComponent>(m_registry);
-            });
-            if (!m_registry.view<Comp::PlantHealthComponent>().empty())
-                fol::RunPlantDiseaseOnTick(m_registry, current_tick);
-            //  germination: ripe plants senesce -> annual dies + reseeds, perennial
-            // resets + reseeds (child genome = the pollination cross, computed just above, or
-            // self). Runs AFTER pollination so next_genome is fresh. Opt-in via
-            // CropLifecycleComponent.
-            budget.Next(Stage::Crops, [&] {
-                return SimParticipantCount<TelemetryComp::CropLifecycleComponent,
-                                           TelemetryComp::PlantGrowthComponent,
-                                           TelemetryComp::PlantGenomeComponent,
-                                           TelemetryComp::TransformComponent>(m_registry);
-            });
-            if (!m_registry.view<Comp::CropLifecycleComponent>().empty())
-                fol::RunCropLifecycleOnTick(m_registry, current_tick);
-            budget.Next(Stage::Fire, [&] {
-                return SimParticipantCount<TelemetryComp::CombustibleComponent,
-                                           TelemetryComp::TransformComponent>(m_registry);
-            });
-            if (!m_registry.view<Comp::CombustibleComponent>().empty()) {
-                std::vector<luminumbra::sim::FireIgnitionSource> weather_ignitions;
-                if (m_weatherSystem) {
-                    for (const Systems::StrikeEvent& strike : m_weatherSystem->StrikesThisTick()) {
-                        weather_ignitions.push_back({
-                            glm::vec2(strike.world_x, strike.world_z),
-                            3.0f + strike.magnitude * 5.0f,
-                            std::max(0.25f, strike.magnitude),
-                        });
+                budget.Next(Stage::Pollination, [&] {
+                    return SimParticipantCount<TelemetryComp::PollinationTag,
+                                               TelemetryComp::PlantGenomeComponent,
+                                               TelemetryComp::PlantGrowthComponent,
+                                               TelemetryComp::TransformComponent,
+                                               TelemetryComp::PollinationComponent>(m_registry);
+                });
+                if (!m_registry.view<Comp::PlantGenomeComponent>().empty())
+                    fol::RunPollinationOnTick(
+                        m_registry, current_tick, windXZ, 0, m_plantMutationRate);
+                budget.Next(Stage::Disease, [&] {
+                    return SimParticipantCount<TelemetryComp::PlantTag,
+                                               TelemetryComp::PlantHealthComponent,
+                                               TelemetryComp::TransformComponent>(m_registry);
+                });
+                if (!m_registry.view<Comp::PlantHealthComponent>().empty())
+                    fol::RunPlantDiseaseOnTick(m_registry, current_tick);
+                //  germination: ripe plants senesce -> annual dies + reseeds, perennial
+                // resets + reseeds (child genome = the pollination cross, computed just above, or
+                // self). Runs AFTER pollination so next_genome is fresh. Opt-in via
+                // CropLifecycleComponent.
+                budget.Next(Stage::Crops, [&] {
+                    return SimParticipantCount<TelemetryComp::CropLifecycleComponent,
+                                               TelemetryComp::PlantGrowthComponent,
+                                               TelemetryComp::PlantGenomeComponent,
+                                               TelemetryComp::TransformComponent>(m_registry);
+                });
+                if (!m_registry.view<Comp::CropLifecycleComponent>().empty())
+                    fol::RunCropLifecycleOnTick(m_registry, current_tick);
+                budget.Next(Stage::Fire, [&] {
+                    return SimParticipantCount<TelemetryComp::CombustibleComponent,
+                                               TelemetryComp::TransformComponent>(m_registry);
+                });
+                if (!m_registry.view<Comp::CombustibleComponent>().empty()) {
+                    std::vector<luminumbra::sim::FireIgnitionSource> weather_ignitions;
+                    if (m_weatherSystem) {
+                        for (const Systems::StrikeEvent& strike :
+                             m_weatherSystem->StrikesThisTick()) {
+                            weather_ignitions.push_back({
+                                glm::vec2(strike.world_x, strike.world_z),
+                                3.0f + strike.magnitude * 5.0f,
+                                std::max(0.25f, strike.magnitude),
+                            });
+                        }
                     }
+                    luminumbra::sim::RunFireSpreadOnTick(
+                        m_registry, current_tick, windXZ, weather_ignitions);
                 }
-                luminumbra::sim::RunFireSpreadOnTick(
-                    m_registry, current_tick, windXZ, weather_ignitions);
+                budget.Next(Stage::Grazing, [&] {
+                    return SimParticipantCount<TelemetryComp::GrazeableComponent,
+                                               TelemetryComp::TransformComponent>(m_registry);
+                });
+                if (!m_registry.view<Comp::GrazeableComponent>().empty())
+                    luminumbra::ai::RunWildlifeFoliageOnTick(
+                        m_registry, current_tick, m_wildlifeFoliageTuning);
+                budget.Next(Stage::Lifespan, [&] {
+                    return SimParticipantCount<TelemetryComp::MortalComponent>(m_registry);
+                });
+                if (!m_registry.view<Comp::MortalComponent>().empty())
+                    luminumbra::ai::RunLifespanOnTick(m_registry, current_tick);
+                // Herd alarm: propagate collective vigilance among same-role creatures. The brain
+                // (slot 2e) sets AlarmComponent.alarmed when a prey senses a threat and reads the
+                // propagated level to flee with the herd; this maintains the field.
+                budget.Next(Stage::Alarm, [&] {
+                    return SimParticipantCount<TelemetryComp::AlarmComponent,
+                                               TelemetryComp::CreatureComponent,
+                                               TelemetryComp::TransformComponent>(m_registry);
+                });
+                if (!m_registry.view<Comp::AlarmComponent>().empty())
+                    luminumbra::ai::RunHerdAlarmOnTick(
+                        m_registry, static_cast<float>(m_simulationClock.fixed_dt()));
+                // Decomposition: dead creatures decay + release nutrient (consumed by the soil
+                // loop).
+                budget.Next(Stage::Decay, [&] {
+                    return SimParticipantCount<TelemetryComp::DecayComponent>(m_registry);
+                });
+                if (!m_registry.view<Comp::DecayComponent>().empty())
+                    luminumbra::ai::RunDecompositionOnTick(m_registry, current_tick);
+                // Circadian: diurnal/nocturnal activity from a tick-derived day fraction.
+                budget.Next(Stage::Circadian, [&] {
+                    return SimParticipantCount<TelemetryComp::CircadianComponent>(m_registry);
+                });
+                if (!m_registry.view<Comp::CircadianComponent>().empty()) {
+                    constexpr std::uint64_t kTicksPerDay =
+                        30ull * 60ull * 20ull; // 20-min day @30Hz
+                    const float tod01 =
+                        m_activeRegionsEnabled
+                            ? static_cast<float>(m_worldClock.day_phase(current_tick))
+                            : static_cast<float>(current_tick % kTicksPerDay) /
+                                  static_cast<float>(kTicksPerDay);
+                    luminumbra::ai::RunCircadianOnTick(m_registry, tod01, m_circadianAmplitude);
+                }
+                // Territory: claim home + emit a homing bias (movement blends it like
+                // mate-seeking).
+                budget.Next(Stage::Territory, [&] {
+                    return SimParticipantCount<TelemetryComp::TerritoryComponent,
+                                               TelemetryComp::TransformComponent>(m_registry);
+                });
+                if (!m_registry.view<Comp::TerritoryComponent>().empty())
+                    luminumbra::ai::RunTerritoryOnTick(m_registry, current_tick);
+                // Predator pack: flanking coordination (a pack surrounds the prey).
+                budget.Next(Stage::Packs, [&] {
+                    return SimParticipantCount<TelemetryComp::PackHunterComponent,
+                                               TelemetryComp::CreatureComponent,
+                                               TelemetryComp::TransformComponent>(m_registry);
+                });
+                if (!m_registry.view<Comp::PackHunterComponent>().empty())
+                    luminumbra::ai::RunPredatorPackOnTick(m_registry, current_tick);
+                // Migration: seasonal drive toward a moving target (tick-derived year fraction).
+                budget.Next(Stage::Migration, [&] {
+                    return SimParticipantCount<TelemetryComp::MigratoryComponent,
+                                               TelemetryComp::TransformComponent>(m_registry);
+                });
+                if (!m_registry.view<Comp::MigratoryComponent>().empty()) {
+                    constexpr std::uint64_t kTicksPerYear = 30ull * 60ull * 60ull; // ~1h year @30Hz
+                    const float season01 =
+                        m_activeRegionsEnabled
+                            ? static_cast<float>(m_worldClock.spring_phase(current_tick))
+                            : static_cast<float>(current_tick % kTicksPerYear) /
+                                  static_cast<float>(kTicksPerYear);
+                    luminumbra::ai::RunMigrationOnTick(m_registry, season01);
+                }
             }
-            budget.Next(Stage::Grazing, [&] {
-                return SimParticipantCount<TelemetryComp::GrazeableComponent,
-                                           TelemetryComp::TransformComponent>(m_registry);
-            });
-            if (!m_registry.view<Comp::GrazeableComponent>().empty())
-                luminumbra::ai::RunWildlifeFoliageOnTick(
-                    m_registry, current_tick, m_wildlifeFoliageTuning);
-            budget.Next(Stage::Lifespan, [&] {
-                return SimParticipantCount<TelemetryComp::MortalComponent>(m_registry);
-            });
-            if (!m_registry.view<Comp::MortalComponent>().empty())
-                luminumbra::ai::RunLifespanOnTick(m_registry, current_tick);
-            // Herd alarm: propagate collective vigilance among same-role creatures. The brain
-            // (slot 2e) sets AlarmComponent.alarmed when a prey senses a threat and reads the
-            // propagated level to flee with the herd; this maintains the field.
-            budget.Next(Stage::Alarm, [&] {
-                return SimParticipantCount<TelemetryComp::AlarmComponent,
-                                           TelemetryComp::CreatureComponent,
-                                           TelemetryComp::TransformComponent>(m_registry);
-            });
-            if (!m_registry.view<Comp::AlarmComponent>().empty())
-                luminumbra::ai::RunHerdAlarmOnTick(
-                    m_registry, static_cast<float>(m_simulationClock.fixed_dt()));
-            // Decomposition: dead creatures decay + release nutrient (consumed by the soil loop).
-            budget.Next(Stage::Decay, [&] {
-                return SimParticipantCount<TelemetryComp::DecayComponent>(m_registry);
-            });
-            if (!m_registry.view<Comp::DecayComponent>().empty())
-                luminumbra::ai::RunDecompositionOnTick(m_registry, current_tick);
-            // Circadian: diurnal/nocturnal activity from a tick-derived day fraction.
-            budget.Next(Stage::Circadian, [&] {
-                return SimParticipantCount<TelemetryComp::CircadianComponent>(m_registry);
-            });
-            if (!m_registry.view<Comp::CircadianComponent>().empty()) {
-                constexpr std::uint64_t kTicksPerDay = 30ull * 60ull * 20ull; // 20-min day @30Hz
-                const float tod01 = m_activeRegionsEnabled
-                                        ? static_cast<float>(m_worldClock.day_phase(current_tick))
-                                        : static_cast<float>(current_tick % kTicksPerDay) /
-                                              static_cast<float>(kTicksPerDay);
-                luminumbra::ai::RunCircadianOnTick(m_registry, tod01, m_circadianAmplitude);
-            }
-            // Territory: claim home + emit a homing bias (movement blends it like mate-seeking).
-            budget.Next(Stage::Territory, [&] {
-                return SimParticipantCount<TelemetryComp::TerritoryComponent,
-                                           TelemetryComp::TransformComponent>(m_registry);
-            });
-            if (!m_registry.view<Comp::TerritoryComponent>().empty())
-                luminumbra::ai::RunTerritoryOnTick(m_registry, current_tick);
-            // Predator pack: flanking coordination (a pack surrounds the prey).
-            budget.Next(Stage::Packs, [&] {
-                return SimParticipantCount<TelemetryComp::PackHunterComponent,
-                                           TelemetryComp::CreatureComponent,
-                                           TelemetryComp::TransformComponent>(m_registry);
-            });
-            if (!m_registry.view<Comp::PackHunterComponent>().empty())
-                luminumbra::ai::RunPredatorPackOnTick(m_registry, current_tick);
-            // Migration: seasonal drive toward a moving target (tick-derived year fraction).
-            budget.Next(Stage::Migration, [&] {
-                return SimParticipantCount<TelemetryComp::MigratoryComponent,
-                                           TelemetryComp::TransformComponent>(m_registry);
-            });
-            if (!m_registry.view<Comp::MigratoryComponent>().empty()) {
-                constexpr std::uint64_t kTicksPerYear = 30ull * 60ull * 60ull; // ~1h year @30Hz
-                const float season01 =
-                    m_activeRegionsEnabled
-                        ? static_cast<float>(m_worldClock.spring_phase(current_tick))
-                        : static_cast<float>(current_tick % kTicksPerYear) /
-                              static_cast<float>(kTicksPerYear);
-                luminumbra::ai::RunMigrationOnTick(m_registry, season01);
-            }
-        }
 
-        budget.Next(Stage::Events, [&] { return m_simulationEventBus.pending_count(); });
-        m_simulationEventBus.drain(current_tick);
-        // The v2 events stage measures only the ordered drain. Region scheduling
-        // has no telemetry stage or consumer work counter in this foundation.
-        budget.Finish();
-        RunRegionScheduler(current_tick);
-        if (m_regionFault)
-            return i + 1; // the faulting tick's systems ran; the clock was rewound to it
+            budget.Next(Stage::Events, [&] { return m_simulationEventBus.pending_count(); });
+            if (m_activeRegionsEnabled)
+                m_simulationEventBus.drain(current_tick, [this] { return !m_regionFault; });
+            else
+                m_simulationEventBus.drain(current_tick);
+            // Consumer counters are published only after the ordered drain succeeds.
+            budget.Finish();
+            if (m_regionFault)
+                return i + 1;
+            if (m_activeRegionsEnabled) {
+                m_activeRegionLedger.publish_completed_work(m_regionCompletedWork);
+                m_regionCompletedWork.clear();
+            }
+        } catch (const std::exception& error) {
+            if (!m_activeRegionsEnabled)
+                throw;
+            LatchRegionFault(current_tick, error.what());
+            return i + 1;
+        } catch (...) {
+            if (!m_activeRegionsEnabled)
+                throw;
+            LatchRegionFault(current_tick, "Unknown simulation consumer fault");
+            return i + 1;
+        }
     }
     return ticks_executed;
 }
@@ -1378,16 +1429,10 @@ void GameSession::RunRegionScheduler(std::uint64_t current_tick) {
         // Built lazily on the first probe call of this tick.
         std::optional<std::set<RegionKey>> resident_regions;
         try {
-            // Ground-object work is derived from persisted state each tick, never from a queue.
-            std::vector<RegionWork> scheduled_work;
-            if (!m_groundObjects.empty())
-                scheduled_work = AppendGroundObjectWork(m_regionWork);
-            const std::vector<RegionWork>& work =
-                m_groundObjects.empty() ? m_regionWork : scheduled_work;
             m_regionSchedule = m_activeRegionLedger.schedule(
                 m_worldClock,
                 anchors,
-                work,
+                m_regionWork,
                 [this](RegionKey key) {
                     const auto directory = m_regionDurableDirectory.empty()
                                                ? GetWorldSaveDir()
@@ -1427,26 +1472,10 @@ void GameSession::RunRegionScheduler(std::uint64_t current_tick) {
                     return resident_regions->contains(key);
                 });
             m_regionWork.clear();
-            if (!m_groundObjects.empty()) {
-                const std::uint64_t tick = m_worldClock.tick();
-                AdvanceGroundObjects(tick);
-            }
         } catch (const std::exception& error) {
             LatchRegionFault(current_tick, error.what());
         }
     }
-}
-
-std::vector<RegionWork> GameSession::AppendGroundObjectWork(std::vector<RegionWork> work) const {
-    const auto& records = m_activeRegionLedger.records();
-    for (const RegionKey key : m_groundObjects.regions()) {
-        const auto record = records.find(key);
-        if (record == records.end() || record->second.state == RegionState::Frozen)
-            continue;
-        const auto count = static_cast<std::uint64_t>(m_groundObjects.in_region(key).size());
-        work.push_back(RegionWork{key, 0, count, 0, 0});
-    }
-    return work;
 }
 
 void GameSession::SetRegionSchedulerConfig(RegionSchedulerConfig config) {
@@ -1462,6 +1491,8 @@ void GameSession::LatchRegionFault(std::uint64_t tick, std::string message) {
     m_regionFault = RegionSchedulerFault{tick, message};
     m_simulationClock.reset(tick);
     m_activeRegionLedger.acknowledge_world_clock(m_worldClock);
+    m_activeRegionLedger.clear_completed_work();
+    m_regionCompletedWork.clear();
     m_regionWork.clear();
     LUMINUMBRA_CORE_ERROR("Region scheduler fault at tick {}: {}", tick, message);
 }
@@ -1500,8 +1531,12 @@ void GameSession::PinActiveRegion(RegionKey key, bool pinned) {
     }
 }
 void GameSession::RecordActiveRegionWork(RegionWork work) {
-    if (m_activeRegionsEnabled && !m_regionFault)
-        m_regionWork.push_back(work);
+    if (m_activeRegionsEnabled && !m_regionFault) {
+        if (m_simulationBatchInProgress)
+            m_regionCompletedWork.push_back(work);
+        else
+            m_regionWork.push_back(work);
+    }
 }
 
 namespace {
@@ -1655,7 +1690,9 @@ void GameSession::AdvanceGroundObjects(std::uint64_t tick) {
     for (const RegionKey key : due) {
         if (!m_groundObjects.owns_region(key))
             continue;
+        const auto processed = static_cast<std::uint64_t>(m_groundObjects.in_region(key).size());
         const GroundObjectStore::AgeResult result = m_groundObjects.age_region(key, settle);
+        m_regionCompletedWork.push_back(RegionWork{key, 0, processed, 0, 0});
         for (const GroundObject& object : result.despawned)
             m_simulationEventBus.publish(tick, "ground.despawned", GroundEventPayload(object));
     }
@@ -2362,6 +2399,7 @@ bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
         m_worldSystem->remember_durable_chunks(durable_inventory);
         m_regionSchedule = {};
         m_regionWork.clear();
+        m_regionCompletedWork.clear();
         m_regionFault.reset();
         m_replicatedSimulationAnchors.reset();
         RestoreWorldClock(saved_clock);

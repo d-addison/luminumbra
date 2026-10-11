@@ -511,17 +511,14 @@ private:
     ActiveRegionLedger m_activeRegionLedger;
     RegionSchedule m_regionSchedule;
     std::optional<std::vector<Vec3>> m_replicatedSimulationAnchors;
-    std::vector<RegionWork> m_regionWork;
+    std::vector<RegionWork> m_regionWork;          // External inputs for the next schedule call.
+    std::vector<RegionWork> m_regionCompletedWork; // Transient successful consumer work this tick.
     std::optional<RegionSchedulerFault> m_regionFault;
     RegionInputRejections m_regionInputRejections;
     // Authoritative in-memory ground objects (S5). Empty unless spawned with the flag on.
     GroundObjectStore m_groundObjects;
     void LatchRegionFault(std::uint64_t tick, std::string message);
     void RunRegionScheduler(std::uint64_t current_tick);
-    // Returns `work` plus one entry per ground-object region that has a ledger record and is not
-    // frozen. Derived from persisted state only.
-    [[nodiscard]] std::vector<RegionWork>
-    AppendGroundObjectWork(std::vector<RegionWork> work) const;
     // Ages the due, owned regions' ground objects by one tick and publishes despawns.
     void AdvanceGroundObjects(std::uint64_t tick);
     // Ledger edit mark for a ground object's region. False when refused (fault or counted reject).

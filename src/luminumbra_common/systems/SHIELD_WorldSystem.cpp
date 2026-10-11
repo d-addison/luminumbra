@@ -3969,6 +3969,8 @@ float SHIELD_WorldSystem::GetTerrainHeightAt(float world_x, float world_z) const
 }
 
 std::optional<float> SHIELD_WorldSystem::ProbeTerrainBelow(const Vec3& requested) const {
+    if (m_durable_read_failed)
+        return std::nullopt;
     if (!std::isfinite(requested.x) || !std::isfinite(requested.y) || !std::isfinite(requested.z) ||
         std::abs(requested.x) >= 16777216.0f || std::abs(requested.z) >= 16777216.0f ||
         std::abs(requested.y) >= 1048576.0f)

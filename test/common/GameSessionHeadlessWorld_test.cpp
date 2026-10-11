@@ -14,6 +14,7 @@
 #include <limits>
 #include <map>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -2451,8 +2452,7 @@ TEST(GameSessionHeadlessWorldTest, DespawnAfterRemovesObjectAndPublishesGroundDe
     EXPECT_EQ(session.GetGroundObjects().objects().at(id).active_age, 2u);
     TickOnce(session);
     EXPECT_TRUE(session.GetGroundObjects().objects().empty());
-    // The despawn is published after the scheduler and delivered by the following drain.
-    TickOnce(session);
+    // The due update publishes the despawn before this tick's ordered drain.
     EXPECT_EQ(CountTopic(seen, "ground.despawned"), 1u);
     EXPECT_EQ(FirstPayload(seen, "ground.despawned"), "1,7,5200,0,-1500");
 }
@@ -2825,4 +2825,50 @@ TEST(GameSessionHeadlessWorldTest, FarOverlayFilesDoNotChangeTheWorldHash) {
     fs::remove_all(save / "far");
     ASSERT_TRUE(reloaded.LoadWorld(original.GetMetadata().worldId)) << reloaded.GetWorldOpenError();
     EXPECT_EQ(SessionWorldHash(reloaded), before);
+}
+
+TEST(GameSessionHeadlessWorldTest, DespawnedGroundWorkSurvivesBoundarySaveAndReopen) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession owner, loaded;
+    CreateGroundWorld(owner, root, jobs, "Completed despawn work");
+    EnableSnapshotSession(loaded, root, jobs);
+    ASSERT_EQ(SpawnGround(owner, 5200, -1500, 1), 1u);
+    TickOnce(owner);
+    EXPECT_TRUE(owner.GetGroundObjects().empty());
+    EXPECT_EQ(owner.GetActiveRegionLedger().completed_work().at(kGroundRegion), 1u);
+    EXPECT_TRUE(owner.IsSimulationTickBoundary());
+    ASSERT_TRUE(owner.SaveWorldState());
+    ASSERT_TRUE(owner.SaveWorld());
+    ASSERT_TRUE(loaded.LoadWorld(owner.GetMetadata().worldId));
+    EXPECT_EQ(SessionWorldHash(loaded), SessionWorldHash(owner));
+    TickOnce(owner);
+    TickOnce(loaded);
+    EXPECT_EQ(owner.GetRegionSchedule().work, 1u);
+    EXPECT_EQ(loaded.GetRegionSchedule(), owner.GetRegionSchedule());
+    EXPECT_TRUE(owner.GetActiveRegionLedger().completed_work().empty());
+    EXPECT_EQ(SessionWorldHash(loaded), SessionWorldHash(owner));
+    TickOnce(owner);
+    EXPECT_EQ(owner.GetRegionSchedule().work, 0u);
+}
+
+TEST(GameSessionHeadlessWorldTest, EventConsumerFaultStopsDeliveryAndClearsCompletedWork) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession owner;
+    CreateGroundWorld(owner, root, jobs, "Consumer event fault");
+    ASSERT_EQ(SpawnGround(owner, 5200, -1500, 1), 1u);
+    int later_calls = 0;
+    owner.GetSimulationEventBus().subscribe(
+        [](const auto&) { throw std::runtime_error("injected consumer callback fault"); });
+    owner.GetSimulationEventBus().subscribe([&](const auto&) { ++later_calls; });
+    TickOnce(owner);
+    EXPECT_EQ(later_calls, 0);
+    EXPECT_TRUE(owner.GetRegionSchedulerFault().has_value());
+    EXPECT_EQ(owner.GetActiveRegionLedger().tick(), 1u);
+    EXPECT_TRUE(owner.GetActiveRegionLedger().completed_work().empty());
+    EXPECT_TRUE(owner.IsSimulationTickBoundary());
+    EXPECT_EQ(owner.TickSimulation(owner.GetSimulationClock().fixed_dt()), 0u);
 }

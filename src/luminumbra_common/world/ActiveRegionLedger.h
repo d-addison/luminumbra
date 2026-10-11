@@ -95,11 +95,11 @@ public:
     // Magic, version, reserved, canonical tick, validation ceiling, config,
     // anchor presence and anchor.
     static constexpr std::size_t kHeaderBytes = 56;
-    // Version 2 adds a u32 extension length, then up to two TLVs: type 1 (persistent id
-    // allocator, u64 value, 14 bytes) and type 2 (digest projection, length 1, value 2,
-    // 7 bytes), then the checksum.
+    // Version 2 adds a u32 extension length and ascending TLVs: type 1 allocator (14 bytes),
+    // type 2 digest projection (7 bytes), type 6 completed work (10 + 16 bytes per owned key).
+    // Types 3/4 are reserved for water/energy; all unsupported types refuse.
     static constexpr std::size_t kMaxFileBytes =
-        kHeaderBytes + kMaxRegions * kRecordBytes + 4 + 7 + 14 + 8;
+        kHeaderBytes + kMaxRegions * kRecordBytes + 4 + 7 + 14 + 6 + 4 + 16 * kMaxRegions + 8;
     static constexpr const char* kCorruptMessage = "Corrupt active-region ledger.";
     static constexpr const char* kProjectionMessage = "Unsupported frozen digest projection.";
     static constexpr const char* kFutureMessage =
@@ -154,6 +154,15 @@ public:
     void set_populated(RegionKey key, bool populated);
     void set_water_cursor(RegionKey key, std::uint64_t cursor);
     void mark_saved(const WorldClock& clock);
+    // Completed consumer work produced at tick(), consumed once by schedule(tick()+1).
+    // Every successful consumer tick replaces this register, including an empty tick.
+    void publish_completed_work(std::span<const RegionWork> work);
+    void clear_completed_work() noexcept {
+        m_completedWork.clear();
+    }
+    [[nodiscard]] const std::map<RegionKey, std::uint64_t>& completed_work() const {
+        return m_completedWork;
+    }
     // An accepted partial save may have an older ledger than its clock. Raise
     // only the validation ceiling on load; never run catch-up, alter any region
     // record, or move the canonical tick that the hash projection reads.
@@ -190,6 +199,7 @@ private:
     std::string payload(bool observational) const;
     // True when any record has been frozen (now or in the past), which requires version 2.
     bool any_frozen_history() const;
+    std::map<RegionKey, std::uint64_t> m_completedWork;
     RegionSchedulerConfig m_config;
     std::map<RegionKey, ActiveRegionRecord> m_records;
     std::optional<Vec3> m_localAnchor;
