@@ -18,6 +18,7 @@
 #include <vector>
 
 #include "luminumbra_common/core/JobSystem.h"
+#include "luminumbra_common/persistence/WorldSaveService.h"
 #include "luminumbra_common/systems/PhysicsSystem.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 #include "luminumbra_common/world/Chunk.h"
@@ -98,9 +99,10 @@ constexpr int kReturnIterations = 60;
 // shutting the job system down.
 class DurableFixture {
 public:
-    explicit DurableFixture(bool durable) {
+    explicit DurableFixture(bool durable, bool active_regions = false) {
         jobs.startup();
         session = std::make_unique<GameSession>();
+        session->SetActiveRegionsEnabled(active_regions);
         session->SetJobSystem(&jobs);
         session->SetRootPath(root.root_string());
         created = session->CreateWorld("DurableResidency", "12345", "default");
@@ -115,7 +117,9 @@ public:
             return;
         }
         world->debug_set_streaming_radius_cap(kStreamRadiusCap);
-        world->set_durable_residency(durable);
+        if (!active_regions) {
+            world->set_durable_residency(durable);
+        }
         physics = session->GetPhysicsSystem();
         spawn = session->GetMetadata().spawnPoint;
     }
@@ -208,6 +212,7 @@ TEST(WorldDurableResidency, EditedChunkParksAndReturnsIdentically) {
     const IVec3 coords = edited->get_coords();
     const std::uint64_t recorded_hash = HashVec(edited->sdf_data);
 
+    fx.world->note_persistence_tick(7);
     fx.Settle(fx.FarAnchor(), kSettleIterations);
     EXPECT_FALSE(fx.world->find_streamed_chunk(coords));
     EXPECT_EQ(fx.world->find_authoritative_chunk(coords), edited);
@@ -215,7 +220,7 @@ TEST(WorldDurableResidency, EditedChunkParksAndReturnsIdentically) {
     const auto status = fx.world->parking_status();
     EXPECT_GE(status.parked_count, 1u);
     EXPECT_GT(status.parked_bytes, 0u);
-    EXPECT_GE(status.oldest_parked_tick, 0);
+    EXPECT_EQ(status.oldest_parked_tick, 7);
 
     const auto parked_snapshot = fx.world->snapshot_parked_chunks();
     EXPECT_TRUE(Contains(parked_snapshot, edited.get()));
@@ -374,6 +379,9 @@ TEST(WorldDurableResidency, SyncWaterAuthorityPromotesWaterDirtyChunk) {
     generated->mark_sdf_generated_current_params();
     EXPECT_EQ(generated->sdf_provenance(), ChunkSdfProvenance::LoadedOrEdited);
     EXPECT_GE(generated->voxel_revision(), 1u);
+    // A backfill must not acknowledge the unsaved water obligation carried by the dirty bit.
+    generated->clear_voxel_data_dirty_after_generation();
+    EXPECT_TRUE(generated->is_voxel_data_dirty());
 }
 
 TEST(WorldDurableResidency, ChunkNormalizeForParkDropsRenderBuffers) {
@@ -405,6 +413,75 @@ TEST(WorldDurableResidency, ChunkWaterRevisionMonotonic) {
     chunk.clear_water_state_dirty();
     EXPECT_EQ(chunk.water_revision(), 2u);
     EXPECT_FALSE(chunk.is_water_state_dirty());
+}
+
+TEST(WorldDurableResidency, SessionSavesAndReloadsParkedEditedChunk) {
+    DurableFixture fx(/*durable=*/true, /*active_regions=*/true);
+    ASSERT_TRUE(fx.created) << fx.error;
+    ASSERT_TRUE(fx.world->durable_residency());
+    fx.Settle(fx.SpawnAnchor(), kSettleIterations);
+
+    const auto edited = fx.EditAtSpawnAndFindEdited();
+    ASSERT_TRUE(edited);
+    const IVec3 coords = edited->get_coords();
+    const std::uint64_t recorded_hash = HashVec(edited->sdf_data);
+
+    fx.Settle(fx.FarAnchor(), kSettleIterations);
+    ASSERT_FALSE(fx.world->find_streamed_chunk(coords));
+    ASSERT_EQ(fx.world->find_authoritative_chunk(coords), edited);
+
+    ASSERT_TRUE(fx.session->SaveWorldState());
+    EXPECT_FALSE(edited->is_voxel_data_dirty());
+
+    GameSession reloaded;
+    reloaded.SetJobSystem(&fx.jobs);
+    reloaded.SetRootPath(fx.root.root_string());
+    reloaded.SetActiveRegionsEnabled(true);
+    ASSERT_TRUE(reloaded.LoadWorld(fx.session->GetMetadata().worldId));
+    ASSERT_NE(reloaded.GetWorldSystem(), nullptr);
+    const auto loaded = reloaded.GetWorldSystem()->find_streamed_chunk(coords);
+    ASSERT_TRUE(loaded);
+    EXPECT_EQ(HashVec(loaded->sdf_data), recorded_hash);
+}
+
+TEST(WorldDurableResidency, FailedSessionSaveRearmsDirtyChunkForRetry) {
+    DurableFixture fx(/*durable=*/true, /*active_regions=*/true);
+    ASSERT_TRUE(fx.created) << fx.error;
+    fx.Settle(fx.SpawnAnchor(), kSettleIterations);
+
+    const auto edited = fx.EditAtSpawnAndFindEdited();
+    ASSERT_TRUE(edited);
+    ASSERT_TRUE(edited->is_voxel_data_dirty());
+
+    Luminumbra::Persistence::WorldSaveService::set_before_active_regions_replace_for_testing(
+        [] { return false; });
+    const bool failed_save = fx.session->SaveWorldState();
+    Luminumbra::Persistence::WorldSaveService::set_before_active_regions_replace_for_testing(
+        nullptr);
+    EXPECT_FALSE(failed_save);
+    EXPECT_TRUE(edited->is_voxel_data_dirty());
+    EXPECT_EQ(fx.session->GetPersistenceStatus().failures, 1u);
+
+    // An explicit retry rewrites the re-armed chunk and acknowledges it.
+    EXPECT_TRUE(fx.session->SaveWorldState());
+    EXPECT_FALSE(edited->is_voxel_data_dirty());
+}
+
+TEST(WorldDurableResidency, ChunkOwnedByAJobIsNotParked) {
+    DurableFixture fx(/*durable=*/true);
+    ASSERT_TRUE(fx.created) << fx.error;
+    fx.Settle(fx.SpawnAnchor(), kSettleIterations);
+
+    const auto edited = fx.EditAtSpawnAndFindEdited();
+    ASSERT_TRUE(edited);
+    const IVec3 coords = edited->get_coords();
+
+    // A pending worker result makes the chunk non-quiescent: it must stay resident.
+    edited->pending_mesh_ready.store(true, std::memory_order_release);
+    fx.Settle(fx.FarAnchor(), kSettleIterations);
+    EXPECT_EQ(fx.world->find_streamed_chunk(coords), edited);
+    EXPECT_EQ(fx.world->parking_status().parked_count, 0u);
+    edited->pending_mesh_ready.store(false, std::memory_order_release);
 }
 
 } // namespace

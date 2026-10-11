@@ -3784,8 +3784,9 @@ int main(int argc, char* argv[]) {
                             region_fault->message);
                         glfwSetWindowShouldClose(window, GLFW_TRUE);
                     }
-                    if (gameSession->PersistenceSaveRequested()) {
-                        // Parked-bytes pressure: persist dirty authoritative chunks now.
+                    if (gameSession->PersistenceSaveRequested() ||
+                        gameSession->PersistenceAutosaveDue()) {
+                        // Parked-bytes pressure or the periodic interval: persist now.
                         gameSession->SaveWorldState();
                     }
                     rb_sim_ms = std::chrono::duration<double, std::milli>(

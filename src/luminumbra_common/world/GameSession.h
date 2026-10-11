@@ -139,6 +139,11 @@ public:
     // 0 = unlimited. Applied when the world system is wired (and immediately if it exists).
     void SetParkedBytesLimit(std::size_t bytes);
     static constexpr std::uint64_t kSaveRetryTicks = 300;
+    static constexpr std::uint64_t kAutosaveTicks = 9000;
+    // Periodic autosave for hosts without their own interval (the client). True once kAutosaveTicks
+    // have elapsed since the last successful save (or since first observed), outside the failure
+    // back-off. Always false unless sim.active_regions is on.
+    [[nodiscard]] bool PersistenceAutosaveDue();
 
     // Loads a previously saved snapshot into the live streaming state. Must be
     // called AFTER the world systems initialize but BEFORE chunk streaming

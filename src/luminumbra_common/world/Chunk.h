@@ -89,13 +89,20 @@ public:
             u32 expected = 0u;
             m_voxel_revision.compare_exchange_strong(
                 expected, 1u, std::memory_order_acq_rel, std::memory_order_acquire);
-            m_voxel_data_dirty.store(false, std::memory_order_release);
+            // Leave the voxel-dirty bit untouched: it may carry an unsaved water obligation.
             return;
         }
         m_sdf_provenance.store(static_cast<u8>(ChunkSdfProvenance::GeneratedCurrentParams),
                                std::memory_order_release);
         m_voxel_revision.store(0u, std::memory_order_release);
         m_voxel_data_dirty.store(false, std::memory_order_release);
+    }
+    // Post-generation acknowledgement: a promoted/backfilled terrain is pure generation output,
+    // except on water-authoritative chunks where the dirty bit may carry unsaved water state.
+    void clear_voxel_data_dirty_after_generation() {
+        if (!has_water_authority()) {
+            clear_voxel_data_dirty();
+        }
     }
     void mark_sdf_loaded_or_edited() {
         m_sdf_provenance.store(static_cast<u8>(ChunkSdfProvenance::LoadedOrEdited),

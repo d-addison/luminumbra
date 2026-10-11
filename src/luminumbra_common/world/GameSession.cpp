@@ -190,6 +190,10 @@ void GameSession::ResetWorldSystems() {
     m_regionDurableDirectory.clear();
     m_simulationEventBus.clear();
     m_lastLoadedChunkCount = 0;
+    m_lastSaveTick = -1;
+    m_lastSaveMs = 0.0;
+    m_saveFailures = 0;
+    m_lastSaveFailureTick = -1;
 }
 
 // load the per-world species definition table at world create/load.
@@ -983,6 +987,7 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
         if (m_activeRegionsEnabled && !m_regionFault) {
             // Water divergence becomes LoadedOrEdited authority BEFORE any digest or ownership
             // probe.
+            m_worldSystem->note_persistence_tick(static_cast<std::int64_t>(current_tick));
             m_worldSystem->sync_water_authority();
             const auto anchors =
                 m_replicatedSimulationAnchors
@@ -1474,6 +1479,20 @@ bool GameSession::PersistenceSaveRequested() const {
     return true;
 }
 
+bool GameSession::PersistenceAutosaveDue() {
+    if (!m_activeRegionsEnabled || !m_worldSystem)
+        return false;
+    const auto tick = static_cast<std::int64_t>(GetSimulationTickCount());
+    if (m_lastSaveTick < 0) {
+        m_lastSaveTick = tick; // first observation is the baseline, not a save
+        return false;
+    }
+    if (m_lastSaveFailureTick >= 0 &&
+        tick < m_lastSaveFailureTick + static_cast<std::int64_t>(kSaveRetryTicks))
+        return false;
+    return tick >= m_lastSaveTick + static_cast<std::int64_t>(kAutosaveTicks);
+}
+
 void GameSession::ClearPersistenceSaveRequest() {
     if (m_worldSystem)
         m_worldSystem->clear_persistence_save_request();
@@ -1611,16 +1630,20 @@ bool GameSession::SaveWorldStateTo(const std::filesystem::path& save_dir,
         return false;
     }
 
-    if (!Persistence::WorldSaveService::validate_save(save_dir))
+    if (!Persistence::WorldSaveService::validate_save(save_dir)) {
+        RecordPersistenceSaveOutcome(false, elapsed_ms());
         return false;
+    }
 
     // Clock snapshots can contain energy or metadata without any chunk/plant writer
     // creating the destination. Create it only after every refusal check passes.
     if (m_activeRegionsEnabled) {
         std::error_code error;
         fs::create_directories(save_dir, error);
-        if (error)
+        if (error) {
+            RecordPersistenceSaveOutcome(false, elapsed_ms());
             return false;
+        }
     }
 
     // Quiesce in-flight generation/promotion/meshing so chunk data is stable

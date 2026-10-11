@@ -899,7 +899,15 @@ public:
     }
     // 0 = unlimited. Default 256 MiB.
     void set_parked_bytes_limit(std::size_t bytes) {
+        if (bytes != m_parked_bytes_limit) {
+            ++m_dirty_generation; // re-run activation so a changed limit takes effect
+        }
         m_parked_bytes_limit = bytes;
+    }
+    // Clock used only to stamp parked chunks. Deliberately separate from begin_tick so it never
+    // changes activation-queue scheduling on hosts that do not drive begin_tick.
+    void note_persistence_tick(std::int64_t sim_tick) {
+        m_persistence_tick = sim_tick;
     }
     ParkingStatus parking_status() const;
     bool persistence_save_requested() const {
@@ -1036,6 +1044,7 @@ private:
     bool m_durable_residency = false;
     std::size_t m_parked_bytes_limit = static_cast<std::size_t>(256) * 1024u * 1024u;
     bool m_persistence_save_requested = false;
+    std::int64_t m_persistence_tick = -1;
     std::size_t m_parking_blocked_dirty = 0;
     std::size_t m_parking_deferred =
         0; // authoritative chunks kept resident this pass (not quiescent)

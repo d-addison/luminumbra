@@ -715,7 +715,7 @@ void SHIELD_WorldSystem::process_completed_promotion_jobs(bool force) {
                 // alongside the SDF (empty -> empty, lazy alloc preserved).
                 chunk->material_data = std::move(chunk->pending_material_data);
                 chunk->mark_sdf_generated_current_params();
-                chunk->clear_voxel_data_dirty();
+                chunk->clear_voxel_data_dirty_after_generation();
                 shadow_note_promotion_published(chunk->get_id()); //  shadow
                 m_streaming_state.pending_promotion_mesh.push_back(job_chunk);
             } else {
@@ -3429,6 +3429,18 @@ bool SHIELD_WorldSystem::update_chunk_activation(const std::vector<Vec3>& anchor
                   return a.coords.z < b.coords.z;
               });
 
+    if (m_durable_residency && !m_parked.empty()) {
+        // A parked chunk that re-entered range keeps its authoritative data. Restore it before
+        // any generation/headroom gate so byte-limit-resident chunks cannot starve re-entry.
+        to_create.erase(std::remove_if(to_create.begin(),
+                                       to_create.end(),
+                                       [this](const GenerationCandidate& candidate) {
+                                           return unpark_chunk(
+                                               Chunk::calculate_id(candidate.coords));
+                                       }),
+                        to_create.end());
+    }
+
     m_last_streaming_budget_stats.generation_candidates = to_create.size();
     for (const GenerationCandidate& candidate : to_create) {
         if (candidate.surface) {
@@ -3452,9 +3464,6 @@ bool SHIELD_WorldSystem::update_chunk_activation(const std::vector<Vec3>& anchor
             std::min(std::min(to_create.size(), budget_headroom),
                      static_cast<std::size_t>(m_last_streaming_budget_stats.generation_budget));
         for (std::size_t i = 0; i < budget; ++i) {
-            if (m_durable_residency && unpark_chunk(Chunk::calculate_id(to_create[i].coords))) {
-                continue; // a parked chunk re-entered range: it keeps its authoritative data
-            }
             generate_now.push_back({to_create[i].coords, to_create[i].target_step});
             if (to_create[i].surface) {
                 ++m_last_streaming_budget_stats.surface_generation_scheduled;
@@ -3555,6 +3564,10 @@ bool SHIELD_WorldSystem::update_chunk_activation(const std::vector<Vec3>& anchor
                 in_flight_ids.insert(job.chunk->get_id());
         }
     };
+    if (m_durable_residency) {
+        // Byte-limit admission is order dependent: make it independent of map insertion history.
+        std::sort(to_unload.begin(), to_unload.end());
+    }
     for (ChunkID id : to_unload) {
         if (m_durable_residency) {
             const auto found = m_streaming_state.chunks.find(id);
@@ -3584,13 +3597,16 @@ bool SHIELD_WorldSystem::update_chunk_activation(const std::vector<Vec3>& anchor
                         ++m_parking_blocked_dirty;
                         m_persistence_save_requested = true;
                     }
-                    continue; // stays resident
+                    // Stays resident. Counted as deferred so activation elision cannot hide a
+                    // later dirty transition (renewed pressure request) from the next pass.
+                    ++m_parking_deferred;
+                    continue;
                 }
                 if (physics_system) {
                     physics_system->remove_chunk_collision(id);
                 }
                 chunk->normalize_for_park();
-                m_parked[id] = ParkedChunk{chunk, bytes, m_current_sim_tick};
+                m_parked[id] = ParkedChunk{chunk, bytes, m_persistence_tick};
                 m_parked_bytes += bytes;
                 m_streaming_state.chunks.erase(id);
                 shadow_note_evicted(id);
@@ -4848,7 +4864,7 @@ void SHIELD_WorldSystem::GenerateChunkData(Luminumbra::Chunk& chunk, int target_
         ComputeShapedHeightGrid(
             base_pos.x, base_pos.z, size_x, size_z, chunk.heightmap_data.data());
         chunk.mark_sdf_generated_current_params();
-        chunk.clear_voxel_data_dirty();
+        chunk.clear_voxel_data_dirty_after_generation();
         return;
     }
 
@@ -4952,7 +4968,7 @@ void SHIELD_WorldSystem::GenerateChunkData(Luminumbra::Chunk& chunk, int target_
     // Generation produces the canonical voxel data; only post-generation edits
     // count as unsaved dirty state.
     chunk.mark_sdf_generated_current_params();
-    chunk.clear_voxel_data_dirty();
+    chunk.clear_voxel_data_dirty_after_generation();
 }
 
 JobHandle
@@ -4978,7 +4994,9 @@ JobHandle SHIELD_WorldSystem::dispatch_generation_jobs(
     for (const auto& request : chunks_to_generate) {
         const IVec3 coords = request.coords;
         if (m_durable_residency) {
-            unpark_chunk(Chunk::calculate_id(coords)); // parked data must not be regenerated
+            if (unpark_chunk(Chunk::calculate_id(coords))) {
+                continue; // parked authoritative data must never be replaced by a fresh chunk
+            }
         }
         // Chunks restored from a world save (or already generated) carry
         // populated voxel data, possibly with player edits; regeneration would
@@ -5722,6 +5740,13 @@ bool SHIELD_WorldSystem::adopt_streamed_chunk(const std::shared_ptr<Luminumbra::
                 m_parked_bytes >= parked->second.bytes ? m_parked_bytes - parked->second.bytes : 0u;
             m_parked.erase(parked);
         }
+    }
+    if (m_durable_residency && chunk->has_water_sim.load(std::memory_order_acquire) &&
+        chunk->sdf_provenance() == ChunkSdfProvenance::LoadedOrEdited) {
+        // The water-authority bit is not serialized. A saved authoritative record that carries
+        // water simulation state conservatively stays authoritative so a later terrain backfill
+        // cannot make it regenerable (and evictable) again.
+        chunk->set_water_authority();
     }
     const bool adopted = m_streaming_state.chunks.emplace(chunk->get_id(), chunk).second;
     if (adopted && chunk->sdf_provenance() == ChunkSdfProvenance::LoadedOrEdited) {
