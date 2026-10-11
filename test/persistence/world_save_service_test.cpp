@@ -334,9 +334,10 @@ TEST(WorldSaveService, GroundObjectsSaveLoadRoundTripAndEmptyStoreRemovesFile) {
         (void)id;
         ledger.mark_edited(GroundObjectStore::region_of(object), clock);
     }
-    nlohmann::json metadata;
+    nlohmann::json metadata = {{"container_version", 2}};
     clock.write_metadata(metadata);
     {
+        WorldSaveService::SaveFactsScope facts(save_dir.path);
         Luminumbra::Persistence::SaveTransaction transaction(
             save_dir.path, clock.tick(), {}, WorldSaveService::member_digest);
         ASSERT_TRUE(transaction.begin(&errors)) << JoinErrors(errors);
