@@ -91,7 +91,7 @@ bool BuildFarVolumeTile(const FarVolumeRequest& request,
                     if (brick_solid && brick_air) {
                         if (tile.bricks.size() >= limits.max_surface_bricks)
                             return fail(FarVolumeBuildError::SurfaceLimit);
-                        tile.bricks.push_back(std::move(brick));
+                        tile.bricks.push_back(brick);
                     }
                 }
             }

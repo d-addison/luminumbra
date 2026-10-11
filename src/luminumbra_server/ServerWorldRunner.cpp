@@ -308,6 +308,8 @@ bool ServerWorldRunner::Boot() {
         return false;
     }
 
+    world_system->debug_set_streaming_radius_cap(m_config.test_streaming_radius_cap);
+
     // a session booted FROM A SAVE must not advance water anywhere in Boot —
     // the restored mid-flow state (depths, sleep flags, counters, persisted sim-window
     // cursor) is authoritative, and the water network flows perpetually, so any boot
@@ -632,6 +634,12 @@ ServerTickReport ServerWorldRunner::RunFixedTicks(std::uint64_t tick_count) {
             }
         }
         physics_budget.Finish();
+        if (m_session->ActiveRegionsEnabled()) {
+            std::vector<Vec3> anchors;
+            for (const auto& avatar : m_avatars)
+                anchors.push_back(avatar.position);
+            m_session->SetReplicatedSimulationAnchors(std::move(anchors));
+        }
         report.ticks_executed += m_session->TickSimulation(fixed_dt);
         report.frames_executed += 1;
         const std::uint64_t simulation_tick = m_session->ActiveRegionsEnabled()
@@ -751,6 +759,7 @@ ServerTickReport ServerWorldRunner::RunFixedTicks(std::uint64_t tick_count) {
 
         if (m_config.autosave_interval_ticks > 0 && simulation_tick > 0 &&
             (simulation_tick % m_config.autosave_interval_ticks) == 0) {
+            // Synchronous host-thread save. Snapshot/shutdown run between RunFixedTicks calls.
             world::WorldStateSaveReport save_report;
             if (m_session->SaveWorldState(&save_report)) {
                 report.autosave_passes += 1;
@@ -1034,6 +1043,7 @@ void ServerWorldRunner::ComputeWorldHashAndSubHashes(
 }
 
 std::size_t ServerWorldRunner::SaveFullSnapshot() {
+    // Host-thread-only, after RunFixedTicks returns; never dispatch a save to workers.
     // write the FULL in-memory streamed-chunk set (not dirty-gated) so
     // a loaded session can adopt exactly this set. Reuses WorldSaveService.
     if (!m_booted || !m_session || !m_session->GetWorldSystem() ||
@@ -1114,6 +1124,7 @@ void ServerWorldRunner::Shutdown(world::WorldStateSaveReport* shutdown_save_repo
     m_shutdown = true;
 
     if (m_booted && m_session) {
+        // The host tick loop has returned, so this cannot overlap autosave/snapshot.
         // Save on shutdown via WorldSaveService (incremental contract: a
         // never-edited world writes nothing and stays on the fresh path).
         world::WorldStateSaveReport save_report;

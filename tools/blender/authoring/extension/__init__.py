@@ -13,6 +13,7 @@ from bpy.app.handlers import persistent
 
 from .blender_asset import assign_ids, capture, validate_collection
 from .logic import BuildState, atomic_json, digest, read_json
+from . import blender_recipes
 
 _session = None
 _capturing = False
@@ -166,13 +167,22 @@ def stop():
         session.close()
 
 
+def recipe_will_apply():
+    # Invalidate captured source and cancel its build before any recipe writes,
+    # rather than waiting for the next dependency-graph callback.
+    if _session:
+        _session.changed()
+
+
 @persistent
 def file_changed(_):
     stop()
+    blender_recipes.reset_document()
 
 
 @persistent
 def undone(_):
+    blender_recipes.state.changed()
     if _session:
         try:
             _session.changed()
@@ -182,6 +192,8 @@ def undone(_):
 
 @persistent
 def edited(scene, depsgraph):
+    if not _capturing and any(True for _ in depsgraph.updates):
+        blender_recipes.state.changed()
     if _session and not _capturing and scene.original == _session.scene:
         collection = _session.scene.lum_author_collection
         if not collection:
@@ -282,6 +294,7 @@ class LUMINUMBRA_PT_geometry(bpy.types.Panel):
         layout.label(text="Geometry builds with installed engine tools")
         layout.operator("luminumbra.mark_geometry")
         layout.prop(scene, "lum_author_collection")
+        layout.operator("luminumbra.review_id_repairs")
         layout.prop(scene, "lum_author_prefab")
         for name in ("project", "python", "service", "toolchain"):
             layout.prop(scene, "lum_author_" + name)
@@ -299,14 +312,17 @@ class LUMINUMBRA_PT_geometry(bpy.types.Panel):
         layout.label(text="Engine viewport and behavior graphs are pending", icon="INFO")
 
 
-CLASSES = (LUMINUMBRA_OT_mark_geometry, LUMINUMBRA_OT_geometry, LUMINUMBRA_PT_geometry)
+CLASSES = (LUMINUMBRA_OT_mark_geometry, LUMINUMBRA_OT_geometry,
+           blender_recipes.LUMINUMBRA_OT_review_id_repairs, LUMINUMBRA_PT_geometry)
 
 
 def register():
     if bpy.app.version != (5, 1, 0):
         raise RuntimeError("Qualify this extension for the installed Blender version first; expected 5.1.0")
+    blender_recipes.reset_document()
     for cls in CLASSES:
         bpy.utils.register_class(cls)
+    blender_recipes.before_apply = recipe_will_apply
     scene = bpy.types.Scene
     scene.lum_author_collection = bpy.props.PointerProperty(name="Geometry asset", type=bpy.types.Collection)
     scene.lum_author_project = bpy.props.StringProperty(name="Project", subtype="DIR_PATH")
@@ -324,6 +340,8 @@ def register():
 
 def unregister():
     stop()
+    blender_recipes.reset_document()
+    blender_recipes.before_apply = None
     if bpy.app.timers.is_registered(timer):
         bpy.app.timers.unregister(timer)
     for handlers, callback in ((bpy.app.handlers.load_pre, file_changed),

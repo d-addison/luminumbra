@@ -39,6 +39,43 @@ automatic retry until a new edit or explicit build. **Stop Service**, changing
 documents and disabling the extension stop its owned processes. Use one Blender
 authoring session per project.
 
+## Reviewed identity repairs
+
+**Review ID Repairs** implements the named recipe
+`authoring.asset.refresh_ids.v1` for one already marked, uniquely identified
+collection. Configure an existing project directory, choose the asset, then
+review every proposed identity change in the dialog before applying. The dialog
+also lists users of shared meshes and materials outside the asset. The oldest
+datablock keeps an existing ID; new duplicates receive the exact IDs shown in
+the review. Initial marking and ambiguous asset IDs still use the manual
+**Mark / Refresh Asset IDs** operation.
+
+Application is one undoable operator. Undo restores the prior IDs, and redo
+restores the exact reviewed IDs. A document session and monotonic revision exist
+before any build starts; edits, undo/redo, file loads and extension unload
+invalidate pending plans. Application rechecks the complete identity/dependency
+snapshot and project directory, and invalidates any pending asset build before
+writing. Property or receipt failure restores the affected ID preimage; a failed
+rollback is reported explicitly. Reusing a request ID returns its original
+terminal receipt and never reapplies an undone edit.
+
+Plans and terminal receipts are retained in
+`.luminumbra-author-recipes/<document-session>/` inside the configured project,
+independently of Blender undo. Exclude this directory from source control and
+art packs. A new document session refuses old plans. If receipt storage itself
+fails, the request remains terminal in memory until the session ends; no durable
+receipt is claimed for that failure. There is no remote listener or MCP adapter.
+The local `blender_recipes.inspect` and `plan` helpers expose bounded records;
+automation applies a reviewed plan through the registered undoable operator.
+
+This first recipe is limited to 24 ID repairs per plan, 32 pending plans and 256
+terminal requests per document session, with at most 100,000 inspected datablocks.
+It refuses linked/overridden targets and non-text identity properties. It does
+not execute Python supplied by a request, create geometry, or replace assets.
+The separate native `extension_tests/native_recipe_probe.py` checks packaged
+installation, real editor undo/redo, document changes, refusal and rollback.
+Portable tests alone do not qualify Blender editor behavior on another platform.
+
 ## Export profile
 
 The initial native profile is Windows Blender 5.1.0, build `adfe2921d5f3`, with glTF
