@@ -900,6 +900,10 @@ public:
     bool durable_residency() const {
         return m_durable_residency;
     }
+    // A durable Error is fail-stop; callers must never reinterpret it as a missing chunk.
+    [[nodiscard]] bool durable_read_failed() const noexcept {
+        return m_durable_read_failed;
+    }
     // 0 = unlimited. Default 256 MiB.
     void set_parked_bytes_limit(std::size_t bytes) {
         if (bytes != m_parked_bytes_limit) {

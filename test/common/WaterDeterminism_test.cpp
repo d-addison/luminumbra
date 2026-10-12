@@ -24,6 +24,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <iostream>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -32,6 +33,7 @@
 #include "luminumbra_common/core/SystemConfig.h"    // sim.water_high_res gate
 #include "luminumbra_common/core/WaterComponents.h" // water-source: WaterSourceComponent
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
+#include "luminumbra_common/systems/WaterSystem.h"
 #include "luminumbra_common/world/GameSession.h"
 
 namespace fs = std::filesystem;
@@ -939,6 +941,39 @@ TEST(WaterDeterminism, HighResWaterMatchesMediumPhysicsPerSimPass) {
     EXPECT_GE(dam_high.fill_at_probe * 100, dam_med.fill_at_probe * 150)
         << "High displaced over 1.50x Medium's volume (" << dam_high.fill_at_probe << " vs "
         << dam_med.fill_at_probe << " mm*m^2)";
+}
+
+TEST(WaterDeterminism, DurableReadErrorRefusesDirectWaterConsumers) {
+    const HeadlessRoot root;
+    GameSession session;
+    session.SetRootPath(root.root_string());
+    ASSERT_TRUE(session.CreateWorld("WaterReadError", "777", "default"));
+    auto* world = session.GetWorldSystem();
+    auto* water = session.GetWaterSystem();
+    ASSERT_NE(world, nullptr);
+    ASSERT_NE(water, nullptr);
+    world->set_durable_residency(true);
+    int faults = 0;
+    world->set_durable_chunk_loader(
+        [](const Luminumbra::IVec3&) -> std::shared_ptr<Luminumbra::Chunk> {
+            throw std::runtime_error("injected durable read error");
+        },
+        [&faults](std::string) { ++faults; });
+    const Luminumbra::IVec3 expected{4096, 0, 4096};
+    world->remember_durable_chunks({expected});
+    // True suppresses procedural regeneration even when restoration fails.
+    ASSERT_TRUE(world->restore_authoritative_chunk(expected));
+    ASSERT_TRUE(world->durable_read_failed());
+    ASSERT_EQ(faults, 1);
+    const auto before = world->debug_water_state_hash().hash;
+    EXPECT_THROW(water->update(session.GetRegistry(), {}), std::runtime_error);
+    EXPECT_THROW(water->get_water_level_at(0.0f, 0.0f), std::runtime_error);
+    EXPECT_THROW(water->get_water_flow_at(0.0f, 0.0f), std::runtime_error);
+    EXPECT_THROW(water->apply_displacement(Vec3(0.0f), 1.0f), std::runtime_error);
+    EXPECT_THROW(water->EditTerrainBed(Vec3(0.0f), 1, 1.0f), std::runtime_error);
+    EXPECT_THROW(water->MigrateChunksToSimResolution({}), std::runtime_error);
+    EXPECT_EQ(world->debug_water_state_hash().hash, before);
+    EXPECT_EQ(faults, 1);
 }
 
 } // namespace

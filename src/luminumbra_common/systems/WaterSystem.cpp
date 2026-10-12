@@ -12,6 +12,7 @@
 #include <cmath>
 #include <glm/gtx/compatibility.hpp>
 #include <numeric>
+#include <stdexcept>
 
 namespace Luminumbra::Systems {
 
@@ -580,8 +581,87 @@ Vec3 WaterSystem::get_camera_position(entt::registry& registry) const {
     return Vec3(0.0f);
 }
 
+int WaterSystem::StepSharedWaterFace(Chunk& owner, Chunk& neighbor, bool is_x) {
+    Chunk* A = &owner;
+    Chunk* B = &neighbor;
+    const int res = GetWaterResolution(owner);
+    if (res <= 1 || GetWaterResolution(neighbor) != res) {
+        return 0;
+    }
+    const int nA = res * res;
+    if (static_cast<int>(owner.water_depth_mm.size()) != nA ||
+        static_cast<int>(owner.water_edge_flux.size()) != 2 * nA ||
+        static_cast<int>(neighbor.water_depth_mm.size()) != nA) {
+        return 0;
+    }
+    const bool have_mirror_A = static_cast<int>(owner.water_level_data.size()) == nA;
+    const bool have_mirror_B = static_cast<int>(neighbor.water_level_data.size()) == nA;
+    const std::int64_t k_accel = KAccelForResolution(res);
+    const std::int32_t min_flow_mm = MinFlowForResolution(res);
+    int seam_wet_pairs = 0;
+    for (int t = 0; t < res; ++t) {
+        int ai, bi, slot;
+        if (is_x) {
+            ai = t * res + (res - 1);
+            bi = t * res + 0;
+            slot = 2 * ai + 0;
+        } else {
+            ai = (res - 1) * res + t;
+            bi = 0 * res + t;
+            slot = 2 * ai + 1;
+        }
+        const std::int64_t surfA =
+            static_cast<std::int64_t>(A->water_bed_mm[ai]) + A->water_depth_mm[ai];
+        const std::int64_t surfB =
+            static_cast<std::int64_t>(B->water_bed_mm[bi]) + B->water_depth_mm[bi];
+        const std::int64_t dSurf = surfA - surfB;
+        std::int64_t q =
+            static_cast<std::int64_t>(A->water_edge_flux[slot]) + ((k_accel * dSurf) >> FLOW_SHIFT);
+        q = (q * FRICTION_NUM) >> FRICTION_SHIFT;
+        if (dSurf < min_flow_mm && dSurf > -min_flow_mm)
+            q = 0;
+        if (q > 2000000000LL)
+            q = 2000000000LL;
+        if (q < -2000000000LL)
+            q = -2000000000LL;
+        if (q > 0) {
+            if (q > A->water_depth_mm[ai])
+                q = A->water_depth_mm[ai];
+        } else if (q < 0) {
+            if (-q > B->water_depth_mm[bi])
+                q = -static_cast<std::int64_t>(B->water_depth_mm[bi]);
+        }
+        const std::int32_t flux_prev = A->water_edge_flux[slot];
+        A->water_edge_flux[slot] = static_cast<std::int32_t>(q);
+        if (A->water_edge_flux[slot] != flux_prev)
+            A->mark_water_state_dirty();
+        A->water_depth_mm[ai] -= static_cast<std::int32_t>(q);
+        B->water_depth_mm[bi] += static_cast<std::int32_t>(q);
+        if (A->water_depth_mm[ai] > 0 && B->water_depth_mm[bi] > 0)
+            ++seam_wet_pairs;
+        if (q != 0) {
+            A->is_water_sleeping.store(false, std::memory_order_relaxed);
+            B->is_water_sleeping.store(false, std::memory_order_relaxed);
+            A->mark_water_state_dirty();
+            B->mark_water_state_dirty();
+            if (have_mirror_A)
+                A->water_level_data[ai] =
+                    static_cast<float>(A->water_bed_mm[ai] + A->water_depth_mm[ai]) /
+                    static_cast<float>(MM_PER_M);
+            if (have_mirror_B)
+                B->water_level_data[bi] =
+                    static_cast<float>(B->water_bed_mm[bi] + B->water_depth_mm[bi]) /
+                    static_cast<float>(MM_PER_M);
+        }
+    }
+    return seam_wet_pairs;
+}
+
 void WaterSystem::update(entt::registry& registry,
                          const std::unordered_map<ChunkID, std::shared_ptr<Chunk>>& active_chunks) {
+    if (m_shield_system && m_shield_system->durable_read_failed()) {
+        throw std::runtime_error("water update refused after durable chunk read error");
+    }
     m_cells_stepped_last_update = 0;
     // (water-kernel perf) sub-phase wall timers — RUNTIME TELEMETRY ONLY (never hashed),
     // the _dbg_split pattern from SHIELD_WorldSystem::update.
@@ -1104,73 +1184,8 @@ void WaterSystem::update(entt::registry& registry,
             static_cast<int>(A->water_edge_flux.size()) != 2 * nA)
             continue;
         const IVec3 ac = A->get_coords();
-        const bool have_mirror_A = (static_cast<int>(A->water_level_data.size()) == nA);
-        // Seam edges use the same resolution-scaled constants as internal edges (the seam
-        // pass hard-gates on equal resolution, so A's res is the pair's res). Byte-identical
-        // integers at the Medium default.
-        const std::int64_t k_accel = KAccelForResolution(res);
-        const std::int32_t min_flow_mm = MinFlowForResolution(res);
-        auto step_face = [&](Chunk* B, bool isX) {
-            if (GetWaterResolution(*B) != res)
-                return; // uniform-res only -> cells align cell-for-cell
-            if (static_cast<int>(B->water_depth_mm.size()) != nA)
-                return;
-            const bool have_mirror_B = (static_cast<int>(B->water_level_data.size()) == nA);
-            for (int t = 0; t < res; ++t) {
-                int ai, bi, slot;
-                if (isX) {
-                    ai = t * res + (res - 1);
-                    bi = t * res + 0;
-                    slot = 2 * ai + 0;
-                } else {
-                    ai = (res - 1) * res + t;
-                    bi = 0 * res + t;
-                    slot = 2 * ai + 1;
-                }
-                const std::int64_t surfA =
-                    static_cast<std::int64_t>(A->water_bed_mm[ai]) + A->water_depth_mm[ai];
-                const std::int64_t surfB =
-                    static_cast<std::int64_t>(B->water_bed_mm[bi]) + B->water_depth_mm[bi];
-                const std::int64_t dSurf = surfA - surfB;
-                std::int64_t q = static_cast<std::int64_t>(A->water_edge_flux[slot]) +
-                                 ((k_accel * dSurf) >> FLOW_SHIFT);
-                q = (q * FRICTION_NUM) >> FRICTION_SHIFT;
-                if (dSurf < min_flow_mm && dSurf > -min_flow_mm)
-                    q = 0;
-                if (q > 2000000000LL)
-                    q = 2000000000LL;
-                if (q < -2000000000LL)
-                    q = -2000000000LL;
-                if (q > 0) {
-                    if (q > A->water_depth_mm[ai])
-                        q = A->water_depth_mm[ai];
-                } else if (q < 0) {
-                    if (-q > B->water_depth_mm[bi])
-                        q = -static_cast<std::int64_t>(B->water_depth_mm[bi]);
-                }
-                const std::int32_t flux_prev = A->water_edge_flux[slot];
-                A->water_edge_flux[slot] = static_cast<std::int32_t>(q);
-                if (A->water_edge_flux[slot] != flux_prev)
-                    A->mark_water_state_dirty();
-                A->water_depth_mm[ai] -= static_cast<std::int32_t>(q);
-                B->water_depth_mm[bi] += static_cast<std::int32_t>(q);
-                if (A->water_depth_mm[ai] > 0 && B->water_depth_mm[bi] > 0)
-                    ++seam_wet_pairs;
-                if (q != 0) {
-                    A->is_water_sleeping.store(false, std::memory_order_relaxed);
-                    B->is_water_sleeping.store(false, std::memory_order_relaxed);
-                    A->mark_water_state_dirty();
-                    B->mark_water_state_dirty();
-                    if (have_mirror_A)
-                        A->water_level_data[ai] =
-                            static_cast<float>(A->water_bed_mm[ai] + A->water_depth_mm[ai]) /
-                            static_cast<float>(MM_PER_M);
-                    if (have_mirror_B)
-                        B->water_level_data[bi] =
-                            static_cast<float>(B->water_bed_mm[bi] + B->water_depth_mm[bi]) /
-                            static_cast<float>(MM_PER_M);
-                }
-            }
+        auto step_face = [&](Chunk* B, bool is_x) {
+            seam_wet_pairs += StepSharedWaterFace(*A, *B, is_x);
         };
         if (Chunk* east = find_in_window(Chunk::calculate_id(ac + IVec3(1, 0, 0))))
             step_face(east, true);
@@ -1210,6 +1225,9 @@ void WaterSystem::update(entt::registry& registry,
 }
 
 f32 WaterSystem::get_water_level_at(float world_x, float world_z) const {
+    if (m_shield_system && m_shield_system->durable_read_failed()) {
+        throw std::runtime_error("water query refused after durable chunk read error");
+    }
     if (!m_active_chunks)
         return SEA_LEVEL;
 
@@ -1253,6 +1271,9 @@ f32 WaterSystem::get_water_level_at(float world_x, float world_z) const {
 }
 
 Vec2 WaterSystem::get_water_flow_at(float world_x, float world_z) const {
+    if (m_shield_system && m_shield_system->durable_read_failed()) {
+        throw std::runtime_error("water query refused after durable chunk read error");
+    }
     if (!m_active_chunks) {
         return Vec2(0.0f);
     }
@@ -1300,6 +1321,9 @@ Vec2 WaterSystem::get_water_flow_at(float world_x, float world_z) const {
 }
 
 void WaterSystem::apply_displacement(const Vec3& world_pos, f32 volume) {
+    if (m_shield_system && m_shield_system->durable_read_failed()) {
+        throw std::runtime_error("water edit refused after durable chunk read error");
+    }
     if (!m_active_chunks)
         return;
 
@@ -1398,6 +1422,9 @@ void WaterSystem::apply_displacement(const Vec3& world_pos, f32 volume) {
 // as a command for host==peer). The VOXEL/SDF terrain + its render mesh are a separate concern;
 // this couples WATER to a bed change. Returns the number of cells edited.
 int WaterSystem::EditTerrainBed(const Vec3& world_pos, std::int32_t delta_mm, float radius_m) {
+    if (m_shield_system && m_shield_system->durable_read_failed()) {
+        throw std::runtime_error("water bed edit refused after durable chunk read error");
+    }
     if (!m_active_chunks || delta_mm == 0)
         return 0;
     const float r2 = radius_m * radius_m;
@@ -1474,6 +1501,9 @@ void WaterSystem::SetSimResolution(int cells_per_side) {
 
 std::size_t WaterSystem::MigrateChunksToSimResolution(
     const std::unordered_map<ChunkID, std::shared_ptr<Chunk>>& chunks) {
+    if (m_shield_system && m_shield_system->durable_read_failed()) {
+        throw std::runtime_error("water migration refused after durable chunk read error");
+    }
     const auto target_level = static_cast<WaterDetailLevel>(m_sim_resolution);
     std::size_t migrated = 0;
     for (const auto& entry : chunks) {
