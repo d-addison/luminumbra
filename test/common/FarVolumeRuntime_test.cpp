@@ -60,8 +60,10 @@ TEST(FarVolumeRuntime, SpanUnionNeverShrinksAndGenerationOnlyTracksGrowth) {
     EXPECT_EQ(ledger.generation(), 2u);
     ASSERT_TRUE(ledger.Extend({0, 20}, kLedgerLimits));
     EXPECT_EQ(ledger.generation(), 2u);
-    ASSERT_TRUE(ledger.Intent());
-    EXPECT_EQ(ledger.Intent()->extra_span, (FarVolumeCoverageSpan{-200, 400}));
+    const auto union_intent = ledger.Intent();
+    ASSERT_TRUE(union_intent);
+    if (union_intent)
+        EXPECT_EQ(union_intent->extra_span, (FarVolumeCoverageSpan{-200, 400}));
     EXPECT_FALSE(ledger.Covers({-192, 400}));
     EXPECT_FALSE(ledger.Covers({-208, 384}));
     EXPECT_TRUE(ledger.Covers({-208, 400}));
@@ -94,7 +96,10 @@ TEST(FarVolumeRuntime, SpanGrowthRefusalIsTransactionalIncludingInvalidReset) {
     EXPECT_EQ(ledger.generation(), generation);
     ASSERT_TRUE(ledger.Reset({3, -1, 1}));
     EXPECT_EQ(ledger.generation(), 0u);
-    EXPECT_FALSE(ledger.Intent()->extra_span);
+    const auto reset_intent = ledger.Intent();
+    ASSERT_TRUE(reset_intent);
+    if (reset_intent)
+        EXPECT_FALSE(reset_intent->extra_span);
 }
 
 TEST(FarVolumeRuntime, RequestOrderProducesIdenticalUnionAndResolvedCoverage) {

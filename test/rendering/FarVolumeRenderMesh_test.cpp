@@ -36,7 +36,7 @@ void ExpectSameOutput(const FarVolumeRenderMesh& actual, const FarVolumeRenderMe
     }
     EXPECT_EQ(actual.indices, expected.indices);
     ASSERT_EQ(actual.bounds.has_value(), expected.bounds.has_value());
-    if (actual.bounds) {
+    if (actual.bounds && expected.bounds) {
         EXPECT_EQ(actual.bounds->min, expected.bounds->min);
         EXPECT_EQ(actual.bounds->max, expected.bounds->max);
     }
@@ -55,7 +55,7 @@ TEST(FarVolumeRenderMesh, PreservesRelativeSharedGeometryNormalsAndMaterial) {
     EXPECT_EQ(output.request, source.request);
     EXPECT_EQ(output.origin_meters, source.origin_meters);
     EXPECT_EQ(output.sampled_max_meters, source.sampled_max_meters);
-    EXPECT_EQ(output.vertices.size(), 4u);
+    ASSERT_EQ(output.vertices.size(), 4u);
     EXPECT_EQ(output.indices, source.indices);
     EXPECT_EQ(output.vertices[0].position, Vec3(0, 0, 0));
     EXPECT_EQ(output.vertices[2].position, Vec3(4, 4, 0));
@@ -63,8 +63,10 @@ TEST(FarVolumeRenderMesh, PreservesRelativeSharedGeometryNormalsAndMaterial) {
     EXPECT_EQ(output.vertices[2].normal, Vec3(0, .8f, .6f));
     EXPECT_EQ(output.vertices[2].material_id, 6u);
     ASSERT_TRUE(output.bounds);
-    EXPECT_EQ(output.bounds->min, Vec3(0, 0, 0));
-    EXPECT_EQ(output.bounds->max, Vec3(4, 4, 0));
+    if (output.bounds) {
+        EXPECT_EQ(output.bounds->min, Vec3(0, 0, 0));
+        EXPECT_EQ(output.bounds->max, Vec3(4, 4, 0));
+    }
     EXPECT_EQ(retained.bytes(), FarVolumeRenderRetainedBytes(output));
     EXPECT_EQ(pool.used(), retained.bytes());
 }
