@@ -528,11 +528,11 @@ bool decode_snapshot_index(std::string_view bytes, SnapshotIndex& out, std::stri
         const nlohmann::json* path = Field(item, "path");
         const nlohmann::json* cls = Field(item, "class");
         const nlohmann::json* state = Field(item, "state");
-        const nlohmann::json* bytes = Field(item, "bytes");
+        const nlohmann::json* member_bytes = Field(item, "bytes");
         const nlohmann::json* fnv = Field(item, "fnv64");
         const nlohmann::json* member_generation = Field(item, "generation");
         if (!path || !path->is_string() || !cls || !cls->is_string() || !state ||
-            !state->is_string() || !bytes || !bytes->is_number_unsigned() || !fnv ||
+            !state->is_string() || !member_bytes || !member_bytes->is_number_unsigned() || !fnv ||
             !fnv->is_string() || !member_generation || !member_generation->is_number_unsigned()) {
             error = "snapshot member fields invalid";
             return false;
@@ -569,7 +569,7 @@ bool decode_snapshot_index(std::string_view bytes, SnapshotIndex& out, std::stri
             error = "snapshot member digest invalid";
             return false;
         }
-        member.bytes = bytes->get<std::uint64_t>();
+        member.bytes = member_bytes->get<std::uint64_t>();
         member.generation = member_generation->get<std::uint64_t>();
         index.members.push_back(std::move(member));
     }
@@ -1051,10 +1051,10 @@ bool SaveTransaction::commit(std::vector<std::string>* errors) {
             fs::path ancestor = m_save_dir.parent_path();
             for (int level = 0; level < 3 && !ancestor.empty(); ++level) {
                 WorldSaveService::durable_flush_directory(ancestor.parent_path(), nullptr);
-                const fs::path next = ancestor.parent_path();
-                if (next == ancestor)
+                const fs::path parent_ancestor = ancestor.parent_path();
+                if (parent_ancestor == ancestor)
                     break;
-                ancestor = next;
+                ancestor = parent_ancestor;
             }
         }
         if (!WorldSaveService::durable_write_file(index_path, encoded, errors)) {

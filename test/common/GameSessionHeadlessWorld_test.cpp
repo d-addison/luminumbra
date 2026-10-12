@@ -3411,7 +3411,7 @@ TEST(GameSessionHeadlessWorldTest, RegionalStormHandoverUsesCommonPhaseWithoutSo
     EnableSnapshotSession(loaded, root, jobs);
     ASSERT_TRUE(loaded.LoadWorld(base.GetMetadata().worldId)) << loaded.GetWorldOpenError();
     loaded.SetReplicatedSimulationAnchors({});
-    TickOnce(loaded); // 1003 is neither source phase 1 nor global common phase.
+    TickOnce(loaded); // 1003 matches neither the source cadence offset nor the global common phase.
     ASSERT_EQ(loaded.GetFieldPages().storms().size(), 1u);
     EXPECT_EQ(loaded.GetFieldPages().storms().front(), storm);
     TickOnce(loaded); // 1004 common phase, source interior still not due.
@@ -3576,7 +3576,7 @@ TEST(GameSessionHeadlessWorldTest, RegionalStormExpiresByDueActiveAgeAndFrozenSt
         EnableSnapshotSession(loaded, root, jobs);
         ASSERT_TRUE(loaded.LoadWorld(base.GetMetadata().worldId)) << loaded.GetWorldOpenError();
         loaded.SetReplicatedSimulationAnchors({});
-        TickOnce(loaded); // common tick 1004; reduced phase 1 is not due
+        TickOnce(loaded); // common tick 1004; the reduced cadence offset is not due
         ASSERT_EQ(loaded.GetFieldPages().storms().size(), 1u);
         EXPECT_EQ(loaded.GetFieldPages().storms().front(), storm);
         TickOnce(loaded); // 1005 interior due only for reduced
