@@ -1,6 +1,7 @@
 #pragma once
 
 #include "FarTierTable.h"
+#include "FarVolumeMemory.h"
 
 #include <array>
 #include <cstddef>
@@ -100,7 +101,8 @@ enum class FarVolumeBuildError {
     InvalidSampler,
     SamplerFailure,
     NonFiniteDensity,
-    AllocationFailure
+    AllocationFailure,
+    InvalidMemory
 };
 
 // A sampler must be a bounded, pure function of world-coordinate input and its
@@ -118,5 +120,24 @@ bool BuildFarVolumeTile(const FarVolumeRequest& request,
                         const FarVolumeSampler& sampler,
                         FarVolumeTile& output,
                         FarVolumeBuildError* error = nullptr);
+
+// Bytes held by the tile's brick buffer (capacity, not size). This is exactly what
+// BuildFarVolumeTileCharged leaves charged to the retained lease.
+inline std::uint64_t FarVolumeTileRetainedBytes(const FarVolumeTile& tile) {
+    return static_cast<std::uint64_t>(tile.bricks.capacity()) * sizeof(FarVolumeBrick);
+}
+
+// BuildFarVolumeTile with every allocation admitted by `memory` before it is made.
+// A null pool is the unaccounted legacy path. With a pool, `memory.retained`
+// is required; on success it is replaced by the new tile's bytes and on any failure
+// (including AllocationFailure from a refused admission) it, `output` and the pool
+// are unchanged. A pool without a usable `retained` lease fails with InvalidMemory
+// before the first sample. No fallback allocation is attempted.
+bool BuildFarVolumeTileCharged(const FarVolumeRequest& request,
+                               const FarVolumeBuildLimits& limits,
+                               const FarVolumeMemory& memory,
+                               const FarVolumeSampler& sampler,
+                               FarVolumeTile& output,
+                               FarVolumeBuildError* error = nullptr);
 
 } // namespace Luminumbra::World

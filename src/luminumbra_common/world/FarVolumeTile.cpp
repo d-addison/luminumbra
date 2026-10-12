@@ -25,11 +25,23 @@ bool BuildFarVolumeTile(const FarVolumeRequest& request,
                         const FarVolumeSampler& sampler,
                         FarVolumeTile& output,
                         FarVolumeBuildError* error) {
+    return BuildFarVolumeTileCharged(request, limits, FarVolumeMemory{}, sampler, output, error);
+}
+
+bool BuildFarVolumeTileCharged(const FarVolumeRequest& request,
+                               const FarVolumeBuildLimits& limits,
+                               const FarVolumeMemory& memory,
+                               const FarVolumeSampler& sampler,
+                               FarVolumeTile& output,
+                               FarVolumeBuildError* error) {
     const auto fail = [error](FarVolumeBuildError value) {
         if (error)
             *error = value;
         return false;
     };
+    FarVolumeMemoryScope scope(memory, true);
+    if (!scope.valid())
+        return fail(FarVolumeBuildError::InvalidMemory);
     const auto dimensions = FarTierAt(request.key.tier);
     if (!dimensions)
         return fail(FarVolumeBuildError::InvalidTier);
@@ -91,6 +103,11 @@ bool BuildFarVolumeTile(const FarVolumeRequest& request,
                     if (brick_solid && brick_air) {
                         if (tile.bricks.size() >= limits.max_surface_bricks)
                             return fail(FarVolumeBuildError::SurfaceLimit);
+                        if (!FarVolumeReserveCharged(tile.bricks,
+                                                     tile.bricks.size() + 1,
+                                                     limits.max_surface_bricks,
+                                                     scope.output()))
+                            return fail(FarVolumeBuildError::AllocationFailure);
                         tile.bricks.push_back(brick);
                     }
                 }
@@ -106,6 +123,7 @@ bool BuildFarVolumeTile(const FarVolumeRequest& request,
     tile.content =
         solid ? (air ? FarVolumeContent::Mixed : FarVolumeContent::Solid) : FarVolumeContent::Air;
     output = std::move(tile);
+    scope.Commit(); // after the old output's buffers are freed
     if (error)
         *error = FarVolumeBuildError::None;
     return true;
