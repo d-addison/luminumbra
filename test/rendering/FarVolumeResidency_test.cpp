@@ -274,11 +274,13 @@ TEST(FarVolumeResidency, FourCurrentEmptyChildrenPermitYieldEachFrame) {
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
     do {
         owner.AdvanceFrame(0, 0, {5, 5, 4 * 1024 * 1024}, producer, backend);
-        if (owner.CoarseMayYield({5, 0, 0}))
+        if (owner.CoarseMayYield({5, 0, 0}) &&
+            IsFarTileCovering(Observation(owner, requests[0].identity.key).coverage))
             break;
         std::this_thread::yield();
     } while (std::chrono::steady_clock::now() < deadline);
     ASSERT_TRUE(owner.CoarseMayYield({5, 0, 0}));
+    ASSERT_TRUE(IsFarTileCovering(Observation(owner, requests[0].identity.key).coverage));
     const auto settled = owner.Snapshot();
     EXPECT_EQ(settled[3].empty_pairs, 4u);
     EXPECT_EQ(settled[3].covering, 4u);
