@@ -74,7 +74,7 @@ bool AdaptFarVolumeRenderMesh(const World::FarVolumeMesh& source,
     if (source.indices.size() > (max_buffer_bytes - vertex_bytes) / sizeof(std::uint32_t))
         return fail(FarVolumeRenderError::ByteLimit);
     for (const auto& vertex : source.vertices) {
-        Vec3 position, normal;
+        Vec3 position{0.0f}, normal{0.0f};
         if (!FloatVector(vertex.position, position) || !FloatVector(vertex.normal, normal) ||
             (normal.x == 0 && normal.y == 0 && normal.z == 0))
             return fail(FarVolumeRenderError::InvalidSource);
@@ -107,16 +107,16 @@ bool AdaptFarVolumeRenderMesh(const World::FarVolumeMesh& source,
         if (FarVolumeRenderRetainedBytes(candidate) > max_buffer_bytes)
             return fail(FarVolumeRenderError::ByteLimit);
         for (const auto& vertex : source.vertices) {
-            Vec3 position, normal;
-            FloatVector(vertex.position, position);
-            FloatVector(vertex.normal, normal);
+            Vec3 position{0.0f}, normal{0.0f};
+            if (!FloatVector(vertex.position, position) || !FloatVector(vertex.normal, normal))
+                return fail(FarVolumeRenderError::InvalidSource);
             candidate.vertices.push_back({position, normal, vertex.material});
-            if (!candidate.bounds)
+            if (candidate.bounds) {
+                auto& bounds = *candidate.bounds;
+                bounds.min = glm::min(bounds.min, position);
+                bounds.max = glm::max(bounds.max, position);
+            } else
                 candidate.bounds = FarVolumeRenderBounds{position, position};
-            else {
-                candidate.bounds->min = glm::min(candidate.bounds->min, position);
-                candidate.bounds->max = glm::max(candidate.bounds->max, position);
-            }
         }
         candidate.indices.insert(
             candidate.indices.end(), source.indices.begin(), source.indices.end());
