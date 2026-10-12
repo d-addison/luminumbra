@@ -1,4 +1,5 @@
 #pragma once
+#include "../systems/RegionConsumerGate.h"
 
 // sim.fire — deterministic emergent FIRE SPREAD across combustible entities.
 //
@@ -104,7 +105,8 @@ inline FireSpreadStats
 RunFireSpreadOnTick(entt::registry& reg,
                     std::uint64_t tick,
                     glm::vec2 wind_xz = glm::vec2(0.0f),
-                    std::span<const FireIgnitionSource> external_sources = {}) {
+                    std::span<const FireIgnitionSource> external_sources = {},
+                    const ::Luminumbra::world::RegionEntityGate& gate = {}) {
     (void)tick;
     FireSpreadStats stats;
 
@@ -113,7 +115,8 @@ RunFireSpreadOnTick(entt::registry& reg,
     // id-ordered entity list so snapshot + apply are order-independent + deterministic.
     std::vector<entt::entity> ents;
     for (auto e : view)
-        ents.push_back(e);
+        if (::Luminumbra::world::AdmitRegionEntity(gate, e))
+            ents.push_back(e);
     std::sort(ents.begin(), ents.end(), [](entt::entity a, entt::entity b) {
         return entt::to_integral(a) < entt::to_integral(b);
     });
@@ -142,6 +145,8 @@ RunFireSpreadOnTick(entt::registry& reg,
             return entt::to_integral(a) < entt::to_integral(b);
         });
         for (auto e : igs) {
+            if (!::Luminumbra::world::AdmitRegionEntity(gate, e))
+                continue;
             const auto& src = ig.get<Comp::IgnitionSourceComponent>(e);
             const auto& tf = ig.get<Comp::TransformComponent>(e);
             sources.push_back({glm::vec2(tf.position.x, tf.position.z),

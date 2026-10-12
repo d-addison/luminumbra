@@ -1,4 +1,5 @@
 #pragma once
+#include "../systems/RegionConsumerGate.h"
 
 //   ( germination): CropLifecycleSystem — advances ripe plants through
 // SENESCENCE and reseeds the next generation. Each tick, for every CropLifecycleComponent plant:
@@ -49,7 +50,10 @@ struct CropLifecycleStats {
 // Advance every CropLifecycleComponent plant one tick. world_seed lets distinct worlds diverge
 // (GameSession passes the default 0, mirroring the reproduction/pollination systems).
 inline CropLifecycleStats
-RunCropLifecycleOnTick(entt::registry& reg, std::uint64_t tick, std::uint64_t world_seed = 0) {
+RunCropLifecycleOnTick(entt::registry& reg,
+                       std::uint64_t tick,
+                       std::uint64_t world_seed = 0,
+                       const ::Luminumbra::world::RegionEntityGate& gate = {}) {
     namespace Comp = ::Luminumbra::Components;
     namespace dm = ::Luminumbra::DeterministicMath;
     CropLifecycleStats stats;
@@ -60,7 +64,8 @@ RunCropLifecycleOnTick(entt::registry& reg, std::uint64_t tick, std::uint64_t wo
                          const Comp::TransformComponent>();
     std::vector<entt::entity> ents;
     for (auto e : view)
-        ents.push_back(e);
+        if (::Luminumbra::world::AdmitRegionEntity(gate, e))
+            ents.push_back(e);
     if (ents.empty())
         return stats; // opt-in: no participants -> byte-identical no-op
     std::sort(ents.begin(), ents.end(), [](entt::entity a, entt::entity b) {

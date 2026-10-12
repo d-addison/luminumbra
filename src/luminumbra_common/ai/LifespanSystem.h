@@ -1,4 +1,5 @@
 #pragma once
+#include "../systems/RegionConsumerGate.h"
 
 // sim.lifespan: creatures (and any opted-in entity) AGE and DIE. This is
 // the closing half of the ecology life-cycle: CreatureReproductionSystem makes
@@ -67,7 +68,9 @@ struct LifespanStats {
 // of registry state. id-ordered so the death-marking order (and thus any derived
 // telemetry) is deterministic. No creation/destruction -> no two-phase needed,
 // no view invalidation. Safe to call every tick; a no-op when no entity opts in.
-inline LifespanStats RunLifespanOnTick(entt::registry& reg, std::uint64_t /*tick*/ = 0) {
+inline LifespanStats RunLifespanOnTick(entt::registry& reg,
+                                       std::uint64_t /*tick*/ = 0,
+                                       const ::Luminumbra::world::RegionEntityGate& gate = {}) {
     LifespanStats stats;
 
     auto view = reg.view<Comp::MortalComponent>();
@@ -79,6 +82,8 @@ inline LifespanStats RunLifespanOnTick(entt::registry& reg, std::uint64_t /*tick
     });
 
     for (auto e : ents) {
+        if (!::Luminumbra::world::AdmitRegionEntity(gate, e))
+            continue;
         auto& mortal = view.get<Comp::MortalComponent>(e);
 
         // A latched-dead entity is inert: it neither ages nor dies again, so its

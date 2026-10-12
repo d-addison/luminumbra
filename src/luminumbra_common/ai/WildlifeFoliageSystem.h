@@ -1,4 +1,5 @@
 #pragma once
+#include "../systems/RegionConsumerGate.h"
 
 // sim.wildlife_foliage: the ECOLOGY x FOLIAGE coupling: non-predator CREATURES
 // GRAZE/TRAMPLE the nearby PLANTS, and the plants slowly REGROW when left alone. This
@@ -97,9 +98,11 @@ struct WildlifeFoliageStats {
 // Advance the wildlife-foliage coupling by ONE fixed tick. Pure function of registry
 // state. id-ordered; graze pressure is summed per plant (order-independent) and feed is
 // summed per creature, then both are applied in id-ordered passes.
-inline WildlifeFoliageStats RunWildlifeFoliageOnTick(entt::registry& reg,
-                                                     std::uint64_t tick,
-                                                     const WildlifeFoliageTuning& tuning = {}) {
+inline WildlifeFoliageStats
+RunWildlifeFoliageOnTick(entt::registry& reg,
+                         std::uint64_t tick,
+                         const WildlifeFoliageTuning& tuning = {},
+                         const ::Luminumbra::world::RegionEntityGate& gate = {}) {
     WildlifeFoliageStats stats;
     const float graze_radius_sq = tuning.graze_radius * tuning.graze_radius;
 
@@ -117,6 +120,8 @@ inline WildlifeFoliageStats RunWildlifeFoliageOnTick(entt::registry& reg,
         });
         grazers.reserve(cents.size());
         for (auto e : cents) {
+            if (!::Luminumbra::world::AdmitRegionEntity(gate, e))
+                continue;
             const auto& cr = cview.get<const Comp::CreatureComponent>(e);
             if (cr.is_predator || cr.eaten)
                 continue; // only live herbivores graze
@@ -139,6 +144,8 @@ inline WildlifeFoliageStats RunWildlifeFoliageOnTick(entt::registry& reg,
 
     // --- 3. id-ordered pass over plants: count grazers in range, graze or regrow. ---
     for (auto pe : pents) {
+        if (!::Luminumbra::world::AdmitRegionEntity(gate, pe))
+            continue;
         ++stats.plants;
         auto& gz = pview.get<Comp::GrazeableComponent>(pe);
         const auto& ptf = pview.get<const Comp::TransformComponent>(pe);

@@ -1,4 +1,5 @@
 #pragma once
+#include "../systems/RegionConsumerGate.h"
 
 // sim.pollination — DETERMINISTIC cross-pollination of neighbouring plants so a
 // field's genetics DRIFT over seasons. A flowering / fruiting plant ("donor")
@@ -118,13 +119,15 @@ inline luminumbra::core::DeterministicRng PollinationPairRng(std::uint64_t id_a,
 
 // The deterministic, pair-symmetric cross of two plant genomes. Public so tests (and
 // callers) can assert symmetry directly without spinning a registry.
-inline Comp::PlantGenomeComponent PollinateCross(const Comp::PlantGenomeComponent& receiver,
-                                                 const Comp::PlantGenomeComponent& donor,
-                                                 std::uint64_t receiver_id,
-                                                 std::uint64_t donor_id,
-                                                 std::uint64_t tick,
-                                                 std::uint64_t world_seed = 0,
-                                                 float mutation_frac = kPollinationMutationFrac) {
+inline Comp::PlantGenomeComponent
+PollinateCross(const Comp::PlantGenomeComponent& receiver,
+               const Comp::PlantGenomeComponent& donor,
+               std::uint64_t receiver_id,
+               std::uint64_t donor_id,
+               std::uint64_t tick,
+               std::uint64_t world_seed = 0,
+               float mutation_frac = kPollinationMutationFrac,
+               const ::Luminumbra::world::RegionEntityGate& gate = {}) {
     luminumbra::core::DeterministicRng rng =
         PollinationPairRng(receiver_id, donor_id, tick, world_seed);
     // Order the parents by id too, so the BlendCrossover draw order (and thus the
@@ -154,7 +157,8 @@ inline PollinationStats RunPollinationOnTick(entt::registry& reg,
     // id-ordered participant ids so donor-selection ties + apply order are deterministic.
     std::vector<entt::entity> ents;
     for (auto e : view)
-        ents.push_back(e);
+        if (::Luminumbra::world::AdmitRegionEntity(gate, e))
+            ents.push_back(e);
     std::sort(ents.begin(), ents.end(), [](entt::entity a, entt::entity b) {
         return entt::to_integral(a) < entt::to_integral(b);
     });

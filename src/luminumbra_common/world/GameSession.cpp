@@ -756,6 +756,19 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
                 }
             }
 
+            const auto foliage_due = SortedDueRegions();
+            RegionEntityGate foliage_gate;
+            if (m_activeRegionsEnabled) {
+                foliage_gate = [this, &foliage_due](entt::entity entity) {
+                    const auto* transform =
+                        m_registry.try_get<const Components::TransformComponent>(entity);
+                    if (!transform || !ActiveRegionLedger::valid_anchor(transform->position))
+                        return false;
+                    const auto key = ActiveRegionLedger::region_at(transform->position);
+                    return std::binary_search(foliage_due.begin(), foliage_due.end(), key);
+                };
+            }
+
             // 5b.: the soil-nutrient + irrigation-moisture FIELDS update BEFORE plant
             // growth (slot 6) so growth reads FRESH availability, not last tick's (the prior order
             // had growth at slot 6 reading grids that only updated at slot 7 -> a 1-tick-stale
@@ -952,14 +965,14 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
                 });
                 if (!m_registry.view<Comp::PlantGenomeComponent>().empty())
                     fol::RunPollinationOnTick(
-                        m_registry, current_tick, windXZ, 0, m_plantMutationRate);
+                        m_registry, current_tick, windXZ, 0, m_plantMutationRate, foliage_gate);
                 budget.Next(Stage::Disease, [&] {
                     return SimParticipantCount<TelemetryComp::PlantTag,
                                                TelemetryComp::PlantHealthComponent,
                                                TelemetryComp::TransformComponent>(m_registry);
                 });
                 if (!m_registry.view<Comp::PlantHealthComponent>().empty())
-                    fol::RunPlantDiseaseOnTick(m_registry, current_tick);
+                    fol::RunPlantDiseaseOnTick(m_registry, current_tick, 0, foliage_gate);
                 //  germination: ripe plants senesce -> annual dies + reseeds, perennial
                 // resets + reseeds (child genome = the pollination cross, computed just above, or
                 // self). Runs AFTER pollination so next_genome is fresh. Opt-in via
@@ -971,7 +984,7 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
                                                TelemetryComp::TransformComponent>(m_registry);
                 });
                 if (!m_registry.view<Comp::CropLifecycleComponent>().empty())
-                    fol::RunCropLifecycleOnTick(m_registry, current_tick);
+                    fol::RunCropLifecycleOnTick(m_registry, current_tick, 0, foliage_gate);
                 budget.Next(Stage::Fire, [&] {
                     return SimParticipantCount<TelemetryComp::CombustibleComponent,
                                                TelemetryComp::TransformComponent>(m_registry);
@@ -989,7 +1002,7 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
                         }
                     }
                     luminumbra::sim::RunFireSpreadOnTick(
-                        m_registry, current_tick, windXZ, weather_ignitions);
+                        m_registry, current_tick, windXZ, weather_ignitions, foliage_gate);
                 }
                 budget.Next(Stage::Grazing, [&] {
                     return SimParticipantCount<TelemetryComp::GrazeableComponent,
@@ -997,12 +1010,12 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
                 });
                 if (!m_registry.view<Comp::GrazeableComponent>().empty())
                     luminumbra::ai::RunWildlifeFoliageOnTick(
-                        m_registry, current_tick, m_wildlifeFoliageTuning);
+                        m_registry, current_tick, m_wildlifeFoliageTuning, foliage_gate);
                 budget.Next(Stage::Lifespan, [&] {
                     return SimParticipantCount<TelemetryComp::MortalComponent>(m_registry);
                 });
                 if (!m_registry.view<Comp::MortalComponent>().empty())
-                    luminumbra::ai::RunLifespanOnTick(m_registry, current_tick);
+                    luminumbra::ai::RunLifespanOnTick(m_registry, current_tick, foliage_gate);
                 // Herd alarm: propagate collective vigilance among same-role creatures. The brain
                 // (slot 2e) sets AlarmComponent.alarmed when a prey senses a threat and reads the
                 // propagated level to flee with the herd; this maintains the field.
@@ -1498,11 +1511,13 @@ void GameSession::RunRegionScheduler(std::uint64_t current_tick) {
                                                         m_groundObjects.region_bytes(key),
                                                         RegionalFieldProjection(key)});
                 },
-                // Later slices extend this probe with creatures, plants and water debt.
+                // Persistent plants and creatures additionally extend this ownership probe below.
                 [this, &resident_regions](RegionKey key) {
                     for (const auto& entry : m_regionWork)
                         if (entry.key == key)
                             return true;
+                    if (m_activeRegionLedger.water_debts().contains(key))
+                        return true;
                     if (m_groundObjects.owns_region(key))
                         return true;
                     if (m_fieldPages.owns_region(key))
@@ -1634,6 +1649,12 @@ std::string GameSession::RegionalFieldProjection(RegionKey key) const {
     auto bytes = m_fieldPages.region_bytes(key);
     if (m_energyFieldState)
         bytes += m_energyFieldState->RegionBytes(key);
+    const auto debt = m_activeRegionLedger.water_debts().find(key);
+    if (debt != m_activeRegionLedger.water_debts().end()) {
+        bytes += "|water_debt:";
+        for (int i = 0; i < 8; ++i)
+            bytes.push_back(static_cast<char>((debt->second >> (8 * i)) & 255));
+    }
     const auto age = m_activeRegionLedger.energy_ages().find(key);
     if (age != m_activeRegionLedger.energy_ages().end()) {
         bytes += "|energy_age:";
