@@ -60,7 +60,7 @@ for argument in sys.argv[1:]:
 
 crash_dir = Path(os.environ["LUMINUMBRA_CRASH_DIR"])
 iteration = int(crash_dir.parent.name.split("-", 1)[1])
-print(f"fake child iteration {iteration} mode {mode}", flush=True)
+print(f"fake child iteration={iteration} mode {mode}", flush=True)
 
 kind, _, target = mode.partition("@")
 target_iteration = int(target) if target else None
@@ -395,7 +395,7 @@ class RepeatQualificationTest(HarnessTestCase):
         for index in range(1, 4):
             log = run_dir / f"iter-{index}.log"
             self.assertTrue(log.is_file(), log)
-            self.assertIn(f"fake child iteration {index}", log.read_text(encoding="utf-8"))
+            self.assertIn(f"fake child iteration={index}", log.read_text(encoding="utf-8"))
             gtest_json = Path(receipt["iterations"][index - 1]["gtest_json"])
             self.assertEqual(json.loads(gtest_json.read_text())["tests"], 1)
 
@@ -493,21 +493,22 @@ class RepeatQualificationTest(HarnessTestCase):
         )
 
     def test_launch_error_is_recorded_and_receipt_finalized(self) -> None:
-        # A file without execute permission (POSIX) or a non-executable image (Windows)
-        # makes the launch itself fail.
-        broken = self.root / "bin dir" / "not_executable.exe"
-        broken.write_bytes(b"not an executable image")
-        if os.name != "nt":
-            broken.chmod(0o644)
-        self.exe = broken
-        result = self.run_script(count=2, mode="pass")
+        # Keep the valid launcher, but prevent its working directory from existing.
+        # A file ancestor also prevents POSIX core preflight from creating it.
+        blocker = self.root / "cwd-blocker"
+        blocker.write_bytes(b"not a directory")
+        self.work = blocker / "missing-cwd"
+        args = [*self.base_args(), "--count", "2", "--timeout-seconds", "30"]
+        if "--allow-no-dumps" not in args:
+            args.append("--allow-no-dumps")
+        result = self.run_raw([*args, "--", "--fake=pass"], timeout=90)
         self.assertEqual(result.returncode, 1, result.stderr)
 
         receipt = self.load_receipt()
         self.assertEqual(receipt["status"], "failed")
         self.assertIsNotNone(receipt["end_time"])
         self.assertEqual(len(receipt["iterations"]), 2)
-        self.assertTrue(receipt["iterations"][0]["status"].startswith("launch_error"))
+        self.assertTrue(all(entry["status"] == "launch_error" for entry in receipt["iterations"]))
         self.assertTrue(receipt["first_failure"]["failure_reason"].startswith("launch_error"))
 
     def test_invalid_count_and_timeout_are_rejected(self) -> None:
@@ -557,7 +558,7 @@ class FixtureWatchdogTest(HarnessTestCase):
             self.assertFalse(pid_alive(grandchild_pid), "fixture descendant survived outer watchdog")
             logs = list(retained[0].rglob("iter-1.log"))
             self.assertEqual(len(logs), 1)
-            self.assertIn("fake child iteration 1 mode hang", logs[0].read_text())
+            self.assertIn("fake child iteration=1 mode hang", logs[0].read_text())
 
     def test_fixture_runner_keeps_separate_output_streams(self) -> None:
         result = self.run_script(count=1, mode="pass")
