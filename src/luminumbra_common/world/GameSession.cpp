@@ -2127,7 +2127,7 @@ std::string GameSession::ComputeChunkStateHash() {
                                         record->second.state == RegionState::Frozen
                                     ? record->second.frozen_digest
                                     : Persistence::WorldSaveService::region_simulation_digest(
-                                          directory, key, {live, parked, durable});
+                                          directory, key, {live, parked, durable, {}, {}});
             projection += std::to_string(key.x) + "," + std::to_string(key.z) + ":" +
                           std::to_string(digest) + ";";
         }
