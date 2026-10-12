@@ -2518,8 +2518,9 @@ TEST(GameSessionHeadlessWorldTest, FrozenRegionDoesNotAgeItsGroundObjects) {
     std::size_t frozen_ticks = 0;
     for (int i = 0; i < 10; ++i) {
         const auto before = session.GetGroundObjects().objects().at(id).active_age;
-        ASSERT_TRUE(session.RecordActiveRegionWork({kFarGroundRegion, 100, 0, 0, 0}));
+        session.RecordActiveRegionWork({kFarGroundRegion, 100, 0, 0, 0});
         TickOnce(session);
+        ASSERT_GE(session.GetActiveRegionLedger().records().at(kFarGroundRegion).pressure, 100u);
         // Frozen after a tick means it was not due in that tick, so its objects did not age.
         if (session.GetActiveRegionLedger().records().at(kFarGroundRegion).state ==
             Luminumbra::world::RegionState::Frozen) {

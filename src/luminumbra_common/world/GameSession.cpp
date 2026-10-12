@@ -409,6 +409,7 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
                                  kScentFieldChannels
                            : 0ull;
             });
+            const bool scent_active = HasScentParticipants();
             AdvanceNearScent();
 
             budget.Next(Stage::Locomotion, [&] {
