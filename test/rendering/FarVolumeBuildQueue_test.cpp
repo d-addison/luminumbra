@@ -178,6 +178,39 @@ TEST(FarVolumeBuildQueue, SupersededWorkReapsBeforeLatestSpanDispatch) {
     EXPECT_FALSE(queue.TakeCompleted(first.identity, first.intent));
 }
 
+TEST(FarVolumeBuildQueue, ForgottenRunningKeyCanReturnWithSameIdentityAfterDrain) {
+    JobSystem jobs;
+    jobs.startup(1);
+    FarVolumeMemoryPool pool(64 * 1024 * 1024);
+    FarVolumeBuildQueue queue(jobs, pool, QueueLimits());
+    auto barrier = std::make_shared<Barrier>();
+    ReleaseOnExit release{barrier};
+    auto request = AirRequest();
+    request.authority.height = [barrier](std::int64_t, std::int64_t) {
+        barrier->Enter();
+        return 0.0f;
+    };
+    ASSERT_EQ(queue.Submit(request), FarVolumeSubmitStatus::Queued);
+    ASSERT_EQ(queue.Pump(1), 1u);
+    ASSERT_TRUE(barrier->WaitEntered());
+    queue.Forget(request.identity.key);
+    // Leaving/re-entering wanted before the cancelled worker has returned.
+    ASSERT_EQ(queue.Submit(request), FarVolumeSubmitStatus::Coalesced);
+    EXPECT_EQ(queue.Pump(1), 0u);
+    EXPECT_EQ(queue.Stats().pending, 1u);
+    auto wrong_intent = request;
+    wrong_intent.intent.extra_span = FarVolumeCoverageSpan{-320, 32};
+    EXPECT_EQ(queue.Submit(wrong_intent), FarVolumeSubmitStatus::Invalid);
+    barrier->Release();
+    auto result = WaitResult(queue, request);
+    ASSERT_TRUE(result);
+    EXPECT_EQ(result->status(), FarVolumeBuildStatus::ReadyEmpty);
+    EXPECT_EQ(result->identity(), request.identity);
+    EXPECT_EQ(queue.Stats().dispatched, 2u);
+    EXPECT_EQ(queue.Submit(request), FarVolumeSubmitStatus::Duplicate);
+    EXPECT_EQ(queue.Pump(1), 0u);
+}
+
 TEST(FarVolumeBuildQueue, EveryCurrencyFieldPreventsWrongCompletion) {
     JobSystem jobs;
     jobs.startup(1);

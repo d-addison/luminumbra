@@ -41,7 +41,8 @@ struct FarVolumeResidentObservation {
 struct FarVolumeFrameResult {
     std::size_t dispatched = 0, uploaded = 0, rejected = 0, evicted = 0;
     std::size_t build_attempts = 0, upload_attempts = 0;
-    std::uint64_t upload_bytes = 0;
+    // Geometry allowance debited before backend entry, including failed work.
+    std::uint64_t upload_bytes = 0, successful_upload_bytes = 0;
     bool horizon_refused = false;
 };
 using FarVolumeAuthorityProducer = std::function<std::optional<World::FarVolumeAuthority>(

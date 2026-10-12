@@ -218,7 +218,18 @@ TEST(FarVolumeResidency, ActualUploadBytesCapDefersReadyAndPreservesOldGpuOnFail
     FarVolumeUploadBackend failing = [](const auto&) -> std::unique_ptr<FarVolumeGpuAllocation> {
         throw std::runtime_error("partial backend failure");
     };
-    EXPECT_TRUE(owner.AdvanceFrame(0, 0, {0, 1, bytes}, {}, failing).horizon_refused);
+    std::size_t failed_calls = 0;
+    FarVolumeUploadBackend counted_failure = [&](const auto& mesh) {
+        ++failed_calls;
+        return failing(mesh);
+    };
+    const auto failure = owner.AdvanceFrame(0, 0, {0, 2, bytes}, {}, counted_failure);
+    EXPECT_TRUE(failure.horizon_refused);
+    EXPECT_EQ(failure.upload_bytes, bytes);
+    EXPECT_EQ(failure.successful_upload_bytes, 0u);
+    EXPECT_EQ(failed_calls, 1u);
+    EXPECT_EQ(Observation(owner, requests[1].identity.key).eligibility,
+              FarVolumeEligibility::Ready);
     EXPECT_EQ(owner.Resource(requests[0].identity.key), previous);
     const auto rejected = Observation(owner, requests[0].identity.key);
     EXPECT_EQ(rejected.eligibility, FarVolumeEligibility::RequestRejected);

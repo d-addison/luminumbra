@@ -288,12 +288,17 @@ FarVolumeFrameResult FarVolumeResidency::AdvanceFrame(double x,
             if (*bytes > limits.upload_bytes - result.upload_bytes)
                 continue;
             ++result.upload_attempts;
-            if (!Headroom(n, *bytes, entry.desired->identity.key, result) ||
-                !UploadFarVolume(*entry.completion,
+            if (!Headroom(n, *bytes, entry.desired->identity.key, result)) {
+                Reject(entry, result);
+                continue;
+            }
+            const auto remaining = limits.upload_bytes - result.upload_bytes;
+            result.upload_bytes += *bytes;
+            if (!UploadFarVolume(*entry.completion,
                                  entry.desired->identity,
                                  entry.desired->intent,
                                  memory_,
-                                 limits.upload_bytes - result.upload_bytes,
+                                 remaining,
                                  backend,
                                  entry.uploaded)) {
                 Reject(entry, result);
@@ -302,7 +307,7 @@ FarVolumeFrameResult FarVolumeResidency::AdvanceFrame(double x,
             entry.completion.reset();
             entry.eligibility = FarVolumeEligibility::Settled;
             ++result.uploaded;
-            result.upload_bytes += *bytes;
+            result.successful_upload_bytes += *bytes;
         }
     }
     // One global dispatch budget; explicit single-key Pump avoids fallback.
