@@ -80,3 +80,31 @@ The requirements follow SPDX 2.3
 [creation information](https://spdx.github.io/spdx-spec/v2.3/document-creation-information/),
 [file information](https://spdx.github.io/spdx-spec/v2.3/file-information/), and
 [package verification](https://spdx.github.io/spdx-spec/v2.3/package-information/#79-package-verification-code-field).
+
+## Independent verification
+
+`verify_release.py` checks a published source release from a fresh directory on an
+operator machine, not on the release runner. It requires the tag to be annotated, to
+point at the expected commit, and to be GitHub-verified; the release must be neither
+a draft nor a prerelease and must contain exactly the archive, the SPDX document, and
+`SHA256SUMS`. It downloads those assets, checks `SHA256SUMS`, regenerates the archive
+with `git archive` and deterministic gzip, runs the package and SBOM validators, and
+verifies the provenance and SBOM attestations with `gh attestation verify --source-digest
+<commit>`. The certificate's `buildSignerURI` must equal
+`https://github.com/<repo>/.github/workflows/release.yml@refs/tags/<tag>` exactly, its
+`sourceRepositoryDigest` must equal the expected commit, and `buildSignerDigest` must
+equal it when present. Malformed responses are reported as FAIL checks.
+
+```sh
+python3 tools/release/verify_release.py --repo OWNER/NAME --tag vX.Y.Z \
+  --expected-commit <40-hex commit> --out verify-out \
+  --python /path/to/sbom-venv/bin/python
+python3 tools/release/verify_release.py ... --dry-run-plan   # print commands only
+python3 tools/release/test_verify_release.py                 # offline, fake runner
+```
+
+The `--python` interpreter must have the pinned schema dependencies from
+`requirements-sbom.txt` installed. The script exits 0 only when every check passes and
+writes `verify-report.json` with the SHA-256 of each asset. The script refuses, before any
+network work, an `--out` directory where `verify-report.json` already exists, including as
+a symlink; use a fresh or empty directory.
