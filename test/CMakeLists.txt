@@ -105,6 +105,14 @@ target_link_libraries(morph_asset_test PRIVATE gtest_main nlohmann_json meshopti
 luminumbra_configure_first_party_target(morph_asset_test)
 luminumbra_pin_fp_determinism(morph_asset_test)
 
+# Table-driven volume generation has no client, GL or world-service dependency.
+add_executable(far_volume_tile_test
+    common/FarVolumeTile_test.cpp
+    ../src/luminumbra_common/world/FarVolumeTile.cpp)
+target_include_directories(far_volume_tile_test PRIVATE ../src)
+target_link_libraries(far_volume_tile_test PRIVATE gtest_main)
+luminumbra_configure_first_party_target(far_volume_tile_test)
+
 add_executable(common_tests
     common/Crc32_test.cpp
     rendering/shader_compositing_contract_test.cpp
@@ -1651,6 +1659,7 @@ if(LUMINUMBRA_ENABLE_STATIC_PREVIEW)
     gtest_discover_tests(viewport_protocol_test PROPERTIES LABELS "authoring;tools" TIMEOUT 30)
 endif()
 set(LUMINUMBRA_GTEST_TARGETS
+    far_volume_tile_test
     world_generation_test
     worldgen_layer_snapshot_test
     asset_processor_round_trip_test
