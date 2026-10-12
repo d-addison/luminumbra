@@ -2,6 +2,8 @@
 
 add_executable(asset_processor
     asset_processor.cpp
+    morph_asset_processor.cpp
+    "${CMAKE_SOURCE_DIR}/src/luminumbra_common/animation/MorphMesh.cpp"
 )
 
 # Tell the target where to find "meshoptimizer.h"
