@@ -44,6 +44,18 @@ struct FarVolumeFrameResult {
     std::uint64_t upload_bytes = 0;
     bool horizon_refused = false;
 };
+struct FarVolumeTierObservation {
+    std::size_t wanted = 0, pending = 0, building = 0, ready = 0, settled = 0;
+    std::size_t request_rejected = 0, budget_evicted = 0;
+    // Pair counts include stale resources; covering counts only complete current
+    // identity + span. Empty pairs have no GPU object or charge.
+    std::size_t uploaded_pairs = 0, empty_pairs = 0, covering = 0;
+    std::uint64_t ready_cpu_bytes = 0, retained_gpu_bytes = 0;
+    // Whole pool includes queue/owner controls, snapshots, scratch, overlapping
+    // source/converted results and GPU, unlike the retained pair subtotals.
+    // Worker activity can skew CPU/GPU sampling; diagnostics never admit bytes.
+    World::FarVolumeTierMemoryStats memory;
+};
 using FarVolumeAuthorityProducer = std::function<std::optional<World::FarVolumeAuthority>(
     const FarVolumeWantedRequest&, World::FarVolumeMemoryPool&)>;
 
@@ -77,6 +89,7 @@ public:
                                       const FarVolumeAuthorityProducer& producer,
                                       const FarVolumeUploadBackend& backend);
     std::optional<FarVolumeResidentObservation> Observe(const World::FarTileKey& key) const;
+    std::array<FarVolumeTierObservation, World::kFarTierCount> Snapshot() const;
     // Borrowed GPU pointer is valid only until next mutation/destruction. Stale
     // pairs are observable but never reported covering. Renderer chooses draw.
     const FarVolumeGpuAllocation* Resource(const World::FarTileKey& key) const;

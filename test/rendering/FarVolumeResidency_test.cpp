@@ -224,6 +224,15 @@ TEST(FarVolumeResidency, ActualUploadBytesCapDefersReadyAndPreservesOldGpuOnFail
     EXPECT_EQ(rejected.eligibility, FarVolumeEligibility::RequestRejected);
     EXPECT_EQ(rejected.gpu_bytes, bytes);
     EXPECT_FALSE(rejected.coverage.current);
+    const auto state = owner.Snapshot();
+    EXPECT_EQ(state[4].wanted, 2u);
+    EXPECT_EQ(state[4].request_rejected, 1u);
+    EXPECT_EQ(state[4].ready, 1u);
+    EXPECT_EQ(state[4].uploaded_pairs, 1u);
+    EXPECT_EQ(state[4].covering, 0u);
+    EXPECT_EQ(state[4].retained_gpu_bytes, bytes);
+    EXPECT_EQ(state[4].memory.bytes_gpu, bytes);
+    EXPECT_GT(state[4].memory.bytes_total, bytes);
     owner.CancelAndDrain();
     EXPECT_FALSE(owner.Observe(requests[0].identity.key));
     ASSERT_TRUE(memory.Pool(5));
@@ -254,12 +263,20 @@ TEST(FarVolumeResidency, FourCurrentEmptyChildrenPermitYieldEachFrame) {
         std::this_thread::yield();
     } while (std::chrono::steady_clock::now() < deadline);
     ASSERT_TRUE(owner.CoarseMayYield({5, 0, 0}));
+    const auto settled = owner.Snapshot();
+    EXPECT_EQ(settled[3].empty_pairs, 4u);
+    EXPECT_EQ(settled[3].covering, 4u);
+    EXPECT_EQ(settled[4].empty_pairs, 1u);
+    EXPECT_EQ(settled[4].retained_gpu_bytes, 0u);
     EXPECT_FALSE(owner.CoarseMayYield({4, 0, 0}));
     ++requests[4].identity.span_generation;
     requests[4].intent.extra_span = FarVolumeCoverageSpan{-512, 256};
     ASSERT_TRUE(owner.ReplaceWanted(requests));
     EXPECT_FALSE(owner.CoarseMayYield({5, 0, 0}));
     EXPECT_FALSE(Observation(owner, requests[4].identity.key).coverage.current);
+    const auto stale = owner.Snapshot();
+    EXPECT_EQ(stale[3].empty_pairs, 4u);
+    EXPECT_EQ(stale[3].covering, 3u);
     ASSERT_TRUE(owner.ReplaceWanted(std::span(requests).first(4)));
     EXPECT_FALSE(owner.CoarseMayYield({5, 0, 0}));
 }

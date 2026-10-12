@@ -387,6 +387,52 @@ const FarVolumeGpuAllocation* FarVolumeResidency::Resource(const World::FarTileK
     const auto* entry = Find(key);
     return entry ? entry->uploaded.resource() : nullptr;
 }
+std::array<FarVolumeTierObservation, World::kFarTierCount> FarVolumeResidency::Snapshot() const {
+    CheckOwner();
+    std::array<FarVolumeTierObservation, World::kFarTierCount> result{};
+    for (std::size_t i = 0; i < tiers_.size(); ++i) {
+        auto& observation = result[i];
+        const auto memory = memory_.Stats(i + 1);
+        if (memory)
+            observation.memory = *memory;
+        for (const auto& entry : tiers_[i]->entries) {
+            if (!entry.desired)
+                continue;
+            ++observation.wanted;
+            switch (entry.eligibility) {
+                case FarVolumeEligibility::Wanted:
+                    break;
+                case FarVolumeEligibility::Pending:
+                    ++observation.pending;
+                    break;
+                case FarVolumeEligibility::Building:
+                    ++observation.building;
+                    break;
+                case FarVolumeEligibility::Ready:
+                    ++observation.ready;
+                    break;
+                case FarVolumeEligibility::Settled:
+                    ++observation.settled;
+                    break;
+                case FarVolumeEligibility::RequestRejected:
+                    ++observation.request_rejected;
+                    break;
+                case FarVolumeEligibility::BudgetEvicted:
+                    ++observation.budget_evicted;
+                    break;
+            }
+            const auto coverage =
+                entry.uploaded.Status(entry.desired->identity, entry.desired->intent);
+            observation.uploaded_pairs += coverage.state == World::FarTileState::Uploaded;
+            observation.empty_pairs += coverage.state == World::FarTileState::Empty;
+            observation.covering += World::IsFarTileCovering(coverage);
+            observation.ready_cpu_bytes +=
+                entry.completion ? entry.completion->retained_bytes() : 0;
+            observation.retained_gpu_bytes += entry.uploaded.gpu_bytes();
+        }
+    }
+    return result;
+}
 bool FarVolumeResidency::CoarseMayYield(const World::FarTileKey& key) const {
     CheckOwner();
     const auto* coarse = Find(key);
