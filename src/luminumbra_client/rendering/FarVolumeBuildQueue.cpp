@@ -119,10 +119,13 @@ FarVolumeSubmitStatus FarVolumeBuildQueue::Submit(const FarVolumeQueueRequest& r
             return FarVolumeSubmitStatus::Invalid;
         const auto& previous = *held;
         if (previous.identity == request.identity) {
-            return previous.intent == request.intent &&
-                           previous.authority.numeric == request.authority.numeric
-                       ? FarVolumeSubmitStatus::Duplicate
-                       : FarVolumeSubmitStatus::Invalid;
+            if (previous.intent != request.intent ||
+                previous.authority.numeric != request.authority.numeric)
+                return FarVolumeSubmitStatus::Invalid;
+            // Forgotten in-flight work revives only after cancellation drains.
+            // Ordinary equal requests still cannot restart/retry completed work.
+            if (!descriptors_[*existing].forget)
+                return FarVolumeSubmitStatus::Duplicate;
         }
     } else {
         for (std::size_t i = 0; i < descriptors_.size(); ++i)
