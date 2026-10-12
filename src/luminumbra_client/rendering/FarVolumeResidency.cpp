@@ -462,4 +462,34 @@ void FarVolumeResidency::CancelAndDrain() {
         for (auto& entry : tier->entries)
             entry = Entry{};
 }
+std::size_t FarVolumeResidency::VisitDraws(FarVolumeDrawVisitor visitor, void* context) {
+    Guard guard(*this);
+    if (!visitor)
+        return 0;
+    std::size_t count = 0;
+    for (std::size_t number = tiers_.size(); number > 0; --number) {
+        const auto& dimensions = World::kFarTierTable[number - 1];
+        const auto edge = std::int64_t(dimensions.tile_edge_meters);
+        for (const auto& entry : tiers_[number - 1]->entries) {
+            if (!entry.desired)
+                continue;
+            const auto& identity = entry.desired->identity;
+            const auto coverage = entry.uploaded.Status(identity, entry.desired->intent);
+            if (!World::IsFarTileCovering(coverage) || !entry.uploaded.resource() ||
+                CoarseMayYield(identity.key))
+                continue;
+            const auto& request = entry.uploaded.request();
+            const FarVolumeDrawRecord record{
+                identity,
+                request,
+                {identity.key.tx * edge, request.span.min_y, identity.key.tz * edge},
+                entry.uploaded.resource(),
+                World::FarWantedRadiusMeters(number),
+                double(dimensions.sample_spacing_meters) / 2};
+            visitor(context, record);
+            ++count;
+        }
+    }
+    return count;
+}
 } // namespace Luminumbra::Rendering

@@ -266,9 +266,14 @@ TEST(FarVolumeResidency, FourCurrentEmptyChildrenPermitYieldEachFrame) {
     ASSERT_TRUE(owner.ReplaceWanted(requests));
     EXPECT_FALSE(owner.CoarseMayYield({5, 0, 0}));
     // Per-tier held-result slots are bounded at two, so upload while building.
+    FarVolumeAuthorityProducer producer = [](const auto& request, auto&) {
+        return Authority(request, request.identity.key.tier == 5);
+    };
+    std::size_t backend_calls = 0;
+    const auto backend = Backend(backend_calls);
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
     do {
-        owner.AdvanceFrame(0, 0, {5, 5, 0}, Producer(), {});
+        owner.AdvanceFrame(0, 0, {5, 5, 4 * 1024 * 1024}, producer, backend);
         if (owner.CoarseMayYield({5, 0, 0}))
             break;
         std::this_thread::yield();
@@ -277,8 +282,15 @@ TEST(FarVolumeResidency, FourCurrentEmptyChildrenPermitYieldEachFrame) {
     const auto settled = owner.Snapshot();
     EXPECT_EQ(settled[3].empty_pairs, 4u);
     EXPECT_EQ(settled[3].covering, 4u);
-    EXPECT_EQ(settled[4].empty_pairs, 1u);
-    EXPECT_EQ(settled[4].retained_gpu_bytes, 0u);
+    EXPECT_EQ(settled[4].uploaded_pairs, 1u);
+    EXPECT_GT(settled[4].retained_gpu_bytes, 0u);
+    EXPECT_EQ(backend_calls, 1u);
+    std::vector<FarVolumeDrawRecord> records;
+    const auto collect = [](void* context, const FarVolumeDrawRecord& record) {
+        static_cast<std::vector<FarVolumeDrawRecord>*>(context)->push_back(record);
+    };
+    EXPECT_EQ(owner.VisitDraws(collect, &records), 0u);
+    EXPECT_TRUE(records.empty());
     EXPECT_FALSE(owner.CoarseMayYield({4, 0, 0}));
     ++requests[4].identity.span_generation;
     requests[4].intent.extra_span = FarVolumeCoverageSpan{-512, 256};
@@ -288,6 +300,21 @@ TEST(FarVolumeResidency, FourCurrentEmptyChildrenPermitYieldEachFrame) {
     const auto stale = owner.Snapshot();
     EXPECT_EQ(stale[3].empty_pairs, 4u);
     EXPECT_EQ(stale[3].covering, 3u);
+    ASSERT_EQ(owner.VisitDraws(collect, &records), 1u);
+    ASSERT_EQ(records.size(), 1u);
+    EXPECT_EQ(records[0].identity, requests[0].identity);
+    EXPECT_EQ(records[0].resource, owner.Resource(requests[0].identity.key));
+    EXPECT_EQ(records[0].horizontal_outer_clip_meters, 16384);
+    EXPECT_EQ(records[0].view_ray_bias_meters, 32);
+    EXPECT_EQ(records[0].origin_meters, (FarVolumePosition{0, records[0].request.span.min_y, 0}));
+    EXPECT_THROW(owner.VisitDraws(
+                     [](void* context, const auto&) {
+                         auto& runtime = *static_cast<FarVolumeResidency*>(context);
+                         runtime.CancelAndDrain();
+                     },
+                     &owner),
+                 std::logic_error);
+    EXPECT_EQ(owner.VisitDraws(collect, &records), 1u); // exception guard unwound
     ASSERT_TRUE(owner.ReplaceWanted(std::span(requests).first(4)));
     EXPECT_FALSE(owner.CoarseMayYield({5, 0, 0}));
 }

@@ -57,6 +57,15 @@ struct FarVolumeTierObservation {
     // Worker activity can skew CPU/GPU sampling; diagnostics never admit bytes.
     World::FarVolumeTierMemoryStats memory;
 };
+struct FarVolumeDrawRecord {
+    World::FarBuildIdentity identity;
+    World::FarVolumeRequest request;
+    World::FarVolumePosition origin_meters;
+    const FarVolumeGpuAllocation* resource = nullptr;
+    double horizontal_outer_clip_meters = 0;
+    double view_ray_bias_meters = 0;
+};
+using FarVolumeDrawVisitor = void (*)(void*, const FarVolumeDrawRecord&);
 using FarVolumeAuthorityProducer = std::function<std::optional<World::FarVolumeAuthority>(
     const FarVolumeWantedRequest&, World::FarVolumeMemoryPool&)>;
 
@@ -95,6 +104,14 @@ public:
     // pairs are observable but never reported covering. Renderer chooses draw.
     const FarVolumeGpuAllocation* Resource(const World::FarTileKey& key) const;
     bool CoarseMayYield(const World::FarTileKey& key) const;
+    // Allocation-free borrowed records, coarsest first. Only current/spanning
+    // GPU pairs appear; Empty covers/yields but never draws. Coarse yielding is
+    // re-evaluated on every call. Consumer applies fragment horizontal XZ clip
+    // and AWAY-from-camera ray bias (spacing/2), never triangle/frustum skips.
+    // Live-chunk ownership, the V1 176m inner clip and real shaders remain the
+    // renderer's contract. No pointer may escape controller mutation/lifetime.
+    // Callback mutation/re-entry is refused; callback exceptions propagate.
+    std::size_t VisitDraws(FarVolumeDrawVisitor visitor, void* context);
     // Cancels/drains every queue BEFORE dropping any authority/CPU/GPU pair.
     void CancelAndDrain();
 
