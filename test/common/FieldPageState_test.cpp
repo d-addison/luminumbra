@@ -587,3 +587,65 @@ TEST(FieldPageStateTest, NewActivationCannotSupplyPreviousTickBorderExchange) {
     EXPECT_TRUE(store.step_scheduled(records, {}, kSeed, 4, &previous).empty());
     EXPECT_EQ(store.serialize(), before);
 }
+
+TEST(FieldPageStateTest, WeatherCapacityIsOwnerAwareAndRefusesAtomically) {
+    FieldPageState store;
+    std::vector<RegionalStorm> storms;
+    std::vector<RegionalStrike> strikes;
+    for (int owner = 0; owner < 2; ++owner) {
+        for (std::uint32_t salt = 0; salt < FieldPageState::kMaxOwnerStorms; ++salt)
+            storms.push_back({{owner, 0},
+                              std::bit_cast<std::uint32_t>(owner * 512.0f + 256.0f),
+                              std::bit_cast<std::uint32_t>(256.0f),
+                              0,
+                              0,
+                              0,
+                              0,
+                              240,
+                              static_cast<std::uint32_t>(owner * 100) + salt,
+                              0});
+        for (std::uint32_t salt = 0; salt < FieldPageState::kMaxOwnerStrikes; ++salt)
+            strikes.push_back({{owner, 0},
+                               0,
+                               std::bit_cast<std::uint32_t>(owner * 512.0f + 256.0f),
+                               std::bit_cast<std::uint32_t>(256.0f),
+                               0,
+                               static_cast<std::uint32_t>(owner * 100) + salt,
+                               0});
+    }
+    // Both owners can retain their full allowance; global legacy 16/32 caps would fail this.
+    ASSERT_TRUE(store.replace_weather(storms, strikes));
+    const auto before = store.serialize();
+    FieldPageState restored;
+    std::string error;
+    ASSERT_TRUE(FieldPageState::parse(before, restored, error)) << error;
+    EXPECT_EQ(restored.serialize(), before);
+    auto excess_storms = storms;
+    excess_storms.push_back({{0, 0},
+                             std::bit_cast<std::uint32_t>(256.0f),
+                             std::bit_cast<std::uint32_t>(256.0f),
+                             0,
+                             0,
+                             0,
+                             0,
+                             240,
+                             99,
+                             0});
+    EXPECT_FALSE(store.replace_weather(excess_storms, strikes));
+    EXPECT_EQ(store.serialize(), before);
+    auto excess_strikes = strikes;
+    excess_strikes.push_back({{0, 0},
+                              0,
+                              std::bit_cast<std::uint32_t>(256.0f),
+                              std::bit_cast<std::uint32_t>(256.0f),
+                              0,
+                              99,
+                              0});
+    EXPECT_FALSE(store.replace_weather(storms, excess_strikes));
+    EXPECT_EQ(store.serialize(), before);
+    EXPECT_FALSE(
+        store.replace_weather(std::vector<RegionalStorm>(FieldPageState::kMaxStorms + 1), {}));
+    EXPECT_FALSE(
+        store.replace_weather({}, std::vector<RegionalStrike>(FieldPageState::kMaxStrikes + 1)));
+    EXPECT_EQ(store.serialize(), before);
+}

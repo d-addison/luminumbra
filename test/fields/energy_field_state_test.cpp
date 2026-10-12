@@ -780,6 +780,11 @@ TEST(RegionalEnergy, BorderAcquisitionInitializesZeroAgeWithoutAnInteriorAdvance
     EXPECT_GT(field.at_cell(21, 0), 0u);
     EXPECT_EQ(field.total_raw(), 1000u);
     EXPECT_TRUE(field.ValidateRegionalOwners(records, result.ages));
+    ASSERT_EQ(result.work.size(), 2u);
+    EXPECT_EQ(result.work[0].key, (RegionKey{0, 0}));
+    EXPECT_EQ(result.work[0].page_updates, 1u); // existing age, one physical page
+    EXPECT_EQ(result.work[1].key, (RegionKey{1, 0}));
+    EXPECT_EQ(result.work[1].page_updates, 2u); // one page plus first zero-age register
 }
 
 TEST(RegionalEnergy, RegionalMultiChannelStoredContinuationMatchesAtEveryCadence) {
@@ -804,3 +809,21 @@ TEST(RegionalEnergy, RegionalMultiChannelStoredContinuationMatchesAtEveryCadence
 }
 
 } // namespace
+
+TEST(RegionalEnergy, EmptyDueOwnersCountEachPersistentAgeUpdate) {
+    EnergyFieldState field;
+    const auto records = TwoEnergyOwners();
+    const std::array due{RegionKey{0, 0}, RegionKey{1, 0}};
+    const auto result = RegionalStep(field, 1, records, due, {});
+    EXPECT_TRUE(field.SerializeRegionalRecord().empty());
+    EXPECT_EQ(field.page_count(), 0u);
+    ASSERT_EQ(result.work.size(), 2u);
+    for (std::size_t i = 0; i < due.size(); ++i) {
+        EXPECT_EQ(result.work[i].key, due[i]);
+        EXPECT_EQ(result.work[i].page_updates, 1u);
+        EXPECT_EQ(result.work[i].region_ticks, 0u);
+        EXPECT_EQ(result.work[i].entity_updates, 0u);
+        EXPECT_EQ(result.work[i].water_cells, 0u);
+        EXPECT_EQ(result.ages.at(due[i]), 1u);
+    }
+}

@@ -409,78 +409,8 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
                                  kScentFieldChannels
                            : 0ull;
             });
-            // 2c.: scent stigmergy write/update. Game-data opt-in:
-            // no scent emitter/sensor components means no field mutation, while active
-            // ecology worlds get deterministic deposit -> diffuse/evaporate -> clamp.
             const bool scent_active = HasScentParticipants();
-            // ant foraging deposits trails into the SAME scent field (channels 2/3), so it runs in
-            // this slot BEFORE the diffuse/evaporate Step (its deposits then diffuse + evaporate
-            // this tick, like creature scent). Opt-in via ForagerComponent: a roster with none is a
-            // no-op, so the canonical roster (and any scent-only world) is byte-identical.
-            // Integer/id-ordered/libm-free.
-            const auto foragers_view =
-                m_registry.view<const Luminumbra::Components::ForagerComponent>();
-            const bool foraging_active = std::any_of(
-                foragers_view.begin(),
-                foragers_view.end(),
-                [this, &foragers_view](const auto entity) {
-                    if (!m_activeRegionsEnabled)
-                        return true;
-                    const auto& forager =
-                        foragers_view.get<const Luminumbra::Components::ForagerComponent>(entity);
-                    return ScentCellDue(forager.cell_x, forager.cell_z);
-                });
-            const bool scent_interior = scent_active || foraging_active;
-            if ((scent_interior || HasScentBorderWork()) && m_scentField) {
-                if (scent_active) {
-                    luminumbra::ai::RunScentDepositOnTick(m_registry,
-                                                          *m_scentField,
-                                                          ScentDomainOrigin(true),
-                                                          ScentDomainOrigin(false),
-                                                          kScentCellSize);
-                }
-                if (foraging_active) {
-                    luminumbra::ai::RunForagingOnTick(m_registry, *m_scentField, m_foragingTuning);
-                }
-                // advect the scent downwind by the PRIOR-tick wind (the wind field is updated
-                // later this tick at slot 3, so sampling here keeps the slot order stable). Convert
-                // world-units/sec -> cells/step via dt and the cell size. Scale 0 -> zero wind ->
-                // Step skips advection -> byte-identical (no re-pin until tuned on).
-                double wind_cx = 0.0, wind_cz = 0.0;
-                if (kScentWindAdvectionScale != 0.0 && m_windFieldSystem) {
-                    const Luminumbra::Vec2 w = m_windFieldSystem->SampleWind(m_metadata.spawnPoint);
-                    const double k = kScentWindAdvectionScale * m_simulationClock.fixed_dt() /
-                                     static_cast<double>(kScentCellSize);
-                    wind_cx = static_cast<double>(w.x) * k;
-                    wind_cz = static_cast<double>(w.y) * k;
-                }
-                m_scentField->Step(
-                    kScentDiffusionRate,
-                    kScentDiffusionIterations,
-                    kScentEvaporation,
-                    wind_cx,
-                    wind_cz,
-                    m_activeRegionsEnabled ? luminumbra::ai::ScentField::CellGate(
-                                                 [this, scent_interior](int x, int z) {
-                                                     return scent_interior && ScentCellDue(x, z);
-                                                 })
-                                           : luminumbra::ai::ScentField::CellGate{},
-                    m_activeRegionsEnabled ? luminumbra::ai::ScentField::EdgeGate(
-                                                 [this](int x, int z, int nx, int nz) {
-                                                     return ScentEdgeOpen(x, z, nx, nz);
-                                                 })
-                                           : luminumbra::ai::ScentField::EdgeGate{});
-                m_scentField->Clamp(kScentTauMin,
-                                    kScentTauMax,
-                                    m_activeRegionsEnabled
-                                        ? luminumbra::ai::ScentField::CellGate(
-                                              [this, scent_interior](int x, int z) {
-                                                  return scent_interior && ScentCellDue(x, z);
-                                              })
-                                        : luminumbra::ai::ScentField::CellGate{});
-                if (m_activeRegionsEnabled)
-                    CaptureRegionalScent();
-            }
+            AdvanceNearScent();
 
             budget.Next(Stage::Locomotion, [&] {
                 return SimParticipantCount<TelemetryComp::ActionPlanComponent,
@@ -3084,6 +3014,77 @@ void GameSession::CaptureRegionalScent() {
     m_fieldPages = std::move(next);
     for (const auto& [owner, updates] : work)
         RecordActiveRegionWork({owner, 0, 0, 0, updates});
+}
+
+void GameSession::AdvanceNearScent() {
+    // 2c.: scent stigmergy write/update. Game-data opt-in:
+    // no scent emitter/sensor components means no field mutation, while active
+    // ecology worlds get deterministic deposit -> diffuse/evaporate -> clamp.
+    const bool scent_active = HasScentParticipants();
+    // ant foraging deposits trails into the SAME scent field (channels 2/3), so it runs in
+    // this slot BEFORE the diffuse/evaporate Step (its deposits then diffuse + evaporate
+    // this tick, like creature scent). Opt-in via ForagerComponent: a roster with none is a
+    // no-op, so the canonical roster (and any scent-only world) is byte-identical.
+    // Integer/id-ordered/libm-free.
+    const auto foragers_view = m_registry.view<const Luminumbra::Components::ForagerComponent>();
+    const bool foraging_active = std::any_of(
+        foragers_view.begin(), foragers_view.end(), [this, &foragers_view](const auto entity) {
+            if (!m_activeRegionsEnabled)
+                return true;
+            const auto& forager =
+                foragers_view.get<const Luminumbra::Components::ForagerComponent>(entity);
+            return ScentCellDue(forager.cell_x, forager.cell_z);
+        });
+    const bool scent_interior = scent_active || foraging_active;
+    if ((scent_interior || HasScentBorderWork()) && m_scentField) {
+        if (scent_active) {
+            luminumbra::ai::RunScentDepositOnTick(m_registry,
+                                                  *m_scentField,
+                                                  ScentDomainOrigin(true),
+                                                  ScentDomainOrigin(false),
+                                                  kScentCellSize);
+        }
+        if (foraging_active) {
+            luminumbra::ai::RunForagingOnTick(m_registry, *m_scentField, m_foragingTuning);
+        }
+        // advect the scent downwind by the PRIOR-tick wind (the wind field is updated
+        // later this tick at slot 3, so sampling here keeps the slot order stable). Convert
+        // world-units/sec -> cells/step via dt and the cell size. Scale 0 -> zero wind ->
+        // Step skips advection -> byte-identical (no re-pin until tuned on).
+        double wind_cx = 0.0, wind_cz = 0.0;
+        if (kScentWindAdvectionScale != 0.0 && m_windFieldSystem) {
+            const Luminumbra::Vec2 w = m_windFieldSystem->SampleWind(m_metadata.spawnPoint);
+            const double k = kScentWindAdvectionScale * m_simulationClock.fixed_dt() /
+                             static_cast<double>(kScentCellSize);
+            wind_cx = static_cast<double>(w.x) * k;
+            wind_cz = static_cast<double>(w.y) * k;
+        }
+        m_scentField->Step(
+            kScentDiffusionRate,
+            kScentDiffusionIterations,
+            kScentEvaporation,
+            wind_cx,
+            wind_cz,
+            m_activeRegionsEnabled
+                ? luminumbra::ai::ScentField::CellGate([this, scent_interior](int x, int z) {
+                      return scent_interior && ScentCellDue(x, z);
+                  })
+                : luminumbra::ai::ScentField::CellGate{},
+            m_activeRegionsEnabled
+                ? luminumbra::ai::ScentField::EdgeGate(
+                      [this](int x, int z, int nx, int nz) { return ScentEdgeOpen(x, z, nx, nz); })
+                : luminumbra::ai::ScentField::EdgeGate{});
+        m_scentField->Clamp(
+            kScentTauMin,
+            kScentTauMax,
+            m_activeRegionsEnabled
+                ? luminumbra::ai::ScentField::CellGate([this, scent_interior](int x, int z) {
+                      return scent_interior && ScentCellDue(x, z);
+                  })
+                : luminumbra::ai::ScentField::CellGate{});
+        if (m_activeRegionsEnabled)
+            CaptureRegionalScent();
+    }
 }
 
 bool GameSession::HasScentBorderWork() const {

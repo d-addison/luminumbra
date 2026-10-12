@@ -403,16 +403,14 @@ TEST(GameSessionHeadlessWorldTest, ActiveClockSaveLoadContinuationMatchesUninter
     constexpr int n = 317, k = 73;
     const double dt = original.GetSimulationClock().fixed_dt();
     for (int i = 0; i < n; ++i) {
+        if (i == n - 1)
+            for (auto* session : {&original, &control})
+                ASSERT_TRUE(
+                    session->GetEnergyFieldState()->QueueRegionalDeposit(1, 0, 0, 0, 60000));
         ASSERT_EQ(original.TickSimulation(dt), 1u);
         ASSERT_EQ(control.TickSimulation(dt), 1u);
     }
     ASSERT_FALSE(original.GetWeatherSystem()->StormCells().empty());
-    // Exercise nonempty energy epoch restoration with a deposit on the last tick.
-    for (auto* session : {&original, &control}) {
-        auto* energy = session->GetEnergyFieldState();
-        energy->QueueDeposit(1, 0, 0, 0, 60000);
-        energy->Tick(n);
-    }
     ASSERT_FALSE(original.ComputeAetherStateSubHash().empty());
     const auto before_save = SessionWorldHash(original);
     ASSERT_TRUE(original.SaveWorldState());
@@ -850,19 +848,20 @@ TEST(GameSessionHeadlessWorldTest, EmptyEnergyResumeAlignsFirstDepositWithoutRep
     ASSERT_TRUE(explicit_load.CreateTransientWorld("Explicit", "1337", "default"));
     // An absent record must also clear a reused loader's pages and pending input.
     auto* previous = explicit_load.GetEnergyFieldState();
-    previous->QueueDeposit(1, 0, 0, 0, 40000);
+    ASSERT_TRUE(previous->QueueRegionalDeposit(1, 0, 0, 0, 40000));
     ASSERT_EQ(explicit_load.TickSimulation(dt), 1u);
-    previous->QueueDeposit(2, 0, 0, 0, 1000);
+    ASSERT_TRUE(previous->QueueRegionalDeposit(2, 0, 0, 0, 1000));
     ASSERT_TRUE(explicit_load.LoadWorldStateFrom(save));
+    const auto saved_ages = control.GetActiveRegionLedger().energy_ages();
+    ASSERT_EQ(saved_ages.at({0, 0}), 317u);
     for (auto* session : {&control, &loaded, &explicit_load}) {
         auto* energy = session->GetEnergyFieldState();
         ASSERT_EQ(energy->page_count(), 0u);
-        EXPECT_EQ(energy->next_fire_tick(), 320u);
-        const auto fires = energy->fires_completed();
-        energy->QueueDeposit(1, 0, 0, 0, 60000);
+        EXPECT_EQ(session->GetActiveRegionLedger().energy_ages(), saved_ages);
+        ASSERT_TRUE(energy->QueueRegionalDeposit(1, 0, 0, 0, 60000));
         ASSERT_EQ(session->TickSimulation(dt), 1u);
         EXPECT_EQ(energy->at_cell(0, 0), 60000u);
-        EXPECT_EQ(energy->fires_completed(), fires);
+        EXPECT_EQ(session->GetActiveRegionLedger().energy_ages().at({0, 0}), 318u);
     }
     for (int i = 0; i < 10; ++i) {
         EXPECT_EQ(SessionWorldHash(loaded), SessionWorldHash(control));
@@ -876,14 +875,17 @@ TEST(GameSessionHeadlessWorldTest, EmptyLegacyEnergySnapshotPreservesNonAlignedC
     const HeadlessRoot root;
     JobSystem jobs;
     jobs.startup(1);
-    GameSession legacy, control, loaded, explicit_load;
-    for (auto* session : {&legacy, &control, &loaded, &explicit_load}) {
+    GameSession legacy, loaded, explicit_load;
+    for (auto* session : {&legacy, &loaded, &explicit_load}) {
         session->SetRootPath(root.root_string());
         session->SetJobSystem(&jobs);
         session->SetAetherStateEnabled(true);
-        session->SetActiveRegionsEnabled(session != &legacy);
     }
     ASSERT_TRUE(legacy.CreateWorld("Legacy energy", "1337", "default"));
+    auto chunk = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3(0, 0, 0));
+    chunk->set_state(Luminumbra::ChunkState::Idle);
+    chunk->mark_voxel_data_dirty();
+    ASSERT_TRUE(legacy.GetWorldSystem()->adopt_streamed_chunk(chunk));
     const double dt = legacy.GetSimulationClock().fixed_dt();
     for (int i = 0; i < 5; ++i)
         ASSERT_EQ(legacy.TickSimulation(dt), 1u);
@@ -893,40 +895,59 @@ TEST(GameSessionHeadlessWorldTest, EmptyLegacyEnergySnapshotPreservesNonAlignedC
     const auto save = legacy.GetWorldSaveDir();
     ASSERT_FALSE(nlohmann::json::parse(ReadClockTestFile(save / "world_info.json"))
                      .contains("simulationTick"));
-    ASSERT_TRUE(control.LoadWorld(legacy.GetMetadata().worldId));
-    ASSERT_EQ(control.GetSimulationTickCount(), 0u);
-    ASSERT_EQ(control.GetEnergyFieldState()->total_raw(), 1u);
-    ASSERT_EQ(control.GetEnergyFieldState()->next_fire_tick(), 3u);
-    for (int i = 0; i < 7; ++i)
-        ASSERT_EQ(control.TickSimulation(dt), 1u);
-    ASSERT_EQ(control.GetEnergyFieldState()->page_count(), 0u);
-    ASSERT_EQ(control.GetEnergyFieldState()->next_fire_tick(), 11u);
-    const auto explicit_save = root.path() / "empty-offset-snapshot";
-    ASSERT_TRUE(control.SaveWorldStateTo(explicit_save));
-    EXPECT_EQ(ReadClockTestTextRecord(explicit_save / "aether_state.efs"), "EFS1 2 4\n");
-    ASSERT_TRUE(control.SaveWorldState());
-    EXPECT_EQ(ReadClockTestTextRecord(save / "aether_state.efs"), "EFS1 2 4\n");
-    ASSERT_TRUE(loaded.LoadWorld(control.GetMetadata().worldId));
-    ASSERT_TRUE(explicit_load.CreateTransientWorld("Explicit", "1337", "default"));
-    ASSERT_TRUE(explicit_load.LoadWorldStateFrom(explicit_save));
-    for (auto* session : {&control, &loaded, &explicit_load}) {
-        auto* energy = session->GetEnergyFieldState();
-        ASSERT_EQ(energy->page_count(), 0u);
-        EXPECT_EQ(energy->next_fire_tick(), 11u);
-        energy->QueueDeposit(1, 0, 0, 0, 60000);
+    const auto bytes = ReadClockTestTextRecord(save / "aether_state.efs");
+    ASSERT_EQ(bytes.substr(0, 9), "EFS1 2 3\n");
+    ASSERT_TRUE(loaded.LoadWorld(legacy.GetMetadata().worldId));
+    ASSERT_TRUE(explicit_load.CreateTransientWorld("Explicit legacy", "1337", "default"));
+    ASSERT_TRUE(explicit_load.LoadWorldStateFrom(save));
+    for (auto* session : {&loaded, &explicit_load}) {
+        EXPECT_EQ(session->GetSimulationTickCount(), 0u);
+        EXPECT_EQ(session->GetEnergyFieldState()->next_fire_tick(), 3u);
+        EXPECT_EQ(session->GetEnergyFieldState()->total_raw(), 1u);
+        session->GetEnergyFieldState()->QueueDeposit(2, 0, 0, 0, 60000);
     }
-    for (int tick = 8; tick <= 15; ++tick) {
-        SCOPED_TRACE(tick);
-        for (auto* session : {&control, &loaded, &explicit_load}) {
+    for (int tick = 1; tick <= 8; ++tick) {
+        for (auto* session : {&loaded, &explicit_load}) {
             ASSERT_EQ(session->TickSimulation(dt), 1u);
-            if (tick < 11)
-                EXPECT_EQ(session->GetEnergyFieldState()->at_cell(0, 0), 60000u);
+            if (tick < 3)
+                EXPECT_EQ(session->GetEnergyFieldState()->at_cell(0, 0), 60001u);
             else
-                EXPECT_LT(session->GetEnergyFieldState()->at_cell(0, 0), 60000u);
+                EXPECT_LT(session->GetEnergyFieldState()->at_cell(0, 0), 60001u);
         }
-        EXPECT_EQ(SessionWorldHash(loaded), SessionWorldHash(control));
-        EXPECT_EQ(SessionWorldHash(explicit_load), SessionWorldHash(control));
+        EXPECT_EQ(SessionWorldHash(loaded), SessionWorldHash(explicit_load));
     }
+    // The legacy writer leaves an empty layer's existing phase-bearing file byte-identical.
+    ASSERT_EQ(loaded.GetEnergyFieldState()->DeserializeRecord("EFS1 2 4\n",
+                                                              loaded.GetSimulationTickCount()),
+              true);
+    ASSERT_TRUE(loaded.SaveWorldState());
+    EXPECT_EQ(ReadClockTestTextRecord(save / "aether_state.efs"), bytes);
+}
+
+TEST(GameSessionHeadlessWorldTest, EnabledLoadingRefusesPhaseBearingLegacyEnergyWithoutMigration) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession legacy, enabled;
+    for (auto* session : {&legacy, &enabled}) {
+        session->SetRootPath(root.root_string());
+        session->SetJobSystem(&jobs);
+        session->SetAetherStateEnabled(true);
+    }
+    enabled.SetActiveRegionsEnabled(true);
+    ASSERT_TRUE(legacy.CreateWorld("Legacy refusal", "1337", "default"));
+    auto chunk = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3(0, 0, 0));
+    chunk->set_state(Luminumbra::ChunkState::Idle);
+    chunk->mark_voxel_data_dirty();
+    ASSERT_TRUE(legacy.GetWorldSystem()->adopt_streamed_chunk(chunk));
+    legacy.GetEnergyFieldState()->QueueDeposit(1, 0, 0, 0, 1);
+    ASSERT_EQ(legacy.TickSimulation(legacy.GetSimulationClock().fixed_dt()), 1u);
+    ASSERT_TRUE(legacy.SaveWorldState());
+    const auto path = legacy.GetWorldSaveDir() / "aether_state.efs";
+    const auto before = ReadClockTestFile(path);
+    EXPECT_FALSE(enabled.LoadWorld(legacy.GetMetadata().worldId));
+    EXPECT_FALSE(enabled.GetWorldOpenError().empty());
+    EXPECT_EQ(ReadClockTestFile(path), before);
 }
 
 TEST(GameSessionHeadlessWorldTest, EmptyAlignedEnergySaveRemovesStaleRecord) {
@@ -942,7 +963,7 @@ TEST(GameSessionHeadlessWorldTest, EmptyAlignedEnergySaveRemovesStaleRecord) {
     }
     ASSERT_TRUE(original.CreateWorld("Aligned energy", "1337", "default"));
     const double dt = original.GetSimulationClock().fixed_dt();
-    original.GetEnergyFieldState()->QueueDeposit(1, 0, 0, 0, 1);
+    ASSERT_TRUE(original.GetEnergyFieldState()->QueueRegionalDeposit(1, 0, 0, 0, 1));
     ASSERT_EQ(original.TickSimulation(dt), 1u);
     ASSERT_TRUE(original.SaveWorldState());
     ASSERT_TRUE(fs::exists(original.GetWorldSaveDir() / "aether_state.efs"));
@@ -953,7 +974,20 @@ TEST(GameSessionHeadlessWorldTest, EmptyAlignedEnergySaveRemovesStaleRecord) {
     EXPECT_FALSE(fs::exists(original.GetWorldSaveDir() / "aether_state.efs"));
     ASSERT_TRUE(loaded.LoadWorld(original.GetMetadata().worldId));
     EXPECT_EQ(loaded.GetEnergyFieldState()->total_raw(), 0u);
-    EXPECT_EQ(loaded.GetEnergyFieldState()->next_fire_tick(), 16u);
+    EXPECT_EQ(loaded.GetActiveRegionLedger().energy_ages(),
+              original.GetActiveRegionLedger().energy_ages());
+    ASSERT_EQ(loaded.GetActiveRegionLedger().energy_ages().at({0, 0}), 8u);
+    for (auto* session : {&original, &loaded})
+        ASSERT_TRUE(session->GetEnergyFieldState()->QueueRegionalDeposit(2, 0, 0, 0, 60000));
+    for (int tick = 9; tick <= 16; ++tick) {
+        for (auto* session : {&original, &loaded})
+            ASSERT_EQ(session->TickSimulation(dt), 1u);
+        EXPECT_EQ(loaded.GetActiveRegionLedger().energy_ages(),
+                  original.GetActiveRegionLedger().energy_ages());
+        EXPECT_EQ(loaded.GetEnergyFieldState()->CanonicalRegionalBytes(),
+                  original.GetEnergyFieldState()->CanonicalRegionalBytes());
+        EXPECT_EQ(loaded.GetEnergyFieldState()->at_cell(0, 0) == 60000u, tick < 16);
+    }
     EXPECT_EQ(SessionWorldHash(loaded), SessionWorldHash(original));
 }
 
@@ -970,7 +1004,7 @@ TEST(GameSessionHeadlessWorldTest, TransientClockSnapshotRefusesBeforeWritingAny
     }
     ASSERT_TRUE(original.CreateWorld("Snapshot owner", "1337", "default"));
     ClockTestPlant(original.GetRegistry(), original.GetMetadata().spawnPoint);
-    original.GetEnergyFieldState()->QueueDeposit(1, 0, 0, 0, 60000);
+    ASSERT_TRUE(original.GetEnergyFieldState()->QueueRegionalDeposit(1, 0, 0, 0, 60000));
     ASSERT_EQ(original.TickSimulation(original.GetSimulationClock().fixed_dt()), 1u);
     ASSERT_TRUE(original.SaveWorldState());
     const auto save = original.GetWorldSaveDir();
@@ -978,7 +1012,7 @@ TEST(GameSessionHeadlessWorldTest, TransientClockSnapshotRefusesBeforeWritingAny
     ASSERT_TRUE(transient.LoadWorldStateFrom(save));
     // Make every member writer observable if it runs before the refusal.
     ClockTestPlant(transient.GetRegistry(), transient.GetMetadata().spawnPoint);
-    transient.GetEnergyFieldState()->QueueDeposit(2, 0, 0, 0, 1000);
+    ASSERT_TRUE(transient.GetEnergyFieldState()->QueueRegionalDeposit(2, 0, 0, 0, 1000));
     ASSERT_EQ(transient.TickSimulation(transient.GetSimulationClock().fixed_dt()), 1u);
     const auto snapshot_bytes = [](const fs::path& path) {
         std::map<fs::path, std::string> bytes;
@@ -1017,7 +1051,7 @@ TEST(GameSessionHeadlessWorldTest, EnergyOnlyExplicitSnapshotCreatesDestinationA
         session->SetAetherStateEnabled(true);
     }
     ASSERT_TRUE(original.CreateWorld("Energy only", "1337", "default"));
-    original.GetEnergyFieldState()->QueueDeposit(1, 0, 0, 0, 60000);
+    ASSERT_TRUE(original.GetEnergyFieldState()->QueueRegionalDeposit(1, 0, 0, 0, 60000));
     const double dt = original.GetSimulationClock().fixed_dt();
     ASSERT_EQ(original.TickSimulation(dt), 1u);
     const auto save = root.path() / "energy-only";
@@ -2484,8 +2518,9 @@ TEST(GameSessionHeadlessWorldTest, FrozenRegionDoesNotAgeItsGroundObjects) {
     std::size_t frozen_ticks = 0;
     for (int i = 0; i < 10; ++i) {
         const auto before = session.GetGroundObjects().objects().at(id).active_age;
-        ASSERT_TRUE(session.RecordActiveRegionWork({kFarGroundRegion, 100, 0, 0, 0}));
+        session.RecordActiveRegionWork({kFarGroundRegion, 100, 0, 0, 0});
         TickOnce(session);
+        ASSERT_GE(session.GetActiveRegionLedger().records().at(kFarGroundRegion).pressure, 100u);
         // Frozen after a tick means it was not due in that tick, so its objects did not age.
         if (session.GetActiveRegionLedger().records().at(kFarGroundRegion).state ==
             Luminumbra::world::RegionState::Frozen) {
@@ -3055,13 +3090,22 @@ TEST(GameSessionHeadlessWorldTest, DespawnedGroundWorkSurvivesBoundarySaveAndReo
     const HeadlessRoot root;
     JobSystem jobs;
     jobs.startup(1);
-    GameSession owner, loaded;
+    GameSession owner, loaded, baseline;
     CreateGroundWorld(owner, root, jobs, "Completed despawn work");
+    CreateGroundWorld(baseline, root, jobs, "Completed despawn baseline");
     EnableSnapshotSession(loaded, root, jobs);
     ASSERT_EQ(SpawnGround(owner, 5200, -1500, 1), 1u);
     TickOnce(owner);
     EXPECT_TRUE(owner.GetGroundObjects().empty());
-    EXPECT_GE(owner.GetActiveRegionLedger().completed_work().at(kGroundRegion), 1u);
+    // The baseline has identical ownership and allocator state, but no object to process.
+    ASSERT_EQ(SpawnGround(baseline, 5200, -1500, 1), 1u);
+    ASSERT_TRUE(
+        const_cast<Luminumbra::world::GroundObjectStore&>(baseline.GetGroundObjects()).erase(1));
+    TickOnce(baseline);
+    ASSERT_TRUE(baseline.GetGroundObjects().empty());
+    EXPECT_EQ(owner.GetFieldPages().serialize(), baseline.GetFieldPages().serialize());
+    EXPECT_EQ(owner.GetActiveRegionLedger().completed_work().at(kGroundRegion),
+              baseline.GetActiveRegionLedger().completed_work().at(kGroundRegion) + 1u);
     std::uint64_t pending = 0;
     for (const auto& [key, work] : owner.GetActiveRegionLedger().completed_work()) {
         (void)key;
@@ -3074,6 +3118,10 @@ TEST(GameSessionHeadlessWorldTest, DespawnedGroundWorkSurvivesBoundarySaveAndReo
     EXPECT_EQ(SessionWorldHash(loaded), SessionWorldHash(owner));
     TickOnce(owner);
     TickOnce(loaded);
+    TickOnce(baseline);
+    EXPECT_EQ(owner.GetRegionSchedule().work, baseline.GetRegionSchedule().work + 1u);
+    EXPECT_EQ(owner.GetActiveRegionLedger().completed_work(),
+              baseline.GetActiveRegionLedger().completed_work());
     EXPECT_EQ(owner.GetRegionSchedule().work, pending);
     EXPECT_EQ(loaded.GetRegionSchedule(), owner.GetRegionSchedule());
     EXPECT_TRUE(owner.GetGroundObjects().empty());
@@ -3085,6 +3133,8 @@ TEST(GameSessionHeadlessWorldTest, DespawnedGroundWorkSurvivesBoundarySaveAndReo
     EXPECT_EQ(SessionWorldHash(loaded), SessionWorldHash(owner));
     TickOnce(owner);
     TickOnce(loaded);
+    TickOnce(baseline);
+    EXPECT_EQ(owner.GetRegionSchedule().work, baseline.GetRegionSchedule().work);
     // Ongoing ambient work replaces the despawn tick's register; ARL unit cases check empty
     // replacement independently. Reopening must neither lose nor duplicate either register.
     EXPECT_EQ(owner.GetRegionSchedule().work, pending);
@@ -3160,6 +3210,17 @@ TEST(GameSessionHeadlessWorldTest, RegionalWeatherOpportunityClockContinuesAcros
     for (int tick = 0; tick < 4; ++tick) {
         TickOnce(owner);
         TickOnce(loaded);
+        if (tick == 0) {
+            const auto& storms = owner.GetFieldPages().storms();
+            const auto spawned = std::find_if(storms.begin(), storms.end(), [](const auto& storm) {
+                return storm.owner == kGroundRegion && storm.spawn_tick == 45;
+            });
+            ASSERT_NE(spawned, storms.end());
+            EXPECT_EQ(spawned->seed_salt, 1812730280u); // root 1337+40, spawn domain
+            EXPECT_EQ(spawned->active_age, 0u);
+            EXPECT_NEAR(std::bit_cast<float>(spawned->center_x), 325.6141f, 0.001f);
+            EXPECT_NEAR(std::bit_cast<float>(spawned->center_z), -212.8846f, 0.001f);
+        }
         EXPECT_EQ(loaded.GetFieldPages().serialize(), owner.GetFieldPages().serialize());
         EXPECT_EQ(loaded.GetRegionSchedule(), owner.GetRegionSchedule());
         EXPECT_EQ(SessionWorldHash(loaded), SessionWorldHash(owner));
@@ -3238,4 +3299,420 @@ TEST(GameSessionHeadlessWorldTest, HistoricalRegionalScentSurvivesEmitterRemoval
     EXPECT_EQ(owner.GetFieldPages().scent_cells(), persisted);
     EXPECT_EQ(loaded.GetFieldPages().scent_cells(), persisted);
     EXPECT_EQ(SessionWorldHash(loaded), SessionWorldHash(owner));
+}
+
+namespace {
+using namespace Luminumbra::world;
+
+// Construct typed authority locally, seal it through the real codecs and commit a valid index.
+// The const views are cast only on these mutable fixture values, never on a live session.
+ActiveRegionLedger FixtureLedger(std::uint64_t tick,
+                                 const std::map<RegionKey, RegionState>& owners,
+                                 std::uint8_t shift = 2) {
+    const WorldClock clock(tick);
+    ActiveRegionLedger ledger({std::numeric_limits<std::uint64_t>::max(), 10000, shift}, clock);
+    for (const auto& [key, state] : owners) {
+        ledger.pin(key, true, clock);
+        auto& record =
+            const_cast<std::map<RegionKey, ActiveRegionRecord>&>(ledger.records()).at(key);
+        record.wake_pending = false;
+        record.state = state;
+        record.cadence_shift = state == RegionState::Active ? 0 : shift;
+        record.cadence_phase = ActiveRegionLedger::phase(key, record.cadence_shift);
+        if (state == RegionState::Frozen) {
+            record.frozen_at = tick;
+            record.frozen_digest = 123;
+        }
+    }
+    return ledger;
+}
+
+void CommitRegionalFixture(GameSession& base,
+                           ActiveRegionLedger ledger,
+                           const FieldPageState& fields) {
+    const auto save = base.GetWorldSaveDir();
+    const WorldClock clock(ledger.tick());
+    auto metadata = nlohmann::json::parse(ReadClockTestFile(save / "world_info.json"));
+    clock.write_metadata(metadata);
+    metadata["ambientFieldAnchor"] = {{"x", 0}, {"y", 0}, {"z", 0}};
+    std::vector<std::string> errors;
+    P::WorldSaveService::SaveFactsScope facts(save);
+    P::SaveTransaction transaction(
+        save, clock.tick(), {{{0, 0, 0}}}, &P::WorldSaveService::member_digest);
+    ASSERT_TRUE(transaction.begin(&errors));
+    ASSERT_TRUE(P::WorldSaveService::save_metadata_and_active_regions(
+        metadata.dump(), ledger, save, &errors));
+    ASSERT_TRUE(P::WorldSaveService::save_field_pages(fields, save, &errors));
+    ASSERT_TRUE(transaction.commit(&errors));
+}
+
+RegionalStorm FixtureStorm(RegionKey owner,
+                           float x,
+                           float z,
+                           float vx,
+                           float vz,
+                           std::uint32_t age = 10,
+                           std::uint32_t salt = 99,
+                           std::uint32_t lifetime = 240) {
+    return {owner,
+            std::bit_cast<std::uint32_t>(x),
+            std::bit_cast<std::uint32_t>(z),
+            std::bit_cast<std::uint32_t>(vx),
+            std::bit_cast<std::uint32_t>(vz),
+            std::bit_cast<std::uint32_t>(1.0f),
+            0,
+            lifetime,
+            salt,
+            age};
+}
+
+void FixtureWind(FieldPageState& fields, RegionKey owner, float x, float z) {
+    ASSERT_TRUE(fields.activate_region(owner, 1337, 1000));
+    auto& pages = const_cast<std::map<FieldPageKey, FieldPage>&>(fields.pages());
+    for (auto& [key, page] : pages) {
+        (void)key;
+        for (std::size_t i = 0; i < FieldPage::kCells; ++i)
+            if ((page.mask[i / 64] >> (i % 64)) & 1) {
+                page.cells[0][i] =
+                    std::bit_cast<std::uint16_t>(static_cast<std::int16_t>(x * 1024));
+                page.cells[1][i] =
+                    std::bit_cast<std::uint16_t>(static_cast<std::int16_t>(z * 1024));
+            }
+    }
+}
+
+bool RegionDue(const GameSession& session, RegionKey owner) {
+    const auto& due = session.GetRegionSchedule().due;
+    return std::find(due.begin(), due.end(), owner) != due.end();
+}
+} // namespace
+
+TEST(GameSessionHeadlessWorldTest, RegionalStormHandoverUsesCommonPhaseWithoutSourceInteriorDue) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession base, loaded, reopened;
+    CreateGroundWorld(base, root, jobs, "Independent storm handover");
+    const RegionKey source{0, -1}, destination{1, -1};
+    auto ledger =
+        FixtureLedger(1002, {{source, RegionState::Reduced}, {destination, RegionState::Reduced}});
+    ASSERT_NE(ledger.records().at(source).cadence_phase,
+              ledger.records().at(destination).cadence_phase);
+    FieldPageState fields;
+    const auto storm = FixtureStorm(source, 511.75f, -256.0f, 30.0f, 0.0f);
+    ASSERT_TRUE(fields.replace_weather({storm}, {}));
+    CommitRegionalFixture(base, ledger, fields);
+    EnableSnapshotSession(loaded, root, jobs);
+    ASSERT_TRUE(loaded.LoadWorld(base.GetMetadata().worldId)) << loaded.GetWorldOpenError();
+    loaded.SetReplicatedSimulationAnchors({});
+    TickOnce(loaded); // 1003 is neither source phase 1 nor global common phase.
+    ASSERT_EQ(loaded.GetFieldPages().storms().size(), 1u);
+    EXPECT_EQ(loaded.GetFieldPages().storms().front(), storm);
+    TickOnce(loaded); // 1004 common phase, source interior still not due.
+    EXPECT_FALSE(RegionDue(loaded, source));
+    EXPECT_TRUE(RegionDue(loaded, destination));
+    ASSERT_EQ(loaded.GetFieldPages().storms().size(), 1u);
+    const auto& moved = loaded.GetFieldPages().storms().front();
+    EXPECT_EQ(moved.owner, destination);
+    EXPECT_FLOAT_EQ(std::bit_cast<float>(moved.center_x), 512.75f);
+    EXPECT_EQ(moved.active_age, storm.active_age);
+    EXPECT_EQ(moved.seed_salt, storm.seed_salt);
+    EXPECT_GT(loaded.GetActiveRegionLedger().completed_work().at(source), 0u);
+    EXPECT_GT(loaded.GetActiveRegionLedger().completed_work().at(destination), 0u);
+    const auto transferred = moved;
+    ASSERT_TRUE(loaded.SaveWorld());
+    EnableSnapshotSession(reopened, root, jobs);
+    ASSERT_TRUE(reopened.LoadWorld(base.GetMetadata().worldId)) << reopened.GetWorldOpenError();
+    ASSERT_EQ(reopened.GetFieldPages().storms().size(), 1u);
+    EXPECT_EQ(reopened.GetFieldPages().storms().front(), transferred);
+    EXPECT_EQ(SessionWorldHash(reopened), SessionWorldHash(loaded));
+}
+
+TEST(GameSessionHeadlessWorldTest, RegionalStormCornerRequiresBothCardinalOwners) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    const RegionKey source{0, 0}, destination{1, 1}, east{1, 0}, north{0, 1};
+    for (const int blocked : {0, 1, 2, 3}) {
+        SCOPED_TRACE(blocked);
+        GameSession base, loaded;
+        CreateGroundWorld(base, root, jobs, "Storm cardinal admission");
+        auto owners = std::map<RegionKey, RegionState>{{source, RegionState::Reduced},
+                                                       {destination, RegionState::Reduced},
+                                                       {east, RegionState::Reduced},
+                                                       {north, RegionState::Reduced}};
+        if (blocked == 1)
+            owners.erase(east);
+        if (blocked == 2)
+            owners[north] = RegionState::Frozen;
+        if (blocked == 3)
+            owners[destination] = RegionState::Frozen;
+        auto ledger = FixtureLedger(1003, owners);
+        FieldPageState fields;
+        const auto storm = FixtureStorm(source, 511.75f, 511.75f, 30.0f, 30.0f);
+        ASSERT_TRUE(fields.replace_weather({storm}, {}));
+        CommitRegionalFixture(base, ledger, fields);
+        EnableSnapshotSession(loaded, root, jobs);
+        ASSERT_TRUE(loaded.LoadWorld(base.GetMetadata().worldId)) << loaded.GetWorldOpenError();
+        loaded.SetReplicatedSimulationAnchors({});
+        TickOnce(loaded);
+        EXPECT_FALSE(RegionDue(loaded, source));
+        ASSERT_EQ(loaded.GetFieldPages().storms().size(), 1u);
+        const auto& after = loaded.GetFieldPages().storms().front();
+        EXPECT_EQ(after.owner, blocked == 0 ? destination : source);
+        EXPECT_FLOAT_EQ(std::bit_cast<float>(after.center_x), blocked == 0 ? 512.75f : 511.75f);
+        EXPECT_FLOAT_EQ(std::bit_cast<float>(after.center_z), blocked == 0 ? 512.75f : 511.75f);
+        EXPECT_EQ(after.active_age, storm.active_age);
+    }
+}
+
+TEST(GameSessionHeadlessWorldTest, BlockedDueStormDiscardsMotionWithinHalfOpenSourceOwner) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession base, loaded;
+    CreateGroundWorld(base, root, jobs, "Blocked due storm");
+    const RegionKey source{0, 0};
+    FieldPageState fields;
+    const std::map<RegionKey, RegionState> owners{{source, RegionState::Active},
+                                                  {{1, 0}, RegionState::Reduced},
+                                                  {{0, 1}, RegionState::Reduced},
+                                                  {{1, 1}, RegionState::Reduced}};
+    // The 24m cell sampled at this corner belongs to the diagonal owner. Initialize its
+    // projection too; motion is blocked because 1001..1003 are not common-phase ticks.
+    for (const auto& [owner, state] : owners) {
+        (void)state;
+        FixtureWind(fields, owner, 31.0f, 31.0f);
+    }
+    ASSERT_TRUE(fields.replace_weather({FixtureStorm(source, 511.99f, 511.99f, 31, 31)}, {}));
+    CommitRegionalFixture(base, FixtureLedger(1000, owners), fields);
+    EnableSnapshotSession(loaded, root, jobs);
+    ASSERT_TRUE(loaded.LoadWorld(base.GetMetadata().worldId)) << loaded.GetWorldOpenError();
+    loaded.SetReplicatedSimulationAnchors({});
+    for (int i = 0; i < 3; ++i) {
+        TickOnce(loaded);
+        ASSERT_EQ(loaded.GetFieldPages().storms().size(), 1u);
+        const auto& storm = loaded.GetFieldPages().storms().front();
+        EXPECT_EQ(storm.owner, source);
+        EXPECT_FLOAT_EQ(std::bit_cast<float>(storm.center_x), std::nextafter(512.0f, 0.0f));
+        EXPECT_FLOAT_EQ(std::bit_cast<float>(storm.center_z), std::nextafter(512.0f, 0.0f));
+        EXPECT_EQ(storm.active_age, 11u + i);
+    }
+}
+
+TEST(GameSessionHeadlessWorldTest,
+     RegionalStrikeRoot40RejectsFrozenScatterTargetAndDoesNotReemitOnLoad) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    const RegionKey source{0, 0}, target{1, 0};
+    for (const bool frozen : {false, true}) {
+        SCOPED_TRACE(frozen);
+        GameSession base, loaded, reopened;
+        CreateGroundWorld(base, root, jobs, "Regional strike target");
+        FieldPageState fields;
+        FixtureWind(fields, source, 0, 0);
+        // Root 1337+40, strike domain, salt 4, opportunity 3 qualifies and scatters east.
+        ASSERT_TRUE(fields.replace_weather({FixtureStorm(source, 500, 256, 0, 0, 53, 4)}, {}));
+        CommitRegionalFixture(
+            base,
+            FixtureLedger(1003,
+                          {{source, RegionState::Active},
+                           {target, frozen ? RegionState::Frozen : RegionState::Reduced}}),
+            fields);
+        EnableSnapshotSession(loaded, root, jobs);
+        ASSERT_TRUE(loaded.LoadWorld(base.GetMetadata().worldId)) << loaded.GetWorldOpenError();
+        loaded.SetReplicatedSimulationAnchors({});
+        TickOnce(loaded);
+        EXPECT_FALSE(loaded.GetRegionSchedulerFault().has_value());
+        const auto& strikes = loaded.GetFieldPages().strikes();
+        EXPECT_EQ(strikes.size(), frozen ? 0u : 1u);
+        EXPECT_EQ(loaded.GetWeatherSystem()->StrikesThisTick().size(), frozen ? 0u : 1u);
+        if (frozen)
+            continue;
+        ASSERT_EQ(strikes.size(), 1u);
+        EXPECT_EQ(strikes.front().owner, target);
+        EXPECT_EQ(strikes.front().storm_salt, 4u);
+        EXPECT_EQ(strikes.front().strike_tick, 1004u);
+        EXPECT_NEAR(std::bit_cast<float>(strikes.front().world_x), 638.60f, 1.0f);
+        EXPECT_NEAR(std::bit_cast<float>(strikes.front().world_z), 389.23f, 1.0f);
+        EXPECT_FLOAT_EQ(std::bit_cast<float>(strikes.front().magnitude), 0.91478163f);
+        ASSERT_TRUE(loaded.SaveWorld());
+        EnableSnapshotSession(reopened, root, jobs);
+        ASSERT_TRUE(reopened.LoadWorld(base.GetMetadata().worldId)) << reopened.GetWorldOpenError();
+        EXPECT_EQ(reopened.GetFieldPages().strikes(), strikes);
+        EXPECT_TRUE(reopened.GetWeatherSystem()->StrikesThisTick().empty());
+        EXPECT_EQ(SessionWorldHash(reopened), SessionWorldHash(loaded));
+        reopened.SetReplicatedSimulationAnchors({});
+        TickOnce(loaded);
+        TickOnce(reopened);
+        EXPECT_TRUE(reopened.GetWeatherSystem()->StrikesThisTick().empty());
+        EXPECT_EQ(reopened.GetFieldPages().serialize(), loaded.GetFieldPages().serialize());
+        EXPECT_EQ(SessionWorldHash(reopened), SessionWorldHash(loaded));
+    }
+}
+
+TEST(GameSessionHeadlessWorldTest, RegionalStormExpiresByDueActiveAgeAndFrozenStormRemainsExact) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    const RegionKey owner{0, 0};
+    for (const bool frozen : {false, true}) {
+        GameSession base, loaded;
+        CreateGroundWorld(base, root, jobs, "Regional storm active expiry");
+        FieldPageState fields;
+        const auto storm = FixtureStorm(owner, 256, 256, 0, 0, 239);
+        ASSERT_TRUE(fields.replace_weather({storm}, {}));
+        CommitRegionalFixture(
+            base,
+            FixtureLedger(1003, {{owner, frozen ? RegionState::Frozen : RegionState::Reduced}}),
+            fields);
+        EnableSnapshotSession(loaded, root, jobs);
+        ASSERT_TRUE(loaded.LoadWorld(base.GetMetadata().worldId)) << loaded.GetWorldOpenError();
+        loaded.SetReplicatedSimulationAnchors({});
+        TickOnce(loaded); // common tick 1004; reduced phase 1 is not due
+        ASSERT_EQ(loaded.GetFieldPages().storms().size(), 1u);
+        EXPECT_EQ(loaded.GetFieldPages().storms().front(), storm);
+        TickOnce(loaded); // 1005 interior due only for reduced
+        if (frozen) {
+            ASSERT_EQ(loaded.GetFieldPages().storms().size(), 1u);
+            EXPECT_EQ(loaded.GetFieldPages().storms().front(), storm);
+        } else {
+            EXPECT_TRUE(loaded.GetFieldPages().storms().empty());
+        }
+    }
+}
+
+TEST(GameSessionHeadlessWorldTest,
+     NearScentCommonBorderRunsWithUnequalNonDueInteriorsAndRestoresHistory) {
+    using namespace Luminumbra::Components;
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession base, near, outside, reopened;
+    CreateGroundWorld(base, root, jobs, "Integrated common scent border");
+    const RegionKey left{-1, -1}, right{0, -1}, historical_owner{0, 0};
+    auto ledger = FixtureLedger(1006,
+                                {{left, RegionState::Reduced},
+                                 {right, RegionState::Reduced},
+                                 {historical_owner, RegionState::Reduced}},
+                                3);
+    ASSERT_NE(ledger.records().at(left).cadence_phase, ledger.records().at(right).cadence_phase);
+    ASSERT_NE(ledger.records().at(left).cadence_phase, 0u);
+    ASSERT_NE(ledger.records().at(right).cadence_phase, 0u);
+    FieldPageState fields;
+    ASSERT_TRUE(fields.set_scent({-1, -10}, {std::bit_cast<std::uint64_t>(20.0), 0, 0, 0}));
+    const ScentCell historical{0, std::bit_cast<std::uint64_t>(7.0), 0, 0};
+    ASSERT_TRUE(fields.set_scent({200, 0}, historical));
+    CommitRegionalFixture(base, ledger, fields);
+    for (auto* session : {&near, &outside}) {
+        EnableSnapshotSession(*session, root, jobs);
+        ASSERT_TRUE(session->LoadWorld(base.GetMetadata().worldId)) << session->GetWorldOpenError();
+        session->SetReplicatedSimulationAnchors({});
+    }
+    const auto add_sensor = [](GameSession& session, Luminumbra::Vec3 position) {
+        const auto entity = session.GetRegistry().create();
+        session.GetRegistry().emplace<TransformComponent>(entity).position = position;
+        session.GetRegistry().emplace<ScentSenseComponent>(entity).channel = 0;
+        return entity;
+    };
+    const auto near_sensor = add_sensor(near, {-0.5f, 0, -9.5f});
+    const auto outside_sensor = add_sensor(outside, {200, 0, 0});
+    const auto before_hash = near.ComputeScentSubHash();
+    ASSERT_FALSE(before_hash.empty());
+    for (auto* session : {&near, &outside}) {
+        TickOnce(*session); // 1007: neither owner due, and no common border.
+        EXPECT_FALSE(RegionDue(*session, left));
+        EXPECT_FALSE(RegionDue(*session, right));
+        EXPECT_EQ(session->GetFieldPages().scent_cells(), fields.scent_cells());
+        EXPECT_EQ(session->ComputeScentSubHash(), before_hash);
+        TickOnce(*session); // 1008: global common phase; both interiors still not due.
+        EXPECT_FALSE(RegionDue(*session, left));
+        EXPECT_FALSE(RegionDue(*session, right));
+    }
+    EXPECT_EQ(outside.GetFieldPages().scent_cells(), fields.scent_cells());
+    ASSERT_TRUE(near.GetFieldPages().scent_cells().contains({0, -10}));
+    EXPECT_GT(std::bit_cast<double>(near.GetFieldPages().scent_cells().at({0, -10})[0]), 0.0);
+    EXPECT_LT(std::bit_cast<double>(near.GetFieldPages().scent_cells().at({-1, -10})[0]), 20.0);
+    double sum = 0;
+    for (const auto& [key, values] : near.GetFieldPages().scent_cells()) {
+        (void)key;
+        sum += std::bit_cast<double>(values[0]);
+    }
+    EXPECT_DOUBLE_EQ(sum, 20.0); // no advection, smoothing, evaporation or clamp without interiors
+    EXPECT_EQ(near.GetFieldPages().scent_cells().at({200, 0}), historical);
+    EXPECT_NE(near.ComputeScentSubHash(), before_hash);
+    near.GetRegistry().destroy(near_sensor);
+    outside.GetRegistry().destroy(outside_sensor);
+    const auto history = near.GetFieldPages().scent_cells();
+    const auto history_hash = near.ComputeScentSubHash();
+    ASSERT_TRUE(near.SaveWorld());
+    EnableSnapshotSession(reopened, root, jobs);
+    ASSERT_TRUE(reopened.LoadWorld(base.GetMetadata().worldId)) << reopened.GetWorldOpenError();
+    reopened.SetReplicatedSimulationAnchors({});
+    EXPECT_EQ(reopened.GetFieldPages().scent_cells(), history);
+    EXPECT_EQ(reopened.ComputeScentSubHash(), history_hash);
+    EXPECT_DOUBLE_EQ(reopened.GetScentField()->Sample(
+                         0, reopened.ScentWorldToCellX(0), reopened.ScentWorldToCellZ(-10)),
+                     std::bit_cast<double>(history.at({0, -10})[0]));
+    EXPECT_EQ(SessionWorldHash(reopened), SessionWorldHash(near));
+    for (int tick = 0; tick < 8; ++tick) {
+        TickOnce(near);
+        TickOnce(reopened);
+        EXPECT_EQ(near.GetFieldPages().scent_cells(), history);
+        EXPECT_EQ(reopened.GetFieldPages().scent_cells(), history);
+        EXPECT_EQ(reopened.ComputeScentSubHash(), history_hash);
+        EXPECT_EQ(SessionWorldHash(reopened), SessionWorldHash(near));
+    }
+}
+
+TEST(GameSessionHeadlessWorldTest,
+     QualifyingStormOpportunityRefusesOwnerCapacityWithoutAdoptingWeather) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession base, loaded;
+    CreateGroundWorld(base, root, jobs, "Transactional weather capacity");
+    FieldPageState fields;
+    std::vector<RegionalStorm> storms;
+    for (std::uint32_t salt = 0; salt < FieldPageState::kMaxOwnerStorms; ++salt)
+        storms.push_back(FixtureStorm(kGroundRegion, 256, -256, 0, 0, 10, salt));
+    ASSERT_TRUE(fields.replace_weather(storms, {}));
+    ASSERT_TRUE(fields.set_weather_age(kGroundRegion, 44));
+    CommitRegionalFixture(base, FixtureLedger(44, {{kGroundRegion, RegionState::Active}}), fields);
+    EnableSnapshotSession(loaded, root, jobs);
+    ASSERT_TRUE(loaded.LoadWorld(base.GetMetadata().worldId)) << loaded.GetWorldOpenError();
+    loaded.SetReplicatedSimulationAnchors({});
+    TickOnce(loaded); // root+40 spawn qualifies; the 17th owner storm must refuse the staged copy
+    ASSERT_TRUE(loaded.GetRegionSchedulerFault().has_value());
+    EXPECT_EQ(loaded.GetFieldPages().storms(), storms);
+    EXPECT_EQ(loaded.GetFieldPages().weather_clocks(), fields.weather_clocks());
+    EXPECT_EQ(loaded.GetFieldPages().strikes(), fields.strikes());
+    EXPECT_TRUE(loaded.GetActiveRegionLedger().completed_work().empty());
+    EXPECT_EQ(loaded.TickSimulation(loaded.GetSimulationClock().fixed_dt()), 0u);
+}
+
+TEST(GameSessionHeadlessWorldTest, EmptyRegionalEnergyAgeWorkReachesNextSchedulePressure) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession energy, baseline;
+    energy.SetAetherStateEnabled(true);
+    CreateGroundWorld(energy, root, jobs, "Empty energy work");
+    CreateGroundWorld(baseline, root, jobs, "Empty energy work baseline");
+    TickOnce(energy);
+    TickOnce(baseline);
+    ASSERT_EQ(energy.GetRegionSchedule().due, baseline.GetRegionSchedule().due);
+    ASSERT_FALSE(energy.GetRegionSchedule().due.empty());
+    EXPECT_TRUE(energy.GetEnergyFieldState()->SerializeRegionalRecord().empty());
+    EXPECT_EQ(energy.GetFieldPages().serialize(), baseline.GetFieldPages().serialize());
+    for (const auto owner : energy.GetRegionSchedule().due) {
+        EXPECT_EQ(energy.GetActiveRegionLedger().energy_ages().at(owner), 1u);
+        EXPECT_EQ(energy.GetActiveRegionLedger().completed_work().at(owner),
+                  baseline.GetActiveRegionLedger().completed_work().at(owner) + 1u);
+    }
+    const auto age_updates = energy.GetRegionSchedule().due.size();
+    TickOnce(energy);
+    TickOnce(baseline);
+    EXPECT_EQ(energy.GetRegionSchedule().work, baseline.GetRegionSchedule().work + age_updates);
 }
