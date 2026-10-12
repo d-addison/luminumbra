@@ -381,3 +381,39 @@ TEST(PlantCoarseGrowth, RefusesBeyondDayBeforeChangingState) {
     EXPECT_EQ(growth.last_tick, 0u);
     EXPECT_EQ(growth.growth_points, 0u);
 }
+
+TEST(PlantCoarseGrowth, VaryingInputsStayWithinOneStageForCadencesThrough64Ticks) {
+    // For coherent nonterminal growth state, every tick adds 0..20 points.
+    // At k<=64 either trajectory spans at most 1280 points; adjacent stage
+    // thresholds are >=2000 points apart. Therefore their stage difference is
+    // <=1 even under an adversarial environment, infection or tending change.
+    // This qualifies that range only, not arbitrarily longer configured cadence.
+    for (const auto k : {1u, 4u, 16u, 64u})
+        for (const auto initial : {0u, 999u, 2999u, 5999u, 9999u, 17999u})
+            for (const auto tended : {0u, 255u}) {
+                entt::registry reg;
+                const auto e = reg.create();
+                reg.emplace<C::PlantTag>(e);
+                reg.emplace<C::TransformComponent>(e);
+                auto& genome = reg.emplace<C::PlantGenomeComponent>(e);
+                genome.genes.fill(.5f);
+                genome.genes[static_cast<std::size_t>(C::PlantGene::GrowthRate)] = 1;
+                auto& g = reg.emplace<C::PlantGrowthComponent>(e);
+                g.growth_points = initial;
+                while (g.stage + 1 < C::kPlantStageCount && initial >= F::StageThreshold(g.stage))
+                    ++g.stage;
+                g.tended = static_cast<std::uint8_t>(tended);
+                reg.emplace<C::PlantHealthComponent>(e);
+                auto coarse = g;
+                F::PlantEnvSample current{.5f, .5f, 1, 1};
+                for (std::uint32_t n = 1; n <= k; ++n) {
+                    const bool harsh = n % 2 == 0;
+                    reg.get<C::PlantHealthComponent>(e).infection = harsh ? 1000 : 0;
+                    const F::PlantEnvSample sampled =
+                        harsh ? F::PlantEnvSample{0, 0, 0, 0} : current;
+                    F::RunPlantGrowthSystemOnTick(reg, n, [&](const auto&) { return sampled; });
+                }
+                F::AdvancePlantGrowthCoarse(coarse, genome, current, 0, k, k);
+                EXPECT_LE(std::abs(static_cast<int>(coarse.stage) - static_cast<int>(g.stage)), 1);
+            }
+}

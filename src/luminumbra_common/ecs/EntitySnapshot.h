@@ -7,6 +7,7 @@
 #include <exception>
 #include <iomanip>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -26,6 +27,7 @@ struct EntitySnapshotRecord {
 
 struct EntityRegistrySnapshot {
     std::vector<EntitySnapshotRecord> entities;
+    bool persistent_identity = false;
 };
 
 inline const char* EntitySnapshotSchema() {
@@ -82,6 +84,8 @@ inline std::string SerializeEntityRegistrySnapshotJson(EntityRegistrySnapshot sn
                              {"entity_count", snapshot.entities.size()},
                              {"component_count", component_count},
                              {"entities", std::move(entities)}};
+    if (snapshot.persistent_identity)
+        output["identity_mode"] = "shared_allocator_v1";
     return StableEntitySnapshotDump(output);
 }
 
@@ -100,9 +104,16 @@ inline bool LoadEntityRegistrySnapshotJson(const std::string& json_text,
         }
 
         EntityRegistrySnapshot loaded;
+        if (snapshot.contains("identity_mode")) {
+            if (snapshot.at("identity_mode") != "shared_allocator_v1")
+                throw std::invalid_argument("unknown entity identity mode");
+            loaded.persistent_identity = true;
+        }
         std::size_t component_count = 0;
         for (const nlohmann::json& entity_json : snapshot.at("entities")) {
             EntitySnapshotRecord entity;
+            if (loaded.persistent_identity && !entity_json.at("entity_id").is_number_unsigned())
+                throw std::invalid_argument("persistent entity ID must be an unsigned integer");
             entity.entity_id = entity_json.at("entity_id").get<std::uint64_t>();
             entity.name = entity_json.at("name").get<std::string>();
 

@@ -106,7 +106,8 @@ RunFireSpreadOnTick(entt::registry& reg,
                     std::uint64_t tick,
                     glm::vec2 wind_xz = glm::vec2(0.0f),
                     std::span<const FireIgnitionSource> external_sources = {},
-                    const ::Luminumbra::world::RegionEntityGate& gate = {}) {
+                    const ::Luminumbra::world::RegionEntityGate& gate = {},
+                    const ::Luminumbra::world::RegionEntityWork& completed = {}) {
     (void)tick;
     FireSpreadStats stats;
 
@@ -117,8 +118,9 @@ RunFireSpreadOnTick(entt::registry& reg,
     for (auto e : view)
         if (::Luminumbra::world::AdmitRegionEntity(gate, e))
             ents.push_back(e);
-    std::sort(ents.begin(), ents.end(), [](entt::entity a, entt::entity b) {
-        return entt::to_integral(a) < entt::to_integral(b);
+    std::sort(ents.begin(), ents.end(), [&reg, &gate](entt::entity a, entt::entity b) {
+        return ::Luminumbra::world::RegionEntityIdentity(reg, a, bool(gate)) <
+               ::Luminumbra::world::RegionEntityIdentity(reg, b, bool(gate));
     });
 
     // --- : snapshot heat SOURCES (this tick's Burning cells) ---
@@ -141,8 +143,9 @@ RunFireSpreadOnTick(entt::registry& reg,
         std::vector<entt::entity> igs;
         for (auto e : ig)
             igs.push_back(e);
-        std::sort(igs.begin(), igs.end(), [](entt::entity a, entt::entity b) {
-            return entt::to_integral(a) < entt::to_integral(b);
+        std::sort(igs.begin(), igs.end(), [&reg, &gate](entt::entity a, entt::entity b) {
+            return ::Luminumbra::world::RegionEntityIdentity(reg, a, bool(gate)) <
+                   ::Luminumbra::world::RegionEntityIdentity(reg, b, bool(gate));
         });
         for (auto e : igs) {
             if (!::Luminumbra::world::AdmitRegionEntity(gate, e))
@@ -170,6 +173,8 @@ RunFireSpreadOnTick(entt::registry& reg,
     std::vector<Apply> applies;
 
     for (auto e : ents) {
+        if (completed)
+            completed(e);
         ++stats.considered;
         const auto& cb = view.get<Comp::CombustibleComponent>(e);
         const Comp::BurnState st = cb.state();

@@ -27,6 +27,7 @@ public:
     }
     [[nodiscard]] static bool valid_cell(ScentCellKey cell);
     [[nodiscard]] std::int32_t sample(ScentCellKey cell, std::int32_t baseline) const;
+    [[nodiscard]] bool initialized(ScentCellKey cell) const;
     bool set(ScentCellKey cell, std::int32_t value, std::int32_t limit);
     [[nodiscard]] bool owns_region(RegionKey owner) const;
     [[nodiscard]] std::string records() const;

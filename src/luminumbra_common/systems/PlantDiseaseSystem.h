@@ -100,7 +100,8 @@ inline PlantDiseaseStats
 RunPlantDiseaseOnTick(entt::registry& reg,
                       std::uint64_t tick,
                       std::uint64_t world_seed = 0,
-                      const ::Luminumbra::world::RegionEntityGate& gate = {}) {
+                      const ::Luminumbra::world::RegionEntityGate& gate = {},
+                      const ::Luminumbra::world::RegionEntityWork& completed = {}) {
     (void)tick;       // unused by the deterministic threshold path
     (void)world_seed; // reserved for the +20 stochastic variant
     PlantDiseaseStats stats;
@@ -113,8 +114,9 @@ RunPlantDiseaseOnTick(entt::registry& reg,
     for (auto e : view)
         if (::Luminumbra::world::AdmitRegionEntity(gate, e))
             ents.push_back(e);
-    std::sort(ents.begin(), ents.end(), [](entt::entity a, entt::entity b) {
-        return entt::to_integral(a) < entt::to_integral(b);
+    std::sort(ents.begin(), ents.end(), [&reg, &gate](entt::entity a, entt::entity b) {
+        return ::Luminumbra::world::RegionEntityIdentity(reg, a, bool(gate)) <
+               ::Luminumbra::world::RegionEntityIdentity(reg, b, bool(gate));
     });
 
     if (ents.empty())
@@ -139,6 +141,8 @@ RunPlantDiseaseOnTick(entt::registry& reg,
 
     //  (expose + resolve): mutate each plant's health from the snapshot.
     for (auto e : ents) {
+        if (completed)
+            completed(e);
         ++stats.considered;
         auto& h = view.get<Comp::PlantHealthComponent>(e);
         const auto& tf = view.get<const Comp::TransformComponent>(e);

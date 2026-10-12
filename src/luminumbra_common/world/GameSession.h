@@ -40,7 +40,8 @@ class CreatureSpeciesRegistry; // per-world species definition table
 } // namespace luminumbra::ai
 
 namespace luminumbra::foliage {
-class SoilGrid;       // soil nutrient field (systems/SoilNutrientSystem.h)
+class SoilGrid; // soil nutrient field (systems/SoilNutrientSystem.h)
+struct PlantEnvSample;
 class IrrigationGrid; // soil-moisture field (systems/IrrigationSystem.h)
 } // namespace luminumbra::foliage
 
@@ -401,6 +402,12 @@ public:
     [[nodiscard]] const FieldPageState& GetFieldPages() const {
         return m_fieldPages;
     }
+    // Main-thread admission/edit seams. Enabled edits are transactional and own
+    // their region before publishing any cell or identity.
+    bool AdmitPlant(entt::entity entity);
+    bool SetFoliageCell(const Vec3& position, bool soil, std::int32_t value);
+    [[nodiscard]] std::int32_t SoilNutrientAt(const Vec3& position) const;
+    [[nodiscard]] std::int32_t IrrigationAt(const Vec3& position) const;
     // A fatal scheduler/obligation fault. Once latched the session is fail-stop: the
     // simulation clock is rewound to the faulting tick, no further ticks run, and hosts
     // are expected to save and stop. Saving a faulted session is allowed.
@@ -532,6 +539,18 @@ private:
     void AdvanceGroundObjects(std::uint64_t tick);
     // Activates and steps the due, ledger-backed regions' field pages by one tick.
     void AdvanceFieldPages(std::uint64_t tick);
+    bool AdmitPlantAt(entt::entity entity, std::uint64_t fresh_stamp);
+    void PrepareRegionalFoliage();
+    void RunRegionalFoliageTick(std::uint64_t tick);
+    void RunRegionalFoliageTickImpl(std::uint64_t tick);
+    void RunFoliageTick(luminumbra::simulation::SimBudgetTelemetry::TickScope& budget,
+                        std::uint64_t tick);
+    [[nodiscard]] luminumbra::foliage::PlantEnvSample
+    SamplePlantEnvironment(const Components::TransformComponent& transform,
+                           std::uint64_t tick) const;
+    [[nodiscard]] std::string PlantRegionProjection(RegionKey key) const;
+    std::map<RegionKey, std::uint64_t> m_foliagePreviousTicks;
+
     void BindRegionalFieldQueries();
     [[nodiscard]] std::uint16_t SampleRegionalChannel(int channel, const Vec3& position) const;
     [[nodiscard]] std::string RegionalAmbientHash(std::uint8_t channels, bool weather) const;

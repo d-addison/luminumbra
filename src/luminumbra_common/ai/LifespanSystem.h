@@ -68,17 +68,20 @@ struct LifespanStats {
 // of registry state. id-ordered so the death-marking order (and thus any derived
 // telemetry) is deterministic. No creation/destruction -> no two-phase needed,
 // no view invalidation. Safe to call every tick; a no-op when no entity opts in.
-inline LifespanStats RunLifespanOnTick(entt::registry& reg,
-                                       std::uint64_t /*tick*/ = 0,
-                                       const ::Luminumbra::world::RegionEntityGate& gate = {}) {
+inline LifespanStats
+RunLifespanOnTick(entt::registry& reg,
+                  std::uint64_t /*tick*/ = 0,
+                  const ::Luminumbra::world::RegionEntityGate& gate = {},
+                  const ::Luminumbra::world::RegionEntityWork& completed = {}) {
     LifespanStats stats;
 
     auto view = reg.view<Comp::MortalComponent>();
 
     // id-ordered traversal so death-marking is deterministic / order-stable.
     std::vector<entt::entity> ents(view.begin(), view.end());
-    std::sort(ents.begin(), ents.end(), [](entt::entity a, entt::entity b) {
-        return entt::to_integral(a) < entt::to_integral(b);
+    std::sort(ents.begin(), ents.end(), [&reg, &gate](entt::entity a, entt::entity b) {
+        return ::Luminumbra::world::RegionEntityIdentity(reg, a, bool(gate)) <
+               ::Luminumbra::world::RegionEntityIdentity(reg, b, bool(gate));
     });
 
     for (auto e : ents) {
@@ -92,6 +95,8 @@ inline LifespanStats RunLifespanOnTick(entt::registry& reg,
             continue;
         }
 
+        if (completed)
+            completed(e);
         ++stats.aged;
 
         // Age (saturating so a long-lived entity can't wrap its clock).

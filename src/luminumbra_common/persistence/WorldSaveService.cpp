@@ -2,6 +2,8 @@
 
 #include "../ecs/EntitySnapshot.h" //  plant entity snapshot persistence
 #include "../fields/EnergyFieldState.h"
+#include "../systems/RegionalFoliage.h"
+#include "PlantPersistence.h"
 #include "SaveTransaction.h"
 #include "WorldPersistenceRoundtrip.h"
 #include "world/FarLodStore.h"
@@ -1337,7 +1339,32 @@ bool WorldSaveService::load_plant_entities(Luminumbra::Ecs::EntityRegistrySnapsh
     out = Luminumbra::Ecs::EntityRegistrySnapshot{};
     const std::filesystem::path path = plant_entities_path(save_dir);
     std::error_code ec;
-    if (!std::filesystem::exists(path, ec)) {
+    const bool present = std::filesystem::exists(path, ec);
+    if (ec) {
+        AddError(errors, "failed to inspect plant authority: " + ec.message());
+        return false;
+    }
+    if (!SaveTransaction::active_for(save_dir) && snapshot_index_exists(save_dir)) {
+        SnapshotIndex index;
+        if (!read_snapshot_index(save_dir, index, errors))
+            return false;
+        const auto member =
+            std::find_if(index.members.begin(), index.members.end(), [](const SnapshotMember& m) {
+                return m.path == "chunks/region/plant-entities.json";
+            });
+        std::uint64_t size = 0, fnv = 0;
+        bool exists = false;
+        if (!hash_file(path, size, fnv, exists, errors))
+            return false;
+        if ((member == index.members.end() && exists) ||
+            (member != index.members.end() &&
+             (member->present != exists ||
+              (exists && (member->bytes != size || member->fnv64 != fnv))))) {
+            AddError(errors, "inconsistent snapshot: chunks/region/plant-entities.json");
+            return false;
+        }
+    }
+    if (!present) {
         return true; // clean miss: a fresh / no-plant world
     }
     std::ifstream in(path, std::ios::binary);
@@ -1351,6 +1378,12 @@ bool WorldSaveService::load_plant_entities(Luminumbra::Ecs::EntityRegistrySnapsh
     if (!Luminumbra::Ecs::LoadEntityRegistrySnapshotJson(ss.str(), out, load_errors)) {
         for (const auto& e : load_errors)
             AddError(errors, e);
+        return false;
+    }
+    if (out.persistent_identity &&
+        ((!SaveTransaction::active_for(save_dir) && !snapshot_index_exists(save_dir)) ||
+         Ecs::SerializeEntityRegistrySnapshotJson(out) != ss.str())) {
+        AddError(errors, "corrupt or unindexed persistent plant snapshot");
         return false;
     }
     return true;
@@ -2866,6 +2899,32 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
             return reject("Saved-world validation cancelled.");
         if (!load_plant_entities(plants, save_dir, &errors))
             return reject("");
+        if (indexed || plants.persistent_identity) {
+            world::GroundObjectStore ground;
+            if (!load_ground_objects(ground, save_dir, ledger.next_persistent_id(), &errors))
+                return reject("");
+            std::string plant_error;
+            if (!luminumbra::foliage::ValidatePlantEntitySnapshot(
+                    plants, ledger, ground, plant_error))
+                return reject(plant_error);
+            entt::registry decoded;
+            luminumbra::foliage::ApplyPlantEntitySnapshot(decoded, plants);
+            world::FieldPageState foliage_pages;
+            if (!load_field_pages(foliage_pages, save_dir, &errors))
+                return reject("");
+            const auto soil_cells = luminumbra::foliage::FoliageCells(foliage_pages.soil());
+            const auto irrigation_cells =
+                luminumbra::foliage::FoliageCells(foliage_pages.irrigation());
+            for (auto e : decoded.view<Components::PlantTag, Components::TransformComponent>()) {
+                const auto cell = luminumbra::foliage::FoliageCell(
+                    decoded.get<Components::TransformComponent>(e).position);
+                if ((decoded.all_of<Components::SoilFeederComponent>(e) &&
+                     !soil_cells.contains(cell)) ||
+                    (decoded.all_of<Components::WaterSourceComponent>(e) &&
+                     !irrigation_cells.contains(cell)))
+                    return reject("Corrupt plant authority: missing owned foliage cell");
+            }
+        }
         if (indexed) {
             const std::string mismatch =
                 VerifySnapshotIndex(save_dir, snapshot_index, region_digests);

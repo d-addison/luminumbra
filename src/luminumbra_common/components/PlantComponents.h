@@ -71,6 +71,14 @@ struct PlantGrowthComponent {
     std::uint64_t last_tick = 0;     // last update tick (catch-up via now - last)
 };
 
+// Enabled continuation identity. Owner is persisted explicitly and must match the
+// validated transform; region_stamp is the last successfully completed growth window.
+struct PlantRegionComponent {
+    std::uint64_t persistent_id = 0;
+    std::int32_t owner_x = 0, owner_z = 0;
+    std::uint64_t region_stamp = 0;
+};
+
 // Opt-in marker. ONLY entities tagged with this participate in plant growth, so
 // the canonical headless roster (which has no plants) stays byte-identical and
 // the world_hash baseline is unperturbed until plants are deliberately spawned.

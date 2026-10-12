@@ -24,14 +24,20 @@
 #include "luminumbra_client/rendering/TimeOfDayModel.h"
 #include "luminumbra_common/ai/CircadianSystem.h"
 #include "luminumbra_common/ai/EcologyHash.h"
+#include "luminumbra_common/ai/LifespanSystem.h"
 #include "luminumbra_common/ai/MigrationSystem.h"
 #include "luminumbra_common/ai/ScentField.h"
 #include "luminumbra_common/ai/StimulusChannels.h"
 #include "luminumbra_common/components/InstinctComponents.h"
+#include "luminumbra_common/persistence/PlantPersistence.h"
 #include "luminumbra_common/persistence/SavedWorldCatalog.h"
 #include "luminumbra_common/replay/RegionScheduleTrace.h"
 #include "luminumbra_common/systems/AetherFieldSystem.h"
+#include "luminumbra_common/systems/CropLifecycleSystem.h"
+#include "luminumbra_common/systems/FireSpreadSystem.h"
+#include "luminumbra_common/systems/PlantDiseaseSystem.h"
 #include "luminumbra_common/systems/PlantGrowthSystem.h"
+#include "luminumbra_common/systems/RegionalFoliage.h"
 #include "luminumbra_common/systems/WeatherSystem.h"
 #include "luminumbra_common/systems/WindFieldSystem.h"
 
@@ -3715,4 +3721,936 @@ TEST(GameSessionHeadlessWorldTest, EmptyRegionalEnergyAgeWorkReachesNextSchedule
     TickOnce(energy);
     TickOnce(baseline);
     EXPECT_EQ(energy.GetRegionSchedule().work, baseline.GetRegionSchedule().work + age_updates);
+}
+
+namespace {
+namespace SF = luminumbra::foliage;
+namespace SC = Luminumbra::Components;
+
+std::string S7PlantBytes(GameSession& session) {
+    return Luminumbra::Ecs::SerializeEntityRegistrySnapshotJson(
+        SF::BuildPlantEntitySnapshot(session.GetRegistry(), true));
+}
+entt::entity S7FindPlant(GameSession& session, std::uint64_t id) {
+    for (auto e : session.GetRegistry().view<SC::PlantRegionComponent>())
+        if (session.GetRegistry().get<SC::PlantRegionComponent>(e).persistent_id == id)
+            return e;
+    return entt::null;
+}
+void S7KeepAllocator(ActiveRegionLedger& ledger, std::uint64_t next) {
+    while (ledger.next_persistent_id() < next) {
+        std::uint64_t id = 0;
+        ASSERT_TRUE(ledger.allocate_persistent_id(id));
+    }
+    auto& records = const_cast<std::map<RegionKey, ActiveRegionRecord>&>(ledger.records());
+    for (auto& [key, record] : records) {
+        record.first_active = 0;
+        if (record.state == RegionState::Active)
+            record.last_ticked = ledger.tick();
+    }
+}
+void S7CommitFixture(GameSession& base,
+                     ActiveRegionLedger ledger,
+                     const FieldPageState& fields,
+                     Luminumbra::Ecs::EntityRegistrySnapshot plants,
+                     WorldCalendar calendar = {}) {
+    const auto save = base.GetWorldSaveDir();
+    auto metadata = nlohmann::json::parse(ReadClockTestFile(save / "world_info.json"));
+    const WorldClock clock(ledger.tick(), calendar);
+    clock.write_metadata(metadata);
+    metadata["ambientFieldAnchor"] = {{"x", 0}, {"y", 0}, {"z", 0}};
+    std::vector<std::string> errors;
+    P::WorldSaveService::SaveFactsScope facts(save);
+    P::SaveTransaction transaction(save, clock.tick(), {}, &P::WorldSaveService::member_digest);
+    ASSERT_TRUE(transaction.begin(&errors));
+    ASSERT_TRUE(P::WorldSaveService::save_metadata_and_active_regions(
+        metadata.dump(), ledger, save, &errors));
+    ASSERT_TRUE(P::WorldSaveService::save_field_pages(fields, save, &errors));
+    ASSERT_TRUE(P::WorldSaveService::save_plant_entities(plants, save, &errors));
+    ASSERT_TRUE(transaction.commit(&errors));
+}
+void S7SetSnapshotStamp(Luminumbra::Ecs::EntityRegistrySnapshot& snap, std::uint64_t stamp) {
+    for (auto& plant : snap.entities)
+        for (auto& c : plant.components) {
+            if (c.type == "PlantRegion")
+                c.data["region_stamp"] = stamp;
+            if (c.type == "PlantGrowth")
+                c.data["last_tick"] = stamp;
+        }
+}
+SF::PlantEnvSample
+S7Environment(GameSession& session, const Luminumbra::Vec3& p, std::uint64_t tick) {
+    // Independent public terrain/weather/calendar samples. No session foliage
+    // sampler or coarse implementation is used by this reference.
+    SF::PlantEnvSample env;
+    const auto height = session.GetWorldSystem()->GetTerrainHeightAt(p.x, p.z);
+    switch (session.GetWorldSystem()->SurfaceVertexMaterial(p.x, p.z, height)) {
+        case Luminumbra::MaterialType::Grass:
+            env.soil_quality = .95f;
+            break;
+        case Luminumbra::MaterialType::Soil:
+            env.soil_quality = .85f;
+            break;
+        case Luminumbra::MaterialType::Sand:
+            env.soil_quality = .45f;
+            break;
+        case Luminumbra::MaterialType::Stone:
+            env.soil_quality = .30f;
+            break;
+        default:
+            env.soil_quality = .25f;
+            break;
+    }
+    const auto day = static_cast<float>(session.GetWorldClock().day_phase(tick));
+    const auto year = static_cast<float>(session.GetWorldClock().year_phase(tick));
+    const auto daylight = 1 - 2 * (day < .5f ? .5f - day : day - .5f);
+    const auto warmth = 1 - 2 * (year < .5f ? .5f - year : year - .5f);
+    env.light = SF::clamp01(.15f + .85f * daylight);
+    env.temperature = SF::clamp01(
+        SF::clamp01(.60f -
+                    std::max(0.0f, height - static_cast<float>(Luminumbra::SEA_LEVEL)) * .00045f) +
+        (warmth - .5f) * .30f);
+    env.moisture = SF::clamp01(.30f + session.GetWeatherSystem()->PrecipitationAt(p) * .70f);
+    return env;
+}
+void S7ExpectGrowth(const SC::PlantGrowthComponent& a, const SC::PlantGrowthComponent& b) {
+    EXPECT_EQ(a.species_id, b.species_id);
+    EXPECT_EQ(a.stage, b.stage);
+    EXPECT_EQ(a.quality, b.quality);
+    EXPECT_EQ(a.growth_points, b.growth_points);
+    EXPECT_EQ(a.stress_points, b.stress_points);
+    EXPECT_EQ(a.tended, b.tended);
+    EXPECT_EQ(a.planted_tick, b.planted_tick);
+    EXPECT_EQ(a.last_tick, b.last_tick);
+}
+} // namespace
+
+TEST(GameSessionHeadlessWorldTest, S7StableSharedPlantIdentityAndEntireLivingSnapshotContinue) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession owner, reopened;
+    CreateGroundWorld(owner, root, jobs, "S7 plant identity");
+    ASSERT_EQ(SpawnGround(owner, 5200, -1500), 1u);
+    const auto plant = ClockTestPlant(owner.GetRegistry(), {5.2f, 0, -1.5f});
+    owner.GetRegistry().emplace<SC::SoilFeederComponent>(plant);
+    owner.GetRegistry().emplace<SC::PlantHealthComponent>(plant);
+    owner.GetRegistry().emplace<SC::MortalComponent>(plant).age_ticks = 19;
+    owner.GetRegistry().emplace<SC::GrazeableComponent>(plant).biomass = .2f;
+    owner.GetRegistry().emplace<SC::CombustibleComponent>(plant).burn_ticks_remaining = 100;
+    owner.GetRegistry().emplace<SC::WaterSourceComponent>(plant).output = 65535;
+    const auto legacy = Luminumbra::Ecs::SerializeEntityRegistrySnapshotJson(
+        SF::BuildPlantEntitySnapshot(owner.GetRegistry()));
+    ASSERT_TRUE(owner.AdmitPlant(plant));
+    const auto identity = owner.GetRegistry().get<SC::PlantRegionComponent>(plant).persistent_id;
+    EXPECT_EQ(identity, 2u);
+    EXPECT_EQ(Luminumbra::Ecs::SerializeEntityRegistrySnapshotJson(
+                  SF::BuildPlantEntitySnapshot(owner.GetRegistry())),
+              legacy);
+    // Preserve opt-in markers literally in enabled snapshots. A component
+    // without its tag must not start receiving pollen after reopen, and a bare
+    // tag must not disappear merely because it has no payload component yet.
+    owner.GetRegistry().emplace<SC::PollinationComponent>(plant);
+    const auto donor = ClockTestPlant(owner.GetRegistry(), {6.2f, 0, -1.5f});
+    owner.GetRegistry().get<SC::PlantGrowthComponent>(donor).stage =
+        static_cast<std::uint8_t>(SC::PlantStage::Flowering);
+    owner.GetRegistry().emplace<SC::PollinationTag>(donor);
+    owner.GetRegistry().emplace<SC::PollinationComponent>(donor);
+    ASSERT_TRUE(owner.AdmitPlant(donor));
+    const auto marker = ClockTestPlant(owner.GetRegistry(), {7.2f, 0, -1.5f});
+    owner.GetRegistry().emplace<SC::PollinationTag>(marker);
+    ASSERT_TRUE(owner.AdmitPlant(marker));
+    TickOnce(owner);
+    const auto saved = S7PlantBytes(owner);
+    ASSERT_TRUE(owner.SaveWorld());
+    EXPECT_EQ(S7PlantBytes(owner), saved);
+    EnableSnapshotSession(reopened, root, jobs);
+    ASSERT_TRUE(reopened.LoadWorld(owner.GetMetadata().worldId)) << reopened.GetWorldOpenError();
+    EXPECT_EQ(S7PlantBytes(reopened), saved);
+    ASSERT_NE(S7FindPlant(reopened, identity), entt::null);
+    EXPECT_FALSE(reopened.GetRegistry().all_of<SC::PollinationTag>(S7FindPlant(reopened, 2)));
+    EXPECT_TRUE(reopened.GetRegistry().all_of<SC::PollinationTag>(S7FindPlant(reopened, 4)));
+    EXPECT_FALSE(reopened.GetRegistry().all_of<SC::PollinationComponent>(S7FindPlant(reopened, 4)));
+    EXPECT_EQ(reopened.GetRegistry()
+                  .get<SC::PlantRegionComponent>(S7FindPlant(reopened, identity))
+                  .region_stamp,
+              owner.GetWorldClock().tick());
+    for (int i = 0; i < 5; ++i) {
+        TickOnce(owner);
+        TickOnce(reopened);
+        EXPECT_EQ(S7PlantBytes(owner), S7PlantBytes(reopened));
+        EXPECT_EQ(owner.GetFieldPages().serialize(), reopened.GetFieldPages().serialize());
+    }
+}
+
+TEST(GameSessionHeadlessWorldTest,
+     S7ReducedDueUsesExactConstantGrowthAndFrozenLivingStateIsUntouched) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession base, live;
+    CreateGroundWorld(base, root, jobs, "S7 reduced living");
+    const RegionKey reduced{10, -3}, frozen{20, -3};
+    for (const auto pos : {Luminumbra::Vec3{5200, 0, -1500}, Luminumbra::Vec3{10300, 0, -1500}}) {
+        const auto plant = ClockTestPlant(base.GetRegistry(), pos);
+        base.GetRegistry().get<SC::PlantGrowthComponent>(plant).tended = 255;
+        base.GetRegistry().emplace<SC::MortalComponent>(plant).age_ticks = 10;
+        auto& fire = base.GetRegistry().emplace<SC::CombustibleComponent>(plant);
+        fire.set_state(SC::BurnState::Burning);
+        fire.burn_ticks_remaining = 1000;
+        base.GetRegistry().emplace<SC::GrazeableComponent>(plant).biomass = .2f;
+        base.GetRegistry().emplace<SC::PlantHealthComponent>(plant).infection = 400;
+    }
+    ASSERT_TRUE(base.SaveWorld());
+    auto snap = SF::BuildPlantEntitySnapshot(base.GetRegistry(), true);
+    S7SetSnapshotStamp(snap, 96);
+    auto ledger =
+        FixtureLedger(100, {{reduced, RegionState::Reduced}, {frozen, RegionState::Frozen}});
+    S7KeepAllocator(ledger, base.GetActiveRegionLedger().next_persistent_id());
+    for (const auto key : {reduced, frozen})
+        const_cast<std::map<RegionKey, ActiveRegionRecord>&>(ledger.records()).at(key).last_ticked =
+            96;
+    S7CommitFixture(base, ledger, {}, snap);
+    EnableSnapshotSession(live, root, jobs);
+    ASSERT_TRUE(live.LoadWorld(base.GetMetadata().worldId)) << live.GetWorldOpenError();
+    live.SetReplicatedSimulationAnchors({});
+    const auto frozen_before =
+        SF::BuildPlantEntitySnapshot(live.GetRegistry(), true).entities.at(1);
+    std::uint64_t previous = 96;
+    int skipped = 0, stepped = 0;
+    for (int n = 0; n < 8; ++n) {
+        const auto e = S7FindPlant(live, 1);
+        const auto before = live.GetRegistry().get<SC::PlantGrowthComponent>(e);
+        const auto living_before = S7PlantBytes(live);
+        const auto health_before = live.GetRegistry().get<SC::PlantHealthComponent>(e);
+        const auto fire_before = live.GetRegistry().get<SC::CombustibleComponent>(e);
+        const auto grazing_before = live.GetRegistry().get<SC::GrazeableComponent>(e);
+        const auto mortal_before = live.GetRegistry().get<SC::MortalComponent>(e);
+        const auto age = live.GetRegistry().get<SC::MortalComponent>(e).age_ticks;
+        const auto infection = live.GetRegistry().get<SC::PlantHealthComponent>(e).infection;
+        TickOnce(live);
+        ASSERT_FALSE(live.GetRegionSchedulerFault());
+        const auto t = live.GetWorldClock().tick();
+        const bool due = std::find(live.GetRegionSchedule().due.begin(),
+                                   live.GetRegionSchedule().due.end(),
+                                   reduced) != live.GetRegionSchedule().due.end();
+        if (!due) {
+            S7ExpectGrowth(live.GetRegistry().get<SC::PlantGrowthComponent>(e), before);
+            EXPECT_EQ(live.GetRegistry().get<SC::MortalComponent>(e).age_ticks, age);
+            EXPECT_EQ(S7PlantBytes(live), living_before);
+            ++skipped;
+        } else {
+            entt::registry reference;
+            const auto r = ClockTestPlant(reference, {5200, 0, -1500});
+            reference.get<SC::PlantGrowthComponent>(r) = before;
+            reference.emplace<SC::PlantHealthComponent>(r).infection = infection;
+            const auto env = S7Environment(live, {5200, 0, -1500}, t);
+            for (auto k = previous + 1; k <= t; ++k)
+                SF::RunPlantGrowthSystemOnTick(reference, k, [&](const auto&) { return env; });
+            S7ExpectGrowth(live.GetRegistry().get<SC::PlantGrowthComponent>(e),
+                           reference.get<SC::PlantGrowthComponent>(r));
+            EXPECT_EQ(live.GetRegistry().get<SC::MortalComponent>(e).age_ticks, age + t - previous);
+            reference.get<SC::PlantHealthComponent>(r) = health_before;
+            reference.emplace<SC::CombustibleComponent>(r, fire_before);
+            reference.emplace<SC::GrazeableComponent>(r, grazing_before);
+            reference.emplace<SC::MortalComponent>(r, mortal_before);
+            for (auto k = previous + 1; k <= t; ++k) {
+                SF::RunPlantDiseaseOnTick(reference, k);
+                luminumbra::sim::RunFireSpreadOnTick(reference, k);
+                luminumbra::ai::RunWildlifeFoliageOnTick(reference, k);
+                luminumbra::ai::RunLifespanOnTick(reference, k);
+            }
+            reference.emplace<SC::PlantRegionComponent>(r, 1, reduced.x, reduced.z, t);
+            auto expected = SF::BuildPlantEntitySnapshot(reference, true);
+            auto actual = SF::BuildPlantEntitySnapshot(live.GetRegistry(), true);
+            actual.entities.resize(1);
+            EXPECT_EQ(Luminumbra::Ecs::SerializeEntityRegistrySnapshotJson(actual),
+                      Luminumbra::Ecs::SerializeEntityRegistrySnapshotJson(expected));
+            previous = t;
+            ++stepped;
+        }
+        auto frozen_now = SF::BuildPlantEntitySnapshot(live.GetRegistry(), true);
+        Luminumbra::Ecs::EntityRegistrySnapshot a, b;
+        a.entities.push_back(frozen_before);
+        b.entities.push_back(frozen_now.entities.at(1));
+        EXPECT_EQ(Luminumbra::Ecs::SerializeEntityRegistrySnapshotJson(a),
+                  Luminumbra::Ecs::SerializeEntityRegistrySnapshotJson(b));
+    }
+    EXPECT_GT(skipped, 0);
+    EXPECT_GT(stepped, 0);
+    ASSERT_TRUE(live.SaveWorld());
+    GameSession reopened;
+    EnableSnapshotSession(reopened, root, jobs);
+    ASSERT_TRUE(reopened.LoadWorld(base.GetMetadata().worldId));
+    EXPECT_EQ(S7PlantBytes(live), S7PlantBytes(reopened));
+}
+
+TEST(GameSessionHeadlessWorldTest,
+     S7PageSoilAndIrrigationMatchLegacyIntegerOrderAndRetainEmptyHistory) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession owner, reopened;
+    CreateGroundWorld(owner, root, jobs, "S7 exact page units");
+    const Luminumbra::Vec3 pos{5201.25f, 0, -1499.25f};
+    const auto cell = SF::FoliageCell(pos);
+    const auto origin_x = (cell.x / 16) * 16;
+    const auto origin_z = ((cell.z - 15) / 16) * 16;
+    const auto plant = ClockTestPlant(owner.GetRegistry(), pos);
+    owner.GetRegistry().emplace<SC::SoilFeederComponent>(plant).uptake = 80;
+    owner.GetRegistry().emplace<SC::WaterSourceComponent>(plant).output = 65535;
+    ASSERT_TRUE(owner.AdmitPlant(plant));
+    ASSERT_TRUE(owner.SetFoliageCell(pos, true, 3));
+    ASSERT_TRUE(owner.SetFoliageCell(pos, false, 3999990));
+    owner.SetReplicatedSimulationAnchors({});
+    entt::registry legacy;
+    const auto r = ClockTestPlant(legacy, pos);
+    legacy.emplace<SC::SoilFeederComponent>(r).uptake = 80;
+    legacy.emplace<SC::WaterSourceComponent>(r).output = 65535;
+    SF::SoilGrid soil(16, 16);
+    SF::IrrigationGrid irrigation(16, 16);
+    soil.SetCell(cell.x - origin_x, cell.z - origin_z, 3);
+    irrigation.SetCell(cell.x - origin_x, cell.z - origin_z, 3999990);
+    for (int n = 0; n < 4; ++n) {
+        SF::RunIrrigationOnTick(legacy, irrigation, origin_x, origin_z, 1);
+        SF::RunSoilNutrientOnTick(legacy, soil, origin_x, origin_z, 1);
+        TickOnce(owner);
+        EXPECT_EQ(owner.SoilNutrientAt(pos), soil.AtCell(cell.x - origin_x, cell.z - origin_z));
+        EXPECT_EQ(owner.IrrigationAt(pos), irrigation.AtCell(cell.x - origin_x, cell.z - origin_z));
+        EXPECT_EQ(owner.GetRegistry().get<SC::SoilFeederComponent>(plant).absorbed,
+                  legacy.get<SC::SoilFeederComponent>(r).absorbed);
+        for (int z = 0; z < 16; ++z)
+            for (int x = 0; x < 16; ++x) {
+                EXPECT_EQ(
+                    owner.GetFieldPages().soil().sample({origin_x + x, origin_z + z}, 1000000),
+                    soil.AtCell(x, z));
+                EXPECT_EQ(
+                    owner.GetFieldPages().irrigation().sample({origin_x + x, origin_z + z}, 0),
+                    irrigation.AtCell(x, z));
+            }
+    }
+    owner.GetRegistry().destroy(plant);
+    legacy.destroy(r);
+    const auto history = owner.GetFieldPages().serialize();
+    ASSERT_TRUE(owner.SaveWorld());
+    EnableSnapshotSession(reopened, root, jobs);
+    ASSERT_TRUE(reopened.LoadWorld(owner.GetMetadata().worldId)) << reopened.GetWorldOpenError();
+    reopened.SetReplicatedSimulationAnchors({});
+    EXPECT_EQ(reopened.GetFieldPages().serialize(), history);
+    EXPECT_TRUE(reopened.GetFieldPages().owns_region({10, -3}));
+    for (int n = 0; n < 3; ++n) {
+        SF::RunIrrigationOnTick(legacy, irrigation, origin_x, origin_z, 1);
+        SF::RunSoilNutrientOnTick(legacy, soil, origin_x, origin_z, 1);
+        TickOnce(owner);
+        TickOnce(reopened);
+        EXPECT_EQ(owner.GetFieldPages().serialize(), reopened.GetFieldPages().serialize());
+        EXPECT_EQ(reopened.SoilNutrientAt(pos), soil.AtCell(cell.x - origin_x, cell.z - origin_z));
+        EXPECT_EQ(reopened.IrrigationAt(pos),
+                  irrigation.AtCell(cell.x - origin_x, cell.z - origin_z));
+    }
+}
+
+TEST(GameSessionHeadlessWorldTest,
+     S7ActualIrrigationBorderCommonPhaseIgnoresInteriorDueAndSealsFrozenOrAbsent) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    RegionKey left{10, -30}, right{11, -30};
+    for (int z = -30; z < 30; ++z)
+        if (ActiveRegionLedger::phase({10, z}, 2) != 0 &&
+            ActiveRegionLedger::phase({11, z}, 2) != 0) {
+            left.z = right.z = z;
+            break;
+        }
+    ASSERT_NE(ActiveRegionLedger::phase(left, 2), 0u);
+    ASSERT_NE(ActiveRegionLedger::phase(right, 2), 0u);
+    for (int mode = 0; mode < 3; ++mode) {
+        SCOPED_TRACE(mode);
+        GameSession base, live;
+        CreateGroundWorld(base, root, jobs, ("S7 border " + std::to_string(mode)).c_str());
+        ASSERT_TRUE(base.SaveWorld());
+        std::map<RegionKey, RegionState> owners{{left, RegionState::Reduced}};
+        if (mode != 2)
+            owners[right] = mode == 0 ? RegionState::Reduced : RegionState::Frozen;
+        const auto ledger = FixtureLedger(103, owners);
+        FieldPageState pages;
+        const ScentCellKey a{left.x * 512 + 511, left.z * 512 + 50}, b{a.x + 1, a.z};
+        ASSERT_TRUE(pages.set_irrigation(a, 800));
+        ASSERT_TRUE(pages.set_soil(a, 999997));
+        if (mode != 2)
+            ASSERT_TRUE(pages.set_irrigation(b, 0));
+        CommitRegionalFixture(base, ledger, pages);
+        EnableSnapshotSession(live, root, jobs);
+        ASSERT_TRUE(live.LoadWorld(base.GetMetadata().worldId)) << live.GetWorldOpenError();
+        live.SetReplicatedSimulationAnchors({});
+        TickOnce(live); // 104 common phase; neither Reduced interior is due
+        EXPECT_TRUE(live.GetRegionSchedule().due.empty());
+        EXPECT_EQ(live.GetFieldPages().soil().records(), pages.soil().records());
+        if (mode == 0) {
+            EXPECT_EQ(live.GetFieldPages().irrigation().sample(a, 0), 700);
+            EXPECT_EQ(live.GetFieldPages().irrigation().sample(b, 0), 100);
+            EXPECT_EQ(live.GetActiveRegionLedger().completed_work().at(left), 1u);
+            EXPECT_EQ(live.GetActiveRegionLedger().completed_work().at(right), 1u);
+        } else
+            EXPECT_EQ(live.GetFieldPages().irrigation().records(), pages.irrigation().records());
+        ASSERT_TRUE(live.SaveWorld());
+        GameSession reopened;
+        EnableSnapshotSession(reopened, root, jobs);
+        ASSERT_TRUE(reopened.LoadWorld(base.GetMetadata().worldId));
+        EXPECT_EQ(reopened.GetFieldPages().serialize(), live.GetFieldPages().serialize());
+    }
+}
+
+TEST(GameSessionHeadlessWorldTest, S7ResumeCapClearsPersistedTokenAndDoesNotReplayAfterReopen) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    for (const auto calendar : {WorldCalendar{}, WorldCalendar{120, 4}}) {
+        SCOPED_TRACE(calendar.dayLengthTicks);
+        GameSession base, live, reopened;
+        CreateGroundWorld(
+            base, root, jobs, ("S7 resume " + std::to_string(calendar.dayLengthTicks)).c_str());
+        const auto plant = ClockTestPlant(base.GetRegistry(), {5200, 0, -1500});
+        base.GetRegistry().get<SC::PlantGrowthComponent>(plant).tended = 255;
+        base.GetRegistry().emplace<SC::MortalComponent>(plant).age_ticks = 10;
+        ASSERT_TRUE(base.SaveWorld());
+        auto snap = SF::BuildPlantEntitySnapshot(base.GetRegistry(), true);
+        S7SetSnapshotStamp(snap, 96);
+        auto ledger = FixtureLedger(70000, {{kFarGroundRegion, RegionState::Frozen}});
+        S7KeepAllocator(ledger, base.GetActiveRegionLedger().next_persistent_id());
+        auto& record = const_cast<std::map<RegionKey, ActiveRegionRecord>&>(ledger.records())
+                           .at(kFarGroundRegion);
+        record.frozen_at = 100;
+        record.last_ticked = 96;
+        S7CommitFixture(base, ledger, {}, snap, calendar);
+        EnableSnapshotSession(live, root, jobs);
+        ASSERT_TRUE(live.LoadWorld(base.GetMetadata().worldId)) << live.GetWorldOpenError();
+        live.SetReplicatedSimulationAnchors({});
+        // A save while Frozen preserves the token; opening it does no catch-up.
+        const auto before = S7PlantBytes(live);
+        ASSERT_TRUE(live.SaveWorld());
+        EXPECT_EQ(S7PlantBytes(live), before);
+        live.PinActiveRegion(kFarGroundRegion, true);
+        const auto e = S7FindPlant(live, 1);
+        const auto growth = live.GetRegistry().get<SC::PlantGrowthComponent>(e);
+        TickOnce(live);
+        ASSERT_FALSE(live.GetRegionSchedulerFault());
+        const auto cap = std::min(36000u, calendar.dayLengthTicks);
+        EXPECT_EQ(live.GetRegistry().get<SC::MortalComponent>(e).age_ticks, 10u + cap);
+        EXPECT_EQ(live.GetActiveRegionLedger().records().at(kFarGroundRegion).frozen_at, 0u);
+        EXPECT_EQ(live.GetRegistry().get<SC::PlantRegionComponent>(e).region_stamp, 70001u);
+        entt::registry reference;
+        const auto r = ClockTestPlant(reference, {5200, 0, -1500});
+        reference.get<SC::PlantGrowthComponent>(r) = growth;
+        const auto env = S7Environment(live, {5200, 0, -1500}, 70001);
+        for (std::uint32_t k = 0; k < cap; ++k)
+            SF::RunPlantGrowthSystemOnTick(
+                reference, 70002 - cap + k, [&](const auto&) { return env; });
+        S7ExpectGrowth(live.GetRegistry().get<SC::PlantGrowthComponent>(e),
+                       reference.get<SC::PlantGrowthComponent>(r));
+        const auto resumed = S7PlantBytes(live);
+        ASSERT_TRUE(live.SaveWorld());
+        EnableSnapshotSession(reopened, root, jobs);
+        ASSERT_TRUE(reopened.LoadWorld(base.GetMetadata().worldId)) << reopened.GetWorldOpenError();
+        reopened.SetReplicatedSimulationAnchors({});
+        EXPECT_EQ(S7PlantBytes(reopened), resumed);
+        EXPECT_EQ(reopened.GetActiveRegionLedger().records().at(kFarGroundRegion).frozen_at, 0u);
+        TickOnce(live);
+        TickOnce(reopened);
+        EXPECT_EQ(S7PlantBytes(reopened), S7PlantBytes(live));
+        EXPECT_EQ(
+            reopened.GetRegistry().get<SC::MortalComponent>(S7FindPlant(reopened, 1)).age_ticks,
+            11u + cap);
+    }
+}
+
+TEST(GameSessionHeadlessWorldTest, S7FrozenSourcesAndRecipientsCannotPollinateInfectIgniteOrGraze) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    const RegionKey left{10, -3}, right{11, -3};
+    for (const int mode : {0, 1, 2}) {
+        SCOPED_TRACE(mode);
+        const bool freeze_source = mode == 0;
+        const bool freeze_recipient = mode == 1;
+        GameSession base, live;
+        CreateGroundWorld(
+            base, root, jobs, freeze_source ? "S7 source gates" : "S7 recipient gates");
+        const auto source = ClockTestPlant(base.GetRegistry(), {5631.5f, 0, -1500});
+        const auto recipient = ClockTestPlant(base.GetRegistry(), {5632.5f, 0, -1500});
+        for (auto e : {source, recipient}) {
+            base.GetRegistry().emplace<SC::PollinationTag>(e);
+            base.GetRegistry().emplace<SC::PollinationComponent>(e);
+            base.GetRegistry().emplace<SC::PlantHealthComponent>(e);
+            base.GetRegistry().emplace<SC::GrazeableComponent>(e).biomass = .2f;
+            base.GetRegistry().emplace<SC::CombustibleComponent>(e);
+            base.GetRegistry().emplace<SC::MortalComponent>(e).age_ticks = 10;
+        }
+        base.GetRegistry().get<SC::PlantGrowthComponent>(source).stage =
+            static_cast<std::uint8_t>(SC::PlantStage::Flowering);
+        auto& disease = base.GetRegistry().get<SC::PlantHealthComponent>(source);
+        disease.state = static_cast<std::uint8_t>(SC::PlantDiseaseState::Infected);
+        disease.infection = 1000;
+        base.GetRegistry().emplace<SC::IgnitionSourceComponent>(source).radius = 4;
+        ASSERT_TRUE(base.SaveWorld());
+        auto ledger =
+            FixtureLedger(100,
+                          {{left, freeze_source ? RegionState::Frozen : RegionState::Active},
+                           {right, freeze_recipient ? RegionState::Frozen : RegionState::Active}});
+        S7KeepAllocator(ledger, base.GetActiveRegionLedger().next_persistent_id());
+        auto snap = SF::BuildPlantEntitySnapshot(base.GetRegistry(), true);
+        S7SetSnapshotStamp(snap, 99);
+        for (const auto key : {left, right})
+            const_cast<std::map<RegionKey, ActiveRegionRecord>&>(ledger.records())
+                .at(key)
+                .last_ticked = 99;
+        S7CommitFixture(base, ledger, {}, snap);
+        EnableSnapshotSession(live, root, jobs);
+        ASSERT_TRUE(live.LoadWorld(base.GetMetadata().worldId)) << live.GetWorldOpenError();
+        live.SetReplicatedSimulationAnchors({});
+        const auto frozen_id = freeze_source ? 1u : 2u;
+        const auto frozen_before =
+            SF::BuildPlantEntitySnapshot(live.GetRegistry(), true).entities.at(frozen_id - 1);
+        // A bare herbivore is the grazing source on both sides of the gate
+        // matrix; the all-Active control proves there is a real feeding opportunity.
+        {
+            const auto grazer = live.GetRegistry().create();
+            live.GetRegistry().emplace<SC::TransformComponent>(grazer).position = {
+                5631.5f, 0, -1500};
+            live.GetRegistry().emplace<SC::CreatureComponent>(grazer).hunger = .5f;
+        }
+        TickOnce(live);
+        ASSERT_FALSE(live.GetRegionSchedulerFault());
+        const auto target = S7FindPlant(live, 2);
+        if (mode == 2) {
+            EXPECT_GT(live.GetRegistry().get<SC::PollinationComponent>(target).crosses, 0u);
+            EXPECT_GT(live.GetRegistry().get<SC::PlantHealthComponent>(target).infection, 0u);
+            EXPECT_GT(live.GetRegistry().get<SC::GrazeableComponent>(target).last_grazed_tick, 0u);
+            EXPECT_EQ(
+                live.GetRegistry().get<SC::CombustibleComponent>(S7FindPlant(live, 1)).state(),
+                SC::BurnState::Burning);
+            continue;
+        }
+        EXPECT_EQ(live.GetRegistry().get<SC::PollinationComponent>(target).crosses, 0u);
+        EXPECT_EQ(live.GetRegistry().get<SC::PlantHealthComponent>(target).infection, 0u);
+        EXPECT_EQ(live.GetRegistry().get<SC::CombustibleComponent>(target).state(),
+                  SC::BurnState::Unburnt);
+        EXPECT_EQ(live.GetRegistry().get<SC::GrazeableComponent>(target).last_grazed_tick, 0u);
+        const auto frozen_now =
+            SF::BuildPlantEntitySnapshot(live.GetRegistry(), true).entities.at(frozen_id - 1);
+        Luminumbra::Ecs::EntityRegistrySnapshot a, b;
+        a.entities.push_back(frozen_before);
+        b.entities.push_back(frozen_now);
+        EXPECT_EQ(Luminumbra::Ecs::SerializeEntityRegistrySnapshotJson(a),
+                  Luminumbra::Ecs::SerializeEntityRegistrySnapshotJson(b));
+    }
+}
+
+TEST(GameSessionHeadlessWorldTest, S7CropBirthRefusesFrozenDestinationBeforeRemovingParent) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession base, live;
+    CreateGroundWorld(base, root, jobs, "S7 birth recipient gate");
+    auto rng = luminumbra::core::DeterministicRng::seeded(SF::kGerminationSeedOffset, 1, 101);
+    const auto angle = rng.next_unit() * 6.2831853f;
+    const auto radius = 1 + rng.next_unit() * 2;
+    const auto dx = radius * Luminumbra::DeterministicMath::Cos(angle);
+    ASSERT_NE(dx, 0.0f);
+    const Luminumbra::Vec3 pos{dx > 0 ? 5631.999f : 5632.001f, 0, -1500};
+    const auto source_owner = ActiveRegionLedger::region_at(pos);
+    const auto destination = ActiveRegionLedger::region_at(
+        pos + Luminumbra::Vec3{dx, 0, radius * Luminumbra::DeterministicMath::Sin(angle)});
+    ASSERT_NE(destination, source_owner);
+    const auto plant = ClockTestPlant(base.GetRegistry(), pos);
+    auto& growth = base.GetRegistry().get<SC::PlantGrowthComponent>(plant);
+    growth.stage = static_cast<std::uint8_t>(SC::PlantStage::Fruiting);
+    auto& lifecycle = base.GetRegistry().emplace<SC::CropLifecycleComponent>(plant);
+    lifecycle.lifespan_ticks = 1;
+    ASSERT_TRUE(base.SaveWorld());
+    auto ledger = FixtureLedger(
+        100, {{source_owner, RegionState::Active}, {destination, RegionState::Frozen}});
+    S7KeepAllocator(ledger, base.GetActiveRegionLedger().next_persistent_id());
+    auto snap = SF::BuildPlantEntitySnapshot(base.GetRegistry(), true);
+    S7SetSnapshotStamp(snap, 99);
+    const_cast<std::map<RegionKey, ActiveRegionRecord>&>(ledger.records())
+        .at(source_owner)
+        .last_ticked = 100;
+    S7CommitFixture(base, ledger, {}, snap);
+    EnableSnapshotSession(live, root, jobs);
+    ASSERT_TRUE(live.LoadWorld(base.GetMetadata().worldId));
+    live.SetReplicatedSimulationAnchors({});
+    TickOnce(live);
+    ASSERT_NE(S7FindPlant(live, 1), entt::null);
+    EXPECT_EQ(SF::BuildPlantEntitySnapshot(live.GetRegistry(), true).entities.size(), 1u);
+    EXPECT_EQ(live.GetRegistry().get<SC::CropLifecycleComponent>(S7FindPlant(live, 1)).generations,
+              0u);
+    EXPECT_EQ(live.GetActiveRegionLedger().next_persistent_id(), 2u);
+}
+
+TEST(GameSessionHeadlessWorldTest,
+     S7RemovedCropWorkAndBornIdentityReachActualCompletedWorkAndSave) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession owner, baseline, reopened;
+    CreateGroundWorld(owner, root, jobs, "S7 completed removed crop");
+    CreateGroundWorld(baseline, root, jobs, "S7 completed empty region");
+    auto rng = luminumbra::core::DeterministicRng::seeded(SF::kGerminationSeedOffset, 1, 1);
+    const auto angle = rng.next_unit() * 6.2831853f;
+    const auto radius = 1 + rng.next_unit() * 2;
+    const auto dx = radius * Luminumbra::DeterministicMath::Cos(angle);
+    ASSERT_NE(dx, 0.0f);
+    const Luminumbra::Vec3 pos{dx > 0 ? 5631.999f : 5632.001f, 0, -1500};
+    const auto source = ActiveRegionLedger::region_at(pos);
+    const auto destination = ActiveRegionLedger::region_at(
+        pos + Luminumbra::Vec3{dx, 0, radius * Luminumbra::DeterministicMath::Sin(angle)});
+    ASSERT_NE(destination, source);
+    const auto plant = ClockTestPlant(owner.GetRegistry(), pos);
+    owner.GetRegistry().get<SC::PlantGrowthComponent>(plant).stage =
+        static_cast<std::uint8_t>(SC::PlantStage::Fruiting);
+    owner.GetRegistry().emplace<SC::CropLifecycleComponent>(plant).lifespan_ticks = 1;
+    ASSERT_TRUE(owner.AdmitPlant(plant));
+    baseline.NotifyGroundObjectEdit(pos);
+    for (auto* session : {&owner, &baseline}) {
+        session->SetReplicatedSimulationAnchors({});
+        TickOnce(*session);
+    }
+    EXPECT_EQ(S7FindPlant(owner, 1), entt::null);
+    ASSERT_NE(S7FindPlant(owner, 2), entt::null);
+    // No surviving participant lives in the source owner. Its growth + crop
+    // loop + completed region tick still contribute exactly three operations.
+    EXPECT_EQ(owner.GetActiveRegionLedger().completed_work().at(source),
+              baseline.GetActiveRegionLedger().completed_work().at(source) + 3);
+    EXPECT_EQ(owner.GetActiveRegionLedger().completed_work().at(destination),
+              258u); // page init + birth + region
+    const auto completed = owner.GetActiveRegionLedger().completed_work();
+    ASSERT_TRUE(owner.SaveWorld());
+    EnableSnapshotSession(reopened, root, jobs);
+    ASSERT_TRUE(reopened.LoadWorld(owner.GetMetadata().worldId)) << reopened.GetWorldOpenError();
+    EXPECT_EQ(S7PlantBytes(reopened), S7PlantBytes(owner));
+    EXPECT_EQ(reopened.GetActiveRegionLedger().completed_work(), completed);
+    EXPECT_EQ(
+        reopened.GetRegistry().get<SC::PlantRegionComponent>(S7FindPlant(reopened, 2)).region_stamp,
+        1u);
+    reopened.SetReplicatedSimulationAnchors({});
+    TickOnce(reopened);
+    std::uint64_t total = 0;
+    for (const auto& [key, work] : completed)
+        total += work;
+    EXPECT_EQ(reopened.GetRegionSchedule().work, total);
+}
+
+TEST(GameSessionHeadlessWorldTest,
+     S7IndexedPlantAuthorityRefusesDuplicatesMissingIdentityOwnerAndMissingPage) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    for (int mutation = 0; mutation < 5; ++mutation) {
+        SCOPED_TRACE(mutation);
+        GameSession base, refused;
+        CreateGroundWorld(
+            base, root, jobs, ("S7 corrupt plant " + std::to_string(mutation)).c_str());
+        ASSERT_EQ(SpawnGround(base, 5200000, -1500000), 1u);
+        const auto plant = ClockTestPlant(base.GetRegistry(), {5200, 0, -1500});
+        base.GetRegistry().emplace<SC::SoilFeederComponent>(plant);
+        ASSERT_TRUE(base.SaveWorld());
+        const auto save = base.GetWorldSaveDir();
+        auto snap = SF::BuildPlantEntitySnapshot(base.GetRegistry(), true);
+        auto pages = base.GetFieldPages();
+        if (mutation == 0)
+            snap.entities.front().entity_id = 1; // ground-store collision
+        if (mutation == 1)
+            snap.persistent_identity = false;
+        if (mutation == 2)
+            for (auto& c : snap.entities.front().components)
+                if (c.type == "PlantRegion")
+                    c.data["owner_x"] = 11;
+        if (mutation == 3)
+            snap.entities.push_back(snap.entities.front());
+        if (mutation == 4)
+            pages.clear(); // feeder is not fresh admission on load
+        // Recompute the index through a real transaction: refusal must come from
+        // decoded authority validation, not just an obsolete file digest.
+        S7CommitFixture(base, base.GetActiveRegionLedger(), pages, snap);
+        EnableSnapshotSession(refused, root, jobs);
+        EXPECT_FALSE(refused.LoadWorld(base.GetMetadata().worldId));
+        EXPECT_NE(refused.GetWorldOpenError().find("plant"), std::string::npos);
+        EXPECT_TRUE(refused.GetRegistry().view<SC::PlantTag>().empty());
+    }
+}
+
+TEST(GameSessionHeadlessWorldTest,
+     S7PlantIndexedAbsenceGuardDoesNotTurnMissingAuthorityIntoFreshPlants) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession base, refused;
+    CreateGroundWorld(base, root, jobs, "S7 plant Error versus Absent");
+    ClockTestPlant(base.GetRegistry(), {5200, 0, -1500});
+    ASSERT_TRUE(base.SaveWorld());
+    fs::remove(P::WorldSaveService::plant_entities_path(base.GetWorldSaveDir()));
+    Luminumbra::Ecs::EntityRegistrySnapshot snap;
+    std::vector<std::string> errors;
+    EXPECT_FALSE(P::WorldSaveService::load_plant_entities(snap, base.GetWorldSaveDir(), &errors));
+    ASSERT_FALSE(errors.empty());
+    EnableSnapshotSession(refused, root, jobs);
+    EXPECT_FALSE(refused.LoadWorld(base.GetMetadata().worldId));
+}
+
+TEST(GameSessionHeadlessWorldTest, S7PageCapEditAndFailedResumeAreAtomicAndRetainPendingToken) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession base, live, reopened;
+    CreateGroundWorld(base, root, jobs, "S7 resume refusal");
+    const auto plant = ClockTestPlant(base.GetRegistry(), {5200, 0, -1500});
+    base.GetRegistry().get<SC::PlantGrowthComponent>(plant).stage =
+        static_cast<std::uint8_t>(SC::PlantStage::Fruiting);
+    base.GetRegistry().emplace<SC::CropLifecycleComponent>(plant).lifespan_ticks = 1;
+    ASSERT_TRUE(base.SaveWorld());
+    FieldPageState pages;
+    std::map<RegionKey, RegionState> owners{{kFarGroundRegion, RegionState::Frozen}};
+    for (std::size_t p = 0; p < FoliageFieldPages::kMaxPages; ++p) {
+        const ScentCellKey cell{static_cast<int>(p) * 16, 0};
+        ASSERT_TRUE(pages.set_soil(cell, 1000000));
+        ASSERT_TRUE(pages.set_irrigation(cell, 0));
+        owners[FieldPageState::region_of_scent_cell(cell)] = RegionState::Active;
+    }
+    auto ledger = FixtureLedger(70000, owners);
+    S7KeepAllocator(ledger, base.GetActiveRegionLedger().next_persistent_id());
+    auto& record =
+        const_cast<std::map<RegionKey, ActiveRegionRecord>&>(ledger.records()).at(kFarGroundRegion);
+    record.frozen_at = 100;
+    record.last_ticked = 96;
+    auto snap = SF::BuildPlantEntitySnapshot(base.GetRegistry(), true);
+    S7SetSnapshotStamp(snap, 96);
+    S7CommitFixture(base, ledger, pages, snap);
+    EnableSnapshotSession(live, root, jobs);
+    ASSERT_TRUE(live.LoadWorld(base.GetMetadata().worldId)) << live.GetWorldOpenError();
+    live.SetReplicatedSimulationAnchors({});
+    const auto ledger_before = live.GetActiveRegionLedger().encode();
+    const auto pages_before = live.GetFieldPages().serialize();
+    EXPECT_FALSE(live.SetFoliageCell({5200, 0, -1500}, true, 0));
+    EXPECT_FALSE(live.SetFoliageCell({5200, 0, -1500}, false, 4));
+    EXPECT_FALSE(live.SetFoliageCell({std::numeric_limits<float>::quiet_NaN(), 0, 0}, false, 1));
+    EXPECT_EQ(live.GetActiveRegionLedger().encode(), ledger_before);
+    EXPECT_EQ(live.GetFieldPages().serialize(), pages_before);
+    const auto plants_before = S7PlantBytes(live);
+    live.PinActiveRegion(kFarGroundRegion, true);
+    TickOnce(live); // resume growth then a child needs page 4097: refuse all staged foliage
+    ASSERT_TRUE(live.GetRegionSchedulerFault());
+    EXPECT_EQ(S7PlantBytes(live), plants_before);
+    EXPECT_EQ(live.GetFieldPages().soil().records(), pages.soil().records());
+    EXPECT_EQ(live.GetFieldPages().irrigation().records(), pages.irrigation().records());
+    EXPECT_EQ(live.GetActiveRegionLedger().records().at(kFarGroundRegion).frozen_at, 100u);
+    EXPECT_EQ(live.GetActiveRegionLedger().next_persistent_id(), 3u); // failed spawn consumed ID 2
+    EXPECT_TRUE(live.GetActiveRegionLedger().completed_work().empty());
+    ASSERT_TRUE(live.SaveWorld());
+    EnableSnapshotSession(reopened, root, jobs);
+    ASSERT_TRUE(reopened.LoadWorld(base.GetMetadata().worldId)) << reopened.GetWorldOpenError();
+    EXPECT_EQ(S7PlantBytes(reopened), plants_before);
+    EXPECT_EQ(reopened.GetActiveRegionLedger().records().at(kFarGroundRegion).frozen_at, 100u);
+    EXPECT_EQ(reopened.GetActiveRegionLedger().next_persistent_id(), 3u);
+}
+
+TEST(GameSessionHeadlessWorldTest, S7LivePlantsRetainOtherwiseEvictableUneditedOwner) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession base, live;
+    CreateGroundWorld(base, root, jobs, "S7 plant retention");
+    ClockTestPlant(base.GetRegistry(), {5200, 0, -1500});
+    ASSERT_TRUE(base.SaveWorld());
+    auto ledger = FixtureLedger(108001, {{kFarGroundRegion, RegionState::Active}});
+    S7KeepAllocator(ledger, base.GetActiveRegionLedger().next_persistent_id());
+    auto& record =
+        const_cast<std::map<RegionKey, ActiveRegionRecord>&>(ledger.records()).at(kFarGroundRegion);
+    record.pinned = false;
+    record.edited = false;
+    record.first_active = 0;
+    record.last_proximity = 0;
+    record.last_ticked = 108000;
+    auto snap = SF::BuildPlantEntitySnapshot(base.GetRegistry(), true);
+    S7SetSnapshotStamp(snap, 108000);
+    S7CommitFixture(base, ledger, {}, snap);
+    EnableSnapshotSession(live, root, jobs);
+    ASSERT_TRUE(live.LoadWorld(base.GetMetadata().worldId));
+    live.SetReplicatedSimulationAnchors({});
+    TickOnce(live);
+    EXPECT_TRUE(live.GetActiveRegionLedger().records().contains(kFarGroundRegion));
+    EXPECT_EQ(live.GetRegistry().get<SC::PlantRegionComponent>(S7FindPlant(live, 1)).region_stamp,
+              108002u);
+}
+
+TEST(GameSessionHeadlessWorldTest,
+     S7ReducedAndCalendarBoundedResumePagesMatchIndependentIntegerTicks) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    for (const bool resume : {false, true}) {
+        SCOPED_TRACE(resume);
+        GameSession base, live, reopened;
+        CreateGroundWorld(
+            base, root, jobs, resume ? "S7 resumed integer pages" : "S7 reduced integer pages");
+        const Luminumbra::Vec3 pos{5201.25f, 0, -1499.25f};
+        const auto cell = SF::FoliageCell(pos);
+        const int ox = 5200, oz = -1504;
+        entt::registry reference;
+        for (int i = 0; i < 2; ++i) {
+            const auto p = ClockTestPlant(base.GetRegistry(), pos);
+            base.GetRegistry().emplace<SC::SoilFeederComponent>(p).uptake = 80;
+            base.GetRegistry().emplace<SC::WaterSourceComponent>(p).output = 65535;
+            ASSERT_TRUE(base.AdmitPlant(p));
+            const auto r = ClockTestPlant(reference, pos);
+            reference.emplace<SC::SoilFeederComponent>(r).uptake = 80;
+            reference.emplace<SC::WaterSourceComponent>(r).output = 65535;
+        }
+        ASSERT_TRUE(base.SetFoliageCell(pos, true, 3));
+        ASSERT_TRUE(base.SetFoliageCell(pos, false, 3999990));
+        ASSERT_TRUE(base.SaveWorld());
+        const RegionKey frozen{20, -3};
+        auto pages = base.GetFieldPages();
+        const ScentCellKey sealed{10240, -1500};
+        ASSERT_TRUE(pages.set_soil(sealed, 123456));
+        ASSERT_TRUE(pages.set_irrigation(sealed, 3456789));
+        auto ledger =
+            FixtureLedger(100,
+                          {{kFarGroundRegion, resume ? RegionState::Frozen : RegionState::Reduced},
+                           {frozen, RegionState::Frozen}});
+        S7KeepAllocator(ledger, base.GetActiveRegionLedger().next_persistent_id());
+        auto& record = const_cast<std::map<RegionKey, ActiveRegionRecord>&>(ledger.records())
+                           .at(kFarGroundRegion);
+        record.last_ticked = 96;
+        if (resume)
+            record.frozen_at = 20;
+        auto plants = SF::BuildPlantEntitySnapshot(base.GetRegistry(), true);
+        S7SetSnapshotStamp(plants, 96);
+        WorldCalendar calendar;
+        if (resume)
+            calendar.dayLengthTicks = 16;
+        S7CommitFixture(base, ledger, pages, plants, calendar);
+        EnableSnapshotSession(live, root, jobs);
+        ASSERT_TRUE(live.LoadWorld(base.GetMetadata().worldId)) << live.GetWorldOpenError();
+        live.SetReplicatedSimulationAnchors({});
+        if (resume)
+            live.PinActiveRegion(kFarGroundRegion, true);
+        SF::SoilGrid soil(16, 16);
+        SF::IrrigationGrid moisture(16, 16);
+        soil.SetCell(cell.x - ox, cell.z - oz, 3);
+        moisture.SetCell(cell.x - ox, cell.z - oz, 3999990);
+        std::uint64_t previous = 96;
+        int actual_due = 0;
+        for (int host = 0; host < (resume ? 2 : 8); ++host) {
+            const auto before = live.GetFieldPages().serialize();
+            TickOnce(live);
+            ASSERT_FALSE(live.GetRegionSchedulerFault());
+            const auto tick = live.GetWorldClock().tick();
+            const bool due = std::find(live.GetRegionSchedule().due.begin(),
+                                       live.GetRegionSchedule().due.end(),
+                                       kFarGroundRegion) != live.GetRegionSchedule().due.end();
+            if (resume || due) {
+                const auto k = resume && host == 0 ? 16 : tick - previous;
+                for (std::uint64_t n = 0; n < k; ++n) {
+                    SF::RunSoilNutrientOnTick(reference, soil, ox, oz, 1);
+                    SF::RunIrrigationOnTick(reference, moisture, ox, oz, 1);
+                }
+                previous = tick;
+                ++actual_due;
+                for (int z = 0; z < 16; ++z)
+                    for (int x = 0; x < 16; ++x) {
+                        EXPECT_EQ(live.GetFieldPages().soil().sample({ox + x, oz + z}, 0),
+                                  soil.AtCell(x, z));
+                        EXPECT_EQ(live.GetFieldPages().irrigation().sample({ox + x, oz + z}, 0),
+                                  moisture.AtCell(x, z));
+                    }
+                std::uint64_t id = 1;
+                std::vector<entt::entity> feeders;
+                for (auto e : reference.view<SC::SoilFeederComponent>())
+                    feeders.push_back(e);
+                std::sort(feeders.begin(), feeders.end());
+                for (auto e : feeders)
+                    EXPECT_EQ(live.GetRegistry()
+                                  .get<SC::SoilFeederComponent>(S7FindPlant(live, id++))
+                                  .absorbed,
+                              reference.get<SC::SoilFeederComponent>(e).absorbed);
+            } else
+                EXPECT_EQ(live.GetFieldPages().serialize(), before);
+            EXPECT_EQ(live.GetFieldPages().soil().sample(sealed, 0), 123456);
+            EXPECT_EQ(live.GetFieldPages().irrigation().sample(sealed, 0), 3456789);
+            if (resume)
+                EXPECT_EQ(live.GetActiveRegionLedger().records().at(kFarGroundRegion).frozen_at,
+                          0u);
+        }
+        EXPECT_GT(actual_due, 0);
+        ASSERT_TRUE(live.SaveWorld());
+        EnableSnapshotSession(reopened, root, jobs);
+        ASSERT_TRUE(reopened.LoadWorld(base.GetMetadata().worldId)) << reopened.GetWorldOpenError();
+        EXPECT_EQ(S7PlantBytes(reopened), S7PlantBytes(live));
+        EXPECT_EQ(reopened.GetFieldPages().serialize(), live.GetFieldPages().serialize());
+        reopened.SetReplicatedSimulationAnchors({});
+        TickOnce(reopened);
+        TickOnce(live);
+        EXPECT_EQ(S7PlantBytes(reopened), S7PlantBytes(live));
+        EXPECT_EQ(reopened.GetFieldPages().serialize(), live.GetFieldPages().serialize());
+    }
+}
+
+TEST(GameSessionHeadlessWorldTest, S7OffDueFrozenToReducedEmptyPageResumeDoesNotReplayAfterSave) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession base, live, reopened;
+    CreateGroundWorld(base, root, jobs, "S7 off-due resume boundary");
+    ASSERT_TRUE(base.SaveWorld());
+    RegionKey owner{10, -3};
+    while (ActiveRegionLedger::phase(owner, 2) == (101u & 3u))
+        ++owner.z;
+    auto ledger = FixtureLedger(100, {{owner, RegionState::Frozen}});
+    auto& record = const_cast<std::map<RegionKey, ActiveRegionRecord>&>(ledger.records()).at(owner);
+    record.frozen_at = 20;
+    record.last_ticked = 16;
+    record.under_hold = 9999; // next schedule recovers exactly to Reduced
+    FieldPageState pages;
+    const ScentCellKey cell{owner.x * 512 + 20, owner.z * 512 + 20};
+    ASSERT_TRUE(pages.set_soil(cell, 100));
+    ASSERT_TRUE(pages.set_irrigation(cell, 123));
+    Luminumbra::Ecs::EntityRegistrySnapshot empty;
+    empty.persistent_identity = true;
+    S7CommitFixture(base, ledger, pages, empty, WorldCalendar{16, 8});
+    EnableSnapshotSession(live, root, jobs);
+    ASSERT_TRUE(live.LoadWorld(base.GetMetadata().worldId)) << live.GetWorldOpenError();
+    live.SetReplicatedSimulationAnchors({});
+    TickOnce(live);
+    ASSERT_FALSE(live.GetRegionSchedulerFault());
+    const auto& resumed = live.GetActiveRegionLedger().records().at(owner);
+    EXPECT_EQ(resumed.state, RegionState::Reduced);
+    EXPECT_EQ(resumed.frozen_at, 0u);
+    EXPECT_EQ(resumed.last_ticked, 101u);
+    EXPECT_TRUE(live.GetRegionSchedule().due.empty());
+    EXPECT_EQ(live.GetFieldPages().soil().sample(cell, 0), 164);
+    EXPECT_EQ(live.GetFieldPages().irrigation().sample(cell, 0), 27); // 16 exact drains
+    ASSERT_TRUE(live.SaveWorld());
+    EnableSnapshotSession(reopened, root, jobs);
+    ASSERT_TRUE(reopened.LoadWorld(base.GetMetadata().worldId)) << reopened.GetWorldOpenError();
+    reopened.SetReplicatedSimulationAnchors({});
+    EXPECT_EQ(reopened.GetActiveRegionLedger().records().at(owner).last_ticked, 101u);
+    std::uint64_t previous = 101;
+    std::int32_t nutrient = 164, moisture = 27;
+    for (int n = 0; n < 8; ++n) {
+        TickOnce(live);
+        TickOnce(reopened);
+        ASSERT_FALSE(reopened.GetRegionSchedulerFault());
+        const auto tick = reopened.GetWorldClock().tick();
+        if (std::find(reopened.GetRegionSchedule().due.begin(),
+                      reopened.GetRegionSchedule().due.end(),
+                      owner) != reopened.GetRegionSchedule().due.end()) {
+            nutrient += 4 * static_cast<std::int32_t>(tick - previous);
+            moisture = std::max(0, moisture - 6 * static_cast<std::int32_t>(tick - previous));
+            previous = tick;
+        }
+        EXPECT_EQ(reopened.GetFieldPages().soil().sample(cell, 0), nutrient);
+        EXPECT_EQ(reopened.GetFieldPages().irrigation().sample(cell, 0), moisture);
+        EXPECT_EQ(live.GetFieldPages().serialize(), reopened.GetFieldPages().serialize());
+    }
 }

@@ -34,6 +34,13 @@ std::int32_t FoliageFieldPages::sample(ScentCellKey cell, std::int32_t baseline)
     return it != m_pages.end() && ((it->second.mask[i / 64] >> (i % 64)) & 1) ? it->second.cells[i]
                                                                               : baseline;
 }
+bool FoliageFieldPages::initialized(ScentCellKey cell) const {
+    if (!valid_cell(cell))
+        return false;
+    const auto [key, i] = Slot(cell);
+    const auto it = m_pages.find(key);
+    return it != m_pages.end() && ((it->second.mask[i / 64] >> (i % 64)) & 1);
+}
 bool FoliageFieldPages::set(ScentCellKey cell, std::int32_t value, std::int32_t limit) {
     if (!valid_cell(cell) || value < 0 || value > limit)
         return false;
