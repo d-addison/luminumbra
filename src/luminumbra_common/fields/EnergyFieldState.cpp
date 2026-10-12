@@ -883,7 +883,7 @@ bool EnergyFieldState::TickRegional(std::uint64_t tick,
                     const auto a = records.find(owner_a);
                     if (a == records.end() || a->second.state == RegionState::Frozen)
                         continue;
-                    for (const auto [dx, dz] : {std::pair{1, 0}, std::pair{0, 1}}) {
+                    for (const auto& [dx, dz] : {std::pair{1, 0}, std::pair{0, 1}}) {
                         const int nx = cx + dx, nz = cz + dz;
                         const auto owner_b = OwnerOfCell(nx, nz);
                         const auto b = records.find(owner_b);

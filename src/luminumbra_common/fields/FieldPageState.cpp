@@ -567,7 +567,7 @@ FieldPageState::step_scheduled(const std::map<RegionKey, ActiveRegionRecord>& re
             const RegionKey owner = region_of_cell(x, z);
             if (!eligible(owner))
                 continue;
-            for (const auto [dx, dz] : {std::pair{1, 0}, std::pair{0, 1}}) {
+            for (const auto& [dx, dz] : {std::pair{1, 0}, std::pair{0, 1}}) {
                 const CellSlot neighbour = CellSlotOf(x + dx, z + dz);
                 const auto* old_neighbour = InitializedPage(previous, neighbour);
                 const RegionKey other = region_of_cell(x + dx, z + dz);
