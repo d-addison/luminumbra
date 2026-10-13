@@ -4744,8 +4744,9 @@ TEST(RenderSmokeTest, FarWorldOwnedUploadIndexedSubmissionAndRelativeOrigin) {
 
 namespace {
 using namespace Luminumbra::Rendering;
-// One pixel is sampled at the exact centre ray, so boundary cases don't depend
-// on a pixel-centre offset or an approximate radius inferred from image extent.
+// Sample the centre pixel of an odd-sized viewport at the exact centre ray.
+// A 1x1 viewport collapses oblique boundary triangles at rasterizer subpixel
+// precision, before the ownership/arrival fragment code can run.
 class FarWorldShaderProbe {
 public:
     ~FarWorldShaderProbe() {
@@ -4766,7 +4767,8 @@ public:
         glBindFramebuffer(GL_FRAMEBUFFER, fbo_);
         glGenTextures(1, &position_);
         glBindTexture(GL_TEXTURE_2D, position_);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, 1, 1, 0, GL_RGBA, GL_FLOAT, nullptr);
+        glTexImage2D(
+            GL_TEXTURE_2D, 0, GL_RGBA32F, kProbeEdge, kProbeEdge, 0, GL_RGBA, GL_FLOAT, nullptr);
         glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, position_, 0);
         glDrawBuffer(GL_COLOR_ATTACHMENT0);
         if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
@@ -4794,7 +4796,7 @@ public:
         glDisable(GL_DEPTH_TEST);
         glDisable(GL_CULL_FACE);
         glDisable(GL_BLEND);
-        glViewport(0, 0, 1, 1);
+        glViewport(0, 0, kProbeEdge, kProbeEdge);
         return glGetError() == GL_NO_ERROR;
     }
     float Point(const glm::vec3& centre,
@@ -4948,7 +4950,7 @@ private:
             SubmitLive(mesh, glm::vec3(centre), projection, view, cells);
         std::array<float, 4> pixel{};
         glReadBuffer(GL_COLOR_ATTACHMENT0);
-        glReadPixels(0, 0, 1, 1, GL_RGBA, GL_FLOAT, pixel.data());
+        glReadPixels(kProbeEdge / 2, kProbeEdge / 2, 1, 1, GL_RGBA, GL_FLOAT, pixel.data());
         EXPECT_EQ(glGetError(), GL_NO_ERROR);
         return pixel[2];
     }
@@ -5005,6 +5007,7 @@ private:
         glBindBuffer(GL_DRAW_INDIRECT_BUFFER, 0);
         pool_.free(handle);
     }
+    static constexpr int kProbeEdge = 257;
     GLuint program_ = 0, fbo_ = 0, position_ = 0, lut_ = 0, indirect_ = 0;
     FarVolumeGlDriver driver_;
     std::unique_ptr<FarVolumeGpuAllocation> allocation_;
@@ -5220,11 +5223,42 @@ TEST(RenderSmokeTest, FarWorldClipAwareArrivalHonoursFinerRadiusAndBuiltY) {
     ASSERT_TRUE(context.ready()) << context.error();
     FarWorldShaderProbe probe;
     ASSERT_TRUE(probe.Init());
-    EXPECT_EQ(probe.Point({0, 0, -500}, 2080, {}, false, true), 0);
-    EXPECT_LT(probe.Point({0, 0, -500}, 2080, {}, false, true, {10, 20}), -499);
+    // Q20 uses the stored local XZ in a half-open tile. Keep this radius/span
+    // probe inside the tile: its view-facing triangle interpolates X, so a
+    // theoretical centre at X=0 can round outside. Exact edges use constant
+    // local-coordinate planes in FarWorldCanonicalArrivalOwnsTileEdgesAndUpperSpan.
+    EXPECT_EQ(probe.Point({8, 0, -500}, 2080, {}, false, true), 0);
+    EXPECT_LT(probe.Point({8, 0, -500}, 2080, {}, false, true, {10, 20}), -499);
     // Tile-local metadata must not remove coarse fragments outside finer clip.
     EXPECT_LT(probe.Point({800, 0, -900}, 2080, {}, false, true), -1200);
-    EXPECT_LT(probe.Point({0, 0, -500}, 2080), -499); // next-frame fallback
+    EXPECT_LT(probe.Point({8, 0, -500}, 2080), -499); // next-frame fallback
+}
+
+TEST(RenderSmokeTest, FarWorldCanonicalArrivalOwnsTileEdgesAndUpperSpan) {
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    FarWorldShaderProbe probe;
+    ASSERT_TRUE(probe.Init());
+    for (const double translation : {0.0, 4194304.0, -4194304.0}) {
+        const auto origin = glm::dvec3(0, -256, -1024) + glm::dvec3(translation);
+        const auto camera = glm::dvec3(37.1f, 83.32f, -780.23f) + glm::dvec3(translation);
+        const glm::vec2 child_y(static_cast<float>(translation),
+                                static_cast<float>(translation + 256));
+        for (int axis = 0; axis < 3; ++axis) {
+            SCOPED_TRACE(::testing::Message() << "axis=" << axis << " translation=" << translation);
+            glm::vec3 local(600, 264, 600);
+            local[axis] = axis == 1 ? 512.0f : 0.0f;
+            // R1.1/Q20: lower XZ tile edges are included. Built Y samples
+            // include the upper span boundary (docs/far-volume-generation.md).
+            EXPECT_EQ(probe.TileBoundary(origin, local, camera, axis, {}, true, child_y), 0);
+            auto inside = local;
+            inside[axis] += axis == 1 ? -.125f : .125f;
+            EXPECT_EQ(probe.TileBoundary(origin, inside, camera, axis, {}, true, child_y), 0);
+            auto outside = local;
+            outside[axis] += axis == 1 ? .125f : -.125f;
+            EXPECT_LT(probe.TileBoundary(origin, outside, camera, axis, {}, true, child_y), -176);
+        }
+    }
 }
 
 TEST(RenderSmokeTest, FarWorldBoundedOwnershipStoreAndBindingsRestore) {
