@@ -569,9 +569,10 @@ bool CompressPayload(const std::string& payload,
         AddError(errors, "LZ4 compression of a region record failed");
         return false;
     }
-    compressed.resize(static_cast<std::size_t>(written));
     record.uncompressed_size = static_cast<std::uint32_t>(payload.size());
-    record.compressed_payload = std::move(compressed);
+    // Region batches retain many records. Keep only the compressed bytes, rather than retaining
+    // LZ4's allocation for the entire uncompressed JSON payload for every chunk in the batch.
+    record.compressed_payload.assign(compressed.data(), static_cast<std::size_t>(written));
     return true;
 }
 
@@ -622,7 +623,7 @@ bool ReadRegionFile(const std::filesystem::path& path,
         AddError(errors, "failed to read region file: " + path.string());
         return false;
     }
-    const std::string bytes = buffer.str();
+    const std::string bytes = std::move(buffer).str();
 
     if (bytes.size() < kRegionFileHeaderSize ||
         std::memcmp(bytes.data(), kRegionMagic, sizeof(kRegionMagic)) != 0) {
@@ -931,17 +932,25 @@ MemberDigest Lod0Fingerprint(const std::vector<RegionRecord>& records) {
     std::sort(lod0.begin(), lod0.end(), [](const RegionRecord* lhs, const RegionRecord* rhs) {
         return lhs->id < rhs->id;
     });
-    std::string stream;
+    std::uint64_t hash = 14695981039346656037ull;
+    const auto fold = [&hash](const std::string& bytes) {
+        for (const char byte : bytes) {
+            hash ^= static_cast<unsigned char>(byte);
+            hash *= 1099511628211ull;
+        }
+    };
     for (const RegionRecord* record : lod0) {
-        AppendU64(stream, record->id);
-        stream.push_back(static_cast<char>(record->flags));
-        AppendU32(stream, record->uncompressed_size);
-        AppendU32(stream, static_cast<std::uint32_t>(record->compressed_payload.size()));
-        stream.append(record->compressed_payload);
+        std::string header;
+        AppendU64(header, record->id);
+        header.push_back(static_cast<char>(record->flags));
+        AppendU32(header, record->uncompressed_size);
+        AppendU32(header, static_cast<std::uint32_t>(record->compressed_payload.size()));
+        fold(header);
+        fold(record->compressed_payload);
+        digest.bytes += header.size() + record->compressed_payload.size();
     }
     digest.present = true;
-    digest.bytes = stream.size();
-    digest.fnv64 = fnv1a64_bytes(stream.data(), stream.size());
+    digest.fnv64 = hash;
     return digest;
 }
 

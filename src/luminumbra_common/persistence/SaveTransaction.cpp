@@ -1002,6 +1002,14 @@ bool SaveTransaction::commit(std::vector<std::string>* errors) {
             if (!digest.present && entry.action != "replace" && !known) {
                 continue; // absent and never indexed: not recorded
             }
+            if (known) {
+                const auto& previous = members.at(entry.path);
+                if (previous.present == digest.present &&
+                    previous.bytes == (digest.present ? digest.bytes : 0) &&
+                    previous.fnv64 == (digest.present ? digest.fnv64 : 0)) {
+                    continue; // unchanged content retains its member generation (design.md D5)
+                }
+            }
             SnapshotMember member;
             member.path = entry.path;
             member.cls = MemberClass::Authoritative;
