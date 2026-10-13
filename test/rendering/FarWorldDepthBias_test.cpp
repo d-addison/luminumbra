@@ -5,7 +5,9 @@
 
 #include <gtest/gtest.h>
 
+#include <bit>
 #include <cmath>
+#include <cstdint>
 #include <limits>
 
 namespace {
@@ -42,6 +44,65 @@ TEST(FarWorldDepthBias, IndependentProjectedDepthAtBothPlanes) {
     }
 }
 
+TEST(FarWorldDepthBias, ProductionFloatNearEndpointRoundsToExactlyOne) {
+    const auto projection = Projection(kLegacyFarPlaneMeters);
+    const glm::vec3 point(0, 0, -.1f);
+    const auto clip = projection * glm::vec4(point, 1.0f);
+    // Retain the failing production trace: 3200,0.10000000149011612,0.
+    // The matrix itself establishes the rounding allowance, independently of
+    // the double depth equation and the far-world correction.
+    EXPECT_EQ(clip.z / clip.w, std::nextafter(1.0f, 2.0f));
+    FarWorldBiasedDepth result;
+    ASSERT_TRUE(ProjectFarWorldRayBias(point, 0, projection, result));
+    EXPECT_EQ(result.depth, 1.0f);
+    EXPECT_EQ(result.view_position, point);
+    EXPECT_NEAR(result.depth, ExpectedDepth(.1f, kLegacyFarPlaneMeters), 1e-7);
+}
+
+TEST(FarWorldDepthBias, ExactDepthBoundaryRefusesNextFloatAndNanWithoutPublication) {
+    const float upper_bound = std::nextafter(1.0f, 2.0f);
+    const float rejected_depth = std::nextafter(upper_bound, 2.0f);
+    // Isolate depth validation with clip.w == 1 and an exactly prescribed z.
+    // The production-float fixture and independent oracle remain above.
+    glm::mat4 projection(1.0f);
+    projection[2][2] = 0;
+    for (const float accepted : {0.0f, 1.0f, upper_bound}) {
+        projection[3][2] = accepted;
+        FarWorldBiasedDepth result;
+        ASSERT_TRUE(ProjectFarWorldRayBias({0, 0, -1}, 0, projection, result));
+        EXPECT_EQ(result.depth, accepted > 1.0f ? 1.0f : accepted);
+        EXPECT_EQ(result.view_position, glm::vec3(0, 0, -1));
+    }
+    for (const float refused : {rejected_depth,
+                                std::numeric_limits<float>::quiet_NaN(),
+                                std::numeric_limits<float>::infinity(),
+                                -std::numeric_limits<float>::denorm_min()}) {
+        projection[3][2] = refused;
+        FarWorldBiasedDepth result{{1, 2, 3}, .5f};
+        EXPECT_FALSE(ProjectFarWorldRayBias({0, 0, -1}, 0, projection, result));
+        EXPECT_EQ(result.view_position, glm::vec3(1, 2, 3));
+        EXPECT_EQ(result.depth, .5f);
+    }
+}
+
+TEST(FarWorldDepthBias, LegacyCameraProjectionRetainsOriginalFloatBits) {
+    Camera camera;
+    camera.SelectFarWorldPlane(FarWorldMode::Legacy);
+    const auto projection = camera.GetProjectionMatrix(900, 600);
+    // The original float GLM construction, without the far-world depth path.
+    const auto original =
+        glm::perspectiveRH_ZO(glm::radians(camera.Zoom), 1.5f, kLegacyFarPlaneMeters, .1f);
+    for (int column = 0; column < 4; ++column) {
+        for (int row = 0; row < 4; ++row) {
+            EXPECT_EQ(std::bit_cast<std::uint32_t>(projection[column][row]),
+                      std::bit_cast<std::uint32_t>(original[column][row]));
+        }
+    }
+    const auto near_clip = projection * glm::vec4(0, 0, -.1f, 1);
+    // Legacy projection still has its original overshoot; it is not clamped.
+    EXPECT_EQ(near_clip.z / near_clip.w, std::nextafter(1.0f, 2.0f));
+}
+
 TEST(FarWorldDepthBias, AwayDirectionAndFinerCoarserPriority) {
     const glm::vec3 point(120, -340, -1000);
     FarWorldBiasedDepth unbiased;
@@ -50,6 +111,8 @@ TEST(FarWorldDepthBias, AwayDirectionAndFinerCoarserPriority) {
     for (std::size_t tier = 1; tier <= kFarTierCount; ++tier) {
         const auto dimensions = FarTierAt(tier);
         ASSERT_TRUE(dimensions);
+        if (!dimensions)
+            return;
         const float bias = static_cast<float>(dimensions->sample_spacing_meters) / 2;
         FarWorldBiasedDepth result;
         ASSERT_TRUE(ProjectFarWorldRayBias(point, bias, Projection(kFarPlaneMeters), result));

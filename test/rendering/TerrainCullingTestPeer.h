@@ -14,9 +14,8 @@ struct TerrainCullingTestPeer {
     // Shadow exclusion qualification: initialize only the real shadow resources
     // and enter the production stage, including its production terrain submitter.
     // Test-only access through the existing peer; no shipping behavior changes.
-    static ShadowPass& InitShadow(RenderPipeline& pipeline,
-                                  const std::filesystem::path& root,
-                                  u32 resolution) {
+    static ShadowPass&
+    InitShadow(RenderPipeline& pipeline, const std::filesystem::path& root, u32 resolution) {
         pipeline.m_screen_width = pipeline.m_internal_width = resolution;
         pipeline.m_screen_height = pipeline.m_internal_height = resolution;
         auto& pass = *pipeline.m_shadow_pass;
@@ -26,8 +25,7 @@ struct TerrainCullingTestPeer {
         return pass;
     }
     static void ExecuteShadow(RenderPipeline& pipeline, const Camera& camera) {
-        pipeline.m_frame_far_selection =
-            pipeline.m_far_world->Selection(FarWorldPurpose::World);
+        pipeline.m_frame_far_selection = pipeline.m_far_world->Selection(FarWorldPurpose::World);
         camera.SelectFarWorldPlane(pipeline.m_frame_far_selection.effective);
         pipeline.execute_stage_shadow(camera);
     }
