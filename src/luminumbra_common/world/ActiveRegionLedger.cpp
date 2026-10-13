@@ -403,6 +403,8 @@ ActiveRegionLedger::schedule_in_place(const WorldClock& clock,
     result.digest = Persistence::StableChecksum(trace);
     // Retention runs after the digest so the digest and trace describe the pre-eviction state.
     evict_idle(clock, owned);
+    // Consumers may create authority and publish work only for surviving records.
+    std::erase_if(result.due, [this](RegionKey key) { return !m_records.contains(key); });
     result.ledger_records = m_records.size();
     return result;
 }

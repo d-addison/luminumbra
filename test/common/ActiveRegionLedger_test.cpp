@@ -4,6 +4,7 @@
 #include "luminumbra_common/persistence/WorldSaveService.h"
 #include "luminumbra_common/world/ActiveRegionLedger.h"
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstdint>
@@ -671,11 +672,73 @@ std::vector<RegionKey> Keys(const ActiveRegionLedger& ledger) {
     }
     return keys;
 }
-// Schedules an explicit empty anchor span, so nothing is visited and only retention can act.
+// Stage separate Frozen coverage with a valid freeze stamp after each record's last tick.
+void FreezeForRetention(ActiveRegionLedger& ledger) {
+    const WorldClock frozen_at(ledger.header_tick() + 1);
+    for (auto& [key, record] :
+         const_cast<std::map<RegionKey, ActiveRegionRecord>&>(ledger.records())) {
+        record.wake_pending = false;
+        record.state = RegionState::Frozen;
+        record.frozen_at = frozen_at.tick();
+        record.cadence_shift = ledger.config().reduced_shift;
+        record.cadence_phase = ActiveRegionLedger::phase(key, record.cadence_shift);
+        record.over_hold = record.under_hold = 0;
+    }
+    ledger.acknowledge_world_clock(frozen_at);
+}
+// Schedules an explicit empty anchor span, so nothing is visited.
 RegionSchedule Idle(ActiveRegionLedger& ledger,
                     std::uint64_t tick,
                     const ActiveRegionLedger::OwnershipProbe& owned = {}) {
     return ledger.schedule(WorldClock(tick), std::span<const Vec3>{}, {}, {}, owned);
+}
+
+TEST(ActiveRegionLedgerTest, EvictedActiveDueKeysAreFilteredBeforePublishingSurvivingWork) {
+    auto ledger = HomeVisit();
+    const auto keys = Keys(ledger);
+    ASSERT_GE(keys.size(), 4u);
+    // Rank puts the pinned final key first, so survivor order differs from map order.
+    ledger.pin(keys.back(), true, WorldClock(2));
+    const std::vector<RegionKey> survivors{keys.back(), keys.front(), keys[2]};
+    const RegionKey expired = keys[1];
+    const auto& record = ledger.records().at(expired);
+    ASSERT_EQ(record.state, RegionState::Active);
+    ASSERT_EQ(record.last_proximity, 1u);
+    ASSERT_FALSE(record.pinned);
+    ASSERT_FALSE(record.edited);
+    ASSERT_FALSE(record.populated);
+    ASSERT_EQ(record.water_cursor, 0u);
+    ASSERT_TRUE(ledger.completed_work().empty());
+    ASSERT_TRUE(ledger.energy_ages().empty());
+
+    const std::uint64_t due_tick = record.last_proximity + kIdle;
+    // With no probe, every Active record is due; this is also the pre-eviction trace oracle.
+    auto trace_reference = ledger;
+    const auto unfiltered = Idle(trace_reference, due_tick);
+    ASSERT_NE(std::find(unfiltered.due.begin(), unfiltered.due.end(), expired),
+              unfiltered.due.end());
+    ASSERT_EQ(trace_reference.records().at(expired).last_ticked, due_tick);
+
+    const auto schedule = Idle(ledger, due_tick, [&survivors](RegionKey key) {
+        return std::find(survivors.begin(), survivors.end(), key) != survivors.end();
+    });
+    EXPECT_FALSE(ledger.records().contains(expired));
+    EXPECT_EQ(std::find(schedule.due.begin(), schedule.due.end(), expired), schedule.due.end());
+    EXPECT_EQ(schedule.due, survivors);
+    EXPECT_EQ(schedule.ledger_records, survivors.size());
+    EXPECT_EQ(schedule.digest, unfiltered.digest);
+    EXPECT_EQ(schedule.transitions, unfiltered.transitions);
+
+    std::vector<RegionWork> completed;
+    for (const auto key : schedule.due) {
+        ASSERT_TRUE(ledger.records().contains(key));
+        EXPECT_EQ(ledger.records().at(key).last_ticked, due_tick);
+        completed.push_back({key, 1, 0, 0, 0});
+    }
+    ASSERT_NO_THROW(ledger.publish_completed_work(completed));
+    ASSERT_EQ(ledger.completed_work().size(), survivors.size());
+    for (const auto key : survivors)
+        EXPECT_EQ(ledger.completed_work().at(key), 1u);
 }
 
 TEST(ActiveRegionLedgerTest, RetentionDropsOnlyIdleUnownedRecords) {
@@ -684,14 +747,38 @@ TEST(ActiveRegionLedgerTest, RetentionDropsOnlyIdleUnownedRecords) {
     ASSERT_GT(visited, 1u);
     for (const auto& [key, record] : ledger.records()) {
         (void)key;
+        ASSERT_EQ(record.state, RegionState::Active);
         ASSERT_EQ(record.last_proximity, 1u);
     }
     const auto before = Idle(ledger, 1 + kIdle - 1, kNobodyOwns);
     EXPECT_EQ(ledger.records().size(), visited);
     EXPECT_EQ(before.ledger_records, visited);
+    EXPECT_EQ(before.due, Keys(ledger));
     const auto after = Idle(ledger, 1 + kIdle, kNobodyOwns);
     EXPECT_TRUE(ledger.records().empty());
     EXPECT_EQ(after.ledger_records, 0u);
+    EXPECT_TRUE(after.due.empty());
+}
+
+TEST(ActiveRegionLedgerTest, FrozenRetentionKeepsOwnedRecordsAndEvictsThemWhenReleased) {
+    auto ledger = HomeVisit();
+    FreezeForRetention(ledger);
+    const auto keys = Keys(ledger);
+    ASSERT_GT(keys.size(), 1u);
+    const auto owner = keys.front();
+    const auto before = Idle(ledger, kIdle, kNobodyOwns);
+    EXPECT_EQ(Keys(ledger), keys);
+    EXPECT_TRUE(before.due.empty());
+    const auto retained = Idle(ledger, 1 + kIdle, [owner](RegionKey key) { return key == owner; });
+    ASSERT_EQ(Keys(ledger), (std::vector<RegionKey>{owner}));
+    EXPECT_EQ(retained.ledger_records, 1u);
+    EXPECT_TRUE(retained.due.empty());
+    EXPECT_EQ(ledger.records().at(owner).state, RegionState::Frozen);
+    EXPECT_EQ(Reload(ledger).records(), ledger.records());
+    const auto released = Idle(ledger, 2 + kIdle, kNobodyOwns);
+    EXPECT_TRUE(ledger.records().empty());
+    EXPECT_EQ(released.ledger_records, 0u);
+    EXPECT_TRUE(released.due.empty());
 }
 
 TEST(ActiveRegionLedgerTest, RetentionKeepsPinnedEditedPopulatedWaterAndOwnedRecords) {
@@ -722,6 +809,7 @@ TEST(ActiveRegionLedgerTest, NoProbeNeverEvicts) {
     const auto schedule = Idle(ledger, 3 * kIdle);
     EXPECT_EQ(ledger.records().size(), visited);
     EXPECT_EQ(schedule.ledger_records, visited);
+    EXPECT_EQ(schedule.due, Keys(ledger));
 }
 
 TEST(ActiveRegionLedgerTest, EvictedRegionStartsFreshWhenVisitedAgain) {
@@ -748,9 +836,12 @@ TEST(ActiveRegionLedgerTest, RetentionKeepsTheLedgerBounded) {
     ledger.schedule(WorldClock(1), std::span<const Vec3>(grid));
     EXPECT_GT(ledger.records().size(), 1000u);
     const std::array lone{Vec3(0, 0, 0)};
+    ActiveRegionLedger fresh;
+    const auto fresh_schedule = fresh.schedule(WorldClock(1 + kIdle), lone);
     const auto schedule =
         ledger.schedule(WorldClock(1 + kIdle), std::span<const Vec3>(lone), {}, {}, kNobodyOwns);
-    EXPECT_LT(ledger.records().size(), 20u);
+    EXPECT_EQ(Keys(ledger), Keys(fresh));
+    EXPECT_EQ(schedule.due, fresh_schedule.due);
     EXPECT_EQ(schedule.ledger_records, ledger.records().size());
 }
 
