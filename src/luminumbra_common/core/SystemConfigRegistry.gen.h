@@ -89,5 +89,6 @@
   PARAM(SpawnPreySpeed, RenderCreatureSpawn, "prey_speed", false, 2.6f, 0.0f, 0.0f, 0.0f) \
   PARAM(SpawnInitialHunger, RenderCreatureSpawn, "initial_hunger", false, 0.2f, 0.0f, 0.0f, 0.0f) \
   PARAM(ColonyAntCount, RenderForagingColony, "ant_count", false, 24.0f, 0.0f, 0.0f, 0.0f) \
-  PARAM(ColonyFoodAmount, RenderForagingColony, "food_amount", false, 1000000.0f, 0.0f, 0.0f, 0.0f)
+  PARAM(ColonyFoodAmount, RenderForagingColony, "food_amount", false, 1000000.0f, 0.0f, 0.0f, 0.0f) \
+  PARAM(FarWorldCaveField, RenderFarWorldLadder, "cave_field", false, 0.0f, 0.0f, 0.0f, 0.0f)
 // clang-format on

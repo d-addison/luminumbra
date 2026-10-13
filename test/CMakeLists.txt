@@ -161,6 +161,7 @@ add_executable(common_tests
     rendering/FarWorldRenderer_test.cpp
     rendering/FarWorldOwnership_test.cpp
     rendering/FarWorldDepthBias_test.cpp
+    rendering/FarWorldCaveSelection_test.cpp
     rendering/ShaderSource_test.cpp
     ../src/luminumbra_client/rendering/ShaderSource.cpp
     ../src/luminumbra_client/rendering/FarWorldRenderer.cpp

@@ -2128,12 +2128,24 @@ int main(int argc, char* argv[]) {
         scenario_config.isolation_layers, scenario_config.isolation_backdrop));
     // far-LOD tile builds ride the JobSystem Normal lane.
     renderPipeline.attach_farlod_job_system(&jobSystem);
+    renderPipeline.far_world_renderer().SetRequestedCavePolicy(
+        Luminumbra::Rendering::ResolveFarWorldCaveField(
+            g_systemConfig.param(luminumbra::core::SysParam::FarWorldCaveField,
+                                 Luminumbra::Rendering::kDefaultFarWorldCaveFieldCode)));
     renderPipeline.set_far_world_mode(Luminumbra::Rendering::RequestedFarWorldMode(
         g_systemConfig.enabled(luminumbra::core::SysKey::RenderFarWorldLadder)));
-    if (g_systemConfig.enabled(luminumbra::core::SysKey::RenderFarWorldLadder))
-        LUMINUMBRA_CORE_WARN(
-            "Far-world Ladder requested; normal world activation refuses without "
-            "immutable committed authority and dirty parking. Legacy remains effective.");
+    if (g_systemConfig.enabled(luminumbra::core::SysKey::RenderFarWorldLadder)) {
+        if (!renderPipeline.far_world_renderer()
+                 .CavePolicy(Luminumbra::Rendering::FarWorldPurpose::World)
+                 .requested)
+            LUMINUMBRA_CORE_WARN(
+                "Far-world Ladder refused: cave_field requires exact 0 (BandLimited) "
+                "or 1 (BoxFiltered). Legacy remains effective.");
+        else
+            LUMINUMBRA_CORE_WARN(
+                "Far-world Ladder requested; normal world activation refuses without "
+                "immutable committed authority and dirty parking. Legacy remains effective.");
+    }
     // set the sky-LUT GPU flag BEFORE startup so the one-shot precompute
     // (init_sky_lut, inside startup) takes the GPU compute path. render.sky_lut_gpu, default OFF.
     renderPipeline.set_sky_lut_gpu_enabled(

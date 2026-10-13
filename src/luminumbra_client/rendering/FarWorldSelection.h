@@ -29,7 +29,9 @@ enum class FarWorldRefusal {
     PreviewOverride,
     OffscreenSuppressed,
     SpanHistoryExhausted,
-    ShaderProgramUnavailable
+    ShaderProgramUnavailable,
+    InvalidCavePolicy,
+    CavePolicyMismatch
 };
 
 constexpr FarWorldMode RequestedFarWorldMode(bool enabled) noexcept {
