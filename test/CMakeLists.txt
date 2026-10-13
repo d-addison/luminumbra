@@ -426,9 +426,6 @@ target_link_libraries(foliage_cache_prune_test PRIVATE
 
 add_executable(render_smoke_test
     rendering/render_smoke_test.cpp
-    ../src/luminumbra_client/rendering/FarVolumeGpuBackend.cpp
-    ../src/luminumbra_client/rendering/FarVolumeGlBackend.cpp
-    ../src/luminumbra_common/core/FilesystemPath.cpp
 )
 
 target_compile_definitions(render_smoke_test PRIVATE
@@ -438,9 +435,11 @@ target_compile_definitions(render_smoke_test PRIVATE
 
 target_include_directories(render_smoke_test PRIVATE
 ../src
+../src/luminumbra_client
 )
 
 target_link_libraries(render_smoke_test PRIVATE
+    luminumbra_client
     glm::glm
     gtest_main
     glfw
