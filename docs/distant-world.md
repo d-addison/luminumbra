@@ -7,6 +7,17 @@ current shipped behaviour so nothing here reads as implemented. Nothing in this
 document waives the acceptance evidence that each slice must supply, and no
 format change listed here exists until its slice lands.
 
+For the September 13 recovered source, see the [implementation and acceptance
+gap map](distant-world-implementation-status.md). It distinguishes landed
+prerequisites from the remaining runtime and evidence work without changing this
+contract. The subsequent [bounded volume-generation entry point](far-volume-generation.md)
+implements the first sampler-driven part of DW01; runtime integration remains open.
+The [bounded volume mesher](far-volume-meshing.md) supplies the first CPU kernel
+part of DW03 with same-authority halo normals; runtime integration remains open.
+The [canonical discovery and authority facade](far-volume-convergence.md) adds
+the original surface-span discovery and explicit numeric profiles; queue,
+allocation and renderer integration remain separate.
+
 ## Scope
 
 - The view radius is **16 km from the camera** and the world has **no fixed
@@ -45,7 +56,9 @@ separate camera-relative set of pristine heightfield tiles to about 3 km with
 authoritative volumetric overlays captured from resident chunks; simulation
 systems tick every registry participant regardless of residency; wind, weather,
 aether ambience, scent, soil and irrigation are fixed grids anchored on the
-spawn point. There is no notion of an active region.
+spawn point. A host-side active-region ledger and scheduler foundation exists
+(`sim.active_regions`, off by default; see [active regions](active-regions.md)),
+but no distant-simulation consumer uses the schedule yet.
 
 This contract separates three sets that may overlap but are never equated.
 

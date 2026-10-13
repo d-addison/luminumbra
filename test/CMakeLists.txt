@@ -47,6 +47,7 @@ add_executable(asset_processor_round_trip_test
     tools/test_asset_processor_round_trip.cpp
     tools/test_skeletal_asset_round_trip.cpp
     "${ASSET_PROCESSOR_SOURCE}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../tools/morph_asset_processor.cpp"
 )
 
 target_compile_definitions(asset_processor_round_trip_test PRIVATE
@@ -90,6 +91,49 @@ if(TARGET meshoptimizer)
 elseif(TARGET meshoptimizer::meshoptimizer)
     target_link_libraries(asset_processor_round_trip_test PRIVATE meshoptimizer::meshoptimizer)
 endif()
+luminumbra_pin_fp_determinism(asset_processor_round_trip_test)
+
+# This geometry-only compiler/runtime target does not build or start the client.
+add_executable(morph_asset_test
+    tools/test_morph_asset.cpp
+    "${ASSET_PROCESSOR_SOURCE}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../tools/morph_asset_processor.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../src/luminumbra_common/animation/MorphMesh.cpp")
+target_include_directories(morph_asset_test PRIVATE ../src)
+target_include_directories(morph_asset_test SYSTEM PRIVATE ../vendor/cgltf)
+target_link_libraries(morph_asset_test PRIVATE gtest_main nlohmann_json meshoptimizer stb_headers)
+luminumbra_configure_first_party_target(morph_asset_test)
+luminumbra_pin_fp_determinism(morph_asset_test)
+
+# Table-driven volume generation has no client, GL or world-service dependency.
+add_executable(far_volume_tile_test
+    common/FarVolumeTile_test.cpp
+    ../src/luminumbra_common/world/FarVolumeTile.cpp)
+target_include_directories(far_volume_tile_test PRIVATE ../src)
+target_link_libraries(far_volume_tile_test PRIVATE gtest_main)
+luminumbra_configure_first_party_target(far_volume_tile_test)
+
+add_executable(far_volume_mesher_test
+    common/FarVolumeMesher_test.cpp
+    common/FarVolumeMemory_test.cpp
+    ../src/luminumbra_common/world/FarVolumeTile.cpp
+    ../src/luminumbra_common/world/FarVolumeMesher.cpp)
+target_include_directories(far_volume_mesher_test PRIVATE ../src)
+target_link_libraries(far_volume_mesher_test PRIVATE gtest_main)
+luminumbra_configure_first_party_target(far_volume_mesher_test)
+
+add_executable(far_volume_facade_test
+    common/FarVolumeFacade_test.cpp
+    common/FarVolumeFacadeMemory_test.cpp
+    ../src/luminumbra_common/world/FarDensityQuantization.cpp
+    ../src/luminumbra_common/world/FarVolume.cpp
+    ../src/luminumbra_common/world/FarVolumeTile.cpp
+    ../src/luminumbra_common/world/FarVolumeMesher.cpp)
+target_include_directories(far_volume_facade_test PRIVATE ../src ../src/luminumbra_common)
+target_compile_definitions(far_volume_facade_test PRIVATE
+    LUMINUMBRA_SOURCE_ROOT="${CMAKE_SOURCE_DIR}")
+target_link_libraries(far_volume_facade_test PRIVATE gtest_main glm::glm nlohmann_json::nlohmann_json)
+luminumbra_configure_first_party_target(far_volume_facade_test)
 
 add_executable(common_tests
     common/Crc32_test.cpp
@@ -107,7 +151,9 @@ add_executable(common_tests
     common/ResidencyContract_test.cpp
     common/FarLodStore_test.cpp
     common/FarTierTable_test.cpp
+    common/FarHorizon_test.cpp
     common/FarWantedSet_test.cpp
+    common/FarAuthorityOverlay_test.cpp
     common/GameSessionHeadlessWorld_test.cpp
     common/SimBudgetTelemetry_test.cpp
     ../src/luminumbra_server/modes/SmokeArtifact.cpp
@@ -338,6 +384,13 @@ target_link_libraries(forest_perf_budget_test PRIVATE
 # helper is a free template in FoliagePass.h precisely so it can be exercised
 # without a GL context.
 # Final foliage policy and receipt contracts are GL-free and do not link the engine.
+if(NOT TARGET render_view_test)
+    add_executable(render_view_test rendering/render_view_test.cpp
+        ../src/luminumbra_client/rendering/static_preview/RenderView.cpp)
+    target_include_directories(render_view_test PRIVATE ../include)
+    target_link_libraries(render_view_test PRIVATE gtest_main glm)
+endif()
+
 add_executable(foliage_visual_contract_test rendering/foliage_visual_contract_test.cpp)
 target_include_directories(foliage_visual_contract_test PRIVATE ../src/luminumbra_client)
 target_link_libraries(foliage_visual_contract_test PRIVATE gtest_main nlohmann_json)
@@ -1016,6 +1069,30 @@ target_link_libraries(initial_world_loading_perf_test PRIVATE
     luminumbra_common
 )
 
+# Gtest-free worldgen timing probe. Uses public engine APIs only. It is not a
+# gtest target, so its smoke run is a direct add_test rather than discovery.
+add_executable(worldgen_probe
+    diagnostics/worldgen_probe.cpp
+)
+
+target_compile_definitions(worldgen_probe PRIVATE
+    LUMINUMBRA_SOURCE_ROOT="${CMAKE_SOURCE_DIR}"
+)
+
+target_include_directories(worldgen_probe PRIVATE
+../src
+)
+
+target_link_libraries(worldgen_probe PRIVATE
+    luminumbra_common
+)
+
+luminumbra_configure_first_party_target(worldgen_probe)
+
+add_test(NAME WorldgenProbeSmoke
+    COMMAND worldgen_probe --smoke --json ${CMAKE_CURRENT_BINARY_DIR}/worldgen_probe_smoke.json)
+set_tests_properties(WorldgenProbeSmoke PROPERTIES LABELS "perf" TIMEOUT 120)
+
 # Manual cold-load latency diagnostic. It exercises twenty interactive loads at
 # radius 12/4 with the watchdog armed, but deliberately makes no machine-speed
 # claim. The required performance workflow uses paired relative observations.
@@ -1469,6 +1546,23 @@ target_link_libraries(hang_watchdog_test PRIVATE
     Threads::Threads
 )
 
+# Bounded console sink: separate executable so the logging-stall cases can run
+# without the rest of common_tests. Fake outputs are stalled on purpose; the
+# tests release them before returning.
+add_executable(bounded_console_sink_test
+    common/bounded_console_sink_test.cpp
+)
+target_include_directories(bounded_console_sink_test PRIVATE
+../src
+../src/luminumbra_common
+)
+target_link_libraries(bounded_console_sink_test PRIVATE
+    gtest_main
+    luminumbra_common
+    Threads::Threads
+)
+luminumbra_configure_first_party_target(bounded_console_sink_test)
+
 #  implementation note: occlusion read-back onto ma_sound volume. Pure test of the
 # ComputeFinalVolume helper; includes MiniaudioManager.h so needs miniaudio + nlohmann_json.
 add_executable(audio_volume_readback_test
@@ -1578,10 +1672,22 @@ add_test(
 # timeout" during the post-build gtest_discover_tests step (no test actually ran).
 # 120 s is generous headroom; it only affects the one-time list-tests probe.
 include(GoogleTest)
+if(LUMINUMBRA_ENABLE_STATIC_PREVIEW)
+    add_executable(viewport_protocol_test static_preview/viewport_protocol_test.cpp
+        ../tools/static_preview/ViewportProtocol.cpp)
+    target_include_directories(viewport_protocol_test PRIVATE ../tools/static_preview)
+    target_link_libraries(viewport_protocol_test PRIVATE luminumbra_prefab_runtime gtest_main)
+    luminumbra_configure_first_party_target(viewport_protocol_test)
+    gtest_discover_tests(viewport_protocol_test PROPERTIES LABELS "authoring;tools" TIMEOUT 30)
+endif()
 set(LUMINUMBRA_GTEST_TARGETS
+    far_volume_tile_test
+    far_volume_mesher_test
+    far_volume_facade_test
     world_generation_test
     worldgen_layer_snapshot_test
     asset_processor_round_trip_test
+    morph_asset_test
     game_assets_test
     common_tests
     filesystem_path_test
@@ -1600,6 +1706,7 @@ set(LUMINUMBRA_GTEST_TARGETS
     world_dressing_test
     foliage_cache_prune_test
     foliage_visual_contract_test
+    render_view_test
     render_smoke_test
     render_capture_test
     capture_sdk_trigger_test
@@ -1632,6 +1739,7 @@ set(LUMINUMBRA_GTEST_TARGETS
     client_policy_test
     audio_physics_binding_test
     hang_watchdog_test
+    bounded_console_sink_test
     audio_volume_readback_test
     audio_disabled_test
     capture_scale_test
@@ -1837,6 +1945,11 @@ if(DEFINED ENV{VISUAL_SWEEP_PYTHON})
     list(APPEND _vc_candidates "$ENV{VISUAL_SWEEP_PYTHON}")
 endif()
 if(Python3_FOUND)
+    if(Python3_VERSION VERSION_GREATER_EQUAL "3.10")
+        add_test(NAME FoliageEvidenceContract
+            COMMAND "${Python3_EXECUTABLE}" ${CMAKE_SOURCE_DIR}/tools/perf/test_foliage_evidence.py)
+        set_tests_properties(FoliageEvidenceContract PROPERTIES LABELS "visual;tools" TIMEOUT 90)
+    endif()
     add_test(NAME GameAssetAcquisition COMMAND "${Python3_EXECUTABLE}" -m unittest discover
         -s "${CMAKE_SOURCE_DIR}/tools/assets" -v)
     add_test(NAME ReleaseSbomInventory
@@ -1866,6 +1979,9 @@ if(_vc_python)
     add_test(NAME TerrainAovDepthContract
         COMMAND "${_vc_python}" ${CMAKE_SOURCE_DIR}/tools/perf/test_terrain_aovs.py)
     set_tests_properties(TerrainAovDepthContract PROPERTIES LABELS "visual;tools" TIMEOUT 60)
+    add_test(NAME StaticPreviewCaptureContract COMMAND "${Python3_EXECUTABLE}"
+        ${CMAKE_SOURCE_DIR}/test/static_preview/test_capture_validation.py)
+    set_tests_properties(StaticPreviewCaptureContract PROPERTIES LABELS "authoring;tools" TIMEOUT 90)
     add_test(NAME VisualCritiqueFlags
         COMMAND "${_vc_python}" ${CMAKE_SOURCE_DIR}/tools/test_visual_critique.py)
     set_tests_properties(VisualCritiqueFlags PROPERTIES LABELS "visual;critique" TIMEOUT 120)
@@ -2014,6 +2130,7 @@ endif()
 add_test(NAME RenderContractPython COMMAND "${Python3_EXECUTABLE}" ${CMAKE_SOURCE_DIR}/tools/perf/test_render_contract.py)
 add_test(NAME RenderRunnerEvidencePython COMMAND "${Python3_EXECUTABLE}" ${CMAKE_SOURCE_DIR}/tools/perf/test_render_runner_evidence.py)
 set_tests_properties(RenderRunnerEvidencePython PROPERTIES TIMEOUT 60)
+add_test(NAME RenderSceneMatrixPython COMMAND "${Python3_EXECUTABLE}" -B ${CMAKE_SOURCE_DIR}/tools/rendering/acceptance/test_scene_matrix.py)
 
 # Ordinary test lanes need no downloaded game art. Generate valid synthetic
 # meshes/materials and their manifest solely for the isolated runner roots.

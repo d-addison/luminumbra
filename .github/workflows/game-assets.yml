@@ -11,8 +11,12 @@ permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # Pushes to devel get one group per commit and are never cancelled: when devel is not
+  # strict-up-to-date, every merged tip needs its own complete run so that a newer
+  # push cannot hide an older red tip. Pull requests and main keep cancelling
+  # superseded runs.
+  group: ${{ github.workflow }}-${{ github.ref }}${{ github.event_name == 'push' && github.ref == 'refs/heads/devel' && format('-{0}', github.sha) || '' }}
+  cancel-in-progress: ${{ !(github.event_name == 'push' && github.ref == 'refs/heads/devel') }}
 
 jobs:
   acquire:
