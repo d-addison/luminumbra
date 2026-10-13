@@ -48,9 +48,8 @@ TEST(FarWorldDepthPosition, ProductionWriterProjectionRoundTripsWithAerialInvers
     for (const auto jitter : {glm::vec2(.001f, -.002f), glm::vec2(-.0015f, .0007f)}) {
         RenderContext ctx;
         const auto selected_projection = camera.GetProjectionMatrix(900, 600);
-        ctx.set_gbuffer_depth_contract(selection.effective == FarWorldMode::Ladder,
-                                       selected_projection,
-                                       jitter);
+        ctx.set_gbuffer_depth_contract(
+            selection.effective == FarWorldMode::Ladder, selected_projection, jitter);
         ASSERT_TRUE(ctx.far_world_ladder);
         // This field is uploaded by every Ladder G-buffer writer, including
         // PlantProcgenPass; AerialPass uploads the inverse from the same contract.

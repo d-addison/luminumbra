@@ -28,6 +28,8 @@ TEST(FarVolumeTierMemory, SnapshotAndOldNewGpuShareAdmissionBeforeAllocation) {
     snapshot.resize(64);
     auto old_gpu = memory.ReserveGpu(1, 48);
     ASSERT_TRUE(old_gpu);
+    if (!old_gpu.has_value())
+        return;
     EXPECT_EQ(Observe(memory, 1).bytes_cpu, 64u);
     EXPECT_EQ(Observe(memory, 1).bytes_gpu, 48u);
     EXPECT_EQ(Observe(memory, 1).bytes_total, 112u);
@@ -55,6 +57,8 @@ TEST(FarVolumeTierMemory, GpuReplacementHoldsBothAndMoveTransfersExactlyOnce) {
     auto new_gpu = memory.ReserveGpu(5, 48);
     ASSERT_TRUE(old_gpu);
     ASSERT_TRUE(new_gpu);
+    if (!new_gpu.has_value())
+        return;
     EXPECT_EQ(Observe(memory, 5).bytes_gpu, 88u);
     EXPECT_FALSE(memory.ReserveGpu(5, 9));
     EXPECT_EQ(Observe(memory, 5).bytes_total, 88u);
@@ -94,6 +98,8 @@ TEST(FarVolumeTierMemory, TierIsolationInvalidAndUnlimitedDoNotWrap) {
     EXPECT_FALSE(memory.ReserveGpu(3, 1));
     auto zero = memory.ReserveGpu(3, 0);
     ASSERT_TRUE(zero);
+    if (!zero.has_value())
+        return;
     EXPECT_EQ(zero->bytes(), 0u);
     EXPECT_EQ(Observe(memory, 3).bytes_gpu, maximum);
     EXPECT_EQ(Observe(memory, 3).bytes_total, maximum);

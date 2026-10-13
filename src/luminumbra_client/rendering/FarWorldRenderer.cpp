@@ -266,9 +266,11 @@ FarWorldRefusal FarWorldRenderer::ExtendLedger(const FarTileKey& key,
     auto headroom = limits_.build_headroom_bytes;
     if (old != ledgers_.end()) {
         const auto& accepted = old->accepted;
-        if (!accepted) return FarWorldRefusal::InvalidRequests;
-        generation = accepted->identity.span_generation;
-        if (growth == 0) headroom = accepted->build_headroom_bytes;
+        if (accepted) {
+            generation = accepted->identity.span_generation;
+            if (growth == 0)
+                headroom = accepted->build_headroom_bytes;
+        }
     }
     if (growth > std::numeric_limits<std::uint64_t>::max() - generation)
         return FarWorldRefusal::SpanRejected;
@@ -321,7 +323,8 @@ FarWorldRenderer::ValidateAndRecordRequests(std::span<const FarVolumeWantedReque
             });
         if (slot != pending_ledgers_.end()) {
             const auto& accepted = slot->accepted;
-            if (!accepted) return FarWorldRefusal::InvalidRequests;
+            if (!accepted)
+                return FarWorldRefusal::InvalidRequests;
             const auto& old = *accepted;
             if (request.identity.span_generation < old.identity.span_generation ||
                 (request.identity == old.identity &&

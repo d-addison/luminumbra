@@ -2,7 +2,7 @@
 
 #include <bit>
 #include <cstdint>
-#include <glm/gtc/packing.hpp>
+#include <glm/packing.hpp>
 #include <gtest/gtest.h>
 
 namespace {
@@ -16,8 +16,8 @@ TEST(FarWorldSurfaceTag, EndpointsSurviveBinary16WithAnUnambiguousSign) {
             EXPECT_EQ(IsFarWorldSurface(stored.y), far);
             EXPECT_FLOAT_EQ(DecodeFarWorldSurfaceAO(stored.y), ao);
             EXPECT_FLOAT_EQ(stored.x, 0.25f);
-            const std::uint32_t expected = far ? (ao == 0.0f ? 0xbc00u : 0xc000u)
-                                              : (ao == 0.0f ? 0x0000u : 0x3c00u);
+            const std::uint32_t expected =
+                far ? (ao == 0.0f ? 0xbc00u : 0xc000u) : (ao == 0.0f ? 0x0000u : 0x3c00u);
             EXPECT_EQ(packed >> 16, expected);
         }
     }
@@ -37,8 +37,9 @@ TEST(FarWorldSurfaceTag, DenseAORoundTripThroughActualHalfFloatQuantization) {
             EXPECT_EQ(IsFarWorldSurface(stored.y), far) << sample;
             EXPECT_NEAR(DecodeFarWorldSurfaceAO(stored.y), ao, 1.0f / 2048.0f) << sample;
             EXPECT_EQ(bits & 0xffffu, ordinary_bits & 0xffffu); // Metallic is unchanged.
-            if (!far)
+            if (!far) {
                 EXPECT_EQ(bits, ordinary_bits);
+            }
         }
     }
 }

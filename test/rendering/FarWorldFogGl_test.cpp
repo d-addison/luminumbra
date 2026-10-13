@@ -293,8 +293,8 @@ TEST_F(FarWorldFogGl, ProductionMarkerDepthRoundTripsWithSharedAerialInverseAndJ
     pass->set_enabled(true);
 
     GLint output = 0;
-    glGetFramebufferAttachmentParameteriv(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
-                                          GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME, &output);
+    glGetFramebufferAttachmentParameteriv(
+        GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME, &output);
     const auto position = Texture(GL_TEXTURE_2D, GL_RGB16F, GL_RGB, nullptr);
     const auto normal = Texture(GL_TEXTURE_2D, GL_RGBA8, GL_RGBA, nullptr);
     const auto albedo = Texture(GL_TEXTURE_2D, GL_RGBA8, GL_RGBA, nullptr);
@@ -302,8 +302,11 @@ TEST_F(FarWorldFogGl, ProductionMarkerDepthRoundTripsWithSharedAerialInverseAndJ
     const auto depth = Texture(GL_TEXTURE_2D, GL_DEPTH_COMPONENT32F, GL_DEPTH_COMPONENT, nullptr);
     const std::array<GLuint, 4> colors{position, normal, albedo, material};
     for (std::size_t i = 1; i < colors.size(); ++i)
-        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0 + static_cast<GLenum>(i),
-                                GL_TEXTURE_2D, colors[i], 0);
+        glFramebufferTexture2D(GL_FRAMEBUFFER,
+                               GL_COLOR_ATTACHMENT0 + static_cast<GLenum>(i),
+                               GL_TEXTURE_2D,
+                               colors[i],
+                               0);
 
     Camera camera;
     const auto selection =
@@ -316,7 +319,8 @@ TEST_F(FarWorldFogGl, ProductionMarkerDepthRoundTripsWithSharedAerialInverseAndJ
         RenderContext ctx;
         ctx.screen_width = ctx.screen_height = extent;
         ctx.set_gbuffer_depth_contract(selection.effective == FarWorldMode::Ladder,
-                                       camera.GetProjectionMatrix(extent, extent), jitter);
+                                       camera.GetProjectionMatrix(extent, extent),
+                                       jitter);
         for (const float axial : {8192.0f, 16000.0f}) {
             SCOPED_TRACE(axial);
             SCOPED_TRACE(signature);
@@ -327,12 +331,15 @@ TEST_F(FarWorldFogGl, ProductionMarkerDepthRoundTripsWithSharedAerialInverseAndJ
             pass->set_plants({{{-axial, -axial, -axial}, n, {0, 0}, color},
                               {{axial, -axial, -axial}, n, {0, 0}, color},
                               {{0, axial, -axial}, n, {0, 0}, color}},
-                             {0, 1, 2}, ++signature);
-            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
-                                    GL_TEXTURE_2D, position, 0);
+                             {0, 1, 2},
+                             ++signature);
+            glFramebufferTexture2D(
+                GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, position, 0);
             glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, depth, 0);
-            const GLenum buffers[]{GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1,
-                                    GL_COLOR_ATTACHMENT2, GL_COLOR_ATTACHMENT3};
+            const GLenum buffers[]{GL_COLOR_ATTACHMENT0,
+                                   GL_COLOR_ATTACHMENT1,
+                                   GL_COLOR_ATTACHMENT2,
+                                   GL_COLOR_ATTACHMENT3};
             glDrawBuffers(4, buffers);
             ASSERT_EQ(glCheckFramebufferStatus(GL_FRAMEBUFFER),
                       static_cast<GLenum>(GL_FRAMEBUFFER_COMPLETE));
@@ -357,7 +364,8 @@ TEST_F(FarWorldFogGl, ProductionMarkerDepthRoundTripsWithSharedAerialInverseAndJ
                     EXPECT_EQ(uploaded[c][r], ctx.gbuffer_projection[c][r]);
             float written_depth = 0;
             glm::vec3 stored;
-            glReadPixels(extent / 2, extent / 2, 1, 1, GL_DEPTH_COMPONENT, GL_FLOAT, &written_depth);
+            glReadPixels(
+                extent / 2, extent / 2, 1, 1, GL_DEPTH_COMPONENT, GL_FLOAT, &written_depth);
             glReadBuffer(GL_COLOR_ATTACHMENT0);
             glReadPixels(extent / 2, extent / 2, 1, 1, GL_RGB, GL_FLOAT, glm::value_ptr(stored));
             ASSERT_GT(written_depth, 0);
@@ -373,8 +381,11 @@ TEST_F(FarWorldFogGl, ProductionMarkerDepthRoundTripsWithSharedAerialInverseAndJ
 
             // Feed the rasterized writer textures into a production Q54 reader.
             glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, 0, 0);
-            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
-                                    GL_TEXTURE_2D, static_cast<GLuint>(output), 0);
+            glFramebufferTexture2D(GL_FRAMEBUFFER,
+                                   GL_COLOR_ATTACHMENT0,
+                                   GL_TEXTURE_2D,
+                                   static_cast<GLuint>(output),
+                                   0);
             glDrawBuffer(GL_COLOR_ATTACHMENT0);
             glDisable(GL_DEPTH_TEST);
             auto reader = Production("debug_view.frag");
