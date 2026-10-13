@@ -64,16 +64,21 @@ function New-Section {
 }
 
 function Invoke-SiblingScript {
-    # Runs a sibling driver with splatted parameters and returns its exit code
-    # (or $null when it never set one). Clears $LASTEXITCODE first so a stale
-    # value from an earlier native call cannot be mistaken for the sibling's.
+    # In PS 5.1 and 7, & invokes a script file in its own scope: exit N ends
+    # that script and sets LASTEXITCODE in the caller; it does not exit the host.
+    # Do not dot-source drivers. Capture terminating errors separately from exits
+    # so a stale native exit code or partial evidence cannot turn an error into PASS.
     param(
         [Parameter(Mandatory = $true)][string]$Path,
         [Parameter(Mandatory = $true)][hashtable]$Params
     )
     $global:LASTEXITCODE = $null
-    & $Path @Params | Out-Host
-    return $global:LASTEXITCODE
+    try {
+        & $Path @Params | Out-Host
+        return @{ exit_code = $global:LASTEXITCODE; error = "" }
+    } catch {
+        return @{ exit_code = $null; error = $_.ToString() }
+    }
 }
 
 if ($DryRun) {
@@ -90,6 +95,7 @@ if ($DryRun) {
 }
 
 $sections = [ordered]@{}
+$orchestratorError = ""
 
 try {
     # Every client-driving section needs the executable; fail fast if it is absent.
@@ -98,23 +104,20 @@ try {
     # --- render_qualification -------------------------------------------------
     $renderScript = Join-Path $PSScriptRoot "run-render-qualification.ps1"
     $renderOut = Join-Path $OutAbs "render"
-    if (-not (Test-Path -LiteralPath $renderScript -PathType Leaf)) {
-        $sections["render_qualification"] = New-Section -Status "unevaluated" -Detail "run-render-qualification.ps1 missing"
-    } elseif ($SkipRender) {
+    if ($SkipRender) {
         $sections["render_qualification"] = New-Section -Status "unevaluated" -Detail "skipped by -SkipRender"
+    } elseif (-not (Test-Path -LiteralPath $renderScript -PathType Leaf)) {
+        $sections["render_qualification"] = New-Section -Status "fail" -Detail "run-render-qualification.ps1 missing"
     } else {
         $renderParams = @{ Package = $PackageAbs; OutDir = $renderOut }
         if ($null -ne $DeclareRefresh -and $DeclareRefresh.Count -gt 0) { $renderParams["DeclareRefresh"] = $DeclareRefresh }
-        $renderRc = $null
-        $renderErr = ""
-        try {
-            $renderRc = Invoke-SiblingScript -Path $renderScript -Params $renderParams
-        } catch {
-            $renderErr = $_.Exception.Message
-        }
+        $renderRun = Invoke-SiblingScript -Path $renderScript -Params $renderParams
+        $renderRc = $renderRun.exit_code
         $qualPath = Join-Path $renderOut "qualification.json"
-        if ($null -eq $renderRc) {
-            $sections["render_qualification"] = New-Section -Status "fail" -Detail ("no exit code from run-render-qualification.ps1: " + $renderErr)
+        if ($renderRun.error.Length -gt 0) {
+            $sections["render_qualification"] = New-Section -Status "fail" -Detail ("run-render-qualification.ps1 error: " + $renderRun.error)
+        } elseif ($null -eq $renderRc) {
+            $sections["render_qualification"] = New-Section -Status "fail" -Detail "no exit code from run-render-qualification.ps1"
         } elseif ([int]$renderRc -eq 3) {
             $sections["render_qualification"] = New-Section -Status "unevaluated" -Detail "run-render-qualification.ps1 exit 3"
         } elseif ([int]$renderRc -ne 0) {
@@ -122,11 +125,15 @@ try {
         } elseif (-not (Test-Path -LiteralPath $qualPath -PathType Leaf)) {
             $sections["render_qualification"] = New-Section -Status "unevaluated" -Detail "render/qualification.json missing"
         } else {
-            $qual = ConvertFrom-Json -InputObject ([System.IO.File]::ReadAllText($qualPath, [System.Text.Encoding]::UTF8))
-            if ((Test-JsonProperty -Object $qual -Name "render_floor_qualified") -and $qual.render_floor_qualified -eq $true) {
-                $sections["render_qualification"] = New-Section -Status "pass" -Evidence "render/qualification.json" -Detail "render floor qualified"
-            } else {
-                $sections["render_qualification"] = New-Section -Status "fail" -Evidence "render/qualification.json" -Detail "render_floor_qualified is not true"
+            try {
+                $qual = ConvertFrom-Json -InputObject ([System.IO.File]::ReadAllText($qualPath, [System.Text.Encoding]::UTF8))
+                if ((Test-JsonProperty -Object $qual -Name "render_floor_qualified") -and $qual.render_floor_qualified -eq $true) {
+                    $sections["render_qualification"] = New-Section -Status "pass" -Evidence "render/qualification.json" -Detail "render floor qualified"
+                } else {
+                    $sections["render_qualification"] = New-Section -Status "fail" -Evidence "render/qualification.json" -Detail "render_floor_qualified is not true"
+                }
+            } catch {
+                $sections["render_qualification"] = New-Section -Status "fail" -Evidence "render/qualification.json" -Detail ("cannot read qualification.json: " + $_.Exception.Message)
             }
         }
     }
@@ -138,16 +145,13 @@ try {
         $sections["saved_world_lifecycle"] = New-Section -Status "unevaluated" -Detail "skipped by -SkipLifecycle"
     } else {
         $lifecycleParams = @{ Package = $PackageAbs; FixtureDir = $FixtureAbs; OutDir = $lifecycleOut; TimeoutSeconds = $TimeoutSeconds }
-        $lifecycleRc = $null
-        $lifecycleErr = ""
-        try {
-            $lifecycleRc = Invoke-SiblingScript -Path $lifecycleScript -Params $lifecycleParams
-        } catch {
-            $lifecycleErr = $_.Exception.Message
-        }
+        $lifecycleRun = Invoke-SiblingScript -Path $lifecycleScript -Params $lifecycleParams
+        $lifecycleRc = $lifecycleRun.exit_code
         $lifecycleEvidence = "lifecycle/acceptance-receipt.json"
-        if ($null -eq $lifecycleRc) {
-            $sections["saved_world_lifecycle"] = New-Section -Status "fail" -Detail ("no exit code from run-saved-world-lifecycle.ps1: " + $lifecycleErr)
+        if ($lifecycleRun.error.Length -gt 0) {
+            $sections["saved_world_lifecycle"] = New-Section -Status "fail" -Detail ("run-saved-world-lifecycle.ps1 error: " + $lifecycleRun.error)
+        } elseif ($null -eq $lifecycleRc) {
+            $sections["saved_world_lifecycle"] = New-Section -Status "fail" -Detail "no exit code from run-saved-world-lifecycle.ps1"
         } elseif ([int]$lifecycleRc -eq 0) {
             $sections["saved_world_lifecycle"] = New-Section -Status "pass" -Evidence $lifecycleEvidence -Detail "saved-world acceptance verdict pass"
         } elseif ([int]$lifecycleRc -eq 3) {
@@ -171,28 +175,29 @@ try {
     if ($null -eq $fixtureWorldId) {
         $sections["noui_load"] = New-Section -Status "fail" -Detail ("fixture world id unavailable: " + $fixtureError)
     } else {
-        $noUiRc = $null
-        $noUiErr = ""
-        try {
-            $noUiRc = Invoke-SiblingScript -Path $noUiScript -Params @{ Package = $PackageAbs; WorldId = $fixtureWorldId; OutDir = $noUiOut; TimeoutSeconds = $TimeoutSeconds }
-        } catch {
-            $noUiErr = $_.Exception.Message
-        }
+        $noUiRun = Invoke-SiblingScript -Path $noUiScript -Params @{ Package = $PackageAbs; WorldId = $fixtureWorldId; OutDir = $noUiOut; TimeoutSeconds = $TimeoutSeconds }
+        $noUiRc = $noUiRun.exit_code
         $noUiEvidence = "noui-load/noui-load-receipt.json"
-        $noUiVerdict = ""
         $noUiReceipt = Join-Path $noUiOut "noui-load-receipt.json"
-        if (Test-Path -LiteralPath $noUiReceipt -PathType Leaf) {
-            $noUiParsed = ConvertFrom-Json -InputObject ([System.IO.File]::ReadAllText($noUiReceipt, [System.Text.Encoding]::UTF8))
-            if (Test-JsonProperty -Object $noUiParsed -Name "verdict") { $noUiVerdict = [string]$noUiParsed.verdict }
-        }
-        if ($null -eq $noUiRc) {
-            $sections["noui_load"] = New-Section -Status "fail" -Evidence $noUiEvidence -Detail ("no exit code from run-noui-load.ps1: " + $noUiErr)
-        } elseif ([int]$noUiRc -eq 0 -and $noUiVerdict -eq "pass") {
-            $sections["noui_load"] = New-Section -Status "pass" -Evidence $noUiEvidence -Detail "no-UI load verdict pass"
+        if ($noUiRun.error.Length -gt 0) {
+            $sections["noui_load"] = New-Section -Status "fail" -Detail ("run-noui-load.ps1 error: " + $noUiRun.error)
+        } elseif ($null -eq $noUiRc) {
+            $sections["noui_load"] = New-Section -Status "fail" -Detail "no exit code from run-noui-load.ps1"
         } elseif ([int]$noUiRc -eq 3) {
             $sections["noui_load"] = New-Section -Status "unevaluated" -Evidence $noUiEvidence -Detail "no-UI load unevaluated (exit 3)"
+        } elseif ([int]$noUiRc -ne 0) {
+            $sections["noui_load"] = New-Section -Status "fail" -Evidence $noUiEvidence -Detail ("run-noui-load.ps1 exit " + [int]$noUiRc)
         } else {
-            $sections["noui_load"] = New-Section -Status "fail" -Evidence $noUiEvidence -Detail ("run-noui-load.ps1 exit " + [int]$noUiRc + ", verdict '" + $noUiVerdict + "'")
+            try {
+                $noUiParsed = ConvertFrom-Json -InputObject ([System.IO.File]::ReadAllText($noUiReceipt, [System.Text.Encoding]::UTF8))
+                if ((Test-JsonProperty -Object $noUiParsed -Name "verdict") -and $noUiParsed.verdict -eq "pass") {
+                    $sections["noui_load"] = New-Section -Status "pass" -Evidence $noUiEvidence -Detail "no-UI load verdict pass"
+                } else {
+                    $sections["noui_load"] = New-Section -Status "fail" -Evidence $noUiEvidence -Detail "no-UI load verdict is not pass"
+                }
+            } catch {
+                $sections["noui_load"] = New-Section -Status "fail" -Evidence $noUiEvidence -Detail ("cannot read noui-load-receipt.json: " + $_.Exception.Message)
+            }
         }
     }
 
@@ -388,6 +393,20 @@ try {
         }
     }
 
+} catch {
+    $orchestratorError = $_.Exception.Message
+    Write-Host ("error: " + $orchestratorError)
+}
+
+# Finalize even after a section/preflight error. Never leave a partial run without
+# a receipt and checker verdict; sections that did not finish cannot pass.
+foreach ($name in @("render_qualification", "saved_world_lifecycle", "noui_load", "serial_load_20", "net_soak", "perf_pointer", "audio_off")) {
+    if (-not $sections.Contains($name)) {
+        $sections[$name] = New-Section -Status "fail" -Detail ("section did not complete: " + $orchestratorError)
+    }
+}
+
+try {
     # --- receipt and checker --------------------------------------------------
     Write-JsonFile -Object ([ordered]@{
         schema = "luminumbra.v03_acceptance.v1"
