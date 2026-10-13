@@ -32,6 +32,11 @@ def positive_int(value: str) -> int:
 
 def build_proposal(capture: dict[str, Any], num: int, den: int) -> dict[str, Any]:
     manifest = capture["manifest"]
+    identity = {key: manifest[key] for key in (
+        "revision", "fixture_hash", "seed", "ticks", "binary_sha256", "source_dirty",
+        "surface_radius", "collision_radius")}
+    for key in ("seed", "ticks"):
+        identity[key] = sim_budget_io.validate_workload_integer(manifest[key], key)
     presets: dict[str, Any] = {}
     for preset, data in capture["presets"].items():
         stages: dict[str, Any] = {}
@@ -60,9 +65,7 @@ def build_proposal(capture: dict[str, Any], num: int, den: int) -> dict[str, Any
         }
     return {
         "schema": PROPOSAL_SCHEMA,
-        "identity": {key: manifest[key] for key in (
-            "revision", "fixture_hash", "seed", "ticks", "binary_sha256", "source_dirty",
-            "surface_radius", "collision_radius")},
+        "identity": identity,
         "headroom": {"num": num, "den": den},
         "presets": presets,
         "region_scheduler": {"work_limit": None, "reason": REGION_SCHEDULER_REASON},
@@ -78,8 +81,13 @@ def build_budgets(proposal: dict[str, Any]) -> dict[str, Any]:
         "headroom": dict(proposal["headroom"]),
         "presets": {
             preset: {
-                "stages": {name: {"max_work_per_tick": stage["proposed_max_work_per_tick"]}
-                           for name, stage in data["stages"].items()},
+                "stages": {
+                    name: {
+                        "max_work_per_tick": stage["proposed_max_work_per_tick"],
+                        "expect_inactive": stage["status"] == "inactive",
+                    }
+                    for name, stage in data["stages"].items()
+                },
                 "total": {"max_work_per_tick": data["total"]["proposed_max_work_per_tick"]},
             }
             for preset, data in proposal["presets"].items()

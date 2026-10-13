@@ -7,7 +7,7 @@
     "collision_radius": null,
     "fixture_hash": null,
     "revision": null,
-    "seed": "1337",
+    "seed": 1337,
     "surface_radius": null,
     "ticks": 600
   },

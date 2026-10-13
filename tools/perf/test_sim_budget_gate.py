@@ -20,6 +20,7 @@ import sim_budget_io
 
 PRESETS = capture.PRESETS
 HASH = "0123456789abcdef"
+FIXTURE_HASH = HASH * 4
 ZERO_HASH = "0" * 64
 DURATION = {"p50": 0.5, "p95": 0.95, "p99": 0.99, "maximum": 1.0}
 
@@ -60,7 +61,7 @@ def write_capture(directory: Path, ticks: int = 4, work_scale: int = 1,
         runs.append({"preset": preset, "artifact": name, "command": ["synthetic"]})
     manifest = {
         "schema": "luminumbra.sim_budget_capture.v1", "revision": "a" * 40,
-        "source_dirty": False, "binary_sha256": ZERO_HASH, "fixture_hash": HASH,
+        "source_dirty": False, "binary_sha256": ZERO_HASH, "fixture_hash": FIXTURE_HASH,
         "seed": "1337", "ticks": ticks, "surface_radius": 1, "collision_radius": 1,
         "runs": runs,
     }
@@ -98,6 +99,103 @@ class SimBudgetGateTests(unittest.TestCase):
     def capture_dir(self, name: str, **kwargs: Any) -> Path:
         return write_capture(self.root / name, **kwargs)
 
+    def assert_workload_acceptance(self, directory: Path, reference: Path, budgets: Path,
+                                   key: str, accepted: bool) -> None:
+        try:
+            sim_budget_io.load_capture(directory)
+        except ValueError as exc:
+            self.assertFalse(accepted, str(exc))
+            self.assertIn(key, str(exc))
+            loader_accepted = False
+        else:
+            loader_accepted = True
+        outcomes = {"loader": loader_accepted}
+        for module, argv in (
+                (propose_sim_budgets, [str(directory)]),
+                (check_sim_budgets, [str(directory), str(budgets), "--require-complete"]),
+                (sim_budget_compare, [str(reference), str(directory)])):
+            code, out, err = run_tool(module, argv)
+            self.assertEqual(code, 0 if accepted else 2, err)
+            if not accepted:
+                self.assertEqual(out, "")
+                self.assertIn(key, err)
+            outcomes[module.__name__] = code == 0
+        self.assertEqual(outcomes, dict.fromkeys(outcomes, accepted))
+
+    def test_seed_and_ticks_syntax_is_consistent_across_tools(self) -> None:
+        # Match artifact seed spelling too: rejection must come from syntax validation.
+        for key in ("seed", "ticks"):
+            reference = self.capture_dir(f"syntax-reference-{key}", ticks=1337,
+                                         presets=("default",))
+            budgets = self.root / f"syntax-budgets-{key}.json"
+            emit_budgets(reference, budgets)
+            for index, value in enumerate(("1_337", "١٣٣٧", " 1337", "+1337", "1337",
+                                           "1337 ", "1337\n", "-1337", "", "1337.0",
+                                           "01337", 1337)):
+                with self.subTest(key=key, value=value):
+                    directory = self.capture_dir(f"syntax-{key}-{index}", ticks=1337,
+                                                 presets=("default",), overrides={key: value})
+                    if key == "seed":
+                        artifact_path = directory / "default.json"
+                        data = sim_budget_io.read_json(artifact_path)
+                        data["seed"] = value
+                        artifact_path.write_text(json.dumps(data), encoding="utf-8")
+                    self.assert_workload_acceptance(directory, reference, budgets, key,
+                                                    value in ("1337", "01337", 1337))
+
+    def test_invalid_seed_and_ticks_values_are_consistent_across_tools(self) -> None:
+        reference = self.capture_dir("range-reference", presets=("default",))
+        budgets = self.root / "range-budgets.json"
+        emit_budgets(reference, budgets)
+        for key in ("seed", "ticks"):
+            values = (True, False, None, 1337.0, -1, 2**64, str(2**64))
+            if key == "ticks":
+                values += (0, "0")
+            for index, value in enumerate(values):
+                with self.subTest(key=key, value=value):
+                    directory = self.capture_dir(f"range-{key}-{index}", presets=("default",),
+                                                 overrides={key: value})
+                    self.assert_workload_acceptance(directory, reference, budgets, key, False)
+
+    def test_workload_integer_validator_accepts_uint64_boundaries(self) -> None:
+        for key in ("seed", "ticks"):
+            for value in (1, 1337, 2**64 - 1):
+                for form in (value, str(value)):
+                    with self.subTest(key=key, value=form):
+                        self.assertEqual(sim_budget_io.validate_workload_integer(form, key), value)
+        for value in (0, "0"):
+            self.assertEqual(sim_budget_io.validate_workload_integer(value, "seed"), 0)
+            with self.assertRaisesRegex(ValueError, "ticks"):
+                sim_budget_io.validate_workload_integer(value, "ticks")
+
+    def test_tool_helpers_use_shared_workload_validation(self) -> None:
+        original = sim_budget_io.load_capture(self.capture_dir("helper-reference"))
+        identity = propose_sim_budgets.build_proposal(original, 3, 2)["identity"]
+        for key in ("seed", "ticks"):
+            for value in ("1_337", "١٣٣٧", " 1337", "+1337", True, -1, 2**64):
+                with self.subTest(key=key, value=value):
+                    bad = {**original, "manifest": {**original["manifest"], key: value}}
+                    with self.assertRaisesRegex(ValueError, key):
+                        check_sim_budgets.identity_mismatch(identity, bad["manifest"])
+                    with self.assertRaisesRegex(ValueError, key):
+                        propose_sim_budgets.build_proposal(bad, 3, 2)
+                    for before, after in ((bad, original), (original, bad)):
+                        with self.assertRaisesRegex(ValueError, key):
+                            sim_budget_compare.build_comparison(before, after, set())
+
+    def test_budget_seed_and_ticks_out_of_range_are_rejected(self) -> None:
+        directory = self.capture_dir("budget-range-reference")
+        budgets = self.root / "budget-range.json"
+        emit_budgets(directory, budgets)
+        original = read_budgets(budgets)
+        for key in ("seed", "ticks"):
+            for value in (-1, 2**64) + ((0,) if key == "ticks" else ()):
+                with self.subTest(key=key, value=value):
+                    data = {**original, "identity": {**original["identity"], key: value}}
+                    budgets.write_text(json.dumps(data), encoding="utf-8")
+                    with self.assertRaisesRegex(ValueError, key):
+                        check_sim_budgets.load_budgets(budgets)
+
     def test_emitted_budgets_carry_radius_identity(self) -> None:
         directory = self.capture_dir("radius-identity", overrides={"surface_radius": 2,
                                                                    "collision_radius": 3})
@@ -106,6 +204,79 @@ class SimBudgetGateTests(unittest.TestCase):
         identity = read_budgets(budgets)["identity"]
         self.assertEqual(identity["surface_radius"], 2)
         self.assertEqual(identity["collision_radius"], 3)
+        self.assertEqual(identity["seed"], 1337)
+        self.assertIs(type(identity["seed"]), int)
+
+    def test_null_or_omitted_seed_or_ticks_reports_unpinned_identity(self) -> None:
+        directory = self.capture_dir("unpinned-identity")
+        budgets = self.root / "unpinned-identity.json"
+        emit_budgets(directory, budgets)
+        original = read_budgets(budgets)
+        for key in ("seed", "ticks"):
+            for omitted in (False, True):
+                with self.subTest(key=key, omitted=omitted):
+                    data = json.loads(json.dumps(original))
+                    if omitted:
+                        del data["identity"][key]
+                    else:
+                        data["identity"][key] = None
+                    budgets.write_text(json.dumps(data), encoding="utf-8")
+                    for complete in (False, True):
+                        argv = [str(directory), str(budgets)]
+                        if complete:
+                            argv.append("--require-complete")
+                        code, out, err = run_tool(check_sim_budgets, argv)
+                        self.assertEqual(code, 3 if complete else 0, err)
+                        report = json.loads(out)
+                        self.assertEqual(report["identity"][key]["verdict"], "unpinned")
+                        self.assertEqual(report["summary"]["unpinned"], 1)
+
+    def test_mistyped_budget_seed_or_ticks_is_rejected(self) -> None:
+        directory = self.capture_dir("mistyped-identity")
+        budgets = self.root / "mistyped-identity.json"
+        emit_budgets(directory, budgets)
+        original = read_budgets(budgets)
+        for key in ("seed", "ticks"):
+            for value in (True, False, "1337", 1337.0):
+                with self.subTest(key=key, value=value):
+                    data = json.loads(json.dumps(original))
+                    data["identity"][key] = value
+                    budgets.write_text(json.dumps(data), encoding="utf-8")
+                    code, out, err = run_tool(check_sim_budgets, [str(directory), str(budgets)])
+                    self.assertEqual((code, out), (2, ""))
+                    self.assertIn(key, err)
+
+    def test_malformed_fixture_hash_in_capture_is_rejected_by_every_tool(self) -> None:
+        budgets = self.root / "malformed-fixture.json"
+        emit_budgets(self.capture_dir("malformed-fixture-base"), budgets)
+        for index, value in enumerate(("A" * 64, "a" * 63, "g" * 64)):
+            with self.subTest(value=value):
+                directory = self.capture_dir(f"malformed-fixture-{index}",
+                                             overrides={"fixture_hash": value})
+                with self.assertRaisesRegex(ValueError, "fixture_hash"):
+                    sim_budget_io.load_capture(directory)
+                for module, argv in (
+                        (propose_sim_budgets, [str(directory)]),
+                        (check_sim_budgets, [str(directory), str(budgets)]),
+                        (sim_budget_compare, [str(directory), str(directory)])):
+                    code, out, err = run_tool(module, argv)
+                    self.assertEqual((code, out), (2, ""))
+                    self.assertIn("fixture_hash", err)
+
+    def test_malformed_fixture_hash_in_budget_is_rejected(self) -> None:
+        directory = self.capture_dir("malformed-budget-fixture")
+        budgets = self.root / "malformed-budget-fixture.json"
+        emit_budgets(directory, budgets)
+        data = read_budgets(budgets)
+        for value in ("A" * 64, "a" * 63, "g" * 64, "", 5, True):
+            with self.subTest(value=value):
+                data["identity"]["fixture_hash"] = value
+                budgets.write_text(json.dumps(data), encoding="utf-8")
+                with self.assertRaisesRegex(ValueError, "fixture_hash"):
+                    check_sim_budgets.load_budgets(budgets)
+                code, out, err = run_tool(check_sim_budgets, [str(directory), str(budgets)])
+                self.assertEqual((code, out), (2, ""))
+                self.assertIn("fixture_hash", err)
 
     def test_surface_or_collision_radius_mismatch_refuses_with_exit_two(self) -> None:
         budgets = self.root / "radius-base-budgets.json"
@@ -270,7 +441,47 @@ class SimBudgetGateTests(unittest.TestCase):
         self.assertEqual(report["schema"], "luminumbra.sim_budget_check.v1")
         self.assertEqual(report["summary"]["fail"], 0)
         self.assertEqual(report["summary"]["inactive"], len(PRESETS))
+        self.assertEqual(report["summary"]["unexpected_inactive"], 0)
         self.assertEqual(report["presets"]["default"]["stages"]["wind_weather"]["verdict"], "inactive")
+
+    def test_inactive_stage_requires_explicit_expectation_only_with_require_complete(self) -> None:
+        directory = self.capture_dir("inactive")
+        budgets = self.root / "inactive.json"
+        emit_budgets(directory, budgets)
+        data = read_budgets(budgets)
+        stage = data["presets"]["default"]["stages"]["wind_weather"]
+        for expected in (None, False, True):
+            with self.subTest(expected=expected):
+                if expected is None:
+                    del stage["expect_inactive"]
+                else:
+                    stage["expect_inactive"] = expected
+                budgets.write_text(json.dumps(data), encoding="utf-8")
+                for complete in (False, True):
+                    argv = [str(directory), str(budgets)]
+                    if complete:
+                        argv.append("--require-complete")
+                    code, out, err = run_tool(check_sim_budgets, argv)
+                    self.assertEqual(code, 3 if complete and not expected else 0, err)
+                    report = json.loads(out)
+                    self.assertEqual(report["summary"]["unexpected_inactive"],
+                                     0 if expected else 1)
+                    row = report["presets"]["default"]["stages"]["wind_weather"]
+                    self.assertEqual(row["verdict"], "inactive")
+                    self.assertEqual(row["expect_inactive"], bool(expected))
+
+    def test_mistyped_expect_inactive_is_rejected(self) -> None:
+        directory = self.capture_dir("mistyped-inactive")
+        budgets = self.root / "mistyped-inactive.json"
+        emit_budgets(directory, budgets)
+        data = read_budgets(budgets)
+        for value in (None, "true", 0, 1, 1.0):
+            with self.subTest(value=value):
+                data["presets"]["default"]["stages"]["wind_weather"]["expect_inactive"] = value
+                budgets.write_text(json.dumps(data), encoding="utf-8")
+                code, out, err = run_tool(check_sim_budgets, [str(directory), str(budgets)])
+                self.assertEqual((code, out), (2, ""))
+                self.assertIn("expect_inactive", err)
 
     def test_doubled_work_fails_even_though_durations_are_unchanged(self) -> None:
         budgets = self.root / "base-budgets.json"
@@ -296,17 +507,39 @@ class SimBudgetGateTests(unittest.TestCase):
                                                   "--require-complete"])
         self.assertEqual(code, 3)
 
+    def test_pinned_limit_failure_takes_precedence_over_incomplete_identity(self) -> None:
+        budgets = self.root / "incomplete-failure.json"
+        emit_budgets(self.capture_dir("incomplete-failure-base"), budgets)
+        data = read_budgets(budgets)
+        data["identity"]["seed"] = None
+        budgets.write_text(json.dumps(data), encoding="utf-8")
+        directory = self.capture_dir("incomplete-failure-doubled", work_scale=2)
+        for complete in (False, True):
+            with self.subTest(complete=complete):
+                argv = [str(directory), str(budgets)]
+                if complete:
+                    argv.append("--require-complete")
+                code, out, err = run_tool(check_sim_budgets, argv)
+                self.assertEqual(code, 1, err)
+                report = json.loads(out)
+                self.assertGreater(report["summary"]["fail"], 0)
+                self.assertEqual(report["identity"]["seed"]["verdict"], "unpinned")
+
     def test_identity_mismatch_refuses_with_exit_two(self) -> None:
         directory = self.capture_dir("identity")
         budgets = self.root / "identity.json"
         emit_budgets(directory, budgets)
         data = read_budgets(budgets)
-        data["identity"]["ticks"] = 600
-        budgets.write_text(json.dumps(data), encoding="utf-8")
-        code, out, err = run_tool(check_sim_budgets, [str(directory), str(budgets)])
-        self.assertEqual(code, 2)
-        self.assertEqual(out, "")
-        self.assertIn("different workload", err)
+        for key in ("seed", "ticks"):
+            with self.subTest(key=key):
+                mismatched = json.loads(json.dumps(data))
+                mismatched["identity"][key] = 600
+                budgets.write_text(json.dumps(mismatched), encoding="utf-8")
+                code, out, err = run_tool(check_sim_budgets, [str(directory), str(budgets)])
+                self.assertEqual(code, 2)
+                self.assertEqual(out, "")
+                self.assertIn("different workload", err)
+                self.assertIn(key, err)
 
     def test_stage_missing_from_budgets_is_unbudgeted_and_extra_is_missing(self) -> None:
         directory = self.capture_dir("partial")
@@ -326,9 +559,9 @@ class SimBudgetGateTests(unittest.TestCase):
         self.assertEqual(code, 3)
 
     def test_committed_baseline_is_structurally_unpinned(self) -> None:
-        data = read_budgets(capture_baseline())
+        data = check_sim_budgets.load_budgets(capture_baseline())
         self.assertEqual(data["schema"], "luminumbra.sim_budgets.v1")
-        self.assertEqual(data["identity"]["seed"], "1337")
+        self.assertEqual(data["identity"]["seed"], 1337)
         self.assertEqual(data["identity"]["ticks"], 600)
         for key in ("fixture_hash", "revision", "surface_radius", "collision_radius"):
             self.assertIsNone(data["identity"][key], key)

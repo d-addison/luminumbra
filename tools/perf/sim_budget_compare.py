@@ -26,7 +26,11 @@ def p99_ratio(before: float | None, after: float | None) -> float | None:
 def build_comparison(before: dict[str, Any], after: dict[str, Any],
                      expected: set[str]) -> tuple[dict[str, Any], int]:
     for key in WORKLOAD_KEYS:
-        if before["manifest"].get(key) != after["manifest"].get(key):
+        old_value, new_value = before["manifest"].get(key), after["manifest"].get(key)
+        if key in ("seed", "ticks"):
+            old_value = sim_budget_io.validate_workload_integer(old_value, key)
+            new_value = sim_budget_io.validate_workload_integer(new_value, key)
+        if old_value != new_value:
             raise ValueError(f"captures differ in {key}")
     if sorted(before["presets"]) != sorted(after["presets"]):
         raise ValueError("captures have different preset lists")

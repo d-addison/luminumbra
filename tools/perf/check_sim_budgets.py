@@ -31,6 +31,16 @@ def load_budgets(path: Path) -> dict[str, Any]:
         raise ValueError("budgets file has a missing or unsupported schema")
     if not isinstance(data.get("identity"), dict):
         raise ValueError("budgets file lacks identity")
+    for key in ("seed", "ticks"):
+        value = data["identity"].get(key)
+        if value is not None and type(value) is not int:
+            raise ValueError(f"budgets identity {key} must be null or an integer")
+        if value is not None:
+            sim_budget_io.validate_workload_integer(value, key)
+    fixture = data["identity"].get("fixture_hash")
+    if fixture is not None and (
+            not isinstance(fixture, str) or sim_budget_io.SHA256_HEX.fullmatch(fixture) is None):
+        raise ValueError("budgets identity fixture_hash must be null or 64 lowercase hex characters")
     presets = data.get("presets")
     if not isinstance(presets, dict):
         raise ValueError("budgets file lacks presets")
@@ -40,14 +50,23 @@ def load_budgets(path: Path) -> dict[str, Any]:
             raise ValueError(f"malformed budget entry: {preset}")
         for name, stage in entry["stages"].items():
             check_limit(stage, f"{preset}/{name}")
+            if type(stage.get("expect_inactive", False)) is not bool:
+                raise ValueError(f"budget expect_inactive must be a boolean: {preset}/{name}")
         check_limit(entry["total"], f"{preset}/total")
     return data
 
 
 def identity_mismatch(identity: dict[str, Any], manifest: dict[str, Any]) -> str | None:
+    workload = {key: sim_budget_io.validate_workload_integer(manifest.get(key), key)
+                for key in ("seed", "ticks")}
     for key in ("seed", "ticks", "fixture_hash", "surface_radius", "collision_radius"):
         expected = identity.get(key)
-        if expected is not None and manifest.get(key) != expected:
+        if expected is None:
+            continue
+        observed = workload[key] if key in workload else manifest.get(key)
+        if key in workload:
+            expected = sim_budget_io.validate_workload_integer(expected, key)
+        if observed != expected:
             return f"budgets {key} {expected!r} differs from capture {manifest.get(key)!r}"
     return None
 
@@ -64,6 +83,13 @@ def build_report(capture: dict[str, Any], budgets: dict[str, Any],
     budgeted = budgets["presets"]
     names = list(captured) + [preset for preset in budgeted if preset not in captured]
     counts = dict.fromkeys(VERDICTS, 0)
+    counts["unexpected_inactive"] = 0
+    identity = {}
+    for key in ("seed", "ticks"):
+        value = budgets["identity"].get(key)
+        verdict = "unpinned" if value is None else "pass"
+        identity[key] = {"verdict": verdict, "value": value}
+        counts[verdict] += 1
     presets: dict[str, Any] = {}
     for preset in names:
         observed_stages = captured.get(preset, {"stages": {}})["stages"]
@@ -73,13 +99,17 @@ def build_report(capture: dict[str, Any], budgets: dict[str, Any],
             entry = None if budget is None else budget["stages"].get(name)
             limit = None if entry is None else entry["max_work_per_tick"]
             observed = sim_budget_io.stage_max(stage)
+            expect_inactive = entry is not None and entry.get("expect_inactive", False)
             if stage["samples"] == 0:
                 verdict = "inactive"
+                if not expect_inactive:
+                    counts["unexpected_inactive"] += 1
             elif entry is None:
                 verdict = "unbudgeted"
             else:
                 verdict = judge(observed, limit)
-            stages[name] = {"verdict": verdict, "observed_max": observed, "limit": limit}
+            stages[name] = {"verdict": verdict, "observed_max": observed, "limit": limit,
+                            "expect_inactive": expect_inactive}
             counts[verdict] += 1
         missing = [] if budget is None else sorted(
             name for name in budget["stages"] if name not in observed_stages)
@@ -98,11 +128,13 @@ def build_report(capture: dict[str, Any], budgets: dict[str, Any],
         presets[preset] = {"stages": stages, "total": total, "missing": missing}
     report = {
         "schema": CHECK_SCHEMA,
+        "identity": identity,
         "presets": presets,
         "summary": counts,
         "durations": "advisory only, never enforced",
     }
-    incomplete = counts["unpinned"] + counts["unbudgeted"] + counts["missing"] > 0
+    incomplete = (counts["unpinned"] + counts["unbudgeted"] + counts["missing"]
+                  + counts["unexpected_inactive"] > 0)
     if counts["fail"]:
         return report, 1
     if require_complete and incomplete:

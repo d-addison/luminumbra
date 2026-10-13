@@ -373,7 +373,7 @@ jobs:
             --output build/water-smoke-comparison.json
       - name: Capture simulation budget evidence
         timeout-minutes: 20
-        # switch to --require-complete once baselines are pinned
+        # limits are pinned by AC2p from the first devel push's sim-budget-evidence artifact; then this step switches to --require-complete
         run: |
           python3 head/tools/perf/capture_sim_budget.py \
             --binary build/head/bin/luminumbra_server_app \

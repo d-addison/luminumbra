@@ -17,6 +17,21 @@ MANIFEST_KEYS = (
     "seed", "ticks", "surface_radius", "collision_radius",
 )
 SHA256_HEX = re.compile(r"[0-9a-f]{64}")
+ASCII_DECIMAL = re.compile(r"[0-9]+")
+
+
+def validate_workload_integer(value: Any, key: str) -> int:
+    """Parse seed/ticks as ASCII decimal or a non-bool integer in uint64 range."""
+    if isinstance(value, str) and ASCII_DECIMAL.fullmatch(value) is not None:
+        parsed = int(value)
+    elif type(value) is int:
+        parsed = value
+    else:
+        raise ValueError(f"{key} must be ASCII decimal digits or an integer")
+    minimum = 1 if key == "ticks" else 0
+    if not minimum <= parsed < 2**64:
+        raise ValueError(f"{key} must be in range [{minimum}, {2**64 - 1}]")
+    return parsed
 
 
 def read_json(path: Path) -> Any:
@@ -55,7 +70,7 @@ def validate_manifest(manifest: dict[str, Any]) -> None:
     if not isinstance(digest, str) or SHA256_HEX.fullmatch(digest) is None:
         raise ValueError("capture.json has an invalid binary_sha256")
     fixture = manifest["fixture_hash"]
-    if not isinstance(fixture, str) or not fixture:
+    if not isinstance(fixture, str) or SHA256_HEX.fullmatch(fixture) is None:
         raise ValueError("capture.json has an invalid fixture_hash")
     for key in ("surface_radius", "collision_radius"):
         value = manifest[key]
@@ -70,9 +85,8 @@ def load_capture(directory: Path) -> dict[str, Any]:
     absent = [key for key in MANIFEST_KEYS if key not in manifest]
     if absent:
         raise ValueError(f"capture.json lacks {', '.join(absent)}")
-    ticks = manifest["ticks"]
-    if type(ticks) is not int or ticks <= 0 or not isinstance(manifest["seed"], str):
-        raise ValueError("capture.json has an invalid seed or tick count")
+    validate_workload_integer(manifest["seed"], "seed")
+    ticks = validate_workload_integer(manifest["ticks"], "ticks")
     validate_manifest(manifest)
     runs = manifest.get("runs")
     if not isinstance(runs, list) or not runs:
