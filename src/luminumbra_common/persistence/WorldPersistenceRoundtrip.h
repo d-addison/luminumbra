@@ -87,6 +87,7 @@ bool ValidateWorldStreamingChunkFormatJson(const std::string& chunk_json,
 std::string ComputeWorldStreamingStateHash(const WorldStreamingState& state);
 
 // Active-region freeze identity: voxel/material and water solver contents only.
+// Caller filters incomplete live/parked inputs; durable edited records allow every lifecycle.
 // Lifecycle, collider and render bookkeeping are excluded. Legacy hashes and
 // persistence continue to use their existing projections.
 std::string ComputeRegionContentHash(const WorldStreamingState& state);

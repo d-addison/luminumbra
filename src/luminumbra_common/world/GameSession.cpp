@@ -1358,8 +1358,7 @@ void GameSession::RunRegionScheduler(std::uint64_t current_tick) {
                         for (const auto& entry : m_regionWork)
                             owned_regions->insert(entry.key);
                         for (const auto& chunk : m_worldSystem->snapshot_streamed_chunks()) {
-                            if (!chunk ||
-                                chunk->sdf_provenance() != ChunkSdfProvenance::LoadedOrEdited)
+                            if (!chunk)
                                 continue;
                             int rx = 0, rz = 0;
                             Persistence::WorldSaveService::region_coords_for_chunk(
