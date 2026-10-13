@@ -138,12 +138,12 @@ nlohmann::json FarWorldDiagnosticJson(const FarWorldDiagnosticSnapshot& s) {
             {"content_identity", s.content_identity},
             {"bake_generation", s.bake_generation},
             {"far_plane_m", s.far_plane},
-            {"requested_cave_policy", s.requested_cave_policy
-                                          ? nlohmann::json(static_cast<int>(*s.requested_cave_policy))
-                                          : nlohmann::json(nullptr)},
-            {"bound_cave_policy", s.bound_cave_policy
-                                      ? nlohmann::json(static_cast<int>(*s.bound_cave_policy))
-                                      : nlohmann::json(nullptr)},
+            {"requested_cave_policy",
+             s.requested_cave_policy ? nlohmann::json(static_cast<int>(*s.requested_cave_policy))
+                                     : nlohmann::json(nullptr)},
+            {"bound_cave_policy",
+             s.bound_cave_policy ? nlohmann::json(static_cast<int>(*s.bound_cave_policy))
+                                 : nlohmann::json(nullptr)},
             {"numeric_policy", static_cast<int>(s.numeric)},
             {"captured", s.captured},
             {"complete", s.complete},

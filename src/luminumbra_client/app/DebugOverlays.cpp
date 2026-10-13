@@ -787,19 +787,18 @@ void DrawGpuProfilerOverlay(ClientAppContext& app,
                         FarWorldModeName(fw.selection.requested),
                         FarWorldModeName(fw.selection.effective),
                         FarWorldRefusalName(fw.selection.refusal));
-            ImGui::Text(
-                "epoch %llu frame %llu plane %.0f numeric %d; advanced %d submitted %d",
-                static_cast<unsigned long long>(fw.world_epoch),
-                static_cast<unsigned long long>(fw.frame),
-                static_cast<double>(fw.far_plane),
-                static_cast<int>(fw.numeric),
-                fw.advanced,
-                fw.submission_occurred);
+            ImGui::Text("epoch %llu frame %llu plane %.0f numeric %d; advanced %d submitted %d",
+                        static_cast<unsigned long long>(fw.world_epoch),
+                        static_cast<unsigned long long>(fw.frame),
+                        static_cast<double>(fw.far_plane),
+                        static_cast<int>(fw.numeric),
+                        fw.advanced,
+                        fw.submission_occurred);
             const auto cave_policy_name = [](std::optional<Luminumbra::World::FarCaveMode> policy) {
                 if (!policy)
                     return "none";
                 return *policy == Luminumbra::World::FarCaveMode::BoxFiltered ? "BoxFiltered"
-                                                                           : "BandLimited";
+                                                                              : "BandLimited";
             };
             ImGui::Text("cave policy: requested %s / bound %s",
                         cave_policy_name(fw.requested_cave_policy),

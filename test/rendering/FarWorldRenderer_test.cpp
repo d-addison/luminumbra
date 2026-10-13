@@ -593,7 +593,12 @@ TEST(FarWorldRenderer, DiagnosticRecordsRequestedBoxFilteredWithoutFixture) {
     renderer.SetRequestedCavePolicy(std::nullopt);
     EXPECT_EQ(snapshot.requested_cave_policy, FarCaveMode::BoxFiltered);
     renderer.CaptureDiagnostic(renderer.Selection(FarWorldPurpose::World),
-                               2, {0, 0, 0}, kLegacyFarPlaneMeters, false, 0, 0);
+                               2,
+                               {0, 0, 0},
+                               kLegacyFarPlaneMeters,
+                               false,
+                               0,
+                               0);
     EXPECT_TRUE(FarWorldDiagnosticJson(renderer.Diagnostic())["requested_cave_policy"].is_null());
     EXPECT_TRUE(FarWorldDiagnosticJson(renderer.Diagnostic())["bound_cave_policy"].is_null());
 }
@@ -604,7 +609,9 @@ TEST(FarWorldRenderer, LegacyDiagnosticPreservesDistinctRequestedAndBoundCavePol
     owner.renderer.SetRequestedCavePolicy(FarCaveMode::BoxFiltered);
     ASSERT_EQ(owner.renderer.BindFixture(owner.jobs,
                                          std::make_shared<const Fixture>(owner.state),
-                                         1, 1, FarWorldDevelopmentLimits()),
+                                         1,
+                                         1,
+                                         FarWorldDevelopmentLimits()),
               FarWorldRefusal::None);
     const auto selection = owner.renderer.Selection(FarWorldPurpose::World);
     EXPECT_EQ(selection.effective, FarWorldMode::Legacy);
@@ -642,8 +649,8 @@ TEST(FarWorldRenderer, MismatchedImmutableCaveBindingRefusesWithoutRelabeling) {
         EXPECT_EQ(owner.renderer.Residency(), nullptr);
         EXPECT_EQ(owner.renderer.world_epoch(), 0u);
         EXPECT_EQ(owner.state.live, 0u);
-        owner.renderer.CaptureDiagnostic(selected, 1, {0, 0, 0},
-                                         kLegacyFarPlaneMeters, false, 0, 0);
+        owner.renderer.CaptureDiagnostic(
+            selected, 1, {0, 0, 0}, kLegacyFarPlaneMeters, false, 0, 0);
         EXPECT_EQ(owner.renderer.Diagnostic().requested_cave_policy, requested);
         EXPECT_FALSE(owner.renderer.Diagnostic().bound_cave_policy);
         const auto json = FarWorldDiagnosticJson(owner.renderer.Diagnostic());
