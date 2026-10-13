@@ -7,9 +7,12 @@
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <iterator>
 #include <limits>
+#include <string>
+#include <system_error>
 #include <type_traits>
 
 bool process_morph_gltf_checked(const std::string&, const std::string&);
@@ -110,10 +113,33 @@ class MorphAssetTest : public ::testing::Test {
 protected:
     fs::path directory;
     void SetUp() override {
-        directory = fs::temp_directory_path() /
-                    ("luminumbra_morph_" +
-                     std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
-        ASSERT_TRUE(fs::create_directory(directory));
+        std::string test_name = ::testing::UnitTest::GetInstance()->current_test_info()->name();
+        for (char& character : test_name) {
+            if (!((character >= 'A' && character <= 'Z') ||
+                  (character >= 'a' && character <= 'z') ||
+                  (character >= '0' && character <= '9') || character == '_')) {
+                character = '_';
+            }
+        }
+        const auto prefix =
+            "luminumbra_morph_" + test_name + "_" +
+            std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+        const auto temporary_root = fs::temp_directory_path();
+        constexpr int max_attempts = 64;
+        std::error_code error;
+        bool created = false;
+        for (int attempt = 0; attempt < max_attempts; ++attempt) {
+            const auto candidate = temporary_root / (prefix + "_" + std::to_string(attempt));
+            if (fs::create_directory(candidate, error)) {
+                directory = candidate;
+                created = true;
+                break;
+            }
+            if (!error) {
+                error = std::make_error_code(std::errc::file_exists);
+            }
+        }
+        ASSERT_TRUE(created) << "Failed to create a fresh temporary directory: " << error.message();
     }
     void TearDown() override {
         std::error_code error;
