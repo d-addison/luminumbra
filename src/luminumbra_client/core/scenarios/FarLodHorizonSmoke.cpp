@@ -21,6 +21,7 @@
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 #include "luminumbra_common/systems/WeatherSystem.h"
 #include "luminumbra_common/systems/WindFieldSystem.h"
+#include "luminumbra_common/world/FarWantedSet.h"
 #include "luminumbra_common/world/GameSession.h"
 #include "luminumbra_common/world/WorldStreamingState.h"
 #include "rendering/Camera.h"
@@ -612,6 +613,8 @@ void WriteFarLodHorizonAnalysis(const std::filesystem::path& artifact_dir,
     std::size_t final_resident = 0;
     std::size_t final_draws = 0;
     std::size_t final_indices = 0;
+    double final_camera_x = 0.0;
+    double final_camera_z = 0.0;
     //  true once the most-converged (min-missing) station has been recorded.
     bool had_converged_capture = false;
     double max_sky_ratio = 0.0;
@@ -691,6 +694,8 @@ void WriteFarLodHorizonAnalysis(const std::filesystem::path& artifact_dir,
             final_resident = capture.regions_resident;
             final_draws = capture.region_draws;
             final_indices = capture.far_indices_drawn;
+            final_camera_x = capture.camera_world_x;
+            final_camera_z = capture.camera_world_z;
         }
 
         station_rows.push_back({
@@ -908,6 +913,65 @@ void WriteFarLodHorizonAnalysis(const std::filesystem::path& artifact_dir,
     std::filesystem::create_directories(artifact_dir, ec);
     std::ofstream output(artifact_dir / "farlod-horizon-analysis.json");
     output << std::setw(2) << artifact << '\n';
+
+    // v2 oracle for the independent gate check. The legacy scheduler cannot produce
+    // ladder residency, so mode stays "legacy" and the ladder residency lists are empty.
+    if (had_converged_capture) {
+        std::vector<Luminumbra::World::FarTileKey> ladder_tiles;
+        const Luminumbra::World::FarWantedError wanted_error =
+            Luminumbra::World::ComputeFarWantedSet(final_camera_x, final_camera_z, ladder_tiles);
+        const char* wanted_error_name = "None";
+        switch (wanted_error) {
+            case Luminumbra::World::FarWantedError::None:
+                break;
+            case Luminumbra::World::FarWantedError::NonFiniteCamera:
+                wanted_error_name = "NonFiniteCamera";
+                break;
+            case Luminumbra::World::FarWantedError::CameraOutOfRange:
+                wanted_error_name = "CameraOutOfRange";
+                break;
+        }
+        std::array<std::size_t, Luminumbra::World::kFarTierCount> tier_counts{};
+        nlohmann::json expected_tiles = nlohmann::json::array();
+        for (const Luminumbra::World::FarTileKey& tile : ladder_tiles) {
+            ++tier_counts[static_cast<std::size_t>(tile.tier - 1)];
+            expected_tiles.push_back({static_cast<int>(tile.tier), tile.tx, tile.tz});
+        }
+        nlohmann::json expected_by_tier = nlohmann::json::array();
+        for (const std::size_t count : tier_counts) {
+            expected_by_tier.push_back(count);
+        }
+
+        const nlohmann::json oracle = {
+            {"schema", "luminumbra.farlod_horizon.v2"},
+            {"world_preset", world_preset},
+            {"mode", "legacy"},
+            {"camera",
+             {
+                 {"world_x", final_camera_x},
+                 {"world_z", final_camera_z},
+             }},
+            {"legacy",
+             {
+                 {"region_size_m", 512},
+                 {"f1_outer_range_m", 768},
+                 {"f2_outer_range_m", 3000},
+                 {"regions_wanted", final_wanted},
+                 {"regions_resident", final_resident},
+                 {"regions_missing", final_missing},
+             }},
+            {"ladder",
+             {
+                 {"wanted_error", wanted_error_name},
+                 {"expected_by_tier", expected_by_tier},
+                 {"expected_tiles", expected_tiles},
+                 {"resident_tiles", nlohmann::json::array()},
+                 {"stale_tiles", 0},
+             }},
+        };
+        std::ofstream oracle_output(artifact_dir / "farlod-horizon-ladder-oracle.json");
+        oracle_output << std::setw(2) << oracle << '\n';
+    }
 }
 
 } // namespace Luminumbra::Client::ScenarioHarness

@@ -115,11 +115,15 @@ imply host migration, matchmaking or private Steam relay availability.
 ## Limits and acceptance still tracked
 
 - Current far rendering reaches approximately 3 km with a 3200 m camera far
-  plane; world generation itself has no fixed edge. Pristine far tiles are
+  plane; world generation itself has no fixed edge. Local full-SDF cave residency
+  is bounded (128 m horizontal/64 m vertical). Pristine far tiles are
   heightfields; bounded authoritative SDF overlays can carry resident edits, but
-  the far store is not attached to saves at runtime. The accepted v0.3 contract replaces this with a 16 km volumetric
-  ladder over an unbounded world; until those slices land and are verified, the
-  current limits stand.
+  the far store is not attached to saves at runtime. The five-tier table and
+  reversed-Z prerequisite are present; the accepted v0.3 contract's 16 km
+  volumetric ladder over an unbounded world, durable all-tier edit overlay and
+  measured budgets remain unfinished. Until those slices land and are verified,
+  the current limits stand. See the
+  [source-pinned implementation and acceptance map](distant-world-implementation-status.md).
 - With `sim.active_regions` disabled, the simulation clock retains its legacy
   load-time reset; the landed enabled clock resumes the persisted absolute tick.
   Creature/plant distance scheduling, durable field pages and wildlife, and dirty

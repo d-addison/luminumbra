@@ -248,6 +248,8 @@ bool ServerWorldRunner::Boot() {
     m_session->SetSimBudgetTelemetryEnabled(m_config.sim_budget);
     m_session->SetJobSystem(&m_jobSystem);
     m_session->SetRootPath(m_config.root_path);
+    if (m_config.region_scheduler)
+        m_session->SetRegionSchedulerConfig(*m_config.region_scheduler);
     // host==peer: the headless host must run the SAME water-sim resolution the
     // client derives from data/common/systems.json — sim.water_high_res is baked into
     // the hashed mm grids, so a mismatched host could never agree with its peers.
@@ -612,6 +614,12 @@ ServerTickReport ServerWorldRunner::RunFixedTicks(std::uint64_t tick_count) {
 
     const auto wall_start = std::chrono::steady_clock::now();
     while (report.ticks_executed < tick_count) {
+        if (const auto& region_fault = m_session->GetRegionSchedulerFault();
+            region_fault.has_value()) {
+            report.region_fault = true;
+            report.region_fault_message = region_fault.value().message;
+            break;
+        }
         LUMIN_PROFILE_ZONE_N("server_tick"); // no-op unless LUMINUMBRA_ENABLE_TRACY
         // One frame == one fixed tick: feeding the clock exactly fixed_dt
         // keeps the frame/tick mapping 1:1 and removes wall-clock timing from
@@ -642,6 +650,11 @@ ServerTickReport ServerWorldRunner::RunFixedTicks(std::uint64_t tick_count) {
         }
         report.ticks_executed += m_session->TickSimulation(fixed_dt);
         report.frames_executed += 1;
+        if (const auto& fault = m_session->GetRegionSchedulerFault()) {
+            report.region_fault = true;
+            report.region_fault_message = fault->message;
+            break;
+        }
         const std::uint64_t simulation_tick = m_session->ActiveRegionsEnabled()
                                                   ? m_session->GetSimulationTickCount()
                                                   : report.ticks_executed;
