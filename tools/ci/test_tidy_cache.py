@@ -353,7 +353,9 @@ class TidyCacheTests(unittest.TestCase):
         self.assertRan(self.run_cache(), 1)
         record = list(self.cache.rglob("*.json"))[0]
         stale = self.cache / "ff"
-        stale.mkdir()
+        # The real record shards by its key's first two hex digits, so it lands
+        # in "ff" one run in 256; the bucket may already exist.
+        stale.mkdir(exist_ok=True)
         (stale / ("f" * 64 + ".json")).write_text("{}", encoding="utf-8")
         cutoff = time.time() + 5
         os.utime(record, (cutoff + 10, cutoff + 10))
