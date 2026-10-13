@@ -304,6 +304,11 @@ void main()
         vec4 biasedClip = projection * vec4(depthPosition, 1.0);
         if (any(isnan(biasedClip)) || any(isinf(biasedClip)) || biasedClip.w <= 0.0) discard;
         float biasedDepth = biasedClip.z / biasedClip.w;
+        // Production float near-plane rounding: exactly nextafter(1.0f, 2.0f),
+        // matching ProjectFarWorldRayBias without widening any other boundary.
+        float nearDepthUpperBound = uintBitsToFloat(floatBitsToUint(1.0) + 1u);
+        if (biasedDepth > 1.0 && biasedDepth <= nearDepthUpperBound)
+            biasedDepth = 1.0;
         if (isnan(biasedDepth) || isinf(biasedDepth) || biasedDepth < 0.0 || biasedDepth > 1.0)
             discard;
         gl_FragDepth = biasedDepth;
