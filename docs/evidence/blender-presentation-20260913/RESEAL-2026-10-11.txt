@@ -1,0 +1,39 @@
+Re-seal note, 2026-10-11
+
+What changed
+  Five receipts recorded the machine-local build root of the isolated
+  campaign (a WSL UNC path and a WSL-style absolute path) in their "path"
+  fields. Every such prefix was replaced with the neutral placeholder
+  <build-root>; the remainder of each path (authoring-isolated/campaign-
+  20260913/...) is unchanged. The randomly named per-run temporary roots
+  (C:/Temp/luminumbra-viewport-checks-<32 hex>) in the two process receipts
+  were likewise replaced with <temp-root>. Standard tool install locations
+  (the Blender and MSYS2 Python executables) contain no user-specific data
+  and were left as recorded. No measurement, identity, source hash, case
+  result or timestamp was altered.
+
+Why
+  The repository owner directed the redaction of local filesystem paths from
+  published evidence on 2026-10-11. Because receipt.json and two other
+  receipts are pinned by SHA-256 in sibling files, those pins were recomputed
+  from the redacted files.
+
+Hashes (SHA-256 of the file bytes)
+  file                            old                                                              new
+  receipt.json                    45cfdc2a4bf6a65238a4a5f7d86c61ed8428b5c648b3e4f56921b58b9567ba14 9fefbb14e75e3a1c09f1f2cca1c02797ae81d70e4f55493e2ae797b7b09116f0
+  receipt-8822fda4.json           8cc5e31bf287eafbf9e2dff8338a0018a64c691b1e9d4fa66041ecf7e6c1ace2 779a63d0ae40b2dfb2096b8c7e49d4b757e4fd64ca763910934668643e7076db
+  client-8822fda4.json            90c60604343fd4aed984fcc21383bbf210e17033ff477b59ad9335cd642d0ae6 e9e420d179693491bc2df1edff08747ff30a8fb691cb41cb04702ea76da6a171
+  process-receipt.json            5487230ef6e03c81e9b463fe63bf8d66253520b145d63b871fc6c68a4482762a b9c08a3920f80c4e8ae1a0a2f4302551d752f38dd83239054eda58d2413cfdd3
+  process-receipt-8822fda4.json   d0b65db6830acea33b766a9b55de810a058c4e542a5b6c3975ff0af3fb27b9f9 e1318b2288ea654e9794189a3e9a51e5f15b852815707155487724976cf311ad
+  independent-review.json         5ab07fb75f7e7682883e386b4d955b74fe986f8a0df8170c8f2c2680f20a2ba2 1bb831a29f77951c7566159d8133d4d64020410fed901cd2fa8da4008fb80a28
+
+Pins updated
+  independent-review.json         receipt_sha256 -> new receipt.json hash
+  process-receipt.json            receipt_sha256 -> new receipt.json hash
+  process-receipt-8822fda4.json   receipt_sha256 (two entries) -> new client-8822fda4.json and receipt-8822fda4.json hashes
+
+Verification
+  The redacted files are the originals with only the path prefix replaced.
+  The original sha256 values above identify the pre-redaction bytes. Those
+  bytes are not published: the change landed as a single squashed commit, so
+  no pre-redaction receipt version is reachable from the repository.

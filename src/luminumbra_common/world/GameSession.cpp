@@ -1441,10 +1441,11 @@ void GameSession::RunRegionScheduler(std::uint64_t current_tick) {
                     return Persistence::WorldSaveService::region_simulation_digest(
                         directory,
                         key,
-                        Persistence::RegionDigestInputs{m_worldSystem->snapshot_streamed_chunks(),
-                                                        m_worldSystem->snapshot_parked_chunks(),
-                                                        m_worldSystem->durable_chunk_inventory(),
-                                                        m_groundObjects.region_bytes(key)});
+                        Persistence::RegionDigestInputs{
+                            .live = m_worldSystem->snapshot_streamed_chunks(),
+                            .parked = m_worldSystem->snapshot_parked_chunks(),
+                            .durable = m_worldSystem->durable_chunk_inventory(),
+                            .ground_object_bytes = m_groundObjects.region_bytes(key)});
                 },
                 // Later slices extend this probe with pages, creatures, plants and water debt.
                 [this, &owned_regions](RegionKey key) {
@@ -1460,8 +1461,7 @@ void GameSession::RunRegionScheduler(std::uint64_t current_tick) {
                             owned_regions->insert(RegionKey{rx, rz});
                         }
                         for (const auto& chunk : m_worldSystem->snapshot_authoritative_chunks()) {
-                            if (!chunk ||
-                                chunk->sdf_provenance() != ChunkSdfProvenance::LoadedOrEdited)
+                            if (!chunk)
                                 continue;
                             int rx = 0, rz = 0;
                             Persistence::WorldSaveService::region_coords_for_chunk(
@@ -1832,11 +1832,17 @@ std::string GameSession::ComputeChunkStateHash() {
             throw std::runtime_error("inconsistent snapshot: index missing");
         for (const auto key : keys) {
             const auto record = m_activeRegionLedger.records().find(key);
-            const auto digest = record != m_activeRegionLedger.records().end() &&
-                                        record->second.state == RegionState::Frozen
-                                    ? record->second.frozen_digest
-                                    : Persistence::WorldSaveService::region_simulation_digest(
-                                          directory, key, {live, parked, durable, {}});
+            const auto digest =
+                record != m_activeRegionLedger.records().end() &&
+                        record->second.state == RegionState::Frozen
+                    ? record->second.frozen_digest
+                    : Persistence::WorldSaveService::region_simulation_digest(
+                          directory,
+                          key,
+                          Persistence::RegionDigestInputs{.live = live,
+                                                          .parked = parked,
+                                                          .durable = durable,
+                                                          .ground_object_bytes = {}});
             projection += std::to_string(key.x) + "," + std::to_string(key.z) + ":" +
                           std::to_string(digest) + ";";
         }
