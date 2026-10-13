@@ -2911,21 +2911,27 @@ struct FrozenWaterSnapshot {
     std::vector<std::int32_t> depth, bed, flux;
 };
 
-void SeedRegionalWaterFixture(GameSession& session,
+struct RegionalWaterScenario {
+    // WaterSystem retains this map's address; destroy the session before the map.
+    std::unordered_map<ChunkID, std::shared_ptr<Chunk>> water_chunks;
+    GameSession session;
+};
+
+void SeedRegionalWaterFixture(RegionalWaterScenario& scenario,
                               const std::shared_ptr<Luminumbra::Chunk>& chunk,
                               RegionKey water_region,
                               RegionKey work_region,
                               const Luminumbra::Vec3& visit_position,
                               std::uint64_t empty_digest,
                               std::vector<std::int32_t>& generated_depth) {
-    const std::unordered_map<ChunkID, std::shared_ptr<Chunk>> water_chunks{
-        {chunk->get_id(), chunk}};
+    auto& session = scenario.session;
+    scenario.water_chunks.emplace(chunk->get_id(), chunk);
     const auto before_initialization = P::WorldSaveService::region_simulation_digest(
         {},
         water_region,
         P::RegionDigestInputs{
             .live = {chunk}, .parked = {}, .durable = {}, .ground_object_bytes = {}});
-    session.GetWaterSystem()->update(session.GetRegistry(), water_chunks);
+    session.GetWaterSystem()->update(session.GetRegistry(), scenario.water_chunks);
     ASSERT_TRUE(chunk->has_water_sim.load());
     ASSERT_EQ(chunk->water_depth_mm.size(), 64u);
     ASSERT_EQ(chunk->water_bed_mm.size(), 64u);
@@ -2957,7 +2963,7 @@ void SeedRegionalWaterFixture(GameSession& session,
     ASSERT_FALSE(chunk->has_water_authority());
 }
 
-void FreezeRegionalWaterFixture(GameSession& session,
+void FreezeRegionalWaterFixture(RegionalWaterScenario& scenario,
                                 const std::shared_ptr<Luminumbra::Chunk>& chunk,
                                 bool displace,
                                 RegionKey water_region,
@@ -2965,6 +2971,7 @@ void FreezeRegionalWaterFixture(GameSession& session,
                                 const Luminumbra::Vec3& displacement_position,
                                 const std::vector<std::int32_t>& generated_depth,
                                 const ActiveRegionRecord& initial_record) {
+    auto& session = scenario.session;
     const auto dt = session.GetSimulationClock().fixed_dt();
     if (displace) {
         session.GetWaterSystem()->apply_displacement(displacement_position, 4.0f);
@@ -3140,7 +3147,8 @@ TEST(GameSessionHeadlessWorldTest, DisplacementWaterPromotesBeforeFreezeAndSurvi
     // Run the same seeded resident fixture with and without a production water writer.
     for (const bool displace : {false, true}) {
         SCOPED_TRACE(displace);
-        GameSession session;
+        RegionalWaterScenario scenario;
+        auto& session = scenario.session;
         EnableSnapshotSession(session, root, jobs);
         session.SetRegionSchedulerConfig({0, 1, 1});
         ASSERT_TRUE(session.CreateWorld(
@@ -3153,7 +3161,7 @@ TEST(GameSessionHeadlessWorldTest, DisplacementWaterPromotesBeforeFreezeAndSurvi
         chunk->is_water_sleeping.store(true);
         ASSERT_TRUE(session.GetWorldSystem()->adopt_streamed_chunk(chunk));
         std::vector<std::int32_t> generated_depth;
-        ASSERT_NO_FATAL_FAILURE(SeedRegionalWaterFixture(session,
+        ASSERT_NO_FATAL_FAILURE(SeedRegionalWaterFixture(scenario,
                                                          chunk,
                                                          water_region,
                                                          work_region,
@@ -3161,7 +3169,7 @@ TEST(GameSessionHeadlessWorldTest, DisplacementWaterPromotesBeforeFreezeAndSurvi
                                                          empty_digest,
                                                          generated_depth));
         const auto initial_record = session.GetActiveRegionLedger().records().at(water_region);
-        ASSERT_NO_FATAL_FAILURE(FreezeRegionalWaterFixture(session,
+        ASSERT_NO_FATAL_FAILURE(FreezeRegionalWaterFixture(scenario,
                                                            chunk,
                                                            displace,
                                                            water_region,
