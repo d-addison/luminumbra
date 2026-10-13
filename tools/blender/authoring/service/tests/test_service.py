@@ -188,20 +188,51 @@ class Project(unittest.TestCase):
         atomic_json(self.project / "asset.json", self.asset)
         canary = triangle(1)
 
-        def compile_replaced(job_id, source, outputs, emit_lods, max_tris):
+        cleanup_outputs = service._cleanup_outputs
+        cleanup_outcome = {}
+        restoration_errors = []
+
+        def compile_over(job_id, source, outputs, emit_lods, max_tris):
+            (outputs / "asset.lmesh").write_bytes(triangle(65))
+
+        def cleanup_replaced(job_id, output_identity):
+            # Establish the budget refusal before attacking cleanup. A swap in
+            # _compile is rejected by the no-follow reader before count checks.
+            outputs = service.root / "jobs" / job_id / "outputs"
             target = outputs.parent if component == "job" else outputs
             backup = self.root / "owned-staging"
             target.rename(backup)
-            # Matching snapshots reproduce the reported postcompile attack.
             shutil.copytree(backup, external)
             external_outputs = external / "outputs" if component == "job" else external
-            (external_outputs / "asset.lmesh").write_bytes(triangle(65))
             (external_outputs / "asset.lod1.lmesh").write_bytes(canary)
             make_link(target, external)
-            self.addCleanup(target.rmdir if os.name == "nt" else target.unlink)
+            try:
+                cleanup_outcome["return"] = cleanup_outputs(job_id, output_identity)
+            except Exception as error:
+                cleanup_outcome["error"] = error
+                raise
+            finally:
+                # Restore owned ancestry before the failure receipt is saved;
+                # receipt publication must never follow the external link.
+                # Teardown errors must not fabricate a cleanup refusal.
+                try:
+                    if os.path.lexists(target):
+                        info = target.lstat()
+                        is_junction = bool(getattr(info, "st_file_attributes", 0) & 0x400)
+                        if target.is_symlink() or is_junction:
+                            (target.rmdir if os.name == "nt" else target.unlink)()
+                    backup.rename(target)
+                except Exception as error:
+                    restoration_errors.append(error)
 
-        with patch.object(service, "_compile", side_effect=compile_replaced):
+        with patch.object(service, "_compile", side_effect=compile_over), \
+                patch.object(service, "_cleanup_outputs", side_effect=cleanup_replaced) as cleanup:
             result = self.wait(service, service.submit("asset.json", 1))
+        cleanup.assert_called_once()
+        self.assertEqual(restoration_errors, [], "Staging ownership restoration failed")
+        self.assertNotIn("return", cleanup_outcome, "Real cleanup returned normally")
+        self.assertIsInstance(cleanup_outcome.get("error"), Refusal)
+        self.assertEqual(cleanup_outcome["error"].finding["rule_id"], "output.cleanup_refused")
         self.assertEqual(result["status"], "failed", result)
         self.assertEqual(result["findings"][0]["rule_id"], "output.budget_exceeded")
         self.assertEqual(result["cleanup_findings"][0]["rule_id"], "output.cleanup_refused")
@@ -230,6 +261,63 @@ class Project(unittest.TestCase):
     def test_budget_cleanup_refuses_outputs_symlink_and_preserves_outside_canary(self):
         self.require_directory_symlink()
         self.assert_cleanup_link_refusal("outputs", self.directory_symlink)
+
+    def test_cleanup_link_refusal_helper_rejects_link_removal_without_refusal(self):
+        self.require_directory_symlink()
+
+        def remove_link(service, job_id, output_identity):
+            outputs = service.root / "jobs" / job_id / "outputs"
+            (outputs.rmdir if os.name == "nt" else outputs.unlink)()
+
+        with patch.object(BuildService, "_cleanup_outputs", autospec=True,
+                          side_effect=remove_link) as cleanup:
+            with self.assertRaisesRegex(AssertionError, "Real cleanup returned normally"):
+                self.assert_cleanup_link_refusal("outputs", self.directory_symlink)
+        cleanup.assert_called_once()
+
+    def test_postcompile_staging_symlink_refuses_before_budget_cleanup(self):
+        self.require_directory_symlink()
+        service = self.open()
+        previous = self.success(service)
+        pointer = (service.root / "current.json").read_bytes()
+        generation = service.root / "generations" / previous["job_id"]
+        retained = {path.name: path.read_bytes() for path in generation.iterdir()}
+        self.asset["settings"] = {"max_tris": 64}
+        atomic_json(self.project / "asset.json", self.asset)
+
+        for component in ("job", "outputs"):
+            with self.subTest(component=component):
+                external = self.root / ("outside-postcompile-" + component)
+                before = {}
+
+                def compile_replaced(job_id, source, outputs, emit_lods, max_tris):
+                    target = outputs.parent if component == "job" else outputs
+                    backup = self.root / ("owned-postcompile-" + component)
+                    target.rename(backup)
+                    shutil.copytree(backup, external)
+                    external_outputs = external / "outputs" if component == "job" else external
+                    (external_outputs / "asset.lmesh").write_bytes(triangle(65))
+                    (external_outputs / "asset.lod1.lmesh").write_bytes(triangle(1))
+                    before.update({path.relative_to(external): path.read_bytes()
+                                   for path in external.rglob("*") if path.is_file()})
+                    self.directory_symlink(target, external)
+                    self.addCleanup(target.rmdir if os.name == "nt" else target.unlink)
+
+                with patch.object(service, "_compile", side_effect=compile_replaced), \
+                        patch.object(service, "_cleanup_outputs", wraps=service._cleanup_outputs) as cleanup:
+                    result = self.wait(service, service.submit("asset.json", 1))
+                self.assertEqual(result["status"], "failed", result)
+                self.assertEqual(result["findings"][0]["rule_id"], "file.invalid")
+                self.assertEqual(result["findings"][0]["message"], "Reparse path")
+                cleanup.assert_not_called()
+                self.assertNotIn("cleanup_findings", result)
+                self.assertEqual({path.relative_to(external): path.read_bytes()
+                                  for path in external.rglob("*") if path.is_file()}, before)
+                self.assertFalse((service.root / "generations" / result["job_id"]).exists())
+                if component == "outputs":
+                    self.assertEqual(read_json(service.root / "jobs" / result["job_id"] / "receipt.json"), result)
+                self.assertEqual((service.root / "current.json").read_bytes(), pointer)
+                self.assertEqual({path.name: path.read_bytes() for path in generation.iterdir()}, retained)
 
     def test_budget_cleanup_junction_or_reparse_attribute_preserves_outside_canary(self):
         # Exercise a real junction whenever this host can create one. All other
