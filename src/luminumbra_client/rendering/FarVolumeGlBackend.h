@@ -35,6 +35,7 @@ public:
                       std::int32_t stride,
                       std::size_t offset) noexcept override;
     void EnableAttribute(FarVolumeVertexAttribute attribute) noexcept override;
+    bool DrawIndexed(std::int32_t index_count) noexcept override;
 
 private:
     GLFWwindow* const context_;

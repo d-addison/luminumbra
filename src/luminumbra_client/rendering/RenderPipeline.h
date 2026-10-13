@@ -6,6 +6,7 @@
 #include <optional>
 
 #include "../../include/luminumbra/core/Types.h"
+#include "FarWorldRenderer.h"
 #include "FrameBufferObject.h" // FrameBufferObject (extracted)
 #include "GBuffer.h"           // GBuffer (extracted)
 #include "Mesh.h"
@@ -791,6 +792,18 @@ public:
     // Drains in-flight far tile builds (they sample the world system). MUST
     // run before the currently bound world is destroyed/recreated.
     void prepare_world_swap();
+    // Internal, non-persisted request. Normal worlds retain a typed refusal until
+    // immutable committed authority is available. Fixtures bind explicitly.
+    void set_far_world_mode(FarWorldMode requested);
+    FarWorldRenderer& far_world_renderer() {
+        return *m_far_world;
+    }
+    const FarWorldRenderer& far_world_renderer() const {
+        return *m_far_world;
+    }
+    FarWorldSelection far_world_selection() const {
+        return m_frame_far_selection;
+    }
     FarLodSystem* farlod() {
         return m_farlod.get();
     }
@@ -971,6 +984,7 @@ private:
         Systems::SHIELD_WorldSystem* world_system = nullptr;
         float delta_time = 0.0f;
         bool wireframe = false;
+        float far_plane = World::kLegacyFarPlaneMeters;
         glm::mat4 projection{1.0f};
         glm::mat4 view{1.0f};
         glm::vec4 frustum_planes[6]{};
@@ -1237,6 +1251,10 @@ private:
     // render-only lightning pulse + bolt state for the current frame.
     LightningRenderState m_lightning_state;
     std::unique_ptr<FarLodSystem> m_farlod;
+    std::unique_ptr<FarWorldRenderer> m_far_world;
+    FarWorldSelection m_frame_far_selection;
+    std::uint64_t m_far_world_frame = 0;
+    bool m_far_world_preview = false;
     std::unique_ptr<GBufferPass> m_gbuffer_pass;
     std::unique_ptr<ShadowPass> m_shadow_pass;
     std::unique_ptr<SsaoPass> m_ssao_pass;
@@ -1721,6 +1739,7 @@ private:
         glm::vec3 lastCameraPos;
         glm::vec3 lastCameraFront;
         float lastZoom = 0.0f;
+        float lastFarPlane = World::kLegacyFarPlaneMeters;
         bool valid = false;
     } m_frustumCache;
 };

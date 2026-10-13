@@ -43,6 +43,12 @@ public:
                               std::int32_t stride,
                               std::size_t offset) noexcept = 0;
     virtual void EnableAttribute(FarVolumeVertexAttribute attribute) noexcept = 0;
+    // Fixed indexed GL_TRIANGLES / GL_UNSIGNED_INT, offset zero. Upload-only
+    // drivers refuse by default; the renderer never assumes a draw capability.
+    virtual bool DrawIndexed(std::int32_t index_count) noexcept {
+        (void)index_count;
+        return false;
+    }
 };
 
 struct FarVolumeGpuSizes {
@@ -70,6 +76,9 @@ public:
     std::uint64_t bytes() const noexcept override {
         return sizes_.total_bytes;
     }
+    bool UsesDriver(const FarVolumeGpuDriver& driver) const noexcept {
+        return &driver_ == &driver;
+    }
     std::uint32_t native_vao() const noexcept {
         return vao_;
     }
@@ -95,5 +104,10 @@ private:
 // context. Allocation failure may throw before any object creation.
 std::unique_ptr<FarVolumeGpuAllocation> UploadFarVolumeGpu(const FarVolumeRenderMesh& mesh,
                                                            FarVolumeGpuDriver& driver);
+
+// Checked backend-specific adapter: rejects foreign allocation implementations
+// and allocations from another driver/context. Restores VAO on every draw path.
+bool DrawFarVolumeGpu(const FarVolumeGpuAllocation& allocation,
+                      FarVolumeGpuDriver& driver) noexcept;
 
 } // namespace Luminumbra::Rendering

@@ -145,6 +145,12 @@
       "section": "render",
       "residency": "excluded",
       "json_name": "snow_cover"
+    },
+    {
+      "enum": "RenderFarWorldLadder",
+      "section": "render",
+      "residency": "excluded",
+      "json_name": "far_world_ladder"
     }
   ],
   "params": [

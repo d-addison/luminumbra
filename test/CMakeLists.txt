@@ -158,6 +158,8 @@ add_executable(common_tests
     rendering/FarVolumeUpload_test.cpp
     rendering/FarVolumeGpuBackend_test.cpp
     rendering/FarVolumeResidency_test.cpp
+    rendering/FarWorldRenderer_test.cpp
+    ../src/luminumbra_client/rendering/FarWorldRenderer.cpp
     ../src/luminumbra_client/rendering/FarVolumeBuildQueue.cpp
     ../src/luminumbra_client/rendering/FarVolumeUpload.cpp
     ../src/luminumbra_client/rendering/FarVolumeGpuBackend.cpp
@@ -424,6 +426,8 @@ target_link_libraries(foliage_cache_prune_test PRIVATE
 
 add_executable(render_smoke_test
     rendering/render_smoke_test.cpp
+    ../src/luminumbra_client/rendering/FarVolumeGpuBackend.cpp
+    ../src/luminumbra_client/rendering/FarVolumeGlBackend.cpp
     ../src/luminumbra_common/core/FilesystemPath.cpp
 )
 

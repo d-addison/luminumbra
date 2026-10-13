@@ -239,7 +239,7 @@ bool RenderPipeline::capture_terrain_coverage(const std::filesystem::path& out_d
                                    {"near_plane_depth", 1.0f},
                                    {"far_plane_depth", 0.0f},
                                    {"near_plane_m", NEAR_PLANE},
-                                   {"far_plane_m", FAR_PLANE},
+                                   {"far_plane_m", m_frame_prepared.far_plane},
                                    {"storage_format", "GL_DEPTH_COMPONENT32F"}};
     receipt["view"] = std::vector<float>(glm::value_ptr(m_frame_prepared.view),
                                          glm::value_ptr(m_frame_prepared.view) + 16);

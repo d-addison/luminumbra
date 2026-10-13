@@ -1,5 +1,6 @@
 #include "luminumbra_client/rendering/Camera.h"
 #include "luminumbra_client/rendering/EnvironmentBrdfLut.gen.h"
+#include "luminumbra_client/rendering/FarVolumeGlBackend.h"
 #include "luminumbra_client/rendering/RenderGraph.h"
 #include "luminumbra_common/core/FilesystemPath.h"
 #include "gtest/gtest.h"
@@ -4623,4 +4624,97 @@ TEST(RenderSmokeTest, RenderFrameworkContractsEmitArtifacts) {
     capture_hooks << "  \"marker_prefix\": \"luminumbra.capture.ready\",\n";
     capture_hooks << "  \"screenshot_artifact_dir\": \"render_captures\"\n";
     capture_hooks << "}\n";
+}
+
+TEST(RenderSmokeTest, FarWorldOwnedUploadIndexedSubmissionAndRelativeOrigin) {
+    using namespace Luminumbra;
+    using namespace Luminumbra::Rendering;
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    const GLuint program = LinkProgram({"g_buffer", "g_buffer.vert", "g_buffer.frag"});
+    ASSERT_NE(program, 0u);
+    GLuint fbo = 0, position = 0, lut = 0;
+    glGenFramebuffers(1, &fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    glGenTextures(1, &position);
+    glBindTexture(GL_TEXTURE_2D, position);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, 64, 64, 0, GL_RGBA, GL_FLOAT, nullptr);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, position, 0);
+    glDrawBuffer(GL_COLOR_ATTACHMENT0);
+    ASSERT_EQ(glCheckFramebufferStatus(GL_FRAMEBUFFER), GL_FRAMEBUFFER_COMPLETE);
+    const std::array<float, 16> lut_pixels{0, .8f, 1, 0, 0, 0, 0, 0, 0, 1, 0, 0, 1, 1, 1, 0};
+    glGenTextures(1, &lut);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, lut);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, 1, 4, 0, GL_RGBA, GL_FLOAT, lut_pixels.data());
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glUseProgram(program);
+    SetMat3Identity(program, "u_normalViewMatrix");
+    SetMat3Identity(program, "normalMatrix");
+    SetMat4Identity(program, "model");
+    // A large view translation must not cancel a previously narrowed origin.
+    const auto view = glm::translate(glm::mat4(1), glm::vec3(-8'000'000, -1024, 8192));
+    const auto projection =
+        ReversedZPerspective(glm::radians(45.0f), 1, .1f, Luminumbra::World::kFarPlaneMeters);
+    glUniformMatrix4fv(glGetUniformLocation(program, "view"), 1, GL_FALSE, &view[0][0]);
+    glUniformMatrix4fv(glGetUniformLocation(program, "projection"), 1, GL_FALSE, &projection[0][0]);
+    glUniform1i(glGetUniformLocation(program, "u_farWorldLadder"), 1);
+    glUniform1i(glGetUniformLocation(program, "u_useInstanceOrigin"), 0);
+    glUniform3f(glGetUniformLocation(program, "u_farRelativeOrigin"), 0, 0, -2);
+    glUniform3f(glGetUniformLocation(program, "u_farWorldOrigin"), 8'000'000, 1024, -8192);
+    glUniform1i(glGetUniformLocation(program, "u_forceFlat"), 1);
+    glUniform1i(glGetUniformLocation(program, "u_materialLUT"), 0);
+    for (const char* name : {"u_terrainTextures",
+                             "u_terrainNormals",
+                             "u_terrainRoughness",
+                             "u_skinnedTextures",
+                             "u_staticNormals",
+                             "u_staticSurface"})
+        glUniform1i(glGetUniformLocation(program, name), 1);
+    FarVolumeRenderMesh mesh;
+    mesh.content = Luminumbra::World::FarVolumeContent::Mixed;
+    // Stone survives the production G-buffer's water discard, so the position
+    // pixel verifies actual fragment submission as well as primitive generation.
+    mesh.vertices = {
+        {{-1, -1, 0}, {0, 0, 1}, 1}, {{1, -1, 0}, {0, 0, 1}, 1}, {{0, 1, 0}, {0, 0, 1}, 1}};
+    mesh.indices = {0, 1, 2};
+    FarVolumeGlDriver driver;
+    ASSERT_TRUE(driver.ValidContext());
+    auto allocation = UploadFarVolumeGpu(mesh, driver);
+    ASSERT_NE(allocation, nullptr);
+    EXPECT_EQ(allocation->bytes(), 3 * sizeof(VoxelVertex) + 3 * sizeof(std::uint32_t));
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_BLEND);
+    glDisable(GL_CULL_FACE);
+    glViewport(0, 0, 64, 64);
+    const GLfloat clear[4] = {0, 0, 0, 0};
+    glClearBufferfv(GL_COLOR, 0, clear);
+    GLuint query = 0;
+    glGenQueries(1, &query);
+    glBeginQuery(GL_PRIMITIVES_GENERATED, query);
+    EXPECT_TRUE(DrawFarVolumeGpu(*allocation, driver));
+    glEndQuery(GL_PRIMITIVES_GENERATED);
+    GLuint primitives = 0;
+    glGetQueryObjectuiv(query, GL_QUERY_RESULT, &primitives);
+    EXPECT_EQ(primitives, 1u);
+    std::array<float, 4> pixel{};
+    glReadBuffer(GL_COLOR_ATTACHMENT0);
+    glReadPixels(32, 32, 1, 1, GL_RGBA, GL_FLOAT, pixel.data());
+    EXPECT_NEAR(pixel[2], -2, .0001);
+    GLint vao = -1;
+    glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &vao);
+    EXPECT_EQ(vao, 0);
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
+    // All stores disappear before the exact captured context is destroyed.
+    allocation.reset();
+    glDeleteQueries(1, &query);
+    glUseProgram(0);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glDeleteTextures(1, &lut);
+    glDeleteTextures(1, &position);
+    glDeleteFramebuffers(1, &fbo);
+    glDeleteProgram(program);
 }

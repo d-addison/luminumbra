@@ -3,6 +3,7 @@
 #include "CelestialBodyModel.h" //  Tier 1: the celestial-body seam
 #include "ExposureModel.h"      //  rendering: SelectRenderExposure (manual EV precedence)
 #include "FarLodSystem.h"
+#include "FarVolumeGlBackend.h"
 #include "ImpostorBake.h"  //  far-field tree impostor atlas (opt-in)
 #include "InProcessFlip.h" // Deterministic in-process FLIP image comparison.
 #include "Mesh.h"
@@ -232,6 +233,7 @@ constexpr const char* kGpuTimerPassNames[] = {
 
 RenderPipeline::RenderPipeline()
     : m_farlod(std::make_unique<FarLodSystem>())
+    , m_far_world(std::make_unique<FarWorldRenderer>())
     , m_gbuffer_pass(std::make_unique<GBufferPass>())
     , m_shadow_pass(std::make_unique<ShadowPass>())
     , m_ssao_pass(std::make_unique<SsaoPass>())
@@ -305,6 +307,9 @@ bool RenderPipeline::startup(u32 screen_width,
     m_root_path = root_path;
 
     try {
+        // startup runs after successful GL loading, with the client context
+        // current. Never capture a GL context in the independent constructor.
+        m_far_world->InstallBackend(std::make_unique<FarVolumeGlDriver>());
         set_default_shadow_cascade_splits(m_shadow_pass->shadow_map());
 
         init_shaders();
@@ -1190,19 +1195,33 @@ void RenderPipeline::attach_farlod_job_system(JobSystem* job_system) {
     }
 }
 
+void RenderPipeline::set_far_world_mode(FarWorldMode requested) {
+    m_far_world->SetRequested(requested);
+    m_taau_pass->invalidate_history();
+    m_prev_view_proj = glm::mat4(1.0f);
+    m_frustumCache.valid = false;
+}
+
 void RenderPipeline::prepare_world_swap() {
+    m_far_world->PrepareWorldSwap();
+    m_frame_prepared.valid = false;
+    m_taau_pass->invalidate_history();
+    m_prev_view_proj = glm::mat4(1.0f);
+    m_frustumCache.valid = false;
     if (m_farlod) {
         m_farlod->prepare_world_swap();
     }
 }
 
 void RenderPipeline::set_far_lod_preview_anchor(const glm::vec3& center, float inner_radius_m) {
+    m_far_world_preview = true;
     if (m_farlod) {
         m_farlod->set_preview_anchor(center, inner_radius_m);
     }
 }
 
 void RenderPipeline::clear_far_lod_preview_anchor() {
+    m_far_world_preview = false;
     if (m_farlod) {
         m_farlod->clear_preview_anchor();
     }
@@ -2325,6 +2344,18 @@ void RenderPipeline::render_frame(entt::registry& registry,
         m_terrain_coverage_live_submit_observed = false;
         m_terrain_coverage_visible.clear();
     }
+    const auto purpose = m_offscreen_target_active ? FarWorldPurpose::OffscreenPreview
+                         : m_far_world_preview     ? FarWorldPurpose::Preview
+                                                   : FarWorldPurpose::World;
+    m_frame_far_selection = m_far_world->Selection(purpose, m_far_lod_enabled);
+    const auto plane = FarWorldPlane(m_frame_far_selection.effective);
+    if (camera.GetFarPlane() != plane) {
+        m_taau_pass->invalidate_history();
+        m_prev_view_proj = glm::mat4(1.0f);
+        m_frustumCache.valid = false;
+    }
+    camera.SelectFarWorldPlane(m_frame_far_selection.effective);
+    ++m_far_world_frame;
     prepare_frame(registry, world_system, camera, deltaTime, wireframe);
     dispatch_stages(camera);
 
@@ -2427,9 +2458,25 @@ void RenderPipeline::prepare_frame(entt::registry& registry,
     // far field; it stays use-after-free safe because the preview drains far-LOD off its
     // candidate world before freeing it (swap_pending_into_live + the dtor call
     // prepare_world_swap). m_far_lod_enabled remains a manual override hook.
-    if (m_farlod && m_far_lod_enabled && !m_offscreen_target_active) {
-        m_farlod->update(world_system, camera.Position);
-    }
+    AdvanceSelectedFarWorld(
+        m_frame_far_selection,
+        [&] {
+            if (m_farlod)
+                m_farlod->update(world_system, camera.Position);
+        },
+        [&] {
+            m_far_world->PrepareFrame(m_far_world_frame,
+                                      {camera.Position.x, camera.Position.y, camera.Position.z});
+            // Checked request refusal is reported; one scheduler per frame.
+            m_frame_far_selection =
+                m_far_world->Selection(FarWorldPurpose::World, m_far_lod_enabled);
+            if (camera.GetFarPlane() != FarWorldPlane(m_frame_far_selection.effective)) {
+                m_taau_pass->invalidate_history();
+                m_prev_view_proj = glm::mat4(1.0f);
+                m_frustumCache.valid = false;
+            }
+            camera.SelectFarWorldPlane(m_frame_far_selection.effective);
+        });
 
     glm::mat4 projection = ReversedZPerspective(glm::radians(camera.Zoom),
                                                 (float)m_screen_width / (float)m_screen_height,
@@ -2468,13 +2515,15 @@ void RenderPipeline::prepare_frame(entt::registry& registry,
         !m_frustumCache.valid ||
         glm::distance(camera.Position, m_frustumCache.lastCameraPos) > POSITION_THRESHOLD ||
         glm::distance(camera.Front, m_frustumCache.lastCameraFront) > ROTATION_THRESHOLD ||
-        std::abs(camera.Zoom - m_frustumCache.lastZoom) > 0.1f;
+        std::abs(camera.Zoom - m_frustumCache.lastZoom) > 0.1f ||
+        camera.GetFarPlane() != m_frustumCache.lastFarPlane;
 
     if (needsUpdate) {
         PassGl::ExtractFrustumPlanes(projection * view, m_frustumCache.planes);
         m_frustumCache.lastCameraPos = camera.Position;
         m_frustumCache.lastCameraFront = camera.Front;
         m_frustumCache.lastZoom = camera.Zoom;
+        m_frustumCache.lastFarPlane = camera.GetFarPlane();
         m_frustumCache.valid = true;
     }
 
@@ -2494,6 +2543,7 @@ void RenderPipeline::prepare_frame(entt::registry& registry,
     m_frame_prepared.world_system = &world_system;
     m_frame_prepared.delta_time = deltaTime;
     m_frame_prepared.wireframe = wireframe;
+    m_frame_prepared.far_plane = camera.GetFarPlane();
     m_frame_prepared.projection = projection;
     m_frame_prepared.view = view;
     std::memcpy(m_frame_prepared.frustum_planes, frustum_planes, sizeof(frustum_planes));
@@ -2662,7 +2712,12 @@ void RenderPipeline::execute_stage_gbuffer(const Camera& camera) {
         // Live-terrain submit: the Codex-signed-off callback (CullHierarchical +
         // draw_chunks_mdi, byte-identical), shared with ShadowPass.
         gbuffer_input.submit_terrain_chunks = make_terrain_submitter(true);
-        gbuffer_input.far_lod = farlod();
+        gbuffer_input.far_selection = m_frame_far_selection;
+        gbuffer_input.legacy_far = farlod();
+        gbuffer_input.submit_ladder = [this, &camera](const FarWorldPrepareDraw& prepare) {
+            return m_far_world->Submit({camera.Position.x, camera.Position.y, camera.Position.z},
+                                       prepare);
+        };
         gbuffer_input.root_path = m_root_path;
         gbuffer_input.static_model_texture_array = static_model_texture_array();
         gbuffer_input.static_model_normal_array = static_model_normal_array();
@@ -3694,6 +3749,9 @@ RenderContext RenderPipeline::make_taau_context() {
 // --- CLEANUP ---
 
 void RenderPipeline::cleanup_gpu_resources() {
+    // Release allocations while the captured context is current, including
+    // startup failure. Repeated shutdown/destruction sees an empty owner.
+    m_far_world->Shutdown();
     if (m_farlod) {
         m_farlod->shutdown();
     }

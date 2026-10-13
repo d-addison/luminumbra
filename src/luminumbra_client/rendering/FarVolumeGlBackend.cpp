@@ -21,7 +21,7 @@ bool FunctionsLoaded() noexcept {
     return glGetError && glGetIntegerv && glGenVertexArrays && glGenBuffers &&
            glDeleteVertexArrays && glDeleteBuffers && glBindVertexArray && glBindBuffer &&
            glBufferData && glGetBufferParameteri64v && glVertexAttribPointer &&
-           glVertexAttribIPointer && glEnableVertexAttribArray;
+           glVertexAttribIPointer && glEnableVertexAttribArray && glDrawElements;
 }
 } // namespace
 
@@ -87,5 +87,11 @@ void FarVolumeGlDriver::SetAttribute(FarVolumeVertexAttribute attribute,
 }
 void FarVolumeGlDriver::EnableAttribute(FarVolumeVertexAttribute attribute) noexcept {
     glEnableVertexAttribArray(static_cast<GLuint>(attribute));
+}
+bool FarVolumeGlDriver::DrawIndexed(std::int32_t index_count) noexcept {
+    if (index_count <= 0 || !ValidContext())
+        return false;
+    glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(index_count), GL_UNSIGNED_INT, nullptr);
+    return true;
 }
 } // namespace Luminumbra::Rendering

@@ -43,6 +43,11 @@ uniform mat3 u_normalViewMatrix;
 // (== mat3(view)); when 0 the legacy per-draw 'model' / 'normalMatrix' uniforms
 // drive it (far-LOD region draws, which set those uniforms per region).
 uniform int u_useInstanceOrigin;
+// Explicit ladder origin transform; B/C add ownership, clips and depth policy.
+// The CPU subtracts camera in double before narrowing this relative origin.
+uniform int u_farWorldLadder;
+uniform vec3 u_farRelativeOrigin;
+uniform vec3 u_farWorldOrigin;
 
 // far-region geometry clip band (meters). Set > 0
 // only for far draws (live/static/skinned keep them 0 -> clip inert).
@@ -68,7 +73,11 @@ void main()
     vec3 worldPos3;
     vec3 worldNormal;
     vec3 viewNormal;
-    if (u_useInstanceOrigin == 1) {
+    if (u_farWorldLadder == 1) {
+        worldPos3 = aPos + u_farWorldOrigin;
+        worldNormal = normalize(aNormal);
+        viewNormal = normalize(u_normalViewMatrix * aNormal);
+    } else if (u_useInstanceOrigin == 1) {
         worldPos3 = aPos + aOrigin;
         worldNormal = normalize(aNormal);
         viewNormal = normalize(u_normalViewMatrix * aNormal);
@@ -83,7 +92,9 @@ void main()
     vs_out.WorldNormal = worldNormal;
 
     // Calculate view-space position
-    vec4 viewPos = view * worldPos;
+    vec4 viewPos = u_farWorldLadder == 1
+        ? vec4(mat3(view) * (aPos + u_farRelativeOrigin), 1.0)
+        : view * worldPos;
     vs_out.FragPos = vec3(viewPos);
     vs_out.Normal = viewNormal;
     vs_out.UV = vec2(0.0); // terrain uses triplanar projection, not mesh UVs

@@ -147,4 +147,25 @@ std::unique_ptr<FarVolumeGpuAllocation> UploadFarVolumeGpu(const FarVolumeRender
         return nullptr;
     return allocation;
 }
+bool DrawFarVolumeGpu(const FarVolumeGpuAllocation& resource, FarVolumeGpuDriver& driver) noexcept {
+    const auto* allocation = dynamic_cast<const FarVolumeGlAllocation*>(&resource);
+    if (!allocation || !allocation->UsesDriver(driver) || !allocation->native_vao() ||
+        allocation->index_count() <= 0 || !driver.ValidContext() || driver.HasError())
+        return false;
+    std::uint32_t saved_vao = 0;
+    driver.GetVertexArrayBinding(saved_vao);
+    if (driver.HasError())
+        return false;
+    driver.BindVertexArray(allocation->native_vao());
+    bool success = !driver.HasError();
+    if (success) {
+        success = driver.DrawIndexed(allocation->index_count());
+        const bool clean = !driver.HasError();
+        success = success && clean;
+    }
+    driver.BindVertexArray(saved_vao);
+    const bool restored = !driver.HasError();
+    return success && restored;
+}
+
 } // namespace Luminumbra::Rendering

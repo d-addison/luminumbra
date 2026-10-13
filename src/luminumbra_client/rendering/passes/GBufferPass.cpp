@@ -319,6 +319,7 @@ void GBufferPass::geometry_pass_chunks(const RenderContext& ctx,
     // the instanced aOrigin attribute, so the per-chunk model uniform path is
     // disabled (u_useInstanceOrigin == 1). Far-LOD draws below re-enable the
     // model-uniform path (u_useInstanceOrigin == 0).
+    m_geometry_shader->setInt("u_farWorldLadder", 0);
     m_geometry_shader->setInt("u_useInstanceOrigin", 1);
     // Clip band is inert for live chunks (matches the legacy per-chunk path).
     m_geometry_shader->setFloat("u_farClipNearRadius", 0.0f);
@@ -369,14 +370,32 @@ void GBufferPass::geometry_pass_chunks(const RenderContext& ctx,
     // frustum culling, depth-biased so overlapping live terrain wins. Far
     // draws stay inside the gbuffer GPU timer window; they are excluded from
     // the shadow cascades (ShadowPass never sees them).
-    if (input.far_lod) {
-        std::size_t far_draws = 0;
-        std::size_t far_indices = 0;
-        input.far_lod->draw_gbuffer(
-            *m_geometry_shader, view, frustum_planes, far_draws, far_indices);
-        stats.far_region_draws += far_draws;
-        stats.far_indices += far_indices;
-    }
+    const auto far_stats = SubmitSelectedFarWorld(
+        input.far_selection,
+        [&] {
+            FarWorldSubmitStats result;
+            if (input.legacy_far)
+                input.legacy_far->draw_gbuffer(
+                    *m_geometry_shader, view, frustum_planes, result.draws, result.indices);
+            return result;
+        },
+        input.submit_ladder,
+        [&](const FarWorldDrawCommand& command) {
+            m_geometry_shader->setInt("u_farWorldLadder", 1);
+            m_geometry_shader->setInt("u_useInstanceOrigin", 0);
+            m_geometry_shader->setVec3("u_farRelativeOrigin",
+                                       glm::vec3(command.relative_origin[0],
+                                                 command.relative_origin[1],
+                                                 command.relative_origin[2]));
+            m_geometry_shader->setVec3("u_farWorldOrigin",
+                                       glm::vec3(command.world_origin[0],
+                                                 command.world_origin[1],
+                                                 command.world_origin[2]));
+            return true;
+        });
+    m_geometry_shader->setInt("u_farWorldLadder", 0);
+    stats.far_region_draws += far_stats.draws;
+    stats.far_indices += far_stats.indices;
 
     glBindVertexArray(0);
 }

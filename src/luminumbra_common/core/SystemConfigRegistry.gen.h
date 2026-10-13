@@ -40,7 +40,8 @@
   KEY(RenderForagingColony, Render, "render", "foraging_colony", excluded) \
   KEY(RenderLiveWeather, Render, "render", "live_weather", excluded) \
   KEY(RenderAetherTap, Render, "render", "aether_tap", excluded) \
-  KEY(RenderSnowCover, Render, "render", "snow_cover", excluded)
+  KEY(RenderSnowCover, Render, "render", "snow_cover", excluded) \
+  KEY(RenderFarWorldLadder, Render, "render", "far_world_ladder", excluded)
 
 // PARAM(enum, owner, "json_name", is_vec3, default_scalar, vx, vy, vz)
 #define LUMIN_CONFIG_PARAM_TABLE(PARAM) \
