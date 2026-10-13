@@ -647,7 +647,7 @@ TEST(ActiveRegionLedgerTest, V1FileWithFrozenHistoryIsRefused) {
     const auto before = destination.encode();
     std::string error;
     EXPECT_FALSE(ActiveRegionLedger::decode(bytes, destination, error));
-    EXPECT_EQ(error, ActiveRegionLedger::kProjectionMessage);
+    EXPECT_EQ(error, "Unsupported frozen digest projection.");
     EXPECT_EQ(destination.encode(), before);
 }
 
