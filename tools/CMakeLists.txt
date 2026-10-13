@@ -29,6 +29,17 @@ if(LUMINUMBRA_ENABLE_STATIC_PREVIEW)
 endif()
 
 if(BUILD_TESTING)
+    # Acceptance fixture code is linked only by its CLI and tests, never the engine targets.
+    add_library(luminumbra_save_fixture_support STATIC
+        ${CMAKE_SOURCE_DIR}/src/luminumbra_common/persistence/SyntheticSaveFixture.cpp)
+    target_include_directories(luminumbra_save_fixture_support PUBLIC ${CMAKE_SOURCE_DIR}/src)
+    target_link_libraries(luminumbra_save_fixture_support PUBLIC luminumbra_common)
+    luminumbra_configure_first_party_target(luminumbra_save_fixture_support)
+
+    add_executable(luminumbra_save_fixture persistence/save_fixture_main.cpp)
+    target_link_libraries(luminumbra_save_fixture PRIVATE luminumbra_save_fixture_support)
+    luminumbra_configure_first_party_target(luminumbra_save_fixture)
+
     find_package(Python3 COMPONENTS Interpreter REQUIRED)
     add_test(
         NAME PerformanceToolContract
@@ -63,6 +74,12 @@ if(BUILD_TESTING)
                 --check "${CMAKE_SOURCE_DIR}/config/public-asset-inventory.json")
     set_tests_properties(PublicAssetInventory
         PROPERTIES LABELS "hygiene;assets;tools" TIMEOUT 60)
+    add_test(
+        NAME SaveReceiptContract
+        COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/persistence/test_save_receipt.py")
+    set_tests_properties(SaveReceiptContract
+        PROPERTIES LABELS "persistence;tools" TIMEOUT 30)
     add_test(
         NAME DocumentationLinkValidatorContract
         COMMAND "${Python3_EXECUTABLE}"

@@ -196,6 +196,7 @@ add_executable(common_tests
     common/world_streaming_hardening_test.cpp
     common/HydraulicErosion_test.cpp
     common/WorldStreamingState_test.cpp
+    persistence/synthetic_save_fixture_test.cpp
     sim/fire_spread_test.cpp
     sim/soil_nutrient_test.cpp
     sim/pollination_test.cpp
@@ -251,6 +252,7 @@ target_include_directories(common_tests PRIVATE
 target_link_libraries(common_tests PRIVATE
     gtest_main
     luminumbra_common
+    luminumbra_save_fixture_support
 )
 
 # File-only path contracts run without a GL context or the common-library graph.
