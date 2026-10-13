@@ -1,6 +1,7 @@
 """Static pin diagnostics and guarded launches of stdlib-only game fixtures."""
 from copy import deepcopy
 from pathlib import Path
+import errno
 import json
 import os
 import shutil
@@ -8,11 +9,13 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 SERVICE = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SERVICE))
 from luminumbra_author.contracts import Toolchain, TOOLCHAIN, Refusal, canonical, digest
 from luminumbra_author.__main__ import dispatch
+from luminumbra_author.meshgen_scripts import ScriptInventory
 
 
 class ScriptPins(unittest.TestCase):
@@ -41,6 +44,104 @@ class ScriptPins(unittest.TestCase):
     def write(self):
         self.manifest.write_bytes(canonical(self.document))
 
+    def assert_inventory_handle_closed(self, inventory):
+        if os.name == "posix":
+            with self.assertRaises(OSError) as caught:
+                os.fstat(inventory.root_fd)
+            self.assertEqual(caught.exception.errno, errno.EBADF)
+        elif os.name == "nt":
+            import ctypes
+            from ctypes import wintypes
+            get_info = ctypes.WinDLL("kernel32", use_last_error=True).GetHandleInformation
+            get_info.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+            get_info.restype = wintypes.BOOL
+            flags = wintypes.DWORD()
+            self.assertFalse(get_info(inventory.root_handle, ctypes.byref(flags)))
+            self.assertEqual(ctypes.get_last_error(), 6)  # ERROR_INVALID_HANDLE
+        self.assertFalse(inventory._close_root.alive)
+
+    def test_inventory_close_releases_handle_and_is_idempotent(self):
+        self.pin()
+        inventory = ScriptInventory(self.game, self.document["scripts"]["finisher"])
+        self.addCleanup(inventory.close)
+        self.assertEqual(inventory.source(self.helper), self.helper.read_bytes())
+        inventory.close()
+        self.assert_inventory_handle_closed(inventory)
+        inventory.close()
+        self.assert_inventory_handle_closed(inventory)
+        with self.assertRaises(Refusal) as caught:
+            inventory.source(self.helper)
+        self.assertEqual(caught.exception.finding["rule_id"], "toolchain.script_path")
+
+    def test_inventory_context_releases_handle_on_success_and_exception(self):
+        self.pin()
+        for raises in (False, True):
+            with self.subTest(raises=raises):
+                try:
+                    with ScriptInventory(self.game, self.document["scripts"]["finisher"]) as inventory:
+                        self.assertEqual(inventory.source(self.helper), self.helper.read_bytes())
+                        if raises:
+                            raise RuntimeError("leave the inventory context")
+                except RuntimeError:
+                    if not raises:
+                        raise
+                self.assert_inventory_handle_closed(inventory)
+                inventory.close()
+                self.assert_inventory_handle_closed(inventory)
+
+    def test_replacement_skip_closes_inventory_before_temporary_directory(self):
+        opened = []
+        inventory_type = ScriptInventory
+        def track_inventory(*args):
+            inventory = inventory_type(*args)
+            case.addCleanup(inventory.close)
+            opened.append(inventory)
+            return inventory
+        case = ScriptPins("test_root_symlink_replacement_between_containment_and_open_refused")
+        result = unittest.TestResult()
+        with mock.patch(__name__ + ".ScriptInventory", side_effect=track_inventory), \
+                mock.patch.object(Path, "symlink_to", side_effect=OSError(errno.EPERM, "no symlink privilege")):
+            case.run(result)
+        self.assertEqual(len(result.skipped), 1)
+        self.assertEqual(result.errors, [])
+        self.assertEqual(result.failures, [])
+        self.assertEqual(len(opened), 1)
+        self.assert_inventory_handle_closed(opened[0])
+        self.assertFalse(case.root.exists())
+
+    def test_inventory_initialization_refusal_releases_handle(self):
+        self.pin()
+        opened = []
+        def refuse_entry(inventory, path):
+            opened.append(inventory)
+            raise Refusal("toolchain.script_path", "Entry refused after opening root.")
+        with mock.patch.object(ScriptInventory, "canonical_path", autospec=True, side_effect=refuse_entry):
+            with self.assertRaises(Refusal):
+                with ScriptInventory(self.game, self.document["scripts"]["finisher"]):
+                    self.fail("Refused inventory cannot enter its context")
+        self.assertEqual(len(opened), 1)
+        self.assert_inventory_handle_closed(opened[0])
+
+    def test_verify_scripts_releases_inventory_on_success_and_refusal(self):
+        toolchain = self.pin()
+        from luminumbra_author import meshgen_scripts
+        opened = []
+        inventory_type = ScriptInventory
+        def track_inventory(*args):
+            inventory = inventory_type(*args)
+            self.addCleanup(inventory.close)
+            opened.append(inventory)
+            return inventory
+        with mock.patch.object(meshgen_scripts, "ScriptInventory", side_effect=track_inventory):
+            toolchain.verify_scripts(self.game)
+            self.assert_inventory_handle_closed(opened[-1])
+            self.helper.write_text("changed companion\n")
+            with self.assertRaises(Refusal) as caught:
+                toolchain.verify_scripts(self.game)
+            self.assertEqual(caught.exception.finding["rule_id"], "toolchain.changed")
+            self.assert_inventory_handle_closed(opened[-1])
+        self.assertEqual(len(opened), 2)
+
     def test_old_toolchain_valid_but_mg2_requires_role(self):
         self.write()
         toolchain = Toolchain(self.manifest)
@@ -51,7 +152,7 @@ class ScriptPins(unittest.TestCase):
     def test_explicit_project_root_and_rechecks(self):
         toolchain = self.pin()
         result = toolchain.verify_scripts(self.game)
-        self.assertEqual(result["path"], self.script)
+        self.assertEqual(result["path"].resolve(strict=True), self.script.resolve(strict=True))
         self.assertEqual(set(result["modules"]), {"scripts/helper.py"})
         with self.assertRaises(Refusal): toolchain.verify_scripts(self.installed)
         self.helper.write_text("changed companion module")
@@ -95,11 +196,185 @@ class ScriptPins(unittest.TestCase):
             toolchain = self.pin()
             with self.subTest(source=source), self.assertRaises(Refusal): toolchain.verify_scripts(self.game)
 
-    def launch(self, cwd=None, environment=None):
+    def launch(self, cwd=None, environment=None, project_root=None):
         return subprocess.run([sys.executable, "-I", "-S", "-B", str(SERVICE / "launch.py"), "--scripts",
-            "--project", str(self.game), "--toolchain", str(self.manifest)],
+            "--project", str(self.game if project_root is None else project_root), "--toolchain", str(self.manifest)],
             env=environment or dict(os.environ, PYTHONPATH=str(self.game), PYTHONDONTWRITEBYTECODE="1"),
             cwd=cwd or self.root, capture_output=True, text=True, timeout=15)
+
+    def check_root_alias(self, alias, source_path):
+        self.helper.write_text("print('aliased pinned source')\n")
+        self.script.write_text("import importlib.machinery\nimport importlib.util\n"
+            f"loader = getattr(importlib.machinery, 'Source' + 'FileLoader')('other', {str(source_path)!r})\n"
+            "spec = getattr(importlib.util, 'spec_from_' + 'loader')('other', loader)\n"
+            "module = getattr(importlib.util, 'module_from_' + 'spec')(spec)\n"
+            "getattr(loader, 'exec_' + 'module')(module)\nimport helper\n")
+        toolchain = self.pin()
+        self.assertEqual(toolchain.verify_scripts(alias)["path"].resolve(strict=True), self.script.resolve(strict=True))
+        result = self.launch(project_root=alias)
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertEqual(result.stdout, "aliased pinned source\n" * 2)
+        inventory = ScriptInventory(alias, self.document["scripts"]["finisher"])
+        self.addCleanup(inventory.close)
+        self.assertEqual(inventory.source(source_path), self.helper.read_bytes())
+        unpinned = source_path.with_name("unpinned.py")
+        unpinned.write_bytes(self.helper.read_bytes())
+        with self.assertRaises(Refusal) as caught: inventory.source(unpinned)
+        self.assertEqual(caught.exception.finding["rule_id"], "config.pins_missing")
+        self.helper.write_text("changed after verification\n")
+        with self.assertRaises(Refusal) as caught: inventory.source(source_path)
+        self.assertEqual(caught.exception.finding["rule_id"], "toolchain.changed")
+
+    def test_relative_project_root_and_companion_alias(self):
+        # Required on every platform; a relative spelling must resolve just as
+        # the explicitly supplied project root does, including in direct loads.
+        previous = Path.cwd()
+        os.chdir(self.root)
+        self.addCleanup(os.chdir, previous)
+        self.check_root_alias(Path("game"), Path("game/scripts/helper.py"))
+
+    if os.name != "nt":
+        def test_symlinked_project_root_alias(self):
+            alias = self.root / "project-alias"
+            alias.symlink_to(self.game, target_is_directory=True)
+            self.check_root_alias(alias, alias / "scripts/helper.py")
+
+    if os.name == "nt":
+        def test_windows_companion_junctions_are_refused(self):
+            self.pin()
+            inventory = ScriptInventory(self.game, self.document["scripts"]["finisher"])
+            self.addCleanup(inventory.close)
+            outside = self.root / "outside"
+            outside.mkdir()
+            (outside / "helper.py").write_bytes(self.helper.read_bytes())
+            for name, target, member in (("outside-alias", outside, "helper.py"),
+                                         ("root-alias", self.game, "scripts/helper.py")):
+                link = self.game / name
+                # Directory junctions do not require Windows symlink privilege.
+                subprocess.run(["cmd", "/d", "/c", "mklink", "/J", str(link), str(target)],
+                               check=True, capture_output=True, text=True, timeout=15)
+                try:
+                    with self.subTest(target=target), self.assertRaises(Refusal) as caught:
+                        inventory.source(link / member)
+                    self.assertEqual(caught.exception.finding["rule_id"], "path.symlink")
+                finally:
+                    link.rmdir()
+
+        def test_windows_short_project_root_alias(self):
+            import ctypes
+            from ctypes import wintypes
+            renamed = self.root / "project with a long directory name"
+            self.game.rename(renamed)
+            self.game = renamed
+            self.script = renamed / "scripts/finish.py"
+            self.helper = renamed / "scripts/helper.py"
+            get_short = ctypes.WinDLL("kernel32", use_last_error=True).GetShortPathNameW
+            get_short.argtypes = [wintypes.LPCWSTR, wintypes.LPWSTR, wintypes.DWORD]
+            get_short.restype = wintypes.DWORD
+            long_path = str(renamed.resolve(strict=True))
+            size = get_short(long_path, None, 0)
+            if not size: raise ctypes.WinError(ctypes.get_last_error())
+            buffer = ctypes.create_unicode_buffer(size)
+            written = get_short(long_path, buffer, size)
+            if not written or written >= size: raise ctypes.WinError(ctypes.get_last_error())
+            alias = Path(buffer.value)
+            if alias.name == renamed.name:
+                self.skipTest("8.3 short names are disabled for new directories on this volume")
+            self.assertEqual(alias.resolve(strict=True), renamed.resolve(strict=True))
+            self.check_root_alias(alias, alias / "scripts/helper.py")
+
+    def test_companion_aliases_do_not_allow_traversal_or_escape(self):
+        self.pin()
+        inventory = ScriptInventory(self.game, self.document["scripts"]["finisher"])
+        self.addCleanup(inventory.close)
+        outside = self.root / "outside.py"
+        outside.write_bytes(self.helper.read_bytes())
+        for path in (outside, self.game / "scripts/../scripts/helper.py", self.game / "../outside.py"):
+            with self.subTest(path=path), self.assertRaises(Refusal) as caught: inventory.source(path)
+            self.assertEqual(caught.exception.finding["rule_id"], "toolchain.script_path")
+        if os.name == "nt":
+            drive = "Z:" if self.game.drive.upper() != "Z:" else "Y:"
+            with self.assertRaises((Refusal, OSError)): inventory.source(Path(drive + "/outside.py"))
+        else:
+            # Both an internal alias and an escaping link must be rejected,
+            # even when their target has exactly the expected pinned bytes.
+            for target in (self.helper.resolve(strict=True), outside):
+                link = self.script.parent / "alias.py"
+                link.symlink_to(target)
+                with self.subTest(target=target), self.assertRaises(Refusal) as caught: inventory.source(link)
+                self.assertEqual(caught.exception.finding["rule_id"], "path.symlink")
+                link.unlink()
+            alias = self.game / "root-alias"
+            alias.symlink_to(self.game.resolve(strict=True), target_is_directory=True)
+            with self.assertRaises(Refusal) as caught: inventory.source(alias / "scripts/helper.py")
+            self.assertEqual(caught.exception.finding["rule_id"], "path.symlink")
+
+    def check_replacement_after_containment(self, replaced):
+        self.pin()
+        inventory = ScriptInventory(self.game, self.document["scripts"]["finisher"])
+        self.addCleanup(inventory.close)
+        outside = self.root / "outside"
+        shutil.copytree(replaced, outside)
+        # Outside source has identical pins: refusal must establish identity,
+        # rather than rely on changed bytes or a probabilistic race.
+        probe = self.root / "symlink-probe"
+        try:
+            probe.symlink_to(outside, target_is_directory=True)
+        except OSError as error:
+            if (error.errno not in (errno.EPERM, errno.EACCES, errno.ENOSYS, errno.EOPNOTSUPP)
+                    and getattr(error, "winerror", None) not in (1, 50, 1314)):
+                raise
+            self.skipTest(f"Directory symlink creation is unavailable: {error}")
+        probe.unlink()
+        original = ScriptInventory.canonical_path
+        backup = replaced.with_name(replaced.name + "-original")
+        def replace_after_check(current, path):
+            checked = original(current, path)
+            replaced.rename(backup)
+            try:
+                replaced.symlink_to(outside, target_is_directory=True)
+            except BaseException:
+                backup.rename(replaced)
+                raise
+            return checked
+        try:
+            with mock.patch.object(ScriptInventory, "canonical_path", autospec=True, side_effect=replace_after_check):
+                with self.assertRaises(Refusal) as caught:
+                    inventory.source(self.helper)
+            self.assertEqual(caught.exception.finding["rule_id"], "path.symlink")
+        finally:
+            if replaced.is_symlink():
+                replaced.unlink()
+                backup.rename(replaced)
+
+    def test_root_symlink_replacement_between_containment_and_open_refused(self):
+        self.check_replacement_after_containment(self.game)
+
+    def test_companion_ancestor_symlink_replacement_between_containment_and_open_refused(self):
+        self.check_replacement_after_containment(self.script.parent)
+
+    def test_root_ancestor_symlink_replacement_between_containment_and_open_refused(self):
+        ancestor = self.root / "project-parent"
+        ancestor.mkdir()
+        self.game.rename(ancestor / "game")
+        self.game = ancestor / "game"
+        self.script = self.game / "scripts/finish.py"
+        self.helper = self.game / "scripts/helper.py"
+        self.check_replacement_after_containment(ancestor)
+
+    def test_all_companions_retain_same_root_identity(self):
+        self.pin()
+        inventory = ScriptInventory(self.game, self.document["scripts"]["finisher"])
+        self.addCleanup(inventory.close)
+        self.assertEqual(inventory.source(self.script), self.script.read_bytes())
+        replacement = self.root / "replacement"
+        shutil.copytree(self.game, replacement)
+        backup = self.root / "original"
+        self.game.rename(backup)
+        replacement.rename(self.game)
+        with self.assertRaises(Refusal) as caught:
+            inventory.source(self.helper)
+        self.assertEqual(caught.exception.finding["rule_id"], "toolchain.script_path")
 
     def test_isolated_launcher_never_executes_startup_project_sentinels(self):
         self.script.write_text("print('pinned entry')\n")

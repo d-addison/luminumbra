@@ -8,6 +8,7 @@ from pathlib import Path, PurePosixPath
 import re
 import stat
 import uuid
+from . import file_io
 
 ASSET = "luminumbra.authoring.asset.v1"
 RECEIPT = "luminumbra.authoring.receipt.v1"
@@ -60,8 +61,15 @@ def parse_json(data):
     return result
 
 
+def _open_reader(path):
+    try:
+        return file_io.open_regular_reader(path)
+    except ValueError as error:
+        raise Refusal("file.invalid", str(error)) from error
+
+
 def read_bounded(path, limit):
-    with Path(path).open("rb") as stream:
+    with _open_reader(path) as stream:
         data = stream.read(limit + 1)
     require(len(data) <= limit, "file.limit", "File exceeds this profile's size limit.")
     return data
@@ -73,21 +81,27 @@ def read_json(path):
 
 def file_digest(path):
     checksum = hashlib.sha256()
-    with Path(path).open("rb") as stream:
+    with _open_reader(path) as stream:
         for block in iter(lambda: stream.read(1024 * 1024), b""):
             checksum.update(block)
     return checksum.hexdigest()
 
 
 def atomic_json(path, value):
-    path = Path(path)
+    try:
+        path = file_io.safe_path(path)
+    except ValueError as error:
+        raise Refusal("file.publication", str(error)) from error
     temp = path.with_name(".tmp-" + uuid.uuid4().hex)
     try:
         with temp.open("xb") as stream:
             stream.write(canonical(value) + b"\n")
             stream.flush()
             os.fsync(stream.fileno())
-        os.replace(temp, path)
+        try:
+            file_io.replace_file(temp, path)
+        except ValueError as error:
+            raise Refusal("file.publication", str(error)) from error
     finally:
         temp.unlink(missing_ok=True)
 
@@ -233,8 +247,8 @@ class Toolchain:
         from .meshgen_scripts import ScriptInventory
         self.verify()
         require(role in self.scripts, "config.pins_missing", "MG2 requires a pinned game script role.", role)
-        inventory = ScriptInventory(project_root, self.scripts[role])
-        inventory.verify()
-        inventory.diagnose()
-        return {"path": inventory.entry, "sha256": self.scripts[role]["sha256"],
-                "modules": dict(self.scripts[role].get("modules", {}))}
+        with ScriptInventory(project_root, self.scripts[role]) as inventory:
+            inventory.verify()
+            inventory.diagnose()
+            return {"path": inventory.entry, "sha256": self.scripts[role]["sha256"],
+                    "modules": dict(self.scripts[role].get("modules", {}))}
