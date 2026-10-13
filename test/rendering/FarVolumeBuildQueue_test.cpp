@@ -205,6 +205,8 @@ TEST(FarVolumeBuildQueue, ForgottenRunningKeyCanReturnWithSameIdentityAfterDrain
     barrier->Release();
     auto result = WaitResult(queue, request);
     ASSERT_TRUE(result);
+    if (!result)
+        return;
     EXPECT_EQ(result->status(), FarVolumeBuildStatus::ReadyEmpty);
     EXPECT_EQ(result->identity(), request.identity);
     EXPECT_EQ(queue.Stats().dispatched, 2u);
