@@ -56,7 +56,7 @@ def valid_receipt() -> dict:
         {"name": "create", "kind": "create_edit_save", "exit_code": 0, "timed_out": False,
          "shutdown": {"schema": "luminumbra.shutdown.v1", "complete": True, "jobs_drained": True}},
         {"name": "restart", "kind": "restart_select_load", "exit_code": 0, "timed_out": False,
-         "shutdown": {"schema": "luminumbra.shutdown.v1", "jobs_drained": True}},
+         "shutdown": {"schema": "luminumbra.shutdown.v1", "complete": True, "jobs_drained": True}},
         {"name": "seed2", "kind": "second_seed", "exit_code": 0, "timed_out": False,
          "shutdown": {"schema": "luminumbra.shutdown.v1", "complete": True, "jobs_drained": True}},
         {"name": "back", "kind": "switch_back", "exit_code": 0, "timed_out": False,
@@ -326,6 +326,42 @@ class AcceptanceReceiptContract(unittest.TestCase):
         receipt["sessions"][3]["shutdown"] = None
         self._expect(receipt, "sessions_clean", "unevaluated")
         self.assertIn("back", _check(_verdict(receipt), "sessions_clean")["detail"])
+
+    def test_sessions_clean_requires_explicit_shutdown_completion(self) -> None:
+        self._assert_baseline("sessions_clean")
+        for complete, expected in ((None, "unevaluated"), (False, "fail"), (True, "pass")):
+            with self.subTest(complete=complete):
+                receipt = valid_receipt()
+                shutdown = receipt["sessions"][1]["shutdown"]
+                if complete is None:
+                    del shutdown["complete"]
+                else:
+                    shutdown["complete"] = complete
+                self.assertIs(shutdown["jobs_drained"], True)
+                self._expect(receipt, "sessions_clean", expected)
+                detail = _check(_verdict(receipt), "sessions_clean")["detail"]
+                if complete is None:
+                    self.assertEqual(detail, "shutdown completion missing for sessions: restart")
+                elif complete is False:
+                    self.assertIn("restart (shutdown not complete)", detail)
+                else:
+                    self.assertEqual(detail, "4 sessions clean")
+
+    def test_sessions_clean_reports_both_kinds_of_missing_shutdown_evidence(self) -> None:
+        receipt = valid_receipt()
+        del receipt["sessions"][1]["shutdown"]["complete"]
+        receipt["sessions"][3]["shutdown"] = None
+        self._expect(receipt, "sessions_clean", "unevaluated")
+        detail = _check(_verdict(receipt), "sessions_clean")["detail"]
+        self.assertIn("no shutdown record for sessions: back", detail)
+        self.assertIn("shutdown completion missing for sessions: restart", detail)
+
+    def test_sessions_clean_missing_completion_does_not_hide_shutdown_failure(self) -> None:
+        receipt = valid_receipt()
+        del receipt["sessions"][1]["shutdown"]["complete"]
+        receipt["sessions"][1]["shutdown"]["jobs_drained"] = False
+        self._expect(receipt, "sessions_clean", "fail")
+        self.assertIn("restart (jobs not drained)", _check(_verdict(receipt), "sessions_clean")["detail"])
 
     def test_sessions_clean_absent_is_unevaluated(self) -> None:
         self._assert_baseline("sessions_clean")

@@ -168,6 +168,7 @@ def _check_sessions_clean(receipt: dict) -> dict:
         return _malformed(check_id, "sessions")
     failed = []
     unevaluated = []
+    completion_missing = []
     for session in sessions:
         name = session["name"]
         shutdown = session.get("shutdown")
@@ -187,12 +188,19 @@ def _check_sessions_clean(receipt: dict) -> dict:
             failed.append(f"{name} ({', '.join(reasons)})")
         elif shutdown is None:
             unevaluated.append(name)
+        elif "complete" not in shutdown:
+            # The client omits this field when shutdown progress was not enabled.
+            # A drained queue alone does not prove that shutdown completed.
+            completion_missing.append(name)
     if failed:
         return _result(check_id, FAIL, "failed sessions: " + "; ".join(failed))
+    missing_details = []
     if unevaluated:
-        return _result(
-            check_id, UNEVALUATED, "no shutdown record for sessions: " + ", ".join(unevaluated)
-        )
+        missing_details.append("no shutdown record for sessions: " + ", ".join(unevaluated))
+    if completion_missing:
+        missing_details.append("shutdown completion missing for sessions: " + ", ".join(completion_missing))
+    if missing_details:
+        return _result(check_id, UNEVALUATED, "; ".join(missing_details))
     return _result(check_id, PASS, f"{len(sessions)} sessions clean")
 
 
