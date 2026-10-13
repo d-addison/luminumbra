@@ -6,15 +6,29 @@ on:
   pull_request:
     branches: [main, devel]
   workflow_dispatch:
+    inputs:
+      qualification_capture:
+        description: 'Explicit same-head AC2/AC4 artifact capture'
+        type: boolean
+        default: false
+      expected_sha:
+        description: 'Full candidate SHA; required when qualification capture is enabled'
+        type: string
+        default: ''
 
 permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # Manual capture attempts have separate run groups. Every devel push has its
+  # own commit group, preserving complete verdicts for previously merged tips.
+  group: ${{ github.event_name == 'workflow_dispatch' && inputs.qualification_capture && format('{0}-qualification-{1}', github.workflow, github.run_id) || format('{0}-{1}{2}', github.workflow, github.ref, github.event_name == 'push' && github.ref == 'refs/heads/devel' && format('-{0}', github.sha) || '') }}
+  cancel-in-progress: ${{ !((github.event_name == 'workflow_dispatch' && inputs.qualification_capture) || (github.event_name == 'push' && github.ref == 'refs/heads/devel')) }}
 
 env:
+  QUALIFICATION_WORKFLOW_SHA: ${{ github.workflow_sha }}
+  QUALIFICATION_WORKFLOW_REF: ${{ github.workflow_ref }}
+  QUALIFICATION_EXPECTED_SHA: ${{ inputs.expected_sha }}
   CTEST_PARALLEL_LEVEL: "4"
 
 jobs:
@@ -25,6 +39,10 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Verify manual qualification identity and dependencies
+        id: identity
+        if: github.event_name == 'workflow_dispatch' && inputs.qualification_capture
+        run: python tools/ci/qualification_capture.py preflight --lane linux-gcc --expected-sha "$QUALIFICATION_EXPECTED_SHA"
       - name: Install build and test dependencies
         run: |
           sudo apt-get update
@@ -40,12 +58,15 @@ jobs:
           key: linux-x64-gcc-ccache-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json', 'cmake/**/*.cmake', 'src/**/*.cmake', 'test/CMakeLists.txt', 'tools/CMakeLists.txt', 'vendor/CMakeLists.txt') }}
           restore-keys: linux-x64-gcc-ccache-
       - name: Configure
+        id: configure
         run: >-
           cmake --preset release -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
           -DLUMINUMBRA_ENABLE_PREFAB_RUNTIME=ON
       - name: Build
+        id: build
         run: cmake --build --preset release --parallel 4
       - name: Test
+        id: tests
         run: |
           env -u WAYLAND_DISPLAY XDG_SESSION_TYPE=x11 LIBGL_ALWAYS_SOFTWARE=1 \
             xvfb-run -a ctest --preset release --no-tests=error -LE manual \
@@ -66,6 +87,21 @@ jobs:
         run: |
           ctest --preset release --no-tests=error -R '^NetSoak$' \
             --parallel 1 --output-junit netsoak.junit.xml
+      - name: Bind manual qualification evidence
+        if: always() && (github.event_name == 'workflow_dispatch' && inputs.qualification_capture)
+        env:
+          QUALIFICATION_PRODUCERS: '{"identity":"${{ steps.identity.outcome }}","configure":"${{ steps.configure.outcome }}","build":"${{ steps.build.outcome }}","tests":"${{ steps.tests.outcome }}"}'
+        run: python tools/ci/qualification_capture.py write --lane linux-gcc --expected-sha "$QUALIFICATION_EXPECTED_SHA" --binary build/release/bin/common_tests --junit build/release/ctest.junit.xml --output build/release/qualification-capture.json
+      - name: Upload manual qualification evidence
+        if: always() && (github.event_name == 'workflow_dispatch' && inputs.qualification_capture)
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: qualification-linux-gcc-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            build/release/ctest.junit.xml
+            build/release/qualification-capture.json
+          if-no-files-found: error
+          retention-days: 30
       - name: Upload test evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -219,6 +255,10 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Verify manual qualification identity and dependencies
+        id: identity
+        if: github.event_name == 'workflow_dispatch' && inputs.qualification_capture
+        run: python tools/ci/qualification_capture.py preflight --lane windows-msvc --expected-sha "$env:QUALIFICATION_EXPECTED_SHA"
       - name: Install Python test dependencies
         run: python -m pip install --disable-pip-version-check numpy Pillow
       - name: Stage software OpenGL (Mesa3D llvmpipe)
@@ -251,6 +291,7 @@ jobs:
             }
           }
       - name: Configure, build, and test
+        id: native
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -299,6 +340,21 @@ jobs:
           # remaining skip is a hard failure.
           # Inventory floor: measured 2284 tests on devel b56cdba1, minus ~1% margin (see the Linux lane for the policy).
           python tools/ci/check_ctest_junit.py build/release/ctest.junit.xml --minimum-tests 2260
+      - name: Bind manual qualification evidence
+        if: always() && (github.event_name == 'workflow_dispatch' && inputs.qualification_capture)
+        env:
+          QUALIFICATION_PRODUCERS: '{"identity":"${{ steps.identity.outcome }}","native":"${{ steps.native.outcome }}"}'
+        run: python tools/ci/qualification_capture.py write --lane windows-msvc --expected-sha "$env:QUALIFICATION_EXPECTED_SHA" --binary build/release/bin/common_tests.exe --junit build/release/ctest.junit.xml --output build/release/qualification-capture.json
+      - name: Upload manual qualification evidence
+        if: always() && (github.event_name == 'workflow_dispatch' && inputs.qualification_capture)
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: qualification-windows-msvc-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            build/release/ctest.junit.xml
+            build/release/qualification-capture.json
+          if-no-files-found: error
+          retention-days: 30
       - name: Upload test evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -341,7 +397,7 @@ jobs:
     # MinGW/UCRT break shows on the PR that causes it instead of at promotion. It is
     # not a required devel context, so it informs rather than blocks there; it stays
     # required on main. Pushes to devel do not run it (the PR already did).
-    if: github.event_name == 'pull_request' || github.ref_name == 'main'
+    if: github.event_name == 'pull_request' || github.ref_name == 'main' || (github.event_name == 'workflow_dispatch' && inputs.qualification_capture)
     runs-on: windows-2025
     # Measured 40.6 min end to end on the first post-release promotion run
     # (previously two 135-minute cap kills, before the test streaming caps
@@ -353,6 +409,10 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Verify manual qualification identity and dependencies
+        id: identity
+        if: github.event_name == 'workflow_dispatch' && inputs.qualification_capture
+        run: python tools/ci/qualification_capture.py preflight --lane windows-ucrt64 --expected-sha "$env:QUALIFICATION_EXPECTED_SHA"
       - name: Set up MSYS2 UCRT64
         uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2
         with:
@@ -401,12 +461,15 @@ jobs:
             }
           }
       - name: Configure
+        id: configure
         shell: msys2 {0}
         run: cmake --preset release
       - name: Build
+        id: build
         shell: msys2 {0}
         run: cmake --build --preset release --parallel 4
       - name: Test
+        id: tests
         shell: msys2 {0}
         run: |
           # Deploy the staged Mesa3D llvmpipe runtime next to the test
@@ -430,6 +493,22 @@ jobs:
           # any remaining skip is a hard failure.
           # Inventory floor: measured 2284 tests on devel b56cdba1, minus ~1% margin (see the Linux lane for the policy).
           python tools/ci/check_ctest_junit.py build/release/ctest.junit.xml --minimum-tests 2260
+      - name: Bind manual qualification evidence
+        if: always() && (github.event_name == 'workflow_dispatch' && inputs.qualification_capture)
+        shell: msys2 {0}
+        env:
+          QUALIFICATION_PRODUCERS: '{"identity":"${{ steps.identity.outcome }}","configure":"${{ steps.configure.outcome }}","build":"${{ steps.build.outcome }}","tests":"${{ steps.tests.outcome }}"}'
+        run: python tools/ci/qualification_capture.py write --lane windows-ucrt64 --expected-sha "$QUALIFICATION_EXPECTED_SHA" --binary build/release/bin/common_tests.exe --junit build/release/ctest.junit.xml --output build/release/qualification-capture.json
+      - name: Upload manual qualification evidence
+        if: always() && (github.event_name == 'workflow_dispatch' && inputs.qualification_capture)
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: qualification-windows-ucrt64-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            build/release/ctest.junit.xml
+            build/release/qualification-capture.json
+          if-no-files-found: error
+          retention-days: 30
       - name: Upload test evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -522,8 +601,30 @@ jobs:
             -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++
       - name: Generate vendored headers used by first-party sources
         run: cmake --build build/tidy --target glad --parallel 4
+      # Per-translation-unit result cache (scripts/tidy_cache.py). A unit is skipped
+      # only when its complete analysis input (source, every header the compiler
+      # reads, compile flags, check config, clang-tidy and compiler versions) is
+      # identical to an earlier run that passed; anything else runs clang-tidy.
+      # Pull requests read and write it. Pushes to devel/main never read it, so
+      # every merged tip gets a full analysis, and they write it to seed the PRs.
+      - name: Restore clang-tidy result cache
+        id: tidy-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: github.event_name == 'pull_request'
+        with:
+          path: .tidy-cache
+          key: tidy-cache-${{ runner.os }}-${{ github.sha }}
+          restore-keys: tidy-cache-${{ runner.os }}-
       - name: Run blocking clang-tidy gate
-        run: scripts/tidy.sh --build-dir build/tidy --jobs 4
+        env:
+          TIDY_CACHE_MODE: ${{ github.event_name == 'pull_request' && 'readwrite' || 'writeonly' }}
+        run: scripts/tidy.sh --build-dir build/tidy --jobs 4 --cache-dir .tidy-cache --cache-mode "$TIDY_CACHE_MODE"
+      - name: Save clang-tidy result cache
+        if: ${{ !cancelled() && steps.tidy-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .tidy-cache
+          key: tidy-cache-${{ runner.os }}-${{ github.sha }}
 
   public-tree:
     name: Public tree / inventory honesty
@@ -537,6 +638,7 @@ jobs:
           python3 tools/ci/test_validate_public_tree.py
           python3 tools/ci/test_check_docs.py
           python3 tools/ci/test_check_ctest_junit.py
+          python3 tools/ci/test_tidy_cache.py
           python3 tools/ci/test_validate_visual_catalog.py
           python3 tools/ci/validate_visual_catalog.py
           python3 tools/ci/render_visual_catalog.py --check
