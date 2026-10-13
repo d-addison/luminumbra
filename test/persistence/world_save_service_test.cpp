@@ -417,13 +417,17 @@ TEST(WorldSaveService, GroundObjectWithoutLedgerIsRefusedByLoadWorld) {
     TempSaveDir save_dir("ground_orphan");
     WorldSaveService service;
     WorldStreamingState original;
-    PopulateFixtureWorld(original);
+    // Indexing validates full SDF lattices; the tiny legacy chunk fixtures are
+    // deliberately incomplete. A manifest-only baseline isolates the orphan
+    // refusal without introducing an unrelated invalid chunk member.
     std::vector<std::string> save_errors;
-    ASSERT_TRUE(service.save_world(original, save_dir.path, &save_errors));
+    ASSERT_TRUE(service.save_world(original, save_dir.path, &save_errors))
+        << JoinErrors(save_errors);
 
     Luminumbra::world::GroundObjectStore store;
     ASSERT_TRUE(store.insert(MakeGroundObject(1, 100, 0)));
-    ASSERT_TRUE(WorldSaveService::save_ground_objects(store, save_dir.path, &save_errors));
+    ASSERT_TRUE(WorldSaveService::save_ground_objects(store, save_dir.path, &save_errors))
+        << JoinErrors(save_errors);
 
     WorldStreamingState restored;
     std::vector<std::string> load_errors;
