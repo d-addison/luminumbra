@@ -204,6 +204,8 @@ TEST(FarVolumeBuildQueue, ForgottenRunningKeyCanReturnWithSameIdentityAfterDrain
     barrier->Release();
     auto result = WaitResult(queue, request);
     ASSERT_TRUE(result);
+    if (!result)
+        return;
     EXPECT_EQ(result->status(), FarVolumeBuildStatus::ReadyEmpty);
     EXPECT_EQ(result->identity(), request.identity);
     EXPECT_EQ(queue.Stats().dispatched, 2u);
@@ -375,6 +377,8 @@ TEST(FarVolumeBuildQueue, ExplicitSelectionControlsDispatchRatherThanInsertionOr
     EXPECT_FALSE(queue.TakeCompleted(first.identity, first.intent));
     auto result = queue.TakeCompleted(second.identity, second.intent);
     ASSERT_TRUE(result);
+    if (!result)
+        return;
     EXPECT_EQ(result->identity(), second.identity);
     EXPECT_EQ(result->status(), FarVolumeBuildStatus::DispatchRejected);
     EXPECT_EQ(queue.Stats().pending, 1u);
@@ -402,5 +406,7 @@ TEST(FarVolumeBuildQueue, DispatchUsesNormalLaneBehindBlockedHighWorker) {
     barrier->Release();
     auto result = WaitResult(queue, request);
     ASSERT_TRUE(result);
+    if (!result)
+        return;
     EXPECT_EQ(result->status(), FarVolumeBuildStatus::ReadyEmpty);
 }
