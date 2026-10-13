@@ -13,8 +13,11 @@ from .service import BuildService, TERMINAL
 def dispatch(service, operation, params):
     if operation in ("capabilities", "registry"):
         keys(params, ())
-        return service.capabilities() if operation == "capabilities" else {
-            "schemas": service.capabilities()["schemas"], "profiles": service.capabilities()["profiles"],
+        capabilities = service.capabilities()
+        capabilities.setdefault("features", {}).update({"meshgen_script_pins": True,
+                                                        "meshgen_configuration": True})
+        return capabilities if operation == "capabilities" else {
+            "schemas": capabilities["schemas"], "profiles": capabilities["profiles"],
             "components": [], "nodes": []}
     if operation == "validate":
         keys(params, ("source",))
@@ -79,8 +82,25 @@ def main():
     for operation in ("job.status", "job.cancel", "generation.inspect"):
         command = sub.add_parser(operation)
         command.add_argument("--job-id", required=operation != "generation.inspect")
+    meshgen = sub.add_parser("meshgen").add_subparsers(dest="meshgen_operation", required=True)
+    check = meshgen.add_parser("check-config", help="Read-only configuration planning check.")
+    check.add_argument("--profile", required=True)
+    check.add_argument("--print-effective", action="store_true")
     args = parser.parse_args()
     try:
+        if args.operation == "meshgen":
+            # Dispatch before constructing BuildService: its constructor creates
+            # state directories and acquires the exclusive build session lock.
+            from .meshgen_config import load_config
+            resolved = load_config(args.project, args.profile)
+            result = {"config_digest": resolved.config_digest, "schema_version": 1,
+                      "profile": args.profile, "sources": resolved.sources,
+                      "differences": resolved.differences, "findings": resolved.findings,
+                      "backend_validation": "unavailable", "budgets_calibrated": False}
+            if args.print_effective:
+                result["effective_config"] = resolved.effective
+            print(canonical({"ok": True, "result": result}).decode())
+            return 0
         with BuildService(args.project, args.toolchain, timeout=args.timeout) as service:
             if args.operation == "serve":
                 serve(service)
