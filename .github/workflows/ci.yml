@@ -94,7 +94,7 @@ jobs:
         run: python tools/ci/qualification_capture.py write --lane linux-gcc --expected-sha "$QUALIFICATION_EXPECTED_SHA" --binary build/release/bin/common_tests --junit build/release/ctest.junit.xml --output build/release/qualification-capture.json
       - name: Upload manual qualification evidence
         if: always() && (github.event_name == 'workflow_dispatch' && inputs.qualification_capture)
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: qualification-linux-gcc-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
@@ -104,7 +104,7 @@ jobs:
           retention-days: 30
       - name: Upload test evidence
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: linux-gcc-test-evidence-${{ github.sha }}
           path: |
@@ -116,7 +116,7 @@ jobs:
           retention-days: 14
       - name: Upload installed prefab generations and receipts
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: linux-gcc-prefab-runtime-${{ github.sha }}
           path: build/release/test-artifacts/prefab-runtime
@@ -239,7 +239,7 @@ jobs:
           python3 tools/ci/check_ctest_junit.py build/release/ctest-pilot.junit.xml --minimum-tests 2
       - name: Upload Diligent test evidence
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: diligent-rhi-test-evidence-${{ github.sha }}
           path: |
@@ -351,7 +351,7 @@ jobs:
         run: python tools/ci/qualification_capture.py write --lane windows-msvc --expected-sha "$env:QUALIFICATION_EXPECTED_SHA" --binary build/release/bin/common_tests.exe --junit build/release/ctest.junit.xml --output build/release/qualification-capture.json
       - name: Upload manual qualification evidence
         if: always() && (github.event_name == 'workflow_dispatch' && inputs.qualification_capture)
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: qualification-windows-msvc-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
@@ -361,7 +361,7 @@ jobs:
           retention-days: 30
       - name: Upload test evidence
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: windows-msvc-test-evidence-${{ github.sha }}
           path: |
@@ -372,7 +372,7 @@ jobs:
           retention-days: 14
       - name: Upload native worldgen diagnostic
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: windows-msvc-worldgen-diagnostic-${{ github.sha }}
           path: build/release/worldgen-diagnostic
@@ -505,7 +505,7 @@ jobs:
         run: python tools/ci/qualification_capture.py write --lane windows-ucrt64 --expected-sha "$QUALIFICATION_EXPECTED_SHA" --binary build/release/bin/common_tests.exe --junit build/release/ctest.junit.xml --output build/release/qualification-capture.json
       - name: Upload manual qualification evidence
         if: always() && (github.event_name == 'workflow_dispatch' && inputs.qualification_capture)
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: qualification-windows-ucrt64-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
@@ -515,7 +515,7 @@ jobs:
           retention-days: 30
       - name: Upload test evidence
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: windows-ucrt64-test-evidence-${{ github.sha }}
           path: |
