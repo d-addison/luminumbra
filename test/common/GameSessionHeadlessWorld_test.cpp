@@ -2346,23 +2346,26 @@ TEST(GameSessionHeadlessWorldTest, BoundedBootSaveAsTransfersDiskOnlyAuthorityAn
 }
 
 namespace {
-Luminumbra::Chunk* g_chunk_revision_during_commit = nullptr;
+Luminumbra::Chunk*& ChunkRevisionDuringCommit() {
+    static Luminumbra::Chunk* chunk = nullptr;
+    return chunk;
+}
 void ChangeChunkAtIndexPublication(const char* step, const fs::path& path) {
-    if (g_chunk_revision_during_commit && std::string(step) == "before-replace" &&
+    if (ChunkRevisionDuringCommit() && std::string(step) == "before-replace" &&
         path.filename() == "snapshot.json") {
-        g_chunk_revision_during_commit->sdf_data.front() -= 1.0f;
-        g_chunk_revision_during_commit->mark_voxel_data_dirty();
-        g_chunk_revision_during_commit->mark_water_state_dirty();
+        ChunkRevisionDuringCommit()->sdf_data.front() -= 1.0f;
+        ChunkRevisionDuringCommit()->mark_voxel_data_dirty();
+        ChunkRevisionDuringCommit()->mark_water_state_dirty();
     }
 }
 struct ChunkRevisionHook {
     explicit ChunkRevisionHook(Luminumbra::Chunk* chunk) {
-        g_chunk_revision_during_commit = chunk;
+        ChunkRevisionDuringCommit() = chunk;
         P::set_snapshot_step_hook_for_testing(&ChangeChunkAtIndexPublication);
     }
     ~ChunkRevisionHook() {
         P::set_snapshot_step_hook_for_testing(nullptr);
-        g_chunk_revision_during_commit = nullptr;
+        ChunkRevisionDuringCommit() = nullptr;
     }
 };
 } // namespace

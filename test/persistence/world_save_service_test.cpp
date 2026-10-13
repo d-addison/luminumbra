@@ -239,7 +239,7 @@ TEST(WorldSaveService, ClockMetadataValidationPrecedesEveryWrite) {
     const auto valid = metadata.dump(4) + "\n";
     ASSERT_TRUE(WorldSaveService::save_metadata(valid, save_dir.path));
     EXPECT_EQ(read(), valid);
-    const auto index_path = WorldSaveService::snapshot_index_path(save_dir.path);
+    const auto index_path = Luminumbra::Persistence::snapshot_index_path(save_dir.path);
     ASSERT_TRUE(std::filesystem::exists(index_path));
     std::ifstream index_file(index_path, std::ios::binary);
     const std::string index_before(std::istreambuf_iterator<char>{index_file}, {});
