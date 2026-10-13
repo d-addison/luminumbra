@@ -1428,7 +1428,7 @@ void GameSession::RunRegionScheduler(std::uint64_t current_tick) {
                 ? std::optional<std::span<const Vec3>>(*m_replicatedSimulationAnchors)
                 : std::nullopt;
         // Built lazily on the first probe call of this tick.
-        std::optional<std::set<RegionKey>> resident_regions;
+        std::optional<std::set<RegionKey>> owned_regions;
         try {
             m_regionSchedule = m_activeRegionLedger.schedule(
                 m_worldClock,
@@ -1447,18 +1447,17 @@ void GameSession::RunRegionScheduler(std::uint64_t current_tick) {
                                                         m_groundObjects.region_bytes(key)});
                 },
                 // Later slices extend this probe with pages, creatures, plants and water debt.
-                [this, &resident_regions](RegionKey key) {
-                    for (const auto& entry : m_regionWork)
-                        if (entry.key == key)
-                            return true;
+                [this, &owned_regions](RegionKey key) {
                     if (m_groundObjects.owns_region(key))
                         return true;
-                    if (!resident_regions) {
-                        resident_regions.emplace();
+                    if (!owned_regions) {
+                        owned_regions.emplace();
+                        for (const auto& entry : m_regionWork)
+                            owned_regions->insert(entry.key);
                         for (const auto& coords : m_worldSystem->durable_chunk_inventory()) {
                             int rx = 0, rz = 0;
                             Persistence::WorldSaveService::region_coords_for_chunk(coords, rx, rz);
-                            resident_regions->insert(RegionKey{rx, rz});
+                            owned_regions->insert(RegionKey{rx, rz});
                         }
                         for (const auto& chunk : m_worldSystem->snapshot_authoritative_chunks()) {
                             if (!chunk ||
@@ -1467,10 +1466,10 @@ void GameSession::RunRegionScheduler(std::uint64_t current_tick) {
                             int rx = 0, rz = 0;
                             Persistence::WorldSaveService::region_coords_for_chunk(
                                 chunk->get_coords(), rx, rz);
-                            resident_regions->insert(RegionKey{rx, rz});
+                            owned_regions->insert(RegionKey{rx, rz});
                         }
                     }
-                    return resident_regions->contains(key);
+                    return owned_regions->contains(key);
                 });
             m_regionWork.clear();
         } catch (const std::exception& error) {

@@ -10,6 +10,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <limits>
@@ -456,8 +457,8 @@ TEST(WorldSaveService, RegionDigestIgnoresEmptyGroundBytesAndSeparatesNonEmptyBy
 TEST(WorldSaveServiceTest, PublicRegionDigestRejectsUnsupportedKeysBeforeDurableRead) {
     using Luminumbra::world::RegionKey;
     const Luminumbra::Persistence::RegionDigestInputs inputs{};
-    const auto missing_save = MakeTempSaveDir("invalid_digest_key");
-    std::filesystem::remove_all(missing_save);
+    const TempSaveDir root("invalid_digest_key");
+    const auto missing_save = root.path / "missing";
     for (const RegionKey key : {RegionKey{std::numeric_limits<std::int32_t>::min(), 0},
                                 RegionKey{std::numeric_limits<std::int32_t>::max(), 0},
                                 RegionKey{0, std::numeric_limits<std::int32_t>::min()},
@@ -466,12 +467,31 @@ TEST(WorldSaveServiceTest, PublicRegionDigestRejectsUnsupportedKeysBeforeDurable
                                 RegionKey{32768, 0},
                                 RegionKey{0, -32769},
                                 RegionKey{0, 32768}}) {
-        EXPECT_THROW(WorldSaveService::region_simulation_digest(missing_save, key, inputs),
+        EXPECT_THROW((void)WorldSaveService::region_simulation_digest({}, key, inputs),
+                     std::invalid_argument);
+        EXPECT_THROW((void)WorldSaveService::region_simulation_digest(missing_save, key, inputs),
                      std::invalid_argument);
     }
-    EXPECT_FALSE(std::filesystem::exists(missing_save));
-    for (const RegionKey key :
-         {RegionKey{-32768, -32768}, RegionKey{32767, 32767}, RegionKey{0, 0}}) {
-        EXPECT_NO_THROW(WorldSaveService::region_simulation_digest({}, key, inputs));
+    const auto empty_digest = WorldSaveService::region_simulation_digest({}, {0, 0}, inputs);
+    for (const RegionKey key : {RegionKey{-32768, -32768},
+                                RegionKey{-32768, 32767},
+                                RegionKey{32767, -32768},
+                                RegionKey{32767, 32767},
+                                RegionKey{0, 0}}) {
+        EXPECT_EQ(WorldSaveService::region_simulation_digest({}, key, inputs), empty_digest);
+        EXPECT_EQ(WorldSaveService::region_simulation_digest(missing_save, key, inputs),
+                  empty_digest);
+        WorldStreamingState region;
+        const auto chunk =
+            AddFixtureChunk(region, IVec3(key.x * 32, 0, key.z * 32), ChunkState::Idle, 1u);
+        chunk->mark_voxel_data_dirty();
+        const Luminumbra::Persistence::RegionDigestInputs edited_inputs{{chunk}, {}, {}, {}};
+        const auto expected_digest =
+            std::stoull(Luminumbra::Persistence::ComputeRegionContentHash(region), nullptr, 16);
+        EXPECT_EQ(WorldSaveService::region_simulation_digest({}, key, edited_inputs),
+                  expected_digest);
+        EXPECT_EQ(WorldSaveService::region_simulation_digest(missing_save, key, edited_inputs),
+                  expected_digest);
     }
+    EXPECT_FALSE(std::filesystem::exists(missing_save));
 }
