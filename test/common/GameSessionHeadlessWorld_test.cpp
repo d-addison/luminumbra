@@ -2811,14 +2811,14 @@ TEST(GameSessionHeadlessWorldTest, DisplacementWaterPromotesBeforeFreezeAndSurvi
         EXPECT_NE(frozen_record.frozen_digest, generated_digest);
         const FrozenWaterSnapshot evolved{
             chunk->water_depth_mm, chunk->water_bed_mm, chunk->water_edge_flux};
-        ASSERT_NO_FATAL_FAILURE(
-            PersistRegionalWaterBeforeRetention(session, chunk, work_region, coords, frozen_record));
+        ASSERT_NO_FATAL_FAILURE(PersistRegionalWaterBeforeRetention(
+            session, chunk, work_region, coords, frozen_record));
 
         GameSession reopened;
         ASSERT_NO_FATAL_FAILURE(
             ReopenRegionalWaterBeforeRetention(session, reopened, root, jobs, coords));
-        ASSERT_NO_FATAL_FAILURE(
-            TickRegionalWaterRetention(session, reopened, water_region, work_region, frozen_record));
+        ASSERT_NO_FATAL_FAILURE(TickRegionalWaterRetention(
+            session, reopened, water_region, work_region, frozen_record));
         ASSERT_NO_FATAL_FAILURE(AssertDurableWaterContinuation(
             session, reopened, chunk, coords, water_region, frozen_record, evolved));
         ASSERT_TRUE(session.SaveWorldState());
