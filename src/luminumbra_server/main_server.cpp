@@ -31,6 +31,7 @@
 #include "luminumbra_common/components/CoreComponents.h"
 #include "luminumbra_common/components/InstinctComponents.h"
 #include "luminumbra_common/core/CrashReport.h"
+#include "luminumbra_common/core/Environment.h"
 #include "luminumbra_common/core/Log.h"
 #include "luminumbra_common/net/GnsTransport.h" // body #ifdef LUMINUMBRA_ENABLE_GNS
 #include "luminumbra_common/net/LockstepSession.h"
@@ -268,8 +269,10 @@ int main(int argc, char* argv[]) {
     }
 
     {
-        const fs::path crash_dir =
-            options.crash_dir.empty() ? fs::path("logs") / "crash" : fs::path(options.crash_dir);
+        const auto crash_dir_environment =
+            Luminumbra::Core::ReadEnvironment("LUMINUMBRA_CRASH_DIR");
+        const fs::path crash_dir = ResolveServerCrashDirectory(
+            options.crash_dir, crash_dir_environment ? crash_dir_environment->c_str() : nullptr);
         if (luminumbra::crash::InstallCrashCapture(crash_dir, "luminumbra_server_app")) {
             LUMINUMBRA_CORE_INFO("Crash report path: {}",
                                  luminumbra::crash::CrashReportPath().string());

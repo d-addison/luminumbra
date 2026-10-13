@@ -270,10 +270,10 @@ class HarnessTestCase(unittest.TestCase):
             args.append("--allow-no-dumps")
         return args
 
-    def preserve_fixture_failure(self) -> tuple[Path | None, list[str]]:
+    def preserve_fixture_failure(self, diagnostic_dir: Path | None = None) -> tuple[Path | None, list[str]]:
         """Keep synthetic fixture evidence outside TemporaryDirectory cleanup."""
         errors = []
-        base = os.environ.get(FIXTURE_DIAGNOSTIC_ENV)
+        base = diagnostic_dir or os.environ.get(FIXTURE_DIAGNOSTIC_ENV)
         try:
             parent = Path(base).resolve() if base else Path(tempfile.gettempdir()).resolve()
             # A descendant would recursively copy the copy itself.
@@ -288,7 +288,8 @@ class HarnessTestCase(unittest.TestCase):
             return None, errors
 
     def run_raw(self, args: list[str], extra_env: dict[str, str] | None = None,
-                timeout: float = 120, ready_file: Path | None = None):
+                timeout: float = 120, ready_file: Path | None = None,
+                diagnostic_dir: Path | None = None):
         env = dict(os.environ)
         env.update(extra_env or {})
         command = [sys.executable, "-I", "-X", "utf8", str(SCRIPT), *args]
@@ -329,7 +330,7 @@ class HarnessTestCase(unittest.TestCase):
         output = stdout_path.read_text(encoding="utf-8", errors="replace")
         error = stderr_path.read_text(encoding="utf-8", errors="replace")
         if expired:
-            retained, preservation_errors = self.preserve_fixture_failure()
+            retained, preservation_errors = self.preserve_fixture_failure(diagnostic_dir)
             label = startup_failure or f"fixture watchdog expired after {min(timeout, FIXTURE_MAX_WAIT_SECONDS)}s"
             self.fail(
                 f"{label}; "
@@ -537,10 +538,10 @@ class FixtureWatchdogTest(HarnessTestCase):
         with tempfile.TemporaryDirectory(prefix="rq-watchdog-retained-") as destination:
             args = [*self.base_args(), "--count", "2", "--timeout-seconds", "600",
                     "--", "--fake=hang"]
-            with mock.patch.dict(os.environ, {FIXTURE_DIAGNOSTIC_ENV: destination}):
-                with self.assertRaisesRegex(AssertionError, "fixture watchdog expired"):
-                    self.run_raw(args, timeout=1, ready_file=self.root / "ready",
-                                 extra_env={"LUMINUMBRA_FIXTURE_READY_FILE": str(self.root / "ready")})
+            with self.assertRaisesRegex(AssertionError, "fixture watchdog expired"):
+                self.run_raw(args, timeout=1, ready_file=self.root / "ready",
+                             extra_env={"LUMINUMBRA_FIXTURE_READY_FILE": str(self.root / "ready")},
+                             diagnostic_dir=Path(destination))
             retained = list(Path(destination).glob("fixture-watchdog-*/fixture"))
             self.assertEqual(len(retained), 1)
             receipt = json.loads((retained[0] / "out dir" / "receipt.json").read_text())
@@ -761,13 +762,13 @@ if os.name == "posix":
             real_snapshot = rq.snapshot_files
             recursive_calls: list[Path] = []
 
-            def listing_fails_after_crash(root, recursive, skip=None):  # type: ignore[no-untyped-def]
+            def listing_fails_after_crash(root, recursive, skip=None, errors=None):  # type: ignore[no-untyped-def]
                 # The first recursive snapshot is taken before the child runs; the next is post-crash.
-                if recursive:
+                if recursive and root == self.work:
                     recursive_calls.append(root)
                     if len(recursive_calls) > 1:
                         raise PermissionError("listing denied")
-                return real_snapshot(root, recursive, skip)
+                return real_snapshot(root, recursive, skip, errors)
 
             with mock.patch.object(rq, "snapshot_files", side_effect=listing_fails_after_crash):
                 code = rq.run_qualification(
@@ -875,6 +876,369 @@ class RunDirectoryAndSnapshotTest(unittest.TestCase):
         copies = rq.copy_changed_files(folder, before, self.root / "iter-1" / "wer")
         self.assertEqual([Path(c).name for c in copies], ["new.dmp"])
         self.assertEqual(Path(copies[0]).read_bytes(), b"new")
+
+
+    def test_snapshot_stat_failure_propagates_without_error_list(self) -> None:
+        folder = self.root / "dumps"
+        folder.mkdir()
+        denied = folder / "denied.dmp"
+        denied.write_bytes(b"dump")
+        real_stat = Path.stat
+
+        def selective_stat(path, *args, **kwargs):
+            if path == denied:
+                raise PermissionError("inspection denied")
+            return real_stat(path, *args, **kwargs)
+
+        with mock.patch.object(Path, "stat", selective_stat):
+            with self.assertRaisesRegex(PermissionError, "inspection denied"):
+                rq.snapshot_files(folder, recursive=False)
+
+    def test_snapshot_traversal_errors_preserve_healthy_entries(self) -> None:
+        folder = self.root / "dumps"
+        denied = folder / "denied"
+        denied.mkdir(parents=True)
+        healthy = folder / "healthy.dmp"
+        healthy.write_bytes(b"healthy")
+        real_scandir = os.scandir
+
+        def selective_scandir(path):
+            if Path(path) == denied:
+                raise PermissionError(13, "traversal denied", str(denied))
+            return real_scandir(path)
+
+        errors: list[str] = []
+        with mock.patch.object(rq.os, "scandir", side_effect=selective_scandir):
+            snapshot = rq.snapshot_files(folder, recursive=True, errors=errors)
+            with self.assertRaisesRegex(PermissionError, "traversal denied"):
+                rq.snapshot_files(folder, recursive=True)
+        self.assertEqual(list(snapshot), [str(healthy)])
+        self.assertEqual(len(errors), 1)
+        self.assertIn(str(denied), errors[0])
+        self.assertIn("PermissionError", errors[0])
+        self.assertIn("traversal denied", errors[0])
+
+    def test_snapshot_root_inspection_failure_is_reported_or_propagated(self) -> None:
+        missing = self.root / "missing dumps"
+        errors: list[str] = []
+        self.assertEqual(rq.snapshot_files(missing, False, errors=errors), {})
+        self.assertEqual(len(errors), 1)
+        self.assertIn(str(missing), errors[0])
+        self.assertIn("FileNotFoundError", errors[0])
+        with self.assertRaises(FileNotFoundError):
+            rq.snapshot_files(missing, False)
+
+    def test_dump_settle_snapshot_reports_stat_errors(self) -> None:
+        folder = self.root / "dumps"
+        folder.mkdir()
+        denied = folder / "denied.dmp"
+        denied.write_bytes(b"dump")
+        (folder / "healthy.dmp").write_bytes(b"healthy")
+        real_stat = Path.stat
+
+        def selective_stat(path, *args, **kwargs):
+            if path == denied:
+                raise PermissionError("settle inspection denied")
+            return real_stat(path, *args, **kwargs)
+
+        errors: list[str] = []
+        # Fixed time and a mocked pause make the two stable snapshots deterministic.
+        with mock.patch.object(Path, "stat", selective_stat), \
+                mock.patch.object(rq.time, "monotonic", return_value=0.0), \
+                mock.patch.object(rq.time, "sleep"):
+            rq.wait_for_dump_settle(folder, {}, 30.0, errors)
+        self.assertEqual(len(errors), 2)
+        self.assertTrue(all(str(denied) in error and "PermissionError: settle inspection denied" in error
+                            for error in errors))
+
+    def test_receipt_ownership_uses_canonical_parent(self) -> None:
+        parent = self.root / "receipts"
+        parent.mkdir()
+        (parent / "nested").mkdir()
+        receipt = parent / "receipt.json"
+        alias = parent / "nested" / ".." / receipt.name
+        self.assertEqual(rq.receipt_ownership_path(receipt), rq.receipt_ownership_path(alias))
+
+    def test_receipt_ownership_file_is_excluded_from_artifact_scans(self) -> None:
+        receipt = self.root / "receipt.json"
+        ownership = rq.receipt_ownership_path(receipt)
+        ownership.write_bytes(b"owner")
+        healthy = self.root / "healthy.dmp"
+        healthy.write_bytes(b"dump")
+        skip = rq.harness_output_skip(self.root / "run", receipt)
+        self.assertEqual(list(rq.snapshot_files(self.root, False, skip)), [str(healthy)])
+
+
+class QualificationSafetyTest(HarnessTestCase):
+    """Deterministic receipt tests; no native child, registry, or core access."""
+
+    def safety_args(self, count: int = 3, allow: bool = True, folder: Path | None = None):
+        arguments = ["--exe", str(self.exe), "--cwd", str(self.work),
+                     "--receipt", str(self.receipt), "--count", str(count)]
+        if allow:
+            arguments.append("--allow-no-dumps")
+        if folder is not None:
+            arguments.extend(["--wer-dump-folder", str(folder)])
+        return rq.parse_args(arguments)
+
+    def clean_child(self, command, cwd, env, log_path, timeout, core_target):
+        self.assertEqual(command[0], str(self.exe))
+        self.assertEqual(cwd, self.work)
+        report = Path(next(arg.split("json:", 1)[1] for arg in command
+                           if arg.startswith("--gtest_output=json:")))
+        report.write_text(json.dumps({
+            "tests": 1, "failures": 0, "errors": 0,
+            "testsuites": [{"testsuite": [{"name": "Case", "status": "RUN", "result": "COMPLETED"}]}],
+        }), encoding="utf-8")
+        log_path.write_text("simulated clean child", encoding="utf-8")
+        return {"exit_code": 0, "signal": None, "timed_out": False,
+                "duration_seconds": 0.0, "status": "exit:0", "launch_error": None,
+                "cleanup_errors": []}
+
+    def qualify(self, args=None, child=None, query=None):
+        with mock.patch.object(rq, "IS_WINDOWS", True), \
+                mock.patch.object(rq, "run_iteration", side_effect=child or self.clean_child) as launch:
+            code = rq.run_qualification(args or self.safety_args(), [], query=query or (lambda key: (1, "")))
+        return code, launch
+
+    def assert_finalized(self, status: str) -> dict:
+        receipt = self.load_receipt()
+        self.assertEqual(receipt["status"], status)
+        self.assertIsNotNone(receipt["end_time"])
+        self.assertFalse(rq.receipt_ownership_path(self.receipt).exists())
+        return receipt
+
+    def test_unchanged_executable_is_checked_before_and_after_every_child(self) -> None:
+        with mock.patch.object(rq, "sha256_file", wraps=rq.sha256_file) as hash_file:
+            code, launch = self.qualify()
+        self.assertEqual(code, 0)
+        self.assertEqual(launch.call_count, 3)
+        self.assertEqual(hash_file.call_count, 7)
+        receipt = self.assert_finalized("passed")
+        self.assertTrue(all(entry["executable_identity_error"] is None for entry in receipt["iterations"]))
+
+    def test_replacement_between_iterations_refuses_next_launch(self) -> None:
+        real_write = rq.write_receipt
+
+        def replace_after_first_receipt(path, receipt):
+            real_write(path, receipt)
+            if receipt["status"] == "running" and len(receipt["iterations"]) == 1:
+                self.exe.write_bytes(b"replacement between iterations")
+
+        with mock.patch.object(rq, "write_receipt", side_effect=replace_after_first_receipt):
+            code, launch = self.qualify()
+        self.assertEqual(code, 1)
+        self.assertEqual(launch.call_count, 1)
+        receipt = self.assert_finalized("failed")
+        self.assertEqual(len(receipt["iterations"]), 2)
+        self.assertEqual(receipt["failure_count"], 1)
+        self.assertEqual(receipt["first_failure"]["index"], 2)
+        refused = receipt["iterations"][1]
+        self.assertIsNone(refused["exit_code"])
+        self.assertIsNone(refused["signal"])
+        self.assertFalse(refused["timed_out"])
+        self.assertEqual(refused["status"], "executable_identity_error")
+        self.assertIn("before launch", receipt["first_failure"]["failure_reason"])
+        self.assertIn("SHA-256 mismatch", receipt["failure_reason"])
+
+    def test_replacement_during_child_fails_even_after_clean_exit(self) -> None:
+        def replacing_child(*arguments):
+            result = self.clean_child(*arguments)
+            self.exe.write_bytes(b"replacement during child")
+            return result
+
+        code, launch = self.qualify(child=replacing_child)
+        self.assertEqual(code, 1)
+        self.assertEqual(launch.call_count, 1)
+        receipt = self.assert_finalized("failed")
+        self.assertEqual(len(receipt["iterations"]), 1)
+        self.assertEqual(receipt["failure_count"], 1)
+        self.assertEqual(receipt["first_failure"]["index"], 1)
+        entry = receipt["iterations"][0]
+        self.assertEqual(entry["exit_code"], 0)
+        self.assertEqual(entry["status"], "exit:0")
+        self.assertIsNone(entry["signal"])
+        self.assertFalse(entry["timed_out"])
+        self.assertTrue(entry["failed"])
+        self.assertIn("after child", entry["failure_reason"])
+        self.assertIn("SHA-256 mismatch", receipt["first_failure"]["failure_reason"])
+        self.assertEqual(receipt["exit_code_histogram"], {"exit:0": 1})
+
+    def test_unreadable_executable_before_launch_finalizes_without_child_exit(self) -> None:
+        real_hash = rq.sha256_file
+        with mock.patch.object(rq, "sha256_file", side_effect=[real_hash(self.exe), PermissionError("hash denied")]):
+            code, launch = self.qualify()
+        self.assertEqual(code, 1)
+        launch.assert_not_called()
+        receipt = self.assert_finalized("failed")
+        self.assertEqual(len(receipt["iterations"]), 1)
+        self.assertEqual(receipt["first_failure"]["index"], 1)
+        self.assertIsNone(receipt["iterations"][0]["exit_code"])
+        self.assertIn("PermissionError: hash denied", receipt["failure_reason"])
+
+    def test_unreadable_initial_executable_hash_finalizes_preflight(self) -> None:
+        with mock.patch.object(rq, "sha256_file", side_effect=PermissionError("initial hash denied")):
+            code, launch = self.qualify()
+        self.assertEqual(code, rq.PREFLIGHT_EXIT_CODE)
+        launch.assert_not_called()
+        receipt = self.assert_finalized("PREFLIGHT_FAILED")
+        self.assertEqual(receipt["iterations"], [])
+        self.assertIsNone(receipt["exe"]["sha256"])
+        self.assertIn("executable identity initial hash", receipt["failure_reason"])
+        self.assertIn("PermissionError: initial hash denied", receipt["failure_reason"])
+
+    def test_unreadable_executable_after_child_retains_child_exit(self) -> None:
+        digest = rq.sha256_file(self.exe)
+        with mock.patch.object(rq, "sha256_file", side_effect=[digest, digest, PermissionError("hash denied")]):
+            code, launch = self.qualify()
+        self.assertEqual(code, 1)
+        self.assertEqual(launch.call_count, 1)
+        receipt = self.assert_finalized("failed")
+        self.assertEqual(len(receipt["iterations"]), 1)
+        self.assertEqual(receipt["first_failure"]["index"], 1)
+        self.assertEqual(receipt["iterations"][0]["exit_code"], 0)
+        self.assertEqual(receipt["iterations"][0]["status"], "exit:0")
+        self.assertIn("after child", receipt["failure_reason"])
+        self.assertIn("PermissionError: hash denied", receipt["failure_reason"])
+
+    def dump_query(self, folder: Path):
+        return lambda key: (0, WerPreflightTest.reg_output(str(folder)))
+
+    def test_snapshot_stat_errors_in_baseline_and_post_run_keep_healthy_artifacts(self) -> None:
+        folder = self.root / "dumps"
+        folder.mkdir()
+        denied = folder / "denied.dmp"
+        denied.write_bytes(b"unreadable")
+        healthy = folder / "healthy.dmp"
+        real_stat = Path.stat
+
+        def selective_stat(path, *args, **kwargs):
+            if path == denied:
+                raise PermissionError("inspection denied")
+            return real_stat(path, *args, **kwargs)
+
+        def child_with_dump(*arguments):
+            healthy.write_bytes(b"healthy dump")
+            return self.clean_child(*arguments)
+
+        with mock.patch.object(Path, "stat", selective_stat):
+            code, launch = self.qualify(self.safety_args(count=1, folder=folder), child_with_dump,
+                                       self.dump_query(folder))
+        self.assertEqual(code, 0)
+        self.assertEqual(launch.call_count, 1)
+        receipt = self.assert_finalized("passed")
+        entry = receipt["iterations"][0]
+        self.assertEqual(entry["status"], "exit:0")
+        self.assertFalse(entry["failed"])
+        self.assertEqual(receipt["collection_error_count"], 2)
+        self.assertEqual(len(entry["collection_errors"]), 2)
+        self.assertTrue(all(str(denied) in error and "PermissionError: inspection denied" in error
+                            for error in entry["collection_errors"]))
+        self.assertEqual([Path(path).name for path in entry["crash_artifacts"]], ["healthy.dmp"])
+        self.assertEqual(Path(entry["crash_artifacts"][0]).read_bytes(), b"healthy dump")
+
+    def check_dump_folder_failure(self, allow: bool) -> None:
+        folder = self.root / "denied dumps"
+        real_mkdir = Path.mkdir
+
+        def selective_mkdir(path, *args, **kwargs):
+            if path == folder:
+                raise PermissionError("dump mkdir denied")
+            return real_mkdir(path, *args, **kwargs)
+
+        with mock.patch.object(Path, "mkdir", selective_mkdir):
+            code, launch = self.qualify(self.safety_args(count=1, allow=allow, folder=folder),
+                                       query=self.dump_query(folder))
+        receipt = self.assert_finalized("passed" if allow else "PREFLIGHT_FAILED")
+        self.assertEqual(code, 0 if allow else rq.PREFLIGHT_EXIT_CODE)
+        self.assertEqual(launch.call_count, 1 if allow else 0)
+        self.assertEqual(len(receipt["iterations"]), 1 if allow else 0)
+        wer = receipt["environment"]["wer"]
+        self.assertFalse(wer["configured"])
+        self.assertIn(str(folder), wer["dump_folder_error"])
+        self.assertIn("PermissionError: dump mkdir denied", wer["reason"])
+        self.assertEqual(receipt["environment"]["allow_no_dumps"], allow)
+        if not allow:
+            self.assertIn("dump mkdir denied", receipt["failure_reason"])
+
+    def test_dump_folder_creation_failure_finalizes_preflight_without_launch(self) -> None:
+        self.check_dump_folder_failure(False)
+
+    def test_dump_folder_creation_failure_with_opt_out_preserves_diagnostic(self) -> None:
+        self.check_dump_folder_failure(True)
+
+    def test_competing_receipt_owner_is_refused_before_run_directory_or_child(self) -> None:
+        self.receipt.parent.mkdir()
+        ownership = rq.receipt_ownership_path(self.receipt)
+        fd = os.open(ownership, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            with mock.patch.object(rq, "make_run_directory") as create_run:
+                code, launch = self.qualify()
+            self.assertEqual(code, 2)
+            create_run.assert_not_called()
+            launch.assert_not_called()
+            self.assertTrue(ownership.is_file())
+            self.assertFalse(self.receipt.exists())
+            self.assertEqual(list(self.receipt.parent.iterdir()), [ownership])
+        finally:
+            os.close(fd)
+            ownership.unlink()
+
+    def test_existing_receipt_is_preserved_byte_for_byte(self) -> None:
+        self.receipt.parent.mkdir()
+        original = b"existing receipt\r\n\x00"
+        self.receipt.write_bytes(original)
+        with mock.patch.object(rq, "make_run_directory") as create_run:
+            code, launch = self.qualify()
+        self.assertEqual(code, 2)
+        create_run.assert_not_called()
+        launch.assert_not_called()
+        self.assertEqual(self.receipt.read_bytes(), original)
+        self.assertFalse(rq.receipt_ownership_path(self.receipt).exists())
+
+    def test_existing_receipt_symlink_is_refused_including_dangling_link(self) -> None:
+        self.receipt.parent.mkdir()
+        target = self.root / "missing receipt"
+        try:
+            self.receipt.symlink_to(target)
+        except (OSError, NotImplementedError) as exc:
+            self.skipTest(f"symlink creation unavailable: {exc}")
+        with mock.patch.object(rq, "make_run_directory") as create_run:
+            code, launch = self.qualify()
+        self.assertEqual(code, 2)
+        create_run.assert_not_called()
+        launch.assert_not_called()
+        self.assertTrue(self.receipt.is_symlink())
+        self.assertFalse(target.exists())
+        self.assertFalse(rq.receipt_ownership_path(self.receipt).exists())
+
+    def test_distinct_receipts_work_while_another_receipt_is_owned(self) -> None:
+        self.receipt.parent.mkdir()
+        ownership = rq.receipt_ownership_path(self.receipt)
+        fd = os.open(ownership, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            self.receipt = self.receipt.with_name("independent.json")
+            code, launch = self.qualify(self.safety_args(count=1))
+            self.assertEqual(code, 0)
+            self.assertEqual(launch.call_count, 1)
+            self.assert_finalized("passed")
+            self.assertTrue(ownership.is_file())
+        finally:
+            os.close(fd)
+            ownership.unlink()
+
+    def test_receipt_ownership_releases_after_preflight_failure(self) -> None:
+        code, launch = self.qualify(self.safety_args(allow=False))
+        self.assertEqual(code, rq.PREFLIGHT_EXIT_CODE)
+        launch.assert_not_called()
+        self.assert_finalized("PREFLIGHT_FAILED")
+
+    def test_receipt_ownership_releases_after_abort(self) -> None:
+        with self.assertRaisesRegex(KeyboardInterrupt, "controlled abort"):
+            self.qualify(child=lambda *args: (_ for _ in ()).throw(KeyboardInterrupt("controlled abort")))
+        receipt = self.assert_finalized("aborted")
+        self.assertEqual(receipt["iterations"], [])
+        self.assertIn("controlled abort", receipt["abort_reason"])
 
 
 class WerPreflightTest(unittest.TestCase):

@@ -35,6 +35,7 @@ import platform
 import re
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -187,28 +188,78 @@ def snapshot_files(
     root: Path | None,
     recursive: bool,
     skip: Callable[[Path], bool] | None = None,
+    errors: list[str] | None = None,
 ) -> dict[str, tuple[int, int]]:
-    """Map each file path to (size, mtime_ns). Rewritten files change their entry."""
-    if root is None or not root.is_dir():
+    """Map regular files to (size, mtime_ns); collect inspection errors or propagate them."""
+    if root is None:
         return {}
-    paths = root.rglob("*") if recursive else root.iterdir()
     result: dict[str, tuple[int, int]] = {}
-    for path in paths:
-        try:
-            if not path.is_file() or (skip is not None and skip(path)):
+
+    def inspection_error(path: Path, exc: OSError) -> None:
+        if errors is None:
+            raise exc
+        errors.append(f"{path}: {type(exc).__name__}: {exc}")
+
+    try:
+        root_stat = root.stat()
+    except OSError as exc:
+        inspection_error(root, exc)
+        return result
+    if not stat.S_ISDIR(root_stat.st_mode):
+        return result
+
+    def traversal_error(exc: OSError) -> None:
+        inspection_error(Path(exc.filename) if exc.filename else root, exc)
+
+    # os.walk's onerror reports directory traversal failures that rglob may hide.
+    paths = (
+        (Path(directory) / name
+         for directory, _directories, names in os.walk(root, onerror=traversal_error)
+         for name in names)
+        if recursive else root.iterdir()
+    )
+    try:
+        for path in paths:
+            if skip is not None and skip(path):
                 continue
-            stat = path.stat()
-        except OSError:
-            continue
-        result[str(path)] = (stat.st_size, stat.st_mtime_ns)
+            try:
+                file_stat = path.stat()
+            except OSError as exc:
+                inspection_error(path, exc)
+                continue
+            if stat.S_ISREG(file_stat.st_mode):
+                result[str(path)] = (file_stat.st_size, file_stat.st_mtime_ns)
+    except OSError as exc:
+        if errors is None:
+            raise
+        traversal_error(exc)
     return result
 
 
+def receipt_ownership_path(receipt: Path) -> Path:
+    """Use the canonical parent, preserving the receipt name even if it is a symlink."""
+    return receipt.parent.resolve() / f".{receipt.name}.owner"
+
+
+def executable_identity_problem(exe: Path, expected_sha256: str, phase: str) -> str | None:
+    try:
+        actual = sha256_file(exe)
+    except OSError as exc:
+        return f"executable identity {phase}: {exe}: {type(exc).__name__}: {exc}"
+    if actual != expected_sha256:
+        return (f"executable identity {phase}: {exe}: SHA-256 mismatch "
+                f"(expected {expected_sha256}, observed {actual})")
+    return None
+
+
 def harness_output_skip(run_dir: Path, receipt: Path) -> Callable[[Path], bool]:
-    """Skip this harness's own output (run directory, receipt, receipt temp files) when scanning cores."""
+    """Skip this harness's run directory, receipt, ownership file, and receipt temp files."""
+    ownership = receipt_ownership_path(receipt)
 
     def skip(path: Path) -> bool:
-        if path == receipt or path == run_dir or run_dir in path.parents:
+        if path == receipt or path == ownership or path == run_dir or run_dir in path.parents:
+            return True
+        if path.name == ownership.name and path.parent.resolve() == ownership.parent:
             return True
         return (
             path.parent == receipt.parent
@@ -283,7 +334,7 @@ def copy_changed_files(
     """
     copies: list[str] = []
     try:
-        changed = changed_files(before, snapshot_files(root, recursive, skip))
+        changed = changed_files(before, snapshot_files(root, recursive, skip, errors))
     except OSError as exc:
         if errors is None:
             raise
@@ -759,6 +810,8 @@ def write_receipt(path: Path, data: dict[str, Any]) -> None:
 
 
 def failure_reason(result: dict[str, Any], problem: str | None) -> str | None:
+    if result.get("executable_identity_error"):
+        return result["executable_identity_error"]
     if problem is not None:
         return f"gtest: {problem}"
     if result["status"] == "exit:0":
@@ -772,6 +825,7 @@ def run_indexed_iteration(
     index: int,
     run_dir: Path,
     exe: Path,
+    expected_sha256: str,
     gtest_filter: str,
     extra: list[str],
     cwd: Path | None,
@@ -781,6 +835,7 @@ def run_indexed_iteration(
     core_directory: Path | None,
     core_target: tuple[int, int] | None,
     core_skip: Callable[[Path], bool] | None,
+    dump_skip: Callable[[Path], bool] | None,
 ) -> dict[str, Any]:
     iter_dir = run_dir / f"iter-{index}"
     log_path = run_dir / f"iter-{index}.log"
@@ -800,11 +855,27 @@ def run_indexed_iteration(
         }
         return build_entry(index, log_path, gtest_json, crash_dir, [], result, None)
 
-    dump_before = snapshot_files(dump_folder, recursive=False)
-    core_before = snapshot_files(core_directory, recursive=True, skip=core_skip)
+    collection_errors: list[str] = []
+    dump_before = snapshot_files(dump_folder, recursive=False, skip=dump_skip, errors=collection_errors)
+    core_before = snapshot_files(core_directory, recursive=True, skip=core_skip, errors=collection_errors)
     command = build_command(exe, gtest_filter, extra, gtest_json)
     env = build_child_environment(dict(os.environ), crash_dir)
+    identity_error = executable_identity_problem(exe, expected_sha256, "before launch")
+    if identity_error is not None:
+        result = {
+            "exit_code": None,
+            "signal": None,
+            "timed_out": False,
+            "duration_seconds": 0.0,
+            "status": "executable_identity_error",
+            "executable_identity_error": identity_error,
+            "launch_error": None,
+            "cleanup_errors": [],
+        }
+        return build_entry(index, log_path, gtest_json, crash_dir, [], result, None, collection_errors)
     result = run_iteration(command, cwd, env, log_path, timeout, core_target)
+    # Preserve the child's actual exit fields, including its exit classification.
+    result["executable_identity_error"] = executable_identity_problem(exe, expected_sha256, "after child")
 
     problem: str | None = None
     if result["status"] == "exit:0":
@@ -813,19 +884,18 @@ def run_indexed_iteration(
             result["status"] = "gtest_invalid"
 
     # Collection problems are recorded on the iteration, which keeps its classification.
-    collection_errors: list[str] = []
     artifacts: list[str] = []
     try:
-        artifacts = sorted(str(path) for path in crash_dir.rglob("*") if path.is_file())
+        artifacts = sorted(snapshot_files(crash_dir, recursive=True, errors=collection_errors))
     except OSError as exc:
         collection_errors.append(f"crash directory listing: {type(exc).__name__}: {exc}")
     if IS_WINDOWS and dump_folder is not None and result["status"] not in ("exit:0", "timeout"):
         try:
-            wait_for_dump_settle(dump_folder, dump_before, DUMP_SETTLE_SECONDS)
+            wait_for_dump_settle(dump_folder, dump_before, DUMP_SETTLE_SECONDS, collection_errors, dump_skip)
         except OSError as exc:
             collection_errors.append(f"dump folder settle: {type(exc).__name__}: {exc}")
     artifacts += copy_changed_files(
-        dump_folder, dump_before, iter_dir / "wer", errors=collection_errors
+        dump_folder, dump_before, iter_dir / "wer", skip=dump_skip, errors=collection_errors
     )
     artifacts += copy_changed_files(
         core_directory, core_before, iter_dir / "core", recursive=True, skip=core_skip,
@@ -836,12 +906,18 @@ def run_indexed_iteration(
     )
 
 
-def wait_for_dump_settle(folder: Path, before: dict[str, tuple[int, int]], timeout: float) -> None:
+def wait_for_dump_settle(
+    folder: Path,
+    before: dict[str, tuple[int, int]],
+    timeout: float,
+    errors: list[str] | None = None,
+    skip: Callable[[Path], bool] | None = None,
+) -> None:
     """Wait until new dump files stop changing, so WER output is not copied half-written."""
     deadline = time.monotonic() + timeout
     previous: dict[str, tuple[int, int]] | None = None
     while time.monotonic() < deadline:
-        current = {path: stamp for path, stamp in snapshot_files(folder, False).items() if before.get(path) != stamp}
+        current = {path: stamp for path, stamp in snapshot_files(folder, False, skip, errors).items() if before.get(path) != stamp}
         if current and current == previous:
             return
         previous = current
@@ -891,6 +967,39 @@ def run_qualification(
 
     receipt_path = Path(os.path.abspath(args.receipt))
     receipt_path.parent.mkdir(parents=True, exist_ok=True)
+    receipt_path = receipt_path.parent.resolve() / receipt_path.name
+    ownership = receipt_ownership_path(receipt_path)
+    try:
+        ownership_fd = os.open(ownership, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except OSError as exc:
+        print(f"error: cannot own receipt {receipt_path}: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 2
+    try:
+        try:
+            receipt_path.lstat()
+        except FileNotFoundError:
+            pass
+        else:
+            print(f"error: receipt already exists; refusing to overwrite: {receipt_path}", file=sys.stderr)
+            return 2
+        return run_owned_qualification(args, extra, exe, receipt_path, query, core_limits, read_pattern)
+    finally:
+        try:
+            os.close(ownership_fd)
+        finally:
+            ownership.unlink()
+
+
+def run_owned_qualification(
+    args: argparse.Namespace,
+    extra: list[str],
+    exe: Path,
+    receipt_path: Path,
+    query: Callable[[str], tuple[int, str]],
+    core_limits: Callable[[], tuple[int, int]] | None,
+    read_pattern: Callable[[], str | None] | None,
+) -> int:
+    """Run only while this invocation holds exclusive receipt ownership."""
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
     try:
         run_dir = make_run_directory(receipt_path.parent, stamp, os.getpid())
@@ -914,7 +1023,16 @@ def run_qualification(
         environment["wer"] = preflight
         if preflight["configured"]:
             dump_folder = Path(os.path.abspath(args.wer_dump_folder))
-            dump_folder.mkdir(parents=True, exist_ok=True)
+            try:
+                dump_folder.mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                diagnostic = f"{dump_folder}: {type(exc).__name__}: {exc}"
+                preflight["dump_folder_error"] = diagnostic
+                preflight["configured"] = False
+                preflight["reason"] = f"dump folder could not be created: {diagnostic}"
+                dump_folder = None
+                if not args.allow_no_dumps:
+                    preflight_reason = preflight["reason"]
         elif not args.allow_no_dumps:
             preflight_reason = preflight["reason"]
     else:
@@ -938,11 +1056,17 @@ def run_qualification(
             core_directory = Path(posix["core_directory"])
             core_skip = core_collection_skip(run_dir, receipt_path, pattern)
 
+    try:
+        expected_sha256: str | None = sha256_file(exe)
+    except OSError as exc:
+        expected_sha256 = None
+        preflight_reason = f"executable identity initial hash: {exe}: {type(exc).__name__}: {exc}"
+
     receipt: dict[str, Any] = {
         "schema": SCHEMA,
         "label": LABEL,
         "command": build_command(exe, args.gtest_filter, extra, Path("<iter-N>") / "gtest.json"),
-        "exe": {"path": str(exe), "sha256": sha256_file(exe)},
+        "exe": {"path": str(exe), "sha256": expected_sha256},
         "platform": {
             "system": platform.system(),
             "release": platform.release(),
@@ -982,6 +1106,7 @@ def run_qualification(
                 index,
                 run_dir,
                 exe,
+                receipt["exe"]["sha256"],
                 args.gtest_filter,
                 extra,
                 cwd,
@@ -991,6 +1116,7 @@ def run_qualification(
                 core_directory,
                 core_target,
                 core_skip,
+                harness_output_skip(run_dir, receipt_path),
             )
             receipt["iterations"].append(entry)
             histogram[entry["status"]] += 1
@@ -1007,6 +1133,9 @@ def run_qualification(
             receipt["failure_count"] = failures
             receipt["collection_error_count"] = sum(len(item["collection_errors"]) for item in receipt["iterations"])
             write_receipt(receipt_path, receipt)
+            if entry.get("executable_identity_error"):
+                receipt["failure_reason"] = entry["executable_identity_error"]
+                break
         receipt["status"] = "failed" if failures else "passed"
     except BaseException as exc:
         receipt["status"] = "aborted"
@@ -1021,7 +1150,7 @@ def run_qualification(
     if receipt["collection_error_count"]:
         collection_note = f"; {receipt['collection_error_count']} artifact collection error(s) recorded"
     print(
-        f"{LABEL}: {summary} ({args.count - failures}/{args.count} iterations clean), "
+        f"{LABEL}: {summary} ({len(receipt['iterations']) - failures}/{args.count} iterations clean), "
         f"receipt {receipt_path}{collection_note}"
     )
     return 1 if failures else 0

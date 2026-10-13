@@ -1,16 +1,20 @@
 #include "luminumbra_common/core/CrashReport.h"
+#include "luminumbra_server/ServerCliOptions.h"
 
 #include <gtest/gtest.h>
 
 #include <chrono>
+#include <cstddef>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
 #include <string>
+#include <string_view>
 #include <system_error>
 #include <thread>
 #include <utility>
+#include <vector>
 
 #if !defined(_WIN32)
 #include <csignal>
@@ -55,6 +59,26 @@ std::string ReadAll(const fs::path& file) {
 #endif
 
 } // namespace
+
+TEST(CrashReportTest, ExplicitCrashDirectoryOverridesEnvironment) {
+    EXPECT_EQ(ResolveServerCrashDirectory("explicit/crash", "environment/crash"),
+              fs::path("explicit/crash"));
+}
+
+TEST(CrashReportTest, EnvironmentCrashDirectoryIsUsedForCapture) {
+    ScopedDirectory scratch(UniqueScratchDir("environment"));
+    const fs::path dir = scratch.path / "environment" / "crash";
+    const std::string environment_directory = dir.string();
+    const fs::path resolved = ResolveServerCrashDirectory("", environment_directory.c_str());
+    EXPECT_EQ(resolved, dir);
+    ASSERT_TRUE(luminumbra::crash::InstallCrashCapture(resolved, "crash_report_test"));
+    EXPECT_EQ(luminumbra::crash::CrashReportPath().parent_path(), dir);
+}
+
+TEST(CrashReportTest, NullOrEmptyEnvironmentUsesDefaultCrashDirectory) {
+    EXPECT_EQ(ResolveServerCrashDirectory("", nullptr), fs::path("logs") / "crash");
+    EXPECT_EQ(ResolveServerCrashDirectory("", ""), fs::path("logs") / "crash");
+}
 
 TEST(CrashReportTest, InstallCreatesDirectoryAndOpenableReportFile) {
     ScopedDirectory scratch(UniqueScratchDir("install"));
@@ -149,21 +173,33 @@ void ExpectChildCrashReport(const char* mode, int expected_signal, const char* s
 
     ScopedDirectory scratch(UniqueScratchDir("child"));
     fs::create_directories(scratch.path);
-    const std::string child_dir = scratch.path.string();
+    std::string child_dir_environment = std::string(kChildDirEnv) + "=" + scratch.path.string();
+    std::string child_mode_environment = std::string(kChildModeEnv) + "=" + mode;
+    std::vector<char*> child_environment;
+    for (char** entry = ::environ; *entry != nullptr; ++entry) {
+        const std::string_view value(*entry);
+        const std::string_view name = value.substr(0, value.find('='));
+        if (name != kChildDirEnv && name != kChildModeEnv) {
+            child_environment.push_back(*entry);
+        }
+    }
+    child_environment.push_back(child_dir_environment.data());
+    child_environment.push_back(child_mode_environment.data());
+    child_environment.push_back(nullptr);
     const std::string filter_arg = "--gtest_filter=CrashReportChild.*";
 
-    ASSERT_EQ(::setenv(kChildDirEnv, child_dir.c_str(), 1), 0);
-    ASSERT_EQ(::setenv(kChildModeEnv, mode, 1), 0);
     const pid_t pid = ::fork();
     ASSERT_GE(pid, 0);
     if (pid == 0) {
-        ::execl(self.c_str(), self.c_str(), filter_arg.c_str(), static_cast<char*>(nullptr));
+        ::execle(self.c_str(),
+                 self.c_str(),
+                 filter_arg.c_str(),
+                 static_cast<char*>(nullptr),
+                 child_environment.data());
         ::_exit(127);
     }
     int status = 0;
     const bool exited = WaitForChild(pid, status);
-    ::unsetenv(kChildDirEnv);
-    ::unsetenv(kChildModeEnv);
     ASSERT_TRUE(exited) << "child did not exit within 30 seconds; it was killed";
 
     ASSERT_TRUE(WIFSIGNALED(status)) << "child exited normally with status " << WEXITSTATUS(status);
