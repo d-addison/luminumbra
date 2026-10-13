@@ -31,6 +31,8 @@ def valid_receipt() -> dict:
     sections["noui_load"]["required_tests"] = ["NoUiLoadsSavedWorld"]
     sections["noui_load"]["discovered_tests"] = ["NoUiLoadsSavedWorld", "OtherTest"]
     sections["noui_load"]["skipped_tests"] = 0
+    sections["net_soak"]["required_tests"] = ["NetSoak"]
+    sections["net_soak"]["discovered_tests"] = ["NetSoak"]
     return {
         "schema": "luminumbra.v03_acceptance.v1",
         "revision": "0123abcd",
@@ -168,9 +170,78 @@ class V03AcceptanceReceiptContract(unittest.TestCase):
                 self._evaluate(receipt)
             self.assertEqual(_run([str(self._write_obj(receipt))])[0], 2)
 
+    def test_absolute_evidence_roots_are_refused(self) -> None:
+        for root in (str(self.base), r"C:\evidence", r"\evidence", r"C:evidence",
+                     r"\\server\share\evidence"):
+            with self.subTest(root=root):
+                receipt = valid_receipt()
+                receipt["evidence_root"] = root
+                with self.assertRaisesRegex(
+                    tool.InputError, "^malformed receipt: evidence_root must be relative$"
+                ):
+                    self._evaluate(receipt)
+                code, _, err = _run([str(self._write_obj(receipt))])
+                self.assertEqual(code, 2)
+                self.assertEqual(err, "error: malformed receipt: evidence_root must be relative\n")
+
+    def test_evidence_root_parent_components_are_refused_before_resolution(self) -> None:
+        (self.base / "tools").mkdir()
+        (self.base / "docs").mkdir()
+        for root in ("tools/../docs", "docs/..", r"tools\..\docs", r"docs\..",
+                     "tools/..\\docs", "..", "../" + self.base.name + "-outside"):
+            with self.subTest(root=root):
+                receipt = valid_receipt()
+                receipt["evidence_root"] = root
+                with self.assertRaisesRegex(
+                    tool.InputError,
+                    "^malformed receipt: evidence_root must not contain '\\.\\.' components$",
+                ):
+                    self._evaluate(receipt)
+                code, _, err = _run([str(self._write_obj(receipt))])
+                self.assertEqual(code, 2)
+                self.assertEqual(
+                    err, "error: malformed receipt: evidence_root must not contain '..' components\n"
+                )
+
+    def test_evidence_roots_resolving_outside_receipt_directory_are_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as outside:
+            # Also reject a sibling whose name starts with the receipt directory's name.
+            sibling = self.base.with_name(self.base.name + "-outside")
+            sibling.mkdir()
+            self.addCleanup(sibling.rmdir)
+            try:
+                (self.base / "escaped-root").symlink_to(outside, target_is_directory=True)
+                (self.base / "escaped-sibling").symlink_to(sibling, target_is_directory=True)
+            except (NotImplementedError, OSError) as error:
+                self.skipTest(f"symlinks unavailable: {error}")
+            for root in ("escaped-root", "escaped-sibling"):
+                with self.subTest(root=root):
+                    receipt = valid_receipt()
+                    receipt["evidence_root"] = root
+                    with self.assertRaisesRegex(
+                        tool.InputError, "^malformed receipt: evidence_root outside receipt directory$"
+                    ):
+                        self._evaluate(receipt)
+                    code, _, err = _run([str(self._write_obj(receipt))])
+                    self.assertEqual(code, 2)
+                    self.assertEqual(
+                        err, "error: malformed receipt: evidence_root outside receipt directory\n"
+                    )
+
+    def test_evidence_root_symlink_within_receipt_directory_passes(self) -> None:
+        try:
+            (self.base / "root-alias").symlink_to(self.base / "logs", target_is_directory=True)
+        except (NotImplementedError, OSError) as error:
+            self.skipTest(f"symlinks unavailable: {error}")
+        receipt = valid_receipt()
+        receipt["evidence_root"] = "root-alias"
+        for section in receipt["sections"].values():
+            section["evidence"] = Path(section["evidence"]).name
+        self.assertEqual(self._evaluate(receipt)["verdict"], "pass")
+
     def test_file_or_missing_evidence_root_is_invalid_input(self) -> None:
         file_root = self._write_obj({}, "file-root.json")
-        for root in (file_root.name, str(file_root), "missing-root"):
+        for root in (file_root.name, "./" + file_root.name, "missing-root"):
             with self.subTest(root=root):
                 receipt = valid_receipt()
                 receipt["evidence_root"] = root
@@ -280,6 +351,45 @@ class V03AcceptanceReceiptContract(unittest.TestCase):
         receipt["sections"]["noui_load"]["skipped_tests"] = 2
         check = self._expect(receipt, "noui_load", "fail")
         self.assertEqual(check["detail"], "unexpected skipped tests: 2")
+
+    def test_invalid_skipped_test_counts_are_refused(self) -> None:
+        for skipped in (-1, True, False, 0.0, 1.5, "0", None):
+            with self.subTest(skipped=skipped):
+                receipt = valid_receipt()
+                receipt["sections"]["net_soak"]["skipped_tests"] = skipped
+                check = self._expect(receipt, "net_soak", "fail")
+                self.assertEqual(check["detail"], "malformed skipped_tests")
+
+    def test_net_soak_requires_both_discovery_fields(self) -> None:
+        for fields in (("required_tests",), ("discovered_tests",),
+                       ("required_tests", "discovered_tests")):
+            with self.subTest(fields=fields):
+                receipt = valid_receipt()
+                for field in fields:
+                    del receipt["sections"]["net_soak"][field]
+                check = self._expect(receipt, "net_soak", "fail")
+                self.assertEqual(check["detail"], f"missing {fields[0]}")
+
+    def test_net_soak_validates_discovery_fields(self) -> None:
+        for field, bad in (("required_tests", []), ("required_tests", "NetSoak"),
+                           ("required_tests", [1]), ("discovered_tests", None),
+                           ("discovered_tests", "NetSoak"), ("discovered_tests", [True])):
+            with self.subTest(field=field, bad=bad):
+                receipt = valid_receipt()
+                receipt["sections"]["net_soak"][field] = bad
+                check = self._expect(receipt, "net_soak", "fail")
+                self.assertEqual(check["detail"], "malformed required_tests")
+        for discovered in ([], ["OtherTest"]):
+            receipt = valid_receipt()
+            receipt["sections"]["net_soak"]["discovered_tests"] = discovered
+            check = self._expect(receipt, "net_soak", "fail")
+            self.assertEqual(check["detail"], "missing named discovery: NetSoak")
+
+    def test_unrun_net_soak_without_discovery_remains_unevaluated(self) -> None:
+        receipt = valid_receipt()
+        receipt["sections"]["net_soak"] = {"status": "unevaluated"}
+        check = self._expect(receipt, "net_soak", "unevaluated")
+        self.assertEqual(check["detail"], "section reported unevaluated")
 
     def test_missing_named_discovery_fails(self) -> None:
         self._assert_baseline("noui_load")

@@ -40,7 +40,7 @@ param(
     [Parameter(Mandatory = $true)][string]$Package,
     [Parameter(Mandatory = $true)][string]$FixtureDir,
     [Parameter(Mandatory = $true)][string]$OutDir,
-    [ValidateRange(1, 1000)][int]$SwitchCount = 6,
+    [ValidateRange(2, 1000)][int]$SwitchCount = 6,
     [ValidateRange(1, 86400)][int]$TimeoutSeconds = 300,
     [string]$Preset = "default",
     [string]$ExpectedTreeDigest = "",
@@ -185,12 +185,21 @@ function Get-EditRoundtrip {
         }
     }
     foreach ($phase in @("save", "load")) {
+        if (-not (Test-JsonProperty -Object $docs[$phase] -Name "schema") -or
+            $docs[$phase].schema -isnot [string] -or
+            $docs[$phase].schema -cne "luminumbra.persistence_runtime_roundtrip_phase.v1" -or
+            -not (Test-JsonProperty -Object $docs[$phase] -Name "phase") -or
+            $docs[$phase].phase -isnot [string] -or
+            $docs[$phase].phase -cne $phase) { return $null }
         if (-not (Test-JsonProperty -Object $docs[$phase] -Name "world_hash")) { return $null }
     }
     if (-not (Test-JsonProperty -Object $docs["save"] -Name "edited_chunk_ids")) { return $null }
+    if ($docs["save"].edited_chunk_ids -isnot [System.Array]) { return $null }
     return [ordered]@{
-        save_world_hash = [string]$docs["save"].world_hash
-        load_world_hash = [string]$docs["load"].world_hash
+        save_phase_schema = $docs["save"].schema
+        load_phase_schema = $docs["load"].schema
+        save_world_hash = $docs["save"].world_hash
+        load_world_hash = $docs["load"].world_hash
         edited_chunk_count = [int]@($docs["save"].edited_chunk_ids).Count
     }
 }

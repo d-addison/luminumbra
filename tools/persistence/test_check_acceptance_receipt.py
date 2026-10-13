@@ -52,14 +52,16 @@ def valid_receipt() -> dict:
             {"label": "after_reload", "tree_digest": HEX_E, "file_count": 13},
         ],
         "edit_roundtrip": {
-            "save_world_hash": HEX_A, "load_world_hash": HEX_A, "edited_chunk_count": 2,
+            "save_phase_schema": "luminumbra.persistence_runtime_roundtrip_phase.v1",
+            "load_phase_schema": "luminumbra.persistence_runtime_roundtrip_phase.v1",
+            "save_world_hash": "a" * 16, "load_world_hash": "a" * 16, "edited_chunk_count": 2,
         },
         "reload_changes": {"added": [], "removed": [], "changed": []},
         "fixture_changes": {"added": [], "removed": [], "changed": []},
         "switches": switches,
         "refusals": [
-            {"variant": variant, "exit_code": 2 + index, "diagnostic": True, "timed_out": False}
-            for index, variant in enumerate(tool.REQUIRED_REFUSAL_VARIANTS)
+            {"variant": variant, "exit_code": 2, "diagnostic": True, "timed_out": False}
+            for variant in tool.REQUIRED_REFUSAL_VARIANTS
         ],
     }
 
@@ -432,8 +434,10 @@ class AcceptanceReceiptContract(unittest.TestCase):
         del receipt["edit_roundtrip"]
         self._expect(receipt, "edit_roundtrip", "unevaluated")
         receipt = valid_receipt()
-        receipt["edit_roundtrip"]["load_world_hash"] = HEX_B
+        receipt["edit_roundtrip"]["load_world_hash"] = "b" * 16
         self._expect(receipt, "edit_roundtrip", "fail")
+        self.assertEqual(_check(_verdict(receipt), "edit_roundtrip")["detail"],
+                         "edited chunk hash after reload differs from the hash at save")
         receipt = valid_receipt()
         receipt["edit_roundtrip"]["edited_chunk_count"] = 0
         self._expect(receipt, "edit_roundtrip", "fail")
@@ -445,6 +449,61 @@ class AcceptanceReceiptContract(unittest.TestCase):
         receipt = valid_receipt()
         receipt["edit_roundtrip"] = "yes"
         self._expect(receipt, "edit_roundtrip", "fail")
+
+    def test_edit_roundtrip_refuses_equal_malformed_checksums(self) -> None:
+        for bad in ("bad", "", "a" * 15, "a" * 17, HEX_A, "A" * 16, "g" * 16,
+                    "a" * 16 + "\n", 123, True, None):
+            with self.subTest(bad=bad):
+                receipt = valid_receipt()
+                receipt["edit_roundtrip"].update(save_world_hash=bad, load_world_hash=bad)
+                self._expect(receipt, "edit_roundtrip", "fail")
+                self.assertEqual(_check(_verdict(receipt), "edit_roundtrip")["detail"],
+                                 "save_world_hash must be 16-character lowercase hex")
+        receipt = valid_receipt()
+        receipt["edit_roundtrip"]["load_world_hash"] = "bad"
+        self._expect(receipt, "edit_roundtrip", "fail")
+        self.assertEqual(_check(_verdict(receipt), "edit_roundtrip")["detail"],
+                         "load_world_hash must be 16-character lowercase hex")
+
+    def test_edit_roundtrip_refuses_invalid_phase_artifact_schemas(self) -> None:
+        for phase in ("save", "load"):
+            for bad in ("missing", "luminumbra.persistence_runtime_roundtrip_phase.v2",
+                        "", None, True, []):
+                with self.subTest(phase=phase, bad=bad):
+                    receipt = valid_receipt()
+                    field = f"{phase}_phase_schema"
+                    if bad == "missing":
+                        del receipt["edit_roundtrip"][field]
+                    else:
+                        receipt["edit_roundtrip"][field] = bad
+                    self._expect(receipt, "edit_roundtrip", "fail")
+                    self.assertEqual(_check(_verdict(receipt), "edit_roundtrip")["detail"],
+                                     f"invalid {phase} phase artifact schema")
+
+    def test_switch_count_refuses_repeated_single_world(self) -> None:
+        for count in (6, 9):
+            with self.subTest(count=count):
+                receipt = valid_receipt()
+                receipt["switches"] = [dict(receipt["switches"][0], index=i) for i in range(count)]
+                self._expect(receipt, "switch_count", "fail")
+                self.assertEqual(_check(_verdict(receipt), "switch_count")["detail"],
+                                 "switches require at least two distinct world IDs")
+                self.assertEqual(_run([str(self._write_obj(receipt))])[0], 1)
+
+    def test_switch_count_requires_nonempty_world_ids(self) -> None:
+        receipt = valid_receipt()
+        for switch in receipt["switches"]:
+            switch["world"] = "" if switch["index"] % 2 else "alpha"
+        self._expect(receipt, "switch_count", "fail")
+        self.assertEqual(_check(_verdict(receipt), "switch_count")["detail"], "malformed switches")
+
+    def test_switch_count_accepts_consecutive_world_change(self) -> None:
+        receipt = valid_receipt()
+        alpha, beta = receipt["switches"][:2]
+        receipt["switches"] = [dict(alpha if i < 3 else beta, index=i) for i in range(6)]
+        self._expect(receipt, "switch_count", "pass")
+        self.assertTrue(any(a["world"] != b["world"] for a, b in
+                            zip(receipt["switches"], receipt["switches"][1:])))
 
     def test_switch_count_checks(self) -> None:
         self._assert_baseline("switch_count")
@@ -524,6 +583,22 @@ class AcceptanceReceiptContract(unittest.TestCase):
         self.assertEqual(_check(verdict, "switch_probes")["detail"], "malformed switches")
 
     # Check 8: refusal_matrix
+
+    def test_refusal_requires_exact_native_exit_code(self) -> None:
+        for exit_code in (0, 1, 3, 7, -1, 0xC0000005):
+            with self.subTest(exit_code=exit_code):
+                receipt = valid_receipt()
+                receipt["refusals"][0]["exit_code"] = exit_code
+                self._expect(receipt, "refusal_matrix", "fail")
+                self.assertEqual(_check(_verdict(receipt), "refusal_matrix")["detail"],
+                                 f"refusals not clean: obsolete-metadata (exit code {exit_code})")
+        for bad in (True, False, 2.0, "2"):
+            with self.subTest(bad=bad):
+                receipt = valid_receipt()
+                receipt["refusals"][0]["exit_code"] = bad
+                self._expect(receipt, "refusal_matrix", "fail")
+                self.assertEqual(_check(_verdict(receipt), "refusal_matrix")["detail"],
+                                 "malformed refusals")
 
     def test_refusal_matrix_checks(self) -> None:
         self._assert_baseline("refusal_matrix")
@@ -623,7 +698,7 @@ class AcceptanceReceiptContract(unittest.TestCase):
         receipt = valid_receipt()
         receipt["refusals"] = [
             {"variant": "alpha", "exit_code": 2, "diagnostic": True, "timed_out": False},
-            {"variant": "beta", "exit_code": 3, "diagnostic": True, "timed_out": False},
+            {"variant": "beta", "exit_code": 2, "diagnostic": True, "timed_out": False},
         ]
         verdict = tool.evaluate(receipt, 6, ("alpha", "beta"))
         self.assertEqual(_check(verdict, "refusal_matrix")["verdict"], "pass")

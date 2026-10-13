@@ -8,7 +8,11 @@ sections: {<name>: {status, evidence, detail?, skipped_tests?, required_tests?,
 discovered_tests?}}, evidence_root?}. Evidence references must resolve to regular
 files strictly within an existing directory evidence_root (relative to the
 receipt directory, default "."). References to the root itself are rejected.
-Traversal and symlink escapes are rejected. Each required section yields one
+The root must also resolve within the receipt directory and contain no ".."
+components using either separator. Traversal and symlink escapes are rejected.
+Passing net_soak sections require nonempty required_tests
+and discovered_tests lists; skipped_tests must be a nonnegative integer.
+Each required section yields one
 check whose id is the section name. Sections not in REQUIRED_SECTIONS yield an "unknown_section:<name>"
 check that is always unevaluated, so they never make the overall verdict pass.
 
@@ -94,10 +98,16 @@ def _check_section(name: str, section, evidence_root: Path) -> dict:
         return _result(name, FAIL, "unexpected skip")
     if "skipped_tests" in section:
         skipped = section["skipped_tests"]
-        if not _is_int(skipped):
+        if not _is_int(skipped) or skipped < 0:
             return _result(name, FAIL, "malformed skipped_tests")
         if skipped > 0:
             return _result(name, FAIL, f"unexpected skipped tests: {skipped}")
+    if name == "net_soak" and section.get("status") == "pass":
+        for field in ("required_tests", "discovered_tests"):
+            if field not in section:
+                return _result(name, FAIL, f"missing {field}")
+        if not section["required_tests"]:
+            return _result(name, FAIL, "malformed required_tests")
     if "required_tests" in section:
         required = section["required_tests"]
         discovered = section.get("discovered_tests", [])
@@ -150,10 +160,19 @@ def evaluate(receipt, receipt_dir=None) -> dict:
     root = receipt.get("evidence_root", ".")
     if not isinstance(root, str) or not root:
         raise InputError("malformed receipt: evidence_root must be a nonempty string")
+    if Path(root).is_absolute() or PureWindowsPath(root).anchor:
+        raise InputError("malformed receipt: evidence_root must be relative")
+    if ".." in root.replace("\\", "/").split("/"):
+        raise InputError("malformed receipt: evidence_root must not contain '..' components")
     try:
-        evidence_root = (Path(receipt_dir or Path.cwd()) / root).resolve()
+        receipt_directory = Path(receipt_dir or Path.cwd()).resolve()
+        evidence_root = (receipt_directory / root).resolve()
     except (OSError, RuntimeError, ValueError) as error:
         raise InputError(f"cannot resolve evidence_root: {error}") from error
+    try:
+        evidence_root.relative_to(receipt_directory)
+    except ValueError as error:
+        raise InputError("malformed receipt: evidence_root outside receipt directory") from error
     try:
         if not evidence_root.is_dir():
             raise InputError("malformed receipt: evidence_root must be an existing directory")
