@@ -15,7 +15,9 @@
 #
 # The create_edit_save and restart_select_load sessions share one runtime artifact
 # directory (artifacts\persistence) because the load phase reads the save-phase
-# marker file from there.
+# marker file from there. shutdown.json is removed before each launch.
+# Refusals require their exact variant diagnostic, exit 2, a fresh completed
+# shutdown record with jobs drained, no timeout and unchanged saved bytes.
 #
 # Edit persistence evidence (receipt field edit_roundtrip): the create_edit_save and
 # restart_select_load pair runs the client's own persistence_roundtrip_smoke scenario. Its
@@ -97,6 +99,11 @@ function Invoke-Session {
         [Parameter(Mandatory = $true)][string]$ArtifactDir
     )
     New-Item -ItemType Directory -Force -Path $ArtifactDir | Out-Null
+    # The persistence phases share their marker, but must never share shutdown proof.
+    $shutdownPath = Join-Path $ArtifactDir "shutdown.json"
+    if (Test-Path -LiteralPath $shutdownPath) {
+        Remove-Item -LiteralPath $shutdownPath -Force
+    }
     $run = Invoke-ClientSession -Exe $exePath -ArgumentList $Arguments `
         -WorkingDirectory $PackageAbs `
         -StdoutPath (Join-Path $logsDir "$Name.stdout.log") `
@@ -226,8 +233,19 @@ function Test-GBufferProbeDocument {
 }
 
 function Get-RefusalDiagnostic {
-    param([string]$Text)
-    return [regex]::IsMatch($Text, '(?i)refus|cannot open|invalid')
+    # Exact prefixes from SavedWorldCatalog, WorldSaveService and TerrainPresetLoader.
+    # Variable parser detail, version and file path are permitted only after the prefix.
+    param([string]$Variant, [string]$Text)
+    $patterns = @{
+        "obsolete-metadata" = 'This world predates the v0\.3\.0 format and cannot be opened\. Create a new world; migration is not supported\.'
+        "future-metadata" = 'unsupported future world metadata container version [0-9]+'
+        "corrupt-metadata" = 'Corrupt world metadata: \[json\.exception\.parse_error\.[0-9]+\]'
+        "missing-metadata" = 'World unavailable: its save directory or metadata is missing or unreadable\.'
+        "missing-preset" = 'failed to open world preset: [^\r\n]+'
+        "truncated-region" = 'region file (?:is missing the LMR1 magic|record manifest is truncated|record payload is truncated): [^\r\n]+'
+    }
+    if (-not $patterns.ContainsKey($Variant)) { return $false }
+    return [regex]::IsMatch($Text, 'World open refused: ' + $patterns[$Variant])
 }
 
 # ---------------------------------------------------------------------------
@@ -376,19 +394,32 @@ try {
 
             $refusalArtifact = Join-Path $artifactsDir ("refusal_" + $variant)
             New-Item -ItemType Directory -Force -Path $refusalArtifact | Out-Null
+            $shutdownPath = Join-Path $refusalArtifact "shutdown.json"
+            if (Test-Path -LiteralPath $shutdownPath) {
+                Remove-Item -LiteralPath $shutdownPath -Force
+            }
             $run = Invoke-ClientSession -Exe $exePath `
-                -ArgumentList @("--load-world", $variant, "--no-ui", "--hidden-window", "--render-benchmark", (Join-Path $refusalArtifact "benchmark.json")) `
+                -ArgumentList (@("--load-world", $variant, "--render-benchmark", (Join-Path $refusalArtifact "benchmark.json")) + (Get-CommonFlags -ArtifactDir $refusalArtifact)) `
                 -WorkingDirectory $PackageAbs `
                 -StdoutPath (Join-Path $logsDir ("refusal_" + $variant + ".stdout.log")) `
                 -StderrPath (Join-Path $logsDir ("refusal_" + $variant + ".stderr.log")) `
                 -TimeoutSeconds 120
 
             $logText = (Read-TextOrEmpty -Path (Join-Path $logsDir ("refusal_" + $variant + ".stdout.log"))) + "`n" + (Read-TextOrEmpty -Path (Join-Path $logsDir ("refusal_" + $variant + ".stderr.log")))
-            $diagnostic = Get-RefusalDiagnostic -Text $logText
+            $diagnostic = Get-RefusalDiagnostic -Variant $variant -Text $logText
+            $shutdown = Read-ShutdownRecord -ArtifactDir $refusalArtifact
+            $cleanTermination = $run.exit_code -eq 2 -and -not $run.timed_out -and
+                $null -ne $shutdown -and $shutdown.schema -ceq "luminumbra.shutdown.v1" -and
+                $shutdown.Contains("complete") -and $shutdown.complete -is [bool] -and
+                $shutdown.complete -eq $true -and $shutdown.jobs_drained -is [bool] -and
+                $shutdown.jobs_drained -eq $true
             $entry = [ordered]@{
                 variant = $variant
                 exit_code = [int]$run.exit_code
-                diagnostic = $diagnostic
+                diagnostic = [bool]($diagnostic -and $cleanTermination)
+                expected_diagnostic = [bool]$diagnostic
+                clean_termination = [bool]$cleanTermination
+                shutdown = $shutdown
                 timed_out = [bool]$run.timed_out
             }
 

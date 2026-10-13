@@ -4,7 +4,8 @@
 # on the qualified Windows machine. Works under Windows PowerShell 5.1 and pwsh.
 #
 # Loads -WorldId from <Package>\worlds\saves with --no-ui, captures a render
-# benchmark frame, and checks exit code, PPM validity and mean luma. The
+# benchmark frame, and checks exit code, PPM validity and mean luma, the loaded
+# capture_context.world_id, and 1280x720 in both the PPM and benchmark. The
 # documented pre-fix failure is exit code 134.
 #
 # Writes <OutDir>\noui-load-receipt.json. Exit 0 on pass, 1 on fail.
@@ -78,6 +79,7 @@ function Get-PpmMeanLuma {
     $header = Read-PpmHeader -Bytes $bytes
     if ($header.magic -cne "P6") { return @{ ok = $false; mean = $null; reason = "PPM magic is not P6" } }
     if ($header.width -le 0 -or $header.height -le 0) { return @{ ok = $false; mean = $null; reason = "PPM dimensions invalid" } }
+    if ($header.width -ne 1280 -or $header.height -ne 720) { return @{ ok = $false; mean = $null; reason = "PPM dimensions must be 1280x720" } }
     if ($header.maxval -ne 255) { return @{ ok = $false; mean = $null; reason = "PPM maxval is not 255" } }
     $pixels = [int64]$header.width * [int64]$header.height
     $need = [int64]$header.data_offset + $pixels * 3
@@ -149,6 +151,21 @@ try {
         try {
             $bench = ConvertFrom-Json -InputObject ([System.IO.File]::ReadAllText($benchPath, [System.Text.Encoding]::UTF8))
             $captureContextPresent = Test-JsonProperty -Object $bench -Name "capture_context"
+            if ($captureContextPresent) {
+                if (-not (Test-JsonProperty -Object $bench.capture_context -Name "world_id")) {
+                    $reasons += "capture_context.world_id absent from benchmark.json"
+                } elseif ($bench.capture_context.world_id -isnot [string] -or $bench.capture_context.world_id -cne $WorldId) {
+                    $reasons += "capture_context.world_id does not match requested WorldId '$WorldId'"
+                }
+            }
+            foreach ($dimension in @("width", "height")) {
+                if ($dimension -eq "width") { $expected = 1280 } else { $expected = 720 }
+                if (-not (Test-JsonProperty -Object $bench -Name $dimension)) {
+                    $reasons += "benchmark.$dimension absent from benchmark.json"
+                } elseif (($bench.$dimension -isnot [int] -and $bench.$dimension -isnot [long]) -or $bench.$dimension -ne $expected) {
+                    $reasons += "benchmark.$dimension must be $expected"
+                }
+            }
         } catch {
             $reasons += "benchmark.json does not parse"
         }

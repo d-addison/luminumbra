@@ -5,8 +5,11 @@ Usage: check_v03_receipt.py RECEIPT.json [--verdict-out PATH]
 
 Input schema "luminumbra.v03_acceptance.v1": {schema, revision (optional str),
 sections: {<name>: {status, evidence, detail?, skipped_tests?, required_tests?,
-discovered_tests?}}}. Each required section yields one check whose id is the
-section name. Sections not in REQUIRED_SECTIONS yield an "unknown_section:<name>"
+discovered_tests?}}, evidence_root?}. Evidence references must resolve to regular
+files strictly within an existing directory evidence_root (relative to the
+receipt directory, default "."). References to the root itself are rejected.
+Traversal and symlink escapes are rejected. Each required section yields one
+check whose id is the section name. Sections not in REQUIRED_SECTIONS yield an "unknown_section:<name>"
 check that is always unevaluated, so they never make the overall verdict pass.
 
 Exit codes: 0 pass, 1 fail, 2 invalid input, 3 unevaluated.
@@ -17,6 +20,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from pathlib import Path, PureWindowsPath
 
 INPUT_SCHEMA = "luminumbra.v03_acceptance.v1"
 VERDICT_SCHEMA = "luminumbra.v03_acceptance_verdict.v1"
@@ -57,7 +61,33 @@ def _is_str_list(value) -> bool:
     return isinstance(value, list) and all(isinstance(item, str) for item in value)
 
 
-def _check_section(name: str, section) -> dict:
+def _check_evidence(name: str, evidence: str, root: Path) -> dict:
+    # Check both separators so receipts cannot hide Windows traversal on POSIX.
+    if ".." in evidence.replace("\\", "/").split("/"):
+        return _result(name, FAIL, f"evidence traversal: {evidence}")
+    reference = Path(evidence)
+    if PureWindowsPath(evidence).is_absolute() and not reference.is_absolute():
+        return _result(name, FAIL, f"evidence outside root: {evidence}")
+    try:
+        artifact = (root / reference).resolve()
+        artifact.relative_to(root)
+    except ValueError:
+        return _result(name, FAIL, f"evidence outside root: {evidence}")
+    except (OSError, RuntimeError) as error:
+        return _result(name, FAIL, f"cannot resolve evidence {evidence}: {error}")
+    if artifact == root:
+        return _result(name, FAIL, f"evidence resolves to root itself: {evidence}")
+    try:
+        if not artifact.exists():
+            return _result(name, FAIL, f"missing evidence artifact: {evidence}")
+        if not artifact.is_file():
+            return _result(name, FAIL, f"evidence is not a regular file: {evidence}")
+    except OSError as error:
+        return _result(name, FAIL, f"cannot inspect evidence {evidence}: {error}")
+    return _result(name, PASS, f"evidence: {evidence}")
+
+
+def _check_section(name: str, section, evidence_root: Path) -> dict:
     if not isinstance(section, dict):
         return _result(name, FAIL, "malformed section")
     if section.get("status") == "skipped":
@@ -87,7 +117,7 @@ def _check_section(name: str, section) -> dict:
             return _result(name, FAIL, "malformed evidence")
         if not evidence:
             return _result(name, UNEVALUATED, "pass without evidence")
-        return _result(name, PASS, f"evidence: {evidence}")
+        return _check_evidence(name, evidence, evidence_root)
     return _result(name, FAIL, f"unknown status: {status!r}")
 
 
@@ -100,11 +130,13 @@ def _overall(checks: list) -> str:
     return PASS
 
 
-def evaluate(receipt) -> dict:
+def evaluate(receipt, receipt_dir=None) -> dict:
     """Return the verdict dict for a parsed receipt.
 
     Raises InputError when the receipt is not an object with the right schema
-    and a sections object.
+    and a sections object, or evidence_root is malformed. receipt_dir defaults
+    to the current directory for programmatic callers; the CLI uses the receipt
+    file's directory regardless of the working directory.
     """
     if not isinstance(receipt, dict):
         raise InputError("malformed receipt: top level is not a JSON object")
@@ -115,12 +147,24 @@ def evaluate(receipt) -> dict:
     sections = receipt.get("sections")
     if not isinstance(sections, dict):
         raise InputError("malformed receipt: sections must be an object")
+    root = receipt.get("evidence_root", ".")
+    if not isinstance(root, str) or not root:
+        raise InputError("malformed receipt: evidence_root must be a nonempty string")
+    try:
+        evidence_root = (Path(receipt_dir or Path.cwd()) / root).resolve()
+    except (OSError, RuntimeError, ValueError) as error:
+        raise InputError(f"cannot resolve evidence_root: {error}") from error
+    try:
+        if not evidence_root.is_dir():
+            raise InputError("malformed receipt: evidence_root must be an existing directory")
+    except OSError as error:
+        raise InputError(f"cannot inspect evidence_root: {error}") from error
     checks = []
     for name in REQUIRED_SECTIONS:
         if name not in sections:
             checks.append(_result(name, UNEVALUATED, "section absent"))
         else:
-            checks.append(_check_section(name, sections[name]))
+            checks.append(_check_section(name, sections[name], evidence_root))
     for name in sorted(sections):
         if name not in REQUIRED_SECTIONS:
             checks.append(
@@ -159,7 +203,7 @@ def main(argv=None) -> int:
     except SystemExit as error:
         return error.code if isinstance(error.code, int) else EXIT_INVALID
     try:
-        verdict = evaluate(load_receipt(args.receipt))
+        verdict = evaluate(load_receipt(args.receipt), Path(args.receipt).absolute().parent)
     except InputError as error:
         print(f"error: {error}", file=sys.stderr)
         return EXIT_INVALID
