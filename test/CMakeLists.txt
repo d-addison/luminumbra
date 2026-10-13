@@ -156,6 +156,7 @@ add_executable(common_tests
     common/FarAuthorityOverlay_test.cpp
     common/GameSessionHeadlessWorld_test.cpp
     common/SimBudgetTelemetry_test.cpp
+    common/SimBudgetProfile_test.cpp
     ../src/luminumbra_server/modes/SmokeArtifact.cpp
     common/JobSystem_test.cpp
     common/JobWatchdog_test.cpp
