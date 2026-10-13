@@ -49,6 +49,7 @@
 #include <limits>
 #include <sstream>
 #include <system_error>
+#include <utility>
 
 namespace Luminumbra::Client::ScenarioHarness {
 
@@ -595,15 +596,16 @@ void AnalyzeFarLodBoundaryBandWater(const std::vector<unsigned char>& pixels,
     }
 }
 
-void WriteFarLodHorizonAnalysis(const std::filesystem::path& artifact_dir,
-                                const std::string& world_preset,
-                                double duration_seconds,
-                                const std::vector<FarLodHorizonStationCapture>& captures,
-                                std::size_t expected_station_count,
-                                double baseline_gbuffer_gpu_ms,
-                                double far_gbuffer_gpu_ms,
-                                bool gpu_timers_supported,
-                                bool enforce_sky_ratio) {
+static nlohmann::json
+WriteLegacyFarLodHorizonAnalysis(const std::filesystem::path& artifact_dir,
+                                 const std::string& world_preset,
+                                 double duration_seconds,
+                                 const std::vector<FarLodHorizonStationCapture>& captures,
+                                 std::size_t expected_station_count,
+                                 double baseline_gbuffer_gpu_ms,
+                                 double far_gbuffer_gpu_ms,
+                                 bool gpu_timers_supported,
+                                 bool enforce_sky_ratio) {
     const GLDebugRuntimeStats gl_debug = CurrentGLDebugRuntimeStats();
     const double gbuffer_delta_ms = far_gbuffer_gpu_ms - baseline_gbuffer_gpu_ms;
 
@@ -914,7 +916,69 @@ void WriteFarLodHorizonAnalysis(const std::filesystem::path& artifact_dir,
     std::ofstream output(artifact_dir / "farlod-horizon-analysis.json");
     output << std::setw(2) << artifact << '\n';
 
-    // V1 above remains historical legacy evidence. V2 qualifies every station,
+    nlohmann::json oracle = nlohmann::json::object();
+    // Preserve #199's additional legacy aggregate keys for historical readers.
+    // Ladder evidence is exclusively per-station; no ladder pair is fabricated.
+    if (had_converged_capture) {
+        std::vector<Luminumbra::World::FarTileKey> expected;
+        const auto error =
+            Luminumbra::World::ComputeFarWantedSet(final_camera_x, final_camera_z, expected);
+        nlohmann::json keys = nlohmann::json::array();
+        std::array<std::size_t, Luminumbra::World::kFarTierCount> counts{};
+        for (const auto& key : expected) {
+            keys.push_back({key.tier, key.tx, key.tz});
+            ++counts[key.tier - 1];
+        }
+        oracle["camera"] = {{"world_x", final_camera_x}, {"world_z", final_camera_z}};
+        oracle["legacy"] = {{"region_size_m", 512},
+                            {"f1_outer_range_m", 768},
+                            {"f2_outer_range_m", 3000},
+                            {"regions_wanted", final_wanted},
+                            {"regions_resident", final_resident},
+                            {"regions_missing", final_missing}};
+        oracle["ladder"] = {
+            {"wanted_error",
+             error == Luminumbra::World::FarWantedError::None ? "None" : "InvalidCamera"},
+            {"expected_by_tier", counts},
+            {"expected_tiles", keys},
+            {"resident_tiles", nlohmann::json::array()},
+            {"stale_tiles", 0}};
+    }
+    return oracle;
+}
+
+void WriteFarLodHorizonAnalysis(const std::filesystem::path& artifact_dir,
+                                const std::string& world_preset,
+                                double duration_seconds,
+                                const std::vector<FarLodHorizonStationCapture>& captures,
+                                std::size_t expected_station_count,
+                                double baseline_gbuffer_gpu_ms,
+                                double far_gbuffer_gpu_ms,
+                                bool gpu_timers_supported,
+                                bool enforce_sky_ratio) {
+    const auto mode = captures.empty() ? Luminumbra::Rendering::FarWorldMode::Legacy
+                                       : captures.back().far_world.selection.effective;
+    // V1 is exclusively historical Legacy evidence, including refused requests.
+    // Mixed effective modes cannot borrow compatibility evidence to qualify.
+    const bool legacy_evidence =
+        std::all_of(captures.begin(), captures.end(), [](const auto& capture) {
+            return capture.far_world.selection.effective ==
+                   Luminumbra::Rendering::FarWorldMode::Legacy;
+        });
+    nlohmann::json legacy_compatibility = nlohmann::json::object();
+    if (legacy_evidence)
+        legacy_compatibility = WriteLegacyFarLodHorizonAnalysis(artifact_dir,
+                                                                world_preset,
+                                                                duration_seconds,
+                                                                captures,
+                                                                expected_station_count,
+                                                                baseline_gbuffer_gpu_ms,
+                                                                far_gbuffer_gpu_ms,
+                                                                gpu_timers_supported,
+                                                                enforce_sky_ratio);
+    std::error_code ec;
+    std::filesystem::create_directories(artifact_dir, ec);
+    // V2 qualifies every station,
     // never the most-converged aggregate. Actual coverage comes from retained
     // value snapshots, not legacy region counts.
     nlohmann::json rows = nlohmann::json::array();
@@ -940,35 +1004,34 @@ void WriteFarLodHorizonAnalysis(const std::filesystem::path& artifact_dir,
             if (tile.has_pair && !tile.coverage.current)
                 ++stale;
         }
-        rows.push_back(
-            {{"name", capture.station.name},
-             {"camera",
-              {{"world_x", capture.camera_world_x},
-               {"world_y", capture.camera_world_y},
-               {"world_z", capture.camera_world_z},
-               {"yaw_degrees", capture.camera_yaw_degrees},
-               {"pitch_degrees", capture.camera_pitch_degrees}}},
-             {"settle_seconds", capture.settle_seconds},
-             {"ready_within_deadline", capture.ready_within_deadline},
-             {"paired_capture_preserved", capture.paired_capture_preserved},
-             {"snapshot", Luminumbra::Rendering::FarWorldDiagnosticJson(fw)},
-             {"legacy",
-              {{"regions_wanted", capture.regions_wanted},
-               {"regions_resident", capture.regions_resident},
-               {"regions_missing", capture.regions_missing}}},
-             {"ladder",
-              {{"wanted_error",
-                error == Luminumbra::World::FarWantedError::None ? "None" : "InvalidCamera"},
-               {"expected_tiles", expected_tiles},
-               {"expected_by_tier", counts},
-               {"resident_tiles", resident_tiles},
-               {"stale_tiles", stale}}}});
-        v2_complete = v2_complete && fw.captured && fw.complete && capture.ready_within_deadline &&
-                      capture.paired_capture_preserved &&
+        nlohmann::json row = {
+            {"name", capture.station.name},
+            {"camera",
+             {{"world_x", capture.camera_world_x},
+              {"world_y", capture.camera_world_y},
+              {"world_z", capture.camera_world_z},
+              {"yaw_degrees", capture.camera_yaw_degrees},
+              {"pitch_degrees", capture.camera_pitch_degrees}}},
+            {"settle_seconds", capture.settle_seconds},
+            {"ready_within_deadline", capture.ready_within_deadline},
+            {"paired_capture_preserved", capture.paired_capture_preserved},
+            {"snapshot", Luminumbra::Rendering::FarWorldDiagnosticJson(fw)},
+            {"ladder",
+             {{"wanted_error",
+               error == Luminumbra::World::FarWantedError::None ? "None" : "InvalidCamera"},
+              {"expected_tiles", expected_tiles},
+              {"expected_by_tier", counts},
+              {"resident_tiles", resident_tiles},
+              {"stale_tiles", stale}}}};
+        if (fw.selection.effective == Luminumbra::Rendering::FarWorldMode::Legacy)
+            row["legacy"] = {{"regions_wanted", capture.regions_wanted},
+                             {"regions_resident", capture.regions_resident},
+                             {"regions_missing", capture.regions_missing}};
+        rows.push_back(std::move(row));
+        v2_complete = v2_complete && fw.selection.effective == mode && fw.captured && fw.complete &&
+                      capture.ready_within_deadline && capture.paired_capture_preserved &&
                       error == Luminumbra::World::FarWantedError::None;
     }
-    const auto mode = captures.empty() ? Luminumbra::Rendering::FarWorldMode::Legacy
-                                       : captures.back().far_world.selection.effective;
     nlohmann::json oracle = {
         {"schema", "luminumbra.farlod_horizon.v2"},
         {"world_preset", world_preset},
@@ -980,33 +1043,7 @@ void WriteFarLodHorizonAnalysis(const std::filesystem::path& artifact_dir,
         {"ladder_water",
          mode == Luminumbra::Rendering::FarWorldMode::Ladder ? "combined_immutable_observation"
                                                              : "legacy_compatibility"}};
-    // Preserve #199's additional legacy aggregate keys for historical readers.
-    // Ladder evidence is exclusively per-station; no ladder pair is fabricated.
-    if (mode == Luminumbra::Rendering::FarWorldMode::Legacy && had_converged_capture) {
-        std::vector<Luminumbra::World::FarTileKey> expected;
-        const auto error =
-            Luminumbra::World::ComputeFarWantedSet(final_camera_x, final_camera_z, expected);
-        nlohmann::json keys = nlohmann::json::array();
-        std::array<std::size_t, Luminumbra::World::kFarTierCount> counts{};
-        for (const auto& key : expected) {
-            keys.push_back({key.tier, key.tx, key.tz});
-            ++counts[key.tier - 1];
-        }
-        oracle["camera"] = {{"world_x", final_camera_x}, {"world_z", final_camera_z}};
-        oracle["legacy"] = {{"region_size_m", 512},
-                            {"f1_outer_range_m", 768},
-                            {"f2_outer_range_m", 3000},
-                            {"regions_wanted", final_wanted},
-                            {"regions_resident", final_resident},
-                            {"regions_missing", final_missing}};
-        oracle["ladder"] = {
-            {"wanted_error",
-             error == Luminumbra::World::FarWantedError::None ? "None" : "InvalidCamera"},
-            {"expected_by_tier", counts},
-            {"expected_tiles", keys},
-            {"resident_tiles", nlohmann::json::array()},
-            {"stale_tiles", 0}};
-    }
+    oracle.update(legacy_compatibility);
     std::ofstream oracle_output(artifact_dir / "farlod-horizon-ladder-oracle.json");
     oracle_output << std::setw(2) << oracle << '\n';
 }

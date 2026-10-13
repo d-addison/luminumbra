@@ -1544,7 +1544,7 @@ void ScenarioRunnerImpl::captureFarLodHorizon(std::chrono::steady_clock::time_po
             if (fw.selection.effective == Luminumbra::Rendering::FarWorldMode::Ladder)
                 station_ready = expected_ok && Luminumbra::Rendering::FarWorldStationReady(
                                                    fw, expected, settle_seconds);
-            else if (const auto* legacy = renderPipeline.farlod())
+            else if (const auto* legacy = renderPipeline.legacy_far_compatibility())
                 station_ready =
                     fw.captured &&
                     fw.selection.requested == Luminumbra::Rendering::FarWorldMode::Legacy &&
@@ -1657,13 +1657,10 @@ void ScenarioRunnerImpl::captureFarLodHorizon(std::chrono::steady_clock::time_po
                     // above-horizon thin-sliver scan (far ON).
                     capture.sky_sliver = AnalyzeFarLodHorizonSkySliver(
                         frame_pixels, screenshot_width, screenshot_height, horizon_row_from_top);
-                    // snapshot the far-LOD
-                    // scheduler stats for the ON frame BEFORE the paired
-                    // far-OFF render below - that render updates
-                    // farlod->stats to the disabled frame (no wanted/
-                    // resident regions, zero draws), which is not the
-                    // state this capture asserts on.
-                    if (const auto* farlod = renderPipeline.farlod()) {
+                    // Retained v1 counters belong only to effective Legacy.
+                    // Ladder evidence uses the immutable ON value snapshot;
+                    // the paired replay mutates neither scheduler nor snapshot.
+                    if (const auto* farlod = renderPipeline.legacy_far_compatibility()) {
                         const auto& farlod_stats = farlod->stats();
                         capture.regions_wanted = farlod_stats.regions_wanted;
                         capture.regions_resident = farlod_stats.regions_resident;

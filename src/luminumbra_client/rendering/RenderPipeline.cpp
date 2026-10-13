@@ -1256,6 +1256,8 @@ void RenderPipeline::prepare_world_swap() {
     if (m_farlod) {
         m_farlod->prepare_world_swap();
     }
+    m_legacy_far_resident_bytes = 0;
+    m_legacy_far_vertex_arrays = 0;
 }
 
 void RenderPipeline::set_far_lod_preview_anchor(const glm::vec3& center, float inner_radius_m) {
@@ -1388,8 +1390,7 @@ RenderPipeline::RuntimeRenderStats RenderPipeline::get_runtime_render_stats() co
         estimated_vram_bytes += static_cast<size_t>(WaterPass::kCausticsResolution) *
                                 static_cast<size_t>(WaterPass::kCausticsResolution) * 4u; // RGBA8
     }
-    if (m_farlod)
-        estimated_vram_bytes += m_farlod->stats().resident_bytes;
+    estimated_vram_bytes += m_legacy_far_resident_bytes;
     stats.estimated_vram_bytes = estimated_vram_bytes;
 
     stats.geometry_shader_ok =
@@ -1615,10 +1616,8 @@ RenderPipeline::RenderResourceRegistryStats RenderPipeline::get_resource_registr
     }
 
     // Far-LOD region meshes (one VAO + VBO/EBO per resident region, ).
-    if (m_farlod) {
-        stats.vertex_arrays += m_farlod->resident_vertex_array_count();
-        stats.buffers += m_farlod->resident_vertex_array_count() * 2u;
-    }
+    stats.vertex_arrays += m_legacy_far_vertex_arrays;
+    stats.buffers += m_legacy_far_vertex_arrays * 2u;
 
     for (const ShaderHealthEntry& shader : get_shader_health()) {
         if (shader.ok) {
@@ -2400,8 +2399,9 @@ void RenderPipeline::render_frame(entt::registry& registry,
                          : m_far_world_preview     ? FarWorldPurpose::Preview
                                                    : FarWorldPurpose::World;
     select_frame_far_world(
-        FarWorldSubmissionOverride(m_far_world->Selection(purpose, m_far_lod_enabled),
-                                   m_far_world_submission),
+        FarWorldSubmissionOverride(
+            ApplyLegacyFarWorldEnable(m_far_world->Selection(purpose), m_legacy_far_enabled),
+            m_far_world_submission),
         camera);
     m_far_world_advanced = false;
     ++m_far_world_frame;
@@ -2648,20 +2648,28 @@ void RenderPipeline::prepare_frame(entt::registry& registry,
     // The LIVE preview (render_to_backbuffer) DOES run far-LOD so the diorama shows the
     // far field; it stays use-after-free safe because the preview drains far-LOD off its
     // candidate world before freeing it (swap_pending_into_live + the dtor call
-    // prepare_world_swap). m_far_lod_enabled remains a manual override hook.
+    // prepare_world_swap). The preview enable hook applies only to compatibility.
     AdvanceSelectedFarWorld(
         m_frame_far_selection,
         [&] {
-            if (m_farlod)
-                m_farlod->update(world_system, camera.Position);
-            m_far_world_advanced = m_farlod != nullptr;
+            auto* legacy = legacy_far_compatibility();
+            if (legacy) {
+                legacy->update(world_system, camera.Position);
+                m_legacy_far_resident_bytes = legacy->stats().resident_bytes;
+                m_legacy_far_vertex_arrays = legacy->resident_vertex_array_count();
+            }
+            m_far_world_advanced = legacy != nullptr;
         },
         [&] {
             m_far_world_advanced = m_far_world->PrepareFrame(
                 m_far_world_frame, {camera.Position.x, camera.Position.y, camera.Position.z});
             // Checked request refusal is reported; one scheduler per frame.
             select_frame_far_world(
-                m_far_world->Selection(FarWorldPurpose::World, m_far_lod_enabled), camera);
+                FarWorldSubmissionOverride(
+                    ApplyLegacyFarWorldEnable(m_far_world->Selection(FarWorldPurpose::World),
+                                              m_legacy_far_enabled),
+                    m_far_world_submission),
+                camera);
         });
 
     prepare_camera_projection(camera);
@@ -2909,11 +2917,12 @@ void RenderPipeline::execute_stage_gbuffer(const Camera& camera) {
         // draw_chunks_mdi, byte-identical), shared with ShadowPass.
         gbuffer_input.submit_terrain_chunks = make_terrain_submitter(true);
         gbuffer_input.far_selection = m_frame_far_selection;
-        gbuffer_input.legacy_far = farlod();
-        gbuffer_input.submit_ladder = [this, &camera](const FarWorldPrepareDraw& prepare) {
-            return m_far_world->Submit({camera.Position.x, camera.Position.y, camera.Position.z},
-                                       prepare);
-        };
+        gbuffer_input.legacy_far = legacy_far_compatibility();
+        if (m_frame_far_selection.effective == FarWorldMode::Ladder)
+            gbuffer_input.submit_ladder = [this, &camera](const FarWorldPrepareDraw& prepare) {
+                return m_far_world->Submit(
+                    {camera.Position.x, camera.Position.y, camera.Position.z}, prepare);
+            };
         gbuffer_input.root_path = m_root_path;
         gbuffer_input.static_model_texture_array = static_model_texture_array();
         gbuffer_input.static_model_normal_array = static_model_normal_array();
@@ -3982,6 +3991,8 @@ void RenderPipeline::cleanup_gpu_resources() {
     if (m_farlod) {
         m_farlod->shutdown();
     }
+    m_legacy_far_resident_bytes = 0;
+    m_legacy_far_vertex_arrays = 0;
     for (auto& [id, d] : m_chunk_render_data) {
         (void)id;
         delete_chunk_slot(d);

@@ -3461,9 +3461,8 @@ function Test-PlayerView {
 # deadline <=90 seconds, current spanning identities and independent wanted set.
 # An explicit Ladder run refuses until immutable fixture authority is supported.
 
-# D-v2 wet fixtures exercise the same independent validator used below. This
-# file-only proof needs no GL: terrain alone, retained stores, unavailable water,
-# wet Empty, and a missing combined field must all be refused.
+# File-only controls exercise selected-mode dispatch and combined water evidence
+# through the same independent validator used below.
 function Assert-FarHorizonWaterNegativeControls {
     $waterPython = $null
     foreach ($candidate in @("python3", "python", "py")) {
@@ -3471,7 +3470,17 @@ function Assert-FarHorizonWaterNegativeControls {
     }
     if (-not $waterPython) { throw "far water controls require Python 3 (stdlib only)" }
     & $waterPython -B -m unittest discover -s (Join-Path $PSScriptRoot ".") -p "test_far_ladder_oracle.py"
-    if ($LASTEXITCODE -ne 0) { throw "FarLodHorizon v2 wet-fixture negative controls failed" }
+    if ($LASTEXITCODE -ne 0) { throw "FarLodHorizon v2 mode/water negative controls failed" }
+}
+
+function Assert-FarHorizonLegacyCompatibility {
+    param([object]$SelectedEvidence)
+    # V1 thresholds and F1/F2 counts qualify only this retained compatibility
+    # branch. Never infer selection from a requested flag or resident regions.
+    if ($SelectedEvidence.Mode -cne "legacy" -or
+        $SelectedEvidence.LadderChecked -ne $false) {
+        throw "FarLodHorizon wrong-mode: v1 requires effective Legacy compatibility evidence"
+    }
 }
 
 function Test-FarLodHorizon {
@@ -3508,12 +3517,13 @@ function Test-FarLodHorizon {
             "--runtime-artifact-dir", $viewDir
         ) -TimeoutSeconds ([Math]::Max(180, $runSeconds + 120))
 
-        $analysisPath = Join-Path $viewDir "farlod-horizon-analysis.json"
-        $analysis = Read-JsonArtifact -Path $analysisPath -Schema "luminumbra.farlod_horizon.v1"
         $oracle = Read-JsonArtifact -Path (Join-Path $viewDir "farlod-horizon-ladder-oracle.json") -Schema "luminumbra.farlod_horizon.v2"
         # Runs retained #199 aggregate checks plus the strict station/pose validator.
         $oracleResult = Assert-FarHorizonV2Artifact -Path (Join-Path $viewDir "farlod-horizon-ladder-oracle.json") -Renderer ($FarWorldRenderer.ToLowerInvariant())
         if ($oracle.world_preset -ne $preset) { throw "farlod horizon ($preset) wrong v2 preset" }
+        Assert-FarHorizonLegacyCompatibility -SelectedEvidence $oracleResult
+        $analysisPath = Join-Path $viewDir "farlod-horizon-analysis.json"
+        $analysis = Read-JsonArtifact -Path $analysisPath -Schema "luminumbra.farlod_horizon.v1"
         Assert-FarLodHorizonStationCoverage -Analysis $analysis -Name "farlod horizon ($preset)"
         foreach ($counter in @("regions_wanted", "regions_resident", "regions_missing")) {
             $oracleCount = Get-FarOracleInteger $oracle.legacy.$counter "farlod horizon ($preset) oracle" "legacy.$counter"
