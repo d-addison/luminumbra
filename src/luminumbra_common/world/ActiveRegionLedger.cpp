@@ -800,7 +800,8 @@ bool ActiveRegionLedger::decode(std::string_view bytes,
                 digest_projection = true;
             }
         }
-        // Frozen history cannot be read without the digest projection declaration.
+        // Persistence contract (docs/active-regions.md): refuse pre-release frozen history
+        // without digest_projection=2; those enabled saves are deliberately not migrated.
         if (!digest_projection && result.any_frozen_history()) {
             error = kProjectionMessage;
             return false;

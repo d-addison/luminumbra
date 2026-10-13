@@ -494,10 +494,22 @@ TEST(GameSessionHeadlessWorldTest, ActiveClockSaveLoadContinuationMatchesUninter
               control.GetRegistry().get<C::NeedsComponent>(creatures[1]).needs[0].pressure);
 }
 
-void CheckPartialPairReloadAndSave(const HeadlessRoot& root,
-                                   JobSystem& jobs,
-                                   const std::string& world_id,
-                                   const fs::path& save) {
+void CheckCommittedSnapshotReloadAndSave(const HeadlessRoot& root,
+                                         JobSystem& jobs,
+                                         const std::string& world_id,
+                                         const fs::path& save,
+                                         std::uint64_t expected_tick) {
+    // answers.md:31 and design.md:60-61 require recovery at world open, before reading members.
+    if (P::journal_pending(save)) {
+        GameSession recovery;
+        recovery.SetRootPath(root.root_string());
+        recovery.SetJobSystem(&jobs);
+        recovery.SetActiveRegionsEnabled(true);
+        ASSERT_TRUE(recovery.LoadWorld(world_id)) << recovery.GetWorldOpenError();
+        EXPECT_EQ(recovery.GetSimulationTickCount(), expected_tick);
+        EXPECT_FALSE(P::journal_pending(save));
+    }
+    ASSERT_TRUE(P::WorldSaveService::validate_save(save));
     const auto metadata_bytes = ReadClockTestFile(save / "world_info.json");
     const auto ledger_path = P::WorldSaveService::active_regions_path(save);
     const auto ledger_bytes = ReadClockTestFile(ledger_path);
@@ -505,10 +517,11 @@ void CheckPartialPairReloadAndSave(const HeadlessRoot& root,
     ASSERT_TRUE(P::WorldSaveService::load_active_regions(durable, save));
     const auto tick =
         nlohmann::json::parse(metadata_bytes).at("simulationTick").get<std::uint64_t>();
-    ASSERT_LT(durable.tick(), tick);
+    ASSERT_EQ(tick, expected_tick);
+    ASSERT_EQ(durable.tick(), tick);
     for (const bool edit : {false, true}) {
         SCOPED_TRACE(edit);
-        // Each fresh session must load the partial pair, including the edit case.
+        // Each fresh session must load the previous whole commit, including the edit case.
         {
             P::SaveTransaction staged(save, tick, {}, &P::WorldSaveService::member_digest);
             ASSERT_TRUE(staged.begin(nullptr));
@@ -526,9 +539,7 @@ void CheckPartialPairReloadAndSave(const HeadlessRoot& root,
         }
         ASSERT_TRUE(loaded.LoadWorld(world_id)) << loaded.GetWorldOpenError();
         EXPECT_EQ(loaded.GetSimulationTickCount(), tick);
-        // Reconciliation raises only the validation ceiling. The canonical tick
-        // stays where the interrupted save left it, so recovery cannot move the
-        // hash projection of an accepted state.
+        // Loading the recovered commit preserves its causal clock and canonical ledger.
         EXPECT_EQ(loaded.GetActiveRegionLedger().tick(), durable.tick());
         EXPECT_EQ(loaded.GetActiveRegionLedger().header_tick(), tick);
         EXPECT_EQ(loaded.GetActiveRegionLedger().canonical_bytes(), durable.canonical_bytes());
@@ -616,9 +627,13 @@ TEST(GameSessionHeadlessWorldTest,
     ASSERT_TRUE(session.SaveWorldState());
     EXPECT_TRUE(P::WorldSaveService::validate_save(save));
 
-    // A failure between the two rewind replacements still leaves a readable pair.
+    // design.md:60-61: a failure between rewind replacements restores the whole previous commit.
     ASSERT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 1u);
     ASSERT_TRUE(session.SaveWorld());
+    const auto before_rewind_metadata = ReadClockTestFile(save / "world_info.json");
+    const auto before_rewind_ledger =
+        ReadClockTestFile(P::WorldSaveService::active_regions_path(save));
+    const auto before_rewind_index = ReadClockTestFile(P::snapshot_index_path(save));
     ASSERT_TRUE(session.LoadWorldStateFrom(alternate));
     P::WorldSaveService::set_interrupt_before_region_replace_for_testing(true);
     const bool interrupted_save = session.SaveWorld();
@@ -627,9 +642,13 @@ TEST(GameSessionHeadlessWorldTest,
     ASSERT_TRUE(P::WorldSaveService::validate_save(save));
     EXPECT_EQ(P::InspectSavedWorld(root.path(), session.GetMetadata().worldId).clock.tick(), 2u);
     ASSERT_TRUE(P::WorldSaveService::load_active_regions(saved_ledger, save));
-    EXPECT_EQ(saved_ledger.tick(), 1u);
+    EXPECT_EQ(saved_ledger.tick(), 2u);
+    EXPECT_EQ(ReadClockTestFile(save / "world_info.json"), before_rewind_metadata);
+    EXPECT_EQ(ReadClockTestFile(P::WorldSaveService::active_regions_path(save)),
+              before_rewind_ledger);
+    EXPECT_EQ(ReadClockTestFile(P::snapshot_index_path(save)), before_rewind_index);
     ASSERT_NO_FATAL_FAILURE(
-        CheckPartialPairReloadAndSave(root, jobs, session.GetMetadata().worldId, save));
+        CheckCommittedSnapshotReloadAndSave(root, jobs, session.GetMetadata().worldId, save, 2));
     ASSERT_TRUE(session.SaveWorld());
     ASSERT_TRUE(session.LoadWorld(session.GetMetadata().worldId)) << session.GetWorldOpenError();
     EXPECT_EQ(session.GetSimulationTickCount(), 1u);
@@ -648,13 +667,21 @@ TEST(GameSessionHeadlessWorldTest, FailedForwardLedgerWriteReloadsAndSavesImmedi
     ASSERT_TRUE(session.CreateWorld("Forward failure", "1337", "default"));
     ASSERT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 1u);
     ASSERT_TRUE(session.SaveWorld());
+    const auto save = session.GetWorldSaveDir();
+    const auto before_metadata = ReadClockTestFile(save / "world_info.json");
+    const auto before_ledger = ReadClockTestFile(P::WorldSaveService::active_regions_path(save));
+    const auto before_index = ReadClockTestFile(P::snapshot_index_path(save));
     ASSERT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 1u);
     P::WorldSaveService::set_before_active_regions_replace_for_testing([] { return false; });
     const bool saved = session.SaveWorld();
     P::WorldSaveService::set_before_active_regions_replace_for_testing(nullptr);
     ASSERT_FALSE(saved);
-    ASSERT_NO_FATAL_FAILURE(CheckPartialPairReloadAndSave(
-        root, jobs, session.GetMetadata().worldId, session.GetWorldSaveDir()));
+    // design.md:60-61: failed forward writes also restore the whole previous commit.
+    EXPECT_EQ(ReadClockTestFile(save / "world_info.json"), before_metadata);
+    EXPECT_EQ(ReadClockTestFile(P::WorldSaveService::active_regions_path(save)), before_ledger);
+    EXPECT_EQ(ReadClockTestFile(P::snapshot_index_path(save)), before_index);
+    ASSERT_NO_FATAL_FAILURE(
+        CheckCommittedSnapshotReloadAndSave(root, jobs, session.GetMetadata().worldId, save, 1));
 }
 
 #if GTEST_HAS_DEATH_TEST && !defined(_WIN32)
@@ -699,11 +726,13 @@ TEST(GameSessionHeadlessWorldDeathTest, TerminatedLedgerStagingLeavesLoadableAnd
         ReadClockTestFile(debris.front()), staged, error))
         << error;
     EXPECT_EQ(staged.tick(), 2u);
-    ASSERT_TRUE(P::WorldSaveService::validate_save(save));
+    // design.md:60-61: installed members may be incomplete until world-open recovery runs.
+    EXPECT_TRUE(P::journal_pending(save));
+    EXPECT_FALSE(P::WorldSaveService::validate_save(save));
     JobSystem jobs;
     jobs.startup(1);
     ASSERT_NO_FATAL_FAILURE(
-        CheckPartialPairReloadAndSave(root, jobs, save.filename().string(), save));
+        CheckCommittedSnapshotReloadAndSave(root, jobs, save.filename().string(), save, 1));
     // Recovery never depends on cleaning the staging file up, but the next
     // successful save must reclaim it. Otherwise every interruption leaks a full
     // ledger copy and repeated crashes exhaust the volume.
