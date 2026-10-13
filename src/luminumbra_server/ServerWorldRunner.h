@@ -14,12 +14,14 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 
 #include <vector>
 
 #include "luminumbra_common/core/JobSystem.h"
 #include "luminumbra_common/persistence/WorldPersistenceRoundtrip.h"
+#include "luminumbra_common/world/ActiveRegionLedger.h"
 #include "luminumbra_common/world/GameSession.h"
 #include "luminumbra_common/world/PlayerAvatar.h"
 
@@ -100,11 +102,16 @@ struct ServerWorldRunnerConfig {
     // (no new reads, no anchor change).
     bool water_smoke = false;
     bool sim_budget = false; // Opt-in simulation stage observation; default artifact unchanged.
+    // Applied via GameSession::SetRegionSchedulerConfig right after the root path is set, so it
+    // takes effect for the fresh world Boot() creates. Empty = session default.
+    std::optional<Luminumbra::world::RegionSchedulerConfig> region_scheduler;
 };
 
 struct ServerTickReport {
     std::uint64_t ticks_executed = 0;
     std::uint64_t frames_executed = 0;
+    bool region_fault = false;
+    std::string region_fault_message;
     std::uint64_t autosave_passes = 0;
     std::uint64_t autosave_writes = 0;
     double simulated_seconds = 0.0;
