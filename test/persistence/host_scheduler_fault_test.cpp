@@ -306,7 +306,9 @@ TEST_F(HostSchedulerFault, HealthyRecordPublishesACompleteReplayAndRegionTrace) 
     ASSERT_EQ(RunRecord(options), 0);
     const auto recording = Luminumbra::Replay::ReadReplay(options.record_path);
     ASSERT_TRUE(recording.has_value());
-    EXPECT_EQ(recording.value().tick_count, options.ticks);
+    if (recording) {
+        EXPECT_EQ(recording.value().tick_count, options.ticks);
+    }
     Luminumbra::Replay::RegionScheduleTrace trace;
     std::string error;
     ASSERT_TRUE(Luminumbra::Replay::ReadRegionScheduleTrace(
