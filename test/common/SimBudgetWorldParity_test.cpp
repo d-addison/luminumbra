@@ -100,12 +100,16 @@ TEST_P(SimBudgetWorldParity, Populated3600TicksPreserveWorldHashAndReplayWork) {
         config.seed = "1337";
         config.surface_radius = 1;
         config.collision_radius = 1;
+        // The server supplies an explicit replicated anchor list. An avatar keeps
+        // the roster's scent owners due; an empty list intentionally visits nothing.
+        config.avatar_count = 1;
         config.ecology_roster = true;
         config.planted_roster = true;
         config.sim_budget = pass != 0;
         Luminumbra::Server::ServerWorldRunner runner(config);
         ASSERT_TRUE(runner.Boot());
         ASSERT_EQ(runner.Session()->ActiveRegionsEnabled(), GetParam());
+        ASSERT_EQ(runner.Avatars().size(), 1u);
         ASSERT_EQ(runner.CreatureCount(), 8u);
         ASSERT_FALSE(
             runner.Session()->GetRegistry().view<Luminumbra::Components::PlantTag>().empty());

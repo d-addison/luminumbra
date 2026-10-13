@@ -1514,7 +1514,17 @@ std::uint16_t GameSession::SampleRegionalChannel(int channel, const Vec3& positi
 }
 
 std::string GameSession::RegionalAmbientHash(std::uint8_t channels, bool weather) const {
-    return Persistence::StableChecksum(m_fieldPages.ambient_bytes(channels, weather));
+    auto bytes = m_fieldPages.ambient_bytes(channels, weather);
+    // The same regional authority can be projected at different anchors. The anchor
+    // drives ambient diagnostics and the scent domain, so include its identity in
+    // the slot hash without changing the stored region/freeze digest projection.
+    bytes += "|ambient_anchor:";
+    for (const float coordinate : {m_ambientFieldAnchor.x, m_ambientFieldAnchor.z}) {
+        const auto bits = std::bit_cast<std::uint32_t>(coordinate);
+        for (int i = 0; i < 4; ++i)
+            bytes.push_back(static_cast<char>((bits >> (8 * i)) & 255));
+    }
+    return Persistence::StableChecksum(bytes);
 }
 
 void GameSession::BindRegionalFieldQueries() {

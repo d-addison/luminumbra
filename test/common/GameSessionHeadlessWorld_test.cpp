@@ -786,6 +786,10 @@ TEST(GameSessionHeadlessWorldTest, ActiveClockKeepsAmbientAnchorWhenClientSavesM
     ASSERT_TRUE(P::WorldSaveService::save_metadata(metadata.dump(), explicit_save));
     ASSERT_TRUE(wrong_anchor.CreateTransientWorld("Wrong anchor", "1337", "default"));
     ASSERT_TRUE(wrong_anchor.LoadWorldStateFrom(explicit_save));
+    // Regional weather restores the same world-space authority at either anchor.
+    // The negative control must still detect the different ambient projection domain.
+    ASSERT_EQ(wrong_anchor.GetFieldPages().canonical_bytes(),
+              control.GetFieldPages().canonical_bytes());
     for (int i = 0; i <= k; ++i) {
         SCOPED_TRACE(i);
         EXPECT_EQ(SessionWorldHash(original), SessionWorldHash(control));
@@ -2360,9 +2364,10 @@ TEST(GameSessionHeadlessWorldTest, InvalidHostInputsNeverThrowAndAreCounted) {
 namespace {
 constexpr Luminumbra::world::RegionKey kFaultRegion{40, -40};
 
-// Arms a scheduler fault at tick k. The pinned far region gets work over the
-// limit in completed ticks k-2 and k-1: Active->Reduced at k-1, then Frozen at k,
-// where the durable digest provider reads the corrupt region file and throws.
+// Arms a scheduler fault at tick k. Keep the pinned far region awake through k-2,
+// then publish over-limit work in completed ticks k-2 and k-1: Active->Reduced
+// at k-1, then Frozen at k, where the durable digest provider reads the corrupt
+// region file and throws.
 void ArmSchedulerFault(GameSession& session,
                        const HeadlessRoot& root,
                        JobSystem& jobs,
@@ -2378,6 +2383,10 @@ void ArmSchedulerFault(GameSession& session,
     fs::create_directories(region.parent_path());
     std::ofstream(region, std::ios::binary) << "not a region file";
     session.GetSimulationEventBus().subscribe([&session, k](const auto& event) {
+        // Field initialization/evolution also publishes pressure. Keep this region
+        // awake until the intended two-decision fault window, regardless of it.
+        if (event.tick < k - 2)
+            session.PinActiveRegion(kFaultRegion, true);
         if (event.tick == k - 2 || event.tick == k - 1)
             session.RecordActiveRegionWork({kFaultRegion, 5, 0, 0, 0});
     });
