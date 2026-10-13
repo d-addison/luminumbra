@@ -1,14 +1,18 @@
 #include "core/CrashReport.h"
 
+#include <array>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <memory>
+#include <mutex>
 #include <new>
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <utility>
 
 #if defined(_WIN32)
 #ifndef NOMINMAX
@@ -22,6 +26,7 @@
 #include <cerrno>
 #include <csignal>
 #include <fcntl.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #if defined(__linux__) && (defined(__x86_64__) || defined(__aarch64__))
 #include <sys/ucontext.h>
@@ -41,6 +46,72 @@ using Target = HANDLE;
 #else
 using Target = int;
 #endif
+
+// Only installers access these slots, under install_mutex. Handlers read only the
+// published atomic target. Never close a published target: a handler may have loaded
+// it already. Reuse unchanged files and bound all other retention to eight targets.
+constexpr std::size_t kMaxReportTargets = 8;
+struct ReportTarget {
+    Target target{};
+    std::filesystem::path directory;
+    std::filesystem::path report;
+};
+
+bool IsSameReportFile(const ReportTarget& slot) {
+#if defined(_WIN32)
+    const HANDLE probe = CreateFileW(slot.report.c_str(), FILE_READ_ATTRIBUTES,
+                                     FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                     nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (probe == INVALID_HANDLE_VALUE) {
+        return false;
+    }
+    BY_HANDLE_FILE_INFORMATION original{};
+    BY_HANDLE_FILE_INFORMATION existing{};
+    const bool same = GetFileInformationByHandle(slot.target, &original) != 0 &&
+                      GetFileInformationByHandle(probe, &existing) != 0 &&
+                      original.dwVolumeSerialNumber == existing.dwVolumeSerialNumber &&
+                      original.nFileIndexHigh == existing.nFileIndexHigh &&
+                      original.nFileIndexLow == existing.nFileIndexLow;
+    CloseHandle(probe);
+    return same;
+#else
+    struct stat original {};
+    struct stat existing {};
+    return ::fstat(slot.target, &original) == 0 && ::stat(slot.report.c_str(), &existing) == 0 &&
+           original.st_dev == existing.st_dev && original.st_ino == existing.st_ino;
+#endif
+}
+
+Target OpenFreshReport(const std::filesystem::path& directory,
+                       std::uint64_t pid,
+                       std::filesystem::path& report) {
+    const std::string stem = "crash-" + std::to_string(pid);
+    // Exclusive creation preserves pre-existing evidence and cannot open a hard link
+    // to a live old target. Keep the usual name when free; collisions get a suffix.
+    for (unsigned int suffix = 0; suffix < 1024; ++suffix) {
+        report = directory / (stem + (suffix == 0 ? "" : "-" + std::to_string(suffix)) + ".txt");
+#if defined(_WIN32)
+        const HANDLE file = CreateFileW(report.c_str(), GENERIC_WRITE,
+                                        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                        nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (file != INVALID_HANDLE_VALUE || (GetLastError() != ERROR_FILE_EXISTS &&
+                                             GetLastError() != ERROR_ALREADY_EXISTS)) {
+            return file;
+        }
+#else
+        const int fd = ::open(report.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0644);
+        if (fd >= 0 || errno != EEXIST) {
+            return fd;
+        }
+#endif
+    }
+    std::fputs("Crash capture: report filename collision limit reached\n", stderr);
+#if defined(_WIN32)
+    return INVALID_HANDLE_VALUE;
+#else
+    return -1;
+#endif
+}
 
 // Fixed-size buffer that formats text and integers without allocating. Flush()
 // returns false once any write has failed; later output is dropped.
@@ -263,17 +334,35 @@ void HandleFatalSignal(int signo, siginfo_t* info, void* context) {
 bool InstallAlternateStack() {
     constexpr std::size_t kAlternateStackBytes = 64 * 1024;
     static std::unique_ptr<char[]> stack;
+    static thread_local bool installed_on_this_thread = false;
+    // The server installs once on its entry thread. Keep that ownership even if the
+    // thread exits: a different thread must never share its alternate-stack storage.
+    // InstallCrashCapture serializes access to stack; the signal handler never uses it.
+    if (stack && !installed_on_this_thread) {
+        std::fputs("Crash capture: cross-thread reinstallation is unsupported; "
+                   "install on the original entry thread\n",
+                   stderr);
+        return false;
+    }
+    std::unique_ptr<char[]> candidate;
     if (!stack) {
-        stack.reset(new (std::nothrow) char[kAlternateStackBytes]);
-        if (!stack) {
+        candidate.reset(new (std::nothrow) char[kAlternateStackBytes]);
+        if (!candidate) {
             return false;
         }
     }
     stack_t alternate{};
-    alternate.ss_sp = stack.get();
+    alternate.ss_sp = stack ? stack.get() : candidate.get();
     alternate.ss_size = kAlternateStackBytes;
     alternate.ss_flags = 0;
-    return ::sigaltstack(&alternate, nullptr) == 0;
+    if (::sigaltstack(&alternate, nullptr) != 0) {
+        return false;
+    }
+    if (candidate) {
+        stack = std::move(candidate);
+    }
+    installed_on_this_thread = true;
+    return true;
 }
 
 bool InstallSignalHandlers() {
@@ -298,6 +387,7 @@ constexpr DWORD kMaxModulePathChars = 32767;
 
 // NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
 std::atomic<HANDLE> g_report{nullptr};
+static_assert(std::atomic<HANDLE>::is_always_lock_free, "handler state must be lock-free");
 // NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
 LONG g_handler_entered = 0;
 
@@ -466,63 +556,94 @@ LONG WINAPI HandleUnhandledException(EXCEPTION_POINTERS* pointers) {
 } // namespace
 
 bool InstallCrashCapture(const std::filesystem::path& crash_dir, std::string_view program_name) {
+    static std::mutex install_mutex;
+    static std::array<ReportTarget, kMaxReportTargets> targets;
+    static std::size_t target_count = 0;
+    const std::lock_guard<std::mutex> install_lock(install_mutex);
     std::error_code ec;
     std::filesystem::create_directories(crash_dir, ec);
     if (ec || !std::filesystem::is_directory(crash_dir, ec)) {
         return false;
     }
+    const std::filesystem::path directory = std::filesystem::canonical(crash_dir, ec);
+    if (ec) {
+        return false;
+    }
+#if !defined(_WIN32)
+    if (!InstallAlternateStack()) {
+        return false;
+    }
+#endif
+    for (std::size_t index = 0; index < target_count; ++index) {
+        const ReportTarget& slot = targets[index];
+        if (slot.directory == directory && IsSameReportFile(slot)) {
+            // Preserve the header and offset as well as the resource. A handler can
+            // still be writing this file, including when returning to an old target.
+            std::filesystem::path report = crash_dir / slot.report.filename();
+#if defined(_WIN32)
+            g_report.store(slot.target);
+            SetUnhandledExceptionFilter(&HandleUnhandledException);
+#else
+            if (!InstallSignalHandlers()) {
+                return false;
+            }
+            g_report_fd.store(slot.target);
+#endif
+            ReportPathStorage() = std::move(report);
+            return true;
+        }
+    }
+    if (target_count == targets.size()) {
+        std::fputs("Crash capture: eight retained report targets exhausted; "
+                   "previous target remains installed\n", stderr);
+        return false;
+    }
 
 #if defined(_WIN32)
     const auto pid = static_cast<std::uint64_t>(GetCurrentProcessId());
-    const std::filesystem::path report = crash_dir / ("crash-" + std::to_string(pid) + ".txt");
-    // The previous report handle does not allow other writers, so it must be closed before
-    // the same path can be recreated. Capture stays disabled if the recreate fails.
-    const HANDLE previous = g_report.exchange(nullptr);
-    if (previous != nullptr && previous != INVALID_HANDLE_VALUE) {
-        CloseHandle(previous);
-    }
-    const HANDLE file = CreateFileW(report.c_str(),
-                                    GENERIC_WRITE,
-                                    FILE_SHARE_READ | FILE_SHARE_WRITE,
-                                    nullptr,
-                                    CREATE_ALWAYS,
-                                    FILE_ATTRIBUTE_NORMAL,
-                                    nullptr);
-    if (file == INVALID_HANDLE_VALUE) {
-        return false;
-    }
-    if (!WriteHeader(file, program_name, pid)) {
-        CloseHandle(file);
-        return false;
-    }
-    CacheMainModule();
-    g_report.store(file);
-    ResolveNtdllEntryPoints();
-    SetUnhandledExceptionFilter(&HandleUnhandledException);
-    ReportPathStorage() = report;
-    return true;
 #else
     const auto pid = static_cast<std::uint64_t>(::getpid());
-    const std::filesystem::path report = crash_dir / ("crash-" + std::to_string(pid) + ".txt");
-    const int fd = ::open(report.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
-    if (fd < 0) {
-        return false;
-    }
-    if (!WriteHeader(fd, program_name, pid)) {
-        ::close(fd);
-        return false;
-    }
-    if (!InstallAlternateStack() || !InstallSignalHandlers()) {
-        ::close(fd);
-        return false;
-    }
-    const int previous = g_report_fd.exchange(fd);
-    if (previous >= 0) {
-        ::close(previous);
-    }
-    ReportPathStorage() = report;
-    return true;
 #endif
+    ReportTarget candidate;
+    candidate.directory = directory;
+    candidate.target = OpenFreshReport(directory, pid, candidate.report);
+#if defined(_WIN32)
+    if (candidate.target == INVALID_HANDLE_VALUE) {
+        return false;
+    }
+#else
+    if (candidate.target < 0) {
+        return false;
+    }
+#endif
+    if (!WriteHeader(candidate.target, program_name, pid)) {
+#if defined(_WIN32)
+        CloseHandle(candidate.target);
+#else
+        ::close(candidate.target);
+#endif
+        return false;
+    }
+    std::filesystem::path report = crash_dir / candidate.report.filename();
+#if defined(_WIN32)
+    // These facts are immutable after first publication, even during reinstall.
+    static std::once_flag module_initialized;
+    std::call_once(module_initialized, [] {
+        CacheMainModule();
+        ResolveNtdllEntryPoints();
+    });
+    g_report.store(candidate.target);
+    SetUnhandledExceptionFilter(&HandleUnhandledException);
+#else
+    if (!InstallSignalHandlers()) {
+        ::close(candidate.target);
+        return false;
+    }
+    g_report_fd.store(candidate.target);
+#endif
+    targets[target_count++] = std::move(candidate);
+    ReportPathStorage() = std::move(report);
+    return true;
 }
 
 const std::filesystem::path& CrashReportPath() {

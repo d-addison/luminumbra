@@ -7,6 +7,7 @@ so the test does not depend on the current directory or on sys.path.
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import importlib.util
 import json
@@ -16,8 +17,11 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from pathlib import Path
 from types import ModuleType
 from unittest import mock
@@ -969,6 +973,188 @@ class RunDirectoryAndSnapshotTest(unittest.TestCase):
         self.assertEqual(list(rq.snapshot_files(self.root, False, skip)), [str(healthy)])
 
 
+class WindowsDumpLockTest(unittest.TestCase):
+    """Simulate mandatory Windows byte locks, using real unbuffered file handles."""
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory(prefix="rq-windows-lock-test-")
+        self.addCleanup(self.temp.cleanup)
+        self.folder = Path(self.temp.name)
+        self.guard = threading.Lock()
+        self.owner = None
+        self.second_lock_attempted = threading.Event()
+        self.initializer_fd = None
+        self.initializing = threading.Event()
+        self.finish_initialization = threading.Event()
+        self.pause_initialization = False
+        self.deny_initialization_once = False
+        self.initialization_writes = 0
+        self.verified_reads = 0
+        self.unlocks = 0
+        self.windows = ModuleType("msvcrt")
+        self.windows.LK_NBLCK = 1
+        self.windows.LK_UNLCK = 0
+        self.windows.locking = self.locking
+        self.host_os = mock.Mock(wraps=os)
+        self.host_os.name = "nt"
+        self.host_os.O_RDWR = os.O_RDWR
+        self.host_os.O_CREAT = os.O_CREAT
+        self.host_os.fdopen.side_effect = self.fdopen
+
+    def locking(self, fd, operation, size):
+        self.assertEqual(size, 1)
+        with self.guard:
+            if operation == self.windows.LK_UNLCK:
+                self.assertEqual(self.owner, fd)
+                self.owner = None
+                self.unlocks += 1
+            else:
+                if self.owner is None:
+                    self.owner = fd
+                else:
+                    self.second_lock_attempted.set()
+                    raise PermissionError(errno.EACCES, "byte zero is held by another contender")
+                if self.initializer_fd is not None and fd != self.initializer_fd:
+                    self.second_lock_attempted.set()
+
+    def fdopen(self, fd, *args, **kwargs):
+        raw = os.fdopen(fd, *args, **kwargs)
+        test = self
+
+        class TrackedFile:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exception):
+                with test.guard:
+                    if test.owner == fd:
+                        test.owner = None
+                raw.close()
+
+            def fileno(self):
+                return raw.fileno()
+
+            def seek(self, offset):
+                return raw.seek(offset)
+
+            def write(self, content):
+                # Model Windows faithfully: unlocked writes are permitted, but a
+                # write overlapping another contender's locked byte is denied.
+                with test.guard:
+                    if test.owner is not None and test.owner != fd:
+                        raise PermissionError(errno.EACCES, "initialization overlaps a locked byte")
+                    test.initialization_writes += 1
+                    if test.initializer_fd is None:
+                        test.initializer_fd = fd
+                    pause = test.pause_initialization and test.initializer_fd == fd
+                    deny = test.deny_initialization_once
+                    test.deny_initialization_once = False
+                if deny:
+                    raise PermissionError(errno.EACCES, "transient initialization denial")
+                if pause:
+                    test.initializing.set()
+                    if not test.finish_initialization.wait(5):
+                        raise RuntimeError("initialization hook was not released")
+                with test.guard:
+                    if test.owner is not None and test.owner != fd:
+                        raise PermissionError(errno.EACCES, "initialization overlaps a locked byte")
+                    return raw.write(content)
+
+            def read(self, size):
+                with test.guard:
+                    test.assertEqual(test.owner, fd)
+                    test.verified_reads += 1
+                return raw.read(size)
+
+        return TrackedFile()
+
+    def patches(self):
+        @contextmanager
+        def installed():
+            with mock.patch.object(rq, "os", self.host_os), \
+                    mock.patch.dict(sys.modules, {"msvcrt": self.windows}):
+                yield
+        return installed()
+
+    def test_two_contenders_interleave_before_initialization_finishes(self) -> None:
+        self.pause_initialization = True
+        first_in_body = threading.Event()
+        second_in_body = threading.Event()
+        release_first = threading.Event()
+        release_second = threading.Event()
+
+        def contender(first):
+            with rq.shared_dump_directory_locks(self.folder):
+                if first:
+                    first_in_body.set()
+                    if not release_first.wait(5):
+                        raise RuntimeError("first lock owner was not released")
+                else:
+                    second_in_body.set()
+                    if not release_second.wait(5):
+                        raise RuntimeError("second lock owner was not released")
+
+        with self.patches(), ThreadPoolExecutor(max_workers=2) as workers:
+            first = workers.submit(contender, True)
+            try:
+                self.assertTrue(self.initializing.wait(5), "first initializer never reached its hook")
+                second = workers.submit(contender, False)
+                self.assertTrue(self.second_lock_attempted.wait(5), "second contender never tried byte zero")
+                self.assertEqual((self.folder / rq.DUMP_LOCK_NAME).read_bytes(), b"")
+                self.assertFalse(second_in_body.is_set())
+                self.finish_initialization.set()
+                self.assertTrue(first_in_body.wait(5))
+                self.assertFalse(second_in_body.is_set())
+            finally:
+                self.finish_initialization.set()
+                release_first.set()
+                release_second.set()
+            first.result(timeout=5)
+            second.result(timeout=5)
+        self.assertTrue(second_in_body.is_set())
+        self.assertEqual(self.initialization_writes, 1)
+        self.assertEqual(self.verified_reads, 2)
+        self.assertEqual((self.folder / rq.DUMP_LOCK_NAME).read_bytes(), b"\0")
+        self.assertIsNone(self.owner)
+
+    def test_initialization_permission_error_releases_and_retries(self) -> None:
+        self.deny_initialization_once = True
+        with self.patches(), mock.patch.object(rq.time, "sleep"):
+            with rq.shared_dump_directory_locks(self.folder):
+                self.assertEqual((self.folder / rq.DUMP_LOCK_NAME).read_bytes(), b"\0")
+        self.assertEqual(self.initialization_writes, 2)
+        self.assertEqual(self.verified_reads, 1)
+        self.assertEqual(self.unlocks, 1)
+        self.assertIsNone(self.owner)
+
+    def test_contention_times_out_within_bounded_loop(self) -> None:
+        self.owner = -1
+        with self.patches(), mock.patch.object(rq.time, "monotonic", side_effect=[0.0, 301.0]):
+            with self.assertRaises(TimeoutError):
+                with rq.shared_dump_directory_locks(self.folder):
+                    self.fail("contended lock must not be acquired")
+        self.assertEqual(self.initialization_writes, 0)
+        self.assertEqual(self.owner, -1)
+
+    def test_existing_lock_byte_is_verified_without_rewriting(self) -> None:
+        (self.folder / rq.DUMP_LOCK_NAME).write_bytes(b"\0")
+        with self.patches():
+            with rq.shared_dump_directory_locks(self.folder):
+                self.assertIsNotNone(self.owner)
+        self.assertEqual(self.initialization_writes, 0)
+        self.assertEqual(self.verified_reads, 1)
+        self.assertIsNone(self.owner)
+
+    def test_invalid_lock_byte_releases_ownership_and_fails_verification(self) -> None:
+        (self.folder / rq.DUMP_LOCK_NAME).write_bytes(b"x")
+        with self.patches():
+            with self.assertRaisesRegex(OSError, "initialization verification failed"):
+                with rq.shared_dump_directory_locks(self.folder):
+                    self.fail("invalid lock byte must not be accepted")
+        self.assertEqual(self.unlocks, 1)
+        self.assertIsNone(self.owner)
+
+
 class QualificationSafetyTest(HarnessTestCase):
     """Deterministic receipt tests; no native child, registry, or core access."""
 
@@ -1103,6 +1289,97 @@ class QualificationSafetyTest(HarnessTestCase):
 
     def dump_query(self, folder: Path):
         return lambda key: (0, WerPreflightTest.reg_output(str(folder)))
+
+    def check_concurrent_dump_collection(self, windows: bool) -> None:
+        folder = self.work / "shared-dumps"
+        folder.mkdir()
+        first_in_child = threading.Event()
+        second_at_lock = threading.Event()
+        second_in_child = threading.Event()
+        release_first = threading.Event()
+        attempt_mutex = threading.Lock()
+        attempts = 0
+        real_locks = rq.shared_dump_directory_locks
+
+        @contextmanager
+        def tracked_locks(*folders):
+            nonlocal attempts
+            with attempt_mutex:
+                attempts += 1
+                if attempts == 2:
+                    second_at_lock.set()
+            with real_locks(*folders):
+                yield
+
+        names = ({"first": "world.exe.101.dmp", "second": "world.exe.202.dmp"}
+                 if windows else {"first": "core.101", "second": "core.202"})
+
+        def child(command, *arguments):
+            owner = command[-1].split("=", 1)[1]
+            (folder / names[owner]).write_bytes(owner.encode("ascii"))
+            if owner == "first":
+                first_in_child.set()
+                if not release_first.wait(10):
+                    raise RuntimeError("first synthetic child was not released")
+            else:
+                second_in_child.set()
+            return self.clean_child(command, *arguments)
+
+        def qualify(owner):
+            args = self.safety_args(count=1, folder=folder if windows else None)
+            args.receipt = self.receipt.with_name(f"{owner}.json")
+            return rq.run_qualification(
+                args, [f"--owner={owner}"], query=self.dump_query(folder),
+                core_limits=lambda: (4096, 4096),
+                read_pattern=lambda: str(folder / "core.%p"),
+            )
+
+        with mock.patch.object(rq, "IS_WINDOWS", windows), \
+                mock.patch.object(rq, "run_iteration", side_effect=child), \
+                mock.patch.object(rq, "shared_dump_directory_locks", side_effect=tracked_locks), \
+                ThreadPoolExecutor(max_workers=2) as workers:
+            first = workers.submit(qualify, "first")
+            try:
+                self.assertTrue(first_in_child.wait(10), "first invocation never launched")
+                second = workers.submit(qualify, "second")
+                self.assertTrue(second_at_lock.wait(10), "second invocation never attempted its lock")
+                self.assertFalse(second_in_child.wait(0.2), "shared dump writers overlapped")
+            finally:
+                release_first.set()
+            self.assertEqual(first.result(timeout=10), 0)
+            self.assertEqual(second.result(timeout=10), 0)
+
+        self.assertTrue(second_in_child.is_set())
+        for owner, name in names.items():
+            receipt_path = self.receipt.with_name(f"{owner}.json")
+            receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+            self.assertEqual(receipt["status"], "passed")
+            entry = receipt["iterations"][0]
+            self.assertEqual(entry["collection_errors"], [])
+            self.assertEqual([Path(path).name for path in entry["crash_artifacts"]], [name])
+            self.assertEqual(Path(entry["crash_artifacts"][0]).read_bytes(), owner.encode("ascii"))
+            self.assertFalse(rq.receipt_ownership_path(receipt_path).exists())
+        self.assertTrue((folder / rq.DUMP_LOCK_NAME).is_file())
+        self.assertNotIn(str(folder / rq.DUMP_LOCK_NAME), rq.snapshot_files(folder, True))
+
+    def test_concurrent_distinct_receipts_serialize_wer_collection(self) -> None:
+        self.check_concurrent_dump_collection(windows=True)
+
+    def test_concurrent_distinct_receipts_serialize_core_collection(self) -> None:
+        self.check_concurrent_dump_collection(windows=False)
+
+    def test_dump_lock_failure_finalizes_without_launching_child(self) -> None:
+        folder = self.root / "dumps"
+        with mock.patch.object(rq, "shared_dump_directory_locks",
+                               side_effect=PermissionError("lock denied")):
+            code, launch = self.qualify(self.safety_args(count=1, folder=folder),
+                                       query=self.dump_query(folder))
+        self.assertEqual(code, 1)
+        launch.assert_not_called()
+        entry = self.assert_finalized("failed")["iterations"][0]
+        self.assertEqual(entry["status"], "harness_error")
+        self.assertIsNone(entry["exit_code"])
+        self.assertIn("shared dump directory lock: PermissionError: lock denied", entry["failure_reason"])
 
     def test_snapshot_stat_errors_in_baseline_and_post_run_keep_healthy_artifacts(self) -> None:
         folder = self.root / "dumps"

@@ -21,11 +21,16 @@ an undeterminable core directory is a preflight failure. On Windows the executab
 a WER LocalDumps DumpFolder that matches --wer-dump-folder, and new dumps are copied into the
 iteration. Without that setup the run fails closed with status PREFLIGHT_FAILED, unless
 --allow-no-dumps is given, which is recorded in the receipt.
+
+Invocations sharing a core or WER directory serialize the snapshot, child execution,
+dump settling and copying under an OS file lock. The persistent lock file is excluded
+from artifact collection; closing the lock handle releases ownership even after a crash.
 """
 
 from __future__ import annotations
 
 import argparse
+import errno
 import functools
 import hashlib
 import json
@@ -41,9 +46,10 @@ import sys
 import tempfile
 import time
 from collections import Counter
+from contextlib import ExitStack, contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 try:
     import resource as _resource_module
@@ -62,6 +68,8 @@ DUMP_SETTLE_SECONDS = 30.0
 REGISTRY_QUERY_TIMEOUT_SECONDS = 30.0
 PREFLIGHT_EXIT_CODE = 3
 CRASH_DIR_ENV = "LUMINUMBRA_CRASH_DIR"
+DUMP_LOCK_NAME = ".luminumbra-qualification-dumps.lock"
+DUMP_LOCK_TIMEOUT_SECONDS = 300.0
 IS_WINDOWS = os.name == "nt"
 SCRUBBED_GTEST_ENV = (
     "GTEST_SHARD_INDEX",
@@ -220,6 +228,8 @@ def snapshot_files(
     )
     try:
         for path in paths:
+            if path.name == DUMP_LOCK_NAME:
+                continue
             if skip is not None and skip(path):
                 continue
             try:
@@ -234,6 +244,60 @@ def snapshot_files(
             raise
         traversal_error(exc)
     return result
+
+
+def acquire_windows_dump_lock(handle: Any) -> None:
+    """Lock byte zero (Windows permits locking beyond EOF), then initialize it."""
+    import msvcrt
+
+    fd = handle.fileno()
+    deadline = time.monotonic() + DUMP_LOCK_TIMEOUT_SECONDS
+    while True:
+        locked = False
+        try:
+            handle.seek(0)
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+            locked = True
+            if os.fstat(fd).st_size == 0:
+                if handle.write(b"\0") != 1:
+                    raise OSError(errno.EIO, "short dump lock initialization write")
+            handle.seek(0)
+            if handle.read(1) != b"\0":
+                raise OSError(errno.EIO, "dump lock initialization verification failed")
+            return
+        except OSError as exc:
+            if locked:
+                handle.seek(0)
+                msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+            if not isinstance(exc, PermissionError) and exc.errno not in (
+                    errno.EACCES, errno.EAGAIN, errno.EDEADLK):
+                raise
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(errno.ETIMEDOUT, "timed out acquiring shared dump lock") from exc
+            time.sleep(min(0.1, remaining))
+
+
+@contextmanager
+def shared_dump_directory_locks(*folders: Path | None) -> Iterator[None]:
+    """Hold advisory OS locks until all collection completes; never unlink their files.
+
+    Canonical paths and a fixed acquisition order also handle directory aliases. The
+    lock files must persist: unlinking one lets a contender lock a different inode.
+    Use the host OS here rather than IS_WINDOWS, which tests override for WER coverage.
+    """
+    directories = sorted({folder.resolve() for folder in folders if folder is not None})
+    with ExitStack() as handles:
+        for directory in directories:
+            fd = os.open(directory / DUMP_LOCK_NAME, os.O_RDWR | os.O_CREAT, 0o600)
+            handle = handles.enter_context(os.fdopen(fd, "r+b", buffering=0))
+            if os.name == "nt":
+                acquire_windows_dump_lock(handle)
+            else:
+                import fcntl
+
+                fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
 
 
 def receipt_ownership_path(receipt: Path) -> Path:
@@ -822,6 +886,47 @@ def failure_reason(result: dict[str, Any], problem: str | None) -> str | None:
 
 
 def run_indexed_iteration(
+    index: int,
+    run_dir: Path,
+    exe: Path,
+    expected_sha256: str,
+    gtest_filter: str,
+    extra: list[str],
+    cwd: Path | None,
+    timeout: float,
+    expected_tests: int,
+    dump_folder: Path | None,
+    core_directory: Path | None,
+    core_target: tuple[int, int] | None,
+    core_skip: Callable[[Path], bool] | None,
+    dump_skip: Callable[[Path], bool] | None,
+) -> dict[str, Any]:
+    # Acquire before the baseline snapshot and release only after all dumps are copied.
+    # Distinct receipts can otherwise attribute another invocation's changed files.
+    try:
+        with shared_dump_directory_locks(core_directory, dump_folder):
+            return run_locked_iteration(
+                index, run_dir, exe, expected_sha256, gtest_filter, extra, cwd, timeout,
+                expected_tests, dump_folder, core_directory, core_target, core_skip, dump_skip,
+            )
+    except OSError as exc:
+        result = {
+            "exit_code": None,
+            "signal": None,
+            "timed_out": False,
+            "duration_seconds": 0.0,
+            "status": "harness_error",
+            "launch_error": f"shared dump directory lock: {type(exc).__name__}: {exc}",
+            "cleanup_errors": [],
+        }
+        iter_dir = run_dir / f"iter-{index}"
+        return build_entry(
+            index, run_dir / f"iter-{index}.log", iter_dir / "gtest.json", iter_dir / "crash",
+            [], result, None,
+        )
+
+
+def run_locked_iteration(
     index: int,
     run_dir: Path,
     exe: Path,

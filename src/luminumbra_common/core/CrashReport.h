@@ -7,10 +7,13 @@ namespace luminumbra::crash {
 
 /// Installs process-level crash capture that writes a text report into crash_dir.
 ///
-/// The directory is created if needed and crash-<pid>.txt is opened and given its
-/// header now, so the crash path never allocates or opens files. Callers must invoke
+/// The directory is created if needed and a fresh crash-<pid>.txt (or
+/// crash-<pid>-<suffix>.txt on collision) is opened and given its header now, so the
+/// crash path never allocates or opens files. Existing files are never truncated.
+/// Callers must invoke
 /// this from the process entry point on the thread that should get the alternate signal
-/// stack; calling it again replaces the previous report file and handlers. Returns false
+/// stack; calling it again installs the requested target and handlers. POSIX rejects
+/// reinstallation from a different thread with a stderr diagnostic. Returns false
 /// if the directory or report file cannot be created.
 ///
 /// What the report contains:
@@ -26,9 +29,14 @@ namespace luminumbra::crash {
 /// Stack overflow is captured only on the thread that installed the handler. Worker
 /// threads do not get an alternate stack, so an overflow there is not reported.
 ///
-/// Reinstalling into the same directory replaces the report. On Windows the previous
-/// report handle is closed before the file is recreated; if the recreate fails, crash
-/// capture stays disabled until the next successful install.
+/// Reinstalling into a previously used directory reuses its descriptor/handle when
+/// the report's file identity is unchanged, preserving its header, contents and offset
+/// (including the original program name). Otherwise a fresh file is created exclusively.
+/// At most eight distinct report targets are retained until process exit, so a handler
+/// racing reinstallation can safely finish writing. Further new targets are refused
+/// with a stderr diagnostic; retained targets can still be reused without consuming
+/// resources. A failed reinstall leaves the previous capture target installed.
+/// Read CrashReportPath only when installation is not running concurrently.
 bool InstallCrashCapture(const std::filesystem::path& crash_dir, std::string_view program_name);
 
 /// Report file opened by the last successful InstallCrashCapture, or empty before install.
