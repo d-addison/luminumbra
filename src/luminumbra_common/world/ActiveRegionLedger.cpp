@@ -220,9 +220,10 @@ void ActiveRegionLedger::evict_idle(const WorldClock& clock, const OwnershipProb
                           clock.tick() - r.last_proximity >= kIdleEvictionTicks;
         if (!r.pinned && !r.edited && !r.populated && r.water_cursor == 0 && idle &&
             !m_completedWork.contains(it->first) && !m_energyAges.contains(it->first) &&
-            !owned(it->first))
+            !owned(it->first)) {
+            m_legacyFrozenDigests.erase(it->first);
             it = m_records.erase(it);
-        else
+        } else
             ++it;
     }
 }
@@ -359,6 +360,7 @@ ActiveRegionLedger::schedule_in_place(const WorldClock& clock,
                     throw std::invalid_argument(
                         "Freezing requires a durable region digest provider");
                 r.frozen_digest = durable_digest(key);
+                m_legacyFrozenDigests.erase(key);
                 r.frozen_at = clock.tick();
             }
             r.over_hold = r.under_hold = 0;
@@ -498,10 +500,10 @@ bool ActiveRegionLedger::any_frozen_history() const {
 }
 std::string ActiveRegionLedger::encode() const {
     constexpr std::uint8_t kDigestProjection = 2;
-    const bool frozen_history = any_frozen_history();
+    const bool declare_projection = any_frozen_history() && m_legacyFrozenDigests.empty();
     const bool allocator_advanced = m_nextPersistentId != 1;
-    const bool extension =
-        frozen_history || allocator_advanced || !m_energyAges.empty() || !m_completedWork.empty();
+    const bool extension = declare_projection || allocator_advanced || !m_energyAges.empty() ||
+                           !m_completedWork.empty();
     std::string bytes = "ARL1";
     Append(bytes, extension ? 2 : 1, 2);
     Append(bytes, 0, 2);
@@ -514,7 +516,7 @@ std::string ActiveRegionLedger::encode() const {
             Append(tlvs, 8, 4);
             Append(tlvs, m_nextPersistentId, 8);
         }
-        if (frozen_history) {
+        if (declare_projection) {
             Append(tlvs, 2, 2);
             Append(tlvs, 1, 4);
             Append(tlvs, kDigestProjection, 1);
@@ -645,7 +647,7 @@ bool ActiveRegionLedger::decode(std::string_view bytes,
                 return false;
             result.m_records.emplace(key, r);
         }
-        bool digest_projection = false;
+        bool declared_projection = false;
         if (version == 2) {
             const auto extension_length = in.read(4);
             const auto extension_begin = records_end + 4;
@@ -738,15 +740,18 @@ bool ActiveRegionLedger::decode(std::string_view bytes,
                 }
                 if (projection < 2)
                     return false;
-                digest_projection = true;
+                declared_projection = true;
             }
         }
-        // Persistence contract (docs/active-regions.md): refuse pre-release frozen history
-        // without digest_projection=2; those enabled saves are deliberately not migrated.
-        if (!digest_projection && result.any_frozen_history()) {
-            error = kProjectionMessage;
-            return false;
+        if (!declared_projection) {
+            for (const auto& [key, record] : result.m_records)
+                if (record.state == RegionState::Frozen || record.frozen_at != 0 ||
+                    record.frozen_digest != 0)
+                    result.m_legacyFrozenDigests.insert(key);
         }
+        // An envelope without a projection TLV preserves historical digests verbatim, even
+        // when allocator/completed-work TLVs require version 2. Do not label them projection 2
+        // until each has been recomputed at a later freeze or evicted.
         // Also refuses alternate encodings (negative zero, reserved bytes).
         if (result.encode() != bytes)
             return false;

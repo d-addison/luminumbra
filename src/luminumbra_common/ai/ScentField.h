@@ -168,19 +168,22 @@ public:
                             continue;
                         double acc = 0.5 * tmp[y * W + x];
                         double wsum = 0.5;
-                        if (x > 0 && (!exchange || exchange(x, y, x - 1, y))) {
+                        // x/y are below the int-sized grid dimensions, so these conversions
+                        // and the guarded neighbour coordinates are representable on every host.
+                        const int ix = static_cast<int>(x), iy = static_cast<int>(y);
+                        if (x > 0 && (!exchange || exchange(ix, iy, ix - 1, iy))) {
                             acc += 0.125 * tmp[y * W + (x - 1)];
                             wsum += 0.125;
                         }
-                        if (x + 1 < W && (!exchange || exchange(x, y, x + 1, y))) {
+                        if (x + 1 < W && (!exchange || exchange(ix, iy, ix + 1, iy))) {
                             acc += 0.125 * tmp[y * W + (x + 1)];
                             wsum += 0.125;
                         }
-                        if (y > 0 && (!exchange || exchange(x, y, x, y - 1))) {
+                        if (y > 0 && (!exchange || exchange(ix, iy, ix, iy - 1))) {
                             acc += 0.125 * tmp[(y - 1) * W + x];
                             wsum += 0.125;
                         }
-                        if (y + 1 < H && (!exchange || exchange(x, y, x, y + 1))) {
+                        if (y + 1 < H && (!exchange || exchange(ix, iy, ix, iy + 1))) {
                             acc += 0.125 * tmp[(y + 1) * W + x];
                             wsum += 0.125;
                         }
