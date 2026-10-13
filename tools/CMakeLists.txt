@@ -2,6 +2,8 @@
 
 add_executable(asset_processor
     asset_processor.cpp
+    morph_asset_processor.cpp
+    "${CMAKE_SOURCE_DIR}/src/luminumbra_common/animation/MorphMesh.cpp"
 )
 
 # Tell the target where to find "meshoptimizer.h"
@@ -69,6 +71,17 @@ if(BUILD_TESTING)
                 "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_compare_ambient_receipts.py")
     set_tests_properties(AmbientReceiptComparatorContract
         PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME QualificationCaptureContract
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_qualification_capture.py")
+    set_tests_properties(QualificationCaptureContract
+        PROPERTIES LABELS "ci;tools" TIMEOUT 30)
+    add_test(
+        NAME ReleaseVerifyScriptContract
+        COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/release/test_verify_release.py")
+    set_tests_properties(ReleaseVerifyScriptContract
+        PROPERTIES LABELS "release;tools" TIMEOUT 60)
     add_test(
         NAME SlowestTestsScriptContract
         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_slowest_tests.py")
