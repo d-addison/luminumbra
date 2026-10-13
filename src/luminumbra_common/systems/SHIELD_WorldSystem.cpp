@@ -4007,9 +4007,9 @@ std::optional<float> SHIELD_WorldSystem::ProbeTerrainBelow(const Vec3& requested
         const int ix = std::min(static_cast<int>(lx), CHUNK_SIZE_X - 1);
         const int iz = std::min(static_cast<int>(lz), CHUNK_SIZE_Z - 1);
         const float fx = lx - static_cast<float>(ix), fz = lz - static_cast<float>(iz);
-        const auto plane = [&](int y) {
-            const auto at = [&](int x, int z) {
-                return chunk->sdf_data[static_cast<std::size_t>(x + nx * (y + ny * z))];
+        const auto plane = [ix, iz, fx, fz, sdf = chunk->sdf_data.data()](int y) {
+            const auto at = [sdf, y](int x, int z) {
+                return sdf[static_cast<std::size_t>(x + nx * (y + ny * z))];
             };
             return (at(ix, iz) * (1.0f - fx) + at(ix + 1, iz) * fx) * (1.0f - fz) +
                    (at(ix, iz + 1) * (1.0f - fx) + at(ix + 1, iz + 1) * fx) * fz;

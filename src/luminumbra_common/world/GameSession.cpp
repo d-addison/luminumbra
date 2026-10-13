@@ -3081,7 +3081,7 @@ bool GameSession::HasScentBorderWork() const {
         return false;
     for (int z = 0; z < kScentFieldCells; ++z)
         for (int x = 0; x < kScentFieldCells; ++x)
-            for (const auto offset : {std::pair{1, 0}, std::pair{0, 1}}) {
+            for (const auto& offset : {std::pair{1, 0}, std::pair{0, 1}}) {
                 const int nx = x + offset.first, nz = z + offset.second;
                 if (nx >= kScentFieldCells || nz >= kScentFieldCells ||
                     ScentCellOwner(x, z) == ScentCellOwner(nx, nz) || !ScentEdgeOpen(x, z, nx, nz))

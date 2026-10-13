@@ -708,11 +708,12 @@ bool ActiveRegionLedger::decode(std::string_view bytes,
                     if (length < 4)
                         return false;
                     Reader completed(value);
-                    const auto count = completed.read(4);
-                    if (count == 0 || count > result.m_records.size() || length != 4 + 16 * count)
+                    const auto completed_count = completed.read(4);
+                    if (completed_count == 0 || completed_count > result.m_records.size() ||
+                        length != 4 + 16 * completed_count)
                         return false;
                     std::optional<RegionKey> prior;
-                    for (std::uint64_t entry = 0; entry < count; ++entry) {
+                    for (std::uint64_t entry = 0; entry < completed_count; ++entry) {
                         const RegionKey key{std::bit_cast<std::int32_t>(
                                                 static_cast<std::uint32_t>(completed.read(4))),
                                             std::bit_cast<std::int32_t>(

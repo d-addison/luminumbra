@@ -29,7 +29,10 @@ constexpr std::uint64_t kFnvOffset = 14695981039346656037ull;
 constexpr std::uint64_t kFnvPrime = 1099511628211ull;
 constexpr std::size_t kHashBlockBytes = 1024u * 1024u;
 
-thread_local SaveTransaction* g_active = nullptr;
+SaveTransaction*& ActiveTransaction() {
+    static thread_local SaveTransaction* active = nullptr;
+    return active;
+}
 
 SnapshotStepHook& StepHook() {
     static SnapshotStepHook hook = nullptr;
@@ -753,8 +756,8 @@ SaveTransaction::SaveTransaction(std::filesystem::path save_dir,
     , m_tick(tick)
     , m_anchors(std::move(anchors))
     , m_digest_fn(digest_fn) {
-    if (g_active == nullptr) {
-        g_active = this;
+    if (ActiveTransaction() == nullptr) {
+        ActiveTransaction() = this;
         m_registered = true;
     }
 }
@@ -766,12 +769,12 @@ SaveTransaction::~SaveTransaction() {
         } catch (...) {}
     }
     if (m_registered) {
-        g_active = nullptr;
+        ActiveTransaction() = nullptr;
     }
 }
 
 SaveTransaction* SaveTransaction::active_for(const fs::path& save_dir) {
-    SaveTransaction* active = g_active;
+    SaveTransaction* active = ActiveTransaction();
     if (active == nullptr || active->m_state != State::Open) {
         return nullptr;
     }
@@ -1051,10 +1054,10 @@ bool SaveTransaction::commit(std::vector<std::string>* errors) {
             fs::path ancestor = m_save_dir.parent_path();
             for (int level = 0; level < 3 && !ancestor.empty(); ++level) {
                 WorldSaveService::durable_flush_directory(ancestor.parent_path(), nullptr);
-                const fs::path parent_ancestor = ancestor.parent_path();
-                if (parent_ancestor == ancestor)
+                const fs::path parent = ancestor.parent_path();
+                if (parent == ancestor)
                     break;
-                ancestor = parent_ancestor;
+                ancestor = parent;
             }
         }
         if (!WorldSaveService::durable_write_file(index_path, encoded, errors)) {

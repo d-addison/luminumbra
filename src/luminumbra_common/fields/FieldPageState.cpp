@@ -307,7 +307,7 @@ bool DecodePages(const std::string& bytes,
         if (!CheckPage(key, page, error)) {
             return false;
         }
-        pages.emplace_hint(pages.end(), key, std::move(page));
+        pages.emplace_hint(pages.end(), key, page);
         previous = key;
     }
     return true;
