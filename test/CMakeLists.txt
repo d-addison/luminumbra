@@ -266,6 +266,11 @@ target_include_directories(filesystem_path_test PRIVATE ../src ../src/luminumbra
 target_compile_definitions(filesystem_path_test PRIVATE LUMINUMBRA_SOURCE_ROOT="${CMAKE_SOURCE_DIR}")
 target_link_libraries(filesystem_path_test PRIVATE gtest_main)
 
+# Temporary-path reservation contracts need only the filesystem and GoogleTest.
+add_executable(unique_temp_path_test support/UniqueTempPath_test.cpp)
+target_link_libraries(unique_temp_path_test PRIVATE gtest_main)
+luminumbra_configure_first_party_target(unique_temp_path_test)
+
 # tree rendering (tree rendering): render-only tree LOD distance selection. The header
 add_executable(game_assets_test
     tools/game_assets_test.cpp
@@ -1706,6 +1711,7 @@ set(LUMINUMBRA_GTEST_TARGETS
     game_assets_test
     common_tests
     filesystem_path_test
+    unique_temp_path_test
     skinned_test_assets_test
     tree_lod_test
     # the hemi-octa mapping test was built but never

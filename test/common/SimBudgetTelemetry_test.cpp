@@ -29,7 +29,8 @@ using luminumbra::simulation::SimBudgetTelemetry;
 
 TEST(SimBudgetTelemetry, DisabledProductionArtifactMatchesDevelBytes) {
     namespace fs = std::filesystem;
-    const fs::path output = Luminumbra::TestSupport::UniqueTempFilePath("smoke_artifact_", ".json");
+    const Luminumbra::TestSupport::ScopedTempFile file("smoke_artifact_", ".json");
+    const fs::path& output = file.Path();
     for (int scenario = 0; scenario != 3; ++scenario) {
         SCOPED_TRACE(scenario);
         ServerCliOptions options;
@@ -62,7 +63,6 @@ TEST(SimBudgetTelemetry, DisabledProductionArtifactMatchesDevelBytes) {
 #endif
         EXPECT_EQ(actual, baseline);
     }
-    fs::remove(output);
 }
 
 TEST(SimBudgetTelemetry, WaterWorkIsZeroAfterEmptyAndPausedUpdates) {
@@ -402,9 +402,8 @@ TEST(SimBudgetTelemetry, EnforcementIsByteNeutralWithoutEnabledCollector) {
 }
 
 TEST(SimBudgetTelemetry, SmokeFailsOnlyWhenBudgetProfileStageIsExceeded) {
-    namespace fs = std::filesystem;
-    const fs::path output =
-        Luminumbra::TestSupport::UniqueTempFilePath("smoke_budget_profile_", ".json");
+    const Luminumbra::TestSupport::ScopedTempFile profile_file("smoke_budget_profile_", ".json");
+    const auto& output = profile_file.Path();
     for (const std::uint64_t cap : {std::uint64_t{5}, std::uint64_t{9}}) {
         SCOPED_TRACE(cap);
         ServerCliOptions options;
@@ -426,6 +425,5 @@ TEST(SimBudgetTelemetry, SmokeFailsOnlyWhenBudgetProfileStageIsExceeded) {
         EXPECT_EQ(block.at("no_violation").get<bool>(), !violated);
         EXPECT_EQ(block.at("profile_bytes"), 123);
     }
-    fs::remove(output);
 }
 } // namespace

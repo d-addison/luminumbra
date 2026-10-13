@@ -64,6 +64,22 @@ inline std::string UniqueTempStem(std::string_view prefix) {
            CompactHex(sequence.fetch_add(1, std::memory_order_relaxed));
 }
 
+// Keep candidate reservation separate from name generation so collisions can
+// be exercised deterministically, including files occupying directory names.
+[[nodiscard]] inline std::filesystem::path ReserveTempDirectory(
+    const std::filesystem::path& temporary_root, const std::string& stem, std::error_code& error) {
+    for (int attempt = 0; attempt < kTempPathAttempts; ++attempt) {
+        const auto candidate = temporary_root / (stem + "_" + std::to_string(attempt));
+        if (std::filesystem::create_directory(candidate, error)) {
+            return candidate;
+        }
+        if (!error) {
+            error = std::make_error_code(std::errc::file_exists);
+        }
+    }
+    return {};
+}
+
 } // namespace detail
 
 /// Create a fresh directory under the system temporary root, with 64 attempts.
@@ -75,17 +91,7 @@ inline std::string UniqueTempStem(std::string_view prefix) {
     if (error) {
         return {};
     }
-    const auto stem = detail::UniqueTempStem(prefix);
-    for (int attempt = 0; attempt < detail::kTempPathAttempts; ++attempt) {
-        const auto candidate = temporary_root / (stem + "_" + std::to_string(attempt));
-        if (std::filesystem::create_directory(candidate, error)) {
-            return candidate;
-        }
-        if (!error) {
-            error = std::make_error_code(std::errc::file_exists);
-        }
-    }
-    return {};
+    return detail::ReserveTempDirectory(temporary_root, detail::UniqueTempStem(prefix), error);
 }
 
 /// Create an exclusively reserved directory; the caller owns its cleanup.
@@ -100,27 +106,36 @@ inline std::string UniqueTempStem(std::string_view prefix) {
     return directory;
 }
 
-/// Return an absent file path without creating it, retaining the supplied suffix.
-/// The case name separates discovered tests and the counter separates calls.
-/// This is not an exclusive reservation against concurrent runs of the same case;
-/// callers needing that guarantee should put their file in CreateUniqueTempDirectory.
+/// Return a file path inside an exclusively reserved fresh directory, retaining
+/// the supplied suffix. The file starts absent; the caller must remove_all the
+/// returned path's parent directory, or use ScopedTempFile to own its cleanup.
 [[nodiscard]] inline std::filesystem::path UniqueTempFilePath(std::string_view prefix,
                                                               std::string_view suffix) {
-    const auto temporary_root = std::filesystem::temp_directory_path();
-    const auto stem = detail::UniqueTempStem(prefix);
-    std::error_code error;
-    for (int attempt = 0; attempt < detail::kTempPathAttempts; ++attempt) {
-        const auto candidate =
-            temporary_root / (stem + "_" + std::to_string(attempt) + std::string(suffix));
-        const auto status = std::filesystem::symlink_status(candidate, error);
-        if (status.type() == std::filesystem::file_type::not_found) {
-            return candidate;
-        }
-        if (!error) {
-            error = std::make_error_code(std::errc::file_exists);
-        }
-    }
-    throw std::runtime_error("Failed to find an absent temporary file path: " + error.message());
+    const std::filesystem::path filename("file" + std::string(suffix));
+    return CreateUniqueTempDirectory(prefix) / filename;
 }
+
+/// Own a temporary file's reserved directory, including on fatal test assertions.
+class ScopedTempFile {
+public:
+    ScopedTempFile(std::string_view prefix, std::string_view suffix)
+        : path_(UniqueTempFilePath(prefix, suffix)) {}
+    ~ScopedTempFile() {
+        std::error_code error;
+        std::filesystem::remove_all(path_.parent_path(), error);
+    }
+
+    ScopedTempFile(const ScopedTempFile&) = delete;
+    ScopedTempFile& operator=(const ScopedTempFile&) = delete;
+    ScopedTempFile(ScopedTempFile&&) = delete;
+    ScopedTempFile& operator=(ScopedTempFile&&) = delete;
+
+    [[nodiscard]] const std::filesystem::path& Path() const {
+        return path_;
+    }
+
+private:
+    const std::filesystem::path path_;
+};
 
 } // namespace Luminumbra::TestSupport

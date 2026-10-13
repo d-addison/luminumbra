@@ -12,7 +12,6 @@
 #include <fstream>
 #include <ios>
 #include <string>
-#include <system_error>
 #include <utility>
 #include <vector>
 
@@ -24,22 +23,17 @@ using namespace luminumbra::animation;
 
 class ClipFile {
 public:
-    ClipFile()
-        : path(Luminumbra::TestSupport::UniqueTempFilePath("luminumbra_clip_", ".lanim")) {}
-    ~ClipFile() {
-        std::error_code error;
-        std::filesystem::remove(path, error);
-    }
+    ClipFile() : file_("luminumbra_clip_", ".lanim") {}
     const std::filesystem::path& Path() const {
-        return path;
+        return file_.Path();
     }
 
 private:
-    std::filesystem::path path;
+    Luminumbra::TestSupport::ScopedTempFile file_;
 
 public:
     void Write(const std::vector<uint8_t>& bytes) const {
-        std::ofstream out(path, std::ios::binary);
+        std::ofstream out(file_.Path(), std::ios::binary);
         out.write(reinterpret_cast<const char*>(bytes.data()),
                   static_cast<std::streamsize>(bytes.size()));
     }
