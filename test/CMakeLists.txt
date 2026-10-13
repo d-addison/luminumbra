@@ -156,6 +156,7 @@ add_executable(common_tests
     common/FarAuthorityOverlay_test.cpp
     common/GameSessionHeadlessWorld_test.cpp
     common/SimBudgetTelemetry_test.cpp
+    common/HeavyComparison_test.cpp
     common/SimBudgetProfile_test.cpp
     ../src/luminumbra_server/modes/SmokeArtifact.cpp
     common/JobSystem_test.cpp
@@ -196,6 +197,7 @@ add_executable(common_tests
     common/world_streaming_hardening_test.cpp
     common/HydraulicErosion_test.cpp
     common/WorldStreamingState_test.cpp
+    persistence/synthetic_save_fixture_test.cpp
     sim/fire_spread_test.cpp
     sim/soil_nutrient_test.cpp
     sim/pollination_test.cpp
@@ -251,6 +253,7 @@ target_include_directories(common_tests PRIVATE
 target_link_libraries(common_tests PRIVATE
     gtest_main
     luminumbra_common
+    luminumbra_save_fixture_support
 )
 
 # File-only path contracts run without a GL context or the common-library graph.
@@ -1885,6 +1888,9 @@ find_package(Python3 COMPONENTS Interpreter REQUIRED)
 add_test(NAME SimBudgetCaptureContract
     COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tools/perf/test_capture_sim_budget.py")
 set_tests_properties(SimBudgetCaptureContract PROPERTIES LABELS "simulation;tools" TIMEOUT 60)
+add_test(NAME SimBudgetGateContract
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tools/perf/test_sim_budget_gate.py")
+set_tests_properties(SimBudgetGateContract PROPERTIES LABELS "simulation;tools" TIMEOUT 60)
 
 # GPU tracer micro-profile. Manual/GPU — needs a real GL context and a
 # hardware GPU (skips gracefully headless; writes the artifact but skips the perf
