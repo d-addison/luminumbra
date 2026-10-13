@@ -63,6 +63,17 @@ constexpr std::size_t kRecordHeaderSize = 18;
 constexpr std::uint8_t kRecordFlagEdited = 0x01;
 constexpr std::uint8_t kRecordFlagWaterPresent = 0x02;
 
+void ValidateRegionDigestKey(world::RegionKey key) {
+    // Packed chunk coordinates are [-2^20,2^20); reject unsupported public
+    // region keys before multiplying bounds or reading any durable member.
+    constexpr int minimum_key = -(1 << 20) / WorldSaveService::kRegionChunkSpan;
+    constexpr int maximum_key = (1 << 20) / WorldSaveService::kRegionChunkSpan;
+    if (key.x < minimum_key || key.x >= maximum_key || key.z < minimum_key ||
+        key.z >= maximum_key) {
+        throw std::invalid_argument("Invalid region digest key");
+    }
+}
+
 std::atomic<std::uint64_t>& RegionTempSequence() {
     static std::atomic<std::uint64_t> sequence{0};
     return sequence;
@@ -1105,14 +1116,7 @@ bool WorldSaveService::save_active_regions(world::ActiveRegionLedger& ledger,
 std::uint64_t WorldSaveService::region_simulation_digest(const std::filesystem::path& save_dir,
                                                          world::RegionKey key,
                                                          const RegionDigestInputs& inputs) {
-    // Packed chunk coordinates are [-2^20,2^20); reject unsupported public
-    // region keys before multiplying bounds or reading any durable member.
-    constexpr int minimum_key = -(1 << 20) / kRegionChunkSpan;
-    constexpr int maximum_key = (1 << 20) / kRegionChunkSpan;
-    if (key.x < minimum_key || key.x >= maximum_key || key.z < minimum_key ||
-        key.z >= maximum_key) {
-        throw std::invalid_argument("Invalid region digest key");
-    }
+    ValidateRegionDigestKey(key);
     WorldStreamingState region;
     // Filtering precedes insertion: a live pristine or Loading chunk must not shadow a durable
     // edited record with the same id. insert_chunk preserves the first record per id.
@@ -1150,6 +1154,23 @@ std::uint64_t WorldSaveService::region_simulation_digest(const std::filesystem::
         }
     }
     return std::stoull(ComputeRegionContentHash(region), nullptr, 16);
+}
+
+std::uint64_t
+WorldSaveService::region_simulation_digest(const std::filesystem::path& save_dir,
+                                           world::RegionKey key,
+                                           const std::vector<std::shared_ptr<Chunk>>& live_chunks) {
+    ValidateRegionDigestKey(key);
+    return region_simulation_digest(save_dir, key, RegionDigestInputs{live_chunks, {}});
+}
+
+std::uint64_t WorldSaveService::region_simulation_digest(
+    const std::filesystem::path& save_dir,
+    world::RegionKey key,
+    std::initializer_list<std::shared_ptr<Chunk>> live_chunks) {
+    ValidateRegionDigestKey(key);
+    return region_simulation_digest(
+        save_dir, key, RegionDigestInputs{std::vector<std::shared_ptr<Chunk>>(live_chunks), {}});
 }
 
 void WorldSaveService::region_coords_for_chunk(const IVec3& chunk_coords,

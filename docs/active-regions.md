@@ -143,12 +143,18 @@ ceiling starts at the restored WorldClock tick without executing a tick, so
 an immediate edit or pin can be saved before simulation advances.
 No old-world migration occurs. Corrupt, truncated, oversized, duplicate,
 misordered or inconsistent records refuse with `Corrupt active-region ledger.`
-A valid magic followed by a version greater than 1 refuses distinctly with
+A valid magic followed by a version greater than 2 refuses distinctly with
 `Unsupported future active-region ledger version.` Version zero is corrupt.
 A save containing the ledger requires `sim.active_regions`; opening or writing
 with it off refuses as incompatible configuration. Older engine builds refuse
 this file as an unknown region file. Decode failure never changes the destination
-ledger. Unknown fields cannot be skipped: extensions require a new version.
+ledger. Unknown extension types cannot be skipped and are corrupt.
+Version 1 ledgers without frozen history still load. A ledger with frozen
+history but no `digest_projection=2` declaration refuses with
+`Unsupported frozen digest projection.` Pre-release saves made with active
+regions enabled and the older frozen projection are deliberately not migrated.
+Flag-off legacy saves without a ledger retain their existing load, save and hash
+behaviour, with no new files, bytes or hash terms.
 
 All integers are little endian, signed integers use two's complement, floats
 are IEEE binary32 (finite, with positive zero as the sole zero encoding).
@@ -157,7 +163,7 @@ The header is exactly 56 bytes:
 | Offset | Bytes | Value |
 |---|---:|---|
 | 0 | 4 | ASCII ARL1 |
-| 4 | 2 | version = 1 |
+| 4 | 2 | version = 1 or 2 |
 | 6 | 2 | reserved zero |
 | 8 | 8 | canonical scheduler tick; advances only when scheduling runs |
 | 16 | 8 | validation ceiling; observational restored clock bound |
@@ -187,20 +193,39 @@ Each record is exactly 104 bytes, sorted uniquely by signed X then Z:
 | 88 | 8 | u64 water cursor |
 | 96 | 8 | u64 frozen simulation content digest |
 
-The footer is one LE u64 FNV-1a-64 checksum over every preceding byte (offset
-basis 14695981039346656037, multiplier 1099511628211). Total length must be exactly
-56 + count * 104 + 8, capped at 109,051,968 bytes before allocation. No trailing
-bytes, padding, native structs, section omission or alternate encodings are
-accepted. Stamps cannot exceed the validation ceiling, counters cannot exceed the hold
-or both be nonzero, phases must match the region key, and a frozen region's last
+Version 1 has no extensions. Version 2 uses the same header and records, then
+a LE u32 `ext_len` followed by exactly that many extension bytes. Each extension
+is a TLV: LE u16 type, LE u32 value length, then the value bytes. Types must be
+strictly ascending, with no duplicates; unknown types, truncated values and
+`ext_len == 0` are corrupt. The currently supported extension is type 2,
+`digest_projection`, with a one-byte value of 2. A value greater than 2 refuses
+with `Unsupported frozen digest projection.`; a lower value is corrupt.
+The encoder emits version 2 with this declaration whenever a record is frozen
+or retains a nonzero freeze stamp or frozen digest, including after waking.
+Otherwise the extension set is empty and the encoder emits version 1.
+The declaration belongs only to the persistence envelope and adds no canonical
+hash term.
+
+The footer is one LE u64 FNV-1a-64 checksum over every preceding byte, including
+the extension length and TLVs (offset basis 14695981039346656037, multiplier
+1099511628211). Total length must be exactly 56 + count * 104 + 8 for version 1,
+or 56 + count * 104 + 4 + ext_len + 8 for version 2. Files are capped at
+109,051,979 bytes before allocation. No trailing bytes, padding, native structs,
+section omission or alternate encodings are accepted. Stamps cannot exceed the
+validation ceiling, counters cannot exceed the hold or both be nonzero, phases
+must match the region key, and a frozen region's last
 ticked stamp precedes its freeze stamp. The ledger tick cannot exceed the saved
 WorldClock tick, and the canonical tick cannot exceed its validation ceiling.
 Configuration is stored and hashed with the ledger rather than
 read from an unrecorded machine-local budget.
 
-Frozen content is supplied at the transition by merging live lod-0 chunks with
-durable region records by id, with live records taking precedence. The provider
-uses a dedicated `region_content_v1` projection in chunk-id order: identity,
+Frozen content is supplied at the transition by merging authoritative lod-0
+chunks by id, with live chunks taking precedence over parked chunks, then durable
+region records carrying the sticky edited flag. Live and parked inputs must have
+`LoadedOrEdited` provenance; pristine generated chunks and chunks in `Loading`
+state are excluded before merging, so they cannot shadow authoritative content.
+Residency and save history cannot change the result. The provider uses a dedicated
+`region_content_v2` projection in chunk-id order: identity,
 SDF, heightmap, materials, integer water depth/bed/flux, water initialization,
 resolution and solver sleep/threshold state. Lifecycle state/state_value,
 collider flags, render meshes/bookkeeping, transient dirtiness, far render

@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <initializer_list>
 #include <optional>
 #include <stop_token>
 #include <string>
@@ -85,6 +86,16 @@ public:
     static std::uint64_t region_simulation_digest(const std::filesystem::path& save_dir,
                                                   world::RegionKey key,
                                                   const RegionDigestInputs& inputs);
+    // Compatibility call shape: live chunks with no parked inputs, using the same v2 projection.
+    static std::uint64_t
+    region_simulation_digest(const std::filesystem::path& save_dir,
+                             world::RegionKey key,
+                             const std::vector<std::shared_ptr<Chunk>>& live_chunks);
+    // Preserve braced chunk lists, including {}, without ambiguity with RegionDigestInputs.
+    static std::uint64_t
+    region_simulation_digest(const std::filesystem::path& save_dir,
+                             world::RegionKey key,
+                             std::initializer_list<std::shared_ptr<Chunk>> live_chunks);
 
     // Region addressing: rx = floor(chunk_x / 32), rz = floor(chunk_z / 32).
     static constexpr int kRegionChunkSpan = 32;
