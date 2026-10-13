@@ -45,6 +45,7 @@ set(CLIENT_INTERNAL_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/rendering/FarVolumeGpuBackend.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/FarVolumeGlBackend.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/FarWorldRenderer.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/rendering/FarWorldOwnership.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/FarVolumeResidency.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/FoliageSurface.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/FrameScan.cpp

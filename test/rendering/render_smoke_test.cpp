@@ -1,3 +1,4 @@
+#include "TerrainCullingTestPeer.h"
 #include "luminumbra_client/rendering/Camera.h"
 #include "luminumbra_client/rendering/EnvironmentBrdfLut.gen.h"
 #include "luminumbra_client/rendering/FarVolumeGlBackend.h"
@@ -4663,7 +4664,8 @@ TEST(RenderSmokeTest, FarWorldOwnedUploadIndexedSubmissionAndRelativeOrigin) {
     glUniformMatrix4fv(glGetUniformLocation(program, "projection"), 1, GL_FALSE, &projection[0][0]);
     glUniform1i(glGetUniformLocation(program, "u_farWorldLadder"), 1);
     glUniform1i(glGetUniformLocation(program, "u_useInstanceOrigin"), 0);
-    glUniform3f(glGetUniformLocation(program, "u_farRelativeOrigin"), 0, 0, -2);
+    glUniform3f(glGetUniformLocation(program, "u_farRelativeOrigin"), 0, 0, -200);
+    glUniform1f(glGetUniformLocation(program, "u_farOuterRadius"), 16384);
     glUniform3f(glGetUniformLocation(program, "u_farWorldOrigin"), 8'000'000, 1024, -8192);
     glUniform1i(glGetUniformLocation(program, "u_forceFlat"), 1);
     glUniform1i(glGetUniformLocation(program, "u_materialLUT"), 0);
@@ -4678,8 +4680,9 @@ TEST(RenderSmokeTest, FarWorldOwnedUploadIndexedSubmissionAndRelativeOrigin) {
     mesh.content = Luminumbra::World::FarVolumeContent::Mixed;
     // Stone survives the production G-buffer's water discard, so the position
     // pixel verifies actual fragment submission as well as primitive generation.
-    mesh.vertices = {
-        {{-1, -1, 0}, {0, 0, 1}, 1}, {{1, -1, 0}, {0, 0, 1}, 1}, {{0, 1, 0}, {0, 0, 1}, 1}};
+    mesh.vertices = {{{-100, -100, 0}, {0, 0, 1}, 1},
+                     {{100, -100, 0}, {0, 0, 1}, 1},
+                     {{0, 100, 0}, {0, 0, 1}, 1}};
     mesh.indices = {0, 1, 2};
     FarVolumeGlDriver driver;
     ASSERT_TRUE(driver.ValidContext());
@@ -4703,7 +4706,7 @@ TEST(RenderSmokeTest, FarWorldOwnedUploadIndexedSubmissionAndRelativeOrigin) {
     std::array<float, 4> pixel{};
     glReadBuffer(GL_COLOR_ATTACHMENT0);
     glReadPixels(32, 32, 1, 1, GL_RGBA, GL_FLOAT, pixel.data());
-    EXPECT_NEAR(pixel[2], -2, .0001);
+    EXPECT_NEAR(pixel[2], -200, .001);
     GLint vao = -1;
     glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &vao);
     EXPECT_EQ(vao, 0);
@@ -4717,4 +4720,525 @@ TEST(RenderSmokeTest, FarWorldOwnedUploadIndexedSubmissionAndRelativeOrigin) {
     glDeleteTextures(1, &position);
     glDeleteFramebuffers(1, &fbo);
     glDeleteProgram(program);
+}
+
+namespace {
+using namespace Luminumbra::Rendering;
+// One pixel is sampled at the exact centre ray, so boundary cases don't depend
+// on a pixel-centre offset or an approximate radius inferred from image extent.
+class FarWorldShaderProbe {
+public:
+    ~FarWorldShaderProbe() {
+        allocation_.reset();
+        driver_.ReleaseLiveOwnership();
+        pool_.destroy();
+        glDeleteBuffers(1, &indirect_);
+        glDeleteTextures(1, &lut_);
+        glDeleteTextures(1, &position_);
+        glDeleteFramebuffers(1, &fbo_);
+        glDeleteProgram(program_);
+    }
+    bool Init() {
+        program_ = LinkProgram({"g_buffer", "g_buffer.vert", "g_buffer.frag"});
+        if (!program_)
+            return false;
+        glGenFramebuffers(1, &fbo_);
+        glBindFramebuffer(GL_FRAMEBUFFER, fbo_);
+        glGenTextures(1, &position_);
+        glBindTexture(GL_TEXTURE_2D, position_);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, 1, 1, 0, GL_RGBA, GL_FLOAT, nullptr);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, position_, 0);
+        glDrawBuffer(GL_COLOR_ATTACHMENT0);
+        if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+            return false;
+        const std::array<float, 16> pixels{0, .8f, 1, 0, 0, 0, 0, 0, 0, 1, 0, 0, 1, 1, 1, 0};
+        glGenTextures(1, &lut_);
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, lut_);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, 1, 4, 0, GL_RGBA, GL_FLOAT, pixels.data());
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glUseProgram(program_);
+        glUniform1i(Location("u_forceFlat"), 1);
+        glUniform1i(Location("u_materialLUT"), 0);
+        for (const char* name : {"u_terrainTextures",
+                                 "u_terrainNormals",
+                                 "u_terrainRoughness",
+                                 "u_skinnedTextures",
+                                 "u_staticNormals",
+                                 "u_staticSurface"})
+            glUniform1i(Location(name), 1);
+        SetMat4Identity(program_, "model");
+        SetMat3Identity(program_, "normalMatrix");
+        glGenBuffers(1, &indirect_);
+        glDisable(GL_DEPTH_TEST);
+        glDisable(GL_CULL_FACE);
+        glDisable(GL_BLEND);
+        glViewport(0, 0, 1, 1);
+        return glGetError() == GL_NO_ERROR;
+    }
+    float Point(const glm::vec3& centre,
+                float outer,
+                std::span<const FarWorldLiveCell> cells = {},
+                bool submit_live = false,
+                bool arrival = false,
+                glm::vec2 child_y = {-256, 256}) {
+        const auto view = glm::lookAt(glm::vec3(0), centre, glm::vec3(0, 1, 0));
+        const auto rotation = glm::transpose(glm::mat3(view));
+        FarVolumeRenderMesh mesh;
+        mesh.content = Luminumbra::World::FarVolumeContent::Mixed;
+        const float extent = std::max(2.0f, glm::length(centre) * .01f);
+        for (const auto& corner : std::array{glm::vec3(-extent, -extent, 0),
+                                             glm::vec3(extent, -extent, 0),
+                                             glm::vec3(0, extent, 0)})
+            mesh.vertices.push_back({rotation * corner, {0, 0, 1}, 1});
+        const glm::dvec3 origin(std::floor(static_cast<double>(centre.x) / 1024.0) * 1024.0,
+                                std::floor(static_cast<double>(centre.y) / 256.0) * 256.0,
+                                std::floor(static_cast<double>(centre.z) / 1024.0) * 1024.0);
+        for (auto& vertex : mesh.vertices)
+            vertex.position += glm::vec3(glm::dvec3(centre) - origin);
+        mesh.indices = {0, 1, 2};
+        return Draw(mesh, origin, view, outer, cells, submit_live, arrival, child_y);
+    }
+    float Straddling(float plane_depth, float outer) {
+        FarVolumeRenderMesh mesh;
+        mesh.content = Luminumbra::World::FarVolumeContent::Mixed;
+        // One vertex lies behind the camera; the centre ray intersects at -plane_depth.
+        mesh.vertices = {{{-200, -200, -plane_depth - 300}, {0, 0, 1}, 1},
+                         {{200, -200, -plane_depth - 300}, {0, 0, 1}, 1},
+                         {{0, 400, -plane_depth + 600}, {0, 0, 1}, 1}};
+        mesh.indices = {0, 1, 2};
+        return Draw(mesh, {0, 0, 0}, glm::mat4(1), outer, {}, false, false, {-256, 256});
+    }
+    float Boundary(const glm::dvec3& centre,
+                   const glm::dvec3& camera,
+                   int axis,
+                   std::span<const FarWorldLiveCell> cells) {
+        // Canonical V2 tile and brick-aligned span; the tested coordinate is a
+        // nonzero local, including origin Y=-256/local Y=256 at world Y=0.
+        const glm::dvec3 origin(std::floor(centre.x / 1024.0) * 1024.0,
+                                std::floor((centre.y - 256.0) / 256.0) * 256.0,
+                                std::floor(centre.z / 1024.0) * 1024.0);
+        return TileBoundary(origin, glm::vec3(centre - origin), camera, axis, cells);
+    }
+    float TileBoundary(const glm::dvec3& origin,
+                       const glm::vec3& local_centre,
+                       const glm::dvec3& camera,
+                       int axis,
+                       std::span<const FarWorldLiveCell> cells = {},
+                       bool arrival = false,
+                       glm::vec2 child_y = {0, 256},
+                       int arrival_child = -1) {
+        const auto centre = origin + glm::dvec3(local_centre);
+        const auto relative = glm::vec3(centre - camera);
+        const auto view = glm::lookAt(glm::vec3(0), relative, glm::vec3(0, 1, 0));
+        FarVolumeRenderMesh mesh;
+        mesh.content = Luminumbra::World::FarVolumeContent::Mixed;
+        // The tested local boundary coordinate is constant at all three vertices,
+        // so perspective interpolation preserves the same canonical boundary.
+        for (const auto& corner :
+             std::array{glm::vec2(-2, -2), glm::vec2(2, -2), glm::vec2(0, 2)}) {
+            auto local = local_centre;
+            local[(axis + 1) % 3] += corner.x;
+            local[(axis + 2) % 3] += corner.y;
+            mesh.vertices.push_back({local, {0, 0, 1}, 1});
+        }
+        mesh.indices = {0, 1, 2};
+        return Draw(
+            mesh, origin, view, 1040, cells, false, arrival, child_y, camera, false, arrival_child);
+    }
+
+private:
+    GLint Location(const char* name) const {
+        return glGetUniformLocation(program_, name);
+    }
+    void Mat4(const char* name, const glm::mat4& matrix) {
+        glUniformMatrix4fv(Location(name), 1, GL_FALSE, &matrix[0][0]);
+    }
+    float Draw(const FarVolumeRenderMesh& mesh,
+               const glm::dvec3& centre,
+               const glm::mat4& view,
+               float outer,
+               std::span<const FarWorldLiveCell> cells,
+               bool submit_live,
+               bool arrival,
+               glm::vec2 child_y,
+               const glm::dvec3& camera = glm::dvec3(0),
+               bool remap_arrival_origin = true,
+               int arrival_child = -1) {
+        glUseProgram(program_);
+        const auto projection =
+            ReversedZPerspective(glm::radians(45.0f), 1, .1f, Luminumbra::World::kFarPlaneMeters);
+        Mat4("view", view);
+        Mat4("projection", projection);
+        const auto normal_rotation = glm::mat3(view);
+        glUniformMatrix3fv(Location("u_normalViewMatrix"), 1, GL_FALSE, &normal_rotation[0][0]);
+        const auto draw_origin = arrival && remap_arrival_origin ? glm::dvec3(0, 0, -1024) : centre;
+        const auto relative_origin = glm::vec3(draw_origin - camera);
+        const auto world_origin = glm::vec3(draw_origin);
+        glUniform3f(Location("u_farRelativeOrigin"),
+                    relative_origin.x,
+                    relative_origin.y,
+                    relative_origin.z);
+        glUniform3f(Location("u_farWorldOrigin"), world_origin.x, world_origin.y, world_origin.z);
+        glUniform1f(Location("u_farOuterRadius"), outer);
+        glUniform1i(Location("u_farArrivalEligible"), arrival ? 1 : 0);
+        glUniform1f(Location("u_farTileEdge"), 1024);
+        glUniform1f(Location("u_farFinerOuterRadius"), 1040);
+        for (int i = 0; i < 4; ++i) {
+            // Child spans are tile-local integer differences, never camera-relative.
+            const float min_y = static_cast<float>(static_cast<double>(child_y.x) - draw_origin.y);
+            const float max_y = static_cast<float>(static_cast<double>(child_y.y) - draw_origin.y);
+            const float shift = arrival_child < 0 || arrival_child == i ? 0.0f : 1024.0f;
+            glUniform2f(
+                glGetUniformLocation(program_, ("u_farChildY[" + std::to_string(i) + "]").c_str()),
+                min_y + shift,
+                max_y + shift);
+        }
+        FarWorldCellOrigin cell_origin;
+        if (!MakeFarWorldCellOrigin({draw_origin.x, draw_origin.y, draw_origin.z}, cell_origin)) {
+            ADD_FAILURE() << "Tile origin chunk conversion refused";
+            return 0;
+        }
+        glUniform3i(
+            Location("u_farOriginChunk"), cell_origin.key.x, cell_origin.key.y, cell_origin.key.z);
+        glUniform3f(Location("u_farOriginRemainder"),
+                    cell_origin.remainder[0],
+                    cell_origin.remainder[1],
+                    cell_origin.remainder[2]);
+        glUniform1i(Location("u_farLiveCellCount"), static_cast<GLint>(cells.size()));
+        glUniform1i(Location("u_farWorldLadder"), 1);
+        glUniform1i(Location("u_useInstanceOrigin"), 0);
+        // Older arrival fixtures share a tile at (0,0,-1024). If requested,
+        // move their locals into that tile while preserving the world surface.
+        auto draw_mesh = mesh;
+        if (arrival && remap_arrival_origin)
+            for (auto& vertex : draw_mesh.vertices)
+                vertex.position += glm::vec3(centre - draw_origin);
+        allocation_ = UploadFarVolumeGpu(draw_mesh, driver_);
+        if (!allocation_ || !driver_.BindLiveOwnership(cells)) {
+            ADD_FAILURE() << "Ladder upload/ownership publication refused";
+            return 0;
+        }
+        const GLfloat clear[4] = {0, 0, 0, 0};
+        glClearBufferfv(GL_COLOR, 0, clear);
+        EXPECT_TRUE(DrawFarVolumeGpu(*allocation_, driver_));
+        driver_.UnbindLiveOwnership();
+        if (submit_live)
+            SubmitLive(mesh, glm::vec3(centre), projection, view, cells);
+        std::array<float, 4> pixel{};
+        glReadBuffer(GL_COLOR_ATTACHMENT0);
+        glReadPixels(0, 0, 1, 1, GL_RGBA, GL_FLOAT, pixel.data());
+        EXPECT_EQ(glGetError(), GL_NO_ERROR);
+        return pixel[2];
+    }
+    void SubmitLive(const FarVolumeRenderMesh& mesh,
+                    const glm::vec3& centre,
+                    const glm::mat4& projection,
+                    const glm::mat4& view,
+                    std::span<const FarWorldLiveCell> cells) {
+        ASSERT_EQ(cells.size(), 1u);
+        const auto& cell = cells[0];
+        const glm::ivec3 coords(cell.x, cell.y, cell.z);
+        // Exercise the production hierarchy, with enough neighbours to split it.
+        std::vector<Luminumbra::IVec3> chunks;
+        for (int x = -4; x <= 4; ++x)
+            for (int z = -4; z <= 4; ++z)
+                chunks.emplace_back(coords.x + x, coords.y, coords.z + z);
+        const auto matrix = glm::transpose(projection * view);
+        const glm::vec4 planes[6] = {matrix[3] + matrix[0],
+                                     matrix[3] - matrix[0],
+                                     matrix[3] + matrix[1],
+                                     matrix[3] - matrix[1],
+                                     matrix[2],
+                                     matrix[3] - matrix[2]};
+        const auto visible = TerrainCullingTestPeer::Cull(chunks, planes);
+        ASSERT_TRUE(visible.contains(Luminumbra::Chunk::calculate_id(coords)));
+        const glm::vec3 origin = glm::vec3(coords) * 16.0f;
+        auto live_mesh = mesh;
+        for (auto& vertex : live_mesh.vertices)
+            vertex.position += centre - origin;
+        const auto handle = pool_.allocate(
+            live_mesh.vertices.data(), 3, live_mesh.indices.data(), 3, "fw-live-probe");
+        ASSERT_NE(handle, ChunkGeometryPool::kInvalid);
+        const auto& allocation = pool_.allocation(handle);
+        const auto& block = pool_.blocks()[allocation.block_index];
+        struct Command {
+            GLuint count, instances, first;
+            GLint base;
+            GLuint instance;
+        };
+        const Command command{allocation.index_count,
+                              1,
+                              allocation.index_offset,
+                              static_cast<GLint>(allocation.vertex_offset),
+                              0};
+        glBindBuffer(GL_DRAW_INDIRECT_BUFFER, indirect_);
+        glBufferData(GL_DRAW_INDIRECT_BUFFER, sizeof(command), &command, GL_STREAM_DRAW);
+        glBindVertexArray(block.vao);
+        glDisableVertexAttribArray(3);
+        glVertexAttrib3f(3, origin.x, origin.y, origin.z);
+        glUniform1i(Location("u_farWorldLadder"), 0);
+        glUniform1i(Location("u_useInstanceOrigin"), 1);
+        glMultiDrawElementsIndirect(GL_TRIANGLES, GL_UNSIGNED_INT, nullptr, 1, 0);
+        glBindVertexArray(0);
+        glBindBuffer(GL_DRAW_INDIRECT_BUFFER, 0);
+        pool_.free(handle);
+    }
+    GLuint program_ = 0, fbo_ = 0, position_ = 0, lut_ = 0, indirect_ = 0;
+    FarVolumeGlDriver driver_;
+    std::unique_ptr<FarVolumeGpuAllocation> allocation_;
+    ChunkGeometryPool pool_;
+};
+} // namespace
+
+TEST(RenderSmokeTest, FarWorldExactInnerOuterAndNearOnlyVertexGuard) {
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    FarWorldShaderProbe probe;
+    ASSERT_TRUE(probe.Init());
+    EXPECT_EQ(probe.Point({0, 0, -175.99f}, 1040), 0);
+    EXPECT_NEAR(probe.Point({0, 0, -176}, 1040), -176, .001);
+    for (std::size_t tier = 1; tier <= Luminumbra::World::kFarTierCount; ++tier) {
+        const float outer = static_cast<float>(Luminumbra::World::FarWantedRadiusMeters(tier));
+        EXPECT_NEAR(probe.Point({0, 0, -outer}, outer), -outer, .001);
+        EXPECT_EQ(probe.Point({0, 0, -outer - .01f}, outer), 0);
+    }
+    // Camera/inner/outer straddling triangles must retain their eligible interior.
+    EXPECT_EQ(probe.Straddling(100, 1040), 0);
+    EXPECT_NEAR(probe.Straddling(200, 1040), -200, .01);
+    EXPECT_NEAR(probe.Straddling(1039, 1040), -1039, .1);
+    EXPECT_EQ(probe.Straddling(1041, 1040), 0);
+}
+
+TEST(RenderSmokeTest, FarWorldLiveEdgesCaveCeilingsAndCullerReplacementSubmission) {
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    FarWorldShaderProbe probe;
+    ASSERT_TRUE(probe.Init());
+    const std::array floor{FarWorldLiveCell{0, 0, -13, 0}};
+    EXPECT_EQ(probe.Point({8, 8, -200}, 1040, floor), 0);
+    EXPECT_LT(probe.Point({8, 8, -200}, 1040, floor, true), -199);
+    EXPECT_LT(probe.Point({8, 17, -200}, 1040, floor), -199);
+    // Exact upper Y boundary; rotated boundary planes are covered separately below.
+    const std::array below{FarWorldLiveCell{0, -1, -13, 0}};
+    EXPECT_LT(probe.Point({0, 0, -200}, 1040, below), -199);
+    EXPECT_EQ(probe.Point({1, -.01f, -200}, 1040, below), 0);
+    EXPECT_LT(probe.Point({8, -8, -200}, 1040, floor), -199);
+    const std::array negative{FarWorldLiveCell{-1, -2, -13, 0}};
+    EXPECT_EQ(probe.Point({-8, -24, -200}, 1040, negative), 0);
+    EXPECT_LT(probe.Point({-8, -24, -200}, 1040, negative, true), -199);
+    EXPECT_LT(probe.Point({-16.01f, -24, -200}, 1040, negative), -199);
+}
+
+TEST(RenderSmokeTest, FarWorldRotatedCamerasPreserveHalfOpenChunkBoundaries) {
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    FarWorldShaderProbe probe;
+    ASSERT_TRUE(probe.Init());
+    struct BoundaryPlane {
+        glm::dvec3 centre;
+        int axis;
+    };
+    const std::array boundaries{BoundaryPlane{{8, 0, -200}, 1},
+                                BoundaryPlane{{-8, -16, -200}, 1},
+                                BoundaryPlane{{-16, -24, -200}, 0},
+                                BoundaryPlane{{-8, -24, -208}, 2}};
+    // Both views have pitch and yaw, opposite elevation signs, and nonzero
+    // chunk offsets on every axis. A large translation also checks that origin
+    // subtraction precedes float narrowing (its fractional offsets would vanish).
+    const std::array cameras{glm::dvec3(37.1f, 83.32f, 19.77f),
+                             glm::dvec3(-53.39f, -67.13f, 43.21f)};
+    for (const auto& translation :
+         std::array{glm::dvec3(0), glm::dvec3(4194304, -4194304, 4194304)}) {
+        for (const auto& camera_offset : cameras) {
+            const auto camera = camera_offset + translation;
+            for (const auto& boundary : boundaries) {
+                SCOPED_TRACE(::testing::Message()
+                             << "axis=" << boundary.axis << " translation=" << translation.x
+                             << " camera=" << camera_offset.x << ',' << camera_offset.y << ','
+                             << camera_offset.z);
+                const auto centre = boundary.centre + translation;
+                FarWorldLiveCell cell;
+                ASSERT_TRUE(FarWorldChunkCell({centre.x, centre.y, centre.z}, cell));
+                const std::array owner{cell};
+                std::array<std::int32_t, 3> lower_coords{cell.x, cell.y, cell.z};
+                --lower_coords[static_cast<std::size_t>(boundary.axis)];
+                const std::array lower{
+                    FarWorldLiveCell{lower_coords[0], lower_coords[1], lower_coords[2], 0}};
+                const auto expected_depth = -static_cast<float>(glm::length(centre - camera));
+                // The exact edge belongs to the upper cell, never the lower one.
+                EXPECT_NEAR(
+                    probe.Boundary(centre, camera, boundary.axis, lower), expected_depth, .01);
+                EXPECT_EQ(probe.Boundary(centre, camera, boundary.axis, owner), 0);
+                auto below = centre;
+                below[boundary.axis] -= .125;
+                EXPECT_EQ(probe.Boundary(below, camera, boundary.axis, lower), 0);
+                EXPECT_NEAR(probe.Boundary(below, camera, boundary.axis, owner),
+                            -static_cast<float>(glm::length(below - camera)),
+                            .01);
+                auto above = centre;
+                above[boundary.axis] += .125;
+                EXPECT_NEAR(probe.Boundary(above, camera, boundary.axis, lower),
+                            -static_cast<float>(glm::length(above - camera)),
+                            .01);
+                EXPECT_EQ(probe.Boundary(above, camera, boundary.axis, owner), 0);
+            }
+        }
+    }
+}
+
+TEST(RenderSmokeTest, FarWorldCanonicalTileLocalsOwnExactCellsWithFractionalCameras) {
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    FarWorldShaderProbe probe;
+    ASSERT_TRUE(probe.Init());
+    struct Boundary {
+        glm::dvec3 origin;
+        glm::vec3 local;
+        FarWorldLiveCell expected;
+        int axis;
+    };
+    const std::array boundaries{
+        Boundary{{0, -256, -1024}, {8, 256, 824}, {0, 0, -13, 0}, 1},
+        Boundary{{-1024, -512, -1024}, {1016, 496, 824}, {-1, -1, -13, 0}, 1},
+        Boundary{{-1024, -256, -1024}, {1024, 232, 824}, {0, -2, -13, 0}, 0},
+        Boundary{{-1024, -256, -1024}, {1008, 232, 824}, {-1, -2, -13, 0}, 0},
+        Boundary{{-1024, -256, -1024}, {1016, 232, 1024}, {-1, -2, 0, 0}, 2},
+        Boundary{{-1024, -256, -1024}, {1016, 232, 816}, {-1, -2, -13, 0}, 2}};
+    // These float camera values include the exact rereview Y counterexample;
+    // both views pitch/yaw. Camera and world translations leave the cell exact.
+    const std::array cameras{glm::dvec3(37.1f, 83.32f, 219.77f),
+                             glm::dvec3(-53.39f, -67.13f, 243.21f)};
+    for (const double translation : {0.0, 4194304.0, -4194304.0}) {
+        for (const auto& camera_offset : cameras) {
+            const auto camera = camera_offset + glm::dvec3(translation);
+            for (const auto& boundary : boundaries) {
+                SCOPED_TRACE(::testing::Message()
+                             << "axis=" << boundary.axis
+                             << " local=" << boundary.local[boundary.axis]
+                             << " translation=" << translation << " cameraY=" << camera_offset.y);
+                const auto origin = boundary.origin + glm::dvec3(translation);
+                auto cell = boundary.expected;
+                const auto shift = static_cast<std::int32_t>(translation / 16.0);
+                cell.x += shift;
+                cell.y += shift;
+                cell.z += shift;
+                const std::array owner{cell};
+                std::array<std::int32_t, 3> lower_coords{cell.x, cell.y, cell.z};
+                --lower_coords[static_cast<std::size_t>(boundary.axis)];
+                const std::array lower{
+                    FarWorldLiveCell{lower_coords[0], lower_coords[1], lower_coords[2], 0}};
+                const auto depth =
+                    -static_cast<float>(glm::length(origin + glm::dvec3(boundary.local) - camera));
+                // Only the asserted integer cell owns the exact boundary. A
+                // populated adjacent lower cell must leave this surface visible.
+                EXPECT_NEAR(
+                    probe.TileBoundary(origin, boundary.local, camera, boundary.axis, lower),
+                    depth,
+                    .01);
+                EXPECT_EQ(probe.TileBoundary(origin, boundary.local, camera, boundary.axis, owner),
+                          0);
+                auto below = boundary.local;
+                below[boundary.axis] -= .125f;
+                EXPECT_EQ(probe.TileBoundary(origin, below, camera, boundary.axis, lower), 0);
+                EXPECT_LT(probe.TileBoundary(origin, below, camera, boundary.axis, owner), -176);
+                auto above = boundary.local;
+                above[boundary.axis] += .125f;
+                EXPECT_LT(probe.TileBoundary(origin, above, camera, boundary.axis, lower), -176);
+                EXPECT_EQ(probe.TileBoundary(origin, above, camera, boundary.axis, owner), 0);
+            }
+        }
+    }
+}
+
+TEST(RenderSmokeTest, FarWorldCanonicalArrivalUsesLocalChildAndSpanBoundaries) {
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    FarWorldShaderProbe probe;
+    ASSERT_TRUE(probe.Init());
+    for (const double translation : {0.0, 4194304.0, -4194304.0}) {
+        const auto origin = glm::dvec3(-1024, -256, -1024) + glm::dvec3(translation);
+        const auto camera = glm::dvec3(-474.9f, 83.32f, -180.23f) + glm::dvec3(translation);
+        const glm::vec2 child_y(static_cast<float>(translation),
+                                static_cast<float>(translation + 256));
+        for (int axis = 0; axis < 3; ++axis) {
+            SCOPED_TRACE(::testing::Message() << "axis=" << axis << " translation=" << translation);
+            // Keep the other coordinates inside their child/span, so only the
+            // tested axis can decide replacement at a half-open boundary.
+            glm::vec3 local(600, axis == 1 ? 256 : 264, 600);
+            if (axis != 1)
+                local[axis] = 512;
+            // X/Z midpoints choose the upper child; Y=0 is the inclusive
+            // lower sampled boundary of child 3's built span.
+            EXPECT_EQ(probe.TileBoundary(origin, local, camera, axis, {}, true, child_y, 3), 0);
+            auto below = local;
+            below[axis] -= .125f;
+            EXPECT_LT(probe.TileBoundary(origin, below, camera, axis, {}, true, child_y, 3), -176);
+            auto above = local;
+            above[axis] += .125f;
+            EXPECT_EQ(probe.TileBoundary(origin, above, camera, axis, {}, true, child_y, 3), 0);
+            if (axis != 1) {
+                const int lower_child = axis == 0 ? 2 : 1;
+                EXPECT_LT(
+                    probe.TileBoundary(origin, local, camera, axis, {}, true, child_y, lower_child),
+                    -176);
+                EXPECT_EQ(
+                    probe.TileBoundary(origin, below, camera, axis, {}, true, child_y, lower_child),
+                    0);
+                auto outside = local;
+                outside[axis] = 1024;
+                EXPECT_LT(probe.TileBoundary(origin, outside, camera, axis, {}, true, child_y, 3),
+                          -176);
+            }
+        }
+    }
+}
+
+TEST(RenderSmokeTest, FarWorldClipAwareArrivalHonoursFinerRadiusAndBuiltY) {
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    FarWorldShaderProbe probe;
+    ASSERT_TRUE(probe.Init());
+    EXPECT_EQ(probe.Point({0, 0, -500}, 2080, {}, false, true), 0);
+    EXPECT_LT(probe.Point({0, 0, -500}, 2080, {}, false, true, {10, 20}), -499);
+    // Tile-local metadata must not remove coarse fragments outside finer clip.
+    EXPECT_LT(probe.Point({800, 0, -900}, 2080, {}, false, true), -1200);
+    EXPECT_LT(probe.Point({0, 0, -500}, 2080), -499); // next-frame fallback
+}
+
+TEST(RenderSmokeTest, FarWorldBoundedOwnershipStoreAndBindingsRestore) {
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    GLuint sentinel = 0;
+    glCreateBuffers(1, &sentinel);
+    glNamedBufferData(sentinel, 512, nullptr, GL_DYNAMIC_DRAW);
+    glBindBufferRange(GL_SHADER_STORAGE_BUFFER, 7, sentinel, 0, 256);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, sentinel);
+    glDisable(GL_CLIP_DISTANCE0);
+    FarVolumeGlDriver driver;
+    const std::array cells{FarWorldLiveCell{-1, -2, -3, 0}};
+    ASSERT_TRUE(driver.BindLiveOwnership(cells));
+    GLint bound = 0;
+    glGetIntegeri_v(GL_SHADER_STORAGE_BUFFER_BINDING, 7, &bound);
+    EXPECT_NE(static_cast<GLuint>(bound), sentinel);
+    GLint64 bytes = 0;
+    glGetNamedBufferParameteri64v(static_cast<GLuint>(bound), GL_BUFFER_SIZE, &bytes);
+    EXPECT_EQ(bytes, static_cast<GLint64>(kFarWorldOwnershipGpuBytes));
+    EXPECT_TRUE(glIsEnabled(GL_CLIP_DISTANCE0));
+    driver.UnbindLiveOwnership();
+    glGetIntegeri_v(GL_SHADER_STORAGE_BUFFER_BINDING, 7, &bound);
+    EXPECT_EQ(static_cast<GLuint>(bound), sentinel);
+    glGetIntegerv(GL_SHADER_STORAGE_BUFFER_BINDING, &bound);
+    EXPECT_EQ(static_cast<GLuint>(bound), sentinel);
+    glGetInteger64i_v(GL_SHADER_STORAGE_BUFFER_SIZE, 7, &bytes);
+    EXPECT_EQ(bytes, 256);
+    EXPECT_FALSE(glIsEnabled(GL_CLIP_DISTANCE0));
+    const std::vector<FarWorldLiveCell> oversized(kFarWorldLiveCellLimit + 1);
+    EXPECT_FALSE(driver.BindLiveOwnership(oversized));
+    driver.ReleaseLiveOwnership();
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 7, 0);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+    glDeleteBuffers(1, &sentinel);
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
 }

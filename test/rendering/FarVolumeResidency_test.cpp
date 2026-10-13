@@ -253,7 +253,7 @@ TEST(FarVolumeResidency, ActualUploadBytesCapDefersReadyAndPreservesOldGpuOnFail
     EXPECT_EQ(stats->bytes_gpu, 0u);
 }
 
-TEST(FarVolumeResidency, FourCurrentEmptyChildrenPermitYieldEachFrame) {
+TEST(FarVolumeResidency, FourCurrentEmptyChildrenPermitClippedArrivalEachFrame) {
     JobSystem jobs;
     jobs.startup(2);
     FarVolumeTierMemory memory(Budgets());
@@ -291,8 +291,24 @@ TEST(FarVolumeResidency, FourCurrentEmptyChildrenPermitYieldEachFrame) {
     const auto collect = [](void* context, const FarVolumeDrawRecord& record) {
         static_cast<std::vector<FarVolumeDrawRecord>*>(context)->push_back(record);
     };
-    EXPECT_EQ(owner.VisitDraws(collect, &records), 0u);
-    EXPECT_TRUE(records.empty());
+    ASSERT_EQ(owner.VisitDraws(collect, &records), 1u);
+    ASSERT_EQ(records.size(), 1u);
+    EXPECT_TRUE(records[0].arrival.eligible);
+    EXPECT_EQ(records[0].arrival.finer_outer_radius_meters, 8320);
+    for (std::size_t i = 0; i < records[0].arrival.children.size(); ++i) {
+        const auto& span = records[0].arrival.children[i];
+        EXPECT_LT(span.min_y, span.max_y);
+        EXPECT_TRUE(FarWorldArrivalReplaces(
+            records[0].arrival,
+            8192,
+            {10, static_cast<float>(span.min_y - records[0].origin_meters.y), 10},
+            records[0].origin_meters.y,
+            10,
+            10));
+    }
+    // The coarse far corner is outside the finer clip, even with four Empty children.
+    EXPECT_FALSE(FarWorldArrivalReplaces(records[0].arrival, 8192, {8191, 0, 8191}, 0, 8191, 8191));
+    records.clear();
     EXPECT_FALSE(owner.CoarseMayYield({4, 0, 0}));
     ++requests[4].identity.span_generation;
     requests[4].intent.extra_span = FarVolumeCoverageSpan{-512, 256};
@@ -304,6 +320,7 @@ TEST(FarVolumeResidency, FourCurrentEmptyChildrenPermitYieldEachFrame) {
     EXPECT_EQ(stale[3].covering, 3u);
     ASSERT_EQ(owner.VisitDraws(collect, &records), 1u);
     ASSERT_EQ(records.size(), 1u);
+    EXPECT_FALSE(records[0].arrival.eligible);
     EXPECT_EQ(records[0].identity, requests[0].identity);
     EXPECT_EQ(records[0].resource, owner.Resource(requests[0].identity.key));
     EXPECT_EQ(records[0].horizontal_outer_clip_meters, 16384);
@@ -399,4 +416,108 @@ TEST(FarVolumeResidency, ProspectiveEvictionRequiresCurrentUnderlayAndKeepsKeyLa
     EXPECT_EQ(refused.rejected, 1u);
     EXPECT_EQ(owner.Resource(near.identity.key), saved_near);
     EXPECT_EQ(owner.Resource(far.identity.key), saved_far);
+}
+
+TEST(FarVolumeResidency, V2ArrivalMetadataRetainsOriginAndNegativeRadiusCorners) {
+    for (const std::int64_t coordinate : {0, -1}) {
+        JobSystem jobs;
+        jobs.startup(2);
+        FarVolumeTierMemory memory(Budgets());
+        FarVolumeResidency owner(jobs, memory, Limits());
+        auto requests = std::array{Wanted({2, coordinate, coordinate}),
+                                   Wanted({1, coordinate * 2, coordinate * 2}),
+                                   Wanted({1, coordinate * 2 + 1, coordinate * 2}),
+                                   Wanted({1, coordinate * 2, coordinate * 2 + 1}),
+                                   Wanted({1, coordinate * 2 + 1, coordinate * 2 + 1})};
+        ASSERT_TRUE(owner.ReplaceWanted(requests));
+        FarVolumeAuthorityProducer producer = [](const auto& request, auto&) {
+            return Authority(request, request.identity.key.tier == 2);
+        };
+        std::size_t calls = 0;
+        const auto backend = Backend(calls);
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+        do {
+            owner.AdvanceFrame(0, 0, {5, 5, 4 * 1024 * 1024}, producer, backend);
+            if (owner.CoarseMayYield(requests[0].identity.key) &&
+                IsFarTileCovering(Observation(owner, requests[0].identity.key).coverage))
+                break;
+            std::this_thread::yield();
+        } while (std::chrono::steady_clock::now() < deadline);
+        ASSERT_TRUE(owner.CoarseMayYield(requests[0].identity.key));
+        FarWorldArrival arrival;
+        const auto inspect = [](void* context, const FarVolumeDrawRecord& record) {
+            *static_cast<FarWorldArrival*>(context) = record.arrival;
+        };
+        ASSERT_EQ(owner.VisitDraws(inspect, &arrival), 1u);
+        ASSERT_TRUE(arrival.eligible);
+        EXPECT_EQ(arrival.finer_outer_radius_meters, 1040);
+        const double corner = coordinate == 0 ? 1023 : -1023;
+        EXPECT_FALSE(FarWorldArrivalReplaces(arrival, 1024, {1, 0, 1}, 0, corner, corner));
+        // Partial manifest immediately disables arrival, including Empty coverage.
+        ASSERT_TRUE(owner.ReplaceWanted(std::span(requests).first(4)));
+        ASSERT_EQ(owner.VisitDraws(inspect, &arrival), 1u);
+        EXPECT_FALSE(arrival.eligible);
+        owner.AdvanceFrame(0, 0, {}, {}, {});
+        ASSERT_EQ(owner.VisitDraws(inspect, &arrival), 1u);
+        EXPECT_FALSE(arrival.eligible); // next-frame fallback restoration
+    }
+}
+
+TEST(FarVolumeResidency, FailedAndBudgetEvictedChildrenRestoreArrivalFallbackNextFrame) {
+    for (const bool evict : {false, true}) {
+        JobSystem jobs;
+        jobs.startup(2);
+        FarVolumeTierMemory memory(Budgets());
+        FarVolumeResidency owner(jobs, memory, Limits());
+        auto requests = std::array{Wanted({2, 0, 0}),
+                                   Wanted({1, 0, 0}),
+                                   Wanted({1, 1, 0}),
+                                   Wanted({1, 0, 1}),
+                                   Wanted({1, 1, 1})};
+        ASSERT_TRUE(owner.ReplaceWanted(requests));
+        std::size_t calls = 0;
+        const auto backend = Backend(calls);
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+        do {
+            owner.AdvanceFrame(0, 0, {5, 5, 8 * 1024 * 1024}, Producer(true), backend);
+            if (owner.CoarseMayYield({2, 0, 0}) &&
+                IsFarTileCovering(Observation(owner, requests[0].identity.key).coverage))
+                break;
+            std::this_thread::yield();
+        } while (std::chrono::steady_clock::now() < deadline);
+        ASSERT_TRUE(owner.CoarseMayYield({2, 0, 0}));
+        if (evict) {
+            auto pressure = Wanted({1, 2, 0});
+            const auto* pool = memory.Pool(1);
+            ASSERT_NE(pool, nullptr);
+            pressure.build_headroom_bytes = pool->limit() - pool->used() + 1;
+            const std::array pressured{
+                requests[0], requests[1], requests[2], requests[3], requests[4], pressure};
+            ASSERT_TRUE(owner.ReplaceWanted(pressured));
+            EXPECT_GE(owner.AdvanceFrame(0, 0, {1, 0, 0}, Producer(true), {}).evicted, 1u);
+        } else {
+            const auto* retained = owner.Resource(requests[4].identity.key);
+            ASSERT_NE(retained, nullptr);
+            ++requests[4].identity.content_hash;
+            ASSERT_TRUE(owner.ReplaceWanted(requests));
+            ASSERT_TRUE(WaitReady(owner, std::span(requests).last(1), Producer(true)));
+            FarVolumeUploadBackend failure =
+                [](const auto&) -> std::unique_ptr<FarVolumeGpuAllocation> {
+                return {};
+            };
+            EXPECT_EQ(owner.AdvanceFrame(0, 0, {0, 1, 8 * 1024 * 1024}, {}, failure).uploaded, 0u);
+            EXPECT_EQ(owner.Resource(requests[4].identity.key), retained);
+        }
+        owner.AdvanceFrame(0, 0, {}, {}, {});
+        EXPECT_FALSE(owner.CoarseMayYield({2, 0, 0}));
+        bool parent_drawn = false;
+        const auto inspect = [](void* opaque, const FarVolumeDrawRecord& record) {
+            if (record.identity.key.tier == 2) {
+                *static_cast<bool*>(opaque) = true;
+                EXPECT_FALSE(record.arrival.eligible);
+            }
+        };
+        EXPECT_GE(owner.VisitDraws(inspect, &parent_drawn), 1u);
+        EXPECT_TRUE(parent_drawn);
+    }
 }

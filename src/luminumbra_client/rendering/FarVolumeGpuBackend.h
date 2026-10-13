@@ -1,6 +1,7 @@
 #pragma once
 
 #include "FarVolumeUpload.h"
+#include "FarWorldOwnership.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -45,6 +46,13 @@ public:
     virtual void EnableAttribute(FarVolumeVertexAttribute attribute) noexcept = 0;
     // Fixed indexed GL_TRIANGLES / GL_UNSIGNED_INT, offset zero. Upload-only
     // drivers refuse by default; the renderer never assumes a draw capability.
+    // Owner reserves the fixed logical store before entry. Empty-only fake
+    // drivers need no GL; nonempty masks require an explicit backend.
+    virtual bool BindLiveOwnership(std::span<const FarWorldLiveCell> cells) noexcept {
+        return cells.empty();
+    }
+    virtual void UnbindLiveOwnership() noexcept {}
+    virtual void ReleaseLiveOwnership() noexcept {}
     virtual bool DrawIndexed(std::int32_t index_count) noexcept {
         (void)index_count;
         return false;

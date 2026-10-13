@@ -475,17 +475,30 @@ std::size_t FarVolumeResidency::VisitDraws(FarVolumeDrawVisitor visitor, void* c
                 continue;
             const auto& identity = entry.desired->identity;
             const auto coverage = entry.uploaded.Status(identity, entry.desired->intent);
-            if (!World::IsFarTileCovering(coverage) || !entry.uploaded.resource() ||
-                CoarseMayYield(identity.key))
+            if (!World::IsFarTileCovering(coverage) || !entry.uploaded.resource())
                 continue;
             const auto& request = entry.uploaded.request();
-            const FarVolumeDrawRecord record{
+            FarVolumeDrawRecord record{
                 identity,
                 request,
                 {identity.key.tx * edge, request.span.min_y, identity.key.tz * edge},
                 entry.uploaded.resource(),
                 World::FarWantedRadiusMeters(number),
-                double(dimensions.sample_spacing_meters) / 2};
+                double(dimensions.sample_spacing_meters) / 2,
+                {}};
+            record.arrival.eligible = CoarseMayYield(identity.key);
+            if (record.arrival.eligible) {
+                record.arrival.finer_outer_radius_meters = World::FarWantedRadiusMeters(number - 1);
+                for (std::int64_t z = 0; z < 2; ++z) {
+                    for (std::int64_t x = 0; x < 2; ++x) {
+                        const World::FarTileKey child{std::uint8_t(number - 1),
+                                                      identity.key.tx * 2 + x,
+                                                      identity.key.tz * 2 + z};
+                        record.arrival.children[static_cast<std::size_t>(x + 2 * z)] =
+                            Find(child)->uploaded.request().span;
+                    }
+                }
+            }
             visitor(context, record);
             ++count;
         }

@@ -368,6 +368,26 @@ bool MakeFarWorldDrawCommand(const FarVolumeDrawRecord& record,
         candidate.relative_origin[i] = static_cast<float>(origin[i] - camera[i]);
         candidate.world_origin[i] = static_cast<float>(origin[i]);
     }
+    FarWorldCellOrigin cell_origin;
+    if (!MakeFarWorldCellOrigin(origin, cell_origin))
+        return false;
+    candidate.origin_chunk = {cell_origin.key.x, cell_origin.key.y, cell_origin.key.z};
+    candidate.origin_remainder = cell_origin.remainder;
+    candidate.tile_edge_meters = static_cast<float>(FarTileEdgeMeters(record.identity.key.tier));
+    candidate.arrival_eligible = record.arrival.eligible;
+    candidate.finer_outer_radius_meters =
+        static_cast<float>(record.arrival.finer_outer_radius_meters);
+    for (std::size_t i = 0; i < record.arrival.children.size(); ++i) {
+        const auto& child = record.arrival.children[i];
+        if (std::abs(static_cast<double>(child.min_y)) > kFarVolumeExactCoordinateLimitMeters ||
+            std::abs(static_cast<double>(child.max_y)) > kFarVolumeExactCoordinateLimitMeters)
+            return false;
+        // Both integer endpoints and the origin lie in +/-2^23 metres, so their
+        // differences are integers within +/-2^24 and exactly representable.
+        candidate.child_local_y_spans[i] = {
+            static_cast<float>(static_cast<double>(child.min_y) - origin[1]),
+            static_cast<float>(static_cast<double>(child.max_y) - origin[1])};
+    }
     candidate.index_count = index_count;
     candidate.horizontal_outer_clip_meters = record.horizontal_outer_clip_meters;
     candidate.view_ray_bias_meters = record.view_ray_bias_meters;
@@ -382,6 +402,24 @@ FarWorldSubmitStats FarWorldRenderer::Submit(const std::array<double, 3>& camera
     if (!residency_ || stopping_ || !prepare ||
         Selection(FarWorldPurpose::World).effective != FarWorldMode::Ladder)
         return stats;
+    if (!ownership_.complete() || !advanced_frame_ || ownership_.frame() != *advanced_frame_) {
+        ++stats.refused;
+        return stats;
+    }
+    if (!ownership_gpu_charge_) {
+        auto charge = memory_->ReserveGpu(kFarTierCount, kFarWorldOwnershipGpuBytes);
+        if (!charge) {
+            ++stats.refused;
+            return stats;
+        }
+        ownership_gpu_charge_.emplace(std::move(*charge));
+    }
+    if (!driver_->BindLiveOwnership(ownership_.cells())) {
+        driver_->ReleaseLiveOwnership();
+        ownership_gpu_charge_.reset();
+        ++stats.refused;
+        return stats;
+    }
     struct Visit {
         FarWorldRenderer& owner;
         const std::array<double, 3>& camera;
@@ -396,10 +434,14 @@ FarWorldSubmitStats FarWorldRenderer::Submit(const std::array<double, 3>& camera
                 const auto* allocation =
                     dynamic_cast<const FarVolumeGlAllocation*>(record.resource);
                 FarWorldDrawCommand command;
-                if (!allocation ||
-                    !MakeFarWorldDrawCommand(
-                        record, v.camera, allocation->index_count(), command) ||
-                    !v.prepare(command) || !DrawFarVolumeGpu(*record.resource, *v.owner.driver_)) {
+                if (!allocation || !MakeFarWorldDrawCommand(
+                                       record, v.camera, allocation->index_count(), command)) {
+                    ++v.stats.refused;
+                    return;
+                }
+                command.live_cell_count =
+                    static_cast<std::int32_t>(v.owner.ownership_.cells().size());
+                if (!v.prepare(command) || !DrawFarVolumeGpu(*record.resource, *v.owner.driver_)) {
                     ++v.stats.refused;
                     return;
                 }
@@ -408,9 +450,11 @@ FarWorldSubmitStats FarWorldRenderer::Submit(const std::array<double, 3>& camera
             },
             &context);
     } catch (...) {
+        driver_->UnbindLiveOwnership();
         submitting_ = false;
         throw;
     }
+    driver_->UnbindLiveOwnership();
     submitting_ = false;
     return stats;
 }
@@ -428,7 +472,11 @@ void FarWorldRenderer::Drain() {
     if (residency_)
         residency_->CancelAndDrain();
     residency_.reset();
+    if (driver_)
+        driver_->ReleaseLiveOwnership();
     fixture_.reset();
+    ownership_gpu_charge_.reset();
+    ownership_.Begin(0);
     integration_charge_.reset();
     memory_.reset();
     ledgers_ = {};

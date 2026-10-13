@@ -370,6 +370,14 @@ void GBufferPass::geometry_pass_chunks(const RenderContext& ctx,
     // frustum culling, depth-biased so overlapping live terrain wins. Far
     // draws stay inside the gbuffer GPU timer window; they are excluded from
     // the shadow cascades (ShadowPass never sees them).
+    // Reset ladder uniforms even if the synchronous backend/prepare callback throws.
+    struct LadderUniformReset {
+        Shader& shader;
+        ~LadderUniformReset() {
+            shader.setInt("u_farWorldLadder", 0);
+            shader.setFloat("u_farClipNearRadius", 0.0f);
+        }
+    } ladder_uniform_reset{*m_geometry_shader};
     const auto far_stats = SubmitSelectedFarWorld(
         input.far_selection,
         [&] {
@@ -382,6 +390,30 @@ void GBufferPass::geometry_pass_chunks(const RenderContext& ctx,
         input.submit_ladder,
         [&](const FarWorldDrawCommand& command) {
             m_geometry_shader->setInt("u_farWorldLadder", 1);
+            m_geometry_shader->setFloat("u_farClipNearRadius",
+                                        static_cast<float>(kFarWorldInnerRadiusMeters));
+            m_geometry_shader->setFloat("u_farOuterRadius",
+                                        static_cast<float>(command.horizontal_outer_clip_meters));
+            m_geometry_shader->setFloat("u_farTileEdge", command.tile_edge_meters);
+            m_geometry_shader->setInt("u_farArrivalEligible", command.arrival_eligible ? 1 : 0);
+            m_geometry_shader->setFloat("u_farFinerOuterRadius", command.finer_outer_radius_meters);
+            for (std::size_t i = 0; i < command.child_local_y_spans.size(); ++i) {
+                m_geometry_shader->setVec2("u_farChildY[" + std::to_string(i) + "]",
+                                           glm::vec2(command.child_local_y_spans[i][0],
+                                                     command.child_local_y_spans[i][1]));
+            }
+            // Ladder tiles use synchronous indexed draws, with instance-origin
+            // mode disabled even after pooled live MDI. This key/remainder belongs
+            // to this draw only; the live MDI shader branch never consumes it.
+            glUniform3i(glGetUniformLocation(m_geometry_shader->Id(), "u_farOriginChunk"),
+                        command.origin_chunk[0],
+                        command.origin_chunk[1],
+                        command.origin_chunk[2]);
+            m_geometry_shader->setVec3("u_farOriginRemainder",
+                                       glm::vec3(command.origin_remainder[0],
+                                                 command.origin_remainder[1],
+                                                 command.origin_remainder[2]));
+            m_geometry_shader->setInt("u_farLiveCellCount", command.live_cell_count);
             m_geometry_shader->setInt("u_useInstanceOrigin", 0);
             m_geometry_shader->setVec3("u_farRelativeOrigin",
                                        glm::vec3(command.relative_origin[0],
@@ -394,6 +426,7 @@ void GBufferPass::geometry_pass_chunks(const RenderContext& ctx,
             return true;
         });
     m_geometry_shader->setInt("u_farWorldLadder", 0);
+    m_geometry_shader->setFloat("u_farClipNearRadius", 0.0f);
     stats.far_region_draws += far_stats.draws;
     stats.far_indices += far_stats.indices;
 

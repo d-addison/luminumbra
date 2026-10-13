@@ -26,6 +26,8 @@ out VS_OUT {
     flat uint MaterialID;
     vec3 Tint;         // per-instance tint (terrain: white = no-op, matches g_buffer.frag VS_OUT)
     vec3 PrevWorldPos; //  TAAU: terrain is static -> == WorldPos (camera-only reprojection)
+    vec3 FarRelativeWorldPos; // ladder-only, unbiased and never view-rotated
+    vec3 FarTileLocalPos; // unbiased stored vertex position, before camera subtraction
 } vs_out;
 
 // Uniforms for transforming the entire chunk mesh
@@ -43,7 +45,7 @@ uniform mat3 u_normalViewMatrix;
 // (== mat3(view)); when 0 the legacy per-draw 'model' / 'normalMatrix' uniforms
 // drive it (far-LOD region draws, which set those uniforms per region).
 uniform int u_useInstanceOrigin;
-// Explicit ladder origin transform; B/C add ownership, clips and depth policy.
+// Explicit ladder origin transform for distance and rasterization only.
 // The CPU subtracts camera in double before narrowing this relative origin.
 uniform int u_farWorldLadder;
 uniform vec3 u_farRelativeOrigin;
@@ -92,9 +94,13 @@ void main()
     vs_out.WorldNormal = worldNormal;
 
     // Calculate view-space position
-    vec4 viewPos = u_farWorldLadder == 1
-        ? vec4(mat3(view) * (aPos + u_farRelativeOrigin), 1.0)
-        : view * worldPos;
+    // The relative origin was subtracted in double on the CPU before narrowing.
+    // Carry this directly for unrotated distance clips. Ownership and arrival
+    // instead carry aPos unchanged, avoiding every camera-relative round trip.
+    vs_out.FarTileLocalPos = u_farWorldLadder == 1 ? aPos : vec3(0.0);
+    vs_out.FarRelativeWorldPos = u_farWorldLadder == 1 ? aPos + u_farRelativeOrigin : vec3(0.0);
+    vec4 viewPos = u_farWorldLadder == 1 ? vec4(mat3(view) * (aPos + u_farRelativeOrigin), 1.0)
+                                         : view * worldPos;
     vs_out.FragPos = vec3(viewPos);
     vs_out.Normal = viewNormal;
     vs_out.UV = vec2(0.0); // terrain uses triplanar projection, not mesh UVs
@@ -103,7 +109,10 @@ void main()
 
     // Far-region radial clip band: positive only between the near and far radii.
     // gl_ClipDistance[0] < 0 -> the GL clips the primitive before rasterization.
-    if (u_farClipNearRadius > 0.0 || u_farClipFarRadius > 0.0) {
+    if (u_farWorldLadder == 1) {
+        // Near-only guard: endpoint radii cannot clip an outer-crossing triangle.
+        gl_ClipDistance[0] = length(viewPos.xyz) - 176.0;
+    } else if (u_farClipNearRadius > 0.0 || u_farClipFarRadius > 0.0) {
         float d = length(viewPos.xyz);
         gl_ClipDistance[0] = min(d - u_farClipNearRadius, u_farClipFarRadius - d);
     } else {

@@ -2447,6 +2447,30 @@ void RenderPipeline::prepare_frame(entt::registry& registry,
     manage_chunk_gpu_resources(renderable_chunk_snapshots, camera);
     manage_water_gpu_resources(renderable_chunk_snapshots, camera);
     ensure_terrain_culling_hierarchy(renderable_chunk_snapshots);
+    if (m_frame_far_selection.effective == FarWorldMode::Ladder) {
+        m_far_world->BeginLiveOwnership(m_far_world_frame);
+        for (const auto& chunk : renderable_chunk_snapshots) {
+            const auto found = m_chunk_render_data.find(chunk.id);
+            FarWorldLiveUpload upload;
+            upload.cell = {chunk.coords.x, chunk.coords.y, chunk.coords.z, 0};
+            upload.snapshot_version = chunk.mesh_version;
+            if (found != m_chunk_render_data.end()) {
+                const auto& data = found->second;
+                upload.uploaded_version = data.mesh_version;
+                upload.uploaded_indices = data.element_count;
+                upload.valid_allocation =
+                    data.pool_handle != ChunkRenderData::kInvalidPoolHandle &&
+                    m_chunk_geometry_pool.allocation(data.pool_handle).live &&
+                    m_chunk_geometry_pool.allocation(data.pool_handle).index_count ==
+                        data.element_count;
+            }
+            if (!m_far_world->AddLiveUpload(upload))
+                break;
+        }
+        // Failure deliberately leaves no published mask. Submit refuses the
+        // entire far stage this frame rather than claiming a truncated live set.
+        m_far_world->FinishLiveOwnership();
+    }
 
     // Far-LOD scheduling: ring-diff the wanted region set, integrate
     // finished tile builds (mesh uploads), and evict. Draws happen inside the

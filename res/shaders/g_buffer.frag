@@ -120,6 +120,44 @@ uniform mat4 u_prev_view_proj;
 uniform vec2 u_inv_screen_size;
 uniform vec2 u_jitter_ndc;
 
+// Ladder-only ownership and clipping. All other shared shader paths are inert.
+uniform int u_farWorldLadder;
+uniform float u_farOuterRadius;
+uniform float u_farTileEdge;
+uniform int u_farArrivalEligible;
+uniform float u_farFinerOuterRadius;
+uniform vec2 u_farChildY[4];
+uniform ivec3 u_farOriginChunk;
+uniform vec3 u_farOriginRemainder;
+uniform int u_farLiveCellCount;
+layout(std430, binding = 7) readonly buffer FarWorldLiveOwnership {
+    ivec4 u_farLiveCells[];
+};
+bool farCellLess(ivec3 a, ivec3 b) {
+    if (a.x != b.x) return a.x < b.x;
+    if (a.y != b.y) return a.y < b.y;
+    return a.z < b.z;
+}
+bool farLiveOwns(vec3 local) {
+    // Canonical tile/span origins are integer multiples of 16 (remainder=0).
+    // Adding zero preserves the stored float local; /16 is exact binary scaling.
+    // Integer boundary locals, or integer remainder + integer local below 2^24,
+    // are exact. A boundary plane has the same local coordinate at all vertices.
+    // floor supplies negative half-open semantics; key addition stays integer.
+    // CPU mirror: FarWorldChunkCell(FarWorldCellOrigin, local). Never use camera
+    // relative round trips or view rotation to decide a chunk or child boundary.
+    ivec3 cell = u_farOriginChunk + ivec3(floor((u_farOriginRemainder + local) / 16.0));
+    int lo = 0;
+    int hi = u_farLiveCellCount;
+    // 8192 cells need at most 14 lower-bound steps, including the final cell.
+    for (int stepIndex = 0; stepIndex < 14 && lo < hi; ++stepIndex) {
+        int middle = lo + (hi - lo) / 2;
+        if (farCellLess(u_farLiveCells[middle].xyz, cell)) lo = middle + 1;
+        else hi = middle;
+    }
+    return lo < u_farLiveCellCount && all(equal(u_farLiveCells[lo].xyz, cell));
+}
+
 // Input from the vertex shader, with "flat" interpolation for the integer ID
 in VS_OUT {
     vec3 FragPos;      // VIEW SPACE
@@ -130,6 +168,8 @@ in VS_OUT {
     flat uint MaterialID;
     vec3 Tint;         // per-instance albedo tint (1,1,1 = no-op)
     vec3 PrevWorldPos; //  TAAU: world pos with PREVIOUS-frame wind sway (== WorldPos for static)
+    vec3 FarRelativeWorldPos; // ladder-only, unbiased and never view-rotated
+    vec3 FarTileLocalPos; // unbiased stored vertex position, before camera subtraction
 } fs_in;
 
 //  terrain visual-fidelity (visual-fidelity warm palette floor),: the 256px terrain
@@ -255,7 +295,26 @@ void main()
     if (fs_in.MaterialID == 7u) { // Water
         discard;
     }
-    if (u_farClipInnerRadius > 0.0 &&
+    if (u_farWorldLadder == 1) {
+        vec3 relativeWorld = fs_in.FarRelativeWorldPos;
+        // Q25/Q27 bind continuous camera-relative sphere/XZ distance tests,
+        // not cell decisions. Float roundoff is confined to the radius surface;
+        // the prescribed strict comparisons retain exactly representable limits
+        // without expanding a clip band. It cannot change half-open cell ownership.
+        float horizontalSquared = dot(relativeWorld.xz, relativeWorld.xz);
+        vec3 local = fs_in.FarTileLocalPos;
+        if (dot(relativeWorld, relativeWorld) < 176.0 * 176.0 ||
+            horizontalSquared > u_farOuterRadius * u_farOuterRadius || farLiveOwns(local))
+            discard;
+        if (u_farArrivalEligible == 1 &&
+            horizontalSquared <= u_farFinerOuterRadius * u_farFinerOuterRadius &&
+            all(greaterThanEqual(local.xz, vec2(0.0))) && all(lessThan(local.xz, vec2(u_farTileEdge)))) {
+            int child = int(local.x >= u_farTileEdge * 0.5) + 2 * int(local.z >= u_farTileEdge * 0.5);
+            if (local.y >= u_farChildY[child].x && local.y <= u_farChildY[child].y)
+                discard;
+        }
+    }
+    if (u_farWorldLadder != 1 && u_farClipInnerRadius > 0.0 &&
         dot(fs_in.FragPos, fs_in.FragPos) < u_farClipInnerRadius * u_farClipInnerRadius) {
         discard; // far-region fragment inside the live ring: live wins
     }

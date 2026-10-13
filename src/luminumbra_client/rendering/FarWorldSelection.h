@@ -69,6 +69,13 @@ struct FarWorldDrawCommand {
     std::array<float, 3> relative_origin{}, world_origin{};
     double horizontal_outer_clip_meters = 0, view_ray_bias_meters = 0;
     std::int32_t index_count = 0;
+    float tile_edge_meters = 0, finer_outer_radius_meters = 0;
+    bool arrival_eligible = false;
+    // Child built spans minus this draw's integer Y origin, exactly representable.
+    std::array<std::array<float, 2>, 4> child_local_y_spans{};
+    std::array<std::int32_t, 3> origin_chunk{};
+    std::array<float, 3> origin_remainder{};
+    std::int32_t live_cell_count = 0;
 };
 using FarWorldPrepareDraw = std::function<bool(const FarWorldDrawCommand&)>;
 struct FarWorldSubmitStats {

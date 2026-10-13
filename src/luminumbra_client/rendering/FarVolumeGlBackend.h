@@ -14,6 +14,7 @@ namespace Luminumbra::Rendering {
 class FarVolumeGlDriver final : public FarVolumeGpuDriver {
 public:
     FarVolumeGlDriver() noexcept;
+    ~FarVolumeGlDriver() noexcept override;
     FarVolumeGlDriver(const FarVolumeGlDriver&) = delete;
     FarVolumeGlDriver& operator=(const FarVolumeGlDriver&) = delete;
     FarVolumeGlDriver(FarVolumeGlDriver&&) = delete;
@@ -36,8 +37,15 @@ public:
                       std::size_t offset) noexcept override;
     void EnableAttribute(FarVolumeVertexAttribute attribute) noexcept override;
     bool DrawIndexed(std::int32_t index_count) noexcept override;
+    bool BindLiveOwnership(std::span<const FarWorldLiveCell> cells) noexcept override;
+    void UnbindLiveOwnership() noexcept override;
+    void ReleaseLiveOwnership() noexcept override;
 
 private:
+    std::uint32_t ownership_buffer_ = 0;
+    std::int32_t saved_ssbo_ = 0, saved_indexed_ssbo_ = 0;
+    std::int64_t saved_ssbo_start_ = 0, saved_ssbo_size_ = 0;
+    bool ownership_bound_ = false, saved_clip_enabled_ = false;
     GLFWwindow* const context_;
     const std::thread::id owner_;
 };

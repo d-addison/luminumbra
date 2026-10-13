@@ -161,6 +161,11 @@ nlohmann::json RenderPipeline::terrain_coverage_diagnostics(bool include_live_ch
     } else {
         out["far"] = nullptr;
     }
+    const auto& ownership = m_far_world->LiveOwnership();
+    out["live_ownership"] = {{"frame", ownership.frame()},
+                             {"complete", ownership.complete()},
+                             {"cells", ownership.cells().size()},
+                             {"limit", kFarWorldLiveCellLimit}};
     if (!include_live_chunks || !m_frame_prepared.valid)
         return out;
     // Bound output and sort independently of unordered-map/culler iteration.
@@ -175,17 +180,31 @@ nlohmann::json RenderPipeline::terrain_coverage_diagnostics(bool include_live_ch
         if (rows.size() == limit)
             break;
         const auto found = m_chunk_render_data.find(chunk.id);
-        const bool uploaded = found != m_chunk_render_data.end() &&
-                              found->second.pool_handle != ChunkRenderData::kInvalidPoolHandle &&
-                              found->second.element_count != 0;
+        const bool allocated =
+            found != m_chunk_render_data.end() &&
+            found->second.pool_handle != ChunkRenderData::kInvalidPoolHandle &&
+            m_chunk_geometry_pool.allocation(found->second.pool_handle).live &&
+            m_chunk_geometry_pool.allocation(found->second.pool_handle).index_count ==
+                found->second.element_count;
+        const FarWorldLiveUpload upload{
+            {chunk.coords.x, chunk.coords.y, chunk.coords.z, 0},
+            chunk.mesh_version,
+            found != m_chunk_render_data.end() ? found->second.mesh_version : 0,
+            found != m_chunk_render_data.end() ? found->second.element_count : 0,
+            allocated};
+        const bool uploaded = IsFarWorldLiveUploadCurrent(upload);
         const bool visible = m_terrain_coverage_visible.count(chunk.id) != 0;
         Json row = {{"id", chunk.id},
                     {"coords", {chunk.coords.x, chunk.coords.y, chunk.coords.z}},
                     {"snapshot_mesh_version", chunk.mesh_version},
                     {"snapshot_indices", chunk.terrain_index_count},
                     {"pool_resident", uploaded},
+                    {"pool_allocation_valid", allocated},
+                    {"current_uploaded_coverage", uploaded},
                     {"culler_visible", visible},
-                    {"submitted", m_terrain_coverage_live_submit_observed && visible && uploaded}};
+                    {"submitted",
+                     m_terrain_coverage_live_submit_observed && visible && allocated &&
+                         upload.uploaded_indices != 0}};
         if (chunk.source_chunk)
             row["source_lod_observed_at_capture"] = chunk.source_chunk->current_lod.load();
         if (found != m_chunk_render_data.end()) {

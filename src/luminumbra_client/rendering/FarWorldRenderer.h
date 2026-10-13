@@ -42,14 +42,17 @@ struct FarWorldExperimentalLimits {
 // Fixture: 8 MiB; build headroom: 64 MiB; span [-8192,8192], maximum growth hull
 // 2048 m; 512 history slots retained until rebinding, 512 wanted/scratch slots
 // and at most 16 extensions per frame. History exhaustion refuses activation.
+// Ownership: at most 8192 prepared candidates/3D live cells per publication,
+// fixed 128 KiB logical SSBO reservation charged
+// to V5 before allocation. CPU cells and metadata are included in owner storage.
 // Height/density and generation/mesh work bounds are named in the implementation.
 FarWorldExperimentalLimits FarWorldDevelopmentLimits() noexcept;
 
 // Owner-thread integration. Constructing this object does not touch GL. Install
 // a driver only AFTER loading GL with the exact client context current. Shutdown
 // while that context is current, before JobSystem/world/window destruction.
-// Fixture activation exercises unqualified transport. Live ownership, clip-aware
-// arrival and ray depth qualification are the subsequent renderer slices.
+// Fixture activation exercises unqualified transport. Live ownership and
+// clip-aware arrival are integrated; ray depth qualification is a later slice.
 class FarWorldRenderer {
 public:
     explicit FarWorldRenderer(FarWorldMode requested = FarWorldMode::Legacy);
@@ -82,6 +85,23 @@ public:
                                const FarWorldPrepareDraw& prepare);
     void PrepareWorldSwap();
     void Shutdown();
+    // Publication is independent of the culler. The pipeline feeds every prepared
+    // snapshot after live GPU management; only complete masks permit submission.
+    void BeginLiveOwnership(std::uint64_t frame, std::size_t limit = kFarWorldLiveCellLimit) {
+        CheckOwner();
+        ownership_.Begin(frame, limit);
+    }
+    bool AddLiveUpload(const FarWorldLiveUpload& upload) {
+        CheckOwner();
+        return ownership_.Add(upload);
+    }
+    bool FinishLiveOwnership() {
+        CheckOwner();
+        return ownership_.Finish();
+    }
+    const FarWorldOwnership& LiveOwnership() const noexcept {
+        return ownership_;
+    }
     const FarVolumeFrameResult& LastFrame() const noexcept {
         return last_frame_;
     }
@@ -124,6 +144,8 @@ private:
     std::unique_ptr<FarVolumeGpuDriver> driver_;
     std::unique_ptr<World::FarVolumeTierMemory> memory_;
     std::optional<World::FarVolumeMemoryLease> integration_charge_;
+    std::optional<World::FarVolumeGpuLease> ownership_gpu_charge_;
+    FarWorldOwnership ownership_;
     std::shared_ptr<const FarWorldPristineFixture> fixture_;
     std::unique_ptr<FarVolumeResidency> residency_;
     // Fixed history and its transactional copy are included in sizeof(*this)'s

@@ -386,6 +386,8 @@ TEST(FarWorldRenderer, UploadedDrawMetadataAndSynchronousBorrowing) {
     Owner owner;
     const auto request = Request();
     ASSERT_TRUE(owner.WaitSettled(request));
+    owner.renderer.BeginLiveOwnership(owner.frame);
+    ASSERT_TRUE(owner.renderer.FinishLiveOwnership());
     const auto stats = owner.renderer.Submit({.5, -128.25, -.25}, [&](const auto& command) {
         EXPECT_FLOAT_EQ(command.relative_origin[0], -.5f);
         EXPECT_FLOAT_EQ(command.relative_origin[1], -127.75f);
@@ -435,7 +437,16 @@ TEST(FarWorldRenderer, FailedRebuildRetainsOldAllocationAndLogicalChargeButDoesN
     EXPECT_EQ(observed->gpu_bytes, bytes);
     EXPECT_FALSE(IsFarTileCovering(observed->coverage));
     EXPECT_EQ(owner.state.live, live);
-    EXPECT_EQ(owner.renderer.Submit({0, 0, 0}, [](const auto&) { return true; }).draws, 0u);
+    owner.renderer.BeginLiveOwnership(owner.frame);
+    ASSERT_TRUE(owner.renderer.FinishLiveOwnership());
+    std::size_t prepares = 0;
+    const auto submission = owner.renderer.Submit({0, 0, 0}, [&](const auto&) {
+        ++prepares;
+        return true;
+    });
+    EXPECT_EQ(submission.draws, 0u);
+    EXPECT_EQ(submission.refused, 0u); // complete mask; stale residency itself excludes the draw
+    EXPECT_EQ(prepares, 0u);
     const auto attempts = owner.renderer.LastFrame().upload_attempts;
     EXPECT_EQ(attempts, 1u);
     EXPECT_GT(owner.renderer.LastFrame().upload_bytes, 0u);
@@ -807,4 +818,59 @@ TEST(FarWorldRenderer, DrawOriginSubtractsBeforeNarrowingAndIncludesSpanMinimum)
         record, {std::numeric_limits<double>::quiet_NaN(), 0, 0}, 3, command));
     record.origin_meters.y = 0;
     EXPECT_FALSE(MakeFarWorldDrawCommand(record, {0, 0, 0}, 3, command));
+}
+
+TEST(FarWorldRenderer, DrawOwnershipKeyAndArrivalSpansNeverDependOnCamera) {
+    struct Allocation final : FarVolumeGpuAllocation {
+        std::uint64_t bytes() const noexcept override {
+            return 96;
+        }
+    } allocation;
+    for (const std::int64_t translation : {0, 4194304, -4194304}) {
+        FarVolumeDrawRecord record;
+        record.identity.key.tier = 2;
+        record.request.span = {translation - 256, translation + 256};
+        record.origin_meters = {translation - 1024, translation - 256, translation - 1024};
+        record.resource = &allocation;
+        record.arrival.eligible = true;
+        record.arrival.children.fill({translation, translation + 256});
+        const auto shift = static_cast<std::int32_t>(translation / 16);
+        for (const float camera_y : {83.32f, -67.13f}) {
+            FarWorldDrawCommand command;
+            ASSERT_TRUE(MakeFarWorldDrawCommand(record,
+                                                {static_cast<double>(translation) + 37.1f,
+                                                 static_cast<double>(translation) + camera_y,
+                                                 static_cast<double>(translation) + 219.77f},
+                                                3,
+                                                command));
+            EXPECT_EQ(command.origin_chunk,
+                      (std::array<std::int32_t, 3>{shift - 64, shift - 16, shift - 64}));
+            EXPECT_EQ(command.origin_remainder, (std::array<float, 3>{0, 0, 0}));
+            for (const auto& span : command.child_local_y_spans)
+                EXPECT_EQ(span, (std::array<float, 2>{256, 512}));
+        }
+    }
+}
+
+TEST(FarWorldRenderer, IncompleteAndWrongFrameOwnershipRefuseFarSubmission) {
+    Owner owner;
+    ASSERT_TRUE(owner.WaitSettled(Request()));
+    owner.renderer.BeginLiveOwnership(owner.frame, 1);
+    ASSERT_TRUE(owner.renderer.AddLiveUpload({{0, 0, 0, 0}, 1, 1, 3, true}));
+    EXPECT_FALSE(owner.renderer.AddLiveUpload({{1, 0, 0, 0}, 1, 1, 3, true}));
+    EXPECT_FALSE(owner.renderer.FinishLiveOwnership());
+    std::size_t prepares = 0;
+    const auto prepare = [&](const auto&) {
+        ++prepares;
+        return true;
+    };
+    EXPECT_EQ(owner.renderer.Submit({0, 0, 0}, prepare).refused, 1u);
+    owner.renderer.BeginLiveOwnership(owner.frame - 1);
+    ASSERT_TRUE(owner.renderer.FinishLiveOwnership());
+    EXPECT_EQ(owner.renderer.Submit({0, 0, 0}, prepare).refused, 1u);
+    EXPECT_EQ(prepares, 0u);
+    EXPECT_EQ(owner.state.draws, 0u);
+    owner.renderer.BeginLiveOwnership(owner.frame);
+    ASSERT_TRUE(owner.renderer.FinishLiveOwnership());
+    EXPECT_EQ(owner.renderer.Submit({0, 0, 0}, prepare).draws, 1u);
 }
