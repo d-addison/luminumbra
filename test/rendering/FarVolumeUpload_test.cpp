@@ -82,6 +82,8 @@ TEST(FarVolumeUpload, CurrencyByteAndSharedPoolRefusalsPrecedeBackend) {
     const auto request = UploadRequest();
     auto completion = Build(queue, request);
     ASSERT_TRUE(completion);
+    if (!completion)
+        return;
     ASSERT_EQ(completion->status(), FarVolumeBuildStatus::Ready);
     std::size_t calls = 0;
     FarVolumeUploadBackend backend = [&calls](const FarVolumeRenderMesh& mesh) {
@@ -151,6 +153,8 @@ TEST(FarVolumeUpload, ReplacementAndBackendFailureKeepOldChargeUntilGpuDeletion)
     const auto request = UploadRequest();
     auto completion = Build(queue, request);
     ASSERT_TRUE(completion);
+    if (!completion)
+        return;
     ASSERT_EQ(completion->status(), FarVolumeBuildStatus::Ready);
     const auto bytes = Bytes(completion->mesh());
     const auto cpu = Observe(memory, 1).bytes_cpu;
@@ -238,8 +242,9 @@ TEST(FarVolumeUpload, ReplacementAndBackendFailureKeepOldChargeUntilGpuDeletion)
         *completion, request.identity, request.intent, memory, bytes, backend, output));
     EXPECT_EQ(deletions, 1u);
     EXPECT_GE(Observe(memory, 1).peak_total, cpu + bytes * 2);
+    const FarVolumeUploadedTile& moved_from_output = output;
     FarVolumeUploadedTile moved(std::move(output));
-    EXPECT_FALSE(IsFarTileCovering(output.Status(request.identity, request.intent)));
+    EXPECT_FALSE(IsFarTileCovering(moved_from_output.Status(request.identity, request.intent)));
     EXPECT_TRUE(IsFarTileCovering(moved.Status(request.identity, request.intent)));
     moved = FarVolumeUploadedTile();
     EXPECT_EQ(deletions, 2u);
@@ -257,6 +262,8 @@ TEST(FarVolumeUpload, CurrentEmptyCoversWithoutGpuAndSpanGrowthMakesItIneligible
     const auto request = UploadRequest(false);
     auto completion = Build(queue, request);
     ASSERT_TRUE(completion);
+    if (!completion)
+        return;
     ASSERT_EQ(completion->status(), FarVolumeBuildStatus::ReadyEmpty);
     FarVolumeUploadedTile output;
     ASSERT_TRUE(
