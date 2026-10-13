@@ -117,6 +117,13 @@ std::uint64_t SimParticipantCount(const entt::registry& registry) {
     return static_cast<std::uint64_t>(std::distance(view.begin(), view.end()));
 }
 
+template<typename... Components>
+std::uint64_t RegionalParticipantCount(const entt::registry& registry,
+                                        const Luminumbra::world::RegionEntityGate& gate) {
+    const auto view = registry.view<const Components...>();
+    return static_cast<std::uint64_t>(std::count_if(view.begin(), view.end(), gate));
+}
+
 void AddValidationError(Luminumbra::world::WorldConfigValidationResult& result, std::string error) {
     result.errors.push_back(std::move(error));
     result.ok = false;
@@ -911,9 +918,8 @@ void GameSession::RunFoliageTick(luminumbra::simulation::SimBudgetTelemetry::Tic
     using Stage = luminumbra::simulation::SimBudgetStage;
     namespace TelemetryComp = Components;
     if (m_activeRegionsEnabled) {
-        budget.Next(Stage::Plants,
-                    [&] { return m_registry.view<TelemetryComp::PlantTag>().size(); });
-        RunRegionalFoliageTick(current_tick);
+        budget.Next(Stage::Plants, [] { return 0u; });
+        RunRegionalFoliageTick(budget, current_tick);
         return;
     }
     const RegionEntityGate foliage_gate;
@@ -1624,7 +1630,8 @@ std::string GameSession::PlantRegionProjection(RegionKey key) const {
     return snap.entities.empty() ? std::string{}
                                  : "|plants:" + Ecs::SerializeEntityRegistrySnapshotJson(snap);
 }
-void GameSession::RunRegionalFoliageTick(std::uint64_t tick) {
+void GameSession::RunRegionalFoliageTick(
+    luminumbra::simulation::SimBudgetTelemetry::TickScope& budget, std::uint64_t tick) {
     auto ledger = m_activeRegionLedger;
     auto pages = m_fieldPages;
     auto work = m_regionCompletedWork;
@@ -1633,7 +1640,7 @@ void GameSession::RunRegionalFoliageTick(std::uint64_t tick) {
     auto original = std::move(m_registry);
     m_registry = std::move(staged);
     try {
-        RunRegionalFoliageTickImpl(tick);
+        RunRegionalFoliageTickImpl(budget, tick);
         luminumbra::foliage::CommitFoliageRegistry(original, m_registry, retained);
         m_registry = std::move(original);
     } catch (...) {
@@ -1657,9 +1664,18 @@ void GameSession::RunRegionalFoliageTick(std::uint64_t tick) {
         throw;
     }
 }
-void GameSession::RunRegionalFoliageTickImpl(std::uint64_t tick) {
+void GameSession::RunRegionalFoliageTickImpl(
+    luminumbra::simulation::SimBudgetTelemetry::TickScope& budget, std::uint64_t tick) {
     namespace fol = luminumbra::foliage;
     namespace C = Components;
+    using Stage = luminumbra::simulation::SimBudgetStage;
+    // Every foliage stage has a sample even on an off-due or empty-window tick.
+    // Record coalesces the measured substeps back into these host-tick samples.
+    for (const auto stage : {Stage::Irrigation, Stage::Soil, Stage::Plants, Stage::Pollination,
+                             Stage::Disease, Stage::Crops, Stage::Fire, Stage::Grazing,
+                             Stage::Lifespan})
+        budget.Next(stage, [] { return 0u; });
+    budget.Next(Stage::Plants, [] { return 0u; });
     const auto due = SortedDueRegions();
     std::map<RegionKey, std::uint32_t> windows;
     std::map<RegionKey, std::uint64_t> resumes;
@@ -1706,7 +1722,7 @@ void GameSession::RunRegionalFoliageTickImpl(std::uint64_t tick) {
             if (max_window - step <= k)
                 one_tick[key] = 1;
         for (const auto& [key, updates] :
-             fol::AdvanceFoliageInteriors(m_registry, m_fieldPages, one_tick, subtick))
+             fol::AdvanceFoliageInteriors(m_registry, m_fieldPages, one_tick, subtick, &budget))
             page_work[key] += updates;
         // Cache the current environment/infection once for this bounded window.
         // Interleave exact PlantCoarse single steps with the integer soil and
@@ -1717,6 +1733,15 @@ void GameSession::RunRegionalFoliageTickImpl(std::uint64_t tick) {
         std::sort(plants.begin(), plants.end(), [this](auto a, auto b) {
             return m_registry.get<C::PlantRegionComponent>(a).persistent_id <
                    m_registry.get<C::PlantRegionComponent>(b).persistent_id;
+        });
+        budget.Next(Stage::Plants, [this, &plants, &one_tick, subtick] {
+            return static_cast<std::uint64_t>(std::count_if(
+                plants.begin(), plants.end(), [this, &one_tick, subtick](entt::entity e) {
+                    const auto& owner = m_registry.get<C::PlantRegionComponent>(e);
+                    const auto& growth = m_registry.get<C::PlantGrowthComponent>(e);
+                    return one_tick.contains({owner.owner_x, owner.owner_z}) &&
+                           owner.region_stamp < subtick && growth.planted_tick < subtick;
+                }));
         });
         for (auto e : plants) {
             auto& owner = m_registry.get<C::PlantRegionComponent>(e);
@@ -1733,10 +1758,11 @@ void GameSession::RunRegionalFoliageTickImpl(std::uint64_t tick) {
                 it = growth_windows
                          .emplace(owner.persistent_id,
                                   GrowthWindow{
-                                      SamplePlantEnvironment(
+                                      .environment = SamplePlantEnvironment(
                                           m_registry.get<C::TransformComponent>(e), tick),
-                                      static_cast<std::uint16_t>(health ? health->infection : 0),
-                                      elapsed})
+                                      .infection =
+                                          static_cast<std::uint16_t>(health ? health->infection : 0),
+                                      .elapsed = elapsed})
                          .first;
             }
             if (max_window - step > it->second.elapsed || g.planted_tick >= subtick)
@@ -1768,9 +1794,27 @@ void GameSession::RunRegionalFoliageTickImpl(std::uint64_t tick) {
             RecordActiveRegionWork({key, 0, 1, 0, 0});
             completed_regions.insert(key);
         };
+        budget.Next(Stage::Pollination, [this, &gate] {
+            return RegionalParticipantCount<C::PollinationTag,
+                                              C::PlantGenomeComponent,
+                                              C::PlantGrowthComponent,
+                                              C::TransformComponent,
+                                              C::PollinationComponent>(m_registry, gate);
+        });
         fol::RunPollinationOnTick(
             m_registry, subtick, wind, 0, m_plantMutationRate, gate, completed);
+        budget.Next(Stage::Disease, [this, &gate] {
+            return RegionalParticipantCount<C::PlantTag,
+                                              C::PlantHealthComponent,
+                                              C::TransformComponent>(m_registry, gate);
+        });
         fol::RunPlantDiseaseOnTick(m_registry, subtick, 0, gate, completed);
+        budget.Next(Stage::Crops, [this, &gate] {
+            return RegionalParticipantCount<C::CropLifecycleComponent,
+                                              C::PlantGrowthComponent,
+                                              C::PlantGenomeComponent,
+                                              C::TransformComponent>(m_registry, gate);
+        });
         fol::RunCropLifecycleOnTick(
             m_registry,
             subtick,
@@ -1796,6 +1840,10 @@ void GameSession::RunRegionalFoliageTickImpl(std::uint64_t tick) {
                 RecordActiveRegionWork({key, 0, 1, 0, 0});
                 completed_regions.insert(key);
             });
+        budget.Next(Stage::Fire, [this, &gate] {
+            return RegionalParticipantCount<C::CombustibleComponent, C::TransformComponent>(
+                m_registry, gate);
+        });
         std::vector<luminumbra::sim::FireIgnitionSource> ignitions;
         if (step + 1 == max_window && m_weatherSystem)
             for (const auto& strike : m_weatherSystem->StrikesThisTick()) {
@@ -1809,15 +1857,25 @@ void GameSession::RunRegionalFoliageTickImpl(std::uint64_t tick) {
                                          std::max(0.25f, strike.magnitude)});
             }
         luminumbra::sim::RunFireSpreadOnTick(m_registry, subtick, wind, ignitions, gate, completed);
+        budget.Next(Stage::Grazing, [this, &gate] {
+            return RegionalParticipantCount<C::GrazeableComponent, C::TransformComponent>(
+                m_registry, gate);
+        });
         luminumbra::ai::RunWildlifeFoliageOnTick(
             m_registry, subtick, m_wildlifeFoliageTuning, gate, completed);
+        budget.Next(Stage::Lifespan, [this, &gate] {
+            return RegionalParticipantCount<C::MortalComponent>(m_registry, gate);
+        });
         luminumbra::ai::RunLifespanOnTick(m_registry, subtick, gate, completed);
     }
+    budget.Next(Stage::Plants, [] { return 0u; });
     for (const auto& [key, updates] : page_work)
         RecordActiveRegionWork({key, 0, 0, 0, updates});
+    budget.Next(Stage::Irrigation, [] { return 0u; });
     for (const auto& [key, updates] :
          fol::ExchangeFoliageBorders(m_fieldPages, previous, m_activeRegionLedger.records(), tick))
         RecordActiveRegionWork({key, 0, 0, 0, updates});
+    budget.Next(Stage::Plants, [] { return 0u; });
     for (auto e :
          m_registry.view<C::PlantTag, C::PlantRegionComponent, C::PlantGrowthComponent>()) {
         auto& owner = m_registry.get<C::PlantRegionComponent>(e);
@@ -1863,12 +1921,13 @@ void GameSession::RunRegionScheduler(std::uint64_t current_tick) {
                     return Persistence::WorldSaveService::region_simulation_digest(
                         directory,
                         key,
-                        Persistence::RegionDigestInputs{m_worldSystem->snapshot_streamed_chunks(),
-                                                        m_worldSystem->snapshot_parked_chunks(),
-                                                        m_worldSystem->durable_chunk_inventory(),
-                                                        m_groundObjects.region_bytes(key) +
-                                                            PlantRegionProjection(key),
-                                                        RegionalFieldProjection(key)});
+                        Persistence::RegionDigestInputs{
+                            .live = m_worldSystem->snapshot_streamed_chunks(),
+                            .parked = m_worldSystem->snapshot_parked_chunks(),
+                            .durable = m_worldSystem->durable_chunk_inventory(),
+                            .ground_object_bytes = m_groundObjects.region_bytes(key) +
+                                                   PlantRegionProjection(key),
+                            .field_page_bytes = RegionalFieldProjection(key)});
                 },
                 // Plants, foliage pages and water debt retain their owners alongside fields,
                 // ground objects, pending work and authoritative chunks.
@@ -1897,8 +1956,7 @@ void GameSession::RunRegionScheduler(std::uint64_t current_tick) {
                             owned_regions.value().insert(RegionKey{rx, rz});
                         }
                         for (const auto& chunk : m_worldSystem->snapshot_authoritative_chunks()) {
-                            if (!chunk ||
-                                chunk->sdf_provenance() != ChunkSdfProvenance::LoadedOrEdited)
+                            if (!chunk)
                                 continue;
                             int rx = 0, rz = 0;
                             Persistence::WorldSaveService::region_coords_for_chunk(
@@ -2582,7 +2640,13 @@ std::string GameSession::ComputeChunkStateHash() {
                                         record->second.state == RegionState::Frozen
                                     ? record->second.frozen_digest
                                     : Persistence::WorldSaveService::region_simulation_digest(
-                                          directory, key, {live, parked, durable, {}, {}});
+                                          directory,
+                                          key,
+                                          Persistence::RegionDigestInputs{.live = live,
+                                                                          .parked = parked,
+                                                                          .durable = durable,
+                                                                          .ground_object_bytes = {},
+                                                                          .field_page_bytes = {}});
             projection += std::to_string(key.x) + "," + std::to_string(key.z) + ":" +
                           std::to_string(digest) + ";";
         }

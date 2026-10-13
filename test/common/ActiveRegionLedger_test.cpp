@@ -638,18 +638,109 @@ TEST(ActiveRegionLedgerTest, V2RefusalMatrix) {
     }
 }
 
-TEST(ActiveRegionLedgerTest, V1FileWithFrozenHistoryIsRefused) {
-    const auto good = FrozenLedger().encode();
-    const std::size_t ext = good.size() - 8 - 11;
-    auto bytes = good.substr(0, ext) + std::string(8, '\0');
+TEST(ActiveRegionLedgerTest, V1FrozenHistoryLoadsAndRoundTripsVerbatimIncludingAfterWake) {
+    for (const bool wake : {false, true}) {
+        auto original = FrozenLedger();
+        if (wake) {
+            original.pin(kFar, true, WorldClock(4));
+            original.schedule(WorldClock(5));
+            ASSERT_EQ(original.records().at(kFar).state, RegionState::Active);
+        }
+        const auto good = original.encode();
+        const std::size_t ext = good.size() - 8 - 11;
+        auto bytes = good.substr(0, ext) + std::string(8, '\0');
+        bytes[4] = 1;
+        Seal(bytes);
+        ActiveRegionLedger destination = Distant();
+        std::string error;
+        ASSERT_TRUE(ActiveRegionLedger::decode(bytes, destination, error)) << error;
+        EXPECT_TRUE(error.empty());
+        EXPECT_EQ(destination.records(), original.records());
+        EXPECT_EQ(destination.canonical_bytes(), original.canonical_bytes());
+        EXPECT_EQ(destination.encode(), bytes);
+        EXPECT_EQ(Reload(destination).encode(), bytes);
+    }
+}
+
+TEST(ActiveRegionLedgerTest, LegacyFrozenHistoryRoundTripsWithGroundExtensionsUntilRefreeze) {
+    const auto original = FrozenLedger();
+    const auto projected = original.encode();
+    auto legacy = projected.substr(0, projected.size() - 8 - 11) + std::string(8, '\0');
+    legacy[4] = 1;
+    Seal(legacy);
+    // Allocator only, completed work only, and both extensions must preserve legacy history.
+    for (const unsigned extensions : {1u, 2u, 3u}) {
+        SCOPED_TRACE(extensions);
+        ActiveRegionLedger restored;
+        std::string error;
+        ASSERT_TRUE(ActiveRegionLedger::decode(legacy, restored, error)) << error;
+        std::size_t extension_bytes = 0;
+        if (extensions & 1u) {
+            std::uint64_t id = 0;
+            ASSERT_TRUE(restored.allocate_persistent_id(id));
+            EXPECT_EQ(id, 1u);
+            extension_bytes += 14;
+        }
+        if (extensions & 2u) {
+            const std::array completed{RegionWork{.key = kFar,
+                                                  .region_ticks = 1,
+                                                  .entity_updates = 0,
+                                                  .water_cells = 0,
+                                                  .page_updates = 0}};
+            restored.publish_completed_work(completed);
+            extension_bytes += 26;
+        }
+        const auto bytes = restored.encode();
+        EXPECT_EQ(Version(bytes), 2u);
+        // The extension contains only ground TLVs, without declaring projection 2.
+        EXPECT_EQ(bytes.size(), legacy.size() + 4 + extension_bytes);
+        auto reopened = Reload(restored);
+        EXPECT_EQ(reopened.encode(), bytes);
+        EXPECT_EQ(reopened.records(), original.records());
+        EXPECT_EQ(reopened.next_persistent_id(), restored.next_persistent_id());
+        EXPECT_EQ(reopened.completed_work(), restored.completed_work());
+        EXPECT_EQ(reopened.canonical_bytes(), restored.canonical_bytes());
+
+        reopened.mark_edited(kFar, WorldClock(3));
+        for (std::uint64_t tick = 4; tick <= 6; ++tick)
+            Step(reopened, tick, 1);
+        ASSERT_EQ(reopened.records().at(kFar).frozen_at, 6u);
+        EXPECT_TRUE(reopened.completed_work().empty());
+        // Refreezing replaces the last historical digest and now declares projection 2.
+        const std::size_t allocator_bytes = (extensions & 1u) ? 14 : 0;
+        EXPECT_EQ(reopened.encode().size(), legacy.size() + 4 + allocator_bytes + 7);
+        EXPECT_EQ(Reload(reopened).encode(), reopened.encode());
+    }
+}
+
+TEST(ActiveRegionLedgerTest, LegacyEnvelopeUpgradesOnlyAfterEveryHistoricalDigestIsRefreshed) {
+    const RegionKey second{11, -3};
+    auto original = FrozenLedger();
+    original.mark_edited(second, WorldClock(3));
+    for (std::uint64_t tick = 4; tick <= 6; ++tick)
+        Step(original, tick, 1);
+    ASSERT_EQ(original.records().at(second).state, RegionState::Frozen);
+    const auto good = original.encode();
+    auto bytes = good.substr(0, good.size() - 8 - 11) + std::string(8, '\0');
     bytes[4] = 1;
     Seal(bytes);
-    ActiveRegionLedger destination = Distant();
-    const auto before = destination.encode();
+    ActiveRegionLedger restored;
     std::string error;
-    EXPECT_FALSE(ActiveRegionLedger::decode(bytes, destination, error));
-    EXPECT_EQ(error, "Unsupported frozen digest projection.");
-    EXPECT_EQ(destination.encode(), before);
+    ASSERT_TRUE(ActiveRegionLedger::decode(bytes, restored, error)) << error;
+
+    restored.mark_edited(kFar, WorldClock(6));
+    for (std::uint64_t tick = 7; tick <= 9; ++tick)
+        Step(restored, tick, 1);
+    ASSERT_EQ(restored.records().at(kFar).frozen_at, 9u);
+    EXPECT_EQ(Version(restored.encode()), 1u);
+    EXPECT_EQ(Reload(restored).canonical_bytes(), restored.canonical_bytes());
+
+    restored.mark_edited(second, WorldClock(9));
+    for (std::uint64_t tick = 10; tick <= 12; ++tick)
+        Step(restored, tick, 1);
+    ASSERT_EQ(restored.records().at(second).frozen_at, 12u);
+    EXPECT_EQ(Version(restored.encode()), 2u);
+    EXPECT_EQ(Reload(restored).encode(), restored.encode());
 }
 
 const std::uint64_t kIdle = ActiveRegionLedger::kIdleEvictionTicks;
@@ -1258,7 +1349,8 @@ TEST(ActiveRegionLedgerTest, ResumeAcknowledgementClearsOnlyMatchingThawedStampO
     const auto frozen = ledger.records().at(kFar).frozen_at;
     ASSERT_GT(frozen, 0u);
     EXPECT_FALSE(ledger.acknowledge_resume(kFar, frozen));
-    ledger.pin(kFar, true, WorldClock(4));
+    // pin advances the header ceiling; scheduling needs the next absolute tick.
+    ledger.pin(kFar, true, WorldClock(ledger.tick()));
     Step(ledger, 4, 0);
     ASSERT_EQ(ledger.records().at(kFar).state, RegionState::Active);
     EXPECT_FALSE(ledger.acknowledge_resume(kFar, frozen + 1));

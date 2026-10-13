@@ -404,6 +404,11 @@ TEST_F(RegionalWaterFixture,
     loading->set_state(ChunkState::Loading);
     chunks = {target, loading};
     const auto untouched = CaptureWater(*loading);
+    // Keep the injected eight millimetres in a basin so this mapping assertion
+    // remains independent of the interior flux step that follows source injection.
+    target->water_bed_mm[63] = 900;
+    target->water_level_data[63] = 0.9f;
+    target->water_sim_terrain_height[63] = 0.9f;
     Source({-.25f, -.25f, -.25f}); // direct y=-1 missing; resident y=0, floor cell (7,7)
     Step(1, {{-1, -1}});
     EXPECT_EQ(target->water_depth_mm[63], 8);

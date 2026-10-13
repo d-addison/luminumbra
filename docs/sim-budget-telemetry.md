@@ -87,6 +87,14 @@ and `wind_weather` has no samples. No work or time is duplicated or estimated
 by splitting the combined call. The artifact's distinct stage and trace coverage
 make this choice visible. Telemetry never controls this branch.
 
+Regional foliage retains separate soil, irrigation, growth and living-world stage
+measurements. Only admitted due participants and owned field cells contribute
+work. A bounded resume can revisit a stage several times within one host tick;
+those visits sum their work and measured intervals into one stage/tick sample.
+Off-due and empty-window stages retain a zero-work sample. Telemetry counters
+are evaluated only with collection enabled and never affect regional admission
+or simulation state.
+
 The first and last two rows are server supplements. Physics precedes the
 session tick. Streaming and water still run **outside** `TickSimulation`, in
 the existing server update. When collection is enabled, streaming duration

@@ -804,7 +804,8 @@ std::optional<DWORD> WindowsTxnChild(const fs::path& dir, int cut, bool recovery
         ::SetEnvironmentVariableW(L"LUM_TXN_TEST_CHILD_RECOVER", recovery ? L"1" : L"0");
     std::wstring command =
         L"\"" + executable +
-        L"\" --gtest_filter=SaveTransaction.WindowsInterruptionChild --gtest_color=no";
+        L"\" --gtest_filter=SaveTransaction.DISABLED_WindowsInterruptionChild "
+        L"--gtest_also_run_disabled_tests --gtest_color=no";
     STARTUPINFOW startup{};
     startup.cb = sizeof(startup);
     PROCESS_INFORMATION process{};
@@ -839,7 +840,9 @@ std::optional<DWORD> WindowsTxnChild(const fs::path& dir, int cut, bool recovery
 }
 } // namespace
 
-TEST(SaveTransaction, WindowsInterruptionChild) {
+// Direct GoogleTest runs must leave this child to the interruption matrix below.
+// CTest also labels it manual via SaveTransactionCTest.cmake after discovery.
+TEST(SaveTransaction, DISABLED_WindowsInterruptionChild) {
     const auto dir = WindowsTestEnv(L"LUM_TXN_TEST_CHILD_DIR");
     if (dir.empty())
         GTEST_SKIP() << "invoked only by the Windows interruption matrix";

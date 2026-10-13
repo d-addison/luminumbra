@@ -57,6 +57,12 @@ due, frozen never is. All stamps use WorldClock, with no load-time restart.
 Repeated/backward scheduler ticks refuse. Frozen scheduling metadata can change;
 its simulation cursor, last-ticked stamp and frozen content digest do not advance.
 
+Idle retention probes ownership only for otherwise evictable records. The host
+builds one set of pending work keys and all resident chunk region keys per tick,
+including pristine and `Loading` chunks. These residents protect scheduling
+history even when they contribute no frozen content. Consumed work stops owning
+records on the next tick.
+
 Invalid host input never throws out of the session. Non-finite or out-of-range
 (|x|,|z| >= 2^24) walking anchors, ground-object edit positions and region pins are
 ignored and counted (observational, never hashed or saved). Invalid replicated anchors, work for
@@ -150,10 +156,11 @@ A save containing the ledger requires `sim.active_regions`; opening or writing
 with it off refuses as incompatible configuration. Older engine builds refuse
 this file as an unknown region file. Decode failure never changes the destination
 ledger. Unknown extension types cannot be skipped and are corrupt.
-Version 1 ledgers without frozen history still load. A ledger with frozen
-history but no `digest_projection=2` declaration refuses with
-`Unsupported frozen digest projection.` Pre-release saves made with active
-regions enabled and the older frozen projection are deliberately not migrated.
+Version 1 ledgers load with or without frozen history. Their historical digest
+values, freeze stamps and canonical bytes are preserved without recomputation.
+They retain the version 1 envelope until every legacy historical digest has
+been refreshed at a later freeze or its record evicted; waking alone does not
+refresh a digest. This avoids declaring legacy digests as projection 2.
 Flag-off legacy saves without a ledger retain their existing load, save and hash
 behaviour, with no new files, bytes or hash terms.
 
@@ -202,7 +209,9 @@ strictly ascending, with no duplicates; unknown types, truncated values and
 `digest_projection`, with a one-byte value of 2. A value greater than 2 refuses
 with `Unsupported frozen digest projection.`; a lower value is corrupt.
 The encoder emits version 2 with this declaration whenever a record is frozen
-or retains a nonzero freeze stamp or frozen digest, including after waking.
+or retains a nonzero freeze stamp or frozen digest, including after waking,
+provided no legacy historical digest remains. A version 1 reload conservatively
+treats all historical digests as legacy, including any refreshed before saving.
 Otherwise the extension set is empty and the encoder emits version 1.
 The declaration belongs only to the persistence envelope and adds no canonical
 hash term.
@@ -223,8 +232,10 @@ read from an unrecorded machine-local budget.
 Frozen content is supplied at the transition by merging authoritative lod-0
 chunks by id, with live chunks taking precedence over parked chunks, then durable
 region records carrying the sticky edited flag. Live and parked inputs must have
-`LoadedOrEdited` provenance; pristine generated chunks and chunks in `Loading`
-state are excluded before merging, so they cannot shadow authoritative content.
+`LoadedOrEdited` provenance and must not be in `Loading` state; exclusions apply
+before merging, so these inputs cannot shadow authoritative content. Durable
+edited records contribute in every serialized lifecycle state, including
+`Loading`. Durable pristine records are regenerable caches and never contribute.
 Residency and save history cannot change the result. The provider uses a dedicated
 `region_content_v2` projection in chunk-id order: identity,
 SDF, heightmap, materials, integer water depth/bed/flux, water initialization,

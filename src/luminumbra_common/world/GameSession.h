@@ -542,8 +542,10 @@ private:
     bool AdmitPlantAt(entt::entity entity, std::uint64_t fresh_stamp);
     void PrepareRegionalFoliage();
     void RunRegionalWaterTick();
-    void RunRegionalFoliageTick(std::uint64_t tick);
-    void RunRegionalFoliageTickImpl(std::uint64_t tick);
+    void RunRegionalFoliageTick(luminumbra::simulation::SimBudgetTelemetry::TickScope& budget,
+                                std::uint64_t tick);
+    void RunRegionalFoliageTickImpl(luminumbra::simulation::SimBudgetTelemetry::TickScope& budget,
+                                    std::uint64_t tick);
     void RunFoliageTick(luminumbra::simulation::SimBudgetTelemetry::TickScope& budget,
                         std::uint64_t tick);
     [[nodiscard]] luminumbra::foliage::PlantEnvSample

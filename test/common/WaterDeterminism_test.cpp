@@ -945,7 +945,10 @@ TEST(WaterDeterminism, HighResWaterMatchesMediumPhysicsPerSimPass) {
 
 TEST(WaterDeterminism, DurableReadErrorRefusesDirectWaterConsumers) {
     const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
     GameSession session;
+    session.SetJobSystem(&jobs);
     session.SetRootPath(root.root_string());
     ASSERT_TRUE(session.CreateWorld("WaterReadError", "777", "default"));
     auto* world = session.GetWorldSystem();

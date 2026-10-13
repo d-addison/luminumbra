@@ -13,12 +13,25 @@ python3 -B -m unittest discover -s test/viewport -v
 An integration caller creates a fresh private session directory and a 32-byte key,
 then supplies broker.py --config FILE. Trusted config has exact Broker constructor
 arguments: root, session, command (absolute executable plus argv),
-executable_sha256, project_root, optional deadline<=60. Supply the key hex only in
+executable_sha256, project_root, optional deadline<=60 and startup_deadline<=60.
+Supply the key hex only in
 LUMINUMBRA_VIEWPORT_KEY. The broker verifies the executable bytes and starts it
 with shell=False; its command arguments and project root are trusted startup
 configuration, not accepted from mailbox messages. Pin scripts/modules/resources
 in the external installation manifest before launch: an executable hash alone
 does not authenticate those dependencies.
+
+The broker supplies `LUMINUMBRA_VIEWPORT_SESSION` and an absolute
+`LUMINUMBRA_VIEWPORT_READY` path to its owned host. After clearing the inherited
+key and completing resource and renderer initialization, the host atomically
+publishes a bounded JSON marker with schema `luminumbra.viewport.ready.v1`,
+session and process PID. The broker accepts only the current session and its
+live child's PID, then atomically publishes `broker-ready.json` with its own
+PID added. Neither marker contains credentials or changes LVP1 wire records.
+Frame-slot existence is allocation, not readiness. Clients retain only their
+latest desired state during startup and begin frame timing after broker readiness;
+startup and frame deadlines never renew under desired-state floods. Direct
+host probes without the optional readiness environment retain their wire contract.
 
 Use protocol.encode + atomic_write to publish desired.bin and stop.bin. Use
 Slots.read(0/1) to copy authenticated completed frames under leases; choose the
@@ -40,6 +53,12 @@ Stop completes the active request, discards pending work, forwards authenticated
 shutdown, and waits at most five seconds (or the shorter configured deadline).
 It reaps uncooperative children and records failure. Production integration must
 pin the complete installed host before claiming qualification.
+
+When NumPy is installed, frame-plane checks use read-only array views and vector
+operations. The portable implementation remains available; parity tests cover
+nonfinite depth, range, coverage and alpha corruption. The broker receipt records
+which implementation ran. This optimization alone does not qualify presentation
+rate or end-to-end latency.
 
 Windows record readers share deletion and publishers use handle-based POSIX
 replacement (`FileRenameInfoEx`, replace-existing plus POSIX-semantics flags).

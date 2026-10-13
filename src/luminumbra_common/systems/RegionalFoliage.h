@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../fields/FieldPageState.h"
+#include "../simulation/SimBudgetTelemetry.h"
 #include "IrrigationSystem.h"
 #include "SoilNutrientSystem.h"
 #include <map>
@@ -61,7 +62,8 @@ inline std::map<RegionKey, std::uint64_t>
 AdvanceFoliageInteriors(entt::registry& reg,
                         FieldPageState& pages,
                         const std::map<RegionKey, std::uint32_t>& windows,
-                        std::optional<std::uint64_t> current_tick = {}) {
+                        std::optional<std::uint64_t> current_tick = {},
+                        simulation::SimBudgetTelemetry::TickScope* budget = nullptr) {
     auto soil = FoliageCells(pages.soil());
     auto moisture = FoliageCells(pages.irrigation());
     std::map<RegionKey, std::uint64_t> work;
@@ -95,6 +97,13 @@ AdvanceFoliageInteriors(entt::registry& reg,
                growth->planted_tick == *current_tick;
     };
     for (std::uint32_t step = 0; step < max_window; ++step) {
+        if (budget)
+            budget->Next(simulation::SimBudgetStage::Soil, [&soil, &due, step] {
+                return static_cast<std::uint64_t>(std::count_if(
+                    soil.begin(), soil.end(), [&due, step](const auto& cell) {
+                        return due(cell.first, step);
+                    }));
+            });
         for (auto e : feeders) {
             const auto c = FoliageCell(reg.get<Comp::TransformComponent>(e).position);
             if (!due(c, step) || !existed(e))
@@ -116,6 +125,13 @@ AdvanceFoliageInteriors(entt::registry& reg,
                 value = std::min(kSoilBaseline, value + kSoilRegenPerTick);
                 ++work[FieldPageState::region_of_scent_cell(c)];
             }
+        if (budget)
+            budget->Next(simulation::SimBudgetStage::Irrigation, [&moisture, &due, step] {
+                return static_cast<std::uint64_t>(std::count_if(
+                    moisture.begin(), moisture.end(), [&due, step](const auto& cell) {
+                        return due(cell.first, step);
+                    }));
+            });
         std::map<ScentCellKey, std::int64_t> deposits;
         for (auto e : sources) {
             const auto c = FoliageCell(reg.get<Comp::TransformComponent>(e).position);

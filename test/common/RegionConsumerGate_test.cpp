@@ -76,6 +76,8 @@ TEST(RegionConsumerGate, BlockedEntitiesCannotTransmitDiseaseOrPollenToDueOwner)
         registry.emplace<C::PollinationComponent>(entity);
         registry.emplace<C::PlantHealthComponent>(entity);
     }
+    // Disease skips coincident positions as self exposure; use a nearby distinct recipient.
+    registry.get<C::TransformComponent>(due).position.x = 1.0f;
     auto& sick = registry.get<C::PlantHealthComponent>(blocked);
     sick.state = static_cast<std::uint8_t>(C::PlantDiseaseState::Infected);
     sick.infection = 1000;

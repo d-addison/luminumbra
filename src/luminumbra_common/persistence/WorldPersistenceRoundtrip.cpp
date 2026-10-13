@@ -960,12 +960,10 @@ std::string ComputeRegionContentHash(const WorldStreamingState& state) {
     });
     nlohmann::json contents = nlohmann::json::array();
     for (const auto& chunk : chunks) {
-        // Pristine (generated) and Loading chunks are absent by construction, so
-        // residency and save history cannot change the result. Only edited SDF
-        // content is projected, independent of the legacy residency classification
-        // (which includes state/state_value/has_collision).
-        if (chunk->sdf_provenance() != ChunkSdfProvenance::LoadedOrEdited ||
-            chunk->get_state() == ChunkState::Loading)
+        // The provider filters incomplete live/parked inputs before merging. Durable
+        // edited records may retain any lifecycle state, including Loading; this
+        // content projection must not filter them again by residency bookkeeping.
+        if (chunk->sdf_provenance() != ChunkSdfProvenance::LoadedOrEdited)
             continue;
         contents.push_back(
             {{"chunk_id", chunk->get_id()},

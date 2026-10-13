@@ -1,6 +1,7 @@
 #include "SaveTransaction.h"
 
 #include "WorldSaveService.h"
+#include "../world/ActiveRegionLedger.h"
 
 #include "nlohmann/json.hpp"
 
@@ -990,6 +991,32 @@ bool SaveTransaction::commit(std::vector<std::string>* errors) {
                 member.fnv64 = digest.fnv64;
                 member.generation = m_new_generation;
                 members[rel] = std::move(member);
+            }
+        }
+
+        // C4 keeps all-zero energy cadence in the ledger. Its omitted EFS payload is
+        // an intentional absence, including the first indexed save (distant-world.md).
+        // Generic transactions with a caller-supplied digest do not interpret world records.
+        if (m_digest_fn == &WorldSaveService::member_digest &&
+            !members.contains("aether_state.efs")) {
+            world::ActiveRegionLedger ledger;
+            if (!WorldSaveService::load_active_regions(ledger, m_save_dir, errors)) {
+                abort(errors);
+                return false;
+            }
+            if (!ledger.energy_ages().empty()) {
+                MemberDigest energy;
+                if (!digest_member("aether_state.efs", energy)) {
+                    abort(errors);
+                    return false;
+                }
+                members.emplace("aether_state.efs",
+                                SnapshotMember{.path = "aether_state.efs",
+                                               .cls = MemberClass::Authoritative,
+                                               .present = energy.present,
+                                               .bytes = energy.bytes,
+                                               .fnv64 = energy.fnv64,
+                                               .generation = m_new_generation});
             }
         }
 

@@ -9,6 +9,7 @@
 #include <limits>
 #include <map>
 #include <optional>
+#include <set>
 #include <span>
 #include <string>
 #include <string_view>
@@ -224,13 +225,16 @@ private:
     ActiveRegionRecord& activate(RegionKey key, const WorldClock& clock);
     void visit(const Vec3& anchor, const WorldClock& clock, RegionRejections& rejected);
     std::string payload(bool observational) const;
-    // True when any record has been frozen (now or in the past), which requires version 2.
+    // True when any record has been frozen (now or in the past).
     bool any_frozen_history() const;
     std::map<RegionKey, std::uint64_t> m_completedWork;
     EnergyAges m_energyAges;
     WaterDebts m_waterDebts;
     RegionSchedulerConfig m_config;
     std::map<RegionKey, ActiveRegionRecord> m_records;
+    // Preserve the v1 envelope until every retained legacy digest is refreshed or evicted.
+    // This bookkeeping is excluded from the canonical projection.
+    std::set<RegionKey> m_legacyFrozenDigests;
     std::optional<Vec3> m_localAnchor;
     std::uint64_t m_tick = 0;
     std::uint64_t m_headerTick = 0;

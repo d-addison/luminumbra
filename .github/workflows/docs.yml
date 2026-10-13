@@ -11,8 +11,12 @@ permissions:
   contents: read
 
 concurrency:
-  group: docs-${{ github.ref }}
-  cancel-in-progress: true
+  # Pushes to devel get one group per commit and are never cancelled: when devel is not
+  # strict-up-to-date, every merged tip needs its own complete run so that a newer
+  # push cannot hide an older red tip. Pull requests and main keep cancelling
+  # superseded runs.
+  group: docs-${{ github.ref }}${{ github.event_name == 'push' && github.ref == 'refs/heads/devel' && format('-{0}', github.sha) || '' }}
+  cancel-in-progress: ${{ !(github.event_name == 'push' && github.ref == 'refs/heads/devel') }}
 
 jobs:
   doxygen:
@@ -42,7 +46,7 @@ jobs:
           python3 tools/ci/check_docs.py --html build/docs/html
 
       - name: Upload API documentation
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: luminumbra-api-docs-${{ github.sha }}
           path: build/docs/html

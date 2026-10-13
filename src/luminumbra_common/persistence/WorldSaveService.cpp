@@ -1892,19 +1892,18 @@ std::uint64_t WorldSaveService::region_simulation_digest(const std::filesystem::
     // Filtering precedes insertion: a live pristine or Loading chunk must not shadow a durable
     // edited record with the same id. insert_chunk preserves the first record per id.
     const auto qualifies = [&key](const std::shared_ptr<Chunk>& chunk) {
-        if (!chunk || chunk->sdf_provenance() != ChunkSdfProvenance::LoadedOrEdited ||
-            chunk->get_state() == ChunkState::Loading)
+        if (!chunk || chunk->sdf_provenance() != ChunkSdfProvenance::LoadedOrEdited)
             return false;
         int rx = 0, rz = 0;
         region_coords_for_chunk(chunk->get_coords(), rx, rz);
         return rx == key.x && rz == key.z;
     };
     for (const auto& chunk : inputs.live) {
-        if (qualifies(chunk))
+        if (qualifies(chunk) && chunk->get_state() != ChunkState::Loading)
             region.insert_chunk(chunk);
     }
     for (const auto& chunk : inputs.parked) {
-        if (qualifies(chunk))
+        if (qualifies(chunk) && chunk->get_state() != ChunkState::Loading)
             region.insert_chunk(chunk);
     }
     if (!save_dir.empty()) {
@@ -1922,6 +1921,7 @@ std::uint64_t WorldSaveService::region_simulation_digest(const std::filesystem::
             throw std::runtime_error(errors.empty() ? "Cannot read durable region records"
                                                     : errors.front());
         for (const auto& chunk : durable_chunks) {
+            // Durable edited content is complete even if its saved lifecycle was Loading.
             if (qualifies(chunk))
                 region.insert_chunk(chunk);
         }
@@ -1943,7 +1943,13 @@ WorldSaveService::region_simulation_digest(const std::filesystem::path& save_dir
     ValidateRegionDigestKey(key);
     // This compatibility overload projects chunks only. Durable chunks are read from save_dir;
     // callers with live ground objects or field pages supply those projections explicitly.
-    return region_simulation_digest(save_dir, key, RegionDigestInputs{live_chunks, {}, {}, {}, {}});
+    return region_simulation_digest(save_dir,
+                                    key,
+                                    RegionDigestInputs{.live = live_chunks,
+                                                       .parked = {},
+                                                       .durable = {},
+                                                       .ground_object_bytes = {},
+                                                       .field_page_bytes = {}});
 }
 
 std::uint64_t WorldSaveService::region_simulation_digest(
