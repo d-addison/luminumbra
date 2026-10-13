@@ -57,6 +57,14 @@ CTest produces JUnit and runtime artifacts. CI verifies a minimum discovered-tes
 count so an empty or severely truncated suite cannot report success. Sanitizer and
 test artifacts are uploaded even on failure to support diagnosis.
 
+`WorldgenProbeSmoke` validates the `luminumbra.worldgen_probe.v1` smoke report
+with seed `424242` and spawn `(8, terrain height + 1.95, 8)`. Valid evidence requires
+`selected_chunks == requested_chunks == 2` and `phases.polygonise.mesh_triangles >= 1`.
+The probe scans a 25-by-25 initial surface neighborhood, including each column's
+surface-height span and one vertical chunk of margin on either side, until it
+finds the requested surface chunks. Reduced coverage or an empty mesh fails
+validation. Timing values may be zero; the check imposes no speed threshold.
+
 ## UCRT64 package attribution setup
 
 The dedicated attribution workflow explicitly provisions `libatomic` before

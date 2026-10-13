@@ -19,7 +19,7 @@ def valid_report():
 
     phases = {name: stats(2 if name in checker.PHASES[:3] or name == "shaped_heights" else 1024)
               for name in checker.PHASES}
-    phases["polygonise"]["mesh_triangles"] = 0
+    phases["polygonise"]["mesh_triangles"] = 1
     for name in checker.PHASES[3:]:
         phases[name]["grid"] = "32x32"
     phases["height_query_cold"]["first_call_ms"] = 0.0
@@ -41,6 +41,24 @@ def valid_report():
 class SmokeReportTests(unittest.TestCase):
     def test_valid_report_allows_zero_timing_and_different_actual_workers(self):
         checker.validate_report(valid_report())
+
+    def test_reduced_chunk_coverage_is_rejected(self):
+        report = valid_report()
+        report["selected_chunks"] = 1
+        for phase in checker.PHASES[:3]:
+            report["phases"][phase].update(samples=1, total_ms=2.0)
+        for entry in report["scaling"]:
+            entry["chunks"] = 1
+        with self.assertRaises(ValueError) as error:
+            checker.validate_report(report)
+        self.assertEqual(str(error.exception), "selected_chunks must match requested_chunks")
+
+    def test_zero_mesh_triangles_are_rejected(self):
+        report = valid_report()
+        report["phases"]["polygonise"]["mesh_triangles"] = 0
+        with self.assertRaises(ValueError) as error:
+            checker.validate_report(report)
+        self.assertEqual(str(error.exception), "polygonise.mesh_triangles must be an integer >= 1")
 
     def test_missing_essential_fields(self):
         for field in valid_report():

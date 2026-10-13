@@ -75,6 +75,8 @@ def validate_report(report):
     candidates = integer(report.get("initial_chunk_list_size"), "initial_chunk_list_size", 1)
     require(selected <= report["requested_chunks"] and selected <= candidates,
             "selected chunk count is inconsistent")
+    require(selected == report["requested_chunks"],
+            "selected_chunks must match requested_chunks")
     spawn = object_value(report.get("spawn"), "spawn")
     for axis in ("x", "y", "z"):
         number(spawn.get(axis), f"spawn.{axis}", nonnegative=False)
@@ -83,7 +85,7 @@ def validate_report(report):
     for phase in PHASES:
         samples = selected if phase in PHASES[:3] else (2 if phase == "shaped_heights" else 1024)
         stats(phases.get(phase), phase, samples)
-    integer(phases["polygonise"].get("mesh_triangles"), "polygonise.mesh_triangles")
+    integer(phases["polygonise"].get("mesh_triangles"), "polygonise.mesh_triangles", 1)
     for phase in PHASES[3:]:
         require(phases[phase].get("grid") == "32x32", f"{phase}.grid must be 32x32")
     number(phases["height_query_cold"].get("first_call_ms"), "height_query_cold.first_call_ms")
