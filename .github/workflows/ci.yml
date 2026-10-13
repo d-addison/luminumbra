@@ -38,6 +38,10 @@ jobs:
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     runs-on: ubuntu-24.04
     timeout-minutes: 60
+    env:
+      CCACHE_BASEDIR: ${{ github.workspace }}
+      CCACHE_COMPILERCHECK: content
+      CCACHE_MAXSIZE: 500M
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -53,20 +57,45 @@ jobs:
             libgl1-mesa-dev libglu1-mesa-dev libwayland-dev libxkbcommon-dev \
             ninja-build pkg-config python3-numpy python3-pil wayland-protocols \
             xauth xorg-dev xvfb
+      - name: Disable compiler cache for qualification captures
+        if: github.event_name == 'workflow_dispatch' && inputs.qualification_capture
+        run: echo "CCACHE_DISABLE=1" >> "$GITHUB_ENV"
       - name: Restore compiler cache
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: compiler-cache
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.qualification_capture) }}
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/ccache
-          key: linux-x64-gcc-ccache-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json', 'cmake/**/*.cmake', 'src/**/*.cmake', 'test/CMakeLists.txt', 'tools/CMakeLists.txt', 'vendor/CMakeLists.txt') }}
-          restore-keys: linux-x64-gcc-ccache-
+          key: linux-x64-gcc-ccache-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json', 'cmake/**/*.cmake', 'src/**/*.cmake', 'test/CMakeLists.txt', 'tools/CMakeLists.txt', 'vendor/CMakeLists.txt') }}-${{ github.sha }}
+          restore-keys: |
+            linux-x64-gcc-ccache-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json', 'cmake/**/*.cmake', 'src/**/*.cmake', 'test/CMakeLists.txt', 'tools/CMakeLists.txt', 'vendor/CMakeLists.txt') }}-
+            linux-x64-gcc-ccache-
       - name: Configure
         id: configure
         run: >-
           cmake --preset release -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
           -DLUMINUMBRA_ENABLE_PREFAB_RUNTIME=ON
+      - name: Reset compiler cache statistics
+        if: ${{ always() && !(github.event_name == 'workflow_dispatch' && inputs.qualification_capture) }}
+        continue-on-error: true
+        run: ccache -z || true
       - name: Build
         id: build
         run: cmake --build --preset release --parallel 4
+      - name: Report compiler cache statistics
+        if: ${{ always() && !(github.event_name == 'workflow_dispatch' && inputs.qualification_capture) }}
+        continue-on-error: true
+        run: ccache -s || true
+      - name: Clean compiler cache before saving
+        if: ${{ always() && github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/devel') && !(github.event_name == 'workflow_dispatch' && inputs.qualification_capture) && steps.compiler-cache.outcome == 'success' && steps.compiler-cache.outputs.cache-hit != 'true' }}
+        continue-on-error: true
+        run: ccache --cleanup || true
+      - name: Save compiler cache
+        if: ${{ always() && github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/devel') && !(github.event_name == 'workflow_dispatch' && inputs.qualification_capture) && steps.compiler-cache.outcome == 'success' && steps.compiler-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ccache
+          key: linux-x64-gcc-ccache-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json', 'cmake/**/*.cmake', 'src/**/*.cmake', 'test/CMakeLists.txt', 'tools/CMakeLists.txt', 'vendor/CMakeLists.txt') }}-${{ github.sha }}
       - name: Test
         id: tests
         run: |
@@ -181,6 +210,10 @@ jobs:
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     runs-on: ubuntu-24.04
     timeout-minutes: 60
+    env:
+      CCACHE_BASEDIR: ${{ github.workspace }}
+      CCACHE_COMPILERCHECK: content
+      CCACHE_MAXSIZE: 500M
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -198,16 +231,27 @@ jobs:
             libgl1-mesa-dev libglu1-mesa-dev libwayland-dev libxkbcommon-dev \
             mesa-vulkan-drivers ninja-build pkg-config python3-numpy \
             python3-pil wayland-protocols xauth xorg-dev xvfb
+      - name: Disable compiler cache for qualification captures
+        if: github.event_name == 'workflow_dispatch' && inputs.qualification_capture
+        run: echo "CCACHE_DISABLE=1" >> "$GITHUB_ENV"
       - name: Restore compiler cache
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: compiler-cache
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.qualification_capture) }}
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/ccache
-          key: diligent-rhi-linux-x64-gcc-ccache-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json', 'cmake/**/*.cmake', 'src/**/*.cmake', 'test/CMakeLists.txt', 'tools/CMakeLists.txt', 'vendor/CMakeLists.txt') }}
-          restore-keys: diligent-rhi-linux-x64-gcc-ccache-
+          key: diligent-rhi-linux-x64-gcc-ccache-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json', 'cmake/**/*.cmake', 'src/**/*.cmake', 'test/CMakeLists.txt', 'tools/CMakeLists.txt', 'vendor/CMakeLists.txt') }}-${{ github.sha }}
+          restore-keys: |
+            diligent-rhi-linux-x64-gcc-ccache-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json', 'cmake/**/*.cmake', 'src/**/*.cmake', 'test/CMakeLists.txt', 'tools/CMakeLists.txt', 'vendor/CMakeLists.txt') }}-
+            diligent-rhi-linux-x64-gcc-ccache-
       - name: Configure with Diligent RHI
         run: |
           cmake --preset release -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
             -DLUMINUMBRA_ENABLE_DILIGENT=ON
+      - name: Reset compiler cache statistics
+        if: ${{ always() && !(github.event_name == 'workflow_dispatch' && inputs.qualification_capture) }}
+        continue-on-error: true
+        run: ccache -z || true
       - name: Build with Diligent RHI
         env:
           EVENT_NAME: ${{ github.event_name }}
@@ -223,6 +267,20 @@ jobs:
           else
             cmake --build --preset release --parallel 4
           fi
+      - name: Report compiler cache statistics
+        if: ${{ always() && !(github.event_name == 'workflow_dispatch' && inputs.qualification_capture) }}
+        continue-on-error: true
+        run: ccache -s || true
+      - name: Clean compiler cache before saving
+        if: ${{ always() && github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/devel') && !(github.event_name == 'workflow_dispatch' && inputs.qualification_capture) && steps.compiler-cache.outcome == 'success' && steps.compiler-cache.outputs.cache-hit != 'true' }}
+        continue-on-error: true
+        run: ccache --cleanup || true
+      - name: Save compiler cache
+        if: ${{ always() && github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/devel') && !(github.event_name == 'workflow_dispatch' && inputs.qualification_capture) && steps.compiler-cache.outcome == 'success' && steps.compiler-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ccache
+          key: diligent-rhi-linux-x64-gcc-ccache-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json', 'cmake/**/*.cmake', 'src/**/*.cmake', 'test/CMakeLists.txt', 'tools/CMakeLists.txt', 'vendor/CMakeLists.txt') }}-${{ github.sha }}
       - name: Test Diligent RHI with software GL
         run: |
           # gtest_discover_tests registers ctest names as Suite.Test, NOT the CMake
@@ -257,6 +315,15 @@ jobs:
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     runs-on: windows-2025
     timeout-minutes: 90
+    env:
+      CCACHE_DIR: ${{ runner.temp }}/ccache-msvc
+      CCACHE_BASEDIR: ${{ github.workspace }}
+      CCACHE_COMPILERCHECK: content
+      CCACHE_MAXSIZE: 1G
+      # Only the main configure opts in via command-line launchers. Captures
+      # and packaging must not inherit a launcher from the environment.
+      CMAKE_C_COMPILER_LAUNCHER: ""
+      CMAKE_CXX_COMPILER_LAUNCHER: ""
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -266,6 +333,46 @@ jobs:
         run: python tools/ci/qualification_capture.py preflight --lane windows-msvc --expected-sha "$env:QUALIFICATION_EXPECTED_SHA"
       - name: Install Python test dependencies
         run: python -m pip install --disable-pip-version-check numpy Pillow
+      - name: Disable compiler cache for qualification captures
+        if: github.event_name == 'workflow_dispatch' && inputs.qualification_capture
+        shell: pwsh
+        run: '"CCACHE_DISABLE=1" >> $env:GITHUB_ENV'
+      - name: Stage ccache
+        id: ccache-stage
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.qualification_capture) }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          $version = '4.14.1'
+          $sha256 = '6219f3865ca59aec41ee4b678df171d5d35855ecb2b6dbbbd20690b3a68af7b4'
+          $archive = "ccache-$version-windows-x86_64.zip"
+          $url = "https://github.com/ccache/ccache/releases/download/v$version/$archive"
+          $archivePath = Join-Path $env:RUNNER_TEMP $archive
+          Invoke-WebRequest -Uri $url -OutFile $archivePath
+          $actual = (Get-FileHash -Algorithm SHA256 -Path $archivePath).Hash.ToLowerInvariant()
+          if ($actual -ne $sha256) {
+            throw "ccache archive sha256 mismatch: expected $sha256, got $actual"
+          }
+          $ccacheRoot = Join-Path $env:RUNNER_TEMP 'ccache-bin'
+          7z x $archivePath "-o$ccacheRoot" | Out-Null
+          # Discover the executable whether the zip has a top-level directory
+          # or places it directly at the extraction root; refuse ambiguity.
+          $executables = @(Get-ChildItem -Path $ccacheRoot -Filter 'ccache.exe' -File -Recurse)
+          if ($executables.Count -ne 1) {
+            throw "Expected exactly one ccache.exe in the archive, found $($executables.Count)"
+          }
+          $executables[0].DirectoryName >> $env:GITHUB_PATH
+      - name: Restore compiler cache
+        id: compiler-cache
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.qualification_capture) }}
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: windows-x64-msvc-ccache-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json', 'cmake/**/*.cmake', 'src/**/*.cmake', 'test/CMakeLists.txt', 'tools/CMakeLists.txt', 'vendor/CMakeLists.txt') }}-${{ github.sha }}
+          restore-keys: |
+            windows-x64-msvc-ccache-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json', 'cmake/**/*.cmake', 'src/**/*.cmake', 'test/CMakeLists.txt', 'tools/CMakeLists.txt', 'vendor/CMakeLists.txt') }}-
+            windows-x64-msvc-ccache-
       - name: Stage software OpenGL (Mesa3D llvmpipe)
         shell: pwsh
         run: |
@@ -295,6 +402,11 @@ jobs:
               throw "Mesa3D archive is missing x64/$dll"
             }
           }
+      - name: Reset compiler cache statistics
+        if: ${{ always() && !(github.event_name == 'workflow_dispatch' && inputs.qualification_capture) && steps.ccache-stage.outcome == 'success' }}
+        continue-on-error: true
+        shell: pwsh
+        run: ccache -z
       - name: Configure, build, and test
         id: native
         shell: pwsh
@@ -306,7 +418,13 @@ jobs:
             -property installationPath
           Import-Module "$installPath\Common7\Tools\Microsoft.VisualStudio.DevShell.dll"
           Enter-VsDevShell -VsInstallPath $installPath -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'
-          cmake --preset release -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl
+          # Release uses Ninja without /Zi under the project's CMake 3.20
+          # policy baseline. Keep launchers local to this configure.
+          $compilerLaunchers = @()
+          if ($env:CCACHE_DISABLE -ne '1') {
+            $compilerLaunchers = @('-DCMAKE_C_COMPILER_LAUNCHER=ccache', '-DCMAKE_CXX_COMPILER_LAUNCHER=ccache')
+          }
+          cmake --preset release -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl @compilerLaunchers
           cmake --build --preset release --parallel 4
           # Require the file-only production writer/oracle integration even
           # when optional PowerShell discovery would omit it from the suite.
@@ -349,6 +467,22 @@ jobs:
           # remaining skip is a hard failure.
           # Inventory floor: measured 2284 tests on devel b56cdba1, minus ~1% margin (see the Linux lane for the policy).
           python tools/ci/check_ctest_junit.py build/release/ctest.junit.xml --minimum-tests 2260
+      - name: Report compiler cache statistics
+        if: ${{ always() && !(github.event_name == 'workflow_dispatch' && inputs.qualification_capture) && steps.ccache-stage.outcome == 'success' }}
+        continue-on-error: true
+        shell: pwsh
+        run: ccache -s
+      - name: Clean compiler cache before saving
+        if: ${{ always() && github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/devel') && !(github.event_name == 'workflow_dispatch' && inputs.qualification_capture) && steps.compiler-cache.outcome == 'success' && steps.compiler-cache.outputs.cache-hit != 'true' }}
+        continue-on-error: true
+        shell: pwsh
+        run: ccache --cleanup
+      - name: Save compiler cache
+        if: ${{ always() && github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/devel') && !(github.event_name == 'workflow_dispatch' && inputs.qualification_capture) && steps.compiler-cache.outcome == 'success' && steps.compiler-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: windows-x64-msvc-ccache-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json', 'cmake/**/*.cmake', 'src/**/*.cmake', 'test/CMakeLists.txt', 'tools/CMakeLists.txt', 'vendor/CMakeLists.txt') }}-${{ github.sha }}
       - name: Bind manual qualification evidence
         if: always() && (github.event_name == 'workflow_dispatch' && inputs.qualification_capture)
         env:
@@ -415,6 +549,12 @@ jobs:
     # the Mesa3D download add a few more here, so the cap keeps ~1.9x
     # headroom over the projected ~45 min.
     timeout-minutes: 85
+    env:
+      # The native UCRT64 ccache accepts Windows paths inherited by msys2.
+      CCACHE_DIR: ${{ runner.temp }}/ccache-ucrt64
+      CCACHE_BASEDIR: ${{ github.workspace }}
+      CCACHE_COMPILERCHECK: content
+      CCACHE_MAXSIZE: 1G
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -429,12 +569,27 @@ jobs:
           update: true
           install: >-
             git
+            mingw-w64-ucrt-x86_64-ccache
             mingw-w64-ucrt-x86_64-cmake
             mingw-w64-ucrt-x86_64-gcc
             mingw-w64-ucrt-x86_64-ninja
             mingw-w64-ucrt-x86_64-python
             mingw-w64-ucrt-x86_64-python-numpy
             mingw-w64-ucrt-x86_64-python-pillow
+      - name: Disable compiler cache for qualification captures
+        if: github.event_name == 'workflow_dispatch' && inputs.qualification_capture
+        shell: msys2 {0}
+        run: echo "CCACHE_DISABLE=1" >> "$GITHUB_ENV"
+      - name: Restore compiler cache
+        id: compiler-cache
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.qualification_capture) }}
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: windows-x64-ucrt64-gcc-ccache-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json', 'cmake/**/*.cmake', 'src/**/*.cmake', 'test/CMakeLists.txt', 'tools/CMakeLists.txt', 'vendor/CMakeLists.txt') }}-${{ github.sha }}
+          restore-keys: |
+            windows-x64-ucrt64-gcc-ccache-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json', 'cmake/**/*.cmake', 'src/**/*.cmake', 'test/CMakeLists.txt', 'tools/CMakeLists.txt', 'vendor/CMakeLists.txt') }}-
+            windows-x64-ucrt64-gcc-ccache-
       - name: Stage software OpenGL (Mesa3D llvmpipe)
         shell: pwsh
         run: |
@@ -472,11 +627,34 @@ jobs:
       - name: Configure
         id: configure
         shell: msys2 {0}
-        run: cmake --preset release
+        run: >-
+          cmake --preset release -DCMAKE_C_COMPILER_LAUNCHER=ccache
+          -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+      - name: Reset compiler cache statistics
+        if: ${{ always() && !(github.event_name == 'workflow_dispatch' && inputs.qualification_capture) }}
+        continue-on-error: true
+        shell: msys2 {0}
+        run: ccache -z || true
       - name: Build
         id: build
         shell: msys2 {0}
         run: cmake --build --preset release --parallel 4
+      - name: Report compiler cache statistics
+        if: ${{ always() && !(github.event_name == 'workflow_dispatch' && inputs.qualification_capture) }}
+        continue-on-error: true
+        shell: msys2 {0}
+        run: ccache -s || true
+      - name: Clean compiler cache before saving
+        if: ${{ always() && github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/devel') && !(github.event_name == 'workflow_dispatch' && inputs.qualification_capture) && steps.compiler-cache.outcome == 'success' && steps.compiler-cache.outputs.cache-hit != 'true' }}
+        continue-on-error: true
+        shell: msys2 {0}
+        run: ccache --cleanup || true
+      - name: Save compiler cache
+        if: ${{ always() && github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/devel') && !(github.event_name == 'workflow_dispatch' && inputs.qualification_capture) && steps.compiler-cache.outcome == 'success' && steps.compiler-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: windows-x64-ucrt64-gcc-ccache-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json', 'cmake/**/*.cmake', 'src/**/*.cmake', 'test/CMakeLists.txt', 'tools/CMakeLists.txt', 'vendor/CMakeLists.txt') }}-${{ github.sha }}
       - name: Test
         id: tests
         shell: msys2 {0}

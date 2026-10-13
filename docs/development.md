@@ -43,6 +43,12 @@ ctest --preset release -L manual \
 
 ## Continuous integration
 
+The Linux/GCC, Diligent RHI, and ASan lanes use bounded ccache (500M each), as do
+UCRT64 and MSVC (1G each), with saves only on devel/main pushes and qualification
+captures bypassing the cache. One complete cache generation is about 3.5 GB;
+per-SHA saves accumulate until GitHub's least-recently-used eviction at the
+repository cache quota. PR runs restore from the newest matching prefix.
+
 Draft pull requests run the cheap routine checks: changed-file formatting, public
 tree inventory, runner contracts, Doxygen, game assets, and the authoring mock
 (subject to its existing paths filter). Linux/GCC, ASan, Windows/MSVC,
