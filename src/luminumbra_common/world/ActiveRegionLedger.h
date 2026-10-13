@@ -60,10 +60,20 @@ struct RegionTransition {
     bool operator==(const RegionTransition&) const = default;
 };
 
+// Observational counts of inputs that the scheduler skipped deterministically.
+struct RegionRejections {
+    std::uint32_t anchors = 0, work = 0, capacity = 0;
+    bool any() const {
+        return anchors != 0 || work != 0 || capacity != 0;
+    }
+    bool operator==(const RegionRejections&) const = default;
+};
+
 struct RegionSchedule {
     std::uint64_t tick = 0, work = 0;
     std::vector<RegionKey> due;
     std::vector<RegionTransition> transitions;
+    RegionRejections rejected;
     std::string digest;
     bool operator==(const RegionSchedule&) const = default;
 };
@@ -113,6 +123,13 @@ public:
     [[nodiscard]] const std::optional<Vec3>& local_anchor() const {
         return m_localAnchor;
     }
+    // Finite, and -2^24 <= x,z < 2^24 (exactly -2^24 is valid). y must be finite.
+    [[nodiscard]] static bool valid_anchor(const Vec3& position) noexcept;
+    // Non-throwing form: returns false and leaves the anchor untouched when invalid.
+    bool try_set_local_anchor(const Vec3& walking_feet) noexcept;
+    // Raises only the validation ceiling to the clock tick (never lowers it, never
+    // touches the canonical tick or any record). Used after a scheduler fault.
+    void acknowledge_world_clock(const WorldClock& clock) noexcept;
     void set_local_anchor(const Vec3& walking_feet);
     void mark_edited(RegionKey key, const WorldClock& clock);
     void pin(RegionKey key, bool pinned, const WorldClock& clock);
@@ -147,7 +164,7 @@ private:
                                      std::span<const RegionWork> work,
                                      const DurableDigest& durable_digest);
     ActiveRegionRecord& activate(RegionKey key, const WorldClock& clock);
-    void visit(const Vec3& anchor, const WorldClock& clock);
+    void visit(const Vec3& anchor, const WorldClock& clock, RegionRejections& rejected);
     std::string payload(bool observational) const;
     RegionSchedulerConfig m_config;
     std::map<RegionKey, ActiveRegionRecord> m_records;

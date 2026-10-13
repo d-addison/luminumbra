@@ -157,6 +157,7 @@ add_executable(common_tests
     ../src/luminumbra_client/rendering/FarVolumeBuildQueue.cpp
     ../src/luminumbra_client/rendering/FarVolumeRenderMesh.cpp
     common/FarTierTable_test.cpp
+    common/FarHorizon_test.cpp
     common/FarWantedSet_test.cpp
     common/FarAuthorityOverlay_test.cpp
     common/GameSessionHeadlessWorld_test.cpp
@@ -1074,6 +1075,30 @@ target_link_libraries(initial_world_loading_perf_test PRIVATE
     luminumbra_common
 )
 
+# Gtest-free worldgen timing probe. Uses public engine APIs only. It is not a
+# gtest target, so its smoke run is a direct add_test rather than discovery.
+add_executable(worldgen_probe
+    diagnostics/worldgen_probe.cpp
+)
+
+target_compile_definitions(worldgen_probe PRIVATE
+    LUMINUMBRA_SOURCE_ROOT="${CMAKE_SOURCE_DIR}"
+)
+
+target_include_directories(worldgen_probe PRIVATE
+../src
+)
+
+target_link_libraries(worldgen_probe PRIVATE
+    luminumbra_common
+)
+
+luminumbra_configure_first_party_target(worldgen_probe)
+
+add_test(NAME WorldgenProbeSmoke
+    COMMAND worldgen_probe --smoke --json ${CMAKE_CURRENT_BINARY_DIR}/worldgen_probe_smoke.json)
+set_tests_properties(WorldgenProbeSmoke PROPERTIES LABELS "perf" TIMEOUT 120)
+
 # Manual cold-load latency diagnostic. It exercises twenty interactive loads at
 # radius 12/4 with the watchdog armed, but deliberately makes no machine-speed
 # claim. The required performance workflow uses paired relative observations.
@@ -1527,6 +1552,23 @@ target_link_libraries(hang_watchdog_test PRIVATE
     Threads::Threads
 )
 
+# Bounded console sink: separate executable so the logging-stall cases can run
+# without the rest of common_tests. Fake outputs are stalled on purpose; the
+# tests release them before returning.
+add_executable(bounded_console_sink_test
+    common/bounded_console_sink_test.cpp
+)
+target_include_directories(bounded_console_sink_test PRIVATE
+../src
+../src/luminumbra_common
+)
+target_link_libraries(bounded_console_sink_test PRIVATE
+    gtest_main
+    luminumbra_common
+    Threads::Threads
+)
+luminumbra_configure_first_party_target(bounded_console_sink_test)
+
 #  implementation note: occlusion read-back onto ma_sound volume. Pure test of the
 # ComputeFinalVolume helper; includes MiniaudioManager.h so needs miniaudio + nlohmann_json.
 add_executable(audio_volume_readback_test
@@ -1703,6 +1745,7 @@ set(LUMINUMBRA_GTEST_TARGETS
     client_policy_test
     audio_physics_binding_test
     hang_watchdog_test
+    bounded_console_sink_test
     audio_volume_readback_test
     audio_disabled_test
     capture_scale_test

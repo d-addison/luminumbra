@@ -1,5 +1,6 @@
 #include "luminumbra_client/rendering/Camera.h"
 #include "luminumbra_client/rendering/passes/PassGlHelpers.h"
+#include "luminumbra_common/world/FarHorizon.h"
 
 #define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
@@ -174,8 +175,9 @@ TEST_F(ReversedZDepth, OrdersQuadsAt3000Metres) {
 }
 
 TEST_F(ReversedZDepth, OrdersQuadsAt16000Metres) {
-    // Future-distance qualification only. The production camera stays at 3200 m.
-    ordering(16000.0f, 0.125f, 17408.0f);
+    // Future-distance qualification only. The ladder plane is declared in FarHorizon.h;
+    // the production camera stays at the legacy plane.
+    ordering(16000.0f, 0.125f, Luminumbra::World::kFarPlaneMeters);
 }
 
 TEST_F(ReversedZDepth, OrdersQuadsAt30Metres) {
@@ -262,6 +264,37 @@ TEST(ReversedZProjection, CascadeCornersUseReversedClipEndpoints) {
                     const auto corner = inverse * glm::vec4(2 * x - 1, 2 * y - 1, 1 - z, 1);
                     EXPECT_NEAR(-corner.z / corner.w, z ? range.second : range.first, 0.0001f);
                 }
+    }
+}
+
+TEST(ReversedZProjection, LadderPlaneEndpointsAndMonotonicDepth) {
+    const glm::mat4 m = ReversedZPerspective(
+        glm::radians(90.0f), 1.0f, NEAR_PLANE, Luminumbra::World::kFarPlaneMeters);
+    const auto ndc_z_at = [&m](float distance) {
+        const glm::vec4 clip = m * glm::vec4(0.0f, 0.0f, -distance, 1.0f);
+        return clip.z / clip.w;
+    };
+    EXPECT_NEAR(ndc_z_at(NEAR_PLANE), 1.0f, 1e-4f);
+    EXPECT_NEAR(ndc_z_at(Luminumbra::World::kFarPlaneMeters), 0.0f, 1e-5f);
+    float previous = std::numeric_limits<float>::max();
+    for (const float distance : {1.0f, 30.0f, 3000.0f, 3200.0f, 16000.0f, 16384.0f, 17000.0f}) {
+        SCOPED_TRACE(distance);
+        const float ndc_z = ndc_z_at(distance);
+        EXPECT_TRUE(std::isfinite(ndc_z));
+        EXPECT_GE(ndc_z, 0.0f);
+        EXPECT_LE(ndc_z, 1.0f);
+        EXPECT_LT(ndc_z, previous);
+        previous = ndc_z;
+    }
+}
+
+TEST(ReversedZProjection, LegacyAndLadderPlanesKeepTheSameNearEndpoint) {
+    for (const float far_plane :
+         {Luminumbra::World::kLegacyFarPlaneMeters, Luminumbra::World::kFarPlaneMeters}) {
+        SCOPED_TRACE(far_plane);
+        const glm::mat4 m = ReversedZPerspective(glm::radians(90.0f), 1.0f, NEAR_PLANE, far_plane);
+        const glm::vec4 clip = m * glm::vec4(0.0f, 0.0f, -NEAR_PLANE, 1.0f);
+        EXPECT_NEAR(clip.z / clip.w, 1.0f, 1e-4f);
     }
 }
 } // namespace
