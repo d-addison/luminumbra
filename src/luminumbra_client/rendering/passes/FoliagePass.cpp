@@ -1193,7 +1193,8 @@ std::size_t FoliagePass::execute(const RenderContext& ctx, const Camera& camera)
         return 0;
     }
 
-    const bool evidence_fresh = FarReplayEffects{ctx.frozen_replay}.Evidence() && m_qualification.rebuild.completed &&
+    const bool evidence_fresh = FarReplayEffects{ctx.frozen_replay}.Evidence() &&
+                                m_qualification.rebuild.completed &&
                                 m_instance_generation == m_build_generation &&
                                 m_evidence_phase >= 1 && m_evidence_phase <= 2;
     const bool vertex_due = evidence_fresh && m_phase_query_counts[m_evidence_phase - 1] >= 32 &&

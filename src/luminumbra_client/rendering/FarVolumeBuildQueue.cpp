@@ -102,9 +102,11 @@ void FarVolumeBuildQueue::CheckOwner() const {
         throw std::logic_error("Far-volume queue called outside its owner thread");
 }
 std::optional<std::size_t> FarVolumeBuildQueue::Find(const World::FarTileKey& key) const {
-    for (std::size_t i = 0; i < descriptors_.size(); ++i)
-        if (descriptors_[i].desired && descriptors_[i].desired->identity.key == key)
+    for (std::size_t i = 0; i < descriptors_.size(); ++i) {
+        const auto& descriptor = descriptors_[i];
+        if (descriptor.desired && descriptor.desired->identity.key == key)
             return i;
+    }
     return std::nullopt;
 }
 
@@ -315,17 +317,20 @@ std::size_t FarVolumeBuildQueue::Pump(std::size_t max_dispatches,
             continue;
         const auto d = *selected;
         auto& descriptor = descriptors_[d];
-        if (!descriptor.desired || !descriptor.pending || descriptor.slot)
+        const auto& desired = descriptor.desired;
+        if (!desired || !descriptor.pending || descriptor.slot)
             continue;
-        std::optional<std::size_t> available;
-        for (std::size_t i = 0; i < slots_.size(); ++i)
-            if (!slots_[i].occupied) {
-                available = i;
-                break;
-            }
+        const auto& request = *desired;
+        const auto available = [this]() -> std::optional<std::size_t> {
+            for (std::size_t i = 0; i < slots_.size(); ++i)
+                if (!slots_[i].occupied)
+                    return i;
+            return std::nullopt;
+        }();
         if (!available)
             break;
-        auto& slot = slots_[*available];
+        const auto slot_index = *available;
+        auto& slot = slots_[slot_index];
         slot.descriptor = d;
         slot.pool = &pool_;
         slot.upstream = upstream_;
@@ -333,8 +338,8 @@ std::size_t FarVolumeBuildQueue::Pump(std::size_t max_dispatches,
         slot.cancelled.store(false, std::memory_order_release);
         slot.published.store(false, std::memory_order_release);
         try {
-            slot.result.emplace(FarVolumeQueueCompletion(pool_, descriptor.desired->identity));
-            slot.request.emplace(*descriptor.desired);
+            slot.result.emplace(FarVolumeQueueCompletion(pool_, request.identity));
+            slot.request.emplace(request);
             const std::vector<Job> batch{[pointer = &slot]() {
                 Run(pointer);
             }};
@@ -342,7 +347,7 @@ std::size_t FarVolumeBuildQueue::Pump(std::size_t max_dispatches,
             // publishing that job. Everything after the return is nonthrowing.
             slot.handle = jobs_.dispatch_batch(batch, JobPriority::Normal);
             slot.occupied = true;
-            descriptor.slot = *available;
+            descriptor.slot = slot_index;
             descriptor.pending = false;
             ++dispatched;
             Increment(dispatched_);
@@ -352,7 +357,7 @@ std::size_t FarVolumeBuildQueue::Pump(std::size_t max_dispatches,
                 slot.result->status_ = FarVolumeBuildStatus::Failed;
                 slot.occupied = true;
                 slot.ready = true;
-                descriptor.slot = *available;
+                descriptor.slot = slot_index;
                 descriptor.pending = false;
             }
             // No automatic retry loop after dispatch/callback-copy failure.

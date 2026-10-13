@@ -24,7 +24,11 @@ bool ProjectFarWorldRayBias(const glm::vec3& position,
     const auto clip = projection * glm::vec4(biased, 1.0f);
     if (!Finite(glm::vec3(clip)) || !std::isfinite(clip.w) || clip.w <= 0)
         return false;
-    const float depth = clip.z / clip.w;
+    float depth = clip.z / clip.w;
+    // The production float matrix can round the near endpoint one ULP above
+    // one. Match the shader's exact binary32 successor, not an epsilon band.
+    if (depth > 1.0f && depth <= std::nextafter(1.0f, 2.0f))
+        depth = 1.0f;
     if (!std::isfinite(depth) || depth < 0 || depth > 1)
         return false;
     out = {biased, depth};

@@ -7,6 +7,13 @@
 
 namespace Luminumbra::Rendering {
 namespace {
+// Construction and residency selection guarantee these values are present.
+template<typename Optional>
+auto& RequireEngaged(Optional& value) {
+    if (!value)
+        throw std::logic_error("Far-volume residency missing required state");
+    return *value;
+}
 bool Valid(const FarVolumeWantedRequest& request) {
     World::FarTileKey key;
     if (!World::ToFarTileKey(request.intent.key, key) || key != request.identity.key)
@@ -172,12 +179,13 @@ bool FarVolumeResidency::ReplaceWanted(std::span<const FarVolumeWantedRequest> r
     return true;
 }
 void FarVolumeResidency::Reject(Entry& entry, FarVolumeFrameResult& result) {
-    auto& tier = *tiers_[entry.desired->identity.key.tier - 1];
-    tier.queue.Forget(entry.desired->identity.key);
+    const auto& desired = RequireEngaged(entry.desired);
+    auto& tier = RequireEngaged(tiers_[desired.identity.key.tier - 1]);
+    tier.queue.Forget(desired.identity.key);
     entry.completion.reset();
     entry.eligibility = FarVolumeEligibility::RequestRejected;
     ++result.rejected;
-    if (entry.desired->identity.key.tier == World::kFarTierCount)
+    if (desired.identity.key.tier == World::kFarTierCount)
         result.horizon_refused = true;
 }
 bool FarVolumeResidency::Headroom(std::size_t number,
@@ -192,7 +200,7 @@ bool FarVolumeResidency::Headroom(std::size_t number,
         return true;
     if (number == World::kFarTierCount || bytes > pool->limit())
         return false;
-    auto& tier = *tiers_[number - 1];
+    auto& tier = RequireEngaged(tiers_[number - 1]);
     // Farthest first, then canonical key. Other tiers cannot free this pool.
     for (std::size_t step = 0; step < tier.entries.size(); ++step) {
         Entry* candidate = nullptr;
@@ -208,13 +216,14 @@ bool FarVolumeResidency::Headroom(std::size_t number,
                                parent->desired->identity, parent->desired->intent)))
                 continue;
             if (!candidate || entry.distance > candidate->distance ||
-                (entry.distance == candidate->distance && key < candidate->desired->identity.key))
+                (entry.distance == candidate->distance &&
+                 key < RequireEngaged(candidate->desired).identity.key))
                 candidate = &entry;
         }
         if (!candidate)
             break;
         auto& entry = *candidate;
-        const auto& key = entry.desired->identity.key;
+        const auto& key = RequireEngaged(entry.desired).identity.key;
         tier.queue.Forget(key);
         entry.completion.reset();
         entry.uploaded = FarVolumeUploadedTile{};
@@ -237,6 +246,8 @@ FarVolumeFrameResult FarVolumeResidency::AdvanceFrame(double x,
     if (!std::isfinite(z))
         z = 0;
     for (auto& tier : tiers_) {
+        if (!tier)
+            throw std::logic_error("Far-volume residency missing tier");
         tier->queue.Pump(0);
         tier->order.clear();
         std::size_t held = 0;
@@ -276,7 +287,7 @@ FarVolumeFrameResult FarVolumeResidency::AdvanceFrame(double x,
     }
     // One global upload budget, V5 first. Frame deferral retains Ready CPU data.
     for (std::size_t n = tiers_.size(); n > 0; --n) {
-        auto& tier = *tiers_[n - 1];
+        auto& tier = RequireEngaged(tiers_[n - 1]);
         for (const auto i : tier.order) {
             auto& entry = tier.entries[i];
             if (entry.eligibility != FarVolumeEligibility::Ready || !entry.completion)
@@ -292,15 +303,16 @@ FarVolumeFrameResult FarVolumeResidency::AdvanceFrame(double x,
             if (*bytes > limits.upload_bytes - result.upload_bytes)
                 continue;
             ++result.upload_attempts;
-            if (!Headroom(n, *bytes, entry.desired->identity.key, result)) {
+            const auto& desired = RequireEngaged(entry.desired);
+            if (!Headroom(n, *bytes, desired.identity.key, result)) {
                 Reject(entry, result);
                 continue;
             }
             const auto remaining = limits.upload_bytes - result.upload_bytes;
             result.upload_bytes += *bytes;
             if (!UploadFarVolume(*entry.completion,
-                                 entry.desired->identity,
-                                 entry.desired->intent,
+                                 desired.identity,
+                                 desired.intent,
                                  memory_,
                                  remaining,
                                  backend,
@@ -316,7 +328,7 @@ FarVolumeFrameResult FarVolumeResidency::AdvanceFrame(double x,
     }
     // One global dispatch budget; explicit single-key Pump avoids fallback.
     for (std::size_t n = tiers_.size(); n > 0; --n) {
-        auto& tier = *tiers_[n - 1];
+        auto& tier = RequireEngaged(tiers_[n - 1]);
         for (const auto i : tier.order) {
             auto& entry = tier.entries[i];
             if (entry.eligibility != FarVolumeEligibility::Wanted &&
@@ -326,7 +338,7 @@ FarVolumeFrameResult FarVolumeResidency::AdvanceFrame(double x,
                 break;
             ++result.build_attempts;
             if (entry.eligibility == FarVolumeEligibility::Pending) {
-                const std::array key{entry.desired->identity.key};
+                const std::array key{RequireEngaged(entry.desired).identity.key};
                 const auto dispatched = tier.queue.Pump(1, key);
                 result.dispatched += dispatched;
                 if (dispatched != 0)
@@ -382,7 +394,7 @@ std::optional<FarVolumeResidentObservation>
 FarVolumeResidency::Observe(const World::FarTileKey& key) const {
     CheckOwner();
     const auto* entry = Find(key);
-    if (!entry)
+    if (!entry || !entry->desired)
         return {};
     return FarVolumeResidentObservation{
         entry->desired->identity,
@@ -413,7 +425,7 @@ std::array<FarVolumeTierObservation, World::kFarTierCount> FarVolumeResidency::S
         const auto memory = memory_.Stats(i + 1);
         if (memory)
             observation.memory = *memory;
-        for (const auto& entry : tiers_[i]->entries) {
+        for (const auto& entry : RequireEngaged(tiers_[i]).entries) {
             if (!entry.desired)
                 continue;
             ++observation.wanted;
@@ -466,8 +478,9 @@ bool FarVolumeResidency::CoarseMayYield(const World::FarTileKey& key) const {
             const World::FarTileKey child{
                 std::uint8_t(key.tier - 1), key.tx * 2 + x, key.tz * 2 + z};
             const auto* entry = Find(child);
-            if (!entry || !World::IsFarTileCovering(entry->uploaded.Status(entry->desired->identity,
-                                                                           entry->desired->intent)))
+            if (!entry || !entry->desired ||
+                !World::IsFarTileCovering(
+                    entry->uploaded.Status(entry->desired->identity, entry->desired->intent)))
                 return false;
         }
     return true;
@@ -475,9 +488,9 @@ bool FarVolumeResidency::CoarseMayYield(const World::FarTileKey& key) const {
 void FarVolumeResidency::CancelAndDrain() {
     Guard guard(*this);
     for (auto& tier : tiers_)
-        tier->queue.CancelAndDrain();
+        RequireEngaged(tier).queue.CancelAndDrain();
     for (auto& tier : tiers_)
-        for (auto& entry : tier->entries)
+        for (auto& entry : RequireEngaged(tier).entries)
             entry = Entry{};
 }
 std::size_t FarVolumeResidency::VisitDraws(FarVolumeDrawVisitor visitor, void* context) {
@@ -488,7 +501,7 @@ std::size_t FarVolumeResidency::VisitDraws(FarVolumeDrawVisitor visitor, void* c
     for (std::size_t number = tiers_.size(); number > 0; --number) {
         const auto& dimensions = World::kFarTierTable[number - 1];
         const auto edge = std::int64_t(dimensions.tile_edge_meters);
-        for (const auto& entry : tiers_[number - 1]->entries) {
+        for (const auto& entry : RequireEngaged(tiers_[number - 1]).entries) {
             if (!entry.desired)
                 continue;
             const auto& identity = entry.desired->identity;

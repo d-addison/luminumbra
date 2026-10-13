@@ -331,6 +331,8 @@ TEST(FarVolumeResidency, ActualUploadBytesCapDefersReadyAndPreservesOldGpuOnFail
     // Only fixed owner/queue controls survive explicit drain, until destruction.
     const auto stats = memory.Stats(5);
     ASSERT_TRUE(stats);
+    if (!stats)
+        return;
     EXPECT_EQ(stats->bytes_gpu, 0u);
 }
 

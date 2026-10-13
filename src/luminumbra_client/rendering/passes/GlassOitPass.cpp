@@ -1,5 +1,5 @@
-#include "../FarWorldReplay.h"
 #include "GlassOitPass.h"
+#include "../FarWorldReplay.h"
 
 #include "PassGlHelpers.h"
 #include "core/Log.h"
@@ -21,7 +21,8 @@ void GlassOitPass::execute_accum(const RenderContext& ctx, const GlassOitPassInp
         return;
     }
     if (!m_accum_shader) {
-        if (ctx.frozen_replay) return;
+        if (ctx.frozen_replay)
+            return;
         // Lazy init: shaders + the accum/reveal MRT FBO sharing the lighting depth.
         m_accum_shader = std::make_unique<Shader>(
             (input.root_path / "res/shaders/glass_oit.vert").string().c_str(),
