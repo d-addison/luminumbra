@@ -48,6 +48,11 @@ UCRT64 and MSVC (1G each), with saves only on devel/main pushes and qualificatio
 captures bypassing the cache. One complete cache generation is about 3.5 GB;
 per-SHA saves accumulate until GitHub's least-recently-used eviction at the
 repository cache quota. PR runs restore from the newest matching prefix.
+All Actions caches, including performance, clang-tidy results, and MSYS2 packages,
+are saved only on `push` events to `refs/heads/main` or `refs/heads/devel`; PRs,
+scheduled runs, and manual dispatches never save caches. When a PR closes,
+`cache-cleanup.yml` deletes caches scoped to its `refs/pull/<n>/merge` ref without
+checking out PR code.
 
 Draft pull requests run the cheap routine checks: changed-file formatting, public
 tree inventory, runner contracts, Doxygen, game assets, and the authoring mock

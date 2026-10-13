@@ -1,0 +1,28 @@
+name: Clean up closed PR caches
+
+on:
+  pull_request_target:
+    types: [closed]
+
+permissions:
+  actions: write
+
+jobs:
+  cleanup:
+    name: Delete closed PR merge-ref caches
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      # No checkout: this job only uses trusted workflow code and a numeric PR ref.
+      - name: Delete caches for the closed PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          CACHE_REF: refs/pull/${{ github.event.pull_request.number }}/merge
+        run: |
+          gh api --method GET "repos/$GH_REPO/actions/caches" \
+            -f ref="$CACHE_REF" -f per_page=100 --paginate \
+            --jq '.actions_caches[].id' > "$RUNNER_TEMP/pr-cache-ids"
+          while IFS= read -r cache_id; do
+            gh cache delete "$cache_id" --repo "$GH_REPO"
+          done < "$RUNNER_TEMP/pr-cache-ids"

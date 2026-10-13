@@ -39,7 +39,6 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     env:
-      CCACHE_BASEDIR: ${{ github.workspace }}
       CCACHE_COMPILERCHECK: content
       CCACHE_MAXSIZE: 500M
     steps:
@@ -211,7 +210,6 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     env:
-      CCACHE_BASEDIR: ${{ github.workspace }}
       CCACHE_COMPILERCHECK: content
       CCACHE_MAXSIZE: 500M
     steps:
@@ -317,7 +315,6 @@ jobs:
     timeout-minutes: 90
     env:
       CCACHE_DIR: ${{ runner.temp }}/ccache-msvc
-      CCACHE_BASEDIR: ${{ github.workspace }}
       CCACHE_COMPILERCHECK: content
       CCACHE_MAXSIZE: 1G
       # Only the main configure opts in via command-line launchers. Captures
@@ -552,7 +549,6 @@ jobs:
     env:
       # The native UCRT64 ccache accepts Windows paths inherited by msys2.
       CCACHE_DIR: ${{ runner.temp }}/ccache-ucrt64
-      CCACHE_BASEDIR: ${{ github.workspace }}
       CCACHE_COMPILERCHECK: content
       CCACHE_MAXSIZE: 1G
     steps:
@@ -565,6 +561,7 @@ jobs:
       - name: Set up MSYS2 UCRT64
         uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2
         with:
+          cache: ${{ github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/devel') }}
           msystem: UCRT64
           update: true
           install: >-
@@ -793,8 +790,8 @@ jobs:
       # only when its complete analysis input (source, every header the compiler
       # reads, compile flags, check config, clang-tidy and compiler versions) is
       # identical to an earlier run that passed; anything else runs clang-tidy.
-      # Pull requests read and write it. Pushes to devel/main never read it, so
-      # every merged tip gets a full analysis, and they write it to seed the PRs.
+      # Pull requests only restore it. Pushes to devel/main never restore it, so
+      # every merged tip gets a full analysis; only those pushes save it for PRs.
       - name: Restore clang-tidy result cache
         id: tidy-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -808,7 +805,7 @@ jobs:
           TIDY_CACHE_MODE: ${{ github.event_name == 'pull_request' && 'readwrite' || 'writeonly' }}
         run: scripts/tidy.sh --build-dir build/tidy --jobs 4 --cache-dir .tidy-cache --cache-mode "$TIDY_CACHE_MODE"
       - name: Save clang-tidy result cache
-        if: ${{ !cancelled() && steps.tidy-cache.outputs.cache-hit != 'true' }}
+        if: ${{ !cancelled() && github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/devel') && steps.tidy-cache.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .tidy-cache
