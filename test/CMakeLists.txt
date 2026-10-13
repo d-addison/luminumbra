@@ -161,6 +161,8 @@ add_executable(common_tests
     rendering/FarWorldRenderer_test.cpp
     rendering/FarWorldOwnership_test.cpp
     rendering/FarWorldDepthBias_test.cpp
+    rendering/FarWorldFog_test.cpp
+    rendering/FarWorldDepthPosition_test.cpp
     rendering/FarWorldCaveSelection_test.cpp
     rendering/FarWorldSurfaceTag_test.cpp
     rendering/ShaderSource_test.cpp
@@ -435,6 +437,7 @@ target_link_libraries(foliage_cache_prune_test PRIVATE
 add_executable(render_smoke_test
     rendering/render_smoke_test.cpp
     rendering/FarWorldShadow_test.cpp
+    rendering/FarWorldFogGl_test.cpp
     rendering/TerrainCullingTestPeer.h
 )
 

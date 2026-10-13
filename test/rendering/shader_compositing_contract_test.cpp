@@ -75,6 +75,115 @@ TEST(ShaderCompositingContract, WaterSamplesTheResolvedSceneAtFarDepth) {
     EXPECT_EQ(source.find("refraction_depth"), std::string::npos);
 }
 
+TEST(FarWorldPositionContract, EveryPositionReadIncludingNeighborsUsesTheSharedHelper) {
+    const char* files[]{"lighting_pass.frag",
+                        "ssao.frag",
+                        "ssao_gtao.frag",
+                        "ssao_bilateral_upsample.frag",
+                        "scent_decal.frag",
+                        "debug_view.frag"};
+    const std::size_t expected_calls[]{2, 2, 3, 2, 1, 1};
+    for (std::size_t i = 0; i < 6; ++i) {
+        SCOPED_TRACE(files[i]);
+        const auto source = ReadShader(std::filesystem::path("res/shaders") / files[i]);
+        ExpectContains(source, "#include \"far_world_position.glsl\"");
+        EXPECT_EQ(CountOccurrences(source, "farWorldPosition("), expected_calls[i]);
+        EXPECT_EQ(source.find("texture(gPosition"), std::string::npos);
+        EXPECT_EQ(source.find("texelFetch(gPosition"), std::string::npos);
+    }
+    const auto helper = ReadShader("res/shaders/far_world_position.glsl");
+    ExpectContains(helper, "uniform int u_farWorldLadder = 0;");
+    ExpectContains(helper, "if (u_farWorldLadder == 0)");
+    ExpectContains(helper, "position = texture(storedPosition, uv).rgb;");
+    ExpectContains(helper, "depth <= 0.0");
+    ExpectContains(helper, "abs(q.w) <= 1e-8");
+    ExpectContains(helper, "any(isnan(q)) || any(isinf(q))");
+    ExpectContains(helper, "vec4(uv * 2.0 - 1.0, depth, 1.0)");
+    ExpectContains(helper, "length(reconstructed) > FAR_WORLD_POSITION_THRESHOLD");
+    ExpectContains(helper, "(floor(uv * textureSizePixels) + 0.5) / textureSizePixels");
+    EXPECT_EQ(helper.find("depth * 2.0"), std::string::npos);
+}
+
+TEST(FarWorldFogContract, FinalFadeFollowsBothCapsAndKeepsUnderwaterSeparate) {
+    const auto source = ReadShader("res/shaders/volumetric_lighting.frag");
+    const auto compose = ExtractBlock(source, "vec4 composeFinalFog(");
+    ExpectContains(compose, "float fog = min(analyticFog, 0.94);");
+    ExpectContains(compose, "float outFog = clamp(fog * fx.a + fxFog, 0.0, 0.94);");
+    const auto fade = compose.find("float finalTransmittance");
+    ASSERT_NE(fade, std::string::npos);
+    EXPECT_LT(compose.find("fog = outFog;"), fade);
+    EXPECT_EQ(compose.find("0.94", fade), std::string::npos);
+    ExpectContains(compose, "(1.0 - fog) * aerialOuterFade(rawRayDistance, 16384.0)");
+    ExpectContains(source, "1.0 - smoothstep(0.9 * outerRadius, outerRadius, rayDistance)");
+    const auto main = ExtractBlock(source, "void main()");
+    ExpectContains(main, "float dist = min(rawRayDistance, u_aerialMaxDistance);");
+    ExpectContains(main, "rawRayDistance = length(viewPosition);");
+    ExpectContains(main, "clamp(murk, 0.0, 0.92)");
+    EXPECT_LT(main.find("if (u_underwater > 0.5)"), main.find("composeFinalFog("));
+}
+
+TEST(FarWorldPositionContract, EffectiveFrameProjectionAndPostOverrideDistanceSeams) {
+    const auto pipeline = ReadShader("src/luminumbra_client/rendering/RenderPipeline.cpp");
+    for (const char* name : {"gbuffer", "plant", "ssao", "debug_view", "ground_decal",
+                             "lighting", "skybox", "water", "aerial"}) {
+        const auto body = ExtractBlock(
+            pipeline, std::string("RenderContext RenderPipeline::make_") + name + "_context(");
+        ExpectContains(body, "m_frame_far_selection.effective == FarWorldMode::Ladder");
+        ExpectContains(body, "m_frame_prepared.projection");
+        ExpectContains(body, "m_taau_jitter_ndc");
+    }
+    const auto aerial =
+        ExtractBlock(pipeline, "RenderContext RenderPipeline::make_aerial_context(");
+    EXPECT_LT(aerial.find("atmo = *s_atmos_override;"), aerial.find("ctx.aerial_max_distance ="));
+    ExpectContains(aerial, "World::kFarOuterRadiusMeters");
+    const auto context = ReadShader("src/luminumbra_client/rendering/RenderContext.h");
+    ExpectContains(context, "selected_projection[2][0] += jitter.x;");
+    ExpectContains(context, "selected_projection[2][1] += jitter.y;");
+    const char* passes[]{
+        "SsaoPass", "AerialPass", "LightingPass", "GroundDecalPass", "DebugViewPass"};
+    for (const char* pass : passes) {
+        const auto source =
+            ReadShader(std::filesystem::path("src/luminumbra_client/rendering/passes") /
+                       (std::string(pass) + ".cpp"));
+        ExpectContains(source, "ctx.far_world_ladder ? 1 : 0");
+        ExpectContains(source, "ctx.gbuffer_inverse_projection");
+    }
+    for (const char* pass : {"WaterPass", "SkyboxPass"}) {
+        const auto source =
+            ReadShader(std::filesystem::path("src/luminumbra_client/rendering/passes") /
+                       (std::string(pass) + ".cpp"));
+        ExpectContains(source, "ctx.far_world_ladder");
+        ExpectContains(source,
+                       std::string(pass) == "WaterPass" ? "ctx.gbuffer_projection"
+                                                        : "ctx.gbuffer_inverse_projection");
+    }
+    // These existing depth consumers use the zero-to-one convention. Water
+    // excludes cleared depth before reconstruction; weather keeps its sky fog.
+    const auto water = ReadShader("res/shaders/water.frag");
+    const auto weather = ReadShader("res/shaders/weather_system.frag");
+    ExpectContains(water, "float z = depth;");
+    ExpectContains(weather, "float z = depth;");
+}
+
+TEST(FarWorldPositionContract, EveryGbufferDepthWriterConsumesTheSharedLadderProjection) {
+    const auto gbuffer = ReadShader("src/luminumbra_client/rendering/passes/GBufferPass.cpp");
+    for (const char* name : {"chunks", "static_meshes", "skinned_meshes"}) {
+        const auto body = ExtractBlock(
+            gbuffer, std::string("void GBufferPass::geometry_pass_") + name + "(");
+        ExpectContains(body, "ctx.gbuffer_projection");
+        ExpectContains(body, "if (!ctx.far_world_ladder)");
+    }
+    // Tree impostors inherit the static writer's projection, including jitter.
+    ExpectContains(gbuffer, "m_tree_impostor_shader->setMat4(\"u_proj\", static_proj);");
+    const auto plant = ReadShader("src/luminumbra_client/rendering/passes/PlantProcgenPass.cpp");
+    ExpectContains(plant, "ctx.far_world_ladder");
+    ExpectContains(plant, "? ctx.gbuffer_projection");
+    ExpectContains(plant, "m_shader->setMat4(\"projection\", projection);");
+    const auto pipeline = ReadShader("src/luminumbra_client/rendering/RenderPipeline.cpp");
+    const auto stage = ExtractBlock(pipeline, "void RenderPipeline::execute_stage_gbuffer(");
+    ExpectContains(stage, "? gbuffer_ctx.gbuffer_projection");
+}
+
 TEST(ShaderCompositingContract, CloudAndAuroraGatesCoverTheFullStormSlab) {
     const std::string source = ReadShader("res/shaders/enhanced_skybox.frag");
     ASSERT_FALSE(source.empty());

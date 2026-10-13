@@ -48,8 +48,8 @@ void PlantProcgenPass::init_buffers() {
     glVertexAttribPointer(
         3, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), reinterpret_cast<void*>(offsetof(Vertex, color)));
     glBindVertexArray(0);
+    // The element-array binding is VAO state; unbinding it with VAO 0 is invalid in core GL.
     glBindBuffer(GL_ARRAY_BUFFER, 0);
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
 }
 
 void PlantProcgenPass::destroy_buffers() {
@@ -102,15 +102,16 @@ void PlantProcgenPass::set_plants(const std::vector<Vertex>& vertices,
         glBufferSubData(GL_ARRAY_BUFFER, 0, vbytes, vertices.data());
     }
 
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, m_ebo);
+    // Upload indices through a VAO-independent target. Keep the caller's VAO
+    // binding and every VAO's EBO attachment unchanged, including m_vao's.
+    glBindBuffer(GL_ARRAY_BUFFER, m_ebo);
     if (ibytes > m_ebo_capacity_bytes) {
-        glBufferData(GL_ELEMENT_ARRAY_BUFFER, ibytes, indices.data(), GL_STATIC_DRAW);
+        glBufferData(GL_ARRAY_BUFFER, ibytes, indices.data(), GL_STATIC_DRAW);
         m_ebo_capacity_bytes = ibytes;
     } else {
-        glBufferSubData(GL_ELEMENT_ARRAY_BUFFER, 0, ibytes, indices.data());
+        glBufferSubData(GL_ARRAY_BUFFER, 0, ibytes, indices.data());
     }
     glBindBuffer(GL_ARRAY_BUFFER, 0);
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
 
     m_index_count = indices.size();
     m_has_geometry = true;
@@ -125,8 +126,11 @@ void PlantProcgenPass::execute(const RenderContext& ctx, const Camera& camera) {
     }
 
     const glm::mat4 view = camera.GetViewMatrix();
-    const glm::mat4 projection = camera.GetProjectionMatrix(static_cast<int>(ctx.screen_width),
-                                                            static_cast<int>(ctx.screen_height));
+    const glm::mat4 projection =
+        ctx.far_world_ladder
+            ? ctx.gbuffer_projection
+            : camera.GetProjectionMatrix(static_cast<int>(ctx.screen_width),
+                                          static_cast<int>(ctx.screen_height));
 
     m_shader->use();
     m_shader->setMat4("projection", projection);

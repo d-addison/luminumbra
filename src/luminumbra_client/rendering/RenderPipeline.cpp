@@ -717,6 +717,9 @@ bool RenderPipeline::capture_upscale_seam_parity(const Camera& camera,
 // byte-identical to the production ctx.
 RenderContext RenderPipeline::make_ssao_context(const Camera& camera) {
     RenderContext ctx;
+    ctx.set_gbuffer_depth_contract(m_frame_far_selection.effective == FarWorldMode::Ladder,
+                                   m_frame_prepared.projection,
+                                   m_taau_jitter_ndc);
     ctx.camera = &camera;
     ctx.screen_width = m_screen_width;
     ctx.screen_height = m_screen_height;
@@ -729,6 +732,8 @@ RenderContext RenderPipeline::make_ssao_context(const Camera& camera) {
         "gbuffer_position", m_gbuffer_pass->gbuffer().position_texture);
     ctx.gbuffer_normal =
         m_render_registry.adopt_texture("gbuffer_normal", m_gbuffer_pass->gbuffer().normal_texture);
+    ctx.gbuffer_depth =
+        m_render_registry.adopt_texture("gbuffer_depth", m_gbuffer_pass->gbuffer().depth_texture);
     return ctx;
 }
 
@@ -737,6 +742,9 @@ RenderContext RenderPipeline::make_ssao_context(const Camera& camera) {
 // the frame camera for Depth-mode near/far linearization. Render-only; never hashed.
 RenderContext RenderPipeline::make_debug_view_context(const Camera& camera) {
     RenderContext ctx;
+    ctx.set_gbuffer_depth_contract(m_frame_far_selection.effective == FarWorldMode::Ladder,
+                                   m_frame_prepared.projection,
+                                   m_taau_jitter_ndc);
     ctx.camera = &camera;
     ctx.screen_width = m_screen_width;
     ctx.screen_height = m_screen_height;
@@ -756,6 +764,9 @@ RenderContext RenderPipeline::make_debug_view_context(const Camera& camera) {
 // view. Render-only (one-way scent mirror); never feeds world_hash.
 RenderContext RenderPipeline::make_ground_decal_context(const Camera& camera) {
     RenderContext ctx;
+    ctx.set_gbuffer_depth_contract(m_frame_far_selection.effective == FarWorldMode::Ladder,
+                                   m_frame_prepared.projection,
+                                   m_taau_jitter_ndc);
     ctx.camera = &camera;
     ctx.screen_width = m_screen_width;
     ctx.screen_height = m_screen_height;
@@ -764,6 +775,8 @@ RenderContext RenderPipeline::make_ground_decal_context(const Camera& camera) {
     ctx.registry = &m_render_registry;
     ctx.gbuffer_position = m_render_registry.adopt_texture(
         "gbuffer_position", m_gbuffer_pass->gbuffer().position_texture);
+    ctx.gbuffer_depth =
+        m_render_registry.adopt_texture("gbuffer_depth", m_gbuffer_pass->gbuffer().depth_texture);
     return ctx;
 }
 
@@ -771,6 +784,9 @@ RenderContext RenderPipeline::make_ground_decal_context(const Camera& camera) {
 // per-frame wall-clock snapshot that feeds u_time leaf sway). Render-only.
 RenderContext RenderPipeline::make_plant_context() {
     RenderContext ctx;
+    ctx.set_gbuffer_depth_contract(m_frame_far_selection.effective == FarWorldMode::Ladder,
+                                   m_frame_prepared.projection,
+                                   m_taau_jitter_ndc);
     ctx.registry = &m_render_registry;
     ctx.screen_width = m_screen_width;
     ctx.screen_height = m_screen_height;
@@ -830,6 +846,9 @@ RenderContext RenderPipeline::make_foliage_context(const Camera& camera) {
 // Lighting GPU timer leaves the measured GPU work and every pixel unchanged.
 RenderContext RenderPipeline::make_lighting_context(const Camera& camera) {
     RenderContext ctx;
+    ctx.set_gbuffer_depth_contract(m_frame_far_selection.effective == FarWorldMode::Ladder,
+                                   m_frame_prepared.projection,
+                                   m_taau_jitter_ndc);
     ctx.render_view = m_authored_view.get();
     if (m_gbuffer_pass->gbuffer().authored_texture)
         ctx.authored_surface = m_render_registry.adopt_texture(
@@ -931,6 +950,9 @@ RenderContext RenderPipeline::make_lighting_context(const Camera& camera) {
 // skybox_draws bump rides ctx.skybox_draw_counter (Group M out-pointer).
 RenderContext RenderPipeline::make_skybox_context(const Camera& camera) {
     RenderContext ctx;
+    ctx.set_gbuffer_depth_contract(m_frame_far_selection.effective == FarWorldMode::Ladder,
+                                   m_frame_prepared.projection,
+                                   m_taau_jitter_ndc);
     ctx.camera = &camera;
     ctx.screen_width = m_screen_width;
     ctx.screen_height = m_screen_height;
@@ -982,6 +1004,9 @@ RenderContext RenderPipeline::make_skybox_context(const Camera& camera) {
 // and the per-frame time snapshot. The draw list travels separately (WaterPassInput).
 RenderContext RenderPipeline::make_water_context(const Camera& camera) {
     RenderContext ctx;
+    ctx.set_gbuffer_depth_contract(m_frame_far_selection.effective == FarWorldMode::Ladder,
+                                   m_frame_prepared.projection,
+                                   m_taau_jitter_ndc);
     ctx.camera = &camera;
     ctx.screen_width = m_screen_width;
     ctx.screen_height = m_screen_height;
@@ -1089,6 +1114,9 @@ RenderContext RenderPipeline::make_luminance_meter_context() {
 RenderContext RenderPipeline::make_gbuffer_context(const Camera& camera,
                                                    const glm::vec4 frustum_planes[6]) {
     RenderContext ctx;
+    ctx.set_gbuffer_depth_contract(m_frame_far_selection.effective == FarWorldMode::Ladder,
+                                   m_frame_prepared.projection,
+                                   m_taau_jitter_ndc);
     ctx.camera = &camera;
     ctx.screen_width = m_screen_width;
     ctx.screen_height = m_screen_height;
@@ -2508,7 +2536,8 @@ void RenderPipeline::prepare_frame(entt::registry& registry,
 
     //  TAAU: per-frame Halton[2,3] sub-pixel jitter for the G-buffer projection. Computed ONLY
     // when TAAU is on; (0,0) otherwise so the default render (and frustum culling, which uses the
-    // UNJITTERED projection above) is byte-identical. GBufferPass applies it; the resolve
+    // UNJITTERED projection above) is byte-identical. The shared Ladder depth
+    // contract applies it (GBufferPass retains the compatibility path); the resolve
     // un-jitters the motion vectors with the same offset.
     if (m_taau_enabled && m_screen_width > 0 && m_screen_height > 0) {
         auto halton = [](unsigned i, unsigned base) {
@@ -2549,7 +2578,8 @@ void RenderPipeline::prepare_frame(entt::registry& registry,
 
 void RenderPipeline::prepare_camera_projection(const Camera& camera) {
     // One production seam publishes the unjittered projection, culling planes
-    // and capture metadata. Passes still upload their own jittered projections.
+    // and capture metadata. The depth contract adds jitter to this matrix for
+    // all Ladder G-buffer writers and reconstruction consumers.
     const auto projection = camera.GetProjectionMatrix(static_cast<int>(m_screen_width),
                                                        static_cast<int>(m_screen_height));
     const auto view = camera.GetViewMatrix();
@@ -2723,7 +2753,9 @@ void RenderPipeline::execute_stage_gbuffer(const Camera& camera) {
             RenderViewDescription description;
             const glm::mat4 view = camera.GetViewMatrix();
             const glm::mat4 projection =
-                camera.GetProjectionMatrix(m_screen_width, m_screen_height);
+                gbuffer_ctx.far_world_ladder
+                    ? gbuffer_ctx.gbuffer_projection
+                    : camera.GetProjectionMatrix(m_screen_width, m_screen_height);
             for (size_t i = 0; i < 16; ++i) {
                 description.view[i] = glm::value_ptr(view)[i];
                 description.projection[i] = glm::value_ptr(projection)[i];
@@ -3522,6 +3554,9 @@ void RenderPipeline::init_sky_lut() {
 // LUMIN_ATMOS override. Render-only; never feeds world_hash.
 RenderContext RenderPipeline::make_aerial_context(const Camera& camera) {
     RenderContext ctx;
+    ctx.set_gbuffer_depth_contract(m_frame_far_selection.effective == FarWorldMode::Ladder,
+                                   m_frame_prepared.projection,
+                                   m_taau_jitter_ndc);
     ctx.camera = &camera;
     ctx.screen_width = m_screen_width;
     ctx.screen_height = m_screen_height;
@@ -3564,7 +3599,9 @@ RenderContext RenderPipeline::make_aerial_context(const Camera& camera) {
         atmo = *s_atmos_override;
     }
     ctx.aerial_density = atmo.aerial_density;
-    ctx.aerial_max_distance = atmo.aerial_max_distance;
+    ctx.aerial_max_distance = ctx.far_world_ladder
+                                  ? static_cast<float>(World::kFarOuterRadiusMeters)
+                                  : atmo.aerial_max_distance;
     ctx.inscatter_strength = atmo.inscatter_strength;
     ctx.atmosphere_warmth = atmo.warmth;
     return ctx;

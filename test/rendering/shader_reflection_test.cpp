@@ -394,6 +394,40 @@ TEST_P(PassLayoutValidation, RealShaderMatchesRegisteredLayoutNonVacuously) {
     glDeleteProgram(prog);
 }
 
+TEST_P(PassLayoutValidation, FarWorldDepthUniformsAndFloatDepthRemainActive) {
+    const std::map<std::string, std::string> depth_samplers{{"lighting", "u_sceneDepth"},
+                                                            {"ssao", "gDepth"},
+                                                            {"ssao_gtao", "gDepth"},
+                                                            {"ssao_bilateral_upsample", "gDepth"},
+                                                            {"scent_decal", "gDepth"},
+                                                            {"debug_view", "gDepth"},
+                                                            {"aerial_perspective", "gDepth"}};
+    const auto found = depth_samplers.find(GetParam());
+    if (found == depth_samplers.end())
+        return;
+    const auto* entry = FindPassShaderLayout(GetParam());
+    ASSERT_NE(entry, nullptr);
+    const std::string root = LUMINUMBRA_SOURCE_ROOT;
+    std::string vertex, fragment, error;
+    ASSERT_TRUE(ReadShaderSource(root + "/" + entry->vert, vertex, error)) << error;
+    ASSERT_TRUE(ReadShaderSource(root + "/" + entry->frag, fragment, error)) << error;
+    const auto program = LinkProgram(vertex.c_str(), fragment.c_str(), error);
+    ASSERT_NE(program, 0u) << error;
+    const auto layout = ReflectProgramLayout(program);
+    const auto* depth = layout.find_sampler(found->second);
+    ASSERT_NE(depth, nullptr);
+    EXPECT_EQ(depth->type, static_cast<GLenum>(GL_SAMPLER_2D));
+    const char* inverse =
+        GetParam() == "aerial_perspective" ? "u_inverseProjection" : "u_gbufferInverseProjection";
+    EXPECT_GE(glGetUniformLocation(program, inverse), 0);
+    const auto mode_location = glGetUniformLocation(program, "u_farWorldLadder");
+    ASSERT_GE(mode_location, 0);
+    GLint mode = -1;
+    glGetUniformiv(program, mode_location, &mode);
+    EXPECT_EQ(mode, 0) << "Existing callers must default to the Legacy path";
+    glDeleteProgram(program);
+}
+
 INSTANTIATE_TEST_SUITE_P(RegisteredPasses,
                          PassLayoutValidation,
                          ::testing::ValuesIn(RegisteredLayoutNames()),
