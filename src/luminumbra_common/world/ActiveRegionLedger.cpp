@@ -32,10 +32,6 @@ bool ValidKey(RegionKey key) {
     // Existing packed chunk identity: [-2^20, 2^20) chunks / 32.
     return key.x >= -32768 && key.x < 32768 && key.z >= -32768 && key.z < 32768;
 }
-bool ValidAnchor(const Vec3& p) {
-    return std::isfinite(p.x) && std::isfinite(p.y) && std::isfinite(p.z) && p.x >= -16777216.0f &&
-           p.x < 16777216.0f && p.z >= -16777216.0f && p.z < 16777216.0f;
-}
 int Rank(const ActiveRegionRecord& record) {
     return record.pinned ? 0 : record.edited ? 1 : 2;
 }
@@ -65,20 +61,30 @@ ActiveRegionLedger::ActiveRegionLedger(RegionSchedulerConfig config, const World
     if (!ValidConfig(config))
         throw std::invalid_argument("Invalid active-region scheduler configuration");
 }
+bool ActiveRegionLedger::valid_anchor(const Vec3& p) noexcept {
+    return std::isfinite(p.x) && std::isfinite(p.y) && std::isfinite(p.z) && p.x >= -16777216.0f &&
+           p.x < 16777216.0f && p.z >= -16777216.0f && p.z < 16777216.0f;
+}
 RegionKey ActiveRegionLedger::region_at(const Vec3& position) {
-    if (!ValidAnchor(position))
+    if (!valid_anchor(position))
         throw std::invalid_argument("Invalid simulation anchor");
     return {static_cast<std::int32_t>(std::floor(static_cast<double>(position.x) / 512.0)),
             static_cast<std::int32_t>(std::floor(static_cast<double>(position.z) / 512.0))};
 }
 void ActiveRegionLedger::set_local_anchor(const Vec3& walking_feet) {
-    if (!ValidAnchor(walking_feet))
+    if (!valid_anchor(walking_feet))
         throw std::invalid_argument("Invalid simulation anchor");
     m_localAnchor = walking_feet;
     // Canonicalise signed zero, including anchor hashes and persisted bits.
     for (int axis = 0; axis < 3; ++axis)
         if ((*m_localAnchor)[axis] == 0.0f)
             (*m_localAnchor)[axis] = 0.0f;
+}
+bool ActiveRegionLedger::try_set_local_anchor(const Vec3& walking_feet) noexcept {
+    if (!valid_anchor(walking_feet))
+        return false;
+    set_local_anchor(walking_feet);
+    return true;
 }
 ActiveRegionRecord& ActiveRegionLedger::activate(RegionKey key, const WorldClock& clock) {
     if (!ValidKey(key) || clock.tick() < m_headerTick)
@@ -129,6 +135,9 @@ void ActiveRegionLedger::restore_clock(const WorldClock& clock) {
     // with and recovery cannot rewrite history.
     m_headerTick = clock.tick();
 }
+void ActiveRegionLedger::acknowledge_world_clock(const WorldClock& clock) noexcept {
+    m_headerTick = std::max(m_headerTick, clock.tick());
+}
 std::uint32_t ActiveRegionLedger::phase(RegionKey key, std::uint8_t shift) {
     if (shift > 16)
         throw std::invalid_argument("Invalid region cadence shift");
@@ -150,7 +159,9 @@ RegionResumeWindow ActiveRegionLedger::resume_window(RegionKey key,
                       system_cap,
                       std::uint64_t{clock.calendar().dayLengthTicks}})};
 }
-void ActiveRegionLedger::visit(const Vec3& anchor, const WorldClock& clock) {
+void ActiveRegionLedger::visit(const Vec3& anchor,
+                               const WorldClock& clock,
+                               RegionRejections& rejected) {
     const auto centre = region_at(anchor);
     // The fixed disc intersects a region's closed XZ square; corner-only
     // AABB candidates outside the circle are excluded. Streaming is unrelated.
@@ -163,6 +174,10 @@ void ActiveRegionLedger::visit(const Vec3& anchor, const WorldClock& clock) {
             const double dz = std::max({z * 512.0 - anchor.z, 0.0, anchor.z - (z + 1) * 512.0});
             if (dx * dx + dz * dz > 512.0 * 512.0)
                 continue;
+            if (!m_records.contains(key) && m_records.size() == kMaxRegions) {
+                ++rejected.capacity;
+                continue;
+            }
             auto& record = activate(key, clock);
             record.visited = true;
             record.last_proximity = clock.tick();
@@ -187,26 +202,36 @@ ActiveRegionLedger::schedule_in_place(const WorldClock& clock,
     // older, and scheduling at an already elapsed tick would re-run it.
     if (clock.tick() <= m_headerTick)
         throw std::invalid_argument("Region schedule requires a new absolute tick");
-    const auto anchors = replicated_anchors.value_or(std::span<const Vec3>{});
-    for (const auto& anchor : anchors)
-        if (!ValidAnchor(anchor))
-            throw std::invalid_argument("Invalid simulation anchor");
-    for (const auto& units : work)
-        if (!m_records.contains(units.key))
-            throw std::invalid_argument("Work refers to an inactive region");
-    if (m_localAnchor && !replicated_anchors)
-        visit(*m_localAnchor, clock);
-    for (const auto& anchor : anchors)
-        visit(anchor, clock);
-
     RegionSchedule result;
     result.tick = clock.tick();
+    const auto all_anchors = replicated_anchors.value_or(std::span<const Vec3>{});
+    std::vector<Vec3> anchors;
+    anchors.reserve(all_anchors.size());
+    for (const auto& anchor : all_anchors) {
+        if (valid_anchor(anchor))
+            anchors.push_back(anchor);
+        else
+            ++result.rejected.anchors;
+    }
+    std::vector<RegionWork> accepted_work;
+    accepted_work.reserve(work.size());
+    for (const auto& units : work) {
+        if (m_records.contains(units.key))
+            accepted_work.push_back(units);
+        else
+            ++result.rejected.work;
+    }
+    if (m_localAnchor && !replicated_anchors)
+        visit(*m_localAnchor, clock, result.rejected);
+    for (const auto& anchor : anchors)
+        visit(anchor, clock, result.rejected);
+
     std::vector<RegionKey> order;
     for (auto& [key, record] : m_records) {
         record.pressure = 0;
         order.push_back(key);
     }
-    for (const auto& units : work) {
+    for (const auto& units : accepted_work) {
         const auto total = Sum(Sum(units.region_ticks, units.entity_updates),
                                Sum(units.water_cells, units.page_updates));
         auto& record = m_records.at(units.key);
@@ -311,6 +336,11 @@ ActiveRegionLedger::schedule_in_place(const WorldClock& clock,
         Append(trace, static_cast<std::uint8_t>(transition.from), 1);
         Append(trace, static_cast<std::uint8_t>(transition.to), 1);
     }
+    if (result.rejected.any()) {
+        Append(trace, result.rejected.anchors, 4);
+        Append(trace, result.rejected.work, 4);
+        Append(trace, result.rejected.capacity, 4);
+    }
     result.digest = Persistence::StableChecksum(trace);
     return result;
 }
@@ -401,7 +431,7 @@ bool ActiveRegionLedger::decode(std::string_view bytes,
         Vec3 anchor{};
         for (int axis = 0; axis < 3; ++axis)
             anchor[axis] = std::bit_cast<float>(static_cast<std::uint32_t>(in.read(4)));
-        if (!ValidAnchor(anchor) || (!has_anchor && anchor != Vec3{}))
+        if (!valid_anchor(anchor) || (!has_anchor && anchor != Vec3{}))
             return false;
         if (has_anchor)
             result.set_local_anchor(anchor);

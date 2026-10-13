@@ -1443,6 +1443,34 @@
       "source": "documented DEM fixtures"
     },
     {
+      "bytes": 960,
+      "license": "MIT",
+      "path": "test/fixtures/far_volume/FoundationFixture.h",
+      "sha256": "b3780cfb56beec8ae50f5f675e524a97e5dbd168de884e2593b33b5667af5003",
+      "source": "Luminumbra test fixtures"
+    },
+    {
+      "bytes": 3750,
+      "license": "MIT",
+      "path": "test/fixtures/far_volume/export_foundation.cpp",
+      "sha256": "bcf13fd63f387d36209f8f32202a19db11c49e100b679916e490c7485badb6c4",
+      "source": "Luminumbra test fixtures"
+    },
+    {
+      "bytes": 6108,
+      "license": "MIT",
+      "path": "test/fixtures/far_volume/foundation-reference.json",
+      "sha256": "0762d54eb40e14a8063fc400570e594b5dbe4143e12b1d5cba248c87308c7c47",
+      "source": "Luminumbra test fixtures"
+    },
+    {
+      "bytes": 4984,
+      "license": "MIT",
+      "path": "test/fixtures/far_volume/generate_foundation.py",
+      "sha256": "85fdbf74ef6560342e24e185dca907ae3e4f9ca63dbbdf02f370101263abe85e",
+      "source": "Luminumbra test fixtures"
+    },
+    {
       "bytes": 3064,
       "license": "MIT",
       "path": "test/fixtures/smoke_artifact/FixedInputs.h",
