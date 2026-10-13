@@ -279,9 +279,10 @@ void CheckDifferentTargetPreservesExistingEvidenceAndHasBoundedRetention() {
 }
 
 TEST(CrashReportTest, DifferentTargetPreservesExistingEvidenceAndHasBoundedRetention) {
-    ASSERT_EXIT(RunCaptureChecks(&CheckDifferentTargetPreservesExistingEvidenceAndHasBoundedRetention),
-                ::testing::ExitedWithCode(EXIT_SUCCESS),
-                "");
+    ASSERT_EXIT(
+        RunCaptureChecks(&CheckDifferentTargetPreservesExistingEvidenceAndHasBoundedRetention),
+        ::testing::ExitedWithCode(EXIT_SUCCESS),
+        "");
 }
 
 #if !defined(_WIN32)

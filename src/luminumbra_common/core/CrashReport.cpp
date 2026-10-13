@@ -59,9 +59,13 @@ struct ReportTarget {
 
 bool IsSameReportFile(const ReportTarget& slot) {
 #if defined(_WIN32)
-    const HANDLE probe = CreateFileW(slot.report.c_str(), FILE_READ_ATTRIBUTES,
+    const HANDLE probe = CreateFileW(slot.report.c_str(),
+                                     FILE_READ_ATTRIBUTES,
                                      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                                     nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+                                     nullptr,
+                                     OPEN_EXISTING,
+                                     FILE_ATTRIBUTE_NORMAL,
+                                     nullptr);
     if (probe == INVALID_HANDLE_VALUE) {
         return false;
     }
@@ -91,11 +95,15 @@ Target OpenFreshReport(const std::filesystem::path& directory,
     for (unsigned int suffix = 0; suffix < 1024; ++suffix) {
         report = directory / (stem + (suffix == 0 ? "" : "-" + std::to_string(suffix)) + ".txt");
 #if defined(_WIN32)
-        const HANDLE file = CreateFileW(report.c_str(), GENERIC_WRITE,
+        const HANDLE file = CreateFileW(report.c_str(),
+                                        GENERIC_WRITE,
                                         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                                        nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
-        if (file != INVALID_HANDLE_VALUE || (GetLastError() != ERROR_FILE_EXISTS &&
-                                             GetLastError() != ERROR_ALREADY_EXISTS)) {
+                                        nullptr,
+                                        CREATE_NEW,
+                                        FILE_ATTRIBUTE_NORMAL,
+                                        nullptr);
+        if (file != INVALID_HANDLE_VALUE ||
+            (GetLastError() != ERROR_FILE_EXISTS && GetLastError() != ERROR_ALREADY_EXISTS)) {
             return file;
         }
 #else
@@ -595,7 +603,8 @@ bool InstallCrashCapture(const std::filesystem::path& crash_dir, std::string_vie
     }
     if (target_count == targets.size()) {
         std::fputs("Crash capture: eight retained report targets exhausted; "
-                   "previous target remains installed\n", stderr);
+                   "previous target remains installed\n",
+                   stderr);
         return false;
     }
 
