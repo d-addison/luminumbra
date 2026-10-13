@@ -2389,9 +2389,10 @@ void ArmSchedulerFault(GameSession& session,
 // save validates every region file, so restore a clean miss before saving.
 void RemoveFaultRegionFile(const GameSession& session) {
     std::error_code error;
-    fs::remove(P::WorldSaveService::region_file_path(
-                   session.GetWorldSaveDir(), kFaultRegion.x, kFaultRegion.z),
-               error);
+    EXPECT_TRUE(fs::remove(P::WorldSaveService::region_file_path(
+                               session.GetWorldSaveDir(), kFaultRegion.x, kFaultRegion.z),
+                           error));
+    EXPECT_FALSE(error) << error.message();
 }
 
 // The session clock produces at most two ticks per frame. Single-tick frames run
@@ -2436,6 +2437,10 @@ void RunSchedulerFaultCase(std::uint64_t k, std::uint64_t start) {
     ASSERT_TRUE(loaded.LoadWorld(session.GetMetadata().worldId));
     EXPECT_EQ(loaded.GetSimulationTickCount(), k);
     EXPECT_FALSE(loaded.GetRegionSchedulerFault().has_value());
+    const auto saved_hashes = SessionWorldSubHashes(session);
+    const auto loaded_hashes = SessionWorldSubHashes(loaded);
+    for (const auto& [field, hash] : saved_hashes.items())
+        EXPECT_EQ(loaded_hashes.at(field), hash) << field;
     EXPECT_EQ(SessionWorldHash(loaded), SessionWorldHash(session));
 }
 } // namespace
@@ -2443,7 +2448,11 @@ void RunSchedulerFaultCase(std::uint64_t k, std::uint64_t start) {
 TEST(GameSessionHeadlessWorldTest, SchedulerFaultStopsTheFrameAndLeavesASavableConsistentSession) {
     for (const auto& [k, start] : {std::pair<std::uint64_t, std::uint64_t>{3, 3},
                                    std::pair<std::uint64_t, std::uint64_t>{3, 2},
-                                   std::pair<std::uint64_t, std::uint64_t>{4, 4}}) {
+                                   std::pair<std::uint64_t, std::uint64_t>{4, 4},
+                                   // Cross the first storm-spawn epoch so reconstruction
+                                   // also covers storm history when the next tick faults.
+                                   std::pair<std::uint64_t, std::uint64_t>{46, 46},
+                                   std::pair<std::uint64_t, std::uint64_t>{46, 45}}) {
         ASSERT_NO_FATAL_FAILURE(RunSchedulerFaultCase(k, start));
     }
 }

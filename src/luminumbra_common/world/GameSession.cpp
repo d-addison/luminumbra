@@ -1107,7 +1107,7 @@ bool GameSession::CreateWorldInternal(const std::string& name,
     metadata.worldId = transient ? std::string{} : GenerateWorldId();
     metadata.creationTime = std::time(nullptr);
     metadata.spawnPoint = Vec3(0, 100, 0);
-    const auto worldPath = RuntimeRoot(m_rootPath) / "worlds/saves" / metadata.worldId;
+    const auto worldPath = RuntimeRoot(m_rootPath) / "worlds" / "saves" / metadata.worldId;
     if (!transient) {
         try {
             fs::create_directories(worldPath);
@@ -1247,7 +1247,7 @@ bool GameSession::LoadWorld(const std::string& worldId) {
     // reads the directory. The identifier check mirrors InspectSavedWorld's.
     if (!worldId.empty() && worldId != "." && worldId != ".." &&
         worldId.find_first_of("/\\:") == std::string::npos) {
-        const fs::path candidate = RuntimeRoot(m_rootPath) / "worlds/saves" / worldId;
+        const fs::path candidate = RuntimeRoot(m_rootPath) / "worlds" / "saves" / worldId;
         std::error_code status_error;
         if (fs::is_directory(candidate, status_error) && !fs::is_symlink(candidate, status_error)) {
             std::vector<std::string> recovery_errors;
@@ -1280,7 +1280,7 @@ bool GameSession::LoadWorld(const std::string& worldId) {
             return false;
         }
     }
-    const std::string worldPath = (RuntimeRoot(m_rootPath) / "worlds/saves" / worldId).string();
+    const fs::path worldPath = RuntimeRoot(m_rootPath) / "worlds" / "saves" / worldId;
     const auto& preset_to_load = saved.preset_path;
     const TerrainPresetLoadResult preset = LoadTerrainPreset(preset_to_load);
     if (!preset.ok) {
@@ -1332,8 +1332,8 @@ bool GameSession::LoadWorld(const std::string& worldId) {
     // record is all-zeros by contract. OFF -> null -> byte-identical.
     InitializeEnergyFieldState();
     if (m_energyFieldState && !m_activeRegionsEnabled) {
-        const std::string recordPath = worldPath + "/aether_state.efs";
-        std::ifstream recordFile(recordPath);
+        const fs::path recordPath = worldPath / "aether_state.efs";
+        std::ifstream recordFile(recordPath, std::ios::binary);
         if (recordFile) {
             std::ostringstream recordBytes;
             recordBytes << recordFile.rdbuf();
@@ -1343,7 +1343,7 @@ bool GameSession::LoadWorld(const std::string& worldId) {
                                      m_energyFieldState->page_count());
             } else {
                 LUMINUMBRA_CORE_WARN("Aether state record UNREADABLE at {} - starting all-zero.",
-                                     recordPath);
+                                     recordPath.string());
             }
         }
     }
@@ -1787,6 +1787,10 @@ void GameSession::LatchRegionFault(std::uint64_t tick, std::string message) {
     m_activeRegionLedger.clear_completed_work();
     m_regionCompletedWork.clear();
     m_regionWork.clear();
+    // A fault can stop the tick before the ambient fields run. These fields are
+    // reconstructed from the saved clock on load, so align them with that same
+    // clock now without running any consumers or discarding stateful authority.
+    RestoreAmbientFieldsAtTick(tick);
     LUMINUMBRA_CORE_ERROR("Region scheduler fault at tick {}: {}", tick, message);
 }
 void GameSession::SetLocalPlayerSimulationPosition(const Vec3& feet, bool walking) {
@@ -2156,12 +2160,23 @@ void GameSession::RestoreWorldClock(const WorldClock& clock) {
     m_simulationClock.reset(clock.tick());
     if (m_energyFieldState)
         m_energyFieldState->ResetEmptyAtTick(clock.tick());
+    RestoreAmbientFieldsAtTick(clock.tick());
+}
+
+void GameSession::RestoreAmbientFieldsAtTick(std::uint64_t tick) {
+    if (m_activeRegionsEnabled) {
+        // Rebuild projections from authority without advancing regional ages or consumers.
+        // Regional RestoreAtTick only stamps weather's tick; it does not update wind.
+        if (m_windFieldSystem)
+            m_windFieldSystem->Update(tick, m_ambientFieldAnchor);
+        ProjectRegionalWeather(true);
+    }
+    if (m_weatherSystem && m_windFieldSystem)
+        m_weatherSystem->RestoreAtTick(tick, m_ambientFieldAnchor, *m_windFieldSystem);
+    if (m_aetherFieldSystem)
+        m_aetherFieldSystem->Update(tick, m_ambientFieldAnchor, m_windFieldSystem.get());
     if (m_activeRegionsEnabled)
-        m_windFieldSystem->Update(clock.tick(), m_ambientFieldAnchor);
-    ProjectRegionalWeather(true);
-    m_weatherSystem->RestoreAtTick(clock.tick(), m_ambientFieldAnchor, *m_windFieldSystem);
-    m_aetherFieldSystem->Update(clock.tick(), m_ambientFieldAnchor, m_windFieldSystem.get());
-    RestoreRegionalScent();
+        RestoreRegionalScent();
 }
 
 namespace {
@@ -2345,7 +2360,7 @@ std::filesystem::path GameSession::GetWorldSaveDir() const {
     if (m_transientWorld || m_metadata.worldId.empty()) {
         return {};
     }
-    return RuntimeRoot(m_rootPath) / "worlds/saves" / m_metadata.worldId;
+    return RuntimeRoot(m_rootPath) / "worlds" / "saves" / m_metadata.worldId;
 }
 
 bool GameSession::SaveWorldState(WorldStateSaveReport* report) {
@@ -2845,7 +2860,7 @@ bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
     // onto the loaded session's tick stream (-4).
     if (m_energyFieldState && !m_activeRegionsEnabled) {
         const fs::path recordPath = save_dir / "aether_state.efs";
-        std::ifstream recordFile(recordPath);
+        std::ifstream recordFile(recordPath, std::ios::binary);
         if (recordFile) {
             std::ostringstream recordBytes;
             recordBytes << recordFile.rdbuf();

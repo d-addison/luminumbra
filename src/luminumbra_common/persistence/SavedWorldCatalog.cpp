@@ -34,7 +34,7 @@ InspectSavedWorld(const fs::path& root, const std::string& world_id, const std::
         return result;
     }
     try {
-        const auto save = root / "worlds/saves" / world_id;
+        const auto save = root / "worlds" / "saves" / world_id;
         if (!fs::is_directory(save) || fs::is_symlink(save))
             return result;
         const auto metadata_path = save / "world_info.json";
@@ -134,7 +134,7 @@ SavedWorldCatalog EnumerateSavedWorlds(const fs::path& root, const std::stop_tok
         return result;
     }
     try {
-        const auto directory = root / "worlds/saves";
+        const auto directory = root / "worlds" / "saves";
         if (!fs::exists(directory))
             return result;
         for (const auto& entry : fs::directory_iterator(directory)) {
