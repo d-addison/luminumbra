@@ -1361,6 +1361,9 @@ private:
 
     // the prepared per-frame state dispatch_stages reads (see prepare_frame).
     FramePrepared m_frame_prepared;
+    void select_frame_far_world(FarWorldSelection selection, const Camera& camera);
+    void prepare_camera_projection(const Camera& camera);
+    nlohmann::json terrain_coverage_camera_metadata() const;
     // the lighting ctx built by execute_stage_lighting, reused by the
     // opaque-snapshot and lightning-overlay stages (its fields are frame-stable —
     // the pre-split code built it once at function scope for exactly this reuse).

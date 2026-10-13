@@ -25,6 +25,7 @@ enum class Call {
     QueryVertex,
     QueryIndex,
     Attribute,
+    Draw,
     Enable
 };
 
@@ -58,6 +59,7 @@ struct FakeDriver final : FarVolumeGpuDriver {
     const int context = 1;
     int current_context = 1;
     bool loaded = true, error = false, bad_call = false, delete_error = false;
+    bool fail_draw = false;
     mutable unsigned validity_calls = 0;
     unsigned operation_count = 0, error_reads = 0;
     unsigned fail_at = 0, zero_at = 0, wrong_size_at = 0;
@@ -217,6 +219,12 @@ struct FakeDriver final : FarVolumeGpuDriver {
         const bool integer = attribute == FarVolumeVertexAttribute::Material;
         vaos[vao].attributes[std::size_t(attribute)] = {
             vbo, stride, offset, integer ? 1 : 3, integer, false};
+    }
+    bool DrawIndexed(std::int32_t count) noexcept override {
+        Step(Call::Draw);
+        if (count <= 0 || !vao || !vaos[vao].live)
+            bad_call = true;
+        return !fail_draw;
     }
     void EnableAttribute(FarVolumeVertexAttribute attribute) noexcept override {
         Step(Call::Enable);
@@ -546,4 +554,22 @@ TEST(FarVolumeGpuBackend, WrongOwnerDestructionTerminates) {
         "");
     resource.reset();
     driver.ExpectBalanced();
+}
+
+TEST(FarVolumeGpuBackend, FailedIndexedSubmissionRestoresBindings) {
+    for (const bool failed : {false, true}) {
+        FakeDriver driver;
+        auto allocation = UploadFarVolumeGpu(Mesh(), driver);
+        ASSERT_TRUE(allocation);
+        driver.fail_draw = failed;
+        EXPECT_EQ(DrawFarVolumeGpu(*allocation, driver), !failed);
+        driver.ExpectOldBindings();
+    }
+    FakeDriver driver;
+    auto allocation = UploadFarVolumeGpu(Mesh(), driver);
+    ASSERT_TRUE(allocation);
+    // Snapshot, bind, draw: an actual driver error also refuses after restoration.
+    driver.fail_at = driver.operation_count + 3;
+    EXPECT_FALSE(DrawFarVolumeGpu(*allocation, driver));
+    driver.ExpectOldBindings();
 }

@@ -122,6 +122,11 @@ uniform vec2 u_jitter_ndc;
 
 // Ladder-only ownership and clipping. All other shared shader paths are inert.
 uniform int u_farWorldLadder;
+#ifdef LUMINUMBRA_FAR_WORLD_LADDER
+uniform float u_farRayBiasMeters;
+// Shared with the vertex stage: exactly the projection used for rasterization.
+uniform mat4 projection;
+#endif
 uniform float u_farOuterRadius;
 uniform float u_farTileEdge;
 uniform int u_farArrivalEligible;
@@ -283,6 +288,27 @@ float triplanar_roughness(vec3 worldPos, vec3 weights, float layer, float scale)
 
 void main()
 {
+#ifdef LUMINUMBRA_FAR_WORLD_LADDER
+    // A program writing gl_FragDepth must assign it on every surviving path.
+    // Live, legacy, static and skinned depth/material outputs stay inert.
+    gl_FragDepth = gl_FragCoord.z;
+    vec3 depthPosition = fs_in.FragPos;
+    if (u_farWorldLadder == 1) {
+        if (any(isnan(depthPosition)) || any(isinf(depthPosition)) ||
+            isnan(u_farRayBiasMeters) || isinf(u_farRayBiasMeters) || u_farRayBiasMeters < 0.0)
+            discard;
+        float radius = length(depthPosition);
+        if (isnan(radius) || isinf(radius) || radius <= 0.0) discard;
+        depthPosition *= 1.0 + u_farRayBiasMeters / radius;
+        if (any(isnan(depthPosition)) || any(isinf(depthPosition))) discard;
+        vec4 biasedClip = projection * vec4(depthPosition, 1.0);
+        if (any(isnan(biasedClip)) || any(isinf(biasedClip)) || biasedClip.w <= 0.0) discard;
+        float biasedDepth = biasedClip.z / biasedClip.w;
+        if (isnan(biasedDepth) || isinf(biasedDepth) || biasedDepth < 0.0 || biasedDepth > 1.0)
+            discard;
+        gl_FragDepth = biasedDepth;
+    }
+#endif
     gAuthoredSurface = vec4(0.0);
     // Public procedural trees have no leaf-card texture. Give their cards an
     // explicit silhouette instead of drawing opaque rectangular terrain patches.
@@ -519,7 +545,13 @@ void main()
     }
 
     // --- G-Buffer output ---
+#ifdef LUMINUMBRA_FAR_WORLD_LADDER
+    // Depth and position describe the same point. Clips, ownership, material
+    // sampling and previous-world reprojection retain their unbiased inputs.
+    gPosition = depthPosition;
+#else
     gPosition = fs_in.FragPos;
+#endif
 
     // The flat-shaded path keeps the interpolated view-space normal exactly as
     // before (byte-identical for untextured ids); the textured path rotates the
@@ -541,6 +573,13 @@ void main()
     // reproject the PREVIOUS-frame world position (wind sway included) through the previous
     // view-proj. For static geometry PrevWorldPos == WorldPos, so this is identical to camera-only
     // reprojection; for wind-swayed foliage it cancels the per-frame sway delta (no tree-top ghosting).
+#ifdef LUMINUMBRA_FAR_WORLD_LADDER
+    // projection[2].xy += jitter shifts raster NDC by MINUS jitter in RH
+    // perspective (w=-z). Correct it for ladder camera-only motion, preserving
+    // the existing non-ladder convention above verbatim.
+    if (u_farWorldLadder == 1)
+        currNdc = gl_FragCoord.xy * u_inv_screen_size * 2.0 - 1.0 + u_jitter_ndc;
+#endif
     vec4 prevClip = u_prev_view_proj * vec4(fs_in.PrevWorldPos, 1.0);
     gMotionVector = (prevClip.w > 1e-5) ? (currNdc - prevClip.xy / prevClip.w): vec2(0.0);
 }

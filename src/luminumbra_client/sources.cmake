@@ -46,6 +46,8 @@ set(CLIENT_INTERNAL_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/rendering/FarVolumeGlBackend.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/FarWorldRenderer.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/FarWorldOwnership.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/rendering/FarWorldDepthBias.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/rendering/passes/FarWorldPassUniforms.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/FarVolumeResidency.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/FoliageSurface.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/FrameScan.cpp
@@ -62,6 +64,7 @@ set(CLIENT_INTERNAL_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/rendering/WaterfallDetect.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/RenderSystem.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/Shader.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/rendering/ShaderSource.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/GBufferTargets.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/static_preview/RenderView.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/ShaderReflection.cpp

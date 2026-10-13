@@ -1,10 +1,27 @@
 #include "TerrainCullingTestPeer.h"
+#include "luminumbra_client/core/IsolationConfig.h"
 #include "luminumbra_client/rendering/Camera.h"
 #include "luminumbra_client/rendering/EnvironmentBrdfLut.gen.h"
 #include "luminumbra_client/rendering/FarVolumeGlBackend.h"
+#include "luminumbra_client/rendering/FarWorldDepthBias.h"
+#include "luminumbra_client/rendering/Mesh.h"
 #include "luminumbra_client/rendering/RenderGraph.h"
+#include "luminumbra_client/rendering/Shader.h"
+#include "luminumbra_client/rendering/ShaderSource.h"
+#include "luminumbra_client/rendering/passes/AerialPass.h"
+#include "luminumbra_client/rendering/passes/DebugViewPass.h"
+#include "luminumbra_client/rendering/passes/FarWorldPassUniforms.h"
+#include "luminumbra_client/rendering/passes/GBufferPass.h"
+#include "luminumbra_client/rendering/passes/LightingPass.h"
+#include "luminumbra_client/rendering/passes/ParticlePass.h"
+#include "luminumbra_client/rendering/passes/SsaoPass.h"
+#include "luminumbra_client/rendering/passes/WaterPass.h"
+#include "luminumbra_common/animation/AnimationRuntime.h"
+#include "luminumbra_common/components/CoreComponents.h"
 #include "luminumbra_common/core/FilesystemPath.h"
 #include "gtest/gtest.h"
+#include <glm/gtc/type_ptr.hpp>
+#include <nlohmann/json.hpp>
 
 #define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
@@ -13,6 +30,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -21,8 +39,10 @@
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
+#include <limits>
 #include <map>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <unordered_set>
@@ -5241,4 +5261,1454 @@ TEST(RenderSmokeTest, FarWorldBoundedOwnershipStoreAndBindingsRestore) {
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
     glDeleteBuffers(1, &sentinel);
     EXPECT_EQ(glGetError(), GL_NO_ERROR);
+}
+
+namespace {
+// Production programs + checked uploaded allocations; full float attachments
+// expose depth, view position, motion and the unchanged material path directly.
+class FarWorldDepthProbe {
+public:
+    struct Pixel {
+        glm::vec3 position{};
+        glm::vec2 motion{};
+        glm::vec4 albedo{};
+        float depth = 0;
+    };
+    ~FarWorldDepthProbe() {
+        allocation_.reset();
+        driver_.ReleaseLiveOwnership();
+        glDeleteBuffers(1, &palette_);
+        glDeleteTextures(1, &lut_);
+        glDeleteTextures(1, &depth_);
+        glDeleteTextures(1, &terrain_);
+        glDeleteTextures(3, colours_.data());
+        glDeleteFramebuffers(1, &fbo_);
+    }
+    bool Init(bool ladder_variant = true) {
+        const std::array specs{
+            ShaderProgramSpec{"depth-terrain", "g_buffer.vert", "g_buffer.frag"},
+            ShaderProgramSpec{"depth-static", "instanced_mesh.vert", "g_buffer.frag"},
+            ShaderProgramSpec{"depth-skinned", "skinned_mesh.vert", "g_buffer.frag"}};
+        for (std::size_t i = 0; i < specs.size(); ++i) {
+            shaders_[i] = std::make_unique<Shader>(
+                (SourceRoot() / "res/shaders" / specs[i].vertex).string().c_str(),
+                (SourceRoot() / "res/shaders" / specs[i].fragment).string().c_str(),
+                std::vector<std::string>{},
+                ladder_variant ? std::vector<std::string>{"LUMINUMBRA_FAR_WORLD_LADDER 1"}
+                               : std::vector<std::string>{});
+            programs_[i] = shaders_[i]->IsValid() ? shaders_[i]->Id() : 0;
+            if (!programs_[i])
+                return false;
+            uniforms_[i].Cache(*shaders_[i]);
+            glUseProgram(programs_[i]);
+            glUniform1i(Location(i, "u_materialLUT"), 0);
+            // A textured LUT selects the production triplanar path. Procedural
+            // macro colour and normal/roughness code remain the actual shader.
+            for (const char* sampler : {"u_terrainTextures",
+                                        "u_terrainNormals",
+                                        "u_terrainRoughness",
+                                        "u_skinnedTextures",
+                                        "u_staticNormals",
+                                        "u_staticSurface"})
+                glUniform1i(Location(i, sampler), 1);
+            glUniform1i(Location(i, "u_materialId"), 1);
+            SetMat4Identity(programs_[i], "model");
+            SetMat3Identity(programs_[i], "normalMatrix");
+        }
+        glGenFramebuffers(1, &fbo_);
+        glBindFramebuffer(GL_FRAMEBUFFER, fbo_);
+        glGenTextures(3, colours_.data());
+        const std::array<GLenum, 3> attachments{
+            GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT4, GL_COLOR_ATTACHMENT2};
+        for (std::size_t i = 0; i < colours_.size(); ++i) {
+            glBindTexture(GL_TEXTURE_2D, colours_[i]);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, 1, 1, 0, GL_RGBA, GL_FLOAT, nullptr);
+            glFramebufferTexture2D(GL_FRAMEBUFFER, attachments[i], GL_TEXTURE_2D, colours_[i], 0);
+        }
+        const GLenum outputs[5] = {
+            GL_COLOR_ATTACHMENT0, GL_NONE, GL_COLOR_ATTACHMENT2, GL_NONE, GL_COLOR_ATTACHMENT4};
+        glDrawBuffers(5, outputs);
+        glGenTextures(1, &depth_);
+        glBindTexture(GL_TEXTURE_2D, depth_);
+        glTexImage2D(GL_TEXTURE_2D,
+                     0,
+                     GL_DEPTH_COMPONENT32F,
+                     1,
+                     1,
+                     0,
+                     GL_DEPTH_COMPONENT,
+                     GL_FLOAT,
+                     nullptr);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, depth_, 0);
+        if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+            return false;
+        glGenTextures(1, &lut_);
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, lut_);
+        const std::array<float, 16> pixels{0, .8f, 1, 0, 0, 0, 1, 1, 0, 1, 0, 0, 1, 1, 1, 0};
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, 1, 4, 0, GL_RGBA, GL_FLOAT, pixels.data());
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        // A valid one-layer array supplies the actual terrain material samplers.
+        glGenTextures(1, &terrain_);
+        glActiveTexture(GL_TEXTURE1);
+        glBindTexture(GL_TEXTURE_2D_ARRAY, terrain_);
+        const std::array<float, 4> texel{.5f, .6f, 1, 1};
+        glTexImage3D(
+            GL_TEXTURE_2D_ARRAY, 0, GL_RGBA32F, 1, 1, 1, 0, GL_RGBA, GL_FLOAT, texel.data());
+        glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glGenBuffers(1, &palette_);
+        const glm::mat4 identity(1);
+        glBindBuffer(GL_SHADER_STORAGE_BUFFER, palette_);
+        glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof(identity), &identity[0][0], GL_STATIC_DRAW);
+        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, palette_);
+        glDisable(GL_CULL_FACE);
+        glDisable(GL_BLEND);
+        glDisable(GL_CLIP_DISTANCE0);
+        glClipControl(GL_LOWER_LEFT, GL_ZERO_TO_ONE);
+        glEnable(GL_DEPTH_TEST);
+        glDepthFunc(GL_GREATER);
+        glDepthMask(GL_TRUE);
+        glViewport(0, 0, 1, 1);
+        return glGetError() == GL_NO_ERROR;
+    }
+    Pixel Draw(const Camera& camera,
+               const glm::vec3& relative,
+               float bias,
+               float outer,
+               glm::vec2 jitter = {},
+               std::size_t path = 0,
+               bool ladder = true,
+               bool clear = true,
+               glm::vec3 previous_camera_shift = {}) {
+        Configure(camera, relative, jitter, path, previous_camera_shift);
+        if (clear) {
+            glClearDepth(0);
+            glClearColor(0, 0, 0, 0);
+            glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        }
+        if (ladder) {
+            FarWorldPassUniformScope reset(uniforms_[path]);
+            auto command = Command(camera, bias, outer);
+            EXPECT_TRUE(uniforms_[path].Prepare(command));
+            if (inject_bias_) {
+                glUniform1f(Location(path, "u_farRayBiasMeters"), injected_bias_);
+                inject_bias_ = false;
+            }
+            EXPECT_TRUE(driver_.BindLiveOwnership({}));
+            EXPECT_TRUE(DrawFarVolumeGpu(*allocation_, driver_));
+            driver_.UnbindLiveOwnership();
+        } else {
+            uniforms_[path].Reset();
+            // Deliberately poisonous ladder metadata proves the disabled branch
+            // leaves all live/static/skinned depth and material outputs inert.
+            glUniform1f(Location(path, "u_farRayBiasMeters"),
+                        std::numeric_limits<float>::quiet_NaN());
+            glUniform1f(Location(path, "u_farOuterRadius"), 1);
+            glUniform1i(Location(path, "u_farLiveCellCount"), 8192);
+            if (path == 0) {
+                glUniform1i(Location(path, "u_useInstanceOrigin"), 1);
+                glVertexAttrib3f(3, 0, 0, 0);
+            }
+            EXPECT_TRUE(DrawFarVolumeGpu(*allocation_, driver_));
+        }
+        Pixel result;
+        glReadPixels(0, 0, 1, 1, GL_DEPTH_COMPONENT, GL_FLOAT, &result.depth);
+        std::array<float, 4> values{};
+        glReadBuffer(GL_COLOR_ATTACHMENT0);
+        glReadPixels(0, 0, 1, 1, GL_RGBA, GL_FLOAT, values.data());
+        result.position = {values[0], values[1], values[2]};
+        glReadBuffer(GL_COLOR_ATTACHMENT4);
+        glReadPixels(0, 0, 1, 1, GL_RGBA, GL_FLOAT, values.data());
+        result.motion = {values[0], values[1]};
+        glReadBuffer(GL_COLOR_ATTACHMENT2);
+        glReadPixels(0, 0, 1, 1, GL_RGBA, GL_FLOAT, &result.albedo[0]);
+        EXPECT_EQ(glGetError(), GL_NO_ERROR);
+        return result;
+    }
+    void Configure(const Camera& camera,
+                   const glm::vec3& relative,
+                   glm::vec2 jitter = {},
+                   std::size_t path = 0,
+                   glm::vec3 previous_camera_shift = {}) {
+        glUseProgram(programs_[path]);
+        const auto view = camera.GetViewMatrix();
+        auto projection = camera.GetProjectionMatrix(1, 1);
+        auto previous_camera = camera;
+        previous_camera.Position += previous_camera_shift;
+        const auto previous = projection * previous_camera.GetViewMatrix();
+        projection[2][0] += jitter.x;
+        projection[2][1] += jitter.y;
+        glUniformMatrix4fv(Location(path, "projection"), 1, GL_FALSE, &projection[0][0]);
+        glUniformMatrix4fv(Location(path, "view"), 1, GL_FALSE, &view[0][0]);
+        glUniformMatrix4fv(Location(path, "u_prev_view_proj"), 1, GL_FALSE, &previous[0][0]);
+        const auto rotation = glm::mat3(view);
+        glUniformMatrix3fv(Location(path, "u_normalViewMatrix"), 1, GL_FALSE, &rotation[0][0]);
+        glUniform2f(Location(path, "u_inv_screen_size"), 1, 1);
+        glUniform2f(Location(path, "u_jitter_ndc"), jitter.x, jitter.y);
+        FarVolumeRenderMesh mesh;
+        mesh.content = Luminumbra::World::FarVolumeContent::Mixed;
+        const float extent = std::max(10.0f, glm::length(relative) * .1f);
+        for (const auto& corner : std::array{glm::vec3(-extent, -extent, 0),
+                                             glm::vec3(extent, -extent, 0),
+                                             glm::vec3(0, extent, 0)})
+            mesh.vertices.push_back(
+                {camera.Position + relative + glm::transpose(rotation) * corner, {0, 0, 1}, 1});
+        mesh.indices = {0, 1, 2};
+        allocation_ = UploadFarVolumeGpu(mesh, driver_);
+        ASSERT_TRUE(allocation_);
+        if (path != 0) {
+            const auto* gl_allocation =
+                static_cast<const FarVolumeGlAllocation*>(allocation_.get());
+            glBindVertexArray(gl_allocation->native_vao());
+            glDisableVertexAttribArray(2);
+            glVertexAttrib2f(2, 0, 0);
+            if (path == 1) {
+                for (GLuint column = 0; column < 4; ++column) {
+                    glDisableVertexAttribArray(3 + column);
+                    glm::vec4 value(0);
+                    value[column] = 1;
+                    glVertexAttrib4fv(3 + column, &value[0]);
+                }
+                glVertexAttrib3f(7, 1, 1, 1);
+            } else {
+                glVertexAttribI4ui(3, 0, 0, 0, 0);
+                glVertexAttrib4f(4, 1, 0, 0, 0);
+            }
+            glBindVertexArray(0);
+        }
+    }
+    FarWorldDrawCommand Command(const Camera& camera, float bias, float outer) const {
+        FarWorldDrawCommand command;
+        command.relative_origin = {-camera.Position.x, -camera.Position.y, -camera.Position.z};
+        command.view_ray_bias_meters = bias;
+        command.horizontal_outer_clip_meters = outer;
+        command.tile_edge_meters = 512;
+        return command;
+    }
+    void InjectBias(float value) {
+        // Bypass CPU validation to exercise the production fragment guard.
+        inject_bias_ = true;
+        injected_bias_ = value;
+    }
+    void CheckTierBoundaryUniforms(const Camera& camera) {
+        FarWorldPassUniformScope reset(uniforms_[0]);
+        auto command = Command(camera, 4, 2080);
+        command.tile_edge_meters = 1024;
+        EXPECT_TRUE(uniforms_[0].Prepare(command)); // first tile has no eligible arrival
+        command.arrival_eligible = true;
+        command.finer_outer_radius_meters = 1040;
+        command.child_local_y_spans = {{{0, 256}, {16, 272}, {-32, 224}, {64, 320}}};
+        EXPECT_TRUE(uniforms_[0].Prepare(command)); // eligible tile in the same tier
+        GLfloat radius = 0;
+        glGetUniformfv(programs_[0], Location(0, "u_farFinerOuterRadius"), &radius);
+        EXPECT_EQ(radius, 1040);
+        for (std::size_t i = 0; i < command.child_local_y_spans.size(); ++i) {
+            GLfloat span[2]{};
+            const auto name = "u_farChildY[" + std::to_string(i) + "]";
+            glGetUniformfv(programs_[0], Location(0, name.c_str()), span);
+            EXPECT_EQ(span[0], command.child_local_y_spans[i][0]);
+            EXPECT_EQ(span[1], command.child_local_y_spans[i][1]);
+        }
+        command.tile_edge_meters = 512;
+        command.horizontal_outer_clip_meters = 1040;
+        command.view_ray_bias_meters = 2;
+        command.arrival_eligible = false;
+        EXPECT_TRUE(uniforms_[0].Prepare(command));
+        GLfloat bias = 0;
+        glGetUniformfv(programs_[0], Location(0, "u_farRayBiasMeters"), &bias);
+        EXPECT_EQ(bias, 2);
+        glGetUniformfv(programs_[0], Location(0, "u_farFinerOuterRadius"), &radius);
+        EXPECT_EQ(radius, 0);
+    }
+    bool FailMappedSubmission(const Camera& camera) {
+        // Mapping the uploaded index allocation makes the actual GL draw fail.
+        // The production adapter must still restore VAO, and the owner scope
+        // must restore ownership/depth/raster state and reset ladder uniforms.
+        FarWorldPassUniformScope reset(uniforms_[0]);
+        if (!driver_.BindLiveOwnership({}) || !uniforms_[0].Prepare(Command(camera, 2, 1040)))
+            return false;
+        const auto* allocation = static_cast<const FarVolumeGlAllocation*>(allocation_.get());
+        GLint saved_vao = 0, ebo = 0;
+        glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &saved_vao);
+        glBindVertexArray(allocation->native_vao());
+        glGetIntegerv(GL_ELEMENT_ARRAY_BUFFER_BINDING, &ebo);
+        glBindVertexArray(static_cast<GLuint>(saved_vao));
+        EXPECT_NE(glMapNamedBuffer(static_cast<GLuint>(ebo), GL_READ_ONLY), nullptr);
+        glDisable(GL_DEBUG_OUTPUT); // this one driver error is deliberate
+        const bool submitted = DrawFarVolumeGpu(*allocation_, driver_);
+        glEnable(GL_DEBUG_OUTPUT);
+        EXPECT_TRUE(glUnmapNamedBuffer(static_cast<GLuint>(ebo)));
+        driver_.UnbindLiveOwnership();
+        return submitted;
+    }
+    bool SubmitExisting(const Camera& camera) {
+        FarWorldPassUniformScope reset(uniforms_[0]);
+        if (!driver_.BindLiveOwnership({}))
+            return false;
+        const bool prepared = uniforms_[0].Prepare(Command(camera, 2, 1040));
+        const bool submitted = prepared && DrawFarVolumeGpu(*allocation_, driver_);
+        driver_.UnbindLiveOwnership();
+        return submitted;
+    }
+    GLuint program() const {
+        return programs_[0];
+    }
+    void PoisonThenThrow(const Camera& camera) {
+        FarWorldPassUniformScope reset(uniforms_[0]);
+        EXPECT_TRUE(uniforms_[0].Prepare(Command(camera, 32, 1040)));
+        throw std::runtime_error("prepare refused");
+    }
+
+private:
+    GLint Location(std::size_t path, const char* name) const {
+        return glGetUniformLocation(programs_[path], name);
+    }
+    bool inject_bias_ = false;
+    float injected_bias_ = 0;
+    std::array<std::unique_ptr<Shader>, 3> shaders_{};
+    std::array<GLuint, 3> programs_{}, colours_{};
+    std::array<FarWorldPassUniforms, 3> uniforms_{};
+    GLuint fbo_ = 0, depth_ = 0, lut_ = 0, terrain_ = 0, palette_ = 0;
+    FarVolumeGlDriver driver_;
+    std::unique_ptr<FarVolumeGpuAllocation> allocation_;
+};
+
+// Independent depth expectation, not the production reference helper.
+double RayDepthExpected(const glm::vec3& point, double bias, double far_plane) {
+    const double radius =
+        std::sqrt(static_cast<double>(point.x) * point.x + static_cast<double>(point.y) * point.y +
+                  static_cast<double>(point.z) * point.z);
+    const double axial = -point.z * (1 + bias / radius);
+    return .1 * (far_plane / axial - 1) / (far_plane - .1);
+}
+} // namespace
+
+TEST(RenderSmokeTest, FarWorldRayDepthBothPlanesAwayDirectionAndTierPriority) {
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    FarWorldDepthProbe probe;
+    ASSERT_TRUE(probe.Init());
+    // A steep ray reaches either axial far plane while staying inside every
+    // tier's real horizontal clip limit; no widened clip radius is needed.
+    Camera camera({0, 0, 0}, {0, 1, 0}, -90, 87);
+    for (const auto mode : {FarWorldMode::Legacy, FarWorldMode::Ladder}) {
+        camera.SelectFarWorldPlane(mode);
+        for (const float distance : {176.25f, 1000.0f, camera.GetFarPlane() - 40}) {
+            const auto relative = camera.Front * distance;
+            const auto unbiased = probe.Draw(camera, relative, 0, 16384);
+            ASSERT_GT(unbiased.depth, 0);
+            float previous_depth = unbiased.depth;
+            for (std::size_t tier = 1; tier <= Luminumbra::World::kFarTierCount; ++tier) {
+                const float bias =
+                    static_cast<float>(Luminumbra::World::FarTierAt(tier)->sample_spacing_meters) /
+                    2;
+                const float outer =
+                    static_cast<float>(Luminumbra::World::FarWantedRadiusMeters(tier));
+                const auto pixel = probe.Draw(camera, relative, bias, outer);
+                EXPECT_NEAR(pixel.depth,
+                            RayDepthExpected(unbiased.position, bias, camera.GetFarPlane()),
+                            1e-9);
+                EXPECT_NEAR(
+                    glm::length(pixel.position) - glm::length(unbiased.position), bias, .005);
+                EXPECT_LT(pixel.depth, previous_depth);
+                EXPECT_EQ(pixel.albedo, unbiased.albedo);
+                previous_depth = pixel.depth;
+            }
+        }
+        // A biased point beyond the selected far plane must not publish depth.
+        EXPECT_EQ(probe.Draw(camera, camera.Front * (camera.GetFarPlane() - 1), 32, 16384).depth,
+                  0);
+    }
+    camera = Camera();
+    camera.SelectFarWorldPlane(FarWorldMode::Ladder);
+    const auto coarse = probe.Draw(camera, {0, 0, -1000}, 32, 1040);
+    const auto fine_after = probe.Draw(camera, {0, 0, -1000}, 2, 1040, {}, 0, true, false);
+    EXPECT_GT(fine_after.depth, coarse.depth);
+    const auto coarse_after = probe.Draw(camera, {0, 0, -1000}, 32, 1040, {}, 0, true, false);
+    EXPECT_EQ(coarse_after.depth, fine_after.depth);
+    EXPECT_EQ(coarse_after.position, fine_after.position);
+}
+
+TEST(RenderSmokeTest, FarWorldRayBiasElevatedPitchedUnbiasedClipsAndJitterMotion) {
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    FarWorldDepthProbe probe;
+    ASSERT_TRUE(probe.Init());
+    for (const float pitch : {-27.0f, 35.0f}) {
+        Camera camera({37.1f, 583.32f, 19.77f}, {0, 1, 0}, -70, pitch);
+        camera.SelectFarWorldPlane(FarWorldMode::Ladder);
+        const glm::vec3 relative = camera.Front * 1000.0f;
+        const glm::vec2 jitter(.03f, -.02f);
+        const auto unbiased = probe.Draw(camera, relative, 0, 1040, jitter);
+        const auto biased = probe.Draw(camera, relative, 32, 1040, jitter);
+        EXPECT_NEAR(biased.depth, RayDepthExpected(unbiased.position, 32, 17408), 1e-9);
+        EXPECT_NEAR(glm::length(biased.position) - glm::length(unbiased.position), 32, .001);
+        EXPECT_EQ(biased.albedo, unbiased.albedo);
+        EXPECT_NEAR(biased.motion.x, 0, 1e-5);
+        EXPECT_NEAR(biased.motion.y, 0, 1e-5);
+        auto projection = camera.GetProjectionMatrix(1, 1);
+        projection[2][0] += jitter.x;
+        projection[2][1] += jitter.y;
+        const auto clip = projection * glm::vec4(biased.position, 1);
+        EXPECT_NEAR(clip.x / clip.w, 0, 1e-5);
+        EXPECT_NEAR(clip.y / clip.w, 0, 1e-5);
+        const auto reconstructed = glm::inverse(projection) * glm::vec4(0, 0, biased.depth, 1);
+        EXPECT_NEAR(
+            glm::length(glm::vec3(reconstructed) / reconstructed.w - biased.position), 0, .002);
+        const auto shifted_unbiased =
+            probe.Draw(camera, relative, 0, 1040, jitter, 0, true, true, camera.Right * 20.0f);
+        const auto shifted_biased =
+            probe.Draw(camera, relative, 32, 1040, jitter, 0, true, true, camera.Right * 20.0f);
+        EXPECT_GT(glm::length(shifted_biased.motion), .01);
+        EXPECT_NEAR(glm::length(shifted_biased.motion - shifted_unbiased.motion), 0, 1e-6);
+    }
+    // A pitched ray reaches the V1 XZ edge despite a >1040 m 3D distance.
+    Camera camera({0, 500, 0}, {0, 1, 0}, -90, 30);
+    camera.SelectFarWorldPlane(FarWorldMode::Ladder);
+    const glm::vec3 edge(0, 1040 * std::tan(glm::radians(30.0f)), -1040);
+    EXPECT_GT(probe.Draw(camera, edge * (1039.875f / 1040), 32, 1040).depth, 0);
+    EXPECT_EQ(probe.Draw(camera, edge * (1040.125f / 1040), 32, 1040).depth, 0);
+    Camera straight;
+    straight.SelectFarWorldPlane(FarWorldMode::Ladder);
+    for (std::size_t tier = 1; tier <= Luminumbra::World::kFarTierCount; ++tier) {
+        const float outer = static_cast<float>(Luminumbra::World::FarWantedRadiusMeters(tier));
+        const float bias =
+            static_cast<float>(Luminumbra::World::FarTierAt(tier)->sample_spacing_meters) / 2;
+        EXPECT_GT(probe.Draw(straight, {0, 0, -outer}, bias, outer).depth, 0);
+        EXPECT_EQ(probe.Draw(straight, {0, 0, -outer - .01f}, bias, outer).depth, 0);
+        EXPECT_EQ(probe.Draw(straight, {0, 0, -175.99f}, bias, outer).depth, 0);
+        EXPECT_GT(probe.Draw(straight, {0, 0, -176}, bias, outer).depth, 0);
+    }
+}
+
+TEST(RenderSmokeTest, FarWorldSharedDepthIsInertForLiveStaticAndSkinnedPrograms) {
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    for (const bool ladder_variant : {false, true}) {
+        SCOPED_TRACE(ladder_variant);
+        FarWorldDepthProbe probe;
+        ASSERT_TRUE(probe.Init(ladder_variant));
+        Camera camera;
+        for (std::size_t path = 0; path < 3; ++path) {
+            const auto pixel = probe.Draw(camera, {0, 0, -200}, 32, 1, {}, path, false);
+            EXPECT_NEAR(pixel.position.z, -200, .001);
+            EXPECT_NEAR(pixel.depth, RayDepthExpected({0, 0, -200}, 0, 3200), 1e-9);
+            EXPECT_GT(pixel.albedo.a, 0);
+        }
+    }
+}
+
+TEST(RenderSmokeTest, FarWorldZeroNonfinitePositionsAndInvalidBiasedDepthRefuse) {
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    FarWorldDepthProbe probe;
+    ASSERT_TRUE(probe.Init());
+    Camera camera;
+    camera.SelectFarWorldPlane(FarWorldMode::Ladder);
+    // Zero/invalid positions never survive rasterization or the fragment guard.
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    const float inf = std::numeric_limits<float>::infinity();
+    for (const auto& point :
+         {glm::vec3(0), glm::vec3(nan, 0, -200), glm::vec3(0, inf, -200), glm::vec3(0, 0, -inf)})
+        EXPECT_EQ(probe.Draw(camera, point, 2, 1040).depth, 0);
+    for (const float bias : {nan, inf, -1.0f}) {
+        probe.InjectBias(bias);
+        EXPECT_EQ(probe.Draw(camera, {0, 0, -200}, 2, 1040).depth, 0);
+    }
+    Camera pitched({0, 0, 0}, {0, 1, 0}, -90, 87);
+    pitched.SelectFarWorldPlane(FarWorldMode::Ladder);
+    EXPECT_EQ(probe.Draw(pitched, pitched.Front * 17400.0f, 32, 16384).depth, 0);
+}
+
+namespace {
+struct FarWorldGlState {
+    std::array<GLboolean, 5> enabled{};
+    GLboolean depth_mask = GL_FALSE;
+    std::array<GLint, 10> integers{};
+    GLint64 range_start = 0, range_size = 0;
+    std::array<GLdouble, 2> depth_range{};
+    std::array<GLfloat, 2> polygon_offset{};
+    bool operator==(const FarWorldGlState&) const = default;
+};
+FarWorldGlState FarWorldGlSnapshot() {
+    FarWorldGlState state;
+    const std::array<GLenum, 5> capabilities{GL_CLIP_DISTANCE0,
+                                             GL_DEPTH_TEST,
+                                             GL_POLYGON_OFFSET_FILL,
+                                             GL_POLYGON_OFFSET_LINE,
+                                             GL_POLYGON_OFFSET_POINT};
+    for (std::size_t i = 0; i < capabilities.size(); ++i)
+        state.enabled[i] = glIsEnabled(capabilities[i]);
+    glGetBooleanv(GL_DEPTH_WRITEMASK, &state.depth_mask);
+    const std::array<GLenum, 9> queries{GL_VERTEX_ARRAY_BINDING,
+                                        GL_ARRAY_BUFFER_BINDING,
+                                        GL_ELEMENT_ARRAY_BUFFER_BINDING,
+                                        GL_SHADER_STORAGE_BUFFER_BINDING,
+                                        GL_DEPTH_FUNC,
+                                        GL_CLIP_ORIGIN,
+                                        GL_CLIP_DEPTH_MODE,
+                                        GL_CURRENT_PROGRAM,
+                                        GL_DRAW_FRAMEBUFFER_BINDING};
+    for (std::size_t i = 0; i < queries.size(); ++i)
+        glGetIntegerv(queries[i], &state.integers[i]);
+    glGetIntegeri_v(GL_SHADER_STORAGE_BUFFER_BINDING, 7, &state.integers[9]);
+    glGetInteger64i_v(GL_SHADER_STORAGE_BUFFER_START, 7, &state.range_start);
+    glGetInteger64i_v(GL_SHADER_STORAGE_BUFFER_SIZE, 7, &state.range_size);
+    glGetDoublev(GL_DEPTH_RANGE, state.depth_range.data());
+    glGetFloatv(GL_POLYGON_OFFSET_FACTOR, &state.polygon_offset[0]);
+    glGetFloatv(GL_POLYGON_OFFSET_UNITS, &state.polygon_offset[1]);
+    return state;
+}
+void ExpectFarWorldUniformsReset(GLuint program) {
+    for (const char* name : {"u_farWorldLadder", "u_farLiveCellCount", "u_farArrivalEligible"}) {
+        GLint value = -1;
+        glGetUniformiv(program, glGetUniformLocation(program, name), &value);
+        EXPECT_EQ(value, 0) << name;
+    }
+    for (const char* name : {"u_farRayBiasMeters", "u_farClipNearRadius", "u_farClipFarRadius"}) {
+        GLfloat value = -1;
+        glGetUniformfv(program, glGetUniformLocation(program, name), &value);
+        EXPECT_EQ(value, 0) << name;
+    }
+}
+} // namespace
+
+TEST(RenderSmokeTest, FarWorldFailedSubmissionRestoresBindingsClipDepthRasterAndUniforms) {
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    FarWorldDepthProbe probe;
+    ASSERT_TRUE(probe.Init());
+    Camera camera;
+    camera.SelectFarWorldPlane(FarWorldMode::Ladder);
+    probe.Configure(camera, {0, 0, -200});
+    GLuint vao = 0;
+    std::array<GLuint, 3> sentinels{};
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+    glGenBuffers(3, sentinels.data());
+    GLint alignment = 0;
+    glGetIntegerv(GL_SHADER_STORAGE_BUFFER_OFFSET_ALIGNMENT, &alignment);
+    for (const auto buffer : sentinels) {
+        glBindBuffer(GL_ARRAY_BUFFER, buffer);
+        glBufferData(
+            GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(alignment) + 512, nullptr, GL_STATIC_DRAW);
+    }
+    glBindBuffer(GL_ARRAY_BUFFER, sentinels[0]);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, sentinels[1]);
+    glBindBufferRange(GL_SHADER_STORAGE_BUFFER, 7, sentinels[2], alignment, 256);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, sentinels[0]);
+    for (const bool enabled : {false, true}) {
+        SCOPED_TRACE(enabled);
+        if (enabled) {
+            glEnable(GL_DEPTH_TEST);
+            glEnable(GL_CLIP_DISTANCE0);
+        } else {
+            glDisable(GL_DEPTH_TEST);
+            glDisable(GL_CLIP_DISTANCE0);
+        }
+        glDepthFunc(GL_LEQUAL);
+        glDepthMask(GL_FALSE);
+        glDepthRange(.2, .8);
+        glClipControl(GL_UPPER_LEFT, GL_NEGATIVE_ONE_TO_ONE);
+        glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
+        glEnable(GL_POLYGON_OFFSET_FILL);
+        glEnable(GL_POLYGON_OFFSET_LINE);
+        glEnable(GL_POLYGON_OFFSET_POINT);
+        glPolygonOffset(-4, 7);
+        const auto before = FarWorldGlSnapshot();
+        EXPECT_TRUE(probe.SubmitExisting(camera));
+        EXPECT_EQ(FarWorldGlSnapshot(), before);
+        ExpectFarWorldUniformsReset(probe.program());
+        EXPECT_FALSE(probe.FailMappedSubmission(camera));
+        EXPECT_EQ(FarWorldGlSnapshot(), before);
+        GLint polygon_modes[2]{};
+        glGetIntegerv(GL_POLYGON_MODE, polygon_modes);
+        EXPECT_EQ(polygon_modes[0], GL_LINE);
+        EXPECT_EQ(polygon_modes[1], GL_LINE);
+        ExpectFarWorldUniformsReset(probe.program());
+        EXPECT_THROW(probe.PoisonThenThrow(camera), std::runtime_error);
+        ExpectFarWorldUniformsReset(probe.program());
+        EXPECT_EQ(FarWorldGlSnapshot(), before);
+        EXPECT_EQ(glGetError(), GL_NO_ERROR);
+    }
+    glBindVertexArray(0);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 7, 0);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+    glDeleteBuffers(3, sentinels.data());
+    glDeleteVertexArrays(1, &vao);
+}
+
+TEST(RenderSmokeTest, FarWorldUniformTierBoundaryKeepsLaterArrivalRadiusAndBatchedSpans) {
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    FarWorldDepthProbe probe;
+    ASSERT_TRUE(probe.Init());
+    Camera camera;
+    camera.SelectFarWorldPlane(FarWorldMode::Ladder);
+    probe.Configure(camera, {0, 0, -200});
+    probe.CheckTierBoundaryUniforms(camera);
+    ExpectFarWorldUniformsReset(probe.program());
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
+}
+
+namespace {
+// Inspect the source actually attached to the linked production program, then
+// evaluate its variant conditionals exactly as the GLSL preprocessor does.
+// g_buffer.frag uses only this macro's #ifdef/#else/#endif directives.
+std::string LinkedFragmentSource(GLuint program) {
+    std::array<GLuint, 2> stages{};
+    GLsizei count = 0;
+    glGetAttachedShaders(program, static_cast<GLsizei>(stages.size()), &count, stages.data());
+    for (GLsizei i = 0; i < count; ++i) {
+        GLint type = 0, length = 0;
+        glGetShaderiv(stages[i], GL_SHADER_TYPE, &type);
+        if (type != GL_FRAGMENT_SHADER)
+            continue;
+        glGetShaderiv(stages[i], GL_SHADER_SOURCE_LENGTH, &length);
+        std::string source(static_cast<std::size_t>(length), '\0');
+        GLsizei written = 0;
+        glGetShaderSource(stages[i], length, &written, source.data());
+        source.resize(static_cast<std::size_t>(written));
+        return source;
+    }
+    ADD_FAILURE() << "Linked program has no fragment stage";
+    return {};
+}
+
+std::string PreprocessedLinkedFragment(GLuint program) {
+    const auto source = LinkedFragmentSource(program);
+    std::istringstream lines(source);
+    std::string line, result;
+    bool defined = false, in_variant = false, enabled = true;
+    while (std::getline(lines, line)) {
+        if (!line.empty() && line.back() == '\r')
+            line.pop_back();
+        if (line == "#define LUMINUMBRA_FAR_WORLD_LADDER 1") {
+            defined = true;
+        } else if (line == "#ifdef LUMINUMBRA_FAR_WORLD_LADDER") {
+            EXPECT_FALSE(in_variant);
+            in_variant = true;
+            enabled = defined;
+        } else if (line == "#else" && in_variant) {
+            enabled = !defined;
+        } else if (line == "#endif" && in_variant) {
+            in_variant = false;
+            enabled = true;
+        } else if (enabled) {
+            result += line + '\n';
+        }
+    }
+    EXPECT_FALSE(in_variant);
+    return result;
+}
+
+GLint ReadIntUniform(GLuint program, const char* name) {
+    const GLint location = glGetUniformLocation(program, name);
+    EXPECT_GE(location, 0) << name;
+    GLint value = -1;
+    if (location >= 0)
+        glGetUniformiv(program, location, &value);
+    return value;
+}
+GLfloat ReadFloatUniform(GLuint program, const char* name) {
+    const GLint location = glGetUniformLocation(program, name);
+    EXPECT_GE(location, 0) << name;
+    GLfloat value = -1;
+    if (location >= 0)
+        glGetUniformfv(program, location, &value);
+    return value;
+}
+glm::mat4 ReadMatrixUniform(GLuint program, const char* name) {
+    const GLint location = glGetUniformLocation(program, name);
+    EXPECT_GE(location, 0) << name;
+    glm::mat4 matrix(0);
+    if (location >= 0)
+        glGetUniformfv(program, location, glm::value_ptr(matrix));
+    return matrix;
+}
+
+struct ReloadShaderSources {
+    fs::path directory =
+        fs::temp_directory_path() /
+        ("luminumbra-fw-reload-" +
+         std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    explicit ReloadShaderSources(bool project_layout = false) {
+        const auto destination = project_layout ? directory / "res/shaders" : directory;
+        fs::create_directories(destination.parent_path());
+        fs::copy(SourceRoot() / "res/shaders", destination, fs::copy_options::recursive);
+    }
+    ~ReloadShaderSources() {
+        std::error_code error;
+        fs::remove_all(directory, error);
+    }
+};
+
+void CheckDirectFarWorldReload(bool prepare_first) {
+    ReloadShaderSources sources;
+    for (const bool ladder_variant : {false, true}) {
+        for (const char* vertex : {"g_buffer.vert", "instanced_mesh.vert", "skinned_mesh.vert"}) {
+            SCOPED_TRACE(::testing::Message() << vertex << " ladder=" << ladder_variant);
+            const auto fragment = sources.directory / "g_buffer.frag";
+            Shader shader((sources.directory / vertex).string().c_str(),
+                          fragment.string().c_str(),
+                          {},
+                          ladder_variant ? std::vector<std::string>{"LUMINUMBRA_FAR_WORLD_LADDER 1"}
+                                         : std::vector<std::string>{});
+            ASSERT_TRUE(shader.IsValid()) << shader.Diagnostic();
+            FarWorldPassUniforms uniforms;
+            uniforms.Cache(shader);
+            FarWorldDrawCommand command;
+            command.tile_edge_meters = 512;
+            command.view_ray_bias_meters = 2;
+            command.horizontal_outer_clip_meters = 1040;
+            command.live_cell_count = 3;
+            uniforms.Begin();
+            ASSERT_TRUE(uniforms.Prepare(command));
+            const auto old_id = shader.Id();
+            const auto old_generation = shader.ProgramGeneration();
+            // Both DebugOverlays paths call Reload directly, without a pass or
+            // pipeline refresh. Exercise different first cache operations.
+            ASSERT_TRUE(shader.Reload()) << shader.Diagnostic();
+            EXPECT_NE(shader.Id(), old_id);
+            EXPECT_EQ(shader.ProgramGeneration(), old_generation + 1);
+            if (prepare_first) {
+                // Also proves frame/tier invariants are republished after relink
+                // even when the next command stays in the same tier.
+                ASSERT_TRUE(uniforms.Prepare(command));
+                EXPECT_EQ(ReadIntUniform(shader.Id(), "u_farWorldLadder"), 1);
+                EXPECT_EQ(ReadIntUniform(shader.Id(), "u_farLiveCellCount"), 3);
+                EXPECT_EQ(ReadFloatUniform(shader.Id(), "u_farOuterRadius"), 1040);
+                if (ladder_variant)
+                    EXPECT_EQ(ReadFloatUniform(shader.Id(), "u_farRayBiasMeters"), 2);
+                uniforms.Reset();
+            } else {
+                uniforms.Reset();
+                if (std::string_view(vertex) == "g_buffer.vert") {
+                    uniforms.UseInstanceOrigin(true);
+                    EXPECT_EQ(ReadIntUniform(shader.Id(), "u_useInstanceOrigin"), 1);
+                }
+                uniforms.Begin();
+                ASSERT_TRUE(uniforms.Prepare(command));
+                uniforms.Reset();
+            }
+            EXPECT_EQ(ReadIntUniform(shader.Id(), "u_farWorldLadder"), 0);
+            EXPECT_EQ(PreprocessedLinkedFragment(shader.Id()).find("gl_FragDepth =") !=
+                          std::string::npos,
+                      ladder_variant);
+            EXPECT_EQ(glGetError(), GL_NO_ERROR);
+        }
+    }
+}
+} // namespace
+
+TEST(RenderSmokeTest, FarWorldLegacyLinkedProgramsHaveNoDepthWritesAndLadderVariantsDo) {
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    GBufferPass pass;
+    pass.init_geometry_shader(SourceRoot());
+    pass.init_instanced_static_mesh(SourceRoot());
+    pass.init_skinned_mesh(SourceRoot());
+    for (const auto mode : {FarWorldMode::Legacy, FarWorldMode::Ladder}) {
+        for (const Shader* shader : {pass.geometry_shader(mode).get(),
+                                     pass.instanced_static_mesh_shader(mode).get(),
+                                     pass.skinned_mesh_shader(mode).get()}) {
+            ASSERT_TRUE(shader->IsValid()) << shader->Diagnostic();
+            const auto source = PreprocessedLinkedFragment(shader->Id());
+            if (mode == FarWorldMode::Legacy) {
+                EXPECT_EQ(source.find("gl_FragDepth"), std::string::npos);
+                EXPECT_EQ(source.find("u_farRayBiasMeters"), std::string::npos);
+                EXPECT_EQ(source.find("depthPosition"), std::string::npos);
+            } else {
+                EXPECT_NE(source.find("gl_FragDepth = gl_FragCoord.z;"), std::string::npos);
+                EXPECT_NE(source.find("gl_FragDepth = biasedDepth;"), std::string::npos);
+            }
+        }
+    }
+    pass.destroy_instanced_static_mesh();
+    pass.destroy_skinned_mesh();
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
+}
+
+TEST(RenderSmokeTest, FarWorldProductionDefineInjectionHandlesHeadersAndReload) {
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    ReloadShaderSources sources;
+    struct Header {
+        const char* leading;
+        const char* trailing;
+        bool crlf = false;
+    };
+    const std::array headers{Header{" \t\n\n", ""},
+                             Header{"// leading #version 110\n", ""},
+                             Header{"/* leading\n#version 110\nstill a comment */\n", ""},
+                             Header{"// CRLF header\n", "", true},
+                             Header{"", " // trailing #version 110"},
+                             Header{"", " /* trailing\n#version 110\ncomment */"}};
+    const auto fragment_path = sources.directory / "g_buffer.frag";
+    const auto original_fragment = ReadTextFile(fragment_path);
+    for (const auto& header : headers) {
+        SCOPED_TRACE(::testing::Message() << header.leading << header.trailing << header.crlf);
+        const auto with_header = [&](const std::string& original) {
+            const auto version_end = original.find('\n');
+            EXPECT_NE(version_end, std::string::npos);
+            std::string source = header.leading + original.substr(0, version_end) +
+                                 header.trailing + original.substr(version_end);
+            if (header.crlf) {
+                std::string converted;
+                for (const char c : source) {
+                    if (c == '\n')
+                        converted += '\r';
+                    converted += c;
+                }
+                source = std::move(converted);
+            }
+            return source;
+        };
+        const auto fragment = with_header(original_fragment);
+        {
+            std::ofstream output(fragment_path, std::ios::binary);
+            output << fragment;
+        }
+        for (const char* vertex : {"g_buffer.vert", "instanced_mesh.vert", "skinned_mesh.vert"}) {
+            SCOPED_TRACE(vertex);
+            const auto vertex_path = sources.directory / vertex;
+            {
+                std::ofstream output(vertex_path, std::ios::binary);
+                output << with_header(ReadTextFile(SourceRoot() / "res/shaders" / vertex));
+            }
+            for (const bool ladder : {false, true}) {
+                const auto defines = ladder
+                                         ? std::vector<std::string>{"LUMINUMBRA_FAR_WORLD_LADDER 1"}
+                                         : std::vector<std::string>{};
+                std::string expected = fragment, diagnostic;
+                ASSERT_TRUE(InjectShaderDefines(expected, defines, diagnostic)) << diagnostic;
+                Shader shader(
+                    vertex_path.string().c_str(), fragment_path.string().c_str(), {}, defines);
+                ASSERT_TRUE(shader.IsValid()) << shader.Diagnostic();
+                EXPECT_EQ(LinkedFragmentSource(shader.Id()), expected);
+                const auto check_variant = [&] {
+                    const auto preprocessed = PreprocessedLinkedFragment(shader.Id());
+                    EXPECT_EQ(preprocessed.find("gl_FragDepth") != std::string::npos, ladder);
+                    // An active linked bias uniform proves the compiler saw the
+                    // define outside the leading/trailing comments.
+                    EXPECT_EQ(glGetUniformLocation(shader.Id(), "u_farRayBiasMeters") >= 0, ladder);
+                };
+                check_variant();
+                const auto generation = shader.ProgramGeneration();
+                ASSERT_TRUE(shader.Reload()) << shader.Diagnostic();
+                EXPECT_EQ(shader.ProgramGeneration(), generation + 1);
+                EXPECT_EQ(LinkedFragmentSource(shader.Id()), expected);
+                check_variant();
+            }
+        }
+    }
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
+}
+
+TEST(RenderSmokeTest, VersionlessDefineInjectionCompilesAndReloads) {
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    ReloadShaderSources sources;
+    // A versionless shader defaults to desktop GLSL 1.10. Use compatible source
+    // while exercising the same production loader/injector/link/reload seams.
+    const auto vertex = sources.directory / "versionless.vert";
+    const auto fragment = sources.directory / "versionless.frag";
+    {
+        std::ofstream output(vertex, std::ios::binary);
+        output << "// no version\nvoid main() { gl_Position = vec4(0.0); }";
+    }
+    const std::string original = "/* no #version directive */\n"
+                                 "#ifdef LUMINUMBRA_FAR_WORLD_LADDER\n"
+                                 "void main() { gl_FragDepth = 0.25; }\n"
+                                 "#else\n"
+                                 "void main() { }\n"
+                                 "#endif";
+    {
+        std::ofstream output(fragment, std::ios::binary);
+        output << original;
+    }
+    for (const bool ladder : {false, true}) {
+        const auto defines = ladder ? std::vector<std::string>{"LUMINUMBRA_FAR_WORLD_LADDER 1"}
+                                    : std::vector<std::string>{};
+        std::string expected = original, diagnostic;
+        ASSERT_TRUE(InjectShaderDefines(expected, defines, diagnostic));
+        Shader shader(vertex.string().c_str(), fragment.string().c_str(), {}, defines);
+        ASSERT_TRUE(shader.IsValid()) << shader.Diagnostic();
+        EXPECT_EQ(LinkedFragmentSource(shader.Id()), expected);
+        EXPECT_EQ(PreprocessedLinkedFragment(shader.Id()).find("gl_FragDepth") != std::string::npos,
+                  ladder);
+        ASSERT_TRUE(shader.Reload()) << shader.Diagnostic();
+        EXPECT_EQ(LinkedFragmentSource(shader.Id()), expected);
+        EXPECT_EQ(PreprocessedLinkedFragment(shader.Id()).find("gl_FragDepth") != std::string::npos,
+                  ladder);
+    }
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
+}
+
+TEST(RenderSmokeTest, DefineInjectionRestoresCompilerOriginalLineNumbers) {
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    ReloadShaderSources sources;
+    const auto vertex = sources.directory / "line-check.vert";
+    const auto fragment = sources.directory / "line-check.frag";
+    {
+        std::ofstream output(vertex, std::ios::binary);
+        output << "/* leading\n#version 110\ncomment */\n#version 450 core\n"
+                  "#if __LINE__ != 5\n#error incorrect original vertex line\n#endif\n"
+                  "void main() { gl_Position = vec4(0.0); }\n";
+    }
+    {
+        std::ofstream output(fragment, std::ios::binary);
+        output << "// leading\r\n#version 450 core // trailing\r\n"
+                  "#if __LINE__ != 3\r\n#error incorrect original fragment line\r\n#endif\r\n"
+                  "void main() { gl_FragDepth = 0.25; }\r\n";
+    }
+    Shader shader(vertex.string().c_str(),
+                  fragment.string().c_str(),
+                  {},
+                  {"LUMINUMBRA_FAR_WORLD_LADDER 1", "SECOND_DEFINE 1"});
+    ASSERT_TRUE(shader.IsValid()) << shader.Diagnostic();
+    ASSERT_TRUE(shader.Reload()) << shader.Diagnostic();
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
+}
+
+TEST(RenderSmokeTest, UnterminatedBlockCommentRefusesCompilationAndRollsBackReload) {
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    ReloadShaderSources sources;
+    const auto vertex = sources.directory / "g_buffer.vert";
+    const auto fragment = sources.directory / "g_buffer.frag";
+    Shader shader(
+        vertex.string().c_str(), fragment.string().c_str(), {}, {"LUMINUMBRA_FAR_WORLD_LADDER 1"});
+    ASSERT_TRUE(shader.IsValid());
+    const auto id = shader.Id();
+    const auto generation = shader.ProgramGeneration();
+    {
+        std::ofstream output(fragment, std::ios::binary);
+        output << "/* unterminated\n#version 450 core\n";
+    }
+    Shader failed(
+        vertex.string().c_str(), fragment.string().c_str(), {}, {"LUMINUMBRA_FAR_WORLD_LADDER 1"});
+    EXPECT_FALSE(failed.IsValid());
+    EXPECT_EQ(failed.Id(), 0u);
+    EXPECT_NE(failed.Diagnostic().find("unterminated GLSL block comment"), std::string::npos);
+    EXPECT_FALSE(shader.Reload());
+    EXPECT_EQ(shader.Id(), id);
+    EXPECT_EQ(shader.ProgramGeneration(), generation);
+    EXPECT_TRUE(shader.IsValid());
+    EXPECT_NE(shader.Diagnostic().find("unterminated GLSL block comment"), std::string::npos);
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
+}
+
+TEST(RenderSmokeTest, FarWorldSelectionRequiresEveryLadderProgram) {
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    ReloadShaderSources sources(true);
+    const auto shaders = sources.directory / "res/shaders";
+    const auto request =
+        SelectFarWorld(FarWorldMode::Ladder, FarWorldPurpose::World, FarWorldRefusal::None);
+    for (const char* failed_vertex :
+         {"g_buffer.vert", "instanced_mesh.vert", "skinned_mesh.vert"}) {
+        SCOPED_TRACE(failed_vertex);
+        const auto path = shaders / failed_vertex;
+        const auto original = ReadTextFile(path);
+        {
+            std::ofstream output(path, std::ios::binary);
+            output << original
+                   << "\n#ifdef LUMINUMBRA_FAR_WORLD_LADDER\n"
+                      "#error deliberate ladder-only failure\n#endif\n";
+        }
+        GBufferPass pass;
+        glDisable(GL_DEBUG_OUTPUT);
+        pass.init_geometry_shader(sources.directory);
+        pass.init_instanced_static_mesh(sources.directory);
+        pass.init_skinned_mesh(sources.directory);
+        glEnable(GL_DEBUG_OUTPUT);
+        const std::array legacy{pass.geometry_shader().get(),
+                                pass.instanced_static_mesh_shader().get(),
+                                pass.skinned_mesh_shader().get()};
+        const std::array ladder{pass.geometry_shader(FarWorldMode::Ladder).get(),
+                                pass.instanced_static_mesh_shader(FarWorldMode::Ladder).get(),
+                                pass.skinned_mesh_shader(FarWorldMode::Ladder).get()};
+        for (std::size_t i = 0; i < legacy.size(); ++i) {
+            ASSERT_TRUE(legacy[i]->IsValid()) << legacy[i]->Diagnostic();
+            EXPECT_EQ(ladder[i]->IsValid(), ladder[i]->VertexPath() != path.string());
+        }
+        const auto selection = pass.SelectFarWorldRenderer(request);
+        EXPECT_EQ(selection.requested, FarWorldMode::Ladder);
+        EXPECT_EQ(selection.effective, FarWorldMode::Legacy);
+        EXPECT_EQ(selection.refusal, FarWorldRefusal::ShaderProgramUnavailable);
+        EXPECT_TRUE(selection.advance);
+        EXPECT_TRUE(selection.submit);
+        const auto preview = pass.SelectFarWorldRenderer(
+            SelectFarWorld(FarWorldMode::Ladder, FarWorldPurpose::Preview, FarWorldRefusal::None));
+        EXPECT_EQ(preview.refusal, FarWorldRefusal::PreviewOverride);
+        const auto legacy_selection = pass.SelectFarWorldRenderer(
+            SelectFarWorld(FarWorldMode::Legacy, FarWorldPurpose::World, FarWorldRefusal::None));
+        EXPECT_EQ(legacy_selection.refusal, FarWorldRefusal::None);
+        pass.destroy_instanced_static_mesh();
+        pass.destroy_skinned_mesh();
+        std::ofstream output(path, std::ios::binary);
+        output << original;
+    }
+    // Even absent (uninitialised) programs must refuse activation.
+    EXPECT_EQ(GBufferPass{}.SelectFarWorldRenderer(request).refusal,
+              FarWorldRefusal::ShaderProgramUnavailable);
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
+}
+
+TEST(RenderSmokeTest, FailedLadderCompilationAllowsStartupAndRefusesFrameAndInvalidDraws) {
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    ReloadShaderSources sources(true);
+    const auto fragment = sources.directory / "res/shaders/g_buffer.frag";
+    const auto original = ReadTextFile(fragment);
+    const auto failed_source = original + "\n#ifdef LUMINUMBRA_FAR_WORLD_LADDER\n"
+                                          "#error deliberate ladder-only failure\n#endif\n";
+    {
+        std::ofstream output(fragment, std::ios::binary);
+        output << failed_source;
+    }
+    RenderPipeline pipeline;
+    pipeline.enable_static_model_content(false);
+    glDisable(GL_DEBUG_OUTPUT);
+    const bool started = pipeline.startup(32, 32, sources.directory);
+    glEnable(GL_DEBUG_OUTPUT);
+    ASSERT_TRUE(started);
+    auto& pass = TerrainCullingTestPeer::GBuffer(pipeline);
+    const std::array legacy{pass.geometry_shader().get(),
+                            pass.instanced_static_mesh_shader().get(),
+                            pass.skinned_mesh_shader().get()};
+    const std::array ladder{pass.geometry_shader(FarWorldMode::Ladder).get(),
+                            pass.instanced_static_mesh_shader(FarWorldMode::Ladder).get(),
+                            pass.skinned_mesh_shader(FarWorldMode::Ladder).get()};
+    for (std::size_t i = 0; i < legacy.size(); ++i) {
+        ASSERT_TRUE(legacy[i]->IsValid()) << legacy[i]->Diagnostic();
+        ASSERT_FALSE(ladder[i]->IsValid());
+        EXPECT_EQ(ladder[i]->Id(), 0u);
+    }
+    pipeline.set_far_world_mode(FarWorldMode::Ladder);
+    const auto request =
+        SelectFarWorld(FarWorldMode::Ladder, FarWorldPurpose::World, FarWorldRefusal::None);
+    Camera camera;
+    camera.SelectFarWorldPlane(FarWorldMode::Ladder);
+    // Supply satisfied authority/backend prerequisites so their independent
+    // refusals cannot mask the production frame's shader validation.
+    TerrainCullingTestPeer::SelectFarWorldFrame(pipeline, request, camera);
+    const auto selection = pipeline.far_world_selection();
+    EXPECT_EQ(selection.requested, FarWorldMode::Ladder);
+    EXPECT_EQ(selection.effective, FarWorldMode::Legacy);
+    EXPECT_EQ(selection.refusal, FarWorldRefusal::ShaderProgramUnavailable);
+    EXPECT_EQ(camera.GetFarPlane(), 3200.0f);
+    Luminumbra::Client::ScenarioHarness::IsolationConfig isolation;
+    glm::vec4 planes[6];
+    std::fill_n(planes, 6, glm::vec4(0, 0, 0, 1));
+    RenderContext ctx;
+    ctx.camera = &camera;
+    ctx.screen_width = 32;
+    ctx.screen_height = 32;
+    ctx.isolation = &isolation;
+    ctx.frustum_planes = planes;
+    GBufferPassInput input;
+    input.root_path = sources.directory;
+    input.far_selection = selection;
+    std::size_t terrain_calls = 0, ladder_calls = 0;
+    input.submit_terrain_chunks = [&](const glm::vec4(&)[6]) {
+        ++terrain_calls;
+        GLint current = 0;
+        glGetIntegerv(GL_CURRENT_PROGRAM, &current);
+        EXPECT_EQ(static_cast<GLuint>(current), pass.geometry_shader()->Id());
+        return TerrainSubmitStats{};
+    };
+    input.submit_ladder = [&](const FarWorldPrepareDraw&) {
+        ++ladder_calls;
+        return FarWorldSubmitStats{};
+    };
+    entt::registry entities;
+    Shader previous((SourceRoot() / "res/shaders/g_buffer.vert").string().c_str(),
+                    (SourceRoot() / "res/shaders/g_buffer.frag").string().c_str());
+    ASSERT_TRUE(previous.IsValid());
+    previous.use();
+    const auto fallback_stats = pass.execute(ctx, entities, input);
+    EXPECT_EQ(terrain_calls, 1u);
+    EXPECT_EQ(ladder_calls, 0u);
+    EXPECT_EQ(fallback_stats.invalid_program_refusals, 0u);
+    GLint current = 0;
+    glGetIntegerv(GL_CURRENT_PROGRAM, &current);
+    EXPECT_NE(static_cast<GLuint>(current), previous.Id());
+
+    // Bypass frame selection deliberately: all binding sites must still skip
+    // invalid programs. Include a drawable static mesh and a skinned actor so
+    // missing content/empty registries cannot make the binding guards vacuous.
+    const std::string mesh_key = "procgen://fw-invalid-program";
+    pass.register_cached_mesh(mesh_key,
+                              MeshLoader::CreateFromArrays({{{-1, -1, -5}, {0, 0, 1}, {0, 0}},
+                                                            {{1, -1, -5}, {0, 0, 1}, {1, 0}},
+                                                            {{0, 1, -5}, {0, 0, 1}, {.5f, 1}}},
+                                                           {0, 1, 2}));
+    ASSERT_TRUE(pass.has_cached_mesh(mesh_key));
+    const auto prop = entities.create();
+    entities.emplace<Luminumbra::Components::TransformComponent>(prop);
+    entities.emplace<Luminumbra::Components::StaticMeshComponent>(prop).meshPath = mesh_key;
+    const auto actor = entities.create();
+    entities.emplace<Luminumbra::Components::TransformComponent>(actor);
+    entities.emplace<Luminumbra::Components::SkinnedMeshComponent>(actor).meshPath =
+        "test/fw-invalid-no-skinned-mesh.lmesh";
+    entities.emplace<luminumbra::animation::AnimationPlayerComponent>(actor);
+    input.far_selection = request;
+    previous.use();
+    GLuint query = 0;
+    glGenQueries(1, &query);
+    glBeginQuery(GL_PRIMITIVES_GENERATED, query);
+    const auto refused_stats = pass.execute(ctx, entities, input);
+    glEndQuery(GL_PRIMITIVES_GENERATED);
+    GLuint primitives = 1;
+    glGetQueryObjectuiv(query, GL_QUERY_RESULT, &primitives);
+    glDeleteQueries(1, &query);
+    EXPECT_EQ(primitives, 0u);
+    EXPECT_EQ(refused_stats.refusal, FarWorldRefusal::ShaderProgramUnavailable);
+    EXPECT_EQ(refused_stats.invalid_program_refusals, 3u);
+    EXPECT_EQ(refused_stats.terrain_draws + refused_stats.far_region_draws +
+                  refused_stats.skinned_draws,
+              0u);
+    EXPECT_EQ(terrain_calls, 1u);
+    EXPECT_EQ(ladder_calls, 0u);
+    glGetIntegerv(GL_CURRENT_PROGRAM, &current);
+    EXPECT_EQ(static_cast<GLuint>(current), previous.Id());
+
+    // The same drawable prop does submit through Legacy after checked fallback,
+    // even though every Ladder program is still zero. The query distinguishes
+    // a working fallback from simply suppressing the entire G-buffer pass.
+    input.far_selection = selection;
+    input.static_model_tex = [](const std::string&) -> const StaticModelTex* {
+        return nullptr;
+    };
+    previous.use();
+    glGenQueries(1, &query);
+    glBeginQuery(GL_PRIMITIVES_GENERATED, query);
+    const auto legacy_stats = pass.execute(ctx, entities, input);
+    glEndQuery(GL_PRIMITIVES_GENERATED);
+    glGetQueryObjectuiv(query, GL_QUERY_RESULT, &primitives);
+    glDeleteQueries(1, &query);
+    EXPECT_EQ(primitives, 1u);
+    EXPECT_EQ(legacy_stats.invalid_program_refusals, 0u);
+    EXPECT_EQ(terrain_calls, 2u);
+    EXPECT_EQ(ladder_calls, 0u);
+    glGetIntegerv(GL_CURRENT_PROGRAM, &current);
+    EXPECT_NE(static_cast<GLuint>(current), previous.Id());
+
+    // Reload failure from an invalid initial variant continues to refuse. After
+    // recovery, failed reloads retain the valid linked programs and Ladder mode.
+    glDisable(GL_DEBUG_OUTPUT);
+    for (auto* shader : ladder)
+        EXPECT_FALSE(shader->Reload());
+    glEnable(GL_DEBUG_OUTPUT);
+    TerrainCullingTestPeer::SelectFarWorldFrame(pipeline, request, camera);
+    EXPECT_EQ(pipeline.far_world_selection().refusal, FarWorldRefusal::ShaderProgramUnavailable);
+    {
+        std::ofstream output(fragment, std::ios::binary);
+        output << original;
+    }
+    for (auto* shader : ladder)
+        ASSERT_TRUE(shader->Reload()) << shader->Diagnostic();
+    TerrainCullingTestPeer::SelectFarWorldFrame(pipeline, request, camera);
+    EXPECT_EQ(pipeline.far_world_selection().effective, FarWorldMode::Ladder);
+    EXPECT_EQ(pipeline.far_world_selection().refusal, FarWorldRefusal::None);
+    EXPECT_EQ(camera.GetFarPlane(), 17408.0f);
+    {
+        std::ofstream output(fragment, std::ios::binary);
+        output << failed_source;
+    }
+    for (auto* shader : ladder) {
+        const auto id = shader->Id();
+        const auto generation = shader->ProgramGeneration();
+        glDisable(GL_DEBUG_OUTPUT);
+        EXPECT_FALSE(shader->Reload());
+        glEnable(GL_DEBUG_OUTPUT);
+        EXPECT_EQ(shader->Id(), id);
+        EXPECT_EQ(shader->ProgramGeneration(), generation);
+        EXPECT_TRUE(shader->IsValid());
+    }
+    TerrainCullingTestPeer::SelectFarWorldFrame(pipeline, request, camera);
+    EXPECT_EQ(pipeline.far_world_selection().effective, FarWorldMode::Ladder);
+    EXPECT_EQ(pipeline.far_world_selection().refusal, FarWorldRefusal::None);
+    EXPECT_EQ(camera.GetFarPlane(), 17408.0f);
+    pipeline.shutdown();
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
+}
+
+TEST(RenderSmokeTest, FarWorldAutoReloadRefreshesBothVariantCachesOnReset) {
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    CheckDirectFarWorldReload(false);
+}
+
+TEST(RenderSmokeTest, FarWorldIndividualReloadRefreshesBothVariantCachesOnPrepare) {
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    CheckDirectFarWorldReload(true);
+}
+
+TEST(RenderSmokeTest, FarWorldFailedReloadKeepsBothVariantProgramsAndCachesValid) {
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    ReloadShaderSources sources;
+    const auto fragment = sources.directory / "g_buffer.frag";
+    const auto good_source = ReadTextFile(fragment);
+    for (const bool ladder_variant : {false, true}) {
+        for (const char* vertex : {"g_buffer.vert", "instanced_mesh.vert", "skinned_mesh.vert"}) {
+            Shader shader((sources.directory / vertex).string().c_str(),
+                          fragment.string().c_str(),
+                          {},
+                          ladder_variant ? std::vector<std::string>{"LUMINUMBRA_FAR_WORLD_LADDER 1"}
+                                         : std::vector<std::string>{});
+            ASSERT_TRUE(shader.IsValid());
+            FarWorldPassUniforms uniforms;
+            uniforms.Cache(shader);
+            FarWorldDrawCommand command;
+            command.tile_edge_meters = 512;
+            command.view_ray_bias_meters = 2;
+            command.horizontal_outer_clip_meters = 1040;
+            uniforms.Begin();
+            ASSERT_TRUE(uniforms.Prepare(command));
+            const auto id = shader.Id();
+            const auto generation = shader.ProgramGeneration();
+            {
+                std::ofstream output(fragment);
+                output << "#version 450 core\nthis is deliberately invalid GLSL;\n";
+            }
+            glDisable(GL_DEBUG_OUTPUT); // compilation failure is intentional
+            EXPECT_FALSE(shader.Reload());
+            glEnable(GL_DEBUG_OUTPUT);
+            EXPECT_EQ(shader.Id(), id);
+            EXPECT_EQ(shader.ProgramGeneration(), generation);
+            EXPECT_TRUE(shader.IsValid());
+            EXPECT_EQ(ReadIntUniform(id, "u_farWorldLadder"), 1);
+            if (ladder_variant)
+                EXPECT_EQ(ReadFloatUniform(id, "u_farRayBiasMeters"), 2);
+            uniforms.Reset();
+            EXPECT_EQ(ReadIntUniform(id, "u_farWorldLadder"), 0);
+            uniforms.Begin();
+            ASSERT_TRUE(uniforms.Prepare(command));
+            EXPECT_EQ(ReadFloatUniform(id, "u_farOuterRadius"), 1040);
+            if (std::string_view(vertex) == "g_buffer.vert") {
+                uniforms.UseInstanceOrigin(true);
+                EXPECT_EQ(ReadIntUniform(id, "u_useInstanceOrigin"), 1);
+            }
+            EXPECT_EQ(glGetError(), GL_NO_ERROR);
+            std::ofstream output(fragment);
+            output << good_source;
+        }
+    }
+}
+
+namespace {
+struct FarWorldPlanePasses {
+    RenderResourceRegistry resources;
+    GBufferPass gbuffer;
+    LightingPass lighting;
+    WaterPass water;
+    ParticlePass particles;
+    AerialPass aerial;
+    SsaoPass ssao;
+    DebugViewPass debug_depth;
+    GLuint quad = 0;
+    ~FarWorldPlanePasses() {
+        gbuffer.destroy_instanced_static_mesh();
+        gbuffer.destroy_skinned_mesh();
+        gbuffer.destroy_gbuffer(resources);
+        lighting.destroy_lighting_fbo(resources);
+        particles.destroy_buffers();
+        ssao.destroy_ssao(resources);
+        debug_depth.destroy_buffers();
+        glDeleteVertexArrays(1, &quad);
+    }
+    void Init() {
+        gbuffer.init_geometry_shader(SourceRoot());
+        gbuffer.init_instanced_static_mesh(SourceRoot());
+        gbuffer.init_skinned_mesh(SourceRoot());
+        gbuffer.init_gbuffer(resources, 96, 64);
+        lighting.init_shader(SourceRoot());
+        lighting.init_lighting_fbo(resources, 96, 64);
+        water.init_shader(SourceRoot());
+        aerial.init_shader(SourceRoot());
+        ssao.init_shaders(SourceRoot());
+        ssao.init_ssao(resources, 96, 64);
+        debug_depth.init_shader(SourceRoot());
+        debug_depth.init_buffers();
+        debug_depth.set_mode(DebugViewPass::Depth);
+        particles.init_shader(SourceRoot());
+        particles.init_buffers();
+        EXPECT_NE(particles.add_emitter(SourceRoot() / "data/common/particles/fixture_sparkle.json",
+                                        {0, 0, 0}),
+                  ParticlePass::kInvalidEmitter);
+        particles.update(.1f);
+        // A valid empty VAO gives a degenerate fullscreen triangle strip: these
+        // checks observe production uploads without material fixture sampling.
+        glGenVertexArrays(1, &quad);
+    }
+};
+void ExpectProjectionPlane(const glm::mat4& projection, float far_plane, glm::vec2 jitter = {}) {
+    const auto near_clip = projection * glm::vec4(0, 0, -.1f, 1);
+    const auto far_clip = projection * glm::vec4(0, 0, -far_plane, 1);
+    EXPECT_NEAR(near_clip.z / near_clip.w, 1, 1e-6);
+    EXPECT_NEAR(far_clip.z / far_clip.w, 0, 1e-10);
+    EXPECT_NEAR(far_clip.x / far_clip.w, -jitter.x, 1e-6);
+    EXPECT_NEAR(far_clip.y / far_clip.w, -jitter.y, 1e-6);
+}
+} // namespace
+
+TEST(RenderSmokeTest, FarWorldPlaneCoherenceThroughProductionConsumers) {
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    RenderPipeline pipeline;
+    FarWorldPlanePasses passes;
+    passes.Init();
+    ASSERT_TRUE(passes.lighting.shader()->IsValid());
+    ASSERT_TRUE(passes.water.shader()->IsValid());
+    ASSERT_TRUE(passes.particles.shader()->IsValid());
+    ASSERT_TRUE(passes.aerial.shader()->IsValid());
+    ASSERT_GT(passes.particles.frame_instance_count(), 0u);
+    entt::registry entities;
+    // The skinned pass requires an actor before uploading. Its fixture path
+    // intentionally has no drawable mesh; all frame uniforms still traverse
+    // the production skinned pass. No synthetic projection is built here.
+    const auto actor = entities.create();
+    entities.emplace<Luminumbra::Components::TransformComponent>(actor);
+    auto& skinned = entities.emplace<Luminumbra::Components::SkinnedMeshComponent>(actor);
+    skinned.meshPath = "test/fw-plane-no-draw.lmesh";
+    entities.emplace<luminumbra::animation::AnimationPlayerComponent>(actor);
+    Luminumbra::Client::ScenarioHarness::IsolationConfig isolation;
+    const std::vector<glm::mat4> light_matrices(4, glm::mat4(1));
+    const std::vector<PointLight> point_lights;
+    Camera camera({37, 580, -19}, {0, 1, 0}, -70, -27);
+    const glm::vec2 jitter(.003f, -.002f);
+    RenderContext ctx;
+    ctx.camera = &camera;
+    ctx.screen_width = 96;
+    ctx.screen_height = 64;
+    ctx.registry = &passes.resources;
+    ctx.isolation = &isolation;
+    ctx.taau_jitter_ndc = jitter;
+    ctx.light_space_matrices = &light_matrices;
+    ctx.screen_quad_vao = passes.quad;
+    ctx.point_lights = &point_lights;
+    ctx.lit_scene.id = passes.lighting.lighting_fbo().fbo_id;
+    ctx.gbuffer_depth.id = passes.gbuffer.gbuffer().depth_texture;
+    ctx.gbuffer_position.id = passes.gbuffer.gbuffer().position_texture;
+    ctx.gbuffer_normal.id = passes.gbuffer.gbuffer().normal_texture;
+    ctx.gbuffer_albedo.id = passes.gbuffer.gbuffer().albedo_texture;
+    ctx.sky_lut_ready = true;
+    // Change modes on this same camera/pipeline so the real frustum cache must
+    // also invalidate on a plane-only change. Preview/refusal policy is covered
+    // below as well as the normal Ladder -> Legacy transition.
+    const std::array selections{
+        SelectFarWorld(FarWorldMode::Ladder, FarWorldPurpose::World, FarWorldRefusal::None),
+        SelectFarWorld(FarWorldMode::Legacy, FarWorldPurpose::World, FarWorldRefusal::None),
+        SelectFarWorld(FarWorldMode::Ladder, FarWorldPurpose::World, FarWorldRefusal::None),
+        SelectFarWorld(FarWorldMode::Ladder, FarWorldPurpose::Preview, FarWorldRefusal::None),
+        SelectFarWorld(
+            FarWorldMode::Ladder, FarWorldPurpose::OffscreenPreview, FarWorldRefusal::None),
+        SelectFarWorld(FarWorldMode::Ladder,
+                       FarWorldPurpose::World,
+                       FarWorldRefusal::ImmutableAuthorityUnavailable)};
+    for (const auto& selection : selections) {
+        const auto mode = selection.effective;
+        const float expected = mode == FarWorldMode::Ladder ? 17408.0f : 3200.0f;
+        SCOPED_TRACE(expected);
+        camera.SelectFarWorldPlane(mode);
+        glm::vec4 planes[6];
+        TerrainCullingTestPeer::PrepareCamera(pipeline, camera, 96, 64, jitter, planes);
+        const auto inside = glm::vec4(camera.Position + camera.Front * (expected - 1), 1);
+        const auto outside = glm::vec4(camera.Position + camera.Front * (expected + 1), 1);
+        EXPECT_GT(glm::dot(planes[5], inside), 0);
+        EXPECT_LT(glm::dot(planes[5], outside), 0);
+        EXPECT_NEAR(
+            glm::dot(planes[4], glm::vec4(camera.Position + camera.Front * .1f, 1)), 0, .001);
+        ctx.frustum_planes = planes;
+        GBufferPassInput input;
+        input.root_path = SourceRoot();
+        input.far_selection = selection;
+        input.submit_terrain_chunks = [&](const glm::vec4(&submitted_planes)[6]) {
+            for (std::size_t i = 0; i < 6; ++i)
+                EXPECT_EQ(submitted_planes[i], planes[i]);
+            GLint current = 0;
+            glGetIntegerv(GL_CURRENT_PROGRAM, &current);
+            EXPECT_EQ(static_cast<GLuint>(current), passes.gbuffer.geometry_shader(mode)->Id());
+            EXPECT_EQ(ReadIntUniform(static_cast<GLuint>(current), "u_useInstanceOrigin"), 1);
+            return TerrainSubmitStats{};
+        };
+        bool ladder_prepared = false;
+        input.submit_ladder = [&](const FarWorldPrepareDraw& prepare) {
+            FarWorldDrawCommand command;
+            command.tile_edge_meters = 512;
+            command.view_ray_bias_meters = 2;
+            command.horizontal_outer_clip_meters = 1040;
+            EXPECT_TRUE(prepare(command));
+            ladder_prepared = true;
+            const auto program = passes.gbuffer.geometry_shader(mode)->Id();
+            EXPECT_EQ(ReadIntUniform(program, "u_farWorldLadder"), 1);
+            EXPECT_EQ(ReadFloatUniform(program, "u_farRayBiasMeters"), 2);
+            return FarWorldSubmitStats{};
+        };
+        passes.gbuffer.execute(ctx, entities, input);
+        EXPECT_EQ(ladder_prepared, mode == FarWorldMode::Ladder);
+        for (const Shader* shader : {passes.gbuffer.geometry_shader(mode).get(),
+                                     passes.gbuffer.instanced_static_mesh_shader(mode).get(),
+                                     passes.gbuffer.skinned_mesh_shader(mode).get()}) {
+            ASSERT_TRUE(shader->IsValid());
+            ExpectProjectionPlane(ReadMatrixUniform(shader->Id(), "projection"), expected, jitter);
+            EXPECT_EQ(ReadIntUniform(shader->Id(), "u_farWorldLadder"), 0);
+        }
+        // Deferred, water, aerial and soft-particle depth consumers use actual
+        // pass execute methods and linked program uniforms, not test matrices.
+        for (const int quality : {0, 1, 2, 3}) {
+            ctx.ssao_quality = quality;
+            passes.ssao.execute_ssao(ctx);
+            const auto& shader =
+                quality == 0 ? passes.ssao.ssao().ssaoShader : passes.ssao.ssao().gtaoShader;
+            ASSERT_TRUE(shader->IsValid());
+            ExpectProjectionPlane(ReadMatrixUniform(shader->Id(), "u_projection"), expected);
+        }
+        passes.lighting.execute(ctx);
+        ExpectProjectionPlane(ReadMatrixUniform(passes.lighting.shader()->Id(), "u_projection"),
+                              expected);
+        passes.water.execute(ctx, {}, camera);
+        ExpectProjectionPlane(ReadMatrixUniform(passes.water.shader()->Id(), "u_projection"),
+                              expected);
+        const auto inverse = ReadMatrixUniform(passes.water.shader()->Id(), "u_inverse_projection");
+        const auto reconstructed_far = inverse * glm::vec4(0, 0, 0, 1);
+        EXPECT_NEAR(reconstructed_far.z / reconstructed_far.w, -expected, .002);
+        const auto reconstructed_near = inverse * glm::vec4(0, 0, 1, 1);
+        EXPECT_NEAR(reconstructed_near.z / reconstructed_near.w, -.1f, 1e-6);
+        passes.aerial.execute(ctx);
+        const auto aerial_inverse =
+            ReadMatrixUniform(passes.aerial.shader()->Id(), "u_inverseProjection");
+        const auto aerial_far = aerial_inverse * glm::vec4(0, 0, 0, 1);
+        EXPECT_NEAR(aerial_far.z / aerial_far.w, -expected, .002);
+        ASSERT_GT(passes.particles.execute(ctx, camera), 0u);
+        EXPECT_EQ(ReadFloatUniform(passes.particles.shader()->Id(), "u_farPlane"), expected);
+        EXPECT_EQ(ReadFloatUniform(passes.particles.shader()->Id(), "u_nearPlane"), .1f);
+        ExpectProjectionPlane(ReadMatrixUniform(passes.particles.shader()->Id(), "u_projection"),
+                              expected);
+        passes.debug_depth.execute(ctx);
+        GLint debug_program = 0;
+        glGetIntegerv(GL_CURRENT_PROGRAM, &debug_program);
+        EXPECT_EQ(ReadFloatUniform(static_cast<GLuint>(debug_program), "u_far"), expected);
+        EXPECT_EQ(ReadFloatUniform(static_cast<GLuint>(debug_program), "u_near"), .1f);
+        // The capture serializer reads the prepared frame snapshot, even if
+        // the camera's selection has since moved to the other mode.
+        camera.SelectFarWorldPlane(mode == FarWorldMode::Ladder ? FarWorldMode::Legacy
+                                                                : FarWorldMode::Ladder);
+        const auto captured = TerrainCullingTestPeer::CaptureCamera(pipeline);
+        EXPECT_EQ(captured["depth_convention"]["far_plane_m"].get<float>(), expected);
+        EXPECT_EQ(captured["depth_convention"]["near_plane_m"].get<float>(), .1f);
+        const auto stored_projection = captured["gbuffer_projection"].get<std::vector<float>>();
+        ASSERT_EQ(stored_projection.size(), 16u);
+        ExpectProjectionPlane(glm::make_mat4(stored_projection.data()), expected, jitter);
+        EXPECT_EQ(glGetError(), GL_NO_ERROR);
+    }
 }

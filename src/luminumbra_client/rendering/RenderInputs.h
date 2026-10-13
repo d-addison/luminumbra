@@ -73,6 +73,8 @@ struct GBufferPassInput {
 // accumulated with '+=' (mirrors GBufferPass.cpp geometry_pass_chunks /
 // geometry_pass_skinned_meshes today).
 struct GBufferDrawStats {
+    FarWorldRefusal refusal = FarWorldRefusal::None;
+    std::size_t invalid_program_refusals = 0;
     std::size_t terrain_visible_chunks = 0; // call site: '=' (terrain_visible_chunks)
     std::size_t terrain_draws = 0;          // call site: '+=' (terrain_draws)
     std::size_t terrain_indices = 0;        // call site: '+=' (terrain_indices_drawn)

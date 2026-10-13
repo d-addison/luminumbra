@@ -160,8 +160,12 @@ add_executable(common_tests
     rendering/FarVolumeResidency_test.cpp
     rendering/FarWorldRenderer_test.cpp
     rendering/FarWorldOwnership_test.cpp
+    rendering/FarWorldDepthBias_test.cpp
+    rendering/ShaderSource_test.cpp
+    ../src/luminumbra_client/rendering/ShaderSource.cpp
     ../src/luminumbra_client/rendering/FarWorldRenderer.cpp
     ../src/luminumbra_client/rendering/FarWorldOwnership.cpp
+    ../src/luminumbra_client/rendering/FarWorldDepthBias.cpp
     ../src/luminumbra_client/rendering/FarVolumeBuildQueue.cpp
     ../src/luminumbra_client/rendering/FarVolumeUpload.cpp
     ../src/luminumbra_client/rendering/FarVolumeGpuBackend.cpp

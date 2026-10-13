@@ -16,6 +16,7 @@ using namespace Luminumbra::Rendering;
 struct DriverState {
     bool current = true, fail_upload = false, fail_draw = false;
     std::size_t draws = 0, deletes = 0, live = 0;
+    bool ownership_bound = false;
     bool destroyed = false, released_with_context = true, fixture_released = false;
 };
 // Fixed storage: fake operations neither load GL nor allocate hidden buffers.
@@ -71,6 +72,17 @@ public:
     }
     void SetAttribute(FarVolumeVertexAttribute, std::int32_t, std::size_t) noexcept override {}
     void EnableAttribute(FarVolumeVertexAttribute) noexcept override {}
+    bool BindLiveOwnership(std::span<const FarWorldLiveCell>) noexcept override {
+        EXPECT_FALSE(state_.ownership_bound);
+        state_.ownership_bound = true;
+        return true;
+    }
+    void UnbindLiveOwnership() noexcept override {
+        state_.ownership_bound = false;
+    }
+    void ReleaseLiveOwnership() noexcept override {
+        UnbindLiveOwnership();
+    }
     bool DrawIndexed(std::int32_t count) noexcept override {
         EXPECT_GT(count, 0);
         EXPECT_NE(vao_, 0u);
@@ -873,4 +885,32 @@ TEST(FarWorldRenderer, IncompleteAndWrongFrameOwnershipRefuseFarSubmission) {
     owner.renderer.BeginLiveOwnership(owner.frame);
     ASSERT_TRUE(owner.renderer.FinishLiveOwnership());
     EXPECT_EQ(owner.renderer.Submit({0, 0, 0}, prepare).draws, 1u);
+}
+
+TEST(FarWorldRenderer, FailedSubmissionAndPrepareExceptionUnbindBeforeNextSubmission) {
+    Owner owner;
+    ASSERT_TRUE(owner.WaitSettled(Request()));
+    owner.renderer.BeginLiveOwnership(owner.frame);
+    ASSERT_TRUE(owner.renderer.FinishLiveOwnership());
+    const FarWorldPrepareDraw prepare = [](const auto&) {
+        return true;
+    };
+    owner.state.fail_draw = true;
+    const auto failed = owner.renderer.Submit({0, 0, 0}, prepare);
+    EXPECT_EQ(failed.draws, 0u);
+    EXPECT_EQ(failed.refused, 1u);
+    EXPECT_FALSE(owner.state.ownership_bound);
+    owner.state.fail_draw = false;
+    const auto refused = owner.renderer.Submit({0, 0, 0}, [](const auto&) { return false; });
+    EXPECT_EQ(refused.draws, 0u);
+    EXPECT_EQ(refused.refused, 1u);
+    EXPECT_FALSE(owner.state.ownership_bound);
+    EXPECT_THROW(owner.renderer.Submit({0, 0, 0},
+                                       [](const FarWorldDrawCommand&) -> bool {
+                                           throw std::runtime_error("prepare failed");
+                                       }),
+                 std::runtime_error);
+    EXPECT_FALSE(owner.state.ownership_bound);
+    EXPECT_EQ(owner.renderer.Submit({0, 0, 0}, prepare).draws, 1u);
+    EXPECT_FALSE(owner.state.ownership_bound);
 }

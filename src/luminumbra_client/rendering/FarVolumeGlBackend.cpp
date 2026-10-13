@@ -37,7 +37,9 @@ bool FarVolumeGlDriver::BindLiveOwnership(std::span<const FarWorldLiveCell> cell
     if (!ValidContext() || ownership_bound_ || cells.size() > kFarWorldLiveCellLimit ||
         !glCreateBuffers || !glNamedBufferData || !glNamedBufferSubData ||
         !glGetNamedBufferParameteri64v || !glGetIntegeri_v || !glGetInteger64i_v ||
-        !glBindBufferBase || !glBindBufferRange || HasError())
+        !glBindBufferBase || !glBindBufferRange || !glIsEnabled || !glGetBooleanv ||
+        !glGetDoublev || !glEnable || !glDisable || !glDepthFunc || !glDepthMask || !glDepthRange ||
+        !glPolygonMode || !glClipControl || HasError())
         return false;
     if (!ownership_buffer_) {
         glCreateBuffers(1, &ownership_buffer_);
@@ -73,9 +75,32 @@ bool FarVolumeGlDriver::BindLiveOwnership(std::span<const FarWorldLiveCell> cell
     if (HasError())
         return false;
     saved_clip_enabled_ = glIsEnabled(GL_CLIP_DISTANCE0) == GL_TRUE;
+    saved_depth_enabled_ = glIsEnabled(GL_DEPTH_TEST) == GL_TRUE;
+    GLboolean depth_mask = GL_FALSE;
+    glGetBooleanv(GL_DEPTH_WRITEMASK, &depth_mask);
+    saved_depth_mask_ = depth_mask == GL_TRUE;
+    glGetIntegerv(GL_DEPTH_FUNC, &saved_depth_func_);
+    glGetDoublev(GL_DEPTH_RANGE, saved_depth_range_);
+    saved_offset_fill_ = glIsEnabled(GL_POLYGON_OFFSET_FILL) == GL_TRUE;
+    saved_offset_line_ = glIsEnabled(GL_POLYGON_OFFSET_LINE) == GL_TRUE;
+    saved_offset_point_ = glIsEnabled(GL_POLYGON_OFFSET_POINT) == GL_TRUE;
+    glGetIntegerv(GL_CLIP_ORIGIN, &saved_clip_origin_);
+    glGetIntegerv(GL_CLIP_DEPTH_MODE, &saved_clip_mode_);
+    if (HasError())
+        return false;
     ownership_bound_ = true;
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 7, ownership_buffer_);
     glEnable(GL_CLIP_DISTANCE0);
+    glClipControl(GL_LOWER_LEFT, GL_ZERO_TO_ONE);
+    glEnable(GL_DEPTH_TEST);
+    glDepthFunc(GL_GREATER);
+    glDepthMask(GL_TRUE);
+    glDepthRange(0.0, 1.0);
+    // Only the specified ray offset applies; inherited legacy polygon offset
+    // must not add another bias to these draws.
+    glDisable(GL_POLYGON_OFFSET_FILL);
+    glDisable(GL_POLYGON_OFFSET_LINE);
+    glDisable(GL_POLYGON_OFFSET_POINT);
     if (!HasError())
         return true;
     UnbindLiveOwnership();
@@ -95,8 +120,21 @@ void FarVolumeGlDriver::UnbindLiveOwnership() noexcept {
     else
         glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 7, static_cast<GLuint>(saved_indexed_ssbo_));
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, static_cast<GLuint>(saved_ssbo_));
-    if (!saved_clip_enabled_)
-        glDisable(GL_CLIP_DISTANCE0);
+    const auto restore_enable = [](GLenum capability, bool enabled) {
+        if (enabled)
+            glEnable(capability);
+        else
+            glDisable(capability);
+    };
+    restore_enable(GL_CLIP_DISTANCE0, saved_clip_enabled_);
+    restore_enable(GL_DEPTH_TEST, saved_depth_enabled_);
+    restore_enable(GL_POLYGON_OFFSET_FILL, saved_offset_fill_);
+    restore_enable(GL_POLYGON_OFFSET_LINE, saved_offset_line_);
+    restore_enable(GL_POLYGON_OFFSET_POINT, saved_offset_point_);
+    glDepthFunc(static_cast<GLenum>(saved_depth_func_));
+    glDepthMask(saved_depth_mask_ ? GL_TRUE : GL_FALSE);
+    glDepthRange(saved_depth_range_[0], saved_depth_range_[1]);
+    glClipControl(static_cast<GLenum>(saved_clip_origin_), static_cast<GLenum>(saved_clip_mode_));
     ownership_bound_ = false;
 }
 void FarVolumeGlDriver::ReleaseLiveOwnership() noexcept {

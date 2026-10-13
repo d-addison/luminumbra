@@ -28,7 +28,8 @@ enum class FarWorldRefusal {
     SpanRejected,
     PreviewOverride,
     OffscreenSuppressed,
-    SpanHistoryExhausted
+    SpanHistoryExhausted,
+    ShaderProgramUnavailable
 };
 
 constexpr FarWorldMode RequestedFarWorldMode(bool enabled) noexcept {

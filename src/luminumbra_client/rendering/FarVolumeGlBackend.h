@@ -46,6 +46,11 @@ private:
     std::int32_t saved_ssbo_ = 0, saved_indexed_ssbo_ = 0;
     std::int64_t saved_ssbo_start_ = 0, saved_ssbo_size_ = 0;
     bool ownership_bound_ = false, saved_clip_enabled_ = false;
+    bool saved_depth_enabled_ = false, saved_depth_mask_ = false;
+    bool saved_offset_fill_ = false, saved_offset_line_ = false, saved_offset_point_ = false;
+    std::int32_t saved_depth_func_ = 0;
+    std::int32_t saved_clip_origin_ = 0, saved_clip_mode_ = 0;
+    double saved_depth_range_[2]{};
     GLFWwindow* const context_;
     const std::thread::id owner_;
 };
