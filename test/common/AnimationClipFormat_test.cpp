@@ -1,9 +1,10 @@
+#include "../support/UniqueTempPath.h"
+
 #include <gtest/gtest.h>
 
 #include "luminumbra_common/animation/SkinnedMeshFormat.h"
 #include <algorithm>
 #include <bit>
-#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -24,10 +25,7 @@ using namespace luminumbra::animation;
 class ClipFile {
 public:
     ClipFile()
-        : path(std::filesystem::temp_directory_path() /
-               ("luminumbra_clip_" +
-                std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) +
-                ".lanim")) {}
+        : path(Luminumbra::TestSupport::UniqueTempFilePath("luminumbra_clip_", ".lanim")) {}
     ~ClipFile() {
         std::error_code error;
         std::filesystem::remove(path, error);

@@ -3,12 +3,12 @@
 #include "components/CoreComponents.h"
 #include <luminumbra/rendering/StaticScene.h>
 
+#include "../support/UniqueTempPath.h"
 #include <glm/gtc/matrix_transform.hpp>
+
 #include <gtest/gtest.h>
 
-#include <atomic>
 #include <bit>
-#include <chrono>
 #include <fstream>
 
 namespace {
@@ -54,11 +54,7 @@ protected:
     std::string digest;
 
     void SetUp() override {
-        static std::atomic<unsigned> sequence{0};
-        project = std::filesystem::temp_directory_path() /
-                  ("luminumbra-prefab-test-" +
-                   std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) +
-                   "-" + std::to_string(sequence++));
+        project = Luminumbra::TestSupport::CreateUniqueTempDirectory("luminumbra-prefab-test-");
         generation = project / ".luminumbra-author" / "generations" / kGeneration;
         std::filesystem::create_directories(generation);
         auto& mesh = files[kMesh];

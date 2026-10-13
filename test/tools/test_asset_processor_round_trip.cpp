@@ -1,8 +1,9 @@
+#include "../support/UniqueTempPath.h"
+
 #include <gtest/gtest.h>
 
 #include <algorithm>
 #include <array>
-#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -63,10 +64,7 @@ struct ProcessedMesh {
 class TempDirectory {
 public:
     TempDirectory() {
-        const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
-        path_ = std::filesystem::temp_directory_path() /
-                ("luminumbra_asset_round_trip_" + std::to_string(stamp));
-        std::filesystem::create_directories(path_);
+        path_ = Luminumbra::TestSupport::CreateUniqueTempDirectory("luminumbra_asset_round_trip_");
     }
 
     ~TempDirectory() {

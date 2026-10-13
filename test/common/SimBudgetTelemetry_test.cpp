@@ -1,7 +1,9 @@
+#include "../support/UniqueTempPath.h"
 #include <chrono>
 #include <cstddef>
 #include <filesystem>
 #include <fstream>
+
 #include <gtest/gtest.h>
 #include <iterator>
 #include <memory>
@@ -27,9 +29,7 @@ using luminumbra::simulation::SimBudgetTelemetry;
 
 TEST(SimBudgetTelemetry, DisabledProductionArtifactMatchesDevelBytes) {
     namespace fs = std::filesystem;
-    const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
-    const fs::path output =
-        fs::temp_directory_path() / ("smoke_artifact_" + std::to_string(stamp) + ".json");
+    const fs::path output = Luminumbra::TestSupport::UniqueTempFilePath("smoke_artifact_", ".json");
     for (int scenario = 0; scenario != 3; ++scenario) {
         SCOPED_TRACE(scenario);
         ServerCliOptions options;
@@ -403,9 +403,8 @@ TEST(SimBudgetTelemetry, EnforcementIsByteNeutralWithoutEnabledCollector) {
 
 TEST(SimBudgetTelemetry, SmokeFailsOnlyWhenBudgetProfileStageIsExceeded) {
     namespace fs = std::filesystem;
-    const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
     const fs::path output =
-        fs::temp_directory_path() / ("smoke_budget_profile_" + std::to_string(stamp) + ".json");
+        Luminumbra::TestSupport::UniqueTempFilePath("smoke_budget_profile_", ".json");
     for (const std::uint64_t cap : {std::uint64_t{5}, std::uint64_t{9}}) {
         SCOPED_TRACE(cap);
         ServerCliOptions options;
