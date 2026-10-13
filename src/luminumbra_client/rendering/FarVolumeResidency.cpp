@@ -8,7 +8,8 @@
 namespace Luminumbra::Rendering {
 namespace {
 // Construction and residency selection guarantee these values are present.
-template <typename Optional> auto& RequireEngaged(Optional& value) {
+template<typename Optional>
+auto& RequireEngaged(Optional& value) {
     if (!value)
         throw std::logic_error("Far-volume residency missing required state");
     return *value;
