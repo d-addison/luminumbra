@@ -120,7 +120,7 @@ TEST(PlantPersistence, PhysicalAndIrrigationSourcesRoundtripSeparatelyWithLegacy
     EXPECT_EQ(E::SerializeEntityRegistrySnapshotJson(F::BuildPlantEntitySnapshot(original)),
               legacy);
     Luminumbra::world::ActiveRegionLedger ledger;
-    ledger.mark_edited({0, 0}, {});
+    ledger.mark_edited({0, 0}, Luminumbra::world::WorldClock{});
     std::uint64_t id = 0;
     ASSERT_TRUE(ledger.allocate_persistent_id(id));
     original.emplace<C::PlantRegionComponent>(entity).persistent_id = id;

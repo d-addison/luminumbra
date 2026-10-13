@@ -560,7 +560,7 @@ TEST(WorldDurableResidency, S7WaterExcludesParkedAuthorityEvenWhenOwnerAndSource
     using Luminumbra::world::ActiveRegionLedger;
     const auto owner = ActiveRegionLedger::region_at(position);
     ActiveRegionLedger ledger;
-    ledger.mark_edited(owner, {});
+    ledger.mark_edited(owner, Luminumbra::world::WorldClock{});
     Luminumbra::world::RegionSchedule schedule;
     schedule.tick = ledger.tick();
     schedule.due = {owner};

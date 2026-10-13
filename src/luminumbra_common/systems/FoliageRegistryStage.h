@@ -15,6 +15,7 @@
 #include <entt/entt.hpp>
 #include <set>
 #include <stdexcept>
+#include <type_traits>
 #include <vector>
 
 namespace luminumbra::foliage {
@@ -25,8 +26,14 @@ void Copy(const entt::registry& from,
           entt::entity source,
           entt::registry& to,
           entt::entity target) {
-    if (const auto* component = from.try_get<const T>(source))
-        to.emplace_or_replace<T>(target, *component);
+    // EnTT's empty-component storage has no addressable payload for try_get.
+    if constexpr (std::is_empty_v<T>) {
+        if (from.all_of<T>(source))
+            to.emplace_or_replace<T>(target);
+    } else {
+        if (const auto* component = from.try_get<const T>(source))
+            to.emplace_or_replace<T>(target, *component);
+    }
 }
 inline void CopyFoliage(const entt::registry& from,
                         entt::entity source,

@@ -1941,7 +1941,9 @@ WorldSaveService::region_simulation_digest(const std::filesystem::path& save_dir
                                            world::RegionKey key,
                                            const std::vector<std::shared_ptr<Chunk>>& live_chunks) {
     ValidateRegionDigestKey(key);
-    return region_simulation_digest(save_dir, key, RegionDigestInputs{live_chunks, {}});
+    // This compatibility overload projects chunks only. Durable chunks are read from save_dir;
+    // callers with live ground objects or field pages supply those projections explicitly.
+    return region_simulation_digest(save_dir, key, RegionDigestInputs{live_chunks, {}, {}, {}, {}});
 }
 
 std::uint64_t WorldSaveService::region_simulation_digest(
@@ -1950,7 +1952,7 @@ std::uint64_t WorldSaveService::region_simulation_digest(
     std::initializer_list<std::shared_ptr<Chunk>> live_chunks) {
     ValidateRegionDigestKey(key);
     return region_simulation_digest(
-        save_dir, key, RegionDigestInputs{std::vector<std::shared_ptr<Chunk>>(live_chunks), {}});
+        save_dir, key, std::vector<std::shared_ptr<Chunk>>(live_chunks));
 }
 
 void WorldSaveService::region_coords_for_chunk(const IVec3& chunk_coords,

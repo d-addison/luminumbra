@@ -1268,4 +1268,25 @@ TEST(ActiveRegionLedgerTest, ResumeAcknowledgementClearsOnlyMatchingThawedStampO
     EXPECT_FALSE(ledger.acknowledge_resume({8, 8}, frozen));
 }
 
+TEST(ActiveRegionLedgerTest, ResumeAcknowledgementCommitsWindowBetweenReducedDuePhases) {
+    auto ledger = FrozenLedger();
+    const auto frozen = ledger.records().at(kFar).frozen_at;
+    const auto thaw_tick = ActiveRegionLedger::phase(kFar, 1) == 0 ? 5u : 4u;
+    const auto schedule = Step(ledger, thaw_tick, 0);
+    ASSERT_EQ(ledger.records().at(kFar).state, RegionState::Reduced);
+    ASSERT_TRUE(schedule.due.empty());
+    ASSERT_LT(ledger.records().at(kFar).last_ticked, thaw_tick);
+    const auto before = ledger.encode();
+    EXPECT_FALSE(ledger.acknowledge_resume(kFar, frozen + 1));
+    EXPECT_EQ(ledger.encode(), before);
+    ASSERT_TRUE(ledger.acknowledge_resume(kFar, frozen));
+    const auto restored = Reload(ledger);
+    EXPECT_EQ(restored.records().at(kFar).last_ticked, thaw_tick);
+    EXPECT_EQ(restored.records().at(kFar).frozen_at, 0u);
+    EXPECT_EQ(restored.tick(), thaw_tick);
+    const auto committed = ledger.encode();
+    EXPECT_FALSE(ledger.acknowledge_resume(kFar, frozen));
+    EXPECT_EQ(ledger.encode(), committed);
+}
+
 } // namespace

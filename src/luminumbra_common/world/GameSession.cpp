@@ -1831,10 +1831,6 @@ void GameSession::RunRegionalFoliageTickImpl(std::uint64_t tick) {
     for (const auto& [key, frozen_at] : resumes) {
         if (!m_activeRegionLedger.acknowledge_resume(key, frozen_at))
             throw std::runtime_error("Plant resume acknowledgement refused");
-        // Thaw can land between Reduced due phases. Persist the completed
-        // window boundary even with no remaining plants: pages/living consumers
-        // must not replay the pre-freeze interval at the next due phase or reopen.
-        m_activeRegionLedger.activate(key, m_worldClock).last_ticked = tick;
     }
     for (const auto& [key, updates] : page_work)
         if (updates)

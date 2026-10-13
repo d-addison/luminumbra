@@ -133,6 +133,7 @@ bool ActiveRegionLedger::acknowledge_resume(RegionKey key, std::uint64_t frozen_
         it->second.frozen_at != frozen_at)
         return false;
     it->second.frozen_at = 0;
+    it->second.last_ticked = m_tick;
     return true;
 }
 void ActiveRegionLedger::mark_saved(const WorldClock& clock) {

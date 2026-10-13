@@ -150,7 +150,8 @@ public:
     // Validation/cap failure changes nothing. Explicitly retain absent due claims.
     bool set_water_debts(const WaterDebts& debts);
     // Apply only after every resume consumer succeeds. Refuses frozen/unknown or stale
-    // stamps, so a saved frozen_at cannot cause catch-up twice.
+    // stamps, so a saved frozen_at cannot cause catch-up twice. Commits last_ticked to tick(),
+    // including a thaw between Reduced due phases, so consumers cannot replay that window.
     bool acknowledge_resume(RegionKey key, std::uint64_t frozen_at);
     using EnergyAges = std::map<RegionKey, std::uint64_t>;
     [[nodiscard]] const EnergyAges& energy_ages() const noexcept {

@@ -736,7 +736,7 @@ TEST(WorldSaveServiceTest, ChunkVectorRegionDigestUsesV2AuthorityAndDurableMerge
     EXPECT_EQ(WorldSaveService::region_simulation_digest(root.path, {0, 0}, chunks),
               expected_digest);
     EXPECT_EQ(WorldSaveService::region_simulation_digest(
-                  root.path, {0, 0}, RegionDigestInputs{chunks, {}}),
+                  root.path, {0, 0}, RegionDigestInputs{chunks, {}, {}, {}, {}}),
               expected_digest);
 
     const std::vector<std::shared_ptr<Chunk>> empty;

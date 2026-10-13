@@ -958,7 +958,7 @@ TEST(WaterDeterminism, DurableReadErrorRefusesDirectWaterConsumers) {
         [](const Luminumbra::IVec3&) -> std::shared_ptr<Luminumbra::Chunk> {
             throw std::runtime_error("injected durable read error");
         },
-        [&faults](std::string) { ++faults; });
+        [&faults](const std::string&) { ++faults; });
     const Luminumbra::IVec3 expected{4096, 0, 4096};
     world->remember_durable_chunks({expected});
     // True suppresses procedural regeneration even when restoration fails.
