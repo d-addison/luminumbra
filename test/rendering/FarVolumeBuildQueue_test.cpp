@@ -169,6 +169,8 @@ TEST(FarVolumeBuildQueue, SupersededWorkReapsBeforeLatestSpanDispatch) {
     barrier->Release();
     auto result = WaitResult(queue, latest);
     ASSERT_TRUE(result);
+    if (!result)
+        return;
     EXPECT_EQ(result->identity(), latest.identity);
     EXPECT_EQ(result->status(), FarVolumeBuildStatus::ReadyEmpty);
     EXPECT_LE(result->mesh().request.span.min_y, -320);
@@ -246,6 +248,8 @@ TEST(FarVolumeBuildQueue, EveryCurrencyFieldPreventsWrongCompletion) {
             // A query for another key does not consume this key's completion.
             auto correct = queue.TakeCompleted(request.identity, request.intent);
             ASSERT_TRUE(correct);
+            if (!correct)
+                return;
             EXPECT_EQ(correct->identity(), request.identity);
         } else
             EXPECT_EQ(queue.Stats().ready, 0u);
@@ -261,6 +265,8 @@ TEST(FarVolumeBuildQueue, StoppedJobSystemReportsRejectedWithoutPublication) {
     ASSERT_EQ(queue.Pump(1), 1u);
     auto result = queue.TakeCompleted(request.identity, request.intent);
     ASSERT_TRUE(result);
+    if (!result)
+        return;
     EXPECT_EQ(result->status(), FarVolumeBuildStatus::DispatchRejected);
     EXPECT_EQ(queue.Stats().rejected, 1u);
     EXPECT_EQ(queue.Submit(request), FarVolumeSubmitStatus::Duplicate);
@@ -277,6 +283,8 @@ TEST(FarVolumeBuildQueue, CompilationAdmissionRefusalNeedsExplicitRetry) {
     ASSERT_EQ(queue.Submit(request), FarVolumeSubmitStatus::Queued);
     auto refused = WaitResult(queue, request);
     ASSERT_TRUE(refused);
+    if (!refused)
+        return;
     EXPECT_EQ(refused->status(), FarVolumeBuildStatus::CompileRefused);
     EXPECT_EQ(refused->compilation_failure().code, FarVolumeFacadeError::AllocationFailure);
     EXPECT_EQ(refused->compilation_failure().work, FarVolumeAuthorityWork{});
@@ -287,6 +295,8 @@ TEST(FarVolumeBuildQueue, CompilationAdmissionRefusalNeedsExplicitRetry) {
     ASSERT_TRUE(queue.Retry(request.identity.key));
     auto accepted = WaitResult(queue, request);
     ASSERT_TRUE(accepted);
+    if (!accepted)
+        return;
     EXPECT_EQ(accepted->status(), FarVolumeBuildStatus::ReadyEmpty);
 }
 
@@ -342,6 +352,8 @@ TEST(FarVolumeBuildQueue, TakenGeometryChargeOutlivesQueueAndMoveReplacement) {
         ASSERT_EQ(queue.Submit(first), FarVolumeSubmitStatus::Queued);
         retained = WaitResult(queue, first);
         ASSERT_TRUE(retained);
+        if (!retained)
+            return;
         ASSERT_EQ(retained->status(), FarVolumeBuildStatus::Ready);
         EXPECT_GT(retained->retained_bytes(), 0u);
         EXPECT_EQ(pool.used(), queue.Stats().control_bytes + retained->retained_bytes());
@@ -349,6 +361,8 @@ TEST(FarVolumeBuildQueue, TakenGeometryChargeOutlivesQueueAndMoveReplacement) {
         ASSERT_EQ(queue.Submit(second), FarVolumeSubmitStatus::Queued);
         auto replacement = WaitResult(queue, second);
         ASSERT_TRUE(replacement);
+        if (!replacement)
+            return;
         EXPECT_EQ(pool.used(),
                   queue.Stats().control_bytes + retained->retained_bytes() +
                       replacement->retained_bytes());
@@ -359,6 +373,8 @@ TEST(FarVolumeBuildQueue, TakenGeometryChargeOutlivesQueueAndMoveReplacement) {
         EXPECT_EQ(pool.used(), queue.Stats().control_bytes + retained->retained_bytes());
     }
     ASSERT_TRUE(retained);
+    if (!retained)
+        return;
     EXPECT_EQ(pool.used(), retained->retained_bytes());
     retained.reset();
     EXPECT_EQ(pool.used(), 0u);
