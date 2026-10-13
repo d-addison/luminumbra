@@ -87,7 +87,7 @@ public:
                                     std::vector<std::string>* errors = nullptr,
                                     const world::WorldClock& absent_clock = world::WorldClock{});
     // Content-only projection region_content_v2: live over parked over durable records flagged
-    // edited; pristine and Loading chunks excluded.
+    // edited; pristine chunks excluded. Loading is excluded only for live/parked inputs.
     static std::uint64_t region_simulation_digest(const std::filesystem::path& save_dir,
                                                   world::RegionKey key,
                                                   const RegionDigestInputs& inputs);

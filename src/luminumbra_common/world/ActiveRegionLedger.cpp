@@ -192,9 +192,10 @@ void ActiveRegionLedger::evict_idle(const WorldClock& clock, const OwnershipProb
         const bool idle = clock.tick() >= r.last_proximity &&
                           clock.tick() - r.last_proximity >= kIdleEvictionTicks;
         if (!r.pinned && !r.edited && !r.populated && r.water_cursor == 0 && idle &&
-            !owned(it->first))
+            !owned(it->first)) {
+            m_legacyFrozenDigests.erase(it->first);
             it = m_records.erase(it);
-        else
+        } else
             ++it;
     }
 }
@@ -324,6 +325,7 @@ ActiveRegionLedger::schedule_in_place(const WorldClock& clock,
                     throw std::invalid_argument(
                         "Freezing requires a durable region digest provider");
                 r.frozen_digest = durable_digest(key);
+                m_legacyFrozenDigests.erase(key);
                 r.frozen_at = clock.tick();
             }
             r.over_hold = r.under_hold = 0;
@@ -425,12 +427,12 @@ bool ActiveRegionLedger::any_frozen_history() const {
 }
 std::string ActiveRegionLedger::encode() const {
     constexpr std::uint8_t kDigestProjection = 2;
-    const bool frozen_history = any_frozen_history();
+    const bool declare_projection = any_frozen_history() && m_legacyFrozenDigests.empty();
     std::string bytes = "ARL1";
-    Append(bytes, frozen_history ? 2 : 1, 2);
+    Append(bytes, declare_projection ? 2 : 1, 2);
     Append(bytes, 0, 2);
     bytes += payload(true);
-    if (frozen_history) {
+    if (declare_projection) {
         // Extension block: u32 length, then one TLV (u16 type, u32 length, value).
         Append(bytes, 7, 4);
         Append(bytes, 2, 2);
@@ -539,8 +541,10 @@ bool ActiveRegionLedger::decode(std::string_view bytes,
                 (r.state == RegionState::Frozen && r.last_ticked >= r.frozen_at))
                 return false;
             result.m_records.emplace(key, r);
+            if (version == 1 &&
+                (r.state == RegionState::Frozen || r.frozen_at != 0 || r.frozen_digest != 0))
+                result.m_legacyFrozenDigests.insert(key);
         }
-        bool digest_projection = false;
         if (version == 2) {
             const auto extension_length = in.read(4);
             const auto extension_begin = records_end + 4;
@@ -574,15 +578,10 @@ bool ActiveRegionLedger::decode(std::string_view bytes,
                 }
                 if (projection < 2)
                     return false;
-                digest_projection = true;
             }
         }
-        // Persistence contract (docs/active-regions.md): refuse pre-release frozen history
-        // without digest_projection=2; those enabled saves are deliberately not migrated.
-        if (!digest_projection && result.any_frozen_history()) {
-            error = kProjectionMessage;
-            return false;
-        }
+        // A v1 envelope preserves its historical digests verbatim. Do not label them
+        // projection 2 until each has been recomputed at a later freeze or evicted.
         // Also refuses alternate encodings (negative zero, reserved bytes).
         if (result.encode() != bytes)
             return false;

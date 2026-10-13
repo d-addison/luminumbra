@@ -634,18 +634,58 @@ TEST(ActiveRegionLedgerTest, V2RefusalMatrix) {
     }
 }
 
-TEST(ActiveRegionLedgerTest, V1FileWithFrozenHistoryIsRefused) {
-    const auto good = FrozenLedger().encode();
-    const std::size_t ext = good.size() - 8 - 11;
-    auto bytes = good.substr(0, ext) + std::string(8, '\0');
+TEST(ActiveRegionLedgerTest, V1FrozenHistoryLoadsAndRoundTripsVerbatimIncludingAfterWake) {
+    for (const bool wake : {false, true}) {
+        auto original = FrozenLedger();
+        if (wake) {
+            original.pin(kFar, true, WorldClock(4));
+            original.schedule(WorldClock(5));
+            ASSERT_EQ(original.records().at(kFar).state, RegionState::Active);
+        }
+        const auto good = original.encode();
+        const std::size_t ext = good.size() - 8 - 11;
+        auto bytes = good.substr(0, ext) + std::string(8, '\0');
+        bytes[4] = 1;
+        Seal(bytes);
+        ActiveRegionLedger destination = Distant();
+        std::string error;
+        ASSERT_TRUE(ActiveRegionLedger::decode(bytes, destination, error)) << error;
+        EXPECT_TRUE(error.empty());
+        EXPECT_EQ(destination.records(), original.records());
+        EXPECT_EQ(destination.canonical_bytes(), original.canonical_bytes());
+        EXPECT_EQ(destination.encode(), bytes);
+        EXPECT_EQ(Reload(destination).encode(), bytes);
+    }
+}
+
+TEST(ActiveRegionLedgerTest, LegacyEnvelopeUpgradesOnlyAfterEveryHistoricalDigestIsRefreshed) {
+    const RegionKey second{11, -3};
+    auto original = FrozenLedger();
+    original.mark_edited(second, WorldClock(3));
+    for (std::uint64_t tick = 4; tick <= 6; ++tick)
+        Step(original, tick, 1);
+    ASSERT_EQ(original.records().at(second).state, RegionState::Frozen);
+    const auto good = original.encode();
+    auto bytes = good.substr(0, good.size() - 8 - 11) + std::string(8, '\0');
     bytes[4] = 1;
     Seal(bytes);
-    ActiveRegionLedger destination = Distant();
-    const auto before = destination.encode();
+    ActiveRegionLedger restored;
     std::string error;
-    EXPECT_FALSE(ActiveRegionLedger::decode(bytes, destination, error));
-    EXPECT_EQ(error, "Unsupported frozen digest projection.");
-    EXPECT_EQ(destination.encode(), before);
+    ASSERT_TRUE(ActiveRegionLedger::decode(bytes, restored, error)) << error;
+
+    restored.mark_edited(kFar, WorldClock(6));
+    for (std::uint64_t tick = 7; tick <= 9; ++tick)
+        Step(restored, tick, 1);
+    ASSERT_EQ(restored.records().at(kFar).frozen_at, 9u);
+    EXPECT_EQ(Version(restored.encode()), 1u);
+    EXPECT_EQ(Reload(restored).canonical_bytes(), restored.canonical_bytes());
+
+    restored.mark_edited(second, WorldClock(9));
+    for (std::uint64_t tick = 10; tick <= 12; ++tick)
+        Step(restored, tick, 1);
+    ASSERT_EQ(restored.records().at(second).frozen_at, 12u);
+    EXPECT_EQ(Version(restored.encode()), 2u);
+    EXPECT_EQ(Reload(restored).encode(), restored.encode());
 }
 
 const std::uint64_t kIdle = ActiveRegionLedger::kIdleEvictionTicks;
