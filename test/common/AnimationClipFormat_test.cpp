@@ -23,7 +23,8 @@ using namespace luminumbra::animation;
 
 class ClipFile {
 public:
-    ClipFile() : file_("luminumbra_clip_", ".lanim") {}
+    ClipFile()
+        : file_("luminumbra_clip_", ".lanim") {}
     const std::filesystem::path& Path() const {
         return file_.Path();
     }
