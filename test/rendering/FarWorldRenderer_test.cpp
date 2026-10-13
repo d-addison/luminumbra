@@ -141,11 +141,15 @@ public:
     explicit Fixture(DriverState& state,
                      FarCaveMode caves = FarCaveMode::BandLimited,
                      std::uint64_t identity = 42,
-                     std::shared_ptr<BuildGate> gate = {})
+                     std::shared_ptr<BuildGate> gate = {},
+                     FarWorldWaterCapability water = FarWorldWaterCapability::ExplicitlyDry,
+                     float level = 0)
         : state_(state)
         , caves_(caves)
         , identity_(identity)
-        , gate_(std::move(gate)) {
+        , gate_(std::move(gate))
+        , water_(water)
+        , level_(level) {
         state_.fixture_released = false;
     }
     ~Fixture() override {
@@ -155,6 +159,20 @@ public:
     }
     std::uint64_t content_identity() const noexcept override {
         return identity_;
+    }
+    FarWorldWaterCapability WaterCapability() const noexcept override {
+        return water_;
+    }
+    std::optional<FarWorldWaterBound>
+    WaterBound(const Luminumbra::World::FarTileKey&) const override {
+        if (water_ == FarWorldWaterCapability::Unavailable)
+            return std::nullopt;
+        return FarWorldWaterBound{water_ == FarWorldWaterCapability::ExplicitlyDry, level_, level_};
+    }
+    std::optional<FarWorldWaterSample> WaterSample(std::int64_t, std::int64_t) const override {
+        if (water_ == FarWorldWaterCapability::Unavailable)
+            return std::nullopt;
+        return FarWorldWaterSample{water_ == FarWorldWaterCapability::Wet, level_};
     }
     std::uint64_t owned_bytes() const noexcept override {
         return sizeof(*this);
@@ -186,6 +204,8 @@ private:
     const FarCaveMode caves_;
     const std::uint64_t identity_;
     const std::shared_ptr<BuildGate> gate_;
+    const FarWorldWaterCapability water_;
+    const float level_;
 };
 
 FarVolumeWantedRequest Request(FarTileKey key = {5, 0, 0}) {
@@ -198,11 +218,19 @@ struct Owner {
     JobSystem jobs;
     FarWorldRenderer renderer{FarWorldMode::Ladder};
     std::uint64_t frame = 0;
-    explicit Owner(const FarWorldExperimentalLimits& limits = FarWorldDevelopmentLimits()) {
+    explicit Owner(const FarWorldExperimentalLimits& limits = FarWorldDevelopmentLimits(),
+                   FarWorldWaterCapability water = FarWorldWaterCapability::ExplicitlyDry,
+                   float level = 0) {
         jobs.startup(2);
         renderer.InstallBackend(std::make_unique<Driver>(state));
-        EXPECT_EQ(renderer.BindFixture(jobs, std::make_shared<const Fixture>(state), 1, 1, limits),
-                  FarWorldRefusal::None);
+        EXPECT_EQ(
+            renderer.BindFixture(jobs,
+                                 std::make_shared<const Fixture>(
+                                     state, FarCaveMode::BandLimited, 42, nullptr, water, level),
+                                 1,
+                                 1,
+                                 limits),
+            FarWorldRefusal::None);
     }
     ~Owner() {
         renderer.Shutdown();
@@ -1478,4 +1506,127 @@ TEST(FarWorldRenderer, DiagnosticEmptyPairCoversWithoutDrawingOrRetainedGpuStore
     EXPECT_EQ(snapshot.tiers[4].draws, 0u);
     EXPECT_FALSE(snapshot.submission_occurred);
     EXPECT_TRUE(FarWorldStationReady(snapshot, std::span(&empty.identity.key, 1), 1));
+}
+
+TEST(FarWorldRenderer, WaterBoundGrowsSpanBeforeIdentityAndRefusesOutOfBudgetHeight) {
+    std::uint64_t dry_generation = 0;
+    {
+        auto dry = std::make_unique<Owner>();
+        ASSERT_TRUE(dry->renderer.PrepareFrame(++dry->frame, {0, 0, 0}));
+        const auto dry_observation = dry->renderer.Residency()->Observe({5, 0, 0});
+        ASSERT_TRUE(dry_observation);
+        if (dry_observation) {
+            dry_generation = dry_observation->desired.span_generation;
+        }
+    }
+    {
+        auto wet =
+            std::make_unique<Owner>(FarWorldDevelopmentLimits(), FarWorldWaterCapability::Wet, 500);
+        ASSERT_TRUE(wet->renderer.PrepareFrame(++wet->frame, {0, 0, 0}));
+        const auto wet_observation = wet->renderer.Residency()->Observe({5, 0, 0});
+        ASSERT_TRUE(wet_observation);
+        if (wet_observation) {
+            EXPECT_GT(wet_observation->desired.span_generation, dry_generation);
+        }
+    }
+    auto limits = FarWorldDevelopmentLimits();
+    limits.spans.max_y = 400;
+    auto refused = std::make_unique<Owner>(limits, FarWorldWaterCapability::Wet, 500);
+    EXPECT_FALSE(refused->renderer.PrepareFrame(++refused->frame, {0, 0, 0}));
+    EXPECT_EQ(refused->renderer.Selection(FarWorldPurpose::World).refusal,
+              FarWorldRefusal::WaterSpanRefused);
+    EXPECT_EQ(refused->renderer.LastFrame().dispatched, 0u);
+}
+
+TEST(FarWorldRenderer, ExplicitWetManifestRefusesMissingWaterSpanBeforeDispatch) {
+    Owner owner(FarWorldDevelopmentLimits(), FarWorldWaterCapability::Wet, 500);
+    auto request = Request();
+    request.intent.extra_span = FarVolumeCoverageSpan{0, 0};
+    EXPECT_FALSE(owner.renderer.AdvanceFrame(++owner.frame, {0, 0, 0}, std::span(&request, 1)));
+    EXPECT_EQ(owner.renderer.Selection(FarWorldPurpose::World).refusal,
+              FarWorldRefusal::WaterSpanRefused);
+    EXPECT_EQ(owner.renderer.LastFrame().dispatched, 0u);
+}
+
+TEST(FarWorldRenderer, UnavailableWaterRefusesActivationWithoutAssumingDry) {
+    DriverState state;
+    JobSystem jobs;
+    FarWorldRenderer renderer(FarWorldMode::Ladder);
+    renderer.InstallBackend(std::make_unique<Driver>(state));
+    EXPECT_EQ(
+        renderer.BindFixture(
+            jobs,
+            std::make_shared<const Fixture>(
+                state, FarCaveMode::BandLimited, 42, nullptr, FarWorldWaterCapability::Unavailable),
+            1,
+            1,
+            FarWorldDevelopmentLimits()),
+        FarWorldRefusal::WaterUnavailable);
+    EXPECT_EQ(renderer.Selection(FarWorldPurpose::World).effective, FarWorldMode::Legacy);
+    EXPECT_EQ(state.live, 0u);
+}
+
+TEST(FarWorldRenderer, LegacyBindingDoesNotRequireWaterObservation) {
+    DriverState state;
+    JobSystem jobs;
+    FarWorldRenderer renderer(FarWorldMode::Legacy);
+    renderer.InstallBackend(std::make_unique<Driver>(state));
+    EXPECT_EQ(
+        renderer.BindFixture(
+            jobs,
+            std::make_shared<const Fixture>(
+                state, FarCaveMode::BandLimited, 42, nullptr, FarWorldWaterCapability::Unavailable),
+            1,
+            1,
+            FarWorldDevelopmentLimits()),
+        FarWorldRefusal::None);
+    EXPECT_EQ(renderer.Selection(FarWorldPurpose::World).effective, FarWorldMode::Legacy);
+    EXPECT_EQ(state.live, 0u);
+}
+
+TEST(FarWorldRenderer, WetEmptyTerrainCountsRetainedAndActualSubmissionSeparately) {
+    Owner owner(FarWorldDevelopmentLimits(), FarWorldWaterCapability::Wet);
+    const auto request = Request({5, 1, 1});
+    // Explicit wet manifests contain the conservative bound before dispatch.
+    auto wet_request = request;
+    wet_request.intent.extra_span = FarVolumeCoverageSpan{0, 0};
+    ASSERT_TRUE(owner.WaitSettled(wet_request));
+    const auto observation = owner.renderer.Residency()->Observe(request.identity.key);
+    ASSERT_TRUE(observation);
+    if (observation) {
+        EXPECT_EQ(observation->coverage.state, FarTileState::Uploaded);
+        EXPECT_EQ(observation->terrain_indices, 0u);
+        EXPECT_EQ(observation->water_indices, 98304u);
+    }
+    owner.renderer.BeginLiveOwnership(owner.frame);
+    ASSERT_TRUE(owner.renderer.FinishLiveOwnership());
+    owner.state.fail_draw = true;
+    EXPECT_EQ(owner.renderer.Submit({0, 0, 0}, [](const auto&) { return true; }).water_indices, 0u);
+    owner.renderer.CaptureDiagnostic(owner.renderer.Selection(FarWorldPurpose::World),
+                                     owner.frame,
+                                     {0, 0, 0},
+                                     17408,
+                                     true,
+                                     0,
+                                     0);
+    EXPECT_EQ(owner.renderer.Diagnostic().tiers[4].resident.retained_water_indices, 98304u);
+    EXPECT_EQ(owner.renderer.Diagnostic().tiers[4].resident.submitted_water_indices, 0u);
+    owner.state.fail_draw = false;
+    const auto submitted = owner.renderer.Submit({0, 0, 0}, [](const auto&) { return true; });
+    EXPECT_EQ(submitted.water_indices, 98304u);
+    owner.renderer.CaptureDiagnostic(owner.renderer.Selection(FarWorldPurpose::World),
+                                     owner.frame,
+                                     {0, 0, 0},
+                                     17408,
+                                     true,
+                                     submitted.draws,
+                                     submitted.indices);
+    const auto on = owner.renderer.Diagnostic();
+    EXPECT_EQ(on.tiers[4].resident.submitted_water_indices, 98304u);
+    EXPECT_EQ(on.tiers[4].resident.water_wet_tiles, 1u);
+    EXPECT_TRUE(on.ladder_water_available);
+    const auto off = FarWorldSubmissionOverride(on.selection, false);
+    SubmitSelectedFarWorld(off, {}, {}, {});
+    EXPECT_EQ(owner.renderer.Diagnostic().tiers[4].resident.submitted_water_indices,
+              on.tiers[4].resident.submitted_water_indices);
 }

@@ -153,6 +153,7 @@ add_executable(common_tests
     common/FarVolumeWorld_test.cpp
     common/FarVolumeRuntime_test.cpp
     common/FarVolumeTierMemory_test.cpp
+    rendering/FarWorldWaterMesh_test.cpp
     rendering/FarVolumeRenderMesh_test.cpp
     rendering/FarVolumeBuildQueue_test.cpp
     rendering/FarVolumeUpload_test.cpp
@@ -177,6 +178,7 @@ add_executable(common_tests
     ../src/luminumbra_client/rendering/FarVolumeUpload.cpp
     ../src/luminumbra_client/rendering/FarVolumeGpuBackend.cpp
     ../src/luminumbra_client/rendering/FarVolumeResidency.cpp
+    ../src/luminumbra_client/rendering/FarWorldWaterMesh.cpp
     ../src/luminumbra_client/rendering/FarVolumeRenderMesh.cpp
     common/FarTierTable_test.cpp
     common/FarHorizon_test.cpp
@@ -442,6 +444,7 @@ add_executable(render_smoke_test
     rendering/render_smoke_test.cpp
     rendering/FarWorldShadow_test.cpp
     rendering/FarWorldFogGl_test.cpp
+    rendering/FarWorldWaterGl_test.cpp
     rendering/TerrainCullingTestPeer.h
 )
 

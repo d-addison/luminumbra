@@ -149,6 +149,10 @@ FarWorldRenderer::BindFixture(JobSystem& jobs,
         return refusal_ = FarWorldRefusal::ImmutableAuthorityUnavailable;
     if (requested_ == FarWorldMode::Ladder && fixture->caves() != requested_caves_)
         return refusal_ = FarWorldRefusal::CavePolicyMismatch;
+    if (requested_ == FarWorldMode::Ladder &&
+        fixture->WaterCapability() != FarWorldWaterCapability::ExplicitlyDry &&
+        fixture->WaterCapability() != FarWorldWaterCapability::Wet)
+        return refusal_ = FarWorldRefusal::WaterUnavailable;
     if (!driver_ || !driver_->ValidContext())
         return refusal_ = FarWorldRefusal::BackendUnavailable;
     if (fixture->owned_bytes() > limits.max_fixture_bytes)
@@ -247,6 +251,13 @@ FarWorldRefusal FarWorldRenderer::ExtendLedger(const FarTileKey& key,
     for (const auto& extension : extensions)
         if (!span.Extend(extension, limits_.spans))
             return FarWorldRefusal::SpanRejected;
+    const auto water_bound = fixture_->WaterBound(key);
+    if (!water_bound)
+        return FarWorldRefusal::WaterUnavailable;
+    if (!ValidFarWorldWaterBound(*water_bound) ||
+        (!water_bound->known_dry &&
+         !span.Extend({water_bound->min_y, water_bound->max_y}, limits_.spans)))
+        return FarWorldRefusal::WaterSpanRefused;
     const auto intent = span.Intent();
     if (!intent)
         return FarWorldRefusal::SpanRejected;
@@ -268,7 +279,9 @@ FarWorldRefusal FarWorldRenderer::ExtendLedger(const FarTileKey& key,
                 bake_generation_,
                 generation + growth},
                *intent,
-               headroom};
+               headroom,
+               fixture_,
+               water_bound};
     return FarWorldRefusal::None;
 }
 
@@ -279,6 +292,13 @@ bool FarWorldRenderer::ValidRequest(const FarVolumeWantedRequest& request,
         request.identity.cave_policy != static_cast<std::uint8_t>(fixture_->caves()) ||
         request.identity.bake_generation != bake_generation_ ||
         request.build_headroom_bytes > limits_.build_headroom_bytes)
+        return false;
+    const auto water_bound = fixture_->WaterBound(request.identity.key);
+    if (!water_bound || !ValidFarWorldWaterBound(*water_bound) || request.water != fixture_ ||
+        request.water_bound != water_bound ||
+        (!water_bound->known_dry &&
+         (!request.intent.extra_span || request.intent.extra_span->min_y > water_bound->min_y ||
+          request.intent.extra_span->max_y < water_bound->max_y)))
         return false;
     return span.Reset(request.identity.key) &&
            (!request.intent.extra_span || span.Extend(*request.intent.extra_span, limits_.spans)) &&
@@ -357,6 +377,7 @@ bool FarWorldRenderer::AdvanceFrame(std::uint64_t frame,
         return false;
     advanced_frame_ = frame;
     for (auto& tier : diagnostic_tiers_) {
+        tier.resident.submitted_water_indices = 0;
         tier.draws = 0;
         tier.indices = 0;
         tier.draw_refusals = 0;
@@ -368,6 +389,26 @@ bool FarWorldRenderer::AdvanceFrame(std::uint64_t frame,
         refusal_ = FarWorldRefusal::InvalidRequests;
         return false;
     }
+    // Explicit owner manifests acquire the same immutable water authority as
+    // PrepareFrame. A wet bound still has to be contained in their supplied span.
+    for (std::size_t i = 0; i < requests.size(); ++i) {
+        requests_[i] = requests[i];
+        requests_[i].water = fixture_;
+        requests_[i].water_bound = fixture_->WaterBound(requests[i].identity.key);
+        const auto& bound = requests_[i].water_bound;
+        if (!bound) {
+            refusal_ = FarWorldRefusal::WaterUnavailable;
+            return false;
+        }
+        if (!ValidFarWorldWaterBound(*bound) ||
+            (!bound->known_dry && (!requests_[i].intent.extra_span ||
+                                   requests_[i].intent.extra_span->min_y > bound->min_y ||
+                                   requests_[i].intent.extra_span->max_y < bound->max_y))) {
+            refusal_ = FarWorldRefusal::WaterSpanRefused;
+            return false;
+        }
+    }
+    requests = std::span(requests_.data(), requests.size());
     const auto outcome = ValidateAndRecordRequests(requests);
     if (outcome != FarWorldRefusal::None) {
         refusal_ = outcome;
@@ -475,6 +516,7 @@ FarWorldSubmitStats FarWorldRenderer::Submit(const std::array<double, 3>& camera
     CheckOwner();
     FarWorldSubmitStats stats;
     for (auto& tier : diagnostic_tiers_) {
+        tier.resident.submitted_water_indices = 0;
         tier.draws = 0;
         tier.indices = 0;
         tier.draw_refusals = 0;
@@ -534,10 +576,12 @@ FarWorldSubmitStats FarWorldRenderer::Submit(const std::array<double, 3>& camera
                     v.owner.submission_refusal_ = FarWorldSubmissionRefusal::DrawRejected;
                     return;
                 }
+                tier_stats.resident.submitted_water_indices += record.water_indices;
                 ++v.stats.draws;
                 ++tier_stats.draws;
                 tier_stats.indices += static_cast<std::size_t>(command.index_count);
                 v.stats.indices += static_cast<std::size_t>(command.index_count);
+                v.stats.water_indices += record.water_indices;
             },
             &context);
     } catch (...) {
@@ -581,6 +625,11 @@ void FarWorldRenderer::CaptureDiagnostic(FarWorldSelection selection,
     if (advanced && selection.effective == FarWorldMode::Ladder)
         diagnostic_.upload = last_frame_;
     if (fixture_) {
+        if (selection.effective == FarWorldMode::Ladder) {
+            diagnostic_.water_capability = fixture_->WaterCapability();
+            diagnostic_.ladder_water_available =
+                diagnostic_.water_capability != FarWorldWaterCapability::Unavailable;
+        }
         diagnostic_.content_identity = fixture_->content_identity();
         diagnostic_.numeric = fixture_->numeric();
     }
@@ -590,10 +639,13 @@ void FarWorldRenderer::CaptureDiagnostic(FarWorldSelection selection,
     for (std::size_t i = 0; i < observations.size(); ++i) {
         diagnostic_.tiers[i] = diagnostic_tiers_[i];
         diagnostic_.tiers[i].resident = observations[i];
+        diagnostic_.tiers[i].resident.submitted_water_indices =
+            diagnostic_tiers_[i].resident.submitted_water_indices;
         if (!selection.submit || selection.effective != FarWorldMode::Ladder) {
             diagnostic_.tiers[i].draws = 0;
             diagnostic_.tiers[i].indices = 0;
             diagnostic_.tiers[i].draw_refusals = 0;
+            diagnostic_.tiers[i].resident.submitted_water_indices = 0;
         }
     }
     for (const auto& ledger : ledgers_) {
@@ -614,6 +666,10 @@ void FarWorldRenderer::CaptureDiagnostic(FarWorldSelection selection,
         tile.request = observed->built_request;
         tile.coverage = observed->coverage;
         tile.eligibility = observed->eligibility;
+        tile.water_complete = observed->water_complete;
+        tile.water_known_dry = observed->water_known_dry;
+        tile.terrain_indices = observed->terrain_indices;
+        tile.water_indices = observed->water_indices;
         tile.has_pair = tile.coverage.state == FarTileState::Uploaded ||
                         tile.coverage.state == FarTileState::Empty;
     }

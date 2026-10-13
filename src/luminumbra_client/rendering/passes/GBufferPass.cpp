@@ -476,6 +476,7 @@ void GBufferPass::geometry_pass_chunks(const RenderContext& ctx,
         [&uniforms](const FarWorldDrawCommand& command) { return uniforms.Prepare(command); });
     stats.far_region_draws += far_stats.draws;
     stats.far_indices += far_stats.indices;
+    stats.far_water_indices += far_stats.water_indices;
 
     glBindVertexArray(0);
 }

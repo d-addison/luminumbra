@@ -37,6 +37,9 @@ FarVolumeQueueRequest UploadRequest(bool plane = true) {
                          [plane](const FarVolumePosition& p, float, std::uint32_t, FarCaveMode) {
                              return FarVolumeSample{plane ? float(p.y) + .25f : 1.0f, 7};
                          }};
+    request.water = std::make_shared<const FarWorldConstantWaterObservation>(
+        request.identity.content_hash, false, 0);
+    request.water_bound = FarWorldWaterBound{true, 0, 0};
     return request;
 }
 std::optional<FarVolumeQueueCompletion> Build(FarVolumeBuildQueue& queue,
@@ -71,6 +74,66 @@ struct FakeGpu final : FarVolumeGpuAllocation {
     }
 };
 } // namespace
+
+TEST(FarVolumeUpload, CombinedWetAllocationByteDebitAndWaterFailurePreserveOldPair) {
+    JobSystem jobs;
+    jobs.startup(2);
+    FarTierBudgets budgets;
+    budgets.bytes.fill(64 * 1024 * 1024);
+    FarVolumeTierMemory memory(budgets);
+    auto limits = UploadLimits();
+    limits.max_converted_bytes = 16 * 1024 * 1024;
+    FarVolumeBuildQueue queue(jobs, *memory.Pool(1), limits);
+    auto request = UploadRequest();
+    request.water = std::make_shared<const FarWorldConstantWaterObservation>(42, true, 0);
+    request.water_bound = FarWorldWaterBound{false, 0, 0};
+    auto result = Build(queue, request);
+    ASSERT_TRUE(result);
+    if (result) {
+        const auto bytes = Bytes(result->mesh());
+        EXPECT_GT(result->mesh().terrain_indices, 0u);
+        EXPECT_EQ(result->mesh().indices.size(),
+                  result->mesh().terrain_indices + result->mesh().water_indices);
+        EXPECT_GT(bytes, 65536u * sizeof(VoxelVertex) + 98304u * sizeof(std::uint32_t));
+        FarVolumeUploadedTile output;
+        std::size_t calls = 0;
+        const auto backend = [&calls](const FarVolumeRenderMesh& mesh) {
+            ++calls;
+            return std::make_unique<FakeGpu>(Bytes(mesh));
+        };
+        FarVolumeUploadError error;
+        EXPECT_FALSE(UploadFarVolume(
+            *result, request.identity, request.intent, memory, bytes - 1, backend, output, &error));
+        EXPECT_EQ(error, FarVolumeUploadError::ByteLimit);
+        EXPECT_EQ(calls, 0u);
+        ASSERT_TRUE(UploadFarVolume(
+            *result, request.identity, request.intent, memory, bytes, backend, output));
+        EXPECT_EQ(output.gpu_bytes(), bytes);
+        EXPECT_EQ(output.water_indices(), 98304u);
+        EXPECT_EQ(output.terrain_indices(), result->mesh().terrain_indices);
+        EXPECT_TRUE(output.water_complete());
+        const auto* old = output.resource();
+        const auto old_identity = output.identity();
+        ++request.identity.bake_generation;
+        request.water.reset();
+        request.water_bound.reset();
+        result.reset();
+        result = Build(queue, request);
+        ASSERT_TRUE(result);
+        if (result) {
+            EXPECT_EQ(result->status(), FarVolumeBuildStatus::WaterRefused);
+            EXPECT_FALSE(UploadFarVolume(
+                *result, request.identity, request.intent, memory, bytes, backend, output, &error));
+            EXPECT_EQ(error, FarVolumeUploadError::NotReady);
+            EXPECT_EQ(output.resource(), old);
+            EXPECT_EQ(output.identity(), old_identity);
+            EXPECT_EQ(output.gpu_bytes(), bytes);
+            EXPECT_FALSE(IsFarTileCovering(output.Status(request.identity, request.intent)));
+            EXPECT_EQ(calls, 1u);
+        }
+    }
+    jobs.shutdown();
+}
 
 TEST(FarVolumeUpload, CurrencyByteAndSharedPoolRefusalsPrecedeBackend) {
     JobSystem jobs;

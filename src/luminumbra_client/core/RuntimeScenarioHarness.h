@@ -995,6 +995,7 @@ AnalyzeFarLodHorizonSkySliver(const std::vector<unsigned char>& pixels,
 
 struct FarLodHorizonStationCapture {
     FarLodHorizonStation station;
+    // Includes combined water readiness and actual water indices from far ON.
     Luminumbra::Rendering::FarWorldDiagnosticSnapshot far_world;
     double settle_seconds = 0;
     bool ready_within_deadline = false, paired_capture_preserved = false;

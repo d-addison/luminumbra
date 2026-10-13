@@ -25,6 +25,8 @@ const char* FarWorldRefusalName(FarWorldRefusal refusal) noexcept {
         FW_REASON(ShaderProgramUnavailable);
         FW_REASON(InvalidCavePolicy);
         FW_REASON(CavePolicyMismatch);
+        FW_REASON(WaterUnavailable);
+        FW_REASON(WaterSpanRefused);
 #undef FW_REASON
     }
     return "Unknown";
@@ -100,13 +102,21 @@ nlohmann::json FarWorldDiagnosticJson(const FarWorldDiagnosticSnapshot& s) {
                          {"admission_refusals", v.memory.admission_refusals},
                          {"draws", t.draws},
                          {"indices", t.indices},
-                         {"draw_refusals", t.draw_refusals}});
+                         {"draw_refusals", t.draw_refusals},
+                         {"water_known_dry_tiles", v.water_known_dry_tiles},
+                         {"water_wet_tiles", v.water_wet_tiles},
+                         {"retained_water_indices", v.retained_water_indices},
+                         {"submitted_water_indices", v.submitted_water_indices}});
     }
     for (std::size_t i = 0; i < std::min(s.tile_count, s.tiles.size()); ++i) {
         const auto& t = s.tiles[i];
         tiles.push_back({{"desired", IdentityJson(t.desired)},
                          {"built", IdentityJson(t.built)},
                          {"has_pair", t.has_pair},
+                         {"water_complete", t.water_complete},
+                         {"water_known_dry", t.water_known_dry},
+                         {"terrain_indices", t.terrain_indices},
+                         {"water_indices", t.water_indices},
                          {"state", StateName(t.coverage.state)},
                          {"current", t.coverage.current},
                          {"span_ok", t.coverage.span_ok},
@@ -142,6 +152,7 @@ nlohmann::json FarWorldDiagnosticJson(const FarWorldDiagnosticSnapshot& s) {
             {"draws", s.draws},
             {"indices", s.indices},
             {"ladder_water_available", s.ladder_water_available},
+            {"water_capability", static_cast<int>(s.water_capability)},
             {"memory_sampling", "asynchronous_diagnostic_not_atomic_admission"},
             {"gpu_bytes_kind", "logical_stores"},
             {"camera", s.camera},
@@ -186,7 +197,13 @@ FarWorldStationRefusal CheckFarWorldStation(const FarWorldDiagnosticSnapshot& s,
     for (const auto& tier : s.tiers)
         if (tier.resident.request_rejected || tier.resident.budget_evicted || tier.draw_refusals)
             return R::RejectedTiles;
+    if (!s.ladder_water_available ||
+        (s.water_capability != FarWorldWaterCapability::ExplicitlyDry &&
+         s.water_capability != FarWorldWaterCapability::Wet))
+        return R::WaterIncomplete;
     bool mixed = false;
+    std::uint64_t wet_tiles = 0, submitted_water = 0;
+    std::array<std::uint64_t, World::kFarTierCount> dry_counts{}, water_counts{}, terrain_counts{};
     for (const auto& key : expected) {
         const auto end = s.tiles.begin() + static_cast<std::ptrdiff_t>(s.tile_count);
         const auto found =
@@ -211,6 +228,19 @@ FarWorldStationRefusal CheckFarWorldStation(const FarWorldDiagnosticSnapshot& s,
               found->request.span.min_y > found->intent.extra_span->min_y ||
               found->request.span.max_y < found->intent.extra_span->max_y)))
             return R::SpanRefused;
+        if (!found->water_complete || found->water_known_dry != (found->water_indices == 0) ||
+            (found->coverage.state == World::FarTileState::Empty &&
+             (found->water_indices || found->terrain_indices)) ||
+            (found->coverage.state == World::FarTileState::Uploaded && !found->water_indices &&
+             !found->terrain_indices))
+            return R::WaterIncomplete;
+        if (key.tier < 1 || key.tier > World::kFarTierCount || found->water_indices % 6 != 0 ||
+            found->terrain_indices % 3 != 0)
+            return R::WaterIncomplete;
+        const auto number = key.tier - 1;
+        dry_counts[number] += found->water_known_dry;
+        water_counts[number] += found->water_indices;
+        terrain_counts[number] += found->terrain_indices;
         mixed = mixed || found->coverage.state == World::FarTileState::Uploaded;
     }
     std::size_t total_draws = 0, total_indices = 0;
@@ -224,6 +254,18 @@ FarWorldStationRefusal CheckFarWorldStation(const FarWorldDiagnosticSnapshot& s,
             tier.indices % 3 != 0 || tier.indices / 3 < tier.draws ||
             (tier.draws == 0) != (tier.indices == 0))
             return R::TierCounters;
+        if (tier.resident.water_known_dry_tiles + tier.resident.water_wet_tiles != count ||
+            tier.resident.submitted_water_indices > tier.indices ||
+            tier.resident.submitted_water_indices > tier.resident.retained_water_indices ||
+            tier.resident.submitted_water_indices % 3 != 0)
+            return R::WaterIncomplete;
+        if (tier.resident.water_known_dry_tiles != dry_counts[i] ||
+            tier.resident.retained_water_indices != water_counts[i] ||
+            tier.resident.submitted_water_indices != water_counts[i] ||
+            tier.indices != water_counts[i] + terrain_counts[i])
+            return R::WaterIncomplete;
+        wet_tiles += tier.resident.water_wet_tiles;
+        submitted_water += tier.resident.submitted_water_indices;
         total_draws += tier.draws;
         total_indices += tier.indices;
     }
@@ -231,6 +273,10 @@ FarWorldStationRefusal CheckFarWorldStation(const FarWorldDiagnosticSnapshot& s,
         return R::DrawTotals;
     if (mixed && !(s.submission_occurred && s.draws > 0 && s.indices > 0))
         return R::MissingSubmission;
+    if ((s.water_capability == FarWorldWaterCapability::ExplicitlyDry &&
+         (wet_tiles || submitted_water)) ||
+        (s.water_capability == FarWorldWaterCapability::Wet && (!wet_tiles || !submitted_water)))
+        return R::WaterIncomplete;
     return R::None;
 }
 bool FarWorldStationReady(const FarWorldDiagnosticSnapshot& snapshot,

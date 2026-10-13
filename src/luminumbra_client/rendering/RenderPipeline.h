@@ -117,6 +117,26 @@ struct WaterRenderData {
     u32 vertex_capacity = 0;
     u32 index_capacity = 0;
     u32 frames_since_inactive = 0;
+    // Only a validated Ladder upload certifies this exact mesh version.
+    std::optional<u32> ladder_upload_version;
+
+    bool LadderUploadValid() const noexcept {
+        return vao_id != 0 && vbo_id != 0 && ebo_id != 0 && ladder_upload_version == mesh_version;
+    }
+
+    void SetLadderWaterUpload(FarWorldLiveUpload& upload,
+                              u32 snapshot_version,
+                              bool pass_enabled) const noexcept {
+        upload.water_snapshot_version = snapshot_version;
+        upload.water_uploaded_version = mesh_version;
+        upload.water_uploaded_indices = element_count;
+        upload.water_valid_allocation = LadderUploadValid();
+        upload.water_pass_eligible = LadderWaterPassEligible(snapshot_version,
+                                                             mesh_version,
+                                                             element_count,
+                                                             upload.water_valid_allocation,
+                                                             pass_enabled);
+    }
 };
 
 // FrameBufferObject moved to FrameBufferObject.h (included above). Definition unchanged.
@@ -904,6 +924,7 @@ private:
     friend struct TerrainCullingTestPeer;
     friend struct TextureFileTestPeer;
     friend struct RenderClockTestPeer;
+    friend struct WaterUploadTestPeer;
     // Extracted render pass classes. Passes own their GL resources
     // (FBOs/textures/shaders); the pipeline keeps orchestration order, shared
     // state, stats collection, and GPU timer issue/collect calls.

@@ -22,6 +22,8 @@ struct FarWorldTileDiagnostic {
     World::FarTileStatus coverage;
     FarVolumeEligibility eligibility = FarVolumeEligibility::Wanted;
     bool has_pair = false;
+    bool water_complete = false, water_known_dry = false;
+    std::uint64_t terrain_indices = 0, water_indices = 0;
 };
 enum class FarWorldSubmissionRefusal {
     None,
@@ -41,6 +43,7 @@ struct FarWorldDiagnosticSnapshot {
     World::FarVolumeNumericProfile numeric = World::FarVolumeNumericProfile::LegacySigned16;
     bool captured = false, advanced = false, submission_occurred = false;
     bool complete = true, ladder_water_available = false;
+    FarWorldWaterCapability water_capability = FarWorldWaterCapability::Unavailable;
     std::array<double, 3> camera{};
     FarVolumeFrameResult upload;
     std::array<FarWorldTierDiagnostic, World::kFarTierCount> tiers{};
@@ -80,7 +83,8 @@ enum class FarWorldStationRefusal {
     SpanRefused,
     TierCounters,
     DrawTotals,
-    MissingSubmission
+    MissingSubmission,
+    WaterIncomplete
 };
 FarWorldStationRefusal CheckFarWorldStation(const FarWorldDiagnosticSnapshot& snapshot,
                                             std::span<const World::FarTileKey> expected,

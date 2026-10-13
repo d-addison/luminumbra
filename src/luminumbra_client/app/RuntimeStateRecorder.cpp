@@ -451,6 +451,7 @@ RuntimeStateRecorder::build_state_json(const std::string& phase,
         state["resize_generation"] = render_pipeline->resize_generation();
         state["upload_queue"] = UploadStatsToJson(render_pipeline->get_last_mesh_upload_stats());
         state["render_pass"] = RenderPassStatsToJson(render_pipeline->get_last_render_pass_stats());
+        // D value schema includes immutable water readiness and submitted subtotals.
         state["far_world"] =
             Luminumbra::Rendering::FarWorldDiagnosticJson(render_pipeline->far_world_diagnostic());
         // Far-LOD scheduler telemetry (, FarLodHorizon gate inputs).

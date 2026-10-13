@@ -2621,6 +2621,16 @@ void RenderPipeline::prepare_frame(entt::registry& registry,
                     m_chunk_geometry_pool.allocation(data.pool_handle).index_count ==
                         data.element_count;
             }
+            const auto water_found = m_water_render_data.find(chunk.id);
+            upload.water_snapshot_version = chunk.water_mesh_version;
+            if (water_found != m_water_render_data.end()) {
+                const auto& water_data = water_found->second;
+                water_data.SetLadderWaterUpload(
+                    upload,
+                    chunk.water_mesh_version,
+                    m_isolation_config.renders(Client::ScenarioHarness::IsolationLayer::Water) &&
+                        m_water_pass->shader() && m_water_pass->shader()->IsValid());
+            }
             if (!m_far_world->AddLiveUpload(upload))
                 break;
         }
@@ -3157,7 +3167,14 @@ void RenderPipeline::execute_stage_water(const Camera& camera) {
         WaterPassInput water_input;
         for (const auto& chunk : renderable_chunk_snapshots) {
             auto it = m_water_render_data.find(chunk.id);
-            if (it != m_water_render_data.end() && it->second.element_count > 0) {
+            if (it != m_water_render_data.end() && it->second.element_count > 0 &&
+                (m_frame_far_selection.effective != FarWorldMode::Ladder ||
+                 LadderWaterPassEligible(chunk.water_mesh_version,
+                                         it->second.mesh_version,
+                                         it->second.element_count,
+                                         it->second.LadderUploadValid(),
+                                         m_water_pass->shader() &&
+                                             m_water_pass->shader()->IsValid()))) {
                 glm::mat4 model = glm::translate(
                     glm::mat4(1.0f),
                     glm::vec3(chunk.coords * IVec3(CHUNK_SIZE_X, CHUNK_SIZE_Y, CHUNK_SIZE_Z)));
@@ -4322,7 +4339,9 @@ void RenderPipeline::manage_water_gpu_resources(
 
         auto it = m_water_render_data.find(chunk.id);
         bool is_new = (it == m_water_render_data.end());
-        bool is_stale = !is_new && (it->second.mesh_version != chunk.water_mesh_version);
+        bool is_stale = !is_new && (it->second.mesh_version != chunk.water_mesh_version ||
+                                    (m_frame_far_selection.effective == FarWorldMode::Ladder &&
+                                     !it->second.LadderUploadValid()));
 
         if (is_new || is_stale) {
             const glm::vec3 center(chunk.coords.x * CHUNK_SIZE_X + CHUNK_SIZE_X * 0.5f,
@@ -4460,8 +4479,22 @@ void RenderPipeline::upload_water_mesh(const ChunkMeshSnapshot& chunk,
     if (!payload.has_mesh())
         return;
 
+    const bool ladder = m_frame_far_selection.effective == FarWorldMode::Ladder;
+    // An in-place update can corrupt a previously valid store. Invalidate before
+    // any attempt, including Legacy uploads, so switching modes cannot reuse it.
+    if (const auto found = m_water_render_data.find(chunk.id); found != m_water_render_data.end())
+        found->second.ladder_upload_version.reset();
+
     if (payload.vertices.size() > std::numeric_limits<u32>::max() ||
         payload.indices.size() > std::numeric_limits<u32>::max()) {
+        m_last_mesh_upload_stats.water_upload_failures++;
+        return;
+    }
+
+    FarVolumeGpuSizes checked_sizes;
+    if (ladder &&
+        (!CheckFarVolumeGpuSizes(payload.vertices.size(), payload.indices.size(), checked_sizes) ||
+         glGetError() != GL_NO_ERROR)) {
         m_last_mesh_upload_stats.water_upload_failures++;
         return;
     }
@@ -4495,6 +4528,17 @@ void RenderPipeline::upload_water_mesh(const ChunkMeshSnapshot& chunk,
         data.vertex_capacity < vertex_count || data.index_capacity < index_count;
     const bool version_reused = data.mesh_version != 0 && data.mesh_version != payload.mesh_version;
 
+    // Match the far-volume backend: check the upload error and query the actual
+    // store size. Reuse may retain a larger store, but both writes must succeed.
+    const auto validate_upload = [needs_growth](GLenum target, std::uint64_t bytes) {
+        const bool uploaded = glGetError() == GL_NO_ERROR;
+        GLint64 actual = 0;
+        glGetBufferParameteri64v(target, GL_BUFFER_SIZE, &actual);
+        const bool queried = glGetError() == GL_NO_ERROR;
+        return uploaded && queried && actual >= static_cast<GLint64>(bytes) &&
+               (!needs_growth || actual == static_cast<GLint64>(bytes));
+    };
+
     glBindVertexArray(data.vao_id);
     glBindBuffer(GL_ARRAY_BUFFER, data.vbo_id);
     if (needs_growth) {
@@ -4510,6 +4554,8 @@ void RenderPipeline::upload_water_mesh(const ChunkMeshSnapshot& chunk,
                         payload.vertices.data());
     }
 
+    const bool vertex_uploaded =
+        !ladder || validate_upload(GL_ARRAY_BUFFER, checked_sizes.vertex_bytes);
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, data.ebo_id);
     if (needs_growth) {
         glBufferData(GL_ELEMENT_ARRAY_BUFFER,
@@ -4524,6 +4570,8 @@ void RenderPipeline::upload_water_mesh(const ChunkMeshSnapshot& chunk,
                         payload.indices.data());
     }
 
+    const bool index_uploaded =
+        !ladder || validate_upload(GL_ELEMENT_ARRAY_BUFFER, checked_sizes.index_bytes);
     glEnableVertexAttribArray(0);
     glVertexAttribPointer(
         0, 3, GL_FLOAT, GL_FALSE, sizeof(VoxelVertex), (void*)offsetof(VoxelVertex, position));
@@ -4532,6 +4580,18 @@ void RenderPipeline::upload_water_mesh(const ChunkMeshSnapshot& chunk,
         1, 3, GL_FLOAT, GL_FALSE, sizeof(VoxelVertex), (void*)offsetof(VoxelVertex, normal));
     glBindVertexArray(0);
 
+    if (ladder) {
+        const bool attributes_valid = glGetError() == GL_NO_ERROR;
+        if (!vertex_uploaded || !index_uploaded || !attributes_valid || data.vao_id == 0 ||
+            data.vbo_id == 0 || data.ebo_id == 0) {
+            // Either buffer may have changed. Force full allocation on retry;
+            // the cleared certificate excludes this record from both consumers.
+            data.vertex_capacity = data.index_capacity = 0;
+            m_last_mesh_upload_stats.water_upload_failures++;
+            return;
+        }
+        data.ladder_upload_version = payload.mesh_version;
+    }
     data.element_count = index_count;
     data.mesh_version = payload.mesh_version;
     data.frames_since_inactive = 0;
@@ -4640,6 +4700,7 @@ void RenderPipeline::unload_water_resources(ChunkID chunk_id) {
         WaterRenderData data = it->second;
         data.element_count = 0;
         data.mesh_version = 0;
+        data.ladder_upload_version.reset();
         data.frames_since_inactive = 0;
         if (m_free_water_render_slots.size() < kMaxFreeWaterRenderSlots) {
             m_free_water_render_slots.push_back(data);

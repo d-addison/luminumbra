@@ -143,7 +143,7 @@ bool farCellLess(ivec3 a, ivec3 b) {
     if (a.y != b.y) return a.y < b.y;
     return a.z < b.z;
 }
-bool farLiveOwns(vec3 local) {
+bool farLiveOwns(vec3 local, uint materialId) {
     // Canonical tile/span origins are integer multiples of 16 (remainder=0).
     // Adding zero preserves the stored float local; /16 is exact binary scaling.
     // Integer boundary locals, or integer remainder + integer local below 2^24,
@@ -160,7 +160,9 @@ bool farLiveOwns(vec3 local) {
         if (farCellLess(u_farLiveCells[middle].xyz, cell)) lo = middle + 1;
         else hi = middle;
     }
-    return lo < u_farLiveCellCount && all(equal(u_farLiveCells[lo].xyz, cell));
+    int readiness = materialId == 200u ? 2 : 1;
+    return lo < u_farLiveCellCount && all(equal(u_farLiveCells[lo].xyz, cell)) &&
+           (u_farLiveCells[lo].w & readiness) != 0;
 }
 
 // Input from the vertex shader, with "flat" interpolation for the integer ID
@@ -330,7 +332,7 @@ void main()
         float horizontalSquared = dot(relativeWorld.xz, relativeWorld.xz);
         vec3 local = fs_in.FarTileLocalPos;
         if (dot(relativeWorld, relativeWorld) < 176.0 * 176.0 ||
-            horizontalSquared > u_farOuterRadius * u_farOuterRadius || farLiveOwns(local))
+            horizontalSquared > u_farOuterRadius * u_farOuterRadius || farLiveOwns(local, fs_in.MaterialID))
             discard;
         if (u_farArrivalEligible == 1 &&
             horizontalSquared <= u_farFinerOuterRadius * u_farFinerOuterRadius &&

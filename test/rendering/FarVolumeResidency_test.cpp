@@ -31,7 +31,11 @@ FarTierBudgets Budgets() {
 FarVolumeWantedRequest Wanted(FarTileKey key) {
     FarVolumeTileKey canonical;
     EXPECT_TRUE(ToFarVolumeTileKey(key, canonical));
-    return {{1, 42, 0, key, 1, 1}, {canonical, {}}, 0};
+    return {{1, 42, 0, key, 1, 1},
+            {canonical, {}},
+            0,
+            std::make_shared<const FarWorldConstantWaterObservation>(42, false, 0),
+            FarWorldWaterBound{true, 0, 0}};
 }
 FarVolumeAuthority Authority(const FarVolumeWantedRequest& request, bool mixed = false) {
     const auto edge = FarTileEdgeMeters(request.identity.key.tier);
@@ -96,6 +100,81 @@ FarVolumeUploadBackend Backend(std::size_t& calls) {
     };
 }
 } // namespace
+
+TEST(FarVolumeResidency, CombinedWetUploadDebitsAndCurrentArrivalRestoresAfterWaterFailure) {
+    JobSystem jobs;
+    jobs.startup(2);
+    FarVolumeTierMemory memory(Budgets());
+    auto limits = Limits();
+    limits.queues[0].result_slots = 4;
+    FarVolumeResidency owner(jobs, memory, limits);
+    std::array requests{Wanted({2, -1, -1}),
+                        Wanted({1, -2, -2}),
+                        Wanted({1, -1, -2}),
+                        Wanted({1, -2, -1}),
+                        Wanted({1, -1, -1})};
+    for (auto& request : requests) {
+        request.water = std::make_shared<const FarWorldConstantWaterObservation>(42, true, 0);
+        request.water_bound = FarWorldWaterBound{false, 0, 0};
+    }
+    ASSERT_TRUE(owner.ReplaceWanted(requests));
+    ASSERT_TRUE(WaitReady(owner, requests, Producer()));
+    std::size_t calls = 0;
+    const auto backend = Backend(calls);
+    const auto before = Observation(owner, requests[0].identity.key);
+    auto frame = owner.AdvanceFrame(0, 0, {0, 1, before.ready_upload_bytes}, Producer(), backend);
+    EXPECT_EQ(frame.upload_bytes, before.ready_upload_bytes);
+    EXPECT_EQ(frame.successful_upload_bytes, frame.upload_bytes);
+    EXPECT_EQ(frame.upload_attempts, 1u);
+    EXPECT_FALSE(owner.CoarseMayYield(requests[0].identity.key));
+    owner.AdvanceFrame(0, 0, {0, 5, 32 * 1024 * 1024}, Producer(), backend);
+    ASSERT_TRUE(owner.CoarseMayYield(requests[0].identity.key));
+    EXPECT_EQ(owner.Snapshot()[0].water_wet_tiles, 4u);
+    EXPECT_EQ(owner.Snapshot()[0].retained_water_indices, 4u * 98304);
+    const auto collect = [](void* opaque, const FarVolumeDrawRecord& record) {
+        auto& records = *static_cast<std::vector<FarVolumeDrawRecord>*>(opaque);
+        records.push_back(record);
+    };
+    // A missing fine child invalidates the complete terrain/water certificate.
+    ASSERT_TRUE(owner.ReplaceWanted(std::span(requests).first(4)));
+    owner.AdvanceFrame(0, 0, {}, {}, {});
+    std::vector<FarVolumeDrawRecord> draws;
+    owner.VisitDraws(collect, &draws);
+    ASSERT_FALSE(draws.empty());
+    EXPECT_EQ(draws.front().identity.key, requests[0].identity.key);
+    EXPECT_FALSE(draws.front().arrival.eligible);
+    EXPECT_EQ(draws.front().water_indices, 98304u);
+    ASSERT_TRUE(owner.ReplaceWanted(requests));
+    ASSERT_TRUE(WaitReady(owner, std::span(requests).last(1), Producer()));
+    owner.AdvanceFrame(0, 0, {0, 1, 32 * 1024 * 1024}, Producer(), backend);
+    ASSERT_TRUE(owner.CoarseMayYield(requests[0].identity.key));
+    const auto failed_key = requests[1].identity.key;
+    const auto* old = owner.Resource(failed_key);
+    ASSERT_NE(old, nullptr);
+    ++requests[1].identity.bake_generation;
+    requests[1].water.reset();
+    requests[1].water_bound.reset();
+    ASSERT_TRUE(owner.ReplaceWanted(requests));
+    EXPECT_FALSE(owner.CoarseMayYield(requests[0].identity.key));
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+    do {
+        owner.AdvanceFrame(0, 0, {5, 5, 32 * 1024 * 1024}, Producer(), backend);
+        if (Observation(owner, failed_key).eligibility == FarVolumeEligibility::RequestRejected)
+            break;
+        std::this_thread::yield();
+    } while (std::chrono::steady_clock::now() < deadline);
+    EXPECT_EQ(Observation(owner, failed_key).eligibility, FarVolumeEligibility::RequestRejected);
+    EXPECT_EQ(owner.Resource(failed_key), old);
+    EXPECT_FALSE(IsFarTileCovering(Observation(owner, failed_key).coverage));
+    EXPECT_FALSE(owner.CoarseMayYield(requests[0].identity.key));
+    draws.clear();
+    owner.VisitDraws(collect, &draws);
+    ASSERT_FALSE(draws.empty());
+    EXPECT_EQ(draws.front().identity.key, requests[0].identity.key);
+    EXPECT_FALSE(draws.front().arrival.eligible);
+    EXPECT_EQ(draws.front().water_indices, 98304u);
+    jobs.shutdown();
+}
 
 TEST(FarVolumeResidency, ConstructorRefusalRollsBackAllTierCharges) {
     JobSystem jobs;
@@ -211,6 +290,8 @@ TEST(FarVolumeResidency, ActualUploadBytesCapDefersReadyAndPreservesOldGpuOnFail
     ASSERT_TRUE(owner.Resource(requests[0].identity.key));
     const auto* previous = owner.Resource(requests[0].identity.key);
     ++requests[0].identity.content_hash;
+    requests[0].water = std::make_shared<const FarWorldConstantWaterObservation>(
+        requests[0].identity.content_hash, false, 0);
     ASSERT_TRUE(owner.ReplaceWanted(requests));
     // Other Ready result is retained but cannot consume this build's dispatch.
     const std::array changed{requests[0]};
@@ -397,6 +478,8 @@ TEST(FarVolumeResidency, ProspectiveEvictionRequiresCurrentUnderlayAndKeepsKeyLa
               FarVolumeEligibility::BudgetEvicted);
     // A new real content identity does not defeat the accepted key-scoped latch.
     ++wanted[2].identity.content_hash;
+    wanted[2].water = std::make_shared<const FarWorldConstantWaterObservation>(
+        wanted[2].identity.content_hash, false, 0);
     ASSERT_TRUE(owner.ReplaceWanted(wanted));
     EXPECT_EQ(Observation(owner, far.identity.key).eligibility,
               FarVolumeEligibility::BudgetEvicted);
@@ -474,6 +557,10 @@ TEST(FarVolumeResidency, FailedAndBudgetEvictedChildrenRestoreArrivalFallbackNex
                                    Wanted({1, 1, 0}),
                                    Wanted({1, 0, 1}),
                                    Wanted({1, 1, 1})};
+        for (auto& request : requests) {
+            request.water = std::make_shared<const FarWorldConstantWaterObservation>(42, true, 0);
+            request.water_bound = FarWorldWaterBound{false, 0, 0};
+        }
         ASSERT_TRUE(owner.ReplaceWanted(requests));
         std::size_t calls = 0;
         const auto backend = Backend(calls);
@@ -499,13 +586,21 @@ TEST(FarVolumeResidency, FailedAndBudgetEvictedChildrenRestoreArrivalFallbackNex
             const auto* retained = owner.Resource(requests[4].identity.key);
             ASSERT_NE(retained, nullptr);
             ++requests[4].identity.content_hash;
+            requests[4].water = std::make_shared<const FarWorldConstantWaterObservation>(
+                requests[4].identity.content_hash, true, 0);
             ASSERT_TRUE(owner.ReplaceWanted(requests));
             ASSERT_TRUE(WaitReady(owner, std::span(requests).last(1), Producer(true)));
             FarVolumeUploadBackend failure =
                 [](const auto&) -> std::unique_ptr<FarVolumeGpuAllocation> {
                 return {};
             };
-            EXPECT_EQ(owner.AdvanceFrame(0, 0, {0, 1, 8 * 1024 * 1024}, {}, failure).uploaded, 0u);
+            const auto combined_bytes =
+                Observation(owner, requests[4].identity.key).ready_upload_bytes;
+            const auto failed = owner.AdvanceFrame(0, 0, {0, 1, 8 * 1024 * 1024}, {}, failure);
+            EXPECT_EQ(failed.uploaded, 0u);
+            EXPECT_EQ(failed.upload_attempts, 1u);
+            EXPECT_EQ(failed.upload_bytes, combined_bytes);
+            EXPECT_EQ(failed.successful_upload_bytes, 0u);
             EXPECT_EQ(owner.Resource(requests[4].identity.key), retained);
         }
         owner.AdvanceFrame(0, 0, {}, {}, {});
@@ -515,6 +610,8 @@ TEST(FarVolumeResidency, FailedAndBudgetEvictedChildrenRestoreArrivalFallbackNex
             if (record.identity.key.tier == 2) {
                 *static_cast<bool*>(opaque) = true;
                 EXPECT_FALSE(record.arrival.eligible);
+                EXPECT_GT(record.terrain_indices, 0u);
+                EXPECT_EQ(record.water_indices, 98304u);
             }
         };
         EXPECT_GE(owner.VisitDraws(inspect, &parent_drawn), 1u);

@@ -125,6 +125,16 @@ public:
     std::uint64_t content_identity() const noexcept override {
         return 42;
     }
+    FarWorldWaterCapability WaterCapability() const noexcept override {
+        return FarWorldWaterCapability::ExplicitlyDry;
+    }
+    std::optional<FarWorldWaterBound>
+    WaterBound(const Luminumbra::World::FarTileKey&) const override {
+        return FarWorldWaterBound{true, 0, 0};
+    }
+    std::optional<FarWorldWaterSample> WaterSample(std::int64_t, std::int64_t) const override {
+        return FarWorldWaterSample{false, 0};
+    }
     std::uint64_t owned_bytes() const noexcept override {
         return sizeof(*this);
     }

@@ -98,12 +98,13 @@ TIER_COUNTERS = ("wanted", "pending", "building", "ready", "settled", "uploaded_
                  "current_covering", "rejected", "budget_evicted", "evicted_range_total", "evicted_budget_total",
                  "stale_rebuilds_total", "retained_ready_cpu_bytes", "retained_gpu_logical_store_bytes",
                  "pool_cpu_bytes", "pool_gpu_logical_store_bytes", "pool_sampled_total_bytes", "pool_limit_bytes",
-                 "pool_peak_bytes", "admission_refusals", "draws", "indices", "draw_refusals")
+                 "pool_peak_bytes", "admission_refusals", "draws", "indices", "draw_refusals", "water_known_dry_tiles", "water_wet_tiles",
+                 "retained_water_indices", "submitted_water_indices")
 SNAPSHOT_FIELDS = ("requested_mode", "effective_mode", "refusal", "submission_refusal", "suppression", "selected", "world_epoch",
                    "frame_id", "content_identity", "bake_generation", "far_plane_m", "requested_cave_policy",
                    "bound_cave_policy", "numeric_policy",
                    "captured", "complete", "advancement_occurred", "submission_occurred", "draws", "indices",
-                   "ladder_water_available", "memory_sampling", "gpu_bytes_kind", "camera", "frame_upload", "tiers", "tiles")
+                   "ladder_water_available", "water_capability", "memory_sampling", "gpu_bytes_kind", "camera", "frame_upload", "tiers", "tiles")
 
 
 def identity(value, path):
@@ -145,7 +146,10 @@ def validate_snapshot(s, mode, camera, expected):
                 s["bound_cave_policy"] == s["requested_cave_policy"], "missing/mismatched cave policy binding")
     require(s["gpu_bytes_kind"] == "logical_stores" and
             s["memory_sampling"] == "asynchronous_diagnostic_not_atomic_admission", "invalid memory sampling labels")
-    require(s["ladder_water_available"] is False, "unsupported ladder water claim")
+    capability = integer(s["water_capability"], "water_capability")
+    require(capability in (0, 1, 2), "invalid water capability")
+    require(s["ladder_water_available"] == (capability != 0), "water capability disagreement")
+    require(mode != "ladder" or capability != 0, "water observation unavailable")
     upload = obj(s["frame_upload"], ("attempts", "debited_bytes", "successful_bytes", "horizon_refused"), "frame_upload")
     for f in ("attempts", "debited_bytes", "successful_bytes"):
         integer(upload[f], f)
@@ -176,7 +180,8 @@ def validate_snapshot(s, mode, camera, expected):
     observed = set()
     states = {i: {"Uploaded": 0, "Empty": 0} for i in range(1, 6)}
     for tile in s["tiles"]:
-        obj(tile, ("desired", "built", "has_pair", "state", "current", "span_ok", "eligibility", "requested_span", "built_span"), "tile")
+        obj(tile, ("desired", "built", "has_pair", "state", "current", "span_ok", "eligibility", "requested_span", "built_span", "water_complete", "water_known_dry",
+                   "terrain_indices", "water_indices"), "tile")
         key = identity(tile["desired"], "desired")
         identity(tile["built"], "built")
         require(key not in observed, "duplicate coverage tile")
@@ -193,6 +198,13 @@ def validate_snapshot(s, mode, camera, expected):
         if tile["requested_span"] is not None:
             requested = span(tile["requested_span"], "requested_span")
             require(built[0] <= requested[0] and built[1] >= requested[1], "span refusal")
+        require(boolean(tile["water_complete"], "water_complete"), "incomplete combined water publication")
+        water_indices = integer(tile["water_indices"], "water_indices")
+        terrain_indices = integer(tile["terrain_indices"], "terrain_indices")
+        require(water_indices % 6 == 0 and terrain_indices % 3 == 0, "malformed component indices")
+        require(boolean(tile["water_known_dry"], "water_known_dry") == (water_indices == 0), "water dry/index disagreement")
+        require(tile["state"] != "Empty" or terrain_indices == water_indices == 0, "wet Empty publication")
+        require(tile["state"] != "Uploaded" or terrain_indices + water_indices > 0, "empty Uploaded publication")
         states[key[0]][tile["state"]] += 1
     require(observed == expected, "missing_expected coverage tile or extra tile")
     mixed = any(state["Uploaded"] for state in states.values())
@@ -205,6 +217,19 @@ def validate_snapshot(s, mode, camera, expected):
         require(tier["draws"] == state["Uploaded"], "GL submission counts differ from current drawable pairs")
         if tier["draws"] == 0:
             require(tier["indices"] == 0, "indices without submission")
+        component_tiles = [tile for tile in s["tiles"] if tile["desired"]["key"][0] == tier["tier"]]
+        dry_count = sum(tile["water_known_dry"] for tile in component_tiles)
+        water_count = sum(tile["water_indices"] for tile in component_tiles)
+        terrain_count = sum(tile["terrain_indices"] for tile in component_tiles)
+        require(tier["water_known_dry_tiles"] == dry_count and
+                tier["water_wet_tiles"] == count - dry_count, "water tile counters disagree")
+        require(tier["retained_water_indices"] == water_count, "retained water indices disagree")
+        require(tier["submitted_water_indices"] == water_count, "wet fixture missing submitted water indices")
+        require(tier["indices"] == water_count + terrain_count, "combined submitted index accounting disagrees")
+    wet = sum(t["water_wet_tiles"] for t in tiers)
+    submitted_water = sum(t["submitted_water_indices"] for t in tiers)
+    require(capability != 1 or wet == submitted_water == 0, "explicitly dry fixture contains wet water")
+    require(capability != 2 or (wet > 0 and submitted_water > 0), "wet fixture has zero water draws")
     require(sum(t["draws"] for t in tiers) == s["draws"] and sum(t["indices"] for t in tiers) == s["indices"], "per-tier draw totals differ")
     require(not mixed or s["submission_occurred"], "mixed fixture has no actual submission")
 
@@ -265,7 +290,8 @@ def validate_artifact(a, renderer="legacy", required_stations=None, oracle=wante
     require(renderer in ("legacy", "ladder") and a["mode"] == renderer, "wrong-mode artifact")
     require(boolean(a["ladder_checked"], "ladder_checked") == (renderer == "ladder"), "wrong ladder_checked")
     require(boolean(a["complete"], "complete"), "incomplete artifact")
-    require(a["ladder_water"] == "absent_S13_out_of_scope", "missing water refusal")
+    require(a["ladder_water"] == ("combined_immutable_observation" if renderer == "ladder"
+                                  else "legacy_compatibility"), "missing water contract")
     expected_count = integer(a["expected_stations"], "expected_stations", 1)
     require(type(a["stations"]) is list and len(a["stations"]) == expected_count, "missing station or truncated artifact")
     if renderer == "legacy":

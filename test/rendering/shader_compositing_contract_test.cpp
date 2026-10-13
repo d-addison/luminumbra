@@ -335,3 +335,16 @@ TEST(FarWorldShadowContract, ProductionCascadesHaveOnlyLiveAndGlassInputs) {
 }
 
 } // namespace
+
+TEST(FarWorldWaterContract, ProductionWaterUsesIndependentReadinessAndCombinedSubmission) {
+    const auto fragment = ReadShader("res/shaders/g_buffer.frag");
+    ExpectContains(fragment, "materialId == 200u ? 2 : 1");
+    ExpectContains(fragment, "farLiveOwns(local, fs_in.MaterialID)");
+    ExpectContains(fragment, "(u_farLiveCells[lo].w & readiness) != 0");
+    ExpectContains(fragment, "case 200u: albedo = vec3(0.018, 0.065, 0.11);");
+    const auto pipeline = ReadShader("src/luminumbra_client/rendering/RenderPipeline.cpp");
+    ExpectContains(pipeline, "upload.water_snapshot_version = chunk.water_mesh_version;");
+    ExpectContains(pipeline, "LadderWaterPassEligible(chunk.water_mesh_version");
+    const auto pass = ReadShader("src/luminumbra_client/rendering/passes/GBufferPass.cpp");
+    ExpectContains(pass, "stats.far_water_indices += far_stats.water_indices;");
+}

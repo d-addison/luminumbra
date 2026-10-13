@@ -806,11 +806,12 @@ void DrawGpuProfilerOverlay(ClientAppContext& app,
                         cave_policy_name(fw.bound_cave_policy));
             ImGui::Text("submission refusal: %s",
                         FarWorldSubmissionRefusalName(fw.submission_refusal));
-            ImGui::Text("selected %d; draws %zu indices %zu; suppression %s; ladder water absent",
+            ImGui::Text("selected %d; draws %zu indices %zu; suppression %s; water capability %d",
                         fw.selection.effective == FarWorldMode::Ladder,
                         fw.draws,
                         fw.indices,
-                        fw.selection.submit ? "None" : "SubmissionOverride");
+                        fw.selection.submit ? "None" : "SubmissionOverride",
+                        static_cast<int>(fw.water_capability));
             ImGui::Text("upload attempts %zu debit %llu success %llu horizon refusal %d",
                         fw.upload.upload_attempts,
                         static_cast<unsigned long long>(fw.upload.upload_bytes),
@@ -831,6 +832,11 @@ void DrawGpuProfilerOverlay(ClientAppContext& app,
                             v.covering,
                             t.draws,
                             t.indices);
+                ImGui::Text("  water dry/wet %zu/%zu retained/submitted indices %llu/%llu",
+                            v.water_known_dry_tiles,
+                            v.water_wet_tiles,
+                            static_cast<unsigned long long>(v.retained_water_indices),
+                            static_cast<unsigned long long>(v.submitted_water_indices));
                 ImGui::Text(
                     "  reject %zu budget latch %zu; range/budget/stale totals %llu/%llu/%llu",
                     v.request_rejected,

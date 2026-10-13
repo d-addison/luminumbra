@@ -505,3 +505,35 @@ TEST(ReflectionCoverage, EverySamplerBindingPassRegistersAndValidatesALayout) {
 }
 
 } // namespace
+
+TEST(FarWorldWaterReflection, ProductionLadderKeepsIvec4ReadinessBufferAndMaterialOutputs) {
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    const std::string root = LUMINUMBRA_SOURCE_ROOT;
+    std::string vertex, fragment, error;
+    ASSERT_TRUE(ReadShaderSource(root + "/res/shaders/g_buffer.vert", vertex, error)) << error;
+    ASSERT_TRUE(ReadShaderSource(root + "/res/shaders/g_buffer.frag", fragment, error)) << error;
+    const auto version_end = fragment.find('\n');
+    ASSERT_NE(version_end, std::string::npos);
+    fragment.insert(version_end + 1, "#define LUMINUMBRA_FAR_WORLD_LADDER 1\n");
+    const auto program = LinkProgram(vertex.c_str(), fragment.c_str(), error);
+    ASSERT_NE(program, 0u) << error;
+    const auto block =
+        glGetProgramResourceIndex(program, GL_SHADER_STORAGE_BLOCK, "FarWorldLiveOwnership");
+    ASSERT_NE(block, GL_INVALID_INDEX);
+    const GLenum binding_property = GL_BUFFER_BINDING;
+    GLint binding = -1;
+    glGetProgramResourceiv(
+        program, GL_SHADER_STORAGE_BLOCK, block, 1, &binding_property, 1, nullptr, &binding);
+    EXPECT_EQ(binding, 7);
+    const auto member = glGetProgramResourceIndex(program, GL_BUFFER_VARIABLE, "u_farLiveCells[0]");
+    ASSERT_NE(member, GL_INVALID_INDEX);
+    const GLenum properties[]{GL_TYPE, GL_ARRAY_STRIDE};
+    GLint values[2]{};
+    glGetProgramResourceiv(program, GL_BUFFER_VARIABLE, member, 2, properties, 2, nullptr, values);
+    EXPECT_EQ(values[0], static_cast<GLint>(GL_INT_VEC4));
+    EXPECT_EQ(values[1], 16);
+    EXPECT_EQ(glGetFragDataLocation(program, "gNormalMaterial"), 1);
+    EXPECT_EQ(glGetFragDataLocation(program, "gMetallicAO"), 3);
+    glDeleteProgram(program);
+}

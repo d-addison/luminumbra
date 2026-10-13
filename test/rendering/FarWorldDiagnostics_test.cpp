@@ -28,6 +28,8 @@ struct Station {
         snapshot.camera = {-512, 12, 1024};
         snapshot.captured = true;
         snapshot.advanced = true;
+        snapshot.ladder_water_available = true;
+        snapshot.water_capability = FarWorldWaterCapability::ExplicitlyDry;
         for (const auto& key : expected) {
             auto& tile = snapshot.tiles[snapshot.tile_count++];
             tile.desired = {7, 42, 0, key, 5, 2};
@@ -38,11 +40,13 @@ struct Station {
             tile.coverage = {FarTileState::Empty, true, true};
             tile.eligibility = FarVolumeEligibility::Settled;
             tile.has_pair = true;
+            tile.water_complete = tile.water_known_dry = true;
             auto& tier = snapshot.tiers[key.tier - 1].resident;
             ++tier.wanted;
             ++tier.settled;
             ++tier.empty_pairs;
             ++tier.covering;
+            ++tier.water_known_dry_tiles;
         }
     }
     bool Ready(double seconds = 1) const {
@@ -59,6 +63,45 @@ TEST(FarWorldDiagnostics, EmptyCoverageDoesNotRequireGpuStoresOrSubmission) {
     EXPECT_FALSE(station.Ready(90.001));
     EXPECT_FALSE(station.Ready(-1));
     EXPECT_FALSE(station.Ready(std::numeric_limits<double>::quiet_NaN()));
+}
+
+TEST(FarWorldDiagnostics, WetFixtureRequiresCombinedWaterAndActualSubmittedIndices) {
+    Station station;
+    station.snapshot.water_capability = FarWorldWaterCapability::Wet;
+    EXPECT_FALSE(station.Ready());
+    auto& tile = station.snapshot.tiles[0];
+    tile.coverage.state = FarTileState::Uploaded;
+    tile.water_known_dry = false;
+    tile.water_indices = 6;
+    auto& tier = station.snapshot.tiers[tile.desired.key.tier - 1];
+    --tier.resident.empty_pairs;
+    ++tier.resident.uploaded_pairs;
+    --tier.resident.water_known_dry_tiles;
+    ++tier.resident.water_wet_tiles;
+    tier.resident.retained_water_indices = 6;
+    tier.draws = station.snapshot.draws = 1;
+    tier.indices = station.snapshot.indices = 6;
+    station.snapshot.submission_occurred = true;
+    EXPECT_FALSE(station.Ready());
+    tier.resident.submitted_water_indices = 6;
+    ASSERT_TRUE(station.Ready());
+    for (int control = 0; control < 4; ++control) {
+        auto invalid = station;
+        if (control == 0)
+            invalid.snapshot.tiles[0].water_complete = false;
+        if (control == 1)
+            invalid.snapshot.water_capability = FarWorldWaterCapability::ExplicitlyDry;
+        if (control == 2)
+            invalid.snapshot.tiles[0].coverage.state = FarTileState::Empty;
+        if (control == 3)
+            invalid.snapshot.ladder_water_available = false;
+        EXPECT_FALSE(invalid.Ready());
+    }
+    const auto on = FarWorldDiagnosticJson(station.snapshot);
+    EXPECT_EQ(on["tiers"][0]["submitted_water_indices"], 6);
+    const auto off = FarWorldSubmissionOverride(station.snapshot.selection, false);
+    EXPECT_FALSE(off.submit);
+    EXPECT_EQ(FarWorldDiagnosticJson(station.snapshot), on);
 }
 
 TEST(FarWorldDiagnostics, MissingInvalidOrMismatchedCavePoliciesRefuseStation) {
@@ -111,6 +154,7 @@ TEST(FarWorldDiagnostics, MixedCoverageRequiresActualSuccessfulSubmission) {
     Station station;
     auto& tile = station.snapshot.tiles[0];
     tile.coverage.state = FarTileState::Uploaded;
+    tile.terrain_indices = 6;
     auto& tier = station.snapshot.tiers[tile.desired.key.tier - 1];
     --tier.resident.empty_pairs;
     ++tier.resident.uploaded_pairs;
@@ -135,6 +179,7 @@ TEST(FarWorldDiagnostics, TooFewTriangleIndicesForDrawsRefusesStation) {
             break;
         if (tile.has_pair && tile.desired.key.tier == tier_number) {
             tile.coverage.state = FarTileState::Uploaded;
+            tile.terrain_indices = 3;
             ++uploaded;
         }
     }
@@ -292,14 +337,19 @@ TEST(FarWorldDiagnostics, SerializerContainsBindingPoliciesCoverageCountersAndLo
                                   "retained_gpu_logical_store_bytes",
                                   "draws",
                                   "indices",
-                                  "draw_refusals"})
+                                  "draw_refusals",
+                                  "water_known_dry_tiles",
+                                  "water_wet_tiles",
+                                  "retained_water_indices",
+                                  "submitted_water_indices"})
             EXPECT_TRUE(tier.contains(field)) << field;
     EXPECT_EQ(json["tiles"].size(), station.expected.size());
     EXPECT_EQ(json["tiles"][0]["built"], json["tiles"][0]["desired"]);
     EXPECT_EQ(json["tiles"][0]["desired"]["cave_policy"], json["bound_cave_policy"]);
     EXPECT_EQ(json["gpu_bytes_kind"], "logical_stores");
     EXPECT_EQ(json["memory_sampling"], "asynchronous_diagnostic_not_atomic_admission");
-    EXPECT_FALSE(json["ladder_water_available"].get<bool>());
+    EXPECT_TRUE(json["ladder_water_available"].get<bool>());
+    EXPECT_EQ(json["water_capability"], 1);
     const auto bytes = json.dump();
     EXPECT_THROW((void)nlohmann::json::parse(bytes.substr(0, bytes.size() - 1)),
                  nlohmann::json::parse_error);
