@@ -273,9 +273,11 @@ GBufferDrawStats GBufferPass::execute(const RenderContext& ctx,
                                       const GBufferPassInput& input) {
     // ON already populated persistent mesh caches. Keep reused per-dispatch
     // scratch exactly as ON left it, including when a later stage throws.
-    auto restore = [this, groups = ctx.frozen_replay ? m_visibleGroups : decltype(m_visibleGroups){},
+    auto restore = [this,
+                    groups = ctx.frozen_replay ? m_visibleGroups : decltype(m_visibleGroups){},
                     memo = ctx.frozen_replay ? m_resolveMemo : decltype(m_resolveMemo){},
-                    impostors = ctx.frozen_replay ? m_impostorInstances : decltype(m_impostorInstances){},
+                    impostors =
+                        ctx.frozen_replay ? m_impostorInstances : decltype(m_impostorInstances){},
                     replay = ctx.frozen_replay]() mutable noexcept {
         if (replay) {
             m_visibleGroups.swap(groups);
@@ -571,7 +573,8 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
                          : m_static_far_uniforms;
 
     const auto _sp_t0 = std::chrono::steady_clock::now(); // CPU submit cost
-    if (!ctx.frozen_replay) m_last_static_prop_cpu_ms = 0.0;
+    if (!ctx.frozen_replay)
+        m_last_static_prop_cpu_ms = 0.0;
     if (!UseDrawProgram(shader.get(), stats))
         return;
     uniforms.Reset();
@@ -647,7 +650,8 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
     {
         const std::size_t pop = registry.view<const Components::StaticMeshComponent>().size();
         if (pop != m_staticPropCachePopulation) {
-            if (ctx.frozen_replay) throw std::logic_error("Replay cannot rebuild static residency");
+            if (ctx.frozen_replay)
+                throw std::logic_error("Replay cannot rebuild static residency");
             build_static_prop_cache(registry);
         }
     }
@@ -671,7 +675,8 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
     auto resolve_mesh = [&](const std::string& candidatePath,
                             const std::string& basePath) -> std::pair<Mesh*, std::string> {
         if (m_meshCache.find(candidatePath) == m_meshCache.end()) {
-            if (ctx.frozen_replay) throw std::logic_error("Replay cannot change mesh residency");
+            if (ctx.frozen_replay)
+                throw std::logic_error("Replay cannot change mesh residency");
             std::string full = (input.root_path / candidatePath).string();
             // Only load the LOD variant if it exists on disk; an absent.lodN.lmesh caches a
             // null and falls back to LOD0 SILENTLY (no MeshLoader "failed header" error spam).
@@ -683,7 +688,8 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
             return {m, candidatePath};
         if (candidatePath != basePath) {
             if (m_meshCache.find(basePath) == m_meshCache.end()) {
-                if (ctx.frozen_replay) throw std::logic_error("Replay cannot change mesh residency");
+                if (ctx.frozen_replay)
+                    throw std::logic_error("Replay cannot change mesh residency");
                 std::string full = (input.root_path / basePath).string();
                 m_meshCache[basePath] = MeshLoader::Load(full);
             }
@@ -918,9 +924,10 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
             glEnable(GL_CULL_FACE);
     }
 
-    if (!ctx.frozen_replay) m_last_static_prop_cpu_ms =
-        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - _sp_t0)
-            .count();
+    if (!ctx.frozen_replay)
+        m_last_static_prop_cpu_ms =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - _sp_t0)
+                .count();
 }
 
 void GBufferPass::geometry_pass_skinned_meshes(const RenderContext& ctx,
@@ -1003,7 +1010,8 @@ void GBufferPass::geometry_pass_skinned_meshes(const RenderContext& ctx,
         auto const& player = view.get<const anim::AnimationPlayerComponent>(entity);
 
         if (m_skinnedMeshCache.find(mesh_info.meshPath) == m_skinnedMeshCache.end()) {
-            if (ctx.frozen_replay) throw std::logic_error("Replay cannot change skinned residency");
+            if (ctx.frozen_replay)
+                throw std::logic_error("Replay cannot change skinned residency");
             std::string full_mesh_path = (input.root_path / mesh_info.meshPath).string();
             m_skinnedMeshCache[mesh_info.meshPath] = MeshLoader::LoadSkinned(full_mesh_path);
         }
@@ -1043,7 +1051,8 @@ void GBufferPass::geometry_pass_skinned_meshes(const RenderContext& ctx,
         const std::size_t palette_bytes = player.palette.size() * sizeof(float);
         glBindBuffer(GL_SHADER_STORAGE_BUFFER, m_jointPaletteSSBO);
         if (palette_bytes > m_jointPaletteSSBOCapacityBytes) {
-            if (ctx.frozen_replay) throw std::logic_error("Replay cannot grow joint storage");
+            if (ctx.frozen_replay)
+                throw std::logic_error("Replay cannot grow joint storage");
             m_jointPaletteSSBOCapacityBytes = palette_bytes;
             glBufferData(GL_SHADER_STORAGE_BUFFER,
                          static_cast<GLsizeiptr>(palette_bytes),

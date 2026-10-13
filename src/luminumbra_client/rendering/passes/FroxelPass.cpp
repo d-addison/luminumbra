@@ -1,5 +1,5 @@
-#include "../FarWorldReplay.h"
 #include "FroxelPass.h"
+#include "../FarWorldReplay.h"
 
 #include "../FroxelGrid.h"
 #include "../ShaderReflection.h"
@@ -44,7 +44,8 @@ bool FroxelPass::execute_inject(const RenderContext& ctx, const std::filesystem:
         return true;
     }
     if (m_inject_program == 0) {
-        if (ctx.frozen_replay) return false;
+        if (ctx.frozen_replay)
+            return false;
         // Lazy init: both kernels + both 3D volumes, together.
         auto load_comp = [&](const char* rel) -> GLuint {
             std::ifstream file(std::filesystem::path(root_path) / rel);

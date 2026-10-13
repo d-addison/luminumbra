@@ -7,6 +7,7 @@
 #include <gtest/gtest.h>
 #include <latch>
 #include <limits>
+#include <memory>
 #include <nlohmann/json.hpp>
 #include <stdexcept>
 #include <utility>
@@ -311,10 +312,11 @@ TEST(FarWorldRenderer, ConfigDefaultExplicitAndHashExcluded) {
 }
 
 TEST(FarWorldRenderer, DefaultExplicitRefusedAndPreviewSelection) {
-    const FarWorldRenderer legacy;
-    EXPECT_EQ(legacy.Selection(FarWorldPurpose::World).effective, FarWorldMode::Legacy);
-    const FarWorldRenderer refused(FarWorldMode::Ladder);
-    const auto normal = refused.Selection(FarWorldPurpose::World);
+    // Two owners with fixed diagnostic/ownership storage exceed the Windows stack budget.
+    const auto legacy = std::make_unique<const FarWorldRenderer>();
+    EXPECT_EQ(legacy->Selection(FarWorldPurpose::World).effective, FarWorldMode::Legacy);
+    const auto refused = std::make_unique<const FarWorldRenderer>(FarWorldMode::Ladder);
+    const auto normal = refused->Selection(FarWorldPurpose::World);
     EXPECT_EQ(normal.requested, FarWorldMode::Ladder);
     EXPECT_EQ(normal.effective, FarWorldMode::Legacy);
     EXPECT_EQ(normal.refusal, FarWorldRefusal::ImmutableAuthorityUnavailable);
@@ -332,7 +334,7 @@ TEST(FarWorldRenderer, DefaultExplicitRefusedAndPreviewSelection) {
     EXPECT_EQ(preview.effective, FarWorldMode::Legacy);
     EXPECT_TRUE(preview.advance);
     EXPECT_EQ(preview.refusal, FarWorldRefusal::PreviewOverride);
-    const auto offscreen = refused.Selection(FarWorldPurpose::OffscreenPreview);
+    const auto offscreen = refused->Selection(FarWorldPurpose::OffscreenPreview);
     EXPECT_FALSE(offscreen.advance);
     EXPECT_FALSE(offscreen.submit);
     EXPECT_EQ(offscreen.refusal, FarWorldRefusal::OffscreenSuppressed);
@@ -956,7 +958,7 @@ TEST(FarWorldRenderer, CameraXZWantedSetSpanGrowthAndRejectedExtensionAreTransac
         count += tier.wanted;
     EXPECT_EQ(count, wanted.size());
     const auto before = owner.renderer.Residency()->Observe(wanted.front());
-    EXPECT_TRUE(before);
+    ASSERT_TRUE(before);
     ASSERT_TRUE(owner.renderer.PrepareFrame(2, {-.5, 100, -512.25}));
     const auto after = owner.renderer.Residency()->Observe(wanted.front());
     ASSERT_TRUE(after);
@@ -987,22 +989,20 @@ TEST(FarWorldRenderer, LeaveAndReturnPreservesAcceptedExtensionsAndGeneration) {
     ASSERT_TRUE(owner.renderer.PrepareFrame(1, {-.5, 1000, -512.25}, extensions));
     const auto before = owner.renderer.Residency()->Observe(key);
     ASSERT_TRUE(before);
-    if (!before)
-        return;
     ASSERT_TRUE(owner.renderer.PrepareFrame(2, {65536, 500, 65536}));
     EXPECT_FALSE(owner.renderer.Residency()->Observe(key));
     ASSERT_TRUE(owner.renderer.PrepareFrame(3, {-.5, 500, -512.25}));
     const auto returned = owner.renderer.Residency()->Observe(key);
     ASSERT_TRUE(returned);
-    if (returned) {
+    if (!returned)
+        return;
+    if (before) {
         EXPECT_EQ(returned->desired, before->desired);
     }
     // Equal identity freezes the complete intent in ReplaceWanted. Accepting
     // this manifest proves that the returned request kept the prior coverage.
     auto expected = Request(key);
-    if (returned) {
-        expected.identity = returned->desired;
-    }
+    expected.identity = returned->desired;
     expected.intent.extra_span = extensions.front();
     expected.build_headroom_bytes = FarWorldDevelopmentLimits().build_headroom_bytes;
     owner.frame = 3;
@@ -1015,32 +1015,32 @@ TEST(FarWorldRenderer, LeaveAndReturnSpanGrowthKeepsGenerationMonotone) {
     ASSERT_TRUE(owner.renderer.PrepareFrame(1, {0, 1000, 0}));
     const auto before = owner.renderer.Residency()->Observe(key);
     ASSERT_TRUE(before);
-    if (!before)
-        return;
     ASSERT_TRUE(owner.renderer.PrepareFrame(2, {65536, 0, 65536}));
     EXPECT_FALSE(owner.renderer.Residency()->Observe(key));
     ASSERT_TRUE(owner.renderer.PrepareFrame(3, {0, 0, 0}));
     const auto returned = owner.renderer.Residency()->Observe(key);
     ASSERT_TRUE(returned);
-    if (returned) {
-        EXPECT_GT(returned->desired.span_generation, before->desired.span_generation);
-    }
     auto expected = Request(key);
-    if (returned) {
-        expected.identity = returned->desired;
-    }
-    expected.intent.extra_span = FarVolumeCoverageSpan{0, 1000};
     expected.build_headroom_bytes = FarWorldDevelopmentLimits().build_headroom_bytes;
-    owner.frame = 3;
-    ASSERT_TRUE(owner.Advance(expected));
+    if (returned) {
+        if (before) {
+            EXPECT_GT(returned->desired.span_generation, before->desired.span_generation);
+        }
+        expected.identity = returned->desired;
+        expected.intent.extra_span = FarVolumeCoverageSpan{0, 1000};
+        owner.frame = 3;
+        ASSERT_TRUE(owner.Advance(expected));
+    }
     ASSERT_TRUE(owner.renderer.PrepareFrame(5, {65536, 0, 65536}));
     EXPECT_FALSE(owner.renderer.Residency()->Observe(key));
     ASSERT_TRUE(owner.renderer.PrepareFrame(6, {0, -100, 0}));
     const auto grown = owner.renderer.Residency()->Observe(key);
     ASSERT_TRUE(grown);
-    if (!grown || !returned)
+    if (!grown)
         return;
-    EXPECT_GT(grown->desired.span_generation, returned->desired.span_generation);
+    if (returned) {
+        EXPECT_GT(grown->desired.span_generation, returned->desired.span_generation);
+    }
     expected.identity = grown->desired;
     expected.intent.extra_span = FarVolumeCoverageSpan{-100, 1000};
     owner.frame = 6;
@@ -1204,13 +1204,11 @@ TEST(FarWorldRenderer, MixedPrepareFrameAndAdvanceFramePreserveHistoryAndGenerat
     ASSERT_TRUE(owner.renderer.PrepareFrame(++owner.frame, {0, -300, 0}));
     const auto grown = owner.renderer.Residency()->Observe(key);
     ASSERT_TRUE(grown);
-    if (grown) {
-        EXPECT_EQ(grown->desired.span_generation, request.identity.span_generation + 1);
-    }
+    if (!grown)
+        return;
+    EXPECT_EQ(grown->desired.span_generation, request.identity.span_generation + 1);
     auto expected = request;
-    if (grown) {
-        expected.identity = grown->desired;
-    }
+    expected.identity = grown->desired;
     expected.intent.extra_span = FarVolumeCoverageSpan{-300, 1200};
     ASSERT_TRUE(owner.Advance(expected));
     ASSERT_TRUE(owner.renderer.AdvanceFrame(++owner.frame, {0, 0, 0}, {}));
@@ -1227,23 +1225,23 @@ TEST(FarWorldRenderer, PrepareFrameHistoryRejectsChangedIntentAndShrinkageThroug
         ASSERT_TRUE(owner.renderer.PrepareFrame(++owner.frame, {0, 1000, 0}, extensions));
         const auto prepared = owner.renderer.Residency()->Observe(key);
         ASSERT_TRUE(prepared);
-        ASSERT_TRUE(owner.renderer.AdvanceFrame(++owner.frame, {0, 0, 0}, {}));
-        auto request = Request(key);
         if (prepared) {
+            ASSERT_TRUE(owner.renderer.AdvanceFrame(++owner.frame, {0, 0, 0}, {}));
+            auto request = Request(key);
             request.identity = prepared->desired;
+            request.build_headroom_bytes = FarWorldDevelopmentLimits().build_headroom_bytes;
+            if (shrink) {
+                ++request.identity.span_generation;
+                request.intent.extra_span = FarVolumeCoverageSpan{0, 0};
+            } else {
+                request.intent.extra_span = FarVolumeCoverageSpan{-200, 1200};
+            }
+            ExpectManifestRefusedTransactionally(owner,
+                                                 std::span(&request, 1),
+                                                 shrink ? FarWorldRefusal::SpanRejected
+                                                        : FarWorldRefusal::InvalidRequests);
+            EXPECT_FALSE(owner.renderer.Residency()->Observe(key));
         }
-        request.build_headroom_bytes = FarWorldDevelopmentLimits().build_headroom_bytes;
-        if (shrink) {
-            ++request.identity.span_generation;
-            request.intent.extra_span = FarVolumeCoverageSpan{0, 0};
-        } else {
-            request.intent.extra_span = FarVolumeCoverageSpan{-200, 1200};
-        }
-        ExpectManifestRefusedTransactionally(owner,
-                                             std::span(&request, 1),
-                                             shrink ? FarWorldRefusal::SpanRejected
-                                                    : FarWorldRefusal::InvalidRequests);
-        EXPECT_FALSE(owner.renderer.Residency()->Observe(key));
     }
 }
 

@@ -1332,7 +1332,7 @@ private:
     std::shared_ptr<const StaticDrawSnapshot> m_authored_draws;
     std::unique_ptr<RenderView> m_authored_view;
     glm::vec2 m_taau_jitter_ndc =
-        glm::vec2(0.0f);        // current-frame sub-pixel projection jitter (NDC); (0,0) when OFF
+        glm::vec2(0.0f); // current-frame sub-pixel projection jitter (NDC); (0,0) when OFF
     TaauHistoryState m_far_world_pair_taau;
     TaauHistoryState m_far_world_pair_taau_after;
     bool m_far_world_pair_taau_enabled = false;

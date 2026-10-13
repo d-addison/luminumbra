@@ -1,5 +1,5 @@
-#include "../FarWorldReplay.h"
 #include "LightingPass.h"
+#include "../FarWorldReplay.h"
 
 #include "../EnvironmentBrdfLut.gen.h"
 #include "../PassShaderLayouts.h"
@@ -466,7 +466,8 @@ void LightingPass::execute_lightning_overlay(const RenderContext& ctx) {
 
     // Lazily build the overlay program on first strike.
     if (!m_lightning_overlay_shader) {
-        if (ctx.frozen_replay) return;
+        if (ctx.frozen_replay)
+            return;
         m_lightning_overlay_shader = std::make_unique<Shader>(
             (m_root_path / "res/shaders/lightning_overlay.vert").string().c_str(),
             (m_root_path / "res/shaders/lightning_overlay.frag").string().c_str());
@@ -486,7 +487,8 @@ void LightingPass::execute_lightning_overlay(const RenderContext& ctx) {
 
     // (Re)allocate the scene-copy texture if the framebuffer size changed.
     if (m_lightning_scene_copy == 0 || m_lightning_copy_w != w || m_lightning_copy_h != h) {
-        if (ctx.frozen_replay) return;
+        if (ctx.frozen_replay)
+            return;
         if (m_lightning_scene_copy != 0) {
             glDeleteTextures(1, &m_lightning_scene_copy);
             m_lightning_scene_copy = 0;

@@ -452,8 +452,8 @@ bool FarWorldRenderer::AdvanceFrame(std::uint64_t frame,
 
     for (std::size_t i = 0; i < requests.size(); ++i) {
         const auto observed = residency_->Observe(requests[i].identity.key);
-        diagnostic_budget_before_[i] = observed &&
-            observed->eligibility == FarVolumeEligibility::BudgetEvicted;
+        diagnostic_budget_before_[i] =
+            observed && observed->eligibility == FarVolumeEligibility::BudgetEvicted;
     }
     last_frame_ = residency_->AdvanceFrame(
         camera[0], camera[2], limits_.frame, Producer(), [this](const auto& mesh) {
