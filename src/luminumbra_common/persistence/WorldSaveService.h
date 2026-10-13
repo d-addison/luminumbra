@@ -164,6 +164,27 @@ public:
     // tests.
     static void set_interrupt_before_region_replace_for_testing(bool enabled);
 
+    // Test seam for POSIX directory flushes: the next flush after `flushes_to_skip`
+    // successful ones fails once, then the seam disarms. A negative value disarms it.
+    // Flushes covered are the ancestor-entry flushes of write_file_durably and the
+    // post-rename destination-directory flush of every region replacement; Windows
+    // builds never consult it. Process-global; single-threaded persistence tests only.
+    static void set_directory_flush_failure_for_testing(int flushes_to_skip);
+
+    // Writes `bytes` to `destination` with the same durability contract as an LMR1
+    // region rewrite: the parent directory is created, a unique temporary file in
+    // the destination directory is flushed to stable storage, and it atomically
+    // replaces the destination. On POSIX the entry of every ancestor directory is
+    // flushed on every call, so a retry after a failed flush repeats the missing
+    // flushes. A failed or interrupted write (including the interrupt-before-replace
+    // test seam above) removes the temporary file; the destination is then the
+    // previous complete file, or on POSIX the new complete file when only the final
+    // directory flush failed, never a partial file. Used for derived files that live
+    // beside the save, such as the far authority overlay.
+    static bool write_file_durably(const std::filesystem::path& destination,
+                                   const std::string& bytes,
+                                   std::vector<std::string>* errors = nullptr);
+
     // Called after ledger staging is flushed/closed, before replacement. Returning
     // false fails the write and cleans up; a test subprocess may terminate here
     // to leave real crash debris. Single-threaded persistence tests only; nullptr
