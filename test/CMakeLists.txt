@@ -105,6 +105,36 @@ target_link_libraries(morph_asset_test PRIVATE gtest_main nlohmann_json meshopti
 luminumbra_configure_first_party_target(morph_asset_test)
 luminumbra_pin_fp_determinism(morph_asset_test)
 
+# Table-driven volume generation has no client, GL or world-service dependency.
+add_executable(far_volume_tile_test
+    common/FarVolumeTile_test.cpp
+    ../src/luminumbra_common/world/FarVolumeTile.cpp)
+target_include_directories(far_volume_tile_test PRIVATE ../src)
+target_link_libraries(far_volume_tile_test PRIVATE gtest_main)
+luminumbra_configure_first_party_target(far_volume_tile_test)
+
+add_executable(far_volume_mesher_test
+    common/FarVolumeMesher_test.cpp
+    common/FarVolumeMemory_test.cpp
+    ../src/luminumbra_common/world/FarVolumeTile.cpp
+    ../src/luminumbra_common/world/FarVolumeMesher.cpp)
+target_include_directories(far_volume_mesher_test PRIVATE ../src)
+target_link_libraries(far_volume_mesher_test PRIVATE gtest_main)
+luminumbra_configure_first_party_target(far_volume_mesher_test)
+
+add_executable(far_volume_facade_test
+    common/FarVolumeFacade_test.cpp
+    common/FarVolumeFacadeMemory_test.cpp
+    ../src/luminumbra_common/world/FarDensityQuantization.cpp
+    ../src/luminumbra_common/world/FarVolume.cpp
+    ../src/luminumbra_common/world/FarVolumeTile.cpp
+    ../src/luminumbra_common/world/FarVolumeMesher.cpp)
+target_include_directories(far_volume_facade_test PRIVATE ../src ../src/luminumbra_common)
+target_compile_definitions(far_volume_facade_test PRIVATE
+    LUMINUMBRA_SOURCE_ROOT="${CMAKE_SOURCE_DIR}")
+target_link_libraries(far_volume_facade_test PRIVATE gtest_main glm::glm nlohmann_json::nlohmann_json)
+luminumbra_configure_first_party_target(far_volume_facade_test)
+
 add_executable(common_tests
     common/Crc32_test.cpp
     rendering/shader_compositing_contract_test.cpp
@@ -121,6 +151,7 @@ add_executable(common_tests
     common/ResidencyContract_test.cpp
     common/FarLodStore_test.cpp
     common/FarTierTable_test.cpp
+    common/FarHorizon_test.cpp
     common/FarWantedSet_test.cpp
     common/FarAuthorityOverlay_test.cpp
     common/GameSessionHeadlessWorld_test.cpp
@@ -1515,6 +1546,23 @@ target_link_libraries(hang_watchdog_test PRIVATE
     Threads::Threads
 )
 
+# Bounded console sink: separate executable so the logging-stall cases can run
+# without the rest of common_tests. Fake outputs are stalled on purpose; the
+# tests release them before returning.
+add_executable(bounded_console_sink_test
+    common/bounded_console_sink_test.cpp
+)
+target_include_directories(bounded_console_sink_test PRIVATE
+../src
+../src/luminumbra_common
+)
+target_link_libraries(bounded_console_sink_test PRIVATE
+    gtest_main
+    luminumbra_common
+    Threads::Threads
+)
+luminumbra_configure_first_party_target(bounded_console_sink_test)
+
 #  implementation note: occlusion read-back onto ma_sound volume. Pure test of the
 # ComputeFinalVolume helper; includes MiniaudioManager.h so needs miniaudio + nlohmann_json.
 add_executable(audio_volume_readback_test
@@ -1633,6 +1681,9 @@ if(LUMINUMBRA_ENABLE_STATIC_PREVIEW)
     gtest_discover_tests(viewport_protocol_test PROPERTIES LABELS "authoring;tools" TIMEOUT 30)
 endif()
 set(LUMINUMBRA_GTEST_TARGETS
+    far_volume_tile_test
+    far_volume_mesher_test
+    far_volume_facade_test
     world_generation_test
     worldgen_layer_snapshot_test
     asset_processor_round_trip_test
@@ -1688,6 +1739,7 @@ set(LUMINUMBRA_GTEST_TARGETS
     client_policy_test
     audio_physics_binding_test
     hang_watchdog_test
+    bounded_console_sink_test
     audio_volume_readback_test
     audio_disabled_test
     capture_scale_test
