@@ -458,7 +458,8 @@ class Packaging(unittest.TestCase):
 
     def test_new_runtime_modules_use_only_stdlib_and_service_imports(self):
         import ast
-        for name in ("meshgen_registry", "meshgen_config", "meshgen_contracts", "meshgen_scripts"):
+        for name in ("meshgen_registry", "meshgen_config", "meshgen_contracts", "meshgen_scripts",
+                     "meshgen_licence", "meshgen_backend", "meshgen_jobs"):
             tree = ast.parse((SERVICE/"luminumbra_author"/(name+".py")).read_text())
             for node in ast.walk(tree):
                 names = [item.name for item in node.names] if isinstance(node, ast.Import) else (

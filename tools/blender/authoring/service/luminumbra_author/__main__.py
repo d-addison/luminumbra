@@ -15,7 +15,9 @@ def dispatch(service, operation, params):
         keys(params, ())
         capabilities = service.capabilities()
         capabilities.setdefault("features", {}).update({"meshgen_script_pins": True,
-                                                        "meshgen_configuration": True})
+                                                        "meshgen_configuration": True,
+                                                        "meshgen_backend_broker": True,
+                                                        "meshgen_real_backends": False})
         return capabilities if operation == "capabilities" else {
             "schemas": capabilities["schemas"], "profiles": capabilities["profiles"],
             "components": [], "nodes": []}
@@ -36,6 +38,18 @@ def dispatch(service, operation, params):
 
 
 def serve(service):
+    try:
+        _serve_requests(service)
+    finally:
+        # Backend-only owners expose this hook; EOF, framing shutdown and
+        # exceptions all end ownership. Existing build sessions retain their
+        # outer context-manager cleanup.
+        on_eof = getattr(service, "on_eof", None)
+        if on_eof is not None:
+            on_eof()
+
+
+def _serve_requests(service):
     token = os.environ.pop("LUMINUMBRA_AUTHOR_TOKEN", "")
     require(len(token) >= 32, "session.token", "Set an unpredictable session token of at least 32 characters.")
     while True:

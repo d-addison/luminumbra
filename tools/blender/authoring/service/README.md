@@ -264,3 +264,204 @@ runner requires a real installed compiler and caller-provided GLBs, builds each
 twice, compares output hashes, retains old generations, exercises refusals and
 checks unchanged toolchain hashes. Neither lane closes renderer, physical
 animation or newly authored production-content acceptance.
+## MG2 E3: licence admission and the synthetic backend
+
+The installed service includes the stdlib-only `meshgen_licence`,
+`meshgen_backend`, and `meshgen_jobs` APIs. Existing build commands and the
+side-effect-free `meshgen check-config` CLI retain their behavior. The existing
+capability response advertises `meshgen_backend_broker=true` and
+`meshgen_real_backends=false`. These describe reusable engine APIs; the full
+`meshgen.*` Banso RPC contract is still a P3 deliverable.
+
+`meshgen_licence.gate(card, policy, notes)` is pure. `notes` contains the exact
+committed bytes of `authoring/meshgen/notes/<id>.md`; the parent reads them with
+containment checks and the gate verifies their hashes. Severity is
+`blocked > internal_only > counsel > internal_ok > shippable`, with every
+applicable reason retained. Restricted component licences need acknowledgements
+bound to their ID and licence-text hash. Prerequisites for revenue,
+no-improvement, and registration remain independent; neither acknowledgements
+nor allowed statuses substitute for verified notes. Revenue-cap licences also
+require registration. Counsel notes authorize only their recorded internal
+outcome. NC lineage is never runnable, including NC dataset licence records marked
+`executed=false`; dataset lineage is evaluated independently of runtime
+component execution. Dataset audit
+waivers are backend-specific committed records.
+
+The synthetic mock card is pinned in engine code. It has no weights or training
+dataset and can pass the default licence policy without acknowledgements or
+attestations. The trusted parent separately sets candidate eligibility to
+`shippable=false, origin=backend:mock`. A changed card or another backend claiming
+to be the mock is refused. Mock GPU fields are unavailable (`null`). No model
+adapter is imported or spawned, and enabled real backends are refused before
+any backend contact.
+
+`BackendClient` uses direct stdlib HTTP to literal `127.0.0.1` with a client bind
+to `127.0.0.1:0` and an actual peer check. It ignores proxy environment settings,
+refuses redirects, and requires exact Content-Length framing without transfer
+encoding. Header bytes, JSON bytes/depth/collections, result streaming, and
+absolute deadlines are bounded. Every header/body send and receive reapplies the
+remaining absolute deadline; upload chunks are at most 64 KiB. The five endpoints are capabilities, submit,
+status, cancel and binary result. A successful status carries the validated
+result metadata (`sha256`, `bytes`, bounded `backend_reported`, `logs_tail`), and
+`GET /v1/jobs/<id>/result` returns `model/gltf-binary` bytes. Job IDs are validated
+before URL construction. Tokens occur only in Authorization headers.
+
+The planning request stays path-and-digest based. Upload JSON adds
+`declared_source` and `image_b64`; its allowance is calculated from the decoded
+16 MiB cap. The parent snapshots and hashes the same bytes before upload and
+retains them for E4. PNG/JPEG grammar, dimensions, pixel expansion and metadata
+are bounded and checked through the final end marker. PNG intake supports
+noninterlaced 8-bit grayscale/RGB/grayscale-alpha/RGBA, a complete zlib pixel
+stream, and the explicitly supported chunk subset (IHDR, optional truecolor
+PLTE, contiguous IDAT, tEXt, IEND). JPEG intake supports 8-bit sequential Huffman
+frames with complete coefficient scans, valid restart sequences, fixed JFIF
+metadata and plain comments. Progressive/arithmetic JPEGs, EXIF/vendor metadata,
+indexed/interlaced PNGs and unrecognized chunks are refused. Every JPEG metadata
+segment is inspected, including between later scans. Uncompressed PNG tEXt CAWG
+JSON assertions can be inspected; reserved/constrained assertions are refused.
+C2PA/JUMBF, compressed text and XMP credential containers are unsupported and
+refused. Inspected assertions are not authenticated
+signatures. Missing credentials are recorded as absent, and `refuse_unknown`
+refuses that absence. P1 has no image-waiver escape hatch.
+
+Use `BackendBroker.plan(request)`, `start(plan_id, plan_digest)`, and the ledger's
+`status(job_id)`/`result(job_id)` APIs. Requests still use the E1 backend grammar
+and explicit target-height overrides. The broker runs one owned background
+task, with 1–4 sequential raw candidates and recorded seeds, manual selection,
+and bounded polling. Plans bind request, resolved config, complete capability,
+recipe and gate digests. At start the parent rechecks config, image bytes,
+capabilities and licence-note evidence. Scene revision changes do not cancel
+inference; document-session or project changes prevent staging. Automatic
+scoring is refused without measured evidence.
+
+The project lock is `.luminumbra-author-recipes/.meshgen.lock`, atomically
+published with complete PID, process creation identity, nonce, job ID and wall
+start time bytes under the coordination guard.
+A short OS coordination guard serializes acquisition/recovery; a second owner
+receives `busy` without queueing or reattachment. When both MG2 and build locks
+are needed, acquire MG2 first, then the existing build lock. Shared Windows/WSL
+directory coordination remains unqualified. Read-only construction and terminal
+queries create no state and do not instantiate BuildService.
+
+Mutable records live at `<state>/<document>/jobs/<job>/running.json` and
+`terminal.json`, with `terminal.sha256` published as a separate commit. Durable
+stage-specific request reservations live in the sibling `requests/` directory;
+identical replay returns the original terminal bytes, conflicts are refused,
+and active duplicates do not submit twice. The project-wide ledger counts records across all documents, including orphan
+job directories and incomplete reservations. It admits at most 256 distinct
+records (or the tightened `terminal_requests` limit) and 4 GiB of state bytes;
+new jobs reserve their worst-case retained input allowance before upload.
+Atomic publication bytes are included in the byte check. New work is refused
+when full; replay evidence is never evicted. Startup recovery validates markers,
+reconstructs missing reservations, reconciles malformed/empty owner files, and
+detects dead/reused PIDs. An orphan becomes terminal only after backend stop is
+confirmed. Failed confirmation keeps a recoverable `blocked` marker and the
+project lock. Recovery can retry a drained blocked job even while its original
+PID remains alive. Interrupted failure/cancel publication
+preserves its already hashed terminal result. The deterministic mock job ID,
+backend ID, endpoint and resolved config digest are persisted before submission.
+Cancellation and recovery verify that endpoint and digest; configuration drift
+keeps ownership blocked with `backend.pin_mismatch` until the original
+configuration is restored. Request overrides are retained for digest comparison.
+
+Ledger publication flushes file bytes before publishing names. POSIX operations
+fsync the containing directory after replacement, directory creation and lock
+removal. Windows uses `MoveFileExW` with `MOVEFILE_REPLACE_EXISTING |
+MOVEFILE_WRITE_THROUGH` for publication and directory creation; lock removal
+first durably renames the authoritative name to an ignored tombstone.
+
+EOF or shutdown calls `BackendBroker.on_eof()`/`close()`, which requests
+cancellation, drains the owned executor task, confirms backend cancellation,
+then discards scratch staging and publishes the terminal result. Failure uses
+the same stopped/drained transition. Unconfirmed cancellation preserves
+ownership in `blocked` for retry or recovery. Admission and executor submission
+share the shutdown mutex. Admission owns its marker before publication and rolls
+back marker, reservation and owner writes on failure. If rollback fails, a
+drained blocked marker permits recovery while the original PID remains alive.
+A rejected executor submission publishes a terminal failure and removes its lock.
+The inherited-pipe `serve()` wrapper invokes an owner's EOF
+hook on every exit. Cancellation arriving before submission returns also
+cancels the late backend ID. `RequestLedger.commit_success(job_id, trusted_commit)`
+serializes the future candidate commit with cancellation; a committed terminal
+result wins subsequent cancellation.
+
+E3 stops at `finishing` after validating raw static triangle accessor bounds,
+indices, finite coordinates, aggregate accessor/scene expansion, pre-finish
+count and single-file containment. Only POSITION attributes are supported;
+NORMAL, TEXCOORD, skinning/custom attributes, morphs and extensions are refused
+before an importer could consume unchecked accessors.
+GLB header, declared length and JSON/BIN chunk headers are checked incrementally
+before payload collection or the shared format validator. JPEG restart storage
+is bounded by both the expected MCU extent and collection limits before allocation;
+truncated marker-fill sequences return `request.invalid`. PNG inflate uses
+compressed slices and output pieces bounded to 64 KiB, bounding tail copies.
+Exact uploaded bytes, raw GLB, capability/result metadata and bounded logs are
+in private job scratch `inputs/` (later candidates use `raw-<index>/inputs/`).
+Decoded capability/status/result observations, decoded GLB JSON, raw retained
+bytes and refusal findings are inspected for the bearer token before
+persistence, including tokens containing JSON quote/backslash escapes. Ledger,
+owner, marker and reservation writes check both decoded values and serialized
+bytes at the persistence boundary. Credentials are resolved again before
+admission and every write; token rotation does not permit a previously planned
+request ID or document ID to leak the current token.
+They are not sealed candidates. E4 owns finisher supervision, authoritative
+provenance, prepared candidate receipts, seal verification and committed-success
+recovery. E3 creates no candidate marker and grants no import/promotion rights.
+
+The mock launcher is `tools/blender/authoring/probes/mock_backend.py`; set
+`LUMINUMBRA_GEN_TOKEN` and run it with `--bind 127.0.0.1 --port 0`. It also permits
+an explicit `::1` test bind; the production client remains IPv4-only as required
+by Q20. Fault modes are launcher-controlled, never request-selected: oversize,
+nonfinite, external_uri, redirect, nonloopback, slow, cancel, crash, malformed
+job IDs/JSON/framing, card changes and result-hash mismatch. Cube and subdivision
+zero icosphere GLBs are generated deterministically from source. The mock is
+excluded from the installed runtime package. Its own retention is bounded to
+256 replay records and 64 MiB; it refuses new submissions when full while
+preserving identical replay and retained results.
+
+Both Linux and Windows workflow lanes already discover `service/tests/test_*.py`,
+including the E3 test modules. Default tests use only owned port-0
+loopback listeners. For explicitly network-disabled developer environments,
+`LUMINUMBRA_TEST_NO_SOCKETS=1` selects an in-memory HTTP wire harness that runs the
+same handler and stdlib response parser. It cannot qualify real socket binding,
+peer behavior or timeout enforcement; CI retains the default socket lane.
+Portable evidence does not qualify Blender operations or the Windows 5.1.0
+native acceptance lane.
+
+Binding Q&A coverage (test method names are exact; all files are under
+`tools/blender/authoring/service/tests/`):
+
+| Q | Tests / E3 scope |
+|---|---|
+| 1, 3, 13, 27 | `test_real_backend_and_later_phase_requests_are_disabled`; `test_package_ships_broker_modules_and_excludes_mock_and_adapters` |
+| 15 | `test_nc_dataset_executed_false_always_blocks`; `test_all_precedence_combinations_retain_reasons`; `test_audited_unaudited_and_backend_specific_waiver`; `test_missing_conflicting_and_unexecuted_inventory`; `test_nc_component_or_dataset_cannot_be_waived` |
+| 16 | `test_acknowledgements_bind_id_text_hash_and_scope`; `test_verified_and_false_attestations_never_bypass_prerequisites`; `test_revenue_clause_requires_registration_independently`; `test_counsel_notes_verify_bytes_and_never_upgrade_shipping`; `test_note_bytes_are_read_without_fabricating_evidence` |
+| 17 | `test_complete_card_changes_and_model_pins`; `test_capability_change_refuses_before_submission` |
+| 18 | `test_mock_permission_and_forced_nonshipping_are_distinct`; `test_mock_raw_ready_replay_retained_bytes_and_eof` |
+| 19 | `test_image_snapshot_digest_dimensions_metadata_and_rights`; `test_complete_jpeg_scans_and_metadata_after_later_scan`; `test_png_requires_complete_bounded_pixel_stream_and_grammar` |
+| 20 | `test_five_endpoints_and_deterministic_shapes`; `test_authentication_and_host_check`; `test_literal_loopback_bind_and_no_proxy_routing`; `test_redirect_nonloopback_and_strict_framing_modes`; `test_runtime_peer_and_absolute_deadline_use_bounded_reads`; `test_absolute_deadline_also_bounds_drip_fed_headers`; `test_every_send_uses_remaining_deadline_and_bounded_chunks`; `test_http_headers_and_upload_share_the_absolute_deadline`; `test_every_receive_reapplies_remaining_timeout_and_rejects_late_bytes`; `test_all_mock_modes_have_explicit_portable_evidence` |
+| 21 | `test_exact_wire_grammar_and_base64_allowance`; `test_oversize_malformed_job_ids_and_geometry_refusals`; `test_mock_raw_ready_replay_retained_bytes_and_eof` |
+| 22, 23 (raw intake) | `test_bounded_json_duplicate_nonfinite_depth_and_collections`; `test_image_snapshot_digest_dimensions_metadata_and_rights`; `test_oversize_malformed_job_ids_and_geometry_refusals`; `test_raw_accessor_bounds_encodings_indices_and_scene_expansion`; `test_unconsumed_glb_attributes_refused_and_aggregate_expansion_bounded`; `test_five_endpoints_and_deterministic_shapes`. Exported artifact inspection remains E4/G2. |
+| 24 | `test_failure_and_cancellation_block_until_confirmed_backend_stop`; `test_real_mock_slow_mode_reaches_deadline_and_confirms_cancellation`; `test_executor_submission_failure_is_terminal_and_close_serializes_admission`; `test_terminal_cannot_release_undrained_backend`; `test_injectable_clock_deadline_cancels_slow_backend`; `test_eof_during_submission_cancels_late_backend_id`; `test_mock_raw_ready_replay_retained_bytes_and_eof`. Child process supervision belongs to E4. |
+| 25 | `test_read_only_access_has_no_state_or_build_lock`; `test_project_wide_lock_contention_across_documents`; `test_dead_or_reused_pid_recovery_cancels_backend_and_fails_marker`; `test_orphan_marker_without_lock_is_reconciled`; `test_active_duplicate_from_another_owner_cannot_reattach`; `test_atomic_owner_publication_and_malformed_owner_reconciliation`; `test_invalid_markers_cannot_reconcile_or_release_a_lock`; `test_unconfirmed_orphan_keeps_ownership_until_recovery_confirms_stop`; `test_separate_process_lock_contention`; `test_separate_process_crash_at_each_reservation_publication` |
+| 26 | `test_reservation_reconstruction_conflicts_orphans_and_project_quotas`; `test_orphan_directory_and_retained_bytes_count_toward_admission`; `test_mock_record_and_byte_quotas_preserve_replay`; `test_stage_specific_replay_conflict_active_duplicate_and_quota`; `test_scene_revision_does_not_cancel_but_session_change_prevents_staging`; `test_cancel_before_commit_and_cancel_after_committed_success`; `test_cancellation_and_candidate_commit_are_one_serialized_transition` |
+| 38 (backend sequence) | `test_sequential_four_candidates_retain_each_seed_without_overflow`. Native previews and import selection remain G2/G3. |
+| 40 (mutable ledger groundwork) | `test_terminal_hash_tampering_is_refused`; `test_interrupted_terminal_publication_preserves_original_result`; `test_durable_publication_flushes_file_before_directory`; `test_windows_replace_uses_replace_existing_and_write_through`. Prepared candidate receipt/seal transaction remains E4. |
+| 41, 42 (retained backend evidence / parent gate) | `test_escaped_tokens_in_decoded_logs_glb_json_and_raw_bytes_are_never_retained`; `test_mock_raw_ready_replay_retained_bytes_and_eof`; `test_tokens_are_references_only_and_not_in_wire`; `test_mock_permission_and_forced_nonshipping_are_distinct`. Provenance v2 assembly remains E4. |
+| 52 | `test_existing_ci_discovers_new_service_tests`; `test_new_runtime_modules_use_only_stdlib_and_service_imports`; `test_package_ships_broker_modules_and_excludes_mock_and_adapters`. The import check scans E1 and all three E3 runtime modules, including nested platform imports. The new review regressions are in `test_meshgen_e3_review.py`; refusal assertions check exact `rule_id` values. Native acceptance remains pending. |
+
+Round-two regression additions in `test_meshgen_e3_review.py`:
+
+| Q | Tests |
+|---|---|
+| 24, 25 | `test_recovery_and_cancel_require_recorded_endpoint_and_config_digest`; `test_backend_identity_is_durable_before_submit`; `test_subprocess_readiness_deadline_and_early_exit_always_reap` |
+| 41 | `test_each_ledger_payload_is_checked_decoded_and_serialized`; `test_document_token_and_rotated_request_token_refuse_before_admission` |
+| 19, 22 | `test_restart_flood_refused_before_allocating_beyond_mcu_or_collection_bound`; `test_png_large_idat_has_linear_bounded_inflate_work_and_exact_refusal`; `test_truncated_jpeg_fill_returns_request_invalid` |
+| 22, 23 | `test_raw_glb_container_refuses_before_shared_parser_or_payload_allocation` |
+| 24, 26, 40 | `test_admission_rolls_back_every_write_failure_with_live_pid`; `test_failed_admission_rollback_is_drained_and_recoverable_while_pid_live`; `test_post_admission_marker_failure_has_terminal_owned_cleanup` |
+
+Subprocess readiness uses a pipe reader thread and a queue deadline, including
+on Windows. Every interactive child is killed when needed, reaped, and has its
+streams closed before its temporary directory is removed. Parser adversarial
+fixtures assert exact refusal rules, bounded allocations/input work, and finite
+execution time without large memory inputs.
