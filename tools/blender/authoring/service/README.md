@@ -70,6 +70,28 @@ and hashes only; the service never opens them in Blender or executes their scrip
 The exporter identity is a declaration from the snapshot producer, recorded in
 build identity. Qualification of that exporter remains a separate fixture lane.
 
+Geometry sidecars may add optional `settings.max_tris`: an integer from 64 through
+1,000,000, excluding booleans. The service passes `--max-tris N` to the compiler
+and independently validates the actual primary mesh triangle count before
+publication. Simplification can stop above its target; such a build fails with
+`output.budget_exceeded`. When `max_tris` is supplied, every emitted LOD must have
+no more triangles than the primary mesh; excess fails with `output.lod_exceeded`.
+These failures remove unpublished compiler output staging while retaining the
+failure receipt, input evidence, last valid generation and its current pointer.
+`emit_lods` remains independent.
+Static prefab sidecars refuse `max_tris` with `prefab.max_tris` until an
+aggregate/per-part budget contract is defined.
+
+Clients must first request `capabilities` and require
+`features.max_tris_setting` to be `true` before submitting a budgeted build.
+An absent field means unsupported: refuse the build instead of omitting its cap.
+This feature describes service enforcement; qualify the installed compiler's
+option support separately. Budgeted job receipts record the supplied `settings`,
+including `max_tris`, for successful and postcompile failed builds. The hashed
+sidecar already binds the cap to build identity. Documents without `max_tris`
+keep the existing compiler arguments, output bytes and receipt shape; no default
+cap is inserted.
+
 Snapshot producers may supply `expected_dependency_hashes`, an object mapping
 declared dependency paths to their captured SHA-256 digests. Extraction refuses
 a mismatch before running the compiler. The Blender adapter uses this guard to
@@ -235,7 +257,9 @@ python -B -m unittest discover -s tools/blender/authoring/service/tests -v
 python tools/blender/authoring/service/tests/native_acceptance.py --service /your/install/luminumbra-author --toolchain /your/install/toolchain.json --output /fresh/evidence/directory --exporter-id blender.gltf.qualified --exporter-sha256 ACTUAL_EXPORTER_SHA256 prop.glb plant.glb character.glb
 ```
 
-Unit tests inject compiler failures and publication races. The separate native
+Unit tests inject compiler failures and publication races, cover triangle-cap
+bounds and negotiation, read actual fixture mesh counts, and verify that budget
+and LOD refusals leave the previous publication intact. The separate native
 runner requires a real installed compiler and caller-provided GLBs, builds each
 twice, compares output hashes, retains old generations, exercises refusals and
 checks unchanged toolchain hashes. Neither lane closes renderer, physical
