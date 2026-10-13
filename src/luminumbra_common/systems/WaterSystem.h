@@ -1,9 +1,12 @@
 #pragma once
 #include "../../../include/luminumbra/core/Types.h"
 #include "../core/JobSystem.h"
+#include "../world/WaterShare.h"
 #include "entt/entt.hpp"
 #include <cstdint>
 #include <memory>
+#include <optional>
+#include <span>
 #include <unordered_map>
 #include <vector>
 
@@ -79,6 +82,40 @@ public:
 
     void update(entt::registry& registry,
                 const std::unordered_map<ChunkID, std::shared_ptr<Chunk>>& active_chunks);
+
+    // Enabled sessions evolve water at the fixed tick, after weather. Streaming only binds
+    // the resident query map. The caller supplies snapshot_streamed_chunks(), never authority IO.
+    void SetRegionalScheduling(bool enabled) {
+        m_regional_scheduling = enabled;
+    }
+    struct RegionalWork {
+        std::uint64_t global_windows = 0, border_windows = 0, allocated_windows = 0;
+        std::uint64_t used_windows = 0, unused_windows = 0, unallocated_windows = 0;
+        std::uint64_t preparation_cells = 0, water_cells = 0, total_cells = 0;
+        std::int64_t source_mm = 0, sink_mm = 0, preparation_mm = 0;
+        // Exact physical volume in mm * quarter-square-metres; all legal cell areas
+        // are integral in this unit, including saved 32x32 grids during resize.
+        std::int64_t volume_before_qmm = 0, volume_after_qmm = 0;
+        std::int64_t source_volume_qmm = 0, sink_volume_qmm = 0, preparation_volume_qmm = 0;
+        bool mass_ok = true;
+        // Dynamic eligibility/reservations do not establish a fixed-cohort service theorem.
+        bool fixed_cohort_bound_known = false;
+        std::vector<world::water_share::Grant> grants;
+        std::vector<ChunkID> visits;
+        bool operator==(const RegionalWork&) const = default;
+    };
+    [[nodiscard]] const RegionalWork& regional_work() const {
+        return m_regional_work;
+    }
+    // Strict enabled durable decode and live preflight share the same grid checks.
+    static void ValidateRegionalGrid(const Chunk& chunk);
+    // Refusal throws before publication, preserving chunks, ledger, work and telemetry.
+    void UpdateRegional(entt::registry& registry,
+                        std::span<const std::shared_ptr<Chunk>> resident,
+                        world::ActiveRegionLedger& ledger,
+                        const world::RegionSchedule& schedule,
+                        std::vector<world::RegionWork>& completed,
+                        std::uint64_t cell_budget = 4096);
 
     /**
      * @brief Sets the ECS entity whose TransformComponent drives camera-relative water LOD.
@@ -260,12 +297,17 @@ public:
     void ResizeSimulationGrid(Chunk& chunk, WaterDetailLevel new_level);
 
 private:
-    int StepSharedWaterFace(Chunk& owner, Chunk& neighbor, bool is_x);
+    int StepSharedWaterFace(Chunk& owner, Chunk& neighbor, bool is_x, bool checked = false);
+    void StepRegionalInterior(Chunk& chunk, RegionalWork& result);
+    void PrepareRegionalGrid(Chunk& chunk);
     // (water performance contract) The float render-mirror sim (dispatch_simulation_jobs /
     // simulate_chunk_water + its WaterChunkSnapshot/Output/Neighbors structs) was DEAD CODE — zero
     // callers; the live path is the integer  StepChunkWaterFixed. Removed.
     Vec3 get_camera_position(entt::registry& registry) const;
 
+    std::optional<std::uint64_t> m_last_regional_tick;
+    bool m_regional_scheduling = false;
+    RegionalWork m_regional_work;
     JobSystem* m_job_system;
 
     SHIELD_WorldSystem* m_shield_system;

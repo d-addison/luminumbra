@@ -119,15 +119,13 @@ inline luminumbra::core::DeterministicRng PollinationPairRng(std::uint64_t id_a,
 
 // The deterministic, pair-symmetric cross of two plant genomes. Public so tests (and
 // callers) can assert symmetry directly without spinning a registry.
-inline Comp::PlantGenomeComponent
-PollinateCross(const Comp::PlantGenomeComponent& receiver,
-               const Comp::PlantGenomeComponent& donor,
-               std::uint64_t receiver_id,
-               std::uint64_t donor_id,
-               std::uint64_t tick,
-               std::uint64_t world_seed = 0,
-               float mutation_frac = kPollinationMutationFrac,
-               const ::Luminumbra::world::RegionEntityGate& gate = {}) {
+inline Comp::PlantGenomeComponent PollinateCross(const Comp::PlantGenomeComponent& receiver,
+                                                 const Comp::PlantGenomeComponent& donor,
+                                                 std::uint64_t receiver_id,
+                                                 std::uint64_t donor_id,
+                                                 std::uint64_t tick,
+                                                 std::uint64_t world_seed = 0,
+                                                 float mutation_frac = kPollinationMutationFrac) {
     luminumbra::core::DeterministicRng rng =
         PollinationPairRng(receiver_id, donor_id, tick, world_seed);
     // Order the parents by id too, so the BlendCrossover draw order (and thus the

@@ -31,7 +31,7 @@
 #include "luminumbra_common/components/CoreComponents.h" // water-source: TransformComponent
 #include "luminumbra_common/core/JobSystem.h"
 #include "luminumbra_common/core/SystemConfig.h"    // sim.water_high_res gate
-#include "luminumbra_common/core/WaterComponents.h" // water-source: WaterSourceComponent
+#include "luminumbra_common/core/WaterComponents.h" // water-source: WaterFlowSourceComponent
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 #include "luminumbra_common/systems/WaterSystem.h"
 #include "luminumbra_common/world/GameSession.h"
@@ -406,9 +406,9 @@ TEST(WaterDeterminism, WeatherDrivenRainIsDeterministic) {
 
 // water-source: SOURCE INJECTION routes through the fixed-point mm domain.
 // The proof leans on derived-state reclassification: the water hash covers ONLY the mm truth (the
-// float mirrors are Render-classified) — so if the WaterSourceComponent injection still wrote only
-// the float mirror (the pre-water-source bug), the sourced world's hash would EQUAL the control's
-// and this test would fail. Deterministic: two sourced runs match.
+// float mirrors are Render-classified) — so if the WaterFlowSourceComponent injection still wrote
+// only the float mirror (the pre-water-source bug), the sourced world's hash would EQUAL the
+// control's and this test would fail. Deterministic: two sourced runs match.
 struct SourceResult {
     std::vector<std::uint64_t> hashes;
     bool mass_ok = true;
@@ -467,7 +467,7 @@ SourceResult run_with_source(const std::string& root, bool add_source) {
             const auto e = reg.create();
             auto& tf = reg.emplace<Luminumbra::Components::TransformComponent>(e);
             tf.position = Vec3(pit.x, world->GetTerrainHeightAt(pit.x, pit.z), pit.z);
-            auto& src = reg.emplace<Luminumbra::Components::WaterSourceComponent>(e);
+            auto& src = reg.emplace<Luminumbra::Components::WaterFlowSourceComponent>(e);
             src.flow_rate = 40.0f; // strong spring: >= 1 mm/cell/tick after quantization
         }
         for (int t = 0; t < kSourceObservationTicks; ++t) {
@@ -503,7 +503,7 @@ TEST(WaterDeterminism, SourceInjectionRoutesThroughFixedPoint) {
     // Compare the FULL sequences: even if a sink eventually re-equilibrates the
     // body, SOME post-tick state along the way must differ once mm water landed.
     EXPECT_NE(a.hashes, control.hashes)
-        << "the WaterSourceComponent injection did not reach the HASHED mm truth at "
+        << "the WaterFlowSourceComponent injection did not reach the HASHED mm truth at "
            "ANY tick — it is writing the float mirror only (the pre-water-source bug)";
 }
 
@@ -966,6 +966,19 @@ TEST(WaterDeterminism, DurableReadErrorRefusesDirectWaterConsumers) {
     ASSERT_TRUE(world->durable_read_failed());
     ASSERT_EQ(faults, 1);
     const auto before = world->debug_water_state_hash().hash;
+    Luminumbra::world::ActiveRegionLedger ledger;
+    ledger.mark_edited({128, 128}, Luminumbra::world::WorldClock{});
+    ASSERT_TRUE(ledger.set_water_debts({{{128, 128}, 17}}));
+    const auto ledger_before = ledger.encode();
+    std::vector<Luminumbra::world::RegionWork> completed;
+    Luminumbra::world::RegionSchedule schedule;
+    const auto work_before = water->regional_work();
+    EXPECT_THROW(water->UpdateRegional(session.GetRegistry(), {}, ledger, schedule, completed),
+                 std::runtime_error);
+    EXPECT_EQ(ledger.encode(), ledger_before);
+    EXPECT_EQ(water->regional_work(), work_before);
+    EXPECT_TRUE(completed.empty());
+    EXPECT_FALSE(world->find_streamed_chunk(expected));
     EXPECT_THROW(water->update(session.GetRegistry(), {}), std::runtime_error);
     EXPECT_THROW(water->get_water_level_at(0.0f, 0.0f), std::runtime_error);
     EXPECT_THROW(water->get_water_flow_at(0.0f, 0.0f), std::runtime_error);

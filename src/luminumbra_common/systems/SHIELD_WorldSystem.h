@@ -20,6 +20,7 @@
 #include <optional>
 #include <set>
 #include <shared_mutex>
+#include <span>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -931,6 +932,16 @@ public:
     // Moves every water-dirty chunk (resident and parked) to LoadedOrEdited authority and re-arms
     // its save-dirty bit. Only call with sim.active_regions on.
     void sync_water_authority();
+    // Stage all allocation and acquire the revision lock before water publication. The
+    // owner thread retains this token through the nonthrowing whole-plan commit.
+    struct WaterAuthorityPublication {
+        std::unique_lock<std::mutex> lock;
+        std::map<std::pair<i32, i32>, u64> revisions;
+        u64 revision = 0;
+    };
+    WaterAuthorityPublication prepare_water_authority_publication(std::span<Chunk* const> chunks);
+    void publish_water_authority(WaterAuthorityPublication&& publication) noexcept;
+
     // Moves a parked chunk back into the resident map. Returns true iff the id was parked.
     bool unpark_chunk(ChunkID id);
     // Owner-thread committed identity inventory. Durable payloads are loaded only when wanted;

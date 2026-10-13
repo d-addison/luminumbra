@@ -3,9 +3,10 @@
 The host ledger implements the persistent-active scheduling foundation in
 [distant-world.md](distant-world.md). It is gated by the existing
 `sim.active_regions` switch, absent and false by default. No systems.json value
-is added. Budgets remain unlimited in shipped configuration. No distant system
-consumes this schedule yet; field pages, creature records, water shares,
-diagnostics and measured budget activation remain separate work.
+is added. Budgets remain unlimited in shipped configuration. Enabled host sessions consume this schedule for field pages, ground objects,
+weather, energy, foliage and resident water. Resident water uses the checked
+[regional continuation contract](regional-water-continuation.md). Diagnostics
+and measured budget activation remain separate qualification work.
 
 ## Activation and ordering
 

@@ -695,6 +695,7 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
                 }
             }
 
+            RunRegionalWaterTick();
             RunFoliageTick(budget, current_tick);
             {
                 namespace Comp = Luminumbra::Components;
@@ -895,6 +896,14 @@ GameSession::SamplePlantEnvironment(const Components::TransformComponent& tf,
     s.temperature =
         luminumbra::foliage::clamp01(s.temperature + (warmth - 0.5f) * kSeasonAmplitude);
     return s;
+}
+
+void GameSession::RunRegionalWaterTick() {
+    if (!m_activeRegionsEnabled || !m_waterSystem || !m_worldSystem)
+        return;
+    const auto resident = m_worldSystem->snapshot_streamed_chunks();
+    m_waterSystem->UpdateRegional(
+        m_registry, resident, m_activeRegionLedger, m_regionSchedule, m_regionCompletedWork);
 }
 
 void GameSession::RunFoliageTick(luminumbra::simulation::SimBudgetTelemetry::TickScope& budget,
@@ -1195,6 +1204,7 @@ bool GameSession::CreateWorldInternal(const std::string& name,
 
     // 3. Link them together
     m_worldSystem->SetWaterSystem(m_waterSystem.get());
+    m_waterSystem->SetRegionalScheduling(m_activeRegionsEnabled);
     LUMINUMBRA_CORE_INFO("World and water systems linked.");
 
     // sim.water_high_res: raise the solver to High BEFORE any chunk seeds
@@ -1337,6 +1347,7 @@ bool GameSession::LoadWorld(const std::string& worldId) {
     m_physicsSystem->set_world_system(m_worldSystem.get());
     m_waterSystem = std::make_unique<Systems::WaterSystem>(m_jobSystem, m_worldSystem.get());
     m_worldSystem->SetWaterSystem(m_waterSystem.get());
+    m_waterSystem->SetRegionalScheduling(m_activeRegionsEnabled);
 
     // sim.water_high_res: raise the solver to High BEFORE any chunk is adopted
     // or seeded (default-OFF = untouched Medium = byte-identical). A loaded save
@@ -3300,7 +3311,7 @@ bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
     // deterministic: each chunk's integer-bilinear mm resample is a pure function of
     // its loaded state + worldgen + the session resolution. Matching saves resize
     // nothing — the default path stays byte-identical.
-    {
+    if (!m_activeRegionsEnabled) {
         const std::size_t migrated = m_worldSystem->MigrateWaterSimResolution();
         if (migrated > 0) {
             LUMINUMBRA_CORE_INFO(

@@ -79,7 +79,8 @@ const char* EntitySnapshotArtifactSchema();
 std::string SerializeWorldStreamingStateSnapshotJson(const WorldStreamingState& state);
 bool LoadWorldStreamingStateSnapshotJson(const std::string& json_text,
                                          WorldStreamingState& out_state,
-                                         std::vector<std::string>& errors);
+                                         std::vector<std::string>& errors,
+                                         bool strict_water = false);
 bool ValidateWorldStreamingChunkFormatJson(const std::string& chunk_json,
                                            std::vector<std::string>& errors);
 // Deterministic world hash over the canonical snapshot bytes (same

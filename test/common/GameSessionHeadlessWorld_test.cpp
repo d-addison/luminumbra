@@ -3313,6 +3313,10 @@ TEST(GameSessionHeadlessWorldTest, DisplacementWaterPromotesBeforeFreezeAndSurvi
             {chunk->get_id(), chunk}};
         const auto before_initialization = P::WorldSaveService::region_simulation_digest(
             {}, water_region, P::RegionDigestInputs{{chunk}, {}, {}, {}, {}});
+        // A legacy generator supplies the pristine baseline for this provenance fixture.
+        // The enabled streaming caller only binds query storage; fixed ticks own evolution.
+        Luminumbra::Systems::WaterSystem baseline_seed(nullptr, session.GetWorldSystem());
+        baseline_seed.update(session.GetRegistry(), water_chunks);
         session.GetWaterSystem()->update(session.GetRegistry(), water_chunks);
         ASSERT_TRUE(chunk->has_water_sim.load());
         ASSERT_EQ(chunk->water_depth_mm.size(), 64u);
@@ -3559,7 +3563,13 @@ TEST(GameSessionHeadlessWorldTest, WaterOnlyAuthorityHashDoesNotChangeWhenSaved)
     auto chunk = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3(0, 0, 0));
     chunk->sdf_data.assign(17 * 17 * 17, 1.0f);
     chunk->mark_sdf_generated_current_params();
-    chunk->water_depth_mm = {123};
+    chunk->water_depth_mm.assign(64, 123);
+    chunk->water_bed_mm.assign(64, 1000);
+    chunk->water_edge_flux.assign(128, 0);
+    chunk->water_level_data.assign(64, 1.123f);
+    chunk->water_flow_data.assign(64, Luminumbra::Vec2(0));
+    chunk->water_sim_terrain_height.assign(64, 1.0f);
+    chunk->has_water_sim.store(true);
     chunk->mark_water_state_dirty();
     ASSERT_TRUE(owner.GetWorldSystem()->adopt_streamed_chunk(chunk));
     const auto before = owner.ComputeChunkStateHash();
@@ -4644,6 +4654,86 @@ TEST(GameSessionHeadlessWorldTest,
     }
 }
 
+TEST(GameSessionHeadlessWorldTest,
+     S7IrrigationInteriorsAndBordersConserveWithDepletedDonorAndSaturatedRecipient) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    const RegionKey left{0, 0}, right{1, 0};
+    const ScentCellKey a{511, 8}, b{512, 8};
+    constexpr std::int32_t source_output = 80;
+    for (const bool saturated : {false, true})
+        for (const bool reverse : {false, true}) {
+            SCOPED_TRACE(saturated);
+            SCOPED_TRACE(reverse);
+            const auto donor = reverse ? b : a;
+            const auto recipient = reverse ? a : b;
+            GameSession base, live;
+            CreateGroundWorld(base, root, jobs, "S7 conserving irrigation seam");
+            ASSERT_TRUE(base.SaveWorld());
+            FieldPageState pages;
+            for (int z = 0; z < 16; ++z)
+                for (int x = 496; x < 528; ++x)
+                    ASSERT_TRUE(pages.set_irrigation({x, z}, saturated ? SF::kMoistureMax : 0));
+            if (saturated)
+                ASSERT_TRUE(pages.set_irrigation(recipient, SF::kMoistureMax - source_output));
+            else
+                ASSERT_TRUE(pages.set_irrigation(donor, 8));
+            std::int64_t total_before = 0;
+            for (const auto& entry : SF::FoliageCells(pages.irrigation()))
+                total_before += entry.second;
+            ASSERT_NO_FATAL_FAILURE(CommitRegionalFixture(
+                base,
+                FixtureLedger(103, {{left, RegionState::Active}, {right, RegionState::Active}}),
+                pages));
+            EnableSnapshotSession(live, root, jobs);
+            ASSERT_TRUE(live.LoadWorld(base.GetMetadata().worldId)) << live.GetWorldOpenError();
+            live.SetReplicatedSimulationAnchors({});
+            if (saturated) {
+                // Fill the recipient before diffusion: both pages then contain
+                // exactly the maximum. Drain frees six units, while the prior
+                // host-tick gradient still requests a ten-unit border transfer.
+                const auto source = live.GetRegistry().create();
+                live.GetRegistry().emplace<SC::TransformComponent>(source).position = {
+                    static_cast<float>(recipient.x) + 0.25f,
+                    0,
+                    static_cast<float>(recipient.z) + 0.25f};
+                live.GetRegistry().emplace<SC::WaterSourceComponent>(source).output = source_output;
+            }
+            ASSERT_NO_FATAL_FAILURE(TickOnce(live)); // Both interiors and the common border run.
+            ASSERT_FALSE(live.GetRegionSchedulerFault());
+            const auto& due = live.GetRegionSchedule().due;
+            EXPECT_NE(std::find(due.begin(), due.end(), left), due.end());
+            EXPECT_NE(std::find(due.begin(), due.end(), right), due.end());
+            const auto cells = SF::FoliageCells(live.GetFieldPages().irrigation());
+            ASSERT_EQ(cells.size(), 512u);
+            std::int64_t total_after = 0;
+            for (const auto& [cell, value] : cells) {
+                std::int32_t expected = 0;
+                if (saturated) {
+                    expected = SF::kMoistureMax - SF::kMoistureDrainPerTick;
+                    if (cell == donor)
+                        expected -= SF::kMoistureDrainPerTick;
+                    if (cell == recipient)
+                        expected = SF::kMoistureMax;
+                }
+                EXPECT_EQ(value, expected) << "cell (" << cell.x << ',' << cell.z << ')';
+                total_after += value;
+            }
+            EXPECT_LE(total_after, total_before);
+            if (saturated)
+                EXPECT_EQ(total_after,
+                          total_before + source_output - 512 * SF::kMoistureDrainPerTick);
+            else {
+                // The eight-unit donor sheds one unit to each of its three
+                // same-owner neighbors; drainage removes all eight. Historical
+                // border flux must not recreate a unit at the dry recipient.
+                EXPECT_EQ(total_before, 8);
+                EXPECT_EQ(total_after, 0);
+            }
+        }
+}
+
 TEST(GameSessionHeadlessWorldTest, S7ResumeCapClearsPersistedTokenAndDoesNotReplayAfterReopen) {
     const HeadlessRoot root;
     JobSystem jobs;
@@ -5231,4 +5321,197 @@ TEST(GameSessionHeadlessWorldTest, S7OffDueFrozenToReducedEmptyPageResumeDoesNot
         EXPECT_EQ(reopened.GetFieldPages().irrigation().sample(cell, 0), moisture);
         EXPECT_EQ(live.GetFieldPages().serialize(), reopened.GetFieldPages().serialize());
     }
+}
+
+namespace {
+std::shared_ptr<Luminumbra::Chunk> S7HostWaterGrid(const Luminumbra::IVec3& coords,
+                                                   int resolution) {
+    auto chunk = std::make_shared<Luminumbra::Chunk>(coords);
+    chunk->set_state(Luminumbra::ChunkState::Idle);
+    chunk->sdf_data.assign(17 * 17 * 17, 1.0f);
+    chunk->mark_sdf_generated_current_params();
+    const auto cells = static_cast<std::size_t>(resolution * resolution);
+    chunk->water_depth_mm.assign(cells, 1000);
+    chunk->water_bed_mm.assign(cells, 1000);
+    chunk->water_edge_flux.assign(2 * cells, 0);
+    chunk->water_level_data.assign(cells, 2.0f);
+    chunk->water_flow_data.assign(cells, Luminumbra::Vec2(0));
+    chunk->water_sim_terrain_height.assign(cells, 1.0f);
+    chunk->has_water_sim.store(true);
+    chunk->current_water_resolution.store(resolution);
+    chunk->ticks_below_threshold = 19;
+    chunk->mark_water_state_dirty();
+    return chunk;
+}
+void S7CompareWater(const Luminumbra::Chunk& a, const Luminumbra::Chunk& b) {
+    EXPECT_EQ(a.water_depth_mm, b.water_depth_mm);
+    EXPECT_EQ(a.water_bed_mm, b.water_bed_mm);
+    EXPECT_EQ(a.water_edge_flux, b.water_edge_flux);
+    EXPECT_EQ(a.water_level_data, b.water_level_data);
+    EXPECT_EQ(a.water_flow_data, b.water_flow_data);
+    EXPECT_EQ(a.water_sim_terrain_height, b.water_sim_terrain_height);
+    EXPECT_EQ(a.current_water_resolution.load(), b.current_water_resolution.load());
+    EXPECT_EQ(a.is_water_sleeping.load(), b.is_water_sleeping.load());
+    EXPECT_EQ(a.ticks_below_threshold, b.ticks_below_threshold);
+    EXPECT_EQ(a.max_water_delta_last_tick, b.max_water_delta_last_tick);
+}
+} // namespace
+
+TEST(GameSessionHeadlessWorldTest, S7WaterPlantsPagesDebtAndCompletedWorkShareIndexedContinuation) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession owner, reopened;
+    CreateGroundWorld(owner, root, jobs, "S7 combined continuation");
+    owner.SetLocalPlayerSimulationPosition({8, 0, 8}, true);
+    const auto plant = ClockTestPlant(owner.GetRegistry(), {.25f, 0, .25f});
+    owner.GetRegistry().emplace<SC::SoilFeederComponent>(plant);
+    owner.GetRegistry().emplace<SC::WaterSourceComponent>(plant).output = 65535;
+    owner.GetRegistry().emplace<SC::WaterFlowSourceComponent>(plant).flow_rate = .375f;
+    ASSERT_TRUE(owner.AdmitPlant(plant));
+    auto a = S7HostWaterGrid({0, 0, 0}, 8), b = S7HostWaterGrid({1, 0, 0}, 4);
+    ASSERT_TRUE(owner.GetWorldSystem()->adopt_streamed_chunk(a));
+    ASSERT_TRUE(owner.GetWorldSystem()->adopt_streamed_chunk(b));
+    owner.GetWaterSystem()->SetHydrology(true, 1, 0);
+    auto& ledger = const_cast<ActiveRegionLedger&>(owner.GetActiveRegionLedger());
+    ASSERT_TRUE(ledger.set_water_debts({{{0, 0}, 17}}));
+    ledger.set_water_cursor({0, 0}, 1);
+    // Streaming calls bind the live query map but do not advance source/rain/damping/sleep.
+    const std::unordered_map<Luminumbra::ChunkID, std::shared_ptr<Luminumbra::Chunk>> resident{
+        {a->get_id(), a}, {b->get_id(), b}};
+    const auto depth = a->water_depth_mm;
+    owner.GetWaterSystem()->update(owner.GetRegistry(), resident);
+    owner.GetWaterSystem()->update(owner.GetRegistry(), resident);
+    EXPECT_EQ(a->water_depth_mm, depth);
+    EXPECT_EQ(a->ticks_below_threshold, 19);
+    ASSERT_TRUE(owner.SaveWorldState());
+    const auto saved_plants = S7PlantBytes(owner);
+    const auto saved_pages = owner.GetFieldPages().serialize();
+    EnableSnapshotSession(reopened, root, jobs);
+    ASSERT_TRUE(reopened.LoadWorld(owner.GetMetadata().worldId)) << reopened.GetWorldOpenError();
+    ASSERT_TRUE(reopened.GetWorldSystem()->restore_authoritative_chunk({0, 0, 0}));
+    ASSERT_TRUE(reopened.GetWorldSystem()->restore_authoritative_chunk({1, 0, 0}));
+    auto loaded_a = reopened.GetWorldSystem()->find_streamed_chunk({0, 0, 0});
+    auto loaded_b = reopened.GetWorldSystem()->find_streamed_chunk({1, 0, 0});
+    ASSERT_NE(loaded_a, nullptr);
+    ASSERT_NE(loaded_b, nullptr);
+    S7CompareWater(*a, *loaded_a);
+    S7CompareWater(*b, *loaded_b);
+    EXPECT_EQ(loaded_b->current_water_resolution.load(), 4); // no boot migration/catch-up
+    EXPECT_EQ(S7PlantBytes(reopened), saved_plants);
+    EXPECT_EQ(reopened.GetFieldPages().serialize(), saved_pages);
+    EXPECT_EQ(reopened.GetActiveRegionLedger().water_debts(), ledger.water_debts());
+    EXPECT_EQ(reopened.GetActiveRegionLedger().records().at({0, 0}).water_cursor, 1u);
+    reopened.GetWaterSystem()->SetHydrology(true, 1, 0);
+    for (int tick = 0; tick < 3; ++tick) {
+        TickOnce(owner);
+        TickOnce(reopened);
+        ASSERT_FALSE(owner.GetRegionSchedulerFault());
+        ASSERT_FALSE(reopened.GetRegionSchedulerFault());
+        S7CompareWater(*a, *loaded_a);
+        S7CompareWater(*b, *loaded_b);
+        EXPECT_EQ(S7PlantBytes(owner), S7PlantBytes(reopened));
+        EXPECT_EQ(owner.GetFieldPages().serialize(), reopened.GetFieldPages().serialize());
+        EXPECT_EQ(owner.GetActiveRegionLedger().water_debts(),
+                  reopened.GetActiveRegionLedger().water_debts());
+        EXPECT_EQ(owner.GetActiveRegionLedger().completed_work(),
+                  reopened.GetActiveRegionLedger().completed_work());
+        EXPECT_EQ(owner.GetWaterSystem()->regional_work().used_windows, 2u);
+    }
+    EXPECT_EQ(owner.GetWaterSystem()->regional_work().source_mm, 2 * 64 + 3);
+    ASSERT_TRUE(owner.SaveWorldState());
+    P::SnapshotIndex index;
+    ASSERT_TRUE(P::read_snapshot_index(owner.GetWorldSaveDir(), index, nullptr));
+    for (const auto* path : {"chunks/region/active-regions.arl",
+                             "chunks/region/field-pages.fpg",
+                             "chunks/region/plant-entities.json"})
+        EXPECT_TRUE(
+            std::any_of(index.members.begin(), index.members.end(), [path](const auto& member) {
+                return member.path == path && member.present;
+            }));
+    GameSession after_work;
+    EnableSnapshotSession(after_work, root, jobs);
+    ASSERT_TRUE(after_work.LoadWorld(owner.GetMetadata().worldId));
+    EXPECT_EQ(after_work.GetActiveRegionLedger().completed_work(),
+              owner.GetActiveRegionLedger().completed_work());
+    EXPECT_EQ(after_work.GetActiveRegionLedger().water_debts(),
+              owner.GetActiveRegionLedger().water_debts());
+    EXPECT_EQ(S7PlantBytes(after_work), S7PlantBytes(owner));
+}
+
+TEST(GameSessionHeadlessWorldTest,
+     S7MalformedWaterFaultStopsHostWithoutPublishingDebtCursorOrWork) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    CreateGroundWorld(session, root, jobs, "S7 water refusal");
+    session.SetLocalPlayerSimulationPosition({8, 0, 8}, true);
+    session.PinActiveRegion({0, 0}, true);
+    auto good = S7HostWaterGrid({0, 0, 0}, 8), bad = S7HostWaterGrid({1, 0, 0}, 8);
+    bad->water_bed_mm.pop_back();
+    ASSERT_TRUE(session.GetWorldSystem()->adopt_streamed_chunk(good));
+    ASSERT_TRUE(session.GetWorldSystem()->adopt_streamed_chunk(bad));
+    const auto prior_depth = good->water_depth_mm, prior_flux = good->water_edge_flux;
+    const auto revision = good->water_revision();
+    const auto telemetry = session.GetWaterSystem()->regional_work();
+    TickOnce(session);
+    ASSERT_TRUE(session.GetRegionSchedulerFault());
+    EXPECT_EQ(good->water_depth_mm, prior_depth);
+    EXPECT_EQ(good->water_edge_flux, prior_flux);
+    EXPECT_EQ(good->water_revision(), revision);
+    EXPECT_TRUE(session.GetActiveRegionLedger().water_debts().empty());
+    EXPECT_EQ(session.GetActiveRegionLedger().records().at({0, 0}).water_cursor, 0u);
+    EXPECT_EQ(session.GetWaterSystem()->regional_work(), telemetry);
+    EXPECT_TRUE(session.GetActiveRegionLedger().completed_work().empty());
+    EXPECT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 0u);
+    EXPECT_EQ(good->water_depth_mm, prior_depth);
+}
+
+TEST(GameSessionHeadlessWorldTest, S7IndexedMalformedWaterIsErrorAndCannotOpenOrRegenerate) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession owner, reopened;
+    CreateGroundWorld(owner, root, jobs, "S7 durable water refusal");
+    auto chunk = S7HostWaterGrid({0, 0, 0}, 8);
+    ASSERT_TRUE(owner.GetWorldSystem()->adopt_streamed_chunk(chunk));
+    // Inject malformed authority without a simulation visit. This saves an internally
+    // consistent index/checksum over a semantically bad payload, rather than merely tearing bytes.
+    chunk->water_edge_flux.pop_back();
+    ASSERT_TRUE(owner.SaveWorldState());
+    const auto read = P::WorldSaveService::read_chunk(owner.GetWorldSaveDir(), {0, 0, 0}, true);
+    EXPECT_EQ(read.status, P::WorldSaveService::ChunkReadStatus::Error);
+    EXPECT_EQ(read.chunk, nullptr);
+    EnableSnapshotSession(reopened, root, jobs);
+    EXPECT_FALSE(reopened.LoadWorld(owner.GetMetadata().worldId));
+    EXPECT_FALSE(reopened.GetWorldOpenError().empty());
+}
+
+TEST(GameSessionHeadlessWorldTest, S7WaterTickDoesNotLoadDurableOnlySourceTargets) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    CreateGroundWorld(session, root, jobs, "S7 resident water admission");
+    const Luminumbra::IVec3 coords{640, 0, 640};
+    const RegionKey key{20, 20};
+    session.PinActiveRegion(key, true);
+    session.GetWorldSystem()->remember_durable_chunks({coords});
+    int calls = 0;
+    session.GetWorldSystem()->set_durable_chunk_loader(
+        [&calls](const auto&) -> std::shared_ptr<Luminumbra::Chunk> {
+            ++calls;
+            throw std::runtime_error("Water attempted durable-only admission");
+        },
+        [](const auto&) {});
+    const auto entity = session.GetRegistry().create();
+    session.GetRegistry().emplace<SC::TransformComponent>(entity).position = {10241, 0, 10241};
+    session.GetRegistry().emplace<SC::WaterFlowSourceComponent>(entity);
+    TickOnce(session);
+    ASSERT_FALSE(session.GetRegionSchedulerFault());
+    EXPECT_EQ(calls, 0);
+    EXPECT_EQ(session.GetWorldSystem()->find_streamed_chunk(coords), nullptr);
+    EXPECT_EQ(session.GetWaterSystem()->regional_work().used_windows, 0u);
+    EXPECT_EQ(session.GetWaterSystem()->debug_source_injected_mm(), 0);
 }

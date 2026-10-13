@@ -17,10 +17,13 @@
 #include <utility>
 #include <vector>
 
+#include "luminumbra_common/components/CoreComponents.h"
 #include "luminumbra_common/core/JobSystem.h"
+#include "luminumbra_common/core/WaterComponents.h"
 #include "luminumbra_common/persistence/WorldSaveService.h"
 #include "luminumbra_common/systems/PhysicsSystem.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
+#include "luminumbra_common/systems/WaterSystem.h"
 #include "luminumbra_common/world/Chunk.h"
 #include "luminumbra_common/world/GameSession.h"
 
@@ -532,3 +535,51 @@ TEST(WorldDurableResidency, NonQuiescentChunkIsNotParked) {
 }
 
 } // namespace
+
+TEST(WorldDurableResidency, S7WaterExcludesParkedAuthorityEvenWhenOwnerAndSourceAreDue) {
+    DurableFixture fx(/*durable=*/true, /*active_regions=*/true);
+    ASSERT_TRUE(fx.created) << fx.error;
+    fx.Settle(fx.SpawnAnchor(), kSettleIterations);
+    const auto edited = fx.EditAtSpawnAndFindEdited();
+    ASSERT_NE(edited, nullptr);
+    fx.Settle(fx.FarAnchor(), kSettleIterations);
+    ASSERT_TRUE(Contains(fx.world->snapshot_parked_chunks(), edited.get()));
+    edited->has_water_sim.store(true);
+    edited->current_water_resolution.store(8);
+    edited->water_depth_mm.assign(64, 1000);
+    edited->water_bed_mm.assign(64, 1000);
+    edited->water_edge_flux.assign(128, 100);
+    edited->water_level_data.assign(64, 2.0f);
+    edited->water_sim_terrain_height.assign(64, 1.0f);
+    edited->water_flow_data.assign(64, Luminumbra::Vec2(0));
+    edited->ticks_below_threshold = 7;
+    const auto coords = edited->get_coords();
+    const Vec3 position(static_cast<float>(coords.x * Luminumbra::CHUNK_SIZE_X) + 1.0f,
+                        static_cast<float>(coords.y * Luminumbra::CHUNK_SIZE_Y) + 1.0f,
+                        static_cast<float>(coords.z * Luminumbra::CHUNK_SIZE_Z) + 1.0f);
+    using Luminumbra::world::ActiveRegionLedger;
+    const auto owner = ActiveRegionLedger::region_at(position);
+    ActiveRegionLedger ledger;
+    ledger.mark_edited(owner, {});
+    Luminumbra::world::RegionSchedule schedule;
+    schedule.tick = ledger.tick();
+    schedule.due = {owner};
+    auto& registry = fx.session->GetRegistry();
+    const auto entity = registry.create();
+    registry.emplace<Luminumbra::Components::TransformComponent>(entity).position = position;
+    registry.emplace<Luminumbra::Components::WaterFlowSourceComponent>(entity);
+    const auto depth = edited->water_depth_mm, flux = edited->water_edge_flux;
+    const auto revision = edited->water_revision();
+    std::vector<Luminumbra::world::RegionWork> work;
+    auto* water = fx.session->GetWaterSystem();
+    water->SetHydrology(true, 2, 1);
+    const auto resident = fx.world->snapshot_streamed_chunks();
+    water->UpdateRegional(registry, resident, ledger, schedule, work);
+    EXPECT_EQ(edited->water_depth_mm, depth);
+    EXPECT_EQ(edited->water_edge_flux, flux);
+    EXPECT_EQ(edited->water_revision(), revision);
+    EXPECT_EQ(edited->ticks_below_threshold, 7);
+    EXPECT_EQ(water->regional_work().used_windows, 0u);
+    EXPECT_TRUE(work.empty());
+    EXPECT_TRUE(Contains(fx.world->snapshot_parked_chunks(), edited.get()));
+}

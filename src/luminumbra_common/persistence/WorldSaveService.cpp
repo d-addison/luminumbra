@@ -754,7 +754,8 @@ std::string SerializeSingleChunkSnapshot(const std::shared_ptr<Chunk>& chunk) {
 
 std::shared_ptr<Chunk> DecodeChunkRecord(const RegionRecord& record,
                                          const std::filesystem::path& path,
-                                         std::vector<std::string>* errors) {
+                                         std::vector<std::string>* errors,
+                                         bool strict_water = false) {
     std::string payload;
     if (!DecompressPayload(record, payload, errors)) {
         return nullptr;
@@ -762,7 +763,7 @@ std::shared_ptr<Chunk> DecodeChunkRecord(const RegionRecord& record,
 
     WorldStreamingState single;
     std::vector<std::string> load_errors;
-    if (!LoadWorldStreamingStateSnapshotJson(payload, single, load_errors)) {
+    if (!LoadWorldStreamingStateSnapshotJson(payload, single, load_errors, strict_water)) {
         for (std::string& error : load_errors) {
             AddError(errors, std::move(error));
         }
@@ -1107,6 +1108,13 @@ bool SnapshotMemberForRegionFile(const std::filesystem::path& region_file,
     save_dir = chunks_dir.parent_path();
     relative = RelativeRegionMember(rx, rz);
     return true;
+}
+
+bool StrictWaterRegion(const std::filesystem::path& region_file) {
+    std::filesystem::path save_dir;
+    std::string relative;
+    return SnapshotMemberForRegionFile(region_file, save_dir, relative) &&
+           snapshot_index_exists(save_dir);
 }
 
 bool VerifyRegionMembership(const std::filesystem::path& region_file,
@@ -2088,7 +2096,8 @@ bool WorldSaveService::read_region_chunks(const std::filesystem::path& region_fi
     for (const RegionRecord& record : raw_records) {
         if (record.lod_level != 0u)
             continue;
-        std::shared_ptr<Chunk> chunk = DecodeChunkRecord(record, region_file, errors);
+        std::shared_ptr<Chunk> chunk =
+            DecodeChunkRecord(record, region_file, errors, StrictWaterRegion(region_file));
         if (!chunk) {
             out_chunks.clear();
             return false;
@@ -2135,7 +2144,8 @@ bool WorldSaveService::read_authoritative_region_chunks(
             indexed_coords.z < min_chunk_z || indexed_coords.z > max_chunk_z) {
             continue;
         }
-        std::shared_ptr<Chunk> chunk = DecodeChunkRecord(record, region_file, errors);
+        std::shared_ptr<Chunk> chunk =
+            DecodeChunkRecord(record, region_file, errors, StrictWaterRegion(region_file));
         if (!chunk) {
             out_chunks.clear();
             return false;
@@ -2694,7 +2704,7 @@ WorldSaveService::ChunkReadResult WorldSaveService::read_chunk(
         for (const auto& record : records) {
             if (record.lod_level != 0 || record.id != id)
                 continue;
-            result.chunk = DecodeChunkRecord(record, path, &errors);
+            result.chunk = DecodeChunkRecord(record, path, &errors, require_index || indexed);
             constexpr std::size_t kLattice = static_cast<std::size_t>(CHUNK_SIZE_X + 1) *
                                              (CHUNK_SIZE_Y + 1) * (CHUNK_SIZE_Z + 1);
             if (!result.chunk || result.chunk->get_coords() != coords ||
@@ -2854,7 +2864,7 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
                 if (stop.stop_requested())
                     return reject("Saved-world validation cancelled.");
                 if (record.lod_level == 0) {
-                    const auto chunk = DecodeChunkRecord(record, path, &errors);
+                    const auto chunk = DecodeChunkRecord(record, path, &errors, indexed);
                     if (!chunk)
                         return reject("");
                     constexpr std::size_t kLattice = static_cast<std::size_t>(CHUNK_SIZE_X + 1) *

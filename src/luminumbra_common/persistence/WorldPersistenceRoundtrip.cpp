@@ -1,4 +1,5 @@
 #include "WorldPersistenceRoundtrip.h"
+#include "../systems/WaterSystem.h"
 
 #include "../core/Log.h"
 #include "../core/ResidencyContract.h" // the hash scope derives from the contract
@@ -627,6 +628,44 @@ void ValidateWaterStateObject(const nlohmann::json& chunk, std::vector<std::stri
     }
 }
 
+// Enabled records must carry exact authoritative integer arrays; the legacy reader's
+// missing-flux fallback is unavailable. Check widths before nlohmann narrowing conversions.
+void RequireWaterAuthorityJson(const nlohmann::json& chunk) {
+    const auto& coords = chunk.at("coords");
+    for (const auto* axis : {"x", "y", "z"}) {
+        const std::int64_t limit = std::string_view(axis) == "y" ? 2097152 : 1048576;
+        const auto& value = coords.at(axis);
+        if (!value.is_number_integer() ||
+            (value.is_number_unsigned() &&
+             value.get<std::uint64_t>() >= static_cast<std::uint64_t>(limit)) ||
+            (!value.is_number_unsigned() &&
+             (value.get<std::int64_t>() < -limit || value.get<std::int64_t>() >= limit)))
+            throw std::invalid_argument("Regional water durable identity refused");
+    }
+    for (const auto* field : {"water_depth_mm", "water_bed_mm", "water_edge_flux"}) {
+        const auto& values = chunk.at(field);
+        if (!values.is_array())
+            throw std::invalid_argument("Regional water arrays required");
+        for (const auto& value : values) {
+            if (!value.is_number_integer() ||
+                (value.is_number_unsigned() && value.get<std::uint64_t>() > 2147483647u) ||
+                (!value.is_number_unsigned() && (value.get<std::int64_t>() < -2147483647ll - 1 ||
+                                                 value.get<std::int64_t>() > 2147483647ll)))
+                throw std::invalid_argument("Regional water integer width refused");
+        }
+    }
+    const auto& state = chunk.at("water_state");
+    for (const auto* field :
+         {"current_water_resolution", "ticks_below_threshold", "water_mesh_dirty_ticks"}) {
+        const auto& value = state.at(field);
+        if (!value.is_number_integer() ||
+            (value.is_number_unsigned() && value.get<std::uint64_t>() > 2147483647u) ||
+            (!value.is_number_unsigned() &&
+             (value.get<std::int64_t>() < 0 || value.get<std::int64_t>() > 2147483647ll)))
+            throw std::invalid_argument("Regional water continuation width refused");
+    }
+}
+
 bool ValidateChunkFormatObject(const nlohmann::json& chunk, std::vector<std::string>& errors) {
     const std::size_t error_count = errors.size();
     if (!chunk.is_object()) {
@@ -759,7 +798,8 @@ std::string SerializeWorldStreamingStateSnapshotJson(const WorldStreamingState& 
 
 bool LoadWorldStreamingStateSnapshotJson(const std::string& json_text,
                                          WorldStreamingState& out_state,
-                                         std::vector<std::string>& errors) {
+                                         std::vector<std::string>& errors,
+                                         bool strict_water) {
     try {
         const nlohmann::json snapshot = nlohmann::json::parse(json_text);
         if (snapshot.at("schema").get<std::string>() != kSnapshotSchema) {
@@ -781,9 +821,13 @@ bool LoadWorldStreamingStateSnapshotJson(const std::string& json_text,
             return false;
         };
         for (const nlohmann::json& chunk_json : snapshot.at("chunks")) {
+            if (strict_water)
+                RequireWaterAuthorityJson(chunk_json);
             const IVec3 coords = IVec3FromJson(chunk_json.at("coords"));
             auto chunk = std::make_shared<Chunk>(coords);
             ApplyChunkJson(chunk_json, *chunk);
+            if (strict_water)
+                Systems::WaterSystem::ValidateRegionalGrid(*chunk);
             if (chunk->get_id() != chunk_json.at("chunk_id").get<ChunkID>()) {
                 errors.push_back("chunk id does not match serialized coordinates");
                 return reject();

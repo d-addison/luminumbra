@@ -14,6 +14,7 @@
 // the no-plant save path stays byte-identical.
 
 #include <algorithm>
+#include <bit>
 #include <cstdint>
 #include <vector>
 
@@ -29,6 +30,7 @@
 #include "../components/PlantComponents.h"
 #include "../components/PollinationComponents.h"
 #include "../components/SoilComponents.h"
+#include "../core/WaterComponents.h"
 #include "../ecs/EntitySnapshot.h"
 #include "../world/GroundObjectStore.h"
 #include <cmath>
@@ -143,6 +145,10 @@ BuildPlantEntitySnapshot(const entt::registry& reg, bool persistent_identity = f
                      {{"biomass", c->biomass}, {"last_grazed_tick", c->last_grazed_tick}}});
             if (const auto* c = reg.try_get<const C::WaterSourceComponent>(e))
                 rec.components.push_back({"WaterSource", {{"output", c->output}}});
+            if (const auto* c = reg.try_get<const C::WaterFlowSourceComponent>(e))
+                rec.components.push_back(
+                    {"WaterFlowSource",
+                     {{"flow_rate_bits", std::bit_cast<std::uint32_t>(c->flow_rate)}}});
             if (const auto* c = reg.try_get<const C::IgnitionSourceComponent>(e))
                 rec.components.push_back(
                     {"IgnitionSource", {{"radius", c->radius}, {"intensity", c->intensity}}});
@@ -188,6 +194,7 @@ inline bool ValidatePlantEntitySnapshot(const ::Luminumbra::Ecs::EntityRegistryS
                                                     "Mortal",
                                                     "Grazeable",
                                                     "WaterSource",
+                                                    "WaterFlowSource",
                                                     "IgnitionSource"};
                 if (!allowed.contains(c.type))
                     throw std::invalid_argument("unknown enabled plant component");
@@ -291,6 +298,13 @@ inline bool ValidatePlantEntitySnapshot(const ::Luminumbra::Ecs::EntityRegistryS
                 }
                 if (c.type == "WaterSource")
                     integer("output", 65535);
+                if (c.type == "WaterFlowSource") {
+                    integer("flow_rate_bits", 0xffffffffu);
+                    const auto flow =
+                        std::bit_cast<float>(c.data.at("flow_rate_bits").get<std::uint32_t>());
+                    if (!std::isfinite(flow) || flow < 0)
+                        throw std::invalid_argument("invalid physical water source flow");
+                }
                 if (c.type == "IgnitionSource") {
                     finite("radius", 0, 16777216);
                     finite("intensity", 0, 16777216);
@@ -356,6 +370,9 @@ inline void ApplyPlantEntitySnapshot(entt::registry& reg,
                 c.last_grazed_tick = d.at("last_grazed_tick").get<std::uint32_t>();
             } else if (comp.type == "WaterSource" && snap.persistent_identity) {
                 reg.emplace<C::WaterSourceComponent>(e, d.at("output").get<std::uint16_t>());
+            } else if (comp.type == "WaterFlowSource" && snap.persistent_identity) {
+                reg.emplace<C::WaterFlowSourceComponent>(
+                    e, std::bit_cast<float>(d.at("flow_rate_bits").get<std::uint32_t>()));
             } else if (comp.type == "IgnitionSource" && snap.persistent_identity) {
                 reg.emplace<C::IgnitionSourceComponent>(
                     e, d.at("radius").get<float>(), d.at("intensity").get<float>());

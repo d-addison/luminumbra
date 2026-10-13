@@ -162,13 +162,15 @@ AdvanceFoliageInteriors(entt::registry& reg,
 
 // Cross-owner exchange is a separate common-phase pass, independent of interior
 // due phases. Both directions sample the same prior HOST tick, before deposits.
+// Transfers use current balances in cell-key order, +X before +Z, so shared
+// endpoints cannot spend drained moisture or overfill a recipient.
 inline std::map<RegionKey, std::uint64_t>
 ExchangeFoliageBorders(FieldPageState& pages,
                        const FieldPageState& previous,
                        const std::map<RegionKey, ::Luminumbra::world::ActiveRegionRecord>& records,
                        std::uint64_t tick) {
     const auto prior = FoliageCells(previous.irrigation());
-    std::map<ScentCellKey, std::int64_t> deltas;
+    std::map<ScentCellKey, std::int32_t> balances;
     std::map<RegionKey, std::uint64_t> work;
     for (const auto& [c, value] : prior) {
         const auto owner = FieldPageState::region_of_scent_cell(c);
@@ -185,16 +187,20 @@ ExchangeFoliageBorders(FieldPageState& pages,
             if (tick % (std::uint64_t{1} << shift))
                 continue;
             const auto flux = value / 8 - prior.at(n) / 8;
-            deltas[c] -= flux;
-            deltas[n] += flux;
+            auto& current = balances.try_emplace(c, pages.irrigation().sample(c, 0)).first->second;
+            auto& neighbor = balances.try_emplace(n, pages.irrigation().sample(n, 0)).first->second;
+            auto& donor = flux >= 0 ? current : neighbor;
+            auto& recipient = flux >= 0 ? neighbor : current;
+            const auto requested = flux >= 0 ? flux : -flux;
+            const auto transfer = std::min({requested, donor, kMoistureMax - recipient});
+            donor -= transfer;
+            recipient += transfer;
             ++work[owner];
             ++work[other];
         }
     }
-    for (const auto& [c, delta] : deltas) {
-        const auto value =
-            std::clamp<std::int64_t>(pages.irrigation().sample(c, 0) + delta, 0, kMoistureMax);
-        if (!pages.set_irrigation(c, static_cast<std::int32_t>(value)))
+    for (const auto& [c, value] : balances) {
+        if (!pages.set_irrigation(c, value))
             throw std::runtime_error("Irrigation border commit refused");
     }
     return work;

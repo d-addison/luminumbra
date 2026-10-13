@@ -5619,8 +5619,8 @@ void SHIELD_WorldSystem::bump_far_lod_authority_revision(const IVec3& chunk_coor
     else if (local_z == kChunksPerRegion - 1)
         affected_z[z_count++] = home_rz + 1;
 
-    const u64 revision = m_far_lod_authority_revision.fetch_add(1u, std::memory_order_acq_rel) + 1u;
     std::lock_guard<std::mutex> lock(m_far_lod_region_revision_mutex);
+    const u64 revision = m_far_lod_authority_revision.fetch_add(1u, std::memory_order_acq_rel) + 1u;
     for (std::size_t z = 0; z < z_count; ++z) {
         for (std::size_t x = 0; x < x_count; ++x) {
             m_far_lod_region_revisions[{affected_x[x], affected_z[z]}] = revision;
@@ -5907,6 +5907,38 @@ bool SHIELD_WorldSystem::unpark_chunk(ChunkID id) {
         ++m_dirty_generation;
     }
     return true;
+}
+
+SHIELD_WorldSystem::WaterAuthorityPublication
+SHIELD_WorldSystem::prepare_water_authority_publication(std::span<Chunk* const> chunks) {
+    WaterAuthorityPublication publication;
+    publication.lock = std::unique_lock<std::mutex>(m_far_lod_region_revision_mutex);
+    publication.revisions = m_far_lod_region_revisions;
+    publication.revision = m_far_lod_authority_revision.load(std::memory_order_acquire);
+    constexpr int per_region = World::kFarLodRegionSizeMeters / CHUNK_SIZE_X;
+    for (const auto* chunk : chunks) {
+        if (chunk->sdf_provenance() == ChunkSdfProvenance::LoadedOrEdited)
+            continue;
+        if (publication.revision == std::numeric_limits<u64>::max())
+            throw std::runtime_error("Water authority revision overflow");
+        ++publication.revision;
+        const auto coords = chunk->get_coords();
+        const int rx = static_cast<int>(std::floor(static_cast<double>(coords.x) / per_region));
+        const int rz = static_cast<int>(std::floor(static_cast<double>(coords.z) / per_region));
+        const int local_x = coords.x - rx * per_region;
+        const int local_z = coords.z - rz * per_region;
+        const int adjacent_x = local_x == 0 ? rx - 1 : local_x == per_region - 1 ? rx + 1 : rx;
+        const int adjacent_z = local_z == 0 ? rz - 1 : local_z == per_region - 1 ? rz + 1 : rz;
+        for (const int x : {rx, adjacent_x})
+            for (const int z : {rz, adjacent_z})
+                publication.revisions[{x, z}] = publication.revision;
+    }
+    return publication;
+}
+
+void SHIELD_WorldSystem::publish_water_authority(WaterAuthorityPublication&& publication) noexcept {
+    m_far_lod_region_revisions.swap(publication.revisions);
+    m_far_lod_authority_revision.store(publication.revision, std::memory_order_release);
 }
 
 void SHIELD_WorldSystem::sync_water_authority() {

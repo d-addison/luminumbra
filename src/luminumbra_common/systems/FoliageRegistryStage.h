@@ -11,6 +11,7 @@
 #include "../components/PlantComponents.h"
 #include "../components/PollinationComponents.h"
 #include "../components/SoilComponents.h"
+#include "../core/WaterComponents.h"
 #include <entt/entt.hpp>
 #include <set>
 #include <stdexcept>
@@ -44,6 +45,7 @@ inline void CopyFoliage(const entt::registry& from,
     Copy<C::CombustibleComponent>(from, source, to, target);
     Copy<C::IgnitionSourceComponent>(from, source, to, target);
     Copy<C::WaterSourceComponent>(from, source, to, target);
+    Copy<C::WaterFlowSourceComponent>(from, source, to, target);
     Copy<C::GrazeableComponent>(from, source, to, target);
     Copy<C::MortalComponent>(from, source, to, target);
     Copy<C::CreatureComponent>(from, source, to, target);
