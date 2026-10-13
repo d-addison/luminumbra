@@ -101,9 +101,11 @@ void FarVolumeBuildQueue::CheckOwner() const {
         throw std::logic_error("Far-volume queue called outside its owner thread");
 }
 std::optional<std::size_t> FarVolumeBuildQueue::Find(const World::FarTileKey& key) const {
-    for (std::size_t i = 0; i < descriptors_.size(); ++i)
-        if (descriptors_[i].desired && descriptors_[i].desired->identity.key == key)
+    for (std::size_t i = 0; i < descriptors_.size(); ++i) {
+        const auto& descriptor = descriptors_[i];
+        if (descriptor.desired && descriptor.desired->identity.key == key)
             return i;
+    }
     return std::nullopt;
 }
 
