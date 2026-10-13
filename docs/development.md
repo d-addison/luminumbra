@@ -43,12 +43,35 @@ ctest --preset release -L manual \
 
 ## Continuous integration
 
-Pull requests run:
+Draft pull requests run the cheap routine checks: changed-file formatting, public
+tree inventory, runner contracts, Doxygen, game assets, and the authoring mock
+(subject to its existing paths filter). Linux/GCC, ASan, Windows/MSVC,
+Windows/UCRT64, clang-tidy, GNS, Diligent RHI, preview-frame, and the paired server
+comparison skip draft pull requests. The separate path-filtered UCRT package
+attribution diagnostic keeps its existing job routing.
+
+Marking a pull request ready for review triggers CI on its current head, running
+the full required set. PR workflows listen for `opened`, `synchronize`, `reopened`,
+and `ready_for_review`; existing branch and path filters still apply. Heavy
+required checks report skipped on drafts. The merge gate requires actual
+`SUCCESS` for every required check on the exact head, so a draft cannot land until
+it is marked ready and the full required set passes. Windows/UCRT64 keeps its
+existing branch/manual routing, and the paired server comparison still runs only
+for main-bound ready PRs or eligible main/devel pushes.
+
+Workflows with concurrency groups key PR runs by ref and cancel superseded runs,
+so a `ready_for_review` run cancels an earlier draft run on the same PR ref. Devel
+pushes keep separate SHA-keyed groups with cancellation disabled. Push, schedule,
+manual dispatch (including qualification capture), and release behavior is
+unchanged.
+
+Ready pull requests run:
 
 - optimized GCC builds and tests on Ubuntu;
 - optimized MSVC builds and tests on Windows;
 - optimized GCC/UCRT64 builds and tests on Windows;
 - Clang AddressSanitizer builds and tests on Ubuntu;
+- blocking clang-tidy analysis and GNS and Diligent RHI probes;
 - changed-file formatting checks;
 - Doxygen parsing with warnings treated as errors; and
 - an explicitly observational software-OpenGL performance capture.

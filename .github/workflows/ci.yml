@@ -4,6 +4,7 @@ on:
   push:
     branches: [main, devel]
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
     branches: [main, devel]
   workflow_dispatch:
     inputs:
@@ -34,6 +35,7 @@ env:
 jobs:
   linux:
     name: Linux / GCC
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
@@ -135,6 +137,7 @@ jobs:
 
   gns-compile-probe:
     name: GNS transport / compile probe
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     runs-on: ubuntu-24.04
     # Building GameNetworkingSockets from source (FetchContent + protobuf
     # codegen) is several minutes on top of the project build, well past the
@@ -175,6 +178,7 @@ jobs:
 
   diligent-rhi:
     name: Diligent RHI / software GL
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
@@ -250,6 +254,7 @@ jobs:
 
   windows-msvc:
     name: Windows / MSVC
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     runs-on: windows-2025
     timeout-minutes: 90
     steps:
@@ -397,11 +402,11 @@ jobs:
 
   windows-ucrt64:
     name: Windows / MSYS2 UCRT64
-    # Runs on every pull request (devel- and main-bound) and on pushes to main, so a
+    # Runs on ready pull requests (devel- and main-bound) and on pushes to main, so a
     # MinGW/UCRT break shows on the PR that causes it instead of at promotion. It is
     # not a required devel context, so it informs rather than blocks there; it stays
     # required on main. Pushes to devel do not run it (the PR already did).
-    if: github.event_name == 'pull_request' || github.ref_name == 'main' || (github.event_name == 'workflow_dispatch' && inputs.qualification_capture)
+    if: (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (github.event_name == 'pull_request' || github.ref_name == 'main' || (github.event_name == 'workflow_dispatch' && inputs.qualification_capture))
     runs-on: windows-2025
     # Measured 40.6 min end to end on the first post-release promotion run
     # (previously two 135-minute cap kills, before the test streaming caps
@@ -578,6 +583,7 @@ jobs:
 
   tidy:
     name: Static analysis / clang-tidy
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     runs-on: ubuntu-24.04
     # The gate analyses 351 translation units across src/, test/ and tools/, and since it
     # gained a real HeaderFilterRegex it also analyses first-party headers on every

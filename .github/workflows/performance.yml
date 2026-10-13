@@ -2,6 +2,7 @@ name: Performance observations
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
     branches: [main, devel]
   push:
     branches: [main, devel]
@@ -57,6 +58,7 @@ jobs:
 
   preview-frame:
     name: Preview frame / software OpenGL
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -110,19 +112,19 @@ jobs:
 
   server-smoke-comparison:
     name: Server smoke observation / base versus head
-    # Runs on pull requests that target main (the promotion gate, where the water
-    # verdict is required before release) and on pushes to main and devel (so merged
-    # devel tips get a verdict after the fact; a newer push to the same branch can
-    # still cancel an in-flight run until the devel push concurrency change lands). It is skipped on
+    # Runs on ready pull requests that target main (the promotion gate, where the
+    # water verdict is required before release) and on pushes to main and devel
+    # (so merged devel tips get complete verdicts after the fact). It is skipped on
     # pull requests that target devel: it is not a required devel check and costs
     # about 48 runner-minutes per push. The event.before guard stays because a
     # first push to a branch has no base to compare against; schedule and manual
     # events are excluded on purpose (they define no base/candidate SHA pair).
     if: >-
-      (github.event_name == 'pull_request' && github.base_ref == 'main') ||
+      (github.event_name != 'pull_request' || github.event.pull_request.draft == false) &&
+      ((github.event_name == 'pull_request' && github.base_ref == 'main') ||
       (github.event_name == 'push' &&
       (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/devel') &&
-      github.event.before != '0000000000000000000000000000000000000000')
+      github.event.before != '0000000000000000000000000000000000000000'))
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
