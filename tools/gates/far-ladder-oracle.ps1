@@ -200,7 +200,6 @@ function Assert-FarLadderOracleArtifact {
     Assert-FarOracleArray $ladder.resident_tiles $Name "ladder.resident_tiles"
     $staleTiles = Get-FarOracleInteger $ladder.stale_tiles $Name "ladder.stale_tiles"
 
-    if ($staleTiles -ne 0) { throw "${Name}: aggregate has $staleTiles stale tile(s), expected 0" }
     $tileKeys = @(Get-FarOracleTileKeys -Entries $ladder.expected_tiles -Name $Name -Path "ladder.expected_tiles")
     $expectedKeys = @(Get-FarLadderWantedTiles -X $cameraX -Z $cameraZ)
     $actualSet = @{}
@@ -257,6 +256,9 @@ function Assert-FarLadderOracleArtifact {
         }
         $missingExpected = $notResident.Count
     }
+
+    # Validate range extras before generations so stale reports cannot hide extra keys.
+    if ($staleTiles -ne 0) { throw "${Name}: aggregate has $staleTiles stale tile(s), expected 0" }
 
     return [pscustomobject]@{
         Mode = $mode

@@ -125,7 +125,9 @@ public:
         std::unordered_map<std::string, FboHandle> fbos;
         std::unordered_map<std::string, TextureHandle> textures;
     };
-    AdoptedState adopted_state() const { return {m_fbos, m_textures}; }
+    AdoptedState adopted_state() const {
+        return {m_fbos, m_textures};
+    }
     void restore_adopted_state(AdoptedState& state) noexcept {
         m_fbos.swap(state.fbos);
         m_textures.swap(state.textures);

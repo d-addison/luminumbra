@@ -1,10 +1,10 @@
-#include "FarWorldReplay.h"
 #include "RenderPipeline.h"
 #include "../../include/luminumbra/core/Types.h"
 #include "CelestialBodyModel.h" //  Tier 1: the celestial-body seam
 #include "ExposureModel.h"      //  rendering: SelectRenderExposure (manual EV precedence)
 #include "FarLodSystem.h"
 #include "FarVolumeGlBackend.h"
+#include "FarWorldReplay.h"
 #include "FarWorldReplayGl.h"
 #include "ImpostorBake.h"  //  far-field tree impostor atlas (opt-in)
 #include "InProcessFlip.h" // Deterministic in-process FLIP image comparison.
@@ -2102,7 +2102,8 @@ void RenderPipeline::begin_gpu_pass_timer(GpuTimerPass pass) {
     // bracket the pass even on contexts without GL timestamp queries. Pure
     // command-stream annotation: zero effect on rendered pixels (RenderHealth
     // stays byte-stable). Paired with the pop in end_gpu_pass_timer.
-    if (!m_far_world_paired) PassGl::push_debug_group(kGpuTimerPassNames[static_cast<size_t>(pass)]);
+    if (!m_far_world_paired)
+        PassGl::push_debug_group(kGpuTimerPassNames[static_cast<size_t>(pass)]);
     if (m_benchmark_gpu_queries && !m_gpu_timers_suppressed)
         m_benchmark_gpu_queries->begin_pass(static_cast<std::size_t>(pass));
     // the harness's second dispatch suppresses timestamp queries (the
@@ -2117,7 +2118,8 @@ void RenderPipeline::begin_gpu_pass_timer(GpuTimerPass pass) {
 void RenderPipeline::end_gpu_pass_timer(GpuTimerPass pass) {
     if (m_benchmark_gpu_queries && !m_gpu_timers_suppressed)
         m_benchmark_gpu_queries->end_pass(static_cast<std::size_t>(pass));
-    if (!m_far_world_paired) PassGl::pop_debug_group();
+    if (!m_far_world_paired)
+        PassGl::pop_debug_group();
     if (!m_gpu_timers.supported || m_gpu_timers_suppressed) {
         return;
     }
@@ -2443,31 +2445,45 @@ FarReplayCamera RenderPipeline::replay_camera(const Camera& camera) const {
 }
 
 bool RenderPipeline::render_far_world_off_pair(const Camera& camera) {
-    if (!m_started || !m_frame_prepared.valid || m_far_world_paired) return false;
+    if (!m_started || !m_frame_prepared.valid || m_far_world_paired)
+        return false;
     const bool history_matches = m_taau_enabled == m_far_world_pair_taau_enabled &&
-        m_taau_frame == m_far_world_pair_jitter_frame &&
-        m_taau_jitter_ndc == m_far_world_pair_jitter &&
-        m_taau_pass->history_state() == m_far_world_pair_taau_after &&
-        (!m_taau_enabled || m_taau_pass->replay_available());
-    if (CheckFarReplay(m_started, m_frame_prepared.valid, m_far_world_paired,
-                      m_frame_prepared.replay_camera, replay_camera(camera), history_matches) !=
-        FarReplayRefusal::None)
+                                 m_taau_frame == m_far_world_pair_jitter_frame &&
+                                 m_taau_jitter_ndc == m_far_world_pair_jitter &&
+                                 m_taau_pass->history_state() == m_far_world_pair_taau_after &&
+                                 (!m_taau_enabled || m_taau_pass->replay_available());
+    if (CheckFarReplay(m_started,
+                       m_frame_prepared.valid,
+                       m_far_world_paired,
+                       m_frame_prepared.replay_camera,
+                       replay_camera(camera),
+                       history_matches) != FarReplayRefusal::None)
         return false;
     static_assert(std::is_nothrow_swappable_v<RenderContext>);
     auto gl = MakeFarWorldReplayGlAccess();
     std::unique_ptr<RenderView> authored_view;
-    RunFarWorldReplay(*gl,
+    RunFarWorldReplay(
+        *gl,
         [this, &authored_view] {
             // Allocate/copy before begin. Rollback uses swaps and scalar assignments only.
-            return [this, &authored_view, selected = m_frame_far_selection,
-                    stats = m_last_render_pass_stats, timers = m_gpu_timers_suppressed,
-                    previous_view_projection = m_prev_view_proj, previous_time = m_prev_time,
-                    jitter_frame = m_taau_frame, jitter = m_taau_jitter_ndc,
-                    cursor = m_mdi_frame_cursor, trace = m_frame_stage_trace,
-                    commands = m_mdi_command_scratch, origins = m_mdi_origin_scratch,
-                    lighting = m_frame_lighting_ctx, quality = m_volumetric_quality,
+            return [this,
+                    &authored_view,
+                    selected = m_frame_far_selection,
+                    stats = m_last_render_pass_stats,
+                    timers = m_gpu_timers_suppressed,
+                    previous_view_projection = m_prev_view_proj,
+                    previous_time = m_prev_time,
+                    jitter_frame = m_taau_frame,
+                    jitter = m_taau_jitter_ndc,
+                    cursor = m_mdi_frame_cursor,
+                    trace = m_frame_stage_trace,
+                    commands = m_mdi_command_scratch,
+                    origins = m_mdi_origin_scratch,
+                    lighting = m_frame_lighting_ctx,
+                    quality = m_volumetric_quality,
                     adopted = m_render_registry.adopted_state(),
-                    shadow_time = m_cpu_frame_shadow, gbuffer_time = m_cpu_frame_gbuf,
+                    shadow_time = m_cpu_frame_shadow,
+                    gbuffer_time = m_cpu_frame_gbuf,
                     matrices = m_shadow_pass->shadow_map().light_space_matrices,
                     splits = m_shadow_pass->shadow_map().cascade_splits,
                     tint_dirty = m_shadow_pass->tint_dirty()]() mutable noexcept {
@@ -3229,7 +3245,8 @@ void RenderPipeline::execute_stage_aerial(const Camera& camera) {
     if (m_isolation_config.renders(Client::ScenarioHarness::IsolationLayer::Aerial)) {
         RenderContext aerial_ctx = make_aerial_context(camera);
         if (!m_far_world_paired)
-            m_aerial_pass->set_froxel_input(m_volumetric_quality, m_froxel_pass->integrated_texture());
+            m_aerial_pass->set_froxel_input(m_volumetric_quality,
+                                            m_froxel_pass->integrated_texture());
         begin_gpu_pass_timer(GpuTimerPass::Aerial);
         m_aerial_pass->execute(aerial_ctx);
         end_gpu_pass_timer(GpuTimerPass::Aerial);

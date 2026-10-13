@@ -5,6 +5,7 @@
 #include <chrono>
 #include <gtest/gtest.h>
 #include <limits>
+#include <memory>
 #include <stdexcept>
 #include <utility>
 
@@ -241,10 +242,11 @@ TEST(FarWorldRenderer, ConfigDefaultExplicitAndHashExcluded) {
 }
 
 TEST(FarWorldRenderer, DefaultExplicitRefusedAndPreviewSelection) {
-    const FarWorldRenderer legacy;
-    EXPECT_EQ(legacy.Selection(FarWorldPurpose::World).effective, FarWorldMode::Legacy);
-    const FarWorldRenderer refused(FarWorldMode::Ladder);
-    const auto normal = refused.Selection(FarWorldPurpose::World);
+    // Two owners with fixed diagnostic/ownership storage exceed the Windows stack budget.
+    const auto legacy = std::make_unique<const FarWorldRenderer>();
+    EXPECT_EQ(legacy->Selection(FarWorldPurpose::World).effective, FarWorldMode::Legacy);
+    const auto refused = std::make_unique<const FarWorldRenderer>(FarWorldMode::Ladder);
+    const auto normal = refused->Selection(FarWorldPurpose::World);
     EXPECT_EQ(normal.requested, FarWorldMode::Ladder);
     EXPECT_EQ(normal.effective, FarWorldMode::Legacy);
     EXPECT_EQ(normal.refusal, FarWorldRefusal::ImmutableAuthorityUnavailable);
@@ -262,7 +264,7 @@ TEST(FarWorldRenderer, DefaultExplicitRefusedAndPreviewSelection) {
     EXPECT_EQ(preview.effective, FarWorldMode::Legacy);
     EXPECT_TRUE(preview.advance);
     EXPECT_EQ(preview.refusal, FarWorldRefusal::PreviewOverride);
-    const auto offscreen = refused.Selection(FarWorldPurpose::OffscreenPreview);
+    const auto offscreen = refused->Selection(FarWorldPurpose::OffscreenPreview);
     EXPECT_FALSE(offscreen.advance);
     EXPECT_FALSE(offscreen.submit);
     EXPECT_EQ(offscreen.refusal, FarWorldRefusal::OffscreenSuppressed);
@@ -466,7 +468,8 @@ TEST(FarWorldRenderer, FailedRebuildRetainsOldAllocationAndLogicalChargeButDoesN
             return true;
         });
         EXPECT_EQ(submission.draws, 0u);
-        EXPECT_EQ(submission.refused, 0u); // complete mask; stale residency itself excludes the draw
+        EXPECT_EQ(submission.refused,
+                  0u); // complete mask; stale residency itself excludes the draw
         EXPECT_EQ(prepares, 0u);
         const auto attempts = owner.renderer.LastFrame().upload_attempts;
         EXPECT_EQ(attempts, 1u);

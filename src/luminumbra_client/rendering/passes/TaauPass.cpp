@@ -1,5 +1,5 @@
-#include "../FarWorldReplay.h"
 #include "TaauPass.h"
+#include "../FarWorldReplay.h"
 
 #include "../PassShaderLayouts.h"
 #include "../RenderResourceRegistry.h"
@@ -53,7 +53,8 @@ void TaauPass::init(RenderResourceRegistry& registry, u32 width, u32 height) {
         history.expected_layout = "color_attachment";
         history.debug_label = "taau.history";
         if (i < 2)
-            m_history[i] = registry.create_texture(i == 0 ? "taau_history_0" : "taau_history_1", history).id;
+            m_history[i] =
+                registry.create_texture(i == 0 ? "taau_history_0" : "taau_history_1", history).id;
         else {
             history.lifetime = ResourceLifetime::History;
             history.debug_label = "taau.replay_output";
@@ -92,8 +93,10 @@ void TaauPass::invalidate_history() {
 }
 
 void TaauPass::execute(const RenderContext& ctx, const TaauHistoryState* frozen) {
-    ReplayRollback rollback([this, replay = frozen != nullptr,
-                             write = m_history_write, valid = m_history_valid]() noexcept {
+    ReplayRollback rollback([this,
+                             replay = frozen != nullptr,
+                             write = m_history_write,
+                             valid = m_history_valid]() noexcept {
         if (replay) {
             m_history_write = write;
             m_history_valid = valid;
@@ -106,14 +109,16 @@ void TaauPass::execute(const RenderContext& ctx, const TaauHistoryState* frozen)
     const auto input = frozen ? *frozen : history_state();
     const auto plan = PlanTaauResolve(input, m_replay_output, frozen != nullptr);
     const GLuint resolve_fbo = frozen ? m_replay_fbo : m_fbo;
-    if (!plan.output_texture || !resolve_fbo) return;
+    if (!plan.output_texture || !resolve_fbo)
+        return;
     const GLuint lit_color = ctx.lit_scene_color.id;
     const GLuint lit_fbo = ctx.lit_scene.id;
 
     // Replay reads the exact ON history input and writes only the dedicated scratch target.
     glBindFramebuffer(GL_FRAMEBUFFER, resolve_fbo);
     PreserveReplayObject(ReplayObjectKind::Framebuffer, resolve_fbo);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, plan.output_texture, 0);
+    glFramebufferTexture2D(
+        GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, plan.output_texture, 0);
     const GLenum draw0[1] = {GL_COLOR_ATTACHMENT0};
     glDrawBuffers(1, draw0);
     glViewport(0, 0, ctx.screen_width, ctx.screen_height);

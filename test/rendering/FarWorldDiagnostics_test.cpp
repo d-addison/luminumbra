@@ -251,8 +251,17 @@ TEST(FarWorldDiagnostics, SerializerContainsBindingPoliciesCoverageCountersAndLo
     EXPECT_EQ(json["memory_sampling"], "asynchronous_diagnostic_not_atomic_admission");
     EXPECT_FALSE(json["ladder_water_available"].get<bool>());
     const auto bytes = json.dump();
-    EXPECT_THROW((void)nlohmann::json::parse(bytes.substr(0, bytes.size() - 1)),
-                 nlohmann::json::parse_error);
-    EXPECT_THROW((void)nlohmann::json::parse("{broken"), nlohmann::json::parse_error);
+    EXPECT_THROW(
+        {
+            const auto parsed = nlohmann::json::parse(bytes.substr(0, bytes.size() - 1));
+            (void)parsed;
+        },
+        nlohmann::json::parse_error);
+    EXPECT_THROW(
+        {
+            const auto parsed = nlohmann::json::parse("{broken");
+            (void)parsed;
+        },
+        nlohmann::json::parse_error);
 }
 } // namespace

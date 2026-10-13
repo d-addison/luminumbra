@@ -1607,10 +1607,10 @@ void ScenarioRunnerImpl::captureFarLodHorizon(std::chrono::steady_clock::time_po
                     // Derive from the rendered direction; stale Euler labels cannot
                     // certify a different pose than the view matrix actually uses.
                     const auto rendered_direction = glm::normalize(g_camera->Front);
-                    capture.camera_yaw_degrees = glm::degrees(
-                        std::atan2(rendered_direction.z, rendered_direction.x));
-                    capture.camera_pitch_degrees = glm::degrees(
-                        std::asin(std::clamp(rendered_direction.y, -1.0f, 1.0f)));
+                    capture.camera_yaw_degrees =
+                        glm::degrees(std::atan2(rendered_direction.z, rendered_direction.x));
+                    capture.camera_pitch_degrees =
+                        glm::degrees(std::asin(std::clamp(rendered_direction.y, -1.0f, 1.0f)));
                     capture.sky = AnalyzePlayerViewPixels(
                         frame_pixels, screenshot_width, screenshot_height, horizon_row_from_top);
                     int band_top = 0;
