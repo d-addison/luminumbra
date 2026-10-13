@@ -769,9 +769,15 @@ TEST(GameSessionHeadlessWorldTest, ActiveClockKeepsAmbientAnchorWhenClientSavesM
     const HeadlessRoot root;
     JobSystem jobs;
     jobs.startup(1);
-    GameSession original, control, loaded, explicit_load, correct_anchor, wrong_anchor;
-    for (auto* session :
-         {&original, &control, &loaded, &explicit_load, &correct_anchor, &wrong_anchor}) {
+    GameSession original, control, loaded, explicit_load, correct_anchor, wrong_anchor,
+        wrong_regional_anchor;
+    for (auto* session : {&original,
+                          &control,
+                          &loaded,
+                          &explicit_load,
+                          &correct_anchor,
+                          &wrong_anchor,
+                          &wrong_regional_anchor}) {
         session->SetRootPath(root.root_string());
         session->SetJobSystem(&jobs);
         session->SetActiveRegionsEnabled(true);
@@ -815,6 +821,15 @@ TEST(GameSessionHeadlessWorldTest, ActiveClockKeepsAmbientAnchorWhenClientSavesM
     ASSERT_TRUE(P::WorldSaveService::save_metadata(metadata.dump(), explicit_save));
     ASSERT_TRUE(wrong_anchor.CreateTransientWorld("Wrong anchor", "1337", "default"));
     ASSERT_TRUE(wrong_anchor.LoadWorldStateFrom(explicit_save));
+    ASSERT_TRUE(
+        wrong_regional_anchor.CreateTransientWorld("Wrong regional anchor", "1337", "default"));
+    ASSERT_TRUE(wrong_regional_anchor.LoadWorldStateFrom(explicit_save));
+    // Regional weather restores the same world-space authority at either anchor.
+    // The negative control must still detect the different ambient projection domain.
+    ASSERT_EQ(wrong_anchor.GetFieldPages().canonical_bytes(),
+              control.GetFieldPages().canonical_bytes());
+    ASSERT_EQ(wrong_regional_anchor.GetFieldPages().canonical_bytes(),
+              control.GetFieldPages().canonical_bytes());
     for (int i = 0; i <= k; ++i) {
         SCOPED_TRACE(i);
         EXPECT_EQ(SessionWorldHash(original), SessionWorldHash(control));
@@ -836,11 +851,20 @@ TEST(GameSessionHeadlessWorldTest, ActiveClockKeepsAmbientAnchorWhenClientSavesM
                 EXPECT_EQ(storms[j].intensity, expected[j].intensity);
             }
         }
+        // Keep the regional negative control bound while the separate legacy control
+        // disables its backend. Identical pages must still hash differently by anchor.
+        EXPECT_NE(wrong_regional_anchor.GetWeatherSystem()->ComputeWeatherSubHash(),
+                  control.GetWeatherSystem()->ComputeWeatherSubHash());
         ASSERT_NO_FATAL_FAILURE(
             CheckLegacyWeatherAnchorReconstruction(correct_anchor, wrong_anchor, anchor, spawn));
         if (i < k) {
-            for (auto* session :
-                 {&original, &control, &loaded, &explicit_load, &correct_anchor, &wrong_anchor})
+            for (auto* session : {&original,
+                                  &control,
+                                  &loaded,
+                                  &explicit_load,
+                                  &correct_anchor,
+                                  &wrong_anchor,
+                                  &wrong_regional_anchor})
                 ASSERT_EQ(session->TickSimulation(dt), 1u);
         }
     }
@@ -2403,10 +2427,12 @@ TEST(GameSessionHeadlessWorldTest, InvalidHostInputsNeverThrowAndAreCounted) {
 
 namespace {
 constexpr Luminumbra::world::RegionKey kFaultRegion{40, -40};
+constexpr Luminumbra::world::RegionKey kStormRegion{-1, 0};
 
-// Arms a scheduler fault at tick k. The pinned far region gets work over the
-// limit in completed ticks k-2 and k-1: Active->Reduced at k-1, then Frozen at k,
-// where the durable digest provider reads the corrupt region file and throws.
+// Arms a scheduler fault at tick k. Keep the pinned far region awake through k-2,
+// then publish over-limit work in completed ticks k-2 and k-1: Active->Reduced
+// at k-1, then Frozen at k, where the durable digest provider reads the corrupt
+// region file and throws.
 void ArmSchedulerFault(GameSession& session,
                        const HeadlessRoot& root,
                        JobSystem& jobs,
@@ -2417,17 +2443,24 @@ void ArmSchedulerFault(GameSession& session,
     session.SetRegionSchedulerConfig({1, 1, 1});
     ASSERT_TRUE(session.CreateWorld("Scheduler fault", "1337", "default"));
     session.PinActiveRegion(kFaultRegion, true);
-    // C4 publishes ambient work on tick 1. A proximity visit on tick k-2 holds
-    // this owner Active until the two injected over-budget transitions begin.
+    // Seed 1337 spawns a storm here at weather age 45. Keep this owner due even
+    // when the fault region skips tick 45 after becoming Reduced.
+    session.PinActiveRegion(kStormRegion, true);
+    // Admit only the two pinned owners, without proximity neighbors.
     session.SetReplicatedSimulationAnchors({});
     const auto region = P::WorldSaveService::region_file_path(
         session.GetWorldSaveDir(), kFaultRegion.x, kFaultRegion.z);
     fs::create_directories(region.parent_path());
     std::ofstream(region, std::ios::binary) << "not a region file";
     session.GetSimulationEventBus().subscribe([&session, k](const auto& event) {
-        if (event.tick + 1 == k - 2)
-            session.SetReplicatedSimulationAnchors(
-                {Luminumbra::Vec3(kFaultRegion.x * 512 + 256, 0, kFaultRegion.z * 512 + 256)});
+        // Wake-pending owners are exempt from budget transitions. Keep weather
+        // due through the spawn epoch without taking either fault transition.
+        session.PinActiveRegion(kStormRegion, true);
+        // Field initialization/evolution also publishes pressure. Re-pinning keeps
+        // this owner Active through k-2 without a proximity visit admitting neighbors
+        // that could consume the intended two-decision fault window.
+        if (event.tick < k - 2)
+            session.PinActiveRegion(kFaultRegion, true);
         if (event.tick == k - 2) {
             session.SetReplicatedSimulationAnchors({});
             session.RecordActiveRegionWork({kFaultRegion, 5, 0, 0, 0});
@@ -2442,9 +2475,10 @@ void ArmSchedulerFault(GameSession& session,
 // save validates every region file, so restore a clean miss before saving.
 void RemoveFaultRegionFile(const GameSession& session) {
     std::error_code error;
-    fs::remove(P::WorldSaveService::region_file_path(
-                   session.GetWorldSaveDir(), kFaultRegion.x, kFaultRegion.z),
-               error);
+    EXPECT_TRUE(fs::remove(P::WorldSaveService::region_file_path(
+                               session.GetWorldSaveDir(), kFaultRegion.x, kFaultRegion.z),
+                           error));
+    EXPECT_FALSE(error) << error.message();
 }
 
 // The session clock produces at most two ticks per frame. Single-tick frames run
@@ -2481,6 +2515,8 @@ void RunSchedulerFaultCase(std::uint64_t k, std::uint64_t start) {
     EXPECT_TRUE(session.IsSimulationTickBoundary());
     EXPECT_EQ(session.TickSimulation(dt), 0u);
     EXPECT_EQ(session.GetSimulationTickCount(), k);
+    if (k == 46)
+        ASSERT_FALSE(session.GetWeatherSystem()->StormCells().empty());
     const auto save = session.GetWorldSaveDir();
     RemoveFaultRegionFile(session);
     ASSERT_TRUE(session.SaveWorldState());
@@ -2489,6 +2525,12 @@ void RunSchedulerFaultCase(std::uint64_t k, std::uint64_t start) {
     ASSERT_TRUE(loaded.LoadWorld(session.GetMetadata().worldId));
     EXPECT_EQ(loaded.GetSimulationTickCount(), k);
     EXPECT_FALSE(loaded.GetRegionSchedulerFault().has_value());
+    if (k == 46)
+        ASSERT_FALSE(loaded.GetWeatherSystem()->StormCells().empty());
+    const auto saved_hashes = SessionWorldSubHashes(session);
+    const auto loaded_hashes = SessionWorldSubHashes(loaded);
+    for (const auto& [field, hash] : saved_hashes.items())
+        EXPECT_EQ(loaded_hashes.at(field), hash) << field;
     EXPECT_EQ(SessionWorldHash(loaded), SessionWorldHash(session));
 }
 } // namespace
@@ -2496,7 +2538,11 @@ void RunSchedulerFaultCase(std::uint64_t k, std::uint64_t start) {
 TEST(GameSessionHeadlessWorldTest, SchedulerFaultStopsTheFrameAndLeavesASavableConsistentSession) {
     for (const auto& [k, start] : {std::pair<std::uint64_t, std::uint64_t>{3, 3},
                                    std::pair<std::uint64_t, std::uint64_t>{3, 2},
-                                   std::pair<std::uint64_t, std::uint64_t>{4, 4}}) {
+                                   std::pair<std::uint64_t, std::uint64_t>{4, 4},
+                                   // Cross the first storm-spawn epoch so reconstruction
+                                   // also covers storm history when the next tick faults.
+                                   std::pair<std::uint64_t, std::uint64_t>{46, 46},
+                                   std::pair<std::uint64_t, std::uint64_t>{46, 45}}) {
         ASSERT_NO_FATAL_FAILURE(RunSchedulerFaultCase(k, start));
     }
 }
@@ -4836,10 +4882,11 @@ TEST(GameSessionHeadlessWorldTest,
                 luminumbra::ai::RunLifespanOnTick(reference, k);
             }
             reference.emplace<SC::PlantRegionComponent>(
-                r, SC::PlantRegionComponent{.persistent_id = 1u,
-                                             .owner_x = reduced.x,
-                                             .owner_z = reduced.z,
-                                             .region_stamp = t});
+                r,
+                SC::PlantRegionComponent{.persistent_id = 1u,
+                                         .owner_x = reduced.x,
+                                         .owner_z = reduced.z,
+                                         .region_stamp = t});
             auto expected = SF::BuildPlantEntitySnapshot(reference, true);
             auto actual = SF::BuildPlantEntitySnapshot(live.GetRegistry(), true);
             actual.entities.resize(1);
@@ -5611,7 +5658,8 @@ TEST(GameSessionHeadlessWorldTest, S7OffDueFrozenToReducedEmptyPageResumeDoesNot
     ASSERT_TRUE(pages.set_irrigation(cell, 123));
     Luminumbra::Ecs::EntityRegistrySnapshot empty;
     empty.persistent_identity = true;
-    S7CommitFixture(base, ledger, pages, empty, WorldCalendar{.dayLengthTicks = 16, .daysPerYear = 8});
+    S7CommitFixture(
+        base, ledger, pages, empty, WorldCalendar{.dayLengthTicks = 16, .daysPerYear = 8});
     EnableSnapshotSession(live, root, jobs);
     ASSERT_TRUE(live.LoadWorld(base.GetMetadata().worldId)) << live.GetWorldOpenError();
     live.SetReplicatedSimulationAnchors({});

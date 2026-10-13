@@ -99,8 +99,8 @@ AdvanceFoliageInteriors(entt::registry& reg,
     for (std::uint32_t step = 0; step < max_window; ++step) {
         if (budget)
             budget->Next(simulation::SimBudgetStage::Soil, [&soil, &due, step] {
-                return static_cast<std::uint64_t>(std::count_if(
-                    soil.begin(), soil.end(), [&due, step](const auto& cell) {
+                return static_cast<std::uint64_t>(
+                    std::count_if(soil.begin(), soil.end(), [&due, step](const auto& cell) {
                         return due(cell.first, step);
                     }));
             });
@@ -127,8 +127,8 @@ AdvanceFoliageInteriors(entt::registry& reg,
             }
         if (budget)
             budget->Next(simulation::SimBudgetStage::Irrigation, [&moisture, &due, step] {
-                return static_cast<std::uint64_t>(std::count_if(
-                    moisture.begin(), moisture.end(), [&due, step](const auto& cell) {
+                return static_cast<std::uint64_t>(
+                    std::count_if(moisture.begin(), moisture.end(), [&due, step](const auto& cell) {
                         return due(cell.first, step);
                     }));
             });

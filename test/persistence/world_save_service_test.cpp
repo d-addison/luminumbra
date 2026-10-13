@@ -444,9 +444,12 @@ TEST(WorldSaveService, GroundObjectWithoutLedgerIsRefusedByLoadWorld) {
     TempSaveDir save_dir("ground_orphan");
     WorldSaveService service;
     WorldStreamingState original;
-    PopulateFixtureWorld(original);
+    // Indexing validates full SDF lattices; the tiny legacy chunk fixtures are
+    // deliberately incomplete. A manifest-only baseline isolates the orphan
+    // refusal without introducing an unrelated invalid chunk member.
     std::vector<std::string> save_errors;
-    ASSERT_TRUE(service.save_world(original, save_dir.path, &save_errors));
+    ASSERT_TRUE(service.save_world(original, save_dir.path, &save_errors))
+        << JoinErrors(save_errors);
 
     Luminumbra::world::GroundObjectStore store;
     ASSERT_TRUE(store.insert(MakeGroundObject(1, 100, 0)));
@@ -461,7 +464,8 @@ TEST(WorldSaveService, GroundObjectWithoutLedgerIsRefusedByLoadWorld) {
     clock.write_metadata(metadata);
     ASSERT_TRUE(WorldSaveService::save_metadata_and_active_regions(
         metadata.dump(), ledger, save_dir.path, &save_errors));
-    ASSERT_TRUE(WorldSaveService::save_ground_objects(store, save_dir.path, &save_errors));
+    ASSERT_TRUE(WorldSaveService::save_ground_objects(store, save_dir.path, &save_errors))
+        << JoinErrors(save_errors);
     // Inject a semantically corrupt but checksum-consistent snapshot for the reader.
     ASSERT_TRUE(std::filesystem::remove(WorldSaveService::active_regions_path(save_dir.path)));
     Luminumbra::Persistence::SnapshotIndex index;
@@ -718,8 +722,15 @@ TEST(WorldSaveService, IndexedAbsentEnergyRefusesResealedAgeBeyondSavedClock) {
         ASSERT_TRUE(WorldSaveService::save_metadata_and_active_regions(
             metadata.dump(), ledger, save_dir.path, &errors))
             << JoinErrors(errors);
+        // Never-present members are omitted by the index. Install a valid owned
+        // record first, then retire it through the writer to create indexed absence.
+        ASSERT_TRUE(WorldSaveService::write_member_bytes(
+            save_dir.path, "aether_state.efs", "EFS1 1 0\nP 0 0 0:1\n", &errors))
+            << JoinErrors(errors);
         ASSERT_TRUE(transaction.commit(&errors)) << JoinErrors(errors);
     }
+    ASSERT_TRUE(WorldSaveService::remove_member(save_dir.path, "aether_state.efs", &errors))
+        << JoinErrors(errors);
     WorldSaveService service;
     WorldStreamingState control;
     ASSERT_TRUE(service.load_world(control, save_dir.path, errors)) << JoinErrors(errors);
