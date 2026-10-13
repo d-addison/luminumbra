@@ -5,7 +5,7 @@
 #include <stdexcept>
 
 #include "../FarLodSystem.h"
-#include "../FarWorldOwnership.h" // kFarWorldInnerRadiusMeters for the ladder clip uniform
+#include "../FarWorldOwnership.h"      // kFarWorldInnerRadiusMeters for the ladder clip uniform
 #include "../PassShaderLayouts.h"      // enumerable ExpectedLayout registry
 #include "../RenderResourceRegistry.h" // /: registry-owned G-buffer
 #include "../TreeLod.h" // tree rendering: per-instance distance LOD mesh selection (render-only)
