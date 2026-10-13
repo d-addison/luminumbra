@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path, PurePosixPath
 import re
+import stat
 import uuid
 from . import file_io
 
@@ -112,6 +113,20 @@ def keys(value, required, optional=()):
     require(not unknown, "schema.unknown_field", f"Unregistered fields: {sorted(unknown)}")
 
 
+def path_is_link(path, info=None):
+    """Recognize symlinks and all Windows reparse points, including junctions."""
+    if info is None:
+        try:
+            info = Path(path).lstat()
+        except FileNotFoundError:
+            return False
+    return (stat.S_ISLNK(info.st_mode)
+            or bool(getattr(info, "st_file_attributes", 0)
+                    & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
+            or (path is not None and hasattr(os.path, "isjunction") and os.path.isjunction(path))
+            or (path is not None and hasattr(Path(path), "is_junction") and Path(path).is_junction()))
+
+
 def relative_path(root, name):
     require(isinstance(name, str) and bool(name), "path.invalid", "Use a relative file path.")
     parts = PurePosixPath(name).parts
@@ -123,7 +138,7 @@ def relative_path(root, name):
     path = root
     for part in parts:
         path /= part
-        require(not path.is_symlink() and not (hasattr(path, "is_junction") and path.is_junction()),
+        require(not path_is_link(path),
                 "path.symlink", "Source/state symlinks and junctions are unsupported.", name)
     require(path.is_file() and path.resolve().is_relative_to(root),
             "path.missing", "File does not exist inside its declared root.", name)
@@ -158,9 +173,15 @@ def validate_asset(value):
             and isinstance(exporter["sha256"], str) and SHA.fullmatch(exporter["sha256"]),
             "exporter.identity", "Record the exporter identity and SHA-256.")
     settings = value.get("settings", {})
-    keys(settings, (), ("emit_lods",))
+    keys(settings, (), ("emit_lods", "max_tris"))
     require(type(settings.get("emit_lods", False)) is bool,
             "settings.invalid", "emit_lods must be a boolean.")
+    if "max_tris" in settings:
+        require(type(settings["max_tris"]) is int and 64 <= settings["max_tris"] <= 1_000_000,
+                "settings.invalid", "max_tris must be an integer in [64, 1000000].",
+                "settings.max_tris")
+        require(value["profile"] != PREFAB_PROFILE, "prefab.max_tris",
+                "Prefab triangle budgets need an aggregate/per-part contract.", "settings.max_tris")
     require(isinstance(value.get("annotations", {}), dict),
             "annotation.invalid", "Annotations must be an inert object.")
     canonical(value)
