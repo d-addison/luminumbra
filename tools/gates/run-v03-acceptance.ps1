@@ -11,6 +11,8 @@
 #
 # -Package must be a DISPOSABLE copy of the QA client package. -OutDir must be
 # fresh: the saved-world lifecycle section refuses a non-empty lifecycle subdirectory.
+# Evidence must be a regular file within OutDir; external perf evidence and
+# audio checklists are copied there before the receipt is evaluated.
 #
 # Usage:
 #   powershell -NoProfile -ExecutionPolicy Bypass -File tools\gates\run-v03-acceptance.ps1 `
@@ -338,7 +340,11 @@ try {
     } elseif (-not (Test-Path -LiteralPath $PerfEvidence -PathType Leaf)) {
         $sections["perf_pointer"] = New-Section -Status "unevaluated" -Detail "perf evidence file not found"
     } else {
-        $sections["perf_pointer"] = New-Section -Status "pass" -Evidence (Get-AbsolutePath $PerfEvidence) -Detail "perf evidence file present"
+        $perfCopy = Join-Path $OutAbs "perf-evidence.json"
+        if ((Get-AbsolutePath $PerfEvidence) -ne $perfCopy) {
+            Copy-Item -LiteralPath $PerfEvidence -Destination $perfCopy -Force
+        }
+        $sections["perf_pointer"] = New-Section -Status "pass" -Evidence "perf-evidence.json" -Detail "perf evidence file present"
     }
 
     # --- audio_off ------------------------------------------------------------
@@ -353,7 +359,11 @@ try {
         } catch {
             $checklistError = $_.Exception.Message
         }
-        $audioEvidence = Get-AbsolutePath $AudioChecklist
+        $audioCopy = Join-Path $OutAbs "audio-checklist.json"
+        if ((Get-AbsolutePath $AudioChecklist) -ne $audioCopy) {
+            Copy-Item -LiteralPath $AudioChecklist -Destination $audioCopy -Force
+        }
+        $audioEvidence = "audio-checklist.json"
         if ($null -eq $checklist) {
             $sections["audio_off"] = New-Section -Status "fail" -Evidence $audioEvidence -Detail ("checklist does not parse: " + $checklistError)
         } else {

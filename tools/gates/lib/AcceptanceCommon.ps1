@@ -89,8 +89,264 @@ function Write-JsonFile {
     [System.IO.File]::WriteAllText($full, $json, $encoding)
 }
 
+function Initialize-AcceptanceJobLauncher {
+    # Compile lazily: dot-sourcing and -DryRun do not load native interop.
+    # C# 5 syntax keeps Add-Type compatible with Windows PowerShell 5.1.
+    if ($null -ne ("Luminumbra.AcceptanceJobLauncher" -as [type])) { return }
+    Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Diagnostics;
+using System.Runtime.InteropServices;
+using System.Text;
+using System.Threading;
+
+namespace Luminumbra {
+    public sealed class AcceptanceSessionResult {
+        public int ExitCode;
+        public bool TimedOut;
+    }
+
+    public static class AcceptanceJobLauncher {
+        const uint CREATE_SUSPENDED = 0x00000004;
+        const uint CREATE_NO_WINDOW = 0x08000000;
+        const uint EXTENDED_STARTUPINFO_PRESENT = 0x00080000;
+        const uint STARTF_USESTDHANDLES = 0x00000100;
+        const uint JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000;
+        const int JobObjectExtendedLimitInformation = 9;
+        const int JobObjectBasicAccountingInformation = 1;
+        const int CleanupWaitMilliseconds = 10000;
+        static readonly IntPtr InvalidHandle = new IntPtr(-1);
+
+        [StructLayout(LayoutKind.Sequential)]
+        struct SecurityAttributes {
+            public int Length;
+            public IntPtr SecurityDescriptor;
+            public int InheritHandle;
+        }
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        struct StartupInfo {
+            public int Size;
+            public string Reserved, Desktop, Title;
+            public uint X, Y, XSize, YSize, XCountChars, YCountChars, FillAttribute, Flags;
+            public ushort ShowWindow, Reserved2Size;
+            public IntPtr Reserved2, StdInput, StdOutput, StdError;
+        }
+        [StructLayout(LayoutKind.Sequential)]
+        struct StartupInfoEx {
+            public StartupInfo StartupInfo;
+            public IntPtr AttributeList;
+        }
+        [StructLayout(LayoutKind.Sequential)]
+        struct ProcessInformation {
+            public IntPtr Process, Thread;
+            public uint ProcessId, ThreadId;
+        }
+        [StructLayout(LayoutKind.Sequential)]
+        struct BasicLimitInformation {
+            public long PerProcessUserTimeLimit, PerJobUserTimeLimit;
+            public uint LimitFlags;
+            public UIntPtr MinimumWorkingSetSize, MaximumWorkingSetSize;
+            public uint ActiveProcessLimit;
+            public UIntPtr Affinity;
+            public uint PriorityClass, SchedulingClass;
+        }
+        [StructLayout(LayoutKind.Sequential)]
+        struct IoCounters {
+            public ulong ReadOperationCount, WriteOperationCount, OtherOperationCount;
+            public ulong ReadTransferCount, WriteTransferCount, OtherTransferCount;
+        }
+        [StructLayout(LayoutKind.Sequential)]
+        struct ExtendedLimitInformation {
+            public BasicLimitInformation BasicLimitInformation;
+            public IoCounters IoInfo;
+            public UIntPtr ProcessMemoryLimit, JobMemoryLimit, PeakProcessMemoryUsed, PeakJobMemoryUsed;
+        }
+        [StructLayout(LayoutKind.Sequential)]
+        struct BasicAccountingInformation {
+            public long TotalUserTime, TotalKernelTime, ThisPeriodTotalUserTime, ThisPeriodTotalKernelTime;
+            public uint TotalPageFaultCount, TotalProcesses, ActiveProcesses, TotalTerminatedProcesses;
+        }
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        static extern IntPtr CreateJobObject(IntPtr attributes, string name);
+        [DllImport("kernel32.dll", SetLastError = true)]
+        static extern bool SetInformationJobObject(IntPtr job, int infoClass,
+            ref ExtendedLimitInformation information, uint length);
+        [DllImport("kernel32.dll", SetLastError = true)]
+        static extern bool QueryInformationJobObject(IntPtr job, int infoClass,
+            out BasicAccountingInformation information, uint length, IntPtr returnLength);
+        [DllImport("kernel32.dll", SetLastError = true)]
+        static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
+        [DllImport("kernel32.dll", SetLastError = true)]
+        static extern bool TerminateJobObject(IntPtr job, uint exitCode);
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        static extern bool CreateProcess(string application, StringBuilder commandLine,
+            IntPtr processAttributes, IntPtr threadAttributes, bool inheritHandles,
+            uint flags, IntPtr environment, string directory, ref StartupInfoEx startup,
+            out ProcessInformation information);
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        static extern IntPtr CreateFile(string path, uint access, uint share,
+            ref SecurityAttributes attributes, uint disposition, uint flags, IntPtr template);
+        [DllImport("kernel32.dll", SetLastError = true)]
+        static extern bool InitializeProcThreadAttributeList(IntPtr list, int count, uint flags, ref IntPtr size);
+        [DllImport("kernel32.dll", SetLastError = true)]
+        static extern bool UpdateProcThreadAttribute(IntPtr list, uint flags, IntPtr attribute,
+            IntPtr value, IntPtr size, IntPtr previous, IntPtr returnSize);
+        [DllImport("kernel32.dll")]
+        static extern void DeleteProcThreadAttributeList(IntPtr list);
+        [DllImport("kernel32.dll", SetLastError = true)]
+        static extern uint ResumeThread(IntPtr thread);
+        [DllImport("kernel32.dll", SetLastError = true)]
+        static extern bool GetExitCodeProcess(IntPtr process, out uint exitCode);
+        [DllImport("kernel32.dll", SetLastError = true)]
+        static extern bool TerminateProcess(IntPtr process, uint exitCode);
+        [DllImport("kernel32.dll", SetLastError = true)]
+        static extern uint WaitForSingleObject(IntPtr handle, uint milliseconds);
+        [DllImport("kernel32.dll")]
+        static extern bool CloseHandle(IntPtr handle);
+
+        static Win32Exception NativeError(string operation) {
+            int code = Marshal.GetLastWin32Error();
+            return new Win32Exception(code, operation + " (Win32 error " + code + ": " +
+                new Win32Exception(code).Message + ")");
+        }
+        static void Close(IntPtr handle) {
+            if (handle != IntPtr.Zero && handle != InvalidHandle) CloseHandle(handle);
+        }
+        static IntPtr OpenStream(string path, bool input) {
+            SecurityAttributes attributes = new SecurityAttributes();
+            attributes.Length = Marshal.SizeOf(typeof(SecurityAttributes));
+            attributes.InheritHandle = 1;
+            // GENERIC_READ / GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+            // OPEN_EXISTING (NUL) / CREATE_ALWAYS (output), FILE_ATTRIBUTE_NORMAL.
+            IntPtr handle = CreateFile(path, input ? 0x80000000u : 0x40000000u, 3,
+                ref attributes, input ? 3u : 2u, 0x80, IntPtr.Zero);
+            if (handle == InvalidHandle) throw NativeError("CreateFile: " + path);
+            return handle;
+        }
+        static uint ActiveProcesses(IntPtr job) {
+            BasicAccountingInformation information;
+            if (!QueryInformationJobObject(job, JobObjectBasicAccountingInformation,
+                out information, (uint)Marshal.SizeOf(typeof(BasicAccountingInformation)), IntPtr.Zero))
+                throw NativeError("QueryInformationJobObject: cannot verify process cleanup");
+            return information.ActiveProcesses;
+        }
+        static bool WaitUntilEmpty(IntPtr job, int milliseconds) {
+            Stopwatch watch = Stopwatch.StartNew();
+            while (ActiveProcesses(job) != 0) {
+                if (watch.ElapsedMilliseconds >= milliseconds) return false;
+                Thread.Sleep(25);
+            }
+            return true;
+        }
+        static void TerminateAndDrain(IntPtr job) {
+            if (!TerminateJobObject(job, 1)) throw NativeError("TerminateJobObject");
+            if (!WaitUntilEmpty(job, CleanupWaitMilliseconds))
+                throw new InvalidOperationException("acceptance job still has active processes after 10000 ms cleanup wait");
+        }
+
+        public static AcceptanceSessionResult Run(string exe, string commandLine,
+            string directory, string stdout, string stderr, int timeoutMilliseconds) {
+            IntPtr job = IntPtr.Zero, input = IntPtr.Zero, output = IntPtr.Zero, error = IntPtr.Zero;
+            IntPtr attributes = IntPtr.Zero, handleList = IntPtr.Zero;
+            bool attributesInitialized = false, assigned = false, drained = false, cleanupAttempted = false;
+            ProcessInformation process = new ProcessInformation();
+            try {
+                job = CreateJobObject(IntPtr.Zero, null);
+                if (job == IntPtr.Zero) throw NativeError("CreateJobObject");
+                ExtendedLimitInformation limits = new ExtendedLimitInformation();
+                // No breakaway flags: descendants inherit membership, including
+                // children of exited intermediates. The job handle is not inherited.
+                limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+                if (!SetInformationJobObject(job, JobObjectExtendedLimitInformation, ref limits,
+                    (uint)Marshal.SizeOf(typeof(ExtendedLimitInformation))))
+                    throw NativeError("SetInformationJobObject: KILL_ON_JOB_CLOSE");
+                input = OpenStream("NUL", true);
+                output = OpenStream(stdout, false);
+                error = OpenStream(stderr, false);
+                StartupInfoEx startup = new StartupInfoEx();
+                startup.StartupInfo.Size = Marshal.SizeOf(typeof(StartupInfoEx));
+                startup.StartupInfo.Flags = STARTF_USESTDHANDLES;
+                startup.StartupInfo.StdInput = input;
+                startup.StartupInfo.StdOutput = output;
+                startup.StartupInfo.StdError = error;
+                // Inherit only these three streams, never other handles held by
+                // the PowerShell host or another session on the shared machine.
+                IntPtr size = IntPtr.Zero;
+                InitializeProcThreadAttributeList(IntPtr.Zero, 1, 0, ref size);
+                if (size == IntPtr.Zero) throw NativeError("InitializeProcThreadAttributeList: size");
+                attributes = Marshal.AllocHGlobal(size);
+                if (!InitializeProcThreadAttributeList(attributes, 1, 0, ref size))
+                    throw NativeError("InitializeProcThreadAttributeList");
+                attributesInitialized = true;
+                handleList = Marshal.AllocHGlobal(3 * IntPtr.Size);
+                Marshal.WriteIntPtr(handleList, 0, input);
+                Marshal.WriteIntPtr(handleList, IntPtr.Size, output);
+                Marshal.WriteIntPtr(handleList, 2 * IntPtr.Size, error);
+                // PROC_THREAD_ATTRIBUTE_HANDLE_LIST = 0x00020002.
+                if (!UpdateProcThreadAttribute(attributes, 0, new IntPtr(0x00020002),
+                    handleList, new IntPtr(3 * IntPtr.Size), IntPtr.Zero, IntPtr.Zero))
+                    throw NativeError("UpdateProcThreadAttribute: HANDLE_LIST");
+                startup.AttributeList = attributes;
+                if (!CreateProcess(exe, new StringBuilder(commandLine), IntPtr.Zero, IntPtr.Zero,
+                    true, CREATE_SUSPENDED | CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT,
+                    IntPtr.Zero, directory, ref startup, out process))
+                    throw NativeError("CreateProcess: suspended acceptance session");
+                // Windows 8+ supports nested jobs. Do not request breakaway or
+                // fall back if the host's job restrictions forbid assignment.
+                if (!AssignProcessToJobObject(job, process.Process))
+                    throw NativeError("AssignProcessToJobObject failed (including host/nested-job restrictions); session was not resumed");
+                assigned = true;
+                if (ResumeThread(process.Thread) == UInt32.MaxValue) throw NativeError("ResumeThread");
+                AcceptanceSessionResult result = new AcceptanceSessionResult();
+                // Root exit alone is insufficient: keep ownership until every
+                // descendant exits or the session deadline terminates the job.
+                if (!WaitUntilEmpty(job, timeoutMilliseconds)) {
+                    cleanupAttempted = true;
+                    TerminateAndDrain(job);
+                    result.ExitCode = -1;
+                    result.TimedOut = true;
+                } else {
+                    uint exitCode;
+                    if (!GetExitCodeProcess(process.Process, out exitCode)) throw NativeError("GetExitCodeProcess");
+                    result.ExitCode = unchecked((int)exitCode);
+                }
+                drained = true;
+                return result;
+            } finally {
+                try {
+                    if (assigned && !drained && !cleanupAttempted) {
+                        // Also verify cleanup on errors, not just timeouts.
+                        TerminateAndDrain(job);
+                    } else if (!assigned && process.Process != IntPtr.Zero) {
+                        // Assignment failed while suspended. Use the original
+                        // creation handle, never a PID lookup, to stop this root.
+                        if (!TerminateProcess(process.Process, 1)) throw NativeError("TerminateProcess: unassigned suspended root");
+                        if (WaitForSingleObject(process.Process, CleanupWaitMilliseconds) != 0)
+                            throw new InvalidOperationException("unassigned suspended acceptance process did not exit");
+                    }
+                } finally {
+                    Close(process.Thread);
+                    Close(process.Process);
+                    Close(job); // KILL_ON_JOB_CLOSE is the final safety net.
+                    Close(input);
+                    Close(output);
+                    Close(error);
+                    if (attributesInitialized) DeleteProcThreadAttributeList(attributes);
+                    if (attributes != IntPtr.Zero) Marshal.FreeHGlobal(attributes);
+                    if (handleList != IntPtr.Zero) Marshal.FreeHGlobal(handleList);
+                }
+            }
+        }
+    }
+}
+'@
+}
+
 function Invoke-ClientSession {
-    # Runs one client process with stdout/stderr redirected to local files.
+    # On Windows, owns the client/ctest and all descendants from suspended launch.
+    # Other platforms retain root-only cleanup; not native qualification.
     # Returns @{ exit_code = <int, -1 on timeout>; timed_out = <bool> }.
     param(
         [Parameter(Mandatory = $true)][string]$Exe,
@@ -98,7 +354,7 @@ function Invoke-ClientSession {
         [Parameter(Mandatory = $true)][string]$WorkingDirectory,
         [Parameter(Mandatory = $true)][string]$StdoutPath,
         [Parameter(Mandatory = $true)][string]$StderrPath,
-        [int]$TimeoutSeconds = 300
+        [ValidateRange(1, 86400)][int]$TimeoutSeconds = 300
     )
     $stdout = Get-AbsolutePath $StdoutPath
     $stderr = Get-AbsolutePath $StderrPath
@@ -108,20 +364,32 @@ function Invoke-ClientSession {
             New-Item -ItemType Directory -Force -Path $dir | Out-Null
         }
     }
+    if ([System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Win32NT) {
+        Initialize-AcceptanceJobLauncher
+        $exePath = Get-AbsolutePath $Exe
+        $commandLine = Join-ProcessArguments -Values (@($exePath) + @($ArgumentList))
+        $run = [Luminumbra.AcceptanceJobLauncher]::Run($exePath, $commandLine,
+            (Get-AbsolutePath $WorkingDirectory), $stdout, $stderr, ($TimeoutSeconds * 1000))
+        return @{ exit_code = $run.ExitCode; timed_out = $run.TimedOut }
+    }
     $process = Start-Process -FilePath $Exe `
         -ArgumentList (Join-ProcessArguments -Values $ArgumentList) `
         -WorkingDirectory (Get-AbsolutePath $WorkingDirectory) `
         -PassThru -NoNewWindow `
         -RedirectStandardOutput $stdout -RedirectStandardError $stderr
-    $finished = $process.WaitForExit($TimeoutSeconds * 1000)
-    if (-not $finished) {
-        Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
-        $null = $process.WaitForExit(10000)
-        return @{ exit_code = -1; timed_out = $true }
+    try {
+        $finished = $process.WaitForExit($TimeoutSeconds * 1000)
+        if (-not $finished) {
+            $process.Kill()
+            if (-not $process.WaitForExit(10000)) { throw "timed-out acceptance process still running" }
+            return @{ exit_code = -1; timed_out = $true }
+        }
+        $code = $process.ExitCode
+        if ($null -eq $code) { $code = -1 }
+        return @{ exit_code = [int]$code; timed_out = $false }
+    } finally {
+        $process.Dispose()
     }
-    $code = $process.ExitCode
-    if ($null -eq $code) { $code = -1 }
-    return @{ exit_code = [int]$code; timed_out = $false }
 }
 
 function Read-ShutdownRecord {

@@ -5,13 +5,16 @@
 #include "luminumbra_common/persistence/WorldSaveService.h"
 
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <initializer_list>
 #include <map>
 #include <set>
 #include <sstream>
 #include <string>
+#include <system_error>
 #include <tuple>
 #include <utility>
 #include <vector>
@@ -59,9 +62,10 @@ protected:
         return root;
     }
     void TearDown() override {
+        WorldSaveService::set_interrupt_before_region_replace_for_testing(false);
         for (const auto& root : roots) {
             std::error_code ec;
-            fs::remove_all(root, ec);
+            static_cast<void>(fs::remove_all(root, ec));
         }
     }
 };
@@ -195,6 +199,74 @@ TEST_F(SyntheticSaveFixture, RefusesBadSpecAndExistingSave) {
     EXPECT_FALSE(second.ok);
     EXPECT_FALSE(second.error.empty());
     EXPECT_EQ(DiskBytes(first.save_dir), before);
+}
+
+TEST_F(SyntheticSaveFixture, RefusesPreExistingLeafWithoutChangingItsContents) {
+    const auto root = NewRoot("pre_existing_leaf");
+    const auto save_dir = root / "worlds/saves/owned_elsewhere";
+    ASSERT_TRUE(fs::create_directories(save_dir / "nested"));
+    {
+        std::ofstream sentinel(save_dir / "nested/sentinel.txt");
+        sentinel << "belongs to another writer";
+        ASSERT_TRUE(sentinel.good());
+    }
+    const auto before = DiskBytes(root);
+    SyntheticSaveSpec spec = Spec("owned_elsewhere", 1);
+    spec.preset_source = root / "missing-preset.json";
+    const auto report = WriteSyntheticSave(spec, root);
+    EXPECT_FALSE(report.ok);
+    EXPECT_NE(report.error.find("save already exists"), std::string::npos);
+    EXPECT_EQ(DiskBytes(root), before);
+}
+
+TEST_F(SyntheticSaveFixture, LeafCreationErrorPreservesOtherWritersFiles) {
+    const auto root = NewRoot("blocked_leaf");
+    const auto save_dir = root / "worlds/saves/blocked";
+    ASSERT_TRUE(fs::create_directories(save_dir.parent_path() / "other_world"));
+    {
+        std::ofstream blocker(save_dir);
+        blocker << "existing file";
+        ASSERT_TRUE(blocker.good());
+        std::ofstream sentinel(save_dir.parent_path() / "other_world/sentinel.txt");
+        sentinel << "existing save";
+        ASSERT_TRUE(sentinel.good());
+    }
+    const auto before = DiskBytes(root);
+    const auto report = WriteSyntheticSave(Spec("blocked", 1), root);
+    EXPECT_FALSE(report.ok);
+    EXPECT_FALSE(report.error.empty());
+    EXPECT_EQ(DiskBytes(root), before);
+}
+
+TEST_F(SyntheticSaveFixture, RefusesChunkCountAboveLimitBeforeCreatingDirectories) {
+    const auto root = NewRoot("over_limit");
+    const auto report =
+        WriteSyntheticSave(Spec("too_large", Persistence::kMaxSyntheticSaveChunks + 1), root);
+    EXPECT_FALSE(report.ok);
+    EXPECT_NE(report.error.find("chunk_count must be in [1, 65536]"), std::string::npos);
+    EXPECT_FALSE(fs::exists(root));
+}
+
+TEST_F(SyntheticSaveFixture, InjectedWriteFailureRemovesOnlyTheCreatedSave) {
+    const auto root = NewRoot("injected_cleanup");
+    const auto other_dir = root / "worlds/saves/other_world";
+    ASSERT_TRUE(fs::create_directories(other_dir));
+    {
+        std::ofstream sentinel(other_dir / "sentinel.txt");
+        sentinel << "belongs to another writer";
+        ASSERT_TRUE(sentinel.good());
+    }
+    const auto before = DiskBytes(root);
+    WorldSaveService::set_interrupt_before_region_replace_for_testing(true);
+    const auto failed = WriteSyntheticSave(Spec("interrupted", 1), root);
+    WorldSaveService::set_interrupt_before_region_replace_for_testing(false);
+    ASSERT_FALSE(failed.ok);
+    EXPECT_NE(failed.error.find("interrupted"), std::string::npos);
+    EXPECT_FALSE(fs::exists(failed.save_dir));
+    EXPECT_EQ(DiskBytes(root), before);
+
+    const auto retried = WriteSyntheticSave(Spec("interrupted", 1), root);
+    EXPECT_TRUE(retried.ok) << retried.error;
 }
 
 TEST_F(SyntheticSaveFixture, FailedWriteRemovesPartialSaveAndAllowsRetry) {

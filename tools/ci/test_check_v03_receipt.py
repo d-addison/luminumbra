@@ -57,9 +57,16 @@ class V03AcceptanceReceiptContract(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
         self.base = Path(self._tmp.name)
+        for section in valid_receipt()["sections"].values():
+            artifact = self.base / section["evidence"]
+            artifact.parent.mkdir(parents=True, exist_ok=True)
+            artifact.write_text("{}\n", encoding="utf-8")
 
     def tearDown(self) -> None:
         self._tmp.cleanup()
+
+    def _evaluate(self, receipt: dict) -> dict:
+        return tool.evaluate(receipt, self.base)
 
     def _write_obj(self, data, name: str = "receipt.json") -> Path:
         path = self.base / name
@@ -67,12 +74,12 @@ class V03AcceptanceReceiptContract(unittest.TestCase):
         return path
 
     def _assert_baseline(self, section: str) -> None:
-        verdict = tool.evaluate(valid_receipt())
+        verdict = self._evaluate(valid_receipt())
         self.assertEqual(_check(verdict, section)["verdict"], "pass", section)
         self.assertEqual(verdict["verdict"], "pass")
 
     def _expect(self, receipt: dict, section: str, expected: str) -> dict:
-        verdict = tool.evaluate(receipt)
+        verdict = self._evaluate(receipt)
         check = _check(verdict, section)
         self.assertEqual(check["verdict"], expected, check)
         if expected != "pass":
@@ -80,7 +87,7 @@ class V03AcceptanceReceiptContract(unittest.TestCase):
         return check
 
     def test_valid_receipt_passes_overall_with_exit_zero(self) -> None:
-        verdict = tool.evaluate(valid_receipt())
+        verdict = self._evaluate(valid_receipt())
         self.assertEqual(verdict["verdict"], "pass")
         self.assertEqual(verdict["schema"], "luminumbra.v03_acceptance_verdict.v1")
         self.assertEqual([c["id"] for c in verdict["checks"]], REQUIRED)
@@ -89,6 +96,120 @@ class V03AcceptanceReceiptContract(unittest.TestCase):
         self.assertEqual(code, 0, err)
         self.assertIn("pass render_qualification: evidence: logs/render_qualification.json", out)
         self.assertIn("overall: pass", out)
+
+    def test_missing_evidence_reports_each_reference_and_exits_one(self) -> None:
+        receipt = valid_receipt()
+        for name in ("audio_off", "net_soak"):
+            (self.base / receipt["sections"][name]["evidence"]).unlink()
+        verdict = self._evaluate(receipt)
+        for name in ("audio_off", "net_soak"):
+            check = _check(verdict, name)
+            self.assertEqual(check["verdict"], "fail")
+            self.assertEqual(check["detail"], f"missing evidence artifact: logs/{name}.json")
+        code, out, _ = _run([str(self._write_obj(receipt))])
+        self.assertEqual(code, 1)
+        self.assertIn("missing evidence artifact: logs/audio_off.json", out)
+        self.assertIn("missing evidence artifact: logs/net_soak.json", out)
+
+    def test_evidence_traversal_is_rejected_even_for_existing_files(self) -> None:
+        for reference in ("../receipt.json", "logs/../receipt.json", r"logs\..\receipt.json"):
+            with self.subTest(reference=reference):
+                receipt = valid_receipt()
+                self._write_obj(receipt)
+                receipt["sections"]["audio_off"]["evidence"] = reference
+                check = self._expect(receipt, "audio_off", "fail")
+                self.assertEqual(check["detail"], f"evidence traversal: {reference}")
+
+    def test_absolute_evidence_is_allowed_only_inside_root(self) -> None:
+        receipt = valid_receipt()
+        section = receipt["sections"]["audio_off"]
+        section["evidence"] = str(self.base / section["evidence"])
+        self._expect(receipt, "audio_off", "pass")
+        section["evidence"] = str(Path(__file__).resolve())
+        check = self._expect(receipt, "audio_off", "fail")
+        self.assertIn("evidence outside root:", check["detail"])
+
+    def test_directory_evidence_is_not_a_regular_file(self) -> None:
+        receipt = valid_receipt()
+        receipt["sections"]["audio_off"]["evidence"] = "logs"
+        check = self._expect(receipt, "audio_off", "fail")
+        self.assertEqual(check["detail"], "evidence is not a regular file: logs")
+
+    def test_evidence_symlink_escape_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as outside:
+            outside_dir = Path(outside)
+            (outside_dir / "artifact.json").write_text("{}", encoding="utf-8")
+            for reference, target in (("escaped-file", outside_dir / "artifact.json"),
+                                      ("escaped-dir", outside_dir)):
+                try:
+                    (self.base / reference).symlink_to(target, target_is_directory=target.is_dir())
+                except (NotImplementedError, OSError) as error:
+                    self.skipTest(f"symlinks unavailable: {error}")
+                receipt = valid_receipt()
+                evidence = reference if target.is_file() else reference + "/artifact.json"
+                receipt["sections"]["audio_off"]["evidence"] = evidence
+                check = self._expect(receipt, "audio_off", "fail")
+                self.assertEqual(check["detail"], f"evidence outside root: {evidence}")
+
+    def test_explicit_evidence_root_is_relative_to_receipt_directory(self) -> None:
+        receipt = valid_receipt()
+        receipt["evidence_root"] = "logs"
+        for section in receipt["sections"].values():
+            section["evidence"] = Path(section["evidence"]).name
+        self.assertEqual(self._evaluate(receipt)["verdict"], "pass")
+        code, out, _ = _run([str(self._write_obj(receipt))])
+        self.assertEqual(code, 0, out)
+
+    def test_malformed_evidence_root_is_invalid_input(self) -> None:
+        for root in (None, False, [], ""):
+            receipt = valid_receipt()
+            receipt["evidence_root"] = root
+            with self.assertRaisesRegex(tool.InputError, "evidence_root"):
+                self._evaluate(receipt)
+            self.assertEqual(_run([str(self._write_obj(receipt))])[0], 2)
+
+    def test_file_or_missing_evidence_root_is_invalid_input(self) -> None:
+        file_root = self._write_obj({}, "file-root.json")
+        for root in (file_root.name, str(file_root), "missing-root"):
+            with self.subTest(root=root):
+                receipt = valid_receipt()
+                receipt["evidence_root"] = root
+                for section in receipt["sections"].values():
+                    section["evidence"] = "."
+                with self.assertRaisesRegex(tool.InputError, "existing directory"):
+                    self._evaluate(receipt)
+                code, out, err = _run([str(self._write_obj(receipt))])
+                self.assertEqual(code, 2)
+                self.assertNotIn("overall: pass", out)
+                self.assertIn("existing directory", err)
+
+    def test_evidence_references_to_root_itself_fail(self) -> None:
+        for reference in (".", "./", str(self.base), str(self.base / "logs" / "..")):
+            with self.subTest(reference=reference):
+                receipt = valid_receipt()
+                receipt["sections"]["audio_off"]["evidence"] = reference
+                check = self._expect(receipt, "audio_off", "fail")
+                expected = "evidence traversal" if ".." in reference else "evidence resolves to root itself"
+                self.assertEqual(check["detail"], f"{expected}: {reference}")
+                self.assertEqual(_run([str(self._write_obj(receipt))])[0], 1)
+
+    def test_root_self_via_relative_traversal_fails(self) -> None:
+        for reference in ("logs/..", r"logs\..", "../" + self.base.name):
+            with self.subTest(reference=reference):
+                receipt = valid_receipt()
+                receipt["sections"]["audio_off"]["evidence"] = reference
+                check = self._expect(receipt, "audio_off", "fail")
+                self.assertEqual(check["detail"], f"evidence traversal: {reference}")
+
+    def test_symlink_resolving_to_root_itself_fails(self) -> None:
+        try:
+            (self.base / "root-alias").symlink_to(self.base, target_is_directory=True)
+        except (NotImplementedError, OSError) as error:
+            self.skipTest(f"symlinks unavailable: {error}")
+        receipt = valid_receipt()
+        receipt["sections"]["audio_off"]["evidence"] = "root-alias"
+        check = self._expect(receipt, "audio_off", "fail")
+        self.assertEqual(check["detail"], "evidence resolves to root itself: root-alias")
 
     def test_unevaluated_exits_three(self) -> None:
         self._assert_baseline("audio_off")
@@ -209,7 +330,7 @@ class V03AcceptanceReceiptContract(unittest.TestCase):
         self._assert_baseline("render_qualification")
         receipt = valid_receipt()
         receipt["sections"]["bonus_probe"] = {"status": "pass", "evidence": "x"}
-        verdict = tool.evaluate(receipt)
+        verdict = self._evaluate(receipt)
         check = _check(verdict, "unknown_section:bonus_probe")
         self.assertEqual(check["verdict"], "unevaluated")
         self.assertEqual(check["detail"], "unknown section; not counted as evidence")
@@ -228,12 +349,12 @@ class V03AcceptanceReceiptContract(unittest.TestCase):
             receipt = valid_receipt()
             receipt["sections"][name]["status"] = "fail"
             self._expect(receipt, name, "fail")
-            others = [c for c in tool.evaluate(receipt)["checks"] if c["id"] != name]
+            others = [c for c in self._evaluate(receipt)["checks"] if c["id"] != name]
             self.assertTrue(all(c["verdict"] == "pass" for c in others))
 
     def test_fully_empty_sections_never_pass(self) -> None:
         receipt = {"schema": "luminumbra.v03_acceptance.v1", "sections": {}}
-        verdict = tool.evaluate(copy.deepcopy(receipt))
+        verdict = self._evaluate(copy.deepcopy(receipt))
         self.assertEqual(verdict["verdict"], "unevaluated")
         self.assertEqual(len(verdict["checks"]), len(REQUIRED))
         for check in verdict["checks"]:
