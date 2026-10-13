@@ -15,6 +15,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <exception>
+#include <filesystem>
 #include <iostream>
 #include <map>
 #include <optional>
@@ -49,9 +50,7 @@ std::optional<std::uint64_t> ParseUnsigned(const std::string& text) {
     }
 }
 
-} // namespace
-
-int main(int argc, char** argv) {
+int RunFixture(int argc, char** argv) {
     std::map<std::string, std::string> values;
     for (int i = 1; i < argc; i += 2) {
         const std::string flag = argv[i];
@@ -148,4 +147,17 @@ int main(int argc, char** argv) {
     };
     std::cout << line.dump() << "\n";
     return 0;
+}
+
+} // namespace
+
+int main(int argc, char** argv) {
+    try {
+        return RunFixture(argc, argv);
+    } catch (const std::exception& error) {
+        std::cerr << "save fixture failed: " << error.what() << "\n";
+    } catch (...) {
+        std::cerr << "save fixture failed: unknown exception\n";
+    }
+    return kFailureExit;
 }

@@ -115,6 +115,40 @@ class SaveReceiptContract(unittest.TestCase):
         tampered.write_text(json.dumps(receipt), encoding="utf-8")
         self.assertEqual(_run(["verify", str(self.tree), str(tampered)])[0], 2)
 
+    def test_boolean_aggregates_are_malformed_receipts(self) -> None:
+        # Match the legitimate integer total/count so equality alone would accept the bool.
+        for field in ("file_count", "total_bytes"):
+            for value in (False, True):
+                with self.subTest(field=field, value=value):
+                    tree = self.base / f"{field}_{value}"
+                    tree.mkdir()
+                    if value:
+                        _write(tree / "one-byte.bin", b"x")
+                    receipt = save_receipt.snapshot(tree)
+                    self.assertEqual(receipt[field], int(value))
+                    receipt[field] = value
+                    path = self.base / f"{field}_{value}.json"
+                    path.write_text(json.dumps(receipt), encoding="utf-8")
+                    with self.assertRaisesRegex(save_receipt.ReceiptError, field):
+                        save_receipt.load_receipt(path)
+                    code, _, err = _run(["verify", str(tree), str(path)])
+                    self.assertEqual(code, save_receipt.EXIT_INVALID)
+                    self.assertIn(field, err)
+                    self.assertEqual(_run(["diff", str(path), str(path)])[0], 2)
+
+    def test_non_integer_aggregates_are_malformed_receipts(self) -> None:
+        for field in ("file_count", "total_bytes"):
+            for value in (None, "1", 1.0):
+                with self.subTest(field=field, value=value):
+                    tree = self.base / "one-byte-tree"
+                    _write(tree / "one-byte.bin", b"x")
+                    receipt = save_receipt.snapshot(tree)
+                    receipt[field] = value
+                    path = self.base / "non-integer.json"
+                    path.write_text(json.dumps(receipt), encoding="utf-8")
+                    with self.assertRaisesRegex(save_receipt.ReceiptError, field):
+                        save_receipt.load_receipt(path)
+
     def test_missing_directory_is_invalid_input(self) -> None:
         code, _, err = _run(
             ["snapshot", str(self.base / "missing"), "--out", str(self.base / "x.json")]

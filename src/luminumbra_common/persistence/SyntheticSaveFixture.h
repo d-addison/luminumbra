@@ -24,10 +24,14 @@ enum class FixturePayload {
     Flat
 };
 
+// The largest real profile has 5,433 chunks. This cap allows just over 12x
+// headroom while bounding the in-memory chunk/coordinate allocations.
+inline constexpr std::uint32_t kMaxSyntheticSaveChunks = 65'536;
+
 struct SyntheticSaveSpec {
     std::uint64_t seed = 1337;
-    std::uint32_t chunk_count = 96;
-    std::uint32_t edit_count = 0; // first K chunks get a deterministic mound added
+    std::uint32_t chunk_count = 96; // accepted range: [1, kMaxSyntheticSaveChunks]
+    std::uint32_t edit_count = 0;   // first K chunks get a deterministic mound added
     FixturePayload payload = FixturePayload::Noise;
     std::string world_id = "synthetic"; // directory name under worlds/saves
     std::string world_name = "Synthetic Fixture";
@@ -46,6 +50,8 @@ struct SyntheticSaveReport {
 };
 
 std::vector<IVec3> SyntheticChunkCoords(std::uint32_t count);
+// Refuses a pre-existing leaf. On failure (including exceptions), removes only
+// the leaf created by this call and returns an error report.
 SyntheticSaveReport WriteSyntheticSave(const SyntheticSaveSpec& spec,
                                        const std::filesystem::path& root);
 
