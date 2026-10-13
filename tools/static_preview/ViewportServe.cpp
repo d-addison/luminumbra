@@ -273,6 +273,7 @@ Json FrameReceipt(const StaticFrame& frame, const Json& header, const std::strin
 int Serve(int argc, char** argv) {
     fs::path output;
     bool owns = false;
+    std::string startup_session;
     try {
         fs::path resources;
         bool software = false;
@@ -292,9 +293,30 @@ int Serve(int argc, char** argv) {
         }
         const auto key_text = Core::ReadEnvironment("LUMINUMBRA_VIEWPORT_KEY");
         const auto project_text = Core::ReadEnvironment("LUMINUMBRA_VIEWPORT_PROJECT");
+        const auto session_text = Core::ReadEnvironment("LUMINUMBRA_VIEWPORT_SESSION");
+        const auto ready_text = Core::ReadEnvironment("LUMINUMBRA_VIEWPORT_READY");
         ClearEnvironment("LUMINUMBRA_VIEWPORT_KEY");
         ClearEnvironment("LUMINUMBRA_VIEWPORT_PROJECT");
+        ClearEnvironment("LUMINUMBRA_VIEWPORT_SESSION");
+        ClearEnvironment("LUMINUMBRA_VIEWPORT_READY");
         Require(key_text && project_text, "Viewport trusted startup environment missing");
+        Require(session_text.has_value() == ready_text.has_value(),
+                "Viewport readiness startup environment incomplete");
+        fs::path ready_path;
+        if (session_text && ready_text) {
+            startup_session = *session_text;
+            Require(startup_session.size() == 32 && std::all_of(startup_session.begin(),
+                                                                startup_session.end(),
+                                                                [](char c) {
+                                                                    return (c >= '0' && c <= '9') ||
+                                                                           (c >= 'a' && c <= 'f');
+                                                                }),
+                    "Viewport readiness session identity");
+            ready_path = Path(*ready_text);
+            SafePath(ready_path);
+            Require(fs::is_directory(ready_path.parent_path()) && !fs::exists(ready_path),
+                    "Viewport fresh readiness path required");
+        }
         const auto key = DecodeKey(*key_text);
         const auto project = Path(*project_text);
         SafePath(project);
@@ -345,6 +367,19 @@ int Serve(int argc, char** argv) {
         std::shared_ptr<const StaticPrefab> prefab;
         {
             StaticRenderer renderer(Utf8(resources), software);
+            if (!ready_path.empty()) {
+                // Publish only after resource verification and renderer startup.
+                // The owned broker validates this bounded marker independently
+                // of the existing authenticated record stream.
+                auto pending = ready_path;
+                pending += ".pending";
+                SafePath(pending);
+                WriteJson(pending,
+                          {{"schema", "luminumbra.viewport.ready.v1"},
+                           {"session", startup_session},
+                           {"pid", Pid()}});
+                fs::rename(pending, ready_path);
+            }
             while (true) {
                 const auto request = Next(key, deadline);
                 gate.Accept(request.header);
@@ -410,9 +445,12 @@ int Serve(int argc, char** argv) {
         std::cerr << "viewport refused: " << error.what() << '\n';
         if (owns)
             try {
-                WriteJson(
-                    output / "failure.json",
-                    {{"status", "refused"}, {"error", error.what()}, {"visual_approved", false}});
+                WriteJson(output / "failure.json",
+                          {{"status", "refused"},
+                           {"session", startup_session},
+                           {"pid", Pid()},
+                           {"error", error.what()},
+                           {"visual_approved", false}});
             } catch (...) {}
         return 1;
     }

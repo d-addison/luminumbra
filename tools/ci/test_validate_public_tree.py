@@ -119,6 +119,13 @@ class PublicTreeValidatorTests(unittest.TestCase):
             {"private-posix-path", "private-windows-path", "aws-access-key"},
         )
 
+    def test_rejects_wsl_unc_paths_in_plain_and_json_escaped_form(self):
+        for text in ("\\\\wsl.localhost\\Ubuntu\\x", '"\\\\\\\\wsl.localhost\\\\Ubuntu\\\\x"',
+                     "//wsl.localhost/Ubuntu/x", "\\\\wsl$\\Ubuntu\\x"):
+            with self.subTest(text=text):
+                self.assertTrue(any(f.rule == "private-unc-path"
+                                    for f in MODULE.inspect_text("notes.txt", text)))
+
 
 if __name__ == "__main__":
     unittest.main()
