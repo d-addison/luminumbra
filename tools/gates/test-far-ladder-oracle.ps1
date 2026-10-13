@@ -148,6 +148,18 @@ $stale = New-OracleArtifact -Mode "ladder"
 $stale.ladder.stale_tiles = 1
 Assert-Rejected { Assert-FarLadderOracleArtifact -Artifact (ConvertTo-OracleRoundTrip $stale) -Name "stale generation" } "stale" "ladder mode with a stale tile"
 
+# Range extras must fail even when the producer reports zero stale generations.
+# The nonzero case must fail for the extra key independently of the stale check.
+foreach ($staleCount in @(0, 1)) {
+    $extraResident = New-OracleArtifact -Mode "ladder"
+    $residentList = New-Object System.Collections.ArrayList
+    $residentList.AddRange([object[]]$extraResident.ladder.resident_tiles)
+    [void]$residentList.Add([object[]]@(1, 1000, 1000))
+    $extraResident.ladder.resident_tiles = $residentList.ToArray()
+    $extraResident.ladder.stale_tiles = $staleCount
+    Assert-Rejected { Assert-FarLadderOracleArtifact -Artifact (ConvertTo-OracleRoundTrip $extraResident) -Name "extra resident" } "extra tile(s) in ladder.resident_tiles" "extra resident with stale_tiles $staleCount"
+}
+
 $notResident = New-OracleArtifact -Mode "ladder"
 $notResident.ladder.resident_tiles = Remove-OracleTile $notResident.ladder.resident_tiles { param($t) [int]$t[0] -eq 2 -and [int]$t[1] -eq 0 -and [int]$t[2] -eq 0 }
 Assert-Rejected { Assert-FarLadderOracleArtifact -Artifact (ConvertTo-OracleRoundTrip $notResident) -Name "absent resident tile" } "resident_tiles" "ladder mode with one expected tile absent from resident_tiles"

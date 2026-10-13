@@ -273,6 +273,10 @@ function Assert-FarLadderOracleArtifact {
         if ($notResident.Count -gt 0) {
             throw "${Name}: ladder mode: missing_expected $($notResident.Count) expected tile(s) absent from ladder.resident_tiles (first missing $($notResident[0]))"
         }
+        $extraResident = @($residentKeys | Where-Object { -not $expectedSet.ContainsKey($_) })
+        if ($extraResident.Count -gt 0) {
+            throw "${Name}: ladder mode: $($extraResident.Count) extra tile(s) in ladder.resident_tiles outside the independent wanted set (first extra $($extraResident[0]))"
+        }
         if ($staleTiles -ne 0) {
             throw "${Name}: ladder mode has $staleTiles stale tile(s), expected 0"
         }
@@ -285,5 +289,44 @@ function Assert-FarLadderOracleArtifact {
         LegacyChecked = $true
         ExpectedByTier = [int64[]]$byTierValues.ToArray()
         MissingExpected = $missingExpected
+    }
+}
+
+# V1 preserves its historical selected-station aggregate. Qualification must
+# instead check every captured station, using that station's own camera XZ.
+# This checks serialization and coverage, not readiness within 90 seconds.
+function Assert-FarLodHorizonStationCoverage {
+    param([object]$Analysis, [string]$Name)
+
+    Assert-FarOracleObject $Analysis $Name "analysis" @("schema", "stations", "aggregates")
+    if ($Analysis.schema -cne "luminumbra.farlod_horizon.v1") {
+        throw "${Name}: analysis.schema is not luminumbra.farlod_horizon.v1"
+    }
+    Assert-FarOracleArray $Analysis.stations $Name "stations"
+    Assert-FarOracleObject $Analysis.aggregates $Name "aggregates" @("captured_stations", "expected_stations")
+    $captured = Get-FarOracleInteger $Analysis.aggregates.captured_stations $Name "aggregates.captured_stations"
+    $expected = Get-FarOracleInteger $Analysis.aggregates.expected_stations $Name "aggregates.expected_stations"
+    $stations = @($Analysis.stations)
+    if (($stations.Count -eq 0) -or ($stations.Count -ne $captured) -or ($captured -ne $expected)) {
+        throw "${Name}: stations has $($stations.Count) rows, captured_stations $captured, expected_stations $expected; expected a complete nonempty capture"
+    }
+
+    for ($i = 0; $i -lt $stations.Count; $i++) {
+        $station = $stations[$i]
+        $path = "stations[${i}]"
+        Assert-FarOracleObject $station $Name $path @("name", "camera", "farlod")
+        Assert-FarOracleObject $station.camera $Name "${path}.camera" @("world_x", "world_z")
+        $cameraX = Get-FarOracleCoordinate $station.camera.world_x $Name "${path}.camera.world_x"
+        $cameraZ = Get-FarOracleCoordinate $station.camera.world_z $Name "${path}.camera.world_z"
+        $wanted = Get-FarLegacyWantedCount -X $cameraX -Z $cameraZ
+        Assert-FarOracleObject $station.farlod $Name "${path}.farlod" @("regions_wanted", "regions_missing")
+        $reportedWanted = Get-FarOracleInteger $station.farlod.regions_wanted $Name "${path}.farlod.regions_wanted"
+        $missing = Get-FarOracleInteger $station.farlod.regions_missing $Name "${path}.farlod.regions_missing"
+        if ($reportedWanted -ne $wanted) {
+            throw "${Name}: ${path} '$($station.name)' regions_wanted is $reportedWanted, the independent legacy oracle expects $wanted"
+        }
+        if ($missing -ne 0) {
+            throw "${Name}: ${path} '$($station.name)' regions_missing is $missing, expected 0"
+        }
     }
 }

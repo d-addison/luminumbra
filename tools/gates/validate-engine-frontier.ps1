@@ -3445,8 +3445,8 @@ function Test-PlayerView {
 # run measures the gbuffer GPU time with far-LOD DISABLED (the honest in-run
 # baseline; the committed perf baseline records frame times, not per-pass GPU
 # times); phase B enables far-LOD and sweeps eye-level + elevated stations.
-# Gates: zero reported missing regions in the legacy runtime wanted set after
-# settle (no independent radius assertion); farlod_resident_bytes below the
+# Gates: camera-derived legacy wanted counts and zero missing regions at every
+# captured station; farlod_resident_bytes below the
 # artifact's resident_budget_bytes threshold; gbuffer_gpu_ms delta
 # < 1.5 ms; horizon screenshots show terrain to the horizon (below-horizon
 # sky ratio bounded); the live/far boundary band ROI (~192 m at the smoke
@@ -3455,7 +3455,8 @@ function Test-PlayerView {
 # The legacy scheduler is checked against an independent legacy oracle
 # (far-ladder-oracle.ps1, from the v2 oracle artifact). The volumetric ladder is
 # checked only when the artifact mode is ladder; otherwise ladder_checked is
-# reported false.
+# reported false. The sweep's capture scheduling does not prove readiness
+# within the required 90 seconds; these coverage checks do not establish it.
 
 function Test-FarLodHorizon {
     $exe = Get-ClientExe
@@ -3490,8 +3491,13 @@ function Test-FarLodHorizon {
         $analysis = Read-JsonArtifact -Path $analysisPath -Schema "luminumbra.farlod_horizon.v1"
         $oracle = Read-JsonArtifact -Path (Join-Path $viewDir "farlod-horizon-ladder-oracle.json") -Schema "luminumbra.farlod_horizon.v2"
         $oracleResult = Assert-FarLadderOracleArtifact -Artifact $oracle -Name "farlod horizon ($preset) oracle"
-        if ([int64]$oracle.legacy.regions_wanted -ne [int64]$analysis.farlod.regions_wanted) {
-            throw "farlod horizon ($preset) oracle legacy.regions_wanted $($oracle.legacy.regions_wanted) differs from runtime farlod.regions_wanted $($analysis.farlod.regions_wanted)"
+        Assert-FarLodHorizonStationCoverage -Analysis $analysis -Name "farlod horizon ($preset)"
+        foreach ($counter in @("regions_wanted", "regions_resident", "regions_missing")) {
+            $oracleCount = Get-FarOracleInteger $oracle.legacy.$counter "farlod horizon ($preset) oracle" "legacy.$counter"
+            $analysisCount = Get-FarOracleInteger $analysis.farlod.$counter "farlod horizon ($preset)" "farlod.$counter"
+            if ($oracleCount -ne $analysisCount) {
+                throw "farlod horizon ($preset) oracle legacy.$counter $oracleCount differs from runtime farlod.$counter $analysisCount"
+            }
         }
         $ladderCheckedText = "false"
         if ($oracleResult.LadderChecked) { $ladderCheckedText = "true" }
@@ -3507,10 +3513,8 @@ function Test-FarLodHorizon {
             throw "farlod horizon ($preset) captured $($analysis.aggregates.captured_stations) of $($analysis.aggregates.expected_stations) stations"
         }
 
-        # After settle: zero reported missing regions in the runtime wanted set.
-        # This does not check thresholds.f2_outer_range_m (legacy metadata) or
-        # compute an expected set independently. See world/FarTierTable.h for
-        # the future volumetric ladder; assertions stay unchanged here.
+        # Retain the aggregate checks alongside the per-station independent
+        # coverage checks above. thresholds.f2_outer_range_m is v1 metadata.
         if ([int64]$analysis.farlod.regions_missing -gt 0) {
             throw "farlod horizon ($preset) has $($analysis.farlod.regions_missing) missing wanted far regions after settle"
         }

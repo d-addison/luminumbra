@@ -1181,14 +1181,25 @@ target_link_libraries(runtime_world_visual_validation_test PRIVATE
     glad
 )
 
+# Calls the production artifact writer with synthetic captures, without a GL
+# context or scenario execution. PowerShell validates both emitted schemas.
+add_executable(far_ladder_oracle_writer_fixture
+    client/far_ladder_oracle_writer_fixture.cpp
+)
+target_link_libraries(far_ladder_oracle_writer_fixture PRIVATE luminumbra_client_qa)
+luminumbra_configure_first_party_target(far_ladder_oracle_writer_fixture)
+
 if(WIN32)
     target_link_libraries(runtime_world_visual_validation_test PRIVATE opengl32)
+    target_link_libraries(far_ladder_oracle_writer_fixture PRIVATE opengl32)
 elseif(APPLE)
     find_package(OpenGL REQUIRED)
     target_link_libraries(runtime_world_visual_validation_test PRIVATE ${OPENGL_LIBRARIES})
+    target_link_libraries(far_ladder_oracle_writer_fixture PRIVATE ${OPENGL_LIBRARIES})
 else()
     find_package(OpenGL REQUIRED)
     target_link_libraries(runtime_world_visual_validation_test PRIVATE OpenGL::GL)
+    target_link_libraries(far_ladder_oracle_writer_fixture PRIVATE OpenGL::GL)
 endif()
 
 #   spike benchmark (manual/excluded-by-default: Debug runtime
@@ -1939,6 +1950,21 @@ else()
     message(STATUS "PowerShell unavailable: CaptureArtifactValidationContract is not registered")
     message(STATUS "PowerShell unavailable: FarLadderOracleContract is not registered")
     message(STATUS "PowerShell unavailable: LuaApiManifestSourceContract is not registered")
+endif()
+
+# This integration requires pwsh specifically. Keep the existing discovery
+# above (including its Windows PowerShell fallback) for the file-only checks.
+# Linux coverage is conditional on discovering pwsh; Windows/MSVC CI requires
+# this exact test with --no-tests=error.
+find_program(FAR_LADDER_ORACLE_PWSH NAMES pwsh)
+if(FAR_LADDER_ORACLE_PWSH)
+    add_test(NAME FarLadderOracleWriterContract
+        COMMAND "${FAR_LADDER_ORACLE_PWSH}" -NoLogo -NoProfile -NonInteractive
+            -ExecutionPolicy Bypass -File "${CMAKE_SOURCE_DIR}/tools/gates/test-far-ladder-oracle-writer.ps1"
+            -FixtureExe "$<TARGET_FILE:far_ladder_oracle_writer_fixture>")
+    set_tests_properties(FarLadderOracleWriterContract PROPERTIES LABELS "tools" TIMEOUT 60)
+else()
+    message(STATUS "pwsh unavailable: FarLadderOracleWriterContract is not registered")
 endif()
 set(_vc_candidates "")
 if(DEFINED ENV{VISUAL_SWEEP_PYTHON})

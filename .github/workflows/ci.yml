@@ -266,6 +266,10 @@ jobs:
           Enter-VsDevShell -VsInstallPath $installPath -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'
           cmake --preset release -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl
           cmake --build --preset release --parallel 4
+          # Require the file-only production writer/oracle integration even
+          # when optional PowerShell discovery would omit it from the suite.
+          ctest --preset release --no-tests=error `
+            -R '^FarLadderOracleWriterContract$' --output-on-failure
           # Retain one CPU-only diagnostic binary with its compiler runtime so a
           # terrain-hash failure can distinguish compiler output from host effects.
           # This temporary CI artifact is not a software release or game package.
