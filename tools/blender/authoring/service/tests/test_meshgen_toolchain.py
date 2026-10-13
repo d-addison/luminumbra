@@ -328,9 +328,18 @@ class ScriptPins(unittest.TestCase):
         probe.unlink()
         original = ScriptInventory.canonical_path
         backup = replaced.with_name(replaced.name + "-original")
+        blocked = []
         def replace_after_check(current, path):
             checked = original(current, path)
-            replaced.rename(backup)
+            try:
+                replaced.rename(backup)
+            except PermissionError as error:
+                # Windows refuses to rename a directory while a handle beneath it
+                # is open, so the swap itself cannot happen there.
+                if getattr(error, "winerror", None) != 5:
+                    raise
+                blocked.append(error)
+                return checked
             try:
                 replaced.symlink_to(outside, target_is_directory=True)
             except BaseException:
@@ -339,9 +348,15 @@ class ScriptPins(unittest.TestCase):
             return checked
         try:
             with mock.patch.object(ScriptInventory, "canonical_path", autospec=True, side_effect=replace_after_check):
-                with self.assertRaises(Refusal) as caught:
-                    inventory.source(self.helper)
-            self.assertEqual(caught.exception.finding["rule_id"], "path.symlink")
+                try:
+                    source = inventory.source(self.helper)
+                except Refusal as refusal:
+                    self.assertEqual(blocked, [])
+                    self.assertEqual(refusal.finding["rule_id"], "path.symlink")
+                else:
+                    self.assertTrue(blocked, "the replaced tree was read without a refusal")
+                    self.assertFalse(replaced.is_symlink())
+                    self.assertEqual(source, self.helper.read_bytes())
         finally:
             if replaced.is_symlink():
                 replaced.unlink()
