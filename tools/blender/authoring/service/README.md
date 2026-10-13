@@ -281,9 +281,13 @@ animation or newly authored production-content acceptance.
 
 Windows sharing qualification uses
 `python -B test/viewport/probe_windows_file_io.py --receipt /fresh/receipt.json`.
-Its sixteen contracts include an independently packaged service subprocess
+Its nineteen contracts include an independently packaged service subprocess
 publishing `current.json` while the packaged generation reader holds the old
 file, a real non-sharing CRT-reader negative control, and unchanged input pins.
+The MG2 ledger regression holds the same reader used by `status()` across
+`update()` and terminal publication, including owner removal. It runs without
+mocks on POSIX and Windows in the `Authoring mock / windows-2025` CI lane;
+Windows publication requests a handle flush while POSIX fsyncs the directory.
 It does not qualify the native renderer or Blender adapter.
 
 ## MG2 E3: licence admission and the synthetic backend
@@ -468,7 +472,7 @@ Binding Q&A coverage (test method names are exact; all files are under
 | 25 | `test_read_only_access_has_no_state_or_build_lock`; `test_project_wide_lock_contention_across_documents`; `test_dead_or_reused_pid_recovery_cancels_backend_and_fails_marker`; `test_orphan_marker_without_lock_is_reconciled`; `test_active_duplicate_from_another_owner_cannot_reattach`; `test_atomic_owner_publication_and_malformed_owner_reconciliation`; `test_invalid_markers_cannot_reconcile_or_release_a_lock`; `test_unconfirmed_orphan_keeps_ownership_until_recovery_confirms_stop`; `test_separate_process_lock_contention`; `test_separate_process_crash_at_each_reservation_publication` |
 | 26 | `test_reservation_reconstruction_conflicts_orphans_and_project_quotas`; `test_orphan_directory_and_retained_bytes_count_toward_admission`; `test_mock_record_and_byte_quotas_preserve_replay`; `test_stage_specific_replay_conflict_active_duplicate_and_quota`; `test_scene_revision_does_not_cancel_but_session_change_prevents_staging`; `test_cancel_before_commit_and_cancel_after_committed_success`; `test_cancellation_and_candidate_commit_are_one_serialized_transition` |
 | 38 (backend sequence) | `test_sequential_four_candidates_retain_each_seed_without_overflow`. Native previews and import selection remain G2/G3. |
-| 40 (mutable ledger groundwork) | `test_terminal_hash_tampering_is_refused`; `test_interrupted_terminal_publication_preserves_original_result`; `test_durable_publication_flushes_file_before_directory`; `test_windows_replace_uses_replace_existing_and_write_through`. Prepared candidate receipt/seal transaction remains E4. |
+| 40 (mutable ledger groundwork) | `test_terminal_hash_tampering_is_refused`; `test_interrupted_terminal_publication_preserves_original_result`; `test_durable_publication_flushes_file_before_directory`; `test_file_replace_uses_shared_publication_with_durability`; `test_windows_directory_replace_uses_replace_existing_and_write_through`; `test_actual_held_ledger_reader_allows_update_and_terminal_transition`. Prepared candidate receipt/seal transaction remains E4. |
 | 41, 42 (retained backend evidence / parent gate) | `test_escaped_tokens_in_decoded_logs_glb_json_and_raw_bytes_are_never_retained`; `test_mock_raw_ready_replay_retained_bytes_and_eof`; `test_tokens_are_references_only_and_not_in_wire`; `test_mock_permission_and_forced_nonshipping_are_distinct`. Provenance v2 assembly remains E4. |
 | 52 | `test_existing_ci_discovers_new_service_tests`; `test_new_runtime_modules_use_only_stdlib_and_service_imports`; `test_package_ships_broker_modules_and_excludes_mock_and_adapters`. The import check scans E1 and all three E3 runtime modules, including nested platform imports. The new review regressions are in `test_meshgen_e3_review.py`; refusal assertions check exact `rule_id` values. Native acceptance remains pending. |
 

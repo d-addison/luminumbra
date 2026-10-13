@@ -18,6 +18,7 @@ import threading
 import time
 import uuid
 
+from . import file_io
 from .contracts import (Refusal, canonical, digest, keys, path_is_link,
                         read_bounded, relative_path, require)
 from .locking import ProjectLock
@@ -57,6 +58,12 @@ def sync_directory(path):
 
 
 def durable_replace(source, destination):
+    file_io.replace_file(source, destination, durable=True)
+    sync_directory(destination.parent)
+
+
+def durable_replace_directory(source, destination):
+    """Directory moves remain separate from regular-file publication."""
     if os.name == "nt":
         import ctypes
         from ctypes import wintypes
@@ -81,7 +88,7 @@ def durable_mkdir(path):
         temporary.mkdir(mode=0o700)
         try:
             try:
-                durable_replace(temporary, path)
+                durable_replace_directory(temporary, path)
             except OSError:
                 if not path.is_dir():
                     raise

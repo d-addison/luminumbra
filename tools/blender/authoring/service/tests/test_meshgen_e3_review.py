@@ -457,12 +457,19 @@ class LedgerReviewTests(RuleAssertions, unittest.TestCase):
             jobs.durable_remove(self.project / "bytes")
         self.assertEqual(actions, ["directory", "directory", "directory"])
 
-    def test_windows_replace_uses_replace_existing_and_write_through(self):
+    def test_file_replace_uses_shared_publication_with_durability(self):
+        source, target = self.project / "source", self.project / "target"
+        with patch.object(jobs.file_io, "replace_file") as replace, patch.object(jobs, "sync_directory") as sync:
+            jobs.durable_replace(source, target)
+        replace.assert_called_once_with(source, target, durable=True)
+        sync.assert_called_once_with(target.parent)
+
+    def test_windows_directory_replace_uses_replace_existing_and_write_through(self):
         source, target = self.project / "source", self.project / "target"
         kernel = Mock()
         kernel.MoveFileExW.return_value = True
         with patch.object(jobs.os, "name", "nt"), patch.object(ctypes, "WinDLL", return_value=kernel, create=True):
-            jobs.durable_replace(source, target)
+            jobs.durable_replace_directory(source, target)
         kernel.MoveFileExW.assert_called_once_with(str(source), str(target), 0x1 | 0x8)
 
     def child(self, source, *arguments, interactive=False):
