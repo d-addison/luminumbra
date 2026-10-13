@@ -272,33 +272,47 @@ public:
     HookGuard& operator=(const HookGuard&) = delete;
 };
 
-fs::path g_capture_source;
-fs::path g_capture_target;
+struct JournalCaptureState {
+    fs::path source;
+    fs::path target;
+};
+
+JournalCaptureState& JournalCapture() {
+    static JournalCaptureState state;
+    return state;
+}
 
 void CaptureJournalHook(const char* step, const fs::path& /*path*/) {
-    if (std::string_view(step) == "commit-point" && fs::exists(g_capture_source)) {
-        CopyTree(g_capture_source, g_capture_target);
+    if (std::string_view(step) == "commit-point" && fs::exists(JournalCapture().source)) {
+        CopyTree(JournalCapture().source, JournalCapture().target);
     }
 }
 
 #if !defined(_WIN32)
 // Death-test state. Death tests run in forked children (gtest "fast" style), so the parent-side
 // paths are inherited unchanged by the child.
-int g_kill_at = 0;
-int g_calls = 0;
-int g_published_at = 0;
-int g_last_exit_code = -1;
+struct DeathTestState {
+    int kill_at = 0;
+    int calls = 0;
+    int published_at = 0;
+    int last_exit_code = -1;
+};
+
+DeathTestState& DeathState() {
+    static DeathTestState state;
+    return state;
+}
 
 void KillHook(const char* /*step*/, const fs::path& /*path*/) {
-    if (++g_calls == g_kill_at) {
+    if (++DeathState().calls == DeathState().kill_at) {
         std::_Exit(7);
     }
 }
 
 void RecordHook(const char* step, const fs::path& /*path*/) {
-    ++g_calls;
-    if (g_published_at == 0 && std::string_view(step) == "journal-published") {
-        g_published_at = g_calls;
+    ++DeathState().calls;
+    if (DeathState().published_at == 0 && std::string_view(step) == "journal-published") {
+        DeathState().published_at = DeathState().calls;
     }
 }
 
@@ -307,8 +321,8 @@ bool KilledOrFinished(int status) {
     if (!WIFEXITED(status)) {
         return false;
     }
-    g_last_exit_code = WEXITSTATUS(status);
-    return g_last_exit_code == 7 || g_last_exit_code == 0;
+    DeathState().last_exit_code = WEXITSTATUS(status);
+    return DeathState().last_exit_code == 7 || DeathState().last_exit_code == 0;
 }
 
 bool RunScenario(const fs::path& dir) {
@@ -320,16 +334,16 @@ bool RunScenario(const fs::path& dir) {
 }
 
 void ChildKillScenario(const fs::path& dir, int kill_at) {
-    g_calls = 0;
-    g_kill_at = kill_at;
+    DeathState().calls = 0;
+    DeathState().kill_at = kill_at;
     set_snapshot_step_hook_for_testing(&KillHook);
     const bool ok = RunScenario(dir);
     std::_Exit(ok ? 0 : 9);
 }
 
 void ChildKilledRecovery(const fs::path& dir, int kill_at) {
-    g_calls = 0;
-    g_kill_at = kill_at;
+    DeathState().calls = 0;
+    DeathState().kill_at = kill_at;
     set_snapshot_step_hook_for_testing(&KillHook);
     (void)recover_pending_journal(dir, nullptr);
     std::_Exit(0);
@@ -560,18 +574,19 @@ TEST(SaveTransaction, RecoveryDiscardsStaleJournalWhenIndexAlreadyCommitted) {
     ASSERT_TRUE(CommitOnce(save.path(), 1, {{"world_info.json", "v0"}}));
 
     TempSave side;
-    g_capture_source = journal_directory(save.path());
-    g_capture_target = side.path() / "stale_journal";
-    fs::remove_all(g_capture_target);
+    JournalCapture().source = journal_directory(save.path());
+    JournalCapture().target = side.path() / "stale_journal";
+    fs::remove_all(JournalCapture().target);
     {
         HookGuard guard(&CaptureJournalHook);
         ASSERT_TRUE(CommitOnce(save.path(), 2, {{"world_info.json", "v1"}}));
     }
-    ASSERT_TRUE(fs::exists(g_capture_target / "txn.json")) << "stale journal was not captured";
+    ASSERT_TRUE(fs::exists(JournalCapture().target / "txn.json"))
+        << "stale journal was not captured";
     ASSERT_FALSE(journal_pending(save.path()));
     const TreeMap post_commit = Tree(save.path());
 
-    CopyTree(g_capture_target, journal_directory(save.path()));
+    CopyTree(JournalCapture().target, journal_directory(save.path()));
     ASSERT_TRUE(journal_pending(save.path()));
 
     std::vector<std::string> errors;
@@ -653,10 +668,10 @@ TEST(SaveTransactionDeathTest, KillAtEveryStepRecoversToBaselineOrFinal) {
     for (int n = 1; n <= 200 && !saw_finish; ++n) {
         CopyTree(base.path(), work.path());
         EXPECT_EXIT(ChildKillScenario(work.path(), n), KilledOrFinished, "");
-        ASSERT_TRUE(g_last_exit_code == 0 || g_last_exit_code == 7)
-            << "N=" << n << " child exit=" << g_last_exit_code;
+        ASSERT_TRUE(DeathState().last_exit_code == 0 || DeathState().last_exit_code == 7)
+            << "N=" << n << " child exit=" << DeathState().last_exit_code;
 
-        const bool finished = g_last_exit_code == 0;
+        const bool finished = DeathState().last_exit_code == 0;
         if (!finished) {
             ++killed;
         }
@@ -692,21 +707,21 @@ TEST(SaveTransactionDeathTest, RecoveryItselfSurvivesKillAtEachRollbackEntry) {
     // Probe the total hook count of the scenario, and the first journal-published hook.
     TempSave probe;
     CopyTree(base.path(), probe.path());
-    g_calls = 0;
-    g_published_at = 0;
+    DeathState().calls = 0;
+    DeathState().published_at = 0;
     {
         HookGuard guard(&RecordHook);
         ASSERT_TRUE(RunScenario(probe.path()));
     }
-    ASSERT_GT(g_published_at, 0);
-    ASSERT_GT(g_calls, g_published_at);
+    ASSERT_GT(DeathState().published_at, 0);
+    ASSERT_GT(DeathState().calls, DeathState().published_at);
     // Midway between journal publication and the end of the transaction: the journal still exists.
-    const int kill_at = (g_published_at + g_calls) / 2;
+    const int kill_at = (DeathState().published_at + DeathState().calls) / 2;
 
     TempSave dead;
     CopyTree(base.path(), dead.path());
     EXPECT_EXIT(ChildKillScenario(dead.path(), kill_at), KilledOrFinished, "");
-    ASSERT_EQ(g_last_exit_code, 7) << "transaction was not killed at hook " << kill_at;
+    ASSERT_EQ(DeathState().last_exit_code, 7) << "transaction was not killed at hook " << kill_at;
     ASSERT_TRUE(journal_pending(dead.path())) << "kill_at=" << kill_at;
 
     bool saw_finish = false;
@@ -715,9 +730,9 @@ TEST(SaveTransactionDeathTest, RecoveryItselfSurvivesKillAtEachRollbackEntry) {
         TempSave rec;
         CopyTree(dead.path(), rec.path());
         EXPECT_EXIT(ChildKilledRecovery(rec.path(), m), KilledOrFinished, "");
-        ASSERT_TRUE(g_last_exit_code == 0 || g_last_exit_code == 7)
-            << "M=" << m << " child exit=" << g_last_exit_code;
-        const bool finished = g_last_exit_code == 0;
+        ASSERT_TRUE(DeathState().last_exit_code == 0 || DeathState().last_exit_code == 7)
+            << "M=" << m << " child exit=" << DeathState().last_exit_code;
+        const bool finished = DeathState().last_exit_code == 0;
         if (!finished) {
             ++recovery_kills;
         }

@@ -421,6 +421,8 @@ ActiveRegionLedger::schedule_in_place(const WorldClock& clock,
     result.digest = Persistence::StableChecksum(trace);
     // Retention runs after the digest so the digest and trace describe the pre-eviction state.
     evict_idle(clock, owned);
+    // Consumers may create authority and publish work only for surviving records.
+    std::erase_if(result.due, [this](RegionKey key) { return !m_records.contains(key); });
     result.ledger_records = m_records.size();
     return result;
 }
@@ -767,11 +769,12 @@ bool ActiveRegionLedger::decode(std::string_view bytes,
                     if (length < 4)
                         return false;
                     Reader completed(value);
-                    const auto count = completed.read(4);
-                    if (count == 0 || count > result.m_records.size() || length != 4 + 16 * count)
+                    const auto completed_count = completed.read(4);
+                    if (completed_count == 0 || completed_count > result.m_records.size() ||
+                        length != 4 + 16 * completed_count)
                         return false;
                     std::optional<RegionKey> prior;
-                    for (std::uint64_t entry = 0; entry < count; ++entry) {
+                    for (std::uint64_t entry = 0; entry < completed_count; ++entry) {
                         const RegionKey key{std::bit_cast<std::int32_t>(
                                                 static_cast<std::uint32_t>(completed.read(4))),
                                             std::bit_cast<std::int32_t>(

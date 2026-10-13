@@ -1843,8 +1843,7 @@ void GameSession::RunRegionScheduler(std::uint64_t current_tick) {
                 ? std::optional<std::span<const Vec3>>(*m_replicatedSimulationAnchors)
                 : std::nullopt;
         // Built lazily on the first probe call of this tick.
-        std::optional<std::set<RegionKey>> resident_regions;
-        std::optional<std::set<RegionKey>> plant_regions;
+        std::optional<std::set<RegionKey>> owned_regions;
         try {
             m_regionSchedule = m_activeRegionLedger.schedule(
                 m_worldClock,
@@ -1864,22 +1863,10 @@ void GameSession::RunRegionScheduler(std::uint64_t current_tick) {
                                                             PlantRegionProjection(key),
                                                         RegionalFieldProjection(key)});
                 },
-                // Persistent plants and creatures additionally extend this ownership probe below.
-                [this, &resident_regions, &plant_regions](RegionKey key) {
-                    for (const auto& entry : m_regionWork)
-                        if (entry.key == key)
-                            return true;
+                // Plants, foliage pages and water debt retain their owners alongside fields,
+                // ground objects, pending work and authoritative chunks.
+                [this, &owned_regions](RegionKey key) {
                     if (m_activeRegionLedger.water_debts().contains(key))
-                        return true;
-                    if (!plant_regions) {
-                        plant_regions.emplace();
-                        for (auto e : m_registry.view<const Components::PlantRegionComponent>()) {
-                            const auto& owner =
-                                m_registry.get<const Components::PlantRegionComponent>(e);
-                            plant_regions->insert({owner.owner_x, owner.owner_z});
-                        }
-                    }
-                    if (plant_regions->contains(key))
                         return true;
                     if (m_groundObjects.owns_region(key))
                         return true;
@@ -1888,12 +1875,19 @@ void GameSession::RunRegionScheduler(std::uint64_t current_tick) {
                     if (m_activeRegionLedger.energy_ages().contains(key) ||
                         (m_energyFieldState && m_energyFieldState->OwnsRegion(key)))
                         return true;
-                    if (!resident_regions) {
-                        resident_regions.emplace();
+                    if (!owned_regions) {
+                        owned_regions.emplace();
+                        for (auto e : m_registry.view<const Components::PlantRegionComponent>()) {
+                            const auto& owner =
+                                m_registry.get<const Components::PlantRegionComponent>(e);
+                            owned_regions.value().insert({owner.owner_x, owner.owner_z});
+                        }
+                        for (const auto& entry : m_regionWork)
+                            owned_regions.value().insert(entry.key);
                         for (const auto& coords : m_worldSystem->durable_chunk_inventory()) {
                             int rx = 0, rz = 0;
                             Persistence::WorldSaveService::region_coords_for_chunk(coords, rx, rz);
-                            resident_regions->insert(RegionKey{rx, rz});
+                            owned_regions.value().insert(RegionKey{rx, rz});
                         }
                         for (const auto& chunk : m_worldSystem->snapshot_authoritative_chunks()) {
                             if (!chunk ||
@@ -1902,10 +1896,10 @@ void GameSession::RunRegionScheduler(std::uint64_t current_tick) {
                             int rx = 0, rz = 0;
                             Persistence::WorldSaveService::region_coords_for_chunk(
                                 chunk->get_coords(), rx, rz);
-                            resident_regions->insert(RegionKey{rx, rz});
+                            owned_regions.value().insert(RegionKey{rx, rz});
                         }
                     }
-                    return resident_regions->contains(key);
+                    return owned_regions.value().contains(key);
                 });
             m_regionWork.clear();
         } catch (const std::exception& error) {
@@ -3599,7 +3593,7 @@ bool GameSession::HasScentBorderWork() const {
         return false;
     for (int z = 0; z < kScentFieldCells; ++z)
         for (int x = 0; x < kScentFieldCells; ++x)
-            for (const auto offset : {std::pair{1, 0}, std::pair{0, 1}}) {
+            for (const auto& offset : {std::pair{1, 0}, std::pair{0, 1}}) {
                 const int nx = x + offset.first, nz = z + offset.second;
                 if (nx >= kScentFieldCells || nz >= kScentFieldCells ||
                     ScentCellOwner(x, z) == ScentCellOwner(nx, nz) || !ScentEdgeOpen(x, z, nx, nz))

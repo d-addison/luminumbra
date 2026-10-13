@@ -200,6 +200,7 @@ public:
     // Inputs are complete for this host tick. Duplicate work entries are summed
     // before any decision; unknown regions and repeated/backward ticks refuse.
     // nullopt uses the local single-player anchor; an explicit empty span visits nothing.
+    // due lists only records that survive this tick's retention, in scheduler order.
     RegionSchedule schedule(const WorldClock& clock,
                             std::optional<std::span<const Vec3>> replicated_anchors = std::nullopt,
                             std::span<const RegionWork> work = {},
@@ -216,7 +217,8 @@ private:
                                      std::span<const RegionWork> work,
                                      const DurableDigest& durable_digest,
                                      const OwnershipProbe& owned);
-    // Drops idle, unowned, non-pinned, unedited, unpopulated records with no water cursor.
+    // Drops idle, unowned, non-pinned, unedited, unpopulated records with no water cursor,
+    // water debt, completed work or energy age, including records due in the current schedule.
     void evict_idle(const WorldClock& clock, const OwnershipProbe& owned);
     ActiveRegionRecord& activate(RegionKey key, const WorldClock& clock);
     void visit(const Vec3& anchor, const WorldClock& clock, RegionRejections& rejected);

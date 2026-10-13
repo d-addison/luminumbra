@@ -9,15 +9,19 @@
 #include <bit>
 #include <chrono>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <limits>
 #include <map>
+#include <memory>
+#include <span>
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -38,6 +42,7 @@
 #include "luminumbra_common/systems/PlantDiseaseSystem.h"
 #include "luminumbra_common/systems/PlantGrowthSystem.h"
 #include "luminumbra_common/systems/RegionalFoliage.h"
+#include "luminumbra_common/systems/WaterSystem.h"
 #include "luminumbra_common/systems/WeatherSystem.h"
 #include "luminumbra_common/systems/WindFieldSystem.h"
 
@@ -1580,7 +1585,7 @@ static std::uint64_t Digest(const std::filesystem::path& save,
                             std::vector<std::shared_ptr<Luminumbra::Chunk>> live,
                             std::vector<std::shared_ptr<Luminumbra::Chunk>> parked = {}) {
     return P::WorldSaveService::region_simulation_digest(
-        save, key, P::RegionDigestInputs{std::move(live), std::move(parked)});
+        save, key, P::RegionDigestInputs{std::move(live), std::move(parked), {}, {}, {}});
 }
 
 TEST(GameSessionHeadlessWorldTest, RegionDigestExcludesPristineAndLoadingChunks) {
@@ -1822,6 +1827,260 @@ TEST(GameSessionHeadlessWorldTest, QueuedRegionWorkRefusesSaveUntilTickCompletes
     }
     EXPECT_EQ(loaded.GetRegionSchedule(), session.GetRegionSchedule());
     EXPECT_EQ(SessionWorldHash(loaded), SessionWorldHash(session));
+}
+
+TEST(GameSessionHeadlessWorldTest, IdleRetentionMatchesWorkAndAuthoritativeResidentOwnership) {
+    using Luminumbra::world::ActiveRegionLedger;
+    using Luminumbra::world::ActiveRegionRecord;
+    using Luminumbra::world::FieldPageState;
+    using Luminumbra::world::RegionKey;
+    using Luminumbra::world::RegionState;
+    using Luminumbra::world::RegionWork;
+    using Luminumbra::world::WorldClock;
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    session.SetRootPath(root.root_string());
+    session.SetJobSystem(&jobs);
+    session.SetActiveRegionsEnabled(true);
+    ASSERT_TRUE(session.CreateWorld("Idle retention", "1337", "default"));
+    ASSERT_TRUE(session.SaveWorldState());
+
+    const RegionKey pending{40, -40}, duplicate{41, -40}, zero_count{42, -40};
+    const RegionKey resident{43, -40}, pristine{44, -40}, unowned{45, -40};
+    const RegionKey non_due_resident{46, -40};
+    const std::array keys{
+        pending, duplicate, zero_count, resident, pristine, unowned, non_due_resident};
+    ActiveRegionLedger staged;
+    staged.set_local_anchor(session.GetMetadata().spawnPoint);
+    for (const auto key : keys) {
+        staged.pin(key, true, WorldClock{});
+        staged.pin(key, false, WorldClock{});
+    }
+    {
+        // This authority must rely on the ownership probe without initializing field pages.
+        auto& record = const_cast<std::map<RegionKey, ActiveRegionRecord>&>(staged.records())
+                           .at(non_due_resident);
+        record.wake_pending = false;
+        record.state = RegionState::Frozen;
+        record.frozen_at = 1;
+        record.cadence_shift = staged.config().reduced_shift;
+        record.cadence_phase = ActiveRegionLedger::phase(non_due_resident, record.cadence_shift);
+    }
+    // Stage just before retention without advancing thousands of simulation ticks.
+    const WorldClock before_idle(ActiveRegionLedger::kIdleEvictionTicks - 1);
+    staged.schedule(before_idle, std::span<const Luminumbra::Vec3>{});
+    const auto save = session.GetWorldSaveDir();
+    auto metadata = nlohmann::json::parse(ReadClockTestFile(save / "world_info.json"));
+    before_idle.write_metadata(metadata);
+    ASSERT_TRUE(
+        P::WorldSaveService::save_metadata_and_active_regions(metadata.dump(), staged, save));
+    ASSERT_TRUE(session.LoadWorldStateFrom(save)) << session.GetWorldOpenError();
+    ASSERT_EQ(session.GetActiveRegionLedger().records().size(), keys.size());
+    ASSERT_TRUE(session.GetRegistry().view<C::PlantTag>().empty());
+    ASSERT_TRUE(session.GetFieldPages().soil().empty());
+    ASSERT_TRUE(session.GetFieldPages().irrigation().empty());
+    session.SetReplicatedSimulationAnchors({});
+    for (const auto key : keys) {
+        const auto& record = session.GetActiveRegionLedger().records().at(key);
+        ASSERT_FALSE(record.pinned);
+        ASSERT_FALSE(record.edited);
+        ASSERT_FALSE(record.populated);
+        ASSERT_EQ(record.water_cursor, 0u);
+        ASSERT_EQ(record.last_proximity, 0u);
+        ASSERT_FALSE(session.GetFieldPages().owns_region(key));
+        ASSERT_FALSE(session.GetActiveRegionLedger().completed_work().contains(key));
+        ASSERT_FALSE(session.GetActiveRegionLedger().energy_ages().contains(key));
+    }
+    for (const auto key : {pristine, unowned})
+        ASSERT_EQ(session.GetActiveRegionLedger().records().at(key).state, RegionState::Active);
+
+    for (const auto key : {resident, pristine, non_due_resident}) {
+        auto chunk =
+            std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3(key.x * 32, 0, key.z * 32));
+        chunk->set_state(Luminumbra::ChunkState::Idle);
+        chunk->heightmap_data = {8.0f};
+        if (key != pristine)
+            chunk->mark_voxel_data_dirty();
+        ASSERT_TRUE(session.GetWorldSystem()->adopt_streamed_chunk(chunk));
+        // Stage resident authority without relying on an edited ledger flag.
+        ASSERT_FALSE(session.GetActiveRegionLedger().records().at(key).edited);
+    }
+    const std::array work{RegionWork{pending, 3, 0, 0, 0},
+                          RegionWork{duplicate, 1, 0, 0, 0},
+                          RegionWork{duplicate, 2, 0, 0, 0},
+                          RegionWork{zero_count, 0, 0, 0, 0},
+                          RegionWork{zero_count, 0, 0, 0, 0}};
+    for (const auto& entry : work)
+        session.RecordActiveRegionWork(entry);
+    auto expected = session.GetActiveRegionLedger();
+    const std::array owned_keys{pending, duplicate, zero_count, resident, non_due_resident};
+    const auto expected_schedule = expected.schedule(
+        WorldClock(ActiveRegionLedger::kIdleEvictionTicks),
+        std::span<const Luminumbra::Vec3>{},
+        work,
+        {},
+        [&owned_keys](RegionKey key) {
+            return std::find(owned_keys.begin(), owned_keys.end(), key) != owned_keys.end();
+        });
+    ASSERT_EQ(expected_schedule.due,
+              (std::vector<RegionKey>{pending, duplicate, zero_count, resident}));
+    const auto dt = session.GetSimulationClock().fixed_dt();
+    ASSERT_EQ(session.TickSimulation(dt), 1u);
+    const auto& fault = session.GetRegionSchedulerFault();
+    ASSERT_FALSE(fault) << (fault ? fault->message : "");
+    std::vector<RegionWork> completed;
+    for (const auto key : expected_schedule.due) {
+        // This fixture has no foliage authority. The first due tick seeds ambient cells
+        // and advances the regional weather clock, with no additional S7 work.
+        const auto cells = FieldPageState::cells_of_region(key).size();
+        EXPECT_EQ(session.GetFieldPages().owned_initialized_cells(key), cells);
+        EXPECT_EQ(session.GetFieldPages().weather_clocks().at(key), 1u);
+        completed.push_back({key, 0, 0, 0, cells + 1});
+    }
+    expected.publish_completed_work(completed);
+    EXPECT_EQ(session.GetRegionSchedule(), expected_schedule);
+    EXPECT_EQ(session.GetActiveRegionLedger().canonical_bytes(), expected.canonical_bytes());
+    EXPECT_EQ(session.GetActiveRegionLedger().encode(), expected.encode());
+    ASSERT_EQ(session.GetActiveRegionLedger().records().size(), owned_keys.size());
+    for (const auto key : owned_keys)
+        EXPECT_TRUE(session.GetActiveRegionLedger().records().contains(key));
+    EXPECT_FALSE(session.GetActiveRegionLedger().records().contains(pristine));
+    EXPECT_FALSE(session.GetActiveRegionLedger().records().contains(unowned));
+    for (const auto key : {pristine, unowned}) {
+        EXPECT_EQ(std::find(session.GetRegionSchedule().due.begin(),
+                            session.GetRegionSchedule().due.end(),
+                            key),
+                  session.GetRegionSchedule().due.end());
+        EXPECT_FALSE(session.GetFieldPages().owns_region(key));
+        EXPECT_FALSE(session.GetActiveRegionLedger().completed_work().contains(key));
+    }
+    EXPECT_EQ(session.GetActiveRegionLedger().records().at(non_due_resident).state,
+              RegionState::Frozen);
+    EXPECT_EQ(session.GetActiveRegionLedger().records().at(non_due_resident).last_ticked, 0u);
+    EXPECT_FALSE(session.GetFieldPages().owns_region(non_due_resident));
+    EXPECT_FALSE(session.GetActiveRegionLedger().completed_work().contains(non_due_resident));
+    EXPECT_FALSE(session.GetActiveRegionLedger().energy_ages().contains(non_due_resident));
+
+    // Consumed host work expires; field pages own due keys and resident authority owns the rest.
+    const auto next_schedule = expected.schedule(
+        WorldClock(ActiveRegionLedger::kIdleEvictionTicks + 1),
+        std::span<const Luminumbra::Vec3>{},
+        {},
+        {},
+        [&session, non_due_resident](RegionKey key) {
+            return key == non_due_resident || session.GetFieldPages().owns_region(key);
+        });
+    auto expected_pages = session.GetFieldPages();
+    completed.clear();
+    for (const auto& [key, updates] : expected_pages.step_scheduled(
+             expected.records(), next_schedule.due, 1337, next_schedule.tick))
+        completed.push_back({key, 0, 0, 0, updates});
+    for (const auto key : next_schedule.due)
+        completed.push_back({key, 0, 0, 0, 1}); // regional weather clock
+    expected.publish_completed_work(completed);
+    ASSERT_EQ(session.TickSimulation(dt), 1u);
+    const auto& next_fault = session.GetRegionSchedulerFault();
+    ASSERT_FALSE(next_fault) << (next_fault ? next_fault->message : "");
+    EXPECT_EQ(session.GetRegionSchedule(), next_schedule);
+    EXPECT_EQ(session.GetActiveRegionLedger().canonical_bytes(), expected.canonical_bytes());
+    EXPECT_EQ(session.GetActiveRegionLedger().encode(), expected.encode());
+    ASSERT_EQ(session.GetActiveRegionLedger().records().size(), owned_keys.size());
+    for (const auto key : next_schedule.due) {
+        EXPECT_TRUE(session.GetFieldPages().owns_region(key));
+        EXPECT_TRUE(session.GetActiveRegionLedger().records().contains(key));
+    }
+    EXPECT_TRUE(session.GetActiveRegionLedger().records().contains(non_due_resident));
+    EXPECT_EQ(session.GetActiveRegionLedger().records().at(non_due_resident).state,
+              RegionState::Frozen);
+    EXPECT_EQ(session.GetActiveRegionLedger().records().at(non_due_resident).last_ticked, 0u);
+    EXPECT_FALSE(session.GetFieldPages().owns_region(non_due_resident));
+    EXPECT_FALSE(session.GetActiveRegionLedger().completed_work().contains(non_due_resident));
+    EXPECT_FALSE(session.GetActiveRegionLedger().energy_ages().contains(non_due_resident));
+}
+
+TEST(GameSessionHeadlessWorldTest, ConsumedWorkEvictsIdleRegionsThatNeverBecomeDue) {
+    using Luminumbra::world::ActiveRegionLedger;
+    using Luminumbra::world::ActiveRegionRecord;
+    using Luminumbra::world::RegionKey;
+    using Luminumbra::world::RegionState;
+    using Luminumbra::world::RegionWork;
+    using Luminumbra::world::WorldClock;
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    session.SetRootPath(root.root_string());
+    session.SetJobSystem(&jobs);
+    session.SetActiveRegionsEnabled(true);
+    ASSERT_TRUE(session.CreateWorld("Consumed idle work", "1337", "default"));
+    ASSERT_TRUE(session.SaveWorldState());
+
+    const RegionKey pending{40, -40}, duplicate{41, -40}, zero_count{42, -40};
+    const std::array keys{pending, duplicate, zero_count};
+    ActiveRegionLedger staged;
+    staged.set_local_anchor(session.GetMetadata().spawnPoint);
+    for (const auto key : keys) {
+        staged.pin(key, true, WorldClock{});
+        staged.pin(key, false, WorldClock{});
+        // Mutate only this fixture ledger: frozen records never initialize field authority.
+        auto& record =
+            const_cast<std::map<RegionKey, ActiveRegionRecord>&>(staged.records()).at(key);
+        record.wake_pending = false;
+        record.state = RegionState::Frozen;
+        record.frozen_at = 1;
+        record.cadence_shift = staged.config().reduced_shift;
+        record.cadence_phase = ActiveRegionLedger::phase(key, record.cadence_shift);
+    }
+    const WorldClock before_idle(ActiveRegionLedger::kIdleEvictionTicks - 1);
+    ASSERT_TRUE(staged.schedule(before_idle, std::span<const Luminumbra::Vec3>{}).due.empty());
+    const auto save = session.GetWorldSaveDir();
+    auto metadata = nlohmann::json::parse(ReadClockTestFile(save / "world_info.json"));
+    before_idle.write_metadata(metadata);
+    ASSERT_TRUE(
+        P::WorldSaveService::save_metadata_and_active_regions(metadata.dump(), staged, save));
+    ASSERT_TRUE(session.LoadWorldStateFrom(save)) << session.GetWorldOpenError();
+    session.SetReplicatedSimulationAnchors({});
+    const std::array work{RegionWork{pending, 3, 0, 0, 0},
+                          RegionWork{duplicate, 1, 0, 0, 0},
+                          RegionWork{duplicate, 2, 0, 0, 0},
+                          RegionWork{zero_count, 0, 0, 0, 0},
+                          RegionWork{zero_count, 0, 0, 0, 0}};
+    for (const auto& entry : work)
+        session.RecordActiveRegionWork(entry);
+    auto expected = session.GetActiveRegionLedger();
+    const auto retained_schedule =
+        expected.schedule(WorldClock(ActiveRegionLedger::kIdleEvictionTicks),
+                          std::span<const Luminumbra::Vec3>{},
+                          work,
+                          {},
+                          [](RegionKey) { return true; });
+    const auto dt = session.GetSimulationClock().fixed_dt();
+    ASSERT_EQ(session.TickSimulation(dt), 1u);
+    ASSERT_FALSE(session.GetRegionSchedulerFault());
+    EXPECT_EQ(session.GetRegionSchedule(), retained_schedule);
+    EXPECT_EQ(session.GetActiveRegionLedger().canonical_bytes(), expected.canonical_bytes());
+    EXPECT_EQ(session.GetActiveRegionLedger().encode(), expected.encode());
+    ASSERT_EQ(session.GetActiveRegionLedger().records().size(), keys.size());
+    EXPECT_TRUE(session.GetRegionSchedule().due.empty());
+    EXPECT_TRUE(session.GetFieldPages().empty());
+    EXPECT_TRUE(session.GetActiveRegionLedger().completed_work().empty());
+
+    const auto evicted_schedule =
+        expected.schedule(WorldClock(ActiveRegionLedger::kIdleEvictionTicks + 1),
+                          std::span<const Luminumbra::Vec3>{},
+                          {},
+                          {},
+                          [](RegionKey) { return false; });
+    ASSERT_EQ(session.TickSimulation(dt), 1u);
+    ASSERT_FALSE(session.GetRegionSchedulerFault());
+    EXPECT_EQ(session.GetRegionSchedule(), evicted_schedule);
+    EXPECT_EQ(session.GetActiveRegionLedger().canonical_bytes(), expected.canonical_bytes());
+    EXPECT_EQ(session.GetActiveRegionLedger().encode(), expected.encode());
+    EXPECT_TRUE(session.GetActiveRegionLedger().records().empty());
+    EXPECT_TRUE(session.GetRegionSchedule().due.empty());
+    EXPECT_TRUE(session.GetFieldPages().empty());
 }
 
 TEST(GameSessionHeadlessWorldTest, WalkingAnchorSurvivesNoclipAndReloadWithoutCameraInputs) {
@@ -2091,9 +2350,9 @@ void RunSchedulerFaultCase(std::uint64_t k, std::uint64_t start) {
 } // namespace
 
 TEST(GameSessionHeadlessWorldTest, SchedulerFaultStopsTheFrameAndLeavesASavableConsistentSession) {
-    for (const auto [k, start] : {std::pair<std::uint64_t, std::uint64_t>{3, 3},
-                                  std::pair<std::uint64_t, std::uint64_t>{3, 2},
-                                  std::pair<std::uint64_t, std::uint64_t>{4, 4}}) {
+    for (const auto& [k, start] : {std::pair<std::uint64_t, std::uint64_t>{3, 3},
+                                   std::pair<std::uint64_t, std::uint64_t>{3, 2},
+                                   std::pair<std::uint64_t, std::uint64_t>{4, 4}}) {
         ASSERT_NO_FATAL_FAILURE(RunSchedulerFaultCase(k, start));
     }
 }
@@ -2863,12 +3122,13 @@ TEST(GameSessionHeadlessWorldTest, GroundSpawnQuantizesAndProbesEditedTerrainBef
     CreateGroundWorld(session, root, jobs, "Edited ground probe");
     auto chunk = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3{0, 0, 0});
     chunk->set_state(Luminumbra::ChunkState::Ready);
-    constexpr int side = CHUNK_SIZE_X + 1;
-    chunk->sdf_data.resize(side * (CHUNK_SIZE_Y + 1) * (CHUNK_SIZE_Z + 1));
-    for (int z = 0; z <= CHUNK_SIZE_Z; ++z)
-        for (int y = 0; y <= CHUNK_SIZE_Y; ++y)
-            for (int x = 0; x <= CHUNK_SIZE_X; ++x)
-                chunk->sdf_data[static_cast<std::size_t>(x + side * (y + (CHUNK_SIZE_Y + 1) * z))] =
+    constexpr int side = Luminumbra::CHUNK_SIZE_X + 1;
+    chunk->sdf_data.resize(side * (Luminumbra::CHUNK_SIZE_Y + 1) * (Luminumbra::CHUNK_SIZE_Z + 1));
+    for (int z = 0; z <= Luminumbra::CHUNK_SIZE_Z; ++z)
+        for (int y = 0; y <= Luminumbra::CHUNK_SIZE_Y; ++y)
+            for (int x = 0; x <= Luminumbra::CHUNK_SIZE_X; ++x)
+                chunk->sdf_data[static_cast<std::size_t>(
+                    x + side * (y + (Luminumbra::CHUNK_SIZE_Y + 1) * z))] =
                     static_cast<float>(y) - 4.0f;
     chunk->mark_voxel_data_dirty();
     ASSERT_TRUE(session.GetWorldSystem()->adopt_streamed_chunk(chunk));
@@ -2952,23 +3212,26 @@ TEST(GameSessionHeadlessWorldTest, BoundedBootSaveAsTransfersDiskOnlyAuthorityAn
 }
 
 namespace {
-Luminumbra::Chunk* g_chunk_revision_during_commit = nullptr;
+Luminumbra::Chunk*& ChunkRevisionDuringCommit() {
+    static Luminumbra::Chunk* chunk = nullptr;
+    return chunk;
+}
 void ChangeChunkAtIndexPublication(const char* step, const fs::path& path) {
-    if (g_chunk_revision_during_commit && std::string(step) == "before-replace" &&
+    if (ChunkRevisionDuringCommit() && std::string(step) == "before-replace" &&
         path.filename() == "snapshot.json") {
-        g_chunk_revision_during_commit->sdf_data.front() -= 1.0f;
-        g_chunk_revision_during_commit->mark_voxel_data_dirty();
-        g_chunk_revision_during_commit->mark_water_state_dirty();
+        ChunkRevisionDuringCommit()->sdf_data.front() -= 1.0f;
+        ChunkRevisionDuringCommit()->mark_voxel_data_dirty();
+        ChunkRevisionDuringCommit()->mark_water_state_dirty();
     }
 }
 struct ChunkRevisionHook {
     explicit ChunkRevisionHook(Luminumbra::Chunk* chunk) {
-        g_chunk_revision_during_commit = chunk;
+        ChunkRevisionDuringCommit() = chunk;
         P::set_snapshot_step_hook_for_testing(&ChangeChunkAtIndexPublication);
     }
     ~ChunkRevisionHook() {
         P::set_snapshot_step_hook_for_testing(nullptr);
-        g_chunk_revision_during_commit = nullptr;
+        ChunkRevisionDuringCommit() = nullptr;
     }
 };
 } // namespace
@@ -3004,6 +3267,286 @@ TEST(GameSessionHeadlessWorldTest, FirstAndIncrementalSavePreserveChangesAfterSe
     ASSERT_TRUE(owner.SaveWorldState());
     EXPECT_FALSE(chunk->is_voxel_data_dirty());
     EXPECT_FALSE(chunk->is_water_state_dirty());
+}
+
+TEST(GameSessionHeadlessWorldTest, DisplacementWaterPromotesBeforeFreezeAndSurvivesIdleReopen) {
+    using Luminumbra::Chunk;
+    using Luminumbra::ChunkID;
+    using Luminumbra::ChunkSdfProvenance;
+    using Luminumbra::ChunkState;
+    using Luminumbra::IVec3;
+    using Luminumbra::Vec3;
+    using Luminumbra::world::ActiveRegionLedger;
+    using Luminumbra::world::ActiveRegionRecord;
+    using Luminumbra::world::RegionKey;
+    using Luminumbra::world::RegionState;
+    using Luminumbra::world::RegionWork;
+    using Luminumbra::world::WorldClock;
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    const RegionKey water_region{40, -40}, work_region{30, -40}, disk_region{60, -40};
+    const IVec3 coords(water_region.x * 32, 0, water_region.z * 32);
+    const IVec3 disk_coords(disk_region.x * 32, 0, disk_region.z * 32);
+    const Vec3 visit_position(water_region.x * 512 + 256, 0, water_region.z * 512 + 256);
+    const Vec3 displacement_position(coords.x * 16 + 8, 0, coords.z * 16 + 8);
+    const auto empty_digest = P::WorldSaveService::region_simulation_digest(
+        {}, water_region, P::RegionDigestInputs{{}, {}, {}, {}, {}});
+    std::uint64_t generated_digest = 0;
+
+    // Run the same seeded resident fixture with and without a production water writer.
+    for (const bool displace : {false, true}) {
+        SCOPED_TRACE(displace);
+        GameSession session;
+        EnableSnapshotSession(session, root, jobs);
+        session.SetRegionSchedulerConfig({0, 1, 1});
+        ASSERT_TRUE(session.CreateWorld(
+            displace ? "Displaced water" : "Generated water", "1337", "default"));
+        auto chunk = std::make_shared<Chunk>(coords);
+        chunk->set_state(ChunkState::Idle);
+        chunk->sdf_data.assign(17 * 17 * 17, 1.0f);
+        chunk->mark_sdf_generated_current_params();
+        // Seed through the real initializer, keeping it asleep so this call only generates water.
+        chunk->is_water_sleeping.store(true);
+        ASSERT_TRUE(session.GetWorldSystem()->adopt_streamed_chunk(chunk));
+        const std::unordered_map<ChunkID, std::shared_ptr<Chunk>> water_chunks{
+            {chunk->get_id(), chunk}};
+        const auto before_initialization = P::WorldSaveService::region_simulation_digest(
+            {}, water_region, P::RegionDigestInputs{{chunk}, {}, {}, {}, {}});
+        session.GetWaterSystem()->update(session.GetRegistry(), water_chunks);
+        ASSERT_TRUE(chunk->has_water_sim.load());
+        ASSERT_EQ(chunk->water_depth_mm.size(), 64u);
+        ASSERT_EQ(chunk->water_bed_mm.size(), 64u);
+        ASSERT_EQ(chunk->water_edge_flux.size(), 128u);
+        ASSERT_EQ(chunk->sdf_provenance(), ChunkSdfProvenance::GeneratedCurrentParams);
+        ASSERT_FALSE(chunk->is_water_state_dirty());
+        ASSERT_FALSE(chunk->has_water_authority());
+        ASSERT_FALSE(chunk->is_voxel_data_dirty());
+        const auto generated_depth = chunk->water_depth_mm;
+        EXPECT_EQ(before_initialization, empty_digest);
+        EXPECT_EQ(P::WorldSaveService::region_simulation_digest(
+                      {}, water_region, P::RegionDigestInputs{{chunk}, {}, {}, {}, {}}),
+                  before_initialization);
+
+        session.PinActiveRegion(work_region, true);
+        session.SetReplicatedSimulationAnchors({visit_position});
+        const auto dt = session.GetSimulationClock().fixed_dt();
+        ASSERT_EQ(session.TickSimulation(dt), 1u);
+        const auto initial_records = session.GetActiveRegionLedger().records();
+        const auto initial_record = initial_records.at(water_region);
+        ASSERT_TRUE(initial_record.visited);
+        ASSERT_FALSE(initial_record.pinned);
+        ASSERT_FALSE(initial_record.edited);
+        ASSERT_FALSE(initial_record.populated);
+        ASSERT_EQ(initial_record.water_cursor, 0u);
+        ASSERT_EQ(initial_record.state, RegionState::Active);
+        ASSERT_GT(session.GetFieldPages().owned_initialized_cells(water_region), 0u);
+        ASSERT_FALSE(chunk->has_water_authority());
+        if (displace) {
+            session.GetWaterSystem()->apply_displacement(displacement_position, 4.0f);
+            ASSERT_NE(chunk->water_depth_mm, generated_depth);
+            ASSERT_TRUE(chunk->is_water_state_dirty());
+            // The writer itself must leave promotion to the scheduling boundary under test.
+            ASSERT_EQ(chunk->sdf_provenance(), ChunkSdfProvenance::GeneratedCurrentParams);
+            ASSERT_FALSE(chunk->has_water_authority());
+        }
+        session.SetReplicatedSimulationAnchors({});
+        session.RecordActiveRegionWork({work_region, 1, 0, 0, 0});
+        ASSERT_EQ(session.TickSimulation(dt), 1u);
+        ASSERT_FALSE(session.GetRegionSchedulerFault());
+        EXPECT_EQ(chunk->has_water_authority(), displace);
+        EXPECT_EQ(chunk->sdf_provenance(),
+                  displace ? ChunkSdfProvenance::LoadedOrEdited
+                           : ChunkSdfProvenance::GeneratedCurrentParams);
+        EXPECT_EQ(chunk->is_voxel_data_dirty(), displace);
+        EXPECT_FALSE(chunk->is_water_state_dirty());
+        // K is still unfrozen when the first post-writer boundary has promoted its water.
+        ASSERT_NE(session.GetActiveRegionLedger().records().at(water_region).state,
+                  RegionState::Frozen);
+
+        // At most two budget transitions per unpinned record suffice; only J supplies work.
+        const auto transition_count = 2 * session.GetActiveRegionLedger().records().size();
+        for (std::size_t step = 0; step < transition_count; ++step) {
+            session.RecordActiveRegionWork({work_region, 1, 0, 0, 0});
+            ASSERT_EQ(session.TickSimulation(dt), 1u);
+            ASSERT_FALSE(session.GetRegionSchedulerFault());
+        }
+        const auto frozen_record = session.GetActiveRegionLedger().records().at(water_region);
+        ASSERT_EQ(frozen_record.state, RegionState::Frozen);
+        EXPECT_FALSE(frozen_record.pinned);
+        EXPECT_FALSE(frozen_record.edited);
+        EXPECT_FALSE(frozen_record.populated);
+        EXPECT_EQ(frozen_record.water_cursor, 0u);
+        EXPECT_EQ(frozen_record.pressure, 0u);
+        EXPECT_EQ(frozen_record.last_proximity, initial_record.last_proximity);
+        EXPECT_EQ(
+            frozen_record.frozen_digest,
+            P::WorldSaveService::region_simulation_digest(
+                {},
+                water_region,
+                P::RegionDigestInputs{
+                    {chunk}, {}, {}, {}, session.GetFieldPages().region_bytes(water_region)}));
+        if (!displace) {
+            generated_digest = frozen_record.frozen_digest;
+            // Generated water contributes nothing to the chunk projection; fields still do.
+            EXPECT_EQ(P::WorldSaveService::region_simulation_digest(
+                          {}, water_region, P::RegionDigestInputs{{chunk}, {}, {}, {}, {}}),
+                      empty_digest);
+            EXPECT_EQ(generated_digest,
+                      P::WorldSaveService::region_simulation_digest(
+                          {},
+                          water_region,
+                          P::RegionDigestInputs{
+                              {}, {}, {}, {}, session.GetFieldPages().region_bytes(water_region)}));
+            EXPECT_EQ(chunk->water_depth_mm, generated_depth);
+            EXPECT_FALSE(chunk->has_water_authority());
+            EXPECT_FALSE(chunk->is_voxel_data_dirty());
+            continue;
+        }
+        EXPECT_NE(frozen_record.frozen_digest, generated_digest);
+        const auto evolved_depth = chunk->water_depth_mm;
+        const auto evolved_bed = chunk->water_bed_mm;
+        const auto evolved_flux = chunk->water_edge_flux;
+        // Persist a second authority without ever giving its region a consumer tick.
+        auto disk_chunk = std::make_shared<Chunk>(disk_coords);
+        disk_chunk->set_state(ChunkState::Idle);
+        disk_chunk->sdf_data.assign(17 * 17 * 17, -1.0f);
+        disk_chunk->mark_voxel_data_dirty();
+        ASSERT_TRUE(session.GetWorldSystem()->adopt_streamed_chunk(disk_chunk));
+        ASSERT_FALSE(session.GetFieldPages().owns_region(disk_region));
+        ASSERT_TRUE(session.SaveWorldState());
+        EXPECT_FALSE(chunk->is_voxel_data_dirty());
+        EXPECT_TRUE(chunk->has_water_authority());
+
+        // Use the existing paired-clock/ledger fixture idiom to approach retention directly.
+        auto staged = session.GetActiveRegionLedger();
+        const auto save = session.GetWorldSaveDir();
+        staged.pin(disk_region, true, session.GetWorldClock());
+        staged.pin(disk_region, false, session.GetWorldClock());
+        // Mutate only the staged fixture: reopening leaves no flags or fields to mask inventory.
+        auto& disk_record =
+            const_cast<std::map<RegionKey, ActiveRegionRecord>&>(staged.records()).at(disk_region);
+        disk_record.wake_pending = false;
+        disk_record.state = RegionState::Frozen;
+        disk_record.frozen_at = session.GetWorldClock().tick();
+        disk_record.cadence_shift = staged.config().reduced_shift;
+        disk_record.cadence_phase =
+            ActiveRegionLedger::phase(disk_region, disk_record.cadence_shift);
+        disk_record.frozen_digest = P::WorldSaveService::region_simulation_digest(
+            save,
+            disk_region,
+            P::RegionDigestInputs{
+                {}, {}, session.GetWorldSystem()->durable_chunk_inventory(), {}, {}});
+        const auto frozen_disk_record = disk_record;
+        const WorldClock before_idle(frozen_record.last_proximity +
+                                     ActiveRegionLedger::kIdleEvictionTicks - 1);
+        const std::array pressure{RegionWork{work_region, 1, 0, 0, 0}};
+        staged.schedule(before_idle, std::span<const Vec3>{}, pressure);
+        auto metadata = nlohmann::json::parse(ReadClockTestFile(save / "world_info.json"));
+        before_idle.write_metadata(metadata);
+        ASSERT_TRUE(
+            P::WorldSaveService::save_metadata_and_active_regions(metadata.dump(), staged, save));
+        ASSERT_TRUE(session.LoadWorldStateFrom(save)) << session.GetWorldOpenError();
+        ASSERT_EQ(session.GetWorldSystem()->find_streamed_chunk(coords), chunk);
+
+        GameSession reopened;
+        EnableSnapshotSession(reopened, root, jobs);
+        ASSERT_TRUE(reopened.LoadWorld(session.GetMetadata().worldId))
+            << reopened.GetWorldOpenError();
+        // Both far chunks are disk-only; disk_region has no field authority to mask the probe.
+        ASSERT_EQ(reopened.GetWorldSystem()->find_streamed_chunk(coords), nullptr);
+        ASSERT_EQ(reopened.GetWorldSystem()->find_streamed_chunk(disk_coords), nullptr);
+        const auto inventory = reopened.GetWorldSystem()->durable_chunk_inventory();
+        ASSERT_NE(std::find(inventory.begin(), inventory.end(), disk_coords), inventory.end());
+        for (const auto& resident : reopened.GetWorldSystem()->snapshot_authoritative_chunks())
+            ASSERT_NE(resident->get_coords(), disk_coords);
+        EXPECT_EQ(reopened.GetActiveRegionLedger().encode(),
+                  session.GetActiveRegionLedger().encode());
+        for (auto* active_session : {&session, &reopened})
+            active_session->SetReplicatedSimulationAnchors({});
+        for (int step = 0; step < 2; ++step) {
+            for (auto* active_session : {&session, &reopened}) {
+                active_session->RecordActiveRegionWork({work_region, 1, 0, 0, 0});
+                ASSERT_EQ(active_session->TickSimulation(dt), 1u);
+                ASSERT_FALSE(active_session->GetRegionSchedulerFault());
+                const auto& records = active_session->GetActiveRegionLedger().records();
+                ASSERT_TRUE(records.contains(water_region));
+                const auto& retained = records.at(water_region);
+                EXPECT_EQ(retained.state, RegionState::Frozen);
+                EXPECT_EQ(retained.frozen_digest, frozen_record.frozen_digest);
+                EXPECT_EQ(retained.frozen_at, frozen_record.frozen_at);
+                EXPECT_EQ(retained.last_proximity, frozen_record.last_proximity);
+                EXPECT_FALSE(retained.pinned);
+                EXPECT_FALSE(retained.edited);
+                EXPECT_FALSE(retained.populated);
+                EXPECT_EQ(retained.water_cursor, 0u);
+                EXPECT_EQ(retained.pressure, 0u);
+                // Due neighbours retain field authority; the never-due region uses inventory.
+                EXPECT_EQ(records.size(), initial_records.size() + 1);
+                for (const auto& [key, previous] : initial_records) {
+                    ASSERT_TRUE(records.contains(key));
+                    if (previous.visited)
+                        EXPECT_TRUE(active_session->GetFieldPages().owns_region(key));
+                }
+                const auto& disk_retained = records.at(disk_region);
+                EXPECT_EQ(disk_retained.state, RegionState::Frozen);
+                EXPECT_EQ(disk_retained.last_ticked, 0u);
+                EXPECT_EQ(disk_retained.frozen_at, frozen_disk_record.frozen_at);
+                EXPECT_EQ(disk_retained.frozen_digest, frozen_disk_record.frozen_digest);
+                EXPECT_FALSE(disk_retained.visited);
+                EXPECT_FALSE(disk_retained.pinned);
+                EXPECT_FALSE(disk_retained.edited);
+                EXPECT_FALSE(disk_retained.populated);
+                EXPECT_EQ(disk_retained.water_cursor, 0u);
+                EXPECT_EQ(disk_retained.pressure, 0u);
+                EXPECT_FALSE(active_session->GetFieldPages().owns_region(disk_region));
+                EXPECT_TRUE(active_session->GetFieldPages().region_bytes(disk_region).empty());
+                EXPECT_FALSE(
+                    active_session->GetActiveRegionLedger().energy_ages().contains(disk_region));
+                EXPECT_FALSE(
+                    active_session->GetActiveRegionLedger().completed_work().contains(disk_region));
+                if (active_session == &reopened) {
+                    EXPECT_EQ(reopened.GetWorldSystem()->find_streamed_chunk(disk_coords), nullptr);
+                    for (const auto& resident :
+                         reopened.GetWorldSystem()->snapshot_authoritative_chunks())
+                        EXPECT_NE(resident->get_coords(), disk_coords);
+                }
+            }
+            EXPECT_EQ(reopened.GetRegionSchedule(), session.GetRegionSchedule());
+            EXPECT_EQ(reopened.GetActiveRegionLedger().canonical_bytes(),
+                      session.GetActiveRegionLedger().canonical_bytes());
+        }
+        EXPECT_GT(session.GetWorldClock().tick(),
+                  frozen_record.last_proximity + ActiveRegionLedger::kIdleEvictionTicks);
+        ASSERT_EQ(reopened.GetWorldSystem()->find_streamed_chunk(coords), nullptr);
+        ASSERT_EQ(reopened.GetWorldSystem()->find_streamed_chunk(disk_coords), nullptr);
+        const auto durable_chunk = reopened.GetWorldSystem()->find_authoritative_chunk(coords);
+        ASSERT_NE(durable_chunk, nullptr);
+        EXPECT_EQ(durable_chunk->sdf_provenance(), ChunkSdfProvenance::LoadedOrEdited);
+        EXPECT_EQ(durable_chunk->water_depth_mm, evolved_depth);
+        EXPECT_EQ(durable_chunk->water_bed_mm, evolved_bed);
+        EXPECT_EQ(durable_chunk->water_edge_flux, evolved_flux);
+        EXPECT_EQ(durable_chunk->is_water_sleeping.load(), chunk->is_water_sleeping.load());
+        EXPECT_EQ(reopened.ComputeChunkStateHash(), session.ComputeChunkStateHash());
+        EXPECT_EQ(P::WorldSaveService::region_simulation_digest(
+                      save,
+                      water_region,
+                      P::RegionDigestInputs{{},
+                                            {},
+                                            reopened.GetWorldSystem()->durable_chunk_inventory(),
+                                            {},
+                                            reopened.GetFieldPages().region_bytes(water_region)}),
+                  frozen_record.frozen_digest);
+        ASSERT_TRUE(session.SaveWorldState());
+        GameSession after_retention;
+        EnableSnapshotSession(after_retention, root, jobs);
+        ASSERT_TRUE(after_retention.LoadWorld(session.GetMetadata().worldId))
+            << after_retention.GetWorldOpenError();
+        EXPECT_EQ(after_retention.GetWorldClock().tick(), session.GetWorldClock().tick());
+        EXPECT_EQ(after_retention.GetActiveRegionLedger().encode(),
+                  session.GetActiveRegionLedger().encode());
+        EXPECT_EQ(after_retention.ComputeChunkStateHash(), session.ComputeChunkStateHash());
+    }
 }
 
 TEST(GameSessionHeadlessWorldTest, WaterOnlyAuthorityHashDoesNotChangeWhenSaved) {
@@ -4462,23 +5005,58 @@ TEST(GameSessionHeadlessWorldTest, S7LivePlantsRetainOtherwiseEvictableUneditedO
     CreateGroundWorld(base, root, jobs, "S7 plant retention");
     ClockTestPlant(base.GetRegistry(), {5200, 0, -1500});
     ASSERT_TRUE(base.SaveWorld());
-    auto ledger = FixtureLedger(108001, {{kFarGroundRegion, RegionState::Active}});
+    const RegionKey soil_owner{20, -3}, irrigation_owner{30, -3}, debt_owner{40, -3};
+    const RegionKey unowned{50, -3};
+    auto ledger = FixtureLedger(108001,
+                                {{kFarGroundRegion, RegionState::Active},
+                                 {soil_owner, RegionState::Frozen},
+                                 {irrigation_owner, RegionState::Frozen},
+                                 {debt_owner, RegionState::Frozen},
+                                 {unowned, RegionState::Frozen}});
     S7KeepAllocator(ledger, base.GetActiveRegionLedger().next_persistent_id());
+    for (auto& [key, owner] :
+         const_cast<std::map<RegionKey, ActiveRegionRecord>&>(ledger.records())) {
+        (void)key;
+        owner.pinned = false;
+        owner.edited = false;
+        owner.last_proximity = 0;
+    }
     auto& record =
         const_cast<std::map<RegionKey, ActiveRegionRecord>&>(ledger.records()).at(kFarGroundRegion);
-    record.pinned = false;
-    record.edited = false;
     record.first_active = 0;
-    record.last_proximity = 0;
     record.last_ticked = 108000;
+    FieldPageState pages;
+    // Independent one-metre histories: no ambient/weather cells or live feeders mask ownership.
+    ASSERT_TRUE(pages.set_soil({soil_owner.x * 512, soil_owner.z * 512}, 1000000));
+    ASSERT_TRUE(pages.set_irrigation({irrigation_owner.x * 512, irrigation_owner.z * 512}, 0));
+    const ActiveRegionLedger::WaterDebts debts{{debt_owner, 1}};
+    ASSERT_TRUE(ledger.set_water_debts(debts));
     auto snap = SF::BuildPlantEntitySnapshot(base.GetRegistry(), true);
     S7SetSnapshotStamp(snap, 108000);
-    S7CommitFixture(base, ledger, {}, snap);
+    S7CommitFixture(base, ledger, pages, snap);
     EnableSnapshotSession(live, root, jobs);
-    ASSERT_TRUE(live.LoadWorld(base.GetMetadata().worldId));
+    ASSERT_TRUE(live.LoadWorld(base.GetMetadata().worldId)) << live.GetWorldOpenError();
     live.SetReplicatedSimulationAnchors({});
     TickOnce(live);
-    EXPECT_TRUE(live.GetActiveRegionLedger().records().contains(kFarGroundRegion));
+    ASSERT_FALSE(live.GetRegionSchedulerFault());
+    const auto& retained = live.GetActiveRegionLedger().records();
+    ASSERT_EQ(retained.size(), 4u);
+    EXPECT_FALSE(retained.contains(unowned));
+    EXPECT_EQ(live.GetRegionSchedule().due, (std::vector<RegionKey>{kFarGroundRegion}));
+    for (const auto key : {soil_owner, irrigation_owner, debt_owner}) {
+        ASSERT_TRUE(retained.contains(key));
+        EXPECT_EQ(retained.at(key).state, RegionState::Frozen);
+        EXPECT_FALSE(retained.at(key).pinned);
+        EXPECT_FALSE(retained.at(key).edited);
+        EXPECT_FALSE(retained.at(key).populated);
+        EXPECT_EQ(retained.at(key).water_cursor, 0u);
+        EXPECT_EQ(live.GetFieldPages().owned_initialized_cells(key), 0u);
+        EXPECT_FALSE(live.GetActiveRegionLedger().energy_ages().contains(key));
+        EXPECT_FALSE(live.GetActiveRegionLedger().completed_work().contains(key));
+    }
+    EXPECT_EQ(live.GetFieldPages().soil().records(), pages.soil().records());
+    EXPECT_EQ(live.GetFieldPages().irrigation().records(), pages.irrigation().records());
+    EXPECT_EQ(live.GetActiveRegionLedger().water_debts(), debts);
     EXPECT_EQ(live.GetRegistry().get<SC::PlantRegionComponent>(S7FindPlant(live, 1)).region_stamp,
               108002u);
 }
