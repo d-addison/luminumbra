@@ -526,8 +526,30 @@ jobs:
             -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++
       - name: Generate vendored headers used by first-party sources
         run: cmake --build build/tidy --target glad --parallel 4
+      # Per-translation-unit result cache (scripts/tidy_cache.py). A unit is skipped
+      # only when its complete analysis input (source, every header the compiler
+      # reads, compile flags, check config, clang-tidy and compiler versions) is
+      # identical to an earlier run that passed; anything else runs clang-tidy.
+      # Pull requests read and write it. Pushes to devel/main never read it, so
+      # every merged tip gets a full analysis, and they write it to seed the PRs.
+      - name: Restore clang-tidy result cache
+        id: tidy-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: github.event_name == 'pull_request'
+        with:
+          path: .tidy-cache
+          key: tidy-cache-${{ runner.os }}-${{ github.sha }}
+          restore-keys: tidy-cache-${{ runner.os }}-
       - name: Run blocking clang-tidy gate
-        run: scripts/tidy.sh --build-dir build/tidy --jobs 4
+        env:
+          TIDY_CACHE_MODE: ${{ github.event_name == 'pull_request' && 'readwrite' || 'writeonly' }}
+        run: scripts/tidy.sh --build-dir build/tidy --jobs 4 --cache-dir .tidy-cache --cache-mode "$TIDY_CACHE_MODE"
+      - name: Save clang-tidy result cache
+        if: ${{ !cancelled() && steps.tidy-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .tidy-cache
+          key: tidy-cache-${{ runner.os }}-${{ github.sha }}
 
   public-tree:
     name: Public tree / inventory honesty
@@ -541,6 +563,7 @@ jobs:
           python3 tools/ci/test_validate_public_tree.py
           python3 tools/ci/test_check_docs.py
           python3 tools/ci/test_check_ctest_junit.py
+          python3 tools/ci/test_tidy_cache.py
           python3 tools/ci/test_validate_visual_catalog.py
           python3 tools/ci/validate_visual_catalog.py
           python3 tools/ci/render_visual_catalog.py --check
