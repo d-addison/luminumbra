@@ -29,7 +29,10 @@ constexpr std::uint64_t kFnvOffset = 14695981039346656037ull;
 constexpr std::uint64_t kFnvPrime = 1099511628211ull;
 constexpr std::size_t kHashBlockBytes = 1024u * 1024u;
 
-thread_local SaveTransaction* g_active = nullptr;
+SaveTransaction*& ActiveTransaction() {
+    static thread_local SaveTransaction* active = nullptr;
+    return active;
+}
 
 SnapshotStepHook& StepHook() {
     static SnapshotStepHook hook = nullptr;
@@ -527,11 +530,11 @@ bool decode_snapshot_index(std::string_view bytes, SnapshotIndex& out, std::stri
         const nlohmann::json* path = Field(item, "path");
         const nlohmann::json* cls = Field(item, "class");
         const nlohmann::json* state = Field(item, "state");
-        const nlohmann::json* bytes = Field(item, "bytes");
+        const nlohmann::json* member_bytes = Field(item, "bytes");
         const nlohmann::json* fnv = Field(item, "fnv64");
         const nlohmann::json* member_generation = Field(item, "generation");
         if (!path || !path->is_string() || !cls || !cls->is_string() || !state ||
-            !state->is_string() || !bytes || !bytes->is_number_unsigned() || !fnv ||
+            !state->is_string() || !member_bytes || !member_bytes->is_number_unsigned() || !fnv ||
             !fnv->is_string() || !member_generation || !member_generation->is_number_unsigned()) {
             error = "snapshot member fields invalid";
             return false;
@@ -568,7 +571,7 @@ bool decode_snapshot_index(std::string_view bytes, SnapshotIndex& out, std::stri
             error = "snapshot member digest invalid";
             return false;
         }
-        member.bytes = bytes->get<std::uint64_t>();
+        member.bytes = member_bytes->get<std::uint64_t>();
         member.generation = member_generation->get<std::uint64_t>();
         index.members.push_back(std::move(member));
     }
@@ -752,8 +755,8 @@ SaveTransaction::SaveTransaction(std::filesystem::path save_dir,
     , m_tick(tick)
     , m_anchors(std::move(anchors))
     , m_digest_fn(digest_fn) {
-    if (g_active == nullptr) {
-        g_active = this;
+    if (ActiveTransaction() == nullptr) {
+        ActiveTransaction() = this;
         m_registered = true;
     }
 }
@@ -765,12 +768,12 @@ SaveTransaction::~SaveTransaction() {
         } catch (...) {}
     }
     if (m_registered) {
-        g_active = nullptr;
+        ActiveTransaction() = nullptr;
     }
 }
 
 SaveTransaction* SaveTransaction::active_for(const fs::path& save_dir) {
-    SaveTransaction* active = g_active;
+    SaveTransaction* active = ActiveTransaction();
     if (active == nullptr || active->m_state != State::Open) {
         return nullptr;
     }
@@ -1049,10 +1052,10 @@ bool SaveTransaction::commit(std::vector<std::string>* errors) {
             fs::path ancestor = m_save_dir.parent_path();
             for (int level = 0; level < 3 && !ancestor.empty(); ++level) {
                 WorldSaveService::durable_flush_directory(ancestor.parent_path(), nullptr);
-                const fs::path next = ancestor.parent_path();
-                if (next == ancestor)
+                const fs::path parent = ancestor.parent_path();
+                if (parent == ancestor)
                     break;
-                ancestor = next;
+                ancestor = parent;
             }
         }
         if (!WorldSaveService::durable_write_file(index_path, encoded, errors)) {

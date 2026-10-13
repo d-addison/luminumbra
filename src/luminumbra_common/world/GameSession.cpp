@@ -765,113 +765,114 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
             // growth runs AFTER weather. Integer/fixed-point + id-ordered = run==replay.
             // Temperature, light, soil, weather, and irrigation are sampled below.
             if (HasPlantParticipants()) {
-                luminumbra::foliage::EnvSampler plant_env = [this,
-                                                             foliageOriginX,
-                                                             foliageOriginZ,
-                                                             current_tick](
-                                                                const Luminumbra::Components::
-                                                                    TransformComponent& tf) {
-                    luminumbra::foliage::PlantEnvSample s;
-                    const Luminumbra::Vec3 p = tf.position;
-                    // Moisture: weather precipitation (rain -> growth) + irrigation (player
-                    // watering).
-                    const float precip =
-                        m_weatherSystem ? m_weatherSystem->PrecipitationAt(p) : 0.0f;
-                    s.moisture = luminumbra::foliage::clamp01(0.30f + precip * 0.70f);
-                    // fold the freshly-updated IRRIGATION grid (milli 0..1000) into moisture —
-                    // watered cells grow better (watered-beats-dry). No grid -> unchanged.
-                    if (m_irrigationGrid) {
-                        const int moist = luminumbra::foliage::MoistureAt(*m_irrigationGrid,
-                                                                          p.x,
-                                                                          p.z,
-                                                                          foliageOriginX,
-                                                                          foliageOriginZ,
-                                                                          kFoliageFieldCell);
-                        s.moisture = luminumbra::foliage::clamp01(
-                            s.moisture + static_cast<float>(moist) / 1000.0f * 0.5f);
-                    }
-                    // Soil + temperature from the TERRAIN: surface-material favourability
-                    // (grass/soil rich, sand/stone poor) and an altitude lapse (higher
-                    // ground is colder -> alpine vs lowland growth). The real atmospheric/
-                    // terrain coupling. (Only runs for opt-in sim plants, so the per-plant
-                    // world queries are bounded.)
-                    float soil = 0.5f, temp = 0.55f;
-                    if (m_worldSystem) {
-                        const float th = m_worldSystem->GetTerrainHeightAt(p.x, p.z);
-                        switch (m_worldSystem->SurfaceVertexMaterial(p.x, p.z, th)) {
-                            case Luminumbra::MaterialType::Grass:
-                                soil = 0.95f;
-                                break;
-                            case Luminumbra::MaterialType::Soil:
-                                soil = 0.85f;
-                                break;
-                            case Luminumbra::MaterialType::Sand:
-                                soil = 0.45f;
-                                break;
-                            case Luminumbra::MaterialType::Stone:
-                                soil = 0.30f;
-                                break;
-                            default:
-                                soil = 0.25f;
-                                break;
+                luminumbra::foliage::EnvSampler plant_env =
+                    [this, foliageOriginX, foliageOriginZ, current_tick](
+                        const Luminumbra::Components::TransformComponent& tf) {
+                        luminumbra::foliage::PlantEnvSample s;
+                        const Luminumbra::Vec3 p = tf.position;
+                        // Moisture: weather precipitation (rain -> growth) + irrigation (player
+                        // watering).
+                        const float precip =
+                            m_weatherSystem ? m_weatherSystem->PrecipitationAt(p) : 0.0f;
+                        s.moisture = luminumbra::foliage::clamp01(0.30f + precip * 0.70f);
+                        // fold the freshly-updated IRRIGATION grid (milli 0..1000) into moisture —
+                        // watered cells grow better (watered-beats-dry). No grid -> unchanged.
+                        if (m_irrigationGrid) {
+                            const int moist = luminumbra::foliage::MoistureAt(*m_irrigationGrid,
+                                                                              p.x,
+                                                                              p.z,
+                                                                              foliageOriginX,
+                                                                              foliageOriginZ,
+                                                                              kFoliageFieldCell);
+                            s.moisture = luminumbra::foliage::clamp01(
+                                s.moisture + static_cast<float>(moist) / 1000.0f * 0.5f);
                         }
-                        const float altitude = th - static_cast<float>(Luminumbra::SEA_LEVEL);
-                        temp = luminumbra::foliage::clamp01(
-                            0.60f - (altitude > 0.0f ? altitude : 0.0f) * 0.00045f);
-                    }
-                    s.soil_quality = soil;
-                    // fold the freshly-updated SOIL-NUTRIENT grid (milli 0..1000) into soil
-                    // quality. Foragers/feeders DEPLETE the cell, so a monoculture on one cell
-                    // starves itself (monoculture-starves). No grid -> unchanged terrain quality.
-                    if (m_soilGrid) {
-                        const int nut = luminumbra::foliage::NutrientAt(*m_soilGrid,
-                                                                        p.x,
-                                                                        p.z,
-                                                                        foliageOriginX,
-                                                                        foliageOriginZ,
-                                                                        kFoliageFieldCell);
-                        // NutrientAt is milli-of-milli (kSoilBaseline == 1.0 nutrient), so
-                        // normalise by kSoilBaseline (NOT 1000) to a [0,1] fraction before
-                        // blending.
-                        const float nutFrac =
-                            static_cast<float>(nut) /
-                            static_cast<float>(luminumbra::foliage::kSoilBaseline);
-                        s.soil_quality =
-                            luminumbra::foliage::clamp01(s.soil_quality * 0.5f + nutFrac * 0.5f);
-                    }
-                    s.temperature = temp;
-                    // Real day/night light from the sim clock. Triangular day
-                    // curve peaking at noon, with a twilight floor so growth slows (not halts) at
-                    // night. kTicksPerDay = 20-min day @30Hz (mirrors the circadian slot).
-                    constexpr std::uint64_t kTicksPerDay = 30ull * 60ull * 20ull;
-                    const float tod01 =
-                        m_activeRegionsEnabled
-                            ? static_cast<float>(m_worldClock.day_phase(current_tick))
-                            : static_cast<float>(current_tick % kTicksPerDay) /
-                                  static_cast<float>(kTicksPerDay);
-                    const float noonDist = tod01 < 0.5f ? (0.5f - tod01) : (tod01 - 0.5f);
-                    const float day = 1.0f - 2.0f * noonDist; // 0 at midnight -> 1 at noon
-                    s.light = luminumbra::foliage::clamp01(0.15f + 0.85f * day);
-                    //  (season): a deterministic ANNUAL temperature swing folded onto the terrain
-                    // temp so growth varies across the year — colder in winter (slower growth +
-                    // cold stress), warmer in summer. Triangular (libm-free) over a year of
-                    // kSeasonDays in-game days; tick-based -> run==replay (kSeasonSeedOffset 37
-                    // reserved, no RNG). Only opt-in plant rosters run this, so the canonical
-                    // (no-plant) world is unchanged.
-                    constexpr std::uint64_t kSeasonDays = 8ull;
-                    const std::uint64_t kTicksPerYear = kTicksPerDay * kSeasonDays;
-                    const float season01 =
-                        m_activeRegionsEnabled
-                            ? static_cast<float>(m_worldClock.year_phase(current_tick))
-                            : static_cast<float>(current_tick % kTicksPerYear) /
-                                  static_cast<float>(kTicksPerYear);
-                    const float midDist = season01 < 0.5f ? (0.5f - season01) : (season01 - 0.5f);
-                    const float warmth = 1.0f - 2.0f * midDist; // 0 = midwinter -> 1 = midsummer
-                    constexpr float kSeasonAmplitude = 0.30f;   // +-0.15 temperature swing
-                    s.temperature = luminumbra::foliage::clamp01(
-                        s.temperature + (warmth - 0.5f) * kSeasonAmplitude);
-                    return s;
-                };
+                        // Soil + temperature from the TERRAIN: surface-material favourability
+                        // (grass/soil rich, sand/stone poor) and an altitude lapse (higher
+                        // ground is colder -> alpine vs lowland growth). The real atmospheric/
+                        // terrain coupling. (Only runs for opt-in sim plants, so the per-plant
+                        // world queries are bounded.)
+                        float soil = 0.5f, temp = 0.55f;
+                        if (m_worldSystem) {
+                            const float th = m_worldSystem->GetTerrainHeightAt(p.x, p.z);
+                            switch (m_worldSystem->SurfaceVertexMaterial(p.x, p.z, th)) {
+                                case Luminumbra::MaterialType::Grass:
+                                    soil = 0.95f;
+                                    break;
+                                case Luminumbra::MaterialType::Soil:
+                                    soil = 0.85f;
+                                    break;
+                                case Luminumbra::MaterialType::Sand:
+                                    soil = 0.45f;
+                                    break;
+                                case Luminumbra::MaterialType::Stone:
+                                    soil = 0.30f;
+                                    break;
+                                default:
+                                    soil = 0.25f;
+                                    break;
+                            }
+                            const float altitude = th - static_cast<float>(Luminumbra::SEA_LEVEL);
+                            temp = luminumbra::foliage::clamp01(
+                                0.60f - (altitude > 0.0f ? altitude : 0.0f) * 0.00045f);
+                        }
+                        s.soil_quality = soil;
+                        // fold the freshly-updated SOIL-NUTRIENT grid (milli 0..1000) into soil
+                        // quality. Foragers/feeders DEPLETE the cell, so a monoculture on one cell
+                        // starves itself (monoculture-starves). No grid -> unchanged terrain
+                        // quality.
+                        if (m_soilGrid) {
+                            const int nut = luminumbra::foliage::NutrientAt(*m_soilGrid,
+                                                                            p.x,
+                                                                            p.z,
+                                                                            foliageOriginX,
+                                                                            foliageOriginZ,
+                                                                            kFoliageFieldCell);
+                            // NutrientAt is milli-of-milli (kSoilBaseline == 1.0 nutrient), so
+                            // normalise by kSoilBaseline (NOT 1000) to a [0,1] fraction before
+                            // blending.
+                            const float nutFrac =
+                                static_cast<float>(nut) /
+                                static_cast<float>(luminumbra::foliage::kSoilBaseline);
+                            s.soil_quality = luminumbra::foliage::clamp01(s.soil_quality * 0.5f +
+                                                                          nutFrac * 0.5f);
+                        }
+                        s.temperature = temp;
+                        // Real day/night light from the sim clock. Triangular day
+                        // curve peaking at noon, with a twilight floor so growth slows (not halts)
+                        // at night. kTicksPerDay = 20-min day @30Hz (mirrors the circadian slot).
+                        constexpr std::uint64_t kTicksPerDay = 30ull * 60ull * 20ull;
+                        const float tod01 =
+                            m_activeRegionsEnabled
+                                ? static_cast<float>(m_worldClock.day_phase(current_tick))
+                                : static_cast<float>(current_tick % kTicksPerDay) /
+                                      static_cast<float>(kTicksPerDay);
+                        const float noonDist = tod01 < 0.5f ? (0.5f - tod01) : (tod01 - 0.5f);
+                        const float day = 1.0f - 2.0f * noonDist; // 0 at midnight -> 1 at noon
+                        s.light = luminumbra::foliage::clamp01(0.15f + 0.85f * day);
+                        //  (season): a deterministic ANNUAL temperature swing folded onto the
+                        //  terrain
+                        // temp so growth varies across the year — colder in winter (slower growth +
+                        // cold stress), warmer in summer. Triangular (libm-free) over a year of
+                        // kSeasonDays in-game days; tick-based -> run==replay (kSeasonSeedOffset 37
+                        // reserved, no RNG). Only opt-in plant rosters run this, so the canonical
+                        // (no-plant) world is unchanged.
+                        constexpr std::uint64_t kSeasonDays = 8ull;
+                        const std::uint64_t kTicksPerYear = kTicksPerDay * kSeasonDays;
+                        const float season01 =
+                            m_activeRegionsEnabled
+                                ? static_cast<float>(m_worldClock.year_phase(current_tick))
+                                : static_cast<float>(current_tick % kTicksPerYear) /
+                                      static_cast<float>(kTicksPerYear);
+                        const float midDist =
+                            season01 < 0.5f ? (0.5f - season01) : (season01 - 0.5f);
+                        const float warmth =
+                            1.0f - 2.0f * midDist;                // 0 = midwinter -> 1 = midsummer
+                        constexpr float kSeasonAmplitude = 0.30f; // +-0.15 temperature swing
+                        s.temperature = luminumbra::foliage::clamp01(
+                            s.temperature + (warmth - 0.5f) * kSeasonAmplitude);
+                        return s;
+                    };
                 luminumbra::foliage::RunPlantGrowthSystemOnTick(
                     m_registry, current_tick, plant_env);
             }
@@ -1836,7 +1837,7 @@ std::string GameSession::ComputeChunkStateHash() {
                                         record->second.state == RegionState::Frozen
                                     ? record->second.frozen_digest
                                     : Persistence::WorldSaveService::region_simulation_digest(
-                                          directory, key, {live, parked, durable});
+                                          directory, key, {live, parked, durable, {}});
             projection += std::to_string(key.x) + "," + std::to_string(key.z) + ":" +
                           std::to_string(digest) + ";";
         }

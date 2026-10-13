@@ -535,15 +535,18 @@ bool FlushDirectoryEntry(const std::filesystem::path& directory_path,
 
 #endif
 
-thread_local WorldSaveService::SaveFactsScope* g_active_facts = nullptr;
+WorldSaveService::SaveFactsScope*& ActiveFacts() {
+    static thread_local WorldSaveService::SaveFactsScope* active = nullptr;
+    return active;
+}
 
 // Every member replacement funnels through here so tests can observe real publication sites.
 bool ReplaceMember(const std::filesystem::path& temp,
                    const std::filesystem::path& destination,
                    std::vector<std::string>* errors) {
     report_snapshot_step("before-replace", destination);
-    if (g_active_facts != nullptr)
-        g_active_facts->invalidate_presence_facts();
+    if (ActiveFacts() != nullptr)
+        ActiveFacts()->invalidate_presence_facts();
     if (!ReplaceRegionFileAtomically(temp, destination, errors))
         return false;
     report_snapshot_step("after-replace", destination);
@@ -1687,17 +1690,17 @@ bool SameSaveDirectory(const std::filesystem::path& lhs, const std::filesystem::
 
 WorldSaveService::SaveFactsScope::SaveFactsScope(const std::filesystem::path& save_dir)
     : m_save_dir(save_dir)
-    , m_previous(g_active_facts) {
-    g_active_facts = this;
+    , m_previous(ActiveFacts()) {
+    ActiveFacts() = this;
 }
 
 WorldSaveService::SaveFactsScope::~SaveFactsScope() {
-    g_active_facts = m_previous;
+    ActiveFacts() = m_previous;
 }
 
 WorldSaveService::SaveFactsScope*
 WorldSaveService::SaveFactsScope::active_for(const std::filesystem::path& save_dir) {
-    for (SaveFactsScope* scope = g_active_facts; scope != nullptr; scope = scope->m_previous) {
+    for (SaveFactsScope* scope = ActiveFacts(); scope != nullptr; scope = scope->m_previous) {
         if (SameSaveDirectory(scope->m_save_dir, save_dir))
             return scope;
     }
@@ -2037,8 +2040,8 @@ bool WorldSaveService::durable_remove(const std::filesystem::path& path,
     if (!existed)
         return true;
     report_snapshot_step("before-delete", path);
-    if (g_active_facts != nullptr)
-        g_active_facts->invalidate_presence_facts();
+    if (ActiveFacts() != nullptr)
+        ActiveFacts()->invalidate_presence_facts();
 #if defined(_WIN32)
     // Publish absence through a write-through move before deleting the expendable
     // tombstone. If interrupted here, recovery restores the protected original;

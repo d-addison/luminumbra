@@ -2609,12 +2609,13 @@ TEST(GameSessionHeadlessWorldTest, GroundSpawnQuantizesAndProbesEditedTerrainBef
     CreateGroundWorld(session, root, jobs, "Edited ground probe");
     auto chunk = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3{0, 0, 0});
     chunk->set_state(Luminumbra::ChunkState::Ready);
-    constexpr int side = CHUNK_SIZE_X + 1;
-    chunk->sdf_data.resize(side * (CHUNK_SIZE_Y + 1) * (CHUNK_SIZE_Z + 1));
-    for (int z = 0; z <= CHUNK_SIZE_Z; ++z)
-        for (int y = 0; y <= CHUNK_SIZE_Y; ++y)
-            for (int x = 0; x <= CHUNK_SIZE_X; ++x)
-                chunk->sdf_data[static_cast<std::size_t>(x + side * (y + (CHUNK_SIZE_Y + 1) * z))] =
+    constexpr int side = Luminumbra::CHUNK_SIZE_X + 1;
+    chunk->sdf_data.resize(side * (Luminumbra::CHUNK_SIZE_Y + 1) * (Luminumbra::CHUNK_SIZE_Z + 1));
+    for (int z = 0; z <= Luminumbra::CHUNK_SIZE_Z; ++z)
+        for (int y = 0; y <= Luminumbra::CHUNK_SIZE_Y; ++y)
+            for (int x = 0; x <= Luminumbra::CHUNK_SIZE_X; ++x)
+                chunk->sdf_data[static_cast<std::size_t>(
+                    x + side * (y + (Luminumbra::CHUNK_SIZE_Y + 1) * z))] =
                     static_cast<float>(y) - 4.0f;
     chunk->mark_voxel_data_dirty();
     ASSERT_TRUE(session.GetWorldSystem()->adopt_streamed_chunk(chunk));
@@ -2698,23 +2699,26 @@ TEST(GameSessionHeadlessWorldTest, BoundedBootSaveAsTransfersDiskOnlyAuthorityAn
 }
 
 namespace {
-Luminumbra::Chunk* g_chunk_revision_during_commit = nullptr;
+Luminumbra::Chunk*& ChunkRevisionDuringCommit() {
+    static Luminumbra::Chunk* chunk = nullptr;
+    return chunk;
+}
 void ChangeChunkAtIndexPublication(const char* step, const fs::path& path) {
-    if (g_chunk_revision_during_commit && std::string(step) == "before-replace" &&
+    if (ChunkRevisionDuringCommit() && std::string(step) == "before-replace" &&
         path.filename() == "snapshot.json") {
-        g_chunk_revision_during_commit->sdf_data.front() -= 1.0f;
-        g_chunk_revision_during_commit->mark_voxel_data_dirty();
-        g_chunk_revision_during_commit->mark_water_state_dirty();
+        ChunkRevisionDuringCommit()->sdf_data.front() -= 1.0f;
+        ChunkRevisionDuringCommit()->mark_voxel_data_dirty();
+        ChunkRevisionDuringCommit()->mark_water_state_dirty();
     }
 }
 struct ChunkRevisionHook {
     explicit ChunkRevisionHook(Luminumbra::Chunk* chunk) {
-        g_chunk_revision_during_commit = chunk;
+        ChunkRevisionDuringCommit() = chunk;
         P::set_snapshot_step_hook_for_testing(&ChangeChunkAtIndexPublication);
     }
     ~ChunkRevisionHook() {
         P::set_snapshot_step_hook_for_testing(nullptr);
-        g_chunk_revision_during_commit = nullptr;
+        ChunkRevisionDuringCommit() = nullptr;
     }
 };
 } // namespace
