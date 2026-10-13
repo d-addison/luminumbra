@@ -38,6 +38,8 @@ struct FarVolumeResidentObservation {
     World::FarTileStatus coverage;
     std::uint64_t cpu_bytes = 0, gpu_bytes = 0;
     std::uint64_t ready_upload_bytes = 0;
+    World::FarBuildIdentity built_identity;
+    World::FarVolumeRequest built_request;
 };
 struct FarVolumeFrameResult {
     std::size_t dispatched = 0, uploaded = 0, rejected = 0, evicted = 0;

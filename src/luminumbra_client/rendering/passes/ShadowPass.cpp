@@ -1,3 +1,4 @@
+#include "../FarWorldReplay.h"
 #include "ShadowPass.h"
 
 #include "../RenderResourceRegistry.h"
@@ -167,6 +168,7 @@ ShadowPass::execute(const RenderContext& ctx, const ShadowPassInput& input) {
     m_shadow_map.light_space_matrices = light_space_matrices;
     glViewport(0, 0, m_shadow_map.resolution, m_shadow_map.resolution);
     glBindFramebuffer(GL_FRAMEBUFFER, m_shadow_map.fbo_id);
+    PreserveReplayObject(ReplayObjectKind::LayerFramebuffer, m_shadow_map.fbo_id);
     glEnable(GL_DEPTH_TEST);
     glDepthMask(GL_TRUE);
     glDepthFunc(GL_LESS);
@@ -209,6 +211,7 @@ ShadowPass::execute(const RenderContext& ctx, const ShadowPassInput& input) {
                             m_tint_fbo != 0;
     if ((have_glass || m_tint_dirty) && m_tint_fbo != 0) {
         glBindFramebuffer(GL_FRAMEBUFFER, m_tint_fbo);
+        PreserveReplayObject(ReplayObjectKind::LayerFramebuffer, m_tint_fbo);
         glClearColor(1.0f, 1.0f, 1.0f, 1.0f);
         glDepthMask(GL_FALSE);
         glEnable(GL_DEPTH_TEST);

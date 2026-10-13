@@ -3,13 +3,16 @@
     [string]$Mode = "All",
 
     [string]$BuildPreset = "debug",
-    [int]$SmokeSeconds = 30
+    [int]$SmokeSeconds = 30,
+    [ValidateSet("Legacy", "Ladder")]
+    [string]$FarWorldRenderer = "Legacy"
 )
 
 $ErrorActionPreference = "Stop"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 . (Join-Path $ScriptDir "nightly-provenance.ps1")
 . (Join-Path $ScriptDir "capture-artifact-validation.ps1")
+. (Join-Path $ScriptDir "far-ladder-oracle.ps1")
 
 $ArtifactDir = "tools/gates/baselines"
 
@@ -3444,19 +3447,27 @@ function Test-PlayerView {
 # run measures the gbuffer GPU time with far-LOD DISABLED (the honest in-run
 # baseline; the committed perf baseline records frame times, not per-pass GPU
 # times); phase B enables far-LOD and sweeps eye-level + elevated stations.
-# Gates: zero reported missing regions in the legacy runtime wanted set after
-# settle (no independent radius assertion); farlod_resident_bytes below the
+# Gates: camera-derived legacy wanted counts and zero missing regions at every
+# captured station; farlod_resident_bytes below the
 # artifact's resident_budget_bytes threshold; gbuffer_gpu_ms delta
 # < 1.5 ms; horizon screenshots show terrain to the horizon (below-horizon
 # sky ratio bounded); the live/far boundary band ROI (~192 m at the smoke
 # radii) shows no sky-leak band and no strict void clusters (the
 # Distant-Horizons failure mode).
-# FarTierTable.h declares the future volumetric ranges; this gate still reads
-# the legacy artifact and does not qualify coverage of that ladder.
+# The legacy scheduler is checked against an independent legacy oracle
+# (far-ladder-oracle.ps1, from the v2 oracle artifact). The volumetric ladder is
+# checked only when the artifact mode is ladder; otherwise ladder_checked is
+# reported false. Complete v2 checks every required station's retained ON frame,
+# deadline <=90 seconds, current spanning identities and independent wanted set.
+# An explicit Ladder run refuses until immutable fixture authority is supported.
 
 function Test-FarLodHorizon {
+    if ($FarWorldRenderer -eq "Ladder") {
+        throw "FarLodHorizon Ladder qualification is unsupported: the world presets lack injected immutable authority; native cave/edit/budget/water qualification remains NEEDS-NATIVE-RUN. A refused Legacy fallback cannot qualify Ladder."
+    }
+    Write-Host "FarLodHorizon selected renderer: $FarWorldRenderer (legacy default; ladder_checked:false)"
     $exe = Get-ClientExe
-    $runSeconds = [Math]::Max(50, $SmokeSeconds)
+    $runSeconds = [Math]::Max(680, $SmokeSeconds)
 
     # archipelago (sea to horizon) added so the
     # water-continuity assertion below runs on an open-water preset alongside
@@ -3485,6 +3496,21 @@ function Test-FarLodHorizon {
 
         $analysisPath = Join-Path $viewDir "farlod-horizon-analysis.json"
         $analysis = Read-JsonArtifact -Path $analysisPath -Schema "luminumbra.farlod_horizon.v1"
+        $oracle = Read-JsonArtifact -Path (Join-Path $viewDir "farlod-horizon-ladder-oracle.json") -Schema "luminumbra.farlod_horizon.v2"
+        # Runs retained #199 aggregate checks plus the strict station/pose validator.
+        $oracleResult = Assert-FarHorizonV2Artifact -Path (Join-Path $viewDir "farlod-horizon-ladder-oracle.json") -Renderer ($FarWorldRenderer.ToLowerInvariant())
+        if ($oracle.world_preset -ne $preset) { throw "farlod horizon ($preset) wrong v2 preset" }
+        Assert-FarLodHorizonStationCoverage -Analysis $analysis -Name "farlod horizon ($preset)"
+        foreach ($counter in @("regions_wanted", "regions_resident", "regions_missing")) {
+            $oracleCount = Get-FarOracleInteger $oracle.legacy.$counter "farlod horizon ($preset) oracle" "legacy.$counter"
+            $analysisCount = Get-FarOracleInteger $analysis.farlod.$counter "farlod horizon ($preset)" "farlod.$counter"
+            if ($oracleCount -ne $analysisCount) {
+                throw "farlod horizon ($preset) oracle legacy.$counter $oracleCount differs from runtime farlod.$counter $analysisCount"
+            }
+        }
+        $ladderCheckedText = "false"
+        if ($oracleResult.LadderChecked) { $ladderCheckedText = "true" }
+        Write-Host "  ladder_checked: $ladderCheckedText (mode $($oracle.mode))"
 
         if ($analysis.world_preset -ne $preset) {
             throw "farlod horizon ($preset) artifact has unexpected world_preset '$($analysis.world_preset)'"
@@ -3496,10 +3522,8 @@ function Test-FarLodHorizon {
             throw "farlod horizon ($preset) captured $($analysis.aggregates.captured_stations) of $($analysis.aggregates.expected_stations) stations"
         }
 
-        # After settle: zero reported missing regions in the runtime wanted set.
-        # This does not check thresholds.f2_outer_range_m (legacy metadata) or
-        # compute an expected set independently. See world/FarTierTable.h for
-        # the future volumetric ladder; assertions stay unchanged here.
+        # Retain the aggregate checks alongside the per-station independent
+        # coverage checks above. thresholds.f2_outer_range_m is v1 metadata.
         if ([int64]$analysis.farlod.regions_missing -gt 0) {
             throw "farlod horizon ($preset) has $($analysis.farlod.regions_missing) missing wanted far regions after settle"
         }

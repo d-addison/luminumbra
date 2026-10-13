@@ -251,7 +251,14 @@ FarWorldRefusal FarWorldRenderer::ExtendLedger(const FarTileKey& key,
     if (!intent)
         return FarWorldRefusal::SpanRejected;
     const auto growth = span.generation() - previous_generation;
-    const auto generation = old != ledgers_.end() ? old->accepted->identity.span_generation : 0;
+    std::uint64_t generation = 0;
+    auto headroom = limits_.build_headroom_bytes;
+    if (old != ledgers_.end()) {
+        const auto& accepted = old->accepted;
+        if (!accepted) return FarWorldRefusal::InvalidRequests;
+        generation = accepted->identity.span_generation;
+        if (growth == 0) headroom = accepted->build_headroom_bytes;
+    }
     if (growth > std::numeric_limits<std::uint64_t>::max() - generation)
         return FarWorldRefusal::SpanRejected;
     request = {{world_epoch_,
@@ -261,8 +268,7 @@ FarWorldRefusal FarWorldRenderer::ExtendLedger(const FarTileKey& key,
                 bake_generation_,
                 generation + growth},
                *intent,
-               old != ledgers_.end() && growth == 0 ? old->accepted->build_headroom_bytes
-                                                    : limits_.build_headroom_bytes};
+               headroom};
     return FarWorldRefusal::None;
 }
 
@@ -294,7 +300,9 @@ FarWorldRenderer::ValidateAndRecordRequests(std::span<const FarVolumeWantedReque
                 return l.accepted && l.accepted->identity.key == request.identity.key;
             });
         if (slot != pending_ledgers_.end()) {
-            const auto& old = *slot->accepted;
+            const auto& accepted = slot->accepted;
+            if (!accepted) return FarWorldRefusal::InvalidRequests;
+            const auto& old = *accepted;
             if (request.identity.span_generation < old.identity.span_generation ||
                 (request.identity == old.identity &&
                  (request.intent != old.intent ||
@@ -348,6 +356,12 @@ bool FarWorldRenderer::AdvanceFrame(std::uint64_t frame,
         (advanced_frame_ && frame <= *advanced_frame_))
         return false;
     advanced_frame_ = frame;
+    for (auto& tier : diagnostic_tiers_) {
+        tier.draws = 0;
+        tier.indices = 0;
+        tier.draw_refusals = 0;
+    }
+    submission_refusal_ = FarWorldSubmissionRefusal::None;
     if (requests.size() > kScratchSlots || !std::all_of(camera.begin(), camera.end(), [](double v) {
             return std::isfinite(v) && std::abs(v) <= kFarWantedCameraLimitMeters;
         })) {
@@ -359,15 +373,54 @@ bool FarWorldRenderer::AdvanceFrame(std::uint64_t frame,
         refusal_ = outcome;
         return false;
     }
+    diagnostic_old_wanted_.fill(false);
+    diagnostic_old_pair_.fill(false);
+    for (std::size_t i = 0; i < ledgers_.size(); ++i) {
+        const auto& accepted = ledgers_[i].accepted;
+        if (!accepted)
+            continue;
+        const auto old = residency_->Observe(accepted->identity.key);
+        diagnostic_old_wanted_[i] = old.has_value();
+        diagnostic_old_pair_[i] = old && (old->coverage.state == FarTileState::Uploaded ||
+                                          old->coverage.state == FarTileState::Empty);
+    }
     if (!residency_->ReplaceWanted(requests)) {
         refusal_ = FarWorldRefusal::InvalidRequests;
         return false;
     }
+    for (std::size_t i = 0; i < ledgers_.size(); ++i) {
+        const auto& accepted = ledgers_[i].accepted;
+        if (!diagnostic_old_wanted_[i] || !accepted)
+            continue;
+        const auto& old = *accepted;
+        const auto next = std::find_if(requests.begin(), requests.end(), [&](const auto& r) {
+            return r.identity.key == old.identity.key;
+        });
+        auto& counters = diagnostic_tiers_[old.identity.key.tier - 1];
+        if (next == requests.end())
+            ++counters.evicted_range;
+        else if (next->identity != old.identity) {
+            if (diagnostic_old_pair_[i])
+                ++counters.stale_rebuilds;
+        }
+    }
     ledgers_ = pending_ledgers_;
+
+    for (std::size_t i = 0; i < requests.size(); ++i) {
+        const auto observed = residency_->Observe(requests[i].identity.key);
+        diagnostic_budget_before_[i] = observed &&
+            observed->eligibility == FarVolumeEligibility::BudgetEvicted;
+    }
     last_frame_ = residency_->AdvanceFrame(
         camera[0], camera[2], limits_.frame, Producer(), [this](const auto& mesh) {
             return UploadFarVolumeGpu(mesh, *driver_);
         });
+    for (std::size_t i = 0; i < requests.size(); ++i) {
+        const auto observed = residency_->Observe(requests[i].identity.key);
+        if (!diagnostic_budget_before_[i] && observed &&
+            observed->eligibility == FarVolumeEligibility::BudgetEvicted)
+            ++diagnostic_tiers_[requests[i].identity.key.tier - 1].evicted_budget;
+    }
     return true;
 }
 
@@ -421,22 +474,31 @@ FarWorldSubmitStats FarWorldRenderer::Submit(const std::array<double, 3>& camera
                                              const FarWorldPrepareDraw& prepare) {
     CheckOwner();
     FarWorldSubmitStats stats;
+    for (auto& tier : diagnostic_tiers_) {
+        tier.draws = 0;
+        tier.indices = 0;
+        tier.draw_refusals = 0;
+    }
     if (!residency_ || stopping_ || !prepare ||
         Selection(FarWorldPurpose::World).effective != FarWorldMode::Ladder)
         return stats;
+    submission_refusal_ = FarWorldSubmissionRefusal::None;
     if (!ownership_.complete() || !advanced_frame_ || ownership_.frame() != *advanced_frame_) {
+        submission_refusal_ = FarWorldSubmissionRefusal::LiveOwnershipIncomplete;
         ++stats.refused;
         return stats;
     }
     if (!ownership_gpu_charge_) {
         auto charge = memory_->ReserveGpu(kFarTierCount, kFarWorldOwnershipGpuBytes);
         if (!charge) {
+            submission_refusal_ = FarWorldSubmissionRefusal::LogicalStoreAdmission;
             ++stats.refused;
             return stats;
         }
         ownership_gpu_charge_.emplace(std::move(*charge));
     }
     if (!driver_->BindLiveOwnership(ownership_.cells())) {
+        submission_refusal_ = FarWorldSubmissionRefusal::BackendUnavailable;
         driver_->ReleaseLiveOwnership();
         ownership_gpu_charge_.reset();
         ++stats.refused;
@@ -455,19 +517,26 @@ FarWorldSubmitStats FarWorldRenderer::Submit(const std::array<double, 3>& camera
                 auto& v = *static_cast<Visit*>(opaque);
                 const auto* allocation =
                     dynamic_cast<const FarVolumeGlAllocation*>(record.resource);
+                auto& tier_stats = v.owner.diagnostic_tiers_[record.identity.key.tier - 1];
                 FarWorldDrawCommand command;
                 if (!allocation || !MakeFarWorldDrawCommand(
                                        record, v.camera, allocation->index_count(), command)) {
                     ++v.stats.refused;
+                    ++tier_stats.draw_refusals;
+                    v.owner.submission_refusal_ = FarWorldSubmissionRefusal::DrawRejected;
                     return;
                 }
                 command.live_cell_count =
                     static_cast<std::int32_t>(v.owner.ownership_.cells().size());
                 if (!v.prepare(command) || !DrawFarVolumeGpu(*record.resource, *v.owner.driver_)) {
                     ++v.stats.refused;
+                    ++tier_stats.draw_refusals;
+                    v.owner.submission_refusal_ = FarWorldSubmissionRefusal::DrawRejected;
                     return;
                 }
                 ++v.stats.draws;
+                ++tier_stats.draws;
+                tier_stats.indices += static_cast<std::size_t>(command.index_count);
                 v.stats.indices += static_cast<std::size_t>(command.index_count);
             },
             &context);
@@ -479,6 +548,75 @@ FarWorldSubmitStats FarWorldRenderer::Submit(const std::array<double, 3>& camera
     driver_->UnbindLiveOwnership();
     submitting_ = false;
     return stats;
+}
+
+void FarWorldRenderer::CaptureDiagnostic(FarWorldSelection selection,
+                                         std::uint64_t frame,
+                                         const std::array<double, 3>& camera,
+                                         float plane,
+                                         bool advanced,
+                                         std::size_t draws,
+                                         std::size_t indices,
+                                         std::uint64_t legacy_epoch) {
+    CheckOwner();
+    diagnostic_ = {};
+    diagnostic_.captured = true;
+    diagnostic_.selection = selection;
+    const auto cave_policy = CavePolicy(selection);
+    diagnostic_.requested_cave_policy = cave_policy.requested;
+    diagnostic_.bound_cave_policy = cave_policy.bound;
+    diagnostic_.submission_refusal = selection.effective == FarWorldMode::Ladder && selection.submit
+                                         ? submission_refusal_
+                                         : FarWorldSubmissionRefusal::None;
+    diagnostic_.frame = frame;
+    diagnostic_.camera = camera;
+    diagnostic_.far_plane = plane;
+    diagnostic_.world_epoch =
+        selection.effective == FarWorldMode::Ladder ? world_epoch_ : legacy_epoch;
+    diagnostic_.bake_generation = bake_generation_;
+    diagnostic_.advanced = advanced;
+    diagnostic_.draws = draws;
+    diagnostic_.indices = indices;
+    diagnostic_.submission_occurred = draws != 0;
+    if (advanced && selection.effective == FarWorldMode::Ladder)
+        diagnostic_.upload = last_frame_;
+    if (fixture_) {
+        diagnostic_.content_identity = fixture_->content_identity();
+        diagnostic_.numeric = fixture_->numeric();
+    }
+    if (!residency_)
+        return;
+    const auto observations = residency_->Snapshot();
+    for (std::size_t i = 0; i < observations.size(); ++i) {
+        diagnostic_.tiers[i] = diagnostic_tiers_[i];
+        diagnostic_.tiers[i].resident = observations[i];
+        if (!selection.submit || selection.effective != FarWorldMode::Ladder) {
+            diagnostic_.tiers[i].draws = 0;
+            diagnostic_.tiers[i].indices = 0;
+            diagnostic_.tiers[i].draw_refusals = 0;
+        }
+    }
+    for (const auto& ledger : ledgers_) {
+        const auto& accepted = ledger.accepted;
+        if (!accepted)
+            continue;
+        const auto observed = residency_->Observe(accepted->identity.key);
+        if (!observed)
+            continue; // history also includes keys outside today's wanted set
+        if (diagnostic_.tile_count == diagnostic_.tiles.size()) {
+            diagnostic_.complete = false;
+            break;
+        }
+        auto& tile = diagnostic_.tiles[diagnostic_.tile_count++];
+        tile.desired = observed->desired;
+        tile.built = observed->built_identity;
+        tile.intent = accepted->intent;
+        tile.request = observed->built_request;
+        tile.coverage = observed->coverage;
+        tile.eligibility = observed->eligibility;
+        tile.has_pair = tile.coverage.state == FarTileState::Uploaded ||
+                        tile.coverage.state == FarTileState::Empty;
+    }
 }
 
 void FarWorldRenderer::Drain() {
@@ -506,6 +644,9 @@ void FarWorldRenderer::Drain() {
     requests_ = {};
     advanced_frame_.reset();
     last_frame_ = {};
+    diagnostic_ = {};
+    diagnostic_tiers_ = {};
+    submission_refusal_ = FarWorldSubmissionRefusal::None;
     world_epoch_ = 0;
     refusal_ = FarWorldRefusal::ImmutableAuthorityUnavailable;
 }

@@ -131,6 +131,7 @@ TEST(FarWorldPositionContract, EffectiveFrameProjectionAndPostOverrideDistanceSe
         ExpectContains(body, "m_frame_far_selection.effective == FarWorldMode::Ladder");
         ExpectContains(body, "m_frame_prepared.projection");
         ExpectContains(body, "m_taau_jitter_ndc");
+        ExpectContains(body, "ctx.frozen_replay = m_far_world_paired;");
     }
     const auto aerial =
         ExtractBlock(pipeline, "RenderContext RenderPipeline::make_aerial_context(");
