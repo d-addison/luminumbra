@@ -1331,7 +1331,9 @@ class QualificationSafetyTest(HarnessTestCase):
             return rq.run_qualification(
                 args, [f"--owner={owner}"], query=self.dump_query(folder),
                 core_limits=lambda: (4096, 4096),
-                read_pattern=lambda: str(folder / "core.%p"),
+                # Simulate the kernel's '/' separators even on a Windows host;
+                # backslashes would be literal characters in a POSIX core name.
+                read_pattern=lambda: (folder / "core.%p").as_posix(),
             )
 
         with mock.patch.object(rq, "IS_WINDOWS", windows), \
