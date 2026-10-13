@@ -5522,24 +5522,24 @@ public:
         glGetUniformfv(programs_[0], Location(0, "u_farFinerOuterRadius"), &radius);
         EXPECT_EQ(radius, 0);
     }
-    bool FailMappedSubmission(const Camera& camera) {
-        // Mapping the uploaded index allocation makes the actual GL draw fail.
+    bool FailSamplerSubmission(const Camera& camera) {
+        // Different active sampler types sharing a unit make the GL draw fail.
+        // Some drivers accept a mapped index buffer, so use a validation error
+        // independent of buffer mapping implementation details.
         // The production adapter must still restore VAO, and the owner scope
         // must restore ownership/depth/raster state and reset ladder uniforms.
         FarWorldPassUniformScope reset(uniforms_[0]);
         if (!driver_.BindLiveOwnership({}) || !uniforms_[0].Prepare(Command(camera, 2, 1040)))
             return false;
-        const auto* allocation = static_cast<const FarVolumeGlAllocation*>(allocation_.get());
-        GLint saved_vao = 0, ebo = 0;
-        glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &saved_vao);
-        glBindVertexArray(allocation->native_vao());
-        glGetIntegerv(GL_ELEMENT_ARRAY_BUFFER_BINDING, &ebo);
-        glBindVertexArray(static_cast<GLuint>(saved_vao));
-        EXPECT_NE(glMapNamedBuffer(static_cast<GLuint>(ebo), GL_READ_ONLY), nullptr);
+        const GLint sampler = Location(0, "u_materialLUT");
+        EXPECT_GE(sampler, 0);
+        EXPECT_GE(Location(0, "u_terrainTextures"), 0);
+        glProgramUniform1i(programs_[0], sampler, 1);
+        EXPECT_EQ(glGetError(), GL_NO_ERROR);
         glDisable(GL_DEBUG_OUTPUT); // this one driver error is deliberate
         const bool submitted = DrawFarVolumeGpu(*allocation_, driver_);
         glEnable(GL_DEBUG_OUTPUT);
-        EXPECT_TRUE(glUnmapNamedBuffer(static_cast<GLuint>(ebo)));
+        glProgramUniform1i(programs_[0], sampler, 0);
         driver_.UnbindLiveOwnership();
         return submitted;
     }
@@ -5601,9 +5601,11 @@ TEST(RenderSmokeTest, FarWorldRayDepthBothPlanesAwayDirectionAndTierPriority) {
             ASSERT_GT(unbiased.depth, 0);
             float previous_depth = unbiased.depth;
             for (std::size_t tier = 1; tier <= Luminumbra::World::kFarTierCount; ++tier) {
-                const float bias =
-                    static_cast<float>(Luminumbra::World::FarTierAt(tier)->sample_spacing_meters) /
-                    2;
+                const auto dimensions = Luminumbra::World::FarTierAt(tier);
+                ASSERT_TRUE(dimensions);
+                if (!dimensions)
+                    return;
+                const float bias = static_cast<float>(dimensions->sample_spacing_meters) / 2;
                 const float outer =
                     static_cast<float>(Luminumbra::World::FarWantedRadiusMeters(tier));
                 const auto pixel = probe.Draw(camera, relative, bias, outer);
@@ -5674,8 +5676,11 @@ TEST(RenderSmokeTest, FarWorldRayBiasElevatedPitchedUnbiasedClipsAndJitterMotion
     straight.SelectFarWorldPlane(FarWorldMode::Ladder);
     for (std::size_t tier = 1; tier <= Luminumbra::World::kFarTierCount; ++tier) {
         const float outer = static_cast<float>(Luminumbra::World::FarWantedRadiusMeters(tier));
-        const float bias =
-            static_cast<float>(Luminumbra::World::FarTierAt(tier)->sample_spacing_meters) / 2;
+        const auto dimensions = Luminumbra::World::FarTierAt(tier);
+        ASSERT_TRUE(dimensions);
+        if (!dimensions)
+            return;
+        const float bias = static_cast<float>(dimensions->sample_spacing_meters) / 2;
         EXPECT_GT(probe.Draw(straight, {0, 0, -outer}, bias, outer).depth, 0);
         EXPECT_EQ(probe.Draw(straight, {0, 0, -outer - .01f}, bias, outer).depth, 0);
         EXPECT_EQ(probe.Draw(straight, {0, 0, -175.99f}, bias, outer).depth, 0);
@@ -5821,7 +5826,7 @@ TEST(RenderSmokeTest, FarWorldFailedSubmissionRestoresBindingsClipDepthRasterAnd
         EXPECT_TRUE(probe.SubmitExisting(camera));
         EXPECT_EQ(FarWorldGlSnapshot(), before);
         ExpectFarWorldUniformsReset(probe.program());
-        EXPECT_FALSE(probe.FailMappedSubmission(camera));
+        EXPECT_FALSE(probe.FailSamplerSubmission(camera));
         EXPECT_EQ(FarWorldGlSnapshot(), before);
         GLint polygon_modes[2]{};
         glGetIntegerv(GL_POLYGON_MODE, polygon_modes);
@@ -5884,7 +5889,7 @@ std::string PreprocessedLinkedFragment(GLuint program) {
     std::string line, result;
     bool defined = false, in_variant = false, enabled = true;
     while (std::getline(lines, line)) {
-        if (!line.empty() && line.back() == '\r')
+        while (!line.empty() && line.back() == '\r')
             line.pop_back();
         if (line == "#define LUMINUMBRA_FAR_WORLD_LADDER 1") {
             defined = true;
@@ -5940,6 +5945,29 @@ struct ReloadShaderSources {
         fs::create_directories(destination.parent_path());
         fs::copy(SourceRoot() / "res/shaders", destination, fs::copy_options::recursive);
     }
+    bool EnableFarWorldClipInputs() const {
+        // Cache tests need active clipping uniforms in all three programs.
+        // Production static/skinned vertices use constant zero inputs, allowing
+        // the linker to remove ownership/radius uniforms after unconditional
+        // near-sphere discard. Keep those programs' inertness tests unmodified.
+        for (const char* vertex : {"instanced_mesh.vert", "skinned_mesh.vert"}) {
+            const auto path = directory / vertex;
+            auto source = ReadTextFile(path);
+            for (const char* field : {"FarRelativeWorldPos", "FarTileLocalPos"}) {
+                const std::string assignment = std::string("vs_out.") + field + " = vec3(0.0);";
+                const auto position = source.find(assignment);
+                if (position == std::string::npos)
+                    return false;
+                source.replace(
+                    position, assignment.size(), std::string("vs_out.") + field + " = aPos;");
+            }
+            std::ofstream output(path, std::ios::binary);
+            output << source;
+            if (!output)
+                return false;
+        }
+        return true;
+    }
     ~ReloadShaderSources() {
         std::error_code error;
         fs::remove_all(directory, error);
@@ -5948,6 +5976,7 @@ struct ReloadShaderSources {
 
 void CheckDirectFarWorldReload(bool prepare_first) {
     ReloadShaderSources sources;
+    ASSERT_TRUE(sources.EnableFarWorldClipInputs());
     for (const bool ladder_variant : {false, true}) {
         for (const char* vertex : {"g_buffer.vert", "instanced_mesh.vert", "skinned_mesh.vert"}) {
             SCOPED_TRACE(::testing::Message() << vertex << " ladder=" << ladder_variant);
@@ -5981,8 +6010,9 @@ void CheckDirectFarWorldReload(bool prepare_first) {
                 EXPECT_EQ(ReadIntUniform(shader.Id(), "u_farWorldLadder"), 1);
                 EXPECT_EQ(ReadIntUniform(shader.Id(), "u_farLiveCellCount"), 3);
                 EXPECT_EQ(ReadFloatUniform(shader.Id(), "u_farOuterRadius"), 1040);
-                if (ladder_variant)
+                if (ladder_variant) {
                     EXPECT_EQ(ReadFloatUniform(shader.Id(), "u_farRayBiasMeters"), 2);
+                }
                 uniforms.Reset();
             } else {
                 uniforms.Reset();
@@ -6021,9 +6051,24 @@ TEST(RenderSmokeTest, FarWorldLegacyLinkedProgramsHaveNoDepthWritesAndLadderVari
                 EXPECT_EQ(source.find("gl_FragDepth"), std::string::npos);
                 EXPECT_EQ(source.find("u_farRayBiasMeters"), std::string::npos);
                 EXPECT_EQ(source.find("depthPosition"), std::string::npos);
+                EXPECT_EQ(source.find("nearDepthUpperBound"), std::string::npos);
             } else {
                 EXPECT_NE(source.find("gl_FragDepth = gl_FragCoord.z;"), std::string::npos);
                 EXPECT_NE(source.find("gl_FragDepth = biasedDepth;"), std::string::npos);
+                const auto bound = source.find(
+                    "float nearDepthUpperBound = uintBitsToFloat(floatBitsToUint(1.0) + 1u);");
+                const auto correction =
+                    source.find("if (biasedDepth > 1.0 && biasedDepth <= nearDepthUpperBound)\n"
+                                "            biasedDepth = 1.0;");
+                const auto guard = source.find(
+                    "if (isnan(biasedDepth) || isinf(biasedDepth) || biasedDepth < 0.0 || "
+                    "biasedDepth > 1.0)\n            discard;");
+                ASSERT_NE(bound, std::string::npos);
+                ASSERT_NE(correction, std::string::npos);
+                ASSERT_NE(guard, std::string::npos);
+                EXPECT_LT(bound, correction);
+                EXPECT_LT(correction, guard);
+                EXPECT_LT(guard, source.find("gl_FragDepth = biasedDepth;"));
             }
         }
     }
@@ -6052,10 +6097,12 @@ TEST(RenderSmokeTest, FarWorldProductionDefineInjectionHandlesHeadersAndReload) 
     for (const auto& header : headers) {
         SCOPED_TRACE(::testing::Message() << header.leading << header.trailing << header.crlf);
         const auto with_header = [&](const std::string& original) {
-            const auto version_end = original.find('\n');
+            auto normalized = original;
+            std::erase(normalized, '\r');
+            const auto version_end = normalized.find('\n');
             EXPECT_NE(version_end, std::string::npos);
-            std::string source = header.leading + original.substr(0, version_end) +
-                                 header.trailing + original.substr(version_end);
+            std::string source = header.leading + normalized.substr(0, version_end) +
+                                 header.trailing + normalized.substr(version_end);
             if (header.crlf) {
                 std::string converted;
                 for (const char c : source) {
@@ -6235,7 +6282,8 @@ TEST(RenderSmokeTest, FarWorldSelectionRequiresEveryLadderProgram) {
                                 pass.skinned_mesh_shader(FarWorldMode::Ladder).get()};
         for (std::size_t i = 0; i < legacy.size(); ++i) {
             ASSERT_TRUE(legacy[i]->IsValid()) << legacy[i]->Diagnostic();
-            EXPECT_EQ(ladder[i]->IsValid(), ladder[i]->VertexPath() != path.string());
+            EXPECT_EQ(ladder[i]->IsValid(),
+                      fs::path(ladder[i]->VertexPath()).filename() != fs::path(failed_vertex));
         }
         const auto selection = pass.SelectFarWorldRenderer(request);
         EXPECT_EQ(selection.requested, FarWorldMode::Ladder);
@@ -6456,6 +6504,7 @@ TEST(RenderSmokeTest, FarWorldFailedReloadKeepsBothVariantProgramsAndCachesValid
     HiddenGlContext context;
     ASSERT_TRUE(context.ready()) << context.error();
     ReloadShaderSources sources;
+    ASSERT_TRUE(sources.EnableFarWorldClipInputs());
     const auto fragment = sources.directory / "g_buffer.frag";
     const auto good_source = ReadTextFile(fragment);
     for (const bool ladder_variant : {false, true}) {
@@ -6487,8 +6536,9 @@ TEST(RenderSmokeTest, FarWorldFailedReloadKeepsBothVariantProgramsAndCachesValid
             EXPECT_EQ(shader.ProgramGeneration(), generation);
             EXPECT_TRUE(shader.IsValid());
             EXPECT_EQ(ReadIntUniform(id, "u_farWorldLadder"), 1);
-            if (ladder_variant)
+            if (ladder_variant) {
                 EXPECT_EQ(ReadFloatUniform(id, "u_farRayBiasMeters"), 2);
+            }
             uniforms.Reset();
             EXPECT_EQ(ReadIntUniform(id, "u_farWorldLadder"), 0);
             uniforms.Begin();

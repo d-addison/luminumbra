@@ -11,7 +11,8 @@ struct FarWorldBiasedDepth {
 
 // Pure binary32 reference for the production fragment shader. Projection must
 // be the actual jittered RH zero-to-one reversed-Z matrix. Refusal leaves out
-// unchanged; no clamping can turn an invalid point into a visible surface.
+// unchanged. Only the production float near endpoint's one-ULP overshoot is
+// clamped to exactly one; all other invalid depths are refused.
 bool ProjectFarWorldRayBias(const glm::vec3& position,
                             float bias_meters,
                             const glm::mat4& projection,
