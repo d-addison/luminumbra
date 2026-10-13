@@ -368,7 +368,7 @@ class HarnessTestCase(unittest.TestCase):
         return json.loads(self.receipt.read_text(encoding="utf-8"))
 
     def run_dir(self) -> Path:
-        runs = [p for p in self.receipt.parent.iterdir() if p.is_dir() and p.name.startswith("run-")]
+        runs = [p for p in self.receipt.parent.resolve().iterdir() if p.is_dir() and p.name.startswith("run-")]
         self.assertEqual(len(runs), 1, runs)
         return runs[0]
 
@@ -1179,7 +1179,7 @@ class QualificationSafetyTest(HarnessTestCase):
             launch.assert_not_called()
             self.assertTrue(ownership.is_file())
             self.assertFalse(self.receipt.exists())
-            self.assertEqual(list(self.receipt.parent.iterdir()), [ownership])
+            self.assertEqual(list(self.receipt.parent.resolve().iterdir()), [ownership])
         finally:
             os.close(fd)
             ownership.unlink()
