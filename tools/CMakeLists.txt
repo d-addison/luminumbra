@@ -45,6 +45,13 @@ if(BUILD_TESTING)
                     --bash "${UCRT_ATTRIBUTION_BASH}")
         set_tests_properties(UcrtAttributionContract
             PROPERTIES LABELS "ci;tools" TIMEOUT 30)
+        add_test(
+            NAME UcrtGccCohortContract
+            COMMAND "${Python3_EXECUTABLE}"
+                    "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_ucrt_gcc_cohort.py"
+                    --bash "${UCRT_ATTRIBUTION_BASH}")
+        set_tests_properties(UcrtGccCohortContract
+            PROPERTIES LABELS "ci;tools" TIMEOUT 30)
     endif()
     add_test(
         NAME PerformanceToolContract

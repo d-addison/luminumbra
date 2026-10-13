@@ -120,6 +120,23 @@ record_baseline() {
     done
 }
 
+# The pinned old cc-libs requires libatomic at the same version. Provision it
+# before baseline capture; never introduce an absent package during a swap.
+check_gcc_prerequisite() {
+    local cell
+    for cell in $CELLS; do
+        if [[ "$cell" == 3 && -n "${BASELINE_VERSION[cc-libs]:-}" &&
+              -z "${BASELINE_VERSION[libatomic]:-}" ]]; then
+            EXPERIMENT_STATUS=INFRASTRUCTURE_FAILED
+            PKG_REASON="GCC prerequisite missing: recorded cc-libs requires baseline libatomic for pinned cc-libs=${GCC_DOWNGRADE[cc-libs]} intervention; provision libatomic before starting a new run"
+            printf '%s\n' "$PKG_REASON" > "$DIAG_DIR/reason.txt"
+            printf '%s\n' "$PKG_REASON" >&2
+            return 1
+        fi
+    done
+    return 0
+}
+
 # begin_deadline: start the budget for the next bounded operation group.
 begin_deadline() {
     CELL_START="$(date +%s)"
@@ -834,6 +851,7 @@ main() {
     : > "$ROWS_FILE"
     preflight || exit 1
     record_baseline
+    check_gcc_prerequisite || exit 1
     if ! stage_baseline; then
         EXPERIMENT_STATUS=STAGING_FAILED
         echo "baseline staging failed; no intervention was attempted" >&2

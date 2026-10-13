@@ -79,6 +79,39 @@ elif name == "date":
 elif name in ("basename", "dirname"):
     print(Path(args[0]).name if name == "basename" else str(Path(args[0]).parent))
 elif name == "pacman":
+    state_file = root / "package-state.json"
+    if state_file.exists():
+        packages = json.loads(state_file.read_text(encoding="utf-8"))
+        prefix = "mingw-w64-ucrt-x86_64-"
+        if args[0] == "-Q":
+            selected = packages if len(args) == 1 else {args[1]: packages[args[1]]} if args[1] in packages else {}
+            for package, version in sorted(selected.items()):
+                print(package + " " + version)
+            sys.exit(0 if selected else 1)
+        if args[:2] != ["-U", "--noconfirm"]:
+            raise AssertionError("unexpected package operation: " + repr(args))
+        incoming = {}
+        for archive in args[2:]:
+            path = local(archive)
+            if not path.is_file() or not local(archive + ".sig").is_file():
+                raise AssertionError("unstaged package or signature: " + archive)
+            for package in sorted(packages, key=len, reverse=True):
+                start = package + "-"
+                if path.name.startswith(start) and path.name.endswith("-any.pkg.tar.zst"):
+                    incoming[package] = path.name[len(start):-len("-any.pkg.tar.zst")]
+                    break
+            else:
+                raise AssertionError("attempt to introduce absent package: " + archive)
+        proposed = {**packages, **incoming}
+        if incoming.get(prefix + "cc-libs") == "16.2.0-4":
+            if scenario == "cohort_unknown_dependency":
+                print("unknown dependency refusal", file=sys.stderr)
+                sys.exit(1)
+            if proposed.get(prefix + "libatomic") != "16.2.0-4":
+                print("libatomic=16.2.0-4 is required", file=sys.stderr)
+                sys.exit(1)
+        state_file.write_text(json.dumps(proposed), encoding="utf-8")
+        sys.exit(0)
     if args[0] != "-Q":
         raise AssertionError("unexpected package transaction in baseline-only fixture")
     package = "mingw-w64-ucrt-x86_64-crt"
@@ -180,9 +213,13 @@ else:
 
 
 class AttributionTests(unittest.TestCase):
-    def run_script(self, scenario, missing=None):
+    def run_script(self, scenario, missing=None, cells="0", packages=None):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
+            if packages is not None:
+                state = {"mingw-w64-ucrt-x86_64-" + name: version
+                         for name, version in packages.items()}
+                (root / "package-state.json").write_text(json.dumps(state), encoding="utf-8")
             isolated_path = root / "empty-bin"
             isolated_path.mkdir()
             script = root / "ucrt_attribution.sh"
@@ -219,13 +256,16 @@ class AttributionTests(unittest.TestCase):
             environment.update(PATH=isolated_path.as_posix(),
                                BASH_ENV=environment_file.as_posix(),
                                STUB_SCENARIO=scenario, MSYSTEM="UCRT64",
-                               MSYSTEM_PREFIX=prefix.as_posix(), CELLS="0",
+                               MSYSTEM_PREFIX=prefix.as_posix(), CELLS=cells,
                                GITHUB_STEP_SUMMARY=(root / "step-summary.md").as_posix())
             result = subprocess.run([BASH, "--noprofile", "--norc", script.as_posix()],
                                     cwd=root, env=environment, capture_output=True,
                                     text=True, timeout=20)
             artifacts = {path.relative_to(root).as_posix(): path.read_text(encoding="utf-8")
                          for path in (root / "diag").rglob("*") if path.is_file()}
+            state_path = root / "package-state.json"
+            if state_path.exists():
+                artifacts["fixture/package-state.json"] = state_path.read_text(encoding="utf-8")
             calls_path = root / "calls.jsonl"
             calls = [json.loads(line) for line in calls_path.read_text(encoding="utf-8").splitlines()]
             step_summary = (root / "step-summary.md").read_text(encoding="utf-8")
@@ -292,6 +332,7 @@ class AttributionTests(unittest.TestCase):
         self.assertEqual(sum(call[0] == "cmp" for call in calls), 3)
         measured = [call[0] for call in calls if call[0] in ("probe", "perf")]
         self.assertEqual(measured, ["probe", "perf"])
+
 
 
 if __name__ == "__main__":

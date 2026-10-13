@@ -57,6 +57,27 @@ CTest produces JUnit and runtime artifacts. CI verifies a minimum discovered-tes
 count so an empty or severely truncated suite cannot report success. Sanitizer and
 test artifacts are uploaded even on failure to support diagnosis.
 
+## UCRT64 package attribution setup
+
+The dedicated attribution workflow explicitly provisions `libatomic` before
+`tools/ci/ucrt_attribution.sh` records its package baseline. The pinned GCC
+intervention includes `cc-libs=16.2.0-4`, whose package transaction requires
+`libatomic=16.2.0-4`. Every changed package must already be installed when the
+baseline is recorded; interventions do not install previously absent members.
+
+For a direct script run, provision `mingw-w64-ucrt-x86_64-libatomic` in a disposable
+UCRT64 environment before starting the script. Restart the complete run after any
+provisioning change. The recorded baseline is the environment after that setup:
+restoration returns `libatomic` and other changed members to their recorded
+versions using staged archives. It does not undo the initial provisioning.
+Baseline-only and CRT-only selections do not require this GCC prerequisite.
+
+The actual installed baseline version is recorded rather than inferred from the
+compiler version. Missing archives, package dependency refusals, and unsuccessful
+restoration remain explicit failures; the script does not repair dependencies or
+claim a measurement for an unavailable intervention. A run with a different setup
+has a different provisioning profile, so its observations must retain that identity.
+
 ## Local validation
 
 Run the preset that matches the affected platform and configuration. At minimum:
