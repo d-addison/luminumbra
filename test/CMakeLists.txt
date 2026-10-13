@@ -135,6 +135,15 @@ target_compile_definitions(far_volume_facade_test PRIVATE
 target_link_libraries(far_volume_facade_test PRIVATE gtest_main glm::glm nlohmann_json::nlohmann_json)
 luminumbra_configure_first_party_target(far_volume_facade_test)
 
+# Focused live-field regressions use the canonical world sampler, without a client.
+add_executable(far_pristine_field_test common/FarPristineField_test.cpp)
+target_include_directories(far_pristine_field_test PRIVATE ../src)
+target_compile_definitions(far_pristine_field_test PRIVATE
+    LUMINUMBRA_SOURCE_ROOT="${CMAKE_SOURCE_DIR}")
+target_link_libraries(far_pristine_field_test PRIVATE gtest_main luminumbra_common)
+luminumbra_configure_first_party_target(far_pristine_field_test)
+luminumbra_pin_fp_determinism(far_pristine_field_test)
+
 add_executable(common_tests
     common/Crc32_test.cpp
     rendering/shader_compositing_contract_test.cpp
@@ -1684,6 +1693,7 @@ set(LUMINUMBRA_GTEST_TARGETS
     far_volume_tile_test
     far_volume_mesher_test
     far_volume_facade_test
+    far_pristine_field_test
     world_generation_test
     worldgen_layer_snapshot_test
     asset_processor_round_trip_test
