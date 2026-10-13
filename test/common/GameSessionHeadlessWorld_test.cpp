@@ -13,6 +13,7 @@
 #include <fstream>
 #include <limits>
 #include <map>
+#include <span>
 #include <sstream>
 #include <string>
 #include <utility>
@@ -1760,6 +1761,98 @@ TEST(GameSessionHeadlessWorldTest, QueuedRegionWorkRefusesSaveUntilTickCompletes
     }
     EXPECT_EQ(loaded.GetRegionSchedule(), session.GetRegionSchedule());
     EXPECT_EQ(SessionWorldHash(loaded), SessionWorldHash(session));
+}
+
+TEST(GameSessionHeadlessWorldTest, IdleRetentionMatchesWorkAndAuthoritativeResidentOwnership) {
+    using Luminumbra::world::ActiveRegionLedger;
+    using Luminumbra::world::RegionKey;
+    using Luminumbra::world::RegionWork;
+    using Luminumbra::world::WorldClock;
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    session.SetRootPath(root.root_string());
+    session.SetJobSystem(&jobs);
+    session.SetActiveRegionsEnabled(true);
+    ASSERT_TRUE(session.CreateWorld("Idle retention", "1337", "default"));
+    ASSERT_TRUE(session.SaveWorldState());
+
+    const RegionKey pending{40, -40}, duplicate{41, -40}, zero_count{42, -40};
+    const RegionKey resident{43, -40}, pristine{44, -40}, unowned{45, -40};
+    const std::array keys{pending, duplicate, zero_count, resident, pristine, unowned};
+    ActiveRegionLedger staged;
+    staged.set_local_anchor(session.GetMetadata().spawnPoint);
+    for (const auto key : keys) {
+        staged.pin(key, true, WorldClock{});
+        staged.pin(key, false, WorldClock{});
+    }
+    // Stage just before retention without advancing thousands of simulation ticks.
+    const WorldClock before_idle(ActiveRegionLedger::kIdleEvictionTicks - 1);
+    staged.schedule(before_idle, std::span<const Luminumbra::Vec3>{});
+    const auto save = session.GetWorldSaveDir();
+    auto metadata = nlohmann::json::parse(ReadClockTestFile(save / "world_info.json"));
+    before_idle.write_metadata(metadata);
+    ASSERT_TRUE(
+        P::WorldSaveService::save_metadata_and_active_regions(metadata.dump(), staged, save));
+    ASSERT_TRUE(session.LoadWorldStateFrom(save)) << session.GetWorldOpenError();
+    ASSERT_EQ(session.GetActiveRegionLedger().records().size(), keys.size());
+    session.SetReplicatedSimulationAnchors({});
+
+    for (const auto key : {resident, pristine}) {
+        auto chunk =
+            std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3(key.x * 32, 0, key.z * 32));
+        chunk->set_state(Luminumbra::ChunkState::Idle);
+        chunk->heightmap_data = {8.0f};
+        if (key == resident)
+            chunk->mark_voxel_data_dirty();
+        ASSERT_TRUE(session.GetWorldSystem()->adopt_streamed_chunk(chunk));
+        // The resident's provenance, rather than an edited ledger flag, must retain it.
+        ASSERT_FALSE(session.GetActiveRegionLedger().records().at(key).edited);
+    }
+    const std::array work{RegionWork{pending, 3, 0, 0, 0},
+                          RegionWork{duplicate, 1, 0, 0, 0},
+                          RegionWork{duplicate, 2, 0, 0, 0},
+                          RegionWork{zero_count, 0, 0, 0, 0},
+                          RegionWork{zero_count, 0, 0, 0, 0}};
+    for (const auto& entry : work)
+        session.RecordActiveRegionWork(entry);
+    auto expected = session.GetActiveRegionLedger();
+    const std::array owned_keys{pending, duplicate, zero_count, resident};
+    const auto expected_schedule = expected.schedule(
+        WorldClock(ActiveRegionLedger::kIdleEvictionTicks),
+        std::span<const Luminumbra::Vec3>{},
+        work,
+        {},
+        [&owned_keys](RegionKey key) {
+            return std::find(owned_keys.begin(), owned_keys.end(), key) != owned_keys.end();
+        });
+    const auto dt = session.GetSimulationClock().fixed_dt();
+    ASSERT_EQ(session.TickSimulation(dt), 1u);
+    ASSERT_FALSE(session.GetRegionSchedulerFault());
+    EXPECT_EQ(session.GetRegionSchedule(), expected_schedule);
+    EXPECT_EQ(session.GetActiveRegionLedger().canonical_bytes(), expected.canonical_bytes());
+    EXPECT_EQ(session.GetActiveRegionLedger().encode(), expected.encode());
+    ASSERT_EQ(session.GetActiveRegionLedger().records().size(), owned_keys.size());
+    for (const auto key : owned_keys)
+        EXPECT_TRUE(session.GetActiveRegionLedger().records().contains(key));
+    EXPECT_FALSE(session.GetActiveRegionLedger().records().contains(pristine));
+    EXPECT_FALSE(session.GetActiveRegionLedger().records().contains(unowned));
+
+    // Consumed work must stop owning records on the next scheduling call.
+    const auto next_schedule =
+        expected.schedule(WorldClock(ActiveRegionLedger::kIdleEvictionTicks + 1),
+                          std::span<const Luminumbra::Vec3>{},
+                          {},
+                          {},
+                          [resident](RegionKey key) { return key == resident; });
+    ASSERT_EQ(session.TickSimulation(dt), 1u);
+    ASSERT_FALSE(session.GetRegionSchedulerFault());
+    EXPECT_EQ(session.GetRegionSchedule(), next_schedule);
+    EXPECT_EQ(session.GetActiveRegionLedger().canonical_bytes(), expected.canonical_bytes());
+    EXPECT_EQ(session.GetActiveRegionLedger().encode(), expected.encode());
+    ASSERT_EQ(session.GetActiveRegionLedger().records().size(), 1u);
+    EXPECT_TRUE(session.GetActiveRegionLedger().records().contains(resident));
 }
 
 TEST(GameSessionHeadlessWorldTest, WalkingAnchorSurvivesNoclipAndReloadWithoutCameraInputs) {
