@@ -7,22 +7,116 @@ for trusted scripts, not a sandbox against hostile Python/native code.
 from __future__ import annotations
 
 import ast
+from contextlib import ExitStack
+import errno
+from functools import lru_cache
 import importlib.abc
 import importlib.machinery
 import importlib.util
+import os
 from pathlib import Path, PurePosixPath
 import site
+import stat
 import sys
 from types import CodeType
+import weakref
 
+from . import file_io
 from .bootstrap import isolated_path
-from .contracts import (MAX_DOCUMENT, Refusal, Toolchain, canonical, digest,
-                        read_bounded, relative_path, require)
+from .contracts import (MAX_DOCUMENT, Refusal, Toolchain, canonical, digest, require)
 
 TRUSTED_MODULES = sys.stdlib_module_names | {"bpy", "bmesh", "mathutils"}
 INDIRECT_NAMES = {"__import__", "exec", "eval", "compile"}
 INDIRECT_ATTRIBUTES = {"import_module", "spec_from_file_location", "spec_from_loader",
     "module_from_spec", "exec_module", "load_module", "SourceFileLoader", "SourcelessFileLoader"}
+
+
+def _posix_open(path, root_fd=None, directory=True):
+    """Walk from an open directory, refusing links in every component."""
+    require(os.open in os.supports_dir_fd and hasattr(os, "O_NOFOLLOW")
+            and hasattr(os, "O_DIRECTORY"), "toolchain.script_path",
+            "Platform cannot verify companion directory handles.")
+    directory_flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_DIRECTORY
+    fd = os.dup(root_fd) if root_fd is not None else os.open(path.anchor, directory_flags)
+    parts = path.parts if root_fd is not None else path.parts[1:]
+    try:
+        for index, part in enumerate(parts):
+            flags = directory_flags if directory or index < len(parts) - 1 else (
+                os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            child = os.open(part, flags, dir_fd=fd)
+            os.close(fd)
+            fd = child
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def _posix_identity(fd):
+    info = os.fstat(fd)
+    return info.st_dev, info.st_ino
+
+
+@lru_cache(maxsize=1)
+def _windows_path_api():
+    import ctypes
+    from ctypes import wintypes as w
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.CreateFileW.argtypes = [w.LPCWSTR, w.DWORD, w.DWORD, w.LPVOID, w.DWORD, w.DWORD, w.HANDLE]
+    kernel.CreateFileW.restype = w.HANDLE
+    kernel.CloseHandle.argtypes, kernel.CloseHandle.restype = [w.HANDLE], w.BOOL
+    kernel.GetFileInformationByHandleEx.argtypes = [w.HANDLE, ctypes.c_int, w.LPVOID, w.DWORD]
+    kernel.GetFileInformationByHandleEx.restype = w.BOOL
+    kernel.GetFinalPathNameByHandleW.argtypes = [w.HANDLE, w.LPWSTR, w.DWORD, w.DWORD]
+    kernel.GetFinalPathNameByHandleW.restype = w.DWORD
+    return kernel
+
+
+def _windows_final_path(handle):
+    import ctypes
+    kernel = _windows_path_api()
+    size = kernel.GetFinalPathNameByHandleW(handle, None, 0, 0)
+    if not size:
+        raise ctypes.WinError(ctypes.get_last_error())
+    buffer = ctypes.create_unicode_buffer(size + 1)
+    written = kernel.GetFinalPathNameByHandleW(handle, buffer, len(buffer), 0)
+    require(0 < written < len(buffer), "toolchain.script_path", "Cannot obtain final companion handle path.")
+    name = buffer.value
+    # Accept only normalized DOS drive paths; UNC/device paths fail closed.
+    require(name.startswith("\\\\?\\") and len(name) > 6 and name[5:7] == ":\\",
+            "toolchain.script_path", "Unsupported companion handle path.")
+    return Path(name[4:]).as_posix().casefold()
+
+
+def _windows_directory(path, share=3):
+    import ctypes
+    from ctypes import wintypes as w
+    kernel = _windows_path_api()
+    # READ_ATTRIBUTES; OPEN_EXISTING; BACKUP_SEMANTICS | OPEN_REPARSE_POINT.
+    handle = kernel.CreateFileW(str(path), 0x80, share, None, 3, 0x02200000, None)
+    if handle == ctypes.c_void_p(-1).value:
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        class AttributeTag(ctypes.Structure):
+            _fields_ = [("attributes", w.DWORD), ("tag", w.DWORD)]
+        class Identity(ctypes.Structure):
+            _fields_ = [("volume", ctypes.c_uint64), ("file_id", ctypes.c_ubyte * 16)]
+        tag, identity = AttributeTag(), Identity()
+        for kind, value in ((9, tag), (18, identity)):
+            if not kernel.GetFileInformationByHandleEx(handle, kind, ctypes.byref(value), ctypes.sizeof(value)):
+                raise ctypes.WinError(ctypes.get_last_error())
+        require(not tag.attributes & 0x400, "path.symlink", "Companion directory is a reparse point.")
+        require(tag.attributes & 0x10 and _windows_final_path(handle) == path.as_posix().casefold(),
+                "toolchain.script_path", "Companion directory handle differs from its canonical path.")
+        return handle, (identity.volume, bytes(identity.file_id))
+    except BaseException:
+        kernel.CloseHandle(handle)
+        raise
+
+
+def _path_refusal(error):
+    rule = "path.symlink" if isinstance(error, ValueError) or error.errno in (errno.ELOOP, errno.ENOTDIR) else "toolchain.script_path"
+    return Refusal(rule, "Cannot verify companion containment: " + str(error))
 
 
 def validate_import_roots(record):
@@ -35,12 +129,69 @@ def validate_import_roots(record):
     require(len(set(roots)) == len(roots), "toolchain.scripts", "Do not repeat import roots.")
 
 
+def _close_inventory_handles(root_handles, active_reads):
+    """Release active ancestor handles before the retained project root."""
+    with ExitStack() as cleanup:
+        cleanup.callback(root_handles.close)
+        for stack in tuple(active_reads):
+            cleanup.callback(stack.close)
+        active_reads.clear()
+
+
 class ScriptInventory:
     def __init__(self, project_root, record):
+        self._root_handles = ExitStack()
+        self._active_reads = set()
+        # The callback owns resource state, never the inventory itself.
+        self._close_root = weakref.finalize(self, _close_inventory_handles,
+                                          self._root_handles, self._active_reads)
+        try:
+            self._initialize(project_root, record)
+        except BaseException:
+            self.close()
+            raise
+
+    def close(self):
+        """Idempotently release retained root and any active ancestor handles."""
+        self._close_root()
+
+    def __enter__(self):
+        require(self._close_root.alive, "toolchain.script_path", "Script inventory is closed.")
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.close()
+
+    def _initialize(self, project_root, record):
         validate_import_roots(record)
+        self.root_alias = Path(project_root).absolute()
         self.root = Path(project_root).resolve(strict=True)
+        try:
+            if os.name == "posix":
+                self.root_fd = _posix_open(self.root)
+                self._root_handles.callback(os.close, self.root_fd)
+                self.root_identity = _posix_identity(self.root_fd)
+            elif os.name == "nt":
+                # Retain identity without blocking replacements between reads.
+                self.root_handle, self.root_identity = _windows_directory(self.root, share=7)
+                self._root_handles.callback(_windows_path_api().CloseHandle, self.root_handle)
+            else:
+                raise Refusal("toolchain.script_path", "Unsupported companion handle verification platform.")
+        except (OSError, ValueError) as error:
+            if isinstance(error, Refusal):
+                raise
+            raise _path_refusal(error) from error
         self.pins = {record["path"]: record["sha256"], **record.get("modules", {})}
-        self.entry = relative_path(self.root, record["path"])
+        for name in self.pins:
+            require(isinstance(name, str) and bool(name) and not name.startswith("/")
+                    and ".." not in PurePosixPath(name).parts and "\\" not in name
+                    and ":" not in name and "\x00" not in name and str(PurePosixPath(name)) == name,
+                    "toolchain.script_path", "Use canonical project-relative companion paths.")
+        try:
+            self.entry = self.canonical_path(self.root / record["path"])
+        except OSError as error:
+            raise Refusal("path.missing", "Entry does not exist inside its declared root.") from error
+        require(self.entry.is_file(), "path.missing", "Entry requires a file inside its declared root.")
         # A module's import root is above its outermost pinned regular package.
         # Namespace packages require an explicit import_roots entry.
         roots = [self.entry.parent]
@@ -61,14 +212,76 @@ class ScriptInventory:
             roots.append(path)
         self.roots = list(dict.fromkeys(roots))
 
-    def source(self, path):
-        path = Path(path)
+    def canonical_path(self, path):
+        """Accept root aliases, but never resolve away a companion reparse point."""
+        path = Path(path).absolute()
+        require(".." not in path.parts, "toolchain.script_path", "Companion traversal is unsupported.")
+        for member in (path, *path.parents):
+            # The declared project root may itself have been reached through a
+            # symlink or a Windows short name. Only aliases of that root are OK.
+            if member == self.root or member == self.root_alias:
+                break
+            require(not member.is_symlink() and not (hasattr(member, "is_junction") and member.is_junction()),
+                    "path.symlink", "Companions cannot use symlinks or junctions.")
+            if member.is_dir() and member.resolve(strict=True) == self.root:
+                break  # A non-reparse alias, such as a Windows 8.3 spelling.
+        path = path.resolve(strict=True)
         require(path.is_relative_to(self.root), "toolchain.script_path", "Companion escapes the project.")
+        return path
+
+    def source(self, path):
+        path = self.canonical_path(path)
         name = path.relative_to(self.root).as_posix()
         require(name in self.pins, "config.pins_missing", "Project module has no pin.", name)
-        data = read_bounded(relative_path(self.root, name), MAX_DOCUMENT)
+        data = self._read_source(name)
         require(digest(data) == self.pins[name], "toolchain.changed", "Pinned game source changed.", name)
         return data
+
+    def _read_source(self, name):
+        """Read the same handle whose containment and retained root were verified."""
+        require(self._close_root.alive, "toolchain.script_path", "Script inventory is closed.")
+        stack = ExitStack()
+        self._active_reads.add(stack)
+        try:
+            with stack:
+                if os.name == "posix":
+                    current_root = _posix_open(self.root)
+                    stack.callback(os.close, current_root)
+                    require(_posix_identity(current_root) == self.root_identity,
+                            "toolchain.script_path", "Canonical project root was replaced.")
+                    fd = _posix_open(Path(name), self.root_fd, directory=False)
+                    try:
+                        require(stat.S_ISREG(os.fstat(fd).st_mode), "file.invalid", "Companion requires a regular file.")
+                        stream = os.fdopen(fd, "rb")
+                    except BaseException:
+                        os.close(fd)
+                        raise
+                    stack.enter_context(stream)
+                else:
+                    # Hold every canonical directory without delete sharing:
+                    # no ancestor can be renamed/replaced while the file opens.
+                    path = Path(self.root.anchor)
+                    for part in ("", *self.root.parts[1:], *PurePosixPath(name).parts[:-1]):
+                        path /= part
+                        handle, identity = _windows_directory(path)
+                        stack.callback(_windows_path_api().CloseHandle, handle)
+                        if path == self.root:
+                            require(identity == self.root_identity, "toolchain.script_path",
+                                    "Canonical project root was replaced.")
+                    stream = stack.enter_context(file_io.open_regular_reader(self.root / name))
+                    import msvcrt
+                    final = _windows_final_path(msvcrt.get_osfhandle(stream.fileno()))
+                    require(final == (self.root / name).as_posix().casefold(),
+                            "toolchain.script_path", "Opened companion escapes its canonical project path.")
+                data = stream.read(MAX_DOCUMENT + 1)
+                require(len(data) <= MAX_DOCUMENT, "file.limit", "File exceeds this profile's size limit.")
+                return data
+        except (OSError, ValueError) as error:
+            if isinstance(error, Refusal):
+                raise
+            raise _path_refusal(error) from error
+        finally:
+            self._active_reads.discard(stack)
 
     def refuse_shadows(self):
         for name in sorted(TRUSTED_MODULES):
@@ -156,6 +369,7 @@ class ImportGuard(importlib.abc.MetaPathFinder):
 
     def code(self, path):
         # Compile exactly the bytes just hashed, never cached .pyc or a later read.
+        path = self.inventory.canonical_path(path)
         code = compile(self.inventory.source(path), str(path), "exec", dont_inherit=True)
         def register(item):
             self.codes[id(item)] = item
@@ -174,6 +388,8 @@ class ImportGuard(importlib.abc.MetaPathFinder):
         project = (origin and self.project_path(origin)) or any(self.project_path(p) for p in locations)
         if not project:
             return None
+        origin = self.inventory.canonical_path(origin) if origin else None
+        locations = [self.inventory.canonical_path(p) for p in locations]
         require(fullname.split(".")[0] not in TRUSTED_MODULES, "toolchain.script_shadow",
                 "Project files cannot shadow trusted modules.", fullname)
         require(all(any(p.is_relative_to(root) for root in self.inventory.roots)
@@ -182,7 +398,7 @@ class ImportGuard(importlib.abc.MetaPathFinder):
         if origin:
             require(isinstance(spec.loader, importlib.abc.SourceLoader),
                     "toolchain.script_inventory", "Project modules require pinned source loaders.", str(origin))
-            # Check lexical origin too, to reject aliases and symlinks.
+            # Validate the lexical origin before reading its canonical snapshot.
             self.inventory.source(Path(spec.origin))
             return importlib.util.spec_from_file_location(fullname, spec.origin,
                 loader=PinnedLoader(self, spec.origin),
@@ -282,8 +498,7 @@ class ImportGuard(importlib.abc.MetaPathFinder):
             require(not self.project_path(args[1]), "toolchain.script_inventory",
                     "Project native module loading is unsupported.", args[1])
         if event == "compile" and isinstance(args[1], str) and not args[1].startswith("<") and self.project_path(args[1]):
-            path = Path(args[1]).absolute()
-            require(path.is_relative_to(self.inventory.root), "toolchain.script_path", "Source alias is unsupported.")
+            path = self.inventory.canonical_path(args[1])
             name = path.relative_to(self.inventory.root).as_posix()
             source = args[0].encode("utf-8") if isinstance(args[0], str) else args[0]
             require(name in self.inventory.pins and digest(source) == self.inventory.pins[name],
@@ -309,22 +524,22 @@ def run_pinned_script(toolchain, project_root, role="finisher"):
                     for p in sys.path),
             "toolchain.bootstrap", "Use the trusted launcher with -I -S -B and only service/stdlib paths.")
     toolchain.verify_scripts(project_root, role)
-    inventory = ScriptInventory(project_root, toolchain.scripts[role])
-    inventory.verify()
-    guard = ImportGuard(inventory)
-    for module in list(sys.modules.values()):
-        filename = getattr(module, "__file__", None)
-        require(not filename or not guard.project_path(filename),
-                "toolchain.script_inventory", "Worker already loaded project code; use a fresh interpreter.")
-    sys.dont_write_bytecode = True
-    guard.install_loader_checks()
-    guard.install_site_checks()
-    sys.meta_path.insert(0, guard)
-    sys.addaudithook(guard.audit)
-    # Add project search roots only after runtime enforcement is installed.
-    sys.path[:] = [str(p) for p in inventory.roots] + sys.path
-    exec(guard.code(inventory.entry), {"__name__": "__main__", "__file__": str(inventory.entry),
-                                     "__package__": None})
+    with ScriptInventory(project_root, toolchain.scripts[role]) as inventory:
+        inventory.verify()
+        guard = ImportGuard(inventory)
+        for module in list(sys.modules.values()):
+            filename = getattr(module, "__file__", None)
+            require(not filename or not guard.project_path(filename),
+                    "toolchain.script_inventory", "Worker already loaded project code; use a fresh interpreter.")
+        sys.dont_write_bytecode = True
+        guard.install_loader_checks()
+        guard.install_site_checks()
+        sys.meta_path.insert(0, guard)
+        sys.addaudithook(guard.audit)
+        # Add project search roots only after runtime enforcement is installed.
+        sys.path[:] = [str(p) for p in inventory.roots] + sys.path
+        exec(guard.code(inventory.entry), {"__name__": "__main__", "__file__": str(inventory.entry),
+                                         "__package__": None})
 
 
 def main():

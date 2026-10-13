@@ -1,5 +1,6 @@
 """Portable registry, layer and read-only CLI evidence; no backend processes."""
 from copy import deepcopy
+import ast
 import importlib.util
 import json
 import os
@@ -420,6 +421,42 @@ class ProjectFiles(unittest.TestCase):
 
 
 class Packaging(unittest.TestCase):
+    def test_shipped_modules_include_actual_sibling_imports_and_hashed_code(self):
+        spec = importlib.util.spec_from_file_location("service_package", SERVICE/"package.py")
+        package = importlib.util.module_from_spec(spec); spec.loader.exec_module(package)
+        # Source siblings identify module names; dependencies come from imports
+        # in the built archive, including imports inside functions.
+        siblings = {path.stem for path in (SERVICE/"luminumbra_author").glob("*.py")}
+        with tempfile.TemporaryDirectory() as temporary:
+            app = package.build(Path(temporary)/"author.pyz")
+            with zipfile.ZipFile(app) as archive:
+                shipped = {Path(name).stem for name in archive.namelist()
+                           if name.startswith("luminumbra_author/") and name.endswith(".py")}
+                for name in sorted(shipped):
+                    tree = ast.parse(archive.read(f"luminumbra_author/{name}.py"))
+                    for node in ast.walk(tree):
+                        imports = []
+                        if isinstance(node, ast.Import):
+                            imports = [alias.name.removeprefix("luminumbra_author.")
+                                       for alias in node.names if alias.name.startswith("luminumbra_author.")]
+                        elif isinstance(node, ast.ImportFrom):
+                            module = node.module or ""
+                            if node.level == 1 or module == "luminumbra_author" or module.startswith("luminumbra_author."):
+                                module = module.removeprefix("luminumbra_author").lstrip(".")
+                                imports = [module] if module else [alias.name for alias in node.names]
+                        for imported in imports:
+                            sibling = imported.split(".")[0]
+                            if sibling in siblings:
+                                with self.subTest(module=name, sibling=sibling):
+                                    self.assertIn(sibling, shipped, "Imported sibling is missing from the archive")
+                    # Build identities must be able to hash every named resource.
+                    for node in ast.walk(tree):
+                        if isinstance(node, ast.Assign) and any(
+                                isinstance(target, ast.Name) and target.id == "service_hashes" for target in node.targets):
+                            for literal in ast.walk(node.value):
+                                if isinstance(literal, ast.Constant) and isinstance(literal.value, str) and literal.value.endswith(".py"):
+                                    self.assertIn("luminumbra_author/" + literal.value, archive.namelist())
+
     def test_registry_and_packaged_schema_defaults_are_identical(self):
         validate_schema(defaults(), config_schema())
         resources = {**packaged_schemas(), "meshgen.defaults.v1.json": defaults()}
@@ -474,6 +511,8 @@ class Packaging(unittest.TestCase):
             archive_path = package.build(Path(temporary)/"extension.zip")
             with zipfile.ZipFile(archive_path) as archive:
                 self.assertFalse(any("meshgen" in name or "provenance" in name or "candidate" in name for name in archive.namelist()))
+                self.assertEqual(archive.read("viewport/file_io.py"),
+                                 (SERVICE/"luminumbra_author/file_io.py").read_bytes())
 
     def test_new_files_pass_public_tree_guard(self):
         repo = SERVICE.parents[3]

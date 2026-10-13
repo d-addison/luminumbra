@@ -9,7 +9,7 @@ import sys
 
 SOURCE_DIRECTORY = Path(__file__).parent / "luminumbra_author"
 SERVICE_MODULES = ("__init__.py", "__main__.py", "contracts.py", "formats.py", "locking.py",
-                   "prefab.py", "process.py", "service.py", "meshgen_registry.py",
+                   "prefab.py", "process.py", "service.py", "file_io.py", "meshgen_registry.py",
                    "meshgen_config.py", "meshgen_contracts.py", "meshgen_scripts.py", "bootstrap.py",
                    "meshgen_licence.py", "meshgen_backend.py", "meshgen_jobs.py")
 
