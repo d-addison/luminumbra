@@ -23,6 +23,8 @@ import sys
 INPUT_SCHEMA = "luminumbra.saved_world_acceptance.v1"
 VERDICT_SCHEMA = "luminumbra.saved_world_acceptance_verdict.v1"
 SHUTDOWN_SCHEMA = "luminumbra.shutdown.v1"
+PHASE_SCHEMA = "luminumbra.persistence_runtime_roundtrip_phase.v1"
+REFUSAL_EXIT_CODE = 2
 DEFAULT_MIN_SWITCHES = 6
 REQUIRED_KINDS = ("create_edit_save", "restart_select_load", "second_seed", "switch_back")
 # before_edit and fixture_after_loads snapshot the FIXTURE world (before any session
@@ -50,6 +52,8 @@ EXIT_UNEVALUATED = 3
 EXIT_CODES = {PASS: EXIT_PASS, FAIL: EXIT_FAIL, UNEVALUATED: EXIT_UNEVALUATED}
 
 _HEX64 = re.compile(r"[0-9a-f]{64}")
+# WorldPersistenceRoundtrip.cpp Checksum emits a zero-padded 64-bit hex value.
+_WORLD_HASH = re.compile(r"[0-9a-f]{16}")
 _TOP_LEVEL_TYPES = {
     "package": dict,
     "fixture": dict,
@@ -275,7 +279,7 @@ def _check_save_tree_changes(receipt: dict) -> dict:
 def _switch_ok(switch) -> bool:
     if not isinstance(switch, dict):
         return False
-    if not _is_int(switch.get("index")) or not isinstance(switch.get("world"), str):
+    if not _is_int(switch.get("index")) or not _is_nonempty_str(switch.get("world")):
         return False
     capture = switch.get("capture_sha256")
     if capture is not None and not _is_hex64(capture):
@@ -295,6 +299,10 @@ def _check_switch_count(receipt: dict, min_switches: int) -> dict:
         return _result(
             check_id, FAIL, f"{len(switches)} switches, need at least {min_switches}"
         )
+    if len({switch["world"] for switch in switches}) < 2:
+        return _result(check_id, FAIL, "switches require at least two distinct world IDs")
+    if not any(a["world"] != b["world"] for a, b in zip(switches, switches[1:])):
+        return _result(check_id, FAIL, "no consecutive entries switch world IDs")
     return _result(check_id, PASS, f"{len(switches)} switches")
 
 
@@ -348,11 +356,17 @@ def _check_edit_roundtrip(receipt: dict) -> dict:
         return _missing(check_id, "edit_roundtrip")
     if (
         not isinstance(trip, dict)
-        or not _is_nonempty_str(trip.get("save_world_hash"))
-        or not _is_nonempty_str(trip.get("load_world_hash"))
         or not _is_int(trip.get("edited_chunk_count"))
     ):
         return _malformed(check_id, "edit_roundtrip")
+    for phase in ("save", "load"):
+        if trip.get(f"{phase}_phase_schema") != PHASE_SCHEMA:
+            return _result(check_id, FAIL, f"invalid {phase} phase artifact schema")
+        value = trip.get(f"{phase}_world_hash")
+        if not isinstance(value, str) or _WORLD_HASH.fullmatch(value) is None:
+            return _result(
+                check_id, FAIL, f"{phase}_world_hash must be 16-character lowercase hex"
+            )
     if trip["edited_chunk_count"] < 1:
         return _result(check_id, FAIL, "save phase recorded no edited chunks")
     if trip["save_world_hash"] != trip["load_world_hash"]:
@@ -514,8 +528,8 @@ def _check_refusals(receipt: dict, required: tuple) -> dict:
     for refusal in refusals:
         variant = refusal["variant"]
         reasons = []
-        if refusal["exit_code"] != 2:
-            reasons.append(f"exit code {refusal['exit_code']} (expected 2)")
+        if refusal["exit_code"] != REFUSAL_EXIT_CODE:
+            reasons.append(f"exit code {refusal['exit_code']}")
         if refusal["diagnostic"] is not True:
             reasons.append("no diagnostic")
         if refusal.get("timed_out") is True:
