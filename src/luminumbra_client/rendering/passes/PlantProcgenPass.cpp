@@ -127,10 +127,9 @@ void PlantProcgenPass::execute(const RenderContext& ctx, const Camera& camera) {
 
     const glm::mat4 view = camera.GetViewMatrix();
     const glm::mat4 projection =
-        ctx.far_world_ladder
-            ? ctx.gbuffer_projection
-            : camera.GetProjectionMatrix(static_cast<int>(ctx.screen_width),
-                                          static_cast<int>(ctx.screen_height));
+        ctx.far_world_ladder ? ctx.gbuffer_projection
+                             : camera.GetProjectionMatrix(static_cast<int>(ctx.screen_width),
+                                                          static_cast<int>(ctx.screen_height));
 
     m_shader->use();
     m_shader->setMat4("projection", projection);

@@ -129,8 +129,15 @@ TEST(FarWorldFogContract, FinalFadeFollowsBothCapsAndKeepsUnderwaterSeparate) {
 
 TEST(FarWorldPositionContract, EffectiveFrameProjectionAndPostOverrideDistanceSeams) {
     const auto pipeline = ReadShader("src/luminumbra_client/rendering/RenderPipeline.cpp");
-    for (const char* name : {"gbuffer", "plant", "ssao", "debug_view", "ground_decal",
-                             "lighting", "skybox", "water", "aerial"}) {
+    for (const char* name : {"gbuffer",
+                             "plant",
+                             "ssao",
+                             "debug_view",
+                             "ground_decal",
+                             "lighting",
+                             "skybox",
+                             "water",
+                             "aerial"}) {
         const auto body = ExtractBlock(
             pipeline, std::string("RenderContext RenderPipeline::make_") + name + "_context(");
         ExpectContains(body, "m_frame_far_selection.effective == FarWorldMode::Ladder");
@@ -173,8 +180,8 @@ TEST(FarWorldPositionContract, EffectiveFrameProjectionAndPostOverrideDistanceSe
 TEST(FarWorldPositionContract, EveryGbufferDepthWriterConsumesTheSharedLadderProjection) {
     const auto gbuffer = ReadShader("src/luminumbra_client/rendering/passes/GBufferPass.cpp");
     for (const char* name : {"chunks", "static_meshes", "skinned_meshes"}) {
-        const auto body = ExtractBlock(
-            gbuffer, std::string("void GBufferPass::geometry_pass_") + name + "(");
+        const auto body =
+            ExtractBlock(gbuffer, std::string("void GBufferPass::geometry_pass_") + name + "(");
         ExpectContains(body, "ctx.gbuffer_projection");
         ExpectContains(body, "if (!ctx.far_world_ladder)");
     }
