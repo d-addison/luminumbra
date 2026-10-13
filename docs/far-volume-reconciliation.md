@@ -29,7 +29,7 @@ branches and their evidence retain their original identities.
 
 ## Concrete conflicts
 
-The comparisons below describe the historical sources. Regression-port slice 1
+The comparisons below describe the historical sources. This regression port
 is based on devel `f15dcde7`, which does not contain the separate FW chain at
 `950609d3`. That FW head has a canonical queue and renderer adapter; their
 presence on another branch does not establish their landing or native acceptance
