@@ -48,70 +48,44 @@ function Get-FarLadderTierTable {
     return @($rows.ToArray())
 }
 
-# Distance along one axis from a coordinate to the nearest point of the cell
-# [index*edge, (index+1)*edge); zero when the coordinate lies inside the cell.
-function Get-FarOracleAxisGap {
-    param([int64]$Index, [double]$Edge, [double]$Coord)
-    $low = [double]$Index * $Edge
-    $high = [double]($Index + 1) * $Edge
-    return [math]::Max([math]::Max($low - $Coord, 0.0), $Coord - $high)
+# The independent #199 arithmetic is shared with file-only stdlib tests. It
+# lives in one Python helper; the PowerShell facade never reads engine sources.
+$script:FarOracleHelper = Join-Path $PSScriptRoot "far_ladder_oracle.py"
+function Invoke-FarOraclePython {
+    param([string[]]$Arguments)
+    $python = $null
+    foreach ($candidate in @("python3", "python", "py")) {
+        if (Get-Command $candidate -ErrorAction SilentlyContinue) { $python = $candidate; break }
+    }
+    if (-not $python) { throw "far oracle requires Python 3 (stdlib only)" }
+    $output = & $python -B $script:FarOracleHelper @Arguments
+    if ($LASTEXITCODE -ne 0) { throw "far oracle refused artifact/arithmetic (exit $LASTEXITCODE)" }
+    return ($output | ConvertFrom-Json)
 }
-
-# Returns "tier,tx,tz" strings in canonical order: tier, then tz, then tx.
 function Get-FarLadderWantedTiles {
     param([double]$X, [double]$Z)
     Assert-FarLadderCameraDomain -X $X -Z $Z
-    $found = New-Object System.Collections.ArrayList
-    foreach ($row in @(Get-FarLadderTierTable)) {
-        $edge = [double]$row.TileEdge
-        $radius = [double]$row.Wanted
-        $radiusSquared = $radius * $radius
-        $txMin = [int64]([math]::Floor(($X - $radius) / $edge)) - 1
-        $txMax = [int64]([math]::Floor(($X + $radius) / $edge)) + 1
-        $tzMin = [int64]([math]::Floor(($Z - $radius) / $edge)) - 1
-        $tzMax = [int64]([math]::Floor(($Z + $radius) / $edge)) + 1
-        for ($tx = $txMin; $tx -le $txMax; $tx++) {
-            $gapX = Get-FarOracleAxisGap -Index $tx -Edge $edge -Coord $X
-            for ($tz = $tzMin; $tz -le $tzMax; $tz++) {
-                $gapZ = Get-FarOracleAxisGap -Index $tz -Edge $edge -Coord $Z
-                if ($gapX * $gapX + $gapZ * $gapZ -le $radiusSquared) {
-                    [void]$found.Add([pscustomobject]@{
-                        Tier = [int64]$row.Tier
-                        Tx = $tx
-                        Tz = $tz
-                    })
-                }
-            }
-        }
-    }
-    $keys = @($found | Sort-Object -Property Tier, Tz, Tx)
-    $keyStrings = New-Object System.Collections.ArrayList
-    foreach ($key in $keys) {
-        [void]$keyStrings.Add([string]::Format([System.Globalization.CultureInfo]::InvariantCulture,
-            "{0},{1},{2}", $key.Tier, $key.Tx, $key.Tz))
-    }
-    return @($keyStrings.ToArray())
+    $culture = [System.Globalization.CultureInfo]::InvariantCulture
+    return @(Invoke-FarOraclePython -Arguments @("wanted", "--", $X.ToString("R", $culture), $Z.ToString("R", $culture)))
 }
-
-# Number of 512 m legacy regions (keyed floor(x/512)) whose nearest point lies
-# within the 3000 m legacy wanted range of the camera.
 function Get-FarLegacyWantedCount {
     param([double]$X, [double]$Z)
     Assert-FarLadderCameraDomain -X $X -Z $Z
-    $regionSize = [double]512
-    $range = [double]3000
-    $rangeSquared = $range * $range
-    $centerX = [int64]([math]::Floor($X / $regionSize))
-    $centerZ = [int64]([math]::Floor($Z / $regionSize))
-    $count = [int64]0
-    for ($rx = $centerX - 8; $rx -le $centerX + 8; $rx++) {
-        $gapX = Get-FarOracleAxisGap -Index $rx -Edge $regionSize -Coord $X
-        for ($rz = $centerZ - 8; $rz -le $centerZ + 8; $rz++) {
-            $gapZ = Get-FarOracleAxisGap -Index $rz -Edge $regionSize -Coord $Z
-            if ($gapX * $gapX + $gapZ * $gapZ -le $rangeSquared) { $count = $count + 1 }
-        }
+    $culture = [System.Globalization.CultureInfo]::InvariantCulture
+    return [int64](Invoke-FarOraclePython -Arguments @("legacy", "--", $X.ToString("R", $culture), $Z.ToString("R", $culture)))
+}
+function Assert-FarHorizonV2Artifact {
+    param([string]$Path, [ValidateSet("legacy", "ladder")][string]$Renderer,
+          [string[]]$Stations = @("eye_yaw_000", "eye_yaw_090", "eye_yaw_180", "eye_yaw_270", "elevated"))
+    # Keep #199's aggregate assertions AND the station validator on this path.
+    # Ladder artifacts intentionally carry per-station evidence only.
+    if ($Renderer -ceq "legacy") {
+        $artifact = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
+        Assert-FarLadderOracleArtifact -Artifact $artifact -Name "horizon v2 aggregate" | Out-Null
     }
-    return $count
+    $arguments = @("validate", $Path, "--renderer", $Renderer)
+    foreach ($station in $Stations) { $arguments += @("--station", $station) }
+    return Invoke-FarOraclePython -Arguments $arguments
 }
 
 # Each helper either returns a scalar or throws; none returns a bare array.
@@ -226,6 +200,7 @@ function Assert-FarLadderOracleArtifact {
     Assert-FarOracleArray $ladder.resident_tiles $Name "ladder.resident_tiles"
     $staleTiles = Get-FarOracleInteger $ladder.stale_tiles $Name "ladder.stale_tiles"
 
+    if ($staleTiles -ne 0) { throw "${Name}: aggregate has $staleTiles stale tile(s), expected 0" }
     $tileKeys = @(Get-FarOracleTileKeys -Entries $ladder.expected_tiles -Name $Name -Path "ladder.expected_tiles")
     $expectedKeys = @(Get-FarLadderWantedTiles -X $cameraX -Z $cameraZ)
     $actualSet = @{}

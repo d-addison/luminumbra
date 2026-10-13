@@ -21,6 +21,8 @@ class RenderResourceRegistry;
 // hierarchy, stats collection, and the GPU timer issue/collect calls.
 class ShadowPass {
 public:
+    bool tint_dirty() const noexcept { return m_tint_dirty; }
+    void restore_tint_dirty(bool dirty) noexcept { m_tint_dirty = dirty; }
     ShadowPass();
     ~ShadowPass();
 
