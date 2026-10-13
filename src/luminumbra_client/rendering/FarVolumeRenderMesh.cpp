@@ -106,18 +106,23 @@ bool AdaptFarVolumeRenderMesh(const World::FarVolumeMesh& source,
             return fail(FarVolumeRenderError::AllocationFailure);
         if (FarVolumeRenderRetainedBytes(candidate) > max_buffer_bytes)
             return fail(FarVolumeRenderError::ByteLimit);
+        FarVolumeRenderBounds bounds{Vec3{0.0f}, Vec3{0.0f}};
+        bool has_bounds = false;
         for (const auto& vertex : source.vertices) {
             Vec3 position{0.0f}, normal{0.0f};
             if (!FloatVector(vertex.position, position) || !FloatVector(vertex.normal, normal))
                 return fail(FarVolumeRenderError::InvalidSource);
             candidate.vertices.push_back({position, normal, vertex.material});
-            if (candidate.bounds) {
-                auto& bounds = *candidate.bounds;
+            if (has_bounds) {
                 bounds.min = glm::min(bounds.min, position);
                 bounds.max = glm::max(bounds.max, position);
-            } else
-                candidate.bounds = FarVolumeRenderBounds{position, position};
+            } else {
+                bounds = FarVolumeRenderBounds{position, position};
+                has_bounds = true;
+            }
         }
+        if (has_bounds)
+            candidate.bounds = bounds;
         candidate.indices.insert(
             candidate.indices.end(), source.indices.begin(), source.indices.end());
         output = std::move(candidate);
