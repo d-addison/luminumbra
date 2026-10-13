@@ -40,8 +40,10 @@ class GccCohortTests(unittest.TestCase):
         return packages
 
     def assert_package_state(self, artifacts, packages):
-        self.assertEqual(json.loads(artifacts["fixture/package-state.json"]),
-                         {"mingw-w64-ucrt-x86_64-" + key: value for key, value in packages.items()})
+        expected = {"mingw-w64-ucrt-x86_64-" + key: value for key, value in packages.items()}
+        self.assertEqual(json.loads(artifacts["fixture/package-state.json"]), expected)
+        self.assertEqual(dict(line.split() for line in artifacts["fixture/package-snapshot.txt"].splitlines()),
+                         expected)
 
     def test_gcc_known_pair_is_staged_swapped_together_and_restored(self):
         packages = self.cohort_baseline()
@@ -50,6 +52,13 @@ class GccCohortTests(unittest.TestCase):
         self.assert_finalized(artifacts, summary, "COMPLETE")
         for cell in (3, 4):
             self.assertEqual(json.loads(artifacts[f"diag/cell-{cell}/status.json"])["status"], "OK")
+        # Identity is collected through hot shell queries after each transaction,
+        # so these assertions also catch a stale snapshot after a successful -U.
+        for name in ("gcc", "cc-libs", "libgcc", "libstdc++", "libatomic"):
+            self.assertIn(f"mingw-w64-ucrt-x86_64-{name} 16.2.0-4\n",
+                          artifacts["diag/cell-3/identity.txt"])
+            self.assertIn(f"mingw-w64-ucrt-x86_64-{name} {packages[name]}\n",
+                          artifacts["diag/cell-4/identity.txt"])
         transactions = [(index, call) for index, call in enumerate(calls)
                         if call[:2] == ["pacman", "-U"]]
         self.assertEqual(len(transactions), 2)
