@@ -78,6 +78,7 @@ TEXT_RULES = (
         r"\b(?:design-decisions|handoff|spec|plan)\.md\b", re.IGNORECASE
     )),
     ("private-posix-path", re.compile(r"(?:^|[\s'\"])(?:/home/[^/\s]+/|/mnt/[a-zA-Z]/)")),
+    ("private-unc-path", re.compile(r"(?:\\\\+|//)wsl(?:\.localhost|\$)[\\/]", re.IGNORECASE)),
     ("private-windows-path", re.compile(r"\b[A-Za-z]:\\(?:Users|src|code)\\", re.IGNORECASE)),
     ("github-token", re.compile(r"\b(?:gh[opsu]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{40,})\b")),
     ("openai-token", re.compile(r"\bsk-(?:proj-)?[A-Za-z0-9_-]{24,}\b")),
