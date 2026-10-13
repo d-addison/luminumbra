@@ -708,6 +708,51 @@ TEST(WorldSaveService, IndexedAbsentEnergyRefusesResealedAgeBeyondSavedClock) {
     EXPECT_TRUE(refused.snapshot_chunks().empty());
 }
 
+TEST(WorldSaveServiceTest, ChunkVectorRegionDigestUsesV2AuthorityAndDurableMerge) {
+    using Luminumbra::Persistence::RegionDigestInputs;
+    const TempSaveDir root("vector_digest");
+    WorldStreamingState durable;
+    const auto stored = AddFixtureChunk(durable, IVec3(0, 0, 0), ChunkState::Idle, 1u);
+    const auto retained = AddFixtureChunk(durable, IVec3(1, 0, 0), ChunkState::Idle, 2u);
+    stored->mark_voxel_data_dirty();
+    retained->mark_voxel_data_dirty();
+    ASSERT_TRUE(WorldSaveService{}.save_world(durable, root.path));
+
+    WorldStreamingState resident;
+    const auto live = AddFixtureChunk(resident, IVec3(0, 0, 0), ChunkState::Idle, 3u);
+    const auto pristine = AddFixtureChunk(resident, IVec3(1, 0, 0), ChunkState::Idle, 4u);
+    const auto loading = AddFixtureChunk(resident, IVec3(2, 0, 0), ChunkState::Loading, 5u);
+    const auto outside = AddFixtureChunk(resident, IVec3(32, 0, 0), ChunkState::Idle, 6u);
+    live->mark_voxel_data_dirty();
+    loading->mark_voxel_data_dirty();
+    outside->mark_voxel_data_dirty();
+    const std::vector<std::shared_ptr<Chunk>> chunks{nullptr, pristine, loading, outside, live};
+
+    WorldStreamingState expected;
+    ASSERT_TRUE(expected.insert_chunk(live));
+    ASSERT_TRUE(expected.insert_chunk(retained));
+    const auto expected_digest =
+        std::stoull(Luminumbra::Persistence::ComputeRegionContentHash(expected), nullptr, 16);
+    EXPECT_EQ(WorldSaveService::region_simulation_digest(root.path, {0, 0}, chunks),
+              expected_digest);
+    EXPECT_EQ(WorldSaveService::region_simulation_digest(
+                  root.path, {0, 0}, RegionDigestInputs{chunks, {}}),
+              expected_digest);
+
+    const std::vector<std::shared_ptr<Chunk>> empty;
+    const auto durable_digest =
+        std::stoull(Luminumbra::Persistence::ComputeRegionContentHash(durable), nullptr, 16);
+    EXPECT_EQ(WorldSaveService::region_simulation_digest(root.path, {0, 0}, empty), durable_digest);
+    EXPECT_EQ(WorldSaveService::region_simulation_digest(root.path, {0, 0}, {}), durable_digest);
+    EXPECT_EQ(WorldSaveService::region_simulation_digest(root.path, {0, 0}, {live}),
+              expected_digest);
+    const std::vector<std::shared_ptr<Chunk>> only_live{live};
+    const auto live_digest = WorldSaveService::region_simulation_digest({}, {0, 0}, only_live);
+    EXPECT_EQ(WorldSaveService::region_simulation_digest({}, {0, 0}, chunks), live_digest);
+    EXPECT_EQ(WorldSaveService::region_simulation_digest(root.path / "missing", {0, 0}, chunks),
+              live_digest);
+}
+
 TEST(WorldSaveServiceTest, PublicRegionDigestRejectsUnsupportedKeysBeforeDurableRead) {
     using Luminumbra::world::RegionKey;
     const Luminumbra::Persistence::RegionDigestInputs inputs{};
@@ -725,6 +770,11 @@ TEST(WorldSaveServiceTest, PublicRegionDigestRejectsUnsupportedKeysBeforeDurable
                      std::invalid_argument);
         EXPECT_THROW((void)WorldSaveService::region_simulation_digest(missing_save, key, inputs),
                      std::invalid_argument);
+        EXPECT_THROW((void)WorldSaveService::region_simulation_digest({}, key, inputs.live),
+                     std::invalid_argument);
+        EXPECT_THROW(
+            (void)WorldSaveService::region_simulation_digest(missing_save, key, inputs.live),
+            std::invalid_argument);
     }
     const auto empty_digest = WorldSaveService::region_simulation_digest({}, {0, 0}, inputs);
     for (const RegionKey key : {RegionKey{-32768, -32768},
@@ -745,6 +795,10 @@ TEST(WorldSaveServiceTest, PublicRegionDigestRejectsUnsupportedKeysBeforeDurable
         EXPECT_EQ(WorldSaveService::region_simulation_digest({}, key, edited_inputs),
                   expected_digest);
         EXPECT_EQ(WorldSaveService::region_simulation_digest(missing_save, key, edited_inputs),
+                  expected_digest);
+        EXPECT_EQ(WorldSaveService::region_simulation_digest({}, key, edited_inputs.live),
+                  expected_digest);
+        EXPECT_EQ(WorldSaveService::region_simulation_digest(missing_save, key, edited_inputs.live),
                   expected_digest);
     }
     EXPECT_FALSE(std::filesystem::exists(missing_save));
