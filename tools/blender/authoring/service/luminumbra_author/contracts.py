@@ -226,8 +226,8 @@ class Toolchain:
         from .meshgen_scripts import ScriptInventory
         self.verify()
         require(role in self.scripts, "config.pins_missing", "MG2 requires a pinned game script role.", role)
-        inventory = ScriptInventory(project_root, self.scripts[role])
-        inventory.verify()
-        inventory.diagnose()
-        return {"path": inventory.entry, "sha256": self.scripts[role]["sha256"],
-                "modules": dict(self.scripts[role].get("modules", {}))}
+        with ScriptInventory(project_root, self.scripts[role]) as inventory:
+            inventory.verify()
+            inventory.diagnose()
+            return {"path": inventory.entry, "sha256": self.scripts[role]["sha256"],
+                    "modules": dict(self.scripts[role].get("modules", {}))}
