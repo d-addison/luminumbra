@@ -656,6 +656,16 @@ def run_iteration(
                 timed_out = True
                 cleanup_errors = terminate_process_tree(process)
                 returncode = process.returncode
+            except KeyboardInterrupt as exc:
+                try:
+                    errors = terminate_process_tree(process)
+                except Exception as cleanup_exc:
+                    errors = [f"{type(cleanup_exc).__name__}: {cleanup_exc}"]
+                if errors:
+                    original = str(exc)
+                    detail = "process-tree cleanup errors: " + "; ".join(errors)
+                    exc.args = (f"{original}; {detail}" if original else detail,)
+                raise
     except (OSError, ValueError, subprocess.SubprocessError) as exc:
         return {
             "exit_code": None,

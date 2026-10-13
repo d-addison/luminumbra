@@ -146,14 +146,14 @@ def posix_crash_capture_ready(cwd: Path) -> bool:
     )
 
 
-def pid_alive(pid: int) -> bool:
+def pid_alive(pid: int, timeout: float = 30) -> bool:
     if os.name == "nt":
         listing = subprocess.run(
             ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
             capture_output=True,
             text=True,
             check=False,
-            timeout=30,
+            timeout=timeout,
         ).stdout
         return f'"{pid}"' in listing
     try:
@@ -567,6 +567,108 @@ class FixtureWatchdogTest(HarnessTestCase):
         self.assertEqual(result.stdout, (logs / "stdout.log").read_text(encoding="utf-8"))
         self.assertEqual(result.stderr, (logs / "stderr.log").read_text(encoding="utf-8"))
         self.assertTrue((logs / "stderr.log").is_file())
+
+
+class InterruptCleanupTest(HarnessTestCase):
+    def test_interrupted_wait_terminates_owned_child_and_grandchild(self) -> None:
+        crash = self.root / "iter-1" / "crash"
+        crash.mkdir(parents=True)
+        ready = self.root / "interrupt-ready"
+        log = self.root / "interrupted.log"
+        env = rq.build_child_environment(dict(os.environ), crash)
+        env["LUMINUMBRA_FIXTURE_READY_FILE"] = str(ready)
+        original_popen = subprocess.Popen
+        owned = []
+        grandchild_pid = None
+        injected = False
+
+        def factory(*args, **kwargs):
+            process = original_popen(*args, **kwargs)
+            if not owned:
+                original_wait = process.wait
+                owned.append((process, original_wait))
+
+                def wait_once(timeout=None):
+                    nonlocal grandchild_pid, injected
+                    if injected:
+                        return original_wait(timeout=timeout)
+                    deadline = time.monotonic() + 30
+                    while not ready.exists():
+                        if process.poll() is not None:
+                            self.fail("interrupt fixture exited before readiness")
+                        if time.monotonic() >= deadline:
+                            self.fail("interrupt fixture did not become ready")
+                        time.sleep(0.01)
+                    grandchild_pid = int((crash / "grandchild.pid").read_text())
+                    self.assertGreater(grandchild_pid, 0)
+                    self.assertIsNone(process.poll())
+                    injected = True
+                    raise KeyboardInterrupt("fixture interrupt")
+
+                process.wait = wait_once
+            return process
+
+        try:
+            with mock.patch.object(rq.subprocess, "Popen", side_effect=factory):
+                with self.assertRaises(KeyboardInterrupt):
+                    rq.run_iteration([str(self.exe), "--fake=hang"], self.work, env, log, 60)
+            self.assertTrue(injected)
+            process = owned[0][0]
+            self.assertIsNotNone(process.poll(), "direct child was not reaped")
+            deadline = time.monotonic() + 5
+            while pid_alive(grandchild_pid, timeout=max(0.01, deadline - time.monotonic())):
+                if time.monotonic() >= deadline:
+                    self.fail("fixture grandchild survived interruption cleanup")
+                time.sleep(0.01)
+            self.assertIn("fake child iteration=1 mode hang", log.read_text(encoding="utf-8"))
+        except BaseException:
+            self.preserve_fixture_failure()
+            raise
+        finally:
+            # The factory patch has ended; fallback cleanup cannot intercept
+            # Windows taskkill/tasklist or recursively create another fixture.
+            for process, original_wait in owned:
+                process.wait = original_wait
+                rq.terminate_process_tree(process)
+            if grandchild_pid is not None and pid_alive(grandchild_pid, timeout=5):
+                if os.name == "nt":
+                    subprocess.run(["taskkill", "/T", "/F", "/PID", str(grandchild_pid)],
+                                   capture_output=True, check=False, timeout=rq.CLEANUP_TIMEOUT_SECONDS)
+                else:
+                    os.kill(grandchild_pid, signal.SIGKILL)
+
+    def test_cleanup_failure_preserves_interrupt_and_reports_diagnostics(self) -> None:
+        for failure in (["fixture cleanup refused"], OSError("fixture cleanup raised")):
+            with self.subTest(failure=str(failure)):
+                interrupt = KeyboardInterrupt("fixture interrupt")
+                process = mock.Mock()
+                process.wait.side_effect = interrupt
+                cleanup_options = {"side_effect": failure} if isinstance(failure, Exception) else {"return_value": failure}
+                with mock.patch.object(rq.subprocess, "Popen", return_value=process), \
+                        mock.patch.object(rq, "terminate_process_tree", **cleanup_options):
+                    with self.assertRaises(KeyboardInterrupt) as caught:
+                        rq.run_iteration([str(self.exe)], self.work, {}, self.root / "cleanup-error.log", 60)
+                self.assertIs(caught.exception, interrupt)
+                self.assertIn("process-tree cleanup errors", str(caught.exception))
+                self.assertIn("fixture cleanup", str(caught.exception))
+
+    def test_interruption_finalizes_aborted_receipt_without_inventing_entry(self) -> None:
+        args_list = [*self.base_args(), "--count", "2"]
+        if "--allow-no-dumps" not in args_list:
+            args_list.append("--allow-no-dumps")
+        args = rq.parse_args(args_list)
+        completed = {"index": 1, "failed": False, "status": "exit:0", "failure_reason": None,
+                     "log_path": "completed.log", "crash_artifacts": [], "collection_errors": []}
+        interrupt = KeyboardInterrupt("process-tree cleanup errors: fixture diagnostic")
+        with mock.patch.object(rq, "run_indexed_iteration", side_effect=[completed, interrupt]):
+            with self.assertRaises(KeyboardInterrupt):
+                rq.run_qualification(args, ["--fake=pass"], core_limits=lambda: (0, 0),
+                                     read_pattern=lambda: "|fixture")
+        receipt = self.load_receipt()
+        self.assertEqual(receipt["status"], "aborted")
+        self.assertIsNotNone(receipt["end_time"])
+        self.assertEqual(receipt["iterations"], [completed])
+        self.assertIn("process-tree cleanup errors: fixture diagnostic", receipt["abort_reason"])
 
 
 if os.name == "posix":
