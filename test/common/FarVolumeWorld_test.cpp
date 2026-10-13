@@ -168,8 +168,10 @@ TEST(FarVolumeWorld, SuccessfulChargedCompileMatchesUnchargedAndNullPool) {
     ASSERT_EQ(output.mesh.vertices.size(), 129u * 129u);
     ASSERT_EQ(output.mesh.indices.size(), 128u * 128u * 6u);
     ASSERT_TRUE(output.mesh.bounds.has_value());
-    EXPECT_EQ(output.mesh.bounds->min, (FarVolumeVector{0.0, 256.25, 0.0}));
-    EXPECT_EQ(output.mesh.bounds->max, (FarVolumeVector{8192.0, 256.25, 8192.0}));
+    if (output.mesh.bounds) {
+        EXPECT_EQ(output.mesh.bounds->min, (FarVolumeVector{0.0, 256.25, 0.0}));
+        EXPECT_EQ(output.mesh.bounds->max, (FarVolumeVector{8192.0, 256.25, 8192.0}));
+    }
     for (const auto index : output.mesh.indices)
         ASSERT_LT(index, output.mesh.vertices.size());
     EXPECT_EQ(output.work, failure.work);
