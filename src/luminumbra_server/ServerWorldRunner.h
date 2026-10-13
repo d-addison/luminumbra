@@ -105,6 +105,8 @@ struct ServerWorldRunnerConfig {
 struct ServerTickReport {
     std::uint64_t ticks_executed = 0;
     std::uint64_t frames_executed = 0;
+    bool region_fault = false;
+    std::string region_fault_message;
     std::uint64_t autosave_passes = 0;
     std::uint64_t autosave_writes = 0;
     double simulated_seconds = 0.0;
