@@ -5,7 +5,10 @@
 #include <nlohmann/json.hpp>
 
 #include <cstddef>
+#include <cstdint>
 #include <cstdlib>
+#include <exception>
+#include <filesystem>
 #include <string>
 #include <system_error>
 #include <utility>
@@ -46,6 +49,38 @@ SyntheticSaveReport Fail(SyntheticSaveReport report, std::string error) {
     report.error = std::move(error);
     return report;
 }
+
+// Copy the path before creation: cleanup must survive moving the report on a failure return.
+class CreatedSaveDirectory {
+public:
+    explicit CreatedSaveDirectory(const fs::path& save_path)
+        : path_(save_path) {}
+    CreatedSaveDirectory(const CreatedSaveDirectory&) = delete;
+    CreatedSaveDirectory& operator=(const CreatedSaveDirectory&) = delete;
+
+    ~CreatedSaveDirectory() noexcept {
+        if (!owned_)
+            return;
+        try {
+            std::error_code ignored;
+            static_cast<void>(fs::remove_all(path_, ignored));
+        } catch (...) {
+            // Even the error_code overload can throw on allocation failure. Never throw during
+            // stack unwinding; cleanup is best-effort if the filesystem cannot remove the tree.
+        }
+    }
+
+    void MarkCreated() noexcept {
+        owned_ = true;
+    }
+    void Release() noexcept {
+        owned_ = false;
+    }
+
+private:
+    fs::path path_;
+    bool owned_ = false;
+};
 
 void FillChunk(Chunk& chunk, const SyntheticSaveSpec& spec, std::uint64_t index) {
     const std::size_t sx = static_cast<std::size_t>(CHUNK_SIZE_X) + 1;
@@ -116,89 +151,95 @@ std::vector<IVec3> SyntheticChunkCoords(std::uint32_t count) {
 
 SyntheticSaveReport WriteSyntheticSave(const SyntheticSaveSpec& spec, const fs::path& root) {
     SyntheticSaveReport report;
-    report.save_dir = root / "worlds/saves" / spec.world_id;
-    if (spec.chunk_count < 1)
-        return Fail(std::move(report), "chunk_count must be at least 1.");
-    if (spec.edit_count > spec.chunk_count)
-        return Fail(std::move(report), "edit_count must not exceed chunk_count.");
-    if (!ValidWorldId(spec.world_id))
-        return Fail(std::move(report), "world_id must match [A-Za-z0-9_-]+.");
+    try {
+        report.save_dir = root / "worlds/saves" / spec.world_id;
+        if (spec.chunk_count < 1 || spec.chunk_count > kMaxSyntheticSaveChunks)
+            return Fail(std::move(report),
+                        "chunk_count must be in [1, " + std::to_string(kMaxSyntheticSaveChunks) +
+                            "].");
+        if (spec.edit_count > spec.chunk_count)
+            return Fail(std::move(report), "edit_count must not exceed chunk_count.");
+        if (!ValidWorldId(spec.world_id))
+            return Fail(std::move(report), "world_id must match [A-Za-z0-9_-]+.");
 
-    std::error_code ec;
-    const bool exists = fs::exists(report.save_dir, ec);
-    if (ec)
-        return Fail(std::move(report), "cannot inspect save directory: " + ec.message());
-    if (exists) {
-        std::string message = "save already exists: " + report.save_dir.generic_string();
-        return Fail(std::move(report), std::move(message));
-    }
-    fs::create_directories(report.save_dir, ec);
-    if (ec)
-        return Fail(std::move(report), "cannot create save directory: " + ec.message());
-    // From here on the directory belongs to this call: a failure removes it so a retry with the
-    // same world id is not refused as an existing save.
-    const auto fail_and_clean = [&report](const std::string& message) {
-        std::error_code ignored;
-        fs::remove_all(report.save_dir, ignored);
-        return Fail(std::move(report), message);
-    };
-
-    const json metadata = {
-        {"container_version", WorldSaveService::kContainerVersion},
-        {"name", spec.world_name},
-        {"seed", std::to_string(spec.seed)},
-        {"worldType", "default"},
-        {"creationTime", 1},
-        {"spawnPoint", {{"x", 8}, {"y", 18}, {"z", 8}}},
-        {"waterSimCursor", 0},
-    };
-    std::vector<std::string> errors;
-    if (!WorldSaveService::save_metadata(metadata.dump(4) + "\n", report.save_dir, &errors))
-        return fail_and_clean(errors.empty() ? "metadata write failed" : errors.front());
-
-    if (!spec.preset_source.empty()) {
-        if (!fs::copy_file(spec.preset_source, report.save_dir / "preset.json", ec))
-            return fail_and_clean("cannot copy preset: " + spec.preset_source.generic_string() +
-                                  " (" + ec.message() + ")");
-    }
-
-    WorldStreamingState state;
-    const auto coords = SyntheticChunkCoords(spec.chunk_count);
-    for (std::size_t i = 0; i < coords.size(); ++i) {
-        auto chunk = state.get_or_create_chunk(coords[i]);
-        FillChunk(*chunk, spec, static_cast<std::uint64_t>(i));
-        chunk->mark_sdf_loaded_or_edited();
-    }
-    std::vector<std::string> save_errors;
-    if (!WorldSaveService{}.save_world(state, report.save_dir, &save_errors))
-        return fail_and_clean(save_errors.empty() ? "world save failed" : save_errors.front());
-    report.chunks_written = spec.chunk_count;
-
-    const auto region_dir = WorldSaveService::region_directory(report.save_dir);
-    fs::directory_iterator it(region_dir, ec);
-    if (ec)
-        return fail_and_clean("cannot list region directory: " + ec.message());
-    for (; it != fs::directory_iterator{}; it.increment(ec)) {
+        std::error_code ec;
+        static_cast<void>(fs::create_directories(report.save_dir.parent_path(), ec));
         if (ec)
-            break;
-        const auto name = it->path().filename().string();
-        if (!name.ends_with(".lmr"))
-            continue;
-        const bool regular = it->is_regular_file(ec);
+            return Fail(std::move(report),
+                        "cannot create save parent directories: " + ec.message());
+        CreatedSaveDirectory cleanup(report.save_dir);
+        const bool created = fs::create_directory(report.save_dir, ec);
         if (ec)
-            break;
-        if (!regular)
-            continue;
-        const std::uintmax_t bytes = it->file_size(ec);
+            return Fail(std::move(report), "cannot create save directory: " + ec.message());
+        if (!created)
+            return Fail(std::move(report), "save already exists; refusing to overwrite it.");
+        cleanup.MarkCreated();
+
+        const json metadata = {
+            {"container_version", WorldSaveService::kContainerVersion},
+            {"name", spec.world_name},
+            {"seed", std::to_string(spec.seed)},
+            {"worldType", "default"},
+            {"creationTime", 1},
+            {"spawnPoint", {{"x", 8}, {"y", 18}, {"z", 8}}},
+            {"waterSimCursor", 0},
+        };
+        std::vector<std::string> errors;
+        if (!WorldSaveService::save_metadata(metadata.dump(4) + "\n", report.save_dir, &errors))
+            return Fail(std::move(report),
+                        errors.empty() ? "metadata write failed" : errors.front());
+
+        if (!spec.preset_source.empty()) {
+            if (!fs::copy_file(spec.preset_source, report.save_dir / "preset.json", ec))
+                return Fail(std::move(report),
+                            "cannot copy preset: " + spec.preset_source.generic_string() + " (" +
+                                ec.message() + ")");
+        }
+
+        WorldStreamingState state;
+        const auto coords = SyntheticChunkCoords(spec.chunk_count);
+        for (std::size_t i = 0; i < coords.size(); ++i) {
+            auto chunk = state.get_or_create_chunk(coords[i]);
+            FillChunk(*chunk, spec, static_cast<std::uint64_t>(i));
+            chunk->mark_sdf_loaded_or_edited();
+        }
+        std::vector<std::string> save_errors;
+        if (!WorldSaveService{}.save_world(state, report.save_dir, &save_errors))
+            return Fail(std::move(report),
+                        save_errors.empty() ? "world save failed" : save_errors.front());
+        report.chunks_written = spec.chunk_count;
+
+        const auto region_dir = WorldSaveService::region_directory(report.save_dir);
+        fs::directory_iterator it(region_dir, ec);
         if (ec)
-            break;
-        ++report.region_files;
-        report.region_bytes += bytes;
+            return Fail(std::move(report), "cannot list region directory: " + ec.message());
+        for (; it != fs::directory_iterator{}; it.increment(ec)) {
+            if (ec)
+                break;
+            const auto name = it->path().filename().string();
+            if (!name.ends_with(".lmr"))
+                continue;
+            const bool regular = it->is_regular_file(ec);
+            if (ec)
+                break;
+            if (!regular)
+                continue;
+            const std::uintmax_t bytes = it->file_size(ec);
+            if (ec)
+                break;
+            ++report.region_files;
+            report.region_bytes += bytes;
+        }
+        if (ec)
+            return Fail(std::move(report), "cannot measure region files: " + ec.message());
+        report.ok = true;
+        cleanup.Release();
+        return report;
+    } catch (const std::exception& error) {
+        return Fail(std::move(report), std::string("save fixture exception: ") + error.what());
+    } catch (...) {
+        return Fail(std::move(report), "unknown save fixture exception.");
     }
-    if (ec)
-        return fail_and_clean("cannot measure region files: " + ec.message());
-    report.ok = true;
-    return report;
 }
 
 } // namespace Luminumbra::Persistence

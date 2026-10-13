@@ -128,9 +128,15 @@ def load_receipt(receipt_path) -> dict:
             raise ReceiptError(f"malformed receipt: invalid size for {path!r}")
         if not isinstance(sha, str) or not _SHA256_RE.match(sha):
             raise ReceiptError(f"malformed receipt: invalid sha256 for {path!r}")
-    if receipt.get("file_count") != len(files):
+    file_count = receipt.get("file_count")
+    if not isinstance(file_count, int) or isinstance(file_count, bool):
+        raise ReceiptError("malformed receipt: file_count must be an integer")
+    if file_count != len(files):
         raise ReceiptError("malformed receipt: file_count does not match files")
-    if receipt.get("total_bytes") != sum(item["size"] for item in files):
+    total_bytes = receipt.get("total_bytes")
+    if not isinstance(total_bytes, int) or isinstance(total_bytes, bool):
+        raise ReceiptError("malformed receipt: total_bytes must be an integer")
+    if total_bytes != sum(item["size"] for item in files):
         raise ReceiptError("malformed receipt: total_bytes does not match files")
     if receipt.get("tree_digest") != _tree_digest(files):
         raise ReceiptError("malformed receipt: tree_digest does not match files")
