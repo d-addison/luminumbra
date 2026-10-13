@@ -2677,12 +2677,10 @@ void ReopenRegionalWaterBeforeRetention(GameSession& session,
                                         JobSystem& jobs,
                                         const Luminumbra::IVec3& coords) {
     EnableSnapshotSession(reopened, root, jobs);
-    ASSERT_TRUE(reopened.LoadWorld(session.GetMetadata().worldId))
-        << reopened.GetWorldOpenError();
+    ASSERT_TRUE(reopened.LoadWorld(session.GetMetadata().worldId)) << reopened.GetWorldOpenError();
     // The far chunk is disk-only here: reopened retention must use durable inventory.
     ASSERT_EQ(reopened.GetWorldSystem()->find_streamed_chunk(coords), nullptr);
-    EXPECT_EQ(reopened.GetActiveRegionLedger().encode(),
-              session.GetActiveRegionLedger().encode());
+    EXPECT_EQ(reopened.GetActiveRegionLedger().encode(), session.GetActiveRegionLedger().encode());
 }
 
 void AssertWaterRetentionRecords(GameSession& session,
@@ -2744,12 +2742,12 @@ void AssertDurableWaterContinuation(GameSession& session,
     EXPECT_EQ(durable_chunk->water_edge_flux, expected.flux);
     EXPECT_EQ(durable_chunk->is_water_sleeping.load(), chunk->is_water_sleeping.load());
     EXPECT_EQ(reopened.ComputeChunkStateHash(), session.ComputeChunkStateHash());
-    EXPECT_EQ(P::WorldSaveService::region_simulation_digest(
-                  session.GetWorldSaveDir(),
-                  water_region,
-                  P::RegionDigestInputs{
-                      {}, {}, reopened.GetWorldSystem()->durable_chunk_inventory()}),
-              frozen_record.frozen_digest);
+    EXPECT_EQ(
+        P::WorldSaveService::region_simulation_digest(
+            session.GetWorldSaveDir(),
+            water_region,
+            P::RegionDigestInputs{{}, {}, reopened.GetWorldSystem()->durable_chunk_inventory()}),
+        frozen_record.frozen_digest);
 }
 } // namespace
 
