@@ -32,9 +32,14 @@ std::size_t CountOccurrences(const std::string& source, const std::string& fragm
 // Reject direct owner access as well as the selected G-buffer submit seam;
 // owner names are independent of whitespace around ->Submit / draw calls.
 bool HasFarSubmissionAccess(const std::string& source) {
-    const char* const forbidden[] = {"m_far_world", "far_world_renderer", "m_farlod",
-                                    "FarWorld", "FarLod", "submit_ladder",
-                                    "SubmitSelectedFarWorld", "DrawFarVolumeGpu"};
+    const char* const forbidden[] = {"m_far_world",
+                                     "far_world_renderer",
+                                     "m_farlod",
+                                     "FarWorld",
+                                     "FarLod",
+                                     "submit_ladder",
+                                     "SubmitSelectedFarWorld",
+                                     "DrawFarVolumeGpu"};
     for (const char* identifier : forbidden) {
         if (source.find(identifier) != std::string::npos)
             return true;
@@ -158,8 +163,8 @@ TEST(FarWorldShadowContract, SignedTagIsLadderOnlyAndAfterAllMaterialPaths) {
     EXPECT_EQ(body.find("discard;", tag), std::string::npos);
     // Full byte material ID and the marker lane retain their existing writes.
     ExpectContains(body, "float material_id_normalized = float(fs_in.MaterialID) / 255.0;");
-    ExpectContains(body,
-                   "gNormalMaterial = vec4(encoded_normal * 0.5 + 0.5, 0.0, material_id_normalized);");
+    ExpectContains(
+        body, "gNormalMaterial = vec4(encoded_normal * 0.5 + 0.5, 0.0, material_id_normalized);");
     const auto marker = ReadShader("res/shaders/plant_procgen.frag");
     ExpectContains(marker, "gNormalMaterial");
     EXPECT_EQ(marker.find("LUMINUMBRA_FAR_WORLD_LADDER"), std::string::npos);
@@ -210,9 +215,9 @@ TEST(FarWorldShadowContract, ProductionCascadesHaveOnlyLiveAndGlassInputs) {
     // added inside this stage must trip the very same source-contract predicate.
     const auto before_closing_brace = stage.substr(0, stage.size() - 1);
     EXPECT_TRUE(HasFarSubmissionAccess(before_closing_brace +
-                                      "\nm_far_world -> Submit(camera, prepare);\n}"));
+                                       "\nm_far_world -> Submit(camera, prepare);\n}"));
     EXPECT_TRUE(HasFarSubmissionAccess(before_closing_brace +
-                                      "\nDrawFarVolumeGpu(allocation, driver);\n}"));
+                                       "\nDrawFarVolumeGpu(allocation, driver);\n}"));
     const auto live =
         ExtractBlock(pipeline, "SubmitTerrainChunksFn RenderPipeline::make_terrain_submitter(");
     ExpectContains(live, "CullHierarchical");

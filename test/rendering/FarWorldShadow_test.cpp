@@ -60,7 +60,8 @@ public:
     void BindBuffer(FarVolumeBufferKind kind, std::uint32_t name) noexcept override {
         (kind == FarVolumeBufferKind::Vertex ? vbo : ebo) = name;
     }
-    void UploadBuffer(FarVolumeBufferKind kind, std::intptr_t bytes, const void*) noexcept override {
+    void
+    UploadBuffer(FarVolumeBufferKind kind, std::intptr_t bytes, const void*) noexcept override {
         sizes[kind == FarVolumeBufferKind::Vertex ? vbo : ebo] = bytes;
     }
     void GetBufferBytes(FarVolumeBufferKind kind, std::int64_t& bytes) noexcept override {
@@ -81,10 +82,12 @@ public:
     }
     bool Excluded() const {
         return submissions == 0 && draws == 0 &&
-               std::all_of(cascade_submissions.begin(), cascade_submissions.end(),
+               std::all_of(cascade_submissions.begin(),
+                           cascade_submissions.end(),
                            [](std::size_t count) { return count == 0; }) &&
-               std::all_of(cascade_draws.begin(), cascade_draws.end(),
-                           [](std::size_t count) { return count == 0; });
+               std::all_of(cascade_draws.begin(), cascade_draws.end(), [](std::size_t count) {
+                   return count == 0;
+               });
     }
     void Reset() {
         submissions = draws = 0;
@@ -106,8 +109,10 @@ private:
         if (static_cast<GLuint>(bound) != shadow_fbo_)
             return;
         GLint layer = -1;
-        glGetFramebufferAttachmentParameteriv(GL_DRAW_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
-                                              GL_FRAMEBUFFER_ATTACHMENT_TEXTURE_LAYER, &layer);
+        glGetFramebufferAttachmentParameteriv(GL_DRAW_FRAMEBUFFER,
+                                              GL_DEPTH_ATTACHMENT,
+                                              GL_FRAMEBUFFER_ATTACHMENT_TEXTURE_LAYER,
+                                              &layer);
         EXPECT_GE(layer, 0);
         EXPECT_LT(layer, ShadowMap::CASCADE_COUNT);
         if (layer >= 0 && layer < ShadowMap::CASCADE_COUNT)
@@ -140,8 +145,8 @@ public:
            std::uint32_t,
            Luminumbra::World::FarCaveMode) const override {
         const bool column = p.x >= 0 && p.x <= 256 && p.z >= 0 && p.z <= 256;
-        return Luminumbra::World::FarVolumeSample{
-            column ? static_cast<float>(p.y) + .25f : 3.0f, 1};
+        return Luminumbra::World::FarVolumeSample{column ? static_cast<float>(p.y) + .25f : 3.0f,
+                                                  1};
     }
 };
 
@@ -221,11 +226,8 @@ protected:
         glTexParameteri(target, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
         return texture;
     }
-    void Bind(Shader& shader,
-              const char* name,
-              int unit,
-              GLuint texture,
-              GLenum target = GL_TEXTURE_2D) {
+    void Bind(
+        Shader& shader, const char* name, int unit, GLuint texture, GLenum target = GL_TEXTURE_2D) {
         shader.setInt(name, unit);
         glActiveTexture(GL_TEXTURE0 + unit);
         glBindTexture(target, texture);
@@ -265,8 +267,12 @@ TEST_F(FarWorldShadowGl, UploadedLadderAllocationsNeverEnterProductionCascades) 
     auto& far = pipeline.far_world_renderer();
     far.SetRequested(FarWorldMode::Ladder);
     far.InstallBackend(std::move(backend));
-    ASSERT_EQ(far.BindFixture(workers.jobs, std::make_shared<const ShadowBoundaryFixture>(),
-                             1, 1, FarWorldDevelopmentLimits()), FarWorldRefusal::None);
+    ASSERT_EQ(far.BindFixture(workers.jobs,
+                              std::make_shared<const ShadowBoundaryFixture>(),
+                              1,
+                              1,
+                              FarWorldDevelopmentLimits()),
+              FarWorldRefusal::None);
     ASSERT_EQ(far.Selection(FarWorldPurpose::World).effective, FarWorldMode::Ladder);
     ASSERT_NE(far.Residency(), nullptr);
     std::array<FarVolumeWantedRequest, 5> requests{};
@@ -285,10 +291,10 @@ TEST_F(FarWorldShadowGl, UploadedLadderAllocationsNeverEnterProductionCascades) 
         for (const auto& request : requests) {
             const auto observed = far.Residency()->Observe(request.identity.key);
             ASSERT_TRUE(observed);
-            if (observed) {
-                ASSERT_NE(observed->eligibility, FarVolumeEligibility::RequestRejected);
-                settled = settled && observed->eligibility == FarVolumeEligibility::Settled;
-            }
+            if (!observed)
+                return;
+            ASSERT_NE(observed->eligibility, FarVolumeEligibility::RequestRejected);
+            settled = settled && observed->eligibility == FarVolumeEligibility::Settled;
         }
         if (!settled)
             std::this_thread::yield();
@@ -324,8 +330,8 @@ TEST_F(FarWorldShadowGl, UploadedLadderAllocationsNeverEnterProductionCascades) 
     // Seed every layer so readback also proves ShadowPass ran all cascades,
     // rather than returning early and trivially satisfying the zero counters.
     const float stale_depth = 0.25f;
-    glClearTexImage(pass.shadow_map().depth_texture_array, 0, GL_DEPTH_COMPONENT,
-                   GL_FLOAT, &stale_depth);
+    glClearTexImage(
+        pass.shadow_map().depth_texture_array, 0, GL_DEPTH_COMPONENT, GL_FLOAT, &stale_depth);
     Camera camera;
     TerrainCullingTestPeer::ExecuteShadow(pipeline, camera);
     ASSERT_EQ(pass.shadow_map().light_space_matrices.size(),
@@ -341,8 +347,8 @@ TEST_F(FarWorldShadowGl, UploadedLadderAllocationsNeverEnterProductionCascades) 
         EXPECT_EQ(observer->cascade_submissions[cascade], 0u);
         EXPECT_EQ(observer->cascade_draws[cascade], 0u);
         const auto begin = depths.begin() + cascade * resolution * resolution;
-        EXPECT_TRUE(std::all_of(begin, begin + resolution * resolution,
-                                [](float value) { return value == 1.0f; }));
+        EXPECT_TRUE(std::all_of(
+            begin, begin + resolution * resolution, [](float value) { return value == 1.0f; }));
     }
     ASSERT_EQ(glGetError(), static_cast<GLenum>(GL_NO_ERROR));
 
@@ -351,7 +357,7 @@ TEST_F(FarWorldShadowGl, UploadedLadderAllocationsNeverEnterProductionCascades) 
     // The SAME exclusion predicate must reject it, in every actual GL layer.
     ShadowPassInput injected;
     injected.light_space_matrices = pass.shadow_map().light_space_matrices;
-    injected.submit_terrain = [&](const glm::vec4 (&)[6]) {
+    injected.submit_terrain = [&](const glm::vec4(&)[6]) {
         const auto stats = far.Submit({0, 0, 0}, prepare);
         EXPECT_EQ(stats.refused, 0u);
         return TerrainSubmitStats{stats.draws, stats.draws, stats.indices};
@@ -384,10 +390,10 @@ TEST_F(FarWorldShadowGl, ProductionGBufferPreservesMaterialBytesAndTagsWaterAndA
     const std::array<GLint, 5> formats{GL_RGB16F, GL_RGBA8, GL_RGBA8, GL_RG16F, GL_RG16F};
     const std::array<GLenum, 5> channels{GL_RGB, GL_RGBA, GL_RGBA, GL_RG, GL_RG};
     const std::array<GLenum, 5> draw_buffers{GL_COLOR_ATTACHMENT0,
-                                           GL_COLOR_ATTACHMENT1,
-                                           GL_COLOR_ATTACHMENT2,
-                                           GL_COLOR_ATTACHMENT3,
-                                           GL_COLOR_ATTACHMENT4};
+                                             GL_COLOR_ATTACHMENT1,
+                                             GL_COLOR_ATTACHMENT2,
+                                             GL_COLOR_ATTACHMENT3,
+                                             GL_COLOR_ATTACHMENT4};
     for (int i = 0; i < 5; ++i) {
         outputs[i] = Texture(GL_TEXTURE_2D, formats[i], channels[i], nullptr);
         Attach(outputs[i], i);
@@ -458,8 +464,9 @@ TEST_F(FarWorldShadowGl, ProductionGBufferPreservesMaterialBytesAndTagsWaterAndA
             SCOPED_TRACE(id);
             const auto legacy = render(ordinary, false, id);
             const auto inert = render(ladder, false, id);
-            for (int i = 0; i < 5; ++i)
+            for (int i = 0; i < 5; ++i) {
                 EXPECT_EQ(legacy[i], inert[i]);
+            }
             const auto far = render(ladder, true, id);
             if (id == 7u) { // The live-water path is discarded in both variants.
                 EXPECT_EQ(far[3], glm::vec4(0, 0, 0, 1));
@@ -543,7 +550,8 @@ TEST_F(FarWorldShadowGl, ProductionLightingExcludesCascadesButKeepsLiveShadowsAn
         tint_pixels.fill(tint_value);
         glActiveTexture(GL_TEXTURE8);
         glBindTexture(GL_TEXTURE_2D_ARRAY, tint);
-        glTexSubImage3D(GL_TEXTURE_2D_ARRAY, 0, 0, 0, 0, 1, 1, 4, GL_RGB, GL_FLOAT, tint_pixels.data());
+        glTexSubImage3D(
+            GL_TEXTURE_2D_ARRAY, 0, 0, 0, 0, 1, 1, 4, GL_RGB, GL_FLOAT, tint_pixels.data());
         glDrawArrays(GL_TRIANGLES, 0, 3);
         return Pixel();
     };
@@ -557,8 +565,9 @@ TEST_F(FarWorldShadowGl, ProductionLightingExcludesCascadesButKeepsLiveShadowsAn
         const auto live_lit = render(false, 1, 1);
         EXPECT_EQ(live_lit, far_lit);
         EXPECT_LT(render(false, 0, 1).r, live_lit.r);
-        if (!night)
+        if (!night) {
             EXPECT_LT(render(false, 1, 0.15f).r, live_lit.r);
+        }
     }
     // Marker emissivity still uses normalData.b, independently of the AO sign.
     shader.setVec3("u_sun.color", glm::vec3(0));
