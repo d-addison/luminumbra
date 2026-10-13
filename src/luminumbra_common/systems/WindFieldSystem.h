@@ -32,6 +32,9 @@
 
 namespace Luminumbra::Systems {
 
+class AmbientDiagnosticAccess;
+class AmbientDiagnosticCapture;
+
 // Wind layers (AGL bands). Vertical wind is not modeled; each layer carries a
 // 2D horizontal vector. The enum order is the canonical per-cell hash order.
 enum class WindLayer : int {
@@ -118,6 +121,10 @@ public:
     }
 
 private:
+    friend class AmbientDiagnosticAccess;
+    // Test-thread-only observer, including the constructor's tick-zero update.
+    inline static thread_local AmbientDiagnosticCapture* s_diagnostic_capture = nullptr;
+
     // Resolve world_pos.y to a layer band.
     [[nodiscard]] static WindLayer LayerForHeight(float world_y) noexcept;
     // World-pos -> local cell indices for the current origin (clamped result is

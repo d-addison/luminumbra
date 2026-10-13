@@ -55,7 +55,10 @@ Pull requests run:
 
 CTest produces JUnit and runtime artifacts. CI verifies a minimum discovered-test
 count so an empty or severely truncated suite cannot report success. Sanitizer and
-test artifacts are uploaded even on failure to support diagnosis.
+test artifacts are uploaded even on failure to support diagnosis. The
+[ambient stage diagnostic](ambient-stage-diagnostic.md) records complete float
+bits at ticks 0 and 64 across GCC, ASan, MSVC and UCRT64, with download and
+comparison instructions.
 
 ## Local validation
 

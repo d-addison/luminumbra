@@ -43,6 +43,9 @@
 
 namespace Luminumbra::Systems {
 
+class AmbientDiagnosticAccess;
+class AmbientDiagnosticCapture;
+
 class WindFieldSystem; // advection source (optional, forward-declared)
 
 // PINNED geometry (mirrors the wind field so the grids share identity).
@@ -106,6 +109,10 @@ public:
     }
 
 private:
+    friend class AmbientDiagnosticAccess;
+    // Test-thread-only observer, including the constructor's tick-zero update.
+    inline static thread_local AmbientDiagnosticCapture* s_diagnostic_capture = nullptr;
+
     // World-pos -> local cell indices for the current origin (clamped result
     // reported via in_region). Mirrors WindFieldSystem::LocalCell.
     void LocalCell(const Vec3& world_pos, int& out_lx, int& out_lz, bool& in_region) const;

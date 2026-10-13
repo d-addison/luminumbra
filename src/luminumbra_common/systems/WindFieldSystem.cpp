@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "../core/DeterministicMath.h"
+#include "AmbientDiagnosticCapture.h"
 #include "AmbientNoiseDispatch.h"
 
 // NOTE: call the wrappers via the fully-qualified DeterministicMath:: name (not
@@ -127,6 +128,10 @@ void WindFieldSystem::LocalCell(const Vec3& world_pos,
 
 void WindFieldSystem::Update(std::uint64_t tick, const Vec3& region_anchor) {
     m_last_tick = tick;
+    AmbientDiagnosticCapture* diagnostic = s_diagnostic_capture;
+    if (diagnostic != nullptr && !diagnostic->WantsTick(tick)) {
+        diagnostic = nullptr;
+    }
 
     // 1) Anchor the grid origin on the streamed region. The grid is centred on
     // the anchor's cell so it follows the player/stream centre. Pure integer.
@@ -155,10 +160,21 @@ void WindFieldSystem::Update(std::uint64_t tick, const Vec3& region_anchor) {
     m_direction_noise->GenPositionArray2D(
         base_out, 2, base_in_x, base_in_y, 0.0f, 0.0f, m_wind_seed);
 
+    if (diagnostic != nullptr) {
+        diagnostic->Floats(tick, "wind.base.x", base_in_x, 2);
+        diagnostic->Floats(tick, "wind.base.z", base_in_y, 2);
+        diagnostic->Floats(tick, "wind.base.noise", base_out, 2);
+    }
+
     // angle in [-pi, pi] from the first sample; second sample modulates speed.
     const float base_angle = base_out[0] * DeterministicMath::kPi;
     const float speed_mod = 1.0f + 0.25f * base_out[1]; // ~[0.75, 1.25]
     m_base_direction = Vec2(DeterministicMath::Cos(base_angle), DeterministicMath::Sin(base_angle));
+
+    if (diagnostic != nullptr) {
+        diagnostic->Samples(tick, "wind.base.angle_speed", {base_angle, speed_mod});
+        diagnostic->Samples(tick, "wind.base.trig", {m_base_direction.x, m_base_direction.y});
+    }
 
     // 3) Per-cell spatial blend. Sample the same noise field over the cell world
     // coordinates (scrolled by tick-time) through the BATCH grid path, then
@@ -200,6 +216,9 @@ void WindFieldSystem::Update(std::uint64_t tick, const Vec3& region_anchor) {
             const float angle = base_angle + jitter;
             const float cs = DeterministicMath::Cos(angle);
             const float sn = DeterministicMath::Sin(angle);
+            if (diagnostic != nullptr) {
+                diagnostic->Samples(tick, "wind.cell.angle_trig", {jitter, angle, cs, sn});
+            }
             WindCell& wcell = m_grid.cells()[i];
             for (int layer = 0; layer < kWindLayerCount; ++layer) {
                 const float speed = kLayerSpeed[layer] * speed_mod;

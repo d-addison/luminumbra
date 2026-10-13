@@ -1,0 +1,9 @@
+#pragma once
+
+#include <string_view>
+
+namespace AmbientDiagnosticBuild {
+inline constexpr std::string_view kBinaryRoot = R"(@CMAKE_BINARY_DIR@)";
+inline constexpr std::string_view kCompiler = "@CMAKE_CXX_COMPILER_ID@";
+inline constexpr std::string_view kCompilerVersion = "@CMAKE_CXX_COMPILER_VERSION@";
+} // namespace AmbientDiagnosticBuild

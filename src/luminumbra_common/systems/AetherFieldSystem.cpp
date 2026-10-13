@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "../core/DeterministicMath.h"
+#include "AmbientDiagnosticCapture.h"
 #include "AmbientNoiseDispatch.h"
 #include "WindFieldSystem.h"
 
@@ -92,6 +93,10 @@ void AetherFieldSystem::Update(std::uint64_t tick,
                                const Vec3& region_anchor,
                                const WindFieldSystem* wind) {
     m_last_tick = tick;
+    AmbientDiagnosticCapture* diagnostic = s_diagnostic_capture;
+    if (diagnostic != nullptr && !diagnostic->WantsTick(tick)) {
+        diagnostic = nullptr;
+    }
 
     // 1) Anchor the grid origin on the streamed region (pure integer).
     const float cell = m_grid.cell_size_m();
@@ -125,9 +130,16 @@ void AetherFieldSystem::Update(std::uint64_t tick,
     float* emission = m_scratch_emission.data();
     m_emission_noise->GenPositionArray2D(
         emission, static_cast<int>(count), px, pz, 0.0f, 0.0f, m_aether_seed);
+    if (diagnostic != nullptr) {
+        diagnostic->Floats(tick, "aether.raw_emission", emission, count);
+    }
     // Map noise [-1,1] -> [0,1] (non-negative emission). Only +,*; no libm.
     for (std::size_t i = 0; i < count; ++i) {
         emission[i] = 0.5f * (emission[i] + 1.0f);
+    }
+
+    if (diagnostic != nullptr) {
+        diagnostic->Floats(tick, "aether.remapped_emission", emission, count);
     }
 
     // 3) Semi-Lagrangian advection of the emission source by the wind field.
@@ -172,6 +184,10 @@ void AetherFieldSystem::Update(std::uint64_t tick,
         }
     }
 
+    if (diagnostic != nullptr) {
+        diagnostic->Floats(tick, "aether.advected", advected, count);
+    }
+
     // 4) Diffuse: PINNED Gauss-Seidel sweeps (implicit, Neumann boundary). In
     //    place on the grid; non-negative in -> non-negative out. Deterministic.
     std::vector<float>& field = m_grid.cells();
@@ -203,6 +219,9 @@ void AetherFieldSystem::Update(std::uint64_t tick,
                 }
                 field[i] = (advected[i] + k * nsum) / (1.0f + k * static_cast<float>(ncount));
             }
+        }
+        if (diagnostic != nullptr) {
+            diagnostic->Sweep(tick, iter, field.data(), count);
         }
     }
 }

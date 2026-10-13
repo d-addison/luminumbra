@@ -43,6 +43,8 @@
 
 namespace Luminumbra::Systems {
 
+class AmbientDiagnosticAccess;
+
 // Region weather category. The enum order is the canonical hash/serialization
 // order; clear is the control-phase default (premise guard ). Storms only
 // raise precipitation; the category is the large-scale sky state.
@@ -216,6 +218,8 @@ public:
     }
 
 private:
+    friend class AmbientDiagnosticAccess;
+
     // Map a world position to a local cell (clamped result reported via in_region).
     void LocalCell(const Vec3& world_pos, int& out_lx, int& out_lz, bool& in_region) const;
     // Classify a (pressure, temperature, humidity) triple into a category.

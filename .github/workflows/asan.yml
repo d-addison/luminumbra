@@ -26,6 +26,7 @@ concurrency:
   cancel-in-progress: ${{ !((github.event_name == 'workflow_dispatch' && inputs.qualification_capture) || (github.event_name == 'push' && github.ref == 'refs/heads/devel')) }}
 
 env:
+  LUMINUMBRA_AMBIENT_DIAGNOSTIC: "1"
   QUALIFICATION_WORKFLOW_SHA: ${{ github.workflow_sha }}
   QUALIFICATION_WORKFLOW_REF: ${{ github.workflow_ref }}
   QUALIFICATION_EXPECTED_SHA: ${{ inputs.expected_sha }}

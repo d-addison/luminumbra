@@ -187,6 +187,7 @@ add_executable(common_tests
     common/WeatherSystem_test.cpp
     common/AetherFieldSystem_test.cpp
     common/AmbientDeterminismReceipt_test.cpp
+    common/AmbientStageDiagnostic_test.cpp
     common/AmbientInputBounds_test.cpp
     common/fields_hardening_test.cpp
     common/replication_hardening_test.cpp
@@ -245,6 +246,10 @@ target_compile_definitions(common_tests PRIVATE
     LUMINUMBRA_SOURCE_ROOT="${CMAKE_SOURCE_DIR}"
 )
 
+# Reuse the engine's existing generated-header include root so even the test
+# compiler command's include flags stay unchanged.
+configure_file(common/AmbientDiagnosticBuild.h.in
+    "${LUMINUMBRA_ENGINE_VERSION_INCLUDE_DIR}/core/AmbientDiagnosticBuild.h" @ONLY)
 target_include_directories(common_tests PRIVATE
 ../src
 )
