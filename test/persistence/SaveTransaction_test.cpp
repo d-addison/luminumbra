@@ -801,10 +801,9 @@ std::optional<DWORD> WindowsTxnChild(const fs::path& dir, int cut, bool recovery
         ::SetEnvironmentVariableW(L"LUM_TXN_TEST_CHILD_DIR", dir.c_str()) &&
         ::SetEnvironmentVariableW(L"LUM_TXN_TEST_CHILD_CUT", cut_text.c_str()) &&
         ::SetEnvironmentVariableW(L"LUM_TXN_TEST_CHILD_RECOVER", recovery ? L"1" : L"0");
-    std::wstring command =
-        L"\"" + executable +
-        L"\" --gtest_filter=SaveTransaction.DISABLED_WindowsInterruptionChild "
-        L"--gtest_also_run_disabled_tests --gtest_color=no";
+    std::wstring command = L"\"" + executable +
+                           L"\" --gtest_filter=SaveTransaction.DISABLED_WindowsInterruptionChild "
+                           L"--gtest_also_run_disabled_tests --gtest_color=no";
     STARTUPINFOW startup{};
     startup.cb = sizeof(startup);
     PROCESS_INFORMATION process{};
