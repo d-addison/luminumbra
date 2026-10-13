@@ -1840,6 +1840,11 @@ foreach(_lum_gtest_target ${LUMINUMBRA_GTEST_TARGETS})
     endif()
 endforeach()
 
+# Apply child-only labels after discovery has registered the tests. This CTest
+# include mechanism works since CMake 3.10; discovery TEST_FILTER requires 3.22.
+set_property(DIRECTORY APPEND PROPERTY TEST_INCLUDE_FILES
+    "${CMAKE_CURRENT_SOURCE_DIR}/persistence/SaveTransactionCTest.cmake")
+
 # The deterministic forest geometry harness is manual because it validates a
 # pinned 16k-tree workload rather than ordinary unit behavior. It guards the
 # production impostor fold with draw-call and triangle-count ceilings; it makes
