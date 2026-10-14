@@ -31,7 +31,7 @@ def valid_report():
                 cpu="unknown", preset="default.json", hardware_concurrency=0,
                 default_worker_count=1, seed=424242, requested_chunks=2,
                 selected_chunks=2, initial_chunk_list_size=10,
-                spawn=dict(x=8.0, y=-2.0, z=8.0), phases=phases,
+                spawn=dict(x=8.0, y=-2.0, z=8.0), terrain_height=-3.95, phases=phases,
                 scaling=[dict(requested_workers=requested, worker_count=1,
                               chunks=2, wall_ms=0.0)
                          for requested in (1, 2, 4, "default")],
@@ -41,6 +41,54 @@ def valid_report():
 class SmokeReportTests(unittest.TestCase):
     def test_valid_report_allows_zero_timing_and_different_actual_workers(self):
         checker.validate_report(valid_report())
+
+    def test_spawn_accepts_signed_terrain_heights_and_cpp_float_rounding(self):
+        for terrain_height, spawn_y in ((-3.95, -2.0), (0.0, 1.95),
+                                       (15.202278137207031, 17.152278900146484)):
+            with self.subTest(terrain_height=terrain_height):
+                report = valid_report()
+                report["terrain_height"] = terrain_height
+                report["spawn"]["y"] = spawn_y
+                checker.validate_report(report)
+
+    def test_wrong_spawn_x_and_z_are_rejected(self):
+        for axis in ("x", "z"):
+            for value in (0.0, 9.0, 8.0 + 1e-6):
+                with self.subTest(axis=axis, value=value):
+                    report = valid_report()
+                    report["spawn"][axis] = value
+                    with self.assertRaisesRegex(ValueError, rf"spawn\.{axis} must be 8"):
+                        checker.validate_report(report)
+
+    def test_spawn_y_uses_tight_absolute_tolerance(self):
+        for terrain_height in (-3.95, 15.202278137207031, 10000.0):
+            for offset in (-5e-6, 5e-6, -2e-5, 2e-5, 1.0):
+                with self.subTest(terrain_height=terrain_height, offset=offset):
+                    report = valid_report()
+                    report["terrain_height"] = terrain_height
+                    report["spawn"]["y"] = terrain_height + 1.95 + offset
+                    if abs(offset) < 1e-5:
+                        checker.validate_report(report)
+                    else:
+                        with self.assertRaisesRegex(ValueError, "spawn.y must equal terrain_height"):
+                            checker.validate_report(report)
+
+    def test_missing_terrain_height_is_rejected(self):
+        report = valid_report()
+        del report["terrain_height"]
+        with self.assertRaisesRegex(ValueError, "terrain_height must be a number"):
+            checker.validate_report(report)
+
+    def test_invalid_spawn_and_terrain_height_values_are_rejected(self):
+        for field in ("x", "y", "z", "terrain_height"):
+            for value in (True, "8", None, float("nan"), float("inf"),
+                          float("-inf"), 10 ** 400):
+                with self.subTest(field=field, value=value):
+                    report = valid_report()
+                    target = report if field == "terrain_height" else report["spawn"]
+                    target[field] = value
+                    with self.assertRaises(ValueError):
+                        checker.validate_report(report)
 
     def test_reduced_chunk_coverage_is_rejected(self):
         report = valid_report()

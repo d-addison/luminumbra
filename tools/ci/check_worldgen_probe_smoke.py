@@ -9,6 +9,8 @@ import subprocess
 import sys
 
 SCHEMA = "luminumbra.worldgen_probe.v1"
+# Absolute metres only: allow C++ float rounding of terrain_height + 1.95f.
+SPAWN_Y_ABS_TOLERANCE = 1e-5
 PHASES = (
     "generate_step1", "generate_step4", "polygonise",
     "height_query_cold", "height_query_warm", "shaped_heights",
@@ -80,6 +82,12 @@ def validate_report(report):
     spawn = object_value(report.get("spawn"), "spawn")
     for axis in ("x", "y", "z"):
         number(spawn.get(axis), f"spawn.{axis}", nonnegative=False)
+    for axis in ("x", "z"):
+        require(spawn[axis] == 8, f"spawn.{axis} must be 8")
+    terrain_height = number(report.get("terrain_height"), "terrain_height", nonnegative=False)
+    require(math.isclose(spawn["y"], terrain_height + 1.95,
+                         rel_tol=0.0, abs_tol=SPAWN_Y_ABS_TOLERANCE),
+            "spawn.y must equal terrain_height + 1.95 within 1e-5 metres")
 
     phases = object_value(report.get("phases"), "phases")
     for phase in PHASES:

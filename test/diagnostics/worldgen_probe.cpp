@@ -536,6 +536,7 @@ nlohmann::json RunProbe(const Options& options) {
         {"seed", kSeed},
         {"preset", preset_path.filename().string()},
         {"spawn", {{"x", spawn.x}, {"y", spawn.y}, {"z", spawn.z}}},
+        {"terrain_height", terrain_height},
         {"requested_chunks", options.chunks},
         {"selected_chunks", selected.size()},
         {"initial_chunk_list_size", candidates.size()},

@@ -60,6 +60,12 @@ test artifacts are uploaded even on failure to support diagnosis.
 `WorldgenProbeSmoke` validates the `luminumbra.worldgen_probe.v1` smoke report
 with seed `424242` and spawn `(8, terrain height + 1.95, 8)`. Valid evidence requires
 `selected_chunks == requested_chunks == 2` and `phases.polygonise.mesh_triangles >= 1`.
+The report adds a top-level `terrain_height` number sampled at `(8, 8)`, preserving
+the schema identifier and existing `spawn` fields for report consumers. Smoke
+validation requires this finite height, exact `spawn.x == spawn.z == 8`, and
+`spawn.y == terrain_height + 1.95` within an absolute tolerance of `1e-5` metres
+(no relative tolerance), allowing C++ float rounding. Reports missing the height
+or using a different spawn fail validation.
 The probe scans a 25-by-25 initial surface neighborhood, including each column's
 surface-height span and one vertical chunk of margin on either side, until it
 finds the requested surface chunks. Reduced coverage or an empty mesh fails
