@@ -1,6 +1,7 @@
 #include "luminumbra_client/rendering/FarWorldRenderer.h"
 #include "luminumbra_common/world/FarLodStore.h"
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <filesystem>
@@ -32,7 +33,10 @@ std::string Source(const char* relative) {
     const auto path = std::filesystem::path(LUMINUMBRA_SOURCE_ROOT) / relative;
     std::ifstream input(path, std::ios::binary);
     EXPECT_TRUE(input.is_open()) << path;
-    return {std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
+    std::string text{std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
+    // Windows checkouts may use CRLF; the source patterns below are LF-only.
+    text.erase(std::remove(text.begin(), text.end(), '\r'), text.end());
+    return text;
 }
 
 void AppendLittleEndian(std::string& bytes, std::uint64_t value, std::size_t width) {
