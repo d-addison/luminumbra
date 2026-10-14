@@ -794,7 +794,7 @@ public:
     // sim truth going live independently of any render-mesh publish.
     void wait_for_promotion_jobs();
     //   (activation queue): stability WITHOUT publication. Drains every
-    // streaming lane (generation, promotion, meshing) with RAW handle waits —
+    // streaming lane (generation, promotion, meshing, hydro prefetch) with RAW handle waits —
     // no pending→live movement, no stage-B dispatch, no state flips — so the
     // caller (the SAVE path) serializes stable bytes without becoming an
     // accidental activation event. Publication stays exclusively owned by the
@@ -1414,6 +1414,10 @@ private:
     // so const-correctness is preserved (no world_hash-affecting state changes).
     mutable std::set<std::pair<std::int64_t, std::int64_t>> m_hydro_prefetch_inflight;
     mutable std::mutex m_hydro_prefetch_mutex;
+    // Owned batches keep every prefetch capture of this inside the world's lifetime.
+    // Guarded by m_hydro_prefetch_mutex; never hold it while waiting on workers.
+    mutable std::vector<JobHandle> m_hydro_prefetch_batches;
+    void wait_for_hydro_prefetch_jobs() const;
 
 public:
     // Bake the hydraulic-erosion regions covering a disc around (cx,cz) AHEAD of
@@ -1422,8 +1426,9 @@ public:
     // the cause of the laggy-while-flying with hydro on). No-op when hydro is off.
     // const: only mutates the deterministic recompute-on-load hydro caches (mutable),
     // so the far-LOD scheduler (which holds a const SHIELD_WorldSystem*) can warm far
-    // regions ahead of BuildPristineFarLodTile.
-    void PrefetchHydroRegions(float cx, float cz, float radius_m) const;
+    // regions ahead of BuildPristineFarLodTile. Returns this call's batch handle;
+    // the world retains ownership even when the caller does not wait on it.
+    JobHandle PrefetchHydroRegions(float cx, float cz, float radius_m) const;
 };
 
 } // namespace Luminumbra::Systems

@@ -394,6 +394,7 @@ SHIELD_WorldSystem::SHIELD_WorldSystem(JobSystem* job_system,
 }
 
 SHIELD_WorldSystem::~SHIELD_WorldSystem() {
+    wait_for_hydro_prefetch_jobs();
     wait_for_generation_jobs();
     // Drain promotion workers with RAW waits — teardown must not publish or
     // dispatch stage-B jobs, only guarantee no worker still touches chunks.
@@ -589,6 +590,7 @@ SHIELD_WorldSystem::ActivationShadowReport SHIELD_WorldSystem::activation_shadow
 }
 
 void SHIELD_WorldSystem::quiesce_streaming_jobs_for_save() {
+    wait_for_hydro_prefetch_jobs();
     if (!m_job_system) {
         return;
     }
@@ -1337,7 +1339,22 @@ float SHIELD_WorldSystem::SampleHydroOffsetMeters(float world_x, float world_z) 
     return a + (b - a) * fz;
 }
 
-void SHIELD_WorldSystem::PrefetchHydroRegions(float cx, float cz, float radius_m) const {
+void SHIELD_WorldSystem::wait_for_hydro_prefetch_jobs() const {
+    std::vector<JobHandle> batches;
+    {
+        std::lock_guard<std::mutex> lock(m_hydro_prefetch_mutex);
+        batches.swap(m_hydro_prefetch_batches);
+    }
+    // Prefetch workers take the same mutex to retire their region keys.
+    // Owners stop submitting work before teardown; wait outside the mutex.
+    if (m_job_system) {
+        for (const auto& handle : batches) {
+            m_job_system->wait(handle);
+        }
+    }
+}
+
+JobHandle SHIELD_WorldSystem::PrefetchHydroRegions(float cx, float cz, float radius_m) const {
     // Warm the hydraulic-erosion region cache AHEAD of chunk-gen demand on
     // background jobs, so the (expensive) per-region bake never lands on the
     // gen/main critical path when the camera flies into new terrain. Each region
@@ -1345,7 +1362,7 @@ void SHIELD_WorldSystem::PrefetchHydroRegions(float cx, float cz, float radius_m
     // and the cache check stops re-dispatching baked regions.
     const float cs = m_params.hydro_cell_size_m;
     if (!m_params.hydro_enabled || m_job_system == nullptr || cs <= 0.0f) {
-        return;
+        return {};
     }
     const float region_m = static_cast<float>(kHydroRegionCells) * cs; // 512 m
     const std::int64_t reach = static_cast<std::int64_t>(std::ceil(radius_m / region_m)) + 1;
@@ -1374,6 +1391,7 @@ void SHIELD_WorldSystem::PrefetchHydroRegions(float cx, float cz, float radius_m
             const float sample_z =
                 static_cast<float>(rkey.second * kHydroRegionCells) * cs + region_m * 0.5f;
             jobs.emplace_back([this, rkey, sample_x, sample_z]() {
+                const auto worldgen_scope = acquire_worldgen_sample_scope();
                 SampleHydroOffsetMeters(sample_x, sample_z); // triggers + caches the region bake
                 std::lock_guard<std::mutex> g(m_hydro_prefetch_mutex);
                 m_hydro_prefetch_inflight.erase(rkey);
@@ -1381,8 +1399,15 @@ void SHIELD_WorldSystem::PrefetchHydroRegions(float cx, float cz, float radius_m
         }
     }
     if (!jobs.empty()) {
-        m_job_system->dispatch_batch(jobs); // fire-and-forget background bakes
+        std::lock_guard<std::mutex> lock(m_hydro_prefetch_mutex);
+        std::erase_if(m_hydro_prefetch_batches,
+                      [](const JobHandle& handle) { return !has_active_job(handle); });
+        // Allocate ownership storage before dispatch can expose this to a worker.
+        m_hydro_prefetch_batches.emplace_back();
+        m_hydro_prefetch_batches.back() = m_job_system->dispatch_batch(jobs);
+        return m_hydro_prefetch_batches.back();
     }
+    return {};
 }
 
 float SHIELD_WorldSystem::RiverCarveAmount(float final_height, float influence) const {
@@ -5641,6 +5666,7 @@ IVec3 SHIELD_WorldSystem::world_to_chunk_coords(const Vec3& position) {
 }
 
 void SHIELD_WorldSystem::wait_for_streaming_jobs() {
+    wait_for_hydro_prefetch_jobs();
     //  ( step 1): the SEQUENCED drain. Sim truth for LOD0
     // promotions is generated on the promotion lane and published before its
     // render mesh is dispatched (stage B) — and the whole two-stage pipeline

@@ -235,9 +235,8 @@ bool ServerWorldRunner::Boot() {
     // optional worker-count override (LUMINUMBRA_JOB_WORKERS). The
     // streamed-chunk world_hash is INVARIANT to worker count (hashes are computed
     // after a full streaming quiesce), so this is a pure scheduling knob: the
-    // replay gates set it to 1 to minimize the headless server's known
-    // intermittent shutdown/streaming race (documented in ) without
-    // touching the hash. Unset => one worker per hardware thread (production).
+    // replay gates can set it to 1 to bound worker usage without touching the
+    // hash. Unset => one worker per hardware thread (production).
     if (const auto workers = Core::ReadEnvironment("LUMINUMBRA_JOB_WORKERS")) {
         m_jobSystem.startup(static_cast<std::size_t>(std::strtoul(workers->c_str(), nullptr, 10)));
     } else {
