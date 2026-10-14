@@ -23,7 +23,7 @@
 namespace Luminumbra::world {
 
 // Explicit preset revisions must match the current algorithm contract.
-inline constexpr std::int64_t kTerrainPresetSchemaRevision = 6;
+inline constexpr std::int64_t kTerrainPresetSchemaRevision = 7;
 inline constexpr std::int64_t kMinTerrainPresetSchemaRevision = 6;
 
 // generation_params.terrain.shaping — reserved keys pinned by
@@ -46,16 +46,16 @@ struct TerrainShapingPreset {
 // table: "biomes": {"table": "common/biomes.json"}. The table path is relative
 // to the data/ root and resolved to an absolute path against the preset's
 // location at load time (presets live at <root>/worlds/atlas/presets/, data at
-// <root>/data/). With no "table" key biomes stay disabled and the consumed
-// params drift byte-zero from the pre-biome implementation.
+// <root>/data/). Revision 7 supplies the shipped table when omitted; revision 6
+// keeps historical omission semantics. An explicit empty table always disables biomes.
 struct TerrainBiomesPreset {
     bool present = false;
-    bool enabled = false;            // a non-empty "table" was supplied
-    std::string table;               // verbatim relative path from the preset
-    std::string resolved_table_path; // absolute path handed to TerrainGenParams
+    bool enabled = true;                      // a non-empty "table" was supplied
+    std::string table = "common/biomes.json"; // verbatim relative path from the preset
+    std::string resolved_table_path;          // absolute path handed to TerrainGenParams
     float temperature_frequency = 0.005f;
     float humidity_frequency = 0.005f;
-    bool relief_enabled = false; //  temperature-driven ridge scaling
+    bool relief_enabled = true; //  temperature-driven ridge scaling
     float relief_strength = 0.45f;
 };
 
@@ -63,8 +63,8 @@ struct TerrainBiomesPreset {
 // TerrainGenParams.
 struct TerrainFeaturesPreset {
     bool present = false;
-    bool rivers_enabled = false;
-    bool structures_enabled = false;
+    bool rivers_enabled = true;
+    bool structures_enabled = true;
 };
 
 // generation_params.terrain.hydro: hydraulic/thermal relief. A preset
@@ -72,7 +72,7 @@ struct TerrainFeaturesPreset {
 // TerrainGenParams' hydro_* defaults so a bare {"enabled": true} works.
 struct TerrainHydroPreset {
     bool present = false;
-    bool enabled = false;
+    bool enabled = true;
     int iterations = 24;
     float cell_size_m = 8.0f;
     float talus_height = 1.2f;
@@ -99,6 +99,10 @@ struct TerrainPresetLoadResult {
     std::vector<std::string> errors;
     std::vector<std::string> warnings; // unknown-key reports (also logged)
 };
+
+// Fill omitted feature choices using the declared revision (unversioned presets use
+// historical revision 6). Explicit false and an empty biome table remain authoritative.
+nlohmann::json ResolveTerrainPresetDefaults(const nlohmann::json& preset);
 
 // Loads and validates a world preset JSON file. Validation contract matches
 // the historical GameSession parser: generation_params, terrain and features

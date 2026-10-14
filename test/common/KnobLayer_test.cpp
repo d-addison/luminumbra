@@ -334,3 +334,25 @@ TEST(KnobLayerTest, ParamDescriptorTableIsTheSourceOfTruth) {
     EXPECT_EQ(amp->min_value, 0.0);
     EXPECT_EQ(amp->max_value, 200.0);
 }
+
+TEST(KnobLayerTest, ShippingOmissionsAndExplicitOffSurviveReopen) {
+    auto baseline = FixedBasePreset();
+    baseline["schema_rev"] = 7;
+    auto& generation = baseline["generation_params"];
+    generation["terrain"].erase("island_mask_enabled");
+    generation.erase("biomes");
+    generation["features"].erase("rivers_enabled");
+    generation["features"]["lakes_enabled"] = false;
+    nlohmann::json save;
+    WriteKnobLayer(save, baseline, NeutralKnobVector(), {{"biomes.enabled", "false", "bool"}});
+    auto reopened = ReadKnobLayer(save);
+    const auto resolved = ResolveKnobLayer(reopened.baseline, reopened.knobs, reopened.overrides);
+    const auto& params = resolved.at("generation_params");
+    EXPECT_TRUE(params.at("terrain").at("island_mask_enabled").get<bool>());
+    EXPECT_TRUE(params.at("features").at("rivers_enabled").get<bool>());
+    EXPECT_FALSE(params.at("features").at("lakes_enabled").get<bool>());
+    EXPECT_TRUE(params.at("biomes").at("table").get<std::string>().empty());
+    auto saved_params = save.at("generation_params");
+    saved_params.erase("knob_layer");
+    EXPECT_EQ(saved_params, params);
+}

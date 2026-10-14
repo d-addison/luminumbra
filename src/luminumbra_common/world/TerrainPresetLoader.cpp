@@ -141,7 +141,7 @@ void ParseBiomesBlock(const nlohmann::json& gen_params,
     biomes.humidity_frequency = block.value("humidity_frequency", biomes.humidity_frequency);
     biomes.relief_enabled = block.value("relief_enabled", biomes.relief_enabled);
     biomes.relief_strength = block.value("relief_strength", biomes.relief_strength);
-    biomes.table = block.value("table", std::string{});
+    biomes.table = block.value("table", biomes.table);
     biomes.enabled = !biomes.table.empty();
     if (biomes.enabled) {
         // The table path is relative to the data/ root, resolved against the
@@ -163,6 +163,43 @@ void ParseBiomesBlock(const nlohmann::json& gen_params,
 }
 
 } // namespace
+
+nlohmann::json ResolveTerrainPresetDefaults(const nlohmann::json& preset) {
+    nlohmann::json out = preset;
+    if (!out.is_object())
+        return out;
+    const bool on = out.value("schema_rev", kMinTerrainPresetSchemaRevision) >= 7;
+    if (!JsonHasObject(out, "generation_params"))
+        return out;
+    auto& gen = out["generation_params"];
+    auto fill = [](nlohmann::json& block, const char* key, const nlohmann::json& value) {
+        if (!block.contains(key))
+            block[key] = value;
+    };
+    if (JsonHasObject(gen, "terrain")) {
+        auto& terrain = gen["terrain"];
+        fill(terrain, "island_mask_enabled", on);
+        if (!JsonHasObject(terrain, "hydro"))
+            terrain["hydro"] = nlohmann::json::object();
+        if (terrain["hydro"].is_object())
+            fill(terrain["hydro"], "enabled", on);
+    }
+    if (!JsonHasObject(gen, "biomes"))
+        gen["biomes"] = nlohmann::json::object();
+    if (gen["biomes"].is_object()) {
+        fill(gen["biomes"], "table", on ? "common/biomes.json" : "");
+        fill(gen["biomes"], "relief_enabled", on);
+    }
+    if (JsonHasObject(gen, "features")) {
+        for (const char* key : {"rivers_enabled",
+                                "lakes_enabled",
+                                "cliffs_enabled",
+                                "structures_enabled",
+                                "surface_breaks_enabled"})
+            fill(gen["features"], key, on);
+    }
+    return out;
+}
 
 TerrainPresetLoadResult LoadTerrainPreset(const std::filesystem::path& preset_path) {
     TerrainPresetLoadResult result;
@@ -194,10 +231,16 @@ TerrainPresetLoadResult LoadTerrainPreset(const std::filesystem::path& preset_pa
     return LoadTerrainPresetFromJson(data, data_root, preset_path.string());
 }
 
-TerrainPresetLoadResult LoadTerrainPresetFromJson(const nlohmann::json& data,
+TerrainPresetLoadResult LoadTerrainPresetFromJson(const nlohmann::json& source,
                                                   const std::filesystem::path& data_root,
                                                   const std::string& provenance) {
     TerrainPresetLoadResult result;
+    // Validate revision type before resolving defaults, retaining the no-throw error path.
+    if (source.contains("schema_rev") && !source["schema_rev"].is_number_integer()) {
+        result.errors.push_back("world preset schema_rev must be an integer: " + provenance);
+        return result;
+    }
+    const nlohmann::json data = ResolveTerrainPresetDefaults(source);
 
     // schema_rev is validated when declared, not required. Every preset under
     // worlds/atlas/presets/ carries it, but in-memory fixtures construct minimal
@@ -212,7 +255,7 @@ TerrainPresetLoadResult LoadTerrainPresetFromJson(const nlohmann::json& data,
 
     const std::int64_t schema_revision = data.contains("schema_rev")
                                              ? data["schema_rev"].get<std::int64_t>()
-                                             : kTerrainPresetSchemaRevision;
+                                             : kMinTerrainPresetSchemaRevision;
     if (schema_revision < kMinTerrainPresetSchemaRevision ||
         schema_revision > kTerrainPresetSchemaRevision) {
         result.errors.push_back("world preset schema revision out of range: supported " +
@@ -272,9 +315,15 @@ TerrainPresetLoadResult LoadTerrainPresetFromJson(const nlohmann::json& data,
         return result;
     }
 
-    // Consumed generation parameters. Defaults match Systems::TerrainGenParams
-    // so an absent optional key never drifts behavior.
+    // Consume the versioned, materialized generation parameters.
     Systems::TerrainGenParams& params = result.params;
+    // Missing optional blocks retain historical off semantics in revision 6.
+    const bool shipping_defaults = schema_revision >= 7;
+    result.extras.hydro.enabled = shipping_defaults;
+    params.hydro_enabled = shipping_defaults;
+    result.extras.biomes.enabled = false;
+    result.extras.biomes.table = shipping_defaults ? "common/biomes.json" : "";
+    result.extras.biomes.relief_enabled = shipping_defaults;
     params.base_frequency = terrain.value("base_frequency", params.base_frequency);
     params.base_amplitude = terrain.value("base_amplitude", params.base_amplitude);
     params.octaves = terrain.value("octaves", params.octaves);
@@ -309,8 +358,8 @@ TerrainPresetLoadResult LoadTerrainPresetFromJson(const nlohmann::json& data,
         params.peaks_spline = shaping.peaks_spline;
     }
 
-    // Hydro block: hydraulic/thermal relief. Default-off; a preset opts
-    // in via "hydro": {"enabled": true,...}. Mapped into TerrainGenParams.hydro_*
+    // Hydro block: versioned hydraulic/thermal relief, with explicit off preserved.
+    // Mapped into TerrainGenParams.hydro_*
     // (deliberate world_hash-affecting feature when enabled).
     ParseHydroBlock(terrain, result.extras.hydro, provenance, result.warnings);
     if (result.extras.hydro.present) {
@@ -332,7 +381,11 @@ TerrainPresetLoadResult LoadTerrainPresetFromJson(const nlohmann::json& data,
     // table. With no table the consumed params keep biomes_enabled=false ->
     // byte-zero drift from the pre-biome implementation.
     ParseBiomesBlock(gen_params, result.extras.biomes, data_root, provenance, result.warnings);
-    if (result.extras.biomes.present && result.extras.biomes.enabled) {
+    params.biomes_enabled = result.extras.biomes.enabled;
+    params.biome_relief_enabled =
+        result.extras.biomes.enabled && result.extras.biomes.relief_enabled;
+    params.biome_table_path.clear();
+    if (result.extras.biomes.enabled) {
         const TerrainBiomesPreset& biomes = result.extras.biomes;
         params.biomes_enabled = true;
         params.biome_table_path = biomes.resolved_table_path;
@@ -342,30 +395,30 @@ TerrainPresetLoadResult LoadTerrainPresetFromJson(const nlohmann::json& data,
         params.biome_relief_strength = biomes.relief_strength;
     }
     // Features river/structure flags: rivers and structures
-    // are CONSUMED when the preset opts in; an absent flag keeps the feature off
-    // -> byte-zero drift. The structure template content hash is stamped later by
+    // use the versioned resolved choices. The structure template content hash is stamped later by
     // the world system when it loads the pools (mirrors the biome-table hash).
     result.extras.features.present = true;
     result.extras.features.rivers_enabled = features.value("rivers_enabled", false);
     result.extras.features.structures_enabled = features.value("structures_enabled", false);
     params.structures_enabled = result.extras.features.structures_enabled;
+    params.structures_data_dir.clear();
     if (params.structures_enabled) {
         // Resolve <data_root>/common/structures to an absolute path (the same
         // data root the biome table resolves against, supplied by the caller).
         params.structures_data_dir =
             Filesystem::LexicallyNormalPath(data_root / "common" / "structures").string();
     }
-    if (result.extras.features.rivers_enabled) {
-        params.rivers_enabled = true;
+    params.rivers_enabled = result.extras.features.rivers_enabled;
+    if (params.rivers_enabled) {
         params.river_frequency = features.value("river_frequency", params.river_frequency);
         params.river_depth = features.value("river_depth", params.river_depth);
         params.river_pv_min = features.value("river_pv_min", params.river_pv_min);
         params.river_pv_max = features.value("river_pv_max", params.river_pv_max);
         params.river_max_carve = features.value("river_max_carve", params.river_max_carve);
     }
-    //  lakes. Opt-in via features.lakes_enabled; absent -> off (byte-zero).
-    if (features.value("lakes_enabled", false)) {
-        params.lakes_enabled = true;
+    // Lakes: the resolver supplies the versioned missing-field choice.
+    params.lakes_enabled = features.value("lakes_enabled", false);
+    if (params.lakes_enabled) {
         params.lake_frequency = features.value("lake_frequency", params.lake_frequency);
         params.lake_threshold = features.value("lake_threshold", params.lake_threshold);
         params.lake_depth = features.value("lake_depth", params.lake_depth);
@@ -373,10 +426,10 @@ TerrainPresetLoadResult LoadTerrainPresetFromJson(const nlohmann::json& data,
         params.lake_bank_offset = features.value("lake_bank_offset", params.lake_bank_offset);
     }
     // surface-breaking caves / sinkholes / cave-mouths. Opt-in via
-    // features.surface_breaks_enabled; absent -> off (byte-zero drift). When on, the
+    // features.surface_breaks_enabled, resolved by revision. When on, the
     // 18 m cave cap becomes a per-column field inside hashed doline footprints.
-    if (features.value("surface_breaks_enabled", false)) {
-        params.surface_breaks_enabled = true;
+    params.surface_breaks_enabled = features.value("surface_breaks_enabled", false);
+    if (params.surface_breaks_enabled) {
         params.surface_break_density =
             features.value("surface_break_density", params.surface_break_density);
         params.feature_cell_size = features.value("feature_cell_size", params.feature_cell_size);
@@ -392,9 +445,9 @@ TerrainPresetLoadResult LoadTerrainPresetFromJson(const nlohmann::json& data,
             params.max_feature_radius = params.feature_cell_size * 0.49f;
         }
     }
-    //  cliffs. Opt-in via features.cliffs_enabled; absent -> off (byte-zero).
-    if (features.value("cliffs_enabled", false)) {
-        params.cliffs_enabled = true;
+    // Cliffs: the resolver supplies the versioned missing-field choice.
+    params.cliffs_enabled = features.value("cliffs_enabled", false);
+    if (params.cliffs_enabled) {
         params.cliff_frequency = features.value("cliff_frequency", params.cliff_frequency);
         params.cliff_threshold = features.value("cliff_threshold", params.cliff_threshold);
         params.cliff_step = features.value("cliff_step", params.cliff_step);

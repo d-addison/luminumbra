@@ -18,7 +18,7 @@ fallback, including when obsolete artifacts coexist with current region files.
 | Region container | `chunks/region/r.<rx>.<rz>.lmr`: `LMR1` magic, little-endian `u16` container version `2`, `u16` record count, record headers and LZ4 payloads |
 | World manifest | `chunks/region/world-manifest.json`: `schema: "luminumbra.persistence.world_manifest.v1"`, `container: "LMR1"`, `container_version: 2` |
 | Far-LOD record payload | `FSD2` magic, payload version `3` inside the LMR1 container |
-| Terrain preset | Explicit `schema_rev` must be the integer `6`; omitted revision remains accepted by the shared parser for in-memory callers |
+| Terrain preset | New presets use integer `schema_rev: 7`; revision `6` and omitted revisions retain historical missing-field semantics |
 
 The manifest schema is still v1; it is distinct from container v2, FSD2 payload
 v3, and project version 0.3.0. Lod-0 records retain the canonical
@@ -137,9 +137,9 @@ without an anchor use their saved spawn; a historical anchor already lost by
 such a snapshot cannot be recovered. The snapshot commit index, rollback
 journal, and multi-file recovery belong to C2/C3. C1 uses the existing metadata write path and is not a
 claim of atomic publication across chunk, entity, energy and metadata files.
-The feature remains default-off until those persistence slices land. LMR1 v2,
-world_manifest.v1, FSD2 v3, preset revision 6, and existing canonical chunk and
-entity serialization are unchanged.
+Active regions and clock restoration are enabled by default. LMR1 v2,
+world_manifest.v1, FSD2 v3, and existing canonical chunk and entity serialization
+are unchanged; preset revision 7 retains revision 6 omission compatibility.
 
 An absent energy record restores an empty layer with its next firing on the
 next absolute eight-tick boundary. A legacy import may carry a different
@@ -393,8 +393,8 @@ variables in CMake are build options, not these runtime environment controls.
 | `LUMIN_GRADE` | `exposure,saturation,contrast,warmR,warmG,warmB`; defaults `1.12,1.30,1.42,1.06,1.0,0.92`. A parsed prefix replaces those fields; remaining fields retain defaults. A positive render-context exposure takes precedence over the grade exposure. | Once per process on first lighting use |
 | `LUMIN_MOON` | No forced illumination by default. A nonnegative float overrides moon illumination, clamped to `[0, 1]`. Negative or unparseable input falls back to the pipeline override or lunar cycle. | Once per process on first celestial update |
 | `LUMIN_MOON_WRAP_FLOOR` | Float, default `0.25`; parse failure retains the default. The C++ environment parser does not clamp it. | Once per process on first lighting use |
-| `LUMIN_CAVE_AO` | `enabled,maxDist,floor,steps,thickness`; defaults `0,24,0.06,8,1.5` (off). Parses a float prefix with an integer fourth field; unparsed fields retain defaults. This is screen-space cave/sky-visibility AO, independent of terrain cave generation. | Once per process on first lighting use |
-| `LUMIN_SCENT_DECAL` | Off when absent. Presence enables the scent ground decal, including an empty value or `0`; requires scent data to display. | Cached on first scent-decal initialization |
+| `LUMIN_CAVE_AO` | `enabled,maxDist,floor,steps,thickness`; defaults `1,24,0.06,8,1.5` (on). Parses a float prefix with an integer fourth field; unparsed fields retain defaults. This is screen-space cave/sky-visibility AO, independent of terrain cave generation. | Once per process on first lighting use |
+| `LUMIN_SCENT_DECAL` | On when absent. Exactly `0` disables the scent ground decal; other values enable it. Requires scent data to display. | Cached on first scent-decal initialization |
 | `LUMIN_FRAME_SCAN_SETTLE` | Frame-scan capture default `90` frames. A positive `atoi` result overrides the settle target; other values leave it unchanged. This diagnostic override is not set by the gates. | Client argument/capture setup |
 | `LUMIN_GL_DEBUG` | Off if absent, empty or exactly `0`. Other values install synchronous GL debug output when KHR_debug entry points exist; exactly `verbose` also enables notification messages (low/medium warnings are already enabled). | Callback installation; subsequent calls return immediately once installed |
 | `LUMIN_RHI` | Selector default `gl`; case-insensitive `gl`/`opengl`, `vulkan`/`vk`. Empty or unknown values select GL. Exposed by the RHI selector helper; the shipping client does not call it and it does not switch its renderer. | Each `SelectedBackendFromEnv()` call; no static cache |
@@ -405,7 +405,7 @@ an absent variable differ where noted above. Updating the environment after a
 cached read does not retune a running process.
 
 High-resolution water is instead the supported `sim.water_high_res` configuration
-flag, default off: Medium uses 8×8 cells per 16 m chunk (2 m cells), High uses
+flag, default on: explicit false selects Medium, with 8×8 cells per 16 m chunk (2 m cells); High uses
 16×16 (1 m cells). It changes hashed water state and must match on every peer.
 `GameSession` applies the chosen resolution at world creation/load; the underlying
 solver also supports amortized grid resizing. See the [water limits](known-limitations.md).
@@ -481,3 +481,49 @@ client and `Luminumbra::Server::ServerWorldRunner` do.
 - [Performance measurement](performance.md) for relative regression gates.
 - [Visual regression](visual-regression.md) for capture evidence.
 - [SHIELD SDF contract](shield/sdf-contract.md) for terrain invariants.
+
+## Shipping defaults
+
+All registered `sim.*` and `render.*` SystemConfig gates are enabled in both the
+compiled mask and `data/common/systems.json`. Missing or malformed enabled fields
+retain defaults; an explicit boolean false clears its bit. Simulation tuning
+selectors use the packaged tuning. `sim.erosion`, `render.moonlight` and
+`render.tree_wind` are declared gates without runtime activation consumers;
+turning them on does not add a new erosion pass, moon strength or wind system.
+The config:v1 serializer is unchanged: the default sim sub-hash is now nonempty,
+and an explicitly all-disabled sim configuration still has an empty sub-hash.
+
+Client and server apply the same GameSession resolver before Create/Load, including
+active regions/absolute clock, High water, weather rain/events, stateful aether and
+all simulation tuning. Finite hydrology is on, with existing rain scale 25 mm and
+zero constant rain/evaporation rates. Explicit false water resolution selects
+Medium; lower-level session setters can retain disabled compatibility workloads.
+Diagnostic rosters and telemetry remain opt-in.
+
+Playback, vsync, TAAU, tier-1 froxel volumetrics, cave AO, scent decals and aether
+material gain 1 are on. `--no-audio`, `--volumetric-quality 0`, `LUMIN_CAVE_AO=0`,
+`LUMIN_SCENT_DECAL=0`, explicit config values and renderer setters remain available.
+User overlays still contain only `user.*`: saved false vsync and saved volumes
+win over defaults without a settings version bump. Locations are
+`%APPDATA%/Luminumbra/settings.json`, `$XDG_CONFIG_HOME/luminumbra/settings.json`,
+or `$HOME/.config/luminumbra/settings.json`.
+
+Replication defaults to acknowledged deltas and radius-3 chunk AOI with a 16,000 mm
+chunk edge. Millimeter AOI is an alternative: disable chunk AOI before selecting it.
+Locomotion defaults use separation radius 2 m/strength 0.6, flock radius 12 m,
+cohesion 0.5 and alignment 0.4. Server autosaves run every 30 ticks; explicit zero
+suppresses them, including smoke and recorder fixtures.
+
+New preset revision 7 resolves omitted island masks, surface breaks, biomes,
+biome relief, cliffs, rivers, lakes, structures and hydraulic/thermal erosion on.
+The biome table is `common/biomes.json`; structures resolve under the data root.
+Revision 6 and unversioned presets retain their historical omitted-field choices.
+Explicit false and an empty biome table remain off. New saves embed resolved
+choices; neutral knobs and UI controls use the same versioned resolver. Existing
+saved presets are read without rewriting their choices.
+
+The ordinary hills world is `worlds/atlas/presets/default.json`: its island mask
+is now on, alongside its already-enabled terrain features. Amplified, archipelago,
+caverns, mountains and temperate forest also enable their shipping features.
+`flat_lands` keeps its minimal identity with explicit opt-outs and structures on.
+Vulkan RHI, Steam and GNS defaults remain unchanged, as do developer diagnostics.

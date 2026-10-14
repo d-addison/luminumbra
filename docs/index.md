@@ -11,8 +11,8 @@ class, and file indexes are the lower-level API reference.
 
 Create a new world using a current preset. The format is LMR1 container v2,
 `luminumbra.persistence.world_manifest.v1` with `container_version: 2`, and FSD2
-far-LOD payload v3. Explicit preset revisions must be `schema_rev: 6`; omission
-remains accepted for in-memory callers. Shaping is unconditional and enabled
+far-LOD payload v3. New presets use `schema_rev: 7`; revision 6 and omitted revisions
+retain historical missing-field choices. Shaping is unconditional and enabled
 caves use the noise router, while content, hydrology, and biome controls remain.
 Future-format and corruption failures are separate from obsolete-world refusal.
 See [world format compatibility](engine-guide.md).

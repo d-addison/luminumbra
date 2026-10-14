@@ -6,10 +6,9 @@
 //
 // Determinism contract (verified against persistence/WorldPersistenceRoundtrip.h):
 //   * Flags split into `sim.*` (may affect sim state) and `render.*` (render-only).
-//   * ComputeConfigSubHash is an ADDITIVE per-system sub-hash (modelled on wind/
-//     weather/aether): it does NOT alter the top-level world_hash, and it is empty
-//     ("") whenever every sim.* flag is at its compiled default -> the canonical
-//     baseline d950a6afc12a5cdc and the sub-hash SET both stay byte-identical.
+//   * ComputeConfigSubHash is an ADDITIVE per-system sub-hash; it does not alter
+//     the top-level world_hash. Its serialization remains config:v1, with empty
+//     output only when every sim flag is explicitly disabled.
 //   * render.* flags NEVER appear in the sub-hash and never touch any hash.
 //   * enabled is an O(1) bit test on a resolved immutable snapshot (no map lookup,
 //     no string compare, no allocation) so it is safe on the 36k-entity / 30 Hz tick.
@@ -31,7 +30,7 @@ struct UserSettings {
     // video
     std::string resolution;                 // "" = native/default; else "WxH"
     std::string window_mode = "borderless"; // windowed | borderless | fullscreen
-    bool vsync = false;                     // default OFF: preserve today's uncapped 300fps target
+    bool vsync = true;                      // Saved user choices override this default.
     float fov = 45.0f;
     float render_scale = 1.0f;
     float ui_scale = 1.0f; // HUD/UI density-independent-pixel ratio (0.5..2.5); 1.0 = native px.
@@ -72,7 +71,7 @@ enum class SysParam : std::uint8_t {
 
 class SystemConfig {
 public:
-    // All flags off, all params unset (queries return the caller's fallback).
+    // Shipping flags on, all params unset (queries return the caller's fallback).
     [[nodiscard]] static SystemConfig Defaults();
     // Parse a systems.json document. Malformed/empty/blank text -> all-defaults (no throw).
     [[nodiscard]] static SystemConfig FromJsonString(const std::string& json_text);
@@ -88,7 +87,7 @@ public:
     [[nodiscard]] float param(SysParam id, float fallback) const;
     [[nodiscard]] glm::vec3 param3(SysParam id, glm::vec3 fallback) const;
 
-    // Additive sim-only sub-hash. Empty "" at all sim defaults; deterministic and
+    // Additive sim-only sub-hash. Empty "" when all sim flags are disabled; deterministic and
     // order-independent (canonical SysKey/SysParam enum order) otherwise. render.*/user.* excluded.
     [[nodiscard]] std::string ComputeConfigSubHash() const;
 
@@ -122,7 +121,9 @@ public:
 private:
     static constexpr std::size_t kParamCount = static_cast<std::size_t>(SysParam::Count);
 
-    std::uint32_t m_enabled = 0;                   // packed flag bitset (<=32 keys)
+    static_assert(static_cast<unsigned>(SysKey::Count) < 32);
+    std::uint32_t m_enabled =
+        (1u << static_cast<unsigned>(SysKey::Count)) - 1u; // packed flag bitset (<=32 keys)
     std::uint64_t m_param_set = 0;                 // which params were explicitly set (<=64 params)
     std::array<glm::vec3, kParamCount> m_params{}; // scalar params live in .x
     UserSettings m_user{};                         // client-only; never hashed

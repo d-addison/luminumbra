@@ -128,8 +128,24 @@ fs::path ArtifactRoot() {
     return fs::path(LUMINUMBRA_TEST_ARTIFACT_DIR) / "worldgen_layers";
 }
 
-TerrainGenParams TerrainLayerParams() {
+TerrainGenParams SyntheticTerrainParams() {
     TerrainGenParams params;
+    params.surface_breaks_enabled = false;
+    params.island_mask_enabled = false;
+    params.biomes_enabled = false;
+    params.biome_relief_enabled = false;
+    params.cliffs_enabled = false;
+    params.rivers_enabled = false;
+    params.lakes_enabled = false;
+    params.structures_enabled = false;
+    params.hydro_enabled = false;
+    params.biome_table_path.clear();
+    params.structures_data_dir.clear();
+    return params;
+}
+
+TerrainGenParams TerrainLayerParams() {
+    TerrainGenParams params = SyntheticTerrainParams();
     params.base_frequency = 0.035f;
     params.base_amplitude = 8.0f;
     params.octaves = 5;
@@ -152,7 +168,7 @@ TerrainGenParams CaveLayerParams() {
 }
 
 TerrainGenParams WaterLayerParams() {
-    TerrainGenParams params;
+    TerrainGenParams params = SyntheticTerrainParams();
     params.base_frequency = 0.02f;
     params.base_amplitude = 1.0f;
     params.height_offset = -4.0f;
@@ -703,7 +719,7 @@ TEST(WorldGenLayerSnapshotTest, ExportsLayerMetricsAndImages) {
 }
 
 TEST(WorldGenLayerSnapshotTest, GeneratedSpawnCollisionPreventsFallThrough) {
-    TerrainGenParams params;
+    TerrainGenParams params = SyntheticTerrainParams();
     params.base_frequency = 0.01f;
     params.base_amplitude = 12.0f;
     params.octaves = 4;
@@ -746,7 +762,7 @@ TEST(WorldGenLayerSnapshotTest, GeneratedSpawnCollisionPreventsFallThrough) {
 // sea level. The user hit a 0xC0000005 here. This drives that EXACT sequence so a regression
 // segfaults the suite (and proves the fix). No GL needed -> CPU build/mesh path only.
 TEST(WorldGenLayerSnapshotTest, LakePreviewBuildWithNullSystemsDoesNotCrash) {
-    TerrainGenParams params;
+    TerrainGenParams params = SyntheticTerrainParams();
     params.base_frequency = 0.01f;
     params.base_amplitude = 24.0f;
     params.octaves = 4;
@@ -777,7 +793,7 @@ TEST(WorldGenLayerSnapshotTest, LakePreviewBuildWithNullSystemsDoesNotCrash) {
 }
 
 TEST(WorldGenLayerSnapshotTest, SpawnCollisionBootstrapPreparesWalkingStart) {
-    TerrainGenParams params;
+    TerrainGenParams params = SyntheticTerrainParams();
     params.base_frequency = 0.01f;
     params.base_amplitude = 12.0f;
     params.octaves = 4;
@@ -868,7 +884,7 @@ TEST(WorldGenLayerSnapshotTest, DefaultWalkingSpawnRemainsSupportedAtClampedFram
 }
 
 TEST(WorldGenLayerSnapshotTest, InitialChunkLoadListCoversSpawnSurfaceNeighborhood) {
-    TerrainGenParams params;
+    TerrainGenParams params = SyntheticTerrainParams();
     params.base_frequency = 0.01f;
     params.base_amplitude = 12.0f;
     params.octaves = 4;
@@ -948,7 +964,7 @@ TEST(WorldGenLayerSnapshotTest, InitialChunkLoadListCoversSpawnSurfaceNeighborho
 }
 
 TEST(WorldGenLayerSnapshotTest, SpawnReadyNeighborhoodMeshesBroadSurfaceArea) {
-    TerrainGenParams params;
+    TerrainGenParams params = SyntheticTerrainParams();
     params.base_frequency = 0.01f;
     params.base_amplitude = 12.0f;
     params.octaves = 4;
@@ -987,7 +1003,7 @@ TEST(WorldGenLayerSnapshotTest, SpawnReadyNeighborhoodMeshesBroadSurfaceArea) {
 }
 
 TEST(WorldGenLayerSnapshotTest, LodRemeshKeepsPreviousMeshRenderableWhilePending) {
-    TerrainGenParams params;
+    TerrainGenParams params = SyntheticTerrainParams();
     params.base_frequency = 0.01f;
     params.base_amplitude = 12.0f;
     params.octaves = 4;
@@ -1073,7 +1089,7 @@ TEST(WorldGenLayerSnapshotTest, ExplicitEnsureSurfaceReadyNearMakesTeleportNearF
     // field fully renderable (async), but an explicit EnsureSurfaceReadyNear
     // call does - 49/49 renderable, no holes - which is exactly what the
     // pre-capture call provides to the LodGround coverage gate.
-    TerrainGenParams params;
+    TerrainGenParams params = SyntheticTerrainParams();
     params.base_frequency = 0.01f;
     params.base_amplitude = 12.0f;
     params.octaves = 4;
@@ -1135,7 +1151,7 @@ TEST(WorldGenLayerSnapshotTest, VerticalUnloadExemptsColumnSurfaceSpanChunks) {
     // surface scan immediately re-candidated - a churn loop that left holes
     // on mountain summits. Chunks inside their column's surface band must be
     // exempt from the vertical test; chunks far off the surface still unload.
-    TerrainGenParams params;
+    TerrainGenParams params = SyntheticTerrainParams();
     params.base_frequency = 0.01f;
     params.base_amplitude = 0.0f;  // flat world...
     params.height_offset = 200.0f; //... with its surface in chunk-Y 12
@@ -1172,7 +1188,7 @@ TEST(WorldGenLayerSnapshotTest, MountainsSurfaceSpanWantedSetStaysUnderChunkBudg
     // gate checks the live budget on the shipped preset at runtime). The
     // count mirrors update_chunk_activation's candidate rule: every chunk-Y
     // in the column span at every ring, plus the +-1 stack inside ring 12.
-    TerrainGenParams params;
+    TerrainGenParams params = SyntheticTerrainParams();
     params.base_frequency = 0.008f;
     params.base_amplitude = 120.0f;
     params.octaves = 6;
@@ -1349,7 +1365,7 @@ constexpr std::uint64_t ToolchainHeightHash(std::uint64_t msvc, std::uint64_t gc
 std::vector<DefaultShapingHeightFixture> DefaultShapingHeightFixtures() {
     std::vector<DefaultShapingHeightFixture> fixtures;
 
-    TerrainGenParams default_params;
+    TerrainGenParams default_params = SyntheticTerrainParams();
     default_params.base_frequency = 0.01f;
     default_params.base_amplitude = 12.0f;
     default_params.octaves = 4;
@@ -1362,7 +1378,7 @@ std::vector<DefaultShapingHeightFixture> DefaultShapingHeightFixtures() {
                         default_params,
                         ToolchainHeightHash(0x5b1177b7f0cd121full, 0xaec140c43a735f9eull)});
 
-    TerrainGenParams flat_params;
+    TerrainGenParams flat_params = SyntheticTerrainParams();
     flat_params.base_frequency = 0.02f;
     flat_params.base_amplitude = 10.0f;
     flat_params.octaves = 2;
@@ -1375,7 +1391,7 @@ std::vector<DefaultShapingHeightFixture> DefaultShapingHeightFixtures() {
                         flat_params,
                         ToolchainHeightHash(0x499fac5a81a7784bull, 0x6b50de342336674aull)});
 
-    TerrainGenParams mountains_params;
+    TerrainGenParams mountains_params = SyntheticTerrainParams();
     mountains_params.base_frequency = 0.008f;
     mountains_params.base_amplitude = 120.0f;
     mountains_params.octaves = 6;
@@ -1388,7 +1404,7 @@ std::vector<DefaultShapingHeightFixture> DefaultShapingHeightFixtures() {
                         mountains_params,
                         ToolchainHeightHash(0x1373155178dab3c8ull, 0xd8f3adb6564f52d4ull)});
 
-    TerrainGenParams archipelago_params;
+    TerrainGenParams archipelago_params = SyntheticTerrainParams();
     archipelago_params.base_frequency = 0.009f;
     archipelago_params.base_amplitude = 110.0f;
     archipelago_params.octaves = 6;
@@ -1403,7 +1419,7 @@ std::vector<DefaultShapingHeightFixture> DefaultShapingHeightFixtures() {
                         archipelago_params,
                         ToolchainHeightHash(0x7f4ee46cde9fe0d4ull, 0xc4110e0446935b91ull)});
 
-    TerrainGenParams forest_params;
+    TerrainGenParams forest_params = SyntheticTerrainParams();
     forest_params.base_frequency = 0.008f;
     forest_params.base_amplitude = 50.0f;
     forest_params.octaves = 6;
@@ -1485,7 +1501,7 @@ namespace {
 // Synthetic shaping params for the  parity/determinism gates (engine
 // tests must not depend on game preset data choices).
 TerrainGenParams ShapingTestParams() {
-    TerrainGenParams params;
+    TerrainGenParams params = SyntheticTerrainParams();
     params.base_frequency = 0.008f;
     params.base_amplitude = 60.0f;
     params.octaves = 5;

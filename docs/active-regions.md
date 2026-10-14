@@ -2,10 +2,11 @@
 
 The host ledger implements the persistent-active scheduling foundation in
 [distant-world.md](distant-world.md). It is gated by the existing
-`sim.active_regions` switch, absent and false by default. No systems.json value
-is added. Budgets remain unlimited in shipped configuration. No distant system
-consumes this schedule yet; field pages, creature records, water shares,
-diagnostics and measured budget activation remain separate work.
+`sim.active_regions` switch, enabled in compiled and packaged defaults. Explicit
+false selects the legacy clock path. Budgets remain unlimited in shipped
+configuration. No distant system consumes this schedule yet; field pages, creature
+records, water shares, diagnostics and measured budget activation remain separate
+work.
 
 ## Activation and ordering
 

@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include "../../../include/luminumbra/core/Types.h"
 #include "../ai/CreatureBrainSystem.h"        // ai::EcologyTuning (data-driven brain tuning, )
@@ -22,6 +22,10 @@
 #include <optional>
 #include <string>
 #include <vector>
+
+namespace luminumbra::core {
+class SystemConfig;
+}
 
 namespace luminumbra::fields {
 class EnergyFieldState; //  (): the stateful energy layer
@@ -246,6 +250,8 @@ public:
     // Data-driven creature-brain tuning (energy/sleep/hunger/stamina/herd/
     // catch). Defaults to the compiled constants -> byte-identical until a caller overrides it from
     // SystemConfig sim.ecology (ai::ResolveEcologyTuning). Set once after construction.
+    void ApplySystemConfig(const luminumbra::core::SystemConfig& config);
+
     void SetEcologyTuning(const luminumbra::ai::EcologyTuning& t) {
         m_ecologyTuning = t;
     }
@@ -275,25 +281,38 @@ public:
     void SetPlantMutationRate(float rate) {
         m_plantMutationRate = rate < 0.0f ? 0.0f : rate;
     }
-    // Opt-in weather-driven rain (sim.hydrology_weather).
+    // Weather-driven rain is enabled by default (sim.hydrology_weather).
     // Stored pre-world; wired into the water solver at CreateWorld/LoadWorld once the
-    // weather + water systems exist. Default-OFF = null wiring = byte-identical.
+    // weather + water systems exist. Explicit OFF = null wiring = byte-identical.
     // scale_mm: full precipitation (1.0) adds this many mm/tick to a cell.
     void SetWeatherRainEnabled(bool enabled, std::int32_t scale_mm = 25) {
         m_weatherRainEnabled = enabled;
         m_weatherRainScaleMm = scale_mm;
     }
-    // Supported opt-in High-resolution water (sim.water_high_res).
+    // Stored pre-world; ordinary Create/Load conserves finite water.
+    void SetFiniteHydrologyEnabled(bool enabled) {
+        m_finiteHydrologyEnabled = enabled;
+    }
+    [[nodiscard]] bool FiniteHydrologyEnabled() const {
+        return m_finiteHydrologyEnabled;
+    }
+    [[nodiscard]] bool WeatherRainEnabled() const {
+        return m_weatherRainEnabled;
+    }
+    [[nodiscard]] bool WeatherEventsEnabled() const {
+        return m_weatherEventsEnabled;
+    }
+    // High-resolution water is enabled by default (sim.water_high_res).
     // Stored pre-world; applied once at CreateWorld/LoadWorld before the first update.
     // The chosen resolution affects water/world hashes and must match on every peer.
-    // Default-OFF = Medium (8x8, 2 m cells); ON = High (16x16, 1 m cells), whose
+    // Explicit OFF = Medium (8x8, 2 m cells); ON = High (16x16, 1 m cells), whose
     // 4096-cell budget derives a 16-chunk sim window. Loading a current-format save
     // resizes its water grids in one boot-time pass if needed (LoadWorldStateFrom).
     void SetWaterHighResEnabled(bool enabled) {
         m_waterHighResEnabled = enabled;
     }
     // Exposes the deterministic weather-event schedule (Markov epoch windows) on the
-    // session behind sim.weather_events (default OFF -> always Clear/0: byte-identical).
+    // session behind sim.weather_events (explicit OFF -> always Clear/0: byte-identical).
     // Pure read: same (tick, world seed + 25) -> same state; a consumer must ALSO be a
     // participant (the scent/plant opt-in discipline) before its behavior may change.
     void SetWeatherEventsEnabled(bool enabled) {
@@ -302,7 +321,7 @@ public:
     [[nodiscard]] luminumbra::sim::WeatherEventState CurrentWeatherEvent() const;
 
     // Enables the stateful energy-field layer (sim.aether_state,
-    // default OFF). Stored pre-world; the layer is constructed at CreateWorld/
+    // explicit OFF). Stored pre-world; the layer is constructed at CreateWorld/
     // LoadWorld ONLY when enabled — OFF means no allocation, no tick work, zero
     // sub-hash bytes, saves unchanged (byte-identical by construction). The
     // layer is world-anchored sparse-page truth (the re-derivable
@@ -462,7 +481,7 @@ private:
     std::filesystem::path m_regionDurableDirectory;
     // Stable only in the clock slice; world-anchored pages replace this grid in C4.
     Vec3 m_ambientFieldAnchor{};
-    bool m_activeRegionsEnabled = false;
+    bool m_activeRegionsEnabled = true;
     bool m_simulationBatchInProgress = false;
     bool CreateWorldInternal(const std::string& name,
                              const std::string& seed,
@@ -484,12 +503,12 @@ private:
     std::unique_ptr<Systems::WeatherSystem> m_weatherSystem;
     std::unique_ptr<Systems::AetherFieldSystem> m_aetherFieldSystem;
     // The stateful energy layer. Null unless
-    // sim.aether_state was enabled BEFORE CreateWorld/LoadWorld (default OFF —
+    // sim.aether_state was enabled BEFORE CreateWorld/LoadWorld (explicit OFF —
     // null — byte-identical). unique_ptr so this header only needs the
     // forward declaration.
     std::unique_ptr<luminumbra::fields::EnergyFieldState> m_energyFieldState;
     std::unique_ptr<Luminumbra::scripting::LuaState> m_scriptState;
-    bool m_aetherStateEnabled = false;
+    bool m_aetherStateEnabled = true;
     std::unique_ptr<luminumbra::ai::ScentField> m_scentField;
     // Species definitions (see GetSpeciesTable). unique_ptr so this header only
     // needs the forward declaration (the registry is header-only nlohmann-parsing code).
@@ -517,13 +536,14 @@ private:
     // Persist the layer's record beside the chunk save (null/all-zero -> no
     // file). Serialize normalizes, which is state-idempotent at save time.
     bool SaveEnergyFieldRecord(const std::filesystem::path& save_dir);
-    void LoadSpeciesDefinitions();          // fills m_speciesTable (world create + load)
-    void ApplyWeatherRainWiring();          // Wires weather to rain when opted in.
-    void ApplyWaterResolutionWiring();      // Raises the water solver to High when opted in.
-    bool m_waterHighResEnabled = false;     // See SetWaterHighResEnabled.
-    bool m_weatherRainEnabled = false;      // See SetWeatherRainEnabled.
+    void LoadSpeciesDefinitions();     // fills m_speciesTable (world create + load)
+    void ApplyWeatherRainWiring();     // Wires weather to rain when opted in.
+    void ApplyWaterResolutionWiring(); // Raises the water solver to High when opted in.
+    bool m_finiteHydrologyEnabled = true;
+    bool m_waterHighResEnabled = true;      // See SetWaterHighResEnabled.
+    bool m_weatherRainEnabled = true;       // See SetWeatherRainEnabled.
     std::int32_t m_weatherRainScaleMm = 25; // Millimetres per tick at full precipitation.
-    bool m_weatherEventsEnabled = false;    // See SetWeatherEventsEnabled.
+    bool m_weatherEventsEnabled = true;     // See SetWeatherEventsEnabled.
     bool HasScentParticipants() const;
     bool HasPlantParticipants() const; //  opt-in gate
     std::string m_rootPath;

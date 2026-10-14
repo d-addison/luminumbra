@@ -48,8 +48,13 @@ int main() {
         return 1;
     }
 
-    if (kTerrainPresetSchemaRevision != 6 || kMinTerrainPresetSchemaRevision != 6) {
-        std::cerr << "the sole explicit preset revision must be 6\n";
+    if (kTerrainPresetSchemaRevision != 7 || kMinTerrainPresetSchemaRevision != 6) {
+        std::cerr << "current preset revision must be 7 and minimum 6\n";
+        return 1;
+    }
+
+    if (!Accepts(6, "legacy-six")) {
+        std::cerr << "revision 6 compatibility was lost\n";
         return 1;
     }
 

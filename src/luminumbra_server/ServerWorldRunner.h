@@ -47,7 +47,9 @@ struct ServerWorldRunnerConfig {
     int test_streaming_radius_cap = 0;
     // Autosave every N simulation ticks through WorldSaveService
     // (GameSession::SaveWorldState incremental contract). 0 disables.
-    std::uint64_t autosave_interval_ticks = 0;
+    std::uint64_t autosave_interval_ticks = 30;
+    // Explicit workload override, applied before world creation or loading.
+    bool finite_hydrology = true;
     //  number of deterministic player avatars to spawn at
     // boot (phyllotaxis ring around spawn; see World::DeterministicAvatarSpawnOffset).
     // Avatar positions feed the multi-anchor streaming vector and fold into the

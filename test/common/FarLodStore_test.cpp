@@ -1,3 +1,4 @@
+#include "../fixtures/TerrainFixtureParams.h"
 // far-LOD tile store + region mesher gates.
 // - tile determinism: pristine builds are pure functions of
 //   (seed, params, tier, region); pregen hash == hash after a
@@ -57,7 +58,7 @@ constexpr u64 ToolchainHash(u64 msvc, u64 gcc_clang) {
 }
 
 TerrainGenParams FixtureParams() {
-    TerrainGenParams params;
+    TerrainGenParams params = Luminumbra::Test::SyntheticTerrainParams();
     params.base_frequency = 0.005f;
     params.base_amplitude = 40.0f;
     params.height_offset = 10.0f;
@@ -1221,7 +1222,7 @@ TEST(FarLodRegionMesher, AdjacentRegionsShareBorderVertexPositions) {
 // Spline content/count and every frequency must invalidate pristine tiles.
 TEST(FarLodStore, TerrainParamsHashShapingFold) {
     auto make = []() {
-        TerrainGenParams p;
+        TerrainGenParams p = Luminumbra::Test::SyntheticTerrainParams();
         p.base_frequency = 0.008f;
         p.base_amplitude = 60.0f;
         p.octaves = 5;

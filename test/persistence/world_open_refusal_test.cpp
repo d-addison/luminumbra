@@ -2,6 +2,7 @@
 
 #include "luminumbra_common/core/JobSystem.h"
 #include "luminumbra_common/persistence/SavedWorldCatalog.h"
+#include "luminumbra_common/persistence/WorldPersistenceRoundtrip.h"
 #include "luminumbra_common/persistence/WorldSaveService.h"
 #include "luminumbra_common/systems/AetherFieldSystem.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
@@ -9,6 +10,7 @@
 #include "luminumbra_common/systems/WindFieldSystem.h"
 #include "luminumbra_common/world/FarLodStore.h"
 #include "luminumbra_common/world/GameSession.h"
+#include "luminumbra_common/world/TerrainPresetLoader.h"
 #include "luminumbra_server/ServerWorldRunner.h"
 
 #include <algorithm>
@@ -80,6 +82,9 @@ protected:
         fs::create_directories(root / "worlds/atlas/presets");
         fs::copy_file(fs::path(LUMINUMBRA_SOURCE_ROOT) / "worlds/atlas/presets/default.json",
                       root / "worlds/atlas/presets/default.json");
+        fs::copy(fs::path(LUMINUMBRA_SOURCE_ROOT) / "worlds/atlas/presets-rev6",
+                 root / "worlds/atlas/presets-rev6",
+                 fs::copy_options::recursive);
         save = root / "worlds/saves/fixture";
         Write(
             save / "world_info.json",
@@ -497,6 +502,133 @@ TEST_F(WorldOpenRefusal, EmbeddedPresetLoadsWithoutTheOriginalNamedPreset) {
     ASSERT_TRUE(session.LoadWorld("fixture")) << session.GetWorldOpenError();
     EXPECT_EQ(session.GetLastLoadedChunkCount(), 1u);
     EXPECT_EQ(DiskBytes(root), before);
+}
+
+TEST_F(WorldOpenRefusal, NonEmbeddedAdditionalNamedPresetUsesOriginalFile) {
+    const auto preset_path = root / "worlds/atlas/presets/my_hills.json";
+    auto preset = nlohmann::json::parse(Read(root / "worlds/atlas/presets-rev6/default.json"));
+    preset["generation_params"]["terrain"]["height_offset"] = 17.0f;
+    Write(preset_path, preset.dump());
+    auto metadata = nlohmann::json::parse(Read(save / "world_info.json"));
+    metadata["worldType"] = "my_hills";
+    ASSERT_FALSE(metadata.contains("presetIdentity"));
+    ASSERT_FALSE(fs::exists(save / "preset.json"));
+    ASSERT_FALSE(fs::exists(root / "worlds/atlas/presets-rev6/my_hills.json"));
+
+    for (const auto& identity_metadata : {nlohmann::json::object(),
+                                          nlohmann::json{{"presetIdentity", "wrong"}},
+                                          nlohmann::json{{"presetIdentity", 123}}}) {
+        SCOPED_TRACE(identity_metadata.dump());
+        auto saved_metadata = metadata;
+        saved_metadata.update(identity_metadata);
+        Write(save / "world_info.json", saved_metadata.dump());
+        const auto before = DiskBytes(root);
+
+        const auto inspected = Persistence::InspectSavedWorld(root, "fixture");
+        ASSERT_TRUE(inspected.error.empty()) << inspected.error;
+        EXPECT_EQ(inspected.preset_path, preset_path);
+        GameSession session;
+        session.SetRootPath(RootString());
+        session.SetJobSystem(&jobs);
+        ASSERT_TRUE(session.LoadWorld("fixture")) << session.GetWorldOpenError();
+        EXPECT_FLOAT_EQ(session.GetWorldSystem()->get_params().height_offset, 17.0f);
+        EXPECT_FALSE(session.GetWorldSystem()->get_params().island_mask_enabled);
+        EXPECT_EQ(session.GetLastLoadedChunkCount(), 1u);
+        EXPECT_EQ(DiskBytes(root), before);
+    }
+}
+
+TEST_F(WorldOpenRefusal, NonEmbeddedRevisionSixHillsPreservesTerrainIdentity) {
+    const fs::path source = LUMINUMBRA_SOURCE_ROOT;
+    Write(save / "world_info.json",
+          Read(source / "test/fixtures/saves/revision6-hills/world_info.json"));
+    fs::create_directories(root / "data");
+    fs::copy(source / "data/common", root / "data/common", fs::copy_options::recursive);
+    ASSERT_FALSE(fs::exists(save / "preset.json"));
+    const auto before = DiskBytes(root);
+    const auto historical =
+        world::LoadTerrainPreset(root / "worlds/atlas/presets-rev6/default.json");
+    const auto shipping = world::LoadTerrainPreset(root / "worlds/atlas/presets/default.json");
+    ASSERT_TRUE(historical.ok);
+    ASSERT_TRUE(shipping.ok);
+    EXPECT_FALSE(historical.params.island_mask_enabled);
+    EXPECT_TRUE(shipping.params.island_mask_enabled);
+    EXPECT_EQ(
+        Persistence::StableChecksum(
+            nlohmann::json::parse(Read(root / "worlds/atlas/presets-rev6/default.json")).dump()),
+        "026f24207a8ffc7e");
+
+    GameSession session;
+    session.SetRootPath(RootString());
+    session.SetJobSystem(&jobs);
+    ASSERT_TRUE(session.LoadWorld("fixture")) << session.GetWorldOpenError();
+    const auto& params = session.GetWorldSystem()->get_params();
+    EXPECT_FALSE(params.island_mask_enabled);
+    EXPECT_FLOAT_EQ(params.base_frequency, 0.01f);
+    EXPECT_FLOAT_EQ(params.base_amplitude, 34.0f);
+    EXPECT_FLOAT_EQ(params.height_offset, 5.0f);
+    EXPECT_TRUE(params.hydro_enabled);
+    EXPECT_TRUE(params.biomes_enabled);
+    EXPECT_TRUE(params.biome_relief_enabled);
+    EXPECT_TRUE(params.rivers_enabled);
+    EXPECT_TRUE(params.lakes_enabled);
+    EXPECT_TRUE(params.cliffs_enabled);
+    EXPECT_TRUE(params.structures_enabled);
+    EXPECT_TRUE(params.surface_breaks_enabled);
+    EXPECT_EQ(World::ComputeTerrainParamsHash(params, session.GetWorldSystem()->get_seed()),
+              16636010052247870746ull);
+    EXPECT_EQ(session.GetLastLoadedChunkCount(), 1u);
+    EXPECT_EQ(DiskBytes(root), before);
+}
+
+TEST_F(WorldOpenRefusal, NonEmbeddedSaveWithoutIdentityNeverUsesShippingPreset) {
+    // The fixture's old metadata has no identity. Removing shipping content
+    // must not affect inspection or opening of an existing world.
+    fs::remove(root / "worlds/atlas/presets/default.json");
+    const auto before = DiskBytes(root);
+    const auto inspected = Persistence::InspectSavedWorld(root, "fixture");
+    ASSERT_TRUE(inspected.error.empty()) << inspected.error;
+    EXPECT_EQ(inspected.preset_path, root / "worlds/atlas/presets-rev6/default.json");
+    GameSession session;
+    session.SetRootPath(RootString());
+    session.SetJobSystem(&jobs);
+    ASSERT_TRUE(session.LoadWorld("fixture")) << session.GetWorldOpenError();
+    EXPECT_FALSE(session.GetWorldSystem()->get_params().island_mask_enabled);
+    EXPECT_EQ(DiskBytes(root), before);
+}
+
+TEST_F(WorldOpenRefusal, MissingHistoricalPresetRefusesRatherThanUsingShipping) {
+    fs::remove(root / "worlds/atlas/presets-rev6/default.json");
+    const auto before = DiskBytes(root);
+    const auto inspected = Persistence::InspectSavedWorld(root, "fixture");
+    EXPECT_FALSE(inspected.error.empty());
+    GameSession session;
+    session.SetRootPath(RootString());
+    session.SetJobSystem(&jobs);
+    EXPECT_FALSE(session.LoadWorld("fixture"));
+    EXPECT_EQ(session.GetWorldSystem(), nullptr);
+    EXPECT_EQ(DiskBytes(root), before);
+}
+
+TEST_F(WorldOpenRefusal, RecordedPresetIdentityMismatchRefusesBeforeGeneration) {
+    for (const bool embedded : {false, true}) {
+        if (embedded)
+            fs::copy_file(root / "worlds/atlas/presets/default.json", save / "preset.json");
+        for (const auto& identity : {nlohmann::json("wrong"), nlohmann::json(123)}) {
+            auto metadata = nlohmann::json::parse(Read(save / "world_info.json"));
+            metadata["presetIdentity"] = identity;
+            Write(save / "world_info.json", metadata.dump());
+            const auto before = DiskBytes(root);
+            const auto inspected = Persistence::InspectSavedWorld(root, "fixture");
+            EXPECT_NE(inspected.error.find("identity"), std::string::npos);
+            GameSession session;
+            session.SetRootPath(RootString());
+            session.SetJobSystem(&jobs);
+            EXPECT_FALSE(session.LoadWorld("fixture"));
+            EXPECT_EQ(session.GetWorldSystem(), nullptr);
+            EXPECT_EQ(DiskBytes(root), before);
+        }
+    }
 }
 
 TEST_F(WorldOpenRefusal, CreateEditSaveRestartAndSwitchPreserveAuthority) {

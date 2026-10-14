@@ -43,7 +43,7 @@ allocation and renderer integration remain separate.
 - Simulation over distance runs only in **persistent active regions** and only
   while the world host runs. There is no wall-clock progression while a world is
   shut down.
-- Audio remains disabled for v0.3 and every qualification run launches with
+- Ordinary audio playback is enabled; every qualification run launches with
   `--no-audio`; nothing in this contract depends on audio.
 
 ## Three explicit sets
@@ -285,13 +285,13 @@ chunks stops (they stay resident) and the failure is reported; dirty state is
 never dropped. Parked bytes, save latency and failures are shown in the
 diagnostic panel and qualified on the historical 5,433-chunk edited save.
 
-The default-off ledger and deterministic scheduler foundation is now implemented;
+The ledger and deterministic scheduler foundation is enabled by default;
 see [the active-region format and scheduling guide](active-regions.md) for its
 canonical bytes, refusal behaviours and bounded slice boundaries. It has no
 per-system consumers and no measured budget caps yet. Dirty parking, autosave
 policy changes, snapshot transactions and the diagnostic panel remain pending.
 Current default behaviour still evicts dirty chunks without a flush, the client
-saves only on quit or shutdown, and the server autosave interval defaults to zero.
+saves only on quit or shutdown, and the server autosave interval defaults to 30 ticks.
 
 ## Per-system distant policy
 

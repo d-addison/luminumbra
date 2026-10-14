@@ -193,6 +193,15 @@ class RenderContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'workload manifest'):
             contract.validate(artifact(), QUALIFIED, workload={'seed': 1})
 
+    def test_current_and_legacy_preset_revisions(self):
+        text = (FIXTURES / 'surface-flight.traversal').read_text()
+        for revision in (6, 7):
+            parsed = contract.traversal_manifest(text.replace('preset_revision 7', f'preset_revision {revision}'))
+            self.assertEqual(parsed['preset_revision'], revision)
+        for revision in (5, 8):
+            with self.assertRaises(ValueError):
+                contract.traversal_manifest(text.replace('preset_revision 7', f'preset_revision {revision}'))
+
     def test_traversal_manifest_and_camera_oracle(self):
         manifest = contract.traversal_manifest((FIXTURES / 'surface-flight.traversal').read_bytes().decode('utf-8'))
         first = [contract.camera_sample(manifest, tick) for tick in range(1801)]

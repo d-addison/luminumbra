@@ -127,8 +127,8 @@ constexpr std::int32_t EVAP_MM = 1; // cull <1mm films on non-source cells (dete
 // cross-chunk flux, which needs neighbour chunks' boundary cells to align cell-for-cell.
 // Chunks are 16 m across, so Medium (8x8) is 2 m cells and High (16x16 -> 1 m cells)
 // resolves a river channel. Visual mesh LOD, if wanted, stays a separate  concern.
-// The resolution lives in m_sim_resolution (default Medium); sim.water_high_res
-// raises a session to High ONCE at construction via SetSimResolution — never mid-run.
+// The resolution lives in m_sim_resolution (default High); explicit sim.water_high_res=false
+// selects Medium at construction via SetSimResolution — never mid-run.
 // Perf: High (16) was ~4x and spiked the moving water phase to ~130ms; Medium is ~4x cheaper (~32ms
 // worst) and still uniform+deterministic. Cross-chunk flux REQUIRES a uniform resolution (boundary
 // cells must align). A mixed-resolution variant would require explicit seam resampling.
@@ -137,9 +137,9 @@ constexpr std::int32_t EVAP_MM = 1; // cull <1mm films on non-source cells (dete
 // uniform sim resolution. Medium (8x8 = 64 cells/chunk) -> 4096/64 = 64 chunks, identical to the
 // historical fixed 64-chunk window, so the persisted waterSimCursor semantics and the hashed
 // trajectory are untouched; only a resolution change re-derives it (High: 4096/256 = 16 chunks).
-// Derived at runtime from m_sim_resolution in update() — at the Medium default the
+// Derived at runtime from m_sim_resolution in update() — with explicit Medium the
 // values (64 cells/chunk, 64-chunk window) and arithmetic are identical to the old
-// constexpr pair, so the default trajectory is byte-identical.
+// constexpr pair, so the explicit Medium trajectory is byte-identical.
 
 namespace {
 

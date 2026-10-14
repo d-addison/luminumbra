@@ -149,7 +149,7 @@ ParseRuntimeScenarioConfig(int argc, char* argv[], const std::filesystem::path& 
     config.auto_create_world = HasCommandLineFlag(argc, argv, "--auto-create-world");
     config.auto_enter_world = HasCommandLineFlag(argc, argv, "--auto-enter-world");
     config.no_audio = HasCommandLineFlag(argc, argv, "--no-audio");
-    config.enable_audio = HasCommandLineFlag(argc, argv, "--enable-audio");
+    config.enable_audio = true; // --enable-audio remains accepted for compatibility.
     config.no_ui = HasCommandLineFlag(argc, argv, "--no-ui");
     config.hidden_window = HasCommandLineFlag(argc, argv, "--hidden-window");
 

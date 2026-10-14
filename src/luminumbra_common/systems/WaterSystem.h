@@ -130,7 +130,8 @@ public:
     // river source (water becomes finite/drainable); rain_mm_per_tick adds uniform rainfall (the
     // caller scales it by weather precipitation); evap_mm_per_tick recedes above-sea standing
     // water. All integer
-    // -> deterministic. Defaults (false,0,0) == classic  behaviour, so gates stay green.
+    // -> deterministic. Default (true,0,0) conserves finite water; explicit false retains river
+    // replenishment.
     void SetHydrology(bool finite, std::int32_t rain_mm_per_tick, std::int32_t evap_mm_per_tick) {
         m_finite_hydrology = finite;
         m_rain_mm_per_tick = rain_mm_per_tick;
@@ -276,7 +277,7 @@ private:
     const std::unordered_map<ChunkID, std::shared_ptr<Chunk>>* m_active_chunks = nullptr;
 
     //  finite-hydrology config (set via SetHydrology; integer -> deterministic).
-    bool m_finite_hydrology = false;
+    bool m_finite_hydrology = true;
     std::int32_t m_rain_mm_per_tick = 0;
     std::int32_t m_evap_mm_per_tick = 0;
     // weather-driven rain (null = OFF; see SetWeatherRain).
@@ -291,9 +292,9 @@ private:
 
     // boot-settle mode (see SetBootSettleMode). Lifts the init/sim caps during Boot.
     bool m_boot_settle_mode = false;
-    // The single uniform hashed sim resolution (cells per chunk side). Default Medium
-    // (8x8, 2 m cells) — see SetSimResolution; set once pre-world via sim.water_high_res.
-    int m_sim_resolution = static_cast<int>(WaterDetailLevel::Medium);
+    // The single uniform hashed sim resolution (cells per chunk side). Default High
+    // (16x16, 1 m cells) — see SetSimResolution; set once pre-world via sim.water_high_res.
+    int m_sim_resolution = static_cast<int>(WaterDetailLevel::High);
     // loaded-boot water pause (see SetBootPaused). update is a no-op while set.
     bool m_boot_paused = false;
 

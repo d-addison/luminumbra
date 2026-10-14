@@ -254,7 +254,7 @@ bool ServerWorldRunner::Boot() {
     // client derives from data/common/systems.json — sim.water_high_res is baked into
     // the hashed mm grids, so a mismatched host could never agree with its peers.
     // Resolved against the runner root with a CWD-relative fallback (the client's
-    // load path); a missing file is all-defaults = Medium = byte-identical.
+    // load path); a missing file uses the same shipping simulation defaults.
     {
         namespace fsys = std::filesystem;
         const fsys::path root =
@@ -265,11 +265,9 @@ bool ServerWorldRunner::Boot() {
             systems_json = fsys::path("data") / "common" / "systems.json";
         }
         const auto sys_cfg = luminumbra::core::SystemConfig::LoadFromFile(systems_json.string());
-        m_session->SetActiveRegionsEnabled(
-            sys_cfg.enabled(luminumbra::core::SysKey::SimActiveRegions));
-        m_session->SetWaterHighResEnabled(
-            sys_cfg.enabled(luminumbra::core::SysKey::SimWaterHighRes));
+        m_session->ApplySystemConfig(sys_cfg);
     }
+    m_session->SetFiniteHydrologyEnabled(m_config.finite_hydrology);
     // A headless host has no client asset manifest; simulation assets alone are
     // validated and every voxel field uses the authoritative CPU generator.
 

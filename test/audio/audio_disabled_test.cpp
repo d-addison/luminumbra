@@ -38,8 +38,8 @@ public:
     fs::path path;
 };
 
-TEST(AudioDisabledTest, RealLaunchParserRequiresOptInAndDisableWinsInEitherOrder) {
-    EXPECT_FALSE(Parse({"client"}).audio_playback_enabled());
+TEST(AudioDisabledTest, RealLaunchParserDefaultsOnAndDisableWinsInEitherOrder) {
+    EXPECT_TRUE(Parse({"client"}).audio_playback_enabled());
     EXPECT_FALSE(Parse({"client", "--no-audio"}).audio_playback_enabled());
     EXPECT_TRUE(Parse({"client", "--enable-audio"}).audio_playback_enabled());
     EXPECT_FALSE(Parse({"client", "--enable-audio", "--no-audio"}).audio_playback_enabled());
@@ -52,7 +52,7 @@ TEST(AudioDisabledTest, RealLaunchParserRequiresOptInAndDisableWinsInEitherOrder
 
 TEST(AudioDisabledTest, SavedNonzeroVolumesCannotEnablePlaybackOrRetainRequestHistory) {
     TemporaryDirectory directory;
-    const auto config = Parse({"client"}, directory.path);
+    const auto config = Parse({"client", "--no-audio"}, directory.path);
     ASSERT_FALSE(config.audio_playback_enabled());
     NullAudioManager audio(config.audio_telemetry_path);
     ASSERT_TRUE(audio.Init());

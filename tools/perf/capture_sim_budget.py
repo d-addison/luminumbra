@@ -42,6 +42,11 @@ def validate_artifact(data: dict[str, Any], preset: str, seed: str, ticks: int) 
             or data.get("passed") is not True
             or data.get("world_hash") != data.get("world_hash_replay")):
         raise ValueError("smoke identity, tick count or replay verdict mismatch")
+    effective = data.get("effective_simulation")
+    required = ("active_regions", "aether_state", "water_high_res", "finite_hydrology",
+                "weather_rain", "weather_events")
+    if not isinstance(effective, dict) or any(effective.get(key) is not True for key in required):
+        raise ValueError("capture did not activate the shipping simulation defaults")
     budget = data.get("sim_budget")
     if not isinstance(budget, dict) or budget.get("schema") != "luminumbra.sim_budget.v2":
         raise ValueError("missing or unsupported sim_budget schema")

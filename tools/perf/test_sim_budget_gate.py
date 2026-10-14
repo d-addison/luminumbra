@@ -39,6 +39,8 @@ def artifact_for(preset: str, ticks: int, work_scale: int) -> dict[str, Any]:
     return {
         "schema": "luminumbra.server_tick.v1", "preset": preset, "seed": "1337",
         "ticks_requested": ticks, "passed": True,
+        "effective_simulation": dict.fromkeys(("active_regions", "aether_state", "water_high_res",
+            "finite_hydrology", "weather_rain", "weather_events"), True),
         "world_hash": HASH, "world_hash_replay": HASH,
         "sim_budget": {"schema": "luminumbra.sim_budget.v2", "work_replay_match": True,
                        "stages": stages},

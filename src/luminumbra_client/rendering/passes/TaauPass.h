@@ -22,6 +22,9 @@ public:
     void destroy(RenderResourceRegistry& registry);
     void reset_shader();
     void invalidate_history();
+    bool history_valid() const {
+        return m_history_valid;
+    }
     void execute(const RenderContext& ctx);
 
 private:

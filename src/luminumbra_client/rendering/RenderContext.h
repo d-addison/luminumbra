@@ -1,4 +1,5 @@
 #pragma once
+#include "RenderingDefaults.h"
 
 #include "../../include/luminumbra/core/Types.h"
 #include "RenderFrameTypes.h" // DirectionalLight/PointLight/WeatherType/Weather/Cloud/Lightning (by value/ptr)
@@ -143,7 +144,7 @@ struct RenderContext {
     float aether_glow_intensity = 2.0f;
     //  ( -6): emissive materials scale by
     // (1 + aether * modulation). 0.0 = multiply by exactly 1.0 = pixel-identical.
-    float aether_material_modulation = 0.0f;
+    float aether_material_modulation = kDefaultAetherMaterialModulation;
     // render-only snow ground cover [0,1]; 0 = untouched.
     float snow_cover = 0.0f;
 
@@ -205,7 +206,8 @@ struct RenderContext {
     float exposure = 0.0f;
 
     // Group O — froxel volumetric quality (0 = both compute stages are no-ops).
-    int volumetric_quality = 0; // <- m_volumetric_quality
+    int volumetric_quality =
+        Luminumbra::Rendering::kDefaultVolumetricQuality; // <- m_volumetric_quality
 
     // Group P — waterfall live-water mirror. The pass reads this one-way world
     // view to extinguish a dammed/drained fall; it never mutates simulation state.

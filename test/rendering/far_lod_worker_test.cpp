@@ -1,3 +1,4 @@
+#include "../fixtures/TerrainFixtureParams.h"
 #include "gtest/gtest.h"
 
 #include "luminumbra_client/debug/DebugCamera.h"
@@ -54,7 +55,7 @@ struct TempSaveDir {
 };
 
 TerrainGenParams FlatParams() {
-    TerrainGenParams params;
+    TerrainGenParams params = Luminumbra::Test::SyntheticTerrainParams();
     params.base_frequency = 0.005f;
     params.base_amplitude = 0.0f;
     params.height_offset = 12.0f;

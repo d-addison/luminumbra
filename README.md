@@ -26,7 +26,7 @@ only metadata and no saved chunks. New world metadata declares `container_versio
 New saves use LMR1 container v2,
 the `luminumbra.persistence.world_manifest.v1` manifest with
 `container_version: 2`, and FSD2 far-LOD payload v3. Explicit preset `schema_rev`
-must be `6`; in-memory callers may omit it. Terrain shaping is always applied,
+uses `7` for new presets; `6` and omitted revisions retain historical omission defaults. Terrain shaping is always applied,
 and enabled caves always use the noise router. Content, hydrology, and biome
 controls remain available. Unknown future formats and corrupt data have distinct
 failures. See the [persistence contract](docs/engine-guide.md)

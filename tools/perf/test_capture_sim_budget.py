@@ -15,6 +15,8 @@ def artifact() -> dict:
         "schema": "luminumbra.server_tick.v1", "preset": "default", "seed": "1337",
         "ticks_requested": 2, "passed": True,
         "world_hash": "0123456789abcdef", "world_hash_replay": "0123456789abcdef",
+        "effective_simulation": dict.fromkeys(("active_regions", "aether_state", "water_high_res",
+            "finite_hydrology", "weather_rain", "weather_events"), True),
         "sim_budget": {
             "schema": "luminumbra.sim_budget.v2", "work_replay_match": True,
             "stages": [{"name": name, "samples": 2, "work_total": 3,
@@ -31,6 +33,17 @@ def artifact() -> dict:
 class SimBudgetCaptureTests(unittest.TestCase):
     def validate(self, data: dict) -> None:
         capture.validate_artifact(data, "default", "1337", 2)
+
+    def test_shipping_activation_is_required(self):
+        for field in artifact()["effective_simulation"]:
+            data = artifact()
+            data["effective_simulation"][field] = False
+            with self.assertRaisesRegex(ValueError, "shipping simulation"):
+                self.validate(data)
+        data = artifact()
+        del data["effective_simulation"]
+        with self.assertRaisesRegex(ValueError, "shipping simulation"):
+            self.validate(data)
 
     def test_unknown_object_keys_are_ignored(self) -> None:
         data = artifact()

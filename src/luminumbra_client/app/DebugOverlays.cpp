@@ -1066,7 +1066,7 @@ void DrawSettingsWindow(ClientAppContext& app,
                 }
             }
             const bool audio_disabled = audioManager && !audioManager->IsPlaybackEnabled();
-            ImGui::TextWrapped(audio_disabled ? "Audio is disabled for this release."
+            ImGui::TextWrapped(audio_disabled ? "Audio playback disabled or unavailable."
                                : audioManager ? "Experimental audio enabled."
                                               : "Saved audio levels.");
             ImGui::BeginDisabled(audio_disabled);

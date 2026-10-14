@@ -51,7 +51,7 @@ struct TerrainGenParams {
     float worley_threshold =
         0.62f; // / < this => open room (cell interior); higher = more/bigger caverns
 
-    // ---  surface-breaking caves / sinkholes / cave-mouths (default-off) ---
+    // ---  surface-breaking caves / sinkholes / cave-mouths (enabled by default) ---
     // Makes the 18 m surface cap (kCaveSurfaceCapDepth) a PER-COLUMN field so the
     // EXISTING cave noise reaches the surface ONLY inside hashed feature
     // footprints, plus a bounded analytic sinkhole carve. Placement is a pure
@@ -70,14 +70,14 @@ struct TerrainGenParams {
     //   carve_smoothness   -- exp-smin k for the cone/capsule lip (0 => hard max).
     //   entrance_min_cap   -- floor the per-column cap drops to inside a feature
     //                         (0 => cave noise fully exposed; small positive keeps a thin lip).
-    bool surface_breaks_enabled = false;
+    bool surface_breaks_enabled = true;
     float surface_break_density = 0.0f; // Bernoulli accept prob per doline cell
     float feature_cell_size = 128.0f;   // doline cell pitch (m)
     float max_feature_radius = 60.0f;   // MUST be < feature_cell_size (asserted)
     float carve_smoothness = 0.0f;      // exp-smin k (0 => hard max)
     float entrance_min_cap = 0.0f;      // metres the cap floors to inside a feature
 
-    bool island_mask_enabled = false;
+    bool island_mask_enabled = true;
     float island_mask_frequency = 0.004f;
 
     // --- terrain shaping (unconditional) ---
@@ -101,7 +101,7 @@ struct TerrainGenParams {
     std::vector<std::array<float, 2>> erosion_spline;
     std::vector<std::array<float, 2>> peaks_spline;
 
-    // ---  biome selection (default-off) ---
+    // ---  biome selection (enabled by default) ---
     // Biomes are opt-in via the preset block "biomes": {"table": "..."}. When
     // biomes_enabled is false the world system never builds the temperature
     // (+8) / humidity (+9) climate noises and never loads a biome table, so
@@ -110,8 +110,8 @@ struct TerrainGenParams {
     // drift). biome_table_path is relative to data/ (e.g. "common/biomes.json").
     //  mixes the loaded table's content hash into ComputeTerrainParamsHash
     // so pristine far-LOD tiles self-invalidate on a table content change.
-    bool biomes_enabled = false;
-    std::string biome_table_path;
+    bool biomes_enabled = true;
+    std::string biome_table_path = "data/common/biomes.json";
     float temperature_frequency = 0.005f;
     float humidity_frequency = 0.005f;
     // Per-biome morphology: when enabled, the peaks/ridge term is scaled
@@ -120,7 +120,7 @@ struct TerrainGenParams {
     // just material. Smooth (climate noise is continuous) so there are no seams,
     // and it only touches the ridge term (base relief unchanged) to keep the
     // hypsometric/spectral realism gate in band. Disabled -> byte-zero drift.
-    bool biome_relief_enabled = false;
+    bool biome_relief_enabled = true;
     float biome_relief_strength = 0.45f; // ridge scale span: warm *(1-s).. cold *(1+s)
 
     // Cliffs / escarpments: in cliff-zones (a smooth noise mask, seed
@@ -128,12 +128,12 @@ struct TerrainGenParams {
     // marching-cubes surface forms mesa/canyon cliff faces. Pure heightfield ->
     // no holes / floating geometry, fully deterministic. Blended by the mask so
     // cliff zones sit naturally amid normal foothills. Disabled -> byte-zero drift.
-    bool cliffs_enabled = false;
+    bool cliffs_enabled = true;
     float cliff_frequency = 0.0011f; // cliff-zone mask feature scale
     float cliff_threshold = 0.4f; // mask value above which terracing engages (matches default.json)
     float cliff_step = 11.0f;     // metres per bench (cliff face height)
 
-    // ---  PV-band rivers (default-off) ---
+    // ---  PV-band rivers (enabled by default) ---
     // Chunk-local river carve on the +10 ridged noise (seed registry). The
     // folded PV value PV = 1 - |3*|r| - 2| (Minecraft 1.18 weirdness->PV) of
     // the +10 noise selects the rivers where it falls in the VALLEYS band
@@ -144,7 +144,7 @@ struct TerrainGenParams {
     // Applied inside ComputeShapedHeight so near chunks AND far tiles agree at
     // the seam. With rivers_enabled false the height path is bit-identical to
     // pre-river generation (byte-zero drift).
-    bool rivers_enabled = false;
+    bool rivers_enabled = true;
     float river_frequency = 0.0016f;
     float river_pv_min = -1.0f;    // valleys band lower edge (folded PV)
     float river_pv_max = -0.85f;   // valleys band upper edge (folded PV)
@@ -158,7 +158,7 @@ struct TerrainGenParams {
     // surface for the water mesh + the WaterSystem rest level (which pins the lake
     // so the flow sim can't drain it). Sea-level oceans still form wherever the
     // continental base dips below SEA_LEVEL. Disabled -> byte-zero drift.
-    bool lakes_enabled = false;
+    bool lakes_enabled = true;
     float lake_frequency = 0.0009f; // ~1100 m feature scale
     float lake_threshold = 0.52f;   // lake field value above which a lake forms (moderate)
     float lake_depth = 5.0f;        // metres the basin floor sits below the lake surface
@@ -176,12 +176,12 @@ struct TerrainGenParams {
     // loaded template pools' content; ComputeTerrainParamsHash mixes it in (only
     // when enabled) so pristine far tiles self-invalidate on a template change.
     // Disabled (the default preset) => byte-zero drift, identical hashes.
-    bool structures_enabled = false;
+    bool structures_enabled = true;
     u64 structures_content_hash = 0;
     // Absolute path to data/common/structures (resolved by the preset loader,
     // mirrors biome_table_path). The world system loads every <type>/ pool here
     // when structures_enabled.
-    std::string structures_data_dir;
+    std::string structures_data_dir = "data/common/structures";
 
     // hydraulic/thermal RELIEF. When enabled, a deterministic per-region
     // erosion bake (HydraulicErosion) carves drainage/talus into the analytic
@@ -192,7 +192,7 @@ struct TerrainGenParams {
     // height offset in metres. Disabled (the default preset) => byte-zero drift,
     // identical hashes (ComputeShapedHeightSample/Grid skip the lookup, marker
     // 0x06 is not mixed). World_hash-affecting when enabled -> deliberate bump.
-    bool hydro_enabled = false;
+    bool hydro_enabled = true;
     int hydro_iterations = 24;       // erosion sweeps (also the halo cell radius)
     float hydro_cell_size_m = 8.0f;  // erosion grid resolution (coarse macro relief)
     float hydro_talus_height = 1.2f; // thermal stable per-cell delta (m, at cell size)
@@ -704,7 +704,7 @@ public:
 
     // wire weather-driven per-cell rain into the water solver
     // (precipitation integer-quantized at the boundary). null = OFF, byte-identical.
-    // The session owner gates this on sim.hydrology_weather (default-OFF).
+    // The session owner gates this on sim.hydrology_weather (enabled by default).
     void SetWaterWeatherRain(const Systems::WeatherSystem* weather, std::int32_t scale_mm);
 
     // water-source diagnostics passthrough (never hashed): source entities seen by the

@@ -1,7 +1,7 @@
 {
   "name": "Caverns",
   "description": "A pitted karst highland riddled with caves that open to the sky through sinkholes and cave-mouths — built to chase light shafts underground",
-  "schema_rev": 6,
+  "schema_rev": 7,
   "generation_params": {
     "terrain": {
       "base_frequency": 0.009,
@@ -21,7 +21,7 @@
         "erosion_spline": [[-1.0, 0.5], [-0.6, 0.36], [-0.35, 0.26], [0.0, 0.2], [0.4, 0.14], [1.0, 0.1]],
         "peaks_spline": [[-1.0, 0.0], [0.35, 0.1], [0.72, 0.5], [1.0, 1.0]]
       },
-      "island_mask_enabled": false,
+      "island_mask_enabled": true,
       "hydro": {
         "enabled": true,
         "iterations": 8,
@@ -38,7 +38,7 @@
       "table": "common/biomes.json",
       "temperature_frequency": 0.003,
       "humidity_frequency": 0.004,
-      "relief_enabled": false
+      "relief_enabled": true
     },
     "features": {
       "caves_enabled": true,
@@ -60,7 +60,7 @@
       "river_pv_max": -0.82,
       "river_max_carve": 10.0,
       "lakes_enabled": true,
-      "cliffs_enabled": false,
+      "cliffs_enabled": true,
       "structures_enabled": true
     }
   }

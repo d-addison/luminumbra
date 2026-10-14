@@ -270,6 +270,19 @@ RenderPipeline::~RenderPipeline() {
 
 // --- PUBLIC INTERFACE ---
 
+void RenderPipeline::set_taau_enabled(bool enabled) {
+    if (m_taau_enabled == enabled)
+        return;
+    m_taau_enabled = enabled;
+    m_taau_frame = 0;
+    m_taau_jitter_ndc = glm::vec2(0.0f);
+    m_taau_pass->invalidate_history();
+}
+
+bool RenderPipeline::taau_history_valid() const {
+    return m_taau_pass->history_valid();
+}
+
 bool RenderPipeline::startup(u32 screen_width,
                              u32 screen_height,
                              const std::filesystem::path& root_path) {

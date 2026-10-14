@@ -49,8 +49,8 @@ struct RuntimeScenarioConfig {
     bool auto_create_world = false;
     bool auto_enter_world = false;
     bool no_audio = false;
-    // Temporary release policy: only an explicit diagnostic opt-in can start audio.
-    bool enable_audio = false;
+    // Playback is enabled for ordinary launches; --no-audio takes precedence.
+    bool enable_audio = true;
     bool audio_playback_enabled() const {
         return enable_audio && !no_audio;
     }

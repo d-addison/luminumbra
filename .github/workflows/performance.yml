@@ -48,6 +48,7 @@ jobs:
         run: |
           python tools/perf/test_perf.py
           python tools/perf/test_fixture_hash.py
+          python tools/perf/test_prepare_server_comparison.py
           python tools/perf/test_render_contract.py
           python tools/perf/test_sim_budget_gate.py
           python tools/perf/test_check_residency.py
@@ -84,7 +85,7 @@ jobs:
         run: |
           env -u WAYLAND_DISPLAY XDG_SESSION_TYPE=x11 LIBGL_ALWAYS_SOFTWARE=1 \
             xvfb-run -a ctest --preset perf --no-tests=error \
-              -R '^WorldgenPreviewTest\.PerFrameRenderProducesComparableObservation$' \
+              -R '^WorldgenPreviewTest\.(PerFrameRenderProducesComparableObservation|ResolvedShippingHillsRendersWithDefaultTemporalPresentation)$' \
               --output-on-failure --output-junit performance.junit.xml
       - name: Validate measurement evidence
         if: always()
@@ -149,6 +150,10 @@ jobs:
           path: ~/.cache/ccache
           key: perf-paired-linux-x64-gcc-${{ github.event.pull_request.base.sha || github.event.before }}-${{ github.event.pull_request.head.sha || github.sha }}
           restore-keys: perf-paired-linux-x64-gcc-
+      - name: Prepare explicit common comparison workload
+        run: |
+          python3 head/tools/perf/prepare_server_comparison.py --base base --head head \
+            --receipt build/server-comparison-fixture.json
       - name: Configure identical builds
         run: |
           cmake -S base -B build/base -G Ninja \
@@ -182,7 +187,7 @@ jobs:
       # all simulation species/configuration files remain fingerprinted.
       - name: Measure base / first batch
         run: |
-          BASE_FIXTURE=$(python3 head/tools/perf/fixture_hash.py base/data/common --scope headless-server)
+          BASE_FIXTURE=$(python3 head/tools/perf/prepare_server_comparison.py --hash base/perf-common)
           python3 head/tools/perf/perf.py run \
             --workload server-smoke --workload-version 1 --layer end-to-end \
             --preset perf --build-manifest build/base/performance-build.json \
@@ -190,16 +195,17 @@ jobs:
             --mode observation --warmup 1 --samples 10 --timeout 180 \
             --parameter ticks=30 --parameter surface_radius=1 \
             --parameter collision_radius=1 --parameter seed=1337 \
-            --parameter world_preset=default --fixture-hash "$BASE_FIXTURE" \
+            --parameter world_preset=default --parameter simulation=controlled-legacy \
+            --parameter autosave_ticks=0 --fixture-hash "$BASE_FIXTURE" \
             --evidence-contract server-smoke --evidence build/base/server-smoke-evidence-1.json \
             --output build/base/server-smoke-run-1.json -- \
             cmake -E chdir base ../build/base/bin/luminumbra_server_app \
-              --smoke --preset default \
+              --smoke --root perf-common --preset default --autosave-ticks 0 \
               --seed 1337 --ticks 30 --radius 1 --collision-radius 1 \
               --artifact ../build/base/server-smoke-evidence-1.json
       - name: Measure candidate / first batch
         run: |
-          HEAD_FIXTURE=$(python3 head/tools/perf/fixture_hash.py head/data/common --scope headless-server)
+          HEAD_FIXTURE=$(python3 head/tools/perf/prepare_server_comparison.py --hash head/perf-common)
           python3 head/tools/perf/perf.py run \
             --workload server-smoke --workload-version 1 --layer end-to-end \
             --preset perf --build-manifest build/head/performance-build.json \
@@ -207,16 +213,17 @@ jobs:
             --mode observation --warmup 1 --samples 10 --timeout 180 \
             --parameter ticks=30 --parameter surface_radius=1 \
             --parameter collision_radius=1 --parameter seed=1337 \
-            --parameter world_preset=default --fixture-hash "$HEAD_FIXTURE" \
+            --parameter world_preset=default --parameter simulation=controlled-legacy \
+            --parameter autosave_ticks=0 --fixture-hash "$HEAD_FIXTURE" \
             --evidence-contract server-smoke --evidence build/head/server-smoke-evidence-1.json \
             --output build/head/server-smoke-run-1.json -- \
             cmake -E chdir head ../build/head/bin/luminumbra_server_app \
-              --smoke --preset default \
+              --smoke --root perf-common --preset default --autosave-ticks 0 \
               --seed 1337 --ticks 30 --radius 1 --collision-radius 1 \
               --artifact ../build/head/server-smoke-evidence-1.json
       - name: Measure candidate / second batch
         run: |
-          HEAD_FIXTURE=$(python3 head/tools/perf/fixture_hash.py head/data/common --scope headless-server)
+          HEAD_FIXTURE=$(python3 head/tools/perf/prepare_server_comparison.py --hash head/perf-common)
           python3 head/tools/perf/perf.py run \
             --workload server-smoke --workload-version 1 --layer end-to-end \
             --preset perf --build-manifest build/head/performance-build.json \
@@ -224,16 +231,17 @@ jobs:
             --mode observation --warmup 1 --samples 10 --timeout 180 \
             --parameter ticks=30 --parameter surface_radius=1 \
             --parameter collision_radius=1 --parameter seed=1337 \
-            --parameter world_preset=default --fixture-hash "$HEAD_FIXTURE" \
+            --parameter world_preset=default --parameter simulation=controlled-legacy \
+            --parameter autosave_ticks=0 --fixture-hash "$HEAD_FIXTURE" \
             --evidence-contract server-smoke --evidence build/head/server-smoke-evidence-2.json \
             --output build/head/server-smoke-run-2.json -- \
             cmake -E chdir head ../build/head/bin/luminumbra_server_app \
-              --smoke --preset default \
+              --smoke --root perf-common --preset default --autosave-ticks 0 \
               --seed 1337 --ticks 30 --radius 1 --collision-radius 1 \
               --artifact ../build/head/server-smoke-evidence-2.json
       - name: Measure base / second batch
         run: |
-          BASE_FIXTURE=$(python3 head/tools/perf/fixture_hash.py base/data/common --scope headless-server)
+          BASE_FIXTURE=$(python3 head/tools/perf/prepare_server_comparison.py --hash base/perf-common)
           python3 head/tools/perf/perf.py run \
             --workload server-smoke --workload-version 1 --layer end-to-end \
             --preset perf --build-manifest build/base/performance-build.json \
@@ -241,11 +249,12 @@ jobs:
             --mode observation --warmup 1 --samples 10 --timeout 180 \
             --parameter ticks=30 --parameter surface_radius=1 \
             --parameter collision_radius=1 --parameter seed=1337 \
-            --parameter world_preset=default --fixture-hash "$BASE_FIXTURE" \
+            --parameter world_preset=default --parameter simulation=controlled-legacy \
+            --parameter autosave_ticks=0 --fixture-hash "$BASE_FIXTURE" \
             --evidence-contract server-smoke --evidence build/base/server-smoke-evidence-2.json \
             --output build/base/server-smoke-run-2.json -- \
             cmake -E chdir base ../build/base/bin/luminumbra_server_app \
-              --smoke --preset default \
+              --smoke --root perf-common --preset default --autosave-ticks 0 \
               --seed 1337 --ticks 30 --radius 1 --collision-radius 1 \
               --artifact ../build/base/server-smoke-evidence-2.json
       - name: Combine interleaved batches
@@ -300,7 +309,7 @@ jobs:
       - name: Measure water base / first batch
         if: steps.water_base.outputs.supported == 'true'
         run: |
-          BASE_FIXTURE=$(python3 head/tools/perf/fixture_hash.py base/data/common --scope headless-server)
+          BASE_FIXTURE=$(python3 head/tools/perf/prepare_server_comparison.py --hash base/perf-common)
           python3 head/tools/perf/perf.py run \
             --workload water-smoke --workload-version 1 --layer simulation \
             --preset perf --build-manifest build/base/performance-build.json \
@@ -308,17 +317,18 @@ jobs:
             --mode observation --warmup 1 --samples 10 --timeout 300 \
             --parameter ticks=300 --parameter surface_radius=2 \
             --parameter collision_radius=1 --parameter seed=1337 \
-            --parameter world_preset=default --fixture-hash "$BASE_FIXTURE" \
+            --parameter world_preset=default --parameter simulation=controlled-legacy \
+            --parameter autosave_ticks=0 --fixture-hash "$BASE_FIXTURE" \
             --evidence-contract server-smoke --evidence build/base/water-smoke-evidence-1.json \
             --evidence-metric water_phase_p95_ms \
             --output build/base/water-smoke-run-1.json -- \
             cmake -E chdir base ../build/base/bin/luminumbra_server_app \
-              --water-smoke --preset default \
+              --water-smoke --root perf-common --preset default --autosave-ticks 0 \
               --seed 1337 --ticks 300 --radius 2 --collision-radius 1 \
               --artifact ../build/base/water-smoke-evidence-1.json
       - name: Measure water candidate / first batch
         run: |
-          HEAD_FIXTURE=$(python3 head/tools/perf/fixture_hash.py head/data/common --scope headless-server)
+          HEAD_FIXTURE=$(python3 head/tools/perf/prepare_server_comparison.py --hash head/perf-common)
           python3 head/tools/perf/perf.py run \
             --workload water-smoke --workload-version 1 --layer simulation \
             --preset perf --build-manifest build/head/performance-build.json \
@@ -326,17 +336,18 @@ jobs:
             --mode observation --warmup 1 --samples 10 --timeout 300 \
             --parameter ticks=300 --parameter surface_radius=2 \
             --parameter collision_radius=1 --parameter seed=1337 \
-            --parameter world_preset=default --fixture-hash "$HEAD_FIXTURE" \
+            --parameter world_preset=default --parameter simulation=controlled-legacy \
+            --parameter autosave_ticks=0 --fixture-hash "$HEAD_FIXTURE" \
             --evidence-contract server-smoke --evidence build/head/water-smoke-evidence-1.json \
             --evidence-metric water_phase_p95_ms \
             --output build/head/water-smoke-run-1.json -- \
             cmake -E chdir head ../build/head/bin/luminumbra_server_app \
-              --water-smoke --preset default \
+              --water-smoke --root perf-common --preset default --autosave-ticks 0 \
               --seed 1337 --ticks 300 --radius 2 --collision-radius 1 \
               --artifact ../build/head/water-smoke-evidence-1.json
       - name: Measure water candidate / second batch
         run: |
-          HEAD_FIXTURE=$(python3 head/tools/perf/fixture_hash.py head/data/common --scope headless-server)
+          HEAD_FIXTURE=$(python3 head/tools/perf/prepare_server_comparison.py --hash head/perf-common)
           python3 head/tools/perf/perf.py run \
             --workload water-smoke --workload-version 1 --layer simulation \
             --preset perf --build-manifest build/head/performance-build.json \
@@ -344,18 +355,19 @@ jobs:
             --mode observation --warmup 1 --samples 10 --timeout 300 \
             --parameter ticks=300 --parameter surface_radius=2 \
             --parameter collision_radius=1 --parameter seed=1337 \
-            --parameter world_preset=default --fixture-hash "$HEAD_FIXTURE" \
+            --parameter world_preset=default --parameter simulation=controlled-legacy \
+            --parameter autosave_ticks=0 --fixture-hash "$HEAD_FIXTURE" \
             --evidence-contract server-smoke --evidence build/head/water-smoke-evidence-2.json \
             --evidence-metric water_phase_p95_ms \
             --output build/head/water-smoke-run-2.json -- \
             cmake -E chdir head ../build/head/bin/luminumbra_server_app \
-              --water-smoke --preset default \
+              --water-smoke --root perf-common --preset default --autosave-ticks 0 \
               --seed 1337 --ticks 300 --radius 2 --collision-radius 1 \
               --artifact ../build/head/water-smoke-evidence-2.json
       - name: Measure water base / second batch
         if: steps.water_base.outputs.supported == 'true'
         run: |
-          BASE_FIXTURE=$(python3 head/tools/perf/fixture_hash.py base/data/common --scope headless-server)
+          BASE_FIXTURE=$(python3 head/tools/perf/prepare_server_comparison.py --hash base/perf-common)
           python3 head/tools/perf/perf.py run \
             --workload water-smoke --workload-version 1 --layer simulation \
             --preset perf --build-manifest build/base/performance-build.json \
@@ -363,12 +375,13 @@ jobs:
             --mode observation --warmup 1 --samples 10 --timeout 300 \
             --parameter ticks=300 --parameter surface_radius=2 \
             --parameter collision_radius=1 --parameter seed=1337 \
-            --parameter world_preset=default --fixture-hash "$BASE_FIXTURE" \
+            --parameter world_preset=default --parameter simulation=controlled-legacy \
+            --parameter autosave_ticks=0 --fixture-hash "$BASE_FIXTURE" \
             --evidence-contract server-smoke --evidence build/base/water-smoke-evidence-2.json \
             --evidence-metric water_phase_p95_ms \
             --output build/base/water-smoke-run-2.json -- \
             cmake -E chdir base ../build/base/bin/luminumbra_server_app \
-              --water-smoke --preset default \
+              --water-smoke --root perf-common --preset default --autosave-ticks 0 \
               --seed 1337 --ticks 300 --radius 2 --collision-radius 1 \
               --artifact ../build/base/water-smoke-evidence-2.json
       - name: Combine water interleaved batches
@@ -446,6 +459,7 @@ jobs:
             build/head/server-smoke-run-*.json
             build/head/server-smoke-evidence-*.json
             build/server-smoke-comparison.json
+            build/server-comparison-fixture.json
           if-no-files-found: error
           retention-days: 30
       - name: Upload simulation budget evidence

@@ -68,7 +68,7 @@ TEST(TerrainPresetLoaderTest, LoadsShippedDefaultPreset) {
     EXPECT_FLOAT_EQ(result.params.persistence, 0.5f);
     EXPECT_FLOAT_EQ(result.params.lacunarity, 2.0f);
     EXPECT_FLOAT_EQ(result.params.height_offset, 5.0f);
-    EXPECT_FALSE(result.params.island_mask_enabled);
+    EXPECT_TRUE(result.params.island_mask_enabled);
     EXPECT_TRUE(result.params.caves_enabled);
     EXPECT_FLOAT_EQ(result.params.cave_frequency, 0.02f);
     // Unconsumed cave fields keep the engine defaults when absent.
@@ -399,12 +399,66 @@ TEST(TerrainPresetLoaderTest, PreservesContentSwitchesAndOptionalErosionAndBiome
     for (const char* name : {"flat_lands", "temperate_forest"}) {
         const auto result = LoadTerrainPreset(PresetDir() / (std::string(name) + ".json"));
         ASSERT_TRUE(result.ok);
-        EXPECT_FALSE(result.params.hydro_enabled) << name;
-        EXPECT_FALSE(result.params.biomes_enabled) << name;
+        const bool enabled = std::string(name) == "temperate_forest";
+        EXPECT_EQ(result.params.hydro_enabled, enabled) << name;
+        EXPECT_EQ(result.params.biomes_enabled, enabled) << name;
     }
     const auto archipelago = LoadTerrainPreset(PresetDir() / "archipelago.json");
     ASSERT_TRUE(archipelago.ok);
-    EXPECT_FALSE(archipelago.params.biomes_enabled);
+    EXPECT_TRUE(archipelago.params.biomes_enabled);
 }
 
 } // namespace
+
+TEST(TerrainPresetLoaderTest, RevisionSevenDefaultsAndSixCompatibility) {
+    for (int revision : {6, 7}) {
+        auto preset = nlohmann::json::parse(kMinimalPreset);
+        preset["schema_rev"] = revision;
+        const auto parsed = LoadTerrainPresetFromJson(preset, PresetDir() / "../../../data");
+        ASSERT_TRUE(parsed.ok);
+        const bool on = revision == 7;
+        EXPECT_EQ(parsed.params.island_mask_enabled, on);
+        EXPECT_EQ(parsed.params.surface_breaks_enabled, on);
+        EXPECT_EQ(parsed.params.biomes_enabled, on);
+        EXPECT_EQ(parsed.params.biome_relief_enabled, on);
+        EXPECT_EQ(parsed.params.rivers_enabled, on);
+        EXPECT_EQ(parsed.params.lakes_enabled, on);
+        EXPECT_EQ(parsed.params.cliffs_enabled, on);
+        EXPECT_EQ(parsed.params.structures_enabled, on);
+        EXPECT_EQ(parsed.params.hydro_enabled, on);
+        auto saved = Luminumbra::world::ResolveTerrainPresetDefaults(preset);
+        saved["schema_rev"] = 7;
+        const auto reopened = LoadTerrainPresetFromJson(saved, {});
+        ASSERT_TRUE(reopened.ok);
+        EXPECT_EQ(reopened.params.island_mask_enabled, on);
+        EXPECT_EQ(reopened.params.surface_breaks_enabled, on);
+        EXPECT_EQ(reopened.params.biomes_enabled, on);
+        EXPECT_EQ(reopened.params.biome_relief_enabled, on);
+        EXPECT_EQ(reopened.params.rivers_enabled, on);
+        EXPECT_EQ(reopened.params.lakes_enabled, on);
+        EXPECT_EQ(reopened.params.cliffs_enabled, on);
+        EXPECT_EQ(reopened.params.structures_enabled, on);
+        EXPECT_EQ(reopened.params.hydro_enabled, on);
+
+        preset["generation_params"]["biomes"]["table"] = "";
+        preset["generation_params"]["terrain"]["island_mask_enabled"] = false;
+        preset["generation_params"]["terrain"]["hydro"]["enabled"] = false;
+        for (const char* key : {"surface_breaks_enabled",
+                                "rivers_enabled",
+                                "lakes_enabled",
+                                "cliffs_enabled",
+                                "structures_enabled"})
+            preset["generation_params"]["features"][key] = false;
+        const auto off = LoadTerrainPresetFromJson(preset, {});
+        ASSERT_TRUE(off.ok);
+        EXPECT_FALSE(off.params.biomes_enabled);
+        EXPECT_TRUE(off.params.biome_table_path.empty());
+        EXPECT_FALSE(off.params.island_mask_enabled);
+        EXPECT_FALSE(off.params.hydro_enabled);
+        EXPECT_FALSE(off.params.rivers_enabled);
+        EXPECT_FALSE(off.params.lakes_enabled);
+        EXPECT_FALSE(off.params.cliffs_enabled);
+        EXPECT_FALSE(off.params.structures_enabled);
+        EXPECT_FALSE(off.params.surface_breaks_enabled);
+    }
+}
