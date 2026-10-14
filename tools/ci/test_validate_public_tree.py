@@ -386,6 +386,34 @@ class PublicTreeValidatorTests(unittest.TestCase):
                                  [("numbered-pr-reference", 1)])
                 self.assertEqual(MODULE.inspect_text(path, "https://example.com/issues/12"), [])
 
+    def test_accepts_documented_pull_ref_placeholder_sentence(self):
+        text = (
+            "When a PR closes,\n"
+            "`cache-cleanup.yml` deletes caches scoped to its `refs/pull/<n>/merge` ref without\n"
+            "checking out PR code."
+        )
+        self.assertEqual(MODULE.inspect_text("docs/development.md", text), [])
+
+    def test_accepts_generic_pull_refs_and_unrelated_words(self):
+        for text in ("refs/pull/<n>/merge", "refs/pull/${{ github.event.number }}/merge",
+                     "refs/pull/*/merge", "pullback/12", "lunar"):
+            with self.subTest(text=text):
+                self.assertEqual(MODULE.inspect_text("docs/example.md", text), [])
+
+    def test_rejects_numbered_pull_refs_and_prose(self):
+        for text in ("/\x70ull/123", "refs/\x70ull/123/merge", "\x50R #12", "\x70ull request 7"):
+            with self.subTest(text=text):
+                findings = MODULE.inspect_text("docs/example.md", text)
+                self.assertEqual([(finding.rule, finding.line) for finding in findings],
+                                 [("numbered-pr-reference", 1)])
+
+    def test_development_documentation_has_no_numbered_pr_references(self):
+        path = "docs/development.md"
+        text = (MODULE_PATH.parents[2] / path).read_text(encoding="utf-8")
+        findings = MODULE.inspect_text(path, text)
+        self.assertEqual([finding for finding in findings
+                          if finding.rule == "numbered-pr-reference"], [])
+
     def test_accepts_only_actual_index_and_tuple_member_tokens(self):
         for path, text in (
             ("src/example.h", "++counts[q.\x70hase - 1];\nreturn values[\x70hase - 1].source_frame;"),
