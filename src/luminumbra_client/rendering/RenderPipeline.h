@@ -796,6 +796,9 @@ public:
     // Internal, non-persisted request. Normal worlds retain a typed refusal until
     // immutable committed authority is available. Fixtures bind explicitly.
     void set_far_world_mode(FarWorldMode requested);
+    // Startup/world-entry policy; runtime changes first reset history via
+    // set_far_world_mode. Returns the resolved request for caller diagnostics.
+    FarWorldCavePolicy set_far_world_cave_policy(std::optional<World::FarCaveMode> requested);
     const FarWorldRenderer& far_world_renderer() const {
         return *m_far_world;
     }

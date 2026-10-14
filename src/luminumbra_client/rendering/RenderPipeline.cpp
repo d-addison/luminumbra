@@ -1246,6 +1246,13 @@ void RenderPipeline::set_far_world_mode(FarWorldMode requested) {
     m_frustumCache.valid = false;
 }
 
+FarWorldCavePolicy
+RenderPipeline::set_far_world_cave_policy(std::optional<World::FarCaveMode> requested) {
+    // The renderer validates owner-thread/re-entry state, as for set_far_world_mode.
+    m_far_world->SetRequestedCavePolicy(requested);
+    return m_far_world->CavePolicy(FarWorldPurpose::World);
+}
+
 void RenderPipeline::prepare_world_swap() {
     m_far_world->PrepareWorldSwap();
     ++m_far_world_epoch;
