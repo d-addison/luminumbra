@@ -1,5 +1,5 @@
 ﻿{
-  "_comment": "SystemConfig shipping defaults enable every registered system. Explicit enabled:false opts out. sim.* may change authoritative state and contributes to the config hash; render.* is render-only and excluded from hashes.",
+  "_comment": "SystemConfig shipping defaults enable every shipping system; the far-world ladder remains opt-in. Explicit enabled:false opts out. sim.* may change authoritative state and contributes to the config hash; render.* is render-only and excluded from hashes.",
   "sim": {
     "active_regions": {"enabled": true},
     "plant_growth": { "enabled": true, "params": { "mutation_rate": 0.05 } },
@@ -58,6 +58,7 @@
     "_living_atmosphere_comment": "Live weather, aether response, and snow cover form the default living-atmosphere presentation.",
     "live_weather": { "enabled": true },
     "aether_tap": { "enabled": true },
-    "snow_cover": { "enabled": true }
+    "snow_cover": { "enabled": true },
+    "far_world_ladder": { "enabled": false, "params": { "cave_field": 0 } }
   }
 }
