@@ -185,6 +185,27 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def stage_executable(exe: Path, run_dir: Path, expected_sha256: str, cleanup: ExitStack) -> Path:
+    """Own a private copy for the whole run; never launch the mutable source path."""
+    directory = Path(cleanup.enter_context(tempfile.TemporaryDirectory(
+        prefix="executable-", dir=run_dir,
+    )))
+    snapshot = directory / exe.name
+    shutil.copy2(exe, snapshot)
+    problem = executable_identity_problem(snapshot, expected_sha256, "snapshot staging")
+    if problem is not None:
+        raise OSError(problem)
+    # Windows searches the executable directory before cwd/PATH; POSIX packages
+    # may use $ORIGIN/@loader_path. Keep adjacent runtime libraries beside the
+    # copy. The exe basename also preserves per-executable WER settings.
+    for sibling in exe.parent.iterdir():
+        library = (sibling.suffix.lower() == ".dll" if IS_WINDOWS else
+                   sibling.name.endswith((".so", ".dylib")) or ".so." in sibling.name)
+        if sibling != exe and library and sibling.is_file():
+            shutil.copy2(sibling, directory / sibling.name)
+    return snapshot
+
+
 def make_run_directory(parent: Path, stamp: str, pid: int) -> Path:
     """Create run-<stamp>-<pid> under parent; refuses (FileExistsError) if it already exists."""
     run_dir = parent / f"run-{stamp}-{pid}"
@@ -1087,7 +1108,10 @@ def run_qualification(
         else:
             print(f"error: receipt already exists; refusing to overwrite: {receipt_path}", file=sys.stderr)
             return 2
-        return run_owned_qualification(args, extra, exe, receipt_path, query, core_limits, read_pattern)
+        with ExitStack() as cleanup:
+            return run_owned_qualification(
+                args, extra, exe, receipt_path, query, core_limits, read_pattern, cleanup,
+            )
     finally:
         try:
             os.close(ownership_fd)
@@ -1103,6 +1127,7 @@ def run_owned_qualification(
     query: Callable[[str], tuple[int, str]],
     core_limits: Callable[[], tuple[int, int]] | None,
     read_pattern: Callable[[], str | None] | None,
+    cleanup: ExitStack,
 ) -> int:
     """Run only while this invocation holds exclusive receipt ownership."""
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
@@ -1112,6 +1137,8 @@ def run_owned_qualification(
         print(f"error: run directory already exists; refusing to reuse it: {receipt_path.parent}", file=sys.stderr)
         return 2
     cwd = Path(os.path.abspath(args.cwd)) if args.cwd is not None else None
+    # Staging changes only the executable path. Preserve --cwd (or the caller's
+    # cwd), including package-relative assets and relative kernel core paths.
     base_cwd = cwd if cwd is not None else Path.cwd()
 
     environment: dict[str, Any] = {
@@ -1167,11 +1194,19 @@ def run_owned_qualification(
         expected_sha256 = None
         preflight_reason = f"executable identity initial hash: {exe}: {type(exc).__name__}: {exc}"
 
+    snapshot: Path | None = None
+    if preflight_reason is None and expected_sha256 is not None:
+        try:
+            snapshot = stage_executable(exe, run_dir, expected_sha256, cleanup)
+        except OSError as exc:
+            preflight_reason = f"executable snapshot: {type(exc).__name__}: {exc}"
+
     receipt: dict[str, Any] = {
         "schema": SCHEMA,
         "label": LABEL,
-        "command": build_command(exe, args.gtest_filter, extra, Path("<iter-N>") / "gtest.json"),
-        "exe": {"path": str(exe), "sha256": expected_sha256},
+        "command": build_command(snapshot or exe, args.gtest_filter, extra, Path("<iter-N>") / "gtest.json"),
+        "exe": {"path": str(exe), "sha256": expected_sha256,
+                "snapshot_path": str(snapshot) if snapshot is not None else None},
         "platform": {
             "system": platform.system(),
             "release": platform.release(),
@@ -1198,11 +1233,12 @@ def run_owned_qualification(
         receipt["failure_reason"] = preflight_reason
         receipt["end_time"] = utc_now()
         write_receipt(receipt_path, receipt)
-        print(f"error: crash capture is not available: {preflight_reason}", file=sys.stderr)
+        print(f"error: qualification preflight failed: {preflight_reason}", file=sys.stderr)
         print(f"receipt {receipt_path}", file=sys.stderr)
         return PREFLIGHT_EXIT_CODE
 
     write_receipt(receipt_path, receipt)
+    assert snapshot is not None
     histogram: Counter[str] = Counter()
     failures = 0
     try:
@@ -1210,7 +1246,7 @@ def run_owned_qualification(
             entry = run_indexed_iteration(
                 index,
                 run_dir,
-                exe,
+                snapshot,
                 receipt["exe"]["sha256"],
                 args.gtest_filter,
                 extra,

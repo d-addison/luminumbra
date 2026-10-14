@@ -53,7 +53,25 @@ re-entry during a real fault, and WER LocalDumps production remain
 **NEEDS-NATIVE-RUN** on MSVC and MinGW. Returning continue-search alone does not
 prove a dump was produced. These C++ tests have not been run for this revision.
 
-`tools/qualify/repeat_qualification.py` holds an OS file lock on each shared core
+`tools/qualify/repeat_qualification.py` copies the executable once into a private
+temporary directory under its run directory. It checks the copy against the
+original's initial SHA-256, launches only that copy, and checks the copy again
+before and after every child. Replacing the original after staging cannot change
+the executable used by later iterations. The receipt records both the original
+path and the snapshot path; the snapshot is removed on completion or a Python
+exception, while logs and receipts remain. A forcibly killed harness may leave
+its staging directory behind.
+
+The child retains `--cwd`, or the caller's working directory when omitted. Use
+the original package directory as the working directory for package-relative
+assets. On Windows, adjacent `.dll` files are copied beside the snapshot because
+the loader searches the executable directory first; the executable's filename
+is retained for WER LocalDumps settings. DLLs and assets are not covered by the
+executable's SHA-256 identity guarantee. On POSIX, adjacent `.so` files (including
+versioned names) and `.dylib` files are also copied to retain `$ORIGIN` and
+`@loader_path` library lookup; these libraries are likewise outside that guarantee.
+
+The harness holds an OS file lock on each shared core
 or WER directory from its baseline snapshot through child exit, dump settling,
 and artifact copying. Concurrent invocations with different receipts serialize
 that interval. The persistent `.luminumbra-qualification-dumps.lock` file is

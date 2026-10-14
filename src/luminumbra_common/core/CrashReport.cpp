@@ -1,3 +1,8 @@
+#if defined(__linux__) && !defined(_GNU_SOURCE)
+// Linux ucontext register names (REG_RIP/REG_RSP) require GNU extensions.
+#define _GNU_SOURCE
+#endif
+
 #include "core/CrashReport.h"
 
 #include <array>
@@ -278,7 +283,7 @@ void ContextPcAndSp(const ucontext_t& context, std::uint64_t& pc, std::uint64_t&
 #if defined(__x86_64__)
     pc = static_cast<std::uint64_t>(context.uc_mcontext.gregs[REG_RIP]);
     sp = static_cast<std::uint64_t>(context.uc_mcontext.gregs[REG_RSP]);
-#else
+#elif defined(__aarch64__)
     pc = static_cast<std::uint64_t>(context.uc_mcontext.pc);
     sp = static_cast<std::uint64_t>(context.uc_mcontext.sp);
 #endif

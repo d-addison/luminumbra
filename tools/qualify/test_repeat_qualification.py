@@ -741,7 +741,14 @@ if os.name == "posix":
 
         def test_core_file_copy_failure_keeps_the_classified_iteration(self) -> None:
             args = self.in_process_args(1)
-            with mock.patch.object(rq.shutil, "copy2", side_effect=OSError("disk full")):
+            original_copy = rq.shutil.copy2
+
+            def fail_core_copy(source, destination):
+                if Path(source).name.startswith("core."):
+                    raise OSError("disk full")
+                return original_copy(source, destination)
+
+            with mock.patch.object(rq.shutil, "copy2", side_effect=fail_core_copy):
                 code = rq.run_qualification(
                     args,
                     ["--fake=segv_core"],
@@ -1158,6 +1165,10 @@ class WindowsDumpLockTest(unittest.TestCase):
 class QualificationSafetyTest(HarnessTestCase):
     """Deterministic receipt tests; no native child, registry, or core access."""
 
+    def setUp(self) -> None:
+        super().setUp()
+        self.original_bytes = self.exe.read_bytes()
+
     def safety_args(self, count: int = 3, allow: bool = True, folder: Path | None = None):
         arguments = ["--exe", str(self.exe), "--cwd", str(self.work),
                      "--receipt", str(self.receipt), "--count", str(count)]
@@ -1168,7 +1179,11 @@ class QualificationSafetyTest(HarnessTestCase):
         return rq.parse_args(arguments)
 
     def clean_child(self, command, cwd, env, log_path, timeout, core_target):
-        self.assertEqual(command[0], str(self.exe))
+        snapshot = Path(command[0])
+        self.assertNotEqual(snapshot, self.exe)
+        self.assertEqual(snapshot.name, self.exe.name)
+        self.assertEqual(snapshot.parent.parent, log_path.parent)
+        self.assertEqual(snapshot.read_bytes(), self.original_bytes)
         self.assertEqual(cwd, self.work)
         report = Path(next(arg.split("json:", 1)[1] for arg in command
                            if arg.startswith("--gtest_output=json:")))
@@ -1192,6 +1207,7 @@ class QualificationSafetyTest(HarnessTestCase):
         self.assertEqual(receipt["status"], status)
         self.assertIsNotNone(receipt["end_time"])
         self.assertFalse(rq.receipt_ownership_path(self.receipt).exists())
+        self.assertFalse(list(Path(receipt["run_dir"]).glob("executable-*")))
         return receipt
 
     def test_unchanged_executable_is_checked_before_and_after_every_child(self) -> None:
@@ -1199,17 +1215,22 @@ class QualificationSafetyTest(HarnessTestCase):
             code, launch = self.qualify()
         self.assertEqual(code, 0)
         self.assertEqual(launch.call_count, 3)
-        self.assertEqual(hash_file.call_count, 7)
+        self.assertEqual(hash_file.call_count, 8)
         receipt = self.assert_finalized("passed")
+        snapshot = Path(receipt["exe"]["snapshot_path"])
+        self.assertEqual(receipt["command"][0], str(snapshot))
+        self.assertEqual([call.args[0] for call in hash_file.call_args_list],
+                         [self.exe] + [snapshot] * 7)
+        self.assertTrue(all(call.args[0][0] == str(snapshot) for call in launch.call_args_list))
         self.assertTrue(all(entry["executable_identity_error"] is None for entry in receipt["iterations"]))
 
-    def test_replacement_between_iterations_refuses_next_launch(self) -> None:
+    def test_snapshot_replacement_between_iterations_refuses_next_launch(self) -> None:
         real_write = rq.write_receipt
 
         def replace_after_first_receipt(path, receipt):
             real_write(path, receipt)
             if receipt["status"] == "running" and len(receipt["iterations"]) == 1:
-                self.exe.write_bytes(b"replacement between iterations")
+                Path(receipt["exe"]["snapshot_path"]).write_bytes(b"replacement between iterations")
 
         with mock.patch.object(rq, "write_receipt", side_effect=replace_after_first_receipt):
             code, launch = self.qualify()
@@ -1227,10 +1248,10 @@ class QualificationSafetyTest(HarnessTestCase):
         self.assertIn("before launch", receipt["first_failure"]["failure_reason"])
         self.assertIn("SHA-256 mismatch", receipt["failure_reason"])
 
-    def test_replacement_during_child_fails_even_after_clean_exit(self) -> None:
+    def test_snapshot_replacement_during_child_fails_even_after_clean_exit(self) -> None:
         def replacing_child(*arguments):
             result = self.clean_child(*arguments)
-            self.exe.write_bytes(b"replacement during child")
+            Path(arguments[0][0]).write_bytes(b"replacement during child")
             return result
 
         code, launch = self.qualify(child=replacing_child)
@@ -1252,7 +1273,8 @@ class QualificationSafetyTest(HarnessTestCase):
 
     def test_unreadable_executable_before_launch_finalizes_without_child_exit(self) -> None:
         real_hash = rq.sha256_file
-        with mock.patch.object(rq, "sha256_file", side_effect=[real_hash(self.exe), PermissionError("hash denied")]):
+        digest = real_hash(self.exe)
+        with mock.patch.object(rq, "sha256_file", side_effect=[digest, digest, PermissionError("hash denied")]):
             code, launch = self.qualify()
         self.assertEqual(code, 1)
         launch.assert_not_called()
@@ -1275,7 +1297,7 @@ class QualificationSafetyTest(HarnessTestCase):
 
     def test_unreadable_executable_after_child_retains_child_exit(self) -> None:
         digest = rq.sha256_file(self.exe)
-        with mock.patch.object(rq, "sha256_file", side_effect=[digest, digest, PermissionError("hash denied")]):
+        with mock.patch.object(rq, "sha256_file", side_effect=[digest, digest, digest, PermissionError("hash denied")]):
             code, launch = self.qualify()
         self.assertEqual(code, 1)
         self.assertEqual(launch.call_count, 1)
@@ -1286,6 +1308,121 @@ class QualificationSafetyTest(HarnessTestCase):
         self.assertEqual(receipt["iterations"][0]["status"], "exit:0")
         self.assertIn("after child", receipt["failure_reason"])
         self.assertIn("PermissionError: hash denied", receipt["failure_reason"])
+
+    def test_original_replacement_between_iterations_keeps_one_verified_snapshot(self) -> None:
+        real_write = rq.write_receipt
+
+        def replace_original(path, receipt):
+            real_write(path, receipt)
+            if receipt["status"] == "running" and len(receipt["iterations"]) == 1:
+                replacement = self.exe.with_name("replacement")
+                replacement.write_bytes(b"unverified replacement")
+                os.replace(replacement, self.exe)
+
+        with mock.patch.object(rq, "write_receipt", side_effect=replace_original), \
+                mock.patch.object(rq.shutil, "copy2", wraps=rq.shutil.copy2) as copy:
+            code, launch = self.qualify()
+        self.assertEqual(code, 0)
+        self.assertEqual(launch.call_count, 3)
+        copy.assert_called_once()
+        self.assert_finalized("passed")
+
+    def test_original_replaced_after_check_before_popen_executes_verified_snapshot(self) -> None:
+        original_popen = subprocess.Popen
+        digest = hashlib.sha256(self.original_bytes).hexdigest()
+        launched = []
+
+        def replace_then_spawn_target(command, *args, **kwargs):
+            snapshot = Path(self.load_receipt()["exe"]["snapshot_path"])
+            self.assertNotEqual(snapshot, self.exe)
+            if isinstance(command, list):
+                self.assertEqual(command[0], str(snapshot))
+            else:
+                # Windows batch fixtures run through a quoted cmd.exe string.
+                self.assertIn(str(snapshot), command)
+            replacement = self.exe.with_name("replacement")
+            replacement.write_bytes(b"unverified replacement that cannot execute")
+            os.replace(replacement, self.exe)
+            self.assertEqual(hashlib.sha256(snapshot.read_bytes()).hexdigest(), digest)
+            launched.append(snapshot)
+            return original_popen(command, *args, **kwargs)
+
+        with mock.patch.object(rq.subprocess, "Popen", side_effect=replace_then_spawn_target):
+            code = rq.run_qualification(self.safety_args(count=1), [], query=lambda key: (1, ""),
+                                        core_limits=lambda: (0, 0), read_pattern=lambda: "core.%p")
+        self.assertEqual(code, 0)
+        receipt = self.assert_finalized("passed")
+        self.assertEqual(launched, [Path(receipt["exe"]["snapshot_path"])])
+        self.assertIn("fake child iteration=1", Path(receipt["iterations"][0]["log_path"]).read_text())
+
+    def test_replacement_during_copy_fails_preflight_and_cleans_snapshot(self) -> None:
+        original_copy = rq.shutil.copy2
+
+        def replacing_copy(source, destination):
+            self.exe.write_bytes(b"replacement during copy")
+            return original_copy(source, destination)
+
+        with mock.patch.object(rq.shutil, "copy2", side_effect=replacing_copy):
+            code, launch = self.qualify()
+        self.assertEqual(code, rq.PREFLIGHT_EXIT_CODE)
+        launch.assert_not_called()
+        receipt = self.assert_finalized("PREFLIGHT_FAILED")
+        self.assertIn("snapshot staging", receipt["failure_reason"])
+        self.assertIn("SHA-256 mismatch", receipt["failure_reason"])
+
+    def test_windows_snapshot_has_adjacent_dlls_and_preserves_package_cwd(self) -> None:
+        dll = self.exe.parent / "Runtime.DLL"
+        dll.write_bytes(b"runtime dependency")
+        (self.exe.parent / "assets").mkdir()
+        (self.exe.parent / "assets" / "data.bin").write_bytes(b"package asset")
+        self.work = self.exe.parent
+
+        def packaged_child(*arguments):
+            snapshot = Path(arguments[0][0])
+            self.assertEqual((snapshot.parent / dll.name).read_bytes(), dll.read_bytes())
+            self.assertEqual((arguments[1] / "assets" / "data.bin").read_bytes(), b"package asset")
+            return self.clean_child(*arguments)
+
+        code, _ = self.qualify(child=packaged_child)
+        self.assertEqual(code, 0)
+        self.assert_finalized("passed")
+
+    def test_snapshot_cleanup_after_aborted_child(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "child aborted"):
+            self.qualify(child=mock.Mock(side_effect=RuntimeError("child aborted")))
+        self.assert_finalized("aborted")
+
+    def test_posix_snapshot_keeps_adjacent_runtime_libraries(self) -> None:
+        libraries = [self.exe.parent / name for name in
+                     ("libsteam_api.so", "libshared.so.1.2", "libshared.dylib")]
+        for library in libraries:
+            library.write_bytes(library.name.encode("utf-8"))
+
+        def packaged_child(*arguments):
+            directory = Path(arguments[0][0]).parent
+            for library in libraries:
+                self.assertEqual((directory / library.name).read_bytes(), library.read_bytes())
+            return self.clean_child(*arguments)
+
+        with mock.patch.object(rq, "IS_WINDOWS", False), \
+                mock.patch.object(rq, "run_iteration", side_effect=packaged_child):
+            code = rq.run_qualification(self.safety_args(), [], core_limits=lambda: (0, 0),
+                                        read_pattern=lambda: "core.%p")
+        self.assertEqual(code, 0)
+        self.assert_finalized("passed")
+
+    def test_snapshot_preserves_inherited_cwd(self) -> None:
+        args = self.safety_args(count=1)
+        args.cwd = None
+
+        def inherited_child(command, cwd, *arguments):
+            self.assertIsNone(cwd)
+            return self.clean_child(command, self.work, *arguments)
+
+        code, _ = self.qualify(args=args, child=inherited_child)
+        self.assertEqual(code, 0)
+        receipt = self.assert_finalized("passed")
+        self.assertEqual(receipt["cwd"], str(Path.cwd()))
 
     def dump_query(self, folder: Path):
         return lambda key: (0, WerPreflightTest.reg_output(str(folder)))
