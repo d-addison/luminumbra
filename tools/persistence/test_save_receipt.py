@@ -172,17 +172,24 @@ class SaveReceiptContract(unittest.TestCase):
 
     def test_symlink_is_rejected(self) -> None:
         link = self.tree / "link.bin"
-        try:
-            os.symlink(self.tree / "b.bin", link)
-        except OSError as error:
-            if (error.errno not in (errno.EPERM, errno.EACCES, errno.ENOSYS, errno.EOPNOTSUPP)
-                    and getattr(error, "winerror", None) not in (1, 50, 1314)):
-                raise
-            self.skipTest(f"Symlink creation is unavailable: {error}")
-        with self.assertRaises(save_receipt.ReceiptError):
-            save_receipt.snapshot(self.tree)
-        code, _, _ = _run(["snapshot", str(self.tree), "--out", str(self.base / "link.json")])
-        self.assertEqual(code, 2)
+        with contextlib.ExitStack() as stack:
+            try:
+                os.symlink(self.tree / "b.bin", link)
+            except OSError as error:
+                if (error.errno not in (errno.EPERM, errno.EACCES, errno.ENOSYS, errno.EOPNOTSUPP)
+                        and getattr(error, "winerror", None) not in (1, 50, 1314)):
+                    raise
+                # DirEntry reports the link before the walker reads its target.
+                entry = mock.Mock(name="symlink entry")
+                entry.name = link.name
+                entry.is_symlink.return_value = True
+                scandir = stack.enter_context(mock.patch.object(save_receipt.os, "scandir"))
+                scandir.return_value.__enter__.side_effect = lambda: iter([entry])
+            with self.assertRaisesRegex(save_receipt.ReceiptError, "symlink"):
+                save_receipt.snapshot(self.tree)
+            code, _, err = _run(["snapshot", str(self.tree), "--out", str(self.base / "link.json")])
+            self.assertEqual(code, 2)
+            self.assertIn("symlink", err)
 
     def test_reparse_points_are_rejected_without_symlink_privilege(self) -> None:
         status = mock.Mock(st_mode=self.tree.stat().st_mode, st_file_attributes=0x400)
