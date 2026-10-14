@@ -1,4 +1,5 @@
 #include "GBufferPass.h"
+#include "../FarWorldReplay.h"
 #include "../GBufferTargets.h"
 #include "StaticDrawPass.h"
 #include <luminumbra/rendering/StaticScene.h>
@@ -270,6 +271,21 @@ void GBufferPass::reset_shaders() {
 GBufferDrawStats GBufferPass::execute(const RenderContext& ctx,
                                       entt::registry& registry,
                                       const GBufferPassInput& input) {
+    // ON already populated persistent mesh caches. Keep reused per-dispatch
+    // scratch exactly as ON left it, including when a later stage throws.
+    auto restore = [this,
+                    groups = ctx.frozen_replay ? m_visibleGroups : decltype(m_visibleGroups){},
+                    memo = ctx.frozen_replay ? m_resolveMemo : decltype(m_resolveMemo){},
+                    impostors =
+                        ctx.frozen_replay ? m_impostorInstances : decltype(m_impostorInstances){},
+                    replay = ctx.frozen_replay]() mutable noexcept {
+        if (replay) {
+            m_visibleGroups.swap(groups);
+            m_resolveMemo.swap(memo);
+            m_impostorInstances.swap(impostors);
+        }
+    };
+    ReplayRollback rollback(std::move(restore));
     GBufferDrawStats stats;
     const bool authored = input.authored_draws && !input.authored_draws->draws.empty();
     if (authored) {
@@ -277,6 +293,8 @@ GBufferDrawStats GBufferPass::execute(const RenderContext& ctx,
             ctx.internal_w() != ctx.screen_width || ctx.internal_h() != ctx.screen_height)
             throw std::invalid_argument(
                 "Authored static draws require exact view, scale 1 and TAAU disabled");
+        if (ctx.frozen_replay && (!m_authored_pass || !m_gbuffer.authored_texture))
+            throw std::logic_error("Replay cannot allocate authored resources");
         if (!m_authored_pass)
             m_authored_pass = std::make_unique<StaticDrawPass>(input.root_path);
         if (!m_gbuffer.authored_texture) {
@@ -288,6 +306,7 @@ GBufferDrawStats GBufferPass::execute(const RenderContext& ctx,
     const Camera& camera = *ctx.camera;
 
     glBindFramebuffer(GL_FRAMEBUFFER, m_gbuffer.fbo_id);
+    PreserveReplayObject(ReplayObjectKind::Framebuffer, m_gbuffer.fbo_id);
     {
         GLenum buffers[6] = {GL_COLOR_ATTACHMENT0,
                              GL_COLOR_ATTACHMENT1,
@@ -360,15 +379,19 @@ void GBufferPass::geometry_pass_chunks(const RenderContext& ctx,
 
     if (!UseDrawProgram(shader.get(), stats))
         return;
-    glm::mat4 projection = ReversedZPerspective(glm::radians(camera.Zoom),
-                                                (float)ctx.screen_width / (float)ctx.screen_height,
-                                                camera.GetNearPlane(),
-                                                camera.GetFarPlane());
+    glm::mat4 projection = ctx.gbuffer_projection;
     glm::mat4 view = camera.GetViewMatrix();
-    //  TAAU: sub-pixel jitter the projection (0 when TAAU off -> byte-identical).
+    // Ladder writers share the exact projection inverted by the depth readers.
+    // Preserve the original projection/jitter arithmetic for compatibility paths.
     const glm::vec2 taau_jit = ctx.taau_jitter_ndc;
-    projection[2][0] += taau_jit.x;
-    projection[2][1] += taau_jit.y;
+    if (!ctx.far_world_ladder) {
+        projection = ReversedZPerspective(glm::radians(camera.Zoom),
+                                          (float)ctx.screen_width / (float)ctx.screen_height,
+                                          camera.GetNearPlane(),
+                                          camera.GetFarPlane());
+        projection[2][0] += taau_jit.x;
+        projection[2][1] += taau_jit.y;
+    }
 
     shader->setMat4("projection", projection);
     shader->setMat4("view", view);
@@ -455,6 +478,7 @@ void GBufferPass::geometry_pass_chunks(const RenderContext& ctx,
         [&uniforms](const FarWorldDrawCommand& command) { return uniforms.Prepare(command); });
     stats.far_region_draws += far_stats.draws;
     stats.far_indices += far_stats.indices;
+    stats.far_water_indices += far_stats.water_indices;
 
     glBindVertexArray(0);
 }
@@ -549,18 +573,22 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
                          : m_static_far_uniforms;
 
     const auto _sp_t0 = std::chrono::steady_clock::now(); // CPU submit cost
-    m_last_static_prop_cpu_ms = 0.0;
+    if (!ctx.frozen_replay)
+        m_last_static_prop_cpu_ms = 0.0;
     if (!UseDrawProgram(shader.get(), stats))
         return;
     uniforms.Reset();
     const glm::mat4 static_view = camera.GetViewMatrix();
     const glm::vec2 static_taau_jit = ctx.taau_jitter_ndc; //  TAAU (0 when off)
-    glm::mat4 static_proj = ReversedZPerspective(glm::radians(camera.Zoom),
-                                                 (float)ctx.screen_width / (float)ctx.screen_height,
-                                                 camera.GetNearPlane(),
-                                                 camera.GetFarPlane());
-    static_proj[2][0] += static_taau_jit.x;
-    static_proj[2][1] += static_taau_jit.y;
+    glm::mat4 static_proj = ctx.gbuffer_projection;
+    if (!ctx.far_world_ladder) {
+        static_proj = ReversedZPerspective(glm::radians(camera.Zoom),
+                                           (float)ctx.screen_width / (float)ctx.screen_height,
+                                           camera.GetNearPlane(),
+                                           camera.GetFarPlane());
+        static_proj[2][0] += static_taau_jit.x;
+        static_proj[2][1] += static_taau_jit.y;
+    }
     shader->setMat4("projection", static_proj);
     shader->setMat4("view", static_view);
     shader->setMat4("u_prev_view_proj",
@@ -621,8 +649,11 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
     // static-mesh population changes (props are scattered once -> usually a no-op).
     {
         const std::size_t pop = registry.view<const Components::StaticMeshComponent>().size();
-        if (pop != m_staticPropCachePopulation)
+        if (pop != m_staticPropCachePopulation) {
+            if (ctx.frozen_replay)
+                throw std::logic_error("Replay cannot rebuild static residency");
             build_static_prop_cache(registry);
+        }
     }
     // groups carry the material id (per-group uniform). tree rendering: each
     // instance picks a LOD bucket from its camera distance (SelectTreeLod) and the
@@ -644,6 +675,8 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
     auto resolve_mesh = [&](const std::string& candidatePath,
                             const std::string& basePath) -> std::pair<Mesh*, std::string> {
         if (m_meshCache.find(candidatePath) == m_meshCache.end()) {
+            if (ctx.frozen_replay)
+                throw std::logic_error("Replay cannot change mesh residency");
             std::string full = (input.root_path / candidatePath).string();
             // Only load the LOD variant if it exists on disk; an absent.lodN.lmesh caches a
             // null and falls back to LOD0 SILENTLY (no MeshLoader "failed header" error spam).
@@ -655,6 +688,8 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
             return {m, candidatePath};
         if (candidatePath != basePath) {
             if (m_meshCache.find(basePath) == m_meshCache.end()) {
+                if (ctx.frozen_replay)
+                    throw std::logic_error("Replay cannot change mesh residency");
                 std::string full = (input.root_path / basePath).string();
                 m_meshCache[basePath] = MeshLoader::Load(full);
             }
@@ -815,6 +850,7 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
             const GLsizei instance_count = static_cast<GLsizei>(std::min<std::size_t>(
                 matrices.size() - offset, static_cast<std::size_t>(kStaticInstanceCapacity)));
             glBindVertexArray(mesh->vao);
+            PreserveReplayObject(ReplayObjectKind::VertexArray, mesh->vao);
             glBindBuffer(GL_ARRAY_BUFFER, m_instanceMatrixVBO);
             glBufferSubData(GL_ARRAY_BUFFER,
                             0,
@@ -888,9 +924,10 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
             glEnable(GL_CULL_FACE);
     }
 
-    m_last_static_prop_cpu_ms =
-        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - _sp_t0)
-            .count();
+    if (!ctx.frozen_replay)
+        m_last_static_prop_cpu_ms =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - _sp_t0)
+                .count();
 }
 
 void GBufferPass::geometry_pass_skinned_meshes(const RenderContext& ctx,
@@ -917,13 +954,15 @@ void GBufferPass::geometry_pass_skinned_meshes(const RenderContext& ctx,
     uniforms.Reset();
     const glm::mat4 skinned_view = camera.GetViewMatrix();
     const glm::vec2 skinned_taau_jit = ctx.taau_jitter_ndc; //  TAAU (0 when off)
-    glm::mat4 skinned_proj =
-        ReversedZPerspective(glm::radians(camera.Zoom),
-                             (float)ctx.screen_width / (float)ctx.screen_height,
-                             camera.GetNearPlane(),
-                             camera.GetFarPlane());
-    skinned_proj[2][0] += skinned_taau_jit.x;
-    skinned_proj[2][1] += skinned_taau_jit.y;
+    glm::mat4 skinned_proj = ctx.gbuffer_projection;
+    if (!ctx.far_world_ladder) {
+        skinned_proj = ReversedZPerspective(glm::radians(camera.Zoom),
+                                            (float)ctx.screen_width / (float)ctx.screen_height,
+                                            camera.GetNearPlane(),
+                                            camera.GetFarPlane());
+        skinned_proj[2][0] += skinned_taau_jit.x;
+        skinned_proj[2][1] += skinned_taau_jit.y;
+    }
     shader->setMat4("projection", skinned_proj);
     shader->setMat4("view", skinned_view);
     shader->setMat4("u_prev_view_proj", ctx.prev_view_proj); //  TAAU motion vectors
@@ -971,6 +1010,8 @@ void GBufferPass::geometry_pass_skinned_meshes(const RenderContext& ctx,
         auto const& player = view.get<const anim::AnimationPlayerComponent>(entity);
 
         if (m_skinnedMeshCache.find(mesh_info.meshPath) == m_skinnedMeshCache.end()) {
+            if (ctx.frozen_replay)
+                throw std::logic_error("Replay cannot change skinned residency");
             std::string full_mesh_path = (input.root_path / mesh_info.meshPath).string();
             m_skinnedMeshCache[mesh_info.meshPath] = MeshLoader::LoadSkinned(full_mesh_path);
         }
@@ -1010,6 +1051,8 @@ void GBufferPass::geometry_pass_skinned_meshes(const RenderContext& ctx,
         const std::size_t palette_bytes = player.palette.size() * sizeof(float);
         glBindBuffer(GL_SHADER_STORAGE_BUFFER, m_jointPaletteSSBO);
         if (palette_bytes > m_jointPaletteSSBOCapacityBytes) {
+            if (ctx.frozen_replay)
+                throw std::logic_error("Replay cannot grow joint storage");
             m_jointPaletteSSBOCapacityBytes = palette_bytes;
             glBufferData(GL_SHADER_STORAGE_BUFFER,
                          static_cast<GLsizeiptr>(palette_bytes),

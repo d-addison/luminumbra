@@ -1,4 +1,5 @@
 #version 450 core
+#include "far_world_position.glsl"
 #include "config_constants.gen.glsl"
 out vec4 FragColor;
 
@@ -408,7 +409,8 @@ float computeSkyVisibility(vec3 viewPosFrag, vec3 viewNrm) {
         if (clip.w <= 0.0) break;               // behind eye -> stop
         vec2 uv = (clip.xy / clip.w) * 0.5 + 0.5;
         if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) break; // off-screen = treat as open
-        vec3 sampPos = texture(gPosition, uv).rgb;
+        vec3 sampPos = vec3(0.0);
+        if (!farWorldPosition(gPosition, u_sceneDepth, uv, sampPos)) continue;
         // gPosition is 0 where nothing was rendered (sky); skip those (open).
         if (dot(sampPos, sampPos) < 1e-6) continue;
         // The ray point p and the stored surface sampPos share the same screen
@@ -436,7 +438,11 @@ void main() {
     bool authored = authoredSurface.a > 0.5;
     // --- Step 1: Decode compressed G-Buffer ---
 
-    vec3 viewPos = texture(gPosition, TexCoords).rgb;
+    vec3 viewPos = vec3(0.0);
+    if (!farWorldPosition(gPosition, u_sceneDepth, TexCoords, viewPos)) {
+        FragColor = vec4(0.0);
+        return;
+    }
 
     // Decode octahedral normal and material ID
     vec4 normalData = texture(gNormalMaterial, TexCoords);

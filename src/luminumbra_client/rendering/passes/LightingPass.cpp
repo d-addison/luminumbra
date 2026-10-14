@@ -1,4 +1,5 @@
 #include "LightingPass.h"
+#include "../FarWorldReplay.h"
 #include "../RenderingDefaults.h"
 
 #include "../EnvironmentBrdfLut.gen.h"
@@ -159,6 +160,7 @@ void LightingPass::copy_lighting_color_to_opaque_texture(const RenderContext& ct
     }
 
     glBindFramebuffer(GL_READ_FRAMEBUFFER, m_lighting_fbo.fbo_id);
+    PreserveReplayObject(ReplayObjectKind::Framebuffer, m_lighting_fbo.fbo_id);
     glReadBuffer(GL_COLOR_ATTACHMENT0);
     glBindTexture(GL_TEXTURE_2D, m_lighting_fbo.opaque_color_texture);
     glCopyTexSubImage2D(GL_TEXTURE_2D,
@@ -200,6 +202,8 @@ void LightingPass::execute(const RenderContext& ctx) {
     glClearDepth(0.0);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
     m_lighting_shader->use();
+    m_lighting_shader->setInt("u_farWorldLadder", ctx.far_world_ladder ? 1 : 0);
+    m_lighting_shader->setMat4("u_gbufferInverseProjection", ctx.gbuffer_inverse_projection);
     m_lighting_shader->setInt("u_staticStudio", ctx.static_studio ? 1 : 0);
     m_lighting_shader->setVec3("u_studioBackground", ctx.studio_background);
     m_lighting_shader->setInt("u_authoredEnabled", ctx.authored_surface.id != 0 ? 1 : 0);
@@ -359,7 +363,8 @@ void LightingPass::execute(const RenderContext& ctx) {
     // env knob ("enabled,maxDist,floor,steps,thickness"). The probe needs the
     // same projection the SSAO pass builds, plus the screen size.
     {
-        m_lighting_shader->setMat4("u_projection", projection);
+        m_lighting_shader->setMat4("u_projection",
+                                   ctx.far_world_ladder ? ctx.gbuffer_projection : projection);
         m_lighting_shader->setVec2(
             "u_screenSize",
             glm::vec2(ctx.internal_w(), ctx.internal_h())); // cave AO marches the internal G-buffer
@@ -443,6 +448,8 @@ void LightingPass::execute_lightning_overlay(const RenderContext& ctx) {
 
     // Lazily build the overlay program on first strike.
     if (!m_lightning_overlay_shader) {
+        if (ctx.frozen_replay)
+            return;
         m_lightning_overlay_shader = std::make_unique<Shader>(
             (m_root_path / "res/shaders/lightning_overlay.vert").string().c_str(),
             (m_root_path / "res/shaders/lightning_overlay.frag").string().c_str());
@@ -462,6 +469,8 @@ void LightingPass::execute_lightning_overlay(const RenderContext& ctx) {
 
     // (Re)allocate the scene-copy texture if the framebuffer size changed.
     if (m_lightning_scene_copy == 0 || m_lightning_copy_w != w || m_lightning_copy_h != h) {
+        if (ctx.frozen_replay)
+            return;
         if (m_lightning_scene_copy != 0) {
             glDeleteTextures(1, &m_lightning_scene_copy);
             m_lightning_scene_copy = 0;
@@ -483,6 +492,7 @@ void LightingPass::execute_lightning_overlay(const RenderContext& ctx) {
     // Snapshot the composited (lit + sky + water + particles) FBO color into the
     // scratch texture; the overlay reads it and writes the additive result back.
     glBindFramebuffer(GL_READ_FRAMEBUFFER, m_lighting_fbo.fbo_id);
+    PreserveReplayObject(ReplayObjectKind::Framebuffer, m_lighting_fbo.fbo_id);
     glReadBuffer(GL_COLOR_ATTACHMENT0);
     glBindTexture(GL_TEXTURE_2D, m_lightning_scene_copy);
     glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, w, h);
