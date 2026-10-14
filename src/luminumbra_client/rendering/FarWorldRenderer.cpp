@@ -161,6 +161,9 @@ FarWorldRenderer::BindFixture(JobSystem& jobs,
     } catch (const std::bad_alloc&) {
         Drain();
         return refusal_ = FarWorldRefusal::AdmissionFailed;
+    } catch (...) {
+        Drain();
+        throw;
     }
 }
 FarWorldSelection FarWorldRenderer::Selection(FarWorldPurpose purpose,
@@ -616,6 +619,8 @@ void FarWorldRenderer::Drain() {
     fixture_.reset();
     ownership_gpu_charge_.reset();
     ownership_.Begin(0);
+    // Free retained scratch before its charge, including failed bindings.
+    std::vector<World::FarTileKey>{}.swap(wanted_);
     integration_charge_.reset();
     memory_.reset();
     ledgers_ = {};
