@@ -138,9 +138,13 @@ the owned worker stops. A request arriving after publication observes success.
 Use these RPC operations within the same session to inspect or cancel live jobs;
 independent CLI invocations cannot take over another session's project lock.
 
-One service owns a project per host. Linux uses `flock`; Windows uses a kernel
-mutex. These locks do not coordinate simultaneous Windows/Linux access or different
-path aliases. Use a canonical project path and trusted local collaborators.
+One service owns a project. Linux uses `flock`; Windows uses a nonblocking
+exclusive byte-range lock on `.luminumbra-author/session.lock`. The Windows lock
+coordinates logon sessions through the same file and uses the project's file
+access controls. Any thread can close it; release failures are reported and can
+be retried. Filesystems that cannot provide byte-range locks refuse acquisition.
+Simultaneous Windows/Linux access is not qualified. Use a canonical project path
+and trusted local collaborators.
 Source writers should publish sidecars atomically and advance revisions; arbitrary
 concurrent hostile filesystem mutation is outside this profile.
 
@@ -181,6 +185,11 @@ automatically deleted. Garbage collection and power-loss durability are future
 work; an atomic pointer does not imply a durable directory fsync on every host.
 Startup marks interrupted jobs failed, except when their generation pointer
 already committed. That case recovers as success after hash verification.
+Recovery runs only after acquiring the project lock. Receiptless directories and
+interrupted jobs move intact to timestamped directories under
+`.luminumbra-author/quarantine/`; interrupted jobs retain a failed receipt under
+`jobs/` for status queries. Quarantine preserves all files and is never deleted
+automatically. Completed jobs and committed generations remain in place.
 
 Receipts record the host/Python profile, source/dependency hashes, exporter metadata through the hashed
 sidecar, service-code hashes, compiler/library identities, settings, outputs and

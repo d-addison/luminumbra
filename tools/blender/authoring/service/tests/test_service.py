@@ -1,4 +1,5 @@
 """Fault injection for publication; native compiler acceptance is a separate lane."""
+import errno
 import json
 import os
 from pathlib import Path
@@ -21,6 +22,7 @@ from luminumbra_author.__main__ import dispatch
 from luminumbra_author.contracts import (ASSET, PROFILE, PREFAB_PROFILE, TOOLCHAIN, Refusal, atomic_json,
                                          canonical, digest, read_json, validate_asset)
 from luminumbra_author.formats import mesh_info, clip_info, validate_glb
+from luminumbra_author.locking import ProjectLock, WindowsFileLock
 from luminumbra_author.service import BuildService, TERMINAL
 from package import build as package_build
 
@@ -38,6 +40,194 @@ def triangle(count=1):
     vertices = b"".join(struct.pack("<8f", x, y, 0, 0, 0, 1, x, y)
                         for x, y in ((0, 0), (1, 0), (0, 1)))
     return header + vertices + struct.pack("<3I", 0, 1, 2) * count
+
+
+class FileLockBackend:
+    """Inject handle ownership and release failures without host dependencies."""
+    def __init__(self):
+        self.owners = {}
+        self.attempts = []
+        self.release_threads = []
+        self.release_error = None
+
+    def acquire(self, stream):
+        self.attempts.append(stream)
+        key = Path(stream.name).resolve()
+        if key in self.owners:
+            raise BlockingIOError(errno.EAGAIN, "Project is locked")
+        self.owners[key] = stream
+
+    def release(self, stream):
+        if self.release_error is not None:
+            raise self.release_error
+        key = Path(stream.name).resolve()
+        if self.owners.get(key) is not stream:
+            raise OSError("Handle does not own the lock")
+        del self.owners[key]
+        self.release_threads.append(threading.get_ident())
+
+
+class Locking(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.project = Path(self.temp.name)
+        self.lockfile = self.project / "session.lock"
+        self.backend = FileLockBackend()
+
+    def open(self, backend=None):
+        lock = ProjectLock(self.project, self.lockfile,
+                           backend=self.backend if backend is None else backend)
+        self.addCleanup(lock.close)
+        return lock
+
+    def close_from_threads(self, lock, count=1):
+        errors = []
+        ready = threading.Barrier(count + 1)
+        def close():
+            try:
+                ready.wait(timeout=5)
+                lock.close()
+            except Exception as error:
+                errors.append(error)
+        threads = [threading.Thread(target=close) for _ in range(count)]
+        for thread in threads:
+            thread.start()
+        ready.wait(timeout=5)
+        for thread in threads:
+            thread.join(timeout=5)
+            self.assertFalse(thread.is_alive())
+        self.assertEqual(errors, [])
+
+    def test_cross_thread_release_and_double_close(self):
+        owner_thread = threading.get_ident()
+        lock = self.open()
+        self.close_from_threads(lock)
+        lock.close()
+        self.assertTrue(lock.closed)
+        self.assertTrue(lock.stream.closed)
+        self.assertEqual(len(self.backend.release_threads), 1)
+        self.assertNotEqual(self.backend.release_threads[0], owner_thread)
+        self.open()
+
+    def test_concurrent_close_releases_once(self):
+        lock = self.open()
+        self.close_from_threads(lock, count=4)
+        self.assertEqual(len(self.backend.release_threads), 1)
+        self.open()
+
+    def test_contention_closes_only_the_failed_handle(self):
+        lock = self.open()
+        with self.assertRaises(BlockingIOError):
+            self.open()
+        self.assertTrue(self.backend.attempts[-1].closed)
+        self.assertFalse(lock.stream.closed)
+        self.assertEqual(self.backend.release_threads, [])
+        lock.close()
+        self.open()
+
+    def test_release_error_propagates_and_can_be_retried(self):
+        lock = self.open()
+        error = OSError("Injected unlock failure")
+        self.backend.release_error = error
+        try:
+            with self.assertRaises(OSError) as caught:
+                lock.close()
+            self.assertIs(caught.exception, error)
+            self.assertFalse(lock.closed)
+            self.assertFalse(lock.stream.closed)
+            with self.assertRaises(BlockingIOError):
+                self.open()
+        finally:
+            self.backend.release_error = None
+        self.close_from_threads(lock)
+        lock.close()
+        self.assertEqual(len(self.backend.release_threads), 1)
+        self.open()
+
+    def test_handle_close_error_propagates_without_unlocking_twice(self):
+        lock = self.open()
+        with patch.object(lock.stream, "close", side_effect=OSError("Injected close failure")):
+            with self.assertRaisesRegex(OSError, "Injected close failure"):
+                lock.close()
+        self.assertFalse(lock.closed)
+        lock.close()
+        self.assertTrue(lock.closed)
+        self.assertEqual(len(self.backend.release_threads), 1)
+
+    def test_windows_backend_uses_nonblocking_byte_zero_and_surfaces_errors(self):
+        runtime = SimpleNamespace(LK_NBLCK=1, LK_UNLCK=0)
+        calls = []
+        def locking(fd, mode, size):
+            calls.append((fd, mode, size, stream.tell()))
+        runtime.locking = locking
+        with self.lockfile.open("a+b") as stream, patch.dict(sys.modules, msvcrt=runtime):
+            stream.seek(23)
+            backend = WindowsFileLock()
+            backend.acquire(stream)
+            stream.seek(42)
+            backend.release(stream)
+            self.assertEqual(calls, [(stream.fileno(), 1, 1, 0), (stream.fileno(), 0, 1, 0)])
+            with patch.object(runtime, "locking", side_effect=OSError(errno.EACCES, "Locked")):
+                with self.assertRaises(BlockingIOError):
+                    backend.acquire(stream)
+                with self.assertRaises(PermissionError):
+                    backend.release(stream)
+            error = OSError(errno.EBADF, "Invalid handle")
+            with patch.object(runtime, "locking", side_effect=error):
+                with self.assertRaises(OSError) as caught:
+                    backend.acquire(stream)
+                self.assertIs(caught.exception, error)
+
+    @unittest.skipUnless(os.name == "nt", "Windows file locking")
+    def test_windows_lock_releases_from_another_thread(self):
+        lock = self.open(WindowsFileLock())
+        with self.assertRaises(BlockingIOError):
+            self.open(WindowsFileLock())
+        self.close_from_threads(lock)
+        lock.close()
+        self.open(WindowsFileLock())
+
+    @unittest.skipUnless(os.name == "nt", "Windows file locking")
+    def test_windows_lock_contends_with_another_process(self):
+        lock = self.open(WindowsFileLock())
+        script = """
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from luminumbra_author.locking import ProjectLock
+project = Path(sys.argv[2])
+try:
+    lock = ProjectLock(project, project / 'session.lock')
+except BlockingIOError:
+    sys.exit(2)
+lock.close()
+"""
+        command = [sys.executable, "-I", "-B", "-c", script,
+                   str(Path(__file__).resolve().parents[1]), str(self.project)]
+        result = subprocess.run(command, capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 2, result.stderr)
+        lock.close()
+        result = subprocess.run(command, capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    @unittest.skipUnless(os.name == "nt", "Windows file locking")
+    def test_windows_process_exit_releases_lock(self):
+        script = """
+import os
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from luminumbra_author.locking import ProjectLock
+project = Path(sys.argv[2])
+lock = ProjectLock(project, project / 'session.lock')
+os._exit(7)
+"""
+        result = subprocess.run([sys.executable, "-I", "-B", "-c", script,
+                                 str(Path(__file__).resolve().parents[1]), str(self.project)],
+                                capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 7, result.stderr)
+        self.open(WindowsFileLock())
 
 
 class Project(unittest.TestCase):
@@ -777,6 +967,166 @@ class Project(unittest.TestCase):
         self.assertEqual(recovered.status(first["job_id"])["status"], "failed")
         self.assertEqual(recovered.status(second["job_id"])["status"], "succeeded")
         self.assertEqual(recovered.generation()["job_id"], second["job_id"])
+
+    def test_recovery_quarantines_stale_jobs_only_after_lock_acquisition(self):
+        backend = FileLockBackend()
+        def project_lock(project, lockfile):
+            return ProjectLock(project, lockfile, backend=backend)
+        with patch.object(service_module, "ProjectLock", side_effect=project_lock):
+            service = self.open()
+            committed = self.success(service)
+            pointer = (service.root / "current.json").read_bytes()
+            generation = service.generation()
+            missing = service.root / "jobs" / ("1" * 32)
+            interrupted = service.root / "jobs" / ("2" * 32)
+            for directory in (missing, interrupted):
+                directory.mkdir()
+                (directory / "source.data").write_bytes(b"Preserve this user data")
+                (directory / "outputs").mkdir()
+                (directory / "outputs" / "partial.data").write_bytes(b"Unfinished output")
+            original = {**committed, "job_id": interrupted.name, "status": "compiling"}
+            atomic_json(interrupted / "receipt.json", original)
+            before = {directory.name: {path.relative_to(directory): path.read_bytes()
+                      for path in directory.rglob("*") if path.is_file()}
+                      for directory in (missing, interrupted)}
+            with self.assertRaises(Refusal) as caught:
+                self.open()
+            self.assertEqual(caught.exception.finding["rule_id"], "session.busy")
+            self.assertFalse((service.root / "quarantine").exists())
+            self.assertTrue(missing.is_dir())
+            self.assertEqual(read_json(interrupted / "receipt.json"), original)
+            service.close()
+            recovered = self.open()
+            quarantined = list((service.root / "quarantine").iterdir())
+            self.assertEqual(len(quarantined), 1)
+            self.assertRegex(quarantined[0].name, r"^[0-9]{8}T[0-9]{6}Z(?:-[0-9]+)?$")
+            self.assertEqual({path.name for path in quarantined[0].iterdir()}, set(before))
+            for directory in quarantined[0].iterdir():
+                self.assertEqual({path.relative_to(directory): path.read_bytes()
+                                  for path in directory.rglob("*") if path.is_file()},
+                                 before[directory.name])
+            self.assertFalse(missing.exists())
+            self.assertEqual([path.name for path in interrupted.iterdir()], ["receipt.json"])
+            self.assertEqual(recovered.status(interrupted.name)["status"], "failed")
+            self.assertEqual(recovered.status(interrupted.name)["findings"][0]["rule_id"], "job.orphaned")
+            self.assertEqual(recovered.status(committed["job_id"]), committed)
+            self.assertEqual((service.root / "current.json").read_bytes(), pointer)
+            self.assertEqual(recovered.generation(), generation)
+            recovered.close()
+            reopened = self.open()
+            self.assertEqual(reopened.status(interrupted.name)["status"], "failed")
+            self.assertEqual(list((reopened.root / "quarantine").iterdir()), quarantined)
+
+    def test_recovery_preserves_empty_and_populated_quarantine_collisions(self):
+        service = self.open()
+        service.close()
+        quarantine = service.root / "quarantine"
+        quarantine.mkdir()
+        stamp = "20000101T000000Z"
+        empty = quarantine / stamp
+        populated = quarantine / f"{stamp}-1"
+        empty.mkdir()
+        populated.mkdir()
+        (populated / "nested").mkdir()
+        canary = populated / "nested" / "source.data"
+        canary.write_bytes(b"Preserve existing quarantine data")
+        entries = [empty, populated, *populated.rglob("*")]
+        before = {path: path.stat() for path in entries}
+        stale = [service.root / "jobs" / (digit * 32) for digit in ("1", "2")]
+        for directory in stale:
+            directory.mkdir()
+            (directory / "source.data").write_bytes(directory.name.encode())
+        with patch.object(service_module.time, "strftime", return_value=stamp):
+            recovered = self.open()
+            container = quarantine / f"{stamp}-2"
+            self.assertEqual(set(quarantine.iterdir()), {empty, populated, container})
+            self.assertEqual({path.name for path in container.iterdir()},
+                             {path.name for path in stale})
+            for directory in stale:
+                self.assertFalse(directory.exists())
+                self.assertEqual((container / directory.name / "source.data").read_bytes(),
+                                 directory.name.encode())
+            self.assertEqual(list((recovered.root / "jobs").iterdir()), [])
+            recovered.close()
+            # Another pass in the same second must allocate its own container.
+            later = service.root / "jobs" / ("3" * 32)
+            later.mkdir()
+            (later / "source.data").write_bytes(b"Later recovery")
+            reopened = self.open()
+            fresh = quarantine / f"{stamp}-3"
+            self.assertEqual(set(quarantine.iterdir()), {empty, populated, container, fresh})
+            self.assertEqual([path.name for path in fresh.iterdir()], [later.name])
+            self.assertEqual((fresh / later.name / "source.data").read_bytes(), b"Later recovery")
+            self.assertEqual(list((reopened.root / "jobs").iterdir()), [])
+        for path, info in before.items():
+            with self.subTest(path=path.relative_to(quarantine)):
+                after = path.stat()
+                self.assertEqual((after.st_dev, after.st_ino, after.st_mtime_ns),
+                                 (info.st_dev, info.st_ino, info.st_mtime_ns))
+        self.assertEqual(list(empty.iterdir()), [])
+        self.assertEqual(set(populated.rglob("*")), {populated / "nested", canary})
+        self.assertEqual(canary.read_bytes(), b"Preserve existing quarantine data")
+        for directory in stale:
+            self.assertEqual((container / directory.name / "source.data").read_bytes(),
+                             directory.name.encode())
+
+    def test_recovery_reclaims_receiptless_jobs_before_retained_limit(self):
+        service = self.open()
+        service.close()
+        for index in range(257):
+            (service.root / "jobs" / f"{index:032x}").mkdir()
+        recovered = self.open()
+        self.assertEqual(list((service.root / "jobs").iterdir()), [])
+        containers = list((service.root / "quarantine").iterdir())
+        self.assertEqual(len(containers), 1)
+        self.assertEqual({path.name for path in containers[0].iterdir()},
+                         {f"{index:032x}" for index in range(257)})
+        self.success(recovered)
+
+    def test_recovery_refuses_linked_quarantine_and_preserves_stale_job(self):
+        service = self.open()
+        service.close()
+        stale = service.root / "jobs" / ("1" * 32)
+        stale.mkdir()
+        (stale / "source.data").write_bytes(b"Keep")
+        outside = self.root / "outside"
+        outside.mkdir()
+        (outside / "canary").write_bytes(b"Untouched")
+        try:
+            (service.root / "quarantine").symlink_to(outside, target_is_directory=True)
+        except OSError as error:
+            self.skipTest(f"Directory symlink capability unavailable: {error}")
+        with self.assertRaises(Refusal) as caught:
+            self.open()
+        self.assertEqual(caught.exception.finding["rule_id"], "path.symlink")
+        self.assertEqual((stale / "source.data").read_bytes(), b"Keep")
+        self.assertEqual([path.name for path in outside.iterdir()], ["canary"])
+        self.assertEqual((outside / "canary").read_bytes(), b"Untouched")
+        quarantine = service.root / "quarantine"
+        (quarantine.rmdir if os.name == "nt" else quarantine.unlink)()
+        self.open()
+
+    def test_close_surfaces_lock_release_error_and_retries_after_shutdown(self):
+        backend = FileLockBackend()
+        def project_lock(project, lockfile):
+            return ProjectLock(project, lockfile, backend=backend)
+        with patch.object(service_module, "ProjectLock", side_effect=project_lock):
+            service = self.open()
+            backend.release_error = OSError("Injected unlock failure")
+            try:
+                with self.assertRaisesRegex(OSError, "Injected unlock failure"):
+                    service.close()
+                self.assertTrue(service.closed)
+                self.assertFalse(service.project_lock.closed)
+                with self.assertRaises(Refusal) as caught:
+                    self.open()
+                self.assertEqual(caught.exception.finding["rule_id"], "session.busy")
+            finally:
+                backend.release_error = None
+            service.close()
+            service.close()
+            self.assertEqual(len(backend.release_threads), 1)
+            self.open()
 
     def test_exclusive_project_lock_and_cleanup(self):
         first = self.open()

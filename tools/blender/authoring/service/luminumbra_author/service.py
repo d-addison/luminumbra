@@ -83,6 +83,7 @@ class BuildService:
         except BlockingIOError as error:
             raise Refusal("session.busy", "Another authoring service owns this project.") from error
         self.mutex = threading.RLock()
+        self.close_mutex = threading.Lock()
         self.jobs, self.cancellations = {}, {}
         self.closed = False
         try:
@@ -102,15 +103,17 @@ class BuildService:
         atomic_json(self.root / "jobs" / job["job_id"] / "receipt.json", job)
 
     def _recover(self):
+        # Acquiring session.lock first proves no prior service still owns jobs.
         current = self.current()
         paths = list((self.root / "jobs").iterdir())
-        require(len(paths) <= 256, "job.limit", "Project reached the retained-job limit.")
+        container = None
         for path in paths:
-            require(path.is_dir() and not path.is_symlink() and JOB_ID.fullmatch(path.name),
+            require(path.is_dir() and not path_is_link(path) and JOB_ID.fullmatch(path.name),
                     "state.invalid", "Unexpected entry in the job directory.")
             receipt = path / "receipt.json"
             if not receipt.exists():
                 # Crash between making a private job directory and recording it.
+                container = self._quarantine_job(path, container)
                 continue
             job = read_json(relative_path(path, "receipt.json"))
             require(job.get("schema") == RECEIPT and job.get("job_id") == path.name
@@ -122,9 +125,34 @@ class BuildService:
                 job.update(status="succeeded", recovery="Publication committed before service exit.")
                 self._save(job)
             elif job["status"] not in TERMINAL:
+                container = self._quarantine_job(path, container)
+                # Keep status queryable without retaining abandoned work here.
+                path.mkdir()
                 job.update(status="failed", findings=[Refusal(
                     "job.orphaned", "Service exited before publication; submit a new build.").finding])
                 self._save(job)
+        require(len(self.jobs) <= 256, "job.limit", "Project reached the retained-job limit.")
+
+    def _quarantine_job(self, path, container):
+        quarantine = self.root / "quarantine"
+        for directory in (self.root, self.root / "jobs", path, quarantine):
+            require(not path_is_link(directory), "path.symlink", "Invalid quarantine path.")
+        quarantine.mkdir(exist_ok=True)
+        require(quarantine.is_dir() and quarantine.resolve().is_relative_to(self.root),
+                "state.invalid", "Quarantine must be a directory inside authoring state.")
+        if container is None:
+            stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+            counter = 0
+            while True:
+                container = quarantine / (stamp if counter == 0 else f"{stamp}-{counter}")
+                try:
+                    os.mkdir(container)
+                    break
+                except FileExistsError:
+                    counter += 1
+        # Rename the entire directory, preserving receipts and all user data.
+        path.rename(container / path.name)
+        return container
 
     def capabilities(self):
         return {"version": VERSION, "protocol": 1, "mode": "NATIVE", "profiles": [PROFILE, PREFAB_PROFILE],
@@ -533,12 +561,12 @@ class BuildService:
             return manifest
 
     def close(self):
-        with self.mutex:
-            if self.closed:
-                return
-            self.closed = True
-            for job_id, event in self.cancellations.items():
-                if self.jobs[job_id]["status"] not in TERMINAL:
-                    event.set()
-        self.executor.shutdown(wait=True, cancel_futures=False)
-        self.project_lock.close()
+        with self.close_mutex:
+            with self.mutex:
+                self.closed = True
+                for job_id, event in self.cancellations.items():
+                    if self.jobs[job_id]["status"] not in TERMINAL:
+                        event.set()
+            self.executor.shutdown(wait=True, cancel_futures=False)
+            # Retry a failed release even though submissions are already closed.
+            self.project_lock.close()
