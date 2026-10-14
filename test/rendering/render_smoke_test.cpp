@@ -4717,12 +4717,57 @@ TEST(RenderSmokeTest, FarWorldOwnedUploadIndexedSubmissionAndRelativeOrigin) {
     glClearBufferfv(GL_COLOR, 0, clear);
     GLuint query = 0;
     glGenQueries(1, &query);
+    // Ladder vertex/index SSBO aliases must preserve both indexed ranges and
+    // the independently bound generic target on successful and failed draws.
+    GLint alignment = 0;
+    glGetIntegerv(GL_SHADER_STORAGE_BUFFER_OFFSET_ALIGNMENT, &alignment);
+    ASSERT_GT(alignment, 0);
+    GLuint sentinel = 0;
+    glGenBuffers(1, &sentinel);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, sentinel);
+    glBufferData(GL_SHADER_STORAGE_BUFFER,
+                 2 * static_cast<GLsizeiptr>(alignment) + 256,
+                 nullptr,
+                 GL_DYNAMIC_DRAW);
+    glBindBufferRange(GL_SHADER_STORAGE_BUFFER, 5, sentinel, alignment, 256);
+    glBindBufferRange(GL_SHADER_STORAGE_BUFFER, 6, sentinel, 2 * alignment, 128);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+    const auto expect_aliases_restored = [&] {
+        for (GLuint binding = 5; binding <= 6; ++binding) {
+            GLint buffer = 0;
+            GLint64 start = 0, size = 0;
+            glGetIntegeri_v(GL_SHADER_STORAGE_BUFFER_BINDING, binding, &buffer);
+            glGetInteger64i_v(GL_SHADER_STORAGE_BUFFER_START, binding, &start);
+            glGetInteger64i_v(GL_SHADER_STORAGE_BUFFER_SIZE, binding, &size);
+            EXPECT_EQ(static_cast<GLuint>(buffer), sentinel);
+            EXPECT_EQ(start, static_cast<GLint64>(binding - 4) * alignment);
+            EXPECT_EQ(size, binding == 5 ? 256 : 128);
+        }
+        GLint generic = -1;
+        glGetIntegerv(GL_SHADER_STORAGE_BUFFER_BINDING, &generic);
+        EXPECT_EQ(generic, 0);
+    };
     glBeginQuery(GL_PRIMITIVES_GENERATED, query);
     EXPECT_TRUE(DrawFarVolumeGpu(*allocation, driver));
     glEndQuery(GL_PRIMITIVES_GENERATED);
     GLuint primitives = 0;
     glGetQueryObjectuiv(query, GL_QUERY_RESULT, &primitives);
     EXPECT_EQ(primitives, 1u);
+    expect_aliases_restored();
+    GLuint incomplete_fbo = 0;
+    glGenFramebuffers(1, &incomplete_fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, incomplete_fbo);
+    ASSERT_NE(glCheckFramebufferStatus(GL_FRAMEBUFFER), GL_FRAMEBUFFER_COMPLETE);
+    // This deliberate draw error is consumed by the adapter; keep the context's
+    // unexpected-error callback active for every other operation.
+    glDisable(GL_DEBUG_OUTPUT);
+    const bool failed_draw = DrawFarVolumeGpu(*allocation, driver);
+    glEnable(GL_DEBUG_OUTPUT);
+    EXPECT_FALSE(failed_draw);
+    expect_aliases_restored();
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    glDeleteFramebuffers(1, &incomplete_fbo);
     std::array<float, 4> pixel{};
     glReadBuffer(GL_COLOR_ATTACHMENT0);
     glReadPixels(32, 32, 1, 1, GL_RGBA, GL_FLOAT, pixel.data());
@@ -4733,6 +4778,10 @@ TEST(RenderSmokeTest, FarWorldOwnedUploadIndexedSubmissionAndRelativeOrigin) {
     EXPECT_EQ(glGetError(), GL_NO_ERROR);
     // All stores disappear before the exact captured context is destroyed.
     allocation.reset();
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 5, 0);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 6, 0);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+    glDeleteBuffers(1, &sentinel);
     glDeleteQueries(1, &query);
     glUseProgram(0);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
@@ -4850,14 +4899,16 @@ public:
                        std::span<const FarWorldLiveCell> cells = {},
                        bool arrival = false,
                        glm::vec2 child_y = {0, 256},
-                       int arrival_child = -1) {
+                       int arrival_child = -1,
+                       bool prepend_triangle = false) {
         const auto centre = origin + glm::dvec3(local_centre);
         const auto relative = glm::vec3(centre - camera);
         const auto view = glm::lookAt(glm::vec3(0), relative, glm::vec3(0, 1, 0));
         FarVolumeRenderMesh mesh;
         mesh.content = Luminumbra::World::FarVolumeContent::Mixed;
-        // The tested local boundary coordinate is constant at all three vertices,
-        // so perspective interpolation preserves the same canonical boundary.
+        // The tested coordinate is constant at all three vertices. Production
+        // restores it from the indexed triangle: smooth perspective interpolation
+        // alone can move a nonzero constant one ULP below its canonical boundary.
         for (const auto& corner :
              std::array{glm::vec2(-2, -2), glm::vec2(2, -2), glm::vec2(0, 2)}) {
             auto local = local_centre;
@@ -4866,6 +4917,17 @@ public:
             mesh.vertices.push_back({local, {0, 0, 1}, 1});
         }
         mesh.indices = {0, 1, 2};
+        if (prepend_triangle) {
+            // A clipped first primitive and reordered visible indices exercise
+            // the source primitive ID and indexed lookup.
+            const auto offscreen = glm::transpose(glm::mat3(view)) * glm::vec3(100000, 0, 0);
+            for (std::size_t i = 0; i < 3; ++i) {
+                auto vertex = mesh.vertices[i];
+                vertex.position += offscreen;
+                mesh.vertices.push_back(vertex);
+            }
+            mesh.indices = {3, 4, 5, 2, 0, 1};
+        }
         return Draw(
             mesh, origin, view, 1040, cells, false, arrival, child_y, camera, false, arrival_child);
     }
@@ -5175,6 +5237,35 @@ TEST(RenderSmokeTest, FarWorldCanonicalTileLocalsOwnExactCellsWithFractionalCame
     }
 }
 
+TEST(RenderSmokeTest, FarWorldIndexedPlanesPreserveVaryingAxes) {
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    FarWorldShaderProbe probe;
+    ASSERT_TRUE(probe.Init());
+    const glm::dvec3 origin(-1024, -256, -1024);
+    const glm::dvec3 camera(-53.39f, -67.13f, 43.21f);
+    const std::array owner{FarWorldLiveCell{-1, -2, -13, 0}};
+    const std::array lower{FarWorldLiveCell{-2, -2, -13, 0}};
+    const auto sample = [&](glm::vec3 local, int plane_axis, auto cells) {
+        return probe.TileBoundary(
+            origin, local, camera, plane_axis, cells, false, {0, 256}, -1, true);
+    };
+    // The second primitive has an exact X boundary even though its vertex
+    // indices are reordered. The clipped first primitive has different locals.
+    const glm::vec3 local(1008, 232, 824);
+    EXPECT_EQ(sample(local, 0, owner), 0);
+    EXPECT_NEAR(sample(local, 0, lower),
+                -static_cast<float>(glm::length(origin + glm::dvec3(local) - camera)),
+                .01);
+    // Hold Y constant and let X cross the boundary within the triangle. Only
+    // Y may be restored; taking a flat vertex or rounding X would misown a side.
+    const glm::vec3 below(1007.875f, 232, 824), above(1008.125f, 232, 824);
+    EXPECT_EQ(sample(below, 1, lower), 0);
+    EXPECT_LT(sample(below, 1, owner), -176);
+    EXPECT_LT(sample(above, 1, lower), -176);
+    EXPECT_EQ(sample(above, 1, owner), 0);
+}
+
 TEST(RenderSmokeTest, FarWorldCanonicalArrivalUsesLocalChildAndSpanBoundaries) {
     HiddenGlContext context;
     ASSERT_TRUE(context.ready()) << context.error();
@@ -5248,7 +5339,7 @@ TEST(RenderSmokeTest, FarWorldCanonicalArrivalOwnsTileEdgesAndUpperSpan) {
             SCOPED_TRACE(::testing::Message() << "axis=" << axis << " translation=" << translation);
             glm::vec3 local(600, 264, 600);
             local[axis] = axis == 1 ? 512.0f : 0.0f;
-            // R1.1/Q20: lower XZ tile edges are included. Built Y samples
+            // Lower XZ tile edges are included. Built Y samples
             // include the upper span boundary (docs/far-volume-generation.md).
             EXPECT_EQ(probe.TileBoundary(origin, local, camera, axis, {}, true, child_y), 0);
             auto inside = local;
