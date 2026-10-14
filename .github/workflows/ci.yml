@@ -4,7 +4,7 @@ on:
   push:
     branches: [main, devel]
   pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
     branches: [main, devel]
   workflow_dispatch:
     inputs:
@@ -35,10 +35,21 @@ env:
 jobs:
   linux:
     name: Linux / GCC
-    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    # Keep this existing required check red on drafts: job-level skips can
+    # satisfy GitHub branch protection before the ready run finishes.
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
+      - name: Reject draft pull requests
+        shell: bash
+        env:
+          CI_EVENT_NAME: ${{ github.event_name }}
+          CI_PR_DRAFT: ${{ github.event.pull_request.draft }}
+        run: |
+          if [ "$CI_EVENT_NAME" = "pull_request" ] && [ "$CI_PR_DRAFT" != "false" ]; then
+            echo "::error::Draft pull requests cannot merge. Mark ready for review and wait for the full checks."
+            exit 1
+          fi
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Verify manual qualification identity and dependencies
@@ -105,7 +116,7 @@ jobs:
           if-no-files-found: error
           retention-days: 30
       - name: Upload test evidence
-        if: always()
+        if: always() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: linux-gcc-test-evidence-${{ github.sha }}
@@ -117,7 +128,7 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
       - name: Upload installed prefab generations and receipts
-        if: always()
+        if: always() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: linux-gcc-prefab-runtime-${{ github.sha }}
@@ -648,6 +659,7 @@ jobs:
           python3 tools/ci/test_validate_public_tree.py
           python3 tools/ci/test_check_docs.py
           python3 tools/ci/test_check_ctest_junit.py
+          python3 tools/ci/test_workflow_policy.py
           python3 tools/ci/test_tidy_cache.py
           python3 tools/ci/test_validate_visual_catalog.py
           python3 tools/ci/validate_visual_catalog.py
