@@ -12,15 +12,19 @@ A --client path ending in .py runs with the current interpreter; the tests use t
 to drive a fake client. Importing this module has no side effects.
 """
 import argparse
+import hashlib
 import json
 import math
 import os
-from pathlib import Path
 import re
 import shutil
+import struct
 import subprocess
 import sys
+import tempfile
+from pathlib import Path
 
+import perf
 import plan_qualification as planner
 import qualification_matrix as matrix_lib
 import render_budget
@@ -35,6 +39,8 @@ DEFAULT_TIMEOUT_SECONDS = 900
 CHECKER_TIMEOUT_SECONDS = 120
 FLOOR_FAILURE_EXIT = 4
 QUALIFICATION_NAME = 'qualification.json'
+LOCK_NAME = '.qualification.lock'
+BUILD_SCHEMA = 'luminumbra.performance_build.v1'
 EXPANDED_REASON = 'requires far_coverage evidence from the far-world runtime workstream'
 REFRESH_TEXT = re.compile(r'[0-9]{1,4}')
 SETTINGS_NAME = 'settings'
@@ -134,15 +140,17 @@ def adapter_triple(data):
     return {key: adapter.get(key) for key in ('vendor', 'renderer', 'version')}
 
 
-def finish(cell, state, reason, artifact, verdict=None, *, checker_canonical):
+def finish(cell, state, reason, artifact, verdict=None, *, checker_canonical,
+           out_dir, matrix_canonical, client_evidence):
     """Cell result; the artifact path and adapter are reported only when the file exists."""
     present = Path(artifact).is_file()
-    return dict(id=cell['id'], workload=cell['workload'], kind=cell['kind'],
-                warmup_frames=cell['warmup_frames'], measured_frames=cell['measured_frames'],
-                script=cell['script'], state=state, reason=reason,
-                adapter=adapter_triple(read_json_object(artifact)) if present else None,
-                artifact=str(artifact) if present else None, verdict=verdict,
-                checker_canonical=checker_canonical)
+    return {'id': cell['id'], 'workload': cell['workload'], 'kind': cell['kind'],
+                'warmup_frames': cell['warmup_frames'], 'measured_frames': cell['measured_frames'],
+                'script': cell['script'], 'state': state, 'reason': reason,
+                'adapter': adapter_triple(read_json_object(artifact)) if present else None,
+                'artifact': Path(artifact).relative_to(out_dir).as_posix() if present else None,
+                'verdict': verdict, 'checker_canonical': checker_canonical,
+                'matrix_canonical': matrix_canonical, 'client': client_evidence}
 
 
 def binding_mismatch(cell, data):
@@ -163,6 +171,8 @@ def binding_mismatch(cell, data):
 
 def verdict_reason(verdict, data, cell):
     """None when a checker-passed verdict reconciles with the capture and cell, else the reason."""
+    # --verdict-out writes render_budget.evaluate(data), a full v1 envelope, despite
+    # the checker's local variable being named 'floor'. Do not accept a bare floor.
     if not isinstance(verdict, dict) or any(key not in verdict for key in VERDICT_KEYS):
         return 'verdict missing/malformed'
     floor = verdict['floor']
@@ -215,6 +225,8 @@ def valid_adapter(adapter):
 
 def canonical_record(result):
     """True when the cell is bound to its id and carries exactly the canonical semantics."""
+    if result.get('matrix_canonical') is not True:
+        return False
     cell_id = result['id']
     parts = cell_id.split('.') if isinstance(cell_id, str) else []
     if len(parts) != 3 or cell_id not in canonical_cell_ids():
@@ -237,66 +249,311 @@ def canonical_record(result):
 def cell_qualifies(result):
     """A cell counts toward qualification only with a complete, canonical, passing record
     that was checked by the canonical checker."""
-    return (result['state'] == 'pass' and valid_adapter(result['adapter'])
+    client = result.get('client') or {}
+    return (client.get('kind') == 'native' and client.get('native_build') is True
+            and client.get('sha256_verified') is True
+            and isinstance(client.get('sha256'), str)
+            and re.fullmatch(r'[0-9a-f]{64}', client['sha256']) is not None
+            and client['sha256'] == client.get('build_manifest_client_sha256')
+            and result['state'] == 'pass' and valid_adapter(result['adapter'])
             and result['adapter']['renderer'] == CANONICAL_RENDERER
             and result['artifact'] is not None and verdict_passes(result['verdict'])
             and result['checker_canonical'] is True and canonical_record(result))
 
 
+def matrix_identity(matrix, path=planner.DEFAULT_MATRIX):
+    """Hash all matrix content, including poses/provenance, against the repo matrix."""
+    def digest(value):
+        payload = json.dumps(value, sort_keys=True, separators=(',', ':'),
+                             allow_nan=False).encode('utf-8')
+        return hashlib.sha256(payload).hexdigest()
+
+    sha256 = digest(matrix)
+    canonical_sha256 = digest(matrix_lib.load_matrix(planner.DEFAULT_MATRIX))
+    canonical = (Path(path).resolve() == planner.DEFAULT_MATRIX.resolve()
+                 and sha256 == canonical_sha256)
+    return {'sha256': sha256, 'canonical_sha256': canonical_sha256, 'canonical': canonical}
+
+
+def load_build_manifest(path):
+    """Existing performance-build schema, extended with the built client's SHA-256."""
+    if path is None:
+        return None
+    try:
+        before = runner.file_sha256(path)
+        document = read_json_object(path)
+        if document is None or document.get('schema') != BUILD_SCHEMA:
+            raise ValueError('schema must be ' + BUILD_SCHEMA)
+        # Reuse the repo's compiler/configuration validation for this same schema.
+        perf.load_build_manifest(Path(path))
+        system = document.get('system')
+        if (not isinstance(system, dict)
+                or any(not isinstance(system.get(key), str) or not system[key]
+                       for key in ('name', 'processor'))):
+            raise ValueError('system identity is incomplete')
+        client = document.get('client')
+        if (not isinstance(client, dict) or set(client) != {'sha256'}
+                or not isinstance(client['sha256'], str)
+                or re.fullmatch(r'[0-9a-f]{64}', client['sha256']) is None):
+            raise ValueError('client must contain a lowercase SHA-256 in client.sha256')
+        if runner.file_sha256(path) != before:
+            raise ValueError('manifest changed while being read')
+        return {'sha256': before, 'client_sha256': client['sha256']}
+    except (OSError, ValueError, UnicodeError) as error:
+        raise UsageError(f'--build-manifest: {error}') from error
+
+
+def native_executable(path):
+    """Require an executable image, excluding formats dispatched through interpreters."""
+    path = Path(path)
+    script_suffixes = {'.bat', '.cmd', '.com', '.ps1', '.py', '.pyw', '.sh', '.bash',
+                       '.csh', '.zsh', '.fish', '.pl', '.rb', '.js', '.vbs', '.wsf'}
+    if (path.suffix.lower() in script_suffixes
+            or path.resolve().suffix.lower() in script_suffixes
+            or (os.name == 'nt' and path.suffix.lower() != '.exe')
+            or not os.access(path, os.X_OK)):
+        return False
+    with path.open('rb') as source:
+        size = os.fstat(source.fileno()).st_size
+
+        def read(offset, count):
+            if offset < 0 or offset + count > size:
+                return b''
+            source.seek(offset)
+            return source.read(count)
+
+        header = read(0, 64)
+        if len(header) != 64:
+            return False
+        if header[:2] == b'MZ':
+            pe_offset = struct.unpack_from('<I', header, 60)[0]
+            coff = read(pe_offset, 24)
+            if pe_offset < 64 or len(coff) != 24 or coff[:4] != b'PE\0\0':
+                return False
+            machine, sections = struct.unpack_from('<HH', coff, 4)
+            optional_size, flags = struct.unpack_from('<HH', coff, 20)
+            optional = read(pe_offset + 24, optional_size)
+            if (machine not in (0x14c, 0x8664, 0xaa64) or not 1 <= sections <= 96
+                    or not flags & 0x0002 or flags & 0x2000
+                    or len(optional) < 96):
+                return False
+            magic = struct.unpack_from('<H', optional)[0]
+            minimum = {0x10b: 96, 0x20b: 112}.get(magic)
+            if minimum is None or len(optional) < minimum:
+                return False
+            directories = struct.unpack_from('<I', optional, minimum - 4)[0]
+            if directories > 16 or minimum + directories * 8 > len(optional):
+                return False
+            entry, = struct.unpack_from('<I', optional, 16)
+            image_size, headers_size = struct.unpack_from('<II', optional, 56)
+            table_offset = pe_offset + 24 + optional_size
+            table = read(table_offset, sections * 40)
+            if (len(table) != sections * 40 or not 0 < entry < image_size
+                    or not table_offset + len(table) <= headers_size <= size):
+                return False
+            executable_entry = False
+            for offset in range(0, len(table), 40):
+                virtual_size, address, raw_size, raw_offset = struct.unpack_from(
+                    '<IIII', table, offset + 8)
+                section_flags, = struct.unpack_from('<I', table, offset + 36)
+                if raw_size and (raw_offset < headers_size or raw_offset + raw_size > size):
+                    return False
+                executable_entry |= (bool(section_flags & 0x20000000)
+                                     and address <= entry < address + max(virtual_size, raw_size))
+            return executable_entry
+        if header[:4] == b'\x7fELF':
+            if header[4] not in (1, 2) or header[5] not in (1, 2) or header[6] != 1:
+                return False
+            endian = '<' if header[5] == 1 else '>'
+            kind, machine, version = struct.unpack_from(endian + 'HHI', header, 16)
+            wide = header[4] == 2
+            entry, phoff = struct.unpack_from(endian + ('QQ' if wide else 'II'), header, 24)
+            ehsize, phsize, phnum = struct.unpack_from(endian + 'HHH', header, 52 if wide else 40)
+            return (kind in (2, 3) and machine != 0 and version == 1 and entry != 0
+                    and ehsize == (64 if wide else 52) and phsize == (56 if wide else 32)
+                    and phnum > 0 and ehsize <= phoff and phoff + phsize * phnum <= size)
+
+        def macho(offset, length):
+            header = read(offset, 32)
+            formats = {b'\xfe\xed\xfa\xce': ('>', 28), b'\xce\xfa\xed\xfe': ('<', 28),
+                       b'\xfe\xed\xfa\xcf': ('>', 32), b'\xcf\xfa\xed\xfe': ('<', 32)}
+            if len(header) != 32 or header[:4] not in formats:
+                return False
+            endian, header_size = formats[header[:4]]
+            filetype, commands, command_size = struct.unpack_from(endian + 'III', header, 12)
+            return (filetype == 2 and commands > 0 and command_size >= commands * 8
+                    and header_size + command_size <= length)
+
+        if header[:4] in (b'\xca\xfe\xba\xbe', b'\xbe\xba\xfe\xca'):
+            endian = '>' if header[:4] == b'\xca\xfe\xba\xbe' else '<'
+            count, = struct.unpack_from(endian + 'I', header, 4)
+            table = read(8, count * 20) if 1 <= count <= 64 else b''
+            if not table:
+                return False
+            for index in range(count):
+                offset, length = struct.unpack_from(endian + 'II', table, index * 20 + 8)
+                if offset < 8 + len(table) or offset + length > size or not macho(offset, length):
+                    return False
+            return True
+        return macho(0, size)
+
+
+def run_client_process(command, *, client, build_manifest, **kwargs):
+    """Add client-code identity to the existing receipt without changing its runner."""
+    script = str(client).endswith('.py')
+    path = (Path(client).resolve() if script else
+            runner.resolve_executable(command[0], kwargs['cwd'], kwargs['environment']))
+    sha256 = runner.file_sha256(path)
+    native = not script and native_executable(path)
+    identity = {'sha256': sha256, 'sha256_verified': False, 'native_build': False,
+                    'kind': 'native' if native else 'script', 'reason': 'client_not_native_build',
+                    'build_manifest_client_sha256': None if build_manifest is None else
+                    build_manifest['client_sha256'],
+                    'build_manifest_sha256': None if build_manifest is None else
+                    build_manifest['sha256']}
+    errors = []
+    try:
+        completed, errors = runner.run_process(command, **kwargs)
+    finally:
+        receipt = read_json_object(kwargs['receipt_path'])
+        if receipt is not None:
+            try:
+                verified = runner.file_sha256(path) == sha256
+            except OSError as error:
+                verified = False
+                errors.append(f'client identity read: {error}')
+            if not script:
+                verified = verified and receipt.get('binary_sha256') == sha256
+            identity['sha256_verified'] = verified
+            if not verified:
+                errors.append('client SHA-256 changed or disagrees with process receipt')
+            if native:
+                identity['reason'] = ('build_manifest_missing' if build_manifest is None
+                                      else 'client_build_hash_mismatch')
+                if (verified and build_manifest is not None
+                        and build_manifest['client_sha256'] == sha256):
+                    identity.update(native_build=True, reason=None)
+            receipt.update(client_path=str(path), client=identity)
+            try:
+                capture_path = receipt.get('capture_path')
+                if capture_path is not None:
+                    receipt['capture_path'] = Path(capture_path).relative_to(
+                        Path(kwargs['receipt_path']).parent.parent).as_posix()
+                receipt['evidence_errors'] = list(dict.fromkeys(
+                    receipt.get('evidence_errors', []) + errors))
+                runner.atomic_write(kwargs['receipt_path'],
+                                    (json.dumps(receipt, indent=2) + '\n').encode('utf-8'))
+            except OSError as error:
+                errors.append(f'client identity evidence: {error}')
+        else:
+            errors.append('client identity: process receipt missing/malformed')
+    return completed, errors, identity
+
+
 def check_command(cell, *, matrix, artifact, verdict_path, root, python, checker):
-    """Checker argv: the matrix checker command with the script swapped and floor flags."""
+    """Checker argv: the matrix checker command with fixed-view report checks."""
     command = matrix_lib.checker_command(
-        cell, artifact=artifact, qualified_renderer=matrix['qualified_renderer'],
+        cell, artifact=artifact, verdict=verdict_path,
+        qualified_renderer=matrix['qualified_renderer'],
         root=root, python=python)
     command[1] = str(checker)
     if cell['kind'] == 'fixed_view':
         command += list(FIXED_VIEW_CHECK_FLAGS) + ['--fov', str(EXPECTED_FOV)]
-    return command + ['--enforce-floor', '--verdict-out', str(verdict_path)]
+    return command
+
+
+def capture_ownership(receipt, retained, capture, out_dir):
+    """Return a refusal reason unless the receipt owns the retained capture bytes."""
+    if receipt is None or receipt.get('schema') != runner.RECEIPT_SCHEMA:
+        return 'capture evidence: process receipt missing/malformed'
+    if receipt.get('capture_status') != 'retained':
+        return 'capture evidence: capture not retained'
+    if (receipt.get('outcome') != 'returned' or receipt.get('return_code') != 0
+            or receipt.get('evidence_errors')):
+        return 'capture evidence: process receipt unsuccessful'
+    if receipt.get('capture_path') != retained.relative_to(out_dir).as_posix():
+        return 'capture evidence: retained path mismatch'
+    command = receipt.get('command')
+    if not isinstance(command, list) or command.count('--render-benchmark') != 1:
+        return 'capture evidence: capture command missing/malformed'
+    index = command.index('--render-benchmark') + 1
+    if index >= len(command) or command[index] != str(capture):
+        return 'capture evidence: capture command path mismatch'
+    try:
+        digest = runner.file_sha256(retained)
+        if digest != receipt.get('capture_sha256') or digest != runner.file_sha256(capture):
+            return 'capture evidence: retained hash mismatch'
+    except OSError as error:
+        return f'capture evidence: capture read failed: {error}'
+    return None
 
 
 def run_cell(cell, matrix, *, client, out_dir, root, python, checker, timeout_seconds,
-             environment, checker_canonical):
+             environment, checker_canonical, matrix_canonical, build_manifest):
     state, reason = matrix_lib.readiness(cell, root)
     cells_dir = out_dir / 'cells'
     cell_id = cell['id']
     artifact = cells_dir / f'{cell_id}.json'
-    canonical = checker_canonical
+    client_evidence = None
+
+    def record(state, reason, artifact, verdict=None):
+        return finish(cell, state, reason, artifact, verdict,
+                      checker_canonical=checker_canonical, out_dir=out_dir,
+                      matrix_canonical=matrix_canonical, client_evidence=client_evidence)
+
+    verdict_path = cells_dir / f'{cell_id}.verdict.json'
+    for previous in (artifact, verdict_path, cells_dir / f'{cell_id}.artifact.json',
+                     cells_dir / f'{cell_id}.process.json'):
+        set_aside(previous)
     if state != 'ready':
-        return finish(cell, 'unevaluated', reason, artifact, checker_canonical=canonical)
+        return record('unevaluated', reason, artifact)
     work = out_dir / 'work' / cell_id
     work.mkdir(parents=True, exist_ok=True)
     cells_dir.mkdir(parents=True, exist_ok=True)
-    set_aside(artifact)
-    command = matrix_lib.build_command(cell, client=client, artifact=artifact, root=root)
-    if str(client).endswith('.py'):
-        command = [sys.executable, str(client)] + command[1:]
+    retained = cells_dir / f'{cell_id}.artifact.json'
+    receipt_path = cells_dir / f'{cell_id}.process.json'
     try:
-        completed, evidence = runner.run_process(
-            command, cwd=work, environment=environment, log=cells_dir / f'{cell_id}.log',
-            artifact=artifact, retained=cells_dir / f'{cell_id}.artifact.json',
-            receipt_path=cells_dir / f'{cell_id}.process.json',
-            timeout_seconds=timeout_seconds)
+        with tempfile.TemporaryDirectory(prefix='.capture-', dir=work) as staging:
+            capture = Path(staging) / 'capture.json'
+            command = matrix_lib.build_command(cell, client=client, artifact=capture, root=root)
+            if str(client).endswith('.py'):
+                command = [sys.executable, str(client)] + command[1:]
+            completed, evidence, client_evidence = run_client_process(
+                command, client=client, build_manifest=build_manifest, cwd=work,
+                environment=environment, log=cells_dir / f'{cell_id}.log',
+                artifact=capture, retained=retained, receipt_path=receipt_path,
+                timeout_seconds=timeout_seconds)
+            receipt = read_json_object(receipt_path)
+            ownership = capture_ownership(receipt, retained, capture, out_dir)
+            if ownership is None:
+                capture_sha256 = receipt['capture_sha256']
+                payload = retained.read_bytes()
+                if hashlib.sha256(payload).hexdigest() != capture_sha256:
+                    ownership = 'capture evidence: retained hash mismatch'
+                else:
+                    runner.atomic_write(artifact, payload)
+                if ownership is None and runner.file_sha256(artifact) != capture_sha256:
+                    ownership = 'capture evidence: published hash mismatch'
     except subprocess.TimeoutExpired:
-        return finish(cell, 'process_failed', 'timed_out', artifact, checker_canonical=canonical)
+        receipt = read_json_object(cells_dir / f'{cell_id}.process.json')
+        client_evidence = None if receipt is None else receipt.get('client')
+        return record('process_failed', 'timed_out', artifact)
     except OSError as error:
-        return finish(cell, 'process_failed', f'spawn-failed: {error}', artifact,
-                      checker_canonical=canonical)
+        receipt = read_json_object(cells_dir / f'{cell_id}.process.json')
+        client_evidence = None if receipt is None else receipt.get('client')
+        return record('process_failed', f'spawn-failed: {error}', artifact)
     if completed.returncode != 0:
-        return finish(cell, 'process_failed', f'exit {completed.returncode}', artifact,
-                      checker_canonical=canonical)
+        return record('process_failed', f'exit {completed.returncode}', artifact)
     if evidence:
-        return finish(cell, 'process_failed', 'evidence: ' + '; '.join(evidence), artifact,
-                      checker_canonical=canonical)
+        return record('process_failed', 'evidence: ' + '; '.join(evidence), artifact)
     if not artifact.is_file():
-        return finish(cell, 'process_failed', 'no-artifact', artifact,
-                      checker_canonical=canonical)
+        return record('process_failed', ownership or 'no-artifact', artifact)
+    if ownership is not None:
+        return record('process_failed', ownership, artifact)
     data = read_json_object(artifact)
     field = None if data is None else binding_mismatch(cell, data)
     if field is not None:
-        return finish(cell, 'invalid', f'capture-does-not-match-cell: {field}', artifact,
-                      checker_canonical=canonical)
-    verdict_path = cells_dir / f'{cell_id}.verdict.json'
-    set_aside(verdict_path)
+        return record('invalid', f'capture-does-not-match-cell: {field}', artifact)
     check = check_command(cell, matrix=matrix, artifact=artifact, verdict_path=verdict_path,
                           root=root, python=python, checker=checker)
     try:
@@ -305,30 +562,36 @@ def run_cell(cell, matrix, *, client, out_dir, root, python, checker, timeout_se
                                      stderr=subprocess.STDOUT,
                                      timeout=CHECKER_TIMEOUT_SECONDS, check=False)
     except subprocess.TimeoutExpired:
-        return finish(cell, 'invalid',
-                      f'checker timed out after {CHECKER_TIMEOUT_SECONDS} s', artifact,
-                      checker_canonical=canonical)
+        return record('invalid',
+                      f'checker timed out after {CHECKER_TIMEOUT_SECONDS} s', artifact)
     except OSError as error:
-        return finish(cell, 'invalid', f'checker spawn-failed: {error}', artifact,
-                      checker_canonical=canonical)
+        return record('invalid', f'checker spawn-failed: {error}', artifact)
+    try:
+        unchanged = (runner.file_sha256(artifact) == capture_sha256
+                     and runner.file_sha256(retained) == capture_sha256)
+    except OSError:
+        unchanged = False
+    if not unchanged:
+        return record('invalid', 'capture evidence: checked hash mismatch', artifact)
     verdict = read_json_object(verdict_path)
     if checked.returncode == 0:
         reason = verdict_reason(verdict, data or {}, cell)
         if reason is not None:
-            return finish(cell, 'invalid', reason, artifact, verdict,
-                          checker_canonical=canonical)
-        return finish(cell, 'pass', None, artifact, verdict, checker_canonical=canonical)
+            return record('invalid', reason, artifact, verdict)
+        return record('pass', None, artifact, verdict)
     if checked.returncode == FLOOR_FAILURE_EXIT:
-        return finish(cell, 'fail', 'floor', artifact, verdict, checker_canonical=canonical)
-    return finish(cell, 'invalid', f'checker exit {checked.returncode}', artifact, verdict,
-                  checker_canonical=canonical)
+        return record('fail', 'floor', artifact, verdict)
+    return record('invalid', f'checker exit {checked.returncode}', artifact, verdict)
 
 
 def run_cells(matrix, *, client, out_dir, root=planner.ROOT, python=sys.executable,
               only=None, timeout_seconds=DEFAULT_TIMEOUT_SECONDS, checker=None,
-              environment=None):
+              environment=None, matrix_canonical=None, build_manifest=None):
     """Run every selected cell in matrix order; return one result dict per cell."""
-    out_dir = Path(out_dir)
+    out_dir = Path(out_dir).resolve()
+    client = resolve_client(str(client))
+    if matrix_canonical is None:
+        matrix_canonical = matrix_identity(matrix)['canonical']
     if checker is None:
         checker = Path(root) / matrix_lib.VALIDATOR
     # A replacement checker may run, but its results never count toward qualification.
@@ -337,7 +600,8 @@ def run_cells(matrix, *, client, out_dir, root=planner.ROOT, python=sys.executab
     environment = isolated_environment(out_dir, environment)
     return [run_cell(cell, matrix, client=client, out_dir=out_dir, root=root, python=python,
                      checker=checker, timeout_seconds=timeout_seconds,
-                     environment=environment, checker_canonical=checker_canonical)
+                     environment=environment, checker_canonical=checker_canonical,
+                     matrix_canonical=matrix_canonical, build_manifest=build_manifest)
             for cell in planner.select(matrix_lib.cells(matrix), only)]
 
 
@@ -351,13 +615,14 @@ def display_entries(matrix, declared_refresh):
             hz, source = declared_refresh[display['id']], 'operator'
         else:
             hz, source = None, 'undeclared'
-        entries.append(dict(id=display['id'], refresh_hz=hz, refresh_source=source))
+        entries.append({'id': display['id'], 'refresh_hz': hz, 'refresh_source': source})
     return entries
 
 
-def aggregate(matrix, results, *, partial, declared_refresh):
+def aggregate(matrix, results, *, partial, declared_refresh, matrix_provenance=None):
     """Build the luminumbra.render_qualification.v1 document from cell results."""
     declared = dict(declared_refresh)
+    provenance = matrix_identity(matrix) if matrix_provenance is None else matrix_provenance
     displays = display_entries(matrix, declared)
     summary = {state: 0 for state in STATES}
     for result in results:
@@ -376,23 +641,39 @@ def aggregate(matrix, results, *, partial, declared_refresh):
     complete_universe = (not partial and len(ids) == len(canonical)
                          and set(ids) == canonical)
     undeclared = any(item['refresh_source'] == 'undeclared' for item in displays)
-    render_floor = (complete_universe and qualified == CANONICAL_RENDERER
+    render_floor = (provenance['canonical'] and complete_universe
+                    and qualified == CANONICAL_RENDERER
                     and all(cell_qualifies(result) for result in results)
                     and adapter_identical and adapter_matches and not undeclared)
-    return dict(
-        schema=SCHEMA, matrix_schema=matrix['schema'], partial=partial,
-        qualified_renderer=qualified, declared_refresh=declared, displays=displays,
-        cells=[dict(id=result['id'], workload=result['workload'], kind=result['kind'],
-                    warmup_frames=result['warmup_frames'],
-                    measured_frames=result['measured_frames'], script=result['script'],
-                    state=result['state'], reason=result['reason'],
-                    adapter=result['adapter'], artifact=result['artifact'],
-                    verdict=result['verdict'], checker_canonical=result['checker_canonical'])
+    reasons = []
+    if not provenance['canonical'] or any(not result.get('matrix_canonical')
+                                          for result in results):
+        reasons.append('non_canonical_matrix')
+    for result in results:
+        client = result.get('client')
+        if client is not None and client.get('reason') and client['reason'] not in reasons:
+            reasons.append(client['reason'])
+    if not render_floor and not reasons:
+        reasons.append('qualification_evidence_incomplete')
+    return {
+        'schema': SCHEMA, 'matrix_schema': matrix['schema'], 'partial': partial,
+        'matrix': provenance,
+        'qualified_renderer': qualified, 'declared_refresh': declared, 'displays': displays,
+        'cells': [{'id': result['id'], 'workload': result['workload'], 'kind': result['kind'],
+                    'warmup_frames': result['warmup_frames'],
+                    'measured_frames': result['measured_frames'], 'script': result['script'],
+                    'state': result['state'], 'reason': result['reason'],
+                    'adapter': result['adapter'], 'artifact': result['artifact'],
+                    'verdict': result['verdict'], 'checker_canonical': result['checker_canonical'],
+                    'matrix_canonical': result.get('matrix_canonical', False),
+                    'client': result.get('client')}
                for result in results],
-        summary=summary, adapter_identical=adapter_identical,
-        adapter_matches_qualified=adapter_matches, harness_complete=harness_complete,
-        render_floor_qualified=render_floor, expanded_qualified=False,
-        expanded_qualified_reason=EXPANDED_REASON)
+        'summary': summary, 'adapter_identical': adapter_identical,
+        'adapter_matches_qualified': adapter_matches, 'harness_complete': harness_complete,
+        'render_floor_qualified': render_floor, 'expanded_qualified': False,
+        'render_floor_qualified_reasons': reasons,
+        'qualification_status': 'QUALIFIED' if render_floor else 'NEEDS-NATIVE-RUN',
+        'expanded_qualified_reason': EXPANDED_REASON}
 
 
 def parse_declarations(values, matrix):
@@ -425,7 +706,7 @@ def exit_code(summary):
 
 def resolve_client(text):
     """Absolute path when the client is a path that exists from the caller's cwd."""
-    if (os.sep in text or (os.altsep and os.altsep in text)) and Path(text).exists():
+    if Path(text).exists():
         return str(Path(text).resolve())
     return text
 
@@ -449,8 +730,10 @@ def run_dry(matrix, args, out_dir):
 def fail_closed(path, error):
     """Replace the aggregate with an unqualified error record; exit 1."""
     message = str(error) or type(error).__name__
-    payload = dict(schema=SCHEMA, render_floor_qualified=False, harness_complete=False,
-                   expanded_qualified=False, error=message)
+    payload = {'schema': SCHEMA, 'render_floor_qualified': False, 'harness_complete': False,
+                   'expanded_qualified': False, 'error': message,
+                   'qualification_status': 'NEEDS-NATIVE-RUN',
+                   'render_floor_qualified_reasons': ['qualification_run_failed']}
     try:
         runner.atomic_write(path, (json.dumps(payload, indent=2) + '\n').encode('utf-8'))
     except OSError as write_error:
@@ -469,6 +752,9 @@ def build_parser():
                         help='Directory receiving cells/, work/ and qualification.json')
     parser.add_argument('--matrix', type=Path, default=planner.DEFAULT_MATRIX,
                         help='Qualification matrix JSON (default: committed matrix)')
+    parser.add_argument('--build-manifest', type=Path,
+                        help='performance-build.json extended with client.sha256; '
+                             'required for native qualification')
     parser.add_argument('--only', action='append', metavar='CELL_ID',
                         help='Select one cell id; repeatable; makes the run partial')
     parser.add_argument('--timeout-seconds', type=int, default=DEFAULT_TIMEOUT_SECONDS,
@@ -491,6 +777,8 @@ def main(argv=None):
         if args.timeout_seconds < 1:
             raise UsageError('--timeout-seconds must be at least 1')
         matrix = matrix_lib.load_matrix(args.matrix)
+        provenance = matrix_identity(matrix, args.matrix)
+        build_manifest = load_build_manifest(args.build_manifest)
         declared = parse_declarations(args.declare_refresh, matrix)
         planner.select(matrix_lib.cells(matrix), args.only)
     except (matrix_lib.MatrixError, UsageError) as error:
@@ -499,22 +787,39 @@ def main(argv=None):
     out_dir = args.out_dir.resolve()
     client = resolve_client(str(args.client))
     checker = None if args.checker is None else resolve_checker(str(args.checker))
+    lock = out_dir / LOCK_NAME
     try:
         out_dir.mkdir(parents=True, exist_ok=True)
-        if args.dry_run:
-            return run_dry(matrix, args, out_dir)
+        descriptor = os.open(lock, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        print(f'run_qualification: output directory locked: {lock}; '
+              'no automatic stale-lock reclaim', file=sys.stderr)
+        return 2
     except OSError as error:
         print(f'run_qualification: cannot write under {out_dir}: {error}', file=sys.stderr)
         return 2
+    try:
+        os.close(descriptor)
+        if args.dry_run:
+            return run_dry(matrix, args, out_dir)
+        return run_locked(matrix, args, out_dir, client, checker, declared,
+                          provenance, build_manifest)
+    finally:
+        lock.unlink()
+
+
+def run_locked(matrix, args, out_dir, client, checker, declared, provenance, build_manifest):
+    """Execute and atomically publish while main owns the directory lock."""
     path = out_dir / QUALIFICATION_NAME
     try:
         set_aside(path)
         results = run_cells(matrix, client=client, out_dir=out_dir,
                             only=args.only, timeout_seconds=args.timeout_seconds,
-                            checker=checker)
+                            checker=checker, matrix_canonical=provenance['canonical'],
+                            build_manifest=build_manifest)
         payload = aggregate(matrix, results, partial=args.only is not None,
-                            declared_refresh=declared)
-    except Exception as error:  # Any unexpected failure must leave an unqualified record.
+                            declared_refresh=declared, matrix_provenance=provenance)
+    except Exception as error:  # noqa: BLE001 - Any failure must leave an unqualified record.
         return fail_closed(path, error)
     try:
         runner.atomic_write(path, (json.dumps(payload, indent=2) + '\n').encode('utf-8'))

@@ -56,6 +56,26 @@ due, frozen never is. All stamps use WorldClock, with no load-time restart.
 Repeated/backward scheduler ticks refuse. Frozen scheduling metadata can change;
 its simulation cursor, last-ticked stamp and frozen content digest do not advance.
 
+Idle retention probes ownership only for otherwise evictable records. The host
+builds one set of pending work keys and all resident chunk region keys per tick,
+including pristine and `Loading` chunks. These residents protect scheduling
+history even when they contribute no frozen content. Consumed work stops owning
+records on the next tick.
+
+Invalid host input never throws out of the session. Non-finite or out-of-range
+(|x|,|z| >= 2^24) walking anchors, ground-object edit positions and region pins are
+ignored and counted (observational, never hashed or saved). Invalid replicated anchors, work for
+regions the ledger does not know, and visit-time ledger exhaustion are skipped inside the scheduler
+and counted in the schedule's `rejected` triple; the schedule digest appends that triple only when
+it is non-zero, so valid input keeps its digest.
+A scheduler exception, or an edit/pin that cannot be recorded because the ledger is full, is a
+fail-stop fault: the failed schedule never mutates the ledger, the simulation clock is rewound to
+the faulting tick (whose systems ran), pending region work is dropped, the validation ceiling is raised
+to that tick, and every later tick returns zero. The server saves and exits with status 3, the
+client saves and quits, and replay recording aborts without a schedule trace. A faulted session can
+be saved and the save loads cleanly. A failed `load_active_regions` clears the world and restores the
+previous ambient anchor.
+
 `BoundedRegionResumeHook` defines an opt-in interface receiving region key,
 freeze tick, resume tick and bounded elapsed ticks. `resume_window` clamps elapsed
 ticks to both the system's explicit cap and one WorldClock calendar day; it
@@ -129,12 +149,19 @@ ceiling starts at the restored WorldClock tick without executing a tick, so
 an immediate edit or pin can be saved before simulation advances.
 No old-world migration occurs. Corrupt, truncated, oversized, duplicate,
 misordered or inconsistent records refuse with `Corrupt active-region ledger.`
-A valid magic followed by a version greater than 1 refuses distinctly with
+A valid magic followed by a version greater than 2 refuses distinctly with
 `Unsupported future active-region ledger version.` Version zero is corrupt.
 A save containing the ledger requires `sim.active_regions`; opening or writing
 with it off refuses as incompatible configuration. Older engine builds refuse
 this file as an unknown region file. Decode failure never changes the destination
-ledger. Unknown fields cannot be skipped: extensions require a new version.
+ledger. Unknown extension types cannot be skipped and are corrupt.
+Version 1 ledgers load with or without frozen history. Their historical digest
+values, freeze stamps and canonical bytes are preserved without recomputation.
+They retain the version 1 envelope until every legacy historical digest has
+been refreshed at a later freeze or its record evicted; waking alone does not
+refresh a digest. This avoids declaring legacy digests as projection 2.
+Flag-off legacy saves without a ledger retain their existing load, save and hash
+behaviour, with no new files, bytes or hash terms.
 
 All integers are little endian, signed integers use two's complement, floats
 are IEEE binary32 (finite, with positive zero as the sole zero encoding).
@@ -143,7 +170,7 @@ The header is exactly 56 bytes:
 | Offset | Bytes | Value |
 |---|---:|---|
 | 0 | 4 | ASCII ARL1 |
-| 4 | 2 | version = 1 |
+| 4 | 2 | version = 1 or 2 |
 | 6 | 2 | reserved zero |
 | 8 | 8 | canonical scheduler tick; advances only when scheduling runs |
 | 16 | 8 | validation ceiling; observational restored clock bound |
@@ -173,20 +200,43 @@ Each record is exactly 104 bytes, sorted uniquely by signed X then Z:
 | 88 | 8 | u64 water cursor |
 | 96 | 8 | u64 frozen simulation content digest |
 
-The footer is one LE u64 FNV-1a-64 checksum over every preceding byte (offset
-basis 14695981039346656037, multiplier 1099511628211). Total length must be exactly
-56 + count * 104 + 8, capped at 109,051,968 bytes before allocation. No trailing
-bytes, padding, native structs, section omission or alternate encodings are
-accepted. Stamps cannot exceed the validation ceiling, counters cannot exceed the hold
-or both be nonzero, phases must match the region key, and a frozen region's last
+Version 1 has no extensions. Version 2 uses the same header and records, then
+a LE u32 `ext_len` followed by exactly that many extension bytes. Each extension
+is a TLV: LE u16 type, LE u32 value length, then the value bytes. Types must be
+strictly ascending, with no duplicates; unknown types, truncated values and
+`ext_len == 0` are corrupt. The currently supported extension is type 2,
+`digest_projection`, with a one-byte value of 2. A value greater than 2 refuses
+with `Unsupported frozen digest projection.`; a lower value is corrupt.
+The encoder emits version 2 with this declaration whenever a record is frozen
+or retains a nonzero freeze stamp or frozen digest, including after waking,
+provided no legacy historical digest remains. A version 1 reload conservatively
+treats all historical digests as legacy, including any refreshed before saving.
+Otherwise the extension set is empty and the encoder emits version 1.
+The declaration belongs only to the persistence envelope and adds no canonical
+hash term.
+
+The footer is one LE u64 FNV-1a-64 checksum over every preceding byte, including
+the extension length and TLVs (offset basis 14695981039346656037, multiplier
+1099511628211). Total length must be exactly 56 + count * 104 + 8 for version 1,
+or 56 + count * 104 + 4 + ext_len + 8 for version 2. Files are capped at
+109,051,979 bytes before allocation. No trailing bytes, padding, native structs,
+section omission or alternate encodings are accepted. Stamps cannot exceed the
+validation ceiling, counters cannot exceed the hold or both be nonzero, phases
+must match the region key, and a frozen region's last
 ticked stamp precedes its freeze stamp. The ledger tick cannot exceed the saved
 WorldClock tick, and the canonical tick cannot exceed its validation ceiling.
 Configuration is stored and hashed with the ledger rather than
 read from an unrecorded machine-local budget.
 
-Frozen content is supplied at the transition by merging live lod-0 chunks with
-durable region records by id, with live records taking precedence. The provider
-uses a dedicated `region_content_v1` projection in chunk-id order: identity,
+Frozen content is supplied at the transition by merging authoritative lod-0
+chunks by id, with live chunks taking precedence over parked chunks, then durable
+region records carrying the sticky edited flag. Live and parked inputs must have
+`LoadedOrEdited` provenance and must not be in `Loading` state; exclusions apply
+before merging, so these inputs cannot shadow authoritative content. Durable
+edited records contribute in every serialized lifecycle state, including
+`Loading`. Durable pristine records are regenerable caches and never contribute.
+Residency and save history cannot change the result. The provider uses a dedicated
+`region_content_v2` projection in chunk-id order: identity,
 SDF, heightmap, materials, integer water depth/bed/flux, water initialization,
 resolution and solver sleep/threshold state. Lifecycle state/state_value,
 collider flags, render meshes/bookkeeping, transient dirtiness, far render
@@ -295,7 +345,7 @@ AVX2 ceiling, preserving lower-ISA fallback and native non-x86 selection. Its
 Debug/Release controls and native qualification retain their own source identities;
 the historical table above is not relabelled as post-repair evidence. Integrated
 and native acceptance remain tracked by [#163](https://github.com/d-addison/luminumbra/issues/163).
-The separate wind input-padding defect is tracked by [#173](https://github.com/d-addison/luminumbra/issues/173).
+The wind input-padding defect tracked by [#173](https://github.com/d-addison/luminumbra/issues/173) was fixed afterwards on devel (df8a6716, e9b122e5); the evidence above is unchanged and pre-dates that fix.
 
 `RegionRecordingOverwrite` runs the shipping recorder/player with
 `--test-streaming-radius-cap 1` on every invocation. This diagnostic option applies

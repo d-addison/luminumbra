@@ -1,10 +1,8 @@
-// Regressions from the independent review of candidate 2c32211:
-//  (1) saving while crouched reloaded the player 0.81 m below the saved feet because both
-//      quit/shutdown saves recorded the live camera position while world entry derives the
-//      feet from the spawn point minus the STANDING eye height;
-//  (2) the LUMIN_TREE_IMPOSTORS switch was interpreted differently by the render pipeline
-//      (empty or '0'-prefixed disables) and the world-entry gate (only exactly "0"), so a
-//      documented disable value could refuse world entry.
+// Save and world-entry contracts:
+//  (1) quit/shutdown saves use the standing eye anchor regardless of stance, so world
+//      entry derives the saved feet from the spawn point minus the standing eye height;
+//  (2) the render pipeline and world-entry gate share the LUMIN_TREE_IMPOSTORS policy:
+//      empty or '0'-prefixed values disable impostors without refusing world entry.
 #include <gtest/gtest.h>
 
 #include "core/BenchmarkPose.h"

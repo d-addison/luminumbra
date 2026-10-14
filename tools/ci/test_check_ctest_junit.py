@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
 
+import contextlib
 import importlib.util
+import io
 import sys
+import tempfile
 import unittest
 import xml.etree.ElementTree as ET
 from pathlib import Path
+from unittest import mock
 
 
 MODULE_PATH = Path(__file__).with_name("check_ctest_junit.py")
@@ -25,6 +29,25 @@ def skipped_case(name: str, reason: str | None) -> ET.Element:
 
 
 class CTestSkipAuditTests(unittest.TestCase):
+    def test_non_applicable_probe_passes_without_a_skip(self):
+        status = "not_applicable:guard-page probe is Linux only"
+        root = ET.Element("testsuite")
+        case = ET.SubElement(
+            root,
+            "testcase",
+            name="AmbientInputBounds.UnpaddedTwoElementInputFaultsAtActiveIsa",
+            probe_status=status,
+        )
+        ET.SubElement(case, "system-out").text = f"AMBIENT_PROBE probe_status={status}\n"
+        with tempfile.TemporaryDirectory() as directory:
+            report = Path(directory) / "ctest.junit.xml"
+            ET.ElementTree(root).write(report, encoding="utf-8")
+            output = io.StringIO()
+            with mock.patch.object(sys, "argv", [str(MODULE_PATH), str(report)]):
+                with contextlib.redirect_stdout(output):
+                    self.assertEqual(MODULE.main(), 0)
+            self.assertIn("1 tests; 0 approved skips", output.getvalue())
+
     def test_rejects_audio_skip_now_that_a_fixture_exists(self):
         # This skip used to be allow-listed because the sound banks are external
         # to the repository. AudioBankIntegrity now generates its payloads at test

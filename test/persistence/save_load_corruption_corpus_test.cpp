@@ -24,11 +24,12 @@
 // they fail (not pass) if a gap exists -- they never assert the bug.
 #include "gtest/gtest.h"
 
+#include "../support/UniqueTempPath.h"
+
 #include "persistence/WorldPersistenceRoundtrip.h"
 #include "persistence/WorldSaveService.h"
 #include "world/WorldStreamingState.h"
 
-#include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -48,11 +49,9 @@ using Luminumbra::Persistence::SerializeWorldStreamingStateSnapshotJson;
 using Luminumbra::Persistence::WorldSaveService;
 
 std::filesystem::path MakeTempSaveDir(const std::string& tag) {
-    const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
-    const std::filesystem::path dir =
-        std::filesystem::temp_directory_path() /
-        ("luminumbra_corruption_corpus_" + tag + "_" + std::to_string(stamp));
-    std::filesystem::create_directories(dir);
+    const std::filesystem::path dir = Luminumbra::TestSupport::CreateUniqueTempDirectory(
+        "luminumbra_corruption_corpus_" + tag + "_");
+
     return dir;
 }
 

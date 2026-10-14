@@ -4,6 +4,7 @@ import contextlib
 import copy
 import io
 import json
+import math
 import os
 from pathlib import Path
 import subprocess
@@ -17,8 +18,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import plan_qualification as planner  # noqa: E402
 import qualification_matrix as qm  # noqa: E402
+import perf  # noqa: E402
+import render_contract as contract  # noqa: E402
 import render_runner_process as runner  # noqa: E402
 import validate_render_capture as capture  # noqa: E402
+from test_render_contract import artifact as synthetic_artifact  # noqa: E402
 
 ROOT = planner.ROOT
 MATRIX_PATH = planner.DEFAULT_MATRIX
@@ -105,7 +109,8 @@ class CommittedMatrixTests(MatrixTestBase):
                              client='client', artifact='a.json', root=ROOT)
         with self.assertRaisesRegex(qm.MatrixError, 'not ready'):
             qm.checker_command(find_cell(cells, 'cave-walk.quality.3840x1600'),
-                               artifact='a.json', qualified_renderer=RENDERER, root=ROOT,
+                               artifact='a.json', verdict='v.json',
+                               qualified_renderer=RENDERER, root=ROOT,
                                python='python3')
 
 
@@ -139,30 +144,52 @@ class CommandGoldenTests(MatrixTestBase):
     def test_checker_goldens(self):
         cells = qm.cells(with_pose(committed()))
         fixed = qm.checker_command(find_cell(cells, 'forest-settled.quality.3840x1600'),
-                                   artifact='/out/a.json', qualified_renderer=RENDERER,
+                                   artifact='/out/a.json', verdict='/out/v.json',
+                                   qualified_renderer=RENDERER,
                                    root=ROOT, python='/usr/bin/python3')
         self.assertEqual(fixed, [
             '/usr/bin/python3', str(ROOT / 'tools/perf/validate_render_capture.py'),
             '/out/a.json', '--qualified-renderer', RENDERER,
-            '--position', '100.5', '-2.25', '30.0', '--yaw', '45.0', '--pitch', '-10.5',
-            '--tod', '0.04'])
+            '--profile', 'quality', '--width=3840', '--height=1600',
+            '--warmup-frames=400', '--workload-kind', 'fixed_view',
+            '--position', '100.5', '-2.25', '30.0', '--yaw=45.0', '--pitch=-10.5',
+            '--tod=0.04', '--frames=240', '--enforce-floor', '--verdict-out', '/out/v.json'])
         traversal = qm.checker_command(
-            find_cell(cells, 'surface-flight.quality.3840x1600'), artifact='/out/a.json',
+            find_cell(cells, 'surface-flight.quality.3840x1600'),
+            artifact='/out/a.json', verdict='/out/v.json',
             qualified_renderer=RENDERER, root=ROOT, python='/usr/bin/python3')
         self.assertEqual(traversal, [
             '/usr/bin/python3', str(ROOT / 'tools/perf/validate_render_capture.py'),
             '/out/a.json', '--qualified-renderer', RENDERER,
-            '--traversal', str(ROOT / SURFACE_SCRIPT)])
+            '--profile', 'quality', '--width=3840', '--height=1600',
+            '--warmup-frames=400', '--workload-kind', 'traversal',
+            '--traversal', str(ROOT / SURFACE_SCRIPT),
+            '--enforce-floor', '--verdict-out', '/out/v.json'])
 
 
 class CheckerArgparseTests(MatrixTestBase):
     def test_fixed_checker_argv_parses_with_tod(self):
+        self.check_pose_round_trip(POSE)
+
+    def test_negative_scientific_pose_round_trip(self):
+        self.check_pose_round_trip(dict(x=-1e-5, y=-2e-7, z=-3e20,
+                                       yaw=-4e-6, pitch=-0.00001))
+
+    def test_extreme_finite_pose_round_trip(self):
+        self.check_pose_round_trip(dict(x=-5e-324, y=-1.7976931348623157e308,
+                                       z=1e-20, yaw=1e20, pitch=-1e-20))
+
+    def check_pose_round_trip(self, pose):
         # Runs the real validator main() argument parsing; only validate() is replaced.
-        cells = qm.cells(with_pose(committed()))
+        matrix = with_pose(committed())
+        matrix['workloads'][0]['pose'] = dict(pose)
+        qm.validate_matrix(matrix)
+        cells = qm.cells(matrix)
         artifact = self.tmp / 'capture.json'
-        artifact.write_text('{}', encoding='utf-8')
+        artifact.write_text(json.dumps({'schema': contract.SCHEMA}), encoding='utf-8')
         argv = qm.checker_command(find_cell(cells, 'forest-settled.quality.3840x1600'),
-                                  artifact=artifact, qualified_renderer=RENDERER,
+                                  artifact=artifact, verdict=self.tmp / 'verdict.json',
+                                  qualified_renderer=RENDERER,
                                   root=ROOT, python=sys.executable)
         seen = {}
 
@@ -171,22 +198,108 @@ class CheckerArgparseTests(MatrixTestBase):
             return {'verdict': 'PASS'}
 
         with mock.patch.object(capture, 'validate', fake_validate), \
+                mock.patch.object(capture.render_budget, 'evaluate',
+                                  return_value={'floor': {'verdict': 'pass'}}), \
                 mock.patch.object(sys, 'argv', argv[1:]), \
                 contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(capture.main(), 0)
         args = seen['args']
         self.assertEqual(args.tod, 0.04)
-        self.assertEqual(args.position, [100.5, -2.25, 30.0])
-        self.assertEqual((args.yaw, args.pitch), (45.0, -10.5))
+        self.assertEqual(args.position, [pose[key] for key in ('x', 'y', 'z')])
+        self.assertEqual((args.yaw, args.pitch), (pose['yaw'], pose['pitch']))
         self.assertEqual(args.qualified_renderer, RENDERER)
+        self.assertEqual(args.profile, 'quality')
+        self.assertEqual((args.width, args.height), (3840, 1600))
+        self.assertEqual((args.warmup_frames, args.frames), (400, 240))
+        self.assertEqual(args.workload_kind, 'fixed_view')
         self.assertIsNone(args.traversal)
 
     def test_traversal_checker_argv_has_no_tod(self):
         cells = qm.cells(committed())
         argv = qm.checker_command(find_cell(cells, 'surface-flight.quality.3840x1600'),
-                                  artifact='a.json', qualified_renderer=RENDERER, root=ROOT,
+                                  artifact='a.json', verdict='v.json',
+                                  qualified_renderer=RENDERER, root=ROOT,
                                   python='python3')
-        self.assertNotIn('--tod', argv)
+        self.assertFalse(any(arg.startswith('--tod') for arg in argv))
+
+
+class CheckerEvidenceTests(MatrixTestBase):
+    def traversal_capture(self, *, profile='performance', width=3440, height=1440,
+                          warmup=400):
+        """Synthetic full-length traversal with internally consistent cell metadata."""
+        script = ROOT / SURFACE_SCRIPT
+        text = script.read_bytes().decode('utf-8')
+        manifest = contract.traversal_manifest(text)
+        count = manifest['expected_ticks']
+        data = synthetic_artifact()
+        scale = 1.0 if profile == 'quality' else 0.67
+        data.update(profile=dict(name=profile, render_scale=scale, width=width, height=height),
+                    width=width, height=height, render_scale=scale, warmup_frames=warmup,
+                    frames=count,
+                    internal_width=math.floor(contract.float32(width * contract.float32(scale)) + 0.5),
+                    internal_height=math.floor(contract.float32(height * contract.float32(scale)) + 0.5))
+        rows = data['frame_samples']
+        data['frame_samples'] = [dict(copy.deepcopy(rows[index % len(rows)]),
+                                     frame=warmup + index, gpu_frame=warmup + index)
+                                 for index in range(count)]
+        data['excluded_windows'][0]['last_frame'] = warmup - 1
+        data['excluded_windows'][1].update(first_frame=warmup + count, last_frame=warmup + count)
+        data['workload'].update({key: value for key, value in manifest.items() if key != 'path'})
+        data['workload'].update(kind='traversal', expected_frames=count, actual_ticks=count,
+                                measured_duration_seconds=0.01, script=text, script_path=str(script),
+                                camera_samples=[contract.camera_sample(manifest, tick)
+                                                for tick in range(1, count + 1)])
+        for name in contract.METRICS:
+            values = [row[name] for row in data['frame_samples']]
+            summary = perf.summarize(values, 'ms')
+            data['distribution'][name].update({key: summary[key] for key in contract.STATS},
+                                             sample_count=count)
+            data['avg'][name] = sum(values) / count
+        for name in contract.PASSES:
+            data['avg_ms'][name] = sum(row['passes'][name]['ms'] or 0
+                                       for row in data['frame_samples']) / count
+        data['avg_ms']['total'] = data['avg']['gpu_pass_sum_ms']
+        self.assertEqual(contract.validate(data, RENDERER, traversal=script)['verdict'], 'PASS')
+        return data
+
+    def run_checker(self, data):
+        cell_id = 'surface-flight.performance.3440x1440'
+        plan = planner.build_plan(committed(), client='client', out_dir=self.tmp, root=ROOT,
+                                  python=sys.executable, only=[cell_id])
+        argv = plan['cells'][0]['checker_command']
+        artifact = Path(argv[2])
+        artifact.parent.mkdir(parents=True, exist_ok=True)
+        artifact.write_text(json.dumps(data), encoding='utf-8')
+        # Keep the real checker CLI and all validation, with isolated module loading.
+        bootstrap = ('import sys, runpy; from pathlib import Path; '
+                     'sys.path.insert(0, str(Path(sys.argv[1]).resolve().parent)); '
+                     'sys.argv = sys.argv[1:]; runpy.run_path(sys.argv[0], run_name="__main__")')
+        result = subprocess.run([argv[0], '-I', '-c', bootstrap, *argv[1:]],
+                                capture_output=True, text=True, check=False)
+        self.assertEqual(result.stderr, '')
+        return result.returncode, json.loads(result.stdout)
+
+    def test_matching_capture_passes_generated_checker(self):
+        code, verdict = self.run_checker(self.traversal_capture())
+        self.assertEqual(code, 0)
+        self.assertEqual(verdict['verdict'], 'PASS')
+
+    def test_other_profile_resolution_and_warmup_fail_generated_checker(self):
+        data = self.traversal_capture(profile='quality', width=1280, height=720, warmup=2)
+        code, verdict = self.run_checker(data)
+        self.assertEqual(code, 1)
+        self.assertEqual(verdict['verdict'], 'FAIL')
+        self.assertIn('--profile mismatch', verdict['reason'])
+
+    def test_each_cell_parameter_mismatch_fails_generated_checker(self):
+        for option, change in (('profile', dict(profile='quality')),
+                               ('width', dict(width=1280)), ('height', dict(height=720)),
+                               ('warmup-frames', dict(warmup=2))):
+            with self.subTest(option=option):
+                code, verdict = self.run_checker(self.traversal_capture(**change))
+                self.assertEqual(code, 1)
+                self.assertEqual(verdict['verdict'], 'FAIL')
+                self.assertIn(f'--{option} mismatch', verdict['reason'])
 
 
 class MatrixValidationTests(MatrixTestBase):
@@ -391,12 +504,26 @@ class ProcessRunnerTests(MatrixTestBase):
         self.assertTrue(self.retained.is_file())
 
     def test_timeout_raises_and_receipt_shows_timed_out(self):
-        command = self.script('import time\ntime.sleep(30)\n')
-        with self.assertRaises(subprocess.TimeoutExpired):
+        command = self.script('')
+
+        def timeout(argv, **kwargs):
+            kwargs['stdout'].write(b'x' * 20000 + b'\nEnsureSurfaceReadyNear: draining\n')
+            raise subprocess.TimeoutExpired(argv, kwargs['timeout'])
+
+        diagnostic = io.StringIO()
+        with contextlib.redirect_stderr(diagnostic), \
+                mock.patch.object(runner.subprocess, 'run', side_effect=timeout), \
+                self.assertRaises(subprocess.TimeoutExpired):
             self.run_case(command, timeout_seconds=1)
         receipt = self.read_receipt()
         self.assertEqual(receipt['outcome'], 'timed_out')
         self.assertEqual(receipt['timeout_seconds'], 1)
+        self.assertEqual(receipt['last_observed_phase'],
+                         'EnsureSurfaceReadyNear: draining')
+        self.assertEqual(len(receipt['log_tail'].encode('utf-8')),
+                         runner.TIMEOUT_LOG_TAIL_BYTES)
+        self.assertIn('timed out after 1 s', diagnostic.getvalue())
+        self.assertIn('EnsureSurfaceReadyNear: draining', diagnostic.getvalue())
 
     def test_nonzero_exit_code_recorded(self):
         command = self.script('import sys\nfrom pathlib import Path\n'

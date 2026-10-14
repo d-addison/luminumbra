@@ -1,4 +1,5 @@
 #include "TaauPass.h"
+#include "../FarWorldReplay.h"
 
 #include "../PassShaderLayouts.h"
 #include "../RenderResourceRegistry.h"
@@ -26,6 +27,8 @@ void TaauPass::init(RenderResourceRegistry& registry, u32 width, u32 height) {
     if (width == 0 || height == 0)
         return;
     glGenFramebuffers(1, &m_fbo);
+    glGenFramebuffers(1, &m_replay_fbo);
+    PassGl::label_gl_object(GL_FRAMEBUFFER, m_replay_fbo, "taau.replay_fbo");
     PassGl::label_gl_object(GL_FRAMEBUFFER, m_fbo, "taau.fbo");
     // the ping-pong resolved-color history textures are
     // registry-owned with History lifetime (they persist across frames by design;
@@ -35,7 +38,7 @@ void TaauPass::init(RenderResourceRegistry& registry, u32 width, u32 height) {
     // execute_taau_resolve - not a fixed-layout render target the registry can own.
     // The desc reproduces the retired glTexImage2D/glTexParameter calls exactly
     // (RGBA16F, LINEAR, CLAMP_TO_EDGE).
-    for (int i = 0; i < 2; ++i) {
+    for (int i = 0; i < 3; ++i) {
         TextureDesc history;
         history.width = width;
         history.height = height;
@@ -49,8 +52,14 @@ void TaauPass::init(RenderResourceRegistry& registry, u32 width, u32 height) {
         history.lifetime = ResourceLifetime::History;
         history.expected_layout = "color_attachment";
         history.debug_label = "taau.history";
-        m_history[i] =
-            registry.create_texture(i == 0 ? "taau_history_0" : "taau_history_1", history).id;
+        if (i < 2)
+            m_history[i] =
+                registry.create_texture(i == 0 ? "taau_history_0" : "taau_history_1", history).id;
+        else {
+            history.lifetime = ResourceLifetime::History;
+            history.debug_label = "taau.replay_output";
+            m_replay_output = registry.create_texture("taau_replay_output", history).id;
+        }
     }
     m_history_write = 0;
     m_history_valid = false; // no usable history until the first resolve fills it
@@ -61,9 +70,15 @@ void TaauPass::destroy(RenderResourceRegistry& registry) {
         glDeleteFramebuffers(1, &m_fbo);
         m_fbo = 0;
     }
+    if (m_replay_fbo) {
+        glDeleteFramebuffers(1, &m_replay_fbo);
+        m_replay_fbo = 0;
+    }
     // The history textures are registry-owned.
     registry.destroy_owned("taau_history_0");
     registry.destroy_owned("taau_history_1");
+    registry.destroy_owned("taau_replay_output");
+    m_replay_output = 0;
     m_history[0] = 0;
     m_history[1] = 0;
     m_history_valid = false;
@@ -77,19 +92,33 @@ void TaauPass::invalidate_history() {
     m_history_valid = false;
 }
 
-void TaauPass::execute(const RenderContext& ctx) {
+void TaauPass::execute(const RenderContext& ctx, const TaauHistoryState* frozen) {
+    ReplayRollback rollback([this,
+                             replay = frozen != nullptr,
+                             write = m_history_write,
+                             valid = m_history_valid]() noexcept {
+        if (replay) {
+            m_history_write = write;
+            m_history_valid = valid;
+        }
+    });
     if (!m_shader || !m_shader->IsValid() || m_fbo == 0 || ctx.screen_quad_vao == 0 ||
         ctx.screen_width == 0 || ctx.screen_height == 0) {
         return;
     }
-    const int wr = m_history_write;
-    const int rd = 1 - wr;
+    const auto input = frozen ? *frozen : history_state();
+    const auto plan = PlanTaauResolve(input, m_replay_output, frozen != nullptr);
+    const GLuint resolve_fbo = frozen ? m_replay_fbo : m_fbo;
+    if (!plan.output_texture || !resolve_fbo)
+        return;
     const GLuint lit_color = ctx.lit_scene_color.id;
     const GLuint lit_fbo = ctx.lit_scene.id;
 
-    // Resolve current (lit HDR) + motion-reprojected history -> history[wr].
-    glBindFramebuffer(GL_FRAMEBUFFER, m_fbo);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_history[wr], 0);
+    // Replay reads the exact ON history input and writes only the dedicated scratch target.
+    glBindFramebuffer(GL_FRAMEBUFFER, resolve_fbo);
+    PreserveReplayObject(ReplayObjectKind::Framebuffer, resolve_fbo);
+    glFramebufferTexture2D(
+        GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, plan.output_texture, 0);
     const GLenum draw0[1] = {GL_COLOR_ATTACHMENT0};
     glDrawBuffers(1, draw0);
     glViewport(0, 0, ctx.screen_width, ctx.screen_height);
@@ -103,7 +132,7 @@ void TaauPass::execute(const RenderContext& ctx) {
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, lit_color);
     glActiveTexture(GL_TEXTURE1);
-    glBindTexture(GL_TEXTURE_2D, m_history[rd]);
+    glBindTexture(GL_TEXTURE_2D, plan.read_texture);
     glActiveTexture(GL_TEXTURE2);
     glBindTexture(GL_TEXTURE_2D, ctx.motion_vectors.id);
     m_shader->setInt("u_current", 0);
@@ -116,17 +145,18 @@ void TaauPass::execute(const RenderContext& ctx) {
                                                     // (u_current is internal-sized)
     m_shader->setFloat("u_blend", 0.9f);
     m_shader->setFloat("u_sharpness", 0.4f); // recover TAA temporal-blur softness
-    m_shader->setInt("u_history_valid", m_history_valid ? 1 : 0);
+    m_shader->setInt("u_history_valid", plan.history_valid ? 1 : 0);
 
     glBindVertexArray(ctx.screen_quad_vao);
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
     glBindVertexArray(0);
 
-    // Copy the resolved result back into the lighting color so the final blit shows it; keep
-    // history[wr] for next frame's reprojection.
-    glBindFramebuffer(GL_READ_FRAMEBUFFER, m_fbo);
+    // Copy the resolved output into lighting for final blit. Only normal frames
+    // publish the written history for the next frame's reprojection.
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, resolve_fbo);
     glReadBuffer(GL_COLOR_ATTACHMENT0);
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, lit_fbo);
+    PreserveReplayObject(ReplayObjectKind::Framebuffer, lit_fbo);
     glDrawBuffer(GL_COLOR_ATTACHMENT0);
     glBlitFramebuffer(0,
                       0,
@@ -145,8 +175,10 @@ void TaauPass::execute(const RenderContext& ctx) {
         glEnable(GL_BLEND);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     glActiveTexture(GL_TEXTURE0);
-    m_history_write = rd; // ping-pong
-    m_history_valid = true;
+    if (plan.commit_history) {
+        m_history_write = 1 - input.write_index;
+        m_history_valid = true;
+    }
 }
 
 } // namespace Luminumbra::Rendering

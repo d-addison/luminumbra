@@ -1,7 +1,10 @@
 #pragma once
 
+#include "luminumbra_common/simulation/SimBudgetProfile.h"
+
 #include <cstdint>
 #include <filesystem>
+#include <optional>
 #include <string>
 
 struct ServerCliOptions {
@@ -46,6 +49,11 @@ struct ServerCliOptions {
     // ServerWorldRunnerConfig::water_smoke). Observability only; implies --smoke.
     bool water_smoke = false;
     bool sim_budget = false; // Opt-in simulation stage observation; default artifact unchanged.
+    // --sim-budget-profile <path>: operator-supplied budget profile (implies --sim-budget and
+    // --smoke). Parsed and validated before any world creation; never affects simulation output.
+    std::string sim_budget_profile_path;
+    std::optional<luminumbra::simulation::SimBudgetProfile> sim_budget_profile;
+    std::uint64_t sim_budget_profile_bytes = 0;
 
     //  --replicate runs the authoritative server + an in-process loopback
     // ReplicationClient, broadcasts the avatar states each tick, and asserts the client
@@ -135,8 +143,22 @@ struct ServerCliOptions {
     std::uint64_t lockstep_delay_input = 0;
     std::uint64_t lockstep_corrupt_tick = 0;
     std::string lockstep_dump_path;
+    // --crash-dir: where the crash report is written. Empty uses nonempty
+    // LUMINUMBRA_CRASH_DIR, then logs/crash under the working directory.
+    std::string crash_dir;
     bool parse_error = false;
 };
+
+inline std::filesystem::path ResolveServerCrashDirectory(const std::string& explicit_directory,
+                                                         const char* environment_directory) {
+    if (!explicit_directory.empty()) {
+        return std::filesystem::path(explicit_directory);
+    }
+    if (environment_directory != nullptr && environment_directory[0] != '\0') {
+        return std::filesystem::path(environment_directory);
+    }
+    return std::filesystem::path("logs") / "crash";
+}
 
 bool HasWorldPresets(const std::filesystem::path& candidate);
 std::filesystem::path ResolveServerRoot(const char* argv0);

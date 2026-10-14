@@ -4,27 +4,63 @@ on:
   push:
     branches: [main, devel]
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
     branches: [main, devel]
   workflow_dispatch:
+    inputs:
+      qualification_capture:
+        description: 'Explicit same-head AC2/AC4 artifact capture'
+        type: boolean
+        default: false
+      expected_sha:
+        description: 'Full candidate SHA; required when qualification capture is enabled'
+        type: string
+        default: ''
 
 permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # Manual capture attempts have separate run groups. Every devel push has its
+  # own commit group, preserving complete verdicts for previously merged tips.
+  group: ${{ github.event_name == 'workflow_dispatch' && inputs.qualification_capture && format('{0}-qualification-{1}', github.workflow, github.run_id) || format('{0}-{1}{2}', github.workflow, github.ref, github.event_name == 'push' && github.ref == 'refs/heads/devel' && format('-{0}', github.sha) || '') }}
+  cancel-in-progress: ${{ !((github.event_name == 'workflow_dispatch' && inputs.qualification_capture) || (github.event_name == 'push' && github.ref == 'refs/heads/devel')) }}
 
 env:
+  QUALIFICATION_WORKFLOW_SHA: ${{ github.workflow_sha }}
+  QUALIFICATION_WORKFLOW_REF: ${{ github.workflow_ref }}
+  QUALIFICATION_EXPECTED_SHA: ${{ inputs.expected_sha }}
   CTEST_PARALLEL_LEVEL: "4"
 
 jobs:
+  # Drafts cannot merge. ready_for_review reruns these jobs on the same head;
+  # maintainers must wait for that run's required checks to pass before merging.
   linux:
     name: Linux / GCC
+    # Keep this existing required check red on drafts: job-level skips can
+    # satisfy GitHub branch protection before the ready run finishes.
     runs-on: ubuntu-24.04
     timeout-minutes: 60
+    env:
+      CCACHE_COMPILERCHECK: content
+      CCACHE_MAXSIZE: 500M
     steps:
+      - name: Reject draft pull requests
+        shell: bash
+        env:
+          CI_EVENT_NAME: ${{ github.event_name }}
+          CI_PR_DRAFT: ${{ github.event.pull_request.draft }}
+        run: |
+          if [ "$CI_EVENT_NAME" = "pull_request" ] && [ "$CI_PR_DRAFT" != "false" ]; then
+            echo "::error::Draft pull requests cannot merge. Mark ready for review and wait for the full checks."
+            exit 1
+          fi
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Verify manual qualification identity and dependencies
+        id: identity
+        if: github.event_name == 'workflow_dispatch' && inputs.qualification_capture
+        run: python tools/ci/qualification_capture.py preflight --lane linux-gcc --expected-sha "$QUALIFICATION_EXPECTED_SHA"
       - name: Install build and test dependencies
         run: |
           sudo apt-get update
@@ -33,19 +69,49 @@ jobs:
             libgl1-mesa-dev libglu1-mesa-dev libwayland-dev libxkbcommon-dev \
             ninja-build pkg-config python3-numpy python3-pil wayland-protocols \
             xauth xorg-dev xvfb
+      - name: Disable compiler cache for qualification captures
+        if: github.event_name == 'workflow_dispatch' && inputs.qualification_capture
+        run: echo "CCACHE_DISABLE=1" >> "$GITHUB_ENV"
       - name: Restore compiler cache
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: compiler-cache
+        if: ${{ (github.event_name != 'workflow_dispatch' || inputs.qualification_capture != true) }}
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/ccache
-          key: linux-x64-gcc-ccache-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json', 'cmake/**/*.cmake', 'src/**/*.cmake', 'test/CMakeLists.txt', 'tools/CMakeLists.txt', 'vendor/CMakeLists.txt') }}
-          restore-keys: linux-x64-gcc-ccache-
+          key: linux-x64-gcc-ccache-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json', 'cmake/**/*.cmake', 'src/**/*.cmake', 'test/CMakeLists.txt', 'tools/CMakeLists.txt', 'vendor/CMakeLists.txt') }}-${{ github.sha }}
+          restore-keys: |
+            linux-x64-gcc-ccache-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json', 'cmake/**/*.cmake', 'src/**/*.cmake', 'test/CMakeLists.txt', 'tools/CMakeLists.txt', 'vendor/CMakeLists.txt') }}-
+            linux-x64-gcc-ccache-
       - name: Configure
+        id: configure
         run: >-
           cmake --preset release -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
           -DLUMINUMBRA_ENABLE_PREFAB_RUNTIME=ON
+      - name: Reset compiler cache statistics
+        if: ${{ always() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (github.event_name != 'workflow_dispatch' || inputs.qualification_capture != true) }}
+        continue-on-error: true
+        run: ccache -z || true
       - name: Build
+        id: build
         run: cmake --build --preset release --parallel 4
+      - name: Report compiler cache statistics
+        if: ${{ always() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (github.event_name != 'workflow_dispatch' || inputs.qualification_capture != true) }}
+        continue-on-error: true
+        run: ccache -s || true
+      - name: Clean compiler cache before saving
+        if: ${{ always() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/devel') && (github.event_name != 'workflow_dispatch' || inputs.qualification_capture != true) && steps.compiler-cache.outcome == 'success' && steps.compiler-cache.outputs.cache-hit != 'true' }}
+        continue-on-error: true
+        run: ccache --cleanup || true
+      - name: Save compiler cache
+        if: ${{ always() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/devel') && (github.event_name != 'workflow_dispatch' || inputs.qualification_capture != true) && steps.compiler-cache.outcome == 'success' && steps.compiler-cache.outputs.cache-hit != 'true' }}
+        # Cache writes are best-effort, including collisions on same-SHA reruns.
+        continue-on-error: true
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ccache
+          key: linux-x64-gcc-ccache-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json', 'cmake/**/*.cmake', 'src/**/*.cmake', 'test/CMakeLists.txt', 'tools/CMakeLists.txt', 'vendor/CMakeLists.txt') }}-${{ github.sha }}
       - name: Test
+        id: tests
         run: |
           env -u WAYLAND_DISPLAY XDG_SESSION_TYPE=x11 LIBGL_ALWAYS_SOFTWARE=1 \
             xvfb-run -a ctest --preset release --no-tests=error -LE manual \
@@ -66,9 +132,24 @@ jobs:
         run: |
           ctest --preset release --no-tests=error -R '^NetSoak$' \
             --parallel 1 --output-junit netsoak.junit.xml
+      - name: Bind manual qualification evidence
+        if: always() && (github.event_name == 'workflow_dispatch' && inputs.qualification_capture)
+        env:
+          QUALIFICATION_PRODUCERS: '{"identity":"${{ steps.identity.outcome }}","configure":"${{ steps.configure.outcome }}","build":"${{ steps.build.outcome }}","tests":"${{ steps.tests.outcome }}"}'
+        run: python tools/ci/qualification_capture.py write --lane linux-gcc --expected-sha "$QUALIFICATION_EXPECTED_SHA" --binary build/release/bin/common_tests --junit build/release/ctest.junit.xml --output build/release/qualification-capture.json
+      - name: Upload manual qualification evidence
+        if: always() && (github.event_name == 'workflow_dispatch' && inputs.qualification_capture)
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: qualification-linux-gcc-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            build/release/ctest.junit.xml
+            build/release/qualification-capture.json
+          if-no-files-found: error
+          retention-days: 30
       - name: Upload test evidence
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: linux-gcc-test-evidence-${{ github.sha }}
           path: |
@@ -79,8 +160,8 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
       - name: Upload installed prefab generations and receipts
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: linux-gcc-prefab-runtime-${{ github.sha }}
           path: build/release/test-artifacts/prefab-runtime
@@ -99,6 +180,7 @@ jobs:
 
   gns-compile-probe:
     name: GNS transport / compile probe
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     runs-on: ubuntu-24.04
     # Building GameNetworkingSockets from source (FetchContent + protobuf
     # codegen) is several minutes on top of the project build, well past the
@@ -139,8 +221,12 @@ jobs:
 
   diligent-rhi:
     name: Diligent RHI / software GL
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     runs-on: ubuntu-24.04
     timeout-minutes: 60
+    env:
+      CCACHE_COMPILERCHECK: content
+      CCACHE_MAXSIZE: 500M
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -158,16 +244,27 @@ jobs:
             libgl1-mesa-dev libglu1-mesa-dev libwayland-dev libxkbcommon-dev \
             mesa-vulkan-drivers ninja-build pkg-config python3-numpy \
             python3-pil wayland-protocols xauth xorg-dev xvfb
+      - name: Disable compiler cache for qualification captures
+        if: github.event_name == 'workflow_dispatch' && inputs.qualification_capture
+        run: echo "CCACHE_DISABLE=1" >> "$GITHUB_ENV"
       - name: Restore compiler cache
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: compiler-cache
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.qualification_capture) }}
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/ccache
-          key: diligent-rhi-linux-x64-gcc-ccache-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json', 'cmake/**/*.cmake', 'src/**/*.cmake', 'test/CMakeLists.txt', 'tools/CMakeLists.txt', 'vendor/CMakeLists.txt') }}
-          restore-keys: diligent-rhi-linux-x64-gcc-ccache-
+          key: diligent-rhi-linux-x64-gcc-ccache-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json', 'cmake/**/*.cmake', 'src/**/*.cmake', 'test/CMakeLists.txt', 'tools/CMakeLists.txt', 'vendor/CMakeLists.txt') }}-${{ github.sha }}
+          restore-keys: |
+            diligent-rhi-linux-x64-gcc-ccache-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json', 'cmake/**/*.cmake', 'src/**/*.cmake', 'test/CMakeLists.txt', 'tools/CMakeLists.txt', 'vendor/CMakeLists.txt') }}-
+            diligent-rhi-linux-x64-gcc-ccache-
       - name: Configure with Diligent RHI
         run: |
           cmake --preset release -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
             -DLUMINUMBRA_ENABLE_DILIGENT=ON
+      - name: Reset compiler cache statistics
+        if: ${{ always() && !(github.event_name == 'workflow_dispatch' && inputs.qualification_capture) }}
+        continue-on-error: true
+        run: ccache -z || true
       - name: Build with Diligent RHI
         env:
           EVENT_NAME: ${{ github.event_name }}
@@ -183,6 +280,21 @@ jobs:
           else
             cmake --build --preset release --parallel 4
           fi
+      - name: Report compiler cache statistics
+        if: ${{ always() && !(github.event_name == 'workflow_dispatch' && inputs.qualification_capture) }}
+        continue-on-error: true
+        run: ccache -s || true
+      - name: Clean compiler cache before saving
+        if: ${{ always() && github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/devel') && !(github.event_name == 'workflow_dispatch' && inputs.qualification_capture) && steps.compiler-cache.outcome == 'success' && steps.compiler-cache.outputs.cache-hit != 'true' }}
+        continue-on-error: true
+        run: ccache --cleanup || true
+      - name: Save compiler cache
+        if: ${{ always() && github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/devel') && !(github.event_name == 'workflow_dispatch' && inputs.qualification_capture) && steps.compiler-cache.outcome == 'success' && steps.compiler-cache.outputs.cache-hit != 'true' }}
+        continue-on-error: true
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ccache
+          key: diligent-rhi-linux-x64-gcc-ccache-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json', 'cmake/**/*.cmake', 'src/**/*.cmake', 'test/CMakeLists.txt', 'tools/CMakeLists.txt', 'vendor/CMakeLists.txt') }}-${{ github.sha }}
       - name: Test Diligent RHI with software GL
         run: |
           # gtest_discover_tests registers ctest names as Suite.Test, NOT the CMake
@@ -203,7 +315,7 @@ jobs:
           python3 tools/ci/check_ctest_junit.py build/release/ctest-pilot.junit.xml --minimum-tests 2
       - name: Upload Diligent test evidence
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: diligent-rhi-test-evidence-${{ github.sha }}
           path: |
@@ -214,13 +326,70 @@ jobs:
 
   windows-msvc:
     name: Windows / MSVC
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     runs-on: windows-2025
     timeout-minutes: 90
+    env:
+      CCACHE_COMPILERCHECK: content
+      CCACHE_MAXSIZE: 1G
+      # Only the main configure opts in via command-line launchers. Captures
+      # and packaging must not inherit a launcher from the environment.
+      CMAKE_C_COMPILER_LAUNCHER: ""
+      CMAKE_CXX_COMPILER_LAUNCHER: ""
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Job-level env cannot read the runner context; set the cache
+      # directory from RUNNER_TEMP before any step consumes it.
+      - name: Locate compiler cache
+        shell: pwsh
+        run: '"CCACHE_DIR=$(Join-Path $env:RUNNER_TEMP ''ccache-msvc'')" >> $env:GITHUB_ENV'
+      - name: Verify manual qualification identity and dependencies
+        id: identity
+        if: github.event_name == 'workflow_dispatch' && inputs.qualification_capture
+        run: python tools/ci/qualification_capture.py preflight --lane windows-msvc --expected-sha "$env:QUALIFICATION_EXPECTED_SHA"
       - name: Install Python test dependencies
         run: python -m pip install --disable-pip-version-check numpy Pillow
+      - name: Disable compiler cache for qualification captures
+        if: github.event_name == 'workflow_dispatch' && inputs.qualification_capture
+        shell: pwsh
+        run: '"CCACHE_DISABLE=1" >> $env:GITHUB_ENV'
+      - name: Stage ccache
+        id: ccache-stage
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.qualification_capture) }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          $version = '4.14.1'
+          $sha256 = '6219f3865ca59aec41ee4b678df171d5d35855ecb2b6dbbbd20690b3a68af7b4'
+          $archive = "ccache-$version-windows-x86_64.zip"
+          $url = "https://github.com/ccache/ccache/releases/download/v$version/$archive"
+          $archivePath = Join-Path $env:RUNNER_TEMP $archive
+          Invoke-WebRequest -Uri $url -OutFile $archivePath
+          $actual = (Get-FileHash -Algorithm SHA256 -Path $archivePath).Hash.ToLowerInvariant()
+          if ($actual -ne $sha256) {
+            throw "ccache archive sha256 mismatch: expected $sha256, got $actual"
+          }
+          $ccacheRoot = Join-Path $env:RUNNER_TEMP 'ccache-bin'
+          7z x $archivePath "-o$ccacheRoot" | Out-Null
+          # Discover the executable whether the zip has a top-level directory
+          # or places it directly at the extraction root; refuse ambiguity.
+          $executables = @(Get-ChildItem -Path $ccacheRoot -Filter 'ccache.exe' -File -Recurse)
+          if ($executables.Count -ne 1) {
+            throw "Expected exactly one ccache.exe in the archive, found $($executables.Count)"
+          }
+          $executables[0].DirectoryName >> $env:GITHUB_PATH
+      - name: Restore compiler cache
+        id: compiler-cache
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.qualification_capture) }}
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/ccache-msvc
+          key: windows-x64-msvc-ccache-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json', 'cmake/**/*.cmake', 'src/**/*.cmake', 'test/CMakeLists.txt', 'tools/CMakeLists.txt', 'vendor/CMakeLists.txt') }}-${{ github.sha }}
+          restore-keys: |
+            windows-x64-msvc-ccache-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json', 'cmake/**/*.cmake', 'src/**/*.cmake', 'test/CMakeLists.txt', 'tools/CMakeLists.txt', 'vendor/CMakeLists.txt') }}-
+            windows-x64-msvc-ccache-
       - name: Stage software OpenGL (Mesa3D llvmpipe)
         shell: pwsh
         run: |
@@ -250,7 +419,13 @@ jobs:
               throw "Mesa3D archive is missing x64/$dll"
             }
           }
+      - name: Reset compiler cache statistics
+        if: ${{ always() && !(github.event_name == 'workflow_dispatch' && inputs.qualification_capture) && steps.ccache-stage.outcome == 'success' }}
+        continue-on-error: true
+        shell: pwsh
+        run: ccache -z
       - name: Configure, build, and test
+        id: native
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -260,8 +435,18 @@ jobs:
             -property installationPath
           Import-Module "$installPath\Common7\Tools\Microsoft.VisualStudio.DevShell.dll"
           Enter-VsDevShell -VsInstallPath $installPath -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'
-          cmake --preset release -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl
+          # Release uses Ninja without /Zi under the project's CMake 3.20
+          # policy baseline. Keep launchers local to this configure.
+          $compilerLaunchers = @()
+          if ($env:CCACHE_DISABLE -ne '1') {
+            $compilerLaunchers = @('-DCMAKE_C_COMPILER_LAUNCHER=ccache', '-DCMAKE_CXX_COMPILER_LAUNCHER=ccache')
+          }
+          cmake --preset release -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl @compilerLaunchers
           cmake --build --preset release --parallel 4
+          # Require the file-only production writer/oracle integration even
+          # when optional PowerShell discovery would omit it from the suite.
+          ctest --preset release --no-tests=error `
+            -R '^FarLadderOracleWriterContract$' --output-on-failure
           # Retain one CPU-only diagnostic binary with its compiler runtime so a
           # terrain-hash failure can distinguish compiler output from host effects.
           # This temporary CI artifact is not a software release or game package.
@@ -299,9 +484,41 @@ jobs:
           # remaining skip is a hard failure.
           # Inventory floor: measured 2284 tests on devel b56cdba1, minus ~1% margin (see the Linux lane for the policy).
           python tools/ci/check_ctest_junit.py build/release/ctest.junit.xml --minimum-tests 2260
+      - name: Report compiler cache statistics
+        if: ${{ always() && !(github.event_name == 'workflow_dispatch' && inputs.qualification_capture) && steps.ccache-stage.outcome == 'success' }}
+        continue-on-error: true
+        shell: pwsh
+        run: ccache -s
+      - name: Clean compiler cache before saving
+        if: ${{ always() && github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/devel') && !(github.event_name == 'workflow_dispatch' && inputs.qualification_capture) && steps.compiler-cache.outcome == 'success' && steps.compiler-cache.outputs.cache-hit != 'true' }}
+        continue-on-error: true
+        shell: pwsh
+        run: ccache --cleanup
+      - name: Save compiler cache
+        if: ${{ always() && github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/devel') && !(github.event_name == 'workflow_dispatch' && inputs.qualification_capture) && steps.compiler-cache.outcome == 'success' && steps.compiler-cache.outputs.cache-hit != 'true' }}
+        continue-on-error: true
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/ccache-msvc
+          key: windows-x64-msvc-ccache-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json', 'cmake/**/*.cmake', 'src/**/*.cmake', 'test/CMakeLists.txt', 'tools/CMakeLists.txt', 'vendor/CMakeLists.txt') }}-${{ github.sha }}
+      - name: Bind manual qualification evidence
+        if: always() && (github.event_name == 'workflow_dispatch' && inputs.qualification_capture)
+        env:
+          QUALIFICATION_PRODUCERS: '{"identity":"${{ steps.identity.outcome }}","native":"${{ steps.native.outcome }}"}'
+        run: python tools/ci/qualification_capture.py write --lane windows-msvc --expected-sha "$env:QUALIFICATION_EXPECTED_SHA" --binary build/release/bin/common_tests.exe --junit build/release/ctest.junit.xml --output build/release/qualification-capture.json
+      - name: Upload manual qualification evidence
+        if: always() && (github.event_name == 'workflow_dispatch' && inputs.qualification_capture)
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: qualification-windows-msvc-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            build/release/ctest.junit.xml
+            build/release/qualification-capture.json
+          if-no-files-found: error
+          retention-days: 30
       - name: Upload test evidence
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: windows-msvc-test-evidence-${{ github.sha }}
           path: |
@@ -312,7 +529,7 @@ jobs:
           retention-days: 14
       - name: Upload native worldgen diagnostic
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: windows-msvc-worldgen-diagnostic-${{ github.sha }}
           path: build/release/worldgen-diagnostic
@@ -337,11 +554,11 @@ jobs:
 
   windows-ucrt64:
     name: Windows / MSYS2 UCRT64
-    # Runs on every pull request (devel- and main-bound) and on pushes to main, so a
+    # Runs on ready pull requests (devel- and main-bound) and on pushes to main, so a
     # MinGW/UCRT break shows on the PR that causes it instead of at promotion. It is
     # not a required devel context, so it informs rather than blocks there; it stays
     # required on main. Pushes to devel do not run it (the PR already did).
-    if: github.event_name == 'pull_request' || github.ref_name == 'main'
+    if: (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (github.event_name == 'pull_request' || github.ref_name == 'main' || (github.event_name == 'workflow_dispatch' && inputs.qualification_capture))
     runs-on: windows-2025
     # Measured 40.6 min end to end on the first post-release promotion run
     # (previously two 135-minute cap kills, before the test streaming caps
@@ -350,22 +567,51 @@ jobs:
     # the Mesa3D download add a few more here, so the cap keeps ~1.9x
     # headroom over the projected ~45 min.
     timeout-minutes: 85
+    env:
+      CCACHE_COMPILERCHECK: content
+      CCACHE_MAXSIZE: 1G
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Job-level env cannot read the runner context; set the cache
+      # directory from RUNNER_TEMP before any step consumes it. The native
+      # UCRT64 ccache accepts the Windows path inherited by msys2.
+      - name: Locate compiler cache
+        shell: pwsh
+        run: '"CCACHE_DIR=$(Join-Path $env:RUNNER_TEMP ''ccache-ucrt64'')" >> $env:GITHUB_ENV'
+      - name: Verify manual qualification identity and dependencies
+        id: identity
+        if: github.event_name == 'workflow_dispatch' && inputs.qualification_capture
+        run: python tools/ci/qualification_capture.py preflight --lane windows-ucrt64 --expected-sha "$env:QUALIFICATION_EXPECTED_SHA"
       - name: Set up MSYS2 UCRT64
         uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2
         with:
+          cache: ${{ github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/devel') }}
           msystem: UCRT64
           update: true
           install: >-
             git
+            mingw-w64-ucrt-x86_64-ccache
             mingw-w64-ucrt-x86_64-cmake
             mingw-w64-ucrt-x86_64-gcc
             mingw-w64-ucrt-x86_64-ninja
             mingw-w64-ucrt-x86_64-python
             mingw-w64-ucrt-x86_64-python-numpy
             mingw-w64-ucrt-x86_64-python-pillow
+      - name: Disable compiler cache for qualification captures
+        if: github.event_name == 'workflow_dispatch' && inputs.qualification_capture
+        shell: msys2 {0}
+        run: echo "CCACHE_DISABLE=1" >> "$GITHUB_ENV"
+      - name: Restore compiler cache
+        id: compiler-cache
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.qualification_capture) }}
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/ccache-ucrt64
+          key: windows-x64-ucrt64-gcc-ccache-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json', 'cmake/**/*.cmake', 'src/**/*.cmake', 'test/CMakeLists.txt', 'tools/CMakeLists.txt', 'vendor/CMakeLists.txt') }}-${{ github.sha }}
+          restore-keys: |
+            windows-x64-ucrt64-gcc-ccache-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json', 'cmake/**/*.cmake', 'src/**/*.cmake', 'test/CMakeLists.txt', 'tools/CMakeLists.txt', 'vendor/CMakeLists.txt') }}-
+            windows-x64-ucrt64-gcc-ccache-
       - name: Stage software OpenGL (Mesa3D llvmpipe)
         shell: pwsh
         run: |
@@ -401,12 +647,39 @@ jobs:
             }
           }
       - name: Configure
+        id: configure
         shell: msys2 {0}
-        run: cmake --preset release
+        run: >-
+          cmake --preset release -DCMAKE_C_COMPILER_LAUNCHER=ccache
+          -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+      - name: Reset compiler cache statistics
+        if: ${{ always() && !(github.event_name == 'workflow_dispatch' && inputs.qualification_capture) }}
+        continue-on-error: true
+        shell: msys2 {0}
+        run: ccache -z || true
       - name: Build
+        id: build
         shell: msys2 {0}
         run: cmake --build --preset release --parallel 4
+      - name: Report compiler cache statistics
+        if: ${{ always() && !(github.event_name == 'workflow_dispatch' && inputs.qualification_capture) }}
+        continue-on-error: true
+        shell: msys2 {0}
+        run: ccache -s || true
+      - name: Clean compiler cache before saving
+        if: ${{ always() && github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/devel') && !(github.event_name == 'workflow_dispatch' && inputs.qualification_capture) && steps.compiler-cache.outcome == 'success' && steps.compiler-cache.outputs.cache-hit != 'true' }}
+        continue-on-error: true
+        shell: msys2 {0}
+        run: ccache --cleanup || true
+      - name: Save compiler cache
+        if: ${{ always() && github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/devel') && !(github.event_name == 'workflow_dispatch' && inputs.qualification_capture) && steps.compiler-cache.outcome == 'success' && steps.compiler-cache.outputs.cache-hit != 'true' }}
+        continue-on-error: true
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/ccache-ucrt64
+          key: windows-x64-ucrt64-gcc-ccache-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json', 'cmake/**/*.cmake', 'src/**/*.cmake', 'test/CMakeLists.txt', 'tools/CMakeLists.txt', 'vendor/CMakeLists.txt') }}-${{ github.sha }}
       - name: Test
+        id: tests
         shell: msys2 {0}
         run: |
           # Deploy the staged Mesa3D llvmpipe runtime next to the test
@@ -430,9 +703,25 @@ jobs:
           # any remaining skip is a hard failure.
           # Inventory floor: measured 2284 tests on devel b56cdba1, minus ~1% margin (see the Linux lane for the policy).
           python tools/ci/check_ctest_junit.py build/release/ctest.junit.xml --minimum-tests 2260
+      - name: Bind manual qualification evidence
+        if: always() && (github.event_name == 'workflow_dispatch' && inputs.qualification_capture)
+        shell: msys2 {0}
+        env:
+          QUALIFICATION_PRODUCERS: '{"identity":"${{ steps.identity.outcome }}","configure":"${{ steps.configure.outcome }}","build":"${{ steps.build.outcome }}","tests":"${{ steps.tests.outcome }}"}'
+        run: python tools/ci/qualification_capture.py write --lane windows-ucrt64 --expected-sha "$QUALIFICATION_EXPECTED_SHA" --binary build/release/bin/common_tests.exe --junit build/release/ctest.junit.xml --output build/release/qualification-capture.json
+      - name: Upload manual qualification evidence
+        if: always() && (github.event_name == 'workflow_dispatch' && inputs.qualification_capture)
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: qualification-windows-ucrt64-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            build/release/ctest.junit.xml
+            build/release/qualification-capture.json
+          if-no-files-found: error
+          retention-days: 30
       - name: Upload test evidence
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: windows-ucrt64-test-evidence-${{ github.sha }}
           path: |
@@ -493,16 +782,19 @@ jobs:
       - name: Check formatting
         run: scripts/lint.sh --format-only
 
-  tidy:
-    name: Static analysis / clang-tidy
+  tidy-shard:
+    name: Static analysis / clang-tidy shard ${{ matrix.shard }}/3
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     runs-on: ubuntu-24.04
-    # The gate analyses 351 translation units across src/, test/ and tools/, and since it
-    # gained a real HeaderFilterRegex it also analyses first-party headers on every
-    # one of them. That is a large multiple of the src/-only, headers-excluded scope
-    # this job was originally sized for, and it overran the previous 30-minute limit
-    # on a hosted runner at --jobs 4. Sized like the other heavy lanes (Linux 60,
-    # UCRT64 85, MSVC 90) rather than trimmed back to fit.
+    # The gate analyses 458 translation units across src/, test/ and tools/ plus
+    # their first-party headers. Three standard hosted runners partition that
+    # full scope by path hash so every merged tip gets complete analysis within
+    # the unchanged 60-minute timeout; pushes still never skip cached units.
     timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -522,8 +814,48 @@ jobs:
             -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++
       - name: Generate vendored headers used by first-party sources
         run: cmake --build build/tidy --target glad --parallel 4
+      # Per-translation-unit result cache (scripts/tidy_cache.py). A unit is skipped
+      # only when its complete analysis input (source, every header the compiler
+      # reads, compile flags, check config, clang-tidy and compiler versions) is
+      # identical to an earlier run that passed; anything else runs clang-tidy.
+      # Pull requests only restore it. Pushes to devel/main never restore it, so
+      # every merged tip gets a full analysis; only those pushes save it for PRs.
+      - name: Restore clang-tidy result cache
+        id: tidy-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: github.event_name == 'pull_request'
+        with:
+          path: .tidy-cache
+          key: tidy-cache-${{ runner.os }}-shard${{ matrix.shard }}of3-${{ github.sha }}
+          restore-keys: tidy-cache-${{ runner.os }}-shard${{ matrix.shard }}of3-
       - name: Run blocking clang-tidy gate
-        run: scripts/tidy.sh --build-dir build/tidy --jobs 4
+        env:
+          TIDY_CACHE_MODE: ${{ github.event_name == 'pull_request' && 'readwrite' || 'writeonly' }}
+        run: scripts/tidy.sh --build-dir build/tidy --jobs 4 --shard ${{ matrix.shard }}/3 --cache-dir .tidy-cache --cache-mode "$TIDY_CACHE_MODE"
+      - name: Save clang-tidy result cache
+        if: ${{ !cancelled() && github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/devel') && steps.tidy-cache.outputs.cache-hit != 'true' }}
+        continue-on-error: true
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .tidy-cache
+          key: tidy-cache-${{ runner.os }}-shard${{ matrix.shard }}of3-${{ github.sha }}
+
+  tidy:
+    # Preserve the required check name and reject every non-success shard result.
+    name: Static analysis / clang-tidy
+    needs: tidy-shard
+    if: always() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require all clang-tidy shards to pass
+        env:
+          TIDY_SHARD_RESULT: ${{ needs.tidy-shard.result }}
+        run: |
+          if [[ "$TIDY_SHARD_RESULT" != 'success' ]]; then
+            echo "clang-tidy shards did not all pass: $TIDY_SHARD_RESULT" >&2
+            exit 1
+          fi
 
   public-tree:
     name: Public tree / inventory honesty
@@ -537,6 +869,9 @@ jobs:
           python3 tools/ci/test_validate_public_tree.py
           python3 tools/ci/test_check_docs.py
           python3 tools/ci/test_check_ctest_junit.py
+          python3 tools/ci/test_workflow_policy.py
+          python3 tools/ci/test_tidy_cache.py
+          python3 tools/ci/test_tidy_shard.py
           python3 tools/ci/test_validate_visual_catalog.py
           python3 tools/ci/validate_visual_catalog.py
           python3 tools/ci/render_visual_catalog.py --check

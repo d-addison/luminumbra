@@ -162,7 +162,7 @@ TEST(AetherEmitterDeterminism, WindowEdgeConservation) {
 }
 
 TEST(AetherEmitterDeterminism, SequentialCatchUpBitEqual) {
-    // Codex r2 correction: page-in catch-up decay must be the SEQUENTIAL
+    // Page-in catch-up decay must be the SEQUENTIAL
     // per-step loop — bit-equal to stepping the pinned decay one firing at a
     // time (pow-by-squaring truncates once, differs).
     const std::uint16_t seed_value = 51234;

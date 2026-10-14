@@ -1,0 +1,31 @@
+{
+  "passed": true,
+  "receipt_sha256": "9fefbb14e75e3a1c09f1f2cca1c02797ae81d70e4f55493e2ae797b7b09116f0",
+  "artifact_count": 36,
+  "cases": [
+    {
+      "name": "perspective",
+      "pixels": 19200,
+      "clear_pixels": 1200,
+      "max_color_byte_error": 0,
+      "max_depth_error": 4.3306497277129097e-10,
+      "front_behind_controls": true
+    },
+    {
+      "name": "orthographic-negative-near",
+      "pixels": 19200,
+      "clear_pixels": 1200,
+      "max_color_byte_error": 0,
+      "max_depth_error": 3.547784688251454e-08,
+      "front_behind_controls": true
+    },
+    {
+      "name": "odd-downsample",
+      "pixels": 923601,
+      "clear_pixels": 57600,
+      "max_color_byte_error": 0,
+      "max_depth_error": 4.3306497277129097e-10,
+      "front_behind_controls": true
+    }
+  ]
+}

@@ -13,10 +13,16 @@ set -euo pipefail
 #   scripts/tidy.sh --changed-from REF    # analyze TUs changed since REF
 #   scripts/tidy.sh --build-dir DIR       # compile db location (default build/tidy)
 #   scripts/tidy.sh --jobs N              # parallel clang-tidy processes
+#   scripts/tidy.sh --shard INDEX/COUNT   # stable path-hash partition (default 1/1)
+#   scripts/tidy.sh --cache-dir DIR       # skip units proven identical to a passing run
+#   scripts/tidy.sh --cache-mode MODE     # readwrite (default) or writeonly (never skip)
 
 build_dir="build/tidy"
 changed_from=""
 jobs="$(nproc)"
+cache_dir=""
+cache_mode="readwrite"
+shard="1/1"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -32,6 +38,22 @@ while [[ $# -gt 0 ]]; do
             jobs="$2"
             shift 2
             ;;
+        --shard)
+            if [[ $# -lt 2 ]]; then
+                echo "--shard requires INDEX/COUNT with 1 <= INDEX <= COUNT" >&2
+                exit 2
+            fi
+            shard="$2"
+            shift 2
+            ;;
+        --cache-dir)
+            cache_dir="$2"
+            shift 2
+            ;;
+        --cache-mode)
+            cache_mode="$2"
+            shift 2
+            ;;
         *)
             echo "Unknown argument: $1" >&2
             exit 2
@@ -41,6 +63,9 @@ done
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "$script_dir/.." && pwd)"
+
+# Validate before looking for analysis tools, even when this shard will be empty.
+python3 "$script_dir/tidy_cache.py" shard --repo-root "$repo_root" --shard "$shard"
 
 # Curated blocking subset. Every check listed here is clean tree-wide today;
 # add a check only after verifying a full-tree run passes (or fixing the
@@ -172,16 +197,26 @@ else
     done < <(printf '%s\0' "${!compile_db_files[@]}" | sort -z)
 fi
 
-if [[ "${#tidy_files[@]}" -eq 0 ]]; then
-    if [[ -n "$changed_from" ]]; then
-        echo "No first-party translation units changed; clang-tidy gate has nothing to check."
-        exit 0
-    fi
+# Preserve the full-scope discovery guard; an empty partition of a valid TU list
+# is handled successfully below.
+if [[ "${#tidy_files[@]}" -eq 0 && -z "$changed_from" ]]; then
     echo "No first-party translation units found for clang-tidy." >&2
     exit 1
 fi
 
-echo "clang-tidy gate: ${#tidy_files[@]} translation unit(s), $jobs job(s), binary $clang_tidy"
+# Partition only after compile-database discovery and changed-file filtering,
+# before splitting the selected units by their tracked-global configuration.
+mapfile -d '' -t tidy_files < <(
+    python3 "$script_dir/tidy_cache.py" shard --repo-root "$repo_root" --shard "$shard" -- "${tidy_files[@]}"
+)
+# Propagate a helper failure instead of treating it as an empty, passing shard.
+wait "$!"
+
+echo "clang-tidy gate: shard $shard, ${#tidy_files[@]} translation unit(s), $jobs job(s), binary $clang_tidy"
+if [[ "${#tidy_files[@]}" -eq 0 ]]; then
+    echo "clang-tidy shard $shard has nothing to analyse."
+    exit 0
+fi
 
 regular_tidy_files=()
 tracked_global_tidy_files=()
@@ -207,10 +242,28 @@ run_tidy_batch() {
     if [[ "$#" -eq 0 ]]; then
         return 0
     fi
+    if [[ -n "$cache_dir" ]]; then
+        # Cached mode: tools/ci/test_tidy_cache.py documents why a hit can
+        # only ever stand in for a previous passing run of identical inputs.
+        python3 "$script_dir/tidy_cache.py" run \
+            --build-dir "$repo_root/$build_dir" --cache-dir "$cache_dir" \
+            --mode "$cache_mode" --jobs "$jobs" --clang-tidy "$clang_tidy" \
+            --config "$config" --tool-file "$script_dir/tidy.sh" -- "$@"
+        return $?
+    fi
     printf '%s\0' "$@" |
         xargs -0 -n 4 -P "$jobs" \
             "$clang_tidy" -p "$repo_root/$build_dir" -quiet --config="$config"
 }
+
+case "$cache_mode" in
+    readwrite | writeonly) ;;
+    *)
+        echo "Unknown --cache-mode: $cache_mode" >&2
+        exit 2
+        ;;
+esac
+cache_started="$(date +%s)"
 
 set +e
 run_tidy_batch "$gate_config" "${regular_tidy_files[@]}"
@@ -222,6 +275,12 @@ set -e
 if [[ "$tidy_status" -ne 0 || "$tracked_global_tidy_status" -ne 0 ]]; then
     echo "clang-tidy gate failed (status $tidy_status). Fix the diagnostics above; the checks in scripts/tidy.sh are blocking." >&2
     exit 1
+fi
+
+if [[ -n "$cache_dir" ]]; then
+    # Keep only the records this run used, so the saved cache tracks the
+    # current tree instead of growing with every commit.
+    python3 "$script_dir/tidy_cache.py" prune --cache-dir "$cache_dir" --before "$cache_started"
 fi
 
 echo "clang-tidy gate passed."

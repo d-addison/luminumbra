@@ -3,13 +3,16 @@
     [string]$Mode = "All",
 
     [string]$BuildPreset = "debug",
-    [int]$SmokeSeconds = 30
+    [int]$SmokeSeconds = 30,
+    [ValidateSet("Legacy", "Ladder")]
+    [string]$FarWorldRenderer = "Ladder"
 )
 
 $ErrorActionPreference = "Stop"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 . (Join-Path $ScriptDir "nightly-provenance.ps1")
 . (Join-Path $ScriptDir "capture-artifact-validation.ps1")
+. (Join-Path $ScriptDir "far-ladder-oracle.ps1")
 
 $ArtifactDir = "tools/gates/baselines"
 
@@ -3444,19 +3447,57 @@ function Test-PlayerView {
 # run measures the gbuffer GPU time with far-LOD DISABLED (the honest in-run
 # baseline; the committed perf baseline records frame times, not per-pass GPU
 # times); phase B enables far-LOD and sweeps eye-level + elevated stations.
-# Gates: zero reported missing regions in the legacy runtime wanted set after
-# settle (no independent radius assertion); farlod_resident_bytes below the
+# Gates: camera-derived legacy wanted counts and zero missing regions at every
+# captured station; farlod_resident_bytes below the
 # artifact's resident_budget_bytes threshold; gbuffer_gpu_ms delta
 # < 1.5 ms; horizon screenshots show terrain to the horizon (below-horizon
 # sky ratio bounded); the live/far boundary band ROI (~192 m at the smoke
 # radii) shows no sky-leak band and no strict void clusters (the
 # Distant-Horizons failure mode).
-# FarTierTable.h declares the future volumetric ranges; this gate still reads
-# the legacy artifact and does not qualify coverage of that ladder.
+# The legacy scheduler is checked against an independent legacy oracle
+# (far-ladder-oracle.ps1, from the v2 oracle artifact). The volumetric ladder is
+# checked only when the artifact mode is ladder; otherwise ladder_checked is
+# reported false. Complete v2 checks every required station's retained ON frame,
+# deadline <=90 seconds, current spanning identities and independent wanted set.
+# An explicit Ladder run refuses until immutable fixture authority is supported.
+
+# File-only controls exercise selected-mode dispatch and combined water evidence
+# through the same independent validator used below.
+function Assert-FarHorizonWaterNegativeControls {
+    $waterPython = $null
+    foreach ($candidate in @("python3", "python", "py")) {
+        if (Get-Command $candidate -ErrorAction SilentlyContinue) { $waterPython = $candidate; break }
+    }
+    if (-not $waterPython) { throw "far water controls require Python 3 (stdlib only)" }
+    & $waterPython -B -m unittest discover -s (Join-Path $PSScriptRoot ".") -p "test_far_ladder_oracle.py"
+    if ($LASTEXITCODE -ne 0) { throw "FarLodHorizon v2 mode/water negative controls failed" }
+}
+
+function Assert-FarHorizonLegacyCompatibility {
+    param([object]$SelectedEvidence)
+    # V1 thresholds and F1/F2 counts qualify only this retained compatibility
+    # branch. Never infer selection from a requested flag or resident regions.
+    if ($SelectedEvidence.Mode -cne "legacy" -or
+        $SelectedEvidence.LadderChecked -ne $false) {
+        throw "FarLodHorizon wrong-mode: v1 requires effective Legacy compatibility evidence"
+    }
+}
 
 function Test-FarLodHorizon {
+    Assert-FarHorizonWaterNegativeControls
+    if ($FarWorldRenderer -eq "Ladder") {
+        throw "FarLodHorizon Ladder qualification is unsupported: the world presets lack injected immutable authority; native cave/edit/budget/water qualification remains NEEDS-NATIVE-RUN. A refused Legacy fallback cannot qualify Ladder."
+    }
+    # The validator selector does not override the client's systems.json request.
+    # Legacy qualification must explicitly opt out through the existing setting.
+    $systems = Get-Content -LiteralPath "data/common/systems.json" -Raw | ConvertFrom-Json
+    if ($systems.render.far_world_ladder.enabled -isnot [bool] -or
+        $systems.render.far_world_ladder.enabled -ne $false) {
+        throw "FarLodHorizon Legacy requires explicit render.far_world_ladder.enabled:false in data/common/systems.json. The default request is Ladder; a refused fallback is not an explicit Legacy request."
+    }
+    Write-Host "FarLodHorizon selected renderer: $FarWorldRenderer (explicit Legacy opt-out; ladder_checked:false)"
     $exe = Get-ClientExe
-    $runSeconds = [Math]::Max(50, $SmokeSeconds)
+    $runSeconds = [Math]::Max(680, $SmokeSeconds)
 
     # archipelago (sea to horizon) added so the
     # water-continuity assertion below runs on an open-water preset alongside
@@ -3483,8 +3524,24 @@ function Test-FarLodHorizon {
             "--runtime-artifact-dir", $viewDir
         ) -TimeoutSeconds ([Math]::Max(180, $runSeconds + 120))
 
+        $oracle = Read-JsonArtifact -Path (Join-Path $viewDir "farlod-horizon-ladder-oracle.json") -Schema "luminumbra.farlod_horizon.v2"
+        # Runs retained #199 aggregate checks plus the strict station/pose validator.
+        $oracleResult = Assert-FarHorizonV2Artifact -Path (Join-Path $viewDir "farlod-horizon-ladder-oracle.json") -Renderer ($FarWorldRenderer.ToLowerInvariant())
+        if ($oracle.world_preset -ne $preset) { throw "farlod horizon ($preset) wrong v2 preset" }
+        Assert-FarHorizonLegacyCompatibility -SelectedEvidence $oracleResult
         $analysisPath = Join-Path $viewDir "farlod-horizon-analysis.json"
         $analysis = Read-JsonArtifact -Path $analysisPath -Schema "luminumbra.farlod_horizon.v1"
+        Assert-FarLodHorizonStationCoverage -Analysis $analysis -Name "farlod horizon ($preset)"
+        foreach ($counter in @("regions_wanted", "regions_resident", "regions_missing")) {
+            $oracleCount = Get-FarOracleInteger $oracle.legacy.$counter "farlod horizon ($preset) oracle" "legacy.$counter"
+            $analysisCount = Get-FarOracleInteger $analysis.farlod.$counter "farlod horizon ($preset)" "farlod.$counter"
+            if ($oracleCount -ne $analysisCount) {
+                throw "farlod horizon ($preset) oracle legacy.$counter $oracleCount differs from runtime farlod.$counter $analysisCount"
+            }
+        }
+        $ladderCheckedText = "false"
+        if ($oracleResult.LadderChecked) { $ladderCheckedText = "true" }
+        Write-Host "  ladder_checked: $ladderCheckedText (mode $($oracle.mode))"
 
         if ($analysis.world_preset -ne $preset) {
             throw "farlod horizon ($preset) artifact has unexpected world_preset '$($analysis.world_preset)'"
@@ -3496,10 +3553,8 @@ function Test-FarLodHorizon {
             throw "farlod horizon ($preset) captured $($analysis.aggregates.captured_stations) of $($analysis.aggregates.expected_stations) stations"
         }
 
-        # After settle: zero reported missing regions in the runtime wanted set.
-        # This does not check thresholds.f2_outer_range_m (legacy metadata) or
-        # compute an expected set independently. See world/FarTierTable.h for
-        # the future volumetric ladder; assertions stay unchanged here.
+        # Retain the aggregate checks alongside the per-station independent
+        # coverage checks above. thresholds.f2_outer_range_m is v1 metadata.
         if ([int64]$analysis.farlod.regions_missing -gt 0) {
             throw "farlod horizon ($preset) has $($analysis.farlod.regions_missing) missing wanted far regions after settle"
         }
@@ -4171,8 +4226,8 @@ function Test-AetherFieldDeterminism {
     # across runs and STABLE; the field EVOLVES over time (not vacuous); geometry
     # matches the PINNED 24 m / 64-extent / 8-sweep shape. The `aether` sub-hash is
     # folded into the world_hash (deliberate bump #4 d950a6afc12a5cdc ->
-    # f17726d44054d133; then bump #5 f17726d44054d133 -> 8a6b7bb6795da912 from commit
-    # 0cb9ce8 appending the |scents: term; then bump #6
+    # f17726d44054d133; then bump #5 f17726d44054d133 -> 8a6b7bb6795da912
+    # appending the |scents: term; then bump #6
     # 8a6b7bb6795da912 -> d8f84cf6d7d0b978 from gate-populated-world-replay appending the
     # |ecology: term to ComposeWorldHash — the SERVER composite hash, run==replay proven —
     # asserted by the headless tick / replay / lockstep gates. NOTE the NetworkedSession gate pins a DIFFERENT quantity:
@@ -4352,7 +4407,7 @@ function Test-HeadlessServerTickHeavy {
     # aether_state: the STATEFUL energy layer is authoritative
     # round-trip state (unlike the recompute-and-excluded re-derivable wind/weather/
     # aether trio). Empty on the default OFF world ("" == "" passes); the ON fixture
-    # rides the sim.aether_state activation bump (Codex sign-off finding A).
+    # rides the sim.aether_state activation bump.
     foreach ($section in @("terrain", "water", "entities", "aether_state")) {
         if ($h.original_at_save.sub_hashes.$section -ne $h.loaded_at_load.sub_hashes.$section) {
             throw "heavy oracle: round-trip $section sub-hash mismatch: $($h.original_at_save.sub_hashes.$section) != $($h.loaded_at_load.sub_hashes.$section)"
@@ -4400,7 +4455,7 @@ function Test-ReplayRoundtrip {
     #  -> 0857e683b4b8c47e [ weather slot] -> d950a6afc12a5cdc [
     #  lightning strike schedule folded into the weather sub-hash, hash revision]
     #  -> f17726d44054d133 [ aether slot appended, bump #4]
-    #  -> 8a6b7bb6795da912 [commit 0cb9ce8  appended the |scents: term to
+    #  -> 8a6b7bb6795da912 [appended the |scents: term to
     #  ComposeWorldHash, bump #5]
     #  -> d8f84cf6d7d0b978 [gate-populated-world-replay appended the |ecology: term to
     #  ComposeWorldHash, bump #6; the EMPTY-roster ecology sub-hash is neutral, so this

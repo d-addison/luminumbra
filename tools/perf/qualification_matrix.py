@@ -7,6 +7,7 @@ CLI built on top of this module.
 """
 import json
 import math
+from decimal import Decimal
 from pathlib import Path
 import re
 
@@ -297,16 +298,24 @@ def build_command(cell, *, client, artifact, root):
     return command
 
 
-def checker_command(cell, *, artifact, qualified_renderer, root, python):
+def checker_command(cell, *, artifact, verdict, qualified_renderer, root, python):
     """Return the validate_render_capture.py argv that checks a ready cell's artifact."""
     _require_ready(cell, root)
     command = [str(python), str(Path(root) / VALIDATOR), str(artifact),
-               '--qualified-renderer', qualified_renderer]
+               '--qualified-renderer', qualified_renderer,
+               '--profile', cell['profile'],
+               f"--width={cell['width']}", f"--height={cell['height']}",
+               f"--warmup-frames={cell['warmup_frames']}",
+               '--workload-kind', cell['kind']]
     if cell['kind'] == 'fixed_view':
         pose = cell['pose']
-        command += ['--position', repr(pose['x']), repr(pose['y']), repr(pose['z']),
-                    '--yaw', repr(pose['yaw']), '--pitch', repr(pose['pitch']),
-                    '--tod', repr(cell['time_of_day'])]
+        # nargs=3 cannot use --position=value. Expand exponents to decimals so
+        # argparse recognises negative components as values rather than options.
+        command += ['--position', *(format(Decimal(repr(pose[key])), 'f')
+                                     for key in ('x', 'y', 'z')),
+                    f"--yaw={pose['yaw']!r}", f"--pitch={pose['pitch']!r}",
+                    f"--tod={cell['time_of_day']!r}",
+                    f"--frames={cell['measured_frames']}"]
     else:
         command += ['--traversal', str(Path(root) / cell['script'])]
-    return command
+    return command + ['--enforce-floor', '--verdict-out', str(verdict)]
