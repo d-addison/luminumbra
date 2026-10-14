@@ -41,6 +41,7 @@ def _windows_reader_api():
     kernel.GetFileInformationByHandleEx.restype = w.BOOL
     kernel.SetFileInformationByHandle.argtypes = [w.HANDLE, ctypes.c_int, w.LPVOID, w.DWORD]
     kernel.SetFileInformationByHandle.restype = w.BOOL
+    kernel.FlushFileBuffers.argtypes, kernel.FlushFileBuffers.restype = [w.HANDLE], w.BOOL
     kernel.CloseHandle.argtypes, kernel.CloseHandle.restype = [w.HANDLE], w.BOOL
     return kernel
 
@@ -125,12 +126,16 @@ def file_identity(path):
         return reader_identity(stream)
 
 
-def replace_file(temporary, path):
+def replace_file(temporary, path, *, durable=False):
     """Publish a complete record while shared readers retain the old file.
 
     Windows MoveFileExW (os.replace) does not supply POSIX replacement semantics.
     FileRenameInfoEx does; unsupported filesystems fail without altering the
     destination. This does not retry, remove the destination or write in place.
+    With durable=True, Windows flushes the publication handle after renaming.
+    Callers must still fsync complete temporary bytes before publication and
+    fsync the containing directory afterwards on POSIX. Default callers retain
+    their existing access rights and publication behavior.
     """
     temporary, path = safe_path(temporary), safe_path(path)
     require(temporary.parent == path.parent and temporary != path, 'Publication requires distinct same-directory files')
@@ -156,7 +161,9 @@ def replace_file(temporary, path):
     # DELETE | FILE_READ_ATTRIBUTES on the owned complete temporary file;
     # OPEN_REPARSE_POINT
     # prevents following a replaced leaf. Handles are never inherited.
-    handle = kernel.CreateFileW(str(temporary), 0x10080, 7, None, 3, 0x00200000, None)
+    # FlushFileBuffers requires GENERIC_WRITE; request it only for durability.
+    access = 0x10080 | (0x40000000 if durable else 0)
+    handle = kernel.CreateFileW(str(temporary), access, 7, None, 3, 0x00200000, None)
     if handle == ctypes.c_void_p(-1).value:
         raise ctypes.WinError(ctypes.get_last_error())
     try:
@@ -167,6 +174,10 @@ def replace_file(temporary, path):
             raise ctypes.WinError(ctypes.get_last_error())
         require(not tag.attributes & (0x400 | 0x10), 'Reparse or directory publication handle')
         if not kernel.SetFileInformationByHandle(handle, 22, storage, len(storage)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        if durable and not kernel.FlushFileBuffers(handle):
+            # Publication has happened; propagate failure so recovery can
+            # reconcile the complete record rather than claiming durability.
             raise ctypes.WinError(ctypes.get_last_error())
     finally:
         kernel.CloseHandle(handle)
