@@ -4,7 +4,7 @@ on:
   push:
     branches: [main, devel]
   pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
     branches: [main, devel]
   workflow_dispatch:
     inputs:
@@ -36,7 +36,7 @@ jobs:
   # maintainers must wait for that run's required checks to pass before merging.
   asan:
     name: Linux / GCC ASan
-    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    # Fail the existing check on drafts instead of producing a green job skip.
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     env:
@@ -46,6 +46,16 @@ jobs:
       CCACHE_COMPILERCHECK: content
       CCACHE_MAXSIZE: 500M
     steps:
+      - name: Reject draft pull requests
+        shell: bash
+        env:
+          CI_EVENT_NAME: ${{ github.event_name }}
+          CI_PR_DRAFT: ${{ github.event.pull_request.draft }}
+        run: |
+          if [ "$CI_EVENT_NAME" = "pull_request" ] && [ "$CI_PR_DRAFT" != "false" ]; then
+            echo "::error::Draft pull requests cannot merge. Mark ready for review and wait for the full checks."
+            exit 1
+          fi
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Verify manual qualification identity and dependencies
@@ -64,7 +74,7 @@ jobs:
         run: echo "CCACHE_DISABLE=1" >> "$GITHUB_ENV"
       - name: Restore compiler cache
         id: compiler-cache
-        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.qualification_capture) }}
+        if: ${{ (github.event_name != 'workflow_dispatch' || inputs.qualification_capture != true) }}
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/ccache
@@ -78,22 +88,22 @@ jobs:
           cmake --preset debug-asan -DCMAKE_C_COMPILER_LAUNCHER=ccache
           -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
       - name: Reset compiler cache statistics
-        if: ${{ always() && !(github.event_name == 'workflow_dispatch' && inputs.qualification_capture) }}
+        if: ${{ always() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (github.event_name != 'workflow_dispatch' || inputs.qualification_capture != true) }}
         continue-on-error: true
         run: ccache -z || true
       - name: Build
         id: build
         run: cmake --build --preset debug-asan --parallel 4
       - name: Report compiler cache statistics
-        if: ${{ always() && !(github.event_name == 'workflow_dispatch' && inputs.qualification_capture) }}
+        if: ${{ always() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (github.event_name != 'workflow_dispatch' || inputs.qualification_capture != true) }}
         continue-on-error: true
         run: ccache -s || true
       - name: Clean compiler cache before saving
-        if: ${{ always() && github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/devel') && !(github.event_name == 'workflow_dispatch' && inputs.qualification_capture) && steps.compiler-cache.outcome == 'success' && steps.compiler-cache.outputs.cache-hit != 'true' }}
+        if: ${{ always() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/devel') && (github.event_name != 'workflow_dispatch' || inputs.qualification_capture != true) && steps.compiler-cache.outcome == 'success' && steps.compiler-cache.outputs.cache-hit != 'true' }}
         continue-on-error: true
         run: ccache --cleanup || true
       - name: Save compiler cache
-        if: ${{ always() && github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/devel') && !(github.event_name == 'workflow_dispatch' && inputs.qualification_capture) && steps.compiler-cache.outcome == 'success' && steps.compiler-cache.outputs.cache-hit != 'true' }}
+        if: ${{ always() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/devel') && (github.event_name != 'workflow_dispatch' || inputs.qualification_capture != true) && steps.compiler-cache.outcome == 'success' && steps.compiler-cache.outputs.cache-hit != 'true' }}
         # Cache writes are best-effort, including collisions on same-SHA reruns.
         continue-on-error: true
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -127,7 +137,7 @@ jobs:
           if-no-files-found: error
           retention-days: 30
       - name: Upload sanitizer evidence
-        if: always()
+        if: always() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: asan-test-evidence-${{ github.sha }}

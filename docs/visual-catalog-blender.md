@@ -433,7 +433,7 @@ Required performance scope: `installed_authoring`; 1 distinct frozen profile(s).
 - `warm_material_refresh_seconds` (profile-declared statistic) < 2.
 - `small_asset_refresh_seconds` (profile-declared statistic) < 5.
 
-Source reconciliation at `945ecd295835a838eed0169ff709e7aabc134fa1`: Authorized September 13 completion scope. This row adds explicit coverage without replacing any original group; implementation and acceptance remain unfinished.
+Source reconciliation at `945ecd295835a838eed0169ff709e7aabc134fa1`: Additional completion coverage. This row adds explicit coverage without replacing any original group; implementation and acceptance remain unfinished.
 
 Retained evidence:
 
@@ -486,7 +486,7 @@ Acceptance checks:
 - Deliver production SDK extraction in release order and compile separate graph documents into restricted Lua with typed manifests.
 - Meet the shared packet contract for every required variant and parent mapping.
 
-Source reconciliation at `945ecd295835a838eed0169ff709e7aabc134fa1`: Authorized September 13 completion scope. This row adds explicit coverage without replacing any original group; implementation and acceptance remain unfinished.
+Source reconciliation at `945ecd295835a838eed0169ff709e7aabc134fa1`: Additional completion coverage. This row adds explicit coverage without replacing any original group; implementation and acceptance remain unfinished.
 
 Retained evidence:
 
@@ -533,7 +533,7 @@ Acceptance checks:
 - Recover morph changes and show source-to-installed-engine character edits with executable/library hashes unchanged.
 - Meet the shared packet contract for every required variant and parent mapping.
 
-Source reconciliation at `945ecd295835a838eed0169ff709e7aabc134fa1`: Authorized September 13 completion scope. This row adds explicit coverage without replacing any original group; implementation and acceptance remain unfinished.
+Source reconciliation at `945ecd295835a838eed0169ff709e7aabc134fa1`: Additional completion coverage. This row adds explicit coverage without replacing any original group; implementation and acceptance remain unfinished.
 
 Retained evidence:
 
@@ -579,7 +579,7 @@ Acceptance checks:
 - Qualify actual runtime poses and trajectories with supported rig identity and bounded constraints.
 - Meet the shared packet contract for every required variant and parent mapping.
 
-Source reconciliation at `945ecd295835a838eed0169ff709e7aabc134fa1`: Authorized September 13 completion scope. This row adds explicit coverage without replacing any original group; implementation and acceptance remain unfinished.
+Source reconciliation at `945ecd295835a838eed0169ff709e7aabc134fa1`: Additional completion coverage. This row adds explicit coverage without replacing any original group; implementation and acceptance remain unfinished.
 
 Retained evidence:
 
@@ -630,7 +630,7 @@ Acceptance checks:
 - Establish explicit physics phases and one transform owner; prove impact/recovery, limits and deterministic continuation without relying on stills.
 - Meet the shared packet contract for every required variant and parent mapping.
 
-Source reconciliation at `945ecd295835a838eed0169ff709e7aabc134fa1`: Authorized September 13 completion scope. This row adds explicit coverage without replacing any original group; implementation and acceptance remain unfinished.
+Source reconciliation at `945ecd295835a838eed0169ff709e7aabc134fa1`: Additional completion coverage. This row adds explicit coverage without replacing any original group; implementation and acceptance remain unfinished.
 
 Retained evidence:
 
@@ -642,11 +642,11 @@ Next action: Identify the concrete missing feature and dependency, implement in 
 
 **Reviewed bounded recipes and graph fidelity**
 
-Extend reviewed recipes after the named-recipe integration. Demonstrate stale revision refusal, undo and rollback; optional Banso adapters depend on typed-port fidelity.
+Extend reviewed recipes after the named-recipe integration. Demonstrate stale revision refusal, undo and rollback; optional orchestration adapters depend on typed-port fidelity.
 
 Origin: added. Parents: B05, B08. Priority: P2. Execution: **not_captured**. Approval: **pending**.
 
-Fixture: Extend reviewed recipes after the named-recipe integration. Demonstrate stale revision refusal, undo and rollback; optional Banso adapters depend on typed-port fidelity. Author and version the fixture with GLB plus versioned sidecars and immutable generations.
+Fixture: Extend reviewed recipes after the named-recipe integration. Demonstrate stale revision refusal, undo and rollback; optional orchestration adapters depend on typed-port fidelity. Author and version the fixture with GLB plus versioned sidecars and immutable generations.
 
 Source links:
 
@@ -662,7 +662,7 @@ Required variants:
 - cancel
 - rollback
 - typed-port-save-reload
-- optional-banso-after-fidelity
+- optional-adapters-after-fidelity
 
 Automated temporal evidence: **required**.
 
@@ -676,10 +676,10 @@ Capture: **missing**. Implementation and a reproducible installed/native capture
 
 Acceptance checks:
 
-- Extend reviewed recipes after the named-recipe integration. Demonstrate stale revision refusal, undo and rollback; optional Banso adapters depend on typed-port fidelity.
+- Extend reviewed recipes after the named-recipe integration. Demonstrate stale revision refusal, undo and rollback; optional orchestration adapters depend on typed-port fidelity.
 - Meet the shared packet contract for every required variant and parent mapping.
 
-Source reconciliation at `945ecd295835a838eed0169ff709e7aabc134fa1`: Authorized September 13 completion scope. This row adds explicit coverage without replacing any original group; implementation and acceptance remain unfinished.
+Source reconciliation at `945ecd295835a838eed0169ff709e7aabc134fa1`: Additional completion coverage. This row adds explicit coverage without replacing any original group; implementation and acceptance remain unfinished.
 
 Retained evidence:
 
@@ -727,7 +727,7 @@ Acceptance checks:
 - Preserve evaluated assignments and supported instance identity, declare UV/material behavior, and refuse unsafe topology reduction while retaining accepted Tree Small 02 content.
 - Meet the shared packet contract for every required variant and parent mapping.
 
-Source reconciliation at `945ecd295835a838eed0169ff709e7aabc134fa1`: Authorized September 13 completion scope. This row adds explicit coverage without replacing any original group; implementation and acceptance remain unfinished.
+Source reconciliation at `945ecd295835a838eed0169ff709e7aabc134fa1`: Additional completion coverage. This row adds explicit coverage without replacing any original group; implementation and acceptance remain unfinished.
 
 Retained evidence:
 

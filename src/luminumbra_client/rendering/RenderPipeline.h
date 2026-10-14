@@ -445,7 +445,7 @@ public:
     // diorama is covered by its live chunks; skipping far-LOD means no such jobs are ever
     // dispatched for the transient preview world. Restored after the preview's frame.
     void set_far_lod_enabled(bool enabled) {
-        m_far_lod_enabled = enabled;
+        m_legacy_far_enabled = enabled;
     }
 
     // Worldgen-preview far-field: pin far-LOD streaming + the inner fragment
@@ -599,8 +599,8 @@ public:
     // never had (cross-run FLIP floors at ~0.057 noise; --smoke never renders). The
     //  execution migration compares old-vs-new dispatch paths through this same
     // entry point. Writes frame_parity_{a,b}.ppm + frame_parity.json under out_dir.
-    // Returns false on GL/IO error, TAAU-on (history ping-pong breaks idempotence — Codex
-    // ), or a nonzero score.
+    // Returns false on GL/IO error, TAAU-on (history ping-pong breaks idempotence),
+    // or a nonzero score.
     bool capture_frame_parity(const Camera& camera, const std::filesystem::path& out_dir);
     // / closure gate: render the same prepared frame at native scale twice
     // (the scale-1 seam must be bit-exact), then at 0.67 internal scale and compare the
@@ -837,11 +837,14 @@ public:
     FarWorldSelection far_world_selection() const {
         return m_frame_far_selection;
     }
-    FarLodSystem* farlod() {
-        return m_farlod.get();
+    // Value diagnostics are the selected-renderer interface. Legacy runtime
+    // access is restricted to the effective default/preview compatibility path.
+    FarLodSystem* legacy_far_compatibility() {
+        return LegacyFarWorldCompatibility(m_frame_far_selection, m_farlod.get());
     }
-    const FarLodSystem* farlod() const {
-        return m_farlod.get();
+    const FarLodSystem* legacy_far_compatibility() const {
+        return LegacyFarWorldCompatibility(m_frame_far_selection,
+                                           static_cast<const FarLodSystem*>(m_farlod.get()));
     }
 
     // --- Particle framework. ---
@@ -1185,7 +1188,7 @@ private:
     // m_offscreen_target_w/h instead of framebuffer 0. Default inactive == the
     // legacy default-0 blit (byte-identical).
     bool m_offscreen_target_active = false;
-    bool m_far_lod_enabled = true; // worldgen preview disables far-LOD (transient-world UAF)
+    bool m_legacy_far_enabled = true; // retained preview scheduling/submission hook
     u32 m_offscreen_target_fbo = 0;
     u32 m_offscreen_target_w = 0;
     u32 m_offscreen_target_h = 0;
@@ -1287,6 +1290,9 @@ private:
     // render-only lightning pulse + bolt state for the current frame.
     LightningRenderState m_lightning_state;
     std::unique_ptr<FarLodSystem> m_farlod;
+    // Inventory includes compatibility stores retained across selection changes,
+    // using values published by the Legacy branch rather than Ladder reading its counters.
+    std::size_t m_legacy_far_resident_bytes = 0, m_legacy_far_vertex_arrays = 0;
     std::unique_ptr<FarWorldRenderer> m_far_world;
     FarWorldSelection m_frame_far_selection;
     std::uint64_t m_far_world_frame = 0;
@@ -1767,7 +1773,7 @@ private:
     void draw_chunks_mdi(const std::vector<const ChunkCullEntry*>& visible_chunks,
                          std::size_t& out_draws,
                          std::size_t& out_indices);
-    //  (Codex-signed-off terrain-submit seam): a callback wrapping the
+    // Terrain-submit seam: a callback wrapping the
     // pipeline-owned CullHierarchical + draw_chunks_mdi, shared by GBuffer + Shadow
     // so neither needs friend access for terrain submission. Returns counts; the
     // caller folds them into pass stats.

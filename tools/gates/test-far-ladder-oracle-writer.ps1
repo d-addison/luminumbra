@@ -38,11 +38,29 @@ function Read-WriterFixture {
     New-Item -ItemType Directory -Path $Directory | Out-Null
     & $script:fixturePath $Directory $Mode | Out-Host
     if ($LASTEXITCODE -ne 0) { throw "Writer fixture ($Mode) exited with code $LASTEXITCODE" }
+    $analysis = $null
+    $analysisPath = Join-Path $Directory "farlod-horizon-analysis.json"
+    if (Test-Path -LiteralPath $analysisPath) {
+        $analysis = Read-JsonArtifact -Path $analysisPath -Schema "luminumbra.farlod_horizon.v1"
+    }
     return [pscustomobject]@{
-        Analysis = Read-JsonArtifact -Path (Join-Path $Directory "farlod-horizon-analysis.json") -Schema "luminumbra.farlod_horizon.v1"
+        Analysis = $analysis
         Oracle = Read-JsonArtifact -Path (Join-Path $Directory "farlod-horizon-ladder-oracle.json") -Schema "luminumbra.farlod_horizon.v2"
     }
 }
+
+# Load only the mode-dispatch boundary; parsing does not execute the main gate.
+$gatePath = Join-Path $ScriptDir "validate-engine-frontier.ps1"
+$tokens = $null
+$parseErrors = $null
+$gateAst = [System.Management.Automation.Language.Parser]::ParseFile($gatePath, [ref]$tokens, [ref]$parseErrors)
+if ($parseErrors.Count -ne 0) { throw "frontier gate parse failed" }
+$dispatch = $gateAst.Find({ param($node)
+    $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+    $node.Name -eq "Assert-FarHorizonLegacyCompatibility"
+}, $true)
+if ($null -eq $dispatch) { throw "frontier gate compatibility boundary missing" }
+Invoke-Expression $dispatch.Extent.Text
 
 function Assert-WriterFixture {
     param([object]$Pair)
@@ -83,6 +101,37 @@ try {
     $completeDir = Join-Path $root "complete"
     $complete = Read-WriterFixture -Directory $completeDir -Mode "complete"
     Assert-WriterFixture -Pair $complete
+    Assert-Test ($complete.Analysis.thresholds.f2_outer_range_m -eq 1536) "historical v1 threshold retained"
+    Assert-FarHorizonLegacyCompatibility -SelectedEvidence ([pscustomobject]@{ Mode = "legacy"; LadderChecked = $false })
+    foreach ($badEvidence in @(
+        [pscustomobject]@{ Mode = "ladder"; LadderChecked = $true },
+        [pscustomobject]@{ Mode = "legacy"; LadderChecked = $true },
+        [pscustomobject]@{ Mode = "ladder"; LadderChecked = $false }
+    )) {
+        Assert-Rejected { Assert-FarHorizonLegacyCompatibility -SelectedEvidence $badEvidence } "wrong-mode" "v1 mode dispatch"
+    }
+    foreach ($selection in @("refused", "preview")) {
+        $compatibility = Read-WriterFixture -Directory (Join-Path $root $selection) -Mode $selection
+        Assert-Test ($null -ne $compatibility.Analysis) "$selection retains v1 Legacy evidence"
+        Assert-Test ($compatibility.Analysis.thresholds.f2_outer_range_m -eq 1536) "$selection retains historical threshold"
+        Assert-Test ($compatibility.Oracle.mode -ceq "legacy") "$selection follows effective Legacy"
+        foreach ($station in $compatibility.Oracle.stations) {
+            Assert-Test ($station.snapshot.requested_mode -ceq "ladder") "$selection preserves requested Ladder"
+            Assert-Test ($station.snapshot.effective_mode -ceq "legacy") "$selection reports effective Legacy"
+        }
+        Assert-Rejected {
+            Assert-FarHorizonV2Artifact -Path (Join-Path (Join-Path $root $selection) "farlod-horizon-ladder-oracle.json") -Renderer "ladder" -Stations @("origin", "translated")
+        } "refused" "$selection cannot qualify Ladder"
+    }
+    foreach ($selection in @("ladder", "mixed")) {
+        $selected = Read-WriterFixture -Directory (Join-Path $root $selection) -Mode $selection
+        Assert-Test ($null -eq $selected.Analysis) "$selection emits no v1 Legacy artifact"
+        Assert-Test ($selected.Oracle.mode -ceq "ladder") "$selection reports the final effective mode"
+        Assert-Test ($selected.Oracle.complete -eq $false) "$selection incomplete fixture cannot qualify"
+        Assert-Test (@($selected.Oracle.PSObject.Properties.Name) -cnotcontains "legacy") "$selection emits no Legacy aggregate"
+        $ladderRow = $selected.Oracle.stations[-1]
+        Assert-Test (@($ladderRow.PSObject.Properties.Name) -cnotcontains "legacy") "$selection Ladder station contains no Legacy counters"
+    }
     Assert-FarLodHorizonStationCoverage -Analysis $complete.Analysis -Name "complete writer capture"
     Assert-Test ($complete.Analysis.stations[1].farlod.regions_missing -eq 0) "positive translated capture is complete"
 

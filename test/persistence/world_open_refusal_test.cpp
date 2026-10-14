@@ -85,6 +85,13 @@ fs::path UniqueRoot() {
     }
 }
 
+void ExpectMissingPresetReason(const std::string& error, const fs::path& expected_path) {
+    const std::string prefix = "failed to open world preset: ";
+    ASSERT_EQ(error.rfind(prefix, 0), 0u);
+    EXPECT_EQ(fs::path(error.substr(prefix.size())).lexically_normal(),
+              expected_path.lexically_normal());
+}
+
 class WorldOpenRefusal : public testing::TestWithParam<std::tuple<int, int>> {
 protected:
     fs::path root;
@@ -328,6 +335,80 @@ INSTANTIATE_TEST_SUITE_P(PersistenceEntryPoints,
 INSTANTIATE_TEST_SUITE_P(ClockMetadataEntryPoints,
                          WorldOpenRefusal,
                          testing::Combine(testing::Range(0, 3), testing::Range(30, 60)));
+
+TEST_F(WorldOpenRefusal, MissingMetadataRefusesCatalogClientAndServerWithoutChangingBytes) {
+    ASSERT_TRUE(fs::remove(save / "world_info.json"));
+    const auto before = DiskBytes(root);
+    const std::string expected =
+        "World unavailable: its save directory or metadata is missing or unreadable.";
+    const auto inspected = Persistence::InspectSavedWorld(root, "fixture");
+    EXPECT_EQ(inspected.error, expected);
+    const auto catalog = Persistence::EnumerateSavedWorlds(root);
+    ASSERT_TRUE(catalog.error.empty());
+    ASSERT_EQ(catalog.worlds.size(), 1u);
+    EXPECT_EQ(catalog.worlds.front().error, expected);
+    {
+        GameSession client;
+        client.SetJobSystem(&jobs);
+        client.SetRootPath(RootString());
+        EXPECT_FALSE(client.LoadWorld("fixture"));
+        EXPECT_EQ(client.GetWorldOpenError(), expected);
+        EXPECT_EQ(client.GetLastLoadedChunkCount(), 0u);
+        EXPECT_FALSE(client.SaveWorld());
+    }
+    Server::ServerWorldRunnerConfig config;
+    config.root_path = RootString();
+    config.world_id = "fixture";
+    config.surface_radius = 0;
+    config.collision_radius = 0;
+    Server::ServerWorldRunner runner(config);
+    EXPECT_FALSE(runner.Boot());
+    EXPECT_EQ(runner.GetBootError(), expected);
+    EXPECT_EQ(runner.Session(), nullptr);
+    world::WorldStateSaveReport report;
+    runner.Shutdown(&report);
+    EXPECT_FALSE(report.saved);
+    EXPECT_EQ(DiskBytes(root), before);
+}
+
+TEST_F(WorldOpenRefusal, MissingEmbeddedPresetAndAtlasFallbackRefuseBeforeGeneration) {
+    const auto atlas = root / "worlds/atlas/presets/default.json";
+    const auto embedded = save / "preset.json";
+    ASSERT_TRUE(fs::copy_file(atlas, embedded));
+    ASSERT_TRUE(Persistence::InspectSavedWorld(root, "fixture").error.empty());
+    ASSERT_TRUE(fs::remove(embedded));
+    // An embedded-preset deletion alone is loadable through the atlas fallback.
+    ASSERT_TRUE(Persistence::InspectSavedWorld(root, "fixture").error.empty());
+    ASSERT_TRUE(fs::remove(atlas));
+    const auto before = DiskBytes(root);
+    ExpectMissingPresetReason(Persistence::InspectSavedWorld(root, "fixture").error, atlas);
+    const auto catalog = Persistence::EnumerateSavedWorlds(root);
+    ASSERT_TRUE(catalog.error.empty());
+    ASSERT_EQ(catalog.worlds.size(), 1u);
+    ExpectMissingPresetReason(catalog.worlds.front().error, atlas);
+    {
+        GameSession client;
+        client.SetJobSystem(&jobs);
+        client.SetRootPath(RootString());
+        EXPECT_FALSE(client.LoadWorld("fixture"));
+        ExpectMissingPresetReason(client.GetWorldOpenError(), atlas);
+        EXPECT_EQ(client.GetLastLoadedChunkCount(), 0u);
+        EXPECT_FALSE(client.SaveWorld());
+    }
+    Server::ServerWorldRunnerConfig config;
+    config.root_path = RootString();
+    config.world_id = "fixture";
+    config.surface_radius = 0;
+    config.collision_radius = 0;
+    Server::ServerWorldRunner runner(config);
+    EXPECT_FALSE(runner.Boot());
+    ExpectMissingPresetReason(runner.GetBootError(), atlas);
+    EXPECT_EQ(runner.Session(), nullptr);
+    world::WorldStateSaveReport report;
+    runner.Shutdown(&report);
+    EXPECT_FALSE(report.saved);
+    EXPECT_EQ(DiskBytes(root), before);
+}
 
 TEST_F(WorldOpenRefusal, ActiveClockSaveRefusesWithFeatureOffThroughEveryOpenPath) {
     // This case exercises the legacy clock path, independently of shipping defaults.

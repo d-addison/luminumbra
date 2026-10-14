@@ -46,7 +46,7 @@ struct GBufferPassInput {
     // Exclusive selected far submission. Legacy uses the pass-owned shader;
     // ladder consumes value commands synchronously through its owned backend.
     FarWorldSelection far_selection;
-    FarLodSystem* legacy_far = nullptr;
+    FarLodSystem* legacy_far = nullptr; // effective Legacy compatibility only
     FarWorldSubmitFn submit_ladder;
 
     // Root path for resolving on-disk LOD mesh variants (procgen tree palette).

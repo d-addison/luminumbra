@@ -676,7 +676,7 @@ void WaterSystem::update(entt::registry& registry,
     // (worst-frame fix) The dominant moving cost is INIT re-sampling worldgen per cell
     // (~16ms/frame, profiled). The terrain half (GetTerrainHeightAt) is BYTE-IDENTICAL to the
     // heightmap the mesher already computed into heightmap_data (proven by the EXPECT_EQ parity
-    // gate, commit 8348e0e9), so REUSE it — a cheap array read instead of a ~125us multi-octave
+    // gate), so REUSE it — a cheap array read instead of a ~125us multi-octave
     // sample. Read it HERE on the MAIN THREAD: an active chunk's LIVE heightmap_data is only ever
     // (re)written by the main-thread LOD publish (process_completed_meshing_jobs); off-thread
     // meshing writes scratch/pending, never the live array. So this read cannot race, and the
