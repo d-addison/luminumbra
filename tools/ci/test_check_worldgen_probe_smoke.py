@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Contracts for the smoke report and probe launch wrapper."""
+"""Contracts for smoke/full reports and the probe launch wrapper."""
 
 import copy
 import json
@@ -12,28 +12,31 @@ from unittest import mock
 import check_worldgen_probe_smoke as checker
 
 
-def valid_report():
+def valid_report(mode="smoke"):
+    chunks, shaped_reps, libm_calls = (2, 2, 1000) if mode == "smoke" else (24, 8, 1000000)
+
     def stats(samples):
         return dict(samples=samples, min_ms=0.0, median_ms=1.0, max_ms=2.0,
                     total_ms=2.0 * samples)
 
-    phases = {name: stats(2 if name in checker.PHASES[:3] or name == "shaped_heights" else 1024)
+    phases = {name: stats(chunks if name in checker.PHASES[:3]
+                          else (shaped_reps if name == "shaped_heights" else 1024))
               for name in checker.PHASES}
     phases["polygonise"]["mesh_triangles"] = 1
     for name in checker.PHASES[3:]:
         phases[name]["grid"] = "32x32"
     phases["height_query_cold"]["first_call_ms"] = 0.0
-    phases["shaped_heights"].update(positions=1024, reps=2)
-    libm = dict(calls=1000, functions={
-        name: dict(calls=1000, total_ms=0.0, ns_per_call=0.0)
+    phases["shaped_heights"].update(positions=1024, reps=shaped_reps)
+    libm = dict(calls=libm_calls, functions={
+        name: dict(calls=libm_calls, total_ms=0.0, ns_per_call=0.0)
         for name in checker.LIBM_FUNCTIONS})
-    return dict(schema=checker.SCHEMA, mode="smoke", compiler="fixture compiler",
+    return dict(schema=checker.SCHEMA, mode=mode, compiler="fixture compiler",
                 cpu="unknown", preset="default.json", hardware_concurrency=0,
-                default_worker_count=1, seed=424242, requested_chunks=2,
-                selected_chunks=2, initial_chunk_list_size=10,
+                default_worker_count=1, seed=424242, requested_chunks=chunks,
+                selected_chunks=chunks, initial_chunk_list_size=100,
                 spawn=dict(x=8.0, y=-2.0, z=8.0), terrain_height=-3.95, phases=phases,
                 scaling=[dict(requested_workers=requested, worker_count=1,
-                              chunks=2, wall_ms=0.0)
+                              chunks=chunks, wall_ms=0.0)
                          for requested in (1, 2, 4, "default")],
                 libm=libm, libm_after_generation=copy.deepcopy(libm))
 
@@ -241,6 +244,58 @@ class SmokeReportTests(unittest.TestCase):
             path.write_text(json.dumps(valid_report()), encoding="utf-8")
             with mock.patch.object(checker.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)):
                 self.assertEqual(checker.main(["--probe", "fixture-probe", "--out", str(path)]), 1)
+
+
+class FullReportTests(unittest.TestCase):
+    def test_full_report_requires_explicit_full_validation(self):
+        checker.validate_report(valid_report("full"), mode="full")
+        with self.assertRaisesRegex(ValueError, "mode must be smoke"):
+            checker.validate_report(valid_report("full"))
+        with self.assertRaisesRegex(ValueError, "mode must be full"):
+            checker.validate_report(valid_report(), mode="full")
+
+    def test_full_workload_counts(self):
+        for failure in ("chunks", "shaped_samples", "shaped_reps", "libm",
+                        "libm_after_generation", "function_calls"):
+            with self.subTest(failure=failure):
+                report = valid_report("full")
+                if failure == "chunks":
+                    report["requested_chunks"] = 2
+                elif failure.startswith("shaped_"):
+                    field = "samples" if failure == "shaped_samples" else "reps"
+                    report["phases"]["shaped_heights"][field] = 2
+                elif failure == "function_calls":
+                    report["libm"]["functions"]["sinf"]["calls"] = 1000
+                else:
+                    report[failure]["calls"] = 1000
+                with self.assertRaises(ValueError):
+                    checker.validate_report(report, mode="full")
+
+    def test_report_only_cli_preserves_evidence_and_never_runs_probe(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "full report.json"
+            for content, status in ((json.dumps(valid_report("full")), 0),
+                                    ("{", 1), ("{}", 1)):
+                with self.subTest(content=content[:40]):
+                    path.write_text(content, encoding="utf-8")
+                    with mock.patch.object(checker.subprocess, "run") as run:
+                        self.assertEqual(checker.main([
+                            "--validate-report", str(path), "--mode", "full"]), status)
+                        run.assert_not_called()
+                    self.assertEqual(path.read_text(encoding="utf-8"), content)
+
+    def test_full_wrapper_does_not_request_smoke(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "report.json"
+
+            def probe(command, check):
+                self.assertEqual(command, ["fixture-probe", "--json", str(path)])
+                path.write_text(json.dumps(valid_report("full")), encoding="utf-8")
+                return subprocess.CompletedProcess(command, 0)
+
+            with mock.patch.object(checker.subprocess, "run", side_effect=probe):
+                self.assertEqual(checker.main([
+                    "--probe", "fixture-probe", "--out", str(path), "--mode", "full"]), 0)
 
 
 if __name__ == "__main__":

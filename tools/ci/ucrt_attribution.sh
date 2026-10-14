@@ -86,7 +86,7 @@ CELL_WALL=""
 preflight() {
     local tool missing=()
     local -a required=(awk basename cat cmake cmp cp curl date dirname find
-                      g++ grep head mkdir mv ninja pacman pgrep pkill rm sed
+                      g++ grep head mkdir mv ninja pacman pgrep pkill python rm sed
                       sha256sum sleep tail timeout tr)
     if [[ "${MSYSTEM:-}" == UCRT64 ]]; then
         required+=(tasklist.exe taskkill.exe)
@@ -589,9 +589,12 @@ finish_cell() {
 run_probe() {
     local dir="$1" bdir="$2" exe="$3" rc=0
     bounded "$exe" --json "$dir/probe.json" > "$dir/probe.txt" 2>&1 || rc=$?
-    CELL_PROBE="$(classify_rc "$rc" TEST_FAILED)"
-    if [[ "$CELL_PROBE" == OK && ! -s "$dir/probe.json" ]]; then
-        CELL_PROBE=TEST_FAILED
+    if (( rc == 0 )); then
+        bounded python "$(dirname "${BASH_SOURCE[0]}")/check_worldgen_probe_smoke.py" \
+            --validate-report "$dir/probe.json" --mode full >> "$dir/probe.txt" 2>&1 || rc=$?
+        CELL_PROBE="$(classify_rc "$rc" INVALID_REPORT)"
+    else
+        CELL_PROBE="$(classify_rc "$rc" TEST_FAILED)"
     fi
     copy_test_artifacts "$bdir" "$dir"
 }

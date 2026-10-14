@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the worldgen smoke probe and validate its report without speed limits."""
+"""Validate worldgen smoke/full reports, optionally running the probe first."""
 
 import argparse
 import json
@@ -62,17 +62,19 @@ def stats(value, label, samples):
             f"{label} timing order is inconsistent")
 
 
-def validate_report(report):
+def validate_report(report, mode="smoke"):
+    require(mode in ("smoke", "full"), "unsupported validation mode")
+    chunks, shaped_reps, libm_calls = (2, 2, 1000) if mode == "smoke" else (24, 8, 1000000)
     report = object_value(report, "report")
     require(report.get("schema") == SCHEMA, "unexpected schema")
-    require(report.get("mode") == "smoke", "mode must be smoke")
+    require(report.get("mode") == mode, f"mode must be {mode}")
     for field in ("compiler", "cpu", "preset"):
         text(report.get(field), field)
     integer(report.get("hardware_concurrency"), "hardware_concurrency")
     integer(report.get("default_worker_count"), "default_worker_count", 1)
     require(integer(report.get("seed"), "seed") == 424242, "unexpected seed")
-    require(integer(report.get("requested_chunks"), "requested_chunks", 1) == 2,
-            "smoke must request two chunks")
+    require(integer(report.get("requested_chunks"), "requested_chunks", 1) == chunks,
+            f"{mode} must request {chunks} chunks")
     selected = integer(report.get("selected_chunks"), "selected_chunks", 1)
     candidates = integer(report.get("initial_chunk_list_size"), "initial_chunk_list_size", 1)
     require(selected <= report["requested_chunks"] and selected <= candidates,
@@ -91,7 +93,7 @@ def validate_report(report):
 
     phases = object_value(report.get("phases"), "phases")
     for phase in PHASES:
-        samples = selected if phase in PHASES[:3] else (2 if phase == "shaped_heights" else 1024)
+        samples = selected if phase in PHASES[:3] else (shaped_reps if phase == "shaped_heights" else 1024)
         stats(phases.get(phase), phase, samples)
     integer(phases["polygonise"].get("mesh_triangles"), "polygonise.mesh_triangles", 1)
     for phase in PHASES[3:]:
@@ -100,8 +102,8 @@ def validate_report(report):
     shaped = phases["shaped_heights"]
     require(integer(shaped.get("positions"), "shaped_heights.positions") == 1024,
             "shaped_heights.positions must be 1024")
-    require(integer(shaped.get("reps"), "shaped_heights.reps") == 2,
-            "shaped_heights.reps must be two")
+    require(integer(shaped.get("reps"), "shaped_heights.reps") == shaped_reps,
+            f"shaped_heights.reps must be {shaped_reps}")
 
     scaling = report.get("scaling")
     require(isinstance(scaling, list) and len(scaling) == 4, "scaling must contain four entries")
@@ -117,8 +119,8 @@ def validate_report(report):
 
     for observation in ("libm", "libm_after_generation"):
         suite = object_value(report.get(observation), observation)
-        require(integer(suite.get("calls"), f"{observation}.calls", 1) == 1000,
-                f"{observation}.calls must be 1000")
+        require(integer(suite.get("calls"), f"{observation}.calls", 1) == libm_calls,
+                f"{observation}.calls must be {libm_calls}")
         functions = object_value(suite.get("functions"), f"{observation}.functions")
         for function in LIBM_FUNCTIONS:
             value = object_value(functions.get(function), f"{observation}.{function}")
@@ -140,25 +142,37 @@ def unique_object(pairs):
     return result
 
 
-def validate_output(path):
+def validate_output(path, mode="smoke"):
     with Path(path).open(encoding="utf-8") as stream:
         report = json.load(stream, parse_constant=reject_constant, object_pairs_hook=unique_object)
-    validate_report(report)
+    validate_report(report, mode=mode)
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--probe", required=True)
-    parser.add_argument("--out", required=True, type=Path)
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--probe")
+    source.add_argument("--validate-report", type=Path,
+                        help="validate an existing report without running the probe")
+    parser.add_argument("--out", type=Path)
+    parser.add_argument("--mode", choices=("smoke", "full"), default="smoke")
     args = parser.parse_args(argv)
+    if args.probe and args.out is None:
+        parser.error("--probe requires --out")
     try:
-        args.out.unlink(missing_ok=True)
-        result = subprocess.run([args.probe, "--smoke", "--json", str(args.out)], check=False)
-        if result.returncode:
-            return result.returncode if result.returncode > 0 else 128 - result.returncode
-        validate_output(args.out)
+        if args.validate_report is not None:
+            validate_output(args.validate_report, mode=args.mode)
+        else:
+            args.out.unlink(missing_ok=True)
+            command = [args.probe]
+            if args.mode == "smoke":
+                command.append("--smoke")
+            result = subprocess.run([*command, "--json", str(args.out)], check=False)
+            if result.returncode:
+                return result.returncode if result.returncode > 0 else 128 - result.returncode
+            validate_output(args.out, mode=args.mode)
     except (OSError, ValueError) as error:
-        print(f"worldgen smoke check failed: {error}", file=sys.stderr)
+        print(f"worldgen {args.mode} check failed: {error}", file=sys.stderr)
         return 1
     return 0
 

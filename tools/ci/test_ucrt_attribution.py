@@ -12,12 +12,15 @@ import sys
 import tempfile
 import unittest
 
+from test_check_worldgen_probe_smoke import valid_report
+
 SCRIPT = Path(__file__).with_name("ucrt_attribution.sh")
+CHECKER = SCRIPT.with_name("check_worldgen_probe_smoke.py")
 BASH = shutil.which("bash")
 COMMANDS = (
     "awk", "basename", "cat", "cmake", "cmp", "cp", "curl", "date", "dirname",
     "find", "g++", "grep", "head", "mkdir", "mv", "ninja", "pacman", "pgrep",
-    "pkill", "rm", "sed", "sha256sum", "sleep", "tail", "tr", "tasklist.exe",
+    "pkill", "python", "rm", "sed", "sha256sum", "sleep", "tail", "tr", "tasklist.exe",
     "taskkill.exe", "wmic", "which",
 )
 
@@ -29,6 +32,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import runpy
 import shutil
 import sys
 
@@ -132,7 +136,16 @@ elif name == "cmake":
     else:
         raise AssertionError("unexpected cmake arguments: " + repr(args))
 elif name == "probe":
-    local(args[args.index("--json") + 1]).write_text('{"fixture": true}', encoding="utf-8")
+    if scenario != "probe_missing_report":
+        local(args[args.index("--json") + 1]).write_text(
+            (root / "probe-fixture.json").read_text(encoding="utf-8"), encoding="utf-8")
+    if scenario.startswith("probe_exit_"):
+        sys.exit(int(scenario.rsplit("_", 1)[1]))
+elif name == "python":
+    # Execute the copied real validator in the worker, without another process
+    # or a host command lookup through PATH.
+    sys.argv = args
+    runpy.run_path(str(local(args[0])), run_name="__main__")
 else:
     raise AssertionError("unstubbed command: " + name)
 '''
@@ -366,9 +379,12 @@ def read_calls(path):
 
 
 class AttributionTests(unittest.TestCase):
-    def run_script(self, scenario, missing=None, cells="0", packages=None):
-        with tempfile.TemporaryDirectory() as directory:
+    def run_script(self, scenario, missing=None, cells="0", packages=None, probe_report=None):
+        with tempfile.TemporaryDirectory(prefix="ucrt attribution ") as directory:
             root = Path(directory)
+            (root / "probe-fixture.json").write_text(
+                json.dumps(valid_report("full")) if probe_report is None else probe_report,
+                encoding="utf-8")
             if packages is not None:
                 state = {"mingw-w64-ucrt-x86_64-" + name: version
                          for name, version in packages.items()}
@@ -382,6 +398,7 @@ class AttributionTests(unittest.TestCase):
             isolated_path.mkdir()
             script = root / "ucrt_attribution.sh"
             shutil.copyfile(SCRIPT, script)
+            shutil.copyfile(CHECKER, root / CHECKER.name)
             dispatcher = root / "stub.py"
             dispatcher.write_text("STUB = " + repr(STUB) + "\n" + WORKER, encoding="utf-8")
             prefix = root / "prefix"
@@ -396,7 +413,7 @@ class AttributionTests(unittest.TestCase):
             # Keep only OS variables Python/Bash need on Windows; discard shell
             # startup hooks and CI/package settings inherited from the host.
             environment = {key: value for key, value in os.environ.items()
-                           if key.upper() in ("SYSTEMROOT", "WINDIR", "COMSPEC", "TEMP", "TMP")}
+                           if key.upper() in ("SYSTEMROOT", "WINDIR", "COMSPEC", "TMPDIR", "TEMP", "TMP")}
             environment.update(PATH=isolated_path.as_posix(),
                                BASH_ENV=environment_file.as_posix(),
                                STUB_SCENARIO=scenario, MSYSTEM="UCRT64",
@@ -435,6 +452,84 @@ class AttributionTests(unittest.TestCase):
         self.assertTrue(any(call[0] == "curl" for call in calls))
         self.assertFalse(any(call[0] in ("cmake", "probe", "perf") for call in calls))
         self.assertEqual(artifacts["diag/rows.md"], "")
+
+    def test_missing_python_fails_before_package_operations(self):
+        result, artifacts, calls, step_summary = self.run_script("good", missing="python")
+        self.assertNotEqual(result.returncode, 0, result.stderr)
+        self.assert_finalized(artifacts, step_summary, "INFRASTRUCTURE_FAILED")
+        self.assertIn("missing required commands: python", artifacts["diag/reason.txt"])
+        self.assertFalse(any(call[0] in ("pacman", "curl", "cmake", "probe", "perf")
+                             for call in calls))
+
+    def assert_invalid_report(self, content, reason):
+        result, artifacts, calls, step_summary = self.run_script("good", probe_report=content)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assert_finalized(artifacts, step_summary, "COMPLETE")
+        cell = json.loads(artifacts["diag/cell-0/status.json"])
+        self.assertEqual((cell["status"], cell["probe_status"], cell["perf_status"]),
+                         ("INVALID_REPORT", "INVALID_REPORT", "OK"))
+        row = "| 0 | baseline | INVALID_REPORT | INVALID_REPORT | OK |"
+        self.assertIn(row, artifacts["diag/rows.md"])
+        self.assertIn(row, step_summary)
+        self.assertIn(reason, artifacts["diag/cell-0/probe.txt"])
+        self.assertEqual(artifacts["diag/cell-0/probe.json"], content)
+        self.assertEqual([call[0] for call in calls if call[0] in ("probe", "python", "perf")],
+                         ["probe", "python", "perf"])
+
+    def test_invalid_json_is_not_ok(self):
+        for content, reason in (("{", "worldgen full check failed"),
+                                ('{"timing": NaN}', "nonfinite JSON constant"),
+                                ('{"schema": "a", "schema": "b"}', "duplicate JSON key")):
+            with self.subTest(content=content):
+                self.assert_invalid_report(content, reason)
+
+    def test_missing_report_evidence_is_not_ok(self):
+        self.assert_invalid_report('{"fixture": true}', "unexpected schema")
+        for field in valid_report("full"):
+            with self.subTest(field=field):
+                report = valid_report("full")
+                del report[field]
+                self.assert_invalid_report(json.dumps(report), "worldgen full check failed")
+
+    def test_incomplete_or_wrong_workload_evidence_is_not_ok(self):
+        for failure, reason in (("coverage", "selected_chunks must match requested_chunks"),
+                                ("mesh", "polygonise.mesh_triangles"),
+                                ("spawn", "spawn.y must equal terrain_height"),
+                                ("smoke", "mode must be full")):
+            with self.subTest(failure=failure):
+                report = valid_report("smoke" if failure == "smoke" else "full")
+                if failure == "coverage":
+                    report["selected_chunks"] = 23
+                    for phase in ("generate_step1", "generate_step4", "polygonise"):
+                        report["phases"][phase].update(samples=23, total_ms=46.0)
+                    for entry in report["scaling"]:
+                        entry["chunks"] = 23
+                elif failure == "mesh":
+                    report["phases"]["polygonise"]["mesh_triangles"] = 0
+                elif failure == "spawn":
+                    report["spawn"]["y"] += 1.0
+                self.assert_invalid_report(json.dumps(report), reason)
+
+    def test_missing_report_is_not_ok(self):
+        result, artifacts, calls, step_summary = self.run_script("probe_missing_report")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        cell = json.loads(artifacts["diag/cell-0/status.json"])
+        self.assertEqual((cell["status"], cell["probe_status"], cell["perf_status"]),
+                         ("INVALID_REPORT", "INVALID_REPORT", "OK"))
+        self.assertIn("worldgen full check failed", artifacts["diag/cell-0/probe.txt"])
+        self.assertNotIn("diag/cell-0/probe.json", artifacts)
+        self.assertIn("| 0 | baseline | INVALID_REPORT | INVALID_REPORT | OK |", step_summary)
+
+    def test_probe_failures_and_timeouts_skip_validation(self):
+        for code, status in ((7, "TEST_FAILED"), (124, "TIMED_OUT"), (137, "TIMED_OUT")):
+            with self.subTest(code=code):
+                result, artifacts, calls, step_summary = self.run_script(f"probe_exit_{code}")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                cell = json.loads(artifacts["diag/cell-0/status.json"])
+                self.assertEqual((cell["status"], cell["probe_status"], cell["perf_status"]),
+                                 (status, status, "OK"))
+                self.assertFalse(any(call[0] == "python" for call in calls))
+                self.assertIn(f"| 0 | baseline | {status} | {status} | OK |", step_summary)
 
     def test_failed_help_ignores_partial_target_listing(self):
         for code, status in ((7, "BUILD_FAILED"), (124, "TIMED_OUT"), (137, "TIMED_OUT")):
@@ -476,12 +571,18 @@ class AttributionTests(unittest.TestCase):
         self.assertEqual(sum(call[0] == "cmp" for call in calls), 3)
         measured = [call[0] for call in calls if call[0] in ("probe", "perf")]
         self.assertEqual(measured, ["probe", "perf"])
+        self.assertIn("| 0 | baseline | OK | OK | OK |", step_summary)
+        validation = [call for call in calls if call[0] == "python"]
+        self.assertEqual(len(validation), 1)
+        self.assertEqual(validation[0][2:], ["--validate-report", "diag/cell-0/probe.json",
+                                           "--mode", "full"])
+        self.assertEqual(json.loads(artifacts["diag/cell-0/probe.json"]), valid_report("full"))
 
 
 class MockTests(unittest.TestCase):
     def environment(self, root):
         environment = {key: value for key, value in os.environ.items()
-                       if key.upper() in ("SYSTEMROOT", "WINDIR", "COMSPEC", "TEMP", "TMP")}
+                       if key.upper() in ("SYSTEMROOT", "WINDIR", "COMSPEC", "TMPDIR", "TEMP", "TMP")}
         isolated_path = root / "empty-bin"
         isolated_path.mkdir()
         environment.update(PATH=isolated_path.as_posix(), STUB_SCENARIO="good")

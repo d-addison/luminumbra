@@ -86,6 +86,15 @@ restoration returns `libatomic` and other changed members to their recorded
 versions using staged archives. It does not undo the initial provisioning.
 Baseline-only and CRT-only selections do not require this GCC prerequisite.
 
+The script requires Python and validates each full-mode probe report before
+recording `OK`. Full reports must cover all 24 requested chunks, contain a
+non-empty mesh, satisfy the spawn contract above, and include every phase,
+scaling entry, and both libm observations (eight shaped-height repetitions and
+one million calls per libm function). Invalid JSON, missing reports, or incomplete
+evidence produce `INVALID_REPORT` in the cell's `status.json` and summary row;
+the validation reason is appended to `probe.txt`. Nonzero probe exits remain
+`TEST_FAILED`, and probe or validation timeouts remain `TIMED_OUT`.
+
 The actual installed baseline version is recorded rather than inferred from the
 compiler version. Missing archives, package dependency refusals, and unsuccessful
 restoration remain explicit failures; the script does not repair dependencies or
