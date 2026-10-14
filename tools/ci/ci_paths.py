@@ -14,6 +14,7 @@ import sys
 # an explicit coverage decision; directory membership never grants an exemption.
 PYTHON_TESTS = (
     "tools/ci/test_ci_paths.py",
+    "tools/ci/test_cache_retention.py",
     "tools/ci/test_check_docs.py",
     "tools/ci/test_check_ctest_junit.py",
     "tools/ci/test_qualification_capture.py",
@@ -107,6 +108,25 @@ COVERED_PYTHON_FILES = (
     | AUTHORING_PYTHON_FILES | PYTHON_SELF_CHECKS.keys()
 )
 
+# CI infrastructure and executable test/validation entrypoints cannot exempt
+# themselves from native qualification. Keep this ahead of the Python allowlist.
+CI_PREFIXES = ("tools/ci/", ".github/workflows/", "scripts/")
+CI_ENTRYPOINTS = (
+    set(PYTHON_TESTS) | set(POSIX_PYTHON_TESTS)
+    | {command[0] for command in PYTHON_SELF_CHECKS.values()}
+    | {
+        "tools/assets/acquire.py", "tools/blender/authoring/probes/run.py",
+        "tools/check_runtime_data_manifest.py", "tools/check_sdf_contract_doc.py",
+        "tools/config_codegen.py", "tools/perf/capture_sim_budget.py",
+        "tools/perf/check_sim_budgets.py", "tools/perf/fixture_hash.py",
+        "tools/perf/perf.py", "tools/perf/propose_sim_budgets.py",
+        "tools/release/generate_sbom.py", "tools/release/validate_package.py",
+        "tools/release/validate_sbom.py",
+    }
+    | {path for path in AUTHORING_PYTHON_FILES
+       if "/tests/" in path or "/extension_tests/" in path or "/test_" in path}
+)
+
 
 def covered_python(path: str) -> bool:
     return path in COVERED_PYTHON_FILES
@@ -114,6 +134,8 @@ def covered_python(path: str) -> bool:
 
 def needs_cpp(path: str) -> bool:
     item = PurePosixPath(path)
+    if path.startswith(CI_PREFIXES) or path in CI_ENTRYPOINTS:
+        return True
     if covered_python(path):
         return False
     if path.startswith(BUILD_PREFIXES) or item.suffix.lower() in BUILD_SUFFIXES:

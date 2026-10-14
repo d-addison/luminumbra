@@ -61,7 +61,25 @@ jobs:
           CI_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
           CI_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           CI_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        run: python3 -B tools/ci/ci_paths.py classify
+        run: |
+          # Use already-fetched base history; never execute the PR's classifier.
+          # The explicit guard also handles bases predating the fail-open rules.
+          all_lanes() {
+            echo 'Classification uncertain or CI inputs changed; running all lanes'
+            printf 'needs_cpp=true\nneeds_python=true\n' >> "$GITHUB_OUTPUT"
+          }
+          if [ "$CI_EVENT" != pull_request ] || [ -z "$CI_BASE_SHA" ] ||
+             [ -z "$CI_HEAD_SHA" ] || [ "$CI_REPOSITORY" != "$CI_HEAD_REPOSITORY" ]; then
+            all_lanes
+          elif ! git diff --quiet "$CI_BASE_SHA" "$CI_HEAD_SHA" -- tools/ci/ .github/workflows/ scripts/; then
+            all_lanes
+          elif git show "$CI_BASE_SHA:tools/ci/ci_paths.py" > "$RUNNER_TEMP/trusted-ci-paths.py"; then
+            if ! python3 -I -B "$RUNNER_TEMP/trusted-ci-paths.py" classify --root "$GITHUB_WORKSPACE"; then
+              all_lanes
+            fi
+          else
+            all_lanes
+          fi
 
   linux:
     name: Linux / GCC
@@ -71,17 +89,35 @@ jobs:
     timeout-minutes: 60
     env:
       CCACHE_COMPILERCHECK: content
-      CCACHE_MAXSIZE: 500M
+      CCACHE_MAXSIZE: 250M
+    outputs:
+      route: ${{ steps.route.outputs.route }}
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Report validation route
+        id: route
+        shell: bash
+        env:
+          NEEDS_CPP: ${{ needs.changes.outputs.needs_cpp }}
+        run: |
+          if [ "$NEEDS_CPP" = false ]; then
+            route=python-only
+            message='route: python-only (native build skipped by Classify changed paths)'
+          else
+            route=native
+            message='route: native (full build and CTest enabled)'
+          fi
+          echo "$message"
+          echo "$message" >> "$GITHUB_STEP_SUMMARY"
+          echo "route=$route" >> "$GITHUB_OUTPUT"
       - name: Install standalone Python test dependencies
-        if: ${{ needs.changes.outputs.needs_cpp == 'false' }}
+        if: ${{ needs.changes.outputs.needs_cpp == 'false' || needs.changes.outputs.needs_python != 'false' }}
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends python3-numpy python3-pil python3-jsonschema
       - name: Run standalone Python contracts (including CTest-registered suites)
-        if: ${{ needs.changes.outputs.needs_cpp == 'false' }}
+        if: ${{ needs.changes.outputs.needs_cpp == 'false' || needs.changes.outputs.needs_python != 'false' }}
         run: python3 -B tools/ci/ci_paths.py python-tests
       - name: Verify manual qualification identity and dependencies
         id: identity
@@ -258,7 +294,7 @@ jobs:
     timeout-minutes: 60
     env:
       CCACHE_COMPILERCHECK: content
-      CCACHE_MAXSIZE: 500M
+      CCACHE_MAXSIZE: 250M
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -364,19 +400,37 @@ jobs:
     env:
       CCACHE_DIR: ${{ runner.temp }}/ccache-msvc
       CCACHE_COMPILERCHECK: content
-      CCACHE_MAXSIZE: 1G
+      CCACHE_MAXSIZE: 500M
       # Only the main configure opts in via command-line launchers. Captures
       # and packaging must not inherit a launcher from the environment.
       CMAKE_C_COMPILER_LAUNCHER: ""
       CMAKE_CXX_COMPILER_LAUNCHER: ""
+    outputs:
+      route: ${{ steps.route.outputs.route }}
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Report validation route
+        id: route
+        shell: bash
+        env:
+          NEEDS_CPP: ${{ needs.changes.outputs.needs_cpp }}
+        run: |
+          if [ "$NEEDS_CPP" = false ]; then
+            route=python-only
+            message='route: python-only (native build skipped by Classify changed paths)'
+          else
+            route=native
+            message='route: native (full build and CTest enabled)'
+          fi
+          echo "$message"
+          echo "$message" >> "$GITHUB_STEP_SUMMARY"
+          echo "route=$route" >> "$GITHUB_OUTPUT"
       - name: Install standalone Python test dependencies
-        if: ${{ needs.changes.outputs.needs_cpp == 'false' }}
+        if: ${{ needs.changes.outputs.needs_cpp == 'false' || needs.changes.outputs.needs_python != 'false' }}
         run: python -m pip install --disable-pip-version-check numpy Pillow jsonschema
       - name: Run standalone Python contracts (including CTest-registered suites)
-        if: ${{ needs.changes.outputs.needs_cpp == 'false' }}
+        if: ${{ needs.changes.outputs.needs_cpp == 'false' || needs.changes.outputs.needs_python != 'false' }}
         run: python -B tools/ci/ci_paths.py python-tests
       - name: Verify manual qualification identity and dependencies
         id: identity
@@ -608,7 +662,7 @@ jobs:
       # The native UCRT64 ccache accepts Windows paths inherited by msys2.
       CCACHE_DIR: ${{ runner.temp }}/ccache-ucrt64
       CCACHE_COMPILERCHECK: content
-      CCACHE_MAXSIZE: 1G
+      CCACHE_MAXSIZE: 500M
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

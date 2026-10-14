@@ -43,20 +43,33 @@ ctest --preset release -L manual \
 
 ## Continuous integration
 
-The Linux/GCC, Diligent RHI, and ASan lanes use bounded ccache (500M each), as do
-UCRT64 and MSVC (1G each), with saves only on devel/main pushes and qualification
-captures bypassing the cache. One complete cache generation is about 3.5 GB;
-per-SHA saves accumulate until GitHub's least-recently-used eviction at the
-repository cache quota. PR runs restore from the newest matching prefix.
+The Linux/GCC, Diligent RHI, ASan, preview-frame and paired performance lanes use
+bounded ccache (250M each); UCRT64 and MSVC use 500M each. Qualification captures
+bypass the cache. Keys include the configuration hash where applicable and the
+candidate SHA, with stable restore prefixes, so each new candidate can save
+updated entries. Caches are trimmed before saving. Main/devel native and
+performance caches together retain about 4.5 GB across both branches.
+
 All Actions caches, including performance, clang-tidy results, and MSYS2 packages,
 are saved only on `push` events to `refs/heads/main` or `refs/heads/devel`; PRs,
-scheduled runs, and manual dispatches never save caches. When a PR closes,
-`cache-cleanup.yml` deletes caches scoped to its `refs/pull/<n>/merge` ref without
-checking out PR code.
+scheduled runs, and manual dispatches never save caches. After CI, AddressSanitizer
+or Performance observations completes, `cache-cleanup.yml` retains the newest
+cache per branch and lane across configuration changes and SHA keys. It also
+limits total repository cache storage, including package and other caches, to
+6 GB, leaving room below GitHub's 10 GB cap for saves in progress. GitHub also
+evicts old keys, but routine cleanup prevents relying on eviction at the cap.
+Cleanup uses trusted inline workflow code with no checkout. When a PR closes,
+it deletes caches scoped to that PR's `refs/pull/<n>/merge` ref.
 
 Pull requests first classify changed paths with a merge-base diff of the base and
-head SHAs. Deleted paths and both sides of renames count. The classifier runs on a
-standard `ubuntu-latest` runner; fork PRs, missing repository identity, shallow or
+head SHAs. Deleted paths and both sides of renames count. On PRs, the workflow
+reads the classifier from the trusted base using `git show` against the history
+already fetched by checkout, without an extra fetch. It passes the checkout root
+explicitly and uses isolated Python imports. Changes under `tools/ci/`,
+`.github/workflows/` or `scripts/` force all lanes before any classifier executes,
+including when the base predates the classifier. A missing base script or failed
+classifier also forces all lanes. The classifier runs on a standard
+`ubuntu-latest` runner; fork PRs, missing repository identity, shallow or
 missing history, an empty diff, unknown paths, or missing classifier outputs keep
 the build lanes enabled. Pushes, schedules, and manual dispatches always enable
 every path-gated lane, regardless of changed files.
@@ -64,7 +77,10 @@ every path-gated lane, regardless of changed files.
 C++ sources and headers, CMake inputs, `src/`, `include/`, `test/`, `cmake/`,
 `res/` (including shaders and test data), `data/`, `config/`, `worlds/`, vendored
 and third-party dependencies, vcpkg/dependency files, `.gitattributes`, and workflow
-changes require builds. Git attributes affect exact fixture bytes on checkout.
+changes, all `tools/ci/**` and `scripts/**` changes, and scripts invoked by CI
+(including executable tests and validation entrypoints) require builds. These
+rules take precedence over the Python allowlist. Git attributes affect exact
+fixture bytes on checkout.
 Documentation and covered Python tooling can skip C++ lanes. The allowlist and
 standalone test plan live together in `tools/ci/ci_paths.py`.
 Unknown tooling remains on the build path.
@@ -73,8 +89,17 @@ The required `Linux / GCC` and `Windows / MSVC` jobs always run on ready PRs.
 When `needs_cpp=false`, each installs only numpy, Pillow and jsonschema for its OS
 and runs `ci_paths.py python-tests`, skipping native dependencies, compiler caches,
 configure/build/CTest, native qualification, packaging and native artifacts.
-Python failures therefore block merging through the existing required contexts.
-When `needs_cpp` is true or missing, both jobs retain their full native path.
+Both jobs log and summarize `route: python-only (native build skipped by Classify
+changed paths)` and expose a `route` job output of `python-only`. When `needs_cpp`
+is true or missing, they report and expose `native` and retain their full native
+path. Consumers requiring native qualification must check that output alongside
+the job conclusion; a successful Python route provides Python coverage.
+
+The standalone plan also runs whenever `needs_python=true` or its output is
+missing, including mixed Python/native PRs and full push/manual runs, with numpy,
+Pillow and jsonschema installed. It includes `tools/ci/test_ci_paths.py` and cache
+retention regression tests. Python failures block merging through the existing
+required contexts on either route.
 
 The standalone plan explicitly lists tests in `tools/ci`, `tools/perf`,
 `tools/release`, `tools/assets`, `tools/audio`, `tools/persistence`, and
@@ -86,8 +111,9 @@ reviewed files, including covered test-backed modules; new files require builds.
 Native integrations such as `qualify_prefab_runtime.py`, its packaged service and
 installed acceptance inputs, `test_render_runner.py`, its native fixture generator
 and imports, and simulation capture tools stay on the build path.
-Explicit authoring test files, selected extension helpers and `test/viewport` files
-also skip C++: the existing authoring mock job covers them on Linux and Windows.
+Selected extension helpers and viewport fixtures also skip C++: the existing
+authoring mock job covers them on Linux and Windows. Executable authoring test
+entrypoints retain native builds under the CI script rule.
 Authoring service implementation and native probes require builds.
 The public-tree job also runs SDF documentation lint so doc-only edits retain that
 CTest-registered check. Doxygen always runs because `docs/` feeds its input.

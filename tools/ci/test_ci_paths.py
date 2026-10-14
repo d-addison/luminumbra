@@ -1,6 +1,8 @@
 """Path gate coverage, rename safety, and standalone Python runner contracts."""
 
 from pathlib import Path
+import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -11,6 +13,17 @@ import ci_paths as gate
 
 
 ROOT = Path(__file__).resolve().parents[2]
+
+
+def run_block(workflow: str, step: str) -> str:
+    section = workflow.split(f"      - name: {step}\n", 1)[1]
+    lines = section.split("        run: |\n", 1)[1].splitlines()
+    body = []
+    for line in lines:
+        if line and not line.startswith("          "):
+            break
+        body.append(line[10:])
+    return "\n".join(body)
 
 
 class PathGateTests(unittest.TestCase):
@@ -44,12 +57,9 @@ class PathGateTests(unittest.TestCase):
     def test_docs_and_covered_python_skip_builds(self):
         for path in (
             "docs/development.md", "docs/assets/example.png", "README.md", "Doxyfile",
-            "tools/ci/check_docs.py", "tools/ci/test_check_docs.py",
-            "tools/perf/test_capture_sim_budget.py",
-            "tools/release/test_sbom.py", "tools/persistence/save_receipt.py",
-            "tools/rendering/acceptance/scene_matrix.py", "tools/timelapse.py",
-            "tools/gates/test_visual_sweep_montages.py",
-            "tools/blender/authoring/extension/recipes.py", "test/viewport/test_transport.py",
+            "tools/perf/check_residency.py", "tools/persistence/save_receipt.py",
+            "tools/rendering/acceptance/scene_matrix.py", "tools/audio/bank_validate.py",
+            "tools/blender/authoring/extension/recipes.py",
         ):
             with self.subTest(path=path):
                 self.assertFalse(gate.needs_cpp(path))
@@ -91,7 +101,8 @@ class PathGateTests(unittest.TestCase):
     def test_pr_classification_and_mixed_changes(self):
         for paths, expected in (
             (["docs/development.md"], (False, False)),
-            (["tools/ci/check_docs.py"], (False, True)),
+            (["tools/audio/bank_validate.py"], (False, True)),
+            (["tools/ci/check_docs.py"], (True, True)),
             (["src/main.cpp"], (True, False)),
             (["docs/index.md", "src/main.cpp", "tools/ci/check_docs.py"], (True, True)),
             (["tools/perf/test_render_runner.py"], (True, True)),
@@ -99,6 +110,110 @@ class PathGateTests(unittest.TestCase):
         ):
             with self.subTest(paths=paths), patch.object(gate, "changed_paths", return_value=paths):
                 self.assertEqual(gate.classify(ROOT, "pull_request", "base", "head", "owner/repo", "owner/repo"), expected)
+
+    def test_ci_changes_override_allowlist_and_force_full_native_matrix(self):
+        for path in (
+            "tools/ci/ci_paths.py", "tools/ci/test_ci_paths.py", "tools/ci/check_docs.py",
+            "tools/ci/README.md", "tools/ci/nested/new_file.txt",
+            ".github/workflows/ci.yml", ".github/workflows/new.yml",
+            "scripts/tidy_cache.py", "scripts/README.md",
+            *gate.CI_ENTRYPOINTS,
+        ):
+            with self.subTest(path=path), patch.object(gate, "changed_paths", return_value=[path]):
+                self.assertTrue(gate.needs_cpp(path))
+                self.assertTrue(gate.classify(ROOT, "pull_request", "base", "head", "owner/repo", "owner/repo")[0])
+
+    def test_every_workflow_script_entrypoint_requires_native_builds(self):
+        for workflow in (ROOT / ".github/workflows").glob("*.yml"):
+            paths = re.findall(r"(?:tools|scripts|test)/[A-Za-z0-9_./-]+\.(?:py|sh|ps1)\b", workflow.read_text())
+            for path in paths:
+                with self.subTest(workflow=workflow.name, path=path):
+                    self.assertTrue(gate.needs_cpp(path))
+
+    @unittest.skipIf(os.name == "nt", "trusted classification runs on Linux")
+    def test_workflow_bootstrap_uses_base_and_fails_open_without_executing_head(self):
+        for name in ("ci", "asan", "performance"):
+            workflow = (ROOT / f".github/workflows/{name}.yml").read_text()
+            script = run_block(workflow, "Classify merge-base diff (all lanes for non-PR events)")
+            for sensitive, missing, failed in ((False, False, False), (True, False, False),
+                                               (False, True, False), (False, False, True)):
+                with self.subTest(workflow=name, sensitive=sensitive, missing=missing, failed=failed), tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    bin_dir = root / "bin"
+                    bin_dir.mkdir()
+                    git = bin_dir / "git"
+                    git.write_text(
+                        '#!/bin/sh\ncase "$1" in\n'
+                        'diff) test "$FAKE_SENSITIVE" = false;;\n'
+                        'show) test "$FAKE_MISSING" = false || exit 1; cat "$FAKE_BASE_SCRIPT";;\n'
+                        '*) exit 1;;\nesac\n'
+                    )
+                    git.chmod(0o755)
+                    base = root / "base.py"
+                    base.write_text(
+                        "import os, sys\n"
+                        "assert sys.argv[1:] == ['classify', '--root', os.environ['GITHUB_WORKSPACE']]\n"
+                        "if os.environ['FAKE_FAILED'] == 'true': raise SystemExit(1)\n"
+                        "with open(os.environ['GITHUB_OUTPUT'], 'a') as f:\n"
+                        "    f.write('needs_cpp=false\\nneeds_python=true\\n')\n"
+                    )
+                    # A PR tries to exempt itself; executing it would leave a marker.
+                    head = root / "tools/ci/ci_paths.py"
+                    head.parent.mkdir(parents=True)
+                    marker = root / "head-executed"
+                    head.write_text(f"from pathlib import Path\nPath({str(marker)!r}).touch()\n")
+                    output = root / "output"
+                    env = dict(os.environ, PATH=f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+                               CI_EVENT="pull_request", CI_REPOSITORY="owner/repo",
+                               CI_HEAD_REPOSITORY="owner/repo", CI_BASE_SHA="base", CI_HEAD_SHA="head",
+                               RUNNER_TEMP=str(root), GITHUB_WORKSPACE=str(root), GITHUB_OUTPUT=str(output),
+                               FAKE_BASE_SCRIPT=str(base), FAKE_SENSITIVE=str(sensitive).lower(),
+                               FAKE_MISSING=str(missing).lower(), FAKE_FAILED=str(failed).lower())
+                    subprocess.run(["bash", "-e", "-o", "pipefail", "-c", script], env=env, check=True,
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                    self.assertFalse(marker.exists())
+                    expected = "needs_cpp=true\nneeds_python=true\n" if sensitive or missing or failed else "needs_cpp=false\nneeds_python=true\n"
+                    self.assertEqual(output.read_text(), expected)
+
+    def test_required_jobs_run_python_plan_on_mixed_changes_and_publish_route(self):
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text()
+        for job in ("linux", "windows-msvc"):
+            # Split on a job boundary, not nested YAML mappings.
+            body = re.split(r"\n  [\w-]+:\n", workflow.split(f"  {job}:\n", 1)[1])[0]
+            for step in ("Install standalone Python test dependencies",
+                         "Run standalone Python contracts (including CTest-registered suites)"):
+                condition = body.split(f"      - name: {step}\n", 1)[1].splitlines()[0].strip()
+                expression = condition.removeprefix("if: ${{ ").removesuffix(" }}")
+                for cpp, python, expected in (("true", "true", True), ("false", "true", True),
+                                               ("true", "false", False), ("false", "false", True),
+                                               ("", "", True)):
+                    actual = expression.replace("needs.changes.outputs.needs_cpp", repr(cpp)).replace(
+                        "needs.changes.outputs.needs_python", repr(python)
+                    ).replace("||", "or").replace("&&", "and")
+                    with self.subTest(job=job, step=step, cpp=cpp, python=python):
+                        self.assertEqual(eval(actual, {"__builtins__": {}}), expected)
+            self.assertIn("route: ${{ steps.route.outputs.route }}", body)
+            self.assertIn("tools/ci/ci_paths.py python-tests", body)
+            self.assertIn('echo "$message" >> "$GITHUB_STEP_SUMMARY"', body)
+            self.assertIn("native build skipped by Classify changed paths", body)
+
+    @unittest.skipIf(os.name == "nt", "route scripts use the hosted bash shell")
+    def test_route_is_visible_in_log_summary_and_step_output(self):
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text()
+        for job in ("linux", "windows-msvc"):
+            script = run_block(workflow.split(f"  {job}:\n", 1)[1], "Report validation route")
+            for cpp, route in (("false", "python-only"), ("true", "native"), ("", "native")):
+                with self.subTest(job=job, cpp=cpp), tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    env = dict(os.environ, NEEDS_CPP=cpp, GITHUB_OUTPUT=str(root / "output"),
+                               GITHUB_STEP_SUMMARY=str(root / "summary"))
+                    result = subprocess.run(["bash", "-e", "-c", script], env=env, check=True,
+                                            stdout=subprocess.PIPE, text=True)
+                    self.assertEqual((root / "output").read_text(), f"route={route}\n")
+                    self.assertEqual((root / "summary").read_text(), result.stdout)
+                    self.assertIn(f"route: {route}", result.stdout)
+                    if cpp == "false":
+                        self.assertIn("native build skipped by Classify changed paths", result.stdout)
 
     def test_new_files_in_covered_directories_require_builds(self):
         for path in gate.PYTHON_MODULES | gate.AUTHORING_PYTHON_FILES:

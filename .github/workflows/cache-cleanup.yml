@@ -1,20 +1,33 @@
-name: Clean up closed PR caches
+name: Bound Actions cache storage
 
 on:
   pull_request_target:
     types: [closed]
+  workflow_run:
+    workflows: [CI, AddressSanitizer, Performance observations]
+    types: [completed]
 
 permissions:
   actions: write
 
+concurrency:
+  group: cache-cleanup-${{ github.event_name == 'workflow_run' && 'rolling' || github.event.pull_request.number }}
+  cancel-in-progress: false
+
 jobs:
   cleanup:
-    name: Delete closed PR merge-ref caches
+    name: Retain rolling caches within the storage budget
+    # Only main/devel pushes save caches; other completions need no runner time.
+    if: >-
+      github.event_name == 'pull_request_target' ||
+      (github.event.workflow_run.event == 'push' &&
+      (github.event.workflow_run.head_branch == 'main' || github.event.workflow_run.head_branch == 'devel'))
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       # No checkout: this job only uses trusted workflow code and a numeric PR ref.
       - name: Delete caches for the closed PR
+        if: github.event_name == 'pull_request_target'
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
@@ -26,3 +39,52 @@ jobs:
           while IFS= read -r cache_id; do
             gh cache delete "$cache_id" --repo "$GH_REPO"
           done < "$RUNNER_TEMP/pr-cache-ids"
+      # Workflow code is trusted and no repository code is checked out. GitHub
+      # also evicts old keys, but that alone would fill the 10 GB free quota.
+      - name: Retain one generation per branch and lane, below 6 GB total
+        if: github.event_name == 'workflow_run'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import subprocess
+
+          PREFIXES = (
+              'linux-x64-gcc-ccache-', 'diligent-rhi-linux-x64-gcc-ccache-',
+              'linux-x64-gcc-asan-ccache-', 'windows-x64-msvc-ccache-',
+              'windows-x64-ucrt64-gcc-ccache-', 'perf-linux-x64-gcc-ccache-',
+              'perf-paired-linux-x64-gcc-', 'qualification-server-linux-x64-gcc-',
+              'tidy-cache-',
+          )
+          BUDGET = 6_000_000_000
+
+          def obsolete_caches(caches):
+              # Newest wins even when main pushes finish out of order. Configuration
+              # hashes can change without retaining every historical configuration.
+              caches = sorted(caches, key=lambda c: (c['created_at'], c['id']), reverse=True)
+              retained = set()
+              used = 0
+              obsolete = []
+              for cache in caches:
+                  prefix = next((p for p in PREFIXES if cache['key'].startswith(p)), None)
+                  group = (cache['ref'], prefix) if prefix else None
+                  if (group is not None and group in retained) or used + cache['size_in_bytes'] > BUDGET:
+                      obsolete.append(cache['id'])
+                      continue
+                  if group is not None:
+                      retained.add(group)
+                  used += cache['size_in_bytes']
+              return obsolete
+
+          repository = os.environ['GH_REPO']
+          pages = json.loads(subprocess.check_output([
+              'gh', 'api', '--paginate', '--slurp',
+              f'repos/{repository}/actions/caches?per_page=100',
+          ], text=True))
+          caches = [cache for page in pages for cache in page['actions_caches']]
+          for cache_id in obsolete_caches(caches):
+              subprocess.run(['gh', 'cache', 'delete', str(cache_id), '--repo', repository], check=True)
+          PY
