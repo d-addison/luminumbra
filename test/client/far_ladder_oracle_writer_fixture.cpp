@@ -51,12 +51,13 @@ std::vector<FarLodHorizonStationCapture> MakeCaptures() {
 
 int main(int argc, char** argv) {
     if (argc != 3) {
-        std::cerr
-            << "Usage: far_ladder_oracle_writer_fixture <artifact-dir> <complete|incomplete>\n";
+        std::cerr << "Usage: far_ladder_oracle_writer_fixture <artifact-dir> "
+                     "<complete|incomplete|ladder|mixed|refused|preview>\n";
         return EXIT_FAILURE;
     }
     const std::string mode = argv[2];
-    if (mode != "complete" && mode != "incomplete") {
+    if (mode != "complete" && mode != "incomplete" && mode != "ladder" && mode != "mixed" &&
+        mode != "refused" && mode != "preview") {
         std::cerr << "Unknown fixture mode: " << mode << '\n';
         return EXIT_FAILURE;
     }
@@ -66,6 +67,23 @@ int main(int argc, char** argv) {
         if (mode == "incomplete") {
             captures.back().regions_missing = 1;
             --captures.back().regions_resident;
+        }
+        using namespace Luminumbra::Rendering;
+        for (std::size_t i = 0; i < captures.size(); ++i) {
+            auto& snapshot = captures[i].far_world;
+            if (mode == "ladder" || (mode == "mixed" && i != 0)) {
+                snapshot.selection = SelectFarWorld(
+                    FarWorldMode::Ladder, FarWorldPurpose::World, FarWorldRefusal::None);
+                snapshot.far_plane = FarWorldPlane(snapshot.selection.effective);
+                // Deliberately unqualified: emission must not invent v1 evidence
+                // or make retained Legacy counters a Ladder readiness proof.
+                snapshot.complete = false;
+            } else if (mode == "refused" || mode == "preview") {
+                snapshot.selection = SelectFarWorld(FarWorldMode::Ladder,
+                                                    mode == "preview" ? FarWorldPurpose::Preview
+                                                                      : FarWorldPurpose::World,
+                                                    FarWorldRefusal::ImmutableAuthorityUnavailable);
+            }
         }
         // File-only production writer call: no window, GL context, or smoke run.
         // These synthetic captures do not establish readiness within 90 seconds.

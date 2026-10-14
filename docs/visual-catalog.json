@@ -4690,7 +4690,7 @@
       ],
       "reconciliation": {
         "source_commit": "945ecd295835a838eed0169ff709e7aabc134fa1",
-        "finding": "Authorized September 13 completion scope. This row adds explicit coverage without replacing any original group; implementation and acceptance remain unfinished."
+        "finding": "Additional completion coverage. This row adds explicit coverage without replacing any original group; implementation and acceptance remain unfinished."
       },
       "runtime_selector": null,
       "execution_state": "not_captured",
@@ -4763,7 +4763,7 @@
       ],
       "reconciliation": {
         "source_commit": "945ecd295835a838eed0169ff709e7aabc134fa1",
-        "finding": "Authorized September 13 completion scope. This row adds explicit coverage without replacing any original group; implementation and acceptance remain unfinished."
+        "finding": "Additional completion coverage. This row adds explicit coverage without replacing any original group; implementation and acceptance remain unfinished."
       },
       "runtime_selector": null,
       "execution_state": "not_captured",
@@ -4831,7 +4831,7 @@
       ],
       "reconciliation": {
         "source_commit": "945ecd295835a838eed0169ff709e7aabc134fa1",
-        "finding": "Authorized September 13 completion scope. This row adds explicit coverage without replacing any original group; implementation and acceptance remain unfinished."
+        "finding": "Additional completion coverage. This row adds explicit coverage without replacing any original group; implementation and acceptance remain unfinished."
       },
       "runtime_selector": null,
       "execution_state": "not_captured",
@@ -4923,7 +4923,7 @@
       ],
       "reconciliation": {
         "source_commit": "945ecd295835a838eed0169ff709e7aabc134fa1",
-        "finding": "Authorized September 13 completion scope. This row adds explicit coverage without replacing any original group; implementation and acceptance remain unfinished."
+        "finding": "Additional completion coverage. This row adds explicit coverage without replacing any original group; implementation and acceptance remain unfinished."
       },
       "runtime_selector": null,
       "execution_state": "not_captured",
@@ -4984,7 +4984,7 @@
       ],
       "reconciliation": {
         "source_commit": "945ecd295835a838eed0169ff709e7aabc134fa1",
-        "finding": "Authorized September 13 completion scope. This row adds explicit coverage without replacing any original group; implementation and acceptance remain unfinished."
+        "finding": "Additional completion coverage. This row adds explicit coverage without replacing any original group; implementation and acceptance remain unfinished."
       },
       "runtime_selector": null,
       "execution_state": "not_captured",
@@ -5044,7 +5044,7 @@
       ],
       "reconciliation": {
         "source_commit": "945ecd295835a838eed0169ff709e7aabc134fa1",
-        "finding": "Authorized September 13 completion scope. This row adds explicit coverage without replacing any original group; implementation and acceptance remain unfinished."
+        "finding": "Additional completion coverage. This row adds explicit coverage without replacing any original group; implementation and acceptance remain unfinished."
       },
       "runtime_selector": null,
       "execution_state": "not_captured",
@@ -5110,7 +5110,7 @@
       ],
       "reconciliation": {
         "source_commit": "945ecd295835a838eed0169ff709e7aabc134fa1",
-        "finding": "Authorized September 13 completion scope. This row adds explicit coverage without replacing any original group; implementation and acceptance remain unfinished."
+        "finding": "Additional completion coverage. This row adds explicit coverage without replacing any original group; implementation and acceptance remain unfinished."
       },
       "runtime_selector": null,
       "execution_state": "not_captured",
@@ -5138,10 +5138,10 @@
       "family": "blender",
       "name": "Reviewed bounded recipes and graph fidelity",
       "priority": "P2",
-      "visual_goal": "Extend reviewed recipes after the named-recipe integration. Demonstrate stale revision refusal, undo and rollback; optional Banso adapters depend on typed-port fidelity.",
+      "visual_goal": "Extend reviewed recipes after the named-recipe integration. Demonstrate stale revision refusal, undo and rollback; optional orchestration adapters depend on typed-port fidelity.",
       "fixture": {
         "status": "missing",
-        "description": "Extend reviewed recipes after the named-recipe integration. Demonstrate stale revision refusal, undo and rollback; optional Banso adapters depend on typed-port fidelity. Author and version the fixture with GLB plus versioned sidecars and immutable generations.",
+        "description": "Extend reviewed recipes after the named-recipe integration. Demonstrate stale revision refusal, undo and rollback; optional orchestration adapters depend on typed-port fidelity. Author and version the fixture with GLB plus versioned sidecars and immutable generations.",
         "source_paths": []
       },
       "required_variants": [
@@ -5153,7 +5153,7 @@
         "cancel",
         "rollback",
         "typed-port-save-reload",
-        "optional-banso-after-fidelity"
+        "optional-adapters-after-fidelity"
       ],
       "temporal_evidence_required": true,
       "dependencies": [
@@ -5168,12 +5168,12 @@
         "scope": "Implementation and a reproducible installed/native capture producer remain required."
       },
       "acceptance_checks": [
-        "Extend reviewed recipes after the named-recipe integration. Demonstrate stale revision refusal, undo and rollback; optional Banso adapters depend on typed-port fidelity.",
+        "Extend reviewed recipes after the named-recipe integration. Demonstrate stale revision refusal, undo and rollback; optional orchestration adapters depend on typed-port fidelity.",
         "Meet the shared packet contract for every required variant and parent mapping."
       ],
       "reconciliation": {
         "source_commit": "945ecd295835a838eed0169ff709e7aabc134fa1",
-        "finding": "Authorized September 13 completion scope. This row adds explicit coverage without replacing any original group; implementation and acceptance remain unfinished."
+        "finding": "Additional completion coverage. This row adds explicit coverage without replacing any original group; implementation and acceptance remain unfinished."
       },
       "runtime_selector": null,
       "execution_state": "not_captured",
@@ -5237,7 +5237,7 @@
       ],
       "reconciliation": {
         "source_commit": "945ecd295835a838eed0169ff709e7aabc134fa1",
-        "finding": "Authorized September 13 completion scope. This row adds explicit coverage without replacing any original group; implementation and acceptance remain unfinished."
+        "finding": "Additional completion coverage. This row adds explicit coverage without replacing any original group; implementation and acceptance remain unfinished."
       },
       "runtime_selector": null,
       "execution_state": "not_captured",
@@ -5297,7 +5297,7 @@
       ],
       "reconciliation": {
         "source_commit": "945ecd295835a838eed0169ff709e7aabc134fa1",
-        "finding": "Authorized September 13 completion scope. This row adds explicit coverage without replacing any original group; implementation and acceptance remain unfinished."
+        "finding": "Additional completion coverage. This row adds explicit coverage without replacing any original group; implementation and acceptance remain unfinished."
       },
       "runtime_selector": null,
       "execution_state": "not_captured",
@@ -5360,7 +5360,7 @@
       ],
       "reconciliation": {
         "source_commit": "945ecd295835a838eed0169ff709e7aabc134fa1",
-        "finding": "Authorized September 13 completion scope. This row adds explicit coverage without replacing any original group; implementation and acceptance remain unfinished."
+        "finding": "Additional completion coverage. This row adds explicit coverage without replacing any original group; implementation and acceptance remain unfinished."
       },
       "runtime_selector": null,
       "execution_state": "not_captured",
@@ -5421,7 +5421,7 @@
       ],
       "reconciliation": {
         "source_commit": "945ecd295835a838eed0169ff709e7aabc134fa1",
-        "finding": "Authorized September 13 completion scope. This row adds explicit coverage without replacing any original group; implementation and acceptance remain unfinished."
+        "finding": "Additional completion coverage. This row adds explicit coverage without replacing any original group; implementation and acceptance remain unfinished."
       },
       "runtime_selector": null,
       "execution_state": "not_captured",

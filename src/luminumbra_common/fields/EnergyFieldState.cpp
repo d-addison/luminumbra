@@ -89,7 +89,7 @@ void EnergyFieldState::QueueDeposit(
 }
 
 std::uint16_t EnergyFieldState::DecaySteps(std::uint16_t v, std::uint64_t steps) noexcept {
-    // SEQUENTIAL per-step loop — bit-equal to the in-window path (Codex r2: a
+    // SEQUENTIAL per-step loop — bit-equal to the in-window path (a
     // pow-by-squaring shortcut truncates once instead of per step and is NOT
     // bit-equal). Bounded: the exact-zero property caps it at a few hundred
     // iterations for any uint16 value; the early-exit fires long before that

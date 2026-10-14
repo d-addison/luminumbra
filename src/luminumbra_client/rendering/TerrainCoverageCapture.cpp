@@ -98,9 +98,9 @@ struct ReadbackState {
 void RenderPipeline::set_terrain_coverage_diagnostics_enabled(bool enabled,
                                                               bool bypass_camera_region_guard) {
     m_terrain_coverage_enabled = enabled;
-    if (m_farlod) {
-        m_farlod->set_coverage_diagnostics_enabled(enabled);
-        m_farlod->set_coverage_camera_region_guard_bypass(bypass_camera_region_guard);
+    if (auto* legacy = legacy_far_compatibility()) {
+        legacy->set_coverage_diagnostics_enabled(enabled);
+        legacy->set_coverage_camera_region_guard_bypass(bypass_camera_region_guard);
     }
 }
 
@@ -109,9 +109,9 @@ nlohmann::json RenderPipeline::terrain_coverage_diagnostics(bool include_live_ch
                 {"render_frame", m_terrain_coverage_frame}};
     if (!m_terrain_coverage_enabled)
         return out;
-    if (m_farlod) {
-        const auto& d = m_farlod->coverage_diagnostics();
-        const auto& s = m_farlod->stats();
+    if (const auto* legacy = legacy_far_compatibility()) {
+        const auto& d = legacy->coverage_diagnostics();
+        const auto& s = legacy->stats();
         auto rows = Json::array();
         for (const auto& r : d.neighbourhood) {
             Json row = {{"region", {r.rx, r.rz}},
@@ -158,6 +158,8 @@ nlohmann::json RenderPipeline::terrain_coverage_diagnostics(bool include_live_ch
                       {"clip_inner_radius_m", FarLodSystem::kFarClipInnerRadiusMeters},
                       {"clip_outer_radius_m", FarLodSystem::kFarClipOuterRadiusMeters},
                       {"camera_neighbourhood", std::move(rows)}};
+    } else if (far_world_selection().effective == FarWorldMode::Ladder) {
+        out["far"] = FarWorldDiagnosticJson(far_world_diagnostic());
     } else {
         out["far"] = nullptr;
     }

@@ -41,6 +41,7 @@ import concurrent.futures
 import hashlib
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -77,6 +78,37 @@ _ENV_NAMES = (
 
 class CacheMiss(Exception):
     """The key for this unit cannot be established; run clang-tidy."""
+
+
+def parse_shard(value: str) -> tuple[int, int]:
+    """Parse a 1-based INDEX/COUNT without accepting signs or non-integers."""
+    if re.fullmatch(r"[0-9]+/[0-9]+", value):
+        index, count = map(int, value.split("/"))
+        if 1 <= index <= count:
+            return index, count
+    raise argparse.ArgumentTypeError("--shard must be INDEX/COUNT with 1 <= INDEX <= COUNT")
+
+
+def select_shard(files: list[str], repo_root: str, shard: tuple[int, int]) -> list[str]:
+    """Assign each repo-relative POSIX path by SHA-256 modulo the shard count.
+
+    The checkout location, input order and other files cannot change a unit's
+    shard. Sort and deduplicate the result for deterministic execution order.
+    """
+    index, count = shard
+    selected = []
+    for path in sorted(set(files)):
+        relative = os.path.relpath(path, repo_root).replace(os.sep, "/")
+        digest = hashlib.sha256(relative.encode("utf-8", "surrogateescape")).digest()
+        if int.from_bytes(digest, "big") % count + 1 == index:
+            selected.append(path)
+    return selected
+
+
+def shard_command(args: argparse.Namespace) -> int:
+    for path in select_shard(args.files, args.repo_root, args.shard):
+        sys.stdout.buffer.write(os.fsencode(path) + b"\0")
+    return 0
 
 
 def sha256_bytes(data: bytes) -> str:
@@ -473,6 +505,12 @@ def prune_command(args: argparse.Namespace) -> int:
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
+
+    shard = sub.add_parser("shard", help="select a stable path-hash shard; emit NUL-separated paths")
+    shard.add_argument("--repo-root", required=True)
+    shard.add_argument("--shard", type=parse_shard, default=(1, 1))
+    shard.add_argument("files", nargs="*")
+    shard.set_defaults(func=shard_command)
 
     run = sub.add_parser("run", help="analyze translation units, skipping proven-identical ones")
     run.add_argument("--build-dir", required=True)

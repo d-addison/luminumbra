@@ -32,11 +32,12 @@ std::size_t CountOccurrences(const std::string& source, const std::string& fragm
 // Shadow orchestration must delegate only live terrain/glass to ShadowPass.
 // Reject owner references and types, class-qualified access and submission/draw calls,
 // independent of whitespace. Replay flags and replay-preservation helpers are allowed.
+// The retired legacy renderer's compatibility owner is FarLodSystem.
 bool HasFarSubmissionAccess(const std::string& source) {
     static const std::regex forbidden(
         R"(\b(m_far_world|m_farlod)\b|)"
-        R"(\b(FarWorldRenderer|FarLodRenderer|FarLodSystem)\b|)"
-        R"(\b(far_world_renderer|submit_ladder|SubmitSelectedFarWorld|DrawFarVolumeGpu)\s*\()");
+        R"(\b(FarWorldRenderer|FarLodSystem)\b|)"
+        R"(\b(far_world_renderer|legacy_far_compatibility|submit_ladder|SubmitSelectedFarWorld|DrawFarVolumeGpu)\s*\()");
     return std::regex_search(source, forbidden);
 }
 
@@ -317,6 +318,7 @@ TEST(FarWorldShadowContract, SubmissionPredicateAllowsReplayStateAndRejectsDrawA
              "other_m_far_world->Submit(camera, prepare);",
              "m_farlod_state.draw();",
              "other_far_world_renderer().Submit(camera, prepare);",
+             "other_legacy_far_compatibility()->draw();",
              "submit_ladder_state();",
              "SubmitSelectedFarWorldReplay();",
              "DrawFarVolumeGpuReplay();",
@@ -334,11 +336,13 @@ TEST(FarWorldShadowContract, SubmissionPredicateAllowsReplayStateAndRejectsDrawA
              "m_farlod \t. draw();",
              "far_world_renderer().Submit(camera, prepare);",
              "far_world_renderer \n().Submit(camera, prepare);",
+             "legacy_far_compatibility()->draw();",
+             "legacy_far_compatibility \n()->draw();",
              "input.submit_ladder (prepare);",
              "SubmitSelectedFarWorld (input, prepare);",
              "DrawFarVolumeGpu (allocation, driver);",
              "FarWorldRenderer::Submit(camera, prepare);",
-             "FarLodRenderer \n\t:: draw();",
+             "FarLodSystem \n\t:: draw();",
              "FarLodSystem \t:: draw();",
          }) {
         SCOPED_TRACE(source);
@@ -374,8 +378,10 @@ TEST(FarWorldShadowContract, ProductionCascadesHaveOnlyLiveAndGlassInputs) {
              "helper(*m_farlod, camera, prepare);",
              "helper(m_farlod, camera, prepare);",
              "helper(m_farlod.get(), camera, prepare);",
+             "legacy_far_compatibility()->draw();",
+             "auto* far = legacy_far_compatibility(); far->draw();",
+             "helper(legacy_far_compatibility(), camera, prepare);",
              "FarWorldRenderer::Submit(camera, prepare);",
-             "FarLodRenderer::draw();",
              "FarLodSystem::draw();",
              "DrawFarVolumeGpu(allocation, driver);",
          }) {
@@ -390,6 +396,7 @@ TEST(FarWorldShadowContract, ProductionCascadesHaveOnlyLiveAndGlassInputs) {
     EXPECT_TRUE(HasFarSubmissionAccess("shadow_ctx.frozen_replay = m_far_world_paired;\n"
                                        "m_far_world -> Submit(camera, prepare);"));
     EXPECT_TRUE(HasFarSubmissionAccess("FarWorldRenderer* owner;"));
+    EXPECT_TRUE(HasFarSubmissionAccess("FarLodSystem* owner;"));
     const auto live =
         ExtractBlock(pipeline, "SubmitTerrainChunksFn RenderPipeline::make_terrain_submitter(");
     ExpectContains(live, "CullHierarchical");

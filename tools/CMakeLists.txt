@@ -111,6 +111,24 @@ if(BUILD_TESTING)
     set_tests_properties(SaveReceiptContract
         PROPERTIES LABELS "persistence;tools" TIMEOUT 30)
     add_test(
+        NAME SavedWorldRefusalFixtureContract
+        COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/persistence/test_refusal_fixtures.py")
+    set_tests_properties(SavedWorldRefusalFixtureContract
+        PROPERTIES LABELS "persistence;tools" TIMEOUT 30)
+    add_test(
+        NAME SavedWorldAcceptanceReceiptContract
+        COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/persistence/test_check_acceptance_receipt.py")
+    set_tests_properties(SavedWorldAcceptanceReceiptContract
+        PROPERTIES LABELS "persistence;tools" TIMEOUT 30)
+    add_test(
+        NAME V03AcceptanceReceiptContract
+        COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_v03_receipt.py")
+    set_tests_properties(V03AcceptanceReceiptContract
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
         NAME DocumentationLinkValidatorContract
         COMMAND "${Python3_EXECUTABLE}"
                 "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_docs.py")

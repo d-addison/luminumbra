@@ -4976,6 +4976,9 @@ int main(int argc, char* argv[]) {
                     }
                 });
                 j["capture_context"]["time_of_day_at_report"] = renderPipeline.get_time_of_day();
+                j["capture_context"]["world_id"] =
+                    gameSession ? nlohmann::json(gameSession->GetMetadata().worldId)
+                                : nlohmann::json(nullptr);
                 if (g_rb_has_streaming_position) {
                     j["capture_context"]["last_world_streaming_position"] = {
                         g_rb_last_streaming_position.x,
