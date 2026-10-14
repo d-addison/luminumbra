@@ -1280,7 +1280,8 @@ TEST(ActiveRegionLedgerTest, EnergyAgeCoexistsInAscendingAllocatorProjectionWork
     EXPECT_EQ(ActiveRegionLedger::kMaxFileBytes,
               ActiveRegionLedger::kHeaderBytes +
                   ActiveRegionLedger::kMaxRegions * ActiveRegionLedger::kRecordBytes + 4u + 14u +
-                  7u + 3u * (10u + 16u * ActiveRegionLedger::kMaxRegions) + 8u);
+                  7u + 6u + SimulationContentIdentity::kEncodedBytes +
+                  3u * (10u + 16u * ActiveRegionLedger::kMaxRegions) + 8u);
 }
 
 TEST(ActiveRegionLedgerTest, ZeroEnergyAgeOwnsAnIdleRecordUntilExplicitReset) {
@@ -1379,6 +1380,91 @@ TEST(ActiveRegionLedgerTest, ResumeAcknowledgementCommitsWindowBetweenReducedDue
     const auto committed = ledger.encode();
     EXPECT_FALSE(ledger.acknowledge_resume(kFar, frozen));
     EXPECT_EQ(ledger.encode(), committed);
+}
+
+TEST(ActiveRegionLedgerTest, ContentIdentityIsImmutableAndHasAnExactVersionedWireRecord) {
+    SimulationContentIdentity identity;
+    identity.effective_policy_digest = 0x0102030405060708ull;
+    identity.creature_definitions_digest = 11;
+    identity.plant_definitions_digest = 12;
+    identity.population_digest = 13;
+    const auto expected = LittleEndian(1, 2) + LittleEndian(1, 2) + LittleEndian(1, 2) +
+                          LittleEndian(0, 2) + LittleEndian(0x0102030405060708ull, 8) +
+                          LittleEndian(11, 8) + LittleEndian(12, 8) + LittleEndian(13, 8);
+    ASSERT_EQ(expected.size(), 40u);
+    EXPECT_EQ(identity.encode(), expected);
+    ActiveRegionLedger ledger;
+    EXPECT_TRUE(ledger.canonical_bytes().empty());
+    ASSERT_TRUE(ledger.adopt_content_identity(identity));
+    ASSERT_TRUE(ledger.adopt_content_identity(identity));
+    EXPECT_FALSE(ledger.canonical_bytes().empty());
+    EXPECT_EQ(Version(ledger.encode()), 2u);
+    const auto restored = Reload(ledger);
+    ASSERT_TRUE(restored.content_identity());
+    EXPECT_EQ(*restored.content_identity(), identity);
+    EXPECT_EQ(restored.encode(), ledger.encode());
+    auto changed = identity;
+    ++changed.population_digest;
+    const auto before = ledger.encode();
+    EXPECT_FALSE(ledger.adopt_content_identity(changed));
+    EXPECT_EQ(ledger.encode(), before);
+    std::string error;
+    EXPECT_FALSE(ledger.validate_content_identity(changed, error));
+    EXPECT_EQ(error, ActiveRegionLedger::kContentMismatchMessage);
+    ActiveRegionLedger historical;
+    EXPECT_FALSE(historical.validate_content_identity(identity, error));
+    EXPECT_EQ(error, ActiveRegionLedger::kContentVersionMessage);
+}
+TEST(ActiveRegionLedgerTest, ContentIdentityPrecedesCompletedWorkAndPreservesNextDecision) {
+    auto ledger = Distant();
+    SimulationContentIdentity identity;
+    identity.effective_policy_digest = 123;
+    ASSERT_TRUE(ledger.adopt_content_identity(identity));
+    const std::array work{RegionWork{kFar, 1, 2, 3, 4}};
+    ledger.publish_completed_work(work);
+    const auto bytes = ledger.encode();
+    const auto extensions = Tlv(5, identity.encode()) + Tlv(6, EnergyAgePayload(1, kFar, 10));
+    const auto offset = ActiveRegionLedger::kHeaderBytes + ActiveRegionLedger::kRecordBytes;
+    EXPECT_EQ(bytes.substr(offset, bytes.size() - offset - 8),
+              LittleEndian(extensions.size(), 4) + extensions);
+    auto restored = Reload(ledger);
+    EXPECT_EQ(restored.completed_work(), ledger.completed_work());
+    EXPECT_EQ(restored.canonical_bytes(), ledger.canonical_bytes());
+    EXPECT_EQ(restored.schedule(WorldClock(2)), ledger.schedule(WorldClock(2)));
+}
+TEST(ActiveRegionLedgerTest, ContentAndWorkEnvelopeRefusesMalformedOrMisorderedTlvsAtomically) {
+    auto ledger = Distant();
+    const SimulationContentIdentity identity;
+    ASSERT_TRUE(ledger.adopt_content_identity(identity));
+    const std::array work{RegionWork{kFar, 7, 0, 0, 0}};
+    ledger.publish_completed_work(work);
+    const auto valid = ledger.encode();
+    const auto prefix = ActiveRegionLedger::kHeaderBytes + ActiveRegionLedger::kRecordBytes;
+    const auto replace_extensions = [&](const std::string& extensions) {
+        auto bytes = valid.substr(0, prefix) + LittleEndian(extensions.size(), 4) + extensions +
+                     LittleEndian(0, 8);
+        Seal(bytes);
+        return bytes;
+    };
+    const auto work_tlv = Tlv(6, EnergyAgePayload(1, kFar, 7));
+    for (const auto& bad : {identity.encode().substr(1), identity.encode() + "x"})
+        ExpectRefused(replace_extensions(Tlv(5, bad) + work_tlv),
+                      ActiveRegionLedger::kCorruptMessage);
+    for (std::size_t offset : {0u, 2u, 4u, 6u}) {
+        auto bad = identity.encode();
+        bad[offset] = 2;
+        ExpectRefused(replace_extensions(Tlv(5, bad) + work_tlv),
+                      ActiveRegionLedger::kCorruptMessage);
+    }
+    ExpectRefused(replace_extensions(work_tlv + Tlv(5, identity.encode())),
+                  ActiveRegionLedger::kCorruptMessage);
+    ExpectRefused(replace_extensions(Tlv(5, identity.encode()) + Tlv(5, identity.encode())),
+                  ActiveRegionLedger::kCorruptMessage);
+    ExpectRefused(
+        replace_extensions(Tlv(5, identity.encode()) + Tlv(6, EnergyAgePayload(1, kFar, 0))),
+        ActiveRegionLedger::kCorruptMessage);
+    ExpectRefused(replace_extensions(Tlv(5, identity.encode()) + Tlv(7, "")),
+                  ActiveRegionLedger::kCorruptMessage);
 }
 
 } // namespace

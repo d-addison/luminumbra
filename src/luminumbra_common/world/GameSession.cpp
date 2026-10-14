@@ -190,6 +190,8 @@ void GameSession::ResetWorldSystems() {
     m_physicsSystem.reset();
     m_waterSystem.reset();
     m_registry.clear();
+    m_simulationContent.reset();
+    m_speciesTable.reset();
     m_soilGrid.reset();
     m_irrigationGrid.reset();
     m_simulationClock.reset();
@@ -264,17 +266,44 @@ void GameSession::ApplyWaterResolutionWiring() {
         "High-resolution water WIRED (16x16 grid, 1 m cells; 16-chunk sim window)");
 }
 
-void GameSession::LoadSpeciesDefinitions() {
-    m_speciesTable = std::make_unique<luminumbra::ai::CreatureSpeciesRegistry>();
+bool GameSession::PreflightSimulationContent(std::shared_ptr<const SimulationContent>& content) {
+    if (!m_activeRegionsEnabled)
+        return true;
+    SimulationContent candidate;
+    if (!AdmitSimulationContent(RuntimeRoot(m_rootPath),
+                                candidate,
+                                m_worldOpenError,
+                                m_populationContract,
+                                m_populationConfiguration)) {
+        LUMINUMBRA_CORE_ERROR("World open refused: {}", m_worldOpenError);
+        return false;
+    }
+    content = std::make_shared<const SimulationContent>(std::move(candidate));
+    return true;
+}
+
+bool GameSession::LoadSpeciesDefinitions(std::shared_ptr<const SimulationContent> content) {
+    if (m_activeRegionsEnabled) {
+        if (!content || !m_activeRegionLedger.adopt_content_identity(content->identity)) {
+            m_worldOpenError = "Simulation content adoption failed.";
+            return false;
+        }
+        m_speciesTable = content->creatures;
+        m_simulationContent = std::move(content);
+        return true;
+    }
+    auto species = std::make_shared<luminumbra::ai::CreatureSpeciesRegistry>();
     const fs::path dir = RuntimeRoot(m_rootPath) / "data" / "common" / "creatures" / "species";
     std::vector<std::string> errors;
-    const std::size_t loaded = m_speciesTable->LoadFromDirectory(dir, errors);
+    const std::size_t loaded = species->LoadFromDirectory(dir, errors);
     for (const std::string& err : errors) {
         // Content problems are warnings, not failures: a bad species file must never brick a
         // world load (the affected species just keeps its compiled-default behaviour/absence).
         LUMINUMBRA_CORE_WARN("Species definition load: {}", err);
     }
     LUMINUMBRA_CORE_INFO("Species definitions loaded: {} from {}", loaded, dir.string());
+    m_speciesTable = std::move(species);
+    return true;
 }
 
 std::uint32_t GameSession::TickSimulation(double frame_dt) {
@@ -1140,6 +1169,10 @@ bool GameSession::CreateWorldInternal(const std::string& name,
         return false;
     }
 
+    std::shared_ptr<const SimulationContent> content;
+    if (!PreflightSimulationContent(content))
+        return false;
+
     WorldMetadata metadata;
     metadata.name = name;
     metadata.seed = seed.empty() ? std::to_string(std::random_device{}()) : seed;
@@ -1184,6 +1217,8 @@ bool GameSession::CreateWorldInternal(const std::string& name,
     ClampTerrainParams(params);
 
     ResetWorldSystems();
+    if (m_activeRegionsEnabled && !LoadSpeciesDefinitions(std::move(content)))
+        return false;
     m_metadata = std::move(metadata);
     m_transientWorld = transient;
     m_physicsSystem = std::make_unique<Systems::PhysicsSystem>();
@@ -1254,7 +1289,8 @@ bool GameSession::CreateWorldInternal(const std::string& name,
     InitializeScentField(m_metadata.spawnPoint);
 
     // species definitions load once at world create (content-pure; see the helper).
-    LoadSpeciesDefinitions();
+    if (!m_activeRegionsEnabled)
+        LoadSpeciesDefinitions();
 
     // wire weather-driven rain into the water solver when the
     // owner opted in (sim.hydrology_weather via SetWeatherRainEnabled). Default-OFF =
@@ -1333,7 +1369,12 @@ bool GameSession::LoadWorld(const std::string& worldId) {
     TerrainGenParams params = preset.params;
     ClampTerrainParams(params);
 
+    std::shared_ptr<const SimulationContent> content;
+    if (!PreflightSimulationContent(content))
+        return false;
     ResetWorldSystems();
+    if (m_activeRegionsEnabled && !LoadSpeciesDefinitions(std::move(content)))
+        return false;
     m_metadata = saved.metadata;
     if (m_activeRegionsEnabled) {
         m_worldClock = saved.clock;
@@ -1402,7 +1443,8 @@ bool GameSession::LoadWorld(const std::string& worldId) {
 
     // species definitions load once at world load, exactly as CreateWorld does
     // (content-pure; a loaded world resolves the same table as the created one).
-    LoadSpeciesDefinitions();
+    if (!m_activeRegionsEnabled)
+        LoadSpeciesDefinitions();
 
     // restore the rotating water sim-window cursor so the loaded session
     // resimulates the exact windows the original would from the same water state.
@@ -3271,6 +3313,24 @@ bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
             m_worldOpenError = clock_errors.empty()
                                    ? std::string(ActiveRegionLedger::kCorruptMessage)
                                    : clock_errors.front();
+            m_worldSystem->clear_world(m_physicsSystem.get());
+            return false;
+        }
+        // Historical worlds without an identity adopt current content on load and persist it
+        // on their next save.
+        if (m_simulationContent && !ledger.content_identity()) {
+            if (!ledger.adopt_content_identity(m_simulationContent->identity)) {
+                m_worldOpenError = "Simulation content identity adoption failed.";
+                m_ambientFieldAnchor = previous_ambient_anchor;
+                m_worldSystem->clear_world(m_physicsSystem.get());
+                return false;
+            }
+        }
+        if (!m_simulationContent ||
+            !ledger.validate_content_identity(m_simulationContent->identity, m_worldOpenError)) {
+            if (!m_simulationContent)
+                m_worldOpenError = "Simulation content was not adopted.";
+            m_ambientFieldAnchor = previous_ambient_anchor;
             m_worldSystem->clear_world(m_physicsSystem.get());
             return false;
         }

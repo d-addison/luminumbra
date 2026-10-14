@@ -2,6 +2,7 @@
 // SIMULATION requirements only (world preset readable/parseable); renderer/UI
 // asset requirements are caller-supplied by the client. Headless CreateWorld
 // must succeed in a root containing nothing but the world preset.
+#include "../support/SimulationContentFixture.h"
 #include "../support/UniqueTempPath.h"
 
 #include <gtest/gtest.h>
@@ -61,6 +62,7 @@
 #include "luminumbra_common/world/FarWantedSet.h"
 #include "luminumbra_common/world/GameSession.h"
 #include "luminumbra_common/world/WorldStreamingState.h"
+#include "luminumbra_server/SimBudgetArtifact.h"
 
 namespace fs = std::filesystem;
 
@@ -78,18 +80,19 @@ fs::path SourcePresetPath() {
     return fs::path(LUMINUMBRA_SOURCE_ROOT) / "worlds" / "atlas" / "presets" / "default.json";
 }
 
-// Temp root containing ONLY worlds/atlas/presets/default.json — no res/ or
-// data/ client assets anywhere. The root is unique per fixture instance so
-// concurrent common_tests processes never share (or clobber) a directory; each
-// TEST builds ONE instance and reuses it, so within-run path stability still
-// holds. The destructor removes the tree.
+// Temp root with a world preset and optional minimal simulation species; no client assets. The root
+// is unique per fixture instance so concurrent common_tests processes never share (or clobber) a
+// directory; each TEST builds ONE instance and reuses it, so within-run path stability still holds.
+// The destructor removes the tree.
 class HeadlessRoot {
 public:
-    HeadlessRoot() {
+    explicit HeadlessRoot(bool simulation_content = true) {
         root_ =
             Luminumbra::TestSupport::CreateUniqueTempDirectory("luminumbra_headless_world_test_");
         fs::create_directories(root_ / "worlds" / "atlas" / "presets");
         fs::copy_file(SourcePresetPath(), root_ / "worlds" / "atlas" / "presets" / "default.json");
+        if (simulation_content)
+            Luminumbra::TestSupport::WriteSimulationContentFixture(root_);
     }
     ~HeadlessRoot() {
         std::error_code ec;
@@ -110,7 +113,7 @@ private:
 };
 
 TEST(GameSessionHeadlessWorldTest, ValidateWorldConfigIsSimulationOnlyByDefault) {
-    const HeadlessRoot root;
+    const HeadlessRoot root(false);
     ASSERT_FALSE(fs::exists(root.path() / "res"));
     ASSERT_FALSE(fs::exists(root.path() / "data"));
 
@@ -149,7 +152,8 @@ TEST(GameSessionHeadlessWorldTest, SessionRequiredAssetListFailsCreateWorldWhenM
 }
 
 TEST(GameSessionHeadlessWorldTest, HeadlessCreateWorldSucceedsWithPresetOnly) {
-    const HeadlessRoot root;
+    const HeadlessRoot root(false);
+    ASSERT_FALSE(fs::exists(root.path() / "data"));
     JobSystem jobs;
     jobs.startup();
     {
@@ -2102,6 +2106,7 @@ TEST(GameSessionHeadlessWorldTest, IdleRetentionMatchesWorkAndAllResidentOwnersh
                           pristine_loading,
                           non_due_resident};
     ActiveRegionLedger staged;
+    ASSERT_TRUE(staged.adopt_content_identity(session.GetSimulationContent()->identity));
     staged.set_local_anchor(session.GetMetadata().spawnPoint);
     for (const auto key : keys) {
         staged.pin(key, true, WorldClock{});
@@ -2228,6 +2233,7 @@ TEST(GameSessionHeadlessWorldTest, ConsumedWorkEvictsIdleRegionsThatNeverBecomeD
     const RegionKey pending{40, -40}, duplicate{41, -40}, zero_count{42, -40};
     const std::array keys{pending, duplicate, zero_count};
     ActiveRegionLedger staged;
+    ASSERT_TRUE(staged.adopt_content_identity(session.GetSimulationContent()->identity));
     staged.set_local_anchor(session.GetMetadata().spawnPoint);
     for (const auto key : keys) {
         staged.pin(key, true, WorldClock{});
@@ -4351,6 +4357,7 @@ ActiveRegionLedger FixtureLedger(std::uint64_t tick,
 void CommitRegionalFixture(GameSession& base,
                            ActiveRegionLedger ledger,
                            const FieldPageState& fields) {
+    ASSERT_TRUE(ledger.adopt_content_identity(base.GetSimulationContent()->identity));
     const auto save = base.GetWorldSaveDir();
     const WorldClock clock(ledger.tick());
     auto metadata = nlohmann::json::parse(ReadClockTestFile(save / "world_info.json"));
@@ -4769,6 +4776,7 @@ void S7CommitFixture(GameSession& base,
                      const FieldPageState& fields,
                      const Luminumbra::Ecs::EntityRegistrySnapshot& plants,
                      WorldCalendar calendar = {}) {
+    ASSERT_TRUE(ledger.adopt_content_identity(base.GetSimulationContent()->identity));
     const auto save = base.GetWorldSaveDir();
     auto metadata = nlohmann::json::parse(ReadClockTestFile(save / "world_info.json"));
     const WorldClock clock(ledger.tick(), calendar);
@@ -5982,4 +5990,257 @@ TEST(GameSessionHeadlessWorldTest, S7WaterTickDoesNotLoadDurableOnlySourceTarget
     EXPECT_EQ(session.GetWorldSystem()->find_streamed_chunk(coords), nullptr);
     EXPECT_EQ(session.GetWaterSystem()->regional_work().used_windows, 0u);
     EXPECT_EQ(session.GetWaterSystem()->debug_source_injected_mm(), 0);
+}
+
+namespace {
+void WriteSessionPolicy(const HeadlessRoot& root, std::uint32_t need_rate) {
+    const auto path = root.path() / "data/common/sim/distant_policy.json";
+    fs::create_directories(path.parent_path());
+    nlohmann::json policy{{"schema", "luminumbra.distant_policy.v1"},
+                          {"creature_species",
+                           {{"fixture_creature",
+                             {{"coarse_need_rate_ppm", need_rate},
+                              {"coarse_travel_m_per_cadence", 0},
+                              {"promote_distance_m", 512},
+                              {"lifespan_cadences", 0},
+                              {"reproduce_cadences", 0}}}}},
+                          {"plant_species", nlohmann::json::object()}};
+    std::ofstream(path, std::ios::binary) << policy.dump() << '\n';
+}
+} // namespace
+
+TEST(GameSessionHeadlessWorldTest, EnabledContentPreflightRefusesBeforePublishingOrSavingWorld) {
+    const HeadlessRoot root(false);
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    EnableSnapshotSession(session, root, jobs);
+    EXPECT_FALSE(session.CreateWorld("Missing content", "1337", "default"));
+    EXPECT_NE(session.GetWorldOpenError().find("content admission failed"), std::string::npos);
+    EXPECT_EQ(session.GetWorldSystem(), nullptr);
+    EXPECT_EQ(session.GetSimulationContent(), nullptr);
+    EXPECT_FALSE(session.SaveWorld());
+    EXPECT_FALSE(fs::exists(root.path() / "worlds/saves"));
+    Luminumbra::TestSupport::WriteSimulationContentFixture(root.path());
+    WriteSessionPolicy(root, 1);
+    std::ofstream(root.path() / "data/common/sim/distant_policy.json", std::ios::binary) << "{}\n";
+    EXPECT_FALSE(session.CreateWorld("Malformed policy", "1337", "default"));
+    EXPECT_EQ(session.GetWorldSystem(), nullptr);
+    EXPECT_EQ(session.GetSimulationContent(), nullptr);
+    EXPECT_FALSE(session.SaveWorld());
+    EXPECT_FALSE(fs::exists(root.path() / "worlds/saves"));
+}
+
+TEST(GameSessionHeadlessWorldTest, AdoptedContentIsImmutableAndPolicyMismatchRefusesBothLoadPaths) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession original;
+    EnableSnapshotSession(original, root, jobs);
+    ASSERT_TRUE(original.CreateWorld("Policy identity", "1337", "default"));
+    ASSERT_TRUE(original.SaveWorldState());
+    ASSERT_NE(original.GetSimulationContent(), nullptr);
+    const auto identity = original.GetSimulationContent()->identity;
+    const auto original_hash = SessionWorldHash(original);
+    WriteSessionPolicy(root, 1000);
+    EXPECT_EQ(original.GetSimulationContent()->identity, identity);
+    EXPECT_EQ(SessionWorldHash(original), original_hash);
+    EXPECT_THROW(original.SetActiveRegionsEnabled(false), std::logic_error);
+    GameSession fresh;
+    EnableSnapshotSession(fresh, root, jobs);
+    ASSERT_TRUE(fresh.CreateTransientWorld("Changed content", "1337", "default"));
+    EXPECT_NE(fresh.GetSimulationContent()->identity, identity);
+    EXPECT_NE(fresh.FoldClockIntoEcologyHash("empty"), original.FoldClockIntoEcologyHash("empty"));
+    const auto before =
+        ReadClockTestFile(P::WorldSaveService::active_regions_path(original.GetWorldSaveDir()));
+    EXPECT_FALSE(fresh.LoadWorldStateFrom(original.GetWorldSaveDir()));
+    EXPECT_EQ(fresh.GetWorldOpenError(),
+              Luminumbra::world::ActiveRegionLedger::kContentMismatchMessage);
+    EXPECT_FALSE(fresh.SaveWorldStateTo(original.GetWorldSaveDir()));
+    GameSession reopened;
+    EnableSnapshotSession(reopened, root, jobs);
+    EXPECT_FALSE(reopened.LoadWorld(original.GetMetadata().worldId));
+    EXPECT_EQ(reopened.GetWorldOpenError(),
+              Luminumbra::world::ActiveRegionLedger::kContentMismatchMessage);
+    EXPECT_FALSE(reopened.SaveWorld());
+    EXPECT_EQ(
+        ReadClockTestFile(P::WorldSaveService::active_regions_path(original.GetWorldSaveDir())),
+        before);
+}
+
+TEST(GameSessionHeadlessWorldTest, SpeciesSimulationMismatchRefusesAndPresentationChangesReload) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession original;
+    EnableSnapshotSession(original, root, jobs);
+    ASSERT_TRUE(original.CreateWorld("Species identity", "1337", "default"));
+    ASSERT_TRUE(original.SaveWorldState());
+    const auto path = root.path() / "data/common/creatures/species/fixture_creature.json";
+    std::ofstream(path, std::ios::binary)
+        << "{\"id\":\"fixture_creature\",\"display_name\":\"Other name\",\"base_color\":[1,0,0]}\n";
+    GameSession presentation;
+    EnableSnapshotSession(presentation, root, jobs);
+    ASSERT_TRUE(presentation.LoadWorld(original.GetMetadata().worldId))
+        << presentation.GetWorldOpenError();
+    EXPECT_EQ(presentation.GetSimulationContent()->identity,
+              original.GetSimulationContent()->identity);
+    std::ofstream(path, std::ios::binary)
+        << "{\"id\":\"fixture_creature\",\"brain\":{\"wander_weight\":0.8}}\n";
+    GameSession changed;
+    EnableSnapshotSession(changed, root, jobs);
+    EXPECT_FALSE(changed.LoadWorld(original.GetMetadata().worldId));
+    EXPECT_EQ(changed.GetWorldOpenError(),
+              Luminumbra::world::ActiveRegionLedger::kContentMismatchMessage);
+    EXPECT_FALSE(changed.SaveWorld());
+}
+
+TEST(GameSessionHeadlessWorldTest, IndexedEnabledHistoricalLedgerAdoptsIdentityOnNextSave) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession original;
+    EnableSnapshotSession(original, root, jobs);
+    ASSERT_TRUE(original.CreateWorld("Historical content", "1337", "default"));
+    Luminumbra::world::ActiveRegionLedger historical;
+    historical.pin({20, -20}, true, original.GetWorldClock());
+    // Loading stamps the spawn anchor into anchorless ledgers; canonical bytes include it.
+    historical.set_local_anchor(original.GetMetadata().spawnPoint);
+    ASSERT_FALSE(historical.records().empty());
+    ASSERT_FALSE(historical.content_identity());
+    const auto save = original.GetWorldSaveDir();
+    ASSERT_TRUE(
+        P::WorldSaveService::save_active_regions(historical, original.GetWorldClock(), save));
+    const auto before = ReadClockTestFile(P::WorldSaveService::active_regions_path(save));
+    ASSERT_TRUE(P::snapshot_index_exists(save));
+    ASSERT_TRUE(P::WorldSaveService::validate_save(save));
+    Luminumbra::world::ActiveRegionLedger unidentified;
+    ASSERT_TRUE(P::WorldSaveService::load_active_regions(unidentified, save));
+    ASSERT_FALSE(unidentified.records().empty());
+    ASSERT_FALSE(unidentified.content_identity());
+    GameSession reopened;
+    EnableSnapshotSession(reopened, root, jobs);
+    ASSERT_TRUE(reopened.LoadWorld(original.GetMetadata().worldId)) << reopened.GetWorldOpenError();
+    ASSERT_NE(reopened.GetSimulationContent(), nullptr);
+    const auto identity = reopened.GetSimulationContent()->identity;
+    auto expected = historical;
+    ASSERT_TRUE(expected.adopt_content_identity(identity));
+    EXPECT_EQ(reopened.GetActiveRegionLedger().canonical_bytes(), expected.canonical_bytes());
+    EXPECT_EQ(ReadClockTestFile(P::WorldSaveService::active_regions_path(save)), before);
+    ASSERT_TRUE(reopened.SaveWorldState());
+    Luminumbra::world::ActiveRegionLedger persisted;
+    ASSERT_TRUE(P::WorldSaveService::load_active_regions(persisted, save));
+    ASSERT_TRUE(persisted.content_identity());
+    EXPECT_EQ(*persisted.content_identity(), identity);
+    EXPECT_NE(ReadClockTestFile(P::WorldSaveService::active_regions_path(save)), before);
+    GameSession matched;
+    EnableSnapshotSession(matched, root, jobs);
+    ASSERT_TRUE(matched.LoadWorld(original.GetMetadata().worldId)) << matched.GetWorldOpenError();
+    EXPECT_EQ(matched.GetSimulationContent()->identity, identity);
+    EXPECT_EQ(matched.GetActiveRegionLedger().canonical_bytes(), persisted.canonical_bytes());
+    auto tampered = historical;
+    auto changed_identity = identity;
+    ++changed_identity.effective_policy_digest;
+    ASSERT_TRUE(tampered.adopt_content_identity(changed_identity));
+    ASSERT_TRUE(P::WorldSaveService::save_active_regions(tampered, matched.GetWorldClock(), save));
+    ASSERT_TRUE(P::WorldSaveService::validate_save(save));
+    GameSession refused;
+    EnableSnapshotSession(refused, root, jobs);
+    EXPECT_FALSE(refused.LoadWorld(original.GetMetadata().worldId));
+    EXPECT_EQ(refused.GetWorldOpenError(),
+              Luminumbra::world::ActiveRegionLedger::kContentMismatchMessage);
+    EXPECT_FALSE(refused.SaveWorld());
+}
+
+TEST(GameSessionHeadlessWorldTest, FlagOffPolicyHasNoEffectOnSaveHashOrArtifactBytes) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    session.SetRootPath(root.root_string());
+    session.SetJobSystem(&jobs);
+    ASSERT_TRUE(session.CreateTransientWorld("Policy off", "1337", "default"));
+    const auto before_hash = SessionWorldHash(session);
+    const auto first = root.path() / "policy-off-first";
+    const auto second = root.path() / "policy-off-second";
+    ASSERT_TRUE(session.SaveWorldStateTo(first));
+    nlohmann::json artifact{{"schema", "luminumbra.server_tick.v1"}, {"world_hash", before_hash}};
+    Luminumbra::Server::AppendSimBudgetArtifact(
+        artifact, session.GetSimBudgetTelemetry(), session.GetSimBudgetTelemetry());
+    const auto before_artifact = artifact.dump(2) + "\n";
+    WriteSessionPolicy(root, 9999);
+    std::ofstream(root.path() / "data/common/sim/distant_policy.json", std::ios::binary)
+        << "malformed";
+    ASSERT_TRUE(session.SaveWorldStateTo(second));
+    ExpectSameSaveTree(first, second);
+    EXPECT_EQ(SessionWorldHash(session), before_hash);
+    EXPECT_EQ(session.GetSimulationContent(), nullptr);
+    EXPECT_FALSE(session.GetActiveRegionLedger().content_identity());
+    EXPECT_FALSE(fs::exists(second / "chunks/region/active-regions.arl"));
+    Luminumbra::Server::AppendSimBudgetArtifact(
+        artifact, session.GetSimBudgetTelemetry(), session.GetSimBudgetTelemetry());
+    EXPECT_EQ(artifact.dump(2) + "\n", before_artifact);
+    GameSession legacy;
+    legacy.SetRootPath(root.root_string());
+    legacy.SetJobSystem(&jobs);
+    ASSERT_TRUE(legacy.CreateTransientWorld("Legacy malformed policy", "1337", "default"));
+    EXPECT_EQ(SessionWorldHash(legacy), before_hash);
+}
+
+TEST(GameSessionHeadlessWorldTest, FlagOffLoadThenSavePreservesExistingWorldBytes) {
+    const HeadlessRoot root(false);
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession original;
+    original.SetRootPath(root.root_string());
+    original.SetJobSystem(&jobs);
+    ASSERT_TRUE(original.CreateWorld("Flag off round trip", "1337", "default"));
+    ASSERT_NO_FATAL_FAILURE(AdoptRegionGoldenChunk(original, 0));
+    ASSERT_TRUE(original.SaveWorldState());
+    ASSERT_TRUE(original.SaveWorld());
+    const auto save = original.GetWorldSaveDir();
+    const auto before = root.path() / "flag-off-before-load";
+    fs::copy(save, before, fs::copy_options::recursive);
+    ASSERT_FALSE(P::snapshot_index_exists(save));
+    ASSERT_FALSE(fs::exists(P::WorldSaveService::active_regions_path(save)));
+    GameSession loaded;
+    loaded.SetRootPath(root.root_string());
+    loaded.SetJobSystem(&jobs);
+    ASSERT_TRUE(loaded.LoadWorld(original.GetMetadata().worldId)) << loaded.GetWorldOpenError();
+    EXPECT_GT(loaded.GetLastLoadedChunkCount(), 0u);
+    EXPECT_EQ(loaded.GetSimulationContent(), nullptr);
+    EXPECT_FALSE(loaded.GetActiveRegionLedger().content_identity());
+    // Loaded chunks are clean; force a rewrite so the comparison exercises serialization.
+    const auto chunk = loaded.GetWorldSystem()->find_streamed_chunk(Luminumbra::IVec3(0, 0, 0));
+    ASSERT_NE(chunk, nullptr);
+    chunk->mark_dirty_for_save();
+    Luminumbra::world::WorldStateSaveReport report;
+    ASSERT_TRUE(loaded.SaveWorldState(&report));
+    EXPECT_TRUE(report.saved);
+    EXPECT_GT(report.chunks_dirty, 0u);
+    ASSERT_TRUE(loaded.SaveWorld());
+    ExpectSameSaveTree(save, before);
+}
+
+TEST(GameSessionHeadlessWorldTest, RegisteredPopulationIdentityRefusesChangedConfigurationOnLoad) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession original;
+    EnableSnapshotSession(original, root, jobs);
+    original.SetSimulationPopulationIdentity("fixture-populator:v1", "configuration:v1");
+    ASSERT_TRUE(original.CreateWorld("Population identity", "1337", "default"));
+    EXPECT_THROW(original.SetSimulationPopulationIdentity("changed:v1"), std::logic_error);
+    GameSession compatible;
+    EnableSnapshotSession(compatible, root, jobs);
+    compatible.SetSimulationPopulationIdentity("fixture-populator:v1", "configuration:v1");
+    ASSERT_TRUE(compatible.LoadWorld(original.GetMetadata().worldId))
+        << compatible.GetWorldOpenError();
+    GameSession changed;
+    EnableSnapshotSession(changed, root, jobs);
+    changed.SetSimulationPopulationIdentity("fixture-populator:v1", "configuration:v2");
+    EXPECT_FALSE(changed.LoadWorld(original.GetMetadata().worldId));
+    EXPECT_EQ(changed.GetWorldOpenError(),
+              Luminumbra::world::ActiveRegionLedger::kContentMismatchMessage);
+    EXPECT_FALSE(changed.SaveWorld());
 }

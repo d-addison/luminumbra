@@ -1,3 +1,4 @@
+#include "../support/SimulationContentFixture.h"
 #include <gtest/gtest.h>
 
 #include "luminumbra_common/core/JobSystem.h"
@@ -97,6 +98,7 @@ protected:
     JobSystem jobs;
     void SetUp() override {
         root = UniqueRoot();
+        Luminumbra::TestSupport::WriteSimulationContentFixture(root);
         fs::create_directories(root / "worlds/atlas/presets");
         fs::copy_file(fs::path(LUMINUMBRA_SOURCE_ROOT) / "worlds/atlas/presets/default.json",
                       root / "worlds/atlas/presets/default.json");

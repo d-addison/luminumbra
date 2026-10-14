@@ -1,3 +1,4 @@
+#include "../support/SimulationContentFixture.h"
 #include <gtest/gtest.h>
 
 #include "luminumbra_client/app/SessionExit.h"
@@ -50,6 +51,7 @@ void ArmHostFault(GameSession& session) {
     ASSERT_EQ(session.GetSimulationTickCount(), 0u);
     ASSERT_TRUE(session.SaveWorldState());
     Luminumbra::world::ActiveRegionLedger ledger({1, 1, 1});
+    ASSERT_TRUE(ledger.adopt_content_identity(session.GetSimulationContent()->identity));
     ledger.set_local_anchor(session.GetMetadata().spawnPoint);
     ASSERT_TRUE(WorldSaveService::save_active_regions(
         ledger, session.GetWorldClock(), session.GetWorldSaveDir()));
@@ -184,6 +186,7 @@ protected:
         root = fs::temp_directory_path() /
                ("luminumbra_host_fault_" +
                 std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+        Luminumbra::TestSupport::WriteSimulationContentFixture(root);
         fs::create_directories(root / "worlds/atlas/presets");
         fs::copy_file(fs::path(LUMINUMBRA_SOURCE_ROOT) / "worlds/atlas/presets/default.json",
                       root / "worlds/atlas/presets/default.json");

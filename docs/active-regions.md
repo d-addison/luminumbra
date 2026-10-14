@@ -205,14 +205,14 @@ Version 1 has no extensions. Version 2 uses the same header and records, then
 a LE u32 `ext_len` followed by exactly that many extension bytes. Each extension
 is a TLV: LE u16 type, LE u32 value length, then the value bytes. Types must be
 strictly ascending, with no duplicates; unknown types, truncated values and
-`ext_len == 0` are corrupt. The currently supported extension is type 2,
+`ext_len == 0` are corrupt. Type 2 is
 `digest_projection`, with a one-byte value of 2. A value greater than 2 refuses
 with `Unsupported frozen digest projection.`; a lower value is corrupt.
 The encoder emits version 2 with this declaration whenever a record is frozen
 or retains a nonzero freeze stamp or frozen digest, including after waking,
 provided no legacy historical digest remains. A version 1 reload conservatively
 treats all historical digests as legacy, including any refreshed before saving.
-Otherwise the extension set is empty and the encoder emits version 1.
+When all extensions are absent, the encoder emits version 1.
 The declaration belongs only to the persistence envelope and adds no canonical
 hash term.
 
@@ -220,7 +220,7 @@ The footer is one LE u64 FNV-1a-64 checksum over every preceding byte, including
 the extension length and TLVs (offset basis 14695981039346656037, multiplier
 1099511628211). Total length must be exactly 56 + count * 104 + 8 for version 1,
 or 56 + count * 104 + 4 + ext_len + 8 for version 2. Files are capped at
-109,051,979 bytes before allocation. No trailing bytes, padding, native structs,
+159,383,717 bytes before allocation. No trailing bytes, padding, native structs,
 section omission or alternate encodings are accepted. Stamps cannot exceed the
 validation ceiling, counters cannot exceed the hold or both be nonzero, phases
 must match the region key, and a frozen region's last
@@ -384,3 +384,103 @@ and format-patch artifacts, not engine inputs. Absence supplies no commit;
 corruption or an unsupported bundle version is refused by Git's bundle verifier,
 and a patch with invalid context is refused by Git's patch application. Neither
 artifact grants permission to alter another checkout.
+
+## Distant policy adoption and simulation content identity
+
+With `sim.active_regions` enabled, create and load capture and validate both required species
+inventories before constructing world systems. Each inventory must contain 1–256 JSON definitions;
+each document is capped at 1 MiB and the captured inventories together at 16 MiB. Names are nonempty
+UTF-8 strings of at most 256 bytes without NUL. Duplicate names or folded 16-bit IDs refuse within
+each species domain, including the zero-to-one ID remap. Creature IDs use `CreatureSpeciesId16`
+with its existing offset basis, folding and constants; plant IDs use `SpeciesId16`. Policy names
+must resolve in the matching inventory. Species filenames and paths do not identify definitions.
+Captured definitions and both registries are ordered by declared name using unsigned UTF-8 bytes,
+so enumeration and biome selection remain stable across filename changes.
+
+`data/common/sim/distant_policy.json` is optional. Clean absence, including an absent optional
+parent directory, selects the compiled table. Status, permission, open, read and change-during-read
+errors refuse; directories, symlinks and reparse points cannot substitute for content files or
+parents. Present policy documents require UTF-8 without BOM, LF line endings and a final LF.
+Species documents accept ordinary JSON whitespace. Both use duplicate-key detection before
+adoption, a nesting cap of 32, strings of at most 256 bytes, at most 256 entries in any collection,
+and at most 65,536 parser callback events. Unknown keys, wrong types, narrowing and non-finite
+simulation numbers refuse. Adoption is transactional and the session exposes only const content
+and registries. Later file edits cannot change an open world's policy.
+
+The policy root has exactly `schema`, `creature_species` and `plant_species`;
+`schema` is `luminumbra.distant_policy.v1`. Every authored creature entry has exactly
+`coarse_need_rate_ppm` (u32), `coarse_travel_m_per_cadence` (u32), `promote_distance_m` (u16),
+`lifespan_cadences` (u32) and `reproduce_cadences` (u32). Every authored plant entry has exactly
+`max_cadence_shift` (integer 1–8) and `resume_cap_ticks` (integer 0–36,000). Boolean, floating,
+exponent, negative and negative-zero tokens cannot stand in for these unsigned integers.
+
+Compiled defaults table version 1 resolves missing creature entries to need rate 0, travel 0,
+promotion distance 512 m, lifespan limit 0 and reproduction limit 0. Zero need/travel rates do
+nothing; zero lifecycle limits disable their mechanisms; explicit zero promotion disables
+promotion. Plant defaults are maximum shift 8 and resume cap 36,000 ticks; explicit zero resume
+cap discards catch-up. A coarse cadence means one accepted owner due step, rather than a separate
+fixed tick interval. Algorithm version 1 seals this interpretation. Consumer enforcement of these
+policies belongs to the corresponding simulation systems.
+
+TLV 5 is always present in newly created enabled worlds, even with no regions or creatures.
+Its value is exactly 40 bytes, without padding:
+
+| Offset | Bytes | Value |
+|---|---|---|
+| 0 | 2 | LE u16 identity encoding version, 1 |
+| 2 | 2 | LE u16 compiled defaults version, 1 |
+| 4 | 2 | LE u16 simulation algorithm version, 1 |
+| 6 | 2 | LE u16 reserved, zero |
+| 8 | 8 | LE u64 resolved policy digest |
+| 16 | 8 | LE u64 creature definitions digest |
+| 24 | 8 | LE u64 plant definitions digest |
+| 32 | 8 | LE u64 populator identity/configuration digest |
+
+Each digest uses FNV-1a-64 over the canonical bytes below, with offset basis
+14695981039346656037 and multiplier 1099511628211, wrapping modulo 2^64. Integer fields are
+little endian; strings/byte sections are framed with a LE u32 byte length. Inventories are ordered
+by unsigned UTF-8 name bytes. No filesystem order or path is hashed.
+
+The resolved policy projection begins with the unframed ASCII tag `ds-effective-policy:v1`,
+then u16 defaults version, u16 algorithm version, the five compiled creature fields in the order
+listed above (4, 4, 2, 4, 4 bytes), and the two compiled plant fields (1, 4 bytes). Next comes u32
+creature count and each resolved entry as framed name, u16 species ID and the five fields, followed
+by u32 plant count and each resolved entry as framed name, u16 species ID and the two fields.
+The compiled table is included even when all species have authored overrides. Missing, empty and
+explicit-default policy documents therefore produce the same identity. Override-only canonical
+JSON remains a separate parser round-trip representation.
+
+Creature and plant definition projections begin with `ds-creature-definitions:v1` and
+`ds-plant-definitions:v1` respectively, then u32 count and each definition's framed name,
+u16 species ID and framed resolved simulation payload. Creature payloads contain u8 predator,
+u8 nocturnal, u32 biome-name count with framed names in sorted order, then IEEE-754 u32 float bits
+for brain weights in order wander, rest, sleep, hunt, flee, graze, flee logistic m, flee logistic c,
+drink; then each core and sensory genome range as low/high float bits. Range order is move speed,
+vigilance, hunger threshold, size scale, vision cosine half-FOV, vision range and hearing range.
+Plant payloads contain u8 perennial, u32 lifespan ticks, then low/high float bits for each gene
+in `PlantGene` enum order. Omitted fields are resolved through the registry's compiled defaults.
+Display names, colours, discovery rarity, render archetypes, JSON key order and whitespace are
+excluded. All definitions contribute, including species not mentioned by authored policy.
+
+The population projection begins with `ds-population:v1`, then framed populator contract and
+framed canonical configuration bytes. The current unregistered contract is `none:v1` with empty
+configuration. `GameSession::SetSimulationPopulationIdentity` supplies these inputs before
+create/load; admission requires a nonempty UTF-8 contract of at most 256 bytes and caps canonical
+configuration at 1 MiB. This identity seam does not implement a population callback or adopt game
+population files. Registered population content must be supplied before world adoption and
+versioned when its behavior changes.
+
+The ledger canonical projection appends `|content_identity:` and the exact identity record before
+`|completed_work:`. This feeds the existing enabled ecology/world hash at boot, including an empty
+creature world, without changing network or replay layouts. TLV 5 precedes existing TLV 6 in the
+persistence envelope; completed-work encoding and next-decision behavior are unchanged. Identity
+adoption is immutable; repeated identical adoption is allowed, changing it refuses.
+
+Opening an enabled world without TLV 5 adopts the current resolved content, including historical
+enabled or indexed state. Adoption must succeed; the next save writes TLV 5. A present identity
+must match newly captured content exactly or open refuses with `Simulation content identity mismatch.`
+Unsupported identity/default/algorithm versions, nonzero reserved fields, wrong lengths and duplicate
+or misordered TLVs are corrupt. Load compares identity before adopting loaded ledger/consumer state;
+a refusal prevents saving. A legacy flag-off world may opt in and adopt current content for the
+first time. With the flag disabled, strict policy/species adoption is bypassed,
+identity is absent, and the existing lenient species, save, hash and artifact paths remain unchanged.
