@@ -13,6 +13,7 @@
 #include "luminumbra_common/components/InstinctComponents.h"
 #include "luminumbra_common/core/Environment.h"
 #include "luminumbra_common/core/JobSystem.h"
+#include "luminumbra_common/core/SystemConfig.h"
 #include "luminumbra_common/ecs/EntitySnapshot.h"
 #include "luminumbra_common/persistence/WorldPersistenceRoundtrip.h"
 #include "luminumbra_common/persistence/WorldSaveService.h"
@@ -43,6 +44,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
+#include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <limits>
@@ -247,6 +249,12 @@ bool NetworkedSessionDriver::Begin(Luminumbra::world::GameSession* client_sessio
     m_impl->host_session = std::make_unique<Luminumbra::world::GameSession>();
     m_impl->host_session->SetJobSystem(&m_impl->host_job_system);
     m_impl->host_session->SetRootPath(config.root_path);
+    auto systems_path = std::filesystem::path(config.root_path) / "data/common/systems.json";
+    std::error_code systems_error;
+    if (!std::filesystem::exists(systems_path, systems_error))
+        systems_path = std::filesystem::path("data/common/systems.json");
+    m_impl->host_session->ApplySystemConfig(
+        luminumbra::core::SystemConfig::LoadFromFile(systems_path.string()));
     if (!m_impl->host_session->CreateWorld(
             "Networked Host", std::to_string(config.seed), config.preset)) {
         m_failure_reason = "host_create_world_failed";
@@ -290,10 +298,13 @@ bool NetworkedSessionDriver::Begin(Luminumbra::world::GameSession* client_sessio
     host_cfg.tick_rate_hz = 30;
     host_cfg.local_client_id = 0;
     host_cfg.peer_client_id = 1;
+    // This driver steps one authoritative host; its client renders that host's state.
+    host_cfg.system_config_identity = m_impl->host_session->SystemConfigIdentity();
     host_cfg.hash_cadence_ticks = config.hash_cadence_ticks;
     Luminumbra::Net::LockstepConfig client_cfg = host_cfg;
     client_cfg.local_client_id = 1;
     client_cfg.peer_client_id = 0;
+    client_cfg.system_config_identity = client_session->SystemConfigIdentity();
 
     Luminumbra::Net::LockstepHooks host_hooks = hooks_template;
     host_hooks.user = &m_impl->host_ctx;
@@ -313,12 +324,14 @@ bool NetworkedSessionDriver::Begin(Luminumbra::world::GameSession* client_sessio
         ch.preset = config.preset;
         ch.tick_rate_hz = 30;
         ch.client_id = 1;
+        ch.system_config_identity = client_cfg.system_config_identity;
         m_impl->client_transport->SendFrame(Luminumbra::Net::EncodeHello(ch));
         Luminumbra::Net::HelloMsg hh;
         hh.seed = config.seed;
         hh.preset = config.preset;
         hh.tick_rate_hz = 30;
         hh.client_id = 0;
+        hh.system_config_identity = host_cfg.system_config_identity;
         m_impl->host_transport->SendFrame(Luminumbra::Net::EncodeHello(hh));
     }
     if (!m_impl->host->Handshake() || !m_impl->client->Handshake()) {

@@ -72,6 +72,7 @@ int RunRecord(const ServerCliOptions& options) {
     header.collision_radius = static_cast<std::uint32_t>(options.collision_radius);
     header.engine_version = std::string(luminumbra::core::GetEngineVersionString());
     header.start_world_hash = runner.ComputeWorldHash();
+    header.system_config_identity = runner.Session()->SystemConfigIdentity();
 
     Luminumbra::Replay::RegionScheduleTrace schedule_trace;
     Luminumbra::Replay::ReplayWriter writer;
@@ -190,6 +191,12 @@ int RunReplay(const ServerCliOptions& options) {
     Luminumbra::Server::ServerWorldRunner runner(std::move(config));
     if (!runner.Boot()) {
         LUMINUMBRA_CORE_ERROR("replay: session failed to boot from header");
+        return 1;
+    }
+
+    if (!Luminumbra::Replay::ConfigurationMatches(header,
+                                                  runner.Session()->SystemConfigIdentity())) {
+        LUMINUMBRA_CORE_ERROR("replay: incompatible simulation configuration identity");
         return 1;
     }
 

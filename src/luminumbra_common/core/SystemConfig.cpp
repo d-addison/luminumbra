@@ -1,5 +1,7 @@
 #include "core/SystemConfig.h"
 
+#include <bit>
+#include <cstddef>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -226,6 +228,72 @@ std::string SystemConfig::ComputeConfigSubHash() const {
     if (!any)
         return {}; // all sim defaults -> byte-identical baseline
     return Luminumbra::Persistence::StableChecksum(bytes.str());
+}
+
+SimulationIdentityValues::SimulationIdentityValues() {
+    enabled.fill(true);
+    for (const auto& pm : kParams) {
+        scalars[static_cast<std::size_t>(pm.id)] = pm.default_scalar;
+        vectors[static_cast<std::size_t>(pm.id)] = pm.default_vec3;
+    }
+}
+
+std::string SimulationIdentityValues::ComputeIdentity() const {
+    static_assert(sizeof(float) == sizeof(std::uint32_t) && std::numeric_limits<float>::is_iec559);
+    static_assert(sizeof(double) == sizeof(std::uint64_t) &&
+                  std::numeric_limits<double>::is_iec559);
+    std::uint64_t hash = 14695981039346656037ull;
+    const auto byte = [&hash](std::uint8_t value) {
+        hash ^= static_cast<std::uint64_t>(value);
+        hash *= 1099511628211ull;
+    };
+    for (const char ch : std::string("system-config:v2:"))
+        byte(static_cast<std::uint8_t>(static_cast<unsigned char>(ch)));
+    const auto integer = [&byte](std::uint64_t bits, unsigned width) {
+        for (unsigned shift = 0; shift < width; shift += 8)
+            byte(static_cast<std::uint8_t>((bits >> shift) & 0xffu));
+    };
+    const auto scalar = [&integer](float value) {
+        integer(std::bit_cast<std::uint32_t>(value), 32);
+    };
+    for (const auto& key : kKeys) {
+        if (key.section != Section::Sim && key.key != SysKey::RenderCircadian)
+            continue;
+        byte(static_cast<std::uint8_t>(key.key));
+        byte(static_cast<std::uint8_t>(enabled[static_cast<std::size_t>(key.key)]));
+        for (const auto& pm : kParams) {
+            if (pm.owner != key.key)
+                continue;
+            byte(static_cast<std::uint8_t>(pm.id));
+            const bool binary64 = pm.owner == SysKey::SimForaging;
+            const bool ticks = pm.id == SysParam::ReproMaturityTicks ||
+                               pm.id == SysParam::ReproCooldownTicks ||
+                               pm.id == SysParam::ReproCourtshipTicks;
+            // Type tags: binary32=0, vec3=1, binary64=2, u32=3.
+            byte(static_cast<std::uint8_t>(pm.is_vec3 ? 1 : binary64 ? 2 : ticks ? 3 : 0));
+            const auto index = static_cast<std::size_t>(pm.id);
+            if (pm.is_vec3) {
+                const auto value = vectors[index];
+                scalar(value.x);
+                scalar(value.y);
+                scalar(value.z);
+            } else if (binary64) {
+                integer(std::bit_cast<std::uint64_t>(scalars[index]), 64);
+            } else if (ticks) {
+                integer(static_cast<std::uint32_t>(scalars[index]), 32);
+            } else {
+                scalar(static_cast<float>(scalars[index]));
+            }
+        }
+    }
+    // Hex digits are emitted explicitly so even the result is independent of locale.
+    constexpr char digits[] = "0123456789abcdef";
+    std::string result(16, '0');
+    for (std::size_t i = 0; i < result.size(); ++i) {
+        result[result.size() - 1 - i] = digits[static_cast<std::size_t>(hash & 0xfull)];
+        hash >>= 4;
+    }
+    return result;
 }
 
 int SystemConfig::keybind(const std::string& action, int fallback) const {

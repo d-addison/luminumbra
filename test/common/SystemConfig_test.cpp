@@ -2,6 +2,7 @@
 // Acceptance Criteria ..005.
 // These reference luminumbra::core::SystemConfig, which does not exist yet:
 // the test keeps the generated schema and runtime registry aligned.
+#include "../support/SystemConfigVariants.h"
 #include <gtest/gtest.h>
 #include <nlohmann/json.hpp>
 
@@ -23,6 +24,56 @@ using luminumbra::core::SysParam;
 using luminumbra::core::SystemConfig;
 
 namespace {
+
+std::string ConfigIdentity(const SystemConfig& config) {
+    Luminumbra::world::GameSession session;
+    session.ApplySystemConfig(config);
+    return session.SystemConfigIdentity();
+}
+
+TEST(SystemConfig, SimulationIdentityPinsShippingDefaults) {
+    // Exact little-endian scalar serialization, independently computed with stdlib Python.
+    // See docs/development/system-config-identity.md for the complete computation.
+    EXPECT_EQ(ConfigIdentity(SystemConfig::Defaults()), "da24cea9dbc5159b");
+    const auto path = std::filesystem::path(__FILE__).parent_path().parent_path().parent_path() /
+                      "data/common/systems.json";
+    ASSERT_TRUE(std::filesystem::exists(path));
+    EXPECT_EQ(ConfigIdentity(SystemConfig::LoadFromFile(path.string())), "da24cea9dbc5159b");
+}
+
+TEST(SystemConfig, SimulationIdentityCoversEveryAppliedInput) {
+    const auto baseline = ConfigIdentity(SystemConfig::Defaults());
+    for (const auto& [name, identity] : Luminumbra::TestSupport::EffectiveIdentityMismatches()) {
+        SCOPED_TRACE(name);
+        EXPECT_NE(identity, baseline);
+    }
+}
+
+TEST(SystemConfig, SimulationIdentityUsesResolvedValuesAndIgnoresPresentation) {
+    const auto baseline = ConfigIdentity(SystemConfig::Defaults());
+    const auto explicit_defaults = SystemConfig::FromJsonString(R"({
+        "user":{"video":{"fov":90}},
+        "render":{"moonlight":{"enabled":false,"params":{"strength":0.75}}},
+        "sim":{"ecology":{"params":{"herd_weight":0.8,"energy_drain_per_second":0.006}},
+               "plant_growth":{"params":{"mutation_rate":0.05}}}})");
+    EXPECT_EQ(ConfigIdentity(explicit_defaults), baseline);
+    const auto first = SystemConfig::FromJsonString(R"({"sim":{
+        "ecology":{"params":{"herd_weight":0.9,"catch_radius":2.5}},
+        "plant_growth":{"params":{"mutation_rate":0.2}}}})");
+    const auto reordered = SystemConfig::FromJsonString(R"({"sim":{
+        "plant_growth":{"params":{"mutation_rate":0.2}},
+        "ecology":{"params":{"catch_radius":2.5,"herd_weight":0.9}}}})");
+    EXPECT_EQ(ConfigIdentity(first), ConfigIdentity(reordered));
+    const auto disabled = SystemConfig::FromJsonString(R"({"sim":{"ecology":{"enabled":false}}})");
+    const auto ignored = SystemConfig::FromJsonString(
+        R"({"sim":{"ecology":{"enabled":false,"params":{"herd_weight":0.9}}}})");
+    EXPECT_EQ(ConfigIdentity(disabled), ConfigIdentity(ignored));
+    const auto positive_zero = SystemConfig::FromJsonString(
+        R"({"sim":{"plant_growth":{"params":{"mutation_rate":0.0}}}})");
+    const auto negative_zero = SystemConfig::FromJsonString(
+        R"({"sim":{"plant_growth":{"params":{"mutation_rate":-0.0}}}})");
+    EXPECT_NE(ConfigIdentity(positive_zero), ConfigIdentity(negative_zero));
+}
 
 // missing/empty config yields all-defaults, no crash.
 TEST(SystemConfig, ShippingDefaultsOnExceptFarWorldLadder) {

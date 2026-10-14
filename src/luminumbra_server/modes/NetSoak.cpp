@@ -63,6 +63,7 @@ int RunNetSoak(const ServerCliOptions& options) {
     }
 
     Luminumbra::Net::ReplicationServer server;
+    auto expected_hello = RuntimeHelloFrom(options);
     server.SetAoiChunkRadius(/*chunk_radius=*/3, /*chunk_size_mm=*/Luminumbra::CHUNK_SIZE_X * 1000);
 
     std::vector<RuntimeTcpClientSlot> slots;
@@ -94,9 +95,10 @@ int RunNetSoak(const ServerCliOptions& options) {
     const auto wall_start = std::chrono::steady_clock::now();
     auto next_tick_time = wall_start;
     while (executed < options.ticks) {
+        expected_hello.system_config_identity = runner.Session()->SystemConfigIdentity();
         // Accept / RE-ACCEPT (reconnect-under-load): a re-armed slot picks the peer up.
         for (RuntimeTcpClientSlot& slot : slots) {
-            if (PollRuntimeTcpAccept(slot)) {
+            if (PollRuntimeTcpAccept(slot, expected_hello)) {
                 slot.joined_tick = executed;
                 server.AddClient(slot.client_id, slot.transport.get());
                 accept_events += 1;
@@ -292,6 +294,10 @@ int RunNetSoakClient(const ServerCliOptions& options) {
                 cycle,
                 options.host,
                 connect_port);
+            continue;
+        }
+        if (!transport.SendFrame(Luminumbra::Net::EncodeHello(RuntimeHelloFrom(options)))) {
+            transport.Close();
             continue;
         }
         connected_cycles += 1;

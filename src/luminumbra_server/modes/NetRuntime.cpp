@@ -21,9 +21,32 @@ void StartRuntimeTcpAccept(RuntimeTcpClientSlot& slot) {
     });
 }
 
-bool PollRuntimeTcpAccept(RuntimeTcpClientSlot& slot) {
+bool PollRuntimeTcpAccept(RuntimeTcpClientSlot& slot, const Luminumbra::Net::HelloMsg& expected) {
     if (slot.accepted) {
         return false;
+    }
+    if (slot.awaiting_hello) {
+        std::vector<std::uint8_t> frame;
+        if (!slot.transport->TryReceiveFrame(frame)) {
+            if (!slot.transport->IsPeerConnected()) {
+                slot.transport.reset();
+                slot.awaiting_hello = false;
+            }
+            return false;
+        }
+        Luminumbra::Net::HelloMsg hello;
+        slot.awaiting_hello = false;
+        if (!Luminumbra::Net::DecodeHello(frame, hello) ||
+            !Luminumbra::Net::HelloMatches(expected, hello) || hello.client_id != slot.client_id) {
+            LUMINUMBRA_CORE_ERROR("net-host: incompatible session identity for client {}",
+                                  slot.client_id);
+            slot.transport->Close();
+            slot.transport.reset();
+            return false;
+        }
+        slot.accepted = true;
+        slot.connected = true;
+        return true;
     }
     if (!slot.accepting) {
         StartRuntimeTcpAccept(slot);
@@ -36,9 +59,8 @@ bool PollRuntimeTcpAccept(RuntimeTcpClientSlot& slot) {
     const bool accepted = slot.accept_result.get();
     slot.accepting = false;
     if (accepted) {
-        slot.accepted = true;
-        slot.connected = true;
-        return true;
+        slot.awaiting_hello = true;
+        return false;
     }
 
     slot.transport.reset();
@@ -89,6 +111,7 @@ int RunNetHostServerMode(const ServerCliOptions& options) {
     }
 
     Luminumbra::Net::ReplicationServer server;
+    auto expected_hello = RuntimeHelloFrom(options);
     std::vector<RuntimeTcpClientSlot> slots;
     slots.reserve(expected_clients);
     for (std::uint32_t client_id = 1; client_id <= expected_clients; ++client_id) {
@@ -115,8 +138,9 @@ int RunNetHostServerMode(const ServerCliOptions& options) {
     std::uint32_t left_count = 0;
     auto next_tick_time = std::chrono::steady_clock::now();
     while (executed < options.ticks) {
+        expected_hello.system_config_identity = runner.Session()->SystemConfigIdentity();
         for (RuntimeTcpClientSlot& slot : slots) {
-            if (PollRuntimeTcpAccept(slot)) {
+            if (PollRuntimeTcpAccept(slot, expected_hello)) {
                 slot.joined_tick = executed;
                 server.AddClient(slot.client_id, slot.transport.get());
                 accepted_count += 1;

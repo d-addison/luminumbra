@@ -130,6 +130,7 @@ net::LockstepConfig MakeConfig(std::uint32_t local_id, std::uint32_t peer_id) {
     c.tick_rate_hz = 30;
     c.local_client_id = local_id;
     c.peer_client_id = peer_id;
+    c.system_config_identity = "da24cea9dbc5159b";
     return c;
 }
 
@@ -137,6 +138,7 @@ net::LockstepConfig MakeConfig(std::uint32_t local_id, std::uint32_t peer_id) {
 // both ends. Returns true iff BOTH handshakes succeed.
 bool HandshakeBoth(net::LockstepSession& a, net::LockstepSession& b, net::LoopbackTransport* tb) {
     net::HelloMsg bh;
+    bh.system_config_identity = "da24cea9dbc5159b";
     bh.seed = 424242;
     bh.preset = "default";
     bh.tick_rate_hz = 30;
@@ -203,6 +205,7 @@ replay::ReplayHeader RichHeader() {
 
 TEST(LockstepCodecHardening, HelloRoundtripAdversarial) {
     net::HelloMsg in;
+    in.system_config_identity = "da24cea9dbc5159b";
     in.protocol_version = net::kLockstepProtocolVersion;
     in.seed = 0xFFFFFFFFFFFFFFFFULL;                    // max u64
     in.preset = "preset/with spaces/and-utf8-\xC3\xA9"; // non-ASCII bytes survive
@@ -216,10 +219,12 @@ TEST(LockstepCodecHardening, HelloRoundtripAdversarial) {
     EXPECT_EQ(out.preset, in.preset);
     EXPECT_EQ(out.tick_rate_hz, in.tick_rate_hz);
     EXPECT_EQ(out.client_id, in.client_id);
+    EXPECT_EQ(out.system_config_identity, in.system_config_identity);
 }
 
 TEST(LockstepCodecHardening, HelloEmptyPresetRoundtrips) {
     net::HelloMsg in;
+    in.system_config_identity = "da24cea9dbc5159b";
     in.preset = ""; // zero-length string is a valid boundary
     net::HelloMsg out;
     ASSERT_TRUE(net::DecodeHello(net::EncodeHello(in), out));
@@ -229,6 +234,7 @@ TEST(LockstepCodecHardening, HelloEmptyPresetRoundtrips) {
 TEST(LockstepCodecHardening, HelloPresetWithEmbeddedNulRoundtrips) {
     // Length-prefixed strings must be NUL-transparent (a C-string would truncate).
     net::HelloMsg in;
+    in.system_config_identity = "da24cea9dbc5159b";
     in.preset = std::string("a\0b\0c", 5);
     ASSERT_EQ(in.preset.size(), 5u);
     net::HelloMsg out;
@@ -356,6 +362,7 @@ TEST(LockstepCodecHardening, DecodeIsIdempotent) {
 TEST(LockstepCodecHardening, DecodeHelloRejectsTruncatedFrame) {
     auto frame = net::EncodeHello([] {
         net::HelloMsg m;
+        m.system_config_identity = "da24cea9dbc5159b";
         m.preset = "default";
         m.seed = 7;
         return m;
@@ -431,6 +438,7 @@ TEST(LockstepCodecHardening, DecodeRejectsTypeMismatch) {
 TEST(LockstepCodecHardening, DecodeHelloRejectsBadMagic) {
     auto frame = net::EncodeHello([] {
         net::HelloMsg m;
+        m.system_config_identity = "da24cea9dbc5159b";
         m.preset = "default";
         return m;
     }());
@@ -846,6 +854,7 @@ TEST(LockstepReplayHardening, DroppedPeerInputStallsDeterministically) {
     net::LockstepSession a(MakeConfig(0, 1), ta.get(), MakeHooks(&wa));
     // NOTE: no b session and no b inputs are ever sent -> a's peer inputs never arrive.
     net::HelloMsg bh;
+    bh.system_config_identity = "da24cea9dbc5159b";
     bh.seed = 424242;
     bh.preset = "default";
     bh.tick_rate_hz = 30;
@@ -993,6 +1002,7 @@ TEST(LockstepReplayHardening, HandshakeRejectsTickRateMismatch) {
     FakeWorld wa{0, "agree", 0};
     net::LockstepSession a(MakeConfig(0, 1), ta.get(), MakeHooks(&wa));
     net::HelloMsg bad;
+    bad.system_config_identity = "da24cea9dbc5159b";
     bad.seed = 424242;
     bad.preset = "default";
     bad.tick_rate_hz = 60;
@@ -1008,6 +1018,7 @@ TEST(LockstepReplayHardening, HandshakeRejectsProtocolVersionMismatch) {
     FakeWorld wa{0, "agree", 0};
     net::LockstepSession a(MakeConfig(0, 1), ta.get(), MakeHooks(&wa));
     net::HelloMsg bad;
+    bad.system_config_identity = "da24cea9dbc5159b";
     bad.protocol_version = static_cast<std::uint16_t>(net::kLockstepProtocolVersion + 1);
     bad.seed = 424242;
     bad.preset = "default";

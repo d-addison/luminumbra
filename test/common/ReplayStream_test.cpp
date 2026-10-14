@@ -8,6 +8,7 @@
 // file under the test artifact dir and removed afterward, so the suite never
 // touches the committed gate fixtures.
 
+#include "../support/SystemConfigVariants.h"
 #include <gtest/gtest.h>
 
 #include <cstdint>
@@ -62,6 +63,7 @@ protected:
         h.surface_radius = 4;
         h.collision_radius = 2;
         h.engine_version = "0.1.0+testsha";
+        h.system_config_identity = Luminumbra::world::GameSession{}.SystemConfigIdentity();
         return h;
     }
 
@@ -94,6 +96,36 @@ TEST_F(ReplayStreamTest, HeaderRoundtrip) {
     EXPECT_EQ(h.surface_radius, original.surface_radius);
     EXPECT_EQ(h.collision_radius, original.collision_radius);
     EXPECT_EQ(h.engine_version, original.engine_version);
+    EXPECT_EQ(h.system_config_identity, original.system_config_identity);
+}
+
+TEST_F(ReplayStreamTest, EffectiveConfigIdentityRefusesDifferentRulesBeforePlayback) {
+    replay::ReplayWriter writer;
+    ASSERT_TRUE(writer.Open(m_path, MakeHeader()));
+    ASSERT_TRUE(writer.Finalize(0));
+    const auto contents = replay::ReadReplay(m_path);
+    ASSERT_TRUE(contents.has_value());
+    EXPECT_TRUE(replay::ConfigurationMatches(
+        contents->header, Luminumbra::world::GameSession{}.SystemConfigIdentity()));
+    for (const auto& [name, identity] : Luminumbra::TestSupport::EffectiveIdentityMismatches()) {
+        SCOPED_TRACE(name);
+        EXPECT_FALSE(replay::ConfigurationMatches(contents->header, identity));
+    }
+    EXPECT_FALSE(replay::ConfigurationMatches(contents->header, ""));
+    auto unbound = contents->header;
+    unbound.system_config_identity.clear();
+    EXPECT_FALSE(replay::ConfigurationMatches(unbound, ""));
+    EXPECT_FALSE(replay::ConfigurationMatches(unbound, MakeHeader().system_config_identity));
+}
+
+TEST_F(ReplayStreamTest, LegacyHeaderWithoutConfigIdentityIsRejected) {
+    auto header = MakeHeader();
+    header.version = 1;
+    header.system_config_identity.clear();
+    replay::ReplayWriter writer;
+    ASSERT_TRUE(writer.Open(m_path, header));
+    ASSERT_TRUE(writer.Finalize(0));
+    EXPECT_FALSE(replay::ReadReplay(m_path).has_value());
 }
 
 // Input records (including an EMPTY input set) and checkpoints round-trip with

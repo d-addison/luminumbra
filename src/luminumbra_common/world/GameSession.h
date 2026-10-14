@@ -251,6 +251,8 @@ public:
     // catch). Defaults to the compiled constants -> byte-identical until a caller overrides it from
     // SystemConfig sim.ecology (ai::ResolveEcologyTuning). Set once after construction.
     void ApplySystemConfig(const luminumbra::core::SystemConfig& config);
+    // Computed on demand from the current effective simulation gates and tuning.
+    [[nodiscard]] std::string SystemConfigIdentity() const;
 
     void SetEcologyTuning(const luminumbra::ai::EcologyTuning& t) {
         m_ecologyTuning = t;

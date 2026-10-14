@@ -194,6 +194,7 @@ std::vector<std::uint8_t> EncodeHello(const HelloMsg& m) {
     PutU16(p, m.tick_rate_hz);
     PutU32(p, m.client_id);
     PutString(p, m.preset);
+    PutString(p, m.system_config_identity);
     return Frame(MessageType::Hello, p);
 }
 
@@ -250,6 +251,8 @@ bool DecodeHello(const std::vector<std::uint8_t>& frame, HelloMsg& out) {
     if (!c.GetU32(out.client_id))
         return false;
     if (!c.GetString(out.preset))
+        return false;
+    if (!c.GetString(out.system_config_identity))
         return false;
     return c.ok;
 }
@@ -943,10 +946,11 @@ LockstepSession::LockstepSession(LockstepConfig config,
 bool LockstepSession::Handshake() {
     // Send our Hello, then drain until the peer's Hello arrives (loopback: the peer's
     // Hello must already be queued by the single-process driver). A mismatched
-    // protocol/version/seed/preset/tick-rate is rejected loudly -- a mis-paired session
-    // would otherwise silently desync.
+    // protocol/version/seed/preset/tick-rate/config identity is rejected loudly.
+    // A mis-paired session would otherwise silently desync.
     HelloMsg mine;
     mine.protocol_version = kLockstepProtocolVersion;
+    mine.system_config_identity = m_config.system_config_identity;
     mine.seed = m_config.seed;
     mine.preset = m_config.preset;
     mine.tick_rate_hz = m_config.tick_rate_hz;
@@ -1009,6 +1013,12 @@ bool LockstepSession::Handshake() {
                               m_config.local_client_id,
                               mine.tick_rate_hz,
                               peer.tick_rate_hz);
+        return false;
+    }
+
+    if (!HelloMatches(mine, peer)) {
+        LUMINUMBRA_CORE_ERROR("lockstep[{}]: simulation configuration identity mismatch",
+                              m_config.local_client_id);
         return false;
     }
 
@@ -1259,6 +1269,7 @@ void LockstepSession::EmitDesyncDump(std::uint64_t divergence_tick, const std::s
     // the desync-repro artifact: replaying it reconstructs exactly what this peer ran).
     Luminumbra::Replay::ReplayHeader header;
     header.version = Luminumbra::Replay::kLrec1Version;
+    header.system_config_identity = m_config.system_config_identity;
     header.tick_rate_hz = m_config.tick_rate_hz;
     header.seed = m_config.seed;
     header.seed_string = std::to_string(m_config.seed);

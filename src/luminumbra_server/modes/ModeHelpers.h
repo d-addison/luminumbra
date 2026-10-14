@@ -12,6 +12,7 @@ struct RuntimeTcpClientSlot {
     std::uint64_t left_tick = 0;
     float initial_x = 0.0f;
     bool accepting = false;
+    bool awaiting_hello = false;
     std::future<bool> accept_result;
 };
 
@@ -22,5 +23,6 @@ bool ResolveNetworkClientPort(std::uint16_t base_port,
                               std::uint32_t client_id,
                               std::uint16_t& out_port);
 void StartRuntimeTcpAccept(RuntimeTcpClientSlot& slot);
-bool PollRuntimeTcpAccept(RuntimeTcpClientSlot& slot);
+bool PollRuntimeTcpAccept(RuntimeTcpClientSlot& slot, const Luminumbra::Net::HelloMsg& expected);
+Luminumbra::Net::HelloMsg RuntimeHelloFrom(const ServerCliOptions& options);
 void CloseRuntimeTcpSlot(RuntimeTcpClientSlot& slot);

@@ -5,11 +5,12 @@
 // queried by every system so each can be turned on/off + tuned from data, no recompile.
 //
 // Determinism contract (verified against persistence/WorldPersistenceRoundtrip.h):
-//   * Flags split into `sim.*` (may affect sim state) and `render.*` (render-only).
-//   * ComputeConfigSubHash is an ADDITIVE per-system sub-hash; it does not alter
-//     the top-level world_hash. Its serialization remains config:v1, with empty
-//     output only when every sim flag is explicitly disabled.
-//   * render.* flags NEVER appear in the sub-hash and never touch any hash.
+//   * Flags split into `sim.*` and `render.*` (presentation, except circadian tuning).
+//   * ComputeConfigSubHash retains the diagnostic config:v1 serialization.
+//     GameSession computes effective identity for joins and replays
+//     independently of the established per-tick world_hash.
+//   * render.* flags never appear in the diagnostic sub-hash. The session identity
+//     also covers render.circadian because its amplitude is applied to simulation.
 //   * enabled is an O(1) bit test on a resolved immutable snapshot (no map lookup,
 //     no string compare, no allocation) so it is safe on the 36k-entity / 30 Hz tick.
 
@@ -67,6 +68,17 @@ enum class SysParam : std::uint8_t {
     LUMIN_CONFIG_PARAM_TABLE(LUMIN_CONFIG_EMIT_PARAM)
 #undef LUMIN_CONFIG_EMIT_PARAM
     Count
+};
+
+// Values supplied to the canonical serializer. Session callers supply current effective
+// values, including tuning changed through public setters. No owner-based fallback here.
+struct SimulationIdentityValues {
+    std::array<bool, static_cast<std::size_t>(SysKey::Count)> enabled{};
+    std::array<double, static_cast<std::size_t>(SysParam::Count)> scalars{};
+    std::array<glm::vec3, static_cast<std::size_t>(SysParam::Count)> vectors{};
+
+    SimulationIdentityValues();
+    [[nodiscard]] std::string ComputeIdentity() const;
 };
 
 class SystemConfig {

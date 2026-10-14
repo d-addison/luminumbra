@@ -247,6 +247,87 @@ void GameSession::ApplySystemConfig(const luminumbra::core::SystemConfig& config
     SetPlantMutationRate(luminumbra::ai::ResolvePlantMutationRate(config));
 }
 
+std::string GameSession::SystemConfigIdentity() const {
+    using luminumbra::core::SysKey;
+    using luminumbra::core::SysParam;
+    luminumbra::core::SimulationIdentityValues values;
+    // Tuning-only gates resolve to values in ApplySystemConfig; their flags are
+    // normalized to true. Erosion has no session gate. Preserve the canonical slots.
+    values.enabled[static_cast<std::size_t>(SysKey::SimHydrologyWeather)] = m_weatherRainEnabled;
+    values.enabled[static_cast<std::size_t>(SysKey::SimWeatherEvents)] = m_weatherEventsEnabled;
+    values.enabled[static_cast<std::size_t>(SysKey::SimAetherState)] = m_aetherStateEnabled;
+    values.enabled[static_cast<std::size_t>(SysKey::SimWaterHighRes)] = m_waterHighResEnabled;
+    values.enabled[static_cast<std::size_t>(SysKey::SimActiveRegions)] = m_activeRegionsEnabled;
+    values.scalars[static_cast<std::size_t>(SysParam::PlantMutationRate)] = m_plantMutationRate;
+    values.scalars[static_cast<std::size_t>(SysParam::EcoEnergyDrain)] =
+        m_ecologyTuning.energy_drain_per_second;
+    values.scalars[static_cast<std::size_t>(SysParam::EcoEnergyRestRecover)] =
+        m_ecologyTuning.energy_rest_recover;
+    values.scalars[static_cast<std::size_t>(SysParam::EcoEnergySleepRecover)] =
+        m_ecologyTuning.energy_sleep_recover;
+    values.scalars[static_cast<std::size_t>(SysParam::EcoHungerGrowth)] =
+        m_ecologyTuning.hunger_growth_per_second;
+    values.scalars[static_cast<std::size_t>(SysParam::EcoHungerGrazeSate)] =
+        m_ecologyTuning.hunger_graze_sate;
+    values.scalars[static_cast<std::size_t>(SysParam::EcoStaminaRestRecover)] =
+        m_ecologyTuning.stamina_rest_recover;
+    values.scalars[static_cast<std::size_t>(SysParam::EcoStaminaMoveDrain)] =
+        m_ecologyTuning.stamina_move_drain;
+    values.scalars[static_cast<std::size_t>(SysParam::EcoHerdWeight)] = m_ecologyTuning.herd_weight;
+    values.scalars[static_cast<std::size_t>(SysParam::EcoAlignmentWeight)] =
+        m_ecologyTuning.alignment_weight;
+    values.scalars[static_cast<std::size_t>(SysParam::EcoCatchRadius)] =
+        m_ecologyTuning.catch_radius;
+    values.scalars[static_cast<std::size_t>(SysParam::EcoCatchSatiation)] =
+        m_ecologyTuning.catch_satiation;
+    values.scalars[static_cast<std::size_t>(SysParam::EcoFlockNeighborRadius)] =
+        m_ecologyTuning.flock_neighbor_radius;
+    values.scalars[static_cast<std::size_t>(SysParam::EcoFlockSeparationRadius)] =
+        m_ecologyTuning.flock_separation_radius;
+    values.scalars[static_cast<std::size_t>(SysParam::EcoFlockCohesionWeight)] =
+        m_ecologyTuning.flock_cohesion_weight;
+    values.scalars[static_cast<std::size_t>(SysParam::EcoFlockSeparationWeight)] =
+        m_ecologyTuning.flock_separation_weight;
+    values.scalars[static_cast<std::size_t>(SysParam::WfGrazeRadius)] =
+        m_wildlifeFoliageTuning.graze_radius;
+    values.scalars[static_cast<std::size_t>(SysParam::WfGrazePerCreature)] =
+        m_wildlifeFoliageTuning.graze_per_creature;
+    values.scalars[static_cast<std::size_t>(SysParam::WfRegrowPerTick)] =
+        m_wildlifeFoliageTuning.regrow_per_tick;
+    values.scalars[static_cast<std::size_t>(SysParam::WfFeedPerGraze)] =
+        m_wildlifeFoliageTuning.feed_per_graze;
+    values.scalars[static_cast<std::size_t>(SysParam::ThirstRiseRate)] = m_thirstTuning.rise_rate;
+    values.scalars[static_cast<std::size_t>(SysParam::ThirstDrinkRate)] = m_thirstTuning.drink_rate;
+    values.scalars[static_cast<std::size_t>(SysParam::ThirstSeekThreshold)] =
+        m_thirstTuning.seek_threshold;
+    values.scalars[static_cast<std::size_t>(SysParam::ScavHungerThreshold)] =
+        m_scavengingTuning.hunger_threshold;
+    values.scalars[static_cast<std::size_t>(SysParam::ScavFeedRadius)] =
+        m_scavengingTuning.feed_radius;
+    values.scalars[static_cast<std::size_t>(SysParam::ScavFeedRate)] = m_scavengingTuning.feed_rate;
+    values.scalars[static_cast<std::size_t>(SysParam::ReproMaturityTicks)] =
+        m_reproductionTuning.maturity_ticks;
+    values.scalars[static_cast<std::size_t>(SysParam::ReproCooldownTicks)] =
+        m_reproductionTuning.cooldown_ticks;
+    values.scalars[static_cast<std::size_t>(SysParam::ReproHealthyStamina)] =
+        m_reproductionTuning.healthy_stamina;
+    values.scalars[static_cast<std::size_t>(SysParam::ReproMateSeekRadius)] =
+        m_reproductionTuning.mate_seek_radius;
+    values.scalars[static_cast<std::size_t>(SysParam::ReproCourtshipRadius)] =
+        m_reproductionTuning.courtship_radius;
+    values.scalars[static_cast<std::size_t>(SysParam::ReproCourtshipTicks)] =
+        m_reproductionTuning.courtship_ticks;
+    values.scalars[static_cast<std::size_t>(SysParam::ReproSpawnRadius)] =
+        m_reproductionTuning.spawn_radius;
+    values.scalars[static_cast<std::size_t>(SysParam::ForagingDeposit)] = m_foragingTuning.deposit;
+    values.scalars[static_cast<std::size_t>(SysParam::ForagingTrailWeight)] =
+        m_foragingTuning.trail_weight;
+    values.scalars[static_cast<std::size_t>(SysParam::ForagingGoalWeight)] =
+        m_foragingTuning.goal_weight;
+    values.scalars[static_cast<std::size_t>(SysParam::CircadianAmplitude)] = m_circadianAmplitude;
+    return values.ComputeIdentity();
+}
+
 // apply the session water-sim resolution when the owner opted in
 // (sim.water_high_res -> SetWaterHighResEnabled). Called from BOTH CreateWorld and
 // LoadWorld immediately after the water system is constructed and linked — before its
