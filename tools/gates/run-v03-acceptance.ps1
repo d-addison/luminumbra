@@ -367,9 +367,7 @@ try {
         $sections["perf_pointer"] = New-Section -Status "unevaluated" -Detail "perf evidence file not found"
     } else {
         $perfCopy = Join-Path $OutAbs "perf-evidence.json"
-        if ((Get-AbsolutePath $PerfEvidence) -ne $perfCopy) {
-            Copy-Item -LiteralPath $PerfEvidence -Destination $perfCopy -Force
-        }
+        Copy-AcceptanceEvidence -Source $PerfEvidence -Destination $perfCopy
         $sections["perf_pointer"] = New-Section -Status "pass" -Evidence "perf-evidence.json" -Detail "perf evidence file present"
     }
 
@@ -386,9 +384,7 @@ try {
             $checklistError = $_.Exception.Message
         }
         $audioCopy = Join-Path $OutAbs "audio-checklist.json"
-        if ((Get-AbsolutePath $AudioChecklist) -ne $audioCopy) {
-            Copy-Item -LiteralPath $AudioChecklist -Destination $audioCopy -Force
-        }
+        Copy-AcceptanceEvidence -Source $AudioChecklist -Destination $audioCopy
         $audioEvidence = "audio-checklist.json"
         if ($null -eq $checklist) {
             $sections["audio_off"] = New-Section -Status "fail" -Evidence $audioEvidence -Detail ("checklist does not parse: " + $checklistError)

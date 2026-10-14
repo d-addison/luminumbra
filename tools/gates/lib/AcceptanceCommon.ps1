@@ -72,6 +72,28 @@ function Get-FileSha256Hex {
     return $hash.Hash.ToLowerInvariant()
 }
 
+function Copy-AcceptanceEvidence {
+    # Stage a byte-for-byte copy before replacing the destination. This also
+    # works when source and destination name the same file through different
+    # casing or Windows short/long paths, without comparing path strings.
+    param(
+        [Parameter(Mandatory = $true)][string]$Source,
+        [Parameter(Mandatory = $true)][string]$Destination
+    )
+    $full = Get-AbsolutePath $Destination
+    $dir = Split-Path -Parent $full
+    if (-not (Test-Path -LiteralPath $dir -PathType Container)) {
+        New-Item -ItemType Directory -Force -Path $dir | Out-Null
+    }
+    $staged = Join-Path $dir (".acceptance-evidence-" + [System.Guid]::NewGuid().ToString() + ".tmp")
+    try {
+        Copy-Item -LiteralPath $Source -Destination $staged
+        Move-Item -LiteralPath $staged -Destination $full -Force
+    } finally {
+        if (Test-Path -LiteralPath $staged) { Remove-Item -LiteralPath $staged -Force }
+    }
+}
+
 function Write-JsonFile {
     # UTF-8 without BOM, LF line endings, depth 12.
     param(
@@ -350,7 +372,7 @@ function Invoke-ClientSession {
     # Returns @{ exit_code = <int, -1 on timeout>; timed_out = <bool> }.
     param(
         [Parameter(Mandatory = $true)][string]$Exe,
-        [Parameter(Mandatory = $true)][string[]]$ArgumentList,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][AllowEmptyString()][string[]]$ArgumentList,
         [Parameter(Mandatory = $true)][string]$WorkingDirectory,
         [Parameter(Mandatory = $true)][string]$StdoutPath,
         [Parameter(Mandatory = $true)][string]$StderrPath,
@@ -474,7 +496,7 @@ function Get-FixtureWorldId {
     if (-not (Test-Path -LiteralPath $saves -PathType Container)) {
         throw "fixture saves directory missing: $saves"
     }
-    $worlds = @(Get-ChildItem -LiteralPath $saves -Directory)
+    $worlds = @(Get-ChildItem -LiteralPath $saves -Directory -Force)
     if ($worlds.Count -ne 1) {
         throw "expected exactly one fixture world under $saves, found $($worlds.Count)"
     }

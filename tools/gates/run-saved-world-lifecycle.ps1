@@ -98,7 +98,7 @@ function Invoke-Session {
     param(
         [Parameter(Mandatory = $true)][string]$Name,
         [Parameter(Mandatory = $true)][string]$Kind,
-        [Parameter(Mandatory = $true)][string[]]$Arguments,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][AllowEmptyString()][string[]]$Arguments,
         [Parameter(Mandatory = $true)][string]$ArtifactDir
     )
     New-Item -ItemType Directory -Force -Path $ArtifactDir | Out-Null
@@ -165,9 +165,20 @@ function Get-DiffChanges {
 }
 
 function Get-PrimaryWorld {
-    param([Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]]$BeforeNames)
+    # ConvertFrom-Json emits an array as one object in Windows PowerShell 5.1,
+    # but enumerates it in PowerShell 7. Preserve objects until after flattening:
+    # binding a nested array to string[] joins its names (or produces "" for []).
+    param([Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$BeforeNames)
+    $before = @(foreach ($group in $BeforeNames) {
+        foreach ($name in $group) {
+            if ($name -isnot [string] -or $name.Length -eq 0) {
+                throw "pre-session world names must be non-empty strings"
+            }
+            $name
+        }
+    })
     $candidates = @(Get-ChildItem -LiteralPath $savesRoot -Directory -Force |
-        Where-Object { $_.Name -notin $BeforeNames })
+        Where-Object { $_.Name -notin $before })
     if ($candidates.Count -ne 1) {
         $names = @($candidates | ForEach-Object { $_.Name } | Sort-Object) -join ", "
         throw "create_edit_save requires exactly one new world under ${savesRoot}; found $($candidates.Count): [$names]"

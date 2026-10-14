@@ -2,6 +2,7 @@
 """File-only acceptance preflight regressions; never launch a native client."""
 
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -90,7 +91,13 @@ class AcceptancePreflightTests(unittest.TestCase):
                 render_line = next(line for line in result.stdout.splitlines()
                                    if line.startswith("[dry-run] render_qualification:"))
                 if present:
-                    self.assertIn(str(driver), render_line)
+                    expected, reported = str(driver), render_line
+                    if os.name == "nt":
+                        # Windows temp roots may use 8.3 names while PowerShell
+                        # expands them. Keep the full driver path assertion.
+                        expected = os.path.normcase(str(driver.resolve()))
+                        reported = os.path.normcase(render_line)
+                    self.assertIn(expected, reported)
                     self.assertIn("-Package", render_line)
                     self.assertNotIn("unevaluated", render_line)
                 else:
