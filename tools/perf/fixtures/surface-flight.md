@@ -1,7 +1,7 @@
 # Surface-flight identity provenance
 
 The strict `.traversal` grammar does not accept comments. This adjacent note
-records the deliberate PR #273 identity changes in `surface-flight.traversal`:
+records the deliberate defaults-on identity changes in `surface-flight.traversal`:
 
 | Field | Before (revision 6) | After (revision 7) | Reason |
 | --- | --- | --- | --- |

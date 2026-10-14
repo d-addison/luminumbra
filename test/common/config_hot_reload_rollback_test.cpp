@@ -153,7 +153,7 @@ TEST(ConfigHotReloadRollback, GeneratedMoonlightConstantMatchesSchemaDefault) {
 // SystemConfig fallback path and the schema-authored default are one and the same value.
 TEST(ConfigHotReloadRollback, GeneratedConstantIsTheRuntimeMoonlightDefault) {
     const SystemConfig defaults = SystemConfig::Defaults();
-    // PR #273: moonlight ships enabled (previously false); strength/color still
+    // Defaults-on: moonlight ships enabled (previously false); strength/color still
     // resolve to the generated constants when no parameter override is authored.
     EXPECT_TRUE(defaults.enabled(SysKey::RenderMoonlight));
     EXPECT_FLOAT_EQ(defaults.param(SysParam::MoonlightStrength, kc::kMoonlightStrength),
