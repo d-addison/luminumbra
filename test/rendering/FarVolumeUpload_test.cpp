@@ -38,13 +38,15 @@ FarVolumeQueueRequest UploadRequest(bool plane = true) {
                              return FarVolumeSample{plane ? float(p.y) + .25f : 1.0f, 7};
                          }};
     request.water = std::make_shared<const FarWorldConstantWaterObservation>(
-        request.identity.content_hash, false, 0);
+        request.identity.content_hash, false, 0.0f);
     request.water_bound = FarWorldWaterBound{true, 0, 0};
     return request;
 }
-std::optional<FarVolumeQueueCompletion> Build(FarVolumeBuildQueue& queue,
-                                              const FarVolumeQueueRequest& request) {
-    EXPECT_EQ(queue.Submit(request), FarVolumeSubmitStatus::Queued);
+std::optional<FarVolumeQueueCompletion>
+Build(FarVolumeBuildQueue& queue,
+      const FarVolumeQueueRequest& request,
+      FarVolumeSubmitStatus expected_submission = FarVolumeSubmitStatus::Queued) {
+    EXPECT_EQ(queue.Submit(request), expected_submission);
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
     do {
         queue.Pump(1);
@@ -85,11 +87,12 @@ TEST(FarVolumeUpload, CombinedWetAllocationByteDebitAndWaterFailurePreserveOldPa
     limits.max_converted_bytes = 16 * 1024 * 1024;
     FarVolumeBuildQueue queue(jobs, *memory.Pool(1), limits);
     auto request = UploadRequest();
-    request.water = std::make_shared<const FarWorldConstantWaterObservation>(42, true, 0);
+    request.water = std::make_shared<const FarWorldConstantWaterObservation>(42, true, 0.0f);
     request.water_bound = FarWorldWaterBound{false, 0, 0};
     auto result = Build(queue, request);
     ASSERT_TRUE(result);
     if (result) {
+        ASSERT_EQ(result->status(), FarVolumeBuildStatus::Ready);
         const auto bytes = Bytes(result->mesh());
         EXPECT_GT(result->mesh().terrain_indices, 0u);
         EXPECT_EQ(result->mesh().indices.size(),
@@ -106,28 +109,38 @@ TEST(FarVolumeUpload, CombinedWetAllocationByteDebitAndWaterFailurePreserveOldPa
             *result, request.identity, request.intent, memory, bytes - 1, backend, output, &error));
         EXPECT_EQ(error, FarVolumeUploadError::ByteLimit);
         EXPECT_EQ(calls, 0u);
+        EXPECT_EQ(Observe(memory, 1).bytes_gpu, 0u);
         ASSERT_TRUE(UploadFarVolume(
             *result, request.identity, request.intent, memory, bytes, backend, output));
         EXPECT_EQ(output.gpu_bytes(), bytes);
+        EXPECT_EQ(Observe(memory, 1).bytes_gpu, bytes);
         EXPECT_EQ(output.water_indices(), 98304u);
         EXPECT_EQ(output.terrain_indices(), result->mesh().terrain_indices);
         EXPECT_TRUE(output.water_complete());
         const auto* old = output.resource();
         const auto old_identity = output.identity();
+        const auto old_terrain_indices = output.terrain_indices();
         ++request.identity.bake_generation;
         request.water.reset();
         request.water_bound.reset();
         result.reset();
-        result = Build(queue, request);
+        // The descriptor retains the key after TakeCompleted; a new identity
+        // under that key is accepted as a coalesced replacement.
+        result = Build(queue, request, FarVolumeSubmitStatus::Coalesced);
         ASSERT_TRUE(result);
         if (result) {
             EXPECT_EQ(result->status(), FarVolumeBuildStatus::WaterRefused);
+            EXPECT_EQ(result->water_failure(), FarWorldWaterError::Unavailable);
             EXPECT_FALSE(UploadFarVolume(
                 *result, request.identity, request.intent, memory, bytes, backend, output, &error));
             EXPECT_EQ(error, FarVolumeUploadError::NotReady);
             EXPECT_EQ(output.resource(), old);
             EXPECT_EQ(output.identity(), old_identity);
             EXPECT_EQ(output.gpu_bytes(), bytes);
+            EXPECT_EQ(Observe(memory, 1).bytes_gpu, bytes);
+            EXPECT_EQ(output.terrain_indices(), old_terrain_indices);
+            EXPECT_EQ(output.water_indices(), 98304u);
+            EXPECT_TRUE(output.water_complete());
             EXPECT_FALSE(IsFarTileCovering(output.Status(request.identity, request.intent)));
             EXPECT_EQ(calls, 1u);
         }
