@@ -113,6 +113,17 @@ void FarWorldRenderer::SetRequested(FarWorldMode requested) {
     Drain();
     requested_ = requested;
 }
+void FarWorldRenderer::SetRequestedCavePolicy(std::optional<FarCaveMode> requested) {
+    CheckOwner();
+    if (requested && *requested != FarCaveMode::BandLimited &&
+        *requested != FarCaveMode::BoxFiltered)
+        requested.reset();
+    if (requested_caves_ == requested)
+        return;
+    if (requested_ == FarWorldMode::Ladder)
+        Drain();
+    requested_caves_ = requested;
+}
 void FarWorldRenderer::InstallBackend(std::unique_ptr<FarVolumeGpuDriver> driver) {
     CheckOwner();
     Drain();
@@ -126,6 +137,8 @@ FarWorldRenderer::BindFixture(JobSystem& jobs,
                               const FarWorldExperimentalLimits& limits) {
     CheckOwner();
     Drain();
+    if (requested_ == FarWorldMode::Ladder && !requested_caves_)
+        return refusal_ = FarWorldRefusal::InvalidCavePolicy;
     if (!limits.Complete())
         return refusal_ = FarWorldRefusal::MissingLimits;
     if (!fixture || !world_epoch || !fixture->content_identity() ||
@@ -134,6 +147,8 @@ FarWorldRenderer::BindFixture(JobSystem& jobs,
         (fixture->numeric() != FarVolumeNumericProfile::RawFloat &&
          fixture->numeric() != FarVolumeNumericProfile::LegacySigned16))
         return refusal_ = FarWorldRefusal::ImmutableAuthorityUnavailable;
+    if (requested_ == FarWorldMode::Ladder && fixture->caves() != requested_caves_)
+        return refusal_ = FarWorldRefusal::CavePolicyMismatch;
     if (!driver_ || !driver_->ValidContext())
         return refusal_ = FarWorldRefusal::BackendUnavailable;
     if (fixture->owned_bytes() > limits.max_fixture_bytes)
@@ -169,9 +184,16 @@ FarWorldRenderer::BindFixture(JobSystem& jobs,
 FarWorldSelection FarWorldRenderer::Selection(FarWorldPurpose purpose,
                                               bool enabled) const noexcept {
     auto prerequisite = refusal_;
+    if (requested_ == FarWorldMode::Ladder && !requested_caves_)
+        prerequisite = FarWorldRefusal::InvalidCavePolicy;
     if (prerequisite == FarWorldRefusal::None && (!driver_ || !driver_->ValidContext()))
         prerequisite = FarWorldRefusal::BackendUnavailable;
     return SelectFarWorld(requested_, purpose, prerequisite, enabled);
+}
+
+FarWorldCavePolicy FarWorldRenderer::CavePolicy(const FarWorldSelection& selection) const noexcept {
+    return SelectFarWorldCavePolicy(
+        requested_caves_, fixture_ ? std::optional(fixture_->caves()) : std::nullopt, selection);
 }
 
 FarVolumeAuthorityProducer FarWorldRenderer::Producer() const {

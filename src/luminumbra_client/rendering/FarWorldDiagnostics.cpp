@@ -23,6 +23,8 @@ const char* FarWorldRefusalName(FarWorldRefusal refusal) noexcept {
         FW_REASON(OffscreenSuppressed);
         FW_REASON(SpanHistoryExhausted);
         FW_REASON(ShaderProgramUnavailable);
+        FW_REASON(InvalidCavePolicy);
+        FW_REASON(CavePolicyMismatch);
 #undef FW_REASON
     }
     return "Unknown";

@@ -796,6 +796,9 @@ public:
     // Internal, non-persisted request. Normal worlds retain a typed refusal until
     // immutable committed authority is available. Fixtures bind explicitly.
     void set_far_world_mode(FarWorldMode requested);
+    FarWorldRenderer& far_world_renderer() {
+        return *m_far_world;
+    }
     const FarWorldRenderer& far_world_renderer() const {
         return *m_far_world;
     }

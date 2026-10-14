@@ -2,6 +2,7 @@
 
 #include "FarVolumeGpuBackend.h"
 #include "FarVolumeResidency.h"
+#include "FarWorldCaveSelection.h"
 #include "FarWorldDiagnostics.h"
 #include "FarWorldSelection.h"
 
@@ -61,6 +62,11 @@ public:
     FarWorldRenderer(const FarWorldRenderer&) = delete;
     FarWorldRenderer& operator=(const FarWorldRenderer&) = delete;
     void SetRequested(FarWorldMode requested);
+    // Startup/world-entry selection. For a runtime change, the pipeline caller
+    // first uses set_far_world_mode to reset temporal history between frames.
+    // Changed Ladder policy drains every old build/resource and requires a new
+    // immutable fixture; never relabel an already captured sampler's content.
+    void SetRequestedCavePolicy(std::optional<World::FarCaveMode> requested);
     void InstallBackend(std::unique_ptr<FarVolumeGpuDriver> driver);
     FarWorldRefusal BindFixture(JobSystem& jobs,
                                 std::shared_ptr<const FarWorldPristineFixture> fixture,
@@ -68,6 +74,12 @@ public:
                                 std::uint64_t bake_generation,
                                 const FarWorldExperimentalLimits& limits);
     FarWorldSelection Selection(FarWorldPurpose purpose, bool enabled = true) const noexcept;
+    // Pass the pipeline's final selection so shader refusal/preview overrides
+    // are reflected in effective policy. No borrowed authority is exposed.
+    FarWorldCavePolicy CavePolicy(const FarWorldSelection& selection) const noexcept;
+    FarWorldCavePolicy CavePolicy(FarWorldPurpose purpose, bool enabled = true) const noexcept {
+        return CavePolicy(Selection(purpose, enabled));
+    }
     // Normal scheduling: checked XZ wanted set + monotone per-key span ledgers.
     // Leaving the wanted set retains charged history until the binding drains;
     // exhaustion reports SpanHistoryExhausted without replacing wanted requests.
@@ -146,6 +158,7 @@ private:
     FarVolumeAuthorityProducer Producer() const;
     const std::thread::id owner_ = std::this_thread::get_id();
     FarWorldMode requested_;
+    std::optional<World::FarCaveMode> requested_caves_ = kDefaultFarWorldCavePolicy;
     FarWorldRefusal refusal_ = FarWorldRefusal::ImmutableAuthorityUnavailable;
     bool submitting_ = false, stopping_ = false;
     std::optional<std::uint64_t> advanced_frame_;

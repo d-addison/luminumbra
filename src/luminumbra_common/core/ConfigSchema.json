@@ -562,6 +562,16 @@
       "default": 1000000.0,
       "constant": null,
       "constant_note": "render-only (residency 'excluded', never hashed); default is an inline literal at the luminumbra_client consumer, a TU not linked into common_tests. No named owning constant to cross-check."
+    },
+    {
+      "enum": "FarWorldCaveField",
+      "owner": "RenderFarWorldLadder",
+      "json_name": "cave_field",
+      "type": "scalar",
+      "default": 0.0,
+      "constant": "Luminumbra::Rendering::kDefaultFarWorldCaveFieldCode",
+      "constant_system": "luminumbra_client/rendering/FarWorldCaveSelection.h",
+      "constant_note": "render-only (excluded, never hashed); exact codes 0 = BandLimited (recorded default/fallback), 1 = BoxFiltered. Other numeric codes refuse explicit Ladder activation. Resolved in luminumbra_client/rendering/FarWorldCaveSelection.h."
     }
   ]
 }

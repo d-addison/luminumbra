@@ -1,7 +1,7 @@
 #version 450 core
 layout (location = 5) out vec4 gAuthoredSurface; // RGB emission, A material lane
 layout (location = 0) out vec3 gPosition;          // RGB16F: full view-space position
-layout (location = 1) out vec4 gNormalMaterial;    // RGB10A2: Octahedral normal + material ID
+layout (location = 1) out vec4 gNormalMaterial;    // RGBA8: Oct normal, marker emissivity, material ID
 layout (location = 2) out vec4 gAlbedoRoughness;   // RGBA8: RGB albedo + roughness
 layout (location = 3) out vec2 gMetallicAO;        // RG16F: Metallic + AO
 layout (location = 4) out vec2 gMotionVector;      // RG16F: screen motion (NDC delta); /TAAU
@@ -596,6 +596,13 @@ void main()
 
     gAlbedoRoughness = vec4(albedo * fs_in.Tint, roughness);
     gMetallicAO = vec2(metallic, ao);
+#ifdef LUMINUMBRA_FAR_WORLD_LADDER
+    // Signed RG16F AO tag, mirrored by FarWorldSurfaceTag.h. Keep RGBA8
+    // normal/material and marker emissivity intact. This common output also
+    // tags material-200 water; no distance or material-ID classification.
+    if (u_farWorldLadder == 1)
+        gMetallicAO.g = -(1.0 + ao);
+#endif
     //  (TAAU): screen-space motion vector = current screen pos - reprojected previous pos.
     // Current pos is exact from gl_FragCoord (NDC); previous pos reprojects this surface point's
     // ABSOLUTE world position through last frame's view-proj. Captures camera/rigid motion
