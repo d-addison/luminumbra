@@ -5246,8 +5246,8 @@ TEST(RenderSmokeTest, FarWorldIndexedPlanesPreserveVaryingAxes) {
     ASSERT_TRUE(probe.Init());
     const glm::dvec3 origin(-1024, -256, -1024);
     const glm::dvec3 camera(-53.39f, -67.13f, 43.21f);
-    const std::array owner{FarWorldLiveCell{-1, -2, -13, 0}};
-    const std::array lower{FarWorldLiveCell{-2, -2, -13, 0}};
+    const std::array owner{FarWorldLiveCell{-1, -2, -13, kFarWorldTerrainReady}};
+    const std::array lower{FarWorldLiveCell{-2, -2, -13, kFarWorldTerrainReady}};
     const auto sample = [&](glm::vec3 local, int plane_axis, auto cells) {
         return probe.TileBoundary(
             origin, local, camera, plane_axis, cells, false, {0, 256}, -1, true);
