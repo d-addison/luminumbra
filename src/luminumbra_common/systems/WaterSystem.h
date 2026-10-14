@@ -2,6 +2,7 @@
 #include "../../../include/luminumbra/core/Types.h"
 #include "../core/JobSystem.h"
 #include "../world/WaterShare.h"
+#include "RegionalWater.h"
 #include "entt/entt.hpp"
 #include <cstdint>
 #include <memory>
@@ -321,7 +322,7 @@ private:
     //  finite-hydrology config (set via SetHydrology; integer -> deterministic).
     // Reusable transaction workspace, never authority. Every staged payload is
     // overwritten from its live resident before use; nonresident entries are pruned.
-    std::unordered_map<ChunkID, std::shared_ptr<Chunk>> m_regionalStaging;
+    RegionalWater::PlanningCache m_regionalPlanning;
     bool m_finite_hydrology = false;
     std::int32_t m_rain_mm_per_tick = 0;
     std::int32_t m_evap_mm_per_tick = 0;

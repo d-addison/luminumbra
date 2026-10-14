@@ -4,6 +4,7 @@
 #include "luminumbra_common/components/IrrigationComponents.h"
 #include "luminumbra_common/core/WaterComponents.h"
 #include "luminumbra_common/persistence/WorldPersistenceRoundtrip.h"
+#include "luminumbra_common/systems/RegionalWater.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 #include "luminumbra_common/systems/WaterSystem.h"
 #include "luminumbra_common/systems/WeatherSystem.h"
@@ -15,6 +16,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <map>
 #include <memory>
 #include <numeric>
 #include <set>
@@ -114,6 +116,440 @@ protected:
     std::vector<std::shared_ptr<Chunk>> chunks;
     std::vector<world::RegionWork> work;
 };
+
+// Rebuild the old admitted map, neighbors and face tuples without using cache indexes.
+// Compare physical orientation as well as order: sorting must never exchange endpoints.
+void CheckPlanningOracle(Systems::RegionalWater::PlanningCache& cache,
+                         const std::vector<std::shared_ptr<Chunk>>& resident,
+                         const ActiveRegionLedger& ledger,
+                         int resolution,
+                         bool raining,
+                         const std::set<ChunkID>& source_targets) {
+    using FaceKey = std::tuple<RegionKey, RegionKey, ChunkID, ChunkID, bool>;
+    std::map<ChunkID, std::shared_ptr<Chunk>> rebuilt;
+    const auto owner_of = [](const Chunk& chunk) {
+        const auto coords = chunk.get_coords();
+        return ActiveRegionLedger::region_at(Vec3(static_cast<float>(coords.x * CHUNK_SIZE_X),
+                                                  0.0f,
+                                                  static_cast<float>(coords.z * CHUNK_SIZE_Z)));
+    };
+    for (const auto& chunk : resident) {
+        if (!chunk || chunk->get_state() == ChunkState::Loading)
+            continue;
+        const auto found = ledger.records().find(owner_of(*chunk));
+        if (found != ledger.records().end() && found->second.state != RegionState::Frozen)
+            ASSERT_TRUE(rebuilt.emplace(chunk->get_id(), chunk).second);
+    }
+    std::vector<ChunkID> expected_ids, actual_ids;
+    for (const auto& [id, chunk] : rebuilt)
+        expected_ids.push_back(id);
+    for (const auto& entry : cache.entries) {
+        if (entry.admitted) {
+            actual_ids.push_back(entry.id);
+            ASSERT_EQ(entry.chunk, rebuilt.at(entry.id).get());
+        }
+    }
+    ASSERT_EQ(actual_ids, expected_ids);
+    const auto neighbor_of = [&rebuilt](const Chunk& chunk, IVec3 offset) {
+        const auto coords = chunk.get_coords() + offset;
+        if (coords.x < -1048576 || coords.x >= 1048576 || coords.z < -1048576 ||
+            coords.z >= 1048576)
+            return rebuilt.end();
+        return rebuilt.find(Chunk::calculate_id(coords));
+    };
+    constexpr IVec3 offsets[] = {{1, 0, 0}, {-1, 0, 0}, {0, 0, 1}, {0, 0, -1}};
+    std::vector<FaceKey> expected_faces, actual_faces;
+    for (const auto& [id, chunk] : rebuilt) {
+        const auto* entry = cache.Find(id);
+        ASSERT_NE(entry, nullptr);
+        for (std::size_t direction = 0; direction < 4; ++direction) {
+            const auto neighbor = neighbor_of(*chunk, offsets[direction]);
+            const auto index = entry->neighbors[direction];
+            const auto* cached =
+                index == Systems::RegionalWater::missing ? nullptr : &cache.entries.at(index);
+            if (neighbor == rebuilt.end()) {
+                EXPECT_TRUE(!cached || !cached->admitted);
+            } else {
+                ASSERT_NE(cached, nullptr);
+                ASSERT_TRUE(cached->admitted);
+                EXPECT_EQ(cached->id, neighbor->first);
+                if (direction == 0 || direction == 2)
+                    expected_faces.emplace_back(owner_of(*chunk),
+                                                owner_of(*neighbor->second),
+                                                id,
+                                                neighbor->first,
+                                                direction == 0);
+            }
+        }
+    }
+    std::sort(expected_faces.begin(), expected_faces.end());
+    for (const auto& indexed : cache.faces) {
+        if (!cache.entries.at(indexed.positive).admitted ||
+            !cache.entries.at(indexed.other).admitted)
+            continue;
+        const auto& face = indexed.face;
+        EXPECT_EQ(cache.entries[indexed.positive].id, face.positive);
+        EXPECT_EQ(cache.entries[indexed.other].id, face.other);
+        actual_faces.emplace_back(face.owner, face.neighbor, face.positive, face.other, face.is_x);
+    }
+    EXPECT_EQ(actual_faces, expected_faces);
+
+    RegionSchedule schedule;
+    std::map<RegionKey, std::vector<ChunkID>> expected_candidates;
+    for (const auto& [owner, record] : ledger.records()) {
+        if (record.state != RegionState::Frozen) {
+            schedule.due.push_back(owner);
+            expected_candidates[owner]; // Retain claims for due owners without residents.
+        }
+    }
+    std::reverse(schedule.due.begin(), schedule.due.end());
+    for (const auto& [id, chunk] : rebuilt) {
+        bool eligible = !chunk->has_water_sim.load() ||
+                        chunk->current_water_resolution.load() != resolution ||
+                        !chunk->is_water_sleeping.load() || raining || source_targets.contains(id);
+        for (const auto offset : offsets) {
+            const auto neighbor = neighbor_of(*chunk, offset);
+            if (neighbor != rebuilt.end() && neighbor->second->has_water_sim.load() &&
+                !neighbor->second->is_water_sleeping.load())
+                eligible = true;
+        }
+        if (eligible)
+            expected_candidates.at(owner_of(*chunk)).push_back(id);
+    }
+    for (const auto id : source_targets) {
+        if (auto* entry = cache.Find(id))
+            entry->source = true;
+    }
+    cache.PlanCandidates(ledger, schedule, raining);
+    ASSERT_EQ(cache.claims.size(), expected_candidates.size());
+    std::size_t claim = 0;
+    for (const auto& [owner, ids] : expected_candidates) {
+        EXPECT_EQ(cache.claims[claim].key, owner);
+        EXPECT_EQ(cache.claims[claim++].awake, ids.size());
+        std::vector<ChunkID> actual;
+        if (const auto* group = cache.FindCandidates(owner)) {
+            for (const auto index : group->ids)
+                actual.push_back(cache.entries.at(index).id);
+        }
+        EXPECT_EQ(actual, ids);
+    }
+}
+
+TEST_F(RegionalWaterFixture, CachedTopologyFacesAndCandidatesMatchScratchAcrossAdmissionAndChurn) {
+    Owner({0, 0});
+    Owner({1, 0});
+    Owner({-1, -1});
+    Owner({0, -1});
+    Owner({32767, 0});
+    Owner({-32768, 0});
+    Owner({9, 9}); // Due owner with no resident candidates.
+    auto a = WaterChunk({31, 0, 0}), b = WaterChunk({32, 0, 0});
+    chunks = {a,
+              b,
+              WaterChunk({31, 0, 1}),
+              WaterChunk({32, 0, 1}),
+              WaterChunk({-1, 0, -1}),
+              WaterChunk({0, 0, -1}),
+              WaterChunk({1048575, 0, 0}),
+              WaterChunk({-1048576, 0, 0}),
+              WaterChunk({64, 0, 0}), // Unknown owner until admitted below.
+              nullptr};
+    Systems::RegionalWater::PlanningCache cache;
+    for (int step = 0; step < 14; ++step) {
+        SCOPED_TRACE(step);
+        auto& records =
+            const_cast<std::map<RegionKey, world::ActiveRegionRecord>&>(ledger.records());
+        if (step == 1)
+            std::reverse(chunks.begin(), chunks.end());
+        if (step == 2)
+            std::erase(chunks, b); // Park, retaining durable identity outside residency.
+        if (step == 3)
+            chunks.push_back(b); // Unpark the same object.
+        if (step == 4) {
+            const auto found = std::find(chunks.begin(), chunks.end(), b);
+            b = WaterChunk({32, 0, 0}, 333); // Same ID, replacement live object.
+            *found = b;
+        }
+        if (step == 5) {
+            const auto found = std::find(chunks.begin(), chunks.end(), b);
+            b = WaterChunk({33, 0, 0}, 111); // Changed packed identity/face membership.
+            *found = b;
+        }
+        if (step == 6)
+            a->set_state(ChunkState::Loading);
+        if (step == 7)
+            a->set_state(ChunkState::Idle);
+        if (step == 8)
+            records.at({1, 0}).state = RegionState::Frozen;
+        if (step == 9)
+            records.at({1, 0}).state = RegionState::Reduced;
+        if (step == 10)
+            Owner({2, 0});
+        for (const auto& chunk : chunks) {
+            if (chunk)
+                chunk->is_water_sleeping.store(step % 3 != 0);
+        }
+        a->is_water_sleeping.store(false); // One-hop wake next to sleepers.
+        if (step == 13) {
+            // Admission/preparation flags must be fresh even with unchanged topology.
+            a->has_water_sim.store(false);
+            a->water_depth_mm.clear();
+            a->water_bed_mm.clear();
+            a->water_edge_flux.clear();
+            a->water_level_data.clear();
+            a->water_flow_data.clear();
+            a->water_sim_terrain_height.clear();
+        }
+        const auto* entries_before = cache.entries.data();
+        const auto* faces_before = cache.faces.data();
+        const int resolution = step == 11 ? 16 : 8;
+        cache.Refresh(chunks, ledger, resolution);
+        ASSERT_NO_FATAL_FAILURE(
+            CheckPlanningOracle(cache, chunks, ledger, resolution, step == 12, {b->get_id()}));
+        if (step == 1 || step >= 8) {
+            // A permutation, freeze/thaw, new owner, config or flag refresh does
+            // not sort/reallocate geometry; filtering retains scratch face order.
+            EXPECT_EQ(cache.entries.data(), entries_before);
+            EXPECT_EQ(cache.faces.data(), faces_before);
+        }
+    }
+    const auto duplicate = chunks;
+    chunks.push_back(b);
+    EXPECT_THROW(cache.Refresh(chunks, ledger, 8), std::runtime_error);
+    chunks = duplicate;
+    cache.Refresh(chunks, ledger, 8);
+    ASSERT_NO_FATAL_FAILURE(CheckPlanningOracle(cache, chunks, ledger, 8, false, {}));
+}
+
+TEST_F(RegionalWaterFixture, WarmPlanningCacheStillValidatesUnselectedWaterAndRefusesAtomically) {
+    Owner({0, 0});
+    ledger.pin({0, 0}, true, WorldClock{});
+    auto a = WaterChunk({0, 0, 0}), b = WaterChunk({4, 0, 0});
+    chunks = {a, b};
+    Step(2, {{0, 0}}); // Populate topology and transaction buffers first.
+    for (int fault = 0; fault < 9; ++fault) {
+        SCOPED_TRACE(fault);
+        WorldClock clock;
+        clock.set_tick(static_cast<std::uint64_t>(fault + 1));
+        auto schedule = ledger.schedule(clock, std::span<const Vec3>{});
+        schedule.due = {{0, 0}};
+        b->is_water_sleeping.store(true); // Off-window state still requires validation.
+        const auto valid = CaptureWater(*b);
+        const float infinity = std::numeric_limits<float>::infinity();
+        switch (fault) {
+            case 0:
+                b->water_depth_mm[0] = -1;
+                break;
+            case 1:
+                b->water_level_data[0] = infinity;
+                break;
+            case 2:
+                b->water_flow_data[0].y = infinity;
+                break;
+            case 3:
+                b->water_sim_terrain_height[0] = infinity;
+                break;
+            case 4:
+                b->ticks_below_threshold = -1;
+                break;
+            case 5:
+                b->water_mesh_dirty_ticks = 16;
+                break;
+            case 6:
+                b->max_water_delta_last_tick = infinity;
+                break;
+            case 7:
+                b->current_water_resolution.store(3);
+                break;
+            case 8:
+                b->water_flow_data.pop_back();
+                break;
+        }
+        const auto before_a = CaptureWater(*a), before_b = CaptureWater(*b);
+        const auto encoded = ledger.encode();
+        const auto telemetry = water.regional_work();
+        const auto revision = shield.far_lod_authority_revision();
+        const auto completed = work;
+        EXPECT_THROW(water.UpdateRegional(registry, chunks, ledger, schedule, work, kCapacity),
+                     std::runtime_error);
+        EXPECT_EQ(CaptureWater(*a), before_a);
+        EXPECT_EQ(CaptureWater(*b), before_b);
+        EXPECT_EQ(ledger.encode(), encoded);
+        EXPECT_EQ(water.regional_work(), telemetry);
+        EXPECT_EQ(shield.far_lod_authority_revision(), revision);
+        ASSERT_EQ(work.size(), completed.size());
+        for (std::size_t i = 0; i < work.size(); ++i) {
+            EXPECT_EQ(work[i].key, completed[i].key);
+            EXPECT_EQ(work[i].region_ticks, completed[i].region_ticks);
+            EXPECT_EQ(work[i].entity_updates, completed[i].entity_updates);
+            EXPECT_EQ(work[i].water_cells, completed[i].water_cells);
+            EXPECT_EQ(work[i].page_updates, completed[i].page_updates);
+        }
+        b->water_depth_mm = valid.depth;
+        b->water_level_data = valid.level;
+        b->water_flow_data = valid.flow;
+        b->water_sim_terrain_height = valid.terrain;
+        b->ticks_below_threshold = valid.calm;
+        b->water_mesh_dirty_ticks = valid.mesh_ticks;
+        b->max_water_delta_last_tick = valid.delta;
+        b->current_water_resolution.store(valid.resolution);
+        // Retry the refused tick with the same identities; no poisoned derived flags.
+        EXPECT_NO_THROW(water.UpdateRegional(registry, chunks, ledger, schedule, work, kCapacity));
+    }
+}
+
+TEST_F(RegionalWaterFixture, SameRosterLateRefusalRetryMatchesFreshCacheCompleteOutputs) {
+    Owner({0, 0});
+    Owner({1, 0});
+    auto a = WaterChunk({31, 0, 0}), b = WaterChunk({32, 0, 0});
+    chunks = {a, b};
+    const auto roster = chunks; // Keep both object identities alive through refusal and retry.
+    std::vector<std::shared_ptr<Chunk>> reference{WaterChunk(a->get_coords()),
+                                                  WaterChunk(b->get_coords())};
+    Systems::SHIELD_WorldSystem reference_shield(
+        nullptr, nullptr, Systems::TerrainGenParams{}, 1337);
+    auto reference_ledger = ledger;
+    std::vector<world::RegionWork> reference_work;
+    {
+        // Warm both worlds identically; only the actual system retains its cache.
+        Systems::WaterSystem warm_reference(nullptr, &reference_shield);
+        water.SetHydrology(true, 1, 0);
+        warm_reference.SetHydrology(true, 1, 0);
+        RegionSchedule warm_schedule;
+        warm_schedule.tick = ledger.tick();
+        warm_schedule.due = {{0, 0}, {1, 0}};
+        water.UpdateRegional(registry, chunks, ledger, warm_schedule, work, 4 * kCapacity);
+        warm_reference.UpdateRegional(
+            registry, reference, reference_ledger, warm_schedule, reference_work, 4 * kCapacity);
+    }
+    // Preserve non-water contributions too, checking every completed-work field.
+    const world::RegionWork prior_work{{0, 0}, 2, 3, 5, 7};
+    work.push_back(prior_work);
+    reference_work.push_back(prior_work);
+    const auto capture_work = [](const auto& completed) {
+        std::vector<
+            std::tuple<RegionKey, std::uint64_t, std::uint64_t, std::uint64_t, std::uint64_t>>
+            state;
+        for (const auto& entry : completed)
+            state.emplace_back(entry.key,
+                               entry.region_ticks,
+                               entry.entity_updates,
+                               entry.water_cells,
+                               entry.page_updates);
+        return state;
+    };
+    const auto capture_telemetry = [](const Systems::WaterSystem& system) {
+        return std::make_tuple(system.regional_work(),
+                               system.debug_sources_seen(),
+                               system.debug_source_injected_mm(),
+                               system.dbg_last_source_mm(),
+                               system.dbg_last_sink_mm(),
+                               system.dbg_mass_ok(),
+                               system.dbg_seam_wet_pairs(),
+                               system.dbg_awake_water_chunks(),
+                               system.dbg_cells_simmed(),
+                               system.cells_stepped_last_update());
+    };
+    const auto capture_authority = [](const Systems::SHIELD_WorldSystem& system) {
+        return std::make_tuple(system.far_lod_authority_revision(),
+                               system.far_lod_region_authority_revision(0, 0),
+                               system.far_lod_region_authority_revision(1, 0));
+    };
+    const auto save_bytes = [](const auto& residents) {
+        WorldStreamingState saved;
+        for (const auto& chunk : residents)
+            EXPECT_TRUE(saved.insert_chunk(chunk));
+        return Persistence::SerializeWorldStreamingStateSnapshotJson(saved);
+    };
+
+    water.SetHydrology(true, 0, 0);
+    Source({497, 0, 1});
+    auto schedule = ledger.schedule(WorldClock(1), std::span<const Vec3>{});
+    schedule.due = {{0, 0}, {1, 0}};
+    reference_ledger = ledger;
+    const auto valid_a = CaptureWater(*a), valid_b = CaptureWater(*b);
+    ASSERT_EQ(valid_a, CaptureWater(*reference[0]));
+    ASSERT_EQ(valid_b, CaptureWater(*reference[1]));
+    ASSERT_EQ(save_bytes(chunks), save_bytes(reference));
+    ASSERT_EQ(capture_work(work), capture_work(reference_work));
+    ASSERT_EQ(capture_authority(shield), capture_authority(reference_shield));
+
+    // Both interior kernels and the ECS injection succeed, mutating reused payloads.
+    // The face then changes A's flux/depth before overflowing the full destination B.
+    a->water_bed_mm.assign(64, std::numeric_limits<std::int32_t>::max());
+    b->water_bed_mm.assign(64, 1); // Above sea level, so B's interior cannot drain the fault.
+    b->water_depth_mm.assign(64, std::numeric_limits<std::int32_t>::max());
+    const auto refused_a = CaptureWater(*a), refused_b = CaptureWater(*b);
+    const auto encoded = ledger.encode();
+    const auto telemetry = capture_telemetry(water);
+    const auto authority = capture_authority(shield);
+    const auto completed = capture_work(work);
+    try {
+        water.UpdateRegional(registry, chunks, ledger, schedule, work, 4 * kCapacity);
+        FAIL() << "Expected a late shared-face depth overflow";
+    } catch (const std::runtime_error& error) {
+        EXPECT_STREQ(error.what(), "Regional water depth overflow");
+    }
+    EXPECT_EQ(CaptureWater(*a), refused_a);
+    EXPECT_EQ(CaptureWater(*b), refused_b);
+    EXPECT_EQ(ledger.encode(), encoded);
+    EXPECT_EQ(capture_telemetry(water), telemetry);
+    EXPECT_EQ(capture_authority(shield), authority);
+    EXPECT_EQ(capture_work(work), completed);
+
+    // Repair only the injected fault, preserving the complete topology and identities.
+    a->water_bed_mm = valid_a.bed;
+    b->water_bed_mm = valid_b.bed;
+    b->water_depth_mm = valid_b.depth;
+    ASSERT_EQ(chunks, roster);
+    ASSERT_EQ(CaptureWater(*a), valid_a);
+    ASSERT_EQ(CaptureWater(*b), valid_b);
+    Systems::WaterSystem cold(nullptr, &reference_shield);
+    cold.SetHydrology(true, 0, 0);
+    water.UpdateRegional(registry, chunks, ledger, schedule, work, 4 * kCapacity);
+    cold.UpdateRegional(
+        registry, reference, reference_ledger, schedule, reference_work, 4 * kCapacity);
+    EXPECT_EQ(chunks, roster);
+    for (std::size_t i = 0; i < chunks.size(); ++i) {
+        EXPECT_EQ(CaptureWater(*chunks[i]), CaptureWater(*reference[i]));
+        EXPECT_EQ(chunks[i]->water_source_inputs, reference[i]->water_source_inputs);
+    }
+    EXPECT_EQ(save_bytes(chunks), save_bytes(reference));
+    EXPECT_EQ(ledger.encode(), reference_ledger.encode());
+    EXPECT_EQ(capture_work(work), capture_work(reference_work));
+    EXPECT_EQ(capture_telemetry(water), capture_telemetry(cold));
+    EXPECT_EQ(capture_authority(shield), capture_authority(reference_shield));
+}
+
+TEST_F(RegionalWaterFixture, ReadmittedCachedResidentIsValidatedBeforeAnyPublication) {
+    Owner({0, 0});
+    Owner({1, 0});
+    chunks = {WaterChunk({31, 0, 0}), WaterChunk({32, 0, 0})};
+    auto& records = const_cast<std::map<RegionKey, world::ActiveRegionRecord>&>(ledger.records());
+    records.at({1, 0}).state = RegionState::Frozen;
+    chunks[1]->water_depth_mm[0] = -1;
+    Step(1, {{0, 0}}); // The frozen resident's payload is sealed, its geometry is cached.
+    WorldClock clock;
+    clock.set_tick(1);
+    auto schedule = ledger.schedule(clock, std::span<const Vec3>{});
+    records.at({1, 0}).state = RegionState::Active;
+    schedule.due = {{0, 0}, {1, 0}};
+    const auto a = CaptureWater(*chunks[0]), b = CaptureWater(*chunks[1]);
+    const auto encoded = ledger.encode();
+    const auto telemetry = water.regional_work();
+    const auto revision = shield.far_lod_authority_revision();
+    const auto completed_size = work.size();
+    EXPECT_THROW(water.UpdateRegional(registry, chunks, ledger, schedule, work, 4 * kCapacity),
+                 std::runtime_error);
+    EXPECT_EQ(CaptureWater(*chunks[0]), a);
+    EXPECT_EQ(CaptureWater(*chunks[1]), b);
+    EXPECT_EQ(ledger.encode(), encoded);
+    EXPECT_EQ(water.regional_work(), telemetry);
+    EXPECT_EQ(shield.far_lod_authority_revision(), revision);
+    EXPECT_EQ(work.size(), completed_size);
+    chunks[1]->water_depth_mm[0] = 1000;
+    EXPECT_NO_THROW(water.UpdateRegional(registry, chunks, ledger, schedule, work, 4 * kCapacity));
+}
 
 TEST_F(RegionalWaterFixture, UninitializedAndOldResolutionClaimsEarnPreparationAndOneKernel) {
     Owner({0, 0});
