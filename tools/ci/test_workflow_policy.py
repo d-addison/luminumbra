@@ -142,9 +142,13 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
 
     def test_other_heavy_jobs_still_skip_drafts_and_keep_routed_skips(self):
         ci = jobs(self.workflows["ci.yml"])
-        for job_id in ("gns-compile-probe", "diligent-rhi", "windows-msvc", "tidy"):
+        for job_id in ("gns-compile-probe", "diligent-rhi", "windows-msvc", "tidy-shard"):
             with self.subTest(job=job_id):
                 self.assertEqual(value(ci[job_id], "if", 4), READY)
+        # The aggregator keeps the required check name and must report skipped
+        # or failed shards, so it runs on always() but still excludes drafts.
+        self.assertEqual(value(ci["tidy"], "if", 4), f"always() && ({READY})")
+        self.assertEqual(value(ci["tidy"], "needs", 4), "tidy-shard")
         self.assertEqual(value(ci["windows-ucrt64"], "if", 4), f"({READY}) && ({UCRT_ROUTE})")
         perf = jobs(self.workflows["performance.yml"])
         self.assertEqual(value(perf["server-smoke-comparison"], "if", 4), f"({READY}) && {SERVER_ROUTE}")
