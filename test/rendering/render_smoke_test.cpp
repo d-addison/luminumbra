@@ -5319,7 +5319,7 @@ TEST(RenderSmokeTest, FarWorldCanonicalArrivalOwnsTileEdgesAndUpperSpan) {
             SCOPED_TRACE(::testing::Message() << "axis=" << axis << " translation=" << translation);
             glm::vec3 local(600, 264, 600);
             local[axis] = axis == 1 ? 512.0f : 0.0f;
-            // R1.1/Q20: lower XZ tile edges are included. Built Y samples
+            // Lower XZ tile edges are included. Built Y samples
             // include the upper span boundary (docs/far-volume-generation.md).
             EXPECT_EQ(probe.TileBoundary(origin, local, camera, axis, {}, true, child_y), 0);
             auto inside = local;
