@@ -104,6 +104,9 @@ protected:
         registry.emplace<Components::TransformComponent>(entity).position = position;
         registry.emplace<Components::WaterFlowSourceComponent>(entity).flow_rate = rate;
     }
+    void CheckColdStagingTransactions();
+    void CheckFlatStagingOracle();
+
     Systems::SHIELD_WorldSystem shield;
     Systems::WaterSystem water;
     ActiveRegionLedger ledger;
@@ -807,9 +810,27 @@ TEST(RegionalWaterPersistence, StrictDecodeRejectsMalformedAuthorityAndKeepsLega
               CaptureWater(*state.find_chunk(old_resolution->get_id())));
 }
 
-} // namespace
+void ReloadWaterResidents(std::vector<std::shared_ptr<Chunk>>& chunks,
+                          std::vector<std::shared_ptr<Chunk>>& reference) {
+    WorldStreamingState saved;
+    for (const auto& chunk : chunks)
+        ASSERT_TRUE(saved.insert_chunk(chunk));
+    const auto bytes = Persistence::SerializeWorldStreamingStateSnapshotJson(saved);
+    WorldStreamingState loaded, reference_loaded;
+    std::vector<std::string> errors;
+    ASSERT_TRUE(Persistence::LoadWorldStreamingStateSnapshotJson(bytes, loaded, errors, true));
+    ASSERT_TRUE(
+        Persistence::LoadWorldStreamingStateSnapshotJson(bytes, reference_loaded, errors, true));
+    for (std::size_t i = 0; i < chunks.size(); ++i) {
+        const auto id = chunks[i]->get_id();
+        chunks[i] = loaded.find_chunk(id);
+        reference[i] = reference_loaded.find_chunk(id);
+        ASSERT_NE(chunks[i], nullptr);
+        ASSERT_NE(reference[i], nullptr);
+    }
+}
 
-TEST_F(RegionalWaterFixture, ReusedStagingMatchesIndependentOracleAndColdTransactions) {
+void RegionalWaterFixture::CheckColdStagingTransactions() {
     ledger = ActiveRegionLedger({0, 1, 2});
     Owner({0, 0});
     Owner({1, 0});
@@ -857,25 +878,8 @@ TEST_F(RegionalWaterFixture, ReusedStagingMatchesIndependentOracleAndColdTransac
             chunks[0] = WaterChunk({31, 0, 0}, 600);
             reference[0] = WaterChunk({31, 0, 0}, 600);
         }
-        if (tick == 8) {
-            WorldStreamingState saved;
-            for (const auto& chunk : chunks)
-                ASSERT_TRUE(saved.insert_chunk(chunk));
-            const auto bytes = Persistence::SerializeWorldStreamingStateSnapshotJson(saved);
-            WorldStreamingState loaded, reference_loaded;
-            std::vector<std::string> errors;
-            ASSERT_TRUE(
-                Persistence::LoadWorldStreamingStateSnapshotJson(bytes, loaded, errors, true));
-            ASSERT_TRUE(Persistence::LoadWorldStreamingStateSnapshotJson(
-                bytes, reference_loaded, errors, true));
-            for (std::size_t i = 0; i < chunks.size(); ++i) {
-                const auto id = chunks[i]->get_id();
-                chunks[i] = loaded.find_chunk(id);
-                reference[i] = reference_loaded.find_chunk(id);
-                ASSERT_NE(chunks[i], nullptr);
-                ASSERT_NE(reference[i], nullptr);
-            }
-        }
+        if (tick == 8)
+            ASSERT_NO_FATAL_FAILURE(ReloadWaterResidents(chunks, reference));
         if (tick == 9) {
             chunks.pop_back();
             reference.pop_back();
@@ -909,7 +913,9 @@ TEST_F(RegionalWaterFixture, ReusedStagingMatchesIndependentOracleAndColdTransac
         EXPECT_EQ(shield.far_lod_authority_revision(),
                   reference_shield.far_lod_authority_revision());
     }
+}
 
+void RegionalWaterFixture::CheckFlatStagingOracle() {
     // Independent closed-form oracle for the pre-reuse semantics: a flat isolated
     // grid has zero surface differences and therefore zero flux. Each cell gains
     // exactly the uniform rain plus its cached source, with no sink above sea.
@@ -987,4 +993,11 @@ TEST_F(RegionalWaterFixture, ReusedStagingMatchesIndependentOracleAndColdTransac
         EXPECT_EQ(actual_work[0].key, (RegionKey{0, 0}));
         EXPECT_EQ(actual_work[0].water_cells, cells);
     }
+}
+
+} // namespace
+
+TEST_F(RegionalWaterFixture, ReusedStagingMatchesIndependentOracleAndColdTransactions) {
+    ASSERT_NO_FATAL_FAILURE(CheckColdStagingTransactions());
+    ASSERT_NO_FATAL_FAILURE(CheckFlatStagingOracle());
 }

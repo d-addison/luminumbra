@@ -254,7 +254,7 @@ TEST(FoliageFieldPages, FlatSnapshotsMatchScalarEvolutionAfterEditsLoadAndCadenc
             reg.emplace<C::PlantGrowthComponent>(e).stage = 3;
             reg.emplace<C::SoilFeederComponent>(e).uptake = 137;
             const auto owner = ActiveRegionLedger::region_at(position);
-            reg.emplace<C::PlantRegionComponent>(e, ++id, owner.x, owner.z, 0);
+            reg.emplace<C::PlantRegionComponent>(e, ++id, owner.x, owner.z, std::uint64_t{0});
             reg.emplace<C::WaterSourceComponent>(e).output = 1234;
         }
         return reg;
