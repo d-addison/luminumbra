@@ -7,6 +7,8 @@
 //   (seed, params_hash, tier, region); edited tiles are authoritative.
 #include "gtest/gtest.h"
 
+#include "../support/UniqueTempPath.h"
+
 #include "persistence/WorldSaveService.h"
 #include "systems/SHIELD_WorldSystem.h"
 #include "world/FarLodStore.h"
@@ -14,7 +16,6 @@
 #include "world/WorldStreamingState.h"
 
 #include <algorithm>
-#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -67,10 +68,9 @@ TerrainGenParams FixtureParams() {
 }
 
 std::filesystem::path MakeTempSaveDir(const std::string& tag) {
-    const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
-    const std::filesystem::path dir = std::filesystem::temp_directory_path() /
-                                      ("luminumbra_farlod_" + tag + "_" + std::to_string(stamp));
-    std::filesystem::create_directories(dir);
+    const std::filesystem::path dir =
+        Luminumbra::TestSupport::CreateUniqueTempDirectory("luminumbra_farlod_" + tag + "_");
+
     return dir;
 }
 

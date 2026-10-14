@@ -6,6 +6,8 @@
 #include <optional>
 
 #include "../../include/luminumbra/core/Types.h"
+#include "FarWorldRenderer.h"
+#include "FarWorldReplay.h"
 #include "FrameBufferObject.h" // FrameBufferObject (extracted)
 #include "GBuffer.h"           // GBuffer (extracted)
 #include "Mesh.h"
@@ -115,6 +117,26 @@ struct WaterRenderData {
     u32 vertex_capacity = 0;
     u32 index_capacity = 0;
     u32 frames_since_inactive = 0;
+    // Only a validated Ladder upload certifies this exact mesh version.
+    std::optional<u32> ladder_upload_version;
+
+    bool LadderUploadValid() const noexcept {
+        return vao_id != 0 && vbo_id != 0 && ebo_id != 0 && ladder_upload_version == mesh_version;
+    }
+
+    void SetLadderWaterUpload(FarWorldLiveUpload& upload,
+                              u32 snapshot_version,
+                              bool pass_enabled) const noexcept {
+        upload.water_snapshot_version = snapshot_version;
+        upload.water_uploaded_version = mesh_version;
+        upload.water_uploaded_indices = element_count;
+        upload.water_valid_allocation = LadderUploadValid();
+        upload.water_pass_eligible = LadderWaterPassEligible(snapshot_version,
+                                                             mesh_version,
+                                                             element_count,
+                                                             upload.water_valid_allocation,
+                                                             pass_enabled);
+    }
 };
 
 // FrameBufferObject moved to FrameBufferObject.h (included above). Definition unchanged.
@@ -791,6 +813,27 @@ public:
     // Drains in-flight far tile builds (they sample the world system). MUST
     // run before the currently bound world is destroyed/recreated.
     void prepare_world_swap();
+    // Internal, non-persisted request. Normal worlds retain a typed refusal until
+    // immutable committed authority is available. Fixtures bind explicitly.
+    void set_far_world_mode(FarWorldMode requested);
+    // Startup/world-entry policy; runtime changes first reset history via
+    // set_far_world_mode. Returns the resolved request for caller diagnostics.
+    FarWorldCavePolicy set_far_world_cave_policy(std::optional<World::FarCaveMode> requested);
+    const FarWorldRenderer& far_world_renderer() const {
+        return *m_far_world;
+    }
+    const FarWorldDiagnosticSnapshot& far_world_diagnostic() const {
+        return m_far_world->Diagnostic();
+    }
+    void set_far_world_submission(bool submit) {
+        m_far_world_submission = submit;
+    }
+    // Same prepared frame; no frame increment, scheduler, live publication or epilogue.
+    // TAAU reads frozen ON history into scratch; all entry state is restored.
+    bool render_far_world_off_pair(const Camera& camera);
+    FarWorldSelection far_world_selection() const {
+        return m_frame_far_selection;
+    }
     FarLodSystem* farlod() {
         return m_farlod.get();
     }
@@ -881,6 +924,7 @@ private:
     friend struct TerrainCullingTestPeer;
     friend struct TextureFileTestPeer;
     friend struct RenderClockTestPeer;
+    friend struct WaterUploadTestPeer;
     // Extracted render pass classes. Passes own their GL resources
     // (FBOs/textures/shaders); the pipeline keeps orchestration order, shared
     // state, stats collection, and GPU timer issue/collect calls.
@@ -971,8 +1015,10 @@ private:
         Systems::SHIELD_WorldSystem* world_system = nullptr;
         float delta_time = 0.0f;
         bool wireframe = false;
+        float far_plane = World::kLegacyFarPlaneMeters;
         glm::mat4 projection{1.0f};
         glm::mat4 view{1.0f};
+        FarReplayCamera replay_camera;
         glm::vec4 frustum_planes[6]{};
         std::vector<ChunkMeshSnapshot> renderable_chunk_snapshots;
         bool valid = false;
@@ -983,6 +1029,7 @@ private:
                        float deltaTime,
                        bool wireframe);
     void dispatch_stages(const Camera& camera);
+    FarReplayCamera replay_camera(const Camera& camera) const;
 
     using StageExecutorFn = void (RenderPipeline::*)(const Camera&);
     // node name -> extracted stage body, authored order.
@@ -1237,6 +1284,14 @@ private:
     // render-only lightning pulse + bolt state for the current frame.
     LightningRenderState m_lightning_state;
     std::unique_ptr<FarLodSystem> m_farlod;
+    std::unique_ptr<FarWorldRenderer> m_far_world;
+    FarWorldSelection m_frame_far_selection;
+    std::uint64_t m_far_world_frame = 0;
+    bool m_far_world_preview = false;
+    bool m_far_world_submission = true, m_far_world_advanced = false, m_far_world_paired = false;
+    std::uint64_t m_far_world_epoch = 1;
+    glm::mat4 m_far_world_pair_prev_view_proj{1.0f};
+    float m_far_world_pair_prev_time = 0;
     std::unique_ptr<GBufferPass> m_gbuffer_pass;
     std::unique_ptr<ShadowPass> m_shadow_pass;
     std::unique_ptr<SsaoPass> m_ssao_pass;
@@ -1277,7 +1332,13 @@ private:
     std::shared_ptr<const StaticDrawSnapshot> m_authored_draws;
     std::unique_ptr<RenderView> m_authored_view;
     glm::vec2 m_taau_jitter_ndc =
-        glm::vec2(0.0f);        // current-frame sub-pixel projection jitter (NDC); (0,0) when OFF
+        glm::vec2(0.0f); // current-frame sub-pixel projection jitter (NDC); (0,0) when OFF
+    TaauHistoryState m_far_world_pair_taau;
+    TaauHistoryState m_far_world_pair_taau_after;
+    bool m_far_world_pair_taau_enabled = false;
+    unsigned m_far_world_pair_jitter_frame = 0;
+    glm::vec2 m_far_world_pair_jitter{0.0f};
+    std::size_t m_far_world_pair_mdi_cursor = 0;
     unsigned m_taau_frame = 0u; // Halton sequence index
     // Screen-space crepuscular rays (god rays). Additive pass over the lit scene when
     // the sun is above the horizon + on screen. Render-only.
@@ -1343,6 +1404,9 @@ private:
 
     // the prepared per-frame state dispatch_stages reads (see prepare_frame).
     FramePrepared m_frame_prepared;
+    void select_frame_far_world(FarWorldSelection selection, const Camera& camera);
+    void prepare_camera_projection(const Camera& camera);
+    nlohmann::json terrain_coverage_camera_metadata() const;
     // the lighting ctx built by execute_stage_lighting, reused by the
     // opaque-snapshot and lightning-overlay stages (its fields are frame-stable —
     // the pre-split code built it once at function scope for exactly this reuse).
@@ -1721,6 +1785,7 @@ private:
         glm::vec3 lastCameraPos;
         glm::vec3 lastCameraFront;
         float lastZoom = 0.0f;
+        float lastFarPlane = World::kLegacyFarPlaneMeters;
         bool valid = false;
     } m_frustumCache;
 };

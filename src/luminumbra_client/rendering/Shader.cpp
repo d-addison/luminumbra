@@ -1,4 +1,6 @@
 #include "Shader.h"
+#include "FarWorldReplay.h"
+#include "ShaderSource.h"
 #include "core/Log.h"
 #include "luminumbra_common/core/FilesystemPath.h"
 #include <algorithm>
@@ -25,7 +27,7 @@ bool LoadShaderSourceRecursive(const std::filesystem::path& path,
         return false;
     }
 
-    std::ifstream input(normalized);
+    std::ifstream input(normalized, std::ios::binary);
     if (!input) {
         diagnostic = "cannot open shader source: " + key;
         include_stack.erase(key);
@@ -34,15 +36,21 @@ bool LoadShaderSourceRecursive(const std::filesystem::path& path,
 
     std::string line;
     while (std::getline(input, line)) {
+        const bool has_newline = !input.eof();
+        std::string_view directive(line);
+        if (has_newline && directive.ends_with('\r'))
+            directive.remove_suffix(1);
         constexpr std::string_view prefix = "#include \"";
-        const std::size_t begin = line.find(prefix);
+        const std::size_t begin = directive.find(prefix);
         if (begin == std::string::npos) {
-            output.append(line).push_back('\n');
+            output.append(line);
+            if (has_newline)
+                output.push_back('\n');
             continue;
         }
         const std::size_t name_begin = begin + prefix.size();
-        const std::size_t name_end = line.find('"', name_begin);
-        if (begin != 0 || name_end == std::string::npos || name_end + 1 != line.size()) {
+        const std::size_t name_end = directive.find('"', name_begin);
+        if (begin != 0 || name_end == std::string::npos || name_end + 1 != directive.size()) {
             diagnostic = "malformed shader include in " + key + ": " + line;
             include_stack.erase(key);
             return false;
@@ -53,6 +61,8 @@ bool LoadShaderSourceRecursive(const std::filesystem::path& path,
             include_stack.erase(key);
             return false;
         }
+        if (has_newline && !output.ends_with('\n'))
+            output += line.ends_with('\r') ? "\r\n" : "\n";
     }
     include_stack.erase(key);
     return true;
@@ -75,6 +85,15 @@ GLuint Shader::buildProgram(const char* vertexPath, const char* fragmentPath) {
         LUMINUMBRA_CORE_ERROR(
             "SHADER IO ERROR ({} / {}): {}", vertexPath, fragmentPath, m_diagnostic);
         return 0;
+    }
+
+    // The same lexer and retained defines apply to initial link and every reload.
+    for (auto* source : {&vertexCode, &fragmentCode}) {
+        if (!InjectShaderDefines(*source, m_defines, m_diagnostic)) {
+            LUMINUMBRA_CORE_ERROR(
+                "SHADER SOURCE ERROR ({} / {}): {}", vertexPath, fragmentPath, m_diagnostic);
+            return 0;
+        }
     }
 
     const char* vShaderCode = vertexCode.c_str();
@@ -125,8 +144,10 @@ GLuint Shader::buildProgram(const char* vertexPath, const char* fragmentPath) {
 
 Shader::Shader(const char* vertexPath,
                const char* fragmentPath,
-               std::vector<std::string> feedback_varyings)
-    : m_feedback_varyings(std::move(feedback_varyings)) {
+               std::vector<std::string> feedback_varyings,
+               std::vector<std::string> defines)
+    : m_feedback_varyings(std::move(feedback_varyings))
+    , m_defines(std::move(defines)) {
     m_debug_name = std::string(vertexPath) + " | " + fragmentPath;
     m_vertex_path = vertexPath;
     m_fragment_path = fragmentPath;
@@ -140,6 +161,7 @@ Shader::Shader(const char* vertexPath,
     // introspect the resource layout once at link time.
     m_reflected = ReflectProgramLayout(m_id);
     m_valid = true;
+    ++m_program_generation;
 }
 
 Shader::~Shader() {
@@ -148,8 +170,10 @@ Shader::~Shader() {
 }
 
 void Shader::use() const {
-    if (m_id)
+    if (m_id) {
+        PreserveReplayObject(ReplayObjectKind::Program, m_id);
         glUseProgram(m_id);
+    }
 }
 
 // validate the bindings a pass adopts against the reflected layout.
@@ -206,6 +230,7 @@ bool Shader::Reload() {
     m_reflected = candidate_layout;
     m_uniformLocationCache.clear();
     m_valid = true;
+    ++m_program_generation;
     LUMINUMBRA_CORE_INFO("[shader-reload] {} reloaded (id {}).", m_debug_name, m_id);
     return true;
 }
