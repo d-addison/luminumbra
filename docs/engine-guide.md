@@ -484,8 +484,10 @@ client and `Luminumbra::Server::ServerWorldRunner` do.
 
 ## Shipping defaults
 
-All registered `sim.*` and `render.*` SystemConfig gates are enabled in both the
-compiled mask and `data/common/systems.json`. Missing or malformed enabled fields
+All registered `sim.*` and `render.*` SystemConfig gates except
+`render.far_world_ladder` are enabled in both the compiled mask and
+`data/common/systems.json`. The far-world ladder stays opt-in until its separate
+default change lands. Missing or malformed enabled fields
 retain defaults; an explicit boolean false clears its bit. Simulation tuning
 selectors use the packaged tuning. `sim.erosion`, `render.moonlight` and
 `render.tree_wind` are declared gates without runtime activation consumers;
