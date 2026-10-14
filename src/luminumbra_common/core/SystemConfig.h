@@ -25,9 +25,31 @@
 
 namespace luminumbra::core {
 
+// Developer records are bounded during parsing; unknown stable ids survive overlays.
+// Runtime effects and session history are deliberately absent from this model.
+struct DeveloperBindingSetting {
+    int key = -1; // -1 explicitly unbound
+    int mods = 0;
+};
+struct DeveloperSettings {
+    static constexpr std::size_t kRecordLimit = 256;
+    static constexpr std::size_t kIdLimit = 128;
+    int schema_version = 1;
+    std::map<std::string, bool> widgets;
+    std::map<std::string, DeveloperBindingSetting> bindings;
+    bool WidgetVisible(const std::string& id, bool default_visible) const {
+        const auto it = widgets.find(id);
+        return it == widgets.end() ? default_visible : it->second;
+    }
+    bool PerfHudVisible() const {
+        return WidgetVisible("perf.hud", true);
+    }
+};
+
 // Player-facing settings (client-only; NEVER hashed). Persisted to a writable per-user
 // overlay (%APPDATA%/Luminumbra/settings.json).
 struct UserSettings {
+    DeveloperSettings developer;
     // video
     std::string resolution;                 // "" = native/default; else "WxH"
     std::string window_mode = "borderless"; // windowed | borderless | fullscreen

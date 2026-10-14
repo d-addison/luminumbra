@@ -8,6 +8,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <glm/glm.hpp>
 #include <optional>
 
@@ -57,6 +58,8 @@ public:
                      std::optional<glm::vec3> restored_walking_feet = std::nullopt);
 
     void Update(float deltaTime);
+    void SetLiveInputGate(std::function<bool(int)> gate);
+    void ClearQueuedLiveInput();
     void ApplyReplayInput(float deltaTime, const PlayerReplayInputFrame& inputFrame);
     PlayerReplaySnapshot CaptureReplaySnapshot() const;
     void ResetReplayFrameCounter(std::uint64_t frame = 0);
@@ -147,6 +150,7 @@ public:
     }
 
 private:
+    std::function<bool(int)> m_liveInputGate;
     PlayerReplayInputFrame ReadLiveInputFrame() const;
     void UpdateWalking(float deltaTime,
                        const glm::vec3& wishDir,

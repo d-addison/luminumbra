@@ -195,6 +195,9 @@ public:
         m_galleryImgPrefix = std::move(img_prefix);
     }
 
+    bool HasInputInteraction() const;
+    bool HasTextInputFocus() const;
+
     // Static GLFW callbacks that forward to the active manager instance
     static void KeyCallback(GLFWwindow* window, int key, int scancode, int action, int mods);
     static void CharCallback(GLFWwindow* window, unsigned int codepoint);

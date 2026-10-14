@@ -87,6 +87,18 @@ void PlayerController::RenderDebugUI() {
     ImGui::End();
 }
 
+void PlayerController::SetLiveInputGate(std::function<bool(int)> gate) {
+    m_liveInputGate = std::move(gate);
+}
+void PlayerController::ClearQueuedLiveInput() {
+    m_wantsToJump = false;
+    m_wantsToCrouch = false;
+    m_shutterRequested = false;
+    m_codexToggleRequested = false;
+    m_apertureNudge = m_focusNudge = m_shutterSpeedNudge = m_isoNudge = m_todNudge = 0.0f;
+    m_weatherCycle = 0;
+}
+
 void PlayerController::Update(float deltaTime) {
     ApplyReplayInput(deltaTime, ReadLiveInputFrame());
     m_wantsToJump = false;
@@ -95,6 +107,11 @@ void PlayerController::Update(float deltaTime) {
 
 PlayerReplayInputFrame PlayerController::ReadLiveInputFrame() const {
     PlayerReplayInputFrame input{};
+    const auto held = [&](InputAction action) {
+        const int code = key(action);
+        return (!m_liveInputGate || m_liveInputGate(code)) &&
+               glfwGetKey(m_window, code) == GLFW_PRESS;
+    };
 
     glm::vec3 wishDir(0.0f);
     glm::vec3 forward(m_camera->Front.x, 0.0f, m_camera->Front.z);
@@ -104,20 +121,20 @@ PlayerReplayInputFrame PlayerController::ReadLiveInputFrame() const {
 
     glm::vec3 right = m_camera->Right;
 
-    if (glfwGetKey(m_window, key(InputAction::MoveForward)) == GLFW_PRESS)
+    if (held(InputAction::MoveForward))
         wishDir += forward;
-    if (glfwGetKey(m_window, key(InputAction::MoveBack)) == GLFW_PRESS)
+    if (held(InputAction::MoveBack))
         wishDir -= forward;
-    if (glfwGetKey(m_window, key(InputAction::MoveLeft)) == GLFW_PRESS)
+    if (held(InputAction::MoveLeft))
         wishDir -= right;
-    if (glfwGetKey(m_window, key(InputAction::MoveRight)) == GLFW_PRESS)
+    if (held(InputAction::MoveRight))
         wishDir += right;
 
     if (m_mode == MovementMode::Noclip) {
-        if (glfwGetKey(m_window, key(InputAction::NoclipUp)) == GLFW_PRESS) {
+        if (held(InputAction::NoclipUp)) {
             wishDir += m_camera->WorldUp;
         }
-        if (glfwGetKey(m_window, key(InputAction::NoclipDown)) == GLFW_PRESS) {
+        if (held(InputAction::NoclipDown)) {
             wishDir -= m_camera->WorldUp;
         }
     }
@@ -125,7 +142,7 @@ PlayerReplayInputFrame PlayerController::ReadLiveInputFrame() const {
     input.wishDirection = wishDir;
     input.jumpPressed = m_wantsToJump;
     input.crouchPressed = m_wantsToCrouch;
-    input.sprintHeld = glfwGetKey(m_window, key(InputAction::Sprint)) == GLFW_PRESS;
+    input.sprintHeld = held(InputAction::Sprint);
     return input;
 }
 

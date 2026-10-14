@@ -333,12 +333,6 @@ void Rml_UIManager::Init(GLFWwindow* window, IAudioManager* audioManager) {
 
     Rml::Debugger::Initialise(m_context);
 
-    glfwSetKeyCallback(m_window, Rml_UIManager::KeyCallback);
-    glfwSetCharCallback(m_window, Rml_UIManager::CharCallback);
-    glfwSetMouseButtonCallback(m_window, Rml_UIManager::MouseButtonCallback);
-    glfwSetCursorPosCallback(m_window, Rml_UIManager::CursorPosCallback);
-    glfwSetScrollCallback(m_window, Rml_UIManager::ScrollCallback);
-
     LUMINUMBRA_CORE_INFO("UI Manager Initialized.");
 }
 
@@ -1501,16 +1495,39 @@ void Rml_UIManager::BindSettingsListeners(Rml::ElementDocument* document) {
     }
 }
 
+bool Rml_UIManager::HasInputInteraction() const {
+    if (!m_context)
+        return false;
+    const auto* focus = m_context->GetFocusElement();
+    if (!focus)
+        return false;
+    const auto& tag = focus->GetTagName();
+    // Documents and HUD containers may be focused without owning keyboard input.
+    return tag == "input" || tag == "textarea" || tag == "select" || tag == "button" ||
+           tag == "a" || focus->GetAttribute<Rml::String>("contenteditable", "") == "true";
+}
+
+bool Rml_UIManager::HasTextInputFocus() const {
+    const auto* focus = m_context ? m_context->GetFocusElement() : nullptr;
+    if (!focus)
+        return false;
+    const auto& tag = focus->GetTagName();
+    if (tag == "textarea" || focus->GetAttribute<Rml::String>("contenteditable", "") == "true")
+        return true;
+    if (tag != "input")
+        return false;
+    const auto type = focus->GetAttribute<Rml::String>("type", "text");
+    return type == "text" || type == "password" || type == "number" || type == "search" ||
+           type == "email" || type == "url" || type == "tel";
+}
+
 // --- Static GLFW Callbacks ---
 void Rml_UIManager::KeyCallback(GLFWwindow* window, int key, int scancode, int action, int mods) {
     if (!s_active_manager || !s_active_manager->m_context)
         return;
 
-    if (key == GLFW_KEY_F8 && action == GLFW_PRESS) {
-        Rml::Debugger::SetVisible(!Rml::Debugger::IsVisible());
-        return;
-    }
-
+    (void)window;
+    (void)scancode;
     Rml::Input::KeyIdentifier rml_key = GlfwToRmlKey(key);
     int rml_mods = GlfwToRmlMods(mods);
 

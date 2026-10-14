@@ -1,5 +1,6 @@
 #include "core/SystemConfig.h"
 
+#include <algorithm>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -56,6 +57,79 @@ constexpr ParamMeta kParams[] = {
 #undef LUMIN_CONFIG_EMIT_PARAM
 };
 
+bool KnownDeveloperWidget(const std::string& id) {
+    constexpr const char* ids[] = {"perf.hud",
+                                   "perf.gpu",
+                                   "render.shaders",
+                                   "render.debug_views",
+                                   "render.wireframe",
+                                   "world.generation",
+                                   "client.settings",
+                                   "runtime.time",
+                                   "runtime.time_indicator",
+                                   "player.state",
+                                   "farm.debug",
+                                   "world.creature_labels",
+                                   "ui.data_stream",
+                                   "ui.debugger",
+                                   "console.help"};
+    for (const auto* known : ids)
+        if (id == known)
+            return true;
+    return false;
+}
+bool KnownDeveloperBinding(const std::string& id) {
+    if (KnownDeveloperWidget(id))
+        return true;
+    constexpr const char* ids[] = {"console.toggle",
+                                   "shader.reload",
+                                   "render.debug-cycle",
+                                   "render.wireframe-toggle",
+                                   "time.slower",
+                                   "time.faster",
+                                   "time.reset"};
+    for (const auto* known : ids)
+        if (id == known)
+            return true;
+    return false;
+}
+template<class Value, class Known>
+void MergeDeveloperRecord(std::map<std::string, Value>& records,
+                          const std::string& id,
+                          Value value,
+                          Known known) {
+    if (!records.contains(id) && records.size() >= DeveloperSettings::kRecordLimit) {
+        if (!known(id))
+            return;
+        // A valid recognized record cannot be crowded out by forward-compatible ids.
+        const auto unknown = std::find_if(
+            records.begin(), records.end(), [&](const auto& entry) { return !known(entry.first); });
+        if (unknown == records.end())
+            return;
+        records.erase(unknown);
+    }
+    records[id] = std::move(value);
+}
+
+// Never compare JSON signed and unsigned numbers before checking their representation.
+bool DeveloperInteger(const nlohmann::json& value, int minimum, int maximum, int& result) {
+    if (value.is_number_unsigned()) {
+        const auto number = value.get<nlohmann::json::number_unsigned_t>();
+        if (number < static_cast<nlohmann::json::number_unsigned_t>(std::max(minimum, 0)) ||
+            number > static_cast<nlohmann::json::number_unsigned_t>(maximum))
+            return false;
+        result = static_cast<int>(number);
+        return true;
+    }
+    if (!value.is_number_integer())
+        return false;
+    const auto number = value.get<nlohmann::json::number_integer_t>();
+    if (number < minimum || number > maximum)
+        return false;
+    result = static_cast<int>(number);
+    return true;
+}
+
 // Overlay the `user.*` section of `data` onto `user`, setting only named fields (merge
 // semantics: an absent field keeps its current/default value). render-client-only; never hashed.
 void ParseUserSection(const nlohmann::json& data, UserSettings& user) {
@@ -63,6 +137,44 @@ void ParseUserSection(const nlohmann::json& data, UserSettings& user) {
         return;
     const nlohmann::json& u = data["user"];
 
+    if (u.contains("developer") && u["developer"].is_object()) {
+        const auto& d = u["developer"];
+        // Each record is independent: malformed siblings never discard valid preferences.
+        if (d.contains("widgets") && d["widgets"].is_object()) {
+            for (const auto& [id, record] : d["widgets"].items()) {
+                if (id.empty() || id.size() > DeveloperSettings::kIdLimit || !record.is_object() ||
+                    !record.contains("visible") || !record["visible"].is_boolean())
+                    continue;
+                MergeDeveloperRecord(user.developer.widgets,
+                                     id,
+                                     record["visible"].get<bool>(),
+                                     KnownDeveloperWidget);
+            }
+        }
+        if (d.contains("bindings") && d["bindings"].is_object()) {
+            for (const auto& [id, record] : d["bindings"].items()) {
+                if (id.empty() || id.size() > DeveloperSettings::kIdLimit || !record.is_object() ||
+                    !record.contains("key") || !record["key"].is_number_integer() ||
+                    !record.contains("mods") || !record["mods"].is_number_integer())
+                    continue;
+                int key = 0, mods = 0;
+                if (!DeveloperInteger(record["key"], -1, 348, key) ||
+                    !DeveloperInteger(record["mods"], 0, 15, mods))
+                    continue;
+                const bool known_key =
+                    key == -1 || key == 32 || key == 39 || (key >= 44 && key <= 57) || key == 59 ||
+                    key == 61 || (key >= 65 && key <= 93) || key == 96 || key == 161 ||
+                    key == 162 || (key >= 256 && key <= 269) || (key >= 280 && key <= 284) ||
+                    (key >= 290 && key <= 314) || (key >= 320 && key <= 336) || key == 348;
+                if (!known_key)
+                    continue;
+                MergeDeveloperRecord(user.developer.bindings,
+                                     id,
+                                     DeveloperBindingSetting{key, mods},
+                                     KnownDeveloperBinding);
+            }
+        }
+    }
     if (u.contains("video") && u["video"].is_object()) {
         const nlohmann::json& v = u["video"];
         if (v.contains("resolution") && v["resolution"].is_string())
@@ -277,6 +389,30 @@ bool SystemConfig::SaveUserOverlay(const std::string& path) const {
     for (const auto& [action, key] : m_user.keybinds)
         controls[action] = key;
     user["controls"] = controls;
+    nlohmann::json developer;
+    developer["schema_version"] = 1;
+    developer["widgets"] = nlohmann::json::object();
+    developer["bindings"] = nlohmann::json::object();
+    std::size_t widget_count = 0, binding_count = 0;
+    for (const bool recognized : {true, false}) {
+        for (const auto& [id, visible] : m_user.developer.widgets) {
+            if (KnownDeveloperWidget(id) != recognized || id.empty() ||
+                id.size() > DeveloperSettings::kIdLimit ||
+                widget_count >= DeveloperSettings::kRecordLimit)
+                continue;
+            developer["widgets"][id] = {{"visible", visible}};
+            ++widget_count;
+        }
+        for (const auto& [id, binding] : m_user.developer.bindings) {
+            if (KnownDeveloperBinding(id) != recognized || id.empty() ||
+                id.size() > DeveloperSettings::kIdLimit ||
+                binding_count >= DeveloperSettings::kRecordLimit)
+                continue;
+            developer["bindings"][id] = {{"key", binding.key}, {"mods", binding.mods}};
+            ++binding_count;
+        }
+    }
+    user["developer"] = developer;
 
     nlohmann::json doc;
     doc["_comment"] =
