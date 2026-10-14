@@ -63,7 +63,7 @@ history even when they contribute no frozen content. Consumed work stops owning
 records on the next tick.
 
 Invalid host input never throws out of the session. Non-finite or out-of-range
-(|x|,|z| >= 2^24) walking anchors, ground-object edit positions and region pins are
+(outside -2^24 <= x,z < 2^24) walking anchors, ground-object edit positions and region pins are
 ignored and counted (observational, never hashed or saved). Invalid replicated anchors, work for
 regions the ledger does not know, and visit-time ledger exhaustion are skipped inside the scheduler
 and counted in the schedule's `rejected` triple; the schedule digest appends that triple only when
