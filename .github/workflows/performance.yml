@@ -2,6 +2,7 @@ name: Performance observations
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
     branches: [main, devel]
   push:
     branches: [main, devel]
@@ -22,17 +23,73 @@ permissions:
   contents: read
 
 concurrency:
-  # Manual capture attempts have separate run groups. Every devel push has its
-  # own commit group, preserving complete verdicts for previously merged tips.
-  group: ${{ github.event_name == 'workflow_dispatch' && inputs.qualification_capture && format('{0}-qualification-{1}', github.workflow, github.run_id) || format('{0}-{1}{2}', github.workflow, github.ref, github.event_name == 'push' && github.ref == 'refs/heads/devel' && format('-{0}', github.sha) || '') }}
-  cancel-in-progress: ${{ !((github.event_name == 'workflow_dispatch' && inputs.qualification_capture) || (github.event_name == 'push' && github.ref == 'refs/heads/devel')) }}
+  # Devel pushes share one workflow/ref group: the running run finishes, while
+  # GitHub's queue of one replaces a pending run with the newest devel push.
+  # The push suffix separates this group from cancellable scheduled runs.
+  # The campaign freeze audit covers a devel push run that ended cancelled
+  # only with a newer devel push run of the same workflow path on a descendant
+  # SHA that is pending or successful, or whose first attempt failed but has
+  # an accepted automatic rerun request. Coverage is recomputed on every audit.
+  # If the covering run later fails, or itself ends cancelled without its own
+  # covering run, the freeze re-latches. Failed runs are never covered by
+  # descendants; only their own successful rerun or an explicit resolution
+  # can resolve them.
+  # Main pushes and manual runs (including qualification captures) have isolated
+  # groups and never cancel. PR ref grouping/cancellation stays unchanged.
+  group: ${{ github.event_name == 'workflow_dispatch' && format('{0}-manual-{1}', github.workflow, github.run_id) || github.event_name == 'push' && github.ref == 'refs/heads/main' && format('{0}-{1}-{2}-{3}', github.workflow, github.ref, github.sha, github.run_id) || github.event_name == 'push' && github.ref == 'refs/heads/devel' && format('{0}-{1}-push', github.workflow, github.ref) || format('{0}-{1}', github.workflow, github.ref) }}
+  cancel-in-progress: ${{ github.event_name != 'push' && github.event_name != 'workflow_dispatch' }}
 
 env:
   QUALIFICATION_WORKFLOW_SHA: ${{ github.workflow_sha }}
   QUALIFICATION_WORKFLOW_REF: ${{ github.workflow_ref }}
   QUALIFICATION_EXPECTED_SHA: ${{ inputs.expected_sha }}
+  CCACHE_COMPILERCHECK: content
+  CCACHE_MAXSIZE: 250M
 
 jobs:
+  # Keep required job names and PR triggers unconditional. Heavy jobs need only
+  # this gate; their job-level if reports skipped, with no skipped-needs chain.
+  # !cancelled() and != false keep missing/failed classification on the build path.
+  changes:
+    name: Classify changed paths
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      needs_cpp: ${{ steps.paths.outputs.needs_cpp }}
+      needs_python: ${{ steps.paths.outputs.needs_python }}
+    steps:
+      - name: Check out repository and PR history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Classify merge-base diff (all lanes for non-PR events)
+        id: paths
+        env:
+          CI_EVENT: ${{ github.event_name }}
+          CI_REPOSITORY: ${{ github.repository }}
+          CI_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+          CI_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          CI_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          # Use already-fetched base history; never execute the PR's classifier.
+          # The explicit guard also handles bases predating the fail-open rules.
+          all_lanes() {
+            echo 'Classification uncertain or CI inputs changed; running all lanes'
+            printf 'needs_cpp=true\nneeds_python=true\n' >> "$GITHUB_OUTPUT"
+          }
+          if [ "$CI_EVENT" != pull_request ] || [ -z "$CI_BASE_SHA" ] ||
+             [ -z "$CI_HEAD_SHA" ] || [ "$CI_REPOSITORY" != "$CI_HEAD_REPOSITORY" ]; then
+            all_lanes
+          elif ! git diff --quiet "$CI_BASE_SHA" "$CI_HEAD_SHA" -- tools/ci/ .github/workflows/ scripts/; then
+            all_lanes
+          elif git show "$CI_BASE_SHA:tools/ci/ci_paths.py" > "$RUNNER_TEMP/trusted-ci-paths.py"; then
+            if ! python3 -I -B "$RUNNER_TEMP/trusted-ci-paths.py" classify --root "$GITHUB_WORKSPACE"; then
+              all_lanes
+            fi
+          else
+            all_lanes
+          fi
+
   runner-contract:
     name: Runner contract / ${{ matrix.os }}
     strategy:
@@ -55,11 +112,27 @@ jobs:
           python tools/ci/test_validate_performance_measurement.py
           python tools/ci/test_qualification_capture.py
 
+  # Drafts cannot merge. ready_for_review reruns these jobs on the same
+  # head; maintainers must wait for its required checks to pass before merging.
   preview-frame:
     name: Preview frame / software OpenGL
+    # Drafts, including missing metadata, must reach the guard even on docs-only
+    # changes. Ready PRs can still skip this lane through the path gate.
+    needs: changes
+    if: ${{ !cancelled() && ((github.event_name == 'pull_request' && toJSON(github.event.pull_request.draft) != 'false') || needs.changes.outputs.needs_cpp != 'false') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
+      - name: Reject draft pull requests
+        shell: bash
+        env:
+          CI_EVENT_NAME: ${{ github.event_name }}
+          CI_PR_DRAFT: ${{ github.event.pull_request.draft }}
+        run: |
+          if [ "$CI_EVENT_NAME" = "pull_request" ] && [ "$CI_PR_DRAFT" != "false" ]; then
+            echo "::error::Draft pull requests cannot merge. Mark ready for review and wait for the full checks."
+            exit 1
+          fi
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install measurement dependencies
@@ -71,11 +144,14 @@ jobs:
             ninja-build pkg-config python3-numpy python3-pil wayland-protocols \
             xauth xorg-dev xvfb
       - name: Restore compiler cache
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: compiler-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/ccache
-          key: perf-linux-x64-gcc-ccache-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json', 'cmake/**/*.cmake', 'src/**/*.cmake', 'test/CMakeLists.txt', 'vendor/CMakeLists.txt') }}
-          restore-keys: perf-linux-x64-gcc-ccache-
+          key: perf-linux-x64-gcc-ccache-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json', 'cmake/**/*.cmake', 'src/**/*.cmake', 'test/CMakeLists.txt', 'vendor/CMakeLists.txt') }}-${{ github.sha }}
+          restore-keys: |
+            perf-linux-x64-gcc-ccache-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json', 'cmake/**/*.cmake', 'src/**/*.cmake', 'test/CMakeLists.txt', 'vendor/CMakeLists.txt') }}-
+            perf-linux-x64-gcc-ccache-
       - name: Configure
         run: cmake --preset perf -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
       - name: Build measurement target
@@ -87,7 +163,7 @@ jobs:
               -R '^WorldgenPreviewTest\.PerFrameRenderProducesComparableObservation$' \
               --output-on-failure --output-junit performance.junit.xml
       - name: Validate measurement evidence
-        if: always()
+        if: always() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)
         run: |
           python3 tools/ci/validate_performance_measurement.py \
             build/perf/performance.junit.xml \
@@ -96,8 +172,8 @@ jobs:
             --test WorldgenPreviewTest.PerFrameRenderProducesComparableObservation --preset perf
           cat build/perf/performance-result.json >> "$GITHUB_STEP_SUMMARY"
       - name: Upload measurement evidence
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: preview-frame-performance-${{ github.sha }}
           path: |
@@ -107,22 +183,36 @@ jobs:
             build/perf/test-artifacts
           if-no-files-found: warn
           retention-days: 30
+      - name: Clean compiler cache before saving
+        if: ${{ success() && github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/devel') && steps.compiler-cache.outcome == 'success' && steps.compiler-cache.outputs.cache-hit != 'true' }}
+        continue-on-error: true
+        run: ccache --cleanup
+      - name: Save compiler cache
+        if: ${{ success() && github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/devel') && steps.compiler-cache.outcome == 'success' && steps.compiler-cache.outputs.cache-hit != 'true' }}
+        # Cache writes are best-effort, including collisions on same-SHA reruns.
+        continue-on-error: true
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ccache
+          key: perf-linux-x64-gcc-ccache-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json', 'cmake/**/*.cmake', 'src/**/*.cmake', 'test/CMakeLists.txt', 'vendor/CMakeLists.txt') }}-${{ github.sha }}
 
   server-smoke-comparison:
     name: Server smoke observation / base versus head
-    # Runs on pull requests that target main (the promotion gate, where the water
-    # verdict is required before release) and on pushes to main and devel (so merged
-    # devel tips get a verdict after the fact; a newer push to the same branch can
-    # still cancel an in-flight run until the devel push concurrency change lands). It is skipped on
+    # Runs on ready pull requests that target main (the promotion gate, where the
+    # water verdict is required before release) and on pushes to main and devel
+    # (so merged devel tips get complete verdicts after the fact). It is skipped on
     # pull requests that target devel: it is not a required devel check and costs
     # about 48 runner-minutes per push. The event.before guard stays because a
     # first push to a branch has no base to compare against; schedule and manual
     # events are excluded on purpose (they define no base/candidate SHA pair).
+    needs: changes
     if: >-
-      (github.event_name == 'pull_request' && github.base_ref == 'main') ||
+      !cancelled() && needs.changes.outputs.needs_cpp != 'false' &&
+      (github.event_name != 'pull_request' || github.event.pull_request.draft == false) &&
+      ((github.event_name == 'pull_request' && github.base_ref == 'main') ||
       (github.event_name == 'push' &&
       (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/devel') &&
-      github.event.before != '0000000000000000000000000000000000000000')
+      github.event.before != '0000000000000000000000000000000000000000'))
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
@@ -144,7 +234,8 @@ jobs:
             libgl1-mesa-dev libglu1-mesa-dev libwayland-dev libxkbcommon-dev \
             ninja-build pkg-config python3-numpy python3-pil wayland-protocols xorg-dev
       - name: Restore compiler cache
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: compiler-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/ccache
           key: perf-paired-linux-x64-gcc-${{ github.event.pull_request.base.sha || github.event.before }}-${{ github.event.pull_request.head.sha || github.sha }}
@@ -435,7 +526,7 @@ jobs:
           fi
       - name: Upload paired evidence
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: server-smoke-comparison-${{ github.event.pull_request.head.sha || github.sha }}
           path: |
@@ -450,7 +541,7 @@ jobs:
           retention-days: 30
       - name: Upload simulation budget evidence
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: sim-budget-evidence-${{ github.event.pull_request.head.sha || github.sha }}
           path: |
@@ -461,7 +552,7 @@ jobs:
           retention-days: 30
       - name: Upload water paired evidence
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: water-smoke-comparison-${{ github.event.pull_request.head.sha || github.sha }}
           path: |
@@ -474,12 +565,24 @@ jobs:
             build/water-smoke-comparison.json
           if-no-files-found: error
           retention-days: 30
+      - name: Clean compiler cache before saving
+        if: ${{ success() && github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/devel') && steps.compiler-cache.outcome == 'success' && steps.compiler-cache.outputs.cache-hit != 'true' }}
+        continue-on-error: true
+        run: ccache --cleanup
+      - name: Save compiler cache
+        if: ${{ success() && github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/devel') && steps.compiler-cache.outcome == 'success' && steps.compiler-cache.outputs.cache-hit != 'true' }}
+        continue-on-error: true
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ccache
+          key: perf-paired-linux-x64-gcc-${{ github.event.pull_request.base.sha || github.event.before }}-${{ github.event.pull_request.head.sha || github.sha }}
 
   qualification-capture:
     name: Simulation budget qualification / candidate
     # Independent candidate-only path: a missing/incompatible comparison base
     # never prevents AC2 source evidence. Routine paired routing stays above.
-    if: github.event_name == 'workflow_dispatch' && inputs.qualification_capture
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.needs_cpp != 'false' && github.event_name == 'workflow_dispatch' && inputs.qualification_capture }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
@@ -497,8 +600,13 @@ jobs:
             build-essential ccache cmake extra-cmake-modules libfreetype6-dev \
             libgl1-mesa-dev libglu1-mesa-dev libwayland-dev libxkbcommon-dev \
             ninja-build pkg-config python3-numpy python3-pil wayland-protocols xorg-dev
+      - name: Disable compiler cache for qualification captures
+        if: github.event_name == 'workflow_dispatch' && inputs.qualification_capture
+        run: echo "CCACHE_DISABLE=1" >> "$GITHUB_ENV"
       - name: Restore candidate compiler cache
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: compiler-cache
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.qualification_capture) }}
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/ccache
           key: qualification-server-linux-x64-gcc-${{ github.sha }}
@@ -549,9 +657,20 @@ jobs:
             --output build/qualification/qualification-capture.json
       - name: Upload candidate qualification evidence
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: qualification-server-capture-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: build/qualification
           if-no-files-found: error
           retention-days: 30
+      - name: Clean compiler cache before saving
+        if: ${{ success() && github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/devel') && !(github.event_name == 'workflow_dispatch' && inputs.qualification_capture) && steps.compiler-cache.outcome == 'success' && steps.compiler-cache.outputs.cache-hit != 'true' }}
+        continue-on-error: true
+        run: ccache --cleanup
+      - name: Save candidate compiler cache
+        if: ${{ success() && github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/devel') && !(github.event_name == 'workflow_dispatch' && inputs.qualification_capture) && steps.compiler-cache.outcome == 'success' && steps.compiler-cache.outputs.cache-hit != 'true' }}
+        continue-on-error: true
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ccache
+          key: qualification-server-linux-x64-gcc-${{ github.sha }}

@@ -22,7 +22,7 @@ from luminumbra_author.meshgen_backend import (BackendClient, MAX_RESULT, MOCK_C
 from luminumbra_author.meshgen_jobs import inspect_raw_glb
 from luminumbra_author.meshgen_registry import defaults
 from mock_backend import MockServer, synthetic_glb
-from meshgen_http_fixture import owned_server, client_factory, MemoryMockServer, RuleAssertions
+from meshgen_http_fixture import owned_server, client_factory, MemoryMockServer, RuleAssertions, WireSocket
 
 TOKEN = "test-only-token-" + "x"*32
 
@@ -251,6 +251,58 @@ class BackendTests(RuleAssertions, unittest.TestCase):
 
 
 class StreamingTests(RuleAssertions, unittest.TestCase):
+    def test_reader_delegates_file_protocol_without_checking_deadline(self):
+        from luminumbra_author.meshgen_backend import DeadlineReader
+        stream = io.BytesIO(b"body")
+        self.addCleanup(stream.close)
+        def expired():
+            raise Refusal("backend.deadline", "Expired")
+        reader = DeadlineReader(stream, None, expired)
+        self.assertFalse(reader.closed)
+        self.assertEqual(reader.readable(), stream.readable())
+        with self.assertRaises(io.UnsupportedOperation):
+            reader.fileno()
+        with patch.object(stream, "flush", return_value="flushed") as flush:
+            self.assertEqual(reader.flush(), "flushed")
+            flush.assert_called_once_with()
+        error = OSError("stream flush failed")
+        with patch.object(stream, "flush", side_effect=error):
+            with self.assertRaises(OSError) as caught:
+                reader.flush()
+            self.assertIs(caught.exception, error)
+        reader.close()
+        self.assertTrue(reader.closed)
+        reader.close()
+        with self.assertRaises(ValueError):
+            reader.flush()
+
+    def test_http_response_cleanup_preserves_refusal_with_unread_body(self):
+        from luminumbra_author.meshgen_backend import DeadlineSocket
+        wire = WireSocket(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nbody")
+        expired = [False]
+        def remaining():
+            if expired[0]:
+                raise Refusal("backend.deadline", "Expired")
+            return 1
+        response = http.client.HTTPResponse(DeadlineSocket(wire, remaining))
+        self.addCleanup(response.close)
+        response.begin()
+        reader = response.fp
+        # A refusal before consuming the body takes HTTPResponse's flush path.
+        # Resource cleanup must work even when the absolute deadline has passed.
+        expired[0] = True
+        with patch.object(wire.inbound, "flush", wraps=wire.inbound.flush) as flush:
+            with self.assertRule("backend.limit"):
+                try:
+                    raise Refusal("backend.limit", "Backend response exceeds its bound.")
+                finally:
+                    response.close()
+            flush.assert_called_once_with()
+        self.assertTrue(response.closed)
+        self.assertTrue(reader.closed)
+        self.assertIsNone(response.fp)
+        response.close()
+
     def test_absolute_deadline_also_bounds_drip_fed_headers(self):
         from luminumbra_author.meshgen_backend import DeadlineReader
         clock = [0]

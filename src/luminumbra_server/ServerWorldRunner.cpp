@@ -998,8 +998,8 @@ Persistence::WorldStreamingStateSubHashes ServerWorldRunner::ComputeWorldSubHash
     // AetherFieldDeterminism gate and the desync-localization oracle.
     sub.aether = AetherSubHash(m_session.get());
     // the STATE-ONLY stateful-layer sub-hash — the heavy
-    // oracle's authoritative-compare slot when sim.aether_state is ON (Codex
-    // finding A). Always empty on the default (OFF) world.
+    // oracle's authoritative-compare slot when sim.aether_state is ON.
+    // Always empty on the default (OFF) world.
     sub.aether_state = m_session ? m_session->ComputeAetherStateSubHash() : std::string();
     return sub;
 }

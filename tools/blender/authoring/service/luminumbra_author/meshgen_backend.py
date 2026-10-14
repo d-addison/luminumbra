@@ -283,6 +283,7 @@ class DeadlineSocket:
 
 
 class DeadlineReader:
+    """Bounded timed reads with the wrapped stream's file lifecycle protocol."""
     def __init__(self, stream, sock, remaining):
         self.stream, self.sock, self.remaining = stream, sock, remaining
         self.buffer, self.header_bytes = bytearray(), 0
@@ -327,8 +328,24 @@ class DeadlineReader:
             result.extend(chunk)
         return bytes(result)
 
+    @property
+    def closed(self):
+        return self.stream.closed
+
+    def readable(self):
+        return self.stream.readable()
+
+    def fileno(self):
+        return self.stream.fileno()
+
+    def flush(self):
+        # HTTPResponse.close() flushes even an unread response. Cleanup must
+        # remain possible after the read deadline, preserving the original
+        # refusal rather than replacing it with a deadline or protocol error.
+        return self.stream.flush()
+
     def close(self):
-        self.stream.close()
+        return self.stream.close()
 
 
 def validate_result(value):

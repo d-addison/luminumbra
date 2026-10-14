@@ -38,11 +38,29 @@ function Read-WriterFixture {
     New-Item -ItemType Directory -Path $Directory | Out-Null
     & $script:fixturePath $Directory $Mode | Out-Host
     if ($LASTEXITCODE -ne 0) { throw "Writer fixture ($Mode) exited with code $LASTEXITCODE" }
+    $analysis = $null
+    $analysisPath = Join-Path $Directory "farlod-horizon-analysis.json"
+    if (Test-Path -LiteralPath $analysisPath) {
+        $analysis = Read-JsonArtifact -Path $analysisPath -Schema "luminumbra.farlod_horizon.v1"
+    }
     return [pscustomobject]@{
-        Analysis = Read-JsonArtifact -Path (Join-Path $Directory "farlod-horizon-analysis.json") -Schema "luminumbra.farlod_horizon.v1"
+        Analysis = $analysis
         Oracle = Read-JsonArtifact -Path (Join-Path $Directory "farlod-horizon-ladder-oracle.json") -Schema "luminumbra.farlod_horizon.v2"
     }
 }
+
+# Load only the mode-dispatch boundary; parsing does not execute the main gate.
+$gatePath = Join-Path $ScriptDir "validate-engine-frontier.ps1"
+$tokens = $null
+$parseErrors = $null
+$gateAst = [System.Management.Automation.Language.Parser]::ParseFile($gatePath, [ref]$tokens, [ref]$parseErrors)
+if ($parseErrors.Count -ne 0) { throw "frontier gate parse failed" }
+$dispatch = $gateAst.Find({ param($node)
+    $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+    $node.Name -eq "Assert-FarHorizonLegacyCompatibility"
+}, $true)
+if ($null -eq $dispatch) { throw "frontier gate compatibility boundary missing" }
+Invoke-Expression $dispatch.Extent.Text
 
 function Assert-WriterFixture {
     param([object]$Pair)
@@ -55,10 +73,16 @@ function Assert-WriterFixture {
     Assert-Test ($null -eq $result.MissingExpected) "legacy writer does not claim ladder residency"
     Assert-Test (@($oracle.ladder.resident_tiles).Count -eq 0) "legacy writer emits no ladder residents"
     Assert-Test ($oracle.ladder.stale_tiles -eq 0) "legacy writer emits zero stale tiles"
+    foreach ($station in $oracle.stations) {
+        Assert-Test ($station.snapshot.requested_cave_policy -eq 1) "writer preserves requested BoxFiltered"
+        Assert-Test ($null -eq $station.snapshot.bound_cave_policy) "writer explicitly emits no bound cave policy"
+    }
     Assert-Test ($analysis.world_preset -ceq "mountains" -and $oracle.world_preset -ceq "mountains") "writer preserves the supplied preset in both artifacts"
     Assert-Test ($oracle.camera.world_x -eq 0 -and $oracle.camera.world_z -eq 0) "oracle uses the supplied origin camera"
     Assert-Test ($analysis.aggregates.captured_stations -eq 2 -and $analysis.aggregates.expected_stations -eq 2) "writer emits both supplied stations"
     Assert-Test (@($analysis.stations).Count -eq 2) "v1 has both station rows"
+    Assert-Test ($oracle.stations[0].camera.yaw_degrees -eq 12 -and $oracle.stations[0].camera.pitch_degrees -eq -4) "v2 serializes measured camera orientation"
+    Assert-Test ($analysis.stations[0].camera.yaw_degrees -eq 0 -and $analysis.stations[0].camera.pitch_degrees -eq 0) "v1 retains historical station label serialization"
     Assert-Test ($analysis.stations[0].camera.world_x -eq 0 -and $analysis.stations[0].camera.world_z -eq 0) "v1 preserves the origin camera"
     Assert-Test ($analysis.stations[1].camera.world_x -eq -512 -and $analysis.stations[1].camera.world_z -eq 1024) "v1 preserves the translated camera"
     foreach ($counter in @("regions_wanted", "regions_resident", "regions_missing")) {
@@ -77,8 +101,95 @@ try {
     $completeDir = Join-Path $root "complete"
     $complete = Read-WriterFixture -Directory $completeDir -Mode "complete"
     Assert-WriterFixture -Pair $complete
+    Assert-Test ($complete.Analysis.thresholds.f2_outer_range_m -eq 1536) "historical v1 threshold retained"
+    Assert-FarHorizonLegacyCompatibility -SelectedEvidence ([pscustomobject]@{ Mode = "legacy"; LadderChecked = $false })
+    foreach ($badEvidence in @(
+        [pscustomobject]@{ Mode = "ladder"; LadderChecked = $true },
+        [pscustomobject]@{ Mode = "legacy"; LadderChecked = $true },
+        [pscustomobject]@{ Mode = "ladder"; LadderChecked = $false }
+    )) {
+        Assert-Rejected { Assert-FarHorizonLegacyCompatibility -SelectedEvidence $badEvidence } "wrong-mode" "v1 mode dispatch"
+    }
+    foreach ($selection in @("refused", "preview")) {
+        $compatibility = Read-WriterFixture -Directory (Join-Path $root $selection) -Mode $selection
+        Assert-Test ($null -ne $compatibility.Analysis) "$selection retains v1 Legacy evidence"
+        Assert-Test ($compatibility.Analysis.thresholds.f2_outer_range_m -eq 1536) "$selection retains historical threshold"
+        Assert-Test ($compatibility.Oracle.mode -ceq "legacy") "$selection follows effective Legacy"
+        foreach ($station in $compatibility.Oracle.stations) {
+            Assert-Test ($station.snapshot.requested_mode -ceq "ladder") "$selection preserves requested Ladder"
+            Assert-Test ($station.snapshot.effective_mode -ceq "legacy") "$selection reports effective Legacy"
+        }
+        Assert-Rejected {
+            Assert-FarHorizonV2Artifact -Path (Join-Path (Join-Path $root $selection) "farlod-horizon-ladder-oracle.json") -Renderer "ladder" -Stations @("origin", "translated")
+        } "refused" "$selection cannot qualify Ladder"
+    }
+    foreach ($selection in @("ladder", "mixed")) {
+        $selected = Read-WriterFixture -Directory (Join-Path $root $selection) -Mode $selection
+        Assert-Test ($null -eq $selected.Analysis) "$selection emits no v1 Legacy artifact"
+        Assert-Test ($selected.Oracle.mode -ceq "ladder") "$selection reports the final effective mode"
+        Assert-Test ($selected.Oracle.complete -eq $false) "$selection incomplete fixture cannot qualify"
+        Assert-Test (@($selected.Oracle.PSObject.Properties.Name) -cnotcontains "legacy") "$selection emits no Legacy aggregate"
+        $ladderRow = $selected.Oracle.stations[-1]
+        Assert-Test (@($ladderRow.PSObject.Properties.Name) -cnotcontains "legacy") "$selection Ladder station contains no Legacy counters"
+    }
     Assert-FarLodHorizonStationCoverage -Analysis $complete.Analysis -Name "complete writer capture"
     Assert-Test ($complete.Analysis.stations[1].farlod.regions_missing -eq 0) "positive translated capture is complete"
+
+    # Corrupt retained aggregate fields through the combined NEW gate path.
+    foreach ($fault in @("camera", "expected_tiles", "expected_by_tier", "stale_tiles")) {
+        $bad = Get-Content -LiteralPath (Join-Path $completeDir "farlod-horizon-ladder-oracle.json") -Raw | ConvertFrom-Json
+        $fragment = $fault
+        switch ($fault) {
+            "camera" { $bad.camera = $null }
+            "expected_tiles" { $bad.ladder.expected_tiles = @() }
+            "expected_by_tier" { $bad.ladder.expected_by_tier = @() }
+            "stale_tiles" { $bad.ladder.stale_tiles = 1; $fragment = "stale tile" }
+        }
+        $badPath = Join-Path $completeDir ("bad-aggregate-" + $fault + ".json")
+        $bad | ConvertTo-Json -Depth 32 | Set-Content -LiteralPath $badPath -Encoding utf8
+        Assert-Rejected {
+            Assert-FarHorizonV2Artifact -Path $badPath -Renderer "legacy" -Stations @("origin", "translated")
+        } $fragment ("new path corrupt aggregate " + $fault)
+    }
+
+    # The PS facade uses the same pinned poses and height relation as Python.
+    $poses = Get-Content -LiteralPath (Join-Path $completeDir "farlod-horizon-ladder-oracle.json") -Raw | ConvertFrom-Json
+    $template = $poses.stations[0] | ConvertTo-Json -Depth 32
+    $poses.stations = @()
+    $names = @("eye_yaw_000", "eye_yaw_090", "eye_yaw_180", "eye_yaw_270", "elevated")
+    $yaws = @(0, 90, 180, 270, 45)
+    for ($i = 0; $i -lt 5; $i++) {
+        $row = $template | ConvertFrom-Json
+        $row.name = $names[$i]
+        $row.camera.yaw_degrees = $yaws[$i]
+        $row.camera.pitch_degrees = 0
+        $row.snapshot.frame_id = $i + 1
+        if ($i -eq 4) {
+            $row.camera.pitch_degrees = -20
+            $row.camera.world_y = [double]$row.camera.world_y + 78.2
+            $row.snapshot.camera[1] = [double]$row.snapshot.camera[1] + 78.2
+        }
+        $poses.stations += $row
+    }
+    $poses.expected_stations = 5
+    $posePath = Join-Path $completeDir "required-poses.json"
+    $poses | ConvertTo-Json -Depth 32 | Set-Content -LiteralPath $posePath -Encoding utf8
+    Assert-FarHorizonV2Artifact -Path $posePath -Renderer "legacy" | Out-Null
+    $wrongHeight = $poses | ConvertTo-Json -Depth 32 | ConvertFrom-Json
+    $wrongHeight.stations[4].camera.world_y += 1
+    $wrongHeight.stations[4].snapshot.camera[1] += 1
+    $wrongHeight | ConvertTo-Json -Depth 32 | Set-Content -LiteralPath $posePath -Encoding utf8
+    Assert-Rejected {
+        Assert-FarHorizonV2Artifact -Path $posePath -Renderer "legacy"
+    } "far oracle refused" "new path wrong elevated height"
+    foreach ($row in $poses.stations) {
+        $row.camera = $poses.stations[0].camera
+        $row.snapshot.camera = $poses.stations[0].snapshot.camera
+    }
+    $poses | ConvertTo-Json -Depth 32 | Set-Content -LiteralPath $posePath -Encoding utf8
+    Assert-Rejected {
+        Assert-FarHorizonV2Artifact -Path $posePath -Renderer "legacy"
+    } "far oracle refused" "new path identical poses under five names"
 
     # Corrupt an actual emitted vector, serialize it, and use the same strict
     # reader again. The independent oracle must reject the changed tile key.
@@ -95,6 +206,9 @@ try {
     Assert-Rejected {
         Assert-FarLodHorizonStationCoverage -Analysis $complete.Analysis -Name "incorrect station count"
     } "stations[1] 'translated' regions_wanted" "nonselected station with incorrect wanted count"
+
+    $completeResult = Assert-FarHorizonV2Artifact -Path (Join-Path (Join-Path $root "complete") "farlod-horizon-ladder-oracle.json") -Renderer "legacy" -Stations @("origin", "translated")
+    Assert-Test (-not $completeResult.LadderChecked) "new station schema stays explicit legacy evidence"
 
     # The production writer still selects the complete station for historical
     # v1/v2 aggregates. The gate must reject the other station's missing region.

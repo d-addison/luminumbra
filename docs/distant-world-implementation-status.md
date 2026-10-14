@@ -3,7 +3,7 @@
 This September 13, 2026 audit is pinned to recovered terrain source
 [`32f4e6997779`](https://github.com/d-addison/luminumbra/commit/32f4e69977793267ef03ccbb9b73f50ebf17dc61),
 which includes the prefab prerequisite from `devel` through `7b7510d157af`.
-[The terrain recovery checkpoint](https://github.com/d-addison/luminumbra/pull/166)
+The terrain recovery checkpoint
 awaits current-source native qualification. This document changes
 no runtime, format, budget, scenario denominator or acceptance threshold.
 

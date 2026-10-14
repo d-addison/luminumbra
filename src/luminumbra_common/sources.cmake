@@ -17,6 +17,7 @@ set(COMMON_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/animation/MorphMesh.cpp
 
     # Core
+    ${CMAKE_CURRENT_LIST_DIR}/core/CrashReport.cpp
     ${CMAKE_CURRENT_LIST_DIR}/core/EngineContracts.cpp
     ${CMAKE_CURRENT_LIST_DIR}/core/EngineVersion.cpp
     ${CMAKE_CURRENT_LIST_DIR}/core/EventBus.cpp
@@ -88,6 +89,8 @@ set(COMMON_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/world/FarVolumeMesher.cpp
     ${CMAKE_CURRENT_LIST_DIR}/world/FarVolume.cpp
     ${CMAKE_CURRENT_LIST_DIR}/world/FarVolumeWorld.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/world/FarVolumeRuntime.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/world/FarVolumeTierMemory.cpp
     ${CMAKE_CURRENT_LIST_DIR}/world/FarWantedSet.cpp
     ${CMAKE_CURRENT_LIST_DIR}/world/FarAuthorityOverlay.cpp
     ${CMAKE_CURRENT_LIST_DIR}/world/ActiveRegionLedger.cpp
