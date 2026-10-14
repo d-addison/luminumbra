@@ -26,26 +26,40 @@ using luminumbra::core::SystemConfig;
 
 namespace {
 
-TEST(SystemConfig, SimulationArtifactReportsEveryRegistryGateAndExplicitOptOut) {
-    using luminumbra::core::SystemConfig;
+constexpr const char* kSimulationGateNames[]{
+#define SIM_GATE_Sim(NAME) NAME,
+#define SIM_GATE_Render(NAME)
+#define SIM_GATE_NAME(ENUM, SECTION, JSON_SECTION, NAME, RESIDENCY) SIM_GATE_##SECTION(NAME)
+    LUMIN_CONFIG_KEY_TABLE(SIM_GATE_NAME)
+#undef SIM_GATE_NAME
+#undef SIM_GATE_Render
+#undef SIM_GATE_Sim
+};
+
+TEST(SystemConfig, SimulationArtifactReportsEveryRegistryGate) {
     const auto gates = SystemConfig::Defaults().SimulationGates();
     std::size_t count = 0;
-#define CHECK_SIM_GATE(ENUM, SECTION, JSON_SECTION, NAME, RESIDENCY)                               \
-    if (std::string(JSON_SECTION) == "sim") {                                                      \
-        ++count;                                                                                   \
-        ASSERT_TRUE(gates.contains(NAME));                                                         \
-        EXPECT_TRUE(gates.at(NAME));                                                               \
-        nlohmann::json document;                                                                   \
-        document["sim"][NAME]["enabled"] = false;                                                  \
-        Luminumbra::world::GameSession session;                                                    \
-        session.ApplySystemConfig(SystemConfig::FromJsonString(document.dump()));                  \
-        const auto effective = session.EffectiveSimulationGates();                                 \
-        EXPECT_EQ(effective.size(), gates.size());                                                 \
-        EXPECT_FALSE(effective.at(NAME));                                                          \
+    for (const char* name : kSimulationGateNames) {
+        SCOPED_TRACE(name);
+        ++count;
+        ASSERT_TRUE(gates.contains(name));
+        EXPECT_TRUE(gates.at(name));
     }
-    LUMIN_CONFIG_KEY_TABLE(CHECK_SIM_GATE)
-#undef CHECK_SIM_GATE
     EXPECT_EQ(gates.size(), count);
+}
+
+TEST(SystemConfig, SimulationArtifactReportsEveryExplicitOptOut) {
+    const auto gates = SystemConfig::Defaults().SimulationGates();
+    for (const char* name : kSimulationGateNames) {
+        SCOPED_TRACE(name);
+        nlohmann::json document;
+        document["sim"][name]["enabled"] = false;
+        Luminumbra::world::GameSession session;
+        session.ApplySystemConfig(SystemConfig::FromJsonString(document.dump()));
+        const auto effective = session.EffectiveSimulationGates();
+        EXPECT_EQ(effective.size(), gates.size());
+        EXPECT_FALSE(effective.at(name));
+    }
 }
 
 std::string ConfigIdentity(const SystemConfig& config) {

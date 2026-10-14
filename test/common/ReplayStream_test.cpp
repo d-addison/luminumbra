@@ -108,16 +108,19 @@ TEST_F(ReplayStreamTest, SamePresetNameWithDifferentResolvedContentRefusesVerifi
     ASSERT_TRUE(writer.Finalize(0));
     const auto contents = replay::ReadReplay(m_path);
     ASSERT_TRUE(contents.has_value());
+    if (!contents.has_value())
+        return;
+    const auto& recorded_header = contents->header;
     auto different = Luminumbra::TestSupport::PresetIdentityFixture();
     different["generation_params"]["terrain"]["height_offset"] = 90.0;
     EXPECT_TRUE(replay::ConfigurationMatches(
-        contents->header, header.system_config_identity, header.preset_content_hash));
+        recorded_header, header.system_config_identity, header.preset_content_hash));
     EXPECT_FALSE(
-        replay::ConfigurationMatches(contents->header,
+        replay::ConfigurationMatches(recorded_header,
                                      header.system_config_identity,
                                      Luminumbra::world::TerrainPresetContentHash(different)));
-    EXPECT_FALSE(replay::ConfigurationMatches(contents->header, header.system_config_identity, ""));
-    auto unbound = contents->header;
+    EXPECT_FALSE(replay::ConfigurationMatches(recorded_header, header.system_config_identity, ""));
+    auto unbound = recorded_header;
     unbound.preset_content_hash.clear();
     EXPECT_FALSE(replay::ConfigurationMatches(
         unbound, header.system_config_identity, header.preset_content_hash));
