@@ -44,6 +44,8 @@ set(CLIENT_INTERNAL_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/rendering/FarVolumeUpload.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/FarVolumeGpuBackend.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/FarVolumeGlBackend.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/rendering/FarWorldReplayGl.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/rendering/FarWorldDiagnostics.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/FarWorldRenderer.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/FarWorldOwnership.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/FarWorldDepthBias.cpp

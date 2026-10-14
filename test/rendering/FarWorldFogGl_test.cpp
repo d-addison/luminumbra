@@ -251,8 +251,9 @@ TEST_F(FarWorldFogGl, ProductionAerialMatchesCompleteCppCompositionAndRawRadialF
                                                         ladder);
                                     const auto actual = Draw();
                                     Near(actual, expected, 2e-4f);
-                                    if (ladder && raw >= 16384)
+                                    if (ladder && raw >= 16384) {
                                         EXPECT_LE(1 - actual.a, .05f);
+                                    }
                                     if (ladder && raw >= 16384) {
                                         // Measure the composited terrain contribution, not
                                         // only shader alpha: white-minus-black = transmittance.
@@ -268,8 +269,9 @@ TEST_F(FarWorldFogGl, ProductionAerialMatchesCompleteCppCompositionAndRawRadialF
                                             EXPECT_LE(white[i] - black[i], .05f);
                                         glDisable(GL_BLEND);
                                     }
-                                    if (!ladder)
+                                    if (!ladder) {
                                         EXPECT_LE(actual.a, .94f);
+                                    }
                                 }
                             }
                         }
@@ -526,10 +528,12 @@ TEST_F(FarWorldFogGl, ProductionConsumersUseDepthForFarCentersAndAllNeighbors) {
                 const auto negative_control = Draw();
                 // Demonstrate the poisoned reads matter, rather than accepting
                 // a fixture whose position samples have no observable effect.
-                if (mixed && (ssao || upsample || name == "ssao_gtao.frag" || (lighting && cave)))
+                if (mixed && (ssao || upsample || name == "ssao_gtao.frag" || (lighting && cave))) {
                     EXPECT_GT(std::abs(negative_control.r - expected.r), .005f);
-                if (!mixed && (decal || debug || lighting))
+                }
+                if (!mixed && (decal || debug || lighting)) {
                     EXPECT_GT(glm::length(glm::vec3(negative_control - expected)), .005f);
+                }
                 shader.setMat4("u_gbufferInverseProjection", glm::mat4(0));
                 EXPECT_EQ(Draw(), negative_control) << "Legacy ignores the reconstruction matrix";
                 shader.setMat4("u_gbufferInverseProjection", glm::inverse(projection));

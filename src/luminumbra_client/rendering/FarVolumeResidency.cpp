@@ -397,7 +397,9 @@ FarVolumeResidency::Observe(const World::FarTileKey& key) const {
         entry->uploaded.gpu_bytes(),
         entry->completion ? UploadBytes(entry->completion->mesh())
                                 .value_or(std::numeric_limits<std::uint64_t>::max())
-                          : 0};
+                          : 0,
+        entry->uploaded.identity(),
+        entry->uploaded.request()};
 }
 const FarVolumeGpuAllocation* FarVolumeResidency::Resource(const World::FarTileKey& key) const {
     CheckOwner();

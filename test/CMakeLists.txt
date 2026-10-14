@@ -158,6 +158,8 @@ add_executable(common_tests
     rendering/FarVolumeUpload_test.cpp
     rendering/FarVolumeGpuBackend_test.cpp
     rendering/FarVolumeResidency_test.cpp
+    rendering/FarWorldReplay_test.cpp
+    rendering/FarWorldDiagnostics_test.cpp
     rendering/FarWorldRenderer_test.cpp
     rendering/FarWorldOwnership_test.cpp
     rendering/FarWorldDepthBias_test.cpp
@@ -167,6 +169,7 @@ add_executable(common_tests
     rendering/FarWorldSurfaceTag_test.cpp
     rendering/ShaderSource_test.cpp
     ../src/luminumbra_client/rendering/ShaderSource.cpp
+    ../src/luminumbra_client/rendering/FarWorldDiagnostics.cpp
     ../src/luminumbra_client/rendering/FarWorldRenderer.cpp
     ../src/luminumbra_client/rendering/FarWorldOwnership.cpp
     ../src/luminumbra_client/rendering/FarWorldDepthBias.cpp
@@ -2007,6 +2010,9 @@ if(DEFINED ENV{VISUAL_SWEEP_PYTHON})
     list(APPEND _vc_candidates "$ENV{VISUAL_SWEEP_PYTHON}")
 endif()
 if(Python3_FOUND)
+    add_test(NAME FarHorizonV2ValidatorContract
+        COMMAND "${Python3_EXECUTABLE}" -B -m unittest discover -s "${CMAKE_SOURCE_DIR}/tools/gates" -p test_far_ladder_oracle.py)
+    set_tests_properties(FarHorizonV2ValidatorContract PROPERTIES LABELS "tools" TIMEOUT 60)
     if(Python3_VERSION VERSION_GREATER_EQUAL "3.10")
         add_test(NAME FoliageEvidenceContract
             COMMAND "${Python3_EXECUTABLE}" ${CMAKE_SOURCE_DIR}/tools/perf/test_foliage_evidence.py)

@@ -1,4 +1,5 @@
 #include "LightingPass.h"
+#include "../FarWorldReplay.h"
 
 #include "../EnvironmentBrdfLut.gen.h"
 #include "../PassShaderLayouts.h"
@@ -158,6 +159,7 @@ void LightingPass::copy_lighting_color_to_opaque_texture(const RenderContext& ct
     }
 
     glBindFramebuffer(GL_READ_FRAMEBUFFER, m_lighting_fbo.fbo_id);
+    PreserveReplayObject(ReplayObjectKind::Framebuffer, m_lighting_fbo.fbo_id);
     glReadBuffer(GL_COLOR_ATTACHMENT0);
     glBindTexture(GL_TEXTURE_2D, m_lighting_fbo.opaque_color_texture);
     glCopyTexSubImage2D(GL_TEXTURE_2D,
@@ -464,6 +466,8 @@ void LightingPass::execute_lightning_overlay(const RenderContext& ctx) {
 
     // Lazily build the overlay program on first strike.
     if (!m_lightning_overlay_shader) {
+        if (ctx.frozen_replay)
+            return;
         m_lightning_overlay_shader = std::make_unique<Shader>(
             (m_root_path / "res/shaders/lightning_overlay.vert").string().c_str(),
             (m_root_path / "res/shaders/lightning_overlay.frag").string().c_str());
@@ -483,6 +487,8 @@ void LightingPass::execute_lightning_overlay(const RenderContext& ctx) {
 
     // (Re)allocate the scene-copy texture if the framebuffer size changed.
     if (m_lightning_scene_copy == 0 || m_lightning_copy_w != w || m_lightning_copy_h != h) {
+        if (ctx.frozen_replay)
+            return;
         if (m_lightning_scene_copy != 0) {
             glDeleteTextures(1, &m_lightning_scene_copy);
             m_lightning_scene_copy = 0;
@@ -504,6 +510,7 @@ void LightingPass::execute_lightning_overlay(const RenderContext& ctx) {
     // Snapshot the composited (lit + sky + water + particles) FBO color into the
     // scratch texture; the overlay reads it and writes the additive result back.
     glBindFramebuffer(GL_READ_FRAMEBUFFER, m_lighting_fbo.fbo_id);
+    PreserveReplayObject(ReplayObjectKind::Framebuffer, m_lighting_fbo.fbo_id);
     glReadBuffer(GL_COLOR_ATTACHMENT0);
     glBindTexture(GL_TEXTURE_2D, m_lightning_scene_copy);
     glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, w, h);

@@ -39,6 +39,7 @@ class RenderView;
 struct RenderContext {
     // Frame / camera / time.
     u64 frame_index = 0;
+    bool frozen_replay = false; // No queries, readbacks or evidence publication.
     const Camera* camera = nullptr;
     // Validated neutral view used verbatim by the static geometry/lighting path.
     const RenderView* render_view = nullptr;
