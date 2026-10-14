@@ -1,6 +1,7 @@
 // canonical TerrainPresetLoader unit coverage — consumed params,
 // shaping, biome, and feature blocks plus unknown-key
 // warnings, and the validation error contract.
+#include "../support/UniqueTempPath.h"
 #include <gtest/gtest.h>
 
 #include <filesystem>
@@ -427,6 +428,50 @@ TEST(TerrainPresetLoaderTest, PreservesContentSwitchesAndOptionalErosionAndBiome
     const auto archipelago = LoadTerrainPreset(PresetDir() / "archipelago.json");
     ASSERT_TRUE(archipelago.ok);
     EXPECT_TRUE(archipelago.params.biomes_enabled);
+}
+
+TEST(TerrainPresetLoaderTest, ExplicitOverridePreservesHistoricalTerrain) {
+    const auto root = PresetDir().parent_path().parent_path().parent_path();
+    const auto path = root / "worlds/atlas/presets-rev6/default.json";
+    std::string text;
+    std::string error;
+    ASSERT_TRUE(Luminumbra::world::LoadTerrainPresetOverride(path, root / "data", text, error))
+        << error;
+    EXPECT_TRUE(error.empty());
+    const auto document = nlohmann::json::parse(text);
+    EXPECT_EQ(document["schema_rev"], 6);
+    const auto historical = LoadTerrainPresetFromJson(document, root / "data");
+    ASSERT_TRUE(historical.ok);
+    EXPECT_FALSE(historical.params.island_mask_enabled);
+    EXPECT_EQ(historical.params.biome_table_path, LoadTerrainPreset(path).params.biome_table_path);
+    EXPECT_NE(historical.params.island_mask_enabled,
+              LoadTerrainPreset(PresetDir() / "default.json").params.island_mask_enabled);
+}
+
+TEST(TerrainPresetLoaderTest, ExplicitOverrideRefusesInvalidFilesWithoutChangingText) {
+    const auto root = PresetDir().parent_path().parent_path().parent_path();
+    const auto directory =
+        Luminumbra::TestSupport::CreateUniqueTempDirectory("lumin-preset-override-");
+    const auto path = directory / "override.json";
+    std::error_code remove_error;
+    std::string text = "unchanged";
+    std::string error;
+    EXPECT_FALSE(Luminumbra::world::LoadTerrainPresetOverride(path, root / "data", text, error));
+    EXPECT_EQ(text, "unchanged");
+    EXPECT_FALSE(error.empty());
+    for (const char* invalid : {"{", "[]", "{}", "{} trailing"}) {
+        SCOPED_TRACE(invalid);
+        {
+            std::ofstream file(path);
+            ASSERT_TRUE(file.good());
+            file << invalid;
+        }
+        EXPECT_FALSE(
+            Luminumbra::world::LoadTerrainPresetOverride(path, root / "data", text, error));
+        EXPECT_EQ(text, "unchanged");
+        EXPECT_FALSE(error.empty());
+    }
+    fs::remove_all(directory, remove_error);
 }
 
 } // namespace

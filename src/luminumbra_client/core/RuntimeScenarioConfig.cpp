@@ -136,6 +136,8 @@ RuntimeScenarioConfig
 ParseRuntimeScenarioConfig(int argc, char* argv[], const std::filesystem::path& root_dir) {
     RuntimeScenarioConfig config;
     config.scenario = GetCommandLineOption(argc, argv, "--scenario", "");
+    config.systems_config_path = GetCommandLineOption(argc, argv, "--systems-config", "");
+    config.preset_json_path = GetCommandLineOption(argc, argv, "--preset-json", "");
     //  the visual-sweep capture matrix can be selected with the
     // LUMINUMBRA_VISUAL_SWEEP=1 env flag (in addition to --scenario), so existing
     // auto/server launch wrappers can opt in without a CLI change. An explicit

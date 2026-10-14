@@ -112,6 +112,13 @@ nlohmann::json ResolveTerrainPresetDefaults(const nlohmann::json& preset);
 // meaningful when ok=true.
 TerrainPresetLoadResult LoadTerrainPreset(const std::filesystem::path& preset_path);
 
+// Explicit CLI preset override, validated against the runtime data root. Failure leaves
+// json_text unchanged; successful text is passed to GameSession::CreateWorld.
+bool LoadTerrainPresetOverride(const std::filesystem::path& preset_path,
+                               const std::filesystem::path& data_root,
+                               std::string& json_text,
+                               std::string& error);
+
 //   (ADDITIVE in-memory seam — no struct/behavior change). Parses
 // an ALREADY-PARSED preset JSON with an EXPLICIT data root, so a host that holds
 // candidate preset JSON in memory (the create-world live preview) gets identical

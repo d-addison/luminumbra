@@ -3,6 +3,7 @@
 // These reference luminumbra::core::SystemConfig, which does not exist yet:
 // the test keeps the generated schema and runtime registry aligned.
 #include "../support/SystemConfigVariants.h"
+#include "../support/UniqueTempPath.h"
 #include <gtest/gtest.h>
 #include <nlohmann/json.hpp>
 
@@ -108,6 +109,56 @@ TEST(SystemConfig, MissingFileIsDefaults) {
     EXPECT_TRUE(cfg.enabled(SysKey::RenderMoonlight));
     EXPECT_TRUE(cfg.enabled(SysKey::RenderFarWorldLadder));
     EXPECT_FLOAT_EQ(cfg.param(SysParam::MoonlightStrength, 0.7f), 0.7f);
+}
+
+TEST(SystemConfig, ExplicitOverrideLoadsHistoricalConfiguration) {
+    const auto path = std::filesystem::path(__FILE__).parent_path().parent_path() /
+                      "fixtures/historical-defaults-off.json";
+    SystemConfig config;
+    std::string error = "previous error";
+    ASSERT_TRUE(SystemConfig::TryLoadFromFile(path.string(), config, error)) << error;
+    EXPECT_TRUE(error.empty());
+#define EXPECT_HISTORICAL_KEY(ENUM, SECTION, JSON_SECTION, JSON_NAME, RESIDENCY)                   \
+    if (std::string(JSON_SECTION) == "sim")                                                        \
+        EXPECT_FALSE(config.enabled(SysKey::ENUM)) << JSON_NAME;
+    LUMIN_CONFIG_KEY_TABLE(EXPECT_HISTORICAL_KEY)
+#undef EXPECT_HISTORICAL_KEY
+    EXPECT_TRUE(config.ComputeConfigSubHash().empty());
+    EXPECT_TRUE(config.enabled(SysKey::RenderFarWorldLadder));
+    EXPECT_FALSE(config.enabled(SysKey::RenderCircadian));
+    EXPECT_NE(ConfigIdentity(config), ConfigIdentity(SystemConfig::Defaults()));
+    EXPECT_EQ(ConfigIdentity(config), ConfigIdentity(SystemConfig::LoadFromFile(path.string())));
+}
+
+TEST(SystemConfig, ExplicitOverrideRefusesInvalidFilesWithoutChangingSnapshot) {
+    const auto directory =
+        Luminumbra::TestSupport::CreateUniqueTempDirectory("lumin-systemconfig-override-");
+    const auto path = directory / "override.json";
+    std::error_code remove_error;
+    SystemConfig config =
+        SystemConfig::FromJsonString(R"({"sim":{"water_high_res":{"enabled":false}}})");
+    const auto identity = ConfigIdentity(config);
+    std::string error;
+    EXPECT_FALSE(SystemConfig::TryLoadFromFile(path.string(), config, error));
+    EXPECT_FALSE(error.empty());
+    EXPECT_EQ(ConfigIdentity(config), identity);
+    for (const char* text : {"",
+                             "{",
+                             "[]",
+                             "null",
+                             "{} trailing",
+                             R"({"render":{"moonlight":{"params":{"color":[1,"bad",3]}}}})"}) {
+        SCOPED_TRACE(text);
+        {
+            std::ofstream file(path);
+            ASSERT_TRUE(file.good());
+            file << text;
+        }
+        EXPECT_FALSE(SystemConfig::TryLoadFromFile(path.string(), config, error));
+        EXPECT_FALSE(error.empty());
+        EXPECT_EQ(ConfigIdentity(config), identity);
+    }
+    std::filesystem::remove_all(directory, remove_error);
 }
 
 TEST(SystemConfig, EmptyAndBlankJsonAreDefaults) {

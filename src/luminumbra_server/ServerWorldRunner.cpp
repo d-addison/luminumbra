@@ -264,7 +264,10 @@ bool ServerWorldRunner::Boot() {
         if (!fsys::exists(systems_json, systems_ec)) {
             systems_json = fsys::path("data") / "common" / "systems.json";
         }
-        const auto sys_cfg = luminumbra::core::SystemConfig::LoadFromFile(systems_json.string());
+        const auto sys_cfg =
+            m_config.systems_config_override
+                ? *m_config.systems_config_override
+                : luminumbra::core::SystemConfig::LoadFromFile(systems_json.string());
         m_session->ApplySystemConfig(sys_cfg);
     }
     m_session->SetFiniteHydrologyEnabled(m_config.finite_hydrology);
@@ -275,7 +278,11 @@ bool ServerWorldRunner::Boot() {
     if (!m_config.world_id.empty()) {
         world_ready = m_session->LoadWorld(m_config.world_id);
     } else {
-        world_ready = m_session->CreateWorld(m_config.world_name, m_config.seed, m_config.preset);
+        world_ready = m_session->CreateWorld(
+            m_config.world_name,
+            m_config.seed,
+            m_config.preset,
+            m_config.preset_json_override ? &*m_config.preset_json_override : nullptr);
     }
     if (!world_ready) {
         m_bootError = m_session->GetWorldOpenError();

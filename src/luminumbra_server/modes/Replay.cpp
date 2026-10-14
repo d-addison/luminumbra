@@ -179,6 +179,8 @@ int RunReplay(const ServerCliOptions& options) {
     // Boot the session from the header parameters (mirror ServerWorldRunnerConfig).
     Luminumbra::Server::ServerWorldRunnerConfig config;
     config.root_path = options.root;
+    config.systems_config_override = options.systems_config_override;
+    config.preset_json_override = options.preset_json_override;
     config.seed = header.seed_string;
     config.preset = header.preset;
     config.world_id.clear();

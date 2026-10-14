@@ -507,4 +507,33 @@ TerrainPresetLoadResult LoadTerrainPresetFromJson(const nlohmann::json& source,
     return result;
 }
 
+bool LoadTerrainPresetOverride(const std::filesystem::path& preset_path,
+                               const std::filesystem::path& data_root,
+                               std::string& json_text,
+                               std::string& error) {
+    std::ifstream file(preset_path);
+    if (!file) {
+        error = "cannot read preset override: " + preset_path.string();
+        return false;
+    }
+    try {
+        const auto document = nlohmann::json::parse(file);
+        if (file.bad()) {
+            error = "cannot read preset override: " + preset_path.string();
+            return false;
+        }
+        const auto validated = LoadTerrainPresetFromJson(document, data_root, preset_path.string());
+        if (!validated.ok) {
+            error = validated.errors.front();
+            return false;
+        }
+        json_text = document.dump();
+    } catch (const nlohmann::json::exception& exception) {
+        error = "invalid preset override: " + preset_path.string() + ": " + exception.what();
+        return false;
+    }
+    error.clear();
+    return true;
+}
+
 } // namespace Luminumbra::world

@@ -58,3 +58,19 @@ The per-tick world hash, replay start/checkpoint comparisons and every existing 
 remain unchanged. Replay wire bytes change only through the versioned header. Native
 verification must exercise TCP lockstep, replay and effective setter tests, existing
 save/open regressions, and the established determinism gates.
+
+Both runtime executables accept `--systems-config <path>` for an explicit SystemConfig
+JSON override and `--preset-json <path>` for a validated new-world terrain preset.
+Paths are relative to the working directory. Missing or invalid overrides fail before
+world creation. Server smoke, recording, replay, and lockstep share the resolved
+configuration; the client networked smoke also supplies it to its host authority.
+Replay and Hello identities still come from `GameSession::SystemConfigIdentity()`.
+Record and replay must receive the same overrides.
+
+Historical determinism pins use `test/fixtures/historical-defaults-off.json` together
+with `worlds/atlas/presets-rev6/default.json`. The fixture explicitly disables every
+simulation flag and retains the historical render settings. The ladder is render-only
+and excluded from the world hash. The frozen preset also preserves the disabled island
+mask; disabling simulation flags alone would not restore historical terrain. Shipping
+defaults remain exercised by the unpinned headless, moving, and water trace workloads.
+Capturing shipping-default absolute hashes still requires native runs.

@@ -182,6 +182,35 @@ SystemConfig SystemConfig::LoadFromFile(const std::string& path) {
     return FromJsonString(buffer.str());
 }
 
+bool SystemConfig::TryLoadFromFile(const std::string& path,
+                                   SystemConfig& config,
+                                   std::string& error) {
+    std::ifstream file(path);
+    if (!file) {
+        error = "cannot read systems config: " + path;
+        return false;
+    }
+    std::ostringstream buffer;
+    buffer << file.rdbuf();
+    if (file.bad()) {
+        error = "cannot read systems config: " + path;
+        return false;
+    }
+    try {
+        const auto document = nlohmann::json::parse(buffer.str());
+        if (!document.is_object()) {
+            error = "systems config must be a JSON object: " + path;
+            return false;
+        }
+        config = FromJsonString(document.dump());
+    } catch (const nlohmann::json::exception& exception) {
+        error = "invalid systems config: " + path + ": " + exception.what();
+        return false;
+    }
+    error.clear();
+    return true;
+}
+
 float SystemConfig::param(SysParam id, float fallback) const {
     if ((m_param_set >> static_cast<unsigned>(id)) & 1u) {
         return m_params[static_cast<std::size_t>(id)].x;

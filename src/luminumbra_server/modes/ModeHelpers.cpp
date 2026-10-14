@@ -18,7 +18,9 @@ Luminumbra::Net::HelloMsg RuntimeHelloFrom(const ServerCliOptions& options) {
     hello.preset = options.preset;
     hello.client_id = LocalNetworkPlayerId(options);
     Luminumbra::world::GameSession session;
-    session.ApplySystemConfig(luminumbra::core::SystemConfig::LoadFromFile(path.string()));
+    session.ApplySystemConfig(options.systems_config_override
+                                  ? *options.systems_config_override
+                                  : luminumbra::core::SystemConfig::LoadFromFile(path.string()));
     hello.system_config_identity = session.SystemConfigIdentity();
     return hello;
 }
@@ -26,6 +28,8 @@ Luminumbra::Net::HelloMsg RuntimeHelloFrom(const ServerCliOptions& options) {
 Luminumbra::Server::ServerWorldRunnerConfig RunnerConfigFrom(const ServerCliOptions& options) {
     Luminumbra::Server::ServerWorldRunnerConfig config;
     config.root_path = options.root;
+    config.systems_config_override = options.systems_config_override;
+    config.preset_json_override = options.preset_json_override;
     config.seed = options.seed;
     config.preset = options.preset;
     config.world_id = options.world_id;

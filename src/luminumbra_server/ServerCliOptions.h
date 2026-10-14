@@ -1,5 +1,6 @@
 #pragma once
 
+#include "luminumbra_common/core/SystemConfig.h"
 #include "luminumbra_common/simulation/SimBudgetProfile.h"
 
 #include <cstdint>
@@ -9,6 +10,10 @@
 
 struct ServerCliOptions {
     std::string root;
+    std::string systems_config_path;
+    std::string preset_json_path;
+    std::optional<luminumbra::core::SystemConfig> systems_config_override;
+    std::optional<std::string> preset_json_override;
     std::string preset = "default";
     std::string seed = "424242";
     std::string world_id;

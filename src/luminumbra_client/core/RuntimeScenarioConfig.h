@@ -2,10 +2,12 @@
 
 #include "../../../include/luminumbra/core/Types.h"
 #include "core/CaptureScale.h"
+#include "luminumbra_common/core/SystemConfig.h"
 #include "nlohmann/json.hpp"
 #include <atomic>
 #include <cstdint>
 #include <filesystem>
+#include <optional>
 #include <string>
 
 namespace Luminumbra::Client::ScenarioHarness {
@@ -46,6 +48,10 @@ inline constexpr int kCapturePinnedHeight = 1600;
 
 struct RuntimeScenarioConfig {
     std::string scenario;
+    std::string systems_config_path;
+    std::string preset_json_path;
+    std::optional<luminumbra::core::SystemConfig> systems_config_override;
+    std::optional<std::string> preset_json_override;
     bool auto_create_world = false;
     bool auto_enter_world = false;
     bool no_audio = false;

@@ -15,6 +15,9 @@ $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 . (Join-Path $ScriptDir "far-ladder-oracle.ps1")
 
 $ArtifactDir = "tools/gates/baselines"
+# Compatibility pins use explicit historical systems and the frozen terrain preset.
+$HistoricalSystemsConfig = Join-Path $ScriptDir "../../test/fixtures/historical-defaults-off.json"
+$HistoricalPresetJson = Join-Path $ScriptDir "../../worlds/atlas/presets-rev6/default.json"
 
 function Test-Build {
     # Preflight: the SystemConfig registry is generated from
@@ -3902,7 +3905,7 @@ function Test-PopulatedWorldReplay {
         Remove-Item $artifactPath
     }
 
-    & $serverExe --smoke --ecology-roster --planted-roster --ticks 90 --artifact $artifactPath # Include plants in the live feeding loop.
+    & $serverExe --systems-config $HistoricalSystemsConfig --preset-json $HistoricalPresetJson --smoke --ecology-roster --planted-roster --ticks 90 --artifact $artifactPath # Include plants in the live feeding loop.
     if ($LASTEXITCODE -ne 0) {
         throw "populated world replay smoke exited with code $LASTEXITCODE"
     }
@@ -3968,8 +3971,7 @@ function Test-PopulatedWorldReplay {
     # (Re-pinned 2026-07-05 for: the roster now ALSO plants (--planted-roster),
     # so the previously-dormant feeding loop runs LIVE in this gate - grazeable biomass +
     # creature hunger now evolve and hash. The defined  extended-roster transition.)
-    # Defaults-on: shipping terrain/simulation defaults changed; needs CI recapture.
-    # Keep the old golden until this exact workload/build has reported its new hash.
+    # Pin covers the historical all-off simulation configuration and revision-6 terrain.
     $expectedHash = "d281053b8de4b891"
     if ($analysis.world_hash -ne $expectedHash) {
         throw "populated world replay end hash $($analysis.world_hash) != pinned golden $expectedHash (the populated ecology world diverged / non-deterministic)"
@@ -4475,7 +4477,7 @@ function Test-ReplayRoundtrip {
     Remove-Item -Force -ErrorAction SilentlyContinue $streamPath, $artifactPath
 
     # 1) Record a 90-tick run.
-    $recCode = Invoke-ServerWithCrashRetry -ServerExe $serverExe -ServerArgs @("--record", $streamPath, "--ticks", "90")
+    $recCode = Invoke-ServerWithCrashRetry -ServerExe $serverExe -ServerArgs @("--systems-config", $HistoricalSystemsConfig, "--preset-json", $HistoricalPresetJson, "--record", $streamPath, "--ticks", "90")
     if ($recCode -ne 0) {
         throw "replay record exited with code $recCode"
     }
@@ -4484,7 +4486,7 @@ function Test-ReplayRoundtrip {
     }
 
     # 2) Replay the recorded stream.
-    $repCode = Invoke-ServerWithCrashRetry -ServerExe $serverExe -ServerArgs @("--replay", $streamPath, "--artifact", $artifactPath)
+    $repCode = Invoke-ServerWithCrashRetry -ServerExe $serverExe -ServerArgs @("--systems-config", $HistoricalSystemsConfig, "--preset-json", $HistoricalPresetJson, "--replay", $streamPath, "--artifact", $artifactPath)
     if ($repCode -ne 0) {
         throw "replay playback exited with code $repCode (the recorded stream failed to replay deterministically)"
     }
@@ -4512,8 +4514,7 @@ function Test-ReplayRoundtrip {
     # (Re-pinned 2026-07-05 for the  authoritative-state change: settle contract + flux
     # persistence + order-independent wake propagation. Prior canonical was
     # 6f008a9f637c40b7.)
-    # Defaults-on: shipping terrain/simulation defaults changed; needs CI recapture.
-    # Keep the old golden until this exact workload/build has reported its new hash.
+    # Pin covers the historical all-off simulation configuration and revision-6 terrain.
     $expectedHash = "a66ab4d049ba9228"
     if ($r.end_world_hash -ne $expectedHash) {
         throw "replay roundtrip end hash $($r.end_world_hash) != canonical $expectedHash (recording perturbed the simulation)"
@@ -4610,7 +4611,7 @@ function Test-LockstepLoopback {
     $artifactPath = Join-Path $lockstepDir "lockstep-loopback.json"
     Remove-Item -Force -ErrorAction SilentlyContinue $artifactPath
 
-    & $serverExe --lockstep-loopback --ticks 90 --artifact $artifactPath
+    & $serverExe --systems-config $HistoricalSystemsConfig --preset-json $HistoricalPresetJson --lockstep-loopback --ticks 90 --artifact $artifactPath
     if ($LASTEXITCODE -ne 0) {
         throw "lockstep loopback exited with code $LASTEXITCODE"
     }
@@ -4633,8 +4634,7 @@ function Test-LockstepLoopback {
     # Determinism proof: lockstep must NOT perturb the sim. The in-sync end hash must equal
     # the canonical HeadlessServerTick hash, unchanged. (Re-pinned 2026-07-05 for the
     #  authoritative-state change; prior canonical was 6f008a9f637c40b7.)
-    # Defaults-on: shipping terrain/simulation defaults changed; needs CI recapture.
-    # Keep the old golden until this exact workload/build has reported its new hash.
+    # Pin covers the historical all-off simulation configuration and revision-6 terrain.
     $expectedHash = "a66ab4d049ba9228"
     if ($a.host.world_hash -ne $expectedHash) {
         throw "lockstep loopback end hash $($a.host.world_hash) != canonical $expectedHash (lockstep perturbed the simulation)"
@@ -4689,6 +4689,8 @@ function Test-NetworkedSession {
     # exits; --timed-run is a generous outer ceiling only.
     Invoke-Checked -FilePath $exe -ArgumentList @(
         "--scenario", "networked_session_smoke",
+        "--systems-config", $HistoricalSystemsConfig,
+        "--preset-json", $HistoricalPresetJson,
         "--auto-create-world",
         "--auto-enter-world",
         "--timed-run", "600",
@@ -4742,8 +4744,7 @@ function Test-NetworkedSession {
     # Re-pinned 2026-07-10 after three independent 90-tick runs all produced
     # 354be8d009c08703 with host==client at every cadence, clean disconnect,
     # and zero GL errors. This remains the client-path bare streamed-chunk hash.
-    # Defaults-on: shipping terrain/simulation defaults changed; needs CI recapture.
-    # Keep the old golden until this exact workload/build has reported its new hash.
+    # Pin covers the historical all-off simulation configuration and revision-6 terrain.
     $expectedHash = "354be8d009c08703"
     if ($a.end_hash -ne $expectedHash) {
         throw "networked session end hash $($a.end_hash) != expected $expectedHash (client streamed-chunk world diverged / non-deterministic)"
@@ -4776,7 +4777,7 @@ function Test-LockstepFaultInjection {
     # --- Scenario 1: horizon absorbs a delayed/dropped input (stays in sync). ---
     $absorbArtifact = Join-Path $lockstepDir "lockstep-absorb.json"
     Remove-Item -Force -ErrorAction SilentlyContinue $absorbArtifact
-    & $serverExe --lockstep-loopback --ticks 90 --lockstep-delay-input 8 --artifact $absorbArtifact
+    & $serverExe --systems-config $HistoricalSystemsConfig --preset-json $HistoricalPresetJson --lockstep-loopback --ticks 90 --lockstep-delay-input 8 --artifact $absorbArtifact
     if ($LASTEXITCODE -ne 0) {
         throw "lockstep fault-injection (absorb) exited with code $LASTEXITCODE"
     }
@@ -4794,8 +4795,7 @@ function Test-LockstepFaultInjection {
     if ([int64]$absorb.host.late_input_events -le 0) {
         throw "lockstep fault-injection: no late-input events recorded (the delay was not exercised)"
     }
-    # Defaults-on: shipping terrain/simulation defaults changed; needs CI recapture.
-    # Keep the old golden until this exact workload/build has reported its new hash.
+    # Pin covers the historical all-off simulation configuration and revision-6 terrain.
     if (-not $absorb.end_hashes_equal -or $absorb.host.world_hash -ne "a66ab4d049ba9228") {
         throw "lockstep fault-injection: absorbed-jitter run did not reach the canonical in-sync end hash (host=$($absorb.host.world_hash))"
     }
@@ -4804,7 +4804,7 @@ function Test-LockstepFaultInjection {
     $corruptArtifact = Join-Path $lockstepDir "lockstep-corrupt.json"
     $dumpPath = Join-Path $lockstepDir "lockstep-desync.lrec1"
     Remove-Item -Force -ErrorAction SilentlyContinue $corruptArtifact, $dumpPath, ($dumpPath + ".peer")
-    & $serverExe --lockstep-loopback --ticks 90 --lockstep-corrupt-tick 30 --lockstep-dump $dumpPath --artifact $corruptArtifact
+    & $serverExe --systems-config $HistoricalSystemsConfig --preset-json $HistoricalPresetJson --lockstep-loopback --ticks 90 --lockstep-corrupt-tick 30 --lockstep-dump $dumpPath --artifact $corruptArtifact
     if ($LASTEXITCODE -ne 0) {
         throw "lockstep fault-injection (corrupt) exited with code $LASTEXITCODE"
     }

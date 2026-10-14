@@ -254,9 +254,14 @@ bool NetworkedSessionDriver::Begin(Luminumbra::world::GameSession* client_sessio
     if (!std::filesystem::exists(systems_path, systems_error))
         systems_path = std::filesystem::path("data/common/systems.json");
     m_impl->host_session->ApplySystemConfig(
-        luminumbra::core::SystemConfig::LoadFromFile(systems_path.string()));
+        config.systems_config_override
+            ? *config.systems_config_override
+            : luminumbra::core::SystemConfig::LoadFromFile(systems_path.string()));
     if (!m_impl->host_session->CreateWorld(
-            "Networked Host", std::to_string(config.seed), config.preset)) {
+            "Networked Host",
+            std::to_string(config.seed),
+            config.preset,
+            config.preset_json_override ? &*config.preset_json_override : nullptr)) {
         m_failure_reason = "host_create_world_failed";
         return false;
     }

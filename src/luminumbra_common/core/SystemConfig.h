@@ -90,6 +90,9 @@ public:
     [[nodiscard]] static SystemConfig FromJsonString(const std::string& json_text);
     // Load from disk. Missing/unreadable file -> all-defaults (no throw).
     [[nodiscard]] static SystemConfig LoadFromFile(const std::string& path);
+    // Explicit CLI overrides must be readable JSON objects; failure leaves config unchanged.
+    [[nodiscard]] static bool
+    TryLoadFromFile(const std::string& path, SystemConfig& config, std::string& error);
 
     // O(1) hot-path query: single bit test on the resolved flag set.
     [[nodiscard]] bool enabled(SysKey key) const {

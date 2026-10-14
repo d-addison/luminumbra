@@ -20,6 +20,7 @@
 #include <vector>
 
 #include "luminumbra_common/core/JobSystem.h"
+#include "luminumbra_common/core/SystemConfig.h"
 #include "luminumbra_common/persistence/WorldPersistenceRoundtrip.h"
 #include "luminumbra_common/world/ActiveRegionLedger.h"
 #include "luminumbra_common/world/GameSession.h"
@@ -30,6 +31,8 @@ namespace Luminumbra::Server {
 struct ServerWorldRunnerConfig {
     // Runtime root with trailing separator (GameSession concatenates paths).
     std::string root_path;
+    std::optional<luminumbra::core::SystemConfig> systems_config_override;
+    std::optional<std::string> preset_json_override;
     std::string world_name = "Headless Server World";
     std::string seed = "424242";
     // World preset name (worlds/atlas/presets/<preset>.json).

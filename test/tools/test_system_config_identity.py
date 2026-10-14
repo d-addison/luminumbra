@@ -57,6 +57,25 @@ def identity(document):
 
 
 class SystemConfigIdentityTest(unittest.TestCase):
+    def test_historical_workload_explicitly_covers_every_registered_flag(self):
+        historical = json.loads(
+            (ROOT / "test/fixtures/historical-defaults-off.json").read_text(encoding="utf-8")
+        )
+        render_on = {"far_world_ladder", "plant_procgen", "sky_lut_gpu",
+                     "live_weather", "aether_tap", "snow_cover"}
+        for section in ("sim", "render"):
+            keys = [key["json_name"] for key in SCHEMA["keys"] if key["section"] == section]
+            self.assertEqual(set(historical[section]), set(keys))
+            for name in keys:
+                with self.subTest(section=section, name=name):
+                    self.assertIs(historical[section][name]["enabled"],
+                                  section == "render" and name in render_on)
+        expected = {"sim": {key["json_name"]: {"enabled": False}
+                            for key in SCHEMA["keys"] if key["section"] == "sim"},
+                    "render": {"circadian": {"enabled": False}}}
+        self.assertEqual(canonical_bytes(historical), canonical_bytes(expected))
+        self.assertNotEqual(identity(historical), identity(SHIPPED))
+
     def test_exact_shipping_pin(self):
         self.assertEqual(len(canonical_bytes(SHIPPED)), 279)
         self.assertEqual(identity(SHIPPED), "da24cea9dbc5159b")

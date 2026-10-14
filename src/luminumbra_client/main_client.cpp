@@ -1355,6 +1355,29 @@ int main(int argc, char* argv[]) {
     LUMINUMBRA_CORE_INFO("Runtime root: {}", root_path_str);
 
     RuntimeScenarioConfig scenario_config = ParseRuntimeScenarioConfig(argc, argv, root_dir);
+    std::string override_error;
+    if (!scenario_config.systems_config_path.empty() ||
+        HasCommandLineFlag(argc, argv, "--systems-config") ||
+        HasCommandLineFlag(argc, argv, "--systems-config=")) {
+        luminumbra::core::SystemConfig config;
+        if (!luminumbra::core::SystemConfig::TryLoadFromFile(
+                scenario_config.systems_config_path, config, override_error)) {
+            LUMINUMBRA_CORE_ERROR("--systems-config: {}", override_error);
+            return 2;
+        }
+        scenario_config.systems_config_override = std::move(config);
+    }
+    if (!scenario_config.preset_json_path.empty() ||
+        HasCommandLineFlag(argc, argv, "--preset-json") ||
+        HasCommandLineFlag(argc, argv, "--preset-json=")) {
+        std::string json_text;
+        if (!Luminumbra::world::LoadTerrainPresetOverride(
+                scenario_config.preset_json_path, root_dir / "data", json_text, override_error)) {
+            LUMINUMBRA_CORE_ERROR("--preset-json: {}", override_error);
+            return 2;
+        }
+        scenario_config.preset_json_override = std::move(json_text);
+    }
 #if !defined(LUMINUMBRA_QA_RUNNER)
     // The shipping client does not compile the QA scenario harness (no
     // CreateScenarioRunner is linked). Refuse `--scenario` up front, before any
@@ -1953,6 +1976,12 @@ int main(int argc, char* argv[]) {
     // can be applied immediately. Never hashed; missing overlay -> struct defaults.
     g_systemConfig = luminumbra::core::SystemConfig::LoadLayered(
         "data/common/systems.json", luminumbra::core::SystemConfig::DefaultUserOverlayPath());
+    if (scenario_config.systems_config_override) {
+        // Retain the player settings overlay; it cannot alter simulation or render flags.
+        const auto user_settings = g_systemConfig.user();
+        g_systemConfig = *scenario_config.systems_config_override;
+        g_systemConfig.user() = user_settings;
+    }
 
     if (!capture_size.empty())
         glfwWindowHint(GLFW_SCALE_FRAMEBUFFER, GLFW_FALSE);
@@ -2463,6 +2492,10 @@ int main(int argc, char* argv[]) {
             }
         }
 
+        if (scenario_config.preset_json_override) {
+            customPresetJson = *scenario_config.preset_json_override;
+            customPtr = &customPresetJson;
+        }
         const auto asset_error = game_content_error();
         if (!asset_error.empty()) {
             refuse_world_entry(asset_error, false);
