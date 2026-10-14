@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <filesystem>
 #include <fstream>
+#include <regex>
 #include <sstream>
 #include <string>
 
@@ -29,22 +30,13 @@ std::size_t CountOccurrences(const std::string& source, const std::string& fragm
 }
 
 // Shadow orchestration must delegate only live terrain/glass to ShadowPass.
-// Reject direct owner access as well as the selected G-buffer submit seam;
-// owner names are independent of whitespace around ->Submit / draw calls.
+// Reject direct owner member access and submission/draw calls, independent of
+// whitespace. Replay flags and replay-preservation helpers are allowed.
 bool HasFarSubmissionAccess(const std::string& source) {
-    const char* const forbidden[] = {"m_far_world",
-                                     "far_world_renderer",
-                                     "m_farlod",
-                                     "FarWorld",
-                                     "FarLod",
-                                     "submit_ladder",
-                                     "SubmitSelectedFarWorld",
-                                     "DrawFarVolumeGpu"};
-    for (const char* identifier : forbidden) {
-        if (source.find(identifier) != std::string::npos)
-            return true;
-    }
-    return false;
+    static const std::regex forbidden(
+        R"(\b(m_far_world|m_farlod)\s*(->|\.)|)"
+        R"(\b(far_world_renderer|submit_ladder|SubmitSelectedFarWorld|DrawFarVolumeGpu)\s*\()");
+    return std::regex_search(source, forbidden);
 }
 
 // Returns the brace-delimited body that follows the first occurrence of `signature`, or an empty
@@ -313,6 +305,38 @@ TEST(FarWorldShadowContract, NegativeAOBypassesOnlyTheThreeCascadeLookups) {
     ExpectContains(body, "* shadow * (1.0 - cloud_shadow) * shadowTint;");
     ExpectContains(body, "texture(u_ssao, TexCoords).r");
     ExpectContains(body, "skyVis = computeSkyVisibility(viewPos, viewNormal);");
+}
+
+TEST(FarWorldShadowContract, SubmissionPredicateAllowsReplayStateAndRejectsDrawAccess) {
+    for (const char* source : {
+             "shadow_ctx.frozen_replay = m_far_world_paired;",
+             "#include \"../FarWorldReplay.h\"",
+             "PreserveReplayObject(ReplayObjectKind::LayerFramebuffer, m_shadow_map.fbo_id);",
+             "other_m_far_world->Submit(camera, prepare);",
+             "m_farlod_state.draw();",
+             "other_far_world_renderer().Submit(camera, prepare);",
+             "submit_ladder_state();",
+             "SubmitSelectedFarWorldReplay();",
+             "DrawFarVolumeGpuReplay();",
+         }) {
+        SCOPED_TRACE(source);
+        EXPECT_FALSE(HasFarSubmissionAccess(source));
+    }
+    for (const char* source : {
+             "m_far_world->Submit(camera, prepare);",
+             "m_far_world -> Submit(camera, prepare);",
+             "m_far_world\n\t. Submit(camera, prepare);",
+             "m_farlod->draw();",
+             "m_farlod \t. draw();",
+             "far_world_renderer().Submit(camera, prepare);",
+             "far_world_renderer \n().Submit(camera, prepare);",
+             "input.submit_ladder (prepare);",
+             "SubmitSelectedFarWorld (input, prepare);",
+             "DrawFarVolumeGpu (allocation, driver);",
+         }) {
+        SCOPED_TRACE(source);
+        EXPECT_TRUE(HasFarSubmissionAccess(source));
+    }
 }
 
 TEST(FarWorldShadowContract, ProductionCascadesHaveOnlyLiveAndGlassInputs) {
