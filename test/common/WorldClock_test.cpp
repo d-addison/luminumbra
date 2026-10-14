@@ -1,5 +1,7 @@
 #include <gtest/gtest.h>
 
+#include "../support/CalendarMetadataCases.h"
+
 #include "luminumbra_client/rendering/TimeOfDayModel.h"
 #include "luminumbra_common/ai/CircadianSystem.h"
 #include "luminumbra_common/ai/StimulusChannels.h"
@@ -8,6 +10,7 @@
 #include "luminumbra_common/systems/WindFieldSystem.h"
 #include "luminumbra_common/world/WorldClock.h"
 
+#include <array>
 #include <limits>
 #include <nlohmann/json.hpp>
 
@@ -21,7 +24,10 @@ TEST(WorldClockTest, MidnightMidwinterPhasesAndIndicesWrapExactly) {
     EXPECT_EQ(clock.calendar(), WorldCalendar{});
     constexpr std::uint64_t day = WorldCalendar{}.dayLengthTicks;
     constexpr std::uint64_t year = day * WorldCalendar{}.daysPerYear;
-    EXPECT_EQ(day, 216000u);
+    EXPECT_EQ(day, 162000u);
+    EXPECT_EQ(clock.lunar_period_ticks(), 1296000u);
+    EXPECT_EQ(clock.calendar().daylightNumerator, 2u);
+    EXPECT_EQ(clock.calendar().daylightDenominator, 3u);
     EXPECT_EQ(WorldCalendar{}.daysPerYear, 8u);
     EXPECT_EQ(clock.year_length_ticks(), year);
     EXPECT_EQ(clock.day_phase(0), 0.0);
@@ -60,12 +66,16 @@ TEST(WorldClockTest, CustomCalendarAndCheckedTickLimits) {
 TEST(WorldClockTest, CanonicalBytesAreTaggedLittleEndianAndIgnoreFrameTime) {
     const WorldClock clock(0x0102030405060708ull, {36000, 8});
     const std::string expected =
-        std::string("world_clock:v1:") +
-        std::string("\x08\x07\x06\x05\x04\x03\x02\x01\xa0\x8c\x00\x00\x08\x00\x00\x00", 16);
+        std::string("world_clock:v2:") +
+        std::string("\x08\x07\x06\x05\x04\x03\x02\x01\xa0\x8c\x00\x00\x08\x00\x00\x00"
+                    "\x02\x00\x00\x00\x03\x00\x00\x00\x08\x00\x00\x00",
+                    28);
     EXPECT_EQ(clock.canonical_bytes(), expected);
     const std::string default_expected =
-        std::string("world_clock:v1:") +
-        std::string("\x08\x07\x06\x05\x04\x03\x02\x01\xc0\x4b\x03\x00\x08\x00\x00\x00", 16);
+        std::string("world_clock:v2:") +
+        std::string("\x08\x07\x06\x05\x04\x03\x02\x01\xd0\x78\x02\x00\x08\x00\x00\x00"
+                    "\x02\x00\x00\x00\x03\x00\x00\x00\x08\x00\x00\x00",
+                    28);
     EXPECT_EQ(WorldClock(clock.tick()).canonical_bytes(), default_expected);
     json metadata;
     clock.write_metadata(metadata);
@@ -76,6 +86,9 @@ TEST(WorldClockTest, CanonicalBytesAreTaggedLittleEndianAndIgnoreFrameTime) {
     EXPECT_NE(WorldClock(clock.tick() + 1, clock.calendar()).canonical_bytes(), expected);
     EXPECT_NE(WorldClock(clock.tick(), {36001, 8}).canonical_bytes(), expected);
     EXPECT_NE(WorldClock(clock.tick(), {36000, 9}).canonical_bytes(), expected);
+    EXPECT_NE(WorldClock(clock.tick(), {36000, 8, 1, 3, 8}).canonical_bytes(), expected);
+    EXPECT_NE(WorldClock(clock.tick(), {36000, 8, 2, 5, 8}).canonical_bytes(), expected);
+    EXPECT_NE(WorldClock(clock.tick(), {36000, 8, 2, 3, 7}).canonical_bytes(), expected);
 }
 
 TEST(WorldClockTest, MissingMetadataUsesPinnedDefaults) {
@@ -83,16 +96,16 @@ TEST(WorldClockTest, MissingMetadataUsesPinnedDefaults) {
     std::string error;
     ASSERT_TRUE(WorldClock::from_metadata(json::object(), clock, error));
     EXPECT_EQ(clock.tick(), 0u);
-    EXPECT_EQ(clock.calendar(), WorldCalendar{});
+    EXPECT_EQ(clock.calendar(), WorldCalendar::Legacy());
     ASSERT_TRUE(WorldClock::from_metadata(json::parse(R"({"simulationTick":13})"), clock, error));
     EXPECT_EQ(clock.tick(), 13u);
-    EXPECT_EQ(clock.calendar(), WorldCalendar{});
+    EXPECT_EQ(clock.calendar(), WorldCalendar::Legacy());
     ASSERT_TRUE(WorldClock::from_metadata(
         json::parse(R"({"simulationTick":13,"calendar":{"dayLengthTicks":36000,"daysPerYear":8}})"),
         clock,
         error));
     EXPECT_EQ(clock.tick(), 13u);
-    EXPECT_EQ(clock.calendar(), (WorldCalendar{36000, 8}));
+    EXPECT_EQ(clock.calendar(), (WorldCalendar{36000, 8, 1, 2, 8}));
     EXPECT_EQ(clock.year_length_ticks(), 288000u);
     ASSERT_TRUE(WorldClock::from_metadata(
         json::parse(R"({"calendar":{"dayLengthTicks":1,"daysPerYear":1}})"), clock, error));
@@ -104,6 +117,131 @@ TEST(WorldClockTest, MissingMetadataUsesPinnedDefaults) {
         clock,
         error));
     EXPECT_EQ(clock.tick(), WorldClock::kTickLimit - 1);
+}
+
+TEST(WorldClockTest, SolarHorizonsUseIntegerBoundariesAtEverySeason) {
+    const WorldClock clock;
+    for (const auto base : {0ull, 162000ull, 324000ull, 648000ull, 972000ull}) {
+        EXPECT_EQ(clock.solar_phase(base), 0.0);
+        EXPECT_EQ(clock.solar_phase(base + 27000), 0.25);
+        EXPECT_EQ(clock.solar_phase(base + 81000), 0.5);
+        EXPECT_EQ(clock.solar_phase(base + 135000), 0.75);
+        for (const auto horizon : {27000ull, 135000ull}) {
+            const double anchor = horizon == 27000 ? 0.25 : 0.75;
+            EXPECT_LT(clock.solar_phase(base + horizon - 1), anchor);
+            EXPECT_GT(clock.solar_phase(base + horizon + 1), anchor);
+            const WorldClock at(base + horizon);
+            const auto season = Luminumbra::Rendering::ComputeSeason(at);
+            const auto sun = Luminumbra::Rendering::ComputeSunGeometry(
+                Luminumbra::Rendering::TimeOfDayFromWorldClock(at), season.sunDeclination);
+            EXPECT_NEAR(sun.upFactor, 0.0f, 2e-7f);
+        }
+    }
+    EXPECT_EQ(clock.day_phase(27000), 1.0 / 6.0);
+    EXPECT_EQ(clock.day_phase(135000), 5.0 / 6.0);
+}
+
+TEST(WorldClockTest, SymmetricIdentityOddDaysAndLargeIntegerProducts) {
+    for (const auto day : {1u, 101u, 36000u, 216000u, 2147483647u}) {
+        const WorldClock symmetric(0, {day, 366, 1, 2, 366});
+        const WorldClock warped(0, {day, 3, 32768, 65535, 366});
+        EXPECT_EQ(warped.lunar_period_ticks(), std::uint64_t{day} * 366);
+        for (const auto tick :
+             std::array<std::uint64_t, 4>{0, 1, 100, WorldClock::kTickLimit - 1}) {
+            EXPECT_EQ(symmetric.solar_phase(tick), symmetric.day_phase(tick));
+            EXPECT_EQ(warped.solar_phase(tick), warped.solar_phase(tick % day));
+            EXPECT_GE(warped.solar_phase(tick), 0.0);
+            EXPECT_LT(warped.solar_phase(tick), 1.0);
+        }
+    }
+    const WorldClock odd(0, {101, 3, 2, 3, 8});
+    EXPECT_LT(odd.solar_phase(16), .25);
+    EXPECT_GT(odd.solar_phase(17), .25);
+    EXPECT_LT(odd.solar_phase(84), .75);
+    EXPECT_GT(odd.solar_phase(85), .75);
+    EXPECT_EQ(odd.solar_phase(101), 0.0);
+}
+
+TEST(WorldClockTest, LunarMonthIsIndependentOfYearAndImportsRecordedDayLength) {
+    const WorldClock clock(0, {162000, 3, 2, 3, 8});
+    EXPECT_EQ(clock.lunar_phase(0), 0.0);
+    EXPECT_EQ(clock.lunar_phase(4 * 162000), 0.5);
+    EXPECT_EQ(clock.lunar_phase(8 * 162000), 0.0);
+    EXPECT_EQ(clock.lunar_phase(clock.year_length_ticks()), 3.0 / 8.0);
+    const auto last = WorldClock::kTickLimit - 1;
+    EXPECT_EQ(clock.lunar_phase(last), static_cast<double>(last % 1296000) / 1296000.0);
+    for (const auto day : {36000u, 216000u}) {
+        WorldClock imported;
+        std::string error;
+        ASSERT_TRUE(WorldClock::from_metadata(
+            {{"calendar", {{"dayLengthTicks", day}, {"daysPerYear", 3}}}}, imported, error));
+        EXPECT_EQ(imported.lunar_period_ticks(), std::uint64_t{day} * 8);
+        EXPECT_EQ(imported.solar_phase(day / 4), .25);
+    }
+}
+
+TEST(WorldClockTest, StrictV2AndMarkerRefusalMatrixLeavesOutputUnchanged) {
+    for (const auto& metadata : Luminumbra::TestSupport::InvalidCalendarMetadata()) {
+        SCOPED_TRACE(metadata.dump());
+        WorldClock clock(123);
+        const auto before = clock.canonical_bytes();
+        std::string error;
+        EXPECT_FALSE(WorldClock::from_metadata(metadata, clock, error));
+        EXPECT_FALSE(error.empty());
+        EXPECT_EQ(clock.canonical_bytes(), before);
+    }
+    const json metadata = {{"renderCalendar", Luminumbra::TestSupport::DefaultCalendarMetadata()}};
+    WorldClock clock;
+    std::string error;
+    ASSERT_TRUE(WorldClock::from_metadata(metadata, clock, error));
+    EXPECT_EQ(clock.calendar(), WorldCalendar::Legacy());
+    std::optional<WorldCalendar> marker;
+    ASSERT_TRUE(WorldClock::read_render_calendar(metadata, marker, error));
+    ASSERT_TRUE(marker);
+    EXPECT_EQ(*marker, WorldCalendar{});
+}
+
+TEST(WorldClockTest, ConstructorChecksRationalAndLunarBounds) {
+    for (const auto calendar : {WorldCalendar{162000, 8, 0, 3, 8},
+                                WorldCalendar{162000, 8, 3, 3, 8},
+                                WorldCalendar{162000, 8, 2, 0, 8},
+                                WorldCalendar{162000, 8, 4, 6, 8},
+                                WorldCalendar{162000, 8, 1, 65536, 8},
+                                WorldCalendar{162000, 8, 2, 3, 0},
+                                WorldCalendar{162000, 8, 2, 3, 367}})
+        EXPECT_THROW(WorldClock(0, calendar), std::invalid_argument);
+    EXPECT_NO_THROW(WorldClock(0, (WorldCalendar{1, 1, 65534, 65535, 1})));
+}
+
+TEST(WorldClockTest, StimulusSolarLightTemperatureAndOverridesPreserveFallbacks) {
+    namespace ai = luminumbra::ai;
+    namespace dm = Luminumbra::DeterministicMath;
+    for (const auto tick :
+         {26999ull, 27000ull, 27001ull, 81000ull, 134999ull, 135000ull, 135001ull, 162000ull}) {
+        const WorldClock clock(tick);
+        ai::StimulusContext context;
+        context.tick = tick;
+        context.world_clock = &clock;
+        context.precip_override = .4f;
+        const ai::StimulusChannelRegistry sample(context);
+        const auto activity =
+            ai::CircadianActivity(static_cast<float>(clock.solar_phase(tick)), false);
+        EXPECT_FLOAT_EQ(sample.Sample(ai::StimulusChannel::TimeOfDay), activity);
+        EXPECT_FLOAT_EQ(sample.Sample(ai::StimulusChannel::LightLevel),
+                        activity * (1.0f - .4f * .4f));
+        const float season = dm::Sin(static_cast<float>(clock.spring_phase(tick)) * dm::kTwoPi);
+        const float temperature = .5f + .25f * season + .12f * (activity - .5f) - .15f * .4f;
+        EXPECT_FLOAT_EQ(sample.Sample(ai::StimulusChannel::Temperature), temperature);
+        context.ambient_light = .8f;
+        EXPECT_FLOAT_EQ(
+            ai::StimulusChannelRegistry(context).Sample(ai::StimulusChannel::LightLevel),
+            .8f * (1.0f - .4f * .4f));
+        context.world_clock = nullptr;
+        const float legacy = static_cast<float>(static_cast<double>(tick % ai::kTicksPerDayCycle) /
+                                                ai::kTicksPerDayCycle);
+        EXPECT_FLOAT_EQ(ai::StimulusChannelRegistry(context).Sample(ai::StimulusChannel::TimeOfDay),
+                        ai::CircadianActivity(legacy, false));
+    }
 }
 
 class WorldClockInvalidMetadata : public testing::TestWithParam<const char*> {};
@@ -184,6 +322,18 @@ TEST(WorldClockTest, ActiveRegionsIsGeneratedHashedAndDefaultOff) {
     EXPECT_FALSE(enabled.ComputeConfigSubHash().empty());
 }
 
+TEST(WorldClockTest, ActiveRegionsExplicitConfigurationIsHashed) {
+    using namespace luminumbra::core;
+    const auto defaults =
+        SystemConfig::FromJsonString(R"({"sim":{"active_regions":{"enabled":false}}})");
+    EXPECT_FALSE(defaults.enabled(SysKey::SimActiveRegions));
+
+    const auto enabled =
+        SystemConfig::FromJsonString(R"({"sim":{"active_regions":{"enabled":true}}})");
+    EXPECT_TRUE(enabled.enabled(SysKey::SimActiveRegions));
+    EXPECT_NE(enabled.ComputeConfigSubHash(), defaults.ComputeConfigSubHash());
+}
+
 TEST(WorldClockTest, SkyCircadianAndStimulusSharePinnedCalendarPhases) {
     namespace ai = luminumbra::ai;
     namespace sky = Luminumbra::Rendering;
@@ -200,7 +350,7 @@ TEST(WorldClockTest, SkyCircadianAndStimulusSharePinnedCalendarPhases) {
                             year}) {
         SCOPED_TRACE(tick);
         const WorldClock clock(tick);
-        const float day_phase = static_cast<float>(clock.day_phase(tick));
+        const float day_phase = static_cast<float>(clock.solar_phase(tick));
         ai::StimulusContext context;
         context.tick = tick;
         context.world_clock = &clock;

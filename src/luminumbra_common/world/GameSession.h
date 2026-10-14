@@ -356,6 +356,10 @@ public:
     [[nodiscard]] const WorldClock& GetWorldClock() const {
         return m_worldClock;
     }
+    [[nodiscard]] WorldCalendar GetRenderCalendar() const {
+        return m_activeRegionsEnabled ? m_worldClock.calendar()
+                                      : m_renderCalendar.value_or(WorldCalendar::Legacy());
+    }
     [[nodiscard]] const ActiveRegionLedger& GetActiveRegionLedger() const {
         return m_activeRegionLedger;
     }
@@ -449,6 +453,8 @@ private:
     bool SaveWorldMetadataTo(const std::filesystem::path& save_dir);
     bool ClockConfigurationCompatible(const std::filesystem::path& save_dir) const;
     WorldClock m_worldClock;
+    // Presentation persistence bookkeeping; excluded from disabled simulation hashes.
+    std::optional<WorldCalendar> m_renderCalendar;
     void AttachRegionEditObserver();
     RegionSchedulerConfig m_regionSchedulerConfig;
     ActiveRegionLedger m_activeRegionLedger;

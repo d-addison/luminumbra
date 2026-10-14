@@ -15,7 +15,8 @@ struct SavedWorld {
     std::filesystem::path preset_path;
     bool has_spawn_point = false;
     std::size_t water_sim_cursor = 0;
-    world::WorldClock clock;
+    world::WorldClock clock{0, world::WorldCalendar::Legacy()};
+    std::optional<world::WorldCalendar> render_calendar;
     bool requires_active_regions = false;
     // Empty only when metadata, preset and all existing save artifacts are supported.
     std::string error;

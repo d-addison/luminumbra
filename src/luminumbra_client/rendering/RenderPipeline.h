@@ -2,6 +2,7 @@
 #include <luminumbra/rendering/RenderView.h>
 
 #include "BenchmarkGpuQueries.h"
+#include "luminumbra_common/core/SimulationClock.h"
 #include "luminumbra_common/world/WorldClock.h"
 #include <optional>
 
@@ -631,6 +632,8 @@ public:
     // never call this keep the legacy wall-clock advance at the shared day length.
     void set_time_of_day_tick(std::uint64_t sim_tick);
     void set_world_clock(const world::WorldClock& clock);
+    // Presentation calendar for clock-disabled saves; keeps the legacy noon origin.
+    void set_render_calendar(world::WorldCalendar calendar);
     void set_day_length_ticks(std::uint64_t ticks) {
         m_dayLengthTicks = ticks == 0 ? 1 : ticks;
         m_dayLengthOverride = true;
@@ -640,7 +643,7 @@ public:
     // the sun-path trig) -- never wall-clock, never a free-running float
     // accumulator (regression review). It is: the client pushes the
     // replicated sim tick here each frame; the season modulates the sun ARC
-    // (declination / day length) and a biome material/foliage PALETTE tint ON TOP
+    // (declination / peak elevation) and a biome material/foliage PALETTE tint ON TOP
     // of the existing time-of-day, and adds NOTHING to world_hash. One-way :
     // nothing here writes back into the sim.
     void set_season_tick(std::uint64_t tick);
@@ -1148,14 +1151,18 @@ private:
     std::vector<glm::mat4> get_light_space_matrices(const Camera& camera);
 
     void update_time_of_day(float deltaTime);
-    float m_timeOfDay = 0.5f;             // Start at sunrise
-    bool m_timeOfDayHold = false;         // freeze auto-advance for photo-mode TOD scrub
-    float m_dayDurationSeconds = 7200.0f; // 2 h/day, matching the world calendar
+    float m_timeOfDay = 0.5f;       // Midnight in the noon-origin sky
+    double m_elapsedDayPhase = 0.5; // Unwarped, noon-origin presentation time
+    bool m_timeOfDayHold = false;   // freeze auto-advance for photo-mode TOD scrub
+    double m_dayDurationSeconds = world::WorldCalendar{}.dayLengthTicks /
+                                  luminumbra::core::SimulationClock::kCanonicalTickRateHz;
+    world::WorldCalendar m_renderCalendar;
+    std::uint64_t m_celestialTick = 0;
     // tick-authority state. m_todTickDriven marks "the sim tick fed TOD this
     // frame" so update_time_of_day skips the wall-clock advance; cleared every frame.
     std::optional<world::WorldClock> m_worldClock;
     bool m_dayLengthOverride = false;
-    std::uint64_t m_dayLengthTicks = 216000; // == TimeOfDayModel kDefaultDayLengthTicks
+    std::uint64_t m_dayLengthTicks = world::WorldCalendar{}.dayLengthTicks;
     bool m_todTickDriven = false;
 
     u32 m_screen_width = 0;
@@ -1246,8 +1253,6 @@ private:
     // const, so the moon is tunable independent of the sun. Default == the prior shader kMoonColor
     // (byte-identical until deliberately re-calibrated). This is a fixed pipeline value.
     glm::vec3 m_moonRadiance = glm::vec3(0.40f, 0.52f, 0.92f);
-    static constexpr std::uint64_t kTicksPerLunarCycle =
-        54000ull;                        // 30 min @ 30 Hz (a lunar "month")
     float m_seasonSunDeclination = 0.0f; // radians, seasonal arc tilt
     float m_sunElevationRad = 0.0f;      // sun elevation this frame (radians)
     glm::vec3 m_seasonPaletteTint{1.0f}; // warm(summer)/cool(winter) palette tint

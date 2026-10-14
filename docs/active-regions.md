@@ -2,8 +2,8 @@
 
 The host ledger implements the persistent-active scheduling foundation in
 [distant-world.md](distant-world.md). It is gated by the existing
-`sim.active_regions` switch, absent and false by default. No systems.json value
-is added. Budgets remain unlimited in shipped configuration. No distant system
+`sim.active_regions` switch. Explicitly disabling it retains the legacy
+simulation periods and hash behavior. Budgets remain unlimited in shipped configuration. No distant system
 consumes this schedule yet; field pages, creature records, water shares,
 diagnostics and measured budget activation remain separate work.
 
@@ -79,7 +79,11 @@ previous ambient anchor.
 `BoundedRegionResumeHook` defines an opt-in interface receiving region key,
 freeze tick, resume tick and bounded elapsed ticks. `resume_window` clamps elapsed
 ticks to both the system's explicit cap and one WorldClock calendar day; it
-refuses a resume before freeze. No callback consumer or catch-up is installed.
+refuses a resume before freeze. New calendars cap at 162,000 ticks (90 minutes),
+while imported calendars retain their recorded day, including 36,000 or 216,000
+ticks. The daylight fraction changes solar phase without changing this elapsed
+cap. ARL1 bytes and timestamps are unchanged; no callback consumer or catch-up
+is installed.
 
 ## File and compatibility
 

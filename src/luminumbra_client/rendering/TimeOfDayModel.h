@@ -55,7 +55,7 @@ inline SeasonState ComputeSeason(std::uint64_t seasonTick, std::uint64_t ticksPe
     const float phase = static_cast<float>(static_cast<double>(tick_in_year) /
                                            static_cast<double>(ticksPerSeasonCycle));
     // Seasonal sine  the year, ZEROED at  (neutral default). +1 at .25
-    // (summer solstice, highest arc / longest day); -1 at .75 (winter, lowest arc).
+    // (summer solstice, highest arc); -1 at .75 (winter, lowest arc).
     const float wave = DM::Sin(phase * DM::kTwoPi);
     // Axial-tilt declination -> a real per-season change in the sun's peak elevation, replacing
     // the old fixed -0.2f tilt with this season-varying term so summer reads a visibly higher
@@ -67,7 +67,7 @@ inline SeasonState ComputeSeason(std::uint64_t seasonTick, std::uint64_t ticksPe
 // Calendar uses midnight/midwinter; the existing sky geometry uses noon and
 // spring equinox. These explicit offsets keep the physical origins aligned.
 inline float TimeOfDayFromWorldClock(const world::WorldClock& clock) {
-    const double shifted = clock.day_phase(clock.tick()) + 0.5;
+    const double shifted = clock.solar_phase(clock.tick()) + 0.5;
     return static_cast<float>(shifted >= 1.0 ? shifted - 1.0 : shifted);
 }
 inline SeasonState ComputeSeason(const world::WorldClock& clock) {
@@ -180,16 +180,45 @@ inline float ComputeMoonIllumination(std::uint64_t seasonTick,
     return LunarIllumination(seasonTick, ticksPerLunarCycle);
 }
 
-// TIME AUTHORITY — time-of-day as a PURE FUNCTION of the
-// authoritative sim tick, retiring the wall-clock day-advance for live play. Integer
-// modulo first (exact), then one divide — the same pure-function-of-the-tick shape as
-// ComputeSeason. The default day length matches the world calendar's day
-// (216000 ticks = 2 h at the canonical 30 Hz tick rate) and m_dayDurationSeconds,
-// so the legacy clock, the wall-clock fallback and the calendar share one pacing.
-// Render-only: the tick flows sim -> render one way; TOD never feeds world_hash
-//.
+// Legacy tick inputs have a noon origin. Keep elapsed phase separate from solar
+// angle; direct pins are already solar angles and use the inverse for continuity.
 inline constexpr std::uint64_t kDefaultDayLengthTicks = world::WorldCalendar{}.dayLengthTicks;
-static_assert(kDefaultDayLengthTicks == 216000, "2 h/day @ 30 Hz");
+static_assert(kDefaultDayLengthTicks == 162000, "90 min/day @ 30 Hz");
+
+inline double SolarPhaseFromElapsed(double phase, const world::WorldCalendar& calendar) {
+    if (calendar.daylightNumerator == 1 && calendar.daylightDenominator == 2)
+        return phase;
+    const double f = static_cast<double>(calendar.daylightNumerator) / calendar.daylightDenominator;
+    const double dawn = (1.0 - f) / 2.0;
+    const double dusk = (1.0 + f) / 2.0;
+    if (phase < dawn)
+        return phase / (2.0 * (1.0 - f));
+    if (phase <= dusk)
+        return 0.25 + (phase - dawn) / (2.0 * f);
+    return 0.75 + (phase - dusk) / (2.0 * (1.0 - f));
+}
+inline double ElapsedPhaseFromSolar(double phase, const world::WorldCalendar& calendar) {
+    if (calendar.daylightNumerator == 1 && calendar.daylightDenominator == 2)
+        return phase;
+    const double f = static_cast<double>(calendar.daylightNumerator) / calendar.daylightDenominator;
+    if (phase < 0.25)
+        return phase * (2.0 * (1.0 - f));
+    if (phase <= 0.75)
+        return (1.0 - f) / 2.0 + (phase - 0.25) * (2.0 * f);
+    return (1.0 + f) / 2.0 + (phase - 0.75) * (2.0 * (1.0 - f));
+}
+inline double WrapDayPhase(double phase) {
+    return phase >= 1.0 ? phase - 1.0 : phase;
+}
+inline float SolarTimeFromNoonElapsed(double phase, const world::WorldCalendar& calendar) {
+    if (calendar.daylightNumerator == 1 && calendar.daylightDenominator == 2)
+        return static_cast<float>(phase);
+    return static_cast<float>(
+        WrapDayPhase(SolarPhaseFromElapsed(WrapDayPhase(phase + 0.5), calendar) + 0.5));
+}
+inline double NoonElapsedFromSolarTime(double phase, const world::WorldCalendar& calendar) {
+    return WrapDayPhase(ElapsedPhaseFromSolar(WrapDayPhase(phase + 0.5), calendar) + 0.5);
+}
 
 inline float TimeOfDayFromTick(std::uint64_t simTick, std::uint64_t dayLengthTicks) {
     if (dayLengthTicks == 0) {

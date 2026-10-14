@@ -4052,6 +4052,7 @@ int main(int argc, char* argv[]) {
                         if (gameSession->ActiveRegionsEnabled()) {
                             renderPipeline.set_world_clock(gameSession->GetWorldClock());
                         } else {
+                            renderPipeline.set_render_calendar(gameSession->GetRenderCalendar());
                             renderPipeline.set_season_tick(sim_tick);
                             renderPipeline.set_time_of_day_tick(sim_tick);
                         }

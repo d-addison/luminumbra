@@ -75,7 +75,8 @@ InspectSavedWorld(const fs::path& root, const std::string& world_id, const std::
             return result;
         }
         result.water_sim_cursor = json.value("waterSimCursor", std::size_t{0});
-        if (!world::WorldClock::from_metadata(json, result.clock, result.error))
+        if (!world::WorldClock::from_metadata(json, result.clock, result.error) ||
+            !world::WorldClock::read_render_calendar(json, result.render_calendar, result.error))
             return result;
         result.requires_active_regions =
             json.contains("simulationTick") || json.contains("calendar");

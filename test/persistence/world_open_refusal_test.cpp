@@ -1,3 +1,4 @@
+#include "../support/CalendarMetadataCases.h"
 #include <gtest/gtest.h>
 
 #include "luminumbra_common/core/JobSystem.h"
@@ -455,6 +456,78 @@ TEST_F(WorldOpenRefusal, CorruptClockMetadataOnlySaveRefusesBeforeFirstChunkSave
     EXPECT_FALSE(session.SaveWorld());
     EXPECT_FALSE(WorldSaveService::validate_save(save));
     EXPECT_EQ(DiskBytes(root), before);
+}
+
+TEST_F(WorldOpenRefusal, CalendarAndMarkerRefusalMatrixPreservesInitializedAndMetadataOnlySaves) {
+    const auto base = nlohmann::json::parse(Read(save / "world_info.json"));
+    for (const bool metadata_only : {false, true}) {
+        if (metadata_only)
+            fs::remove_all(save / "chunks");
+        for (const auto& patch : TestSupport::InvalidCalendarMetadata()) {
+            SCOPED_TRACE(patch.dump());
+            auto metadata = base;
+            metadata.update(patch);
+            Write(save / "world_info.json", metadata.dump());
+            const auto before = DiskBytes(save);
+            EXPECT_FALSE(Persistence::InspectSavedWorld(root, "fixture").error.empty());
+            const auto catalog = Persistence::EnumerateSavedWorlds(root);
+            ASSERT_EQ(catalog.worlds.size(), 1u);
+            EXPECT_FALSE(catalog.worlds.front().error.empty());
+            EXPECT_FALSE(WorldSaveService::validate_save(save));
+            GameSession session;
+            session.SetJobSystem(&jobs);
+            session.SetRootPath(RootString());
+            session.SetActiveRegionsEnabled(true);
+            EXPECT_FALSE(session.LoadWorld("fixture"));
+            GameSession snapshot;
+            snapshot.SetJobSystem(&jobs);
+            snapshot.SetRootPath(RootString());
+            ASSERT_TRUE(snapshot.CreateTransientWorld("Snapshot reader", "1337", "default"));
+            EXPECT_FALSE(snapshot.LoadWorldStateFrom(save));
+            EXPECT_FALSE(snapshot.SaveWorldStateTo(save));
+            EXPECT_EQ(DiskBytes(save), before);
+        }
+    }
+}
+
+TEST_F(WorldOpenRefusal, SupportedCalendarFormsAreReadOnlyAndMarkerDoesNotRequireFeature) {
+    const auto base = nlohmann::json::parse(Read(save / "world_info.json"));
+    fs::remove_all(save / "chunks");
+    const auto v2 = TestSupport::DefaultCalendarMetadata();
+    const auto v1 = nlohmann::json{{"dayLengthTicks", 36000}, {"daysPerYear", 3}};
+    for (const auto& patch : {nlohmann::json::object(),
+                              nlohmann::json{{"calendar", v1}},
+                              nlohmann::json{{"calendar", v2}},
+                              nlohmann::json{{"renderCalendar", v2}}}) {
+        fs::remove_all(save / "chunks");
+        auto metadata = base;
+        metadata.update(patch);
+        Write(save / "world_info.json", metadata.dump());
+        const auto before = DiskBytes(save);
+        const auto inspected = Persistence::InspectSavedWorld(root, "fixture");
+        ASSERT_TRUE(inspected.error.empty()) << inspected.error;
+        EXPECT_EQ(inspected.requires_active_regions, patch.contains("calendar"));
+        EXPECT_EQ(inspected.render_calendar.has_value(), patch.contains("renderCalendar"));
+        GameSession session;
+        session.SetJobSystem(&jobs);
+        session.SetRootPath(RootString());
+        session.SetActiveRegionsEnabled(patch.contains("calendar"));
+        ASSERT_TRUE(session.LoadWorld("fixture")) << session.GetWorldOpenError();
+        const auto expected =
+            patch.contains("renderCalendar") ||
+                    patch.value("calendar", nlohmann::json::object()).contains("version")
+                ? world::WorldCalendar{}
+            : patch.contains("calendar") ? world::WorldCalendar{36000, 3, 1, 2, 8}
+                                         : world::WorldCalendar::Legacy();
+        EXPECT_EQ(session.GetRenderCalendar(), expected);
+        EXPECT_EQ(DiskBytes(save), before);
+        ASSERT_TRUE(session.SaveWorld());
+        const auto written = nlohmann::json::parse(Read(save / "world_info.json"));
+        if (patch.contains("calendar"))
+            EXPECT_EQ(written.at("calendar").at("version"), 2);
+        else
+            EXPECT_EQ(written.contains("renderCalendar"), patch.contains("renderCalendar"));
+    }
 }
 
 TEST_F(WorldOpenRefusal, CurrentMetadataOnlyWorldLoadsBeforeFirstChunkSave) {

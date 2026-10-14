@@ -1,5 +1,6 @@
 #include "gtest/gtest.h"
 
+#include "../support/CalendarMetadataCases.h"
 #include "../support/UniqueTempPath.h"
 
 #include "persistence/WorldPersistenceRoundtrip.h"
@@ -13,6 +14,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <limits>
 #include <memory>
 #include <nlohmann/json.hpp>
@@ -496,4 +498,75 @@ TEST(WorldSaveServiceTest, PublicRegionDigestRejectsUnsupportedKeysBeforeDurable
                   expected_digest);
     }
     EXPECT_FALSE(std::filesystem::exists(missing_save));
+}
+
+TEST(WorldSaveService, BothCalendarKindsAreValidatedBeforeEveryWriter) {
+    for (const auto& patch : Luminumbra::TestSupport::InvalidCalendarMetadata()) {
+        SCOPED_TRACE(patch.dump());
+        TempSaveDir save_dir("calendar_matrix");
+        auto metadata = nlohmann::json{{"container_version", 2}};
+        metadata.update(patch);
+        EXPECT_FALSE(WorldSaveService::save_metadata(metadata.dump(), save_dir.path));
+        EXPECT_FALSE(std::filesystem::exists(save_dir.path / "world_info.json"));
+        Luminumbra::world::ActiveRegionLedger ledger;
+        EXPECT_FALSE(WorldSaveService::save_metadata_and_active_regions(
+            metadata.dump(), ledger, save_dir.path));
+        std::ofstream(save_dir.path / "world_info.json", std::ios::binary) << metadata.dump();
+        WorldStreamingState state;
+        PopulateFixtureWorld(state);
+        const auto before = metadata.dump();
+        const auto read = [&]() {
+            std::ifstream input(save_dir.path / "world_info.json", std::ios::binary);
+            return std::string(std::istreambuf_iterator<char>(input), {});
+        };
+        EXPECT_FALSE(WorldSaveService{}.save_world(state, save_dir.path));
+        EXPECT_FALSE(WorldSaveService{}.save_dirty_chunks(state, save_dir.path).saved);
+        EXPECT_FALSE(WorldSaveService::save_plant_entities({}, save_dir.path));
+        EXPECT_FALSE(WorldSaveService::upsert_container_records(
+            WorldSaveService::region_file_path(save_dir.path, 0, 0), {}));
+        EXPECT_FALSE(WorldSaveService::save_active_regions(
+            ledger, Luminumbra::world::WorldClock{}, save_dir.path));
+        EXPECT_FALSE(WorldSaveService::save_metadata(R"({"container_version":2})", save_dir.path));
+        EXPECT_FALSE(WorldSaveService::save_metadata_and_active_regions(
+            R"({"container_version":2,"simulationTick":0})", ledger, save_dir.path));
+        EXPECT_EQ(read(), before);
+        EXPECT_FALSE(std::filesystem::exists(save_dir.path / "chunks"));
+    }
+}
+
+TEST(WorldSaveService, SupportedCalendarWritesNormalizeOnlyOnSuccessfulExplicitSave) {
+    for (const auto* key : {"calendar", "renderCalendar"}) {
+        TempSaveDir save_dir("calendar_normalize");
+        const auto path = save_dir.path / "world_info.json";
+        auto metadata = nlohmann::json{{"container_version", 2}};
+        metadata[key] = key == std::string("calendar")
+                            ? nlohmann::json{{"dayLengthTicks", 36000}, {"daysPerYear", 3}}
+                            : Luminumbra::TestSupport::DefaultCalendarMetadata();
+        const std::string before = metadata.dump();
+        std::ofstream(path, std::ios::binary) << before;
+        const auto read = [&]() {
+            std::ifstream input(path, std::ios::binary);
+            return std::string(std::istreambuf_iterator<char>(input), {});
+        };
+        Luminumbra::world::WorldClock clock;
+        bool required = false;
+        ASSERT_TRUE(WorldSaveService::read_clock_metadata(save_dir.path, clock, required));
+        EXPECT_EQ(required, key == std::string("calendar"));
+        EXPECT_EQ(read(), before);
+        WorldSaveService::set_interrupt_before_region_replace_for_testing(true);
+        EXPECT_FALSE(WorldSaveService::save_metadata(before, save_dir.path));
+        EXPECT_EQ(read(), before);
+        ASSERT_TRUE(WorldSaveService::save_metadata(before, save_dir.path));
+        const auto written = nlohmann::json::parse(read());
+        EXPECT_EQ(written.at(key).at("version"), 2);
+        EXPECT_EQ(written.at(key).size(), 6u);
+        if (required) {
+            EXPECT_EQ(written.at(key).at("dayLengthTicks"), 36000);
+            EXPECT_EQ(written.at(key).at("daylightNumerator"), 1);
+            EXPECT_EQ(written.at(key).at("daylightDenominator"), 2);
+        } else {
+            EXPECT_FALSE(written.contains("simulationTick"));
+            EXPECT_FALSE(written.contains("calendar"));
+        }
+    }
 }

@@ -5597,8 +5597,12 @@ void RenderPipeline::update_time_of_day(float deltaTime) {
     // never feed the tick (scenarios, tests, menus) keep the legacy wall-clock advance
     // at the shared day length.
     if (!m_timeOfDayHold && !m_todTickDriven) {
-        m_timeOfDay += deltaTime / m_dayDurationSeconds;
-        m_timeOfDay = fmod(m_timeOfDay, 1.0f);
+        const auto day_ticks =
+            m_dayLengthOverride ? m_dayLengthTicks : m_renderCalendar.dayLengthTicks;
+        m_dayDurationSeconds = static_cast<double>(day_ticks) /
+                               luminumbra::core::SimulationClock::kCanonicalTickRateHz;
+        m_elapsedDayPhase = std::fmod(m_elapsedDayPhase + deltaTime / m_dayDurationSeconds, 1.0);
+        m_timeOfDay = Rendering::SolarTimeFromNoonElapsed(m_elapsedDayPhase, m_renderCalendar);
     }
     m_todTickDriven = false;
 
@@ -5632,7 +5636,11 @@ void RenderPipeline::update_time_of_day(float deltaTime) {
     }();
     const float moon_forced = s_moon_env >= 0.0f ? s_moon_env : m_moonIllumOverride;
     const Rendering::CelestialFrame celestial = Rendering::EvaluateCelestialBodies(
-        m_timeOfDay, m_seasonSunDeclination, m_seasonTick, moon_forced, kTicksPerLunarCycle);
+        m_timeOfDay,
+        m_seasonSunDeclination,
+        m_celestialTick,
+        moon_forced,
+        world::WorldClock(0, m_renderCalendar).lunar_period_ticks());
     const Rendering::SunGeometry& sun_geo = celestial.sun_geometry;
     float sun_angle_rad = sun_geo.angleRad;
     const float season_tilt_z = sun_geo.tiltZ;
@@ -5801,6 +5809,7 @@ void RenderPipeline::set_season_tick(std::uint64_t tick) {
     // One-way : this never feeds back into the sim and never touches
     // world_hash.
     m_seasonTick = tick;
+    m_celestialTick = tick;
 }
 
 u32 RenderPipeline::water_caustics_texture() const {
@@ -5809,30 +5818,50 @@ u32 RenderPipeline::water_caustics_texture() const {
 
 void RenderPipeline::set_time_of_day(float normalized_time) {
     m_timeOfDay = std::clamp(normalized_time, 0.0f, 1.0f);
+    m_elapsedDayPhase = Rendering::NoonElapsedFromSolarTime(m_timeOfDay, m_renderCalendar);
+}
+
+void RenderPipeline::set_render_calendar(world::WorldCalendar calendar) {
+    // Validate at this boundary too; rendering never silently repairs a calendar.
+    const world::WorldClock checked(0, calendar);
+    m_worldClock.reset();
+    if (m_renderCalendar != checked.calendar()) {
+        m_renderCalendar = checked.calendar();
+        m_elapsedDayPhase = Rendering::NoonElapsedFromSolarTime(m_timeOfDay, m_renderCalendar);
+    }
 }
 
 void RenderPipeline::set_world_clock(const world::WorldClock& clock) {
     m_worldClock = clock;
+    m_renderCalendar = clock.calendar();
     m_seasonTick = clock.tick();
+    m_celestialTick = clock.tick();
     if (!m_timeOfDayHold) {
         if (m_dayLengthOverride) {
-            const float shifted =
-                Rendering::TimeOfDayFromTick(clock.tick(), m_dayLengthTicks) + 0.5f;
-            m_timeOfDay = shifted >= 1.0f ? shifted - 1.0f : shifted;
+            const double phase = static_cast<double>(clock.tick() % m_dayLengthTicks) /
+                                 static_cast<double>(m_dayLengthTicks);
+            m_elapsedDayPhase = Rendering::WrapDayPhase(phase + 0.5);
+            m_timeOfDay = Rendering::SolarTimeFromNoonElapsed(m_elapsedDayPhase, m_renderCalendar);
         } else {
+            m_elapsedDayPhase = Rendering::WrapDayPhase(clock.day_phase(clock.tick()) + 0.5);
             m_timeOfDay = Rendering::TimeOfDayFromWorldClock(clock);
         }
+    } else {
+        m_elapsedDayPhase = Rendering::NoonElapsedFromSolarTime(m_timeOfDay, m_renderCalendar);
     }
     m_todTickDriven = true;
 }
 
 void RenderPipeline::set_time_of_day_tick(std::uint64_t sim_tick) {
-    // the photo-mode hold outranks the tick authority ( — the player
-    // is scrubbing time); scenario/scene pins outrank it by frame order (they call
-    // set_time_of_day after this). Marks the frame tick-driven either way so the
-    // wall-clock advance never fights the scrub.
+    m_worldClock.reset();
+    m_celestialTick = sim_tick;
+    // Photo hold wins; later direct scenario pins retain frame-order precedence.
     if (!m_timeOfDayHold) {
-        m_timeOfDay = Rendering::TimeOfDayFromTick(sim_tick, m_dayLengthTicks);
+        const auto day_ticks =
+            m_dayLengthOverride ? m_dayLengthTicks : m_renderCalendar.dayLengthTicks;
+        m_elapsedDayPhase =
+            static_cast<double>(sim_tick % day_ticks) / static_cast<double>(day_ticks);
+        m_timeOfDay = Rendering::SolarTimeFromNoonElapsed(m_elapsedDayPhase, m_renderCalendar);
     }
     m_todTickDriven = true;
 }

@@ -181,6 +181,7 @@ void GameSession::ResetWorldSystems() {
     m_simulationClock.reset();
     m_simBudgetTelemetry.Clear();
     m_worldClock = WorldClock{};
+    m_renderCalendar.reset();
     m_activeRegionLedger = ActiveRegionLedger(m_regionSchedulerConfig);
     m_regionSchedule = {};
     m_replicatedSimulationAnchors.reset();
@@ -811,7 +812,7 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
                     constexpr std::uint64_t kTicksPerDay = 30ull * 60ull * 20ull;
                     const float tod01 =
                         m_activeRegionsEnabled
-                            ? static_cast<float>(m_worldClock.day_phase(current_tick))
+                            ? static_cast<float>(m_worldClock.solar_phase(current_tick))
                             : static_cast<float>(current_tick % kTicksPerDay) /
                                   static_cast<float>(kTicksPerDay);
                     const float noonDist = tod01 < 0.5f ? (0.5f - tod01) : (tod01 - 0.5f);
@@ -939,7 +940,7 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
             if (!m_registry.view<Comp::CircadianComponent>().empty()) {
                 constexpr std::uint64_t kTicksPerDay = 30ull * 60ull * 20ull; // 20-min day @30Hz
                 const float tod01 = m_activeRegionsEnabled
-                                        ? static_cast<float>(m_worldClock.day_phase(current_tick))
+                                        ? static_cast<float>(m_worldClock.solar_phase(current_tick))
                                         : static_cast<float>(current_tick % kTicksPerDay) /
                                               static_cast<float>(kTicksPerDay);
                 luminumbra::ai::RunCircadianOnTick(m_registry, tod01, m_circadianAmplitude);
@@ -1106,6 +1107,8 @@ bool GameSession::CreateWorldInternal(const std::string& name,
     ClampTerrainParams(params);
 
     ResetWorldSystems();
+    if (!m_activeRegionsEnabled)
+        m_renderCalendar = WorldCalendar{};
     m_metadata = std::move(metadata);
     m_transientWorld = transient;
     m_physicsSystem = std::make_unique<Systems::PhysicsSystem>();
@@ -1236,8 +1239,9 @@ bool GameSession::LoadWorld(const std::string& worldId) {
 
     ResetWorldSystems();
     m_metadata = saved.metadata;
+    m_renderCalendar = saved.render_calendar;
     if (m_activeRegionsEnabled) {
-        m_worldClock = saved.clock;
+        m_worldClock = m_renderCalendar ? WorldClock(0, *m_renderCalendar) : saved.clock;
         m_simulationClock.reset(m_worldClock.tick());
     }
     m_transientWorld = false;
@@ -1465,7 +1469,9 @@ bool GameSession::SaveWorld() {
 
 bool GameSession::SaveWorldMetadataTo(const fs::path& save_dir) {
     if (!IsSimulationTickBoundary() || save_dir.empty() ||
-        !ClockConfigurationCompatible(save_dir) || m_transientWorld || m_metadata.worldId.empty() ||
+        !ClockConfigurationCompatible(save_dir) ||
+        ((m_transientWorld || m_metadata.worldId.empty()) &&
+         (m_activeRegionsEnabled || !m_renderCalendar)) ||
         !m_worldOpenError.empty())
         return false;
     if (m_activeRegionsEnabled) {
@@ -1495,6 +1501,8 @@ bool GameSession::SaveWorldMetadataTo(const fs::path& save_dir) {
         {"waterSimCursor",
          m_worldSystem ? m_worldSystem->GetWaterSimWindowCursor() : std::size_t{0}}};
 
+    if (!m_activeRegionsEnabled && m_renderCalendar)
+        metadata_json["renderCalendar"] = WorldClock(0, *m_renderCalendar).calendar_metadata();
     if (m_activeRegionsEnabled) {
         m_worldClock.write_metadata(metadata_json);
         metadata_json["ambientFieldAnchor"] = {{"x", m_ambientFieldAnchor.x},
@@ -1552,7 +1560,7 @@ bool GameSession::SaveWorldStateTo(const std::filesystem::path& save_dir,
 
     // Clock snapshots can contain energy or metadata without any chunk/plant writer
     // creating the destination. Create it only after every refusal check passes.
-    if (m_activeRegionsEnabled) {
+    if (m_activeRegionsEnabled || m_renderCalendar) {
         std::error_code error;
         fs::create_directories(save_dir, error);
         if (error)
@@ -1589,12 +1597,12 @@ bool GameSession::SaveWorldStateTo(const std::filesystem::path& save_dir,
         const bool plants_ok =
             Persistence::WorldSaveService::save_plant_entities(plant_snapshot, save_dir, nullptr);
         const bool energy_ok = SaveEnergyFieldRecord(save_dir);
-        if (m_activeRegionsEnabled && (!plants_ok || !energy_ok))
+        if ((m_activeRegionsEnabled || m_renderCalendar) && (!plants_ok || !energy_ok))
             return false;
         if (report) {
             *report = result;
         }
-        return !m_activeRegionsEnabled || SaveWorldMetadataTo(save_dir);
+        return (!m_activeRegionsEnabled && !m_renderCalendar) || SaveWorldMetadataTo(save_dir);
     }
 
     Persistence::WorldSaveService service;
@@ -1648,7 +1656,7 @@ bool GameSession::SaveWorldStateTo(const std::filesystem::path& save_dir,
     for (const std::string& error : errors) {
         LUMINUMBRA_CORE_ERROR("World state save failed: {}", error);
     }
-    if (ok && m_activeRegionsEnabled)
+    if (ok && (m_activeRegionsEnabled || m_renderCalendar))
         ok = SaveWorldMetadataTo(save_dir);
     if (ok) {
         result.saved = true;
@@ -1693,10 +1701,15 @@ bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
 
     WorldClock saved_clock;
     std::optional<Vec3> ambient_anchor;
+    std::optional<WorldCalendar> render_calendar;
     bool requires_active_regions = false;
     std::vector<std::string> clock_errors;
-    if (!Persistence::WorldSaveService::read_clock_metadata(
-            save_dir, saved_clock, requires_active_regions, &clock_errors, &ambient_anchor) ||
+    if (!Persistence::WorldSaveService::read_clock_metadata(save_dir,
+                                                            saved_clock,
+                                                            requires_active_regions,
+                                                            &clock_errors,
+                                                            &ambient_anchor,
+                                                            &render_calendar) ||
         (requires_active_regions && !m_activeRegionsEnabled)) {
         m_worldOpenError =
             clock_errors.empty()
@@ -1705,9 +1718,13 @@ bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
         m_worldSystem->clear_world(m_physicsSystem.get());
         return false;
     }
+    m_renderCalendar = render_calendar;
     if (!snapshot_present && !m_activeRegionsEnabled)
         return true; // legacy fresh world
     if (m_activeRegionsEnabled) {
+        // Presentation-only saves recorded the calendar but no simulation tick.
+        if (render_calendar)
+            saved_clock = WorldClock(0, *render_calendar);
         const Vec3 previous_ambient_anchor = m_ambientFieldAnchor;
         m_ambientFieldAnchor = ambient_anchor.value_or(m_metadata.spawnPoint);
         ActiveRegionLedger ledger;
