@@ -3,13 +3,14 @@
 #include <exception>
 #include <limits>
 #include <type_traits>
+#include <utility>
 
 namespace Luminumbra::Rendering {
 namespace {
 static_assert(std::is_standard_layout_v<VoxelVertex>);
-static_assert(std::is_same_v<decltype(VoxelVertex::material_id), std::uint32_t>);
-static_assert(std::is_same_v<decltype(VoxelVertex::position.x), float>);
-static_assert(std::is_same_v<decltype(VoxelVertex::normal.x), float>);
+static_assert(std::is_same_v<decltype(std::declval<VoxelVertex>().material_id), std::uint32_t>);
+static_assert(std::is_same_v<decltype(std::declval<VoxelVertex>().position.x), float>);
+static_assert(std::is_same_v<decltype(std::declval<VoxelVertex>().normal.x), float>);
 static_assert(std::is_standard_layout_v<Vec3>);
 static_assert(sizeof(float) == 4);
 static_assert(offsetof(Vec3, x) == 0);
