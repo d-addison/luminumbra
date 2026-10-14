@@ -185,13 +185,17 @@ function(luminumbra_configure_gns)
     find_package(OpenSSL REQUIRED COMPONENTS Crypto)
     set(USE_CRYPTO OpenSSL CACHE STRING "Networking crypto backend")
     set(USE_CRYPTO25519 OpenSSL CACHE STRING "Networking Curve25519 backend")
-    set(BUILD_STATIC_LIB ON CACHE BOOL "" FORCE)
-    set(BUILD_SHARED_LIB OFF CACHE BOOL "" FORCE)
-    set(BUILD_TESTS OFF CACHE BOOL "" FORCE)
-    set(BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+    # These generic upstream options belong only to the fetched subdirectory.
+    # CMP0077 keeps option() from replacing these normal variables with cache
+    # entries, including when the dependency resets its policy version.
+    set(CMAKE_POLICY_DEFAULT_CMP0077 NEW)
+    set(BUILD_STATIC_LIB ON)
+    set(BUILD_SHARED_LIB OFF)
+    set(BUILD_TESTS OFF)
+    set(BUILD_EXAMPLES OFF)
     # Retain the existing prefixed controls alongside the upstream controls.
-    set(GAMENETWORKINGSOCKETS_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-    set(GAMENETWORKINGSOCKETS_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+    set(GAMENETWORKINGSOCKETS_BUILD_TESTS OFF)
+    set(GAMENETWORKINGSOCKETS_BUILD_EXAMPLES OFF)
     FetchContent_Declare(
         GameNetworkingSockets
         GIT_REPOSITORY https://github.com/ValveSoftware/GameNetworkingSockets.git

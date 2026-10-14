@@ -131,10 +131,9 @@ foreach(CLIENT_EXE_TARGET IN ITEMS luminumbra_client_app luminumbra_client_qa_ap
     endif()
 endforeach()
 
-# Optional networking runtimes must sit beside every application executable.
+# One target owns the shared runtime directory; applications only verify imports.
 if(LUMINUMBRA_ENABLE_GNS OR LUMINUMBRA_ENABLE_STEAM)
     include("${CMAKE_SOURCE_DIR}/cmake/networking_runtime.cmake")
-    foreach(APP_TARGET IN ITEMS luminumbra_server_app luminumbra_client_app luminumbra_client_qa_app)
-        luminumbra_copy_networking_runtime(${APP_TARGET})
-    endforeach()
+    luminumbra_stage_networking_runtime(
+        luminumbra_server_app luminumbra_client_app luminumbra_client_qa_app)
 endif()
