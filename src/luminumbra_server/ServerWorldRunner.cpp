@@ -248,6 +248,8 @@ bool ServerWorldRunner::Boot() {
     m_session->SetSimBudgetTelemetryEnabled(m_config.sim_budget);
     m_session->SetJobSystem(&m_jobSystem);
     m_session->SetRootPath(m_config.root_path);
+    if (m_config.region_scheduler)
+        m_session->SetRegionSchedulerConfig(*m_config.region_scheduler);
     // host==peer: the headless host must run the SAME water-sim resolution the
     // client derives from data/common/systems.json — sim.water_high_res is baked into
     // the hashed mm grids, so a mismatched host could never agree with its peers.
