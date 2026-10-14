@@ -1,25 +1,29 @@
 # Distant-world implementation and acceptance gaps
 
-This September 13, 2026 audit is pinned to recovered terrain source
-[`32f4e6997779`](https://github.com/d-addison/luminumbra/commit/32f4e69977793267ef03ccbb9b73f50ebf17dc61),
-which includes the prefab prerequisite from `devel` through `7b7510d157af`.
-[The terrain recovery checkpoint](https://github.com/d-addison/luminumbra/pull/166)
-awaits current-source native qualification. This document changes
-no runtime, format, budget, scenario denominator or acceptance threshold.
+Updated October 14, 2026 for the final v0.3.0 release scope. This document
+separates implemented source from deferred native qualification; it changes no
+format, scenario denominator, budget or acceptance threshold. Historical
+execution receipts retain their original source identities.
 
-The [accepted distant-world contract](distant-world.md) is the authority for
-scope. Its earlier descriptions of current implementation are historical;
-this audit records the code that now exists. The ladder declaration,
-reversed-Z prerequisite and distribution-aware benchmark are implemented.
-The five-tier volumetric runtime and its all-tier durable edit overlay are
-unfinished. Closing an issue or passing a legacy horizon fixture cannot supply
-those missing implementations.
+The [accepted distant-world contract](distant-world.md) remains the scope
+authority. The five-tier volumetric ladder is the default far-world mode. The
+legacy far-world renderer is retired behind compatibility settings; its roughly
+3 km range and 3,200 m far plane describe the compatibility path, not the default
+ladder. Generation, meshing, canonical build queues, residency, upload accounting,
+renderer integration, far-water submission, fog, shadow exclusion and horizon
+diagnostics are implemented. The overlay codec/writer and bake derivation are
+implemented; the far-world edited-bake runtime consumer is deferred to v0.3.1.
+
+The distant-simulation S3–S7 durability stack is implemented: indexed authority
+durability; durable completed work and ground-object continuation; durable
+regional fields with causal weather and scent; regional foliage and water
+continuation with host persistence. S8/S9 and complete native continuation
+qualification are deferred to v0.3.1.
 
 ## Dimensions and limits retained
 
-The table in [FarTierTable.h](https://github.com/d-addison/luminumbra/blob/32f4e69977793267ef03ccbb9b73f50ebf17dc61/src/luminumbra_common/world/FarTierTable.h)
-already declares these exact dimensions. Its only executable consumers in the
-audited tree are the five [table tests](https://github.com/d-addison/luminumbra/blob/32f4e69977793267ef03ccbb9b73f50ebf17dc61/test/common/FarTierTable_test.cpp).
+The implemented [tier table](../src/luminumbra_common/world/FarTierTable.h)
+defines the ladder consumed by the volumetric runtime.
 
 | Tier | Sample spacing | Brick edge | Tile edge | Horizontal outer radius |
 |---|---:|---:|---:|---:|
@@ -36,42 +40,46 @@ streaming without a fixed world edge, and qualification within 32 km of the
 origin. Floating-origin qualification beyond that extent remains deferred.
 Render visibility, simulation activation and storage residency remain distinct.
 
-The running [FarLodSystem](https://github.com/d-addison/luminumbra/blob/32f4e69977793267ef03ccbb9b73f50ebf17dc61/src/luminumbra_client/rendering/FarLodSystem.h)
-still uses F1/F2 at 4/8 m spacing, one 512 m region footprint for both tiers,
-ranges of 768/3,000 m, fragment clips of 176/3,050 m and a 3,200 m camera far
-plane. Its F2 authority brick is 3×3×3 samples over a 16 m chunk; it is not the
-accepted V2 brick. Adding three enum values or increasing the far plane cannot
-convert this representation into the accepted ladder.
+Local full-SDF cave residency remains bounded at 128 m horizontally and 64 m
+vertically. Volumetric far representation does not establish complete native
+cave or edited-world acceptance. The ladder horizon gate in
+[the frontier script](../tools/gates/validate-engine-frontier.ps1) refuses before
+launch because its presets lack injected immutable authority. That gate remains
+a documented v0.3.1 limitation; legacy evidence cannot qualify the ladder.
 
 ## Implementation map
 
-DW01–DW09 below are engineering work packages. They do not add visual scenario
-IDs. All nine remain open; completed prerequisites are named within each row.
+DW01–DW09 are engineering work packages, not additional visual scenario IDs.
+Their implementation subsets are recorded below. Complete native render and
+budget qualification remains deferred to v0.3.1; none is inferred from source landing.
 
-| Work package | Existing implementation and concrete gap | Proposed addition and dependencies |
+| Work package | Implemented v0.3.0 source | Remaining v0.3.1 obligation |
 |---|---|---|
-| **DW01: generation and tier identity** | `FarLodTier`, `FarLodTile` and `BuildPristineFarLodTile` in [FarLodStore](https://github.com/d-addison/luminumbra/blob/32f4e69977793267ef03ccbb9b73f50ebf17dc61/src/luminumbra_common/world/FarLodStore.cpp) generate two heightfield tiers using `GetTerrainHeightAtCoarse`. The volumetric tier table is not consumed. | Introduce table-driven tier/tile identity and sparse zero-crossing 5³ brick generation for all five tile sizes. Pristine tiles remain regenerable memory caches. Preserve existing format readers until their replacement is declared and qualified. Depends on the table already present and DW02's sampling policy. |
-| **DW02: vertical requests and caves** | [BuildFarLodWorkerTile](https://github.com/d-addison/luminumbra/blob/32f4e69977793267ef03ccbb9b73f50ebf17dc61/src/luminumbra_client/rendering/FarLodSystem.cpp) reconstructs authority columns and a transient halo using full SDF generation. An unedited distant tile remains a heightfield. There is no tile span record or camera/sightline span-extension queue. | Start each pristine tile at its surface band plus 256 m below its lowest surface. Extend upward/downward for anchors, camera, sightline requests and durable chunks, with bounded requests and stored span bounds. Reuse the live cave composition in [SHIELD_WorldSystem](https://github.com/d-addison/luminumbra/blob/32f4e69977793267ef03ccbb9b73f50ebf17dc61/src/luminumbra_common/systems/SHIELD_WorldSystem.cpp) unchanged at V1/V2. Measure band-limited and filtered V3–V5 variants on the cave-dense fixture before choosing; retain the recorded band-limited fallback and full-radius openings/arches/overhangs. Depends on DW01 and the representation review. |
-| **DW03: volumetric meshing and bounds** | [GenerateFarLodRegionMesh](https://github.com/d-addison/luminumbra/blob/32f4e69977793267ef03ccbb9b73f50ebf17dc61/src/luminumbra_common/world/MarchingCubes.cpp) combines a heightfield with authoritative F1/F2 SDF columns and transient support. It validates only F1/F2. The height cache is limited to −2,048 through 2,047.9375 m, and render bounds come from those heights; arbitrary deep/tall volumes are not represented by those bounds. | Mesh sparse bricks at every accepted spacing, sharing deterministic border samples across tile boundaries. Derive render bounds from the actual requested volume/mesh, including water and edits above pristine heights. Preserve deterministic materials and normal/winding behavior. Depends on DW01–DW02. |
-| **DW04: scheduling and residency identity** | `FarLodSystem::update` chooses one wanted tier per region, orders work by nearest distance, and keys pending/resident maps by region alone. Epoch and authority checks reject stale worker results. | Key all lifecycle states by tier/tile identity; compute wanted sets per tier, request required parent coverage and vertical spans, and retain stale-result/world-swap protections. Adopt normalized-distance eviction for the ladder while protecting the horizon layer. Depends on DW01–DW03; measured caps follow DW09. |
-| **DW05: arrival and live ownership** | An existing region stays until its replacement uploads, but multiple nested tiers cannot coexist at that key. `integrate_completed_builds` treats every empty mesh as failure. The [coverage repair](terrain-coverage-diagnostics.md) submits the camera region while retaining a fixed 176 m exclusion, even if its live mesh is missing. | Distinguish valid empty tiles from failed/missing work. Keep coarser coverage resident and drawn beneath finer tiles with one-brick overlap; transfer ownership only after upload. Derive live-edge ownership from actually meshed/uploaded live geometry, including floors and ceilings. Prove the accepted finer-wins depth bias without introducing stitching topology. Depends on DW03–DW04; eviction must preserve fallback. |
-| **DW06: edit propagation and host baking** | Captured live authoritative lattices are reduced at 4/8 m; region revisions invalidate affected neighbors. The worker can rebuild from durable lod-0 records when passed a save path. `FarLodSystem::set_save_dir` has no runtime caller. [WorldSaveService::save_dirty_chunks](https://github.com/d-addison/luminumbra/blob/32f4e69977793267ef03ccbb9b73f50ebf17dc61/src/luminumbra_common/persistence/WorldSaveService.cpp) writes chunks and clears dirty flags without all-tier bake obligations. | Bake every affected tier/tile on the host after durable chunk writes and before far-authority notification. Derive pending bakes from committed chunk generation versus overlay generation on save/load; a failed bake remains due without invalidating the committed chunk save. Generalize authority keys and wire world-entry save ownership. Depends on DW01–DW04 and the accepted snapshot generation/commit service. |
-| **DW07: durable overlay and tombstones** | [FarLodStore](https://github.com/d-addison/luminumbra/blob/32f4e69977793267ef03ccbb9b73f50ebf17dc61/src/luminumbra_common/world/FarLodStore.h) stores FSD2 authority alongside chunk records in LMR1. It supports immutable snapshots, CRCs, stale-parameter handling, home-only persistence and interruption-safe region replacement, but has no FSV1 overlay generation or present/air/solid state. | Declare the accepted `<save>/far/v<tier>.<tx>.<tz>.lmr` FSV1 family before writing it: version/length/allocation/checksum/refusal rules, edit-baked bricks, homogeneous-air and homogeneous-solid tombstones, and source generation. Keep FSD2 v3 decodable. Rebuild missing/stale derived data from durable edited chunks; refuse corrupt/future data. Publish whole generations and preserve the prior complete overlay on interruption. Depends on DW06 and the snapshot integrity/refusal contract. |
-| **DW08: far rendering and independent coverage** | [Camera.h](https://github.com/d-addison/luminumbra/blob/32f4e69977793267ef03ccbb9b73f50ebf17dc61/src/luminumbra_client/rendering/Camera.h), the [render pipeline](https://github.com/d-addison/luminumbra/blob/32f4e69977793267ef03ccbb9b73f50ebf17dc61/src/luminumbra_client/rendering/RenderPipeline.cpp) and G-buffer use reversed-Z/32-bit float depth, with the far plane still 3,200 m. Far water sheets exist. The [legacy horizon scenario](https://github.com/d-addison/luminumbra/blob/32f4e69977793267ef03ccbb9b73f50ebf17dc61/src/luminumbra_client/core/scenarios/FarLodHorizonSmoke.cpp) checks its runtime's own missing count; it does not independently derive coverage. | Adopt the 17,408 m far plane after the ladder works; enforce outer-clip composited transmittance ≤5%, including altitude fog. Keep shadow cascades ending at 250 m and add a reliable far-surface discriminator so far geometry does not receive cascaded shadows. Deliver the accepted independent per-tier horizon v2 oracle and station captures. Depends on DW03–DW05 plus the existing depth prerequisite. |
-| **DW09: measured residency/upload budgets** | Runtime caps are 384 MiB of estimated tile plus GPU mesh bytes, eight dispatches and six integrations/uploads per frame. Snapshot, in-flight worker, completed CPU mesh and transient upload storage have no combined measured ladder budget. The legacy horizon fixture separately uses 128 MiB; neither number is an approved five-tier budget. | Measure per-tier bytes, first fill, build-cost histograms, queue storage, uploads, draws and frame hitches on default, mountains, cave-dense and edited worlds. Present measured per-tier limits/caps for design review, then enforce and report them. Preserve horizon fallback under pressure. Depends on DW01–DW08 and the existing v3 measurement path; no new numeric memory/upload limits are invented here. |
+| **DW01: generation and tier identity** | Table-driven five-tier canonical volumetric generation and sparse brick identity in [FarVolumeTile](../src/luminumbra_common/world/FarVolumeTile.cpp), with [foundation fixtures](../test/fixtures/far_volume/foundation-reference.json). | Complete native coverage and cold-rebuild packets across the contract variants. |
+| **DW02: vertical requests and caves** | Volumetric world generation and request infrastructure in [FarVolumeWorld](../src/luminumbra_common/world/FarVolumeWorld.cpp). | Native deep/tall/cave stations, filtered cave comparison and span-extension qualification. |
+| **DW03: volumetric meshing and bounds** | Canonical all-tier meshing and render meshes in [FarVolumeMesher](../src/luminumbra_common/world/FarVolumeMesher.cpp) and [FarVolumeRenderMesh](../src/luminumbra_client/rendering/FarVolumeRenderMesh.cpp). | Complete native wall/ceiling, border, water, deep-volume and edited-world qualification. |
+| **DW04: scheduling and residency identity** | Canonical queue and bounded owner residency in [FarVolumeBuildQueue](../src/luminumbra_client/rendering/FarVolumeBuildQueue.cpp) and [FarVolumeResidency](../src/luminumbra_client/rendering/FarVolumeResidency.cpp). | Complete movement, world-swap, wanted-set and pressure qualification. |
+| **DW05: arrival and live ownership** | Residency/upload/render integration, valid-empty handling and water handoff infrastructure, with [residency fixtures](../test/rendering/FarVolumeResidency_test.cpp). | Composed native fallback, overlap, tier-crossing and live-edge packets. |
+| **DW06: edit propagation and host baking** | Durable edit overlay and bake derivation in [FarAuthorityOverlay](../src/luminumbra_common/world/FarAuthorityOverlay.cpp). | Edited-bake runtime consumer, save/evict/reload far views and edited-world traversal producer. |
+| **DW07: durable overlay and tombstones** | Overlay codec/writer and [authority fixtures](../test/common/FarAuthorityOverlay_test.cpp), with saved-world refusal coverage. | Complete native overlay/refusal/recovery qualification and runtime consumption. |
+| **DW08: far rendering and independent coverage** | Default ladder, water, fog, shadow exclusion and horizon diagnostics; [independent oracle](../tools/gates/far_ladder_oracle.py) tooling. | Ladder horizon gate still refuses before launch; immutable fixture authority and complete native coverage remain required. |
+| **DW09: measured residency/upload budgets** | Bounded runtime accounting, GPU/upload infrastructure and v3 measurement tools. | Calibrated native budgets, authoritative fixed views, cave-walk/edited-world producers and complete profile/display packets. |
 
-The work above follows [volumetric runtime #131](https://github.com/d-addison/luminumbra/issues/131),
-[authority #132](https://github.com/d-addison/luminumbra/issues/132) and
-[budgets #133](https://github.com/d-addison/luminumbra/issues/133).
-Issue #132's older pit/ridge examples do not override the accepted sampling-phase
-policy: sub-spacing edits may appear or disappear according to phase. Issue
-#133's Quality-only wording does not waive the floor for Performance.
+Sub-spacing edits may appear or disappear according to sampling phase. Neither
+durable overlays nor completed source fixtures waive this policy or the floor
+for both Quality and Performance profiles. Publication uses the scoped tag gate
+in the [acceptance record](v0.3-acceptance.md); other expanded acceptance is
+deferred to v0.3.1 and is not recorded as passed.
 
-## Acceptance cases to implement
+## Qualification deferred to v0.3.1
 
-The following cases specify the missing evidence. Existing test names are linked;
-new suite/scenario names retain those already recorded in the contract and are
-not claimed to be available commands today.
+The following cases preserve the outstanding qualification obligations. Source
+fixtures and supporting tests exist for subsets; the table is an acceptance
+contract, not a claim that every capture producer is available or that any
+current native packet has passed. Complete render qualification is deferred to
+v0.3.1, including the authoritative ground/high/cave-air poses, fixed-view
+workloads, cave-walk and edited-world traversal producers, and outstanding
+acceptance capture/pinning.
 
 | Package | Required executable and native acceptance |
 |---|---|
@@ -82,7 +90,7 @@ not claimed to be available commands today.
 | DW05 | Delay finer builds and uploads, evict under pressure, and exercise valid empty parents/children. Inspect synchronized color/depth/coverage for uninterrupted coarse fallback, actual live ownership and one-brick overlaps on ground, walls, ceilings and water. Repeat at all tier radii and the live edge. |
 | DW06 | `edit_bake_all_tiers_test` uses independent sampled expectations across edit sizes and phases, including region/tile edges, removals/fills and construction above pristine maxima. Save, evict, reload and view without a live authoritative chunk. The edited-world traversal includes edit, successful snapshot commit and all-tier bake within its measured window. |
 | DW07 | `far_volume_store_test` and `world_open_refusal_test` distinguish absent override from homogeneous air/solid, preserve disk bytes on refusal, and verify no far files for an unedited world. `snapshot_commit_test` interrupts every publication rename and the bake; retry must converge byte-identically, retain the prior complete generation, and reconstruct stale/missing overlays from durable chunks. |
-| DW08 | `far_volume_horizon_smoke` v2 through [the frontier gate](https://github.com/d-addison/luminumbra/blob/32f4e69977793267ef03ccbb9b73f50ebf17dc61/tools/gates/validate-engine-frontier.ps1) covers default, mountains, archipelago and cave-dense fixtures. At every station, complete independently expected per-tier coverage must settle within 90 s; below-horizon sky ≤2%, no tier seam band and no outer edge. Include valid empty tiles, cave openings, altitude fog and the 250 m cascade/V1 overlap. |
+| DW08 | `far_volume_horizon_smoke` v2 through [the frontier gate](../tools/gates/validate-engine-frontier.ps1) covers default, mountains, archipelago and cave-dense fixtures. At every station, complete independently expected per-tier coverage must settle within 90 s; below-horizon sky ≤2%, no tier seam band and no outer edge. Include valid empty tiles, cave openings, altitude fog and the 250 m cascade/V1 overlap. |
 | DW09 | Six fixed views and surface-flight, cave-walk and edited-world traversals for each profile/display, with cold-cache identity and streaming transients retained. Publish measured budget proposals before enforcing caps; then rerun and prove eviction protects the horizon. Record raw frame samples and actual source/tool/asset/GPU identities. |
 
 These packets support the original R04/R05 transition, R18 horizon, D20 mixed-LOD
@@ -114,6 +122,13 @@ retains its original `773f60d4b877` source, forward-depth images, diagnostic mea
 and zero approvals. It provides no five-tier or current-source performance
 qualification.
 
+### Historical correctness evidence
+
+The September 13 source audit was pinned to
+`32f4e69977793267ef03ccbb9b73f50ebf17dc61`, including the prefab prerequisite
+through `7b7510d157af`. References to the audited source in this historical
+subsection mean that revision, not the final release candidate.
+
 The September 13 native correctness attempt used recovered source
 `7244cf2a46bff63229890cc1eb743b4c64cd83b2`: 24 of 25 selected terrain cases
 passed; `FarLodWorker.CameraRegionOuterMeshRetainsCavityAndEditedSurface` failed,
@@ -127,5 +142,5 @@ passes on Linux. Preservation of unsampled thin roofs is not established.
 Five additional software-rendered foliage correctness cases pass at the audited
 source. Those results and the earlier native attempt do not qualify the new
 source on native hardware, the five-tier runtime, the world performance matrix,
-or any visual approval. Fresh native qualification and all DW01–DW09 closure
-packets remain outstanding.
+or any visual approval. Complete native qualification and the outstanding DW01–DW09 closure packets
+are deferred to v0.3.1. Implemented source does not approve a visual scenario.

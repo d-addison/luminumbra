@@ -1,106 +1,77 @@
 # Coordinated delivery roadmap
 
-Updated September 13, 2026. This is a delivery/status map with actionable issues in
-both repositories. Engine, game and art-pack versions need not share tag numbers.
-There are no assigned due dates or invented completion percentages.
+Updated October 14, 2026. This map distinguishes implemented release scope,
+deferred acceptance and publication. Engine, game and art-pack versions need not
+share tag numbers. There are no assigned due dates or invented completion percentages.
 
 ## Current state
 
-- **Recovery baseline:** engine `945ecd295835a838eed0169ff709e7aabc134fa1`
-  and game `552a26684215542b327a842104864dda14e31652`. Subsequent verified upstream
-  revisions are engine `devel` at `e60c6554c323f9fd8a8098bbac81e5ea1793cd7e`
-  and game `main` at `f266fe4e121b6a29361c70116ad82e89560b21a3` (September 13).
-- **Merged implementation:** repair PR [#56](https://github.com/d-addison/luminumbra/pull/56),
-  accepted distance contract, hang instrumentation, reversed-Z depth, persisted clock,
-  five-tier declaration, render measurements and simulation telemetry. The original
-  Blender stack was superseded by merged [#155](https://github.com/d-addison/luminumbra/pull/155).
-  The optional headless prefab runtime [#165](https://github.com/d-addison/luminumbra/pull/165)
-  has also merged after current-head checks and independent native evidence review.
-  Blender review/undo [#162](https://github.com/d-addison/luminumbra/pull/162)
-  and the restored [visual catalog](visual-catalog.md)
-  [#170](https://github.com/d-addison/luminumbra/pull/170) have merged.
-  These implementations still have the acceptance obligations listed below.
-- **Recovery in progress:** the SBOM repair [#169](https://github.com/d-addison/luminumbra/pull/169)
-  passes the actual MSYS Git/UCRT Python path-disagreement cases. Ambient SIMD
-  [#172](https://github.com/d-addison/luminumbra/pull/172), tracked by
-  [#163](https://github.com/d-addison/luminumbra/issues/163), passes actual Linux
-  and native UCRT Debug/Release controls at `e1080d7f`. Actual selected-ISA
-  evidence and failing original-dispatch controls preserve each configuration's
-  established goldens. Active-region
-  [#161](https://github.com/d-addison/luminumbra/pull/161) has been refreshed against
-  the recovery baseline and its scheduler, persistence, recovery and replay checks
-  pass. The composed candidate [#175](https://github.com/d-addison/luminumbra/pull/175)
-  awaits current-head integration checks and landing. The separate
-  wind input-padding defect is tracked by [#173](https://github.com/d-addison/luminumbra/issues/173).
-  The September 13 promotion UCRT job passed 2,245 of 2,250 cases at its recorded merge revision;
-  its surface-loading guard and three render-process timeouts remain unresolved.
-  All three timed-out render processes emitted their captures before termination;
-  shutdown diagnosis must establish the cause. Local native `e1080d7f` passes
-  the unchanged loading guard and original render cases on NVIDIA and verified
-  CI-pinned Mesa 26.1.7 llvmpipe. Different hardware and toolchain versions keep
-  these non-reproductions separate from CI and original-hang causal closure.
-  The candidate retains failed-process captures and adds shutdown-stage evidence;
-  its fresh native build and qualification remain in progress.
-  Historical results do not qualify a new candidate; discover its tests again.
-- **Verification:** later Debug/ASan and native records supersede the failed
-  `ff0362b` baseline. Expanded integrated, native and packaged acceptance is
-  outstanding; implementation, test evidence and merged state are distinct.
-- **Accepted pre-release scope:** five volumetric tiers through 16,384 m, qualified
-  within 32 km of the origin; per-system simulation policies over persistent active
-  regions; Quality (1.0) and Performance (0.67) at 3840×1600 and 3440×1440.
-  Both profiles require p99 frame time ≤16.67 ms; 120 fps remains the reported
-  target. The accepted [distance contract](distant-world.md) governs every slice;
-  its completed design interview is not a new implementation prerequisite.
-- **Remaining runtime implementation:** the tier table alone does not render 16 km;
-  the runtime still uses legacy far ranges and a 3,200 m far plane. Telemetry and
-  a region ledger alone do not schedule distant simulation consumers.
-  The pristine brick generator/mesher [#176](https://github.com/d-addison/luminumbra/pull/176)
-  has separate Debug/Release and boundary/cave controls; its CI correction and
-  landing are pending. A fixture-only asynchronous consumer is undergoing review
-  and verification. Runtime paging, graphical integration, final cave-filter
-  qualification and durable dirty residency remain subsequent work.
-- **Hang closure:** Windows reported the original `0xCFFFFFFF` application hang
-  and the operator closed it. The underlying mechanism remains unproven.
-  Instrumentation and successful non-reproductions do not close
-  [#127](https://github.com/d-addison/luminumbra/issues/127); the server-load
-  incident [#69](https://github.com/d-addison/luminumbra/issues/69) is separate.
-- **Publication:** v0.3.0 remains unpublished and promotion
-  [#55](https://github.com/d-addison/luminumbra/pull/55) is blocked. Strict promotion
-  requires all 15 contexts after expanded acceptance, followed by signed source-only
-  publication, independent artifact verification and a newly named private preview.
-  Audio stays off; the delivered `5daeb03` preview stays unchanged.
-- **Authoring ownership:** generic packages remain in the engine monorepo.
-  Merged [#162](https://github.com/d-addison/luminumbra/pull/162) supplies the Blender
-  identity review/undo package. Its refreshed package matches the retained Windows
-  archive byte-for-byte and has 22 recorded native checks. Visual approval and
-  Linux native editor qualification remain outstanding.
-  Merged [#165](https://github.com/d-addison/luminumbra/pull/165)
-  supplies optional compiled-prefab consumption. Headless consumption is not graphical qualification.
-  Full installed SDK delivery and game extraction retain the post-release
-  Foundations approval boundary.
+- **Implemented:** recovery integration, ambient SIMD and wind-input repairs,
+  source-release validation, active-region scheduling foundations, volumetric
+  generation and meshing, canonical build queues, residency and upload accounting,
+  renderer integration, far-water submission, shadow exclusion, horizon diagnostics,
+  saved-world lifecycle and native refusal fixtures, and installed Blender viewport
+  tooling are integrated. Historical verification records retain their original
+  revisions and scope.
+- **v0.3.0 defaults:** Shipping features are enabled by default; debug toggles, Vulkan, Steam and GNS remain disabled. Audio playback keeps its separate disabled-by-default release policy. The volumetric far-world ladder is the default mode; the legacy far-world renderer is retired behind compatibility settings.
+- **Distant simulation:** The distant-simulation S3–S7 durability stack is implemented: indexed authority durability, durable completed work and ground-object continuation, durable regional fields with causal weather and scent, and regional foliage and water continuation with host persistence.
+- **Qualification:** Complete render qualification, the far-world edited-bake runtime consumer, distant-simulation S8/S9, the ladder horizon gate, authoritative ground/high/cave-air poses and fixed-view workloads, cave-walk and edited-world traversal producers, outstanding acceptance capture/pinning, and native Windows evidence not produced for v0.3.0 are deferred to v0.3.1.
+  These obligations are not recorded as passed. The five-tier contract retains
+  16,384 m outer coverage and qualification within 32 km of the origin. Quality
+  (1.0) and Performance (0.67), at 3840×1600 and 3440×1440, retain the p99
+  ≤16.67 ms floor and separately reported 8.33 ms target for deferred qualification.
+- **Client hang:** the acceptance record documents owner-accepted closure after
+  unsuccessful reproduction following the logging repair. Retain watchdog capture
+  and local-disk logs for native runs; a recurrence requires investigation.
+  Dedicated-server crash qualification remains separate.
+- **Publication:** v0.3.0 is not yet published. The v0.3.0 tag gate requires all required CI checks green on the release commit, a signed source tag, independent release-download verification, and an owner native smoke on Windows: launch the client, create a world, edit, save, quit, reload and confirm the edit persists; run the server smoke. These checks remain required and are not reported as passed here.
+  Draft CI and batched devel CI policies are implemented; required checks follow
+  the final applicable policy rather than a fixed context count. Release notes
+  belong in the GitHub release body.
+- **Authoring:** compiled-prefab consumption, installed static preview, persistent
+  viewport hosting, the Blender RenderEngine adapter and bounded recipe tooling
+  are implemented. Complete native editor acceptance, Windows runtime closure,
+  performance targets and visual approval remain unqualified where no packet exists.
+  Full engine/game extraction remains Foundations work.
+
+### Historical recovery verification
+
+The September 13 UCRT job passed 2,245 of 2,250 cases at its recorded revision;
+the surface-loading guard and three render-process timeouts did not pass. All
+three timed-out processes emitted captures before termination. Local native
+`e1080d7f` passed the unchanged loading guard and original render cases on NVIDIA
+and CI-pinned Mesa 26.1.7 llvmpipe. Different hardware and toolchains keep these
+non-reproductions separate from CI and original-hang causal closure. Later
+Debug/ASan and native records supersede the failed `ff0362b` baseline in their
+recorded scopes. None of these historical records qualifies a new candidate.
+The Blender identity review/undo package retains its 22 recorded native checks;
+visual approval and Linux native editor qualification remain outstanding.
 
 An implementation is code present in a revision. Verification identifies the
 tested revision, environment, scope and evidence. Merging integrates code into a
 branch. Publication delivers artifacts with independently checked identities.
 
-Engine [#141](https://github.com/d-addison/luminumbra/issues/141) owns budget enforcement and qualification mechanisms; game [#31](https://github.com/d-addison/luminumbra-game/issues/31) owns authored rates, activation data and populator policy. Game [#34](https://github.com/d-addison/luminumbra-game/issues/34) retains future content/data distribution and optional non-Steam loading. All v0.4 commitments remain assigned.
+The engine owns budget enforcement and qualification mechanisms; the game owns
+authored rates, activation data and populator policy. Future content/data
+distribution and optional non-Steam loading remain game obligations. All v0.4
+commitments remain assigned.
 
 ## Milestones and ownership
 
 | Coordinated milestone | This repository | Counterpart repository |
 |---|---|---|
-| [v0.3.0 — Acceptance and release](https://github.com/d-addison/luminumbra/milestone/1) | Final saved-world/render/content correctness; the expanded pre-release scope (16 km unbounded world with distant cave interiors and edits, persistent-active-region distant simulation, measured 60 fps floor on two profiles, client-hang closure); native/CI acceptance, signed source release, independent verification and new private preview. | [Source/runtime art-pack verification, final canopy conversion/provenance, distant-world scenes, game distant-simulation data and packaged content/save/visual acceptance with audio off.](https://github.com/d-addison/luminumbra-game/milestone/1) |
+| [v0.3.0 — Acceptance and release](https://github.com/d-addison/luminumbra/milestone/1) | Reconcile implemented world/render/persistence/authoring work, shipping defaults and the durability stack; publish a signed source release with documented compatibility breaks and limitations after the scoped tag gate. | [Content/save/visual acceptance remains separate; source/runtime pack verification is historical evidence.](https://github.com/d-addison/luminumbra-game/milestone/1) |
+| v0.3.1 — Deferred qualification and continuation | Render qualification; acceptance captures and pinning; distant-simulation S8/S9; far-world edited-bake runtime consumption; ladder horizon gate; authoritative poses and fixed-view workloads; cave-walk and edited-world traversal producers; native Windows evidence not produced for v0.3.0. | Composed scenes, authored workloads and game integration evidence for the deferred scopes. |
 | [Foundations — Engine/game separation and tooling](https://github.com/d-addison/luminumbra/milestone/2) | Installed SDK; lifecycle/schedule/state registration; optional field/behavior modules; script/component authoring; input, commands, inspection/profiling; dependency enforcement. | [Populated compatibility fixtures; mechanics/state/content extraction; pinned standalone launchers; script/data composition; screens/HUD/diagnostics/tests.](https://github.com/d-addison/luminumbra-game/milestone/2) |
 | [v0.4.0 — Continuing-world multiplayer](https://github.com/d-addison/luminumbra/milestone/3) | Checkpoints/catch-up; first-time authoritative admission; returning-identity and two-established-peer lockstep reconnect; physical avatars; LAN/directory and live transport/fault/load qualification. | [Real host/join/reconnect flows; LAN/public/direct/favorites/recent browser; generated animated physical avatars; network AI clients; composed previews and process acceptance.](https://github.com/d-addison/luminumbra-game/milestone/3) |
 | [v0.5.0 — Environmental audio](https://github.com/d-addison/luminumbra/milestone/4) | Diffuse RT60 DSP, weather-loop lifecycle, thunder propagation and device-independent decoding/graph acceptance. | [Soundscape/event integration, authored acoustic tuning and audible packaged acceptance.](https://github.com/d-addison/luminumbra-game/milestone/4) |
 | [v0.6.0 — Dynamic motion history](https://github.com/d-addison/luminumbra/milestone/5) | Previous rendered transforms/bones, history validity, depth disocclusion and reset/resource/performance qualification. | [Animated avatar/wildlife fixtures and real gameplay/world-transition history acceptance.](https://github.com/d-addison/luminumbra-game/milestone/5) |
-| [v0.7.0 — Rendering foundation — provisional](https://github.com/d-addison/luminumbra/milestone/6) | Production backend/capability settings, residual longer-view scope beyond the 16 km v0.3 contract and native Windows/Linux/Proton/hardware qualification. | [Composed scene/UI parity, terrain/material/weather/water/long-view acceptance and scalable settings.](https://github.com/d-addison/luminumbra-game/milestone/6) |
+| [v0.7.0 — Rendering foundation — provisional](https://github.com/d-addison/luminumbra/milestone/6) | Production backend/capability settings, residual longer-view scope beyond the documented five-tier ladder; deferred v0.3.1 qualification remains separately tracked and native Windows/Linux/Proton/hardware qualification. | [Composed scene/UI parity, terrain/material/weather/water/long-view acceptance and scalable settings.](https://github.com/d-addison/luminumbra-game/milestone/6) |
 | [v0.8.0 — Reconstruction and latency — provisional](https://github.com/d-addison/luminumbra/milestone/7) | Qualified reconstruction, dynamic resolution, latency and prerequisite-gated optional frame generation. | [Effective player settings and representative visual/input workloads.](https://github.com/d-addison/luminumbra-game/milestone/7) |
 | [v0.9.0 — Lighting and effects — provisional](https://github.com/d-addison/luminumbra/milestone/8) | Improved raster lighting, optional hybrid RT/denoising and reusable field-effect interfaces. | [Game lighting integration and proposed aether visuals, provisionally placed pending architecture review.](https://github.com/d-addison/luminumbra-game/milestone/8) |
 
 Full installed SDK delivery and game extraction in Foundations depend on
-independently verified v0.3 publication **and** the single implementation-roadmap approval after refreshed source/SDK architecture
-review with actual Astra/xhigh. Accepted ownership/authoring direction is recorded
+independently verified v0.3 publication **and** the agreed architecture and implementation approval. Accepted ownership/authoring direction is recorded
 in [Engine/game ownership](engine-game-boundary.md). Roadmap population does not
 waive that implementation gate. The already-authorized bounded optional authoring
 packages above may be refreshed and qualified before release. v0.7–v0.9 remain provisional.
@@ -114,44 +85,39 @@ imply host migration, matchmaking or private Steam relay availability.
 
 ## Limits and acceptance still tracked
 
-- Current far rendering reaches approximately 3 km with a 3200 m camera far
-  plane; world generation itself has no fixed edge. Local full-SDF cave residency
-  is bounded (128 m horizontal/64 m vertical). Pristine far tiles are
-  heightfields; bounded authoritative SDF overlays can carry resident edits, but
-  the far store is not attached to saves at runtime. The five-tier table and
-  reversed-Z prerequisite are present; the accepted v0.3 contract's 16 km
-  volumetric ladder over an unbounded world, durable all-tier edit overlay and
-  measured budgets remain unfinished. Until those slices land and are verified,
-  the current limits stand. See the
-  [source-pinned implementation and acceptance map](distant-world-implementation-status.md).
-- With `sim.active_regions` disabled, the simulation clock retains its legacy
-  load-time reset; the landed enabled clock resumes the persisted absolute tick.
-  Creature/plant distance scheduling, durable field pages and wildlife, and dirty
-  eviction parking still require their consumer/residency slices. Wind/weather/aether
-  remain anchored grids; a clock or ledger alone does not implement these policies.
-- The native client exit 0xCFFFFFFF (PID 66604, package 2871c72) was a Windows
-  Application Hang closed by the operator, not a crash; the hang mechanism is not yet
-  established and its closure is a release gate.
-- White ground patches, purple shadows and visible stars in the settled
-  Default/424242/FOV 110° native capture have separate investigation issues.
-  Their causes remain unconfirmed. Tree-only tests do not close whole-scene
-  appearance reports. Culling and no-UI fixes retain their separate causal evidence.
-- Audio is disabled for v0.3 and its private preview by owner direction; audible
-  quality and event coverage are future v0.5 work in a separate workstream. Dynamic-body
-  acoustic material classification currently uses Stone.
-- GNS compilation does not establish live-peer behavior. Steam private SDK/live
-  service and broad NVIDIA/AMD/Intel hardware qualification remain explicit gaps.
-  Native Windows, native Linux and Proton require separate results. Resource
-  estimates must not be presented as measured total VRAM.
-- The intermittent server-load crash retains unresolved cause status. The proven
-  Jolt exception-configuration cause of the MSVC catalog failure does not prove a
-  shared server-crash cause. The UCRT64 120-second guard stays unchanged.
+- The five-tier volumetric renderer and its queue, residency, upload, fog, shadow
+  and water infrastructure are implemented and selected by default. The legacy
+  renderer is retired behind compatibility settings. Local full-SDF cave residency
+  remains bounded (128 m horizontal/64 m vertical). Complete native ladder coverage,
+  cave/edit traversal and calibrated budgets are deferred to v0.3.1. Durable overlay
+  codecs, writers and bake derivation do not establish edited-bake runtime consumption.
+  The ladder horizon gate refuses before launch today; its qualification is a
+  documented v0.3.1 limitation. See the
+  [implementation and acceptance map](distant-world-implementation-status.md).
+- The persisted clock, active-region ledger, edited-content digest, scheduler fault
+  handling and S3–S7 durability stack are implemented. S8/S9 and complete native
+  continuation qualification are deferred to v0.3.1.
+- The client hang has owner-accepted closure after unsuccessful reproduction
+  following the logging repair, without a proven original mechanism. Retain watchdog
+  capture and local-disk logs; a recurrence requires investigation.
+- Source corrections and causal findings for water caustics/foam, soil environment
+  lighting and foreground motes are recorded in the acceptance record. Final
+  composed visual qualification remains deferred to v0.3.1.
+- Audio playback is disabled by default under its separate release policy.
+  Audible quality and event coverage remain future environmental-audio work.
+  Dynamic-body acoustic material classification currently uses Stone.
+- GNS compilation does not establish live-peer behavior. Steam SDK/live service,
+  broad NVIDIA/AMD/Intel hardware qualification and separate native Linux/Windows/
+  Proton qualification remain gaps. Resource estimates are not measured total VRAM.
+- Server crash-report capture, repeat qualification and UCRT package-attribution
+  tooling are implemented. They do not establish the original crash's cause or
+  native dump qualification. The UCRT64 120-second guard remains unchanged.
 
-Software releases remain source-only. Art packs are separately versioned game
-content. Private recordings, Steam payloads and private previews remain outside
-public packs. Preset revision 6, LMR1 v2, FSD2 payload v3, canonical in-memory
-serialization, terrain-quality assertions and default-off policies are preserved;
-obsolete-world migration and legacy loading are not planned.
+Software releases remain source-only; art packs are separately versioned game
+content. Preset revision 6, LMR1 v2, FSD2 payload v3, canonical in-memory
+serialization and terrain-quality assertions remain the format contracts.
+Shipping features are enabled by default with the exclusions documented above;
+obsolete-world migration and legacy save loading are not supported.
 
 ## Work-package index
 
@@ -164,47 +130,47 @@ verification.
 
 ### v0.3.0 — Acceptance and release
 
-- [Finish verified game-content acquisition and Linux/Windows CI](https://github.com/d-addison/luminumbra/issues/58)
-- [Complete authored tree materials, LODs and full-sphere impostors](https://github.com/d-addison/luminumbra/issues/59)
-- [Bound saved-world catalog validation without blocking the UI](https://github.com/d-addison/luminumbra/issues/60)
-- [Verify packaged saved-world lifecycle and authority replacement](https://github.com/d-addison/luminumbra/issues/61)
-- [Verify saved terrain edits across hierarchical culling boundaries](https://github.com/d-addison/luminumbra/issues/62)
-- [Verify no-UI saved-world loading and capture lifecycle](https://github.com/d-addison/luminumbra/issues/63)
-- [Complete settled terrain, weather, cave and water visual acceptance](https://github.com/d-addison/luminumbra/issues/64)
-- [Investigate white ground patches in settled native scene](https://github.com/d-addison/luminumbra/issues/65)
-- [Investigate purple shadows in settled native scene](https://github.com/d-addison/luminumbra/issues/66)
-- [Investigate visible stars in settled native ground scene](https://github.com/d-addison/luminumbra/issues/67)
-- [Qualify serial loading, networking soak and performance gates](https://github.com/d-addison/luminumbra/issues/68)
-- [Resolve or qualify the intermittent server-load crash independently](https://github.com/d-addison/luminumbra/issues/69)
-- [Independently verify, promote and publish signed source-only v0.3.0](https://github.com/d-addison/luminumbra/issues/70)
-- [Deliver a newly named verified private client/server preview](https://github.com/d-addison/luminumbra/issues/71)
-- [Apply storm composition consistently to terrain and grass](https://github.com/d-addison/luminumbra/issues/107)
-- [Align grass cloud-shadow projection with the terrain cloud field](https://github.com/d-addison/luminumbra/issues/108)
-- [Classify the high-view live-to-distant terrain material seam](https://github.com/d-addison/luminumbra/issues/109)
-- [Correct glass shared-depth attachment and resize lifetime](https://github.com/d-addison/luminumbra/issues/110)
-- [Keep glass background sampling aligned at reduced render scales](https://github.com/d-addison/luminumbra/issues/112)
-- [Keep the local walking capsule above terrain at world entry](https://github.com/d-addison/luminumbra/issues/113)
-- [Resolve native MSVC terrain-height hash divergence without weakening pins](https://github.com/d-addison/luminumbra/issues/115)
-- [Generate and verify a conformant SPDX source-release inventory](https://github.com/d-addison/luminumbra/issues/119)
-- [Apply render benchmark camera and time before streaming and rendering](https://github.com/d-addison/luminumbra/issues/120)
-- [Verify slice compliance with the accepted distant-world contract](https://github.com/d-addison/luminumbra/issues/126)
-- [Establish the cause of the native client hang and repair the per-frame audio log](https://github.com/d-addison/luminumbra/issues/127)
-- [Qualify native profiles, displays and traversals using landed render measurements](https://github.com/d-addison/luminumbra/issues/128)
-- [Capture representative budgets using landed simulation telemetry](https://github.com/d-addison/luminumbra/issues/129)
-- [Qualify integrated depth ordering and visual parity](https://github.com/d-addison/luminumbra/issues/130)
-- [Stream volumetric coarse SDF tiers to a 16 km view radius with distant cave interiors](https://github.com/d-addison/luminumbra/issues/131)
-- [Bake terrain edits into every far tier and persist the far authority overlay](https://github.com/d-addison/luminumbra/issues/132)
-- [Measure, propose and enforce far-tier residency and streaming budgets](https://github.com/d-addison/luminumbra/issues/133)
-- [Qualify persisted-clock continuation across simulation consumers](https://github.com/d-addison/luminumbra/issues/134)
-- [Track persistent active regions with ranked cadence, freeze and save-on-evict](https://github.com/d-addison/luminumbra/issues/135)
-- [Host wind, weather and aether ambience as stateful world-anchored pages](https://github.com/d-addison/luminumbra/issues/136)
-- [Persist creatures and simulate distant wildlife coarsely with promotion](https://github.com/d-addison/luminumbra/issues/137)
-- [Run plants and water in distant active regions under bounded cadence and budget](https://github.com/d-addison/luminumbra/issues/138)
-- [Add a minimal persisted ground-object entity](https://github.com/d-addison/luminumbra/issues/139)
-- [Fold distant-simulation state into world hashes and expose a region diagnostic panel](https://github.com/d-addison/luminumbra/issues/140)
-- [Enforce engine budgets and qualify expanded v0.3 acceptance](https://github.com/d-addison/luminumbra/issues/141)
+- [Finish verified game-content acquisition and Linux/Windows CI](https://github.com/d-addison/luminumbra/issues/58) — Existing pack verification is recorded; final composed content acceptance remains unqualified.
+- [Complete authored tree materials, LODs and full-sphere impostors](https://github.com/d-addison/luminumbra/issues/59) — Existing pack verification is recorded; final composed content acceptance remains unqualified.
+- [Bound saved-world catalog validation without blocking the UI](https://github.com/d-addison/luminumbra/issues/60) — Implemented — background validation and responsiveness regressions; final native-package evidence remains separate.
+- [Verify packaged saved-world lifecycle and authority replacement](https://github.com/d-addison/luminumbra/issues/61) — Implemented — lifecycle and native refusal fixtures; native evidence not produced for v0.3.0 is deferred to v0.3.1.
+- [Verify saved terrain edits across hierarchical culling boundaries](https://github.com/d-addison/luminumbra/issues/62) — Implemented corrections and regressions; complete packaged/native acceptance remains unqualified.
+- [Verify no-UI saved-world loading and capture lifecycle](https://github.com/d-addison/luminumbra/issues/63) — Implemented corrections and regressions; complete packaged/native acceptance remains unqualified.
+- [Complete settled terrain, weather, cave and water visual acceptance](https://github.com/d-addison/luminumbra/issues/64) — Deferred to v0.3.1 — complete native render qualification.
+- [Investigate white ground patches in settled native scene](https://github.com/d-addison/luminumbra/issues/65) — Implemented correction; final composed scene approval remains unqualified.
+- [Investigate purple shadows in settled native scene](https://github.com/d-addison/luminumbra/issues/66) — Implemented correction; final composed scene approval remains unqualified.
+- [Investigate visible stars in settled native ground scene](https://github.com/d-addison/luminumbra/issues/67) — Cause classified as foreground motes; final composed scene approval remains unqualified.
+- [Qualify serial loading, networking soak and performance gates](https://github.com/d-addison/luminumbra/issues/68) — Partial — historical soak/comparison evidence; candidate capture/pinning acceptance deferred to v0.3.1.
+- [Resolve or qualify the intermittent server-load crash independently](https://github.com/d-addison/luminumbra/issues/69) — Implemented capture and qualification tooling; original cause and native evidence remain unqualified.
+- [Independently verify, promote and publish signed source-only v0.3.0](https://github.com/d-addison/luminumbra/issues/70) — Not yet published — scoped v0.3.0 tag gate remains required.
+- [Deliver a newly named verified private client/server preview](https://github.com/d-addison/luminumbra/issues/71) — Delivery remains an uncompleted, separate obligation.
+- [Apply storm composition consistently to terrain and grass](https://github.com/d-addison/luminumbra/issues/107) — Implemented; final-candidate native acceptance remains separately recorded.
+- [Align grass cloud-shadow projection with the terrain cloud field](https://github.com/d-addison/luminumbra/issues/108) — Implemented; final-candidate native acceptance remains separately recorded.
+- [Classify the high-view live-to-distant terrain material seam](https://github.com/d-addison/luminumbra/issues/109) — Classified — aerial haze/detail continuity findings recorded; broader visual qualification deferred to v0.3.1.
+- [Correct glass shared-depth attachment and resize lifetime](https://github.com/d-addison/luminumbra/issues/110) — Implemented; final-candidate native acceptance remains separately recorded.
+- [Keep glass background sampling aligned at reduced render scales](https://github.com/d-addison/luminumbra/issues/112) — Implemented; final-candidate native acceptance remains separately recorded.
+- [Keep the local walking capsule above terrain at world entry](https://github.com/d-addison/luminumbra/issues/113) — Implemented; final-candidate native acceptance remains separately recorded.
+- [Resolve native MSVC terrain-height hash divergence without weakening pins](https://github.com/d-addison/luminumbra/issues/115) — Implemented; final-candidate native acceptance remains separately recorded.
+- [Generate and verify a conformant SPDX source-release inventory](https://github.com/d-addison/luminumbra/issues/119) — Implemented; final-candidate native acceptance remains separately recorded.
+- [Apply render benchmark camera and time before streaming and rendering](https://github.com/d-addison/luminumbra/issues/120) — Implemented; final-candidate native acceptance remains separately recorded.
+- [Verify slice compliance with the accepted distant-world contract](https://github.com/d-addison/luminumbra/issues/126) — Partial — implementation integrated; full contract qualification deferred to v0.3.1.
+- [Establish the cause of the native client hang and repair the per-frame audio log](https://github.com/d-addison/luminumbra/issues/127) — Owner-accepted closure after unsuccessful reproduction following the logging repair; original mechanism unproven.
+- [Qualify native profiles, displays and traversals using landed render measurements](https://github.com/d-addison/luminumbra/issues/128) — Deferred to v0.3.1 — outstanding profile, display and traversal qualification.
+- [Capture representative budgets using landed simulation telemetry](https://github.com/d-addison/luminumbra/issues/129) — Deferred to v0.3.1 — outstanding simulation-budget capture qualification.
+- [Qualify integrated depth ordering and visual parity](https://github.com/d-addison/luminumbra/issues/130) — Deferred to v0.3.1 — outstanding depth and visual parity qualification.
+- [Stream volumetric coarse SDF tiers to a 16 km view radius with distant cave interiors](https://github.com/d-addison/luminumbra/issues/131) — Implemented infrastructure, default ladder and legacy retirement behind compatibility settings; native qualification deferred to v0.3.1.
+- [Bake terrain edits into every far tier and persist the far authority overlay](https://github.com/d-addison/luminumbra/issues/132) — Implemented overlay codec/writer and bake derivation; edited-bake runtime consumer deferred to v0.3.1.
+- [Measure, propose and enforce far-tier residency and streaming budgets](https://github.com/d-addison/luminumbra/issues/133) — Implemented accounting and bounded runtime infrastructure; calibrated native budgets deferred to v0.3.1.
+- [Qualify persisted-clock continuation across simulation consumers](https://github.com/d-addison/luminumbra/issues/134) — Implemented persisted clock and S3–S7 continuation durability; complete native consumer qualification deferred to v0.3.1.
+- [Track persistent active regions with ranked cadence, freeze and save-on-evict](https://github.com/d-addison/luminumbra/issues/135) — Implemented ranked active-region ledger, indexed authority durability and durable completed work; complete native qualification deferred to v0.3.1.
+- [Host wind, weather and aether ambience as stateful world-anchored pages](https://github.com/d-addison/luminumbra/issues/136) — Implemented durable regional fields with causal weather and scent; complete native field qualification deferred to v0.3.1.
+- [Persist creatures and simulate distant wildlife coarsely with promotion](https://github.com/d-addison/luminumbra/issues/137) — Partial — durability foundations implemented; distant wildlife promotion and remaining S8/S9 scope deferred to v0.3.1.
+- [Run plants and water in distant active regions under bounded cadence and budget](https://github.com/d-addison/luminumbra/issues/138) — Implemented regional foliage and water continuation with host persistence; complete native qualification deferred to v0.3.1.
+- [Add a minimal persisted ground-object entity](https://github.com/d-addison/luminumbra/issues/139) — Implemented durable ground-object continuation; complete native qualification deferred to v0.3.1.
+- [Fold distant-simulation state into world hashes and expose a region diagnostic panel](https://github.com/d-addison/luminumbra/issues/140) — Partial — clock, ledger, edited-content digest and fault handling implemented; S8/S9 hash/diagnostic closure and outstanding qualification deferred to v0.3.1.
+- [Enforce engine budgets and qualify expanded v0.3 acceptance](https://github.com/d-addison/luminumbra/issues/141) — Expanded qualification deferred to v0.3.1; scoped v0.3.0 tag checks remain required.
 
-- [Qualify ambient SIMD determinism without changing established goldens](https://github.com/d-addison/luminumbra/issues/163)
+- [Qualify ambient SIMD determinism without changing established goldens](https://github.com/d-addison/luminumbra/issues/163) — Implemented portability repair and receipt tooling; outstanding candidate capture/pinning deferred to v0.3.1.
 
 ### Foundations — Engine/game separation and tooling
 
@@ -226,8 +192,8 @@ verification.
 - [Add Blender geometry authoring through installed tools](https://github.com/d-addison/luminumbra/issues/146)
 - [Preserve inline texture alpha coverage at authored cutoffs](https://github.com/d-addison/luminumbra/issues/147)
 
-- [Qualify remaining visual and native Linux acceptance for the merged Blender identity review/undo package (#146)](https://github.com/d-addison/luminumbra/issues/146)
-- [Merged optional prefab runtime consumption package; graphical consumption remains separate (#145)](https://github.com/d-addison/luminumbra/pull/165)
+- [Qualify remaining visual and native Linux acceptance for the merged Blender identity review/undo package](https://github.com/d-addison/luminumbra/issues/146)
+- [Implemented optional prefab consumption, installed static preview and Blender viewport; native qualification remains separate](compiled-prefab-runtime.md)
 
 ### v0.4.0 — Continuing-world multiplayer
 

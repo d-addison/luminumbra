@@ -147,7 +147,7 @@ Retained evidence:
 
 - None qualified for this catalog row.
 
-Next action: Run 48-cell summer sweep after camera/foliage fixes; explicitly expand winter to 96 cells and validate every slot; prepare four time-of-day contact sheets with full originals.
+Next action: Run 48-cell summer sweep after camera/foliage fixes; explicitly expand winter to 96 cells and validate every slot; prepare four time-of-day contact sheets with full originals. Native acceptance not produced for v0.3.0 is deferred to v0.3.1.
 
 ## R02
 
@@ -191,7 +191,7 @@ Retained evidence:
 
 - None qualified for this catalog row.
 
-Next action: Bind loading/ready stills to actual world entry and readiness event; preserve transient progress and final grounded state instead of only process success.
+Next action: Bind loading/ready stills to actual world entry and readiness event; preserve transient progress and final grounded state instead of only process success. Native acceptance not produced for v0.3.0 is deferred to v0.3.1.
 
 ## R03
 
@@ -243,7 +243,7 @@ Retained evidence:
 
 - None qualified for this catalog row.
 
-Next action: Record each named ground-LOD station and intervening transition frames; present labeled near/mid/far sheet with seam metrics.
+Next action: Record each named ground-LOD station and intervening transition frames; present labeled near/mid/far sheet with seam metrics. Native acceptance not produced for v0.3.0 is deferred to v0.3.1.
 
 ## R04
 
@@ -287,7 +287,7 @@ Retained evidence:
 
 - None qualified for this catalog row.
 
-Next action: Add retained frame IDs around repeated boundary crossings and aggregate worst seam/flicker events; select stills from measured intervals.
+Next action: Add retained frame IDs around repeated boundary crossings and aggregate worst seam/flicker events; select stills from measured intervals. Native acceptance not produced for v0.3.0 is deferred to v0.3.1.
 
 ## R05
 
@@ -339,7 +339,7 @@ Retained evidence:
 
 - None qualified for this catalog row.
 
-Next action: Capture incoming neighbor states and geometry continuity with arrival order; include worst transient frame in review sheet.
+Next action: Capture incoming neighbor states and geometry continuity with arrival order; include worst transient frame in review sheet. Native acceptance not produced for v0.3.0 is deferred to v0.3.1.
 
 ## R06
 
@@ -391,7 +391,7 @@ Retained evidence:
 
 - None qualified for this catalog row.
 
-Next action: Run existing water/reflection scene on verified archipelago inputs; frame shore and depth clearly, then expose wet/dry/reference pairs.
+Next action: Run existing water/reflection scene on verified archipelago inputs; frame shore and depth clearly, then expose wet/dry/reference pairs. Native acceptance not produced for v0.3.0 is deferred to v0.3.1.
 
 ## R07
 
@@ -436,7 +436,7 @@ Retained evidence:
 
 - None qualified for this catalog row.
 
-Next action: Verify runtime WaterfallVisual helper caller and actual site framing, map active/dammed/recovery states to existing water tests, and retain corresponding stills.
+Next action: Verify runtime WaterfallVisual helper caller and actual site framing, map active/dammed/recovery states to existing water tests, and retain corresponding stills. Native acceptance not produced for v0.3.0 is deferred to v0.3.1.
 
 ## R08
 
@@ -489,7 +489,7 @@ Retained evidence:
 
 - None qualified for this catalog row.
 
-Next action: Capture real material vista and ID heatmap at matched camera; compare close/mid/far material readability against calibration plates.
+Next action: Capture real material vista and ID heatmap at matched camera; compare close/mid/far material readability against calibration plates. Native acceptance not produced for v0.3.0 is deferred to v0.3.1.
 
 ## R09
 
@@ -543,7 +543,7 @@ Retained evidence:
 
 - None qualified for this catalog row.
 
-Next action: Run skybox capture at qualified sun/moon projections, attach actual pass times and compare horizon context with R15 daylight/night variants.
+Next action: Run skybox capture at qualified sun/moon projections, attach actual pass times and compare horizon context with R15 daylight/night variants. Native acceptance not produced for v0.3.0 is deferred to v0.3.1.
 
 ## R10
 
@@ -593,7 +593,7 @@ Retained evidence:
 
 - None qualified for this catalog row.
 
-Next action: Capture clear/weather pair with actual shared camera and stable world projections; review terrain and grass-edge readability.
+Next action: Capture clear/weather pair with actual shared camera and stable world projections; review terrain and grass-edge readability. Native acceptance not produced for v0.3.0 is deferred to v0.3.1.
 
 ## R11
 
@@ -644,7 +644,7 @@ Retained evidence:
 
 - None qualified for this catalog row.
 
-Next action: Verify strike capture path through weather scenario; retain neighbor/strike/recovery stills and event tick, pulse intensity and clipping evidence.
+Next action: Verify strike capture path through weather scenario; retain neighbor/strike/recovery stills and event tick, pulse intensity and clipping evidence. Native acceptance not produced for v0.3.0 is deferred to v0.3.1.
 
 ## R12
 
@@ -695,7 +695,7 @@ Retained evidence:
 
 - None qualified for this catalog row.
 
-Next action: Retain time-indexed moving-shadow frames and matched terrain/grass ROIs; compare observed added cost only to applicable 0.4ms target.
+Next action: Retain time-indexed moving-shadow frames and matched terrain/grass ROIs; compare observed added cost only to applicable 0.4ms target. Native acceptance not produced for v0.3.0 is deferred to v0.3.1.
 
 ## R13
 
@@ -745,7 +745,7 @@ Retained evidence:
 
 - None qualified for this catalog row.
 
-Next action: Run actual emitter fixture, record visible particle ROI and deterministic descriptors; retain ordered samples beyond single presence image.
+Next action: Run actual emitter fixture, record visible particle ROI and deterministic descriptors; retain ordered samples beyond single presence image. Native acceptance not produced for v0.3.0 is deferred to v0.3.1.
 
 ## R14
 
@@ -759,8 +759,10 @@ Fixture: foliage-instancing.ppm, calm/wind sequence, biome density and instance 
 
 Source links:
 
-- [src/luminumbra_client/core/scenarios/FoliageInstancing.cpp](https://github.com/d-addison/luminumbra/blob/945ecd295835a838eed0169ff709e7aabc134fa1/src/luminumbra_client/core/scenarios/FoliageInstancing.cpp)
-- [src/luminumbra_client/core/ScenarioRunnerCapture.cpp](https://github.com/d-addison/luminumbra/blob/945ecd295835a838eed0169ff709e7aabc134fa1/src/luminumbra_client/core/ScenarioRunnerCapture.cpp)
+- [src/luminumbra_client/core/scenarios/FoliageInstancing.cpp](https://github.com/d-addison/luminumbra/blob/52d6a2642993a60bbadbc9e88fcae382b3739b02/src/luminumbra_client/core/scenarios/FoliageInstancing.cpp)
+- [src/luminumbra_client/core/ScenarioRunnerCapture.cpp](https://github.com/d-addison/luminumbra/blob/52d6a2642993a60bbadbc9e88fcae382b3739b02/src/luminumbra_client/core/ScenarioRunnerCapture.cpp)
+- [src/luminumbra_client/rendering/RenderPipeline.cpp](https://github.com/d-addison/luminumbra/blob/52d6a2642993a60bbadbc9e88fcae382b3739b02/src/luminumbra_client/rendering/RenderPipeline.cpp)
+- [test/rendering/render_smoke_test.cpp](https://github.com/d-addison/luminumbra/blob/52d6a2642993a60bbadbc9e88fcae382b3739b02/test/rendering/render_smoke_test.cpp)
 
 Required variants:
 
@@ -796,7 +798,7 @@ Required performance scope: `foliage_draw`; 1 distinct frozen profile(s).
 
 - `foliage_draw_ms` (profile-declared statistic) <= 0.6.
 
-Source reconciliation at `945ecd295835a838eed0169ff709e7aabc134fa1`: Controlled calm/wind v2 capture code and a deliberately incomplete full gate are landed. Independent rebuilds, actual vertex movement and correlated GPU samples still require recovered implementation and native qualification. Historical night-sky baseline is unchanged.
+Source reconciliation at `52d6a2642993a60bbadbc9e88fcae382b3739b02`: Foliage/terrain corrections are integrated. Historical deficient baselines remain unchanged; current native captures and visual approval are outstanding and deferred to v0.3.1.
 
 Retained evidence:
 
@@ -804,7 +806,7 @@ Retained evidence:
 - [foliage-functional.png](assets/visual-baselines/20260908/foliage-functional.png) — SHA-256 `6d864644ab5f40b4fdedd4125163bcdc16049af49dbddf9b42dc98bc1b226e6f`.
 - [foliage-functional.json](assets/visual-baselines/20260908/foliage-functional.json) — SHA-256 `4c4df138b8cdb3eb668e2aeead13beda3463656cfaf2cbbd23d177f613cae7ac`.
 
-Next action: Consume terrain/foliage ownership/camera/time/wind fixes; recapture calm/windy diagnostic with final pre-draw state, independent placement evidence and truthful motion measurement.
+Next action: Consume terrain/foliage ownership/camera/time/wind fixes; recapture calm/windy diagnostic with final pre-draw state, independent placement evidence and truthful motion measurement. Native acceptance not produced for v0.3.0 is deferred to v0.3.1.
 
 ## R15
 
@@ -860,7 +862,7 @@ Retained evidence:
 
 - None qualified for this catalog row.
 
-Next action: Capture six summer/winter noon/dusk/night states plus emissive control with exact existing per-state pins and actual shader time proof.
+Next action: Capture six summer/winter noon/dusk/night states plus emissive control with exact existing per-state pins and actual shader time proof. Native acceptance not produced for v0.3.0 is deferred to v0.3.1.
 
 ## R16
 
@@ -913,7 +915,7 @@ Retained evidence:
 
 - None qualified for this catalog row.
 
-Next action: Verify precipitation state ownership, capture calm/windy/start-stop stills, and measure slant plus scoped storm timing; qualify snow separately.
+Next action: Verify precipitation state ownership, capture calm/windy/start-stop stills, and measure slant plus scoped storm timing; qualify snow separately. Native acceptance not produced for v0.3.0 is deferred to v0.3.1.
 
 ## R17
 
@@ -963,7 +965,7 @@ Retained evidence:
 
 - None qualified for this catalog row.
 
-Next action: Capture every existing player-view station at grounded pose across supported presets, checking current terrain support and near-field coverage.
+Next action: Capture every existing player-view station at grounded pose across supported presets, checking current terrain support and near-field coverage. Native acceptance not produced for v0.3.0 is deferred to v0.3.1.
 
 ## R18
 
@@ -977,8 +979,10 @@ Fixture: Existing far-horizon station captures and boundary-band water analysis,
 
 Source links:
 
-- [src/luminumbra_client/core/scenarios/FarLodHorizonSmoke.cpp](https://github.com/d-addison/luminumbra/blob/945ecd295835a838eed0169ff709e7aabc134fa1/src/luminumbra_client/core/scenarios/FarLodHorizonSmoke.cpp)
-- [src/luminumbra_client/core/ScenarioRunnerCapture.cpp](https://github.com/d-addison/luminumbra/blob/945ecd295835a838eed0169ff709e7aabc134fa1/src/luminumbra_client/core/ScenarioRunnerCapture.cpp)
+- [src/luminumbra_client/core/scenarios/FarLodHorizonSmoke.cpp](https://github.com/d-addison/luminumbra/blob/52d6a2642993a60bbadbc9e88fcae382b3739b02/src/luminumbra_client/core/scenarios/FarLodHorizonSmoke.cpp)
+- [src/luminumbra_client/core/ScenarioRunnerCapture.cpp](https://github.com/d-addison/luminumbra/blob/52d6a2642993a60bbadbc9e88fcae382b3739b02/src/luminumbra_client/core/ScenarioRunnerCapture.cpp)
+- [src/luminumbra_client/rendering/FarVolumeResidency.cpp](https://github.com/d-addison/luminumbra/blob/52d6a2642993a60bbadbc9e88fcae382b3739b02/src/luminumbra_client/rendering/FarVolumeResidency.cpp)
+- [tools/gates/far_ladder_oracle.py](https://github.com/d-addison/luminumbra/blob/52d6a2642993a60bbadbc9e88fcae382b3739b02/tools/gates/far_ladder_oracle.py)
 
 Required variants:
 
@@ -995,7 +999,7 @@ Implementation dependencies:
 - S2: Serialized native capture and source-correlated measurement on freshly identified local hardware.
 - S6: Terrain/streaming/spatial continuity, independent coverage, persistent world authority.
 
-Capture: **existing_subset**. Source-wired still producer only; command has not been rerun for this catalog. Review source pins and workload before capture; variants, motion evidence and performance remain unqualified. Repeat independently for default, mountains and archipelago with a fresh output directory for each preset; these are the current standing gate presets.
+Capture: **existing_subset**. Source-wired still producer only; command has not been rerun for this catalog. Review source pins and workload before capture; variants, motion evidence and performance remain unqualified. Repeat independently for default, mountains and archipelago with a fresh output directory for each preset; these are the current standing gate presets. This is a historical command subset; the Ladder horizon gate refuses before launch and legacy captures cannot qualify the default ladder.
 
 Arguments are a command template, not a newly executed run. Replace placeholders with owned native paths and a fresh output directory; reserve the native slot first.
 
@@ -1009,13 +1013,13 @@ Acceptance checks:
 - Existing far-horizon station captures and boundary-band water analysis, camera/coverage, elevated and ground views, transition path.
 - Meet the shared packet contract and preserve independent regression checks; each listed variant is required.
 
-Source reconciliation at `945ecd295835a838eed0169ff709e7aabc134fa1`: Source fixture or supporting assertions are present. Current native screenshots, all required variants and performance have not been qualified for this catalog.
+Source reconciliation at `52d6a2642993a60bbadbc9e88fcae382b3739b02`: Canonical volumetric generation, meshing, queue, residency, upload and render integration are implemented, including water, fog, shadow exclusion and horizon diagnostics. The ladder is the default far-world mode; the legacy renderer is retired behind compatibility settings. Edited-bake runtime consumption and complete native qualification are deferred to v0.3.1. The ladder horizon gate refuses before launch today and remains a documented v0.3.1 limitation.
 
 Retained evidence:
 
 - None qualified for this catalog row.
 
-Next action: Pair far-horizon and boundary-water views with depth/material and residency evidence; add transition samples after the independent coverage diagnosis.
+Next action: Pair far-horizon and boundary-water views with depth/material and residency evidence; add transition samples after the independent coverage diagnosis. Native acceptance not produced for v0.3.0 is deferred to v0.3.1.
 
 ## R19
 
@@ -1066,7 +1070,7 @@ Retained evidence:
 
 - None qualified for this catalog row.
 
-Next action: Capture synthetic skinned A/B poses and intermediate deformation samples with texture identity; keep distinct from production character acceptance.
+Next action: Capture synthetic skinned A/B poses and intermediate deformation samples with texture identity; keep distinct from production character acceptance. Native acceptance not produced for v0.3.0 is deferred to v0.3.1.
 
 ## R20
 
@@ -1118,7 +1122,7 @@ Retained evidence:
 
 - None qualified for this catalog row.
 
-Next action: Verify currently supported archetype/stimulus assets, capture before/after plus selected measured reaction poses; do not imply game-code extraction or new behavior system.
+Next action: Verify currently supported archetype/stimulus assets, capture before/after plus selected measured reaction poses; do not imply game-code extraction or new behavior system. Native acceptance not produced for v0.3.0 is deferred to v0.3.1.
 
 ## R21
 
@@ -1132,8 +1136,10 @@ Fixture: Save/load phase frames with identical framing, file hashes and world id
 
 Source links:
 
-- [src/luminumbra_client/core/scenarios/PersistenceRoundtrip.cpp](https://github.com/d-addison/luminumbra/blob/945ecd295835a838eed0169ff709e7aabc134fa1/src/luminumbra_client/core/scenarios/PersistenceRoundtrip.cpp)
-- [src/luminumbra_client/core/ScenarioRunnerCapture.cpp](https://github.com/d-addison/luminumbra/blob/945ecd295835a838eed0169ff709e7aabc134fa1/src/luminumbra_client/core/ScenarioRunnerCapture.cpp)
+- [src/luminumbra_client/core/scenarios/PersistenceRoundtrip.cpp](https://github.com/d-addison/luminumbra/blob/52d6a2642993a60bbadbc9e88fcae382b3739b02/src/luminumbra_client/core/scenarios/PersistenceRoundtrip.cpp)
+- [src/luminumbra_client/core/ScenarioRunnerCapture.cpp](https://github.com/d-addison/luminumbra/blob/52d6a2642993a60bbadbc9e88fcae382b3739b02/src/luminumbra_client/core/ScenarioRunnerCapture.cpp)
+- [test/persistence/world_open_refusal_test.cpp](https://github.com/d-addison/luminumbra/blob/52d6a2642993a60bbadbc9e88fcae382b3739b02/test/persistence/world_open_refusal_test.cpp)
+- [test/persistence/host_scheduler_fault_test.cpp](https://github.com/d-addison/luminumbra/blob/52d6a2642993a60bbadbc9e88fcae382b3739b02/test/persistence/host_scheduler_fault_test.cpp)
 
 Required variants:
 
@@ -1157,13 +1163,13 @@ Acceptance checks:
 - Save/load phase frames with identical framing, file hashes and world identity; UI sequence from campaign separately qualified; corruption refusal UI captured in U03.
 - Meet the shared packet contract and preserve independent regression checks; each listed variant is required.
 
-Source reconciliation at `945ecd295835a838eed0169ff709e7aabc134fa1`: The runtime roundtrip requires separate save and load processes with a shared disposable persistence-session directory. Numeric phase receipts exist; matching before/restart/after pixels need capture wiring.
+Source reconciliation at `52d6a2642993a60bbadbc9e88fcae382b3739b02`: Synthetic fixtures, catalog responsiveness, saved-world lifecycle, native refusal fixtures and scheduler-fault regression coverage are implemented. Complete native UI/persistence packets remain outstanding and are deferred to v0.3.1 when not produced for v0.3.0; the separate owner Windows tag-gate smoke remains required.
 
 Retained evidence:
 
 - None qualified for this catalog row.
 
-Next action: Use disposable saved-world fixture and identical before/restart/after camera, attach file/world digests and actual user-flow stills.
+Next action: Use disposable saved-world fixture and identical before/restart/after camera, attach file/world digests and actual user-flow stills. Native acceptance not produced for v0.3.0 is deferred to v0.3.1.
 
 ## R22
 
@@ -1208,7 +1214,7 @@ Retained evidence:
 
 - None qualified for this catalog row.
 
-Next action: Confirm actual client image capture wiring for existing network driver; retain matching-tick client views with server/transport state, add capture plumbing if absent.
+Next action: Confirm actual client image capture wiring for existing network driver; retain matching-tick client views with server/transport state, add capture plumbing if absent. Native acceptance not produced for v0.3.0 is deferred to v0.3.1.
 
 ## R23
 
@@ -1259,7 +1265,7 @@ Retained evidence:
 
 - None qualified for this catalog row.
 
-Next action: Capture before/after actual supported window-mode changes and UI layout, recording both native window and pinned framebuffer sizes.
+Next action: Capture before/after actual supported window-mode changes and UI layout, recording both native window and pinned framebuffer sizes. Native acceptance not produced for v0.3.0 is deferred to v0.3.1.
 
 ## R24
 
@@ -1269,11 +1275,15 @@ Implement and qualify volumetric generation, meshing, scheduling and independent
 
 Origin: added. Parents: R03, R04, R05, R18, D20, D22. Priority: P2. Execution: **not_captured**. Approval: **pending**.
 
-Fixture: Implement and qualify volumetric generation, meshing, scheduling and independent coverage through 16,384 m, then durable edit authority and residency/upload budgets. Author and version the fixture with GLB plus versioned sidecars and immutable generations.
+Fixture: Implemented five-tier volumetric source fixtures cover generation, meshing, residency and overlay derivation; complete native coverage, runtime edited-bake consumption and calibrated budgets remain outstanding.
 
 Source links:
 
-- Missing: this fixture still needs implementation and a reproducible producer.
+- [test/fixtures/far_volume/foundation-reference.json](https://github.com/d-addison/luminumbra/blob/52d6a2642993a60bbadbc9e88fcae382b3739b02/test/fixtures/far_volume/foundation-reference.json)
+- [test/common/FarVolumeTile_test.cpp](https://github.com/d-addison/luminumbra/blob/52d6a2642993a60bbadbc9e88fcae382b3739b02/test/common/FarVolumeTile_test.cpp)
+- [test/common/FarVolumeMesher_test.cpp](https://github.com/d-addison/luminumbra/blob/52d6a2642993a60bbadbc9e88fcae382b3739b02/test/common/FarVolumeMesher_test.cpp)
+- [test/rendering/FarVolumeResidency_test.cpp](https://github.com/d-addison/luminumbra/blob/52d6a2642993a60bbadbc9e88fcae382b3739b02/test/rendering/FarVolumeResidency_test.cpp)
+- [test/common/FarAuthorityOverlay_test.cpp](https://github.com/d-addison/luminumbra/blob/52d6a2642993a60bbadbc9e88fcae382b3739b02/test/common/FarAuthorityOverlay_test.cpp)
 
 Required variants:
 
@@ -1294,7 +1304,7 @@ Implementation dependencies:
 - S2: Serialized native capture and source-correlated measurement on freshly identified local hardware.
 - S6: Terrain/streaming/spatial continuity, independent coverage, persistent world authority.
 
-Capture: **missing**. Implementation and a reproducible installed/native capture producer remain required.
+Capture: **missing**. Implemented source fixtures and supporting probes do not provide a complete reproducible native visual packet; capture remains missing for the full claim.
 
 Acceptance checks:
 
@@ -1305,13 +1315,13 @@ Required performance scope: `accepted_expanded_world`; 2 distinct frozen profile
 
 - `frame_ms` (p99) <= 16.67; also report target 8.33.
 
-Source reconciliation at `945ecd295835a838eed0169ff709e7aabc134fa1`: Authorized September 13 completion scope. This row adds explicit coverage without replacing any original group; implementation and acceptance remain unfinished.
+Source reconciliation at `52d6a2642993a60bbadbc9e88fcae382b3739b02`: Canonical volumetric generation, meshing, queue, residency, upload and render integration are implemented, including water, fog, shadow exclusion and horizon diagnostics. The ladder is the default far-world mode; the legacy renderer is retired behind compatibility settings. Edited-bake runtime consumption and complete native qualification are deferred to v0.3.1. The ladder horizon gate refuses before launch today and remains a documented v0.3.1 limitation.
 
 Retained evidence:
 
 - None qualified for this catalog row.
 
-Next action: Identify the concrete missing feature and dependency, implement in dependency order, then prepare an individually reviewable native packet.
+Next action: Qualify the default ladder and its source fixtures; implement the edited-bake runtime consumer and immutable authority for the horizon gate. Resolve authoritative ground/high/cave-air poses and fixed-view workloads; add cave-walk and edited-world traversal producers before complete native profile/display qualification. Native acceptance not produced for v0.3.0 is deferred to v0.3.1.
 
 ## R25
 
@@ -1321,11 +1331,13 @@ Reconcile the coarse simulation integration without losing landed telemetry; pro
 
 Origin: added. Parents: R20, R21, R22, G07. Priority: P2. Execution: **not_captured**. Approval: **pending**.
 
-Fixture: Reconcile the coarse simulation integration without losing landed telemetry; prove game-owned activation data and deterministic persistent continuation using the existing clock. Author and version the fixture with GLB plus versioned sidecars and immutable generations.
+Fixture: Implemented clock, ledger and scheduler-fault fixtures support S3–S7 durability; complete deterministic continuation packets with game-owned activation data and S8/S9 remain outstanding.
 
 Source links:
 
-- Missing: this fixture still needs implementation and a reproducible producer.
+- [test/common/SimulationClock_test.cpp](https://github.com/d-addison/luminumbra/blob/52d6a2642993a60bbadbc9e88fcae382b3739b02/test/common/SimulationClock_test.cpp)
+- [test/common/ActiveRegionLedger_test.cpp](https://github.com/d-addison/luminumbra/blob/52d6a2642993a60bbadbc9e88fcae382b3739b02/test/common/ActiveRegionLedger_test.cpp)
+- [test/persistence/host_scheduler_fault_test.cpp](https://github.com/d-addison/luminumbra/blob/52d6a2642993a60bbadbc9e88fcae382b3739b02/test/persistence/host_scheduler_fault_test.cpp)
 
 Required variants:
 
@@ -1347,17 +1359,17 @@ Implementation dependencies:
 - S6: Terrain/streaming/spatial continuity, independent coverage, persistent world authority.
 - S7: Installed authoring/character/behavior integration and immutable source/tool/asset identity.
 
-Capture: **missing**. Implementation and a reproducible installed/native capture producer remain required.
+Capture: **missing**. Implemented source fixtures and supporting probes do not provide a complete reproducible native visual packet; capture remains missing for the full claim.
 
 Acceptance checks:
 
 - Reconcile the coarse simulation integration without losing landed telemetry; prove game-owned activation data and deterministic persistent continuation using the existing clock.
 - Meet the shared packet contract for every required variant and parent mapping.
 
-Source reconciliation at `945ecd295835a838eed0169ff709e7aabc134fa1`: Authorized September 13 completion scope. This row adds explicit coverage without replacing any original group; implementation and acceptance remain unfinished.
+Source reconciliation at `52d6a2642993a60bbadbc9e88fcae382b3739b02`: Clock, ledger, edited-content digest and scheduler-fault foundations are implemented. S3–S7 durability is implemented: indexed authority durability, durable completed work and ground-object continuation, durable regional fields with causal weather and scent, and regional foliage/water continuation with host persistence. S8/S9 and complete native continuation qualification are deferred to v0.3.1.
 
 Retained evidence:
 
 - None qualified for this catalog row.
 
-Next action: Identify the concrete missing feature and dependency, implement in dependency order, then prepare an individually reviewable native packet.
+Next action: Qualify deterministic S3–S7 persistence and continuation with pinned game-owned activation data; complete distant-simulation S8/S9 and native consumer/hash/diagnostic packets in v0.3.1. Native acceptance not produced for v0.3.0 is deferred to v0.3.1.

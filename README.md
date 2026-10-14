@@ -9,12 +9,18 @@ Luminumbra is a C++20 voxel engine for a persistent simulated world. It combines
 deterministic fixed-tick simulation, procedural terrain, entity-component systems,
 networking, and a GPU-driven client renderer.
 
-This is an owner-maintained hobby project. Version 0.3.0 is undergoing acceptance;
-the latest published source release is v0.2.1. Interfaces and content formats may
-still change between releases. See the [coordinated roadmap](docs/roadmap.md) for
-release status and the populated engine/game milestones.
+This is an owner-maintained hobby project. Version 0.3.0 is in release preparation;
+v0.2.1 remains the latest published source release. The
+[coordinated roadmap](docs/roadmap.md) separates implemented release scope,
+acceptance deferred to v0.3.1 and publication. Interfaces and content formats may
+change between releases.
 
-The [September 13 recovery status](docs/roadmap.md#current-state) separates merged implementation, remaining verification and unpublished v0.3.0. The [recovery candidate](https://github.com/d-addison/luminumbra/pull/175) is undergoing integration checks; the [promotion gate](https://github.com/d-addison/luminumbra/pull/55) remains blocked on expanded acceptance.
+Shipping features are enabled by default; debug toggles, Vulkan, Steam and GNS remain disabled. Audio playback keeps its separate disabled-by-default release policy. The volumetric far-world ladder is the default mode; the legacy far-world renderer is retired behind compatibility settings.
+
+The distant-simulation S3–S7 durability stack is implemented: indexed authority durability, durable completed work and ground-object continuation, durable regional fields with causal weather and scent, and regional foliage and water continuation with host persistence.
+
+Complete render qualification, the far-world edited-bake runtime consumer, distant-simulation S8/S9, the ladder horizon gate, authoritative ground/high/cave-air poses and fixed-view workloads, cave-walk and edited-world traversal producers, outstanding acceptance capture/pinning, and native Windows evidence not produced for v0.3.0 are deferred to v0.3.1. See the
+[acceptance record](docs/v0.3-acceptance.md) for the scoped tag gate and historical evidence.
 
 ## v0.3.0 world format break
 
@@ -62,9 +68,9 @@ See [Development and testing](docs/development.md) for platform dependencies,
 validation lanes, and source-list ownership.
 
 The optional [compiled static prefab runtime](docs/compiled-prefab-runtime.md)
-loads pinned authoring generations into an ECS hierarchy. Its installed headless
-consumer is qualified separately on Linux and Windows; renderer integration is
-separate work.
+loads pinned authoring generations into an ECS hierarchy. The installed static
+preview and Blender viewport are implemented. Native acceptance and performance
+scopes are documented separately.
 
 Before entering a game world, acquire the separately versioned tree pack with
 `python3 tools/assets/acquire.py` (Windows: `py -3 tools/assets/acquire.py`).

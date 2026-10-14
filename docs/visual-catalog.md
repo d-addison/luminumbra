@@ -23,10 +23,21 @@ requirements but may not silently reduce the original contract.
 
 ## Reconciliation and execution
 
-The initial source audit is pinned to
-`945ecd295835a838eed0169ff709e7aabc134fa1`. Source reconciliation is a snapshot of
-that tree, separate from the source identities of historical captures. Refresh
-each row's reconciliation when implementation lands; keep old evidence intact.
+The October 14 source reconciliation is recorded against
+`52d6a2642993a60bbadbc9e88fcae382b3739b02`, with the final v0.3.0 release scope described in
+the [acceptance record](v0.3-acceptance.md). Updated rows distinguish implemented
+default ladder, durability, saved-world and installed-authoring support from
+unproduced native packets. Unchanged rows retain their earlier audit identity;
+historical captures retain their original executed-source and artifact identities.
+Source landing grants no visual approval.
+
+Complete render qualification, the far-world edited-bake runtime consumer,
+distant-simulation S8/S9, the ladder horizon gate (which refuses before launch),
+authoritative ground/high/cave-air poses and fixed-view workloads, cave-walk and
+edited-world traversal producers, outstanding acceptance capture/pinning, and
+native Windows evidence not produced for v0.3.0 are deferred to v0.3.1. Required
+variants, performance targets and the zero-approval statement remain unchanged.
+The scoped v0.3.0 tag gate is separate from catalog completion.
 
 Runtime selectors and all ten shipped UI documents are mapped automatically.
 `forced_crash` is the explicit nonvisual selector exclusion. Lightning captures
