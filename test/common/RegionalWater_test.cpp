@@ -131,6 +131,9 @@ TEST_F(RegionalWaterFixture, UninitializedAndOldResolutionClaimsEarnPreparationA
         EXPECT_EQ(chunk->water_depth_mm.size(), 64u);
         EXPECT_TRUE(chunk->has_water_authority());
         EXPECT_EQ(chunk->water_revision(), 1u);
+        EXPECT_EQ(chunk->sdf_provenance(), ChunkSdfProvenance::LoadedOrEdited);
+        EXPECT_TRUE(chunk->is_voxel_data_dirty());
+        EXPECT_FALSE(chunk->is_water_state_dirty());
     }
     ASSERT_EQ(work.size(), 1u);
     EXPECT_EQ(work.front().region_ticks, 1u);

@@ -115,6 +115,9 @@ revision map, and stores scalar/atomic state. No allocation or validation remain
 Changed chunks become sticky durable water authority and are dirty for saving;
 water revisions increment once on live publication. Far authority revisions are
 prepared under the revision mutex, including boundary halo regions.
+Publication consumes the pending water-promotion flag after transferring the
+obligation to the save-dirty bit. It does not acknowledge persistence; that bit
+clears only when the snapshot commits with matching voxel and water revisions.
 
 Existing durable formats persist all authority: chunk records hold water arrays
 and sleep/resolution bookkeeping; FPG sections 5/6 hold soil and irrigation;

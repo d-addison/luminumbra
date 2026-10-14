@@ -309,13 +309,16 @@ void PublishWater(Chunk& destination, Chunk& staged, bool changed) noexcept {
     destination.max_water_delta_last_tick = staged.max_water_delta_last_tick;
     destination.ticks_below_threshold = staged.ticks_below_threshold;
     destination.water_mesh_dirty_ticks = staged.water_mesh_dirty_ticks;
-    // Publication is the only revision/dirty write to live chunks. Sticky provenance is
-    // consumed by SHIELD sync_water_authority before save/digest/retention.
+    // Publication is the only revision/dirty write to live chunks. This commit transfers
+    // water divergence directly to sticky authority and the save-dirty bit, just like
+    // SHIELD sync_water_authority. The pending promotion bit is then consumed; the water
+    // revision still protects changes made after serialization from save acknowledgement.
     if (changed) {
         destination.mark_water_state_dirty();
         destination.set_water_authority();
         destination.mark_sdf_loaded_or_edited();
         destination.mark_dirty_for_save();
+        destination.clear_water_state_dirty();
     }
 }
 

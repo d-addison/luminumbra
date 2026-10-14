@@ -3727,6 +3727,7 @@ void PersistRegionalWaterBeforeRetention(GameSession& session,
     ASSERT_FALSE(session.GetFieldPages().owns_region(disk_region));
     ASSERT_TRUE(session.SaveWorldState());
     EXPECT_FALSE(chunk->is_voxel_data_dirty());
+    EXPECT_FALSE(chunk->is_water_state_dirty());
     EXPECT_TRUE(chunk->has_water_authority());
 
     // Use the existing paired-clock/ledger fixture idiom to approach retention directly.
@@ -3947,6 +3948,50 @@ TEST(GameSessionHeadlessWorldTest, WaterOnlyAuthorityHashDoesNotChangeWhenSaved)
     ASSERT_EQ(restored.status, P::WorldSaveService::ChunkReadStatus::Found);
     ASSERT_NE(restored.chunk, nullptr);
     EXPECT_EQ(restored.chunk->water_depth_mm, chunk->water_depth_mm);
+}
+
+TEST(GameSessionHeadlessWorldTest, WaterOnlySavesAcknowledgeWithoutHashOrTickPromotion) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession owner;
+    EnableSnapshotSession(owner, root, jobs);
+    ASSERT_TRUE(owner.CreateWorld("Water-only acknowledgement", "1337", "default"));
+    auto chunk = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3(0, 0, 0));
+    chunk->sdf_data.assign(17 * 17 * 17, 1.0f);
+    chunk->mark_sdf_generated_current_params();
+    chunk->water_depth_mm.assign(64, 123);
+    chunk->water_bed_mm.assign(64, 1000);
+    chunk->water_edge_flux.assign(128, 0);
+    chunk->water_level_data.assign(64, 1.123f);
+    chunk->water_flow_data.assign(64, Luminumbra::Vec2(0));
+    chunk->water_sim_terrain_height.assign(64, 1.0f);
+    chunk->has_water_sim.store(true);
+    ASSERT_TRUE(owner.GetWorldSystem()->adopt_streamed_chunk(chunk));
+    for (const bool first : {true, false}) {
+        SCOPED_TRACE(first);
+        ++chunk->water_depth_mm.front();
+        chunk->water_level_data.front() =
+            static_cast<float>(chunk->water_bed_mm.front() + chunk->water_depth_mm.front()) /
+            1000.0f;
+        chunk->mark_water_state_dirty();
+        const auto revision = chunk->water_revision();
+        ASSERT_TRUE(chunk->is_water_state_dirty());
+        ASSERT_FALSE(chunk->is_voxel_data_dirty());
+        // Save itself must promote and acknowledge the live object. Hashing or ticking
+        // first would consume the pending flag and mask a missing save-side promotion.
+        ASSERT_TRUE(owner.SaveWorldState());
+        EXPECT_FALSE(chunk->is_voxel_data_dirty());
+        EXPECT_FALSE(chunk->is_water_state_dirty());
+        EXPECT_TRUE(chunk->has_water_authority());
+        EXPECT_EQ(chunk->water_revision(), revision);
+        const auto durable =
+            P::WorldSaveService::read_chunk(owner.GetWorldSaveDir(), {0, 0, 0}, true);
+        ASSERT_EQ(durable.status, P::WorldSaveService::ChunkReadStatus::Found);
+        ASSERT_NE(durable.chunk, nullptr);
+        EXPECT_EQ(durable.chunk->water_depth_mm, chunk->water_depth_mm);
+        EXPECT_EQ(durable.chunk->water_edge_flux, chunk->water_edge_flux);
+    }
 }
 
 TEST(GameSessionHeadlessWorldTest, JoinedLedgerWriterDoesNotRetainCallerLocalReference) {
