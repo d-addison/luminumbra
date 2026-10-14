@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import base64
 import copy
+import errno
 import json
 from pathlib import Path
 import shutil
@@ -111,17 +112,17 @@ class CatalogTests(unittest.TestCase):
 
     def test_source_discovery_catches_unmapped_runtime_selector(self):
         path = self.root / "src/luminumbra_client/core/RuntimeScenarioConfig.h"
-        previous = path.read_text(encoding="utf-8")
+        previous = path.read_bytes()
         try:
-            path.write_text(previous + '\nbool new_capture() { return scenario == "new_capture"; }\n')
+            path.write_bytes(previous + b'\nbool new_capture() { return scenario == "new_capture"; }\n')
             self.rejected("selector discovery")
         finally:
-            path.write_text(previous)
+            path.write_bytes(previous)
 
     def test_source_discovery_catches_new_ui_page(self):
         path = self.root / "data/ui/new_page.rml"
         try:
-            path.write_text("<rml/>")
+            path.write_text("<rml/>", encoding="utf-8")
             self.rejected("UI documents")
         finally:
             path.unlink(missing_ok=True)
@@ -184,12 +185,15 @@ class CatalogTests(unittest.TestCase):
     def test_symlink_does_not_publish_external_evidence(self):
         with tempfile.TemporaryDirectory() as outside:
             external = Path(outside) / "source.json"
-            external.write_text("{}")
+            external.write_text("{}", encoding="utf-8")
             link = self.root / "linked.json"
             try:
                 link.symlink_to(external)
-            except OSError:
-                self.skipTest("symlink creation unavailable")
+            except OSError as error:
+                if (error.errno not in (errno.EPERM, errno.EACCES, errno.ENOSYS, errno.EOPNOTSUPP)
+                        and getattr(error, "winerror", None) not in (1, 50, 1314)):
+                    raise
+                self.skipTest(f"Symlink creation is unavailable: {error}")
             try:
                 self.row("B09")["fixture"]["source_paths"] = ["linked.json"]
                 self.rejected("linked evidence")
@@ -295,7 +299,7 @@ class CatalogTests(unittest.TestCase):
 
     def save_packet(self, packet):
         path = self.root / "docs/assets/contract-fixture/packet.json"
-        path.write_text(json.dumps(packet))
+        path.write_text(json.dumps(packet), encoding="utf-8")
         self.row(self.packet_scenario)["review_packet"] = {"path": path.relative_to(self.root).as_posix(),
                                               "sha256": check.digest(path.read_bytes())}
 
@@ -375,7 +379,7 @@ class CatalogTests(unittest.TestCase):
 
     def test_duplicate_json_keys_are_rejected(self):
         file = self.root / "duplicate.json"
-        file.write_text('{"approval":"pending","approval":"approved"}')
+        file.write_text('{"approval":"pending","approval":"approved"}', encoding="utf-8")
         with self.assertRaisesRegex(ValueError, "duplicate JSON key"):
             check.read_json(file)
 

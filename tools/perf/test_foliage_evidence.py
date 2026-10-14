@@ -103,7 +103,7 @@ class EvidenceTests(unittest.TestCase):
     def check(self, mutate=None):
         report=copy.deepcopy(self.base)
         if mutate: mutate(report)
-        (self.root/'foliage-instancing-analysis.json').write_text(json.dumps(report))
+        (self.root/'foliage-instancing-analysis.json').write_text(json.dumps(report), encoding="utf-8")
         return validate(self.root)
 
     def test_complete_synthetic_fixture(self):

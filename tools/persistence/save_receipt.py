@@ -50,8 +50,11 @@ def _walk(base: Path, prefix: str, out: list) -> None:
         entries = sorted(iterator, key=lambda entry: entry.name)
     for entry in entries:
         rel = f"{prefix}{entry.name}"
-        if entry.is_symlink():
-            raise ReceiptError(f"symlink not allowed in save tree: {rel}")
+        if not _valid_relative_path(rel):
+            raise ReceiptError(f"non-portable path in save tree: {rel}")
+        if (entry.is_symlink()
+                or getattr(entry.stat(follow_symlinks=False), "st_file_attributes", 0) & 0x400):
+            raise ReceiptError(f"symlink or reparse point not allowed in save tree: {rel}")
         if entry.is_dir(follow_symlinks=False):
             _walk(Path(entry.path), rel + "/", out)
         elif entry.is_file(follow_symlinks=False):
@@ -71,7 +74,8 @@ def _tree_digest(files: list) -> str:
 def snapshot(world_dir) -> dict:
     """Return the receipt dict for the regular-file tree beneath world_dir."""
     root = Path(world_dir)
-    if root.is_symlink() or not root.is_dir():
+    if (root.is_symlink() or not root.is_dir()
+            or getattr(root.lstat(), "st_file_attributes", 0) & 0x400):
         raise ReceiptError(f"not a directory: {world_dir}")
     found: list = []
     _walk(root, "", found)
@@ -91,7 +95,8 @@ def snapshot(world_dir) -> dict:
 
 
 def _valid_relative_path(path) -> bool:
-    if not isinstance(path, str) or not path or path.startswith("/") or "\\" in path:
+    if (not isinstance(path, str) or not path or path.startswith("/")
+            or "\\" in path or ":" in path):
         return False
     return all(part not in ("", ".", "..") for part in path.split("/"))
 

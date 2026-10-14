@@ -147,7 +147,7 @@ class PathGateTests(unittest.TestCase):
                         '#!/bin/sh\ncase "$1" in\n'
                         'diff) test "$FAKE_SENSITIVE" = false;;\n'
                         'show) test "$FAKE_MISSING" = false || exit 1; cat "$FAKE_BASE_SCRIPT";;\n'
-                        '*) exit 1;;\nesac\n'
+                        '*) exit 1;;\nesac\n', encoding="utf-8"
                     )
                     git.chmod(0o755)
                     base = root / "base.py"
@@ -156,13 +156,13 @@ class PathGateTests(unittest.TestCase):
                         "assert sys.argv[1:] == ['classify', '--root', os.environ['GITHUB_WORKSPACE']]\n"
                         "if os.environ['FAKE_FAILED'] == 'true': raise SystemExit(1)\n"
                         "with open(os.environ['GITHUB_OUTPUT'], 'a') as f:\n"
-                        "    f.write('needs_cpp=false\\nneeds_python=true\\n')\n"
+                        "    f.write('needs_cpp=false\\nneeds_python=true\\n')\n", encoding="utf-8"
                     )
                     # A PR tries to exempt itself; executing it would leave a marker.
                     head = root / "tools/ci/ci_paths.py"
                     head.parent.mkdir(parents=True)
                     marker = root / "head-executed"
-                    head.write_text(f"from pathlib import Path\nPath({str(marker)!r}).touch()\n")
+                    head.write_text(f"from pathlib import Path\nPath({str(marker)!r}).touch()\n", encoding="utf-8")
                     output = root / "output"
                     env = dict(os.environ, PATH=f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
                                CI_EVENT="pull_request", CI_REPOSITORY="owner/repo",

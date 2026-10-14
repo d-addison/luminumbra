@@ -165,7 +165,7 @@ class VerifyReleaseTests(unittest.TestCase):
         scenario = scenario or self.scenario
         args = verifier.parse_args([
             "--repo", REPO, "--tag", TAG, "--expected-commit", COMMIT,
-            "--out", str(self.out), "--source-root", self.tmp.name, "--python", "/usr/bin/true",
+            "--out", str(self.out), "--source-root", self.tmp.name, "--python", sys.executable,
         ])
         checks = verifier.run_checks(args, FakeRunner(scenario))[0]
         return {c.name: c for c in checks}
@@ -266,7 +266,7 @@ class VerifyReleaseTests(unittest.TestCase):
         runner = FakeRunner(self.scenario)
         args = verifier.parse_args([
             "--repo", REPO, "--tag", TAG, "--expected-commit", COMMIT,
-            "--out", str(self.out), "--source-root", self.tmp.name, "--python", "/usr/bin/true",
+            "--out", str(self.out), "--source-root", self.tmp.name, "--python", sys.executable,
         ])
         checks = {c.name: c for c in verifier.run_checks(args, runner)[0]}
         self.assertEqual(checks["archive-regenerated"].status, "PASS", checks["archive-regenerated"].detail)
@@ -313,7 +313,7 @@ class VerifyReleaseTests(unittest.TestCase):
 
     def cli_args(self) -> List[str]:
         return ["--repo", REPO, "--tag", TAG, "--expected-commit", COMMIT,
-                "--out", str(self.out), "--source-root", self.tmp.name, "--python", "/usr/bin/true"]
+                "--out", str(self.out), "--source-root", self.tmp.name, "--python", sys.executable]
 
     def archive_attestation(self, body: str) -> Dict[str, object]:
         scenario = copy.deepcopy(self.scenario)
