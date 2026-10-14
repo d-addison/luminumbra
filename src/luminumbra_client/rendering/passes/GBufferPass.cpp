@@ -351,7 +351,7 @@ void GBufferPass::geometry_pass_chunks(const RenderContext& ctx,
     m_geometry_shader->setInt("u_terrainRoughnessValid", ctx.terrain_roughness_valid);
     m_geometry_shader->setInt("u_macroRockOverlay", 1); // terrain keeps the macro rock overlay
 
-    // live-terrain submit via the Codex-signed-off callback (wraps
+    // Live-terrain submit via the shared callback (wraps
     // CullHierarchical + draw_chunks_mdi exactly, byte-identical). It returns the
     // cull/draw/index counts; we fold them into the returned stats with the EXACT
     // current policy (terrain_visible_chunks '=', draws/indices '+=').

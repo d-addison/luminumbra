@@ -177,29 +177,44 @@ function Get-PrimaryWorld {
 
 function Get-EditRoundtrip {
     # Reads the save and load phase artifacts of persistence_roundtrip_smoke. Returns $null
-    # (checker: unevaluated) when either is missing or unparseable.
+    # (checker: unevaluated) only for absent artifacts; existing invalid evidence fails.
     param([Parameter(Mandatory = $true)][string]$ArtifactDir)
     $docs = @{}
     foreach ($phase in @("save", "load")) {
         $path = Join-Path $ArtifactDir ("persistence-runtime-roundtrip-phase-" + $phase + ".json")
-        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return $null }
-        try {
-            $docs[$phase] = ConvertFrom-Json -InputObject ([System.IO.File]::ReadAllText($path, [System.Text.Encoding]::UTF8))
-        } catch {
-            return $null
+        if (-not (Test-Path -LiteralPath $path)) { continue }
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+            throw "invalid $phase round-trip artifact (not a file): $path"
         }
-    }
-    foreach ($phase in @("save", "load")) {
-        if (-not (Test-JsonProperty -Object $docs[$phase] -Name "schema") -or
+        try {
+            $artifactText = [System.IO.File]::ReadAllText($path, [System.Text.Encoding]::UTF8)
+            $docs[$phase] = ConvertFrom-Json -InputObject $artifactText
+        } catch {
+            throw "invalid $phase round-trip artifact (unreadable or invalid JSON): ${path}: $($_.Exception.Message)"
+        }
+        if (-not $artifactText.TrimStart().StartsWith("{") -or
+            $docs[$phase] -isnot [System.Management.Automation.PSCustomObject] -or
+            -not (Test-JsonProperty -Object $docs[$phase] -Name "schema") -or
             $docs[$phase].schema -isnot [string] -or
             $docs[$phase].schema -cne "luminumbra.persistence_runtime_roundtrip_phase.v1" -or
             -not (Test-JsonProperty -Object $docs[$phase] -Name "phase") -or
             $docs[$phase].phase -isnot [string] -or
-            $docs[$phase].phase -cne $phase) { return $null }
-        if (-not (Test-JsonProperty -Object $docs[$phase] -Name "world_hash")) { return $null }
+            $docs[$phase].phase -cne $phase) {
+            throw "invalid $phase round-trip artifact schema or phase: $path"
+        }
+        if (-not (Test-JsonProperty -Object $docs[$phase] -Name "world_hash") -or
+            $docs[$phase].world_hash -isnot [string] -or
+            $docs[$phase].world_hash -cnotmatch '^[0-9a-f]{16}$') {
+            throw "invalid $phase round-trip artifact world_hash: $path"
+        }
+        if ($phase -ceq "save" -and
+            (-not (Test-JsonProperty -Object $docs[$phase] -Name "edited_chunk_ids") -or
+             $docs[$phase].edited_chunk_ids -isnot [System.Array] -or
+             @($docs[$phase].edited_chunk_ids).Count -eq 0)) {
+            throw "invalid save round-trip artifact edited_chunk_ids: $path"
+        }
     }
-    if (-not (Test-JsonProperty -Object $docs["save"] -Name "edited_chunk_ids")) { return $null }
-    if ($docs["save"].edited_chunk_ids -isnot [System.Array]) { return $null }
+    if (-not $docs.ContainsKey("save") -or -not $docs.ContainsKey("load")) { return $null }
     return [ordered]@{
         save_phase_schema = $docs["save"].schema
         load_phase_schema = $docs["load"].schema

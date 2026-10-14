@@ -4186,8 +4186,8 @@ function Test-AetherFieldDeterminism {
     # across runs and STABLE; the field EVOLVES over time (not vacuous); geometry
     # matches the PINNED 24 m / 64-extent / 8-sweep shape. The `aether` sub-hash is
     # folded into the world_hash (deliberate bump #4 d950a6afc12a5cdc ->
-    # f17726d44054d133; then bump #5 f17726d44054d133 -> 8a6b7bb6795da912 from commit
-    # 0cb9ce8 appending the |scents: term; then bump #6
+    # f17726d44054d133; then bump #5 f17726d44054d133 -> 8a6b7bb6795da912
+    # appending the |scents: term; then bump #6
     # 8a6b7bb6795da912 -> d8f84cf6d7d0b978 from gate-populated-world-replay appending the
     # |ecology: term to ComposeWorldHash — the SERVER composite hash, run==replay proven —
     # asserted by the headless tick / replay / lockstep gates. NOTE the NetworkedSession gate pins a DIFFERENT quantity:
@@ -4367,7 +4367,7 @@ function Test-HeadlessServerTickHeavy {
     # aether_state: the STATEFUL energy layer is authoritative
     # round-trip state (unlike the recompute-and-excluded re-derivable wind/weather/
     # aether trio). Empty on the default OFF world ("" == "" passes); the ON fixture
-    # rides the sim.aether_state activation bump (Codex sign-off finding A).
+    # rides the sim.aether_state activation bump.
     foreach ($section in @("terrain", "water", "entities", "aether_state")) {
         if ($h.original_at_save.sub_hashes.$section -ne $h.loaded_at_load.sub_hashes.$section) {
             throw "heavy oracle: round-trip $section sub-hash mismatch: $($h.original_at_save.sub_hashes.$section) != $($h.loaded_at_load.sub_hashes.$section)"
@@ -4415,7 +4415,7 @@ function Test-ReplayRoundtrip {
     #  -> 0857e683b4b8c47e [ weather slot] -> d950a6afc12a5cdc [
     #  lightning strike schedule folded into the weather sub-hash, hash revision]
     #  -> f17726d44054d133 [ aether slot appended, bump #4]
-    #  -> 8a6b7bb6795da912 [commit 0cb9ce8  appended the |scents: term to
+    #  -> 8a6b7bb6795da912 [appended the |scents: term to
     #  ComposeWorldHash, bump #5]
     #  -> d8f84cf6d7d0b978 [gate-populated-world-replay appended the |ecology: term to
     #  ComposeWorldHash, bump #6; the EMPTY-roster ecology sub-hash is neutral, so this

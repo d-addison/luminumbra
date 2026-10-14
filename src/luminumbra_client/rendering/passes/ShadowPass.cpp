@@ -190,7 +190,7 @@ ShadowPass::execute(const RenderContext& ctx, const ShadowPassInput& input) {
         glm::vec4 cascade_planes[6];
         PassGl::ExtractFrustumPlanes(
             light_space_matrices[i], cascade_planes, PassGl::ClipDepth::NegativeOneToOne);
-        // ONE submit per cascade via the Codex-signed-off callback
+        // ONE submit per cascade via the shared callback
         // (reproduces CullHierarchical + draw_chunks_mdi exactly). Returns the
         // per-cascade counts; the call site folds them into stats with =/+=.
         cascade_stats[i] = input.submit_terrain(cascade_planes);

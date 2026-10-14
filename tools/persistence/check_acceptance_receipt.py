@@ -9,6 +9,10 @@ Input schema "luminumbra.saved_world_acceptance.v1". Every check yields "pass",
 "fail" if any check failed, else "unevaluated" if any check is unevaluated, else
 "pass".
 
+Verdicts record the full required refusal registry and selected variants. A
+selection omitting any required variant has scope "subset", even when it passes;
+only scope "full" qualifies the complete matrix.
+
 Exit codes: 0 pass, 1 fail, 2 invalid input, 3 unevaluated.
 """
 
@@ -634,6 +638,9 @@ def evaluate(
     return {
         "schema": VERDICT_SCHEMA,
         "verdict": _overall(checks),
+        "scope": "full" if set(REQUIRED_REFUSAL_VARIANTS).issubset(refusal_variants) else "subset",
+        "required_refusal_variants": list(REQUIRED_REFUSAL_VARIANTS),
+        "selected_refusal_variants": list(refusal_variants),
         "min_switches": min_switches,
         "checks": checks,
     }
@@ -692,7 +699,7 @@ def main(argv=None) -> int:
             return EXIT_INVALID
     for check in verdict["checks"]:
         print(f"{check['verdict']} {check['id']}: {check['detail']}")
-    print(f"overall: {verdict['verdict']}")
+    print(f"overall: {verdict['verdict']} (scope: {verdict['scope']})")
     return EXIT_CODES[verdict["verdict"]]
 
 

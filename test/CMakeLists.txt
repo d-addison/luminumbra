@@ -1514,8 +1514,8 @@ target_link_libraries(audio_prune_guard_test PRIVATE
     glm
 )
 
-# review of 2c32211: stance-independent saved spawn anchor and the shared
-# LUMIN_TREE_IMPOSTORS predicate (header-only; no GL/device).
+# Saved spawn anchors are stance-independent; tree impostor policy uses the
+# shared LUMIN_TREE_IMPOSTORS predicate (header-only; no GL/device).
 add_executable(client_policy_test
     client/client_policy_test.cpp
 )
@@ -1951,6 +1951,11 @@ if(CAPTURE_VALIDATION_POWERSHELL)
         COMMAND "${CAPTURE_VALIDATION_POWERSHELL}" -NoLogo -NoProfile -NonInteractive
             -ExecutionPolicy Bypass -File "${CMAKE_SOURCE_DIR}/tools/gates/test-far-ladder-oracle.ps1")
     set_tests_properties(FarLadderOracleContract PROPERTIES LABELS "tools" TIMEOUT 60)
+    add_test(NAME SavedWorldRoundtripArtifactsContract
+        COMMAND "${CAPTURE_VALIDATION_POWERSHELL}" -NoLogo -NoProfile -NonInteractive
+            -ExecutionPolicy Bypass -File "${CMAKE_SOURCE_DIR}/tools/gates/test-saved-world-roundtrip-artifacts.ps1")
+    set_tests_properties(SavedWorldRoundtripArtifactsContract PROPERTIES
+        LABELS "persistence;tools" TIMEOUT 60)
     add_test(NAME LuaApiManifestSourceContract
         COMMAND "${CAPTURE_VALIDATION_POWERSHELL}" -NoLogo -NoProfile -NonInteractive
             -ExecutionPolicy Bypass -File "${CMAKE_SOURCE_DIR}/tools/gates/validate-engine-frontier.ps1"
@@ -1960,6 +1965,7 @@ if(CAPTURE_VALIDATION_POWERSHELL)
 else()
     message(STATUS "PowerShell unavailable: CaptureArtifactValidationContract is not registered")
     message(STATUS "PowerShell unavailable: FarLadderOracleContract is not registered")
+    message(STATUS "PowerShell unavailable: SavedWorldRoundtripArtifactsContract is not registered")
     message(STATUS "PowerShell unavailable: LuaApiManifestSourceContract is not registered")
 endif()
 

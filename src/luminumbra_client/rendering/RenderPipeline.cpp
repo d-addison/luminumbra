@@ -416,8 +416,8 @@ bool RenderPipeline::capture_frame_parity(const Camera& camera,
         return false;
     }
     if (m_taau_enabled) {
-        // TAAU's history ping-pong makes leg B consume leg A's writes (Codex
-        // critique finding 2). The parity contract requires it OFF (the default).
+        // TAAU's history ping-pong makes leg B consume leg A's writes.
+        // The parity contract requires it OFF (the default).
         LUMINUMBRA_CORE_ERROR("capture_frame_parity: requires TAAU OFF (history ping-pong breaks "
                               "dispatch idempotence)");
         return false;
@@ -443,9 +443,9 @@ bool RenderPipeline::capture_frame_parity(const Camera& camera,
     make_target(fboB, texB);
     ok = ok && (glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE);
 
-    // The prepared frame was built under the NORMAL target state (Codex critique
-    // finding 5: prepare behavior keys off m_offscreen_target_active, e.g. the
-    // far-LOD skip) — only the DISPATCH legs retarget. Save + restore exactly.
+    // The prepared frame was built under the NORMAL target state: prepare behavior
+    // keys off m_offscreen_target_active, e.g. the far-LOD skip. Only the DISPATCH
+    // legs retarget. Save + restore exactly.
     const bool prev_active = m_offscreen_target_active;
     const u32 prev_fbo = m_offscreen_target_fbo;
     const u32 prev_w = m_offscreen_target_w;
@@ -966,7 +966,7 @@ RenderContext RenderPipeline::make_skybox_context(const Camera& camera) {
     return ctx;
 }
 
-//  terrain-submit seam (Codex-signed-off). Reproduces the EXACT current
+// Terrain-submit seam. Reproduces the EXACT current
 // GBuffer/Shadow submit (CullHierarchical + draw_chunks_mdi) and RETURNS the
 // counts — no stats mutation, no sort/cache/readback, no hierarchy rebuild (the
 // pipeline owns that, once per frame, before both passes). The only dropped
@@ -2659,7 +2659,7 @@ void RenderPipeline::execute_stage_gbuffer(const Camera& camera) {
             gbuffer_input.authored_draws = m_authored_draws;
             gbuffer_input.authored_view = m_authored_view.get();
         }
-        // Live-terrain submit: the Codex-signed-off callback (CullHierarchical +
+        // Live-terrain submit: the shared callback (CullHierarchical +
         // draw_chunks_mdi, byte-identical), shared with ShadowPass.
         gbuffer_input.submit_terrain_chunks = make_terrain_submitter(true);
         gbuffer_input.far_lod = farlod();
@@ -3323,7 +3323,7 @@ void RenderPipeline::set_render_scale(float scale) {
     // The output-res TAAU history buffers keep their size (output is unchanged), but their
     // CONTENT is now stale -- it was resolved at the previous internal scale, so its motion
     // vectors / reprojection no longer match. Invalidate it so the next resolve restarts fresh
-    // instead of blending the previous scale's history (Codex review, runtime scale-change).
+    // instead of blending the previous scale's history after a runtime scale change.
     m_taau_pass->invalidate_history();
     m_frustumCache.valid = false;
     ++m_resize_generation;

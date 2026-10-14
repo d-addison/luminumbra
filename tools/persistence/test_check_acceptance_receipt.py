@@ -146,6 +146,9 @@ class AcceptanceReceiptContract(unittest.TestCase):
         self.assertEqual(verdict["verdict"], "pass")
         self.assertEqual(verdict["schema"], "luminumbra.saved_world_acceptance_verdict.v1")
         self.assertEqual(verdict["min_switches"], 6)
+        self.assertEqual(verdict["scope"], "full")
+        self.assertEqual(verdict["required_refusal_variants"], list(tool.REQUIRED_REFUSAL_VARIANTS))
+        self.assertEqual(verdict["selected_refusal_variants"], list(tool.REQUIRED_REFUSAL_VARIANTS))
         self.assertEqual(len(verdict["checks"]), 10)
         path = self._write_obj(valid_receipt())
         code, out, err = _run([str(path)])
@@ -210,6 +213,9 @@ class AcceptanceReceiptContract(unittest.TestCase):
         parsed = json.loads(text)
         self.assertEqual(parsed["verdict"], "pass")
         self.assertEqual(parsed["schema"], "luminumbra.saved_world_acceptance_verdict.v1")
+        self.assertEqual(parsed["scope"], "full")
+        self.assertEqual(parsed["required_refusal_variants"], list(tool.REQUIRED_REFUSAL_VARIANTS))
+        self.assertEqual(parsed["selected_refusal_variants"], list(tool.REQUIRED_REFUSAL_VARIANTS))
         self.assertEqual([c["id"] for c in parsed["checks"]][0], "package_identity")
         self.assertEqual(text, json.dumps(parsed, indent=2, sort_keys=True) + "\n")
 
@@ -764,16 +770,49 @@ class AcceptanceReceiptContract(unittest.TestCase):
         receipt = valid_receipt()
         receipt["refusals"] = [bound_refusal("obsolete-metadata"), bound_refusal("future-metadata")]
         required = ("obsolete-metadata", "future-metadata")
-        self.assertEqual(_check(tool.evaluate(receipt, 6, required), "refusal_matrix")["verdict"], "pass")
+        verdict = tool.evaluate(receipt, 6, required)
+        self.assertEqual(_check(verdict, "refusal_matrix")["verdict"], "pass")
+        self.assertEqual(verdict["verdict"], "pass")
+        self.assertEqual(verdict["scope"], "subset")
+        self.assertEqual(verdict["required_refusal_variants"], list(tool.REQUIRED_REFUSAL_VARIANTS))
+        self.assertEqual(verdict["selected_refusal_variants"], list(required))
         verdict = tool.evaluate(receipt, 6, (*required, "corrupt-metadata"))
         self.assertEqual(_check(verdict, "refusal_matrix")["detail"], "missing variants: corrupt-metadata")
         path = self._write_obj(receipt)
-        self.assertEqual(_run([str(path), "--refusal-variants", "obsolete-metadata,future-metadata"])[0], 0)
+        out_path = self.base / "subset-verdict.json"
+        code, out, err = _run([str(path), "--refusal-variants", "obsolete-metadata,future-metadata",
+                               "--verdict-out", str(out_path)])
+        self.assertEqual(code, 0, err)
+        self.assertIn("overall: pass (scope: subset)", out)
+        parsed = json.loads(out_path.read_text(encoding="utf-8"))
+        self.assertEqual(parsed["scope"], "subset")
+        self.assertEqual(parsed["required_refusal_variants"], list(tool.REQUIRED_REFUSAL_VARIANTS))
+        self.assertEqual(parsed["selected_refusal_variants"], list(required))
         code, out, _ = _run([str(path), "--refusal-variants", "obsolete-metadata, future-metadata ,corrupt-metadata"])
         self.assertEqual(code, 3)
         self.assertIn("missing variants: corrupt-metadata", out)
         self.assertEqual(_run([str(path)])[0], 3)
         self.assertEqual(_run([str(path), "--refusal-variants", " , "])[0], 2)
+
+    def test_full_selection_scope_uses_registry_membership_not_order(self) -> None:
+        selected = tuple(reversed(tool.REQUIRED_REFUSAL_VARIANTS))
+        verdict = tool.evaluate(valid_receipt(), refusal_variants=selected)
+        self.assertEqual(verdict["verdict"], "pass")
+        self.assertEqual(verdict["scope"], "full")
+        self.assertEqual(verdict["selected_refusal_variants"], list(selected))
+
+    def test_subset_scope_is_recorded_for_fail_and_unevaluated(self) -> None:
+        selected = ("obsolete-metadata",)
+        for receipt, expected in (({"schema": tool.INPUT_SCHEMA}, "unevaluated"),
+                                  (valid_receipt(), "fail")):
+            with self.subTest(expected=expected):
+                if expected == "fail":
+                    receipt["refusals"][0]["exit_code"] = 0
+                verdict = tool.evaluate(receipt, refusal_variants=selected)
+                self.assertEqual(verdict["verdict"], expected)
+                self.assertEqual(verdict["scope"], "subset")
+                self.assertEqual(verdict["required_refusal_variants"], list(tool.REQUIRED_REFUSAL_VARIANTS))
+                self.assertEqual(verdict["selected_refusal_variants"], list(selected))
 
     def test_unknown_native_contract_never_qualifies_even_with_override(self) -> None:
         receipt = valid_receipt()

@@ -642,11 +642,11 @@ Next action: Identify the concrete missing feature and dependency, implement in 
 
 **Reviewed bounded recipes and graph fidelity**
 
-Extend reviewed recipes after the named-recipe integration. Demonstrate stale revision refusal, undo and rollback; optional Banso adapters depend on typed-port fidelity.
+Extend reviewed recipes after the named-recipe integration. Demonstrate stale revision refusal, undo and rollback; optional orchestration adapters depend on typed-port fidelity.
 
 Origin: added. Parents: B05, B08. Priority: P2. Execution: **not_captured**. Approval: **pending**.
 
-Fixture: Extend reviewed recipes after the named-recipe integration. Demonstrate stale revision refusal, undo and rollback; optional Banso adapters depend on typed-port fidelity. Author and version the fixture with GLB plus versioned sidecars and immutable generations.
+Fixture: Extend reviewed recipes after the named-recipe integration. Demonstrate stale revision refusal, undo and rollback; optional orchestration adapters depend on typed-port fidelity. Author and version the fixture with GLB plus versioned sidecars and immutable generations.
 
 Source links:
 
@@ -662,7 +662,7 @@ Required variants:
 - cancel
 - rollback
 - typed-port-save-reload
-- optional-banso-after-fidelity
+- optional-adapters-after-fidelity
 
 Automated temporal evidence: **required**.
 
@@ -676,7 +676,7 @@ Capture: **missing**. Implementation and a reproducible installed/native capture
 
 Acceptance checks:
 
-- Extend reviewed recipes after the named-recipe integration. Demonstrate stale revision refusal, undo and rollback; optional Banso adapters depend on typed-port fidelity.
+- Extend reviewed recipes after the named-recipe integration. Demonstrate stale revision refusal, undo and rollback; optional orchestration adapters depend on typed-port fidelity.
 - Meet the shared packet contract for every required variant and parent mapping.
 
 Source reconciliation at `945ecd295835a838eed0169ff709e7aabc134fa1`: Authorized September 13 completion scope. This row adds explicit coverage without replacing any original group; implementation and acceptance remain unfinished.

@@ -34,14 +34,8 @@ There are no assigned due dates or invented completion percentages.
   wind input-padding defect is tracked by [#173](https://github.com/d-addison/luminumbra/issues/173).
   The September 13 promotion UCRT job passed 2,245 of 2,250 cases at its recorded merge revision;
   its surface-loading guard and three render-process timeouts remain unresolved.
-  All three timed-out render processes emitted their captures before termination;
-  shutdown diagnosis must establish the cause. Local native `e1080d7f` passes
-  the unchanged loading guard and original render cases on NVIDIA and verified
-  CI-pinned Mesa 26.1.7 llvmpipe. Different hardware and toolchain versions keep
-  these non-reproductions separate from CI and original-hang causal closure.
-  The candidate retains failed-process captures and adds shutdown-stage evidence;
-  its fresh native build and qualification remain in progress.
-  Historical results do not qualify a new candidate; discover its tests again.
+  Fresh native/package qualification remains required; retain capture and shutdown
+  artifacts and discover the selected tests again for each revision.
 - **Verification:** later Debug/ASan and native records supersede the failed
   `ff0362b` baseline. Expanded integrated, native and packaged acceptance is
   outstanding; implementation, test evidence and merged state are distinct.
@@ -59,8 +53,7 @@ There are no assigned due dates or invented completion percentages.
   landing are pending. A fixture-only asynchronous consumer is undergoing review
   and verification. Runtime paging, graphical integration, final cave-filter
   qualification and durable dirty residency remain subsequent work.
-- **Hang closure:** Windows reported the original `0xCFFFFFFF` application hang
-  and the operator closed it. The underlying mechanism remains unproven.
+- **Hang closure:** The Windows application hang mechanism remains unproven.
   Instrumentation and successful non-reproductions do not close
   [#127](https://github.com/d-addison/luminumbra/issues/127); the server-load
   incident [#69](https://github.com/d-addison/luminumbra/issues/69) is separate.
@@ -68,7 +61,7 @@ There are no assigned due dates or invented completion percentages.
   [#55](https://github.com/d-addison/luminumbra/pull/55) is blocked. Strict promotion
   requires all 15 contexts after expanded acceptance, followed by signed source-only
   publication, independent artifact verification and a newly named private preview.
-  Audio stays off; the delivered `5daeb03` preview stays unchanged.
+  Audio stays off; the existing preview stays unchanged.
 - **Authoring ownership:** generic packages remain in the engine monorepo.
   Merged [#162](https://github.com/d-addison/luminumbra/pull/162) supplies the Blender
   identity review/undo package. Its refreshed package matches the retained Windows
@@ -100,7 +93,7 @@ Engine [#141](https://github.com/d-addison/luminumbra/issues/141) owns budget en
 
 Full installed SDK delivery and game extraction in Foundations depend on
 independently verified v0.3 publication **and** the single implementation-roadmap approval after refreshed source/SDK architecture
-review with actual Astra/xhigh. Accepted ownership/authoring direction is recorded
+review. Accepted ownership/authoring direction is recorded
 in [Engine/game ownership](engine-game-boundary.md). Roadmap population does not
 waive that implementation gate. The already-authorized bounded optional authoring
 packages above may be refreshed and qualified before release. v0.7–v0.9 remain provisional.
@@ -129,9 +122,8 @@ imply host migration, matchmaking or private Steam relay availability.
   Creature/plant distance scheduling, durable field pages and wildlife, and dirty
   eviction parking still require their consumer/residency slices. Wind/weather/aether
   remain anchored grids; a clock or ledger alone does not implement these policies.
-- The native client exit 0xCFFFFFFF (PID 66604, package 2871c72) was a Windows
-  Application Hang closed by the operator, not a crash; the hang mechanism is not yet
-  established and its closure is a release gate.
+- Resolving the native client application hang is a release gate; its underlying
+  mechanism remains unconfirmed.
 - White ground patches, purple shadows and visible stars in the settled
   Default/424242/FOV 110° native capture have separate investigation issues.
   Their causes remain unconfirmed. Tree-only tests do not close whole-scene

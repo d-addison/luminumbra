@@ -131,7 +131,7 @@ struct WorldStreamingStateSubHashes {
     // (e.g. the persistence fixtures, which never construct one).
     std::string aether;
     // the STATE-ONLY aether_state:v1: sub-hash
-    // (GameSession::ComputeAetherStateSubHash). Codex finding A: the folded
+    // (GameSession::ComputeAetherStateSubHash). The folded
     // |aether: composite embeds the tick-dependent re-derivable half, which the
     // heavy oracle recompute-and-excludes -- so the AUTHORITATIVE stateful
     // layer needs its own named slot for save/load + resim comparison (and

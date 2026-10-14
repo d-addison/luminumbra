@@ -28,6 +28,7 @@ FORBIDDEN_PATHS = (
     (re.compile(r"^(?:build|out|cmake-build-[^/]*)(?:/|$)"), "generated build output"),
     (re.compile(r"^(?:\.worktrees|scratch|scratch_six|logs)(?:/|$)"), "local working state"),
     (re.compile(r"^docs/internal(?:/|$)"), "private documentation"),
+    (re.compile(r"^\.tmp-private-notes\.md$"), "private archival notes"),
     (re.compile(r"^(?:assets|res)/audio(?:/|$)"), "local audio asset"),
 )
 
@@ -95,6 +96,53 @@ TEXT_EXCLUDED_FILES = {
     "tools/ci/test_validate_public_tree.py",
 }
 
+# Provenance can appear in documentation, source comments or script literals.
+# Require attribution context so game Codex terms and the sol:: namespace pass.
+AGENT_NAME = r"(?:Codex|Astra|Sol|Luna|Banso)"
+PROVENANCE_HASH = r"(?<![\w#])[`'\"]?[0-9a-f]{7,40}\b[`'\"]?"
+HASH_ATTRIBUTION = (
+    r"candidate|package|preview|private|native(?:\s+package)?|build|commit|revision|"
+    r"snapshot|review(?:ed|ing)?|audit(?:ed|ing)?|verif(?:ied|ication)|"
+    r"accept(?:ed|ance)?|qualification|tested|validated"
+)
+HASH_CONNECTORS = r"(?:\s+(?:of|at|on|for|from|with|against|source|candidate|build)){0,3}\s+"
+HASH_NARRATIVE = re.compile(
+    r"\b(?:review(?:ed|ing)?|accept(?:ed|ance)?)\b"
+    r"(?!\s+(?:documentation|checks|obligations)\b)",
+    re.IGNORECASE,
+)
+PROVENANCE_TEXT_RULES = (
+    ("private-provenance", re.compile(
+        r"\bprivate[-\s]+(?:native|candidate|package|release\s+campaign|evidence)\b",
+        re.IGNORECASE,
+    )),
+    ("candidate-provenance", re.compile(
+        rf"\b(?:{HASH_ATTRIBUTION}){HASH_CONNECTORS}{PROVENANCE_HASH}|"
+        rf"{PROVENANCE_HASH}\s+(?:{HASH_ATTRIBUTION})\b|"
+        rf"\bat\s+{PROVENANCE_HASH}",
+        re.IGNORECASE,
+    )),
+    ("internal-reviewer-provenance", re.compile(
+        rf"\b{AGENT_NAME}/(?:low|medium|high|xhigh|max|ultra)\b|"
+        rf"\b{AGENT_NAME}(?=[-\s]+(?:(?:source|independent|code|model|agent)[-\s]+){{0,3}}"
+        r"(?:review|audit|verification|analysis|model|agent|sign(?:ed)?[-\s]+off|"
+        r"authoritative|finding|critique)\b)|"
+        rf"\b{AGENT_NAME}\s+(?:reviewed|audited|verified|accepted|rejected|found|corrected)\b|"
+        rf"\b{AGENT_NAME}\s+(?:#\s*\d+|r\d+)\b|"
+        r"\b(?:review(?:ed)?|audit(?:ed)?|verif(?:ied|ication))\s+"
+        rf"(?:(?:by|with|using|from|the|actual)\s+){{0,3}}{AGENT_NAME}\b(?!\s*::)|"
+        rf"(?:—|--)\s*{AGENT_NAME}\b|"
+        r"\bBanso\s+adapters?\b",
+        re.IGNORECASE,
+    )),
+    ("private-process-provenance", re.compile(
+        r"\bPID(?:\s+|\s*[:#]\s*)[`'\"]?\d+\b|"
+        r"\boperator[-\s]+(?:closed|killed|terminated|cancelled|canceled|stopped)(?![-\w])|"
+        r"\b(?:closed|killed|terminated|cancelled|canceled|stopped)\s+by\s+(?:the\s+)?operator\b",
+        re.IGNORECASE,
+    )),
+)
+
 
 def inspect_path(path: str) -> list[Finding]:
     normalized = PurePosixPath(path).as_posix()
@@ -112,13 +160,11 @@ def inspect_path(path: str) -> list[Finding]:
     return findings
 
 
-def code_mask(text: str, powershell: bool) -> str:
-    """Preserve offsets while blanking comments and literals for token exemptions.
-
-    This mask never suppresses findings itself. Only a specifically recognized
-    code token can be exempted, and all rules still inspect the original text.
-    """
-    masked = list(text)
+def code_mask(text: str, powershell: bool, *, comments_only: bool = False,
+              hash_comments: bool = False, triple_quotes: bool = False,
+              cmake: bool = False) -> str:
+    """Preserve offsets in code, or retain only comments for prose inspection."""
+    masked = list(text if not comments_only else re.sub(r"[^\n]", " ", text))
     index, size = 0, len(text)
 
     def blank(start: int, end: int) -> None:
@@ -128,7 +174,9 @@ def code_mask(text: str, powershell: bool) -> str:
 
     while index < size:
         start = index
+        is_comment = False
         if powershell and text.startswith("<#", index):
+            is_comment = True
             index += 2
             depth = 1
             while index < size and depth:
@@ -140,12 +188,20 @@ def code_mask(text: str, powershell: bool) -> str:
                     index += 2
                 else:
                     index += 1
-        elif (powershell and text[index] == "#") or (not powershell and text.startswith("//", index)):
+        elif cmake and text[index] in "#[" and (bracket := re.match(r"#?\[(=*)\[", text[index:])):
+            is_comment = text[index] == "#"
+            close = "]" + bracket.group(1) + "]"
+            end = text.find(close, index + bracket.end())
+            index = size if end == -1 else end + len(close)
+        elif ((powershell or hash_comments) and text[index] == "#") or (
+                not powershell and not hash_comments and text.startswith("//", index)):
+            is_comment = True
             end = text.find("\n", index)
             while not powershell and end != -1 and text[index:end].rstrip("\r").endswith("\\"):
                 end = text.find("\n", end + 1)
             index = size if end == -1 else end
-        elif not powershell and text.startswith("/*", index):
+        elif not powershell and not hash_comments and text.startswith("/*", index):
+            is_comment = True
             end = text.find("*/", index + 2)
             index = size if end == -1 else end + 2
         elif powershell and text[index:index + 2] in ("@'", '@"'):
@@ -160,6 +216,18 @@ def code_mask(text: str, powershell: bool) -> str:
             close = ")" + raw.group(1) + '"'
             end = text.find(close, index + raw.end())
             index = size if end == -1 else end + len(close)
+        elif triple_quotes and text[index:index + 3] in ("'''", '"""'):
+            quote = text[index:index + 3]
+            index += 3
+            while index < size:
+                if text[index] == "\\":
+                    index += 2
+                elif text.startswith(quote, index):
+                    index += 3
+                    break
+                else:
+                    index += 1
+            index = min(index, size)
         elif text[index] in ("'", '"'):
             quote = text[index]
             index += 1
@@ -180,8 +248,67 @@ def code_mask(text: str, powershell: bool) -> str:
         else:
             index += 1
             continue
-        blank(start, index)
+        if comments_only:
+            if is_comment:
+                masked[start:index] = text[start:index]
+        else:
+            blank(start, index)
     return "".join(masked)
+
+
+def candidate_prose(path: str, text: str) -> str:
+    """Scan prose and comments, never structured data or executable literals."""
+    relative = PurePosixPath(path)
+    suffix = relative.suffix.lower()
+    if (path.startswith(("data/", "assets/", "res/", "docs/assets/", "docs/evidence/"))
+            or re.search(r"(?:^|[-_.])(?:manifest|inventory|checksums?|sha256)(?:[-_.]|$)",
+                         relative.name, re.IGNORECASE)):
+        return ""
+    if suffix in {".md", ".rst", ".txt"} and relative.name != "CMakeLists.txt":
+        return text
+    if suffix in {".c", ".cpp", ".cc", ".cxx", ".h", ".hpp", ".hxx", ".js", ".ts"}:
+        return code_mask(text, False, comments_only=True)
+    if suffix in {".ps1", ".psm1"}:
+        return code_mask(text, True, comments_only=True)
+    if suffix in {".py", ".sh", ".bash", ".cmake", ".yaml", ".yml", ".toml"} or relative.name == "CMakeLists.txt":
+        return code_mask(text, False, comments_only=True, hash_comments=True,
+                         triple_quotes=suffix == ".py",
+                         cmake=suffix == ".cmake" or relative.name == "CMakeLists.txt")
+    return ""
+
+
+def prose_sentence(text: str, start: int, end: int) -> str:
+    """Keep narrative context within a sentence or paragraph boundary."""
+    boundaries = list(re.finditer(r"[.!?](?=\s|$)|\n[ \t]*\n", text))
+    before = max((match.end() for match in boundaries if match.end() <= start), default=0)
+    after = min((match.start() for match in boundaries if match.start() >= end), default=len(text))
+    return text[before:after]
+
+
+def hash_pin_context(text: str, match: re.Match[str]) -> bool:
+    """Recognize data checksums and explicitly identified upstream tool pins."""
+    prefix = text[max(0, match.start() - 80):match.start()]
+    phrase = match.group(0).lower()
+    if ((re.match(r"at\s", phrase) and re.search(r"\bworld_hash\s+$", prefix, re.IGNORECASE))
+            or (phrase.startswith("revision") and re.search(r"\bhash\s+$", prefix, re.IGNORECASE))):
+        return True
+    boundary = text.rfind("\n\n", 0, match.start())
+    start = boundary + 2 if boundary != -1 else 0
+    end = text.find("\n\n", match.end())
+    paragraph = text[start:end if end != -1 else len(text)]
+    # A fixture generator/source pin is data provenance, not a reviewed build.
+    if (phrase.startswith("commit")
+            and "test/fixtures/" in paragraph
+            and re.search(r"\bbaselines?\b", paragraph, re.IGNORECASE)):
+        return True
+    if (phrase.startswith("build")
+            and re.search(r"\bBlender\s+(?:\d+\.\d+(?:\.\d+)?[, ]\s*)?$", prefix, re.IGNORECASE)):
+        return True
+    if (phrase.startswith("commit")
+            and re.search(r"\bofficial\b", paragraph, re.IGNORECASE)
+            and re.search(r"\btag\s+`v?\d+\.\d+", paragraph, re.IGNORECASE)):
+        return True
+    return False
 
 
 CPP_INDEX = re.compile(
@@ -208,6 +335,25 @@ def inspect_text(path: str, text: str) -> list[Finding]:
     if path in TEXT_EXCLUDED_FILES or path.startswith(TEXT_EXCLUDED_PREFIXES):
         return []
     findings: list[Finding] = []
+    # Blank comment leaders without changing offsets, allowing prose to wrap
+    # across C/C++, CMake, Python, PowerShell and YAML comment lines.
+    prose = re.sub(r"(?m)^[ \t]*(?://+|#+|/\*+|\*|<#)[ \t]*",
+                   lambda match: " " * len(match.group(0)), text)
+    hash_prose = candidate_prose(path, text)
+    hash_prose = re.sub(r"(?m)^[ \t]*(?://+|#+|/\*+|\*|<#)[ \t]*",
+                        lambda match: " " * len(match.group(0)), hash_prose)
+    for rule, pattern in PROVENANCE_TEXT_RULES:
+        context = hash_prose if rule == "candidate-provenance" else prose
+        for match in pattern.finditer(context):
+            if rule == "candidate-provenance" and hash_pin_context(context, match):
+                continue
+            if rule == "candidate-provenance" and re.match(r"at\s", match.group(0), re.IGNORECASE):
+                # A bare 'at <hex>' is attribution only within the same review
+                # or acceptance paragraph; unrelated hash pins remain valid.
+                if not HASH_NARRATIVE.search(prose_sentence(context, match.start(), match.end())):
+                    continue
+            findings.append(Finding(rule, path, text[match.start():match.end()],
+                                    text.count("\n", 0, match.start()) + 1))
     exemptions = code_token_exemptions(path, text)
     offset = 0
     for line_number, full_line in enumerate(text.splitlines(keepends=True), 1):
