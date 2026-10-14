@@ -150,12 +150,22 @@ add_executable(common_tests
     common/EngineContracts_test.cpp
     common/ResidencyContract_test.cpp
     common/FarLodStore_test.cpp
+    common/FarVolumeWorld_test.cpp
+    common/FarVolumeRuntime_test.cpp
+    common/FarVolumeTierMemory_test.cpp
+    rendering/FarVolumeRenderMesh_test.cpp
+    rendering/FarVolumeBuildQueue_test.cpp
+    rendering/FarVolumeUpload_test.cpp
+    ../src/luminumbra_client/rendering/FarVolumeBuildQueue.cpp
+    ../src/luminumbra_client/rendering/FarVolumeUpload.cpp
+    ../src/luminumbra_client/rendering/FarVolumeRenderMesh.cpp
     common/FarTierTable_test.cpp
     common/FarHorizon_test.cpp
     common/FarWantedSet_test.cpp
     common/FarAuthorityOverlay_test.cpp
     common/GameSessionHeadlessWorld_test.cpp
     common/SimBudgetTelemetry_test.cpp
+    common/HeavyComparison_test.cpp
     common/SimBudgetProfile_test.cpp
     ../src/luminumbra_server/modes/SmokeArtifact.cpp
     common/JobSystem_test.cpp
@@ -196,6 +206,7 @@ add_executable(common_tests
     common/world_streaming_hardening_test.cpp
     common/HydraulicErosion_test.cpp
     common/WorldStreamingState_test.cpp
+    persistence/synthetic_save_fixture_test.cpp
     sim/fire_spread_test.cpp
     sim/soil_nutrient_test.cpp
     sim/pollination_test.cpp
@@ -251,6 +262,7 @@ target_include_directories(common_tests PRIVATE
 target_link_libraries(common_tests PRIVATE
     gtest_main
     luminumbra_common
+    luminumbra_save_fixture_support
 )
 
 # File-only path contracts run without a GL context or the common-library graph.
