@@ -36,10 +36,14 @@ struct OpportunitySource {
 
 } // namespace
 
-InstinctSystemTickStats RunInstinctSystemOnTick(entt::registry& registry,
-                                                std::uint64_t tick,
-                                                const StimulusChannelRegistry* stimulus,
-                                                bool use_perception_substrate) {
+InstinctSystemTickStats
+RunInstinctSystemOnTick(entt::registry& registry,
+                        std::uint64_t tick,
+                        const StimulusChannelRegistry* stimulus,
+                        bool use_perception_substrate,
+                        const Luminumbra::world::RegionEntityGate& gate,
+                        const Luminumbra::world::RegionEntityWork& completed) {
+    using namespace Luminumbra::world;
     using Luminumbra::Components::ActionPlanComponent;
     using Luminumbra::Components::InstinctAgentComponent;
     using Luminumbra::Components::NeedsComponent;
@@ -55,6 +59,10 @@ InstinctSystemTickStats RunInstinctSystemOnTick(entt::registry& registry,
     {
         auto opportunity_view = registry.view<const OpportunityComponent>();
         for (auto entity : opportunity_view) {
+            // The entity-valued planner destination is the opportunity carrier;
+            // Opportunity.target is authored text, not a runtime entity handle.
+            if (!AdmitRegionEntity(gate, entity))
+                continue;
             OpportunitySource source;
             source.entity = entity;
             source.component = &opportunity_view.get<const OpportunityComponent>(entity);
@@ -68,8 +76,11 @@ InstinctSystemTickStats RunInstinctSystemOnTick(entt::registry& registry,
         }
         std::stable_sort(opportunities.begin(),
                          opportunities.end(),
-                         [](const OpportunitySource& lhs, const OpportunitySource& rhs) {
-                             return lhs.component->id < rhs.component->id;
+                         [&](const OpportunitySource& lhs, const OpportunitySource& rhs) {
+                             if (lhs.component->id != rhs.component->id || !gate)
+                                 return lhs.component->id < rhs.component->id;
+                             return RegionEntityIdentity(registry, lhs.entity, true) <
+                                    RegionEntityIdentity(registry, rhs.entity, true);
                          });
     }
 
@@ -97,7 +108,11 @@ InstinctSystemTickStats RunInstinctSystemOnTick(entt::registry& registry,
     }
 
     auto agent_view = registry.view<InstinctAgentComponent, NeedsComponent>();
-    for (auto entity : agent_view) {
+    std::vector<entt::entity> agents(agent_view.begin(), agent_view.end());
+    FilterRegionEntities(registry, agents, gate);
+    for (auto entity : agents) {
+        if (completed)
+            completed(entity);
         auto& agent = agent_view.get<InstinctAgentComponent>(entity);
         auto& needs = agent_view.get<NeedsComponent>(entity);
         ++stats.agents_seen;
@@ -234,6 +249,21 @@ InstinctSystemTickStats RunInstinctSystemOnTick(entt::registry& registry,
             action.name = winner.action;
             for (std::size_t i = 0; i < request.opportunities.size(); ++i) {
                 if (request.opportunities[i].id == winner.id) {
+                    if (gate) {
+                        // Duplicate authored IDs may have different scores. Resolve the
+                        // winning candidate before applying the persistent-identity tie.
+                        auto single = request;
+                        single.opportunities = {request.opportunities[i]};
+                        const auto scored = PlanInstincts(single);
+                        if (scored.candidates.empty())
+                            continue;
+                        const auto& candidate = scored.candidates.front();
+                        if (candidate.score != winner.score || candidate.action != winner.action ||
+                            candidate.target != winner.target || candidate.need != winner.need)
+                            continue;
+                        if (!AdmitRegionEntity(gate, candidate_entities[i]))
+                            continue;
+                    }
                     action.target = candidate_entities[i];
                     break;
                 }

@@ -564,6 +564,7 @@ private:
         };
         std::uint64_t tick = 0;
         std::map<entt::entity, Previous> previous;
+        std::map<entt::entity, RegionKey> positional_owners;
         std::set<entt::entity> full, coarse_corpses, positional_sources, transient_grazers;
         std::set<entt::entity> processed;
         std::set<RegionKey> processed_owners;
@@ -571,6 +572,7 @@ private:
     void SealCreatureTickAdmission(std::uint64_t tick);
     void CompleteCreatureTickAdmission();
     bool CreatureFullEligible(entt::entity entity) const;
+    bool EnergyCellDue(int x, int z) const;
     bool CreatureGrazerEligible(entt::entity entity) const;
     void RecordCreatureOperation(entt::entity entity);
     bool AdmitCreatureBirth(const luminumbra::ai::CreatureBirthProposal& birth);

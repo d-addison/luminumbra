@@ -15,9 +15,11 @@
 // Participant-gated: a world with no emitter component queues nothing — the
 // canonical roster runs this as a pure no-op.
 
+#include "RegionConsumerGate.h"
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <stdexcept>
 #include <vector>
 
 #include "entt/entt.hpp"
@@ -41,7 +43,12 @@ struct FieldEmitterGatherStats {
 // zero-amount rings skipped (a deposit of 0 is not queued). Emitters with
 // rate 0 are inert and skipped outright.
 inline FieldEmitterGatherStats
-GatherFieldEmitterDeposits(entt::registry& registry, luminumbra::fields::EnergyFieldState& field) {
+GatherFieldEmitterDeposits(entt::registry& registry,
+                           luminumbra::fields::EnergyFieldState& field,
+                           const Luminumbra::world::RegionEntityGate& gate = {},
+                           const Luminumbra::world::RegionCellGate& cell_gate = {},
+                           const Luminumbra::world::RegionEntityWork& completed = {}) {
+    using namespace Luminumbra::world;
     using Luminumbra::Components::FieldEmitterComponent;
     using Luminumbra::Components::TransformComponent;
 
@@ -59,6 +66,7 @@ GatherFieldEmitterDeposits(entt::registry& registry, luminumbra::fields::EnergyF
         });
     }
 
+    FilterRegionEntities(registry, emitters, gate);
     for (auto e : emitters) {
         const auto& emitter = registry.get<const FieldEmitterComponent>(e);
         if (emitter.rate_raw_per_tick == 0u)
@@ -70,7 +78,10 @@ GatherFieldEmitterDeposits(entt::registry& registry, luminumbra::fields::EnergyF
         const int cx = static_cast<int>(std::floor(tf.position.x / kAetherCellSizeM));
         const int cz = static_cast<int>(std::floor(tf.position.z / kAetherCellSizeM));
 
-        const auto emitter_id = static_cast<std::uint64_t>(entt::to_integral(e));
+        const auto emitter_id = RegionEntityIdentity(registry, e, bool(gate));
+        // Enabled persisted emitters retain the admission bound (31 cells).
+        if (gate && (emitter.radius_cells < 0 || emitter.radius_cells > 31))
+            continue;
         const int radius = emitter.radius_cells > 0 ? emitter.radius_cells : 0;
         bool queued = false;
         for (int dz = -radius; dz <= radius; ++dz) {
@@ -80,15 +91,24 @@ GatherFieldEmitterDeposits(entt::registry& registry, luminumbra::fields::EnergyF
                 // every ring at distance >= 32 is zero anyway.
                 const std::uint32_t amount =
                     (cheb < 32) ? (emitter.rate_raw_per_tick >> static_cast<unsigned>(cheb)) : 0u;
-                if (amount == 0u)
+                if (amount == 0u || (cell_gate && !cell_gate(cx + dx, cz + dz)))
                     continue;
-                field.QueueDeposit(emitter_id, cx + dx, cz + dz, emitter.channel, amount);
+                if (gate) {
+                    if (!field.QueueRegionalDeposit(
+                            emitter_id, cx + dx, cz + dz, emitter.channel, amount))
+                        throw std::runtime_error("Creature field deposit admission refused");
+                } else {
+                    field.QueueDeposit(emitter_id, cx + dx, cz + dz, emitter.channel, amount);
+                }
                 ++stats.deposits;
                 queued = true;
             }
         }
-        if (queued)
+        if (queued) {
+            if (completed)
+                completed(e);
             ++stats.emitters;
+        }
     }
     return stats;
 }

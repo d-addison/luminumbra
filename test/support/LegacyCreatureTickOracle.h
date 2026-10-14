@@ -1,5 +1,5 @@
 #pragma once
-// Frozen pre-D reference implementations. Keep independent of production entry points.
+// Frozen pre-D and pre-E reference implementations. Keep independent of production entry points.
 
 #include "ai/CreatureBrain.h"
 #include "ai/CreatureSpeciesRegistry.h"
@@ -2462,9 +2462,16 @@ inline void SurvivalBlend(entt::registry& reg) {
         }
     }
 }
-inline void Tick(entt::registry& reg, std::uint64_t tick, std::uint64_t seed) {
+inline void Tick(entt::registry& reg,
+                 std::uint64_t tick,
+                 std::uint64_t seed,
+                 const ::luminumbra::ai::ScentField* scent = nullptr,
+                 float origin_x = 0,
+                 float origin_z = 0,
+                 float cell_size = 0) {
     constexpr float dt = static_cast<float>(1.0 / 30.0);
-    LegacyCreatureTickOracle::RunCreatureBrainSystemOnTick(reg, dt);
+    LegacyCreatureTickOracle::RunCreatureBrainSystemOnTick(
+        reg, dt, {}, scent, origin_x, origin_z, cell_size);
     LegacyCreatureTickOracle::RunMateSeekingOnTick(reg);
     LegacyCreatureTickOracle::RunSteeringConsumerOnTick(reg);
     LegacyCreatureTickOracle::RunThirstOnTick(reg, dt);
@@ -2682,5 +2689,1282 @@ inline std::string Fields(const entt::registry& reg) {
     for (const auto e : entities)
         result += Fields(reg, e) + "\n";
     return result;
+}
+} // namespace LegacyCreatureTickOracle
+
+#include "ai/InstinctLocomotionSystem.h"
+#include "ai/InstinctSystem.h"
+#include "systems/AetherFieldSystem.h"
+
+#include "ai/InstinctPlanner.h"
+#include "ai/PerceptionSubstrate.h"
+#include "ai/StimulusChannels.h"
+#include "components/CoreComponents.h"
+#include "components/InstinctComponents.h"
+#include <algorithm>
+#include <cmath>
+#include <vector>
+
+namespace LegacyCreatureTickOracle {
+using namespace ::luminumbra::ai;
+namespace {
+
+float ClampUnit(float value) {
+    if (value < 0.0f) {
+        return 0.0f;
+    }
+    if (value > 1.0f) {
+        return 1.0f;
+    }
+    return value;
+}
+
+double Round4(double value) {
+    return std::round(value * 10000.0) / 10000.0;
+}
+
+struct OpportunitySource {
+    entt::entity entity = entt::null;
+    const Luminumbra::Components::OpportunityComponent* component = nullptr;
+    bool has_position = false;
+    float position[3] = {0.0f, 0.0f, 0.0f};
+};
+
+} // namespace
+
+inline InstinctSystemTickStats
+RunInstinctSystemOnTick(entt::registry& registry,
+                        std::uint64_t tick,
+                        const StimulusChannelRegistry* stimulus = nullptr,
+                        bool use_perception_substrate = true) {
+    using Luminumbra::Components::ActionPlanComponent;
+    using Luminumbra::Components::InstinctAgentComponent;
+    using Luminumbra::Components::NeedsComponent;
+    using Luminumbra::Components::OpportunityComponent;
+    using Luminumbra::Components::StimulusSubscriptionComponent;
+    using Luminumbra::Components::TransformComponent;
+
+    InstinctSystemTickStats stats;
+
+    // Snapshot the opportunities once per tick, sorted by id so planner
+    // input order is independent of registry storage order.
+    std::vector<OpportunitySource> opportunities;
+    {
+        auto opportunity_view = registry.view<const OpportunityComponent>();
+        for (auto entity : opportunity_view) {
+            OpportunitySource source;
+            source.entity = entity;
+            source.component = &opportunity_view.get<const OpportunityComponent>(entity);
+            if (const auto* transform = registry.try_get<const TransformComponent>(entity)) {
+                source.has_position = true;
+                source.position[0] = transform->position.x;
+                source.position[1] = transform->position.y;
+                source.position[2] = transform->position.z;
+            }
+            opportunities.push_back(source);
+        }
+        std::stable_sort(opportunities.begin(),
+                         opportunities.end(),
+                         [](const OpportunitySource& lhs, const OpportunitySource& rhs) {
+                             return lhs.component->id < rhs.component->id;
+                         });
+    }
+
+    // Build the shared perception substrate once per tick from the id-sorted
+    // opportunities. Each source's ordinal is its
+    // index in `opportunities`, so a per-agent query returns the perceived set in
+    // that same id order — the substrate reproduces the inline gather exactly. The
+    // field is built only when the canonical path is selected.
+    PerceptionField perception_field;
+    if (use_perception_substrate) {
+        std::vector<PerceptionSourceInput> sources;
+        sources.reserve(opportunities.size());
+        for (std::uint32_t i = 0; i < static_cast<std::uint32_t>(opportunities.size()); ++i) {
+            const OpportunitySource& src = opportunities[i];
+            PerceptionSourceInput in;
+            in.index = i;
+            in.has_position = src.has_position;
+            in.x = src.position[0];
+            in.y = src.position[1];
+            in.z = src.position[2];
+            in.radius = src.component->radius;
+            sources.push_back(in);
+        }
+        perception_field.Build(sources);
+    }
+
+    auto agent_view = registry.view<InstinctAgentComponent, NeedsComponent>();
+    for (auto entity : agent_view) {
+        auto& agent = agent_view.get<InstinctAgentComponent>(entity);
+        auto& needs = agent_view.get<NeedsComponent>(entity);
+        ++stats.agents_seen;
+
+        // 1. Need growth on every fixed tick.
+        for (auto& need : needs.needs) {
+            need.pressure = ClampUnit(need.pressure + need.growth_per_tick);
+        }
+
+        // 1b.  : ecology stimulus channels. INERT for the canonical
+        // roster -- this block only runs when a stimulus context is supplied AND
+        // the creature carries a StimulusSubscriptionComponent (game-data opt-in).
+        // For a subscriber, each subscription samples its channel scalar [0, 1]
+        // (lazily, only the subscribed channels) and adds gain*scalar to the
+        // mapped need's pressure (clamped). Deterministic: the channel is a pure
+        // function of the tick/replicated state; need iteration is the entity's
+        // own ordered vector. The default roster has no subscription component, so
+        // the loop below NEVER runs for it and the tick path is byte-unchanged.
+        if (stimulus != nullptr) {
+            if (const auto* subscription =
+                    registry.try_get<const StimulusSubscriptionComponent>(entity)) {
+                bool applied_any = false;
+                for (const auto& sub : subscription->subscriptions) {
+                    const float scalar = stimulus->Sample(sub.channel);
+                    for (auto& need : needs.needs) {
+                        if (need.name == sub.need) {
+                            need.pressure = ClampUnit(need.pressure + sub.gain * scalar);
+                            applied_any = true;
+                            break;
+                        }
+                    }
+                }
+                if (applied_any) {
+                    ++stats.stimulus_subscribers_applied;
+                }
+            }
+        }
+
+        // 2. Replan when due.
+        const bool never_planned = agent.plans_executed == 0;
+        const std::uint64_t interval = std::max<std::uint32_t>(1u, agent.replan_interval_ticks);
+        if (!never_planned && tick < agent.last_planned_tick + interval) {
+            continue;
+        }
+
+        InstinctPlanRequest request;
+        request.actor_id = agent.actor_id;
+        request.archetype = agent.archetype;
+        request.needs.reserve(needs.needs.size());
+        for (const auto& need : needs.needs) {
+            request.needs.push_back({need.name, static_cast<double>(need.pressure)});
+        }
+
+        const auto* agent_transform = registry.try_get<const TransformComponent>(entity);
+        std::vector<entt::entity> candidate_entities;
+        request.opportunities.reserve(opportunities.size());
+        candidate_entities.reserve(opportunities.size());
+
+        // Emit one opportunity into the planner request. Shared by the inline and
+        // substrate gathers so both build byte-identical planner input (same
+        // fields, same distance, same candidate-entity bookkeeping).
+        auto emit_opportunity = [&](const OpportunitySource& source, double distance) {
+            const OpportunityComponent& component = *source.component;
+            InstinctOpportunity opportunity;
+            opportunity.id = component.id;
+            opportunity.action = component.action;
+            opportunity.target = component.target;
+            opportunity.need = component.need;
+            opportunity.satisfaction = static_cast<double>(component.satisfaction);
+            opportunity.urgency = static_cast<double>(component.urgency);
+            opportunity.distance = distance;
+            opportunity.risk = static_cast<double>(component.risk);
+            opportunity.stamina_cost = static_cast<double>(component.stamina_cost);
+            request.opportunities.push_back(opportunity);
+            candidate_entities.push_back(source.entity);
+            ++stats.opportunities_considered;
+        };
+
+        if (use_perception_substrate) {
+            //  additive path: the shared substrate returns the perceived
+            // opportunity set (id-ordered, radius-gated) equivalent to the inline
+            // scan below. The perceiver has a position only when it carries a
+            // TransformComponent, matching the inline `agent_transform != nullptr`
+            // guard; positionless perceivers perceive every opportunity at dist 0.
+            PerceptionQueryInput query;
+            query.has_position = (agent_transform != nullptr);
+            if (agent_transform != nullptr) {
+                query.x = agent_transform->position.x;
+                query.y = agent_transform->position.y;
+                query.z = agent_transform->position.z;
+            }
+            PerceptionSnapshot snapshot;
+            perception_field.Query(query, snapshot);
+            for (const PerceivedSource& perceived : snapshot.perceived) {
+                emit_opportunity(opportunities[perceived.index], perceived.distance);
+            }
+        } else {
+            for (const OpportunitySource& source : opportunities) {
+                const OpportunityComponent& component = *source.component;
+                double distance = 0.0;
+                if (agent_transform != nullptr && source.has_position) {
+                    const double dx =
+                        static_cast<double>(agent_transform->position.x) - source.position[0];
+                    const double dy =
+                        static_cast<double>(agent_transform->position.y) - source.position[1];
+                    const double dz =
+                        static_cast<double>(agent_transform->position.z) - source.position[2];
+                    distance = Round4(std::sqrt(dx * dx + dy * dy + dz * dz));
+                    if (component.radius > 0.0f &&
+                        distance > static_cast<double>(component.radius)) {
+                        continue;
+                    }
+                }
+                emit_opportunity(source, distance);
+            }
+        }
+
+        agent.current_plan = PlanInstincts(request);
+        agent.last_planned_tick = tick;
+        ++agent.plans_executed;
+        ++stats.agents_replanned;
+
+        // Write the winner into the action plan. The candidate ranking is a
+        // permutation of the request opportunities; recover the winning
+        // opportunity entity by id.
+        auto& action_plan = registry.emplace_or_replace<ActionPlanComponent>(entity);
+        if (agent.current_plan.selected_index >= 0 &&
+            static_cast<std::size_t>(agent.current_plan.selected_index) <
+                agent.current_plan.candidates.size()) {
+            const auto& winner =
+                agent.current_plan
+                    .candidates[static_cast<std::size_t>(agent.current_plan.selected_index)];
+            Luminumbra::Components::Action action;
+            action.name = winner.action;
+            for (std::size_t i = 0; i < request.opportunities.size(); ++i) {
+                if (request.opportunities[i].id == winner.id) {
+                    action.target = candidate_entities[i];
+                    break;
+                }
+            }
+            action_plan.plan.push_back(std::move(action));
+        }
+    }
+
+    return stats;
+}
+
+} // namespace LegacyCreatureTickOracle
+
+#include "components/CoreComponents.h"
+#include "components/InstinctComponents.h"
+#include "core/DeterministicMath.h"
+#include <algorithm>
+#include <cstdint>
+#include <vector>
+
+namespace LegacyCreatureTickOracle {
+using namespace ::luminumbra::ai;
+
+inline InstinctLocomotionTickStats RunInstinctLocomotionOnTick(entt::registry& registry) {
+    using Luminumbra::Components::ActionPlanComponent;
+    using Luminumbra::Components::LocomotionIntentComponent;
+    using Luminumbra::Components::LocomotionPathComponent;
+    using Luminumbra::Components::LocomotionProfile;
+    using Luminumbra::Components::TransformComponent;
+
+    InstinctLocomotionTickStats stats;
+
+    // Collect agents and visit them in a deterministic id order so the outcome
+    // never depends on registry storage internals (mirrors InstinctSystem's
+    // sort discipline). entt entity ids are creation-ordered integers.
+    std::vector<entt::entity> agents;
+    {
+        auto view =
+            registry.view<ActionPlanComponent, const TransformComponent, const LocomotionProfile>();
+        for (auto entity : view) {
+            agents.push_back(entity);
+        }
+    }
+    std::sort(agents.begin(), agents.end(), [](entt::entity lhs, entt::entity rhs) {
+        return entt::to_integral(lhs) < entt::to_integral(rhs);
+    });
+
+    // snapshot of all locomotion agents (position + PRIOR-tick heading),
+    // in deterministic id order, for the optional Reynolds flocking terms below
+    // (separation / cohesion / alignment). Built ONCE per tick BEFORE the per-agent
+    // wish is recomputed, so alignment reads last tick's velocities — there is no
+    // intra-tick read-after-write coupling and the result is order-independent.
+    // When no agent enables flocking this is unused; the canonical roster leaves
+    // every strength at 0 so world_hash is unchanged.
+    struct AgentPos {
+        entt::entity id;
+        float x;
+        float z;
+        float wx;
+        float wz;
+    };
+    std::vector<AgentPos> neighbors;
+    neighbors.reserve(agents.size());
+    for (auto entity : agents) {
+        const auto& tf = registry.get<const TransformComponent>(entity);
+        const auto* prev = registry.try_get<LocomotionIntentComponent>(entity);
+        const float pwx = prev ? prev->wish_xz.x : 0.0f;
+        const float pwz = prev ? prev->wish_xz.y : 0.0f;
+        neighbors.push_back({entity, tf.position.x, tf.position.z, pwx, pwz});
+    }
+    // `agents` is already id-sorted, so `neighbors` is too (deterministic scan).
+
+    for (auto entity : agents) {
+        ++stats.agents_seen;
+
+        auto& plan = registry.get<ActionPlanComponent>(entity);
+        const auto& tf = registry.get<const TransformComponent>(entity);
+        const auto& profile = registry.get<const LocomotionProfile>(entity);
+
+        auto& intent = registry.get_or_emplace<LocomotionIntentComponent>(entity);
+        intent.wish_xz = Luminumbra::Vec2(0.0f);
+        intent.arrived = false;
+
+        // No current action (empty plan or index past the end) -> hold/idle.
+        if (plan.plan.empty() || plan.current_action_index >= plan.plan.size()) {
+            ++stats.agents_idle;
+            continue;
+        }
+
+        const Luminumbra::EntityID target = plan.plan[plan.current_action_index].target;
+        if (target == entt::null || !registry.valid(target) ||
+            !registry.all_of<TransformComponent>(target)) {
+            ++stats.agents_idle;
+            continue;
+        }
+
+        const auto& target_tf = registry.get<const TransformComponent>(target);
+        const bool flee = plan.plan[plan.current_action_index].flee;
+
+        //  path-following: when the agent carries a LocomotionPathComponent
+        // with a remaining waypoint (and is not fleeing), seek the WAYPOINT instead
+        // of the action target directly. On waypoint arrival the index advances;
+        // once the route is exhausted the agent resumes the plain action-target
+        // seek so it still finishes onto its goal. No component -> byte-identical.
+        auto* path = registry.try_get<LocomotionPathComponent>(entity);
+        const bool following = !flee && path != nullptr && path->index < path->waypoints.size();
+        const float goal_x = following ? path->waypoints[path->index].x : target_tf.position.x;
+        const float goal_z = following ? path->waypoints[path->index].y : target_tf.position.z;
+
+        // Horizontal vector to the goal (XZ plane; Y handled by the character's
+        // ground-stick in physics). Float-only; Sqrt is IEEE-deterministic.
+        const float dx = goal_x - tf.position.x;
+        const float dz = goal_z - tf.position.z;
+        const float dist = Luminumbra::DeterministicMath::Sqrt(dx * dx + dz * dz);
+
+        const float slow = profile.slow_radius > profile.arrival_radius ? profile.slow_radius
+                                                                        : profile.arrival_radius;
+
+        if (flee) {
+            //  flee/avoidance: move AWAY from the (threat) target until
+            // beyond slow_radius (the "safe" distance), then the action completes.
+            const float safe = slow > 0.0f ? slow : profile.arrival_radius;
+            if (dist >= safe) {
+                intent.arrived = true; // safe: stop fleeing, advance the plan
+                ++stats.agents_arrived;
+                ++plan.current_action_index;
+                plan.time_in_current_action = 0.0f;
+                continue;
+            }
+            // Full-speed flight directly away. Degenerate dist~0 (agent on top of
+            // the threat) picks a deterministic +X so the wish is never NaN.
+            float adx = dx, adz = dz;
+            if (dist < 1e-4f) {
+                adx = -1.0f;
+                adz = 0.0f;
+            } // away = -dir; -(-1)=+X
+            const float ainv = 1.0f / Luminumbra::DeterministicMath::Sqrt(adx * adx + adz * adz);
+            intent.wish_xz = Luminumbra::Vec2(-adx * ainv * profile.move_speed,
+                                              -adz * ainv * profile.move_speed);
+        } else {
+            if (dist <= profile.arrival_radius) {
+                if (following) {
+                    // Reached this waypoint: advance the route (next tick seeks the
+                    // next waypoint, or the action target once the path runs out).
+                    // The PLAN is not advanced here — the action completes only on
+                    // arrival at its real target, after the path is exhausted.
+                    ++path->index;
+                    continue;
+                }
+                // Arrived at the action target: hold and advance the plan.
+                intent.arrived = true;
+                ++stats.agents_arrived;
+                ++plan.current_action_index;
+                plan.time_in_current_action = 0.0f;
+                continue;
+            }
+            // Seek + arrival ramp (Reynolds): full cruise outside slow_radius,
+            // linear ramp toward zero between slow_radius and arrival_radius.
+            float speed = profile.move_speed;
+            if (dist < slow && slow > 0.0f) {
+                speed = profile.move_speed * (dist / slow);
+            }
+            const float inv = 1.0f / dist; // dist > arrival_radius >= 0 -> safe
+            intent.wish_xz = Luminumbra::Vec2(dx * inv * speed, dz * inv * speed);
+        }
+
+        //  obstacle/crowd avoidance (Reynolds separation), DATA-FLAGGED.
+        // When separation is enabled, push away from nearby agents so they do not
+        // pile onto a shared target at scale. Deterministic: neighbors are scanned
+        // in id order; float-only; Sqrt is IEEE-deterministic. A zero strength (the
+        // default) skips this entirely, keeping the canonical world_hash intact.
+        if (profile.separation_strength > 0.0f && profile.separation_radius > 0.0f) {
+            const float sep_r = profile.separation_radius;
+            float push_x = 0.0f;
+            float push_z = 0.0f;
+            for (const auto& nb : neighbors) {
+                if (nb.id == entity) {
+                    continue;
+                }
+                const float nx = tf.position.x - nb.x;
+                const float nz = tf.position.z - nb.z;
+                const float nd = Luminumbra::DeterministicMath::Sqrt(nx * nx + nz * nz);
+                if (nd > 0.0f && nd < sep_r) {
+                    // Linear falloff: closer neighbors push harder. Normalize the
+                    // away direction (1/nd) then weight by (1 - nd/sep_r).
+                    const float w = (sep_r - nd) / (sep_r * nd);
+                    push_x += nx * w;
+                    push_z += nz * w;
+                }
+            }
+            // Blend the avoidance into the seek wish, scaled to the cruise speed so
+            // it is commensurate with the seek term, then clamp the combined wish to
+            // move_speed so avoidance never exceeds the agent's locomotion budget.
+            intent.wish_xz.x += push_x * profile.separation_strength * profile.move_speed;
+            intent.wish_xz.y += push_z * profile.separation_strength * profile.move_speed;
+            const float wmag = Luminumbra::DeterministicMath::Sqrt(
+                intent.wish_xz.x * intent.wish_xz.x + intent.wish_xz.y * intent.wish_xz.y);
+            if (wmag > profile.move_speed && wmag > 0.0f) {
+                const float s = profile.move_speed / wmag;
+                intent.wish_xz.x *= s;
+                intent.wish_xz.y *= s;
+            }
+        }
+
+        //  flocking/herding: cohesion (steer toward the local group's center
+        // of mass) + alignment (match the group's mean heading). Both use
+        // flock_radius and last tick's neighbor headings (snapshotted above), so the
+        // result is deterministic and order-independent. DATA-FLAGGED: zero strength
+        // skips, keeping world_hash intact. Composed on top of seek + separation;
+        // the combined wish is then clamped to the move_speed budget.
+        if ((profile.cohesion_strength > 0.0f || profile.alignment_strength > 0.0f) &&
+            profile.flock_radius > 0.0f) {
+            const float fr = profile.flock_radius;
+            float cx = 0.0f, cz = 0.0f; // sum of neighbor positions (cohesion)
+            float hx = 0.0f, hz = 0.0f; // sum of neighbor headings (alignment)
+            int count = 0;
+            for (const auto& nb : neighbors) {
+                if (nb.id == entity)
+                    continue;
+                const float nx = nb.x - tf.position.x;
+                const float nz = nb.z - tf.position.z;
+                const float nd = Luminumbra::DeterministicMath::Sqrt(nx * nx + nz * nz);
+                if (nd > 0.0f && nd < fr) {
+                    cx += nb.x;
+                    cz += nb.z;
+                    hx += nb.wx;
+                    hz += nb.wz;
+                    ++count;
+                }
+            }
+            if (count > 0) {
+                const float invn = 1.0f / static_cast<float>(count);
+                if (profile.cohesion_strength > 0.0f) {
+                    // Toward the neighbor centroid (unit) * strength * cruise speed.
+                    const float ccx = cx * invn - tf.position.x;
+                    const float ccz = cz * invn - tf.position.z;
+                    const float cl = Luminumbra::DeterministicMath::Sqrt(ccx * ccx + ccz * ccz);
+                    if (cl > 0.0f) {
+                        const float cs = profile.cohesion_strength * profile.move_speed / cl;
+                        intent.wish_xz.x += ccx * cs;
+                        intent.wish_xz.y += ccz * cs;
+                    }
+                }
+                if (profile.alignment_strength > 0.0f) {
+                    // Toward the mean neighbor heading (unit) * strength * cruise speed.
+                    const float mhx = hx * invn;
+                    const float mhz = hz * invn;
+                    const float al = Luminumbra::DeterministicMath::Sqrt(mhx * mhx + mhz * mhz);
+                    if (al > 0.0f) {
+                        const float as = profile.alignment_strength * profile.move_speed / al;
+                        intent.wish_xz.x += mhx * as;
+                        intent.wish_xz.y += mhz * as;
+                    }
+                }
+                const float wmag = Luminumbra::DeterministicMath::Sqrt(
+                    intent.wish_xz.x * intent.wish_xz.x + intent.wish_xz.y * intent.wish_xz.y);
+                if (wmag > profile.move_speed && wmag > 0.0f) {
+                    const float s = profile.move_speed / wmag;
+                    intent.wish_xz.x *= s;
+                    intent.wish_xz.y *= s;
+                }
+            }
+        }
+        ++stats.agents_steered;
+    }
+
+    return stats;
+}
+
+} // namespace LegacyCreatureTickOracle
+
+#include "ai/Awareness.h"
+#include "ai/Perception.h"
+#include "components/CoreComponents.h"
+#include "components/InstinctComponents.h"
+#include "core/DeterministicMath.h"
+#include <algorithm>
+#include <entt/entt.hpp>
+#include <vector>
+
+// PerceptionSystem — the live ECS read-side of the senses. For every
+// perceiver (Transform + PerceptionComponent + AwarenessComponent) it fuses VISION
+// (forward cone + range) and HEARING (audiogram) over the SensableComponent
+// entities of OTHER factions, picks the strongest sensed target, and advances the
+// per-agent awareness meter/state + last-known memory (see Awareness.h). Smell is
+// handled field-wise by the ScentField/locomotion gradient path, not here.
+//
+// PURE-ENOUGH + DETERMINISTIC: perceivers and sensables are visited in entity-id
+// order; float-only + DeterministicMath::Sqrt; no RNG/wall-clock. World_hash-
+// neutral by construction — it only touches entities that carry these components,
+// and the canonical headless determinism roster carries none (terrain/water only),
+// so wiring it into the tick does not move world_hash.
+
+namespace LegacyCreatureTickOracle {
+using namespace ::luminumbra::ai;
+
+struct PerceptionTickStats {
+    std::uint64_t perceivers = 0; // agents with perception+awareness considered
+    std::uint64_t sensing = 0;    // produced a non-zero fused signal this tick
+    std::uint64_t engaged = 0;    // reached the Engaged state
+};
+
+inline PerceptionTickStats RunPerceptionSystemOnTick(entt::registry& registry, float dt) {
+    using Luminumbra::Components::AwarenessComponent;
+    using Luminumbra::Components::PerceptionComponent;
+    using Luminumbra::Components::SensableComponent;
+    using Luminumbra::Components::TransformComponent;
+
+    PerceptionTickStats stats;
+
+    // Snapshot sensables in id order (deterministic scan; independent of storage).
+    struct Sensable {
+        entt::entity id;
+        float x;
+        float z;
+        float loudness;
+        float pitch;
+        std::uint32_t faction;
+    };
+    std::vector<Sensable> sensables;
+    {
+        auto view = registry.view<const TransformComponent, const SensableComponent>();
+        for (auto e : view) {
+            const auto& tf = view.get<const TransformComponent>(e);
+            const auto& s = view.get<const SensableComponent>(e);
+            sensables.push_back(
+                {e, tf.position.x, tf.position.z, s.noise_loudness, s.noise_pitch, s.faction});
+        }
+        std::sort(sensables.begin(), sensables.end(), [](const Sensable& a, const Sensable& b) {
+            return entt::to_integral(a.id) < entt::to_integral(b.id);
+        });
+    }
+
+    std::vector<entt::entity> perceivers;
+    {
+        auto view =
+            registry
+                .view<const TransformComponent, const PerceptionComponent, AwarenessComponent>();
+        for (auto e : view)
+            perceivers.push_back(e);
+        std::sort(perceivers.begin(), perceivers.end(), [](entt::entity a, entt::entity b) {
+            return entt::to_integral(a) < entt::to_integral(b);
+        });
+    }
+
+    for (auto e : perceivers) {
+        ++stats.perceivers;
+        const auto& tf = registry.get<const TransformComponent>(e);
+        const auto& perc = registry.get<const PerceptionComponent>(e);
+        auto& aw = registry.get<AwarenessComponent>(e);
+
+        float best_signal = 0.0f;
+        float bx = 0.0f;
+        float bz = 0.0f;
+        for (const auto& s : sensables) {
+            if (s.id == e || s.faction == perc.faction)
+                continue; // self / same faction ignored
+            const float dx = s.x - tf.position.x;
+            const float dz = s.z - tf.position.z;
+            const float dist = Luminumbra::DeterministicMath::Sqrt(dx * dx + dz * dz);
+
+            // Vision: in-cone clarity falls off with range.
+            float vis = 0.0f;
+            if (InVisionCone(tf.position.x,
+                             tf.position.z,
+                             perc.facing_x,
+                             perc.facing_z,
+                             perc.vision_cos_half_fov,
+                             perc.vision_range,
+                             s.x,
+                             s.z)) {
+                vis = 1.0f - dist / perc.vision_range;
+                if (vis < 0.0f)
+                    vis = 0.0f;
+            }
+            // Hearing: audiogram response, clamped to a [0,1] signal contribution.
+            float hear = HeardLoudness(dist, s.loudness, s.pitch, perc.ear);
+            if (hear > 1.0f)
+                hear = 1.0f;
+
+            const float sig = vis > hear ? vis : hear; // strongest sense wins
+            if (sig > best_signal) {
+                best_signal = sig;
+                bx = s.x;
+                bz = s.z;
+            }
+        }
+
+        if (best_signal > 0.0f)
+            ++stats.sensing;
+        aw.awareness = UpdateAwareness(aw.awareness, best_signal, bx, bz, dt, aw.params);
+        if (aw.awareness.state == AwarenessState::Engaged)
+            ++stats.engaged;
+    }
+
+    return stats;
+}
+
+} // namespace LegacyCreatureTickOracle
+
+#include "ai/ScentField.h"
+#include "components/CoreComponents.h"
+#include "components/InstinctComponents.h"
+#include "core/DeterministicMath.h"
+#include <algorithm>
+#include <entt/entt.hpp>
+#include <vector>
+
+// ScentSteeringSystem — turns the scent gradient into MOVEMENT. For
+// each creature with a ScentSenseComponent (+ Transform + LocomotionIntent +
+// LocomotionProfile) it samples the ScentField gradient at the creature's cell
+// (Weber chemotaxis, ScentField::GradientSteer) and ADDS a bias to the locomotion
+// wish — toward the source when tracking (sign +1, a predator hunting prey scent /
+// an ant on a food trail) or away when fleeing (sign -1). Runs AFTER the seek/
+// flocking locomotion so it biases the existing wish, then clamps to the move_speed
+// budget. This is the behavioral payoff of the stigmergy substrate: creatures
+// follow smells.
+//
+// DETERMINISTIC: creatures visited in entity-id order; float-only + manual
+// floor-to-cell (no libm); the field read is pure. World_hash-neutral by
+// construction (only entities carrying ScentSenseComponent are touched; the
+// canonical headless roster carries none).
+
+namespace LegacyCreatureTickOracle {
+using namespace ::luminumbra::ai;
+
+struct ScentSteeringStats {
+    std::uint64_t considered = 0;
+    std::uint64_t steered = 0; // produced a non-zero scent bias this tick
+};
+
+// Map a world XZ coordinate to a grid cell index (floor toward -inf, so negative
+// coords map correctly — unlike a plain truncating cast).
+inline int WorldToCell(float world, float origin, float cell_size) {
+    const float v = (world - origin) / cell_size;
+    int c = static_cast<int>(v);
+    if (v < static_cast<float>(c))
+        --c;
+    return c;
+}
+
+inline ScentSteeringStats RunScentSteeringOnTick(entt::registry& registry,
+                                                 const ScentField& field,
+                                                 float origin_x,
+                                                 float origin_z,
+                                                 float cell_size) {
+    using Luminumbra::Components::LocomotionIntentComponent;
+    using Luminumbra::Components::LocomotionProfile;
+    using Luminumbra::Components::ScentSenseComponent;
+    using Luminumbra::Components::TransformComponent;
+
+    ScentSteeringStats stats;
+    if (cell_size <= 0.0f)
+        return stats;
+
+    std::vector<entt::entity> agents;
+    {
+        auto view = registry.view<const TransformComponent,
+                                  const ScentSenseComponent,
+                                  LocomotionIntentComponent,
+                                  const LocomotionProfile>();
+        for (auto e : view)
+            agents.push_back(e);
+        std::sort(agents.begin(), agents.end(), [](entt::entity a, entt::entity b) {
+            return entt::to_integral(a) < entt::to_integral(b);
+        });
+    }
+
+    for (auto e : agents) {
+        ++stats.considered;
+        const auto& sense = registry.get<const ScentSenseComponent>(e);
+        if (sense.channel < 0)
+            continue;
+        const auto& tf = registry.get<const TransformComponent>(e);
+        const auto& profile = registry.get<const LocomotionProfile>(e);
+        auto& intent = registry.get<LocomotionIntentComponent>(e);
+
+        const int cx = WorldToCell(tf.position.x, origin_x, cell_size);
+        const int cz = WorldToCell(tf.position.z, origin_z, cell_size);
+        if (!field.SimulationCellAllowed(cx, cz))
+            continue;
+        float dx = 0.0f;
+        float dz = 0.0f;
+        const float conf = field.GradientSteer(
+            sense.channel, cx, cz, sense.sign, sense.floor, sense.weber_k, dx, dz);
+        if (conf <= 0.0f)
+            continue;
+
+        intent.wish_xz.x += dx * conf * sense.strength * profile.move_speed;
+        intent.wish_xz.y += dz * conf * sense.strength * profile.move_speed;
+        const float wmag = Luminumbra::DeterministicMath::Sqrt(intent.wish_xz.x * intent.wish_xz.x +
+                                                               intent.wish_xz.y * intent.wish_xz.y);
+        if (wmag > profile.move_speed && wmag > 0.0f) {
+            const float s = profile.move_speed / wmag;
+            intent.wish_xz.x *= s;
+            intent.wish_xz.y *= s;
+        }
+        ++stats.steered;
+    }
+    return stats;
+}
+
+} // namespace LegacyCreatureTickOracle
+
+#include "ai/ScentField.h"
+#include "ai/ScentSteeringSystem.h"
+#include "components/CoreComponents.h"
+#include "components/InstinctComponents.h"
+#include <algorithm>
+#include <entt/entt.hpp>
+#include <vector>
+
+// ScentDepositSystem — the WRITE side of stigmergy. Each tick, every
+// entity with a SensableComponent that emits scent (scent_channel >= 0,
+// scent_deposit > 0) lays that amount into the ScentField at its cell. This is how
+// prey leave a trackable trail, predators leave a scent prey can flee, and ant
+// foragers lay food/home trails. Pair with ScentField::Step (diffuse + evaporate)
+// and::Clamp each tick, and the read side (GradientSteer / ScentSteeringSystem).
+//
+// DETERMINISTIC: emitters visited in entity-id order; manual floor-to-cell (no
+// libm); the field write is the solver's deterministic add_impulse. World_hash
+// folds in via the ScentField sub-hash once the field is owned by the sim tick.
+
+namespace LegacyCreatureTickOracle {
+using namespace ::luminumbra::ai;
+
+struct ScentDepositStats {
+    std::uint64_t emitters = 0; // entities that deposited this tick
+};
+
+inline ScentDepositStats RunScentDepositOnTick(
+    entt::registry& registry, ScentField& field, float origin_x, float origin_z, float cell_size) {
+    using Luminumbra::Components::SensableComponent;
+    using Luminumbra::Components::TransformComponent;
+
+    ScentDepositStats stats;
+    if (cell_size <= 0.0f)
+        return stats;
+
+    std::vector<entt::entity> emitters;
+    {
+        auto view = registry.view<const TransformComponent, const SensableComponent>();
+        for (auto e : view)
+            emitters.push_back(e);
+        std::sort(emitters.begin(), emitters.end(), [](entt::entity a, entt::entity b) {
+            return entt::to_integral(a) < entt::to_integral(b);
+        });
+    }
+
+    for (auto e : emitters) {
+        const auto& s = registry.get<const SensableComponent>(e);
+        if (s.scent_channel < 0 || s.scent_deposit <= 0.0f)
+            continue;
+        const auto& tf = registry.get<const TransformComponent>(e);
+        const int cx = LegacyCreatureTickOracle::WorldToCell(tf.position.x, origin_x, cell_size);
+        const int cz = LegacyCreatureTickOracle::WorldToCell(tf.position.z, origin_z, cell_size);
+        if (!field.SimulationCellAllowed(cx, cz))
+            continue;
+        field.Deposit(s.scent_channel, cx, cz, static_cast<double>(s.scent_deposit));
+        ++stats.emitters;
+    }
+    return stats;
+}
+
+} // namespace LegacyCreatureTickOracle
+
+#include "ai/ScentField.h"
+#include "components/ForagingComponents.h"
+#include <algorithm>
+#include <cstdint>
+#include <cstdlib>
+#include <entt/entt.hpp>
+#include <vector>
+
+// ForagingSystem — ant-trail foraging via stigmergy (Deneubourg double-bridge /
+// Dorigo ACO). Each tick every ForagerComponent:
+//   1. DEPOSITS pheromone on BOTH legs of its trip — an outbound ant lays the HOME trail (channel
+//   3);
+//      a laden returning ant lays the FOOD trail (channel 2). This is the "double trail".
+//   2. STEPS one grid cell, choosing the neighbour that maximises a blend of the OPPOSITE channel's
+//      pheromone (follow the trail the other leg laid) and a deterministic pull toward its goal
+//      (nearest food when outbound, the nest when laden) so it makes progress before any trail
+//      exists.
+//   3. PICKS UP at a food source / DELIVERS at the nest, flipping carrying state.
+// Because a SHORTER route is completed more often per unit time, its trail is reinforced faster
+// than evaporation (ScentField::Step) erases it, so foragers converge on the shorter path. Zero
+// evaporation removes the contrast (saturation) — the classic double-bridge result.
+//
+// DETERMINISM (sim path): id-ordered foragers + id-ordered food sources; integer grid cells; a
+// FIXED 4-neighbour scan order with first-wins tie-break; no RNG / wall-clock / libm. The field
+// read/write is the solver's deterministic add_impulse / at. OPT-IN: no ForagerComponent ->
+// no-op, so the canonical roster's world_hash is byte-identical (same discipline as
+// scent/creatures/plants).
+
+namespace LegacyCreatureTickOracle {
+using namespace ::luminumbra::ai;
+
+// ScentField channel layout for foraging (the 4-channel field is 0 prey / 1 predator / 2 food-trail
+// / 3 home-trail). Outbound ants lay the HOME trail and follow the FOOD trail; laden ants lay the
+// FOOD trail and follow the HOME trail.
+inline constexpr int kFoodTrailChannel = 2;
+inline constexpr int kHomeTrailChannel = 3;
+
+struct ForagingParams {
+    double deposit = 1.0;      // pheromone laid per step
+    double trail_weight = 8.0; // attraction to the opposite-channel trail
+    double goal_weight = 1.0;  // deterministic pull toward the goal (0 = pure trail following)
+};
+
+struct ForagingStats {
+    std::uint64_t foragers = 0;
+    std::uint64_t pickups = 0;
+    std::uint64_t deliveries = 0; // food delivered to nests THIS tick
+};
+
+// Advance every forager one cell. Pure function of registry + field state (+ params).
+inline ForagingStats
+RunForagingOnTick(entt::registry& reg, ScentField& field, const ForagingParams& p = {}) {
+    namespace Comp = ::Luminumbra::Components;
+    ForagingStats stats;
+
+    std::vector<entt::entity> ants;
+    {
+        auto view = reg.view<Comp::ForagerComponent>();
+        for (auto e : view)
+            ants.push_back(e);
+    }
+    if (ants.empty())
+        return stats; // opt-in: no foragers -> byte-identical no-op
+    std::sort(ants.begin(), ants.end(), [](entt::entity a, entt::entity b) {
+        return entt::to_integral(a) < entt::to_integral(b);
+    });
+
+    // id-ordered food source cells (with a live handle so pickups can deplete them).
+    struct Food {
+        entt::entity e;
+        std::int32_t x, z;
+    };
+    std::vector<Food> foods;
+    {
+        auto fv = reg.view<Comp::FoodSourceComponent>();
+        std::vector<entt::entity> fe(fv.begin(), fv.end());
+        std::sort(fe.begin(), fe.end(), [](entt::entity a, entt::entity b) {
+            return entt::to_integral(a) < entt::to_integral(b);
+        });
+        for (auto e : fe) {
+            const auto& f = reg.get<Comp::FoodSourceComponent>(e);
+            if (!field.SimulationCellAllowed(f.cell_x, f.cell_z))
+                continue;
+            foods.push_back({e, f.cell_x, f.cell_z});
+        }
+    }
+
+    static const int kDX[4] = {1, -1, 0, 0}; // FIXED scan order -> deterministic tie-break
+    static const int kDZ[4] = {0, 0, 1, -1};
+
+    for (auto e : ants) {
+        auto& a = reg.get<Comp::ForagerComponent>(e);
+        if (!field.SimulationCellAllowed(a.cell_x, a.cell_z))
+            continue;
+        ++stats.foragers;
+
+        // 1. Deposit-on-both-trips: lay the trail leading back toward where we came from.
+        const int layCh = a.carrying_food ? kFoodTrailChannel : kHomeTrailChannel;
+        field.Deposit(layCh, a.cell_x, a.cell_z, p.deposit);
+
+        // 2. Goal cell: laden -> nest; outbound -> nearest live food (Manhattan, first-wins
+        // tie-break).
+        std::int32_t goalX = a.cell_x, goalZ = a.cell_z;
+        if (a.carrying_food) {
+            goalX = a.home_x;
+            goalZ = a.home_z;
+        } else {
+            std::int64_t best = -1;
+            for (const auto& f : foods) {
+                const std::int64_t d = std::llabs(static_cast<long long>(f.x) - a.cell_x) +
+                                       std::llabs(static_cast<long long>(f.z) - a.cell_z);
+                if (best < 0 || d < best) {
+                    best = d;
+                    goalX = f.x;
+                    goalZ = f.z;
+                }
+            }
+        }
+
+        // 3. Step: maximise trail_weight * opposite-channel pheromone + goal_weight * goal
+        // progress.
+        const int followCh = a.carrying_food ? kHomeTrailChannel : kFoodTrailChannel;
+        const std::int64_t curGoalDist = std::llabs(static_cast<long long>(goalX) - a.cell_x) +
+                                         std::llabs(static_cast<long long>(goalZ) - a.cell_z);
+        int bestDir = -1;
+        double bestScore = 0.0;
+        for (int d = 0; d < 4; ++d) {
+            const int nx = a.cell_x + kDX[d];
+            const int nz = a.cell_z + kDZ[d];
+            if (!field.SimulationCellAllowed(nx, nz))
+                continue;
+            const double trail = field.Sample(followCh, nx, nz);
+            const std::int64_t gd = std::llabs(static_cast<long long>(goalX) - nx) +
+                                    std::llabs(static_cast<long long>(goalZ) - nz);
+            const double goalTerm = static_cast<double>(curGoalDist - gd); // +1 closer, -1 farther
+            const double score = p.trail_weight * trail + p.goal_weight * goalTerm;
+            if (bestDir < 0 || score > bestScore) {
+                bestScore = score;
+                bestDir = d;
+            }
+        }
+        if (bestDir >= 0) {
+            a.cell_x += kDX[bestDir];
+            a.cell_z += kDZ[bestDir];
+            // Keep the forager ON the grid. An unclamped step can walk a cell off the field
+            // (e.g. a nest/food placed near an edge), and a downstream render mirror would then
+            // map it to a far-out-of-bounds world coordinate and sample terrain there (crash /
+            // garbage). Clamp to the valid cell range — deterministic integer math.
+            if (a.cell_x < 0)
+                a.cell_x = 0;
+            else if (a.cell_x >= field.width())
+                a.cell_x = field.width() - 1;
+            if (a.cell_z < 0)
+                a.cell_z = 0;
+            else if (a.cell_z >= field.height())
+                a.cell_z = field.height() - 1;
+        }
+
+        // 4. Arrival transitions.
+        if (!a.carrying_food) {
+            for (const auto& f : foods) {
+                if (f.x == a.cell_x && f.z == a.cell_z) {
+                    auto& fc = reg.get<Comp::FoodSourceComponent>(f.e);
+                    if (fc.amount > 0) {
+                        --fc.amount;
+                        a.carrying_food = true;
+                        ++stats.pickups;
+                    }
+                    break;
+                }
+            }
+        } else if (a.cell_x == a.home_x && a.cell_z == a.home_z) {
+            a.carrying_food = false;
+            ++a.deliveries;
+            ++stats.deliveries;
+        }
+    }
+    return stats;
+}
+
+} // namespace LegacyCreatureTickOracle
+
+#include "components/CoreComponents.h"
+#include "components/FieldEmitterComponents.h"
+#include "fields/EnergyFieldState.h"
+#include "systems/AetherFieldSystem.h"
+#include <algorithm>
+#include <cmath>
+#include <cstdint>
+#include <entt/entt.hpp>
+#include <vector>
+
+//  -5: FieldEmitterSystem — the deposit GATHER pass
+// feeding the stateful energy layer.  of the two-phase deposit path:
+// visit every FieldEmitterComponent carrier in entity-id order and QUEUE its
+// (emitter_id, cell, amount) deposits into the EnergyFieldState; the layer's
+// own Tick re-sorts by (cell, channel, emitter_id) and applies with
+// saturation (/ ordering law), so neither registry iteration
+// order nor gather order can ever reach the field bytes.
+//
+// DETERMINISTIC: id-ordered traversal (sort by entt::to_integral — the
+// EcologyHash rule); world -> cell quantization is std::floor over the shared
+// 24 m grid identity (kAetherCellSizeM), byte-matching GameSession's anchor
+// quantization; the falloff is integer shift math only (no libm, no RNG).
+// Participant-gated: a world with no emitter component queues nothing — the
+// canonical roster runs this as a pure no-op.
+
+namespace LegacyCreatureTickOracle {
+using namespace ::Luminumbra::Systems;
+
+struct FieldEmitterGatherStats {
+    std::uint64_t emitters = 0; // carriers that queued at least one deposit
+    std::uint64_t deposits = 0; // QueueDeposit calls issued this tick
+};
+
+// Queue this tick's emitter deposits into `field` (call right before the
+// layer's Tick, which sorts and applies them). Centre cell receives the full
+// rate; when radius_cells > 0 every cell within that Chebyshev radius receives
+// rate >> (Chebyshev distance) — deterministic integer halving per ring, with
+// zero-amount rings skipped (a deposit of 0 is not queued). Emitters with
+// rate 0 are inert and skipped outright.
+inline FieldEmitterGatherStats
+GatherFieldEmitterDeposits(entt::registry& registry, luminumbra::fields::EnergyFieldState& field) {
+    using Luminumbra::Components::FieldEmitterComponent;
+    using Luminumbra::Components::TransformComponent;
+
+    FieldEmitterGatherStats stats;
+
+    // id-ordered traversal (the EcologyHash rule) so the queue order is a pure
+    // function of sim state, never of entt storage layout.
+    std::vector<entt::entity> emitters;
+    {
+        auto view = registry.view<const TransformComponent, const FieldEmitterComponent>();
+        for (auto e : view)
+            emitters.push_back(e);
+        std::sort(emitters.begin(), emitters.end(), [](entt::entity a, entt::entity b) {
+            return entt::to_integral(a) < entt::to_integral(b);
+        });
+    }
+
+    for (auto e : emitters) {
+        const auto& emitter = registry.get<const FieldEmitterComponent>(e);
+        if (emitter.rate_raw_per_tick == 0u)
+            continue; // zero-default = inert
+
+        // World -> cell: floor semantics byte-matching GameSession's anchor
+        // quantization (std::floor over the shared 24 m cell size).
+        const auto& tf = registry.get<const TransformComponent>(e);
+        const int cx = static_cast<int>(std::floor(tf.position.x / kAetherCellSizeM));
+        const int cz = static_cast<int>(std::floor(tf.position.z / kAetherCellSizeM));
+
+        const auto emitter_id = static_cast<std::uint64_t>(entt::to_integral(e));
+        const int radius = emitter.radius_cells > 0 ? emitter.radius_cells : 0;
+        bool queued = false;
+        for (int dz = -radius; dz <= radius; ++dz) {
+            for (int dx = -radius; dx <= radius; ++dx) {
+                const int cheb = std::max(dx < 0 ? -dx : dx, dz < 0 ? -dz : dz);
+                // Integer ring falloff; guard the shift (uint32 >> 32+ is UB)
+                // every ring at distance >= 32 is zero anyway.
+                const std::uint32_t amount =
+                    (cheb < 32) ? (emitter.rate_raw_per_tick >> static_cast<unsigned>(cheb)) : 0u;
+                if (amount == 0u)
+                    continue;
+                field.QueueDeposit(emitter_id, cx + dx, cz + dz, emitter.channel, amount);
+                ++stats.deposits;
+                queued = true;
+            }
+        }
+        if (queued)
+            ++stats.emitters;
+    }
+    return stats;
+}
+
+} // namespace LegacyCreatureTickOracle
+
+namespace LegacyCreatureTickOracle {
+// Explicit secondary inventory projection. Length-prefixed strings and float bits
+// avoid object padding, optional-presence loss and production persistence helpers.
+inline std::string SecondaryFields(const entt::registry& reg, entt::entity e) {
+    std::ostringstream out;
+    const auto str = [&](const std::string& v) {
+        out << v.size() << ':' << v;
+    };
+    const auto real = [&](double v) {
+        Values(out, std::bit_cast<std::uint64_t>(v));
+    };
+    const auto component = [&]<class T>(const char* name, auto write) {
+        out << name << ':';
+        if (const auto* v = reg.try_get<const T>(e)) {
+            out << "present:";
+            write(*v);
+        } else
+            out << "absent:";
+    };
+    component.template operator()<Comp::NeedsComponent>("Needs", [&](const auto& v) {
+        Values(out, v.needs.size());
+        for (const auto& n : v.needs) {
+            str(n.name);
+            Values(out, n.pressure, n.growth_per_tick);
+        }
+    });
+    component.template operator()<Comp::InstinctAgentComponent>("Agent", [&](const auto& v) {
+        str(v.actor_id);
+        str(v.archetype);
+        Values(out, v.replan_interval_ticks, v.last_planned_tick, v.plans_executed);
+        const auto& p = v.current_plan;
+        str(p.actor_id);
+        str(p.archetype);
+        str(p.decision_contract);
+        str(p.checksum);
+        Values(out, p.selected_index, p.passed, p.candidates.size());
+        for (const auto& c : p.candidates) {
+            Values(out, c.rank);
+            str(c.id);
+            str(c.action);
+            str(c.target);
+            str(c.need);
+            real(c.score);
+            real(c.need_pressure);
+            str(c.reason);
+        }
+    });
+    component.template operator()<Comp::OpportunityComponent>("Opportunity", [&](const auto& v) {
+        str(v.id);
+        str(v.action);
+        str(v.target);
+        str(v.need);
+        Values(out, v.satisfaction, v.urgency, v.risk, v.stamina_cost, v.radius);
+    });
+    component.template operator()<Comp::ActionPlanComponent>("Plan", [&](const auto& v) {
+        Values(out, v.current_action_index, v.time_in_current_action, v.plan.size());
+        for (const auto& a : v.plan) {
+            str(a.name);
+            Values(out, entt::to_integral(a.target), a.duration, a.flee);
+        }
+    });
+    component.template operator()<Comp::LocomotionProfile>("Profile", [&](const auto& v) {
+        Values(out,
+               v.move_speed,
+               v.arrival_radius,
+               v.slow_radius,
+               v.separation_radius,
+               v.separation_strength,
+               v.flock_radius,
+               v.cohesion_strength,
+               v.alignment_strength);
+    });
+    component.template operator()<Comp::LocomotionIntentComponent>(
+        "Intent", [&](const auto& v) { Values(out, v.wish_xz.x, v.wish_xz.y, v.arrived); });
+    component.template operator()<Comp::LocomotionPathComponent>("Path", [&](const auto& v) {
+        Values(out, v.index, v.waypoints.size());
+        for (const auto& point : v.waypoints)
+            Values(out, point.x, point.y);
+    });
+    component.template operator()<Comp::StimulusSubscriptionComponent>(
+        "Subscriptions", [&](const auto& v) {
+            Values(out, v.subscriptions.size());
+            for (const auto& sub : v.subscriptions) {
+                Values(out, static_cast<int>(sub.channel), sub.gain);
+                str(sub.need);
+            }
+        });
+    component.template operator()<Comp::SensableComponent>("Sensable", [&](const auto& v) {
+        Values(out, v.scent_channel, v.scent_deposit, v.noise_loudness, v.noise_pitch, v.faction);
+    });
+    component.template operator()<Comp::AwarenessComponent>("Awareness", [&](const auto& v) {
+        const auto& a = v.awareness;
+        Values(out,
+               a.meter,
+               static_cast<int>(a.state),
+               a.has_last_known,
+               a.last_known_x,
+               a.last_known_z,
+               a.time_since_signal,
+               v.params.gain,
+               v.params.decay,
+               v.params.suspicious_at,
+               v.params.alert_at,
+               v.params.engaged_at);
+    });
+    component.template operator()<Comp::ScentSenseComponent>("ScentSense", [&](const auto& v) {
+        Values(out, v.channel, v.sign, v.strength, v.floor, v.weber_k);
+    });
+    component.template operator()<Comp::ForagerComponent>("Forager", [&](const auto& v) {
+        Values(out, v.cell_x, v.cell_z, v.home_x, v.home_z, v.carrying_food, v.deliveries);
+    });
+    component.template operator()<Comp::FoodSourceComponent>(
+        "Food", [&](const auto& v) { Values(out, v.cell_x, v.cell_z, v.amount); });
+    component.template operator()<Comp::FieldEmitterComponent>("Emitter", [&](const auto& v) {
+        Values(out, v.channel, v.rate_raw_per_tick, v.radius_cells);
+    });
+    return out.str();
+}
+inline std::string SecondaryFields(const entt::registry& reg) {
+    std::vector<entt::entity> entities;
+    for (auto e : reg.view<const Comp::TransformComponent>())
+        entities.push_back(e);
+    for (auto e : reg.view<const Comp::ForagerComponent>())
+        if (!reg.all_of<Comp::TransformComponent>(e))
+            entities.push_back(e);
+    for (auto e : reg.view<const Comp::FoodSourceComponent>())
+        if (!reg.any_of<Comp::TransformComponent, Comp::ForagerComponent>(e))
+            entities.push_back(e);
+    std::sort(entities.begin(), entities.end(), [](auto a, auto b) {
+        return entt::to_integral(a) < entt::to_integral(b);
+    });
+    std::string result;
+    for (auto e : entities)
+        result += SecondaryFields(reg, e) + '\n';
+    return result;
+}
+inline void AddSecondaryAgent(
+    entt::registry& reg, entt::entity e, entt::entity target, int cell_x = 4, int cell_z = 4) {
+    auto& a = reg.emplace<Comp::InstinctAgentComponent>(e);
+    a.actor_id = "actor";
+    a.archetype = "fixture";
+    a.replan_interval_ticks = 3;
+    reg.emplace<Comp::NeedsComponent>(e).needs = {{"food", .4f, .01f}};
+    auto& plan = reg.emplace<Comp::ActionPlanComponent>(e);
+    plan.plan.push_back({"seek", target});
+    plan.time_in_current_action = .25f;
+    auto& profile = reg.emplace<Comp::LocomotionProfile>(e);
+    profile.separation_radius = 5;
+    profile.separation_strength = .2f;
+    profile.flock_radius = 8;
+    profile.cohesion_strength = .3f;
+    profile.alignment_strength = .4f;
+    auto& intent = reg.emplace<Comp::LocomotionIntentComponent>(e);
+    intent.wish_xz = {-0.0f, .125f};
+    intent.arrived = true;
+    reg.emplace<Comp::LocomotionPathComponent>(e).waypoints = {{0, 0}, {2, 1}};
+    reg.emplace<Comp::StimulusSubscriptionComponent>(e).subscriptions = {
+        {::luminumbra::ai::StimulusChannel::TimeOfDay, "food", .01f}};
+    auto& sensable = reg.emplace<Comp::SensableComponent>(e);
+    sensable.scent_channel = 0;
+    sensable.scent_deposit = 4;
+    sensable.noise_loudness = .8f;
+    reg.emplace<Comp::PerceptionComponent>(e);
+    reg.emplace<Comp::AwarenessComponent>(e).awareness.meter = .2f;
+    reg.emplace<Comp::ScentSenseComponent>(e).channel = 0;
+    auto& ant = reg.emplace<Comp::ForagerComponent>(e);
+    ant.cell_x = cell_x;
+    ant.cell_z = cell_z;
+    ant.home_x = cell_x;
+    ant.home_z = cell_z;
+    auto& emitter = reg.emplace<Comp::FieldEmitterComponent>(e);
+    emitter.rate_raw_per_tick = 128;
+    emitter.radius_cells = 1;
+}
+inline void AddOpportunity(entt::registry& reg, entt::entity e, const std::string& id = "food") {
+    auto& o = reg.emplace<Comp::OpportunityComponent>(e);
+    o.id = id;
+    o.action = "eat";
+    o.target = "food";
+    o.need = "food";
+    o.satisfaction = .8f;
+    o.urgency = .5f;
+}
+inline std::string ScentBytes(const ::luminumbra::ai::ScentField& field) {
+    std::ostringstream out;
+    out << "scent:v1:" << field.width() << ':' << field.height() << ':' << field.channels() << ':'
+        << std::setprecision(17);
+    for (int ch = 0; ch < field.channels(); ++ch)
+        for (int z = 0; z < field.height(); ++z)
+            for (int x = 0; x < field.width(); ++x)
+                if (const double v = field.Sample(ch, x, z); v != 0)
+                    out << ch << ',' << x << ',' << z << '=' << v << ';';
+    return out.str();
 }
 } // namespace LegacyCreatureTickOracle

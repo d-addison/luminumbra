@@ -20,6 +20,7 @@
 // no-op, so the canonical roster's world_hash is byte-identical (same discipline as
 // scent/creatures/plants).
 
+#include "../systems/RegionConsumerGate.h"
 #include <algorithm>
 #include <cstdint>
 #include <cstdlib>
@@ -51,8 +52,13 @@ struct ForagingStats {
 };
 
 // Advance every forager one cell. Pure function of registry + field state (+ params).
-inline ForagingStats
-RunForagingOnTick(entt::registry& reg, ScentField& field, const ForagingParams& p = {}) {
+inline ForagingStats RunForagingOnTick(entt::registry& reg,
+                                       ScentField& field,
+                                       const ForagingParams& p = {},
+                                       const Luminumbra::world::RegionEntityGate& gate = {},
+                                       const Luminumbra::world::RegionEntityWork& completed = {},
+                                       const ScentField::EdgeGate& exchange = {}) {
+    using namespace Luminumbra::world;
     namespace Comp = ::Luminumbra::Components;
     ForagingStats stats;
 
@@ -68,6 +74,8 @@ RunForagingOnTick(entt::registry& reg, ScentField& field, const ForagingParams& 
         return entt::to_integral(a) < entt::to_integral(b);
     });
 
+    FilterRegionEntities(reg, ants, gate);
+
     // id-ordered food source cells (with a live handle so pickups can deplete them).
     struct Food {
         entt::entity e;
@@ -80,6 +88,7 @@ RunForagingOnTick(entt::registry& reg, ScentField& field, const ForagingParams& 
         std::sort(fe.begin(), fe.end(), [](entt::entity a, entt::entity b) {
             return entt::to_integral(a) < entt::to_integral(b);
         });
+        FilterRegionEntities(reg, fe, gate);
         for (auto e : fe) {
             const auto& f = reg.get<Comp::FoodSourceComponent>(e);
             if (!field.SimulationCellAllowed(f.cell_x, f.cell_z))
@@ -99,7 +108,8 @@ RunForagingOnTick(entt::registry& reg, ScentField& field, const ForagingParams& 
 
         // 1. Deposit-on-both-trips: lay the trail leading back toward where we came from.
         const int layCh = a.carrying_food ? kFoodTrailChannel : kHomeTrailChannel;
-        field.Deposit(layCh, a.cell_x, a.cell_z, p.deposit);
+        if (!gate)
+            field.Deposit(layCh, a.cell_x, a.cell_z, p.deposit);
 
         // 2. Goal cell: laden -> nest; outbound -> nearest live food (Manhattan, first-wins
         // tie-break).
@@ -130,7 +140,8 @@ RunForagingOnTick(entt::registry& reg, ScentField& field, const ForagingParams& 
         for (int d = 0; d < 4; ++d) {
             const int nx = a.cell_x + kDX[d];
             const int nz = a.cell_z + kDZ[d];
-            if (!field.SimulationCellAllowed(nx, nz))
+            if ((!gate && !field.SimulationCellAllowed(nx, nz)) ||
+                (gate && !field.in_bounds(nx, nz)))
                 continue;
             const double trail = field.Sample(followCh, nx, nz);
             const std::int64_t gd = std::llabs(static_cast<long long>(goalX) - nx) +
@@ -141,6 +152,17 @@ RunForagingOnTick(entt::registry& reg, ScentField& field, const ForagingParams& 
                 bestScore = score;
                 bestDir = d;
             }
+        }
+        if (gate) {
+            if (bestDir < 0)
+                continue;
+            const int nx = a.cell_x + kDX[bestDir], nz = a.cell_z + kDZ[bestDir];
+            if (!field.SimulationCellAllowed(nx, nz) ||
+                (exchange && !exchange(a.cell_x, a.cell_z, nx, nz)))
+                continue; // hold all continuation, counters and deposits at the sealed border
+            field.Deposit(layCh, a.cell_x, a.cell_z, p.deposit);
+            if (completed)
+                completed(e);
         }
         if (bestDir >= 0) {
             a.cell_x += kDX[bestDir];
@@ -162,9 +184,12 @@ RunForagingOnTick(entt::registry& reg, ScentField& field, const ForagingParams& 
         // 4. Arrival transitions.
         if (!a.carrying_food) {
             for (const auto& f : foods) {
-                if (f.x == a.cell_x && f.z == a.cell_z) {
+                if (f.x == a.cell_x && f.z == a.cell_z && AdmitRegionEntity(gate, f.e) &&
+                    field.SimulationCellAllowed(f.x, f.z)) {
                     auto& fc = reg.get<Comp::FoodSourceComponent>(f.e);
                     if (fc.amount > 0) {
+                        if (completed)
+                            completed(f.e);
                         --fc.amount;
                         a.carrying_food = true;
                         ++stats.pickups;
