@@ -15,6 +15,7 @@ using Luminumbra::Server::HeavyHashes;
 using Luminumbra::Server::HeavySubsystem;
 using Luminumbra::Server::HeavySubsystemTable;
 using Luminumbra::Server::MeshEqual;
+using Luminumbra::Server::ScentDifference;
 using Luminumbra::world::GroundObject;
 using Luminumbra::world::GroundObjectStore;
 
@@ -155,6 +156,40 @@ TEST(HeavyComparison, OneSideActiveIsNotEqual) {
     const HeavyHashes inactive = MakeBase(false);
     EXPECT_FALSE(AuthoritativeStateEqual(active, inactive));
     EXPECT_FALSE(AuthoritativeStateEqual(inactive, active));
+}
+
+TEST(HeavyComparison, ScentOnlyDivergenceComparesWhenActiveRegionsEnabled) {
+    const HeavySubsystem* row = FindRow(HeavySubsystemTable(), "scents");
+    ASSERT_NE(row, nullptr);
+    EXPECT_TRUE(row->compared);
+    EXPECT_TRUE(row->requires_active_regions);
+    EXPECT_EQ(row->exempt_reason, nullptr);
+    ASSERT_NE(row->mutate, nullptr);
+
+    for (bool active_regions : {false, true}) {
+        SCOPED_TRACE(active_regions);
+        const HeavyHashes base = MakeBase(active_regions);
+        HeavyHashes other = base;
+        EXPECT_TRUE(AuthoritativeStateEqual(base, other));
+        EXPECT_TRUE(ScentDifference(base, other).empty());
+
+        row->mutate(other);
+        EXPECT_NE(base.scent_hash, other.scent_hash);
+        // Equal ledger bytes and an equal composite hash cannot mask durable scent divergence.
+        EXPECT_EQ(base.ledger_bytes, other.ledger_bytes);
+        EXPECT_EQ(base.world_hash, other.world_hash);
+        if (active_regions) {
+            EXPECT_FALSE(AuthoritativeStateEqual(base, other));
+            EXPECT_FALSE(AuthoritativeStateEqual(other, base));
+            EXPECT_EQ(ScentDifference(base, other), "scents");
+            EXPECT_EQ(ScentDifference(other, base), "scents");
+        } else {
+            EXPECT_TRUE(AuthoritativeStateEqual(base, other));
+            EXPECT_TRUE(AuthoritativeStateEqual(other, base));
+            EXPECT_TRUE(ScentDifference(base, other).empty());
+            EXPECT_TRUE(ScentDifference(other, base).empty());
+        }
+    }
 }
 
 GroundObject MakeGroundObject() {

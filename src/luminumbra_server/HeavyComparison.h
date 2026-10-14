@@ -67,6 +67,13 @@ inline std::string GroundObjectDifference(const HeavyHashes& a, const HeavyHashe
     return {};
 }
 
+inline std::string ScentDifference(const HeavyHashes& a, const HeavyHashes& b) {
+    if ((a.active_regions || b.active_regions) && a.scent_hash != b.scent_hash) {
+        return "scents";
+    }
+    return {};
+}
+
 // One row per field of HeavyHashes. `compared` rows must match across the
 // round-trip and the resim; `exempt_reason` documents why an uncompared row is
 // excluded (non-null exactly when `compared` is false). `requires_active_regions`
@@ -183,10 +190,9 @@ inline std::span<const HeavySubsystem> HeavySubsystemTable() {
              h.sub.mesh += "x";
          }},
         {"scents",
-         false,
-         false,
-         "persisted scent state is reported but not yet asserted by the heavy oracle; the "
-         "activation-slice oracle owns its comparison and negative control",
+         true,
+         true,
+         nullptr,
          [](HeavyHashes& h) {
              h.scent_hash += "x";
          }},
@@ -203,13 +209,15 @@ inline std::span<const HeavySubsystem> HeavySubsystemTable() {
 
 // Equality over AUTHORITATIVE SIMULATION STATE (terrain SDF + water sim +
 // entities + ground objects). Legacy loads restart at tick zero. With the persisted clock on,
-// ambient fields and the clock must also agree at save and after continuation.
+// ambient fields, durable regional scent and the clock must also agree at save and after
+// continuation. Without active regions, scent is a transient field that is not persisted,
+// so its hash remains excluded from round-trip and resim equality.
 inline bool AuthoritativeStateEqual(const HeavyHashes& a, const HeavyHashes& b) {
     if (a.active_regions || b.active_regions) {
         if (a.active_regions != b.active_regions || a.clock_bytes != b.clock_bytes ||
             a.ledger_bytes != b.ledger_bytes || a.sub.wind != b.sub.wind ||
             a.sub.weather != b.sub.weather || a.sub.aether != b.sub.aether ||
-            a.sub.aether_state != b.sub.aether_state) {
+            a.sub.aether_state != b.sub.aether_state || a.scent_hash != b.scent_hash) {
             return false;
         }
     }

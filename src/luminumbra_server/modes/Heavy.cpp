@@ -7,6 +7,7 @@ using Luminumbra::Server::CaptureGroundObjects;
 using Luminumbra::Server::GroundObjectDifference;
 using Luminumbra::Server::HeavyHashes;
 using Luminumbra::Server::MeshEqual;
+using Luminumbra::Server::ScentDifference;
 
 namespace fs = std::filesystem;
 
@@ -139,6 +140,10 @@ int RunHeavy(const ServerCliOptions& options) {
     if (!roundtrip_ground_difference.empty()) {
         LUMINUMBRA_CORE_ERROR("heavy: round-trip differs in {}", roundtrip_ground_difference);
     }
+    const std::string roundtrip_scent_difference = ScentDifference(orig_at_save, loaded_at_load);
+    if (!roundtrip_scent_difference.empty()) {
+        LUMINUMBRA_CORE_ERROR("heavy: round-trip differs in {}", roundtrip_scent_difference);
+    }
 
     // --- : resimulate M further ticks on BOTH sessions. ---
     const auto orig_resim = original.RunFixedTicks(options.heavy_resim);
@@ -151,6 +156,10 @@ int RunHeavy(const ServerCliOptions& options) {
     const std::string resim_ground_difference = GroundObjectDifference(orig_final, loaded_final);
     if (!resim_ground_difference.empty()) {
         LUMINUMBRA_CORE_ERROR("heavy: resim differs in {}", resim_ground_difference);
+    }
+    const std::string resim_scent_difference = ScentDifference(orig_final, loaded_final);
+    if (!resim_scent_difference.empty()) {
+        LUMINUMBRA_CORE_ERROR("heavy: resim differs in {}", resim_scent_difference);
     }
 
     //  diagnostic: on a water resim mismatch, localize it — which chunks,
@@ -259,11 +268,13 @@ int RunHeavy(const ServerCliOptions& options) {
         {"loaded_at_load", HeavyHashJson(loaded_at_load)},
         {"roundtrip_match", roundtrip_ok},
         {"roundtrip_ground_difference", roundtrip_ground_difference},
+        {"roundtrip_scent_difference", roundtrip_scent_difference},
         {"roundtrip_mesh_match", roundtrip_mesh_match},
         {"original_final", HeavyHashJson(orig_final)},
         {"loaded_final", HeavyHashJson(loaded_final)},
         {"resim_match", resim_ok},
         {"resim_ground_difference", resim_ground_difference},
+        {"resim_scent_difference", resim_scent_difference},
         {"resim_mesh_match", resim_mesh_match},
         {"boot_settle_original", SettleJson(settle_orig)},
         {"boot_settle_loaded", SettleJson(settle_loaded)},
