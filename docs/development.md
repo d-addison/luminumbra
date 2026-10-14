@@ -110,8 +110,10 @@ Ready pull requests run:
 - an explicitly observational software-OpenGL performance capture.
 
 CTest produces JUnit and runtime artifacts. CI verifies a minimum discovered-test
-count so an empty or severely truncated suite cannot report success. Sanitizer and
-test artifacts are uploaded even on failure to support diagnosis.
+count so an empty or severely truncated suite cannot report success. Once a
+non-draft test or sanitizer lane runs, its sanitizer and test artifacts are uploaded
+even on failure to support diagnosis. The draft guard failures described above stop
+before checkout and upload no artifacts.
 
 `WorldgenProbeSmoke` validates the `luminumbra.worldgen_probe.v1` smoke report
 with seed `424242` and spawn `(8, terrain height + 1.95, 8)`. Valid evidence requires
