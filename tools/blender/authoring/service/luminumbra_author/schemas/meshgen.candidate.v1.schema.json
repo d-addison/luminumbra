@@ -1,0 +1,100 @@
+{
+  "additionalProperties": false,
+  "maxProperties": 256,
+  "properties": {
+    "members": {
+      "additionalProperties": false,
+      "maxProperties": 256,
+      "properties": {
+        "candidate.glb": {
+          "maxLength": 64,
+          "pattern": "^(?:[0-9a-f]{64})$",
+          "type": "string"
+        },
+        "effective_config.json": {
+          "maxLength": 64,
+          "pattern": "^(?:[0-9a-f]{64})$",
+          "type": "string"
+        },
+        "inputs/backend.log": {
+          "maxLength": 64,
+          "pattern": "^(?:[0-9a-f]{64})$",
+          "type": "string"
+        },
+        "inputs/capabilities.json": {
+          "maxLength": 64,
+          "pattern": "^(?:[0-9a-f]{64})$",
+          "type": "string"
+        },
+        "inputs/finish.log": {
+          "maxLength": 64,
+          "pattern": "^(?:[0-9a-f]{64})$",
+          "type": "string"
+        },
+        "inputs/prompt.txt": {
+          "maxLength": 64,
+          "pattern": "^(?:[0-9a-f]{64})$",
+          "type": "string"
+        },
+        "inputs/raw_backend.glb": {
+          "maxLength": 64,
+          "pattern": "^(?:[0-9a-f]{64})$",
+          "type": "string"
+        },
+        "inputs/reference_image": {
+          "maxLength": 64,
+          "pattern": "^(?:[0-9a-f]{64})$",
+          "type": "string"
+        },
+        "inputs/result.json": {
+          "maxLength": 64,
+          "pattern": "^(?:[0-9a-f]{64})$",
+          "type": "string"
+        },
+        "licence_gate.json": {
+          "maxLength": 64,
+          "pattern": "^(?:[0-9a-f]{64})$",
+          "type": "string"
+        },
+        "preview.png": {
+          "maxLength": 64,
+          "pattern": "^(?:[0-9a-f]{64})$",
+          "type": "string"
+        },
+        "provenance.json": {
+          "maxLength": 64,
+          "pattern": "^(?:[0-9a-f]{64})$",
+          "type": "string"
+        },
+        "stats.json": {
+          "maxLength": 64,
+          "pattern": "^(?:[0-9a-f]{64})$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "candidate.glb",
+        "effective_config.json",
+        "inputs/backend.log",
+        "inputs/capabilities.json",
+        "inputs/raw_backend.glb",
+        "inputs/reference_image",
+        "inputs/result.json",
+        "licence_gate.json",
+        "preview.png",
+        "provenance.json",
+        "stats.json"
+      ],
+      "type": "object"
+    },
+    "schema": {
+      "const": "luminumbra.authoring.meshgen.candidate.v1",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema",
+    "members"
+  ],
+  "type": "object"
+}

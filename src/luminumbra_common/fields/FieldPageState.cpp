@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <exception>
 #include <map>
+#include <optional>
 #include <set>
 #include <string>
 #include <string_view>
@@ -526,7 +527,13 @@ FieldPageState::step_scheduled(const std::map<RegionKey, ActiveRegionRecord>& re
                                std::uint64_t world_seed,
                                std::uint64_t tick,
                                const FieldPageState* previous_tick) {
-    const PageMap previous = previous_tick ? previous_tick->m_pages : m_pages;
+    // A caller-provided snapshot is already sealed. The standalone/aliased call needs
+    // its own snapshot, but never copies unrelated evolution state or frozen pages.
+    const auto sealed = !previous_tick || previous_tick == this
+                            ? scheduled_snapshot(records, due, tick)
+                            : FieldPageState{};
+    const PageMap& previous =
+        !previous_tick || previous_tick == this ? sealed.m_pages : previous_tick->m_pages;
     const std::set<RegionKey> due_keys(due.begin(), due.end());
     std::map<RegionKey, std::uint64_t> work;
     const auto eligible = [&records](RegionKey owner) {
@@ -602,6 +609,37 @@ FieldPageState::step_scheduled(const std::map<RegionKey, ActiveRegionRecord>& re
     return work;
 }
 
+FieldPageState
+FieldPageState::scheduled_snapshot(const std::map<RegionKey, ActiveRegionRecord>& records,
+                                   std::span<const RegionKey> due,
+                                   std::uint64_t tick) const {
+    const std::set<RegionKey> due_keys(due.begin(), due.end());
+    std::set<FieldPageKey> keys;
+    for (const auto& [owner, record] : records) {
+        if (record.state == RegionState::Frozen)
+            continue;
+        // A cross-owner edge opens only on the common phase at the maximum shift.
+        // If this owner's own common phase is closed, none of its edges can open.
+        const bool common = record.cadence_shift < 63 &&
+                            (tick & ((std::uint64_t{1} << record.cadence_shift) - 1)) == 0;
+        if (!due_keys.contains(owner) && !common)
+            continue;
+        const auto x = AxisCellRange(owner.x), z = AxisCellRange(owner.z);
+        if (x.lo > x.hi || z.lo > z.hi)
+            continue;
+        for (auto pz = FloorDiv(z.lo, kPageSpan); pz <= FloorDiv(z.hi, kPageSpan); ++pz)
+            for (auto px = FloorDiv(x.lo, kPageSpan); px <= FloorDiv(x.hi, kPageSpan); ++px)
+                keys.insert({static_cast<std::int32_t>(px), static_cast<std::int32_t>(pz)});
+    }
+    FieldPageState snapshot;
+    for (const auto key : keys) {
+        const auto page = m_pages.find(key);
+        if (page != m_pages.end())
+            snapshot.m_pages.emplace_hint(snapshot.m_pages.end(), key, page->second);
+    }
+    return snapshot;
+}
+
 bool FieldPageState::replace_weather(std::vector<RegionalStorm> storms,
                                      std::vector<RegionalStrike> strikes) {
     if (storms.size() > kMaxStorms || strikes.size() > kMaxStrikes)
@@ -632,6 +670,19 @@ bool FieldPageState::replace_weather(std::vector<RegionalStorm> storms,
     m_strikes = std::move(strikes);
     return true;
 }
+bool FieldPageState::replace_weather(std::vector<RegionalStorm> storms,
+                                     std::vector<RegionalStrike> strikes,
+                                     std::map<RegionKey, std::uint64_t> clocks) {
+    if (clocks.size() > kMaxWeatherClocks)
+        return false;
+    for (const auto& [owner, age] : clocks)
+        if (!ValidOwner(owner) || age >= WorldClock::kTickLimit)
+            return false;
+    if (!replace_weather(std::move(storms), std::move(strikes)))
+        return false;
+    m_weatherClocks.swap(clocks);
+    return true;
+}
 bool FieldPageState::set_scent(ScentCellKey key, const ScentCell& values) {
     if (!ValidScent(key, values))
         return false;
@@ -644,6 +695,42 @@ bool FieldPageState::set_scent(ScentCellKey key, const ScentCell& values) {
     if (!m_scent.contains(key) && m_scent.size() == kMaxScentCells)
         return false;
     m_scent[key] = values;
+    return true;
+}
+bool FieldPageState::update_scent(std::span<const std::pair<ScentCellKey, ScentCell>> updates) {
+    // Preflight the ordered admissions and allocate new nodes before touching authority.
+    // Existing concentrations (the usual dense-domain case) update without a map copy.
+    std::map<ScentCellKey, ScentCell> admitted;
+    std::optional<ScentCellKey> previous;
+    auto size = m_scent.size();
+    for (const auto& [key, values] : updates) {
+        if ((previous && std::tie(key.z, key.x) <= std::tie(previous->z, previous->x)) ||
+            !ValidScent(key, values))
+            return false;
+        previous = key;
+        const bool exists = m_scent.contains(key);
+        const bool zero =
+            std::all_of(values.begin(), values.end(), [](auto bits) { return bits == 0; });
+        if (zero) {
+            if (exists)
+                --size;
+        } else if (!exists) {
+            if (size == kMaxScentCells)
+                return false;
+            ++size;
+            admitted.emplace(key, values);
+        }
+    }
+    for (const auto& [key, values] : updates) {
+        const bool zero =
+            std::all_of(values.begin(), values.end(), [](auto bits) { return bits == 0; });
+        if (zero)
+            m_scent.erase(key);
+        else if (const auto found = m_scent.find(key); found != m_scent.end())
+            found->second = values;
+        else
+            m_scent.insert(admitted.extract(key));
+    }
     return true;
 }
 RegionKey FieldPageState::region_of_scent_cell(ScentCellKey key) {

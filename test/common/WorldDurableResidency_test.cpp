@@ -11,6 +11,7 @@
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
+#include <fstream>
 #include <memory>
 #include <set>
 #include <string>
@@ -40,10 +41,6 @@ using Luminumbra::Vec3;
 using Luminumbra::Systems::SHIELD_WorldSystem;
 using Luminumbra::world::GameSession;
 
-#ifndef LUMINUMBRA_SOURCE_ROOT
-#define LUMINUMBRA_SOURCE_ROOT "."
-#endif
-
 // FNV-1a-64 over a raw byte span (the meshing_hardening_test helper).
 constexpr std::uint64_t kFnvOffsetBasis = 14695981039346656037ull;
 constexpr std::uint64_t kFnvPrime = 1099511628211ull;
@@ -63,7 +60,34 @@ std::uint64_t HashVec(const std::vector<T>& v) {
     return Fnv1a64(v.data(), v.size() * sizeof(T));
 }
 
-// Temp root containing ONLY the world preset (headless — no res/data assets).
+// Real generated terrain, but no unrelated caves, structures, biome relief or erosion bakes.
+// A dry plane at Y=8 puts the radius-3 spawn edit wholly inside one chunk (spawn X/Z=8),
+// above sea level and away from chunk seams. The SDF, mesh, collision and save paths still run.
+constexpr char kResidencyPreset[] = R"({
+    "schema_rev": 6,
+    "generation_params": {
+        "terrain": {
+            "base_frequency": 0.01,
+            "base_amplitude": 0.0,
+            "octaves": 1,
+            "persistence": 0.5,
+            "lacunarity": 2.0,
+            "height_offset": 8.0,
+            "shaping": {
+                "peaks_amplitude": 0.0,
+                "domain_warp_amplitude": 0.0,
+                "continental_spline": [[-1.0, 0.0], [1.0, 0.0]]
+            },
+            "hydro": {"enabled": false}
+        },
+        "features": {
+            "caves_enabled": false,
+            "cave_frequency": 0.02
+        }
+    }
+})";
+
+// Temp root containing ONLY the test preset (headless — no res/data assets).
 // The root is unique per fixture instance so concurrent common_tests processes
 // never share (or clobber) a directory. The destructor removes the tree.
 class HeadlessRoot {
@@ -73,9 +97,11 @@ public:
         root_ = fs::temp_directory_path() /
                 ("luminumbra_durable_residency_test_" + std::to_string(stamp));
         fs::create_directories(root_ / "worlds" / "atlas" / "presets");
-        fs::copy_file(fs::path(LUMINUMBRA_SOURCE_ROOT) / "worlds" / "atlas" / "presets" /
-                          "default.json",
-                      root_ / "worlds" / "atlas" / "presets" / "default.json");
+        std::ofstream preset;
+        preset.exceptions(std::ios::failbit | std::ios::badbit);
+        preset.open(root_ / "worlds" / "atlas" / "presets" / "durable.json");
+        preset << kResidencyPreset;
+        preset.close();
     }
     ~HeadlessRoot() {
         std::error_code ec;
@@ -89,13 +115,18 @@ private:
     fs::path root_;
 };
 
-// Streaming cap in chunks (debug_set_streaming_radius_cap). Small enough that the
-// far anchor evicts everything the spawn settle made resident.
-constexpr int kStreamRadiusCap = 8;
+// A radius-1 disc streams five columns, each with the surface chunk and its two
+// vertical neighbours. Editing also builds the production radius-2 square (75 chunks);
+// the far anchor still evicts that entire band. The SDF edit touches one chunk;
+// its coupled water-bed edit can make the other two chunks in that column authoritative too.
+constexpr int kStreamRadiusCap = 1;
 // Far anchor distance in chunks along X: well outside radius + 2 of the spawn anchor.
 constexpr float kFarChunks = 40.0f;
-constexpr int kSettleIterations = 40;
-constexpr int kReturnIterations = 60;
+// Activation runs every four updates. Three passes suffice for this small set:
+// generate/restore, mesh and drain, then retry any eviction deferred by in-flight work.
+// Each update explicitly drains the real streaming jobs, independent of worker timing.
+constexpr int kSettleIterations = 12;
+constexpr int kReturnIterations = kSettleIterations;
 
 // One headless world per TEST. Member order: root outlives the session, the job
 // system outlives the session, and the destructor tears the session down before
@@ -103,12 +134,13 @@ constexpr int kReturnIterations = 60;
 class DurableFixture {
 public:
     explicit DurableFixture(bool durable, bool active_regions = false) {
-        jobs.startup();
+        // CTest runs cases in separate processes; bound each small fixture's worker pool.
+        jobs.startup(2);
         session = std::make_unique<GameSession>();
         session->SetActiveRegionsEnabled(active_regions);
         session->SetJobSystem(&jobs);
         session->SetRootPath(root.root_string());
-        created = session->CreateWorld("DurableResidency", "12345", "default");
+        created = session->CreateWorld("DurableResidency", "12345", "durable");
         if (!created) {
             error = "CreateWorld failed";
             return;
@@ -289,7 +321,26 @@ TEST(WorldDurableResidency, OnlyAuthoritativeChunksAreParked) {
     DurableFixture fx(/*durable=*/true);
     ASSERT_TRUE(fx.created) << fx.error;
     fx.Settle(fx.SpawnAnchor(), kSettleIterations);
+    const auto pristine = fx.world->snapshot_streamed_chunks();
+    ASSERT_FALSE(pristine.empty());
+    for (const auto& chunk : pristine) {
+        ASSERT_TRUE(chunk);
+        ASSERT_FALSE(chunk->needs_authority());
+    }
+    // Dry terrain has no naturally moving water; include an actual edit so the
+    // authoritative half of this contract cannot pass with an empty parked set.
+    const auto edited = fx.EditAtSpawnAndFindEdited();
+    ASSERT_TRUE(edited);
+    std::vector<std::shared_ptr<Chunk>> regenerable;
+    for (const auto& chunk : pristine) {
+        if (!chunk->needs_authority())
+            regenerable.push_back(chunk);
+    }
+    ASSERT_FALSE(regenerable.empty());
     fx.Settle(fx.FarAnchor(), kSettleIterations);
+    EXPECT_TRUE(Contains(fx.world->snapshot_parked_chunks(), edited.get()));
+    for (const auto& chunk : regenerable)
+        EXPECT_FALSE(fx.world->find_authoritative_chunk(chunk->get_coords()));
     // Water that moved makes a chunk authoritative; everything else is regenerable and erased.
     for (const auto& parked : fx.world->snapshot_parked_chunks()) {
         ASSERT_TRUE(parked);

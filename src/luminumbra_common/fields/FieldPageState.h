@@ -125,7 +125,13 @@ public:
     bool set_weather_age(RegionKey owner, std::uint64_t active_age);
     // Transactional admission, canonical ordering and bounded exact-state validation.
     bool replace_weather(std::vector<RegionalStorm> storms, std::vector<RegionalStrike> strikes);
+    bool replace_weather(std::vector<RegionalStorm> storms,
+                         std::vector<RegionalStrike> strikes,
+                         std::map<RegionKey, std::uint64_t> clocks);
     bool set_scent(ScentCellKey key, const ScentCell& values);
+    // Same admissions as set_scent, committed together. Keys must be strictly ordered by
+    // (z, x), as in the near-domain capture. Only newly admitted cells allocate map nodes.
+    bool update_scent(std::span<const std::pair<ScentCellKey, ScentCell>> updates);
     [[nodiscard]] static RegionKey region_of_scent_cell(ScentCellKey key);
     [[nodiscard]] bool owns_evolution_state(RegionKey key) const;
 
@@ -149,6 +155,13 @@ public:
     // v += (int32(target) - int32(v)) >> kRelaxShift (arithmetic shift) with target =
     // seed_value(.., tick / kCadenceTicks). Returns the number of cells stepped.
     std::uint64_t step_region(RegionKey key, std::uint64_t world_seed, std::uint64_t tick);
+
+    // Sealed page-only input for step_scheduled, captured BEFORE activation. Retains only
+    // pages that can participate this tick; excludes scent, weather and frozen-only pages.
+    [[nodiscard]] FieldPageState
+    scheduled_snapshot(const std::map<RegionKey, ActiveRegionRecord>& records,
+                       std::span<const RegionKey> due,
+                       std::uint64_t tick) const;
 
     // One sealed previous-state pass. Interiors follow the due list; cross-owner edges follow
     // global common phase independently of each owner's interior phase. Frozen or absent

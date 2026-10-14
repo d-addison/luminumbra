@@ -588,6 +588,102 @@ TEST(FieldPageStateTest, NewActivationCannotSupplyPreviousTickBorderExchange) {
     EXPECT_EQ(store.serialize(), before);
 }
 
+TEST(FieldPageStateTest, ScheduledSnapshotMatchesFullSealedInputAndWork) {
+    FieldPageState initial;
+    std::map<RegionKey, ActiveRegionRecord> records;
+    for (int z = -1; z <= 1; ++z)
+        for (int x = -1; x <= 1; ++x) {
+            const RegionKey key{x, z};
+            ASSERT_TRUE(initial.activate_region(key, kSeed, 0));
+            auto& record = records[key];
+            record.state = x == -1 ? RegionState::Frozen : RegionState::Reduced;
+            record.cadence_shift = static_cast<std::uint8_t>(z == 0 ? 1 : 2);
+            record.cadence_phase = ActiveRegionLedger::phase(key, record.cadence_shift);
+        }
+    records[{0, 0}].state = RegionState::Active;
+    records[{0, 0}].cadence_shift = std::uint8_t{0};
+    records[{0, 0}].cadence_phase = std::uint32_t{0};
+    // Absent authority and distant frozen pages must not join the sealed working set.
+    ASSERT_TRUE(initial.activate_region({20, 20}, kSeed, 0));
+    ASSERT_TRUE(initial.activate_region({100, 100}, kSeed, 0));
+    records[{100, 100}].state = RegionState::Frozen;
+    // This owner is admitted only AFTER the snapshot, including a shared page boundary.
+    records[{2, 0}] = {};
+    ASSERT_TRUE(initial.set_scent({0, 0}, {std::bit_cast<std::uint64_t>(1.0), 0, 0, 0}));
+    ASSERT_TRUE(initial.set_weather_age({0, 0}, 19));
+    for (std::uint64_t tick = 1; tick <= 8; ++tick) {
+        SCOPED_TRACE(tick);
+        std::vector<RegionKey> due;
+        for (const auto& [key, record] : records)
+            if (record.state != RegionState::Frozen &&
+                (tick & ((std::uint64_t{1} << record.cadence_shift) - 1)) == record.cadence_phase)
+                due.push_back(key);
+        const auto full_previous = initial;
+        const auto sparse_previous = initial.scheduled_snapshot(records, due, tick);
+        EXPECT_LT(sparse_previous.page_count(), full_previous.page_count());
+        EXPECT_TRUE(sparse_previous.scent_cells().empty());
+        EXPECT_TRUE(sparse_previous.weather_clocks().empty());
+        auto full = initial, sparse = initial;
+        for (const auto key : due) {
+            ASSERT_TRUE(full.activate_region(key, kSeed, tick));
+            ASSERT_TRUE(sparse.activate_region(key, kSeed, tick));
+            EXPECT_EQ(
+                full.owned_initialized_cells(key) - full_previous.owned_initialized_cells(key),
+                sparse.owned_initialized_cells(key) - sparse_previous.owned_initialized_cells(key));
+        }
+        EXPECT_EQ(full.step_scheduled(records, due, kSeed, tick, &full_previous),
+                  sparse.step_scheduled(records, due, kSeed, tick, &sparse_previous));
+        EXPECT_EQ(full.serialize(), sparse.serialize());
+        // Also exercise standalone and aliased calls, which must seal their own input.
+        auto standalone = initial, aliased = initial, reference = initial;
+        const auto work = reference.step_scheduled(records, due, kSeed, tick, &full_previous);
+        EXPECT_EQ(standalone.step_scheduled(records, due, kSeed, tick), work);
+        EXPECT_EQ(aliased.step_scheduled(records, due, kSeed, tick, &aliased), work);
+        EXPECT_EQ(standalone.serialize(), reference.serialize());
+        EXPECT_EQ(aliased.serialize(), reference.serialize());
+    }
+}
+
+TEST(FieldPageStateTest, ScentBatchMatchesOrderedAdmissionsAndRejectsAtomically) {
+    auto store = ActivatedStore();
+    const ScentCell one{std::bit_cast<std::uint64_t>(1.0), 0, 0, 0};
+    const ScentCell two{0, std::bit_cast<std::uint64_t>(2.0), 0, 0};
+    ASSERT_TRUE(store.set_scent({-1, -1}, one));
+    ASSERT_TRUE(store.set_scent({0, 0}, one));
+    auto expected = store;
+    const std::vector<std::pair<ScentCellKey, ScentCell>> updates{
+        {{-1, -1}, {}}, {{0, 0}, two}, {{-2, 1}, one}, {{1, 1}, two}};
+    for (const auto& [key, values] : updates)
+        ASSERT_TRUE(expected.set_scent(key, values));
+    ASSERT_TRUE(store.update_scent(updates));
+    EXPECT_EQ(store.serialize(), expected.serialize());
+    const auto before = store.serialize();
+    auto invalid = updates;
+    invalid[1].second = one;
+    invalid.back().second[0] = std::bit_cast<std::uint64_t>(-0.0);
+    EXPECT_FALSE(store.update_scent(invalid));
+    EXPECT_EQ(store.serialize(), before);
+    invalid = updates;
+    invalid[1].second = one;
+    invalid.push_back(updates.back()); // duplicate admission
+    EXPECT_FALSE(store.update_scent(invalid));
+    EXPECT_EQ(store.serialize(), before);
+}
+
+TEST(FieldPageStateTest, WeatherClockBatchRefusesBeforeChangingAnyAuthority) {
+    auto store = ActivatedStore();
+    ASSERT_TRUE(store.set_weather_age({0, 0}, 19));
+    const auto before = store.serialize();
+    EXPECT_FALSE(store.replace_weather({}, {}, {{{0, 0}, WorldClock::kTickLimit}}));
+    EXPECT_EQ(store.serialize(), before);
+    EXPECT_FALSE(store.replace_weather({}, {}, {{{32768, 0}, 1}}));
+    EXPECT_EQ(store.serialize(), before);
+    auto expected = store;
+    ASSERT_TRUE(expected.set_weather_age({0, 0}, 20));
+    ASSERT_TRUE(store.replace_weather({}, {}, {{{0, 0}, 20}}));
+    EXPECT_EQ(store.serialize(), expected.serialize());
+}
+
 TEST(FieldPageStateTest, WeatherCapacityIsOwnerAwareAndRefusesAtomically) {
     FieldPageState store;
     std::vector<RegionalStorm> storms;
