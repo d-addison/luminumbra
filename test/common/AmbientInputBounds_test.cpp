@@ -1,0 +1,202 @@
+// Guard-page regression for FastNoise batch inputs.
+//
+// FastNoise's GenPositionArray2D tail loads a full SIMD vector from the x/y input arrays, so an
+// input whose length is not a whole vector can read past its end. The probe places each input so
+// it ends exactly at a page boundary, with the following page unmapped. The vendored tail load is
+// expected to fault for an exact-size 2-element input, and a 16-element padded input must not.
+// The fault probe is Linux only and also runs in the AddressSanitizer lane: the faulting read is
+// in FastNoise, which the project's ASan configuration does not instrument, so the guard page
+// (not ASan) detects it, and the process-wide SIGSEGV handler is allowed by ASan's default
+// allow_user_segv_handler. Other platforms run the padded call without a guard page.
+// Non-applicable fault probes pass with a probe_status property and an explicit output marker,
+// because CI rejects skipped tests. The ASan qualification lane requires probe_status=ran.
+
+#include <gtest/gtest.h>
+
+#include <array>
+#include <cmath>
+#include <cstddef>
+#include <iostream>
+#include <string>
+#include <vector>
+
+#include "luminumbra_common/systems/AmbientNoiseDispatch.h"
+
+#if defined(__linux__)
+#include <cerrno>
+#include <csetjmp>
+#include <csignal>
+#include <cstdlib>
+#include <cstring>
+#include <sys/mman.h>
+#include <unistd.h>
+#endif
+
+namespace {
+
+#if defined(__linux__)
+
+// The SIGSEGV handler can only reach the jump target through process-global state.
+// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
+sigjmp_buf g_jump;
+// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
+volatile sig_atomic_t g_armed = 0;
+
+void OnSegv(int) {
+    if (g_armed) {
+        siglongjmp(g_jump, 1);
+    }
+    _exit(139);
+}
+
+FastSIMD::eLevel ActiveSimdLevel() {
+    return Luminumbra::Systems::NewAmbientNoise<FastNoise::FractalFBm>()->GetSIMDLevel();
+}
+
+// True when the active ISA uses a wide vector tail load; a scalar level has no such load.
+bool VectorTailLoadsBeyondCount() {
+    const FastSIMD::eLevel level = ActiveSimdLevel();
+    return level != FastSIMD::Level_Scalar && level != FastSIMD::Level_Null;
+}
+
+// Places each input so it ends at a page boundary with the next page unmapped, then runs the
+// fractal batch call. Returns true when the call faulted, and false when the probe itself could
+// not be set up (the failure is reported with ADD_FAILURE).
+bool ProbeFaults(std::size_t buffer_floats, int count) {
+    const std::size_t page = static_cast<std::size_t>(sysconf(_SC_PAGESIZE));
+    const std::size_t bytes = 2 * page;
+    void* mem[2] = {MAP_FAILED, MAP_FAILED};
+    const auto release = [&]() {
+        for (void* region : mem) {
+            if (region != MAP_FAILED) {
+                munmap(region, bytes);
+            }
+        }
+    };
+    for (void*& region : mem) {
+        region = mmap(nullptr, bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (region == MAP_FAILED) {
+            ADD_FAILURE() << "mmap failed for the guard-page probe: " << std::strerror(errno);
+            release();
+            return false;
+        }
+    }
+
+    float* inputs[2] = {nullptr, nullptr};
+    for (int k = 0; k < 2; ++k) {
+        char* base = static_cast<char*>(mem[k]);
+        if (mprotect(base + page, page, PROT_NONE) != 0) {
+            ADD_FAILURE() << "mprotect failed for the guard page: " << std::strerror(errno);
+            release();
+            return false;
+        }
+        float* in = reinterpret_cast<float*>(base + page) - buffer_floats;
+        for (std::size_t i = 0; i < buffer_floats; ++i) {
+            in[i] = i < static_cast<std::size_t>(count) ? 0.37f * static_cast<float>(i + 1) : 0.0f;
+        }
+        inputs[k] = in;
+    }
+
+    auto fractal = Luminumbra::Systems::NewAmbientNoise<FastNoise::FractalFBm>();
+    auto simplex = Luminumbra::Systems::NewAmbientNoise<FastNoise::Simplex>();
+    fractal->SetSource(simplex);
+    fractal->SetOctaveCount(2);
+
+    std::array<float, 16> out{};
+    struct sigaction action {};
+    struct sigaction previous {};
+    action.sa_handler = OnSegv;
+    sigemptyset(&action.sa_mask);
+    action.sa_flags = SA_NODEFER;
+    if (sigaction(SIGSEGV, &action, &previous) != 0) {
+        ADD_FAILURE() << "sigaction install failed for the guard-page probe: "
+                      << std::strerror(errno);
+        release();
+        return false;
+    }
+
+    volatile bool faulted = false;
+    if (sigsetjmp(g_jump, 1) == 0) {
+        g_armed = 1;
+        fractal->GenPositionArray2D(out.data(), count, inputs[0], inputs[1], 0.0f, 0.0f, 424242);
+        g_armed = 0;
+        faulted = false;
+    } else {
+        g_armed = 0;
+        faulted = true;
+    }
+
+    if (sigaction(SIGSEGV, &previous, nullptr) != 0) {
+        ADD_FAILURE() << "sigaction restore failed after the guard-page probe: "
+                      << std::strerror(errno);
+    }
+    release();
+    return faulted;
+}
+
+#endif // defined(__linux__)
+
+// Empty when the fault probe applies to this build and ISA; otherwise the reason it does not.
+std::string ProbeNotApplicableReason() {
+#if defined(__linux__)
+    if (!VectorTailLoadsBeyondCount()) {
+        return "active SIMD level has no wide tail load";
+    }
+    return "";
+#else
+    return "guard-page probe is Linux only";
+#endif
+}
+
+TEST(AmbientInputBounds, UnpaddedTwoElementInputFaultsAtActiveIsa) {
+    const std::string reason = ProbeNotApplicableReason();
+    if (!reason.empty()) {
+        const std::string status = "not_applicable:" + reason;
+        RecordProperty("probe_status", status);
+        std::cout << "AMBIENT_PROBE probe_status=" << status << std::endl;
+        return;
+    }
+#if defined(__linux__)
+    const int active_simd = static_cast<int>(ActiveSimdLevel());
+    RecordProperty("noise_simd_level", active_simd);
+    EXPECT_TRUE(ProbeFaults(2, 2))
+        << "the vendored tail load is expected to read past an exact-size input";
+    if (!HasFailure()) {
+        RecordProperty("probe_status", "ran");
+        std::cout << "AMBIENT_PROBE probe_status=ran active_simd=" << active_simd << std::endl;
+    }
+#endif
+}
+
+TEST(AmbientInputBounds, SixteenElementPaddedInputDoesNotFault) {
+    // Runs on every Linux build, including AddressSanitizer and scalar levels: a padded input
+    // never faults, so there is no reason to exclude it.
+#if defined(__linux__)
+    RecordProperty("noise_simd_level", static_cast<int>(ActiveSimdLevel()));
+    RecordProperty("probe_status", "ran");
+    EXPECT_FALSE(ProbeFaults(16, 2))
+        << "a whole-vector padded input must not fault on the tail load";
+#else
+    // No guard-page probe off Linux: still run the padded call pattern on heap inputs so the
+    // padded regression covers every lane, and require finite output.
+    RecordProperty("probe_status", "ran_without_guard_page");
+    constexpr int kCount = 2;
+    std::vector<float> xs(16, 0.0f);
+    std::vector<float> ys(16, 0.0f);
+    for (int i = 0; i < kCount; ++i) {
+        xs[static_cast<std::size_t>(i)] = 0.37f * static_cast<float>(i + 1);
+        ys[static_cast<std::size_t>(i)] = 0.53f * static_cast<float>(i + 1);
+    }
+    auto fractal = Luminumbra::Systems::NewAmbientNoise<FastNoise::FractalFBm>();
+    auto simplex = Luminumbra::Systems::NewAmbientNoise<FastNoise::Simplex>();
+    fractal->SetSource(simplex);
+    fractal->SetOctaveCount(2);
+    std::array<float, 16> out{};
+    fractal->GenPositionArray2D(out.data(), kCount, xs.data(), ys.data(), 0.0f, 0.0f, 424242);
+    for (int i = 0; i < kCount; ++i) {
+        EXPECT_TRUE(std::isfinite(out[static_cast<std::size_t>(i)]));
+    }
+#endif
+}
+
+} // namespace

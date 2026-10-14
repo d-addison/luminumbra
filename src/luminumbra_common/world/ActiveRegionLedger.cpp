@@ -183,12 +183,29 @@ void ActiveRegionLedger::visit(const Vec3& anchor,
             record.last_proximity = clock.tick();
         }
 }
+void ActiveRegionLedger::evict_idle(const WorldClock& clock, const OwnershipProbe& owned) {
+    if (!owned)
+        return;
+    for (auto it = m_records.begin(); it != m_records.end();) {
+        const auto& r = it->second;
+        // Cheap record conditions first so the probe runs only for evictable records.
+        const bool idle = clock.tick() >= r.last_proximity &&
+                          clock.tick() - r.last_proximity >= kIdleEvictionTicks;
+        if (!r.pinned && !r.edited && !r.populated && r.water_cursor == 0 && idle &&
+            !owned(it->first)) {
+            m_legacyFrozenDigests.erase(it->first);
+            it = m_records.erase(it);
+        } else
+            ++it;
+    }
+}
 RegionSchedule ActiveRegionLedger::schedule(const WorldClock& clock,
                                             std::optional<std::span<const Vec3>> replicated_anchors,
                                             std::span<const RegionWork> work,
-                                            const DurableDigest& durable_digest) {
+                                            const DurableDigest& durable_digest,
+                                            const OwnershipProbe& owned) {
     auto next = *this;
-    auto result = next.schedule_in_place(clock, replicated_anchors, work, durable_digest);
+    auto result = next.schedule_in_place(clock, replicated_anchors, work, durable_digest, owned);
     *this = std::move(next);
     return result;
 }
@@ -196,7 +213,8 @@ RegionSchedule
 ActiveRegionLedger::schedule_in_place(const WorldClock& clock,
                                       std::optional<std::span<const Vec3>> replicated_anchors,
                                       std::span<const RegionWork> work,
-                                      const DurableDigest& durable_digest) {
+                                      const DurableDigest& durable_digest,
+                                      const OwnershipProbe& owned) {
     // The ceiling, not the canonical tick, is the latest world time this ledger
     // knows about. After reconciling an interrupted save the canonical tick is
     // older, and scheduling at an already elapsed tick would re-run it.
@@ -226,10 +244,16 @@ ActiveRegionLedger::schedule_in_place(const WorldClock& clock,
     for (const auto& anchor : anchors)
         visit(anchor, clock, result.rejected);
 
-    std::vector<RegionKey> order;
+    // std::map nodes are pointer stable and nothing is inserted after this point.
+    struct Row {
+        RegionKey key;
+        ActiveRegionRecord* record;
+    };
+    std::vector<Row> rows;
+    rows.reserve(m_records.size());
     for (auto& [key, record] : m_records) {
         record.pressure = 0;
-        order.push_back(key);
+        rows.push_back({key, &record});
     }
     for (const auto& units : accepted_work) {
         const auto total = Sum(Sum(units.region_ticks, units.entity_updates),
@@ -238,15 +262,15 @@ ActiveRegionLedger::schedule_in_place(const WorldClock& clock,
         record.pressure = Sum(record.pressure, total);
         result.work = Sum(result.work, total);
     }
-    std::sort(order.begin(), order.end(), [&](RegionKey a, RegionKey b) {
-        const auto& ra = m_records.at(a);
-        const auto& rb = m_records.at(b);
-        return std::tuple(Rank(ra), clock.tick() - ra.last_proximity, a) <
-               std::tuple(Rank(rb), clock.tick() - rb.last_proximity, b);
+    std::sort(rows.begin(), rows.end(), [&](const Row& a, const Row& b) {
+        const auto& ra = *a.record;
+        const auto& rb = *b.record;
+        return std::tuple(Rank(ra), clock.tick() - ra.last_proximity, a.key) <
+               std::tuple(Rank(rb), clock.tick() - rb.last_proximity, b.key);
     });
     const bool over = result.work > m_config.work_limit;
-    for (const auto key : order) {
-        auto& r = m_records.at(key);
+    for (const auto& row : rows) {
+        auto& r = *row.record;
         const bool near = r.visited && r.last_proximity == clock.tick();
         if (near || r.wake_pending) {
             r.over_hold = r.under_hold = 0;
@@ -262,28 +286,28 @@ ActiveRegionLedger::schedule_in_place(const WorldClock& clock,
     // Degrade the lowest priority eligible region; recover the highest. Then
     // apply all transitions (including forced wakes) in the forward total order.
     std::optional<RegionKey> selected;
-    const auto eligible = [&](RegionKey key) {
-        const auto& r = m_records.at(key);
+    const auto eligible = [&](const ActiveRegionRecord& r) {
         if ((r.visited && r.last_proximity == clock.tick()) || r.wake_pending)
             return false;
         return over ? r.state != RegionState::Frozen && r.over_hold == m_config.hold_ticks
                     : r.state != RegionState::Active && r.under_hold == m_config.hold_ticks;
     };
     if (over) {
-        for (auto it = order.rbegin(); it != order.rend(); ++it)
-            if (eligible(*it)) {
-                selected = *it;
+        for (auto it = rows.rbegin(); it != rows.rend(); ++it)
+            if (eligible(*it->record)) {
+                selected = it->key;
                 break;
             }
     } else {
-        for (const auto key : order)
-            if (eligible(key)) {
-                selected = key;
+        for (const auto& row : rows)
+            if (eligible(*row.record)) {
+                selected = row.key;
                 break;
             }
     }
-    for (const auto key : order) {
-        auto& r = m_records.at(key);
+    for (const auto& row : rows) {
+        const auto key = row.key;
+        auto& r = *row.record;
         const auto previous = r.state;
         if ((r.visited && r.last_proximity == clock.tick()) || r.wake_pending) {
             r.state = RegionState::Active;
@@ -301,6 +325,7 @@ ActiveRegionLedger::schedule_in_place(const WorldClock& clock,
                     throw std::invalid_argument(
                         "Freezing requires a durable region digest provider");
                 r.frozen_digest = durable_digest(key);
+                m_legacyFrozenDigests.erase(key);
                 r.frozen_at = clock.tick();
             }
             r.over_hold = r.under_hold = 0;
@@ -321,9 +346,10 @@ ActiveRegionLedger::schedule_in_place(const WorldClock& clock,
     std::string trace = "region_schedule:v1:";
     Append(trace, result.tick, 8);
     Append(trace, result.work, 8);
-    Append(trace, order.size(), 4);
-    for (const auto key : order) {
-        const auto& r = m_records.at(key);
+    Append(trace, rows.size(), 4);
+    for (const auto& row : rows) {
+        const auto key = row.key;
+        const auto& r = *row.record;
         Append(trace, static_cast<std::uint32_t>(key.x), 4);
         Append(trace, static_cast<std::uint32_t>(key.z), 4);
         Append(trace, static_cast<std::uint8_t>(r.state), 1);
@@ -342,6 +368,9 @@ ActiveRegionLedger::schedule_in_place(const WorldClock& clock,
         Append(trace, result.rejected.capacity, 4);
     }
     result.digest = Persistence::StableChecksum(trace);
+    // Retention runs after the digest so the digest and trace describe the pre-eviction state.
+    evict_idle(clock, owned);
+    result.ledger_records = m_records.size();
     return result;
 }
 
@@ -388,11 +417,28 @@ std::string ActiveRegionLedger::payload(bool observational) const {
 std::string ActiveRegionLedger::canonical_bytes() const {
     return m_records.empty() ? std::string{} : "active_regions:v1:" + payload(false);
 }
+bool ActiveRegionLedger::any_frozen_history() const {
+    for (const auto& [key, r] : m_records) {
+        (void)key;
+        if (r.state == RegionState::Frozen || r.frozen_at != 0 || r.frozen_digest != 0)
+            return true;
+    }
+    return false;
+}
 std::string ActiveRegionLedger::encode() const {
+    constexpr std::uint8_t kDigestProjection = 2;
+    const bool declare_projection = any_frozen_history() && m_legacyFrozenDigests.empty();
     std::string bytes = "ARL1";
-    Append(bytes, 1, 2);
+    Append(bytes, declare_projection ? 2 : 1, 2);
     Append(bytes, 0, 2);
     bytes += payload(true);
+    if (declare_projection) {
+        // Extension block: u32 length, then one TLV (u16 type, u32 length, value).
+        Append(bytes, 7, 4);
+        Append(bytes, 2, 2);
+        Append(bytes, 1, 4);
+        Append(bytes, kDigestProjection, 1);
+    }
     Append(bytes, Hash(bytes), 8);
     return bytes;
 }
@@ -404,11 +450,14 @@ bool ActiveRegionLedger::decode(std::string_view bytes,
         return false;
     Reader version_reader(bytes.substr(4));
     const auto version = version_reader.read(2);
-    if (version > 1) {
+    if (version > 2) {
         error = kFutureMessage;
         return false;
     }
-    if (version != 1 || bytes.size() < kHeaderBytes + 8 || bytes.size() > kMaxFileBytes)
+    // Version 2 carries a u32 extension length between the records and the checksum.
+    const std::size_t extension_prefix = version == 2 ? 4 : 0;
+    if (version == 0 || bytes.size() < kHeaderBytes + extension_prefix + 8 ||
+        bytes.size() > kMaxFileBytes)
         return false;
     try {
         Reader checksum(bytes.substr(bytes.size() - 8));
@@ -436,7 +485,12 @@ bool ActiveRegionLedger::decode(std::string_view bytes,
         if (has_anchor)
             result.set_local_anchor(anchor);
         const auto count = in.read(4);
-        if (count > kMaxRegions || bytes.size() != kHeaderBytes + count * kRecordBytes + 8)
+        if (count > kMaxRegions)
+            return false;
+        // Records end here; a version 2 extension length (checked below) follows them.
+        const std::uint64_t records_end = kHeaderBytes + count * kRecordBytes;
+        if (bytes.size() < records_end + extension_prefix + 8 ||
+            (version == 1 && bytes.size() != records_end + 8))
             return false;
         RegionKey previous{};
         for (std::uint64_t i = 0; i < count; ++i) {
@@ -487,7 +541,47 @@ bool ActiveRegionLedger::decode(std::string_view bytes,
                 (r.state == RegionState::Frozen && r.last_ticked >= r.frozen_at))
                 return false;
             result.m_records.emplace(key, r);
+            if (version == 1 &&
+                (r.state == RegionState::Frozen || r.frozen_at != 0 || r.frozen_digest != 0))
+                result.m_legacyFrozenDigests.insert(key);
         }
+        if (version == 2) {
+            const auto extension_length = in.read(4);
+            const auto extension_begin = records_end + 4;
+            if (extension_length == 0 || bytes.size() != extension_begin + extension_length + 8)
+                return false;
+            const std::string_view extension = bytes.substr(extension_begin, extension_length);
+            // Each TLV is u16 type, u32 length, value. The TLVs must exactly fill the block.
+            std::size_t at = 0;
+            bool have_previous = false;
+            std::uint64_t previous_type = 0;
+            while (at < extension.size()) {
+                if (extension.size() - at < 6)
+                    return false;
+                Reader tlv(extension.substr(at, 6));
+                const auto type = tlv.read(2);
+                const auto length = tlv.read(4);
+                at += 6;
+                if (length > extension.size() - at)
+                    return false;
+                const auto value = extension.substr(at, length);
+                at += length;
+                // Strictly ascending types refuse duplicates; type 2 is the only known type.
+                if ((have_previous && type <= previous_type) || type != 2 || length != 1)
+                    return false;
+                have_previous = true;
+                previous_type = type;
+                const auto projection = static_cast<unsigned char>(value[0]);
+                if (projection > 2) {
+                    error = kProjectionMessage;
+                    return false;
+                }
+                if (projection < 2)
+                    return false;
+            }
+        }
+        // A v1 envelope preserves its historical digests verbatim. Do not label them
+        // projection 2 until each has been recomputed at a later freeze or evicted.
         // Also refuses alternate encodings (negative zero, reserved bytes).
         if (result.encode() != bytes)
             return false;

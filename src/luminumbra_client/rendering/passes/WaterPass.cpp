@@ -178,10 +178,13 @@ WaterPass::execute(const RenderContext& ctx, const WaterPassInput& input, const 
     // --- 2. Activate Shader and Set Uniforms ---
     m_water_shader->use();
 
-    glm::mat4 projection = ReversedZPerspective(glm::radians(camera.Zoom),
-                                                (float)ctx.screen_width / (float)ctx.screen_height,
-                                                camera.GetNearPlane(),
-                                                camera.GetFarPlane());
+    glm::mat4 projection =
+        ctx.far_world_ladder
+            ? ctx.gbuffer_projection
+            : ReversedZPerspective(glm::radians(camera.Zoom),
+                                   (float)ctx.screen_width / (float)ctx.screen_height,
+                                   camera.GetNearPlane(),
+                                   camera.GetFarPlane());
     glm::mat4 view = camera.GetViewMatrix();
 
     // Set matrices

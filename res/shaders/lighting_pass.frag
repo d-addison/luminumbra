@@ -1,4 +1,5 @@
 #version 450 core
+#include "far_world_position.glsl"
 #include "config_constants.gen.glsl"
 out vec4 FragColor;
 
@@ -6,7 +7,7 @@ in vec2 TexCoords;
 
 // G-Buffer samplers (match g_buffer.frag output names)
 uniform sampler2D gPosition;          // RGB16F: full view-space position
-uniform sampler2D gNormalMaterial;    // RGB10A2: Octahedral normal + material ID
+uniform sampler2D gNormalMaterial;    // RGBA8: Oct normal, marker emissivity, material ID
 uniform sampler2D gAlbedoRoughness;   // RGBA8: RGB albedo + roughness
 uniform sampler2D gMetallicAO;        // RG16F: Metallic + AO
 uniform sampler2D u_ssao;
@@ -408,7 +409,8 @@ float computeSkyVisibility(vec3 viewPosFrag, vec3 viewNrm) {
         if (clip.w <= 0.0) break;               // behind eye -> stop
         vec2 uv = (clip.xy / clip.w) * 0.5 + 0.5;
         if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) break; // off-screen = treat as open
-        vec3 sampPos = texture(gPosition, uv).rgb;
+        vec3 sampPos = vec3(0.0);
+        if (!farWorldPosition(gPosition, u_sceneDepth, uv, sampPos)) continue;
         // gPosition is 0 where nothing was rendered (sky); skip those (open).
         if (dot(sampPos, sampPos) < 1e-6) continue;
         // The ray point p and the stored surface sampPos share the same screen
@@ -436,7 +438,11 @@ void main() {
     bool authored = authoredSurface.a > 0.5;
     // --- Step 1: Decode compressed G-Buffer ---
 
-    vec3 viewPos = texture(gPosition, TexCoords).rgb;
+    vec3 viewPos = vec3(0.0);
+    if (!farWorldPosition(gPosition, u_sceneDepth, TexCoords, viewPos)) {
+        FragColor = vec4(0.0);
+        return;
+    }
 
     // Decode octahedral normal and material ID
     vec4 normalData = texture(gNormalMaterial, TexCoords);
@@ -451,8 +457,12 @@ void main() {
     // Get metallic and AO
     vec2 matData = texture(gMetallicAO, TexCoords).xy;
     float Metallic = matData.r;
+    // Signed RG16F AO tag, mirrored by FarWorldSurfaceTag.h. Untagged values
+    // retain their original AO and shadow arithmetic, including Legacy water.
+    bool isFarSurface = matData.g < 0.0;
+    float materialAO = isFarSurface ? -matData.g - 1.0 : matData.g;
     float ao = u_staticStudio != 0 ? 1.0 : texture(u_ssao, TexCoords).r;
-    if (authored) ao *= clamp(matData.g, 0.0, 1.0);
+    if (authored) ao *= clamp(materialAO, 0.0, 1.0);
 
     // Transform to world space
     vec3 FragPos = vec3(u_inverseView * vec4(viewPos, 1.0));
@@ -499,7 +509,7 @@ void main() {
     vec3 Lo = vec3(0.0);
     // The input is the ray-travel direction; the BRDF needs surface-to-light.
     vec3 L_sun = normalize(-u_sun.direction);
-    float shadow = u_staticStudio != 0 ? 1.0 : CalculateShadow(FragPos, Normal, L_sun, abs(viewPos.z));
+    float shadow = (isFarSurface || u_staticStudio != 0) ? 1.0 : CalculateShadow(FragPos, Normal, L_sun, abs(viewPos.z));
     // Convert the authored sun COLOR into surface IRRADIANCE (x PI) so the
     // diffuse 1/PI division round-trips albedo faithfully (exposure-audit root
     // fix; see SUN_IRRADIANCE_SCALE above).
@@ -513,7 +523,7 @@ void main() {
     // tint the DIRECT key light by the glass
     // transmission along the light ray (white = no glass = identity). Applies to
     // whichever key the cascades hold (sun by day, the moon key at night).
-    vec3 shadowTint = SampleShadowTint(FragPos, abs(viewPos.z));
+    vec3 shadowTint = isFarSurface ? vec3(1.0) : SampleShadowTint(FragPos, abs(viewPos.z));
     Lo += CalculateLightContribution(L_sun, V, Normal, F0, Albedo, Metallic, a2, k, sunRadiance)
           * shadow * (1.0 - cloud_shadow) * shadowTint;
 
@@ -535,14 +545,14 @@ void main() {
         // a touch of softening: lift the floor a hair to avoid harsh black edges /
         // peter-panning from the wider-spread night cascade, while still reading as
         // a directional shadow.
-        float moonShadow = CalculateShadow(FragPos, Normal, L_moon, abs(viewPos.z));
+        float moonShadow = isFarSurface ? 1.0 : CalculateShadow(FragPos, Normal, L_moon, abs(viewPos.z));
         //  rendering: the moon-shadow FLOOR scales with the lunar phase.
         // A FULL moon throws PROPER, crisp cast shadows (floor ~0.25 -> shadows read as real
         // directional contrast, DayZ bright-night feel); toward NEW moon the moon is too dim
         // to cast hard shadow, so the floor lifts (~0.7) and shadows fade out gracefully
         // rather than crushing the already-dark scene to black. (Was a flat 0.5.)
         float moonShadowFloor = mix(0.70, 0.25, u_moonIllum);
-        moonShadow = mix(moonShadowFloor, 1.0, moonShadow);
+        if (!isFarSurface) moonShadow = mix(moonShadowFloor, 1.0, moonShadow);
         // Cool moonlight key. Brighter than the old fill so a moonlit night is
         // clearly NAVIGABLE (form + value), but obviously cooler + dimmer than day.
         // Terrain albedos are dark (linear ~0.01-0.07), so the albedo*radiance

@@ -19,6 +19,10 @@ namespace DeterministicMath = Luminumbra::DeterministicMath;
 
 namespace Luminumbra::Systems {
 
+static_assert((kWindExtentCells * kWindExtentCells) % 16 == 0,
+              "ambient position-array inputs must be whole 16-float vectors: FastNoise tail "
+              "loads read a full SIMD vector");
+
 namespace {
 
 // Tick -> base-direction noise coordinate. The base large-scale direction is a

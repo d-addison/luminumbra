@@ -9,6 +9,7 @@
 // proj, isolation) travels through RenderContext. These structs carry the rest.
 
 #include "../../include/luminumbra/core/Types.h" // u32
+#include "FarWorldSelection.h"
 #include "StaticModelTex.h" // namespace-scope StaticModelTex (the lookup return)
 #include "TerrainSubmit.h"  // SubmitTerrainChunksFn + TerrainSubmitStats
 
@@ -42,11 +43,11 @@ struct GBufferPassInput {
     // (ctx.frustum_planes is a pointer; the callback takes an array reference).
     SubmitTerrainChunksFn submit_terrain_chunks;
 
-    // Far-LOD region meshes drawn AFTER the live chunks, using the PASS's own
-    // geometry shader (so they cannot ride submit_terrain_chunks). nullptr when
-    // far-LOD is disabled -> the pass skips the block. Owned by RenderPipeline;
-    // the pass only calls far_lod->draw_gbuffer(shader, view, planes, d, i).
-    FarLodSystem* far_lod = nullptr;
+    // Exclusive selected far submission. Legacy uses the pass-owned shader;
+    // ladder consumes value commands synchronously through its owned backend.
+    FarWorldSelection far_selection;
+    FarLodSystem* legacy_far = nullptr;
+    FarWorldSubmitFn submit_ladder;
 
     // Root path for resolving on-disk LOD mesh variants (procgen tree palette).
     std::filesystem::path root_path;
@@ -72,6 +73,8 @@ struct GBufferPassInput {
 // accumulated with '+=' (mirrors GBufferPass.cpp geometry_pass_chunks /
 // geometry_pass_skinned_meshes today).
 struct GBufferDrawStats {
+    FarWorldRefusal refusal = FarWorldRefusal::None;
+    std::size_t invalid_program_refusals = 0;
     std::size_t terrain_visible_chunks = 0; // call site: '=' (terrain_visible_chunks)
     std::size_t terrain_draws = 0;          // call site: '+=' (terrain_draws)
     std::size_t terrain_indices = 0;        // call site: '+=' (terrain_indices_drawn)
@@ -79,6 +82,7 @@ struct GBufferDrawStats {
     std::size_t far_indices = 0;            // call site: '+=' (far_indices_drawn)
     std::size_t skinned_draws = 0;          // call site: '+=' (skinned_draws)
     std::size_t skinned_indices = 0;        // call site: '+=' (skinned_indices_drawn)
+    std::uint64_t far_water_indices = 0;    // actual combined G-buffer submission
     std::size_t authored_draws = 0;
     std::size_t authored_indices = 0;
 };
@@ -103,6 +107,13 @@ struct WaterDrawItem {
 // calls, ctx.screen_quad_vao for the caustics quad, ctx.opaque_scene +
 // ctx.gbuffer_depth (adopted) for the SSR/refraction reads, and ctx.lit_scene
 // for the draw target. So WaterPassInput carries ONLY the draw-item list.
+constexpr bool LadderWaterPassEligible(u32 snapshot_version,
+                                       u32 uploaded_version,
+                                       u32 indices,
+                                       bool valid_allocation,
+                                       bool enabled) noexcept {
+    return enabled && valid_allocation && indices != 0 && snapshot_version == uploaded_version;
+}
 struct WaterPassInput {
     std::vector<WaterDrawItem> draw_items;
 };

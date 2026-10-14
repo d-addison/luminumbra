@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <glad/glad.h>
 #include <glm/glm.hpp>
 #include <string>
@@ -14,7 +15,8 @@ class Shader {
 public:
     Shader(const char* vertexPath,
            const char* fragmentPath,
-           std::vector<std::string> feedback_varyings = {});
+           std::vector<std::string> feedback_varyings = {},
+           std::vector<std::string> defines = {});
     ~Shader();
 
     void use() const;
@@ -23,6 +25,10 @@ public:
     }
     GLuint Id() const {
         return m_id;
+    }
+    // Changes only after successful program adoption, including initial link.
+    std::uint64_t ProgramGeneration() const {
+        return m_program_generation;
     }
     const std::string& DebugName() const {
         return m_debug_name;
@@ -78,6 +84,8 @@ public:
 
 private:
     std::vector<std::string> m_feedback_varyings;
+    std::vector<std::string> m_defines;
+    std::uint64_t m_program_generation = 0;
     bool checkCompileErrors(GLuint shader, const std::string& type);
     GLint getUniformLocation(const std::string& name) const; // Helper to use the cache
 
