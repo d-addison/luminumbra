@@ -35,6 +35,7 @@
 
 #include <entt/entt.hpp>
 
+#include "CreaturePersistence.h"
 #include "components/AlarmComponents.h"
 #include "components/CircadianComponents.h" //  v2: circadian activity
 #include "components/CoreComponents.h"
@@ -46,9 +47,12 @@
 namespace luminumbra::ai {
 
 // Computes the id-ordered ecology sub-hash over every CreatureComponent-bearing
-// entity in `registry`. Returns the EMPTY string when the roster carries no
-// creatures (additivity-neutral; mirrors ComputeScentSubHash).
-inline std::string ComputeEcologySubHash(const entt::registry& registry) {
+// entity in `registry`. The enabled projection is the complete persisted state,
+// sorted by PersistentId with persistent references and exact float bits. It is
+// deliberately versioned separately from the unchanged legacy v2 projection.
+// Invalid enabled authority refuses through BuildCreatureSnapshot. Empty is neutral.
+inline std::string ComputeEcologySubHash(const entt::registry& registry,
+                                         bool active_regions = false) {
     namespace Comp = ::Luminumbra::Components;
 
     // id-sorted creature set -> stable order independent of view iteration order
@@ -57,6 +61,10 @@ inline std::string ComputeEcologySubHash(const entt::registry& registry) {
     std::vector<entt::entity> es(view.begin(), view.end());
     if (es.empty()) {
         return {}; // additivity-neutral: empty roster == empty sub-hash
+    }
+    if (active_regions) {
+        return ::Luminumbra::Persistence::StableChecksum(
+            "ecology:creatures:v3:" + SerializeCreatureSnapshot(BuildCreatureSnapshot(registry)));
     }
     std::sort(es.begin(), es.end(), [](entt::entity a, entt::entity b) {
         return entt::to_integral(a) < entt::to_integral(b);

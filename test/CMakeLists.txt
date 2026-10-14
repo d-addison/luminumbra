@@ -222,6 +222,8 @@ add_executable(common_tests
     common/ActiveRegionLedger_test.cpp
     common/DistantPolicy_test.cpp
     common/RegionConsumerGate_test.cpp
+    common/RegionRng_test.cpp
+    common/CreatureCoarse_test.cpp
     common/FoliageFieldPages_test.cpp
     common/WaterShare_test.cpp
     common/RegionalWater_test.cpp
