@@ -190,6 +190,7 @@ add_executable(common_tests
     common/WorldgenPreviewReinitRace_test.cpp
     common/MultiAnchorStreaming_test.cpp
     common/PromotionSimTruthDecoupling_test.cpp
+    common/WorldDurableResidency_test.cpp
     common/WaterDeterminism_test.cpp
     common/PlayerAvatar_test.cpp
     common/ReplicationProtocol_test.cpp
@@ -202,6 +203,7 @@ add_executable(common_tests
     common/ServerHeadlessHygiene_test.cpp
     common/SimulationClock_test.cpp
     common/ActiveRegionLedger_test.cpp
+    common/GroundObjectStore_test.cpp
     common/WorldClock_test.cpp
     common/StructurePlacement_test.cpp
     common/StructureStamping_test.cpp
@@ -1433,6 +1435,7 @@ add_executable(frontier_gates_test
     persistence/world_save_region_format_test.cpp
     persistence/persistence_hardening_test.cpp
     persistence/save_load_corruption_corpus_test.cpp
+    persistence/SaveTransaction_test.cpp
 )
 
 target_compile_definitions(frontier_gates_test PRIVATE
@@ -1866,6 +1869,11 @@ foreach(_lum_gtest_target ${LUMINUMBRA_GTEST_TARGETS})
         gtest_discover_tests(${_lum_gtest_target} DISCOVERY_TIMEOUT 120)
     endif()
 endforeach()
+
+# Apply child-only labels after discovery has registered the tests. This CTest
+# include mechanism works since CMake 3.10; discovery TEST_FILTER requires 3.22.
+set_property(DIRECTORY APPEND PROPERTY TEST_INCLUDE_FILES
+    "${CMAKE_CURRENT_SOURCE_DIR}/persistence/SaveTransactionCTest.cmake")
 
 # The deterministic forest geometry harness is manual because it validates a
 # pinned 16k-tree workload rather than ordinary unit behavior. It guards the

@@ -49,6 +49,7 @@ set(COMMON_SOURCES
 
     # Persistence
     ${CMAKE_CURRENT_LIST_DIR}/persistence/WorldPersistenceRoundtrip.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/persistence/SaveTransaction.cpp
     ${CMAKE_CURRENT_LIST_DIR}/persistence/WorldSaveService.cpp
     ${CMAKE_CURRENT_LIST_DIR}/persistence/SavedWorldCatalog.cpp
     ${CMAKE_CURRENT_LIST_DIR}/persistence/AsyncSavedWorldCatalog.cpp
@@ -93,6 +94,7 @@ set(COMMON_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/world/FarWantedSet.cpp
     ${CMAKE_CURRENT_LIST_DIR}/world/FarAuthorityOverlay.cpp
     ${CMAKE_CURRENT_LIST_DIR}/world/ActiveRegionLedger.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/world/GroundObjectStore.cpp
     ${CMAKE_CURRENT_LIST_DIR}/replay/RegionScheduleTrace.cpp
     ${CMAKE_CURRENT_LIST_DIR}/world/WorldClock.cpp
     ${CMAKE_CURRENT_LIST_DIR}/world/GameSession.cpp

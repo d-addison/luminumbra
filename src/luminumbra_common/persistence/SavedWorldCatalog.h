@@ -17,6 +17,9 @@ struct SavedWorld {
     std::size_t water_sim_cursor = 0;
     world::WorldClock clock;
     bool requires_active_regions = false;
+    // An interrupted indexed save left a journal. The listing is metadata-only; opening the world
+    // recovers it first (inspection itself never mutates).
+    bool pending_recovery = false;
     // Empty only when metadata, preset and all existing save artifacts are supported.
     std::string error;
 };
