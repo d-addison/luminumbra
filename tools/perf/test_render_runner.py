@@ -80,13 +80,25 @@ SURFACE_READY_PHASE = re.compile(r'EnsureSurfaceReadyNear[:/]')
 
 
 def _report_timeout(receipt, log):
+    truncated = False
     try:
-        payload = log.read_bytes()
+        with log.open('rb') as source:
+            source.seek(0, os.SEEK_END)
+            offset = max(0, source.tell() - TIMEOUT_LOG_TAIL_BYTES)
+            truncated = offset > 0
+            source.seek(offset)
+            payload = source.read(TIMEOUT_LOG_TAIL_BYTES)
     except OSError as error:
         payload = b''
         receipt['evidence_errors'].append(f'timeout log read: {error}')
-    tail = payload[-TIMEOUT_LOG_TAIL_BYTES:].decode('utf-8', errors='replace')
-    phases = [line for line in payload.decode('utf-8', errors='replace').splitlines()
+    tail = payload.decode('utf-8', errors='replace')
+    # Phase discovery is limited to the retained raw-byte window. Its first
+    # line may be a fragment, so it cannot establish a complete phase record.
+    complete_lines = tail.splitlines(keepends=True)
+    if truncated:
+        complete_lines = complete_lines[1:]
+    complete_lines = [line for line in complete_lines if line.endswith('\n')]
+    phases = [line for line in complete_lines
               if SURFACE_READY_PHASE.search(line)]
     last_phase = phases[-1].strip() if phases else None
     receipt.update(log_tail=tail, last_observed_phase=last_phase)

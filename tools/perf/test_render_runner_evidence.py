@@ -293,6 +293,61 @@ class RenderRunnerEvidenceTests(unittest.TestCase):
         self.assertEqual(clock.monotonic.call_count, 2)
         self.assertFalse(list(self.artifacts.glob('*.tmp')))
 
+    def test_timeout_log_read_is_bounded_and_old_phase_is_not_retained(self):
+        payload = b'EnsureSurfaceReadyNear: outside retained window\n' + b'x' * 20000
+        reads = []
+        class BoundedReader(io.BytesIO):
+            def read(self, size=-1):
+                reads.append(size)
+                self_outer.assertGreaterEqual(size, 0)
+                self_outer.assertLessEqual(size, runner.TIMEOUT_LOG_TAIL_BYTES)
+                return super().read(size)
+        self_outer = self
+        log = mock.Mock()
+        log.open.return_value = BoundedReader(payload)
+        receipt = {'timeout_seconds': 180, 'evidence_errors': []}
+        with redirect_stderr(io.StringIO()):
+            runner._report_timeout(receipt, log)
+        self.assertEqual(reads, [runner.TIMEOUT_LOG_TAIL_BYTES])
+        self.assertEqual(receipt['log_tail'], 'x' * runner.TIMEOUT_LOG_TAIL_BYTES)
+        self.assertIsNone(receipt['last_observed_phase'])
+
+    def test_timeout_partial_first_line_cannot_supply_phase(self):
+        fragment = b'EnsureSurfaceReadyNear: partial first line\n'
+        payload = b'x' * 10000 + fragment + b'q' * (runner.TIMEOUT_LOG_TAIL_BYTES - len(fragment))
+        log = self.root / 'partial-timeout.log'
+        log.write_bytes(payload)
+        receipt = {'timeout_seconds': 180, 'evidence_errors': []}
+        with redirect_stderr(io.StringIO()):
+            runner._report_timeout(receipt, log)
+        self.assertTrue(receipt['log_tail'].startswith(fragment.decode('ascii')))
+        self.assertIsNone(receipt['last_observed_phase'])
+
+    def test_timeout_unfinished_final_phase_preserves_last_complete_phase(self):
+        log = self.root / 'unfinished-timeout.log'
+        log.write_bytes(b'EnsureSurfaceReadyNear: completed phase\n'
+                        b'EnsureSurfaceReadyNear: unfinished phase')
+        receipt = {'timeout_seconds': 180, 'evidence_errors': []}
+        with redirect_stderr(io.StringIO()):
+            runner._report_timeout(receipt, log)
+        self.assertTrue(receipt['log_tail'].endswith('unfinished phase'))
+        self.assertEqual(receipt['last_observed_phase'], 'EnsureSurfaceReadyNear: completed phase')
+
+    def test_timeout_tail_invalid_utf8_and_read_failure_are_best_effort(self):
+        log = self.root / 'invalid-timeout.log'
+        log.write_bytes(b'\xff\nEnsureSurfaceReadyNear: final complete phase\n')
+        receipt = {'timeout_seconds': 180, 'evidence_errors': []}
+        with redirect_stderr(io.StringIO()):
+            runner._report_timeout(receipt, log)
+        self.assertIn('\ufffd', receipt['log_tail'])
+        self.assertEqual(receipt['last_observed_phase'], 'EnsureSurfaceReadyNear: final complete phase')
+        with mock.patch.object(Path, 'open', side_effect=OSError('fixture read refused')), \
+                redirect_stderr(io.StringIO()):
+            runner._report_timeout(receipt, log)
+        self.assertEqual(receipt['log_tail'], '')
+        self.assertIsNone(receipt['last_observed_phase'])
+        self.assertIn('timeout log read: fixture read refused', receipt['evidence_errors'])
+
     def test_timeout_reports_log_tail_and_last_observed_phase(self):
         slow = self.root / 'slow_child.py'
         slow.write_text(SLOW_CHILD)

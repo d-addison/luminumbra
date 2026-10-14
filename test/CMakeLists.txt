@@ -1145,8 +1145,13 @@ target_link_libraries(worldgen_probe PRIVATE
 
 luminumbra_configure_first_party_target(worldgen_probe)
 
+if(NOT Python3_EXECUTABLE)
+    find_package(Python3 COMPONENTS Interpreter REQUIRED)
+endif()
 add_test(NAME WorldgenProbeSmoke
-    COMMAND worldgen_probe --smoke --json ${CMAKE_CURRENT_BINARY_DIR}/worldgen_probe_smoke.json)
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tools/ci/check_worldgen_probe_smoke.py"
+            --probe "$<TARGET_FILE:worldgen_probe>"
+            --out "${CMAKE_CURRENT_BINARY_DIR}/worldgen_probe_smoke.json")
 set_tests_properties(WorldgenProbeSmoke PROPERTIES LABELS "perf" TIMEOUT 120)
 
 # Manual cold-load latency diagnostic. It exercises twenty interactive loads at

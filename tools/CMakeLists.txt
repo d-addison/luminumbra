@@ -42,6 +42,29 @@ if(BUILD_TESTING)
 
     find_package(Python3 COMPONENTS Interpreter REQUIRED)
     add_test(
+        NAME WorldgenProbeSmokeValidatorContract
+        COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_worldgen_probe_smoke.py")
+    set_tests_properties(WorldgenProbeSmokeValidatorContract
+        PROPERTIES LABELS "ci;tools" TIMEOUT 30)
+    if(UNIX AND NOT WIN32)
+        find_program(UCRT_ATTRIBUTION_BASH bash REQUIRED)
+        add_test(
+            NAME UcrtAttributionContract
+            COMMAND "${Python3_EXECUTABLE}"
+                    "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_ucrt_attribution.py"
+                    --bash "${UCRT_ATTRIBUTION_BASH}")
+        set_tests_properties(UcrtAttributionContract
+            PROPERTIES LABELS "ci;tools" TIMEOUT 30)
+        add_test(
+            NAME UcrtGccCohortContract
+            COMMAND "${Python3_EXECUTABLE}"
+                    "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_ucrt_gcc_cohort.py"
+                    --bash "${UCRT_ATTRIBUTION_BASH}")
+        set_tests_properties(UcrtGccCohortContract
+            PROPERTIES LABELS "ci;tools" TIMEOUT 30)
+    endif()
+    add_test(
         NAME PerformanceToolContract
         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/perf/test_perf.py")
     set_tests_properties(PerformanceToolContract PROPERTIES LABELS "perf;tools" TIMEOUT 30)
