@@ -16,6 +16,7 @@
 
 #include <array>
 #include <cstdint>
+#include <limits>
 #include <map>
 #include <string>
 
@@ -76,6 +77,12 @@ struct SimulationIdentityValues {
     std::array<bool, static_cast<std::size_t>(SysKey::Count)> enabled{};
     std::array<double, static_cast<std::size_t>(SysParam::Count)> scalars{};
     std::array<glm::vec3, static_cast<std::size_t>(SysParam::Count)> vectors{};
+    // Session options outside the SystemConfig registry, in canonical wire order.
+    bool finite_hydrology_enabled = true;
+    std::int32_t weather_rain_scale_mm = 25;
+    std::uint64_t region_work_limit = std::numeric_limits<std::uint64_t>::max();
+    std::uint32_t region_hold_ticks = 30;
+    std::uint8_t region_reduced_shift = 1;
 
     SimulationIdentityValues();
     [[nodiscard]] std::string ComputeIdentity() const;

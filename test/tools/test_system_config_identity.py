@@ -15,8 +15,10 @@ SCHEMA = json.loads(
 SHIPPED = json.loads((ROOT / "data/common/systems.json").read_text(encoding="utf-8-sig"))
 
 
-def canonical_bytes(document):
-    result = bytearray(b"system-config:v2:")
+def canonical_bytes(document, *, finite_hydrology=True, rain_scale_mm=25,
+                    region_work_limit=(1 << 64) - 1, region_hold_ticks=30,
+                    region_reduced_shift=1):
+    result = bytearray(b"system-config:v3:")
     for key_id, key in enumerate(SCHEMA["keys"]):
         if key["section"] != "sim" and key["enum"] != "RenderCircadian":
             continue
@@ -46,12 +48,14 @@ def canonical_bytes(document):
                     resolved = 0.0
                 result.extend(struct.pack("<d" if binary64 else "<I" if ticks else "<f",
                                           int(resolved) if ticks else resolved))
+    result.extend(struct.pack("<BiQIB", int(finite_hydrology), rain_scale_mm,
+                              region_work_limit, region_hold_ticks, region_reduced_shift))
     return bytes(result)
 
 
-def identity(document):
+def identity(document, **session_options):
     value = 14695981039346656037
-    for byte in canonical_bytes(document):
+    for byte in canonical_bytes(document, **session_options):
         value = ((value ^ byte) * 1099511628211) & ((1 << 64) - 1)
     return f"{value:016x}"
 
@@ -77,8 +81,8 @@ class SystemConfigIdentityTest(unittest.TestCase):
         self.assertNotEqual(identity(historical), identity(SHIPPED))
 
     def test_exact_shipping_pin(self):
-        self.assertEqual(len(canonical_bytes(SHIPPED)), 279)
-        self.assertEqual(identity(SHIPPED), "da24cea9dbc5159b")
+        self.assertEqual(len(canonical_bytes(SHIPPED)), 297)
+        self.assertEqual(identity(SHIPPED), "60ab3c242d54ce89")
         self.assertEqual(canonical_bytes({}), canonical_bytes(SHIPPED))
 
     def test_every_applied_flag_and_parameter(self):
@@ -112,6 +116,18 @@ class SystemConfigIdentityTest(unittest.TestCase):
         self.assertNotEqual(struct.pack("<I", (1 << 32) - 1), struct.pack("<I", (1 << 32) - 2))
         fractional_ticks = {"sim": {"reproduction": {"params": {"maturity_ticks": 90.75}}}}
         self.assertEqual(identity(fractional_ticks), identity({}))
+
+    def test_session_options_change_identity_independently(self):
+        baseline = identity(SHIPPED)
+        for options in ({"finite_hydrology": False}, {"rain_scale_mm": 26},
+                        {"rain_scale_mm": -(1 << 31)},
+                        {"region_work_limit": (1 << 64) - 2},
+                        {"region_hold_ticks": 31}, {"region_reduced_shift": 2}):
+            with self.subTest(options=options):
+                self.assertNotEqual(identity(SHIPPED, **options), baseline)
+        self.assertEqual(identity(SHIPPED, finite_hydrology=True, rain_scale_mm=25,
+                                  region_work_limit=(1 << 64) - 1, region_hold_ticks=30,
+                                  region_reduced_shift=1), baseline)
 
     def test_presentation_does_not_change_identity(self):
         changed = copy.deepcopy(SHIPPED)

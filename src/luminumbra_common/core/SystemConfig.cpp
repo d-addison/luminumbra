@@ -276,7 +276,7 @@ std::string SimulationIdentityValues::ComputeIdentity() const {
         hash ^= static_cast<std::uint64_t>(value);
         hash *= 1099511628211ull;
     };
-    for (const char ch : std::string("system-config:v2:"))
+    for (const char ch : std::string("system-config:v3:"))
         byte(static_cast<std::uint8_t>(static_cast<unsigned char>(ch)));
     const auto integer = [&byte](std::uint64_t bits, unsigned width) {
         for (unsigned shift = 0; shift < width; shift += 8)
@@ -315,6 +315,13 @@ std::string SimulationIdentityValues::ComputeIdentity() const {
             }
         }
     }
+    // Fixed-width session options follow the registry slots, without padding or float
+    // conversion. Signed rain scale uses its modulo-2^32 representation.
+    byte(static_cast<std::uint8_t>(finite_hydrology_enabled));
+    integer(static_cast<std::uint32_t>(weather_rain_scale_mm), 32);
+    integer(region_work_limit, 64);
+    integer(region_hold_ticks, 32);
+    byte(region_reduced_shift);
     // Hex digits are emitted explicitly so even the result is independent of locale.
     constexpr char digits[] = "0123456789abcdef";
     std::string result(16, '0');

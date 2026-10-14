@@ -108,7 +108,8 @@ struct ServerWorldRunnerConfig {
     bool water_smoke = false;
     bool sim_budget = false; // Opt-in simulation stage observation; default artifact unchanged.
     // Applied via GameSession::SetRegionSchedulerConfig right after the root path is set, so it
-    // takes effect for the fresh world Boot() creates. Empty = session default.
+    // takes effect for the fresh world Boot() creates. A loaded ledger must match an explicit
+    // override; empty restores persisted settings, or defaults when no ledger exists.
     std::optional<Luminumbra::world::RegionSchedulerConfig> region_scheduler;
 };
 

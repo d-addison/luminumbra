@@ -141,7 +141,11 @@ TEST(LockstepSessionTest, EffectiveConfigIdentityAcceptsEqualAndRejectsDifferent
         hello.client_id = 1;
         hello.system_config_identity = identity;
         ASSERT_TRUE(peer_transport->SendFrame(net::EncodeHello(hello)));
-        const bool equal = hello.system_config_identity == baseline;
+        const bool equal = name == "identical";
+        EXPECT_EQ(hello.system_config_identity == baseline, equal);
+        auto expected_hello = hello;
+        expected_hello.system_config_identity = baseline;
+        EXPECT_EQ(net::HelloMatches(expected_hello, hello), equal);
         EXPECT_EQ(host.Handshake(), equal);
         EXPECT_EQ(host.Status().handshaken, equal);
         EXPECT_EQ(world.tick, 0u);

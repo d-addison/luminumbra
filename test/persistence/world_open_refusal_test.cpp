@@ -1,10 +1,12 @@
 #include <gtest/gtest.h>
 
 #include "luminumbra_common/core/JobSystem.h"
+#include "luminumbra_common/net/LockstepSession.h"
 #include "luminumbra_common/persistence/SavedWorldCatalog.h"
 #include "luminumbra_common/persistence/SyntheticSaveFixture.h"
 #include "luminumbra_common/persistence/WorldPersistenceRoundtrip.h"
 #include "luminumbra_common/persistence/WorldSaveService.h"
+#include "luminumbra_common/replay/ReplayStream.h"
 #include "luminumbra_common/systems/AetherFieldSystem.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 #include "luminumbra_common/systems/WeatherSystem.h"
@@ -840,6 +842,216 @@ TEST_F(WorldOpenRefusal, MenuWorldCreatesNoSaveAndClearsPreviousWorldState) {
     EXPECT_TRUE(session.GetWorldSystem()->snapshot_streamed_chunks().empty());
     EXPECT_FALSE(session.SaveWorld());
     EXPECT_FALSE(session.SaveWorldState());
+    EXPECT_EQ(DiskBytes(root), before);
+}
+
+TEST_F(WorldOpenRefusal, AbsentLedgerPreservesSchedulerAndRestoresClockWithoutRegionState) {
+    const world::RegionSchedulerConfig scheduler{10, 3, 2};
+    world::ActiveRegionLedger ledger(scheduler);
+    ledger.set_local_anchor(Vec3(8, 18, 8));
+    ledger.pin({0, 0}, true, world::WorldClock{});
+    const world::WorldClock restored(45);
+    std::vector<std::string> errors;
+    ASSERT_FALSE(fs::exists(WorldSaveService::active_regions_path(save)));
+    ASSERT_TRUE(WorldSaveService::load_active_regions(ledger, save, &errors, restored));
+    EXPECT_TRUE(errors.empty());
+    EXPECT_EQ(ledger.config(), scheduler);
+    EXPECT_EQ(ledger.tick(), restored.tick());
+    EXPECT_EQ(ledger.header_tick(), restored.tick());
+    EXPECT_TRUE(ledger.records().empty());
+    EXPECT_FALSE(ledger.local_anchor().has_value());
+}
+
+TEST_F(WorldOpenRefusal, FreshRunnerBootAndAbsentLedgerReloadPreserveSchedulerIdentity) {
+    const world::RegionSchedulerConfig scheduler{10, 3, 2};
+    Server::ServerWorldRunnerConfig config;
+    config.root_path = RootString();
+    config.systems_config_override = luminumbra::core::SystemConfig::Defaults();
+    config.region_scheduler = scheduler;
+    config.surface_radius = 0;
+    config.collision_radius = 0;
+    config.test_streaming_radius_cap = 1;
+    config.autosave_interval_ticks = 0;
+    GameSession expected;
+    expected.ApplySystemConfig(*config.systems_config_override);
+    expected.SetRegionSchedulerConfig(scheduler);
+    Server::ServerWorldRunner runner(config);
+    ASSERT_TRUE(runner.Boot()) << runner.GetBootError();
+    ASSERT_NE(runner.Session(), nullptr);
+    ASSERT_TRUE(runner.Session()->ActiveRegionsEnabled());
+    EXPECT_EQ(runner.Session()->GetActiveRegionLedger().config(), scheduler);
+    EXPECT_EQ(runner.Session()->SystemConfigIdentity(), expected.SystemConfigIdentity());
+    EXPECT_NE(runner.Session()->SystemConfigIdentity(), GameSession{}.SystemConfigIdentity());
+    const auto ledger_path =
+        WorldSaveService::active_regions_path(runner.Session()->GetWorldSaveDir());
+    ASSERT_TRUE(fs::remove(ledger_path));
+    ASSERT_TRUE(runner.Session()->LoadWorldState()) << runner.Session()->GetWorldOpenError();
+    EXPECT_EQ(runner.Session()->GetActiveRegionLedger().config(), scheduler);
+    EXPECT_EQ(runner.Session()->SystemConfigIdentity(), expected.SystemConfigIdentity());
+    EXPECT_EQ(runner.TickCount(), 0u);
+    config.world_id = runner.Session()->GetMetadata().worldId;
+    runner.Shutdown();
+    // A subsequent runner with no override must identify the saved effective scheduler.
+    config.region_scheduler.reset();
+    const auto before = DiskBytes(root);
+    Server::ServerWorldRunner loaded(config);
+    ASSERT_TRUE(loaded.Boot()) << loaded.GetBootError();
+    EXPECT_EQ(loaded.Session()->GetActiveRegionLedger().config(), scheduler);
+    EXPECT_EQ(loaded.Session()->SystemConfigIdentity(), expected.SystemConfigIdentity());
+    EXPECT_EQ(DiskBytes(root), before);
+    loaded.Shutdown();
+}
+
+TEST_F(WorldOpenRefusal, PersistedSchedulerIdentityRefusesDifferentAdmissionAndReplayRules) {
+    // Each field changes independently while both sessions start with default member storage.
+    // Identity must observe the decoded ledger rather than that original storage.
+    world::RegionSchedulerConfig work_limit, hold_ticks, reduced_shift;
+    --work_limit.work_limit;
+    ++hold_ticks.hold_ticks;
+    ++reduced_shift.reduced_shift;
+    GameSession baseline;
+    baseline.SetRootPath(RootString());
+    baseline.SetJobSystem(&jobs);
+    ASSERT_TRUE(baseline.LoadWorld("fixture")) << baseline.GetWorldOpenError();
+    const auto baseline_identity = baseline.SystemConfigIdentity();
+    for (const auto scheduler : {work_limit, hold_ticks, reduced_shift}) {
+        SCOPED_TRACE(scheduler.work_limit);
+        SCOPED_TRACE(scheduler.hold_ticks);
+        SCOPED_TRACE(static_cast<unsigned>(scheduler.reduced_shift));
+        world::ActiveRegionLedger persisted(scheduler);
+        persisted.set_local_anchor(Vec3(8, 18, 8));
+        Write(WorldSaveService::active_regions_path(save), persisted.encode());
+        const auto before = DiskBytes(root);
+        GameSession loaded, expected;
+        loaded.SetRootPath(RootString());
+        loaded.SetJobSystem(&jobs);
+        ASSERT_TRUE(loaded.LoadWorld("fixture")) << loaded.GetWorldOpenError();
+        expected.SetRegionSchedulerConfig(scheduler);
+        EXPECT_EQ(loaded.GetActiveRegionLedger().config(), scheduler);
+        EXPECT_EQ(loaded.SystemConfigIdentity(), expected.SystemConfigIdentity());
+        ASSERT_NE(loaded.SystemConfigIdentity(), baseline_identity);
+        EXPECT_EQ(DiskBytes(root), before);
+
+        Net::LockstepConfig local;
+        local.local_client_id = 0;
+        local.peer_client_id = 1;
+        local.system_config_identity = baseline_identity;
+        Net::HelloMsg hello;
+        hello.seed = local.seed;
+        hello.preset = local.preset;
+        hello.tick_rate_hz = local.tick_rate_hz;
+        hello.client_id = 1;
+        hello.system_config_identity = loaded.SystemConfigIdentity();
+        auto expected_hello = hello;
+        expected_hello.system_config_identity = baseline_identity;
+        EXPECT_FALSE(Net::HelloMatches(expected_hello, hello)); // TCP admission
+        auto [host_transport, peer_transport] = Net::MakeLoopbackPair();
+        Net::LockstepSession host(local, host_transport.get(), {});
+        ASSERT_TRUE(peer_transport->SendFrame(Net::EncodeHello(hello)));
+        EXPECT_FALSE(host.Handshake());
+        EXPECT_FALSE(host.Status().handshaken);
+
+        Replay::ReplayHeader header;
+        header.system_config_identity = baseline_identity;
+        const auto replay_path = root / "scheduler.lrec1";
+        Replay::ReplayWriter writer;
+        ASSERT_TRUE(writer.Open(replay_path.string(), header));
+        ASSERT_TRUE(writer.Finalize(0));
+        const auto replay = Replay::ReadReplay(replay_path.string());
+        ASSERT_TRUE(replay.has_value());
+        EXPECT_TRUE(Replay::ConfigurationMatches(replay->header, baseline_identity));
+        EXPECT_FALSE(Replay::ConfigurationMatches(replay->header, loaded.SystemConfigIdentity()));
+        auto matching_header = replay->header;
+        matching_header.system_config_identity = loaded.SystemConfigIdentity();
+        EXPECT_TRUE(Replay::ConfigurationMatches(matching_header, expected.SystemConfigIdentity()));
+        EXPECT_EQ(baseline.GetSimulationTickCount(), 0u);
+        EXPECT_EQ(loaded.GetSimulationTickCount(), 0u);
+        ASSERT_TRUE(fs::remove(replay_path));
+    }
+}
+
+TEST_F(WorldOpenRefusal, LoadedSchedulerSurvivesTransientCreateAndAbsentLedgerReplacement) {
+    const world::RegionSchedulerConfig scheduler{10, 3, 2};
+    world::ActiveRegionLedger persisted(scheduler);
+    persisted.set_local_anchor(Vec3(8, 18, 8));
+    Write(WorldSaveService::active_regions_path(save), persisted.encode());
+    GameSession session, expected;
+    session.SetRootPath(RootString());
+    session.SetJobSystem(&jobs);
+    expected.SetRegionSchedulerConfig(scheduler);
+    ASSERT_TRUE(session.LoadWorld("fixture")) << session.GetWorldOpenError();
+    const auto expect_scheduler = [&]() {
+        EXPECT_EQ(session.GetActiveRegionLedger().config(), scheduler);
+        EXPECT_EQ(session.SystemConfigIdentity(), expected.SystemConfigIdentity());
+    };
+    expect_scheduler();
+    ASSERT_TRUE(session.CreateTransientWorld("Scheduler menu", "1337", "default"));
+    expect_scheduler();
+    ASSERT_TRUE(session.LoadWorldState());
+    expect_scheduler();
+    // Exercise direct state load into an existing transient world, followed by an absent file.
+    ASSERT_TRUE(session.LoadWorldStateFrom(save)) << session.GetWorldOpenError();
+    expect_scheduler();
+    ASSERT_TRUE(fs::remove(WorldSaveService::active_regions_path(save)));
+    ASSERT_TRUE(session.LoadWorldStateFrom(save)) << session.GetWorldOpenError();
+    expect_scheduler();
+    ASSERT_TRUE(session.CreateWorld("Scheduler reset", "1337", "default"));
+    expect_scheduler();
+    ASSERT_TRUE(session.LoadWorldState());
+    expect_scheduler();
+}
+
+TEST_F(WorldOpenRefusal, ExplicitSchedulerConflictRefusesLoadAndRunnerBootWithoutWriting) {
+    const world::RegionSchedulerConfig scheduler{10, 3, 2};
+    world::ActiveRegionLedger persisted(scheduler);
+    persisted.set_local_anchor(Vec3(8, 18, 8));
+    Write(WorldSaveService::active_regions_path(save), persisted.encode());
+    const auto before = DiskBytes(root);
+    // A matching explicit override is accepted and preserves all decoded scheduler state.
+    GameSession matching;
+    matching.SetRootPath(RootString());
+    matching.SetJobSystem(&jobs);
+    matching.SetRegionSchedulerConfig(scheduler);
+    const auto matching_identity = matching.SystemConfigIdentity();
+    ASSERT_TRUE(matching.LoadWorld("fixture")) << matching.GetWorldOpenError();
+    EXPECT_EQ(matching.SystemConfigIdentity(), matching_identity);
+    EXPECT_EQ(matching.GetActiveRegionLedger().canonical_bytes(), persisted.canonical_bytes());
+    const std::string conflict =
+        "Incompatible configuration: persisted region scheduler differs from explicit override.";
+    auto work_limit = scheduler, hold_ticks = scheduler, reduced_shift = scheduler;
+    ++work_limit.work_limit;
+    ++hold_ticks.hold_ticks;
+    ++reduced_shift.reduced_shift;
+    for (const auto override_config :
+         {work_limit, hold_ticks, reduced_shift, world::RegionSchedulerConfig{}}) {
+        GameSession refused;
+        refused.SetRootPath(RootString());
+        refused.SetJobSystem(&jobs);
+        refused.SetRegionSchedulerConfig(override_config);
+        const auto requested_identity = refused.SystemConfigIdentity();
+        EXPECT_FALSE(refused.LoadWorld("fixture"));
+        EXPECT_EQ(refused.GetWorldOpenError(), conflict);
+        EXPECT_EQ(refused.GetActiveRegionLedger().config(), override_config);
+        EXPECT_EQ(refused.SystemConfigIdentity(), requested_identity);
+        EXPECT_FALSE(refused.SaveWorld());
+        EXPECT_EQ(DiskBytes(root), before);
+        // The direct state-load entry point enforces the same conflict policy.
+        ASSERT_TRUE(refused.CreateTransientWorld("Scheduler conflict", "1337", "default"));
+        EXPECT_FALSE(refused.LoadWorldStateFrom(save));
+        EXPECT_EQ(refused.GetWorldOpenError(), conflict);
+        EXPECT_EQ(refused.GetActiveRegionLedger().config(), override_config);
+        EXPECT_EQ(refused.SystemConfigIdentity(), requested_identity);
+        EXPECT_EQ(DiskBytes(root), before);
+    }
+    Server::ServerWorldRunnerConfig config;
+    config.root_path = RootString();
+    config.world_id = "fixture";
+    config.systems_config_override = luminumbra::core::SystemConfig::Defaults();
+    config.region_scheduler = world::RegionSchedulerConfig{};
+    Server::ServerWorldRunner runner(config);
+    EXPECT_FALSE(runner.Boot());
+    EXPECT_EQ(runner.GetBootError(), conflict);
+    EXPECT_EQ(runner.Session(), nullptr);
     EXPECT_EQ(DiskBytes(root), before);
 }
 

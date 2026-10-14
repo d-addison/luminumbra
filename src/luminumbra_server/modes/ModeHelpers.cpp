@@ -21,6 +21,10 @@ Luminumbra::Net::HelloMsg RuntimeHelloFrom(const ServerCliOptions& options) {
     session.ApplySystemConfig(options.systems_config_override
                                   ? *options.systems_config_override
                                   : luminumbra::core::SystemConfig::LoadFromFile(path.string()));
+    const auto runner_config = RunnerConfigFrom(options);
+    session.SetFiniteHydrologyEnabled(runner_config.finite_hydrology);
+    if (runner_config.region_scheduler)
+        session.SetRegionSchedulerConfig(*runner_config.region_scheduler);
     hello.system_config_identity = session.SystemConfigIdentity();
     return hello;
 }

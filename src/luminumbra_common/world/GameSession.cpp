@@ -183,7 +183,7 @@ void GameSession::ResetWorldSystems() {
     m_simulationClock.reset();
     m_simBudgetTelemetry.Clear();
     m_worldClock = WorldClock{};
-    m_activeRegionLedger = ActiveRegionLedger(m_regionSchedulerConfig);
+    ReplaceActiveRegionLedger(ActiveRegionLedger(m_regionSchedulerConfig));
     m_regionSchedule = {};
     m_replicatedSimulationAnchors.reset();
     m_regionWork.clear();
@@ -251,6 +251,12 @@ std::string GameSession::SystemConfigIdentity() const {
     using luminumbra::core::SysKey;
     using luminumbra::core::SysParam;
     luminumbra::core::SimulationIdentityValues values;
+    values.finite_hydrology_enabled = m_finiteHydrologyEnabled;
+    values.weather_rain_scale_mm = m_weatherRainScaleMm;
+    const auto& scheduler = m_activeRegionLedger.config();
+    values.region_work_limit = scheduler.work_limit;
+    values.region_hold_ticks = scheduler.hold_ticks;
+    values.region_reduced_shift = scheduler.reduced_shift;
     // Tuning-only gates resolve to values in ApplySystemConfig; their flags are
     // normalized to true. Erosion has no session gate. Preserve the canonical slots.
     values.enabled[static_cast<std::size_t>(SysKey::SimHydrologyWeather)] = m_weatherRainEnabled;
@@ -1501,8 +1507,13 @@ void GameSession::RunRegionScheduler(std::uint64_t current_tick) {
 void GameSession::SetRegionSchedulerConfig(RegionSchedulerConfig config) {
     if (m_worldSystem)
         throw std::logic_error("Set region scheduler configuration before creating a world");
-    m_activeRegionLedger = ActiveRegionLedger(config);
-    m_regionSchedulerConfig = config;
+    ReplaceActiveRegionLedger(ActiveRegionLedger(config));
+    m_regionSchedulerOverride = config;
+}
+void GameSession::ReplaceActiveRegionLedger(ActiveRegionLedger ledger) {
+    m_activeRegionLedger = std::move(ledger);
+    // Retain the effective settings when create/transient/reset clears region state.
+    m_regionSchedulerConfig = m_activeRegionLedger.config();
 }
 void GameSession::LatchRegionFault(std::uint64_t tick, std::string message) {
     if (m_regionFault)
@@ -1833,7 +1844,7 @@ bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
     if (m_activeRegionsEnabled) {
         const Vec3 previous_ambient_anchor = m_ambientFieldAnchor;
         m_ambientFieldAnchor = ambient_anchor.value_or(m_metadata.spawnPoint);
-        ActiveRegionLedger ledger;
+        ActiveRegionLedger ledger(m_activeRegionLedger.config());
         if (!Persistence::WorldSaveService::load_active_regions(
                 ledger, save_dir, &clock_errors, saved_clock)) {
             m_ambientFieldAnchor = previous_ambient_anchor;
@@ -1843,11 +1854,18 @@ bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
             m_worldSystem->clear_world(m_physicsSystem.get());
             return false;
         }
+        if (m_regionSchedulerOverride && ledger.config() != *m_regionSchedulerOverride) {
+            m_ambientFieldAnchor = previous_ambient_anchor;
+            m_worldOpenError = "Incompatible configuration: persisted region scheduler differs "
+                               "from explicit override.";
+            m_worldSystem->clear_world(m_physicsSystem.get());
+            return false;
+        }
         // Validation accepted ledger.tick() <= saved_clock.tick(). An interrupted
         // pair can be strictly older. Rebase its header without scheduling work,
         // so immediate edits/save stamps at the restored clock remain decodable.
         ledger.restore_clock(saved_clock);
-        m_activeRegionLedger = std::move(ledger);
+        ReplaceActiveRegionLedger(std::move(ledger));
         if (!m_activeRegionLedger.local_anchor())
             m_activeRegionLedger.try_set_local_anchor(m_metadata.spawnPoint);
         m_regionDurableDirectory = save_dir;

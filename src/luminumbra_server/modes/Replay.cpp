@@ -189,6 +189,7 @@ int RunReplay(const ServerCliOptions& options) {
     config.collision_radius = static_cast<int>(header.collision_radius);
     config.test_streaming_radius_cap = options.test_streaming_radius_cap;
     config.autosave_interval_ticks = 0;
+    config.region_scheduler = RunnerConfigFrom(options).region_scheduler;
 
     Luminumbra::Server::ServerWorldRunner runner(std::move(config));
     if (!runner.Boot()) {

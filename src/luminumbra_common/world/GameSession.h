@@ -400,7 +400,9 @@ public:
     [[nodiscard]] const RegionInputRejections& GetRegionInputRejections() const {
         return m_regionInputRejections;
     }
-    // Set before world creation. Loaded worlds restore their persisted configuration.
+    // Set before world creation. An absent ledger preserves these settings; a persisted
+    // ledger must match an explicit override or loading refuses. Without an override,
+    // loaded settings become the effective configuration, also retained by world resets.
     void SetRegionSchedulerConfig(RegionSchedulerConfig config);
     void SetLocalPlayerSimulationPosition(const Vec3& feet, bool walking);
     void SetReplicatedSimulationAnchors(std::vector<Vec3> anchors);
@@ -472,7 +474,9 @@ private:
     WorldClock m_worldClock;
     void AttachRegionEditObserver();
     RegionSchedulerConfig m_regionSchedulerConfig;
+    std::optional<RegionSchedulerConfig> m_regionSchedulerOverride;
     ActiveRegionLedger m_activeRegionLedger;
+    void ReplaceActiveRegionLedger(ActiveRegionLedger ledger);
     RegionSchedule m_regionSchedule;
     std::optional<std::vector<Vec3>> m_replicatedSimulationAnchors;
     std::vector<RegionWork> m_regionWork;

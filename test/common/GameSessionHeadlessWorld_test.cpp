@@ -2380,6 +2380,21 @@ TEST(GameSessionHeadlessWorldTest, SharedSystemConfigPreservesExplicitOff) {
     EXPECT_FALSE(session.FiniteHydrologyEnabled());
 }
 
+TEST(GameSessionHeadlessWorldTest, WaterRuleIdentitiesObserveIndependentSetters) {
+    GameSession first, second;
+    EXPECT_EQ(first.SystemConfigIdentity(), second.SystemConfigIdentity());
+    first.SetFiniteHydrologyEnabled(false);
+    EXPECT_NE(first.SystemConfigIdentity(), second.SystemConfigIdentity());
+    second.SetFiniteHydrologyEnabled(false);
+    EXPECT_EQ(first.SystemConfigIdentity(), second.SystemConfigIdentity());
+    first.SetFiniteHydrologyEnabled(true);
+    second.SetFiniteHydrologyEnabled(true);
+    first.SetWeatherRainEnabled(true, 26);
+    EXPECT_NE(first.SystemConfigIdentity(), second.SystemConfigIdentity());
+    second.SetWeatherRainEnabled(true, 26);
+    EXPECT_EQ(first.SystemConfigIdentity(), second.SystemConfigIdentity());
+}
+
 TEST(GameSessionHeadlessWorldTest, EffectiveIdentityUsesDefaultsAndCurrentSetters) {
     using luminumbra::core::SystemConfig;
     GameSession direct, applied;
@@ -2387,7 +2402,7 @@ TEST(GameSessionHeadlessWorldTest, EffectiveIdentityUsesDefaultsAndCurrentSetter
     const auto baseline = direct.SystemConfigIdentity();
     EXPECT_FALSE(baseline.empty());
     EXPECT_EQ(baseline, applied.SystemConfigIdentity());
-    EXPECT_EQ(baseline, "da24cea9dbc5159b");
+    EXPECT_EQ(baseline, "60ab3c242d54ce89");
     for (const auto& [name, identity] : Luminumbra::TestSupport::EffectiveIdentityMismatches()) {
         SCOPED_TRACE(name);
         EXPECT_NE(identity, baseline);
