@@ -101,9 +101,10 @@ struct WildlifeFoliageStats {
 inline WildlifeFoliageStats
 RunWildlifeFoliageOnTick(entt::registry& reg,
                          std::uint64_t tick,
-                         const WildlifeFoliageTuning& tuning = {},
-                         const ::Luminumbra::world::RegionEntityGate& gate = {},
-                         const ::Luminumbra::world::RegionEntityWork& completed = {}) {
+                         const WildlifeFoliageTuning& tuning,
+                         const ::Luminumbra::world::RegionEntityGate& gate,
+                         const ::Luminumbra::world::RegionEntityGate& creature_gate,
+                         const ::Luminumbra::world::RegionEntityWork& completed) {
     WildlifeFoliageStats stats;
     const float graze_radius_sq = tuning.graze_radius * tuning.graze_radius;
 
@@ -116,13 +117,17 @@ RunWildlifeFoliageOnTick(entt::registry& reg,
     {
         auto cview = reg.view<const Comp::CreatureComponent, const Comp::TransformComponent>();
         std::vector<entt::entity> cents(cview.begin(), cview.end());
-        std::sort(cents.begin(), cents.end(), [&reg, &gate](entt::entity a, entt::entity b) {
-            return ::Luminumbra::world::RegionEntityIdentity(reg, a, bool(gate)) <
-                   ::Luminumbra::world::RegionEntityIdentity(reg, b, bool(gate));
-        });
+        std::sort(cents.begin(),
+                  cents.end(),
+                  [&reg, &gate, &creature_gate](entt::entity a, entt::entity b) {
+                      return ::Luminumbra::world::RegionEntityIdentity(
+                                 reg, a, bool(gate || creature_gate)) <
+                             ::Luminumbra::world::RegionEntityIdentity(
+                                 reg, b, bool(gate || creature_gate));
+                  });
         grazers.reserve(cents.size());
         for (auto e : cents) {
-            if (!::Luminumbra::world::AdmitRegionEntity(gate, e))
+            if (!::Luminumbra::world::AdmitRegionEntity(creature_gate, e))
                 continue;
             const auto& cr = cview.get<const Comp::CreatureComponent>(e);
             if (cr.is_predator || cr.eaten)
@@ -138,10 +143,11 @@ RunWildlifeFoliageOnTick(entt::registry& reg,
     // --- 2. Gather grazeable plants, id-ordered. ---
     auto pview = reg.view<Comp::GrazeableComponent, const Comp::TransformComponent>();
     std::vector<entt::entity> pents(pview.begin(), pview.end());
-    std::sort(pents.begin(), pents.end(), [&reg, &gate](entt::entity a, entt::entity b) {
-        return ::Luminumbra::world::RegionEntityIdentity(reg, a, bool(gate)) <
-               ::Luminumbra::world::RegionEntityIdentity(reg, b, bool(gate));
-    });
+    std::sort(
+        pents.begin(), pents.end(), [&reg, &gate, &creature_gate](entt::entity a, entt::entity b) {
+            return ::Luminumbra::world::RegionEntityIdentity(reg, a, bool(gate || creature_gate)) <
+                   ::Luminumbra::world::RegionEntityIdentity(reg, b, bool(gate || creature_gate));
+        });
 
     // Per-creature feed accumulator, indexed parallel to `grazers` (summed so applying it
     // afterward is order-independent).
@@ -198,6 +204,8 @@ RunWildlifeFoliageOnTick(entt::registry& reg,
     // [0,1] (0 = sated). This only RUNS when grazeable plants exist (feed is otherwise
     // all-zero), preserving the no-op-when-no-plants gate.
     for (std::size_t gi = 0; gi < grazers.size(); ++gi) {
+        if (!::Luminumbra::world::AdmitRegionEntity(creature_gate, grazers[gi].e))
+            continue;
         if (feed[gi] <= 0.0f)
             continue;
         auto& cr = reg.get<Comp::CreatureComponent>(grazers[gi].e);
@@ -208,6 +216,16 @@ RunWildlifeFoliageOnTick(entt::registry& reg,
     }
 
     return stats;
+}
+
+// Historical single-gate overload, including its exact empty-gate behavior.
+inline WildlifeFoliageStats
+RunWildlifeFoliageOnTick(entt::registry& reg,
+                         std::uint64_t tick,
+                         const WildlifeFoliageTuning& tuning = {},
+                         const ::Luminumbra::world::RegionEntityGate& gate = {},
+                         const ::Luminumbra::world::RegionEntityWork& completed = {}) {
+    return RunWildlifeFoliageOnTick(reg, tick, tuning, gate, gate, completed);
 }
 
 } // namespace luminumbra::ai

@@ -1,8 +1,10 @@
 #pragma once
 #include "../components/CreatureComponents.h"
 #include "../components/PlantComponents.h"
+#include <algorithm>
 #include <entt/entt.hpp>
 #include <functional>
+#include <vector>
 
 namespace Luminumbra::world {
 // Empty is the exact legacy full-rate path. Enabled consumers share a pure
@@ -22,5 +24,17 @@ RegionEntityIdentity(const entt::registry& registry, entt::entity e, bool enable
 }
 inline bool AdmitRegionEntity(const RegionEntityGate& gate, entt::entity entity) {
     return !gate || gate(entity);
+}
+// Filter before snapshot/index construction. Sorting on the enabled path uses
+// durable identity; callers retain their historical ordering on the empty path.
+inline void FilterRegionEntities(const entt::registry& registry,
+                                 std::vector<entt::entity>& entities,
+                                 const RegionEntityGate& gate) {
+    if (!gate)
+        return;
+    std::erase_if(entities, [&](auto e) { return !AdmitRegionEntity(gate, e); });
+    std::sort(entities.begin(), entities.end(), [&](auto a, auto b) {
+        return RegionEntityIdentity(registry, a, true) < RegionEntityIdentity(registry, b, true);
+    });
 }
 } // namespace Luminumbra::world

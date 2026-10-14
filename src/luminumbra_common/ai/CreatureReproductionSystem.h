@@ -1,4 +1,8 @@
 #pragma once
+#include "../systems/RegionConsumerGate.h"
+#include "../world/RegionRng.h"
+#include <functional>
+#include <limits>
 
 // Creature evolution: CREATURE EVOLUTION via SEXUAL reproduction. Makes the ecology generational
 // AND requires a MALE + a FEMALE to find each other and COURT before a baby is born:
@@ -58,6 +62,32 @@ inline constexpr float kCourtshipRadius = 2.6f;      // must be this close to co
 inline constexpr std::uint32_t kCourtshipTicks = 90; // time together before a baby (~3s)
 inline constexpr float kReproSpawnRadius = 1.2f;     // newborn appears beside the pair
 
+struct CreatureBirthProposal {
+    std::uint64_t mother_id = 0, father_id = 0;
+    ::Luminumbra::world::RegionKey mother_owner{};
+    std::uint64_t seed = 0;
+    CreatureGenome genome;
+    float x = 0, y = 0, z = 0;
+    std::uint32_t generation = 0;
+    bool female = false;
+    std::uint16_t species_id = 0;
+};
+using CreatureBirthAdmission = std::function<bool(const CreatureBirthProposal&)>;
+
+// Ordinary births validate the destination before allocating a shared ID.
+inline bool
+AdmitFullCreatureBirthDestination(const ::Luminumbra::world::ActiveRegionLedger& ledger,
+                                  const std::vector<::Luminumbra::world::RegionKey>& due,
+                                  const ::Luminumbra::Vec3& position) {
+    using namespace ::Luminumbra::world;
+    if (!ActiveRegionLedger::valid_anchor(position))
+        return false;
+    const auto key = ActiveRegionLedger::region_at(position);
+    const auto it = ledger.records().find(key);
+    return it != ledger.records().end() && it->second.state == RegionState::Active &&
+           std::find(due.begin(), due.end(), key) != due.end();
+}
+
 struct CreatureReproductionStats {
     int born = 0;     // offspring created this tick
     int courting = 0; // ready females currently adjacent to a ready male
@@ -84,11 +114,64 @@ struct ReproductionTuning {
            cr.stamina >= t.healthy_stamina;
 }
 
+inline entt::entity CreateCreatureBirthEntity(entt::registry& reg,
+                                              const CreatureBirthProposal& b,
+                                              std::uint32_t cooldown_ticks) {
+    const auto child = reg.create();
+    try {
+        auto& tf = reg.emplace<Comp::TransformComponent>(child);
+        tf.position.x = b.x;
+        tf.position.y = b.y;
+        tf.position.z = b.z;
+        tf.scale = ::Luminumbra::Vec3(b.genome.size_scale);
+
+        auto& cr = reg.emplace<Comp::CreatureComponent>(child);
+        cr.is_predator = false;
+        cr.species_id = b.species_id; // inherit codex species from the mother
+        cr.hunger = 0.5f;
+        cr.stamina = 1.0f;
+        cr.move_speed = b.genome.move_speed;
+
+        auto& gn = reg.emplace<Comp::CreatureGenomeComponent>(child);
+        gn.move_speed = b.genome.move_speed;
+        gn.vigilance = b.genome.vigilance;
+        gn.hunger_threshold = b.genome.hunger_threshold;
+        gn.size_scale = b.genome.size_scale;
+        gn.vision_cos_half_fov = b.genome.vision_cos_half_fov;
+        gn.vision_range = b.genome.vision_range;
+        gn.hearing_range = b.genome.hearing_range;
+        gn.age_ticks = 0;
+        gn.reproduce_cooldown = cooldown_ticks; // newborn can't immediately breed
+        gn.generation = b.generation;
+        gn.female = b.female;
+        gn.courting_ticks = 0;
+
+        // express the sensory genes into a PerceptionComponent so the offspring's senses are
+        // genetically determined (vision cone + range, hearing range). PerceptionComponent is pure
+        // data — it is not in the ecology hash, and the perception system needs an
+        // AwarenessComponent to act — so this is inert for the canonical hash and only bites where
+        // a roster opts its creatures into sensing. This is the read side that makes sensory
+        // divergence observable.
+        auto& pc = reg.emplace<Comp::PerceptionComponent>(child);
+        pc.vision_cos_half_fov = b.genome.vision_cos_half_fov;
+        pc.vision_range = b.genome.vision_range;
+        pc.ear.range = b.genome.hearing_range;
+
+    } catch (...) {
+        reg.destroy(child);
+        throw;
+    }
+    return child;
+}
+
 // PHASE A (run BEFORE the physics bridge): ready creatures steer toward the nearest ready
 // opposite-sex mate by OVERRIDING the brain's wish velocity — unless they are fleeing a
 // threat (survival beats courtship). When already within courtship range they hold still
 // (wish 0) so they stay together and court. id-ordered; reads a pre snapshot (order-stable).
-inline void RunMateSeekingOnTick(entt::registry& reg, const ReproductionTuning& tuning = {}) {
+inline void RunMateSeekingOnTick(entt::registry& reg,
+                                 const ReproductionTuning& tuning = {},
+                                 const ::Luminumbra::world::RegionEntityGate& gate = {},
+                                 const ::Luminumbra::world::RegionEntityWork& completed = {}) {
     auto view = reg.view<Comp::CreatureComponent,
                          Comp::CreatureGenomeComponent,
                          Comp::TransformComponent>();
@@ -103,6 +186,7 @@ inline void RunMateSeekingOnTick(entt::registry& reg, const ReproductionTuning& 
     std::sort(ents.begin(), ents.end(), [](entt::entity a, entt::entity b) {
         return entt::to_integral(a) < entt::to_integral(b);
     });
+    ::Luminumbra::world::FilterRegionEntities(reg, ents, gate);
     std::vector<M> snap;
     snap.reserve(ents.size());
     for (auto e : ents) {
@@ -118,6 +202,8 @@ inline void RunMateSeekingOnTick(entt::registry& reg, const ReproductionTuning& 
     }
     for (std::size_t i = 0; i < ents.size(); ++i) {
         const M& self = snap[i];
+        if (completed)
+            completed(self.e);
         if (!self.ready)
             continue;
         auto& cr = view.get<Comp::CreatureComponent>(self.e);
@@ -161,7 +247,10 @@ RunMatingResolveOnTick(entt::registry& reg,
                        std::uint64_t tick,
                        std::uint64_t world_seed = 0,
                        const ReproductionTuning& tuning = {},
-                       const CreatureSpeciesRegistry* species = nullptr) {
+                       const CreatureSpeciesRegistry* species = nullptr,
+                       const ::Luminumbra::world::RegionEntityGate& gate = {},
+                       const ::Luminumbra::world::RegionEntityWork& completed = {},
+                       const CreatureBirthAdmission& admit_birth = {}) {
     CreatureReproductionStats stats;
     auto view = reg.view<Comp::CreatureComponent,
                          Comp::CreatureGenomeComponent,
@@ -170,9 +259,12 @@ RunMatingResolveOnTick(entt::registry& reg,
     std::sort(ents.begin(), ents.end(), [](entt::entity a, entt::entity b) {
         return entt::to_integral(a) < entt::to_integral(b);
     });
+    ::Luminumbra::world::FilterRegionEntities(reg, ents, gate);
 
     // Bookkeeping: age everyone, tick down cooldowns (id-ordered, deterministic).
     for (auto e : ents) {
+        if (completed)
+            completed(e);
         auto& gn = view.get<Comp::CreatureGenomeComponent>(e);
         if (gn.age_ticks < 0xFFFFFFFFu)
             ++gn.age_ticks;
@@ -196,14 +288,9 @@ RunMatingResolveOnTick(entt::registry& reg,
         }
     }
 
-    struct Birth {
-        CreatureGenome genome;
-        float x, y, z;
-        std::uint32_t generation;
-        bool female;
-        std::uint16_t species_id;
-    };
+    using Birth = CreatureBirthProposal;
     std::vector<Birth> births;
+    std::vector<std::pair<entt::entity, entt::entity>> parents;
     std::vector<bool> male_used(males.size(), false);
 
     // Female-driven courtship: each ready female courts her nearest unused ready male in range.
@@ -231,7 +318,8 @@ RunMatingResolveOnTick(entt::registry& reg,
             continue;
         } // no mate adjacent -> reset
         ++stats.courting;
-        ++gn.courting_ticks;
+        if (!gate || gn.courting_ticks < std::numeric_limits<std::uint32_t>::max())
+            ++gn.courting_ticks;
         if (gn.courting_ticks < tuning.courtship_ticks)
             continue; // still courting
 
@@ -257,11 +345,23 @@ RunMatingResolveOnTick(entt::registry& reg,
         mG.vision_range = mgn.vision_range;
         mG.hearing_range = mgn.hearing_range;
 
-        luminumbra::core::DeterministicRng rng = luminumbra::core::DeterministicRng::seeded(
+        auto legacy_rng = luminumbra::core::DeterministicRng::seeded(
             kReproSeedOffset ^ world_seed,
             (static_cast<std::uint64_t>(entt::to_integral(e)) * 0x9E3779B97F4A7C15ull) ^
                 static_cast<std::uint64_t>(entt::to_integral(maleE)),
             tick);
+        std::uint64_t seed = 0;
+        if (gate) {
+            const auto& owner = reg.get<Comp::CreatureRegionComponent>(e);
+            seed = ::Luminumbra::world::RegionRng(
+                       world_seed,
+                       {owner.owner_x, owner.owner_z},
+                       ::Luminumbra::world::RegionRngTag::CreatureReproduction,
+                       tick,
+                       ::Luminumbra::world::RegionEntityIdentity(reg, e, true))
+                       .draw(::Luminumbra::world::RegionEntityIdentity(reg, maleE, true));
+        }
+        auto rng = gate ? luminumbra::core::DeterministicRng(seed) : legacy_rng;
         const CreatureSpecies* species_definition =
             species ? species->Find(cr.species_id) : nullptr;
         const SpeciesGenomeRanges ranges =
@@ -276,60 +376,48 @@ RunMatingResolveOnTick(entt::registry& reg,
         const auto& mtf = view.get<Comp::TransformComponent>(maleE);
         Birth b;
         b.genome = childG;
+        if (gate) {
+            const auto& owner = reg.get<Comp::CreatureRegionComponent>(e);
+            b.mother_owner = {owner.owner_x, owner.owner_z};
+            b.mother_id = owner.persistent_id;
+            b.father_id = reg.get<Comp::CreatureRegionComponent>(maleE).persistent_id;
+            b.seed = seed;
+        }
         b.x = (tf.position.x + mtf.position.x) * 0.5f;
         b.y = (tf.position.y + mtf.position.y) * 0.5f;
         b.z = (tf.position.z + mtf.position.z) * 0.5f + tuning.spawn_radius;
-        b.generation = (gn.generation > mgn.generation ? gn.generation : mgn.generation) + 1u;
+        const auto generation = std::max(gn.generation, mgn.generation);
+        b.generation = gate && generation == std::numeric_limits<std::uint32_t>::max()
+                           ? generation
+                           : generation + 1u;
         b.female = childFemale;
         b.species_id = cr.species_id; // offspring inherit the mother's codex species identity
         births.push_back(b);
 
-        gn.courting_ticks = 0;
-        gn.reproduce_cooldown = tuning.cooldown_ticks;
-        mgn.reproduce_cooldown = tuning.cooldown_ticks;
+        parents.emplace_back(e, maleE);
+        if (!gate) {
+            gn.courting_ticks = 0;
+            gn.reproduce_cooldown = tuning.cooldown_ticks;
+            mgn.reproduce_cooldown = tuning.cooldown_ticks;
+        }
     }
 
     // Create offspring AFTER the read pass (no view invalidation mid-iteration).
-    for (const Birth& b : births) {
-        const auto child = reg.create();
-        auto& tf = reg.emplace<Comp::TransformComponent>(child);
-        tf.position.x = b.x;
-        tf.position.y = b.y;
-        tf.position.z = b.z;
-        tf.scale = ::Luminumbra::Vec3(b.genome.size_scale);
-
-        auto& cr = reg.emplace<Comp::CreatureComponent>(child);
-        cr.is_predator = false;
-        cr.species_id = b.species_id; // inherit codex species from the mother
-        cr.hunger = 0.5f;
-        cr.stamina = 1.0f;
-        cr.move_speed = b.genome.move_speed;
-
-        auto& gn = reg.emplace<Comp::CreatureGenomeComponent>(child);
-        gn.move_speed = b.genome.move_speed;
-        gn.vigilance = b.genome.vigilance;
-        gn.hunger_threshold = b.genome.hunger_threshold;
-        gn.size_scale = b.genome.size_scale;
-        gn.vision_cos_half_fov = b.genome.vision_cos_half_fov;
-        gn.vision_range = b.genome.vision_range;
-        gn.hearing_range = b.genome.hearing_range;
-        gn.age_ticks = 0;
-        gn.reproduce_cooldown = tuning.cooldown_ticks; // newborn can't immediately breed
-        gn.generation = b.generation;
-        gn.female = b.female;
-        gn.courting_ticks = 0;
-
-        // express the sensory genes into a PerceptionComponent so the offspring's senses are
-        // genetically determined (vision cone + range, hearing range). PerceptionComponent is pure
-        // data — it is not in the ecology hash, and the perception system needs an
-        // AwarenessComponent to act — so this is inert for the canonical hash and only bites where
-        // a roster opts its creatures into sensing. This is the read side that makes sensory
-        // divergence observable.
-        auto& pc = reg.emplace<Comp::PerceptionComponent>(child);
-        pc.vision_cos_half_fov = b.genome.vision_cos_half_fov;
-        pc.vision_range = b.genome.vision_range;
-        pc.ear.range = b.genome.hearing_range;
-
+    for (std::size_t i = 0; i < births.size(); ++i) {
+        const auto& b = births[i];
+        if (gate) {
+            const auto [mother, father] = parents[i];
+            if (!::Luminumbra::world::AdmitRegionEntity(gate, mother) ||
+                !::Luminumbra::world::AdmitRegionEntity(gate, father) || !admit_birth ||
+                !admit_birth(b))
+                continue;
+            auto& gn = reg.get<Comp::CreatureGenomeComponent>(mother);
+            auto& mgn = reg.get<Comp::CreatureGenomeComponent>(father);
+            gn.courting_ticks = mgn.courting_ticks = 0;
+            gn.reproduce_cooldown = mgn.reproduce_cooldown = tuning.cooldown_ticks;
+        } else {
+            CreateCreatureBirthEntity(reg, b, tuning.cooldown_ticks);
+        }
         ++stats.born;
     }
     return stats;

@@ -1,4 +1,5 @@
 #pragma once
+#include "../systems/RegionConsumerGate.h"
 
 // sim.migration: SEASONAL MIGRATION toward a MOVING target (a deterministic seasonal
 // drive). Each migratory creature is pulled toward a migration target that travels a closed
@@ -130,7 +131,11 @@ struct MigrationStats {
 
 // RunMigrationOnTick: for each migratory creature, write a wish toward the current seasonal
 // target scaled by the seasonal drive. id-ordered, deterministic. season01 is a plain input.
-inline MigrationStats RunMigrationOnTick(entt::registry& reg, float season01) {
+inline MigrationStats
+RunMigrationOnTick(entt::registry& reg,
+                   float season01,
+                   const ::Luminumbra::world::RegionEntityGate& gate = {},
+                   const ::Luminumbra::world::RegionEntityWork& completed = {}) {
     MigrationStats stats;
 
     auto view = reg.view<Comp::MigratoryComponent, Comp::TransformComponent>();
@@ -140,6 +145,7 @@ inline MigrationStats RunMigrationOnTick(entt::registry& reg, float season01) {
     std::sort(ents.begin(), ents.end(), [](entt::entity a, entt::entity b) {
         return entt::to_integral(a) < entt::to_integral(b);
     });
+    ::Luminumbra::world::FilterRegionEntities(reg, ents, gate);
     if (ents.empty())
         return stats; // empty roster -> pure no-op.
 
@@ -154,6 +160,8 @@ inline MigrationStats RunMigrationOnTick(entt::registry& reg, float season01) {
     stats.drive = drive;
 
     for (auto e : ents) {
+        if (completed)
+            completed(e);
         const auto& tf = view.get<Comp::TransformComponent>(e);
         auto& mig = view.get<Comp::MigratoryComponent>(e);
 

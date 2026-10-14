@@ -1455,6 +1455,7 @@ add_executable(frontier_gates_test
     ai/creature_brain_test.cpp
     ai/creature_brain_system_test.cpp
     ai/creature_reproduction_test.cpp
+    ai/creature_region_gates_test.cpp
     ai/flocking_test.cpp
     ai/foraging_test.cpp
     ai/creature_divergence_test.cpp

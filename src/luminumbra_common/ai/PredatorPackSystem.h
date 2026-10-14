@@ -1,4 +1,5 @@
 #pragma once
+#include "../systems/RegionConsumerGate.h"
 
 // sim.predator_pack: EMERGENT PACK HUNTING via FLANKING COORDINATION.
 //
@@ -73,7 +74,11 @@ struct PredatorPackStats {
 
 // RunPredatorPackOnTick: maintain the pack-hunting coordination field. id-ordered, two-phase
 // snapshot. Returns per-tick stats (telemetry / test hooks).
-inline PredatorPackStats RunPredatorPackOnTick(entt::registry& reg, std::uint64_t tick) {
+inline PredatorPackStats
+RunPredatorPackOnTick(entt::registry& reg,
+                      std::uint64_t tick,
+                      const ::Luminumbra::world::RegionEntityGate& gate = {},
+                      const ::Luminumbra::world::RegionEntityWork& completed = {}) {
     (void)tick; // no rng / time dependence; kept for signature parity with sibling systems.
     PredatorPackStats stats;
 
@@ -86,6 +91,7 @@ inline PredatorPackStats RunPredatorPackOnTick(entt::registry& reg, std::uint64_
     std::sort(preds.begin(), preds.end(), [](entt::entity a, entt::entity b) {
         return entt::to_integral(a) < entt::to_integral(b);
     });
+    ::Luminumbra::world::FilterRegionEntities(reg, preds, gate);
     if (preds.empty())
         return stats; // empty roster -> pure no-op.
 
@@ -113,7 +119,9 @@ inline PredatorPackStats RunPredatorPackOnTick(entt::registry& reg, std::uint64_
     std::vector<PreySnap> prey;
     {
         auto preyView = reg.view<Comp::CreatureComponent, Comp::TransformComponent>();
-        for (auto e : preyView) {
+        std::vector<entt::entity> sources(preyView.begin(), preyView.end());
+        ::Luminumbra::world::FilterRegionEntities(reg, sources, gate);
+        for (auto e : sources) {
             const auto& cr = preyView.get<Comp::CreatureComponent>(e);
             if (cr.is_predator || cr.eaten)
                 continue;
@@ -125,6 +133,8 @@ inline PredatorPackStats RunPredatorPackOnTick(entt::registry& reg, std::uint64_
     // ---- Second pass: compute coordination wishes from the frozen snapshot. ----
     for (std::size_t i = 0; i < ps.size(); ++i) {
         const PredSnap& self = ps[i];
+        if (completed)
+            completed(self.e);
         auto& pk = predView.get<Comp::PackHunterComponent>(self.e);
 
         // An inert participant (non-predator tag holder) or a carcass: no coordination.
@@ -164,7 +174,8 @@ inline PredatorPackStats RunPredatorPackOnTick(entt::registry& reg, std::uint64_
 
         // Order-INDEPENDENT flank rank: rank pack-mates by POSITION (x then z), not by entity
         // id, so a predator's flank angle depends on WHERE it is — invariant to spawn order.
-        // (ps is id-sorted, so the index `j` is the id; use it as a stable positional tiebreak.)
+        // ps follows shared identity order, so its index resolves equal positions
+        // deterministically.
         std::sort(pack.begin(), pack.end(), [&](std::size_t a, std::size_t b) {
             if (ps[a].x != ps[b].x)
                 return ps[a].x < ps[b].x;

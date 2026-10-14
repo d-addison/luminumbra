@@ -56,6 +56,8 @@ inline void CopyFoliage(const entt::registry& from,
     Copy<C::GrazeableComponent>(from, source, to, target);
     Copy<C::MortalComponent>(from, source, to, target);
     Copy<C::CreatureComponent>(from, source, to, target);
+    Copy<C::CreatureRegionComponent>(from, source, to, target);
+    Copy<C::CreatureCoarseComponent>(from, source, to, target);
 }
 } // namespace stage_detail
 // Staging preserves existing handles. Fresh births receive live handles only at

@@ -1,4 +1,5 @@
 #pragma once
+#include "../systems/RegionConsumerGate.h"
 
 // sim.territory: HOME-RANGE / TERRITORIALITY.
 //
@@ -73,7 +74,11 @@ struct TerritoryStats {
 // id-ordered, two-phase. `tick` is accepted for signature parity with the other tick systems
 // (this system is rng-free, so it does not consume the tick, but keeping it keeps the wire
 // site uniform).
-inline TerritoryStats RunTerritoryOnTick(entt::registry& reg, std::uint64_t /*tick*/ = 0) {
+inline TerritoryStats
+RunTerritoryOnTick(entt::registry& reg,
+                   std::uint64_t /*tick*/ = 0,
+                   const ::Luminumbra::world::RegionEntityGate& gate = {},
+                   const ::Luminumbra::world::RegionEntityWork& completed = {}) {
     TerritoryStats stats;
 
     auto view = reg.view<Comp::TerritoryComponent, Comp::TransformComponent>();
@@ -83,6 +88,7 @@ inline TerritoryStats RunTerritoryOnTick(entt::registry& reg, std::uint64_t /*ti
     std::sort(ents.begin(), ents.end(), [](entt::entity a, entt::entity b) {
         return entt::to_integral(a) < entt::to_integral(b);
     });
+    ::Luminumbra::world::FilterRegionEntities(reg, ents, gate);
     if (ents.empty())
         return stats; // empty roster -> pure no-op.
 
@@ -96,6 +102,8 @@ inline TerritoryStats RunTerritoryOnTick(entt::registry& reg, std::uint64_t /*ti
     std::vector<Snap> snap;
     snap.reserve(ents.size());
     for (auto e : ents) {
+        if (completed)
+            completed(e);
         auto& terr = view.get<Comp::TerritoryComponent>(e);
         const auto& tf = view.get<Comp::TransformComponent>(e);
         if (terr.established == 0) {

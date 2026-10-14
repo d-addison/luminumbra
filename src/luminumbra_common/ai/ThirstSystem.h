@@ -1,4 +1,5 @@
 #pragma once
+#include "../systems/RegionConsumerGate.h"
 
 // sim.thirst: CREATURE THIRST /  (complements hunger).
 //
@@ -82,7 +83,11 @@ struct ThirstTuning {
 // let them drink when in range. id-ordered. `dt` scales the rise/drink rates so the behaviour
 // is frame-rate independent (the sim runs a fixed dt; the parameter keeps the signature honest
 // and lets tests exercise multiple ticks).
-inline ThirstStats RunThirstOnTick(entt::registry& reg, float dt, const ThirstTuning& tuning = {}) {
+inline ThirstStats RunThirstOnTick(entt::registry& reg,
+                                   float dt,
+                                   const ThirstTuning& tuning = {},
+                                   const ::Luminumbra::world::RegionEntityGate& gate = {},
+                                   const ::Luminumbra::world::RegionEntityWork& completed = {}) {
     ThirstStats stats;
 
     // Snapshot every water hole once (deterministic, read-only this tick). id-ordered for a
@@ -98,6 +103,7 @@ inline ThirstStats RunThirstOnTick(entt::registry& reg, float dt, const ThirstTu
         std::sort(hents.begin(), hents.end(), [](entt::entity a, entt::entity b) {
             return entt::to_integral(a) < entt::to_integral(b);
         });
+        ::Luminumbra::world::FilterRegionEntities(reg, hents, gate);
         holes.reserve(hents.size());
         for (auto e : hents) {
             const auto& wh = hview.get<Comp::WaterHoleComponent>(e);
@@ -113,6 +119,7 @@ inline ThirstStats RunThirstOnTick(entt::registry& reg, float dt, const ThirstTu
     std::sort(ents.begin(), ents.end(), [](entt::entity a, entt::entity b) {
         return entt::to_integral(a) < entt::to_integral(b);
     });
+    ::Luminumbra::world::FilterRegionEntities(reg, ents, gate);
     if (ents.empty())
         return stats; // empty roster -> pure no-op.
 
@@ -121,6 +128,8 @@ inline ThirstStats RunThirstOnTick(entt::registry& reg, float dt, const ThirstTu
     const float drink = tuning.drink_rate * dt;
 
     for (auto e : ents) {
+        if (completed)
+            completed(e);
         auto& th = view.get<Comp::ThirstComponent>(e);
         const auto& tf = view.get<Comp::TransformComponent>(e);
 

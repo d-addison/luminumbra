@@ -1,4 +1,5 @@
 #pragma once
+#include "../systems/RegionConsumerGate.h"
 
 //  the live creature tick — reads each creature's senses, decides via the Utility-AI
 // brain (CreatureBrain.h -> IAUS), and MOVES the creature deterministically (flee = away from
@@ -132,7 +133,9 @@ RunCreatureBrainSystemOnTick(entt::registry& reg,
                              float scent_origin_z = 0.0f,
                              float scent_cell_size = 0.0f,
                              bool use_perception_substrate = true,
-                             const CreatureSpeciesRegistry* species = nullptr) {
+                             const CreatureSpeciesRegistry* species = nullptr,
+                             const ::Luminumbra::world::RegionEntityGate& gate = {},
+                             const ::Luminumbra::world::RegionEntityWork& completed = {}) {
     CreatureBrainStats stats;
     auto view = reg.view<Comp::CreatureComponent, Comp::TransformComponent>();
 
@@ -142,6 +145,7 @@ RunCreatureBrainSystemOnTick(entt::registry& reg,
     std::sort(ents.begin(), ents.end(), [](entt::entity a, entt::entity b) {
         return entt::to_integral(a) < entt::to_integral(b);
     });
+    ::Luminumbra::world::FilterRegionEntities(reg, ents, gate);
 
     // Pre-tick snapshot so all creatures sense the SAME state regardless of update order.
     struct Snap {
@@ -220,6 +224,8 @@ RunCreatureBrainSystemOnTick(entt::registry& reg,
 
     for (std::size_t selfIdx = 0; selfIdx < ents.size(); ++selfIdx) {
         const entt::entity e = ents[selfIdx];
+        if (completed)
+            completed(e);
         auto& tf = view.get<Comp::TransformComponent>(e);
         auto& cr = view.get<Comp::CreatureComponent>(e);
 
@@ -355,6 +361,7 @@ RunCreatureBrainSystemOnTick(entt::registry& reg,
         // this same tick may have already eaten it -- re-check the LIVE eaten flag so one prey
         // sates at most ONE predator per tick (no feeding from an already-dead carcass).
         if (cr.is_predator && found && bestDist < tuning.catch_radius && reg.valid(te) &&
+            ::Luminumbra::world::AdmitRegionEntity(gate, te) &&
             !reg.get<Comp::CreatureComponent>(te).eaten) {
             reg.get<Comp::CreatureComponent>(te).eaten = true;
             cr.hunger = utility_clamp01(cr.hunger - tuning.catch_satiation);
@@ -417,8 +424,10 @@ RunCreatureBrainSystemOnTick(entt::registry& reg,
                 break;
             case CreatureAction::Wander: {
                 const float ang =
-                    2.39996323f * static_cast<float>(entt::to_integral(e) % 16u +
-                                                     1u); // deterministic per-id heading
+                    2.39996323f *
+                    static_cast<float>(
+                        ::Luminumbra::world::RegionEntityIdentity(reg, e, bool(gate)) % 16u +
+                        1u); // deterministic per-id heading
                 dirx = dm::Cos(ang);
                 dirz = dm::Sin(ang);
                 break;
@@ -473,6 +482,8 @@ RunCreatureBrainSystemOnTick(entt::registry& reg,
             herdHits.clear();
             const UniformSpatialGrid& grid = cr.is_predator ? predGrid : preyGrid;
             grid.QueryRadius(sx, sz, herdHits);
+            if (gate)
+                std::sort(herdHits.begin(), herdHits.end());
             std::vector<std::pair<float, float>> herd;
             std::vector<std::pair<float, float>> herdHeadings; // index-aligned with `herd`
             herd.reserve(herdHits.size());

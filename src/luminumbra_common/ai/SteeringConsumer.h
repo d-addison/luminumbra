@@ -1,4 +1,8 @@
 #pragma once
+#include "../components/ScavengerComponent.h"
+#include "../components/ThirstComponents.h"
+#include "../systems/RegionConsumerGate.h"
+#include "CreatureBrain.h"
 
 //  the STEERING CONSUMER — blends the  bias systems' outputs into the creature wish
 // velocity before the physics bridge applies it. This is the INTEGRATION layer between the bias
@@ -29,10 +33,17 @@ struct SteeringConsumerStats {
     int homed = 0;    // creatures given a territory homing bias
 };
 
-inline SteeringConsumerStats RunSteeringConsumerOnTick(entt::registry& reg) {
+inline SteeringConsumerStats
+RunSteeringConsumerOnTick(entt::registry& reg,
+                          const ::Luminumbra::world::RegionEntityGate& gate = {},
+                          const ::Luminumbra::world::RegionEntityWork& completed = {}) {
     SteeringConsumerStats stats;
     auto sv = reg.view<Comp::CreatureComponent, Comp::TransformComponent>();
     for (auto e : sv) {
+        if (!::Luminumbra::world::AdmitRegionEntity(gate, e))
+            continue;
+        if (completed)
+            completed(e);
         auto& cr = sv.get<Comp::CreatureComponent>(e);
         if (cr.eaten)
             continue; // a carcass is inert
@@ -62,6 +73,30 @@ inline SteeringConsumerStats RunSteeringConsumerOnTick(entt::registry& reg) {
         }
     }
     return stats;
+}
+
+// Survival motor output shares the same sealed actor gate as the bias consumer.
+inline void
+RunSurvivalWishBlendOnTick(entt::registry& reg,
+                           const ::Luminumbra::world::RegionEntityGate& gate = {},
+                           const ::Luminumbra::world::RegionEntityWork& completed = {}) {
+    for (auto e : reg.view<Comp::CreatureComponent>()) {
+        if (!::Luminumbra::world::AdmitRegionEntity(gate, e))
+            continue;
+        auto& cr = reg.get<Comp::CreatureComponent>(e);
+        if (cr.last_action == static_cast<int>(CreatureAction::Drink)) {
+            if (const auto* th = reg.try_get<Comp::ThirstComponent>(e)) {
+                cr.wish_x += th->wish_x;
+                cr.wish_z += th->wish_z;
+            }
+        }
+        if (const auto* sc = reg.try_get<Comp::ScavengerComponent>(e)) {
+            cr.wish_x += sc->wish_x;
+            cr.wish_z += sc->wish_z;
+        }
+        if (completed)
+            completed(e);
+    }
 }
 
 } // namespace luminumbra::ai

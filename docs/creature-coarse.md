@@ -163,3 +163,69 @@ identity consults plant or creature PersistentId only when enabled. These helper
 add no flag-off save, hash or artifact changes. Session and host integration must
 pass the active-regions flag explicitly when choosing the enabled ecology
 projection. Network/checkpoint layouts and hash composition slots do not change.
+
+
+## Creature AI and lifecycle integration
+
+The session seals `CreatureTickAdmission` after scheduling and before any D
+consumer runs. It retains pre-update owners, tiers and PersistentIds until the
+real tick finishes. Full AI admits only resolved durable Full creatures in due
+Active owners with an earlier completion stamp. Source filtering happens before
+snapshots and indexes, including prey, mates, flock members, pack members,
+carcasses and water holes. Geometric comparisons retain precedence, with shared
+identity resolving ties and ordering enabled accumulation. Empty gates preserve
+the legacy ordering, arithmetic, RNG stream and direct birth recipe.
+
+D owns brain and kinematic brain integration, both mating phases, steering and
+survival blending, thirst, scavenging, alarm, decomposition, circadian,
+territory, pack, migration, creature lifespan and the creature side of grazing.
+E still owns instinct, perception, scent and emitters; F still owns tier choice,
+the living coarse adapter, movement boundary admission and controller physics.
+D-only session regressions omit E-owned participants and do not assert complete
+Frozen protection for those later lanes. The pure C kernel remains unchanged.
+
+Full genome ages advance only in mating resolve. Full mortal ages advance once
+in the real-tick lifespan lane, after foliage and before alarm/decomposition.
+An eaten creature synchronizes an existing Mortal death flag without adding age.
+Coarse living counters remain exclusively kernel-owned. Coarse corpse admission
+uses C's current-owner absolute cadence-window comparison; decay accepts one
+operation, then completion stamps the creature only after the remaining systems
+and event drain finish. Frozen time and plant resume windows add no creature
+age, decay or pressure. A newly dead coarse creature enters the corpse cohort
+only on a later accepted cadence.
+
+Plant historical substeps retain their existing transaction and regrowth path.
+Creature trampling and feeding run only on the final real-tick substep through a
+separate source gate. Staging retains creature Region and Coarse metadata, so
+eligibility and persistent ordering survive the temporary registry. The narrow
+S7 species-zero Creature plus Transform remains an unadmitted positional grazer
+when its existing non-frozen source owner is due. It receives no species or ID;
+complete enabled saving and hashing still require legitimate durable admission.
+
+The foliage recipient gate also enforces sealed Full admission for creatures
+carrying optional Grazeable or Combustible components. Their regrowth, grazing,
+fire ignition and burning-source participation run only on the final real-tick
+substep, with creature completion bookkeeping. Coarse creatures cannot enter
+these lanes through positional eligibility. Full Grazeable recipients retain
+their ordinary grazing/regrowth behavior; the transient exception admits only
+grazer sources. Pollination, disease and crops require plant-only inventory;
+plant lifespan explicitly excludes creatures. The shared foliage guard protects
+all these recipient lanes without changing plant resume substeps.
+
+Enabled full mating collects proposals in mother PersistentId order and seeds
+breeding from the reproduction RegionRng domain, preserving the Full breeding,
+sex and sensory draw sequence. The session rejects absent, Frozen, Reduced or
+off-due Full birth destinations before ID allocation. Subsequent admission
+failure consumes the allocated ID. Parent courtship resets and cooldowns publish
+only after success. Newborns carry Region, Coarse and explicit kinematic
+Controller metadata, are stamped at admission, and cannot join the sealed birth
+tick cohort. No additional persistence block or format version is introduced;
+previous-release absence adoption and present-malformed refusal remain intact.
+
+The independent test oracle freezes the pre-D implementations and legacy ecology
+projection in test-only namespaces. Its nonempty trajectory includes birth,
+predation, thirst, scavenging, alarm, decay, circadian, territory, pack, migration
+and entity generation reuse. The session reference supplies explicit fixed legacy
+metadata, the complete expected relative-path/byte map and regular-file count,
+plus deterministic artifact and ecology bytes. It does not generate its expected
+trajectory by calling the modified D entry points.
