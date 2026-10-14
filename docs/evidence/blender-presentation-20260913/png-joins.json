@@ -1,0 +1,33 @@
+{
+  "source_commit": "bb9e4ce2dea1d5af8bf7cf317d6046dda4f5c5d6",
+  "visual_approved": false,
+  "images": [
+    {
+      "path": "perspective.png",
+      "sha256": "164a1515ef387e8cb8372dc99444a84f4c70fd00036a427484e490606d5e5612",
+      "width": 160,
+      "height": 120,
+      "source": "perspective-presented.rgba8",
+      "source_sha256": "70ed1259e5a5291f8134ee0dfdff149df339c24dd288ad92d66f835d010c9f78",
+      "conversion": "RGBA8 bytes encoded losslessly as PNG; row order changed from lower-left to upper-left only"
+    },
+    {
+      "path": "orthographic-negative-near.png",
+      "sha256": "164a1515ef387e8cb8372dc99444a84f4c70fd00036a427484e490606d5e5612",
+      "width": 160,
+      "height": 120,
+      "source": "orthographic-negative-near-presented.rgba8",
+      "source_sha256": "70ed1259e5a5291f8134ee0dfdff149df339c24dd288ad92d66f835d010c9f78",
+      "conversion": "RGBA8 bytes encoded losslessly as PNG; row order changed from lower-left to upper-left only"
+    },
+    {
+      "path": "odd-downsample.png",
+      "sha256": "e1664bbfedaed2e5fad251fd2362990e2db5880c7b3d92d57bf41b0aa759cbf4",
+      "width": 1281,
+      "height": 721,
+      "source": "odd-downsample-presented.rgba8",
+      "source_sha256": "3b0cb85b956f86c9203b148da7fac25c1d1ee572e6203d349f845e63a789bfdc",
+      "conversion": "RGBA8 bytes encoded losslessly as PNG; row order changed from lower-left to upper-left only"
+    }
+  ]
+}

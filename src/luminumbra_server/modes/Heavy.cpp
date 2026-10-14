@@ -1,5 +1,10 @@
+#include "../HeavyComparison.h"
 #include "ModeHelpers.h"
 #include "Modes.h"
+
+using Luminumbra::Server::AuthoritativeStateEqual;
+using Luminumbra::Server::HeavyHashes;
+using Luminumbra::Server::MeshEqual;
 
 namespace fs = std::filesystem;
 
@@ -14,15 +19,6 @@ namespace {
 // the runner's world_id boot path), so no new persistence format.
 // ---------------------------------------------------------------------------
 
-struct HeavyHashes {
-    std::string world_hash;
-    Luminumbra::Persistence::WorldStreamingStateSubHashes sub;
-    std::string scent_hash;
-    bool active_regions = false;
-    std::string clock_bytes;
-    std::string ledger_bytes;
-};
-
 HeavyHashes CaptureHashes(Luminumbra::Server::ServerWorldRunner& runner) {
     HeavyHashes h;
     h.active_regions = runner.Session() && runner.Session()->ActiveRegionsEnabled();
@@ -36,33 +32,9 @@ HeavyHashes CaptureHashes(Luminumbra::Server::ServerWorldRunner& runner) {
     return h;
 }
 
-// the heavy oracle's equality is over AUTHORITATIVE SIMULATION STATE
-// (terrain SDF + water sim + entities). Surface mesh geometry is EXCLUDED: it is
-// a deterministically-regenerated DERIVED render artifact, and the async
-// re-meshing of chunks adopted across a save/load boundary legitimately reaches
-// the same geometry via a different in-memory pending-mesh/version snapshot than
-// the originating session held. The sub-hashes localize this precisely (only
-// `mesh` differs; terrain/water/entities are byte-identical), which is exactly
-// the desync-localization the sub-hashes exist to provide. The top-level
-// world_hash (which DOES include mesh) is reported but not asserted on across
-// the round-trip for this reason; it is still asserted run==replay in --smoke.
-bool AuthoritativeStateEqual(const HeavyHashes& a, const HeavyHashes& b) {
-    // Legacy loads restart at tick zero. With the persisted clock on, ambient
-    // fields and the clock must also agree at save and after continuation.
-    if (a.active_regions || b.active_regions) {
-        if (a.active_regions != b.active_regions || a.clock_bytes != b.clock_bytes ||
-            a.ledger_bytes != b.ledger_bytes || a.sub.wind != b.sub.wind ||
-            a.sub.weather != b.sub.weather || a.sub.aether != b.sub.aether ||
-            a.sub.aether_state != b.sub.aether_state)
-            return false;
-    }
-    return a.sub.terrain == b.sub.terrain && a.sub.water == b.sub.water &&
-           a.sub.entities == b.sub.entities;
-}
-
-bool MeshEqual(const HeavyHashes& a, const HeavyHashes& b) {
-    return a.sub.mesh == b.sub.mesh;
-}
+// Equality (AuthoritativeStateEqual / MeshEqual) and the subsystem table, with the
+// rationale for excluding mesh from the oracle's equality, live in
+// luminumbra_server/HeavyComparison.h.
 
 nlohmann::json HeavyHashJson(const HeavyHashes& h) {
     return nlohmann::json{
