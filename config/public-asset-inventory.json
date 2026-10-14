@@ -1527,6 +1527,13 @@
       "source": "Luminumbra authored worlds"
     },
     {
+      "bytes": 2102,
+      "license": "MIT",
+      "path": "worlds/atlas/presets/cave_dense.json",
+      "sha256": "5eff891c8d9f654ada480abf27b9cf9781cc86798fec60844bf28b1a7a4ae5e0",
+      "source": "Luminumbra authored worlds"
+    },
+    {
       "bytes": 2129,
       "license": "MIT",
       "path": "worlds/atlas/presets/caverns.json",
