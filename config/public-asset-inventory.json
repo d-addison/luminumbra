@@ -1478,6 +1478,13 @@
       "source": "Luminumbra test fixtures"
     },
     {
+      "bytes": 3340,
+      "license": "MIT",
+      "path": "test/fixtures/historical-defaults-off.json",
+      "sha256": "c7edee5e6f9e5202dd095fb94420f39edb1033f063c9c110b4dcd681cecb0aab",
+      "source": "Luminumbra test fixtures"
+    },
+    {
       "bytes": 236,
       "license": "MIT",
       "path": "test/fixtures/saves/revision6-hills/world_info.json",
