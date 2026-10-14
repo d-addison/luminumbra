@@ -64,7 +64,7 @@ activation inputs, scheduler ordering, ecology projection and replay companion
 are specified in [Active-region ledger and scheduler](active-regions.md).
 No measured caps or distant system consumers are activated by this foundation.
 
-### Simulation clock metadata
+### Simulation clock metadata {#simulation-clock-metadata}
 
 When `sim.active_regions` is enabled, each successful persistent `GameSession`
 save writes the resolved clock through the existing temporary-file and atomic

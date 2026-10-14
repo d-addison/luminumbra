@@ -361,7 +361,7 @@ year and lunar days in `[1, 366]`, and the daylight fraction satisfies
 `0 < n < d <= 65535` in reduced form. Products promote to `uint64_t` first.
 The saved absolute tick is an unsigned integer below `2^62`. Missing/extra
 members, unknown versions and noninteger values refuse before generation or
-writing. The [engine guide](engine-guide.md#simulation-clock-metadata) specifies
+writing. The [engine guide](@ref simulation-clock-metadata) specifies
 the complete schema, canonical bytes and refusal rules.
 
 Unversioned two-field calendars retain their recorded day/year with symmetric

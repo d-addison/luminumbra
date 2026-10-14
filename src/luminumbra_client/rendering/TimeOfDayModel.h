@@ -197,18 +197,18 @@ inline double SolarPhaseFromElapsed(double phase, const world::WorldCalendar& ca
         return 0.25 + (phase - dawn) / (2.0 * f);
     return 0.75 + (phase - dusk) / (2.0 * (1.0 - f));
 }
-inline double ElapsedPhaseFromSolar(double phase, const world::WorldCalendar& calendar) {
+inline double ElapsedPhaseFromSolar(double solarPhase, const world::WorldCalendar& calendar) {
     if (calendar.daylightNumerator == 1 && calendar.daylightDenominator == 2)
-        return phase;
+        return solarPhase;
     const double f = static_cast<double>(calendar.daylightNumerator) / calendar.daylightDenominator;
-    if (phase < 0.25)
-        return phase * (2.0 * (1.0 - f));
-    if (phase <= 0.75)
-        return (1.0 - f) / 2.0 + (phase - 0.25) * (2.0 * f);
-    return (1.0 + f) / 2.0 + (phase - 0.75) * (2.0 * (1.0 - f));
+    if (solarPhase < 0.25)
+        return solarPhase * (2.0 * (1.0 - f));
+    if (solarPhase <= 0.75)
+        return (1.0 - f) / 2.0 + (solarPhase - 0.25) * (2.0 * f);
+    return (1.0 + f) / 2.0 + (solarPhase - 0.75) * (2.0 * (1.0 - f));
 }
-inline double WrapDayPhase(double phase) {
-    return phase >= 1.0 ? phase - 1.0 : phase;
+inline double WrapDayPhase(double dayPhase) {
+    return dayPhase >= 1.0 ? dayPhase - 1.0 : dayPhase;
 }
 inline float SolarTimeFromNoonElapsed(double phase, const world::WorldCalendar& calendar) {
     if (calendar.daylightNumerator == 1 && calendar.daylightDenominator == 2)
