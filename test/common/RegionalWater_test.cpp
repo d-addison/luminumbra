@@ -189,8 +189,11 @@ TEST_F(RegionalWaterFixture, CachedRiverSourcesMatchRebuildingAcrossTicksResizeA
             registry, reference, reference_ledger, schedule, reference_work, budget);
         for (std::size_t i = 0; i < chunks.size(); ++i) {
             EXPECT_EQ(CaptureWater(*chunks[i]), CaptureWater(*reference[i]));
-            ASSERT_TRUE(chunks[i]->water_source_inputs.has_value());
-            EXPECT_EQ(chunks[i]->water_source_inputs->seed, shield.get_seed());
+            const auto& inputs = chunks[i]->water_source_inputs;
+            ASSERT_TRUE(inputs.has_value());
+            if (!inputs.has_value())
+                return;
+            EXPECT_EQ(inputs->seed, shield.get_seed());
         }
         EXPECT_EQ(ledger.encode(), reference_ledger.encode());
         EXPECT_EQ(water.regional_work().water_cells, rebuilding.regional_work().water_cells);
