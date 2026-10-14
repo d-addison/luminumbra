@@ -4,12 +4,18 @@
 #define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
 
+#include <array>
+#include <cstddef>
 #include <exception>
 #include <limits>
 #include <type_traits>
 
 namespace Luminumbra::Rendering {
 namespace {
+// g_buffer.frag reads the same VBO through a scalar std430 array.
+static_assert(sizeof(VoxelVertex) == 7 * sizeof(float));
+static_assert(offsetof(VoxelVertex, position) == 0);
+static_assert(sizeof(Vec3) == 3 * sizeof(float));
 static_assert(std::is_same_v<GLuint, std::uint32_t>);
 static_assert(std::numeric_limits<GLsizeiptr>::max() == std::numeric_limits<std::intptr_t>::max());
 static_assert(std::numeric_limits<GLsizei>::max() == std::numeric_limits<std::int32_t>::max());
@@ -169,9 +175,47 @@ void FarVolumeGlDriver::EnableAttribute(FarVolumeVertexAttribute attribute) noex
     glEnableVertexAttribArray(static_cast<GLuint>(attribute));
 }
 bool FarVolumeGlDriver::DrawIndexed(std::int32_t index_count) noexcept {
-    if (index_count <= 0 || !ValidContext())
+    if (index_count <= 0 || !ValidContext() || !glGetVertexAttribiv || !glGetIntegeri_v ||
+        !glGetInteger64i_v || !glBindBufferBase || !glBindBufferRange)
         return false;
-    glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(index_count), GL_UNSIGNED_INT, nullptr);
-    return true;
+    // The fragment shader checks exact constant axes using the source triangle.
+    // Alias this VAO's stores at SSBO bindings 5/6 for this draw only. Preserve
+    // indexed ranges and the generic binding independently, as for ownership.
+    GLint vertex_buffer = 0, index_buffer = 0, generic = 0;
+    glGetVertexAttribiv(0, GL_VERTEX_ATTRIB_ARRAY_BUFFER_BINDING, &vertex_buffer);
+    glGetIntegerv(GL_ELEMENT_ARRAY_BUFFER_BINDING, &index_buffer);
+    glGetIntegerv(GL_SHADER_STORAGE_BUFFER_BINDING, &generic);
+    struct Binding {
+        GLint buffer = 0;
+        GLint64 start = 0, size = 0;
+    };
+    std::array<Binding, 2> saved{};
+    for (GLuint i = 0; i < saved.size(); ++i) {
+        glGetIntegeri_v(GL_SHADER_STORAGE_BUFFER_BINDING, 5 + i, &saved[i].buffer);
+        glGetInteger64i_v(GL_SHADER_STORAGE_BUFFER_START, 5 + i, &saved[i].start);
+        glGetInteger64i_v(GL_SHADER_STORAGE_BUFFER_SIZE, 5 + i, &saved[i].size);
+    }
+    if (HasError() || !vertex_buffer || !index_buffer)
+        return false;
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 5, static_cast<GLuint>(vertex_buffer));
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 6, static_cast<GLuint>(index_buffer));
+    bool success = !HasError();
+    if (success) {
+        glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(index_count), GL_UNSIGNED_INT, nullptr);
+        success = !HasError();
+    }
+    for (GLuint i = 0; i < saved.size(); ++i) {
+        if (saved[i].buffer && saved[i].size > 0)
+            glBindBufferRange(GL_SHADER_STORAGE_BUFFER,
+                              5 + i,
+                              static_cast<GLuint>(saved[i].buffer),
+                              static_cast<GLintptr>(saved[i].start),
+                              static_cast<GLsizeiptr>(saved[i].size));
+        else
+            glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 5 + i, static_cast<GLuint>(saved[i].buffer));
+    }
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, static_cast<GLuint>(generic));
+    const bool restored = !HasError();
+    return success && restored;
 }
 } // namespace Luminumbra::Rendering

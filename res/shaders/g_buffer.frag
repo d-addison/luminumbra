@@ -133,6 +133,14 @@ uniform int u_farLiveCellCount;
 layout(std430, binding = 7) readonly buffer FarWorldLiveOwnership {
     ivec4 u_farLiveCells[];
 };
+// Aliases of the current ladder draw's existing VBO/EBO, not extra stores.
+// VoxelVertex is seven 32-bit words; position occupies the first three.
+layout(std430, binding = 5) readonly buffer FarWorldVertices {
+    float u_farVertexWords[];
+};
+layout(std430, binding = 6) readonly buffer FarWorldIndices {
+    uint u_farIndices[];
+};
 bool farCellLess(ivec3 a, ivec3 b) {
     if (a.x != b.x) return a.x < b.x;
     if (a.y != b.y) return a.y < b.y;
@@ -142,7 +150,7 @@ bool farLiveOwns(vec3 local) {
     // Canonical tile/span origins are integer multiples of 16 (remainder=0).
     // Adding zero preserves the stored float local; /16 is exact binary scaling.
     // Integer boundary locals, or integer remainder + integer local below 2^24,
-    // are exact. A boundary plane has the same local coordinate at all vertices.
+    // are exact. farTileLocal restores constant axes from the indexed vertices.
     // floor supplies negative half-open semantics; key addition stays integer.
     // CPU mirror: FarWorldChunkCell(FarWorldCellOrigin, local). Never use camera
     // relative round trips or view rotation to decide a chunk or child boundary.
@@ -171,6 +179,25 @@ in VS_OUT {
     vec3 FarRelativeWorldPos; // ladder-only, unbiased and never view-rotated
     vec3 FarTileLocalPos; // unbiased stored vertex position, before camera subtraction
 } fs_in;
+
+vec3 farVertexLocal(uint index) {
+    uint word = index * 7u;
+    return vec3(u_farVertexWords[word], u_farVertexWords[word + 1u], u_farVertexWords[word + 2u]);
+}
+vec3 farTileLocal() {
+    uint first = uint(gl_PrimitiveID) * 3u;
+    vec3 a = farVertexLocal(u_farIndices[first]);
+    vec3 b = farVertexLocal(u_farIndices[first + 1u]);
+    vec3 c = farVertexLocal(u_farIndices[first + 2u]);
+    // Smooth perspective interpolation can move even a constant nonzero local
+    // one ULP below its boundary. Exact vertex equality proves a constant plane;
+    // select its stored coordinate without rounding or snapping varying axes.
+    // This also survives near clipping, which retains the source primitive ID.
+    bvec3 constantAxis = bvec3(equal(a, b).x && equal(a, c).x,
+                               equal(a, b).y && equal(a, c).y,
+                               equal(a, b).z && equal(a, c).z);
+    return mix(fs_in.FarTileLocalPos, a, constantAxis);
+}
 
 //  terrain visual-fidelity (visual-fidelity warm palette floor),: the 256px terrain
 // textures read muddy/low-contrast. Amplify the EXISTING high-frequency detail
@@ -302,7 +329,7 @@ void main()
         // the prescribed strict comparisons retain exactly representable limits
         // without expanding a clip band. It cannot change half-open cell ownership.
         float horizontalSquared = dot(relativeWorld.xz, relativeWorld.xz);
-        vec3 local = fs_in.FarTileLocalPos;
+        vec3 local = farTileLocal();
         if (dot(relativeWorld, relativeWorld) < 176.0 * 176.0 ||
             horizontalSquared > u_farOuterRadius * u_farOuterRadius || farLiveOwns(local))
             discard;
