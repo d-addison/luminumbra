@@ -137,7 +137,8 @@ TEST(TerrainPresetLoaderTest, AllShippedPresetsLoadWithoutErrorsOrWarnings) {
                              "archipelago",
                              "temperate_forest",
                              "amplified",
-                             "caverns"}) {
+                             "caverns",
+                             "cave_dense"}) {
         const TerrainPresetLoadResult result =
             LoadTerrainPreset(PresetDir() / (std::string(name) + ".json"));
         EXPECT_TRUE(result.ok) << name;
