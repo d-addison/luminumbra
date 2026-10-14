@@ -1,6 +1,6 @@
 # MSVC terrain-height contraction investigation
 
-At `a360460`, local MSVC 19.50.35727.0 failed the existing five synthetic
+Local MSVC 19.50.35727.0 failed the existing five synthetic
 height-grid pins and the shipped archipelago pin. CI MSVC 19.51.36256.0 passed
 them. Repeated sampling and scalar/grid agreement within each build passed;
 changing expectations would have hidden the compiler-dependent behavior.

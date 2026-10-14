@@ -7,6 +7,7 @@ import contextlib
 import copy
 import io
 import json
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -99,6 +100,67 @@ class V03AcceptanceReceiptContract(unittest.TestCase):
         self.assertEqual(code, 0, err)
         self.assertIn("pass render_qualification: evidence: logs/render_qualification.json", out)
         self.assertIn("overall: pass", out)
+
+    def _absent_render_driver_section(self) -> dict:
+        # Inspect the actual emission branch so this portable test catches a
+        # driver regression even on hosts without PowerShell or a native client.
+        script = (Path(__file__).resolve().parents[1] / "gates" /
+                  "run-v03-acceptance.ps1").read_text(encoding="utf-8")
+        render = script.split("# --- render_qualification", 1)[1].split(
+            "# --- saved_world_lifecycle", 1)[0]
+        branch = re.search(
+            r'elseif \(-not \(Test-Path -LiteralPath \$renderScript -PathType Leaf\)\) '
+            r'\{\s*([^\n]+)\s*\} else \{', render)
+        self.assertIsNotNone(branch, "missing absent-driver branch")
+        emitted = re.fullmatch(
+            r'\$sections\["render_qualification"\] = New-Section '
+            r'-Status "([a-z]+)" -Detail \$renderDeferredDetail', branch[1].strip())
+        self.assertIsNotNone(emitted, "absent driver must emit an evidence-free section")
+        detail = re.search(r'^\$renderDeferredDetail = "([^"\n]+)"$', script, re.M)
+        self.assertIsNotNone(detail)
+        self.assertIn("v0.3.1", detail[1])
+        self.assertIn("issue #241", detail[1])
+        self.assertIn("NEEDS-NATIVE-RUN", detail[1])
+        self.assertIn("render qualification outstanding", detail[1])
+        self.assertIn("cell by cell", detail[1])
+        dry_run = script.split("if ($DryRun) {", 1)[1].split("    exit 0", 1)[0]
+        self.assertRegex(
+            dry_run,
+            r'elseif \(-not \(Test-Path -LiteralPath \$renderScript -PathType Leaf\)\) '
+            r'\{\s*Write-Host \("\[dry-run\] render_qualification: unevaluated; " '
+            r'\+ \$renderDeferredDetail\)')
+        return {"status": emitted[1], "evidence": "", "detail": detail[1]}
+
+    def test_absent_render_driver_defers_and_never_passes_acceptance(self) -> None:
+        receipt = valid_receipt()
+        section = self._absent_render_driver_section()
+        (self.base / receipt["sections"]["render_qualification"]["evidence"]).unlink()
+        receipt["sections"]["render_qualification"] = section
+        verdict_path = self.base / "verdict.json"
+        code, out, err = _run([str(self._write_obj(receipt)),
+                               "--verdict-out", str(verdict_path)])
+        self.assertEqual(code, 3, err)
+        self.assertIn("unevaluated render_qualification:", out)
+        self.assertIn(section["detail"], out)
+        self.assertIn("overall: unevaluated", out)
+        verdict = json.loads(verdict_path.read_text(encoding="utf-8"))
+        self.assertEqual(verdict["verdict"], "unevaluated")
+        check = _check(verdict, "render_qualification")
+        self.assertEqual(check["verdict"], "unevaluated")
+        self.assertIn(section["detail"], check["detail"])
+        self.assertTrue(all(c["verdict"] == "pass" for c in verdict["checks"]
+                            if c["id"] != "render_qualification"))
+
+    def test_deferred_render_does_not_hide_other_failures(self) -> None:
+        receipt = valid_receipt()
+        receipt["sections"]["render_qualification"] = self._absent_render_driver_section()
+        receipt["sections"]["audio_off"]["status"] = "fail"
+        code, out, err = _run([str(self._write_obj(receipt))])
+        self.assertEqual(code, 1, err)
+        self.assertIn("unevaluated render_qualification:", out)
+        self.assertIn("issue #241", out)
+        self.assertIn("fail audio_off:", out)
+        self.assertIn("overall: fail", out)
 
     def test_missing_evidence_reports_each_reference_and_exits_one(self) -> None:
         receipt = valid_receipt()

@@ -71,6 +71,41 @@ class AcceptancePreflightTests(unittest.TestCase):
         self.assertEqual(list(out.iterdir()), [evidence])
         self.assertEqual(evidence.read_bytes(), b"previous evidence\n")
 
+    def test_render_dry_run_reports_deferral_or_existing_driver(self):
+        gates = self.root / "gates"
+        gates.mkdir()
+        shutil.copy2(GATES / "run-v03-acceptance.ps1", gates)
+        shutil.copytree(GATES / "lib", gates / "lib")
+        driver = gates / "run-render-qualification.ps1"
+        for present in (False, True):
+            with self.subTest(driver_present=present):
+                if present:
+                    # Dry-run must never invoke even an available driver.
+                    driver.write_text('throw "dry-run invoked render driver"\n', encoding="utf-8")
+                result = self.run_script(
+                    gates / "run-v03-acceptance.ps1", "-Package", self.root / "package",
+                    "-FixtureDir", self.root / "fixture", "-OutDir", self.root / "out",
+                    "-DryRun")
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                render_line = next(line for line in result.stdout.splitlines()
+                                   if line.startswith("[dry-run] render_qualification:"))
+                if present:
+                    self.assertIn(str(driver), render_line)
+                    self.assertIn("-Package", render_line)
+                    self.assertNotIn("unevaluated", render_line)
+                else:
+                    self.assertIn("unevaluated", render_line)
+                    self.assertIn("issue #241", render_line)
+                    self.assertIn("NEEDS-NATIVE-RUN", render_line)
+                self.assertFalse((self.root / "out").exists())
+
+    def test_skip_render_dry_run_stays_unevaluated(self):
+        result = self.run_orchestrator(self.root / "out", "-DryRun", "-SkipRender")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("render_qualification: unevaluated (skipped by -SkipRender)",
+                      result.stdout)
+        self.assertFalse((self.root / "out").exists())
+
     def primary_world(self, before, after):
         saves = self.root / "saves"
         saves.mkdir()

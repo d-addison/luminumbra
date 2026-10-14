@@ -24,7 +24,7 @@ There are no assigned due dates or invented completion percentages.
   passes the actual MSYS Git/UCRT Python path-disagreement cases. Ambient SIMD
   [#172](https://github.com/d-addison/luminumbra/pull/172), tracked by
   [#163](https://github.com/d-addison/luminumbra/issues/163), passes actual Linux
-  and native UCRT Debug/Release controls at `e1080d7f`. Actual selected-ISA
+  and native UCRT Debug/Release controls. Actual selected-ISA
   evidence and failing original-dispatch controls preserve each configuration's
   established goldens. Active-region
   [#161](https://github.com/d-addison/luminumbra/pull/161) has been refreshed against
@@ -37,7 +37,7 @@ There are no assigned due dates or invented completion percentages.
   Fresh native/package qualification remains required; retain capture and shutdown
   artifacts and discover the selected tests again for each revision.
 - **Verification:** later Debug/ASan and native records supersede the failed
-  `ff0362b` baseline. Expanded integrated, native and packaged acceptance is
+  baseline. Expanded integrated, native and packaged acceptance is
   outstanding; implementation, test evidence and merged state are distinct.
 - **Accepted pre-release scope:** five volumetric tiers through 16,384 m, qualified
   within 32 km of the origin; per-system simulation policies over persistent active
@@ -92,10 +92,10 @@ Engine [#141](https://github.com/d-addison/luminumbra/issues/141) owns budget en
 | [v0.9.0 — Lighting and effects — provisional](https://github.com/d-addison/luminumbra/milestone/8) | Improved raster lighting, optional hybrid RT/denoising and reusable field-effect interfaces. | [Game lighting integration and proposed aether visuals, provisionally placed pending architecture review.](https://github.com/d-addison/luminumbra-game/milestone/8) |
 
 Full installed SDK delivery and game extraction in Foundations depend on
-independently verified v0.3 publication **and** the single implementation-roadmap approval after refreshed source/SDK architecture
-review. Accepted ownership/authoring direction is recorded
+independently verified v0.3 publication **and** the implementation-roadmap gate after refreshed source/SDK architecture
+review. Engine/game ownership is recorded
 in [Engine/game ownership](engine-game-boundary.md). Roadmap population does not
-waive that implementation gate. The already-authorized bounded optional authoring
+waive that implementation gate. The bounded optional authoring
 packages above may be refreshed and qualified before release. v0.7–v0.9 remain provisional.
 
 The foundation precedes substantial v0.4 work and does not renumber or reduce its
@@ -128,7 +128,7 @@ imply host migration, matchmaking or private Steam relay availability.
   Default/424242/FOV 110° native capture have separate investigation issues.
   Their causes remain unconfirmed. Tree-only tests do not close whole-scene
   appearance reports. Culling and no-UI fixes retain their separate causal evidence.
-- Audio is disabled for v0.3 and its private preview by owner direction; audible
+- Audio is disabled for v0.3 and its preview; audible
   quality and event coverage are future v0.5 work in a separate workstream. Dynamic-body
   acoustic material classification currently uses Stone.
 - GNS compilation does not establish live-peer behavior. Steam private SDK/live

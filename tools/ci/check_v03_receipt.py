@@ -121,7 +121,9 @@ def _check_section(name: str, section, evidence_root: Path) -> dict:
     if status == "fail":
         return _result(name, FAIL, "section reported fail")
     if status == "unevaluated":
-        return _result(name, UNEVALUATED, "section reported unevaluated")
+        detail = section.get("detail")
+        reason = f": {detail}" if isinstance(detail, str) and detail else ""
+        return _result(name, UNEVALUATED, "section reported unevaluated" + reason)
     if status == "pass":
         if evidence is not None and not isinstance(evidence, str):
             return _result(name, FAIL, "malformed evidence")

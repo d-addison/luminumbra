@@ -49,6 +49,8 @@ $FixtureAbs = Get-AbsolutePath $FixtureDir
 $OutAbs = Get-AbsolutePath $OutDir
 $receiptPath = Join-Path $OutAbs "v03-acceptance-receipt.json"
 $verdictPath = Join-Path $OutAbs "v03-verdict.json"
+$renderScript = Join-Path $PSScriptRoot "run-render-qualification.ps1"
+$renderDeferredDetail = "run-render-qualification.ps1 absent; tooling deferred to v0.3.1 (issue #241); render qualification outstanding: native rows remain NEEDS-NATIVE-RUN and must be captured cell by cell with existing devel tooling"
 
 function New-Section {
     # $Extra carries optional section keys (for example required_tests, discovered_tests, skipped_tests).
@@ -83,7 +85,13 @@ function Invoke-SiblingScript {
 
 if ($DryRun) {
     Write-Host "[dry-run] no sections will run and no files will be written"
-    Write-Host ("[dry-run] render_qualification: {0} -Package {1} -OutDir {2}" -f (Join-Path $PSScriptRoot "run-render-qualification.ps1"), $PackageAbs, (Join-Path $OutAbs "render"))
+    if ($SkipRender) {
+        Write-Host "[dry-run] render_qualification: unevaluated (skipped by -SkipRender)"
+    } elseif (-not (Test-Path -LiteralPath $renderScript -PathType Leaf)) {
+        Write-Host ("[dry-run] render_qualification: unevaluated; " + $renderDeferredDetail)
+    } else {
+        Write-Host ("[dry-run] render_qualification: {0} -Package {1} -OutDir {2}" -f $renderScript, $PackageAbs, (Join-Path $OutAbs "render"))
+    }
     Write-Host ("[dry-run] saved_world_lifecycle: {0} -Package {1} -FixtureDir {2} -OutDir {3}" -f (Join-Path $PSScriptRoot "run-saved-world-lifecycle.ps1"), $PackageAbs, $FixtureAbs, (Join-Path $OutAbs "lifecycle"))
     Write-Host ("[dry-run] noui_load: {0} -Package {1} -WorldId <fixture_world_id> -OutDir {2}" -f (Join-Path $PSScriptRoot "run-noui-load.ps1"), $PackageAbs, (Join-Path $OutAbs "noui-load"))
     Write-Host ("[dry-run] serial_load_20: 20 x {0} --load-world <fixture_world_id> --no-ui --hidden-window --render-benchmark ..." -f (Join-Path $PackageAbs "luminumbra_client_qa_app.exe"))
@@ -116,12 +124,11 @@ try {
     $exePath = Get-ClientExe -Package $PackageAbs -Name $ExeName
 
     # --- render_qualification -------------------------------------------------
-    $renderScript = Join-Path $PSScriptRoot "run-render-qualification.ps1"
     $renderOut = Join-Path $OutAbs "render"
     if ($SkipRender) {
         $sections["render_qualification"] = New-Section -Status "unevaluated" -Detail "skipped by -SkipRender"
     } elseif (-not (Test-Path -LiteralPath $renderScript -PathType Leaf)) {
-        $sections["render_qualification"] = New-Section -Status "fail" -Detail "run-render-qualification.ps1 missing"
+        $sections["render_qualification"] = New-Section -Status "unevaluated" -Detail $renderDeferredDetail
     } else {
         $renderParams = @{ Package = $PackageAbs; OutDir = $renderOut }
         if ($null -ne $DeclareRefresh -and $DeclareRefresh.Count -gt 0) { $renderParams["DeclareRefresh"] = $DeclareRefresh }
