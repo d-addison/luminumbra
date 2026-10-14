@@ -184,7 +184,7 @@ public:
     // this ONCE at construction, BEFORE the first update() — never mid-run: the hashed
     // mm grids are sized by it, the seam pass hard-gates on one uniform resolution, and
     // the cell-budget window re-derives from it (4096/64 = 64 chunks at Medium 8x8;
-    // 4096/256 = 16 chunks at High 16x16). Default Medium keeps every baseline
+    // 4096/256 = 16 chunks at High 16x16). Explicit Medium keeps every baseline
     // byte-identical. Values that do not divide the chunk evenly are rejected (the
     // seam pass needs cell-for-cell alignment), keeping the current resolution.
     void SetSimResolution(int cells_per_side);
@@ -294,6 +294,13 @@ private:
     bool m_boot_settle_mode = false;
     // The single uniform hashed sim resolution (cells per chunk side). Default High
     // (16x16, 1 m cells) — see SetSimResolution; set once pre-world via sim.water_high_res.
+    // At uniform resolution, live solver steps share the 4096-cell budget
+    // (16 High chunks, 64 Medium chunks).
+    // High first-time seeding costs about 4x per chunk, amortized at six chunks per live tick;
+    // live migration resizes one chunk per tick. Steady-state solver time is a few percent higher
+    // (see docs/known-limitations.md). Boot settle seeds/simulates the full backlog and world
+    // load migrates all mismatched grids in one pass; the live caps do not bound those paths
+    // or resident-chunk scans and activity scoring in the rest of the update.
     int m_sim_resolution = static_cast<int>(WaterDetailLevel::High);
     // loaded-boot water pause (see SetBootPaused). update is a no-op while set.
     bool m_boot_paused = false;

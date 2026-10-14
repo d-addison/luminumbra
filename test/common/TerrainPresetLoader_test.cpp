@@ -528,3 +528,106 @@ TEST(TerrainPresetLoaderTest, RevisionSevenDefaultsAndSixCompatibility) {
         EXPECT_FALSE(off.params.surface_breaks_enabled);
     }
 }
+
+TEST(TerrainPresetLoaderTest, MalformedDefaultedBlocksReportContractErrors) {
+    for (int revision : {6, 7}) {
+        for (const char* field :
+             {"/generation_params/terrain/hydro", "/generation_params/biomes"}) {
+            for (const auto& invalid : {nlohmann::json(nullptr),
+                                        nlohmann::json::array(),
+                                        nlohmann::json(42),
+                                        nlohmann::json("invalid"),
+                                        nlohmann::json(false)}) {
+                SCOPED_TRACE(revision);
+                SCOPED_TRACE(field);
+                SCOPED_TRACE(invalid.dump());
+                auto preset = nlohmann::json::parse(kMinimalPreset);
+                preset["schema_rev"] = revision;
+                const nlohmann::json::json_pointer pointer(field);
+                preset[pointer] = invalid;
+                const auto resolved = Luminumbra::world::ResolveTerrainPresetDefaults(preset);
+                EXPECT_EQ(resolved[pointer], invalid);
+
+                const auto result = LoadTerrainPresetFromJson(preset, {}, "MalformedBlock");
+                EXPECT_FALSE(result.ok);
+                ASSERT_EQ(result.errors.size(), 1u);
+                const std::string scope = std::string(field) == "/generation_params/terrain/hydro"
+                                              ? "generation_params.terrain.hydro"
+                                              : "generation_params.biomes";
+                EXPECT_EQ(result.errors.front(),
+                          "world preset field must be object: " + scope + ": MalformedBlock");
+            }
+        }
+    }
+}
+
+TEST(TerrainPresetLoaderTest, MalformedDefaultedValuesReportContractErrors) {
+    for (int revision : {6, 7}) {
+        for (const char* field : {"/generation_params/terrain/island_mask_enabled",
+                                  "/generation_params/terrain/hydro/enabled",
+                                  "/generation_params/biomes/table",
+                                  "/generation_params/biomes/relief_enabled",
+                                  "/generation_params/features/rivers_enabled",
+                                  "/generation_params/features/lakes_enabled",
+                                  "/generation_params/features/cliffs_enabled",
+                                  "/generation_params/features/structures_enabled",
+                                  "/generation_params/features/surface_breaks_enabled"}) {
+            for (const auto& invalid : {nlohmann::json(nullptr),
+                                        nlohmann::json::array(),
+                                        nlohmann::json(42),
+                                        nlohmann::json::object()}) {
+                SCOPED_TRACE(revision);
+                SCOPED_TRACE(field);
+                SCOPED_TRACE(invalid.dump());
+                auto preset = nlohmann::json::parse(kMinimalPreset);
+                preset["schema_rev"] = revision;
+                const nlohmann::json::json_pointer pointer(field);
+                preset[pointer] = invalid;
+                const auto resolved = Luminumbra::world::ResolveTerrainPresetDefaults(preset);
+                EXPECT_EQ(resolved[pointer], invalid);
+
+                const auto result = LoadTerrainPresetFromJson(preset, {}, "MalformedValue");
+                EXPECT_FALSE(result.ok);
+                ASSERT_EQ(result.errors.size(), 1u);
+                EXPECT_NE(result.errors.front().find("world preset field must be "),
+                          std::string::npos);
+                std::string scope(field + 1);
+                for (char& character : scope) {
+                    if (character == '/')
+                        character = '.';
+                }
+                EXPECT_NE(result.errors.front().find(scope + ": MalformedValue"),
+                          std::string::npos);
+            }
+        }
+    }
+}
+
+TEST(TerrainPresetLoaderTest, AbsentOptionalBlocksAndFieldsReceiveVersionedDefaults) {
+    for (int revision : {6, 7}) {
+        for (bool empty_blocks : {false, true}) {
+            SCOPED_TRACE(revision);
+            SCOPED_TRACE(empty_blocks);
+            auto preset = nlohmann::json::parse(kMinimalPreset);
+            preset["schema_rev"] = revision;
+            if (empty_blocks) {
+                preset["generation_params"]["terrain"]["hydro"] = nlohmann::json::object();
+                preset["generation_params"]["biomes"] = nlohmann::json::object();
+            }
+            const auto result = LoadTerrainPresetFromJson(preset, {});
+            ASSERT_TRUE(result.ok);
+            EXPECT_TRUE(result.errors.empty());
+            const bool on = revision == 7;
+            EXPECT_EQ(result.params.hydro_enabled, on);
+            EXPECT_EQ(result.params.biomes_enabled, on);
+            EXPECT_EQ(result.params.biome_relief_enabled, on);
+            EXPECT_EQ(result.extras.biomes.table, on ? "common/biomes.json" : "");
+            EXPECT_EQ(result.params.island_mask_enabled, on);
+            EXPECT_EQ(result.params.rivers_enabled, on);
+            EXPECT_EQ(result.params.lakes_enabled, on);
+            EXPECT_EQ(result.params.cliffs_enabled, on);
+            EXPECT_EQ(result.params.structures_enabled, on);
+            EXPECT_EQ(result.params.surface_breaks_enabled, on);
+        }
+    }
+}

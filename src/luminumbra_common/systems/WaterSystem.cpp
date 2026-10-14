@@ -129,9 +129,14 @@ constexpr std::int32_t EVAP_MM = 1; // cull <1mm films on non-source cells (dete
 // resolves a river channel. Visual mesh LOD, if wanted, stays a separate  concern.
 // The resolution lives in m_sim_resolution (default High); explicit sim.water_high_res=false
 // selects Medium at construction via SetSimResolution — never mid-run.
-// Perf: High (16) was ~4x and spiked the moving water phase to ~130ms; Medium is ~4x cheaper (~32ms
-// worst) and still uniform+deterministic. Cross-chunk flux REQUIRES a uniform resolution (boundary
-// cells must align). A mixed-resolution variant would require explicit seam resampling.
+// At uniform resolution, live solver steps are bounded by the 4096-cell budget:
+// 16 chunks at High, 64 at Medium.
+// High first-time grid seeding costs about 4x per chunk, amortized at six chunks per live tick;
+// live grid migration resizes one chunk per tick. Steady-state solver time is a few percent higher
+// (see docs/known-limitations.md). These caps do not bound resident-chunk scans or activity
+// scoring; boot settle seeds and simulates the full backlog, and world load migrates all mismatched
+// grids in one pass. Cross-chunk flux REQUIRES a uniform resolution (boundary cells must align). A
+// mixed-resolution variant would require explicit seam resampling.
 
 // Per-tick rotating sim-window length in CHUNKS, derived from the cell budget at the single
 // uniform sim resolution. Medium (8x8 = 64 cells/chunk) -> 4096/64 = 64 chunks, identical to the
@@ -1442,7 +1447,7 @@ void WaterSystem::SetSimResolution(int cells_per_side) {
     // seam cells align cell-for-cell (see SetSimResolution's header contract). Reject
     // anything else and keep the current resolution — the caller wires this once from
     // sim.water_high_res before the first update, so a rejected value simply leaves
-    // the byte-identical Medium default in place.
+    // the current session resolution in place.
     if (cells_per_side <= 1 || CHUNK_SIZE_X % cells_per_side != 0 ||
         CHUNK_SIZE_Z % cells_per_side != 0) {
         return;

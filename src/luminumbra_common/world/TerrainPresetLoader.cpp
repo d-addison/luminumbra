@@ -179,13 +179,11 @@ nlohmann::json ResolveTerrainPresetDefaults(const nlohmann::json& preset) {
     if (JsonHasObject(gen, "terrain")) {
         auto& terrain = gen["terrain"];
         fill(terrain, "island_mask_enabled", on);
-        if (!JsonHasObject(terrain, "hydro"))
-            terrain["hydro"] = nlohmann::json::object();
+        fill(terrain, "hydro", nlohmann::json::object());
         if (terrain["hydro"].is_object())
             fill(terrain["hydro"], "enabled", on);
     }
-    if (!JsonHasObject(gen, "biomes"))
-        gen["biomes"] = nlohmann::json::object();
+    fill(gen, "biomes", nlohmann::json::object());
     if (gen["biomes"].is_object()) {
         fill(gen["biomes"], "table", on ? "common/biomes.json" : "");
         fill(gen["biomes"], "relief_enabled", on);
@@ -284,6 +282,40 @@ TerrainPresetLoadResult LoadTerrainPresetFromJson(const nlohmann::json& source,
 
     const nlohmann::json& terrain = gen_params["terrain"];
     const nlohmann::json& features = gen_params["features"];
+    // Defaults only fill absent fields; malformed explicit choices must return
+    // contract errors before the typed reads below.
+    auto require_type = [&](bool valid, const char* type, const std::string& field) {
+        if (!valid) {
+            result.errors.push_back("world preset field must be " + std::string(type) + ": " +
+                                    field + ": " + provenance);
+        }
+    };
+    require_type(terrain["island_mask_enabled"].is_boolean(),
+                 "boolean",
+                 "generation_params.terrain.island_mask_enabled");
+    require_type(terrain["hydro"].is_object(), "object", "generation_params.terrain.hydro");
+    if (terrain["hydro"].is_object()) {
+        require_type(terrain["hydro"]["enabled"].is_boolean(),
+                     "boolean",
+                     "generation_params.terrain.hydro.enabled");
+    }
+    require_type(gen_params["biomes"].is_object(), "object", "generation_params.biomes");
+    if (gen_params["biomes"].is_object()) {
+        require_type(
+            gen_params["biomes"]["table"].is_string(), "string", "generation_params.biomes.table");
+        require_type(gen_params["biomes"]["relief_enabled"].is_boolean(),
+                     "boolean",
+                     "generation_params.biomes.relief_enabled");
+    }
+    for (const char* key : {"rivers_enabled",
+                            "lakes_enabled",
+                            "cliffs_enabled",
+                            "structures_enabled",
+                            "surface_breaks_enabled"}) {
+        require_type(features[key].is_boolean(),
+                     "boolean",
+                     std::string("generation_params.features.") + key);
+    }
     if (features.contains("cave_style")) {
         result.errors.push_back(
             "retired world preset selector generation_params.features.cave_style: " + provenance);
