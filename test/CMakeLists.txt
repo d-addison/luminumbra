@@ -1386,6 +1386,7 @@ add_executable(frontier_gates_test
     ai/instinct_locomotion_test.cpp
     ai/astar_grid_test.cpp
     ai/scent_field_test.cpp
+    ai/scent_field_gates_test.cpp
     ai/deterministic_rng_test.cpp
     ai/perception_test.cpp
     ai/evolution_test.cpp

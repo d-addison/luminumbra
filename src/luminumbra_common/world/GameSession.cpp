@@ -15,6 +15,7 @@
 #include "../ai/ScavengingSystem.h"   // Converts carcasses into scavenger food.
 #include "../ai/ScentDepositSystem.h"
 #include "../ai/ScentField.h"
+#include "../ai/ScentFieldGates.h"
 #include "../ai/ScentSteeringSystem.h"
 #include "../ai/SteeringConsumer.h" // Blends steering biases into desired motion.
 #include "../ai/StimulusChannels.h"
@@ -1478,8 +1479,8 @@ void GameSession::AdvanceFieldPages(std::uint64_t tick) {
     const std::uint64_t seed =
         static_cast<std::uint64_t>(static_cast<std::uint32_t>(StringToSeed(m_metadata.seed)));
     const auto& records = m_activeRegionLedger.records();
-    const auto previous = m_fieldPages;
     const auto due = SortedDueRegions();
+    const auto previous = m_fieldPages.scheduled_snapshot(records, due, tick);
     for (const RegionKey key : due) {
         if (records.find(key) == records.end())
             continue;
@@ -1608,7 +1609,8 @@ void GameSession::ProjectRegionalWeather(bool restoring) {
 }
 
 void GameSession::AdvanceRegionalWeather(std::uint64_t tick) {
-    auto next = m_fieldPages;
+    // Weather admission is transactional without copying pages or the dense scent map.
+    auto clocks = m_fieldPages.weather_clocks();
     const auto& records = m_activeRegionLedger.records();
     const auto due_list = SortedDueRegions();
     const std::set<RegionKey> due(due_list.begin(), due_list.end());
@@ -1640,22 +1642,24 @@ void GameSession::AdvanceRegionalWeather(std::uint64_t tick) {
         static_cast<std::uint64_t>(static_cast<std::uint32_t>(StringToSeed(m_metadata.seed)));
     std::map<RegionKey, std::uint64_t> work;
     for (const auto owner : due_list) {
-        const auto found = next.weather_clocks().find(owner);
-        const auto age = found == next.weather_clocks().end() ? 0 : found->second;
-        if (age + 1 >= WorldClock::kTickLimit || !next.set_weather_age(owner, age + 1))
+        const auto found = clocks.find(owner);
+        const auto age = found == clocks.end() ? 0 : found->second;
+        if (age + 1 >= WorldClock::kTickLimit ||
+            (found == clocks.end() && clocks.size() == FieldPageState::kMaxWeatherClocks))
             throw std::overflow_error("Regional weather clock admission failed");
+        clocks[owner] = age + 1;
         ++work[owner];
     }
     std::vector<RegionalStrike> strikes;
     // Same-tick events have already been delivered at the saved boundary. Frozen strikes stay
     // as stored and never re-emit because their absolute provenance tick is immutable.
-    for (const auto& strike : next.strikes())
+    for (const auto& strike : m_fieldPages.strikes())
         if (!due.contains(strike.owner))
             strikes.push_back(strike);
         else
             ++work[strike.owner];
     std::vector<RegionalStorm> storms;
-    for (auto storm : next.storms()) {
+    for (auto storm : m_fieldPages.storms()) {
         const auto source = storm.owner;
         if (!eligible(source)) {
             storms.push_back(storm);
@@ -1740,7 +1744,7 @@ void GameSession::AdvanceRegionalWeather(std::uint64_t tick) {
         storms.push_back(storm);
     }
     for (const auto owner : due_list) {
-        const auto age = next.weather_clocks().at(owner);
+        const auto age = clocks.at(owner);
         if (age % 45 != 0)
             continue;
         auto key = mix((seed + 40) ^ 0x535041574e000000ull ^ ((age / 45) * 0x100000001b3ull));
@@ -1772,9 +1776,8 @@ void GameSession::AdvanceRegionalWeather(std::uint64_t tick) {
                           0});
         ++work[owner];
     }
-    if (!next.replace_weather(std::move(storms), std::move(strikes)))
+    if (!m_fieldPages.replace_weather(std::move(storms), std::move(strikes), std::move(clocks)))
         throw std::runtime_error("Regional weather state admission failed");
-    m_fieldPages = std::move(next);
     ProjectRegionalWeather();
     for (const auto& [owner, updates] : work)
         RecordActiveRegionWork({owner, 0, 0, 0, updates});
@@ -3003,7 +3006,7 @@ void GameSession::RestoreRegionalScent() {
         }
 }
 void GameSession::CaptureRegionalScent() {
-    auto next = m_fieldPages;
+    std::vector<std::pair<ScentCellKey, ScentCell>> changed;
     std::map<RegionKey, std::uint64_t> work;
     for (int z = 0; z < kScentFieldCells; ++z)
         for (int x = 0; x < kScentFieldCells; ++x) {
@@ -3012,15 +3015,16 @@ void GameSession::CaptureRegionalScent() {
             ScentCell values{};
             for (int channel = 0; channel < kScentFieldChannels; ++channel)
                 values[channel] = std::bit_cast<std::uint64_t>(m_scentField->Sample(channel, x, z));
-            const auto found = next.scent_cells().find(key);
-            const ScentCell old = found == next.scent_cells().end() ? ScentCell{} : found->second;
+            const auto found = m_fieldPages.scent_cells().find(key);
+            const ScentCell old =
+                found == m_fieldPages.scent_cells().end() ? ScentCell{} : found->second;
             if (values == old)
                 continue;
-            if (!next.set_scent(key, values))
-                throw std::runtime_error("Regional scent admission failed");
+            changed.emplace_back(key, values);
             ++work[FieldPageState::region_of_scent_cell(key)];
         }
-    m_fieldPages = std::move(next);
+    if (!m_fieldPages.update_scent(changed))
+        throw std::runtime_error("Regional scent admission failed");
     for (const auto& [owner, updates] : work)
         RecordActiveRegionWork({owner, 0, 0, 0, updates});
 }
@@ -3068,29 +3072,29 @@ void GameSession::AdvanceNearScent() {
             wind_cx = static_cast<double>(w.x) * k;
             wind_cz = static_cast<double>(w.y) * k;
         }
-        m_scentField->Step(
-            kScentDiffusionRate,
-            kScentDiffusionIterations,
-            kScentEvaporation,
-            wind_cx,
-            wind_cz,
-            m_activeRegionsEnabled
-                ? luminumbra::ai::ScentField::CellGate([this, scent_interior](int x, int z) {
-                      return scent_interior && ScentCellDue(x, z);
-                  })
-                : luminumbra::ai::ScentField::CellGate{},
-            m_activeRegionsEnabled
-                ? luminumbra::ai::ScentField::EdgeGate(
-                      [this](int x, int z, int nx, int nz) { return ScentEdgeOpen(x, z, nx, nz); })
-                : luminumbra::ai::ScentField::EdgeGate{});
-        m_scentField->Clamp(
-            kScentTauMin,
-            kScentTauMax,
-            m_activeRegionsEnabled
-                ? luminumbra::ai::ScentField::CellGate([this, scent_interior](int x, int z) {
-                      return scent_interior && ScentCellDue(x, z);
-                  })
-                : luminumbra::ai::ScentField::CellGate{});
+        luminumbra::ai::detail::ScentStepGates gates;
+        if (m_activeRegionsEnabled) {
+            // This 128 m square intersects at most two 512 m owners on each axis.
+            // The schedule and anchor are sealed throughout Step/Clamp. Resolve their
+            // gates once per tile, rather than doing world conversions and ledger/due
+            // lookups for every channel, diffusion iteration and advection path hop.
+            static_assert(kScentFieldCells * kScentCellSize < 512.0f);
+            gates = luminumbra::ai::detail::CacheNearScentGates(
+                kScentFieldCells,
+                [this](int x, int z) { return ScentCellOwner(x, z); },
+                [this, scent_interior](int x, int z) {
+                    return scent_interior && ScentCellDue(x, z);
+                },
+                [this](int x, int z, int nx, int nz) { return ScentEdgeOpen(x, z, nx, nz); });
+        }
+        m_scentField->Step(kScentDiffusionRate,
+                           kScentDiffusionIterations,
+                           kScentEvaporation,
+                           wind_cx,
+                           wind_cz,
+                           gates.participants,
+                           gates.exchange);
+        m_scentField->Clamp(kScentTauMin, kScentTauMax, gates.participants);
         if (m_activeRegionsEnabled)
             CaptureRegionalScent();
     }
