@@ -1,11 +1,10 @@
 #pragma once
 
-#include <glad/glad.h>
 #include <glm/ext/matrix_clip_space.hpp>
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 
-#include "luminumbra_common/world/FarHorizon.h"
+#include "FarWorldSelection.h"
 
 #include <vector>
 
@@ -96,8 +95,10 @@ public:
     glm::mat4 GetProjectionMatrix(int screen_width, int screen_height) const {
         if (screen_height == 0)
             screen_height = 1; // Prevent division by zero
-        return ReversedZPerspective(
-            glm::radians(Zoom), (float)screen_width / (float)screen_height, NEAR_PLANE, FAR_PLANE);
+        return ReversedZPerspective(glm::radians(Zoom),
+                                    (float)screen_width / (float)screen_height,
+                                    GetNearPlane(),
+                                    GetFarPlane());
     }
 
     // --- ADD THESE TWO GETTERS ---
@@ -105,7 +106,13 @@ public:
         return NEAR_PLANE;
     }
     float GetFarPlane() const {
-        return FAR_PLANE;
+        return m_frame_far_plane;
+    }
+
+    // Render metadata is selected once between frames; camera pose stays const.
+    // All pass projections, inverses, frusta and captures consume this plane.
+    void SelectFarWorldPlane(FarWorldMode effective) const {
+        m_frame_far_plane = FarWorldPlane(effective);
     }
 
     // processes input received from any keyboard-like input system. Accepts input parameter in the
@@ -124,7 +131,7 @@ public:
 
     // processes input received from a mouse input system. Expects the offset value in both the x
     // and y direction.
-    void ProcessMouseMovement(float xoffset, float yoffset, GLboolean constrainPitch = true) {
+    void ProcessMouseMovement(float xoffset, float yoffset, bool constrainPitch = true) {
         xoffset *= MouseSensitivity;
         yoffset *= MouseSensitivity;
 
@@ -164,5 +171,6 @@ public:
     }
 
 private:
+    mutable float m_frame_far_plane = FAR_PLANE;
 };
 } // namespace Luminumbra::Rendering
