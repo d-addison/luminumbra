@@ -2,6 +2,7 @@ name: Blender authoring contracts
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
     branches: [main, devel]
     paths:
       - 'tools/blender/**'

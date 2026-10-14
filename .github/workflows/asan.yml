@@ -4,6 +4,7 @@ on:
   push:
     branches: [main, devel]
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
     branches: [main, devel]
   workflow_dispatch:
     inputs:
@@ -31,14 +32,19 @@ env:
   QUALIFICATION_EXPECTED_SHA: ${{ inputs.expected_sha }}
 
 jobs:
+  # Drafts cannot merge. ready_for_review reruns this job on the same head;
+  # maintainers must wait for that run's required checks to pass before merging.
   asan:
     name: Linux / GCC ASan
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     env:
       ASAN_OPTIONS: detect_leaks=1:abort_on_error=1:symbolize=1
       CC: gcc
       CXX: g++
+      CCACHE_COMPILERCHECK: content
+      CCACHE_MAXSIZE: 500M
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -50,15 +56,50 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            build-essential cmake extra-cmake-modules libfreetype6-dev libgl1-mesa-dev \
+            build-essential ccache cmake extra-cmake-modules libfreetype6-dev libgl1-mesa-dev \
             libglu1-mesa-dev libwayland-dev libxkbcommon-dev ninja-build pkg-config \
             python3-numpy python3-pil wayland-protocols xauth xorg-dev xvfb
+      - name: Disable compiler cache for qualification captures
+        if: github.event_name == 'workflow_dispatch' && inputs.qualification_capture
+        run: echo "CCACHE_DISABLE=1" >> "$GITHUB_ENV"
+      - name: Restore compiler cache
+        id: compiler-cache
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.qualification_capture) }}
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ccache
+          key: linux-x64-gcc-asan-ccache-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json', 'cmake/**/*.cmake', 'src/**/*.cmake', 'test/CMakeLists.txt', 'tools/CMakeLists.txt', 'vendor/CMakeLists.txt') }}-${{ github.sha }}
+          restore-keys: |
+            linux-x64-gcc-asan-ccache-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json', 'cmake/**/*.cmake', 'src/**/*.cmake', 'test/CMakeLists.txt', 'tools/CMakeLists.txt', 'vendor/CMakeLists.txt') }}-
+            linux-x64-gcc-asan-ccache-
       - name: Configure
         id: configure
-        run: cmake --preset debug-asan
+        run: >-
+          cmake --preset debug-asan -DCMAKE_C_COMPILER_LAUNCHER=ccache
+          -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+      - name: Reset compiler cache statistics
+        if: ${{ always() && !(github.event_name == 'workflow_dispatch' && inputs.qualification_capture) }}
+        continue-on-error: true
+        run: ccache -z || true
       - name: Build
         id: build
         run: cmake --build --preset debug-asan --parallel 4
+      - name: Report compiler cache statistics
+        if: ${{ always() && !(github.event_name == 'workflow_dispatch' && inputs.qualification_capture) }}
+        continue-on-error: true
+        run: ccache -s || true
+      - name: Clean compiler cache before saving
+        if: ${{ always() && github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/devel') && !(github.event_name == 'workflow_dispatch' && inputs.qualification_capture) && steps.compiler-cache.outcome == 'success' && steps.compiler-cache.outputs.cache-hit != 'true' }}
+        continue-on-error: true
+        run: ccache --cleanup || true
+      - name: Save compiler cache
+        if: ${{ always() && github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/devel') && !(github.event_name == 'workflow_dispatch' && inputs.qualification_capture) && steps.compiler-cache.outcome == 'success' && steps.compiler-cache.outputs.cache-hit != 'true' }}
+        # Cache writes are best-effort, including collisions on same-SHA reruns.
+        continue-on-error: true
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ccache
+          key: linux-x64-gcc-asan-ccache-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json', 'cmake/**/*.cmake', 'src/**/*.cmake', 'test/CMakeLists.txt', 'tools/CMakeLists.txt', 'vendor/CMakeLists.txt') }}-${{ github.sha }}
       - name: Test
         id: tests
         run: |
