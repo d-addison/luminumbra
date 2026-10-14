@@ -2,6 +2,9 @@
 
 #include "../support/UniqueTempPath.h"
 
+#include "ai/CreaturePersistence.h"
+#include "components/CoreComponents.h"
+#include "components/CreatureComponents.h"
 #include "fields/FieldPageState.h"
 #include "persistence/SaveTransaction.h"
 #include "persistence/WorldPersistenceRoundtrip.h"
@@ -10,6 +13,7 @@
 #include "world/GroundObjectStore.h"
 #include "world/MarchingCubes.h"
 #include "world/WorldStreamingState.h"
+#include <set>
 
 #include <algorithm>
 #include <array>
@@ -1061,4 +1065,209 @@ TEST(WorldSaveServiceTest, PublicRegionDigestRejectsUnsupportedKeysBeforeDurable
                   expected_digest);
     }
     EXPECT_FALSE(std::filesystem::exists(missing_save));
+}
+namespace {
+namespace CreatureAuthority = luminumbra::ai;
+namespace CreatureComponents = Luminumbra::Components;
+
+CreatureAuthority::CreatureSnapshot CreatureStoreFixture() {
+    entt::registry registry;
+    const auto e = registry.create();
+    registry.emplace<CreatureComponents::TransformComponent>(e);
+    registry.emplace<CreatureComponents::CreatureComponent>(e).species_id = 1;
+    registry.emplace<CreatureComponents::CreatureRegionComponent>(e).persistent_id = 1;
+    registry.emplace<CreatureComponents::CreatureCoarseComponent>(e);
+    return CreatureAuthority::BuildCreatureSnapshot(registry);
+}
+
+bool InstallCreatureStore(const std::filesystem::path& directory,
+                          const CreatureAuthority::CreatureSnapshot& snapshot) {
+    namespace P = Luminumbra::Persistence;
+    const Luminumbra::world::WorldClock clock;
+    Luminumbra::world::ActiveRegionLedger ledger({}, clock);
+    std::uint64_t id = 0;
+    if (!ledger.allocate_persistent_id(id))
+        return false;
+    ledger.mark_edited({0, 0}, clock);
+    nlohmann::json metadata{{"container_version", 2}, {"snapshotFormat", 1}};
+    clock.write_metadata(metadata);
+    WorldSaveService::SaveFactsScope facts(directory);
+    P::SaveTransaction transaction(directory, clock.tick(), {}, WorldSaveService::member_digest);
+    return transaction.begin(nullptr) &&
+           WorldSaveService::save_creature_entities(snapshot, directory) &&
+           WorldSaveService::save_metadata_and_active_regions(
+               metadata.dump() + "\n", ledger, directory) &&
+           transaction.commit(nullptr);
+}
+
+// Pinned predecessor snapshot-member allowlist. Its decoder refuses unfamiliar member names
+// before reading payloads, including an explicitly absent creature member.
+bool PreviousReleaseReadsMembers(const Luminumbra::Persistence::SnapshotIndex& index) {
+    const std::set<std::string> singletons{"world_info.json",
+                                           "aether_state.efs",
+                                           "chunks/region/world-manifest.json",
+                                           "chunks/region/plant-entities.json",
+                                           "chunks/region/ground-objects.json",
+                                           "chunks/region/field-pages.fpg",
+                                           "chunks/region/active-regions.arl"};
+    for (const auto& member : index.members)
+        if (!singletons.contains(member.path) && member.path.rfind("chunks/region/r.", 0) != 0)
+            return false;
+    return true;
+}
+} // namespace
+
+TEST(WorldSaveService, CreatureStoreRoundtripEmptyRemovalAndExplicitIndexedAbsence) {
+    namespace P = Luminumbra::Persistence;
+    TempSaveDir save("creature_roundtrip");
+    const auto original = CreatureStoreFixture();
+    ASSERT_TRUE(InstallCreatureStore(save.path, original));
+    CreatureAuthority::CreatureSnapshot restored;
+    std::vector<std::string> errors;
+    ASSERT_TRUE(WorldSaveService::load_creature_entities(restored, save.path, &errors));
+    EXPECT_EQ(CreatureAuthority::SerializeCreatureSnapshot(restored),
+              CreatureAuthority::SerializeCreatureSnapshot(original));
+    EXPECT_TRUE(WorldSaveService::validate_save(save.path, &errors));
+    P::MemberDigest digest;
+    std::string error;
+    ASSERT_TRUE(WorldSaveService::member_digest(
+        save.path, "chunks/region/creature-entities.json", digest, error));
+    EXPECT_TRUE(digest.present);
+    ASSERT_TRUE(WorldSaveService::save_creature_entities({}, save.path, &errors));
+    EXPECT_FALSE(std::filesystem::exists(WorldSaveService::creature_entities_path(save.path)));
+    ASSERT_TRUE(WorldSaveService::load_creature_entities(restored, save.path, &errors));
+    EXPECT_TRUE(restored.entities.empty());
+    P::SnapshotIndex index;
+    ASSERT_TRUE(P::read_snapshot_index(save.path, index, &errors));
+    const auto absent =
+        std::find_if(index.members.begin(), index.members.end(), [](const auto& member) {
+            return member.path == "chunks/region/creature-entities.json";
+        });
+    ASSERT_NE(absent, index.members.end());
+    EXPECT_FALSE(absent->present);
+    EXPECT_EQ(absent->bytes, 0u);
+    EXPECT_EQ(absent->fnv64, 0u);
+    EXPECT_TRUE(WorldSaveService::validate_save(save.path, &errors));
+    // A file appearing behind an absent index member is corruption.
+    std::ofstream(WorldSaveService::creature_entities_path(save.path), std::ios::binary)
+        << CreatureAuthority::SerializeCreatureSnapshot(original);
+    EXPECT_FALSE(WorldSaveService::load_creature_entities(restored, save.path, &errors));
+    EXPECT_FALSE(WorldSaveService::validate_save(save.path, &errors));
+}
+
+TEST(WorldSaveService, FirstEmptyCreatureSaveIsIndexedAbsentAndOlderReaderRefusesNewMember) {
+    namespace P = Luminumbra::Persistence;
+    TempSaveDir save("creature_first_absent");
+    ASSERT_TRUE(InstallCreatureStore(save.path, {}));
+    P::SnapshotIndex index;
+    ASSERT_TRUE(P::read_snapshot_index(save.path, index, nullptr));
+    const auto member = std::find_if(index.members.begin(), index.members.end(), [](const auto& m) {
+        return m.path == "chunks/region/creature-entities.json";
+    });
+    ASSERT_NE(member, index.members.end());
+    EXPECT_FALSE(member->present);
+    EXPECT_FALSE(PreviousReleaseReadsMembers(index));
+    ASSERT_TRUE(WorldSaveService::save_creature_entities(CreatureStoreFixture(), save.path));
+    ASSERT_TRUE(P::read_snapshot_index(save.path, index, nullptr));
+    EXPECT_FALSE(PreviousReleaseReadsMembers(index));
+}
+
+TEST(WorldSaveService, PreviousReleaseIndexWithoutCreatureMemberLoadsAsEmpty) {
+    namespace P = Luminumbra::Persistence;
+    TempSaveDir save("creature_previous_release");
+    ASSERT_TRUE(InstallCreatureStore(save.path, {}));
+    P::SnapshotIndex index;
+    ASSERT_TRUE(P::read_snapshot_index(save.path, index, nullptr));
+    std::erase_if(index.members, [](const auto& member) {
+        return member.path == "chunks/region/creature-entities.json";
+    });
+    ASSERT_TRUE(WorldSaveService::durable_write_file(P::snapshot_index_path(save.path),
+                                                     P::encode_snapshot_index(index)));
+    EXPECT_TRUE(PreviousReleaseReadsMembers(index));
+    auto out = CreatureStoreFixture();
+    ASSERT_TRUE(WorldSaveService::load_creature_entities(out, save.path));
+    EXPECT_TRUE(out.entities.empty());
+    std::vector<std::string> errors;
+    EXPECT_TRUE(WorldSaveService::validate_save(save.path, &errors));
+    TempSaveDir legacy("creature_legacy_absent");
+    out = CreatureStoreFixture();
+    ASSERT_TRUE(WorldSaveService::load_creature_entities(out, legacy.path));
+    EXPECT_TRUE(out.entities.empty());
+}
+
+TEST(WorldSaveService, MissingUnindexedOrCorruptCreatureMemberRefuses) {
+    namespace P = Luminumbra::Persistence;
+    TempSaveDir save("creature_expected_missing");
+    ASSERT_TRUE(InstallCreatureStore(save.path, CreatureStoreFixture()));
+    std::filesystem::remove(WorldSaveService::creature_entities_path(save.path));
+    std::vector<std::string> errors;
+    CreatureAuthority::CreatureSnapshot out;
+    EXPECT_FALSE(WorldSaveService::load_creature_entities(out, save.path, &errors));
+    EXPECT_FALSE(WorldSaveService::validate_save(save.path, &errors));
+    TempSaveDir unindexed("creature_unindexed");
+    std::filesystem::create_directories(WorldSaveService::region_directory(unindexed.path));
+    std::ofstream(WorldSaveService::creature_entities_path(unindexed.path), std::ios::binary)
+        << CreatureAuthority::SerializeCreatureSnapshot(CreatureStoreFixture());
+    EXPECT_FALSE(WorldSaveService::load_creature_entities(out, unindexed.path, &errors));
+    EXPECT_FALSE(WorldSaveService::validate_save(unindexed.path, &errors));
+}
+
+TEST(WorldSaveService, CorrectFingerprintDoesNotAdmitFutureCreatureComponentOrDuplicateSharedId) {
+    namespace P = Luminumbra::Persistence;
+    const auto raw_digest = +[](const std::filesystem::path& dir,
+                                std::string_view member,
+                                P::MemberDigest& out,
+                                std::string& error) {
+        bool exists = false;
+        if (!P::hash_file(dir / std::string(member), out.bytes, out.fnv64, exists, nullptr)) {
+            error = "cannot fingerprint member";
+            return false;
+        }
+        out.present = exists;
+        return true;
+    };
+    for (const bool future : {false, true}) {
+        TempSaveDir save(future ? "creature_future" : "creature_duplicate");
+        ASSERT_TRUE(InstallCreatureStore(save.path, CreatureStoreFixture()));
+        auto snapshot = CreatureStoreFixture();
+        if (future)
+            snapshot.entities[0].components["Creature"]["version"] = 2;
+        {
+            P::SaveTransaction transaction(save.path, 0, {}, raw_digest);
+            ASSERT_TRUE(transaction.begin(nullptr));
+            if (future) {
+                ASSERT_TRUE(WorldSaveService::write_member_bytes(
+                    save.path,
+                    "chunks/region/creature-entities.json",
+                    CreatureAuthority::SerializeCreatureSnapshot(snapshot)));
+            } else {
+                Luminumbra::world::GroundObjectStore ground;
+                auto object = MakeGroundObject(1, 0, 0);
+                object.z_mm = 0;
+                ASSERT_TRUE(ground.insert(object));
+                ASSERT_TRUE(WorldSaveService::write_member_bytes(
+                    save.path, "chunks/region/ground-objects.json", ground.serialize()));
+            }
+            ASSERT_TRUE(transaction.commit(nullptr));
+        }
+        std::vector<std::string> errors;
+        EXPECT_FALSE(WorldSaveService::validate_save(save.path, &errors));
+        ASSERT_FALSE(errors.empty());
+        EXPECT_NE(JoinErrors(errors).find(future ? "component version" : "shared creature"),
+                  std::string::npos);
+    }
+}
+
+TEST(WorldSaveService, CreatureDigestIsEmptyNeutralAndDetectsContinuationState) {
+    Luminumbra::Persistence::RegionDigestInputs inputs;
+    const auto baseline = WorldSaveService::region_simulation_digest({}, {0, 0}, inputs);
+    inputs.creature_bytes = CreatureAuthority::SerializeCreatureSnapshot(CreatureStoreFixture());
+    const auto populated = WorldSaveService::region_simulation_digest({}, {0, 0}, inputs);
+    EXPECT_NE(populated, baseline);
+    auto changed = CreatureStoreFixture();
+    changed.entities[0].components["Creature"]["data"]["last_action"] = 6;
+    inputs.creature_bytes = CreatureAuthority::SerializeCreatureSnapshot(changed);
+    EXPECT_NE(WorldSaveService::region_simulation_digest({}, {0, 0}, inputs), populated);
+    inputs.creature_bytes.clear();
+    EXPECT_EQ(WorldSaveService::region_simulation_digest({}, {0, 0}, inputs), baseline);
 }

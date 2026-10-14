@@ -167,13 +167,18 @@ inline void ApplyPlantEntitySnapshot(entt::registry& reg,
 inline bool ValidatePlantEntitySnapshot(const ::Luminumbra::Ecs::EntityRegistrySnapshot& snap,
                                         const ::Luminumbra::world::ActiveRegionLedger& ledger,
                                         const ::Luminumbra::world::GroundObjectStore& ground,
-                                        std::string& error) {
+                                        std::string& error,
+                                        const std::set<std::uint64_t>& creature_ids = {}) {
     try {
         if (!snap.entities.empty() && !snap.persistent_identity)
             throw std::invalid_argument("plant identity mode missing");
         std::set<std::uint64_t> ids;
         for (const auto& [id, object] : ground.objects())
             ids.insert(id);
+        for (const auto id : creature_ids) {
+            if (!id || id >= ledger.next_persistent_id() || !ids.insert(id).second)
+                throw std::invalid_argument("duplicate or invalid shared creature ID");
+        }
         for (const auto& rec : snap.entities) {
             if (rec.name != "plant" || !rec.entity_id ||
                 rec.entity_id >= ledger.next_persistent_id() || !ids.insert(rec.entity_id).second)

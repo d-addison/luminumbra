@@ -1,4 +1,5 @@
 #include "WorldSaveService.h"
+#include "ai/CreaturePersistence.h"
 
 #include "../ecs/EntitySnapshot.h" //  plant entity snapshot persistence
 #include "../fields/EnergyFieldState.h"
@@ -1066,6 +1067,7 @@ std::string VerifySnapshotIndex(const std::filesystem::path& save_dir,
                                               "aether_state.efs",
                                               "chunks/region/world-manifest.json",
                                               "chunks/region/plant-entities.json",
+                                              "chunks/region/creature-entities.json",
                                               "chunks/region/ground-objects.json",
                                               "chunks/region/field-pages.fpg",
                                               "chunks/region/active-regions.arl"};
@@ -1418,6 +1420,103 @@ bool WorldSaveService::load_plant_entities(Luminumbra::Ecs::EntityRegistrySnapsh
         AddError(errors, "corrupt or unindexed persistent plant snapshot");
         return false;
     }
+    return true;
+}
+
+std::filesystem::path
+WorldSaveService::creature_entities_path(const std::filesystem::path& save_dir) {
+    return region_directory(save_dir) / "creature-entities.json";
+}
+
+bool WorldSaveService::save_creature_entities(const luminumbra::ai::CreatureSnapshot& snapshot,
+                                              const std::filesystem::path& save_dir,
+                                              std::vector<std::string>* errors) {
+    // Validate before replacing even a single member. The outer writer validates the shared
+    // allocator, owners and plant targets against its complete candidate snapshot.
+    std::string bytes, error;
+    try {
+        bytes = luminumbra::ai::SerializeCreatureSnapshot(snapshot);
+    } catch (const std::exception& e) {
+        AddError(errors, e.what());
+        return false;
+    }
+    luminumbra::ai::CreatureSnapshot decoded;
+    if (!luminumbra::ai::LoadCreatureSnapshot(bytes, decoded, error)) {
+        AddError(errors, error);
+        return false;
+    }
+    TransactionScope scope(save_dir, {"chunks/region/creature-entities.json"}, errors, true);
+    if (!scope.ok() || !validate_save(save_dir, errors))
+        return false;
+    const auto path = creature_entities_path(save_dir);
+    const bool written = snapshot.entities.empty() ? durable_remove(path, errors)
+                                                   : durable_write_file(path, bytes, errors);
+    return written && scope.commit(errors);
+}
+
+bool WorldSaveService::load_creature_entities(luminumbra::ai::CreatureSnapshot& out,
+                                              const std::filesystem::path& save_dir,
+                                              std::vector<std::string>* errors) {
+    const auto path = creature_entities_path(save_dir);
+    std::error_code ec;
+    const bool present = std::filesystem::exists(path, ec);
+    if (ec) {
+        AddError(errors, "failed to inspect creature authority: " + ec.message());
+        return false;
+    }
+    if (!SaveTransaction::active_for(save_dir)) {
+        if (snapshot_index_exists(save_dir)) {
+            SnapshotIndex index;
+            if (!read_snapshot_index(save_dir, index, errors))
+                return false;
+            const auto member = std::find_if(
+                index.members.begin(), index.members.end(), [](const SnapshotMember& m) {
+                    return m.path == "chunks/region/creature-entities.json";
+                });
+            std::uint64_t bytes = 0, fnv = 0;
+            bool exists = false;
+            if (!hash_file(path, bytes, fnv, exists, errors))
+                return false;
+            if ((member == index.members.end() && exists) ||
+                (member != index.members.end() &&
+                 (member->present != exists ||
+                  (exists && (member->bytes != bytes || member->fnv64 != fnv))))) {
+                AddError(errors, "inconsistent snapshot: chunks/region/creature-entities.json");
+                return false;
+            }
+        } else if (present) {
+            AddError(errors, "inconsistent snapshot: creature authority without index");
+            return false;
+        }
+    }
+    if (!present) {
+        out = {};
+        return true;
+    }
+    const auto size = std::filesystem::file_size(path, ec);
+    if (ec || size > luminumbra::ai::kMaxStampedCreatureBytes) {
+        AddError(errors, "unreadable or oversized creature authority");
+        return false;
+    }
+    std::ifstream input(path, std::ios::binary);
+    if (!input) {
+        AddError(errors, "failed to open creature authority");
+        return false;
+    }
+    std::string bytes(static_cast<std::size_t>(size), '\0');
+    input.read(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+    if (!input || input.peek() != std::char_traits<char>::eof()) {
+        AddError(errors, "failed to read creature authority");
+        return false;
+    }
+    luminumbra::ai::CreatureSnapshot candidate;
+    std::string error;
+    if (!luminumbra::ai::LoadCreatureSnapshot(bytes, candidate, error) ||
+        candidate.entities.empty()) {
+        AddError(errors, error.empty() ? "empty creature authority must be absent" : error);
+        return false;
+    }
+    out = std::move(candidate);
     return true;
 }
 
@@ -1926,13 +2025,15 @@ std::uint64_t WorldSaveService::region_simulation_digest(const std::filesystem::
                 region.insert_chunk(chunk);
         }
     }
-    // Optional extensions compose in a fixed order (ground, then pages); with neither the result is
-    // the content hash, with ground only it is the S5 value.
+    // Optional extensions compose in a fixed order: ground, pages, then creatures. Empty
+    // inputs preserve the preceding projection, including the content-only hash.
     std::string composed = ComputeRegionContentHash(region);
     if (!inputs.ground_object_bytes.empty())
         composed = StableChecksum(composed + "|ground:" + inputs.ground_object_bytes);
     if (!inputs.field_page_bytes.empty())
         composed = StableChecksum(composed + "|pages:" + inputs.field_page_bytes);
+    if (!inputs.creature_bytes.empty())
+        composed = StableChecksum(composed + "|creatures:" + inputs.creature_bytes);
     return std::stoull(composed, nullptr, 16);
 }
 
@@ -2472,6 +2573,12 @@ bool WorldSaveService::member_digest(const std::filesystem::path& save_dir,
                 error = first_error("corrupt plant entities");
                 return false;
             }
+        } else if (relative == "chunks/region/creature-entities.json") {
+            luminumbra::ai::CreatureSnapshot creatures;
+            if (!load_creature_entities(creatures, save_dir, &diagnostics)) {
+                error = first_error("corrupt creature entities");
+                return false;
+            }
         } else if (relative == "chunks/region/ground-objects.json") {
             world::GroundObjectStore objects;
             const std::uint64_t no_id_limit = std::numeric_limits<std::uint64_t>::max();
@@ -2858,6 +2965,7 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
             }
             if (entry.path() == world_manifest_path(save_dir) ||
                 entry.path() == plant_entities_path(save_dir) ||
+                entry.path() == creature_entities_path(save_dir) ||
                 entry.path() == ground_objects_path(save_dir) ||
                 entry.path() == field_pages_path(save_dir) ||
                 entry.path() == active_regions_path(save_dir)) {
@@ -2959,14 +3067,24 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
             return reject("Saved-world validation cancelled.");
         if (!load_plant_entities(plants, save_dir, &errors))
             return reject("");
-        if (indexed || plants.persistent_identity) {
+        luminumbra::ai::CreatureSnapshot creatures;
+        if (!load_creature_entities(creatures, save_dir, &errors))
+            return reject("");
+        if (indexed || plants.persistent_identity || !creatures.entities.empty()) {
             world::GroundObjectStore ground;
             if (!load_ground_objects(ground, save_dir, ledger.next_persistent_id(), &errors))
                 return reject("");
+            std::set<std::uint64_t> creature_ids;
+            for (const auto& record : creatures.entities)
+                creature_ids.insert(record.id);
             std::string plant_error;
             if (!luminumbra::foliage::ValidatePlantEntitySnapshot(
-                    plants, ledger, ground, plant_error))
+                    plants, ledger, ground, plant_error, creature_ids))
                 return reject(plant_error);
+            std::string creature_error;
+            if (!luminumbra::ai::ValidateCreatureSnapshot(
+                    creatures, ledger, ground, plants, creature_error))
+                return reject(creature_error);
             entt::registry decoded;
             luminumbra::foliage::ApplyPlantEntitySnapshot(decoded, plants);
             world::FieldPageState foliage_pages;

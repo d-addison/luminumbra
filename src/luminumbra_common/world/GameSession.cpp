@@ -1,6 +1,7 @@
 ﻿#include "GameSession.h"
 #include "../ai/CircadianSystem.h" // Diurnal and nocturnal activity.
 #include "../ai/CreatureBrainSystem.h"
+#include "../ai/CreaturePersistence.h"
 #include "../ai/CreatureReproductionSystem.h" // Generational evolution.
 #include "../ai/CreatureSpeciesRegistry.h"    // per-world species definitions
 #include "../ai/DecompositionSystem.h"        // Releases nutrients after death.
@@ -1155,6 +1156,7 @@ bool GameSession::CreateWorldInternal(const std::string& name,
                                       const std::string* customPresetJson,
                                       bool transient) {
     m_worldOpenError.clear();
+    m_worldLoadError.clear();
     if (!m_jobSystem) {
         LUMINUMBRA_CORE_ERROR("JobSystem not set before creating world");
         return false;
@@ -1317,6 +1319,66 @@ bool GameSession::CreateWorldInternal(const std::string& name,
 }
 
 bool GameSession::LoadWorld(const std::string& worldId) {
+    if (!IsSimulationTickBoundary())
+        return false;
+    m_worldLoadError.clear();
+    if (!m_activeRegionsEnabled)
+        return LoadWorldInternal(worldId);
+
+    // Restore the entire candidate, including catalogue checks and resolved entity references,
+    // before replacing any live authority. Decode each world only once.
+    GameSession candidate;
+    candidate.m_rootPath = m_rootPath;
+    candidate.m_jobSystem = m_jobSystem;
+    candidate.m_requiredClientAssets = m_requiredClientAssets;
+    candidate.m_activeRegionsEnabled = true;
+    candidate.m_regionSchedulerConfig = m_regionSchedulerConfig;
+    candidate.m_parkedBytesLimit = m_parkedBytesLimit;
+    candidate.m_populationContract = m_populationContract;
+    candidate.m_populationConfiguration = m_populationConfiguration;
+    candidate.m_aetherStateEnabled = m_aetherStateEnabled;
+    candidate.m_waterHighResEnabled = m_waterHighResEnabled;
+    candidate.m_weatherRainEnabled = m_weatherRainEnabled;
+    candidate.m_weatherRainScaleMm = m_weatherRainScaleMm;
+    candidate.m_weatherEventsEnabled = m_weatherEventsEnabled;
+    if (!candidate.LoadWorldInternal(worldId)) {
+        m_worldLoadError = candidate.GetWorldOpenError();
+        return false;
+    }
+
+    ResetWorldSystems();
+    m_registry = std::move(candidate.m_registry);
+    m_metadata = std::move(candidate.m_metadata);
+    m_transientWorld = candidate.m_transientWorld;
+    m_worldClock = candidate.m_worldClock;
+    m_simulationClock = candidate.m_simulationClock;
+    m_activeRegionLedger = std::move(candidate.m_activeRegionLedger);
+    m_groundObjects = std::move(candidate.m_groundObjects);
+    m_fieldPages = std::move(candidate.m_fieldPages);
+    m_regionDurableDirectory = std::move(candidate.m_regionDurableDirectory);
+    m_ambientFieldAnchor = candidate.m_ambientFieldAnchor;
+    m_worldSystem = std::move(candidate.m_worldSystem);
+    m_physicsSystem = std::move(candidate.m_physicsSystem);
+    m_waterSystem = std::move(candidate.m_waterSystem);
+    m_windFieldSystem = std::move(candidate.m_windFieldSystem);
+    m_weatherSystem = std::move(candidate.m_weatherSystem);
+    m_aetherFieldSystem = std::move(candidate.m_aetherFieldSystem);
+    m_energyFieldState = std::move(candidate.m_energyFieldState);
+    m_scentField = std::move(candidate.m_scentField);
+    m_speciesTable = std::move(candidate.m_speciesTable);
+    m_simulationContent = std::move(candidate.m_simulationContent);
+    m_lastLoadedChunkCount = candidate.m_lastLoadedChunkCount;
+    m_worldOpenError.clear();
+
+    // Session callbacks must address the published owner after the candidate is destroyed.
+    BindRegionalFieldQueries();
+    AttachRegionEditObserver();
+    m_scentField->BindDepositGate([this](int x, int z) { return ScentCellDue(x, z); });
+    m_scriptState->set_energy_field(m_energyFieldState.get());
+    return true;
+}
+
+bool GameSession::LoadWorldInternal(const std::string& worldId) {
     if (!IsSimulationTickBoundary())
         return false;
     m_lastLoadedChunkCount = 0;
@@ -1542,6 +1604,13 @@ bool GameSession::AdmitPlantAt(entt::entity entity, std::uint64_t fresh_stamp) {
                                C::PlantGrowthComponent,
                                C::PlantGenomeComponent>(entity))
             return false;
+        std::set<std::uint64_t> creature_ids;
+        for (auto creature : m_registry.view<const C::CreatureRegionComponent>()) {
+            const auto id = m_registry.get<C::CreatureRegionComponent>(creature).persistent_id;
+            if (!id || id >= m_activeRegionLedger.next_persistent_id() ||
+                !creature_ids.insert(id).second || m_groundObjects.find(id))
+                throw std::runtime_error("Invalid shared creature identity during plant admission");
+        }
         const auto& tf = m_registry.get<C::TransformComponent>(entity);
         if (!ActiveRegionLedger::valid_anchor(tf.position))
             return false;
@@ -1554,7 +1623,8 @@ bool GameSession::AdmitPlantAt(entt::entity entity, std::uint64_t fresh_stamp) {
                 !m_activeRegionLedger.records().contains(key) ||
                 owner->region_stamp > m_worldClock.tick() ||
                 growth.last_tick != owner->region_stamp ||
-                m_groundObjects.find(owner->persistent_id))
+                m_groundObjects.find(owner->persistent_id) ||
+                creature_ids.contains(owner->persistent_id))
                 return false;
             return true;
         }
@@ -1597,7 +1667,8 @@ bool GameSession::AdmitPlantAt(entt::entity entity, std::uint64_t fresh_stamp) {
                 luminumbra::foliage::BuildPlantEntitySnapshot(candidate, true),
                 ledger,
                 m_groundObjects,
-                error))
+                error,
+                creature_ids))
             return false;
         m_activeRegionLedger = std::move(ledger);
         m_fieldPages = std::move(pages);
@@ -1621,6 +1692,11 @@ void GameSession::PrepareRegionalFoliage() {
     std::set<std::uint64_t> ids;
     for (const auto& [id, object] : m_groundObjects.objects())
         ids.insert(id);
+    for (auto e : m_registry.view<const C::CreatureRegionComponent>()) {
+        const auto id = m_registry.get<C::CreatureRegionComponent>(e).persistent_id;
+        if (!id || id >= m_activeRegionLedger.next_persistent_id() || !ids.insert(id).second)
+            throw std::runtime_error("Duplicate or invalid shared creature identity");
+    }
     std::vector<entt::entity> plants;
     for (auto e : m_registry.view<C::PlantTag>())
         plants.push_back(e);
@@ -1975,7 +2051,9 @@ void GameSession::RunRegionScheduler(std::uint64_t current_tick) {
                             .durable = m_worldSystem->durable_chunk_inventory(),
                             .ground_object_bytes =
                                 m_groundObjects.region_bytes(key) + PlantRegionProjection(key),
-                            .field_page_bytes = RegionalFieldProjection(key)});
+                            .field_page_bytes = RegionalFieldProjection(key),
+                            .creature_bytes =
+                                luminumbra::ai::CreatureRegionProjection(m_registry, key)});
                 },
                 // Plants, foliage pages and water debt retain their owners alongside fields,
                 // ground objects, pending work and authoritative chunks.
@@ -1994,6 +2072,12 @@ void GameSession::RunRegionScheduler(std::uint64_t current_tick) {
                         for (auto e : m_registry.view<const Components::PlantRegionComponent>()) {
                             const auto& owner =
                                 m_registry.get<const Components::PlantRegionComponent>(e);
+                            owned_regions.value().insert({owner.owner_x, owner.owner_z});
+                        }
+                        for (auto e :
+                             m_registry.view<const Components::CreatureRegionComponent>()) {
+                            const auto& owner =
+                                m_registry.get<Components::CreatureRegionComponent>(e);
                             owned_regions.value().insert({owner.owner_x, owner.owner_z});
                         }
                         for (const auto& entry : m_regionWork)
@@ -2843,6 +2927,23 @@ bool GameSession::RunInSnapshotTransaction(const std::function<bool()>& body) {
     return committed;
 }
 
+void GameSession::CaptureCreatureLocomotionForSave() {
+    if (!m_activeRegionsEnabled || !m_physicsSystem)
+        return;
+    namespace C = Components;
+    for (auto e : m_registry.view<C::CreatureComponent, C::CreaturePhysicsComponent>()) {
+        const auto index = m_registry.get<C::CreaturePhysicsComponent>(e).avatar_index;
+        if (index >= m_physicsSystem->avatar_character_count())
+            throw std::runtime_error("Invalid creature avatar handle during save");
+        const auto velocity = m_physicsSystem->get_avatar_velocity(index);
+        auto& state = m_registry.get_or_emplace<C::CreatureLocomotionStateComponent>(e);
+        state.velocity_x = velocity.x;
+        state.velocity_y = velocity.y;
+        state.velocity_z = velocity.z;
+        state.grounded = m_physicsSystem->is_avatar_grounded(index);
+    }
+}
+
 bool GameSession::SaveWorld() {
     return SaveWorldMetadataTo(GetWorldSaveDir());
 }
@@ -2853,15 +2954,30 @@ bool GameSession::SaveWorldMetadataTo(const fs::path& save_dir) {
         !m_worldOpenError.empty())
         return false;
     std::optional<Ecs::EntityRegistrySnapshot> plants;
+    std::optional<luminumbra::ai::CreatureSnapshot> creatures;
     if (m_activeRegionsEnabled) {
         try {
             if (!m_regionFault)
                 PrepareRegionalFoliage();
+            CaptureCreatureLocomotionForSave();
             plants = luminumbra::foliage::BuildPlantEntitySnapshot(m_registry, true);
+            creatures = luminumbra::ai::BuildCreatureSnapshot(m_registry);
+            std::set<std::uint64_t> creature_ids;
+            for (const auto& record : creatures->entities) {
+                creature_ids.insert(record.id);
+                const auto species = record.components.at("Creature")
+                                         .at("data")
+                                         .at("species_id")
+                                         .get<std::uint16_t>();
+                if (!m_simulationContent || !m_simulationContent->creatures->Find(species))
+                    throw std::runtime_error("Unknown persistent creature species");
+            }
             std::string error;
             if (!luminumbra::foliage::ValidatePlantEntitySnapshot(
-                    *plants, m_activeRegionLedger, m_groundObjects, error)) {
-                LUMINUMBRA_CORE_ERROR("Plant save refused: {}", error);
+                    *plants, m_activeRegionLedger, m_groundObjects, error, creature_ids) ||
+                !luminumbra::ai::ValidateCreatureSnapshot(
+                    *creatures, m_activeRegionLedger, m_groundObjects, *plants, error)) {
+                LUMINUMBRA_CORE_ERROR("Entity save refused: {}", error);
                 return false;
             }
         } catch (const std::exception& e) {
@@ -2912,6 +3028,13 @@ bool GameSession::SaveWorldMetadataTo(const fs::path& save_dir) {
         if (!Persistence::WorldSaveService::save_plant_entities(*plants, save_dir, &plant_errors)) {
             for (const auto& error : plant_errors)
                 LUMINUMBRA_CORE_ERROR("Plant save failed: {}", error);
+            return false;
+        }
+        std::vector<std::string> creature_errors;
+        if (!Persistence::WorldSaveService::save_creature_entities(
+                *creatures, save_dir, &creature_errors)) {
+            for (const auto& error : creature_errors)
+                LUMINUMBRA_CORE_ERROR("Creature save failed: {}", error);
             return false;
         }
         std::vector<std::string> ground_errors;
@@ -3242,7 +3365,8 @@ bool GameSession::LoadWorldState() {
 bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
     if (!IsSimulationTickBoundary())
         return false;
-    m_lastLoadedChunkCount = 0;
+    if (!m_activeRegionsEnabled)
+        m_lastLoadedChunkCount = 0;
     if (!m_worldOpenError.empty() || !m_worldSystem || save_dir.empty()) {
         return false;
     }
@@ -3253,7 +3377,8 @@ bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
             m_worldOpenError =
                 "World unavailable: an interrupted save could not be recovered: " +
                 (recovery_errors.empty() ? std::string("unknown error") : recovery_errors.front());
-            m_worldSystem->clear_world(m_physicsSystem.get());
+            if (!m_activeRegionsEnabled)
+                m_worldSystem->clear_world(m_physicsSystem.get());
             return false;
         }
     }
@@ -3280,7 +3405,8 @@ bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
                            m_activeRegionsEnabled ? &durable_inventory : nullptr);
     if (!snapshot_present && !errors.empty()) {
         m_worldOpenError = errors.front();
-        m_worldSystem->clear_world(m_physicsSystem.get());
+        if (!m_activeRegionsEnabled)
+            m_worldSystem->clear_world(m_physicsSystem.get());
         for (const std::string& error : errors) {
             LUMINUMBRA_CORE_ERROR("World state load failed: {}", error);
         }
@@ -3298,22 +3424,36 @@ bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
             clock_errors.empty()
                 ? "Incompatible configuration: this world requires sim.active_regions."
                 : clock_errors.front();
-        m_worldSystem->clear_world(m_physicsSystem.get());
+        if (!m_activeRegionsEnabled)
+            m_worldSystem->clear_world(m_physicsSystem.get());
         return false;
     }
     if (!snapshot_present && !m_activeRegionsEnabled)
         return true; // legacy fresh world
+    // Validate every chunk before adopting any state. A malformed lattice must
+    // never become an invitation to regenerate over authoritative disk bytes.
+    constexpr std::size_t kFullSdfLattice =
+        static_cast<std::size_t>(CHUNK_SIZE_X + 1) * (CHUNK_SIZE_Y + 1) * (CHUNK_SIZE_Z + 1);
+    for (const auto& chunk : loaded.snapshot_chunks()) {
+        if (chunk && !chunk->sdf_data.empty() && chunk->sdf_data.size() != kFullSdfLattice) {
+            m_worldOpenError = "corrupt world chunk SDF lattice";
+            if (!m_activeRegionsEnabled)
+                m_worldSystem->clear_world(m_physicsSystem.get());
+            LUMINUMBRA_CORE_ERROR("World open refused: {}", m_worldOpenError);
+            return false;
+        }
+    }
+
+    Luminumbra::Ecs::EntityRegistrySnapshot enabled_plants;
+    luminumbra::ai::CreatureSnapshot enabled_creatures;
     if (m_activeRegionsEnabled) {
-        const Vec3 previous_ambient_anchor = m_ambientFieldAnchor;
-        m_ambientFieldAnchor = ambient_anchor.value_or(m_metadata.spawnPoint);
+        const Vec3 loaded_ambient_anchor = ambient_anchor.value_or(m_metadata.spawnPoint);
         ActiveRegionLedger ledger;
         if (!Persistence::WorldSaveService::load_active_regions(
                 ledger, save_dir, &clock_errors, saved_clock)) {
-            m_ambientFieldAnchor = previous_ambient_anchor;
             m_worldOpenError = clock_errors.empty()
                                    ? std::string(ActiveRegionLedger::kCorruptMessage)
                                    : clock_errors.front();
-            m_worldSystem->clear_world(m_physicsSystem.get());
             return false;
         }
         // Historical worlds without an identity adopt current content on load and persist it
@@ -3321,8 +3461,6 @@ bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
         if (m_simulationContent && !ledger.content_identity()) {
             if (!ledger.adopt_content_identity(m_simulationContent->identity)) {
                 m_worldOpenError = "Simulation content identity adoption failed.";
-                m_ambientFieldAnchor = previous_ambient_anchor;
-                m_worldSystem->clear_world(m_physicsSystem.get());
                 return false;
             }
         }
@@ -3330,8 +3468,6 @@ bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
             !ledger.validate_content_identity(m_simulationContent->identity, m_worldOpenError)) {
             if (!m_simulationContent)
                 m_worldOpenError = "Simulation content was not adopted.";
-            m_ambientFieldAnchor = previous_ambient_anchor;
-            m_worldSystem->clear_world(m_physicsSystem.get());
             return false;
         }
         // Validation accepted ledger.tick() <= saved_clock.tick(). An interrupted
@@ -3344,19 +3480,15 @@ bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
         std::vector<std::string> ground_errors;
         if (!Persistence::WorldSaveService::load_ground_objects(
                 ground_objects, save_dir, ledger.next_persistent_id(), &ground_errors)) {
-            m_ambientFieldAnchor = previous_ambient_anchor;
             m_worldOpenError = ground_errors.empty() ? std::string("Corrupt ground objects.")
                                                      : ground_errors.front();
-            m_worldSystem->clear_world(m_physicsSystem.get());
             return false;
         }
         FieldPageState field_pages;
         std::vector<std::string> page_errors;
         if (!Persistence::WorldSaveService::load_field_pages(field_pages, save_dir, &page_errors)) {
-            m_ambientFieldAnchor = previous_ambient_anchor;
             m_worldOpenError =
                 page_errors.empty() ? std::string("Corrupt field pages.") : page_errors.front();
-            m_worldSystem->clear_world(m_physicsSystem.get());
             return false;
         }
         std::optional<luminumbra::fields::EnergyFieldState> energy;
@@ -3367,8 +3499,6 @@ bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
             m_worldOpenError = energy_ec ? "Unreadable regional energy record."
                                          : "Incompatible configuration: regional energy state "
                                            "requires sim.aether_state.";
-            m_ambientFieldAnchor = previous_ambient_anchor;
-            m_worldSystem->clear_world(m_physicsSystem.get());
             return false;
         }
         if (m_energyFieldState) {
@@ -3387,11 +3517,67 @@ bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
             valid = valid && energy->ValidateRegionalOwners(ledger.records(), ledger.energy_ages());
             if (!valid) {
                 m_worldOpenError = "Corrupt regional energy record.";
-                m_ambientFieldAnchor = previous_ambient_anchor;
-                m_worldSystem->clear_world(m_physicsSystem.get());
                 return false;
             }
         }
+        // Validate the full plant/creature adoption against candidate stores and the
+        // destination's existing durable identities before publishing any loaded member.
+        std::vector<std::string> entity_errors;
+        std::string entity_error;
+        if (!Persistence::WorldSaveService::load_plant_entities(
+                enabled_plants, save_dir, &entity_errors) ||
+            !luminumbra::foliage::ValidatePlantEntitySnapshot(
+                enabled_plants, ledger, ground_objects, entity_error) ||
+            !Persistence::WorldSaveService::load_creature_entities(
+                enabled_creatures, save_dir, &entity_errors) ||
+            !luminumbra::ai::ValidateCreatureSnapshot(
+                enabled_creatures, ledger, ground_objects, enabled_plants, entity_error)) {
+            m_worldOpenError =
+                entity_error.empty()
+                    ? (entity_errors.empty() ? "Corrupt entity authority" : entity_errors.front())
+                    : entity_error;
+            return false;
+        }
+        try {
+            namespace C = Luminumbra::Components;
+            for (const auto& record : enabled_creatures.entities) {
+                const auto species = record.components.at("Creature")
+                                         .at("data")
+                                         .at("species_id")
+                                         .get<std::uint16_t>();
+                if (!m_simulationContent || !m_simulationContent->creatures->Find(species))
+                    throw std::runtime_error("Unknown persistent creature species");
+            }
+            entt::registry candidate;
+            // Preserve the exact target-kind and duplicate-ID checks of destination restore.
+            std::map<entt::entity, entt::entity> targets;
+            const auto target_for = [&](entt::entity e) {
+                auto [it, inserted] = targets.try_emplace(e, entt::null);
+                if (inserted)
+                    it->second = candidate.create();
+                return it->second;
+            };
+            for (auto e : m_registry.view<const C::PlantRegionComponent>()) {
+                const auto target = target_for(e);
+                candidate.emplace<C::PlantRegionComponent>(
+                    target, m_registry.get<C::PlantRegionComponent>(e));
+                if (m_registry.all_of<C::PlantTag>(e))
+                    candidate.emplace<C::PlantTag>(target);
+            }
+            for (auto e : m_registry.view<const C::CreatureRegionComponent>()) {
+                const auto target = target_for(e);
+                candidate.emplace<C::CreatureRegionComponent>(
+                    target, m_registry.get<C::CreatureRegionComponent>(e));
+                if (m_registry.all_of<C::CreatureComponent>(e))
+                    candidate.emplace<C::CreatureComponent>(target);
+            }
+            luminumbra::foliage::ApplyPlantEntitySnapshot(candidate, enabled_plants);
+            luminumbra::ai::ApplyCreatureSnapshot(candidate, enabled_creatures);
+        } catch (const std::exception& e) {
+            m_worldOpenError = std::string("Corrupt creature payload: ") + e.what();
+            return false;
+        }
+        m_ambientFieldAnchor = loaded_ambient_anchor;
         m_groundObjects = std::move(ground_objects);
         m_fieldPages = std::move(field_pages);
         m_activeRegionLedger = std::move(ledger);
@@ -3407,19 +3593,6 @@ bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
         RestoreWorldClock(saved_clock);
         if (energy)
             *m_energyFieldState = std::move(*energy);
-    }
-
-    // Validate every chunk before adopting any state. A malformed lattice must
-    // never become an invitation to regenerate over authoritative disk bytes.
-    constexpr std::size_t kFullSdfLattice =
-        static_cast<std::size_t>(CHUNK_SIZE_X + 1) * (CHUNK_SIZE_Y + 1) * (CHUNK_SIZE_Z + 1);
-    for (const auto& chunk : loaded.snapshot_chunks()) {
-        if (chunk && !chunk->sdf_data.empty() && chunk->sdf_data.size() != kFullSdfLattice) {
-            m_worldOpenError = "corrupt world chunk SDF lattice";
-            m_worldSystem->clear_world(m_physicsSystem.get());
-            LUMINUMBRA_CORE_ERROR("World open refused: {}", m_worldOpenError);
-            return false;
-        }
     }
 
     std::size_t adopted = 0;
@@ -3475,40 +3648,24 @@ bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
         }
     }
 
-    //  reload persisted plant entities into the live registry (a missing file is
-    // a clean miss). Geometry rebakes from the reloaded genome+stage on the render bridge.
-    {
+    // Legacy plant loading retains its clean-miss and optional-component behavior.
+    if (!m_activeRegionsEnabled) {
         Luminumbra::Ecs::EntityRegistrySnapshot plant_snapshot;
         std::vector<std::string> plant_errors;
-        const bool read = Persistence::WorldSaveService::load_plant_entities(
-            plant_snapshot, save_dir, &plant_errors);
-        std::string error;
-        if (m_activeRegionsEnabled &&
-            (!read || !luminumbra::foliage::ValidatePlantEntitySnapshot(
-                          plant_snapshot, m_activeRegionLedger, m_groundObjects, error))) {
-            m_worldOpenError =
-                error.empty() ? (plant_errors.empty() ? "Corrupt plants" : plant_errors.front())
-                              : error;
-            m_worldSystem->clear_world(m_physicsSystem.get());
-            return false;
+        if (Persistence::WorldSaveService::load_plant_entities(
+                plant_snapshot, save_dir, &plant_errors)) {
+            entt::registry scratch;
+            luminumbra::foliage::ApplyPlantEntitySnapshot(scratch, plant_snapshot);
+            luminumbra::foliage::ApplyPlantEntitySnapshot(m_registry, plant_snapshot);
+        } else {
+            for (const auto& error : plant_errors)
+                LUMINUMBRA_CORE_ERROR("Plant state load failed: {}", error);
         }
-        if (read) {
-            try {
-                // Decode completely into a scratch registry first; malformed optional
-                // components cannot leave a partially adopted live roster.
-                entt::registry scratch;
-                luminumbra::foliage::ApplyPlantEntitySnapshot(scratch, plant_snapshot);
-                luminumbra::foliage::ApplyPlantEntitySnapshot(m_registry, plant_snapshot);
-            } catch (const std::exception& e) {
-                if (!m_activeRegionsEnabled)
-                    throw;
-                m_worldOpenError = std::string("Corrupt plant payload: ") + e.what();
-                m_worldSystem->clear_world(m_physicsSystem.get());
-                return false;
-            }
-        } else
-            for (const auto& e : plant_errors)
-                LUMINUMBRA_CORE_ERROR("Plant state load failed: {}", e);
+    }
+
+    if (m_activeRegionsEnabled) {
+        luminumbra::foliage::ApplyPlantEntitySnapshot(m_registry, enabled_plants);
+        luminumbra::ai::ApplyCreatureSnapshot(m_registry, enabled_creatures);
     }
 
     // restore the stateful energy layer's record (a

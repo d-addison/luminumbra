@@ -430,6 +430,7 @@ bool member_path_allowed(std::string_view relative_path) {
     if (relative_path == "world_info.json" || relative_path == "aether_state.efs" ||
         relative_path == "chunks/region/world-manifest.json" ||
         relative_path == "chunks/region/plant-entities.json" ||
+        relative_path == "chunks/region/creature-entities.json" ||
         relative_path == "chunks/region/ground-objects.json" ||
         relative_path == "chunks/region/field-pages.fpg" ||
         relative_path == "chunks/region/active-regions.arl") {
@@ -952,6 +953,7 @@ bool SaveTransaction::commit(std::vector<std::string>* errors) {
                 "aether_state.efs",
                 "chunks/region/world-manifest.json",
                 "chunks/region/plant-entities.json",
+                "chunks/region/creature-entities.json",
                 "chunks/region/ground-objects.json",
                 "chunks/region/field-pages.fpg",
                 "chunks/region/active-regions.arl",
@@ -1030,7 +1032,8 @@ bool SaveTransaction::commit(std::vector<std::string>* errors) {
                 return false;
             }
             const bool known = members.count(entry.path) != 0;
-            if (!digest.present && entry.action != "replace" && !known) {
+            if (!digest.present && entry.action != "replace" && !known &&
+                entry.path != "chunks/region/creature-entities.json") {
                 continue; // absent and never indexed: not recorded
             }
             if (known) {

@@ -219,4 +219,37 @@ TEST(PlantPersistence, EmptyRosterWritesNoFile) {
     fs::remove_all(dir);
 }
 
+TEST(PlantPersistence, SharedIdentityValidationIncludesCreaturesWithoutChangingLegacyProjection) {
+    entt::registry registry;
+    const auto plant = barePlant(registry, 0, 0, 0);
+    const auto legacy =
+        E::SerializeEntityRegistrySnapshotJson(F::BuildPlantEntitySnapshot(registry));
+    Luminumbra::world::ActiveRegionLedger ledger;
+    ledger.mark_edited({0, 0}, Luminumbra::world::WorldClock{});
+    std::uint64_t plant_id = 0, creature_id = 0;
+    ASSERT_TRUE(ledger.allocate_persistent_id(plant_id));
+    ASSERT_TRUE(ledger.allocate_persistent_id(creature_id));
+    registry.emplace<C::PlantRegionComponent>(plant).persistent_id = plant_id;
+    registry.get<C::PlantGrowthComponent>(plant).last_tick = 0;
+    registry.get<C::PlantGrowthComponent>(plant).planted_tick = 0;
+    const auto snapshot = F::BuildPlantEntitySnapshot(registry, true);
+    std::string error;
+    EXPECT_TRUE(F::ValidatePlantEntitySnapshot(snapshot, ledger, {}, error, {creature_id}));
+    EXPECT_FALSE(F::ValidatePlantEntitySnapshot(snapshot, ledger, {}, error, {plant_id}));
+    EXPECT_FALSE(F::ValidatePlantEntitySnapshot(snapshot, ledger, {}, error, {0}));
+    EXPECT_FALSE(
+        F::ValidatePlantEntitySnapshot(snapshot, ledger, {}, error, {ledger.next_persistent_id()}));
+    Luminumbra::world::GroundObjectStore ground;
+    Luminumbra::world::GroundObject object;
+    object.id = creature_id;
+    object.type = 1;
+    ASSERT_TRUE(ground.insert(object));
+    EXPECT_FALSE(F::ValidatePlantEntitySnapshot(snapshot, ledger, ground, error, {creature_id}));
+    // The identity opt-in alone changes no legacy component bytes.
+    registry.get<C::PlantGrowthComponent>(plant).last_tick = 100;
+    registry.get<C::PlantGrowthComponent>(plant).planted_tick = 100;
+    EXPECT_EQ(E::SerializeEntityRegistrySnapshotJson(F::BuildPlantEntitySnapshot(registry)),
+              legacy);
+}
+
 } // namespace

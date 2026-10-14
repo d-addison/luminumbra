@@ -13,6 +13,7 @@
 #include <iterator>
 #include <map>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -369,6 +370,7 @@ TEST(SaveTransaction, MemberPathAllowListAcceptsOnlyKnownShapes) {
         "aether_state.efs",
         "chunks/region/world-manifest.json",
         "chunks/region/plant-entities.json",
+        "chunks/region/creature-entities.json",
         "chunks/region/ground-objects.json",
         "chunks/region/field-pages.fpg",
         "chunks/region/active-regions.arl",
@@ -907,6 +909,78 @@ TEST(SaveTransaction, WindowsKillAtEveryPublicationAndRecoveryStepIsIdempotent) 
         complete = code == 0;
     }
     EXPECT_TRUE(complete);
+}
+#endif
+
+namespace {
+void FailAfterCreatureReplacement(const char* step, const fs::path& path) {
+    if (std::string_view(step) == "after-replace" && path.filename() == "creature-entities.json") {
+        set_snapshot_step_hook_for_testing(nullptr);
+        throw std::runtime_error("injected failure after creature replacement");
+    }
+}
+#ifndef _WIN32
+void KillAfterCreatureReplacement(const char* step, const fs::path& path) {
+    if (std::string_view(step) == "after-replace" && path.filename() == "creature-entities.json")
+        std::_Exit(7);
+}
+#endif
+} // namespace
+
+TEST(SaveTransaction,
+     RollbackAfterCreatureMemberReplacementRestoresWholeSnapshotAndDropsAcknowledgement) {
+    TempSave save;
+    ASSERT_TRUE(
+        CommitOnce(save.path(),
+                   1,
+                   {{"world_info.json", "w0"}, {"chunks/region/creature-entities.json", "c0"}}));
+    const auto before = Tree(save.path());
+    bool acknowledged = false;
+    {
+        SaveTransaction transaction(save.path(), 2, {}, &RawDigest);
+        ASSERT_TRUE(transaction.begin(nullptr));
+        transaction.defer_until_commit([&acknowledged] { acknowledged = true; });
+        ASSERT_TRUE(WorldSaveService::write_member_bytes(save.path(), "world_info.json", "w1"));
+        set_snapshot_step_hook_for_testing(&FailAfterCreatureReplacement);
+        EXPECT_THROW(WorldSaveService::write_member_bytes(
+                         save.path(), "chunks/region/creature-entities.json", "c1"),
+                     std::runtime_error);
+        set_snapshot_step_hook_for_testing(nullptr);
+        EXPECT_EQ(Get(save.path() / "chunks/region/creature-entities.json"), "c1");
+    }
+    EXPECT_EQ(Tree(save.path()), before);
+    EXPECT_FALSE(acknowledged);
+    EXPECT_FALSE(journal_pending(save.path()));
+}
+
+#ifndef _WIN32
+TEST(SaveTransactionDeathTest, RecoveryRollsBackCrashAfterCreatureReplacement) {
+    TempSave save;
+    ASSERT_TRUE(
+        CommitOnce(save.path(),
+                   1,
+                   {{"world_info.json", "w0"}, {"chunks/region/creature-entities.json", "c0"}}));
+    const auto before = Tree(save.path());
+    EXPECT_EXIT(
+        {
+            SaveTransaction transaction(save.path(), 2, {}, &RawDigest);
+            if (!transaction.begin(nullptr) ||
+                !WorldSaveService::write_member_bytes(save.path(), "world_info.json", "w1"))
+                std::_Exit(9);
+            set_snapshot_step_hook_for_testing(&KillAfterCreatureReplacement);
+            WorldSaveService::write_member_bytes(
+                save.path(), "chunks/region/creature-entities.json", "c1");
+            std::_Exit(9);
+        },
+        ::testing::ExitedWithCode(7),
+        "");
+    ASSERT_TRUE(journal_pending(save.path()));
+    EXPECT_EQ(Get(save.path() / "chunks/region/creature-entities.json"), "c1");
+    std::vector<std::string> errors;
+    EXPECT_EQ(recover_pending_journal(save.path(), &errors), RecoveryOutcome::RolledBack);
+    EXPECT_EQ(Tree(save.path()), before);
+    EXPECT_FALSE(journal_pending(save.path()));
+    EXPECT_EQ(recover_pending_journal(save.path(), &errors), RecoveryOutcome::NothingToDo);
 }
 #endif
 

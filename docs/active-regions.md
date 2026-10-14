@@ -6,7 +6,8 @@ The host ledger implements the persistent-active scheduling foundation in
 is added. Budgets remain unlimited in shipped configuration. Enabled host sessions consume this schedule for field pages, ground objects,
 weather, energy, foliage and resident water. Resident water uses the checked
 [regional continuation contract](regional-water-continuation.md). Diagnostics
-and measured budget activation remain separate qualification work.
+and measured budget activation remain separate qualification work. Creature records and
+snapshot compatibility are specified in [creature-entities.md](creature-entities.md).
 
 ## Activation and ordering
 

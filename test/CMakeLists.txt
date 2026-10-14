@@ -1474,6 +1474,7 @@ add_executable(frontier_gates_test
     fields/scalar_field_diffusion_gate_test.cpp
     fields/energy_field_state_test.cpp
     persistence/world_save_service_test.cpp
+    persistence/creature_persistence_test.cpp
     persistence/plant_persistence_test.cpp
     persistence/world_save_region_format_test.cpp
     persistence/persistence_hardening_test.cpp

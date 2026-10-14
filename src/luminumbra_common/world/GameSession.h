@@ -119,7 +119,8 @@ public:
                               const std::string& seed,
                               const std::string& worldType);
 
-    // Load an existing world from disk
+    // Load an existing world from disk. Enabled sessions publish only a fully restored
+    // candidate; refusal preserves the current world and its ability to save.
     bool LoadWorld(const std::string& worldId);
 
     // Save the current world state
@@ -162,7 +163,7 @@ public:
     // edits are never clobbered by regeneration. A missing snapshot is a clean
     // miss (returns true). A refusal returns false and disables saving.
     const std::string& GetWorldOpenError() const {
-        return m_worldOpenError;
+        return m_worldOpenError.empty() ? m_worldLoadError : m_worldOpenError;
     }
     bool LoadWorldState();
     bool LoadWorldStateFrom(const std::filesystem::path& save_dir);
@@ -518,6 +519,7 @@ private:
     WorldMetadata m_metadata;
     bool m_transientWorld = false;
     void ResetWorldSystems();
+    bool LoadWorldInternal(const std::string& worldId);
     void RestoreWorldClock(const WorldClock& clock);
     void RestoreAmbientFieldsAtTick(std::uint64_t tick);
     bool SaveWorldMetadataTo(const std::filesystem::path& save_dir);
@@ -552,6 +554,7 @@ private:
     void AdvanceFieldPages(std::uint64_t tick);
     bool AdmitPlantAt(entt::entity entity, std::uint64_t fresh_stamp);
     void PrepareRegionalFoliage();
+    void CaptureCreatureLocomotionForSave();
     void RunRegionalWaterTick();
     void RunRegionalFoliageTick(luminumbra::simulation::SimBudgetTelemetry::TickScope& budget,
                                 std::uint64_t tick);
@@ -626,6 +629,8 @@ private:
     std::string GenerateWorldId();
     std::unique_ptr<Systems::PhysicsSystem> m_physicsSystem;
     std::string m_worldOpenError;
+    // A rejected replacement leaves the current world usable, including its save path.
+    std::string m_worldLoadError;
     std::size_t m_lastLoadedChunkCount = 0;
     std::vector<std::filesystem::path> m_requiredClientAssets;
 
