@@ -33,6 +33,7 @@ def valid_receipt() -> dict:
     sections["noui_load"]["skipped_tests"] = 0
     sections["net_soak"]["required_tests"] = ["NetSoak"]
     sections["net_soak"]["discovered_tests"] = ["NetSoak"]
+    sections["net_soak"]["skipped_tests"] = 0
     return {
         "schema": "luminumbra.v03_acceptance.v1",
         "revision": "0123abcd",
@@ -359,6 +360,17 @@ class V03AcceptanceReceiptContract(unittest.TestCase):
                 receipt["sections"]["net_soak"]["skipped_tests"] = skipped
                 check = self._expect(receipt, "net_soak", "fail")
                 self.assertEqual(check["detail"], "malformed skipped_tests")
+
+    def test_passing_net_soak_requires_zero_skipped_tests(self) -> None:
+        receipt = valid_receipt()
+        self._expect(receipt, "net_soak", "pass")
+        del receipt["sections"]["net_soak"]["skipped_tests"]
+        check = self._expect(receipt, "net_soak", "fail")
+        self.assertEqual(check["detail"], "missing skipped_tests")
+        self.assertEqual(_run([str(self._write_obj(receipt))])[0], 1)
+        receipt["sections"]["net_soak"]["skipped_tests"] = 1
+        check = self._expect(receipt, "net_soak", "fail")
+        self.assertEqual(check["detail"], "unexpected skipped tests: 1")
 
     def test_net_soak_requires_both_discovery_fields(self) -> None:
         for fields in (("required_tests",), ("discovered_tests",),

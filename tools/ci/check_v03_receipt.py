@@ -103,7 +103,7 @@ def _check_section(name: str, section, evidence_root: Path) -> dict:
         if skipped > 0:
             return _result(name, FAIL, f"unexpected skipped tests: {skipped}")
     if name == "net_soak" and section.get("status") == "pass":
-        for field in ("required_tests", "discovered_tests"):
+        for field in ("required_tests", "discovered_tests", "skipped_tests"):
             if field not in section:
                 return _result(name, FAIL, f"missing {field}")
         if not section["required_tests"]:

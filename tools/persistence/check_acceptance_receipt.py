@@ -313,8 +313,12 @@ def _check_switch_count(receipt: dict, min_switches: int) -> dict:
         )
     if len({switch["world"] for switch in switches}) < 2:
         return _result(check_id, FAIL, "switches require at least two distinct world IDs")
-    if not any(a["world"] != b["world"] for a, b in zip(switches, switches[1:])):
-        return _result(check_id, FAIL, "no consecutive entries switch world IDs")
+    if [switch["index"] for switch in switches] != list(range(1, len(switches) + 1)):
+        return _result(check_id, FAIL, "switch indices must be consecutive starting at 1")
+    worlds = [switches[0]["world"], switches[1]["world"]]
+    if worlds[0] == worlds[1] or any(
+            switch["world"] != worlds[offset % 2] for offset, switch in enumerate(switches)):
+        return _result(check_id, FAIL, "switch worlds must alternate between the first two world IDs")
     return _result(check_id, PASS, f"{len(switches)} switches")
 
 

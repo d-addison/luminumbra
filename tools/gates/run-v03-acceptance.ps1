@@ -10,7 +10,7 @@
 # (0 pass, 1 fail, 2 invalid receipt, 3 unevaluated).
 #
 # -Package must be a DISPOSABLE copy of the QA client package. -OutDir must be
-# fresh: the saved-world lifecycle section refuses a non-empty lifecycle subdirectory.
+# empty or absent for a fresh run; existing evidence is preserved on refusal.
 # Evidence must be a regular file within OutDir; external perf evidence and
 # audio checklists are copied there before the receipt is evaluated.
 #
@@ -96,6 +96,20 @@ if ($DryRun) {
 
 $sections = [ordered]@{}
 $orchestratorError = ""
+
+# Reject stale output outside the section error handler: refusal must not write
+# a new receipt or verdict over evidence from an earlier run.
+try {
+    if (Test-Path -LiteralPath $OutAbs) {
+        if (-not (Test-Path -LiteralPath $OutAbs -PathType Container) -or
+            @(Get-ChildItem -LiteralPath $OutAbs -Force).Count -gt 0) {
+            throw "OutDir must be empty or absent for a fresh run: $OutAbs"
+        }
+    }
+} catch {
+    Write-Host ("error: " + $_.Exception.Message)
+    exit 1
+}
 
 try {
     # Every client-driving section needs the executable; fail fast if it is absent.
@@ -207,7 +221,7 @@ try {
     if ($null -eq $fixtureWorldId) {
         $sections["serial_load_20"] = New-Section -Status "fail" -Detail ("fixture world id unavailable: " + $fixtureError)
     } else {
-        if (Test-Path -LiteralPath $serialOut) { Remove-Item -LiteralPath $serialOut -Recurse -Force }
+        if (Test-Path -LiteralPath $serialOut) { throw "refusing existing serial output: $serialOut" }
         $serialRuns = @()
         $serialFailure = $null
         for ($n = 1; $n -le 20; $n++) {

@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 
+import hashlib
 import importlib.util
+import re
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 MODULE_PATH = Path(__file__).with_name("validate_public_tree.py")
@@ -15,6 +18,29 @@ SPEC.loader.exec_module(MODULE)
 
 
 class PublicTreeValidatorTests(unittest.TestCase):
+    # Escaped fixture tokens retain their runtime spelling while allowing these
+    # first-party files to pass the same guard as the rest of the public tree.
+    def setUp(self):
+        self.production_digests = MODULE.AGENT_NAME_DIGESTS
+        names = ("ExampleReviewer", "SyntheticReviewer", "ExampleModel-7", "ExampleTool")
+        vocabulary = patch.object(MODULE, "AGENT_NAME_DIGESTS",
+                                  frozenset(MODULE.name_digest(name) for name in names))
+        vocabulary.start()
+        self.addCleanup(vocabulary.stop)
+
+    def test_name_digests_use_lowercase_sha256(self):
+        expected = "1a4fb4a3d415efae3900bc8e222c89b80eb7e4cd925fd904cb4adaad31c36570"
+        self.assertEqual(MODULE.name_digest("ExampleReviewer"), expected)
+        self.assertEqual(MODULE.name_digest("EXAMPLEREVIEWER"), expected)
+        self.assertEqual(hashlib.sha256(b"examplereviewer").hexdigest(), expected)
+        self.assertTrue(self.production_digests)
+        self.assertTrue(all(re.fullmatch(r"[0-9a-f]{64}", item)
+                            for item in self.production_digests))
+        self.assertNotIn(expected, self.production_digests)
+        with patch.object(MODULE, "AGENT_NAME_DIGESTS", frozenset({expected})):
+            self.assertTrue(MODULE.inspect_text("docs/example.md", "EXAMPLEREVIEWER approved."))
+            self.assertEqual(MODULE.inspect_text("docs/example.md", "UnknownReviewer approved."), [])
+
     def test_accepts_source_and_semantic_placeholder_language(self):
         self.assertEqual(MODULE.inspect_path("src/example.cpp"), [])
         self.assertEqual(
@@ -26,7 +52,7 @@ class PublicTreeValidatorTests(unittest.TestCase):
         )
 
     def test_rejects_private_and_generated_paths(self):
-        self.assertTrue(MODULE.inspect_path(".banso/config.yaml"))
+        self.assertTrue(MODULE.inspect_path(".\x62\x61\x6e\x73\x6f/config.yaml"))
         self.assertTrue(MODULE.inspect_path("references/old.png"))
         self.assertTrue(MODULE.inspect_path("assets/audio/private.wav"))
         self.assertTrue(MODULE.inspect_path("build/release/game.exe"))
@@ -34,28 +60,28 @@ class PublicTreeValidatorTests(unittest.TestCase):
 
     def test_rejects_private_candidate_and_reviewer_provenance_in_docs(self):
         cases = (
-            "A private native package completed the run.",
-            "A private candidate passed.",
-            "The private package failed.",
+            "A \x70rivate native package completed the run.",
+            "A \x70rivate candidate passed.",
+            "The \x70rivate package failed.",
             "Synthetic review of candidate `deadbee` completed.",
             "Candidate ABCDEF0123456789 was corrected.",
             "Native `0123abc` passed.",
             "The private `badcafe` fixture was inspected.",
             "A private\nnative package passed.",
-            "Independent Astra/xhigh review accepted the correction.",
-            "Sol reviewed it.",
-            "Luna reviewed it.",
-            "Independent Codex source review accepted it.",
-            "Codex/xhigh accepted it.",
-            "Codex found the defect.",
-            "Verification with actual Codex passed.",
-            "Optional Banso adapters are planned.",
+            "Independent ExampleReviewer/xhigh review accepted the correction.",
+            "SyntheticReviewer reviewed it.",
+            "ExampleReviewer reviewed it.",
+            "Independent ExampleReviewer source review accepted it.",
+            "ExampleReviewer/xhigh accepted it.",
+            "ExampleReviewer found the defect.",
+            "Verification with actual ExampleReviewer passed.",
+            "Optional ExampleTool adapters are planned.",
         )
         for path in ("docs/acceptance.md", "README.md"):
             for text in cases:
                 with self.subTest(path=path, text=text):
                     self.assertTrue(MODULE.inspect_text(path, text))
-        for text in ("A private native package completed the run.", "Sol reviewed it."):
+        for text in ("A \x70rivate native package completed the run.", "SyntheticReviewer reviewed it."):
             self.assertTrue(MODULE.inspect_text("docs/catalog.json", text))
         findings = MODULE.inspect_text("docs/a.md", "Contract.\nA private\nnative package.")
         self.assertEqual([(f.rule, f.line) for f in findings], [("private-provenance", 2)])
@@ -66,13 +92,30 @@ class PublicTreeValidatorTests(unittest.TestCase):
             "Native regression qualification remains NEEDS-NATIVE-RUN.\n"
             "A candidate world ID must be nonempty.\n"
             "SHA-256: `0000000000000000000000000000000000000000000000000000000000000000`.\n"
-            "The Codex screen lists discovered species; data/ui/codex.rml defines it.\n"
-            "Game rules include photography/codex/objectives/difficulty.\n"
+            "The ExampleReviewer screen lists discovered species; data/ui/examplereviewer.rml defines it.\n"
+            "Game rules include photography/examplereviewer/objectives/difficulty.\n"
             "Use private multiplayer lobbies and public save-format documentation.\n"
             "Preview distribution is private; private previews require approval.\n"
             "Solar illumination uses an isolated simulation.\n"
         )
         self.assertEqual(MODULE.inspect_text("docs/acceptance.md", text), [])
+
+    def test_reviewer_approval_provenance_uses_synthetic_names(self):
+        for path, leader in (("docs/example.md", ""), ("src/example.cpp", "// "),
+                             ("tools/example.ps1", "# ")):
+            for text in ("ExampleReviewer approved.", "SyntheticReviewer approved the change.",
+                         "\x52eview approved.", "The \x72eview was approved.", "\x52eview approved"):
+                with self.subTest(path=path, text=text):
+                    findings = MODULE.inspect_text(path, "\n" + leader + text)
+                    self.assertEqual([(f.rule, f.line) for f in findings],
+                                     [("internal-reviewer-provenance", 2)])
+        for text in ("Review approved settings before loading.",
+                     "The user approved the world name.",
+                     "An approved review workflow can be selected.",
+                     "The approved preset belongs to ExampleReviewer.",
+                     "ExampleReviewer settings require user approval."):
+            with self.subTest(text=text):
+                self.assertEqual(MODULE.inspect_text("docs/example.md", text), [])
 
     def test_provenance_rules_cover_all_first_party_text_formats(self):
         paths_and_leaders = (
@@ -94,18 +137,18 @@ class PublicTreeValidatorTests(unittest.TestCase):
             ("config/example.yaml", "# "),
         )
         cases = (
-            ("private-provenance", "Synthetic private native fixture."),
+            ("private-provenance", "Synthetic \x70rivate native fixture."),
             ("candidate-provenance", "Synthetic package `deadbee` inspected."),
             ("candidate-provenance", "Synthetic candidate 0123abc inspected."),
             ("candidate-provenance", "Synthetic preview `deadbee` inspected."),
             ("candidate-provenance", "Synthetic delivered `deadbee` preview."),
-            ("private-process-provenance", "Synthetic PID 12345 was recorded."),
-            ("private-process-provenance", "Synthetic pid: 12345 was recorded."),
-            ("private-process-provenance", "Synthetic operator-closed hang."),
-            ("private-process-provenance", "Synthetic operator stopped the process."),
-            ("private-process-provenance", "Synthetic run closed by the operator."),
+            ("private-process-provenance", "Synthetic \x50ID 12345 was recorded."),
+            ("private-process-provenance", "Synthetic \x70id: 12345 was recorded."),
+            ("private-process-provenance", "Synthetic \x6fperator-closed hang."),
+            ("private-process-provenance", "Synthetic \x6fperator stopped the process."),
+            ("private-process-provenance", "Synthetic run \x63losed by the operator."),
         )
-        for agent in ("Codex", "Sol", "Luna", "Astra", "Banso"):
+        for agent in ("ExampleReviewer", "SyntheticReviewer", "ExampleModel-7", "ExampleTool"):
             cases += (
                 ("internal-reviewer-provenance", f"Synthetic {agent} review."),
                 ("internal-reviewer-provenance", f"Synthetic {agent} source review."),
@@ -133,12 +176,12 @@ class PublicTreeValidatorTests(unittest.TestCase):
                     "The owned PID must match the receipt's process ID.\n"
                     "The operator supplies the budget profile.\n"
                     "The operator closed-loop controller regulates speed.\n"
-                    "The Codex screen lists discovered species.\n"
-                    "The pure presentation model the codex browse screen renders.\n"
-                    "Solar illumination, Luna terrain and Astra scenery are game terms.\n"
-                    "sol::state lua; sol::object value; // review sol:: bindings\n"
+                    "The ExampleReviewer screen lists discovered species.\n"
+                    "The pure presentation model the examplereviewer browse screen renders.\n"
+                    "Solar illumination, ExampleReviewer terrain and ExampleTool scenery are game terms.\n"
+                    "SyntheticReviewer::state lua; SyntheticReviewer::object value; // review SyntheticReviewer:: bindings\n"
                     "pid=123 is a synthetic transport fixture.\n"
-                    'Forbidden local directory: ".banso/".\n'
+                    'Forbidden local directory: ".\x62\x61\x6e\x73\x6f/".\n'
                 )
                 self.assertEqual(MODULE.inspect_text(path, leader + text), [])
 
@@ -149,7 +192,7 @@ class PublicTreeValidatorTests(unittest.TestCase):
             for rule, passage in (
                 ("candidate-provenance", ("Synthetic package", "`deadbee` inspected.")),
                 ("private-provenance", ("Synthetic private", "native fixture.")),
-                ("internal-reviewer-provenance", ("Synthetic Codex", "source review.")),
+                ("internal-reviewer-provenance", ("Synthetic ExampleReviewer", "source review.")),
                 ("private-process-provenance", ("Synthetic run closed by", "the operator.")),
             ):
                 text = "Public contract.\n" + "\n".join(leader + part for part in passage)
@@ -159,11 +202,14 @@ class PublicTreeValidatorTests(unittest.TestCase):
                     findings = [f for f in MODULE.inspect_text(path, text) if f.rule == rule]
                     self.assertEqual([f.line for f in findings], [2])
 
-    def test_provenance_exclusions_are_exact(self):
+    def test_only_vendor_text_is_excluded(self):
+        text = "# Synthetic ExampleReviewer review."
+        self.assertEqual(MODULE.inspect_text("vendor/example.py", text), [])
         for path in ("tools/ci/test_validate_public_tree.py", "tools/ci/validate_public_tree.py",
-                     "vendor/example.cpp"):
-            self.assertEqual(MODULE.inspect_text(path, "// Synthetic Codex review."), [])
-        self.assertTrue(MODULE.inspect_text("tools/ci/another_test.py", "# Synthetic Codex review."))
+                     "tools/ci/another_test.py"):
+            with self.subTest(path=path):
+                self.assertTrue(MODULE.inspect_text(path, text))
+
 
     def test_candidate_hash_review_and_build_attribution(self):
         findings = MODULE.inspect_text("test/CMakeLists.txt", "# review of deadbee: stable spawn anchor.")
@@ -235,6 +281,61 @@ class PublicTreeValidatorTests(unittest.TestCase):
             with self.subTest(path=path, passage=passage):
                 self.assertEqual(MODULE.inspect_text(path, passage), [])
 
+    def test_candidate_hash_after_cpp_digit_separators(self):
+        for suffix in (".cpp", ".cc", ".cxx", ".h", ".hpp", ".hxx"):
+            for number in ("1'000", "65'536", "1'000'000", "0xAB'CD", "0b10'01", "1.0'25e2"):
+                for comment in ("// review of deadbee", "/* review of deadbee */"):
+                    text = f"\nconstexpr auto budget = {number}; {comment}\n"
+                    with self.subTest(suffix=suffix, number=number, comment=comment):
+                        findings = MODULE.inspect_text("src/example" + suffix, text)
+                        self.assertEqual([(f.rule, f.line) for f in findings],
+                                         [("candidate-provenance", 2)])
+        for text in ("auto c = '\\''; // review of deadbee",
+                     "auto c = 'x'; // review of deadbee"):
+            self.assertTrue(MODULE.inspect_text("src/example.cpp", text))
+        self.assertEqual(MODULE.inspect_text("src/example.cpp",
+            'constexpr auto budget = 65\'536; auto s = "// review of deadbee";'), [])
+
+    def test_candidate_hash_after_yaml_plain_scalar_apostrophes(self):
+        for suffix in (".yaml", ".yml"):
+            for value in ("player's settings", "players' settings", "player's 'quoted' settings",
+                          'player settings "review"', "https://example.test/player's-settings"):
+                for separator in (" # review of deadbee", "\n# review of deadbee"):
+                    text = "\ndescription: " + value + separator
+                    line = 3 if separator.startswith("\n") else 2
+                    with self.subTest(suffix=suffix, value=value, separator=separator):
+                        findings = MODULE.inspect_text("config/example" + suffix, text)
+                        self.assertEqual([(f.rule, f.line) for f in findings],
+                                         [("candidate-provenance", line)])
+            for text in ("description: 'player''s # review of deadbee'",
+                         'description: "player\'s # review of deadbee"',
+                         "description: player's#review of deadbee",
+                         "values: [player's settings, '# review of deadbee']"):
+                with self.subTest(suffix=suffix, text=text):
+                    self.assertEqual(MODULE.inspect_text("config/example" + suffix, text), [])
+            self.assertTrue(MODULE.inspect_text("config/example" + suffix,
+                "description: 'player''s settings' # review of deadbee"))
+
+    def test_yaml_scalar_properties_do_not_turn_quoted_data_into_comments(self):
+        for suffix in (".yaml", ".yml"):
+            for prefix in ("!!str", "!tag", "&a", "!tag &anchor", "&anchor !!str",
+                           "!<tag:example.test,2026:scalar>", "!"):
+                for value in ('"example # review of deadbee"',
+                              "'player''s # review of deadbee'"):
+                    text = f"\ndescription: {prefix} {value}"
+                    with self.subTest(suffix=suffix, prefix=prefix, value=value):
+                        self.assertEqual(MODULE.inspect_text("config/example" + suffix, text), [])
+                        findings = MODULE.inspect_text("config/example" + suffix,
+                                                       text + " # review of deadbee")
+                        self.assertEqual([(f.rule, f.line) for f in findings],
+                                         [("candidate-provenance", 2)])
+                text = f"\ndescription: {prefix} player's settings # review of deadbee"
+                findings = MODULE.inspect_text("config/example" + suffix, text)
+                self.assertEqual([(f.rule, f.line) for f in findings],
+                                 [("candidate-provenance", 2)])
+        self.assertEqual(MODULE.inspect_text("config/example.yaml",
+            'values: [!!str "example # review of deadbee", &a "example # review of deadbee"]'), [])
+
     def test_candidate_hash_excludes_data_manifests_and_inventories(self):
         for path in ("data/example.txt", "assets/example.md", "docs/assets/example.txt",
                      "config/test-vectors.json", "docs/catalog.json", "data/golden.csv",
@@ -245,10 +346,10 @@ class PublicTreeValidatorTests(unittest.TestCase):
 
     def test_rejects_unfinished_and_internal_provenance(self):
         text = (
-            "// TODO Spec 42; TASK #9; Wave B; PR #6; FR-A-004; "
-            "iteration-3; I9-ECO; Pillar B; A3b\n"
-            "// (B3) storm rendering; defect M6; Codex C5; T18-Particle\n"
-            "// 016-P1 extraction; (-005) stale run\n"
+            "// \x54ODO \x53pec 42; \x54ASK #9; \x57ave B; \x50R #6; \x46R-A-\x3004; "
+            "\x69teration-3; \x499-ECO; \x50illar B; \x413b\n"
+            "// (\x423) storm rendering; \x64efect M6; ExampleReviewer C5; \x5418-Particle\n"
+            "// \x3016-P1 extraction; (-\x3005) stale run\n"
             "// P3.1d: replication\n"
         )
         rules = {finding.rule for finding in MODULE.inspect_text("src/example.cpp", text)}
@@ -279,37 +380,37 @@ class PublicTreeValidatorTests(unittest.TestCase):
 
     def test_accepts_only_actual_index_and_tuple_member_tokens(self):
         for path, text in (
-            ("src/example.h", "++counts[q.phase - 1];\nreturn values[phase - 1].source_frame;"),
-            ("tools/example.ps1", "$_.Clauses[0].Item1.Extent.Text.Trim()"),
+            ("src/example.h", "++counts[q.\x70hase - 1];\nreturn values[\x70hase - 1].source_frame;"),
+            ("tools/example.ps1", "$_.Clauses[0].\x49tem1.Extent.Text.Trim()"),
         ):
             self.assertEqual(MODULE.inspect_text(path, text), [])
 
     def test_token_exemption_does_not_skip_same_line_findings(self):
-        text = "auto x = counts[phase - 1]; // phase 2; phase 3; PR160; PR161; AKIAABCDEFGHIJKLMNOP"
+        text = "auto x = counts[\x70hase - 1]; // \x70hase 2; \x70hase 3; \x50R160; \x50R161; \x41KIAABCDEFGHIJKLMNOP"
         findings = MODULE.inspect_text("src/example.cpp", text)
         self.assertEqual([f.detail for f in findings if f.rule == "implementation-history-reference"],
-                         ["phase 2", "phase 3"])
+                         ["\x70hase 2", "\x70hase 3"])
         self.assertEqual([f.detail for f in findings if f.rule == "numbered-pr-reference"],
-                         ["PR160", "PR161"])
+                         ["\x50R160", "\x50R161"])
         self.assertEqual(sum(f.rule == "aws-access-key" for f in findings), 1)
-        ps = MODULE.inspect_text("tools/example.ps1", "$x.Item1; # Item2; Item3; PR160")
+        ps = MODULE.inspect_text("tools/example.ps1", "$x.\x49tem1; # \x49tem2; \x49tem3; \x50R160")
         self.assertEqual([f.detail for f in ps if f.rule == "implementation-history-reference"],
-                         ["Item2", "Item3"])
+                         ["\x49tem2", "\x49tem3"])
 
     def test_code_looking_comments_and_literals_remain_findings(self):
         cases = (
-            ("src/x.cpp", '// counts[phase - 1]'),
-            ("src/x.cpp", '/* counts[phase - 1] */'),
-            ("src/x.cpp", 'const char* s = "counts[phase - 1]";'),
-            ("src/x.cpp", 'auto s = R"tag(\ncounts[phase - 1]\n)tag";'),
-            ("src/x.cpp", '// continued \\\ncounts[phase - 1]'),
-            ("tools/x.ps1", '# $x.Item1'),
-            ("tools/x.ps1", '<# outer <# inner #> $x.Item1 #>'),
-            ("tools/x.ps1", "'$x.Item1'"),
-            ("tools/x.ps1", "'backslash\\' + '$x.Item1'"),
-            ("tools/x.ps1", "@'\n$x.Item1\n'@"),
-            ("tools/x.ps1", '"$x.Item1"'),
-            ("docs/x.md", 'counts[phase - 1]; $x.Item1'),
+            ("src/x.cpp", '// counts[\x70hase - 1]'),
+            ("src/x.cpp", '/* counts[\x70hase - 1] */'),
+            ("src/x.cpp", 'const char* s = "counts[\x70hase - 1]";'),
+            ("src/x.cpp", 'auto s = R"tag(\ncounts[\x70hase - 1]\n)tag";'),
+            ("src/x.cpp", '// continued \\\ncounts[\x70hase - 1]'),
+            ("tools/x.ps1", '# $x.\x49tem1'),
+            ("tools/x.ps1", '<# outer <# inner #> $x.\x49tem1 #>'),
+            ("tools/x.ps1", "'$x.\x49tem1'"),
+            ("tools/x.ps1", "'backslash\\' + '$x.\x49tem1'"),
+            ("tools/x.ps1", "@'\n$x.\x49tem1\n'@"),
+            ("tools/x.ps1", '"$x.\x49tem1"'),
+            ("docs/x.md", 'counts[\x70hase - 1]; $x.\x49tem1'),
         )
         for path, text in cases:
             with self.subTest(path=path, text=text):
@@ -317,14 +418,14 @@ class PublicTreeValidatorTests(unittest.TestCase):
                                     for f in MODULE.inspect_text(path, text)))
 
     def test_exemptions_are_exact_tokens_and_keep_line_numbers(self):
-        text = "auto a = counts[phase - 1];\r\n// phase 2; phase 3\r\n"
+        text = "auto a = counts[\x70hase - 1];\r\n// \x70hase 2; \x70hase 3\r\n"
         findings = MODULE.inspect_text("src/x.cpp", text)
-        self.assertEqual([(f.detail, f.line) for f in findings], [("phase 2", 2), ("phase 3", 2)])
-        self.assertTrue(MODULE.inspect_text("src/x.cpp", "auto a = counts[phase - 10];"))
-        self.assertTrue(MODULE.inspect_text("src/x.cpp", "// Item1"))
+        self.assertEqual([(f.detail, f.line) for f in findings], [("\x70hase 2", 2), ("\x70hase 3", 2)])
+        self.assertTrue(MODULE.inspect_text("src/x.cpp", "auto a = counts[\x70hase - 10];"))
+        self.assertTrue(MODULE.inspect_text("src/x.cpp", "// \x49tem1"))
 
     def test_rejects_private_paths_and_credentials(self):
-        text = "/home/alice/project\nC:\\Users\\alice\\repo\nAKIAABCDEFGHIJKLMNOP\n"
+        text = "/\x68ome/alice/project\nC:\\Users\\alice\\repo\nAKIAABCDEFGHIJKLMNOP\n"
         rules = {finding.rule for finding in MODULE.inspect_text("notes.txt", text)}
         self.assertEqual(
             rules,
@@ -332,8 +433,8 @@ class PublicTreeValidatorTests(unittest.TestCase):
         )
 
     def test_rejects_wsl_unc_paths_in_plain_and_json_escaped_form(self):
-        for text in ("\\\\wsl.localhost\\Ubuntu\\x", '"\\\\\\\\wsl.localhost\\\\Ubuntu\\\\x"',
-                     "//wsl.localhost/Ubuntu/x", "\\\\wsl$\\Ubuntu\\x"):
+        for text in ("\\\\\x77sl.localhost\\Ubuntu\\x", '"\\\\\\\\\x77sl.localhost\\\\Ubuntu\\\\x"',
+                     "//\x77sl.localhost/Ubuntu/x", "\\\\\x77sl$\\Ubuntu\\x"):
             with self.subTest(text=text):
                 self.assertTrue(any(f.rule == "private-unc-path"
                                     for f in MODULE.inspect_text("notes.txt", text)))

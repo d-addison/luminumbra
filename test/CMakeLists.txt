@@ -1943,6 +1943,12 @@ else()
     find_program(CAPTURE_VALIDATION_POWERSHELL NAMES pwsh powershell)
 endif()
 if(CAPTURE_VALIDATION_POWERSHELL)
+    if(Python3_FOUND)
+        add_test(NAME AcceptancePreflightContract
+            COMMAND "${Python3_EXECUTABLE}" ${CMAKE_SOURCE_DIR}/tools/gates/test_acceptance_preflight.py)
+        set_tests_properties(AcceptancePreflightContract PROPERTIES
+            LABELS "persistence;tools" TIMEOUT 120)
+    endif()
     add_test(NAME CaptureArtifactValidationContract
         COMMAND "${CAPTURE_VALIDATION_POWERSHELL}" -NoLogo -NoProfile -NonInteractive
             -ExecutionPolicy Bypass -File "${CMAKE_SOURCE_DIR}/tools/gates/test-capture-artifact-validation.ps1")
@@ -1963,6 +1969,7 @@ if(CAPTURE_VALIDATION_POWERSHELL)
     set_tests_properties(LuaApiManifestSourceContract PROPERTIES
         LABELS "scripting;tools" TIMEOUT 60 WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
 else()
+    message(STATUS "PowerShell unavailable: AcceptancePreflightContract is not registered")
     message(STATUS "PowerShell unavailable: CaptureArtifactValidationContract is not registered")
     message(STATUS "PowerShell unavailable: FarLadderOracleContract is not registered")
     message(STATUS "PowerShell unavailable: SavedWorldRoundtripArtifactsContract is not registered")

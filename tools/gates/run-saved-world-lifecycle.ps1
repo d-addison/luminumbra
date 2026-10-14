@@ -165,12 +165,12 @@ function Get-DiffChanges {
 }
 
 function Get-PrimaryWorld {
-    # Newest world directory under saves that is not the fixture world.
-    $candidates = @(Get-ChildItem -LiteralPath $savesRoot -Directory |
-        Where-Object { $_.Name -ne $fixtureWorldId } |
-        Sort-Object -Property CreationTimeUtc -Descending)
-    if ($candidates.Count -eq 0) {
-        throw "create_edit_save produced no new world under $savesRoot"
+    param([Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]]$BeforeNames)
+    $candidates = @(Get-ChildItem -LiteralPath $savesRoot -Directory -Force |
+        Where-Object { $_.Name -notin $BeforeNames })
+    if ($candidates.Count -ne 1) {
+        $names = @($candidates | ForEach-Object { $_.Name } | Sort-Object) -join ", "
+        throw "create_edit_save requires exactly one new world under ${savesRoot}; found $($candidates.Count): [$names]"
     }
     return $candidates[0].Name
 }
@@ -455,9 +455,11 @@ try {
     $sessions = @()
 
     # 2. create_edit_save (shutdown record is read inside Invoke-Session, right after the session)
+    $beforeWorldNames = @(Get-ChildItem -LiteralPath $savesRoot -Directory -Force |
+        ForEach-Object { $_.Name })
     $sessions += Invoke-Session -Name "create_edit_save" -Kind "create_edit_save" -ArtifactDir $persistenceArtifact `
         -Arguments (@("--scenario", "persistence_roundtrip_smoke", "--persistence-phase", "save", "--persistence-session-dir", $sessionDir, "--auto-create-world", "--auto-enter-world") + (Get-CommonFlags -ArtifactDir $persistenceArtifact))
-    $primaryWorld = Get-PrimaryWorld
+    $primaryWorld = Get-PrimaryWorld -BeforeNames $beforeWorldNames
     $afterSave = Invoke-Snapshot -WorldDir (Join-Path $savesRoot $primaryWorld) -OutFile (Join-Path $receiptsDir "after_save.json") -Label "after_save"
 
     # 3. restart_select_load (reads the save-phase marker from the shared artifact dir)

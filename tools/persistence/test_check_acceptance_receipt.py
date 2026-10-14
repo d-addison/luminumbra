@@ -63,8 +63,8 @@ def valid_receipt() -> dict:
          "shutdown": {"schema": "luminumbra.shutdown.v1", "complete": True, "jobs_drained": True}},
     ]
     switches = []
-    for index in range(6):
-        world = "alpha" if index % 2 == 0 else "beta"
+    for index in range(1, 7):
+        world = "alpha" if index % 2 == 1 else "beta"
         switches.append({
             "index": index,
             "world": world,
@@ -556,7 +556,7 @@ class AcceptanceReceiptContract(unittest.TestCase):
         for count in (6, 9):
             with self.subTest(count=count):
                 receipt = valid_receipt()
-                receipt["switches"] = [dict(receipt["switches"][0], index=i) for i in range(count)]
+                receipt["switches"] = [dict(receipt["switches"][0], index=i) for i in range(1, count + 1)]
                 self._expect(receipt, "switch_count", "fail")
                 self.assertEqual(_check(_verdict(receipt), "switch_count")["detail"],
                                  "switches require at least two distinct world IDs")
@@ -569,13 +569,41 @@ class AcceptanceReceiptContract(unittest.TestCase):
         self._expect(receipt, "switch_count", "fail")
         self.assertEqual(_check(_verdict(receipt), "switch_count")["detail"], "malformed switches")
 
-    def test_switch_count_accepts_consecutive_world_change(self) -> None:
+    def test_switch_count_rejects_single_transition(self) -> None:
         receipt = valid_receipt()
         alpha, beta = receipt["switches"][:2]
-        receipt["switches"] = [dict(alpha if i < 3 else beta, index=i) for i in range(6)]
-        self._expect(receipt, "switch_count", "pass")
-        self.assertTrue(any(a["world"] != b["world"] for a, b in
-                            zip(receipt["switches"], receipt["switches"][1:])))
+        receipt["switches"] = [dict(alpha if i < 3 else beta, index=i + 1) for i in range(6)]
+        self._expect(receipt, "switch_count", "fail")
+        self.assertIn("must alternate", _check(_verdict(receipt), "switch_count")["detail"])
+        self.assertEqual(_run([str(self._write_obj(receipt))])[0], 1)
+
+    def test_switch_count_requires_recorded_index_order(self) -> None:
+        for indices in ([0, 1, 2, 3, 4, 5], [1, 2, 2, 4, 5, 6],
+                        [1, 2, 4, 5, 6, 7], [2, 1, 3, 4, 5, 6],
+                        [-1, 2, 3, 4, 5, 6], [True, 2, 3, 4, 5, 6]):
+            with self.subTest(indices=indices):
+                receipt = valid_receipt()
+                for switch, index in zip(receipt["switches"], indices):
+                    switch["index"] = index
+                self._expect(receipt, "switch_count", "fail")
+                self.assertEqual(_run([str(self._write_obj(receipt))])[0], 1)
+
+    def test_switch_count_requires_exactly_two_alternating_worlds(self) -> None:
+        for worlds in (["alpha", "beta", "beta", "alpha", "beta", "alpha"],
+                       ["alpha", "beta", "gamma", "alpha", "beta", "gamma"]):
+            with self.subTest(worlds=worlds):
+                receipt = valid_receipt()
+                for switch, world in zip(receipt["switches"], worlds):
+                    switch["world"] = world
+                self._expect(receipt, "switch_count", "fail")
+                self.assertIn("must alternate", _check(_verdict(receipt), "switch_count")["detail"])
+
+    def test_switch_count_accepts_short_and_odd_alternating_runs(self) -> None:
+        for count in (2, 5, 6):
+            with self.subTest(count=count):
+                receipt = valid_receipt()
+                receipt["switches"] = receipt["switches"][:count]
+                self._expect(receipt, "switch_count", "pass", min_switches=count)
 
     def test_switch_count_checks(self) -> None:
         self._assert_baseline("switch_count")
@@ -630,7 +658,7 @@ class AcceptanceReceiptContract(unittest.TestCase):
         receipt = valid_receipt()
         receipt["switches"][2]["g_buffer_probe"] = None
         self._expect(receipt, "switch_probes", "unevaluated")
-        self.assertIn("2", _check(_verdict(receipt), "switch_probes")["detail"])
+        self.assertIn("3", _check(_verdict(receipt), "switch_probes")["detail"])
 
         receipt = valid_receipt()
         del receipt["switches"][5]["g_buffer_probe"]
