@@ -1,5 +1,12 @@
+#include "../HeavyComparison.h"
 #include "ModeHelpers.h"
 #include "Modes.h"
+
+using Luminumbra::Server::AuthoritativeStateEqual;
+using Luminumbra::Server::CaptureGroundObjects;
+using Luminumbra::Server::GroundObjectDifference;
+using Luminumbra::Server::HeavyHashes;
+using Luminumbra::Server::MeshEqual;
 
 namespace fs = std::filesystem;
 
@@ -14,15 +21,6 @@ namespace {
 // the runner's world_id boot path), so no new persistence format.
 // ---------------------------------------------------------------------------
 
-struct HeavyHashes {
-    std::string world_hash;
-    Luminumbra::Persistence::WorldStreamingStateSubHashes sub;
-    std::string scent_hash;
-    bool active_regions = false;
-    std::string clock_bytes;
-    std::string ledger_bytes;
-};
-
 HeavyHashes CaptureHashes(Luminumbra::Server::ServerWorldRunner& runner) {
     HeavyHashes h;
     h.active_regions = runner.Session() && runner.Session()->ActiveRegionsEnabled();
@@ -30,43 +28,36 @@ HeavyHashes CaptureHashes(Luminumbra::Server::ServerWorldRunner& runner) {
         h.clock_bytes = runner.Session()->GetWorldClock().canonical_bytes();
         h.ledger_bytes = runner.Session()->GetActiveRegionLedger().canonical_bytes();
     }
+    if (runner.Session()) {
+        h.ground_objects = CaptureGroundObjects(runner.Session()->GetGroundObjects());
+    }
     h.world_hash = runner.ComputeWorldHash();
     h.sub = runner.ComputeWorldSubHashes();
     h.scent_hash = runner.Session() ? runner.Session()->ComputeScentSubHash() : std::string();
     return h;
 }
 
-// the heavy oracle's equality is over AUTHORITATIVE SIMULATION STATE
-// (terrain SDF + water sim + entities). Surface mesh geometry is EXCLUDED: it is
-// a deterministically-regenerated DERIVED render artifact, and the async
-// re-meshing of chunks adopted across a save/load boundary legitimately reaches
-// the same geometry via a different in-memory pending-mesh/version snapshot than
-// the originating session held. The sub-hashes localize this precisely (only
-// `mesh` differs; terrain/water/entities are byte-identical), which is exactly
-// the desync-localization the sub-hashes exist to provide. The top-level
-// world_hash (which DOES include mesh) is reported but not asserted on across
-// the round-trip for this reason; it is still asserted run==replay in --smoke.
-bool AuthoritativeStateEqual(const HeavyHashes& a, const HeavyHashes& b) {
-    // Legacy loads restart at tick zero. With the persisted clock on, ambient
-    // fields and the clock must also agree at save and after continuation.
-    if (a.active_regions || b.active_regions) {
-        if (a.active_regions != b.active_regions || a.clock_bytes != b.clock_bytes ||
-            a.ledger_bytes != b.ledger_bytes || a.sub.wind != b.sub.wind ||
-            a.sub.weather != b.sub.weather || a.sub.aether != b.sub.aether ||
-            a.sub.aether_state != b.sub.aether_state)
-            return false;
-    }
-    return a.sub.terrain == b.sub.terrain && a.sub.water == b.sub.water &&
-           a.sub.entities == b.sub.entities;
-}
-
-bool MeshEqual(const HeavyHashes& a, const HeavyHashes& b) {
-    return a.sub.mesh == b.sub.mesh;
-}
+// Equality (AuthoritativeStateEqual / MeshEqual) and the subsystem table, with the
+// rationale for excluding mesh from the oracle's equality, live in
+// luminumbra_server/HeavyComparison.h.
 
 nlohmann::json HeavyHashJson(const HeavyHashes& h) {
+    auto ground_objects = nlohmann::json::array();
+    for (const auto& object : h.ground_objects) {
+        ground_objects.push_back({{"id", object.id},
+                                  {"type", object.type},
+                                  {"x_mm", object.x_mm},
+                                  {"y_mm", object.y_mm},
+                                  {"z_mm", object.z_mm},
+                                  {"spawn_tick", object.spawn_tick},
+                                  {"active_age", object.active_age},
+                                  {"despawn_after", object.despawn_after},
+                                  {"payload", object.payload},
+                                  {"flags", object.flags}});
+    }
     return nlohmann::json{
         {"world_hash", h.world_hash},
+        {"ground_objects", std::move(ground_objects)},
         {"sub_hashes",
          {
              {"terrain", h.sub.terrain},
@@ -139,10 +130,15 @@ int RunHeavy(const ServerCliOptions& options) {
         loaded.Session()->GetWorldSystem()->GetWaterSimWindowCursor();
 
     // The loaded session, immediately after load, must match the original at
-    // save on AUTHORITATIVE sim state (terrain/water/entities). Mesh is tracked
+    // save on AUTHORITATIVE sim state (terrain/water/entities/ground objects). Mesh is tracked
     // informationally (see AuthoritativeStateEqual rationale).
     const bool roundtrip_ok = AuthoritativeStateEqual(orig_at_save, loaded_at_load);
     const bool roundtrip_mesh_match = MeshEqual(orig_at_save, loaded_at_load);
+    const std::string roundtrip_ground_difference =
+        GroundObjectDifference(orig_at_save, loaded_at_load);
+    if (!roundtrip_ground_difference.empty()) {
+        LUMINUMBRA_CORE_ERROR("heavy: round-trip differs in {}", roundtrip_ground_difference);
+    }
 
     // --- : resimulate M further ticks on BOTH sessions. ---
     const auto orig_resim = original.RunFixedTicks(options.heavy_resim);
@@ -152,6 +148,10 @@ int RunHeavy(const ServerCliOptions& options) {
 
     const bool resim_ok = AuthoritativeStateEqual(orig_final, loaded_final);
     const bool resim_mesh_match = MeshEqual(orig_final, loaded_final);
+    const std::string resim_ground_difference = GroundObjectDifference(orig_final, loaded_final);
+    if (!resim_ground_difference.empty()) {
+        LUMINUMBRA_CORE_ERROR("heavy: resim differs in {}", resim_ground_difference);
+    }
 
     //  diagnostic: on a water resim mismatch, localize it — which chunks,
     // which fields. Field-by-field compare over both sessions' chunk snapshots.
@@ -258,21 +258,25 @@ int RunHeavy(const ServerCliOptions& options) {
         {"original_at_save", HeavyHashJson(orig_at_save)},
         {"loaded_at_load", HeavyHashJson(loaded_at_load)},
         {"roundtrip_match", roundtrip_ok},
+        {"roundtrip_ground_difference", roundtrip_ground_difference},
         {"roundtrip_mesh_match", roundtrip_mesh_match},
         {"original_final", HeavyHashJson(orig_final)},
         {"loaded_final", HeavyHashJson(loaded_final)},
         {"resim_match", resim_ok},
+        {"resim_ground_difference", resim_ground_difference},
         {"resim_mesh_match", resim_mesh_match},
         {"boot_settle_original", SettleJson(settle_orig)},
         {"boot_settle_loaded", SettleJson(settle_loaded)},
         {"settle_contract_ok", settle_ok},
         {"water_sim_cursor_at_save", cursor_at_save},
         {"water_sim_cursor_at_load", cursor_at_load},
-        {"authoritative_sections", nlohmann::json::array({"terrain", "water", "entities"})},
+        {"authoritative_sections",
+         nlohmann::json::array({"terrain", "water", "entities", "ground_objects"})},
         {"mesh_excluded_reason",
          "surface mesh is a deterministically-regenerated derived render artifact; async "
          "re-meshing across a save/load boundary reaches identical geometry via a different "
-         "in-memory pending-mesh snapshot. Authoritative sim state (terrain/water/entities) "
+         "in-memory pending-mesh snapshot. Authoritative sim state "
+         "(terrain/water/entities/ground objects) "
          "round-trips exactly."},
         {"passed", passed},
     };
