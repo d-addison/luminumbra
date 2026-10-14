@@ -121,7 +121,7 @@ public:
         return FarWorldWaterSample{true, SEA_LEVEL};
     }
     std::optional<float> Height(std::int64_t, std::int64_t) const override {
-        return 0;
+        return 0.0f;
     }
     std::optional<FarVolumeSample>
     Sample(const FarVolumePosition&, float, std::uint32_t, FarCaveMode) const override {

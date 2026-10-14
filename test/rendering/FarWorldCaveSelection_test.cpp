@@ -432,7 +432,7 @@ TEST(FarWorldCaveSelection, OldCompletedBuildRefusesChangedContentOrCaveIdentity
                              [](const FarVolumePosition&, float, std::uint32_t, FarCaveMode) {
                                  return FarVolumeSample{1, 7};
                              }};
-        request.water = std::make_shared<const FarWorldConstantWaterObservation>(42, false, 0);
+        request.water = std::make_shared<const FarWorldConstantWaterObservation>(42, false, 0.0f);
         request.water_bound = FarWorldWaterBound{true, 0, 0};
         ASSERT_EQ(queue.Submit(request), FarVolumeSubmitStatus::Queued);
         ASSERT_EQ(queue.Pump(1), 1u);

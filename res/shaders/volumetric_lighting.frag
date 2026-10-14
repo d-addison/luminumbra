@@ -115,7 +115,8 @@ vec4 composeFinalFog(float analyticFog, vec3 inscatter, bool froxelOn,
         }
         fog = outFog;
     }
-    if (ladder) {
+    // A unit fade is an identity: 1 - (1 - fog) would lose low alpha bits.
+    if (ladder && aerialOuterFade(rawRayDistance, 16384.0) < 1.0) {
         float finalTransmittance = (1.0 - fog) * aerialOuterFade(rawRayDistance, 16384.0);
         fog = 1.0 - finalTransmittance;
     }

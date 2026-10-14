@@ -117,9 +117,10 @@ bool BuildFarWorldWaterMesh(const FarVolumeRenderMesh& terrain,
                                               double(terrain.origin_meters.y)),
                                         float(sz * spacing)};
                     candidate.vertices.push_back({position, Vec3{0, 1, 0}, kFarWorldWaterMaterial});
-                    if (candidate.bounds) {
-                        candidate.bounds->min = glm::min(candidate.bounds->min, position);
-                        candidate.bounds->max = glm::max(candidate.bounds->max, position);
+                    if (auto& bounds = candidate.bounds; bounds.has_value()) {
+                        auto& value = *bounds;
+                        value.min = glm::min(value.min, position);
+                        value.max = glm::max(value.max, position);
                     } else
                         candidate.bounds = FarVolumeRenderBounds{position, position};
                 }

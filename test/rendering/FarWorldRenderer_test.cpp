@@ -1585,8 +1585,8 @@ TEST(FarWorldRenderer, WaterBoundGrowsSpanBeforeIdentityAndRefusesOutOfBudgetHei
         }
     }
     {
-        auto wet =
-            std::make_unique<Owner>(FarWorldDevelopmentLimits(), FarWorldWaterCapability::Wet, 500);
+        auto wet = std::make_unique<Owner>(
+            FarWorldDevelopmentLimits(), FarWorldWaterCapability::Wet, 500.0f);
         ASSERT_TRUE(wet->renderer.PrepareFrame(++wet->frame, {0, 0, 0}));
         const auto wet_observation = wet->renderer.Residency()->Observe({5, 0, 0});
         ASSERT_TRUE(wet_observation);
@@ -1596,7 +1596,7 @@ TEST(FarWorldRenderer, WaterBoundGrowsSpanBeforeIdentityAndRefusesOutOfBudgetHei
     }
     auto limits = FarWorldDevelopmentLimits();
     limits.spans.max_y = 400;
-    auto refused = std::make_unique<Owner>(limits, FarWorldWaterCapability::Wet, 500);
+    auto refused = std::make_unique<Owner>(limits, FarWorldWaterCapability::Wet, 500.0f);
     EXPECT_FALSE(refused->renderer.PrepareFrame(++refused->frame, {0, 0, 0}));
     EXPECT_EQ(refused->renderer.Selection(FarWorldPurpose::World).refusal,
               FarWorldRefusal::WaterSpanRefused);
