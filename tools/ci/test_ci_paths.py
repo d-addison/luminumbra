@@ -1,6 +1,7 @@
 """Path gate coverage, rename safety, and standalone Python runner contracts."""
 
 from pathlib import Path
+import json
 import os
 import re
 import subprocess
@@ -214,6 +215,54 @@ class PathGateTests(unittest.TestCase):
                     self.assertIn(f"route: {route}", result.stdout)
                     if cpp == "false":
                         self.assertIn("native build skipped by Classify changed paths", result.stdout)
+
+    def test_job_routes_keep_draft_guards_and_fail_open_native_analysis(self):
+        workflows = {
+            name: (ROOT / f".github/workflows/{name}.yml").read_text(encoding="utf-8")
+            for name in ("ci", "asan", "performance")
+        }
+        routes = (
+            ("ci", "linux", "guarded-python"),
+            ("ci", "windows-msvc", "ready-python"),
+            ("ci", "gns-compile-probe", "ready-native"),
+            ("ci", "diligent-rhi", "ready-native"),
+            ("ci", "tidy-shard", "ready-native"),
+            ("ci", "tidy", "aggregate"),
+            ("asan", "asan", "guarded-native"),
+            ("performance", "preview-frame", "guarded-native"),
+        )
+        for workflow, job, route in routes:
+            body = re.split(r"\n  [\w-]+:\n", workflows[workflow].split(f"  {job}:\n", 1)[1])[0]
+            condition = re.search(r"^    if: (.*)$", body, re.MULTILINE)[1]
+            expression = condition.removeprefix("${{ ").removesuffix(" }}")
+            # Missing/failed classifier output is represented by the empty string.
+            for event in ("pull_request", "push", "schedule", "workflow_dispatch"):
+                for draft in (True, False, None):
+                    for cpp in ("true", "false", ""):
+                        for cancelled in (False, True):
+                            ready = event != "pull_request" or draft is False
+                            if route == "aggregate":
+                                expected = ready
+                            elif route == "guarded-python":
+                                expected = not cancelled
+                            elif route == "guarded-native":
+                                expected = not cancelled and (not ready or cpp != "false")
+                            else:
+                                expected = not cancelled and ready and (
+                                    route == "ready-python" or cpp != "false"
+                                )
+                            actual = expression.replace(
+                                "toJSON(github.event.pull_request.draft)", repr(json.dumps(draft))
+                            ).replace("!cancelled()", repr(not cancelled)).replace(
+                                "always()", "True"
+                            ).replace("github.event_name", repr(event)).replace(
+                                "github.event.pull_request.draft", repr(draft)
+                            ).replace("needs.changes.outputs.needs_cpp", repr(cpp)).replace(
+                                "== false", "== False"
+                            ).replace("!= false", "!= False").replace("&&", "and").replace("||", "or")
+                            with self.subTest(workflow=workflow, job=job, event=event,
+                                              draft=draft, cpp=cpp, cancelled=cancelled):
+                                self.assertEqual(eval(actual, {"__builtins__": {}}), expected)
 
     def test_new_files_in_covered_directories_require_builds(self):
         for path in gate.PYTHON_MODULES | gate.AUTHORING_PYTHON_FILES:

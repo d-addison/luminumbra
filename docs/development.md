@@ -92,6 +92,29 @@ missing history, an empty diff, unknown paths, or missing classifier outputs kee
 the build lanes enabled. Pushes, schedules, and manual dispatches always enable
 every path-gated lane, regardless of changed files.
 
+Blocking clang-tidy analysis runs in three path-hash shards on standard Ubuntu
+runners, each with a 60-minute timeout. Together they analyse every configured
+first-party translation unit and its headers on every executed merged-tip run;
+pushes use `writeonly` caching and never skip analysis. PRs restore only their
+matching shard's cache. The required `Static analysis / clang-tidy` check aggregates the
+shards and requires all three to succeed whenever native analysis is needed.
+The shards use the same path gate as other heavy lanes. On ready PRs where
+classification succeeds with `needs_cpp=false`, skipped shards produce a successful
+aggregate with an explicit routed-skip summary. Missing or failed classification
+keeps analysis required; skipped, failed, or cancelled shards then fail the
+aggregate. Both the shards and the aggregate check skip draft pull requests.
+Local `scripts/tidy.sh` still analyses the full scope by default;
+`--shard INDEX/COUNT` selects one stable partition.
+
+Draft pull requests run the cheap routine checks: changed-file formatting, public
+tree inventory, runner contracts, Doxygen, game assets, and the authoring mock
+(subject to its existing paths filter). Linux/GCC, ASan, Windows/MSVC,
+Windows/UCRT64, clang-tidy, GNS, Diligent RHI, preview-frame, and the paired server
+comparison do no heavy work on draft pull requests. Linux/GCC, ASan, and
+preview-frame start with a lightweight guard that fails drafts before checkout or
+dependency installation; the other heavy jobs skip drafts. The separate
+path-filtered UCRT package attribution diagnostic keeps its existing job routing.
+
 C++ sources and headers, CMake inputs, `src/`, `include/`, `test/`, `cmake/`,
 `res/` (including shaders and test data), `data/`, `config/`, `worlds/`, vendored
 and third-party dependencies, vcpkg/dependency files, `.gitattributes`, and workflow
@@ -102,6 +125,33 @@ fixture bytes on checkout.
 Documentation and covered Python tooling can skip C++ lanes. The allowlist and
 standalone test plan live together in `tools/ci/ci_paths.py`.
 Unknown tooling remains on the build path.
+
+Draft pull requests cannot merge. GitHub does not allow draft PRs to merge and
+may report jobs skipped by a condition as successful, so a draft skip alone does
+not block required checks. The guards keep the existing `Linux / GCC`,
+`Linux / GCC ASan`, and `Preview frame / software OpenGL` check names and report
+failure on drafts. Their failure prevents a draft head from satisfying all
+required checks, including immediately after marking it ready while the new
+runs are pending. For PR events, they can turn green only after a non-draft run
+completes its routed validation. Linux/GCC runs Python contracts or native tests;
+ASan and preview-frame run their full lanes when native validation is needed.
+No new required-check configuration is needed.
+
+Marking a pull request ready for review triggers the full checks on its current
+head. The CI, AddressSanitizer, and performance workflows listen for `opened`,
+`synchronize`, `reopened`, `ready_for_review`, and `converted_to_draft`; existing
+branch and path filters still apply. Maintainers must not merge until the
+`ready_for_review` run's required checks are green on the current head, and must
+wait again after any head update. This repository does not implement a separate
+merge gate. The external campaign gate (`campaign_control.py land`, outside this
+repository) requires actual `SUCCESS` for required checks on the exact head,
+with one routing exception: for non-draft engine PRs, it accepts `SKIPPED`
+heavy checks only when every same-head `Classify changed paths` check succeeded.
+Drafts and push/recovery validation remain `SUCCESS`-only. A routed skip is not
+evidence that native validation ran. No additional job runs on draft pushes
+to enforce this policy; the guards use existing required jobs. Windows/UCRT64
+keeps its existing branch/manual routing, and the paired server comparison still runs only for
+main-bound ready PRs or eligible main/devel pushes.
 
 The required `Linux / GCC` and `Windows / MSVC` jobs always run on ready PRs.
 When `needs_cpp=false`, each installs only numpy, Pillow and jsonschema for its OS
@@ -136,30 +186,14 @@ Authoring service implementation and native probes require builds.
 The public-tree job also runs SDF documentation lint so doc-only edits retain that
 CTest-registered check. Doxygen always runs because `docs/` feeds its input.
 
-Draft pull requests retain the previous draft routing: heavy lanes skip while
-formatting, public-tree inventory, runner contracts, Doxygen, game assets, and the
-authoring mock run (subject to the mock's existing paths filter). The required
-Linux/GCC and Windows/MSVC jobs still skip drafts. GitHub can treat skipped checks
-as successful, but does not allow draft PRs to merge. Marking a PR ready for review
-triggers its current head; those two jobs run Python or native tests, and other
-heavy lanes run when the paths require them. PR workflows listen for `opened`,
-`synchronize`, `reopened`, and `ready_for_review`; existing branch and path filters
-still apply. The new check runs supersede the draft's skipped ones. Maintainers
-must not merge until the `ready_for_review` run's required checks are green on the
-current head, and must wait again after any head update. This repository does not
-implement a separate merge gate. The external campaign gate (`campaign_control.py
-land`, outside this repository) accepts `SUCCESS` on the exact head. It also accepts
-`SKIPPED` for path-routed heavy checks on non-draft engine PRs, only when every
-same-head `Classify changed paths` CheckRun succeeded. Drafts and push/recovery
-validation remain `SUCCESS`-only. No additional job runs on draft pushes to enforce
-this policy.
-
 Required job names and workflow PR triggers remain present for every PR. Native
-lanes depend directly on the always-running classifier; none depends on a skipped
-heavy job. Linux/GCC and Windows/MSVC select their native or Python steps. Other
-unaffected heavy lanes report a terminal `skipped` conclusion, which GitHub
-accepts for required checks, rather than leaving a missing status pending. Public tree, Format, Doxygen, and
-runner contracts run independently of the classifier. Assuming those checks pass,
+lanes depend directly on the always-running classifier. The clang-tidy aggregate
+also depends on the shards and uses `always()` to report their result even when
+they are skipped. Linux/GCC and Windows/MSVC select their native or Python
+steps. Other unaffected heavy lanes report a terminal `skipped` conclusion,
+which GitHub accepts for required checks, rather than leaving a missing status
+pending. Public tree, Format, Doxygen, and runner contracts run independently
+of the classifier. Assuming those checks pass,
 the devel ruleset sees the following conclusions on ready PRs:
 
 | Required check | Docs-only PR | Covered Python-only PR | C++ PR | Devel push |
@@ -174,7 +208,7 @@ the devel ruleset sees the following conclusions on ready PRs:
 | Runner contract / windows-2025 | success | success | success | success |
 | Runner contract / macos-15 | success | success | success | success |
 | Preview frame / software OpenGL | skipped | skipped | success | success |
-| Static analysis / clang-tidy | skipped | skipped | success | success |
+| Static analysis / clang-tidy | success (routed skip) | success (routed skip) | success | success |
 | GNS transport / compile probe | skipped | skipped | success | success |
 | Diligent RHI / software GL | skipped | skipped | success | success |
 
@@ -195,8 +229,8 @@ runs use a separate group so their cancellation cannot interrupt devel pushes. M
 pushes and manual dispatches, including qualification captures, have isolated
 non-cancelling groups, preserving their individual evidence. PR runs retain ref
 batching and cancellation where previously configured, so `ready_for_review`
-supersedes earlier draft runs. Authoring PR runs retain their independent,
-non-cancelling behaviour.
+supersedes earlier draft runs and `converted_to_draft` cancels in-flight ready
+runs. Authoring PR runs retain their independent, non-cancelling behaviour.
 The authoring workflow keeps its existing path triggers; UCRT attribution keeps
 its PR/manual-only triggers. Scheduled and release routing stays unchanged.
 
@@ -204,8 +238,10 @@ All runners remain standard hosted runners; no paid actions, larger/GPU runners,
 repository visibility changes, or cache-cap increases are introduced.
 
 CTest produces JUnit and runtime artifacts. CI verifies a minimum discovered-test
-count so an empty or severely truncated suite cannot report success. Sanitizer and
-test artifacts are uploaded even on failure to support diagnosis.
+count so an empty or severely truncated suite cannot report success. Once a
+non-draft test or sanitizer lane runs, its sanitizer and test artifacts are uploaded
+even on failure to support diagnosis. The draft guard failures described above stop
+before checkout and upload no artifacts.
 
 `WorldgenProbeSmoke` validates the `luminumbra.worldgen_probe.v1` smoke report
 with seed `424242` and spawn `(8, terrain height + 1.95, 8)`. Valid evidence requires

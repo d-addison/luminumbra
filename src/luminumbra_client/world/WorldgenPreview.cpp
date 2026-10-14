@@ -83,7 +83,7 @@ WorldgenPreview::~WorldgenPreview() {
     }
 
     // Drain far-LOD jobs that may still be sampling the live preview world BEFORE we
-    // free it below (Codex #6: drain before EVERY live-world free, incl. teardown).
+    // free it below. Drain before EVERY live-world free, including teardown.
     // The pipeline is constructed before this controller and so outlives it — the
     // pointer is valid here. No-op if the preview never rendered (pointer null).
     if (m_drain_pipeline) {

@@ -2,7 +2,7 @@ name: Performance observations
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
     branches: [main, devel]
   push:
     branches: [main, devel]
@@ -106,15 +106,27 @@ jobs:
           python tools/ci/test_validate_performance_measurement.py
           python tools/ci/test_qualification_capture.py
 
-  # Drafts cannot merge. ready_for_review reruns the skipped jobs on the same
+  # Drafts cannot merge. ready_for_review reruns these jobs on the same
   # head; maintainers must wait for its required checks to pass before merging.
   preview-frame:
     name: Preview frame / software OpenGL
+    # Drafts, including missing metadata, must reach the guard even on docs-only
+    # changes. Ready PRs can still skip this lane through the path gate.
     needs: changes
-    if: ${{ !cancelled() && needs.changes.outputs.needs_cpp != 'false' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
+    if: ${{ !cancelled() && ((github.event_name == 'pull_request' && toJSON(github.event.pull_request.draft) != 'false') || needs.changes.outputs.needs_cpp != 'false') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
+      - name: Reject draft pull requests
+        shell: bash
+        env:
+          CI_EVENT_NAME: ${{ github.event_name }}
+          CI_PR_DRAFT: ${{ github.event.pull_request.draft }}
+        run: |
+          if [ "$CI_EVENT_NAME" = "pull_request" ] && [ "$CI_PR_DRAFT" != "false" ]; then
+            echo "::error::Draft pull requests cannot merge. Mark ready for review and wait for the full checks."
+            exit 1
+          fi
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install measurement dependencies
@@ -145,7 +157,7 @@ jobs:
               -R '^WorldgenPreviewTest\.PerFrameRenderProducesComparableObservation$' \
               --output-on-failure --output-junit performance.junit.xml
       - name: Validate measurement evidence
-        if: always()
+        if: always() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)
         run: |
           python3 tools/ci/validate_performance_measurement.py \
             build/perf/performance.junit.xml \
@@ -154,7 +166,7 @@ jobs:
             --test WorldgenPreviewTest.PerFrameRenderProducesComparableObservation --preset perf
           cat build/perf/performance-result.json >> "$GITHUB_STEP_SUMMARY"
       - name: Upload measurement evidence
-        if: always()
+        if: always() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: preview-frame-performance-${{ github.sha }}

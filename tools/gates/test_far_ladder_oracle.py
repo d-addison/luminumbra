@@ -372,6 +372,49 @@ class HorizonValidatorTests(unittest.TestCase):
             self.assertEqual(valid.returncode, 0, valid.stderr)
             self.assertTrue(json.loads(valid.stdout)["LadderChecked"])
 
+    def test_mode_dispatch_rejects_both_cross_mode_requests_and_legacy_v1(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "artifact.json"
+            helper = Path(__file__).with_name("far_ladder_oracle.py")
+            for recorded, requested in (("legacy", "ladder"), ("ladder", "legacy")):
+                path.write_text(json.dumps(fixture(recorded)))
+                result = subprocess.run(
+                    [sys.executable, "-B", str(helper), "validate", str(path),
+                     "--renderer", requested, "--station", "origin"],
+                    capture_output=True, text=True)
+                with self.subTest(recorded=recorded, requested=requested):
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("wrong-mode", result.stderr)
+            path.write_text(json.dumps(dict(schema="luminumbra.farlod_horizon.v1",
+                                           thresholds=dict(f2_outer_range_m=1536))))
+            result = subprocess.run(
+                [sys.executable, "-B", str(helper), "validate", str(path),
+                 "--renderer", "ladder", "--station", "origin"],
+                capture_output=True, text=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("far horizon refused", result.stderr)
+
+    def test_ladder_qualification_does_not_consume_legacy_counts_or_range_thresholds(self):
+        artifact = fixture()
+        for row in artifact["stations"]:
+            row.pop("legacy")
+        self.assertTrue(self.validate(artifact)["LadderChecked"])
+        artifact["legacy"] = dict(regions_wanted=-1, regions_resident=-1, regions_missing=999,
+                                  f1_outer_range_m=768, f2_outer_range_m=3000)
+        artifact["thresholds"] = dict(f2_outer_range_m=1536, resident_budget_bytes=0)
+        for row in artifact["stations"]:
+            row["legacy"] = artifact["legacy"]
+        self.assertTrue(self.validate(artifact)["LadderChecked"])
+        artifact["stations"][0]["ladder"]["resident_tiles"].pop()
+        with self.assertRaisesRegex(ArtifactError, "missing_expected"):
+            self.validate(artifact)
+
+    def test_legacy_compatibility_still_requires_its_station_counters(self):
+        artifact = fixture("legacy")
+        artifact["stations"][0].pop("legacy")
+        with self.assertRaisesRegex(ArtifactError, "station missing fields"):
+            self.validate(artifact)
+
     def test_new_path_checks_every_legacy_aggregate_assertion(self):
         mutations = (
             lambda a: a.update(camera=None),

@@ -76,7 +76,7 @@ Cilliers / Poly Haven, CC0-1.0; see [Game assets](game-assets.md).
 
 Native Windows Release binaries used GNU UCRT64 15.1.0 and production OpenGL,
 without ASan, coverage, Tracy or Diligent. NVIDIA's startup process table matched
-guard PID 51780 and bypass PID 87308 to GPU 0, an RTX 5070 Ti with driver 595.97.
+both client processes to GPU 0, an RTX 5070 Ti with driver 595.97.
 Other applications were present in the shared hardware environment; their
 presence alone does not establish interference.
 
