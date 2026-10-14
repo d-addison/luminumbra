@@ -192,7 +192,7 @@ it.
 Qualification must pin the cave-dense revision and identity. The packaged
 `worlds/atlas/presets/cave_dense.json` now uses revision 7; the revision-6 fixture
 is frozen in `worlds/atlas/presets-rev6/cave_dense.json`. See the
-[shipping preset identities](engine-guide.md#shipping-defaults) before comparing
+shipping preset identities under "Shipping defaults" in the [engine guide](engine-guide.md) before comparing
 captures or synchronizing the game repository's fixture and identity sidecar.
 
 ### Edits and the far authority overlay
