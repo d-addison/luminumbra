@@ -4,6 +4,7 @@
 
 #include "luminumbra_common/components/PlantComponents.h"
 #include "luminumbra_common/simulation/SimBudgetTelemetry.h"
+#include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 #include "luminumbra_common/world/GameSession.h"
 #include "luminumbra_server/ServerWorldRunner.h"
 

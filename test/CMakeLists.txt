@@ -19,6 +19,12 @@ target_compile_definitions(world_generation_test PRIVATE
     LUMINUMBRA_TEST_ARTIFACT_DIR="${CMAKE_BINARY_DIR}/test-artifacts"
 )
 
+add_executable(preset_schema_rev_test shield/preset_schema_rev_test.cpp)
+target_include_directories(preset_schema_rev_test PRIVATE ../src)
+target_link_libraries(preset_schema_rev_test PRIVATE luminumbra_common)
+luminumbra_configure_first_party_target(preset_schema_rev_test)
+add_test(NAME TerrainPresetSchemaRevision COMMAND preset_schema_rev_test)
+
 add_executable(worldgen_layer_snapshot_test
     shield/test_worldgen_layer_snapshots.cpp
     shield/worldgen_layers_hardening_test.cpp

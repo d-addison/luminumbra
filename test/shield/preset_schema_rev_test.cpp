@@ -1,7 +1,9 @@
 #include "../../src/luminumbra_common/world/TerrainPresetLoader.h"
 
+#include <cstdint>
 #include <iostream>
 #include <string>
+#include <vector>
 
 #include "nlohmann/json.hpp"
 

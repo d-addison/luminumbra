@@ -17,6 +17,7 @@
 #include "../ai/ScentDepositSystem.h"
 #include "../ai/ScentField.h"
 #include "../ai/ScentSteeringSystem.h"
+#include "../ai/SimTuningConfig.h"
 #include "../ai/SteeringConsumer.h" // Blends steering biases into desired motion.
 #include "../ai/StimulusChannels.h"
 #include "../ai/TerritorySystem.h"       // Home territory and homing bias.
