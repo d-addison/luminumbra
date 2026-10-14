@@ -1,4 +1,5 @@
 #include "GBufferPass.h"
+#include "../FarWorldReplay.h"
 #include "../GBufferTargets.h"
 #include "StaticDrawPass.h"
 #include <luminumbra/rendering/StaticScene.h>
@@ -47,6 +48,34 @@ static constexpr GLsizei kStaticInstanceCapacity = 131072;
 GBufferPass::GBufferPass() = default;
 GBufferPass::~GBufferPass() = default;
 
+FarWorldSelection GBufferPass::SelectFarWorldRenderer(FarWorldSelection selection) const {
+    if (selection.effective == FarWorldMode::Ladder) {
+        for (const auto* shader : {m_geometry_ladder_shader.get(),
+                                   m_instanced_static_mesh_ladder_shader.get(),
+                                   m_skinned_mesh_ladder_shader.get()}) {
+            // IsValid means nonzero and successfully linked/adopted by Shader.
+            if (!shader || !shader->IsValid()) {
+                selection.effective = FarWorldMode::Legacy;
+                selection.refusal = FarWorldRefusal::ShaderProgramUnavailable;
+                break;
+            }
+        }
+    }
+    return selection;
+}
+
+namespace {
+bool UseDrawProgram(const Shader* shader, GBufferDrawStats& stats) {
+    if (!shader || !shader->IsValid()) {
+        stats.refusal = FarWorldRefusal::ShaderProgramUnavailable;
+        ++stats.invalid_program_refusals;
+        return false;
+    }
+    shader->use();
+    return true;
+}
+} // namespace
+
 void GBufferPass::register_cached_mesh(const std::string& key, std::unique_ptr<Mesh> mesh) {
     if (mesh)
         m_meshCache[key] = std::move(mesh);
@@ -59,6 +88,17 @@ void GBufferPass::init_geometry_shader(const std::filesystem::path& root_path) {
     m_geometry_shader =
         std::make_unique<Shader>((root_path / "res/shaders/g_buffer.vert").string().c_str(),
                                  (root_path / "res/shaders/g_buffer.frag").string().c_str());
+    m_geometry_ladder_shader =
+        std::make_unique<Shader>((root_path / "res/shaders/g_buffer.vert").string().c_str(),
+                                 (root_path / "res/shaders/g_buffer.frag").string().c_str(),
+                                 std::vector<std::string>{},
+                                 std::vector<std::string>{"LUMINUMBRA_FAR_WORLD_LADDER 1"});
+    m_geometry_far_uniforms.Cache(*m_geometry_shader);
+    m_geometry_ladder_uniforms.Cache(*m_geometry_ladder_shader);
+    if (m_geometry_ladder_shader->IsValid()) {
+        if (const ExpectedLayout* layout = FindPassExpectedLayout("gbuffer_geometry"))
+            m_geometry_ladder_shader->ValidateLayout(*layout);
+    }
     PassGl::label_gl_object(
         GL_PROGRAM, m_geometry_shader ? m_geometry_shader->Id() : 0u, "shader.geometry");
     // validate g_buffer.frag's sampler bindings against the registry.
@@ -73,6 +113,17 @@ void GBufferPass::init_instanced_static_mesh(const std::filesystem::path& root_p
     std::string gbuffer_frag_path = (root_path / "res/shaders/g_buffer.frag").string();
     m_instanced_static_mesh_shader =
         std::make_unique<Shader>(instanced_vert_path.c_str(), gbuffer_frag_path.c_str());
+    m_instanced_static_mesh_ladder_shader =
+        std::make_unique<Shader>((root_path / "res/shaders/instanced_mesh.vert").string().c_str(),
+                                 (root_path / "res/shaders/g_buffer.frag").string().c_str(),
+                                 std::vector<std::string>{},
+                                 std::vector<std::string>{"LUMINUMBRA_FAR_WORLD_LADDER 1"});
+    m_static_far_uniforms.Cache(*m_instanced_static_mesh_shader);
+    m_static_ladder_uniforms.Cache(*m_instanced_static_mesh_ladder_shader);
+    if (m_instanced_static_mesh_ladder_shader->IsValid()) {
+        if (const ExpectedLayout* layout = FindPassExpectedLayout("gbuffer_static"))
+            m_instanced_static_mesh_ladder_shader->ValidateLayout(*layout);
+    }
     PassGl::label_gl_object(GL_PROGRAM,
                             m_instanced_static_mesh_shader ? m_instanced_static_mesh_shader->Id()
                                                            : 0u,
@@ -141,6 +192,17 @@ void GBufferPass::init_skinned_mesh(const std::filesystem::path& root_path) {
     std::string gbuffer_frag_path = (root_path / "res/shaders/g_buffer.frag").string();
     m_skinned_mesh_shader =
         std::make_unique<Shader>(skinned_vert_path.c_str(), gbuffer_frag_path.c_str());
+    m_skinned_mesh_ladder_shader =
+        std::make_unique<Shader>((root_path / "res/shaders/skinned_mesh.vert").string().c_str(),
+                                 (root_path / "res/shaders/g_buffer.frag").string().c_str(),
+                                 std::vector<std::string>{},
+                                 std::vector<std::string>{"LUMINUMBRA_FAR_WORLD_LADDER 1"});
+    m_skinned_far_uniforms.Cache(*m_skinned_mesh_shader);
+    m_skinned_ladder_uniforms.Cache(*m_skinned_mesh_ladder_shader);
+    if (m_skinned_mesh_ladder_shader->IsValid()) {
+        if (const ExpectedLayout* layout = FindPassExpectedLayout("gbuffer_skinned"))
+            m_skinned_mesh_ladder_shader->ValidateLayout(*layout);
+    }
     PassGl::label_gl_object(GL_PROGRAM,
                             m_skinned_mesh_shader ? m_skinned_mesh_shader->Id() : 0u,
                             "shader.skinned_mesh");
@@ -191,14 +253,39 @@ void GBufferPass::destroy_skinned_mesh() {
 
 void GBufferPass::reset_shaders() {
     m_authored_pass.reset();
+    // Detach the generation observers before destroying their Shader owners.
+    m_geometry_far_uniforms.Cache(0);
+    m_static_far_uniforms.Cache(0);
+    m_skinned_far_uniforms.Cache(0);
+    m_geometry_ladder_uniforms.Cache(0);
+    m_static_ladder_uniforms.Cache(0);
+    m_skinned_ladder_uniforms.Cache(0);
     m_geometry_shader.reset();
     m_instanced_static_mesh_shader.reset();
     m_skinned_mesh_shader.reset();
+    m_geometry_ladder_shader.reset();
+    m_instanced_static_mesh_ladder_shader.reset();
+    m_skinned_mesh_ladder_shader.reset();
 }
 
 GBufferDrawStats GBufferPass::execute(const RenderContext& ctx,
                                       entt::registry& registry,
                                       const GBufferPassInput& input) {
+    // ON already populated persistent mesh caches. Keep reused per-dispatch
+    // scratch exactly as ON left it, including when a later stage throws.
+    auto restore = [this,
+                    groups = ctx.frozen_replay ? m_visibleGroups : decltype(m_visibleGroups){},
+                    memo = ctx.frozen_replay ? m_resolveMemo : decltype(m_resolveMemo){},
+                    impostors =
+                        ctx.frozen_replay ? m_impostorInstances : decltype(m_impostorInstances){},
+                    replay = ctx.frozen_replay]() mutable noexcept {
+        if (replay) {
+            m_visibleGroups.swap(groups);
+            m_resolveMemo.swap(memo);
+            m_impostorInstances.swap(impostors);
+        }
+    };
+    ReplayRollback rollback(std::move(restore));
     GBufferDrawStats stats;
     const bool authored = input.authored_draws && !input.authored_draws->draws.empty();
     if (authored) {
@@ -206,6 +293,8 @@ GBufferDrawStats GBufferPass::execute(const RenderContext& ctx,
             ctx.internal_w() != ctx.screen_width || ctx.internal_h() != ctx.screen_height)
             throw std::invalid_argument(
                 "Authored static draws require exact view, scale 1 and TAAU disabled");
+        if (ctx.frozen_replay && (!m_authored_pass || !m_gbuffer.authored_texture))
+            throw std::logic_error("Replay cannot allocate authored resources");
         if (!m_authored_pass)
             m_authored_pass = std::make_unique<StaticDrawPass>(input.root_path);
         if (!m_gbuffer.authored_texture) {
@@ -217,6 +306,7 @@ GBufferDrawStats GBufferPass::execute(const RenderContext& ctx,
     const Camera& camera = *ctx.camera;
 
     glBindFramebuffer(GL_FRAMEBUFFER, m_gbuffer.fbo_id);
+    PreserveReplayObject(ReplayObjectKind::Framebuffer, m_gbuffer.fbo_id);
     {
         GLenum buffers[6] = {GL_COLOR_ATTACHMENT0,
                              GL_COLOR_ATTACHMENT1,
@@ -258,7 +348,7 @@ GBufferDrawStats GBufferPass::execute(const RenderContext& ctx,
         geometry_pass_chunks(ctx, input, camera, fp, stats);
 
         // Pass 2: Render all instanced static meshes
-        geometry_pass_static_meshes(ctx, input, registry, camera, fp);
+        geometry_pass_static_meshes(ctx, input, registry, camera, fp, stats);
         if (authored) {
             const auto authored_stats =
                 m_authored_pass->Render(*input.authored_view, input.authored_draws, m_gbuffer);
@@ -282,76 +372,84 @@ void GBufferPass::geometry_pass_chunks(const RenderContext& ctx,
                                        const Camera& camera,
                                        const glm::vec4 (&frustum_planes)[6],
                                        GBufferDrawStats& stats) {
-    m_geometry_shader->use();
-    glm::mat4 projection = ReversedZPerspective(glm::radians(camera.Zoom),
-                                                (float)ctx.screen_width / (float)ctx.screen_height,
-                                                camera.GetNearPlane(),
-                                                camera.GetFarPlane());
-    glm::mat4 view = camera.GetViewMatrix();
-    //  TAAU: sub-pixel jitter the projection (0 when TAAU off -> byte-identical).
-    const glm::vec2 taau_jit = ctx.taau_jitter_ndc;
-    projection[2][0] += taau_jit.x;
-    projection[2][1] += taau_jit.y;
+    const auto& shader = geometry_shader(input.far_selection.effective);
+    auto& uniforms = input.far_selection.effective == FarWorldMode::Ladder
+                         ? m_geometry_ladder_uniforms
+                         : m_geometry_far_uniforms;
 
-    m_geometry_shader->setMat4("projection", projection);
-    m_geometry_shader->setMat4("view", view);
+    if (!UseDrawProgram(shader.get(), stats))
+        return;
+    glm::mat4 projection = ctx.gbuffer_projection;
+    glm::mat4 view = camera.GetViewMatrix();
+    // Ladder writers share the exact projection inverted by the depth readers.
+    // Preserve the original projection/jitter arithmetic for compatibility paths.
+    const glm::vec2 taau_jit = ctx.taau_jitter_ndc;
+    if (!ctx.far_world_ladder) {
+        projection = ReversedZPerspective(glm::radians(camera.Zoom),
+                                          (float)ctx.screen_width / (float)ctx.screen_height,
+                                          camera.GetNearPlane(),
+                                          camera.GetFarPlane());
+        projection[2][0] += taau_jit.x;
+        projection[2][1] += taau_jit.y;
+    }
+
+    shader->setMat4("projection", projection);
+    shader->setMat4("view", view);
     //  TAAU: previous-frame view-proj + inverse screen size so the fragment shader writes
     // screen-space motion vectors (curr screen pos - reprojected prev pos). Identity prev (frame 0)
     // -> the shader's w<=0 guard yields zero motion. u_jitter_ndc lets the frag remove this frame's
     // jitter from the current position so motion vectors stay jitter-free.
-    m_geometry_shader->setMat4("u_prev_view_proj", ctx.prev_view_proj);
-    m_geometry_shader->setVec2(
-        "u_inv_screen_size",
-        glm::vec2(1.0f / (float)ctx.screen_width, 1.0f / (float)ctx.screen_height));
-    m_geometry_shader->setVec2("u_jitter_ndc", taau_jit);
+    shader->setMat4("u_prev_view_proj", ctx.prev_view_proj);
+    shader->setVec2("u_inv_screen_size",
+                    glm::vec2(1.0f / (float)ctx.screen_width, 1.0f / (float)ctx.screen_height));
+    shader->setVec2("u_jitter_ndc", taau_jit);
     // LOD mip bias = log2(render_scale) so material textures stay sharp when
     // the scene renders at a reduced internal resolution. internal_w==screen_width at
     // render_scale 1.0 -> exactly log2(1.0)==0.0 -> the shader takes its unbiased path.
-    m_geometry_shader->setFloat("u_lodBias",
-                                ctx.screen_width > 0u
-                                    ? std::log2((float)ctx.internal_w() / (float)ctx.screen_width)
-                                    : 0.0f);
+    shader->setFloat("u_lodBias",
+                     ctx.screen_width > 0u
+                         ? std::log2((float)ctx.internal_w() / (float)ctx.screen_width)
+                         : 0.0f);
     // View rotation: triplanar normal mapping perturbs the normal in
     // world space then rotates it into view space for the octahedral G-buffer.
-    m_geometry_shader->setMat3("u_normalViewMatrix", glm::mat3(view));
+    shader->setMat3("u_normalViewMatrix", glm::mat3(view));
     // live terrain is now submitted via glMultiDrawElementsIndirect
     // from the shared geometry pool; the per-draw chunk origin arrives through
     // the instanced aOrigin attribute, so the per-chunk model uniform path is
     // disabled (u_useInstanceOrigin == 1). Far-LOD draws below re-enable the
     // model-uniform path (u_useInstanceOrigin == 0).
-    m_geometry_shader->setInt("u_useInstanceOrigin", 1);
-    // Clip band is inert for live chunks (matches the legacy per-chunk path).
-    m_geometry_shader->setFloat("u_farClipNearRadius", 0.0f);
-    m_geometry_shader->setFloat("u_farClipFarRadius", 0.0f);
+    uniforms.Reset();
+    uniforms.UseInstanceOrigin(true);
+    // Reset above makes the clip band inert for live chunks.
 
     // Bind material LUT + triplanar terrain arrays for the G-Buffer pass.
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, ctx.material_lut.id);
-    m_geometry_shader->setInt("u_materialLUT", 0);
+    shader->setInt("u_materialLUT", 0);
     glActiveTexture(GL_TEXTURE1);
     glBindTexture(GL_TEXTURE_2D_ARRAY, ctx.terrain_textures.id);
-    m_geometry_shader->setInt("u_terrainTextures", 1);
+    shader->setInt("u_terrainTextures", 1);
     glActiveTexture(GL_TEXTURE2);
     glBindTexture(GL_TEXTURE_2D_ARRAY, ctx.terrain_normals.id);
-    m_geometry_shader->setInt("u_terrainNormals", 2);
+    shader->setInt("u_terrainNormals", 2);
     // u_skinnedTextures must point at a distinct unit (3) even though terrain
     // never samples it: a sampler2DArray sharing unit 0 with the sampler2D LUT is
     // undefined (black draws on some drivers). Bind a valid 2D array there.
     glActiveTexture(GL_TEXTURE3);
     glBindTexture(GL_TEXTURE_2D_ARRAY,
                   ctx.skinned_textures.id ? ctx.skinned_textures.id : ctx.terrain_textures.id);
-    m_geometry_shader->setInt("u_skinnedTextures", 3);
-    m_geometry_shader->setInt("u_skinnedAlbedoLayer", -1); // terrain uses triplanar, not UV
-    m_geometry_shader->setInt("u_skinnedNormalLayer", -1);
+    shader->setInt("u_skinnedTextures", 3);
+    shader->setInt("u_skinnedAlbedoLayer", -1); // terrain uses triplanar, not UV
+    shader->setInt("u_skinnedNormalLayer", -1);
     // terrain PBR roughness-map: per-texel terrain roughness map (unit 4).
     glActiveTexture(GL_TEXTURE4);
     glBindTexture(GL_TEXTURE_2D_ARRAY,
                   ctx.terrain_roughness.id ? ctx.terrain_roughness.id : ctx.terrain_textures.id);
-    m_geometry_shader->setInt("u_terrainRoughness", 4);
-    m_geometry_shader->setInt("u_terrainRoughnessValid", ctx.terrain_roughness_valid);
-    m_geometry_shader->setInt("u_macroRockOverlay", 1); // terrain keeps the macro rock overlay
+    shader->setInt("u_terrainRoughness", 4);
+    shader->setInt("u_terrainRoughnessValid", ctx.terrain_roughness_valid);
+    shader->setInt("u_macroRockOverlay", 1); // terrain keeps the macro rock overlay
 
-    // live-terrain submit via the Codex-signed-off callback (wraps
+    // Live-terrain submit via the shared callback (wraps
     // CullHierarchical + draw_chunks_mdi exactly, byte-identical). It returns the
     // cull/draw/index counts; we fold them into the returned stats with the EXACT
     // current policy (terrain_visible_chunks '=', draws/indices '+=').
@@ -360,23 +458,27 @@ void GBufferPass::geometry_pass_chunks(const RenderContext& ctx,
     stats.terrain_draws += ts.draws;
     stats.terrain_indices += ts.indices;
 
-    // Far-LOD path uses the per-region model uniform: switch the shader back to
-    // the model-uniform origin path before it runs (it never sets this flag).
-    m_geometry_shader->setInt("u_useInstanceOrigin", 0);
-
     // Far-LOD region meshes AFTER the live chunks: same geometry
     // shader/material LUT (VoxelVertex layout is identical), region-AABB
     // frustum culling, depth-biased so overlapping live terrain wins. Far
     // draws stay inside the gbuffer GPU timer window; they are excluded from
     // the shadow cascades (ShadowPass never sees them).
-    if (input.far_lod) {
-        std::size_t far_draws = 0;
-        std::size_t far_indices = 0;
-        input.far_lod->draw_gbuffer(
-            *m_geometry_shader, view, frustum_planes, far_draws, far_indices);
-        stats.far_region_draws += far_draws;
-        stats.far_indices += far_indices;
-    }
+    // Scope resets the shared program after refusal, draw errors or exceptions.
+    FarWorldPassUniformScope ladder_uniform_reset(uniforms);
+    const auto far_stats = SubmitSelectedFarWorld(
+        input.far_selection,
+        [&] {
+            FarWorldSubmitStats result;
+            if (input.legacy_far)
+                input.legacy_far->draw_gbuffer(
+                    *shader, view, frustum_planes, result.draws, result.indices);
+            return result;
+        },
+        input.submit_ladder,
+        [&uniforms](const FarWorldDrawCommand& command) { return uniforms.Prepare(command); });
+    stats.far_region_draws += far_stats.draws;
+    stats.far_indices += far_stats.indices;
+    stats.far_water_indices += far_stats.water_indices;
 
     glBindVertexArray(0);
 }
@@ -463,45 +565,57 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
                                               const GBufferPassInput& input,
                                               entt::registry& registry,
                                               const Camera& camera,
-                                              const glm::vec4 (&frustum_planes)[6]) {
+                                              const glm::vec4 (&frustum_planes)[6],
+                                              GBufferDrawStats& stats) {
+    const auto& shader = instanced_static_mesh_shader(input.far_selection.effective);
+    auto& uniforms = input.far_selection.effective == FarWorldMode::Ladder
+                         ? m_static_ladder_uniforms
+                         : m_static_far_uniforms;
+
     const auto _sp_t0 = std::chrono::steady_clock::now(); // CPU submit cost
-    m_instanced_static_mesh_shader->use();
+    if (!ctx.frozen_replay)
+        m_last_static_prop_cpu_ms = 0.0;
+    if (!UseDrawProgram(shader.get(), stats))
+        return;
+    uniforms.Reset();
     const glm::mat4 static_view = camera.GetViewMatrix();
     const glm::vec2 static_taau_jit = ctx.taau_jitter_ndc; //  TAAU (0 when off)
-    glm::mat4 static_proj = ReversedZPerspective(glm::radians(camera.Zoom),
-                                                 (float)ctx.screen_width / (float)ctx.screen_height,
-                                                 camera.GetNearPlane(),
-                                                 camera.GetFarPlane());
-    static_proj[2][0] += static_taau_jit.x;
-    static_proj[2][1] += static_taau_jit.y;
-    m_instanced_static_mesh_shader->setMat4("projection", static_proj);
-    m_instanced_static_mesh_shader->setMat4("view", static_view);
-    m_instanced_static_mesh_shader->setMat4("u_prev_view_proj",
-                                            ctx.prev_view_proj); //  TAAU motion vectors
-    m_instanced_static_mesh_shader->setVec2(
-        "u_inv_screen_size",
-        glm::vec2(1.0f / (float)ctx.screen_width, 1.0f / (float)ctx.screen_height));
-    m_instanced_static_mesh_shader->setVec2("u_jitter_ndc", static_taau_jit);
-    m_instanced_static_mesh_shader->setFloat(
-        "u_lodBias", //  render-scale mip bias
-        ctx.screen_width > 0u ? std::log2((float)ctx.internal_w() / (float)ctx.screen_width)
-                              : 0.0f);
-    m_instanced_static_mesh_shader->setMat3("u_normalViewMatrix", glm::mat3(static_view));
+    glm::mat4 static_proj = ctx.gbuffer_projection;
+    if (!ctx.far_world_ladder) {
+        static_proj = ReversedZPerspective(glm::radians(camera.Zoom),
+                                           (float)ctx.screen_width / (float)ctx.screen_height,
+                                           camera.GetNearPlane(),
+                                           camera.GetFarPlane());
+        static_proj[2][0] += static_taau_jit.x;
+        static_proj[2][1] += static_taau_jit.y;
+    }
+    shader->setMat4("projection", static_proj);
+    shader->setMat4("view", static_view);
+    shader->setMat4("u_prev_view_proj",
+                    ctx.prev_view_proj); //  TAAU motion vectors
+    shader->setVec2("u_inv_screen_size",
+                    glm::vec2(1.0f / (float)ctx.screen_width, 1.0f / (float)ctx.screen_height));
+    shader->setVec2("u_jitter_ndc", static_taau_jit);
+    shader->setFloat("u_lodBias", //  render-scale mip bias
+                     ctx.screen_width > 0u
+                         ? std::log2((float)ctx.internal_w() / (float)ctx.screen_width)
+                         : 0.0f);
+    shader->setMat3("u_normalViewMatrix", glm::mat3(static_view));
     // Triplanar terrain arrays + LUT: a static mesh tagged with a
     // textured material id (e.g. grass props) reuses the terrain triplanar path.
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, ctx.material_lut.id);
-    m_instanced_static_mesh_shader->setInt("u_materialLUT", 0);
+    shader->setInt("u_materialLUT", 0);
     glActiveTexture(GL_TEXTURE1);
     glBindTexture(GL_TEXTURE_2D_ARRAY, ctx.terrain_textures.id);
-    m_instanced_static_mesh_shader->setInt("u_terrainTextures", 1);
+    shader->setInt("u_terrainTextures", 1);
     glActiveTexture(GL_TEXTURE2);
     glBindTexture(GL_TEXTURE_2D_ARRAY, ctx.terrain_normals.id);
-    m_instanced_static_mesh_shader->setInt("u_terrainNormals", 2);
+    shader->setInt("u_terrainNormals", 2);
     glActiveTexture(GL_TEXTURE3);
     glBindTexture(GL_TEXTURE_2D_ARRAY,
                   ctx.skinned_textures.id ? ctx.skinned_textures.id : ctx.terrain_textures.id);
-    m_instanced_static_mesh_shader->setInt("u_skinnedTextures", 3);
+    shader->setInt("u_skinnedTextures", 3);
     glActiveTexture(GL_TEXTURE5);
     glBindTexture(GL_TEXTURE_2D_ARRAY,
                   input.static_model_normal_array ? input.static_model_normal_array
@@ -510,33 +624,36 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
     glBindTexture(GL_TEXTURE_2D_ARRAY,
                   input.static_model_surface_array ? input.static_model_surface_array
                                                    : ctx.terrain_textures.id);
-    m_instanced_static_mesh_shader->setInt("u_skinnedAlbedoLayer", -1);
-    m_instanced_static_mesh_shader->setInt("u_skinnedNormalLayer", -1);
-    m_instanced_static_mesh_shader->setInt("u_alphaTest", 0); // Overridden per group below.
+    shader->setInt("u_skinnedAlbedoLayer", -1);
+    shader->setInt("u_skinnedNormalLayer", -1);
+    shader->setInt("u_alphaTest", 0); // Overridden per group below.
     // instanced foliage/props skip the terrain-only macro rock overlay (a per-fragment
     // vnoise + up to 3 triplanar samples) — a leaf/bark/bush card never wants rock texturing,
     // and the forest's heavy overdraw made this branch a top G-buffer cost. Terrain keeps it.
-    m_instanced_static_mesh_shader->setInt("u_macroRockOverlay", 0);
-    m_instanced_static_mesh_shader->setFloat("u_time",
-                                             ctx.time_seconds); //  wind (per-frame snapshot)
+    shader->setInt("u_macroRockOverlay", 0);
+    shader->setFloat("u_time",
+                     ctx.time_seconds); //  wind (per-frame snapshot)
     //  TAAU: prev-frame wind clock so the vert reconstructs each swayed vertex's PREVIOUS world
     // position -> the G-buffer motion vector tracks wind sway, not just camera motion (no tree-top
     // ghost).
-    m_instanced_static_mesh_shader->setFloat("u_prevTime", ctx.prev_time);
-    m_instanced_static_mesh_shader->setFloat("u_windStrength", 0.0f); // per-group override below
+    shader->setFloat("u_prevTime", ctx.prev_time);
+    shader->setFloat("u_windStrength", 0.0f); // per-group override below
     // terrain PBR roughness-map: per-texel terrain roughness map (unit 4) — g_buffer.frag is
     // shared, so every program using it must bind a valid array to unit 4.
     glActiveTexture(GL_TEXTURE4);
     glBindTexture(GL_TEXTURE_2D_ARRAY,
                   ctx.terrain_roughness.id ? ctx.terrain_roughness.id : ctx.terrain_textures.id);
-    m_instanced_static_mesh_shader->setInt("u_terrainRoughness", 4);
-    m_instanced_static_mesh_shader->setInt("u_terrainRoughnessValid", ctx.terrain_roughness_valid);
+    shader->setInt("u_terrainRoughness", 4);
+    shader->setInt("u_terrainRoughnessValid", ctx.terrain_roughness_valid);
     //  refresh the cached prop instance data only when the
     // static-mesh population changes (props are scattered once -> usually a no-op).
     {
         const std::size_t pop = registry.view<const Components::StaticMeshComponent>().size();
-        if (pop != m_staticPropCachePopulation)
+        if (pop != m_staticPropCachePopulation) {
+            if (ctx.frozen_replay)
+                throw std::logic_error("Replay cannot rebuild static residency");
             build_static_prop_cache(registry);
+        }
     }
     // groups carry the material id (per-group uniform). tree rendering: each
     // instance picks a LOD bucket from its camera distance (SelectTreeLod) and the
@@ -558,6 +675,8 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
     auto resolve_mesh = [&](const std::string& candidatePath,
                             const std::string& basePath) -> std::pair<Mesh*, std::string> {
         if (m_meshCache.find(candidatePath) == m_meshCache.end()) {
+            if (ctx.frozen_replay)
+                throw std::logic_error("Replay cannot change mesh residency");
             std::string full = (input.root_path / candidatePath).string();
             // Only load the LOD variant if it exists on disk; an absent.lodN.lmesh caches a
             // null and falls back to LOD0 SILENTLY (no MeshLoader "failed header" error spam).
@@ -569,6 +688,8 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
             return {m, candidatePath};
         if (candidatePath != basePath) {
             if (m_meshCache.find(basePath) == m_meshCache.end()) {
+                if (ctx.frozen_replay)
+                    throw std::logic_error("Replay cannot change mesh residency");
                 std::string full = (input.root_path / basePath).string();
                 m_meshCache[basePath] = MeshLoader::Load(full);
             }
@@ -671,7 +792,7 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
         Mesh* mesh = batch.mesh;
         if (!mesh || matrices.empty())
             continue;
-        m_instanced_static_mesh_shader->setInt("u_materialId", static_cast<int>(batch.materialId));
+        shader->setInt("u_materialId", static_cast<int>(batch.materialId));
         bool two_sided = false;
         //  static-model UV texture lane: if this mesh has registered bark/leaf
         // textures, bind the static-model array to unit 3 and set its albedo/normal
@@ -683,43 +804,41 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
             glActiveTexture(GL_TEXTURE3);
             if (smt && input.static_model_texture_array != 0) {
                 glBindTexture(GL_TEXTURE_2D_ARRAY, input.static_model_texture_array);
-                m_instanced_static_mesh_shader->setInt("u_skinnedAlbedoLayer", smt->albedoLayer);
-                m_instanced_static_mesh_shader->setInt("u_skinnedNormalLayer", smt->normalLayer);
-                m_instanced_static_mesh_shader->setInt("u_alphaTest", smt->alphaTest ? 3 : 0);
-                m_instanced_static_mesh_shader->setInt("u_staticNormalsBound", 1);
-                m_instanced_static_mesh_shader->setInt("u_staticSurfaceLayer", smt->surfaceLayer);
+                shader->setInt("u_skinnedAlbedoLayer", smt->albedoLayer);
+                shader->setInt("u_skinnedNormalLayer", smt->normalLayer);
+                shader->setInt("u_alphaTest", smt->alphaTest ? 3 : 0);
+                shader->setInt("u_staticNormalsBound", 1);
+                shader->setInt("u_staticSurfaceLayer", smt->surfaceLayer);
                 two_sided = smt->doubleSided;
-                m_instanced_static_mesh_shader->setInt("u_staticDoubleSided", two_sided ? 1 : 0);
-                m_instanced_static_mesh_shader->setFloat("u_staticMetallicFactor",
-                                                         smt->metallicFactor);
+                shader->setInt("u_staticDoubleSided", two_sided ? 1 : 0);
+                shader->setFloat("u_staticMetallicFactor", smt->metallicFactor);
                 // textured tree parts sway in the wind (rigid props stay at 0).
-                m_instanced_static_mesh_shader->setFloat("u_windStrength", 1.0f);
-                m_instanced_static_mesh_shader->setInt("u_forceFlat", 0);
+                shader->setFloat("u_windStrength", 1.0f);
+                shader->setInt("u_forceFlat", 0);
             } else {
                 glBindTexture(GL_TEXTURE_2D_ARRAY,
                               ctx.skinned_textures.id ? ctx.skinned_textures.id
                                                       : ctx.terrain_textures.id);
-                m_instanced_static_mesh_shader->setInt("u_skinnedAlbedoLayer", -1);
-                m_instanced_static_mesh_shader->setInt("u_skinnedNormalLayer", -1);
-                m_instanced_static_mesh_shader->setInt("u_staticNormalsBound", 0);
-                m_instanced_static_mesh_shader->setInt("u_staticDoubleSided", 0);
-                m_instanced_static_mesh_shader->setInt("u_staticSurfaceLayer", -1);
-                m_instanced_static_mesh_shader->setInt("u_alphaTest", 0);
+                shader->setInt("u_skinnedAlbedoLayer", -1);
+                shader->setInt("u_skinnedNormalLayer", -1);
+                shader->setInt("u_staticNormalsBound", 0);
+                shader->setInt("u_staticDoubleSided", 0);
+                shader->setInt("u_staticSurfaceLayer", -1);
+                shader->setInt("u_alphaTest", 0);
                 // VAST-FOREST: the procedural LEAF submeshes (no texture lane) still sway in the
                 // wind (height-scaled); bark/trunk + rigid props stay at 0. Keyed on the palette
                 // key suffix so only procgen leaves flutter.
                 const bool isLeaf = batch.basePath.size() >= 5 &&
                                     batch.basePath.rfind("_leaf") == batch.basePath.size() - 5;
-                m_instanced_static_mesh_shader->setInt("u_alphaTest", isLeaf ? 2 : 0);
+                shader->setInt("u_alphaTest", isLeaf ? 2 : 0);
                 two_sided = isLeaf;
-                m_instanced_static_mesh_shader->setFloat("u_windStrength", isLeaf ? 0.85f : 0.0f);
+                shader->setFloat("u_windStrength", isLeaf ? 0.85f : 0.0f);
                 // Leaves use the dedicated cutout material at every LOD. Other
                 // foliage retains its existing distant flat-material optimization;
                 // near bushes, bark, and rigid props keep terrain texturing.
                 const bool isBush = batch.basePath.find("procgen://bush_") != std::string::npos;
                 const bool isFarLod = batch.drawPath.find(".lod") != std::string::npos;
-                m_instanced_static_mesh_shader->setInt("u_forceFlat",
-                                                       ((isLeaf || isBush) && isFarLod) ? 1 : 0);
+                shader->setInt("u_forceFlat", ((isLeaf || isBush) && isFarLod) ? 1 : 0);
             }
         }
         if (two_sided || !cull_was_enabled)
@@ -731,6 +850,7 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
             const GLsizei instance_count = static_cast<GLsizei>(std::min<std::size_t>(
                 matrices.size() - offset, static_cast<std::size_t>(kStaticInstanceCapacity)));
             glBindVertexArray(mesh->vao);
+            PreserveReplayObject(ReplayObjectKind::VertexArray, mesh->vao);
             glBindBuffer(GL_ARRAY_BUFFER, m_instanceMatrixVBO);
             glBufferSubData(GL_ARRAY_BUFFER,
                             0,
@@ -769,8 +889,9 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
     // octahedral atlas into the same G-buffer attachments. ONE instanced draw + one shared atlas
     // for the whole far field (the draw-call/triangle collapse the forest_perf_budget gate
     // targets).
-    if (impostorsOn && !impostorInstances.empty() && m_tree_impostor_shader) {
-        m_tree_impostor_shader->use();
+    if (impostorsOn && !impostorInstances.empty()) {
+        if (!UseDrawProgram(m_tree_impostor_shader.get(), stats))
+            return;
         m_tree_impostor_shader->setMat4("u_view", static_view);
         m_tree_impostor_shader->setMat4("u_proj", static_proj);
         m_tree_impostor_shader->setVec3("u_cameraPos", cameraPos);
@@ -803,9 +924,10 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
             glEnable(GL_CULL_FACE);
     }
 
-    m_last_static_prop_cpu_ms =
-        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - _sp_t0)
-            .count();
+    if (!ctx.frozen_replay)
+        m_last_static_prop_cpu_ms =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - _sp_t0)
+                .count();
 }
 
 void GBufferPass::geometry_pass_skinned_meshes(const RenderContext& ctx,
@@ -814,6 +936,11 @@ void GBufferPass::geometry_pass_skinned_meshes(const RenderContext& ctx,
                                                const Camera& camera,
                                                const glm::vec4 (&frustum_planes)[6],
                                                GBufferDrawStats& stats) {
+    const auto& shader = skinned_mesh_shader(input.far_selection.effective);
+    auto& uniforms = input.far_selection.effective == FarWorldMode::Ladder
+                         ? m_skinned_ladder_uniforms
+                         : m_skinned_far_uniforms;
+
     namespace anim = luminumbra::animation;
     auto view = registry.view<const Components::TransformComponent,
                               const Components::SkinnedMeshComponent,
@@ -821,42 +948,42 @@ void GBufferPass::geometry_pass_skinned_meshes(const RenderContext& ctx,
     if (view.begin() == view.end()) {
         return;
     }
-    if (!m_skinned_mesh_shader || !m_skinned_mesh_shader->IsValid()) {
+    if (!UseDrawProgram(shader.get(), stats)) {
         return;
     }
-
-    m_skinned_mesh_shader->use();
+    uniforms.Reset();
     const glm::mat4 skinned_view = camera.GetViewMatrix();
     const glm::vec2 skinned_taau_jit = ctx.taau_jitter_ndc; //  TAAU (0 when off)
-    glm::mat4 skinned_proj =
-        ReversedZPerspective(glm::radians(camera.Zoom),
-                             (float)ctx.screen_width / (float)ctx.screen_height,
-                             camera.GetNearPlane(),
-                             camera.GetFarPlane());
-    skinned_proj[2][0] += skinned_taau_jit.x;
-    skinned_proj[2][1] += skinned_taau_jit.y;
-    m_skinned_mesh_shader->setMat4("projection", skinned_proj);
-    m_skinned_mesh_shader->setMat4("view", skinned_view);
-    m_skinned_mesh_shader->setMat4("u_prev_view_proj", ctx.prev_view_proj); //  TAAU motion vectors
-    m_skinned_mesh_shader->setVec2(
-        "u_inv_screen_size",
-        glm::vec2(1.0f / (float)ctx.screen_width, 1.0f / (float)ctx.screen_height));
-    m_skinned_mesh_shader->setVec2("u_jitter_ndc", skinned_taau_jit);
-    m_skinned_mesh_shader->setFloat(
-        "u_lodBias", //  render-scale mip bias
-        ctx.screen_width > 0u ? std::log2((float)ctx.internal_w() / (float)ctx.screen_width)
-                              : 0.0f);
-    m_skinned_mesh_shader->setMat3("u_normalViewMatrix", glm::mat3(skinned_view));
+    glm::mat4 skinned_proj = ctx.gbuffer_projection;
+    if (!ctx.far_world_ladder) {
+        skinned_proj = ReversedZPerspective(glm::radians(camera.Zoom),
+                                            (float)ctx.screen_width / (float)ctx.screen_height,
+                                            camera.GetNearPlane(),
+                                            camera.GetFarPlane());
+        skinned_proj[2][0] += skinned_taau_jit.x;
+        skinned_proj[2][1] += skinned_taau_jit.y;
+    }
+    shader->setMat4("projection", skinned_proj);
+    shader->setMat4("view", skinned_view);
+    shader->setMat4("u_prev_view_proj", ctx.prev_view_proj); //  TAAU motion vectors
+    shader->setVec2("u_inv_screen_size",
+                    glm::vec2(1.0f / (float)ctx.screen_width, 1.0f / (float)ctx.screen_height));
+    shader->setVec2("u_jitter_ndc", skinned_taau_jit);
+    shader->setFloat("u_lodBias", //  render-scale mip bias
+                     ctx.screen_width > 0u
+                         ? std::log2((float)ctx.internal_w() / (float)ctx.screen_width)
+                         : 0.0f);
+    shader->setMat3("u_normalViewMatrix", glm::mat3(skinned_view));
     // Triplanar terrain arrays + LUT.
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, ctx.material_lut.id);
-    m_skinned_mesh_shader->setInt("u_materialLUT", 0);
+    shader->setInt("u_materialLUT", 0);
     glActiveTexture(GL_TEXTURE1);
     glBindTexture(GL_TEXTURE_2D_ARRAY, ctx.terrain_textures.id);
-    m_skinned_mesh_shader->setInt("u_terrainTextures", 1);
+    shader->setInt("u_terrainTextures", 1);
     glActiveTexture(GL_TEXTURE2);
     glBindTexture(GL_TEXTURE_2D_ARRAY, ctx.terrain_normals.id);
-    m_skinned_mesh_shader->setInt("u_terrainNormals", 2);
+    shader->setInt("u_terrainNormals", 2);
     // UV-mapped skinned-mesh texture array on unit 3. Skinned creatures
     // take the UV-sampled path (precedence over the terrain LUT triplanar path).
     glActiveTexture(GL_TEXTURE3);
@@ -867,17 +994,15 @@ void GBufferPass::geometry_pass_skinned_meshes(const RenderContext& ctx,
     // layers below resolve to -1 in that case, so the fallback is never sampled.
     glBindTexture(GL_TEXTURE_2D_ARRAY,
                   ctx.skinned_textures.id ? ctx.skinned_textures.id : ctx.terrain_textures.id);
-    m_skinned_mesh_shader->setInt("u_skinnedTextures", 3);
-    m_skinned_mesh_shader->setInt("u_skinnedAlbedoLayer",
-                                  ctx.skinned_textures.id ? ctx.skinned_albedo_layer : -1);
-    m_skinned_mesh_shader->setInt("u_skinnedNormalLayer",
-                                  ctx.skinned_textures.id ? ctx.skinned_normal_layer : -1);
+    shader->setInt("u_skinnedTextures", 3);
+    shader->setInt("u_skinnedAlbedoLayer", ctx.skinned_textures.id ? ctx.skinned_albedo_layer : -1);
+    shader->setInt("u_skinnedNormalLayer", ctx.skinned_textures.id ? ctx.skinned_normal_layer : -1);
     // terrain PBR roughness-map: per-texel terrain roughness map (unit 4) — shared g_buffer.frag.
     glActiveTexture(GL_TEXTURE4);
     glBindTexture(GL_TEXTURE_2D_ARRAY,
                   ctx.terrain_roughness.id ? ctx.terrain_roughness.id : ctx.terrain_textures.id);
-    m_skinned_mesh_shader->setInt("u_terrainRoughness", 4);
-    m_skinned_mesh_shader->setInt("u_terrainRoughnessValid", ctx.terrain_roughness_valid);
+    shader->setInt("u_terrainRoughness", 4);
+    shader->setInt("u_terrainRoughnessValid", ctx.terrain_roughness_valid);
 
     for (auto entity : view) {
         auto const& transform = view.get<const Components::TransformComponent>(entity);
@@ -885,6 +1010,8 @@ void GBufferPass::geometry_pass_skinned_meshes(const RenderContext& ctx,
         auto const& player = view.get<const anim::AnimationPlayerComponent>(entity);
 
         if (m_skinnedMeshCache.find(mesh_info.meshPath) == m_skinnedMeshCache.end()) {
+            if (ctx.frozen_replay)
+                throw std::logic_error("Replay cannot change skinned residency");
             std::string full_mesh_path = (input.root_path / mesh_info.meshPath).string();
             m_skinnedMeshCache[mesh_info.meshPath] = MeshLoader::LoadSkinned(full_mesh_path);
         }
@@ -915,15 +1042,17 @@ void GBufferPass::geometry_pass_skinned_meshes(const RenderContext& ctx,
         glm::mat4 model = glm::translate(glm::mat4(1.0f), transform.position);
         model *= glm::mat4_cast(transform.rotation);
         model = glm::scale(model, transform.scale);
-        m_skinned_mesh_shader->setMat4("model", model);
-        m_skinned_mesh_shader->setInt("u_materialId", static_cast<int>(mesh_info.materialId));
+        shader->setMat4("model", model);
+        shader->setInt("u_materialId", static_cast<int>(mesh_info.materialId));
         //  per-creature albedo tint from the species base_color (white = no-op).
-        m_skinned_mesh_shader->setVec3(
-            "u_albedo_tint", glm::vec3(mesh_info.tintR, mesh_info.tintG, mesh_info.tintB));
+        shader->setVec3("u_albedo_tint",
+                        glm::vec3(mesh_info.tintR, mesh_info.tintG, mesh_info.tintB));
 
         const std::size_t palette_bytes = player.palette.size() * sizeof(float);
         glBindBuffer(GL_SHADER_STORAGE_BUFFER, m_jointPaletteSSBO);
         if (palette_bytes > m_jointPaletteSSBOCapacityBytes) {
+            if (ctx.frozen_replay)
+                throw std::logic_error("Replay cannot grow joint storage");
             m_jointPaletteSSBOCapacityBytes = palette_bytes;
             glBufferData(GL_SHADER_STORAGE_BUFFER,
                          static_cast<GLsizeiptr>(palette_bytes),

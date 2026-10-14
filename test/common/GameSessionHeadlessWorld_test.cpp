@@ -2,16 +2,22 @@
 // SIMULATION requirements only (world preset readable/parseable); renderer/UI
 // asset requirements are caller-supplied by the client. Headless CreateWorld
 // must succeed in a root containing nothing but the world preset.
+#include "../support/UniqueTempPath.h"
+
 #include <gtest/gtest.h>
 
 #include <algorithm>
-#include <chrono>
+#include <array>
+#include <cstdint>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <map>
+#include <span>
 #include <sstream>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "luminumbra_client/rendering/TimeOfDayModel.h"
@@ -35,6 +41,8 @@
 #include "luminumbra_common/scripting/LuaState.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 #include "luminumbra_common/world/Chunk.h"
+#include "luminumbra_common/world/FarAuthorityOverlay.h"
+#include "luminumbra_common/world/FarWantedSet.h"
 #include "luminumbra_common/world/GameSession.h"
 #include "luminumbra_common/world/WorldStreamingState.h"
 
@@ -62,9 +70,8 @@ fs::path SourcePresetPath() {
 class HeadlessRoot {
 public:
     HeadlessRoot() {
-        const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
         root_ =
-            fs::temp_directory_path() / ("luminumbra_headless_world_test_" + std::to_string(stamp));
+            Luminumbra::TestSupport::CreateUniqueTempDirectory("luminumbra_headless_world_test_");
         fs::create_directories(root_ / "worlds" / "atlas" / "presets");
         fs::copy_file(SourcePresetPath(), root_ / "worlds" / "atlas" / "presets" / "default.json");
     }
@@ -1508,14 +1515,28 @@ TEST(GameSessionHeadlessWorldTest, RegionScheduleAndWorldHashResumeAcrossBothHol
         EXPECT_TRUE(stage.empty());
 }
 
+static std::uint64_t Digest(const std::filesystem::path& save,
+                            Luminumbra::world::RegionKey key,
+                            std::vector<std::shared_ptr<Luminumbra::Chunk>> live,
+                            std::vector<std::shared_ptr<Luminumbra::Chunk>> parked = {}) {
+    return P::WorldSaveService::region_simulation_digest(
+        save, key, P::RegionDigestInputs{std::move(live), std::move(parked)});
+}
+
 TEST(GameSessionHeadlessWorldTest, RegionDigestMergesLiveAndDurableSimulationOnly) {
     const HeadlessRoot root;
+    // The content-v2 digest includes only authoritative edits. Keep the combined
+    // live/durable regression by marking every simulated durable fixture as edited.
     Luminumbra::WorldStreamingState durable;
     const auto old = durable.get_or_create_chunk({0, 0, 0});
     old->heightmap_data = {1.0f};
+    old->mark_voxel_data_dirty();
     const auto unloaded = durable.get_or_create_chunk({1, 0, 0});
     unloaded->heightmap_data = {2.0f};
-    durable.get_or_create_chunk({32, 0, 0})->heightmap_data = {3.0f};
+    unloaded->mark_voxel_data_dirty();
+    const auto other_region = durable.get_or_create_chunk({32, 0, 0});
+    other_region->heightmap_data = {3.0f};
+    other_region->mark_voxel_data_dirty();
     const auto save = root.path() / "digest";
     ASSERT_TRUE(P::WorldSaveService{}.save_world(durable, save));
     const auto live = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3(0, 0, 0));
@@ -1551,6 +1572,103 @@ TEST(GameSessionHeadlessWorldTest, RegionDigestMergesLiveAndDurableSimulationOnl
     EXPECT_NE(P::WorldSaveService::region_simulation_digest(save, {0, 0}, {live}), digest);
 }
 
+TEST(GameSessionHeadlessWorldTest, RegionDigestExcludesPristineAndLoadingChunks) {
+    const auto empty = Digest({}, {0, 0}, {});
+    const auto chunk = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3(0, 0, 0));
+    chunk->heightmap_data = {1.0f};
+    EXPECT_EQ(Digest({}, {0, 0}, {chunk}), empty);
+    chunk->heightmap_data = {2.0f};
+    EXPECT_EQ(Digest({}, {0, 0}, {chunk}), empty);
+    chunk->mark_voxel_data_dirty();
+    EXPECT_NE(Digest({}, {0, 0}, {chunk}), empty);
+    chunk->set_state(Luminumbra::ChunkState::Loading);
+    EXPECT_EQ(Digest({}, {0, 0}, {chunk}), empty);
+    const auto other = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3(32, 0, 0));
+    other->heightmap_data = {3.0f};
+    other->mark_voxel_data_dirty();
+    EXPECT_EQ(Digest({}, {0, 0}, {other}), empty);
+}
+
+TEST(GameSessionHeadlessWorldTest, RegionDigestIsIndependentOfResidencyAndSaveHistory) {
+    const HeadlessRoot root;
+    const auto x = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3(0, 0, 0));
+    x->heightmap_data = {4.0f};
+    x->mark_voxel_data_dirty();
+    const auto live_only = Digest({}, {0, 0}, {x});
+    EXPECT_EQ(Digest({}, {0, 0}, {}, {x}), live_only);
+    Luminumbra::WorldStreamingState durable;
+    const auto stored = durable.get_or_create_chunk({0, 0, 0});
+    stored->heightmap_data = {4.0f};
+    stored->mark_voxel_data_dirty();
+    const auto save = root.path() / "digest-history";
+    ASSERT_TRUE(P::WorldSaveService{}.save_world(durable, save));
+    EXPECT_EQ(Digest(save, {0, 0}, {}), live_only);
+    EXPECT_EQ(Digest(save, {0, 0}, {x}), live_only);
+    x->clear_voxel_data_dirty();
+    EXPECT_EQ(Digest(save, {0, 0}, {x}), live_only);
+    EXPECT_EQ(Digest({}, {0, 0}, {x}), live_only);
+    x->heightmap_data[0] = 5.0f;
+    EXPECT_NE(Digest({}, {0, 0}, {x}), live_only);
+}
+
+TEST(GameSessionHeadlessWorldTest, RegionDigestPriorityIsLiveThenParkedThenDurable) {
+    const HeadlessRoot root;
+    Luminumbra::WorldStreamingState durable;
+    const auto stored = durable.get_or_create_chunk({0, 0, 0});
+    stored->heightmap_data = {1.0f};
+    stored->mark_voxel_data_dirty();
+    const auto save = root.path() / "digest-priority";
+    ASSERT_TRUE(P::WorldSaveService{}.save_world(durable, save));
+    const auto parked = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3(0, 0, 0));
+    parked->heightmap_data = {2.0f};
+    parked->mark_voxel_data_dirty();
+    const auto live = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3(0, 0, 0));
+    live->heightmap_data = {3.0f};
+    live->mark_voxel_data_dirty();
+    EXPECT_EQ(Digest(save, {0, 0}, {live}, {parked}), Digest({}, {0, 0}, {live}));
+    EXPECT_EQ(Digest(save, {0, 0}, {}, {parked}), Digest({}, {0, 0}, {}, {parked}));
+    const auto durable_only = Digest(save, {0, 0}, {});
+    EXPECT_NE(Digest(save, {0, 0}, {}, {parked}), durable_only);
+    EXPECT_NE(Digest({}, {0, 0}, {live}), Digest({}, {0, 0}, {parked}));
+    EXPECT_NE(Digest({}, {0, 0}, {live}), durable_only);
+    EXPECT_NE(Digest({}, {0, 0}, {parked}), durable_only);
+}
+
+TEST(GameSessionHeadlessWorldTest, RegionDigestIgnoresUnflaggedDurableRecords) {
+    const HeadlessRoot root;
+    Luminumbra::WorldStreamingState durable;
+    durable.get_or_create_chunk({0, 0, 0})->heightmap_data = {1.0f};
+    const auto save = root.path() / "digest-unflagged";
+    ASSERT_TRUE(P::WorldSaveService{}.save_world(durable, save));
+    EXPECT_EQ(Digest(save, {0, 0}, {}), Digest({}, {0, 0}, {}));
+}
+
+TEST(GameSessionHeadlessWorldTest, RegionDigestIgnoresRenderAndResidencyState) {
+    const auto live = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3(0, 0, 0));
+    live->heightmap_data = {4.0f};
+    live->mark_voxel_data_dirty();
+    const auto digest = Digest({}, {0, 0}, {live});
+    live->mesh_vertices.resize(3);
+    live->mesh_indices = {2, 1, 0};
+    live->water_mesh_dirty_ticks = 29;
+    EXPECT_EQ(Digest({}, {0, 0}, {live}), digest);
+    for (const auto state : {Luminumbra::ChunkState::Meshing, Luminumbra::ChunkState::Ready}) {
+        live->set_state(state);
+        for (const bool collision : {true, false}) {
+            live->has_collision.store(collision);
+            EXPECT_EQ(Digest({}, {0, 0}, {live}), digest);
+        }
+    }
+    live->heightmap_data[0] = 5.0f;
+    EXPECT_NE(Digest({}, {0, 0}, {live}), digest);
+    live->heightmap_data[0] = 4.0f;
+    live->material_data = {1};
+    EXPECT_NE(Digest({}, {0, 0}, {live}), digest);
+    live->material_data.clear();
+    live->water_depth_mm = {1};
+    EXPECT_NE(Digest({}, {0, 0}, {live}), digest);
+}
+
 TEST(GameSessionHeadlessWorldTest, RegionDigestIgnoresLoadTimeCollisionNormalization) {
     const HeadlessRoot root;
     JobSystem jobs;
@@ -1568,16 +1686,15 @@ TEST(GameSessionHeadlessWorldTest, RegionDigestIgnoresLoadTimeCollisionNormaliza
     chunk->heightmap_data = {8.0f};
     chunk->mark_voxel_data_dirty();
     ASSERT_TRUE(session.GetWorldSystem()->adopt_streamed_chunk(chunk));
-    const auto digest = P::WorldSaveService::region_simulation_digest({}, {0, 0}, {chunk});
+    const auto digest = Digest({}, {0, 0}, {chunk});
     ASSERT_TRUE(session.SaveWorldState());
     ASSERT_TRUE(loaded.LoadWorld(session.GetMetadata().worldId));
     const auto chunks = loaded.GetWorldSystem()->snapshot_streamed_chunks();
     ASSERT_EQ(chunks.size(), 1u);
     EXPECT_FALSE(chunks.front()->has_collision.load());
     EXPECT_EQ(chunks.front()->get_state(), Luminumbra::ChunkState::Idle);
-    EXPECT_EQ(P::WorldSaveService::region_simulation_digest({}, {0, 0}, chunks), digest);
-    EXPECT_EQ(P::WorldSaveService::region_simulation_digest(session.GetWorldSaveDir(), {0, 0}, {}),
-              digest);
+    EXPECT_EQ(Digest({}, {0, 0}, chunks), digest);
+    EXPECT_EQ(Digest(session.GetWorldSaveDir(), {0, 0}, {}), digest);
 }
 
 TEST(GameSessionHeadlessWorldTest, FirstEnabledChunkSaveIncludesCleanResidentRegions) {
@@ -1695,6 +1812,107 @@ TEST(GameSessionHeadlessWorldTest, QueuedRegionWorkRefusesSaveUntilTickCompletes
     EXPECT_EQ(SessionWorldHash(loaded), SessionWorldHash(session));
 }
 
+TEST(GameSessionHeadlessWorldTest, IdleRetentionMatchesWorkAndAllResidentOwnership) {
+    using Luminumbra::world::ActiveRegionLedger;
+    using Luminumbra::world::RegionKey;
+    using Luminumbra::world::RegionWork;
+    using Luminumbra::world::WorldClock;
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    session.SetRootPath(root.root_string());
+    session.SetJobSystem(&jobs);
+    session.SetActiveRegionsEnabled(true);
+    ASSERT_TRUE(session.CreateWorld("Idle retention", "1337", "default"));
+    ASSERT_TRUE(session.SaveWorldState());
+
+    const RegionKey pending{40, -40}, duplicate{41, -40}, zero_count{42, -40};
+    const RegionKey resident{43, -40}, pristine{44, -40}, unowned{45, -40};
+    const RegionKey loading{46, -40}, pristine_loading{47, -40};
+    const std::array keys{
+        pending, duplicate, zero_count, resident, pristine, unowned, loading, pristine_loading};
+    ActiveRegionLedger staged;
+    staged.set_local_anchor(session.GetMetadata().spawnPoint);
+    for (const auto key : keys) {
+        staged.pin(key, true, WorldClock{});
+        staged.pin(key, false, WorldClock{});
+    }
+    // Stage just before retention without advancing thousands of simulation ticks.
+    const WorldClock before_idle(ActiveRegionLedger::kIdleEvictionTicks - 1);
+    staged.schedule(before_idle, std::span<const Luminumbra::Vec3>{});
+    const auto save = session.GetWorldSaveDir();
+    auto metadata = nlohmann::json::parse(ReadClockTestFile(save / "world_info.json"));
+    before_idle.write_metadata(metadata);
+    ASSERT_TRUE(
+        P::WorldSaveService::save_metadata_and_active_regions(metadata.dump(), staged, save));
+    ASSERT_TRUE(session.LoadWorldStateFrom(save)) << session.GetWorldOpenError();
+    ASSERT_EQ(session.GetActiveRegionLedger().records().size(), keys.size());
+    session.SetReplicatedSimulationAnchors({});
+
+    for (const auto key : {resident, pristine, loading, pristine_loading}) {
+        auto chunk =
+            std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3(key.x * 32, 0, key.z * 32));
+        chunk->set_state(key == loading || key == pristine_loading ? Luminumbra::ChunkState::Loading
+                                                                   : Luminumbra::ChunkState::Idle);
+        chunk->heightmap_data = {8.0f};
+        if (key == resident || key == loading)
+            chunk->mark_voxel_data_dirty();
+        ASSERT_TRUE(session.GetWorldSystem()->adopt_streamed_chunk(chunk));
+        // Adoption settles populated Loading chunks; explicitly exercise an in-flight resident.
+        if (key == loading || key == pristine_loading)
+            chunk->set_state(Luminumbra::ChunkState::Loading);
+        // Residency protects the record regardless of provenance or lifecycle state.
+        ASSERT_FALSE(session.GetActiveRegionLedger().records().at(key).edited);
+    }
+    const std::array work{RegionWork{pending, 3, 0, 0, 0},
+                          RegionWork{duplicate, 1, 0, 0, 0},
+                          RegionWork{duplicate, 2, 0, 0, 0},
+                          RegionWork{zero_count, 0, 0, 0, 0},
+                          RegionWork{zero_count, 0, 0, 0, 0}};
+    for (const auto& entry : work)
+        session.RecordActiveRegionWork(entry);
+    auto expected = session.GetActiveRegionLedger();
+    const std::array owned_keys{
+        pending, duplicate, zero_count, resident, pristine, loading, pristine_loading};
+    const auto expected_schedule = expected.schedule(
+        WorldClock(ActiveRegionLedger::kIdleEvictionTicks),
+        std::span<const Luminumbra::Vec3>{},
+        work,
+        {},
+        [&owned_keys](RegionKey key) {
+            return std::find(owned_keys.begin(), owned_keys.end(), key) != owned_keys.end();
+        });
+    const auto dt = session.GetSimulationClock().fixed_dt();
+    ASSERT_EQ(session.TickSimulation(dt), 1u);
+    ASSERT_FALSE(session.GetRegionSchedulerFault());
+    EXPECT_EQ(session.GetRegionSchedule(), expected_schedule);
+    EXPECT_EQ(session.GetActiveRegionLedger().canonical_bytes(), expected.canonical_bytes());
+    EXPECT_EQ(session.GetActiveRegionLedger().encode(), expected.encode());
+    ASSERT_EQ(session.GetActiveRegionLedger().records().size(), owned_keys.size());
+    for (const auto key : owned_keys)
+        EXPECT_TRUE(session.GetActiveRegionLedger().records().contains(key));
+    EXPECT_FALSE(session.GetActiveRegionLedger().records().contains(unowned));
+
+    // Consumed work must stop owning records on the next scheduling call.
+    const auto next_schedule = expected.schedule(
+        WorldClock(ActiveRegionLedger::kIdleEvictionTicks + 1),
+        std::span<const Luminumbra::Vec3>{},
+        {},
+        {},
+        [resident, pristine, loading, pristine_loading](RegionKey key) {
+            return key == resident || key == pristine || key == loading || key == pristine_loading;
+        });
+    ASSERT_EQ(session.TickSimulation(dt), 1u);
+    ASSERT_FALSE(session.GetRegionSchedulerFault());
+    EXPECT_EQ(session.GetRegionSchedule(), next_schedule);
+    EXPECT_EQ(session.GetActiveRegionLedger().canonical_bytes(), expected.canonical_bytes());
+    EXPECT_EQ(session.GetActiveRegionLedger().encode(), expected.encode());
+    ASSERT_EQ(session.GetActiveRegionLedger().records().size(), 4u);
+    for (const auto key : {resident, pristine, loading, pristine_loading})
+        EXPECT_TRUE(session.GetActiveRegionLedger().records().contains(key));
+}
+
 TEST(GameSessionHeadlessWorldTest, WalkingAnchorSurvivesNoclipAndReloadWithoutCameraInputs) {
     const HeadlessRoot root;
     JobSystem jobs;
@@ -1749,7 +1967,10 @@ TEST(GameSessionHeadlessWorldTest, LedgerFileAbsenceCorruptionFutureAndDisabledR
     ASSERT_TRUE(P::WorldSaveService::validate_save(save));
     for (const bool future : {false, true}) {
         auto bytes = good;
-        bytes[future ? 4 : 8] ^= future ? 3 : 1;
+        if (future)
+            bytes[4] = 3;
+        else
+            bytes[8] ^= 1;
         std::ofstream(path, std::ios::binary) << bytes;
         std::vector<std::string> errors;
         EXPECT_FALSE(P::WorldSaveService::validate_save(save, &errors));
@@ -1838,4 +2059,223 @@ TEST(GameSessionHeadlessWorldTest, ReplayScheduleCompanionRoundTripsAndRefusesIn
     EXPECT_FALSE(ReadRegionScheduleTrace(path, 2, restored, error));
     EXPECT_EQ(error, "Unsupported future region schedule trace version.");
     EXPECT_FALSE(WriteRegionScheduleTrace(path, {{2, "0123456789abcdef"}}, error));
+}
+
+TEST(GameSessionHeadlessWorldTest, InvalidHostInputsNeverThrowAndAreCounted) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    session.SetRootPath(root.root_string());
+    session.SetJobSystem(&jobs);
+    session.SetActiveRegionsEnabled(true);
+    session.SetRegionSchedulerConfig({0, 2, 1});
+    ASSERT_TRUE(session.CreateTransientWorld("Invalid inputs", "1337", "default"));
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    const float inf = std::numeric_limits<float>::infinity();
+    EXPECT_NO_THROW(session.SetLocalPlayerSimulationPosition(Luminumbra::Vec3(nan, 0, 0), true));
+    EXPECT_NO_THROW(session.NotifyGroundObjectEdit(Luminumbra::Vec3(inf, 0, 0)));
+    EXPECT_NO_THROW(session.PinActiveRegion({40000, 0}, true));
+    EXPECT_EQ(session.GetRegionInputRejections().anchors, 1u);
+    EXPECT_EQ(session.GetRegionInputRejections().edits, 1u);
+    EXPECT_EQ(session.GetRegionInputRejections().pins, 1u);
+    EXPECT_FALSE(session.GetRegionSchedulerFault().has_value());
+    EXPECT_TRUE(session.GetActiveRegionLedger().records().empty());
+    session.SetReplicatedSimulationAnchors(
+        {Luminumbra::Vec3(nan, 0, 0), Luminumbra::Vec3(256, 0, 256)});
+    ASSERT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 1u);
+    EXPECT_EQ(session.GetRegionSchedule().rejected.anchors, 1u);
+    EXPECT_FALSE(session.GetRegionSchedulerFault().has_value());
+    EXPECT_EQ(session.GetActiveRegionLedger().records().count({0, 0}), 1u);
+    const Luminumbra::Vec3 walking(256, 0, 256);
+    session.SetLocalPlayerSimulationPosition(walking, true);
+    session.SetLocalPlayerSimulationPosition(Luminumbra::Vec3(nan, 0, 0), true);
+    EXPECT_EQ(session.GetActiveRegionLedger().local_anchor(),
+              std::optional<Luminumbra::Vec3>(walking));
+    EXPECT_EQ(session.GetRegionInputRejections().anchors, 2u);
+}
+
+namespace {
+constexpr Luminumbra::world::RegionKey kFaultRegion{40, -40};
+
+// Arms a scheduler fault at tick k. The pinned far region gets work over the
+// limit on ticks k-1 and k: Active->Reduced at k-1, then Reduced->Frozen at k,
+// where the durable digest provider reads the corrupt region file and throws.
+void ArmSchedulerFault(GameSession& session,
+                       const HeadlessRoot& root,
+                       JobSystem& jobs,
+                       std::uint64_t k) {
+    session.SetRootPath(root.root_string());
+    session.SetJobSystem(&jobs);
+    session.SetActiveRegionsEnabled(true);
+    session.SetRegionSchedulerConfig({1, 1, 1});
+    ASSERT_TRUE(session.CreateWorld("Scheduler fault", "1337", "default"));
+    session.PinActiveRegion(kFaultRegion, true);
+    const auto region = P::WorldSaveService::region_file_path(
+        session.GetWorldSaveDir(), kFaultRegion.x, kFaultRegion.z);
+    fs::create_directories(region.parent_path());
+    std::ofstream(region, std::ios::binary) << "not a region file";
+    session.GetSimulationEventBus().subscribe([&session, k](const auto& event) {
+        if (event.tick == k || event.tick == k - 1)
+            session.RecordActiveRegionWork({kFaultRegion, 5, 0, 0, 0});
+    });
+    for (std::uint64_t t = 1; t <= k + 1; ++t)
+        session.GetSimulationEventBus().publish(t, "work", "");
+}
+
+// The corrupt durable file only exists to make the digest provider throw. A
+// save validates every region file, so restore a clean miss before saving.
+void RemoveFaultRegionFile(const GameSession& session) {
+    std::error_code error;
+    fs::remove(P::WorldSaveService::region_file_path(
+                   session.GetWorldSaveDir(), kFaultRegion.x, kFaultRegion.z),
+               error);
+}
+
+// The session clock produces at most two ticks per frame. Single-tick frames run
+// ticks 1..start-1, then one two-tick frame starts at tick `start` (k or k-1), so
+// the fault lands on the first or the second tick of that frame.
+void RunSchedulerFaultCase(std::uint64_t k, std::uint64_t start) {
+    SCOPED_TRACE("k=" + std::to_string(k) + " start=" + std::to_string(start));
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session, loaded;
+    ASSERT_NO_FATAL_FAILURE(ArmSchedulerFault(session, root, jobs, k));
+    loaded.SetRootPath(root.root_string());
+    loaded.SetJobSystem(&jobs);
+    loaded.SetActiveRegionsEnabled(true);
+    loaded.SetRegionSchedulerConfig({1, 1, 1});
+    const auto dt = session.GetSimulationClock().fixed_dt();
+    for (std::uint64_t t = 1; t < start; ++t)
+        ASSERT_EQ(session.TickSimulation(dt), 1u);
+    ASSERT_FALSE(session.GetRegionSchedulerFault().has_value());
+    // Half a tick of slack keeps the clock from rounding the frame down. A fault
+    // on the first tick of the frame stops the second tick from running.
+    ASSERT_EQ(session.TickSimulation(2.5 * dt), k - start + 1);
+    const auto fault = session.GetRegionSchedulerFault();
+    ASSERT_TRUE(fault.has_value());
+    if (fault.has_value()) {
+        const auto snapshot = fault.value();
+        EXPECT_EQ(snapshot.tick, k);
+        EXPECT_FALSE(snapshot.message.empty());
+    }
+    EXPECT_EQ(session.GetSimulationTickCount(), k);
+    EXPECT_LT(session.GetActiveRegionLedger().tick(), k);
+    EXPECT_EQ(session.GetActiveRegionLedger().header_tick(), k);
+    EXPECT_TRUE(session.IsSimulationTickBoundary());
+    EXPECT_EQ(session.TickSimulation(dt), 0u);
+    EXPECT_EQ(session.GetSimulationTickCount(), k);
+    const auto save = session.GetWorldSaveDir();
+    RemoveFaultRegionFile(session);
+    ASSERT_TRUE(session.SaveWorldState());
+    ASSERT_TRUE(session.SaveWorld());
+    ASSERT_TRUE(P::WorldSaveService::validate_save(save));
+    ASSERT_TRUE(loaded.LoadWorld(session.GetMetadata().worldId));
+    EXPECT_EQ(loaded.GetSimulationTickCount(), k);
+    EXPECT_FALSE(loaded.GetRegionSchedulerFault().has_value());
+    EXPECT_EQ(SessionWorldHash(loaded), SessionWorldHash(session));
+}
+} // namespace
+
+TEST(GameSessionHeadlessWorldTest, SchedulerFaultStopsTheFrameAndLeavesASavableConsistentSession) {
+    for (const auto [k, start] : {std::pair<std::uint64_t, std::uint64_t>{3, 3},
+                                  std::pair<std::uint64_t, std::uint64_t>{3, 2},
+                                  std::pair<std::uint64_t, std::uint64_t>{4, 4}}) {
+        ASSERT_NO_FATAL_FAILURE(RunSchedulerFaultCase(k, start));
+    }
+}
+
+TEST(GameSessionHeadlessWorldTest, ThrowingDigestProviderWithQueuedWorkLeavesNoStaleWork) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    ASSERT_NO_FATAL_FAILURE(ArmSchedulerFault(session, root, jobs, 3));
+    const auto dt = session.GetSimulationClock().fixed_dt();
+    ASSERT_EQ(session.TickSimulation(dt), 1u);
+    ASSERT_EQ(session.TickSimulation(dt), 1u);
+    ASSERT_EQ(session.TickSimulation(2.5 * dt), 1u);
+    ASSERT_TRUE(session.GetRegionSchedulerFault().has_value());
+    session.RecordActiveRegionWork({kFaultRegion, 5, 0, 0, 0});
+    EXPECT_TRUE(session.IsSimulationTickBoundary());
+    EXPECT_EQ(session.TickSimulation(dt), 0u);
+    EXPECT_TRUE(session.IsSimulationTickBoundary());
+    RemoveFaultRegionFile(session);
+    EXPECT_TRUE(session.SaveWorldState());
+}
+
+TEST(GameSessionHeadlessWorldTest, CorruptLedgerLoadClearsTheWorld) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession owner, victim;
+    for (auto* s : {&owner, &victim}) {
+        s->SetRootPath(root.root_string());
+        s->SetJobSystem(&jobs);
+        s->SetActiveRegionsEnabled(true);
+    }
+    ASSERT_TRUE(owner.CreateWorld("Corrupt ledger", "1337", "default"));
+    ASSERT_EQ(owner.TickSimulation(owner.GetSimulationClock().fixed_dt()), 1u);
+    auto chunk = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3(0, 0, 0));
+    chunk->set_state(Luminumbra::ChunkState::Meshing);
+    chunk->heightmap_data = {8.0f};
+    chunk->mark_voxel_data_dirty();
+    ASSERT_TRUE(owner.GetWorldSystem()->adopt_streamed_chunk(chunk));
+    ASSERT_TRUE(owner.SaveWorldState());
+    const auto save = owner.GetWorldSaveDir();
+    const auto path = P::WorldSaveService::active_regions_path(save);
+    auto bytes = ReadClockTestFile(path);
+    bytes[8] ^= 1;
+    std::ofstream(path, std::ios::binary) << bytes;
+    ASSERT_TRUE(victim.CreateWorld("Victim", "2", "default"));
+    auto resident = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3(0, 0, 0));
+    resident->set_state(Luminumbra::ChunkState::Meshing);
+    resident->heightmap_data = {9.0f};
+    resident->mark_voxel_data_dirty();
+    ASSERT_TRUE(victim.GetWorldSystem()->adopt_streamed_chunk(resident));
+    ASSERT_FALSE(victim.GetWorldSystem()->snapshot_streamed_chunks().empty());
+    EXPECT_FALSE(victim.LoadWorldStateFrom(save));
+    EXPECT_TRUE(victim.GetWorldSystem()->snapshot_streamed_chunks().empty());
+    EXPECT_EQ(victim.GetWorldOpenError(), Luminumbra::world::ActiveRegionLedger::kCorruptMessage);
+}
+
+TEST(GameSessionHeadlessWorldTest, FarOverlayFilesDoNotChangeTheWorldHash) {
+    using Luminumbra::World::FarBrickState;
+    using Luminumbra::World::FarOverlayBrick;
+    using Luminumbra::World::FarOverlayTile;
+    using Luminumbra::World::FarTileKey;
+
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession original, loaded, reloaded;
+    for (auto* session : {&original, &loaded, &reloaded}) {
+        session->SetRootPath(root.root_string());
+        session->SetJobSystem(&jobs);
+    }
+    ASSERT_TRUE(original.CreateWorld("Far overlay", "1337", "default"));
+    ASSERT_TRUE(original.SaveWorldState());
+    const auto save = original.GetWorldSaveDir();
+    const auto before = SessionWorldHash(original);
+
+    FarOverlayTile near_tile;
+    near_tile.key = FarTileKey{1, 0, 0};
+    near_tile.generation = 1;
+    near_tile.bricks.push_back(FarOverlayBrick{0, 0, 0, FarBrickState::HomogeneousAir});
+    FarOverlayTile coarse_tile;
+    coarse_tile.key = FarTileKey{3, -1, -1};
+    coarse_tile.generation = 1;
+    coarse_tile.bricks.push_back(FarOverlayBrick{-32, 1, -32, FarBrickState::HomogeneousSolid});
+    ASSERT_TRUE(Luminumbra::World::WriteFarOverlay(save, near_tile));
+    ASSERT_TRUE(Luminumbra::World::WriteFarOverlay(save, coarse_tile));
+    ASSERT_TRUE(P::WorldSaveService::validate_save(save));
+    ASSERT_TRUE(Luminumbra::World::ValidateFarOverlayDirectory(save));
+
+    ASSERT_TRUE(loaded.LoadWorld(original.GetMetadata().worldId)) << loaded.GetWorldOpenError();
+    EXPECT_EQ(SessionWorldHash(loaded), before);
+
+    fs::remove_all(save / "far");
+    ASSERT_TRUE(reloaded.LoadWorld(original.GetMetadata().worldId)) << reloaded.GetWorldOpenError();
+    EXPECT_EQ(SessionWorldHash(reloaded), before);
 }

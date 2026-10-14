@@ -1,9 +1,10 @@
 #include "luminumbra_client/app/GameAssets.h"
 
+#include "../support/UniqueTempPath.h"
+
 #include <gtest/gtest.h>
 #include <nlohmann/json.hpp>
 
-#include <chrono>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -15,13 +16,11 @@ using namespace Luminumbra::Client::App;
 
 class GameAssets : public ::testing::Test {
 protected:
-    fs::path root = fs::temp_directory_path() /
-                    ("luminumbra-game-assets-" +
-                     std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    fs::path root;
     nlohmann::json manifest;
 
     void SetUp() override {
-        fs::create_directories(root);
+        root = Luminumbra::TestSupport::CreateUniqueTempDirectory("luminumbra-game-assets-");
     }
     void TearDown() override {
         std::error_code error;

@@ -55,6 +55,8 @@ void DebugViewPass::execute(const RenderContext& ctx) {
     const float far_plane = ctx.camera ? ctx.camera->GetFarPlane() : 4000.0f;
 
     m_shader->use();
+    m_shader->setInt("u_farWorldLadder", ctx.far_world_ladder ? 1 : 0);
+    m_shader->setMat4("u_gbufferInverseProjection", ctx.gbuffer_inverse_projection);
     m_shader->setInt("u_mode", m_mode);
     m_shader->setFloat("u_near", near_plane);
     m_shader->setFloat("u_far", far_plane);

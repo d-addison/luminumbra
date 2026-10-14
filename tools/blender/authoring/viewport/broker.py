@@ -11,7 +11,7 @@ import threading
 import time
 
 from protocol import (CAPACITY, Refusal, Slots, StateGate, atomic_write, canonical,
-                      encode, match_frame, open_record_reader, read_record, require, safe_path,
+                      encode, match_frame, open_record_reader, read_readiness, read_record, require, safe_path,
                       validation_backend, write_record)
 
 
@@ -29,7 +29,7 @@ def mailbox(path, key):
 
 class Broker:
     def __init__(self, root, key, session, command, executable_sha256, project_root,
-                 deadline=60.0):
+                 deadline=60.0, startup_deadline=60.0):
         self.root, self.key, self.session = safe_path(root), key, session
         self.project_root = safe_path(project_root)
         require(self.project_root.is_dir(), 'Project root')
@@ -37,7 +37,9 @@ class Broker:
         executable = safe_path(command[0])
         require(hashlib.sha256(executable.read_bytes()).hexdigest() == executable_sha256, 'Executable pin')
         require(0 < deadline <= 60, 'Deadline')
+        require(0 < startup_deadline <= 60, 'Startup deadline')
         self.command, self.deadline = command, deadline
+        self.startup_deadline = startup_deadline
         self.gate = StateGate(session)
         self.slots = Slots(root, key, session, create=True)
         self.child = None
@@ -48,6 +50,7 @@ class Broker:
         self.reader_eof = False
         self.errors = []
         self.stderr_tail = bytearray()
+        self.host_ready = None
 
     def _stderr(self):
         # Drain continuously so diagnostics cannot deadlock the renderer. Retain
@@ -98,20 +101,32 @@ class Broker:
             return None
         return self.gate.accept(header)
 
+    def _publish_readiness(self):
+        marker = read_readiness(self.root / 'host-ready.json', self.session, pid=self.child.pid)
+        if marker is not None:
+            require(self.child.poll() is None, 'Ready host already exited')
+            atomic_write(self.root / 'broker-ready.json', canonical({
+                **marker, 'broker_pid': os.getpid()}))
+            self.host_ready = marker
+
     def run(self):
         env = os.environ.copy()
         env['LUMINUMBRA_VIEWPORT_KEY'] = self.key.hex()
         env['LUMINUMBRA_VIEWPORT_PROJECT'] = str(self.project_root)
+        env['LUMINUMBRA_VIEWPORT_SESSION'] = self.session
+        env['LUMINUMBRA_VIEWPORT_READY'] = str(self.root / 'host-ready.json')
         pending = active = completed = None
         shutdown = None
         started = outstanding = None
         published = dropped = 0
         stopped = False
+        failure = None
         try:
             # Own the process before starting either reader: Thread.start may
             # fail after Popen succeeds and must still reap the child.
             self.child = subprocess.Popen(self.command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                           stderr=subprocess.PIPE, env=env, bufsize=0, shell=False)
+            startup_started = time.monotonic()
             self.reader = threading.Thread(target=self._read, daemon=True)
             self.reader.start()
             self.stderr_reader = threading.Thread(target=self._stderr, daemon=True)
@@ -146,12 +161,20 @@ class Broker:
                     if completed is not None:
                         completed = None
                         dropped += 1
+                require(not self.errors and self.child.poll() is None, 'Host disconnected or invalid response')
+                if shutdown is None and self.host_ready is None:
+                    # Frame slots are allocated before Popen; they prove nothing
+                    # about installed renderer initialization. Never renew this
+                    # deadline when desired-state mailboxes are coalesced.
+                    require(time.monotonic() - startup_started < self.startup_deadline,
+                            'Host startup deadline')
+                    self._publish_readiness()
                 if shutdown is None and outstanding is not None:
                     # One delivery deadline survives coalescing and lease retries.
                     # A desired-state flood cannot keep an unpublished session alive.
                     require(time.monotonic() - outstanding < self.deadline,
                             'Frame publication deadline')
-                if active is None and pending is not None:
+                if self.host_ready is not None and active is None and pending is not None:
                     active, pending = pending, None
                     # Small writes happen in a separate thread with the same render deadline.
                     started = time.monotonic()
@@ -184,6 +207,9 @@ class Broker:
                 if active:
                     require(not self.writer_error and time.monotonic() - started < self.deadline, 'Host deadline/write')
                 time.sleep(0.01)
+        except BaseException as error:
+            failure = {'type': type(error).__name__, 'error': str(error)[:512]}
+            raise
         finally:
             if self.child is not None:
                 if self.child.poll() is None:
@@ -201,6 +227,9 @@ class Broker:
                 self.child.stderr.close()
             atomic_write(self.root / 'broker-result.json', canonical({
                 'session': self.session, 'status': 'stopped' if stopped else 'failed',
+                'broker_pid': os.getpid(),
+                'child_pid': self.child.pid if self.child else None,
+                'host_ready': self.host_ready, 'failure': failure,
                 'last_sequence': self.gate.last['sequence'] if self.gate.last else None,
                 'published': published, 'dropped': dropped,
                 'child_returncode': self.child.returncode if self.child else None,

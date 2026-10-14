@@ -1,0 +1,56 @@
+{
+  "passed": true,
+  "job_sha256": "fb9902cb7879adace606bd0f9b5e67dacba8d94ca233c28b682191c10ae79520",
+  "source_commit": "8822fda41e6be1fd389407d4067e339cfe48cd42",
+  "steps": [
+    {
+      "name": "client",
+      "argv": [
+        "C:/msys64/ucrt64/bin/python.exe",
+        "-B",
+        "<build-root>/authoring-isolated/campaign-20260913/viewport-blender/test/viewport/probe_windows_client.py",
+        "--receipt",
+        "<temp-root>/client.json"
+      ],
+      "passed": true,
+      "pid": 40460,
+      "exit_code": 0,
+      "reaped": true,
+      "seconds": 14.578999999997905,
+      "receipt_sha256": "e9e420d179693491bc2df1edff08747ff30a8fb691cb41cb04702ea76da6a171"
+    },
+    {
+      "name": "presentation",
+      "argv": [
+        "C:/Program Files/Blender Foundation/Blender 5.1/blender.exe",
+        "--factory-startup",
+        "--disable-autoexec",
+        "--gpu-backend",
+        "opengl",
+        "--threads",
+        "2",
+        "--window-geometry",
+        "0",
+        "0",
+        "1400",
+        "900",
+        "--python-exit-code",
+        "1",
+        "--python",
+        "<build-root>\\authoring-isolated\\campaign-20260913\\viewport-blender-native-source-v3\\tools\\blender\\authoring\\extension_tests\\native_viewport_presentation.py",
+        "--",
+        "--modules",
+        "<build-root>/authoring-isolated/campaign-20260913/viewport-blender/tools/blender/authoring/extension",
+        "--output",
+        "<temp-root>/presentation"
+      ],
+      "passed": true,
+      "pid": 9412,
+      "exit_code": 0,
+      "reaped": true,
+      "seconds": 7.405999999995402,
+      "receipt_sha256": "779a63d0ae40b2dfb2096b8c7e49d4b757e4fd64ca763910934668643e7076db"
+    }
+  ],
+  "visual_approved": false
+}

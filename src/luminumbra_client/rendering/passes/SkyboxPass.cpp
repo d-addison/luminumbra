@@ -392,7 +392,9 @@ void SkyboxPass::execute_weather_overlay(const RenderContext& ctx,
     m_weather_shader->setFloat("u_time", ctx.time_seconds);
     m_weather_shader->setVec3("u_cameraPos", camera.Position);
     m_weather_shader->setMat4("u_inverseView", glm::inverse(camera.GetViewMatrix()));
-    m_weather_shader->setMat4("u_inverseProjection", glm::inverse(projection));
+    m_weather_shader->setMat4("u_inverseProjection",
+                              ctx.far_world_ladder ? ctx.gbuffer_inverse_projection
+                                                   : glm::inverse(projection));
     // Weather fog scattering follows the lighting-pass convention (the
     // light-travel direction), unlike the skybox disc uniforms above.
     m_weather_shader->setVec3("u_sunDirection", ctx.sun.direction);

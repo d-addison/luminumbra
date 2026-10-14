@@ -391,12 +391,23 @@ class ProcessRunnerTests(MatrixTestBase):
         self.assertTrue(self.retained.is_file())
 
     def test_timeout_raises_and_receipt_shows_timed_out(self):
-        command = self.script('import time\ntime.sleep(30)\n')
-        with self.assertRaises(subprocess.TimeoutExpired):
+        command = self.script('import time\n'
+                              'print("x" * 20000, flush=True)\n'
+                              'print("EnsureSurfaceReadyNear: draining", flush=True)\n'
+                              'time.sleep(30)\n')
+        diagnostic = io.StringIO()
+        with contextlib.redirect_stderr(diagnostic), \
+                self.assertRaises(subprocess.TimeoutExpired):
             self.run_case(command, timeout_seconds=1)
         receipt = self.read_receipt()
         self.assertEqual(receipt['outcome'], 'timed_out')
         self.assertEqual(receipt['timeout_seconds'], 1)
+        self.assertEqual(receipt['last_observed_phase'],
+                         'EnsureSurfaceReadyNear: draining')
+        self.assertEqual(len(receipt['log_tail'].encode('utf-8')),
+                         runner.TIMEOUT_LOG_TAIL_BYTES)
+        self.assertIn('timed out after 1 s', diagnostic.getvalue())
+        self.assertIn('EnsureSurfaceReadyNear: draining', diagnostic.getvalue())
 
     def test_nonzero_exit_code_recorded(self):
         command = self.script('import sys\nfrom pathlib import Path\n'

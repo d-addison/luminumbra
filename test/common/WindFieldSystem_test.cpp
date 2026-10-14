@@ -84,8 +84,8 @@ TEST(AmbientNoiseDispatch, FractalAndSimplexMatchTerrainCeiling) {
     fractal->SetOctaveCount(2);
     reference->SetOctaveCount(2);
 
-    // Full AVX-512-width arrays keep this dispatch test independent of the
-    // separate short-position-array padding defect in WindFieldSystem::Update.
+    // Full AVX-512-width arrays keep this dispatch test independent of tail padding; the
+    // padding of real call sites is covered by AmbientInputBounds.
     std::array<float, 16> x{}, z{}, actual{}, expected{};
     for (std::size_t i = 0; i < x.size(); ++i) {
         x[i] = (static_cast<float>(i) - 7.5f) * 0.375f;

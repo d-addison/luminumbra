@@ -28,6 +28,8 @@ out VS_OUT {
     flat uint MaterialID;
     vec3 Tint;         // per-instance tint (skinned: white = no-op, matches g_buffer.frag VS_OUT)
     vec3 PrevWorldPos; //  TAAU: camera-reprojected (prev-bone-palette skinning is a implementation note)
+    vec3 FarRelativeWorldPos; // interface match; unused outside ladder terrain
+    vec3 FarTileLocalPos; // unbiased stored vertex position, before camera subtraction
 } vs_out;
 
 uniform mat4 model;
@@ -63,6 +65,8 @@ void main()
 
     vs_out.MaterialID = uint(u_materialId);
     vs_out.Tint = vec3(1.0);  // skinned meshes are never per-instance tinted
+    vs_out.FarRelativeWorldPos = vec3(0.0);
+    vs_out.FarTileLocalPos = vec3(0.0);
 
     gl_Position = projection * viewPos;
 }

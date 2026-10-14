@@ -1,5 +1,5 @@
 ﻿{
-  "_comment": "SystemConfig defaults. Every system is off so an unconfigured world keeps the canonical world hash and visual baseline. sim.* may change authoritative state and is hashed when enabled; render.* is render-only and excluded from hashes.",
+  "_comment": "SystemConfig defaults. Far-world Ladder is requested by default; other system defaults below are unchanged. sim.* may change authoritative state and is hashed when enabled; render.* is render-only and excluded from hashes.",
   "sim": {
     "plant_growth": { "enabled": false, "params": { "mutation_rate": 0.05 } },
     "erosion": { "enabled": false },
@@ -44,6 +44,8 @@
     "_active_regions_comment": "Persistent active regions and the absolute simulation clock. The engine default is OFF and this file deliberately does not restate it: an explicit entry is a value the engine reads, so it would change the performance fixture hash even though the disabled feature changes no behaviour. The real entry lands with the activation change that turns the feature on, where a new performance baseline is genuinely warranted. Enabling it restores the absolute tick across save and load, unifies the calendar, and deliberately changes the world hash."
   },
   "render": {
+    "_far_world_ladder_comment": "Ladder is the default request, including with missing config. Set enabled:false to explicitly request Legacy. Binding refusals retain effective Legacy and visible diagnostics; user.* overlays do not override this flag.",
+    "far_world_ladder": { "enabled": true },
     "moonlight": { "enabled": false, "params": { "strength": 0.0, "color": [0.6, 0.7, 1.0] } },
     "tree_wind": { "enabled": false },
     "plant_procgen": { "enabled": true },

@@ -1,4 +1,5 @@
 #include "FroxelPass.h"
+#include "../FarWorldReplay.h"
 
 #include "../FroxelGrid.h"
 #include "../ShaderReflection.h"
@@ -43,6 +44,8 @@ bool FroxelPass::execute_inject(const RenderContext& ctx, const std::filesystem:
         return true;
     }
     if (m_inject_program == 0) {
+        if (ctx.frozen_replay)
+            return false;
         // Lazy init: both kernels + both 3D volumes, together.
         auto load_comp = [&](const char* rel) -> GLuint {
             std::ifstream file(std::filesystem::path(root_path) / rel);
@@ -86,6 +89,7 @@ bool FroxelPass::execute_inject(const RenderContext& ctx, const std::filesystem:
         m_integrated_tex = make_volume("froxel.integrated");
     }
 
+    PreserveReplayObject(ReplayObjectKind::Program, m_inject_program);
     glUseProgram(m_inject_program);
     glBindImageTexture(0, m_scatter_tex, 0, GL_TRUE, 0, GL_WRITE_ONLY, GL_RGBA16F);
     glActiveTexture(GL_TEXTURE0);
@@ -140,6 +144,7 @@ void FroxelPass::execute_integrate(const RenderContext& ctx) {
     if (ctx.volumetric_quality <= 0 || m_integrate_program == 0) {
         return;
     }
+    PreserveReplayObject(ReplayObjectKind::Program, m_integrate_program);
     glUseProgram(m_integrate_program);
     glBindImageTexture(0, m_scatter_tex, 0, GL_TRUE, 0, GL_READ_ONLY, GL_RGBA16F);
     glBindImageTexture(1, m_integrated_tex, 0, GL_TRUE, 0, GL_WRITE_ONLY, GL_RGBA16F);

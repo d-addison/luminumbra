@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -74,6 +75,44 @@ def _retain_process_evidence(receipt, artifact, retained, receipt_path):
     return errors
 
 
+TIMEOUT_LOG_TAIL_BYTES = 8 * 1024
+SURFACE_READY_PHASE = re.compile(r'EnsureSurfaceReadyNear[:/]')
+
+
+def _report_timeout(receipt, log):
+    truncated = False
+    try:
+        with log.open('rb') as source:
+            source.seek(0, os.SEEK_END)
+            offset = max(0, source.tell() - TIMEOUT_LOG_TAIL_BYTES)
+            truncated = offset > 0
+            source.seek(offset)
+            payload = source.read(TIMEOUT_LOG_TAIL_BYTES)
+    except OSError as error:
+        payload = b''
+        receipt['evidence_errors'].append(f'timeout log read: {error}')
+    tail = payload.decode('utf-8', errors='replace')
+    # Phase discovery is limited to the retained raw-byte window. Its first
+    # line may be a fragment, so it cannot establish a complete phase record.
+    complete_lines = tail.splitlines(keepends=True)
+    if truncated:
+        complete_lines = complete_lines[1:]
+    complete_lines = [line for line in complete_lines if line.endswith('\n')]
+    phases = [line for line in complete_lines
+              if SURFACE_READY_PHASE.search(line)]
+    last_phase = phases[-1].strip() if phases else None
+    receipt.update(log_tail=tail, last_observed_phase=last_phase)
+    # Diagnostics are best effort: a closed or failing stderr must not replace
+    # the TimeoutExpired or prevent receipt retention.
+    try:
+        print(f"render runner: timed out after {receipt['timeout_seconds']} s", file=sys.stderr)
+        print(tail, file=sys.stderr)
+        print('last EnsureSurfaceReadyNear phase: ' + (last_phase or '(none observed)'),
+              file=sys.stderr)
+    except (OSError, ValueError):
+        pass
+
+
 def _run_process(command, *, cwd, environment, log, artifact, retained, receipt_path):
     # Retire only this case's exact outputs, including a repeated invocation in
     # the same runtime root. Never let an earlier capture appear current.
@@ -99,7 +138,11 @@ def _run_process(command, *, cwd, environment, log, artifact, retained, receipt_
         receipt.update(outcome='timed_out' if isinstance(error, subprocess.TimeoutExpired)
                        else receipt['outcome'], exception_type=type(error).__name__,
                        exception_message=str(error))
-        _retain_process_evidence(receipt, artifact, retained, receipt_path)
+        try:
+            if isinstance(error, subprocess.TimeoutExpired):
+                _report_timeout(receipt, log)
+        finally:
+            _retain_process_evidence(receipt, artifact, retained, receipt_path)
         raise
     errors = _retain_process_evidence(receipt, artifact, retained, receipt_path)
     return result, errors
