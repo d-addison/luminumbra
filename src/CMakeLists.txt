@@ -87,25 +87,6 @@ target_link_libraries(luminumbra_server_app PRIVATE
 # First-party hygiene (warnings-as-errors per the build preset).
 luminumbra_configure_first_party_target(luminumbra_server_app)
 
-# when the Steamworks transport is built in, the redistributable steam_api64.dll
-# must sit next to the server exe at runtime. Copy it post-build.
-if(LUMINUMBRA_ENABLE_STEAM AND WIN32)
-    add_custom_command(TARGET luminumbra_server_app POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${LUMINUMBRA_STEAM_SDK_DIR}/redistributable_bin/win64/steam_api64.dll"
-            "$<TARGET_FILE_DIR:luminumbra_server_app>/steam_api64.dll"
-        COMMENT "Copying steam_api64.dll next to luminumbra_server_app")
-elseif(LUMINUMBRA_ENABLE_STEAM AND UNIX AND NOT APPLE)
-    # mirror of the win64 copy: the linux64 redistributable is a shared object the
-    # loader must find next to the exe (the link references the SDK path, the
-    # runtime should not).
-    add_custom_command(TARGET luminumbra_server_app POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${LUMINUMBRA_STEAM_SDK_DIR}/redistributable_bin/linux64/libsteam_api.so"
-            "$<TARGET_FILE_DIR:luminumbra_server_app>/libsteam_api.so"
-        COMMENT "Copying libsteam_api.so next to luminumbra_server_app")
-endif()
-
 # --- Client Executables ---
 # Two binaries share the main_client.cpp entry TU:
 #   luminumbra_client_app     - the shipping interactive client. Links ONLY
@@ -149,3 +130,11 @@ foreach(CLIENT_EXE_TARGET IN ITEMS luminumbra_client_app luminumbra_client_qa_ap
         target_link_libraries(${CLIENT_EXE_TARGET} PRIVATE OpenGL::GL)
     endif()
 endforeach()
+
+# Optional networking runtimes must sit beside every application executable.
+if(LUMINUMBRA_ENABLE_GNS OR LUMINUMBRA_ENABLE_STEAM)
+    include("${CMAKE_SOURCE_DIR}/cmake/networking_runtime.cmake")
+    foreach(APP_TARGET IN ITEMS luminumbra_server_app luminumbra_client_app luminumbra_client_qa_app)
+        luminumbra_copy_networking_runtime(${APP_TARGET})
+    endforeach()
+endif()

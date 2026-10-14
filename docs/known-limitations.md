@@ -64,6 +64,44 @@ rosters should not be confused with missing simulation wiring.
 
 ## Networking
 
+- **Networking backends are mutually exclusive.** Both options default to OFF.
+  Use `LUMINUMBRA_ENABLE_GNS=ON` with `LUMINUMBRA_ENABLE_STEAM=OFF` for local/LAN
+  play, and `LUMINUMBRA_ENABLE_STEAM=ON` with `LUMINUMBRA_ENABLE_GNS=OFF` for Steam
+  qualification. Enabling both is a configuration error; dual-backend support
+  is future work. Keep separate build directories for the two configurations.
+
+  GNS uses CONFIG packages for `Protobuf` and `absl`, preserving protobuf's
+  transitive dependencies and `PROTOBUF_USE_DLLS`. Linux distribution packages
+  without a protobuf CONFIG file use CMake's module fallback for the compile
+  probe. Both `USE_CRYPTO` and `USE_CRYPTO25519` default to `OpenSSL` as cache
+  values that can be overridden; the OpenSSL Crypto component is required.
+  The pinned GNS build requests a static library and disables shared libraries,
+  tests and examples. Its installed dependencies may still be shared libraries.
+
+  Windows post-build steps stage networking DLLs beside the server, client and
+  QA client executables. Both GNS and Steam scan each executable and supplemental
+  DLLs with `file(GET_RUNTIME_DEPENDENCIES)` on every supported CMake version
+  (3.20 and newer). On 3.21 and newer, CMake's target runtime DLL list supplies
+  additional inputs; all inputs and resolved DLLs are deduplicated.
+  MSYS2 imported targets can omit DLL locations and transitive runtime imports,
+  so the GNS UCRT64 build also explicitly copies `libprotobuf.dll`,
+  `libutf8_validity.dll`, `zlib1.dll`, `libcrypto-3-x64.dll`, every
+  `libabsl_*-2505.0.0.dll`, `libgcc_s_seh-1.dll`, `libstdc++-6.dll` and
+  `libwinpthread-1.dll`. Package bin directories are derived from protobuf/absl
+  CONFIG locations and the OpenSSL library prefix, with the configured compiler
+  bin directory as fallback. The scan also searches package bin directories
+  derived from CONFIG and imported-target locations, including OpenSSL targets
+  without DLL metadata. Both backends search the configured compiler's bin
+  directory, so Steam's UCRT64 closure also includes `libstdc++-6.dll`,
+  `libgcc_s_seh-1.dll` and `libwinpthread-1.dll` when imported. Windows system
+  directories and `api-ms-*`/`ext-ms-*` imports are excluded. Unresolved non-system
+  imports fail the post-build step with their names and search directories;
+  missing explicitly required GNS DLLs fail configuration. Steam requires both
+  `steam_api64.lib` and `steam_api64.dll` in the SDK's `redistributable_bin/win64`
+  directory, which is also searched by the scan; its DLL is an additional input.
+  These staging steps cover build-tree previews; release packaging still needs
+  runtime deployment.
+
 - **The Steamworks transport is not compiled or exercised in CI.** The
   GameNetworkingSockets (GNS) CI lane builds `luminumbra_common`, including the
   shared `NetSocketsTransport`, against pinned redistributable upstream source.
@@ -82,7 +120,7 @@ rosters should not be confused with missing simulation wiring.
   path with the SDK root containing `public/steam/steam_api.h`):
 
   ```sh
-  cmake --preset debug -DLUMINUMBRA_ENABLE_STEAM=ON \
+  cmake --preset debug -DLUMINUMBRA_ENABLE_STEAM=ON -DLUMINUMBRA_ENABLE_GNS=OFF \
     -DLUMINUMBRA_STEAM_SDK_DIR=/absolute/path/to/steamworks/sdk
   cmake --build --preset debug
   ctest --preset debug --output-on-failure -LE manual
