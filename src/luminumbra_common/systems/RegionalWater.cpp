@@ -337,7 +337,7 @@ std::int64_t DepthSum(const Chunk& chunk) {
     return sum;
 }
 
-std::int64_t WaterVolume(const Chunk& chunk) {
+std::int64_t WaterVolume(const Chunk& chunk, std::int64_t depth_sum) {
     if (!chunk.has_water_sim.load())
         return 0;
     const auto resolution = static_cast<std::int64_t>(chunk.current_water_resolution.load());
@@ -345,7 +345,7 @@ std::int64_t WaterVolume(const Chunk& chunk) {
     // participant union by 2^20 chunks, so all whole-plan volume totals fit i64.
     const auto cell_area =
         4 * static_cast<std::int64_t>(CHUNK_SIZE_X) * CHUNK_SIZE_Z / (resolution * resolution);
-    return DepthSum(chunk) * cell_area;
+    return depth_sum * cell_area;
 }
 
 std::int32_t RoundedWaterMm(double value, bool depth) {
@@ -536,8 +536,9 @@ void WaterSystem::UpdateRegional(entt::registry& registry,
     // The union includes border-only participants and counts preparation/source deltas explicitly.
     std::int64_t before = 0, after = 0, injected = 0;
     for (const auto& [id, chunk] : staged) {
-        before += DepthSum(*chunk);
-        result.volume_before_qmm += WaterVolume(*chunk);
+        const auto depth = DepthSum(*chunk);
+        before += depth;
+        result.volume_before_qmm += WaterVolume(*chunk, depth);
         (void)id;
     }
     for (const auto id : selected) {
@@ -545,10 +546,11 @@ void WaterSystem::UpdateRegional(entt::registry& registry,
         const auto& entry = snapshot.at(id);
         if (entry.preparation) {
             const auto prior = DepthSum(chunk);
-            const auto prior_volume = WaterVolume(chunk);
+            const auto prior_volume = WaterVolume(chunk, prior);
             PrepareRegionalGrid(chunk);
-            result.preparation_mm += DepthSum(chunk) - prior;
-            result.preparation_volume_qmm += WaterVolume(chunk) - prior_volume;
+            const auto prepared = DepthSum(chunk);
+            result.preparation_mm += prepared - prior;
+            result.preparation_volume_qmm += WaterVolume(chunk, prepared) - prior_volume;
         }
         chunk.is_water_sleeping.store(false);
         for (const auto& source : sources) {
@@ -581,8 +583,9 @@ void WaterSystem::UpdateRegional(entt::registry& registry,
     }
     for (const auto& [id, chunk] : staged) {
         ValidateWater(*chunk);
-        after += DepthSum(*chunk);
-        result.volume_after_qmm += WaterVolume(*chunk);
+        const auto depth = DepthSum(*chunk);
+        after += depth;
+        result.volume_after_qmm += WaterVolume(*chunk, depth);
         (void)id;
     }
     const auto area_q = static_cast<std::int64_t>(4 * CHUNK_SIZE_X * CHUNK_SIZE_Z) /

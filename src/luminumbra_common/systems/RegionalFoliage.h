@@ -45,15 +45,25 @@ public:
     static constexpr auto absent = std::numeric_limits<std::size_t>::max();
     explicit FlatFoliageCells(const FoliageFieldPages& pages) {
         cells.reserve(pages.pages().size() * 256);
-        for (const auto& [key, page] : pages.pages())
-            for (unsigned i = 0; i < 256; ++i)
-                if ((page.mask[i / 64] >> (i % 64)) & 1)
-                    cells.emplace_back(ScentCellKey{key.x * 16 + static_cast<int>(i % 16),
-                                                    key.z * 16 + static_cast<int>(i / 16)},
-                                       page.cells[i]);
-        std::sort(cells.begin(), cells.end(), [](const auto& a, const auto& b) {
-            return a.first < b.first;
-        });
+        // Pages are ordered by (x,z). Expand each page column's local X before
+        // its ascending page/local Z to emit the exact cell-key order directly.
+        // Masks may be sparse, and negative page coordinates need no special case.
+        const auto& stored = pages.pages();
+        for (auto column = stored.begin(); column != stored.end();) {
+            auto next = column;
+            while (next != stored.end() && next->first.x == column->first.x)
+                ++next;
+            for (int x = 0; x < 16; ++x)
+                for (auto page = column; page != next; ++page)
+                    for (int z = 0; z < 16; ++z) {
+                        const auto i = static_cast<unsigned>(z * 16 + x);
+                        if ((page->second.mask[i / 64] >> (i % 64)) & 1)
+                            cells.emplace_back(
+                                ScentCellKey{page->first.x * 16 + x, page->first.z * 16 + z},
+                                page->second.cells[i]);
+                    }
+            column = next;
+        }
     }
     auto begin() {
         return cells.begin();
@@ -93,17 +103,23 @@ public:
     // Positive and negative neighbours retain the original -X,+X,-Z,+Z order.
     std::vector<std::array<std::size_t, 4>> interior_neighbors() const {
         std::vector<std::array<std::size_t, 4>> result(cells.size());
+        // Translating sorted keys by a fixed offset leaves them sorted. Each
+        // neighbour cursor therefore advances at most cells.size() times; this
+        // replaces four binary searches per cell with four linear merge walks.
+        std::array<std::size_t, 4> cursors{};
         for (std::size_t i = 0; i < cells.size(); ++i) {
             const auto c = cells[i].first;
             const auto owner = FieldPageState::region_of_scent_cell(c);
             const ScentCellKey adjacent[] = {
                 {c.x - 1, c.z}, {c.x + 1, c.z}, {c.x, c.z - 1}, {c.x, c.z + 1}};
             for (std::size_t n = 0; n < 4; ++n) {
-                const auto it = find(adjacent[n]);
-                result[i][n] =
-                    it != end() && FieldPageState::region_of_scent_cell(adjacent[n]) == owner
-                        ? static_cast<std::size_t>(it - begin())
-                        : absent;
+                auto& cursor = cursors[n];
+                while (cursor < cells.size() && cells[cursor].first < adjacent[n])
+                    ++cursor;
+                result[i][n] = cursor < cells.size() && cells[cursor].first == adjacent[n] &&
+                                       FieldPageState::region_of_scent_cell(adjacent[n]) == owner
+                                   ? cursor
+                                   : absent;
             }
         }
         return result;
@@ -272,9 +288,12 @@ ExchangeFoliageBorders(FieldPageState& pages,
             continue;
         for (const auto n : {ScentCellKey{c.x + 1, c.z}, ScentCellKey{c.x, c.z + 1}}) {
             const auto other = FieldPageState::region_of_scent_cell(n);
+            // Interior edges never participate in this pass. Avoid resolving a
+            // second ledger record for every interior cell of every page.
+            if (owner == other)
+                continue;
             const auto b = records.find(other);
-            if (owner == other || !prior.contains(n) || b == records.end() ||
-                b->second.state == RegionState::Frozen)
+            if (!prior.contains(n) || b == records.end() || b->second.state == RegionState::Frozen)
                 continue;
             const auto shift = std::max(a->second.cadence_shift, b->second.cadence_shift);
             if (tick % (std::uint64_t{1} << shift))

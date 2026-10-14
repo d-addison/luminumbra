@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <iterator>
 #include <map>
 #include <optional>
 #include <stdexcept>
@@ -74,6 +75,36 @@ TEST(FoliageFieldPages, HalfOpenWorldBoundsAndRefusalAreAtomic) {
 
 namespace {
 using namespace luminumbra::foliage;
+TEST(FoliageFieldPages, LinearSnapshotsAndNeighborsMatchSparseCellMap) {
+    FoliageFieldPages pages;
+    // Partial masks, multiple Z pages in each X column, owner boundaries and
+    // both world limits exercise ordering independently of evolution values.
+    for (const int x : {-16777216, -513, -512, -17, -16, -1, 0, 15, 16, 511, 512, 16777215})
+        for (const int z : {-16777216, -513, -512, -17, -16, -1, 0, 15, 16, 511, 512, 16777215})
+            if ((x % 3) != (z % 3))
+                ASSERT_TRUE(pages.set({x, z}, 123, 1000000));
+    const FlatFoliageCells flat(pages);
+    const auto reference = FoliageCells(pages);
+    const std::vector<FlatFoliageCells::Cell> expected(reference.begin(), reference.end());
+    ASSERT_EQ(flat.cells, expected);
+    const auto neighbors = flat.interior_neighbors();
+    ASSERT_EQ(neighbors.size(), expected.size());
+    for (std::size_t i = 0; i < expected.size(); ++i) {
+        const auto c = expected[i].first;
+        const ScentCellKey adjacent[] = {
+            {c.x - 1, c.z}, {c.x + 1, c.z}, {c.x, c.z - 1}, {c.x, c.z + 1}};
+        for (std::size_t n = 0; n < 4; ++n) {
+            const auto found = reference.find(adjacent[n]);
+            const auto index =
+                found != reference.end() && FieldPageState::region_of_scent_cell(adjacent[n]) ==
+                                                FieldPageState::region_of_scent_cell(c)
+                    ? static_cast<std::size_t>(std::distance(reference.begin(), found))
+                    : FlatFoliageCells::absent;
+            EXPECT_EQ(neighbors[i][n], index);
+        }
+    }
+    EXPECT_TRUE(FlatFoliageCells(FoliageFieldPages{}).interior_neighbors().empty());
+}
 // Node-based scalar oracle retains sealed map copies and per-neighbour lookups.
 inline std::map<RegionKey, std::uint64_t>
 ReferenceFoliageInteriors(entt::registry& reg,
