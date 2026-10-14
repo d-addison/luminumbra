@@ -596,8 +596,8 @@ public:
     // never had (cross-run FLIP floors at ~0.057 noise; --smoke never renders). The
     //  execution migration compares old-vs-new dispatch paths through this same
     // entry point. Writes frame_parity_{a,b}.ppm + frame_parity.json under out_dir.
-    // Returns false on GL/IO error, TAAU-on (history ping-pong breaks idempotence — Codex
-    // ), or a nonzero score.
+    // Returns false on GL/IO error, TAAU-on (history ping-pong breaks idempotence),
+    // or a nonzero score.
     bool capture_frame_parity(const Camera& camera, const std::filesystem::path& out_dir);
     // / closure gate: render the same prepared frame at native scale twice
     // (the scale-1 seam must be bit-exact), then at 0.67 internal scale and compare the
@@ -1769,7 +1769,7 @@ private:
     void draw_chunks_mdi(const std::vector<const ChunkCullEntry*>& visible_chunks,
                          std::size_t& out_draws,
                          std::size_t& out_indices);
-    //  (Codex-signed-off terrain-submit seam): a callback wrapping the
+    // Terrain-submit seam: a callback wrapping the
     // pipeline-owned CullHierarchical + draw_chunks_mdi, shared by GBuffer + Shadow
     // so neither needs friend access for terrain submission. Returns counts; the
     // caller folds them into pass stats.

@@ -58,33 +58,54 @@ scheduled runs, and manual dispatches never save caches. When a PR closes,
 `cache-cleanup.yml` deletes caches scoped to its `refs/pull/<n>/merge` ref without
 checking out PR code.
 
+Blocking clang-tidy analysis runs in three path-hash shards on standard Ubuntu
+runners, each with a 60-minute timeout. Together they analyse every configured
+first-party translation unit and its headers on every merged tip; pushes use
+`writeonly` caching and never skip analysis. PRs restore only their matching
+shard's cache. The required `Static analysis / clang-tidy` check aggregates the
+shards and passes only when all three succeed. Both the shards and the aggregate
+check skip draft pull requests. Local `scripts/tidy.sh` still analyses the full
+scope by default; `--shard INDEX/COUNT` selects one stable partition.
+
 Draft pull requests run the cheap routine checks: changed-file formatting, public
 tree inventory, runner contracts, Doxygen, game assets, and the authoring mock
 (subject to its existing paths filter). Linux/GCC, ASan, Windows/MSVC,
 Windows/UCRT64, clang-tidy, GNS, Diligent RHI, preview-frame, and the paired server
-comparison skip draft pull requests. The separate path-filtered UCRT package
-attribution diagnostic keeps its existing job routing.
+comparison do no heavy work on draft pull requests. Linux/GCC, ASan, and
+preview-frame start with a lightweight guard that fails drafts before checkout or
+dependency installation; the other heavy jobs skip drafts. The separate
+path-filtered UCRT package attribution diagnostic keeps its existing job routing.
 
-Marking a pull request ready for review triggers CI on its current head, running
-the full required set. PR workflows listen for `opened`, `synchronize`, `reopened`,
-and `ready_for_review`; existing branch and path filters still apply. Heavy
-required checks report skipped on drafts, and GitHub can treat skipped checks as
-successful. GitHub does not allow draft PRs to merge. Marking the PR ready reruns
-every required job on the same head; the new check runs supersede the skipped
-ones. Maintainers must not merge until the `ready_for_review` run's required
-checks are green on the current head, and must wait again after any head update.
-This repository does not implement a separate merge gate. The external campaign
-gate (`campaign_control.py land`, outside this repository) accepts only actual
-`SUCCESS` for required checks on the exact head. No additional job runs on draft
-pushes to enforce this policy. Windows/UCRT64 keeps its existing branch/manual
-routing, and the paired server comparison still runs only for main-bound ready
-PRs or eligible main/devel pushes.
+Draft pull requests cannot merge. GitHub does not allow draft PRs to merge and
+may report jobs skipped by a condition as successful, so a draft skip alone does
+not block required checks. The guards keep the existing `Linux / GCC`,
+`Linux / GCC ASan`, and `Preview frame / software OpenGL` check names and report
+failure on drafts. Their failure prevents a draft head from satisfying all
+required checks, including immediately after marking it ready while the new
+runs are pending. For PR events, they can turn green only after a non-draft run
+completes their full build/test or measurement lane. No new required-check
+configuration is needed.
+
+Marking a pull request ready for review triggers the full checks on its current
+head. The CI, AddressSanitizer, and performance workflows listen for `opened`,
+`synchronize`, `reopened`, `ready_for_review`, and `converted_to_draft`; existing
+branch and path filters still apply. Maintainers must not merge until the
+`ready_for_review` run's required checks are green on the current head, and must
+wait again after any head update. This repository does not implement a separate
+merge gate. The external campaign gate (`campaign_control.py land`, outside this
+repository) additionally requires actual `SUCCESS` for every required check on
+the exact head and rejects `SKIPPED` checks; routed skips are not evidence that a
+required lane passed. No additional job runs on draft pushes to enforce this
+policy; the guards use existing required jobs. Windows/UCRT64 keeps its existing
+branch/manual routing, and the paired server comparison still runs only for
+main-bound ready PRs or eligible main/devel pushes.
 
 Workflows with concurrency groups key PR runs by ref and cancel superseded runs,
-so a `ready_for_review` run cancels an earlier draft run on the same PR ref. Devel
-pushes keep separate SHA-keyed groups with cancellation disabled. Push, schedule,
-manual dispatch (including qualification capture), and release behavior is
-unchanged.
+so a `ready_for_review` run cancels an earlier draft run on the same PR ref, and
+`converted_to_draft` cancels an in-flight ready run and prevents new heavy work.
+Devel pushes keep separate SHA-keyed groups with cancellation disabled. Push,
+schedule, manual dispatch (including qualification capture), and release behavior
+is unchanged.
 
 Ready pull requests run:
 
@@ -92,14 +113,17 @@ Ready pull requests run:
 - optimized MSVC builds and tests on Windows;
 - optimized GCC/UCRT64 builds and tests on Windows;
 - Clang AddressSanitizer builds and tests on Ubuntu;
-- blocking clang-tidy analysis and GNS and Diligent RHI probes;
+- blocking clang-tidy shards with an aggregated required check, and GNS and
+  Diligent RHI probes;
 - changed-file formatting checks;
 - Doxygen parsing with warnings treated as errors; and
 - an explicitly observational software-OpenGL performance capture.
 
 CTest produces JUnit and runtime artifacts. CI verifies a minimum discovered-test
-count so an empty or severely truncated suite cannot report success. Sanitizer and
-test artifacts are uploaded even on failure to support diagnosis.
+count so an empty or severely truncated suite cannot report success. Once a
+non-draft test or sanitizer lane runs, its sanitizer and test artifacts are uploaded
+even on failure to support diagnosis. The draft guard failures described above stop
+before checkout and upload no artifacts.
 
 `WorldgenProbeSmoke` validates the `luminumbra.worldgen_probe.v1` smoke report
 with seed `424242` and spawn `(8, terrain height + 1.95, 8)`. Valid evidence requires

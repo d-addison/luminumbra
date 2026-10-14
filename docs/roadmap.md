@@ -24,7 +24,7 @@ There are no assigned due dates or invented completion percentages.
   passes the actual MSYS Git/UCRT Python path-disagreement cases. Ambient SIMD
   [#172](https://github.com/d-addison/luminumbra/pull/172), tracked by
   [#163](https://github.com/d-addison/luminumbra/issues/163), passes actual Linux
-  and native UCRT Debug/Release controls at `e1080d7f`. Actual selected-ISA
+  and native UCRT Debug/Release controls. Actual selected-ISA
   evidence and failing original-dispatch controls preserve each configuration's
   established goldens. Active-region
   [#161](https://github.com/d-addison/luminumbra/pull/161) has been refreshed against
@@ -34,16 +34,10 @@ There are no assigned due dates or invented completion percentages.
   wind input-padding defect is tracked by [#173](https://github.com/d-addison/luminumbra/issues/173).
   The September 13 promotion UCRT job passed 2,245 of 2,250 cases at its recorded merge revision;
   its surface-loading guard and three render-process timeouts remain unresolved.
-  All three timed-out render processes emitted their captures before termination;
-  shutdown diagnosis must establish the cause. Local native `e1080d7f` passes
-  the unchanged loading guard and original render cases on NVIDIA and verified
-  CI-pinned Mesa 26.1.7 llvmpipe. Different hardware and toolchain versions keep
-  these non-reproductions separate from CI and original-hang causal closure.
-  The candidate retains failed-process captures and adds shutdown-stage evidence;
-  its fresh native build and qualification remain in progress.
-  Historical results do not qualify a new candidate; discover its tests again.
+  Fresh native/package qualification remains required; retain capture and shutdown
+  artifacts and discover the selected tests again for each revision.
 - **Verification:** later Debug/ASan and native records supersede the failed
-  `ff0362b` baseline. Expanded integrated, native and packaged acceptance is
+  baseline. Expanded integrated, native and packaged acceptance is
   outstanding; implementation, test evidence and merged state are distinct.
 - **Accepted pre-release scope:** five volumetric tiers through 16,384 m, qualified
   within 32 km of the origin; per-system simulation policies over persistent active
@@ -62,8 +56,7 @@ There are no assigned due dates or invented completion percentages.
   landing are pending. A fixture-only asynchronous consumer is undergoing review
   and verification. Runtime paging, graphical integration, final cave-filter
   qualification and durable dirty residency remain subsequent work.
-- **Hang closure:** Windows reported the original `0xCFFFFFFF` application hang
-  and the operator closed it. The underlying mechanism remains unproven.
+- **Hang closure:** The Windows application hang mechanism remains unproven.
   Instrumentation and successful non-reproductions do not close
   [#127](https://github.com/d-addison/luminumbra/issues/127); the server-load
   incident [#69](https://github.com/d-addison/luminumbra/issues/69) is separate.
@@ -71,7 +64,7 @@ There are no assigned due dates or invented completion percentages.
   [#55](https://github.com/d-addison/luminumbra/pull/55) is blocked. Strict promotion
   requires all 15 contexts after expanded acceptance, followed by signed source-only
   publication, independent artifact verification and a newly named private preview.
-  Audio stays off; the delivered `5daeb03` preview stays unchanged.
+  Audio stays off; the existing preview stays unchanged.
 - **Authoring ownership:** generic packages remain in the engine monorepo.
   Merged [#162](https://github.com/d-addison/luminumbra/pull/162) supplies the Blender
   identity review/undo package. Its refreshed package matches the retained Windows
@@ -102,10 +95,10 @@ Engine [#141](https://github.com/d-addison/luminumbra/issues/141) owns budget en
 | [v0.9.0 — Lighting and effects — provisional](https://github.com/d-addison/luminumbra/milestone/8) | Improved raster lighting, optional hybrid RT/denoising and reusable field-effect interfaces. | [Game lighting integration and proposed aether visuals, provisionally placed pending architecture review.](https://github.com/d-addison/luminumbra-game/milestone/8) |
 
 Full installed SDK delivery and game extraction in Foundations depend on
-independently verified v0.3 publication **and** the single implementation-roadmap approval after refreshed source/SDK architecture
-review with actual Astra/xhigh. Accepted ownership/authoring direction is recorded
+independently verified v0.3 publication **and** the implementation-roadmap gate after refreshed source/SDK architecture
+review. Engine/game ownership is recorded
 in [Engine/game ownership](engine-game-boundary.md). Roadmap population does not
-waive that implementation gate. The already-authorized bounded optional authoring
+waive that implementation gate. The bounded optional authoring
 packages above may be refreshed and qualified before release. v0.7–v0.9 remain provisional.
 
 The foundation precedes substantial v0.4 work and does not renumber or reduce its
@@ -133,14 +126,13 @@ imply host migration, matchmaking or private Steam relay availability.
   Creature/plant distance scheduling, durable field pages and wildlife, and dirty
   eviction parking still require their consumer/residency slices. Wind/weather/aether
   remain anchored grids; a clock or ledger alone does not implement these policies.
-- The native client exit 0xCFFFFFFF (PID 66604, package 2871c72) was a Windows
-  Application Hang closed by the operator, not a crash; the hang mechanism is not yet
-  established and its closure is a release gate.
+- Resolving the native client application hang is a release gate; its underlying
+  mechanism remains unconfirmed.
 - White ground patches, purple shadows and visible stars in the settled
   Default/424242/FOV 110° native capture have separate investigation issues.
   Their causes remain unconfirmed. Tree-only tests do not close whole-scene
   appearance reports. Culling and no-UI fixes retain their separate causal evidence.
-- Audio is disabled for v0.3 and its private preview by owner direction; audible
+- Audio is disabled for v0.3 and its preview; audible
   quality and event coverage are future v0.5 work in a separate workstream. Dynamic-body
   acoustic material classification currently uses Stone.
 - GNS compilation does not establish live-peer behavior. Steam private SDK/live
