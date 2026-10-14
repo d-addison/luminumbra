@@ -1,0 +1,201 @@
+"""Path gate coverage, rename safety, and standalone Python runner contracts."""
+
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+import unittest
+from unittest.mock import patch
+
+import ci_paths as gate
+
+
+ROOT = Path(__file__).resolve().parents[2]
+
+
+class PathGateTests(unittest.TestCase):
+    def setUp(self):
+        history = patch.object(gate.subprocess, "check_output", return_value="false\n")
+        self.history = history.start()
+        self.addCleanup(history.stop)
+
+    def test_cli_emits_all_lanes_for_non_pr_event(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "output"
+            with patch.object(sys, "argv", [
+                "ci_paths.py", "classify", "--event", "push", "--output", str(output),
+            ]):
+                self.assertEqual(gate.main(), 0)
+            self.assertEqual(output.read_text(), "needs_cpp=true\nneeds_python=true\n")
+
+    def test_python_runner_executes_plan_and_propagates_failures(self):
+        commands = [("tools/ci/test_check_docs.py",)]
+        with patch.object(sys, "argv", ["ci_paths.py", "python-tests"]), patch.object(
+            gate, "python_test_commands", return_value=commands
+        ), patch.object(gate.subprocess, "run") as run:
+            self.assertEqual(gate.main(), 0)
+            run.assert_called_once_with(
+                [sys.executable, "-B", "tools/ci/test_check_docs.py"], cwd=ROOT, check=True
+            )
+            run.side_effect = subprocess.CalledProcessError(1, "python")
+            with self.assertRaises(subprocess.CalledProcessError):
+                gate.main()
+
+    def test_docs_and_covered_python_skip_builds(self):
+        for path in (
+            "docs/development.md", "docs/assets/example.png", "README.md", "Doxyfile",
+            "tools/ci/check_docs.py", "tools/ci/test_check_docs.py",
+            "tools/perf/test_capture_sim_budget.py",
+            "tools/release/test_sbom.py", "tools/persistence/save_receipt.py",
+            "tools/rendering/acceptance/scene_matrix.py", "tools/timelapse.py",
+            "tools/gates/test_visual_sweep_montages.py",
+            "tools/blender/authoring/extension/recipes.py", "test/viewport/test_transport.py",
+        ):
+            with self.subTest(path=path):
+                self.assertFalse(gate.needs_cpp(path))
+
+    def test_native_build_inputs_and_unknown_paths_keep_builds(self):
+        for path in (
+            "src/main.cpp", "include/api.hpp", "test/unit.cpp", "tools/probe.cxx",
+            "tools/CMakeLists.txt", "CMakeLists.txt", "CMakePresets.json", "cmake/options.cmake",
+            "res/shaders/terrain.vert", "res/test.dat", "data/common/test.json",
+            "config/settings.json", "third_party/foo.h", "vendor/CMakeLists.txt",
+            "vcpkg.json", "deps/lock.json", "worlds/smoke.json", ".clang-tidy",
+            ".github/workflows/docs.yml", "scripts/tidy_cache.py",
+            "tools/static_preview/run_software_gl.py", "test/persistence/region_recording_overwrite.py",
+            ".gitattributes", "tools/ci/qualify_prefab_runtime.py",
+            "tools/ci/test_qualify_prefab_runtime.py",
+            "tools/perf/capture_sim_budget.py", "tools/perf/fixture_hash.py",
+            "tools/perf/render_contract.py", "tools/perf/perf.py",
+            "tools/perf/test_render_runner.py", "tools/perf/synthetic_render_content.py",
+            "tools/blender/geonodes_bake.py",
+            "tools/blender/authoring/service/package.py",
+            "tools/blender/authoring/service/launch.py",
+            "tools/blender/authoring/service/luminumbra_author/prefab.py",
+            "tools/blender/authoring/service/luminumbra_author/service.py",
+            "tools/blender/authoring/service/tests/prefab_fixture.py",
+            "test/authoring/installed_prefab_runtime.py",
+            "tools/ci/new_subdirectory/native_probe.py", "unknown/file.txt",
+            "tools/blender/authoring/service/tests/native_prefab.py",
+            "tools/blender/authoring/probes/run_native.py",
+        ):
+            with self.subTest(path=path):
+                self.assertTrue(gate.needs_cpp(path))
+
+    def test_non_pr_events_always_run_everything_without_diff(self):
+        with patch.object(gate, "changed_paths") as diff:
+            for event in ("push", "workflow_dispatch", "schedule", ""):
+                self.assertEqual(gate.classify(ROOT, event, "", "", "owner/repo", "owner/repo"), (True, True))
+            diff.assert_not_called()
+
+    def test_pr_classification_and_mixed_changes(self):
+        for paths, expected in (
+            (["docs/development.md"], (False, False)),
+            (["tools/ci/check_docs.py"], (False, True)),
+            (["src/main.cpp"], (True, False)),
+            (["docs/index.md", "src/main.cpp", "tools/ci/check_docs.py"], (True, True)),
+            (["tools/perf/test_render_runner.py"], (True, True)),
+            (["src/deleted.cpp", "docs/renamed.txt"], (True, False)),
+        ):
+            with self.subTest(paths=paths), patch.object(gate, "changed_paths", return_value=paths):
+                self.assertEqual(gate.classify(ROOT, "pull_request", "base", "head", "owner/repo", "owner/repo"), expected)
+
+    def test_new_files_in_covered_directories_require_builds(self):
+        for path in gate.PYTHON_MODULES | gate.AUTHORING_PYTHON_FILES:
+            unknown = str(Path(path).parent / "new_native_tool.py")
+            with self.subTest(path=unknown):
+                self.assertTrue(gate.needs_cpp(unknown))
+
+    def test_installed_prefab_service_modules_require_builds(self):
+        # The gate packages every service module; helper tests alone cannot cover
+        # its execution with the native processor and installed ECS consumer.
+        for module in (ROOT / "tools/blender/authoring/service/luminumbra_author").glob("*.py"):
+            with self.subTest(path=module):
+                self.assertTrue(gate.needs_cpp(module.relative_to(ROOT).as_posix()))
+
+    def test_fork_or_missing_repository_identity_runs_everything(self):
+        for repository, head_repository in (
+            ("owner/repo", "fork/repo"), ("", "owner/repo"), ("owner/repo", ""), ("", ""),
+        ):
+            with self.subTest(repository=repository, head_repository=head_repository), patch.object(
+                gate, "changed_paths", return_value=["docs/development.md"]
+            ) as diff:
+                self.assertEqual(gate.classify(
+                    ROOT, "pull_request", "base", "head", repository, head_repository,
+                ), (True, True))
+                diff.assert_not_called()
+        self.history.assert_not_called()
+
+    def test_shallow_or_unavailable_history_runs_everything(self):
+        for outcome in ("true\n", "", "unexpected\n", OSError("missing git"),
+                        subprocess.CalledProcessError(1, "git")):
+            with self.subTest(outcome=outcome), patch.object(gate, "changed_paths") as diff:
+                self.history.side_effect = outcome if isinstance(outcome, Exception) else None
+                self.history.return_value = outcome
+                self.assertEqual(gate.classify(
+                    ROOT, "pull_request", "base", "head", "owner/repo", "owner/repo",
+                ), (True, True))
+                self.history.assert_called_with(
+                    ["git", "rev-parse", "--is-shallow-repository"], cwd=ROOT, text=True,
+                )
+                diff.assert_not_called()
+
+    def test_pr_cli_passes_repository_identity(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(gate, "changed_paths", return_value=[
+            "docs/development.md",
+        ]):
+            output = Path(directory) / "output"
+            with patch.object(sys, "argv", [
+                "ci_paths.py", "classify", "--event", "pull_request",
+                "--base", "base", "--head", "head", "--repository", "owner/repo",
+                "--head-repository", "owner/repo", "--output", str(output),
+            ]):
+                self.assertEqual(gate.main(), 0)
+            self.assertEqual(output.read_text(), "needs_cpp=false\nneeds_python=false\n")
+
+    def test_unavailable_or_empty_diff_fails_open(self):
+        for error in (OSError("missing git"), subprocess.CalledProcessError(1, "git")):
+            with patch.object(gate, "changed_paths", side_effect=error):
+                self.assertEqual(gate.classify(ROOT, "pull_request", "base", "head", "owner/repo", "owner/repo"), (True, True))
+        with patch.object(gate, "changed_paths", return_value=[]):
+            self.assertEqual(gate.classify(ROOT, "pull_request", "base", "head", "owner/repo", "owner/repo"), (True, True))
+        self.assertEqual(gate.classify(ROOT, "pull_request", "", "head", "owner/repo", "owner/repo"), (True, True))
+
+    def test_diff_uses_merge_base_and_preserves_deleted_and_unusual_names(self):
+        with patch.object(gate.subprocess, "check_output", side_effect=[
+            "ancestor\n", b"src/old.cpp\0docs/new name\nfile.md\0",
+        ]) as git:
+            self.assertEqual(gate.changed_paths(ROOT, "base", "head"), [
+                "src/old.cpp", "docs/new name\nfile.md",
+            ])
+            self.assertEqual(git.call_args_list[0].args[0], ["git", "merge-base", "base", "head"])
+            self.assertEqual(git.call_args_list[1].args[0], [
+                "git", "diff", "--name-only", "--no-renames", "-z", "ancestor", "head", "--",
+            ])
+
+    def test_windows_plan_preserves_common_suites_and_omits_posix_fixtures(self):
+        with patch.object(gate.os, "name", "nt"):
+            commands = gate.python_test_commands(ROOT)
+        self.assertNotIn(("tools/ci/test_tidy_cache.py",), commands)
+        for test in gate.PYTHON_TESTS:
+            self.assertIn((test,), commands)
+
+    def test_standalone_plan_covers_ctest_python_contracts_without_native_runner(self):
+        commands = gate.python_test_commands(ROOT)
+        for test in (
+            "tools/ci/test_ci_paths.py", "tools/ci/test_qualification_capture.py",
+            "tools/perf/test_capture_sim_budget.py", "tools/perf/test_foliage_evidence.py",
+            "tools/perf/test_terrain_aovs.py", "tools/perf/test_render_runner_evidence.py",
+            "tools/release/test_sbom.py", "tools/persistence/test_save_receipt.py",
+            "tools/rendering/acceptance/test_scene_matrix.py",
+        ):
+            with self.subTest(test=test):
+                self.assertIn((test,), commands)
+        self.assertIn(("tools/timelapse.py", "--selftest"), commands)
+        self.assertNotIn(("tools/perf/test_render_runner.py",), commands)
+        for command in commands:
+            self.assertTrue((ROOT / command[0]).is_file(), command)
+
+
+if __name__ == "__main__":
+    unittest.main()

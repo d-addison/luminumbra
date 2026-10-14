@@ -54,38 +54,100 @@ scheduled runs, and manual dispatches never save caches. When a PR closes,
 `cache-cleanup.yml` deletes caches scoped to its `refs/pull/<n>/merge` ref without
 checking out PR code.
 
-Draft pull requests run the cheap routine checks: changed-file formatting, public
-tree inventory, runner contracts, Doxygen, game assets, and the authoring mock
-(subject to its existing paths filter). Linux/GCC, ASan, Windows/MSVC,
-Windows/UCRT64, clang-tidy, GNS, Diligent RHI, preview-frame, and the paired server
-comparison skip draft pull requests. The separate path-filtered UCRT package
-attribution diagnostic keeps its existing job routing.
+Pull requests first classify changed paths with a merge-base diff of the base and
+head SHAs. Deleted paths and both sides of renames count. The classifier runs on a
+standard `ubuntu-latest` runner; fork PRs, missing repository identity, shallow or
+missing history, an empty diff, unknown paths, or missing classifier outputs keep
+the build lanes enabled. Pushes, schedules, and manual dispatches always enable
+every path-gated lane, regardless of changed files.
 
-Marking a pull request ready for review triggers CI on its current head, running
-the full required set. PR workflows listen for `opened`, `synchronize`, `reopened`,
-and `ready_for_review`; existing branch and path filters still apply. Heavy
-required checks report skipped on drafts. The merge gate requires actual
-`SUCCESS` for every required check on the exact head, so a draft cannot land until
-it is marked ready and the full required set passes. Windows/UCRT64 keeps its
-existing branch/manual routing, and the paired server comparison still runs only
-for main-bound ready PRs or eligible main/devel pushes.
+C++ sources and headers, CMake inputs, `src/`, `include/`, `test/`, `cmake/`,
+`res/` (including shaders and test data), `data/`, `config/`, `worlds/`, vendored
+and third-party dependencies, vcpkg/dependency files, `.gitattributes`, and workflow
+changes require builds. Git attributes affect exact fixture bytes on checkout.
+Documentation and covered Python tooling can skip C++ lanes. The allowlist and
+standalone test plan live together in `tools/ci/ci_paths.py`.
+Unknown tooling remains on the build path.
 
-Workflows with concurrency groups key PR runs by ref and cancel superseded runs,
-so a `ready_for_review` run cancels an earlier draft run on the same PR ref. Devel
-pushes keep separate SHA-keyed groups with cancellation disabled. Push, schedule,
-manual dispatch (including qualification capture), and release behavior is
-unchanged.
+The required `Linux / GCC` and `Windows / MSVC` jobs always run on ready PRs.
+When `needs_cpp=false`, each installs only numpy, Pillow and jsonschema for its OS
+and runs `ci_paths.py python-tests`, skipping native dependencies, compiler caches,
+configure/build/CTest, native qualification, packaging and native artifacts.
+Python failures therefore block merging through the existing required contexts.
+When `needs_cpp` is true or missing, both jobs retain their full native path.
 
-Ready pull requests run:
+The standalone plan explicitly lists tests in `tools/ci`, `tools/perf`,
+`tools/release`, `tools/assets`, `tools/audio`, `tools/persistence`, and
+`tools/rendering/acceptance`, plus visual-critique, timelapse, SDF doc,
+runtime-manifest, visual-montage, and Blender core/GLB contracts. This preserves
+Windows coverage for CTest-registered Python suites. The POSIX shebang fixtures in
+`test_tidy_cache.py` run only on Linux. Classification exemptions are explicit
+reviewed files, including covered test-backed modules; new files require builds.
+Native integrations such as `qualify_prefab_runtime.py`, its packaged service and
+installed acceptance inputs, `test_render_runner.py`, its native fixture generator
+and imports, and simulation capture tools stay on the build path.
+Explicit authoring test files, selected extension helpers and `test/viewport` files
+also skip C++: the existing authoring mock job covers them on Linux and Windows.
+Authoring service implementation and native probes require builds.
+The public-tree job also runs SDF documentation lint so doc-only edits retain that
+CTest-registered check. Doxygen always runs because `docs/` feeds its input.
 
-- optimized GCC builds and tests on Ubuntu;
-- optimized MSVC builds and tests on Windows;
-- optimized GCC/UCRT64 builds and tests on Windows;
-- Clang AddressSanitizer builds and tests on Ubuntu;
-- blocking clang-tidy analysis and GNS and Diligent RHI probes;
-- changed-file formatting checks;
-- Doxygen parsing with warnings treated as errors; and
-- an explicitly observational software-OpenGL performance capture.
+Draft pull requests retain the previous draft routing: heavy lanes skip while
+formatting, public-tree inventory, runner contracts, Doxygen, game assets, and the
+authoring mock run (subject to the mock's existing paths filter). The required
+Linux/GCC and Windows/MSVC jobs still skip drafts. Marking a PR ready for review
+triggers its current head; those two jobs run Python or native tests,
+and other heavy lanes run when the paths require them. PR workflows
+listen for `opened`, `synchronize`, `reopened`, and `ready_for_review`.
+
+Required job names and workflow PR triggers remain present for every PR. Native
+lanes depend directly on the always-running classifier; none depends on a skipped
+heavy job. Linux/GCC and Windows/MSVC select their native or Python steps. Other
+unaffected heavy lanes report a terminal `skipped` conclusion, which GitHub
+accepts for required checks, rather than leaving a missing status pending. Public tree, Format, Doxygen, and
+runner contracts run independently of the classifier. Assuming those checks pass,
+the devel ruleset sees the following conclusions on ready PRs:
+
+| Required check | Docs-only PR | Covered Python-only PR | C++ PR | Devel push |
+|---|---|---|---|---|
+| Linux / GCC | success (Python) | success (Python) | success | success |
+| Windows / MSVC | success (Python) | success (Python) | success | success |
+| Public tree / inventory honesty | success | success | success | success |
+| Format changed files | success | success | success | success |
+| Linux / GCC ASan | skipped | skipped | success | success |
+| Build Doxygen reference | success | success | success | success |
+| Runner contract / ubuntu-24.04 | success | success | success | success |
+| Runner contract / windows-2025 | success | success | success | success |
+| Runner contract / macos-15 | success | success | success | success |
+| Preview frame / software OpenGL | skipped | skipped | success | success |
+| Static analysis / clang-tidy | skipped | skipped | success | success |
+| GNS transport / compile probe | skipped | skipped | success | success |
+| Diligent RHI / software GL | skipped | skipped | success | success |
+
+Python changes outside the covered allowlist use the C++ PR column. Failures still
+report failure; `success` here describes an executed check that passes. Devel push
+columns describe runs that reach execution, subject to batching below.
+Windows/UCRT64 retains its existing branch/manual and draft routing in addition
+to path gating. The paired server comparison retains its main-bound ready PR and
+eligible main/devel push routing, with the same path gate. Manual qualification
+captures retain full build/test coverage and cache bypass.
+
+Devel pushes share one concurrency group per workflow and ref with
+`cancel-in-progress: false`. A running run completes; GitHub's queue of one
+supersedes a pending run with the newest devel push. The campaign freeze audit
+accepts a superseded devel run when a descendant devel SHA's run of the same
+workflow is green or pending. A failed completed run remains a failure. Scheduled
+runs use a separate group so their cancellation cannot interrupt devel pushes. Main
+pushes and manual dispatches, including qualification captures, have isolated
+non-cancelling groups, preserving their individual evidence. PR runs retain ref
+batching and cancellation where previously configured, so `ready_for_review`
+supersedes earlier draft runs. Authoring PR runs retain their independent,
+non-cancelling behaviour.
+The authoring workflow keeps its existing path triggers; UCRT attribution keeps
+its PR/manual-only triggers. Scheduled and release routing stays unchanged.
+
+All runners remain standard hosted runners; no paid actions, larger/GPU runners,
+repository visibility changes, or cache-cap increases are introduced.
 
 CTest produces JUnit and runtime artifacts. CI verifies a minimum discovered-test
 count so an empty or severely truncated suite cannot report success. Sanitizer and

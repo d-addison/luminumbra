@@ -12,12 +12,15 @@ permissions:
   contents: read
 
 concurrency:
-  # Pushes to devel get one group per commit and are never cancelled: when devel is not
-  # strict-up-to-date, every merged tip needs its own complete run so that a newer
-  # push cannot hide an older red tip. Pull requests and main keep cancelling
-  # superseded runs.
-  group: ${{ github.workflow }}-${{ github.ref }}${{ github.event_name == 'push' && github.ref == 'refs/heads/devel' && format('-{0}', github.sha) || '' }}
-  cancel-in-progress: ${{ !(github.event_name == 'push' && github.ref == 'refs/heads/devel') }}
+  # Devel pushes share one workflow/ref group: the running run finishes, while
+  # GitHub's queue of one replaces a pending run with the newest devel push.
+  # The push suffix separates this group from cancellable scheduled runs.
+  # The campaign freeze audit accepts a superseded devel run when a descendant
+  # devel SHA's run of this same workflow is green or pending.
+  # Main pushes and manual runs (including qualification captures) have isolated
+  # groups and never cancel. PR ref grouping/cancellation stays unchanged.
+  group: ${{ github.event_name == 'workflow_dispatch' && format('{0}-manual-{1}', github.workflow, github.run_id) || github.event_name == 'push' && github.ref == 'refs/heads/main' && format('{0}-{1}-{2}-{3}', github.workflow, github.ref, github.sha, github.run_id) || github.event_name == 'push' && github.ref == 'refs/heads/devel' && format('{0}-{1}-push', github.workflow, github.ref) || format('{0}-{1}', github.workflow, github.ref) }}
+  cancel-in-progress: ${{ github.event_name != 'push' && github.event_name != 'workflow_dispatch' }}
 
 jobs:
   acquire:
