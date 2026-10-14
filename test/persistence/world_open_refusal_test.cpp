@@ -959,6 +959,8 @@ TEST_F(WorldOpenRefusal, PersistedSchedulerIdentityRefusesDifferentAdmissionAndR
         ASSERT_TRUE(writer.Finalize(0));
         const auto replay = Replay::ReadReplay(replay_path.string());
         ASSERT_TRUE(replay.has_value());
+        if (!replay.has_value())
+            return;
         EXPECT_TRUE(Replay::ConfigurationMatches(replay->header, baseline_identity));
         EXPECT_FALSE(Replay::ConfigurationMatches(replay->header, loaded.SystemConfigIdentity()));
         auto matching_header = replay->header;
