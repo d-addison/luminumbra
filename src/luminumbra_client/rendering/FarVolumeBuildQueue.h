@@ -6,6 +6,7 @@
 
 #include <atomic>
 #include <memory_resource>
+#include <span>
 #include <thread>
 
 namespace Luminumbra::Rendering {
@@ -123,7 +124,10 @@ public:
     // cancels old work, then starts the latest only after its handle is reaped.
     FarVolumeSubmitStatus Submit(const FarVolumeQueueRequest& request);
     // Reap completed handles, then start at most max_dispatches Normal jobs.
-    std::size_t Pump(std::size_t max_dispatches);
+    // With an explicit order, ONLY its selected keys may start, in that order;
+    // the owner supplies the wanted policy's coarsest/distance/key ordering.
+    // Empty order retains generic descriptor order. No order storage is owned.
+    std::size_t Pump(std::size_t max_dispatches, std::span<const World::FarTileKey> order = {});
     void Cancel(const World::FarTileKey& key);
     void Forget(const World::FarTileKey& key);
     // Explicit retry after wanted-set/budget change; duplicates never auto-retry.
