@@ -270,11 +270,17 @@ void FarVolumeBuildQueue::Reap() {
         }
     }
 }
-std::size_t FarVolumeBuildQueue::Pump(std::size_t max_dispatches) {
+std::size_t FarVolumeBuildQueue::Pump(std::size_t max_dispatches,
+                                      std::span<const World::FarTileKey> order) {
     CheckOwner();
     Reap();
     std::size_t dispatched = 0;
-    for (std::size_t d = 0; d < descriptors_.size() && dispatched < max_dispatches; ++d) {
+    const auto candidates = order.empty() ? descriptors_.size() : order.size();
+    for (std::size_t rank = 0; rank < candidates && dispatched < max_dispatches; ++rank) {
+        const auto selected = order.empty() ? std::optional<std::size_t>(rank) : Find(order[rank]);
+        if (!selected)
+            continue;
+        const auto d = *selected;
         auto& descriptor = descriptors_[d];
         const auto& desired = descriptor.desired;
         if (!desired || !descriptor.pending || descriptor.slot)

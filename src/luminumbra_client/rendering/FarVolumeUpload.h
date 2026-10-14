@@ -46,6 +46,9 @@ public:
     const World::FarBuildIdentity& identity() const noexcept {
         return identity_;
     }
+    const World::FarVolumeRequest& request() const noexcept {
+        return request_;
+    }
     const FarVolumeGpuAllocation* resource() const noexcept {
         return resource_.get();
     }

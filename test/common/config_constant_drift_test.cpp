@@ -37,6 +37,7 @@
 
 #include "ai/EcologyTuningConfig.h" // EcologyTuning (via CreatureBrainSystem.h)
 #include "ai/SimTuningConfig.h" // WildlifeFoliage/Thirst/Scavenging/Foraging/Reproduction tunings
+#include "luminumbra_client/rendering/FarWorldCaveSelection.h"
 #include "systems/PollinationSystem.h"
 
 namespace {
@@ -104,6 +105,7 @@ std::map<std::string, float> BuildLiveConstants() {
         {"ForagingDeposit", static_cast<float>(forage.deposit)},
         {"ForagingTrailWeight", static_cast<float>(forage.trail_weight)},
         {"ForagingGoalWeight", static_cast<float>(forage.goal_weight)},
+        {"FarWorldCaveField", Luminumbra::Rendering::kDefaultFarWorldCaveFieldCode},
     };
 }
 
