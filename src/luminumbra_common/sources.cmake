@@ -49,6 +49,7 @@ set(COMMON_SOURCES
 
     # Persistence
     ${CMAKE_CURRENT_LIST_DIR}/persistence/WorldPersistenceRoundtrip.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/persistence/SaveTransaction.cpp
     ${CMAKE_CURRENT_LIST_DIR}/persistence/WorldSaveService.cpp
     ${CMAKE_CURRENT_LIST_DIR}/persistence/SavedWorldCatalog.cpp
     ${CMAKE_CURRENT_LIST_DIR}/persistence/AsyncSavedWorldCatalog.cpp

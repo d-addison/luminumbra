@@ -15,9 +15,11 @@
 #include "WorldClock.h"
 #include "WorldMetadata.h"
 #include "entt/entt.hpp"
+#include <chrono>
 #include <cstdint>
 #include <ctime>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -75,6 +77,16 @@ struct WorldStateSaveReport {
     bool saved = false;
 };
 
+struct PersistenceStatus {
+    std::size_t parked_count = 0;
+    std::size_t parked_bytes = 0;
+    std::int64_t oldest_parked_tick = -1;
+    std::int64_t last_save_tick = -1;
+    double last_save_ms = 0.0;
+    std::uint32_t failures = 0;
+    bool save_requested = false;
+};
+
 class GameSession {
 public:
     GameSession();
@@ -107,6 +119,10 @@ public:
 
     // Save the current world state
     bool SaveWorld();
+    // Flag on: runs `body` (which may call SaveWorldState/SaveWorld and indexed-member writers)
+    // inside ONE snapshot transaction published with a single index. Otherwise just runs `body`.
+    // Owner thread only; returns the body's verdict, and false when the commit fails.
+    bool RunInSnapshotTransaction(const std::function<bool()>& body);
 
     // --- Runtime world-state persistence ---
     // Persists streamed chunk voxel state under the canonical world save dir
@@ -118,6 +134,21 @@ public:
     bool SaveWorldState(WorldStateSaveReport* report = nullptr);
     bool SaveWorldStateTo(const std::filesystem::path& save_dir,
                           WorldStateSaveReport* report = nullptr);
+
+    // Durable residency (sim.active_regions only). All zero/false when the flag is off.
+    [[nodiscard]] PersistenceStatus GetPersistenceStatus() const;
+    // True when the world asked for a save (a dirty authoritative chunk hit the parked byte
+    // limit) and the retry back-off after a failed save has elapsed.
+    [[nodiscard]] bool PersistenceSaveRequested() const;
+    void ClearPersistenceSaveRequest();
+    // 0 = unlimited. Applied when the world system is wired (and immediately if it exists).
+    void SetParkedBytesLimit(std::size_t bytes);
+    static constexpr std::uint64_t kSaveRetryTicks = 300;
+    static constexpr std::uint64_t kAutosaveTicks = 9000;
+    // Periodic autosave for hosts without their own interval (the client). True once kAutosaveTicks
+    // have elapsed since the last successful save (or since first observed), outside the failure
+    // back-off. Always false unless sim.active_regions is on.
+    [[nodiscard]] bool PersistenceAutosaveDue();
 
     // Loads a previously saved snapshot into the live streaming state. Must be
     // called AFTER the world systems initialize but BEFORE chunk streaming
@@ -389,6 +420,9 @@ public:
 
     // Fold only when enabled, inside the existing ecology hash slot.
     [[nodiscard]] std::string FoldClockIntoEcologyHash(const std::string& ecology_hash) const;
+    // Enabled chunk slot hashes authoritative truth across residency/save history. The default
+    // path retains the existing streamed-state projection and wire/checkpoint slots.
+    [[nodiscard]] std::string ComputeChunkStateHash();
     [[nodiscard]] bool IsSimulationTickBoundary() const {
         return !m_activeRegionsEnabled || (!m_simulationBatchInProgress && m_regionWork.empty());
     }
@@ -450,6 +484,12 @@ private:
     bool ClockConfigurationCompatible(const std::filesystem::path& save_dir) const;
     WorldClock m_worldClock;
     void AttachRegionEditObserver();
+    void RecordPersistenceSaveOutcome(bool ok, double elapsed_ms);
+    std::size_t m_parkedBytesLimit = static_cast<std::size_t>(256) * 1024u * 1024u;
+    std::int64_t m_lastSaveTick = -1;
+    double m_lastSaveMs = 0.0;
+    std::uint32_t m_saveFailures = 0;
+    std::int64_t m_lastSaveFailureTick = -1;
     RegionSchedulerConfig m_regionSchedulerConfig;
     ActiveRegionLedger m_activeRegionLedger;
     RegionSchedule m_regionSchedule;

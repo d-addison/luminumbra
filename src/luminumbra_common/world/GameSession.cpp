@@ -42,6 +42,7 @@
 #include "../core/Log.h"
 #include "../fields/EnergyFieldState.h"
 #include "../persistence/PlantPersistence.h"
+#include "../persistence/SaveTransaction.h"
 #include "../persistence/SavedWorldCatalog.h"
 #include "../persistence/WorldPersistenceRoundtrip.h" // Persistence::StableChecksum (ComputeScentSubHash)
 #include "../persistence/WorldSaveService.h"
@@ -64,7 +65,8 @@
 #include "TerrainPresetLoader.h"
 #include "WorldStreamingState.h"
 #include "nlohmann/json.hpp" // For parsing JSON
-#include <cmath>             // std::floor (energy-layer anchor quantization)
+#include <array>
+#include <cmath> // std::floor (energy-layer anchor quantization)
 
 #include <algorithm> // explicit: stabilise std template instantiation for entt storage helpers
 #include <chrono>
@@ -190,6 +192,10 @@ void GameSession::ResetWorldSystems() {
     m_regionDurableDirectory.clear();
     m_simulationEventBus.clear();
     m_lastLoadedChunkCount = 0;
+    m_lastSaveTick = -1;
+    m_lastSaveMs = 0.0;
+    m_saveFailures = 0;
+    m_lastSaveFailureTick = -1;
 }
 
 // load the per-world species definition table at world create/load.
@@ -1204,6 +1210,25 @@ bool GameSession::LoadWorld(const std::string& worldId) {
     if (!IsSimulationTickBoundary())
         return false;
     m_lastLoadedChunkCount = 0;
+    // An interrupted indexed save is rolled back (or its stale journal dropped) before anything
+    // reads the directory. The identifier check mirrors InspectSavedWorld's.
+    if (!worldId.empty() && worldId != "." && worldId != ".." &&
+        worldId.find_first_of("/\\:") == std::string::npos) {
+        const fs::path candidate = RuntimeRoot(m_rootPath) / "worlds/saves" / worldId;
+        std::error_code status_error;
+        if (fs::is_directory(candidate, status_error) && !fs::is_symlink(candidate, status_error)) {
+            std::vector<std::string> recovery_errors;
+            if (Persistence::recover_pending_journal(candidate, &recovery_errors) ==
+                Persistence::RecoveryOutcome::Failed) {
+                m_worldOpenError =
+                    "World unavailable: an interrupted save could not be recovered: " +
+                    (recovery_errors.empty() ? std::string("unknown error")
+                                             : recovery_errors.front());
+                LUMINUMBRA_CORE_ERROR("World open refused: {}", m_worldOpenError);
+                return false;
+            }
+        }
+    }
     const auto saved = Persistence::InspectSavedWorld(RuntimeRoot(m_rootPath), worldId);
     m_worldOpenError = saved.error;
     if (m_worldOpenError.empty() && saved.requires_active_regions && !m_activeRegionsEnabled)
@@ -1321,6 +1346,18 @@ bool GameSession::LoadWorld(const std::string& worldId) {
 }
 
 bool GameSession::ClockConfigurationCompatible(const fs::path& save_dir) const {
+    // An interrupted save may have left uncommitted clock-bearing metadata: recover before reading
+    // the clock so the compatibility verdict describes the committed snapshot.
+    // Never during a live transaction on this directory (its journal is the active one), and
+    // never for an empty destination (a relative join would resolve against the cwd).
+    std::vector<std::string> recovery_errors;
+    if (!save_dir.empty() && !Persistence::SaveTransaction::active_for(save_dir) &&
+        Persistence::recover_pending_journal(save_dir, &recovery_errors) ==
+            Persistence::RecoveryOutcome::Failed) {
+        for (const std::string& error : recovery_errors)
+            LUMINUMBRA_CORE_ERROR("World save recovery failed: {}", error);
+        return false;
+    }
     WorldClock clock;
     bool required = false;
     return Persistence::WorldSaveService::read_clock_metadata(save_dir, clock, required) &&
@@ -1329,6 +1366,10 @@ bool GameSession::ClockConfigurationCompatible(const fs::path& save_dir) const {
 
 void GameSession::RunRegionScheduler(std::uint64_t current_tick) {
     if (m_activeRegionsEnabled && !m_regionFault) {
+        // Water divergence becomes LoadedOrEdited authority BEFORE any digest or ownership
+        // probe.
+        m_worldSystem->note_persistence_tick(static_cast<std::int64_t>(current_tick));
+        m_worldSystem->sync_water_authority();
         const auto anchors =
             m_replicatedSimulationAnchors
                 ? std::optional<std::span<const Vec3>>(*m_replicatedSimulationAnchors)
@@ -1348,16 +1389,22 @@ void GameSession::RunRegionScheduler(std::uint64_t current_tick) {
                         directory,
                         key,
                         Persistence::RegionDigestInputs{m_worldSystem->snapshot_streamed_chunks(),
-                                                        {}});
+                                                        m_worldSystem->snapshot_parked_chunks(),
+                                                        m_worldSystem->durable_chunk_inventory()});
                 },
-                // Later slices extend this probe with parked chunks, ground objects,
+                // Later slices extend this probe with ground objects,
                 // pages, creatures, plants and water debt.
                 [this, &owned_regions](RegionKey key) {
                     if (!owned_regions) {
                         owned_regions.emplace();
                         for (const auto& entry : m_regionWork)
                             owned_regions->insert(entry.key);
-                        for (const auto& chunk : m_worldSystem->snapshot_streamed_chunks()) {
+                        for (const auto& coords : m_worldSystem->durable_chunk_inventory()) {
+                            int rx = 0, rz = 0;
+                            Persistence::WorldSaveService::region_coords_for_chunk(coords, rx, rz);
+                            owned_regions->insert(RegionKey{rx, rz});
+                        }
+                        for (const auto& chunk : m_worldSystem->snapshot_authoritative_chunks()) {
                             if (!chunk)
                                 continue;
                             int rx = 0, rz = 0;
@@ -1429,7 +1476,21 @@ void GameSession::RecordActiveRegionWork(RegionWork work) {
         m_regionWork.push_back(work);
 }
 void GameSession::AttachRegionEditObserver() {
-    if (m_activeRegionsEnabled && m_worldSystem)
+    if (m_activeRegionsEnabled && m_worldSystem) {
+        m_worldSystem->set_durable_residency(true);
+        m_worldSystem->set_parked_bytes_limit(m_parkedBytesLimit);
+        m_worldSystem->set_durable_chunk_loader(
+            [this](const IVec3& coords) {
+                const auto directory =
+                    m_regionDurableDirectory.empty() ? GetWorldSaveDir() : m_regionDurableDirectory;
+                const auto result =
+                    Persistence::WorldSaveService::read_chunk(directory, coords, true);
+                if (result.status != Persistence::WorldSaveService::ChunkReadStatus::Found)
+                    throw std::runtime_error(
+                        result.error.empty() ? "expected durable chunk is missing" : result.error);
+                return result.chunk;
+            },
+            [this](std::string error) { LatchRegionFault(m_worldClock.tick(), std::move(error)); });
         m_worldSystem->SetVoxelEditObserver([this](const IVec3& chunk) {
             int x = 0, z = 0;
             Persistence::WorldSaveService::region_coords_for_chunk(chunk, x, z);
@@ -1441,6 +1502,125 @@ void GameSession::AttachRegionEditObserver() {
                 ++m_regionInputRejections.edits;
             }
         });
+    }
+}
+
+PersistenceStatus GameSession::GetPersistenceStatus() const {
+    PersistenceStatus status;
+    if (!m_activeRegionsEnabled || !m_worldSystem)
+        return status;
+    const auto parking = m_worldSystem->parking_status();
+    status.parked_count = parking.parked_count;
+    status.parked_bytes = parking.parked_bytes;
+    status.oldest_parked_tick = parking.oldest_parked_tick;
+    status.last_save_tick = m_lastSaveTick;
+    status.last_save_ms = m_lastSaveMs;
+    status.failures = m_saveFailures;
+    status.save_requested = parking.save_requested;
+    return status;
+}
+
+bool GameSession::PersistenceSaveRequested() const {
+    if (!m_activeRegionsEnabled || !m_worldSystem || !m_worldSystem->persistence_save_requested())
+        return false;
+    if (m_lastSaveFailureTick >= 0 &&
+        static_cast<std::int64_t>(GetSimulationTickCount()) <
+            m_lastSaveFailureTick + static_cast<std::int64_t>(kSaveRetryTicks))
+        return false;
+    return true;
+}
+
+bool GameSession::PersistenceAutosaveDue() {
+    if (!m_activeRegionsEnabled || !m_worldSystem)
+        return false;
+    const auto tick = static_cast<std::int64_t>(GetSimulationTickCount());
+    if (m_lastSaveTick < 0) {
+        m_lastSaveTick = tick; // first observation is the baseline, not a save
+        return false;
+    }
+    if (m_lastSaveFailureTick >= 0 &&
+        tick < m_lastSaveFailureTick + static_cast<std::int64_t>(kSaveRetryTicks))
+        return false;
+    return tick >= m_lastSaveTick + static_cast<std::int64_t>(kAutosaveTicks);
+}
+
+void GameSession::ClearPersistenceSaveRequest() {
+    if (m_worldSystem)
+        m_worldSystem->clear_persistence_save_request();
+}
+
+void GameSession::SetParkedBytesLimit(std::size_t bytes) {
+    m_parkedBytesLimit = bytes;
+    if (m_activeRegionsEnabled && m_worldSystem)
+        m_worldSystem->set_parked_bytes_limit(bytes);
+}
+
+void GameSession::RecordPersistenceSaveOutcome(bool ok, double elapsed_ms) {
+    if (!m_activeRegionsEnabled)
+        return;
+    if (m_worldSystem)
+        m_worldSystem->note_persistence_outcome(ok);
+    const auto tick = static_cast<std::int64_t>(GetSimulationTickCount());
+    if (ok) {
+        m_lastSaveTick = tick;
+        m_lastSaveMs = elapsed_ms;
+        m_lastSaveFailureTick = -1;
+        if (m_worldSystem)
+            m_worldSystem->clear_persistence_save_request();
+    } else {
+        ++m_saveFailures;
+        m_lastSaveFailureTick = tick;
+    }
+}
+
+std::string GameSession::ComputeChunkStateHash() {
+    if (m_activeRegionsEnabled && m_worldSystem)
+        m_worldSystem->sync_water_authority();
+    if (!m_worldSystem)
+        return {};
+    const auto live = m_worldSystem->snapshot_streamed_chunks();
+    if (!m_activeRegionsEnabled) {
+        WorldStreamingState state;
+        for (const auto& chunk : live)
+            state.insert_chunk(chunk);
+        return Persistence::ComputeWorldStreamingStateHash(state);
+    }
+    const auto parked = m_worldSystem->snapshot_parked_chunks();
+    const auto durable = m_worldSystem->durable_chunk_inventory();
+    std::set<RegionKey> keys;
+    const auto add_key = [&keys](const IVec3& coords) {
+        int rx = 0, rz = 0;
+        Persistence::WorldSaveService::region_coords_for_chunk(coords, rx, rz);
+        keys.insert({rx, rz});
+    };
+    for (const auto& chunk : live)
+        if (chunk && chunk->needs_authority() && chunk->get_state() != ChunkState::Loading)
+            add_key(chunk->get_coords());
+    for (const auto& chunk : parked)
+        if (chunk && chunk->needs_authority())
+            add_key(chunk->get_coords());
+    for (const auto& coords : durable)
+        add_key(coords);
+    const auto directory =
+        m_regionDurableDirectory.empty() ? GetWorldSaveDir() : m_regionDurableDirectory;
+    std::string projection = "authoritative_chunks:v2:";
+    try {
+        if (!durable.empty() && !Persistence::snapshot_index_exists(directory))
+            throw std::runtime_error("inconsistent snapshot: index missing");
+        for (const auto key : keys) {
+            const auto record = m_activeRegionLedger.records().find(key);
+            const auto digest = record != m_activeRegionLedger.records().end() &&
+                                        record->second.state == RegionState::Frozen
+                                    ? record->second.frozen_digest
+                                    : Persistence::WorldSaveService::region_simulation_digest(
+                                          directory, key, {live, parked, durable});
+            projection += std::to_string(key.x) + "," + std::to_string(key.z) + ":" +
+                          std::to_string(digest) + ";";
+        }
+    } catch (const std::exception& error) {
+        LatchRegionFault(m_worldClock.tick(), error.what());
+    }
+    return Persistence::StableChecksum(projection);
 }
 
 std::string GameSession::FoldClockIntoEcologyHash(const std::string& ecology_hash) const {
@@ -1459,6 +1639,96 @@ void GameSession::RestoreWorldClock(const WorldClock& clock) {
     m_aetherFieldSystem->Update(clock.tick(), m_ambientFieldAnchor, m_windFieldSystem.get());
 }
 
+namespace {
+
+// One flag-on save is one snapshot transaction (S4): recovery, one validation, then every indexed
+// member writer joins this transaction and the index is published once at Commit. Owner thread
+// only.
+class OuterSaveTransaction {
+public:
+    OuterSaveTransaction(const fs::path& save_dir,
+                         std::uint64_t tick,
+                         std::vector<std::array<float, 3>> anchors)
+        : m_facts(save_dir)
+        , m_transaction(
+              save_dir, tick, std::move(anchors), &Persistence::WorldSaveService::member_digest)
+        , m_save_dir(save_dir) {}
+
+    // Recovers an interrupted save, validates the directory once, then opens the journal.
+    bool Start() {
+        std::vector<std::string> errors;
+        if (Persistence::recover_pending_journal(m_save_dir, &errors) ==
+            Persistence::RecoveryOutcome::Failed) {
+            Log(errors);
+            return false;
+        }
+        if (!m_facts.validate(&errors)) {
+            Log(errors);
+            return false;
+        }
+        if (!m_transaction.begin(&errors)) {
+            Log(errors);
+            return false;
+        }
+        return true;
+    }
+
+    bool Commit() {
+        std::vector<std::string> errors;
+        if (!m_transaction.commit(&errors)) {
+            Log(errors);
+            return false;
+        }
+        m_facts.run_deferred();
+        return true;
+    }
+
+private:
+    static void Log(const std::vector<std::string>& errors) {
+        for (const std::string& error : errors)
+            LUMINUMBRA_CORE_ERROR("World save transaction failed: {}", error);
+    }
+
+    // Declared in this order so the transaction (which rolls back) is destroyed before the facts.
+    Persistence::WorldSaveService::SaveFactsScope m_facts;
+    Persistence::SaveTransaction m_transaction;
+    fs::path m_save_dir;
+};
+
+std::unique_ptr<OuterSaveTransaction>
+StartOuterSave(const fs::path& save_dir, std::uint64_t tick, const std::optional<Vec3>& anchor) {
+    std::vector<std::array<float, 3>> anchors;
+    if (anchor)
+        anchors.push_back({anchor->x, anchor->y, anchor->z});
+    auto outer = std::make_unique<OuterSaveTransaction>(save_dir, tick, std::move(anchors));
+    if (!outer->Start())
+        return nullptr;
+    return outer;
+}
+
+} // namespace
+
+bool GameSession::RunInSnapshotTransaction(const std::function<bool()>& body) {
+    const fs::path save_dir = GetWorldSaveDir();
+    if (!m_activeRegionsEnabled || save_dir.empty() || m_transientWorld ||
+        m_metadata.worldId.empty() || !m_worldOpenError.empty() || !IsSimulationTickBoundary() ||
+        !ClockConfigurationCompatible(save_dir) ||
+        Persistence::SaveTransaction::active_for(save_dir)) {
+        return body(); // nothing to wrap: the writers keep their own commits
+    }
+    auto outer = StartOuterSave(save_dir, m_worldClock.tick(), m_activeRegionLedger.local_anchor());
+    if (!outer)
+        return false;
+    if (!body()) {
+        RecordPersistenceSaveOutcome(false, 0);
+        return false; // the destructor rolls the whole snapshot back
+    }
+    const bool committed = outer->Commit();
+    if (!committed)
+        RecordPersistenceSaveOutcome(false, 0);
+    return committed;
+}
+
 bool GameSession::SaveWorld() {
     return SaveWorldMetadataTo(GetWorldSaveDir());
 }
@@ -1468,12 +1738,10 @@ bool GameSession::SaveWorldMetadataTo(const fs::path& save_dir) {
         !ClockConfigurationCompatible(save_dir) || m_transientWorld || m_metadata.worldId.empty() ||
         !m_worldOpenError.empty())
         return false;
-    if (m_activeRegionsEnabled) {
-        if (!Persistence::WorldSaveService::validate_save(save_dir))
-            return false;
-        std::error_code error;
-        fs::create_directories(save_dir, error);
-        if (error)
+    std::unique_ptr<OuterSaveTransaction> outer;
+    if (m_activeRegionsEnabled && !Persistence::SaveTransaction::active_for(save_dir)) {
+        outer = StartOuterSave(save_dir, m_worldClock.tick(), m_activeRegionLedger.local_anchor());
+        if (!outer)
             return false;
     }
     // Using nlohmann::json for robust saving
@@ -1500,15 +1768,30 @@ bool GameSession::SaveWorldMetadataTo(const fs::path& save_dir) {
         metadata_json["ambientFieldAnchor"] = {{"x", m_ambientFieldAnchor.x},
                                                {"y", m_ambientFieldAnchor.y},
                                                {"z", m_ambientFieldAnchor.z}};
+        // Marks a directory that must carry a snapshot index (downgrade guard, S4). Written only
+        // inside a snapshot transaction, so the marker and the index always appear together.
+        metadata_json["snapshotFormat"] = 1;
     }
     if (m_activeRegionsEnabled) {
         // All production callers save synchronously on the host thread: client
         // world creation/quit/shutdown and server autosave/snapshot/shutdown.
         // Do not dispatch this pair to workers; the writer asserts non-overlap.
+        const auto expected_ledger = m_activeRegionLedger.canonical_bytes();
+        auto saved_ledger = m_activeRegionLedger;
+        saved_ledger.mark_saved(m_worldClock);
         if (!Persistence::WorldSaveService::save_metadata_and_active_regions(
                 metadata_json.dump(4) + "\n", m_activeRegionLedger, save_dir))
             return false;
-        m_regionDurableDirectory = save_dir;
+        if (auto* transaction = Persistence::SaveTransaction::active_for(save_dir))
+            transaction->defer_until_commit(
+                [this, expected_ledger, saved = std::move(saved_ledger)]() mutable {
+                    if (m_activeRegionLedger.canonical_bytes() == expected_ledger)
+                        m_activeRegionLedger = std::move(saved);
+                });
+        if (outer) {
+            if (!outer->Commit())
+                return false;
+        }
     } else if (!Persistence::WorldSaveService::save_metadata(metadata_json.dump(4) + "\n",
                                                              save_dir)) {
         return false;
@@ -1537,6 +1820,12 @@ bool GameSession::SaveWorldState(WorldStateSaveReport* report) {
 
 bool GameSession::SaveWorldStateTo(const std::filesystem::path& save_dir,
                                    WorldStateSaveReport* report) {
+    const auto save_started = std::chrono::steady_clock::now();
+    const auto elapsed_ms = [&save_started]() {
+        return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() -
+                                                         save_started)
+            .count();
+    };
     WorldStateSaveReport result;
     if (report) {
         *report = result;
@@ -1547,16 +1836,24 @@ bool GameSession::SaveWorldStateTo(const std::filesystem::path& save_dir,
         return false;
     }
 
-    if (!Persistence::WorldSaveService::validate_save(save_dir))
-        return false;
-
-    // Clock snapshots can contain energy or metadata without any chunk/plant writer
-    // creating the destination. Create it only after every refusal check passes.
+    // Flag on: one snapshot transaction covers the whole save (recovery, one validation, the
+    // journal, and the destination directory, which Start creates only after every refusal check
+    // passed). Flag off keeps today's per-writer validation.
+    std::unique_ptr<OuterSaveTransaction> outer;
     if (m_activeRegionsEnabled) {
-        std::error_code error;
-        fs::create_directories(save_dir, error);
-        if (error)
-            return false;
+        // A caller-owned transaction (RunInSnapshotTransaction) already recovered, validated and
+        // opened the journal; this save joins it and the owner commits.
+        if (!Persistence::SaveTransaction::active_for(save_dir)) {
+            outer =
+                StartOuterSave(save_dir, m_worldClock.tick(), m_activeRegionLedger.local_anchor());
+            if (!outer) {
+                RecordPersistenceSaveOutcome(false, elapsed_ms());
+                return false;
+            }
+        }
+    } else if (!Persistence::WorldSaveService::validate_save(save_dir)) {
+        RecordPersistenceSaveOutcome(false, elapsed_ms());
+        return false;
     }
 
     // Quiesce in-flight generation/promotion/meshing so chunk data is stable
@@ -1569,11 +1866,58 @@ bool GameSession::SaveWorldStateTo(const std::filesystem::path& save_dir,
     // so the saved bytes are identical to the old publishing barrier's.
     m_worldSystem->quiesce_streaming_jobs_for_save();
 
+    if (m_activeRegionsEnabled) {
+        // After the quiesce: a finishing generation worker can no longer erase the obligation.
+        m_worldSystem->sync_water_authority();
+    }
     WorldStreamingState state;
-    for (const auto& chunk : m_worldSystem->snapshot_streamed_chunks()) {
+    for (const auto& chunk : m_activeRegionsEnabled ? m_worldSystem->snapshot_authoritative_chunks()
+                                                    : m_worldSystem->snapshot_streamed_chunks()) {
         state.insert_chunk(chunk);
     }
     result.chunks_total = state.size();
+
+    std::error_code source_path_error, target_path_error;
+    const auto source_directory = fs::weakly_canonical(m_regionDurableDirectory, source_path_error);
+    const auto target_directory = fs::weakly_canonical(save_dir, target_path_error);
+    if (m_activeRegionsEnabled && !m_regionDurableDirectory.empty() &&
+        (source_path_error || target_path_error)) {
+        RecordPersistenceSaveOutcome(false, elapsed_ms());
+        return false;
+    }
+    if (m_activeRegionsEnabled && !m_regionDurableDirectory.empty() &&
+        source_directory != target_directory) {
+        // Save-as must transfer distant disk-only obligations before switching their backing
+        // directory. Stream one chunk at a time; live/parked state supersedes the old copy.
+        Persistence::WorldSaveService copier;
+        std::vector<std::string> copy_errors;
+        bool copied = true;
+        for (const auto& coords : m_worldSystem->durable_chunk_inventory()) {
+            if (state.find_chunk(Chunk::calculate_id(coords)))
+                continue;
+            const auto durable =
+                Persistence::WorldSaveService::read_chunk(m_regionDurableDirectory, coords, true);
+            if (durable.status != Persistence::WorldSaveService::ChunkReadStatus::Found) {
+                copied = false;
+                copy_errors.push_back(durable.error.empty()
+                                          ? "expected durable chunk missing during save-as"
+                                          : durable.error);
+                break;
+            }
+            WorldStreamingState one;
+            one.insert_chunk(durable.chunk);
+            if (!copier.save_world(one, save_dir, &copy_errors)) {
+                copied = false;
+                break;
+            }
+        }
+        if (!copied || !copier.save_world(state, save_dir, &copy_errors)) {
+            for (const auto& error : copy_errors)
+                LUMINUMBRA_CORE_ERROR("World save-as failed: {}", error);
+            RecordPersistenceSaveOutcome(false, elapsed_ms());
+            return false;
+        }
+    }
 
     //  project the live plant roster ONCE and persist it as a sibling file in
     // BOTH the dirty-empty and the normal save path (plants are independent of chunk dirtiness). An
@@ -1581,6 +1925,26 @@ bool GameSession::SaveWorldStateTo(const std::filesystem::path& save_dir,
     // holds).
     const auto plant_snapshot = luminumbra::foliage::BuildPlantEntitySnapshot(m_registry);
 
+    const auto acknowledge =
+        Persistence::WorldSaveService::chunk_save_acknowledgement(state.snapshot_chunks());
+    const auto defer_success = [this, &save_dir, &state, &elapsed_ms]() {
+        if (!m_activeRegionsEnabled)
+            return;
+        std::vector<IVec3> covered;
+        for (const auto& chunk : state.snapshot_chunks())
+            if (chunk && chunk->needs_authority())
+                covered.push_back(chunk->get_coords());
+        const auto completed_ms = elapsed_ms();
+        auto committed =
+            [this, directory = save_dir, covered = std::move(covered), completed_ms]() {
+                m_regionDurableDirectory = directory;
+                m_worldSystem->remember_durable_chunks(covered);
+                m_worldSystem->release_clean_parked_chunks();
+                RecordPersistenceSaveOutcome(true, completed_ms);
+            };
+        if (auto* transaction = Persistence::SaveTransaction::active_for(save_dir))
+            transaction->defer_until_commit(std::move(committed));
+    };
     const std::vector<ChunkID> dirty_ids = state.dirty_chunk_ids();
     result.chunks_dirty = dirty_ids.size();
     if (dirty_ids.empty()) {
@@ -1589,12 +1953,24 @@ bool GameSession::SaveWorldStateTo(const std::filesystem::path& save_dir,
         const bool plants_ok =
             Persistence::WorldSaveService::save_plant_entities(plant_snapshot, save_dir, nullptr);
         const bool energy_ok = SaveEnergyFieldRecord(save_dir);
-        if (m_activeRegionsEnabled && (!plants_ok || !energy_ok))
+        if (m_activeRegionsEnabled && (!plants_ok || !energy_ok)) {
+            RecordPersistenceSaveOutcome(false, elapsed_ms());
             return false;
+        }
         if (report) {
             *report = result;
         }
-        return !m_activeRegionsEnabled || SaveWorldMetadataTo(save_dir);
+        bool empty_ok = !m_activeRegionsEnabled || SaveWorldMetadataTo(save_dir);
+        if (empty_ok)
+            defer_success();
+        if (empty_ok && outer) {
+            empty_ok = outer->Commit();
+            if (empty_ok)
+                m_regionDurableDirectory = save_dir;
+        }
+        if (!empty_ok)
+            RecordPersistenceSaveOutcome(false, elapsed_ms());
+        return empty_ok;
     }
 
     Persistence::WorldSaveService service;
@@ -1610,11 +1986,11 @@ bool GameSession::SaveWorldStateTo(const std::filesystem::path& save_dir,
         // dirty flags exactly like the incremental path does.
         ok = service.save_world(state, save_dir, &errors);
         if (ok) {
-            for (const ChunkID id : dirty_ids) {
-                if (const auto chunk = state.find_chunk(id)) {
-                    chunk->clear_voxel_data_dirty();
-                }
-            }
+            // Inside the outer transaction the dirty bits clear only once it commits.
+            if (auto* transaction = Persistence::SaveTransaction::active_for(save_dir))
+                transaction->defer_until_commit(acknowledge);
+            else
+                acknowledge();
         }
     } else {
         const Persistence::WorldSaveDirtyReport dirty_report =
@@ -1650,6 +2026,13 @@ bool GameSession::SaveWorldStateTo(const std::filesystem::path& save_dir,
     }
     if (ok && m_activeRegionsEnabled)
         ok = SaveWorldMetadataTo(save_dir);
+    if (ok)
+        defer_success();
+    if (ok && outer) {
+        ok = outer->Commit();
+        if (ok)
+            m_regionDurableDirectory = save_dir;
+    }
     if (ok) {
         result.saved = true;
         result.chunks_saved = result.chunks_total; // whole-snapshot layout
@@ -1657,6 +2040,19 @@ bool GameSession::SaveWorldStateTo(const std::filesystem::path& save_dir,
                              result.chunks_total,
                              result.chunks_dirty,
                              save_dir.string());
+    }
+    if (m_activeRegionsEnabled) {
+        if (!ok) {
+            // The whole save failed after chunk dirty bits may have been acknowledged: re-arm
+            // every chunk this save covered so the retry rewrites it (no revision bump).
+            for (const ChunkID id : dirty_ids) {
+                if (const auto chunk = state.find_chunk(id)) {
+                    chunk->mark_dirty_for_save();
+                }
+            }
+        }
+        if (!ok)
+            RecordPersistenceSaveOutcome(false, elapsed_ms());
     }
     if (report) {
         *report = result;
@@ -1677,11 +2073,38 @@ bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
     if (!m_worldOpenError.empty() || !m_worldSystem || save_dir.empty()) {
         return false;
     }
+    {
+        std::vector<std::string> recovery_errors;
+        if (Persistence::recover_pending_journal(save_dir, &recovery_errors) ==
+            Persistence::RecoveryOutcome::Failed) {
+            m_worldOpenError =
+                "World unavailable: an interrupted save could not be recovered: " +
+                (recovery_errors.empty() ? std::string("unknown error") : recovery_errors.front());
+            m_worldSystem->clear_world(m_physicsSystem.get());
+            return false;
+        }
+    }
 
     Persistence::WorldSaveService service;
     WorldStreamingState loaded;
     std::vector<std::string> errors;
-    const bool snapshot_present = service.load_world(loaded, save_dir, errors);
+    std::vector<IVec3> durable_inventory;
+    std::set<ChunkID> wanted;
+    if (m_activeRegionsEnabled)
+        for (const auto& coords : m_worldSystem->GetInitialChunkLoadList(m_metadata.spawnPoint))
+            wanted.insert(Chunk::calculate_id(coords));
+    const std::function<bool(const IVec3&)> retain =
+        m_activeRegionsEnabled ? std::function<bool(const IVec3&)>([&wanted](const IVec3& coords) {
+            return wanted.contains(Chunk::calculate_id(coords));
+        })
+                               : std::function<bool(const IVec3&)>{};
+    const bool snapshot_present =
+        service.load_world(loaded,
+                           save_dir,
+                           errors,
+                           {},
+                           retain,
+                           m_activeRegionsEnabled ? &durable_inventory : nullptr);
     if (!snapshot_present && !errors.empty()) {
         m_worldOpenError = errors.front();
         m_worldSystem->clear_world(m_physicsSystem.get());
@@ -1728,6 +2151,7 @@ bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
         if (!m_activeRegionLedger.local_anchor())
             m_activeRegionLedger.try_set_local_anchor(m_metadata.spawnPoint);
         m_regionDurableDirectory = save_dir;
+        m_worldSystem->remember_durable_chunks(durable_inventory);
         m_regionSchedule = {};
         m_regionWork.clear();
         m_regionFault.reset();
@@ -1983,14 +2407,27 @@ bool GameSession::SaveEnergyFieldRecord(const std::filesystem::path& save_dir) {
                                           tick % luminumbra::fields::kEnergyCadenceTicks);
         if (m_energyFieldState->next_fire_tick() == aligned_next) {
             // Absence reconstructs this phase. Retire any stale nonempty record.
-            std::error_code error;
-            fs::remove(save_dir / "aether_state.efs", error);
-            return !error;
+            std::vector<std::string> errors;
+            const bool removed =
+                Persistence::WorldSaveService::remove_member(save_dir, "aether_state.efs", &errors);
+            for (const std::string& error : errors)
+                LUMINUMBRA_CORE_ERROR("Failed to retire aether state record: {}", error);
+            return removed;
         }
         // A legacy import can retain a different phase after its last unit decays.
         // The existing header alone preserves it without adding zero pages.
     }
     const std::string record = m_energyFieldState->SerializeRecord(GetSimulationTickCount());
+    if (m_activeRegionsEnabled || Persistence::SaveTransaction::active_for(save_dir) ||
+        Persistence::snapshot_index_exists(save_dir)) {
+        // Flag-on (or indexed-directory) lane: durable binary replace inside the save transaction.
+        std::vector<std::string> errors;
+        const bool written = Persistence::WorldSaveService::write_member_bytes(
+            save_dir, "aether_state.efs", record, &errors);
+        for (const std::string& error : errors)
+            LUMINUMBRA_CORE_ERROR("Failed to write aether state record: {}", error);
+        return written;
+    }
     std::ofstream file(save_dir / "aether_state.efs", std::ios::trunc);
     if (!file.is_open()) {
         LUMINUMBRA_CORE_ERROR("Failed to write aether state record under {}", save_dir.string());
