@@ -81,6 +81,29 @@ CELL_PERF=NOT_RUN
 CELL_PREP=""
 CELL_WALL=""
 
+# Check mandatory tools before recording or downloading the package baseline.
+# Identity-only fallbacks (wmic and which) remain optional.
+preflight() {
+    local tool missing=()
+    local -a required=(awk basename cat cmake cmp cp curl date dirname find
+                      g++ grep head mkdir mv ninja pacman pgrep pkill python rm sed
+                      sha256sum sleep tail timeout tr)
+    if [[ "${MSYSTEM:-}" == UCRT64 ]]; then
+        required+=(tasklist.exe taskkill.exe)
+    fi
+    for tool in "${required[@]}"; do
+        if ! command -v "$tool" >/dev/null 2>&1; then
+            missing+=("$tool")
+        fi
+    done
+    if (( ${#missing[@]} > 0 )); then
+        EXPERIMENT_STATUS=INFRASTRUCTURE_FAILED
+        printf 'missing required commands: %s\n' "${missing[*]}" > "$DIAG_DIR/reason.txt"
+        printf 'missing required commands: %s\n' "${missing[*]}" >&2
+        return 1
+    fi
+}
+
 installed_version() {
     local version
     version="$(pacman -Q "$PKG_PREFIX-$1" 2>/dev/null | awk '{print $2}' || true)"
@@ -95,6 +118,23 @@ record_baseline() {
             BASELINE_VERSION[$name]="$version"
         fi
     done
+}
+
+# The pinned old cc-libs requires libatomic at the same version. Provision it
+# before baseline capture; never introduce an absent package during a swap.
+check_gcc_prerequisite() {
+    local cell
+    for cell in $CELLS; do
+        if [[ "$cell" == 3 && -n "${BASELINE_VERSION[cc-libs]:-}" &&
+              -z "${BASELINE_VERSION[libatomic]:-}" ]]; then
+            EXPERIMENT_STATUS=INFRASTRUCTURE_FAILED
+            PKG_REASON="GCC prerequisite missing: recorded cc-libs requires baseline libatomic for pinned cc-libs=${GCC_DOWNGRADE[cc-libs]} intervention; provision libatomic before starting a new run"
+            printf '%s\n' "$PKG_REASON" > "$DIAG_DIR/reason.txt"
+            printf '%s\n' "$PKG_REASON" >&2
+            return 1
+        fi
+    done
+    return 0
 }
 
 # begin_deadline: start the budget for the next bounded operation group.
@@ -549,9 +589,12 @@ finish_cell() {
 run_probe() {
     local dir="$1" bdir="$2" exe="$3" rc=0
     bounded "$exe" --json "$dir/probe.json" > "$dir/probe.txt" 2>&1 || rc=$?
-    CELL_PROBE="$(classify_rc "$rc" TEST_FAILED)"
-    if [[ "$CELL_PROBE" == OK && ! -s "$dir/probe.json" ]]; then
-        CELL_PROBE=TEST_FAILED
+    if (( rc == 0 )); then
+        bounded python "$(dirname "${BASH_SOURCE[0]}")/check_worldgen_probe_smoke.py" \
+            --validate-report "$dir/probe.json" --mode full >> "$dir/probe.txt" 2>&1 || rc=$?
+        CELL_PROBE="$(classify_rc "$rc" INVALID_REPORT)"
+    else
+        CELL_PROBE="$(classify_rc "$rc" TEST_FAILED)"
     fi
     copy_test_artifacts "$bdir" "$dir"
 }
@@ -646,11 +689,18 @@ run_cell() {
         return 0
     fi
 
-    bounded cmake --build "$bdir" --target help > "$dir/targets.txt" 2>/dev/null || true
+    rc=0
+    bounded cmake --build "$bdir" --target help \
+        > "$dir/targets.txt" 2> "$dir/targets.stderr.txt" || rc=$?
+    if (( rc != 0 )); then
+        CELL_PROBE="$(op_failure_status "$rc" BUILD_FAILED)"
+        finish_cell "$dir" "$CELL_PROBE" || return 1
+        return 0
+    fi
     if grep -qw worldgen_probe "$dir/targets.txt"; then
         has_probe=1
     else
-        CELL_PROBE=ABSENT
+        CELL_PROBE=TARGET_MISSING
         printf 'probe target absent\n' > "$dir/probe.txt" || return 1
         echo "cell $CELL: probe target absent; continuing"
     fi
@@ -708,7 +758,7 @@ run_cell() {
     status=OK
     if [[ "$CELL_PERF" != OK ]]; then
         status="$CELL_PERF"
-    elif [[ "$CELL_PROBE" != OK && "$CELL_PROBE" != ABSENT ]]; then
+    elif [[ "$CELL_PROBE" != OK ]]; then
         status="$CELL_PROBE"
     fi
     finish_cell "$dir" "$status" || return 1
@@ -802,11 +852,13 @@ main() {
     trap 'exit 143' TERM
     trap 'exit 130' INT
     : > "$ROWS_FILE"
+    preflight || exit 1
     record_baseline
+    check_gcc_prerequisite || exit 1
     if ! stage_baseline; then
         EXPERIMENT_STATUS=STAGING_FAILED
         echo "baseline staging failed; no intervention was attempted" >&2
-        exit 0
+        exit 1
     fi
     local skipping=0
     for cell in $CELLS; do

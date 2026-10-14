@@ -27,6 +27,7 @@ __declspec(dllexport) extern const int AmdPowerXpressRequestHighPerformance = 1;
 #include "app/RenderBenchmarkReport.h"
 #include "app/RuntimeRoot.h"
 #include "app/RuntimeStateRecorder.h"
+#include "app/SessionExit.h"
 #include "app/WindowModeControls.h"
 #include "audio/AudioManagerFactory.h"
 #include "audio/AudioPropagationSystem.h"   // ComputeWaterfallRoar (static)
@@ -3797,13 +3798,8 @@ int main(int argc, char* argv[]) {
                         }
                     } // g_app.capture.timeScale == 0 -> paused (no sim ticks; render/streaming
                       // continue)
-                    if (const auto& region_fault = gameSession->GetRegionSchedulerFault()) {
-                        LUMINUMBRA_CORE_ERROR(
-                            "Region scheduler fault at tick {}: {}; saving and quitting",
-                            region_fault->tick,
-                            region_fault->message);
-                        glfwSetWindowShouldClose(window, GLFW_TRUE);
-                    }
+                    Luminumbra::Client::PollSessionFault(
+                        *gameSession, [&] { glfwSetWindowShouldClose(window, GLFW_TRUE); });
                     rb_sim_ms = std::chrono::duration<double, std::milli>(
                                     std::chrono::steady_clock::now() - _rb_sim_t0)
                                     .count();                         //
@@ -5267,13 +5263,15 @@ int main(int argc, char* argv[]) {
     // is active or when no chunk carries unsaved edits.
     // The main loop and its quit callback have returned; keep saving on this thread.
     trace_shutdown("world_save_started");
-    if (gameSession && gameSession->SaveWorldState()) {
-        if (!g_app.menu.menu_backdrop_active && g_camera)
-            gameSession->SetSpawnPoint(g_playerController ? g_playerController->SavedSpawnAnchor()
-                                                          : g_camera->Position);
-        if (gameSession->SaveWorld())
-            mark_shutdown("world_state_saved");
-    }
+    Luminumbra::Client::SaveSessionOnExit(
+        gameSession.get(),
+        [&] {
+            if (!g_app.menu.menu_backdrop_active && g_camera)
+                gameSession->SetSpawnPoint(g_playerController
+                                               ? g_playerController->SavedSpawnAnchor()
+                                               : g_camera->Position);
+        },
+        [&] { mark_shutdown("world_state_saved"); });
 
     // Finished means the save stage returned; only world_state_saved reports success.
     trace_shutdown("world_save_finished");

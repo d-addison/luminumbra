@@ -1,5 +1,6 @@
 """Actual package and held-reader publication contracts, without Blender/GPU."""
 import hashlib
+import ctypes
 from contextlib import contextmanager
 import importlib
 import importlib.util
@@ -20,7 +21,7 @@ import zipfile
 ROOT = Path(__file__).resolve().parents[2]
 AUTHORING = ROOT / 'tools/blender/authoring'
 sys.path.insert(0, str(AUTHORING / 'service'))
-from luminumbra_author import contracts, file_io
+from luminumbra_author import contracts, file_io, meshgen_jobs
 
 
 def load(path, name):
@@ -79,6 +80,81 @@ class SharedFileIOTests(unittest.TestCase):
             self.assertEqual(reader.read(), before)
             self.assertEqual(contracts.read_json(self.target), self.new)
         self.assertEqual(list(self.root.glob('.tmp-*')), [])
+
+    def test_actual_held_ledger_reader_allows_update_and_terminal_transition(self):
+        # No mocks on either OS: status() uses contracts.read_bounded(), which
+        # opens this same delete-sharing reader. Exercise durable E3 publication
+        # while that reader retains the old complete marker and owner records.
+        ledger = meshgen_jobs.RequestLedger(self.root)
+        record = ledger.begin('generate:held-reader', contracts.digest(b'plan'))
+        identifier = record['job_id']
+        path = ledger.root / ledger._record_name(identifier)
+        owner = ledger.root / '.meshgen.lock'
+        owner_bytes = contracts.read_bounded(owner, 1024**2)
+        with file_io.open_regular_reader(owner) as held_owner:
+            for state in ('running', 'failed'):
+                with self.subTest(state=state):
+                    before = contracts.read_bounded(path, 1024**2)
+                    with file_io.open_regular_reader(path) as held:
+                        if state == 'running':
+                            ledger.update(identifier, state=state)
+                        else:
+                            ledger.finish(identifier, state)
+                        self.assertEqual(held.read(), before)
+                        current = ledger.status(identifier)
+                        self.assertEqual(current['state'], state)
+                        self.assertEqual(contracts.read_bounded(path, 1024**2),
+                                         contracts.canonical(current) + b'\n')
+            self.assertEqual(held_owner.read(), owner_bytes)
+        self.assertFalse(owner.exists())
+        self.assertEqual(ledger.result(identifier)['state'], 'failed')
+        self.assertEqual(list(ledger.root.rglob('.publish-*')), [])
+        self.assertEqual(list(ledger.root.rglob('.removed-*')), [])
+
+    def test_windows_durable_publication_flushes_rename_handle_and_default_is_unchanged(self):
+        for durable in (False, True):
+            with self.subTest(durable=durable):
+                temporary = self.root / 'replacement.tmp'
+                temporary.write_bytes(b'complete')
+                kernel = mock.Mock()
+                kernel.CreateFileW.return_value = 123
+                kernel.GetFileInformationByHandleEx.return_value = True
+                kernel.SetFileInformationByHandle.return_value = True
+                kernel.FlushFileBuffers.return_value = True
+                with mock.patch.object(file_io, 'safe_path', side_effect=lambda path: path), \
+                        mock.patch.object(file_io.os, 'name', 'nt'), \
+                        mock.patch.object(file_io, '_windows_reader_api', return_value=kernel):
+                    file_io.replace_file(temporary, self.target, durable=durable)
+                kernel.CreateFileW.assert_called_once_with(
+                    str(temporary), 0x10080 | (0x40000000 if durable else 0), 7, None, 3, 0x00200000, None)
+                rename = kernel.SetFileInformationByHandle.call_args.args
+                self.assertEqual(rename[:2], (123, 22))
+                self.assertEqual(ctypes.c_uint32.from_buffer(rename[2]).value, 3)
+                self.assertEqual([call[0] for call in kernel.mock_calls],
+                    ['CreateFileW', 'GetFileInformationByHandleEx', 'SetFileInformationByHandle']
+                    + (['FlushFileBuffers'] if durable else []) + ['CloseHandle'])
+                if durable:
+                    kernel.FlushFileBuffers.assert_called_once_with(123)
+                kernel.CloseHandle.assert_called_once_with(123)
+
+    def test_windows_durable_flush_failure_propagates_and_closes_handle(self):
+        temporary = self.root / 'replacement.tmp'
+        temporary.write_bytes(b'complete')
+        kernel = mock.Mock()
+        kernel.CreateFileW.return_value = 123
+        kernel.GetFileInformationByHandleEx.return_value = True
+        kernel.SetFileInformationByHandle.return_value = True
+        kernel.FlushFileBuffers.return_value = False
+        with mock.patch.object(file_io, 'safe_path', side_effect=lambda path: path), \
+                mock.patch.object(file_io.os, 'name', 'nt'), \
+                mock.patch.object(file_io, '_windows_reader_api', return_value=kernel), \
+                mock.patch.object(ctypes, 'get_last_error', return_value=5, create=True), \
+                mock.patch.object(ctypes, 'WinError', return_value=OSError('flush failed'), create=True):
+            with self.assertRaisesRegex(OSError, 'flush failed'):
+                file_io.replace_file(temporary, self.target, durable=True)
+        kernel.SetFileInformationByHandle.assert_called_once()
+        kernel.FlushFileBuffers.assert_called_once_with(123)
+        kernel.CloseHandle.assert_called_once_with(123)
 
     def test_published_metadata_path_and_reader_identity_agree(self):
         # Publication changes metadata time even when the creation timestamp

@@ -1,15 +1,19 @@
 #include "luminumbra_common/animation/MorphMesh.h"
 
+#include "../support/UniqueTempPath.h"
+
 #include <gtest/gtest.h>
 #include <nlohmann/json.hpp>
 
 #include <bit>
-#include <chrono>
 #include <cmath>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <iterator>
 #include <limits>
+#include <string>
+#include <system_error>
 #include <type_traits>
 
 bool process_morph_gltf_checked(const std::string&, const std::string&);
@@ -110,10 +114,10 @@ class MorphAssetTest : public ::testing::Test {
 protected:
     fs::path directory;
     void SetUp() override {
-        directory = fs::temp_directory_path() /
-                    ("luminumbra_morph_" +
-                     std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
-        ASSERT_TRUE(fs::create_directory(directory));
+        std::error_code error;
+        directory = Luminumbra::TestSupport::CreateUniqueTempDirectory("luminumbra_morph_", error);
+        const bool created = !directory.empty();
+        ASSERT_TRUE(created) << "Failed to create a fresh temporary directory: " << error.message();
     }
     void TearDown() override {
         std::error_code error;
