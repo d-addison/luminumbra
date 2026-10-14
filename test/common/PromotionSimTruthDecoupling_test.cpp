@@ -199,12 +199,24 @@ TEST(PromotionSimTruthDecoupling, SimTruthPublishesIndependentlyOfRenderMesh) {
         target->has_collision.store(true);
         const auto mesh_version = target->mesh_version.load();
         const auto content_digest = P::WorldSaveService::region_simulation_digest(
-            {}, region, P::RegionDigestInputs{{target}, {}});
+            {},
+            region,
+            P::RegionDigestInputs{.live = {target},
+                                  .parked = {},
+                                  .durable = {},
+                                  .ground_object_bytes = {},
+                                  .field_page_bytes = {}});
         world->wait_for_streaming_jobs();
         EXPECT_GT(target->mesh_version.load(), mesh_version);
         EXPECT_FALSE(target->has_collision.load());
         EXPECT_EQ(P::WorldSaveService::region_simulation_digest(
-                      {}, region, P::RegionDigestInputs{{target}, {}}),
+                      {},
+                      region,
+                      P::RegionDigestInputs{.live = {target},
+                                            .parked = {},
+                                            .durable = {},
+                                            .ground_object_bytes = {},
+                                            .field_page_bytes = {}}),
                   content_digest);
 
         // The render half completes under the full barrier; the mesh publish must

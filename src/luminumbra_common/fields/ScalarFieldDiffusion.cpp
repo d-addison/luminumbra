@@ -109,7 +109,8 @@ void ScalarFieldDiffusion::seal(const std::size_t x, const std::size_t y, const 
 }
 
 ScalarDiffusionReport ScalarFieldDiffusion::diffuse(const std::size_t iterations,
-                                                    const double diffusion_rate) {
+                                                    const double diffusion_rate,
+                                                    const EdgeGate& gate) {
     if (!finite(diffusion_rate) || diffusion_rate <= 0.0 || diffusion_rate > kMaximumStableRate) {
         throw std::invalid_argument(
             "scalar diffusion rate must be finite and in the stable range (0, 0.25]");
@@ -127,7 +128,8 @@ ScalarDiffusionReport ScalarFieldDiffusion::diffuse(const std::size_t iterations
         double max_delta = 0.0;
 
         const auto exchange = [&](const std::size_t lhs, const std::size_t rhs) {
-            if (!can_exchange(lhs, rhs)) {
+            if (!can_exchange(lhs, rhs) ||
+                (gate && !gate(lhs % width_, lhs / width_, rhs % width_, rhs / width_))) {
                 return;
             }
 

@@ -88,6 +88,21 @@ void AetherFieldSystem::Update(std::uint64_t tick,
                                const Vec3& region_anchor,
                                const WindFieldSystem* wind) {
     m_last_tick = tick;
+    if (m_regional_sample) {
+        // Rendering reads the same authoritative sampler through this derived texture grid.
+        const auto cx = static_cast<std::int64_t>(std::floor(region_anchor.x / kAetherCellSizeM));
+        const auto cz = static_cast<std::int64_t>(std::floor(region_anchor.z / kAetherCellSizeM));
+        m_grid.set_origin_cells(cx - kAetherExtentCells / 2, cz - kAetherExtentCells / 2);
+        for (int z = 0; z < m_grid.extent_cells(); ++z)
+            for (int x = 0; x < m_grid.extent_cells(); ++x) {
+                const auto px = static_cast<float>(m_grid.origin_cell_x() + x) * kAetherCellSizeM +
+                                kAetherCellSizeM * 0.5f;
+                const auto pz = static_cast<float>(m_grid.origin_cell_z() + z) * kAetherCellSizeM +
+                                kAetherCellSizeM * 0.5f;
+                m_grid.at(x, z) = m_regional_sample(Vec3(px, 0, pz));
+            }
+        return;
+    }
 
     // 1) Anchor the grid origin on the streamed region (pure integer).
     const float cell = m_grid.cell_size_m();
@@ -204,6 +219,8 @@ void AetherFieldSystem::Update(std::uint64_t tick,
 }
 
 float AetherFieldSystem::SampleAether(const Vec3& world_pos) const {
+    if (m_regional_sample)
+        return m_regional_sample(world_pos);
     int lx = 0;
     int lz = 0;
     bool in_region = false;
@@ -215,6 +232,8 @@ float AetherFieldSystem::SampleAether(const Vec3& world_pos) const {
 }
 
 std::string AetherFieldSystem::ComputeAetherSubHash() const {
+    if (m_regional_hash)
+        return m_regional_hash();
     std::uint64_t hash = 14695981039346656037ull; // fnv offset basis
     MixU64(hash, static_cast<std::uint64_t>(static_cast<std::uint32_t>(m_aether_seed)));
     MixU64(hash, m_last_tick);

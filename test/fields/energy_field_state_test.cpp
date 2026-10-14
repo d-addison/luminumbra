@@ -5,7 +5,10 @@
 
 #include <gtest/gtest.h>
 
+#include <array>
 #include <cstdint>
+#include <limits>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -416,4 +419,411 @@ TEST(AetherEmitterDeterminism, MultiChannelIndependence) {
     EXPECT_EQ(g.at_cell(0, 0, 1), 20000u);
 }
 
+using Luminumbra::world::ActiveRegionLedger;
+using Luminumbra::world::ActiveRegionRecord;
+using Luminumbra::world::RegionKey;
+using Luminumbra::world::RegionState;
+using Luminumbra::world::WorldClock;
+using EnergyAges = EnergyFieldState::EnergyAges;
+using EnergyRecords = EnergyFieldState::RegionRecords;
+using EnergyResult = EnergyFieldState::RegionalResult;
+
+EnergyRecords TwoEnergyOwners() {
+    return {{{0, 0}, ActiveRegionRecord{}}, {{1, 0}, ActiveRegionRecord{}}};
+}
+EnergyResult RegionalStep(EnergyFieldState& field,
+                          std::uint64_t tick,
+                          const EnergyRecords& records,
+                          std::span<const RegionKey> due,
+                          const EnergyAges& ages) {
+    EnergyResult result;
+    EXPECT_TRUE(field.TickRegional(tick, records, due, ages, result));
+    return result;
+}
+
+TEST(RegionalEnergy, CentreOwnershipSplitsOnePhysicalPageAndHandlesNegativeCells) {
+    EXPECT_EQ(EnergyFieldState::OwnerOfCell(20, 0), (RegionKey{0, 0}));
+    EXPECT_EQ(EnergyFieldState::OwnerOfCell(21, 0), (RegionKey{1, 0}));
+    EXPECT_EQ(EnergyFieldState::OwnerOfCell(-1, -22), (RegionKey{-1, -2}));
+    EXPECT_EQ(EnergyFieldState::OwnerOfCell(-21, -21), (RegionKey{-1, -1}));
+    EnergyFieldState field;
+    ASSERT_TRUE(field.DeserializeRegionalRecord("EFS1 1 0\nP 1 0 4:60000 5:12345\n"));
+    ASSERT_EQ(field.page_count(), 1u);
+    EXPECT_EQ(field.RegionBytes({0, 0}), "aether_state:v1:1:P1,0,0:4=60000;");
+    EXPECT_EQ(field.RegionBytes({1, 0}), "aether_state:v1:1:P1,0,0:5=12345;");
+    EXPECT_TRUE(field.OwnsRegion({0, 0}));
+    EXPECT_TRUE(field.OwnsRegion({1, 0}));
+    EXPECT_FALSE(field.OwnsRegion({2, 0}));
+}
+
+TEST(RegionalEnergy, FrozenOwnerCellsAndAgeStayExactOnAMixedOwnerPage) {
+    EnergyFieldState field;
+    ASSERT_TRUE(field.DeserializeRegionalRecord("EFS1 1 0\nP 1 0 4:60000 5:12345\n"));
+    auto records = TwoEnergyOwners();
+    records.at({1, 0}).state = RegionState::Frozen;
+    records.at({1, 0}).cadence_shift = 2;
+    EnergyAges ages{{{0, 0}, 0}, {{1, 0}, 17}};
+    const auto frozen = field.RegionBytes({1, 0});
+    const std::array due{RegionKey{0, 0}};
+    for (std::uint64_t tick = 1; tick <= 40; ++tick) {
+        field.QueueDeposit(1, 21, 0, 0, 900); // refused target never changes frozen cells
+        auto result = RegionalStep(field, tick, records, due, ages);
+        EXPECT_EQ(result.clipped_raw, 900u);
+        ages = result.ages;
+        EXPECT_EQ(ages.at({0, 0}), tick);
+        EXPECT_EQ(ages.at({1, 0}), 17u);
+        EXPECT_EQ(field.RegionBytes({1, 0}), frozen);
+        for (const auto& work : result.work)
+            EXPECT_NE(work.key, (RegionKey{1, 0}));
+    }
+    EXPECT_EQ(field.at_cell(21, 0), 12345u);
+}
+
+TEST(RegionalEnergy, CommonBorderRunsOutsideUnequalInteriorPhasesAndConservesRaw) {
+    EnergyFieldState field;
+    ASSERT_TRUE(field.DeserializeRegionalRecord("EFS1 1 0\nP 1 0 4:16000\n"));
+    auto records = TwoEnergyOwners();
+    records.at({0, 0}).state = RegionState::Reduced;
+    records.at({0, 0}).cadence_shift = 1;
+    records.at({0, 0}).cadence_phase = 1;
+    records.at({1, 0}).state = RegionState::Reduced;
+    records.at({1, 0}).cadence_shift = 2;
+    records.at({1, 0}).cadence_phase = 2;
+    const EnergyAges ages{{{0, 0}, 3}, {{1, 0}, 5}};
+    const auto initial = field.CanonicalRegionalBytes();
+    auto result = RegionalStep(field, 3, records, {}, ages);
+    EXPECT_EQ(field.CanonicalRegionalBytes(), initial);
+    EXPECT_EQ(result.ages, ages);
+    EXPECT_TRUE(result.work.empty());
+    // Neither owner's interior phase is due at tick 4. The border still runs.
+    result = RegionalStep(field, 4, records, {}, ages);
+    EXPECT_EQ(result.ages, ages);
+    EXPECT_EQ(field.total_raw(), 16000u);
+    EXPECT_GT(field.at_cell(21, 0), 0u);
+    EXPECT_EQ(field.at_cell(19, 0), 0u); // no same-owner interior diffusion
+    ASSERT_EQ(result.work.size(), 2u);
+    EXPECT_EQ(result.work[0].key, (RegionKey{0, 0}));
+    EXPECT_EQ(result.work[1].key, (RegionKey{1, 0}));
+    EXPECT_EQ(result.work[0].page_updates, 1u);
+    EXPECT_EQ(result.work[1].page_updates, 1u);
+    const auto after_border = field.CanonicalRegionalBytes();
+    result = RegionalStep(field, 5, records, {}, ages);
+    EXPECT_EQ(field.CanonicalRegionalBytes(), after_border);
+}
+
+TEST(RegionalEnergy, AbsentOwnersAndAbsentPagesHaveSealedEdges) {
+    EnergyFieldState field;
+    ASSERT_TRUE(field.DeserializeRegionalRecord("EFS1 1 0\nP 1 0 4:16000\n"));
+    const EnergyRecords records{{{0, 0}, ActiveRegionRecord{}}};
+    const std::array due{RegionKey{0, 0}};
+    const EnergyAges ages{{{0, 0}, 7}};
+    const auto result = RegionalStep(field, 1000000, records, due, ages);
+    EXPECT_EQ(result.ages.at({0, 0}), 8u);
+    EXPECT_EQ(field.total_raw(), DecayOnceRef(16000));
+    EXPECT_EQ(field.at_cell(21, 0), 0u);
+    EXPECT_EQ(field.page_count(), 1u);
+    EXPECT_FALSE(field.OwnsRegion({1, 0}));
+}
+
+TEST(RegionalEnergy, IntrinsicOneFireRoundingAndNoAbsoluteCatchup) {
+    EnergyFieldState field;
+    ASSERT_TRUE(field.DeserializeRegionalRecord("EFS1 1 0\nP 0 0 0:1 17:255 34:65535\n"));
+    const EnergyRecords records{{{0, 0}, ActiveRegionRecord{}}};
+    const std::array due{RegionKey{0, 0}};
+    const EnergyAges ages{{{0, 0}, 7}};
+    const auto expected = std::uint64_t{DecayOnceRef(1)} + DecayOnceRef(255) + DecayOnceRef(65535);
+    const auto result = RegionalStep(field, 3000000, records, due, ages);
+    EXPECT_EQ(result.ages.at({0, 0}), 8u);
+    EXPECT_EQ(field.total_raw(), expected);
+    EXPECT_EQ(field.fires_completed(), 0u);
+}
+
+TEST(RegionalEnergy, EmptyEnergyAgeContinuesAcrossSaveAndReopenBeforeLaterDeposit) {
+    ActiveRegionLedger ledger;
+    ledger.mark_edited({0, 0}, WorldClock{});
+    EnergyFieldState field;
+    const std::array due{RegionKey{0, 0}};
+    for (std::uint64_t tick = 1; tick <= 7; ++tick) {
+        auto result = RegionalStep(field, tick, ledger.records(), due, ledger.energy_ages());
+        ASSERT_TRUE(ledger.set_energy_ages(result.ages));
+    }
+    EXPECT_TRUE(field.SerializeRegionalRecord().empty());
+    EXPECT_TRUE(field.CanonicalRegionalBytes().empty());
+    ASSERT_EQ(ledger.energy_ages().at({0, 0}), 7u);
+    ActiveRegionLedger restored;
+    std::string error;
+    ASSERT_TRUE(ActiveRegionLedger::decode(ledger.encode(), restored, error)) << error;
+    EnergyFieldState reopened; // indexed absent EFS; do not reset the ARL age
+    field.QueueDeposit(1, 1, 1, 0, 1025);
+    reopened.QueueDeposit(1, 1, 1, 0, 1025);
+    const auto uninterrupted = RegionalStep(field, 8, ledger.records(), due, ledger.energy_ages());
+    const auto resumed =
+        RegionalStep(reopened, 800000, restored.records(), due, restored.energy_ages());
+    EXPECT_EQ(uninterrupted.ages, resumed.ages);
+    EXPECT_EQ(resumed.ages.at({0, 0}), 8u);
+    EXPECT_EQ(reopened.total_raw(), DecayOnceRef(1025));
+    EXPECT_EQ(reopened.SerializeRegionalRecord(), field.SerializeRegionalRecord());
+}
+
+TEST(RegionalEnergy, SaveAndHashesReadFrozenStoredValuesWithoutNormalization) {
+    // Build legacy stale pages to prove regional observation bypasses NormalizeAllPages.
+    EnergyFieldState field;
+    field.SetAnchorCell(4096, 4096);
+    field.QueueDeposit(1, 4096, 4096, 0, 51234);
+    field.Tick(1);
+    field.SetAnchorCell(0, 0);
+    field.Tick(800);
+    const auto legacy_before = field.CanonicalBytes();
+    const auto fires = field.fires_completed();
+    const auto next = field.next_fire_tick();
+    const auto regional = field.CanonicalRegionalBytes();
+    const auto owner = EnergyFieldState::OwnerOfCell(4096, 4096);
+    const auto owner_bytes = field.RegionBytes(owner);
+    const auto saved = field.SerializeRegionalRecord();
+    EXPECT_EQ(saved, "EFS1 1 0\nP 256 256 0:51234\n");
+    EXPECT_EQ(field.CanonicalBytes(), legacy_before);
+    EXPECT_EQ(field.at_cell(4096, 4096), 51234u);
+    EXPECT_EQ(field.fires_completed(), fires);
+    EXPECT_EQ(field.next_fire_tick(), next);
+    EnergyFieldState reopened;
+    ASSERT_TRUE(reopened.DeserializeRegionalRecord(saved));
+    EXPECT_EQ(reopened.CanonicalRegionalBytes(), regional);
+    EXPECT_EQ(reopened.RegionBytes(owner), owner_bytes);
+    EXPECT_EQ(reopened.SerializeRegionalRecord(), saved);
+}
+
+TEST(RegionalEnergy, AgeOverflowAndBadDueRefuseAtomicallyIncludingPendingDeposits) {
+    EnergyFieldState field;
+    const auto records = TwoEnergyOwners();
+    const std::array due{RegionKey{0, 0}, RegionKey{1, 0}};
+    field.QueueDeposit(1, 1, 1, 0, 2000);
+    EnergyResult output;
+    output.clipped_raw = 99;
+    output.ages = {{{9, 9}, 42}};
+    output.work = {{{9, 9}, 1, 2, 3, 4}};
+    const EnergyAges bad_ages{{{0, 0}, 4}, {{1, 0}, WorldClock::kTickLimit - 1}};
+    EXPECT_FALSE(field.TickRegional(500, records, due, bad_ages, output));
+    EXPECT_EQ(output.clipped_raw, 99u);
+    EXPECT_EQ(output.ages, (EnergyAges{{{9, 9}, 42}}));
+    ASSERT_EQ(output.work.size(), 1u);
+    EXPECT_EQ(output.work[0].page_updates, 4u);
+    EXPECT_TRUE(field.SerializeRegionalRecord().empty());
+    EXPECT_TRUE(field.OwnsRegion({0, 0})); // pending deposit preserved
+    const std::array reversed{RegionKey{1, 0}, RegionKey{0, 0}};
+    const std::array duplicate{RegionKey{0, 0}, RegionKey{0, 0}};
+    const std::array orphan{RegionKey{2, 0}};
+    EXPECT_FALSE(field.TickRegional(500, records, reversed, {}, output));
+    EXPECT_FALSE(field.TickRegional(500, records, duplicate, {}, output));
+    EXPECT_FALSE(field.TickRegional(500, records, orphan, {}, output));
+    EXPECT_FALSE(field.TickRegional(WorldClock::kTickLimit, records, due, {}, output));
+    auto frozen = records;
+    frozen.at({0, 0}).state = RegionState::Frozen;
+    EXPECT_FALSE(field.TickRegional(500, frozen, due, {}, output));
+    auto result = RegionalStep(field, 500, records, due, {});
+    EXPECT_EQ(result.ages.at({0, 0}), 1u);
+    EXPECT_EQ(field.at_cell(1, 1), 2000u);
+}
+
+TEST(RegionalEnergy, SortedDepositsSaturateWithoutWrappingAndRegistrationOrderIsNeutral) {
+    const EnergyRecords records{{{0, 0}, ActiveRegionRecord{}}};
+    const std::array due{RegionKey{0, 0}};
+    EnergyFieldState a, b;
+    a.QueueDeposit(8, 1, 1, 0, UINT32_MAX);
+    a.QueueDeposit(3, 1, 1, 0, 7);
+    b.QueueDeposit(3, 1, 1, 0, 7);
+    b.QueueDeposit(8, 1, 1, 0, UINT32_MAX);
+    const auto ra = RegionalStep(a, 1, records, due, {});
+    const auto rb = RegionalStep(b, 1, records, due, {});
+    EXPECT_EQ(ra.clipped_raw, std::uint64_t{UINT32_MAX} + 7 - 65535);
+    EXPECT_EQ(ra.clipped_raw, rb.clipped_raw);
+    EXPECT_EQ(a.at_cell(1, 1), 65535u);
+    EXPECT_EQ(a.SerializeRegionalRecord(), b.SerializeRegionalRecord());
+}
+
+TEST(RegionalEnergy, RegionalDecoderRefusesNoncanonicalPresentRecordsAtomically) {
+    EnergyFieldState field;
+    const std::string valid = "EFS1 2 0\nP -1 0 30:12 31:345\nP 1 0 4:1\n";
+    ASSERT_TRUE(field.DeserializeRegionalRecord(valid));
+    const auto before = field.SerializeRegionalRecord();
+    const std::vector<std::string> refused{"",
+                                           "EFS1 1 0\n",
+                                           "EFS1 1 1\nP 0 0 0:1\n",
+                                           "EFS1 0 0\nP 0 0 0:1\n",
+                                           "EFS1 65 0\nP 0 0 0:1\n",
+                                           "EFS1 2147483648 0\nP 0 0 0:1\n",
+                                           "EFS1 1 0\nP 0 0\n",
+                                           "EFS1 1 0\nP 0 0 0:0\n",
+                                           "EFS1 1 0\nP 0 0 0:65536\n",
+                                           "EFS1 1 0\nP 0 0 256:1\n",
+                                           "EFS1 1 0\nP 0 0 0:1 0:2\n",
+                                           "EFS1 1 0\nP 0 0 1:2 0:1\n",
+                                           "EFS1 1 0\nP 0 0 0:1\nP 0 0 1:2\n",
+                                           "EFS1 1 0\nP 1 0 0:1\nP 0 0 1:2\n",
+                                           "EFS1 1 0\nP 0 0 0:1junk\n",
+                                           "EFS1 1 0\nP 0 0 -1:1\n",
+                                           "EFS1 1 0\nP -0 0 0:1\n",
+                                           "EFS1 1 0\nP 0 0 00:1\n",
+                                           "EFS1 1 0\nP 0 0 0:1",
+                                           "EFS1 1 0\nP 0 0 0:1\n\n",
+                                           "EFS1 1 0\nP 2147483647 0 0:1\n",
+                                           "EFS1 1 0\nP -43691 0 0:1\n",
+                                           "EFS1 1 0 extra\nP 0 0 0:1\n",
+                                           "EFS1 1 0\nP 0 0 0:1\ntrailer\n"};
+    for (const auto& record : refused) {
+        EXPECT_FALSE(field.DeserializeRegionalRecord(record)) << record;
+        EXPECT_EQ(field.SerializeRegionalRecord(), before);
+    }
+    EXPECT_FALSE(field.DeserializeRegionalRecord(
+        std::string(EnergyFieldState::kMaxRegionalRecordBytes + 1, 'x')));
+    EXPECT_EQ(field.SerializeRegionalRecord(), before);
+}
+
+TEST(RegionalEnergy, JointRestoreRequiresAgesForEveryNonzeroOwner) {
+    EnergyFieldState field;
+    ASSERT_TRUE(field.DeserializeRegionalRecord("EFS1 1 0\nP 1 0 4:1 5:2\n"));
+    const auto records = TwoEnergyOwners();
+    EXPECT_FALSE(field.ValidateRegionalOwners(records, {{{0, 0}, 7}}));
+    EXPECT_FALSE(
+        field.ValidateRegionalOwners({{{0, 0}, ActiveRegionRecord{}}}, {{{0, 0}, 7}, {{1, 0}, 2}}));
+    EXPECT_FALSE(
+        field.ValidateRegionalOwners(records, {{{0, 0}, 7}, {{1, 0}, WorldClock::kTickLimit}}));
+    EXPECT_TRUE(field.ValidateRegionalOwners(records, {{{0, 0}, 7}, {{1, 0}, 2}}));
+}
+
+TEST(RegionalEnergy, FlagOffFixtureAndLegacyHeaderRemainUnchanged) {
+    EnergyFieldState legacy(2);
+    legacy.SetAnchorCell(0, 0);
+    legacy.QueueDeposit(1, -1, 0, 0, 123);
+    legacy.QueueDeposit(2, 0, 0, 1, 456);
+    legacy.Tick(1);
+    const std::string fixture = "EFS1 2 7\nP -1 0 30:123\nP 0 0 1:456\n";
+    EXPECT_EQ(legacy.SerializeRecord(1), fixture);
+    EXPECT_EQ(legacy.CanonicalBytes(), "aether_state:v1:2:P-1,0,0:30=123;P0,0,0:1=456;");
+    EnergyFieldState restored;
+    ASSERT_TRUE(restored.DeserializeRecord(fixture, 1));
+    EXPECT_EQ(restored.SerializeRecord(1), fixture);
+    EXPECT_FALSE(restored.DeserializeRegionalRecord(fixture));
+    EXPECT_EQ(restored.SerializeRecord(1), fixture);
+    EnergyFieldState empty;
+    EXPECT_EQ(empty.SerializeRecord(0), "EFS1 1 8\n");
+    EXPECT_TRUE(empty.SerializeRegionalRecord().empty());
+}
+
+TEST(RegionalEnergy, DecodedCapacityRefusesGrowthWithoutConsumingPendingInput) {
+    constexpr int channels = 64;
+    const auto max_pages =
+        EnergyFieldState::kMaxRegionalValueBytes /
+        (std::size_t{kEnergyPageCells * kEnergyPageCells} * channels * sizeof(std::uint16_t));
+    std::string full = "EFS1 64 0\n";
+    EnergyRecords records;
+    EnergyAges ages;
+    for (std::size_t page = 0; page < max_pages; ++page) {
+        full += "P " + std::to_string(page) + " 0 0:1\n";
+        const auto owner =
+            EnergyFieldState::OwnerOfCell(static_cast<int>(page) * kEnergyPageCells, 0);
+        records.try_emplace(owner);
+        ages.try_emplace(owner, 1);
+    }
+    EnergyFieldState field;
+    ASSERT_TRUE(field.DeserializeRegionalRecord(full));
+    EXPECT_EQ(field.channels(), channels);
+    const auto next_cell = static_cast<int>(max_pages) * kEnergyPageCells;
+    const auto next_owner = EnergyFieldState::OwnerOfCell(next_cell, 0);
+    records.try_emplace(next_owner);
+    const std::array due{next_owner};
+    ASSERT_TRUE(field.QueueRegionalDeposit(1, next_cell, 0, 0, 777));
+    EnergyResult output;
+    output.clipped_raw = 42;
+    EXPECT_FALSE(field.TickRegional(1, records, due, ages, output));
+    EXPECT_EQ(output.clipped_raw, 42u);
+    EXPECT_TRUE(output.ages.empty());
+    EXPECT_EQ(field.SerializeRegionalRecord(), full);
+    EXPECT_TRUE(field.OwnsRegion(next_owner)); // queued input survived capacity refusal
+    const auto over_cap = full + "P " + std::to_string(max_pages) + " 0 0:1\n";
+    EXPECT_FALSE(field.DeserializeRegionalRecord(over_cap));
+    EXPECT_EQ(field.SerializeRegionalRecord(), full);
+    EXPECT_TRUE(field.OwnsRegion(next_owner));
+}
+
+TEST(RegionalEnergy, RegionalDepositAdmissionChecksChannelWorldAndPendingCapacity) {
+    EnergyFieldState field(2);
+    EXPECT_FALSE(field.QueueRegionalDeposit(1, 0, 0, -1, 1));
+    EXPECT_FALSE(field.QueueRegionalDeposit(1, 0, 0, 2, 1));
+    EXPECT_FALSE(field.QueueRegionalDeposit(1, std::numeric_limits<int>::max(), 0, 0, 1));
+    EXPECT_FALSE(field.QueueRegionalDeposit(1, 0, std::numeric_limits<int>::min(), 0, 1));
+    EXPECT_FALSE(field.OwnsRegion({0, 0}));
+    EXPECT_TRUE(field.QueueRegionalDeposit(1, 0, 0, 0, 0));
+    EXPECT_FALSE(field.OwnsRegion({0, 0}));
+    for (std::size_t i = 0; i < EnergyFieldState::kMaxRegionalDeposits; ++i)
+        ASSERT_TRUE(field.QueueRegionalDeposit(i, 0, 0, 0, 1));
+    EXPECT_FALSE(field.QueueRegionalDeposit(0, 21, 0, 0, 1));
+    EXPECT_TRUE(field.OwnsRegion({0, 0}));
+    EXPECT_FALSE(field.OwnsRegion({1, 0}));
+    EXPECT_TRUE(field.SerializeRegionalRecord().empty());
+    // The shared legacy gatherer remains compatible, but TickRegional still
+    // refuses an oversized buffer before consuming any deposits.
+    field.QueueDeposit(0, 21, 0, 0, 1);
+    EnergyResult output;
+    output.clipped_raw = 91;
+    EXPECT_FALSE(field.TickRegional(1, TwoEnergyOwners(), {}, {}, output));
+    EXPECT_EQ(output.clipped_raw, 91u);
+    EXPECT_TRUE(field.OwnsRegion({1, 0}));
+}
+
+TEST(RegionalEnergy, BorderAcquisitionInitializesZeroAgeWithoutAnInteriorAdvance) {
+    EnergyFieldState field;
+    ASSERT_TRUE(field.DeserializeRegionalRecord("EFS1 1 0\nP 1 0 4:1000\n"));
+    const auto records = TwoEnergyOwners();
+    const auto result = RegionalStep(field, 20, records, {}, {{{0, 0}, 3}});
+    EXPECT_EQ(result.ages.at({0, 0}), 3u);
+    EXPECT_EQ(result.ages.at({1, 0}), 0u);
+    EXPECT_GT(field.at_cell(21, 0), 0u);
+    EXPECT_EQ(field.total_raw(), 1000u);
+    EXPECT_TRUE(field.ValidateRegionalOwners(records, result.ages));
+    ASSERT_EQ(result.work.size(), 2u);
+    EXPECT_EQ(result.work[0].key, (RegionKey{0, 0}));
+    EXPECT_EQ(result.work[0].page_updates, 1u); // existing age, one physical page
+    EXPECT_EQ(result.work[1].key, (RegionKey{1, 0}));
+    EXPECT_EQ(result.work[1].page_updates, 2u); // one page plus first zero-age register
+}
+
+TEST(RegionalEnergy, RegionalMultiChannelStoredContinuationMatchesAtEveryCadence) {
+    const auto records = TwoEnergyOwners();
+    const std::array due{RegionKey{0, 0}, RegionKey{1, 0}};
+    EnergyFieldState uninterrupted(2), reopened(2);
+    EnergyAges a, b;
+    for (std::uint64_t tick = 1; tick <= 24; ++tick) {
+        ASSERT_TRUE(uninterrupted.QueueRegionalDeposit(tick, 20, 0, 0, 300));
+        ASSERT_TRUE(reopened.QueueRegionalDeposit(tick, 20, 0, 0, 300));
+        ASSERT_TRUE(uninterrupted.QueueRegionalDeposit(tick + 90, 21, 0, 1, 600));
+        ASSERT_TRUE(reopened.QueueRegionalDeposit(tick + 90, 21, 0, 1, 600));
+        a = RegionalStep(uninterrupted, tick, records, due, a).ages;
+        b = RegionalStep(reopened, tick, records, due, b).ages;
+        const auto record = reopened.SerializeRegionalRecord();
+        ASSERT_TRUE(reopened.DeserializeRegionalRecord(record));
+        ASSERT_TRUE(reopened.ValidateRegionalOwners(records, b));
+        EXPECT_EQ(reopened.SerializeRegionalRecord(), uninterrupted.SerializeRegionalRecord());
+        EXPECT_EQ(reopened.CanonicalRegionalBytes(), uninterrupted.CanonicalRegionalBytes());
+        EXPECT_EQ(a, b);
+    }
+}
+
 } // namespace
+
+TEST(RegionalEnergy, EmptyDueOwnersCountEachPersistentAgeUpdate) {
+    EnergyFieldState field;
+    const auto records = TwoEnergyOwners();
+    const std::array due{RegionKey{0, 0}, RegionKey{1, 0}};
+    const auto result = RegionalStep(field, 1, records, due, {});
+    EXPECT_TRUE(field.SerializeRegionalRecord().empty());
+    EXPECT_EQ(field.page_count(), 0u);
+    ASSERT_EQ(result.work.size(), 2u);
+    for (std::size_t i = 0; i < due.size(); ++i) {
+        EXPECT_EQ(result.work[i].key, due[i]);
+        EXPECT_EQ(result.work[i].page_updates, 1u);
+        EXPECT_EQ(result.work[i].region_ticks, 0u);
+        EXPECT_EQ(result.work[i].entity_updates, 0u);
+        EXPECT_EQ(result.work[i].water_cells, 0u);
+        EXPECT_EQ(result.ages.at(due[i]), 1u);
+    }
+}

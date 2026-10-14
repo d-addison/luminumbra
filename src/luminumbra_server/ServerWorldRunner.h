@@ -27,6 +27,8 @@
 
 namespace Luminumbra::Server {
 
+inline constexpr std::uint64_t kDefaultActiveRegionsAutosaveTicks = 9000;
+
 struct ServerWorldRunnerConfig {
     // Runtime root with trailing separator (GameSession concatenates paths).
     std::string root_path;
@@ -48,6 +50,11 @@ struct ServerWorldRunnerConfig {
     // Autosave every N simulation ticks through WorldSaveService
     // (GameSession::SaveWorldState incremental contract). 0 disables.
     std::uint64_t autosave_interval_ticks = 0;
+    // When true and autosave_interval_ticks == 0 and sim.active_regions is on, autosave every
+    // kDefaultActiveRegionsAutosaveTicks ticks. Only the plain server mode sets it.
+    bool autosave_default_when_unset = false;
+    // Parked-chunk byte limit applied to the session (sim.active_regions only). 0 = unlimited.
+    std::uint64_t parked_bytes_limit = 256ull * 1024ull * 1024ull;
     //  number of deterministic player avatars to spawn at
     // boot (phyllotaxis ring around spawn; see World::DeterministicAvatarSpawnOffset).
     // Avatar positions feed the multi-anchor streaming vector and fold into the

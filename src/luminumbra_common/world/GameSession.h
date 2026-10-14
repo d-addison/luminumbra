@@ -8,16 +8,20 @@
 #include "../ai/ThirstSystem.h"               // ai::ThirstTuning
 #include "../ai/WildlifeFoliageSystem.h"      // ai::WildlifeFoliageTuning (full-control)
 #include "../core/SimulationClock.h"
+#include "../fields/FieldPageState.h"
 #include "../simulation/SimBudgetTelemetry.h"
 #include "../simulation/SimulationEventBus.h"
 #include "../systems/PollinationSystem.h"
 #include "ActiveRegionLedger.h"
+#include "GroundObjectStore.h"
 #include "WorldClock.h"
 #include "WorldMetadata.h"
 #include "entt/entt.hpp"
+#include <chrono>
 #include <cstdint>
 #include <ctime>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -75,6 +79,16 @@ struct WorldStateSaveReport {
     bool saved = false;
 };
 
+struct PersistenceStatus {
+    std::size_t parked_count = 0;
+    std::size_t parked_bytes = 0;
+    std::int64_t oldest_parked_tick = -1;
+    std::int64_t last_save_tick = -1;
+    double last_save_ms = 0.0;
+    std::uint32_t failures = 0;
+    bool save_requested = false;
+};
+
 class GameSession {
 public:
     GameSession();
@@ -107,6 +121,10 @@ public:
 
     // Save the current world state
     bool SaveWorld();
+    // Flag on: runs `body` (which may call SaveWorldState/SaveWorld and indexed-member writers)
+    // inside ONE snapshot transaction published with a single index. Otherwise just runs `body`.
+    // Owner thread only; returns the body's verdict, and false when the commit fails.
+    bool RunInSnapshotTransaction(const std::function<bool()>& body);
 
     // --- Runtime world-state persistence ---
     // Persists streamed chunk voxel state under the canonical world save dir
@@ -118,6 +136,21 @@ public:
     bool SaveWorldState(WorldStateSaveReport* report = nullptr);
     bool SaveWorldStateTo(const std::filesystem::path& save_dir,
                           WorldStateSaveReport* report = nullptr);
+
+    // Durable residency (sim.active_regions only). All zero/false when the flag is off.
+    [[nodiscard]] PersistenceStatus GetPersistenceStatus() const;
+    // True when the world asked for a save (a dirty authoritative chunk hit the parked byte
+    // limit) and the retry back-off after a failed save has elapsed.
+    [[nodiscard]] bool PersistenceSaveRequested() const;
+    void ClearPersistenceSaveRequest();
+    // 0 = unlimited. Applied when the world system is wired (and immediately if it exists).
+    void SetParkedBytesLimit(std::size_t bytes);
+    static constexpr std::uint64_t kSaveRetryTicks = 300;
+    static constexpr std::uint64_t kAutosaveTicks = 9000;
+    // Periodic autosave for hosts without their own interval (the client). True once kAutosaveTicks
+    // have elapsed since the last successful save (or since first observed), outside the failure
+    // back-off. Always false unless sim.active_regions is on.
+    [[nodiscard]] bool PersistenceAutosaveDue();
 
     // Loads a previously saved snapshot into the live streaming state. Must be
     // called AFTER the world systems initialize but BEFORE chunk streaming
@@ -362,6 +395,12 @@ public:
     [[nodiscard]] const RegionSchedule& GetRegionSchedule() const {
         return m_regionSchedule;
     }
+    [[nodiscard]] const GroundObjectStore& GetGroundObjects() const {
+        return m_groundObjects;
+    }
+    [[nodiscard]] const FieldPageState& GetFieldPages() const {
+        return m_fieldPages;
+    }
     // A fatal scheduler/obligation fault. Once latched the session is fail-stop: the
     // simulation clock is rewound to the faulting tick, no further ticks run, and hosts
     // are expected to save and stop. Saving a faulted session is allowed.
@@ -372,6 +411,8 @@ public:
     // Observational counters of rejected host inputs; never hashed, digested or saved.
     struct RegionInputRejections {
         std::uint32_t anchors = 0, edits = 0, pins = 0;
+        std::uint32_t ground_spawns = 0;
+        std::uint32_t field_pages = 0;
     };
     [[nodiscard]] const std::optional<RegionSchedulerFault>& GetRegionSchedulerFault() const {
         return m_regionFault;
@@ -386,9 +427,24 @@ public:
     void NotifyGroundObjectEdit(const Vec3& position);
     void PinActiveRegion(RegionKey key, bool pinned);
     void RecordActiveRegionWork(RegionWork work);
+    // Main-thread only, like the other host inputs. Returns the new persistent id, or 0 when the
+    // flag is off (no state touched) or the spawn is refused.
+    std::uint64_t SpawnGroundObject(std::uint32_t type,
+                                    std::int64_t x_mm,
+                                    std::int64_t y_mm,
+                                    std::int64_t z_mm,
+                                    std::uint64_t despawn_after,
+                                    std::uint32_t payload);
+    std::uint64_t SpawnGroundObject(std::uint32_t type,
+                                    Vec3 position,
+                                    std::uint32_t despawn_after,
+                                    std::uint32_t payload);
 
     // Fold only when enabled, inside the existing ecology hash slot.
     [[nodiscard]] std::string FoldClockIntoEcologyHash(const std::string& ecology_hash) const;
+    // Enabled chunk slot hashes authoritative truth across residency/save history. The default
+    // path retains the existing streamed-state projection and wire/checkpoint slots.
+    [[nodiscard]] std::string ComputeChunkStateHash();
     [[nodiscard]] bool IsSimulationTickBoundary() const {
         return !m_activeRegionsEnabled || (!m_simulationBatchInProgress && m_regionWork.empty());
     }
@@ -446,19 +502,51 @@ private:
     bool m_transientWorld = false;
     void ResetWorldSystems();
     void RestoreWorldClock(const WorldClock& clock);
+    void RestoreAmbientFieldsAtTick(std::uint64_t tick);
     bool SaveWorldMetadataTo(const std::filesystem::path& save_dir);
     bool ClockConfigurationCompatible(const std::filesystem::path& save_dir) const;
     WorldClock m_worldClock;
     void AttachRegionEditObserver();
+    void RecordPersistenceSaveOutcome(bool ok, double elapsed_ms);
+    std::size_t m_parkedBytesLimit = static_cast<std::size_t>(256) * 1024u * 1024u;
+    std::int64_t m_lastSaveTick = -1;
+    double m_lastSaveMs = 0.0;
+    std::uint32_t m_saveFailures = 0;
+    std::int64_t m_lastSaveFailureTick = -1;
     RegionSchedulerConfig m_regionSchedulerConfig;
     ActiveRegionLedger m_activeRegionLedger;
     RegionSchedule m_regionSchedule;
     std::optional<std::vector<Vec3>> m_replicatedSimulationAnchors;
-    std::vector<RegionWork> m_regionWork;
+    std::vector<RegionWork> m_regionWork;          // External inputs for the next schedule call.
+    std::vector<RegionWork> m_regionCompletedWork; // Transient successful consumer work this tick.
     std::optional<RegionSchedulerFault> m_regionFault;
     RegionInputRejections m_regionInputRejections;
+    // Authoritative in-memory ground objects (S5). Empty unless spawned with the flag on.
+    GroundObjectStore m_groundObjects;
+    // Authoritative in-memory field pages (S6). Empty unless the region flag is on.
+    FieldPageState m_fieldPages;
     void LatchRegionFault(std::uint64_t tick, std::string message);
     void RunRegionScheduler(std::uint64_t current_tick);
+    // Sorted, de-duplicated due regions of the current schedule.
+    [[nodiscard]] std::vector<RegionKey> SortedDueRegions() const;
+    // Ages the due, owned regions' ground objects by one tick and publishes despawns.
+    void AdvanceGroundObjects(std::uint64_t tick);
+    // Activates and steps the due, ledger-backed regions' field pages by one tick.
+    void AdvanceFieldPages(std::uint64_t tick);
+    void BindRegionalFieldQueries();
+    [[nodiscard]] std::uint16_t SampleRegionalChannel(int channel, const Vec3& position) const;
+    [[nodiscard]] std::string RegionalAmbientHash(std::uint8_t channels, bool weather) const;
+    void ProjectRegionalWeather(bool restoring = false);
+    [[nodiscard]] std::string RegionalFieldProjection(RegionKey key) const;
+    void AdvanceRegionalWeather(std::uint64_t tick);
+    [[nodiscard]] float ScentDomainOrigin(bool x_axis) const;
+    [[nodiscard]] RegionKey ScentCellOwner(int x, int z) const;
+    [[nodiscard]] bool ScentCellDue(int x, int z) const;
+    [[nodiscard]] bool ScentEdgeOpen(int x, int z, int nx, int nz) const;
+    void RestoreRegionalScent();
+    void CaptureRegionalScent();
+    // Ledger edit mark for a ground object's region. False when refused (fault or counted reject).
+    bool MarkGroundRegionEdited(const GroundObject& object);
     std::filesystem::path m_regionDurableDirectory;
     // Stable only in the clock slice; world-anchored pages replace this grid in C4.
     Vec3 m_ambientFieldAnchor{};
@@ -524,7 +612,9 @@ private:
     bool m_weatherRainEnabled = false;      // See SetWeatherRainEnabled.
     std::int32_t m_weatherRainScaleMm = 25; // Millimetres per tick at full precipitation.
     bool m_weatherEventsEnabled = false;    // See SetWeatherEventsEnabled.
-    bool HasScentParticipants() const;
+    bool HasScentParticipants(bool require_due = true) const;
+    bool HasScentBorderWork() const;
+    void AdvanceNearScent();
     bool HasPlantParticipants() const; //  opt-in gate
     std::string m_rootPath;
 };

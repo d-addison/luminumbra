@@ -28,7 +28,8 @@ public:
 
     std::uint64_t
     publish(std::uint64_t tick, std::string topic, std::string payload, std::int32_t lane = 0);
-    std::vector<SimulationEvent> drain(std::uint64_t inclusive_tick);
+    std::vector<SimulationEvent> drain(std::uint64_t inclusive_tick,
+                                       const std::function<bool()>& continue_delivery = {});
     void subscribe(Handler handler);
     void clear();
     [[nodiscard]] std::size_t pending_count() const noexcept;

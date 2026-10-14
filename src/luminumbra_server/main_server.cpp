@@ -168,8 +168,13 @@ ServerCliOptions ParseOptions(int argc, char* argv[]) {
             if (const char* v = next_value(i))
                 options.test_streaming_radius_cap = std::atoi(v);
         } else if (std::strcmp(arg, "--autosave-ticks") == 0) {
-            if (const char* v = next_value(i))
+            if (const char* v = next_value(i)) {
                 options.autosave_ticks = std::strtoull(v, nullptr, 10);
+                options.autosave_ticks_explicit = true;
+            }
+        } else if (std::strcmp(arg, "--parked-bytes-limit") == 0) {
+            if (const char* v = next_value(i))
+                options.parked_bytes_limit = std::strtoull(v, nullptr, 10);
         } else if (std::strcmp(arg, "--avatars") == 0) {
             if (const char* v = next_value(i))
                 options.avatars = std::atoi(v);
@@ -315,7 +320,8 @@ int main(int argc, char* argv[]) {
             "[--lockstep-dump <path>]] "
             "[--root <path>] [--preset <name>] "
             "[--seed <seed>] [--world-id <id>] [--ticks <n>] [--radius <chunks>] "
-            "[--collision-radius <chunks>] [--autosave-ticks <n>] [--clients <n>] "
+            "[--collision-radius <chunks>] [--autosave-ticks <n>] [--parked-bytes-limit <bytes>] "
+            "[--clients <n>] "
             "[--player-id <id>] [--server-mode] [--artifact <path>]");
         return 2;
     }
