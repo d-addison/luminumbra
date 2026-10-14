@@ -94,9 +94,12 @@ def snapshot(world_dir) -> dict:
     }
 
 
-def _valid_relative_path(path) -> bool:
+def _valid_relative_path(path, *, portable: bool = True) -> bool:
+    # Receipt paths are compared as strings and never opened. Loading keeps the
+    # original v1 rule so existing receipts with ':' in a POSIX name still load;
+    # snapshots refuse drive and stream names before reading the tree.
     if (not isinstance(path, str) or not path or path.startswith("/")
-            or "\\" in path or ":" in path):
+            or "\\" in path or (portable and ":" in path)):
         return False
     return all(part not in ("", ".", "..") for part in path.split("/"))
 
@@ -124,7 +127,7 @@ def load_receipt(receipt_path) -> dict:
         path = item.get("path")
         size = item.get("size")
         sha = item.get("sha256")
-        if not _valid_relative_path(path):
+        if not _valid_relative_path(path, portable=False):
             raise ReceiptError(f"malformed receipt: invalid path {path!r}")
         if previous is not None and path <= previous:
             raise ReceiptError(f"malformed receipt: files not strictly sorted at {path!r}")

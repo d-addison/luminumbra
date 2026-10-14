@@ -199,10 +199,21 @@ class SaveReceiptContract(unittest.TestCase):
                 save_receipt.snapshot(self.tree)
         entry.stat.assert_called_once_with(follow_symlinks=False)
 
-    def test_drive_and_stream_receipt_paths_are_rejected(self) -> None:
+    def test_existing_v1_receipts_with_colon_paths_still_load(self) -> None:
         original = save_receipt.snapshot(self.tree)
-        receipt_path = self.base / "unsafe.json"
+        receipt_path = self.base / "legacy.json"
         for path in ("C:/world.bin", "C:world.bin", "world.bin:stream", "worlds/C:world.bin"):
+            with self.subTest(path=path):
+                files = sorted([{**original["files"][0], "path": path}]
+                               + [dict(item) for item in original["files"][1:]],
+                               key=lambda item: item["path"])
+                receipt = {**original, "files": files,
+                           "tree_digest": save_receipt._tree_digest(files)}
+                receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+                self.assertEqual(save_receipt.load_receipt(receipt_path)["files"], files)
+                result = save_receipt.diff(receipt_path, receipt_path)
+                self.assertFalse(save_receipt._has_differences(result))
+        for path in ("/world.bin", "a\\b.bin", "a/../b.bin", "a//b.bin"):
             with self.subTest(path=path):
                 receipt = {**original, "files": [dict(item) for item in original["files"]]}
                 receipt["files"][0]["path"] = path
