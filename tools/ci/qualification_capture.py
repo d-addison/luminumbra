@@ -7,7 +7,7 @@ import hashlib
 import importlib
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 import re
 import subprocess
 import sys
@@ -72,7 +72,8 @@ def module(name):
 
 
 def command(argv):
-    result = subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=120, check=False)
+    result = subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True,
+                            text=True, encoding="utf-8", timeout=120, check=False)
     require(result.returncode == 0, f"command failed: {argv[0]}")
     return result.stdout.strip()
 
@@ -167,7 +168,8 @@ def capture_contract(directory, expected, fixture, binary_hash, producer_root):
     require(manifest["fixture_hash"] == fixture and manifest["binary_sha256"] == binary_hash, "capture fixture/binary identity differs")
     require(all(manifest[key] == value and type(manifest[key]) is type(value) for key, value in PARAMETERS.items()), "capture parameters differ")
     require(tuple(run["preset"] for run in manifest["runs"]) == PRESETS, "exact three ordered presets required")
-    root = Path(producer_root)
+    # This is producer metadata; its filesystem syntax can differ from ours.
+    root = PureWindowsPath(producer_root) if PureWindowsPath(producer_root).drive else PurePosixPath(producer_root)
     require(root.is_absolute() and str(root) == producer_root, "producer source root missing or malformed")
     binary = root / SERVER_BINARY
     for run in manifest["runs"]:
@@ -176,7 +178,7 @@ def capture_contract(directory, expected, fixture, binary_hash, producer_root):
         require(isinstance(argv, list) and len(argv) == 20, "capture command missing or malformed")
         artifact = root / "build/qualification/sim-budget-capture" / run["artifact"]
         expected_argv = module("capture_sim_budget").command(binary, root, artifact, run["preset"], "1337", 600, 1, 1)
-        require(argv == expected_argv and Path(argv[-1]).name == run["artifact"], "capture command flags/identity differ")
+        require(argv == expected_argv and type(root)(argv[-1]).name == run["artifact"], "capture command flags/identity differ")
     return loaded
 
 
@@ -219,7 +221,7 @@ def write_manifest(args):
         for path in files:
             path = path.resolve()
             require(path.is_relative_to(parent), "manifest artifacts must be contained beside the manifest")
-            artifacts[str(path.relative_to(parent))] = digest(path)
+            artifacts[path.relative_to(parent).as_posix()] = digest(path)
         document["files"] = artifacts
         document["status"] = "complete"
     except (ValueError, OSError, KeyError, TypeError, AttributeError, ImportError, UnicodeError, zipfile.BadZipFile, ET.ParseError, subprocess.SubprocessError) as error:
