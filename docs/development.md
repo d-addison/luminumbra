@@ -58,6 +58,15 @@ scheduled runs, and manual dispatches never save caches. When a PR closes,
 `cache-cleanup.yml` deletes caches scoped to its `refs/pull/<n>/merge` ref without
 checking out PR code.
 
+Blocking clang-tidy analysis runs in three path-hash shards on standard Ubuntu
+runners, each with a 60-minute timeout. Together they analyse every configured
+first-party translation unit and its headers on every merged tip; pushes use
+`writeonly` caching and never skip analysis. PRs restore only their matching
+shard's cache. The required `Static analysis / clang-tidy` check aggregates the
+shards and passes only when all three succeed. Both the shards and the aggregate
+check skip draft pull requests. Local `scripts/tidy.sh` still analyses the full
+scope by default; `--shard INDEX/COUNT` selects one stable partition.
+
 Draft pull requests run the cheap routine checks: changed-file formatting, public
 tree inventory, runner contracts, Doxygen, game assets, and the authoring mock
 (subject to its existing paths filter). Linux/GCC, ASan, Windows/MSVC,
@@ -92,7 +101,8 @@ Ready pull requests run:
 - optimized MSVC builds and tests on Windows;
 - optimized GCC/UCRT64 builds and tests on Windows;
 - Clang AddressSanitizer builds and tests on Ubuntu;
-- blocking clang-tidy analysis and GNS and Diligent RHI probes;
+- blocking clang-tidy shards with an aggregated required check, and GNS and
+  Diligent RHI probes;
 - changed-file formatting checks;
 - Doxygen parsing with warnings treated as errors; and
 - an explicitly observational software-OpenGL performance capture.
