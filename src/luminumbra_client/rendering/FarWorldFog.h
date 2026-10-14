@@ -38,7 +38,8 @@ inline glm::vec4 ComposeFinalFog(float analytic_fog,
             inscatter = blended_num / out_fog;
         fog = out_fog;
     }
-    if (ladder)
+    // A unit fade is an identity: 1 - (1 - fog) would lose low alpha bits.
+    if (ladder && AerialOuterFade(raw_ray_distance) < 1.0f)
         fog = 1.0f - (1.0f - fog) * AerialOuterFade(raw_ray_distance);
     return {inscatter, fog};
 }
