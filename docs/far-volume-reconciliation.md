@@ -21,12 +21,19 @@ The [first canonical convergence slice](far-volume-convergence.md) now selects
 one integer-origin/explicit-span model, ports coverage discovery and the original
 pristine cave authority onto it, and declares the legacy quantization profile
 explicitly. Its facade contains no duplicate tile or mesh types. This resolves
-the header boundary in the new source composition; the separate R0 consumer at
-`6a13b70e95f0c4a152f09e5df3422931c10dccfa` still requires allocator, queue and
-renderer adaptation before it can consume that composition. The original
+the header boundary in the new source composition. The separate R0 consumer at
+`6a13b70e95f0c4a152f09e5df3422931c10dccfa` describes the older allocator, queue
+and renderer boundary; the successor FW implementation is scoped below.
+This devel base supplies no canonical runtime consumer. The original
 branches and their evidence retain their original identities.
 
 ## Concrete conflicts
+
+The comparisons below describe the historical sources. This regression port
+is based on devel `f15dcde7`, which does not contain the separate FW chain at
+`950609d3`. That FW head has a canonical queue and renderer adapter; their
+presence on another branch does not establish their landing or native acceptance
+on this devel base.
 
 | Shared name or boundary | Volume foundation / prepared R0 | Generation / mesher kernels |
 |---|---|---|
@@ -99,3 +106,36 @@ The existing runtime `MarchingCubes.cpp` also contains the cell-gradient overrid
 The kernel counterexample makes that a concrete risk requiring a separate runtime
 reproducer and qualification; this correction does not silently change the
 native terrain source currently pinned at `983e6abc338637a226d623ef20ffafc10f07e920`.
+
+## Selected Lane A evidence retained on devel
+
+Lane B remains the sole canonical volume model and mesher. The regression-only
+port retains these controls from Lane A #176 head
+`9b04e1a6c9f575ab02cca62f829454d5553b93f7:test/common/FarVolume_test.cpp`:
+
+- Line 327: V1/V2 live-router bit equality for both cave modes, now in
+  `FarPristineField_test.cpp`.
+- Line 350: distant signed-opening positive-air and below-opening negative-solid
+  controls, including the historical live composition's negative-sign control,
+  now in `FarPristineField_test.cpp`.
+- Line 535: disabled and invalid cave sampling, now in `FarPristineField_test.cpp`.
+- Line 436: independent analytical filter transfer and residual phase alias,
+  now in `FarVolumeFacade_test.cpp`.
+- Line 406: torus/ground walls, upper surfaces and undersides, now in
+  `FarVolumeMesher_test.cpp`, with an independent analytic face-direction check.
+
+The canonical torus control reconstructs world positions from integer mesh
+origin plus local doubles. It does not restore Lane A's absolute-float mesher.
+The filter's expectations are analytic; the existing pinned foundation fixture
+and expected hashes remain unchanged. Production sampling and live cave
+composition are unchanged. These new ports have not been built or run here.
+
+The measured phase/cost experiment (line 471) and cold-world full-tile cost/size
+experiment (line 554) are excluded from routine regression CI. Their historical
+measurements remain attributed to the same Lane A head's
+`docs/far-volume-foundation.md`; they are not Lane B performance qualification.
+Already-covered winding, seam and subspacing controls retain the canonical
+suites' existing oracles. World-to-mesh-to-renderer composition from #194 belongs
+to the separate FW-based slice, and #195's canonical page planning and page
+completeness oracles remain deferred. Explicit aligned spans do not establish
+page residency, uploaded coverage or complete bounded runtime page streaming.

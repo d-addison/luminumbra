@@ -538,3 +538,7 @@ of coarse state and the far authority overlay to remote clients, scent and
 foraging at distance, a simulation-only residency class, scheduled game events
 and Workshop content distribution are tracked separately and are not part of
 this contract.
+
+FW renderer diagnostics and the current horizon artifact/gate contract are described in
+[Far world horizon v2](far-world-horizon-v2.md). Legacy remains the default; native
+ladder qualification and S9–S13 remain outstanding.

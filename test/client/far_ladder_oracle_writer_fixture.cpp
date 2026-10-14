@@ -4,6 +4,7 @@
 #include <exception>
 #include <filesystem>
 #include <iostream>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -15,6 +16,9 @@ std::vector<FarLodHorizonStationCapture> MakeCaptures() {
     FarLodHorizonStationCapture origin{};
     origin.station.name = "origin";
     origin.file = "origin.ppm";
+    // Deliberately differ from station labels: v2 must serialize the measured pose.
+    origin.camera_yaw_degrees = 12.0f;
+    origin.camera_pitch_degrees = -4.0f;
     // At a 512 m grid intersection the 3000 m disc intersects 132 regions:
     // four quadrants, each with 6 + 6 + 6 + 6 + 5 + 4 nearest-point pairs.
     origin.regions_wanted = 132;
@@ -22,12 +26,25 @@ std::vector<FarLodHorizonStationCapture> MakeCaptures() {
     origin.resident_bytes = 4096;
     origin.region_draws = 1;
     origin.far_indices_drawn = 3;
+    origin.far_world.captured = true;
+    origin.far_world.requested_cave_policy = Luminumbra::World::FarCaveMode::BoxFiltered;
+    origin.far_world.bound_cave_policy = std::nullopt;
+    origin.far_world.world_epoch = 1;
+    origin.far_world.frame = 1;
+    origin.far_world.advanced = true;
+    origin.far_world.submission_occurred = true;
+    origin.far_world.draws = 1;
+    origin.far_world.indices = 3;
+    origin.ready_within_deadline = true;
+    origin.paired_capture_preserved = true;
 
     FarLodHorizonStationCapture translated = origin;
     translated.station.name = "translated";
     translated.file = "translated.ppm";
     translated.camera_world_x = -512.0f;
     translated.camera_world_z = 1024.0f;
+    translated.far_world.frame = 2;
+    translated.far_world.camera = {-512.0, 0.0, 1024.0};
     return {origin, translated};
 }
 } // namespace

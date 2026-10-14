@@ -2,12 +2,13 @@
 // SIMULATION requirements only (world preset readable/parseable); renderer/UI
 // asset requirements are caller-supplied by the client. Headless CreateWorld
 // must succeed in a root containing nothing but the world preset.
+#include "../support/UniqueTempPath.h"
+
 #include <gtest/gtest.h>
 
 #include <algorithm>
 #include <array>
 #include <bit>
-#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -85,9 +86,8 @@ fs::path SourcePresetPath() {
 class HeadlessRoot {
 public:
     HeadlessRoot() {
-        const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
         root_ =
-            fs::temp_directory_path() / ("luminumbra_headless_world_test_" + std::to_string(stamp));
+            Luminumbra::TestSupport::CreateUniqueTempDirectory("luminumbra_headless_world_test_");
         fs::create_directories(root_ / "worlds" / "atlas" / "presets");
         fs::copy_file(SourcePresetPath(), root_ / "worlds" / "atlas" / "presets" / "default.json");
     }
@@ -1672,6 +1672,55 @@ static std::uint64_t Digest(const std::filesystem::path& save,
                               .durable = {},
                               .ground_object_bytes = {},
                               .field_page_bytes = {}});
+}
+
+TEST(GameSessionHeadlessWorldTest, RegionDigestMergesLiveAndDurableSimulationOnly) {
+    const HeadlessRoot root;
+    // The content-v2 digest includes only authoritative edits. Keep the combined
+    // live/durable regression by marking every simulated durable fixture as edited.
+    Luminumbra::WorldStreamingState durable;
+    const auto old = durable.get_or_create_chunk({0, 0, 0});
+    old->heightmap_data = {1.0f};
+    old->mark_voxel_data_dirty();
+    const auto unloaded = durable.get_or_create_chunk({1, 0, 0});
+    unloaded->heightmap_data = {2.0f};
+    unloaded->mark_voxel_data_dirty();
+    const auto other_region = durable.get_or_create_chunk({32, 0, 0});
+    other_region->heightmap_data = {3.0f};
+    other_region->mark_voxel_data_dirty();
+    const auto save = root.path() / "digest";
+    ASSERT_TRUE(P::WorldSaveService{}.save_world(durable, save));
+    const auto live = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3(0, 0, 0));
+    live->heightmap_data = {4.0f};
+    live->mark_voxel_data_dirty();
+    const auto digest = P::WorldSaveService::region_simulation_digest(save, {0, 0}, {live});
+    EXPECT_EQ(digest, P::WorldSaveService::region_simulation_digest({}, {0, 0}, {unloaded, live}));
+    EXPECT_NE(digest, P::WorldSaveService::region_simulation_digest(save, {0, 0}, {}));
+    // Both durable render data and live render data are outside the projection.
+    unloaded->mesh_vertices.resize(3);
+    unloaded->mesh_indices = {0, 1, 2};
+    unloaded->water_mesh_generated.store(true);
+    unloaded->water_mesh_dirty_ticks = 11;
+    ASSERT_TRUE(P::WorldSaveService{}.save_world(durable, save));
+    live->mesh_vertices.resize(3);
+    live->mesh_indices = {2, 1, 0};
+    live->water_mesh_dirty_ticks = 29;
+    EXPECT_EQ(P::WorldSaveService::region_simulation_digest(save, {0, 0}, {live}), digest);
+    for (const auto state : {Luminumbra::ChunkState::Meshing, Luminumbra::ChunkState::Ready}) {
+        live->set_state(state);
+        for (const bool collision : {true, false}) {
+            live->has_collision.store(collision);
+            EXPECT_EQ(P::WorldSaveService::region_simulation_digest(save, {0, 0}, {live}), digest);
+        }
+    }
+    live->heightmap_data[0] = 5.0f;
+    EXPECT_NE(P::WorldSaveService::region_simulation_digest(save, {0, 0}, {live}), digest);
+    live->heightmap_data[0] = 4.0f;
+    live->material_data = {1};
+    EXPECT_NE(P::WorldSaveService::region_simulation_digest(save, {0, 0}, {live}), digest);
+    live->material_data.clear();
+    live->water_depth_mm = {1};
+    EXPECT_NE(P::WorldSaveService::region_simulation_digest(save, {0, 0}, {live}), digest);
 }
 
 TEST(GameSessionHeadlessWorldTest, RegionDigestExcludesPristineAndLoadingChunks) {

@@ -7,6 +7,8 @@
 // same process_completed_meshing_jobs body that stores current_lod=0, so the
 // decoupling pin below goes RED. The trailing assertions are the standing
 // regression pin: the render-mesh publish never writes sim truth.
+#include "../support/UniqueTempPath.h"
+
 #include <gtest/gtest.h>
 
 #include <chrono>
@@ -68,9 +70,8 @@ std::uint64_t HashVec(const std::vector<T>& v) {
 class HeadlessRoot {
 public:
     HeadlessRoot() {
-        const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
-        root_ = fs::temp_directory_path() /
-                ("luminumbra_promotion_decoupling_test_" + std::to_string(stamp));
+        root_ = Luminumbra::TestSupport::CreateUniqueTempDirectory(
+            "luminumbra_promotion_decoupling_test_");
         fs::create_directories(root_ / "worlds" / "atlas" / "presets");
         fs::copy_file(fs::path(LUMINUMBRA_SOURCE_ROOT) / "worlds" / "atlas" / "presets" /
                           "default.json",
