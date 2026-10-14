@@ -33,6 +33,11 @@ TEST(AmbientDeterminismReceipt, EmitsConstructorAndEvolvedHashes) {
     WindFieldSystem wind(kSeed);
     WeatherSystem weather(kSeed);
     AetherFieldSystem aether(kSeed);
+    const FastSIMD::eLevel active_simd = wind.noise_simd_level();
+    ASSERT_EQ(active_simd, weather.pressure_noise_simd_level());
+    ASSERT_EQ(active_simd, weather.temperature_noise_simd_level());
+    ASSERT_EQ(active_simd, weather.humidity_noise_simd_level());
+    ASSERT_EQ(active_simd, aether.noise_simd_level());
     const std::string wind_ctor = wind.ComputeWindSubHash();
     const std::string weather_ctor = weather.ComputeWeatherSubHash();
     const std::string aether_ctor = aether.ComputeAetherSubHash();
@@ -60,9 +65,10 @@ TEST(AmbientDeterminismReceipt, EmitsConstructorAndEvolvedHashes) {
     line << "AMBIENT_RECEIPT version=1 seed=" << kSeed << " ticks=" << kReceiptTicks
          << " ceiling=" << static_cast<int>(Luminumbra::Systems::kAmbientNoiseMaxSIMDLevel)
          << " cpu_simd=" << static_cast<int>(FastSIMD::CPUMaxSIMDLevel())
-         << " wind_ctor=" << wind_ctor << " wind_evolved=" << wind_evolved
-         << " weather_ctor=" << weather_ctor << " weather_evolved=" << weather_evolved
-         << " aether_ctor=" << aether_ctor << " aether_evolved=" << aether_evolved;
+         << " active_simd=" << static_cast<int>(active_simd) << " wind_ctor=" << wind_ctor
+         << " wind_evolved=" << wind_evolved << " weather_ctor=" << weather_ctor
+         << " weather_evolved=" << weather_evolved << " aether_ctor=" << aether_ctor
+         << " aether_evolved=" << aether_evolved;
     std::cout << line.str() << std::endl;
     RecordProperty("ambient_receipt", line.str());
 }

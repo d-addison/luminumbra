@@ -8,13 +8,15 @@
 // in FastNoise, which the project's ASan configuration does not instrument, so the guard page
 // (not ASan) detects it, and the process-wide SIGSEGV handler is allowed by ASan's default
 // allow_user_segv_handler. Other platforms run the padded call without a guard page.
-// Non-applicable cases pass and record a probe_status property, because CI rejects skipped tests.
+// Non-applicable fault probes pass with a probe_status property and an explicit output marker,
+// because CI rejects skipped tests. The ASan qualification lane requires probe_status=ran.
 
 #include <gtest/gtest.h>
 
 #include <array>
 #include <cmath>
 #include <cstddef>
+#include <iostream>
 #include <string>
 #include <vector>
 
@@ -149,14 +151,20 @@ std::string ProbeNotApplicableReason() {
 TEST(AmbientInputBounds, UnpaddedTwoElementInputFaultsAtActiveIsa) {
     const std::string reason = ProbeNotApplicableReason();
     if (!reason.empty()) {
-        RecordProperty("probe_status", "not_applicable: " + reason);
+        const std::string status = "not_applicable:" + reason;
+        RecordProperty("probe_status", status);
+        std::cout << "AMBIENT_PROBE probe_status=" << status << std::endl;
         return;
     }
 #if defined(__linux__)
-    RecordProperty("noise_simd_level", static_cast<int>(ActiveSimdLevel()));
-    RecordProperty("probe_status", "ran");
+    const int active_simd = static_cast<int>(ActiveSimdLevel());
+    RecordProperty("noise_simd_level", active_simd);
     EXPECT_TRUE(ProbeFaults(2, 2))
         << "the vendored tail load is expected to read past an exact-size input";
+    if (!HasFailure()) {
+        RecordProperty("probe_status", "ran");
+        std::cout << "AMBIENT_PROBE probe_status=ran active_simd=" << active_simd << std::endl;
+    }
 #endif
 }
 
