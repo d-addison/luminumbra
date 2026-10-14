@@ -88,6 +88,28 @@ Python regressions overlap two invocations for both core and WER collection and
 check that each receipt contains only its own artifact. This locks cooperating
 harness invocations; unrelated dump producers still need a separate directory.
 
+After a Windows crash, WER collection requires closed writers and an unchanged
+snapshot across a one-second stable window within the existing 30-second settle
+deadline. A `CreateFileW` read open with no sharing probes every observed dump;
+sharing or lock violations mean the writer is still active. Size, timestamps and
+sampled bytes alone cannot establish completion of a middle-only rewrite. The
+portable test seam accepts an injected writer probe; the POSIX fallback uses an
+advisory file lock, which only detects cooperating writers.
+
+Snapshots read at most 64 KiB per file and 1 MiB total, sampling the prefix and
+suffix. Every regular file retains its size, file times and identity even when
+the read budget is exhausted, so large dumps remain detectable. Fingerprints
+record exact byte ranges and are compared only when coverage matches. A change
+in coverage alone does not make stale evidence eligible for copying. The settle
+deadline is checked during enumeration, reads, writer probes and before accepting
+stability. Expiry or any writer probe exception (including an unavailable
+platform API) records a collection error and prevents WER copying for that
+iteration, preserving the child's crash classification and other artifacts.
+Successful settling supplies the snapshot used to select copies.
+Stdlib regressions cover large, multiple, growing and middle-rewritten dumps,
+stale-file coverage changes and deadline expiry. Native WER production and
+share-mode behavior remain **NEEDS-NATIVE-RUN**.
+
 Receipts retain the label `process repetitions`. A passed receipt proves its
 process/gtest checks passed; it does not by itself qualify native crash-dump
 capture. Dump preflight overrides and collection errors remain recorded.

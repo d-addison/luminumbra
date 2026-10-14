@@ -49,7 +49,7 @@ from collections import Counter
 from contextlib import ExitStack, contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Iterator
+from typing import Any, Callable, Iterator, NamedTuple
 
 try:
     import resource as _resource_module
@@ -65,6 +65,9 @@ DEFAULT_GTEST_FILTER = (
 DEFAULT_TIMEOUT_SECONDS = 120.0
 CLEANUP_TIMEOUT_SECONDS = 5.0
 DUMP_SETTLE_SECONDS = 30.0
+DUMP_STABLE_SECONDS = 1.0
+SNAPSHOT_FILE_READ_BYTES = 64 * 1024
+SNAPSHOT_TOTAL_READ_BYTES = 1024 * 1024
 REGISTRY_QUERY_TIMEOUT_SECONDS = 30.0
 PREFLIGHT_EXIT_CODE = 3
 CRASH_DIR_ENV = "LUMINUMBRA_CRASH_DIR"
@@ -213,18 +216,44 @@ def make_run_directory(parent: Path, stamp: str, pid: int) -> Path:
     return run_dir
 
 
+class FileStamp(NamedTuple):
+    size: int
+    mtime_ns: int
+    ctime_ns: int
+    identity: tuple[int, int]
+    # Each fingerprint records its exact offset and length, including short reads.
+    fingerprints: tuple[tuple[int, int, str], ...]
+
+
+def check_settle_deadline(deadline: float | None, clock: Callable[[], float]) -> None:
+    if deadline is not None and clock() >= deadline:
+        raise TimeoutError("dump settle deadline expired")
+
+
 def snapshot_files(
     root: Path | None,
     recursive: bool,
     skip: Callable[[Path], bool] | None = None,
     errors: list[str] | None = None,
-) -> dict[str, tuple[int, int]]:
-    """Map regular files to (size, mtime_ns); collect inspection errors or propagate them."""
+    *,
+    deadline: float | None = None,
+    clock: Callable[[], float] | None = None,
+) -> dict[str, FileStamp]:
+    """Record metadata and bounded prefix/suffix hashes; never omit an oversized file.
+
+    The shared read budget can leave files with metadata alone. Coverage is part of
+    each stamp, so changing that budget's allocation cannot imply a content rewrite.
+    Deadline expiry always propagates, even when inspection errors are collected.
+    """
+    clock = clock or time.monotonic
+    check_settle_deadline(deadline, clock)
     if root is None:
         return {}
-    result: dict[str, tuple[int, int]] = {}
+    result: dict[str, FileStamp] = {}
+    remaining = SNAPSHOT_TOTAL_READ_BYTES
 
     def inspection_error(path: Path, exc: OSError) -> None:
+        check_settle_deadline(deadline, clock)
         if errors is None:
             raise exc
         errors.append(f"{path}: {type(exc).__name__}: {exc}")
@@ -234,11 +263,14 @@ def snapshot_files(
     except OSError as exc:
         inspection_error(root, exc)
         return result
+    check_settle_deadline(deadline, clock)
     if not stat.S_ISDIR(root_stat.st_mode):
         return result
 
     def traversal_error(exc: OSError) -> None:
         inspection_error(Path(exc.filename) if exc.filename else root, exc)
+
+    check_settle_deadline(deadline, clock)
 
     # os.walk's onerror reports directory traversal failures that rglob may hide.
     paths = (
@@ -249,6 +281,7 @@ def snapshot_files(
     )
     try:
         for path in paths:
+            check_settle_deadline(deadline, clock)
             if path.name == DUMP_LOCK_NAME:
                 continue
             if skip is not None and skip(path):
@@ -258,12 +291,37 @@ def snapshot_files(
             except OSError as exc:
                 inspection_error(path, exc)
                 continue
+            check_settle_deadline(deadline, clock)
             if stat.S_ISREG(file_stat.st_mode):
-                result[str(path)] = (file_stat.st_size, file_stat.st_mtime_ns)
+                allowance = min(file_stat.st_size, SNAPSHOT_FILE_READ_BYTES, remaining)
+                fingerprints: list[tuple[int, int, str]] = []
+                if allowance:
+                    prefix = (allowance + 1) // 2
+                    ranges = [(0, prefix)]
+                    if allowance > prefix:
+                        ranges.append((file_stat.st_size - (allowance - prefix), allowance - prefix))
+                    try:
+                        with path.open("rb", buffering=0) as handle:
+                            for offset, length in ranges:
+                                check_settle_deadline(deadline, clock)
+                                handle.seek(offset)
+                                # Charge requested bytes even if the read fails or is short.
+                                remaining -= length
+                                chunk = handle.read(length)
+                                check_settle_deadline(deadline, clock)
+                                fingerprints.append((offset, len(chunk), hashlib.sha256(chunk).hexdigest()))
+                    except OSError as exc:
+                        inspection_error(path, exc)
+                        fingerprints = []
+                result[str(path)] = FileStamp(
+                    file_stat.st_size, file_stat.st_mtime_ns, file_stat.st_ctime_ns,
+                    (file_stat.st_dev, file_stat.st_ino), tuple(fingerprints),
+                )
     except OSError as exc:
         if errors is None:
             raise
         traversal_error(exc)
+    check_settle_deadline(deadline, clock)
     return result
 
 
@@ -399,17 +457,30 @@ def core_collection_skip(
     return skip
 
 
-def changed_files(before: dict[str, tuple[int, int]], after: dict[str, tuple[int, int]]) -> list[str]:
-    return sorted(path for path, stamp in after.items() if before.get(path) != stamp)
+def file_rewritten(before: FileStamp, after: FileStamp) -> bool:
+    if before[:4] != after[:4]:
+        return True
+    before_ranges = tuple((offset, length) for offset, length, _digest in before.fingerprints)
+    after_ranges = tuple((offset, length) for offset, length, _digest in after.fingerprints)
+    # Unequal coverage provides no evidence of a rewrite. Metadata still detects
+    # growth, replacement and completed writes even when no read budget remains.
+    return before_ranges == after_ranges and before.fingerprints != after.fingerprints
+
+
+def changed_files(before: dict[str, FileStamp], after: dict[str, FileStamp]) -> list[str]:
+    return sorted(path for path, stamp in after.items()
+                  if path not in before or file_rewritten(before[path], stamp))
 
 
 def copy_changed_files(
     root: Path | None,
-    before: dict[str, tuple[int, int]],
+    before: dict[str, FileStamp],
     destination: Path,
     recursive: bool = False,
     skip: Callable[[Path], bool] | None = None,
     errors: list[str] | None = None,
+    *,
+    after: dict[str, FileStamp] | None = None,
 ) -> list[str]:
     """Copy new or rewritten files under root, keeping their path relative to root.
 
@@ -419,7 +490,8 @@ def copy_changed_files(
     """
     copies: list[str] = []
     try:
-        changed = changed_files(before, snapshot_files(root, recursive, skip, errors))
+        changed = changed_files(before, after if after is not None else
+                                snapshot_files(root, recursive, skip, errors))
     except OSError as exc:
         if errors is None:
             raise
@@ -1015,14 +1087,21 @@ def run_locked_iteration(
         artifacts = sorted(snapshot_files(crash_dir, recursive=True, errors=collection_errors))
     except OSError as exc:
         collection_errors.append(f"crash directory listing: {type(exc).__name__}: {exc}")
+    dump_ready = True
+    settled: dict[str, FileStamp] | None = None
     if IS_WINDOWS and dump_folder is not None and result["status"] not in ("exit:0", "timeout"):
         try:
-            wait_for_dump_settle(dump_folder, dump_before, DUMP_SETTLE_SECONDS, collection_errors, dump_skip)
+            settled = wait_for_dump_settle(
+                dump_folder, dump_before, DUMP_SETTLE_SECONDS, collection_errors, dump_skip,
+            )
         except OSError as exc:
             collection_errors.append(f"dump folder settle: {type(exc).__name__}: {exc}")
-    artifacts += copy_changed_files(
-        dump_folder, dump_before, iter_dir / "wer", skip=dump_skip, errors=collection_errors
-    )
+            dump_ready = False
+    if dump_ready:
+        artifacts += copy_changed_files(
+            dump_folder, dump_before, iter_dir / "wer", skip=dump_skip,
+            errors=collection_errors, after=settled,
+        )
     artifacts += copy_changed_files(
         core_directory, core_before, iter_dir / "core", recursive=True, skip=core_skip,
         errors=collection_errors,
@@ -1032,22 +1111,107 @@ def run_locked_iteration(
     )
 
 
+def windows_dump_writer_closed(path: Path) -> bool:
+    """A no-sharing read open fails while any incompatible WER handle is open."""
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    create_file = kernel32.CreateFileW
+    create_file.argtypes = (
+        wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p,
+        wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE,
+    )
+    create_file.restype = wintypes.HANDLE
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = (wintypes.HANDLE,)
+    close_handle.restype = wintypes.BOOL
+    handle = create_file(str(path), 0x80000000, 0, None, 3, 0x80, None)
+    if handle == ctypes.c_void_p(-1).value:
+        error = ctypes.get_last_error()
+        if error in (32, 33):  # ERROR_SHARING_VIOLATION / ERROR_LOCK_VIOLATION
+            return False
+        raise ctypes.WinError(error)
+    if not close_handle(handle):
+        raise ctypes.WinError(ctypes.get_last_error())
+    return True
+
+
+def dump_writer_closed(path: Path) -> bool:
+    """Probe WER handles on Windows, cooperative advisory writers on POSIX.
+
+    POSIX has no mandatory share-mode equivalent for arbitrary writers. WER
+    collection uses Windows; the advisory fallback and injectable probe allow
+    deterministic portable tests without claiming native WER qualification.
+    """
+    if os.name == "nt":
+        return windows_dump_writer_closed(path)
+    import fcntl
+
+    with path.open("rb", buffering=0) as handle:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            if exc.errno in (errno.EACCES, errno.EAGAIN):
+                return False
+            raise
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    return True
+
+
 def wait_for_dump_settle(
     folder: Path,
-    before: dict[str, tuple[int, int]],
+    before: dict[str, FileStamp],
     timeout: float,
     errors: list[str] | None = None,
     skip: Callable[[Path], bool] | None = None,
-) -> None:
-    """Wait until new dump files stop changing, so WER output is not copied half-written."""
-    deadline = time.monotonic() + timeout
-    previous: dict[str, tuple[int, int]] | None = None
-    while time.monotonic() < deadline:
-        current = {path: stamp for path, stamp in snapshot_files(folder, False, skip, errors).items() if before.get(path) != stamp}
-        if current and current == previous:
-            return
+    *,
+    probe: Callable[[Path], bool] | None = None,
+    clock: Callable[[], float] | None = None,
+    pause: Callable[[float], None] | None = None,
+) -> dict[str, FileStamp]:
+    """Require closed writers and unchanged snapshots for the full stable window.
+
+    Byte sampling alone cannot rule out a middle-only rewrite with deferred file
+    timestamps. The writer probe is required on both ends of the stable window.
+    Expiry during collection or probing must never be accepted as stability.
+    """
+    clock = clock or time.monotonic
+    pause = pause or time.sleep
+    probe = probe or dump_writer_closed
+    deadline = clock() + timeout
+    previous: dict[str, FileStamp] | None = None
+    stable_since: float | None = None
+    while True:
+        check_settle_deadline(deadline, clock)
+        snapshot = snapshot_files(folder, False, skip, errors, deadline=deadline, clock=clock)
+        current = {path: snapshot[path] for path in changed_files(before, snapshot)}
+        closed = bool(current)
+        # Probe all observed dumps: an old file may still be open with its file
+        # times deferred, even when its sampled bytes match the baseline.
+        for path in snapshot:
+            check_settle_deadline(deadline, clock)
+            try:
+                if not probe(Path(path)):
+                    closed = False
+            except Exception as exc:
+                # Optional platform imports and ctypes API calls can fail with
+                # exceptions other than OSError. Completion is unknown after
+                # any probe failure; abort collection rather than retrying into
+                # apparent stability. The iteration records this OSError while
+                # preserving the child's classification and other artifacts.
+                raise OSError(f"{path} writer probe: {type(exc).__name__}: {exc}") from exc
+        check_settle_deadline(deadline, clock)
+        now = clock()
+        if not closed:
+            stable_since = None
+        elif current != previous or stable_since is None:
+            stable_since = now
+        elif now - stable_since >= DUMP_STABLE_SECONDS:
+            check_settle_deadline(deadline, clock)
+            return snapshot
         previous = current
-        time.sleep(1.0)
+        pause(min(DUMP_STABLE_SECONDS, max(0.0, deadline - clock())))
 
 
 def build_entry(

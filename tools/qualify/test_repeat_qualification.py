@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Contract tests for repeat_qualification.py using a small fake child executable.
 
-Run with `python3 -I test_repeat_qualification.py`. The harness is loaded from its file path,
+Run with `python3 -I -B test_repeat_qualification.py`. The harness is loaded from its file path,
 so the test does not depend on the current directory or on sys.path.
 """
 
@@ -962,10 +962,11 @@ class RunDirectoryAndSnapshotTest(unittest.TestCase):
             return real_stat(path, *args, **kwargs)
 
         errors: list[str] = []
-        # Fixed time and a mocked pause make the two stable snapshots deterministic.
+        # Advance exactly one stable window without a real pause.
+        now = [0.0]
         with mock.patch.object(Path, "stat", selective_stat), \
-                mock.patch.object(rq.time, "monotonic", return_value=0.0), \
-                mock.patch.object(rq.time, "sleep"):
+                mock.patch.object(rq.time, "monotonic", side_effect=lambda: now[0]), \
+                mock.patch.object(rq.time, "sleep", side_effect=lambda seconds: now.__setitem__(0, now[0] + seconds)):
             rq.wait_for_dump_settle(folder, {}, 30.0, errors)
         self.assertEqual(len(errors), 2)
         self.assertTrue(all(str(denied) in error and "PermissionError: settle inspection denied" in error
@@ -987,6 +988,365 @@ class RunDirectoryAndSnapshotTest(unittest.TestCase):
         healthy.write_bytes(b"dump")
         skip = rq.harness_output_skip(self.root / "run", receipt)
         self.assertEqual(list(rq.snapshot_files(self.root, False, skip)), [str(healthy)])
+
+
+class DumpSettleTest(unittest.TestCase):
+    """Sparse files, a virtual clock and injected writer state; no native WER."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory(prefix="dump-settle-unit-")
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name)
+        self.folder = self.root / "dumps"
+        self.folder.mkdir()
+        self.now = 0.0
+
+    def dump(self, name: str, size: int = 5 * 1024 * 1024) -> Path:
+        path = self.folder / name
+        with path.open("wb") as handle:
+            handle.seek(size - 1)
+            handle.write(b"x")
+        return path
+
+    def pause(self, seconds: float) -> None:
+        self.now += seconds
+
+    def settle(self, before=None, probe=None, pause=None, timeout=10.0, errors=None):
+        with mock.patch.object(rq.time, "monotonic", side_effect=lambda: self.now), \
+                mock.patch.object(rq.time, "sleep", side_effect=pause or self.pause), \
+                mock.patch.object(rq, "dump_writer_closed", create=True,
+                                  side_effect=probe or (lambda path: True)):
+            return rq.wait_for_dump_settle(self.folder, before or {}, timeout, errors)
+
+    @contextmanager
+    def track_reads(self, on_read=None):
+        real_open = Path.open
+        reads: list[tuple[Path, int, int]] = []
+
+        @contextmanager
+        def tracked_open(path, *args, **kwargs):
+            with real_open(path, *args, **kwargs) as handle:
+                tracked = mock.Mock(wraps=handle)
+
+                def read(length=-1):
+                    self.assertGreaterEqual(length, 0, "snapshot read must be bounded")
+                    offset = handle.tell()
+                    data = handle.read(length)
+                    reads.append((path, offset, len(data)))
+                    if on_read is not None:
+                        on_read()
+                    return data
+
+                tracked.read.side_effect = read
+                yield tracked
+
+        with mock.patch.object(Path, "open", tracked_open):
+            yield reads
+
+    def test_large_dumps_remain_detectable_with_bounded_reads(self) -> None:
+        paths = [self.dump("mini.dmp"), self.dump("full.dmp", 200 * 1024 * 1024)]
+        with self.track_reads() as reads:
+            snapshot = rq.snapshot_files(self.folder, False)
+        self.assertTrue(reads, "snapshots must fingerprint dump contents")
+        self.assertEqual(set(snapshot), {str(path) for path in paths})
+        self.assertEqual(rq.changed_files({}, snapshot), sorted(map(str, paths)))
+        self.assertLessEqual(sum(length for _, _, length in reads), rq.SNAPSHOT_TOTAL_READ_BYTES)
+        for path in paths:
+            stamp = snapshot[str(path)]
+            self.assertEqual(sum(length for source, _, length in reads if source == path),
+                             rq.SNAPSHOT_FILE_READ_BYTES)
+            self.assertEqual([(offset, length) for source, offset, length in reads if source == path],
+                             [(offset, length) for offset, length, _ in stamp.fingerprints])
+            self.assertEqual(stamp.fingerprints[-1][0] + stamp.fingerprints[-1][1], path.stat().st_size)
+        settled = self.settle()
+        self.assertEqual(set(settled), set(snapshot))
+        self.assertEqual(self.now, rq.DUMP_STABLE_SECONDS)
+
+    def test_multiple_dumps_exhaust_budget_without_hiding_open_writer(self) -> None:
+        count = rq.SNAPSHOT_TOTAL_READ_BYTES // rq.SNAPSHOT_FILE_READ_BYTES + 2
+        paths = [self.dump(f"dump-{index}.dmp") for index in range(count)]
+        with self.track_reads() as reads:
+            snapshot = rq.snapshot_files(self.folder, False)
+        self.assertEqual(len(snapshot), count)
+        self.assertEqual(sum(length for _, _, length in reads), rq.SNAPSHOT_TOTAL_READ_BYTES)
+        self.assertTrue(any(not stamp.fingerprints for stamp in snapshot.values()))
+        for path in paths:
+            self.assertLessEqual(sum(length for source, _, length in reads if source == path),
+                                 rq.SNAPSHOT_FILE_READ_BYTES)
+        unsampled = Path(next(path for path, stamp in snapshot.items() if not stamp.fingerprints))
+        probes: list[Path] = []
+
+        def probe(path):
+            probes.append(path)
+            return path != unsampled or self.now >= 2.0
+
+        settled = self.settle(probe=probe)
+        self.assertEqual(set(settled), set(snapshot))
+        self.assertEqual(self.now, 3.0)
+        self.assertEqual(probes.count(unsampled), 4)
+
+    def test_growing_dump_resets_stable_window(self) -> None:
+        path = self.dump("growing.dmp")
+
+        def grow(seconds):
+            self.pause(seconds)
+            if self.now <= 2.0:
+                with path.open("ab") as handle:
+                    handle.write(b"more")
+
+        settled = self.settle(pause=grow)
+        self.assertEqual(self.now, 3.0)
+        self.assertEqual(settled[str(path)].size, 5 * 1024 * 1024 + 8)
+
+    def test_middle_rewrite_cannot_settle_while_writer_is_open(self) -> None:
+        path = self.dump("middle.dmp", 200 * 1024 * 1024)
+        original_stat = path.stat()
+        real_stat = Path.stat
+        observed: list[bool] = []
+
+        def rewrite(seconds):
+            self.pause(seconds)
+            if self.now <= 3.0:
+                with path.open("r+b") as handle:
+                    handle.seek(original_stat.st_size // 2)
+                    handle.write(bytes([int(self.now)]))
+
+        def probe(candidate):
+            self.assertEqual(candidate, path)
+            closed = self.now >= 3.0
+            observed.append(closed)
+            return closed
+
+        # Model Windows deferring all file times until its writer closes. The
+        # sampled ends and metadata deliberately remain identical throughout.
+        with mock.patch.object(Path, "stat", lambda candidate, *a, **kw:
+                               original_stat if candidate == path else real_stat(candidate, *a, **kw)):
+            settled = self.settle(probe=probe, pause=rewrite)
+        self.assertEqual(observed, [False, False, False, True, True])
+        self.assertEqual(self.now, 4.0)
+        self.assertIn(str(path), settled)
+
+    def test_baseline_matching_dump_is_also_probed_for_deferred_writes(self) -> None:
+        old = self.dump("old.dmp")
+        before = rq.snapshot_files(self.folder, False)
+        self.dump("new.dmp")
+        probes: list[Path] = []
+
+        def probe(path):
+            probes.append(path)
+            return path != old or self.now >= 2.0
+
+        self.settle(before=before, probe=probe)
+        self.assertEqual(self.now, 3.0)
+        self.assertEqual(probes.count(old), 4)
+
+    def test_coverage_change_does_not_copy_stale_dump_again(self) -> None:
+        old = self.dump("old.dmp")
+        with mock.patch.object(rq, "SNAPSHOT_TOTAL_READ_BYTES", 96), \
+                mock.patch.object(rq, "SNAPSHOT_FILE_READ_BYTES", 64):
+            before = rq.snapshot_files(self.folder, False)
+            new = self.dump("new.dmp")
+            # Directory enumeration order is not guaranteed. Make the new file
+            # consume the old file's previous coverage deterministically.
+            with mock.patch.object(Path, "iterdir", return_value=iter([new, old])):
+                after = rq.snapshot_files(self.folder, False)
+            self.assertNotEqual(before[str(old)].fingerprints, after[str(old)].fingerprints)
+            self.assertEqual(rq.changed_files(before, after), [str(new)])
+            with mock.patch.object(Path, "iterdir", return_value=iter([new, old])), \
+                    mock.patch.object(rq.shutil, "copy2") as copy:
+                copies = rq.copy_changed_files(self.folder, before, self.root / "wer")
+            self.assertEqual([Path(path).name for path in copies], [new.name])
+            self.assertEqual([call.args[0] for call in copy.call_args_list], [str(new)])
+
+    def test_equivalent_coverage_detects_rewrite_with_unchanged_metadata(self) -> None:
+        path = self.dump("rewrite.dmp")
+        original_stat = path.stat()
+        real_stat = Path.stat
+        before = rq.snapshot_files(self.folder, False)
+        with path.open("r+b") as handle:
+            handle.write(b"rewritten")
+        with mock.patch.object(Path, "stat", lambda candidate, *a, **kw:
+                               original_stat if candidate == path else real_stat(candidate, *a, **kw)):
+            after = rq.snapshot_files(self.folder, False)
+        self.assertEqual(rq.changed_files(before, after), [str(path)])
+
+    def test_deadline_expiry_during_fingerprint_read_stops_collection(self) -> None:
+        self.dump("slow.dmp")
+
+        def expire():
+            self.now = 10.0
+
+        probe = mock.Mock(return_value=True)
+        errors: list[str] = []
+        with self.track_reads(on_read=expire) as reads:
+            with self.assertRaisesRegex(TimeoutError, "settle deadline"):
+                self.settle(probe=probe, timeout=10.0, errors=errors)
+        self.assertEqual(len(reads), 1)
+        probe.assert_not_called()
+
+    def test_deadline_expiry_during_listing_stops_collection(self) -> None:
+        path = self.dump("slow.dmp")
+
+        def slow_listing(folder):
+            yield path
+            self.now = 10.0
+            yield path
+
+        with mock.patch.object(Path, "iterdir", slow_listing):
+            with self.assertRaisesRegex(TimeoutError, "settle deadline"):
+                self.settle(timeout=10.0)
+
+    def test_deadline_expiry_during_final_probe_cannot_accept_stability(self) -> None:
+        self.dump("slow-probe.dmp")
+
+        def probe(path):
+            if self.now >= 1.0:
+                self.now = 2.0
+            return True
+
+        with self.assertRaisesRegex(TimeoutError, "settle deadline"):
+            self.settle(probe=probe, timeout=2.0)
+
+    def test_open_writer_times_out_with_bounded_pause(self) -> None:
+        self.dump("open.dmp")
+        pauses: list[float] = []
+
+        def pause(seconds):
+            pauses.append(seconds)
+            self.pause(seconds)
+
+        with self.assertRaisesRegex(TimeoutError, "settle deadline"):
+            self.settle(probe=lambda path: False, pause=pause, timeout=1.5)
+        self.assertEqual(pauses, [1.0, 0.5])
+        self.assertEqual(self.now, 1.5)
+
+    def check_iteration_probe_failure(self, label, probe, error_text) -> None:
+        run_dir = self.root / label
+        run_dir.mkdir()
+        exe = run_dir / "child.exe"
+        exe.write_bytes(b"synthetic executable")
+        digest = hashlib.sha256(exe.read_bytes()).hexdigest()
+        core_folder = run_dir / "cores"
+        core_folder.mkdir()
+        child_result = {
+            "exit_code": 0xC0000005, "signal": None, "timed_out": False,
+            "duration_seconds": 0.1, "status": "exit:3221225477",
+            "launch_error": None, "cleanup_errors": [],
+        }
+
+        def child(command, cwd, env, log, timeout, core_target):
+            self.dump(f"{label}.dmp", size=128)
+            (Path(env["LUMINUMBRA_CRASH_DIR"]) / "child.dmp").write_bytes(b"child evidence")
+            (core_folder / "core").write_bytes(b"core evidence")
+            return dict(child_result)
+
+        with mock.patch.object(rq, "IS_WINDOWS", True), \
+                mock.patch.object(rq, "run_iteration", side_effect=child), \
+                mock.patch.object(rq, "dump_writer_closed", side_effect=probe) as writer, \
+                mock.patch.object(rq.time, "monotonic", side_effect=lambda: self.now), \
+                mock.patch.object(rq.time, "sleep", side_effect=self.pause):
+            entry = rq.run_locked_iteration(
+                1, run_dir, exe, digest, "Fake.Filter", [], None, 1.0, 1,
+                self.folder, core_folder, None, None, None,
+            )
+        self.assertEqual(entry["index"], 1)
+        self.assertTrue(entry["failed"])
+        self.assertEqual(entry["failure_reason"], child_result["status"])
+        for field, value in child_result.items():
+            self.assertEqual(entry[field], value)
+        self.assertEqual(len(entry["collection_errors"]), 1)
+        self.assertIn("writer probe:", entry["collection_errors"][0])
+        self.assertIn(error_text, entry["collection_errors"][0])
+        self.assertFalse((run_dir / "iter-1" / "wer").exists())
+        self.assertEqual(sorted(Path(path).name for path in entry["crash_artifacts"]),
+                         ["child.dmp", "core"])
+        self.assertTrue(all(Path(path).is_file() for path in entry["crash_artifacts"]))
+        writer.assert_called_once()
+        self.assertEqual(self.now, 0.0)
+
+    def test_unavailable_windows_probe_keeps_completed_iteration(self) -> None:
+        # Execute the actual Windows probe on every platform, including imports.
+        cases = (
+            ("missing-ctypes", None, "ModuleNotFoundError"),
+            ("missing-wintypes", ModuleType("ctypes"), "ImportError"),
+        )
+        for label, module, error in cases:
+            with self.subTest(label=label), mock.patch.dict(sys.modules, {"ctypes": module}):
+                self.check_iteration_probe_failure(label, rq.windows_dump_writer_closed, error)
+
+    def test_windows_api_failures_keep_completed_iteration(self) -> None:
+        import ctypes
+        from ctypes import wintypes
+
+        cases = (
+            ("missing-WinDLL", "ctypes", "WinDLL", None, "AttributeError"),
+            ("missing-CreateFileW", "kernel", "CreateFileW", None, "AttributeError"),
+            ("missing-CloseHandle", "kernel", "CloseHandle", None, "AttributeError"),
+            ("load-error", "ctypes", "WinDLL", RuntimeError("DLL unavailable"), "RuntimeError: DLL unavailable"),
+            ("argument-error", "kernel", "CreateFileW", ctypes.ArgumentError("bad argument"), "ArgumentError: bad argument"),
+            ("close-error", "kernel", "CloseHandle", ValueError("close failed"), "ValueError: close failed"),
+            ("last-error", "ctypes", "get_last_error", TypeError("error unavailable"), "TypeError: error unavailable"),
+            ("win-error", "ctypes", "WinError", RuntimeError("error unavailable"), "RuntimeError: error unavailable"),
+            ("access-denied", "ctypes", "WinError", OSError("access denied"), "OSError: access denied"),
+        )
+        for label, target, attribute, failure, error in cases:
+            with self.subTest(label=label):
+                kernel = ModuleType("kernel32")
+                kernel.CreateFileW = mock.Mock(return_value=123)
+                kernel.CloseHandle = mock.Mock(return_value=True)
+                api = ModuleType("ctypes")
+                api.wintypes = wintypes
+                api.c_void_p = ctypes.c_void_p
+                api.WinDLL = mock.Mock(return_value=kernel)
+                api.get_last_error = mock.Mock(return_value=5)
+                api.WinError = mock.Mock(return_value=OSError("access denied"))
+                if attribute in ("get_last_error", "WinError"):
+                    kernel.CreateFileW.return_value = ctypes.c_void_p(-1).value
+                owner = api if target == "ctypes" else kernel
+                if failure is None:
+                    delattr(owner, attribute)
+                else:
+                    getattr(owner, attribute).side_effect = failure
+                with mock.patch.dict(sys.modules, {"ctypes": api}):
+                    self.check_iteration_probe_failure(label, rq.windows_dump_writer_closed, error)
+
+    def test_probe_error_cannot_recover_into_settled_evidence(self) -> None:
+        # A later successful probe must not erase an earlier collection failure.
+        calls = 0
+
+        def probe(path):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise OSError("probe unavailable")
+            return True
+
+        self.check_iteration_probe_failure("transient-error", probe, "OSError: probe unavailable")
+
+    def test_windows_probe_uses_exclusive_open_and_closes_handle(self) -> None:
+        import ctypes
+
+        kernel = mock.Mock()
+        kernel.CreateFileW.return_value = 123
+        kernel.CloseHandle.return_value = True
+        with mock.patch.object(ctypes, "WinDLL", create=True, return_value=kernel) as dll:
+            self.assertTrue(rq.windows_dump_writer_closed(Path("dump.dmp")))
+        dll.assert_called_once_with("kernel32", use_last_error=True)
+        kernel.CreateFileW.assert_called_once_with("dump.dmp", 0x80000000, 0, None, 3, 0x80, None)
+        kernel.CloseHandle.assert_called_once_with(123)
+        self.assertEqual(kernel.CreateFileW.restype, ctypes.c_void_p)
+
+    def test_windows_probe_sharing_violations_mean_open_writer(self) -> None:
+        import ctypes
+
+        for error in (32, 33):
+            with self.subTest(error=error):
+                kernel = mock.Mock()
+                kernel.CreateFileW.return_value = ctypes.c_void_p(-1).value
+                with mock.patch.object(ctypes, "WinDLL", create=True, return_value=kernel), \
+                        mock.patch.object(ctypes, "get_last_error", create=True, return_value=error):
+                    self.assertFalse(rq.windows_dump_writer_closed(Path("dump.dmp")))
+                kernel.CloseHandle.assert_not_called()
 
 
 class WindowsDumpLockTest(unittest.TestCase):
@@ -1435,6 +1795,31 @@ class QualificationSafetyTest(HarnessTestCase):
 
     def dump_query(self, folder: Path):
         return lambda key: (0, WerPreflightTest.reg_output(str(folder)))
+
+    def test_unsettled_wer_is_not_copied_after_deadline(self) -> None:
+        folder = self.work / "dumps"
+        folder.mkdir()
+        now = [0.0]
+
+        def child_with_open_dump(*arguments):
+            result = self.clean_child(*arguments)
+            (folder / "unfinished.dmp").write_bytes(b"partial dump")
+            result.update(status="exit:5", exit_code=5)
+            return result
+
+        with mock.patch.object(rq, "dump_writer_closed", return_value=False, create=True), \
+                mock.patch.object(rq, "DUMP_SETTLE_SECONDS", 1.5), \
+                mock.patch.object(rq.time, "monotonic", side_effect=lambda: now[0]), \
+                mock.patch.object(rq.time, "sleep", side_effect=lambda seconds: now.__setitem__(0, now[0] + seconds)):
+            code, _ = self.qualify(self.safety_args(count=1, folder=folder),
+                                   child_with_open_dump, self.dump_query(folder))
+        self.assertEqual(code, 1)
+        entry = self.assert_finalized("failed")["iterations"][0]
+        self.assertEqual(entry["status"], "exit:5")
+        self.assertEqual(entry["crash_artifacts"], [])
+        self.assertTrue(any("dump folder settle: TimeoutError" in error
+                            for error in entry["collection_errors"]))
+        self.assertFalse((Path(entry["crash_dir"]).parent / "wer").exists())
 
     def check_concurrent_dump_collection(self, windows: bool) -> None:
         folder = self.work / "shared-dumps"
