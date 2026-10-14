@@ -346,6 +346,35 @@ TEST_F(ConsoleFixture, TextButtonsAndBindingsDispatchTheSameOperation) {
     EXPECT_TRUE(console.Submit("bindings").message.find("Ctrl+F12") != std::string::npos);
 }
 
+TEST_F(ConsoleFixture, HelpListsScopesForDefaultReboundAndUnboundTimeShortcuts) {
+    const auto expect_help =
+        [&](const std::string& slower, const std::string& faster, const std::string& reset) {
+            for (const auto& help : {console.HelpText(),
+                                     console.Submit("help").message,
+                                     console.Submit("bindings").message}) {
+                EXPECT_NE(help.find("time.slower = " + slower + " (scopes: gameplay)\n"),
+                          std::string::npos);
+                EXPECT_NE(help.find("time.faster = " + faster + " (scopes: gameplay)\n"),
+                          std::string::npos);
+                EXPECT_NE(help.find("time.reset = " + reset + " (scopes: gameplay, photo mode)\n"),
+                          std::string::npos);
+                EXPECT_NE(help.find("console.toggle = F1 (scopes: global, gameplay, photo mode)\n"),
+                          std::string::npos);
+                EXPECT_NE(help.find("perf.hud = Unbound (scopes: global, gameplay, photo mode)\n"),
+                          std::string::npos);
+            }
+        };
+    expect_help("[", "]", "\\");
+    ASSERT_TRUE(console.Submit("bind time.slower Ctrl+A").success);
+    ASSERT_TRUE(console.Submit("bind time.faster Ctrl+B").success);
+    ASSERT_TRUE(console.Submit("bind time.reset Ctrl+C").success);
+    expect_help("Ctrl+A", "Ctrl+B", "Ctrl+C");
+    ASSERT_TRUE(console.Submit("unbind time.slower").success);
+    ASSERT_TRUE(console.Submit("unbind time.faster").success);
+    ASSERT_TRUE(console.Submit("unbind time.reset").success);
+    expect_help("Unbound", "Unbound", "Unbound");
+}
+
 TEST(DeveloperCommands, UnavailableExecutionAndDuplicateDefinitions) {
     DeveloperBindings bindings;
     DeveloperWidgetRegistry widgets(bindings);

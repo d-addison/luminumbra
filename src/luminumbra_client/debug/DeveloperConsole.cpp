@@ -212,8 +212,23 @@ std::string DeveloperConsole::WidgetHelp() const {
 }
 std::string DeveloperConsole::BindingHelp() const {
     std::ostringstream out;
-    for (const auto& def : m_bindings.List())
-        out << def.id << " = " << FormatKeyChord(m_bindings.Get(def.id)) << '\n';
+    const struct {
+        unsigned mask;
+        const char* name;
+    } scopes[] = {{Global, "global"}, {Gameplay, "gameplay"}, {Photo, "photo mode"}};
+    for (const auto& def : m_bindings.List()) {
+        out << def.id << " = " << FormatKeyChord(m_bindings.Get(def.id)) << " (scopes: ";
+        const char* separator = "";
+        for (const auto& scope : scopes) {
+            if (def.scopes & scope.mask) {
+                out << separator << scope.name;
+                separator = ", ";
+            }
+        }
+        if (!*separator)
+            out << "none";
+        out << ")\n";
+    }
     if (m_host.gameplay_help)
         out << m_host.gameplay_help();
     return out.str();
