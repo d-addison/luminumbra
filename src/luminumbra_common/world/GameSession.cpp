@@ -1634,14 +1634,14 @@ std::string GameSession::PlantRegionProjection(RegionKey key) const {
 void GameSession::RunRegionalFoliageTick(
     luminumbra::simulation::SimBudgetTelemetry::TickScope& budget, std::uint64_t tick) {
     auto ledger = m_activeRegionLedger;
-    auto pages = m_fieldPages;
+    auto pages = m_fieldPages.foliage_snapshot();
     auto work = m_regionCompletedWork;
     std::set<entt::entity> retained;
     auto staged = luminumbra::foliage::StageFoliageRegistry(m_registry, retained);
     auto original = std::move(m_registry);
     m_registry = std::move(staged);
     try {
-        RunRegionalFoliageTickImpl(budget, tick);
+        RunRegionalFoliageTickImpl(budget, tick, pages);
         luminumbra::foliage::CommitFoliageRegistry(original, m_registry, retained);
         m_registry = std::move(original);
     } catch (...) {
@@ -1654,7 +1654,7 @@ void GameSession::RunRegionalFoliageTick(
                 break;
         }
         m_activeRegionLedger = std::move(ledger);
-        m_fieldPages = std::move(pages);
+        m_fieldPages.restore_foliage(std::move(pages));
         m_regionCompletedWork = std::move(work);
         m_registry = std::move(original);
         if (m_regionFault) {
@@ -1666,7 +1666,9 @@ void GameSession::RunRegionalFoliageTick(
     }
 }
 void GameSession::RunRegionalFoliageTickImpl(
-    luminumbra::simulation::SimBudgetTelemetry::TickScope& budget, std::uint64_t tick) {
+    luminumbra::simulation::SimBudgetTelemetry::TickScope& budget,
+    std::uint64_t tick,
+    const FieldPageState& previous) {
     namespace fol = luminumbra::foliage;
     namespace C = Components;
     using Stage = luminumbra::simulation::SimBudgetStage;
@@ -1706,7 +1708,6 @@ void GameSession::RunRegionalFoliageTickImpl(
             windows[key] = static_cast<std::uint32_t>(std::min<std::uint64_t>(elapsed, 65536));
         }
     }
-    const auto previous = m_fieldPages;
     std::map<RegionKey, std::uint64_t> page_work;
     std::set<RegionKey> completed_regions;
     struct GrowthWindow {
@@ -3591,16 +3592,27 @@ void GameSession::RestoreRegionalScent() {
 void GameSession::CaptureRegionalScent() {
     std::vector<std::pair<ScentCellKey, ScentCell>> changed;
     std::map<RegionKey, std::uint64_t> work;
+    const auto origin_x = static_cast<std::int32_t>(ScentDomainOrigin(true));
+    const auto origin_z = static_cast<std::int32_t>(ScentDomainOrigin(false));
+    const auto& stored = m_fieldPages.scent_cells();
+    // Storage is ordered by (x, z), capture by (z, x). Walk one cursor per column
+    // instead of searching the tree for every cell. Authority stays sealed until
+    // update_scent commits, including when this domain has moved since last tick.
+    std::array<decltype(stored.begin()), kScentFieldCells> columns;
+    for (int x = 0; x < kScentFieldCells; ++x)
+        columns[x] = stored.lower_bound({origin_x + x, origin_z});
+    changed.reserve(kScentFieldCells * kScentFieldCells);
     for (int z = 0; z < kScentFieldCells; ++z)
         for (int x = 0; x < kScentFieldCells; ++x) {
-            const ScentCellKey key{static_cast<std::int32_t>(ScentDomainOrigin(true)) + x,
-                                   static_cast<std::int32_t>(ScentDomainOrigin(false)) + z};
+            const ScentCellKey key{origin_x + x, origin_z + z};
             ScentCell values{};
             for (int channel = 0; channel < kScentFieldChannels; ++channel)
                 values[channel] = std::bit_cast<std::uint64_t>(m_scentField->Sample(channel, x, z));
-            const auto found = m_fieldPages.scent_cells().find(key);
-            const ScentCell old =
-                found == m_fieldPages.scent_cells().end() ? ScentCell{} : found->second;
+            auto& cursor = columns[x];
+            const bool exists = cursor != stored.end() && cursor->first == key;
+            const ScentCell old = exists ? cursor->second : ScentCell{};
+            if (exists)
+                ++cursor;
             if (values == old)
                 continue;
             changed.emplace_back(key, values);

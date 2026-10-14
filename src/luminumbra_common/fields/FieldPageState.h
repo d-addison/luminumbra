@@ -116,6 +116,10 @@ public:
     [[nodiscard]] const FoliageFieldPages& irrigation() const {
         return m_irrigation;
     }
+    // Foliage evolution and admission write only soil/irrigation. Retain these
+    // channels for both border reads and rollback, without copying ambient state.
+    [[nodiscard]] FieldPageState foliage_snapshot() const;
+    void restore_foliage(FieldPageState&& snapshot) noexcept;
     bool set_soil(ScentCellKey cell, std::int32_t value) {
         return m_soil.set(cell, value, kSoilBaseline);
     }

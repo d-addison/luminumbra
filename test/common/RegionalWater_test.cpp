@@ -143,6 +143,67 @@ TEST_F(RegionalWaterFixture, UninitializedAndOldResolutionClaimsEarnPreparationA
     EXPECT_EQ(shield.far_lod_region_authority_revision(-1, -1), 1u);
 }
 
+TEST_F(RegionalWaterFixture, CachedRiverSourcesMatchRebuildingAcrossTicksResizeAndWorldInputs) {
+    Owner({0, 0});
+    chunks = {WaterChunk({0, 0, 0}), WaterChunk({1, 0, 0})};
+    std::vector<std::shared_ptr<Chunk>> reference{WaterChunk({0, 0, 0}), WaterChunk({1, 0, 0})};
+    Systems::WaterSystem rebuilding(nullptr, &shield);
+    water.SetHydrology(false, 0, 0);
+    rebuilding.SetHydrology(false, 0, 0);
+    auto params = shield.get_params();
+    params.rivers_enabled = true;
+    shield.set_params(params);
+    for (std::uint64_t tick = 1; tick <= 12; ++tick) {
+        SCOPED_TRACE(tick);
+        if (tick == 4)
+            shield.set_seed(42);
+        if (tick == 7) {
+            params.river_frequency *= 2;
+            params.river_pv_min = -0.75f;
+            params.river_pv_max = 0.75f;
+            shield.set_params(params);
+        }
+        if (tick == 10) {
+            params.rivers_enabled = false;
+            shield.set_params(params);
+        }
+        const int resolution = tick < 6 ? 8 : 16;
+        water.SetSimResolution(resolution);
+        rebuilding.SetSimResolution(resolution);
+        WorldClock clock;
+        clock.set_tick(tick);
+        const auto schedule = ledger.schedule(clock);
+        auto reference_ledger = ledger;
+        std::vector<world::RegionWork> actual_work, reference_work;
+        for (const auto& chunk : chunks)
+            chunk->is_water_sleeping.store(false);
+        for (const auto& chunk : reference) {
+            chunk->is_water_sleeping.store(false);
+            // The original regional staging rebuilt this derived mask on every visit.
+            chunk->water_src_mm.clear();
+            chunk->water_source_inputs.reset();
+        }
+        const auto budget = 2 * (2 * resolution * resolution + 4 * resolution);
+        water.UpdateRegional(registry, chunks, ledger, schedule, actual_work, budget);
+        rebuilding.UpdateRegional(
+            registry, reference, reference_ledger, schedule, reference_work, budget);
+        for (std::size_t i = 0; i < chunks.size(); ++i) {
+            EXPECT_EQ(CaptureWater(*chunks[i]), CaptureWater(*reference[i]));
+            ASSERT_TRUE(chunks[i]->water_source_inputs.has_value());
+            EXPECT_EQ(chunks[i]->water_source_inputs->seed, shield.get_seed());
+        }
+        EXPECT_EQ(ledger.encode(), reference_ledger.encode());
+        EXPECT_EQ(water.regional_work().water_cells, rebuilding.regional_work().water_cells);
+        EXPECT_EQ(water.regional_work().source_mm, rebuilding.regional_work().source_mm);
+        ASSERT_EQ(actual_work.size(), reference_work.size());
+        for (std::size_t i = 0; i < actual_work.size(); ++i) {
+            EXPECT_EQ(actual_work[i].key, reference_work[i].key);
+            EXPECT_EQ(actual_work[i].region_ticks, reference_work[i].region_ticks);
+            EXPECT_EQ(actual_work[i].water_cells, reference_work[i].water_cells);
+        }
+    }
+}
+
 TEST(RegionalWater,
      EntirelyUninitializedOwnerEarnsOnePreparationAndKernelAtLegalSessionResolutions) {
     for (const int resolution : {4, 8, 16}) {

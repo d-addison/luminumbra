@@ -1908,14 +1908,9 @@ foreach(_lum_gtest_target ${LUMINUMBRA_GTEST_TARGETS})
         gtest_discover_tests(${_lum_gtest_target} DISCOVERY_TIMEOUT 120
             PROPERTIES RUN_SERIAL TRUE)
     elseif(_lum_gtest_target STREQUAL world_open_refusal_test)
-        # Carries the populated 3,600-tick telemetry parity runs, which execute
-        # three full simulations per parameter. They take about four minutes each
-        # in Debug and about eight under the sanitizer on a developer machine, so
-        # the workflow's 300-second default expires on a slower runner. The tick
-        # count is the evidence, not the runtime: it is what proves the world hash
-        # is unmoved by telemetry across both switches, so raise the bound rather
-        # than shorten the run. Everything else in this target is fast; the cost of
-        # the wider bound is only that a genuine hang here surfaces later.
+        # Carries three populated 3,600-tick parity passes per parameter. Keep the
+        # existing bound; HeavyTestsCTest.cmake assigns scheduling costs to these
+        # discovered tests so CTest starts them early in sanitizer lanes.
         gtest_discover_tests(${_lum_gtest_target} DISCOVERY_TIMEOUT 120
             PROPERTIES TIMEOUT 1800)
     elseif(_lum_gtest_target IN_LIST LUMINUMBRA_GL_GTEST_TARGETS)
@@ -1929,7 +1924,8 @@ endforeach()
 # Apply child-only labels after discovery has registered the tests. This CTest
 # include mechanism works since CMake 3.10; discovery TEST_FILTER requires 3.22.
 set_property(DIRECTORY APPEND PROPERTY TEST_INCLUDE_FILES
-    "${CMAKE_CURRENT_SOURCE_DIR}/persistence/SaveTransactionCTest.cmake")
+    "${CMAKE_CURRENT_SOURCE_DIR}/persistence/SaveTransactionCTest.cmake"
+    "${CMAKE_CURRENT_SOURCE_DIR}/HeavyTestsCTest.cmake")
 
 # The deterministic forest geometry harness is manual because it validates a
 # pinned 16k-tree workload rather than ordinary unit behavior. It guards the

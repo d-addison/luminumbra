@@ -262,7 +262,7 @@ std::vector<WaterFace> ReserveWaterFaces(const WaterSnapshot& snapshot,
     return reserved;
 }
 
-std::unique_ptr<Chunk> StageWater(const Chunk& original) {
+std::unique_ptr<Chunk> StageWater(const Chunk& original, bool reuse_sources) {
     auto copy = std::make_unique<Chunk>(original.get_coords());
     copy->water_depth_mm = original.water_depth_mm;
     copy->water_bed_mm = original.water_bed_mm;
@@ -271,7 +271,12 @@ std::unique_ptr<Chunk> StageWater(const Chunk& original) {
     copy->water_flow_data = original.water_flow_data;
     copy->water_sim_terrain_height = original.water_sim_terrain_height;
     copy->water_rest_level = original.water_rest_level;
-    // water_src_mm is derived; rebuilding it deliberately also handles old resolution caches.
+    // Keep the derived source mask: the kernel checks its resolution and generator inputs.
+    // Discarding it here reran river noise for every selected cell on every tick.
+    if (reuse_sources) {
+        copy->water_src_mm = original.water_src_mm;
+        copy->water_source_inputs = original.water_source_inputs;
+    }
     copy->has_water_sim.store(original.has_water_sim.load());
     copy->current_water_resolution.store(original.current_water_resolution.load());
     copy->is_water_sleeping.store(original.is_water_sleeping.load());
@@ -302,6 +307,7 @@ void PublishWater(Chunk& destination, Chunk& staged, bool changed) noexcept {
     destination.water_sim_terrain_height.swap(staged.water_sim_terrain_height);
     destination.water_rest_level.swap(staged.water_rest_level);
     destination.water_src_mm.swap(staged.water_src_mm);
+    destination.water_source_inputs = staged.water_source_inputs;
     destination.has_water_sim.store(staged.has_water_sim.load());
     destination.current_water_resolution.store(staged.current_water_resolution.load());
     destination.is_water_sleeping.store(staged.is_water_sleeping.load());
@@ -496,7 +502,11 @@ void WaterSystem::UpdateRegional(entt::registry& registry,
     const auto stage = [&](ChunkID id) -> Chunk& {
         auto found = staged.find(id);
         if (found == staged.end())
-            found = staged.emplace(id, StageWater(*snapshot.at(id).chunk)).first;
+            found = staged
+                        .emplace(id,
+                                 StageWater(*snapshot.at(id).chunk,
+                                            selected.contains(id) && !m_finite_hydrology))
+                        .first;
         return *found->second;
     };
     for (const auto id : selected) {

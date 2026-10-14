@@ -670,6 +670,48 @@ TEST(FieldPageStateTest, ScentBatchMatchesOrderedAdmissionsAndRejectsAtomically)
     EXPECT_EQ(store.serialize(), before);
 }
 
+TEST(FieldPageStateTest, DenseScentBatchPreservesBytesAcrossEraseInsertAndMovingDomains) {
+    FieldPageState store, reference;
+    for (int tick = 0; tick < 6; ++tick) {
+        std::vector<std::pair<ScentCellKey, ScentCell>> updates;
+        for (int z = -8 + tick; z < 8 + tick; ++z)
+            for (int x = -8 - tick; x < 8 - tick; ++x) {
+                ScentCell value{};
+                if ((x + z + tick) % 3 != 0)
+                    value[tick % 4] = std::bit_cast<std::uint64_t>(1.0 + tick);
+                updates.emplace_back(ScentCellKey{x, z}, value);
+                ASSERT_TRUE(reference.set_scent({x, z}, value));
+            }
+        ASSERT_TRUE(store.update_scent(updates));
+        EXPECT_EQ(store.serialize(), reference.serialize());
+        EXPECT_EQ(store.canonical_bytes(), reference.canonical_bytes());
+    }
+}
+
+TEST(FieldPageStateTest, FoliageSnapshotAndRollbackPreserveAllBytesWithoutCopyingAmbientState) {
+    auto store = ActivatedStore();
+    ASSERT_TRUE(store.set_scent({-1, -1}, {std::bit_cast<std::uint64_t>(1.25), 0, 0, 0}));
+    ASSERT_TRUE(store.set_weather_age({0, 0}, 13));
+    ASSERT_TRUE(store.set_soil({-1, -1}, 999997));
+    ASSERT_TRUE(store.set_irrigation({0, 0}, 12345));
+    const auto before = store.serialize();
+    auto saved = store.foliage_snapshot();
+    EXPECT_TRUE(saved.pages().empty());
+    EXPECT_TRUE(saved.scent_cells().empty());
+    EXPECT_TRUE(saved.storms().empty());
+    EXPECT_TRUE(saved.strikes().empty());
+    EXPECT_TRUE(saved.weather_clocks().empty());
+    EXPECT_EQ(saved.soil().records(), store.soil().records());
+    EXPECT_EQ(saved.irrigation().records(), store.irrigation().records());
+    // Cover both existing-cell evolution and admission of new pages during a birth.
+    ASSERT_TRUE(store.set_soil({-1, -1}, 888888));
+    ASSERT_TRUE(store.set_irrigation({512, 512}, 100));
+    EXPECT_EQ(saved.soil().sample({-1, -1}, 0), 999997);
+    EXPECT_FALSE(saved.irrigation().initialized({512, 512}));
+    store.restore_foliage(std::move(saved));
+    EXPECT_EQ(store.serialize(), before);
+}
+
 TEST(FieldPageStateTest, WeatherClockBatchRefusesBeforeChangingAnyAuthority) {
     auto store = ActivatedStore();
     ASSERT_TRUE(store.set_weather_age({0, 0}, 19));

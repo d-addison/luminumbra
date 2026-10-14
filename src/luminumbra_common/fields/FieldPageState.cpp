@@ -697,10 +697,27 @@ bool FieldPageState::set_scent(ScentCellKey key, const ScentCell& values) {
     m_scent[key] = values;
     return true;
 }
+FieldPageState FieldPageState::foliage_snapshot() const {
+    FieldPageState snapshot;
+    snapshot.m_soil = m_soil;
+    snapshot.m_irrigation = m_irrigation;
+    return snapshot;
+}
+
+void FieldPageState::restore_foliage(FieldPageState&& snapshot) noexcept {
+    m_soil = std::move(snapshot.m_soil);
+    m_irrigation = std::move(snapshot.m_irrigation);
+}
+
 bool FieldPageState::update_scent(std::span<const std::pair<ScentCellKey, ScentCell>> updates) {
     // Preflight the ordered admissions and allocate new nodes before touching authority.
     // Existing concentrations (the usual dense-domain case) update without a map copy.
     std::map<ScentCellKey, ScentCell> admitted;
+    // Map iterators survive insertions and erasures of other (unique) keys. Retain
+    // preflight destinations so publication needs neither another lookup nor a rescan
+    // of channel words. All allocations still happen before authority changes.
+    std::vector<std::pair<decltype(m_scent.begin()), bool>> destinations;
+    destinations.reserve(updates.size());
     std::optional<ScentCellKey> previous;
     auto size = m_scent.size();
     for (const auto& [key, values] : updates) {
@@ -708,9 +725,11 @@ bool FieldPageState::update_scent(std::span<const std::pair<ScentCellKey, ScentC
             !ValidScent(key, values))
             return false;
         previous = key;
-        const bool exists = m_scent.contains(key);
+        const auto found = m_scent.find(key);
+        const bool exists = found != m_scent.end();
         const bool zero =
             std::all_of(values.begin(), values.end(), [](auto bits) { return bits == 0; });
+        destinations.emplace_back(found, zero);
         if (zero) {
             if (exists)
                 --size;
@@ -721,12 +740,13 @@ bool FieldPageState::update_scent(std::span<const std::pair<ScentCellKey, ScentC
             admitted.emplace(key, values);
         }
     }
-    for (const auto& [key, values] : updates) {
-        const bool zero =
-            std::all_of(values.begin(), values.end(), [](auto bits) { return bits == 0; });
-        if (zero)
-            m_scent.erase(key);
-        else if (const auto found = m_scent.find(key); found != m_scent.end())
+    for (std::size_t i = 0; i < updates.size(); ++i) {
+        const auto& [key, values] = updates[i];
+        const auto [found, zero] = destinations[i];
+        if (zero) {
+            if (found != m_scent.end())
+                m_scent.erase(found);
+        } else if (found != m_scent.end())
             found->second = values;
         else
             m_scent.insert(admitted.extract(key));

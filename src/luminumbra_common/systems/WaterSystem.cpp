@@ -310,7 +310,14 @@ void StepChunkWaterFixed(Chunk& c,
         // the init loop) — same cell-centre formula, same threshold/discharge, same row order, so
         // the consumed result is BYTE-IDENTICAL to the per-tick computation (run==replay /
         // host==peer).
-        if (static_cast<int>(c.water_src_mm.size()) != n) {
+        const auto& params = shield.get_params();
+        const Chunk::WaterSourceInputs inputs{shield.get_seed(),
+                                              params.rivers_enabled,
+                                              params.river_frequency,
+                                              params.river_pv_min,
+                                              params.river_pv_max};
+        if (static_cast<int>(c.water_src_mm.size()) != n ||
+            (checked && c.water_source_inputs != inputs)) {
             c.water_src_mm.assign(n, 0);
             for (int z = 0; z < res; ++z)
                 for (int x = 0; x < res; ++x) {
@@ -320,6 +327,7 @@ void StepChunkWaterFixed(Chunk& c,
                         c.water_src_mm[IDX(x, z)] = RIVER_DISCHARGE_MM;
                     }
                 }
+            c.water_source_inputs = inputs;
         }
         for (int i = 0; i < n; ++i) {
             AddWaterDepth(
