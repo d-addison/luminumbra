@@ -105,6 +105,8 @@ TEST_F(ReplayStreamTest, EffectiveConfigIdentityRefusesDifferentRulesBeforePlayb
     ASSERT_TRUE(writer.Finalize(0));
     const auto contents = replay::ReadReplay(m_path);
     ASSERT_TRUE(contents.has_value());
+    if (!contents.has_value())
+        return;
     EXPECT_TRUE(replay::ConfigurationMatches(
         contents->header, Luminumbra::world::GameSession{}.SystemConfigIdentity()));
     for (const auto& [name, identity] : Luminumbra::TestSupport::EffectiveIdentityMismatches()) {
