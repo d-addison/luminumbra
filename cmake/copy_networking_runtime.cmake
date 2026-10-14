@@ -2,6 +2,7 @@
 # A generated, configuration-specific file preserves paths with spaces and
 # avoids adding executable dependencies to their own staging prerequisite.
 file(STRINGS "${NETWORK_INPUT_FILE}" _runtime_dlls)
+list(FILTER _runtime_dlls EXCLUDE REGEX "^$")
 list(REMOVE_DUPLICATES _runtime_dlls)
 if(NOT NETWORK_CONFIG)
     set(NETWORK_CONFIG NOCONFIG)

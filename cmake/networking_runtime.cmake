@@ -1,5 +1,11 @@
 include_guard(GLOBAL)
 
+if(WIN32 AND (LUMINUMBRA_ENABLE_GNS OR LUMINUMBRA_ENABLE_STEAM)
+   AND CMAKE_VERSION VERSION_LESS 3.21)
+    message(FATAL_ERROR
+        "Networked Windows builds (LUMINUMBRA_ENABLE_GNS or LUMINUMBRA_ENABLE_STEAM) require CMake 3.21+ for runtime DLL staging. Upgrade CMake or disable both networking backends.")
+endif()
+
 function(luminumbra_network_configurations OUT_VAR)
     get_property(_multi_config GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
     if(_multi_config)
@@ -181,12 +187,7 @@ endfunction()
 function(luminumbra_collect_absl_runtime OUT_VAR CONFIG)
     set(_bins ${ARGN})
     set(_imported_dlls "")
-    # IMPORTED_TARGETS is available since 3.21. Older CMake can still use the
-    # base target's metadata and the package-bin fallback.
-    set(_targets absl::base)
-    if(CMAKE_VERSION VERSION_GREATER_EQUAL 3.21)
-        get_property(_targets DIRECTORY PROPERTY IMPORTED_TARGETS)
-    endif()
+    get_property(_targets DIRECTORY PROPERTY IMPORTED_TARGETS)
     list(APPEND _targets absl::base)
     list(REMOVE_DUPLICATES _targets)
     foreach(_target IN LISTS _targets)
@@ -242,6 +243,24 @@ function(luminumbra_collect_absl_runtime OUT_VAR CONFIG)
     set(${OUT_VAR} "${_dlls}" PARENT_SCOPE)
 endfunction()
 
+function(luminumbra_network_mingw_compiler_dlls OUT_VAR COMPILER_BIN)
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+        set(_names libc++.dll libunwind.dll libwinpthread-1.dll)
+    else()
+        set(_names libgcc_s_seh-1.dll libstdc++-6.dll libwinpthread-1.dll)
+    endif()
+    set(_dlls "")
+    foreach(_name IN LISTS _names)
+        if(EXISTS "${COMPILER_BIN}/${_name}" AND NOT IS_DIRECTORY "${COMPILER_BIN}/${_name}")
+            list(APPEND _dlls "${COMPILER_BIN}/${_name}")
+        endif()
+    endforeach()
+    # Seed available compiler DLLs for direct executable imports as well as
+    # dependency imports. The PE scanner rejects missing imported runtimes;
+    # unimported runtimes (including optional winpthreads) need not be installed.
+    set(${OUT_VAR} "${_dlls}" PARENT_SCOPE)
+endfunction()
+
 function(luminumbra_collect_gns_mingw_runtime)
     file(REAL_PATH "${CMAKE_CXX_COMPILER}" _compiler_path)
     get_filename_component(_compiler_bin "${_compiler_path}" DIRECTORY)
@@ -258,10 +277,8 @@ function(luminumbra_collect_gns_mingw_runtime)
         endforeach()
         luminumbra_collect_absl_runtime(_absl_dlls "${_config}" ${_package_dirs} "${_compiler_bin}")
         list(APPEND _runtime_dlls ${_absl_dlls})
-        foreach(_name IN ITEMS libgcc_s_seh-1.dll libstdc++-6.dll libwinpthread-1.dll)
-            luminumbra_require_network_dll(_dll "${_name}" "${_compiler_bin}")
-            list(APPEND _runtime_dlls "${_dll}")
-        endforeach()
+        luminumbra_network_mingw_compiler_dlls(_compiler_dlls "${_compiler_bin}")
+        list(APPEND _runtime_dlls ${_compiler_dlls})
         list(REMOVE_DUPLICATES _runtime_dlls)
         set_property(TARGET luminumbra_common PROPERTY LUMINUMBRA_GNS_RUNTIME_DLLS_${_config_key} "${_runtime_dlls}")
     endforeach()
@@ -321,11 +338,8 @@ function(luminumbra_stage_networking_runtime)
         if(MINGW)
             # Executables can import compiler runtimes directly, even if none
             # of the supplemental dependency DLLs import them (notably Steam).
-            foreach(_name IN ITEMS libgcc_s_seh-1.dll libstdc++-6.dll libwinpthread-1.dll)
-                if(EXISTS "${_compiler_bin}/${_name}" AND NOT IS_DIRECTORY "${_compiler_bin}/${_name}")
-                    list(APPEND _extra_dlls "${_compiler_bin}/${_name}")
-                endif()
-            endforeach()
+            luminumbra_network_mingw_compiler_dlls(_compiler_dlls "${_compiler_bin}")
+            list(APPEND _extra_dlls ${_compiler_dlls})
         elseif(MSVC)
             # Discover redistributables without adding install rules. Include
             # debug runtimes for build-tree previews with multi-config builds.
@@ -342,9 +356,7 @@ function(luminumbra_stage_networking_runtime)
         list(REMOVE_DUPLICATES _extra_dlls)
         set(_target_dlls "")
         foreach(_app IN LISTS _apps)
-            if(CMAKE_VERSION VERSION_GREATER_EQUAL 3.21)
-                list(APPEND _target_dlls "$<TARGET_RUNTIME_DLLS:${_app}>")
-            endif()
+            list(APPEND _target_dlls "$<TARGET_RUNTIME_DLLS:${_app}>")
         endforeach()
         # Keep executable target expressions out of the staging command: using
         # TARGET_FILE here would add a reverse dependency and create a cycle.

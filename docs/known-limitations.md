@@ -85,9 +85,10 @@ rosters should not be confused with missing simulation wiring.
   configuration, scans dependency DLLs with `file(GET_RUNTIME_DEPENDENCIES)` and
   uses `copy_if_different`. Each application's post-build step scans its linked
   executable and verifies the staged DLLs without copying shared files. These
-  scans run on every supported CMake version (3.20 and newer). On 3.21 and newer,
-  the union of all three targets' runtime DLL lists supplies additional shared
-  inputs; all inputs and resolved DLLs are deduplicated. Visual Studio and Ninja
+  scans require CMake 3.21 or newer for networked Windows builds; older versions
+  fail configuration. The union of all three targets' runtime DLL lists supplies
+  additional shared inputs; all inputs and resolved DLLs are deduplicated.
+  Visual Studio and Ninja
   Multi-Config use separate input files, stamps and runtime directories per
   configuration. Supplemental package DLLs and OpenSSL search roots select only
   that configuration's imported files, respecting `MAP_IMPORTED_CONFIG_<CONFIG>`
@@ -97,8 +98,12 @@ rosters should not be confused with missing simulation wiring.
   MSYS2 imported targets can omit DLL locations and transitive runtime imports,
   so the GNS UCRT64 build also explicitly copies `libprotobuf.dll`,
   `libutf8_validity.dll`, `zlib1.dll`, `libcrypto-3-x64.dll`, every
-  Abseil runtime DLL, `libgcc_s_seh-1.dll`, `libstdc++-6.dll` and
-  `libwinpthread-1.dll`. Package bin directories are derived from protobuf/absl
+  Abseil runtime DLL. Compiler runtime candidates follow the MinGW toolchain:
+  GCC seeds available `libgcc_s_seh-1.dll`, `libstdc++-6.dll` and
+  `libwinpthread-1.dll`; Clang seeds available `libc++.dll`, `libunwind.dll` and
+  `libwinpthread-1.dll`. Missing compiler runtimes fail the PE scan when imported,
+  rather than requiring GCC DLLs for Clang or an unused winpthreads DLL.
+  Package bin directories are derived from protobuf/absl
   CONFIG locations and selected imported library locations, with the configured
   compiler bin directory as fallback. Abseil discovery also searches package bin
   directories for `libabsl_*.dll` without pinning a version, preferring imported DLL
