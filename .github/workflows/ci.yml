@@ -771,17 +771,19 @@ jobs:
       - name: Check formatting
         run: scripts/lint.sh --format-only
 
-  tidy:
-    name: Static analysis / clang-tidy
+  tidy-shard:
+    name: Static analysis / clang-tidy shard ${{ matrix.shard }}/3
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     runs-on: ubuntu-24.04
-    # The gate analyses 351 translation units across src/, test/ and tools/, and since it
-    # gained a real HeaderFilterRegex it also analyses first-party headers on every
-    # one of them. That is a large multiple of the src/-only, headers-excluded scope
-    # this job was originally sized for, and it overran the previous 30-minute limit
-    # on a hosted runner at --jobs 4. Sized like the other heavy lanes (Linux 60,
-    # UCRT64 85, MSVC 90) rather than trimmed back to fit.
+    # The gate analyses 458 translation units across src/, test/ and tools/ plus
+    # their first-party headers. Three standard hosted runners partition that
+    # full scope by path hash so every merged tip gets complete analysis within
+    # the unchanged 60-minute timeout; pushes still never skip cached units.
     timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -813,19 +815,36 @@ jobs:
         if: github.event_name == 'pull_request'
         with:
           path: .tidy-cache
-          key: tidy-cache-${{ runner.os }}-${{ github.sha }}
-          restore-keys: tidy-cache-${{ runner.os }}-
+          key: tidy-cache-${{ runner.os }}-shard${{ matrix.shard }}of3-${{ github.sha }}
+          restore-keys: tidy-cache-${{ runner.os }}-shard${{ matrix.shard }}of3-
       - name: Run blocking clang-tidy gate
         env:
           TIDY_CACHE_MODE: ${{ github.event_name == 'pull_request' && 'readwrite' || 'writeonly' }}
-        run: scripts/tidy.sh --build-dir build/tidy --jobs 4 --cache-dir .tidy-cache --cache-mode "$TIDY_CACHE_MODE"
+        run: scripts/tidy.sh --build-dir build/tidy --jobs 4 --shard ${{ matrix.shard }}/3 --cache-dir .tidy-cache --cache-mode "$TIDY_CACHE_MODE"
       - name: Save clang-tidy result cache
         if: ${{ !cancelled() && github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/devel') && steps.tidy-cache.outputs.cache-hit != 'true' }}
         continue-on-error: true
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .tidy-cache
-          key: tidy-cache-${{ runner.os }}-${{ github.sha }}
+          key: tidy-cache-${{ runner.os }}-shard${{ matrix.shard }}of3-${{ github.sha }}
+
+  tidy:
+    # Preserve the required check name and reject every non-success shard result.
+    name: Static analysis / clang-tidy
+    needs: tidy-shard
+    if: always() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require all clang-tidy shards to pass
+        env:
+          TIDY_SHARD_RESULT: ${{ needs.tidy-shard.result }}
+        run: |
+          if [[ "$TIDY_SHARD_RESULT" != 'success' ]]; then
+            echo "clang-tidy shards did not all pass: $TIDY_SHARD_RESULT" >&2
+            exit 1
+          fi
 
   public-tree:
     name: Public tree / inventory honesty
@@ -840,6 +859,7 @@ jobs:
           python3 tools/ci/test_check_docs.py
           python3 tools/ci/test_check_ctest_junit.py
           python3 tools/ci/test_tidy_cache.py
+          python3 tools/ci/test_tidy_shard.py
           python3 tools/ci/test_validate_visual_catalog.py
           python3 tools/ci/validate_visual_catalog.py
           python3 tools/ci/render_visual_catalog.py --check
