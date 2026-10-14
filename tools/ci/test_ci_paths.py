@@ -108,6 +108,8 @@ class PathGateTests(unittest.TestCase):
             (["docs/index.md", "src/main.cpp", "tools/ci/check_docs.py"], (True, True)),
             (["tools/perf/test_render_runner.py"], (True, True)),
             (["src/deleted.cpp", "docs/renamed.txt"], (True, False)),
+            ([".github/workflows/cache-cleanup.yml"], (True, True)),
+            (["scripts/README.md"], (True, True)),
         ):
             with self.subTest(paths=paths), patch.object(gate, "changed_paths", return_value=paths):
                 self.assertEqual(gate.classify(ROOT, "pull_request", "base", "head", "owner/repo", "owner/repo"), expected)
@@ -122,7 +124,8 @@ class PathGateTests(unittest.TestCase):
         ):
             with self.subTest(path=path), patch.object(gate, "changed_paths", return_value=[path]):
                 self.assertTrue(gate.needs_cpp(path))
-                self.assertTrue(gate.classify(ROOT, "pull_request", "base", "head", "owner/repo", "owner/repo")[0])
+                self.assertTrue(gate.needs_python(path))
+                self.assertEqual(gate.classify(ROOT, "pull_request", "base", "head", "owner/repo", "owner/repo"), (True, True))
 
     def test_every_workflow_script_entrypoint_requires_native_builds(self):
         for workflow in (ROOT / ".github/workflows").glob("*.yml"):

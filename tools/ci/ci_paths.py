@@ -151,6 +151,12 @@ def needs_cpp(path: str) -> bool:
     return True
 
 
+def needs_python(path: str) -> bool:
+    # Standalone Python suites validate workflow and CI configuration files,
+    # so CI infrastructure changes run the Python plan as well as native lanes.
+    return path.endswith(".py") or path.startswith(CI_PREFIXES)
+
+
 def changed_paths(root: Path, base: str, head: str) -> list[str]:
     merge_base = subprocess.check_output(
         ["git", "merge-base", base, head], cwd=root, text=True
@@ -183,7 +189,7 @@ def classify(root: Path, event: str, base: str, head: str,
     except (OSError, subprocess.CalledProcessError, ValueError) as error:
         print(f"Cannot classify PR diff; running all lanes: {error}", file=sys.stderr)
         return True, True
-    return any(needs_cpp(path) for path in paths), any(path.endswith(".py") for path in paths)
+    return any(needs_cpp(path) for path in paths), any(needs_python(path) for path in paths)
 
 
 def python_test_commands(root: Path) -> list[tuple[str, ...]]:
