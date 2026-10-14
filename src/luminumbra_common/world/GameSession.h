@@ -8,6 +8,7 @@
 #include "../ai/ThirstSystem.h"               // ai::ThirstTuning
 #include "../ai/WildlifeFoliageSystem.h"      // ai::WildlifeFoliageTuning (full-control)
 #include "../core/SimulationClock.h"
+#include "../core/SystemConfig.h"
 #include "../simulation/SimBudgetTelemetry.h"
 #include "../simulation/SimulationEventBus.h"
 #include "../systems/PollinationSystem.h"
@@ -18,14 +19,11 @@
 #include <cstdint>
 #include <ctime>
 #include <filesystem>
+#include <map>
 #include <memory>
 #include <optional>
 #include <string>
 #include <vector>
-
-namespace luminumbra::core {
-class SystemConfig;
-}
 
 namespace luminumbra::fields {
 class EnergyFieldState; //  (): the stateful energy layer
@@ -253,6 +251,10 @@ public:
     void ApplySystemConfig(const luminumbra::core::SystemConfig& config);
     // Computed on demand from the current effective simulation gates and tuning.
     [[nodiscard]] std::string SystemConfigIdentity() const;
+    [[nodiscard]] const std::string& PresetContentHash() const {
+        return m_presetContentHash;
+    }
+    [[nodiscard]] std::map<std::string, bool> EffectiveSimulationGates() const;
 
     void SetEcologyTuning(const luminumbra::ai::EcologyTuning& t) {
         m_ecologyTuning = t;
@@ -487,6 +489,9 @@ private:
     std::filesystem::path m_regionDurableDirectory;
     // Stable only in the clock slice; world-anchored pages replace this grid in C4.
     Vec3 m_ambientFieldAnchor{};
+    std::string m_presetContentHash;
+    luminumbra::core::SystemConfig m_appliedSystemConfig =
+        luminumbra::core::SystemConfig::Defaults();
     bool m_activeRegionsEnabled = true;
     bool m_simulationBatchInProgress = false;
     bool CreateWorldInternal(const std::string& name,

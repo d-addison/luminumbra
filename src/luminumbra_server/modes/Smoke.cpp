@@ -27,15 +27,13 @@ SmokeRunResult RunSmokeOnce(const ServerCliOptions& options, const char* run_lab
     // birthed/culled creatures over the horizon, not a frozen roster).
     result.creature_count_start = runner.CreatureCount();
     auto* session = runner.Session();
-    result.effective_simulation = {
-        {"active_regions", session->ActiveRegionsEnabled()},
-        {"aether_state",
-         session->AetherStateEnabled() && session->GetEnergyFieldState() != nullptr},
-        {"water_high_res", session->GetWorldSystem()->debug_water_sim_resolution() == 16},
-        {"finite_hydrology", session->FiniteHydrologyEnabled()},
-        {"weather_rain", session->WeatherRainEnabled()},
-        {"weather_events", session->WeatherEventsEnabled()},
-    };
+    result.effective_simulation = session->EffectiveSimulationGates();
+    result.effective_simulation["aether_state"] =
+        session->AetherStateEnabled() && session->GetEnergyFieldState() != nullptr;
+    result.effective_simulation["water_high_res"] =
+        session->GetWorldSystem()->debug_water_sim_resolution() == 16;
+    result.effective_simulation["finite_hydrology"] = session->FiniteHydrologyEnabled();
+    result.effective_simulation["weather_rain"] = session->WeatherRainEnabled();
 
     result.ticks = runner.RunFixedTicks(options.ticks);
     //  avatar physics telemetry — confirm the server-authoritative avatar

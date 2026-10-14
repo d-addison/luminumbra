@@ -39,8 +39,8 @@ def artifact_for(preset: str, ticks: int, work_scale: int) -> dict[str, Any]:
     return {
         "schema": "luminumbra.server_tick.v1", "preset": preset, "seed": "1337",
         "ticks_requested": ticks, "passed": True,
-        "effective_simulation": dict.fromkeys(("active_regions", "aether_state", "water_high_res",
-            "finite_hydrology", "weather_rain", "weather_events"), True),
+        "effective_simulation": dict.fromkeys(
+            capture.shipping_simulation_gates() + ("finite_hydrology", "weather_rain"), True),
         "world_hash": HASH, "world_hash_replay": HASH,
         "sim_budget": {"schema": "luminumbra.sim_budget.v2", "work_replay_match": True,
                        "stages": stages},
@@ -144,6 +144,21 @@ class SimBudgetGateTests(unittest.TestCase):
                         artifact_path.write_text(json.dumps(data), encoding="utf-8")
                     self.assert_workload_acceptance(directory, reference, budgets, key,
                                                     value in ("1337", "01337", 1337))
+
+    def test_partial_shipping_simulation_is_refused_by_every_consumer(self) -> None:
+        reference = self.capture_dir("shipping-reference")
+        budgets = self.root / "shipping-budgets.json"
+        emit_budgets(reference, budgets)
+        self.assert_workload_acceptance(reference, reference, budgets, "", True)
+        for gate in ("plant_growth", "erosion", "ecology", "reproduction"):
+            with self.subTest(gate=gate):
+                directory = self.capture_dir(f"shipping-disabled-{gate}")
+                path = directory / "default.json"
+                data = sim_budget_io.read_json(path)
+                data["effective_simulation"][gate] = False
+                path.write_text(json.dumps(data), encoding="utf-8")
+                self.assert_workload_acceptance(directory, reference, budgets,
+                                                "shipping simulation", False)
 
     def test_invalid_seed_and_ticks_values_are_consistent_across_tools(self) -> None:
         reference = self.capture_dir("range-reference", presets=("default",))

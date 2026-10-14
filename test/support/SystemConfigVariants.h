@@ -11,8 +11,20 @@
 
 #include "luminumbra_common/core/SystemConfig.h"
 #include "luminumbra_common/world/GameSession.h"
+#include "luminumbra_common/world/TerrainPresetLoader.h"
 
 namespace Luminumbra::TestSupport {
+
+inline nlohmann::json PresetIdentityFixture() {
+    return nlohmann::json::parse(R"({"schema_rev":7,"generation_params":{
+        "terrain":{"base_frequency":0.01,"base_amplitude":12.0,"octaves":4,
+                   "persistence":0.5,"lacunarity":2.0,"height_offset":20.0},
+        "features":{"caves_enabled":true,"cave_frequency":0.02}}})");
+}
+
+inline std::string PresetIdentityFixtureHash() {
+    return world::TerrainPresetContentHash(PresetIdentityFixture());
+}
 
 // Change each input independently from the shipping defaults, including the circadian
 // setting that is consumed by GameSession simulation despite its render namespace.

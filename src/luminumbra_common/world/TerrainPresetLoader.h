@@ -94,6 +94,7 @@ struct TerrainPresetExtras {
 
 struct TerrainPresetLoadResult {
     bool ok = false;
+    std::string preset_content_hash;
     Systems::TerrainGenParams params;
     TerrainPresetExtras extras;
     std::vector<std::string> errors;
@@ -103,6 +104,12 @@ struct TerrainPresetLoadResult {
 // Fill omitted feature choices using the declared revision (unversioned presets use
 // historical revision 6). Explicit false and an empty biome table remain authoritative.
 nlohmann::json ResolveTerrainPresetDefaults(const nlohmann::json& preset);
+
+// Identity bytes: materialized revision defaults, current schema revision, sorted
+// object keys, compact JSON, ASCII escapes and locale-independent binary64 numbers.
+// No filesystem paths derived from data_root or provenance enter this form.
+std::string CanonicalResolvedTerrainPresetJson(const nlohmann::json& preset);
+std::string TerrainPresetContentHash(const nlohmann::json& preset);
 
 // Loads and validates a world preset JSON file. Validation contract matches
 // the historical GameSession parser: generation_params, terrain and features

@@ -105,6 +105,15 @@ SystemConfig SystemConfig::Defaults() {
     return SystemConfig{};
 }
 
+std::map<std::string, bool> SystemConfig::SimulationGates() const {
+    std::map<std::string, bool> gates;
+    for (const auto& key : kKeys) {
+        if (key.section == Section::Sim)
+            gates.emplace(key.json_name, enabled(key.key));
+    }
+    return gates;
+}
+
 SystemConfig SystemConfig::FromJsonString(const std::string& json_text) {
     SystemConfig cfg; // start from all-defaults; overlay only what the JSON names
 

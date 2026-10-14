@@ -96,6 +96,7 @@ int RunNetSoak(const ServerCliOptions& options) {
     auto next_tick_time = wall_start;
     while (executed < options.ticks) {
         expected_hello.system_config_identity = runner.Session()->SystemConfigIdentity();
+        expected_hello.preset_content_hash = runner.Session()->PresetContentHash();
         // Accept / RE-ACCEPT (reconnect-under-load): a re-armed slot picks the peer up.
         for (RuntimeTcpClientSlot& slot : slots) {
             if (PollRuntimeTcpAccept(slot, expected_hello)) {

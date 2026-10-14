@@ -131,6 +131,7 @@ net::LockstepConfig MakeConfig(std::uint32_t local_id, std::uint32_t peer_id) {
     c.local_client_id = local_id;
     c.peer_client_id = peer_id;
     c.system_config_identity = "60ab3c242d54ce89";
+    c.preset_content_hash = "7b9a3017d9cab0c3";
     return c;
 }
 
@@ -139,6 +140,7 @@ net::LockstepConfig MakeConfig(std::uint32_t local_id, std::uint32_t peer_id) {
 bool HandshakeBoth(net::LockstepSession& a, net::LockstepSession& b, net::LoopbackTransport* tb) {
     net::HelloMsg bh;
     bh.system_config_identity = "60ab3c242d54ce89";
+    bh.preset_content_hash = "7b9a3017d9cab0c3";
     bh.seed = 424242;
     bh.preset = "default";
     bh.tick_rate_hz = 30;
@@ -194,6 +196,7 @@ replay::ReplayHeader RichHeader() {
     h.surface_radius = 4;
     h.collision_radius = 2;
     h.engine_version = "0.1.0+testsha";
+    h.preset_content_hash = "7b9a3017d9cab0c3";
     return h;
 }
 
@@ -206,6 +209,7 @@ replay::ReplayHeader RichHeader() {
 TEST(LockstepCodecHardening, HelloRoundtripAdversarial) {
     net::HelloMsg in;
     in.system_config_identity = "60ab3c242d54ce89";
+    in.preset_content_hash = "7b9a3017d9cab0c3";
     in.protocol_version = net::kLockstepProtocolVersion;
     in.seed = 0xFFFFFFFFFFFFFFFFULL;                    // max u64
     in.preset = "preset/with spaces/and-utf8-\xC3\xA9"; // non-ASCII bytes survive
@@ -220,11 +224,13 @@ TEST(LockstepCodecHardening, HelloRoundtripAdversarial) {
     EXPECT_EQ(out.tick_rate_hz, in.tick_rate_hz);
     EXPECT_EQ(out.client_id, in.client_id);
     EXPECT_EQ(out.system_config_identity, in.system_config_identity);
+    EXPECT_EQ(out.preset_content_hash, in.preset_content_hash);
 }
 
 TEST(LockstepCodecHardening, HelloEmptyPresetRoundtrips) {
     net::HelloMsg in;
     in.system_config_identity = "60ab3c242d54ce89";
+    in.preset_content_hash = "7b9a3017d9cab0c3";
     in.preset = ""; // zero-length string is a valid boundary
     net::HelloMsg out;
     ASSERT_TRUE(net::DecodeHello(net::EncodeHello(in), out));
@@ -235,6 +241,7 @@ TEST(LockstepCodecHardening, HelloPresetWithEmbeddedNulRoundtrips) {
     // Length-prefixed strings must be NUL-transparent (a C-string would truncate).
     net::HelloMsg in;
     in.system_config_identity = "60ab3c242d54ce89";
+    in.preset_content_hash = "7b9a3017d9cab0c3";
     in.preset = std::string("a\0b\0c", 5);
     ASSERT_EQ(in.preset.size(), 5u);
     net::HelloMsg out;
@@ -363,6 +370,7 @@ TEST(LockstepCodecHardening, DecodeHelloRejectsTruncatedFrame) {
     auto frame = net::EncodeHello([] {
         net::HelloMsg m;
         m.system_config_identity = "60ab3c242d54ce89";
+        m.preset_content_hash = "7b9a3017d9cab0c3";
         m.preset = "default";
         m.seed = 7;
         return m;
@@ -439,6 +447,7 @@ TEST(LockstepCodecHardening, DecodeHelloRejectsBadMagic) {
     auto frame = net::EncodeHello([] {
         net::HelloMsg m;
         m.system_config_identity = "60ab3c242d54ce89";
+        m.preset_content_hash = "7b9a3017d9cab0c3";
         m.preset = "default";
         return m;
     }());
@@ -855,6 +864,7 @@ TEST(LockstepReplayHardening, DroppedPeerInputStallsDeterministically) {
     // NOTE: no b session and no b inputs are ever sent -> a's peer inputs never arrive.
     net::HelloMsg bh;
     bh.system_config_identity = "60ab3c242d54ce89";
+    bh.preset_content_hash = "7b9a3017d9cab0c3";
     bh.seed = 424242;
     bh.preset = "default";
     bh.tick_rate_hz = 30;
@@ -1003,6 +1013,7 @@ TEST(LockstepReplayHardening, HandshakeRejectsTickRateMismatch) {
     net::LockstepSession a(MakeConfig(0, 1), ta.get(), MakeHooks(&wa));
     net::HelloMsg bad;
     bad.system_config_identity = "60ab3c242d54ce89";
+    bad.preset_content_hash = "7b9a3017d9cab0c3";
     bad.seed = 424242;
     bad.preset = "default";
     bad.tick_rate_hz = 60;
@@ -1019,6 +1030,7 @@ TEST(LockstepReplayHardening, HandshakeRejectsProtocolVersionMismatch) {
     net::LockstepSession a(MakeConfig(0, 1), ta.get(), MakeHooks(&wa));
     net::HelloMsg bad;
     bad.system_config_identity = "60ab3c242d54ce89";
+    bad.preset_content_hash = "7b9a3017d9cab0c3";
     bad.protocol_version = static_cast<std::uint16_t>(net::kLockstepProtocolVersion + 1);
     bad.seed = 424242;
     bad.preset = "default";

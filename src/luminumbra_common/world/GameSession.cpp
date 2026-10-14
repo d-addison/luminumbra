@@ -232,6 +232,7 @@ void GameSession::ApplyWeatherRainWiring() {
 
 // Apply the same simulation gates and tuning before client/server world boot.
 void GameSession::ApplySystemConfig(const luminumbra::core::SystemConfig& config) {
+    m_appliedSystemConfig = config;
     SetEcologyTuning(luminumbra::ai::ResolveEcologyTuning(config));
     SetWeatherRainEnabled(config.enabled(luminumbra::core::SysKey::SimHydrologyWeather));
     SetActiveRegionsEnabled(config.enabled(luminumbra::core::SysKey::SimActiveRegions));
@@ -245,6 +246,16 @@ void GameSession::ApplySystemConfig(const luminumbra::core::SystemConfig& config
     SetReproductionTuning(luminumbra::ai::ResolveReproductionTuning(config));
     SetCircadianAmplitude(luminumbra::ai::ResolveCircadianAmplitude(config));
     SetPlantMutationRate(luminumbra::ai::ResolvePlantMutationRate(config));
+}
+
+std::map<std::string, bool> GameSession::EffectiveSimulationGates() const {
+    auto gates = m_appliedSystemConfig.SimulationGates();
+    gates["active_regions"] = m_activeRegionsEnabled;
+    gates["aether_state"] = m_aetherStateEnabled;
+    gates["water_high_res"] = m_waterHighResEnabled;
+    gates["hydrology_weather"] = m_weatherRainEnabled;
+    gates["weather_events"] = m_weatherEventsEnabled;
+    return gates;
 }
 
 std::string GameSession::SystemConfigIdentity() const {
@@ -1233,6 +1244,7 @@ bool GameSession::CreateWorldInternal(const std::string& name,
     ClampTerrainParams(params);
 
     ResetWorldSystems();
+    m_presetContentHash = preset.preset_content_hash;
     m_metadata = std::move(metadata);
     m_transientWorld = transient;
     m_physicsSystem = std::make_unique<Systems::PhysicsSystem>();
@@ -1363,6 +1375,7 @@ bool GameSession::LoadWorld(const std::string& worldId) {
     ClampTerrainParams(params);
 
     ResetWorldSystems();
+    m_presetContentHash = preset.preset_content_hash;
     m_metadata = saved.metadata;
     if (m_activeRegionsEnabled) {
         m_worldClock = saved.clock;

@@ -305,11 +305,13 @@ bool NetworkedSessionDriver::Begin(Luminumbra::world::GameSession* client_sessio
     host_cfg.peer_client_id = 1;
     // This driver steps one authoritative host; its client renders that host's state.
     host_cfg.system_config_identity = m_impl->host_session->SystemConfigIdentity();
+    host_cfg.preset_content_hash = m_impl->host_session->PresetContentHash();
     host_cfg.hash_cadence_ticks = config.hash_cadence_ticks;
     Luminumbra::Net::LockstepConfig client_cfg = host_cfg;
     client_cfg.local_client_id = 1;
     client_cfg.peer_client_id = 0;
     client_cfg.system_config_identity = client_session->SystemConfigIdentity();
+    client_cfg.preset_content_hash = client_session->PresetContentHash();
 
     Luminumbra::Net::LockstepHooks host_hooks = hooks_template;
     host_hooks.user = &m_impl->host_ctx;
@@ -330,6 +332,7 @@ bool NetworkedSessionDriver::Begin(Luminumbra::world::GameSession* client_sessio
         ch.tick_rate_hz = 30;
         ch.client_id = 1;
         ch.system_config_identity = client_cfg.system_config_identity;
+        ch.preset_content_hash = client_cfg.preset_content_hash;
         m_impl->client_transport->SendFrame(Luminumbra::Net::EncodeHello(ch));
         Luminumbra::Net::HelloMsg hh;
         hh.seed = config.seed;
@@ -337,6 +340,7 @@ bool NetworkedSessionDriver::Begin(Luminumbra::world::GameSession* client_sessio
         hh.tick_rate_hz = 30;
         hh.client_id = 0;
         hh.system_config_identity = host_cfg.system_config_identity;
+        hh.preset_content_hash = host_cfg.preset_content_hash;
         m_impl->host_transport->SendFrame(Luminumbra::Net::EncodeHello(hh));
     }
     if (!m_impl->host->Handshake() || !m_impl->client->Handshake()) {

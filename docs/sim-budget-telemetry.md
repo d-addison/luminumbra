@@ -200,6 +200,14 @@ mountains and archipelago, with the existing ecology and planted rosters and
 `--no-audio`. The script fails on missing binaries, existing output directories,
 server errors, invalid artifacts or vacuous plant/creature/scent/field work.
 It retains partial evidence on failure and does not publish a success manifest.
+The smoke artifact's `effective_simulation` object reports every `sim.*` gate from
+the generated SystemConfig registry. Tuning-only gates report whether the config
+override is enabled; runtime gates report their applied session state, including
+actual energy-field allocation and water resolution. The existing `finite_hydrology`
+and `weather_rain` fields remain present. Qualification derives required gate names
+from `data/common/systems.json`, ignoring comment entries, and refuses any absent
+or non-true gate. Adding a shipping gate therefore requires artifact coverage
+automatically. Capture, comparison and budget consumers share this validation.
 Use the same compiler, build preset, hardware, content and command arguments
 for time comparisons. The roster evolves, including births and deaths: these
 are populated starting worlds, not an enforced constant entity population.

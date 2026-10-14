@@ -222,6 +222,9 @@ TEST(GameSessionHeadlessWorldTest, CustomPresetEmbedsInSaveAndChangesTerrain) {
         custom_world.SetRootPath(root.root_string());
         ASSERT_TRUE(custom_world.CreateWorld("Custom", "777", "default", &custom));
         ASSERT_NE(custom_world.GetWorldSystem(), nullptr);
+        EXPECT_FALSE(base.PresetContentHash().empty());
+        EXPECT_NE(base.PresetContentHash(), custom_world.PresetContentHash());
+        EXPECT_EQ(custom_world.PresetContentHash(), Luminumbra::world::TerrainPresetContentHash(j));
 
         // The resolved preset is embedded in THIS world's save dir; worldType keeps the base name.
         const fs::path embedded =

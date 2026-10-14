@@ -56,6 +56,7 @@ int RunNetHost(const ServerCliOptions& options) {
     // The Hello's trailing usercmd frames stay buffered in the same transport for PumpInbound.
     auto expected_hello = RuntimeHelloFrom(options);
     expected_hello.system_config_identity = runner.Session()->SystemConfigIdentity();
+    expected_hello.preset_content_hash = runner.Session()->PresetContentHash();
     const auto seed_num = expected_hello.seed;
     for (std::uint32_t accepted = 0; accepted < expected_clients; ++accepted) {
         LUMINUMBRA_CORE_INFO("net-host: waiting for client {}/{} over TCP on port {}...",
@@ -123,13 +124,14 @@ int RunNetHost(const ServerCliOptions& options) {
             return 1;
         }
         if (!Luminumbra::Net::HelloMatches(expected_hello, hello)) {
-            LUMINUMBRA_CORE_ERROR("net-host: client world mismatch (seed host {} != client {}; "
-                                  "preset host '{}' != client '{}'; "
-                                  "simulation configuration must match)",
-                                  seed_num,
-                                  hello.seed,
-                                  options.preset,
-                                  hello.preset);
+            LUMINUMBRA_CORE_ERROR(
+                "net-host: client world mismatch (seed host {} != client {}; "
+                "preset host '{}' != client '{}'; "
+                "simulation configuration and resolved preset content hash must match)",
+                seed_num,
+                hello.seed,
+                options.preset,
+                hello.preset);
             for (auto& t : transports)
                 t->Close();
             transport->Close();

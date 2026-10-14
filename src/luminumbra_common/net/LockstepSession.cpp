@@ -195,6 +195,7 @@ std::vector<std::uint8_t> EncodeHello(const HelloMsg& m) {
     PutU32(p, m.client_id);
     PutString(p, m.preset);
     PutString(p, m.system_config_identity);
+    PutString(p, m.preset_content_hash);
     return Frame(MessageType::Hello, p);
 }
 
@@ -244,6 +245,9 @@ bool DecodeHello(const std::vector<std::uint8_t>& frame, HelloMsg& out) {
         return false;
     if (!c.GetU16(out.protocol_version))
         return false;
+    // Older Hellos have no resolved-preset identity and cannot be admitted safely.
+    if (out.protocol_version != kLockstepProtocolVersion)
+        return false;
     if (!c.GetU64(out.seed))
         return false;
     if (!c.GetU16(out.tick_rate_hz))
@@ -253,6 +257,8 @@ bool DecodeHello(const std::vector<std::uint8_t>& frame, HelloMsg& out) {
     if (!c.GetString(out.preset))
         return false;
     if (!c.GetString(out.system_config_identity))
+        return false;
+    if (!c.GetString(out.preset_content_hash))
         return false;
     return c.ok;
 }
@@ -951,6 +957,7 @@ bool LockstepSession::Handshake() {
     HelloMsg mine;
     mine.protocol_version = kLockstepProtocolVersion;
     mine.system_config_identity = m_config.system_config_identity;
+    mine.preset_content_hash = m_config.preset_content_hash;
     mine.seed = m_config.seed;
     mine.preset = m_config.preset;
     mine.tick_rate_hz = m_config.tick_rate_hz;
@@ -976,7 +983,9 @@ bool LockstepSession::Handshake() {
             return false;
         }
         if (!DecodeHello(frame, peer)) {
-            LUMINUMBRA_CORE_ERROR("lockstep[{}]: malformed Hello", m_config.local_client_id);
+            LUMINUMBRA_CORE_ERROR("lockstep[{}]: malformed or unsupported Hello version (requires "
+                                  "resolved preset identity)",
+                                  m_config.local_client_id);
             return false;
         }
         got_peer = true;
@@ -1016,6 +1025,13 @@ bool LockstepSession::Handshake() {
         return false;
     }
 
+    if (mine.preset_content_hash.empty() || peer.preset_content_hash.empty() ||
+        mine.preset_content_hash != peer.preset_content_hash) {
+        LUMINUMBRA_CORE_ERROR(
+            "lockstep[{}]: resolved preset content hash mismatch or missing identity",
+            m_config.local_client_id);
+        return false;
+    }
     if (!HelloMatches(mine, peer)) {
         LUMINUMBRA_CORE_ERROR("lockstep[{}]: simulation configuration identity mismatch",
                               m_config.local_client_id);
@@ -1270,6 +1286,7 @@ void LockstepSession::EmitDesyncDump(std::uint64_t divergence_tick, const std::s
     Luminumbra::Replay::ReplayHeader header;
     header.version = Luminumbra::Replay::kLrec1Version;
     header.system_config_identity = m_config.system_config_identity;
+    header.preset_content_hash = m_config.preset_content_hash;
     header.tick_rate_hz = m_config.tick_rate_hz;
     header.seed = m_config.seed;
     header.seed_string = std::to_string(m_config.seed);

@@ -73,6 +73,7 @@ int RunRecord(const ServerCliOptions& options) {
     header.engine_version = std::string(luminumbra::core::GetEngineVersionString());
     header.start_world_hash = runner.ComputeWorldHash();
     header.system_config_identity = runner.Session()->SystemConfigIdentity();
+    header.preset_content_hash = runner.Session()->PresetContentHash();
 
     Luminumbra::Replay::RegionScheduleTrace schedule_trace;
     Luminumbra::Replay::ReplayWriter writer;
@@ -156,7 +157,9 @@ int RunReplay(const ServerCliOptions& options) {
 
     auto contents = Luminumbra::Replay::ReadReplay(options.replay_path);
     if (!contents.has_value()) {
-        LUMINUMBRA_CORE_ERROR("replay: '{}' is not a valid LREC1 stream", options.replay_path);
+        LUMINUMBRA_CORE_ERROR("replay: '{}' is invalid or has an unsupported LREC1 version; "
+                              "requires v3 resolved preset identity",
+                              options.replay_path);
         return 1;
     }
     if (contents->truncated || !contents->trailer_present) {
@@ -198,8 +201,10 @@ int RunReplay(const ServerCliOptions& options) {
     }
 
     if (!Luminumbra::Replay::ConfigurationMatches(header,
-                                                  runner.Session()->SystemConfigIdentity())) {
-        LUMINUMBRA_CORE_ERROR("replay: incompatible simulation configuration identity");
+                                                  runner.Session()->SystemConfigIdentity(),
+                                                  runner.Session()->PresetContentHash())) {
+        LUMINUMBRA_CORE_ERROR(
+            "replay: incompatible simulation configuration or resolved preset content hash");
         return 1;
     }
 

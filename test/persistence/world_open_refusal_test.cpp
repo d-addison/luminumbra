@@ -607,6 +607,10 @@ TEST_F(WorldOpenRefusal, EmbeddedPresetLoadsWithoutTheOriginalNamedPreset) {
     session.SetRootPath(RootString());
     session.SetJobSystem(&jobs);
     ASSERT_TRUE(session.LoadWorld("fixture")) << session.GetWorldOpenError();
+    const auto preset = world::LoadTerrainPreset(save / "preset.json");
+    ASSERT_TRUE(preset.ok);
+    EXPECT_FALSE(session.PresetContentHash().empty());
+    EXPECT_EQ(session.PresetContentHash(), preset.preset_content_hash);
     EXPECT_EQ(session.GetLastLoadedChunkCount(), 1u);
     EXPECT_EQ(DiskBytes(root), before);
 }
@@ -986,14 +990,17 @@ TEST_F(WorldOpenRefusal, PersistedSchedulerIdentityRefusesDifferentAdmissionAndR
         local.local_client_id = 0;
         local.peer_client_id = 1;
         local.system_config_identity = baseline_identity;
+        local.preset_content_hash = loaded.PresetContentHash();
         Net::HelloMsg hello;
         hello.seed = local.seed;
         hello.preset = local.preset;
         hello.tick_rate_hz = local.tick_rate_hz;
         hello.client_id = 1;
         hello.system_config_identity = loaded.SystemConfigIdentity();
+        hello.preset_content_hash = loaded.PresetContentHash();
         auto expected_hello = hello;
         expected_hello.system_config_identity = baseline_identity;
+        expected_hello.preset_content_hash = loaded.PresetContentHash();
         EXPECT_FALSE(Net::HelloMatches(expected_hello, hello)); // TCP admission
         auto [host_transport, peer_transport] = Net::MakeLoopbackPair();
         Net::LockstepSession host(local, host_transport.get(), {});
@@ -1003,6 +1010,7 @@ TEST_F(WorldOpenRefusal, PersistedSchedulerIdentityRefusesDifferentAdmissionAndR
 
         Replay::ReplayHeader header;
         header.system_config_identity = baseline_identity;
+        header.preset_content_hash = loaded.PresetContentHash();
         const auto replay_path = root / "scheduler.lrec1";
         Replay::ReplayWriter writer;
         ASSERT_TRUE(writer.Open(replay_path.string(), header));
@@ -1011,11 +1019,15 @@ TEST_F(WorldOpenRefusal, PersistedSchedulerIdentityRefusesDifferentAdmissionAndR
         ASSERT_TRUE(replay.has_value());
         if (!replay.has_value())
             return;
-        EXPECT_TRUE(Replay::ConfigurationMatches(replay->header, baseline_identity));
-        EXPECT_FALSE(Replay::ConfigurationMatches(replay->header, loaded.SystemConfigIdentity()));
+        EXPECT_TRUE(Replay::ConfigurationMatches(
+            replay->header, baseline_identity, header.preset_content_hash));
+        EXPECT_FALSE(Replay::ConfigurationMatches(
+            replay->header, loaded.SystemConfigIdentity(), header.preset_content_hash));
         auto matching_header = replay->header;
         matching_header.system_config_identity = loaded.SystemConfigIdentity();
-        EXPECT_TRUE(Replay::ConfigurationMatches(matching_header, expected.SystemConfigIdentity()));
+        matching_header.preset_content_hash = loaded.PresetContentHash();
+        EXPECT_TRUE(Replay::ConfigurationMatches(
+            matching_header, expected.SystemConfigIdentity(), header.preset_content_hash));
         EXPECT_EQ(baseline.GetSimulationTickCount(), 0u);
         EXPECT_EQ(loaded.GetSimulationTickCount(), 0u);
         ASSERT_TRUE(fs::remove(replay_path));

@@ -90,6 +90,8 @@ struct SimulationIdentityValues {
 
 class SystemConfig {
 public:
+    // Every sim.* registry flag, including tuning gates that select compiled defaults.
+    [[nodiscard]] std::map<std::string, bool> SimulationGates() const;
     // All shipping flags on, including the far-world ladder; explicit enabled:false opts out.
     // Params unset (caller fallback). sim.* hashed; render.* excluded from the config sub-hash.
     [[nodiscard]] static SystemConfig Defaults();

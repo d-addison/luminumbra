@@ -38,7 +38,8 @@ bool PollRuntimeTcpAccept(RuntimeTcpClientSlot& slot, const Luminumbra::Net::Hel
         slot.awaiting_hello = false;
         if (!Luminumbra::Net::DecodeHello(frame, hello) ||
             !Luminumbra::Net::HelloMatches(expected, hello) || hello.client_id != slot.client_id) {
-            LUMINUMBRA_CORE_ERROR("net-host: incompatible session identity for client {}",
+            LUMINUMBRA_CORE_ERROR("net-host: incompatible session identity (including resolved "
+                                  "preset content hash) for client {}",
                                   slot.client_id);
             slot.transport->Close();
             slot.transport.reset();
@@ -139,6 +140,7 @@ int RunNetHostServerMode(const ServerCliOptions& options) {
     auto next_tick_time = std::chrono::steady_clock::now();
     while (executed < options.ticks) {
         expected_hello.system_config_identity = runner.Session()->SystemConfigIdentity();
+        expected_hello.preset_content_hash = runner.Session()->PresetContentHash();
         for (RuntimeTcpClientSlot& slot : slots) {
             if (PollRuntimeTcpAccept(slot, expected_hello)) {
                 slot.joined_tick = executed;

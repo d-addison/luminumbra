@@ -199,6 +199,28 @@ nlohmann::json ResolveTerrainPresetDefaults(const nlohmann::json& preset) {
     return out;
 }
 
+std::string CanonicalResolvedTerrainPresetJson(const nlohmann::json& preset) {
+    auto resolved = ResolveTerrainPresetDefaults(preset);
+    resolved["schema_rev"] = kTerrainPresetSchemaRevision;
+    return resolved.dump(-1, ' ', true);
+}
+
+std::string TerrainPresetContentHash(const nlohmann::json& preset) {
+    // FNV-1a over canonical ASCII JSON bytes. Encode hex explicitly so neither
+    // integer width, host byte order nor the process locale can change identity.
+    std::uint64_t hash = 14695981039346656037ull;
+    for (unsigned char byte : CanonicalResolvedTerrainPresetJson(preset)) {
+        hash ^= byte;
+        hash *= 1099511628211ull;
+    }
+    std::string hex(16, '0');
+    for (std::size_t i = 0; i < hex.size(); ++i) {
+        hex[hex.size() - 1 - i] = "0123456789abcdef"[hash & 0xfu];
+        hash >>= 4u;
+    }
+    return hex;
+}
+
 TerrainPresetLoadResult LoadTerrainPreset(const std::filesystem::path& preset_path) {
     TerrainPresetLoadResult result;
 
@@ -535,6 +557,7 @@ TerrainPresetLoadResult LoadTerrainPresetFromJson(const nlohmann::json& source,
                     provenance,
                     result.warnings);
 
+    result.preset_content_hash = TerrainPresetContentHash(source);
     result.ok = true;
     return result;
 }

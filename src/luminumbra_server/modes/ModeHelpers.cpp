@@ -5,6 +5,8 @@
 #include <system_error>
 
 #include "luminumbra_common/core/SystemConfig.h"
+#include "luminumbra_common/world/TerrainPresetLoader.h"
+#include <nlohmann/json.hpp>
 
 Luminumbra::Net::HelloMsg RuntimeHelloFrom(const ServerCliOptions& options) {
     namespace fs = std::filesystem;
@@ -26,6 +28,13 @@ Luminumbra::Net::HelloMsg RuntimeHelloFrom(const ServerCliOptions& options) {
     if (runner_config.region_scheduler)
         session.SetRegionSchedulerConfig(*runner_config.region_scheduler);
     hello.system_config_identity = session.SystemConfigIdentity();
+    const auto preset =
+        options.preset_json_override
+            ? Luminumbra::world::LoadTerrainPresetFromJson(
+                  nlohmann::json::parse(*options.preset_json_override), root / "data")
+            : Luminumbra::world::LoadTerrainPreset(root / "worlds/atlas/presets" /
+                                                   (options.preset + ".json"));
+    hello.preset_content_hash = preset.preset_content_hash;
     return hello;
 }
 

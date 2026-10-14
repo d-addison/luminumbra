@@ -35,8 +35,8 @@ padding: finite hydrology (u8, 0 or 1), rain scale (i32, modulo-2^32 representat
 work limit (u64), hold ticks (u32) and reduced cadence shift (u8). All five values are
 included even when their associated feature is disabled. No float conversion loses
 adjacent integer values. The defaults append `0119000000ffffffffffffffff1e00000001`.
-The domain version changes so older identities cannot be mistaken for this encoding;
-Hello and replay string layouts are unchanged.
+The domain version changes so older identities cannot be mistaken for this encoding.
+This configuration encoding is independent of the resolved preset hash below.
 
 The registry field order and scalar encoding from v2 are preserved. Exact foraging doubles
 and reproduction integers would lose adjacent values if converted to binary32. Signed
@@ -96,12 +96,25 @@ Preserving an override on an absent-ledger load can change nondefault scheduling
 derived world/replay hashes compared with the previous default-substitution bug; no pins
 for that incorrect behavior are retained or introduced.
 
-Lockstep protocol and LREC1 layout versions are 2 because Hello and replay headers now
-carry an additional length-prefixed identity string. Version 1 replay headers are
-rejected. Desync replay dumps include the identity captured at handshake. TCP (including
+Lockstep protocol and LREC1 layout versions are 3. Hello and replay headers carry
+length-prefixed configuration identity and `preset_content_hash` strings. Versions 1
+and 2 are explicitly rejected because they cannot bind resolved preset content.
+Desync replay dumps include both identities captured at handshake. TCP (including
 runtime/soak modes) hosts validate the same Hello compatibility fields before adding a
 replication client. TCP joiners send Hello before user commands. TCP lockstep and replay
-enforce the SystemConfig identity.
+enforce both identities before simulation starts.
+
+`GameSession::PresetContentHash()` captures the preset used at world creation or load.
+Its canonical form first materializes revision-dependent defaults, then stamps the
+current schema revision (the same operation used for embedded presets). It serializes
+the resolved JSON with sorted object keys, no whitespace, ASCII escapes and nlohmann's
+locale-independent binary64 number serialization. Runtime-resolved absolute asset paths
+and diagnostic provenance are excluded. FNV-1a-64 over these ASCII bytes uses offset
+`14695981039346656037`, prime `1099511628211`, modulo-2^64 arithmetic and exactly 16
+lowercase hex digits, encoded without locale-sensitive formatting. Equivalent key order
+and whitespace produce identical bytes and hashes; a changed terrain override under the
+same preset name is incompatible. The older numeric replay `preset_hash` remains name
+provenance only; admission and verification require `preset_content_hash` as well.
 
 The GNS and Steam transports are optional and disabled by default. They do not yet
 exchange or check the SystemConfig identity. Identity admission for these transports is

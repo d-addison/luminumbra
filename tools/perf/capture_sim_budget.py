@@ -30,6 +30,14 @@ def integer(value: Any) -> bool:
     return type(value) is int and 0 <= value < 2**64
 
 
+def shipping_simulation_gates() -> tuple[str, ...]:
+    """Use the shipping systems document, ignoring its explanatory comment entries."""
+    path = Path(__file__).resolve().parents[2] / "data/common/systems.json"
+    systems = json.loads(path.read_text(encoding="utf-8-sig"))
+    return tuple(sorted(name for name, gate in systems["sim"].items()
+                        if isinstance(gate, dict) and "enabled" in gate))
+
+
 def validate_artifact(data: dict[str, Any], preset: str, seed: str, ticks: int) -> None:
     """Ignore unknown object keys; refuse incomplete, corrupt or future evidence."""
     for field in ("world_hash", "world_hash_replay"):
@@ -43,8 +51,7 @@ def validate_artifact(data: dict[str, Any], preset: str, seed: str, ticks: int) 
             or data.get("world_hash") != data.get("world_hash_replay")):
         raise ValueError("smoke identity, tick count or replay verdict mismatch")
     effective = data.get("effective_simulation")
-    required = ("active_regions", "aether_state", "water_high_res", "finite_hydrology",
-                "weather_rain", "weather_events")
+    required = shipping_simulation_gates() + ("finite_hydrology", "weather_rain")
     if not isinstance(effective, dict) or any(effective.get(key) is not True for key in required):
         raise ValueError("capture did not activate the shipping simulation defaults")
     budget = data.get("sim_budget")

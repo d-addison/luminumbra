@@ -58,7 +58,7 @@ namespace Luminumbra::Net {
 // wire, NO float bit-twiddling -- hashes travel as their hex strings). ------------
 
 inline constexpr char kLockstepMagic[5] = {'L', 'S', 'T', 'P', '1'};
-inline constexpr std::uint16_t kLockstepProtocolVersion = 2;
+inline constexpr std::uint16_t kLockstepProtocolVersion = 3;
 
 // Message type tags (u8 on the wire).
 enum class MessageType : std::uint8_t {
@@ -77,6 +77,7 @@ struct HelloMsg {
     std::uint16_t tick_rate_hz = 30;
     std::uint32_t client_id = 0; // the sender's id (0 = host, 1 = first remote)
     std::string system_config_identity;
+    std::string preset_content_hash;
 };
 
 // Shared admission check for lockstep and TCP remote replication.
@@ -86,7 +87,9 @@ struct HelloMsg {
            peer.protocol_version == local.protocol_version && peer.seed == local.seed &&
            peer.preset == local.preset && peer.tick_rate_hz == local.tick_rate_hz &&
            !local.system_config_identity.empty() && !peer.system_config_identity.empty() &&
-           peer.system_config_identity == local.system_config_identity;
+           peer.system_config_identity == local.system_config_identity &&
+           !local.preset_content_hash.empty() && !peer.preset_content_hash.empty() &&
+           peer.preset_content_hash == local.preset_content_hash;
 }
 
 // One client's input for one tick. The blob is OPAQUE (the game's per-tick input set's
@@ -362,6 +365,7 @@ struct LockstepConfig {
     std::uint32_t local_client_id = 0; // 0 = host, 1 = the one remote (v1 scope: <= 2)
     std::uint32_t peer_client_id = 1;
     std::string system_config_identity;
+    std::string preset_content_hash;
 
     // Adaptive input horizon (in TICKS -- never wall-clock). Input for tick T is applied
     // at T+horizon. Starts at kStart; GROWS by 1 (up to kMax) when a peer input for the

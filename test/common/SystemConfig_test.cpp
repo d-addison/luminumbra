@@ -26,6 +26,28 @@ using luminumbra::core::SystemConfig;
 
 namespace {
 
+TEST(SystemConfig, SimulationArtifactReportsEveryRegistryGateAndExplicitOptOut) {
+    using luminumbra::core::SystemConfig;
+    const auto gates = SystemConfig::Defaults().SimulationGates();
+    std::size_t count = 0;
+#define CHECK_SIM_GATE(ENUM, SECTION, JSON_SECTION, NAME, RESIDENCY)                               \
+    if (std::string(JSON_SECTION) == "sim") {                                                      \
+        ++count;                                                                                   \
+        ASSERT_TRUE(gates.contains(NAME));                                                         \
+        EXPECT_TRUE(gates.at(NAME));                                                               \
+        nlohmann::json document;                                                                   \
+        document["sim"][NAME]["enabled"] = false;                                                  \
+        Luminumbra::world::GameSession session;                                                    \
+        session.ApplySystemConfig(SystemConfig::FromJsonString(document.dump()));                  \
+        const auto effective = session.EffectiveSimulationGates();                                 \
+        EXPECT_EQ(effective.size(), gates.size());                                                 \
+        EXPECT_FALSE(effective.at(NAME));                                                          \
+    }
+    LUMIN_CONFIG_KEY_TABLE(CHECK_SIM_GATE)
+#undef CHECK_SIM_GATE
+    EXPECT_EQ(gates.size(), count);
+}
+
 std::string ConfigIdentity(const SystemConfig& config) {
     Luminumbra::world::GameSession session;
     session.ApplySystemConfig(config);

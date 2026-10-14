@@ -98,6 +98,30 @@ TEST(TerrainPresetLoaderTest, LoadsShippedDefaultPreset) {
     EXPECT_TRUE(result.warnings.empty()) << result.warnings.front();
 }
 
+TEST(TerrainPresetLoaderTest, CanonicalResolvedPresetBytesAndHashAreStable) {
+    using Luminumbra::world::CanonicalResolvedTerrainPresetJson;
+    using Luminumbra::world::TerrainPresetContentHash;
+    const auto preset = nlohmann::json::parse(kMinimalPreset);
+    const auto equivalent = nlohmann::json::parse(R"({"generation_params":{
+      "features":{"cave_frequency":0.02,"caves_enabled":true},
+      "terrain":{"height_offset":20.0,"lacunarity":2.0,"persistence":0.5,
+        "octaves":4,"base_amplitude":12.0,"base_frequency":0.01}},"name":"Minimal"})");
+    const std::string expected =
+        R"({"generation_params":{"biomes":{"relief_enabled":false,"table":""},"features":{"cave_frequency":0.02,"caves_enabled":true,"cliffs_enabled":false,"lakes_enabled":false,"rivers_enabled":false,"structures_enabled":false,"surface_breaks_enabled":false},"terrain":{"base_amplitude":12.0,"base_frequency":0.01,"height_offset":20.0,"hydro":{"enabled":false},"island_mask_enabled":false,"lacunarity":2.0,"octaves":4,"persistence":0.5}},"name":"Minimal","schema_rev":7})";
+    EXPECT_EQ(CanonicalResolvedTerrainPresetJson(preset), expected);
+    EXPECT_EQ(CanonicalResolvedTerrainPresetJson(equivalent), expected);
+    EXPECT_EQ(TerrainPresetContentHash(preset), "24701fb4e837d18c");
+    EXPECT_EQ(TerrainPresetContentHash(equivalent), "24701fb4e837d18c");
+    // A persisted, revision-upgraded copy retains the same resolved content identity.
+    EXPECT_EQ(CanonicalResolvedTerrainPresetJson(nlohmann::json::parse(expected)), expected);
+    const auto first = LoadTerrainPresetFromJson(preset, "data-one", "first");
+    const auto second = LoadTerrainPresetFromJson(equivalent, "data-two", "second");
+    ASSERT_TRUE(first.ok);
+    ASSERT_TRUE(second.ok);
+    EXPECT_EQ(first.preset_content_hash, "24701fb4e837d18c");
+    EXPECT_EQ(first.preset_content_hash, second.preset_content_hash);
+}
+
 TEST(TerrainPresetLoaderTest, MountainsOptsIntoBiomesAndRivers) {
     // /2/3: mountains is the showcase preset - it opts into the biome
     // table (consumed) and into rivers (consumed). Loading it must warn on

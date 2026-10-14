@@ -41,7 +41,7 @@ namespace Luminumbra::Replay {
 // move the gate goldens deliberately in the same commit (determinism discipline
 // section 13: replay LREC1 is versioned).
 inline constexpr char kLrec1Magic[5] = {'L', 'R', 'E', 'C', '1'};
-inline constexpr std::uint16_t kLrec1Version = 2;
+inline constexpr std::uint16_t kLrec1Version = 3;
 inline constexpr char kLrec1Trailer[8] = {'L', 'R', 'E', 'C', 'E', 'N', 'D', '1'};
 
 // Record type tags (u8 on the wire).
@@ -67,13 +67,17 @@ struct ReplayHeader {
     std::uint32_t collision_radius = 2;
     std::string engine_version; // luminumbra::core::GetEngineVersionString()
     std::string system_config_identity;
+    std::string preset_content_hash;
 };
 
 // Required in addition to the existing start/checkpoint world-hash comparisons.
 [[nodiscard]] inline bool ConfigurationMatches(const ReplayHeader& header,
-                                               const std::string& live_identity) {
-    return !live_identity.empty() && !header.system_config_identity.empty() &&
-           header.system_config_identity == live_identity;
+                                               const std::string& live_identity,
+                                               const std::string& live_preset_hash) {
+    return header.version == kLrec1Version && !live_identity.empty() &&
+           !header.system_config_identity.empty() &&
+           header.system_config_identity == live_identity && !live_preset_hash.empty() &&
+           !header.preset_content_hash.empty() && header.preset_content_hash == live_preset_hash;
 }
 
 // One per-tick input record. The headless smoke has no player inputs today, so
