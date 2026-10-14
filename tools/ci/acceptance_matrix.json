@@ -19,7 +19,7 @@
     {
       "id": "perf.target-report-only",
       "source": "docs/distant-world.md#performance-measurement-contract",
-      "statement": "The 8.33 ms target is reported (p50 for Quality, p50 and p99 for Performance) and never fails a capture.",
+      "statement": "The Python budget evaluator reports the 8.33 ms target (p50 for Quality, p50 and p99 for Performance); its pass/fail decision uses only the floor verdict.",
       "status": "covered",
       "evidence": [
         {"kind": "ctest", "ref": "RenderBudgetPython"},
@@ -29,26 +29,54 @@
     {
       "id": "perf.adapter-identity",
       "source": "docs/distant-world.md#performance-measurement-contract",
-      "statement": "The render capture validator accepts synthetic qualified-adapter strings and rejects a renderer mismatch against the qualified RTX 5070 Ti.",
-      "status": "covered",
+      "statement": "Client reports must record GL vendor, renderer and version from glGetString. RenderContractPython accepts synthetic qualified-adapter strings and rejects a renderer mismatch against the qualified RTX 5070 Ti; it does not exercise glGetString or the client report assignments. GL identity recording remains outstanding native qualification.",
+      "status": "needs-native-run",
       "evidence": [
         {"kind": "ctest", "ref": "RenderContractPython"},
-        {"kind": "script", "ref": "tools/perf/validate_render_capture.py"}
+        {"kind": "script", "ref": "tools/perf/validate_render_capture.py"},
+        {"kind": "native", "ref": "tools/perf/run_qualification.py", "planned": "render qualification runner (v0.3.1); owner: ac",
+         "command": "python tools/perf/run_qualification.py --package <dir> --out <dir> --declare-refresh 3840x1600=143",
+         "receipt_schema": "luminumbra.render_qualification.v1"}
       ]
     },
     {
       "id": "perf.timer-coverage",
       "source": "docs/distant-world.md#performance-measurement-contract",
-      "statement": "The software sample ring preserves frame identity, fake GPU queries test delayed-result attribution and leave unsupported or missing GPU timings unavailable, and statistics match the shared fixture. Client wall, CPU submit and present recording and real GL timestamp capture remain outstanding native/GPU qualification.",
-      "status": "covered",
+      "statement": "The client must record frame wall, CPU submit, present and GPU timings with frame attribution and explicit unavailability. Software ring and query tests exercise attribution with fake queries; client timing assignments and real GL timestamp capture remain outstanding native/GPU qualification.",
+      "status": "needs-native-run",
       "evidence": [
         {"kind": "ctest", "ref": "RenderMeasurementFrameRing"},
         {"kind": "ctest", "ref": "RenderMeasurementGpuQueries"},
-        {"kind": "ctest", "ref": "RenderMeasurementStatistics"}
+        {"kind": "native", "ref": "tools/perf/run_qualification.py", "planned": "render qualification runner (v0.3.1); owner: ac",
+         "command": "python tools/perf/run_qualification.py --package <dir> --out <dir> --declare-refresh 3840x1600=143",
+         "receipt_schema": "luminumbra.render_qualification.v1"}
+      ]
+    },
+    {
+      "id": "perf.timer-attribution",
+      "source": "docs/distant-world.md#performance-measurement-contract",
+      "statement": "The software sample ring preserves frame identity when results resolve out of order. GpuQueryRing with fake queries attributes delayed results to their originating frames and leaves unsupported GPU timings and incomplete pass timings unavailable.",
+      "status": "covered",
+      "evidence": [
+        {"kind": "ctest", "ref": "RenderMeasurementFrameRing"},
+        {"kind": "ctest", "ref": "RenderMeasurementGpuQueries"}
       ]
     },
     {
       "id": "perf.percentile-definition",
+      "source": "docs/distant-world.md#performance-measurement-contract",
+      "statement": "Client reports must emit p50, p95, p99, maximum and median absolute deviation through Measurement::add_distributions. RenderMeasurementStatistics exercises summarize and RenderContractPython constructs synthetic distributions; neither calls Measurement::add_distributions or generates a client report. Distribution emission remains outstanding native qualification.",
+      "status": "needs-native-run",
+      "evidence": [
+        {"kind": "ctest", "ref": "RenderMeasurementStatistics"},
+        {"kind": "ctest", "ref": "RenderContractPython"},
+        {"kind": "native", "ref": "tools/perf/run_qualification.py", "planned": "render qualification runner (v0.3.1); owner: ac",
+         "command": "python tools/perf/run_qualification.py --package <dir> --out <dir> --declare-refresh 3840x1600=143",
+         "receipt_schema": "luminumbra.render_qualification.v1"}
+      ]
+    },
+    {
+      "id": "perf.statistics",
       "source": "docs/distant-world.md#performance-measurement-contract",
       "statement": "C++ summarize and tools/perf/perf.py compute p50, p95, p99, maximum and median absolute deviation against the shared fixture. The render capture validator checks synthetic distributions against frame samples and rejects a forged p95 or mean.",
       "status": "covered",
@@ -119,7 +147,7 @@
     {
       "id": "perf.requirement-matrix",
       "source": "docs/distant-world.md#performance-measurement-contract",
-      "statement": "A requirement-to-evidence matrix names the executable tests, native commands, fixtures, thresholds and artifact schemas behind every contract statement.",
+      "statement": "The matrix checker requires a row for every ID in the contract requirement list, resolves non-planned test and file references, and checks that native evidence names a command and receipt schema. Its tests reject missing required mappings and invalid references; this is static inventory validation.",
       "status": "covered",
       "evidence": [
         {"kind": "script", "ref": "tools/ci/check_acceptance_matrix.py"},
@@ -250,7 +278,7 @@
     {
       "id": "iss.60",
       "source": "issue #60",
-      "statement": "Saved-world catalog validation is bounded and does not block the UI thread.",
+      "statement": "AsyncSavedWorldCatalog coalesces refreshes and discards stale results. With the saved-world fixture, owning-thread Request and Poll calls each return within 1000 ms and the scan finishes within 120 s; corrupt region files are refused. These tests exercise the catalog API, not the client UI event loop.",
       "status": "covered",
       "evidence": [
         {"kind": "ctest", "ref": "AsyncSavedWorldCatalogTest.CoalescesRefreshesAndDiscardsLateResults"},
@@ -308,7 +336,7 @@
     {
       "id": "iss.126",
       "source": "issue #126",
-      "statement": "Every statement of the reviewed distant-world and distant-simulation contract has named evidence.",
+      "statement": "Every ID in the distant-world contract requirement list has a matrix row with named evidence. AcceptanceMatrixContract rejects deletion of each required production mapping; evidence execution and completeness of the requirement list are separate obligations.",
       "status": "covered",
       "evidence": [
         {"kind": "script", "ref": "tools/ci/check_acceptance_matrix.py"},
@@ -359,7 +387,7 @@
     {
       "id": "iss.134",
       "source": "issue #134",
-      "statement": "The simulation clock persists and the calendar is unified across save and load.",
+      "statement": "Server autosave records absolute tick 45, full snapshot reload preserves the tick and default world-clock bytes, and wind, weather, aether and world-clock state match after five further ticks. Negative simulationTick metadata refuses load and save without changing disk bytes. These tests do not establish client rendering or custom-calendar unification.",
       "status": "covered",
       "evidence": [
         {"kind": "ctest", "ref": "WorldOpenRefusal.ServerAutosaveAndFullSnapshotCarryTheAbsoluteClock"},
