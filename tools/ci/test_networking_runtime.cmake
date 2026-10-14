@@ -4,7 +4,9 @@ get_filename_component(_modules "${CMAKE_CURRENT_LIST_DIR}/../../cmake" ABSOLUTE
 
 if(NETWORK_TEST_MODE STREQUAL "version")
     # Simulate the configure variables without a compiler or backend packages.
+    # Script mode defines WIN32 on Windows hosts, hiding a -DWIN32 cache entry.
     set(CMAKE_VERSION "${TEST_CMAKE_VERSION}")
+    set(WIN32 "${TEST_WIN32}")
     include("${_modules}/networking_runtime.cmake")
     return()
 elseif(NETWORK_TEST_MODE STREQUAL "runtime")
@@ -77,17 +79,17 @@ endfunction()
 
 foreach(_backend IN ITEMS GNS STEAM)
     run_child("Windows ${_backend} with CMake 3.20" "require CMake 3.21[+]"
-        -DNETWORK_TEST_MODE=version -DWIN32=TRUE -DTEST_CMAKE_VERSION=3.20.6
+        -DNETWORK_TEST_MODE=version -DTEST_WIN32=TRUE -DTEST_CMAKE_VERSION=3.20.6
         "-DLUMINUMBRA_ENABLE_${_backend}=ON")
     run_child("Windows ${_backend} with CMake 3.21" ""
-        -DNETWORK_TEST_MODE=version -DWIN32=TRUE -DTEST_CMAKE_VERSION=3.21.0
+        -DNETWORK_TEST_MODE=version -DTEST_WIN32=TRUE -DTEST_CMAKE_VERSION=3.21.0
         "-DLUMINUMBRA_ENABLE_${_backend}=ON")
     run_child("Linux ${_backend} with CMake 3.20" ""
-        -DNETWORK_TEST_MODE=version -DWIN32=FALSE -DTEST_CMAKE_VERSION=3.20.6
+        -DNETWORK_TEST_MODE=version -DTEST_WIN32=FALSE -DTEST_CMAKE_VERSION=3.20.6
         "-DLUMINUMBRA_ENABLE_${_backend}=ON")
 endforeach()
 run_child("Windows without networking with CMake 3.20" ""
-    -DNETWORK_TEST_MODE=version -DWIN32=TRUE -DTEST_CMAKE_VERSION=3.20.6)
+    -DNETWORK_TEST_MODE=version -DTEST_WIN32=TRUE -DTEST_CMAKE_VERSION=3.20.6)
 
 include("${_modules}/networking_runtime.cmake")
 set(_compiler_bin "${_root}/compiler bin")
