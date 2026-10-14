@@ -30,11 +30,12 @@ std::size_t CountOccurrences(const std::string& source, const std::string& fragm
 }
 
 // Shadow orchestration must delegate only live terrain/glass to ShadowPass.
-// Reject direct owner member access and submission/draw calls, independent of
+// Reject owner references, class-qualified access and submission/draw calls, independent of
 // whitespace. Replay flags and replay-preservation helpers are allowed.
 bool HasFarSubmissionAccess(const std::string& source) {
     static const std::regex forbidden(
-        R"(\b(m_far_world|m_farlod)\s*(->|\.)|)"
+        R"(\b(m_far_world|m_farlod)\b|)"
+        R"(\b(FarWorldRenderer|FarLodRenderer|FarLodSystem)\s*::|)"
         R"(\b(far_world_renderer|submit_ladder|SubmitSelectedFarWorld|DrawFarVolumeGpu)\s*\()");
     return std::regex_search(source, forbidden);
 }
@@ -318,6 +319,8 @@ TEST(FarWorldShadowContract, SubmissionPredicateAllowsReplayStateAndRejectsDrawA
              "submit_ladder_state();",
              "SubmitSelectedFarWorldReplay();",
              "DrawFarVolumeGpuReplay();",
+             "OtherFarWorldRenderer::Submit(camera, prepare);",
+             "FarLodSystemState::draw();",
          }) {
         SCOPED_TRACE(source);
         EXPECT_FALSE(HasFarSubmissionAccess(source));
@@ -333,6 +336,9 @@ TEST(FarWorldShadowContract, SubmissionPredicateAllowsReplayStateAndRejectsDrawA
              "input.submit_ladder (prepare);",
              "SubmitSelectedFarWorld (input, prepare);",
              "DrawFarVolumeGpu (allocation, driver);",
+             "FarWorldRenderer::Submit(camera, prepare);",
+             "FarLodRenderer \n\t:: draw();",
+             "FarLodSystem \t:: draw();",
          }) {
         SCOPED_TRACE(source);
         EXPECT_TRUE(HasFarSubmissionAccess(source));
@@ -351,13 +357,30 @@ TEST(FarWorldShadowContract, ProductionCascadesHaveOnlyLiveAndGlassInputs) {
     ASSERT_FALSE(stage.empty());
     ExpectContains(stage, "shadow_input.submit_terrain = make_terrain_submitter();");
     EXPECT_FALSE(HasFarSubmissionAccess(stage));
-    // Mutation controls close the reviewed hole: a direct owner Submit or draw
-    // added inside this stage must trip the very same source-contract predicate.
+    // Owner handoffs and class-qualified calls added inside this stage must trip
+    // the same source-contract predicate, including dereferences and aliases.
     const auto before_closing_brace = stage.substr(0, stage.size() - 1);
-    EXPECT_TRUE(HasFarSubmissionAccess(before_closing_brace +
-                                       "\nm_far_world -> Submit(camera, prepare);\n}"));
-    EXPECT_TRUE(HasFarSubmissionAccess(before_closing_brace +
-                                       "\nDrawFarVolumeGpu(allocation, driver);\n}"));
+    for (const char* mutation : {
+             "m_far_world -> Submit(camera, prepare);",
+             "(*m_far_world).Submit(camera, prepare);",
+             "auto& far = *m_far_world; far.Submit(camera, prepare);",
+             "helper(*m_far_world, camera, prepare);",
+             "helper(m_far_world, camera, prepare);",
+             "helper(m_far_world.get(), camera, prepare);",
+             "m_farlod -> draw();",
+             "(*m_farlod).draw();",
+             "auto& far = *m_farlod; far.draw();",
+             "helper(*m_farlod, camera, prepare);",
+             "helper(m_farlod, camera, prepare);",
+             "helper(m_farlod.get(), camera, prepare);",
+             "FarWorldRenderer::Submit(camera, prepare);",
+             "FarLodRenderer::draw();",
+             "FarLodSystem::draw();",
+             "DrawFarVolumeGpu(allocation, driver);",
+         }) {
+        SCOPED_TRACE(mutation);
+        EXPECT_TRUE(HasFarSubmissionAccess(before_closing_brace + "\n" + mutation + "\n}"));
+    }
     const auto live =
         ExtractBlock(pipeline, "SubmitTerrainChunksFn RenderPipeline::make_terrain_submitter(");
     ExpectContains(live, "CullHierarchical");
