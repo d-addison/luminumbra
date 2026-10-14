@@ -17,6 +17,7 @@ set(COMMON_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/animation/MorphMesh.cpp
 
     # Core
+    ${CMAKE_CURRENT_LIST_DIR}/core/CrashReport.cpp
     ${CMAKE_CURRENT_LIST_DIR}/core/EngineContracts.cpp
     ${CMAKE_CURRENT_LIST_DIR}/core/EngineVersion.cpp
     ${CMAKE_CURRENT_LIST_DIR}/core/EventBus.cpp

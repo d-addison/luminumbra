@@ -102,8 +102,49 @@ The facade test includes all three public volume headers together. Production
 source-list verification compiles the facade, world adapter, world system,
 quantization codec, existing store and existing marching-cubes translation units.
 
-The first slice passed 38 focused Linux Release cases and the same 38 cases
-under ASan/UBSan. A fresh linked `common_tests` build also passed all 20 existing
+### Lane A regression ports on devel
+
+The regression-only port is based on devel `f15dcde7beca9c5fe931ec2b83e0702e1a9899f0`.
+It retains selected independent controls from Lane A #176 at
+`9b04e1a6c9f575ab02cca62f829454d5553b93f7`, without importing its tile model,
+shared-lattice generator or mesher. References below are to that exact source's
+`test/common/FarVolume_test.cpp`, not line numbers in the canonical suites.
+
+| Canonical suite | Ported control | Lane A source line |
+|---|---|---:|
+| `FarPristineField` | V1/V2 density-bit equality with the existing live router at shared coordinates, for both cave modes | 327 |
+| `FarPristineField` | Mouth beyond 8 km: positive coarse air in both V4/V5 modes, negative analytic/cutoff solid below, and the historical composition's negative-sign control with noise suppressed | 350 |
+| `FarPristineField` | Disabled caves return terrain subtraction at all five spacings; invalid spacing, mode and coordinates refuse | 535 |
+| `FarVolumeFacade` | Analytical eight-midpoint transfer over spacings, frequencies and phases, including residual full-amplitude aliasing | 436 |
+| `FarVolumeMesher` | Analytical torus/ground arch with walls, upper faces and undersides, using canonical raw samples and reconstructed world positions | 406 |
+
+The filter expectation is derived from `cos(pi * cycles / 2)`, rather than
+another invocation of the filter. It cancels one cycle per spacing but retains
+two cycles per spacing. The torus also checks face orientation against its
+independent continuous analytic gradient above ground. The opening control
+preserves the deliberate coarse signed-CSG difference from historical live
+composition; it does not change the live router or guarantee visibility between
+lattice positions. BoxFiltered can retain noise cavities below the mouth, so
+the below-opening solid control isolates the BandLimited cutoff field.
+
+The new live-field source is registered as `far_pristine_field_test`, linked to
+the canonical common library, configured as a first-party target and included
+in the shared GoogleTest/CTest discovery roster. The filter and torus controls
+remain in the existing facade and mesher targets. This port adds no timing
+assertions, runtime selection, production edits or regenerated hash expectations.
+No build or test execution is claimed for this regression port.
+
+Historical measurements remain archived at Lane A #176 source
+`9b04e1a6c9f575ab02cca62f829454d5553b93f7:docs/far-volume-foundation.md`, in
+"Recorded Linux comparison" and "Qualification and reproduction". That source
+reports cold-world full-tile timings and 512 phase-pair observations; those
+measurements belong to Lane A's generator and mesher. Its measurement tests
+(`CavernsAlternativesHaveMeasuredPhaseAndCostControls`, line 471, and
+`CavernsPristineTilesRecordAlternativeCostAndSize`, line 554) are not ported to
+routine CI. Neither those timings nor their geometry counts qualify Lane B.
+
+The original convergence slice passed 38 focused Linux Release cases and the
+same 38 cases under ASan/UBSan. A fresh linked `common_tests` build also passed all 20 existing
 `FarLodStoreTest` cases, including malformed FSD2 streams, LMR1 round trips,
 interrupted rewrites and retained authoritative edits. Formatting, public-tree
 hygiene and strict Doxygen/generated-link checks passed. These CPU receipts are
@@ -111,18 +152,21 @@ separate from the foundation reference and all native terrain captures.
 
 ## Integration still required
 
-The prepared R0 consumer still uses the old request and result fields. Its next
-slice must carry unresolved coverage intent and resolved canonical requests,
-retain complete epoch/generation/authority checks, and preserve its descriptor,
-payload-slot, completion-epilogue and held-lease lifetimes. The existing worker
-scope must be adapted deliberately; nesting it around the new scope-owning
-synchronous helper would violate the nonrecursive ownership rule.
+On this port's devel base `f15dcde7`, the FW queue/renderer chain is not present.
+The prepared R0 reference above uses the old request and result fields; it is a
+historical source, not a second canonical consumer to restore. The separate FW
+head `950609d3` already supplies a canonical immutable-authority queue and an
+adapter preserving relative positions, shared indices, materials and halo
+normals. That later branch does not establish landed integration or qualification
+on this devel base. World-to-renderer composition controls belong to the separate
+FW-based regression slice. Any live-world producer must respect the synchronous
+helper's nonrecursive sampling scope and complete authority/lifetime ownership.
 
-Its allocation accounting must cover actual float brick/double vertex sizes,
+Runtime allocation accounting must cover actual float brick/double vertex sizes,
 height and density caches, canonical edges, halo work, output capacity and
 simultaneous converted geometry. The prior R0 fixture ceilings are not evidence
-that this representation meets them, and this slice does not change those
-ceilings. The old flat-normal renderer adapter cannot overwrite the canonical
+that this representation meets them and are not adopted production budgets.
+The old flat-normal renderer adapter cannot overwrite the canonical
 halo normals while claiming shared curved-normal acceptance.
 
 Discovery still scans the complete surface-plus-extension interval. Deep sparse
