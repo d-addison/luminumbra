@@ -37,6 +37,26 @@ class FrozenTerrainPresetsTests(unittest.TestCase):
         new["generation_params"]["terrain"]["island_mask_enabled"] = False
         self.assertEqual(old, new)
 
+    def test_flat_lands_keeps_its_minimal_generation_identity(self):
+        old = json.loads((FROZEN / "flat_lands.json").read_text())["generation_params"]
+        new = json.loads((SHIPPING / "flat_lands.json").read_text())["generation_params"]
+        self.assertEqual(new["terrain"], old["terrain"])
+        self.assertEqual(new["biomes"].pop("table"), "")
+        self.assertIs(new["biomes"].pop("relief_enabled"), False)
+        self.assertIs(new["features"].pop("surface_breaks_enabled"), False)
+        self.assertEqual(new, old)
+
+    def test_shipping_traversal_pins_the_current_preset(self):
+        traversal = (ROOT / "tools/perf/fixtures/surface-flight.traversal").read_text()
+        fields = dict(line.split(maxsplit=1) for line in traversal.splitlines()[1:])
+        preset = json.loads((SHIPPING / (fields["preset"] + ".json")).read_text())
+        canonical = json.dumps(preset, sort_keys=True, separators=(",", ":")).encode()
+        checksum = 14695981039346656037
+        for byte in canonical:
+            checksum = ((checksum ^ byte) * 1099511628211) & ((1 << 64) - 1)
+        self.assertEqual(int(fields["preset_revision"]), preset["schema_rev"])
+        self.assertEqual(fields["preset_identity"], f"{checksum:016x}")
+
     def test_non_embedded_fixture_pins_original_identity(self):
         metadata = json.loads((FIXTURE / "world_info.json").read_text())
         self.assertFalse((FIXTURE / "preset.json").exists())

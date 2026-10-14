@@ -318,6 +318,12 @@ target_link_libraries(tree_lod_test PRIVATE
     gtest_main
 )
 
+# Rendering defaults and override parsing are pure headers (no client/GL link).
+add_executable(rendering_defaults_test rendering/RenderingDefaults_test.cpp)
+target_include_directories(rendering_defaults_test PRIVATE ../src)
+target_link_libraries(rendering_defaults_test PRIVATE gtest_main)
+luminumbra_configure_first_party_target(rendering_defaults_test)
+
 #  far-field impostors: the hemi-octahedral view<->tile mapping math (GL-free,
 # the shared source of truth for the atlas bake + the impostor shader).
 add_executable(octa_impostor_test
@@ -1740,6 +1746,7 @@ set(LUMINUMBRA_GTEST_TARGETS
     filesystem_path_test
     skinned_test_assets_test
     tree_lod_test
+    rendering_defaults_test
     # the hemi-octa mapping test was built but never
     # registered — the atlas-bake/shader shared source of truth had zero
     # executing coverage. GL-free pure math, safe in the default lane.

@@ -228,8 +228,29 @@ TEST(TerrainPresetLoaderTest, MinimalPresetLoadsCleanly) {
     const TerrainPresetLoadResult result = LoadTerrainPreset(path);
     EXPECT_TRUE(result.ok);
     EXPECT_TRUE(result.warnings.empty());
+    // Unversioned fixtures keep revision-6 absence semantics; resolving defaults
+    // must not manufacture optional blocks or activate their shipping defaults.
     EXPECT_FALSE(result.extras.biomes.present);
+    EXPECT_FALSE(result.extras.hydro.present);
+    EXPECT_FALSE(result.params.biomes_enabled);
+    EXPECT_FALSE(result.params.hydro_enabled);
     fs::remove(path);
+}
+
+TEST(TerrainPresetLoaderTest, LegacyAbsentBlocksStayOffWhenMaterializedForRevisionUpgrade) {
+    auto resolved =
+        Luminumbra::world::ResolveTerrainPresetDefaults(nlohmann::json::parse(kMinimalPreset));
+    resolved["schema_rev"] = Luminumbra::world::kTerrainPresetSchemaRevision;
+    const auto result = LoadTerrainPresetFromJson(resolved, {});
+    ASSERT_TRUE(result.ok);
+    EXPECT_FALSE(result.params.biomes_enabled);
+    EXPECT_FALSE(result.params.biome_relief_enabled);
+    EXPECT_FALSE(result.params.hydro_enabled);
+    EXPECT_FALSE(result.params.island_mask_enabled);
+    EXPECT_FALSE(result.params.rivers_enabled);
+    EXPECT_FALSE(result.params.lakes_enabled);
+    EXPECT_FALSE(result.params.cliffs_enabled);
+    EXPECT_FALSE(result.params.surface_breaks_enabled);
 }
 
 TEST(TerrainPresetLoaderTest, MissingFileReportsOpenError) {

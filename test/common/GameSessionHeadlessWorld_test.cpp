@@ -2021,6 +2021,7 @@ TEST(GameSessionHeadlessWorldTest, LedgerFileAbsenceCorruptionFutureAndDisabledR
     }
     std::ofstream(path, std::ios::binary) << good;
     GameSession disabled;
+    disabled.SetActiveRegionsEnabled(false); // Exercise the incompatible-config refusal.
     disabled.SetRootPath(root.root_string());
     disabled.SetJobSystem(&jobs);
     EXPECT_FALSE(disabled.LoadWorld(owner.GetMetadata().worldId));

@@ -1488,8 +1488,12 @@ TEST(WorldGenLayerSnapshotTest, CurrentShippedArchipelagoPresetHeightHash) {
     // self-affine gates below still pass (land_h_p95 7.85>6; spectral beta 2.70 in
     // [1.8,3]). 0x940d621a2e3c0436 -> 0xf26e830fb364b045. Visual-QA clean
     // (WorldVisualSweep 0 flags); FarLodHorizon/PlayerView/WaterfallVisual pass.
+    // PR #273 enables authored rivers/lakes/cliffs and biome relief. Archipelago
+    // remains in its coastal realism band (CI beta=2.67673). GCC/UCRT64 before:
+    // 0xd28a6e2408dd073f; after: 0x0fcae21e66b660ea (both HEAD CI logs).
+    // MSVC needs CI recapture: leave its old pin until that toolchain reports it.
     constexpr std::uint64_t kArchipelagoShapedHash =
-        ToolchainHeightHash(0x1bc4be90440f9130ull, 0xd28a6e2408dd073full);
+        ToolchainHeightHash(0x1bc4be90440f9130ull, 0x0fcae21e66b660eaull);
     EXPECT_EQ(hash, kArchipelagoShapedHash)
         << "shipped archipelago preset terrain drifted; if intentional, bump "
         << "kArchipelagoShapedHash deliberately and document before/after in "

@@ -317,6 +317,8 @@ INSTANTIATE_TEST_SUITE_P(ClockMetadataEntryPoints,
                          testing::Combine(testing::Range(0, 3), testing::Range(30, 60)));
 
 TEST_F(WorldOpenRefusal, ActiveClockSaveRefusesWithFeatureOffThroughEveryOpenPath) {
+    // This case exercises the legacy clock path, independently of shipping defaults.
+    Write(root / "data/common/systems.json", R"({"sim":{"active_regions":{"enabled":false}}})");
     GameSession writer;
     writer.SetRootPath(RootString());
     writer.SetJobSystem(&jobs);
@@ -330,6 +332,7 @@ TEST_F(WorldOpenRefusal, ActiveClockSaveRefusesWithFeatureOffThroughEveryOpenPat
     EXPECT_TRUE(inspected.requires_active_regions);
     EXPECT_EQ(inspected.clock.tick(), 1u);
     GameSession reader;
+    reader.SetActiveRegionsEnabled(false); // Required for the feature-off refusal.
     reader.SetRootPath(RootString());
     reader.SetJobSystem(&jobs);
     ASSERT_TRUE(reader.CreateTransientWorld("Reader", "1337", "default"));
@@ -397,6 +400,10 @@ TEST_F(WorldOpenRefusal, CurrentClientLoadPreservesAuthoritativeChunkAndFreshMis
     EXPECT_EQ(session.GetLastLoadedChunkCount(), 0u);
 }
 TEST_F(WorldOpenRefusal, CurrentServerBootKeepsLoadedAuthorityAndSkipsWaterSettle) {
+    // Keep the legacy clock and the fixture's 8x8 water grids: this test checks
+    // loaded authority/no-settle, independently of clock and resolution migrations.
+    Write(root / "data/common/systems.json",
+          R"({"sim":{"active_regions":{"enabled":false},"water_high_res":{"enabled":false}}})");
     Server::ServerWorldRunnerConfig config;
     config.root_path = RootString();
     config.world_id = "fixture";
@@ -779,6 +786,8 @@ TEST_F(WorldOpenRefusal, ServerAutosaveAndFullSnapshotCarryTheAbsoluteClock) {
 }
 
 TEST_F(WorldOpenRefusal, LegacyFullSnapshotCallbackAndMetadataFailureKeepChunkCount) {
+    // This case exercises the legacy clock path, independently of shipping defaults.
+    Write(root / "data/common/systems.json", R"({"sim":{"active_regions":{"enabled":false}}})");
     Server::ServerWorldRunnerConfig config;
     config.root_path = RootString();
     config.world_id = "fixture";
@@ -815,6 +824,7 @@ TEST_F(WorldOpenRefusal, LegacyExplicitSessionSnapshotsKeepLargeKeylessMetadata)
     GameSession session;
     session.SetRootPath(RootString());
     session.SetJobSystem(&jobs);
+    session.SetActiveRegionsEnabled(false); // Legacy keyless snapshots have no clock metadata.
     ASSERT_TRUE(session.CreateTransientWorld("Legacy direct load", "1337", "default"));
     ASSERT_TRUE(session.LoadWorldStateFrom(save)) << session.GetWorldOpenError();
     EXPECT_TRUE(session.SaveWorldStateTo(save));

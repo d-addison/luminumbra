@@ -36,7 +36,11 @@ param(
     # (FP/optimization differences in the sim): the DEBUG sim-truth hash and the RELEASE one are
     # legitimately DIFFERENT deterministic values.  checks each build is run==replay AND
     # matches ITS OWN baseline — NOT that debug == release. Override if intentionally bumped.
+    # PR #273: shipping terrain/simulation defaults changed; needs CI recapture.
+    # Keep the old golden until this exact workload/build has reported its new hash.
     [string]$BaselineHash = 'a66ab4d049ba9228',          # DEBUG canonical (the gate tree;  derived-state reclassification 2026-07-05)
+    # PR #273: shipping terrain/simulation defaults changed; needs CI recapture.
+    # Keep the old golden until this exact workload/build has reported its new hash.
     [string]$ReleaseBaselineHash = '045f7c2f0645bcce',   # RELEASE canonical (distinct, also deterministic; authoritative-state change)
     # Quick mode: workers {1,2}, debug only, skip the replay + moving axes (fast pre-commit check).
     [switch]$Quick,

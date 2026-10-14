@@ -22,13 +22,23 @@
       },
       "island_mask_enabled": true,
       "hydro": {
-        "enabled": true
+        "enabled": true,
+        "iterations": 4,
+        "cell_size_m": 8.0,
+        "talus_height": 2.6,
+        "thermal_rate": 0.3,
+        "solubility": 0.06,
+        "deposition": 0.15,
+        "sediment_capacity": 0.35,
+        "max_offset": 8.0
       }
     },
     "features": {
       "caves_enabled": true,
       "cave_frequency": 0.025,
       "rivers_enabled": true,
+      "river_depth": 4.0,
+      "river_max_carve": 8.0,
       "lakes_enabled": true,
       "cliffs_enabled": true,
       "structures_enabled": true,

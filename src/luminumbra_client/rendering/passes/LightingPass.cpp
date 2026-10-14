@@ -326,14 +326,8 @@ void LightingPass::execute(const RenderContext& ctx) {
                     0.92f}; // richer sat + punchier contrast (de-wash
                             // noon; owner "white filter" pass 2026-07-07)
             if (const auto env = Core::ReadEnvironment("LUMIN_GRADE")) {
-                std::sscanf(env->c_str(),
-                            "%f,%f,%f,%f,%f,%f",
-                            &g.exposure,
-                            &g.saturation,
-                            &g.contrast,
-                            &g.wr,
-                            &g.wg,
-                            &g.wb);
+                ParseCommaSeparatedPrefix(
+                    *env, g.exposure, g.saturation, g.contrast, g.wr, g.wg, g.wb);
             }
             return g;
         }();

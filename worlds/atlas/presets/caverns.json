@@ -24,7 +24,7 @@
       "island_mask_enabled": true,
       "hydro": {
         "enabled": true,
-        "iterations": 8,
+        "iterations": 4,
         "cell_size_m": 8.0,
         "talus_height": 2.6,
         "thermal_rate": 0.3,

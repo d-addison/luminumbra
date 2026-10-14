@@ -10,6 +10,7 @@
 #include "RenderContext.h" // per-frame pass contract
 #include "RenderGraph.h"   // Declarative frame graph validated against the trace.
 #include "RenderSystem.h"
+#include "RenderingDefaults.h"
 #include "SunLightModel.h"  //  rendering: SunIrradiance (transmittance-coupled sun magnitude)
 #include "TimeOfDayModel.h" // Pure time-of-day policy helpers.
 #include "core/Log.h"
@@ -3562,12 +3563,11 @@ RenderContext RenderPipeline::make_aerial_context(const Camera& camera) {
         std::optional<AtmosphereParams> ov;
         if (const auto env = Core::ReadEnvironment("LUMIN_ATMOS")) {
             AtmosphereParams p{};
-            if (std::sscanf(env->c_str(),
-                            "%f,%f,%f,%f",
-                            &p.aerial_density,
-                            &p.aerial_max_distance,
-                            &p.inscatter_strength,
-                            &p.warmth) == 4) {
+            if (ParseCommaSeparatedPrefix(*env,
+                                          p.aerial_density,
+                                          p.aerial_max_distance,
+                                          p.inscatter_strength,
+                                          p.warmth) == 4) {
                 ov = p;
             }
         }

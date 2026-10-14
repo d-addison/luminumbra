@@ -1614,7 +1614,7 @@
       "bytes": 2126,
       "license": "MIT",
       "path": "worlds/atlas/presets/caverns.json",
-      "sha256": "8515d7812b9d46fb6070b3a688eeee7aa117b178e58815100724cee30475bc37",
+      "sha256": "6f5552bdf0effbbedddcd258689494dedf12623d62b39bc98b1909c24ab7e3b1",
       "source": "Luminumbra authored worlds"
     },
     {
@@ -1639,10 +1639,10 @@
       "source": "Luminumbra authored worlds"
     },
     {
-      "bytes": 1207,
+      "bytes": 1492,
       "license": "MIT",
       "path": "worlds/atlas/presets/temperate_forest.json",
-      "sha256": "f622b9cb7dbd7f077ce4229b8b752ef75584d33b6578c7e928267c9af1d21ceb",
+      "sha256": "ecdb37cae5d256df22c221573db5fa34c3760c10d21147106768aa81a5608cb1",
       "source": "Luminumbra authored worlds"
     }
   ],

@@ -362,6 +362,11 @@ TerrainPresetLoadResult LoadTerrainPresetFromJson(const nlohmann::json& source,
     // Mapped into TerrainGenParams.hydro_*
     // (deliberate world_hash-affecting feature when enabled).
     ParseHydroBlock(terrain, result.extras.hydro, provenance, result.warnings);
+    // Resolution materializes historical off choices for saved presets before
+    // revision upgrades. Legacy extras still report whether a block was authored.
+    if (!shipping_defaults)
+        result.extras.hydro.present =
+            JsonHasObject(source["generation_params"]["terrain"], "hydro");
     if (result.extras.hydro.present) {
         const TerrainHydroPreset& hydro = result.extras.hydro;
         params.hydro_enabled = hydro.enabled;
@@ -381,6 +386,8 @@ TerrainPresetLoadResult LoadTerrainPresetFromJson(const nlohmann::json& source,
     // table. With no table the consumed params keep biomes_enabled=false ->
     // byte-zero drift from the pre-biome implementation.
     ParseBiomesBlock(gen_params, result.extras.biomes, data_root, provenance, result.warnings);
+    if (!shipping_defaults)
+        result.extras.biomes.present = JsonHasObject(source["generation_params"], "biomes");
     params.biomes_enabled = result.extras.biomes.enabled;
     params.biome_relief_enabled =
         result.extras.biomes.enabled && result.extras.biomes.relief_enabled;

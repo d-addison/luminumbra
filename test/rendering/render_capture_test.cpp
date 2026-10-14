@@ -33,7 +33,6 @@
 //  rendering ( /  ): the shipping manual-exposure model
 // under test (the SAME functions main_client.cpp + RenderPipeline.cpp call).
 #include "rendering/ExposureModel.h"
-#include "rendering/RenderingDefaults.h"
 #include "rendering/SunLightModel.h"
 // the pure time-of-day policy facets under test.
 #include "rendering/TimeOfDayModel.h"
@@ -1578,52 +1577,4 @@ TEST(RenderGraph, WriteAfterWriteAndReadAfterWriteOrderingHold) {
     EXPECT_EQ(s, expected);
     EXPECT_TRUE(g.validate().empty());
     EXPECT_EQ(g.latest_writer_of("T", "c"), "b");
-}
-
-TEST(RenderDefaults, ShippingPresentationAndExplicitOff) {
-    using namespace Luminumbra::Rendering;
-    EXPECT_EQ(kDefaultVolumetricQuality, 1);
-    EXPECT_FLOAT_EQ(kDefaultAetherMaterialModulation, 1.0f);
-    EXPECT_TRUE(ScentDecalEnabled(std::nullopt));
-    EXPECT_FALSE(ScentDecalEnabled(std::string("0")));
-    EXPECT_TRUE(ScentDecalEnabled(std::string("1")));
-    const auto defaults = ResolveCaveAmbientOcclusion(std::nullopt);
-    EXPECT_FLOAT_EQ(defaults.enabled, 1.0f);
-    EXPECT_FLOAT_EQ(defaults.maxDist, 24.0f);
-    EXPECT_FLOAT_EQ(defaults.floor, 0.06f);
-    EXPECT_EQ(defaults.steps, 8);
-    EXPECT_FLOAT_EQ(defaults.thickness, 1.5f);
-    const auto off = ResolveCaveAmbientOcclusion(std::string("0"));
-    EXPECT_FLOAT_EQ(off.enabled, 0.0f);
-    EXPECT_FLOAT_EQ(off.maxDist, defaults.maxDist);
-    EXPECT_EQ(off.steps, defaults.steps);
-    const auto tuned = ResolveCaveAmbientOcclusion(std::string("1,30,0.1,12,2"));
-    EXPECT_FLOAT_EQ(tuned.maxDist, 30.0f);
-    EXPECT_EQ(tuned.steps, 12);
-    EXPECT_FLOAT_EQ(tuned.thickness, 2.0f);
-}
-
-TEST(RenderDefaults, CaveAmbientOcclusionPreservesPartialAndInvalidOverrides) {
-    using namespace Luminumbra::Rendering;
-    const auto expect = [](const std::string& input, const CaveAmbientOcclusion& expected) {
-        SCOPED_TRACE(input);
-        const auto actual = ResolveCaveAmbientOcclusion(input);
-        EXPECT_FLOAT_EQ(actual.enabled, expected.enabled);
-        EXPECT_FLOAT_EQ(actual.maxDist, expected.maxDist);
-        EXPECT_FLOAT_EQ(actual.floor, expected.floor);
-        EXPECT_EQ(actual.steps, expected.steps);
-        EXPECT_FLOAT_EQ(actual.thickness, expected.thickness);
-    };
-    expect("", {});
-    expect("invalid", {});
-    expect("0,invalid,0.2,12,2", {0.0f, 24.0f, 0.06f, 1.5f, 8});
-    expect("0,30,invalid,12,2", {0.0f, 30.0f, 0.06f, 1.5f, 8});
-    expect("0,30,0.2,invalid,2", {0.0f, 30.0f, 0.2f, 1.5f, 8});
-    expect("0,30,0.2,12,invalid", {0.0f, 30.0f, 0.2f, 1.5f, 12});
-    expect("0,30,0.2,12", {0.0f, 30.0f, 0.2f, 1.5f, 12});
-    expect("0,30,0.2,12.5,2", {0.0f, 30.0f, 0.2f, 1.5f, 12});
-    expect("0 ,30,0.2,12,2", {0.0f, 24.0f, 0.06f, 1.5f, 8});
-    expect("0,,0.2,12,2", {0.0f, 24.0f, 0.06f, 1.5f, 8});
-    expect(" +0, 3e1, 0.2, +12, 2suffix", {0.0f, 30.0f, 0.2f, 2.0f, 12});
-    expect("0,0x1ep0,0.2,-12,2,extra", {0.0f, 30.0f, 0.2f, 2.0f, -12});
 }

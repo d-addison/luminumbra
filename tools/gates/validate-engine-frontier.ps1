@@ -3928,6 +3928,8 @@ function Test-PopulatedWorldReplay {
     # (Re-pinned 2026-07-05 for: the roster now ALSO plants (--planted-roster),
     # so the previously-dormant feeding loop runs LIVE in this gate - grazeable biomass +
     # creature hunger now evolve and hash. The defined  extended-roster transition.)
+    # PR #273: shipping terrain/simulation defaults changed; needs CI recapture.
+    # Keep the old golden until this exact workload/build has reported its new hash.
     $expectedHash = "d281053b8de4b891"
     if ($analysis.world_hash -ne $expectedHash) {
         throw "populated world replay end hash $($analysis.world_hash) != pinned golden $expectedHash (the populated ecology world diverged / non-deterministic)"
@@ -4470,6 +4472,8 @@ function Test-ReplayRoundtrip {
     # (Re-pinned 2026-07-05 for the  authoritative-state change: settle contract + flux
     # persistence + order-independent wake propagation. Prior canonical was
     # 6f008a9f637c40b7.)
+    # PR #273: shipping terrain/simulation defaults changed; needs CI recapture.
+    # Keep the old golden until this exact workload/build has reported its new hash.
     $expectedHash = "a66ab4d049ba9228"
     if ($r.end_world_hash -ne $expectedHash) {
         throw "replay roundtrip end hash $($r.end_world_hash) != canonical $expectedHash (recording perturbed the simulation)"
@@ -4589,6 +4593,8 @@ function Test-LockstepLoopback {
     # Determinism proof: lockstep must NOT perturb the sim. The in-sync end hash must equal
     # the canonical HeadlessServerTick hash, unchanged. (Re-pinned 2026-07-05 for the
     #  authoritative-state change; prior canonical was 6f008a9f637c40b7.)
+    # PR #273: shipping terrain/simulation defaults changed; needs CI recapture.
+    # Keep the old golden until this exact workload/build has reported its new hash.
     $expectedHash = "a66ab4d049ba9228"
     if ($a.host.world_hash -ne $expectedHash) {
         throw "lockstep loopback end hash $($a.host.world_hash) != canonical $expectedHash (lockstep perturbed the simulation)"
@@ -4696,6 +4702,8 @@ function Test-NetworkedSession {
     # Re-pinned 2026-07-10 after three independent 90-tick runs all produced
     # 354be8d009c08703 with host==client at every cadence, clean disconnect,
     # and zero GL errors. This remains the client-path bare streamed-chunk hash.
+    # PR #273: shipping terrain/simulation defaults changed; needs CI recapture.
+    # Keep the old golden until this exact workload/build has reported its new hash.
     $expectedHash = "354be8d009c08703"
     if ($a.end_hash -ne $expectedHash) {
         throw "networked session end hash $($a.end_hash) != expected $expectedHash (client streamed-chunk world diverged / non-deterministic)"
@@ -4746,6 +4754,8 @@ function Test-LockstepFaultInjection {
     if ([int64]$absorb.host.late_input_events -le 0) {
         throw "lockstep fault-injection: no late-input events recorded (the delay was not exercised)"
     }
+    # PR #273: shipping terrain/simulation defaults changed; needs CI recapture.
+    # Keep the old golden until this exact workload/build has reported its new hash.
     if (-not $absorb.end_hashes_equal -or $absorb.host.world_hash -ne "a66ab4d049ba9228") {
         throw "lockstep fault-injection: absorbed-jitter run did not reach the canonical in-sync end hash (host=$($absorb.host.world_hash))"
     }
