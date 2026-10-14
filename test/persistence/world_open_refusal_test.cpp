@@ -372,14 +372,16 @@ TEST_F(WorldOpenRefusal, MissingMetadataRefusesCatalogClientAndServerWithoutChan
 }
 
 TEST_F(WorldOpenRefusal, MissingEmbeddedPresetAndAtlasFallbackRefuseBeforeGeneration) {
-    const auto atlas = root / "worlds/atlas/presets/default.json";
+    const auto atlas = root / "worlds/atlas/presets-rev6/default.json";
     const auto embedded = save / "preset.json";
     ASSERT_TRUE(fs::copy_file(atlas, embedded));
     ASSERT_TRUE(Persistence::InspectSavedWorld(root, "fixture").error.empty());
     ASSERT_TRUE(fs::remove(embedded));
-    // An embedded-preset deletion alone is loadable through the atlas fallback.
+    // An embedded-preset deletion alone is loadable through the frozen revision-6 atlas fallback.
     ASSERT_TRUE(Persistence::InspectSavedWorld(root, "fixture").error.empty());
+    EXPECT_EQ(Persistence::InspectSavedWorld(root, "fixture").preset_path, atlas);
     ASSERT_TRUE(fs::remove(atlas));
+    ASSERT_TRUE(fs::remove(root / "worlds/atlas/presets/default.json"));
     const auto before = DiskBytes(root);
     ExpectMissingPresetReason(Persistence::InspectSavedWorld(root, "fixture").error, atlas);
     const auto catalog = Persistence::EnumerateSavedWorlds(root);
@@ -392,6 +394,7 @@ TEST_F(WorldOpenRefusal, MissingEmbeddedPresetAndAtlasFallbackRefuseBeforeGenera
         client.SetRootPath(RootString());
         EXPECT_FALSE(client.LoadWorld("fixture"));
         ExpectMissingPresetReason(client.GetWorldOpenError(), atlas);
+        EXPECT_EQ(client.GetWorldSystem(), nullptr);
         EXPECT_EQ(client.GetLastLoadedChunkCount(), 0u);
         EXPECT_FALSE(client.SaveWorld());
     }
@@ -596,6 +599,7 @@ TEST_F(WorldOpenRefusal, InvalidMetadataAndMissingWorldRefuseWithoutExceptionsOr
 
 TEST_F(WorldOpenRefusal, EmbeddedPresetLoadsWithoutTheOriginalNamedPreset) {
     fs::rename(root / "worlds/atlas/presets/default.json", save / "preset.json");
+    ASSERT_TRUE(fs::remove(root / "worlds/atlas/presets-rev6/default.json"));
     const auto before = DiskBytes(root);
     GameSession session;
     session.SetRootPath(RootString());
@@ -699,14 +703,16 @@ TEST_F(WorldOpenRefusal, NonEmbeddedSaveWithoutIdentityNeverUsesShippingPreset) 
 }
 
 TEST_F(WorldOpenRefusal, MissingHistoricalPresetRefusesRatherThanUsingShipping) {
-    fs::remove(root / "worlds/atlas/presets-rev6/default.json");
+    const auto historical = root / "worlds/atlas/presets-rev6/default.json";
+    ASSERT_TRUE(fs::remove(historical));
     const auto before = DiskBytes(root);
     const auto inspected = Persistence::InspectSavedWorld(root, "fixture");
-    EXPECT_FALSE(inspected.error.empty());
+    ExpectMissingPresetReason(inspected.error, historical);
     GameSession session;
     session.SetRootPath(RootString());
     session.SetJobSystem(&jobs);
     EXPECT_FALSE(session.LoadWorld("fixture"));
+    ExpectMissingPresetReason(session.GetWorldOpenError(), historical);
     EXPECT_EQ(session.GetWorldSystem(), nullptr);
     EXPECT_EQ(DiskBytes(root), before);
 }
