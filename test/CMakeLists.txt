@@ -227,6 +227,8 @@ add_executable(common_tests
     common/WindFieldSystem_test.cpp
     common/WeatherSystem_test.cpp
     common/AetherFieldSystem_test.cpp
+    common/AmbientDeterminismReceipt_test.cpp
+    common/AmbientInputBounds_test.cpp
     common/fields_hardening_test.cpp
     common/replication_hardening_test.cpp
     common/replication_scale_test.cpp
@@ -907,6 +909,7 @@ add_executable(particle_determinism_test
 add_executable(far_lod_worker_test
     rendering/far_lod_worker_test.cpp
     rendering/terrain_culling_test.cpp
+    rendering/loading_overlay_test.cpp
     rendering/texture_file_test.cpp
     rendering/render_clock_test.cpp
 )
@@ -1477,13 +1480,14 @@ add_executable(world_open_refusal_test
     persistence/world_open_refusal_test.cpp
     common/SimBudgetWorldParity_test.cpp
     persistence/async_saved_world_catalog_test.cpp
+    persistence/saved_world_catalog_responsiveness_test.cpp
     persistence/host_scheduler_fault_test.cpp
     ../src/luminumbra_server/ServerWorldRunner.cpp
     ../src/luminumbra_server/modes/ModeHelpers.cpp
 )
 target_include_directories(world_open_refusal_test PRIVATE ../src ../src/luminumbra_common)
 target_compile_definitions(world_open_refusal_test PRIVATE LUMINUMBRA_SOURCE_ROOT="${CMAKE_SOURCE_DIR}")
-target_link_libraries(world_open_refusal_test PRIVATE gtest_main luminumbra_common)
+target_link_libraries(world_open_refusal_test PRIVATE gtest_main luminumbra_common luminumbra_save_fixture_support)
 
 # Second-class adversarial pass: Jolt tunneling / penetration test. A fast
 # dynamic sphere fired at a thin static heightfield floor must not pass through it.
