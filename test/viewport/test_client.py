@@ -367,10 +367,46 @@ except BaseException as error:
     def test_restart_before_readiness_uses_fresh_session_and_latest_state(self):
         client = self.client('startup-delay', shutdown_timeout=.1)
         client.submit(state())
+        self.wait(lambda: client.status['session_directory'])
+        self.wait(lambda: client.status['broker_pid'])
         child = self.wait(lambda: self.child(client))
-        (self.project / 'mode.txt').write_text('echo')
+        previous_root = Path(client.status['session_directory'])
+        # The latest pending state must survive restart without resubmission.
+        sequence = client.submit(state(3))
+        self.assertEqual(client.status['state'], 'starting', self.diagnostics())
+        self.assertFalse((previous_root / 'desired.bin').exists())
         client.restart()
+
+        # Each durable milestone gets its own polling budget. Shutdown and
+        # cleanup precede replacement preflight; the directory is exposed before
+        # the new session id, and the broker pid precedes fixture-child evidence.
+        self.wait(lambda: not running(child['pid']))
+        self.wait(lambda: not previous_root.exists())
+
+        def replacement_directory():
+            directory = client.status['session_directory']
+            if directory and Path(directory) != previous_root:
+                return Path(directory)
+            return None
+
+        # Preflight and private-directory creation have no earlier durable
+        # public marker, so their finest available boundary is this directory.
+        root = self.wait(replacement_directory)
+        self.wait(lambda: client.status['session'] != child['session'])
+        self.wait(lambda: client.status['broker_pid'])
+        replacement = self.wait(lambda: self.child(client))
+        self.assertNotEqual(root, previous_root)
+        self.assertFalse(previous_root.exists())
+        self.assertFalse(running(child['pid']))
+        self.assertEqual(client.status['state'], 'starting', self.diagnostics())
+        self.assertFalse((root / 'desired.bin').exists())
+        # Keep both hosts behind session-specific readiness gates; frame delivery
+        # gets a separate polling budget after releasing only the replacement.
+        (self.project / ('release-' + replacement['session'])).touch()
         header, _ = self.wait(client.poll)
+        self.assertEqual(header['session'], replacement['session'])
+        self.assertEqual(header['sequence'], sequence)
+        self.assertEqual(header['state'], state(3))
         self.assertNotEqual(header['session'], child['session'])
         self.assertFalse(running(child['pid']))
 

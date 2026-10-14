@@ -19,6 +19,8 @@ out VS_OUT {
     flat uint MaterialID;
     vec3 Tint;         // per-instance albedo tint (1,1,1 = no-op)
     vec3 PrevWorldPos; //  TAAU: world pos with PREVIOUS-frame wind sway
+    vec3 FarRelativeWorldPos; // interface match; unused outside ladder terrain
+    vec3 FarTileLocalPos; // unbiased stored vertex position, before camera subtraction
 } vs_out;
 
 uniform mat4 projection;
@@ -74,6 +76,8 @@ void main()
 
     vs_out.MaterialID = uint(u_materialId);
     vs_out.Tint = aTint;
+    vs_out.FarRelativeWorldPos = vec3(0.0);
+    vs_out.FarTileLocalPos = vec3(0.0);
 
     gl_Position = projection * viewPos;
 }
