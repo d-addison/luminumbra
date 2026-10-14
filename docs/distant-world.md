@@ -540,5 +540,7 @@ and Workshop content distribution are tracked separately and are not part of
 this contract.
 
 FW renderer diagnostics and the current horizon artifact/gate contract are described in
-[Far world horizon v2](far-world-horizon-v2.md). Legacy remains the default; native
-ladder qualification and S9–S13 remain outstanding.
+[Far world horizon v2](far-world-horizon-v2.md). Ladder is the default requested mode;
+`render.far_world_ladder.enabled:false` explicitly opts out to Legacy. Effective
+Legacy fallback and refusal diagnostics remain when Ladder cannot bind. Native
+ladder qualification remains outstanding.
