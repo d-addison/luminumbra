@@ -819,9 +819,6 @@ public:
     // Startup/world-entry policy; runtime changes first reset history via
     // set_far_world_mode. Returns the resolved request for caller diagnostics.
     FarWorldCavePolicy set_far_world_cave_policy(std::optional<World::FarCaveMode> requested);
-    FarWorldRenderer& far_world_renderer() {
-        return *m_far_world;
-    }
     const FarWorldRenderer& far_world_renderer() const {
         return *m_far_world;
     }
