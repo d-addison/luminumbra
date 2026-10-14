@@ -45,10 +45,12 @@ ctest --preset release -L manual \
 
 The Linux/GCC, Diligent RHI, ASan, preview-frame and paired performance lanes use
 bounded ccache (250M each); UCRT64 and MSVC use 500M each. Qualification captures
-bypass the cache. Keys include the configuration hash where applicable and the
-candidate SHA, with stable restore prefixes, so each new candidate can save
-updated entries. Caches are trimmed before saving. Main/devel native and
-performance caches together retain about 4.5 GB across both branches.
+bypass the cache. Immutable save keys include the commit SHA; restores prefer the
+matching CMake configuration prefix where available, then the lane prefix. Caches
+are trimmed with `ccache --cleanup` before saving, and cache-save failures cannot
+fail a job. Main/devel native and performance caches together retain about 4.5 GB
+across both branches. These lanes use standard runners and the existing cache
+actions, with no paid cache service.
 
 All Actions caches, including performance, clang-tidy results, and MSYS2 packages,
 are saved only on `push` events to `refs/heads/main` or `refs/heads/devel`; PRs,
@@ -121,10 +123,18 @@ CTest-registered check. Doxygen always runs because `docs/` feeds its input.
 Draft pull requests retain the previous draft routing: heavy lanes skip while
 formatting, public-tree inventory, runner contracts, Doxygen, game assets, and the
 authoring mock run (subject to the mock's existing paths filter). The required
-Linux/GCC and Windows/MSVC jobs still skip drafts. Marking a PR ready for review
-triggers its current head; those two jobs run Python or native tests,
-and other heavy lanes run when the paths require them. PR workflows
-listen for `opened`, `synchronize`, `reopened`, and `ready_for_review`.
+Linux/GCC and Windows/MSVC jobs still skip drafts. GitHub can treat skipped checks
+as successful, but does not allow draft PRs to merge. Marking a PR ready for review
+triggers its current head; those two jobs run Python or native tests, and other
+heavy lanes run when the paths require them. PR workflows listen for `opened`,
+`synchronize`, `reopened`, and `ready_for_review`; existing branch and path filters
+still apply. The new check runs supersede the draft's skipped ones. Maintainers
+must not merge until the `ready_for_review` run's required checks are green on the
+current head, and must wait again after any head update. This repository does not
+implement a separate merge gate. The external campaign gate (`campaign_control.py
+land`, outside this repository) accepts only actual `SUCCESS` for required checks
+on the exact head. That gate is stricter than GitHub's acceptance of intentional
+path-based skips. No additional job runs on draft pushes to enforce this policy.
 
 Required job names and workflow PR triggers remain present for every PR. Native
 lanes depend directly on the always-running classifier; none depends on a skipped

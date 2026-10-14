@@ -80,6 +80,8 @@ jobs:
             all_lanes
           fi
 
+  # Drafts cannot merge. ready_for_review reruns this job on the same head;
+  # maintainers must wait for that run's required checks to pass before merging.
   asan:
     name: Linux / GCC ASan
     needs: changes
@@ -141,6 +143,8 @@ jobs:
         run: ccache --cleanup || true
       - name: Save compiler cache
         if: ${{ always() && github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/devel') && !(github.event_name == 'workflow_dispatch' && inputs.qualification_capture) && steps.compiler-cache.outcome == 'success' && steps.compiler-cache.outputs.cache-hit != 'true' }}
+        # Cache writes are best-effort, including collisions on same-SHA reruns.
+        continue-on-error: true
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/ccache
