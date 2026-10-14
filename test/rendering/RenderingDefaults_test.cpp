@@ -132,6 +132,22 @@ TEST(RenderDefaults, ValidShortAndWhitespaceSeparatedPrefixes) {
     }
 }
 
+TEST(RenderDefaults, ZeroAndHexPrefixAtTerminatorPreserveDefaults) {
+    for (const auto* input : {"0", "-0", "+0"}) {
+        SCOPED_TRACE(input);
+        float first = 9.0f, second = 10.0f;
+        EXPECT_EQ(ParseCommaSeparatedPrefix(input, first, second), 1u);
+        EXPECT_FLOAT_EQ(first, 0.0f);
+        EXPECT_EQ(std::signbit(first), input[0] == '-');
+        EXPECT_FLOAT_EQ(second, 10.0f);
+    }
+    // A hex prefix without significand digits is refused before assignment.
+    float first = 9.0f, second = 10.0f;
+    EXPECT_EQ(ParseCommaSeparatedPrefix("0x", first, second), 0u);
+    EXPECT_FLOAT_EQ(first, 9.0f);
+    EXPECT_FLOAT_EQ(second, 10.0f);
+}
+
 TEST(RenderDefaults, InvalidOrNonFiniteFieldStopsBeforeAssignment) {
     for (const auto* input : {"",
                               " ",

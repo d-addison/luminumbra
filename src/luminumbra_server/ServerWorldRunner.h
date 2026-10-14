@@ -50,7 +50,8 @@ struct ServerWorldRunnerConfig {
     int test_streaming_radius_cap = 0;
     // Autosave every N simulation ticks through WorldSaveService
     // (GameSession::SaveWorldState incremental contract). 0 disables.
-    std::uint64_t autosave_interval_ticks = 30;
+    // Default: five minutes at the canonical 30 Hz clock.
+    std::uint64_t autosave_interval_ticks = 9000;
     // Explicit workload override, applied before world creation or loading.
     bool finite_hydrology = true;
     //  number of deterministic player avatars to spawn at

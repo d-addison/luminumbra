@@ -528,8 +528,10 @@ or `$HOME/.config/luminumbra/settings.json`.
 Replication defaults to acknowledged deltas and radius-3 chunk AOI with a 16,000 mm
 chunk edge. Millimeter AOI is an alternative: disable chunk AOI before selecting it.
 Locomotion defaults use separation radius 2 m/strength 0.6, flock radius 12 m,
-cohesion 0.5 and alignment 0.4. Server autosaves run every 30 ticks; explicit zero
-suppresses them, including smoke and recorder fixtures.
+cohesion 0.5 and alignment 0.4. Server autosaves default to every 9000 ticks:
+five minutes at the canonical 30 Hz clock, to avoid saving every second during
+normal play. Smoke fixtures explicitly use 30 ticks to exercise saves at ticks
+30/60/90; explicit zero suppresses autosaves, including recorder fixtures.
 
 New preset revision 7 resolves omitted island masks, surface breaks, biomes,
 biome relief, cliffs, rivers, lakes, structures and hydraulic/thermal erosion on.

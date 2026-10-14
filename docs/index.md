@@ -80,7 +80,7 @@ without a window through the deterministic server smoke path:
 
 ```sh
 build/debug/bin/luminumbra_client_app --no-audio
-build/debug/bin/luminumbra_server_app --smoke --root . --preset default --seed 1337 --ticks 90
+build/debug/bin/luminumbra_server_app --smoke --root . --preset default --seed 1337 --ticks 90 --autosave-ticks 30
 ```
 
 Luminumbra 0.3.0 is an early source release. The repository builds an engine and

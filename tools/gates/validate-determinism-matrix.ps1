@@ -87,8 +87,9 @@ function Invoke-Smoke {
         if ($WorkerCount -ge 0) { $env:LUMINUMBRA_JOB_WORKERS = "$WorkerCount" } else { Remove-Item Env:\LUMINUMBRA_JOB_WORKERS -ErrorAction SilentlyContinue }
         if ($ThrottleSeed -gt 0) { $env:LUMINUMBRA_JOB_THROTTLE = "$ThrottleSeed" } else { Remove-Item Env:\LUMINUMBRA_JOB_THROTTLE -ErrorAction SilentlyContinue }
         $smokeArg = if ($Moving) { '--smoke-moving' } else { '--smoke' }
-        # Static cells assert historical pins; moving cells still exercise shipping defaults.
-        $workloadArgs = @($smokeArg)
+        # Static cells assert historical pins; moving cells exercise shipping simulation defaults.
+        # Pin the smoke save cadence independently of the shipping autosave default.
+        $workloadArgs = @($smokeArg, '--autosave-ticks', '30')
         if (-not $Moving) {
             $workloadArgs += @('--systems-config', $HistoricalSystemsConfig, '--preset-json', $HistoricalPresetJson)
         }
@@ -149,7 +150,7 @@ if ($Mode -eq 'WaterCrossBuild') {
         foreach ($proc in @('p1', 'p2')) {
             $artPath = Join-Path $artDir "water-trace-$build-$proc.json"
             Remove-Item $artPath -Force -ErrorAction SilentlyContinue
-            $raw = & $exe.FullName --smoke --water-hash-trace --artifact $artPath 2>&1 | Out-String
+            $raw = & $exe.FullName --smoke --autosave-ticks 30 --water-hash-trace --artifact $artPath 2>&1 | Out-String
             if ($raw -notmatch 'smoke passed') {
                 Write-Host "[water-crossprocess] FAIL: $build --smoke ($proc) did not pass"
                 exit 1

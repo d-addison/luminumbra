@@ -58,6 +58,7 @@ inline bool ParseOverrideNumber(const char*& cursor, float& value) {
     const bool negative = *cursor == '-';
     if (*cursor == '+' || *cursor == '-')
         ++cursor;
+    // Input is NUL-terminated: when cursor[0] is '0', cursor[1] is in bounds.
     const bool hex = cursor[0] == '0' && (cursor[1] == 'x' || cursor[1] == 'X');
     if (hex)
         cursor += 2; // from_chars(hex) expects the significand without 0x.

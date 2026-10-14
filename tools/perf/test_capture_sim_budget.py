@@ -180,6 +180,7 @@ class SimBudgetCaptureTests(unittest.TestCase):
                 self.assertIn(flag, argv)
             self.assertEqual(argv[argv.index("--preset") + 1], preset)
             self.assertEqual(argv[argv.index("--ticks") + 1], "3600")
+            self.assertEqual(argv[argv.index("--autosave-ticks") + 1], "30")
             self.assertEqual(argv[argv.index("--seed") + 1], "1337")
 
 

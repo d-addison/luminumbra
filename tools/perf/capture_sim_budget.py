@@ -105,7 +105,8 @@ def command(binary: Path, root: Path, artifact: Path, preset: str,
             seed: str, ticks: int, radius: int, collision_radius: int) -> list[str]:
     return [str(binary), "--root", str(root), "--smoke", "--no-audio", "--sim-budget",
             "--ecology-roster", "--planted-roster", "--preset", preset, "--seed", seed,
-            "--ticks", str(ticks), "--radius", str(radius), "--collision-radius",
+            "--ticks", str(ticks), "--autosave-ticks", "30", "--radius", str(radius),
+            "--collision-radius",
             str(collision_radius), "--artifact", str(artifact)]
 
 

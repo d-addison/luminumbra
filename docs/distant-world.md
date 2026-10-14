@@ -297,7 +297,8 @@ canonical bytes, refusal behaviours and bounded slice boundaries. It has no
 per-system consumers and no measured budget caps yet. Dirty parking, autosave
 policy changes, snapshot transactions and the diagnostic panel remain pending.
 Current default behaviour still evicts dirty chunks without a flush, the client
-saves only on quit or shutdown, and the server autosave interval defaults to 30 ticks.
+saves only on quit or shutdown, and the server autosave interval defaults to 9000 ticks
+(five minutes at the canonical 30 Hz clock, to avoid saving every second during play).
 
 ## Per-system distant policy
 

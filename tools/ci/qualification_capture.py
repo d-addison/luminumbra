@@ -173,7 +173,7 @@ def capture_contract(directory, expected, fixture, binary_hash, producer_root):
     for run in manifest["runs"]:
         require(run["artifact"] == f"{run['preset']}.json", "capture artifact path differs")
         argv = run.get("command")
-        require(isinstance(argv, list) and len(argv) == 20, "capture command missing or malformed")
+        require(isinstance(argv, list) and len(argv) == 22, "capture command missing or malformed")
         artifact = root / "build/qualification/sim-budget-capture" / run["artifact"]
         expected_argv = module("capture_sim_budget").command(binary, root, artifact, run["preset"], "1337", 600, 1, 1)
         require(argv == expected_argv and Path(argv[-1]).name == run["artifact"], "capture command flags/identity differ")

@@ -3812,7 +3812,7 @@ function Test-HeadlessServerTick {
         Remove-Item $artifactPath
     }
 
-    & $serverExe --smoke --ticks 90 --artifact $artifactPath
+    & $serverExe --smoke --ticks 90 --autosave-ticks 30 --artifact $artifactPath
     if ($LASTEXITCODE -ne 0) {
         throw "headless server smoke exited with code $LASTEXITCODE"
     }
@@ -3905,7 +3905,7 @@ function Test-PopulatedWorldReplay {
         Remove-Item $artifactPath
     }
 
-    & $serverExe --systems-config $HistoricalSystemsConfig --preset-json $HistoricalPresetJson --smoke --ecology-roster --planted-roster --ticks 90 --artifact $artifactPath # Include plants in the live feeding loop.
+    & $serverExe --systems-config $HistoricalSystemsConfig --preset-json $HistoricalPresetJson --smoke --ecology-roster --planted-roster --ticks 90 --autosave-ticks 30 --artifact $artifactPath # Include plants in the live feeding loop.
     if ($LASTEXITCODE -ne 0) {
         throw "populated world replay smoke exited with code $LASTEXITCODE"
     }
@@ -5276,9 +5276,9 @@ function Test-SimOptLevelParity {
     New-Item -ItemType Directory -Force -Path (Split-Path $parityArtifact) | Out-Null
     Remove-Item -ErrorAction SilentlyContinue $normalArtifact, $parityArtifact
 
-    & $normalExe --smoke --ticks 90 --artifact $normalArtifact
+    & $normalExe --smoke --ticks 90 --autosave-ticks 30 --artifact $normalArtifact
     if ($LASTEXITCODE -ne 0) { throw "sim-opt-parity: normal (-O1) smoke exited $LASTEXITCODE" }
-    & $parityExe --smoke --ticks 90 --artifact $parityArtifact
+    & $parityExe --smoke --ticks 90 --autosave-ticks 30 --artifact $parityArtifact
     if ($LASTEXITCODE -ne 0) { throw "sim-opt-parity: parity (-) smoke exited $LASTEXITCODE" }
 
     $normal = Read-JsonArtifact $normalArtifact "luminumbra.server_tick.v1"
@@ -6447,7 +6447,7 @@ function Test-MovingResidency {
     $artifactPath = "build/$BuildPreset/test-artifacts/server/moving-residency.json"
     if (Test-Path $artifactPath) { Remove-Item $artifactPath -Force }
 
-    & $serverExe --smoke-moving --avail-trace --ticks 90 --artifact $artifactPath
+    & $serverExe --smoke-moving --avail-trace --ticks 90 --autosave-ticks 30 --artifact $artifactPath
     if ($LASTEXITCODE -ne 0) {
         throw "moving-residency smoke exited with code $LASTEXITCODE"
     }

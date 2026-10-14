@@ -17,13 +17,13 @@ cmake --build --preset perf --target luminumbra_server_app --parallel
 python tools/perf/perf.py run \
   --workload server-smoke --layer end-to-end --preset perf \
   --build-manifest build/perf/performance-build.json --mode gating \
-  --parameter ticks=30 --parameter surface_radius=1 \
+  --parameter ticks=30 --parameter autosave_ticks=30 --parameter surface_radius=1 \
   --parameter collision_radius=1 --parameter seed=1337 \
   --parameter world_preset=default --fixture-hash "$(git rev-parse HEAD:data)" \
   --evidence-contract server-smoke --evidence build/perf/server-smoke-evidence.json \
   --warmup 1 --samples 20 --output build/perf/server-smoke.json -- \
   build/perf/bin/luminumbra_server_app --smoke --preset default --seed 1337 \
-    --ticks 30 --radius 1 --collision-radius 1 \
+    --ticks 30 --autosave-ticks 30 --radius 1 --collision-radius 1 \
     --artifact build/perf/server-smoke-evidence.json
 ```
 
