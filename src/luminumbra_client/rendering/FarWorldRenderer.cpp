@@ -158,12 +158,15 @@ FarWorldRenderer::BindFixture(JobSystem& jobs,
     if (fixture->owned_bytes() > limits.max_fixture_bytes)
         return refusal_ = FarWorldRefusal::AdmissionFailed;
     try {
+        // The tier-table scan bound above guarantees no per-frame buffer growth.
+        static_assert(kFarTierCount * 8u * 8u <= kScratchSlots);
+        wanted_.reserve(kScratchSlots);
         memory_ = std::make_unique<FarVolumeTierMemory>(limits.budgets);
         integration_charge_.emplace(*memory_->Pool(kFarTierCount));
         // Fixed ledgers, transactional copies, ordering/wanted scratch, owner
         // objects and the immutable fixture are charged in addition to residency.
         const auto bytes = sizeof(*this) + sizeof(FarVolumeResidency) +
-                           sizeof(FarVolumeTierMemory) + kScratchSlots * sizeof(FarTileKey) +
+                           sizeof(FarVolumeTierMemory) + wanted_.capacity() * sizeof(FarTileKey) +
                            fixture->owned_bytes();
         if (!integration_charge_->TryCharge(bytes))
             throw std::bad_alloc();
@@ -177,6 +180,9 @@ FarWorldRenderer::BindFixture(JobSystem& jobs,
     } catch (const std::bad_alloc&) {
         Drain();
         return refusal_ = FarWorldRefusal::AdmissionFailed;
+    } catch (...) {
+        Drain();
+        throw;
     }
 }
 FarWorldSelection FarWorldRenderer::Selection(FarWorldPurpose purpose,
@@ -212,18 +218,15 @@ FarVolumeAuthorityProducer FarWorldRenderer::Producer() const {
 FarWorldRefusal FarWorldRenderer::MakeRequests(const std::array<double, 3>& camera,
                                                std::span<const FarVolumeCoverageSpan> extensions,
                                                std::size_t& count) {
+    wanted_.clear();
     if (extensions.size() > 16 || !std::isfinite(camera[1]) ||
         std::abs(camera[1]) > kFarWantedCameraLimitMeters)
         return FarWorldRefusal::SpanRejected;
-    // The fixed tier table bounds the scan to fewer than 512 candidates. Reserve
-    // the complete charged scratch so ComputeFarWantedSet never grows its buffer.
-    std::vector<FarTileKey> wanted;
-    wanted.reserve(kScratchSlots);
-    if (ComputeFarWantedSet(camera[0], camera[2], wanted) != FarWantedError::None ||
-        wanted.size() > kScratchSlots)
+    if (ComputeFarWantedSet(camera[0], camera[2], wanted_) != FarWantedError::None ||
+        wanted_.size() > kScratchSlots)
         return FarWorldRefusal::SpanRejected;
     count = 0;
-    for (const auto& key : wanted) {
+    for (const auto& key : wanted_) {
         const auto outcome =
             ExtendLedger(key, static_cast<float>(camera[1]), extensions, requests_[count]);
         if (outcome != FarWorldRefusal::None)
@@ -266,11 +269,11 @@ FarWorldRefusal FarWorldRenderer::ExtendLedger(const FarTileKey& key,
     auto headroom = limits_.build_headroom_bytes;
     if (old != ledgers_.end()) {
         const auto& accepted = old->accepted;
-        if (accepted) {
-            generation = accepted->identity.span_generation;
-            if (growth == 0)
-                headroom = accepted->build_headroom_bytes;
-        }
+        if (!accepted)
+            return FarWorldRefusal::InvalidRequests;
+        generation = accepted->identity.span_generation;
+        if (growth == 0)
+            headroom = accepted->build_headroom_bytes;
     }
     if (growth > std::numeric_limits<std::uint64_t>::max() - generation)
         return FarWorldRefusal::SpanRejected;
@@ -697,6 +700,8 @@ void FarWorldRenderer::Drain() {
     fixture_.reset();
     ownership_gpu_charge_.reset();
     ownership_.Begin(0);
+    // Free retained scratch before its charge, including failed bindings.
+    std::vector<World::FarTileKey>{}.swap(wanted_);
     integration_charge_.reset();
     memory_.reset();
     ledgers_ = {};

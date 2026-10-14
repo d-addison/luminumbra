@@ -1,6 +1,7 @@
 #pragma once
 
 #include "FarVolumeRenderMesh.h"
+#include "luminumbra_common/world/FarWantedSet.h"
 
 #include <memory>
 
