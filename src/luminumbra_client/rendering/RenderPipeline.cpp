@@ -1264,8 +1264,7 @@ void RenderPipeline::prepare_world_swap() {
     if (m_farlod) {
         m_farlod->prepare_world_swap();
     }
-    m_legacy_far_resident_bytes = 0;
-    m_legacy_far_vertex_arrays = 0;
+    // The drain retains resident meshes; keep their inventory until rebind or shutdown.
 }
 
 void RenderPipeline::set_far_lod_preview_anchor(const glm::vec3& center, float inner_radius_m) {

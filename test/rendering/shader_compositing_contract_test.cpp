@@ -35,8 +35,8 @@ std::size_t CountOccurrences(const std::string& source, const std::string& fragm
 bool HasFarSubmissionAccess(const std::string& source) {
     static const std::regex forbidden(
         R"(\b(m_far_world|m_farlod)\b|)"
-        R"(\b(FarWorldRenderer|FarLodRenderer|FarLodSystem)\s*::|)"
-        R"(\b(far_world_renderer|submit_ladder|SubmitSelectedFarWorld|DrawFarVolumeGpu)\s*\()");
+        R"(\b(FarWorldRenderer|FarLodSystem)\s*::|)"
+        R"(\b(far_world_renderer|legacy_far_compatibility|submit_ladder|SubmitSelectedFarWorld|DrawFarVolumeGpu)\s*\()");
     return std::regex_search(source, forbidden);
 }
 
@@ -317,6 +317,7 @@ TEST(FarWorldShadowContract, SubmissionPredicateAllowsReplayStateAndRejectsDrawA
              "other_m_far_world->Submit(camera, prepare);",
              "m_farlod_state.draw();",
              "other_far_world_renderer().Submit(camera, prepare);",
+             "other_legacy_far_compatibility()->draw();",
              "submit_ladder_state();",
              "SubmitSelectedFarWorldReplay();",
              "DrawFarVolumeGpuReplay();",
@@ -334,11 +335,12 @@ TEST(FarWorldShadowContract, SubmissionPredicateAllowsReplayStateAndRejectsDrawA
              "m_farlod \t. draw();",
              "far_world_renderer().Submit(camera, prepare);",
              "far_world_renderer \n().Submit(camera, prepare);",
+             "legacy_far_compatibility()->draw();",
+             "legacy_far_compatibility \n()->draw();",
              "input.submit_ladder (prepare);",
              "SubmitSelectedFarWorld (input, prepare);",
              "DrawFarVolumeGpu (allocation, driver);",
              "FarWorldRenderer::Submit(camera, prepare);",
-             "FarLodRenderer \n\t:: draw();",
              "FarLodSystem \t:: draw();",
          }) {
         SCOPED_TRACE(source);
@@ -374,8 +376,10 @@ TEST(FarWorldShadowContract, ProductionCascadesHaveOnlyLiveAndGlassInputs) {
              "helper(*m_farlod, camera, prepare);",
              "helper(m_farlod, camera, prepare);",
              "helper(m_farlod.get(), camera, prepare);",
+             "legacy_far_compatibility()->draw();",
+             "auto* far = legacy_far_compatibility(); far->draw();",
+             "helper(legacy_far_compatibility(), camera, prepare);",
              "FarWorldRenderer::Submit(camera, prepare);",
-             "FarLodRenderer::draw();",
              "FarLodSystem::draw();",
              "DrawFarVolumeGpu(allocation, driver);",
          }) {

@@ -265,7 +265,7 @@ TEST(FarWorldLegacyIsolation, TerrainCoverageLegacyRetainsPayloadFieldValuesAndO
                       {"preview_inner_radius_m", d.preview_inner_radius},
                       {"clip_inner_radius_m", FarLodSystem::kFarClipInnerRadiusMeters},
                       {"clip_outer_radius_m", FarLodSystem::kFarClipOuterRadiusMeters},
-                      {"camera_neighbourhood", std::move(rows)}};)");
+                      {"camera_neighbourhood", std::move(rows)}};)";
     const auto legacy_branch = capture.substr(legacy_begin, ladder_begin - legacy_begin);
     EXPECT_NE(legacy_branch.find(expected), std::string::npos);
     EXPECT_EQ(legacy_branch.find("FarWorldDiagnosticJson("), std::string::npos);

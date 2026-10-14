@@ -11,6 +11,12 @@
 namespace Luminumbra::Rendering {
 
 struct TerrainCullingTestPeer {
+    static void SeedRetainedLegacyInventory(RenderPipeline& pipeline,
+                                            std::size_t bytes,
+                                            std::size_t vertex_arrays) {
+        pipeline.m_legacy_far_resident_bytes = bytes;
+        pipeline.m_legacy_far_vertex_arrays = vertex_arrays;
+    }
     // Shadow qualification mutates only the fixture transport it needs; callers
     // retain const renderer access for residency and selection observations.
     static FarWorldRefusal
