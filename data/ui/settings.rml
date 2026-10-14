@@ -72,6 +72,14 @@
                             <span class="toggle on" id="vsync_toggle"><span class="toggle-knob"></span></span>
                         </div>
 
+                        <div class="form-group settings-row-inline">
+                            <label>performance HUD</label>
+                            <button class="toggle on" id="perf_hud_toggle"><span class="toggle-knob"></span></button>
+                        </div>
+                        <button id="open_developer_console" class="btn">Open developer console</button>
+                        <button id="developer_help_btn" class="btn">Show resolved shortcuts</button>
+                        <pre id="developer_help" class="hidden" style="white-space: pre; max-height: 160px; overflow: auto;"></pre>
+
                         <!-- window mode stepper (drives hidden #setting_window_mode) -->
                         <div class="form-group settings-row-inline">
                             <label>window mode</label>

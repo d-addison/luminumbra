@@ -5,6 +5,23 @@ whole-frame profiling. Measurements compare a candidate revision with its base
 using the same scenario, preset, compiler, operating system, CPU/GPU class, driver,
 and runtime settings.
 
+## Interactive performance HUD
+
+The developer registry's `perf.hud` is available in Release and QA clients and
+shown by default. Ordinary Settings and the F1 hub edit the same persisted switch;
+`widget hide perf.hud` disables it too. Observed FPS and frame milliseconds use
+the unclamped wall interval between frames, so slow frames are not concealed by
+the gameplay delta clamp. UI submission is explicitly labeled CPU time, and
+renderer counters appear only when their service is available.
+
+The GPU profiler widget (F3 by default) reports selected timed passes, not a
+whole-frame GPU measurement. Hiding either widget removes its draw/formatting
+callbacks; existing GPU timer queries still run. An explicitly enabled shader
+watcher also continues while its panel is hidden. The console snapshots bounded
+logs only while displaying them. Capture overrides suppress developer widgets
+without changing saved preferences. See [Developer console](developer-console.md)
+for bindings, commands, registration and focus behavior.
+
 ## Local commands
 
 Use the `perf` preset for comparable measurements and `profile` when collecting a

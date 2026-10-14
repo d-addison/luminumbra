@@ -29,6 +29,10 @@ set(CLIENT_INTERNAL_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/audio/MiniaudioManager.cpp
 
     # Debug
+    ${CMAKE_CURRENT_LIST_DIR}/app/RegisterDeveloperWidgets.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/debug/widgets/DeveloperWidgetUi.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/debug/widgets/PassiveDeveloperWidgets.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/debug/widgets/RenderControlWidgets.cpp
     ${CMAKE_CURRENT_LIST_DIR}/debug/DeveloperWidgetRegistry.cpp
     ${CMAKE_CURRENT_LIST_DIR}/debug/DeveloperCommandRegistry.cpp
     ${CMAKE_CURRENT_LIST_DIR}/debug/DeveloperConsole.cpp

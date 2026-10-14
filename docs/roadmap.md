@@ -210,6 +210,14 @@ verification.
 - [Register configuration, content and authoritative state through engine interfaces](https://github.com/d-addison/luminumbra/issues/75)
 - [Establish shared UI focus, capture, cursor and navigation services](https://github.com/d-addison/luminumbra/issues/76)
 - [Provide typed commands, console help/history and bounded logs](https://github.com/d-addison/luminumbra/issues/77)
+
+  The v0.3.1 client delivers the developer-console subset of these two foundations:
+  centralized callback routing, explicit developer/RmlUi focus, held-key release
+  quarantine and cursor ownership; typed developer commands, generated help,
+  session history and bounded attached logs. These are client presentation services.
+  General engine-wide navigation/module APIs, scripting and arbitrary simulation
+  setters remain outside this delivered subset. See [Developer console](developer-console.md).
+
 - [Register inspection panels, truthful profiling and local capture bundles](https://github.com/d-addison/luminumbra/issues/78)
 - [Enforce game-free engine targets, headers, content and startup in CI](https://github.com/d-addison/luminumbra/issues/79)
 - [Provide optional channel-neutral field simulation services](https://github.com/d-addison/luminumbra/issues/104)

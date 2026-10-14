@@ -56,7 +56,7 @@ void DeveloperConsole::Initialize(DeveloperHost host, std::vector<WidgetDef> wid
                 if (frame.draw) {
                     WidgetDef help;
                     help.id = "console.help";
-                    frame.draw(help);
+                    frame.draw(help, {});
                 }
             };
         }
@@ -93,6 +93,8 @@ void DeveloperConsole::SetOpen(bool open) {
         m_focusInput = true;
     }
     m_open = open;
+    if (open)
+        RefreshAvailability();
 }
 bool DeveloperConsole::IsOpen() const {
     return m_open;
@@ -157,6 +159,7 @@ CommandResult DeveloperConsole::InvokeAction(const std::string& action) {
     return result;
 }
 void DeveloperConsole::PreferencesChanged() {
+    RefreshAvailability();
     m_dirty = true;
     if (!m_batch_preferences)
         SavePreferences();
@@ -169,6 +172,17 @@ bool DeveloperConsole::SavePreferences() {
     }
     m_dirty = false;
     return true;
+}
+void DeveloperConsole::RefreshAvailability() {
+    m_refreshInventory = true;
+    m_refreshHelp = true;
+}
+std::string DeveloperConsole::HelpText() const {
+    if (m_refreshHelp) {
+        m_cachedHelp = m_commands.Help() + WidgetHelp() + BindingHelp();
+        m_refreshHelp = false;
+    }
+    return m_cachedHelp;
 }
 bool DeveloperConsole::Dirty() const {
     return m_dirty;

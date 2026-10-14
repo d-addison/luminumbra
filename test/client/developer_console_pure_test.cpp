@@ -1,3 +1,4 @@
+#include "app/RegisterDeveloperWidgets.h"
 #include "app/UiInputRouter.h"
 #include "core/LogDispatcherSink.h"
 #include "debug/DeveloperConsole.h"
@@ -635,30 +636,45 @@ TEST(DeveloperLog, OversizedAndReservedProducerCapacityIsNeverRetained) {
     EXPECT_EQ(log.Truncations(), 1u);
 }
 
-TEST(DeveloperWidgets, LegacyPanelFlagsAreSharedByRowsCommandsShortcutsAndCloseButtons) {
-    auto definitions = BuiltinDeveloperWidgets();
-    const std::vector<std::string> ids{
-        "perf.gpu", "world.generation", "client.settings", "render.shaders"};
-    std::map<std::string, bool> flags;
-    for (auto& def : definitions)
-        if (std::find(ids.begin(), ids.end(), def.id) != ids.end()) {
-            const auto id = def.id;
-            def.available = [] {
-                return Availability{};
-            };
-            def.get_visible = [&, id] {
-                return flags[id];
-            };
-            def.set_visible = [&, id](bool value) {
-                flags[id] = value;
-            };
-        }
+TEST(DeveloperWidgets, CompleteAdaptersShareRowsCommandsShortcutsAndCloseButtons) {
+    DeveloperWidgetServices services;
+    std::map<std::string, int> draws, availability;
+    for (const auto& def : BuiltinDeveloperWidgets()) {
+        const auto id = def.id;
+        services[id] = {[&, id] {
+                            ++availability[id];
+                            return Availability{};
+                        },
+                        [&, id](DeveloperFrameAdapter&) {
+                            ++draws[id];
+                        }};
+    }
     DeveloperConsole console;
-    console.Initialize({}, std::move(definitions));
-    for (const auto& id : ids) {
-        EXPECT_TRUE(console.Submit("widget show " + id).success);
-        EXPECT_TRUE(flags[id]);
-        flags[id] = false; // legacy window close button
+    console.Initialize({}, RegisterDeveloperWidgets(services));
+    DeveloperFrameAdapter frame;
+    frame.draw = [&](const WidgetDef&, const DrawFn& contents) {
+        contents(frame);
+    };
+    ASSERT_EQ(console.Widgets().List().size(), 15u);
+    console.Widgets().DrawVisible(frame, Presentation::PassiveOverlay);
+    EXPECT_EQ(draws["perf.hud"], 1);
+    EXPECT_EQ(draws["runtime.time_indicator"], 1);
+    for (const auto& def : console.Widgets().List()) {
+        if (def.id == "console.help")
+            continue;
+        EXPECT_TRUE(def.draw);
+        EXPECT_TRUE(def.available || services.contains(def.id));
+        if (!def.default_visible) {
+            EXPECT_EQ(draws[def.id], 0);
+            EXPECT_EQ(availability[def.id], 0);
+        }
+    }
+    for (const auto& id : {"perf.gpu", "world.generation", "client.settings", "render.shaders"}) {
+        EXPECT_TRUE(console.Submit(std::string("widget show ") + id).success);
+        EXPECT_TRUE(console.Widgets().Visible(id));
+        console.Widgets().DrawVisible(frame, Presentation::ConsolePanel);
+        EXPECT_EQ(draws[id], 1);
+        EXPECT_TRUE(console.Widgets().SetVisible(id, false)); // shared window close operation
         EXPECT_FALSE(console.Widgets().Visible(id));
         const auto chord = console.Bindings().Get(id);
         ASSERT_TRUE(chord);
@@ -668,21 +684,99 @@ TEST(DeveloperWidgets, LegacyPanelFlagsAreSharedByRowsCommandsShortcutsAndCloseB
         router.SetOwnership(World());
         ASSERT_EQ(router.Key(chord->key, 1, false, true), KeyRoute::DeveloperShortcut);
         EXPECT_TRUE(console.InvokeAction(*shortcut).success);
-        EXPECT_TRUE(flags[id]);
+        EXPECT_TRUE(console.Widgets().Visible(id));
         EXPECT_TRUE(console.Widgets().HasInteractivePanel());
         auto ownership = World();
         ownership.interactive_panel = true;
         router.SetOwnership(ownership);
         EXPECT_EQ(router.Key(chord->key, 1, false, true, true), KeyRoute::DeveloperShortcut);
         EXPECT_TRUE(console.InvokeAction(*shortcut).success);
-        EXPECT_FALSE(flags[id]);
-        EXPECT_TRUE(console.Submit("widget show " + id).success);
-        EXPECT_TRUE(console.Submit("widget hide " + id).success);
-        EXPECT_FALSE(flags[id]);
+        EXPECT_FALSE(console.Widgets().Visible(id));
+        const int before = draws[id], queries = availability[id];
+        console.Widgets().DrawVisible(frame, Presentation::ConsolePanel);
+        EXPECT_EQ(draws[id], before);
+        EXPECT_EQ(availability[id], queries);
     }
-    const auto result = console.InvokeAction("ui.data_stream");
-    EXPECT_TRUE(result.success);
-    EXPECT_NE(result.message.find("presentation unavailable"), std::string::npos);
+}
+
+TEST(DeveloperWidgets, EveryRegisteredWidgetCanShowHideToggleRebindUnbindAndReset) {
+    DeveloperWidgetServices services;
+    for (const auto& def : BuiltinDeveloperWidgets())
+        services[def.id] = {{}, [](DeveloperFrameAdapter&) {
+                            }};
+    DeveloperConsole console;
+    console.Initialize({}, RegisterDeveloperWidgets(services));
+    int key = 65;
+    for (const auto& def : console.Widgets().List()) {
+        EXPECT_TRUE(console.Submit("widget show " + def.id).success);
+        EXPECT_TRUE(console.Widgets().Visible(def.id));
+        EXPECT_TRUE(console.Submit("widget hide " + def.id).success);
+        EXPECT_FALSE(console.Widgets().Visible(def.id));
+        std::string error;
+        const KeyChord chord{key++, 2};
+        EXPECT_TRUE(console.Widgets().Rebind(def.id, chord, error)) << error;
+        const auto matched = console.Bindings().Match(chord, 1, Gameplay);
+        ASSERT_TRUE(matched);
+        EXPECT_EQ(*matched, def.id);
+        EXPECT_TRUE(console.InvokeAction(*matched).success);
+        EXPECT_TRUE(console.Widgets().Visible(def.id));
+        EXPECT_TRUE(console.Submit("widget toggle " + def.id).success);
+        EXPECT_FALSE(console.Widgets().Visible(def.id));
+        EXPECT_TRUE(console.Submit("unbind " + def.id).success);
+        EXPECT_FALSE(console.Bindings().Get(def.id));
+    }
+    console.Widgets().RestoreDefaults();
+    for (const auto& def : console.Widgets().List()) {
+        EXPECT_EQ(console.Widgets().Visible(def.id), def.default_visible);
+        EXPECT_EQ(console.Bindings().Get(def.id), def.default_binding);
+    }
+}
+
+TEST(DeveloperWidgets, MissingServicesStayListedAndResolveCurrentOwners) {
+    int current = 1, observed = 0;
+    DeveloperWidgetServices services;
+    services["player.state"] = {[&] { return Availability{current != 0, "No player"}; },
+                                [&](DeveloperFrameAdapter&) {
+                                    observed = current;
+                                }};
+    DeveloperConsole console;
+    console.Initialize({}, RegisterDeveloperWidgets(services));
+    EXPECT_EQ(console.Widgets().List().size(), 15u);
+    const auto* missing = console.Widgets().Find("perf.gpu");
+    ASSERT_NE(missing, nullptr);
+    EXPECT_FALSE(missing->available().available);
+    EXPECT_FALSE(missing->available().reason.empty());
+    EXPECT_TRUE(console.InvokeAction("perf.gpu").success);
+    EXPECT_FALSE(console.Widgets().HasInteractivePanel());
+    DeveloperFrameAdapter frame;
+    frame.draw = [&](const WidgetDef&, const DrawFn& contents) {
+        contents(frame);
+    };
+    console.Widgets().SetVisible("player.state", true);
+    console.Widgets().DrawVisible(frame, Presentation::ConsolePanel);
+    EXPECT_EQ(observed, 1);
+    current = 0;
+    console.Widgets().DrawVisible(frame, Presentation::ConsolePanel);
+    EXPECT_EQ(observed, 1);
+    current = 2;
+    console.Widgets().DrawVisible(frame, Presentation::ConsolePanel);
+    EXPECT_EQ(observed, 2);
+}
+
+TEST(UiInputRouter, ExternalDebuggerBlocksGameplayAndRetainsDeveloperEscapeOrdering) {
+    UiInputRouter router;
+    auto ownership = World();
+    ownership.rml_debugger = ownership.rml_interaction = true;
+    router.SetOwnership(ownership);
+    EXPECT_EQ(router.Owner(), InputOwner::RmlUi);
+    EXPECT_FALSE(router.GameplayAllowed());
+    EXPECT_FALSE(router.GameplayMouseAllowed());
+    EXPECT_FALSE(router.CursorCaptured());
+    EXPECT_EQ(router.Key(256, 1, false, false), KeyRoute::DeveloperEscape);
+    EXPECT_EQ(router.Key(290, 1, true, false), KeyRoute::ConsoleToggle);
+    ownership.console_open = true;
+    router.SetOwnership(ownership);
+    EXPECT_EQ(router.Owner(), InputOwner::Developer);
 }
 
 TEST(DeveloperBindings, CompleteDefaultsValidateAtStartupAndResetWithGameplayWinning) {

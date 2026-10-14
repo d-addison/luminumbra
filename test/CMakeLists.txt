@@ -1612,6 +1612,7 @@ find_package(Threads REQUIRED)
 # Developer foundations compile directly, without the client or graphics libraries.
 add_executable(developer_console_pure_test
     client/developer_console_pure_test.cpp
+    ../src/luminumbra_client/app/RegisterDeveloperWidgets.cpp
     ../src/luminumbra_client/debug/DeveloperWidgetRegistry.cpp
     ../src/luminumbra_client/debug/DeveloperCommandRegistry.cpp
     ../src/luminumbra_client/debug/DeveloperConsole.cpp
@@ -1622,6 +1623,30 @@ target_include_directories(developer_console_pure_test PRIVATE
     ../src/luminumbra_client ../src/luminumbra_common)
 target_link_libraries(developer_console_pure_test PRIVATE gtest_main Threads::Threads spdlog::spdlog)
 luminumbra_configure_first_party_target(developer_console_pure_test)
+
+# CPU-only ImGui acceptance compiles the pinned core directly, without GL backends
+# or the complete client. The ordinary imgui target also links graphics libraries.
+FetchContent_GetProperties(imgui_src SOURCE_DIR _developer_imgui_source)
+add_executable(developer_console_imgui_test
+    client/developer_console_imgui_test.cpp
+    ../src/luminumbra_client/app/RegisterDeveloperWidgets.cpp
+    ../src/luminumbra_client/debug/DeveloperWidgetRegistry.cpp
+    ../src/luminumbra_client/debug/DeveloperCommandRegistry.cpp
+    ../src/luminumbra_client/debug/DeveloperConsole.cpp
+    ../src/luminumbra_client/debug/DeveloperConsoleUi.cpp
+    ../src/luminumbra_client/debug/DeveloperLogSink.cpp
+    ../src/luminumbra_client/debug/widgets/DeveloperWidgetUi.cpp
+    ../src/luminumbra_client/debug/widgets/PassiveDeveloperWidgets.cpp
+    ../src/luminumbra_client/debug/widgets/RenderControlWidgets.cpp
+    "${_developer_imgui_source}/imgui.cpp"
+    "${_developer_imgui_source}/imgui_draw.cpp"
+    "${_developer_imgui_source}/imgui_tables.cpp"
+    "${_developer_imgui_source}/imgui_widgets.cpp"
+)
+target_include_directories(developer_console_imgui_test PRIVATE ../src/luminumbra_client)
+target_include_directories(developer_console_imgui_test SYSTEM PRIVATE "${_developer_imgui_source}")
+target_link_libraries(developer_console_imgui_test PRIVATE gtest_main Threads::Threads)
+luminumbra_configure_first_party_target(developer_console_imgui_test)
 
 # User-overlay persistence uses common services only; no client or GL linkage.
 add_executable(developer_settings_test common/developer_settings_test.cpp)
@@ -1858,6 +1883,7 @@ set(LUMINUMBRA_GTEST_TARGETS
     crash_report_test
     bounded_console_sink_test
     developer_console_pure_test
+    developer_console_imgui_test
     developer_settings_test
     audio_volume_readback_test
     audio_disabled_test

@@ -6,10 +6,17 @@ namespace Luminumbra::Client::Debug {
 void DeveloperConsole::Draw(DeveloperFrameAdapter& frame) {
     m_widgets.DrawVisible(frame, Presentation::PassiveOverlay);
     if (m_open) {
+        if (m_refreshInventory) {
+            for (const auto& def : m_widgets.List())
+                m_inventoryAvailability[def.id] = def.available ? def.available() : Availability{};
+            m_refreshInventory = false;
+        }
         ImGui::SetNextWindowSize(ImVec2(820, 650), ImGuiCond_FirstUseEver);
         if (ImGui::Begin("Developer console", &m_open)) {
             if (ImGui::IsWindowFocused())
                 m_shellSequence = m_widgets.NextInteractionSequence();
+            if (ImGui::SmallButton("Refresh services"))
+                RefreshAvailability();
             if (m_dirty && ImGui::Button("Retry saving preferences"))
                 SavePreferences();
             if (IsCapturing())
@@ -22,7 +29,7 @@ void DeveloperConsole::Draw(DeveloperFrameAdapter& frame) {
                         (def.id + def.title + def.category).find(search) == std::string::npos)
                         continue;
                     ImGui::PushID(def.id.c_str());
-                    const auto available = def.available ? def.available() : Availability{};
+                    const auto& available = m_inventoryAvailability.at(def.id);
                     ImGui::Text("%s / %s — %s (%s)",
                                 def.category.c_str(),
                                 def.title.c_str(),
@@ -114,20 +121,20 @@ void DeveloperConsole::Draw(DeveloperFrameAdapter& frame) {
         ImGui::End();
     }
     DeveloperFrameAdapter panels = frame;
-    panels.draw = [this, draw = frame.draw](const WidgetDef& def) {
+    panels.draw = [this, draw = frame.draw](const WidgetDef& def, const DrawFn& contents) {
         if (def.id == "console.help") {
             bool visible = true;
             if (ImGui::Begin("Developer help", &visible)) {
                 if (ImGui::IsWindowFocused())
                     m_widgets.FocusInteraction(def.id);
-                const auto help = m_commands.Help() + BindingHelp();
+                const auto help = HelpText();
                 ImGui::TextUnformatted(help.c_str());
             }
             ImGui::End();
             if (!visible)
                 m_widgets.SetVisible(def.id, false);
         } else if (draw)
-            draw(def);
+            draw(def, contents);
     };
     m_widgets.DrawVisible(panels, Presentation::ConsolePanel);
 }

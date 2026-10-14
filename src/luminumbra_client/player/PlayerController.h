@@ -3,7 +3,6 @@
 #define GLFW_INCLUDE_NONE
 #include "InputActions.h"
 #include "SaveAnchor.h"
-#include "imgui.h"
 #include <GLFW/glfw3.h>
 #include <array>
 #include <cstddef>
@@ -81,7 +80,7 @@ public:
         UpdateNoclip(deltaTime, wishDir, false);
     }
     void ProcessMouseScroll(double yoffset);
-    void RenderDebugUI();
+    void DrawDebugContents();
 
     // Resolve all key bindings from SystemConfig user.controls.* (action name -> key),
     // falling back to the compiled defaults (kInputActionDefs). Call after construction

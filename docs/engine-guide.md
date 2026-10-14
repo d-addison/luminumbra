@@ -390,6 +390,22 @@ Legacy when Ladder cannot bind, with requested/effective mode and refusals in
 the debug HUD and diagnostics. See [Far world horizon v2](far-world-horizon-v2.md)
 for the config example and qualification gates.
 
+### Developer console
+
+The ordinary and QA clients provide the same developer console in Release and
+other configurations. F1 opens its searchable widget hub by default; ordinary
+Settings provides console access and the default-on performance HUD switch.
+Visibility and resolved shortcuts belong to the widget registry, persisted under
+`user.developer` without changing simulation hashes. Generated help includes
+current developer and gameplay bindings. Interactive panels share input/cursor
+ownership; passive HUDs do not capture gameplay. Opening the console does not
+pause simulation.
+
+See [Developer console](developer-console.md) for the complete inventory,
+registration API, typed commands, focus rules, save retries and capture overrides.
+The generation inspector edits an independent preview; only its explicit
+**Apply & Regenerate** button can apply changes to an ordinary local world.
+
 ### Environment controls
 
 These are the `LUMIN_*` controls read by the current client/render source. Set

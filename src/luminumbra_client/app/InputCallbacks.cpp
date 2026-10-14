@@ -46,7 +46,7 @@ void RefreshInputOwnership(GLFWwindow* window) {
     auto& app = *b.app;
     if (!b.router)
         return;
-    const bool ui_enabled = app.overlay.imgui_enabled;
+    const bool ui_enabled = DeveloperUiAllowed(app);
     const bool imgui = ui_enabled && ImGui::GetCurrentContext();
     const auto* ui = b.uiManager->get();
     UiInputOwnership ownership;
@@ -56,13 +56,11 @@ void RefreshInputOwnership(GLFWwindow* window) {
         app.hud.rebindCaptureAction >= 0 ||
         (ui_enabled && b.developerConsole && b.developerConsole->IsCapturing());
     ownership.console_open = ui_enabled && b.developerConsole && b.developerConsole->IsOpen();
-    ownership.interactive_panel =
-        ui_enabled &&
-        ((b.developerConsole && b.developerConsole->Widgets().HasInteractivePanel()) ||
-         app.hud.show_settings || app.overlay.show_shader_panel ||
-         app.overlay.show_worldgen_viewer || app.overlay.show_gpu_profiler);
-    ownership.rml_interaction =
-        app.hud.paused || app.hud.codexOpen || (ui && ui->HasInputInteraction());
+    ownership.interactive_panel = ui_enabled && b.developerConsole &&
+                                  b.developerConsole->Widgets().HasInteractivePanel("ui.debugger");
+    ownership.rml_debugger = ui_enabled && ui && ui->DeveloperDebuggerVisible();
+    ownership.rml_interaction = ownership.rml_debugger || app.hud.paused || app.hud.codexOpen ||
+                                (ui && ui->HasInputInteraction());
     ownership.rml_text_input = ui && ui->HasTextInputFocus();
     ownership.imgui_keyboard = imgui && ImGui::GetIO().WantCaptureKeyboard;
     ownership.imgui_mouse = imgui && ImGui::GetIO().WantCaptureMouse;
@@ -123,20 +121,20 @@ void key_callback(GLFWwindow* window, int key, int scancode, int action, int mod
     if (app.overlay.imgui_enabled && ImGui::GetCurrentContext())
         ImGui_ImplGlfw_KeyCallback(window, key, scancode, action, mods);
     RefreshInputOwnership(window);
-    auto* console = app.overlay.imgui_enabled ? bindings.developerConsole : nullptr;
+    auto* console = DeveloperUiAllowed(app) ? bindings.developerConsole : nullptr;
     const bool photo = playerController && playerController->photo_mode_active();
     const unsigned scope = photo ? Debug::Photo : Debug::Gameplay;
     const auto shortcut =
         console ? console->Bindings().Match({key, mods & 15}, action, scope) : std::nullopt;
     const bool consoleToggle =
         console && console->Bindings().Get("console.toggle") == Debug::KeyChord{key, mods & 15};
-    const bool legacyPanelShortcut =
-        shortcut && (*shortcut == "perf.gpu" || *shortcut == "world.generation" ||
-                     *shortcut == "client.settings" || *shortcut == "render.shaders");
+    const auto* shortcutWidget = shortcut ? console->Widgets().Find(*shortcut) : nullptr;
+    const bool panelShortcut =
+        shortcutWidget && shortcutWidget->focus_policy == Debug::FocusPolicy::Interactive;
     const auto route =
-        bindings.router ? bindings.router->Key(
-                              key, action, consoleToggle, shortcut.has_value(), legacyPanelShortcut)
-                        : KeyRoute::Gameplay;
+        bindings.router
+            ? bindings.router->Key(key, action, consoleToggle, shortcut.has_value(), panelShortcut)
+            : KeyRoute::Gameplay;
     if (action == GLFW_RELEASE) {
         if (uiManager)
             uiManager->KeyCallback(window, key, scancode, action, mods);
@@ -158,15 +156,6 @@ void key_callback(GLFWwindow* window, int key, int scancode, int action, int mod
             RefreshInputOwnership(window);
             return;
         }
-        if (app.hud.show_settings) {
-            app.hud.show_settings = false;
-            app.hud.rebindCaptureAction = -1;
-        } else if (app.overlay.show_shader_panel)
-            app.overlay.show_shader_panel = false;
-        else if (app.overlay.show_worldgen_viewer)
-            app.overlay.show_worldgen_viewer = false;
-        else if (app.overlay.show_gpu_profiler)
-            app.overlay.show_gpu_profiler = false;
         RefreshInputOwnership(window);
         return;
     }
@@ -239,90 +228,31 @@ void key_callback(GLFWwindow* window, int key, int scancode, int action, int mod
                 systemConfig.user().keybinds[name] = key;
                 if (playerController)
                     playerController->ApplyKeyBindings(systemConfig);
+                if (console)
+                    console->RefreshAvailability();
+                if (uiManager)
+                    uiManager->RefreshDeveloperSettings();
             }
         }
         app.hud.rebindCaptureAction = -1;
         RefreshInputOwnership(window);
         return;
     }
-    // Escape: toggle the in-game pause overlay (only in a world, and not while the  panel is up).
-    if (key == GLFW_KEY_ESCAPE && action == GLFW_PRESS && playerController &&
-        !app.hud.show_settings) {
+    // Developer Escape was routed above; gameplay Escape toggles the pause overlay.
+    if (key == GLFW_KEY_ESCAPE && action == GLFW_PRESS && playerController) {
         SetGamePaused(window, !app.hud.paused);
         return;
     }
-    // Legacy panel flags remain authoritative. Console rows bridge to those same flags;
-    // this dispatch also supports hosts without a console.
-    if (!console) {
-        // toggle the live per-pass GPU profiler overlay.
-        if (key == GLFW_KEY_F3 && action == GLFW_PRESS) {
-            app.overlay.show_gpu_profiler = !app.overlay.show_gpu_profiler;
-            return;
-        }
-        // crawl — hot-reload every live shader from res/shaders/ next
-        // frame (rollback-safe per shader; a broken edit keeps the prior program).
-        if (key == GLFW_KEY_F5 && action == GLFW_PRESS) {
-            app.overlay.request_shader_reload = true;
-            return;
-        }
-        // walk — the dev shader panel (per-shader reload, auto-reload
-        // watcher toggle, live uniform editing).
-        if (key == GLFW_KEY_F10 && action == GLFW_PRESS) {
-            app.overlay.show_shader_panel = !app.overlay.show_shader_panel;
-            RefreshInputOwnership(window);
-            return;
-        }
-        // cycle the render-only G-buffer debug view (off -> albedo -> normal -> depth ->
-        // material -> position -> off). Diagnostic only; never affects sim/world_hash. The main
-        // loop pushes app.overlay.debug_view_mode into the pipeline each frame.
-        if (key == GLFW_KEY_F6 && action == GLFW_PRESS) {
-            app.overlay.debug_view_mode = (app.overlay.debug_view_mode + 1) % 6; // 0..5
-            return;
-        }
-        // toggle the settings menu and free/restore the cursor so the panel is usable.
-        if (key == GLFW_KEY_F8 && action == GLFW_PRESS) {
-            app.hud.show_settings = !app.hud.show_settings;
-            app.hud.rebindCaptureAction = -1;
-            RefreshInputOwnership(window);
-            return;
-        }
-        // Engine time scale (host_timescale-style): [ slower, ] faster, \ reset to 1x.
-        if (action == GLFW_PRESS && UiInputRouter::TimeShortcutAllowed(photo, key) &&
-            (key == GLFW_KEY_LEFT_BRACKET || key == GLFW_KEY_RIGHT_BRACKET ||
-             key == GLFW_KEY_BACKSLASH)) {
-            if (key == GLFW_KEY_LEFT_BRACKET)
-                app.capture.timeScale = (app.capture.timeScale <= 0.125f)
-                                            ? 0.0f
-                                            : app.capture.timeScale * 0.5f; //...down to pause
-            else if (key == GLFW_KEY_RIGHT_BRACKET)
-                app.capture.timeScale = (app.capture.timeScale < 0.125f)
-                                            ? 0.125f
-                                            : std::min(app.capture.timeScale * 2.0f, 16.0f);
-            else
-                app.capture.timeScale = 1.0f; // reset
-            LUMINUMBRA_CORE_INFO("Engine time scale: {:.3f}x", app.capture.timeScale);
-            return;
-        }
-        if (key == GLFW_KEY_F7 && action == GLFW_PRESS) {
-            app.overlay.show_worldgen_viewer = !app.overlay.show_worldgen_viewer;
-            RefreshInputOwnership(window);
-            return;
-        }
-        if (key == GLFW_KEY_F9 && action == GLFW_PRESS) {
-            app.overlay.wireframe_mode = !app.overlay.wireframe_mode;
-            return;
-        }
-    }
-
-    if (playerController) {
+    if (playerController)
         playerController->ProcessKeyInput(key, action);
-    }
 }
 
 void SetGameState(GLFWwindow* window, GameStateManager& gameStateManager, GameState newState) {
     InputCallbackBindings& bindings = CallbackBindings(window);
     gameStateManager.SetState(newState);
     bindings.in_world = newState == GameState::IN_GAME;
+    if (bindings.developerConsole)
+        bindings.developerConsole->RefreshAvailability();
     RefreshInputOwnership(window);
 }
 

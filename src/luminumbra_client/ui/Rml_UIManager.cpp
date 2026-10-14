@@ -11,6 +11,7 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <imgui.h>
 #include <nlohmann/json.hpp>
 #include <string>
 #include <utility>
@@ -337,6 +338,7 @@ void Rml_UIManager::Init(GLFWwindow* window, IAudioManager* audioManager) {
 }
 
 void Rml_UIManager::Shutdown() {
+    m_developerDebuggerVisible = false;
     m_savedWorldScan.Cancel();
     m_worldScanPending = false;
     if (m_context) {
@@ -1198,6 +1200,13 @@ void Rml_UIManager::PopulateSettingsForm(Rml::ElementDocument* document) {
         return;
     const SettingsBridge& b = m_settingsBridge;
 
+    if (auto* toggle = document->GetElementById("perf_hud_toggle"))
+        toggle->SetClass("on", !b.GetPerfHud || b.GetPerfHud());
+    if (auto* help = document->GetElementById("developer_help")) {
+        if (b.GetDeveloperHelp)
+            help->SetInnerRML(Rml::StringUtilities::EncodeRml(b.GetDeveloperHelp()));
+    }
+
     // Video
     if (b.GetResolution) {
         SetControlValue(document->GetElementById("setting_resolution"), b.GetResolution());
@@ -1415,6 +1424,32 @@ void Rml_UIManager::BindSettingsListeners(Rml::ElementDocument* document) {
             m_settingsBridge.Save();
     };
 
+    if (auto* toggle = document->GetElementById("perf_hud_toggle")) {
+        toggle->AddEventListener(
+            "click", new LambdaEventListener([this, document](Rml::Event&) {
+                const bool visible = !m_settingsBridge.GetPerfHud || m_settingsBridge.GetPerfHud();
+                if (m_settingsBridge.SetPerfHud)
+                    m_settingsBridge.SetPerfHud(
+                        !visible); // Registry performs immediate persistence.
+                if (auto* control = document->GetElementById("perf_hud_toggle"))
+                    control->SetClass("on",
+                                      m_settingsBridge.GetPerfHud && m_settingsBridge.GetPerfHud());
+            }));
+    }
+    if (auto* open = document->GetElementById("open_developer_console")) {
+        open->AddEventListener("click", new LambdaEventListener([this](Rml::Event&) {
+                                   if (m_settingsBridge.OpenDeveloperConsole)
+                                       m_settingsBridge.OpenDeveloperConsole();
+                               }));
+    }
+
+    if (auto* help = document->GetElementById("developer_help_btn")) {
+        help->AddEventListener("click", new LambdaEventListener([document](Rml::Event&) {
+                                   if (auto* text = document->GetElementById("developer_help"))
+                                       text->SetClass("hidden", !text->IsClassSet("hidden"));
+                               }));
+    }
+
     // vsync toggle: flip.on, mirror to hidden #setting_vsync, apply + save.
     if (auto* toggle = document->GetElementById("vsync_toggle")) {
         toggle->AddEventListener(
@@ -1492,6 +1527,40 @@ void Rml_UIManager::BindSettingsListeners(Rml::ElementDocument* document) {
                 if (m_settingsBridge.BeginRebind)
                     m_settingsBridge.BeginRebind(action);
             }));
+    }
+}
+
+void Rml_UIManager::SetDeveloperDebuggerVisible(bool visible) {
+    visible = visible && m_context;
+    if (m_developerDebuggerVisible == visible)
+        return;
+    m_developerDebuggerVisible = visible;
+    Rml::Debugger::SetVisible(visible);
+}
+bool Rml_UIManager::DeveloperDebuggerVisible() const {
+    return m_developerDebuggerVisible;
+}
+void Rml_UIManager::DrawDeveloperDebuggerContents() {
+    ImGui::TextWrapped("The RmlUi inspector renders in its own context. Close the console and "
+                       "other developer panels to interact with it. Escape closes this adapter.");
+}
+void Rml_UIManager::RefreshDeveloperSettings() {
+    if (!m_context)
+        return;
+    for (int i = 0; i < m_context->GetNumDocuments(); ++i) {
+        auto* document = m_context->GetDocument(i);
+        if (!document || document->GetId() != "settings")
+            continue;
+        if (auto* toggle = document->GetElementById("perf_hud_toggle")) {
+            const bool visible = !m_settingsBridge.GetPerfHud || m_settingsBridge.GetPerfHud();
+            toggle->SetClass("on", visible);
+        }
+        if (auto* help = document->GetElementById("developer_help")) {
+            if (m_settingsBridge.GetDeveloperHelp) {
+                const auto text = m_settingsBridge.GetDeveloperHelp();
+                help->SetInnerRML(Rml::StringUtilities::EncodeRml(text));
+            }
+        }
     }
 }
 

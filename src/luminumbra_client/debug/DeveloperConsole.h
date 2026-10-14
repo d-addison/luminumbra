@@ -29,7 +29,7 @@ struct DeveloperHost {
 };
 // Only integration translation units complete the adapter. Pure tests may use an empty adapter.
 struct DeveloperFrameAdapter {
-    std::function<void(const WidgetDef&)> draw;
+    std::function<void(const WidgetDef&, const DrawFn&)> draw;
 };
 class DeveloperConsole {
 public:
@@ -51,6 +51,8 @@ public:
     void PreferencesChanged();
     bool SavePreferences();
     bool Dirty() const;
+    std::string HelpText() const;
+    void RefreshAvailability();
     // Call after the UI override gate. Hidden shell does not snapshot or format logs.
     void Draw(DeveloperFrameAdapter& frame);
     void Shutdown();
@@ -69,6 +71,10 @@ private:
     std::uint64_t m_shellSequence = 0;
     bool m_focusInput = false;
     bool m_open = false;
+    bool m_refreshInventory = true;
+    std::map<std::string, Availability> m_inventoryAvailability;
+    mutable bool m_refreshHelp = true;
+    mutable std::string m_cachedHelp;
     bool m_dirty = false;
     bool m_batch_preferences = false;
     bool m_initialized = false;

@@ -26,6 +26,7 @@ struct UiInputOwnership {
     bool console_open = false;
     bool interactive_panel = false;
     bool rml_interaction = false;
+    bool rml_debugger = false;
     bool rml_text_input = false;
     bool imgui_keyboard = false;
     bool imgui_mouse = false;
@@ -40,7 +41,7 @@ public:
                  int action,
                  bool console_toggle,
                  bool developer_shortcut,
-                 bool legacy_panel_shortcut = false);
+                 bool panel_shortcut = false);
     InputOwner Character(unsigned int codepoint) const;
     bool GameplayAllowed() const;
     bool GameplayKeyAllowed(int key) const;

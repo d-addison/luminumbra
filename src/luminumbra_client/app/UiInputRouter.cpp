@@ -24,7 +24,7 @@ InputOwner UiInputRouter::Owner() const {
     return InputOwner::Gameplay;
 }
 KeyRoute UiInputRouter::Key(
-    int key, int action, bool console_toggle, bool developer_shortcut, bool legacy_panel_shortcut) {
+    int key, int action, bool console_toggle, bool developer_shortcut, bool panel_shortcut) {
     m_suppressCharacter = false;
     if (action == 0) {
         m_held.erase(key);
@@ -51,10 +51,10 @@ KeyRoute UiInputRouter::Key(
             m_consumedToggleKeys.insert(key);
         return action == 1 ? KeyRoute::ConsoleToggle : KeyRoute::Ignore;
     }
-    if (action == 1 && key == 256 && Owner() == InputOwner::Developer)
+    if (action == 1 && key == 256 && (Owner() == InputOwner::Developer || m_ownership.rml_debugger))
         return KeyRoute::DeveloperEscape;
     // Existing panel function keys can also close their panel while it owns input.
-    if (action == 1 && developer_shortcut && legacy_panel_shortcut && key >= 290 && key <= 314 &&
+    if (action == 1 && developer_shortcut && panel_shortcut && key >= 290 && key <= 314 &&
         Owner() == InputOwner::Developer)
         return KeyRoute::DeveloperShortcut;
     if (Owner() == InputOwner::Developer)

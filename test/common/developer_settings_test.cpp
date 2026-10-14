@@ -46,6 +46,25 @@ TEST_F(DeveloperPersistence, OldSettingsDefaultsAndFalseRoundTrip) {
     EXPECT_EQ(loaded.user().developer.bindings.at("console.toggle").mods, 2);
     EXPECT_EQ(loaded.user().developer.bindings.at("perf.gpu").key, -1);
 }
+TEST_F(DeveloperPersistence, PerfSwitchRoundTripDoesNotChangeOtherSettingsOrHash) {
+    auto cfg = SystemConfig::FromJsonString(
+        R"({"sim":{"plant_growth":{"enabled":true}},"user":{"video":{"fov":80},"audio":{"master":0.4},"controls":{"Jump":90}}})");
+    const auto hash = cfg.ComputeConfigSubHash();
+    const auto path = directory / "perf-switch.json";
+    EXPECT_TRUE(cfg.user().developer.PerfHudVisible());
+    for (const bool visible : {false, true, false}) {
+        cfg.user().developer.widgets["perf.hud"] = visible;
+        ASSERT_TRUE(cfg.SaveUserOverlay(path.string()));
+        const auto loaded = SystemConfig::LoadFromFile(path.string());
+        cfg.user().developer = loaded.user().developer;
+        EXPECT_EQ(cfg.user().developer.PerfHudVisible(), visible);
+        EXPECT_EQ(cfg.ComputeConfigSubHash(), hash);
+        EXPECT_FLOAT_EQ(cfg.user().fov, 80);
+        EXPECT_FLOAT_EQ(cfg.user().audio_master, 0.4f);
+        EXPECT_EQ(cfg.keybind("Jump", 32), 90);
+    }
+}
+
 TEST_F(DeveloperPersistence, IndependentMalformedRecordsAndBoundedUnknownRecords) {
     auto cfg = SystemConfig::FromJsonString(
         R"({"user":{"developer":{"schema_version":1,"widgets":{"perf.hud":{"visible":false},"bad":{"visible":1},"future.widget":{"visible":true}},"bindings":{"console.toggle":{"key":290,"mods":0},"bad":{"key":"F1","mods":0},"modifier":{"key":340,"mods":1},"oversized":{"key":18446744073709551615,"mods":0},"invalid.mods":{"key":300,"mods":16},"future.action":{"key":302,"mods":2}}}}})");

@@ -95,9 +95,8 @@ struct WidgetDef {
     FocusPolicy focus_policy = FocusPolicy::Interactive;
     AvailabilityFn available = {};
     DrawFn draw = {};
-    // Temporary visibility bridge for panels still drawn by their existing host.
-    std::function<bool()> get_visible = {};
-    std::function<void(bool)> set_visible = {};
+    // External presentations (such as the RmlUi debugger) mirror registry mutations.
+    std::function<void(bool)> visibility_changed = {};
 };
 
 std::vector<WidgetDef> BuiltinDeveloperWidgets();
@@ -116,7 +115,7 @@ public:
     bool Rebind(const std::string& id, std::optional<KeyChord> chord, std::string& error);
     void RestoreDefaults();
     void DrawVisible(DeveloperFrameAdapter& frame, Presentation presentation);
-    bool HasInteractivePanel() const;
+    bool HasInteractivePanel(const std::string& except = {}) const;
     bool CloseTopInteraction();
     void FocusInteraction(const std::string& id);
     std::uint64_t NextInteractionSequence();

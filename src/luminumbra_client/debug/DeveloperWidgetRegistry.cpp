@@ -252,7 +252,7 @@ std::vector<WidgetDef> BuiltinDeveloperWidgets() {
                       id,
                       passive ? Presentation::PassiveOverlay : Presentation::ConsolePanel,
                       passive ? FocusPolicy::Passive : FocusPolicy::Interactive,
-                      [] { return Availability{false, "Presentation adapter pending"}; },
+                      [] { return Availability{false, "Service unavailable"}; },
                       {}};
         result.push_back(std::move(def));
     };
@@ -295,6 +295,9 @@ void DeveloperWidgetRegistry::Seal() {
 }
 void DeveloperWidgetRegistry::Shutdown() {
     changed = {};
+    for (const auto& def : m_definitions)
+        if (Visible(def.id) && def.visibility_changed)
+            def.visibility_changed(false);
     m_definitions.clear();
     m_interactions.clear();
     m_visible.clear();
@@ -310,9 +313,6 @@ const WidgetDef* DeveloperWidgetRegistry::Find(const std::string& id) const {
     return nullptr;
 }
 bool DeveloperWidgetRegistry::Visible(const std::string& id) const {
-    const auto* def = Find(id);
-    if (def && def->get_visible)
-        return def->get_visible();
     const auto it = m_visible.find(id);
     return it != m_visible.end() && it->second;
 }
@@ -326,8 +326,8 @@ bool DeveloperWidgetRegistry::SetVisible(const std::string& id, bool visible) {
     }
     if (Visible(id) != visible) {
         m_visible[id] = visible;
-        if (def->set_visible)
-            def->set_visible(visible);
+        if (def->visibility_changed)
+            def->visibility_changed(visible);
         if (visible)
             FocusInteraction(id);
         else
@@ -382,9 +382,9 @@ void DeveloperWidgetRegistry::DrawVisible(DeveloperFrameAdapter& frame, Presenta
         SetVisible(id, visible);
     m_bindings.EndDraw(true);
 }
-bool DeveloperWidgetRegistry::HasInteractivePanel() const {
+bool DeveloperWidgetRegistry::HasInteractivePanel(const std::string& except) const {
     for (const auto& def : m_definitions)
-        if (Visible(def.id) && def.focus_policy == FocusPolicy::Interactive &&
+        if (def.id != except && Visible(def.id) && def.focus_policy == FocusPolicy::Interactive &&
             (!def.available || def.available().available))
             return true;
     return false;
