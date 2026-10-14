@@ -44,10 +44,14 @@ ctest --preset release -L manual \
 ## Continuous integration
 
 The Linux/GCC, Diligent RHI, and ASan lanes use bounded ccache (500M each), as do
-UCRT64 and MSVC (1G each), with saves only on devel/main pushes and qualification
-captures bypassing the cache. One complete cache generation is about 3.5 GB;
-per-SHA saves accumulate until GitHub's least-recently-used eviction at the
-repository cache quota. PR runs restore from the newest matching prefix.
+UCRT64 and MSVC (1G each); qualification captures in these lanes bypass the cache.
+Performance lanes are bounded at 250M each. A complete compiler-cache generation
+is bounded at about 4 GB, including preview-frame and paired-server caches.
+Immutable save keys include the commit SHA; restores prefer the matching CMake
+configuration prefix where available, then the lane prefix. Cleanup runs before
+saving, and cache-save failures cannot fail a job. Per-SHA entries accumulate;
+GitHub evicts older entries within the repository's 10 GB cache cap. These lanes
+use standard runners and the existing cache actions, with no paid cache service.
 All Actions caches, including performance, clang-tidy results, and MSYS2 packages,
 are saved only on `push` events to `refs/heads/main` or `refs/heads/devel`; PRs,
 scheduled runs, and manual dispatches never save caches. When a PR closes,
@@ -64,11 +68,17 @@ attribution diagnostic keeps its existing job routing.
 Marking a pull request ready for review triggers CI on its current head, running
 the full required set. PR workflows listen for `opened`, `synchronize`, `reopened`,
 and `ready_for_review`; existing branch and path filters still apply. Heavy
-required checks report skipped on drafts. The merge gate requires actual
-`SUCCESS` for every required check on the exact head, so a draft cannot land until
-it is marked ready and the full required set passes. Windows/UCRT64 keeps its
-existing branch/manual routing, and the paired server comparison still runs only
-for main-bound ready PRs or eligible main/devel pushes.
+required checks report skipped on drafts, and GitHub can treat skipped checks as
+successful. GitHub does not allow draft PRs to merge. Marking the PR ready reruns
+every required job on the same head; the new check runs supersede the skipped
+ones. Maintainers must not merge until the `ready_for_review` run's required
+checks are green on the current head, and must wait again after any head update.
+This repository does not implement a separate merge gate. The external campaign
+gate (`campaign_control.py land`, outside this repository) accepts only actual
+`SUCCESS` for required checks on the exact head. No additional job runs on draft
+pushes to enforce this policy. Windows/UCRT64 keeps its existing branch/manual
+routing, and the paired server comparison still runs only for main-bound ready
+PRs or eligible main/devel pushes.
 
 Workflows with concurrency groups key PR runs by ref and cancel superseded runs,
 so a `ready_for_review` run cancels an earlier draft run on the same PR ref. Devel

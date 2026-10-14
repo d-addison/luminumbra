@@ -33,6 +33,8 @@ env:
   CTEST_PARALLEL_LEVEL: "4"
 
 jobs:
+  # Drafts cannot merge. ready_for_review reruns these jobs on the same head;
+  # maintainers must wait for that run's required checks to pass before merging.
   linux:
     name: Linux / GCC
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
@@ -91,6 +93,8 @@ jobs:
         run: ccache --cleanup || true
       - name: Save compiler cache
         if: ${{ always() && github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/devel') && !(github.event_name == 'workflow_dispatch' && inputs.qualification_capture) && steps.compiler-cache.outcome == 'success' && steps.compiler-cache.outputs.cache-hit != 'true' }}
+        # Cache writes are best-effort, including collisions on same-SHA reruns.
+        continue-on-error: true
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/ccache
@@ -275,6 +279,7 @@ jobs:
         run: ccache --cleanup || true
       - name: Save compiler cache
         if: ${{ always() && github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/devel') && !(github.event_name == 'workflow_dispatch' && inputs.qualification_capture) && steps.compiler-cache.outcome == 'success' && steps.compiler-cache.outputs.cache-hit != 'true' }}
+        continue-on-error: true
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/ccache
@@ -476,6 +481,7 @@ jobs:
         run: ccache --cleanup
       - name: Save compiler cache
         if: ${{ always() && github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/devel') && !(github.event_name == 'workflow_dispatch' && inputs.qualification_capture) && steps.compiler-cache.outcome == 'success' && steps.compiler-cache.outputs.cache-hit != 'true' }}
+        continue-on-error: true
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ env.CCACHE_DIR }}
@@ -648,6 +654,7 @@ jobs:
         run: ccache --cleanup || true
       - name: Save compiler cache
         if: ${{ always() && github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/devel') && !(github.event_name == 'workflow_dispatch' && inputs.qualification_capture) && steps.compiler-cache.outcome == 'success' && steps.compiler-cache.outputs.cache-hit != 'true' }}
+        continue-on-error: true
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ env.CCACHE_DIR }}
@@ -806,6 +813,7 @@ jobs:
         run: scripts/tidy.sh --build-dir build/tidy --jobs 4 --cache-dir .tidy-cache --cache-mode "$TIDY_CACHE_MODE"
       - name: Save clang-tidy result cache
         if: ${{ !cancelled() && github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/devel') && steps.tidy-cache.outputs.cache-hit != 'true' }}
+        continue-on-error: true
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .tidy-cache
