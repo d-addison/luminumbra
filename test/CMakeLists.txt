@@ -160,6 +160,7 @@ add_executable(common_tests
     common/ResidencyContract_test.cpp
     common/FarLodStore_test.cpp
     common/FarVolumeWorld_test.cpp
+    common/FarFrozenObservation_test.cpp
     common/FarVolumeRuntime_test.cpp
     common/FarVolumeTierMemory_test.cpp
     rendering/FarWorldWaterMesh_test.cpp

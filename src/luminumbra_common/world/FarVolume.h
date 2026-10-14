@@ -4,12 +4,18 @@
 // These declarations do not replace format readers or connect runtime queues.
 #include "FarVolumeMesher.h"
 #include <glm/vec3.hpp>
+#include <memory>
 
 namespace Luminumbra::Systems {
 class SHIELD_WorldSystem;
 }
 
 namespace Luminumbra::World {
+
+class FarFrozenObservation;
+struct FarFrozenCaptureSource;
+struct FarFrozenCaptureLimits;
+enum class FarFrozenCaptureError : std::uint8_t;
 
 enum class FarCaveMode : std::uint8_t {
     BandLimited,
@@ -50,6 +56,27 @@ struct FarVolumeAuthority {
         const FarVolumePosition&, float, std::uint32_t, FarCaveMode)>
         density;
 };
+
+// Owner-thread capture of a resolved canonical request and its complete normal
+// halo. Span discovery/extensions happen before capture; workers consume only
+// the returned immutable observation through its Authority adapter.
+FarFrozenCaptureError
+CaptureFarVolumeObservation(const FarVolumeRequest& request,
+                            const FarFrozenCaptureSource& source,
+                            const FarFrozenCaptureLimits& limits,
+                            std::shared_ptr<FarVolumeMemoryPool> pool,
+                            std::shared_ptr<const FarFrozenObservation>& output);
+
+// Production pristine terrain is sampled under one world-generation scope.
+// The remaining source callbacks provide explicit committed/volatile terrain
+// and water truth at the same host publication boundary. They are never retained.
+FarFrozenCaptureError
+CaptureWorldFarVolumeObservation(const Systems::SHIELD_WorldSystem& world,
+                                 const FarVolumeRequest& request,
+                                 const FarFrozenCaptureSource& source,
+                                 const FarFrozenCaptureLimits& limits,
+                                 std::shared_ptr<FarVolumeMemoryPool> pool,
+                                 std::shared_ptr<const FarFrozenObservation>& output);
 
 struct FarVolumeAuthorityLimits {
     // Required limits on actual callback invocations, not approved runtime caps.
