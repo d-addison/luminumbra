@@ -207,6 +207,7 @@ void GameSession::ResetWorldSystems() {
     m_regionCompletedWork.clear();
     m_foliagePreviousTicks.clear();
     m_creatureTickAdmission = {};
+    m_creatureActivity = {};
     m_regionFault.reset();
     m_regionInputRejections = {};
     m_regionDurableDirectory.clear();
@@ -362,7 +363,9 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
                 RunRegionScheduler(current_tick);
                 if (m_regionFault)
                     return i + 1;
+                ReconcileCreatureTiers();
                 SealCreatureTickAdmission(current_tick);
+                RunCoarseCreatureTick();
                 AdvanceGroundObjects(current_tick);
                 if (m_regionFault)
                     return i + 1;
@@ -522,18 +525,21 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
                     // hand the brain the scent field so a predator without a
                     // directly-perceived target tracks the prey-scent gradient (channel 0).
                     // No scent participants -> the field is all-zero -> byte-identical.
-                    luminumbra::ai::RunCreatureBrainSystemOnTick(
-                        m_registry,
-                        static_cast<float>(m_simulationClock.fixed_dt()),
-                        m_ecologyTuning,
-                        m_scentField.get(),
-                        ScentDomainOrigin(true),
-                        ScentDomainOrigin(false),
-                        kScentCellSize,
-                        true,
-                        m_speciesTable.get(),
-                        creature_gate,
-                        creature_work);
+                    if (m_activeRegionsEnabled)
+                        RunFullCreatureBrain();
+                    else
+                        luminumbra::ai::RunCreatureBrainSystemOnTick(
+                            m_registry,
+                            static_cast<float>(m_simulationClock.fixed_dt()),
+                            m_ecologyTuning,
+                            m_scentField.get(),
+                            ScentDomainOrigin(true),
+                            ScentDomainOrigin(false),
+                            kScentCellSize,
+                            true,
+                            m_speciesTable.get(),
+                            creature_gate,
+                            creature_work);
 
                     // 2e-mate: SEXUAL reproduction, phase A. Ready creatures (mature, well-fed,
                     // off cooldown) carrying a CreatureGenomeComponent steer toward the nearest
@@ -576,7 +582,9 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
                     // terrain-resolved position (gravity/collision/slopes) back into the
                     // transform. Gated on a physics system + at least one physics creature, so
                     // the canonical roster (none) keeps world_hash byte-identical.
-                    if (m_physicsSystem) {
+                    if (m_activeRegionsEnabled) {
+                        StepCreaturePhysics();
+                    } else if (m_physicsSystem) {
                         auto phys =
                             m_registry.view<Luminumbra::Components::CreaturePhysicsComponent,
                                             Luminumbra::Components::CreatureComponent,
@@ -842,6 +850,8 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
                 }
             }
 
+            if (m_activeRegionsEnabled)
+                CompleteCreatureTickAdmission();
             budget.Next(Stage::Events, [&] { return m_simulationEventBus.pending_count(); });
             if (m_activeRegionsEnabled)
                 m_simulationEventBus.drain(current_tick, [this] { return !m_regionFault; });
@@ -852,7 +862,6 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
             if (m_regionFault)
                 return i + 1;
             if (m_activeRegionsEnabled) {
-                CompleteCreatureTickAdmission();
                 PrepareRegionalFoliage();
                 m_activeRegionLedger.publish_completed_work(m_regionCompletedWork);
                 m_regionCompletedWork.clear();
@@ -1866,6 +1875,24 @@ void GameSession::RunRegionalFoliageTickImpl(
             windows[key] = static_cast<std::uint32_t>(std::min<std::uint64_t>(elapsed, 65536));
         }
     }
+    std::map<std::uint64_t, std::uint32_t> plant_windows;
+    for (auto e :
+         m_registry.view<C::PlantTag, C::PlantRegionComponent, C::PlantGrowthComponent>()) {
+        const auto& owner = m_registry.get<C::PlantRegionComponent>(e);
+        const auto& growth = m_registry.get<C::PlantGrowthComponent>(e);
+        const RegionKey key{owner.owner_x, owner.owner_z};
+        const auto found = m_activeRegionLedger.records().find(key);
+        if (found == m_activeRegionLedger.records().end())
+            continue;
+        const auto window =
+            fol::PlantPolicyWindow(found->second,
+                                   key,
+                                   m_simulationContent->policy.plant(growth.species_id),
+                                   m_worldClock,
+                                   owner.region_stamp);
+        if (window)
+            plant_windows.emplace(owner.persistent_id, *window);
+    }
     const auto previous = m_fieldPages;
     std::map<RegionKey, std::uint64_t> page_work;
     std::set<RegionKey> completed_regions;
@@ -1880,6 +1907,8 @@ void GameSession::RunRegionalFoliageTickImpl(
     std::uint32_t max_window = 0;
     for (const auto& [key, k] : windows)
         max_window = std::max(max_window, k);
+    for (const auto& [id, k] : plant_windows)
+        max_window = std::max(max_window, k);
     const Vec2 wind =
         m_windFieldSystem ? m_windFieldSystem->SampleWind(m_metadata.spawnPoint) : Vec2(0);
     for (std::uint32_t step = 0; step < max_window; ++step) {
@@ -1888,8 +1917,17 @@ void GameSession::RunRegionalFoliageTickImpl(
         for (const auto& [key, k] : windows)
             if (max_window - step <= k)
                 one_tick[key] = 1;
-        for (const auto& [key, updates] :
-             fol::AdvanceFoliageInteriors(m_registry, m_fieldPages, one_tick, subtick, &budget))
+        const RegionEntityGate participant_gate = [this, &plant_windows, step, max_window](auto e) {
+            if (m_registry.all_of<C::CreatureComponent>(e))
+                return step + 1 == max_window && CreatureFullEligible(e);
+            if (const auto* owner = m_registry.try_get<C::PlantRegionComponent>(e)) {
+                const auto window = plant_windows.find(owner->persistent_id);
+                return window != plant_windows.end() && max_window - step <= window->second;
+            }
+            return true;
+        };
+        for (const auto& [key, updates] : fol::AdvanceFoliageInteriors(
+                 m_registry, m_fieldPages, one_tick, subtick, &budget, participant_gate))
             page_work[key] += updates;
         // Cache the current environment/infection once for this bounded window.
         // Interleave exact PlantCoarse single steps with the integer soil and
@@ -1901,20 +1939,23 @@ void GameSession::RunRegionalFoliageTickImpl(
             return m_registry.get<C::PlantRegionComponent>(a).persistent_id <
                    m_registry.get<C::PlantRegionComponent>(b).persistent_id;
         });
-        budget.Next(Stage::Plants, [this, &plants, &one_tick, subtick] {
+        budget.Next(Stage::Plants, [this, &plants, &plant_windows, step, max_window, subtick] {
             return static_cast<std::uint64_t>(std::count_if(
-                plants.begin(), plants.end(), [this, &one_tick, subtick](entt::entity e) {
+                plants.begin(),
+                plants.end(),
+                [this, &plant_windows, step, max_window, subtick](entt::entity e) {
                     const auto& owner = m_registry.get<C::PlantRegionComponent>(e);
                     const auto& growth = m_registry.get<C::PlantGrowthComponent>(e);
-                    return one_tick.contains({owner.owner_x, owner.owner_z}) &&
+                    const auto window = plant_windows.find(owner.persistent_id);
+                    return window != plant_windows.end() && max_window - step <= window->second &&
                            owner.region_stamp < subtick && growth.planted_tick < subtick;
                 }));
         });
         for (auto e : plants) {
             auto& owner = m_registry.get<C::PlantRegionComponent>(e);
             const RegionKey key{owner.owner_x, owner.owner_z};
-            const auto window = windows.find(key);
-            if (window == windows.end() || !one_tick.contains(key))
+            const auto window = plant_windows.find(owner.persistent_id);
+            if (window == plant_windows.end() || max_window - step > window->second)
                 continue;
             auto& g = m_registry.get<C::PlantGrowthComponent>(e);
             auto it = growth_windows.find(owner.persistent_id);
@@ -1942,24 +1983,27 @@ void GameSession::RunRegionalFoliageTickImpl(
             RecordActiveRegionWork({key, 0, 1, 0, 0});
             completed_regions.insert(key);
         }
-        const RegionEntityGate gate = [this, &windows, step, max_window, subtick](entt::entity e) {
-            // Optional foliage components do not grant creatures positional admission.
-            // Full creature recipients and fire sources run once at the real tick;
-            // historical plant substeps cannot mutate or complete creature work.
-            if (m_registry.all_of<C::CreatureComponent>(e) &&
-                (step + 1 != max_window || !CreatureFullEligible(e)))
-                return false;
-            const auto* tf = m_registry.try_get<C::TransformComponent>(e);
-            if (!tf || !ActiveRegionLedger::valid_anchor(tf->position))
-                return false;
-            if (const auto* owner = m_registry.try_get<C::PlantRegionComponent>(e)) {
-                const auto& growth = m_registry.get<C::PlantGrowthComponent>(e);
-                if (owner->region_stamp >= subtick && growth.planted_tick != subtick)
+        const RegionEntityGate gate =
+            [this, &windows, &plant_windows, step, max_window, subtick](entt::entity e) {
+                // Optional foliage components do not grant creatures positional admission.
+                // Full creature recipients and fire sources run once at the real tick;
+                // historical plant substeps cannot mutate or complete creature work.
+                if (m_registry.all_of<C::CreatureComponent>(e) &&
+                    (step + 1 != max_window || !CreatureFullEligible(e)))
                     return false;
-            }
-            const auto it = windows.find(ActiveRegionLedger::region_at(tf->position));
-            return it != windows.end() && max_window - step <= it->second;
-        };
+                const auto* tf = m_registry.try_get<C::TransformComponent>(e);
+                if (!tf || !ActiveRegionLedger::valid_anchor(tf->position))
+                    return false;
+                if (const auto* owner = m_registry.try_get<C::PlantRegionComponent>(e)) {
+                    const auto& growth = m_registry.get<C::PlantGrowthComponent>(e);
+                    if (owner->region_stamp >= subtick && growth.planted_tick != subtick)
+                        return false;
+                    const auto window = plant_windows.find(owner->persistent_id);
+                    return window != plant_windows.end() && max_window - step <= window->second;
+                }
+                const auto it = windows.find(ActiveRegionLedger::region_at(tf->position));
+                return it != windows.end() && max_window - step <= it->second;
+            };
         const RegionEntityWork completed = [this, &completed_regions](entt::entity e) {
             if (m_registry.all_of<C::CreatureComponent>(e)) {
                 RecordCreatureOperation(e);
@@ -2005,7 +2049,7 @@ void GameSession::RunRegionalFoliageTickImpl(
                 return it == m_activeRegionLedger.records().end() ||
                        it->second.state != RegionState::Frozen;
             },
-            [this, &completed_regions](entt::entity child) {
+            [this, &completed_regions, &plant_windows](entt::entity child) {
                 if (!AdmitPlantAt(child,
                                   m_registry.get<C::PlantGrowthComponent>(child).last_tick)) {
                     m_registry.destroy(child);
@@ -2013,6 +2057,18 @@ void GameSession::RunRegionalFoliageTickImpl(
                 }
                 const auto& owner = m_registry.get<C::PlantRegionComponent>(child);
                 const RegionKey key{owner.owner_x, owner.owner_z};
+                const auto& growth = m_registry.get<C::PlantGrowthComponent>(child);
+                const auto record = m_activeRegionLedger.records().find(key);
+                if (record != m_activeRegionLedger.records().end()) {
+                    const auto window =
+                        fol::PlantPolicyWindow(record->second,
+                                               key,
+                                               m_simulationContent->policy.plant(growth.species_id),
+                                               m_worldClock,
+                                               owner.region_stamp);
+                    if (window)
+                        plant_windows.emplace(owner.persistent_id, *window);
+                }
                 RecordActiveRegionWork({key, 0, 1, 0, 0});
                 completed_regions.insert(key);
             });
@@ -2061,7 +2117,7 @@ void GameSession::RunRegionalFoliageTickImpl(
     for (auto e :
          m_registry.view<C::PlantTag, C::PlantRegionComponent, C::PlantGrowthComponent>()) {
         auto& owner = m_registry.get<C::PlantRegionComponent>(e);
-        if (windows.contains(RegionKey{owner.owner_x, owner.owner_z})) {
+        if (plant_windows.contains(owner.persistent_id)) {
             owner.region_stamp = tick;
             m_registry.get<C::PlantGrowthComponent>(e).last_tick = tick;
         }
@@ -2079,81 +2135,6 @@ void GameSession::RunRegionalFoliageTickImpl(
         RecordActiveRegionWork({key, 1, 0, 0, 0});
 }
 
-void GameSession::SealCreatureTickAdmission(std::uint64_t tick) {
-    namespace C = Components;
-    m_creatureTickAdmission = {};
-    auto& admission = m_creatureTickAdmission;
-    admission.tick = tick;
-    const auto due = SortedDueRegions();
-    auto active_due = [this, &due](RegionKey key) {
-        const auto it = m_activeRegionLedger.records().find(key);
-        return it != m_activeRegionLedger.records().end() &&
-               it->second.state == RegionState::Active &&
-               std::binary_search(due.begin(), due.end(), key);
-    };
-    auto positional_due = [this, &due](RegionKey key) {
-        const auto it = m_activeRegionLedger.records().find(key);
-        return it != m_activeRegionLedger.records().end() &&
-               it->second.state != RegionState::Frozen &&
-               std::binary_search(due.begin(), due.end(), key);
-    };
-    for (auto e : m_registry.view<C::TransformComponent>()) {
-        const auto& tf = m_registry.get<C::TransformComponent>(e);
-        const auto* cr = m_registry.try_get<C::CreatureComponent>(e);
-        if (!cr) {
-            if (ActiveRegionLedger::valid_anchor(tf.position) &&
-                positional_due(ActiveRegionLedger::region_at(tf.position))) {
-                admission.positional_sources.insert(e);
-                admission.positional_owners.emplace(e, ActiveRegionLedger::region_at(tf.position));
-            }
-            continue;
-        }
-        const auto* owner = m_registry.try_get<C::CreatureRegionComponent>(e);
-        const auto* coarse = m_registry.try_get<C::CreatureCoarseComponent>(e);
-        if (!owner && !coarse && cr->species_id == 0) {
-            if (ActiveRegionLedger::valid_anchor(tf.position) &&
-                positional_due(ActiveRegionLedger::region_at(tf.position))) {
-                admission.transient_grazers.insert(e);
-                admission.positional_owners.emplace(e, ActiveRegionLedger::region_at(tf.position));
-            }
-            continue;
-        }
-        if (!owner || !coarse || !owner->persistent_id || !m_speciesTable ||
-            !m_speciesTable->Find(cr->species_id))
-            continue;
-        const RegionKey key{owner->owner_x, owner->owner_z};
-        admission.previous.emplace(
-            e, CreatureTickAdmission::Previous{key, coarse->tier, owner->persistent_id});
-        if (owner->region_stamp >= tick)
-            continue;
-        if (coarse->tier == C::CreatureTier::Full && active_due(key))
-            admission.full.insert(e);
-        if (coarse->tier != C::CreatureTier::Coarse || !luminumbra::ai::DecompIsDead(m_registry, e))
-            continue;
-        const auto it = m_activeRegionLedger.records().find(key);
-        if (it == m_activeRegionLedger.records().end() || it->second.state == RegionState::Frozen ||
-            !std::binary_search(due.begin(), due.end(), key))
-            continue;
-        const auto shift = it->second.cadence_shift;
-        if (owner->region_stamp == 0 || (owner->region_stamp >> shift) < (tick >> shift))
-            admission.coarse_corpses.insert(e);
-    }
-    const auto seal_grid_source = [this, &admission](entt::entity e, int x, int z) {
-        if (!m_registry.any_of<C::CreatureComponent, C::TransformComponent>(e) &&
-            ScentCellDue(x, z)) {
-            admission.positional_sources.insert(e);
-            admission.positional_owners.emplace(e, ScentCellOwner(x, z));
-        }
-    };
-    for (auto e : m_registry.view<const C::ForagerComponent>()) {
-        const auto& a = m_registry.get<const C::ForagerComponent>(e);
-        seal_grid_source(e, a.cell_x, a.cell_z);
-    }
-    for (auto e : m_registry.view<const C::FoodSourceComponent>()) {
-        const auto& f = m_registry.get<const C::FoodSourceComponent>(e);
-        seal_grid_source(e, f.cell_x, f.cell_z);
-    }
-}
 bool GameSession::EnergyCellDue(int x, int z) const {
     if (m_regionFault)
         return false;
@@ -2164,76 +2145,6 @@ bool GameSession::EnergyCellDue(int x, int z) const {
            std::find(m_regionSchedule.due.begin(), m_regionSchedule.due.end(), owner) !=
                m_regionSchedule.due.end();
 }
-bool GameSession::CreatureFullEligible(entt::entity entity) const {
-    return m_creatureTickAdmission.full.contains(entity) ||
-           m_creatureTickAdmission.positional_sources.contains(entity);
-}
-bool GameSession::CreatureGrazerEligible(entt::entity entity) const {
-    return m_creatureTickAdmission.full.contains(entity) ||
-           m_creatureTickAdmission.transient_grazers.contains(entity);
-}
-void GameSession::RecordCreatureOperation(entt::entity entity) {
-    const auto it = m_creatureTickAdmission.previous.find(entity);
-    if (it != m_creatureTickAdmission.previous.end()) {
-        m_creatureTickAdmission.processed.insert(entity);
-        m_creatureTickAdmission.processed_owners.insert(it->second.owner);
-        RecordActiveRegionWork({it->second.owner, 0ull, 1ull, 0ull, 0ull});
-    } else if (m_creatureTickAdmission.transient_grazers.contains(entity) ||
-               m_creatureTickAdmission.positional_sources.contains(entity)) {
-        const auto key = m_creatureTickAdmission.positional_owners.at(entity);
-        m_creatureTickAdmission.processed_owners.insert(key);
-        RecordActiveRegionWork({key, 0ull, 1ull, 0ull, 0ull});
-    }
-}
-void GameSession::CompleteCreatureTickAdmission() {
-    for (const auto e : m_creatureTickAdmission.processed) {
-        if (!m_registry.valid(e))
-            continue;
-        if (auto* owner = m_registry.try_get<Components::CreatureRegionComponent>(e))
-            owner->region_stamp = m_creatureTickAdmission.tick;
-    }
-    for (const auto key : m_creatureTickAdmission.processed_owners)
-        RecordActiveRegionWork({key, 1, 0, 0, 0});
-}
-bool GameSession::AdmitCreatureBirth(const luminumbra::ai::CreatureBirthProposal& birth) {
-    namespace C = Components;
-    const auto tick = m_creatureTickAdmission.tick;
-    const Vec3 position(birth.x, birth.y, birth.z);
-    if (!m_activeRegionsEnabled || m_regionFault || !m_speciesTable ||
-        !m_speciesTable->Find(birth.species_id) ||
-        !luminumbra::ai::AdmitFullCreatureBirthDestination(
-            m_activeRegionLedger, SortedDueRegions(), position))
-        return false;
-    std::uint64_t id = 0;
-    if (!m_activeRegionLedger.allocate_persistent_id(id))
-        throw std::runtime_error("Creature identity allocation refused");
-    entt::entity child = entt::null;
-    try {
-        child = luminumbra::ai::CreateCreatureBirthEntity(
-            m_registry, birth, m_reproductionTuning.cooldown_ticks);
-        const auto key = ActiveRegionLedger::region_at(position);
-        m_registry.emplace<C::CreatureRegionComponent>(child, id, key.x, key.z, tick);
-        m_registry.emplace<C::CreatureCoarseComponent>(child);
-        m_registry.emplace<C::CreatureControllerComponent>(child); // Explicitly kinematic newborn.
-        // The existing snapshot validation checks all admission bridges and inventory.
-        const auto snapshot = luminumbra::ai::BuildCreatureSnapshot(m_registry);
-        const auto plants = luminumbra::foliage::BuildPlantEntitySnapshot(m_registry, true);
-        std::string error;
-        if (!luminumbra::ai::ValidateCreatureSnapshot(
-                snapshot, m_activeRegionLedger, m_groundObjects, plants, error)) {
-            m_registry.destroy(child);
-            return false;
-        }
-        RecordActiveRegionWork({key, 0, 1, 0, 0});
-        m_creatureTickAdmission.processed_owners.insert(key);
-        return true;
-    } catch (...) {
-        if (child != entt::null && m_registry.valid(child))
-            m_registry.destroy(child);
-        throw;
-    }
-}
-
 void GameSession::RunRegionScheduler(std::uint64_t current_tick) {
     if (m_activeRegionsEnabled && !m_regionFault) {
         // Water divergence becomes LoadedOrEdited authority BEFORE any digest or ownership
@@ -3140,23 +3051,6 @@ bool GameSession::RunInSnapshotTransaction(const std::function<bool()>& body) {
     return committed;
 }
 
-void GameSession::CaptureCreatureLocomotionForSave() {
-    if (!m_activeRegionsEnabled || !m_physicsSystem)
-        return;
-    namespace C = Components;
-    for (auto e : m_registry.view<C::CreatureComponent, C::CreaturePhysicsComponent>()) {
-        const auto index = m_registry.get<C::CreaturePhysicsComponent>(e).avatar_index;
-        if (index >= m_physicsSystem->avatar_character_count())
-            throw std::runtime_error("Invalid creature avatar handle during save");
-        const auto velocity = m_physicsSystem->get_avatar_velocity(index);
-        auto& state = m_registry.get_or_emplace<C::CreatureLocomotionStateComponent>(e);
-        state.velocity_x = velocity.x;
-        state.velocity_y = velocity.y;
-        state.velocity_z = velocity.z;
-        state.grounded = m_physicsSystem->is_avatar_grounded(index);
-    }
-}
-
 bool GameSession::SaveWorld() {
     return SaveWorldMetadataTo(GetWorldSaveDir());
 }
@@ -3172,7 +3066,6 @@ bool GameSession::SaveWorldMetadataTo(const fs::path& save_dir) {
         try {
             if (!m_regionFault)
                 PrepareRegionalFoliage();
-            CaptureCreatureLocomotionForSave();
             plants = luminumbra::foliage::BuildPlantEntitySnapshot(m_registry, true);
             creatures = luminumbra::ai::BuildCreatureSnapshot(m_registry);
             std::set<std::uint64_t> creature_ids;
@@ -3802,6 +3695,8 @@ bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
         m_regionWork.clear();
         m_regionCompletedWork.clear();
         m_regionFault.reset();
+        m_creatureActivity = {};
+        m_creatureTickAdmission = {};
         m_replicatedSimulationAnchors.reset();
         RestoreWorldClock(saved_clock);
         if (energy)

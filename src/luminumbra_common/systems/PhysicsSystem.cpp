@@ -26,6 +26,8 @@
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/quaternion.hpp>
 #include <mutex>
+#include <set>
+#include <stdexcept>
 
 using namespace JPH;
 
@@ -190,7 +192,7 @@ void PhysicsSystem::shutdown() {
     }
     m_chunk_bodies.clear();
     m_player_character.reset();
-    m_avatar_characters.clear(); // Release server avatars before the Jolt system.
+    clear_avatar_characters(); // Release avatars before the Jolt system.
     // Properly release the reference-counted shapes
     m_player_stand_shape = nullptr;
     m_player_crouch_shape = nullptr;
@@ -490,9 +492,12 @@ void PhysicsSystem::destroy_body(JPH::BodyID body) {
 void PhysicsSystem::clear_avatar_characters() {
     m_avatar_characters.clear();
     m_avatar_wish.clear();
+    m_avatar_slots.clear();
+    m_restored_grounded.clear();
 }
 
 void PhysicsSystem::set_avatar_wish_velocity(std::size_t index, const glm::vec2& wish_xz) {
+    index = ResolveAvatar(index);
     if (index < m_avatar_wish.size())
         m_avatar_wish[index] = wish_xz;
 }
@@ -552,6 +557,7 @@ void PhysicsSystem::update_avatars(float dt) {
 }
 
 glm::vec3 PhysicsSystem::get_avatar_position(std::size_t index) const {
+    index = ResolveAvatar(index);
     if (index >= m_avatar_characters.size() || !m_avatar_characters[index])
         return glm::vec3(0.0f);
     const JPH::RVec3 p = m_avatar_characters[index]->GetPosition();
@@ -559,6 +565,7 @@ glm::vec3 PhysicsSystem::get_avatar_position(std::size_t index) const {
 }
 
 glm::vec3 PhysicsSystem::get_avatar_velocity(std::size_t index) const {
+    index = ResolveAvatar(index);
     if (index >= m_avatar_characters.size() || !m_avatar_characters[index])
         return glm::vec3(0.0f);
     const JPH::Vec3 v = m_avatar_characters[index]->GetLinearVelocity();
@@ -566,10 +573,112 @@ glm::vec3 PhysicsSystem::get_avatar_velocity(std::size_t index) const {
 }
 
 bool PhysicsSystem::is_avatar_grounded(std::size_t index) const {
+    const auto restored = m_restored_grounded.find(index);
+    if (restored != m_restored_grounded.end())
+        return restored->second;
+    index = ResolveAvatar(index);
     if (index >= m_avatar_characters.size() || !m_avatar_characters[index])
         return false;
     return m_avatar_characters[index]->GetGroundState() ==
            JPH::CharacterBase::EGroundState::OnGround;
+}
+
+std::size_t PhysicsSystem::ResolveAvatar(std::size_t handle) const {
+    if (handle < std::numeric_limits<std::size_t>::max() / 2)
+        return handle;
+    const auto it = m_avatar_slots.find(handle);
+    return it == m_avatar_slots.end() ? m_avatar_characters.size() : it->second;
+}
+
+bool PhysicsSystem::valid_avatar_handle(std::size_t handle) const {
+    const auto it = m_avatar_slots.find(handle);
+    return it != m_avatar_slots.end() && it->second < m_avatar_characters.size() &&
+           m_avatar_characters[it->second] != nullptr;
+}
+
+std::size_t PhysicsSystem::create_avatar_handle(const glm::vec3& position,
+                                                const glm::vec3& velocity,
+                                                bool grounded) {
+    if (!m_jolt_system || m_next_avatar_handle == std::numeric_limits<std::size_t>::max())
+        throw std::runtime_error("Avatar reconstruction refused");
+    const auto handle = m_next_avatar_handle++;
+    // Prepare both vectors before legacy creation can publish a character.
+    m_avatar_characters.reserve(m_avatar_characters.size() + 1);
+    m_avatar_wish.reserve(m_avatar_wish.size() + 1);
+    auto slot = create_avatar_character(position);
+    // Reuse a vacant opaque slot without moving any surviving character.
+    for (std::size_t i = 0; i < slot; ++i)
+        if (!m_avatar_characters[i]) {
+            m_avatar_characters[i] = std::move(m_avatar_characters.back());
+            m_avatar_characters.pop_back();
+            m_avatar_wish.pop_back();
+            m_avatar_wish[i] = glm::vec2(0.0f);
+            slot = i;
+            break;
+        }
+    try {
+        m_avatar_slots.emplace(handle, slot);
+        m_restored_grounded.emplace(handle, grounded);
+    } catch (...) {
+        m_avatar_slots.erase(handle);
+        m_avatar_characters[slot].reset();
+        throw;
+    }
+    m_avatar_characters[slot]->SetLinearVelocity(JPH::Vec3(velocity.x, velocity.y, velocity.z));
+    return handle;
+}
+
+bool PhysicsSystem::remove_avatar_handle(std::size_t handle) {
+    const auto it = m_avatar_slots.find(handle);
+    if (it == m_avatar_slots.end())
+        return false;
+    m_avatar_characters[it->second].reset();
+    m_avatar_wish[it->second] = glm::vec2(0.0f);
+    m_restored_grounded.erase(handle);
+    m_avatar_slots.erase(it);
+    return true;
+}
+
+bool PhysicsSystem::set_avatar_position(std::size_t handle, const glm::vec3& position) {
+    if (!valid_avatar_handle(handle))
+        return false;
+    m_avatar_characters[ResolveAvatar(handle)]->SetPosition(
+        JPH::RVec3(position.x, position.y, position.z));
+    return true;
+}
+
+void PhysicsSystem::StepAvatar(std::size_t slot, float dt, bool grounded) {
+    auto& character = m_avatar_characters[slot];
+    const auto gravity = m_jolt_system->GetGravity();
+    const auto velocity = character->GetLinearVelocity();
+    const auto wish = m_avatar_wish[slot];
+    character->SetLinearVelocity(
+        JPH::Vec3(wish.x, grounded ? -1.0f : velocity.GetY() + gravity.GetY() * dt, wish.y));
+    character->Update(dt,
+                      gravity,
+                      BroadPhaseLayerFilterAll(),
+                      ObjectLayerFilterAll(),
+                      JPH::BodyFilter(),
+                      JPH::ShapeFilter(),
+                      *m_temp_allocator);
+}
+
+bool PhysicsSystem::update_selected_avatars(std::span<const std::size_t> handles, float dt) {
+    std::set<std::size_t> seen;
+    std::vector<std::size_t> selected;
+    selected.reserve(handles.size());
+    for (const auto handle : handles) {
+        if (!valid_avatar_handle(handle))
+            return false;
+        if (seen.insert(handle).second)
+            selected.push_back(handle);
+    }
+    for (const auto handle : selected) {
+        const bool grounded = is_avatar_grounded(handle);
+        StepAvatar(ResolveAvatar(handle), dt, grounded);
+        m_restored_grounded.erase(handle);
+    }
+    return true;
 }
 
 bool PhysicsSystem::player_has_space_to_stand() const {

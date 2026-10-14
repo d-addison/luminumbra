@@ -2,7 +2,9 @@
 
 #include "../fields/FieldPageState.h"
 #include "../simulation/SimBudgetTelemetry.h"
+#include "../world/DistantPolicy.h"
 #include "IrrigationSystem.h"
+#include "RegionConsumerGate.h"
 #include "SoilNutrientSystem.h"
 #include <map>
 #include <optional>
@@ -15,6 +17,36 @@ using ::Luminumbra::world::FoliageFieldPages;
 using ::Luminumbra::world::RegionKey;
 using ::Luminumbra::world::RegionState;
 using ::Luminumbra::world::ScentCellKey;
+
+// Species cadence never changes region-owned page or water scheduling.
+inline bool PlantPolicyDue(const ::Luminumbra::world::ActiveRegionRecord& record,
+                           RegionKey key,
+                           const ::Luminumbra::world::PlantDistantPolicy& policy,
+                           std::uint64_t tick) {
+    if (record.state == RegionState::Frozen)
+        return false;
+    const auto shift = record.state == RegionState::Active
+                           ? std::uint8_t{0}
+                           : std::min(record.cadence_shift, policy.max_cadence_shift);
+    return (tick & ((std::uint64_t{1} << shift) - 1)) == ActiveRegionLedger::phase(key, shift);
+}
+inline std::optional<std::uint32_t>
+PlantPolicyWindow(const ::Luminumbra::world::ActiveRegionRecord& record,
+                  RegionKey key,
+                  const ::Luminumbra::world::PlantDistantPolicy& policy,
+                  const ::Luminumbra::world::WorldClock& clock,
+                  std::uint64_t stamp) {
+    if (record.state == RegionState::Frozen || stamp > clock.tick())
+        return {};
+    if (record.frozen_at) {
+        const auto resume = ActiveRegionLedger::resume_window(
+            key, record.frozen_at, clock, std::min(policy.resume_cap_ticks, std::uint32_t{36000}));
+        return static_cast<std::uint32_t>(std::min(clock.tick() - stamp, resume.elapsed_ticks));
+    }
+    if (!PlantPolicyDue(record, key, policy, clock.tick()))
+        return {};
+    return static_cast<std::uint32_t>(std::min(clock.tick() - stamp, std::uint64_t{65536}));
+}
 
 inline ScentCellKey FoliageCell(const ::Luminumbra::Vec3& p) {
     if (!ActiveRegionLedger::valid_anchor(p))
@@ -63,7 +95,8 @@ AdvanceFoliageInteriors(entt::registry& reg,
                         FieldPageState& pages,
                         const std::map<RegionKey, std::uint32_t>& windows,
                         std::optional<std::uint64_t> current_tick = {},
-                        simulation::SimBudgetTelemetry::TickScope* budget = nullptr) {
+                        simulation::SimBudgetTelemetry::TickScope* budget = nullptr,
+                        const ::Luminumbra::world::RegionEntityGate& participant_gate = {}) {
     auto soil = FoliageCells(pages.soil());
     auto moisture = FoliageCells(pages.irrigation());
     std::map<RegionKey, std::uint64_t> work;
@@ -72,9 +105,11 @@ AdvanceFoliageInteriors(entt::registry& reg,
                            Comp::SoilFeederComponent,
                            Comp::PlantGrowthComponent,
                            Comp::TransformComponent>())
-        feeders.push_back(e);
+        if (::Luminumbra::world::AdmitRegionEntity(participant_gate, e))
+            feeders.push_back(e);
     for (auto e : reg.view<Comp::WaterSourceComponent, Comp::TransformComponent>())
-        sources.push_back(e);
+        if (::Luminumbra::world::AdmitRegionEntity(participant_gate, e))
+            sources.push_back(e);
     std::sort(feeders.begin(), feeders.end(), [&reg](auto a, auto b) {
         return reg.get<Comp::PlantRegionComponent>(a).persistent_id <
                reg.get<Comp::PlantRegionComponent>(b).persistent_id;

@@ -28,6 +28,7 @@
 
 #include "luminumbra_common/ai/CreatureSpeciesRegistry.h"
 #include "luminumbra_common/foliage/SpeciesRegistry.h"
+#include "luminumbra_common/systems/RegionalFoliage.h"
 #include "luminumbra_common/world/DistantPolicy.h"
 #include "nlohmann/json.hpp"
 
@@ -1016,3 +1017,44 @@ TEST(DistantPolicyTest, PopulationIdentityInputsAreAdoptedAndBoundedAtomically) 
     EXPECT_EQ(content.identity, before);
 }
 } // namespace
+
+TEST(DistantPolicyTest, ResolvedPlantPolicyDrivesSessionCadenceAndResume) {
+    auto document = FullPolicy();
+    document["plant_species"]["wheat"]["max_cadence_shift"] = 1;
+    document["plant_species"]["wheat"]["resume_cap_ticks"] = 2;
+    DistantPolicyOverrides overrides;
+    std::string error;
+    ASSERT_TRUE(DistantPolicyOverrides::parse(Document(document), overrides, error)) << error;
+    const std::vector<CapturedSpeciesDefinition> creatures{
+        {"grovestrider", SimulationSpeciesId("grovestrider"), "{}"}};
+    const std::vector<CapturedSpeciesDefinition> plants{
+        {"wheat", SimulationSpeciesId("wheat"), "{}"}};
+    ResolvedDistantPolicy resolved;
+    ASSERT_TRUE(ResolveDistantPolicy(overrides, creatures, plants, resolved, error)) << error;
+    const auto& policy = resolved.plant(SimulationSpeciesId("wheat"));
+    ASSERT_EQ(policy.max_cadence_shift, 1u);
+    const RegionKey key{0, 0};
+    const auto tick = 102ull + ((ActiveRegionLedger::phase(key, 1) - 102ull) & 1ull);
+    const auto stamp = tick - 5;
+    ActiveRegionRecord record;
+    record.state = RegionState::Reduced;
+    record.cadence_shift = 4;
+    record.cadence_phase = ActiveRegionLedger::phase(key, 4);
+    ASSERT_NE(tick & 15u, record.cadence_phase);
+    EXPECT_FALSE(luminumbra::foliage::PlantPolicyDue(record, key, policy, tick - 1));
+    EXPECT_FALSE(
+        luminumbra::foliage::PlantPolicyWindow(record, key, policy, WorldClock(tick - 1), stamp));
+    EXPECT_TRUE(luminumbra::foliage::PlantPolicyDue(record, key, policy, tick));
+    auto ordinary =
+        luminumbra::foliage::PlantPolicyWindow(record, key, policy, WorldClock(tick), stamp);
+    ASSERT_TRUE(ordinary);
+    EXPECT_EQ(*ordinary, 5u);
+    record.frozen_at = 90;
+    const auto resume =
+        luminumbra::foliage::PlantPolicyWindow(record, key, policy, WorldClock(tick), stamp);
+    ASSERT_TRUE(resume);
+    EXPECT_EQ(*resume, 2u);
+    record.state = RegionState::Frozen;
+    EXPECT_FALSE(
+        luminumbra::foliage::PlantPolicyWindow(record, key, policy, WorldClock(tick), stamp));
+}
