@@ -376,6 +376,15 @@ than duplicated by hand. Authoritative keys are distinguished from render-only
 keys. Published non-source assets are classified and hashed in the public asset
 inventory, with licensing recorded in `THIRD_PARTY_LICENSES.md`.
 
+The far-world requested mode defaults to Ladder, including when systems.json is
+missing or the flag is absent. For an explicit Legacy opt-out, set
+`render.far_world_ladder.enabled` to `false` in `data/common/systems.json` and
+restart the client. The per-user settings overlay only reads `user.*`; this flag
+has no environment or CLI override. Effective selection still falls back to
+Legacy when Ladder cannot bind, with requested/effective mode and refusals in
+the debug HUD and diagnostics. See [Far world horizon v2](far-world-horizon-v2.md)
+for the config example and qualification gates.
+
 ### Environment controls
 
 These are the `LUMIN_*` controls read by the current client/render source. Set

@@ -303,22 +303,27 @@ TEST(FarWorldRenderer, ConfigDefaultExplicitAndHashExcluded) {
     const auto enabled =
         SystemConfig::FromJsonString(R"({"render":{"far_world_ladder":{"enabled":true}}})");
     EXPECT_EQ(RequestedFarWorldMode(defaults.enabled(SysKey::RenderFarWorldLadder)),
-              FarWorldMode::Legacy);
+              FarWorldMode::Ladder);
     EXPECT_EQ(RequestedFarWorldMode(disabled.enabled(SysKey::RenderFarWorldLadder)),
               FarWorldMode::Legacy);
     EXPECT_EQ(RequestedFarWorldMode(enabled.enabled(SysKey::RenderFarWorldLadder)),
               FarWorldMode::Ladder);
     EXPECT_EQ(enabled.ComputeConfigSubHash(), defaults.ComputeConfigSubHash());
+    EXPECT_EQ(disabled.ComputeConfigSubHash(), defaults.ComputeConfigSubHash());
     auto user = defaults;
+    user.OverlayUserFromJsonString(R"({"render":{"far_world_ladder":{"enabled":false}}})");
+    EXPECT_TRUE(user.enabled(SysKey::RenderFarWorldLadder));
+    user = disabled;
     user.OverlayUserFromJsonString(R"({"render":{"far_world_ladder":{"enabled":true}}})");
     EXPECT_FALSE(user.enabled(SysKey::RenderFarWorldLadder));
 }
 
 TEST(FarWorldRenderer, DefaultExplicitRefusedAndPreviewSelection) {
     // Two owners with fixed diagnostic/ownership storage exceed the Windows stack budget.
-    const auto legacy = std::make_unique<const FarWorldRenderer>();
+    const auto legacy = std::make_unique<const FarWorldRenderer>(FarWorldMode::Legacy);
+    EXPECT_EQ(legacy->Selection(FarWorldPurpose::World).requested, FarWorldMode::Legacy);
     EXPECT_EQ(legacy->Selection(FarWorldPurpose::World).effective, FarWorldMode::Legacy);
-    const auto refused = std::make_unique<const FarWorldRenderer>(FarWorldMode::Ladder);
+    const auto refused = std::make_unique<const FarWorldRenderer>();
     const auto normal = refused->Selection(FarWorldPurpose::World);
     EXPECT_EQ(normal.requested, FarWorldMode::Ladder);
     EXPECT_EQ(normal.effective, FarWorldMode::Legacy);

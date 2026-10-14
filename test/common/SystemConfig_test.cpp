@@ -24,12 +24,13 @@ using luminumbra::core::SystemConfig;
 namespace {
 
 // missing/empty config yields all-defaults, no crash.
-TEST(SystemConfig, DefaultsAllOff) {
+TEST(SystemConfig, DefaultsRequestFarWorldLadder) {
     const SystemConfig cfg = SystemConfig::Defaults();
     EXPECT_FALSE(cfg.enabled(SysKey::SimPlantGrowth));
     EXPECT_FALSE(cfg.enabled(SysKey::SimErosion));
     EXPECT_FALSE(cfg.enabled(SysKey::RenderMoonlight));
     EXPECT_FALSE(cfg.enabled(SysKey::RenderTreeWind));
+    EXPECT_TRUE(cfg.enabled(SysKey::RenderFarWorldLadder));
     EXPECT_FLOAT_EQ(cfg.param(SysParam::PlantMutationRate, 0.123f), 0.123f);
     EXPECT_FLOAT_EQ(cfg.param(SysParam::MoonlightStrength, 0.5f), 0.5f);
 }
@@ -37,13 +38,21 @@ TEST(SystemConfig, DefaultsAllOff) {
 TEST(SystemConfig, MissingFileIsDefaults) {
     const SystemConfig cfg = SystemConfig::LoadFromFile("this/path/does/not/exist.json");
     EXPECT_FALSE(cfg.enabled(SysKey::RenderMoonlight));
+    EXPECT_TRUE(cfg.enabled(SysKey::RenderFarWorldLadder));
     EXPECT_FLOAT_EQ(cfg.param(SysParam::MoonlightStrength, 0.7f), 0.7f);
 }
 
 TEST(SystemConfig, EmptyAndBlankJsonAreDefaults) {
-    for (const char* text : {"", "{}", "   ", "not json at all"}) {
+    for (const char* text : {"",
+                             "{}",
+                             "   ",
+                             "not json at all",
+                             R"({"render":{"far_world_ladder":{}}})",
+                             R"({"render":{"far_world_ladder":{"enabled":null}}})",
+                             R"({"render":{"far_world_ladder":{"enabled":"false"}}})"}) {
         const SystemConfig cfg = SystemConfig::FromJsonString(text);
         EXPECT_FALSE(cfg.enabled(SysKey::SimPlantGrowth)) << "input: " << text;
+        EXPECT_TRUE(cfg.enabled(SysKey::RenderFarWorldLadder)) << "input: " << text;
     }
 }
 
@@ -321,7 +330,7 @@ TEST(SystemConfig, FarWorldCaveFieldDefaultsAndExactNumericCodes) {
     using namespace Luminumbra::Rendering;
     using Luminumbra::World::FarCaveMode;
     const auto defaults = SystemConfig::Defaults();
-    EXPECT_FALSE(defaults.enabled(SysKey::RenderFarWorldLadder));
+    EXPECT_TRUE(defaults.enabled(SysKey::RenderFarWorldLadder));
     EXPECT_EQ(ResolveFarWorldCaveField(
                   defaults.param(SysParam::FarWorldCaveField, kDefaultFarWorldCaveFieldCode)),
               FarCaveMode::BandLimited);

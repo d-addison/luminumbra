@@ -454,6 +454,7 @@ INSTANTIATE_TEST_SUITE_P(VertexAndIndexWrites,
 
 TEST_F(FarWorldWaterGl, LegacyUploadDoesNotPublishLadderCertificate) {
     RenderPipeline pipeline;
+    pipeline.set_far_world_mode(FarWorldMode::Legacy);
     WaterUploadTestPeer::Upload(pipeline, 9, 3, FarWorldMode::Legacy);
     const auto& data = WaterUploadTestPeer::Data(pipeline);
     EXPECT_EQ(data.mesh_version, 9u);

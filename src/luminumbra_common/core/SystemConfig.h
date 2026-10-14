@@ -72,7 +72,7 @@ enum class SysParam : std::uint8_t {
 
 class SystemConfig {
 public:
-    // All flags off, all params unset (queries return the caller's fallback).
+    // Far-world Ladder on; other flags off. Params unset (caller's fallback).
     [[nodiscard]] static SystemConfig Defaults();
     // Parse a systems.json document. Malformed/empty/blank text -> all-defaults (no throw).
     [[nodiscard]] static SystemConfig FromJsonString(const std::string& json_text);
@@ -122,7 +122,7 @@ public:
 private:
     static constexpr std::size_t kParamCount = static_cast<std::size_t>(SysParam::Count);
 
-    std::uint32_t m_enabled = 0;                   // packed flag bitset (<=32 keys)
+    std::uint32_t m_enabled = 1u << static_cast<unsigned>(SysKey::RenderFarWorldLadder);
     std::uint64_t m_param_set = 0;                 // which params were explicitly set (<=64 params)
     std::array<glm::vec3, kParamCount> m_params{}; // scalar params live in .x
     UserSettings m_user{};                         // client-only; never hashed
