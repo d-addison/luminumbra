@@ -909,6 +909,10 @@ def main(argv=None):
     lock = out_dir / LOCK_NAME
     try:
         out_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as error:
+        print(f'run_qualification: cannot write under {out_dir}: {error}', file=sys.stderr)
+        return 2
+    try:
         descriptor = os.open(lock, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     except FileExistsError:
         print(f'run_qualification: output directory locked: {lock}; '

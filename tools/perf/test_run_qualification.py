@@ -216,7 +216,9 @@ class RunnerTestBase(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
-        self.tmp = Path(self.directory.name)
+        # Match the runner's canonical output paths when the temporary directory
+        # uses a Windows short name or a macOS directory alias.
+        self.tmp = Path(self.directory.name).resolve()
         self.fake_client = self.tmp / 'fake_client.py'
         self.fake_client.write_text(FAKE_CLIENT, encoding='utf-8')
         self.fake_checker = self.tmp / 'fake_checker.py'
@@ -380,6 +382,30 @@ class SelectionTests(RunnerTestBase):
         code, _, err = self.run_main(self.argv(out=blocker / 'out'))
         self.assertEqual(code, 2)
         self.assertIn('cannot write', err)
+
+    def test_out_dir_file_is_not_reported_as_held_lock(self):
+        self.out.write_text('not a directory', encoding='utf-8')
+        with mock.patch.object(rq, 'run_cells') as launch:
+            code, _, err = self.run_main(self.argv('--only', SURFACE_CELL))
+        self.assertEqual(code, 2, err)
+        self.assertIn('cannot write', err)
+        self.assertNotIn('output directory locked', err)
+        launch.assert_not_called()
+        self.assertEqual(self.out.read_text(encoding='utf-8'), 'not a directory')
+
+    def test_mkdir_file_exists_error_is_not_reported_as_held_lock(self):
+        # Windows can report an obstructing parent file as FileExistsError.
+        with mock.patch.object(Path, 'mkdir', side_effect=FileExistsError('blocked parent')), \
+                mock.patch.object(rq.os, 'open') as open_file, \
+                mock.patch.object(rq, 'run_cells') as launch:
+            code, _, err = self.run_main(self.argv('--only', SURFACE_CELL))
+        self.assertEqual(code, 2, err)
+        self.assertIn('cannot write', err)
+        self.assertIn('blocked parent', err)
+        self.assertNotIn('output directory locked', err)
+        open_file.assert_not_called()
+        launch.assert_not_called()
+        self.assertFalse(self.out.exists())
 
     def test_relative_paths_resolve_from_caller_cwd(self):
         previous = os.getcwd()
@@ -708,7 +734,8 @@ class DirectoryLockTests(RunnerTestBase):
         lock.write_text('held by another worker', encoding='utf-8')
         before = {path: path.read_bytes() for path in self.out.rglob('*') if path.is_file()}
         with mock.patch.object(rq, 'run_cells') as launch:
-            code, _, err = self.run_main(self.argv('--only', SURFACE_CELL))
+            code, _, err = self.run_main(self.argv('--only', SURFACE_CELL,
+                                                   out=self.out / '..' / self.out.name))
         self.assertEqual(code, 2)
         launch.assert_not_called()
         self.assertIn(str(lock), err)
@@ -968,11 +995,22 @@ class HostEvidenceTests(RunnerTestBase):
                 observed.append('aggregate')
                 raise OSError('publication failed')
             if path == host_path:
+                self.assertFalse(host_path.exists())
+                self.assertEqual(payload, self.previous_host)
                 observed.append('restore')
-            return original_write(path, payload)
+            result = original_write(path, payload)
+            if path == host_path:
+                self.assertTrue((self.out / rq.LOCK_NAME).is_file())
+                self.assertEqual(host_path.read_bytes(), self.previous_host)
+                with mock.patch.object(rq, 'run_cells') as launch:
+                    code, _, err = self.run_main(self.argv('--only', SURFACE_CELL))
+                self.assertEqual(code, 2, err)
+                launch.assert_not_called()
+            return result
 
         with mock.patch.object(rq.runner, 'atomic_write', side_effect=write):
-            code, _, err = self.run_main(self.argv('--only', SURFACE_CELL))
+            code, _, err = self.run_main(self.argv('--only', SURFACE_CELL,
+                                                   out=self.out / '..' / self.out.name))
         self.assertEqual(code, 2, err)
         self.assertEqual(observed, ['aggregate', 'restore'])
         self.assertEqual(host_path.read_bytes(), self.previous_host)
@@ -1124,13 +1162,17 @@ class HostEvidenceTests(RunnerTestBase):
     def test_nonregular_hosts_refuse_before_open_or_execution(self):
         original_lstat = Path.lstat
         original_open = Path.open
+        original_os_open = os.open
         for candidate in (self.staged_host, self.out / 'host.json'):
             for mode in (stat.S_IFLNK, stat.S_IFDIR, stat.S_IFCHR, stat.S_IFIFO):
                 for hostful in ((True,) if candidate == self.staged_host else (False, True)):
                     with self.subTest(candidate=candidate.name, mode=mode, hostful=hostful):
                         # Model filesystem types without symlink or device privileges.
+                        inspected = []
+
                         def lstat(path, *args, **kwargs):
                             if path == candidate:
+                                inspected.append(path)
                                 return mock.Mock(st_mode=mode | 0o600)
                             return original_lstat(path, *args, **kwargs)
 
@@ -1138,13 +1180,20 @@ class HostEvidenceTests(RunnerTestBase):
                             self.assertNotEqual(path, candidate)
                             return original_open(path, *args, **kwargs)
 
+                        def os_open(path, *args, **kwargs):
+                            self.assertNotEqual(Path(path), candidate)
+                            return original_os_open(path, *args, **kwargs)
+
                         argv = self.host_argv if hostful else self.argv
                         with mock.patch.object(Path, 'lstat', lstat), \
                                 mock.patch.object(Path, 'open', open_file), \
+                                mock.patch.object(rq.os, 'open', os_open), \
                                 mock.patch.object(rq, 'run_cells') as launch:
-                            code, _, err = self.run_main(argv('--only', SURFACE_CELL))
+                            code, _, err = self.run_main(argv(
+                                '--only', SURFACE_CELL, out=self.out / '..' / self.out.name))
                         self.assertEqual(code, 2, err)
                         self.assertIn('regular file', err)
+                        self.assertEqual(inspected, [candidate])
                         launch.assert_not_called()
                         self.assert_previous_pair()
                         self.assertFalse((self.out / rq.LOCK_NAME).exists())
