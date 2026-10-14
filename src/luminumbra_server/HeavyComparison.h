@@ -1,10 +1,14 @@
 #pragma once
 
 #include <array>
+#include <cstddef>
 #include <span>
 #include <string>
+#include <utility>
+#include <vector>
 
 #include "luminumbra_common/persistence/WorldPersistenceRoundtrip.h"
+#include "luminumbra_common/world/GroundObjectStore.h"
 
 namespace Luminumbra::Server {
 
@@ -16,7 +20,52 @@ struct HeavyHashes {
     bool active_regions = false;
     std::string clock_bytes;
     std::string ledger_bytes;
+    // All durable object fields, in ascending persistent-id order. Compare independently
+    // of world_hash: the composite also includes derived mesh state and is exempt below.
+    std::vector<world::GroundObject> ground_objects;
 };
+
+inline std::vector<world::GroundObject>
+CaptureGroundObjects(const world::GroundObjectStore& store) {
+    std::vector<world::GroundObject> objects;
+    objects.reserve(store.size());
+    for (const auto& [id, object] : store.objects()) {
+        objects.push_back(object);
+    }
+    return objects;
+}
+
+// Empty on equality; otherwise identify the first differing durable field in canonical order.
+inline std::string GroundObjectDifference(const HeavyHashes& a, const HeavyHashes& b) {
+    if (a.ground_objects.size() != b.ground_objects.size()) {
+        return "ground_objects.size";
+    }
+    for (std::size_t i = 0; i < a.ground_objects.size(); ++i) {
+        const auto& lhs = a.ground_objects[i];
+        const auto& rhs = b.ground_objects[i];
+        if (lhs == rhs) {
+            continue;
+        }
+        const std::array<std::pair<const char*, bool>, 10> fields{{
+            {"id", lhs.id == rhs.id},
+            {"type", lhs.type == rhs.type},
+            {"x_mm", lhs.x_mm == rhs.x_mm},
+            {"y_mm", lhs.y_mm == rhs.y_mm},
+            {"z_mm", lhs.z_mm == rhs.z_mm},
+            {"spawn_tick", lhs.spawn_tick == rhs.spawn_tick},
+            {"active_age", lhs.active_age == rhs.active_age},
+            {"despawn_after", lhs.despawn_after == rhs.despawn_after},
+            {"payload", lhs.payload == rhs.payload},
+            {"flags", lhs.flags == rhs.flags},
+        }};
+        for (const auto& [name, equal] : fields) {
+            if (!equal) {
+                return "ground_objects[id=" + std::to_string(lhs.id) + "]." + name;
+            }
+        }
+    }
+    return {};
+}
 
 // One row per field of HeavyHashes. `compared` rows must match across the
 // round-trip and the resim; `exempt_reason` documents why an uncompared row is
@@ -43,7 +92,7 @@ struct HeavySubsystem {
 };
 
 inline std::span<const HeavySubsystem> HeavySubsystemTable() {
-    static const std::array<HeavySubsystem, 13> kTable{{
+    static const std::array<HeavySubsystem, 14> kTable{{
         {"terrain",
          true,
          false,
@@ -64,6 +113,17 @@ inline std::span<const HeavySubsystem> HeavySubsystemTable() {
          nullptr,
          [](HeavyHashes& h) {
              h.sub.entities += "x";
+         }},
+        {"ground_objects",
+         true,
+         false,
+         nullptr,
+         [](HeavyHashes& h) {
+             if (h.ground_objects.empty()) {
+                 h.ground_objects.push_back(world::GroundObject{.id = 1, .type = 1});
+             } else {
+                 h.ground_objects.clear();
+             }
          }},
         {"active_regions",
          true,
@@ -142,8 +202,8 @@ inline std::span<const HeavySubsystem> HeavySubsystemTable() {
 }
 
 // Equality over AUTHORITATIVE SIMULATION STATE (terrain SDF + water sim +
-// entities). Legacy loads restart at tick zero. With the persisted clock on, ambient fields and the
-// clock must also agree at save and after continuation.
+// entities + ground objects). Legacy loads restart at tick zero. With the persisted clock on,
+// ambient fields and the clock must also agree at save and after continuation.
 inline bool AuthoritativeStateEqual(const HeavyHashes& a, const HeavyHashes& b) {
     if (a.active_regions || b.active_regions) {
         if (a.active_regions != b.active_regions || a.clock_bytes != b.clock_bytes ||
@@ -154,7 +214,7 @@ inline bool AuthoritativeStateEqual(const HeavyHashes& a, const HeavyHashes& b) 
         }
     }
     return a.sub.terrain == b.sub.terrain && a.sub.water == b.sub.water &&
-           a.sub.entities == b.sub.entities;
+           a.sub.entities == b.sub.entities && a.ground_objects == b.ground_objects;
 }
 
 inline bool MeshEqual(const HeavyHashes& a, const HeavyHashes& b) {

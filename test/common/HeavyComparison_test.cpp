@@ -1,3 +1,4 @@
+#include <array>
 #include <cstddef>
 #include <gtest/gtest.h>
 #include <set>
@@ -8,10 +9,14 @@
 
 namespace {
 using Luminumbra::Server::AuthoritativeStateEqual;
+using Luminumbra::Server::CaptureGroundObjects;
+using Luminumbra::Server::GroundObjectDifference;
 using Luminumbra::Server::HeavyHashes;
 using Luminumbra::Server::HeavySubsystem;
 using Luminumbra::Server::HeavySubsystemTable;
 using Luminumbra::Server::MeshEqual;
+using Luminumbra::world::GroundObject;
+using Luminumbra::world::GroundObjectStore;
 
 HeavyHashes MakeBase(bool active_regions) {
     HeavyHashes h;
@@ -49,7 +54,8 @@ void ExpectFieldArityMatchesTable(const HeavyHashes& hashes, std::size_t table_r
                                   scent_hash,
                                   active_regions,
                                   clock_bytes,
-                                  ledger_bytes] = hashes;
+                                  ledger_bytes,
+                                  ground_objects] = hashes;
     [[maybe_unused]] const auto& [terrain,
                                   mesh,
                                   water,
@@ -58,7 +64,7 @@ void ExpectFieldArityMatchesTable(const HeavyHashes& hashes, std::size_t table_r
                                   weather,
                                   aether,
                                   aether_state] = hashes.sub;
-    constexpr std::size_t kTopLevelFields = 6;
+    constexpr std::size_t kTopLevelFields = 7;
     constexpr std::size_t kSubFields = 8;
     // One table row per leaf field; `sub` is a container of the kSubFields rows.
     EXPECT_EQ(table_rows, kTopLevelFields - 1 + kSubFields);
@@ -70,6 +76,7 @@ TEST(HeavyComparison, TableCoversEveryHashField) {
     const std::set<std::string> expected{"terrain",
                                          "water",
                                          "entities",
+                                         "ground_objects",
                                          "active_regions",
                                          "clock",
                                          "ledger",
@@ -133,7 +140,7 @@ TEST(HeavyComparison, InactiveRegionsSkipsOptionalRows) {
 
 TEST(HeavyComparison, InactiveRegionsStillComparesAlwaysRows) {
     const HeavyHashes base = MakeBase(false);
-    for (const char* name : {"terrain", "water", "entities"}) {
+    for (const char* name : {"terrain", "water", "entities", "ground_objects"}) {
         SCOPED_TRACE(name);
         const HeavySubsystem* row = FindRow(HeavySubsystemTable(), name);
         ASSERT_NE(row, nullptr);
@@ -148,6 +155,138 @@ TEST(HeavyComparison, OneSideActiveIsNotEqual) {
     const HeavyHashes inactive = MakeBase(false);
     EXPECT_FALSE(AuthoritativeStateEqual(active, inactive));
     EXPECT_FALSE(AuthoritativeStateEqual(inactive, active));
+}
+
+GroundObject MakeGroundObject() {
+    return GroundObject{.id = 7,
+                        .type = 2,
+                        .x_mm = 110,
+                        .y_mm = 220,
+                        .z_mm = 330,
+                        .spawn_tick = 11,
+                        .active_age = 3,
+                        .despawn_after = 20,
+                        .payload = 42,
+                        .flags = GroundObject::kSettled};
+}
+
+TEST(HeavyComparison, GroundObjectProjectionIsCanonicalAndIdenticalStatePasses) {
+    GroundObjectStore original, loaded;
+    const GroundObject first = MakeGroundObject();
+    GroundObject second = first;
+    second.id = 9;
+    ASSERT_TRUE(original.insert(second));
+    ASSERT_TRUE(original.insert(first));
+    ASSERT_TRUE(loaded.insert(first));
+    ASSERT_TRUE(loaded.insert(second));
+
+    HeavyHashes a = MakeBase(true);
+    HeavyHashes b = a;
+    a.ground_objects = CaptureGroundObjects(original);
+    b.ground_objects = CaptureGroundObjects(loaded);
+    ASSERT_EQ(a.ground_objects.size(), 2u);
+    EXPECT_EQ(a.ground_objects[0], first);
+    EXPECT_EQ(a.ground_objects[1], second);
+    EXPECT_TRUE(AuthoritativeStateEqual(a, b));
+    EXPECT_TRUE(GroundObjectDifference(a, b).empty());
+}
+
+TEST(HeavyComparison, EveryDurableGroundObjectFieldMutatesAndCompares) {
+    const GroundObject object = MakeGroundObject();
+    // Guard against adding durable fields without updating the mutation coverage/diagnostics.
+    [[maybe_unused]] const auto& [id,
+                                  type,
+                                  x_mm,
+                                  y_mm,
+                                  z_mm,
+                                  spawn_tick,
+                                  active_age,
+                                  despawn_after,
+                                  payload,
+                                  flags] = object;
+    struct Mutation {
+        const char* field;
+        void (*mutate)(GroundObject&);
+    };
+    const std::array<Mutation, 10> mutations{{
+        {"id",
+         [](GroundObject& o) {
+             ++o.id;
+         }},
+        {"type",
+         [](GroundObject& o) {
+             ++o.type;
+         }},
+        {"x_mm",
+         [](GroundObject& o) {
+             ++o.x_mm;
+         }},
+        {"y_mm",
+         [](GroundObject& o) {
+             ++o.y_mm;
+         }},
+        {"z_mm",
+         [](GroundObject& o) {
+             ++o.z_mm;
+         }},
+        {"spawn_tick",
+         [](GroundObject& o) {
+             ++o.spawn_tick;
+         }},
+        {"active_age",
+         [](GroundObject& o) {
+             ++o.active_age;
+         }},
+        {"despawn_after",
+         [](GroundObject& o) {
+             ++o.despawn_after;
+         }},
+        {"payload",
+         [](GroundObject& o) {
+             ++o.payload;
+         }},
+        {"flags",
+         [](GroundObject& o) {
+             o.flags = 0;
+         }},
+    }};
+    // Pure store fixtures: no world boot, terrain generation, persistence IO or resim ticks.
+    GroundObjectStore original;
+    ASSERT_TRUE(original.insert(object));
+    for (bool active_regions : {false, true}) {
+        SCOPED_TRACE(active_regions);
+        HeavyHashes base = MakeBase(active_regions);
+        base.ground_objects = CaptureGroundObjects(original);
+        EXPECT_TRUE(AuthoritativeStateEqual(base, base));
+        for (const auto& mutation : mutations) {
+            SCOPED_TRACE(mutation.field);
+            GroundObject changed = object;
+            mutation.mutate(changed);
+            GroundObjectStore other;
+            ASSERT_TRUE(other.insert(changed));
+            HeavyHashes mutated = base;
+            mutated.ground_objects = CaptureGroundObjects(other);
+            // Even equal ledger bytes and an equal composite hash cannot mask the object change.
+            EXPECT_EQ(base.ledger_bytes, mutated.ledger_bytes);
+            EXPECT_EQ(base.world_hash, mutated.world_hash);
+            EXPECT_FALSE(AuthoritativeStateEqual(base, mutated));
+            EXPECT_FALSE(AuthoritativeStateEqual(mutated, base));
+            EXPECT_EQ(GroundObjectDifference(base, mutated),
+                      std::string("ground_objects[id=7].") + mutation.field);
+        }
+    }
+}
+
+TEST(HeavyComparison, GroundObjectPresenceMutatesAndCompares) {
+    GroundObjectStore store;
+    ASSERT_TRUE(store.insert(MakeGroundObject()));
+    HeavyHashes empty = MakeBase(true);
+    HeavyHashes populated = empty;
+    populated.ground_objects = CaptureGroundObjects(store);
+    EXPECT_FALSE(AuthoritativeStateEqual(empty, populated));
+    EXPECT_FALSE(AuthoritativeStateEqual(populated, empty));
+    EXPECT_EQ(GroundObjectDifference(empty, populated), "ground_objects.size");
+    EXPECT_EQ(GroundObjectDifference(populated, empty), "ground_objects.size");
 }
 
 TEST(HeavyComparison, MeshEqualTracksMeshOnly) {
