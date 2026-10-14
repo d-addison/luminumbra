@@ -857,11 +857,13 @@ void UpdateShaderTools(ClientAppContext& app,
                             const auto t = std::filesystem::last_write_time(p, ec);
                             if (ec)
                                 continue;
-                            auto it = app.overlay.shader_watch_mtimes.find(p);
+                            // Each program variant must observe shared source changes.
+                            const std::string watch_key = std::string(sh_name) + "|" + p;
+                            auto it = app.overlay.shader_watch_mtimes.find(watch_key);
                             if (it != app.overlay.shader_watch_mtimes.end() && it->second != t) {
                                 changed = true;
                             }
-                            app.overlay.shader_watch_mtimes[p] = t;
+                            app.overlay.shader_watch_mtimes[watch_key] = t;
                         }
                         if (changed) {
                             LUMINUMBRA_CORE_INFO("Shader source changed on disk -> reloading {}",

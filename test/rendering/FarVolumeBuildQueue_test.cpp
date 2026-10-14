@@ -2,6 +2,7 @@
 
 #include <gtest/gtest.h>
 
+#include <array>
 #include <chrono>
 #include <condition_variable>
 #include <limits>
@@ -377,4 +378,51 @@ TEST(FarVolumeBuildQueue, TakenGeometryChargeOutlivesQueueAndMoveReplacement) {
     EXPECT_EQ(pool.used(), retained->retained_bytes());
     retained.reset();
     EXPECT_EQ(pool.used(), 0u);
+}
+
+TEST(FarVolumeBuildQueue, ExplicitSelectionControlsDispatchRatherThanInsertionOrder) {
+    JobSystem stopped_jobs;
+    FarVolumeMemoryPool pool(1024 * 1024);
+    FarVolumeBuildQueue queue(stopped_jobs, pool, QueueLimits());
+    const auto first = AirRequest();
+    auto second = AirRequest(1);
+    ASSERT_EQ(queue.Submit(first), FarVolumeSubmitStatus::Queued);
+    ASSERT_EQ(queue.Submit(second), FarVolumeSubmitStatus::Queued);
+    const std::array selected{second.identity.key, second.identity.key};
+    EXPECT_EQ(queue.Pump(2, selected), 1u); // repeated key starts only once
+    EXPECT_FALSE(queue.TakeCompleted(first.identity, first.intent));
+    auto result = queue.TakeCompleted(second.identity, second.intent);
+    ASSERT_TRUE(result);
+    if (!result)
+        return;
+    EXPECT_EQ(result->identity(), second.identity);
+    EXPECT_EQ(result->status(), FarVolumeBuildStatus::DispatchRejected);
+    EXPECT_EQ(queue.Stats().pending, 1u);
+    const std::array unknown{FarTileKey{1, 99, 99}};
+    EXPECT_EQ(queue.Pump(1, unknown), 0u);
+    EXPECT_EQ(queue.Stats().pending, 1u);
+    EXPECT_EQ(queue.Pump(1), 1u);
+}
+
+TEST(FarVolumeBuildQueue, DispatchUsesNormalLaneBehindBlockedHighWorker) {
+    JobSystem jobs;
+    jobs.startup(1);
+    FarVolumeMemoryPool pool(64 * 1024 * 1024);
+    FarVolumeBuildQueue queue(jobs, pool, QueueLimits());
+    auto barrier = std::make_shared<Barrier>();
+    ReleaseOnExit release{barrier};
+    jobs.dispatch([barrier] { barrier->Enter(); }, JobPriority::High);
+    ASSERT_TRUE(barrier->WaitEntered());
+    const auto request = AirRequest();
+    ASSERT_EQ(queue.Submit(request), FarVolumeSubmitStatus::Queued);
+    ASSERT_EQ(queue.Pump(1), 1u);
+    const auto stats = jobs.get_runtime_stats();
+    EXPECT_EQ(stats.normal_priority_queue_depth, 1u);
+    EXPECT_EQ(stats.high_priority_queue_depth, 0u);
+    barrier->Release();
+    auto result = WaitResult(queue, request);
+    ASSERT_TRUE(result);
+    if (!result)
+        return;
+    EXPECT_EQ(result->status(), FarVolumeBuildStatus::ReadyEmpty);
 }

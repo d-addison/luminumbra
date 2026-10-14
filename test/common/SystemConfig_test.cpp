@@ -9,10 +9,12 @@
 #include <fstream>
 #include <sstream>
 #include <string>
+#include <utility>
 
 #include <glm/glm.hpp>
 #include <iomanip>
 
+#include "luminumbra_client/rendering/FarWorldRenderer.h"
 #include "luminumbra_common/core/SystemConfig.h"
 #include "luminumbra_common/persistence/WorldPersistenceRoundtrip.h" // StableChecksum
 
@@ -23,10 +25,12 @@ using luminumbra::core::SystemConfig;
 namespace {
 
 // missing/empty config yields all-defaults, no crash.
-TEST(SystemConfig, ShippingDefaultsAllOn) {
+TEST(SystemConfig, ShippingDefaultsOnExceptFarWorldLadder) {
     const SystemConfig cfg = SystemConfig::Defaults();
-    for (unsigned key = 0; key < static_cast<unsigned>(SysKey::Count); ++key)
-        EXPECT_TRUE(cfg.enabled(static_cast<SysKey>(key))) << key;
+    for (unsigned key = 0; key < static_cast<unsigned>(SysKey::Count); ++key) {
+        const auto id = static_cast<SysKey>(key);
+        EXPECT_EQ(cfg.enabled(id), id != SysKey::RenderFarWorldLadder) << key;
+    }
     EXPECT_TRUE(cfg.enabled(SysKey::SimPlantGrowth));
     EXPECT_TRUE(cfg.enabled(SysKey::SimErosion));
     EXPECT_TRUE(cfg.enabled(SysKey::RenderMoonlight));
@@ -371,7 +375,9 @@ TEST(SystemConfig, PackagedFlagsAgreeWithCompiledDefaults) {
     std::ifstream file(path);
     const auto document = nlohmann::json::parse(file);
 #define CHECK_PACKAGED_FLAG(name, section, json_section, json_name, residency)                     \
-    EXPECT_TRUE(document.at(json_section).at(json_name).at("enabled").get<bool>()) << json_name;
+    EXPECT_EQ(document.at(json_section).at(json_name).at("enabled").get<bool>(),                   \
+              SystemConfig::Defaults().enabled(SysKey::name))                                      \
+        << json_name;
     LUMIN_CONFIG_KEY_TABLE(CHECK_PACKAGED_FLAG)
 #undef CHECK_PACKAGED_FLAG
     const auto packaged = SystemConfig::LoadFromFile(path.string());
@@ -388,6 +394,114 @@ TEST(SystemConfig, SavedFalseVsyncRemainsAuthoritative) {
     EXPECT_FALSE(cfg.user().vsync);
     EXPECT_TRUE(cfg.enabled(SysKey::SimErosion));
     EXPECT_TRUE(cfg.enabled(SysKey::RenderTaau));
+}
+
+TEST(SystemConfig, FarWorldCaveFieldDefaultsAndExactNumericCodes) {
+    using namespace Luminumbra::Rendering;
+    using Luminumbra::World::FarCaveMode;
+    const auto defaults = SystemConfig::Defaults();
+    EXPECT_FALSE(defaults.enabled(SysKey::RenderFarWorldLadder));
+    EXPECT_EQ(ResolveFarWorldCaveField(
+                  defaults.param(SysParam::FarWorldCaveField, kDefaultFarWorldCaveFieldCode)),
+              FarCaveMode::BandLimited);
+    // The compiled schema default and the selector fallback must agree.
+    constexpr float schema_defaults[]{
+#define SCHEMA_SCALAR_DEFAULT(ENUM, OWNER, NAME, VEC, DEFAULT, X, Y, Z) DEFAULT,
+        LUMIN_CONFIG_PARAM_TABLE(SCHEMA_SCALAR_DEFAULT)
+#undef SCHEMA_SCALAR_DEFAULT
+    };
+    EXPECT_EQ(schema_defaults[static_cast<std::size_t>(SysParam::FarWorldCaveField)],
+              kDefaultFarWorldCaveFieldCode);
+    for (const auto& [code, expected] : {std::pair{"0", FarCaveMode::BandLimited},
+                                         std::pair{"-0.0", FarCaveMode::BandLimited},
+                                         std::pair{"1", FarCaveMode::BoxFiltered},
+                                         std::pair{"1.0", FarCaveMode::BoxFiltered}}) {
+        const auto cfg = SystemConfig::FromJsonString(
+            std::string(
+                R"({"render":{"far_world_ladder":{"enabled":true,"params":{"cave_field":)") +
+            code + "}}}}");
+        EXPECT_TRUE(cfg.enabled(SysKey::RenderFarWorldLadder));
+        EXPECT_EQ(ResolveFarWorldCaveField(cfg.param(SysParam::FarWorldCaveField, -1)), expected);
+    }
+}
+
+TEST(SystemConfig, InvalidCaveCodesCannotRoundOrUnderflowToValidEnumCodes) {
+    using namespace Luminumbra::Rendering;
+    for (const auto code : {"-1",
+                            "2",
+                            "255",
+                            "0.5",
+                            "1.5",
+                            "1.00000001",
+                            "0.99999999",
+                            "1e-46",
+                            "-1e-46",
+                            "1e39",
+                            "-1e39"}) {
+        SCOPED_TRACE(code);
+        const auto cfg = SystemConfig::FromJsonString(
+            std::string(
+                R"({"render":{"far_world_ladder":{"enabled":true,"params":{"cave_field":)") +
+            code + "}}}}");
+        EXPECT_TRUE(cfg.enabled(SysKey::RenderFarWorldLadder));
+        EXPECT_FALSE(ResolveFarWorldCaveField(
+            cfg.param(SysParam::FarWorldCaveField, kDefaultFarWorldCaveFieldCode)));
+    }
+}
+
+TEST(SystemConfig, ExplicitNonNumericCaveFieldsRefuseLadderWithoutChangingOtherParameters) {
+    using namespace Luminumbra::Rendering;
+    for (const auto value : {"true", "false", R"("BoxFiltered")", "null", "[]", "{}"}) {
+        SCOPED_TRACE(value);
+        const auto cfg = SystemConfig::FromJsonString(
+            std::string(
+                R"({"render":{"far_world_ladder":{"enabled":true,"params":{"cave_field":)") +
+            value + R"(}},"moonlight":{"params":{"strength":)" + value + "}}}}");
+        const auto requested = ResolveFarWorldCaveField(
+            cfg.param(SysParam::FarWorldCaveField, kDefaultFarWorldCaveFieldCode));
+        EXPECT_FALSE(requested); // Also selects startup's invalid-code warning.
+        EXPECT_FLOAT_EQ(cfg.param(SysParam::MoonlightStrength, .75f), .75f);
+        FarWorldRenderer renderer(RequestedFarWorldMode(cfg.enabled(SysKey::RenderFarWorldLadder)));
+        renderer.SetRequestedCavePolicy(requested);
+        const auto selection = renderer.Selection(FarWorldPurpose::World);
+        EXPECT_EQ(selection.refusal, FarWorldRefusal::InvalidCavePolicy);
+        EXPECT_EQ(selection.effective, FarWorldMode::Legacy);
+        EXPECT_FALSE(renderer.CavePolicy(selection).effective);
+        Luminumbra::JobSystem jobs;
+        EXPECT_EQ(renderer.BindFixture(jobs, {}, 1, 1, FarWorldDevelopmentLimits()),
+                  FarWorldRefusal::InvalidCavePolicy);
+    }
+    const auto absent = SystemConfig::FromJsonString(
+        R"({"render":{"far_world_ladder":{"enabled":true,"params":{}}}})");
+    EXPECT_EQ(ResolveFarWorldCaveField(
+                  absent.param(SysParam::FarWorldCaveField, kDefaultFarWorldCaveFieldCode)),
+              Luminumbra::World::FarCaveMode::BandLimited);
+}
+
+TEST(SystemConfig, CaveFieldIsRenderOnlyAndIgnoredByUserOverlay) {
+    using namespace Luminumbra::Rendering;
+    using Luminumbra::World::FarCaveMode;
+    const auto sim = SystemConfig::FromJsonString(R"({"sim":{"erosion":{"enabled":true}}})");
+    for (const auto enabled : {"false", "true"}) {
+        for (const auto code : {"0", "1", "0.5"}) {
+            auto cfg = SystemConfig::FromJsonString(
+                std::string(
+                    R"({"sim":{"erosion":{"enabled":true}},"render":{"far_world_ladder":{"enabled":)") +
+                enabled + R"(,"params":{"cave_field":)" + code + "}}}}");
+            EXPECT_EQ(cfg.ComputeConfigSubHash(), sim.ComputeConfigSubHash());
+            cfg.OverlayUserFromJsonString(R"({"render":{"far_world_ladder":{
+                "enabled":true,"params":{"cave_field":1}}}})");
+            if (std::string(code) == "0")
+                EXPECT_EQ(ResolveFarWorldCaveField(cfg.param(SysParam::FarWorldCaveField, -1)),
+                          FarCaveMode::BandLimited);
+            else if (std::string(code) == "1")
+                EXPECT_EQ(ResolveFarWorldCaveField(cfg.param(SysParam::FarWorldCaveField, -1)),
+                          FarCaveMode::BoxFiltered);
+            else
+                EXPECT_FALSE(ResolveFarWorldCaveField(cfg.param(SysParam::FarWorldCaveField, -1)));
+            EXPECT_EQ(cfg.enabled(SysKey::RenderFarWorldLadder), std::string(enabled) == "true");
+        }
+    }
 }
 
 } // namespace
