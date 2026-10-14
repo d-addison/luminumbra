@@ -150,12 +150,36 @@ add_executable(common_tests
     common/EngineContracts_test.cpp
     common/ResidencyContract_test.cpp
     common/FarLodStore_test.cpp
+    common/FarVolumeWorld_test.cpp
+    common/FarVolumeRuntime_test.cpp
+    common/FarVolumeTierMemory_test.cpp
+    rendering/FarVolumeRenderMesh_test.cpp
+    rendering/FarVolumeBuildQueue_test.cpp
+    rendering/FarVolumeUpload_test.cpp
+    rendering/FarVolumeGpuBackend_test.cpp
+    rendering/FarVolumeResidency_test.cpp
+    rendering/FarWorldRenderer_test.cpp
+    rendering/FarWorldOwnership_test.cpp
+    rendering/FarWorldDepthBias_test.cpp
+    rendering/FarWorldCaveSelection_test.cpp
+    rendering/FarWorldSurfaceTag_test.cpp
+    rendering/ShaderSource_test.cpp
+    ../src/luminumbra_client/rendering/ShaderSource.cpp
+    ../src/luminumbra_client/rendering/FarWorldRenderer.cpp
+    ../src/luminumbra_client/rendering/FarWorldOwnership.cpp
+    ../src/luminumbra_client/rendering/FarWorldDepthBias.cpp
+    ../src/luminumbra_client/rendering/FarVolumeBuildQueue.cpp
+    ../src/luminumbra_client/rendering/FarVolumeUpload.cpp
+    ../src/luminumbra_client/rendering/FarVolumeGpuBackend.cpp
+    ../src/luminumbra_client/rendering/FarVolumeResidency.cpp
+    ../src/luminumbra_client/rendering/FarVolumeRenderMesh.cpp
     common/FarTierTable_test.cpp
     common/FarHorizon_test.cpp
     common/FarWantedSet_test.cpp
     common/FarAuthorityOverlay_test.cpp
     common/GameSessionHeadlessWorld_test.cpp
     common/SimBudgetTelemetry_test.cpp
+    common/HeavyComparison_test.cpp
     common/SimBudgetProfile_test.cpp
     ../src/luminumbra_server/modes/SmokeArtifact.cpp
     common/JobSystem_test.cpp
@@ -196,6 +220,7 @@ add_executable(common_tests
     common/world_streaming_hardening_test.cpp
     common/HydraulicErosion_test.cpp
     common/WorldStreamingState_test.cpp
+    persistence/synthetic_save_fixture_test.cpp
     sim/fire_spread_test.cpp
     sim/soil_nutrient_test.cpp
     sim/pollination_test.cpp
@@ -251,6 +276,7 @@ target_include_directories(common_tests PRIVATE
 target_link_libraries(common_tests PRIVATE
     gtest_main
     luminumbra_common
+    luminumbra_save_fixture_support
 )
 
 # File-only path contracts run without a GL context or the common-library graph.
@@ -412,7 +438,8 @@ target_link_libraries(foliage_cache_prune_test PRIVATE
 
 add_executable(render_smoke_test
     rendering/render_smoke_test.cpp
-    ../src/luminumbra_common/core/FilesystemPath.cpp
+    rendering/FarWorldShadow_test.cpp
+    rendering/TerrainCullingTestPeer.h
 )
 
 target_compile_definitions(render_smoke_test PRIVATE
@@ -422,9 +449,11 @@ target_compile_definitions(render_smoke_test PRIVATE
 
 target_include_directories(render_smoke_test PRIVATE
 ../src
+../src/luminumbra_client
 )
 
 target_link_libraries(render_smoke_test PRIVATE
+    luminumbra_client
     glm::glm
     gtest_main
     glfw
@@ -1430,7 +1459,9 @@ add_executable(world_open_refusal_test
     persistence/world_open_refusal_test.cpp
     common/SimBudgetWorldParity_test.cpp
     persistence/async_saved_world_catalog_test.cpp
+    persistence/host_scheduler_fault_test.cpp
     ../src/luminumbra_server/ServerWorldRunner.cpp
+    ../src/luminumbra_server/modes/ModeHelpers.cpp
 )
 target_include_directories(world_open_refusal_test PRIVATE ../src ../src/luminumbra_common)
 target_compile_definitions(world_open_refusal_test PRIVATE LUMINUMBRA_SOURCE_ROOT="${CMAKE_SOURCE_DIR}")
