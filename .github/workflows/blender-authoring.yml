@@ -23,8 +23,14 @@ concurrency:
   # Devel pushes share one workflow/ref group: the running run finishes, while
   # GitHub's queue of one replaces a pending run with the newest devel push.
   # The push suffix separates this group from cancellable scheduled runs.
-  # The campaign freeze audit accepts a superseded devel run when a descendant
-  # devel SHA's run of this same workflow is green or pending.
+  # The campaign freeze audit covers a devel push run that ended cancelled
+  # only with a newer devel push run of the same workflow path on a descendant
+  # SHA that is pending or successful, or whose first attempt failed but has
+  # an accepted automatic rerun request. Coverage is recomputed on every audit.
+  # If the covering run later fails, or itself ends cancelled without its own
+  # covering run, the freeze re-latches. Failed runs are never covered by
+  # descendants; only their own successful rerun or an explicit resolution
+  # can resolve them.
   # Main pushes and manual runs (including qualification captures) have isolated
   # groups and never cancel. PRs previously had no concurrency limit, so each
   # PR run keeps its own group and finishes without cancellation.

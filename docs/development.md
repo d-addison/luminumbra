@@ -222,11 +222,17 @@ captures retain full build/test coverage and cache bypass.
 
 Devel pushes share one concurrency group per workflow and ref with
 `cancel-in-progress: false`. A running run completes; GitHub's queue of one
-supersedes a pending run with the newest devel push. The campaign freeze audit
-accepts a superseded devel run when a descendant devel SHA's run of the same
-workflow is green or pending. A failed completed run remains a failure. Scheduled
-runs use a separate group so their cancellation cannot interrupt devel pushes. Main
-pushes and manual dispatches, including qualification captures, have isolated
+supersedes a pending run with the newest devel push.
+The campaign freeze audit covers a devel push run that ended cancelled
+only with a newer devel push run of the same workflow path on a descendant
+SHA that is pending or successful, or whose first attempt failed but has
+an accepted automatic rerun request. Coverage is recomputed on every audit.
+If the covering run later fails, or itself ends cancelled without its own
+covering run, the freeze re-latches. Failed runs are never covered by
+descendants; only their own successful rerun or an explicit resolution
+can resolve them.
+Scheduled runs use a separate group so their cancellation cannot interrupt devel
+pushes. Main pushes and manual dispatches, including qualification captures, have isolated
 non-cancelling groups, preserving their individual evidence. PR runs retain ref
 batching and cancellation where previously configured, so `ready_for_review`
 supersedes earlier draft runs and `converted_to_draft` cancels in-flight ready

@@ -190,6 +190,27 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
         inventory = jobs(self.workflows["ci.yml"])["public-tree"]
         self.assertIn("python3 tools/ci/test_workflow_policy.py", inventory)
 
+    def test_freeze_audit_comment_is_identical_in_every_workflow(self):
+        expected = {
+            "ci.yml", "asan.yml", "performance.yml", "docs.yml",
+            "game-assets.yml", "blender-authoring.yml", "ucrt-attribution.yml",
+        }
+        comments = {}
+        for path in (ROOT / ".github/workflows").glob("*.yml"):
+            workflow = path.read_text(encoding="utf-8")
+            matches = re.findall(
+                r"^  # The campaign freeze audit[^\n]*\n(?:  #[^\n]*\n)*?"
+                r"(?=  # Main pushes)", workflow, re.MULTILINE,
+            )
+            with self.subTest(workflow=path.name):
+                if path.name in expected:
+                    self.assertEqual(len(matches), 1)
+                if matches:
+                    self.assertEqual(len(matches), 1)
+                    comments[path.name] = matches[0]
+        self.assertEqual(set(comments), expected)
+        self.assertEqual(len(set(comments.values())), 1, comments)
+
 
 if __name__ == "__main__":
     unittest.main()
