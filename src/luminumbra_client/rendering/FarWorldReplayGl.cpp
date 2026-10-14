@@ -172,7 +172,8 @@ class GlAccess final : public ReplayStateAccess {
             else if (a.integer)
                 glVertexAttribIFormat(i, a.size, a.type, a.relative_offset);
             else
-                glVertexAttribFormat(i, a.size, a.type, a.normalized, a.relative_offset);
+                glVertexAttribFormat(
+                    i, a.size, a.type, static_cast<GLboolean>(a.normalized), a.relative_offset);
             glVertexAttribBinding(i, a.binding);
             if (a.enabled)
                 glEnableVertexAttribArray(i);
@@ -205,7 +206,8 @@ class GlAccess final : public ReplayStateAccess {
         }
         for (std::size_t i = 0; i < state.attachments.size(); ++i) {
             auto& a = state.attachments[i];
-            a.point = i < static_cast<std::size_t>(colors)    ? GL_COLOR_ATTACHMENT0 + i
+            a.point = i < static_cast<std::size_t>(colors)
+                          ? GL_COLOR_ATTACHMENT0 + static_cast<GLenum>(i)
                       : i == static_cast<std::size_t>(colors) ? GL_DEPTH_ATTACHMENT
                                                               : GL_STENCIL_ATTACHMENT;
             const auto get = [&](GLenum query, GLint& value) {
@@ -599,7 +601,8 @@ public:
                 else if (a.integer)
                     glVertexAttribIFormat(i, a.size, a.type, a.relative_offset);
                 else
-                    glVertexAttribFormat(i, a.size, a.type, a.normalized, a.relative_offset);
+                    glVertexAttribFormat(
+                        i, a.size, a.type, static_cast<GLboolean>(a.normalized), a.relative_offset);
                 glVertexAttribBinding(i, a.binding);
                 if (a.enabled)
                     glEnableVertexAttribArray(i);
@@ -637,7 +640,8 @@ public:
         glActiveTexture(active_);
         for (GLuint i = 0; i < images_.size(); ++i) {
             const auto& v = images_[i];
-            glBindImageTexture(i, v.name, v.level, v.layered, v.layer, v.access, v.format);
+            glBindImageTexture(
+                i, v.name, v.level, static_cast<GLboolean>(v.layered), v.layer, v.access, v.format);
         }
         glViewport(viewport_[0], viewport_[1], viewport_[2], viewport_[3]);
         glScissor(scissor_[0], scissor_[1], scissor_[2], scissor_[3]);

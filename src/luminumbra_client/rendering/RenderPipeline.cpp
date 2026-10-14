@@ -61,6 +61,7 @@
 #include <nlohmann/json.hpp>
 #include <random>
 #include <stb_image.h>
+#include <stdexcept>
 #include <unordered_set>
 #include <utility>
 
