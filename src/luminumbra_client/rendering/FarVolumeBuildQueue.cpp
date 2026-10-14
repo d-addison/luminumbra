@@ -56,6 +56,7 @@ FarVolumeQueueCompletion::operator=(FarVolumeQueueCompletion&& other) noexcept {
         status_ = other.status_;
         compilation_failure_ = other.compilation_failure_;
         conversion_failure_ = other.conversion_failure_;
+        water_failure_ = other.water_failure_;
     }
     return *this;
 }
@@ -122,7 +123,11 @@ FarVolumeSubmitStatus FarVolumeBuildQueue::Submit(const FarVolumeQueueRequest& r
         const auto& previous = *held;
         if (previous.identity == request.identity) {
             if (previous.intent != request.intent ||
-                previous.authority.numeric != request.authority.numeric)
+                previous.authority.numeric != request.authority.numeric ||
+                bool(previous.water) != bool(request.water) ||
+                previous.water_bound != request.water_bound ||
+                (previous.water && request.water &&
+                 previous.water->content_identity() != request.water->content_identity()))
                 return FarVolumeSubmitStatus::Invalid;
             // Forgotten in-flight work revives only after cancellation drains.
             // Ordinary equal requests still cannot restart/retry completed work.
@@ -216,9 +221,39 @@ void FarVolumeBuildQueue::Run(Slot* slot) noexcept {
                 result.status_ = FarVolumeBuildStatus::ConvertRefused;
             else if (slot->cancelled.load(std::memory_order_acquire))
                 result.status_ = FarVolumeBuildStatus::Cancelled;
-            else
-                result.status_ = result.mesh_.indices.empty() ? FarVolumeBuildStatus::ReadyEmpty
-                                                              : FarVolumeBuildStatus::Ready;
+            else {
+                if (!request->water || !request->water_bound ||
+                    request->water->content_identity() != request->identity.content_hash) {
+                    result.water_failure_ = FarWorldWaterError::Unavailable;
+                    result.status_ = FarVolumeBuildStatus::WaterRefused;
+                } else {
+                    const auto& mesh_limits = slot->limits.compilation.mesh;
+                    // Keep converted terrain and its charge through combined conversion.
+                    World::FarVolumeMemoryLease combined_charge(*slot->pool);
+                    FarVolumeRenderMesh combined;
+                    if (!BuildFarWorldWaterMesh(result.mesh_,
+                                                *request->water,
+                                                *request->water_bound,
+                                                {kFarWorldWaterSamples,
+                                                 kFarWorldWaterCells,
+                                                 mesh_limits.max_vertices,
+                                                 mesh_limits.max_indices,
+                                                 slot->limits.max_converted_bytes},
+                                                {slot->pool, &combined_charge, slot->upstream},
+                                                combined,
+                                                &result.water_failure_))
+                        result.status_ = FarVolumeBuildStatus::WaterRefused;
+                    else {
+                        result.mesh_ = std::move(combined);
+                        result.retained_ = std::move(combined_charge);
+                        result.status_ = result.mesh_.indices.empty()
+                                             ? FarVolumeBuildStatus::ReadyEmpty
+                                             : FarVolumeBuildStatus::Ready;
+                    }
+                }
+                if (slot->cancelled.load(std::memory_order_acquire))
+                    result.status_ = FarVolumeBuildStatus::Cancelled;
+            }
         }
     } catch (...) {
         result.status_ = FarVolumeBuildStatus::Failed;

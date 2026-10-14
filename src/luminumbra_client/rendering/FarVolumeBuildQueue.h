@@ -1,6 +1,6 @@
 #pragma once
 
-#include "FarVolumeRenderMesh.h"
+#include "FarWorldWaterMesh.h"
 #include "luminumbra_common/core/JobSystem.h"
 #include "luminumbra_common/world/FarVolumeRuntime.h"
 
@@ -23,6 +23,8 @@ struct FarVolumeQueueRequest {
     // Owned immutable observations, as required by the canonical facade. The
     // field token equals content_hash and includes cave/numeric semantics.
     World::FarVolumeAuthority authority;
+    std::shared_ptr<const FarWorldWaterObservation> water = {};
+    std::optional<FarWorldWaterBound> water_bound = std::nullopt;
 };
 
 enum class FarVolumeSubmitStatus {
@@ -38,6 +40,7 @@ enum class FarVolumeBuildStatus {
     ReadyEmpty,
     CompileRefused,
     ConvertRefused,
+    WaterRefused,
     DispatchRejected,
     Cancelled,
     Failed
@@ -67,6 +70,9 @@ public:
     FarVolumeRenderError conversion_failure() const noexcept {
         return conversion_failure_;
     }
+    FarWorldWaterError water_failure() const noexcept {
+        return water_failure_;
+    }
     const World::FarVolumeMemoryPool* memory_pool() const noexcept {
         return retained_.pool();
     }
@@ -84,6 +90,7 @@ private:
     FarVolumeBuildStatus status_ = FarVolumeBuildStatus::Failed;
     World::FarVolumeFacadeFailure compilation_failure_;
     FarVolumeRenderError conversion_failure_ = FarVolumeRenderError::None;
+    FarWorldWaterError water_failure_ = FarWorldWaterError::None;
     // Destruction frees buffers before releasing their charge.
     World::FarVolumeMemoryLease retained_;
     FarVolumeRenderMesh mesh_;

@@ -39,11 +39,14 @@ set(CLIENT_INTERNAL_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/rendering/AsyncReadbackRing.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/CaptureHooks.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/FarLodSystem.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/rendering/FarWorldWaterMesh.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/FarVolumeRenderMesh.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/FarVolumeBuildQueue.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/FarVolumeUpload.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/FarVolumeGpuBackend.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/FarVolumeGlBackend.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/rendering/FarWorldReplayGl.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/rendering/FarWorldDiagnostics.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/FarWorldRenderer.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/FarWorldOwnership.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/FarWorldDepthBias.cpp

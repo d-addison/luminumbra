@@ -131,6 +131,16 @@ public:
     std::uint64_t content_identity() const noexcept override {
         return 42;
     }
+    FarWorldWaterCapability WaterCapability() const noexcept override {
+        return FarWorldWaterCapability::ExplicitlyDry;
+    }
+    std::optional<FarWorldWaterBound>
+    WaterBound(const Luminumbra::World::FarTileKey&) const override {
+        return FarWorldWaterBound{true, 0, 0};
+    }
+    std::optional<FarWorldWaterSample> WaterSample(std::int64_t, std::int64_t) const override {
+        return FarWorldWaterSample{false, 0};
+    }
     std::uint64_t owned_bytes() const noexcept override {
         return sizeof(*this);
     }
@@ -265,14 +275,13 @@ TEST_F(FarWorldShadowGl, UploadedLadderAllocationsNeverEnterProductionCascades) 
 
     auto backend = std::make_unique<ShadowBoundaryDriver>(pass.shadow_map().fbo_id);
     auto* observer = backend.get();
-    auto& far = pipeline.far_world_renderer();
-    far.SetRequested(FarWorldMode::Ladder);
-    far.InstallBackend(std::move(backend));
-    ASSERT_EQ(far.BindFixture(workers.jobs,
-                              std::make_shared<const ShadowBoundaryFixture>(),
-                              1,
-                              1,
-                              FarWorldDevelopmentLimits()),
+    const auto& far = pipeline.far_world_renderer();
+    pipeline.set_far_world_mode(FarWorldMode::Ladder);
+    ASSERT_EQ(TerrainCullingTestPeer::BindShadowFarWorldFixture(
+                  pipeline,
+                  workers.jobs,
+                  std::move(backend),
+                  std::make_shared<const ShadowBoundaryFixture>()),
               FarWorldRefusal::None);
     ASSERT_EQ(far.Selection(FarWorldPurpose::World).effective, FarWorldMode::Ladder);
     ASSERT_NE(far.Residency(), nullptr);
@@ -287,7 +296,8 @@ TEST_F(FarWorldShadowGl, UploadedLadderAllocationsNeverEnterProductionCascades) 
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
     bool settled = false;
     do {
-        ASSERT_TRUE(far.AdvanceFrame(++frame, {0, 0, 0}, requests));
+        ASSERT_TRUE(TerrainCullingTestPeer::AdvanceShadowFarWorldFrame(
+            pipeline, ++frame, {0, 0, 0}, requests));
         settled = true;
         for (const auto& request : requests) {
             const auto observed = far.Residency()->Observe(request.identity.key);
@@ -306,8 +316,7 @@ TEST_F(FarWorldShadowGl, UploadedLadderAllocationsNeverEnterProductionCascades) 
         ASSERT_NE(allocation, nullptr);
         EXPECT_GT(allocation->bytes(), 0u);
     }
-    far.BeginLiveOwnership(frame);
-    ASSERT_TRUE(far.FinishLiveOwnership());
+    ASSERT_TRUE(TerrainCullingTestPeer::PublishEmptyShadowFarWorldOwnership(pipeline, frame));
 
     // Prove real residency allocations are submit-ready before the exclusion
     // assertion; a refused/unsettled FarWorld would make that assertion vacuous.
@@ -318,7 +327,8 @@ TEST_F(FarWorldShadowGl, UploadedLadderAllocationsNeverEnterProductionCascades) 
         return true;
     };
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
-    const auto drawable = far.Submit({0, 0, 0}, prepare);
+    const auto drawable =
+        TerrainCullingTestPeer::SubmitShadowFarWorld(pipeline, {0, 0, 0}, prepare);
     ASSERT_EQ(drawable.refused, 0u);
     ASSERT_EQ(drawable.draws, requests.size());
     ASSERT_EQ(prepared, requests.size());
@@ -359,7 +369,8 @@ TEST_F(FarWorldShadowGl, UploadedLadderAllocationsNeverEnterProductionCascades) 
     ShadowPassInput injected;
     injected.light_space_matrices = pass.shadow_map().light_space_matrices;
     injected.submit_terrain = [&](const glm::vec4(&)[6]) {
-        const auto stats = far.Submit({0, 0, 0}, prepare);
+        const auto stats =
+            TerrainCullingTestPeer::SubmitShadowFarWorld(pipeline, {0, 0, 0}, prepare);
         EXPECT_EQ(stats.refused, 0u);
         return TerrainSubmitStats{stats.draws, stats.draws, stats.indices};
     };
