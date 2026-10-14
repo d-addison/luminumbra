@@ -155,6 +155,13 @@
       "source": "Luminumbra first-party runtime data"
     },
     {
+      "bytes": 148,
+      "license": "MIT",
+      "path": "data/common/items/items.json",
+      "sha256": "186f8eede4d0ffcc9ff10f9544b2ec47748afa1793195ee6bd902644ea9d3d54",
+      "source": "Luminumbra first-party runtime data"
+    },
+    {
       "bytes": 3729,
       "license": "MIT",
       "path": "data/common/materials.json",

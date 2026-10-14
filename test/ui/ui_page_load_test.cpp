@@ -184,6 +184,10 @@ TEST(UiPageLoadTest, EveryShippedDocumentLoadsWithAPopulatedBody) {
         EXPECT_GT(document->GetNumChildren(), 0)
             << page.path << " — body has no children (markup parsed empty)";
 
+        if (std::string(page.path) == "hud.rml")
+            EXPECT_NE(ui.GetContext()->GetFocusElement(), document)
+                << "Showing the passive HUD must not focus its document";
+
         ++documents_loaded;
 
         // Unload so the next document's body-id lookup is unambiguous.

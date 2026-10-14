@@ -266,6 +266,7 @@ bool ServerWorldRunner::Boot() {
         const auto sys_cfg = luminumbra::core::SystemConfig::LoadFromFile(systems_json.string());
         m_session->SetActiveRegionsEnabled(
             sys_cfg.enabled(luminumbra::core::SysKey::SimActiveRegions));
+        m_session->SetItemConsumerEnabled(true);
         m_session->SetParkedBytesLimit(static_cast<std::size_t>(m_config.parked_bytes_limit));
         m_session->SetWaterHighResEnabled(
             sys_cfg.enabled(luminumbra::core::SysKey::SimWaterHighRes));
@@ -280,7 +281,9 @@ bool ServerWorldRunner::Boot() {
         world_ready = m_session->CreateWorld(m_config.world_name, m_config.seed, m_config.preset);
     }
     if (!world_ready) {
-        m_bootError = m_session->GetWorldOpenError();
+        m_bootError = m_session->GetLastWorldOpenAttemptError();
+        if (m_bootError.empty())
+            m_bootError = m_session->GetWorldOpenError();
         LUMINUMBRA_CORE_ERROR("ServerWorldRunner: world boot failed (preset='{}', world_id='{}')",
                               m_config.preset,
                               m_config.world_id);
@@ -294,7 +297,9 @@ bool ServerWorldRunner::Boot() {
     // fills gaps and can never clobber authoritative saved voxel data. A
     // fresh world is a clean miss here.
     if (m_config.world_id.empty() && !m_session->LoadWorldState()) {
-        m_bootError = m_session->GetWorldOpenError();
+        m_bootError = m_session->GetLastWorldOpenAttemptError();
+        if (m_bootError.empty())
+            m_bootError = m_session->GetWorldOpenError();
         LUMINUMBRA_CORE_ERROR("ServerWorldRunner: world open refused: {}", m_bootError);
         m_session.reset();
         m_jobSystem.shutdown();

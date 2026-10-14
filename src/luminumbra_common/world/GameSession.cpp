@@ -42,6 +42,7 @@
 #include "../core/JobSystem.h"
 #include "../core/Log.h"
 #include "../fields/EnergyFieldState.h"
+#include "../game/ItemDrop.h"
 #include "../persistence/PlantPersistence.h"
 #include "../persistence/SaveTransaction.h"
 #include "../persistence/SavedWorldCatalog.h"
@@ -197,6 +198,8 @@ void GameSession::ResetWorldSystems() {
     m_worldClock = WorldClock{};
     m_activeRegionLedger = ActiveRegionLedger(m_regionSchedulerConfig);
     m_groundObjects.clear();
+    m_itemCatalogue.reset();
+    m_farmingController = {};
     m_fieldPages.clear();
     m_regionSchedule = {};
     m_replicatedSimulationAnchors.reset();
@@ -1107,6 +1110,62 @@ GameSession::ValidateWorldConfig(const std::string& root_path,
     return result;
 }
 
+void GameSession::SetItemConsumerEnabled(bool enabled) {
+    if (m_worldSystem)
+        throw std::logic_error("Configure the item consumer before world creation/open");
+    m_itemConsumerEnabled = enabled;
+}
+
+bool GameSession::PrepareItemCatalogue(
+    std::shared_ptr<const luminumbra::game::ItemCatalogue>& candidate, std::string& error) {
+    if (!ItemConsumerEnabled())
+        return true;
+    luminumbra::game::ItemCatalogue parsed;
+    if (!luminumbra::game::ItemCatalogue::load(RuntimeRoot(m_rootPath) /
+                                                   luminumbra::game::ItemCatalogue::kRelativePath,
+                                               parsed,
+                                               error) ||
+        !parsed.ValidateGameAdmission(error))
+        return false;
+    candidate = std::make_shared<const luminumbra::game::ItemCatalogue>(std::move(parsed));
+    return true;
+}
+
+bool GameSession::PrepareSavedItems(const fs::path& save_dir,
+                                    const luminumbra::game::ItemCatalogue* catalogue,
+                                    int& seeds,
+                                    std::string& error) {
+    if (!ItemConsumerEnabled())
+        return true;
+    if (!catalogue) {
+        error = "Item catalogue has not been admitted.";
+        return false;
+    }
+    if (!luminumbra::game::LoadFarmingInventory(save_dir, seeds, error))
+        return false;
+    // Resolve references entirely in candidate data before touching the live world.
+    WorldClock clock;
+    bool requires_active_regions = false;
+    ActiveRegionLedger ledger;
+    GroundObjectStore objects;
+    std::vector<std::string> errors;
+    if (!Persistence::WorldSaveService::read_clock_metadata(
+            save_dir, clock, requires_active_regions, &errors) ||
+        !Persistence::WorldSaveService::load_active_regions(ledger, save_dir, &errors, clock) ||
+        !Persistence::WorldSaveService::load_ground_objects(
+            objects, save_dir, ledger.next_persistent_id(), &errors)) {
+        error = errors.empty() ? "Corrupt saved item state." : errors.front();
+        return false;
+    }
+    for (const auto& [id, object] : objects.objects()) {
+        if (!catalogue->FindByType(object.type)) {
+            error = "Unknown saved item type: " + std::to_string(object.type);
+            return false;
+        }
+    }
+    return true;
+}
+
 bool GameSession::CreateWorld(const std::string& name,
                               const std::string& seed,
                               const std::string& worldType,
@@ -1125,7 +1184,10 @@ bool GameSession::CreateWorldInternal(const std::string& name,
                                       const std::string& worldType,
                                       const std::string* customPresetJson,
                                       bool transient) {
-    m_worldOpenError.clear();
+    m_lastWorldOpenAttemptError.clear();
+    std::string& open_error =
+        ItemConsumerEnabled() ? m_lastWorldOpenAttemptError : m_worldOpenError;
+    open_error.clear();
     if (!m_jobSystem) {
         LUMINUMBRA_CORE_ERROR("JobSystem not set before creating world");
         return false;
@@ -1140,6 +1202,10 @@ bool GameSession::CreateWorldInternal(const std::string& name,
         return false;
     }
 
+    std::shared_ptr<const luminumbra::game::ItemCatalogue> items;
+    if (!PrepareItemCatalogue(items, open_error))
+        return false;
+
     WorldMetadata metadata;
     metadata.name = name;
     metadata.seed = seed.empty() ? std::to_string(std::random_device{}()) : seed;
@@ -1152,8 +1218,8 @@ bool GameSession::CreateWorldInternal(const std::string& name,
         try {
             fs::create_directories(worldPath);
         } catch (const std::exception& e) {
-            m_worldOpenError = "Could not create world save directory: " + std::string(e.what());
-            LUMINUMBRA_CORE_ERROR("{}", m_worldOpenError);
+            open_error = "Could not create world save directory: " + std::string(e.what());
+            LUMINUMBRA_CORE_ERROR("{}", open_error);
             return false;
         }
     }
@@ -1167,7 +1233,7 @@ bool GameSession::CreateWorldInternal(const std::string& name,
         pf << *customPresetJson;
         pf.close();
         if (!pf.good()) {
-            m_worldOpenError = "Could not save this world's customized preset.";
+            open_error = "Could not save this world's customized preset.";
             return false;
         }
         preset_to_load = world_preset;
@@ -1183,8 +1249,10 @@ bool GameSession::CreateWorldInternal(const std::string& name,
     TerrainGenParams params = preset.params;
     ClampTerrainParams(params);
 
+    m_worldOpenError.clear();
     ResetWorldSystems();
     m_metadata = std::move(metadata);
+    m_itemCatalogue = std::move(items);
     m_transientWorld = transient;
     m_physicsSystem = std::make_unique<Systems::PhysicsSystem>();
     m_physicsSystem->startup();
@@ -1281,9 +1349,13 @@ bool GameSession::CreateWorldInternal(const std::string& name,
 }
 
 bool GameSession::LoadWorld(const std::string& worldId) {
+    m_lastWorldOpenAttemptError.clear();
     if (!IsSimulationTickBoundary())
         return false;
-    m_lastLoadedChunkCount = 0;
+    if (!ItemConsumerEnabled())
+        m_lastLoadedChunkCount = 0;
+    std::string& open_error =
+        ItemConsumerEnabled() ? m_lastWorldOpenAttemptError : m_worldOpenError;
     // An interrupted indexed save is rolled back (or its stale journal dropped) before anything
     // reads the directory. The identifier check mirrors InspectSavedWorld's.
     if (!worldId.empty() && worldId != "." && worldId != ".." &&
@@ -1294,30 +1366,29 @@ bool GameSession::LoadWorld(const std::string& worldId) {
             std::vector<std::string> recovery_errors;
             if (Persistence::recover_pending_journal(candidate, &recovery_errors) ==
                 Persistence::RecoveryOutcome::Failed) {
-                m_worldOpenError =
-                    "World unavailable: an interrupted save could not be recovered: " +
-                    (recovery_errors.empty() ? std::string("unknown error")
-                                             : recovery_errors.front());
-                LUMINUMBRA_CORE_ERROR("World open refused: {}", m_worldOpenError);
+                open_error = "World unavailable: an interrupted save could not be recovered: " +
+                             (recovery_errors.empty() ? std::string("unknown error")
+                                                      : recovery_errors.front());
+                LUMINUMBRA_CORE_ERROR("World open refused: {}", open_error);
                 return false;
             }
         }
     }
     const auto saved = Persistence::InspectSavedWorld(RuntimeRoot(m_rootPath), worldId);
-    m_worldOpenError = saved.error;
-    if (m_worldOpenError.empty() && saved.requires_active_regions && !m_activeRegionsEnabled)
-        m_worldOpenError = "Incompatible configuration: this world requires sim.active_regions.";
-    if (!m_worldOpenError.empty()) {
-        LUMINUMBRA_CORE_ERROR("World open refused: {}", m_worldOpenError);
+    open_error = saved.error;
+    if (open_error.empty() && saved.requires_active_regions && !m_activeRegionsEnabled)
+        open_error = "Incompatible configuration: this world requires sim.active_regions.";
+    if (!open_error.empty()) {
+        LUMINUMBRA_CORE_ERROR("World open refused: {}", open_error);
         return false;
     }
     if (!m_jobSystem) {
-        m_worldOpenError = "JobSystem not set before loading world.";
+        open_error = "JobSystem not set before loading world.";
         return false;
     }
     for (const auto& asset : m_requiredClientAssets) {
         if (!fs::exists(RuntimeRoot(m_rootPath) / asset)) {
-            m_worldOpenError = "Missing required runtime asset: " + asset.string();
+            open_error = "Missing required runtime asset: " + asset.string();
             return false;
         }
     }
@@ -1333,7 +1404,16 @@ bool GameSession::LoadWorld(const std::string& worldId) {
     TerrainGenParams params = preset.params;
     ClampTerrainParams(params);
 
+    std::shared_ptr<const luminumbra::game::ItemCatalogue> items;
+    if (!PrepareItemCatalogue(items, open_error))
+        return false;
+    int restored_seeds = luminumbra::foliage::FarmingController{}.seeds;
+    if (!PrepareSavedItems(worldPath, items.get(), restored_seeds, open_error))
+        return false;
+
     ResetWorldSystems();
+    m_itemCatalogue = std::move(items);
+    m_farmingController.seeds = restored_seeds;
     m_metadata = saved.metadata;
     if (m_activeRegionsEnabled) {
         m_worldClock = saved.clock;
@@ -2680,10 +2760,13 @@ std::string GameSession::ComputeChunkStateHash() {
 
 std::string GameSession::FoldClockIntoEcologyHash(const std::string& ecology_hash) const {
     return m_activeRegionsEnabled
-               ? Persistence::StableChecksum(ecology_hash + m_worldClock.canonical_bytes() +
-                                             m_activeRegionLedger.canonical_bytes() +
-                                             m_groundObjects.canonical_bytes() +
-                                             m_fieldPages.canonical_bytes())
+               ? Persistence::StableChecksum(
+                     ecology_hash + m_worldClock.canonical_bytes() +
+                     m_activeRegionLedger.canonical_bytes() + m_groundObjects.canonical_bytes() +
+                     m_fieldPages.canonical_bytes() +
+                     (ItemConsumerEnabled() && m_itemCatalogue
+                          ? "farmingInventory:v1:" + std::to_string(m_farmingController.seeds) + ";"
+                          : std::string{}))
                : ecology_hash;
 }
 
@@ -2852,6 +2935,11 @@ bool GameSession::SaveWorldMetadataTo(const fs::path& save_dir) {
         {"waterSimCursor",
          m_worldSystem ? m_worldSystem->GetWaterSimWindowCursor() : std::size_t{0}}};
 
+    if (ItemConsumerEnabled()) {
+        if (!m_itemCatalogue || m_farmingController.seeds < 0)
+            return false;
+        metadata_json["farmingInventory"] = {{"version", 1}, {"seeds", m_farmingController.seeds}};
+    }
     if (m_activeRegionsEnabled) {
         m_worldClock.write_metadata(metadata_json);
         metadata_json["ambientFieldAnchor"] = {{"x", m_ambientFieldAnchor.x},
@@ -3198,9 +3286,11 @@ bool GameSession::LoadWorldState() {
 }
 
 bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
+    m_lastWorldOpenAttemptError.clear();
     if (!IsSimulationTickBoundary())
         return false;
-    m_lastLoadedChunkCount = 0;
+    if (!ItemConsumerEnabled())
+        m_lastLoadedChunkCount = 0;
     if (!m_worldOpenError.empty() || !m_worldSystem || save_dir.empty()) {
         return false;
     }
@@ -3208,14 +3298,22 @@ bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
         std::vector<std::string> recovery_errors;
         if (Persistence::recover_pending_journal(save_dir, &recovery_errors) ==
             Persistence::RecoveryOutcome::Failed) {
-            m_worldOpenError =
+            std::string& error =
+                ItemConsumerEnabled() ? m_lastWorldOpenAttemptError : m_worldOpenError;
+            error =
                 "World unavailable: an interrupted save could not be recovered: " +
                 (recovery_errors.empty() ? std::string("unknown error") : recovery_errors.front());
-            m_worldSystem->clear_world(m_physicsSystem.get());
+            if (!ItemConsumerEnabled())
+                m_worldSystem->clear_world(m_physicsSystem.get());
             return false;
         }
     }
 
+    int restored_seeds = luminumbra::foliage::FarmingController{}.seeds;
+    if (!PrepareSavedItems(
+            save_dir, m_itemCatalogue.get(), restored_seeds, m_lastWorldOpenAttemptError))
+        return false;
+    m_lastLoadedChunkCount = 0;
     Persistence::WorldSaveService service;
     WorldStreamingState loaded;
     std::vector<std::string> errors;
@@ -3333,6 +3431,8 @@ bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
             }
         }
         m_groundObjects = std::move(ground_objects);
+        if (ItemConsumerEnabled())
+            m_farmingController.seeds = restored_seeds;
         m_fieldPages = std::move(field_pages);
         m_activeRegionLedger = std::move(ledger);
         if (!m_activeRegionLedger.local_anchor())

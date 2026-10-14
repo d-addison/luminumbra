@@ -2,6 +2,7 @@
 // SIMULATION requirements only (world preset readable/parseable); renderer/UI
 // asset requirements are caller-supplied by the client. Headless CreateWorld
 // must succeed in a root containing nothing but the world preset.
+#include "../client/FocusedUiElement.h"
 #include "../support/UniqueTempPath.h"
 
 #include <gtest/gtest.h>
@@ -18,6 +19,7 @@
 #include <limits>
 #include <map>
 #include <memory>
+#include <optional>
 #include <span>
 #include <sstream>
 #include <stdexcept>
@@ -27,6 +29,7 @@
 #include <vector>
 
 #include "luminumbra_client/rendering/TimeOfDayModel.h"
+#include "luminumbra_client/ui/KeyboardCapture.h"
 #include "luminumbra_common/ai/CircadianSystem.h"
 #include "luminumbra_common/ai/EcologyHash.h"
 #include "luminumbra_common/ai/LifespanSystem.h"
@@ -52,6 +55,7 @@
 #include "luminumbra_common/core/JobSystem.h"
 #include "luminumbra_common/fields/EnergyFieldState.h"
 #include "luminumbra_common/fields/FieldPageState.h"
+#include "luminumbra_common/game/ItemDrop.h"
 #include "luminumbra_common/persistence/SaveTransaction.h"
 #include "luminumbra_common/persistence/WorldSaveService.h"
 #include "luminumbra_common/scripting/LuaState.h"
@@ -5982,4 +5986,664 @@ TEST(GameSessionHeadlessWorldTest, S7WaterTickDoesNotLoadDurableOnlySourceTarget
     EXPECT_EQ(session.GetWorldSystem()->find_streamed_chunk(coords), nullptr);
     EXPECT_EQ(session.GetWaterSystem()->regional_work().used_windows, 0u);
     EXPECT_EQ(session.GetWaterSystem()->debug_source_injected_mm(), 0);
+}
+
+namespace {
+void WriteItemCatalogue(const HeadlessRoot& root, std::string_view bytes = {}) {
+    const auto path = root.path() / luminumbra::game::ItemCatalogue::kRelativePath;
+    fs::create_directories(path.parent_path());
+    if (bytes.empty()) {
+        fs::copy_file(fs::path(LUMINUMBRA_SOURCE_ROOT) /
+                          luminumbra::game::ItemCatalogue::kRelativePath,
+                      path,
+                      fs::copy_options::overwrite_existing);
+    } else {
+        std::ofstream(path, std::ios::binary) << bytes;
+    }
+}
+void EnableItemSession(GameSession& session, const HeadlessRoot& root, JobSystem& jobs) {
+    EnableSnapshotSession(session, root, jobs);
+    session.SetItemConsumerEnabled(true);
+}
+std::uint64_t DropSeed(GameSession& session) {
+    return luminumbra::game::DropFarmingSeed(
+        session, session.GetFarmingController(), {320, 12, 320});
+}
+void ReplaceInventory(const fs::path& save, const nlohmann::json& block, bool omit = false) {
+    // Preserve snapshot authority and refresh the metadata checksum so admission reaches
+    // the inventory parser instead of refusing a missing index or a stale fingerprint.
+    auto document = nlohmann::json::parse(ReadClockTestFile(save / "world_info.json"));
+    if (omit)
+        document.erase("farmingInventory");
+    else
+        document["farmingInventory"] = block;
+    ASSERT_TRUE(P::WorldSaveService::write_member_bytes(
+        save, "world_info.json", document.dump(4) + "\n"));
+    ASSERT_TRUE(P::WorldSaveService::validate_save(save));
+}
+void WriteMalformedSnapshotMember(const fs::path& save,
+                                  std::string_view relative,
+                                  const std::string& bytes) {
+    P::SnapshotIndex index;
+    ASSERT_TRUE(P::snapshot_index_exists(save));
+    ASSERT_TRUE(P::read_snapshot_index(save, index, nullptr));
+    // Seal deliberately malformed bytes without the writer's semantic validation; the
+    // load must reach the record parser with a matching snapshot fingerprint.
+    P::SaveTransaction transaction(
+        save, index.tick, index.anchors,
+        +[](const fs::path& directory, std::string_view member, P::MemberDigest& digest,
+            std::string&) {
+            return P::hash_file(directory / std::string(member), digest.bytes, digest.fnv64,
+                                digest.present, nullptr);
+        });
+    ASSERT_TRUE(transaction.begin(nullptr));
+    ASSERT_TRUE(P::WorldSaveService::write_member_bytes(save, relative, bytes));
+    ASSERT_TRUE(transaction.commit(nullptr));
+}
+} // namespace
+
+TEST(GameSessionHeadlessWorldTest, ItemCatalogueAdmissionIsTransactionalAndImmutableWithinWorld) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    EnableItemSession(session, root, jobs);
+    EXPECT_FALSE(session.CreateWorld("Missing items", "1337", "default"));
+    EXPECT_EQ(session.GetItemCatalogue(), nullptr);
+    EXPECT_FALSE(fs::exists(root.path() / "worlds/saves"));
+    WriteItemCatalogue(root);
+    ASSERT_TRUE(session.CreateWorld("Admitted items", "1337", "default"));
+    ASSERT_EQ(DropSeed(session), 1u);
+    const auto* admitted = session.GetItemCatalogue();
+    const auto hash = SessionWorldHash(session);
+    const auto objects = session.GetGroundObjects().serialize();
+    const auto next = session.GetActiveRegionLedger().next_persistent_id();
+    const auto save = session.GetWorldSaveDir();
+    const auto saved_metadata = ReadClockTestFile(save / "world_info.json");
+    // Mutating runtime content cannot mutate the admitted catalogue.
+    WriteItemCatalogue(root, "{}\n");
+    EXPECT_EQ(session.GetItemCatalogue()->FindByName("farming-seed")->despawn_after, 900u);
+    ASSERT_EQ(DropSeed(session), 2u);
+    ASSERT_TRUE(session.SaveWorld());
+    const auto live_hash = SessionWorldHash(session);
+    const auto live_objects = session.GetGroundObjects().serialize();
+    const auto live_next = session.GetActiveRegionLedger().next_persistent_id();
+    const auto live_metadata = ReadClockTestFile(save / "world_info.json");
+    EXPECT_FALSE(session.CreateWorld("Refused items", "1337", "default"));
+    EXPECT_EQ(session.GetItemCatalogue(), admitted);
+    EXPECT_EQ(session.GetFarmingController().seeds, 3);
+    EXPECT_EQ(session.GetGroundObjects().serialize(), live_objects);
+    EXPECT_EQ(session.GetActiveRegionLedger().next_persistent_id(), live_next);
+    EXPECT_EQ(SessionWorldHash(session), live_hash);
+    EXPECT_EQ(ReadClockTestFile(save / "world_info.json"), live_metadata);
+    EXPECT_NE(hash, live_hash);
+    EXPECT_NE(objects, live_objects);
+    EXPECT_EQ(next + 1, live_next);
+    EXPECT_NE(saved_metadata, live_metadata);
+    EXPECT_FALSE(session.LoadWorld(session.GetMetadata().worldId));
+    EXPECT_EQ(session.GetItemCatalogue(), admitted);
+    EXPECT_EQ(session.GetGroundObjects().serialize(), live_objects);
+    EXPECT_EQ(session.GetFarmingController().seeds, 3);
+    EXPECT_THROW(session.SetItemConsumerEnabled(false), std::logic_error);
+    WriteItemCatalogue(root, "{\"schema\":\"luminumbra.game.items.v1\",\"items\":[]}\n");
+    EXPECT_FALSE(session.CreateWorld("Unresolved seed", "1337", "default"));
+    EXPECT_EQ(session.GetItemCatalogue(), admitted);
+    EXPECT_FALSE(session.GetLastWorldOpenAttemptError().empty());
+    EXPECT_TRUE(session.GetWorldOpenError().empty());
+    ASSERT_TRUE(session.SaveWorldState());
+    ASSERT_TRUE(session.SaveWorld());
+    ASSERT_EQ(DropSeed(session), live_next);
+    EXPECT_EQ(session.GetFarmingController().seeds, 2);
+    WriteItemCatalogue(root);
+    ASSERT_TRUE(session.LoadWorld(session.GetMetadata().worldId));
+    EXPECT_TRUE(session.GetLastWorldOpenAttemptError().empty());
+    EXPECT_TRUE(session.GetWorldOpenError().empty());
+}
+
+TEST(GameSessionHeadlessWorldTest, SeedDropPreallocationRefusalsConsumeNeitherSeedsNorIds) {
+    const HeadlessRoot root;
+    WriteItemCatalogue(root);
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    EnableItemSession(session, root, jobs);
+    ASSERT_TRUE(session.CreateWorld("Seed refusal", "1337", "default"));
+    auto& farming = session.GetFarmingController();
+    const auto next = session.GetActiveRegionLedger().next_persistent_id();
+    farming.seeds = 0;
+    EXPECT_EQ(DropSeed(session), 0u);
+    EXPECT_EQ(farming.seeds, 0);
+    farming.seeds = 5;
+    for (const auto position : {Luminumbra::Vec3{16777216, 0, 0},
+                                Luminumbra::Vec3{0, 1048576, 0},
+                                Luminumbra::Vec3{std::numeric_limits<float>::quiet_NaN(), 0, 0}})
+        EXPECT_EQ(luminumbra::game::DropFarmingSeed(session, farming, position), 0u);
+    luminumbra::foliage::FarmingController other;
+    EXPECT_EQ(luminumbra::game::DropFarmingSeed(session, other, {320, 12, 320}), 0u);
+    EXPECT_EQ(other.seeds, 5);
+    EXPECT_EQ(farming.seeds, 5);
+    EXPECT_EQ(session.GetActiveRegionLedger().next_persistent_id(), next);
+    EXPECT_TRUE(session.GetGroundObjects().empty());
+    EXPECT_EQ(DropSeed(session), next);
+    EXPECT_EQ(farming.seeds, 4);
+    EXPECT_EQ(farming.harvests, 0);
+    EXPECT_FLOAT_EQ(farming.total_yield, 0);
+}
+
+TEST(GameSessionHeadlessWorldTest,
+     SeedDropAfterAllocationByteCapacityFailureBurnsIdAndPreservesSeed) {
+    const HeadlessRoot root;
+    WriteItemCatalogue(root);
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    EnableItemSession(session, root, jobs);
+    ASSERT_TRUE(session.CreateWorld("Seed byte capacity", "1337", "default"));
+    session.GetFarmingController().seeds = std::numeric_limits<int>::max();
+    bool refused = false;
+    // The 4 MiB reserved-byte ceiling is reached before the separate object-count cap. This
+    // exercises the actual host allocation -> store.insert refusal boundary without a fake store.
+    for (std::size_t i = 0; i < Luminumbra::world::GroundObjectStore::kMaxObjects; ++i) {
+        const auto next = session.GetActiveRegionLedger().next_persistent_id();
+        const auto count = session.GetGroundObjects().size();
+        const int seeds = session.GetFarmingController().seeds;
+        if (DropSeed(session) == 0) {
+            EXPECT_LT(count, Luminumbra::world::GroundObjectStore::kMaxObjects);
+            EXPECT_EQ(session.GetGroundObjects().size(), count);
+            EXPECT_EQ(session.GetActiveRegionLedger().next_persistent_id(), next + 1);
+            EXPECT_EQ(session.GetFarmingController().seeds, seeds);
+            refused = true;
+            break;
+        }
+    }
+    EXPECT_TRUE(refused);
+}
+
+using Luminumbra::Client::Test::FocusedUiElement;
+
+TEST(GameSessionHeadlessWorldTest, ShownHudFocusAllowsOneSeedDropPerPress) {
+    const HeadlessRoot root;
+    WriteItemCatalogue(root);
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    EnableItemSession(session, root, jobs);
+    ASSERT_TRUE(session.CreateWorld("HUD seed drop", "1337", "default"));
+    const FocusedUiElement context{"#root"};
+    const FocusedUiElement hud{"body", &context};
+    const FocusedUiElement hint{"span", &hud};
+    // Show without focus leaves the context (or no element) focused. Also tolerate the
+    // document/body focus from a default Show, and focus on passive HUD descendants.
+    for (const auto* focused :
+         {static_cast<const FocusedUiElement*>(nullptr), &context, &hud, &hint}) {
+        const bool allowed = !Luminumbra::Client::FocusedElementCapturesKeyboard(focused);
+        ASSERT_TRUE(allowed);
+        luminumbra::game::FarmDropSeedEdge edge;
+        EXPECT_FALSE(luminumbra::game::FarmDropSeedPressed(false, true, allowed, edge));
+        // Release then press the default B binding through the real drop edge sampler.
+        ASSERT_TRUE(luminumbra::game::FarmDropSeedPressed(true, true, allowed, edge));
+        ASSERT_NE(DropSeed(session), 0u);
+        EXPECT_FALSE(luminumbra::game::FarmDropSeedPressed(true, true, allowed, edge));
+    }
+    EXPECT_EQ(session.GetGroundObjects().size(), 4u);
+    EXPECT_EQ(session.GetFarmingController().seeds, 1);
+}
+
+TEST(GameSessionHeadlessWorldTest, TextInputBlocksSeedDropUntilReleaseBackOnHud) {
+    const HeadlessRoot root;
+    WriteItemCatalogue(root);
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    EnableItemSession(session, root, jobs);
+    ASSERT_TRUE(session.CreateWorld("Text input seed drop", "1337", "default"));
+    const FocusedUiElement hud{"body"};
+    const FocusedUiElement input{"input", &hud};
+    const bool captured = Luminumbra::Client::FocusedElementCapturesKeyboard(&input);
+    ASSERT_TRUE(captured);
+    luminumbra::game::FarmDropSeedEdge edge;
+    EXPECT_FALSE(luminumbra::game::FarmDropSeedPressed(false, true, !captured, edge));
+    if (luminumbra::game::FarmDropSeedPressed(true, true, !captured, edge))
+        DropSeed(session);
+    EXPECT_TRUE(session.GetGroundObjects().empty());
+    EXPECT_EQ(session.GetFarmingController().seeds, 5);
+    const bool hudAllowed = !Luminumbra::Client::FocusedElementCapturesKeyboard(&hud);
+    // Returning from a text field while holding B cannot drop until an eligible release.
+    EXPECT_FALSE(luminumbra::game::FarmDropSeedPressed(true, true, hudAllowed, edge));
+    EXPECT_FALSE(luminumbra::game::FarmDropSeedPressed(false, true, hudAllowed, edge));
+    ASSERT_TRUE(luminumbra::game::FarmDropSeedPressed(true, true, hudAllowed, edge));
+    ASSERT_NE(DropSeed(session), 0u);
+    EXPECT_EQ(session.GetGroundObjects().size(), 1u);
+    EXPECT_EQ(session.GetFarmingController().seeds, 4);
+}
+
+TEST(GameSessionHeadlessWorldTest, TextControlsAndEditableDescendantsCaptureKeyboard) {
+    const FocusedUiElement hud{"body"};
+    for (const char* tag : {"input", "textarea", "select"}) {
+        const FocusedUiElement control{tag, &hud};
+        EXPECT_TRUE(Luminumbra::Client::FocusedElementCapturesKeyboard(&control)) << tag;
+    }
+    for (const char* value : {"", "true", "plaintext-only"}) {
+        const FocusedUiElement editor{"div", &hud, value};
+        const FocusedUiElement text{"span", &editor};
+        EXPECT_TRUE(Luminumbra::Client::FocusedElementCapturesKeyboard(&editor));
+        EXPECT_TRUE(Luminumbra::Client::FocusedElementCapturesKeyboard(&text));
+        const FocusedUiElement readOnly{"span", &editor, "false"};
+        EXPECT_FALSE(Luminumbra::Client::FocusedElementCapturesKeyboard(&readOnly));
+    }
+    const FocusedUiElement button{"button", &hud};
+    EXPECT_FALSE(Luminumbra::Client::FocusedElementCapturesKeyboard(&button));
+}
+
+TEST(GameSessionHeadlessWorldTest,
+     HeldSeedDropPressFiresOneRealHostSpawnAndRefusedHoldDoesNotRetry) {
+    const HeadlessRoot root;
+    WriteItemCatalogue(root);
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    EnableItemSession(session, root, jobs);
+    ASSERT_TRUE(session.CreateWorld("Seed press", "1337", "default"));
+    luminumbra::game::FarmDropSeedEdge edge;
+    EXPECT_FALSE(luminumbra::game::FarmDropSeedPressed(false, true, true, edge));
+    for (int frame = 0; frame < 10; ++frame)
+        if (luminumbra::game::FarmDropSeedPressed(true, true, true, edge))
+            EXPECT_NE(DropSeed(session), 0u);
+    EXPECT_EQ(session.GetGroundObjects().size(), 1u);
+    EXPECT_EQ(session.GetFarmingController().seeds, 4);
+    EXPECT_FALSE(luminumbra::game::FarmDropSeedPressed(false, true, true, edge));
+    session.GetFarmingController().seeds = 0;
+    ASSERT_TRUE(luminumbra::game::FarmDropSeedPressed(true, true, true, edge));
+    EXPECT_EQ(DropSeed(session), 0u);
+    session.GetFarmingController().seeds = 1;
+    EXPECT_FALSE(luminumbra::game::FarmDropSeedPressed(true, true, true, edge));
+    EXPECT_EQ(session.GetGroundObjects().size(), 1u);
+}
+
+TEST(GameSessionHeadlessWorldTest,
+     SeedInventoryObjectAndAllocatorRoundTripWithoutRestartDuplication) {
+    const HeadlessRoot root;
+    WriteItemCatalogue(root);
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession original, twin, loaded;
+    for (auto* session : {&original, &twin}) {
+        EnableItemSession(*session, root, jobs);
+        ASSERT_TRUE(session->CreateWorld("Seed durability", "1337", "default"));
+        ASSERT_EQ(DropSeed(*session), 1u);
+        ASSERT_EQ(DropSeed(*session), 2u);
+        ASSERT_NO_FATAL_FAILURE(TickOnce(*session));
+    }
+    ASSERT_TRUE(original.SaveWorldState());
+    const auto metadata =
+        nlohmann::json::parse(ReadClockTestFile(original.GetWorldSaveDir() / "world_info.json"));
+    EXPECT_EQ(metadata.at("farmingInventory"), (nlohmann::json{{"version", 1}, {"seeds", 3}}));
+    EnableItemSession(loaded, root, jobs);
+    ASSERT_TRUE(loaded.LoadWorld(original.GetMetadata().worldId)) << loaded.GetWorldOpenError();
+    EXPECT_EQ(loaded.GetGroundObjects().serialize(), original.GetGroundObjects().serialize());
+    EXPECT_EQ(loaded.GetFarmingController().seeds, 3);
+    EXPECT_EQ(loaded.GetActiveRegionLedger().next_persistent_id(), 3u);
+    ASSERT_NE(loaded.GetGroundObjects().find(1), nullptr);
+    EXPECT_EQ(loaded.GetGroundObjects().find(1)->type, 516719959u);
+    EXPECT_EQ(loaded.GetGroundObjects().find(1)->payload, 0u);
+    EXPECT_EQ(loaded.GetGroundObjects().find(1)->despawn_after, 900u);
+    EXPECT_EQ(SessionWorldHash(loaded), SessionWorldHash(twin));
+    for (int i = 0; i < 3; ++i) {
+        EXPECT_EQ(DropSeed(loaded), static_cast<std::uint64_t>(i + 3));
+        EXPECT_EQ(DropSeed(twin), static_cast<std::uint64_t>(i + 3));
+    }
+    EXPECT_EQ(DropSeed(loaded), 0u);
+    EXPECT_EQ(loaded.GetGroundObjects().size(), 5u);
+    EXPECT_EQ(loaded.GetFarmingController().seeds, 0);
+    for (int tick = 0; tick < 4; ++tick) {
+        ASSERT_NO_FATAL_FAILURE(TickOnce(loaded));
+        ASSERT_NO_FATAL_FAILURE(TickOnce(twin));
+        EXPECT_EQ(loaded.GetGroundObjects().serialize(), twin.GetGroundObjects().serialize());
+        EXPECT_EQ(SessionWorldHash(loaded), SessionWorldHash(twin));
+    }
+    ASSERT_TRUE(loaded.SaveWorldState());
+    GameSession restarted;
+    EnableItemSession(restarted, root, jobs);
+    ASSERT_TRUE(restarted.LoadWorld(original.GetMetadata().worldId));
+    EXPECT_EQ(restarted.GetFarmingController().seeds, 0);
+    EXPECT_EQ(DropSeed(restarted), 0u);
+    EXPECT_EQ(restarted.GetGroundObjects().size(), 5u);
+}
+
+TEST(GameSessionHeadlessWorldTest, PreviousReleaseSaveAdoptsDefaultSeedCountAndStampsNextSave) {
+    const HeadlessRoot root;
+    WriteItemCatalogue(root);
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession legacy, loaded;
+    legacy.SetRootPath(root.root_string());
+    legacy.SetJobSystem(&jobs);
+    ASSERT_TRUE(legacy.CreateWorld("Legacy seed adoption", "1337", "default"));
+    const auto save = legacy.GetWorldSaveDir();
+    EXPECT_FALSE(nlohmann::json::parse(ReadClockTestFile(save / "world_info.json"))
+                     .contains("farmingInventory"));
+    EnableItemSession(loaded, root, jobs);
+    ASSERT_TRUE(loaded.LoadWorld(legacy.GetMetadata().worldId)) << loaded.GetWorldOpenError();
+    EXPECT_EQ(loaded.GetFarmingController().seeds, luminumbra::foliage::FarmingController{}.seeds);
+    ASSERT_TRUE(loaded.SaveWorldState());
+    EXPECT_EQ(
+        nlohmann::json::parse(ReadClockTestFile(save / "world_info.json")).at("farmingInventory"),
+        (nlohmann::json{{"version", 1}, {"seeds", 5}}));
+    EXPECT_TRUE(P::snapshot_index_exists(save));
+}
+
+TEST(GameSessionHeadlessWorldTest, EnabledLegacyGroundSaveWithoutInventoryAdoptsDefault) {
+    const HeadlessRoot root;
+    WriteItemCatalogue(root);
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession legacy, loaded;
+    EnableSnapshotSession(legacy, root, jobs);
+    ASSERT_TRUE(legacy.CreateWorld("Old ground seed", "1337", "default"));
+    ASSERT_EQ(legacy.SpawnGroundObject(516719959u, Luminumbra::Vec3{320, 12, 320}, 900, 0), 1u);
+    ASSERT_TRUE(legacy.SaveWorldState());
+    EnableItemSession(loaded, root, jobs);
+    ASSERT_TRUE(loaded.LoadWorld(legacy.GetMetadata().worldId));
+    EXPECT_EQ(loaded.GetFarmingController().seeds, 5);
+    EXPECT_EQ(loaded.GetGroundObjects().size(), 1u);
+    ASSERT_TRUE(loaded.SaveWorld());
+    EXPECT_TRUE(
+        nlohmann::json::parse(ReadClockTestFile(legacy.GetWorldSaveDir() / "world_info.json"))
+            .contains("farmingInventory"));
+}
+
+TEST(GameSessionHeadlessWorldTest, MalformedInventoryAndUnknownVersionRefuseBeforeSessionAdoption) {
+    const HeadlessRoot root;
+    WriteItemCatalogue(root);
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession owner, victim;
+    EnableItemSession(owner, root, jobs);
+    EnableItemSession(victim, root, jobs);
+    ASSERT_TRUE(owner.CreateWorld("Bad inventory", "1337", "default"));
+    ASSERT_TRUE(victim.CreateWorld("Live inventory", "1337", "default"));
+    ASSERT_EQ(DropSeed(victim), 1u);
+    const auto live_objects = victim.GetGroundObjects().serialize();
+    const auto* live_catalogue = victim.GetItemCatalogue();
+    for (const nlohmann::json& block : {nlohmann::json(nullptr),
+                                        nlohmann::json{{"version", 2}, {"seeds", 4}},
+                                        nlohmann::json{{"version", 1}, {"seeds", true}},
+                                        nlohmann::json{{"version", 1}, {"seeds", -1}}}) {
+        ASSERT_NO_FATAL_FAILURE(ReplaceInventory(owner.GetWorldSaveDir(), block));
+        EXPECT_FALSE(victim.LoadWorld(owner.GetMetadata().worldId));
+        EXPECT_EQ(victim.GetLastWorldOpenAttemptError(),
+                  "Corrupt farming inventory: invalid keys, version or seed count");
+        EXPECT_TRUE(victim.GetWorldOpenError().empty());
+        EXPECT_EQ(victim.GetItemCatalogue(), live_catalogue);
+        EXPECT_EQ(victim.GetGroundObjects().serialize(), live_objects);
+        EXPECT_EQ(victim.GetFarmingController().seeds, 4);
+    }
+}
+
+TEST(GameSessionHeadlessWorldTest,
+     UnknownSavedItemTypeRefusesWithoutDeletingOrReinterpretingObjects) {
+    const HeadlessRoot root;
+    WriteItemCatalogue(root);
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession generic, loaded;
+    CreateGroundWorld(generic, root, jobs, "Unknown saved type");
+    ASSERT_EQ(SpawnGround(generic, 5200, -1500), 1u);
+    ASSERT_TRUE(generic.SaveWorldState());
+    const auto path = P::WorldSaveService::ground_objects_path(generic.GetWorldSaveDir());
+    const auto bytes = ReadClockTestFile(path);
+    EnableItemSession(loaded, root, jobs);
+    EXPECT_FALSE(loaded.LoadWorld(generic.GetMetadata().worldId));
+    EXPECT_EQ(loaded.GetLastWorldOpenAttemptError(), "Unknown saved item type: 7");
+    EXPECT_TRUE(loaded.GetWorldOpenError().empty());
+    EXPECT_TRUE(loaded.GetGroundObjects().empty());
+    EXPECT_EQ(ReadClockTestFile(path), bytes);
+}
+
+TEST(GameSessionHeadlessWorldTest, SavedItemAdmissionRefusalPreservesPopulatedLiveSession) {
+    for (const std::string refusal : {"Unknown saved item type",
+                                      "farming inventory",
+                                      "catalogue",
+                                      "missing catalogue",
+                                      "unresolved catalogue",
+                                      "corrupt ledger",
+                                      "corrupt objects",
+                                      "corrupt clock"}) {
+        const bool catalogue_refusal = refusal.find("catalogue") != std::string::npos;
+        for (const int entry : {0, 1, 2, 3}) {
+            // State-only restore uses admitted content; creation checks runtime content only.
+            if ((entry == 1 && catalogue_refusal) || (entry >= 2 && !catalogue_refusal))
+                continue;
+            SCOPED_TRACE(refusal);
+            SCOPED_TRACE(entry);
+            const HeadlessRoot root;
+            WriteItemCatalogue(root);
+            JobSystem jobs;
+            jobs.startup(1);
+            GameSession candidate, live;
+            CreateGroundWorld(candidate, root, jobs, "Incompatible candidate");
+            ASSERT_EQ(SpawnGround(candidate, 5200, -1500), 1u);
+            ASSERT_TRUE(candidate.SaveWorldState());
+            EnableItemSession(live, root, jobs);
+            ASSERT_TRUE(live.CreateWorld("Live unsaved items", "2468", "default"));
+            ASSERT_EQ(DropSeed(live), 1u);
+            ASSERT_TRUE(live.SaveWorldState());
+            auto& farming = live.GetFarmingController();
+            farming.seeds = 9;
+            farming.harvests = 7;
+            farming.total_yield = 3.25f;
+            ASSERT_EQ(DropSeed(live), 2u); // Unsaved object and allocator advancement.
+            const auto plant = ClockTestPlant(live.GetRegistry(), {8, 12, 8});
+            ASSERT_TRUE(live.AdmitPlant(plant));
+            const auto hash = SessionWorldHash(live);
+            const auto objects = live.GetGroundObjects().serialize();
+            const auto next = live.GetActiveRegionLedger().next_persistent_id();
+            const auto ledger = live.GetActiveRegionLedger().encode();
+            const auto metadata = live.GetMetadata();
+            const auto* catalogue = live.GetItemCatalogue();
+            const auto* world = live.GetWorldSystem();
+            const auto* physics = live.GetPhysicsSystem();
+            const auto loaded_chunks = live.GetLastLoadedChunkCount();
+            const auto live_metadata_bytes =
+                ReadClockTestFile(live.GetWorldSaveDir() / "world_info.json");
+            if (refusal == "farming inventory")
+                ASSERT_NO_FATAL_FAILURE(ReplaceInventory(
+                    candidate.GetWorldSaveDir(), nlohmann::json{{"version", 2}, {"seeds", 4}}));
+            else if (refusal == "catalogue")
+                WriteItemCatalogue(root, "{}\n");
+            else if (refusal == "missing catalogue")
+                ASSERT_TRUE(
+                    fs::remove(root.path() / luminumbra::game::ItemCatalogue::kRelativePath));
+            else if (refusal == "unresolved catalogue")
+                WriteItemCatalogue(root,
+                                   "{\"schema\":\"luminumbra.game.items.v1\",\"items\":[]}\n");
+            else if (refusal == "corrupt ledger" || refusal == "corrupt objects") {
+                const auto save = candidate.GetWorldSaveDir();
+                ASSERT_NO_FATAL_FAILURE(WriteMalformedSnapshotMember(
+                    save, refusal == "corrupt ledger" ? "chunks/region/active-regions.arl"
+                                                       : "chunks/region/ground-objects.json",
+                    "invalid record\n"));
+            } else if (refusal == "corrupt clock") {
+                const auto save = candidate.GetWorldSaveDir();
+                auto document = nlohmann::json::parse(ReadClockTestFile(save / "world_info.json"));
+                document["simulationTick"] = -1;
+                ASSERT_NO_FATAL_FAILURE(WriteMalformedSnapshotMember(
+                    save, "world_info.json", document.dump(4) + "\n"));
+            }
+            if (entry == 1)
+                EXPECT_FALSE(live.LoadWorldStateFrom(candidate.GetWorldSaveDir()));
+            else if (entry == 2)
+                EXPECT_FALSE(live.CreateWorld("Refused candidate", "1337", "default"));
+            else if (entry == 3)
+                EXPECT_FALSE(live.CreateTransientWorld("Refused transient", "1337", "default"));
+            else
+                EXPECT_FALSE(live.LoadWorld(candidate.GetMetadata().worldId));
+            EXPECT_FALSE(live.GetLastWorldOpenAttemptError().empty());
+            if (catalogue_refusal)
+                EXPECT_NE(live.GetLastWorldOpenAttemptError().find("catalogue"), std::string::npos);
+            else if (refusal == "farming inventory")
+                EXPECT_EQ(live.GetLastWorldOpenAttemptError(),
+                          "Corrupt farming inventory: invalid keys, version or seed count");
+            else if (refusal == "Unknown saved item type")
+                EXPECT_EQ(live.GetLastWorldOpenAttemptError(), "Unknown saved item type: 7");
+            else if (refusal == "corrupt ledger")
+                EXPECT_EQ(live.GetLastWorldOpenAttemptError(), ActiveRegionLedger::kCorruptMessage);
+            else if (refusal == "corrupt objects")
+                EXPECT_EQ(live.GetLastWorldOpenAttemptError(),
+                          "Ground objects load failed: ground objects: malformed document");
+            else if (refusal == "corrupt clock")
+                EXPECT_EQ(live.GetLastWorldOpenAttemptError(),
+                          "Corrupt world metadata: invalid simulationTick.");
+            EXPECT_TRUE(live.GetWorldOpenError().empty());
+            EXPECT_EQ(live.GetItemCatalogue(), catalogue);
+            EXPECT_EQ(live.GetWorldSystem(), world);
+            EXPECT_EQ(live.GetPhysicsSystem(), physics);
+            EXPECT_EQ(live.GetGroundObjects().serialize(), objects);
+            EXPECT_EQ(live.GetActiveRegionLedger().next_persistent_id(), next);
+            EXPECT_EQ(live.GetActiveRegionLedger().encode(), ledger);
+            EXPECT_EQ(farming.seeds, 8);
+            EXPECT_EQ(farming.harvests, 7);
+            EXPECT_FLOAT_EQ(farming.total_yield, 3.25f);
+            EXPECT_EQ(live.GetMetadata().name, metadata.name);
+            EXPECT_EQ(live.GetMetadata().seed, metadata.seed);
+            EXPECT_EQ(live.GetMetadata().worldType, metadata.worldType);
+            EXPECT_EQ(live.GetMetadata().worldId, metadata.worldId);
+            EXPECT_EQ(live.GetMetadata().creationTime, metadata.creationTime);
+            EXPECT_EQ(live.GetMetadata().spawnPoint, metadata.spawnPoint);
+            EXPECT_EQ(live.GetLastLoadedChunkCount(), loaded_chunks);
+            ASSERT_TRUE(live.GetRegistry().valid(plant));
+            EXPECT_EQ(live.GetRegistry().get<C::TransformComponent>(plant).position,
+                      (Luminumbra::Vec3{8, 12, 8}));
+            EXPECT_EQ(SessionWorldHash(live), hash);
+            EXPECT_EQ(ReadClockTestFile(live.GetWorldSaveDir() / "world_info.json"),
+                      live_metadata_bytes);
+            ASSERT_TRUE(live.SaveWorldState());
+            ASSERT_TRUE(live.SaveWorld());
+            ASSERT_EQ(DropSeed(live), next);
+            EXPECT_EQ(farming.seeds, 7);
+            EXPECT_EQ(live.GetGroundObjects().size(), 3u);
+            EXPECT_EQ(live.GetActiveRegionLedger().next_persistent_id(), next + 1);
+            EXPECT_EQ(farming.harvests, 7);
+            EXPECT_FLOAT_EQ(farming.total_yield, 3.25f);
+        }
+    }
+}
+
+TEST(GameSessionHeadlessWorldTest,
+     FlagOffItemConsumerIgnoresMalformedCatalogueAndPreservesSaveTreeAndHash) {
+    const HeadlessRoot root;
+    WriteItemCatalogue(root, "malformed catalogue\n");
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session, twin;
+    session.SetItemConsumerEnabled(true);
+    for (auto* s : {&session, &twin}) {
+        s->SetRootPath(root.root_string());
+        s->SetJobSystem(&jobs);
+        ASSERT_TRUE(s->CreateWorld("Items off", "1337", "default"));
+        ASSERT_NO_FATAL_FAILURE(AdoptRegionGoldenChunk(*s, 0));
+    }
+    EXPECT_EQ(session.GetItemCatalogue(), nullptr);
+    EXPECT_EQ(DropSeed(session), 0u);
+    EXPECT_EQ(session.GetFarmingController().seeds, 5);
+    for (int i = 0; i < 3; ++i) {
+        ASSERT_NO_FATAL_FAILURE(TickOnce(session));
+        ASSERT_NO_FATAL_FAILURE(TickOnce(twin));
+    }
+    const auto save = root.path() / "items-off-save";
+    const auto expected = root.path() / "items-off-twin";
+    ASSERT_TRUE(session.SaveWorldStateTo(save));
+    ASSERT_TRUE(twin.SaveWorldStateTo(expected));
+    ExpectSameSaveTree(save, expected);
+    ExpectSameWorldHash(session, twin);
+    EXPECT_EQ(session.GetRegionInputRejections().ground_spawns, 0u);
+    EXPECT_FALSE(
+        nlohmann::json::parse(ReadClockTestFile(session.GetWorldSaveDir() / "world_info.json"))
+            .contains("farmingInventory"));
+    ASSERT_NO_FATAL_FAILURE(ReplaceInventory(
+        session.GetWorldSaveDir(), nlohmann::json{{"version", 999}, {"seeds", false}}));
+    GameSession reopened;
+    reopened.SetRootPath(root.root_string());
+    reopened.SetJobSystem(&jobs);
+    reopened.SetItemConsumerEnabled(true);
+    EXPECT_TRUE(reopened.LoadWorld(session.GetMetadata().worldId)) << reopened.GetWorldOpenError();
+}
+
+TEST(GameSessionHeadlessWorldTest, ItemSnapshotFailureRollsBackSeedsObjectsAndAllocatorTogether) {
+    const HeadlessRoot root;
+    WriteItemCatalogue(root);
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session, reopened;
+    EnableItemSession(session, root, jobs);
+    ASSERT_TRUE(session.CreateWorld("Seed rollback", "1337", "default"));
+    ASSERT_EQ(DropSeed(session), 1u);
+    ASSERT_TRUE(session.SaveWorldState());
+    const auto save = session.GetWorldSaveDir();
+    const auto metadata = ReadClockTestFile(save / "world_info.json");
+    const auto objects = ReadClockTestFile(P::WorldSaveService::ground_objects_path(save));
+    const auto ledger = ReadClockTestFile(P::WorldSaveService::active_regions_path(save));
+    const auto index = ReadClockTestFile(P::snapshot_index_path(save));
+    ASSERT_EQ(DropSeed(session), 2u);
+    P::WorldSaveService::set_before_active_regions_replace_for_testing([] { return false; });
+    const bool saved = session.SaveWorldState();
+    P::WorldSaveService::set_before_active_regions_replace_for_testing(nullptr);
+    EXPECT_FALSE(saved);
+    EXPECT_EQ(ReadClockTestFile(save / "world_info.json"), metadata);
+    EXPECT_EQ(ReadClockTestFile(P::WorldSaveService::ground_objects_path(save)), objects);
+    EXPECT_EQ(ReadClockTestFile(P::WorldSaveService::active_regions_path(save)), ledger);
+    EXPECT_EQ(ReadClockTestFile(P::snapshot_index_path(save)), index);
+    EnableItemSession(reopened, root, jobs);
+    ASSERT_TRUE(reopened.LoadWorld(session.GetMetadata().worldId));
+    EXPECT_EQ(reopened.GetFarmingController().seeds, 4);
+    EXPECT_EQ(reopened.GetGroundObjects().size(), 1u);
+    EXPECT_EQ(reopened.GetActiveRegionLedger().next_persistent_id(), 2u);
+}
+
+TEST(GameSessionHeadlessWorldTest,
+     SeedDropSettlesThroughAuthoritativeProbeAndUnsettledSeedsAlsoExpire) {
+    const HeadlessRoot root;
+    WriteItemCatalogue(root,
+                       "{\"schema\":\"luminumbra.game.items.v1\",\"items\":[{\"id\":\"farming-"
+                       "seed\",\"despawn_after\":2,\"payload\":0}]}\n");
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    EnableItemSession(session, root, jobs);
+    ASSERT_TRUE(session.CreateWorld("Seed settling expiry", "1337", "default"));
+    auto chunk = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3{0, 0, 0});
+    chunk->set_state(Luminumbra::ChunkState::Ready);
+    constexpr int side = Luminumbra::CHUNK_SIZE_X + 1;
+    chunk->sdf_data.resize(side * (Luminumbra::CHUNK_SIZE_Y + 1) * (Luminumbra::CHUNK_SIZE_Z + 1));
+    for (int z = 0; z <= Luminumbra::CHUNK_SIZE_Z; ++z)
+        for (int y = 0; y <= Luminumbra::CHUNK_SIZE_Y; ++y)
+            for (int x = 0; x <= Luminumbra::CHUNK_SIZE_X; ++x)
+                chunk->sdf_data[static_cast<std::size_t>(
+                    x + side * (y + (Luminumbra::CHUNK_SIZE_Y + 1) * z))] =
+                    static_cast<float>(y) - 4.0f;
+    chunk->mark_voxel_data_dirty();
+    ASSERT_TRUE(session.GetWorldSystem()->adopt_streamed_chunk(chunk));
+    auto& farming = session.GetFarmingController();
+    const auto settled_id = luminumbra::game::DropFarmingSeed(session, farming, {8, 12, 8});
+    ASSERT_NE(settled_id, 0u);
+    const auto* settled = session.GetGroundObjects().find(settled_id);
+    ASSERT_NE(settled, nullptr);
+    EXPECT_TRUE(settled->settled());
+    EXPECT_EQ(settled->y_mm, 4000);
+    const auto unsettled_id = DropSeed(session);
+    ASSERT_NE(unsettled_id, 0u);
+    const auto* unsettled = session.GetGroundObjects().find(unsettled_id);
+    ASSERT_NE(unsettled, nullptr);
+    EXPECT_FALSE(unsettled->settled());
+    EXPECT_EQ(unsettled->y_mm, 12000);
+    EXPECT_EQ(unsettled->despawn_after, 2u);
+    ASSERT_NO_FATAL_FAILURE(TickOnce(session));
+    ASSERT_NE(session.GetGroundObjects().find(settled_id), nullptr);
+    ASSERT_NE(session.GetGroundObjects().find(unsettled_id), nullptr);
+    EXPECT_EQ(session.GetGroundObjects().find(settled_id)->active_age, 1u);
+    EXPECT_EQ(session.GetGroundObjects().find(unsettled_id)->active_age, 1u);
+    ASSERT_NO_FATAL_FAILURE(TickOnce(session));
+    EXPECT_EQ(session.GetGroundObjects().find(settled_id), nullptr);
+    EXPECT_EQ(session.GetGroundObjects().find(unsettled_id), nullptr);
+    EXPECT_EQ(farming.seeds, 3);
 }

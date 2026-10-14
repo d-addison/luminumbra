@@ -67,6 +67,7 @@ __declspec(dllexport) extern const int AmdPowerXpressRequestHighPerformance = 1;
 #include "luminumbra_common/core/JobSystem.h"
 #include "luminumbra_common/core/SystemConfig.h" // user.* video/audio/controls settings
 #include "luminumbra_common/game/CodexView.h" // pure presentation model for the codex browse screen
+#include "luminumbra_common/game/ItemDrop.h"
 #include "luminumbra_common/game/Objectives.h" // progression goals surfaced on the HUD
 #include "luminumbra_common/game/PhotoMode.h" // photo-capture feature: photo-mode capture loop (read-only observer)
 #include "luminumbra_common/network/NetworkLoopbackAuthority.h"
@@ -1149,7 +1150,22 @@ static void HandlePlayerVerbs(ClientAppContext& g_app,
                               Luminumbra::Client::IAudioManager* audioManager,
                               Luminumbra::world::GameSession* gameSession,
                               Luminumbra::Rendering::RenderPipeline& renderPipeline,
-                              ProcgenPlantState& g_procgen) {
+                              ProcgenPlantState& g_procgen,
+                              bool seedDropPressed) {
+    if (g_playerController && gameSession && gameSession->ItemConsumerEnabled()) {
+        if (seedDropPressed && currentState == GameState::IN_GAME && !scenario_config.active() &&
+            FarmDropSeedInputAllowed(window) && g_camera) {
+            const auto feet = g_playerController->GetPosition();
+            Luminumbra::Vec3 position;
+            if (luminumbra::game::FarmingSeedDropPosition(
+                    {feet.x, feet.y, feet.z},
+                    {g_camera->Front.x, g_camera->Front.y, g_camera->Front.z},
+                    position))
+                luminumbra::game::DropFarmingSeed(
+                    *gameSession, gameSession->GetFarmingController(), position);
+        }
+        g_app.hud.farming = gameSession->GetFarmingController();
+    }
     // ---  : player FARMING verbs (F/G/H/J) ---
     // Plant / water / fertilize / harvest the plant nearest the player's aim point,
     // via the deterministic FarmingSystem verbs (FarmingController). Edge-triggered
@@ -1158,6 +1174,8 @@ static void HandlePlayerVerbs(ClientAppContext& g_app,
     // keys).
     if (g_playerController && currentState == GameState::IN_GAME && !scenario_config.active() &&
         !g_app.hud.paused && gameSession && g_camera) {
+        auto& farming = gameSession->ItemConsumerEnabled() ? gameSession->GetFarmingController()
+                                                           : g_app.hud.farming;
         if (!g_app.hud.farmSpeciesLoaded) {
             std::vector<std::string> ferr;
             g_app.hud.farmSpecies.LoadFromDirectory(root_dir / "data/common/foliage/species", ferr);
@@ -1203,11 +1221,11 @@ static void HandlePlayerVerbs(ClientAppContext& g_app,
                     luminumbra::foliage::kPlantSeedOffset,
                     static_cast<std::uint64_t>(static_cast<std::int64_t>(aimXZ.x * 8.0f)),
                     static_cast<std::uint64_t>(static_cast<std::int64_t>(aimXZ.z * 8.0f)) ^ ftick);
-                if (g_app.hud.farming.Seed(freg, aim, tmpl, frng, ftick) != entt::null) {
+                if (farming.Seed(freg, aim, tmpl, frng, ftick) != entt::null) {
                     if (audioManager)
                         audioManager->PlayOneShot("farm_plant", glm::vec3(aim.x, aim.y, aim.z));
                     LUMINUMBRA_CORE_INFO(
-                        "Farm: planted {} ({} seeds left)", tmpl.id, g_app.hud.farming.seeds);
+                        "Farm: planted {} ({} seeds left)", tmpl.id, farming.seeds);
                 }
             }
         }
@@ -1230,24 +1248,26 @@ static void HandlePlayerVerbs(ClientAppContext& g_app,
         };
         const glm::vec3 aimSnd(aim.x, aim.y, aim.z);
         if (farmEdge(IA::FarmWater, g_app.interactions.farmWater)) {
-            if (g_app.hud.farming.Water(freg, fpick()) && audioManager)
+            if (farming.Water(freg, fpick()) && audioManager)
                 audioManager->PlayOneShot("farm_water", aimSnd);
         }
         if (farmEdge(IA::FarmFertilize, g_app.interactions.farmFertilize)) {
-            if (g_app.hud.farming.Fertilize(freg, fpick()) && audioManager)
+            if (farming.Fertilize(freg, fpick()) && audioManager)
                 audioManager->PlayOneShot("farm_fertilize", aimSnd);
         }
         if (farmEdge(IA::FarmHarvest, g_app.interactions.farmHarvest)) {
-            const auto hr = g_app.hud.farming.Harvest(freg, fpick());
+            const auto hr = farming.Harvest(freg, fpick(), gameSession->ItemConsumerEnabled());
             if (hr.harvestable) {
                 if (audioManager)
                     audioManager->PlayOneShot("farm_harvest", aimSnd);
                 LUMINUMBRA_CORE_INFO("Farm: harvested yield {:.2f} (+{} seeds, {} total)",
                                      hr.yield,
                                      hr.seeds,
-                                     g_app.hud.farming.harvests);
+                                     farming.harvests);
             }
         }
+        if (gameSession->ItemConsumerEnabled())
+            g_app.hud.farming = farming;
         // A promotion suppressed a scatter instance -> rebuild the scatter cache so
         // the next composite re-bake (RebakeAllPlants) drops the now-promoted dup.
         if (promoted) {
@@ -2019,6 +2039,7 @@ int main(int argc, char* argv[]) {
     // Medium 8x8 grid = byte-identical baselines; ON = 16x16, 1 m cells).
     gameSession->SetActiveRegionsEnabled(
         g_systemConfig.enabled(luminumbra::core::SysKey::SimActiveRegions));
+    gameSession->SetItemConsumerEnabled(true);
     gameSession->SetWaterHighResEnabled(
         g_systemConfig.enabled(luminumbra::core::SysKey::SimWaterHighRes));
     // opt-in deterministic weather-event epochs (hashed sim flag).
@@ -2273,7 +2294,8 @@ int main(int argc, char* argv[]) {
     };
 
     auto refuse_world_entry = [&](const std::string& fallback, bool use_world_error = true) {
-        const auto& detail = gameSession->GetWorldOpenError();
+        const auto& attempt = gameSession->GetLastWorldOpenAttemptError();
+        const auto& detail = attempt.empty() ? gameSession->GetWorldOpenError() : attempt;
         const std::string error = !use_world_error || detail.empty() ? fallback : detail;
         LUMINUMBRA_CORE_ERROR("World open refused: {}", error);
         if (g_uiManager)
@@ -2874,6 +2896,8 @@ int main(int argc, char* argv[]) {
     }
 
     glfwSetKeyCallback(window, key_callback);
+    inputCallbackBindings.previousWindowFocusCallback =
+        glfwSetWindowFocusCallback(window, window_focus_callback);
     SetGameState(window, gameStateManager, GameState::MAIN_MENU);
     audioManager->PlayMusic("music_main_menu");
     if (g_uiManager) {
@@ -3235,6 +3259,10 @@ int main(int argc, char* argv[]) {
         }
 
         const auto _rb_poll_t0 = std::chrono::steady_clock::now(); // always-on (runtime telemetry)
+        // Preserve an ineligible interval even if this batch closes the overlay/unpauses.
+        if (gameStateManager.GetCurrentState() != GameState::IN_GAME ||
+            !FarmDropSeedInputAllowed(window))
+            g_app.interactions.farmDropSeed.Invalidate();
         glfwPollEvents();
         rb_poll_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() -
                                                                _rb_poll_t0)
@@ -3294,6 +3322,19 @@ int main(int argc, char* argv[]) {
         uiHotReload.Update(); // No-op unless --ui-hot-reload enabled it; throttled to 1 second.
 
         GameState currentState = gameStateManager.GetCurrentState();
+        const auto drop_action = Luminumbra::Client::InputAction::FarmDropSeed;
+        const int drop_key =
+            g_playerController
+                ? g_playerController->key(drop_action)
+                : Luminumbra::Client::kInputActionDefs[static_cast<std::size_t>(drop_action)]
+                      .default_key;
+        const bool drop_down = glfwGetKey(window, drop_key) == GLFW_PRESS;
+        const bool seedDropPressed = luminumbra::game::FarmDropSeedPressed(
+            drop_down,
+            currentState == GameState::IN_GAME,
+            g_playerController && gameSession && gameSession->ItemConsumerEnabled() &&
+                !scenario_config.active() && g_camera && FarmDropSeedInputAllowed(window),
+            g_app.interactions.farmDropSeed);
 
         // Frame audio — 3D listener, player footsteps, and the living-world
         // rain/creature-call region (app/FrameAudio.cpp).
@@ -4577,7 +4618,8 @@ int main(int argc, char* argv[]) {
                                       audioManager.get(),
                                       gameSession.get(),
                                       renderPipeline,
-                                      g_procgen);
+                                      g_procgen,
+                                      seedDropPressed);
                     // Photo-mode capture loop + codex/objectives/farming HUD
                     // (app/DebugOverlays.cpp). Render-side, read-only observer.
                     UpdatePhotoModeAndHud(g_app,

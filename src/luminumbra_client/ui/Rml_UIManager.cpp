@@ -452,7 +452,11 @@ void Rml_UIManager::LoadDocument(const std::string& rml_path) {
     BindEventListeners(document);
     if (document->GetId() == "gallery")
         PopulateGallery(document);
-    document->Show();
+    // The passive in-game HUD must not take keyboard focus from gameplay.
+    if (rml_path == "hud.rml")
+        document->Show(Rml::ModalFlag::None, Rml::FocusFlag::None);
+    else
+        document->Show();
 }
 
 void Rml_UIManager::ShowMessage(const std::string& message) {

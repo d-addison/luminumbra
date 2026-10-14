@@ -39,10 +39,13 @@ struct InputCallbackBindings {
     std::unique_ptr<Luminumbra::Rendering::Camera>* camera = nullptr;
     std::unique_ptr<Luminumbra::Client::PlayerController>* playerController = nullptr;
     std::unique_ptr<Luminumbra::Client::Rml_UIManager>* uiManager = nullptr;
+    void (*previousWindowFocusCallback)(GLFWwindow*, int) = nullptr;
 };
 
 void framebuffer_size_callback(GLFWwindow* window, int width, int height);
 void key_callback(GLFWwindow* window, int key, int scancode, int action, int mods);
+void window_focus_callback(GLFWwindow* window, int focused);
+bool FarmDropSeedInputAllowed(GLFWwindow* window);
 void mouse_callback(GLFWwindow* window, double xpos, double ypos);
 void scroll_callback(GLFWwindow* window, double xoffset, double yoffset);
 // Menu-state scroll callback — forwards to RmlUi (so menu lists still scroll)

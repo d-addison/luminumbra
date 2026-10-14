@@ -2,6 +2,7 @@
 #include <GLFW/glfw3.h>
 #include <glad/glad.h>
 
+#include "app/FarmDropSeedInput.h"
 #include "app/InputCallbacks.h"
 
 #include "core/Log.h"
@@ -9,6 +10,7 @@
 #include "luminumbra_common/core/SystemConfig.h"
 #include "player/PlayerController.h"
 #include "rendering/Camera.h"
+#include "ui/KeyboardCapture.h"
 #include "ui/Rml_UIManager.h"
 
 #include <algorithm>
@@ -28,7 +30,41 @@ InputCallbackBindings& CallbackBindings(GLFWwindow* window) {
     return *static_cast<InputCallbackBindings*>(glfwGetWindowUserPointer(window));
 }
 
+struct FarmDropSeedRuntimeInput {
+    GLFWwindow* window;
+    const PlayerController* player;
+    Rml_UIManager* ui;
+
+    bool WindowFocused() const {
+        return glfwGetWindowAttrib(window, GLFW_FOCUSED) == GLFW_TRUE;
+    }
+    bool PlayerPhotoModeActive() const {
+        return player && player->photo_mode_active();
+    }
+    bool ImGuiCapturesKeyboard() const {
+        return ImGui::GetCurrentContext() && ImGui::GetIO().WantCaptureKeyboard;
+    }
+    const Rml::Element* GetFocusElement() const {
+        return ui && ui->GetContext() ? ui->GetContext()->GetFocusElement() : nullptr;
+    }
+};
+
 } // namespace
+
+bool FarmDropSeedInputAllowed(GLFWwindow* window) {
+    const auto& bindings = CallbackBindings(window);
+    const auto& app = *bindings.app;
+    const auto* player = bindings.playerController->get();
+    auto* ui = bindings.uiManager->get();
+    return FarmDropSeedInputAllowed(app, FarmDropSeedRuntimeInput{window, player, ui});
+}
+
+void window_focus_callback(GLFWwindow* window, int focused) {
+    auto& bindings = CallbackBindings(window);
+    bindings.app->interactions.farmDropSeed.Invalidate();
+    if (bindings.previousWindowFocusCallback)
+        bindings.previousWindowFocusCallback(window, focused);
+}
 
 void key_callback(GLFWwindow* window, int key, int scancode, int action, int mods) {
     InputCallbackBindings& bindings = CallbackBindings(window);
@@ -37,6 +73,8 @@ void key_callback(GLFWwindow* window, int key, int scancode, int action, int mod
     WindowState& windowState = *bindings.windowState;
     Luminumbra::Client::PlayerController* playerController = bindings.playerController->get();
     Luminumbra::Client::Rml_UIManager* uiManager = bindings.uiManager->get();
+    if (!FarmDropSeedInputAllowed(window))
+        app.interactions.farmDropSeed.Invalidate();
     // Rebind capture: while waiting for a key for some action, the next key press becomes
     // its binding (Escape cancels). Intercept first so any key — even F-keys — can be bound.
     if (app.hud.rebindCaptureAction >= 0 && action == GLFW_PRESS) {
@@ -59,6 +97,7 @@ void key_callback(GLFWwindow* window, int key, int scancode, int action, int mod
     }
     // toggle the live per-pass GPU profiler overlay.
     if (key == GLFW_KEY_F3 && action == GLFW_PRESS) {
+        app.interactions.farmDropSeed.Invalidate();
         app.overlay.show_gpu_profiler = !app.overlay.show_gpu_profiler;
         return;
     }
@@ -71,6 +110,7 @@ void key_callback(GLFWwindow* window, int key, int scancode, int action, int mod
     // walk — the dev shader panel (per-shader reload, auto-reload
     // watcher toggle, live uniform editing).
     if (key == GLFW_KEY_F10 && action == GLFW_PRESS) {
+        app.interactions.farmDropSeed.Invalidate();
         app.overlay.show_shader_panel = !app.overlay.show_shader_panel;
         if (app.overlay.show_shader_panel) {
             glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
@@ -88,6 +128,7 @@ void key_callback(GLFWwindow* window, int key, int scancode, int action, int mod
     }
     // toggle the settings menu and free/restore the cursor so the panel is usable.
     if (key == GLFW_KEY_F8 && action == GLFW_PRESS) {
+        app.interactions.farmDropSeed.Invalidate();
         app.hud.show_settings = !app.hud.show_settings;
         app.hud.rebindCaptureAction = -1;
         if (app.hud.show_settings) {
@@ -115,6 +156,7 @@ void key_callback(GLFWwindow* window, int key, int scancode, int action, int mod
         return;
     }
     if (key == GLFW_KEY_F7 && action == GLFW_PRESS) {
+        app.interactions.farmDropSeed.Invalidate();
         app.overlay.show_worldgen_viewer = !app.overlay.show_worldgen_viewer;
         if (app.overlay.show_worldgen_viewer) {
             glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
@@ -136,6 +178,9 @@ void key_callback(GLFWwindow* window, int key, int scancode, int action, int mod
     }
 
     if (playerController) {
+        if (action == GLFW_PRESS && (key == playerController->key(InputAction::TogglePhotoMode) ||
+                                     key == playerController->key(InputAction::ToggleCodex)))
+            app.interactions.farmDropSeed.Invalidate();
         playerController->ProcessKeyInput(key, action);
     }
 
@@ -150,7 +195,8 @@ void key_callback(GLFWwindow* window, int key, int scancode, int action, int mod
     if (uiManager) {
         uiManager->KeyCallback(window, key, scancode, action, mods);
         // If RmlUi has a focused input element, it should consume the event.
-        if (uiManager->GetContext() && uiManager->GetContext()->GetFocusElement()) {
+        if (uiManager->GetContext() &&
+            FocusedElementCapturesKeyboard(uiManager->GetContext()->GetFocusElement())) {
             return;
         }
     }
@@ -161,6 +207,7 @@ void SetGameState(GLFWwindow* window, GameStateManager& gameStateManager, GameSt
     ClientAppContext& app = *bindings.app;
     Luminumbra::Client::Rml_UIManager* uiManager = bindings.uiManager->get();
     gameStateManager.SetState(newState);
+    app.interactions.farmDropSeed.Invalidate();
     bool cursorDisabled = (newState == GameState::IN_GAME);
 
     if (cursorDisabled) {
@@ -193,6 +240,7 @@ void SetGamePaused(GLFWwindow* window, bool paused) {
     ClientAppContext& app = *bindings.app;
     Luminumbra::Client::Rml_UIManager* uiManager = bindings.uiManager->get();
     app.hud.paused = paused;
+    app.interactions.farmDropSeed.Invalidate();
     if (paused) {
         glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
         if (uiManager) {

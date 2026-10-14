@@ -46,6 +46,7 @@ enum class InputAction : int {
     FarmWater,     // water the nearest plant (boost growth)
     FarmFertilize, // fertilize the nearest plant (stronger boost + stress recovery)
     FarmHarvest,   // harvest the nearest mature plant
+    FarmDropSeed,  // drop one generic seed on the local host
     Count
 };
 
@@ -88,6 +89,7 @@ inline constexpr std::array<InputActionDef, kInputActionCount> kInputActionDefs 
     {InputAction::FarmWater, "FarmWater", GLFW_KEY_G},
     {InputAction::FarmFertilize, "FarmFertilize", GLFW_KEY_H},
     {InputAction::FarmHarvest, "FarmHarvest", GLFW_KEY_J},
+    {InputAction::FarmDropSeed, "FarmDropSeed", GLFW_KEY_B},
 }};
 
 } // namespace Luminumbra::Client

@@ -224,6 +224,8 @@ add_executable(common_tests
     common/FoliageFieldPages_test.cpp
     common/WaterShare_test.cpp
     common/RegionalWater_test.cpp
+    common/ItemCatalogue_test.cpp
+    common/ItemDrop_test.cpp
     common/GroundObjectStore_test.cpp
     common/FieldPageState_test.cpp
     common/WorldClock_test.cpp
@@ -1580,13 +1582,15 @@ target_link_libraries(audio_prune_guard_test PRIVATE
     glm
 )
 
-# Saved spawn anchors are stance-independent; tree impostor policy uses the
-# shared LUMIN_TREE_IMPOSTORS predicate (header-only; no GL/device).
+# Headless client policies: saved spawn anchors, tree impostors, and farm-drop input.
 add_executable(client_policy_test
     client/client_policy_test.cpp
 )
 target_include_directories(client_policy_test PRIVATE
 ../src/luminumbra_client
+)
+target_compile_definitions(client_policy_test PRIVATE
+    LUMINUMBRA_SOURCE_ROOT="${CMAKE_SOURCE_DIR}"
 )
 target_link_libraries(client_policy_test PRIVATE
     gtest_main
