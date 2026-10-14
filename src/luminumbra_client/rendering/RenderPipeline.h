@@ -1148,8 +1148,8 @@ private:
     std::vector<glm::mat4> get_light_space_matrices(const Camera& camera);
 
     void update_time_of_day(float deltaTime);
-    float m_timeOfDay = 0.5f;     // Start at sunrise
-    bool m_timeOfDayHold = false; // freeze auto-advance for photo-mode TOD scrub
+    float m_timeOfDay = 0.5f;             // Start at sunrise
+    bool m_timeOfDayHold = false;         // freeze auto-advance for photo-mode TOD scrub
     float m_dayDurationSeconds = 7200.0f; // 2 h/day, matching the world calendar
     // tick-authority state. m_todTickDriven marks "the sim tick fed TOD this
     // frame" so update_time_of_day skips the wall-clock advance; cleared every frame.
