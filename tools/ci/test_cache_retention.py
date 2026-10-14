@@ -26,7 +26,7 @@ class FrozenDatetime(datetime):
 class CacheRetentionTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        workflow = (ROOT / ".github/workflows/cache-cleanup.yml").read_text()
+        workflow = (ROOT / ".github/workflows/cache-cleanup.yml").read_text(encoding="utf-8")
         body = workflow.split("python3 - <<'PY'\n", 1)[1].split("          PY\n", 1)[0]
         cls.body = "\n".join(line[10:] for line in body.splitlines())
         tree = ast.parse(cls.body)
@@ -159,7 +159,7 @@ class CacheRetentionTests(unittest.TestCase):
     def test_delayed_cleanup_for_push_a_preserves_a_after_live_head_b(self):
         # workflow_run must protect the completed run's A SHA, even if the
         # workflow itself executes on the default branch at a different SHA.
-        workflow = (ROOT / ".github/workflows/cache-cleanup.yml").read_text()
+        workflow = (ROOT / ".github/workflows/cache-cleanup.yml").read_text(encoding="utf-8")
         self.assertIn("TRIGGER_SHA: ${{ github.event_name == 'workflow_run' && "
                       "github.event.workflow_run.head_sha || github.sha }}", workflow)
         caches = [self.cache(1, "tidy-cache-Linux-A"),
@@ -313,7 +313,7 @@ class CacheRetentionTests(unittest.TestCase):
                 self.assertIn(f"::warning::Malformed cache cleanup input ({error})", log.getvalue())
 
     def test_cleanup_only_uses_trusted_triggers_and_serialized_deletion_permissions(self):
-        cleanup = (ROOT / ".github/workflows/cache-cleanup.yml").read_text()
+        cleanup = (ROOT / ".github/workflows/cache-cleanup.yml").read_text(encoding="utf-8")
         triggers = cleanup.split("on:\n", 1)[1].split("\npermissions:", 1)[0]
         self.assertIn("  push:\n    branches: [devel, main]", triggers)
         self.assertNotIn("pull_request", triggers)
@@ -324,15 +324,15 @@ class CacheRetentionTests(unittest.TestCase):
         self.assertIn("    permissions:\n      contents: read\n      actions: write", cleanup)
 
     def test_cleanup_tracks_actual_workflow_names_and_never_checks_out_code(self):
-        cleanup = (ROOT / ".github/workflows/cache-cleanup.yml").read_text()
+        cleanup = (ROOT / ".github/workflows/cache-cleanup.yml").read_text(encoding="utf-8")
         self.assertNotIn("actions/checkout", cleanup)
         triggers = cleanup.split("    workflows: [", 1)[1].split("]", 1)[0].split(", ")
         for name in ("ci", "asan", "performance"):
-            workflow = (ROOT / f".github/workflows/{name}.yml").read_text()
+            workflow = (ROOT / f".github/workflows/{name}.yml").read_text(encoding="utf-8")
             self.assertIn(workflow.splitlines()[0].removeprefix("name: "), triggers)
 
     def test_preview_key_refreshes_with_candidate_and_retains_restore_prefix(self):
-        workflow = (ROOT / ".github/workflows/performance.yml").read_text()
+        workflow = (ROOT / ".github/workflows/performance.yml").read_text(encoding="utf-8")
         preview = workflow.split("  preview-frame:\n", 1)[1].split("  server-smoke-comparison:\n", 1)[0]
         keys = [line.strip().removeprefix("key: ") for line in preview.splitlines()
                 if line.strip().startswith("key: ")]

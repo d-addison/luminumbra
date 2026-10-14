@@ -109,7 +109,7 @@ class CatalogTests(unittest.TestCase):
 
     def test_source_discovery_catches_unmapped_runtime_selector(self):
         path = self.root / "src/luminumbra_client/core/RuntimeScenarioConfig.h"
-        previous = path.read_text()
+        previous = path.read_text(encoding="utf-8")
         try:
             path.write_text(previous + '\nbool new_capture() { return scenario == "new_capture"; }\n')
             self.rejected("selector discovery")

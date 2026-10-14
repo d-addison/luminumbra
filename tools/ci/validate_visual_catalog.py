@@ -350,7 +350,7 @@ def validate(catalog: dict, root: Path) -> list[str]:
         frame_targets = catalog["policy"]["frame_targets"]
         require(frame_targets["p99_max_ms"] == 16.67 and frame_targets["reported_target_ms"] == 8.33
                 and frame_targets["foliage_draw_target_ms"] == 0.6, "accepted target values changed")
-        source = local_file(root, "src/luminumbra_client/core/RuntimeScenarioConfig.h").read_text()
+        source = local_file(root, "src/luminumbra_client/core/RuntimeScenarioConfig.h").read_text(encoding="utf-8")
         selectors = set(re.findall(r'return scenario == "([^"]+)"', source)) - {"forced_crash"}
         require({r.get("runtime_selector") for r in rows if r.get("runtime_selector")} == selectors,
                 "runtime selector discovery does not reconcile to catalog")
