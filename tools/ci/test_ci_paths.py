@@ -39,7 +39,7 @@ class PathGateTests(unittest.TestCase):
                 "ci_paths.py", "classify", "--event", "push", "--output", str(output),
             ]):
                 self.assertEqual(gate.main(), 0)
-            self.assertEqual(output.read_text(), "needs_cpp=true\nneeds_python=true\n")
+            self.assertEqual(output.read_text(encoding="utf-8"), "needs_cpp=true\nneeds_python=true\n")
 
     def test_python_runner_executes_plan_and_propagates_failures(self):
         commands = [("tools/ci/test_check_docs.py",)]
@@ -125,7 +125,7 @@ class PathGateTests(unittest.TestCase):
 
     def test_every_workflow_script_entrypoint_requires_native_builds(self):
         for workflow in (ROOT / ".github/workflows").glob("*.yml"):
-            paths = re.findall(r"(?:tools|scripts|test)/[A-Za-z0-9_./-]+\.(?:py|sh|ps1)\b", workflow.read_text())
+            paths = re.findall(r"(?:tools|scripts|test)/[A-Za-z0-9_./-]+\.(?:py|sh|ps1)\b", workflow.read_text(encoding="utf-8"))
             for path in paths:
                 with self.subTest(workflow=workflow.name, path=path):
                     self.assertTrue(gate.needs_cpp(path))
@@ -133,7 +133,7 @@ class PathGateTests(unittest.TestCase):
     @unittest.skipIf(os.name == "nt", "trusted classification runs on Linux")
     def test_workflow_bootstrap_uses_base_and_fails_open_without_executing_head(self):
         for name in ("ci", "asan", "performance"):
-            workflow = (ROOT / f".github/workflows/{name}.yml").read_text()
+            workflow = (ROOT / f".github/workflows/{name}.yml").read_text(encoding="utf-8")
             script = run_block(workflow, "Classify merge-base diff (all lanes for non-PR events)")
             for sensitive, missing, failed in ((False, False, False), (True, False, False),
                                                (False, True, False), (False, False, True)):
@@ -173,10 +173,10 @@ class PathGateTests(unittest.TestCase):
                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
                     self.assertFalse(marker.exists())
                     expected = "needs_cpp=true\nneeds_python=true\n" if sensitive or missing or failed else "needs_cpp=false\nneeds_python=true\n"
-                    self.assertEqual(output.read_text(), expected)
+                    self.assertEqual(output.read_text(encoding="utf-8"), expected)
 
     def test_required_jobs_run_python_plan_on_mixed_changes_and_publish_route(self):
-        workflow = (ROOT / ".github/workflows/ci.yml").read_text()
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
         for job in ("linux", "windows-msvc"):
             # Split on a job boundary, not nested YAML mappings.
             body = re.split(r"\n  [\w-]+:\n", workflow.split(f"  {job}:\n", 1)[1])[0]
@@ -199,7 +199,7 @@ class PathGateTests(unittest.TestCase):
 
     @unittest.skipIf(os.name == "nt", "route scripts use the hosted bash shell")
     def test_route_is_visible_in_log_summary_and_step_output(self):
-        workflow = (ROOT / ".github/workflows/ci.yml").read_text()
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
         for job in ("linux", "windows-msvc"):
             script = run_block(workflow.split(f"  {job}:\n", 1)[1], "Report validation route")
             for cpp, route in (("false", "python-only"), ("true", "native"), ("", "native")):
@@ -209,8 +209,8 @@ class PathGateTests(unittest.TestCase):
                                GITHUB_STEP_SUMMARY=str(root / "summary"))
                     result = subprocess.run(["bash", "-e", "-c", script], env=env, check=True,
                                             stdout=subprocess.PIPE, text=True)
-                    self.assertEqual((root / "output").read_text(), f"route={route}\n")
-                    self.assertEqual((root / "summary").read_text(), result.stdout)
+                    self.assertEqual((root / "output").read_text(encoding="utf-8"), f"route={route}\n")
+                    self.assertEqual((root / "summary").read_text(encoding="utf-8"), result.stdout)
                     self.assertIn(f"route: {route}", result.stdout)
                     if cpp == "false":
                         self.assertIn("native build skipped by Classify changed paths", result.stdout)
@@ -266,7 +266,7 @@ class PathGateTests(unittest.TestCase):
                 "--head-repository", "owner/repo", "--output", str(output),
             ]):
                 self.assertEqual(gate.main(), 0)
-            self.assertEqual(output.read_text(), "needs_cpp=false\nneeds_python=false\n")
+            self.assertEqual(output.read_text(encoding="utf-8"), "needs_cpp=false\nneeds_python=false\n")
 
     def test_unavailable_or_empty_diff_fails_open(self):
         for error in (OSError("missing git"), subprocess.CalledProcessError(1, "git")):
