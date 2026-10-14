@@ -2,12 +2,14 @@
 from __future__ import annotations
 
 import copy
+from contextlib import ExitStack
 from concurrent.futures import ThreadPoolExecutor
 import os
 from pathlib import Path
 import pkgutil
 import platform
 import re
+import stat
 import subprocess
 import sys
 import threading
@@ -19,13 +21,37 @@ from . import VERSION
 from .contracts import (ASSET, GENERATION, MAX_DOCUMENT, MAX_OUTPUT, MAX_SNAPSHOT,
                         PROFILE, PREFAB_PROFILE, RECEIPT, Refusal, Toolchain, atomic_json, canonical,
                         digest, file_digest, read_bounded, read_json, relative_path,
-                        require, validate_asset)
+                        path_is_link, require, validate_asset)
 from .formats import clip_info, mesh_info, texture_info, validate_glb
 from .prefab import PrefabPlan, SCHEMA as PREFAB_SCHEMA, encode_glb
 from .locking import ProjectLock
 
 TERMINAL = {"succeeded", "failed", "cancelled", "stale"}
 JOB_ID = re.compile(r"[0-9a-f]{32}\Z")
+
+
+def directory_identity(info):
+    return info.st_dev, info.st_ino
+
+
+def lock_windows_directory(stack, path):
+    """Pin a real directory against replacement where dir_fd is unavailable."""
+    import ctypes
+    from ctypes import wintypes
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    create = kernel.CreateFileW
+    create.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p,
+                       wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+    create.restype = wintypes.HANDLE
+    close = kernel.CloseHandle
+    close.argtypes = [wintypes.HANDLE]
+    close.restype = wintypes.BOOL
+    # Read/write sharing, deliberately no FILE_SHARE_DELETE. OPEN_REPARSE_POINT
+    # opens a link itself; the caller rechecks lstat after the handle is pinned.
+    handle = create(str(path), 0, 0x1 | 0x2, None, 3, 0x02000000 | 0x00200000, None)
+    if handle == wintypes.HANDLE(-1).value:
+        raise ctypes.WinError(ctypes.get_last_error())
+    stack.callback(close, handle)
 
 
 def worker_command():
@@ -49,6 +75,8 @@ class BuildService:
         for path in (self.root, self.root / "jobs", self.root / "generations"):
             require(not path.is_symlink(), "path.symlink", "Authoring state cannot be a symlink.")
             path.mkdir(exist_ok=True)
+        self.cleanup_roots = {path: path.lstat() for path in (self.root, self.root / "jobs")}
+        self.cleanup_jobs = {}
         require(not (self.root / "session.lock").is_symlink(), "path.symlink", "Invalid lock file.")
         try:
             self.project_lock = ProjectLock(self.project, self.root / "session.lock")
@@ -103,6 +131,7 @@ class BuildService:
                 "schemas": [ASSET, PREFAB_SCHEMA], "engine_compilation": True, "engine_preview": False,
                 "graph_execution": False, "material_binding": True, "prefab_hierarchy": True,
                 "source_revision_guards": True,
+                "features": {"max_tris_setting": True},
                 "static_prefab_compilation": True, "prefab_runtime_instantiation": False,
                 "operations": ["capabilities", "registry", "validate", "build", "job.status",
                                "job.cancel", "generation.inspect"],
@@ -160,7 +189,9 @@ class BuildService:
             require(len(list((self.root / "jobs").iterdir())) < 256,
                     "job.limit", "Project reached its 256 retained-job limit.")
             job_id = uuid.uuid4().hex
-            (self.root / "jobs" / job_id).mkdir()
+            directory = self.root / "jobs" / job_id
+            directory.mkdir()
+            self.cleanup_jobs[job_id] = directory.lstat()
             job = {"schema": RECEIPT, "mode": "NATIVE", "job_id": job_id,
                    "status": "extracting", "source": source, "revision": revision,
                    "findings": [], "engine_executed": False, "rendered": False}
@@ -187,8 +218,11 @@ class BuildService:
             self.jobs[job_id].update(changes)
             self._save(self.jobs[job_id])
 
-    def _compile(self, job_id, input_path, outputs, emit_lods):
-        self._invoke(job_id, input_path, outputs / "asset.lmesh", ["--emit-lods"] if emit_lods else [])
+    def _compile(self, job_id, input_path, outputs, emit_lods, max_tris=None):
+        arguments = ["--emit-lods"] if emit_lods else []
+        if max_tris is not None:
+            arguments.extend(["--max-tris", str(max_tris)])
+        self._invoke(job_id, input_path, outputs / "asset.lmesh", arguments)
 
     def _invoke(self, job_id, input_path, output_path, arguments):
         directory = output_path.parent.parent
@@ -270,7 +304,7 @@ class BuildService:
             result[path.name] = {**info, "sha256": digest(data)}
         return result
 
-    def _outputs(self, directory):
+    def _outputs(self, directory, max_tris=None):
         paths = list(directory.iterdir())
         require(1 <= len(paths) <= 256, "output.count", "Unexpected output count.")
         names = {path.name for path in paths}
@@ -285,12 +319,107 @@ class BuildService:
             total += len(data)
             payloads[path.name] = data
         primary = mesh_info(payloads["asset.lmesh"])
+        if max_tris is not None:
+            require(primary["triangles"] <= max_tris, "output.budget_exceeded",
+                    f"Primary mesh has {primary['triangles']} triangles; cap is {max_tris}.",
+                    "asset.lmesh")
         outputs = {}
         for name, data in sorted(payloads.items()):
             info = clip_info(data, primary["joint_ids"]) if name.endswith(".lanim") else mesh_info(data)
+            if max_tris is not None and name in ("asset.lod1.lmesh", "asset.lod2.lmesh"):
+                require(info["triangles"] <= primary["triangles"], "output.lod_exceeded",
+                        "LOD triangle count exceeds the primary mesh.", name)
             info.pop("joint_ids", None)
             outputs[name] = {"sha256": digest(data), **info}
         return outputs
+
+    def _check_cleanup_directory(self, path, expected):
+        info = path.lstat()
+        require(not path_is_link(path, info) and stat.S_ISDIR(info.st_mode),
+                "output.cleanup_refused", "Staging cleanup requires real directories.", str(path))
+        require(path.resolve(strict=True).is_relative_to(self.root)
+                and directory_identity(info) == directory_identity(expected),
+                "output.cleanup_refused", "Staging directory escaped or was replaced.", str(path))
+        return info
+
+    def _cleanup_outputs(self, job_id, output_identity):
+        """Delete only owned staging, with pinned ancestry and no-follow descent."""
+        directory = self.root / "jobs" / job_id
+        chain = [*self.cleanup_roots.items(), (directory, self.cleanup_jobs[job_id]),
+                 (directory / "outputs", output_identity)]
+        # Validate the entire chain before deleting even a single member.
+        for path, expected in chain:
+            self._check_cleanup_directory(path, expected)
+        with ExitStack() as stack:
+            if (os.open in os.supports_dir_fd and os.stat in os.supports_dir_fd
+                    and os.unlink in os.supports_dir_fd and os.rmdir in os.supports_dir_fd
+                    and os.listdir in os.supports_fd and hasattr(os, "O_NOFOLLOW")):
+                flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+                parent = None
+                descriptors = []
+                for path, expected in chain:
+                    fd = os.open(path if parent is None else path.name, flags, dir_fd=parent)
+                    stack.callback(os.close, fd)
+                    info = os.fstat(fd)
+                    require(not path_is_link(None, info) and stat.S_ISDIR(info.st_mode)
+                            and directory_identity(info) == directory_identity(expected),
+                            "output.cleanup_refused", "Staging directory changed while opening.", str(path))
+                    descriptors.append(fd)
+                    parent = fd
+
+                def empty(fd):
+                    for name in os.listdir(fd):
+                        info = os.stat(name, dir_fd=fd, follow_symlinks=False)
+                        if path_is_link(None, info) or not stat.S_ISDIR(info.st_mode):
+                            os.unlink(name, dir_fd=fd)
+                        else:
+                            child = os.open(name, flags, dir_fd=fd)
+                            try:
+                                require(directory_identity(os.fstat(child)) == directory_identity(info),
+                                        "output.cleanup_refused", "Staging member changed while opening.", name)
+                                empty(child)
+                            finally:
+                                os.close(child)
+                            os.rmdir(name, dir_fd=fd)
+
+                empty(descriptors[-1])
+                os.rmdir("outputs", dir_fd=descriptors[-2])
+            elif os.name == "nt":
+                # Windows path operations are safe only while every ancestor is
+                # pinned without delete sharing. Refuse if a handle cannot open.
+                lock_windows_directory(stack, self.project)
+                for path, expected in chain[:-1]:
+                    lock_windows_directory(stack, path)
+                    self._check_cleanup_directory(path, expected)
+
+                def empty(path):
+                    for entry in path.iterdir():
+                        info = entry.lstat()
+                        if path_is_link(entry, info):
+                            # Junctions/directory symlinks are removed as links.
+                            if info.st_file_attributes & stat.FILE_ATTRIBUTE_DIRECTORY:
+                                entry.rmdir()
+                            else:
+                                entry.unlink()
+                        elif stat.S_ISDIR(info.st_mode):
+                            with ExitStack() as child_stack:
+                                lock_windows_directory(child_stack, entry)
+                                self._check_cleanup_directory(entry, info)
+                                empty(entry)
+                            entry.rmdir()
+                        else:
+                            entry.unlink()
+
+                outputs, expected = chain[-1]
+                with ExitStack() as output_stack:
+                    lock_windows_directory(output_stack, outputs)
+                    self._check_cleanup_directory(outputs, expected)
+                    empty(outputs)
+                # Only the empty outputs directory is unpinned for rmdir; its
+                # job and every parent remain protected against replacement.
+                outputs.rmdir()
+            else:
+                raise Refusal("output.cleanup_refused", "No safe staging deletion primitive is available.")
 
     def _run(self, job_id):
         directory = self.root / "jobs" / job_id
@@ -300,6 +429,11 @@ class BuildService:
             check = lambda: self._check_cancelled(job_id)
             asset, files, hashes = self._snapshot(job["source"], check)
             require(asset["revision"] == job["revision"], "revision.stale", "Expected scene revision changed.")
+            settings = asset.get("settings", {})
+            max_tris = settings.get("max_tris")
+            if max_tris is not None:
+                # Preserve the legacy receipt shape when no cap was requested.
+                self._change(job_id, settings=copy.deepcopy(settings))
             toolchain = copy.deepcopy(self.toolchain.verify())
             inputs = directory / "inputs"
             inputs.mkdir()
@@ -311,7 +445,7 @@ class BuildService:
             # Hash exact service code as well as the executable/library manifest.
             service_hashes = {name: digest(pkgutil.get_data(__package__, name)) for name in (
                 "__init__.py", "__main__.py", "contracts.py", "formats.py",
-                "locking.py", "process.py", "service.py", "prefab.py")}
+                "locking.py", "process.py", "service.py", "prefab.py", "file_io.py")}
             identity = digest(canonical({"inputs": hashes, "toolchain": toolchain,
                                          "service": service_hashes, "profile": asset["profile"],
                                          "host": self.host_profile}))
@@ -320,6 +454,7 @@ class BuildService:
                          host_profile=self.host_profile)
             outputs = directory / "outputs"
             outputs.mkdir()
+            output_identity = outputs.lstat()
             check()
             plan = None
             if asset["profile"] == PREFAB_PROFILE:
@@ -328,14 +463,14 @@ class BuildService:
                 plan = PrefabPlan(files[asset["source"]], asset["asset_id"])
                 self._compile_prefab(job_id, outputs, plan)
             else:
-                self._compile(job_id, input_path, outputs, asset.get("settings", {}).get("emit_lods", False))
+                self._compile(job_id, input_path, outputs, settings.get("emit_lods", False), max_tris)
             check()
             self.toolchain.verify()
             require(file_digest(input_path) == hashes[asset["source"]],
                     "input.corrupt", "Compiler input snapshot changed.")
             for expected in hashes.values():
                 require(file_digest(inputs / expected) == expected, "input.corrupt", "Input snapshot changed.")
-            validated = self._prefab_outputs(outputs, plan) if plan else self._outputs(outputs)
+            validated = self._prefab_outputs(outputs, plan) if plan else self._outputs(outputs, max_tris)
             manifest = {"schema": GENERATION, "mode": "NATIVE", "job_id": job_id,
                         "asset_id": asset["asset_id"], "revision": asset["revision"],
                         "build_identity": identity, "input_hashes": hashes, "outputs": validated}
@@ -362,7 +497,16 @@ class BuildService:
             status = {"job.cancelled": "cancelled", "revision.stale": "stale"}.get(refusal.finding["rule_id"], "failed")
             # If the pointer committed but the receipt write failed, recovery
             # recognizes that exact generation on the next service startup.
-            self._change(job_id, status=status, findings=[refusal.finding])
+            cleanup_findings = []
+            try:
+                if refusal.finding["rule_id"] in ("output.budget_exceeded", "output.lod_exceeded"):
+                    # Count refusals precede publication; retain only input evidence and receipts.
+                    self._cleanup_outputs(job_id, output_identity)
+            except Exception as cleanup_error:
+                cleanup_findings.append(Refusal("output.cleanup_refused", str(cleanup_error)).finding)
+            finally:
+                self._change(job_id, status=status, findings=[refusal.finding],
+                             **({"cleanup_findings": cleanup_findings} if cleanup_findings else {}))
 
     def current(self):
         if not (self.root / "current.json").exists():
