@@ -5,7 +5,7 @@
     [string]$BuildPreset = "debug",
     [int]$SmokeSeconds = 30,
     [ValidateSet("Legacy", "Ladder")]
-    [string]$FarWorldRenderer = "Legacy"
+    [string]$FarWorldRenderer = "Ladder"
 )
 
 $ErrorActionPreference = "Stop"
@@ -3488,7 +3488,14 @@ function Test-FarLodHorizon {
     if ($FarWorldRenderer -eq "Ladder") {
         throw "FarLodHorizon Ladder qualification is unsupported: the world presets lack injected immutable authority; native cave/edit/budget/water qualification remains NEEDS-NATIVE-RUN. A refused Legacy fallback cannot qualify Ladder."
     }
-    Write-Host "FarLodHorizon selected renderer: $FarWorldRenderer (legacy default; ladder_checked:false)"
+    # The validator selector does not override the client's systems.json request.
+    # Legacy qualification must explicitly opt out through the existing setting.
+    $systems = Get-Content -LiteralPath "data/common/systems.json" -Raw | ConvertFrom-Json
+    if ($systems.render.far_world_ladder.enabled -isnot [bool] -or
+        $systems.render.far_world_ladder.enabled -ne $false) {
+        throw "FarLodHorizon Legacy requires explicit render.far_world_ladder.enabled:false in data/common/systems.json. The default request is Ladder; a refused fallback is not an explicit Legacy request."
+    }
+    Write-Host "FarLodHorizon selected renderer: $FarWorldRenderer (explicit Legacy opt-out; ladder_checked:false)"
     $exe = Get-ClientExe
     $runSeconds = [Math]::Max(680, $SmokeSeconds)
 

@@ -76,11 +76,11 @@ TEST(SystemConfig, SimulationIdentityUsesResolvedValuesAndIgnoresPresentation) {
 }
 
 // missing/empty config yields all-defaults, no crash.
-TEST(SystemConfig, ShippingDefaultsOnExceptFarWorldLadder) {
+TEST(SystemConfig, ShippingDefaultsAllOn) {
     const SystemConfig cfg = SystemConfig::Defaults();
     for (unsigned key = 0; key < static_cast<unsigned>(SysKey::Count); ++key) {
         const auto id = static_cast<SysKey>(key);
-        EXPECT_EQ(cfg.enabled(id), id != SysKey::RenderFarWorldLadder) << key;
+        EXPECT_TRUE(cfg.enabled(id)) << key;
     }
     EXPECT_TRUE(cfg.enabled(SysKey::SimPlantGrowth));
     EXPECT_TRUE(cfg.enabled(SysKey::SimErosion));
@@ -90,16 +90,40 @@ TEST(SystemConfig, ShippingDefaultsOnExceptFarWorldLadder) {
     EXPECT_FLOAT_EQ(cfg.param(SysParam::MoonlightStrength, 0.5f), 0.5f);
 }
 
+TEST(SystemConfig, DefaultsRequestFarWorldLadder) {
+    const SystemConfig cfg = SystemConfig::Defaults();
+    EXPECT_TRUE(cfg.enabled(SysKey::SimPlantGrowth));
+    EXPECT_TRUE(cfg.enabled(SysKey::SimErosion));
+    EXPECT_TRUE(cfg.enabled(SysKey::RenderMoonlight));
+    EXPECT_TRUE(cfg.enabled(SysKey::RenderTreeWind));
+    EXPECT_TRUE(cfg.enabled(SysKey::RenderFarWorldLadder));
+    EXPECT_FLOAT_EQ(cfg.param(SysParam::PlantMutationRate, 0.123f), 0.123f);
+    EXPECT_FLOAT_EQ(cfg.param(SysParam::MoonlightStrength, 0.5f), 0.5f);
+}
+
 TEST(SystemConfig, MissingFileIsDefaults) {
     const SystemConfig cfg = SystemConfig::LoadFromFile("this/path/does/not/exist.json");
+    for (unsigned key = 0; key < static_cast<unsigned>(SysKey::Count); ++key)
+        EXPECT_TRUE(cfg.enabled(static_cast<SysKey>(key))) << key;
     EXPECT_TRUE(cfg.enabled(SysKey::RenderMoonlight));
+    EXPECT_TRUE(cfg.enabled(SysKey::RenderFarWorldLadder));
     EXPECT_FLOAT_EQ(cfg.param(SysParam::MoonlightStrength, 0.7f), 0.7f);
 }
 
 TEST(SystemConfig, EmptyAndBlankJsonAreDefaults) {
-    for (const char* text : {"", "{}", "   ", "not json at all"}) {
+    for (const char* text : {"",
+                             "{}",
+                             "   ",
+                             "not json at all",
+                             R"({"render":{"far_world_ladder":{}}})",
+                             R"({"render":{"far_world_ladder":{"enabled":null}}})",
+                             R"({"render":{"far_world_ladder":{"enabled":"false"}}})"}) {
         const SystemConfig cfg = SystemConfig::FromJsonString(text);
+        for (unsigned key = 0; key < static_cast<unsigned>(SysKey::Count); ++key)
+            EXPECT_TRUE(cfg.enabled(static_cast<SysKey>(key)))
+                << "input: " << text << " key: " << key;
         EXPECT_TRUE(cfg.enabled(SysKey::SimPlantGrowth)) << "input: " << text;
+        EXPECT_TRUE(cfg.enabled(SysKey::RenderFarWorldLadder)) << "input: " << text;
     }
 }
 
@@ -227,6 +251,10 @@ SystemConfig WithAllOtherSimFlagsOff(const std::string& text) {
     return SystemConfig::FromJsonString(json.dump());
 }
 
+TEST(SystemConfig, ConfigSubHashEmptyWithAllSimFlagsDisabled) {
+    EXPECT_EQ(WithAllOtherSimFlagsOff("{}").ComputeConfigSubHash(), std::string{});
+}
+
 TEST(SystemConfig, ConfigSubHashByteIdenticalSnapshot) {
     // Single sim key with one scalar param at its compiled default.
     {
@@ -269,7 +297,7 @@ TEST(SystemConfig, ConfigSubHashByteIdenticalSnapshot) {
             R"({ "sim": { "plant_growth": { "enabled": true, "params": { "mutation_rate": 0.2 } } } })");
         EXPECT_EQ(cfg.ComputeConfigSubHash(), ExpectedSubHash(body.str()));
     }
-    // All-default (no sim enabled) is the empty baseline — byte-identical to today.
+    // Explicitly disabling all sim flags retains the empty compatibility baseline.
     EXPECT_EQ(WithAllOtherSimFlagsOff("{}").ComputeConfigSubHash(), std::string{});
 }
 
@@ -311,8 +339,8 @@ TEST(SystemConfig, UserVideoAudioRoundTrip) {
     EXPECT_FLOAT_EQ(u.audio_sfx, 1.0f); // unnamed -> default
 }
 
-// Owner request 2026-06-18: default look sensitivity is 25% of the prior 0.1, and VSync
-// defaults OFF (preserve uncapped 300fps until the player opts in).
+// Default look sensitivity is 25% of the prior 0.1 (2026-06-18).
+// Shipping VSync defaults ON; saved user settings remain authoritative.
 TEST(SystemConfig, UserVideoDefaults) {
     const auto config = SystemConfig::Defaults();
     const auto& u = config.user();
@@ -451,7 +479,7 @@ TEST(SystemConfig, FarWorldCaveFieldDefaultsAndExactNumericCodes) {
     using namespace Luminumbra::Rendering;
     using Luminumbra::World::FarCaveMode;
     const auto defaults = SystemConfig::Defaults();
-    EXPECT_FALSE(defaults.enabled(SysKey::RenderFarWorldLadder));
+    EXPECT_TRUE(defaults.enabled(SysKey::RenderFarWorldLadder));
     EXPECT_EQ(ResolveFarWorldCaveField(
                   defaults.param(SysParam::FarWorldCaveField, kDefaultFarWorldCaveFieldCode)),
               FarCaveMode::BandLimited);

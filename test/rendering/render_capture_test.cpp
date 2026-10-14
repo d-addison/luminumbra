@@ -1427,22 +1427,24 @@ TEST(SnowCoverModel, AccumulatesUnderSnowMeltsUnderSunAndClamps) {
 // TIME AUTHORITY — time-of-day is a pure function of the
 // sim tick. Same tick -> same TOD, bit-for-bit, no matter how many times or in
 // what order it is evaluated (there is no accumulator to drift with frame
-// pacing); the default day length reproduces the legacy 60 s/day wall pacing.
+// pacing); the default day length matches the world calendar's 2 h day.
 TEST(TodTickPurity, SameTickSameTodIndependentOfFramePacing) {
     namespace R = Luminumbra::Rendering;
-    EXPECT_EQ(R::kDefaultDayLengthTicks, 1800u) << "60 s/day at 30 Hz — the legacy pacing";
+    EXPECT_EQ(R::kDefaultDayLengthTicks, 216000u) << "2 h/day at 30 Hz";
+    EXPECT_EQ(R::kDefaultDayLengthTicks, Luminumbra::world::WorldCalendar{}.dayLengthTicks);
+    constexpr auto day = R::kDefaultDayLengthTicks;
     // Anchors: tick 0 == noon (tod 0); half a day == midnight (tod 0.5); wraps.
-    EXPECT_FLOAT_EQ(R::TimeOfDayFromTick(0, 1800), 0.0f);
-    EXPECT_FLOAT_EQ(R::TimeOfDayFromTick(900, 1800), 0.5f);
-    EXPECT_FLOAT_EQ(R::TimeOfDayFromTick(1800, 1800), 0.0f);
-    EXPECT_FLOAT_EQ(R::TimeOfDayFromTick(1800ull * 1000ull + 450ull, 1800), 0.25f);
+    EXPECT_FLOAT_EQ(R::TimeOfDayFromTick(0, day), 0.0f);
+    EXPECT_FLOAT_EQ(R::TimeOfDayFromTick(day / 2, day), 0.5f);
+    EXPECT_FLOAT_EQ(R::TimeOfDayFromTick(day, day), 0.0f);
+    EXPECT_FLOAT_EQ(R::TimeOfDayFromTick(day * 1000 + day / 4, day), 0.25f);
     // Purity: evaluating out of order / repeatedly yields bit-identical values —
     // the property a wall-clock accumulator can never have.
     const std::uint64_t ticks[] = {7ull, 12345ull, 99999999ull, 3ull, 7ull};
-    const float first_seven = R::TimeOfDayFromTick(7, 1800);
+    const float first_seven = R::TimeOfDayFromTick(7, day);
     for (std::uint64_t t : ticks) {
-        const float a = R::TimeOfDayFromTick(t, 1800);
-        const float b = R::TimeOfDayFromTick(t, 1800);
+        const float a = R::TimeOfDayFromTick(t, day);
+        const float b = R::TimeOfDayFromTick(t, day);
         EXPECT_EQ(a, b);
         if (t == 7ull) {
             EXPECT_EQ(a, first_seven);

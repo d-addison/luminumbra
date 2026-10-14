@@ -61,8 +61,8 @@ enum class SysKey : std::uint8_t {
 
 // Compile-time registry of tunable params (globally-unique ids; each owned by a SysKey).
 // GENERATED from ConfigSchema.json via LUMIN_CONFIG_PARAM_TABLE. Defaults are authored once
-// in the schema (and cross-checked against the owning-system constants by --check); leaving a
-// sim system OFF/unset is byte-identical to the compiled behaviour. Same edit path as SysKey.
+// in the schema (and cross-checked against the owning-system constants by --check); explicitly
+// disabling sim tuning uses the compiled behaviour. Same edit path as SysKey.
 enum class SysParam : std::uint8_t {
 #define LUMIN_CONFIG_EMIT_PARAM(ENUM, OWNER, JSON_NAME, IS_VEC3, SCALAR, VX, VY, VZ) ENUM,
     LUMIN_CONFIG_PARAM_TABLE(LUMIN_CONFIG_EMIT_PARAM)
@@ -83,7 +83,8 @@ struct SimulationIdentityValues {
 
 class SystemConfig {
 public:
-    // Shipping flags on except the opt-in far-world ladder; params unset (caller fallback).
+    // All shipping flags on, including the far-world ladder; explicit enabled:false opts out.
+    // Params unset (caller fallback). sim.* hashed; render.* excluded from the config sub-hash.
     [[nodiscard]] static SystemConfig Defaults();
     // Parse a systems.json document. Malformed/empty/blank text -> all-defaults (no throw).
     [[nodiscard]] static SystemConfig FromJsonString(const std::string& json_text);
@@ -134,9 +135,7 @@ private:
     static constexpr std::size_t kParamCount = static_cast<std::size_t>(SysParam::Count);
 
     static_assert(static_cast<unsigned>(SysKey::Count) < 32);
-    // Keep the far-world ladder opt-in until its separate defaults change.
-    std::uint32_t m_enabled = ((1u << static_cast<unsigned>(SysKey::Count)) - 1u) &
-                              ~(1u << static_cast<unsigned>(SysKey::RenderFarWorldLadder));
+    std::uint32_t m_enabled = (1u << static_cast<unsigned>(SysKey::Count)) - 1u;
     std::uint64_t m_param_set = 0;                 // which params were explicitly set (<=64 params)
     std::array<glm::vec3, kParamCount> m_params{}; // scalar params live in .x
     UserSettings m_user{};                         // client-only; never hashed

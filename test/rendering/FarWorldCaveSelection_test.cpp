@@ -192,7 +192,9 @@ TEST(FarWorldCaveSelection, DefaultAndExactCodesReuseCanonicalEnum) {
     EXPECT_EQ(ResolveFarWorldCaveField(0), FarCaveMode::BandLimited);
     EXPECT_EQ(ResolveFarWorldCaveField(-0.0), FarCaveMode::BandLimited);
     EXPECT_EQ(ResolveFarWorldCaveField(1), FarCaveMode::BoxFiltered);
+    // The default renderer requests Ladder; without authority it has no effective cave policy.
     const FarWorldRenderer renderer;
+    EXPECT_EQ(renderer.Selection(FarWorldPurpose::World).requested, FarWorldMode::Ladder);
     const auto policy = renderer.CavePolicy(FarWorldPurpose::World);
     EXPECT_EQ(policy.requested, FarCaveMode::BandLimited);
     EXPECT_FALSE(policy.bound);
@@ -230,7 +232,7 @@ TEST(FarWorldCaveSelection, LegacyPreviewAndShaderRefusalHaveNoEffectiveCavePoli
     for (const auto requested : {std::optional(FarCaveMode::BandLimited),
                                  std::optional(FarCaveMode::BoxFiltered),
                                  std::optional<FarCaveMode>{}}) {
-        FarWorldRenderer legacy;
+        FarWorldRenderer legacy(FarWorldMode::Legacy);
         legacy.SetRequestedCavePolicy(requested);
         const auto selected = legacy.Selection(FarWorldPurpose::World);
         EXPECT_EQ(selected.effective, FarWorldMode::Legacy);

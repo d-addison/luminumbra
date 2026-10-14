@@ -73,15 +73,15 @@ temporary-file and atomic replacement path:
 
 ```json
 "simulationTick": 317,
-"calendar": { "dayLengthTicks": 36000, "daysPerYear": 8 },
+"calendar": { "dayLengthTicks": 216000, "daysPerYear": 8 },
 "ambientFieldAnchor": { "x": 8.0, "y": 100.0, "z": 8.0 }
 ```
 
 `simulationTick` is the absolute completed host tick; there is no wall-clock
 progression while a world is closed. Tick zero is midnight on day zero in
-midwinter. At 30 Hz the default day lasts 20 minutes and the year lasts eight
-days. Plants and circadian activity use the midnight phase directly; migration,
-stimulus seasons and the sky's seasonal sine offset the year by three quarters
+midwinter. At 30 Hz the default day lasts two hours (about one hour of daylight) and
+the eight-day year lasts 16 hours. Plants and circadian activity use the midnight
+phase directly; migration, stimulus seasons and the sky's seasonal sine offset the year by three quarters
 to their spring-equinoctial origin. Sky geometry offsets the day by half a cycle
 because its existing zero is noon. An explicit render day-length override and
 photo/scenario time pins remain presentation controls.
@@ -89,7 +89,7 @@ photo/scenario time pins remain presentation controls.
 | Metadata condition | Open / write behavior |
 |---|---|
 | `simulationTick` absent | Tick zero |
-| `calendar` absent | Pinned defaults: 36,000 ticks/day, 8 days/year |
+| `calendar` absent | Pinned defaults: 216,000 ticks/day, 8 days/year |
 | `simulationTick` present | JSON unsigned integer in `[0, 2^62)` |
 | `calendar` present | Object containing exactly `dayLengthTicks` and `daysPerYear` |
 | `dayLengthTicks` | JSON integer in `[1, 2^31)` |
@@ -111,8 +111,13 @@ Enabled transient sessions can read explicit snapshots, but saving them is
 refused before creating a directory or writing any member, just as their
 canonical saves are refused.
 
-With the key off, saves omit all three keys, loads restart at zero, and every
-legacy period and hash byte stays unchanged. With it on, clock canonical bytes fold
+Saves with an explicit calendar retain it, including older 36,000-tick days.
+Saves without the calendar key adopt the 216,000-tick default; no migration is
+needed to load them.
+
+With the key off, saves omit all three keys and loads restart at zero; simulation
+consumers retain their legacy periods and hash bytes. The renderer uses the shared
+two-hour default day even on the legacy path. With it on, clock canonical bytes fold
 into the existing ecology hash slot without changing the top-level hash order.
 The canonical clock section is ASCII `world_clock:v1:` followed by little-endian
 `u64 simulationTick`, `u32 dayLengthTicks`, and `u32 daysPerYear` (16 payload
@@ -376,6 +381,15 @@ than duplicated by hand. Authoritative keys are distinguished from render-only
 keys. Published non-source assets are classified and hashed in the public asset
 inventory, with licensing recorded in `THIRD_PARTY_LICENSES.md`.
 
+The far-world requested mode defaults to Ladder, including when systems.json is
+missing or the flag is absent. For an explicit Legacy opt-out, set
+`render.far_world_ladder.enabled` to `false` in `data/common/systems.json` and
+restart the client. The per-user settings overlay only reads `user.*`; this flag
+has no environment or CLI override. Effective selection still falls back to
+Legacy when Ladder cannot bind, with requested/effective mode and refusals in
+the debug HUD and diagnostics. See [Far world horizon v2](far-world-horizon-v2.md)
+for the config example and qualification gates.
+
 ### Environment controls
 
 These are the `LUMIN_*` controls read by the current client/render source. Set
@@ -484,16 +498,16 @@ client and `Luminumbra::Server::ServerWorldRunner` do.
 
 ## Shipping defaults
 
-All registered `sim.*` and `render.*` SystemConfig gates except
-`render.far_world_ladder` are enabled in both the compiled mask and
-`data/common/systems.json`. The far-world ladder stays opt-in until its separate
-default change lands. Missing or malformed enabled fields
+All registered `sim.*` and `render.*` SystemConfig gates, including
+`render.far_world_ladder`, are enabled in both the compiled mask and
+`data/common/systems.json`. Missing or malformed enabled fields
 retain defaults; an explicit boolean false clears its bit. Simulation tuning
 selectors use the packaged tuning. `sim.erosion`, `render.moonlight` and
 `render.tree_wind` are declared gates without runtime activation consumers;
 turning them on does not add a new erosion pass, moon strength or wind system.
 The config:v1 serializer is unchanged: the default sim sub-hash is now nonempty,
 and an explicitly all-disabled sim configuration still has an empty sub-hash.
+`sim.*` is hashed when enabled; `render.*` is excluded from this sub-hash.
 
 Client and server apply the same GameSession resolver before Create/Load, including
 active regions/absolute clock, High water, weather rain/events, stateful aether and
