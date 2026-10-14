@@ -18,6 +18,30 @@ target_include_directories(asset_processor SYSTEM PRIVATE
 # is not held to the project's -Werror warning policy.
 target_link_libraries(asset_processor PRIVATE meshoptimizer stb_headers)
 
+# CPU-only station discovery uses the common query surface without a server lifecycle.
+add_executable(luminumbra_station_discovery station_discovery.cpp)
+target_link_libraries(luminumbra_station_discovery PRIVATE luminumbra_common)
+luminumbra_configure_first_party_target(luminumbra_station_discovery)
+luminumbra_pin_fp_determinism(luminumbra_station_discovery)
+# The front end must reach its ISA refusal before calling AVX2 world queries.
+# Source options follow transitive Jolt options; keep the common library unchanged.
+if(NOT MSVC AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang" AND
+   CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
+    set_source_files_properties(station_discovery.cpp PROPERTIES
+        COMPILE_OPTIONS "-mno-avx;-mno-avx2;-mno-fma")
+endif()
+set(LUMINUMBRA_STATION_ENGINE_REVISION "" CACHE STRING "Pinned discovery source revision")
+if(NOT LUMINUMBRA_STATION_ENGINE_REVISION)
+    find_package(Git QUIET)
+    if(Git_FOUND)
+        execute_process(COMMAND "${GIT_EXECUTABLE}" -C "${CMAKE_SOURCE_DIR}" rev-parse HEAD
+            OUTPUT_VARIABLE LUMINUMBRA_STATION_ENGINE_REVISION OUTPUT_STRIP_TRAILING_WHITESPACE
+            ERROR_QUIET)
+    endif()
+endif()
+target_compile_definitions(luminumbra_station_discovery PRIVATE
+    LUMINUMBRA_STATION_ENGINE_REVISION="${LUMINUMBRA_STATION_ENGINE_REVISION}")
+
 option(LUMINUMBRA_ENABLE_PREFAB_RUNTIME "Build the optional compiled prefab ECS runtime and inspector" OFF)
 option(LUMINUMBRA_ENABLE_STATIC_PREVIEW "Build the neutral production static renderer and installed capture host" OFF)
 if(LUMINUMBRA_ENABLE_PREFAB_RUNTIME OR LUMINUMBRA_ENABLE_STATIC_PREVIEW)

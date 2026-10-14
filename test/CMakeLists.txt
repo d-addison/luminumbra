@@ -145,6 +145,7 @@ luminumbra_configure_first_party_target(far_pristine_field_test)
 luminumbra_pin_fp_determinism(far_pristine_field_test)
 
 add_executable(common_tests
+    common/StationDiscovery_test.cpp
     common/Crc32_test.cpp
     rendering/shader_compositing_contract_test.cpp
     common/AnimationRuntime_test.cpp
@@ -1963,6 +1964,16 @@ set_tests_properties(ShieldRtSpike PROPERTIES
 
 # Simulation telemetry captures require the standard-library Python validator.
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
+add_test(NAME StationDiscoveryContract
+    COMMAND "${Python3_EXECUTABLE}" -I -B
+        "${CMAKE_SOURCE_DIR}/tools/gates/test_station_discovery.py")
+add_test(NAME StationDiscoveryCliSmoke
+    COMMAND "${Python3_EXECUTABLE}" -I -B
+        "${CMAKE_SOURCE_DIR}/tools/gates/test_station_discovery.py"
+        --cli "$<TARGET_FILE:luminumbra_station_discovery>")
+set_tests_properties(StationDiscoveryContract StationDiscoveryCliSmoke
+    PROPERTIES LABELS "world;tools" TIMEOUT 120)
+
 add_test(NAME SimBudgetCaptureContract
     COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tools/perf/test_capture_sim_budget.py")
 set_tests_properties(SimBudgetCaptureContract PROPERTIES LABELS "simulation;tools" TIMEOUT 60)
