@@ -5,9 +5,12 @@ import struct
 import sys
 import time
 sys.path.insert(0, sys.argv[1])
-from protocol import encode, read_record, write_record
+from protocol import atomic_write, canonical, encode, read_record, write_record
 key = bytes.fromhex(os.environ.pop('LUMINUMBRA_VIEWPORT_KEY'))
 mode = sys.argv[2]
+atomic_write(os.environ.pop('LUMINUMBRA_VIEWPORT_READY'), canonical({
+    'schema': 'luminumbra.viewport.ready.v1',
+    'session': os.environ.pop('LUMINUMBRA_VIEWPORT_SESSION'), 'pid': os.getpid()}))
 while True:
     state, _ = read_record(sys.stdin.buffer, key)
     if state['kind'] == 'stop':

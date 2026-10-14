@@ -171,6 +171,8 @@ add_executable(common_tests
     common/FarAuthorityOverlay_test.cpp
     common/GameSessionHeadlessWorld_test.cpp
     common/SimBudgetTelemetry_test.cpp
+    common/HeavyComparison_test.cpp
+    common/SimBudgetProfile_test.cpp
     ../src/luminumbra_server/modes/SmokeArtifact.cpp
     common/JobSystem_test.cpp
     common/JobWatchdog_test.cpp
@@ -210,6 +212,7 @@ add_executable(common_tests
     common/world_streaming_hardening_test.cpp
     common/HydraulicErosion_test.cpp
     common/WorldStreamingState_test.cpp
+    persistence/synthetic_save_fixture_test.cpp
     sim/fire_spread_test.cpp
     sim/soil_nutrient_test.cpp
     sim/pollination_test.cpp
@@ -265,6 +268,7 @@ target_include_directories(common_tests PRIVATE
 target_link_libraries(common_tests PRIVATE
     gtest_main
     luminumbra_common
+    luminumbra_save_fixture_support
 )
 
 # File-only path contracts run without a GL context or the common-library graph.
@@ -1197,14 +1201,25 @@ target_link_libraries(runtime_world_visual_validation_test PRIVATE
     glad
 )
 
+# Calls the production artifact writer with synthetic captures, without a GL
+# context or scenario execution. PowerShell validates both emitted schemas.
+add_executable(far_ladder_oracle_writer_fixture
+    client/far_ladder_oracle_writer_fixture.cpp
+)
+target_link_libraries(far_ladder_oracle_writer_fixture PRIVATE luminumbra_client_qa)
+luminumbra_configure_first_party_target(far_ladder_oracle_writer_fixture)
+
 if(WIN32)
     target_link_libraries(runtime_world_visual_validation_test PRIVATE opengl32)
+    target_link_libraries(far_ladder_oracle_writer_fixture PRIVATE opengl32)
 elseif(APPLE)
     find_package(OpenGL REQUIRED)
     target_link_libraries(runtime_world_visual_validation_test PRIVATE ${OPENGL_LIBRARIES})
+    target_link_libraries(far_ladder_oracle_writer_fixture PRIVATE ${OPENGL_LIBRARIES})
 else()
     find_package(OpenGL REQUIRED)
     target_link_libraries(runtime_world_visual_validation_test PRIVATE OpenGL::GL)
+    target_link_libraries(far_ladder_oracle_writer_fixture PRIVATE OpenGL::GL)
 endif()
 
 #   spike benchmark (manual/excluded-by-default: Debug runtime
@@ -1889,6 +1904,9 @@ find_package(Python3 COMPONENTS Interpreter REQUIRED)
 add_test(NAME SimBudgetCaptureContract
     COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tools/perf/test_capture_sim_budget.py")
 set_tests_properties(SimBudgetCaptureContract PROPERTIES LABELS "simulation;tools" TIMEOUT 60)
+add_test(NAME SimBudgetGateContract
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tools/perf/test_sim_budget_gate.py")
+set_tests_properties(SimBudgetGateContract PROPERTIES LABELS "simulation;tools" TIMEOUT 60)
 
 # GPU tracer micro-profile. Manual/GPU — needs a real GL context and a
 # hardware GPU (skips gracefully headless; writes the artifact but skips the perf
@@ -1941,6 +1959,10 @@ if(CAPTURE_VALIDATION_POWERSHELL)
         COMMAND "${CAPTURE_VALIDATION_POWERSHELL}" -NoLogo -NoProfile -NonInteractive
             -ExecutionPolicy Bypass -File "${CMAKE_SOURCE_DIR}/tools/gates/test-capture-artifact-validation.ps1")
     set_tests_properties(CaptureArtifactValidationContract PROPERTIES LABELS "visual;tools" TIMEOUT 60)
+    add_test(NAME FarLadderOracleContract
+        COMMAND "${CAPTURE_VALIDATION_POWERSHELL}" -NoLogo -NoProfile -NonInteractive
+            -ExecutionPolicy Bypass -File "${CMAKE_SOURCE_DIR}/tools/gates/test-far-ladder-oracle.ps1")
+    set_tests_properties(FarLadderOracleContract PROPERTIES LABELS "tools" TIMEOUT 60)
     add_test(NAME LuaApiManifestSourceContract
         COMMAND "${CAPTURE_VALIDATION_POWERSHELL}" -NoLogo -NoProfile -NonInteractive
             -ExecutionPolicy Bypass -File "${CMAKE_SOURCE_DIR}/tools/gates/validate-engine-frontier.ps1"
@@ -1949,7 +1971,23 @@ if(CAPTURE_VALIDATION_POWERSHELL)
         LABELS "scripting;tools" TIMEOUT 60 WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
 else()
     message(STATUS "PowerShell unavailable: CaptureArtifactValidationContract is not registered")
+    message(STATUS "PowerShell unavailable: FarLadderOracleContract is not registered")
     message(STATUS "PowerShell unavailable: LuaApiManifestSourceContract is not registered")
+endif()
+
+# This integration requires pwsh specifically. Keep the existing discovery
+# above (including its Windows PowerShell fallback) for the file-only checks.
+# Linux coverage is conditional on discovering pwsh; Windows/MSVC CI requires
+# this exact test with --no-tests=error.
+find_program(FAR_LADDER_ORACLE_PWSH NAMES pwsh)
+if(FAR_LADDER_ORACLE_PWSH)
+    add_test(NAME FarLadderOracleWriterContract
+        COMMAND "${FAR_LADDER_ORACLE_PWSH}" -NoLogo -NoProfile -NonInteractive
+            -ExecutionPolicy Bypass -File "${CMAKE_SOURCE_DIR}/tools/gates/test-far-ladder-oracle-writer.ps1"
+            -FixtureExe "$<TARGET_FILE:far_ladder_oracle_writer_fixture>")
+    set_tests_properties(FarLadderOracleWriterContract PROPERTIES LABELS "tools" TIMEOUT 60)
+else()
+    message(STATUS "pwsh unavailable: FarLadderOracleWriterContract is not registered")
 endif()
 set(_vc_candidates "")
 if(DEFINED ENV{VISUAL_SWEEP_PYTHON})
