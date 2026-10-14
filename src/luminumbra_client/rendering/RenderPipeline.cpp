@@ -5594,7 +5594,8 @@ void RenderPipeline::update_time_of_day(float deltaTime) {
     // sun/season below recompute from it. Render-only; never touches the sim clock.
     // when the sim tick drove TOD this frame (set_time_of_day_tick), the
     // wall-clock advance is also skipped — the tick is the time authority. Paths that
-    // never feed the tick (scenarios, tests, menus) keep the legacy advance verbatim.
+    // never feed the tick (scenarios, tests, menus) keep the legacy wall-clock advance
+    // at the shared day length.
     if (!m_timeOfDayHold && !m_todTickDriven) {
         m_timeOfDay += deltaTime / m_dayDurationSeconds;
         m_timeOfDay = fmod(m_timeOfDay, 1.0f);

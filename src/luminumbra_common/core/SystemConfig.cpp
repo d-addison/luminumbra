@@ -125,9 +125,12 @@ SystemConfig SystemConfig::FromJsonString(const std::string& json_text) {
         if (!entry.is_object())
             continue;
 
-        if (entry.contains("enabled") && entry["enabled"].is_boolean() &&
-            entry["enabled"].get<bool>()) {
-            cfg.m_enabled |= (1u << static_cast<unsigned>(key_meta.key));
+        if (entry.contains("enabled") && entry["enabled"].is_boolean()) {
+            const auto bit = 1u << static_cast<unsigned>(key_meta.key);
+            if (entry["enabled"].get<bool>())
+                cfg.m_enabled |= bit;
+            else
+                cfg.m_enabled &= ~bit;
         }
 
         if (!entry.contains("params") || !entry["params"].is_object())

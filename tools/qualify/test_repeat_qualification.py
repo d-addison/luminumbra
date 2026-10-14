@@ -165,11 +165,17 @@ def pid_alive(pid: int, timeout: float = 30) -> bool:
     except OSError:
         return False
     stat = Path(f"/proc/{pid}/stat")
-    if stat.is_file():
+    if not Path("/proc/self/stat").is_file():
+        # Without procfs, kill(pid, 0) succeeding is the best available answer.
+        return True
+    try:
         # A zombie still answers kill(pid, 0) but is already dead.
         fields = stat.read_text().rsplit(")", 1)[-1].split()
-        if fields and fields[0] == "Z":
-            return False
+    except (FileNotFoundError, ProcessLookupError):
+        # The process was reaped between kill(pid, 0) and reading its status.
+        return False
+    if fields and fields[0] == "Z":
+        return False
     return True
 
 
@@ -640,7 +646,10 @@ class InterruptCleanupTest(HarnessTestCase):
                     subprocess.run(["taskkill", "/T", "/F", "/PID", str(grandchild_pid)],
                                    capture_output=True, check=False, timeout=rq.CLEANUP_TIMEOUT_SECONDS)
                 else:
-                    os.kill(grandchild_pid, signal.SIGKILL)
+                    try:
+                        os.kill(grandchild_pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass  # Exited after the liveness check.
 
     def test_cleanup_failure_preserves_interrupt_and_reports_diagnostics(self) -> None:
         for failure in (["fixture cleanup refused"], OSError("fixture cleanup raised")):

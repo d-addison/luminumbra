@@ -72,10 +72,10 @@ std::string CompatibilityPayload() {
 
 TEST(FarWorldLegacyIsolation, CompatibilityFollowsEffectiveSelectionIncludingRefusalsAndPreview) {
     LegacyRuntime runtime;
-    const FarWorldRenderer defaults;
-    EXPECT_EQ(defaults.Selection(FarWorldPurpose::World).requested, FarWorldMode::Legacy);
+    const FarWorldRenderer legacy(FarWorldMode::Legacy);
+    EXPECT_EQ(legacy.Selection(FarWorldPurpose::World).requested, FarWorldMode::Legacy);
     const std::array selections{
-        defaults.Selection(FarWorldPurpose::World),
+        legacy.Selection(FarWorldPurpose::World),
         SelectFarWorld(FarWorldMode::Ladder,
                        FarWorldPurpose::World,
                        FarWorldRefusal::ImmutableAuthorityUnavailable),
@@ -131,8 +131,8 @@ TEST(FarWorldLegacyIsolation,
      CompatibilityDispatchRetainsOneLegacySchedulerWriterAndWaterSubmission) {
     LegacyRuntime runtime;
     unsigned ladder_calls = 0;
-    const FarWorldRenderer defaults;
-    const auto selection = defaults.Selection(FarWorldPurpose::World);
+    const FarWorldRenderer legacy(FarWorldMode::Legacy);
+    const auto selection = legacy.Selection(FarWorldPurpose::World);
     AdvanceSelectedFarWorld(selection, [&] { runtime.Advance(); }, [&] { ++ladder_calls; });
     const auto submitted = SubmitSelectedFarWorld(
         selection,

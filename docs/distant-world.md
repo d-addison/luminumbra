@@ -328,18 +328,18 @@ record omission in the table applies without losing that phase.
 ## Simulation clock and calendar
 
 One persisted absolute tick base continues across save and load. Day length is
-36,000 ticks (20 minutes at 30 Hz) and a year is 8 days for every consumer
-below and for the rendered sky; the shorter render day remains only as a debug
-override.
+216,000 ticks (two hours at 30 Hz) and a year is 8 days (16 hours) for
+calendar consumers and the rendered sky. Explicit calendars retain their saved
+pacing; shorter render days remain available as debug overrides.
 
-| Consumer today | Period today | Under this contract |
+| Consumer | Legacy period without the calendar | Calendar period |
 |---|---|---|
 | Plant light (`GameSession.cpp`) | 36,000-tick day | Calendar day |
 | Plant season (`GameSession.cpp`) | 288,000-tick year (8 days) | Calendar year |
 | Circadian slot (`GameSession.cpp`) | 36,000-tick day | Calendar day |
 | Migration (`GameSession.cpp`) | 108,000-tick year | Calendar year |
 | Stimulus channels (`StimulusChannels.h`) | 7,200-tick day, 432,000-tick season | Calendar day and year |
-| Rendered sky (`TimeOfDayModel.h`, `RenderPipeline.h`) | 1,800-tick day, 432,000-tick season | Calendar day and year |
+| Rendered sky (`TimeOfDayModel.h`, `RenderPipeline.h`) | 216,000-tick day, 432,000-tick season | Calendar day and year |
 
 One physical origin governs every consumer: tick zero is midnight of day zero
 in midwinter, which is the origin the plant and circadian formulas use today;
@@ -356,8 +356,13 @@ Calendar phase origins equal today's formulas (phase = tick modulo period from
 tick zero), so the plant season still starts at its cold minimum. Snapshots are
 taken only on tick boundaries, never inside a batched client catch-up.
 
-Current behaviour: the tick counter restarts at zero on every load, so a loaded
-world resumes tick-zero weather, and the six durations above coexist.
+With `sim.active_regions` off, the tick counter restarts at zero on load and
+simulation consumers retain the legacy periods above. With it on, the saved
+clock governs their day and year phases. Wind and weather retain independent
+tick-based update periods. The renderer's lunar cycle is still fixed at 54,000
+ticks (30 minutes): four full cycles per default day, including two during a
+night. Its brightness therefore changes within a night rather than between
+nights; a calendar-relative lunar period needs a separate pacing decision.
 
 ## Persistence and format contract
 
@@ -540,5 +545,7 @@ and Workshop content distribution are tracked separately and are not part of
 this contract.
 
 FW renderer diagnostics and the current horizon artifact/gate contract are described in
-[Far world horizon v2](far-world-horizon-v2.md). Legacy remains the default; native
-ladder qualification and S9–S13 remain outstanding.
+[Far world horizon v2](far-world-horizon-v2.md). Ladder is the default requested mode;
+`render.far_world_ladder.enabled:false` explicitly opts out to Legacy. Effective
+Legacy fallback and refusal diagnostics remain when Ladder cannot bind. Native
+ladder qualification remains outstanding.
