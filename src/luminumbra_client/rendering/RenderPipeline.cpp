@@ -61,6 +61,7 @@
 #include <nlohmann/json.hpp>
 #include <random>
 #include <stb_image.h>
+#include <stdexcept>
 #include <unordered_set>
 #include <utility>
 
@@ -720,6 +721,9 @@ bool RenderPipeline::capture_upscale_seam_parity(const Camera& camera,
 RenderContext RenderPipeline::make_ssao_context(const Camera& camera) {
     RenderContext ctx;
     ctx.frozen_replay = m_far_world_paired;
+    ctx.set_gbuffer_depth_contract(m_frame_far_selection.effective == FarWorldMode::Ladder,
+                                   m_frame_prepared.projection,
+                                   m_taau_jitter_ndc);
     ctx.camera = &camera;
     ctx.screen_width = m_screen_width;
     ctx.screen_height = m_screen_height;
@@ -732,6 +736,8 @@ RenderContext RenderPipeline::make_ssao_context(const Camera& camera) {
         "gbuffer_position", m_gbuffer_pass->gbuffer().position_texture);
     ctx.gbuffer_normal =
         m_render_registry.adopt_texture("gbuffer_normal", m_gbuffer_pass->gbuffer().normal_texture);
+    ctx.gbuffer_depth =
+        m_render_registry.adopt_texture("gbuffer_depth", m_gbuffer_pass->gbuffer().depth_texture);
     return ctx;
 }
 
@@ -741,6 +747,9 @@ RenderContext RenderPipeline::make_ssao_context(const Camera& camera) {
 RenderContext RenderPipeline::make_debug_view_context(const Camera& camera) {
     RenderContext ctx;
     ctx.frozen_replay = m_far_world_paired;
+    ctx.set_gbuffer_depth_contract(m_frame_far_selection.effective == FarWorldMode::Ladder,
+                                   m_frame_prepared.projection,
+                                   m_taau_jitter_ndc);
     ctx.camera = &camera;
     ctx.screen_width = m_screen_width;
     ctx.screen_height = m_screen_height;
@@ -761,6 +770,9 @@ RenderContext RenderPipeline::make_debug_view_context(const Camera& camera) {
 RenderContext RenderPipeline::make_ground_decal_context(const Camera& camera) {
     RenderContext ctx;
     ctx.frozen_replay = m_far_world_paired;
+    ctx.set_gbuffer_depth_contract(m_frame_far_selection.effective == FarWorldMode::Ladder,
+                                   m_frame_prepared.projection,
+                                   m_taau_jitter_ndc);
     ctx.camera = &camera;
     ctx.screen_width = m_screen_width;
     ctx.screen_height = m_screen_height;
@@ -769,6 +781,8 @@ RenderContext RenderPipeline::make_ground_decal_context(const Camera& camera) {
     ctx.registry = &m_render_registry;
     ctx.gbuffer_position = m_render_registry.adopt_texture(
         "gbuffer_position", m_gbuffer_pass->gbuffer().position_texture);
+    ctx.gbuffer_depth =
+        m_render_registry.adopt_texture("gbuffer_depth", m_gbuffer_pass->gbuffer().depth_texture);
     return ctx;
 }
 
@@ -777,6 +791,9 @@ RenderContext RenderPipeline::make_ground_decal_context(const Camera& camera) {
 RenderContext RenderPipeline::make_plant_context() {
     RenderContext ctx;
     ctx.frozen_replay = m_far_world_paired;
+    ctx.set_gbuffer_depth_contract(m_frame_far_selection.effective == FarWorldMode::Ladder,
+                                   m_frame_prepared.projection,
+                                   m_taau_jitter_ndc);
     ctx.registry = &m_render_registry;
     ctx.screen_width = m_screen_width;
     ctx.screen_height = m_screen_height;
@@ -839,6 +856,9 @@ RenderContext RenderPipeline::make_foliage_context(const Camera& camera) {
 RenderContext RenderPipeline::make_lighting_context(const Camera& camera) {
     RenderContext ctx;
     ctx.frozen_replay = m_far_world_paired;
+    ctx.set_gbuffer_depth_contract(m_frame_far_selection.effective == FarWorldMode::Ladder,
+                                   m_frame_prepared.projection,
+                                   m_taau_jitter_ndc);
     ctx.render_view = m_authored_view.get();
     if (m_gbuffer_pass->gbuffer().authored_texture)
         ctx.authored_surface = m_render_registry.adopt_texture(
@@ -941,6 +961,9 @@ RenderContext RenderPipeline::make_lighting_context(const Camera& camera) {
 RenderContext RenderPipeline::make_skybox_context(const Camera& camera) {
     RenderContext ctx;
     ctx.frozen_replay = m_far_world_paired;
+    ctx.set_gbuffer_depth_contract(m_frame_far_selection.effective == FarWorldMode::Ladder,
+                                   m_frame_prepared.projection,
+                                   m_taau_jitter_ndc);
     ctx.camera = &camera;
     ctx.screen_width = m_screen_width;
     ctx.screen_height = m_screen_height;
@@ -993,6 +1016,9 @@ RenderContext RenderPipeline::make_skybox_context(const Camera& camera) {
 RenderContext RenderPipeline::make_water_context(const Camera& camera) {
     RenderContext ctx;
     ctx.frozen_replay = m_far_world_paired;
+    ctx.set_gbuffer_depth_contract(m_frame_far_selection.effective == FarWorldMode::Ladder,
+                                   m_frame_prepared.projection,
+                                   m_taau_jitter_ndc);
     ctx.camera = &camera;
     ctx.screen_width = m_screen_width;
     ctx.screen_height = m_screen_height;
@@ -1105,6 +1131,9 @@ RenderContext RenderPipeline::make_gbuffer_context(const Camera& camera,
                                                    const glm::vec4 frustum_planes[6]) {
     RenderContext ctx;
     ctx.frozen_replay = m_far_world_paired;
+    ctx.set_gbuffer_depth_contract(m_frame_far_selection.effective == FarWorldMode::Ladder,
+                                   m_frame_prepared.projection,
+                                   m_taau_jitter_ndc);
     ctx.camera = &camera;
     ctx.screen_width = m_screen_width;
     ctx.screen_height = m_screen_height;
@@ -1216,6 +1245,13 @@ void RenderPipeline::set_far_world_mode(FarWorldMode requested) {
     m_taau_pass->invalidate_history();
     m_prev_view_proj = glm::mat4(1.0f);
     m_frustumCache.valid = false;
+}
+
+FarWorldCavePolicy
+RenderPipeline::set_far_world_cave_policy(std::optional<World::FarCaveMode> requested) {
+    // The renderer validates owner-thread/re-entry state, as for set_far_world_mode.
+    m_far_world->SetRequestedCavePolicy(requested);
+    return m_far_world->CavePolicy(FarWorldPurpose::World);
 }
 
 void RenderPipeline::prepare_world_swap() {
@@ -2609,6 +2645,16 @@ void RenderPipeline::prepare_frame(entt::registry& registry,
                     m_chunk_geometry_pool.allocation(data.pool_handle).index_count ==
                         data.element_count;
             }
+            const auto water_found = m_water_render_data.find(chunk.id);
+            upload.water_snapshot_version = chunk.water_mesh_version;
+            if (water_found != m_water_render_data.end()) {
+                const auto& water_data = water_found->second;
+                water_data.SetLadderWaterUpload(
+                    upload,
+                    chunk.water_mesh_version,
+                    m_isolation_config.renders(Client::ScenarioHarness::IsolationLayer::Water) &&
+                        m_water_pass->shader() && m_water_pass->shader()->IsValid());
+            }
             if (!m_far_world->AddLiveUpload(upload))
                 break;
         }
@@ -2646,7 +2692,8 @@ void RenderPipeline::prepare_frame(entt::registry& registry,
 
     //  TAAU: per-frame Halton[2,3] sub-pixel jitter for the G-buffer projection. Computed ONLY
     // when TAAU is on; (0,0) otherwise so the default render (and frustum culling, which uses the
-    // UNJITTERED projection above) is byte-identical. GBufferPass applies it; the resolve
+    // UNJITTERED projection above) is byte-identical. The shared Ladder depth
+    // contract applies it (GBufferPass retains the compatibility path); the resolve
     // un-jitters the motion vectors with the same offset.
     if (m_taau_enabled && m_screen_width > 0 && m_screen_height > 0) {
         auto halton = [](unsigned i, unsigned base) {
@@ -2687,7 +2734,8 @@ void RenderPipeline::prepare_frame(entt::registry& registry,
 
 void RenderPipeline::prepare_camera_projection(const Camera& camera) {
     // One production seam publishes the unjittered projection, culling planes
-    // and capture metadata. Passes still upload their own jittered projections.
+    // and capture metadata. The depth contract adds jitter to this matrix for
+    // all Ladder G-buffer writers and reconstruction consumers.
     const auto projection = camera.GetProjectionMatrix(static_cast<int>(m_screen_width),
                                                        static_cast<int>(m_screen_height));
     const auto view = camera.GetViewMatrix();
@@ -2864,7 +2912,9 @@ void RenderPipeline::execute_stage_gbuffer(const Camera& camera) {
             RenderViewDescription description;
             const glm::mat4 view = camera.GetViewMatrix();
             const glm::mat4 projection =
-                camera.GetProjectionMatrix(m_screen_width, m_screen_height);
+                gbuffer_ctx.far_world_ladder
+                    ? gbuffer_ctx.gbuffer_projection
+                    : camera.GetProjectionMatrix(m_screen_width, m_screen_height);
             for (size_t i = 0; i < 16; ++i) {
                 description.view[i] = glm::value_ptr(view)[i];
                 description.projection[i] = glm::value_ptr(projection)[i];
@@ -3141,7 +3191,14 @@ void RenderPipeline::execute_stage_water(const Camera& camera) {
         WaterPassInput water_input;
         for (const auto& chunk : renderable_chunk_snapshots) {
             auto it = m_water_render_data.find(chunk.id);
-            if (it != m_water_render_data.end() && it->second.element_count > 0) {
+            if (it != m_water_render_data.end() && it->second.element_count > 0 &&
+                (m_frame_far_selection.effective != FarWorldMode::Ladder ||
+                 LadderWaterPassEligible(chunk.water_mesh_version,
+                                         it->second.mesh_version,
+                                         it->second.element_count,
+                                         it->second.LadderUploadValid(),
+                                         m_water_pass->shader() &&
+                                             m_water_pass->shader()->IsValid()))) {
                 glm::mat4 model = glm::translate(
                     glm::mat4(1.0f),
                     glm::vec3(chunk.coords * IVec3(CHUNK_SIZE_X, CHUNK_SIZE_Y, CHUNK_SIZE_Z)));
@@ -3679,6 +3736,9 @@ void RenderPipeline::init_sky_lut() {
 RenderContext RenderPipeline::make_aerial_context(const Camera& camera) {
     RenderContext ctx;
     ctx.frozen_replay = m_far_world_paired;
+    ctx.set_gbuffer_depth_contract(m_frame_far_selection.effective == FarWorldMode::Ladder,
+                                   m_frame_prepared.projection,
+                                   m_taau_jitter_ndc);
     ctx.camera = &camera;
     ctx.screen_width = m_screen_width;
     ctx.screen_height = m_screen_height;
@@ -3721,7 +3781,9 @@ RenderContext RenderPipeline::make_aerial_context(const Camera& camera) {
         atmo = *s_atmos_override;
     }
     ctx.aerial_density = atmo.aerial_density;
-    ctx.aerial_max_distance = atmo.aerial_max_distance;
+    ctx.aerial_max_distance = ctx.far_world_ladder
+                                  ? static_cast<float>(World::kFarOuterRadiusMeters)
+                                  : atmo.aerial_max_distance;
     ctx.inscatter_strength = atmo.inscatter_strength;
     ctx.atmosphere_warmth = atmo.warmth;
     return ctx;
@@ -4302,7 +4364,9 @@ void RenderPipeline::manage_water_gpu_resources(
 
         auto it = m_water_render_data.find(chunk.id);
         bool is_new = (it == m_water_render_data.end());
-        bool is_stale = !is_new && (it->second.mesh_version != chunk.water_mesh_version);
+        bool is_stale = !is_new && (it->second.mesh_version != chunk.water_mesh_version ||
+                                    (m_frame_far_selection.effective == FarWorldMode::Ladder &&
+                                     !it->second.LadderUploadValid()));
 
         if (is_new || is_stale) {
             const glm::vec3 center(chunk.coords.x * CHUNK_SIZE_X + CHUNK_SIZE_X * 0.5f,
@@ -4440,8 +4504,22 @@ void RenderPipeline::upload_water_mesh(const ChunkMeshSnapshot& chunk,
     if (!payload.has_mesh())
         return;
 
+    const bool ladder = m_frame_far_selection.effective == FarWorldMode::Ladder;
+    // An in-place update can corrupt a previously valid store. Invalidate before
+    // any attempt, including Legacy uploads, so switching modes cannot reuse it.
+    if (const auto found = m_water_render_data.find(chunk.id); found != m_water_render_data.end())
+        found->second.ladder_upload_version.reset();
+
     if (payload.vertices.size() > std::numeric_limits<u32>::max() ||
         payload.indices.size() > std::numeric_limits<u32>::max()) {
+        m_last_mesh_upload_stats.water_upload_failures++;
+        return;
+    }
+
+    FarVolumeGpuSizes checked_sizes;
+    if (ladder &&
+        (!CheckFarVolumeGpuSizes(payload.vertices.size(), payload.indices.size(), checked_sizes) ||
+         glGetError() != GL_NO_ERROR)) {
         m_last_mesh_upload_stats.water_upload_failures++;
         return;
     }
@@ -4475,6 +4553,17 @@ void RenderPipeline::upload_water_mesh(const ChunkMeshSnapshot& chunk,
         data.vertex_capacity < vertex_count || data.index_capacity < index_count;
     const bool version_reused = data.mesh_version != 0 && data.mesh_version != payload.mesh_version;
 
+    // Match the far-volume backend: check the upload error and query the actual
+    // store size. Reuse may retain a larger store, but both writes must succeed.
+    const auto validate_upload = [needs_growth](GLenum target, std::uint64_t bytes) {
+        const bool uploaded = glGetError() == GL_NO_ERROR;
+        GLint64 actual = 0;
+        glGetBufferParameteri64v(target, GL_BUFFER_SIZE, &actual);
+        const bool queried = glGetError() == GL_NO_ERROR;
+        return uploaded && queried && actual >= static_cast<GLint64>(bytes) &&
+               (!needs_growth || actual == static_cast<GLint64>(bytes));
+    };
+
     glBindVertexArray(data.vao_id);
     glBindBuffer(GL_ARRAY_BUFFER, data.vbo_id);
     if (needs_growth) {
@@ -4490,6 +4579,8 @@ void RenderPipeline::upload_water_mesh(const ChunkMeshSnapshot& chunk,
                         payload.vertices.data());
     }
 
+    const bool vertex_uploaded =
+        !ladder || validate_upload(GL_ARRAY_BUFFER, checked_sizes.vertex_bytes);
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, data.ebo_id);
     if (needs_growth) {
         glBufferData(GL_ELEMENT_ARRAY_BUFFER,
@@ -4504,6 +4595,8 @@ void RenderPipeline::upload_water_mesh(const ChunkMeshSnapshot& chunk,
                         payload.indices.data());
     }
 
+    const bool index_uploaded =
+        !ladder || validate_upload(GL_ELEMENT_ARRAY_BUFFER, checked_sizes.index_bytes);
     glEnableVertexAttribArray(0);
     glVertexAttribPointer(
         0, 3, GL_FLOAT, GL_FALSE, sizeof(VoxelVertex), (void*)offsetof(VoxelVertex, position));
@@ -4512,6 +4605,18 @@ void RenderPipeline::upload_water_mesh(const ChunkMeshSnapshot& chunk,
         1, 3, GL_FLOAT, GL_FALSE, sizeof(VoxelVertex), (void*)offsetof(VoxelVertex, normal));
     glBindVertexArray(0);
 
+    if (ladder) {
+        const bool attributes_valid = glGetError() == GL_NO_ERROR;
+        if (!vertex_uploaded || !index_uploaded || !attributes_valid || data.vao_id == 0 ||
+            data.vbo_id == 0 || data.ebo_id == 0) {
+            // Either buffer may have changed. Force full allocation on retry;
+            // the cleared certificate excludes this record from both consumers.
+            data.vertex_capacity = data.index_capacity = 0;
+            m_last_mesh_upload_stats.water_upload_failures++;
+            return;
+        }
+        data.ladder_upload_version = payload.mesh_version;
+    }
     data.element_count = index_count;
     data.mesh_version = payload.mesh_version;
     data.frames_since_inactive = 0;
@@ -4620,6 +4725,7 @@ void RenderPipeline::unload_water_resources(ChunkID chunk_id) {
         WaterRenderData data = it->second;
         data.element_count = 0;
         data.mesh_version = 0;
+        data.ladder_upload_version.reset();
         data.frames_since_inactive = 0;
         if (m_free_water_render_slots.size() < kMaxFreeWaterRenderSlots) {
             m_free_water_render_slots.push_back(data);

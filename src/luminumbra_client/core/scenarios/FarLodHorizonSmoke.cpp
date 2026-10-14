@@ -977,7 +977,9 @@ void WriteFarLodHorizonAnalysis(const std::filesystem::path& artifact_dir,
         {"expected_stations", expected_station_count},
         {"stations", rows},
         {"complete", v2_complete},
-        {"ladder_water", "absent_S13_out_of_scope"}};
+        {"ladder_water",
+         mode == Luminumbra::Rendering::FarWorldMode::Ladder ? "combined_immutable_observation"
+                                                             : "legacy_compatibility"}};
     // Preserve #199's additional legacy aggregate keys for historical readers.
     // Ladder evidence is exclusively per-station; no ladder pair is fabricated.
     if (mode == Luminumbra::Rendering::FarWorldMode::Legacy && had_converged_capture) {

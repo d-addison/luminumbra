@@ -15,7 +15,10 @@ readiness, paired capture preservation, independent-oracle input (`ladder`),
 legacy counts, and a retained post-submission `snapshot`. The snapshot records:
 
 - requested/effective mode, selection and submission refusals, suppression;
-- world epoch, frame, content/bake identity, actual plane, cave/numeric policy;
+- world epoch, frame, content/bake identity, actual plane, numeric policy;
+- separate `requested_cave_policy` and `bound_cave_policy` values (0 for
+  BandLimited, 1 for BoxFiltered), with JSON `null` for an invalid request or
+  absent immutable fixture; Ladder qualification requires both to match;
 - whether advancement and successful submission occurred, actual draws/indices;
 - five tier rows: wanted/pending/building/ready/settled, Uploaded/Empty pairs,
   current covering, rejected/budget latches, cumulative range/budget eviction

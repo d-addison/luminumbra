@@ -10,9 +10,10 @@ namespace Luminumbra::Rendering {
 
 // Explicit immutable fixture authority only. Implementations and all reachable
 // data must be bounded, pure, immutable and worker safe; never wrap a mutable
-// SHIELD_WorldSystem. content_identity includes numeric and cave semantics.
+// SHIELD_WorldSystem. content_identity includes numeric, cave and water semantics
+// (capability, wet flags, levels and bounds). Unavailable water refuses Ladder.
 // A saved-world producer requires committed-generation authority + dirty parking.
-class FarWorldPristineFixture {
+class FarWorldPristineFixture : public FarWorldWaterObservation {
 public:
     virtual ~FarWorldPristineFixture() = default;
     virtual std::uint64_t content_identity() const noexcept = 0;

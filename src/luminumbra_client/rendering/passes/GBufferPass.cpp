@@ -379,15 +379,19 @@ void GBufferPass::geometry_pass_chunks(const RenderContext& ctx,
 
     if (!UseDrawProgram(shader.get(), stats))
         return;
-    glm::mat4 projection = ReversedZPerspective(glm::radians(camera.Zoom),
-                                                (float)ctx.screen_width / (float)ctx.screen_height,
-                                                camera.GetNearPlane(),
-                                                camera.GetFarPlane());
+    glm::mat4 projection = ctx.gbuffer_projection;
     glm::mat4 view = camera.GetViewMatrix();
-    //  TAAU: sub-pixel jitter the projection (0 when TAAU off -> byte-identical).
+    // Ladder writers share the exact projection inverted by the depth readers.
+    // Preserve the original projection/jitter arithmetic for compatibility paths.
     const glm::vec2 taau_jit = ctx.taau_jitter_ndc;
-    projection[2][0] += taau_jit.x;
-    projection[2][1] += taau_jit.y;
+    if (!ctx.far_world_ladder) {
+        projection = ReversedZPerspective(glm::radians(camera.Zoom),
+                                          (float)ctx.screen_width / (float)ctx.screen_height,
+                                          camera.GetNearPlane(),
+                                          camera.GetFarPlane());
+        projection[2][0] += taau_jit.x;
+        projection[2][1] += taau_jit.y;
+    }
 
     shader->setMat4("projection", projection);
     shader->setMat4("view", view);
@@ -474,6 +478,7 @@ void GBufferPass::geometry_pass_chunks(const RenderContext& ctx,
         [&uniforms](const FarWorldDrawCommand& command) { return uniforms.Prepare(command); });
     stats.far_region_draws += far_stats.draws;
     stats.far_indices += far_stats.indices;
+    stats.far_water_indices += far_stats.water_indices;
 
     glBindVertexArray(0);
 }
@@ -575,12 +580,15 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
     uniforms.Reset();
     const glm::mat4 static_view = camera.GetViewMatrix();
     const glm::vec2 static_taau_jit = ctx.taau_jitter_ndc; //  TAAU (0 when off)
-    glm::mat4 static_proj = ReversedZPerspective(glm::radians(camera.Zoom),
-                                                 (float)ctx.screen_width / (float)ctx.screen_height,
-                                                 camera.GetNearPlane(),
-                                                 camera.GetFarPlane());
-    static_proj[2][0] += static_taau_jit.x;
-    static_proj[2][1] += static_taau_jit.y;
+    glm::mat4 static_proj = ctx.gbuffer_projection;
+    if (!ctx.far_world_ladder) {
+        static_proj = ReversedZPerspective(glm::radians(camera.Zoom),
+                                           (float)ctx.screen_width / (float)ctx.screen_height,
+                                           camera.GetNearPlane(),
+                                           camera.GetFarPlane());
+        static_proj[2][0] += static_taau_jit.x;
+        static_proj[2][1] += static_taau_jit.y;
+    }
     shader->setMat4("projection", static_proj);
     shader->setMat4("view", static_view);
     shader->setMat4("u_prev_view_proj",
@@ -946,13 +954,15 @@ void GBufferPass::geometry_pass_skinned_meshes(const RenderContext& ctx,
     uniforms.Reset();
     const glm::mat4 skinned_view = camera.GetViewMatrix();
     const glm::vec2 skinned_taau_jit = ctx.taau_jitter_ndc; //  TAAU (0 when off)
-    glm::mat4 skinned_proj =
-        ReversedZPerspective(glm::radians(camera.Zoom),
-                             (float)ctx.screen_width / (float)ctx.screen_height,
-                             camera.GetNearPlane(),
-                             camera.GetFarPlane());
-    skinned_proj[2][0] += skinned_taau_jit.x;
-    skinned_proj[2][1] += skinned_taau_jit.y;
+    glm::mat4 skinned_proj = ctx.gbuffer_projection;
+    if (!ctx.far_world_ladder) {
+        skinned_proj = ReversedZPerspective(glm::radians(camera.Zoom),
+                                            (float)ctx.screen_width / (float)ctx.screen_height,
+                                            camera.GetNearPlane(),
+                                            camera.GetFarPlane());
+        skinned_proj[2][0] += skinned_taau_jit.x;
+        skinned_proj[2][1] += skinned_taau_jit.y;
+    }
     shader->setMat4("projection", skinned_proj);
     shader->setMat4("view", skinned_view);
     shader->setMat4("u_prev_view_proj", ctx.prev_view_proj); //  TAAU motion vectors

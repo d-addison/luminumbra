@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <filesystem>
 #include <fstream>
+#include <regex>
 #include <sstream>
 #include <string>
 
@@ -29,42 +30,14 @@ std::size_t CountOccurrences(const std::string& source, const std::string& fragm
 }
 
 // Shadow orchestration must delegate only live terrain/glass to ShadowPass.
-// Reject direct owner access as well as the selected G-buffer submit seam;
-// owner tokens are independent of whitespace around ->Submit / draw calls.
+// Reject owner references and types, class-qualified access and submission/draw calls,
+// independent of whitespace. Replay flags and replay-preservation helpers are allowed.
 bool HasFarSubmissionAccess(const std::string& source) {
-    // Replay preservation exposes no terrain owner or submission API. Exempt
-    // only this include; all implementation text keeps the same forbidden names.
-    auto checked = source;
-    const std::string replay_include = "#include \"../FarWorldReplay.h\"\n";
-    const auto replay_pos = checked.find(replay_include);
-    if (replay_pos != std::string::npos)
-        checked.erase(replay_pos, replay_include.size());
-    const char* const forbidden[] = {"m_far_world",
-                                     "far_world_renderer",
-                                     "m_farlod",
-                                     "FarWorld",
-                                     "FarLod",
-                                     "submit_ladder",
-                                     "SubmitSelectedFarWorld",
-                                     "DrawFarVolumeGpu"};
-    const auto identifier_char = [](char c) {
-        return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
-               c == '_';
-    };
-    for (const char* identifier : forbidden) {
-        const std::string name(identifier);
-        for (auto pos = checked.find(name); pos != std::string::npos;
-             pos = checked.find(name, pos + name.size())) {
-            const bool begins_token = pos == 0 || !identifier_char(checked[pos - 1]);
-            const auto end = pos + name.size();
-            const bool ends_token = end == checked.size() || !identifier_char(checked[end]);
-            // FarWorld/FarLod also cover their owner/submitter type families.
-            // Exact member tokens keep the replay-state bool m_far_world_paired legal.
-            if (begins_token && (ends_token || name == "FarWorld" || name == "FarLod"))
-                return true;
-        }
-    }
-    return false;
+    static const std::regex forbidden(
+        R"(\b(m_far_world|m_farlod)\b|)"
+        R"(\b(FarWorldRenderer|FarLodRenderer|FarLodSystem)\b|)"
+        R"(\b(far_world_renderer|submit_ladder|SubmitSelectedFarWorld|DrawFarVolumeGpu)\s*\()");
+    return std::regex_search(source, forbidden);
 }
 
 // Returns the brace-delimited body that follows the first occurrence of `signature`, or an empty
@@ -98,6 +71,123 @@ TEST(ShaderCompositingContract, WaterSamplesTheResolvedSceneAtFarDepth) {
     ExpectContains(source, "background_has_opaque_depth ? u_sky_color : resolved_background_color");
     ExpectContains(source, "if (!has_opaque_depth(mid_depth))");
     EXPECT_EQ(source.find("refraction_depth"), std::string::npos);
+}
+
+TEST(FarWorldPositionContract, EveryPositionReadIncludingNeighborsUsesTheSharedHelper) {
+    const char* files[]{"lighting_pass.frag",
+                        "ssao.frag",
+                        "ssao_gtao.frag",
+                        "ssao_bilateral_upsample.frag",
+                        "scent_decal.frag",
+                        "debug_view.frag"};
+    const std::size_t expected_calls[]{2, 2, 3, 2, 1, 1};
+    for (std::size_t i = 0; i < 6; ++i) {
+        SCOPED_TRACE(files[i]);
+        const auto source = ReadShader(std::filesystem::path("res/shaders") / files[i]);
+        ExpectContains(source, "#include \"far_world_position.glsl\"");
+        EXPECT_EQ(CountOccurrences(source, "farWorldPosition("), expected_calls[i]);
+        EXPECT_EQ(source.find("texture(gPosition"), std::string::npos);
+        EXPECT_EQ(source.find("texelFetch(gPosition"), std::string::npos);
+    }
+    const auto helper = ReadShader("res/shaders/far_world_position.glsl");
+    ExpectContains(helper, "uniform int u_farWorldLadder = 0;");
+    ExpectContains(helper, "if (u_farWorldLadder == 0)");
+    ExpectContains(helper, "position = texture(storedPosition, uv).rgb;");
+    ExpectContains(helper, "depth <= 0.0");
+    ExpectContains(helper, "abs(q.w) <= 1e-8");
+    ExpectContains(helper, "any(isnan(q)) || any(isinf(q))");
+    ExpectContains(helper, "vec4(uv * 2.0 - 1.0, depth, 1.0)");
+    ExpectContains(helper, "length(reconstructed) > FAR_WORLD_POSITION_THRESHOLD");
+    ExpectContains(helper, "(floor(uv * textureSizePixels) + 0.5) / textureSizePixels");
+    EXPECT_EQ(helper.find("depth * 2.0"), std::string::npos);
+}
+
+TEST(FarWorldFogContract, FinalFadeFollowsBothCapsAndKeepsUnderwaterSeparate) {
+    const auto source = ReadShader("res/shaders/volumetric_lighting.frag");
+    const auto compose = ExtractBlock(source, "vec4 composeFinalFog(");
+    ExpectContains(compose, "float fog = min(analyticFog, 0.94);");
+    ExpectContains(compose, "float outFog = clamp(fog * fx.a + fxFog, 0.0, 0.94);");
+    const auto fade = compose.find("float finalTransmittance");
+    ASSERT_NE(fade, std::string::npos);
+    EXPECT_LT(compose.find("fog = outFog;"), fade);
+    EXPECT_EQ(compose.find("0.94", fade), std::string::npos);
+    ExpectContains(compose, "(1.0 - fog) * aerialOuterFade(rawRayDistance, 16384.0)");
+    ExpectContains(source, "1.0 - smoothstep(0.9 * outerRadius, outerRadius, rayDistance)");
+    const auto main = ExtractBlock(source, "void main()");
+    ExpectContains(main, "float dist = min(rawRayDistance, u_aerialMaxDistance);");
+    ExpectContains(main, "rawRayDistance = length(viewPosition);");
+    ExpectContains(main, "clamp(murk, 0.0, 0.92)");
+    EXPECT_LT(main.find("if (u_underwater > 0.5)"), main.find("composeFinalFog("));
+}
+
+TEST(FarWorldPositionContract, EffectiveFrameProjectionAndPostOverrideDistanceSeams) {
+    const auto pipeline = ReadShader("src/luminumbra_client/rendering/RenderPipeline.cpp");
+    for (const char* name : {"gbuffer",
+                             "plant",
+                             "ssao",
+                             "debug_view",
+                             "ground_decal",
+                             "lighting",
+                             "skybox",
+                             "water",
+                             "aerial"}) {
+        const auto body = ExtractBlock(
+            pipeline, std::string("RenderContext RenderPipeline::make_") + name + "_context(");
+        ExpectContains(body, "m_frame_far_selection.effective == FarWorldMode::Ladder");
+        ExpectContains(body, "m_frame_prepared.projection");
+        ExpectContains(body, "m_taau_jitter_ndc");
+        ExpectContains(body, "ctx.frozen_replay = m_far_world_paired;");
+    }
+    const auto aerial =
+        ExtractBlock(pipeline, "RenderContext RenderPipeline::make_aerial_context(");
+    EXPECT_LT(aerial.find("atmo = *s_atmos_override;"), aerial.find("ctx.aerial_max_distance ="));
+    ExpectContains(aerial, "World::kFarOuterRadiusMeters");
+    const auto context = ReadShader("src/luminumbra_client/rendering/RenderContext.h");
+    ExpectContains(context, "selected_projection[2][0] += jitter.x;");
+    ExpectContains(context, "selected_projection[2][1] += jitter.y;");
+    const char* passes[]{
+        "SsaoPass", "AerialPass", "LightingPass", "GroundDecalPass", "DebugViewPass"};
+    for (const char* pass : passes) {
+        const auto source =
+            ReadShader(std::filesystem::path("src/luminumbra_client/rendering/passes") /
+                       (std::string(pass) + ".cpp"));
+        ExpectContains(source, "ctx.far_world_ladder ? 1 : 0");
+        ExpectContains(source, "ctx.gbuffer_inverse_projection");
+    }
+    for (const char* pass : {"WaterPass", "SkyboxPass"}) {
+        const auto source =
+            ReadShader(std::filesystem::path("src/luminumbra_client/rendering/passes") /
+                       (std::string(pass) + ".cpp"));
+        ExpectContains(source, "ctx.far_world_ladder");
+        ExpectContains(source,
+                       std::string(pass) == "WaterPass" ? "ctx.gbuffer_projection"
+                                                        : "ctx.gbuffer_inverse_projection");
+    }
+    // These existing depth consumers use the zero-to-one convention. Water
+    // excludes cleared depth before reconstruction; weather keeps its sky fog.
+    const auto water = ReadShader("res/shaders/water.frag");
+    const auto weather = ReadShader("res/shaders/weather_system.frag");
+    ExpectContains(water, "float z = depth;");
+    ExpectContains(weather, "float z = depth;");
+}
+
+TEST(FarWorldPositionContract, EveryGbufferDepthWriterConsumesTheSharedLadderProjection) {
+    const auto gbuffer = ReadShader("src/luminumbra_client/rendering/passes/GBufferPass.cpp");
+    for (const char* name : {"chunks", "static_meshes", "skinned_meshes"}) {
+        const auto body =
+            ExtractBlock(gbuffer, std::string("void GBufferPass::geometry_pass_") + name + "(");
+        ExpectContains(body, "ctx.gbuffer_projection");
+        ExpectContains(body, "if (!ctx.far_world_ladder)");
+    }
+    // Tree impostors inherit the static writer's projection, including jitter.
+    ExpectContains(gbuffer, "m_tree_impostor_shader->setMat4(\"u_proj\", static_proj);");
+    const auto plant = ReadShader("src/luminumbra_client/rendering/passes/PlantProcgenPass.cpp");
+    ExpectContains(plant, "ctx.far_world_ladder");
+    ExpectContains(plant, "? ctx.gbuffer_projection");
+    ExpectContains(plant, "m_shader->setMat4(\"projection\", projection);");
+    const auto pipeline = ReadShader("src/luminumbra_client/rendering/RenderPipeline.cpp");
+    const auto stage = ExtractBlock(pipeline, "void RenderPipeline::execute_stage_gbuffer(");
+    ExpectContains(stage, "? gbuffer_ctx.gbuffer_projection");
 }
 
 TEST(ShaderCompositingContract, CloudAndAuroraGatesCoverTheFullStormSlab) {
@@ -219,6 +309,43 @@ TEST(FarWorldShadowContract, NegativeAOBypassesOnlyTheThreeCascadeLookups) {
     ExpectContains(body, "skyVis = computeSkyVisibility(viewPos, viewNormal);");
 }
 
+TEST(FarWorldShadowContract, SubmissionPredicateAllowsReplayStateAndRejectsDrawAccess) {
+    for (const char* source : {
+             "shadow_ctx.frozen_replay = m_far_world_paired;",
+             "#include \"../FarWorldReplay.h\"",
+             "PreserveReplayObject(ReplayObjectKind::LayerFramebuffer, m_shadow_map.fbo_id);",
+             "other_m_far_world->Submit(camera, prepare);",
+             "m_farlod_state.draw();",
+             "other_far_world_renderer().Submit(camera, prepare);",
+             "submit_ladder_state();",
+             "SubmitSelectedFarWorldReplay();",
+             "DrawFarVolumeGpuReplay();",
+             "OtherFarWorldRenderer::Submit(camera, prepare);",
+             "FarLodSystemState::draw();",
+         }) {
+        SCOPED_TRACE(source);
+        EXPECT_FALSE(HasFarSubmissionAccess(source));
+    }
+    for (const char* source : {
+             "m_far_world->Submit(camera, prepare);",
+             "m_far_world -> Submit(camera, prepare);",
+             "m_far_world\n\t. Submit(camera, prepare);",
+             "m_farlod->draw();",
+             "m_farlod \t. draw();",
+             "far_world_renderer().Submit(camera, prepare);",
+             "far_world_renderer \n().Submit(camera, prepare);",
+             "input.submit_ladder (prepare);",
+             "SubmitSelectedFarWorld (input, prepare);",
+             "DrawFarVolumeGpu (allocation, driver);",
+             "FarWorldRenderer::Submit(camera, prepare);",
+             "FarLodRenderer \n\t:: draw();",
+             "FarLodSystem \t:: draw();",
+         }) {
+        SCOPED_TRACE(source);
+        EXPECT_TRUE(HasFarSubmissionAccess(source));
+    }
+}
+
 TEST(FarWorldShadowContract, ProductionCascadesHaveOnlyLiveAndGlassInputs) {
     const auto input = ReadShader("src/luminumbra_client/rendering/RenderInputs.h");
     const auto shadow_input = ExtractBlock(input, "struct ShadowPassInput");
@@ -231,13 +358,30 @@ TEST(FarWorldShadowContract, ProductionCascadesHaveOnlyLiveAndGlassInputs) {
     ASSERT_FALSE(stage.empty());
     ExpectContains(stage, "shadow_input.submit_terrain = make_terrain_submitter();");
     EXPECT_FALSE(HasFarSubmissionAccess(stage));
-    // Mutation controls close the reviewed hole: a direct owner Submit or draw
-    // added inside this stage must trip the very same source-contract predicate.
+    // Owner handoffs and class-qualified calls added inside this stage must trip
+    // the same source-contract predicate, including dereferences and aliases.
     const auto before_closing_brace = stage.substr(0, stage.size() - 1);
-    EXPECT_TRUE(HasFarSubmissionAccess(before_closing_brace +
-                                       "\nm_far_world -> Submit(camera, prepare);\n}"));
-    EXPECT_TRUE(HasFarSubmissionAccess(before_closing_brace +
-                                       "\nDrawFarVolumeGpu(allocation, driver);\n}"));
+    for (const char* mutation : {
+             "m_far_world -> Submit(camera, prepare);",
+             "(*m_far_world).Submit(camera, prepare);",
+             "auto& far = *m_far_world; far.Submit(camera, prepare);",
+             "helper(*m_far_world, camera, prepare);",
+             "helper(m_far_world, camera, prepare);",
+             "helper(m_far_world.get(), camera, prepare);",
+             "m_farlod -> draw();",
+             "(*m_farlod).draw();",
+             "auto& far = *m_farlod; far.draw();",
+             "helper(*m_farlod, camera, prepare);",
+             "helper(m_farlod, camera, prepare);",
+             "helper(m_farlod.get(), camera, prepare);",
+             "FarWorldRenderer::Submit(camera, prepare);",
+             "FarLodRenderer::draw();",
+             "FarLodSystem::draw();",
+             "DrawFarVolumeGpu(allocation, driver);",
+         }) {
+        SCOPED_TRACE(mutation);
+        EXPECT_TRUE(HasFarSubmissionAccess(before_closing_brace + "\n" + mutation + "\n}"));
+    }
     EXPECT_FALSE(HasFarSubmissionAccess("#include \"../FarWorldReplay.h\"\n"
                                         "PreserveReplayObject(kind, id);"));
     EXPECT_FALSE(HasFarSubmissionAccess("shadow_ctx.frozen_replay = m_far_world_paired;"));
@@ -258,3 +402,16 @@ TEST(FarWorldShadowContract, ProductionCascadesHaveOnlyLiveAndGlassInputs) {
 }
 
 } // namespace
+
+TEST(FarWorldWaterContract, ProductionWaterUsesIndependentReadinessAndCombinedSubmission) {
+    const auto fragment = ReadShader("res/shaders/g_buffer.frag");
+    ExpectContains(fragment, "materialId == 200u ? 2 : 1");
+    ExpectContains(fragment, "farLiveOwns(local, fs_in.MaterialID)");
+    ExpectContains(fragment, "(u_farLiveCells[lo].w & readiness) != 0");
+    ExpectContains(fragment, "case 200u: albedo = vec3(0.018, 0.065, 0.11);");
+    const auto pipeline = ReadShader("src/luminumbra_client/rendering/RenderPipeline.cpp");
+    ExpectContains(pipeline, "upload.water_snapshot_version = chunk.water_mesh_version;");
+    ExpectContains(pipeline, "LadderWaterPassEligible(chunk.water_mesh_version");
+    const auto pass = ReadShader("src/luminumbra_client/rendering/passes/GBufferPass.cpp");
+    ExpectContains(pass, "stats.far_water_indices += far_stats.water_indices;");
+}

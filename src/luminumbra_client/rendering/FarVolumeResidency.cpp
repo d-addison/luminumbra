@@ -120,7 +120,11 @@ bool FarVolumeResidency::ReplaceWanted(std::span<const FarVolumeWantedRequest> r
         const auto* old = Find(request.identity.key);
         if (old && old->desired->identity == request.identity &&
             (old->desired->intent != request.intent ||
-             old->desired->build_headroom_bytes != request.build_headroom_bytes))
+             old->desired->build_headroom_bytes != request.build_headroom_bytes ||
+             bool(old->desired->water) != bool(request.water) ||
+             old->desired->water_bound != request.water_bound ||
+             (old->desired->water && request.water &&
+              old->desired->water->content_identity() != request.water->content_identity())))
             return false;
         if (old && old->desired->identity.world_epoch == request.identity.world_epoch &&
             old->desired->intent.extra_span &&
@@ -360,8 +364,11 @@ FarVolumeFrameResult FarVolumeResidency::AdvanceFrame(double x,
             }
             FarVolumeSubmitStatus submitted;
             try {
-                submitted =
-                    tier.queue.Submit({entry.desired->identity, entry.desired->intent, *authority});
+                submitted = tier.queue.Submit({entry.desired->identity,
+                                               entry.desired->intent,
+                                               *authority,
+                                               entry.desired->water,
+                                               entry.desired->water_bound});
             } catch (...) {
                 Reject(entry, result);
                 continue;
@@ -399,7 +406,11 @@ FarVolumeResidency::Observe(const World::FarTileKey& key) const {
                                 .value_or(std::numeric_limits<std::uint64_t>::max())
                           : 0,
         entry->uploaded.identity(),
-        entry->uploaded.request()};
+        entry->uploaded.request(),
+        entry->uploaded.water_complete(),
+        entry->uploaded.water_known_dry(),
+        entry->uploaded.terrain_indices(),
+        entry->uploaded.water_indices()};
 }
 const FarVolumeGpuAllocation* FarVolumeResidency::Resource(const World::FarTileKey& key) const {
     CheckOwner();
@@ -448,6 +459,11 @@ std::array<FarVolumeTierObservation, World::kFarTierCount> FarVolumeResidency::S
             observation.ready_cpu_bytes +=
                 entry.completion ? entry.completion->retained_bytes() : 0;
             observation.retained_gpu_bytes += entry.uploaded.gpu_bytes();
+            observation.retained_water_indices += entry.uploaded.water_indices();
+            if (World::IsFarTileCovering(coverage) && entry.uploaded.water_complete()) {
+                observation.water_known_dry_tiles += entry.uploaded.water_known_dry();
+                observation.water_wet_tiles += !entry.uploaded.water_known_dry();
+            }
         }
     }
     return result;
@@ -501,6 +517,8 @@ std::size_t FarVolumeResidency::VisitDraws(FarVolumeDrawVisitor visitor, void* c
                 World::FarWantedRadiusMeters(number),
                 double(dimensions.sample_spacing_meters) / 2,
                 {}};
+            record.terrain_indices = entry.uploaded.terrain_indices();
+            record.water_indices = entry.uploaded.water_indices();
             record.arrival.eligible = CoarseMayYield(identity.key);
             if (record.arrival.eligible) {
                 record.arrival.finer_outer_radius_meters = World::FarWantedRadiusMeters(number - 1);

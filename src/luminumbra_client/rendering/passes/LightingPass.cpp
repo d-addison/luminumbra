@@ -201,6 +201,8 @@ void LightingPass::execute(const RenderContext& ctx) {
     glClearDepth(0.0);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
     m_lighting_shader->use();
+    m_lighting_shader->setInt("u_farWorldLadder", ctx.far_world_ladder ? 1 : 0);
+    m_lighting_shader->setMat4("u_gbufferInverseProjection", ctx.gbuffer_inverse_projection);
     m_lighting_shader->setInt("u_staticStudio", ctx.static_studio ? 1 : 0);
     m_lighting_shader->setVec3("u_studioBackground", ctx.studio_background);
     m_lighting_shader->setInt("u_authoredEnabled", ctx.authored_surface.id != 0 ? 1 : 0);
@@ -366,7 +368,8 @@ void LightingPass::execute(const RenderContext& ctx) {
     // env knob ("enabled,maxDist,floor,steps,thickness"). The probe needs the
     // same projection the SSAO pass builds, plus the screen size.
     {
-        m_lighting_shader->setMat4("u_projection", projection);
+        m_lighting_shader->setMat4("u_projection",
+                                   ctx.far_world_ladder ? ctx.gbuffer_projection : projection);
         m_lighting_shader->setVec2(
             "u_screenSize",
             glm::vec2(ctx.internal_w(), ctx.internal_h())); // cave AO marches the internal G-buffer

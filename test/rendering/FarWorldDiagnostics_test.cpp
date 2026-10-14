@@ -21,11 +21,15 @@ struct Station {
         snapshot.world_epoch = 7;
         snapshot.content_identity = 42;
         snapshot.bake_generation = 5;
+        snapshot.requested_cave_policy = FarCaveMode::BandLimited;
+        snapshot.bound_cave_policy = FarCaveMode::BandLimited;
         snapshot.frame = 8;
         snapshot.far_plane = kFarPlaneMeters;
         snapshot.camera = {-512, 12, 1024};
         snapshot.captured = true;
         snapshot.advanced = true;
+        snapshot.ladder_water_available = true;
+        snapshot.water_capability = FarWorldWaterCapability::ExplicitlyDry;
         for (const auto& key : expected) {
             auto& tile = snapshot.tiles[snapshot.tile_count++];
             tile.desired = {7, 42, 0, key, 5, 2};
@@ -36,11 +40,13 @@ struct Station {
             tile.coverage = {FarTileState::Empty, true, true};
             tile.eligibility = FarVolumeEligibility::Settled;
             tile.has_pair = true;
+            tile.water_complete = tile.water_known_dry = true;
             auto& tier = snapshot.tiers[key.tier - 1].resident;
             ++tier.wanted;
             ++tier.settled;
             ++tier.empty_pairs;
             ++tier.covering;
+            ++tier.water_known_dry_tiles;
         }
     }
     bool Ready(double seconds = 1) const {
@@ -59,10 +65,96 @@ TEST(FarWorldDiagnostics, EmptyCoverageDoesNotRequireGpuStoresOrSubmission) {
     EXPECT_FALSE(station.Ready(std::numeric_limits<double>::quiet_NaN()));
 }
 
+TEST(FarWorldDiagnostics, WetFixtureRequiresCombinedWaterAndActualSubmittedIndices) {
+    Station station;
+    station.snapshot.water_capability = FarWorldWaterCapability::Wet;
+    EXPECT_FALSE(station.Ready());
+    auto& tile = station.snapshot.tiles[0];
+    tile.coverage.state = FarTileState::Uploaded;
+    tile.water_known_dry = false;
+    tile.water_indices = 6;
+    auto& tier = station.snapshot.tiers[tile.desired.key.tier - 1];
+    --tier.resident.empty_pairs;
+    ++tier.resident.uploaded_pairs;
+    --tier.resident.water_known_dry_tiles;
+    ++tier.resident.water_wet_tiles;
+    tier.resident.retained_water_indices = 6;
+    tier.draws = station.snapshot.draws = 1;
+    tier.indices = station.snapshot.indices = 6;
+    station.snapshot.submission_occurred = true;
+    EXPECT_FALSE(station.Ready());
+    tier.resident.submitted_water_indices = 6;
+    ASSERT_TRUE(station.Ready());
+    for (int control = 0; control < 4; ++control) {
+        auto invalid = station;
+        if (control == 0)
+            invalid.snapshot.tiles[0].water_complete = false;
+        if (control == 1)
+            invalid.snapshot.water_capability = FarWorldWaterCapability::ExplicitlyDry;
+        if (control == 2)
+            invalid.snapshot.tiles[0].coverage.state = FarTileState::Empty;
+        if (control == 3)
+            invalid.snapshot.ladder_water_available = false;
+        EXPECT_FALSE(invalid.Ready());
+    }
+    const auto on = FarWorldDiagnosticJson(station.snapshot);
+    EXPECT_EQ(on["tiers"][0]["submitted_water_indices"], 6);
+    const auto off = FarWorldSubmissionOverride(station.snapshot.selection, false);
+    EXPECT_FALSE(off.submit);
+    EXPECT_EQ(FarWorldDiagnosticJson(station.snapshot), on);
+}
+
+TEST(FarWorldDiagnostics, MissingInvalidOrMismatchedCavePoliciesRefuseStation) {
+    Station station;
+    station.snapshot.requested_cave_policy.reset();
+    EXPECT_EQ(CheckFarWorldStation(station.snapshot, station.expected, 1),
+              FarWorldStationRefusal::InvalidBinding);
+    station.snapshot.requested_cave_policy = FarCaveMode::BoxFiltered;
+    EXPECT_EQ(CheckFarWorldStation(station.snapshot, station.expected, 1),
+              FarWorldStationRefusal::InvalidBinding);
+    station.snapshot.bound_cave_policy.reset();
+    EXPECT_EQ(CheckFarWorldStation(station.snapshot, station.expected, 1),
+              FarWorldStationRefusal::InvalidBinding);
+    station.snapshot.requested_cave_policy = static_cast<FarCaveMode>(2);
+    station.snapshot.bound_cave_policy = static_cast<FarCaveMode>(2);
+    EXPECT_EQ(CheckFarWorldStation(station.snapshot, station.expected, 1),
+              FarWorldStationRefusal::InvalidBinding);
+    station.snapshot.requested_cave_policy = FarCaveMode::BoxFiltered;
+    station.snapshot.bound_cave_policy = FarCaveMode::BoxFiltered;
+    EXPECT_EQ(CheckFarWorldStation(station.snapshot, station.expected, 1),
+              FarWorldStationRefusal::StaleBinding);
+    for (std::size_t i = 0; i < station.snapshot.tile_count; ++i) {
+        auto& tile = station.snapshot.tiles[i];
+        tile.desired.cave_policy = static_cast<std::uint8_t>(FarCaveMode::BoxFiltered);
+        tile.built = tile.desired;
+    }
+    EXPECT_TRUE(station.Ready());
+}
+
+TEST(FarWorldDiagnostics, SerializerDistinguishesRequestedBoundAndAbsentCavePolicies) {
+    FarWorldDiagnosticSnapshot snapshot{};
+    const auto absent = FarWorldDiagnosticJson(snapshot);
+    EXPECT_TRUE(absent["requested_cave_policy"].is_null());
+    EXPECT_TRUE(absent["bound_cave_policy"].is_null());
+    snapshot.requested_cave_policy = FarCaveMode::BoxFiltered;
+    const auto unbound = FarWorldDiagnosticJson(snapshot);
+    EXPECT_EQ(unbound["requested_cave_policy"], 1);
+    EXPECT_TRUE(unbound["bound_cave_policy"].is_null());
+    snapshot.bound_cave_policy = FarCaveMode::BandLimited;
+    const auto bound = FarWorldDiagnosticJson(snapshot);
+    EXPECT_EQ(bound["requested_cave_policy"], 1);
+    EXPECT_EQ(bound["bound_cave_policy"], 0);
+    snapshot.selection = FarWorldSubmissionOverride(snapshot.selection, false);
+    const auto off = FarWorldDiagnosticJson(snapshot);
+    EXPECT_EQ(off["requested_cave_policy"], bound["requested_cave_policy"]);
+    EXPECT_EQ(off["bound_cave_policy"], bound["bound_cave_policy"]);
+}
+
 TEST(FarWorldDiagnostics, MixedCoverageRequiresActualSuccessfulSubmission) {
     Station station;
     auto& tile = station.snapshot.tiles[0];
     tile.coverage.state = FarTileState::Uploaded;
+    tile.terrain_indices = 6;
     auto& tier = station.snapshot.tiers[tile.desired.key.tier - 1];
     --tier.resident.empty_pairs;
     ++tier.resident.uploaded_pairs;
@@ -87,6 +179,7 @@ TEST(FarWorldDiagnostics, TooFewTriangleIndicesForDrawsRefusesStation) {
             break;
         if (tile.has_pair && tile.desired.key.tier == tier_number) {
             tile.coverage.state = FarTileState::Uploaded;
+            tile.terrain_indices = 3;
             ++uploaded;
         }
     }
@@ -211,7 +304,8 @@ TEST(FarWorldDiagnostics, SerializerContainsBindingPoliciesCoverageCountersAndLo
                               "content_identity",
                               "bake_generation",
                               "far_plane_m",
-                              "cave_policy",
+                              "requested_cave_policy",
+                              "bound_cave_policy",
                               "numeric_policy",
                               "advancement_occurred",
                               "submission_occurred",
@@ -243,13 +337,19 @@ TEST(FarWorldDiagnostics, SerializerContainsBindingPoliciesCoverageCountersAndLo
                                   "retained_gpu_logical_store_bytes",
                                   "draws",
                                   "indices",
-                                  "draw_refusals"})
+                                  "draw_refusals",
+                                  "water_known_dry_tiles",
+                                  "water_wet_tiles",
+                                  "retained_water_indices",
+                                  "submitted_water_indices"})
             EXPECT_TRUE(tier.contains(field)) << field;
     EXPECT_EQ(json["tiles"].size(), station.expected.size());
     EXPECT_EQ(json["tiles"][0]["built"], json["tiles"][0]["desired"]);
+    EXPECT_EQ(json["tiles"][0]["desired"]["cave_policy"], json["bound_cave_policy"]);
     EXPECT_EQ(json["gpu_bytes_kind"], "logical_stores");
     EXPECT_EQ(json["memory_sampling"], "asynchronous_diagnostic_not_atomic_admission");
-    EXPECT_FALSE(json["ladder_water_available"].get<bool>());
+    EXPECT_TRUE(json["ladder_water_available"].get<bool>());
+    EXPECT_EQ(json["water_capability"], 1);
     const auto bytes = json.dump();
     EXPECT_THROW(
         {

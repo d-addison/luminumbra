@@ -55,6 +55,10 @@ function Assert-WriterFixture {
     Assert-Test ($null -eq $result.MissingExpected) "legacy writer does not claim ladder residency"
     Assert-Test (@($oracle.ladder.resident_tiles).Count -eq 0) "legacy writer emits no ladder residents"
     Assert-Test ($oracle.ladder.stale_tiles -eq 0) "legacy writer emits zero stale tiles"
+    foreach ($station in $oracle.stations) {
+        Assert-Test ($station.snapshot.requested_cave_policy -eq 1) "writer preserves requested BoxFiltered"
+        Assert-Test ($null -eq $station.snapshot.bound_cave_policy) "writer explicitly emits no bound cave policy"
+    }
     Assert-Test ($analysis.world_preset -ceq "mountains" -and $oracle.world_preset -ceq "mountains") "writer preserves the supplied preset in both artifacts"
     Assert-Test ($oracle.camera.world_x -eq 0 -and $oracle.camera.world_z -eq 0) "oracle uses the supplied origin camera"
     Assert-Test ($analysis.aggregates.captured_stations -eq 2 -and $analysis.aggregates.expected_stations -eq 2) "writer emits both supplied stations"

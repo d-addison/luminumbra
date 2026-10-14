@@ -4,6 +4,7 @@
 #include <exception>
 #include <filesystem>
 #include <iostream>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -26,6 +27,8 @@ std::vector<FarLodHorizonStationCapture> MakeCaptures() {
     origin.region_draws = 1;
     origin.far_indices_drawn = 3;
     origin.far_world.captured = true;
+    origin.far_world.requested_cave_policy = Luminumbra::World::FarCaveMode::BoxFiltered;
+    origin.far_world.bound_cave_policy = std::nullopt;
     origin.far_world.world_epoch = 1;
     origin.far_world.frame = 1;
     origin.far_world.advanced = true;

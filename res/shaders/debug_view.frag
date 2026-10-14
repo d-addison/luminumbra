@@ -1,4 +1,5 @@
 #version 450 core
+#include "far_world_position.glsl"
 
 // G-BUFFER DEBUG VISUALIZER — render-only diagnostic fullscreen pass (DebugViewPass).
 // Overrides the final composite with a single-channel view of the DEFERRED G-buffer so
@@ -54,9 +55,10 @@ vec3 hash_id_color(uint id) {
 }
 
 void main() {
-    vec3 viewPos  = texture(gPosition, TexCoords).xyz;
+    vec3 viewPos = vec3(0.0);
+    bool validPosition = farWorldPosition(gPosition, gDepth, TexCoords, viewPos);
     vec4 nrmData  = texture(gNormalMaterial, TexCoords);
-    bool isSky    = dot(viewPos, viewPos) < 1e-8; // empty/sky pixel in view space
+    bool isSky    = !validPosition || dot(viewPos, viewPos) < 1e-8; // empty/sky pixel in view space
 
     vec3 outColor = vec3(0.0);
 
@@ -82,7 +84,8 @@ void main() {
         } else {
             float z = texture(gDepth, TexCoords).r;          // [0,1] non-linear
             float lin = (u_near * u_far) / (u_near + z * (u_far - u_near));
-            outColor = vec3(clamp(lin * u_depthScale, 0.0, 1.0));
+            if (u_farWorldLadder != 0 && (isnan(z) || isinf(z))) outColor = vec3(0.0);
+            else outColor = vec3(clamp(lin * u_depthScale, 0.0, 1.0));
         }
     } else if (u_mode == 4) {
         // MATERIAL-ID — normal_texture.a * 255 hashed to a distinct color for per-layer

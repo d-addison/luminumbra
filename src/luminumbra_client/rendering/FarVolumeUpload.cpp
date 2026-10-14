@@ -34,6 +34,10 @@ FarVolumeUploadedTile& FarVolumeUploadedTile::operator=(FarVolumeUploadedTile&& 
         empty_ = other.empty_;
         identity_ = other.identity_;
         request_ = other.request_;
+        water_complete_ = other.water_complete_;
+        water_known_dry_ = other.water_known_dry_;
+        terrain_indices_ = other.terrain_indices_;
+        water_indices_ = other.water_indices_;
         other.valid_ = false;
     }
     return *this;
@@ -77,6 +81,16 @@ bool UploadFarVolume(const FarVolumeQueueCompletion& completion,
     staged.empty_ = completion.status() == FarVolumeBuildStatus::ReadyEmpty;
     staged.identity_ = expected;
     staged.request_ = completion.mesh().request;
+    const auto& combined = completion.mesh();
+    if (!combined.water_complete || combined.terrain_indices > combined.indices.size() ||
+        combined.water_indices != combined.indices.size() - combined.terrain_indices ||
+        combined.water_known_dry != (combined.water_indices == 0) ||
+        staged.empty_ != combined.indices.empty())
+        return fail(FarVolumeUploadError::NotReady);
+    staged.water_complete_ = true;
+    staged.water_known_dry_ = combined.water_known_dry;
+    staged.terrain_indices_ = combined.terrain_indices;
+    staged.water_indices_ = combined.water_indices;
     if (!staged.empty_) {
         const auto& mesh = completion.mesh();
         constexpr auto maximum = std::numeric_limits<std::uint64_t>::max();

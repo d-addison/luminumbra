@@ -3461,7 +3461,21 @@ function Test-PlayerView {
 # deadline <=90 seconds, current spanning identities and independent wanted set.
 # An explicit Ladder run refuses until immutable fixture authority is supported.
 
+# D-v2 wet fixtures exercise the same independent validator used below. This
+# file-only proof needs no GL: terrain alone, retained stores, unavailable water,
+# wet Empty, and a missing combined field must all be refused.
+function Assert-FarHorizonWaterNegativeControls {
+    $waterPython = $null
+    foreach ($candidate in @("python3", "python", "py")) {
+        if (Get-Command $candidate -ErrorAction SilentlyContinue) { $waterPython = $candidate; break }
+    }
+    if (-not $waterPython) { throw "far water controls require Python 3 (stdlib only)" }
+    & $waterPython -B -m unittest discover -s (Join-Path $PSScriptRoot ".") -p "test_far_ladder_oracle.py"
+    if ($LASTEXITCODE -ne 0) { throw "FarLodHorizon v2 wet-fixture negative controls failed" }
+}
+
 function Test-FarLodHorizon {
+    Assert-FarHorizonWaterNegativeControls
     if ($FarWorldRenderer -eq "Ladder") {
         throw "FarLodHorizon Ladder qualification is unsupported: the world presets lack injected immutable authority; native cave/edit/budget/water qualification remains NEEDS-NATIVE-RUN. A refused Legacy fallback cannot qualify Ladder."
     }

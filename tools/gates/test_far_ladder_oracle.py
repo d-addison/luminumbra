@@ -20,7 +20,7 @@ def fixture(mode="ladder", mixed=False, camera=(-512.0, 12.0, 1024.0)):
         counters = dict.fromkeys(TIER_COUNTERS, 0)
         counters.update(tier=tier, pool_limit_bytes=256*1024*1024)
         if mode == "ladder":
-            counters.update(wanted=count, current_covering=count, settled=count, empty_pairs=count)
+            counters.update(wanted=count, current_covering=count, settled=count, empty_pairs=count, water_known_dry_tiles=count)
         tiers.append(counters)
     tiles = []
     if mode == "ladder":
@@ -29,9 +29,11 @@ def fixture(mode="ladder", mixed=False, camera=(-512.0, 12.0, 1024.0)):
                             key=list(key), bake_generation=5, span_generation=2)
             tiles.append(dict(desired=identity, built=copy.deepcopy(identity), has_pair=True,
                               state="Empty", current=True, span_ok=True, eligibility=4,
-                              requested_span=[-256, 80], built_span=[-320, 128]))
+                              requested_span=[-256, 80], built_span=[-320, 128], water_complete=True,
+                              water_known_dry=True, terrain_indices=0, water_indices=0))
         if mixed:
             tiles[0]["state"] = "Uploaded"
+            tiles[0]["terrain_indices"] = 6
             tier = tiers[tiles[0]["desired"]["key"][0] - 1]
             tier.update(uploaded_pairs=1, empty_pairs=tier["empty_pairs"]-1,
                         draws=1, indices=6, retained_gpu_logical_store_bytes=144,
@@ -39,9 +41,10 @@ def fixture(mode="ladder", mixed=False, camera=(-512.0, 12.0, 1024.0)):
     snapshot = dict(requested_mode=mode, effective_mode=mode, refusal="None", submission_refusal="None", suppression="None",
                     selected=mode == "ladder", world_epoch=7, frame_id=9, content_identity=42,
                     bake_generation=5, far_plane_m=17408 if mode == "ladder" else 3200,
-                    cave_policy=0, numeric_policy=1, captured=True, complete=True,
+                    requested_cave_policy=0, bound_cave_policy=0 if mode == "ladder" else None,
+                    numeric_policy=1, captured=True, complete=True,
                     advancement_occurred=True, submission_occurred=mixed,
-                    draws=int(mixed), indices=6 if mixed else 0, ladder_water_available=False,
+                    draws=int(mixed), indices=6 if mixed else 0, ladder_water_available=mode == "ladder", water_capability=1 if mode == "ladder" else 0,
                     memory_sampling="asynchronous_diagnostic_not_atomic_admission", gpu_bytes_kind="logical_stores",
                     camera=list(camera), frame_upload=dict(attempts=0, debited_bytes=0, successful_bytes=0,
                                                           horizon_refused=False), tiers=tiers, tiles=tiles)
@@ -53,7 +56,7 @@ def fixture(mode="ladder", mixed=False, camera=(-512.0, 12.0, 1024.0)):
                            stale_tiles=0))
     artifact = dict(schema="luminumbra.farlod_horizon.v2", mode=mode, world_preset="fixture",
                 ladder_checked=mode == "ladder", expected_stations=1, stations=[row], complete=True,
-                ladder_water="absent_S13_out_of_scope")
+                ladder_water="combined_immutable_observation" if mode == "ladder" else "legacy_compatibility")
     if mode == "legacy":
         artifact.update(camera=dict(world_x=x, world_z=z),
                         legacy=dict(row["legacy"], region_size_m=512, f1_outer_range_m=768, f2_outer_range_m=3000),
@@ -69,11 +72,43 @@ def submission_fixture(draws=(1, 1), indices=(3, 6)):
         uploaded = [t for t in s["tiles"] if t["desired"]["key"][0] == tier_number][:draw_count]
         for tile in uploaded:
             tile["state"] = "Uploaded"
+            tile["terrain_indices"] = index_count // draw_count
         tier = s["tiers"][tier_number - 1]
         tier.update(uploaded_pairs=draw_count, empty_pairs=tier["empty_pairs"]-draw_count,
                     draws=draw_count, indices=index_count)
     s.update(draws=sum(draws), indices=sum(indices), submission_occurred=True)
     return a
+
+
+def wet_fixture():
+    a = fixture(mixed=True)
+    s = a["stations"][0]["snapshot"]
+    s["water_capability"] = 2
+    tile = s["tiles"][0]
+    tile.update(terrain_indices=0, water_indices=6, water_known_dry=False)
+    tier = s["tiers"][tile["desired"]["key"][0] - 1]
+    tier.update(water_known_dry_tiles=tier["water_known_dry_tiles"]-1, water_wet_tiles=1,
+                retained_water_indices=6, submitted_water_indices=6)
+    return a
+
+
+def invalid_water_fixtures():
+    controls = []
+    for name in ("unavailable", "zero_water_submission", "terrain_only", "incomplete_water", "wet_empty",
+                 "false_dry", "missing_water_field", "retained_as_submitted"):
+        a = wet_fixture()
+        s = a["stations"][0]["snapshot"]
+        tier, tile = s["tiers"][0], s["tiles"][0]
+        if name == "unavailable": s.update(water_capability=0, ladder_water_available=False)
+        if name == "zero_water_submission": tier["submitted_water_indices"] = 0
+        if name == "terrain_only": tile.update(water_indices=0, terrain_indices=6, water_known_dry=True)
+        if name == "incomplete_water": tile["water_complete"] = False
+        if name == "wet_empty": tile["state"] = "Empty"
+        if name == "false_dry": s["water_capability"] = 1
+        if name == "missing_water_field": del tile["water_complete"]
+        if name == "retained_as_submitted": tier["retained_water_indices"] = 12
+        controls.append((name, a))
+    return controls
 
 
 def invalid_submission_fixtures():
@@ -104,6 +139,12 @@ def required_station_fixture(mode="ladder"):
 
 
 class HorizonValidatorTests(unittest.TestCase):
+    def test_wet_fixture_and_all_water_negative_controls(self):
+        self.validate(wet_fixture())
+        for name, artifact in invalid_water_fixtures():
+            with self.subTest(name=name), self.assertRaises(ArtifactError):
+                self.validate(artifact)
+
     def validate(self, a, **kwargs):
         return validate_artifact(a, a["mode"], **kwargs)
 
@@ -156,6 +197,54 @@ class HorizonValidatorTests(unittest.TestCase):
         del a["ladder_checked"]
         with self.assertRaises(ArtifactError):
             self.validate(a)
+
+    def test_legacy_preserves_requested_box_filtered_with_absent_or_distinct_bound_policy(self):
+        for bound in (None, 0):
+            a = fixture("legacy")
+            snapshot = a["stations"][0]["snapshot"]
+            snapshot.update(requested_cave_policy=1, bound_cave_policy=bound)
+            a = json.loads(json.dumps(a))
+            self.assertFalse(self.validate(a)["LadderChecked"])
+            self.assertEqual(a["stations"][0]["snapshot"]["requested_cave_policy"], 1)
+            self.assertEqual(a["stations"][0]["snapshot"]["bound_cave_policy"], bound)
+        a = fixture("legacy")
+        a["stations"][0]["snapshot"]["requested_cave_policy"] = None
+        self.assertFalse(self.validate(a)["LadderChecked"])
+
+    def test_ladder_requires_valid_matching_requested_and_bound_cave_policies(self):
+        for requested, bound in ((1, None), (1, 0), (None, 0), (None, None)):
+            with self.subTest(requested=requested, bound=bound):
+                self.refused(lambda a: a["stations"][0]["snapshot"].update(
+                    requested_cave_policy=requested, bound_cave_policy=bound), "cave policy binding")
+        a = fixture()
+        snapshot = a["stations"][0]["snapshot"]
+        snapshot.update(requested_cave_policy=1, bound_cave_policy=1)
+        with self.assertRaisesRegex(ArtifactError, "stale binding identity"):
+            self.validate(a)
+        for tile in snapshot["tiles"]:
+            tile["desired"]["cave_policy"] = tile["built"]["cave_policy"] = 1
+        self.assertTrue(self.validate(a)["LadderChecked"])
+
+    def test_cave_policy_fields_reject_invalid_codes_and_types(self):
+        for mode in ("legacy", "ladder"):
+            for field in ("requested_cave_policy", "bound_cave_policy"):
+                for value in (2, -1, True, False, 0.0, "none"):
+                    a = fixture(mode)
+                    a["stations"][0]["snapshot"][field] = value
+                    with self.subTest(mode=mode, field=field, value=value), self.assertRaises(ArtifactError):
+                        self.validate(a)
+
+    def test_station_binding_preserves_each_cave_policy_independently(self):
+        for field, value in (("requested_cave_policy", 1), ("bound_cave_policy", 0)):
+            a = fixture("legacy")
+            second = copy.deepcopy(a["stations"][0])
+            second["name"] = "other"
+            second["snapshot"]["frame_id"] += 1
+            second["snapshot"][field] = value
+            a["stations"].append(second)
+            a["expected_stations"] = 2
+            with self.subTest(field=field), self.assertRaisesRegex(ArtifactError, "stale station binding"):
+                self.validate(a, required_stations=("origin", "other"))
 
     def test_schema_completeness_every_snapshot_and_counter_field(self):
         for field in SNAPSHOT_FIELDS:
@@ -348,7 +437,7 @@ class HorizonValidatorTests(unittest.TestCase):
                 path.write_text(valid[:cut])
                 with self.assertRaises(ArtifactError):
                     read_artifact(path)
-            for text in ('{"schema":1,"schema":2}', '{"camera":NaN}', '{"a":}'): 
+            for text in ('{"schema":1,"schema":2}', '{"camera":NaN}', '{"a":}'):
                 path.write_text(text)
                 with self.assertRaises(ArtifactError):
                     read_artifact(path)

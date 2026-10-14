@@ -87,6 +87,7 @@ const std::vector<PassShaderLayout>& AllPassShaderLayouts() {
                          e.pass_name = "ssao";
                          e.samplers = {
                              {"gPosition", GL_SAMPLER_2D, -1},
+                             {"gDepth", GL_SAMPLER_2D, -1},
                              {"gNormalMaterial", GL_SAMPLER_2D, -1},
                              {"u_noiseTexture", GL_SAMPLER_2D, -1},
                          };
@@ -97,6 +98,7 @@ const std::vector<PassShaderLayout>& AllPassShaderLayouts() {
                          e.pass_name = "ssao_gtao";
                          e.samplers = {
                              {"gPosition", GL_SAMPLER_2D, -1},
+                             {"gDepth", GL_SAMPLER_2D, -1},
                              {"gNormalMaterial", GL_SAMPLER_2D, -1},
                          };
                          return e;
@@ -118,7 +120,21 @@ const std::vector<PassShaderLayout>& AllPassShaderLayouts() {
                          e.samplers = {
                              {"u_aoHalf", GL_SAMPLER_2D, -1},
                              {"gPosition", GL_SAMPLER_2D, -1},
+                             {"gDepth", GL_SAMPLER_2D, -1},
                          };
+                         return e;
+                     }()});
+
+        v.push_back({"aerial_perspective",
+                     "res/shaders/ssao.vert",
+                     "res/shaders/volumetric_lighting.frag",
+                     [] {
+                         ExpectedLayout e;
+                         e.pass_name = "aerial_perspective";
+                         e.samplers = {{"gDepth", GL_SAMPLER_2D, -1},
+                                       {"u_skyViewLut", GL_SAMPLER_2D, -1},
+                                       {"u_transmittanceLut", GL_SAMPLER_2D, -1},
+                                       {"u_froxelIntegrated", GL_SAMPLER_3D, -1}};
                          return e;
                      }()});
 
@@ -232,6 +248,7 @@ const std::vector<PassShaderLayout>& AllPassShaderLayouts() {
                  e.pass_name = "scent_decal";
                  e.samplers = {
                      {"gPosition", GL_SAMPLER_2D, -1},
+                     {"gDepth", GL_SAMPLER_2D, -1},
                      {"u_scentField", GL_SAMPLER_2D, -1},
                  };
                  return e;

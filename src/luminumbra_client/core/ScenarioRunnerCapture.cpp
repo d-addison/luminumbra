@@ -1595,6 +1595,7 @@ void ScenarioRunnerImpl::captureFarLodHorizon(std::chrono::steady_clock::time_po
 
                     FarLodHorizonStationCapture capture;
                     capture.station = farlod_horizon_stations[station_index];
+                    // Value copy retains water capability/readiness/submission across far OFF.
                     capture.far_world = fw;
                     capture.settle_seconds = settle_seconds;
                     capture.ready_within_deadline = station_ready;
