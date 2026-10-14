@@ -185,6 +185,8 @@ private:
     // integration charge. Slots are reclaimed only by Drain, never by eviction.
     std::array<Ledger, kScratchSlots> ledgers_{}, pending_ledgers_{};
     std::array<FarVolumeWantedRequest, kScratchSlots> requests_{};
+    // Reserved once on binding; backing storage is included in the integration charge.
+    std::vector<World::FarTileKey> wanted_;
 };
 
 bool MakeFarWorldDrawCommand(const FarVolumeDrawRecord& record,

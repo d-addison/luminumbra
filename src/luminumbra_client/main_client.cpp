@@ -2128,16 +2128,14 @@ int main(int argc, char* argv[]) {
         scenario_config.isolation_layers, scenario_config.isolation_backdrop));
     // far-LOD tile builds ride the JobSystem Normal lane.
     renderPipeline.attach_farlod_job_system(&jobSystem);
-    renderPipeline.far_world_renderer().SetRequestedCavePolicy(
-        Luminumbra::Rendering::ResolveFarWorldCaveField(
+    const auto farWorldCavePolicy =
+        renderPipeline.set_far_world_cave_policy(Luminumbra::Rendering::ResolveFarWorldCaveField(
             g_systemConfig.param(luminumbra::core::SysParam::FarWorldCaveField,
                                  Luminumbra::Rendering::kDefaultFarWorldCaveFieldCode)));
     renderPipeline.set_far_world_mode(Luminumbra::Rendering::RequestedFarWorldMode(
         g_systemConfig.enabled(luminumbra::core::SysKey::RenderFarWorldLadder)));
     if (g_systemConfig.enabled(luminumbra::core::SysKey::RenderFarWorldLadder)) {
-        if (!renderPipeline.far_world_renderer()
-                 .CavePolicy(Luminumbra::Rendering::FarWorldPurpose::World)
-                 .requested)
+        if (!farWorldCavePolicy.requested)
             LUMINUMBRA_CORE_WARN(
                 "Far-world Ladder refused: cave_field requires exact 0 (BandLimited) "
                 "or 1 (BoxFiltered). Legacy remains effective.");

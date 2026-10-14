@@ -965,6 +965,7 @@ TEST(FarWorldRenderer, CameraXZWantedSetSpanGrowthAndRejectedExtensionAreTransac
         count += tier.wanted;
     EXPECT_EQ(count, wanted.size());
     const auto before = owner.renderer.Residency()->Observe(wanted.front());
+    EXPECT_TRUE(before);
     ASSERT_TRUE(before);
     ASSERT_TRUE(owner.renderer.PrepareFrame(2, {-.5, 100, -512.25}));
     const auto after = owner.renderer.Residency()->Observe(wanted.front());
