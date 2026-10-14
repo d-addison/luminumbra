@@ -104,6 +104,13 @@ runtime/soak modes) hosts validate the same Hello compatibility fields before ad
 replication client. TCP joiners send Hello before user commands. TCP lockstep and replay
 enforce both identities before simulation starts.
 
+Runtime/soak TCP hosts allow `kRuntimeTcpHelloTimeoutTicks` (150 host simulation ticks,
+about five seconds at 30 Hz) for Hello after the host observes TCP acceptance. A Hello
+must be read before that deadline; at 150 elapsed ticks the host logs the refusal,
+closes the transport, and releases the slot to listen again on the next host tick.
+The deadline uses the host's simulation tick count, so repeated polls at the same tick
+do not consume the handshake window.
+
 `GameSession::PresetContentHash()` captures the preset used at world creation or load.
 Its canonical form first materializes revision-dependent defaults, then stamps the
 current schema revision (the same operation used for embedded presets). It serializes

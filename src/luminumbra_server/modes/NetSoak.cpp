@@ -99,7 +99,7 @@ int RunNetSoak(const ServerCliOptions& options) {
         expected_hello.preset_content_hash = runner.Session()->PresetContentHash();
         // Accept / RE-ACCEPT (reconnect-under-load): a re-armed slot picks the peer up.
         for (RuntimeTcpClientSlot& slot : slots) {
-            if (PollRuntimeTcpAccept(slot, expected_hello)) {
+            if (PollRuntimeTcpAccept(slot, expected_hello, executed)) {
                 slot.joined_tick = executed;
                 server.AddClient(slot.client_id, slot.transport.get());
                 accept_events += 1;

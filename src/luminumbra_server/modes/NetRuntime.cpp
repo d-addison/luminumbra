@@ -1,6 +1,8 @@
 #include "ModeHelpers.h"
 #include "Modes.h"
 
+#include <utility>
+
 namespace fs = std::filesystem;
 
 // ---------------------------------------------------------------------------
@@ -11,31 +13,48 @@ namespace fs = std::filesystem;
 // transport uses the same interface. Run: one process --net-host --port
 // P, another --net-join --host H --port P.
 // ---------------------------------------------------------------------------
-void StartRuntimeTcpAccept(RuntimeTcpClientSlot& slot) {
+void StartRuntimeTcpAccept(RuntimeTcpClientSlot& slot, std::function<void()> on_listening) {
     slot.transport = std::make_unique<Luminumbra::Net::TcpTransport>();
     Luminumbra::Net::TcpTransport* transport = slot.transport.get();
     const std::uint16_t port = slot.port;
     slot.accepting = true;
-    slot.accept_result = std::async(std::launch::async, [transport, port]() {
-        return transport->Listen(port, /*timeout_ms=*/250);
-    });
+    slot.accept_result =
+        std::async(std::launch::async, [transport, port, on_listening = std::move(on_listening)]() {
+            return transport->Listen(port, /*timeout_ms=*/250, on_listening);
+        });
 }
 
-bool PollRuntimeTcpAccept(RuntimeTcpClientSlot& slot, const Luminumbra::Net::HelloMsg& expected) {
+bool PollRuntimeTcpAccept(RuntimeTcpClientSlot& slot,
+                          const Luminumbra::Net::HelloMsg& expected,
+                          std::uint64_t host_tick,
+                          std::function<void()> on_listening) {
     if (slot.accepted) {
         return false;
     }
     if (slot.awaiting_hello) {
+        if (host_tick - slot.hello_started_tick >= kRuntimeTcpHelloTimeoutTicks) {
+            LUMINUMBRA_CORE_ERROR("net-host: Hello deadline expired for client {} after {} host "
+                                  "ticks; connection refused",
+                                  slot.client_id,
+                                  kRuntimeTcpHelloTimeoutTicks);
+            slot.transport->Close();
+            slot.transport.reset();
+            slot.awaiting_hello = false;
+            slot.hello_started_tick = 0;
+            return false;
+        }
         std::vector<std::uint8_t> frame;
         if (!slot.transport->TryReceiveFrame(frame)) {
             if (!slot.transport->IsPeerConnected()) {
                 slot.transport.reset();
                 slot.awaiting_hello = false;
+                slot.hello_started_tick = 0;
             }
             return false;
         }
         Luminumbra::Net::HelloMsg hello;
         slot.awaiting_hello = false;
+        slot.hello_started_tick = 0;
         if (!Luminumbra::Net::DecodeHello(frame, hello) ||
             !Luminumbra::Net::HelloMatches(expected, hello) || hello.client_id != slot.client_id) {
             LUMINUMBRA_CORE_ERROR("net-host: incompatible session identity (including resolved "
@@ -50,7 +69,7 @@ bool PollRuntimeTcpAccept(RuntimeTcpClientSlot& slot, const Luminumbra::Net::Hel
         return true;
     }
     if (!slot.accepting) {
-        StartRuntimeTcpAccept(slot);
+        StartRuntimeTcpAccept(slot, std::move(on_listening));
     }
     if (!slot.accept_result.valid() ||
         slot.accept_result.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready) {
@@ -61,6 +80,7 @@ bool PollRuntimeTcpAccept(RuntimeTcpClientSlot& slot, const Luminumbra::Net::Hel
     slot.accepting = false;
     if (accepted) {
         slot.awaiting_hello = true;
+        slot.hello_started_tick = host_tick;
         return false;
     }
 
@@ -142,7 +162,7 @@ int RunNetHostServerMode(const ServerCliOptions& options) {
         expected_hello.system_config_identity = runner.Session()->SystemConfigIdentity();
         expected_hello.preset_content_hash = runner.Session()->PresetContentHash();
         for (RuntimeTcpClientSlot& slot : slots) {
-            if (PollRuntimeTcpAccept(slot, expected_hello)) {
+            if (PollRuntimeTcpAccept(slot, expected_hello, executed)) {
                 slot.joined_tick = executed;
                 server.AddClient(slot.client_id, slot.transport.get());
                 accepted_count += 1;

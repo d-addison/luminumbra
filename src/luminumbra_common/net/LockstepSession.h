@@ -45,6 +45,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <map>
 #include <memory>
 #include <optional>
@@ -286,7 +287,11 @@ public:
     TcpTransport& operator=(const TcpTransport&) = delete;
 
     // Host: bind+listen on `port`, accept ONE client (blocking up to timeout_ms).
-    bool Listen(std::uint16_t port, int timeout_ms = 10000);
+    // Optional readiness callback runs on the calling thread after bind/listen succeeds,
+    // before the accept timeout starts. It must return before acceptance can proceed.
+    bool Listen(std::uint16_t port,
+                int timeout_ms = 10000,
+                const std::function<void()>& on_listening = {});
     // Client: connect to host:port (blocking up to timeout_ms).
     bool Connect(const std::string& host, std::uint16_t port, int timeout_ms = 10000);
 

@@ -400,7 +400,9 @@ TcpTransport::~TcpTransport() {
     ::WSACleanup();
 }
 
-bool TcpTransport::Listen(std::uint16_t port, int timeout_ms) {
+bool TcpTransport::Listen(std::uint16_t port,
+                          int timeout_ms,
+                          const std::function<void()>& on_listening) {
     m_listen_socket = static_cast<std::intptr_t>(::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP));
     if (m_listen_socket < 0)
         return false;
@@ -424,6 +426,9 @@ bool TcpTransport::Listen(std::uint16_t port, int timeout_ms) {
         Close();
         return false;
     }
+
+    if (on_listening)
+        on_listening();
 
     // Accept ONE client, bounded by timeout_ms via select (no hang -- regression review hygiene).
     fd_set rfds;
@@ -706,7 +711,9 @@ bool TcpTransport::PumpRecv() {
     }
 }
 
-bool TcpTransport::Listen(std::uint16_t port, int timeout_ms) {
+bool TcpTransport::Listen(std::uint16_t port,
+                          int timeout_ms,
+                          const std::function<void()>& on_listening) {
     m_listen_socket = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (m_listen_socket < 0)
         return false;
@@ -724,6 +731,9 @@ bool TcpTransport::Listen(std::uint16_t port, int timeout_ms) {
         Close();
         return false;
     }
+    if (on_listening)
+        on_listening();
+
     fd_set rfds;
     FD_ZERO(&rfds);
     FD_SET(static_cast<int>(m_listen_socket), &rfds);
