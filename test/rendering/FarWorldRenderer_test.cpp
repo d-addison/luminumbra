@@ -126,6 +126,7 @@ private:
         ++state_.live;
     }
     void Delete() noexcept {
+        EXPECT_FALSE(state_.ownership_bound);
         state_.released_with_context = state_.released_with_context && state_.current &&
                                        !state_.destroyed && !state_.fixture_released;
         ++state_.deletes;
@@ -156,6 +157,8 @@ public:
     ~Fixture() override {
         EXPECT_EQ(state_.live, 0u);
         EXPECT_FALSE(state_.destroyed);
+        if (gate_ && !gate_->first_sample.load())
+            EXPECT_TRUE(gate_->exited.try_wait());
         state_.fixture_released = true;
     }
     std::uint64_t content_identity() const noexcept override {
@@ -369,11 +372,16 @@ TEST(FarWorldRenderer, ExclusiveSchedulerSubmissionAndOffscreenSuppression) {
                   .draws,
               1u);
     EXPECT_EQ(dispatch(SelectFarWorld(FarWorldMode::Ladder,
+                                      FarWorldPurpose::World,
+                                      FarWorldRefusal::ImmutableAuthorityUnavailable))
+                  .draws,
+              1u);
+    EXPECT_EQ(dispatch(SelectFarWorld(FarWorldMode::Ladder,
                                       FarWorldPurpose::OffscreenPreview,
                                       FarWorldRefusal::None))
                   .draws,
               0u);
-    EXPECT_EQ(legacy_schedules, 2u);
+    EXPECT_EQ(legacy_schedules, 3u);
     EXPECT_EQ(ladder_schedules, 1u);
     EXPECT_EQ(legacy_draws, legacy_schedules);
     EXPECT_EQ(ladder_draws, ladder_schedules);
@@ -499,6 +507,14 @@ TEST(FarWorldRenderer, WorldSwapDrainsBeforeAuthorityMemoryDriverAndContextRelea
     Owner owner;
     ASSERT_TRUE(owner.WaitSettled(Request()));
     ASSERT_GT(owner.state.live, 0u);
+    // Preview/offscreen selection retains the Ladder owner's resources. A swap
+    // must drain them even though the current effective renderer is Legacy.
+    const auto preview = owner.renderer.Selection(FarWorldPurpose::Preview);
+    EXPECT_EQ(preview.effective, FarWorldMode::Legacy);
+    EXPECT_EQ(owner.renderer.Selection(FarWorldPurpose::OffscreenPreview).effective,
+              FarWorldMode::Legacy);
+    EXPECT_GT(owner.state.live, 0u);
+    owner.state.ownership_bound = true; // Drain must unbind before GPU destruction.
     owner.renderer.PrepareWorldSwap();
     EXPECT_EQ(owner.state.live, 0u);
     EXPECT_TRUE(owner.state.fixture_released);
@@ -509,6 +525,40 @@ TEST(FarWorldRenderer, WorldSwapDrainsBeforeAuthorityMemoryDriverAndContextRelea
     owner.renderer.Shutdown();
     EXPECT_TRUE(owner.state.destroyed);
     owner.state.current = false; // Client may now destroy the context.
+}
+
+TEST(FarWorldRenderer, SwapAndShutdownJoinHeldWorkerBeforeFixtureAndDriverRelease) {
+    for (const bool shutdown : {false, true}) {
+        const auto gate = std::make_shared<BuildGate>();
+        Owner owner;
+        owner.renderer.PrepareWorldSwap();
+        ASSERT_EQ(owner.renderer.BindFixture(owner.jobs,
+                                             std::make_shared<const Fixture>(
+                                                 owner.state, FarCaveMode::BandLimited, 42, gate),
+                                             1,
+                                             1,
+                                             FarWorldDevelopmentLimits()),
+                  FarWorldRefusal::None);
+        owner.state.release_on_drain = gate.get();
+        ASSERT_TRUE(owner.Advance(Request()));
+        ASSERT_EQ(owner.renderer.LastFrame().dispatched, 1u);
+        gate->entered.wait();
+        EXPECT_FALSE(gate->exited.try_wait());
+        if (shutdown)
+            owner.renderer.Shutdown();
+        else
+            owner.renderer.PrepareWorldSwap();
+        EXPECT_TRUE(gate->exited.try_wait());
+        EXPECT_EQ(owner.state.held_build_drains, 1u);
+        EXPECT_TRUE(owner.state.fixture_released);
+        EXPECT_EQ(owner.state.destroyed, shutdown);
+        EXPECT_EQ(owner.state.uploads, 0u);
+        EXPECT_EQ(owner.renderer.Residency(), nullptr);
+        EXPECT_EQ(owner.renderer.Selection(FarWorldPurpose::World).effective, FarWorldMode::Legacy);
+        EXPECT_FALSE(owner.Advance(Request()));
+        owner.renderer.Shutdown();
+        owner.state.current = false;
+    }
 }
 
 TEST(FarWorldRenderer, MatchingImmutableCaveBindingPublishesRequestedBoundAndEffectivePolicy) {

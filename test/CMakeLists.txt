@@ -171,6 +171,7 @@ add_executable(common_tests
     rendering/FarWorldReplay_test.cpp
     rendering/FarWorldDiagnostics_test.cpp
     rendering/FarWorldRenderer_test.cpp
+    rendering/FarWorldLegacyIsolation_test.cpp
     rendering/FarWorldOwnership_test.cpp
     rendering/FarWorldDepthBias_test.cpp
     rendering/FarWorldFog_test.cpp

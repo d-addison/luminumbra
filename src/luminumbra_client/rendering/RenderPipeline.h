@@ -445,7 +445,7 @@ public:
     // diorama is covered by its live chunks; skipping far-LOD means no such jobs are ever
     // dispatched for the transient preview world. Restored after the preview's frame.
     void set_far_lod_enabled(bool enabled) {
-        m_far_lod_enabled = enabled;
+        m_legacy_far_enabled = enabled;
     }
 
     // Worldgen-preview far-field: pin far-LOD streaming + the inner fragment
@@ -834,11 +834,14 @@ public:
     FarWorldSelection far_world_selection() const {
         return m_frame_far_selection;
     }
-    FarLodSystem* farlod() {
-        return m_farlod.get();
+    // Value diagnostics are the selected-renderer interface. Legacy runtime
+    // access is restricted to the effective default/preview compatibility path.
+    FarLodSystem* legacy_far_compatibility() {
+        return LegacyFarWorldCompatibility(m_frame_far_selection, m_farlod.get());
     }
-    const FarLodSystem* farlod() const {
-        return m_farlod.get();
+    const FarLodSystem* legacy_far_compatibility() const {
+        return LegacyFarWorldCompatibility(m_frame_far_selection,
+                                           static_cast<const FarLodSystem*>(m_farlod.get()));
     }
 
     // --- Particle framework. ---
@@ -1182,7 +1185,7 @@ private:
     // m_offscreen_target_w/h instead of framebuffer 0. Default inactive == the
     // legacy default-0 blit (byte-identical).
     bool m_offscreen_target_active = false;
-    bool m_far_lod_enabled = true; // worldgen preview disables far-LOD (transient-world UAF)
+    bool m_legacy_far_enabled = true; // retained preview scheduling/submission hook
     u32 m_offscreen_target_fbo = 0;
     u32 m_offscreen_target_w = 0;
     u32 m_offscreen_target_h = 0;
@@ -1284,6 +1287,9 @@ private:
     // render-only lightning pulse + bolt state for the current frame.
     LightningRenderState m_lightning_state;
     std::unique_ptr<FarLodSystem> m_farlod;
+    // Inventory includes compatibility stores retained across selection changes,
+    // using values published by the Legacy branch rather than Ladder reading its counters.
+    std::size_t m_legacy_far_resident_bytes = 0, m_legacy_far_vertex_arrays = 0;
     std::unique_ptr<FarWorldRenderer> m_far_world;
     FarWorldSelection m_frame_far_selection;
     std::uint64_t m_far_world_frame = 0;
