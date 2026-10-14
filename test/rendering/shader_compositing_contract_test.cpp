@@ -30,12 +30,12 @@ std::size_t CountOccurrences(const std::string& source, const std::string& fragm
 }
 
 // Shadow orchestration must delegate only live terrain/glass to ShadowPass.
-// Reject owner references, class-qualified access and submission/draw calls, independent of
-// whitespace. Replay flags and replay-preservation helpers are allowed.
+// Reject owner references and types, class-qualified access and submission/draw calls,
+// independent of whitespace. Replay flags and replay-preservation helpers are allowed.
 bool HasFarSubmissionAccess(const std::string& source) {
     static const std::regex forbidden(
         R"(\b(m_far_world|m_farlod)\b|)"
-        R"(\b(FarWorldRenderer|FarLodRenderer|FarLodSystem)\s*::|)"
+        R"(\b(FarWorldRenderer|FarLodRenderer|FarLodSystem)\b|)"
         R"(\b(far_world_renderer|submit_ladder|SubmitSelectedFarWorld|DrawFarVolumeGpu)\s*\()");
     return std::regex_search(source, forbidden);
 }
@@ -382,6 +382,14 @@ TEST(FarWorldShadowContract, ProductionCascadesHaveOnlyLiveAndGlassInputs) {
         SCOPED_TRACE(mutation);
         EXPECT_TRUE(HasFarSubmissionAccess(before_closing_brace + "\n" + mutation + "\n}"));
     }
+    EXPECT_FALSE(HasFarSubmissionAccess("#include \"../FarWorldReplay.h\"\n"
+                                        "PreserveReplayObject(kind, id);"));
+    EXPECT_FALSE(HasFarSubmissionAccess("shadow_ctx.frozen_replay = m_far_world_paired;"));
+    EXPECT_TRUE(HasFarSubmissionAccess("#include \"../FarWorldReplay.h\"\n"
+                                       "m_far_world -> Submit(camera, prepare);"));
+    EXPECT_TRUE(HasFarSubmissionAccess("shadow_ctx.frozen_replay = m_far_world_paired;\n"
+                                       "m_far_world -> Submit(camera, prepare);"));
+    EXPECT_TRUE(HasFarSubmissionAccess("FarWorldRenderer* owner;"));
     const auto live =
         ExtractBlock(pipeline, "SubmitTerrainChunksFn RenderPipeline::make_terrain_submitter(");
     ExpectContains(live, "CullHierarchical");

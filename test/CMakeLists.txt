@@ -1157,8 +1157,13 @@ target_link_libraries(worldgen_probe PRIVATE
 
 luminumbra_configure_first_party_target(worldgen_probe)
 
+if(NOT Python3_EXECUTABLE)
+    find_package(Python3 COMPONENTS Interpreter REQUIRED)
+endif()
 add_test(NAME WorldgenProbeSmoke
-    COMMAND worldgen_probe --smoke --json ${CMAKE_CURRENT_BINARY_DIR}/worldgen_probe_smoke.json)
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tools/ci/check_worldgen_probe_smoke.py"
+            --probe "$<TARGET_FILE:worldgen_probe>"
+            --out "${CMAKE_CURRENT_BINARY_DIR}/worldgen_probe_smoke.json")
 set_tests_properties(WorldgenProbeSmoke PROPERTIES LABELS "perf" TIMEOUT 120)
 
 # Manual cold-load latency diagnostic. It exercises twenty interactive loads at
@@ -1628,6 +1633,20 @@ target_link_libraries(hang_watchdog_test PRIVATE
     Threads::Threads
 )
 
+# Process crash capture (core/CrashReport). Runs the child crash case by re-executing
+# this binary, so it is its own executable rather than part of common_tests.
+add_executable(crash_report_test
+    common/crash_report_test.cpp
+)
+target_include_directories(crash_report_test PRIVATE
+    ../src
+    ../src/luminumbra_common
+)
+target_link_libraries(crash_report_test PRIVATE
+    gtest_main
+    luminumbra_common
+)
+luminumbra_configure_first_party_target(crash_report_test)
 # Bounded console sink: separate executable so the logging-stall cases can run
 # without the rest of common_tests. Fake outputs are stalled on purpose; the
 # tests release them before returning.
@@ -1824,6 +1843,7 @@ set(LUMINUMBRA_GTEST_TARGETS
     client_policy_test
     audio_physics_binding_test
     hang_watchdog_test
+    crash_report_test
     bounded_console_sink_test
     audio_volume_readback_test
     audio_disabled_test
