@@ -1,7 +1,7 @@
 # Documented visual baselines
 
-These September 8, 2026 captures record existing behavior at engine commit
-`17c70af79c96d600bde11b0fb13c59b7af15a105`. Both processes exited successfully,
+These September 8, 2026 captures record existing behavior. Both processes
+exited successfully,
 but **neither scenario has received visual approval**. The images expose defects
 that the recorded numeric checks did not reject. They are diagnostic baselines,
 not golden references or completed visual improvements.
