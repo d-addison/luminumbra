@@ -339,7 +339,7 @@ expected component hashes on mismatch. Diagnostic sources, component values,
 compiler commands and predecessor source identities accompany the campaign receipt
 under `ci-investigation/`.
 
-The subsequent [ambient dispatch repair](https://github.com/d-addison/luminumbra/pull/172)
+The subsequent ambient dispatch repair
 caps both FBm and Simplex nodes in all three ambient systems at terrain's x86
 AVX2 ceiling, preserving lower-ISA fallback and native non-x86 selection. Its
 Debug/Release controls and native qualification retain their own source identities;

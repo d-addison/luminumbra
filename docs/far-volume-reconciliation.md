@@ -1,9 +1,7 @@
 # Far-volume integration requires one shared representation
 
-The [volume foundation](https://github.com/d-addison/luminumbra/pull/176) and
-[generation kernel](https://github.com/d-addison/luminumbra/pull/177), followed by
-[mesher kernel](https://github.com/d-addison/luminumbra/pull/179), were developed in
-separate campaign lanes. Their original production headers declare incompatible types
+The volume foundation and generation kernel, followed by the mesher kernel,
+were developed separately. Their original production headers declare incompatible types
 with identical names in `Luminumbra::World`. Those original sources cannot be combined as two
 independent runtime APIs: including both produces redefinitions, and using
 different definitions across translation units violates the C++ one-definition
