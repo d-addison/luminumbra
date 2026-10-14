@@ -8,6 +8,7 @@
 // software-GL lane. Pure surface-tag quantization remains in common_tests.
 #include "TerrainCullingTestPeer.h"
 #include "luminumbra_client/rendering/Camera.h"
+#include "luminumbra_client/rendering/FarVolumeGlBackend.h"
 #include "luminumbra_client/rendering/FarWorldRenderer.h"
 #include "luminumbra_client/rendering/RenderInputs.h"
 #include "luminumbra_client/rendering/Shader.h"
@@ -405,13 +406,37 @@ TEST_F(FarWorldShadowGl, ProductionGBufferPreservesMaterialBytesAndTagsWaterAndA
     std::array<float, 256 * 4 * 4> lut{};
     const GLuint material_lut = Texture(GL_TEXTURE_2D, GL_RGBA32F, GL_RGBA, lut.data(), 256, 4);
     const GLuint arrays = Texture(GL_TEXTURE_2D_ARRAY, GL_RGBA8, GL_RGBA, nullptr);
-    const float triangle[]{-200, -200, -200, 600, -200, -200, -200, 600, -200};
+    // Match the production VBO's seven-word VoxelVertex stride: the fragment
+    // shader reads positions from this same store through SSBO binding 5.
+    const std::array<Luminumbra::VoxelVertex, 3> triangle{{
+        {{-200, -200, -200}, {0, 0, 1}, 0},
+        {{600, -200, -200}, {0, 0, 1}, 0},
+        {{-200, 600, -200}, {0, 0, 1}, 0},
+    }};
+    const std::array<std::uint32_t, 3> indices{0, 1, 2};
+    GLint saved_array_buffer = 0, saved_element_buffer = 0;
+    glGetIntegerv(GL_ARRAY_BUFFER_BINDING, &saved_array_buffer);
+    glGetIntegerv(GL_ELEMENT_ARRAY_BUFFER_BINDING, &saved_element_buffer);
     glGenBuffers(1, &vbo);
     glBindBuffer(GL_ARRAY_BUFFER, vbo);
-    glBufferData(GL_ARRAY_BUFFER, sizeof(triangle), triangle, GL_STATIC_DRAW);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(triangle), triangle.data(), GL_STATIC_DRAW);
     glEnableVertexAttribArray(0);
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 0, nullptr);
+    glVertexAttribPointer(
+        0, 3, GL_FLOAT, GL_FALSE, static_cast<GLsizei>(sizeof(Luminumbra::VoxelVertex)), nullptr);
+    glBindBuffer(GL_ARRAY_BUFFER, static_cast<GLuint>(saved_array_buffer));
+    GLuint index_buffer = 0;
+    glCreateBuffers(1, &index_buffer);
+    glNamedBufferData(index_buffer, sizeof(indices), indices.data(), GL_STATIC_DRAW);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, index_buffer);
+    // Normal/material remain constant attributes so the material-ID sweep is
+    // unchanged; indexed positions and SSBO lookup use the same source triangle.
     glVertexAttrib3f(1, 0, 0, 1);
+    GLint saved_storage_buffer = 0, saved_ownership_buffer = 0;
+    GLint64 saved_ownership_start = 0, saved_ownership_size = 0;
+    glGetIntegerv(GL_SHADER_STORAGE_BUFFER_BINDING, &saved_storage_buffer);
+    glGetIntegeri_v(GL_SHADER_STORAGE_BUFFER_BINDING, 7, &saved_ownership_buffer);
+    glGetInteger64i_v(GL_SHADER_STORAGE_BUFFER_START, 7, &saved_ownership_start);
+    glGetInteger64i_v(GL_SHADER_STORAGE_BUFFER_SIZE, 7, &saved_ownership_size);
     // A valid empty ownership store avoids relying on an unbound active SSBO.
     const std::array<std::int32_t, 4> empty_cell{};
     glGenBuffers(1, &ownership);
@@ -421,6 +446,7 @@ TEST_F(FarWorldShadowGl, ProductionGBufferPreservesMaterialBytesAndTagsWaterAndA
     Camera camera;
     camera.SelectFarWorldPlane(FarWorldMode::Ladder);
     const auto projection = camera.GetProjectionMatrix(1, 1);
+    FarVolumeGlDriver driver;
     const auto render = [&](Shader& shader, bool far, std::uint32_t id) {
         shader.use();
         Bind(shader, "u_materialLUT", 0, material_lut);
@@ -445,7 +471,9 @@ TEST_F(FarWorldShadowGl, ProductionGBufferPreservesMaterialBytesAndTagsWaterAndA
         glVertexAttribI1ui(2, id);
         glClearColor(0, 0, 0, 0);
         glClear(GL_COLOR_BUFFER_BIT);
-        glDrawArrays(GL_TRIANGLES, 0, 3);
+        // The production driver aliases the VBO/EBO at SSBO bindings 5/6 and
+        // restores both indexed ranges and the generic storage-buffer binding.
+        EXPECT_TRUE(driver.DrawIndexed(static_cast<std::int32_t>(indices.size())));
         std::array<glm::vec4, 5> pixels{};
         for (int i = 0; i < 5; ++i)
             pixels[i] = Pixel(i);
@@ -486,6 +514,17 @@ TEST_F(FarWorldShadowGl, ProductionGBufferPreservesMaterialBytesAndTagsWaterAndA
             }
         }
     }
+    if (saved_ownership_buffer && saved_ownership_size > 0)
+        glBindBufferRange(GL_SHADER_STORAGE_BUFFER,
+                          7,
+                          static_cast<GLuint>(saved_ownership_buffer),
+                          static_cast<GLintptr>(saved_ownership_start),
+                          static_cast<GLsizeiptr>(saved_ownership_size));
+    else
+        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 7, static_cast<GLuint>(saved_ownership_buffer));
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, static_cast<GLuint>(saved_storage_buffer));
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, static_cast<GLuint>(saved_element_buffer));
+    glDeleteBuffers(1, &index_buffer);
 }
 
 TEST_F(FarWorldShadowGl, ProductionLightingExcludesCascadesButKeepsLiveShadowsAndMarkers) {
