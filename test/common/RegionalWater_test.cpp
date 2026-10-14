@@ -12,13 +12,17 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <limits>
 #include <memory>
 #include <numeric>
 #include <set>
+#include <span>
 #include <stdexcept>
+#include <string>
 #include <tuple>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -804,3 +808,183 @@ TEST(RegionalWaterPersistence, StrictDecodeRejectsMalformedAuthorityAndKeepsLega
 }
 
 } // namespace
+
+TEST_F(RegionalWaterFixture, ReusedStagingMatchesIndependentOracleAndColdTransactions) {
+    ledger = ActiveRegionLedger({0, 1, 2});
+    Owner({0, 0});
+    Owner({1, 0});
+    chunks = {WaterChunk({31, 0, 0}), WaterChunk({32, 0, 0})};
+    std::vector<std::shared_ptr<Chunk>> reference{WaterChunk({31, 0, 0}), WaterChunk({32, 0, 0})};
+    Systems::SHIELD_WorldSystem reference_shield(
+        nullptr, nullptr, Systems::TerrainGenParams{}, 1337);
+    for (std::uint64_t tick = 1; tick <= 12; ++tick) {
+        SCOPED_TRACE(tick);
+        // A fresh WaterSystem has no retained transaction buffers.
+        Systems::WaterSystem cold(nullptr, &reference_shield);
+        const int resolution = tick < 5 ? 8 : 16;
+        water.SetSimResolution(resolution);
+        cold.SetSimResolution(resolution);
+        water.SetHydrology(true, 1, 0);
+        cold.SetHydrology(true, 1, 0);
+        WorldClock clock;
+        clock.set_tick(tick);
+        // Pressure degrades owners through Reduced/Frozen; edits wake them again.
+        if (tick == 7 || tick == 10) {
+            WorldClock edit_clock;
+            edit_clock.set_tick(tick - 1);
+            ledger.mark_edited({0, 0}, edit_clock);
+            ledger.mark_edited({1, 0}, edit_clock);
+        }
+        const std::vector<world::RegionWork> pressure{{{0, 0}, 1}, {{1, 0}, 1}};
+        const auto schedule = ledger.schedule(
+            clock, std::span<const Vec3>{}, pressure, [](RegionKey) { return std::uint64_t{123}; });
+        auto reference_ledger = ledger;
+        std::vector<world::RegionWork> actual_work, reference_work;
+        if (tick == 3) {
+            // Both transactions refuse after staging; retry must discard partial workspace state.
+            chunks[0]->water_depth_mm.assign(64, std::numeric_limits<std::int32_t>::max());
+            reference[0]->water_depth_mm = chunks[0]->water_depth_mm;
+            const auto before = CaptureWater(*chunks[0]);
+            EXPECT_THROW(
+                water.UpdateRegional(registry, chunks, ledger, schedule, actual_work, 4096),
+                std::runtime_error);
+            EXPECT_THROW(cold.UpdateRegional(
+                             registry, reference, reference_ledger, schedule, reference_work, 4096),
+                         std::runtime_error);
+            EXPECT_EQ(CaptureWater(*chunks[0]), before);
+            EXPECT_EQ(ledger.encode(), reference_ledger.encode());
+            EXPECT_TRUE(actual_work.empty());
+            chunks[0] = WaterChunk({31, 0, 0}, 600);
+            reference[0] = WaterChunk({31, 0, 0}, 600);
+        }
+        if (tick == 8) {
+            WorldStreamingState saved;
+            for (const auto& chunk : chunks)
+                ASSERT_TRUE(saved.insert_chunk(chunk));
+            const auto bytes = Persistence::SerializeWorldStreamingStateSnapshotJson(saved);
+            WorldStreamingState loaded, reference_loaded;
+            std::vector<std::string> errors;
+            ASSERT_TRUE(
+                Persistence::LoadWorldStreamingStateSnapshotJson(bytes, loaded, errors, true));
+            ASSERT_TRUE(Persistence::LoadWorldStreamingStateSnapshotJson(
+                bytes, reference_loaded, errors, true));
+            for (std::size_t i = 0; i < chunks.size(); ++i) {
+                const auto id = chunks[i]->get_id();
+                chunks[i] = loaded.find_chunk(id);
+                reference[i] = reference_loaded.find_chunk(id);
+                ASSERT_NE(chunks[i], nullptr);
+                ASSERT_NE(reference[i], nullptr);
+            }
+        }
+        if (tick == 9) {
+            chunks.pop_back();
+            reference.pop_back();
+        }
+        if (tick == 10) {
+            chunks.push_back(WaterChunk({32, 0, 0}, 111, 16));
+            reference.push_back(WaterChunk({32, 0, 0}, 111, 16));
+        }
+        // A bed edit on a retained resident must replace the workspace's old bed.
+        chunks[0]->water_bed_mm[0] = 1200 + static_cast<std::int32_t>(tick);
+        reference[0]->water_bed_mm[0] = chunks[0]->water_bed_mm[0];
+        water.UpdateRegional(registry, chunks, ledger, schedule, actual_work, 4096);
+        cold.UpdateRegional(registry, reference, reference_ledger, schedule, reference_work, 4096);
+        for (std::size_t i = 0; i < chunks.size(); ++i)
+            EXPECT_EQ(CaptureWater(*chunks[i]), CaptureWater(*reference[i]));
+        WorldStreamingState actual_save, reference_save;
+        for (std::size_t i = 0; i < chunks.size(); ++i) {
+            ASSERT_TRUE(actual_save.insert_chunk(chunks[i]));
+            ASSERT_TRUE(reference_save.insert_chunk(reference[i]));
+        }
+        EXPECT_EQ(Persistence::SerializeWorldStreamingStateSnapshotJson(actual_save),
+                  Persistence::SerializeWorldStreamingStateSnapshotJson(reference_save));
+        EXPECT_EQ(ledger.encode(), reference_ledger.encode());
+        EXPECT_EQ(water.regional_work(), cold.regional_work());
+        ASSERT_EQ(actual_work.size(), reference_work.size());
+        for (std::size_t i = 0; i < actual_work.size(); ++i) {
+            EXPECT_EQ(actual_work[i].key, reference_work[i].key);
+            EXPECT_EQ(actual_work[i].region_ticks, reference_work[i].region_ticks);
+            EXPECT_EQ(actual_work[i].water_cells, reference_work[i].water_cells);
+        }
+        EXPECT_EQ(shield.far_lod_authority_revision(),
+                  reference_shield.far_lod_authority_revision());
+    }
+
+    // Independent closed-form oracle for the pre-reuse semantics: a flat isolated
+    // grid has zero surface differences and therefore zero flux. Each cell gains
+    // exactly the uniform rain plus its cached source, with no sink above sea.
+    // A fresh staging chunk omitted sources in finite mode and copied them in
+    // classic mode. Construct expected state from those rules, never UpdateRegional.
+    // Reuse the already warm system and resident identity, including a replacement
+    // at another resolution, to check complete payload overwrite and source clearing.
+    ledger = ActiveRegionLedger{};
+    std::int32_t expected_depth = 700;
+    int expected_mesh_ticks = 0;
+    std::uint32_t expected_revision = 0;
+    const auto& params = shield.get_params();
+    const Chunk::WaterSourceInputs inputs{shield.get_seed(),
+                                          params.rivers_enabled,
+                                          params.river_frequency,
+                                          params.river_pv_min,
+                                          params.river_pv_max};
+    for (std::uint64_t tick = 13; tick <= 24; ++tick) {
+        SCOPED_TRACE(tick);
+        const int resolution = tick < 19 ? 8 : 16;
+        if (tick == 13 || tick == 19) {
+            expected_depth = 700;
+            expected_mesh_ticks = 0;
+            expected_revision = 0;
+            chunks = {WaterChunk({31, 0, 0}, expected_depth, resolution)};
+        }
+        const auto cells = static_cast<std::size_t>(resolution * resolution);
+        const bool finite = tick % 2 == 0;
+        water.SetSimResolution(resolution);
+        water.SetHydrology(finite, 1, 0);
+        // The checked classic kernel accepts a cache with these matching inputs.
+        // Finite staging must discard it even when last tick used classic mode.
+        chunks[0]->water_src_mm.assign(cells, 3);
+        chunks[0]->water_source_inputs = inputs;
+        WorldClock edit_clock, clock;
+        edit_clock.set_tick(tick - 1);
+        clock.set_tick(tick);
+        ledger.mark_edited({0, 0}, edit_clock);
+        const auto schedule = ledger.schedule(clock, std::span<const Vec3>{});
+        std::vector<world::RegionWork> actual_work;
+        water.UpdateRegional(registry, chunks, ledger, schedule, actual_work, 4096);
+
+        const std::int32_t added = finite ? 1 : 4;
+        expected_depth += added;
+        if (!finite)
+            ++expected_mesh_ticks; // Only changes greater than one mm advance remeshing.
+        auto expected = WaterChunk({31, 0, 0}, expected_depth, resolution);
+        expected->water_level_data.assign(cells,
+                                          static_cast<float>(1000 + expected_depth) / 1000.0f);
+        expected->max_water_delta_last_tick = static_cast<float>(added) / 1000.0f;
+        expected->water_mesh_dirty_ticks = expected_mesh_ticks;
+        if (!finite) {
+            expected->water_src_mm.assign(cells, 3);
+            expected->water_source_inputs = inputs;
+        }
+        ++expected_revision;
+        for (std::uint32_t i = 0; i < expected_revision; ++i)
+            expected->mark_water_state_dirty();
+        expected->set_water_authority();
+        expected->mark_sdf_loaded_or_edited();
+        expected->mark_dirty_for_save();
+        expected->clear_water_state_dirty();
+        EXPECT_EQ(CaptureWater(*chunks[0]), CaptureWater(*expected));
+        EXPECT_EQ(chunks[0]->water_source_inputs, expected->water_source_inputs);
+        WorldStreamingState actual_save, expected_save;
+        ASSERT_TRUE(actual_save.insert_chunk(chunks[0]));
+        ASSERT_TRUE(expected_save.insert_chunk(expected));
+        EXPECT_EQ(Persistence::SerializeWorldStreamingStateSnapshotJson(actual_save),
+                  Persistence::SerializeWorldStreamingStateSnapshotJson(expected_save));
+        EXPECT_EQ(water.regional_work().source_mm, added * static_cast<std::int64_t>(cells));
+        EXPECT_EQ(water.regional_work().sink_mm, 0);
+        EXPECT_EQ(water.regional_work().water_cells, cells);
+        EXPECT_TRUE(water.regional_work().mass_ok);
+        ASSERT_EQ(actual_work.size(), 1u);
+        EXPECT_EQ(actual_work[0].key, (RegionKey{0, 0}));
+        EXPECT_EQ(actual_work[0].water_cells, cells);
+    }
+}

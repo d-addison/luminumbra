@@ -2,11 +2,15 @@
 
 #include "luminumbra_common/fields/FieldPageState.h"
 
+#include <algorithm>
+#include <array>
 #include <bit>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <map>
 #include <set>
+#include <span>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -786,4 +790,246 @@ TEST(FieldPageStateTest, WeatherCapacityIsOwnerAwareAndRefusesAtomically) {
     EXPECT_FALSE(
         store.replace_weather({}, std::vector<RegionalStrike>(FieldPageState::kMaxStrikes + 1)));
     EXPECT_EQ(store.serialize(), before);
+}
+
+namespace {
+using PageMap = std::map<FieldPageKey, FieldPage>;
+struct ReferenceSlot {
+    FieldPageKey key;
+    std::size_t index;
+};
+ReferenceSlot CellSlotOf(int x, int z) {
+    const auto floor16 = [](int v) {
+        return v >= 0 ? v / 16 : (v - 15) / 16;
+    };
+    const FieldPageKey key{floor16(x), floor16(z)};
+    return {key, static_cast<std::size_t>((z - key.z * 16) * 16 + x - key.x * 16)};
+}
+bool CellBit(const FieldPage& page, std::size_t i) {
+    return (page.mask[i / 64] >> (i % 64)) & 1;
+}
+const FieldPage* InitializedPage(const PageMap& pages, ReferenceSlot slot) {
+    const auto it = pages.find(slot.key);
+    return it != pages.end() && CellBit(it->second, slot.index) ? &it->second : nullptr;
+}
+std::int32_t ChannelValue(int channel, std::uint16_t word) {
+    return channel < 2 ? static_cast<std::int32_t>(std::bit_cast<std::int16_t>(word)) : word;
+}
+// Scalar oracle retains per-cell tree lookups and the public full seed chain.
+std::map<RegionKey, std::uint64_t>
+ReferenceScheduledStep(PageMap& live,
+                       const PageMap& previous,
+                       const std::map<RegionKey, ActiveRegionRecord>& records,
+                       std::span<const RegionKey> due,
+                       std::uint64_t world_seed,
+                       std::uint64_t tick) {
+    const std::set<RegionKey> due_keys(due.begin(), due.end());
+    std::map<RegionKey, std::uint64_t> work;
+    const auto eligible = [&records](RegionKey owner) {
+        const auto found = records.find(owner);
+        return found != records.end() && found->second.state != RegionState::Frozen;
+    };
+    // Seed relaxation uses only the sealed old values, even when an adjacent region's
+    // interior phase differs. No consumer observes a partially updated neighbour.
+    for (const auto& [page_key, old_page] : previous) {
+        for (std::size_t i = 0; i < FieldPage::kCells; ++i) {
+            if (!CellBit(old_page, i))
+                continue;
+            const auto x = page_key.x * FieldPageState::kPageCells +
+                           static_cast<std::int32_t>(i % FieldPageState::kPageCells);
+            const auto z = page_key.z * FieldPageState::kPageCells +
+                           static_cast<std::int32_t>(i / FieldPageState::kPageCells);
+            const RegionKey owner = FieldPageState::region_of_cell(x, z);
+            if (!eligible(owner) || !due_keys.contains(owner))
+                continue;
+            FieldPage& page = live.at(page_key);
+            for (int channel = 0; channel < FieldPageState::kChannels; ++channel)
+                page.cells[channel][i] = static_cast<std::uint16_t>(
+                    ChannelValue(channel, old_page.cells[channel][i]) +
+                    ((ChannelValue(
+                          channel,
+                          FieldPageState::seed_value(
+                              world_seed, channel, x, z, tick / FieldPageState::kCadenceTicks)) -
+                      ChannelValue(channel, old_page.cells[channel][i])) >>
+                     FieldPageState::kRelaxShift));
+            ++work[owner];
+        }
+    }
+    // Visit every undirected edge once, in page/cell order, and transfer equal/opposite
+    // integer fluxes. The 1/32 edge coefficient plus 1/16 relaxation is a bounded convex
+    // update, so all intermediate and final concentrations remain representable as u16.
+    for (const auto& [page_key, old_page] : previous) {
+        for (std::size_t i = 0; i < FieldPage::kCells; ++i) {
+            if (!CellBit(old_page, i))
+                continue;
+            const auto x = page_key.x * FieldPageState::kPageCells +
+                           static_cast<std::int32_t>(i % FieldPageState::kPageCells);
+            const auto z = page_key.z * FieldPageState::kPageCells +
+                           static_cast<std::int32_t>(i / FieldPageState::kPageCells);
+            const RegionKey owner = FieldPageState::region_of_cell(x, z);
+            if (!eligible(owner))
+                continue;
+            for (const auto& [dx, dz] : {std::pair{1, 0}, std::pair{0, 1}}) {
+                const ReferenceSlot neighbour = CellSlotOf(x + dx, z + dz);
+                const auto* old_neighbour = InitializedPage(previous, neighbour);
+                const RegionKey other = FieldPageState::region_of_cell(x + dx, z + dz);
+                if (!old_neighbour || !eligible(other))
+                    continue;
+                if (owner == other) {
+                    if (!due_keys.contains(owner))
+                        continue;
+                } else {
+                    const auto shift =
+                        std::max(records.at(owner).cadence_shift, records.at(other).cadence_shift);
+                    if (shift >= 63 || (tick & ((std::uint64_t{1} << shift) - 1)) != 0)
+                        continue;
+                }
+                auto& here = live.at(page_key);
+                auto& there = live.at(neighbour.key);
+                for (int channel = 0; channel < FieldPageState::kChannels; ++channel) {
+                    const auto difference =
+                        ChannelValue(channel, old_neighbour->cells[channel][neighbour.index]) -
+                        ChannelValue(channel, old_page.cells[channel][i]);
+                    const auto flux = difference / 32;
+                    here.cells[channel][i] =
+                        static_cast<std::uint16_t>(here.cells[channel][i] + flux);
+                    there.cells[channel][neighbour.index] =
+                        static_cast<std::uint16_t>(there.cells[channel][neighbour.index] - flux);
+                }
+                ++work[owner];
+                ++work[other];
+            }
+        }
+    }
+    return work;
+}
+} // namespace
+
+TEST(FieldPageStateTest, TiledSteppingMatchesScalarOracleAcrossAdmissionLoadAndTransitions) {
+    FieldPageState store;
+    std::map<RegionKey, ActiveRegionRecord> records;
+    for (int x = -2; x <= 2; ++x)
+        for (int z = -1; z <= 1; ++z) {
+            const RegionKey key{x, z};
+            records[key] = {};
+            if (x != 2)
+                ASSERT_TRUE(store.activate_region(key, kSeed, 0));
+        }
+    // Distant, absent owners must remain sealed even in a full snapshot.
+    ASSERT_TRUE(store.activate_region({100, -100}, kSeed, 0));
+    for (std::uint64_t tick = 1; tick <= 24; ++tick) {
+        SCOPED_TRACE(tick);
+        for (auto& [key, record] : records) {
+            record.state = static_cast<RegionState>((tick / 4 + key.x + 3) % 3);
+            record.cadence_shift = record.state == RegionState::Active ? 0 : 2;
+            record.cadence_phase = ActiveRegionLedger::phase(key, record.cadence_shift);
+        }
+        std::vector<RegionKey> due;
+        for (const auto& [key, record] : records)
+            if (record.state != RegionState::Frozen &&
+                (tick & ((1ull << record.cadence_shift) - 1)) == record.cadence_phase)
+                due.push_back(key);
+        const auto previous = store;
+        for (const auto key : due)
+            ASSERT_TRUE(store.activate_region(key, kSeed, tick));
+        auto expected_pages = store.pages();
+        const auto expected_work =
+            ReferenceScheduledStep(expected_pages, previous.pages(), records, due, kSeed, tick);
+        EXPECT_EQ(store.step_scheduled(records, due, kSeed, tick, &previous), expected_work);
+        EXPECT_EQ(store.pages(), expected_pages);
+        if (tick % 5 == 0) {
+            const auto bytes = store.serialize();
+            FieldPageState restored;
+            std::string error;
+            ASSERT_TRUE(FieldPageState::parse(bytes, restored, error)) << error;
+            EXPECT_EQ(restored.serialize(), bytes);
+            store = std::move(restored);
+        }
+    }
+}
+
+TEST(FieldPageStateTest, InitializationCountsFollowMasksAcrossPartialSnapshotsLoadAndClear) {
+    FieldPageState store;
+    const std::vector<RegionKey> keys{{-32768, 0}, {-2, -1}, {-1, 0}, {0, 0}, {1, 0}, {32767, 0}};
+    const auto check = [&keys](const FieldPageState& state) {
+        for (const auto key : keys) {
+            std::size_t count = 0;
+            for (const auto& [x, z] : FieldPageState::cells_of_region(key))
+                count += state.initialized(x, z);
+            EXPECT_EQ(state.owned_initialized_cells(key), count);
+            EXPECT_EQ(state.owns_region(key), count != 0);
+        }
+    };
+    for (const auto key : keys) {
+        ASSERT_TRUE(store.activate_region(key, kSeed, 0));
+        check(store);
+        const auto before = store.serialize();
+        ASSERT_TRUE(store.activate_region(key, 9999, 800));
+        EXPECT_EQ(store.serialize(), before); // Fully initialized admission must not reseed.
+    }
+    std::map<RegionKey, ActiveRegionRecord> records;
+    records[{0, 0}] = {};
+    const std::vector<RegionKey> due{{0, 0}};
+    auto subset = store.scheduled_snapshot(records, due, 1);
+    check(subset); // Shared pages can contain only part of another owner's cells.
+    const auto partial = subset.owned_initialized_cells({1, 0});
+    EXPECT_GT(partial, 0u);
+    EXPECT_LT(partial, FieldPageState::cells_of_region({1, 0}).size());
+    ASSERT_TRUE(subset.activate_region({1, 0}, kSeed, 2));
+    check(subset);
+    EXPECT_EQ(subset.owned_initialized_cells({1, 0}),
+              FieldPageState::cells_of_region({1, 0}).size());
+    const auto bytes = store.serialize();
+    std::string error;
+    FieldPageState restored;
+    ASSERT_TRUE(FieldPageState::parse(bytes, restored, error)) << error;
+    check(restored);
+    FieldPageState assigned;
+    ASSERT_TRUE(assigned.activate_region({7, 7}, kSeed, 0));
+    assigned = restored;
+    check(assigned);
+    EXPECT_EQ(assigned.owned_initialized_cells({7, 7}), 0u);
+    EXPECT_EQ(assigned.serialize(), bytes);
+    const auto& self = assigned;
+    assigned = self;
+    check(assigned);
+    auto copied = assigned;
+    check(copied);
+    assigned = std::move(copied);
+    check(assigned);
+    auto corrupt = bytes;
+    corrupt.back() ^= 1;
+    EXPECT_FALSE(FieldPageState::parse(corrupt, restored, error));
+    check(restored);
+    EXPECT_EQ(restored.serialize(), bytes);
+    restored.clear();
+    check(restored);
+    ASSERT_TRUE(restored.activate_region({0, 0}, kSeed, 9));
+    check(restored);
+}
+
+TEST(FieldPageStateTest, ScentColumnWalkHandlesEmptyColumnsErasureEditsLoadAndWideFallback) {
+    FieldPageState store, reference;
+    const ScentCell one{std::bit_cast<std::uint64_t>(1.0), 0, 0, 0};
+    // Empty columns' lower_bound would alias the node erased in the adjacent column.
+    ASSERT_TRUE(store.set_scent({1, 0}, one));
+    ASSERT_TRUE(reference.set_scent({1, 0}, one));
+    const auto apply = [&store, &reference](const auto& updates) {
+        for (const auto& [key, value] : updates)
+            ASSERT_TRUE(reference.set_scent(key, value));
+        ASSERT_TRUE(store.update_scent(updates));
+        EXPECT_EQ(store.serialize(), reference.serialize());
+    };
+    apply(std::vector<std::pair<ScentCellKey, ScentCell>>{
+        {{0, 0}, {}}, {{1, 0}, {}}, {{0, 1}, one}, {{1, 1}, one}});
+    ASSERT_TRUE(store.set_scent({0, 1}, {}));
+    ASSERT_TRUE(reference.set_scent({0, 1}, {}));
+    FieldPageState restored;
+    std::string error;
+    ASSERT_TRUE(FieldPageState::parse(store.serialize(), restored, error)) << error;
+    store = std::move(restored);
+    apply(std::vector<std::pair<ScentCellKey, ScentCell>>{
+        {{-2, -1}, one}, {{1, 1}, {}}, {{-2, 4}, one}, {{1, 4}, {}}});
+    apply(std::vector<std::pair<ScentCellKey, ScentCell>>{
+        {{-200, -2}, one}, {{200, -2}, one}, {{-200, 9}, {}}, {{200, 9}, one}});
 }

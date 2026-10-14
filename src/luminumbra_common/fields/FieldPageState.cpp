@@ -1,6 +1,7 @@
 #include "FieldPageState.h"
 
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <cmath>
 #include <cstddef>
@@ -479,28 +480,54 @@ bool FieldPageState::sample(int channel,
 }
 
 std::size_t FieldPageState::owned_initialized_cells(RegionKey key) const {
-    std::size_t count = 0;
-    for (const auto& [cell_x, cell_z] : cells_of_region(key)) {
-        if (initialized(cell_x, cell_z)) {
-            ++count;
+    const auto found = m_initializedRegionCounts.find(key);
+    return found == m_initializedRegionCounts.end() ? 0 : found->second;
+}
+
+void FieldPageState::rebuild_initialized_counts() {
+    std::map<RegionKey, std::size_t> counts_by_region;
+    for (const auto& [key, page] : m_pages) {
+        std::array<std::int32_t, kPageCells> xs, zs;
+        for (int i = 0; i < kPageCells; ++i) {
+            xs[i] = RegionAxisOfCell(key.x * kPageCells + i);
+            zs[i] = RegionAxisOfCell(key.z * kPageCells + i);
         }
+        std::array<std::size_t, 4> counts{};
+        for (std::size_t i = 0; i < FieldPage::kCells; ++i)
+            if (CellBit(page, i))
+                ++counts[(xs[i % kPageCells] != xs[0]) + 2 * (zs[i / kPageCells] != zs[0])];
+        for (int z = 0; z < 2; ++z)
+            for (int x = 0; x < 2; ++x)
+                if (counts[x + 2 * z])
+                    counts_by_region[{xs[0] + x, zs[0] + z}] += counts[x + 2 * z];
     }
-    return count;
+    m_initializedRegionCounts.swap(counts_by_region);
 }
 
 bool FieldPageState::activate_region(RegionKey key, std::uint64_t world_seed, std::uint64_t tick) {
+    const auto x = AxisCellRange(key.x), z = AxisCellRange(key.z);
+    const auto total = x.lo > x.hi || z.lo > z.hi
+                           ? std::size_t{0}
+                           : static_cast<std::size_t>((x.hi - x.lo + 1) * (z.hi - z.lo + 1));
+    if (owned_initialized_cells(key) == total)
+        return true;
     const CellList cells = cells_of_region(key);
     const std::size_t missing = CountMissingPages(m_pages, cells);
     if (m_pages.size() + missing > kMaxPages) {
         return false;
     }
     const std::uint64_t epoch = tick / kCadenceTicks;
+    // Allocate the owner's counter before any initialized mask can change. Page
+    // allocation may still fail partway through admission, but every seeded cell
+    // then has its count updated without another allocation.
+    auto& initialized_count = m_initializedRegionCounts.try_emplace(key, 0).first->second;
     for (const auto& [cell_x, cell_z] : cells) {
         const CellSlot slot = CellSlotOf(cell_x, cell_z);
         if (InitializedPage(m_pages, slot) != nullptr) {
             continue;
         }
         SeedCell(m_pages[slot.key], slot.index, cell_x, cell_z, world_seed, epoch);
+        ++initialized_count;
     }
     return true;
 }
@@ -534,78 +561,160 @@ FieldPageState::step_scheduled(const std::map<RegionKey, ActiveRegionRecord>& re
                             : FieldPageState{};
     const PageMap& previous =
         !previous_tick || previous_tick == this ? sealed.m_pages : previous_tick->m_pages;
-    const std::set<RegionKey> due_keys(due.begin(), due.end());
-    std::map<RegionKey, std::uint64_t> work;
-    const auto eligible = [&records](RegionKey owner) {
-        const auto found = records.find(owner);
-        return found != records.end() && found->second.state != RegionState::Frozen;
+    struct Owner {
+        bool eligible = false, due = false;
+        std::uint8_t shift = 0;
+        std::uint64_t work = 0;
     };
-    // Seed relaxation uses only the sealed old values, even when an adjacent region's
-    // interior phase differs. No consumer observes a partially updated neighbour.
+    const std::set<RegionKey> due_keys(due.begin(), due.end());
+    std::map<RegionKey, Owner> owners;
+    const auto resolve_owner = [&owners, &records, &due_keys](RegionKey key) -> Owner* {
+        const auto cached = owners.find(key);
+        if (cached != owners.end())
+            return &cached->second;
+        const auto record = records.find(key);
+        if (record == records.end())
+            return nullptr;
+        return &owners
+                    .emplace(key,
+                             Owner{record->second.state != RegionState::Frozen,
+                                   due_keys.contains(key),
+                                   record->second.cadence_shift})
+                    .first->second;
+    };
+    // A 17-cell page plus its positive neighbours spans at most two owners per
+    // axis. Resolve record/due/work destinations once per tile, not per edge.
+    struct PageOwners {
+        int split_x = kPageCells + 1, split_z = kPageCells + 1;
+        std::array<Owner*, 4> tiles{};
+        Owner* at(int x, int z) const {
+            return tiles[(x >= split_x) + 2 * (z >= split_z)];
+        }
+    };
+    const auto page_owners = [&resolve_owner](FieldPageKey key) {
+        PageOwners result;
+        const auto x0 = key.x * kPageCells, z0 = key.z * kPageCells;
+        const auto first = region_of_cell(x0, z0);
+        for (int i = 1; i <= kPageCells; ++i) {
+            if (result.split_x > kPageCells && RegionAxisOfCell(x0 + i) != first.x)
+                result.split_x = i;
+            if (result.split_z > kPageCells && RegionAxisOfCell(z0 + i) != first.z)
+                result.split_z = i;
+        }
+        for (int z = 0; z < 2; ++z)
+            for (int x = 0; x < 2; ++x) {
+                const RegionKey owner{first.x + x, first.z + z};
+                result.tiles[x + 2 * z] = resolve_owner(owner);
+            }
+        return result;
+    };
+    const auto eligible = [](const Owner* owner) {
+        return owner && owner->eligible;
+    };
+    std::array<std::uint64_t, kChannels> channel_prefix;
+    for (int channel = 0; channel < kChannels; ++channel)
+        channel_prefix[channel] =
+            Fin(Fin(world_seed + kSeedOffset) ^ static_cast<std::uint64_t>(channel));
+    const auto epoch = tick / kCadenceTicks;
+    std::vector<PageOwners> gate_cache;
+    gate_cache.reserve(previous.size());
+    // Preserve page/cell/channel order and the sealed previous values. Only
+    // integer seed prefixes independent of z and epoch are hoisted.
     for (const auto& [page_key, old_page] : previous) {
+        const auto gates = page_owners(page_key);
+        gate_cache.push_back(gates);
+        const auto live = m_pages.find(page_key);
+        auto* page = live == m_pages.end() ? nullptr : &live->second;
+        std::array<std::array<std::uint64_t, kPageCells>, kChannels> x_prefix;
+        for (int channel = 0; channel < kChannels; ++channel)
+            for (int x = 0; x < kPageCells; ++x)
+                x_prefix[channel][x] = Fin(channel_prefix[channel] ^
+                                           static_cast<std::uint32_t>(page_key.x * kPageCells + x));
         for (std::size_t i = 0; i < FieldPage::kCells; ++i) {
             if (!CellBit(old_page, i))
                 continue;
-            const auto x = page_key.x * kPageCells + static_cast<std::int32_t>(i % kPageCells);
-            const auto z = page_key.z * kPageCells + static_cast<std::int32_t>(i / kPageCells);
-            const RegionKey owner = region_of_cell(x, z);
-            if (!eligible(owner) || !due_keys.contains(owner))
+            const auto x = static_cast<int>(i % kPageCells), z = static_cast<int>(i / kPageCells);
+            auto* owner = gates.at(x, z);
+            if (!eligible(owner) || !owner->due)
                 continue;
-            FieldPage& page = m_pages.at(page_key);
-            for (int channel = 0; channel < kChannels; ++channel)
-                page.cells[channel][i] = static_cast<std::uint16_t>(
-                    ChannelValue(channel, old_page.cells[channel][i]) +
-                    ((ChannelValue(channel,
-                                   seed_value(world_seed, channel, x, z, tick / kCadenceTicks)) -
-                      ChannelValue(channel, old_page.cells[channel][i])) >>
-                     kRelaxShift));
-            ++work[owner];
+            if (!page)
+                page = &m_pages.at(page_key);
+            const auto z_bits = static_cast<std::uint32_t>(page_key.z * kPageCells + z);
+            for (int channel = 0; channel < kChannels; ++channel) {
+                const auto target = static_cast<std::uint16_t>(
+                    Fin(Fin(x_prefix[channel][x] ^ z_bits) ^ epoch) >> 48);
+                page->cells[channel][i] = RelaxToward(channel, old_page.cells[channel][i], target);
+            }
+            ++owner->work;
         }
     }
-    // Visit every undirected edge once, in page/cell order, and transfer equal/opposite
-    // integer fluxes. The 1/32 edge coefficient plus 1/16 relaxation is a bounded convex
-    // update, so all intermediate and final concentrations remain representable as u16.
+    // Positive X then positive Z, exactly as before. Page pointers and owner
+    // tiles stay valid throughout this pass; stepping inserts/erases no pages.
+    std::size_t page_index = 0;
     for (const auto& [page_key, old_page] : previous) {
+        const auto& gates = gate_cache[page_index++];
+        const auto live = m_pages.find(page_key);
+        auto* here = live == m_pages.end() ? nullptr : &live->second;
+        const FieldPage* old_neighbors[2]{};
+        FieldPage* live_neighbors[2]{};
+        const FieldPageKey neighbor_keys[] = {{page_key.x + 1, page_key.z},
+                                              {page_key.x, page_key.z + 1}};
+        for (int axis = 0; axis < 2; ++axis) {
+            const auto old = previous.find(neighbor_keys[axis]);
+            if (old != previous.end()) {
+                old_neighbors[axis] = &old->second;
+                const auto neighbor = m_pages.find(neighbor_keys[axis]);
+                live_neighbors[axis] = neighbor == m_pages.end() ? nullptr : &neighbor->second;
+            }
+        }
         for (std::size_t i = 0; i < FieldPage::kCells; ++i) {
             if (!CellBit(old_page, i))
                 continue;
-            const auto x = page_key.x * kPageCells + static_cast<std::int32_t>(i % kPageCells);
-            const auto z = page_key.z * kPageCells + static_cast<std::int32_t>(i / kPageCells);
-            const RegionKey owner = region_of_cell(x, z);
+            const auto x = static_cast<int>(i % kPageCells), z = static_cast<int>(i / kPageCells);
+            auto* owner = gates.at(x, z);
             if (!eligible(owner))
                 continue;
-            for (const auto& [dx, dz] : {std::pair{1, 0}, std::pair{0, 1}}) {
-                const CellSlot neighbour = CellSlotOf(x + dx, z + dz);
-                const auto* old_neighbour = InitializedPage(previous, neighbour);
-                const RegionKey other = region_of_cell(x + dx, z + dz);
-                if (!old_neighbour || !eligible(other))
+            for (int axis = 0; axis < 2; ++axis) {
+                const auto nx = x + (axis == 0), nz = z + (axis == 1);
+                const bool crosses_page = nx == kPageCells || nz == kPageCells;
+                const auto ni =
+                    static_cast<std::size_t>((nz % kPageCells) * kPageCells + nx % kPageCells);
+                const auto* old_neighbor = crosses_page ? old_neighbors[axis] : &old_page;
+                auto* other = gates.at(nx, nz);
+                if (!old_neighbor || !CellBit(*old_neighbor, ni) || !eligible(other))
                     continue;
                 if (owner == other) {
-                    if (!due_keys.contains(owner))
+                    if (!owner->due)
                         continue;
                 } else {
-                    const auto shift =
-                        std::max(records.at(owner).cadence_shift, records.at(other).cadence_shift);
+                    const auto shift = std::max(owner->shift, other->shift);
                     if (shift >= 63 || (tick & ((std::uint64_t{1} << shift) - 1)) != 0)
                         continue;
                 }
-                auto& here = m_pages.at(page_key);
-                auto& there = m_pages.at(neighbour.key);
+                if (!here)
+                    here = &m_pages.at(page_key);
+                if (crosses_page && !live_neighbors[axis])
+                    live_neighbors[axis] = &m_pages.at(neighbor_keys[axis]);
+                auto& there = crosses_page ? *live_neighbors[axis] : *here;
                 for (int channel = 0; channel < kChannels; ++channel) {
                     const auto difference =
-                        ChannelValue(channel, old_neighbour->cells[channel][neighbour.index]) -
+                        ChannelValue(channel, old_neighbor->cells[channel][ni]) -
                         ChannelValue(channel, old_page.cells[channel][i]);
                     const auto flux = difference / 32;
-                    here.cells[channel][i] =
-                        static_cast<std::uint16_t>(here.cells[channel][i] + flux);
-                    there.cells[channel][neighbour.index] =
-                        static_cast<std::uint16_t>(there.cells[channel][neighbour.index] - flux);
+                    here->cells[channel][i] =
+                        static_cast<std::uint16_t>(here->cells[channel][i] + flux);
+                    there.cells[channel][ni] =
+                        static_cast<std::uint16_t>(there.cells[channel][ni] - flux);
                 }
-                ++work[owner];
-                ++work[other];
+                ++owner->work;
+                ++other->work;
             }
         }
     }
+    std::map<RegionKey, std::uint64_t> work;
+    for (const auto& [key, owner] : owners)
+        if (owner.work)
+            work.emplace_hint(work.end(), key, owner.work);
     return work;
 }
 
@@ -637,6 +746,7 @@ FieldPageState::scheduled_snapshot(const std::map<RegionKey, ActiveRegionRecord>
         if (page != m_pages.end())
             snapshot.m_pages.emplace_hint(snapshot.m_pages.end(), key, page->second);
     }
+    snapshot.rebuild_initialized_counts();
     return snapshot;
 }
 
@@ -710,14 +820,51 @@ void FieldPageState::restore_foliage(FieldPageState&& snapshot) noexcept {
 }
 
 bool FieldPageState::update_scent(std::span<const std::pair<ScentCellKey, ScentCell>> updates) {
-    // Preflight the ordered admissions and allocate new nodes before touching authority.
-    // Existing concentrations (the usual dense-domain case) update without a map copy.
+    // Preflight admissions before touching authority. A near-domain batch spans
+    // at most 128 columns: walk each (x,z)-ordered column while consuming the
+    // (z,x)-ordered input. Wide/general batches retain the tree lookup fallback.
+    // Rebuild cursors on every call and again for publication; edits, erasures,
+    // load and moved domains cannot leave retained iterators behind.
+    if (updates.empty())
+        return true;
+    auto min_x = updates.front().first.x, max_x = min_x;
+    for (const auto& update : updates) {
+        min_x = std::min(min_x, update.first.x);
+        max_x = std::max(max_x, update.first.x);
+    }
+    const bool near = static_cast<std::int64_t>(max_x) - min_x < 128;
+    std::array<decltype(m_scent.begin()), 128> columns;
+    const auto reset_columns = [&] {
+        if (near)
+            for (std::int64_t x = min_x; x <= max_x; ++x) {
+                auto& cursor = columns[static_cast<std::size_t>(x - min_x)];
+                cursor =
+                    m_scent.lower_bound({static_cast<std::int32_t>(x), updates.front().first.z});
+                // Never retain a node belonging to another column: publication
+                // may erase it before this empty column is visited again.
+                if (cursor != m_scent.end() && cursor->first.x != x)
+                    cursor = m_scent.end();
+            }
+    };
+    const auto destination = [&](ScentCellKey key) {
+        if (!near)
+            return m_scent.find(key);
+        auto& cursor = columns[static_cast<std::size_t>(static_cast<std::int64_t>(key.x) - min_x)];
+        while (cursor != m_scent.end() && cursor->first.x == key.x && cursor->first.z < key.z)
+            ++cursor;
+        if (cursor != m_scent.end() && cursor->first.x != key.x)
+            cursor = m_scent.end();
+        if (cursor != m_scent.end() && cursor->first == key) {
+            const auto found = cursor;
+            ++cursor; // Must advance before publication can erase this node.
+            if (cursor != m_scent.end() && cursor->first.x != key.x)
+                cursor = m_scent.end();
+            return found;
+        }
+        return m_scent.end();
+    };
     std::map<ScentCellKey, ScentCell> admitted;
-    // Map iterators survive insertions and erasures of other (unique) keys. Retain
-    // preflight destinations so publication needs neither another lookup nor a rescan
-    // of channel words. All allocations still happen before authority changes.
-    std::vector<std::pair<decltype(m_scent.begin()), bool>> destinations;
-    destinations.reserve(updates.size());
+    reset_columns();
     std::optional<ScentCellKey> previous;
     auto size = m_scent.size();
     for (const auto& [key, values] : updates) {
@@ -725,11 +872,10 @@ bool FieldPageState::update_scent(std::span<const std::pair<ScentCellKey, ScentC
             !ValidScent(key, values))
             return false;
         previous = key;
-        const auto found = m_scent.find(key);
+        const auto found = destination(key);
         const bool exists = found != m_scent.end();
         const bool zero =
             std::all_of(values.begin(), values.end(), [](auto bits) { return bits == 0; });
-        destinations.emplace_back(found, zero);
         if (zero) {
             if (exists)
                 --size;
@@ -740,9 +886,11 @@ bool FieldPageState::update_scent(std::span<const std::pair<ScentCellKey, ScentC
             admitted.emplace(key, values);
         }
     }
-    for (std::size_t i = 0; i < updates.size(); ++i) {
-        const auto& [key, values] = updates[i];
-        const auto [found, zero] = destinations[i];
+    reset_columns();
+    for (const auto& [key, values] : updates) {
+        const auto found = destination(key);
+        const bool zero =
+            std::all_of(values.begin(), values.end(), [](auto bits) { return bits == 0; });
         if (zero) {
             if (found != m_scent.end())
                 m_scent.erase(found);
@@ -928,6 +1076,7 @@ bool FieldPageState::parse(const std::string& bytes, FieldPageState& out, std::s
         if (at != footer || !temporary.replace_weather(temporary.m_storms, temporary.m_strikes) ||
             temporary.serialize() != bytes)
             return false;
+        temporary.rebuild_initialized_counts();
         out = std::move(temporary);
         error.clear();
         return true;

@@ -4,9 +4,13 @@
 #include "../simulation/SimBudgetTelemetry.h"
 #include "IrrigationSystem.h"
 #include "SoilNutrientSystem.h"
+#include <algorithm>
+#include <array>
+#include <limits>
 #include <map>
 #include <optional>
 #include <stdexcept>
+#include <vector>
 
 namespace luminumbra::foliage {
 using ::Luminumbra::world::ActiveRegionLedger;
@@ -33,6 +37,79 @@ inline std::map<ScentCellKey, std::int32_t> FoliageCells(const FoliageFieldPages
                               page.cells[i]);
     return cells;
 }
+// A sealed, key-ordered cell snapshot with contiguous storage. Evolution never
+// inserts cells, so lower_bound replaces tree nodes without changing traversal.
+class FlatFoliageCells {
+public:
+    using Cell = std::pair<ScentCellKey, std::int32_t>;
+    static constexpr auto absent = std::numeric_limits<std::size_t>::max();
+    explicit FlatFoliageCells(const FoliageFieldPages& pages) {
+        cells.reserve(pages.pages().size() * 256);
+        for (const auto& [key, page] : pages.pages())
+            for (unsigned i = 0; i < 256; ++i)
+                if ((page.mask[i / 64] >> (i % 64)) & 1)
+                    cells.emplace_back(ScentCellKey{key.x * 16 + static_cast<int>(i % 16),
+                                                    key.z * 16 + static_cast<int>(i / 16)},
+                                       page.cells[i]);
+        std::sort(cells.begin(), cells.end(), [](const auto& a, const auto& b) {
+            return a.first < b.first;
+        });
+    }
+    auto begin() {
+        return cells.begin();
+    }
+    auto end() {
+        return cells.end();
+    }
+    auto begin() const {
+        return cells.begin();
+    }
+    auto end() const {
+        return cells.end();
+    }
+    auto find(ScentCellKey key) {
+        const auto it = std::lower_bound(
+            cells.begin(), cells.end(), key, [](const Cell& cell, ScentCellKey wanted) {
+                return cell.first < wanted;
+            });
+        return it != cells.end() && it->first == key ? it : cells.end();
+    }
+    auto find(ScentCellKey key) const {
+        const auto it = std::lower_bound(
+            cells.begin(), cells.end(), key, [](const Cell& cell, ScentCellKey wanted) {
+                return cell.first < wanted;
+            });
+        return it != cells.end() && it->first == key ? it : cells.end();
+    }
+    bool contains(ScentCellKey key) const {
+        return find(key) != end();
+    }
+    std::int32_t at(ScentCellKey key) const {
+        const auto it = find(key);
+        if (it == end())
+            throw std::out_of_range("Absent foliage cell");
+        return it->second;
+    }
+    // Positive and negative neighbours retain the original -X,+X,-Z,+Z order.
+    std::vector<std::array<std::size_t, 4>> interior_neighbors() const {
+        std::vector<std::array<std::size_t, 4>> result(cells.size());
+        for (std::size_t i = 0; i < cells.size(); ++i) {
+            const auto c = cells[i].first;
+            const auto owner = FieldPageState::region_of_scent_cell(c);
+            const ScentCellKey adjacent[] = {
+                {c.x - 1, c.z}, {c.x + 1, c.z}, {c.x, c.z - 1}, {c.x, c.z + 1}};
+            for (std::size_t n = 0; n < 4; ++n) {
+                const auto it = find(adjacent[n]);
+                result[i][n] =
+                    it != end() && FieldPageState::region_of_scent_cell(adjacent[n]) == owner
+                        ? static_cast<std::size_t>(it - begin())
+                        : absent;
+            }
+        }
+        return result;
+    }
+    std::vector<Cell> cells;
+};
 // One page per source/feeder admission. Entire one-metre page is initialized,
 // including baseline cells; activation never expands recursively from diffusion.
 // Copy-and-commit at the caller makes two-channel/ledger admission atomic.
@@ -64,8 +141,8 @@ AdvanceFoliageInteriors(entt::registry& reg,
                         const std::map<RegionKey, std::uint32_t>& windows,
                         std::optional<std::uint64_t> current_tick = {},
                         simulation::SimBudgetTelemetry::TickScope* budget = nullptr) {
-    auto soil = FoliageCells(pages.soil());
-    auto moisture = FoliageCells(pages.irrigation());
+    auto soil = FlatFoliageCells(pages.soil());
+    auto moisture = FlatFoliageCells(pages.irrigation());
     std::map<RegionKey, std::uint64_t> work;
     std::vector<entt::entity> feeders, sources;
     for (auto e : reg.view<Comp::PlantTag,
@@ -96,6 +173,8 @@ AdvanceFoliageInteriors(entt::registry& reg,
         return !current_tick || !owner || !growth || owner->region_stamp < *current_tick ||
                growth->planted_tick == *current_tick;
     };
+    const auto neighbors = moisture.interior_neighbors();
+    std::vector<std::int32_t> prior(moisture.cells.size());
     for (std::uint32_t step = 0; step < max_window; ++step) {
         if (budget)
             budget->Next(simulation::SimBudgetStage::Soil, [&soil, &due, step] {
@@ -147,18 +226,16 @@ AdvanceFoliageInteriors(entt::registry& reg,
             it->second = static_cast<std::int32_t>(
                 std::min<std::int64_t>(kMoistureMax, it->second + deposit));
         }
-        const auto prior = moisture;
-        for (const auto& [c, value] : prior)
-            if (due(c, step)) {
-                const auto owner = FieldPageState::region_of_scent_cell(c);
-                const ScentCellKey neighbors[] = {
-                    {c.x - 1, c.z}, {c.x + 1, c.z}, {c.x, c.z - 1}, {c.x, c.z + 1}};
-                for (const auto n : neighbors) {
-                    if (!prior.contains(n) || FieldPageState::region_of_scent_cell(n) != owner)
+        for (std::size_t i = 0; i < prior.size(); ++i)
+            prior[i] = moisture.cells[i].second;
+        for (std::size_t i = 0; i < prior.size(); ++i)
+            if (due(moisture.cells[i].first, step)) {
+                for (const auto n : neighbors[i]) {
+                    if (n == FlatFoliageCells::absent)
                         continue;
-                    const auto flux = value / kMoistureDiffuseShareDen;
-                    moisture[c] -= flux;
-                    moisture[n] += flux;
+                    const auto flux = prior[i] / kMoistureDiffuseShareDen;
+                    moisture.cells[i].second -= flux;
+                    moisture.cells[n].second += flux;
                 }
             }
         for (auto& [c, value] : moisture)
@@ -185,7 +262,7 @@ ExchangeFoliageBorders(FieldPageState& pages,
                        const FieldPageState& previous,
                        const std::map<RegionKey, ::Luminumbra::world::ActiveRegionRecord>& records,
                        std::uint64_t tick) {
-    const auto prior = FoliageCells(previous.irrigation());
+    const auto prior = FlatFoliageCells(previous.irrigation());
     std::map<ScentCellKey, std::int32_t> balances;
     std::map<RegionKey, std::uint64_t> work;
     for (const auto& [c, value] : prior) {

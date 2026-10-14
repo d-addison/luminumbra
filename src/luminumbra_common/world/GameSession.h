@@ -568,6 +568,8 @@ private:
     [[nodiscard]] bool ScentEdgeOpen(int x, int z, int nx, int nz) const;
     void RestoreRegionalScent();
     void CaptureRegionalScent();
+    // Capture workspace only; cleared before use and excluded from save/hash state.
+    std::vector<std::pair<ScentCellKey, ScentCell>> m_scentCaptureUpdates;
     // Ledger edit mark for a ground object's region. False when refused (fault or counted reject).
     bool MarkGroundRegionEdited(const GroundObject& object);
     std::filesystem::path m_regionDurableDirectory;

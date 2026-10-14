@@ -262,8 +262,8 @@ std::vector<WaterFace> ReserveWaterFaces(const WaterSnapshot& snapshot,
     return reserved;
 }
 
-std::unique_ptr<Chunk> StageWater(const Chunk& original, bool reuse_sources) {
-    auto copy = std::make_unique<Chunk>(original.get_coords());
+void StageWater(const Chunk& original, Chunk& workspace, bool reuse_sources) {
+    auto* copy = &workspace;
     copy->water_depth_mm = original.water_depth_mm;
     copy->water_bed_mm = original.water_bed_mm;
     copy->water_edge_flux = original.water_edge_flux;
@@ -276,6 +276,9 @@ std::unique_ptr<Chunk> StageWater(const Chunk& original, bool reuse_sources) {
     if (reuse_sources) {
         copy->water_src_mm = original.water_src_mm;
         copy->water_source_inputs = original.water_source_inputs;
+    } else {
+        copy->water_src_mm.clear();
+        copy->water_source_inputs.reset();
     }
     copy->has_water_sim.store(original.has_water_sim.load());
     copy->current_water_resolution.store(original.current_water_resolution.load());
@@ -284,7 +287,6 @@ std::unique_ptr<Chunk> StageWater(const Chunk& original, bool reuse_sources) {
     copy->max_water_delta_last_tick = original.max_water_delta_last_tick;
     copy->ticks_below_threshold = original.ticks_below_threshold;
     copy->water_mesh_dirty_ticks = original.water_mesh_dirty_ticks;
-    return copy;
 }
 
 bool WaterChanged(const Chunk& before, const Chunk& after) {
@@ -497,16 +499,23 @@ void WaterSystem::UpdateRegional(entt::registry& registry,
             executed.push_back(face);
     }
     std::sort(executed.begin(), executed.end());
-    std::map<ChunkID, std::unique_ptr<Chunk>> staged;
+    // Workspace mutation cannot publish live state, including after a refusal.
+    // Prune against this tick's validated snapshot so streaming/freeze transitions
+    // cannot retain an unbounded history of chunk buffers.
+    std::erase_if(m_regionalStaging,
+                  [&snapshot](const auto& entry) { return !snapshot.contains(entry.first); });
+    std::map<ChunkID, Chunk*> staged;
     std::map<RegionKey, world::RegionWork> work;
     const auto stage = [&](ChunkID id) -> Chunk& {
         auto found = staged.find(id);
-        if (found == staged.end())
-            found = staged
-                        .emplace(id,
-                                 StageWater(*snapshot.at(id).chunk,
-                                            selected.contains(id) && !m_finite_hydrology))
-                        .first;
+        if (found == staged.end()) {
+            auto& workspace = m_regionalStaging[id];
+            const auto& original = *snapshot.at(id).chunk;
+            if (!workspace)
+                workspace = std::make_shared<Chunk>(original.get_coords());
+            StageWater(original, *workspace, selected.contains(id) && !m_finite_hydrology);
+            found = staged.emplace(id, workspace.get()).first;
+        }
         return *found->second;
     };
     for (const auto id : selected) {

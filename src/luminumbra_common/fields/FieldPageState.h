@@ -46,6 +46,16 @@ using ScentCell = std::array<std::uint64_t, 4>; // exact finite, nonnegative bin
 
 class FieldPageState {
 public:
+    FieldPageState() = default;
+    FieldPageState(const FieldPageState&) = default;
+    FieldPageState(FieldPageState&&) noexcept = default;
+    FieldPageState& operator=(FieldPageState&&) noexcept = default;
+    FieldPageState& operator=(const FieldPageState& other) {
+        // Publish masks and their derived counts together even if copying allocates.
+        FieldPageState copy(other);
+        return *this = std::move(copy);
+    }
+
     static constexpr std::int64_t kCellMm = 24'000;
     static constexpr std::int32_t kPageCells = 16;
     static constexpr int kChannels = 5; // wind_x, wind_z, moisture, front, charge (all u16)
@@ -89,6 +99,7 @@ public:
     }
     void clear() {
         m_pages.clear();
+        m_initializedRegionCounts.clear();
         m_storms.clear();
         m_strikes.clear();
         m_scent.clear();
@@ -190,6 +201,9 @@ public:
     [[nodiscard]] std::string region_bytes(RegionKey key) const;
 
 private:
+    // Derived only from initialized masks; excluded from all serialized projections.
+    std::map<RegionKey, std::size_t> m_initializedRegionCounts;
+    void rebuild_initialized_counts();
     std::map<FieldPageKey, FieldPage> m_pages;
     std::vector<RegionalStorm> m_storms;
     std::vector<RegionalStrike> m_strikes;

@@ -2000,8 +2000,11 @@ void GameSession::AdvanceFieldPages(std::uint64_t tick) {
             continue;
         if (!m_fieldPages.activate_region(key, seed, tick))
             ++m_regionInputRejections.field_pages;
-        const auto initialized =
-            m_fieldPages.owned_initialized_cells(key) - previous.owned_initialized_cells(key);
+        const auto current_count = m_fieldPages.owned_initialized_cells(key);
+        const auto previous_count = previous.owned_initialized_cells(key);
+        if (current_count < previous_count)
+            throw std::logic_error("Field page initialization count decreased during admission");
+        const auto initialized = current_count - previous_count;
         if (initialized)
             m_regionCompletedWork.push_back(RegionWork{key, 0, 0, 0, initialized});
     }
@@ -3590,7 +3593,8 @@ void GameSession::RestoreRegionalScent() {
         }
 }
 void GameSession::CaptureRegionalScent() {
-    std::vector<std::pair<ScentCellKey, ScentCell>> changed;
+    auto& changed = m_scentCaptureUpdates;
+    changed.clear();
     std::map<RegionKey, std::uint64_t> work;
     const auto origin_x = static_cast<std::int32_t>(ScentDomainOrigin(true));
     const auto origin_z = static_cast<std::int32_t>(ScentDomainOrigin(false));
