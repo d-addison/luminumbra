@@ -36,8 +36,9 @@ whether caves are generated.
 
 Content tuning remains: base noise and shaping splines/warp, cave frequency and
 carve settings, island masks, surface breaks, cliffs, rivers, lakes and structures.
-Hydraulic/thermal relief remains opt-in through `terrain.hydro.enabled`; biome
-tables, climate frequencies and biome relief retain their controls. The
+Hydraulic/thermal relief defaults on in revision 7; explicit
+`terrain.hydro.enabled: false` disables it. Revision 6 retains historical defaults.
+Biome tables, climate frequencies and biome relief retain their controls. The
 [SDF contract](shield/sdf-contract.md) describes their sampling semantics.
 
 Failures are deliberately distinct. Recognized older versions receive the refusal
@@ -540,6 +541,21 @@ saved presets are read without rewriting their choices.
 
 The ordinary hills world is `worlds/atlas/presets/default.json`: its island mask
 is now on, alongside its already-enabled terrain features. Amplified, archipelago,
-caverns, mountains and temperate forest also enable their shipping features.
+caverns, cave-dense, mountains and temperate forest also enable their shipping
+features.
 `flat_lands` keeps its minimal identity with explicit opt-outs and structures on.
 Vulkan RHI, Steam and GNS defaults remain unchanged, as do developer diagnostics.
+
+`cave_dense.json` follows the Caverns revision-7 migration: island mask, biome
+relief and cliffs are on, and hydraulic/thermal erosion uses four iterations
+instead of eight, matching the retuned Caverns terrain. Its denser cave tuning
+is preserved: cave threshold `0.54`, surface-break density `0.55`, maximum feature
+radius `52` m. Its canonical preset identity changes from `e70158a4777ee36b`
+(frozen revision 6) to `5d081f382b2d5d0d` (shipping revision 7). The frozen copy
+has SHA-256 `5eff891c8d9f654ada480abf27b9cf9781cc86798fec60844bf28b1a7a4ae5e0`;
+the shipping copy has SHA-256
+`4b7c31ac3354db8921aea738749488525da6cb4d122a982c556a797b4ec82a1b`.
+Existing saves without an embedded preset use the frozen copy. The game
+repository's cave-dense qualification fixture and identity sidecar must select
+the intended revision: retaining the old fixture matches the frozen bytes;
+using shipping revision 7 requires updating both the fixture and its pins.

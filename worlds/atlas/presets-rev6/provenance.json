@@ -1,5 +1,14 @@
 {
-  "source_commit": "3b2c0677f45319600bf01ce564fde47489033dfd",
   "source_directory": "worlds/atlas/presets",
-  "schema_rev": 6
+  "schema_rev": 6,
+  "source_commits": {
+    "amplified.json": "3b2c0677f45319600bf01ce564fde47489033dfd",
+    "archipelago.json": "3b2c0677f45319600bf01ce564fde47489033dfd",
+    "cave_dense.json": "4591c7eb9361e12f69432cd6c133211e5ed66842",
+    "caverns.json": "3b2c0677f45319600bf01ce564fde47489033dfd",
+    "default.json": "3b2c0677f45319600bf01ce564fde47489033dfd",
+    "flat_lands.json": "3b2c0677f45319600bf01ce564fde47489033dfd",
+    "mountains.json": "3b2c0677f45319600bf01ce564fde47489033dfd",
+    "temperate_forest.json": "3b2c0677f45319600bf01ce564fde47489033dfd"
+  }
 }

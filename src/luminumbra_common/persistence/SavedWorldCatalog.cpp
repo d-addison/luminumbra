@@ -19,8 +19,9 @@ bool SafeName(const std::string& name) {
 }
 
 bool HasFrozenPreset(const std::string& name) {
-    return name == "amplified" || name == "archipelago" || name == "caverns" || name == "default" ||
-           name == "flat_lands" || name == "mountains" || name == "temperate_forest";
+    return name == "amplified" || name == "archipelago" || name == "cave_dense" ||
+           name == "caverns" || name == "default" || name == "flat_lands" || name == "mountains" ||
+           name == "temperate_forest";
 }
 } // namespace
 
@@ -90,7 +91,7 @@ InspectSavedWorld(const fs::path& root, const std::string& world_id, const std::
             return result;
         }
         const auto embedded = save / "preset.json";
-        // Only the seven changed packaged presets have frozen revision-6 copies.
+        // Changed packaged presets have frozen revision-6 copies.
         // Additional named presets retain their original resolution path.
         const auto presets = HasFrozenPreset(result.metadata.worldType)
                                  ? "worlds/atlas/presets-rev6"
@@ -104,7 +105,7 @@ InspectSavedWorld(const fs::path& root, const std::string& world_id, const std::
                 preset.errors.empty() ? "World preset is unavailable." : preset.errors.front();
             return result;
         }
-        // Within the seven-name compatibility scope, older metadata may omit an identity.
+        // Within the frozen-preset compatibility scope, older metadata may omit an identity.
         // When present, it is the FNV-1a checksum of the canonical preset JSON.
         if (HasFrozenPreset(result.metadata.worldType) && json.contains("presetIdentity")) {
             std::ifstream preset_input(result.preset_path);

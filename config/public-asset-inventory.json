@@ -1534,10 +1534,10 @@
       "source": "Luminumbra test fixtures"
     },
     {
-      "bytes": 1109,
+      "bytes": 1618,
       "license": "MIT",
       "path": "worlds/atlas/presets-rev6/README.md",
-      "sha256": "42a32a1d29ca3728927e5013b56658e4016834f6818ad50d0dc61c28f2456e0d",
+      "sha256": "f642c9a383cf1859cdf50a0f39bfa04da44082d94c584bb55f1a4fe9d801d573",
       "source": "Luminumbra authored worlds"
     },
     {
@@ -1557,7 +1557,7 @@
     {
       "bytes": 2102,
       "license": "MIT",
-      "path": "worlds/atlas/presets/cave_dense.json",
+      "path": "worlds/atlas/presets-rev6/cave_dense.json",
       "sha256": "5eff891c8d9f654ada480abf27b9cf9781cc86798fec60844bf28b1a7a4ae5e0",
       "source": "Luminumbra authored worlds"
     },
@@ -1590,17 +1590,17 @@
       "source": "Luminumbra authored worlds"
     },
     {
-      "bytes": 131,
+      "bytes": 629,
       "license": "MIT",
       "path": "worlds/atlas/presets-rev6/provenance.json",
-      "sha256": "3e4914ce9fa8baf26ab32b42d848c3f45aaf032056f7f7cccdf9b36b233896d3",
+      "sha256": "b485d8051523c7d6fe7e449db4970fd2617de6fcad6e4b86b73c42149230e1d0",
       "source": "Luminumbra authored worlds"
     },
     {
-      "bytes": 625,
+      "bytes": 714,
       "license": "MIT",
       "path": "worlds/atlas/presets-rev6/sha256.json",
-      "sha256": "5c6c9998e79797aa1ea8dd40441eb2e4d5fb3bd68c424671e8054d8dd143b2bd",
+      "sha256": "50a23b69ab5ba896caf6a8abd81899fc4315beacdbffa1b609c2e4149fe18d1c",
       "source": "Luminumbra authored worlds"
     },
     {
@@ -1622,6 +1622,13 @@
       "license": "MIT",
       "path": "worlds/atlas/presets/archipelago.json",
       "sha256": "92dcb69fd2db07acadf0a369468272fca71eb0b05f70e5b161e0487adcdfaa53",
+      "source": "Luminumbra authored worlds"
+    },
+    {
+      "bytes": 2099,
+      "license": "MIT",
+      "path": "worlds/atlas/presets/cave_dense.json",
+      "sha256": "4b7c31ac3354db8921aea738749488525da6cb4d122a982c556a797b4ec82a1b",
       "source": "Luminumbra authored worlds"
     },
     {

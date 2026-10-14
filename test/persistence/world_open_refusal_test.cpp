@@ -645,6 +645,56 @@ TEST_F(WorldOpenRefusal, NonEmbeddedAdditionalNamedPresetUsesOriginalFile) {
     }
 }
 
+TEST_F(WorldOpenRefusal, EveryFrozenPresetResolvesHistoricalBytesAndChecksIdentity) {
+    const fs::path source = LUMINUMBRA_SOURCE_ROOT;
+    const auto original_metadata = nlohmann::json::parse(Read(save / "world_info.json"));
+    ASSERT_FALSE(fs::exists(save / "preset.json"));
+    for (const char* name : {"amplified",
+                             "archipelago",
+                             "cave_dense",
+                             "caverns",
+                             "default",
+                             "flat_lands",
+                             "mountains",
+                             "temperate_forest"}) {
+        SCOPED_TRACE(name);
+        const auto filename = std::string(name) + ".json";
+        const auto historical = root / "worlds/atlas/presets-rev6" / filename;
+        fs::copy_file(source / "worlds/atlas/presets" / filename,
+                      root / "worlds/atlas/presets" / filename,
+                      fs::copy_options::overwrite_existing);
+        const auto identity =
+            Persistence::StableChecksum(nlohmann::json::parse(Read(historical)).dump());
+        if (std::string(name) == "cave_dense")
+            EXPECT_EQ(identity, "e70158a4777ee36b");
+        auto metadata = original_metadata;
+        metadata["worldType"] = name;
+        for (const auto& identity_metadata : {nlohmann::json::object(),
+                                              nlohmann::json{{"presetIdentity", identity}},
+                                              nlohmann::json{{"presetIdentity", "wrong"}}}) {
+            SCOPED_TRACE(identity_metadata.dump());
+            auto saved_metadata = metadata;
+            saved_metadata.update(identity_metadata);
+            Write(save / "world_info.json", saved_metadata.dump());
+            const auto before = DiskBytes(root);
+            const auto inspected = Persistence::InspectSavedWorld(root, "fixture");
+            EXPECT_EQ(inspected.preset_path, historical);
+            if (saved_metadata.value("presetIdentity", identity) == identity)
+                EXPECT_TRUE(inspected.error.empty()) << inspected.error;
+            else
+                EXPECT_NE(inspected.error.find("identity"), std::string::npos);
+            EXPECT_EQ(DiskBytes(root), before);
+        }
+        // Even metadata without an identity must refuse if its frozen file is absent.
+        Write(save / "world_info.json", metadata.dump());
+        ASSERT_TRUE(fs::remove(historical));
+        const auto before = DiskBytes(root);
+        const auto inspected = Persistence::InspectSavedWorld(root, "fixture");
+        ExpectMissingPresetReason(inspected.error, historical);
+        EXPECT_EQ(DiskBytes(root), before);
+    }
+}
+
 TEST_F(WorldOpenRefusal, NonEmbeddedRevisionSixHillsPreservesTerrainIdentity) {
     const fs::path source = LUMINUMBRA_SOURCE_ROOT;
     Write(save / "world_info.json",

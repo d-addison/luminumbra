@@ -139,11 +139,42 @@ TEST(TerrainPresetLoaderTest, AllShippedPresetsLoadWithoutErrorsOrWarnings) {
                              "amplified",
                              "caverns",
                              "cave_dense"}) {
+        std::ifstream input(PresetDir() / (std::string(name) + ".json"));
+        ASSERT_TRUE(input.good()) << name;
+        EXPECT_EQ(nlohmann::json::parse(input).at("schema_rev"), 7) << name;
         const TerrainPresetLoadResult result =
             LoadTerrainPreset(PresetDir() / (std::string(name) + ".json"));
         EXPECT_TRUE(result.ok) << name;
         EXPECT_TRUE(result.errors.empty()) << name << ": " << result.errors.front();
         EXPECT_TRUE(result.warnings.empty()) << name << ": " << result.warnings.front();
+    }
+}
+
+TEST(TerrainPresetLoaderTest, CaveDensePreservesDensityAcrossRevisionSixAndSeven) {
+    for (const int revision : {6, 7}) {
+        SCOPED_TRACE(revision);
+        const auto directory =
+            revision == 6 ? PresetDir().parent_path() / "presets-rev6" : PresetDir();
+        const auto result = LoadTerrainPreset(directory / "cave_dense.json");
+        ASSERT_TRUE(result.ok);
+        EXPECT_TRUE(result.errors.empty());
+        EXPECT_TRUE(result.warnings.empty());
+        const auto& params = result.params;
+        const bool on = revision == 7;
+        EXPECT_EQ(params.island_mask_enabled, on);
+        EXPECT_EQ(params.biome_relief_enabled, on);
+        EXPECT_EQ(params.cliffs_enabled, on);
+        EXPECT_EQ(params.hydro_iterations, on ? 4 : 8);
+        EXPECT_TRUE(params.hydro_enabled);
+        EXPECT_TRUE(params.biomes_enabled);
+        EXPECT_TRUE(params.caves_enabled);
+        EXPECT_TRUE(params.surface_breaks_enabled);
+        EXPECT_TRUE(params.rivers_enabled);
+        EXPECT_TRUE(params.lakes_enabled);
+        EXPECT_TRUE(params.structures_enabled);
+        EXPECT_FLOAT_EQ(params.cave_threshold, 0.54f);
+        EXPECT_FLOAT_EQ(params.surface_break_density, 0.55f);
+        EXPECT_FLOAT_EQ(params.max_feature_radius, 52.0f);
     }
 }
 
@@ -299,8 +330,7 @@ TEST(TerrainPresetLoaderTest, MissingGenerationParamsIsAnError) {
 // the SAME params/extras as the on-disk loader for identical content — proving
 // the file path simply delegates and the create-world live preview gets the same
 // world the on-disk create would. Uses a FIXED literal with a biome table so the
-// data-root-relative resolution is exercised (NOT default.json — owned by the
-// concurrent worldgen agent).
+// data-root-relative resolution is exercised independently of the shipped presets.
 TEST(TerrainPresetLoaderTest, InMemorySeamMatchesOnDiskLoad) {
     const std::string kPreset = R"({
       "name": "SeamParity",

@@ -189,6 +189,12 @@ silhouette features to the full radius, and the acceptance stations include
 deep interiors and distant mouths beyond the noise-cave cutoff, not only within
 it.
 
+Qualification must pin the cave-dense revision and identity. The packaged
+`worlds/atlas/presets/cave_dense.json` now uses revision 7; the revision-6 fixture
+is frozen in `worlds/atlas/presets-rev6/cave_dense.json`. See the
+[shipping preset identities](engine-guide.md#shipping-defaults) before comparing
+captures or synchronizing the game repository's fixture and identity sidecar.
+
 ### Edits and the far authority overlay
 
 Edits are baked into every tier on the world host inside the save path, after
