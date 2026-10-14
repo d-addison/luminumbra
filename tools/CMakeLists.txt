@@ -67,6 +67,13 @@ if(BUILD_TESTING)
     set_tests_properties(PublicTreeValidatorContract
         PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
     add_test(
+        NAME RepeatQualificationContract
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -u "${CMAKE_CURRENT_SOURCE_DIR}/qualify/test_repeat_qualification.py" -v)
+    set_tests_properties(RepeatQualificationContract
+        PROPERTIES LABELS "tools;persistence" TIMEOUT 300
+                   ENVIRONMENT "LUMINUMBRA_RQ_CONTRACT_DIAGNOSTIC_DIR=${CMAKE_BINARY_DIR}/Testing/Temporary/rq-contract-failures")
+    add_test(
         NAME PublicAssetInventory
         COMMAND "${Python3_EXECUTABLE}"
                 "${CMAKE_CURRENT_SOURCE_DIR}/ci/validate_assets.py"

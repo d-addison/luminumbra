@@ -1616,6 +1616,20 @@ target_link_libraries(hang_watchdog_test PRIVATE
     Threads::Threads
 )
 
+# Process crash capture (core/CrashReport). Runs the child crash case by re-executing
+# this binary, so it is its own executable rather than part of common_tests.
+add_executable(crash_report_test
+    common/crash_report_test.cpp
+)
+target_include_directories(crash_report_test PRIVATE
+    ../src
+    ../src/luminumbra_common
+)
+target_link_libraries(crash_report_test PRIVATE
+    gtest_main
+    luminumbra_common
+)
+luminumbra_configure_first_party_target(crash_report_test)
 # Bounded console sink: separate executable so the logging-stall cases can run
 # without the rest of common_tests. Fake outputs are stalled on purpose; the
 # tests release them before returning.
@@ -1811,6 +1825,7 @@ set(LUMINUMBRA_GTEST_TARGETS
     client_policy_test
     audio_physics_binding_test
     hang_watchdog_test
+    crash_report_test
     bounded_console_sink_test
     audio_volume_readback_test
     audio_disabled_test
