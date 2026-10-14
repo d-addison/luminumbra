@@ -18,6 +18,9 @@ Luminumbra::Server::ServerWorldRunnerConfig RunnerConfigFrom(const ServerCliOpti
     config.water_hash_trace = options.water_hash_trace;
     config.water_smoke = options.water_smoke;
     config.sim_budget = options.sim_budget;
+    if (options.sim_budget_profile && options.sim_budget_profile->region_scheduler)
+        config.region_scheduler =
+            luminumbra::simulation::ToRegionSchedulerConfig(*options.sim_budget_profile);
     return config;
 }
 

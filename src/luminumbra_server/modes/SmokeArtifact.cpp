@@ -114,7 +114,14 @@ int WriteSmokeArtifact(const ServerCliOptions& options,
         !options.sim_budget || first.sim_budget.WorkMatches(replay.sim_budget);
     if (!sim_budget_match)
         LUMINUMBRA_CORE_ERROR("Simulation budget work trace does not match replay");
-    const bool passed = sim_budget_match && deterministic &&
+    // Budget profile violations fail the smoke. Unevaluated profile entries do not. The verdict
+    // is recomputed identically by AppendSimBudgetEnforcement when the artifact is written.
+    const bool sim_budget_profile_ok =
+        !options.sim_budget_profile ||
+        EvaluateSimBudgetProfile(*options.sim_budget_profile, first.sim_budget).no_violation;
+    if (!sim_budget_profile_ok)
+        LUMINUMBRA_CORE_ERROR("Simulation budget profile violated (see sim_budget.enforcement)");
+    const bool passed = sim_budget_match && deterministic && sim_budget_profile_ok &&
                         first.ticks.ticks_executed == options.ticks &&
                         replay.ticks.ticks_executed == options.ticks && first.chunks_streamed > 0 &&
                         water_nonvacuous;
@@ -295,6 +302,12 @@ int WriteSmokeArtifact(const ServerCliOptions& options,
     }
 
     Luminumbra::Server::AppendSimBudgetArtifact(artifact, first.sim_budget, replay.sim_budget);
+    if (options.sim_budget_profile) {
+        Luminumbra::Server::AppendSimBudgetEnforcement(artifact,
+                                                       *options.sim_budget_profile,
+                                                       options.sim_budget_profile_bytes,
+                                                       first.sim_budget);
+    }
 
     if (!options.artifact_path.empty()) {
         const fs::path artifact_path(options.artifact_path);
