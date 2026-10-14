@@ -139,12 +139,15 @@ FarWorldRenderer::BindFixture(JobSystem& jobs,
     if (fixture->owned_bytes() > limits.max_fixture_bytes)
         return refusal_ = FarWorldRefusal::AdmissionFailed;
     try {
+        // The tier-table scan bound above guarantees no per-frame buffer growth.
+        static_assert(kFarTierCount * 8u * 8u <= kScratchSlots);
+        wanted_.reserve(kScratchSlots);
         memory_ = std::make_unique<FarVolumeTierMemory>(limits.budgets);
         integration_charge_.emplace(*memory_->Pool(kFarTierCount));
         // Fixed ledgers, transactional copies, ordering/wanted scratch, owner
         // objects and the immutable fixture are charged in addition to residency.
         const auto bytes = sizeof(*this) + sizeof(FarVolumeResidency) +
-                           sizeof(FarVolumeTierMemory) + kScratchSlots * sizeof(FarTileKey) +
+                           sizeof(FarVolumeTierMemory) + wanted_.capacity() * sizeof(FarTileKey) +
                            fixture->owned_bytes();
         if (!integration_charge_->TryCharge(bytes))
             throw std::bad_alloc();
@@ -186,18 +189,15 @@ FarVolumeAuthorityProducer FarWorldRenderer::Producer() const {
 FarWorldRefusal FarWorldRenderer::MakeRequests(const std::array<double, 3>& camera,
                                                std::span<const FarVolumeCoverageSpan> extensions,
                                                std::size_t& count) {
+    wanted_.clear();
     if (extensions.size() > 16 || !std::isfinite(camera[1]) ||
         std::abs(camera[1]) > kFarWantedCameraLimitMeters)
         return FarWorldRefusal::SpanRejected;
-    // The fixed tier table bounds the scan to fewer than 512 candidates. Reserve
-    // the complete charged scratch so ComputeFarWantedSet never grows its buffer.
-    std::vector<FarTileKey> wanted;
-    wanted.reserve(kScratchSlots);
-    if (ComputeFarWantedSet(camera[0], camera[2], wanted) != FarWantedError::None ||
-        wanted.size() > kScratchSlots)
+    if (ComputeFarWantedSet(camera[0], camera[2], wanted_) != FarWantedError::None ||
+        wanted_.size() > kScratchSlots)
         return FarWorldRefusal::SpanRejected;
     count = 0;
-    for (const auto& key : wanted) {
+    for (const auto& key : wanted_) {
         const auto outcome =
             ExtendLedger(key, static_cast<float>(camera[1]), extensions, requests_[count]);
         if (outcome != FarWorldRefusal::None)
