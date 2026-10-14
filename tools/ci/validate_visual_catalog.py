@@ -11,8 +11,9 @@ import hashlib
 import itertools
 import json
 import math
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
+import stat
 import statistics
 import sys
 
@@ -78,16 +79,28 @@ def sha(value: object, length: int = 64) -> bool:
 
 def local_file(root: Path, relative: str) -> Path:
     require(nonempty(relative), "artifact/source path must be nonempty")
-    path = Path(relative)
-    require(bool(path.parts) and not path.is_absolute() and ".." not in path.parts and "\\" not in relative,
+    # Catalog paths are POSIX strings on every host; a native Path would treat
+    # a slash-rooted POSIX path as drive-relative on Windows and let it through.
+    path = PurePosixPath(relative)
+    require(bool(path.parts) and not path.is_absolute() and ".." not in path.parts and "\\" not in relative
+            and ":" not in relative,
             f"path must be repository relative: {relative}")
-    require(path.parts[0] not in {"build", ".git", ".codex", ".agents"},
+    require(path.parts[0].casefold() not in {"build", ".git", ".codex", ".agents"},
             f"private/build path is not publishable evidence: {relative}")
     resolved_root = root.resolve()
     candidate = resolved_root
     for part in path.parts:
         candidate = candidate / part
-        require(not candidate.is_symlink(), f"linked evidence/source is not allowed: {relative}")
+        try:
+            info = candidate.lstat()
+        except FileNotFoundError:
+            continue
+        require(not (stat.S_ISLNK(info.st_mode) or
+                     getattr(info, "st_file_attributes", 0) &
+                     getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)),
+                f"linked evidence/source is not allowed: {relative}")
+    require(candidate.resolve().is_relative_to(resolved_root),
+            f"path must be repository relative: {relative}")
     require(candidate.is_file(), f"missing file: {relative}")
     return candidate
 

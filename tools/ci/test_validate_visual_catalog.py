@@ -8,10 +8,12 @@ import copy
 import json
 from pathlib import Path
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 import validate_visual_catalog as check
 
@@ -125,10 +127,59 @@ class CatalogTests(unittest.TestCase):
             path.unlink(missing_ok=True)
 
     def test_private_or_escaping_source_paths_are_rejected(self):
-        for path in ("../private.json", "/tmp/private.json", "build/run/receipt.json", "."):
+        for path in ("../private.json", "/tmp/private.json", "build/run/receipt.json", ".",
+                     "./C:x", "safe/C:x", "file.json:stream", ".GIT/config", "BUILD/receipt.json"):
             with self.subTest(path=path):
                 self.row("B09")["fixture"]["source_paths"] = [path]
                 self.rejected("path")
+
+    def test_drive_and_stream_paths_are_rejected_before_filesystem_access(self):
+        for path in ("C:x", "C:/file.json", "./C:x", "safe/C:x", "file.json:stream"):
+            with self.subTest(path=path), mock.patch.object(Path, "lstat") as lstat:
+                with self.assertRaisesRegex(ValueError, "path must be repository relative"):
+                    check.local_file(self.root, path)
+                lstat.assert_not_called()
+
+    def test_private_path_check_is_case_insensitive(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            root = Path(workspace)
+            for relative in (".GIT/config", "BUILD/receipt.json", ".CODEX/config", ".AGENTS/config"):
+                with self.subTest(path=relative):
+                    path = root / relative
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text("{}", encoding="utf-8")
+                    with self.assertRaisesRegex(ValueError, "private/build path"):
+                        check.local_file(root, relative)
+
+    def test_reparse_points_are_rejected_in_every_component(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            root = Path(workspace).resolve()
+            candidate = root / "safe/file.json"
+            candidate.parent.mkdir()
+            candidate.write_text("{}", encoding="utf-8")
+            original_lstat = Path.lstat
+            for redirected in (candidate.parent, candidate):
+                with self.subTest(path=redirected):
+                    def lstat(path, *args, **kwargs):
+                        if path == redirected:
+                            mode = stat.S_IFDIR if path == candidate.parent else stat.S_IFREG
+                            return mock.Mock(st_mode=mode, st_file_attributes=0x400)
+                        return original_lstat(path, *args, **kwargs)
+                    with mock.patch.object(Path, "lstat", new=lstat):
+                        with self.assertRaisesRegex(ValueError, "linked evidence"):
+                            check.local_file(root, "safe/file.json")
+
+    def test_resolved_candidate_must_remain_inside_root(self):
+        root = self.root.resolve()
+        candidate = root / check.CATALOG
+        original_resolve = Path.resolve
+        def resolve(path, *args, **kwargs):
+            if path == candidate:
+                return root.parent / "outside.json"
+            return original_resolve(path, *args, **kwargs)
+        with mock.patch.object(Path, "resolve", new=resolve):
+            with self.assertRaisesRegex(ValueError, "path must be repository relative"):
+                check.local_file(root, check.CATALOG)
 
     def test_symlink_does_not_publish_external_evidence(self):
         with tempfile.TemporaryDirectory() as outside:
