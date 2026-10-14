@@ -7,6 +7,8 @@
 // same process_completed_meshing_jobs body that stores current_lod=0, so the
 // decoupling pin below goes RED. The trailing assertions are the standing
 // regression pin: the render-mesh publish never writes sim truth.
+#include "../support/UniqueTempPath.h"
+
 #include <gtest/gtest.h>
 
 #include <chrono>
@@ -68,9 +70,8 @@ std::uint64_t HashVec(const std::vector<T>& v) {
 class HeadlessRoot {
 public:
     HeadlessRoot() {
-        const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
-        root_ = fs::temp_directory_path() /
-                ("luminumbra_promotion_decoupling_test_" + std::to_string(stamp));
+        root_ = Luminumbra::TestSupport::CreateUniqueTempDirectory(
+            "luminumbra_promotion_decoupling_test_");
         fs::create_directories(root_ / "worlds" / "atlas" / "presets");
         fs::copy_file(fs::path(LUMINUMBRA_SOURCE_ROOT) / "worlds" / "atlas" / "presets" /
                           "default.json",
@@ -198,12 +199,13 @@ TEST(PromotionSimTruthDecoupling, SimTruthPublishesIndependentlyOfRenderMesh) {
         P::WorldSaveService::region_coords_for_chunk(coords, region.x, region.z);
         target->has_collision.store(true);
         const auto mesh_version = target->mesh_version.load();
-        const auto content_digest =
-            P::WorldSaveService::region_simulation_digest({}, region, {target});
+        const auto content_digest = P::WorldSaveService::region_simulation_digest(
+            {}, region, P::RegionDigestInputs{{target}, {}});
         world->wait_for_streaming_jobs();
         EXPECT_GT(target->mesh_version.load(), mesh_version);
         EXPECT_FALSE(target->has_collision.load());
-        EXPECT_EQ(P::WorldSaveService::region_simulation_digest({}, region, {target}),
+        EXPECT_EQ(P::WorldSaveService::region_simulation_digest(
+                      {}, region, P::RegionDigestInputs{{target}, {}}),
                   content_digest);
 
         // The render half completes under the full barrier; the mesh publish must

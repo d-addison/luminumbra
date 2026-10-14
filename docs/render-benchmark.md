@@ -276,6 +276,92 @@ Committed and generated evidence has these compatibility rules:
   missing, corrupt or incompatible receipt supplies no acceptance evidence and
   must not be treated as proof of completion.
 
+## Qualification execution record
+
+`tools/perf/run_qualification.py --client <native-client> --out-dir <output>
+--build-manifest <performance-build.json>` writes
+`qualification.json` with schema `luminumbra.render_qualification.v1`.
+The output directory is held exclusively with `.qualification.lock`, created with
+`O_CREAT | O_EXCL`, from before any output/settings changes through aggregate
+publication. A held lock refuses the run and names the lock file; it is never
+automatically reclaimed. Normal returns and exceptions release the lock. After
+an abrupt termination, the operator must establish that the owner has stopped
+before removing its lock. Aggregate publication uses a sibling temporary file
+and atomic replacement. Prior aggregates and selected cells' captures, verdicts,
+retained captures and receipts are set aside as `.prev-<n>`, including for cells
+that have become unready. An unevaluated cell reports no capture or adapter.
+
+`--host-record <staged-host.json>` validates Windows OS, PowerShell and GPU driver
+identity before execution, then publishes `host.json` with the aggregate under
+the same lock. A run without this option removes any previous `host.json` under
+the lock. If aggregate publication fails, the previous host is restored. Both
+staged and previous host files must be regular files, with no symlinks, and fit
+the shared 16 MiB input cap. Staged JSON must be UTF-8 (an optional BOM is accepted)
+and contain at most 64 object/array levels; invalid inputs refuse with exit 2.
+Dry runs preserve the current pair and write supplied host evidence separately
+as `host-dryrun.json`.
+
+Cell `artifact` paths, and retained `capture_path` values in process receipts, are
+relative to the output directory, such as `cells/surface-flight.quality.3840x1600.json`.
+The private process receipt still records absolute command, cwd and client paths.
+Its `binary_sha256` identifies the launched executable. The qualification runner
+adds `client_path` and a `client` object with the actual client code's `sha256`,
+`kind`, `sha256_verified`, `native_build`, manifest hashes and refusal `reason`.
+For `.py` clients, the executable hash identifies Python and the client hash
+identifies the script. Both script and native client hashes are checked before
+and after execution; a changed or unverifiable client makes the cell fail.
+Existing client paths, including bare `.py` filenames, resolve from the caller's
+directory before the child enters its per-cell working directory.
+
+The supplied manifest uses the existing `luminumbra.performance_build.v1` schema:
+compiler (`id`, `version`, `target`), configuration (the existing build options
+and `effective_flags_sha256`), and system (`name`, `processor`). For qualification
+it must additionally contain `"client": {"sha256": "<64 lowercase hex digits>"}`,
+recorded for the final native client binary after the build. The CMake-generated
+manifest currently has no client hash, so it must be extended with that evidence
+before use here. Missing/invalid fields in a supplied manifest are input errors.
+Omitting the manifest or supplying a different executable hash permits diagnostic
+captures but prevents qualification (`build_manifest_missing` or
+`client_build_hash_mismatch`). Executable format checks reject interpreter
+scripts, even if renamed or accompanied by a matching manifest, with
+`client_not_native_build`. Batch and command files are rejected by suffix even
+when they begin with an executable signature. PE images must have a valid DOS,
+PE, optional and section header layout with an executable entry point.
+The manifest is operator-supplied build evidence;
+synthetic controls do not establish a native GPU measurement.
+
+The checker `--verdict-out` contract is the complete
+`luminumbra.render_verdict.v1` envelope returned by `render_budget.evaluate`, with
+workload kind, profile, adapter, frames, `floor`, and `target`. The checker calls
+this envelope `floor` internally; it does not write only its nested floor block.
+The runner reconciles the envelope with the capture and selected cell. A real
+checker success with a passing floor produces a passing cell, even when aggregate
+qualification prerequisites remain unmet.
+
+The child writes to a private per-invocation capture directory. The runner
+publishes and checks that capture only after the process receipt records a
+successful return, successful retention, the exact spawned capture path and a
+SHA-256 matching both the private capture and retained bytes. The published
+artifact must match those bytes. An existing public artifact without this
+ownership evidence fails the cell before the checker runs.
+
+The aggregate records `matrix.sha256`, `matrix.canonical_sha256` and
+`matrix.canonical`. These are SHA-256 hashes of UTF-8 JSON with sorted object keys
+and compact separators, covering every matrix field, including poses and their
+provenance. The canonical hash is computed from the committed repository matrix.
+A different `--matrix` path makes every cell's `matrix_canonical` false, including
+a byte-identical copy; changed content is also noncanonical. Such runs include
+`non_canonical_matrix` in `render_floor_qualified_reasons` and cannot qualify.
+
+`render_floor_qualified` additionally requires all 36 canonical cells, the
+canonical checker, matching RTX 5070 Ti adapter identities, passing capture/floor
+checks, declared display refresh and manifest-bound native clients.
+`expanded_qualified` remains false until the far-world evidence is available.
+Unqualified records retain `qualification_status: "NEEDS-NATIVE-RUN"` and explicit
+`render_floor_qualified_reasons`. The committed matrix still has unrecorded fixed
+poses and blocked traversal workloads; completing diagnostic tests cannot
+qualify it. Missing acceptance evidence is never inferred from passing tests.
+
 ## Process failure and shutdown evidence
 
 Each `test_render_runner.py` child keeps its original 180-second process deadline,

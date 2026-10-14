@@ -1,4 +1,5 @@
 #include "GlassOitPass.h"
+#include "../FarWorldReplay.h"
 
 #include "PassGlHelpers.h"
 #include "core/Log.h"
@@ -20,6 +21,8 @@ void GlassOitPass::execute_accum(const RenderContext& ctx, const GlassOitPassInp
         return;
     }
     if (!m_accum_shader) {
+        if (ctx.frozen_replay)
+            return;
         // Lazy init: shaders + the accum/reveal MRT FBO sharing the lighting depth.
         m_accum_shader = std::make_unique<Shader>(
             (input.root_path / "res/shaders/glass_oit.vert").string().c_str(),
@@ -82,6 +85,7 @@ void GlassOitPass::execute_accum(const RenderContext& ctx, const GlassOitPassInp
     }
 
     glBindFramebuffer(GL_FRAMEBUFFER, m_fbo);
+    PreserveReplayObject(ReplayObjectKind::Framebuffer, m_fbo);
     const GLenum bufs[2] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1};
     glDrawBuffers(2, bufs);
     glViewport(0, 0, ctx.internal_w(), ctx.internal_h()); // OIT composites into internal scene

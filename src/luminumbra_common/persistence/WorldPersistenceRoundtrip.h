@@ -87,6 +87,7 @@ bool ValidateWorldStreamingChunkFormatJson(const std::string& chunk_json,
 std::string ComputeWorldStreamingStateHash(const WorldStreamingState& state);
 
 // Active-region freeze identity: voxel/material and water solver contents only.
+// Caller filters incomplete live/parked inputs; durable edited records allow every lifecycle.
 // Lifecycle, collider and render bookkeeping are excluded. Legacy hashes and
 // persistence continue to use their existing projections.
 std::string ComputeRegionContentHash(const WorldStreamingState& state);
@@ -131,7 +132,7 @@ struct WorldStreamingStateSubHashes {
     // (e.g. the persistence fixtures, which never construct one).
     std::string aether;
     // the STATE-ONLY aether_state:v1: sub-hash
-    // (GameSession::ComputeAetherStateSubHash). Codex finding A: the folded
+    // (GameSession::ComputeAetherStateSubHash). The folded
     // |aether: composite embeds the tick-dependent re-derivable half, which the
     // heavy oracle recompute-and-excludes -- so the AUTHORITATIVE stateful
     // layer needs its own named slot for save/load + resim comparison (and

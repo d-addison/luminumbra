@@ -4,6 +4,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
+#include <limits>
 #include <sstream>
 
 #include "core/Environment.h"
@@ -124,9 +125,12 @@ SystemConfig SystemConfig::FromJsonString(const std::string& json_text) {
         if (!entry.is_object())
             continue;
 
-        if (entry.contains("enabled") && entry["enabled"].is_boolean() &&
-            entry["enabled"].get<bool>()) {
-            cfg.m_enabled |= (1u << static_cast<unsigned>(key_meta.key));
+        if (entry.contains("enabled") && entry["enabled"].is_boolean()) {
+            const auto bit = 1u << static_cast<unsigned>(key_meta.key);
+            if (entry["enabled"].get<bool>())
+                cfg.m_enabled |= bit;
+            else
+                cfg.m_enabled &= ~bit;
         }
 
         if (!entry.contains("params") || !entry["params"].is_object())
@@ -145,6 +149,17 @@ SystemConfig SystemConfig::FromJsonString(const std::string& json_text) {
                         value[0].get<float>(), value[1].get<float>(), value[2].get<float>());
                     cfg.m_param_set |= (1ull << static_cast<unsigned>(pm.id));
                 }
+            } else if (pm.id == SysParam::FarWorldCaveField) {
+                // An explicitly supplied value must be an exact numeric enum
+                // code. Preserve invalid types (including null) as invalid,
+                // rather than silently treating them as the absent default.
+                // Validate before float storage can round/underflow to 0 or 1.
+                const auto code = value.is_number() ? value.get<double>()
+                                                    : std::numeric_limits<double>::quiet_NaN();
+                cfg.m_params[pi].x = code == 0.0   ? 0.0f
+                                     : code == 1.0 ? 1.0f
+                                                   : std::numeric_limits<float>::quiet_NaN();
+                cfg.m_param_set |= (1ull << static_cast<unsigned>(pm.id));
             } else if (value.is_number()) {
                 cfg.m_params[pi].x = value.get<float>();
                 cfg.m_param_set |= (1ull << static_cast<unsigned>(pm.id));

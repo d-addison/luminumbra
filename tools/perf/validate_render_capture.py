@@ -54,10 +54,30 @@ def camera_basis(yaw, pitch):
     return right, up, forward
 
 
+def validate_cell(data, args):
+    """Bind a v3 capture to any expected cell parameters supplied by the caller."""
+    for name, path in (('profile', ('profile', 'name')),
+                       ('width', ('width',)), ('height', ('height',)),
+                       ('warmup_frames', ('warmup_frames',)),
+                       ('frames', ('frames',)), ('workload_kind', ('workload', 'kind'))):
+        expected = getattr(args, name, None)
+        if expected is None:
+            continue
+        option = '--' + name.replace('_', '-')
+        if data.get('schema') != render_contract.SCHEMA:
+            raise ValueError(f'{option} requires a v3 capture')
+        actual = data
+        for key in path:
+            actual = actual[key]
+        if type(actual) is not type(expected) or actual != expected:
+            raise ValueError(f'{option} mismatch: actual={actual!r}, expected={expected!r}')
+
+
 def validate(data, args):
     schema = data.get('schema')
     if schema not in ('luminumbra.render_benchmark.v2', render_contract.SCHEMA):
         raise ValueError('unsupported render capture schema')
+    validate_cell(data, args)
     if schema == 'luminumbra.render_benchmark.v2':
         missing = ['--' + name for name in ('position', 'yaw', 'pitch', 'tod')
                    if getattr(args, name, None) is None]
@@ -169,6 +189,14 @@ def main():
     parser.add_argument('--require-camera-chunk', action='store_true')
     parser.add_argument('--qualified-renderer', help='Exact GL_RENDERER required for v3 qualification')
     parser.add_argument('--qualified-vendor', help='Optional exact GL_VENDOR')
+    parser.add_argument('--profile', choices=('legacy', 'quality', 'performance'),
+                        help='Expected v3 performance profile')
+    parser.add_argument('--width', type=int, help='Expected v3 capture width')
+    parser.add_argument('--height', type=int, help='Expected v3 capture height')
+    parser.add_argument('--warmup-frames', type=int, help='Expected v3 warmup frame count')
+    parser.add_argument('--frames', type=int, help='Expected v3 measured frame count')
+    parser.add_argument('--workload-kind', choices=('fixed_view', 'traversal'),
+                        help='Expected v3 workload kind')
     parser.add_argument('--traversal', type=Path, help='Expected committed traversal script')
     parser.add_argument('--workload-manifest', type=Path, help='Expected workload fields as a JSON object')
     parser.add_argument('--enforce-floor', action='store_true',

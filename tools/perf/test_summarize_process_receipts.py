@@ -5,6 +5,7 @@ import copy
 import io
 import json
 from pathlib import Path
+import stat
 import sys
 import tempfile
 import unittest
@@ -12,6 +13,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import check_gl_debug_log as checker
 import render_runner_process as runner  # noqa: E402
 import summarize_process_receipts as summary  # noqa: E402
 
@@ -35,6 +37,8 @@ class ProcessReceiptSummaryTest(unittest.TestCase):
         data.update(fields)
         if overrides:
             data.update(overrides)
+        if data['outcome'] in ('timed_out', 'spawn_error'):
+            data.setdefault('exception_message', 'process did not return')
         folder = directory or self.root
         folder.mkdir(parents=True, exist_ok=True)
         path = folder / name
@@ -99,14 +103,14 @@ class ProcessReceiptSummaryTest(unittest.TestCase):
 
     def test_unreadable_log_exits_2_naming_the_log(self):
         self.write_timeout('run4', 'Shutdown stage: query_cleanup_started\n')
-        original = Path.read_bytes
+        original = Path.open
 
-        def read_bytes(path):
+        def open_path(path, *args, **kwargs):
             if path.suffix == '.log':
                 raise PermissionError('denied')
-            return original(path)
+            return original(path, *args, **kwargs)
 
-        with mock.patch.object(Path, 'read_bytes', read_bytes):
+        with mock.patch.object(Path, 'open', open_path):
             code, _out, err = self.run_cli([str(self.root)])
         self.assertEqual(code, 2)
         self.assertIn('run4.log', err)
@@ -184,6 +188,137 @@ class ProcessReceiptSummaryTest(unittest.TestCase):
         self.assertEqual(document['receipts'], [])
         self.assertEqual(document['counts'], {'returned': 0, 'timed_out': 0,
                                               'spawn_error': 0})
+
+    def assert_refused(self, args, diagnostic=None):
+        code, out, err = self.run_cli(args)
+        self.assertEqual(code, 2)
+        self.assertEqual(out, '')
+        self.assertNotIn('Traceback', err)
+        self.assertLessEqual(len(err), len('summarize_process_receipts: ') + 301)
+        if diagnostic:
+            self.assertIn(diagnostic, err)
+
+    def test_incomplete_receipt_refuses(self):
+        path = self.root / 'incomplete.process.json'
+        path.write_text(json.dumps(dict(schema=runner.RECEIPT_SCHEMA, outcome='returned')),
+                        encoding='utf-8')
+        self.assert_refused([str(path)], 'command')
+
+    def test_each_required_field_is_validated(self):
+        path = self.root / 'invalid.process.json'
+        for field in RECEIPT:
+            with self.subTest(missing=field):
+                data = copy.deepcopy(RECEIPT)
+                del data[field]
+                path.write_text(json.dumps(data), encoding='utf-8')
+                self.assert_refused([str(path)])
+        invalid = dict(command='client', cwd=None, binary_path=42, binary_sha256='bad',
+                       timeout_seconds=True, elapsed_seconds=float('nan'), return_code=False,
+                       capture_status=[], capture_path=42, capture_sha256='bad',
+                       evidence_errors=[42])
+        for field, value in invalid.items():
+            with self.subTest(wrong_type=field):
+                self.write_receipt(path.name, **{field: value})
+                self.assert_refused([str(path)], field)
+
+    def test_exception_fields_are_required_and_typed(self):
+        path = self.write_timeout('exception')
+        original = json.loads(path.read_text(encoding='utf-8'))
+        for field in ('exception_type', 'exception_message'):
+            for missing in (True, False):
+                with self.subTest(field=field, missing=missing):
+                    data = copy.deepcopy(original)
+                    if missing:
+                        del data[field]
+                    else:
+                        data[field] = 42
+                    path.write_text(json.dumps(data), encoding='utf-8')
+                    self.assert_refused([str(path)], field)
+
+    def test_oversize_receipt_and_log_refuse(self):
+        path = self.write_timeout('oversize')
+        log = path.with_name('oversize.log')
+        for target in (log, path):
+            with self.subTest(target=target.name):
+                with target.open('wb') as output:
+                    output.truncate(checker.MAX_FILE_BYTES + 1)
+                self.assert_refused([str(path)], 'byte cap')
+
+    def test_receipt_and_discovery_counts_are_capped(self):
+        for number in range(3):
+            self.write_receipt(f'run{number}.process.json')
+        with mock.patch.object(summary, 'MAX_RECEIPTS', 2):
+            self.assert_refused([str(self.root)], 'receipt cap')
+        with mock.patch.object(summary, 'MAX_DISCOVERY_ENTRIES', 2):
+            self.assert_refused([str(self.root)], 'discovery entry cap')
+
+    def test_log_line_count_and_length_are_capped(self):
+        path = self.write_timeout('many', 'noise\n' * 3)
+        with mock.patch.object(summary, 'MAX_RECORDS', 2):
+            self.assert_refused([str(path)], 'line cap')
+        path.with_name('many.log').write_text('x' * (checker.MAX_LINE_CHARS + 1),
+                                            encoding='utf-8')
+        self.assert_refused([str(path)], 'character cap')
+
+    def test_invalid_utf8_and_utf16_log_refuse(self):
+        path = self.write_timeout('corrupt')
+        for payload in (b'Shutdown stage: world_save_started\n\xff', b'\xff\xfeA'):
+            with self.subTest(payload=payload):
+                path.with_name('corrupt.log').write_bytes(payload)
+                self.assert_refused([str(path)], 'text')
+
+    def test_bad_log_suffix_refuses(self):
+        path = self.write_timeout('suffix')
+        for suffix in ('/bad', 'nested/bad', 'nested\\bad', 'C:\\bad', 'bad\x00', ''):
+            with self.subTest(suffix=suffix):
+                self.assert_refused([str(path), '--log-suffix', suffix], '--log-suffix')
+
+    def test_nul_path_refuses(self):
+        self.assert_refused(['bad\x00.process.json'], 'NUL')
+
+    def test_symlinked_receipt_refuses_explicit_and_directory_input(self):
+        outside = self.root / 'outside'
+        receipt = self.write_receipt('target.process.json', directory=outside)
+        evidence = (self.root / 'evidence').resolve()
+        evidence.mkdir()
+        link = evidence / 'link.process.json'
+        link.write_bytes(receipt.read_bytes())  # Discoverable without symlink privileges.
+        original_lstat = Path.lstat
+
+        def lstat(path, *args, **kwargs):
+            if Path(path) == link:
+                return mock.Mock(st_mode=stat.S_IFLNK | 0o777)
+            return original_lstat(path, *args, **kwargs)
+
+        with mock.patch.object(Path, 'lstat', lstat):
+            for item in (link, evidence):
+                with self.subTest(item=item):
+                    self.assert_refused([str(item)], 'symlink')
+
+    def test_symlinked_log_and_dangling_log_refuse(self):
+        path = self.write_timeout('linked')
+        target = self.root / 'outside.log'
+        target.write_text('Shutdown stage: world_save_started\n', encoding='utf-8')
+        log = path.with_name('linked.log').resolve()
+        original_lstat = Path.lstat
+
+        def lstat(candidate, *args, **kwargs):
+            if Path(candidate) == log:
+                return mock.Mock(st_mode=stat.S_IFLNK | 0o777)
+            return original_lstat(candidate, *args, **kwargs)
+
+        with mock.patch.object(Path, 'lstat', lstat):
+            self.assert_refused([str(path)], 'symlink')
+            target.unlink()
+            self.assert_refused([str(path)], 'symlink')
+
+    def test_diagnostic_excerpts_are_bounded(self):
+        path = self.write_receipt('long.process.json', outcome='spawn_error', return_code=None,
+                                  exception_type='E' * 1000, binary_path='x' * 1000)
+        entry = self.document([str(path)])['receipts'][0]
+        self.assertEqual(len(entry['exception_type']), summary.MAX_EXCERPT_CHARS)
+        self.assertEqual(len(entry['binary_path']), summary.MAX_EXCERPT_CHARS)
+
 
 
 if __name__ == '__main__':

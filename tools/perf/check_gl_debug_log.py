@@ -8,14 +8,20 @@ must have been installed: a missing install marker, or a 'LUMIN_GL_DEBUG set but
 (debug output not installed), makes the verdict unevaluated. Absence of evidence is
 never a pass.
 
-Exit codes: 0 pass, 1 fail (GL error lines present), 2 invalid input, 3 unevaluated.
+Exit codes: 0 pass, 1 fail (GL errors or malformed records), 2 invalid input,
+3 unevaluated. Each file is limited to 16 MiB; logs to 100,000 lines/records and
+65,536 characters per line. Over-limit or invalid text/path input exits 2.
+Only the first 20 error excerpts (300 characters each) are retained.
 With --artifact, the file must be a JSON object with schema
 luminumbra.render_benchmark.v3; it is validated only and does not change the verdict.
 """
 import argparse
 import codecs
+import io
 import json
+import os
 import re
+import stat
 import sys
 from pathlib import Path
 
@@ -23,7 +29,10 @@ SCHEMA = 'luminumbra.gl_debug_verdict.v1'
 ARTIFACT_SCHEMA = 'luminumbra.render_benchmark.v3'
 INSTALL_MARKER = 'GL KHR_debug output installed (synchronous'
 NOT_INSTALLED = 'LUMIN_GL_DEBUG set but'
-MESSAGE = re.compile(r'\[GL\]\[([^\]]*)\]\[([^\]]*)\]\[([^\]]*)\]')
+MESSAGE = re.compile(r'\[GL\]\[([^\[\]\r\n]+)\]\[([^\[\]\r\n]+)\]\[([^\[\]\r\n]+)\] id=\d+ ')
+MAX_FILE_BYTES = 16 * 1024 * 1024
+MAX_RECORDS = 100_000
+MAX_LINE_CHARS = 65_536
 MAX_ERRORS = 20
 MAX_ERROR_CHARS = 300
 PASS = 'pass'
@@ -36,31 +45,77 @@ class InputError(Exception):
     """Unreadable or invalid input; reported on stderr with exit code 2."""
 
 
-def decode_text(payload):
-    """Decode log bytes; UTF-16 when BOM-marked, NUL characters removed."""
-    if payload[:2] in (codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE):
-        text = payload.decode('utf-16', errors='replace')
-    else:
-        text = payload.decode('utf-8', errors='replace')
-    return text.replace('\x00', '')
+def open_input(path):
+    """Open a regular file with a byte cap; reject malformed path arguments."""
+    try:
+        candidate = Path(path)
+        if not stat.S_ISREG(candidate.stat().st_mode):
+            raise InputError(f'input is not a regular file: {path}')
+        source = candidate.open('rb')
+        try:
+            info = os.fstat(source.fileno())
+            if not stat.S_ISREG(info.st_mode):
+                raise InputError(f'input is not a regular file: {path}')
+            if info.st_size > MAX_FILE_BYTES:
+                raise InputError(f'input exceeds {MAX_FILE_BYTES} byte cap: {path}')
+        except (OSError, InputError):
+            source.close()
+            raise
+        return source
+    except (OSError, ValueError) as error:
+        raise InputError(f'input unreadable: {path}: {str(error)[:MAX_ERROR_CHARS]}') from error
+
+
+def bounded_bytes(path):
+    """JSON must fit the byte cap, including a file that grows after opening."""
+    try:
+        with open_input(path) as source:
+            payload = source.read(MAX_FILE_BYTES + 1)
+    except OSError as error:
+        raise InputError(f'input unreadable: {path}: {str(error)[:MAX_ERROR_CHARS]}') from error
+    if len(payload) > MAX_FILE_BYTES:
+        raise InputError(f'input exceeds {MAX_FILE_BYTES} byte cap: {path}')
+    return payload
 
 
 def read_log(path):
+    """Stream strictly decoded UTF-8 or BOM-marked UTF-16, with bounded lines."""
     try:
-        payload = Path(path).read_bytes()
-    except OSError as error:
-        raise InputError(f'log unreadable: {error}') from error
-    text = decode_text(payload)
-    if '\ufffd' in text:
-        raise InputError(f'log is not valid text: {path}')
-    return text
+        with open_input(path) as source:
+            prefix = source.read(2)
+            encoding = ('utf-16' if prefix in (codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)
+                        else 'utf-8')
+            decoder = codecs.getincrementaldecoder(encoding)(errors='strict')
+            pending = ''
+            total = 0
+            block = prefix
+            while True:
+                total += len(block)
+                if total > MAX_FILE_BYTES:
+                    raise InputError(f'input exceeds {MAX_FILE_BYTES} byte cap: {path}')
+                pending += decoder.decode(block, final=not block)
+                while '\n' in pending:
+                    line, pending = pending.split('\n', 1)
+                    if len(line) > MAX_LINE_CHARS:
+                        raise InputError(f'log line exceeds {MAX_LINE_CHARS} character cap: {path}')
+                    if '\x00' in line:
+                        raise InputError(f'log contains NUL: {path}')
+                    yield line.rstrip('\r')
+                if len(pending) > MAX_LINE_CHARS:
+                    raise InputError(f'log line exceeds {MAX_LINE_CHARS} character cap: {path}')
+                if not block:
+                    if '\x00' in pending:
+                        raise InputError(f'log contains NUL: {path}')
+                    if pending:
+                        yield pending
+                    break
+                block = source.read(64 * 1024)
+    except (OSError, ValueError, UnicodeError) as error:
+        raise InputError(f'log is not valid readable text: {path}: {str(error)[:MAX_ERROR_CHARS]}') from error
 
 
 def check_artifact(path):
-    try:
-        payload = Path(path).read_bytes()
-    except OSError as error:
-        raise InputError(f'artifact unreadable: {error}') from error
+    payload = bounded_bytes(path)
     try:
         data = json.loads(payload)
     except (ValueError, UnicodeError, RecursionError) as error:
@@ -69,32 +124,49 @@ def check_artifact(path):
         raise InputError(f'artifact schema is not {ARTIFACT_SCHEMA}: {path}')
 
 
-def evaluate(text):
-    installed = INSTALL_MARKER in text and NOT_INSTALLED not in text
+def evaluate(lines):
+    # String callers are supported without materializing splitlines().
+    if isinstance(lines, str):
+        lines = io.StringIO(lines)
+    installed = False
+    not_installed = False
     errors = []
-    warning_count = 0
-    notification_count = 0
-    for line in text.splitlines():
-        match = MESSAGE.search(line)
-        if match is None:
-            continue
-        _, kind, severity = match.groups()
-        if kind == 'Error' or severity == 'HIGH':
-            errors.append(line.rstrip())
-        elif severity == 'NOTIFICATION':
-            notification_count += 1
-        else:
-            warning_count += 1
-    if not installed:
+    error_count = malformed_count = record_count = 0
+    warning_count = notification_count = 0
+    for line_number, line in enumerate(lines, 1):
+        if line_number > MAX_RECORDS:
+            raise InputError(f'log exceeds {MAX_RECORDS} line/record cap')
+        installed |= INSTALL_MARKER in line
+        not_installed |= NOT_INSTALLED in line
+        for marker in re.finditer(r'\[GL(?=\]|\[|$)', line):
+            record_count += 1
+            if record_count > MAX_RECORDS:
+                raise InputError(f'log exceeds {MAX_RECORDS} record cap')
+            match = MESSAGE.match(line, marker.start())
+            malformed = match is None
+            if malformed:
+                malformed_count += 1
+            if malformed or match.group(2) == 'Error' or match.group(3) == 'HIGH':
+                error_count += 1
+                if len(errors) < MAX_ERRORS:
+                    errors.append(line[:MAX_ERROR_CHARS].rstrip())
+            elif match.group(3) == 'NOTIFICATION':
+                notification_count += 1
+            else:
+                warning_count += 1
+    installed &= not not_installed
+    if malformed_count:
+        verdict = FAIL
+    elif not installed:
         verdict = UNEVALUATED
-    elif errors:
+    elif error_count:
         verdict = FAIL
     else:
         verdict = PASS
     return dict(schema=SCHEMA, verdict=verdict, installed=installed,
-                error_count=len(errors), warning_count=warning_count,
-                notification_count=notification_count,
-                errors=[line[:MAX_ERROR_CHARS] for line in errors[:MAX_ERRORS]])
+                error_count=error_count, malformed_count=malformed_count,
+                warning_count=warning_count, notification_count=notification_count,
+                errors=errors)
 
 
 def build_parser():
@@ -116,7 +188,7 @@ def main(argv=None):
             check_artifact(args.artifact)
         result = evaluate(read_log(args.log))
     except InputError as error:
-        print(f'check_gl_debug_log: {error}', file=sys.stderr)
+        print(f'check_gl_debug_log: {str(error)[:MAX_ERROR_CHARS]}', file=sys.stderr)
         return 2
     print(json.dumps(result, indent=2))
     return EXIT_CODES[result['verdict']]

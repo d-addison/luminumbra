@@ -2,13 +2,15 @@
 """Parametrised client-process runner for render benchmark captures.
 
 Copy of the _file_sha256, _atomic_write, _retain_process_evidence and _run_process
-helpers from test_render_runner.py, with the timeout passed in and recorded in the
-receipt. test_render_runner.py keeps its own copy with its fixed 180 s contract limit
-so its evidence tests stay unchanged; keep the two in step by hand.
+helpers and timeout diagnostics from test_render_runner.py, with the timeout
+passed in and recorded in the receipt. test_render_runner.py keeps its own copy
+with its fixed 180 s contract limit so its evidence tests stay unchanged;
+keep the two in step by hand.
 """
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -79,6 +81,44 @@ def retain_process_evidence(receipt, artifact, retained, receipt_path):
     return errors
 
 
+TIMEOUT_LOG_TAIL_BYTES = 8 * 1024
+SURFACE_READY_PHASE = re.compile(r'EnsureSurfaceReadyNear[:/]')
+
+
+def report_timeout(receipt, log):
+    truncated = False
+    try:
+        with log.open('rb') as source:
+            source.seek(0, os.SEEK_END)
+            offset = max(0, source.tell() - TIMEOUT_LOG_TAIL_BYTES)
+            truncated = offset > 0
+            source.seek(offset)
+            payload = source.read(TIMEOUT_LOG_TAIL_BYTES)
+    except OSError as error:
+        payload = b''
+        receipt['evidence_errors'].append(f'timeout log read: {error}')
+    tail = payload.decode('utf-8', errors='replace')
+    # Phase discovery is limited to the retained raw-byte window. Its first
+    # line may be a fragment, so it cannot establish a complete phase record.
+    complete_lines = tail.splitlines(keepends=True)
+    if truncated:
+        complete_lines = complete_lines[1:]
+    complete_lines = [line for line in complete_lines if line.endswith('\n')]
+    phases = [line for line in complete_lines
+              if SURFACE_READY_PHASE.search(line)]
+    last_phase = phases[-1].strip() if phases else None
+    receipt.update(log_tail=tail, last_observed_phase=last_phase)
+    # Diagnostics are best effort: a closed or failing stderr must not replace
+    # the TimeoutExpired or prevent receipt retention.
+    try:
+        print(f"render runner: timed out after {receipt['timeout_seconds']} s", file=sys.stderr)
+        print(tail, file=sys.stderr)
+        print('last EnsureSurfaceReadyNear phase: ' + (last_phase or '(none observed)'),
+              file=sys.stderr)
+    except (OSError, ValueError):
+        pass
+
+
 def resolve_executable(program, cwd, environment=None):
     """Return the absolute executable that a spawn of `program` would run.
 
@@ -142,7 +182,11 @@ def run_process(command, *, cwd, environment, log, artifact, retained, receipt_p
         receipt.update(outcome='timed_out' if isinstance(error, subprocess.TimeoutExpired)
                        else receipt['outcome'], exception_type=type(error).__name__,
                        exception_message=str(error))
-        retain_process_evidence(receipt, artifact, retained, receipt_path)
+        try:
+            if isinstance(error, subprocess.TimeoutExpired):
+                report_timeout(receipt, log)
+        finally:
+            retain_process_evidence(receipt, artifact, retained, receipt_path)
         raise
     errors = retain_process_evidence(receipt, artifact, retained, receipt_path)
     return result, errors

@@ -66,6 +66,26 @@ class RenderContractTests(unittest.TestCase):
     def test_valid_capture(self):
         self.assertEqual(capture.validate(artifact(), args())['verdict'], 'PASS')
 
+    def test_expected_cell_parameters_match(self):
+        expected = args(profile='quality', width=1280, height=720, warmup_frames=2,
+                        frames=4, workload_kind='fixed_view')
+        self.assertEqual(capture.validate(artifact(), expected)['verdict'], 'PASS')
+
+    def test_expected_cell_parameter_mismatches(self):
+        for name, value in (('profile', 'performance'), ('width', 3440), ('height', 1440),
+                            ('warmup_frames', 400), ('frames', 240),
+                            ('workload_kind', 'traversal')):
+            with self.subTest(name=name), self.assertRaisesRegex(
+                    ValueError, '--' + name.replace('_', '-') + ' mismatch'):
+                capture.validate(artifact(), args(**{name: value}))
+
+    def test_expected_cell_parameters_require_v3(self):
+        for name, value in (('profile', 'quality'), ('width', 1280), ('height', 720),
+                            ('warmup_frames', 2), ('frames', 4),
+                            ('workload_kind', 'fixed_view')):
+            with self.subTest(name=name), self.assertRaisesRegex(ValueError, 'requires a v3 capture'):
+                capture.validate({'schema': 'luminumbra.render_benchmark.v2'}, args(**{name: value}))
+
     def test_whole_frame_brackets_pass_sum(self):
         data = artifact()
         data['frame_samples'][0]['gpu_frame_ms'] = 1.0

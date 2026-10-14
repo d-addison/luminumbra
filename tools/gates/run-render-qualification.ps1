@@ -15,19 +15,32 @@
   Exit code 2 names them. The wrapper exports nothing that changes render state: it only
   reads the environment and passes its own arguments to the Python runner.
 
-  Before the run it writes <OutDir>\host.json with the OS version, the GPU names and driver
-  versions (Win32_VideoController), and the PowerShell version. The run then executes
+  Before the run it stages host evidence in a temporary file with the OS version, GPU
+  names and driver versions (Win32_VideoController), and PowerShell version. The runner
+  validates and atomically publishes it as <OutDir>\host.json under its qualification
+  lock whenever it publishes qualification.json, including failed or unevaluated runs.
+  Preflight refusals and locked runs preserve the previous evidence pair. The run executes
   "python tools/perf/run_qualification.py --client <Exe> --out-dir <OutDir>
-  --timeout-seconds <N>", plus --declare-refresh and --only for each entry given, and
-  --dry-run when -DryRun is set. The Python exit code is propagated.
+  --timeout-seconds <N> --host-record <StagedHost>", plus --build-manifest when -BuildManifest is supplied,
+  --declare-refresh and --only for each entry given, and --dry-run when -DryRun is set.
+  The Python exit code is propagated.
 
   The qualification is judged only by qualification.json (render_floor_qualified). The
   process exit code and the host record are not a qualification verdict.
 
-  Relative -Exe and -OutDir paths are resolved against the repository root.
+  Relative -Exe, -Package, -BuildManifest and -OutDir paths are resolved against the repository root.
 
 .PARAMETER Exe
   Release client executable. Default: build/release/bin/luminumbra_client_app.exe
+
+.PARAMETER Package
+  QA package directory. Resolves its luminumbra_client_qa_app.exe, matching the v0.3
+  acceptance caller. Cannot be combined with an explicitly supplied -Exe.
+
+.PARAMETER BuildManifest
+  Path to luminumbra.performance_build.v1 JSON with compiler/configuration/system
+  identity and client.sha256 (lowercase SHA-256 of this executable). Required for
+  native qualification; the Python runner validates the full manifest contract.
 
 .PARAMETER OutDir
   Directory receiving cells/, work/, host.json and qualification.json. Required.
@@ -46,11 +59,13 @@
 
 .EXAMPLE
   pwsh tools/gates/run-render-qualification.ps1 -OutDir build/qualification-native `
-    -DeclareRefresh '3840x1600=165','3440x1440=144'
+    -BuildManifest build/release/performance-build.json -DeclareRefresh '3440x1440=144'
 #>
 [CmdletBinding()]
 param(
     [string]$Exe = "build/release/bin/luminumbra_client_app.exe",
+    [string]$Package,
+    [string]$BuildManifest,
     [Parameter(Mandatory = $true)]
     [string]$OutDir,
     [string[]]$DeclareRefresh = @(),
@@ -86,16 +101,24 @@ function Resolve-RepoPath([string]$Path) {
     return [System.IO.Path]::GetFullPath((Join-Path $repo $Path))
 }
 
-$exePath = Resolve-RepoPath $Exe
+if ($PSBoundParameters.ContainsKey('Package')) {
+    if ($PSBoundParameters.ContainsKey('Exe')) {
+        Write-Host "[render-qualification] use either -Package or -Exe"
+        exit 2
+    }
+    $exePath = Join-Path (Resolve-RepoPath $Package) "luminumbra_client_qa_app.exe"
+} else {
+    $exePath = Resolve-RepoPath $Exe
+}
 $outPath = Resolve-RepoPath $OutDir
-if (-not $DryRun -and -not (Test-Path $exePath)) {
+if (-not $DryRun -and -not (Test-Path -LiteralPath $exePath -PathType Leaf)) {
     Write-Host "[render-qualification] client exe not found at '$exePath' - build it first"
     exit 2
 }
 
 New-Item -ItemType Directory -Force -Path $outPath | Out-Null
 
-# Host record first, so a failed run still says what machine produced it.
+# Stage host evidence without modifying a previous accepted run.
 $os = Get-CimInstance Win32_OperatingSystem
 $gpus = @(Get-CimInstance Win32_VideoController | Select-Object Name, DriverVersion)
 $host_record = [ordered]@{
@@ -104,25 +127,32 @@ $host_record = [ordered]@{
     gpus            = $gpus
     powershell      = $PSVersionTable.PSVersion.ToString()
 }
-# A dry run collects no evidence, so it must not rewrite the record of a previous real run.
-$hostName = if ($DryRun) { "host-dryrun.json" } else { "host.json" }
-$hostPath = Join-Path $outPath $hostName
-$host_record | ConvertTo-Json -Depth 5 | Set-Content -Path $hostPath -Encoding UTF8
-Write-Host "[render-qualification] host record -> $hostPath"
+$hostTemporary = Join-Path $outPath (".host-" + [System.Guid]::NewGuid().ToString() + ".tmp")
 
 $argv = @(
     "tools/perf/run_qualification.py",
     "--client", $exePath,
     "--out-dir", $outPath,
-    "--timeout-seconds", [string]$TimeoutSeconds
+    "--timeout-seconds", [string]$TimeoutSeconds,
+    "--host-record", $hostTemporary
 )
+if ($PSBoundParameters.ContainsKey('BuildManifest')) {
+    $argv += @("--build-manifest", (Resolve-RepoPath $BuildManifest))
+}
 foreach ($entry in $DeclareRefresh) { $argv += @("--declare-refresh", $entry) }
 foreach ($cell in $Only) { $argv += @("--only", $cell) }
 if ($DryRun) { $argv += "--dry-run" }
 
-Write-Host "[render-qualification] python $($argv -join ' ')"
-& python @argv
-$code = $LASTEXITCODE
+try {
+    $host_record | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $hostTemporary -Encoding UTF8
+    Write-Host "[render-qualification] python $($argv -join ' ')"
+    & python @argv
+    $code = $LASTEXITCODE
+} finally {
+    if (Test-Path -LiteralPath $hostTemporary) {
+        Remove-Item -LiteralPath $hostTemporary -Force
+    }
+}
 
 if ($DryRun) {
     Write-Host "[render-qualification] dry run: plan only, see qualification-plan.json in $outPath"

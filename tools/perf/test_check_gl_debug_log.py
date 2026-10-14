@@ -8,6 +8,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -148,6 +149,73 @@ class GlDebugLogTest(unittest.TestCase):
         self.assertEqual(document['error_count'], 25)
         self.assertEqual(len(document['errors']), 20)
         self.assertTrue(all(len(line) <= 300 for line in document['errors']))
+
+    def test_truncated_or_malformed_record_fails(self):
+        for record in ('[GL][API][Error][HIGH', '[GL][API][Other][LOW]',
+                       '[GL][API][Other][LOW] id=oops message',
+                       '[GL][API][Other][LOW] id=123', '[GL]garbled', '[GL',
+                       '[GL[API][Other][LOW] id=123 message'):
+            with self.subTest(record=record):
+                code, document = self.verdict(MARKER + record)
+                self.assertEqual(code, 1)
+                self.assertEqual(document['verdict'], 'fail')
+                self.assertEqual(document['malformed_count'], 1)
+                self.assertEqual(document['error_count'], 1)
+
+    def test_malformed_record_fails_even_without_install_marker(self):
+        code, document = self.verdict('[GL][API][Error][HIGH')
+        self.assertEqual(code, 1)
+        self.assertEqual(document['verdict'], 'fail')
+
+    def test_oversize_log_and_artifact_refuse(self):
+        log = self.write_log(MARKER)
+        large = self.root / 'oversize'
+        with large.open('wb') as output:
+            output.truncate(checker.MAX_FILE_BYTES + 1)
+        for args in (['--log', str(large)],
+                     ['--log', str(log), '--artifact', str(large)]):
+            with self.subTest(args=args):
+                code, out, err = self.run_cli(args)
+                self.assertEqual(code, 2)
+                self.assertEqual(out, '')
+                self.assertIn('byte cap', err)
+
+    def test_line_and_record_count_caps_refuse(self):
+        with mock.patch.object(checker, 'MAX_RECORDS', 2):
+            for text in (MARKER + INFO * 2, MARKER + INFO.rstrip() * 3):
+                with self.subTest(text=text):
+                    code, document = self.verdict(text)
+                    self.assertEqual(code, 2)
+                    self.assertIsNone(document)
+
+    def test_overlong_line_refuses(self):
+        code, document = self.verdict(MARKER + 'x' * (checker.MAX_LINE_CHARS + 1))
+        self.assertEqual(code, 2)
+        self.assertIsNone(document)
+
+    def test_invalid_utf8_and_utf16_refuse(self):
+        for payload in (MARKER.encode() + b'\xff', b'\xff\xfeA'):
+            with self.subTest(payload=payload):
+                log = self.root / 'invalid.log'
+                log.write_bytes(payload)
+                code, out, err = self.run_cli(['--log', str(log)])
+                self.assertEqual(code, 2)
+                self.assertEqual(out, '')
+                self.assertIn('text', err)
+
+    def test_nul_path_refuses_without_traceback(self):
+        for option in ('--log', '--artifact'):
+            args = ['--log', str(self.write_log(MARKER))]
+            if option == '--log':
+                args = ['--log', 'bad\x00.log']
+            else:
+                args += ['--artifact', 'bad\x00.json']
+            with self.subTest(option=option):
+                code, out, err = self.run_cli(args)
+                self.assertEqual(code, 2)
+                self.assertEqual(out, '')
+                self.assertNotIn('Traceback', err)
+
 
 
 if __name__ == '__main__':
