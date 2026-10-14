@@ -54,14 +54,30 @@ actions, with no paid cache service.
 
 All Actions caches, including performance, clang-tidy results, and MSYS2 packages,
 are saved only on `push` events to `refs/heads/main` or `refs/heads/devel`; PRs,
-scheduled runs, and manual dispatches never save caches. After CI, AddressSanitizer
-or Performance observations completes, `cache-cleanup.yml` retains the newest
-cache per branch and lane across configuration changes and SHA keys. It also
+scheduled runs, and manual dispatches never save caches. `cache-cleanup.yml` runs
+on trusted maintainer pushes to devel/main, activating retention as soon as the
+workflow lands on devel. Once installed on the default branch (main), it also runs
+after pushed CI, AddressSanitizer or Performance observations completes. All
+cleanup runs share one concurrency group and never cancel an active cleanup.
+It retains the newest generation by creation time per branch and lane across
+configuration changes and SHA keys, protecting both live branch heads' keys and
+the triggering SHA (`github.sha` for push, `workflow_run.head_sha` for workflow_run)
+even when cleanup is delayed until the branch advances. The named `RECENCY_GRACE`
+constant in `cache-cleanup.yml` is six hours: caches whose creation or last access
+(whichever is later) falls within that window are never deleted, preserving caches
+for queued reruns and in-flight runs, including concurrent saves. It also
 limits total repository cache storage, including package and other caches, to
 6 GB, leaving room below GitHub's 10 GB cap for saves in progress. GitHub also
 evicts old keys, but routine cleanup prevents relying on eviction at the cap.
-Cleanup uses trusted inline workflow code with no checkout. When a PR closes,
-it deletes caches scoped to that PR's `refs/pull/<n>/merge` ref.
+Cleanup uses trusted inline workflow code with no checkout or PR triggers;
+`contents: read` applies throughout and only the deletion job gets `actions: write`.
+It rechecks branch heads before deletion and deletes by cache ID so concurrent
+replacements of the same key survive. Saves in progress can temporarily add
+storage until the next cleanup; protected and grace-window caches are never deleted
+to make room. If those caches alone exceed 6 GB, cleanup warns with their size and
+budget, skips deletion, and exits successfully. Cleanup is best-effort:
+API/auth deletion errors warn and do not fail the run; malformed input is logged
+clearly and remaining cleanup is skipped.
 
 Pull requests first classify changed paths with a merge-base diff of the base and
 head SHAs. Deleted paths and both sides of renames count. On PRs, the workflow
@@ -132,9 +148,11 @@ still apply. The new check runs supersede the draft's skipped ones. Maintainers
 must not merge until the `ready_for_review` run's required checks are green on the
 current head, and must wait again after any head update. This repository does not
 implement a separate merge gate. The external campaign gate (`campaign_control.py
-land`, outside this repository) accepts only actual `SUCCESS` for required checks
-on the exact head. That gate is stricter than GitHub's acceptance of intentional
-path-based skips. No additional job runs on draft pushes to enforce this policy.
+land`, outside this repository) accepts `SUCCESS` on the exact head. It also accepts
+`SKIPPED` for path-routed heavy checks on non-draft engine PRs, only when every
+same-head `Classify changed paths` CheckRun succeeded. Drafts and push/recovery
+validation remain `SUCCESS`-only. No additional job runs on draft pushes to enforce
+this policy.
 
 Required job names and workflow PR triggers remain present for every PR. Native
 lanes depend directly on the always-running classifier; none depends on a skipped
