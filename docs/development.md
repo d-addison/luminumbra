@@ -58,6 +58,10 @@ scheduled runs, and manual dispatches never save caches. When a PR closes,
 `cache-cleanup.yml` deletes caches scoped to its `refs/pull/<n>/merge` ref without
 checking out PR code.
 
+Compiler and analysis caches can be restored on eligible PR and manual runs.
+The MSYS2 package cache is an exception: its setup action enables both restore
+and save together, so package caching is disabled outside main/devel pushes.
+
 Blocking clang-tidy analysis runs in three path-hash shards on standard Ubuntu
 runners, each with a 60-minute timeout. Together they analyse every configured
 first-party translation unit and its headers on every merged tip; pushes use

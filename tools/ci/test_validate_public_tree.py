@@ -378,6 +378,14 @@ class PublicTreeValidatorTests(unittest.TestCase):
         )
         self.assertEqual(MODULE.inspect_text("src/example.cpp", text), [])
 
+    def test_rejects_numbered_pull_links_and_preserves_issue_links(self):
+        for path in ("README.md", "docs/example.md", "src/example.cpp", "tools/example.py"):
+            with self.subTest(path=path):
+                findings = MODULE.inspect_text(path, "https://example.com/\x70ull/12")
+                self.assertEqual([(finding.rule, finding.line) for finding in findings],
+                                 [("numbered-pr-reference", 1)])
+                self.assertEqual(MODULE.inspect_text(path, "https://example.com/issues/12"), [])
+
     def test_accepts_only_actual_index_and_tuple_member_tokens(self):
         for path, text in (
             ("src/example.h", "++counts[q.\x70hase - 1];\nreturn values[\x70hase - 1].source_frame;"),

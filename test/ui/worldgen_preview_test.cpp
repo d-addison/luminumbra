@@ -7,8 +7,8 @@
 // changes the FBO pixels, (c) orbit changes the view, (d) the per-frame render
 // holds a budget at the preview FBO size, and (e) rapid param changes collapse
 // into ONE debounced, latest-wins rebuild. They use a FIXED TerrainGenParams
-// literal (NOT default.json — that file is owned/enriched by the concurrent
-// worldgen agent), so they never go RED on a preset change.
+// literal rather than default.json, keeping these assertions independent of
+// changes to the authored world-generation presets.
 //
 // GL-required: the cases GTEST_SKIP without a GL context, and the UI gate
 // promotes any "SKIPPED" line on this target to a CTest failure,

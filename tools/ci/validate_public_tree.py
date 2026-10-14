@@ -43,7 +43,7 @@ TEXT_RULES = (
     # A roadmap wave is an ordinal or letter label.
     # Do not confuse it with real simulation terms such as waveStrength.
     ("internal-wave-reference", re.compile(r"\b[Ww]ave[-_ ]+(?:[A-Z]|\d+[A-Za-z]?)\b")),
-    ("numbered-pr-reference", re.compile(r"\b(?:PR|pull request)\s*#?\s*\d+", re.IGNORECASE)),
+    ("numbered-pr-reference", re.compile(r"\b(?:PR|pull request)\s*#?\s*\d+|/pull/\d+", re.IGNORECASE)),
     ("internal-requirement-id", re.compile(
         r"\b(?:T-(?:I[A-Za-z0-9]+|WORLDGEN|EF|\d+)(?:-[A-Za-z0-9.]+)*|FR-[A-Za-z0-9.]+|"
         r"AC-[A-Za-z0-9.]+|P\d+-T\d+|A-T\d+|"

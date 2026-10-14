@@ -10,26 +10,23 @@ There are no assigned due dates or invented completion percentages.
   and game `552a26684215542b327a842104864dda14e31652`. Subsequent verified upstream
   revisions are engine `devel` at `e60c6554c323f9fd8a8098bbac81e5ea1793cd7e`
   and game `main` at `f266fe4e121b6a29361c70116ad82e89560b21a3` (September 13).
-- **Merged implementation:** repair PR [#56](https://github.com/d-addison/luminumbra/pull/56),
+- **Merged implementation:** the recovery repair,
   accepted distance contract, hang instrumentation, reversed-Z depth, persisted clock,
   five-tier declaration, render measurements and simulation telemetry. The original
-  Blender stack was superseded by merged [#155](https://github.com/d-addison/luminumbra/pull/155).
-  The optional headless prefab runtime [#165](https://github.com/d-addison/luminumbra/pull/165)
+  Blender stack was superseded by the merged Blender authoring replacement.
+  The optional headless prefab runtime
   has also merged after current-head checks and independent native evidence review.
-  Blender review/undo [#162](https://github.com/d-addison/luminumbra/pull/162)
-  and the restored [visual catalog](visual-catalog.md)
-  [#170](https://github.com/d-addison/luminumbra/pull/170) have merged.
+  Blender review/undo and the restored [visual catalog](visual-catalog.md) have merged.
   These implementations still have the acceptance obligations listed below.
-- **Recovery in progress:** the SBOM repair [#169](https://github.com/d-addison/luminumbra/pull/169)
+- **Recovery in progress:** the SBOM repair
   passes the actual MSYS Git/UCRT Python path-disagreement cases. Ambient SIMD
-  [#172](https://github.com/d-addison/luminumbra/pull/172), tracked by
+  dispatch repair, tracked by
   [#163](https://github.com/d-addison/luminumbra/issues/163), passes actual Linux
   and native UCRT Debug/Release controls. Actual selected-ISA
   evidence and failing original-dispatch controls preserve each configuration's
-  established goldens. Active-region
-  [#161](https://github.com/d-addison/luminumbra/pull/161) has been refreshed against
+  established goldens. Active-region recovery has been refreshed against
   the recovery baseline and its scheduler, persistence, recovery and replay checks
-  pass. The composed candidate [#175](https://github.com/d-addison/luminumbra/pull/175)
+  pass. The composed recovery candidate
   awaits current-head integration checks and landing. The separate
   wind input-padding defect is tracked by [#173](https://github.com/d-addison/luminumbra/issues/173).
   The September 13 promotion UCRT job passed 2,245 of 2,250 cases at its recorded merge revision;
@@ -51,7 +48,7 @@ There are no assigned due dates or invented completion percentages.
   visible refusal to legacy far ranges and a 3,200 m far plane. See
   [Far world horizon v2](far-world-horizon-v2.md). Telemetry and
   a region ledger alone do not schedule distant simulation consumers.
-  The pristine brick generator/mesher [#176](https://github.com/d-addison/luminumbra/pull/176)
+  The pristine brick generator/mesher
   has separate Debug/Release and boundary/cave controls; its CI correction and
   landing are pending. A fixture-only asynchronous consumer is undergoing review
   and verification. Runtime paging, graphical integration, final cave-filter
@@ -61,17 +58,16 @@ There are no assigned due dates or invented completion percentages.
   [#127](https://github.com/d-addison/luminumbra/issues/127); the server-load
   incident [#69](https://github.com/d-addison/luminumbra/issues/69) is separate.
 - **Publication:** v0.3.0 remains unpublished and promotion
-  [#55](https://github.com/d-addison/luminumbra/pull/55) is blocked. Strict promotion
+  is blocked. Strict promotion
   requires all 15 contexts after expanded acceptance, followed by signed source-only
   publication, independent artifact verification and a newly named private preview.
   Audio stays off; the existing preview stays unchanged.
 - **Authoring ownership:** generic packages remain in the engine monorepo.
-  Merged [#162](https://github.com/d-addison/luminumbra/pull/162) supplies the Blender
-  identity review/undo package. Its refreshed package matches the retained Windows
+  The merged Blender identity review/undo package matches the retained Windows
   archive byte-for-byte and has 22 recorded native checks. Visual approval and
   Linux native editor qualification remain outstanding.
-  Merged [#165](https://github.com/d-addison/luminumbra/pull/165)
-  supplies optional compiled-prefab consumption. Headless consumption is not graphical qualification.
+  The merged optional prefab runtime supplies compiled-prefab consumption.
+  Headless consumption is not graphical qualification.
   Full installed SDK delivery and game extraction retain the post-release
   Foundations approval boundary.
 
@@ -223,7 +219,7 @@ verification.
 - [Preserve inline texture alpha coverage at authored cutoffs](https://github.com/d-addison/luminumbra/issues/147)
 
 - [Qualify remaining visual and native Linux acceptance for the merged Blender identity review/undo package (#146)](https://github.com/d-addison/luminumbra/issues/146)
-- [Merged optional prefab runtime consumption package; graphical consumption remains separate (#145)](https://github.com/d-addison/luminumbra/pull/165)
+- [Merged optional prefab runtime consumption package; graphical consumption remains separate (#145)](https://github.com/d-addison/luminumbra/issues/145)
 
 ### v0.4.0 — Continuing-world multiplayer
 
