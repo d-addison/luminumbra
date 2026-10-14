@@ -1,4 +1,5 @@
 #include "FoliagePass.h"
+#include "../FarWorldReplay.h"
 #include "rendering/BenchmarkGpuQueries.h"
 
 #include "GBufferPass.h"
@@ -1174,6 +1175,14 @@ void FoliagePass::map_instances_for_frame() {
 }
 
 std::size_t FoliagePass::execute(const RenderContext& ctx, const Camera& camera) {
+    const auto saved_draws = m_last_draw_calls;
+    const auto saved_time = m_last_draw_shader_time;
+    ReplayRollback rollback([this, &ctx, saved_draws, saved_time]() noexcept {
+        if (ctx.frozen_replay) {
+            m_last_draw_calls = saved_draws;
+            m_last_draw_shader_time = saved_time;
+        }
+    });
     m_last_draw_calls = 0;
     if (!m_enabled || !m_shader || !m_shader->IsValid() || m_frame_instance_count == 0 ||
         m_vao == 0) {
@@ -1184,7 +1193,8 @@ std::size_t FoliagePass::execute(const RenderContext& ctx, const Camera& camera)
         return 0;
     }
 
-    const bool evidence_fresh = m_qualification.rebuild.completed &&
+    const bool evidence_fresh = FarReplayEffects{ctx.frozen_replay}.Evidence() &&
+                                m_qualification.rebuild.completed &&
                                 m_instance_generation == m_build_generation &&
                                 m_evidence_phase >= 1 && m_evidence_phase <= 2;
     const bool vertex_due = evidence_fresh && m_phase_query_counts[m_evidence_phase - 1] >= 32 &&
@@ -1264,6 +1274,7 @@ std::size_t FoliagePass::execute(const RenderContext& ctx, const Camera& camera)
     m_shader->setVec3("u_cloudSunDir", cloud.sun_travel_dir);
 
     glBindVertexArray(m_vao);
+    PreserveReplayObject(ReplayObjectKind::VertexArray, m_vao);
     //  #4/: when the GPU scatter path built this frame, draw straight
     // from the blade SSBO using the compute-written indirect command. The CPU
     // fallback path still uses the persistent-mapped ring buffer.

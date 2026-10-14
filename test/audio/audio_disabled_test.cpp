@@ -1,9 +1,10 @@
+#include "../support/UniqueTempPath.h"
+
 #include <gtest/gtest.h>
 
 #include "audio/NullAudioManager.h"
 #include "core/RuntimeScenarioConfig.h"
 
-#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <string>
@@ -26,10 +27,7 @@ auto Parse(std::vector<std::string> arguments, const fs::path& root = {}) {
 class TemporaryDirectory {
 public:
     TemporaryDirectory() {
-        path = fs::temp_directory_path() /
-               ("luminumbra-null-audio-" +
-                std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
-        fs::create_directory(path);
+        path = Luminumbra::TestSupport::CreateUniqueTempDirectory("luminumbra-null-audio-");
     }
     ~TemporaryDirectory() {
         std::error_code error;

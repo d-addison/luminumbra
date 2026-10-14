@@ -110,6 +110,12 @@ if(BUILD_TESTING)
     set_tests_properties(DocumentationLinkValidatorContract
         PROPERTIES LABELS "docs;hygiene;tools" TIMEOUT 30)
     add_test(
+        NAME AmbientReceiptComparatorContract
+        COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_compare_ambient_receipts.py")
+    set_tests_properties(AmbientReceiptComparatorContract
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
         NAME QualificationCaptureContract
         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_qualification_capture.py")
     set_tests_properties(QualificationCaptureContract

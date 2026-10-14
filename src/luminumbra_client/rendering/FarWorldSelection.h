@@ -31,7 +31,9 @@ enum class FarWorldRefusal {
     SpanHistoryExhausted,
     ShaderProgramUnavailable,
     InvalidCavePolicy,
-    CavePolicyMismatch
+    CavePolicyMismatch,
+    WaterUnavailable,
+    WaterSpanRefused
 };
 
 constexpr FarWorldMode RequestedFarWorldMode(bool enabled) noexcept {
@@ -83,6 +85,7 @@ struct FarWorldDrawCommand {
 using FarWorldPrepareDraw = std::function<bool(const FarWorldDrawCommand&)>;
 struct FarWorldSubmitStats {
     std::size_t draws = 0, indices = 0, refused = 0;
+    std::uint64_t water_indices = 0;
 };
 using FarWorldSubmitFn = std::function<FarWorldSubmitStats(const FarWorldPrepareDraw&)>;
 using FarWorldLegacySubmitFn = std::function<FarWorldSubmitStats()>;

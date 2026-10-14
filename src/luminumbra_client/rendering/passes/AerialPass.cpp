@@ -73,7 +73,10 @@ void AerialPass::execute(const RenderContext& ctx) {
                                                 camera.GetNearPlane(),
                                                 camera.GetFarPlane());
     m_shader->setMat4("u_inverseView", glm::inverse(camera.GetViewMatrix()));
-    m_shader->setMat4("u_inverseProjection", glm::inverse(projection));
+    m_shader->setInt("u_farWorldLadder", ctx.far_world_ladder ? 1 : 0);
+    m_shader->setMat4("u_inverseProjection",
+                      ctx.far_world_ladder ? ctx.gbuffer_inverse_projection
+                                           : glm::inverse(projection));
     m_shader->setVec3("u_viewPos", camera.Position);
     // Toward-sun direction (sun-disc convention), matching the sky-view LUT frame.
     m_shader->setVec3("u_sunDirection", -ctx.sun.direction);

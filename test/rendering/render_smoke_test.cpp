@@ -5101,16 +5101,16 @@ TEST(RenderSmokeTest, FarWorldLiveEdgesCaveCeilingsAndCullerReplacementSubmissio
     ASSERT_TRUE(context.ready()) << context.error();
     FarWorldShaderProbe probe;
     ASSERT_TRUE(probe.Init());
-    const std::array floor{FarWorldLiveCell{0, 0, -13, 0}};
+    const std::array floor{FarWorldLiveCell{0, 0, -13, kFarWorldTerrainReady}};
     EXPECT_EQ(probe.Point({8, 8, -200}, 1040, floor), 0);
     EXPECT_LT(probe.Point({8, 8, -200}, 1040, floor, true), -199);
     EXPECT_LT(probe.Point({8, 17, -200}, 1040, floor), -199);
     // Exact upper Y boundary; rotated boundary planes are covered separately below.
-    const std::array below{FarWorldLiveCell{0, -1, -13, 0}};
+    const std::array below{FarWorldLiveCell{0, -1, -13, kFarWorldTerrainReady}};
     EXPECT_LT(probe.Point({0, 0, -200}, 1040, below), -199);
     EXPECT_EQ(probe.Point({1, -.01f, -200}, 1040, below), 0);
     EXPECT_LT(probe.Point({8, -8, -200}, 1040, floor), -199);
-    const std::array negative{FarWorldLiveCell{-1, -2, -13, 0}};
+    const std::array negative{FarWorldLiveCell{-1, -2, -13, kFarWorldTerrainReady}};
     EXPECT_EQ(probe.Point({-8, -24, -200}, 1040, negative), 0);
     EXPECT_LT(probe.Point({-8, -24, -200}, 1040, negative, true), -199);
     EXPECT_LT(probe.Point({-16.01f, -24, -200}, 1040, negative), -199);
@@ -5146,11 +5146,12 @@ TEST(RenderSmokeTest, FarWorldRotatedCamerasPreserveHalfOpenChunkBoundaries) {
                 const auto centre = boundary.centre + translation;
                 FarWorldLiveCell cell;
                 ASSERT_TRUE(FarWorldChunkCell({centre.x, centre.y, centre.z}, cell));
+                cell.reserved = kFarWorldTerrainReady;
                 const std::array owner{cell};
                 std::array<std::int32_t, 3> lower_coords{cell.x, cell.y, cell.z};
                 --lower_coords[static_cast<std::size_t>(boundary.axis)];
-                const std::array lower{
-                    FarWorldLiveCell{lower_coords[0], lower_coords[1], lower_coords[2], 0}};
+                const std::array lower{FarWorldLiveCell{
+                    lower_coords[0], lower_coords[1], lower_coords[2], kFarWorldTerrainReady}};
                 const auto expected_depth = -static_cast<float>(glm::length(centre - camera));
                 // The exact edge belongs to the upper cell, never the lower one.
                 EXPECT_NEAR(
@@ -5209,11 +5210,12 @@ TEST(RenderSmokeTest, FarWorldCanonicalTileLocalsOwnExactCellsWithFractionalCame
                 cell.x += shift;
                 cell.y += shift;
                 cell.z += shift;
+                cell.reserved = kFarWorldTerrainReady;
                 const std::array owner{cell};
                 std::array<std::int32_t, 3> lower_coords{cell.x, cell.y, cell.z};
                 --lower_coords[static_cast<std::size_t>(boundary.axis)];
-                const std::array lower{
-                    FarWorldLiveCell{lower_coords[0], lower_coords[1], lower_coords[2], 0}};
+                const std::array lower{FarWorldLiveCell{
+                    lower_coords[0], lower_coords[1], lower_coords[2], kFarWorldTerrainReady}};
                 const auto depth =
                     -static_cast<float>(glm::length(origin + glm::dvec3(boundary.local) - camera));
                 // Only the asserted integer cell owns the exact boundary. A
@@ -5244,8 +5246,8 @@ TEST(RenderSmokeTest, FarWorldIndexedPlanesPreserveVaryingAxes) {
     ASSERT_TRUE(probe.Init());
     const glm::dvec3 origin(-1024, -256, -1024);
     const glm::dvec3 camera(-53.39f, -67.13f, 43.21f);
-    const std::array owner{FarWorldLiveCell{-1, -2, -13, 0}};
-    const std::array lower{FarWorldLiveCell{-2, -2, -13, 0}};
+    const std::array owner{FarWorldLiveCell{-1, -2, -13, kFarWorldTerrainReady}};
+    const std::array lower{FarWorldLiveCell{-2, -2, -13, kFarWorldTerrainReady}};
     const auto sample = [&](glm::vec3 local, int plane_axis, auto cells) {
         return probe.TileBoundary(
             origin, local, camera, plane_axis, cells, false, {0, 256}, -1, true);

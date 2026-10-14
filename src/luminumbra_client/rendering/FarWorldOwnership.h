@@ -7,7 +7,8 @@
 
 namespace Luminumbra::Rendering {
 
-// std430 ivec4: integer 3D chunk cell, fourth lane reserved. Lexicographic XYZ.
+// std430 ivec4: integer 3D chunk cell, fourth lane readiness bits. Lexicographic XYZ.
+inline constexpr std::int32_t kFarWorldTerrainReady = 1, kFarWorldWaterReady = 2;
 struct FarWorldLiveCell {
     std::int32_t x = 0, y = 0, z = 0, reserved = 0;
     bool operator==(const FarWorldLiveCell&) const = default;
@@ -23,7 +24,11 @@ struct FarWorldLiveUpload {
     std::uint32_t snapshot_version = 0, uploaded_version = 0;
     std::uint64_t uploaded_indices = 0;
     bool valid_allocation = false;
+    std::uint32_t water_snapshot_version = 0, water_uploaded_version = 0;
+    std::uint64_t water_uploaded_indices = 0;
+    bool water_valid_allocation = false, water_pass_eligible = false;
 };
+bool IsFarWorldLiveWaterUploadCurrent(const FarWorldLiveUpload& upload) noexcept;
 bool IsFarWorldLiveUploadCurrent(const FarWorldLiveUpload& upload) noexcept;
 bool FarWorldChunkCell(const std::array<double, 3>& position, FarWorldLiveCell& cell) noexcept;
 
@@ -56,6 +61,7 @@ public:
     }
     std::span<const FarWorldLiveCell> cells() const noexcept;
     bool Owns(const std::array<double, 3>& position) const noexcept;
+    bool OwnsWater(const std::array<double, 3>& position) const noexcept;
     bool Owns(const FarWorldCellOrigin& origin, const std::array<float, 3>& local) const noexcept;
 
 private:

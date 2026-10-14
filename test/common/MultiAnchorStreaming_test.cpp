@@ -3,9 +3,10 @@
 // for multi-player / multi-camera streaming. The single-anchor path is covered
 // byte-identically by HeadlessServerTick + PlayerView; this exercises the 2-anchor path
 // the forwarding overload does not reach.
+#include "../support/UniqueTempPath.h"
+
 #include <gtest/gtest.h>
 
-#include <chrono>
 #include <filesystem>
 #include <string>
 #include <vector>
@@ -35,9 +36,7 @@ using Luminumbra::world::GameSession;
 class HeadlessRoot {
 public:
     HeadlessRoot() {
-        const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
-        root_ =
-            fs::temp_directory_path() / ("luminumbra_multi_anchor_test_" + std::to_string(stamp));
+        root_ = Luminumbra::TestSupport::CreateUniqueTempDirectory("luminumbra_multi_anchor_test_");
         fs::create_directories(root_ / "worlds" / "atlas" / "presets");
         fs::copy_file(fs::path(LUMINUMBRA_SOURCE_ROOT) / "worlds" / "atlas" / "presets" /
                           "default.json",

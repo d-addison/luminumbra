@@ -1,4 +1,5 @@
 #include "Shader.h"
+#include "FarWorldReplay.h"
 #include "ShaderSource.h"
 #include "core/Log.h"
 #include "luminumbra_common/core/FilesystemPath.h"
@@ -169,8 +170,10 @@ Shader::~Shader() {
 }
 
 void Shader::use() const {
-    if (m_id)
+    if (m_id) {
+        PreserveReplayObject(ReplayObjectKind::Program, m_id);
         glUseProgram(m_id);
+    }
 }
 
 // validate the bindings a pass adopts against the reflected layout.

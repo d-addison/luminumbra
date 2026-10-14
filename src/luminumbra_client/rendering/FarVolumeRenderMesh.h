@@ -16,6 +16,9 @@ struct FarVolumeRenderMesh {
     World::FarVolumeRequest request;
     World::FarVolumePosition origin_meters, sampled_max_meters;
     World::FarVolumeContent content = World::FarVolumeContent::Air;
+    World::FarVolumeContent terrain_content = World::FarVolumeContent::Air;
+    std::uint64_t terrain_indices = 0, water_indices = 0;
+    bool water_complete = false, water_known_dry = false;
     std::vector<VoxelVertex> vertices;
     std::vector<std::uint32_t> indices;
     std::optional<FarVolumeRenderBounds> bounds;

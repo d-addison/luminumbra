@@ -3,7 +3,9 @@
     [string]$Mode = "All",
 
     [string]$BuildPreset = "debug",
-    [int]$SmokeSeconds = 30
+    [int]$SmokeSeconds = 30,
+    [ValidateSet("Legacy", "Ladder")]
+    [string]$FarWorldRenderer = "Legacy"
 )
 
 $ErrorActionPreference = "Stop"
@@ -3455,12 +3457,31 @@ function Test-PlayerView {
 # The legacy scheduler is checked against an independent legacy oracle
 # (far-ladder-oracle.ps1, from the v2 oracle artifact). The volumetric ladder is
 # checked only when the artifact mode is ladder; otherwise ladder_checked is
-# reported false. The sweep's capture scheduling does not prove readiness
-# within the required 90 seconds; these coverage checks do not establish it.
+# reported false. Complete v2 checks every required station's retained ON frame,
+# deadline <=90 seconds, current spanning identities and independent wanted set.
+# An explicit Ladder run refuses until immutable fixture authority is supported.
+
+# D-v2 wet fixtures exercise the same independent validator used below. This
+# file-only proof needs no GL: terrain alone, retained stores, unavailable water,
+# wet Empty, and a missing combined field must all be refused.
+function Assert-FarHorizonWaterNegativeControls {
+    $waterPython = $null
+    foreach ($candidate in @("python3", "python", "py")) {
+        if (Get-Command $candidate -ErrorAction SilentlyContinue) { $waterPython = $candidate; break }
+    }
+    if (-not $waterPython) { throw "far water controls require Python 3 (stdlib only)" }
+    & $waterPython -B -m unittest discover -s (Join-Path $PSScriptRoot ".") -p "test_far_ladder_oracle.py"
+    if ($LASTEXITCODE -ne 0) { throw "FarLodHorizon v2 wet-fixture negative controls failed" }
+}
 
 function Test-FarLodHorizon {
+    Assert-FarHorizonWaterNegativeControls
+    if ($FarWorldRenderer -eq "Ladder") {
+        throw "FarLodHorizon Ladder qualification is unsupported: the world presets lack injected immutable authority; native cave/edit/budget/water qualification remains NEEDS-NATIVE-RUN. A refused Legacy fallback cannot qualify Ladder."
+    }
+    Write-Host "FarLodHorizon selected renderer: $FarWorldRenderer (legacy default; ladder_checked:false)"
     $exe = Get-ClientExe
-    $runSeconds = [Math]::Max(50, $SmokeSeconds)
+    $runSeconds = [Math]::Max(680, $SmokeSeconds)
 
     # archipelago (sea to horizon) added so the
     # water-continuity assertion below runs on an open-water preset alongside
@@ -3490,7 +3511,9 @@ function Test-FarLodHorizon {
         $analysisPath = Join-Path $viewDir "farlod-horizon-analysis.json"
         $analysis = Read-JsonArtifact -Path $analysisPath -Schema "luminumbra.farlod_horizon.v1"
         $oracle = Read-JsonArtifact -Path (Join-Path $viewDir "farlod-horizon-ladder-oracle.json") -Schema "luminumbra.farlod_horizon.v2"
-        $oracleResult = Assert-FarLadderOracleArtifact -Artifact $oracle -Name "farlod horizon ($preset) oracle"
+        # Runs retained #199 aggregate checks plus the strict station/pose validator.
+        $oracleResult = Assert-FarHorizonV2Artifact -Path (Join-Path $viewDir "farlod-horizon-ladder-oracle.json") -Renderer ($FarWorldRenderer.ToLowerInvariant())
+        if ($oracle.world_preset -ne $preset) { throw "farlod horizon ($preset) wrong v2 preset" }
         Assert-FarLodHorizonStationCoverage -Analysis $analysis -Name "farlod horizon ($preset)"
         foreach ($counter in @("regions_wanted", "regions_resident", "regions_missing")) {
             $oracleCount = Get-FarOracleInteger $oracle.legacy.$counter "farlod horizon ($preset) oracle" "legacy.$counter"

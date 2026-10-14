@@ -13,6 +13,8 @@ struct FarVolumeWantedRequest {
     // Explicit producer estimate of additional snapshot + compile + conversion
     // peak bytes. Admission remains authoritative; no native estimate/default.
     std::uint64_t build_headroom_bytes = 0;
+    std::shared_ptr<const FarWorldWaterObservation> water = {};
+    std::optional<FarWorldWaterBound> water_bound = std::nullopt;
 };
 struct FarVolumeResidencyLimits {
     std::array<std::size_t, World::kFarTierCount> entry_slots{};
@@ -38,6 +40,10 @@ struct FarVolumeResidentObservation {
     World::FarTileStatus coverage;
     std::uint64_t cpu_bytes = 0, gpu_bytes = 0;
     std::uint64_t ready_upload_bytes = 0;
+    World::FarBuildIdentity built_identity;
+    World::FarVolumeRequest built_request;
+    bool water_complete = false, water_known_dry = false;
+    std::uint64_t terrain_indices = 0, water_indices = 0;
 };
 struct FarVolumeFrameResult {
     std::size_t dispatched = 0, uploaded = 0, rejected = 0, evicted = 0;
@@ -57,6 +63,8 @@ struct FarVolumeTierObservation {
     // source/converted results and GPU, unlike the retained pair subtotals.
     // Worker activity can skew CPU/GPU sampling; diagnostics never admit bytes.
     World::FarVolumeTierMemoryStats memory;
+    std::size_t water_known_dry_tiles = 0, water_wet_tiles = 0;
+    std::uint64_t retained_water_indices = 0, submitted_water_indices = 0;
 };
 struct FarVolumeDrawRecord {
     World::FarBuildIdentity identity;
@@ -66,6 +74,7 @@ struct FarVolumeDrawRecord {
     double horizontal_outer_clip_meters = 0;
     double view_ray_bias_meters = 0;
     FarWorldArrival arrival;
+    std::uint64_t terrain_indices = 0, water_indices = 0;
 };
 using FarVolumeDrawVisitor = void (*)(void*, const FarVolumeDrawRecord&);
 using FarVolumeAuthorityProducer = std::function<std::optional<World::FarVolumeAuthority>(

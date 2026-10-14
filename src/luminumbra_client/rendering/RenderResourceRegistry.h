@@ -120,6 +120,19 @@ public:
         auto it = m_owned_textures.find(std::string(name));
         return it == m_owned_textures.end() ? nullptr : &it->second.desc;
     }
+    // Replay restores adoption metadata without duplicating or owning GL resources.
+    struct AdoptedState {
+        std::unordered_map<std::string, FboHandle> fbos;
+        std::unordered_map<std::string, TextureHandle> textures;
+    };
+    AdoptedState adopted_state() const {
+        return {m_fbos, m_textures};
+    }
+    void restore_adopted_state(AdoptedState& state) noexcept {
+        m_fbos.swap(state.fbos);
+        m_textures.swap(state.textures);
+    }
+
     // Adopt (wrap) an externally-owned GL framebuffer under `name`. Re-adopting
     // the same name updates the wrapped id (the pilot re-adopts per frame).
     FboHandle adopt_fbo(std::string_view name, u32 gl_id) {
