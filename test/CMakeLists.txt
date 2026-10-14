@@ -153,6 +153,8 @@ add_executable(common_tests
     common/FarVolumeWorld_test.cpp
     common/FarVolumeRuntime_test.cpp
     rendering/FarVolumeRenderMesh_test.cpp
+    rendering/FarVolumeBuildQueue_test.cpp
+    ../src/luminumbra_client/rendering/FarVolumeBuildQueue.cpp
     ../src/luminumbra_client/rendering/FarVolumeRenderMesh.cpp
     common/FarTierTable_test.cpp
     common/FarHorizon_test.cpp
