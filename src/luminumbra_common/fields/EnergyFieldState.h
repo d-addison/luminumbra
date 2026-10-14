@@ -19,8 +19,8 @@
 // caller from replicated sim input — never camera state) ticks. Pages outside
 // it are FROZEN with their last-touched cadence step; when a page re-enters the
 // window it receives CATCH-UP DECAY as the SEQUENTIAL per-step multiply-shift
-// loop (pow-by-squaring truncates once instead of per step and is NOT bit-equal
-// Codex sign-off r2). The window edge is SEALED: no outflow crosses it, and
+// loop (pow-by-squaring truncates once instead of per step and is NOT bit-equal).
+// The window edge is SEALED: no outflow crosses it, and
 // the truncating-outflow kernel keeps the residue in the source cell, so the
 // total is conserved exactly (proving signal d).
 //

@@ -248,6 +248,8 @@ bool ServerWorldRunner::Boot() {
     m_session->SetSimBudgetTelemetryEnabled(m_config.sim_budget);
     m_session->SetJobSystem(&m_jobSystem);
     m_session->SetRootPath(m_config.root_path);
+    if (m_config.region_scheduler)
+        m_session->SetRegionSchedulerConfig(*m_config.region_scheduler);
     // host==peer: the headless host must run the SAME water-sim resolution the
     // client derives from data/common/systems.json — sim.water_high_res is baked into
     // the hashed mm grids, so a mismatched host could never agree with its peers.
@@ -996,8 +998,8 @@ Persistence::WorldStreamingStateSubHashes ServerWorldRunner::ComputeWorldSubHash
     // AetherFieldDeterminism gate and the desync-localization oracle.
     sub.aether = AetherSubHash(m_session.get());
     // the STATE-ONLY stateful-layer sub-hash — the heavy
-    // oracle's authoritative-compare slot when sim.aether_state is ON (Codex
-    // finding A). Always empty on the default (OFF) world.
+    // oracle's authoritative-compare slot when sim.aether_state is ON.
+    // Always empty on the default (OFF) world.
     sub.aether_state = m_session ? m_session->ComputeAetherStateSubHash() : std::string();
     return sub;
 }

@@ -1305,7 +1305,7 @@ Required performance scope: `accepted_expanded_world`; 2 distinct frozen profile
 
 - `frame_ms` (p99) <= 16.67; also report target 8.33.
 
-Source reconciliation at `945ecd295835a838eed0169ff709e7aabc134fa1`: Authorized September 13 completion scope. This row adds explicit coverage without replacing any original group; implementation and acceptance remain unfinished.
+Source reconciliation at `945ecd295835a838eed0169ff709e7aabc134fa1`: Additional completion coverage. This row adds explicit coverage without replacing any original group; implementation and acceptance remain unfinished.
 
 Retained evidence:
 
@@ -1354,7 +1354,7 @@ Acceptance checks:
 - Reconcile the coarse simulation integration without losing landed telemetry; prove game-owned activation data and deterministic persistent continuation using the existing clock.
 - Meet the shared packet contract for every required variant and parent mapping.
 
-Source reconciliation at `945ecd295835a838eed0169ff709e7aabc134fa1`: Authorized September 13 completion scope. This row adds explicit coverage without replacing any original group; implementation and acceptance remain unfinished.
+Source reconciliation at `945ecd295835a838eed0169ff709e7aabc134fa1`: Additional completion coverage. This row adds explicit coverage without replacing any original group; implementation and acceptance remain unfinished.
 
 Retained evidence:
 

@@ -51,7 +51,7 @@ RECEIPT = "luminumbra.render_qualification.v1"
 
 def baseline_matrix() -> dict[str, Any]:
     return {
-        "schema": "luminumbra.acceptance_matrix.v1",
+        "schema": "luminumbra.acceptance_matrix.v2",
         "description": "synthetic matrix",
         "rows": [
             {
@@ -75,7 +75,7 @@ def baseline_matrix() -> dict[str, Any]:
                     {
                         "kind": "script",
                         "ref": "tools/later.py",
-                        "planned": {"owner": "fw", "pr": 7},
+                        "planned": "traversal runner; owner: fw",
                     },
                 ],
             },
@@ -103,7 +103,7 @@ def baseline_matrix() -> dict[str, Any]:
                     {
                         "kind": "doc",
                         "ref": "docs/future.md",
-                        "planned": {"owner": "ac", "issue": 132, "note": "traversal v2"},
+                        "planned": "traversal v2; owner: ac; issue #132",
                     },
                 ],
             },
@@ -135,6 +135,12 @@ class AcceptanceMatrixTests(unittest.TestCase):
         (self.root / "tools" / "script.py").write_text("print('ok')\n", encoding="utf-8")
         (self.root / "tools" / "run.ps1").write_text("exit 0\n", encoding="utf-8")
         (self.root / "docs" / "d.md").write_text("# Doc\n", encoding="utf-8")
+        (self.root / MODULE.REQUIREMENT_SOURCE).write_text(
+            MODULE.REQUIREMENT_HEADING + "\n\n"
+            + "\n".join(f"- `{row['id']}`: Synthetic requirement." for row in baseline_matrix()["rows"])
+            + "\n\n## Deferred\n",
+            encoding="utf-8",
+        )
         self.index = MODULE.index_tests(self.root)
         self.matrix_path = self.tmp / "matrix.json"
 
@@ -233,7 +239,7 @@ class AcceptanceMatrixTests(unittest.TestCase):
         matrix = baseline_matrix()
         item = row_of(matrix, "native.run")["evidence"][0]
         del item["command"]
-        item["planned"] = {"owner": "ac", "pr": 218}
+        item["planned"] = "render qualification runner (v0.3.1); owner: ac"
         self.assertErrorContains(matrix, "native command must be a non-empty string")
 
     def test_native_bad_receipt_schema_is_rejected(self) -> None:
@@ -260,7 +266,7 @@ class AcceptanceMatrixTests(unittest.TestCase):
 
         matrix = baseline_matrix()
         row_of(matrix, "alpha.covered")["evidence"].append(
-            {"kind": "script", "ref": "tools/script.py", "planned": {"owner": "fw"}}
+            {"kind": "script", "ref": "tools/script.py", "planned": "runner; owner: fw"}
         )
         cases.append(("covered planned", "alpha.covered", matrix))
 
@@ -282,7 +288,7 @@ class AcceptanceMatrixTests(unittest.TestCase):
 
         matrix = baseline_matrix()
         row_of(matrix, "gtest.partial")["evidence"] = [
-            {"kind": "script", "ref": "tools/later.py", "planned": {"owner": "fw"}}
+            {"kind": "script", "ref": "tools/later.py", "planned": "runner; owner: fw"}
         ]
         cases.append(("partial no plain", "gtest.partial", matrix))
 
@@ -296,16 +302,47 @@ class AcceptanceMatrixTests(unittest.TestCase):
                 )
 
     def test_malformed_planned_is_rejected(self) -> None:
-        cases = {
-            "planned.owner must be a non-empty string": {"pr": 7},
-            "planned.pr must be a positive integer": {"owner": "fw", "pr": 0},
-            "planned.issue must be a positive integer": {"owner": "fw", "issue": "132"},
-        }
-        for fragment, planned in cases.items():
-            with self.subTest(fragment):
+        for planned in (None, "", "   ", 0, False, [], {"owner": "fw", "note": "runner"}):
+            with self.subTest(planned=planned):
                 matrix = baseline_matrix()
                 row_of(matrix, "gtest.partial")["evidence"][1]["planned"] = planned
-                self.assertErrorContains(matrix, fragment)
+                self.assertErrorContains(matrix, "planned must be a non-empty descriptive string")
+
+    def test_planned_description_and_owner_remain_required(self) -> None:
+        for planned, expected in (
+            ("runner", "planned must include a non-empty '; owner:' workstream"),
+            ("runner; owner:   ; issue #132", "planned must include a non-empty '; owner:' workstream"),
+            (" ; owner: fw", "planned work description must not be empty"),
+        ):
+            with self.subTest(planned=planned):
+                matrix = baseline_matrix()
+                row_of(matrix, "gtest.partial")["evidence"][1]["planned"] = planned
+                self.assertErrorContains(matrix, expected)
+
+    def test_requirement_source_is_required(self) -> None:
+        (self.root / MODULE.REQUIREMENT_SOURCE).unlink()
+        self.assertErrorContains(baseline_matrix(), "cannot read requirement source")
+
+    def test_invalid_requirement_lists_are_rejected(self) -> None:
+        for body, expected in (
+            ("# Other section\n", "expected one"),
+            (MODULE.REQUIREMENT_HEADING + "\n", "requirement list must not be empty"),
+            (MODULE.REQUIREMENT_HEADING + "\n- `bad ID`: Invalid.\n", "malformed requirement entry"),
+            (MODULE.REQUIREMENT_HEADING + "\n- `alpha.covered`: First.\n- `alpha.covered`: Second.\n",
+             "duplicate requirement ID: alpha.covered"),
+        ):
+            with self.subTest(expected=expected):
+                (self.root / MODULE.REQUIREMENT_SOURCE).write_text(body, encoding="utf-8")
+                self.assertErrorContains(baseline_matrix(), expected)
+
+    def test_new_contract_requirement_requires_a_mapping(self) -> None:
+        source = self.root / MODULE.REQUIREMENT_SOURCE
+        source.write_text(
+            source.read_text(encoding="utf-8").replace(
+                "## Deferred", "- `future.required`: New contract requirement.\n\n## Deferred"
+            ), encoding="utf-8",
+        )
+        self.assertEqual(self.errors(baseline_matrix()), ["future.required: required mapping missing"])
 
     def test_test_index_handles_suffixes_multiline_and_add_test_breaks(self) -> None:
         self.assertIn("BetaMultiLine", self.index.ctest_names)
@@ -697,8 +734,8 @@ class AcceptanceMatrixTests(unittest.TestCase):
         self.assertIn("| needs-native-run | 1 |", first)
         self.assertIn("| planned | 1 |", first)
         self.assertIn("| Total | 4 |", first)
-        self.assertIn("(planned: fw, change 7)", first)
-        self.assertIn("(planned: ac, issue #132 - traversal v2)", first)
+        self.assertIn("(planned: traversal runner; owner: fw)", first)
+        self.assertIn("(planned: traversal v2; owner: ac; issue #132)", first)
         self.assertIn(f"-- command: `{NATIVE_COMMAND}`; receipt: `{RECEIPT}`", first)
         self.assertLess(first.index("| alpha.covered |"), first.index("| planned.doc |"))
 
@@ -940,6 +977,36 @@ class AcceptanceMatrixTests(unittest.TestCase):
                 event.write_text(json.dumps(invalid), encoding="utf-8")
                 with self.subTest(event=invalid), self.assertRaises(MODULE.MatrixError):
                     MODULE._ci_identity(self.root)
+
+
+class ProductionAcceptanceMatrixTests(unittest.TestCase):
+    def test_deleting_any_required_production_mapping_fails_validation(self) -> None:
+        root = MODULE.DEFAULT_ROOT
+        matrix = MODULE.load_matrix(root / "tools/ci/acceptance_matrix.json")
+        required_ids = MODULE.load_required_ids(root / MODULE.REQUIREMENT_SOURCE)
+        index = MODULE.index_tests(root)
+        self.assertIn("perf.floor-p99", required_ids)
+        self.assertEqual(MODULE.validate(matrix, index, root, False), [])
+        for row_id in sorted(required_ids):
+            with self.subTest(row_id=row_id):
+                incomplete = copy.deepcopy(matrix)
+                incomplete["rows"] = [row for row in incomplete["rows"] if row["id"] != row_id]
+                self.assertEqual(
+                    MODULE.validate(incomplete, index, root, False),
+                    [f"{row_id}: required mapping missing"],
+                )
+
+    def test_production_planned_notes_render_as_descriptive_text(self) -> None:
+        matrix = MODULE.load_matrix(MODULE.DEFAULT_ROOT / "tools/ci/acceptance_matrix.json")
+        planned = [item["planned"] for row in matrix["rows"] for item in row["evidence"]
+                   if "planned" in item]
+        self.assertTrue(planned)
+        rendered = MODULE.render_doc(matrix)
+        for note in planned:
+            self.assertIsInstance(note, str)
+            self.assertTrue(note.strip())
+            self.assertIn(f"(planned: {MODULE._escape_cell(note)})", rendered)
+        self.assertNotRegex(rendered, r"(?i)\b(?:PR|pull request|change)\s*#?\s*\d+")
 
 
 if __name__ == "__main__":

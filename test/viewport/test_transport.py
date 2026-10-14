@@ -46,6 +46,40 @@ def signed_raw(raw, payload=b''):
 
 
 class Transport(unittest.TestCase):
+    def test_readiness_marker_refuses_stale_identity_duplicate_and_nonregular_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'ready.json'
+            marker = {'schema': 'luminumbra.viewport.ready.v1', 'session': SESSION, 'pid': 123}
+            self.assertIsNone(p.read_readiness(path, SESSION, pid=123))
+            p.atomic_write(path, p.canonical(marker))
+            self.assertEqual(p.read_readiness(path, SESSION, pid=123), marker)
+            for session, pid in (('f' * 32, 123), (SESSION, 456)):
+                with self.assertRaises(p.Refusal):
+                    p.read_readiness(path, session, pid=pid)
+            p.atomic_write(path, p.canonical({**marker, 'broker_pid': 789}))
+            with self.assertRaisesRegex(p.Refusal, 'broker identity'):
+                p.read_readiness(path, SESSION, pid=123, broker_pid=456)
+            p.atomic_write(path, b'{"schema":1,"schema":2}')
+            with self.assertRaisesRegex(p.Refusal, 'Duplicate'):
+                p.read_readiness(path, SESSION, pid=123)
+            path.unlink()
+            path.mkdir()
+            with self.assertRaisesRegex(p.Refusal, 'regular file'):
+                p.read_readiness(path, SESSION, pid=123)
+
+    def test_matching_ready_marker_from_dead_owned_child_is_refused(self):
+        with tempfile.TemporaryDirectory() as directory:
+            executable = str(Path(sys.executable).resolve())
+            broker = Broker(directory, KEY, SESSION, [executable],
+                            hashlib.sha256(Path(executable).read_bytes()).hexdigest(), directory)
+            broker.child = SimpleNamespace(pid=123, poll=lambda: 7)
+            p.atomic_write(Path(directory) / 'host-ready.json', p.canonical({
+                'schema': 'luminumbra.viewport.ready.v1', 'session': SESSION, 'pid': 123}))
+            with self.assertRaisesRegex(p.Refusal, 'already exited'):
+                broker._publish_readiness()
+            self.assertFalse((Path(directory) / 'broker-ready.json').exists())
+            self.assertIsNone(broker.host_ready)
+
     def test_record_reader_retains_old_complete_record_across_atomic_replacement(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'desired.bin'
@@ -232,8 +266,11 @@ class Transport(unittest.TestCase):
                 script = '\n'.join([
                     'import os, sys',
                     'sys.path.insert(0, sys.argv[1])',
-                    'from protocol import read_record, require',
+                    'from protocol import atomic_write, canonical, read_record, require',
                     "key = bytes.fromhex(os.environ.pop('LUMINUMBRA_VIEWPORT_KEY'))",
+                    "atomic_write(os.environ.pop('LUMINUMBRA_VIEWPORT_READY'), canonical({"
+                    "'schema':'luminumbra.viewport.ready.v1',"
+                    "'session':os.environ.pop('LUMINUMBRA_VIEWPORT_SESSION'),'pid':os.getpid()}))",
                     'read_record(sys.stdin.buffer, key)',
                     f'sys.stdout.buffer.write(bytes.fromhex({p.encode(*frame(), KEY).hex()!r}))',
                     'sys.stdout.buffer.flush()',
@@ -247,12 +284,21 @@ class Transport(unittest.TestCase):
                 hashlib.sha256(Path(executable).read_bytes()).hexdigest(), root, deadline=.5)
             p.atomic_write(Path(root)/'desired.bin', p.encode(state(), b'', KEY))
             errors = []
+            sent = threading.Event()
+            original_send = broker._send
+            def send(header):
+                original_send(header)
+                if header['kind'] == 'state':
+                    sent.set()
+            broker._send = send
             def run():
                 try: broker.run()
                 except Exception as error: errors.append(error)
             thread = threading.Thread(target=run); thread.start()
             if update:
-                time.sleep(.05)
+                # Update an actual in-flight request, not a frame-slot allocation
+                # during fixture interpreter startup.
+                self.assertTrue(sent.wait(2), 'Initial fixture state was not dispatched')
                 newer = state(2); newer['state']['locals'][0]['matrix'][12] = 3
                 newer['state']['scene_revision'] = 2
                 p.atomic_write(Path(root)/'desired.bin', p.encode(newer, b'', KEY))

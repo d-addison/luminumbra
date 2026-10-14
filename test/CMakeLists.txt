@@ -135,6 +135,15 @@ target_compile_definitions(far_volume_facade_test PRIVATE
 target_link_libraries(far_volume_facade_test PRIVATE gtest_main glm::glm nlohmann_json::nlohmann_json)
 luminumbra_configure_first_party_target(far_volume_facade_test)
 
+# Focused live-field regressions use the canonical world sampler, without a client.
+add_executable(far_pristine_field_test common/FarPristineField_test.cpp)
+target_include_directories(far_pristine_field_test PRIVATE ../src)
+target_compile_definitions(far_pristine_field_test PRIVATE
+    LUMINUMBRA_SOURCE_ROOT="${CMAKE_SOURCE_DIR}")
+target_link_libraries(far_pristine_field_test PRIVATE gtest_main luminumbra_common)
+luminumbra_configure_first_party_target(far_pristine_field_test)
+luminumbra_pin_fp_determinism(far_pristine_field_test)
+
 add_executable(common_tests
     common/Crc32_test.cpp
     rendering/shader_compositing_contract_test.cpp
@@ -150,12 +159,45 @@ add_executable(common_tests
     common/EngineContracts_test.cpp
     common/ResidencyContract_test.cpp
     common/FarLodStore_test.cpp
+    common/FarVolumeWorld_test.cpp
+    common/FarVolumeRuntime_test.cpp
+    common/FarVolumeTierMemory_test.cpp
+    rendering/FarWorldWaterMesh_test.cpp
+    rendering/FarVolumeRenderMesh_test.cpp
+    rendering/FarVolumeBuildQueue_test.cpp
+    rendering/FarVolumeUpload_test.cpp
+    rendering/FarVolumeGpuBackend_test.cpp
+    rendering/FarVolumeResidency_test.cpp
+    rendering/FarWorldReplay_test.cpp
+    rendering/FarWorldDiagnostics_test.cpp
+    rendering/FarWorldRenderer_test.cpp
+    rendering/FarWorldLegacyIsolation_test.cpp
+    rendering/FarWorldOwnership_test.cpp
+    rendering/FarWorldDepthBias_test.cpp
+    rendering/FarWorldFog_test.cpp
+    rendering/FarWorldDepthPosition_test.cpp
+    rendering/FarWorldCaveSelection_test.cpp
+    rendering/FarWorldSurfaceTag_test.cpp
+    rendering/ShaderSource_test.cpp
+    ../src/luminumbra_client/rendering/ShaderSource.cpp
+    ../src/luminumbra_client/rendering/FarWorldDiagnostics.cpp
+    ../src/luminumbra_client/rendering/FarWorldRenderer.cpp
+    ../src/luminumbra_client/rendering/FarWorldOwnership.cpp
+    ../src/luminumbra_client/rendering/FarWorldDepthBias.cpp
+    ../src/luminumbra_client/rendering/FarVolumeBuildQueue.cpp
+    ../src/luminumbra_client/rendering/FarVolumeUpload.cpp
+    ../src/luminumbra_client/rendering/FarVolumeGpuBackend.cpp
+    ../src/luminumbra_client/rendering/FarVolumeResidency.cpp
+    ../src/luminumbra_client/rendering/FarWorldWaterMesh.cpp
+    ../src/luminumbra_client/rendering/FarVolumeRenderMesh.cpp
     common/FarTierTable_test.cpp
     common/FarHorizon_test.cpp
     common/FarWantedSet_test.cpp
     common/FarAuthorityOverlay_test.cpp
     common/GameSessionHeadlessWorld_test.cpp
     common/SimBudgetTelemetry_test.cpp
+    common/HeavyComparison_test.cpp
+    common/SimBudgetProfile_test.cpp
     ../src/luminumbra_server/modes/SmokeArtifact.cpp
     common/JobSystem_test.cpp
     common/JobWatchdog_test.cpp
@@ -186,6 +228,8 @@ add_executable(common_tests
     common/WindFieldSystem_test.cpp
     common/WeatherSystem_test.cpp
     common/AetherFieldSystem_test.cpp
+    common/AmbientDeterminismReceipt_test.cpp
+    common/AmbientInputBounds_test.cpp
     common/fields_hardening_test.cpp
     common/replication_hardening_test.cpp
     common/replication_scale_test.cpp
@@ -195,6 +239,7 @@ add_executable(common_tests
     common/world_streaming_hardening_test.cpp
     common/HydraulicErosion_test.cpp
     common/WorldStreamingState_test.cpp
+    persistence/synthetic_save_fixture_test.cpp
     sim/fire_spread_test.cpp
     sim/soil_nutrient_test.cpp
     sim/pollination_test.cpp
@@ -250,6 +295,7 @@ target_include_directories(common_tests PRIVATE
 target_link_libraries(common_tests PRIVATE
     gtest_main
     luminumbra_common
+    luminumbra_save_fixture_support
 )
 
 # File-only path contracts run without a GL context or the common-library graph.
@@ -261,6 +307,11 @@ add_executable(filesystem_path_test
 target_include_directories(filesystem_path_test PRIVATE ../src ../src/luminumbra_client)
 target_compile_definitions(filesystem_path_test PRIVATE LUMINUMBRA_SOURCE_ROOT="${CMAKE_SOURCE_DIR}")
 target_link_libraries(filesystem_path_test PRIVATE gtest_main)
+
+# Temporary-path reservation contracts need only the filesystem and GoogleTest.
+add_executable(unique_temp_path_test support/UniqueTempPath_test.cpp)
+target_link_libraries(unique_temp_path_test PRIVATE gtest_main)
+luminumbra_configure_first_party_target(unique_temp_path_test)
 
 # tree rendering (tree rendering): render-only tree LOD distance selection. The header
 add_executable(game_assets_test
@@ -411,7 +462,10 @@ target_link_libraries(foliage_cache_prune_test PRIVATE
 
 add_executable(render_smoke_test
     rendering/render_smoke_test.cpp
-    ../src/luminumbra_common/core/FilesystemPath.cpp
+    rendering/FarWorldShadow_test.cpp
+    rendering/FarWorldFogGl_test.cpp
+    rendering/FarWorldWaterGl_test.cpp
+    rendering/TerrainCullingTestPeer.h
 )
 
 target_compile_definitions(render_smoke_test PRIVATE
@@ -421,9 +475,11 @@ target_compile_definitions(render_smoke_test PRIVATE
 
 target_include_directories(render_smoke_test PRIVATE
 ../src
+../src/luminumbra_client
 )
 
 target_link_libraries(render_smoke_test PRIVATE
+    luminumbra_client
     glm::glm
     gtest_main
     glfw
@@ -854,6 +910,7 @@ add_executable(particle_determinism_test
 add_executable(far_lod_worker_test
     rendering/far_lod_worker_test.cpp
     rendering/terrain_culling_test.cpp
+    rendering/loading_overlay_test.cpp
     rendering/texture_file_test.cpp
     rendering/render_clock_test.cpp
 )
@@ -1089,8 +1146,13 @@ target_link_libraries(worldgen_probe PRIVATE
 
 luminumbra_configure_first_party_target(worldgen_probe)
 
+if(NOT Python3_EXECUTABLE)
+    find_package(Python3 COMPONENTS Interpreter REQUIRED)
+endif()
 add_test(NAME WorldgenProbeSmoke
-    COMMAND worldgen_probe --smoke --json ${CMAKE_CURRENT_BINARY_DIR}/worldgen_probe_smoke.json)
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tools/ci/check_worldgen_probe_smoke.py"
+            --probe "$<TARGET_FILE:worldgen_probe>"
+            --out "${CMAKE_CURRENT_BINARY_DIR}/worldgen_probe_smoke.json")
 set_tests_properties(WorldgenProbeSmoke PROPERTIES LABELS "perf" TIMEOUT 120)
 
 # Manual cold-load latency diagnostic. It exercises twenty interactive loads at
@@ -1181,14 +1243,25 @@ target_link_libraries(runtime_world_visual_validation_test PRIVATE
     glad
 )
 
+# Calls the production artifact writer with synthetic captures, without a GL
+# context or scenario execution. PowerShell validates both emitted schemas.
+add_executable(far_ladder_oracle_writer_fixture
+    client/far_ladder_oracle_writer_fixture.cpp
+)
+target_link_libraries(far_ladder_oracle_writer_fixture PRIVATE luminumbra_client_qa)
+luminumbra_configure_first_party_target(far_ladder_oracle_writer_fixture)
+
 if(WIN32)
     target_link_libraries(runtime_world_visual_validation_test PRIVATE opengl32)
+    target_link_libraries(far_ladder_oracle_writer_fixture PRIVATE opengl32)
 elseif(APPLE)
     find_package(OpenGL REQUIRED)
     target_link_libraries(runtime_world_visual_validation_test PRIVATE ${OPENGL_LIBRARIES})
+    target_link_libraries(far_ladder_oracle_writer_fixture PRIVATE ${OPENGL_LIBRARIES})
 else()
     find_package(OpenGL REQUIRED)
     target_link_libraries(runtime_world_visual_validation_test PRIVATE OpenGL::GL)
+    target_link_libraries(far_ladder_oracle_writer_fixture PRIVATE OpenGL::GL)
 endif()
 
 #   spike benchmark (manual/excluded-by-default: Debug runtime
@@ -1413,11 +1486,14 @@ add_executable(world_open_refusal_test
     persistence/world_open_refusal_test.cpp
     common/SimBudgetWorldParity_test.cpp
     persistence/async_saved_world_catalog_test.cpp
+    persistence/saved_world_catalog_responsiveness_test.cpp
+    persistence/host_scheduler_fault_test.cpp
     ../src/luminumbra_server/ServerWorldRunner.cpp
+    ../src/luminumbra_server/modes/ModeHelpers.cpp
 )
 target_include_directories(world_open_refusal_test PRIVATE ../src ../src/luminumbra_common)
 target_compile_definitions(world_open_refusal_test PRIVATE LUMINUMBRA_SOURCE_ROOT="${CMAKE_SOURCE_DIR}")
-target_link_libraries(world_open_refusal_test PRIVATE gtest_main luminumbra_common)
+target_link_libraries(world_open_refusal_test PRIVATE gtest_main luminumbra_common luminumbra_save_fixture_support)
 
 # Second-class adversarial pass: Jolt tunneling / penetration test. A fast
 # dynamic sphere fired at a thin static heightfield floor must not pass through it.
@@ -1495,8 +1571,8 @@ target_link_libraries(audio_prune_guard_test PRIVATE
     glm
 )
 
-# review of 2c32211: stance-independent saved spawn anchor and the shared
-# LUMIN_TREE_IMPOSTORS predicate (header-only; no GL/device).
+# Saved spawn anchors are stance-independent; tree impostor policy uses the
+# shared LUMIN_TREE_IMPOSTORS predicate (header-only; no GL/device).
 add_executable(client_policy_test
     client/client_policy_test.cpp
 )
@@ -1546,6 +1622,20 @@ target_link_libraries(hang_watchdog_test PRIVATE
     Threads::Threads
 )
 
+# Process crash capture (core/CrashReport). Runs the child crash case by re-executing
+# this binary, so it is its own executable rather than part of common_tests.
+add_executable(crash_report_test
+    common/crash_report_test.cpp
+)
+target_include_directories(crash_report_test PRIVATE
+    ../src
+    ../src/luminumbra_common
+)
+target_link_libraries(crash_report_test PRIVATE
+    gtest_main
+    luminumbra_common
+)
+luminumbra_configure_first_party_target(crash_report_test)
 # Bounded console sink: separate executable so the logging-stall cases can run
 # without the rest of common_tests. Fake outputs are stalled on purpose; the
 # tests release them before returning.
@@ -1684,6 +1774,7 @@ set(LUMINUMBRA_GTEST_TARGETS
     far_volume_tile_test
     far_volume_mesher_test
     far_volume_facade_test
+    far_pristine_field_test
     world_generation_test
     worldgen_layer_snapshot_test
     asset_processor_round_trip_test
@@ -1691,6 +1782,7 @@ set(LUMINUMBRA_GTEST_TARGETS
     game_assets_test
     common_tests
     filesystem_path_test
+    unique_temp_path_test
     skinned_test_assets_test
     tree_lod_test
     # the hemi-octa mapping test was built but never
@@ -1739,6 +1831,7 @@ set(LUMINUMBRA_GTEST_TARGETS
     client_policy_test
     audio_physics_binding_test
     hang_watchdog_test
+    crash_report_test
     bounded_console_sink_test
     audio_volume_readback_test
     audio_disabled_test
@@ -1873,6 +1966,9 @@ find_package(Python3 COMPONENTS Interpreter REQUIRED)
 add_test(NAME SimBudgetCaptureContract
     COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tools/perf/test_capture_sim_budget.py")
 set_tests_properties(SimBudgetCaptureContract PROPERTIES LABELS "simulation;tools" TIMEOUT 60)
+add_test(NAME SimBudgetGateContract
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tools/perf/test_sim_budget_gate.py")
+set_tests_properties(SimBudgetGateContract PROPERTIES LABELS "simulation;tools" TIMEOUT 60)
 
 # GPU tracer micro-profile. Manual/GPU — needs a real GL context and a
 # hardware GPU (skips gracefully headless; writes the artifact but skips the perf
@@ -1921,10 +2017,25 @@ else()
     find_program(CAPTURE_VALIDATION_POWERSHELL NAMES pwsh powershell)
 endif()
 if(CAPTURE_VALIDATION_POWERSHELL)
+    if(Python3_FOUND)
+        add_test(NAME AcceptancePreflightContract
+            COMMAND "${Python3_EXECUTABLE}" ${CMAKE_SOURCE_DIR}/tools/gates/test_acceptance_preflight.py)
+        set_tests_properties(AcceptancePreflightContract PROPERTIES
+            LABELS "persistence;tools" TIMEOUT 120)
+    endif()
     add_test(NAME CaptureArtifactValidationContract
         COMMAND "${CAPTURE_VALIDATION_POWERSHELL}" -NoLogo -NoProfile -NonInteractive
             -ExecutionPolicy Bypass -File "${CMAKE_SOURCE_DIR}/tools/gates/test-capture-artifact-validation.ps1")
     set_tests_properties(CaptureArtifactValidationContract PROPERTIES LABELS "visual;tools" TIMEOUT 60)
+    add_test(NAME FarLadderOracleContract
+        COMMAND "${CAPTURE_VALIDATION_POWERSHELL}" -NoLogo -NoProfile -NonInteractive
+            -ExecutionPolicy Bypass -File "${CMAKE_SOURCE_DIR}/tools/gates/test-far-ladder-oracle.ps1")
+    set_tests_properties(FarLadderOracleContract PROPERTIES LABELS "tools" TIMEOUT 60)
+    add_test(NAME SavedWorldRoundtripArtifactsContract
+        COMMAND "${CAPTURE_VALIDATION_POWERSHELL}" -NoLogo -NoProfile -NonInteractive
+            -ExecutionPolicy Bypass -File "${CMAKE_SOURCE_DIR}/tools/gates/test-saved-world-roundtrip-artifacts.ps1")
+    set_tests_properties(SavedWorldRoundtripArtifactsContract PROPERTIES
+        LABELS "persistence;tools" TIMEOUT 60)
     add_test(NAME LuaApiManifestSourceContract
         COMMAND "${CAPTURE_VALIDATION_POWERSHELL}" -NoLogo -NoProfile -NonInteractive
             -ExecutionPolicy Bypass -File "${CMAKE_SOURCE_DIR}/tools/gates/validate-engine-frontier.ps1"
@@ -1932,14 +2043,35 @@ if(CAPTURE_VALIDATION_POWERSHELL)
     set_tests_properties(LuaApiManifestSourceContract PROPERTIES
         LABELS "scripting;tools" TIMEOUT 60 WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
 else()
+    message(STATUS "PowerShell unavailable: AcceptancePreflightContract is not registered")
     message(STATUS "PowerShell unavailable: CaptureArtifactValidationContract is not registered")
+    message(STATUS "PowerShell unavailable: FarLadderOracleContract is not registered")
+    message(STATUS "PowerShell unavailable: SavedWorldRoundtripArtifactsContract is not registered")
     message(STATUS "PowerShell unavailable: LuaApiManifestSourceContract is not registered")
+endif()
+
+# This integration requires pwsh specifically. Keep the existing discovery
+# above (including its Windows PowerShell fallback) for the file-only checks.
+# Linux coverage is conditional on discovering pwsh; Windows/MSVC CI requires
+# this exact test with --no-tests=error.
+find_program(FAR_LADDER_ORACLE_PWSH NAMES pwsh)
+if(FAR_LADDER_ORACLE_PWSH)
+    add_test(NAME FarLadderOracleWriterContract
+        COMMAND "${FAR_LADDER_ORACLE_PWSH}" -NoLogo -NoProfile -NonInteractive
+            -ExecutionPolicy Bypass -File "${CMAKE_SOURCE_DIR}/tools/gates/test-far-ladder-oracle-writer.ps1"
+            -FixtureExe "$<TARGET_FILE:far_ladder_oracle_writer_fixture>")
+    set_tests_properties(FarLadderOracleWriterContract PROPERTIES LABELS "tools" TIMEOUT 60)
+else()
+    message(STATUS "pwsh unavailable: FarLadderOracleWriterContract is not registered")
 endif()
 set(_vc_candidates "")
 if(DEFINED ENV{VISUAL_SWEEP_PYTHON})
     list(APPEND _vc_candidates "$ENV{VISUAL_SWEEP_PYTHON}")
 endif()
 if(Python3_FOUND)
+    add_test(NAME FarHorizonV2ValidatorContract
+        COMMAND "${Python3_EXECUTABLE}" -B -m unittest discover -s "${CMAKE_SOURCE_DIR}/tools/gates" -p test_far_ladder_oracle.py)
+    set_tests_properties(FarHorizonV2ValidatorContract PROPERTIES LABELS "tools" TIMEOUT 60)
     if(Python3_VERSION VERSION_GREATER_EQUAL "3.10")
         add_test(NAME FoliageEvidenceContract
             COMMAND "${Python3_EXECUTABLE}" ${CMAKE_SOURCE_DIR}/tools/perf/test_foliage_evidence.py)

@@ -3,10 +3,17 @@ name: UCRT64 package attribution
 on:
   workflow_dispatch:
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
     branches: [devel]
     paths:
       - .github/workflows/ucrt-attribution.yml
       - tools/ci/ucrt_attribution.sh
+      - tools/ci/test_ucrt_attribution.py
+      - tools/ci/test_ucrt_gcc_cohort.py
+      - tools/ci/check_worldgen_probe_smoke.py
+      - tools/ci/test_check_worldgen_probe_smoke.py
+      - tools/CMakeLists.txt
+      - test/CMakeLists.txt
       - test/diagnostics/worldgen_probe.cpp
 
 permissions:
@@ -31,13 +38,17 @@ jobs:
           update: true
           # The action clears its package cache at the end; restores come from
           # the archives the script stages itself, so the cache stays off.
+          # Provision libatomic before baseline capture: the pinned old cc-libs
+          # requires it, and intervention swaps only already installed members.
           cache: false
           install: >-
             curl
+            diffutils
             git
             procps-ng
             mingw-w64-ucrt-x86_64-cmake
             mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-libatomic
             mingw-w64-ucrt-x86_64-ninja
             mingw-w64-ucrt-x86_64-python
             mingw-w64-ucrt-x86_64-python-numpy
@@ -61,12 +72,19 @@ jobs:
             "| checked out sha | $env:MERGE_SHA |",
             "| runner image version | $imageVersion |"
           ) | Add-Content -Path $env:GITHUB_STEP_SUMMARY
+      - name: Check attribution and smoke contracts
+        shell: msys2 {0}
+        run: |
+          set -euo pipefail
+          python tools/ci/test_ucrt_attribution.py
+          python tools/ci/test_ucrt_gcc_cohort.py
+          python tools/ci/test_check_worldgen_probe_smoke.py
       - name: Run package cohort cells
         shell: msys2 {0}
         run: bash tools/ci/ucrt_attribution.sh
       - name: Upload attribution evidence
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ucrt-attribution-${{ github.run_id }}
           path: diag/

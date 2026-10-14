@@ -27,6 +27,7 @@ __declspec(dllexport) extern const int AmdPowerXpressRequestHighPerformance = 1;
 #include "app/RenderBenchmarkReport.h"
 #include "app/RuntimeRoot.h"
 #include "app/RuntimeStateRecorder.h"
+#include "app/SessionExit.h"
 #include "app/WindowModeControls.h"
 #include "audio/AudioManagerFactory.h"
 #include "audio/AudioPropagationSystem.h"   // ComputeWaterfallRoar (static)
@@ -2128,6 +2129,23 @@ int main(int argc, char* argv[]) {
         scenario_config.isolation_layers, scenario_config.isolation_backdrop));
     // far-LOD tile builds ride the JobSystem Normal lane.
     renderPipeline.attach_farlod_job_system(&jobSystem);
+    const auto farWorldCavePolicy =
+        renderPipeline.set_far_world_cave_policy(Luminumbra::Rendering::ResolveFarWorldCaveField(
+            g_systemConfig.param(luminumbra::core::SysParam::FarWorldCaveField,
+                                 Luminumbra::Rendering::kDefaultFarWorldCaveFieldCode)));
+    // systems.json defaults to Ladder; enabled:false explicitly requests Legacy.
+    renderPipeline.set_far_world_mode(Luminumbra::Rendering::RequestedFarWorldMode(
+        g_systemConfig.enabled(luminumbra::core::SysKey::RenderFarWorldLadder)));
+    if (g_systemConfig.enabled(luminumbra::core::SysKey::RenderFarWorldLadder)) {
+        if (!farWorldCavePolicy.requested)
+            LUMINUMBRA_CORE_WARN(
+                "Far-world Ladder refused: cave_field requires exact 0 (BandLimited) "
+                "or 1 (BoxFiltered). Legacy remains effective.");
+        else
+            LUMINUMBRA_CORE_WARN(
+                "Far-world Ladder requested; normal world activation refuses without "
+                "immutable committed authority and dirty parking. Legacy remains effective.");
+    }
     // set the sky-LUT GPU flag BEFORE startup so the one-shot precompute
     // (init_sky_lut, inside startup) takes the GPU compute path. render.sky_lut_gpu, default OFF.
     renderPipeline.set_sky_lut_gpu_enabled(
@@ -3780,13 +3798,8 @@ int main(int argc, char* argv[]) {
                         }
                     } // g_app.capture.timeScale == 0 -> paused (no sim ticks; render/streaming
                       // continue)
-                    if (const auto& region_fault = gameSession->GetRegionSchedulerFault()) {
-                        LUMINUMBRA_CORE_ERROR(
-                            "Region scheduler fault at tick {}: {}; saving and quitting",
-                            region_fault->tick,
-                            region_fault->message);
-                        glfwSetWindowShouldClose(window, GLFW_TRUE);
-                    }
+                    Luminumbra::Client::PollSessionFault(
+                        *gameSession, [&] { glfwSetWindowShouldClose(window, GLFW_TRUE); });
                     rb_sim_ms = std::chrono::duration<double, std::milli>(
                                     std::chrono::steady_clock::now() - _rb_sim_t0)
                                     .count();                         //
@@ -4959,6 +4972,9 @@ int main(int argc, char* argv[]) {
                     }
                 });
                 j["capture_context"]["time_of_day_at_report"] = renderPipeline.get_time_of_day();
+                j["capture_context"]["world_id"] =
+                    gameSession ? nlohmann::json(gameSession->GetMetadata().worldId)
+                                : nlohmann::json(nullptr);
                 if (g_rb_has_streaming_position) {
                     j["capture_context"]["last_world_streaming_position"] = {
                         g_rb_last_streaming_position.x,
@@ -5250,13 +5266,15 @@ int main(int argc, char* argv[]) {
     // is active or when no chunk carries unsaved edits.
     // The main loop and its quit callback have returned; keep saving on this thread.
     trace_shutdown("world_save_started");
-    if (gameSession && gameSession->SaveWorldState()) {
-        if (!g_app.menu.menu_backdrop_active && g_camera)
-            gameSession->SetSpawnPoint(g_playerController ? g_playerController->SavedSpawnAnchor()
-                                                          : g_camera->Position);
-        if (gameSession->SaveWorld())
-            mark_shutdown("world_state_saved");
-    }
+    Luminumbra::Client::SaveSessionOnExit(
+        gameSession.get(),
+        [&] {
+            if (!g_app.menu.menu_backdrop_active && g_camera)
+                gameSession->SetSpawnPoint(g_playerController
+                                               ? g_playerController->SavedSpawnAnchor()
+                                               : g_camera->Position);
+        },
+        [&] { mark_shutdown("world_state_saved"); });
 
     // Finished means the save stage returned; only world_state_saved reports success.
     trace_shutdown("world_save_finished");

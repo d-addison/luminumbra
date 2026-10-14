@@ -1,6 +1,6 @@
 {
-  "schema": "luminumbra.acceptance_matrix.v1",
-  "description": "Requirement-to-evidence matrix for the expanded v0.3 contract. Rows are statements; evidence items are executable tests, scripts, native commands or documents. An item marked planned names the workstream or PR that will land it; planned items are visible but never count as covered.",
+  "schema": "luminumbra.acceptance_matrix.v2",
+  "description": "Requirement-to-evidence matrix for the expanded v0.3 contract. Rows are statements; evidence items are executable tests, scripts, native commands or documents. The planned field is descriptive text naming outstanding work and its owner; planned items are visible but never count as covered.",
   "rows": [
     {
       "id": "perf.floor-p99",
@@ -10,8 +10,8 @@
       "evidence": [
         {"kind": "ctest", "ref": "RenderContractPython"},
         {"kind": "script", "ref": "tools/perf/validate_render_capture.py"},
-        {"kind": "script", "ref": "tools/perf/render_budget.py", "planned": {"owner": "ac", "pr": 184}},
-        {"kind": "native", "ref": "tools/gates/run-render-qualification.ps1", "planned": {"owner": "ac", "pr": 218},
+        {"kind": "script", "ref": "tools/perf/render_budget.py"},
+        {"kind": "native", "ref": "tools/gates/run-render-qualification.ps1", "planned": "render qualification gate (v0.3.1); owner: ac",
          "command": "pwsh tools/gates/run-render-qualification.ps1 -Package <dir> -OutDir <dir>",
          "receipt_schema": "luminumbra.render_qualification.v1"}
       ]
@@ -20,16 +20,16 @@
       "id": "perf.target-report-only",
       "source": "docs/distant-world.md#performance-measurement-contract",
       "statement": "The 8.33 ms target is reported (p50 for Quality, p50 and p99 for Performance) and never fails a capture.",
-      "status": "partial",
+      "status": "covered",
       "evidence": [
-        {"kind": "ctest", "ref": "RenderContractPython"},
-        {"kind": "script", "ref": "tools/perf/render_budget.py", "planned": {"owner": "ac", "pr": 184}}
+        {"kind": "ctest", "ref": "RenderBudgetPython"},
+        {"kind": "script", "ref": "tools/perf/render_budget.py"}
       ]
     },
     {
       "id": "perf.adapter-identity",
       "source": "docs/distant-world.md#performance-measurement-contract",
-      "statement": "Reports record the GL vendor and renderer strings and fail when the adapter is not the qualified RTX 5070 Ti.",
+      "statement": "The render capture validator accepts synthetic qualified-adapter strings and rejects a renderer mismatch against the qualified RTX 5070 Ti.",
       "status": "covered",
       "evidence": [
         {"kind": "ctest", "ref": "RenderContractPython"},
@@ -39,7 +39,7 @@
     {
       "id": "perf.timer-coverage",
       "source": "docs/distant-world.md#performance-measurement-contract",
-      "statement": "Every frame records wall, CPU submit, present and GPU timestamp timings tagged with the originating frame; unavailable timers are unavailable, never zero.",
+      "statement": "The software sample ring preserves frame identity, fake GPU queries test delayed-result attribution and leave unsupported or missing GPU timings unavailable, and statistics match the shared fixture. Client wall, CPU submit and present recording and real GL timestamp capture remain outstanding native/GPU qualification.",
       "status": "covered",
       "evidence": [
         {"kind": "ctest", "ref": "RenderMeasurementFrameRing"},
@@ -50,7 +50,7 @@
     {
       "id": "perf.percentile-definition",
       "source": "docs/distant-world.md#performance-measurement-contract",
-      "statement": "Reports carry p50, p95, p99, maximum and median absolute deviation using the percentile definition of tools/perf/perf.py.",
+      "statement": "C++ summarize and tools/perf/perf.py compute p50, p95, p99, maximum and median absolute deviation against the shared fixture. The render capture validator checks synthetic distributions against frame samples and rejects a forged p95 or mean.",
       "status": "covered",
       "evidence": [
         {"kind": "ctest", "ref": "RenderMeasurementStatistics"},
@@ -65,8 +65,8 @@
       "status": "needs-native-run",
       "evidence": [
         {"kind": "ctest", "ref": "RenderContractPython"},
-        {"kind": "script", "ref": "tools/perf/qualification/matrix.json", "planned": {"owner": "ac", "pr": 193}},
-        {"kind": "native", "ref": "tools/perf/run_qualification.py", "planned": {"owner": "ac", "pr": 215},
+        {"kind": "script", "ref": "tools/perf/qualification/matrix.json", "planned": "render qualification workload manifest (v0.3.1); owner: ac"},
+        {"kind": "native", "ref": "tools/perf/run_qualification.py", "planned": "render qualification runner (v0.3.1); owner: ac",
          "command": "python tools/perf/run_qualification.py --package <dir> --out <dir> --declare-refresh 3840x1600=143",
          "receipt_schema": "luminumbra.render_qualification.v1"}
       ]
@@ -79,7 +79,7 @@
       "evidence": [
         {"kind": "ctest", "ref": "RenderTraversalDeterministic"},
         {"kind": "ctest", "ref": "RenderTraversalRefusal"},
-        {"kind": "native", "ref": "tools/perf/run_qualification.py", "planned": {"owner": "ac", "pr": 215},
+        {"kind": "native", "ref": "tools/perf/run_qualification.py", "planned": "render qualification runner (v0.3.1); owner: ac",
          "command": "python tools/perf/run_qualification.py --package <dir> --out <dir> --only surface-flight.quality.3840x1600",
          "receipt_schema": "luminumbra.render_qualification.v1"}
       ]
@@ -90,7 +90,7 @@
       "statement": "The cave-walk and edited-world-tour traversals exist, include an identified edit, a snapshot commit and the all-tier bake inside the measured window, and meet the floor.",
       "status": "planned",
       "evidence": [
-        {"kind": "script", "ref": "tools/perf/qualification/matrix.json", "planned": {"owner": "fw", "issue": 132, "note": "traversal v2 and cave poses; ac AC8 spec"}}
+        {"kind": "script", "ref": "tools/perf/qualification/matrix.json", "planned": "traversal v2 and cave poses; ac AC8 spec; owner: fw; issue #132"}
       ]
     },
     {
@@ -102,7 +102,7 @@
         {"kind": "ctest", "ref": "RenderContractPython"},
         {"kind": "ctest", "ref": "RenderRunnerEvidencePython"},
         {"kind": "script", "ref": "tools/perf/validate_render_capture.py"},
-        {"kind": "script", "ref": "tools/perf/far_settle_check.py", "planned": {"owner": "fw", "note": "far ladder settle evidence (90 s limit) is not yet in the artifact or validator"}}
+        {"kind": "script", "ref": "tools/perf/far_settle_check.py", "planned": "far ladder settle evidence (90 s limit) is not yet in the artifact or validator; owner: fw"}
       ]
     },
     {
@@ -111,9 +111,9 @@
       "statement": "The far horizon gate requires complete per-tier coverage against an independently computed wanted set, below-horizon sky at most 2 percent, no seam band and no edge at the outer radius.",
       "status": "planned",
       "evidence": [
-        {"kind": "native", "ref": "tools/gates/validate-engine-frontier.ps1", "planned": {"owner": "fw", "note": "FarLodHorizon mode"},
-         "command": "pwsh tools/gates/validate-engine-frontier.ps1 -Mode FarLodHorizon",
-         "receipt_schema": "luminumbra.runtime_artifact.v2"}
+        {"kind": "native", "ref": "tools/gates/validate-engine-frontier.ps1", "planned": "Ladder qualification refuses until immutable fixture authority is supported; owner: fw",
+         "command": "pwsh tools/gates/validate-engine-frontier.ps1 -Mode FarLodHorizon -FarWorldRenderer Ladder",
+         "receipt_schema": "luminumbra.farlod_horizon.v2"}
       ]
     },
     {
@@ -133,7 +133,7 @@
       "statement": "A world saved at tick N, loaded and advanced K ticks equals an uninterrupted N+K run over every persisted subsystem, with negative controls per subsystem.",
       "status": "planned",
       "evidence": [
-        {"kind": "ctest", "ref": "HeadlessServerTickHeavy.SaveLoadEqualsUninterrupted", "planned": {"owner": "ds"}}
+        {"kind": "ctest", "ref": "HeadlessServerTickHeavy.SaveLoadEqualsUninterrupted", "planned": "save/load versus uninterrupted simulation oracle; owner: ds"}
       ]
     },
     {
@@ -142,9 +142,9 @@
       "statement": "The far ladder, caves and seams are covered on default, mountains, archipelago and cave-dense fixtures.",
       "status": "planned",
       "evidence": [
-        {"kind": "native", "ref": "tools/gates/validate-engine-frontier.ps1", "planned": {"owner": "fw"},
-         "command": "pwsh tools/gates/validate-engine-frontier.ps1 -Mode FarLodHorizon",
-         "receipt_schema": "luminumbra.runtime_artifact.v2"}
+        {"kind": "native", "ref": "tools/gates/validate-engine-frontier.ps1", "planned": "Ladder qualification refuses until immutable fixture authority is supported; owner: fw",
+         "command": "pwsh tools/gates/validate-engine-frontier.ps1 -Mode FarLodHorizon -FarWorldRenderer Ladder",
+         "receipt_schema": "luminumbra.farlod_horizon.v2"}
       ]
     },
     {
@@ -155,7 +155,7 @@
       "evidence": [
         {"kind": "ctest", "ref": "WorldOpenRefusal.CreateEditSaveRestartAndSwitchPreserveAuthority"},
         {"kind": "ctest", "ref": "WorldPersistenceRoundtripGate"},
-        {"kind": "ctest", "ref": "EditBakeAllTiers.*", "planned": {"owner": "fw", "issue": 132}}
+        {"kind": "ctest", "ref": "EditBakeAllTiers.*", "planned": "all-tier edit bake regression; owner: fw; issue #132"}
       ]
     },
     {
@@ -165,7 +165,7 @@
       "status": "partial",
       "evidence": [
         {"kind": "ctest", "ref": "WorldOpenRefusal.CatalogSeparatesEmptyUnavailableAndRealMetadataWithoutWriting"},
-        {"kind": "ctest", "ref": "SnapshotCommit.*", "planned": {"owner": "fw"}}
+        {"kind": "ctest", "ref": "SnapshotCommit.*", "planned": "snapshot commit interruption regression; owner: fw"}
       ]
     },
     {
@@ -176,18 +176,27 @@
       "evidence": [
         {"kind": "ctest", "ref": "WorldOpenRefusal.ServerAutosaveAndFullSnapshotCarryTheAbsoluteClock"},
         {"kind": "ctest", "ref": "WorldOpenRefusal.ActiveClockSaveRefusesWithFeatureOffThroughEveryOpenPath"},
-        {"kind": "ctest", "ref": "HeadlessServerTickHeavy.SaveLoadEqualsUninterrupted", "planned": {"owner": "ds"}}
+        {"kind": "ctest", "ref": "HeadlessServerTickHeavy.SaveLoadEqualsUninterrupted", "planned": "save/load versus uninterrupted simulation oracle; owner: ds"}
       ]
     },
     {
       "id": "em.hash-determinism",
       "source": "docs/distant-world.md#evidence-map",
-      "statement": "Hash pins and additivity guards hold; replay and lockstep gates run with checkpoint exchange enabled.",
-      "status": "partial",
+      "statement": "Hash pins and additivity guards hold; replay and lockstep require native qualification with checkpoint exchange enabled. ReplayRoundtrip verifies checkpoints at ticks 30/60/90, ReplayDivergence rejects the corrupted tick-30 checkpoint, and LockstepLoopback runs two peers for 90 ticks with cadence hash exchange. Qualification receipts remain outstanding.",
+      "status": "needs-native-run",
       "evidence": [
         {"kind": "ctest", "ref": "EcologyHash.AppendingEmptyEcologyAddsOnlyTheSuffix"},
         {"kind": "script", "ref": "tools/gates/validate-determinism-matrix.ps1"},
-        {"kind": "ctest", "ref": "AmbientInputBounds.*", "planned": {"owner": "ac", "pr": 188}}
+        {"kind": "ctest", "ref": "AmbientInputBounds.*"},
+        {"kind": "native", "ref": "tools/gates/validate-engine-frontier.ps1",
+         "command": "pwsh tools/gates/validate-engine-frontier.ps1 -BuildPreset debug -Mode LockstepLoopback",
+         "receipt_schema": "luminumbra.lockstep_loopback.v1"},
+        {"kind": "native", "ref": "tools/gates/validate-engine-frontier.ps1",
+         "command": "pwsh tools/gates/validate-engine-frontier.ps1 -BuildPreset debug -Mode ReplayRoundtrip",
+         "receipt_schema": "luminumbra.replay_roundtrip.v1"},
+        {"kind": "native", "ref": "tools/gates/validate-engine-frontier.ps1",
+         "command": "pwsh tools/gates/validate-engine-frontier.ps1 -BuildPreset debug -Mode ReplayDivergence",
+         "receipt_schema": "luminumbra.replay_divergence.v1"}
       ]
     },
     {
@@ -197,7 +206,7 @@
       "status": "needs-native-run",
       "evidence": [
         {"kind": "ctest", "ref": "RenderContractPython"},
-        {"kind": "native", "ref": "tools/perf/run_qualification.py", "planned": {"owner": "ac", "pr": 215},
+        {"kind": "native", "ref": "tools/perf/run_qualification.py", "planned": "render qualification runner (v0.3.1); owner: ac",
          "command": "python tools/perf/run_qualification.py --package <dir> --out <dir> --declare-refresh 3840x1600=143",
          "receipt_schema": "luminumbra.render_qualification.v1"}
       ]
@@ -209,38 +218,43 @@
       "status": "covered",
       "evidence": [
         {"kind": "ctest", "ref": "HangWatchdog.StalledHeartbeatFiresOnce"},
-        {"kind": "ctest", "ref": "HangWatchdog.AdvancingHeartbeatNeverFires"}
+        {"kind": "ctest", "ref": "HangWatchdog.AdvancingHeartbeatNeverFires"},
+        {"kind": "ctest", "ref": "HangWatchdog.RearmsAfterHeartbeatResumes"}
       ]
     },
     {
       "id": "sim.budget-capture",
       "source": "docs/sim-budget-telemetry.md",
-      "statement": "Per-system simulation tick work counts are captured deterministically on representative worlds.",
-      "status": "covered",
+      "statement": "Per-system simulation tick work counts must be captured deterministically on representative worlds. SimBudgetCaptureContract validates synthetic artifacts and command construction; representative-world capture receipts remain required.",
+      "status": "needs-native-run",
       "evidence": [
         {"kind": "ctest", "ref": "SimBudgetCaptureContract"},
-        {"kind": "script", "ref": "tools/perf/capture_sim_budget.py"}
+        {"kind": "native", "ref": "tools/perf/capture_sim_budget.py",
+         "command": "python3 tools/perf/capture_sim_budget.py --binary <server> --evidence-dir <capture-dir>",
+         "receipt_schema": "luminumbra.sim_budget_capture.v1"}
       ]
     },
     {
       "id": "sim.budget-enforcement",
       "source": "docs/sim-budget-telemetry.md",
-      "statement": "A committed simulation budget profile is enforced against the server smoke capture; residency classes without samples are unevaluated, never passing.",
-      "status": "planned",
+      "statement": "Synthetic caps are enforced in SimBudgetProfileTest and SimBudgetTelemetry: stage work above the cap is a violation, equality passes, missing residency samples remain unevaluated, and synthetic smoke artifacts fail on a stage violation. Production enforcement remains deferred: all committed baseline limits are null and CI runs check_sim_budgets.py without --require-complete. Measured limits must be pinned and --require-complete enabled in CI before production coverage can be claimed.",
+      "status": "partial",
       "evidence": [
-        {"kind": "script", "ref": "tools/perf/check_sim_budgets.py", "planned": {"owner": "ac", "pr": 189}},
-        {"kind": "ctest", "ref": "SimBudgetProfile.*", "planned": {"owner": "ac", "pr": 197}},
-        {"kind": "ctest", "ref": "SimBudgetTelemetry.*", "planned": {"owner": "ac", "pr": 214}}
+        {"kind": "script", "ref": "tools/perf/check_sim_budgets.py"},
+        {"kind": "ctest", "ref": "SimBudgetGateContract"},
+        {"kind": "ctest", "ref": "SimBudgetProfileTest.*"},
+        {"kind": "ctest", "ref": "SimBudgetTelemetry.*"},
+        {"kind": "script", "ref": "tools/perf/baselines/sim-budgets.json", "planned": "pin measured limits and workload identity, then enable --require-complete in CI; owner: ac"}
       ]
     },
     {
       "id": "iss.60",
       "source": "issue #60",
       "statement": "Saved-world catalog validation is bounded and does not block the UI thread.",
-      "status": "partial",
+      "status": "covered",
       "evidence": [
         {"kind": "ctest", "ref": "AsyncSavedWorldCatalogTest.CoalescesRefreshesAndDiscardsLateResults"},
-        {"kind": "ctest", "ref": "SavedWorldCatalogResponsiveness.*", "planned": {"owner": "ac", "pr": 206}}
+        {"kind": "ctest", "ref": "SavedWorldCatalogResponsiveness.*"}
       ]
     },
     {
@@ -250,20 +264,20 @@
       "status": "needs-native-run",
       "evidence": [
         {"kind": "ctest", "ref": "WorldOpenRefusal.CreateEditSaveRestartAndSwitchPreserveAuthority"},
-        {"kind": "native", "ref": "tools/gates/run-saved-world-lifecycle.ps1", "planned": {"owner": "ac", "note": "ac/native-drivers"},
-         "command": "pwsh tools/gates/run-saved-world-lifecycle.ps1 -Package <dir> -FixtureDir <dir>",
+        {"kind": "native", "ref": "tools/gates/run-saved-world-lifecycle.ps1",
+         "command": "pwsh tools/gates/run-saved-world-lifecycle.ps1 -Package <dir> -FixtureDir <dir> -OutDir <dir>",
          "receipt_schema": "luminumbra.saved_world_acceptance.v1"}
       ]
     },
     {
       "id": "iss.62",
       "source": "issue #62",
-      "statement": "Saved terrain edits render identically across hierarchical culling boundaries and world switches.",
+      "statement": "Saved terrain edits must render identically across hierarchical culling boundaries and world switches. TerrainCulling tests the visibility oracle; the lifecycle driver records switch captures but visual comparison of saved edits remains native evidence outstanding.",
       "status": "needs-native-run",
       "evidence": [
-        {"kind": "ctest", "ref": "TerrainCulling.*", "planned": {"owner": "ac", "pr": 206}},
-        {"kind": "native", "ref": "tools/gates/run-saved-world-lifecycle.ps1", "planned": {"owner": "ac", "note": "ac/native-drivers"},
-         "command": "pwsh tools/gates/run-saved-world-lifecycle.ps1 -Package <dir> -FixtureDir <dir>",
+        {"kind": "ctest", "ref": "TerrainCulling.*"},
+        {"kind": "native", "ref": "tools/gates/run-saved-world-lifecycle.ps1",
+         "command": "pwsh tools/gates/run-saved-world-lifecycle.ps1 -Package <dir> -FixtureDir <dir> -OutDir <dir>",
          "receipt_schema": "luminumbra.saved_world_acceptance.v1"}
       ]
     },
@@ -273,9 +287,9 @@
       "statement": "A no-UI saved-world load exits cleanly and produces a nonblack capture whose context agrees with the artifact.",
       "status": "needs-native-run",
       "evidence": [
-        {"kind": "native", "ref": "tools/gates/run-noui-load.ps1", "planned": {"owner": "ac", "note": "ac/native-drivers"},
-         "command": "pwsh tools/gates/run-noui-load.ps1 -Package <dir> -FixtureDir <dir>",
-         "receipt_schema": "luminumbra.saved_world_acceptance.v1"}
+        {"kind": "native", "ref": "tools/gates/run-noui-load.ps1",
+         "command": "pwsh tools/gates/run-noui-load.ps1 -Package <dir> -WorldId <id> -OutDir <dir>",
+         "receipt_schema": "luminumbra.noui_load.v1"}
       ]
     },
     {
@@ -285,9 +299,9 @@
       "status": "needs-native-run",
       "evidence": [
         {"kind": "ctest", "ref": "NetSoak"},
-        {"kind": "script", "ref": "tools/ci/check_v03_receipt.py", "planned": {"owner": "ac", "note": "ac/native-drivers"}},
-        {"kind": "native", "ref": "tools/gates/run-v03-acceptance.ps1", "planned": {"owner": "ac", "note": "ac/native-drivers"},
-         "command": "pwsh tools/gates/run-v03-acceptance.ps1 -Package <dir> -OutDir <dir>",
+        {"kind": "script", "ref": "tools/ci/check_v03_receipt.py"},
+        {"kind": "native", "ref": "tools/gates/run-v03-acceptance.ps1",
+         "command": "pwsh tools/gates/run-v03-acceptance.ps1 -Package <dir> -FixtureDir <dir> -OutDir <dir> -BuildDir <dir> -PerfEvidence <file> -AudioChecklist <file>",
          "receipt_schema": "luminumbra.v03_acceptance.v1"}
       ]
     },
@@ -298,18 +312,19 @@
       "status": "covered",
       "evidence": [
         {"kind": "script", "ref": "tools/ci/check_acceptance_matrix.py"},
+        {"kind": "ctest", "ref": "AcceptanceMatrixContract"},
         {"kind": "doc", "ref": "docs/acceptance-matrix.md"}
       ]
     },
     {
       "id": "iss.128",
       "source": "issue #128",
-      "statement": "Per-frame render timing distributions, profiles, displays and traversal workloads are recorded and validated.",
+      "statement": "Client reports must record GL vendor and renderer strings and emit per-frame render timing distributions through Measurement::add_distributions, alongside profiles, displays and traversal workloads. Cited software tests exercise statistics and synthetic artifact validation, not GL identity recording, distribution emission or client report generation; those runtime paths remain outstanding native qualification.",
       "status": "needs-native-run",
       "evidence": [
         {"kind": "ctest", "ref": "RenderContractPython"},
         {"kind": "ctest", "ref": "RenderMeasurementStatistics"},
-        {"kind": "native", "ref": "tools/perf/run_qualification.py", "planned": {"owner": "ac", "pr": 215},
+        {"kind": "native", "ref": "tools/perf/run_qualification.py", "planned": "render qualification runner (v0.3.1); owner: ac",
          "command": "python tools/perf/run_qualification.py --package <dir> --out <dir> --declare-refresh 3840x1600=143",
          "receipt_schema": "luminumbra.render_qualification.v1"}
       ]
@@ -317,11 +332,17 @@
     {
       "id": "iss.129",
       "source": "issue #129",
-      "statement": "Per-system simulation tick budgets are measured on representative worlds and proposed from observed work.",
-      "status": "partial",
+      "statement": "Per-system simulation tick budgets must be measured on representative worlds and proposed from observed work. Capture and proposal tooling is available and tested with synthetic inputs; representative-world capture and proposal receipts remain required.",
+      "status": "needs-native-run",
       "evidence": [
         {"kind": "ctest", "ref": "SimBudgetCaptureContract"},
-        {"kind": "script", "ref": "tools/perf/propose_sim_budgets.py", "planned": {"owner": "ac", "pr": 189}}
+        {"kind": "ctest", "ref": "SimBudgetGateContract"},
+        {"kind": "native", "ref": "tools/perf/capture_sim_budget.py",
+         "command": "python3 tools/perf/capture_sim_budget.py --binary <server> --evidence-dir <capture-dir>",
+         "receipt_schema": "luminumbra.sim_budget_capture.v1"},
+        {"kind": "native", "ref": "tools/perf/propose_sim_budgets.py",
+         "command": "python3 tools/perf/propose_sim_budgets.py <capture-dir> --output <proposal.json>",
+         "receipt_schema": "luminumbra.sim_budget_proposal.v1"}
       ]
     },
     {
@@ -330,7 +351,7 @@
       "statement": "Reversed-Z float depth is adopted with no GL error-severity output on a fixed view.",
       "status": "needs-native-run",
       "evidence": [
-        {"kind": "native", "ref": "tools/perf/check_gl_debug_log.py", "planned": {"owner": "ac", "pr": 218},
+        {"kind": "native", "ref": "tools/perf/check_gl_debug_log.py", "planned": "GL debug output qualification checker (v0.3.1); owner: ac",
          "command": "python tools/perf/check_gl_debug_log.py <client-stdout.log>",
          "receipt_schema": "luminumbra.gl_debug_verdict.v1"}
       ]
@@ -348,32 +369,38 @@
     {
       "id": "iss.141",
       "source": "issue #141",
-      "statement": "The expanded v0.3 contract is qualified and engine simulation and residency budgets are enforced; residency classes are unevaluated until the engine emits samples.",
+      "statement": "The expanded v0.3 contract requires native qualification and production simulation and residency budget enforcement. Measured simulation limits and --require-complete in CI remain outstanding; residency classes are unevaluated until the engine emits samples. The aggregate v0.3 driver does not evaluate simulation or residency budgets.",
       "status": "needs-native-run",
       "evidence": [
-        {"kind": "script", "ref": "tools/perf/check_residency.py", "planned": {"owner": "ac", "pr": 197}},
-        {"kind": "ctest", "ref": "SimBudgetTelemetry.*", "planned": {"owner": "ac", "pr": 214}},
-        {"kind": "native", "ref": "tools/gates/run-v03-acceptance.ps1", "planned": {"owner": "ac", "note": "ac/native-drivers"},
-         "command": "pwsh tools/gates/run-v03-acceptance.ps1 -Package <dir> -OutDir <dir>",
+        {"kind": "script", "ref": "tools/perf/check_residency.py"},
+        {"kind": "ctest", "ref": "SimBudgetTelemetry.*"},
+        {"kind": "script", "ref": "tools/perf/baselines/sim-budgets.json", "planned": "pin measured limits and require complete CI checks; production residency samples and separate budget qualification are outstanding; owner: ac"},
+        {"kind": "native", "ref": "tools/gates/run-v03-acceptance.ps1",
+         "command": "pwsh tools/gates/run-v03-acceptance.ps1 -Package <dir> -FixtureDir <dir> -OutDir <dir> -BuildDir <dir> -PerfEvidence <file> -AudioChecklist <file>",
          "receipt_schema": "luminumbra.v03_acceptance.v1"}
       ]
     },
     {
       "id": "iss.163",
       "source": "issue #163",
-      "statement": "Ambient field hashes do not depend on the host processor's SIMD dispatch.",
-      "status": "planned",
+      "statement": "Host-independent ambient field hashes require matching constructor and evolved receipts from at least two different hosts with different active ISA dispatch levels (SSE2 and AVX2 under the same dispatch ceiling). Current single-host receipts and the ASan-only comparison do not cover this requirement; cross-host qualification remains planned.",
+      "status": "needs-native-run",
       "evidence": [
-        {"kind": "ctest", "ref": "AmbientInputBounds.*", "planned": {"owner": "ac", "pr": 188}}
+        {"kind": "ctest", "ref": "AmbientDeterminismReceipt.EmitsConstructorAndEvolvedHashes"},
+        {"kind": "script", "ref": "tools/ci/compare_ambient_receipts.py"},
+        {"kind": "native", "ref": "tools/ci/compare_ambient_receipts.py", "planned": "collect JUnit receipts on separate SSE2 and AVX2 hosts, verify their host identities and active_simd values 4 and 256, then compare; the comparator alone does not attest host identity; owner: ac",
+         "command": "python3 tools/ci/compare_ambient_receipts.py sse2=<host-sse2.junit.xml> avx2=<host-avx2.junit.xml> --expect-labels sse2,avx2",
+         "receipt_schema": "luminumbra.ambient_receipt_comparison.v1"}
       ]
     },
     {
       "id": "iss.173",
       "source": "issue #173",
-      "statement": "Short wind position-array inputs are never read past their SIMD width.",
-      "status": "planned",
+      "statement": "Wind's short position-array call sites must provide whole-vector padded storage so SIMD tail loads stay within the allocation. AmbientInputBounds demonstrates that an unpadded two-element input faults and sixteen-element padding succeeds; a bounds regression tied to the production wind call sites remains planned.",
+      "status": "partial",
       "evidence": [
-        {"kind": "ctest", "ref": "AmbientInputBounds.*", "planned": {"owner": "ac", "pr": 188}}
+        {"kind": "ctest", "ref": "AmbientInputBounds.*"},
+        {"kind": "ctest", "ref": "WindFieldSystem.ShortPositionArrayCallSiteBounds", "planned": "exercise production wind call sites with guard-page bounds evidence; existing probes call the noise library directly; owner: ac"}
       ]
     }
   ]

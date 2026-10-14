@@ -177,4 +177,18 @@ bool CompilePristineFarVolume(const Systems::SHIELD_WorldSystem& world,
                               FarVolumeCompilation& output,
                               FarVolumeFacadeFailure* failure = nullptr);
 
+// The same one-scope world adapter, with the complete canonical compilation
+// charged through memory. A bound pool requires a retained lease paired with
+// output; refusal preserves both. A null pool retains the uncharged API behavior.
+// The caller still owns world lifetime and must not hold its sampling scope.
+bool CompilePristineFarVolumeCharged(const Systems::SHIELD_WorldSystem& world,
+                                     const FarVolumeCoverageIntent& intent,
+                                     std::uint64_t field_identity,
+                                     FarCaveMode caves,
+                                     FarVolumeNumericProfile numeric,
+                                     const FarVolumeCompilationLimits& limits,
+                                     const FarVolumeMemory& memory,
+                                     FarVolumeCompilation& output,
+                                     FarVolumeFacadeFailure* failure = nullptr);
+
 } // namespace Luminumbra::World

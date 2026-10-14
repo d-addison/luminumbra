@@ -2,6 +2,7 @@
 
 #include "luminumbra_common/core/JobSystem.h"
 #include "luminumbra_common/persistence/SavedWorldCatalog.h"
+#include "luminumbra_common/persistence/SyntheticSaveFixture.h"
 #include "luminumbra_common/persistence/WorldSaveService.h"
 #include "luminumbra_common/systems/AetherFieldSystem.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
@@ -14,6 +15,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cstdint>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <map>
@@ -51,6 +53,17 @@ std::map<std::string, std::string> DiskBytes(const fs::path& root) {
     return result;
 }
 
+std::uint32_t FixtureChunksFromEnv(const char* name, std::uint32_t fallback) {
+    const char* text = std::getenv(name);
+    if (text == nullptr || *text == '\0')
+        return fallback;
+    char* end = nullptr;
+    const unsigned long long value = std::strtoull(text, &end, 10);
+    if (end == text || *end != '\0' || value < 1 || value > 100000)
+        return fallback;
+    return static_cast<std::uint32_t>(value);
+}
+
 // Parallel ctest runs one process per parameterisation, and a coarse clock can hand two of
 // them the same tick, so the name combines random entropy with a per-process counter and the
 // directory is claimed atomically: create_directory reports false when it already existed.
@@ -68,6 +81,13 @@ fs::path UniqueRoot() {
         if (ec)
             throw fs::filesystem_error("create_directory", candidate, ec);
     }
+}
+
+void ExpectMissingPresetReason(const std::string& error, const fs::path& expected_path) {
+    const std::string prefix = "failed to open world preset: ";
+    ASSERT_EQ(error.rfind(prefix, 0), 0u);
+    EXPECT_EQ(fs::path(error.substr(prefix.size())).lexically_normal(),
+              expected_path.lexically_normal());
 }
 
 class WorldOpenRefusal : public testing::TestWithParam<std::tuple<int, int>> {
@@ -311,6 +331,80 @@ INSTANTIATE_TEST_SUITE_P(ClockMetadataEntryPoints,
                          WorldOpenRefusal,
                          testing::Combine(testing::Range(0, 3), testing::Range(30, 60)));
 
+TEST_F(WorldOpenRefusal, MissingMetadataRefusesCatalogClientAndServerWithoutChangingBytes) {
+    ASSERT_TRUE(fs::remove(save / "world_info.json"));
+    const auto before = DiskBytes(root);
+    const std::string expected =
+        "World unavailable: its save directory or metadata is missing or unreadable.";
+    const auto inspected = Persistence::InspectSavedWorld(root, "fixture");
+    EXPECT_EQ(inspected.error, expected);
+    const auto catalog = Persistence::EnumerateSavedWorlds(root);
+    ASSERT_TRUE(catalog.error.empty());
+    ASSERT_EQ(catalog.worlds.size(), 1u);
+    EXPECT_EQ(catalog.worlds.front().error, expected);
+    {
+        GameSession client;
+        client.SetJobSystem(&jobs);
+        client.SetRootPath(RootString());
+        EXPECT_FALSE(client.LoadWorld("fixture"));
+        EXPECT_EQ(client.GetWorldOpenError(), expected);
+        EXPECT_EQ(client.GetLastLoadedChunkCount(), 0u);
+        EXPECT_FALSE(client.SaveWorld());
+    }
+    Server::ServerWorldRunnerConfig config;
+    config.root_path = RootString();
+    config.world_id = "fixture";
+    config.surface_radius = 0;
+    config.collision_radius = 0;
+    Server::ServerWorldRunner runner(config);
+    EXPECT_FALSE(runner.Boot());
+    EXPECT_EQ(runner.GetBootError(), expected);
+    EXPECT_EQ(runner.Session(), nullptr);
+    world::WorldStateSaveReport report;
+    runner.Shutdown(&report);
+    EXPECT_FALSE(report.saved);
+    EXPECT_EQ(DiskBytes(root), before);
+}
+
+TEST_F(WorldOpenRefusal, MissingEmbeddedPresetAndAtlasFallbackRefuseBeforeGeneration) {
+    const auto atlas = root / "worlds/atlas/presets/default.json";
+    const auto embedded = save / "preset.json";
+    ASSERT_TRUE(fs::copy_file(atlas, embedded));
+    ASSERT_TRUE(Persistence::InspectSavedWorld(root, "fixture").error.empty());
+    ASSERT_TRUE(fs::remove(embedded));
+    // An embedded-preset deletion alone is loadable through the atlas fallback.
+    ASSERT_TRUE(Persistence::InspectSavedWorld(root, "fixture").error.empty());
+    ASSERT_TRUE(fs::remove(atlas));
+    const auto before = DiskBytes(root);
+    ExpectMissingPresetReason(Persistence::InspectSavedWorld(root, "fixture").error, atlas);
+    const auto catalog = Persistence::EnumerateSavedWorlds(root);
+    ASSERT_TRUE(catalog.error.empty());
+    ASSERT_EQ(catalog.worlds.size(), 1u);
+    ExpectMissingPresetReason(catalog.worlds.front().error, atlas);
+    {
+        GameSession client;
+        client.SetJobSystem(&jobs);
+        client.SetRootPath(RootString());
+        EXPECT_FALSE(client.LoadWorld("fixture"));
+        ExpectMissingPresetReason(client.GetWorldOpenError(), atlas);
+        EXPECT_EQ(client.GetLastLoadedChunkCount(), 0u);
+        EXPECT_FALSE(client.SaveWorld());
+    }
+    Server::ServerWorldRunnerConfig config;
+    config.root_path = RootString();
+    config.world_id = "fixture";
+    config.surface_radius = 0;
+    config.collision_radius = 0;
+    Server::ServerWorldRunner runner(config);
+    EXPECT_FALSE(runner.Boot());
+    ExpectMissingPresetReason(runner.GetBootError(), atlas);
+    EXPECT_EQ(runner.Session(), nullptr);
+    world::WorldStateSaveReport report;
+    runner.Shutdown(&report);
+    EXPECT_FALSE(report.saved);
+    EXPECT_EQ(DiskBytes(root), before);
+}
+
 TEST_F(WorldOpenRefusal, ActiveClockSaveRefusesWithFeatureOffThroughEveryOpenPath) {
     GameSession writer;
     writer.SetRootPath(RootString());
@@ -550,6 +644,24 @@ TEST_F(WorldOpenRefusal, CreateEditSaveRestartAndSwitchPreserveAuthority) {
         EXPECT_EQ(reopened.GetLastLoadedChunkCount(), 1u);
         EXPECT_EQ(reopened.GetWorldSystem()->snapshot_streamed_chunks().front()->sdf_data.front(),
                   1.0f);
+    }
+    EXPECT_EQ(DiskBytes(root), before);
+}
+
+TEST_F(WorldOpenRefusal, SavedWorldLifecycleFixtureSwitchesWithoutWritingAnything) {
+    Persistence::SyntheticSaveSpec spec;
+    spec.world_id = "synthetic-lifecycle";
+    spec.chunk_count = FixtureChunksFromEnv("LUMIN_LIFECYCLE_FIXTURE_CHUNKS", 64);
+    spec.preset_source = fs::path(LUMINUMBRA_SOURCE_ROOT) / "worlds/atlas/presets/default.json";
+    const auto report = Persistence::WriteSyntheticSave(spec, root);
+    ASSERT_TRUE(report.ok) << report.error;
+    const auto before = DiskBytes(root);
+    GameSession reopened;
+    reopened.SetRootPath(RootString());
+    reopened.SetJobSystem(&jobs);
+    for (int switch_count = 0; switch_count < 6; ++switch_count) {
+        ASSERT_TRUE(reopened.LoadWorld("synthetic-lifecycle")) << reopened.GetWorldOpenError();
+        ASSERT_TRUE(reopened.LoadWorld("fixture")) << reopened.GetWorldOpenError();
     }
     EXPECT_EQ(DiskBytes(root), before);
 }

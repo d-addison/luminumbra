@@ -15,10 +15,11 @@
 // within a run over a deterministic bounded region — there are no golden hashes —
 // and the non-vacuity guards (water_chunks / max_depth / seam_wet / found_water /
 // land_water) still prove real water was exercised.
+#include "../support/UniqueTempPath.h"
+
 #include <gtest/gtest.h>
 
 #include <algorithm>
-#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -54,9 +55,8 @@ using Luminumbra::world::GameSession;
 class HeadlessRoot {
 public:
     HeadlessRoot() {
-        const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
-        root_ = fs::temp_directory_path() /
-                ("luminumbra_water_determinism_test_" + std::to_string(stamp));
+        root_ = Luminumbra::TestSupport::CreateUniqueTempDirectory(
+            "luminumbra_water_determinism_test_");
         const fs::path src(LUMINUMBRA_SOURCE_ROOT);
         fs::create_directories(root_ / "worlds" / "atlas" / "presets");
         fs::copy_file(src / "worlds" / "atlas" / "presets" / "default.json",

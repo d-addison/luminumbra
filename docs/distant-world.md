@@ -328,18 +328,18 @@ record omission in the table applies without losing that phase.
 ## Simulation clock and calendar
 
 One persisted absolute tick base continues across save and load. Day length is
-36,000 ticks (20 minutes at 30 Hz) and a year is 8 days for every consumer
-below and for the rendered sky; the shorter render day remains only as a debug
-override.
+216,000 ticks (two hours at 30 Hz) and a year is 8 days (16 hours) for
+calendar consumers and the rendered sky. Explicit calendars retain their saved
+pacing; shorter render days remain available as debug overrides.
 
-| Consumer today | Period today | Under this contract |
+| Consumer | Legacy period without the calendar | Calendar period |
 |---|---|---|
 | Plant light (`GameSession.cpp`) | 36,000-tick day | Calendar day |
 | Plant season (`GameSession.cpp`) | 288,000-tick year (8 days) | Calendar year |
 | Circadian slot (`GameSession.cpp`) | 36,000-tick day | Calendar day |
 | Migration (`GameSession.cpp`) | 108,000-tick year | Calendar year |
 | Stimulus channels (`StimulusChannels.h`) | 7,200-tick day, 432,000-tick season | Calendar day and year |
-| Rendered sky (`TimeOfDayModel.h`, `RenderPipeline.h`) | 1,800-tick day, 432,000-tick season | Calendar day and year |
+| Rendered sky (`TimeOfDayModel.h`, `RenderPipeline.h`) | 216,000-tick day, 432,000-tick season | Calendar day and year |
 
 One physical origin governs every consumer: tick zero is midnight of day zero
 in midwinter, which is the origin the plant and circadian formulas use today;
@@ -356,8 +356,13 @@ Calendar phase origins equal today's formulas (phase = tick modulo period from
 tick zero), so the plant season still starts at its cold minimum. Snapshots are
 taken only on tick boundaries, never inside a batched client catch-up.
 
-Current behaviour: the tick counter restarts at zero on every load, so a loaded
-world resumes tick-zero weather, and the six durations above coexist.
+With `sim.active_regions` off, the tick counter restarts at zero on load and
+simulation consumers retain the legacy periods above. With it on, the saved
+clock governs their day and year phases. Wind and weather retain independent
+tick-based update periods. The renderer's lunar cycle is still fixed at 54,000
+ticks (30 minutes): four full cycles per default day, including two during a
+night. Its brightness therefore changes within a night rather than between
+nights; a calendar-relative lunar period needs a separate pacing decision.
 
 ## Persistence and format contract
 
@@ -529,6 +534,50 @@ is not retained per frame.
 Names of new tests are binding once their slices land; the activation slice
 fills in fixture identifiers, thresholds and artifact schemas per row.
 
+## Acceptance requirement IDs
+
+This is the authoritative list of required mappings for the performance contract,
+evidence map, simulation budgets and associated acceptance issues. Each ID must
+have one evidence row in `tools/ci/acceptance_matrix.json`, even when its evidence
+is partial, planned or awaiting native qualification. Add requirements here before
+mapping their evidence; the checker reads this list independently of the matrix.
+The descriptions identify requirements, not their current coverage status.
+
+- `perf.floor-p99`: Both profiles meet the 16.67 ms p99 floor on every workload.
+- `perf.target-report-only`: Report the 8.33 ms target without failing captures.
+- `perf.adapter-identity`: Record GL identity and refuse an unqualified adapter.
+- `perf.timer-coverage`: Record frame wall, CPU submit, present and GPU timings with frame attribution and explicit unavailability.
+- `perf.percentile-definition`: Report p50, p95, p99, maximum and median absolute deviation using the shared definition.
+- `perf.fixed-view-workload`: Pin fixed-view inputs and use 400 warm-up and 240 measured frames.
+- `perf.traversal-60s`: Pin 60-second traversal inputs and include streaming transients.
+- `perf.cave-walk-and-edited-tour`: Qualify cave and edited-world traversals with snapshot commit and all-tier bake inside the measured window.
+- `perf.invalid-capture`: Refuse incomplete timers, undeclared overrides, workload mismatches and unsettled far ladders.
+- `perf.far-horizon-gate`: Require complete wanted-set coverage, bounded below-horizon sky and no seams or outer-radius edge.
+- `perf.requirement-matrix`: Map every contract requirement to named evidence, fixtures, thresholds and artifact schemas.
+- `perf.save-load-oracle`: Compare N-save-load-K with uninterrupted N+K for every persisted subsystem, with negative controls.
+- `em.far-ladder`: Qualify far ladder, caves and seams on default, mountains, archipelago and cave-dense fixtures.
+- `em.edits-far-authority`: Preserve all-tier edit authority across save and load.
+- `em.snapshot-commit`: Recover interrupted snapshot commits and inspect the catalog read-only.
+- `em.clock-ledger-pages`: Persist and round-trip clock, ledger, pages, creatures and water with negative controls.
+- `em.hash-determinism`: Verify hash pins, additivity, replay and lockstep checkpoints.
+- `em.performance`: Qualify six fixed views and three traversals for every profile and display with schema v3 artifacts.
+- `em.client-hang`: Detect client stalls and re-arm the watchdog after heartbeat recovery.
+- `sim.budget-capture`: Capture deterministic per-system work on representative worlds.
+- `sim.budget-enforcement`: Enforce measured per-system and residency limits and reject incomplete qualification.
+- `iss.60`: Bound saved-world catalog validation without blocking the UI thread.
+- `iss.61`: Qualify packaged create, edit, save, restart, select, load and world switching.
+- `iss.62`: Preserve saved-edit rendering across culling boundaries and world switches.
+- `iss.63`: Qualify clean no-UI saved-world loading with a nonblack, context-matched capture.
+- `iss.68`: Qualify serial loading, networking soak and performance together in a v0.3 receipt.
+- `iss.126`: Give every reviewed contract requirement named evidence.
+- `iss.128`: Emit client GL identity and per-frame render distributions for the qualification workloads.
+- `iss.129`: Measure representative-world simulation work and propose per-system tick budgets.
+- `iss.130`: Adopt reversed-Z float depth without GL error-severity output.
+- `iss.134`: Persist the simulation clock and unify the calendar across save and load.
+- `iss.141`: Qualify the expanded contract with production simulation and residency budget enforcement.
+- `iss.163`: Compare ambient field hashes across different hosts and active ISA dispatch levels.
+- `iss.173`: Prove production wind call sites supply padded position arrays for SIMD tail loads.
+
 ## Deferred
 
 Traversal beyond 32 km from the origin (origin rebasing), views beyond 16 km,
@@ -538,3 +587,9 @@ of coarse state and the far authority overlay to remote clients, scent and
 foraging at distance, a simulation-only residency class, scheduled game events
 and Workshop content distribution are tracked separately and are not part of
 this contract.
+
+FW renderer diagnostics and the current horizon artifact/gate contract are described in
+[Far world horizon v2](far-world-horizon-v2.md). Ladder is the default requested mode;
+`render.far_world_ladder.enabled:false` explicitly opts out to Legacy. Effective
+Legacy fallback and refusal diagnostics remain when Ladder cannot bind. Native
+ladder qualification remains outstanding.

@@ -16,8 +16,10 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 
-SCHEMA = "luminumbra.acceptance_matrix.v1"
+SCHEMA = "luminumbra.acceptance_matrix.v2"
 DEFAULT_ROOT = Path(__file__).resolve().parents[2]
+REQUIREMENT_SOURCE = Path("docs/distant-world.md")
+REQUIREMENT_HEADING = "## Acceptance requirement IDs"
 STATUS_ORDER = ("covered", "partial", "needs-native-run", "planned")
 VALID_STATUSES = frozenset(STATUS_ORDER)
 EVIDENCE_KINDS = frozenset({"ctest", "script", "native", "doc"})
@@ -64,6 +66,32 @@ def load_matrix(path: Path) -> dict[str, Any]:
     if not isinstance(data, dict):
         raise MatrixError(f"{path}: top-level value must be a JSON object")
     return data
+
+
+def load_required_ids(path: Path) -> frozenset[str]:
+    """Read the authoritative contract list, independently of the evidence rows."""
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError) as exc:
+        raise MatrixError(f"cannot read requirement source {path}: {exc}") from exc
+    if lines.count(REQUIREMENT_HEADING) != 1:
+        raise MatrixError(f"{path}: expected one {REQUIREMENT_HEADING} section")
+    required: set[str] = set()
+    for line in lines[lines.index(REQUIREMENT_HEADING) + 1 :]:
+        if line.startswith("## "):
+            break
+        if not line.startswith("- "):
+            continue
+        match = re.fullmatch(r"- `([a-z0-9][a-z0-9._-]*)`: (\S.*)", line)
+        if match is None:
+            raise MatrixError(f"{path}: malformed requirement entry: {line}")
+        row_id = match.group(1)
+        if row_id in required:
+            raise MatrixError(f"{path}: duplicate requirement ID: {row_id}")
+        required.add(row_id)
+    if not required:
+        raise MatrixError(f"{path}: requirement list must not be empty")
+    return frozenset(required)
 
 
 def _cmake_files(root: Path) -> list[Path]:
@@ -287,10 +315,6 @@ def _ctest_exists(ref: str, index: TestIndex) -> bool:
     return (suite, case) in index.gtest_cases
 
 
-def _is_positive_int(value: Any) -> bool:
-    return isinstance(value, int) and not isinstance(value, bool) and value > 0
-
-
 def _is_nonempty_str(value: Any) -> bool:
     return isinstance(value, str) and value.strip() != ""
 
@@ -311,16 +335,14 @@ def _path_problem(base: Path, ref: str, must_exist: bool) -> str | None:
 
 
 def _check_planned(add: Any, planned: Any) -> None:
-    if not isinstance(planned, dict):
-        add("planned must be an object")
+    if not _is_nonempty_str(planned):
+        add("planned must be a non-empty descriptive string")
         return
-    if not _is_nonempty_str(planned.get("owner")):
-        add("planned.owner must be a non-empty string")
-    for key in ("pr", "issue"):
-        if key in planned and not _is_positive_int(planned[key]):
-            add(f"planned.{key} must be a positive integer")
-    if "note" in planned and not isinstance(planned["note"], str):
-        add("planned.note must be a string")
+    note, separator, details = planned.partition("; owner:")
+    if not note.strip():
+        add("planned work description must not be empty")
+    if not separator or not details.split(";", 1)[0].strip():
+        add("planned must include a non-empty '; owner:' workstream")
 
 
 def _check_item(
@@ -402,6 +424,11 @@ def validate(
 
     if matrix.get("schema") != SCHEMA:
         problems.append(("<matrix>", f"schema must be {SCHEMA}"))
+    try:
+        required_ids = load_required_ids(base / REQUIREMENT_SOURCE)
+    except MatrixError as exc:
+        problems.append(("<matrix>", str(exc)))
+        required_ids = frozenset()
     if not isinstance(rows, list) or not rows:
         problems.append(("<matrix>", "rows must be a non-empty list"))
         return [f"{label}: {message}" for label, message in sorted(problems)]
@@ -450,6 +477,7 @@ def validate(
 
         problems.extend((label, message) for message in messages)
 
+    problems.extend((row_id, "required mapping missing") for row_id in required_ids - seen_ids)
     return [f"{label}: {message}" for label, message in sorted(problems)]
 
 
@@ -574,16 +602,8 @@ def _escape_cell(text: str) -> str:
 def _render_item(item: dict[str, Any]) -> str:
     text = f"{item['kind']}: `{item['ref']}`"
     planned = item.get("planned")
-    if isinstance(planned, dict):
-        details = [str(planned["owner"])]
-        if "pr" in planned:
-            details.append(f"change {planned['pr']}")
-        if "issue" in planned:
-            details.append(f"issue #{planned['issue']}")
-        inner = ", ".join(details)
-        if planned.get("note"):
-            inner += f" - {planned['note']}"
-        text += f" (planned: {inner})"
+    if isinstance(planned, str):
+        text += f" (planned: {planned})"
     if item["kind"] == "native":
         text += f" -- command: `{item['command']}`; receipt: `{item['receipt_schema']}`"
     return _escape_cell(text)
@@ -602,7 +622,8 @@ def render_doc(matrix: dict[str, Any]) -> str:
         "`tools/ci/check_acceptance_matrix.py --write-doc`. Do not edit it by hand; "
         "change the matrix and regenerate.",
         "",
-        "Statuses declare the available evidence. Static validation checks references; it does not "
+        "Statuses declare the available evidence. Static validation requires a mapping for every ID "
+        "in [the contract requirement list](distant-world.md#acceptance-requirement-ids) and checks references; it does not "
         "prove execution. JUnit mode checks every referenced CTest identity in the supplied discovery "
         "roster, including parameter instances. Scripts, documents and native commands need separate "
         "evidence; a passing CTest gate does not qualify the full acceptance contract.",
