@@ -34,7 +34,7 @@ FarVolumeWantedRequest Wanted(FarTileKey key) {
     return {{1, 42, 0, key, 1, 1},
             {canonical, {}},
             0,
-            std::make_shared<const FarWorldConstantWaterObservation>(42, false, 0),
+            std::make_shared<const FarWorldConstantWaterObservation>(42, false, 0.0f),
             FarWorldWaterBound{true, 0, 0}};
 }
 FarVolumeAuthority Authority(const FarVolumeWantedRequest& request, bool mixed = false) {
@@ -114,7 +114,7 @@ TEST(FarVolumeResidency, CombinedWetUploadDebitsAndCurrentArrivalRestoresAfterWa
                         Wanted({1, -2, -1}),
                         Wanted({1, -1, -1})};
     for (auto& request : requests) {
-        request.water = std::make_shared<const FarWorldConstantWaterObservation>(42, true, 0);
+        request.water = std::make_shared<const FarWorldConstantWaterObservation>(42, true, 0.0f);
         request.water_bound = FarWorldWaterBound{false, 0, 0};
     }
     ASSERT_TRUE(owner.ReplaceWanted(requests));
@@ -291,7 +291,7 @@ TEST(FarVolumeResidency, ActualUploadBytesCapDefersReadyAndPreservesOldGpuOnFail
     const auto* previous = owner.Resource(requests[0].identity.key);
     ++requests[0].identity.content_hash;
     requests[0].water = std::make_shared<const FarWorldConstantWaterObservation>(
-        requests[0].identity.content_hash, false, 0);
+        requests[0].identity.content_hash, false, 0.0f);
     ASSERT_TRUE(owner.ReplaceWanted(requests));
     // Other Ready result is retained but cannot consume this build's dispatch.
     const std::array changed{requests[0]};
@@ -481,7 +481,7 @@ TEST(FarVolumeResidency, ProspectiveEvictionRequiresCurrentUnderlayAndKeepsKeyLa
     // A new real content identity does not defeat the accepted key-scoped latch.
     ++wanted[2].identity.content_hash;
     wanted[2].water = std::make_shared<const FarWorldConstantWaterObservation>(
-        wanted[2].identity.content_hash, false, 0);
+        wanted[2].identity.content_hash, false, 0.0f);
     ASSERT_TRUE(owner.ReplaceWanted(wanted));
     EXPECT_EQ(Observation(owner, far.identity.key).eligibility,
               FarVolumeEligibility::BudgetEvicted);
@@ -560,7 +560,8 @@ TEST(FarVolumeResidency, FailedAndBudgetEvictedChildrenRestoreArrivalFallbackNex
                                    Wanted({1, 0, 1}),
                                    Wanted({1, 1, 1})};
         for (auto& request : requests) {
-            request.water = std::make_shared<const FarWorldConstantWaterObservation>(42, true, 0);
+            request.water =
+                std::make_shared<const FarWorldConstantWaterObservation>(42, true, 0.0f);
             request.water_bound = FarWorldWaterBound{false, 0, 0};
         }
         ASSERT_TRUE(owner.ReplaceWanted(requests));
@@ -589,7 +590,7 @@ TEST(FarVolumeResidency, FailedAndBudgetEvictedChildrenRestoreArrivalFallbackNex
             ASSERT_NE(retained, nullptr);
             ++requests[4].identity.content_hash;
             requests[4].water = std::make_shared<const FarWorldConstantWaterObservation>(
-                requests[4].identity.content_hash, true, 0);
+                requests[4].identity.content_hash, true, 0.0f);
             ASSERT_TRUE(owner.ReplaceWanted(requests));
             ASSERT_TRUE(WaitReady(owner, std::span(requests).last(1), Producer(true)));
             FarVolumeUploadBackend failure =

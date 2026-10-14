@@ -406,12 +406,21 @@ bool FarWorldRenderer::AdvanceFrame(std::uint64_t frame,
             refusal_ = FarWorldRefusal::WaterUnavailable;
             return false;
         }
-        if (!ValidFarWorldWaterBound(*bound) ||
-            (!bound->known_dry && (!requests_[i].intent.extra_span ||
-                                   requests_[i].intent.extra_span->min_y > bound->min_y ||
-                                   requests_[i].intent.extra_span->max_y < bound->max_y))) {
+        if (!ValidFarWorldWaterBound(*bound)) {
             refusal_ = FarWorldRefusal::WaterSpanRefused;
             return false;
+        }
+        if (!bound->known_dry) {
+            const auto& extra_span = requests_[i].intent.extra_span;
+            if (!extra_span) {
+                refusal_ = FarWorldRefusal::WaterSpanRefused;
+                return false;
+            }
+            const auto& span = *extra_span;
+            if (span.min_y > bound->min_y || span.max_y < bound->max_y) {
+                refusal_ = FarWorldRefusal::WaterSpanRefused;
+                return false;
+            }
         }
     }
     requests = std::span(requests_.data(), requests.size());

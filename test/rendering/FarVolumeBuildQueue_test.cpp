@@ -33,7 +33,7 @@ FarVolumeQueueRequest AirRequest(std::int64_t x = 0) {
                              return FarVolumeSample{1, 7};
                          }};
     request.water = std::make_shared<const FarWorldConstantWaterObservation>(
-        request.identity.content_hash, false, 0);
+        request.identity.content_hash, false, 0.0f);
     request.water_bound = FarWorldWaterBound{true, 0, 0};
     return request;
 }
@@ -45,7 +45,7 @@ FarVolumeQueueRequest PlaneRequest(std::int64_t x = 0) {
                                static_cast<std::uint8_t>(p.x < 512 ? 7 : 8)};
     };
     request.water = std::make_shared<const FarWorldConstantWaterObservation>(
-        request.identity.content_hash, false, 0);
+        request.identity.content_hash, false, 0.0f);
     request.water_bound = FarWorldWaterBound{true, 0, 0};
     return request;
 }
@@ -119,7 +119,7 @@ TEST(FarVolumeBuildQueue, EmptyTerrainWetWaterPublishesOneCompleteMixedResult) {
     FarVolumeMemoryPool pool(16 * 1024 * 1024);
     FarVolumeBuildQueue queue(jobs, pool, QueueLimits());
     auto request = AirRequest(-1);
-    request.water = std::make_shared<const FarWorldConstantWaterObservation>(42, true, 0);
+    request.water = std::make_shared<const FarWorldConstantWaterObservation>(42, true, 0.0f);
     request.water_bound = FarWorldWaterBound{false, 0, 0};
     ASSERT_EQ(queue.Submit(request), FarVolumeSubmitStatus::Queued);
     const auto result = WaitResult(queue, request);
