@@ -48,8 +48,8 @@ bool HasFarSubmissionAccess(const std::string& source) {
                                      "SubmitSelectedFarWorld",
                                      "DrawFarVolumeGpu"};
     const auto identifier_char = [](char c) {
-        return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-               (c >= '0' && c <= '9') || c == '_';
+        return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+               c == '_';
     };
     for (const char* identifier : forbidden) {
         const std::string name(identifier);

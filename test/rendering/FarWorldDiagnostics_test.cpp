@@ -267,12 +267,11 @@ TEST(FarWorldDiagnostics, SerializerContainsBindingPoliciesCoverageCountersAndLo
 
 TEST(FarWorldDiagnostics, CavePolicyRefusalsKeepTheirNamesInSerializedDiagnostics) {
     Station station;
-    for (const auto refusal : {FarWorldRefusal::InvalidCavePolicy,
-                               FarWorldRefusal::CavePolicyMismatch}) {
+    for (const auto refusal :
+         {FarWorldRefusal::InvalidCavePolicy, FarWorldRefusal::CavePolicyMismatch}) {
         station.snapshot.selection.refusal = refusal;
-        const auto expected = refusal == FarWorldRefusal::InvalidCavePolicy
-                                  ? "InvalidCavePolicy"
-                                  : "CavePolicyMismatch";
+        const auto expected = refusal == FarWorldRefusal::InvalidCavePolicy ? "InvalidCavePolicy"
+                                                                            : "CavePolicyMismatch";
         EXPECT_STREQ(FarWorldRefusalName(refusal), expected);
         EXPECT_EQ(FarWorldDiagnosticJson(station.snapshot)["refusal"], expected);
         EXPECT_FALSE(station.Ready());
