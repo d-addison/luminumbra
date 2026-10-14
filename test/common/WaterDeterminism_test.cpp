@@ -23,9 +23,12 @@
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <string>
 #include <vector>
+
+#include <nlohmann/json.hpp>
 
 #include "luminumbra_common/components/CoreComponents.h" // water-source: TransformComponent
 #include "luminumbra_common/core/JobSystem.h"
@@ -53,7 +56,7 @@ using Luminumbra::world::GameSession;
 // within-run path stability still holds. The destructor removes the tree.
 class HeadlessRoot {
 public:
-    HeadlessRoot() {
+    explicit HeadlessRoot(bool disable_island_mask = false) {
         const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
         root_ = fs::temp_directory_path() /
                 ("luminumbra_water_determinism_test_" + std::to_string(stamp));
@@ -61,6 +64,15 @@ public:
         fs::create_directories(root_ / "worlds" / "atlas" / "presets");
         fs::copy_file(src / "worlds" / "atlas" / "presets" / "default.json",
                       root_ / "worlds" / "atlas" / "presets" / "default.json");
+        if (disable_island_mask) {
+            const auto path = root_ / "worlds" / "atlas" / "presets" / "default.json";
+            std::ifstream input(path);
+            auto preset = nlohmann::json::parse(input);
+            input.close();
+            preset["generation_params"]["terrain"]["island_mask_enabled"] = false;
+            std::ofstream output(path);
+            output << preset.dump(2);
+        }
         // The `default` preset has rivers_enabled + a biome table ("common/biomes.json"); copy it
         // to the locations the loader probes so the rivers/water actually generate.
         std::error_code ec;
@@ -958,7 +970,9 @@ PhysicsCompareResult run_bed_edit_compare(const std::string& root,
 }
 
 TEST(WaterDeterminism, HighResWaterMatchesMediumPhysicsPerSimPass) {
-    const HeadlessRoot root;
+    // Keep the bed/shoreline used to calibrate both pit-fill and dam-displacement bands:
+    // the shipping island mask reshapes the terrain and can move find_wet_anchor.
+    const HeadlessRoot root(/*disable_island_mask=*/true);
     const int probe_high = kCompareCadence * kCompareMedTicks; // equal wall-clock horizon
     const int max_high = 2 * probe_high;                       // 2x cadence safety
 

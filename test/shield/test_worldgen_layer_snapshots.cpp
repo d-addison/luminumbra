@@ -1491,9 +1491,9 @@ TEST(WorldGenLayerSnapshotTest, CurrentShippedArchipelagoPresetHeightHash) {
     // PR #273 enables authored rivers/lakes/cliffs and biome relief. Archipelago
     // remains in its coastal realism band (CI beta=2.67673). GCC/UCRT64 before:
     // 0xd28a6e2408dd073f; after: 0x0fcae21e66b660ea (both HEAD CI logs).
-    // MSVC needs CI recapture: leave its old pin until that toolchain reports it.
+    // MSVC before: 0x1bc4be90440f9130; after: 0x6fa5f56b0a31f91d (CI log).
     constexpr std::uint64_t kArchipelagoShapedHash =
-        ToolchainHeightHash(0x1bc4be90440f9130ull, 0x0fcae21e66b660eaull);
+        ToolchainHeightHash(0x6fa5f56b0a31f91dull, 0x0fcae21e66b660eaull);
     EXPECT_EQ(hash, kArchipelagoShapedHash)
         << "shipped archipelago preset terrain drifted; if intentional, bump "
         << "kArchipelagoShapedHash deliberately and document before/after in "
