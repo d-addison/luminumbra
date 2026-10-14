@@ -2,6 +2,7 @@ name: Performance observations
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
     branches: [main, devel]
   push:
     branches: [main, devel]
@@ -31,6 +32,8 @@ env:
   QUALIFICATION_WORKFLOW_SHA: ${{ github.workflow_sha }}
   QUALIFICATION_WORKFLOW_REF: ${{ github.workflow_ref }}
   QUALIFICATION_EXPECTED_SHA: ${{ inputs.expected_sha }}
+  CCACHE_COMPILERCHECK: content
+  CCACHE_MAXSIZE: 250M
 
 jobs:
   runner-contract:
@@ -56,8 +59,11 @@ jobs:
           python tools/ci/test_validate_performance_measurement.py
           python tools/ci/test_qualification_capture.py
 
+  # Drafts cannot merge. ready_for_review reruns the skipped jobs on the same
+  # head; maintainers must wait for its required checks to pass before merging.
   preview-frame:
     name: Preview frame / software OpenGL
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -72,11 +78,14 @@ jobs:
             ninja-build pkg-config python3-numpy python3-pil wayland-protocols \
             xauth xorg-dev xvfb
       - name: Restore compiler cache
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: compiler-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/ccache
-          key: perf-linux-x64-gcc-ccache-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json', 'cmake/**/*.cmake', 'src/**/*.cmake', 'test/CMakeLists.txt', 'vendor/CMakeLists.txt') }}
-          restore-keys: perf-linux-x64-gcc-ccache-
+          key: perf-linux-x64-gcc-ccache-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json', 'cmake/**/*.cmake', 'src/**/*.cmake', 'test/CMakeLists.txt', 'vendor/CMakeLists.txt') }}-${{ github.sha }}
+          restore-keys: |
+            perf-linux-x64-gcc-ccache-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json', 'cmake/**/*.cmake', 'src/**/*.cmake', 'test/CMakeLists.txt', 'vendor/CMakeLists.txt') }}-
+            perf-linux-x64-gcc-ccache-
       - name: Configure
         run: cmake --preset perf -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
       - name: Build measurement target
@@ -108,22 +117,34 @@ jobs:
             build/perf/test-artifacts
           if-no-files-found: warn
           retention-days: 30
+      - name: Clean compiler cache before saving
+        if: ${{ success() && github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/devel') && steps.compiler-cache.outcome == 'success' && steps.compiler-cache.outputs.cache-hit != 'true' }}
+        continue-on-error: true
+        run: ccache --cleanup
+      - name: Save compiler cache
+        if: ${{ success() && github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/devel') && steps.compiler-cache.outcome == 'success' && steps.compiler-cache.outputs.cache-hit != 'true' }}
+        # Cache writes are best-effort, including collisions on same-SHA reruns.
+        continue-on-error: true
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ccache
+          key: perf-linux-x64-gcc-ccache-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json', 'cmake/**/*.cmake', 'src/**/*.cmake', 'test/CMakeLists.txt', 'vendor/CMakeLists.txt') }}-${{ github.sha }}
 
   server-smoke-comparison:
     name: Server smoke observation / base versus head
-    # Runs on pull requests that target main (the promotion gate, where the water
-    # verdict is required before release) and on pushes to main and devel (so merged
-    # devel tips get a verdict after the fact; a newer push to the same branch can
-    # still cancel an in-flight run until the devel push concurrency change lands). It is skipped on
+    # Runs on ready pull requests that target main (the promotion gate, where the
+    # water verdict is required before release) and on pushes to main and devel
+    # (so merged devel tips get complete verdicts after the fact). It is skipped on
     # pull requests that target devel: it is not a required devel check and costs
     # about 48 runner-minutes per push. The event.before guard stays because a
     # first push to a branch has no base to compare against; schedule and manual
     # events are excluded on purpose (they define no base/candidate SHA pair).
     if: >-
-      (github.event_name == 'pull_request' && github.base_ref == 'main') ||
+      (github.event_name != 'pull_request' || github.event.pull_request.draft == false) &&
+      ((github.event_name == 'pull_request' && github.base_ref == 'main') ||
       (github.event_name == 'push' &&
       (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/devel') &&
-      github.event.before != '0000000000000000000000000000000000000000')
+      github.event.before != '0000000000000000000000000000000000000000'))
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
@@ -145,7 +166,8 @@ jobs:
             libgl1-mesa-dev libglu1-mesa-dev libwayland-dev libxkbcommon-dev \
             ninja-build pkg-config python3-numpy python3-pil wayland-protocols xorg-dev
       - name: Restore compiler cache
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: compiler-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/ccache
           key: perf-paired-linux-x64-gcc-${{ github.event.pull_request.base.sha || github.event.before }}-${{ github.event.pull_request.head.sha || github.sha }}
@@ -488,6 +510,17 @@ jobs:
             build/water-smoke-comparison.json
           if-no-files-found: error
           retention-days: 30
+      - name: Clean compiler cache before saving
+        if: ${{ success() && github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/devel') && steps.compiler-cache.outcome == 'success' && steps.compiler-cache.outputs.cache-hit != 'true' }}
+        continue-on-error: true
+        run: ccache --cleanup
+      - name: Save compiler cache
+        if: ${{ success() && github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/devel') && steps.compiler-cache.outcome == 'success' && steps.compiler-cache.outputs.cache-hit != 'true' }}
+        continue-on-error: true
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ccache
+          key: perf-paired-linux-x64-gcc-${{ github.event.pull_request.base.sha || github.event.before }}-${{ github.event.pull_request.head.sha || github.sha }}
 
   qualification-capture:
     name: Simulation budget qualification / candidate
@@ -511,8 +544,13 @@ jobs:
             build-essential ccache cmake extra-cmake-modules libfreetype6-dev \
             libgl1-mesa-dev libglu1-mesa-dev libwayland-dev libxkbcommon-dev \
             ninja-build pkg-config python3-numpy python3-pil wayland-protocols xorg-dev
+      - name: Disable compiler cache for qualification captures
+        if: github.event_name == 'workflow_dispatch' && inputs.qualification_capture
+        run: echo "CCACHE_DISABLE=1" >> "$GITHUB_ENV"
       - name: Restore candidate compiler cache
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: compiler-cache
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.qualification_capture) }}
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/ccache
           key: qualification-server-linux-x64-gcc-${{ github.sha }}
@@ -569,3 +607,14 @@ jobs:
           path: build/qualification
           if-no-files-found: error
           retention-days: 30
+      - name: Clean compiler cache before saving
+        if: ${{ success() && github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/devel') && !(github.event_name == 'workflow_dispatch' && inputs.qualification_capture) && steps.compiler-cache.outcome == 'success' && steps.compiler-cache.outputs.cache-hit != 'true' }}
+        continue-on-error: true
+        run: ccache --cleanup
+      - name: Save candidate compiler cache
+        if: ${{ success() && github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/devel') && !(github.event_name == 'workflow_dispatch' && inputs.qualification_capture) && steps.compiler-cache.outcome == 'success' && steps.compiler-cache.outputs.cache-hit != 'true' }}
+        continue-on-error: true
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ccache
+          key: qualification-server-linux-x64-gcc-${{ github.sha }}

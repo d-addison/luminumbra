@@ -233,6 +233,8 @@ add_executable(common_tests
     common/WindFieldSystem_test.cpp
     common/WeatherSystem_test.cpp
     common/AetherFieldSystem_test.cpp
+    common/AmbientDeterminismReceipt_test.cpp
+    common/AmbientInputBounds_test.cpp
     common/fields_hardening_test.cpp
     common/replication_hardening_test.cpp
     common/replication_scale_test.cpp
@@ -310,6 +312,11 @@ add_executable(filesystem_path_test
 target_include_directories(filesystem_path_test PRIVATE ../src ../src/luminumbra_client)
 target_compile_definitions(filesystem_path_test PRIVATE LUMINUMBRA_SOURCE_ROOT="${CMAKE_SOURCE_DIR}")
 target_link_libraries(filesystem_path_test PRIVATE gtest_main)
+
+# Temporary-path reservation contracts need only the filesystem and GoogleTest.
+add_executable(unique_temp_path_test support/UniqueTempPath_test.cpp)
+target_link_libraries(unique_temp_path_test PRIVATE gtest_main)
+luminumbra_configure_first_party_target(unique_temp_path_test)
 
 # tree rendering (tree rendering): render-only tree LOD distance selection. The header
 add_executable(game_assets_test
@@ -914,6 +921,7 @@ add_executable(particle_determinism_test
 add_executable(far_lod_worker_test
     rendering/far_lod_worker_test.cpp
     rendering/terrain_culling_test.cpp
+    rendering/loading_overlay_test.cpp
     rendering/texture_file_test.cpp
     rendering/render_clock_test.cpp
 )
@@ -1484,13 +1492,14 @@ add_executable(world_open_refusal_test
     persistence/world_open_refusal_test.cpp
     common/SimBudgetWorldParity_test.cpp
     persistence/async_saved_world_catalog_test.cpp
+    persistence/saved_world_catalog_responsiveness_test.cpp
     persistence/host_scheduler_fault_test.cpp
     ../src/luminumbra_server/ServerWorldRunner.cpp
     ../src/luminumbra_server/modes/ModeHelpers.cpp
 )
 target_include_directories(world_open_refusal_test PRIVATE ../src ../src/luminumbra_common)
 target_compile_definitions(world_open_refusal_test PRIVATE LUMINUMBRA_SOURCE_ROOT="${CMAKE_SOURCE_DIR}")
-target_link_libraries(world_open_refusal_test PRIVATE gtest_main luminumbra_common)
+target_link_libraries(world_open_refusal_test PRIVATE gtest_main luminumbra_common luminumbra_save_fixture_support)
 
 # Second-class adversarial pass: Jolt tunneling / penetration test. A fast
 # dynamic sphere fired at a thin static heightfield floor must not pass through it.
@@ -1765,6 +1774,7 @@ set(LUMINUMBRA_GTEST_TARGETS
     game_assets_test
     common_tests
     filesystem_path_test
+    unique_temp_path_test
     skinned_test_assets_test
     tree_lod_test
     rendering_defaults_test

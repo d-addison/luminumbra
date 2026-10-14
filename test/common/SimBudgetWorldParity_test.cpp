@@ -1,3 +1,5 @@
+#include "../support/UniqueTempPath.h"
+
 #include <gtest/gtest.h>
 #include <nlohmann/json.hpp>
 #include <nlohmann/json_fwd.hpp>
@@ -8,7 +10,6 @@
 #include "luminumbra_common/world/GameSession.h"
 #include "luminumbra_server/ServerWorldRunner.h"
 
-#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
@@ -35,9 +36,7 @@ protected:
     }
 
     void SetUp() override {
-        root = fs::temp_directory_path() /
-               ("sim_budget_parity_" +
-                std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+        root = Luminumbra::TestSupport::CreateUniqueTempDirectory("sim_budget_parity_");
         fs::create_directories(root / "worlds/atlas/presets");
         // Telemetry neutrality uses a fixed historical terrain workload.
         fs::copy_file(fs::path(LUMINUMBRA_SOURCE_ROOT) / "worlds/atlas/presets-rev6/default.json",

@@ -28,6 +28,8 @@
 
 #include "gtest/gtest.h"
 
+#include "../support/UniqueTempPath.h"
+
 #include "persistence/WorldPersistenceRoundtrip.h"
 #include "persistence/WorldSaveService.h"
 #include "systems/SHIELD_WorldSystem.h"
@@ -36,7 +38,6 @@
 #include "world/StructurePlacement.h"
 #include "world/WorldStreamingState.h"
 
-#include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <memory>
@@ -186,10 +187,8 @@ World::StructureTemplatePool LoadRuin() {
 
 struct TempSaveDir {
     explicit TempSaveDir(const std::string& tag) {
-        const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
-        path = fs::temp_directory_path() /
-               ("luminumbra_streaming_hardening_" + tag + "_" + std::to_string(stamp));
-        fs::create_directories(path);
+        path = Luminumbra::TestSupport::CreateUniqueTempDirectory(
+            "luminumbra_streaming_hardening_" + tag + "_");
     }
     ~TempSaveDir() {
         std::error_code ec;

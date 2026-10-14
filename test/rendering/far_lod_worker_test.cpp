@@ -1,6 +1,8 @@
 #include "../fixtures/TerrainFixtureParams.h"
 #include "gtest/gtest.h"
 
+#include "../support/UniqueTempPath.h"
+
 #include "luminumbra_client/debug/DebugCamera.h"
 #include "luminumbra_client/rendering/Camera.h"
 #include "luminumbra_client/rendering/FarLodSystem.h"
@@ -16,7 +18,6 @@
 #include <algorithm>
 #include <array>
 #include <bit>
-#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <memory>
@@ -42,10 +43,7 @@ std::string ReadFileBytes(const std::filesystem::path& path) {
 
 struct TempSaveDir {
     TempSaveDir() {
-        path = std::filesystem::temp_directory_path() /
-               ("luminumbra_far_worker_" +
-                std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
-        std::filesystem::create_directories(path);
+        path = Luminumbra::TestSupport::CreateUniqueTempDirectory("luminumbra_far_worker_");
     }
     ~TempSaveDir() {
         std::error_code error;

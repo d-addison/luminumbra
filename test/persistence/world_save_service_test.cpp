@@ -1,6 +1,8 @@
 #include "../fixtures/TerrainFixtureParams.h"
 #include "gtest/gtest.h"
 
+#include "../support/UniqueTempPath.h"
+
 #include "persistence/WorldPersistenceRoundtrip.h"
 #include "persistence/WorldSaveService.h"
 #include "systems/SHIELD_WorldSystem.h"
@@ -9,7 +11,6 @@
 
 #include <array>
 #include <atomic>
-#include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -33,11 +34,9 @@ using Luminumbra::WorldStreamingState;
 using Luminumbra::Persistence::WorldSaveService;
 
 std::filesystem::path MakeTempSaveDir(const std::string& tag) {
-    const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
-    const std::filesystem::path dir =
-        std::filesystem::temp_directory_path() /
-        ("luminumbra_world_save_service_" + tag + "_" + std::to_string(stamp));
-    std::filesystem::create_directories(dir);
+    const std::filesystem::path dir = Luminumbra::TestSupport::CreateUniqueTempDirectory(
+        "luminumbra_world_save_service_" + tag + "_");
+
     return dir;
 }
 

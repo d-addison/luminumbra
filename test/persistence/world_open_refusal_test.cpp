@@ -2,6 +2,7 @@
 
 #include "luminumbra_common/core/JobSystem.h"
 #include "luminumbra_common/persistence/SavedWorldCatalog.h"
+#include "luminumbra_common/persistence/SyntheticSaveFixture.h"
 #include "luminumbra_common/persistence/WorldPersistenceRoundtrip.h"
 #include "luminumbra_common/persistence/WorldSaveService.h"
 #include "luminumbra_common/systems/AetherFieldSystem.h"
@@ -16,6 +17,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cstdint>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <map>
@@ -51,6 +53,17 @@ std::map<std::string, std::string> DiskBytes(const fs::path& root) {
         result.emplace(key, entry.is_directory() ? "<directory>" : Read(entry.path()));
     }
     return result;
+}
+
+std::uint32_t FixtureChunksFromEnv(const char* name, std::uint32_t fallback) {
+    const char* text = std::getenv(name);
+    if (text == nullptr || *text == '\0')
+        return fallback;
+    char* end = nullptr;
+    const unsigned long long value = std::strtoull(text, &end, 10);
+    if (end == text || *end != '\0' || value < 1 || value > 100000)
+        return fallback;
+    return static_cast<std::uint32_t>(value);
 }
 
 // Parallel ctest runs one process per parameterisation, and a coarse clock can hand two of
@@ -689,6 +702,24 @@ TEST_F(WorldOpenRefusal, CreateEditSaveRestartAndSwitchPreserveAuthority) {
         EXPECT_EQ(reopened.GetLastLoadedChunkCount(), 1u);
         EXPECT_EQ(reopened.GetWorldSystem()->snapshot_streamed_chunks().front()->sdf_data.front(),
                   1.0f);
+    }
+    EXPECT_EQ(DiskBytes(root), before);
+}
+
+TEST_F(WorldOpenRefusal, SavedWorldLifecycleFixtureSwitchesWithoutWritingAnything) {
+    Persistence::SyntheticSaveSpec spec;
+    spec.world_id = "synthetic-lifecycle";
+    spec.chunk_count = FixtureChunksFromEnv("LUMIN_LIFECYCLE_FIXTURE_CHUNKS", 64);
+    spec.preset_source = fs::path(LUMINUMBRA_SOURCE_ROOT) / "worlds/atlas/presets/default.json";
+    const auto report = Persistence::WriteSyntheticSave(spec, root);
+    ASSERT_TRUE(report.ok) << report.error;
+    const auto before = DiskBytes(root);
+    GameSession reopened;
+    reopened.SetRootPath(RootString());
+    reopened.SetJobSystem(&jobs);
+    for (int switch_count = 0; switch_count < 6; ++switch_count) {
+        ASSERT_TRUE(reopened.LoadWorld("synthetic-lifecycle")) << reopened.GetWorldOpenError();
+        ASSERT_TRUE(reopened.LoadWorld("fixture")) << reopened.GetWorldOpenError();
     }
     EXPECT_EQ(DiskBytes(root), before);
 }
