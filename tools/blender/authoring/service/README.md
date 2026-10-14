@@ -70,6 +70,28 @@ and hashes only; the service never opens them in Blender or executes their scrip
 The exporter identity is a declaration from the snapshot producer, recorded in
 build identity. Qualification of that exporter remains a separate fixture lane.
 
+Geometry sidecars may add optional `settings.max_tris`: an integer from 64 through
+1,000,000, excluding booleans. The service passes `--max-tris N` to the compiler
+and independently validates the actual primary mesh triangle count before
+publication. Simplification can stop above its target; such a build fails with
+`output.budget_exceeded`. When `max_tris` is supplied, every emitted LOD must have
+no more triangles than the primary mesh; excess fails with `output.lod_exceeded`.
+These failures remove unpublished compiler output staging while retaining the
+failure receipt, input evidence, last valid generation and its current pointer.
+`emit_lods` remains independent.
+Static prefab sidecars refuse `max_tris` with `prefab.max_tris` until an
+aggregate/per-part budget contract is defined.
+
+Clients must first request `capabilities` and require
+`features.max_tris_setting` to be `true` before submitting a budgeted build.
+An absent field means unsupported: refuse the build instead of omitting its cap.
+This feature describes service enforcement; qualify the installed compiler's
+option support separately. Budgeted job receipts record the supplied `settings`,
+including `max_tris`, for successful and postcompile failed builds. The hashed
+sidecar already binds the cap to build identity. Documents without `max_tris`
+keep the existing compiler arguments, output bytes and receipt shape; no default
+cap is inserted.
+
 Snapshot producers may supply `expected_dependency_hashes`, an object mapping
 declared dependency paths to their captured SHA-256 digests. Extraction refuses
 a mismatch before running the compiler. The Blender adapter uses this guard to
@@ -140,6 +162,19 @@ generation moves into `.luminumbra-author/generations/`. The service rechecks th
 source hashes before atomically replacing `current.json`; failed, cancelled and
 stale work leaves the previous pointer intact.
 
+The service and optional viewport package share one standard-library file I/O
+implementation. JSON publication flushes and fsyncs a complete temporary file
+in the destination directory before replacement. Shared readers keep the old
+complete file; subsequent opens see the replacement. Windows uses explicit
+delete-sharing readers and `FileRenameInfoEx` POSIX replacement semantics.
+Unsupported filesystems and non-sharing readers fail without truncating or
+removing the current pointer. The shared helper contributes to service build
+identity and is copied byte-for-byte into the viewport extension archive.
+The generation reader compares native Windows file identifiers, sizes, write
+times and metadata change times consistently across path and held-file checks.
+Creation timestamps cannot substitute for change timestamps. Replacement and
+metadata changes during a read are refused even when file size and bytes match.
+
 Consumers retain a generation ID and read its manifest instead of following the
 current pointer on every access. Published generations are never modified or
 automatically deleted. Garbage collection and power-loss durability are future
@@ -153,15 +188,100 @@ timing. This timing ends at publication, not at a visible Blender viewport frame
 The receipt and generation schemas remain tooling contracts; no saved-world or
 network state format changes are introduced by this service.
 
+## Meshgen configuration and game script pins
+
+The source invocation of the read-only configuration check uses the trusted
+launcher with isolated, no-site, no-bytecode Python startup. Supply an absolute
+path to the reviewed service launcher, outside the game/project:
+
+```sh
+python3 -I -S -B /your/engine/tools/blender/authoring/service/launch.py --project /your/game --toolchain /your/install/toolchain.json meshgen check-config --profile rock --print-effective
+```
+
+In PowerShell, use `python -I -S -B C:\your\engine\tools\blender\authoring\service\launch.py`
+with the same arguments and absolute Windows paths. `-I` ignores `PYTHONPATH`
+and `PYTHONDONTWRITEBYTECODE`, so `-B` is required even if that environment
+variable is set. `-S` prevents startup `.pth`, `sitecustomize` and `usercustomize`
+processing. Before importing the service, the launcher explicitly sets
+`sys.path` to the service package root and interpreter stdlib locations only;
+cwd and the game/project root are excluded. For the installed zip application,
+use `python -I -S -B /your/install/luminumbra-author.pyz` with the same check-config
+arguments; the archive is its package root. The supported launch creates no bytecode, state,
+session lock, backend connection, secret-value read or Blender process. The
+required toolchain argument retains the existing CLI shape; this planning check
+does not verify executables. Live backend validation is reported as unavailable.
+
+Toolchain manifests may include `scripts`, a role mapping. Each role declares a
+project-relative `.py` entry `path`, its `sha256`, and a `modules` mapping from
+companion `.py` paths (including regular package initializers) to SHA-256 values.
+Requests cannot choose scripts. Old compiler-only toolchains remain valid;
+MG2 script use requires pins, and clients must negotiate `meshgen_script_pins`.
+
+`Toolchain.verify_scripts()` rechecks all pins and provides conservative AST
+diagnostics. Its import path is the entry directory followed by companion roots
+derived from the pinned files, above each outermost pinned regular package.
+Optional `import_roots` lists additional canonical project-relative directories
+containing pinned companions (`"."` means the project root); namespace packages
+may need this explicit root. Every transitive import uses that same path.
+Symlinks, junctions and project shadows of stdlib or Blender module names are
+refused, even when the shadow has a pin. Assignment aliases of `__import__`,
+importlib spec/loader APIs and `exec`/`eval`/`compile` are diagnosed as unsupported.
+AST diagnostics alone do not establish a complete inventory.
+
+Execution must use the trusted launcher in a fresh interpreter:
+
+```sh
+python3 -I -S -B /your/engine/tools/blender/authoring/service/launch.py --scripts --project /your/game --toolchain /your/install/toolchain.json --role finisher
+```
+
+Hosts calling `meshgen_scripts.run_pinned_script()` through another entry point
+must establish the same startup contract before importing the service. The
+guarded path returns a structured `toolchain.bootstrap` refusal unless Python
+has isolated/no-site/no-bytecode flags and only service/stdlib paths on `sys.path`,
+with no project path. Removing unsafe paths after ambient startup is too late.
+
+The launcher installs an import finder and a permanent audit hook before adding
+the controlled companion import roots. Each project module
+is read through containment checks, hashed, and compiled from those exact bytes;
+cached bytecode is never consumed. Project module origins and search locations
+must use a source loader and a pinned source file with a matching digest.
+Sourceless, native and other non-source project loaders are refused regardless
+of suffix, suffix case or embedded code filename. Directly obtained source
+loaders use the same verified snapshots. Unpinned or changed files are refused
+at load time. Project `.pth` reads and `site.addsitedir`/`site.addpackage` calls
+targeting the project or its descendants are refused before processing.
+Execution provenance walks the whole frame stack, so stdlib helpers cannot
+launder unpinned source or synthetic-filename `exec` from project callers.
+Actual stdlib module imports and their initialization remain supported. Code
+already imported from the project is refused before launch. Interpreter and
+engine installations remain trusted; native Blender integration is E4 work.
+
+This guard enforces source integrity for trusted, reviewed scripts. It is not an
+OS sandbox against malicious pinned Python that changes interpreter internals,
+uses native code or deliberately delegates arbitrary execution to trusted
+external libraries. The E4 supervisor must use this launcher contract together
+with its process/resource envelope; E1 does not wire up or qualify Blender
+execution. Provisional profile budgets remain uncalibrated.
+
 ## Verification
 
 ```sh
 python -B -m unittest discover -s tools/blender/authoring/service/tests -v
+python -B -m unittest discover -s test/viewport -p test_shared_file_io.py -v
 python tools/blender/authoring/service/tests/native_acceptance.py --service /your/install/luminumbra-author --toolchain /your/install/toolchain.json --output /fresh/evidence/directory --exporter-id blender.gltf.qualified --exporter-sha256 ACTUAL_EXPORTER_SHA256 prop.glb plant.glb character.glb
 ```
 
-Unit tests inject compiler failures and publication races. The separate native
+Unit tests inject compiler failures and publication races, cover triangle-cap
+bounds and negotiation, read actual fixture mesh counts, and verify that budget
+and LOD refusals leave the previous publication intact. The separate native
 runner requires a real installed compiler and caller-provided GLBs, builds each
 twice, compares output hashes, retains old generations, exercises refusals and
 checks unchanged toolchain hashes. Neither lane closes renderer, physical
 animation or newly authored production-content acceptance.
+
+Windows sharing qualification uses
+`python -B test/viewport/probe_windows_file_io.py --receipt /fresh/receipt.json`.
+Its sixteen contracts include an independently packaged service subprocess
+publishing `current.json` while the packaged generation reader holds the old
+file, a real non-sharing CRT-reader negative control, and unchanged input pins.
+It does not qualify the native renderer or Blender adapter.

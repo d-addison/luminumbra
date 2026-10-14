@@ -11,6 +11,7 @@
 #include <unordered_map>
 
 #include "../fixtures/smoke_artifact/FixedInputs.h"
+#include "luminumbra_common/simulation/SimBudgetProfile.h"
 #include "luminumbra_common/simulation/SimBudgetTelemetry.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 #include "luminumbra_common/systems/WaterSystem.h"
@@ -327,5 +328,105 @@ TEST(SimBudgetTelemetry, BatchedTicksKeepAbsoluteIdsAndClearOnToggle) {
     EXPECT_EQ(session.TickSimulation(1.0 / 30.0), 1u);
     EXPECT_EQ(telemetry.SamplesByStage()[static_cast<std::size_t>(SimBudgetStage::Plants)][0].tick,
               5u);
+}
+
+// Instinct work is 4 at tick 1 and 9 at tick 2; no residency samples are ever recorded.
+void RecordBudgetRun(SimBudgetTelemetry& telemetry) {
+    telemetry.SetEnabled(true);
+    telemetry.Record(SimBudgetStage::Instinct, 1, 4, 1.0);
+    telemetry.Record(SimBudgetStage::Instinct, 2, 9, 1.0);
+}
+
+luminumbra::simulation::SimBudgetProfile InstinctCapProfile(std::uint64_t cap) {
+    luminumbra::simulation::SimBudgetProfile profile;
+    profile.stage_max_work["instinct"] = cap;
+    return profile;
+}
+
+TEST(SimBudgetTelemetry, EnforcementReportsStageViolationWithCorrectFields) {
+    SimBudgetTelemetry first;
+    SimBudgetTelemetry replay;
+    RecordBudgetRun(first);
+    RecordBudgetRun(replay);
+    nlohmann::json artifact = {{"schema", "luminumbra.server_tick.v1"}};
+    Luminumbra::Server::AppendSimBudgetArtifact(artifact, first, replay);
+    const auto verdict =
+        Luminumbra::Server::AppendSimBudgetEnforcement(artifact, InstinctCapProfile(5), 77, first);
+    EXPECT_FALSE(verdict.no_violation);
+    const auto& block = artifact.at("sim_budget").at("enforcement");
+    EXPECT_EQ(block.at("schema"), "luminumbra.sim_budget_enforcement.v1");
+    EXPECT_EQ(block.at("profile_bytes"), 77);
+    EXPECT_FALSE(block.at("no_violation").get<bool>());
+    EXPECT_TRUE(block.at("coverage_complete").get<bool>());
+    EXPECT_EQ(block.at("violations"),
+              nlohmann::json::array({{{"kind", "stage"},
+                                      {"name", "instinct"},
+                                      {"tick", 2},
+                                      {"observed", 9},
+                                      {"limit", 5}}}));
+    EXPECT_TRUE(block.at("unevaluated").empty());
+}
+
+TEST(SimBudgetTelemetry, EnforcementWithinCapReportsUnevaluatedResidency) {
+    SimBudgetTelemetry first;
+    SimBudgetTelemetry replay;
+    RecordBudgetRun(first);
+    RecordBudgetRun(replay);
+    // The observed value equals the cap, which is not a violation.
+    luminumbra::simulation::SimBudgetProfile profile = InstinctCapProfile(9);
+    profile.residency_max_bytes["terrain_cache"] = 1024;
+    nlohmann::json artifact = {{"schema", "luminumbra.server_tick.v1"}};
+    Luminumbra::Server::AppendSimBudgetArtifact(artifact, first, replay);
+    const auto verdict =
+        Luminumbra::Server::AppendSimBudgetEnforcement(artifact, profile, 0, first);
+    EXPECT_TRUE(verdict.no_violation);
+    EXPECT_FALSE(verdict.coverage_complete);
+    const auto& block = artifact.at("sim_budget").at("enforcement");
+    EXPECT_TRUE(block.at("no_violation").get<bool>());
+    EXPECT_FALSE(block.at("coverage_complete").get<bool>());
+    EXPECT_TRUE(block.at("violations").empty());
+    EXPECT_EQ(block.at("unevaluated"), nlohmann::json::array({"residency:terrain_cache"}));
+}
+
+TEST(SimBudgetTelemetry, EnforcementIsByteNeutralWithoutEnabledCollector) {
+    SimBudgetTelemetry disabled;
+    nlohmann::json artifact = {{"schema", "luminumbra.server_tick.v1"},
+                               {"world_hash", "fixed hash"}};
+    const std::string before = artifact.dump(2) + "\n";
+    Luminumbra::Server::AppendSimBudgetArtifact(artifact, disabled, disabled);
+    const auto verdict = Luminumbra::Server::AppendSimBudgetEnforcement(
+        artifact, InstinctCapProfile(0), 9, disabled);
+    EXPECT_TRUE(verdict.no_violation);
+    EXPECT_EQ(artifact.dump(2) + "\n", before);
+    EXPECT_FALSE(artifact.contains("sim_budget"));
+}
+
+TEST(SimBudgetTelemetry, SmokeFailsOnlyWhenBudgetProfileStageIsExceeded) {
+    namespace fs = std::filesystem;
+    const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
+    const fs::path output =
+        fs::temp_directory_path() / ("smoke_budget_profile_" + std::to_string(stamp) + ".json");
+    for (const std::uint64_t cap : {std::uint64_t{5}, std::uint64_t{9}}) {
+        SCOPED_TRACE(cap);
+        ServerCliOptions options;
+        Luminumbra::Server::SmokeRunResult first, replay;
+        FixedSmokeInputs(0, options, first, replay);
+        options.sim_budget = true;
+        options.sim_budget_profile = InstinctCapProfile(cap);
+        options.sim_budget_profile_bytes = 123;
+        RecordBudgetRun(first.sim_budget);
+        RecordBudgetRun(replay.sim_budget);
+        options.artifact_path = output.string();
+        const bool violated = cap == 5;
+        EXPECT_EQ(Luminumbra::Server::WriteSmokeArtifact(options, first, replay), violated ? 1 : 0);
+        std::ifstream file(output);
+        ASSERT_TRUE(file.is_open());
+        const auto artifact = nlohmann::json::parse(file);
+        EXPECT_EQ(artifact.at("passed").get<bool>(), !violated);
+        const auto& block = artifact.at("sim_budget").at("enforcement");
+        EXPECT_EQ(block.at("no_violation").get<bool>(), !violated);
+        EXPECT_EQ(block.at("profile_bytes"), 123);
+    }
+    fs::remove(output);
 }
 } // namespace
