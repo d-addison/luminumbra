@@ -48,6 +48,9 @@ set(CLIENT_INTERNAL_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/rendering/FarWorldReplayGl.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/FarWorldDiagnostics.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/FarWorldRenderer.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/rendering/FarVolumeHandoff.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/rendering/FarWorldHandoffRenderer.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/rendering/FarWorldHandoffDiagnostics.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/FarWorldOwnership.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/FarWorldDepthBias.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/passes/FarWorldPassUniforms.cpp

@@ -1,4 +1,5 @@
 #include "luminumbra_client/rendering/FarWorldDiagnostics.h"
+#include "luminumbra_client/rendering/FarWorldHandoffDiagnostics.h"
 
 #include <gtest/gtest.h>
 #include <limits>
@@ -378,3 +379,78 @@ TEST(FarWorldDiagnostics, CavePolicyRefusalsKeepTheirNamesInSerializedDiagnostic
     }
 }
 } // namespace
+
+TEST(FarWorldHandoffDiagnostics, ServingContinuityCannotQualifyLatestTarget) {
+    FarWorldHandoffDiagnosticSnapshot snapshot;
+    snapshot.captured = true;
+    snapshot.state.world_epoch = 1;
+    snapshot.state.serving_serial = 4;
+    snapshot.state.target_serial = 5;
+    snapshot.state.committed_generation = 9;
+    snapshot.state.awaiting_replacement_fallback = true;
+    snapshot.tile_count = 1;
+    auto& tile = snapshot.tiles[0];
+    tile.key = {5, -1, 0};
+    auto& value = tile.observation;
+    auto& serving = value.serving.emplace();
+    auto& target = value.target.emplace();
+    serving.identity = {1, 42, 0, tile.key, 4, 1};
+    target.identity = {1, 43, 0, tile.key, 5, 2};
+    serving.intent.extra_span = FarVolumeCoverageSpan{-256, 64};
+    target.intent.extra_span = FarVolumeCoverageSpan{-512, 128};
+    value.serving_built.span = {-256, 256};
+    value.target_built.span = {-512, 256};
+    value.serving_coverage = {FarTileState::Uploaded, true, true};
+    value.serving_water_complete = true;
+    value.target_eligibility = FarVolumeEligibility::RequestRejected;
+    EXPECT_FALSE(FarWorldHandoffTargetReady(snapshot));
+    const auto json = FarWorldHandoffDiagnosticJson(snapshot);
+    EXPECT_EQ(json["schema"], "luminumbra.far_handoff.v1");
+    EXPECT_EQ(json["serving_serial"], 4u);
+    EXPECT_EQ(json["target_serial"], 5u);
+    EXPECT_TRUE(json["tiles"][0]["serving_covering"].get<bool>());
+    EXPECT_FALSE(json["tiles"][0]["target_covering"].get<bool>());
+    EXPECT_TRUE(json["tiles"][0]["serving_older_than_target"].get<bool>());
+    EXPECT_EQ(json["tiles"][0]["serving"]["content_hash"], 42u);
+    EXPECT_EQ(json["tiles"][0]["target"]["content_hash"], 43u);
+    value.target_coverage = {FarTileState::Empty, true, true};
+    value.target_water_complete = true;
+    EXPECT_TRUE(FarWorldHandoffTargetReady(snapshot));
+    value.target_water_complete = false;
+    EXPECT_FALSE(FarWorldHandoffTargetReady(snapshot));
+    value.target_water_complete = true;
+    snapshot.complete = false;
+    EXPECT_FALSE(FarWorldHandoffTargetReady(snapshot));
+}
+
+TEST(FarWorldHandoffDiagnostics, DrawArtifactKeepsServingChildIdentitiesAndAttemptBytes) {
+    FarWorldHandoffDiagnosticSnapshot snapshot;
+    snapshot.captured = true;
+    snapshot.state.serving_serial = 1;
+    snapshot.state.target_serial = 2;
+    snapshot.upload.upload_attempts = 1;
+    snapshot.upload.upload_bytes = 640;
+    snapshot.upload.successful_upload_bytes = 0;
+    snapshot.draw_count = 1;
+    auto& draw = snapshot.draws[0];
+    draw.identity = {7, 42, 0, {5, -1, -1}, 1, 3};
+    draw.arrival.eligible = true;
+    draw.submitted = true;
+    snapshot.submission.draws = 1;
+    for (std::size_t i = 0; i < 4; ++i) {
+        draw.child_identities[i] = {
+            7, 50 + i, 0, {4, -2 + std::int64_t(i % 2), -2 + std::int64_t(i / 2)}, 1, 3};
+        draw.arrival.children[i] = {-256, 128 + std::int64_t(i) * 128};
+    }
+    const auto json = FarWorldHandoffDiagnosticJson(snapshot);
+    EXPECT_EQ(json["upload_attempts"], 1u);
+    EXPECT_EQ(json["attempted_upload_bytes"], 640u);
+    EXPECT_EQ(json["successful_upload_bytes"], 0u);
+    EXPECT_EQ(json["submitted_draws"], 1u);
+    EXPECT_TRUE(json["draws"][0]["submitted"].get<bool>());
+    for (std::size_t i = 0; i < 4; ++i) {
+        EXPECT_EQ(json["draws"][0]["children"][i]["bake_generation"], 1u);
+        EXPECT_EQ(json["draws"][0]["children"][i]["content_hash"], 50 + i);
+        EXPECT_EQ(json["draws"][0]["children"][i]["built_span"][1], 128 + i * 128);
+    }
+}
