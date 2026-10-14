@@ -203,7 +203,7 @@ jobs:
             -DBUILD_TESTING=OFF -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
             -DLUMINUMBRA_ENABLE_DILIGENT=OFF -DLUMINUMBRA_ENABLE_GNS=ON
-      - name: Build the shared sockets transport against GNS
+      - name: Build the sockets transport and server modes against GNS
         run: |
           # Upgraded from a -fsyntax-only probe of one file to a real build.
           # SteamNetworkingTransport and GnsTransport now share NetSocketsTransport,
@@ -213,11 +213,13 @@ jobs:
           # building the GNS side is the only way to get real compile coverage of
           # the socket logic the Steam transport also runs. A syntax check could
           # not catch a link-level or template-instantiation break; this can.
-          cmake --build build/gns-probe --target luminumbra_common --parallel 4
+          cmake --build build/gns-probe --target luminumbra_common luminumbra_server_app --parallel 4
           # Fail loudly if the shared body was not actually part of that build,
           # so this job cannot silently degrade back into proving nothing.
           find build/gns-probe -name 'NetSocketsTransport.cpp.o' -print -quit \
             | grep -q . || { echo "NetSocketsTransport.cpp was not compiled"; exit 1; }
+          find build/gns-probe -path '*/modes/Gns.cpp.o' -print -quit \
+            | grep -q . || { echo "Gns.cpp was not compiled"; exit 1; }
 
   diligent-rhi:
     name: Diligent RHI / software GL

@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <utility>
 #include <vector>
 
 #include "steam/isteamnetworkingsockets.h"
@@ -111,6 +112,12 @@ void NetSocketsTransport::HandleConnStatusChanged(SteamNetConnectionStatusChange
         case k_ESteamNetworkingConnectionState_ClosedByPeer:
         case k_ESteamNetworkingConnectionState_ProblemDetectedLocally:
             if (info->m_hConn == m_conn) {
+                m_close_reason = info->m_info.m_szEndDebug;
+                LUMINUMBRA_CORE_WARN("{}: connection ended ({}): {}",
+                                     m_name,
+                                     info->m_info.m_eEndReason,
+                                     m_close_reason);
+                m_recv.clear();
                 m_closed = true;
                 m_connected = false;
                 SteamNetworkingSockets()->CloseConnection(m_conn, 0, nullptr, false);
@@ -141,16 +148,27 @@ void NetSocketsTransport::DrainInto() {
     for (int i = 0; i < count; ++i) {
         SteamNetworkingMessage_t* message = messages[i];
         const auto* data = static_cast<const std::uint8_t*>(message->m_pData);
-        m_recv.emplace_back(data, data + message->m_cbSize);
+        const FrameDelivery delivery = (message->m_nFlags & k_nSteamNetworkingSend_Reliable) != 0
+                                           ? FrameDelivery::Reliable
+                                           : FrameDelivery::Unreliable;
+        m_recv.push_back({std::vector<std::uint8_t>(data, data + message->m_cbSize), delivery});
         message->Release();
     }
 }
 
 bool NetSocketsTransport::TryReceiveFrame(std::vector<std::uint8_t>& out) {
-    DrainInto();
+    FrameDelivery delivery = FrameDelivery::Reliable;
+    return TryReceiveFrameWithDelivery(out, delivery);
+}
+
+bool NetSocketsTransport::TryReceiveFrameWithDelivery(std::vector<std::uint8_t>& out,
+                                                      FrameDelivery& delivery) {
+    if (m_recv.empty())
+        DrainInto();
     if (m_recv.empty())
         return false;
-    out = std::move(m_recv.front());
+    out = std::move(m_recv.front().bytes);
+    delivery = m_recv.front().delivery;
     m_recv.pop_front();
     return true;
 }
@@ -160,14 +178,24 @@ bool NetSocketsTransport::IsPeerConnected() const {
 }
 
 void NetSocketsTransport::Close() {
+    CloseWithReason(m_close_reason.empty() ? "closing" : m_close_reason);
+}
+
+void NetSocketsTransport::CloseWithReason(const std::string& reason) {
+    // Cleanup and admission's disconnect observation retain the original cause.
+    if (!m_closed || m_close_reason.empty())
+        m_close_reason = reason;
     if (m_conn != k_HSteamNetConnection_Invalid && m_backend.ready) {
-        SteamNetworkingSockets()->CloseConnection(m_conn, 0, "closing", true);
+        LUMINUMBRA_CORE_INFO("{}: closing connection: {}", m_name, m_close_reason);
+        SteamNetworkingSockets()->CloseConnection(m_conn, 0, m_close_reason.c_str(), true);
     }
     m_conn = k_HSteamNetConnection_Invalid;
     if (m_listen != k_HSteamListenSocket_Invalid && m_backend.ready) {
         SteamNetworkingSockets()->CloseListenSocket(m_listen);
     }
     m_listen = k_HSteamListenSocket_Invalid;
+    m_recv.clear();
+    m_closed = true;
     m_connected = false;
 }
 

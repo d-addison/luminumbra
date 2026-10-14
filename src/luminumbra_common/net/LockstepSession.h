@@ -165,6 +165,17 @@ public:
     // IsPeerConnected==false (NOT via a thrown error / hang).
     virtual bool TryReceiveFrame(std::vector<std::uint8_t>& out) = 0;
 
+    // Always-reliable transports retain compatibility with the original receive seam.
+    virtual bool TryReceiveFrameWithDelivery(std::vector<std::uint8_t>& out,
+                                             FrameDelivery& delivery) {
+        delivery = FrameDelivery::Reliable;
+        return TryReceiveFrame(out);
+    }
+
+    virtual void CloseWithReason(const std::string&) {
+        Close();
+    }
+
     // True while the peer end is still attached. A clean disconnect flips this false.
     [[nodiscard]] virtual bool IsPeerConnected() const = 0;
 

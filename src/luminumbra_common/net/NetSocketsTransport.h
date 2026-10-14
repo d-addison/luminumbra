@@ -39,6 +39,9 @@ public:
     bool SendFrame(const std::vector<std::uint8_t>& frame,
                    FrameDelivery delivery = FrameDelivery::Reliable) override;
     bool TryReceiveFrame(std::vector<std::uint8_t>& out) override;
+    bool TryReceiveFrameWithDelivery(std::vector<std::uint8_t>& out,
+                                     FrameDelivery& delivery) override;
+    void CloseWithReason(const std::string& reason) override;
     [[nodiscard]] bool IsPeerConnected() const override;
     void Close() override;
 
@@ -55,7 +58,12 @@ private:
     bool m_connected = false;
     bool m_closed = false;
     bool m_is_host = false;
-    std::deque<std::vector<std::uint8_t>> m_recv;
+    struct ReceivedFrame {
+        std::vector<std::uint8_t> bytes;
+        FrameDelivery delivery;
+    };
+    std::deque<ReceivedFrame> m_recv;
+    std::string m_close_reason;
 };
 
 } // namespace Luminumbra::Net

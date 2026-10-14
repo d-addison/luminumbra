@@ -2,6 +2,37 @@
 
 #include "ModeIncludes.h"
 
+#include <chrono>
+#include <cstdint>
+#include <ratio>
+#include <thread>
+
+#include "luminumbra_common/net/ReplicationAdmission.h"
+
+// Optional transports establish the connection separately (30 s). Admission time
+// is local 30 Hz steady-clock time, never callback, replication or simulation ticks.
+inline bool AwaitReplicationAdmission(Luminumbra::Net::AdmittedReplicationTransport& transport,
+                                      void (*run_callbacks)()) {
+    const auto started = std::chrono::steady_clock::now();
+    transport.Begin(0);
+    while (!transport.admission().admitted() && !transport.admission().failed()) {
+        run_callbacks();
+        const auto elapsed = std::chrono::steady_clock::now() - started;
+        const auto ticks = static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::duration<std::int64_t, std::ratio<1, 30>>>(
+                elapsed)
+                .count());
+        transport.PumpAdmission(ticks);
+        if (!transport.admission().admitted() && !transport.admission().failed())
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    if (transport.admission().failed()) {
+        LUMINUMBRA_CORE_ERROR("replication admission failed: {}", transport.admission().reason());
+        return false;
+    }
+    return true;
+}
+
 struct RuntimeTcpClientSlot {
     std::uint32_t client_id = 0;
     std::uint16_t port = 0;

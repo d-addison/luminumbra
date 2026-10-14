@@ -216,6 +216,7 @@ add_executable(common_tests
     common/WaterDeterminism_test.cpp
     common/PlayerAvatar_test.cpp
     common/ReplicationProtocol_test.cpp
+    common/ReplicationAdmission_test.cpp
     common/ReplicationEndpoint_test.cpp
     common/config_constant_drift_test.cpp
     common/config_hot_reload_rollback_test.cpp
