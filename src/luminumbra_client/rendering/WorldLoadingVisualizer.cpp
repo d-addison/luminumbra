@@ -178,6 +178,17 @@ void WorldLoadingVisualizer::UpdateAndRender(float delta_time,
     glLineWidth(1.0f);
     glDisable(GL_BLEND);
 
+    DrawLoadingOverlay(status_text, progress, dispatched_chunks, total_chunks);
+}
+
+bool DrawLoadingOverlay(const std::string& status_text,
+                        float progress,
+                        int dispatched_chunks,
+                        std::size_t total_chunks) {
+    if (ImGui::GetCurrentContext() == nullptr) {
+        return false;
+    }
+
     // 4. Render overlay UI using ImGui
     ImGui::SetNextWindowPos(
         ImVec2(ImGui::GetIO().DisplaySize.x * 0.5f, ImGui::GetIO().DisplaySize.y * 0.85f),
@@ -197,6 +208,8 @@ void WorldLoadingVisualizer::UpdateAndRender(float delta_time,
     ImGui::PopStyleVar();
 
     ImGui::End();
+
+    return true;
 }
 
 } // namespace Luminumbra::Client

@@ -207,6 +207,50 @@ CTest produces JUnit and runtime artifacts. CI verifies a minimum discovered-tes
 count so an empty or severely truncated suite cannot report success. Sanitizer and
 test artifacts are uploaded even on failure to support diagnosis.
 
+`WorldgenProbeSmoke` validates the `luminumbra.worldgen_probe.v1` smoke report
+with seed `424242` and spawn `(8, terrain height + 1.95, 8)`. Valid evidence requires
+`selected_chunks == requested_chunks == 2` and `phases.polygonise.mesh_triangles >= 1`.
+The report adds a top-level `terrain_height` number sampled at `(8, 8)`, preserving
+the schema identifier and existing `spawn` fields for report consumers. Smoke
+validation requires this finite height, exact `spawn.x == spawn.z == 8`, and
+`spawn.y == terrain_height + 1.95` within an absolute tolerance of `1e-5` metres
+(no relative tolerance), allowing C++ float rounding. Reports missing the height
+or using a different spawn fail validation.
+The probe scans a 25-by-25 initial surface neighborhood, including each column's
+surface-height span and one vertical chunk of margin on either side, until it
+finds the requested surface chunks. Reduced coverage or an empty mesh fails
+validation. Timing values may be zero; the check imposes no speed threshold.
+
+## UCRT64 package attribution setup
+
+The dedicated attribution workflow explicitly provisions `libatomic` before
+`tools/ci/ucrt_attribution.sh` records its package baseline. The pinned GCC
+intervention includes `cc-libs=16.2.0-4`, whose package transaction requires
+`libatomic=16.2.0-4`. Every changed package must already be installed when the
+baseline is recorded; interventions do not install previously absent members.
+
+For a direct script run, provision `mingw-w64-ucrt-x86_64-libatomic` in a disposable
+UCRT64 environment before starting the script. Restart the complete run after any
+provisioning change. The recorded baseline is the environment after that setup:
+restoration returns `libatomic` and other changed members to their recorded
+versions using staged archives. It does not undo the initial provisioning.
+Baseline-only and CRT-only selections do not require this GCC prerequisite.
+
+The script requires Python and validates each full-mode probe report before
+recording `OK`. Full reports must cover all 24 requested chunks, contain a
+non-empty mesh, satisfy the spawn contract above, and include every phase,
+scaling entry, and both libm observations (eight shaped-height repetitions and
+one million calls per libm function). Invalid JSON, missing reports, or incomplete
+evidence produce `INVALID_REPORT` in the cell's `status.json` and summary row;
+the validation reason is appended to `probe.txt`. Nonzero probe exits remain
+`TEST_FAILED`, and probe or validation timeouts remain `TIMED_OUT`.
+
+The actual installed baseline version is recorded rather than inferred from the
+compiler version. Missing archives, package dependency refusals, and unsuccessful
+restoration remain explicit failures; the script does not repair dependencies or
+claim a measurement for an unavailable intervention. A run with a different setup
+has a different provisioning profile, so its observations must retain that identity.
+
 ## Local validation
 
 Run the preset that matches the affected platform and configuration. At minimum:

@@ -1,4 +1,5 @@
 #version 450 core
+#include "far_world_position.glsl"
 // Render-optimization (ssao-gtao, ): Ground-Truth Ambient Occlusion
 // (Jimenez et al. 2016 / Intel XeGTAO), horizon-slice formulation, replacing the
 // 64-sample hemisphere SSAO (ssao.frag). Quality comes from the horizon arc
@@ -11,6 +12,7 @@ out float FragColor;
 
 in vec2 TexCoords;
 
+uniform sampler2D gDepth;
 uniform sampler2D gPosition;       // view-space position (xyz)
 uniform sampler2D gNormalMaterial; // octahedral view-space normal in.xy
 uniform mat4  u_projection;        // for the world->pixel radius (proj[1][1])
@@ -40,7 +42,8 @@ float ign(vec2 p) {
 }
 
 void main() {
-    vec3 P = texture(gPosition, TexCoords).rgb;
+    vec3 P = vec3(0.0);
+    if (!farWorldPosition(gPosition, gDepth, TexCoords, P)) { FragColor = 1.0; return; }
     // Background / sky (no geometry written) -> fully unoccluded. View space looks
     // down -z, so valid geometry has P.z < 0; a (near-)zero position is the cleared
     // background.
@@ -81,16 +84,20 @@ void main() {
             float t = (float(k) - 0.5 + noise) / float(u_stepsPerSlice);
             float px = t * radiusPixels;
 
-            vec3 d1 = texture(gPosition, TexCoords + omega * px * texel).rgb - P;
+            vec3 sample1 = vec3(0.0);
+            bool valid1 = farWorldPosition(gPosition, gDepth, TexCoords + omega * px * texel, sample1);
+            vec3 d1 = valid1 ? sample1 - P : vec3(0.0);
             float len1 = length(d1);
-            if (len1 > 1e-4 && -(d1.z + P.z) < 1e9) {
+            if (valid1 && len1 > 1e-4 && -(d1.z + P.z) < 1e9) {
                 float falloff = clamp(1.0 - len1 / u_radius, 0.0, 1.0);
                 float c = dot(d1 / len1, V);
                 cH1 = max(cH1, mix(-1.0, c, falloff));
             }
-            vec3 d2 = texture(gPosition, TexCoords - omega * px * texel).rgb - P;
+            vec3 sample2 = vec3(0.0);
+            bool valid2 = farWorldPosition(gPosition, gDepth, TexCoords - omega * px * texel, sample2);
+            vec3 d2 = valid2 ? sample2 - P : vec3(0.0);
             float len2 = length(d2);
-            if (len2 > 1e-4) {
+            if (valid2 && len2 > 1e-4) {
                 float falloff = clamp(1.0 - len2 / u_radius, 0.0, 1.0);
                 float c = dot(d2 / len2, V);
                 cH2 = max(cH2, mix(-1.0, c, falloff));

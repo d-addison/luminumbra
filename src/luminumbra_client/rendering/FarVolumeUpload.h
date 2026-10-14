@@ -46,11 +46,27 @@ public:
     const World::FarBuildIdentity& identity() const noexcept {
         return identity_;
     }
+    const World::FarVolumeRequest& request() const noexcept {
+        return request_;
+    }
     const FarVolumeGpuAllocation* resource() const noexcept {
         return resource_.get();
     }
     std::uint64_t gpu_bytes() const noexcept {
         return charge_ ? charge_->bytes() : 0;
+    }
+
+    bool water_complete() const noexcept {
+        return water_complete_;
+    }
+    bool water_known_dry() const noexcept {
+        return water_known_dry_;
+    }
+    std::uint64_t terrain_indices() const noexcept {
+        return terrain_indices_;
+    }
+    std::uint64_t water_indices() const noexcept {
+        return water_indices_;
     }
 
 private:
@@ -63,6 +79,8 @@ private:
                                 FarVolumeUploadedTile&,
                                 FarVolumeUploadError*);
     bool valid_ = false, empty_ = false;
+    bool water_complete_ = false, water_known_dry_ = false;
+    std::uint64_t terrain_indices_ = 0, water_indices_ = 0;
     World::FarBuildIdentity identity_;
     World::FarVolumeRequest request_;
     // Reverse destruction: resource is freed before its budget reservation.

@@ -39,9 +39,19 @@ set(CLIENT_INTERNAL_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/rendering/AsyncReadbackRing.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/CaptureHooks.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/FarLodSystem.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/rendering/FarWorldWaterMesh.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/FarVolumeRenderMesh.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/FarVolumeBuildQueue.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/FarVolumeUpload.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/rendering/FarVolumeGpuBackend.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/rendering/FarVolumeGlBackend.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/rendering/FarWorldReplayGl.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/rendering/FarWorldDiagnostics.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/rendering/FarWorldRenderer.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/rendering/FarWorldOwnership.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/rendering/FarWorldDepthBias.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/rendering/passes/FarWorldPassUniforms.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/rendering/FarVolumeResidency.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/FoliageSurface.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/FrameScan.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/FrameHealth.cpp
@@ -57,6 +67,7 @@ set(CLIENT_INTERNAL_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/rendering/WaterfallDetect.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/RenderSystem.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/Shader.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/rendering/ShaderSource.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/GBufferTargets.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/static_preview/RenderView.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/ShaderReflection.cpp

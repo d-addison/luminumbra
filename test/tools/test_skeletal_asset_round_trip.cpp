@@ -6,11 +6,12 @@
 // equality against the authored fixture. A double-run bitwise determinism
 // check guards the writer.
 
+#include "../support/UniqueTempPath.h"
+
 #include <gtest/gtest.h>
 
 #include <algorithm>
 #include <array>
-#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -51,10 +52,8 @@ struct BufferView {
 class TempDirectory {
 public:
     TempDirectory() {
-        const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
-        path_ = std::filesystem::temp_directory_path() /
-                ("luminumbra_skeletal_round_trip_" + std::to_string(stamp));
-        std::filesystem::create_directories(path_);
+        path_ =
+            Luminumbra::TestSupport::CreateUniqueTempDirectory("luminumbra_skeletal_round_trip_");
     }
 
     ~TempDirectory() {

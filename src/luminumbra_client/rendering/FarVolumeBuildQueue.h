@@ -1,11 +1,12 @@
 #pragma once
 
-#include "FarVolumeRenderMesh.h"
+#include "FarWorldWaterMesh.h"
 #include "luminumbra_common/core/JobSystem.h"
 #include "luminumbra_common/world/FarVolumeRuntime.h"
 
 #include <atomic>
 #include <memory_resource>
+#include <span>
 #include <thread>
 
 namespace Luminumbra::Rendering {
@@ -22,6 +23,8 @@ struct FarVolumeQueueRequest {
     // Owned immutable observations, as required by the canonical facade. The
     // field token equals content_hash and includes cave/numeric semantics.
     World::FarVolumeAuthority authority;
+    std::shared_ptr<const FarWorldWaterObservation> water = {};
+    std::optional<FarWorldWaterBound> water_bound = std::nullopt;
 };
 
 enum class FarVolumeSubmitStatus {
@@ -37,6 +40,7 @@ enum class FarVolumeBuildStatus {
     ReadyEmpty,
     CompileRefused,
     ConvertRefused,
+    WaterRefused,
     DispatchRejected,
     Cancelled,
     Failed
@@ -66,6 +70,9 @@ public:
     FarVolumeRenderError conversion_failure() const noexcept {
         return conversion_failure_;
     }
+    FarWorldWaterError water_failure() const noexcept {
+        return water_failure_;
+    }
     const World::FarVolumeMemoryPool* memory_pool() const noexcept {
         return retained_.pool();
     }
@@ -83,6 +90,7 @@ private:
     FarVolumeBuildStatus status_ = FarVolumeBuildStatus::Failed;
     World::FarVolumeFacadeFailure compilation_failure_;
     FarVolumeRenderError conversion_failure_ = FarVolumeRenderError::None;
+    FarWorldWaterError water_failure_ = FarWorldWaterError::None;
     // Destruction frees buffers before releasing their charge.
     World::FarVolumeMemoryLease retained_;
     FarVolumeRenderMesh mesh_;
@@ -123,7 +131,10 @@ public:
     // cancels old work, then starts the latest only after its handle is reaped.
     FarVolumeSubmitStatus Submit(const FarVolumeQueueRequest& request);
     // Reap completed handles, then start at most max_dispatches Normal jobs.
-    std::size_t Pump(std::size_t max_dispatches);
+    // With an explicit order, ONLY its selected keys may start, in that order;
+    // the owner supplies the wanted policy's coarsest/distance/key ordering.
+    // Empty order retains generic descriptor order. No order storage is owned.
+    std::size_t Pump(std::size_t max_dispatches, std::span<const World::FarTileKey> order = {});
     void Cancel(const World::FarTileKey& key);
     void Forget(const World::FarTileKey& key);
     // Explicit retry after wanted-set/budget change; duplicates never auto-retry.

@@ -65,4 +65,11 @@ private:
     bool m_is_active = false;
 };
 
+// Draws the "Loading" overlay window. Returns false and touches no ImGui state when no ImGui
+// context exists.
+bool DrawLoadingOverlay(const std::string& status_text,
+                        float progress,
+                        int dispatched_chunks,
+                        std::size_t total_chunks);
+
 } // namespace Luminumbra::Client

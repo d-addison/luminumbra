@@ -3,6 +3,9 @@
 #include "CelestialBodyModel.h" //  Tier 1: the celestial-body seam
 #include "ExposureModel.h"      //  rendering: SelectRenderExposure (manual EV precedence)
 #include "FarLodSystem.h"
+#include "FarVolumeGlBackend.h"
+#include "FarWorldReplay.h"
+#include "FarWorldReplayGl.h"
 #include "ImpostorBake.h"  //  far-field tree impostor atlas (opt-in)
 #include "InProcessFlip.h" // Deterministic in-process FLIP image comparison.
 #include "Mesh.h"
@@ -58,6 +61,7 @@
 #include <nlohmann/json.hpp>
 #include <random>
 #include <stb_image.h>
+#include <stdexcept>
 #include <unordered_set>
 #include <utility>
 
@@ -232,6 +236,7 @@ constexpr const char* kGpuTimerPassNames[] = {
 
 RenderPipeline::RenderPipeline()
     : m_farlod(std::make_unique<FarLodSystem>())
+    , m_far_world(std::make_unique<FarWorldRenderer>())
     , m_gbuffer_pass(std::make_unique<GBufferPass>())
     , m_shadow_pass(std::make_unique<ShadowPass>())
     , m_ssao_pass(std::make_unique<SsaoPass>())
@@ -305,6 +310,9 @@ bool RenderPipeline::startup(u32 screen_width,
     m_root_path = root_path;
 
     try {
+        // startup runs after successful GL loading, with the client context
+        // current. Never capture a GL context in the independent constructor.
+        m_far_world->InstallBackend(std::make_unique<FarVolumeGlDriver>());
         set_default_shadow_cascade_splits(m_shadow_pass->shadow_map());
 
         init_shaders();
@@ -712,6 +720,10 @@ bool RenderPipeline::capture_upscale_seam_parity(const Camera& camera,
 // byte-identical to the production ctx.
 RenderContext RenderPipeline::make_ssao_context(const Camera& camera) {
     RenderContext ctx;
+    ctx.frozen_replay = m_far_world_paired;
+    ctx.set_gbuffer_depth_contract(m_frame_far_selection.effective == FarWorldMode::Ladder,
+                                   m_frame_prepared.projection,
+                                   m_taau_jitter_ndc);
     ctx.camera = &camera;
     ctx.screen_width = m_screen_width;
     ctx.screen_height = m_screen_height;
@@ -724,6 +736,8 @@ RenderContext RenderPipeline::make_ssao_context(const Camera& camera) {
         "gbuffer_position", m_gbuffer_pass->gbuffer().position_texture);
     ctx.gbuffer_normal =
         m_render_registry.adopt_texture("gbuffer_normal", m_gbuffer_pass->gbuffer().normal_texture);
+    ctx.gbuffer_depth =
+        m_render_registry.adopt_texture("gbuffer_depth", m_gbuffer_pass->gbuffer().depth_texture);
     return ctx;
 }
 
@@ -732,6 +746,10 @@ RenderContext RenderPipeline::make_ssao_context(const Camera& camera) {
 // the frame camera for Depth-mode near/far linearization. Render-only; never hashed.
 RenderContext RenderPipeline::make_debug_view_context(const Camera& camera) {
     RenderContext ctx;
+    ctx.frozen_replay = m_far_world_paired;
+    ctx.set_gbuffer_depth_contract(m_frame_far_selection.effective == FarWorldMode::Ladder,
+                                   m_frame_prepared.projection,
+                                   m_taau_jitter_ndc);
     ctx.camera = &camera;
     ctx.screen_width = m_screen_width;
     ctx.screen_height = m_screen_height;
@@ -751,6 +769,10 @@ RenderContext RenderPipeline::make_debug_view_context(const Camera& camera) {
 // view. Render-only (one-way scent mirror); never feeds world_hash.
 RenderContext RenderPipeline::make_ground_decal_context(const Camera& camera) {
     RenderContext ctx;
+    ctx.frozen_replay = m_far_world_paired;
+    ctx.set_gbuffer_depth_contract(m_frame_far_selection.effective == FarWorldMode::Ladder,
+                                   m_frame_prepared.projection,
+                                   m_taau_jitter_ndc);
     ctx.camera = &camera;
     ctx.screen_width = m_screen_width;
     ctx.screen_height = m_screen_height;
@@ -759,6 +781,8 @@ RenderContext RenderPipeline::make_ground_decal_context(const Camera& camera) {
     ctx.registry = &m_render_registry;
     ctx.gbuffer_position = m_render_registry.adopt_texture(
         "gbuffer_position", m_gbuffer_pass->gbuffer().position_texture);
+    ctx.gbuffer_depth =
+        m_render_registry.adopt_texture("gbuffer_depth", m_gbuffer_pass->gbuffer().depth_texture);
     return ctx;
 }
 
@@ -766,6 +790,10 @@ RenderContext RenderPipeline::make_ground_decal_context(const Camera& camera) {
 // per-frame wall-clock snapshot that feeds u_time leaf sway). Render-only.
 RenderContext RenderPipeline::make_plant_context() {
     RenderContext ctx;
+    ctx.frozen_replay = m_far_world_paired;
+    ctx.set_gbuffer_depth_contract(m_frame_far_selection.effective == FarWorldMode::Ladder,
+                                   m_frame_prepared.projection,
+                                   m_taau_jitter_ndc);
     ctx.registry = &m_render_registry;
     ctx.screen_width = m_screen_width;
     ctx.screen_height = m_screen_height;
@@ -779,6 +807,7 @@ RenderContext RenderPipeline::make_plant_context() {
 // g-buffer depth, sun/ambient/point-lights, screen). Handles adopted wrap-existing.
 RenderContext RenderPipeline::make_particle_context(const Camera& camera) {
     RenderContext ctx;
+    ctx.frozen_replay = m_far_world_paired;
     ctx.camera = &camera;
     ctx.screen_width = m_screen_width;
     ctx.screen_height = m_screen_height;
@@ -800,6 +829,7 @@ RenderContext RenderPipeline::make_particle_context(const Camera& camera) {
 // sun/ambient/moon/cloud light state, screen, per-frame time for shader sway).
 RenderContext RenderPipeline::make_foliage_context(const Camera& camera) {
     RenderContext ctx;
+    ctx.frozen_replay = m_far_world_paired;
     ctx.camera = &camera;
     ctx.screen_width = m_screen_width;
     ctx.screen_height = m_screen_height;
@@ -825,6 +855,10 @@ RenderContext RenderPipeline::make_foliage_context(const Camera& camera) {
 // Lighting GPU timer leaves the measured GPU work and every pixel unchanged.
 RenderContext RenderPipeline::make_lighting_context(const Camera& camera) {
     RenderContext ctx;
+    ctx.frozen_replay = m_far_world_paired;
+    ctx.set_gbuffer_depth_contract(m_frame_far_selection.effective == FarWorldMode::Ladder,
+                                   m_frame_prepared.projection,
+                                   m_taau_jitter_ndc);
     ctx.render_view = m_authored_view.get();
     if (m_gbuffer_pass->gbuffer().authored_texture)
         ctx.authored_surface = m_render_registry.adopt_texture(
@@ -926,6 +960,10 @@ RenderContext RenderPipeline::make_lighting_context(const Camera& camera) {
 // skybox_draws bump rides ctx.skybox_draw_counter (Group M out-pointer).
 RenderContext RenderPipeline::make_skybox_context(const Camera& camera) {
     RenderContext ctx;
+    ctx.frozen_replay = m_far_world_paired;
+    ctx.set_gbuffer_depth_contract(m_frame_far_selection.effective == FarWorldMode::Ladder,
+                                   m_frame_prepared.projection,
+                                   m_taau_jitter_ndc);
     ctx.camera = &camera;
     ctx.screen_width = m_screen_width;
     ctx.screen_height = m_screen_height;
@@ -977,6 +1015,10 @@ RenderContext RenderPipeline::make_skybox_context(const Camera& camera) {
 // and the per-frame time snapshot. The draw list travels separately (WaterPassInput).
 RenderContext RenderPipeline::make_water_context(const Camera& camera) {
     RenderContext ctx;
+    ctx.frozen_replay = m_far_world_paired;
+    ctx.set_gbuffer_depth_contract(m_frame_far_selection.effective == FarWorldMode::Ladder,
+                                   m_frame_prepared.projection,
+                                   m_taau_jitter_ndc);
     ctx.camera = &camera;
     ctx.screen_width = m_screen_width;
     ctx.screen_height = m_screen_height;
@@ -1001,6 +1043,7 @@ RenderContext RenderPipeline::make_water_context(const Camera& camera) {
 // its accumulation textures remain pass-owned and therefore do not enter ctx.
 RenderContext RenderPipeline::make_glass_oit_context(const Camera& camera) {
     RenderContext ctx;
+    ctx.frozen_replay = m_far_world_paired;
     ctx.camera = &camera;
     ctx.view = m_frame_prepared.view;
     ctx.projection = m_frame_prepared.projection;
@@ -1025,6 +1068,7 @@ RenderContext RenderPipeline::make_glass_oit_context(const Camera& camera) {
 // matrices/splits. Both froxel volumes remain pass-owned and stay out of ctx.
 RenderContext RenderPipeline::make_froxel_context(const Camera& camera) {
     RenderContext ctx;
+    ctx.frozen_replay = m_far_world_paired;
     ctx.camera = &camera;
     ctx.screen_width = m_screen_width;
     ctx.screen_height = m_screen_height;
@@ -1052,6 +1096,7 @@ RenderContext RenderPipeline::make_froxel_context(const Camera& camera) {
 // shader, site cache, and baked geometry remain pass-owned and stay out of ctx.
 RenderContext RenderPipeline::make_waterfall_context(const Camera& camera) {
     RenderContext ctx;
+    ctx.frozen_replay = m_far_world_paired;
     ctx.camera = &camera;
     ctx.view = m_frame_prepared.view;
     ctx.projection = m_frame_prepared.projection;
@@ -1072,6 +1117,7 @@ RenderContext RenderPipeline::make_waterfall_context(const Camera& camera) {
 // reduction program, SSBO, and asynchronous readback ring remain pass-owned.
 RenderContext RenderPipeline::make_luminance_meter_context() {
     RenderContext ctx;
+    ctx.frozen_replay = m_far_world_paired;
     ctx.registry = &m_render_registry;
     ctx.lit_scene_color = m_render_registry.adopt_texture(
         "lit_scene_color", m_lighting_pass->lighting_fbo().color_texture);
@@ -1084,6 +1130,10 @@ RenderContext RenderPipeline::make_luminance_meter_context() {
 RenderContext RenderPipeline::make_gbuffer_context(const Camera& camera,
                                                    const glm::vec4 frustum_planes[6]) {
     RenderContext ctx;
+    ctx.frozen_replay = m_far_world_paired;
+    ctx.set_gbuffer_depth_contract(m_frame_far_selection.effective == FarWorldMode::Ladder,
+                                   m_frame_prepared.projection,
+                                   m_taau_jitter_ndc);
     ctx.camera = &camera;
     ctx.screen_width = m_screen_width;
     ctx.screen_height = m_screen_height;
@@ -1117,7 +1167,7 @@ SubmitTerrainChunksFn RenderPipeline::make_terrain_submitter(bool record_coverag
         m_hierarchicalCuller.CullHierarchical(frustum_planes, visible_chunks);
         std::size_t draws = 0;
         std::size_t indices = 0;
-        if (record_coverage && m_terrain_coverage_enabled) {
+        if (record_coverage && m_terrain_coverage_enabled && !m_far_world_paired) {
             m_terrain_coverage_live_submit_observed = true;
             m_terrain_coverage_visible.clear();
             for (const auto* chunk : visible_chunks)
@@ -1190,19 +1240,41 @@ void RenderPipeline::attach_farlod_job_system(JobSystem* job_system) {
     }
 }
 
+void RenderPipeline::set_far_world_mode(FarWorldMode requested) {
+    m_far_world->SetRequested(requested);
+    m_taau_pass->invalidate_history();
+    m_prev_view_proj = glm::mat4(1.0f);
+    m_frustumCache.valid = false;
+}
+
+FarWorldCavePolicy
+RenderPipeline::set_far_world_cave_policy(std::optional<World::FarCaveMode> requested) {
+    // The renderer validates owner-thread/re-entry state, as for set_far_world_mode.
+    m_far_world->SetRequestedCavePolicy(requested);
+    return m_far_world->CavePolicy(FarWorldPurpose::World);
+}
+
 void RenderPipeline::prepare_world_swap() {
+    m_far_world->PrepareWorldSwap();
+    ++m_far_world_epoch;
+    m_frame_prepared.valid = false;
+    m_taau_pass->invalidate_history();
+    m_prev_view_proj = glm::mat4(1.0f);
+    m_frustumCache.valid = false;
     if (m_farlod) {
         m_farlod->prepare_world_swap();
     }
 }
 
 void RenderPipeline::set_far_lod_preview_anchor(const glm::vec3& center, float inner_radius_m) {
+    m_far_world_preview = true;
     if (m_farlod) {
         m_farlod->set_preview_anchor(center, inner_radius_m);
     }
 }
 
 void RenderPipeline::clear_far_lod_preview_anchor() {
+    m_far_world_preview = false;
     if (m_farlod) {
         m_farlod->clear_preview_anchor();
     }
@@ -1356,6 +1428,7 @@ void RenderPipeline::enumerate_shaders(
     // cannot drift between consumers by construction. A null instance is still
     // visited (health reports "not initialized"; reload/panel skip it).
     visit("geometry", m_gbuffer_pass->geometry_shader().get());
+    visit("geometry_ladder", m_gbuffer_pass->geometry_shader(FarWorldMode::Ladder).get());
     visit("lighting", m_lighting_pass->shader().get());
     visit("skybox", m_skybox_pass->shader().get());
     visit("shadow", m_shadow_pass->shader().get());
@@ -1364,6 +1437,9 @@ void RenderPipeline::enumerate_shaders(
     visit("water", m_water_pass->shader().get());
     visit("instanced_static_mesh", m_gbuffer_pass->instanced_static_mesh_shader().get());
     visit("skinned_mesh", m_gbuffer_pass->skinned_mesh_shader().get());
+    visit("instanced_static_mesh_ladder",
+          m_gbuffer_pass->instanced_static_mesh_shader(FarWorldMode::Ladder).get());
+    visit("skinned_mesh_ladder", m_gbuffer_pass->skinned_mesh_shader(FarWorldMode::Ladder).get());
     visit("weather_overlay", m_skybox_pass->weather_shader().get());
     if (m_particle_pass) {
         visit("particles", m_particle_pass->shader().get());
@@ -1969,6 +2045,8 @@ void RenderPipeline::draw_chunks_mdi(const std::vector<const ChunkCullEntry*>& v
     out_draws = running;
 
     MdiFrameBuffers& frame = m_mdi_frames[m_mdi_frame_cursor];
+    if (m_far_world_paired && frame.command_capacity < running)
+        throw std::logic_error("Replay cannot allocate submission buffers");
     ensure_mdi_capacity(frame, running);
 
     glBindBuffer(GL_DRAW_INDIRECT_BUFFER, frame.indirect_buffer);
@@ -1995,6 +2073,7 @@ void RenderPipeline::draw_chunks_mdi(const std::vector<const ChunkCullEntry*>& v
         glBindVertexArray(blocks[b].vao);
         // Bind this frame's origin buffer to the VAO's instanced binding (1).
         // baseInstance is absolute into this buffer, so offset 0 is correct.
+        PreserveReplayObject(ReplayObjectKind::VertexArray, blocks[b].vao);
         glBindVertexBuffer(1, frame.origin_buffer, 0, sizeof(glm::vec4));
         glBindBuffer(GL_DRAW_INDIRECT_BUFFER, frame.indirect_buffer);
         glMultiDrawElementsIndirect(
@@ -2059,7 +2138,8 @@ void RenderPipeline::begin_gpu_pass_timer(GpuTimerPass pass) {
     // bracket the pass even on contexts without GL timestamp queries. Pure
     // command-stream annotation: zero effect on rendered pixels (RenderHealth
     // stays byte-stable). Paired with the pop in end_gpu_pass_timer.
-    PassGl::push_debug_group(kGpuTimerPassNames[static_cast<size_t>(pass)]);
+    if (!m_far_world_paired)
+        PassGl::push_debug_group(kGpuTimerPassNames[static_cast<size_t>(pass)]);
     if (m_benchmark_gpu_queries && !m_gpu_timers_suppressed)
         m_benchmark_gpu_queries->begin_pass(static_cast<std::size_t>(pass));
     // the harness's second dispatch suppresses timestamp queries (the
@@ -2074,7 +2154,8 @@ void RenderPipeline::begin_gpu_pass_timer(GpuTimerPass pass) {
 void RenderPipeline::end_gpu_pass_timer(GpuTimerPass pass) {
     if (m_benchmark_gpu_queries && !m_gpu_timers_suppressed)
         m_benchmark_gpu_queries->end_pass(static_cast<std::size_t>(pass));
-    PassGl::pop_debug_group();
+    if (!m_far_world_paired)
+        PassGl::pop_debug_group();
     if (!m_gpu_timers.supported || m_gpu_timers_suppressed) {
         return;
     }
@@ -2325,8 +2406,26 @@ void RenderPipeline::render_frame(entt::registry& registry,
         m_terrain_coverage_live_submit_observed = false;
         m_terrain_coverage_visible.clear();
     }
+    const auto purpose = m_offscreen_target_active ? FarWorldPurpose::OffscreenPreview
+                         : m_far_world_preview     ? FarWorldPurpose::Preview
+                                                   : FarWorldPurpose::World;
+    select_frame_far_world(
+        FarWorldSubmissionOverride(m_far_world->Selection(purpose, m_far_lod_enabled),
+                                   m_far_world_submission),
+        camera);
+    m_far_world_advanced = false;
+    ++m_far_world_frame;
     prepare_frame(registry, world_system, camera, deltaTime, wireframe);
+    // Retain the exact ON temporal inputs before the frame epilogue updates them.
+    m_far_world_pair_prev_view_proj = m_prev_view_proj;
+    m_far_world_pair_prev_time = m_prev_time;
+    m_far_world_pair_taau = m_taau_pass->history_state();
+    m_far_world_pair_taau_enabled = m_taau_enabled;
+    m_far_world_pair_jitter_frame = m_taau_frame;
+    m_far_world_pair_jitter = m_taau_jitter_ndc;
+    m_far_world_pair_mdi_cursor = m_mdi_frame_cursor;
     dispatch_stages(camera);
+    m_far_world_pair_taau_after = m_taau_pass->history_state();
 
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     finish_gpu_pass_timer_frame();
@@ -2359,6 +2458,119 @@ void RenderPipeline::render_frame(entt::registry& registry,
     // can reconstruct where each wind-swayed vertex WAS (camera-only reprojection ghosts
     // tree-tops).
     m_prev_time = static_cast<float>(glfwGetTime());
+}
+
+FarReplayCamera RenderPipeline::replay_camera(const Camera& camera) const {
+    FarReplayCamera result;
+    const auto view = camera.GetViewMatrix();
+    const auto projection = camera.GetProjectionMatrix(m_screen_width, m_screen_height);
+    std::copy_n(glm::value_ptr(view), 16, result.view.begin());
+    std::copy_n(glm::value_ptr(projection), 16, result.projection.begin());
+    result.zoom = camera.Zoom;
+    result.near_plane = camera.GetNearPlane();
+    result.far_plane = camera.GetFarPlane();
+    result.width = m_screen_width;
+    result.height = m_screen_height;
+    result.internal_width = m_internal_width;
+    result.internal_height = m_internal_height;
+    result.target = m_offscreen_target_fbo;
+    result.target_width = m_offscreen_target_w;
+    result.target_height = m_offscreen_target_h;
+    result.offscreen = m_offscreen_target_active;
+    return result;
+}
+
+bool RenderPipeline::render_far_world_off_pair(const Camera& camera) {
+    if (!m_started || !m_frame_prepared.valid || m_far_world_paired)
+        return false;
+    const bool history_matches = m_taau_enabled == m_far_world_pair_taau_enabled &&
+                                 m_taau_frame == m_far_world_pair_jitter_frame &&
+                                 m_taau_jitter_ndc == m_far_world_pair_jitter &&
+                                 m_taau_pass->history_state() == m_far_world_pair_taau_after &&
+                                 (!m_taau_enabled || m_taau_pass->replay_available());
+    if (CheckFarReplay(m_started,
+                       m_frame_prepared.valid,
+                       m_far_world_paired,
+                       m_frame_prepared.replay_camera,
+                       replay_camera(camera),
+                       history_matches) != FarReplayRefusal::None)
+        return false;
+    static_assert(std::is_nothrow_swappable_v<RenderContext>);
+    auto gl = MakeFarWorldReplayGlAccess();
+    std::unique_ptr<RenderView> authored_view;
+    RunFarWorldReplay(
+        *gl,
+        [this, &authored_view] {
+            // Allocate/copy before begin. Rollback uses swaps and scalar assignments only.
+            return [this,
+                    &authored_view,
+                    selected = m_frame_far_selection,
+                    stats = m_last_render_pass_stats,
+                    timers = m_gpu_timers_suppressed,
+                    previous_view_projection = m_prev_view_proj,
+                    previous_time = m_prev_time,
+                    jitter_frame = m_taau_frame,
+                    jitter = m_taau_jitter_ndc,
+                    cursor = m_mdi_frame_cursor,
+                    trace = m_frame_stage_trace,
+                    commands = m_mdi_command_scratch,
+                    origins = m_mdi_origin_scratch,
+                    lighting = m_frame_lighting_ctx,
+                    quality = m_volumetric_quality,
+                    adopted = m_render_registry.adopted_state(),
+                    shadow_time = m_cpu_frame_shadow,
+                    gbuffer_time = m_cpu_frame_gbuf,
+                    matrices = m_shadow_pass->shadow_map().light_space_matrices,
+                    splits = m_shadow_pass->shadow_map().cascade_splits,
+                    tint_dirty = m_shadow_pass->tint_dirty()]() mutable noexcept {
+                m_frame_far_selection = selected;
+                m_last_render_pass_stats = stats;
+                m_gpu_timers_suppressed = timers;
+                m_prev_view_proj = previous_view_projection;
+                m_prev_time = previous_time;
+                m_taau_frame = jitter_frame;
+                m_taau_jitter_ndc = jitter;
+                m_mdi_frame_cursor = cursor;
+                m_frame_stage_trace.swap(trace);
+                m_mdi_command_scratch.swap(commands);
+                m_mdi_origin_scratch.swap(origins);
+                // Context contains vectors: swap to keep exception rollback nonthrowing.
+                std::swap(m_frame_lighting_ctx, lighting);
+                m_render_registry.restore_adopted_state(adopted);
+                m_volumetric_quality = quality;
+                m_cpu_frame_shadow = shadow_time;
+                m_cpu_frame_gbuf = gbuffer_time;
+                m_shadow_pass->shadow_map().light_space_matrices.swap(matrices);
+                m_shadow_pass->shadow_map().cascade_splits.swap(splits);
+                m_shadow_pass->restore_tint_dirty(tint_dirty);
+                m_authored_view = std::move(authored_view);
+                m_far_world_paired = false;
+            };
+        },
+        [this, &authored_view] {
+            authored_view = std::move(m_authored_view);
+            m_prev_view_proj = m_far_world_pair_prev_view_proj;
+            m_prev_time = m_far_world_pair_prev_time;
+            m_taau_frame = m_far_world_pair_jitter_frame;
+            m_taau_jitter_ndc = m_far_world_pair_jitter;
+            m_mdi_frame_cursor = m_far_world_pair_mdi_cursor;
+            m_far_world_paired = true;
+            m_gpu_timers_suppressed = !FarReplayEffects{true}.Timers();
+            m_frame_far_selection = FarWorldSubmissionOverride(m_frame_far_selection, false);
+        },
+        [this, &camera] { dispatch_stages(camera); });
+    return true;
+}
+
+void RenderPipeline::select_frame_far_world(FarWorldSelection selection, const Camera& camera) {
+    m_frame_far_selection = m_gbuffer_pass->SelectFarWorldRenderer(selection);
+    const auto plane = FarWorldPlane(m_frame_far_selection.effective);
+    if (camera.GetFarPlane() != plane) {
+        m_taau_pass->invalidate_history();
+        m_prev_view_proj = glm::mat4(1.0f);
+        m_frustumCache.valid = false;
+    }
+    camera.SelectFarWorldPlane(m_frame_far_selection.effective);
 }
 
 void RenderPipeline::prepare_frame(entt::registry& registry,
@@ -2416,6 +2628,40 @@ void RenderPipeline::prepare_frame(entt::registry& registry,
     manage_chunk_gpu_resources(renderable_chunk_snapshots, camera);
     manage_water_gpu_resources(renderable_chunk_snapshots, camera);
     ensure_terrain_culling_hierarchy(renderable_chunk_snapshots);
+    if (m_frame_far_selection.effective == FarWorldMode::Ladder) {
+        m_far_world->BeginLiveOwnership(m_far_world_frame);
+        for (const auto& chunk : renderable_chunk_snapshots) {
+            const auto found = m_chunk_render_data.find(chunk.id);
+            FarWorldLiveUpload upload;
+            upload.cell = {chunk.coords.x, chunk.coords.y, chunk.coords.z, 0};
+            upload.snapshot_version = chunk.mesh_version;
+            if (found != m_chunk_render_data.end()) {
+                const auto& data = found->second;
+                upload.uploaded_version = data.mesh_version;
+                upload.uploaded_indices = data.element_count;
+                upload.valid_allocation =
+                    data.pool_handle != ChunkRenderData::kInvalidPoolHandle &&
+                    m_chunk_geometry_pool.allocation(data.pool_handle).live &&
+                    m_chunk_geometry_pool.allocation(data.pool_handle).index_count ==
+                        data.element_count;
+            }
+            const auto water_found = m_water_render_data.find(chunk.id);
+            upload.water_snapshot_version = chunk.water_mesh_version;
+            if (water_found != m_water_render_data.end()) {
+                const auto& water_data = water_found->second;
+                water_data.SetLadderWaterUpload(
+                    upload,
+                    chunk.water_mesh_version,
+                    m_isolation_config.renders(Client::ScenarioHarness::IsolationLayer::Water) &&
+                        m_water_pass->shader() && m_water_pass->shader()->IsValid());
+            }
+            if (!m_far_world->AddLiveUpload(upload))
+                break;
+        }
+        // Failure deliberately leaves no published mask. Submit refuses the
+        // entire far stage this frame rather than claiming a truncated live set.
+        m_far_world->FinishLiveOwnership();
+    }
 
     // Far-LOD scheduling: ring-diff the wanted region set, integrate
     // finished tile builds (mesh uploads), and evict. Draws happen inside the
@@ -2427,19 +2673,27 @@ void RenderPipeline::prepare_frame(entt::registry& registry,
     // far field; it stays use-after-free safe because the preview drains far-LOD off its
     // candidate world before freeing it (swap_pending_into_live + the dtor call
     // prepare_world_swap). m_far_lod_enabled remains a manual override hook.
-    if (m_farlod && m_far_lod_enabled && !m_offscreen_target_active) {
-        m_farlod->update(world_system, camera.Position);
-    }
+    AdvanceSelectedFarWorld(
+        m_frame_far_selection,
+        [&] {
+            if (m_farlod)
+                m_farlod->update(world_system, camera.Position);
+            m_far_world_advanced = m_farlod != nullptr;
+        },
+        [&] {
+            m_far_world_advanced = m_far_world->PrepareFrame(
+                m_far_world_frame, {camera.Position.x, camera.Position.y, camera.Position.z});
+            // Checked request refusal is reported; one scheduler per frame.
+            select_frame_far_world(
+                m_far_world->Selection(FarWorldPurpose::World, m_far_lod_enabled), camera);
+        });
 
-    glm::mat4 projection = ReversedZPerspective(glm::radians(camera.Zoom),
-                                                (float)m_screen_width / (float)m_screen_height,
-                                                camera.GetNearPlane(),
-                                                camera.GetFarPlane());
-    glm::mat4 view = camera.GetViewMatrix();
+    prepare_camera_projection(camera);
 
     //  TAAU: per-frame Halton[2,3] sub-pixel jitter for the G-buffer projection. Computed ONLY
     // when TAAU is on; (0,0) otherwise so the default render (and frustum culling, which uses the
-    // UNJITTERED projection above) is byte-identical. GBufferPass applies it; the resolve
+    // UNJITTERED projection above) is byte-identical. The shared Ladder depth
+    // contract applies it (GBufferPass retains the compatibility path); the resolve
     // un-jitters the motion vectors with the same offset.
     if (m_taau_enabled && m_screen_width > 0 && m_screen_height > 0) {
         auto halton = [](unsigned i, unsigned base) {
@@ -2459,28 +2713,6 @@ void RenderPipeline::prepare_frame(entt::registry& registry,
         m_taau_jitter_ndc = glm::vec2(0.0f);
     }
 
-    // Cache frustum planes to avoid recalculation when camera hasn't changed significantly
-    glm::vec4 frustum_planes[6];
-    const float POSITION_THRESHOLD = 0.5f;  // Less sensitive to prevent cache thrashing
-    const float ROTATION_THRESHOLD = 0.05f; // Reduced sensitivity for smooth movement
-
-    bool needsUpdate =
-        !m_frustumCache.valid ||
-        glm::distance(camera.Position, m_frustumCache.lastCameraPos) > POSITION_THRESHOLD ||
-        glm::distance(camera.Front, m_frustumCache.lastCameraFront) > ROTATION_THRESHOLD ||
-        std::abs(camera.Zoom - m_frustumCache.lastZoom) > 0.1f;
-
-    if (needsUpdate) {
-        PassGl::ExtractFrustumPlanes(projection * view, m_frustumCache.planes);
-        m_frustumCache.lastCameraPos = camera.Position;
-        m_frustumCache.lastCameraFront = camera.Front;
-        m_frustumCache.lastZoom = camera.Zoom;
-        m_frustumCache.valid = true;
-    }
-
-    // Use cached planes
-    std::memcpy(frustum_planes, m_frustumCache.planes, sizeof(frustum_planes));
-
     // particle MOTION advances in prepare (once per frame), so the
     // dispatch below only draws — running dispatch twice must not double-advance
     // motion. Guarded identically to the particles stage's execute.
@@ -2494,13 +2726,47 @@ void RenderPipeline::prepare_frame(entt::registry& registry,
     m_frame_prepared.world_system = &world_system;
     m_frame_prepared.delta_time = deltaTime;
     m_frame_prepared.wireframe = wireframe;
-    m_frame_prepared.projection = projection;
-    m_frame_prepared.view = view;
-    std::memcpy(m_frame_prepared.frustum_planes, frustum_planes, sizeof(frustum_planes));
     m_frame_prepared.renderable_chunk_snapshots = std::move(renderable_chunk_snapshots);
     m_frame_prepared.valid = true;
 
     m_cpu_frame_prep = std::chrono::steady_clock::now(); //
+}
+
+void RenderPipeline::prepare_camera_projection(const Camera& camera) {
+    // One production seam publishes the unjittered projection, culling planes
+    // and capture metadata. The depth contract adds jitter to this matrix for
+    // all Ladder G-buffer writers and reconstruction consumers.
+    const auto projection = camera.GetProjectionMatrix(static_cast<int>(m_screen_width),
+                                                       static_cast<int>(m_screen_height));
+    const auto view = camera.GetViewMatrix();
+    m_frame_prepared.far_plane = camera.GetFarPlane();
+    m_frame_prepared.projection = projection;
+    m_frame_prepared.view = view;
+    m_frame_prepared.replay_camera = replay_camera(camera);
+    // Cache frustum planes to avoid recalculation when camera hasn't changed significantly
+    const float POSITION_THRESHOLD = 0.5f;  // Less sensitive to prevent cache thrashing
+    const float ROTATION_THRESHOLD = 0.05f; // Reduced sensitivity for smooth movement
+
+    bool needsUpdate =
+        !m_frustumCache.valid ||
+        glm::distance(camera.Position, m_frustumCache.lastCameraPos) > POSITION_THRESHOLD ||
+        glm::distance(camera.Front, m_frustumCache.lastCameraFront) > ROTATION_THRESHOLD ||
+        std::abs(camera.Zoom - m_frustumCache.lastZoom) > 0.1f ||
+        camera.GetFarPlane() != m_frustumCache.lastFarPlane;
+
+    if (needsUpdate) {
+        PassGl::ExtractFrustumPlanes(projection * view, m_frustumCache.planes);
+        m_frustumCache.lastCameraPos = camera.Position;
+        m_frustumCache.lastCameraFront = camera.Front;
+        m_frustumCache.lastZoom = camera.Zoom;
+        m_frustumCache.lastFarPlane = camera.GetFarPlane();
+        m_frustumCache.valid = true;
+    }
+
+    // Use cached planes
+    std::memcpy(m_frame_prepared.frustum_planes,
+                m_frustumCache.planes,
+                sizeof(m_frame_prepared.frustum_planes));
 }
 
 void RenderPipeline::dispatch_stages(const Camera& camera) {
@@ -2604,6 +2870,7 @@ void RenderPipeline::execute_stage_shadow(const Camera& camera) {
     begin_gpu_pass_timer(GpuTimerPass::Shadow);
     {
         RenderContext shadow_ctx;
+        shadow_ctx.frozen_replay = m_far_world_paired;
         shadow_ctx.registry = &m_render_registry;
         ShadowPassInput shadow_input;
         shadow_input.light_space_matrices = get_light_space_matrices(camera);
@@ -2635,6 +2902,7 @@ void RenderPipeline::execute_stage_gbuffer(const Camera& camera) {
     begin_gpu_pass_timer(GpuTimerPass::GBuffer);
     {
         RenderContext gbuffer_ctx = make_gbuffer_context(camera, frustum_planes);
+        gbuffer_ctx.frozen_replay = m_far_world_paired;
         GBufferPassInput gbuffer_input;
         m_authored_view.reset();
         if (m_authored_draws && !m_authored_draws->draws.empty()) {
@@ -2644,7 +2912,9 @@ void RenderPipeline::execute_stage_gbuffer(const Camera& camera) {
             RenderViewDescription description;
             const glm::mat4 view = camera.GetViewMatrix();
             const glm::mat4 projection =
-                camera.GetProjectionMatrix(m_screen_width, m_screen_height);
+                gbuffer_ctx.far_world_ladder
+                    ? gbuffer_ctx.gbuffer_projection
+                    : camera.GetProjectionMatrix(m_screen_width, m_screen_height);
             for (size_t i = 0; i < 16; ++i) {
                 description.view[i] = glm::value_ptr(view)[i];
                 description.projection[i] = glm::value_ptr(projection)[i];
@@ -2662,7 +2932,12 @@ void RenderPipeline::execute_stage_gbuffer(const Camera& camera) {
         // Live-terrain submit: the Codex-signed-off callback (CullHierarchical +
         // draw_chunks_mdi, byte-identical), shared with ShadowPass.
         gbuffer_input.submit_terrain_chunks = make_terrain_submitter(true);
-        gbuffer_input.far_lod = farlod();
+        gbuffer_input.far_selection = m_frame_far_selection;
+        gbuffer_input.legacy_far = farlod();
+        gbuffer_input.submit_ladder = [this, &camera](const FarWorldPrepareDraw& prepare) {
+            return m_far_world->Submit({camera.Position.x, camera.Position.y, camera.Position.z},
+                                       prepare);
+        };
         gbuffer_input.root_path = m_root_path;
         gbuffer_input.static_model_texture_array = static_model_texture_array();
         gbuffer_input.static_model_normal_array = static_model_normal_array();
@@ -2678,6 +2953,8 @@ void RenderPipeline::execute_stage_gbuffer(const Camera& camera) {
         gbuffer_input.tree_impostor_center = tree_impostor_center();
         const GBufferDrawStats gstats =
             m_gbuffer_pass->execute(gbuffer_ctx, registry, gbuffer_input);
+        if (gstats.refusal != FarWorldRefusal::None)
+            m_frame_far_selection.refusal = gstats.refusal;
         // Fold with the EXACT current policy: terrain_visible_chunks '=', rest '+='.
         m_last_render_pass_stats.terrain_visible_chunks = gstats.terrain_visible_chunks;
         m_last_render_pass_stats.terrain_draws += gstats.terrain_draws;
@@ -2689,6 +2966,15 @@ void RenderPipeline::execute_stage_gbuffer(const Camera& camera) {
         m_last_render_pass_stats.authored_draws += gstats.authored_draws;
         m_last_render_pass_stats.authored_indices_drawn += gstats.authored_indices;
     }
+    if (!m_far_world_paired)
+        m_far_world->CaptureDiagnostic(m_frame_far_selection,
+                                       m_far_world_frame,
+                                       {camera.Position.x, camera.Position.y, camera.Position.z},
+                                       camera.GetFarPlane(),
+                                       m_far_world_advanced,
+                                       m_last_render_pass_stats.far_region_draws,
+                                       m_last_render_pass_stats.far_indices_drawn,
+                                       m_far_world_epoch);
     m_cpu_frame_gbuf = std::chrono::steady_clock::now(); //
 }
 
@@ -2707,6 +2993,7 @@ void RenderPipeline::execute_stage_plant_procgen(const Camera& camera) {
         glBindFramebuffer(GL_FRAMEBUFFER, m_gbuffer_pass->gbuffer().fbo_id);
         const GLenum pp_bufs[4] = {
             GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1, GL_COLOR_ATTACHMENT2, GL_COLOR_ATTACHMENT3};
+        PreserveReplayObject(ReplayObjectKind::Framebuffer, m_gbuffer_pass->gbuffer().fbo_id);
         glDrawBuffers(4, pp_bufs);
         glViewport(0, 0, m_internal_width, m_internal_height); // into internal G-buffer
         glEnable(GL_DEPTH_TEST);
@@ -2733,6 +3020,7 @@ void RenderPipeline::execute_stage_ground_decals(const Camera& camera) {
     if (m_ground_decal_pass && m_ground_decal_pass->active()) {
         glBindFramebuffer(GL_FRAMEBUFFER, m_gbuffer_pass->gbuffer().fbo_id);
         const GLenum gd_bufs[1] = {GL_COLOR_ATTACHMENT2}; // albedo only
+        PreserveReplayObject(ReplayObjectKind::Framebuffer, m_gbuffer_pass->gbuffer().fbo_id);
         glDrawBuffers(1, gd_bufs);
         glViewport(0, 0, m_internal_width, m_internal_height); // into internal G-buffer
         glDisable(GL_DEPTH_TEST);
@@ -2903,7 +3191,14 @@ void RenderPipeline::execute_stage_water(const Camera& camera) {
         WaterPassInput water_input;
         for (const auto& chunk : renderable_chunk_snapshots) {
             auto it = m_water_render_data.find(chunk.id);
-            if (it != m_water_render_data.end() && it->second.element_count > 0) {
+            if (it != m_water_render_data.end() && it->second.element_count > 0 &&
+                (m_frame_far_selection.effective != FarWorldMode::Ladder ||
+                 LadderWaterPassEligible(chunk.water_mesh_version,
+                                         it->second.mesh_version,
+                                         it->second.element_count,
+                                         it->second.LadderUploadValid(),
+                                         m_water_pass->shader() &&
+                                             m_water_pass->shader()->IsValid()))) {
                 glm::mat4 model = glm::translate(
                     glm::mat4(1.0f),
                     glm::vec3(chunk.coords * IVec3(CHUNK_SIZE_X, CHUNK_SIZE_Y, CHUNK_SIZE_Z)));
@@ -3006,7 +3301,9 @@ void RenderPipeline::execute_stage_aerial(const Camera& camera) {
     record_frame_stage("aerial");
     if (m_isolation_config.renders(Client::ScenarioHarness::IsolationLayer::Aerial)) {
         RenderContext aerial_ctx = make_aerial_context(camera);
-        m_aerial_pass->set_froxel_input(m_volumetric_quality, m_froxel_pass->integrated_texture());
+        if (!m_far_world_paired)
+            m_aerial_pass->set_froxel_input(m_volumetric_quality,
+                                            m_froxel_pass->integrated_texture());
         begin_gpu_pass_timer(GpuTimerPass::Aerial);
         m_aerial_pass->execute(aerial_ctx);
         end_gpu_pass_timer(GpuTimerPass::Aerial);
@@ -3037,6 +3334,7 @@ void RenderPipeline::execute_stage_foliage(const Camera& camera) {
     if (m_foliage_pass &&
         m_isolation_config.renders(Client::ScenarioHarness::IsolationLayer::Foliage)) {
         RenderContext foliage_ctx = make_foliage_context(camera);
+        foliage_ctx.frozen_replay = m_far_world_paired;
         begin_gpu_pass_timer(GpuTimerPass::Foliage);
         const std::size_t foliage_drawn = m_foliage_pass->execute(foliage_ctx, camera);
         // Stats moved out of FoliagePass::execute (-T17): bump only when
@@ -3063,7 +3361,7 @@ void RenderPipeline::execute_stage_taau_resolve(const Camera& camera) {
     record_frame_stage("taau_resolve");
     if (m_taau_enabled) {
         RenderContext taau_ctx = make_taau_context();
-        m_taau_pass->execute(taau_ctx);
+        m_taau_pass->execute(taau_ctx, m_far_world_paired ? &m_far_world_pair_taau : nullptr);
     }
 }
 
@@ -3077,7 +3375,7 @@ void RenderPipeline::execute_stage_luminance_meter(const Camera& camera) {
     // ring-submits again. The current frame does not consume that new sample, so
     // pixels remain unchanged until the next frame's exposure update.
     record_frame_stage("luminance_meter");
-    if (!m_auto_exposure_metered) {
+    if (!m_auto_exposure_metered || !FarReplayEffects{m_far_world_paired}.ExposureReadback()) {
         return;
     }
     const RenderContext ctx = make_luminance_meter_context();
@@ -3139,6 +3437,7 @@ void RenderPipeline::execute_stage_final_blit(const Camera& camera) {
     begin_gpu_pass_timer(GpuTimerPass::FinalBlit);
     {
         RenderContext ctx;
+        ctx.frozen_replay = m_far_world_paired;
         ctx.camera = &camera;
         ctx.delta_time = deltaTime;
         ctx.screen_width = m_screen_width;
@@ -3436,6 +3735,10 @@ void RenderPipeline::init_sky_lut() {
 // LUMIN_ATMOS override. Render-only; never feeds world_hash.
 RenderContext RenderPipeline::make_aerial_context(const Camera& camera) {
     RenderContext ctx;
+    ctx.frozen_replay = m_far_world_paired;
+    ctx.set_gbuffer_depth_contract(m_frame_far_selection.effective == FarWorldMode::Ladder,
+                                   m_frame_prepared.projection,
+                                   m_taau_jitter_ndc);
     ctx.camera = &camera;
     ctx.screen_width = m_screen_width;
     ctx.screen_height = m_screen_height;
@@ -3478,7 +3781,9 @@ RenderContext RenderPipeline::make_aerial_context(const Camera& camera) {
         atmo = *s_atmos_override;
     }
     ctx.aerial_density = atmo.aerial_density;
-    ctx.aerial_max_distance = atmo.aerial_max_distance;
+    ctx.aerial_max_distance = ctx.far_world_ladder
+                                  ? static_cast<float>(World::kFarOuterRadiusMeters)
+                                  : atmo.aerial_max_distance;
     ctx.inscatter_strength = atmo.inscatter_strength;
     ctx.atmosphere_warmth = atmo.warmth;
     return ctx;
@@ -3489,6 +3794,7 @@ RenderContext RenderPipeline::make_aerial_context(const Camera& camera) {
 // to the retired inline block) so execute_god_rays reads only ctx. Render-only.
 RenderContext RenderPipeline::make_god_rays_context(const Camera& camera) {
     RenderContext ctx;
+    ctx.frozen_replay = m_far_world_paired;
     ctx.gbuffer_depth =
         m_render_registry.adopt_texture("gbuffer_depth", m_gbuffer_pass->gbuffer().depth_texture);
     ctx.camera = &camera;
@@ -3677,6 +3983,7 @@ void RenderPipeline::init_screen_quad() {
 // stay members (pass-owned resolve state, like a pass owns its shader). Render-only.
 RenderContext RenderPipeline::make_taau_context() {
     RenderContext ctx;
+    ctx.frozen_replay = m_far_world_paired;
     ctx.screen_width = m_screen_width;
     ctx.screen_height = m_screen_height;
     ctx.internal_width = m_internal_width; //
@@ -3694,6 +4001,9 @@ RenderContext RenderPipeline::make_taau_context() {
 // --- CLEANUP ---
 
 void RenderPipeline::cleanup_gpu_resources() {
+    // Release allocations while the captured context is current, including
+    // startup failure. Repeated shutdown/destruction sees an empty owner.
+    m_far_world->Shutdown();
     if (m_farlod) {
         m_farlod->shutdown();
     }
@@ -4054,7 +4364,9 @@ void RenderPipeline::manage_water_gpu_resources(
 
         auto it = m_water_render_data.find(chunk.id);
         bool is_new = (it == m_water_render_data.end());
-        bool is_stale = !is_new && (it->second.mesh_version != chunk.water_mesh_version);
+        bool is_stale = !is_new && (it->second.mesh_version != chunk.water_mesh_version ||
+                                    (m_frame_far_selection.effective == FarWorldMode::Ladder &&
+                                     !it->second.LadderUploadValid()));
 
         if (is_new || is_stale) {
             const glm::vec3 center(chunk.coords.x * CHUNK_SIZE_X + CHUNK_SIZE_X * 0.5f,
@@ -4192,8 +4504,22 @@ void RenderPipeline::upload_water_mesh(const ChunkMeshSnapshot& chunk,
     if (!payload.has_mesh())
         return;
 
+    const bool ladder = m_frame_far_selection.effective == FarWorldMode::Ladder;
+    // An in-place update can corrupt a previously valid store. Invalidate before
+    // any attempt, including Legacy uploads, so switching modes cannot reuse it.
+    if (const auto found = m_water_render_data.find(chunk.id); found != m_water_render_data.end())
+        found->second.ladder_upload_version.reset();
+
     if (payload.vertices.size() > std::numeric_limits<u32>::max() ||
         payload.indices.size() > std::numeric_limits<u32>::max()) {
+        m_last_mesh_upload_stats.water_upload_failures++;
+        return;
+    }
+
+    FarVolumeGpuSizes checked_sizes;
+    if (ladder &&
+        (!CheckFarVolumeGpuSizes(payload.vertices.size(), payload.indices.size(), checked_sizes) ||
+         glGetError() != GL_NO_ERROR)) {
         m_last_mesh_upload_stats.water_upload_failures++;
         return;
     }
@@ -4227,6 +4553,17 @@ void RenderPipeline::upload_water_mesh(const ChunkMeshSnapshot& chunk,
         data.vertex_capacity < vertex_count || data.index_capacity < index_count;
     const bool version_reused = data.mesh_version != 0 && data.mesh_version != payload.mesh_version;
 
+    // Match the far-volume backend: check the upload error and query the actual
+    // store size. Reuse may retain a larger store, but both writes must succeed.
+    const auto validate_upload = [needs_growth](GLenum target, std::uint64_t bytes) {
+        const bool uploaded = glGetError() == GL_NO_ERROR;
+        GLint64 actual = 0;
+        glGetBufferParameteri64v(target, GL_BUFFER_SIZE, &actual);
+        const bool queried = glGetError() == GL_NO_ERROR;
+        return uploaded && queried && actual >= static_cast<GLint64>(bytes) &&
+               (!needs_growth || actual == static_cast<GLint64>(bytes));
+    };
+
     glBindVertexArray(data.vao_id);
     glBindBuffer(GL_ARRAY_BUFFER, data.vbo_id);
     if (needs_growth) {
@@ -4242,6 +4579,8 @@ void RenderPipeline::upload_water_mesh(const ChunkMeshSnapshot& chunk,
                         payload.vertices.data());
     }
 
+    const bool vertex_uploaded =
+        !ladder || validate_upload(GL_ARRAY_BUFFER, checked_sizes.vertex_bytes);
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, data.ebo_id);
     if (needs_growth) {
         glBufferData(GL_ELEMENT_ARRAY_BUFFER,
@@ -4256,6 +4595,8 @@ void RenderPipeline::upload_water_mesh(const ChunkMeshSnapshot& chunk,
                         payload.indices.data());
     }
 
+    const bool index_uploaded =
+        !ladder || validate_upload(GL_ELEMENT_ARRAY_BUFFER, checked_sizes.index_bytes);
     glEnableVertexAttribArray(0);
     glVertexAttribPointer(
         0, 3, GL_FLOAT, GL_FALSE, sizeof(VoxelVertex), (void*)offsetof(VoxelVertex, position));
@@ -4264,6 +4605,18 @@ void RenderPipeline::upload_water_mesh(const ChunkMeshSnapshot& chunk,
         1, 3, GL_FLOAT, GL_FALSE, sizeof(VoxelVertex), (void*)offsetof(VoxelVertex, normal));
     glBindVertexArray(0);
 
+    if (ladder) {
+        const bool attributes_valid = glGetError() == GL_NO_ERROR;
+        if (!vertex_uploaded || !index_uploaded || !attributes_valid || data.vao_id == 0 ||
+            data.vbo_id == 0 || data.ebo_id == 0) {
+            // Either buffer may have changed. Force full allocation on retry;
+            // the cleared certificate excludes this record from both consumers.
+            data.vertex_capacity = data.index_capacity = 0;
+            m_last_mesh_upload_stats.water_upload_failures++;
+            return;
+        }
+        data.ladder_upload_version = payload.mesh_version;
+    }
     data.element_count = index_count;
     data.mesh_version = payload.mesh_version;
     data.frames_since_inactive = 0;
@@ -4372,6 +4725,7 @@ void RenderPipeline::unload_water_resources(ChunkID chunk_id) {
         WaterRenderData data = it->second;
         data.element_count = 0;
         data.mesh_version = 0;
+        data.ladder_upload_version.reset();
         data.frames_since_inactive = 0;
         if (m_free_water_render_slots.size() < kMaxFreeWaterRenderSlots) {
             m_free_water_render_slots.push_back(data);

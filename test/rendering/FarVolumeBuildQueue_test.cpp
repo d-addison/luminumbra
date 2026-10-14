@@ -2,6 +2,7 @@
 
 #include <gtest/gtest.h>
 
+#include <array>
 #include <chrono>
 #include <condition_variable>
 #include <limits>
@@ -31,6 +32,9 @@ FarVolumeQueueRequest AirRequest(std::int64_t x = 0) {
                          [](const FarVolumePosition&, float, std::uint32_t, FarCaveMode) {
                              return FarVolumeSample{1, 7};
                          }};
+    request.water = std::make_shared<const FarWorldConstantWaterObservation>(
+        request.identity.content_hash, false, 0.0f);
+    request.water_bound = FarWorldWaterBound{true, 0, 0};
     return request;
 }
 FarVolumeQueueRequest PlaneRequest(std::int64_t x = 0) {
@@ -40,6 +44,9 @@ FarVolumeQueueRequest PlaneRequest(std::int64_t x = 0) {
         return FarVolumeSample{static_cast<float>(p.y) + .25f,
                                static_cast<std::uint8_t>(p.x < 512 ? 7 : 8)};
     };
+    request.water = std::make_shared<const FarWorldConstantWaterObservation>(
+        request.identity.content_hash, false, 0.0f);
+    request.water_bound = FarWorldWaterBound{true, 0, 0};
     return request;
 }
 
@@ -105,6 +112,78 @@ private:
     }
 };
 } // namespace
+
+TEST(FarVolumeBuildQueue, EmptyTerrainWetWaterPublishesOneCompleteMixedResult) {
+    JobSystem jobs;
+    jobs.startup(2);
+    FarVolumeMemoryPool pool(16 * 1024 * 1024);
+    FarVolumeBuildQueue queue(jobs, pool, QueueLimits());
+    auto request = AirRequest(-1);
+    request.water = std::make_shared<const FarWorldConstantWaterObservation>(42, true, 0.0f);
+    request.water_bound = FarWorldWaterBound{false, 0, 0};
+    ASSERT_EQ(queue.Submit(request), FarVolumeSubmitStatus::Queued);
+    const auto result = WaitResult(queue, request);
+    ASSERT_TRUE(result);
+    if (result) {
+        EXPECT_EQ(result->status(), FarVolumeBuildStatus::Ready);
+        EXPECT_TRUE(result->mesh().water_complete);
+        EXPECT_FALSE(result->mesh().water_known_dry);
+        EXPECT_EQ(result->mesh().terrain_content, FarVolumeContent::Air);
+        EXPECT_EQ(result->mesh().content, FarVolumeContent::Mixed);
+        EXPECT_EQ(result->mesh().terrain_indices, 0u);
+        EXPECT_EQ(result->mesh().water_indices, 98304u);
+        EXPECT_EQ(result->retained_bytes(), FarVolumeRenderRetainedBytes(result->mesh()));
+    }
+    jobs.shutdown();
+}
+
+TEST(FarVolumeBuildQueue, UnavailableWaterIsTypedRefusalAndNeverReadyEmpty) {
+    JobSystem jobs;
+    jobs.startup(2);
+    FarVolumeMemoryPool pool(16 * 1024 * 1024);
+    FarVolumeBuildQueue queue(jobs, pool, QueueLimits());
+    auto request = AirRequest();
+    request.water.reset();
+    request.water_bound.reset();
+    ASSERT_EQ(queue.Submit(request), FarVolumeSubmitStatus::Queued);
+    const auto result = WaitResult(queue, request);
+    ASSERT_TRUE(result);
+    if (result) {
+        EXPECT_EQ(result->status(), FarVolumeBuildStatus::WaterRefused);
+        EXPECT_EQ(result->water_failure(), FarWorldWaterError::Unavailable);
+        EXPECT_FALSE(result->mesh().water_complete);
+    }
+    jobs.shutdown();
+}
+
+TEST(FarVolumeBuildQueue, AvailableWaterWithUnavailableSamplesCannotPublishTerrainAlone) {
+    class MissingSample final : public FarWorldWaterObservation {
+    public:
+        std::uint64_t content_identity() const noexcept override {
+            return 43;
+        }
+        FarWorldWaterCapability WaterCapability() const noexcept override {
+            return FarWorldWaterCapability::Wet;
+        }
+    };
+    JobSystem jobs;
+    jobs.startup(2);
+    FarVolumeMemoryPool pool(16 * 1024 * 1024);
+    FarVolumeBuildQueue queue(jobs, pool, QueueLimits());
+    auto request = PlaneRequest();
+    request.water = std::make_shared<const MissingSample>();
+    request.water_bound = FarWorldWaterBound{false, 0, 0};
+    ASSERT_EQ(queue.Submit(request), FarVolumeSubmitStatus::Queued);
+    const auto result = WaitResult(queue, request);
+    ASSERT_TRUE(result);
+    if (result) {
+        EXPECT_EQ(result->status(), FarVolumeBuildStatus::WaterRefused);
+        EXPECT_EQ(result->water_failure(), FarWorldWaterError::Unavailable);
+        EXPECT_GT(result->mesh().terrain_indices, 0u);
+        EXPECT_FALSE(result->mesh().water_complete);
+    }
+    jobs.shutdown();
+}
 
 TEST(FarVolumeBuildQueue, ControlAdmissionPrecedesAllocationAndUnwinds) {
     JobSystem jobs;
@@ -377,4 +456,51 @@ TEST(FarVolumeBuildQueue, TakenGeometryChargeOutlivesQueueAndMoveReplacement) {
     EXPECT_EQ(pool.used(), retained->retained_bytes());
     retained.reset();
     EXPECT_EQ(pool.used(), 0u);
+}
+
+TEST(FarVolumeBuildQueue, ExplicitSelectionControlsDispatchRatherThanInsertionOrder) {
+    JobSystem stopped_jobs;
+    FarVolumeMemoryPool pool(1024 * 1024);
+    FarVolumeBuildQueue queue(stopped_jobs, pool, QueueLimits());
+    const auto first = AirRequest();
+    auto second = AirRequest(1);
+    ASSERT_EQ(queue.Submit(first), FarVolumeSubmitStatus::Queued);
+    ASSERT_EQ(queue.Submit(second), FarVolumeSubmitStatus::Queued);
+    const std::array selected{second.identity.key, second.identity.key};
+    EXPECT_EQ(queue.Pump(2, selected), 1u); // repeated key starts only once
+    EXPECT_FALSE(queue.TakeCompleted(first.identity, first.intent));
+    auto result = queue.TakeCompleted(second.identity, second.intent);
+    ASSERT_TRUE(result);
+    if (!result)
+        return;
+    EXPECT_EQ(result->identity(), second.identity);
+    EXPECT_EQ(result->status(), FarVolumeBuildStatus::DispatchRejected);
+    EXPECT_EQ(queue.Stats().pending, 1u);
+    const std::array unknown{FarTileKey{1, 99, 99}};
+    EXPECT_EQ(queue.Pump(1, unknown), 0u);
+    EXPECT_EQ(queue.Stats().pending, 1u);
+    EXPECT_EQ(queue.Pump(1), 1u);
+}
+
+TEST(FarVolumeBuildQueue, DispatchUsesNormalLaneBehindBlockedHighWorker) {
+    JobSystem jobs;
+    jobs.startup(1);
+    FarVolumeMemoryPool pool(64 * 1024 * 1024);
+    FarVolumeBuildQueue queue(jobs, pool, QueueLimits());
+    auto barrier = std::make_shared<Barrier>();
+    ReleaseOnExit release{barrier};
+    jobs.dispatch([barrier] { barrier->Enter(); }, JobPriority::High);
+    ASSERT_TRUE(barrier->WaitEntered());
+    const auto request = AirRequest();
+    ASSERT_EQ(queue.Submit(request), FarVolumeSubmitStatus::Queued);
+    ASSERT_EQ(queue.Pump(1), 1u);
+    const auto stats = jobs.get_runtime_stats();
+    EXPECT_EQ(stats.normal_priority_queue_depth, 1u);
+    EXPECT_EQ(stats.high_priority_queue_depth, 0u);
+    barrier->Release();
+    auto result = WaitResult(queue, request);
+    ASSERT_TRUE(result);
+    if (!result)
+        return;
+    EXPECT_EQ(result->status(), FarVolumeBuildStatus::ReadyEmpty);
 }
