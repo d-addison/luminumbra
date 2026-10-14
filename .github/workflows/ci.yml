@@ -403,7 +403,6 @@ jobs:
     runs-on: windows-2025
     timeout-minutes: 90
     env:
-      CCACHE_DIR: ${{ runner.temp }}/ccache-msvc
       CCACHE_COMPILERCHECK: content
       CCACHE_MAXSIZE: 500M
       # Only the main configure opts in via command-line launchers. Captures
@@ -415,6 +414,11 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Job-level env cannot read the runner context; set the cache
+      # directory from RUNNER_TEMP before any step consumes it.
+      - name: Locate compiler cache
+        shell: pwsh
+        run: '"CCACHE_DIR=$(Join-Path $env:RUNNER_TEMP ''ccache-msvc'')" >> $env:GITHUB_ENV'
       - name: Report validation route
         id: route
         shell: bash
@@ -665,13 +669,17 @@ jobs:
     # headroom over the projected ~45 min.
     timeout-minutes: 85
     env:
-      # The native UCRT64 ccache accepts Windows paths inherited by msys2.
-      CCACHE_DIR: ${{ runner.temp }}/ccache-ucrt64
       CCACHE_COMPILERCHECK: content
       CCACHE_MAXSIZE: 500M
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Job-level env cannot read the runner context; set the cache
+      # directory from RUNNER_TEMP before any step consumes it. The native
+      # UCRT64 ccache accepts the Windows path inherited by msys2.
+      - name: Locate compiler cache
+        shell: pwsh
+        run: '"CCACHE_DIR=$(Join-Path $env:RUNNER_TEMP ''ccache-ucrt64'')" >> $env:GITHUB_ENV'
       - name: Verify manual qualification identity and dependencies
         id: identity
         if: github.event_name == 'workflow_dispatch' && inputs.qualification_capture
