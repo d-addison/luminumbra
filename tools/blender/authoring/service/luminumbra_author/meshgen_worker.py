@@ -6,6 +6,7 @@ The native lane is unavailable until a qualified installed game finisher exists.
 import os
 from pathlib import Path
 import sys
+import tempfile
 import threading
 import time
 
@@ -132,23 +133,41 @@ def _supervisor():
     return 0
 
 
+def _publish_pid_file(path, data):
+    """Publish a diagnostic witness before readiness; never modify it in place.
+
+    All writer handles are closed before READY permits readers to open the
+    destination. This also avoids Windows replace/delete of an open PID file.
+    These witnesses are not recovery records and need no durable ledger fsync.
+    """
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(dir=path.parent, prefix='.pids-', delete=False) as stream:
+            temporary = Path(stream.name)
+            stream.write(data)
+            stream.flush()
+        os.replace(temporary, path)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
 def _simulator():
     request = _request()
     effective = verify_effective_config(read_bounded(request['config_path'], 1024**2), request['stored_sha256'], request['config_digest'])
     mode = request['mode']
     if mode == 'no_ready':
         threading.Event().wait(request['timeout']+1); return 0
+    if mode == 'descendant':
+        import subprocess
+        child = subprocess.Popen([sys.executable, '-I', '-S', '-B', '-c', 'import threading; threading.Event().wait(3600)'],
+                                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                 start_new_session=os.name != 'nt')
+        _publish_pid_file(Path(request['config_path']).with_suffix('.descendant.pid'), str(child.pid).encode())
+        _publish_pid_file(Path(request['config_path']).with_suffix('.worker.pids'), canonical([os.getpid(), child.pid]))
     _ready()
     if mode == 'crash': return 7
     if mode in ('hang', 'descendant'):
-        if mode == 'descendant':
-            import subprocess
-            child = subprocess.Popen([sys.executable, '-I', '-S', '-B', '-c', 'import threading; threading.Event().wait(3600)'],
-                                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                                     start_new_session=os.name != 'nt')
-            from .meshgen_jobs import durable_write
-            durable_write(Path(request['config_path']).with_suffix('.descendant.pid'), str(child.pid).encode())
-            durable_write(Path(request['config_path']).with_suffix('.worker.pids'), canonical([os.getpid(), child.pid]))
         threading.Event().wait(request['timeout']+1); return 0
     if mode == 'oversize':
         sys.stdout.buffer.write(b'x'*(1024**2+1)); sys.stdout.buffer.flush(); return 0

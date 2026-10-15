@@ -702,8 +702,8 @@ class BackendBroker:
                 backend_job = digest(request["request_id"].encode())[:32]
                 self.ledger.update(identifier, backend_job_id=backend_job)
                 reported_id = client.submit(submission(request, snapshot, plan["params"], plan["deadline_s"]), deadline=deadline)
+                # Equality confirms the pre-POST marker without another fsync.
                 require(reported_id == backend_job, "backend.protocol", "Pinned mock returned an unexpected job identity.")
-                self.ledger.update(identifier, backend_job_id=backend_job)
                 self._check_cancel(identifier)
                 while True:
                     require(self.clock() < deadline, "backend.deadline", "Backend job deadline expired.")

@@ -1,4 +1,8 @@
-"""Portable request ownership, replay, orphan recovery and EOF/cancel races."""
+"""Portable request ownership, replay, orphan recovery and EOF/cancel races.
+
+Job result waits observe drained completion, not machine throughput. Production
+backend deadlines and the CI job watchdog remain the fail-safes for hangs.
+"""
 from copy import deepcopy
 import io
 import os
@@ -211,7 +215,7 @@ class BrokerTests(RuleAssertions, unittest.TestCase):
             self.assertFalse(broker.ledger.root.exists())
             record = broker.start(plan["plan_id"], plan["plan_digest"])
             identifier = record["job_id"]
-            broker.futures[identifier].result(timeout=5)
+            broker.futures[identifier].result()
             self.assertEqual(broker.ledger.status(identifier)["state"], "finishing")
             broker.start(plan["plan_id"], plan["plan_digest"])
             self.assertEqual(server.submissions, 1)
@@ -235,7 +239,7 @@ class BrokerTests(RuleAssertions, unittest.TestCase):
             with BackendBroker(self.project, client_factory=client_factory(server)) as broker:
                 plan = broker.plan(self.request)
                 record = broker.start(plan["plan_id"], plan["plan_digest"])
-                broker.futures[record["job_id"]].result(timeout=5)
+                broker.futures[record["job_id"]].result()
                 terminal = broker.ledger.result(record["job_id"])
                 self.assertEqual(terminal["errors"][0]["rule_id"], "backend.pin_mismatch")
                 self.assertEqual(server.submissions, 0)
@@ -250,7 +254,7 @@ class BrokerTests(RuleAssertions, unittest.TestCase):
                 with BackendBroker(self.project, client_factory=client_factory(server)) as broker:
                     plan = broker.plan(request)
                     record = broker.start(plan["plan_id"], plan["plan_digest"])
-                    broker.futures[record["job_id"]].result(timeout=5)
+                    broker.futures[record["job_id"]].result()
                     terminal = broker.ledger.result(record["job_id"])
                     self.assertEqual(terminal["state"], "failed")
                     self.assertEqual(terminal["errors"][0]["rule_id"], rule)
@@ -277,7 +281,7 @@ class BrokerTests(RuleAssertions, unittest.TestCase):
         with BackendBroker(self.project, clock=lambda: clock[0], client_factory=SlowClient) as broker:
             plan = broker.plan(self.request)
             record = broker.start(plan["plan_id"], plan["plan_digest"])
-            broker.futures[record["job_id"]].result(timeout=10)
+            broker.futures[record["job_id"]].result()
             terminal = broker.ledger.result(record["job_id"])
             self.assertEqual(terminal["errors"][0]["rule_id"], "backend.deadline")
             self.assertEqual(cancelled, [digest(self.request["request_id"].encode())[:32]])
@@ -348,7 +352,7 @@ class BrokerTests(RuleAssertions, unittest.TestCase):
             self.assertTrue(entered.wait(2))
             broker.session = "new-document"
             release.set()
-            broker.futures[record["job_id"]].result(timeout=10)
+            broker.futures[record["job_id"]].result()
             terminal = broker.ledger.result(record["job_id"])
             self.assertEqual(terminal["errors"][0]["rule_id"], "stale.plan")
             self.assertFalse(broker.raw)
@@ -381,10 +385,26 @@ class BrokerTests(RuleAssertions, unittest.TestCase):
             self.configure(f"http://127.0.0.1:{server.server_port}")
             request = deepcopy(self.request)
             request["overrides"]["candidates"] = {"count": 4}
-            with BackendBroker(self.project, client_factory=client_factory(server)) as broker:
+            factory = client_factory(server)
+            def checked_client(*args, **kwargs):
+                backend = factory(*args, **kwargs)
+                submit = backend.submit
+                def checked_submit(body, **kwargs):
+                    # Ownership must already be durable before POST.
+                    expected = digest(body["request_id"].encode())[:32]
+                    self.assertEqual(broker.ledger.status(broker.ledger.active)["backend_job_id"], expected)
+                    return submit(body, **kwargs)
+                backend.submit = checked_submit
+                return backend
+            with BackendBroker(self.project, client_factory=checked_client) as broker:
                 plan = broker.plan(request)
-                record = broker.start(plan["plan_id"], plan["plan_digest"])
-                broker.futures[record["job_id"]].result(timeout=5)
+                with patch.object(broker.ledger, 'update', wraps=broker.ledger.update) as update:
+                    record = broker.start(plan["plan_id"], plan["plan_digest"])
+                    broker.futures[record["job_id"]].result()
+                publications = [call.kwargs["backend_job_id"] for call in update.call_args_list
+                                if "backend_job_id" in call.kwargs]
+                self.assertEqual(len(publications), 4)
+                self.assertEqual(len(set(publications)), 4)
                 self.assertEqual(server.submissions, 4)
                 self.assertEqual([item["seed"] for item in broker.raw[record["job_id"]]["candidates"]], [7, 8, 9, 10])
                 self.assertEqual(broker.ledger.status(record["job_id"])["seeds"], [7, 8, 9, 10])

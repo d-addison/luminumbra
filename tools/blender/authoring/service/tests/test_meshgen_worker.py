@@ -17,6 +17,20 @@ from luminumbra_author.process import run_owned, ProcessTree
 from luminumbra_author import meshgen_worker
 
 
+# Each fixture has one writer at a time. Readers wait for child exit or READY,
+# so no destination is held open during replacement, including on Windows.
+PID_PUBLICATION = '''def publish(path, pids):
+    temporary = path.with_suffix('.publishing')
+    try:
+        with temporary.open('w') as stream:
+            json.dump(pids, stream)
+            stream.flush()
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+'''
+
+
 class WorkerSupervision(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(); self.addCleanup(self.tmp.cleanup)
@@ -132,10 +146,8 @@ class WorkerSupervision(unittest.TestCase):
             process.stdin.write(canonical(request)+b'\n'); process.stdin.flush()
             self.assertEqual(ready.get(timeout=5), b'READY\n')
             path = self.config.with_suffix('.worker.pids')
-            deadline = time.monotonic()+5
-            while not path.exists() and time.monotonic() < deadline: threading.Event().wait(.01)
-            self.assertTrue(path.exists(), 'Descendant readiness was not witnessed')
             import json
+            # READY follows replace and closure of every publication handle.
             owned = [process.pid, *json.loads(path.read_text())]
             process.stdin.close()
             process.wait(timeout=5)
@@ -153,6 +165,40 @@ class WorkerSupervision(unittest.TestCase):
             if tree: tree.close()
             for stream in (process.stdin, process.stdout, process.stderr): stream.close()
             if thread: thread.join(timeout=1)
+
+    def test_descendant_readiness_follows_complete_closed_pid_publications(self):
+        import json
+        request = {'config_path': str(self.config), 'stored_sha256': self.resolved.stored_sha256,
+                   'config_digest': self.resolved.config_digest, 'mode': 'descendant', 'timeout': 5}
+        opened, publications, ready = [], [], []
+        create, replace = tempfile.NamedTemporaryFile, os.replace
+        def capture(**kwargs):
+            stream = create(**kwargs)
+            opened.append(stream)
+            return stream
+        def publish(source, destination):
+            self.assertTrue(opened[-1].closed)
+            self.assertEqual(source.parent, destination.parent)
+            self.assertEqual(destination.read_bytes(), b'previous witness')
+            replace(source, destination)
+            publications.append(destination)
+        def witness():
+            self.assertEqual(len(publications), 2)
+            self.assertEqual(self.config.with_suffix('.descendant.pid').read_text(), '123')
+            self.assertEqual(json.loads(self.config.with_suffix('.worker.pids').read_text()), [os.getpid(), 123])
+            ready.append(True)
+        for suffix in ('.descendant.pid', '.worker.pids'):
+            self.config.with_suffix(suffix).write_bytes(b'previous witness')
+        with patch.object(meshgen_worker, '_request', return_value=request), \
+                patch.object(subprocess, 'Popen') as spawn, \
+                patch.object(meshgen_worker.tempfile, 'NamedTemporaryFile', side_effect=capture), \
+                patch.object(meshgen_worker.os, 'replace', side_effect=publish), \
+                patch.object(meshgen_worker, '_ready', side_effect=witness), \
+                patch.object(meshgen_worker.threading, 'Event'):
+            spawn.return_value.pid = 123
+            self.assertEqual(meshgen_worker._simulator(), 0)
+        self.assertEqual(ready, [True])
+        self.assertFalse(list(self.root.glob('.pids-*')))
 
     def test_worker_modules_ship_without_ml_bpy_and_work_in_installed_package(self):
         import ast
@@ -198,14 +244,15 @@ class WorkerSupervision(unittest.TestCase):
 
     def test_every_owned_pid_disappears_after_timeout_cancellation_and_exception(self):
         import json
-        child_code = "import subprocess,sys,time,json,os; from pathlib import Path; p=subprocess.Popen([sys.executable,'-I','-S','-B','-c','import time; time.sleep(60)'], start_new_session=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL); Path(sys.argv[1]).write_text(json.dumps([os.getpid(),p.pid])); sys.exit(0)"
+        child_code = ("import subprocess,sys,time,json,os; from pathlib import Path; "
+                      f"exec({PID_PUBLICATION!r}); "
+                      "p=subprocess.Popen([sys.executable,'-I','-S','-B','-c','import time; time.sleep(60)'], start_new_session=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL); publish(Path(sys.argv[1]),[os.getpid(),p.pid]); sys.exit(0)")
         for mode in ('timeout', 'cancel', 'exception', 'success'):
             with self.subTest(mode=mode):
                 path = self.root/(mode+'.pids')
                 source = ("import subprocess,sys,time,os,json; from pathlib import Path; sys.stdin.buffer.readline(); "
                           "p=subprocess.Popen([sys.executable,'-I','-S','-B','-c',"+repr(child_code)+",sys.argv[1]],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL); "
-                          "path=Path(sys.argv[1]); "
-                          "exec('while not path.exists(): time.sleep(.005)'); "
+                          "p.wait(); "
                           "print('READY',flush=True); " + ("sys.exit(0)" if mode == 'success' else "time.sleep(60)"))
                 cancel = threading.Event()
                 witnessed = []
@@ -494,11 +541,13 @@ class WorkerSupervision(unittest.TestCase):
         path = self.root/'owner-eof.pids'
         grandchild = "import time; time.sleep(60)"
         intermediate = ("import subprocess,sys,os,json; from pathlib import Path; "
+            f"exec({PID_PUBLICATION!r}); "
             "p=subprocess.Popen([sys.executable,'-I','-S','-B','-c',"+repr(grandchild)+"],start_new_session=True,stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL); "
-            "Path(sys.argv[1]).write_text(json.dumps([os.getpid(),p.pid]))")
+            "publish(Path(sys.argv[1]),[os.getpid(),p.pid])")
         root = ("import subprocess,sys,time,os,json; from pathlib import Path; "
+            f"exec({PID_PUBLICATION!r}); "
             "p=subprocess.Popen([sys.executable,'-I','-S','-B','-c',"+repr(intermediate)+",sys.argv[1]],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL); "
-            "p.wait(); path=Path(sys.argv[1]); path.write_text(json.dumps([os.getpid(),*json.loads(path.read_text())])); print('READY',flush=True); time.sleep(60)")
+            "p.wait(); path=Path(sys.argv[1]); publish(path,[os.getpid(),*json.loads(path.read_text())]); print('READY',flush=True); time.sleep(60)")
         wrapped, read_fd, write_fd = _owned_command([sys.executable, '-I', '-S', '-B', '-c', root, str(path)], 5, None)
         process, tree = None, None
         try:
