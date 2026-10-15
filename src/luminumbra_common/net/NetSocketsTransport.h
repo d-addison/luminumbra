@@ -54,6 +54,7 @@ private:
     HSteamNetConnection m_conn = 0;  // k_HSteamNetConnection_Invalid
     bool m_connected = false;
     bool m_closed = false;
+    bool m_peer_closed = false; // drain the backend before releasing the connection
     bool m_is_host = false;
     MessageReceiveQueue m_recv;
 };

@@ -6,6 +6,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <functional>
 #include <memory>
 #include <vector>
 
@@ -57,22 +58,33 @@ struct FailingSendTransport final : ILockstepTransport {
             return inner.SendFrame(frame, delivery);
         if (disconnect_on_failure)
             connected = false;
+        if (on_failure)
+            on_failure();
         return false;
     }
     bool TryReceiveFrame(std::vector<std::uint8_t>& out) override {
-        return inner.TryReceiveFrame(out);
+        // Model TCP Close releasing its receive buffer, unlike loopback Close.
+        if (close_called || !inner.TryReceiveFrame(out))
+            return false;
+        ++received_frames;
+        return true;
     }
     bool IsPeerConnected() const override {
         return connected;
     }
     void Close() override {
+        if (on_close)
+            on_close();
         close_called = true;
         connected = false;
         inner.Close();
     }
 
     ILockstepTransport& inner;
+    std::function<void()> on_failure;
+    std::function<void()> on_close;
     unsigned send_attempts = 0;
+    unsigned received_frames = 0;
     bool fail_sends = true;
     bool connected = true;
     bool disconnect_on_failure = false;
@@ -88,22 +100,49 @@ TEST(ReplicationEndpoint, UsercmdAndAckSendFailuresCloseTransport) {
         ReplicationServer server;
         server.AddClient(1, pair.first.get());
         ReplicationClient client(1, &transport);
+        SnapshotMsg snapshot;
+        snapshot.server_tick = 42;
+        snapshot.snapshot_seq = 1;
+        snapshot.entities = {MakeEntity(1, 100, 200, 300)};
+        ASSERT_TRUE(pair.first->SendFrame(EncodeSnapshot(snapshot)));
+        transport.on_close = [&] {
+            // Delivery must precede the destructive Close, not just happen eventually.
+            ASSERT_TRUE(client.has_snapshot());
+            EXPECT_EQ(client.snapshot().snapshot_seq, snapshot.snapshot_seq);
+            EXPECT_EQ(client.snapshot().server_tick, snapshot.server_tick);
+            EXPECT_EQ(client.snapshot().entities, snapshot.entities);
+        };
         if (send_ack) {
-            SnapshotMsg snapshot;
-            snapshot.snapshot_seq = 1;
-            ASSERT_TRUE(pair.first->SendFrame(EncodeSnapshot(snapshot)));
+            transport.on_failure = [&] {
+                // The first snapshot triggers an ACK. A second snapshot becomes
+                // available during that send, after the ordinary inbound drain.
+                snapshot.server_tick = 43;
+                snapshot.snapshot_seq = 2;
+                snapshot.entities = {MakeEntity(1, 400, 500, 600)};
+                EXPECT_TRUE(pair.first->SendFrame(EncodeSnapshot(snapshot)));
+            };
             client.PumpInbound();
-            EXPECT_TRUE(client.has_snapshot());
         } else {
+            EXPECT_FALSE(client.has_snapshot());
             UsercmdMsg cmd;
             cmd.tick = 1;
             client.SendUsercmd(cmd);
         }
+        ASSERT_TRUE(client.has_snapshot());
+        EXPECT_EQ(client.snapshot().snapshot_seq, snapshot.snapshot_seq);
+        EXPECT_EQ(client.snapshot().entities, snapshot.entities);
+        EXPECT_EQ(transport.received_frames, send_ack ? 2u : 1u);
         EXPECT_TRUE(transport.close_called);
         EXPECT_FALSE(transport.IsPeerConnected());
         EXPECT_FALSE(pair.first->IsPeerConnected());
         EXPECT_EQ(server.PruneDisconnectedClients(), (std::vector<std::uint32_t>{1}));
         EXPECT_FALSE(server.has_client(1));
+        // A terminal send failure stays terminal even if the transport recovers.
+        transport.fail_sends = false;
+        transport.connected = true;
+        client.SendUsercmd({});
+        client.PumpInbound();
+        EXPECT_EQ(transport.send_attempts, 1u);
     }
 }
 
@@ -184,9 +223,21 @@ TEST(ReplicationEndpoint, SnapshotSendFailureReportsDisconnectedClient) {
     ReplicationServer server;
     server.AddClient(1, &transport);
     server.AddClient(2, healthy_pair.first.get());
+    UsercmdMsg command;
+    command.tick = 42;
+    command.player_id = 1;
+    ASSERT_TRUE(failed_pair.second->SendFrame(EncodeUsercmd(command)));
+    ASSERT_TRUE(failed_pair.second->SendFrame(EncodeAck({7, 42})));
+    transport.on_close = [&] {
+        const auto* received = server.LatestUsercmd(1);
+        ASSERT_NE(received, nullptr);
+        EXPECT_EQ(*received, command);
+        EXPECT_EQ(server.AckedSnapshotSeq(1), 7u);
+    };
     ReplicationClient healthy(2, healthy_pair.second.get());
     server.BroadcastSnapshot(1, {MakeEntity(1, 0, 0, 0), MakeEntity(2, 0, 0, 0)});
     EXPECT_TRUE(transport.close_called);
+    EXPECT_EQ(transport.received_frames, 2u);
     EXPECT_FALSE(server.has_client(1));
     EXPECT_EQ(server.DisconnectedClientsLastBroadcast(), (std::vector<std::uint32_t>{1}));
     healthy.PumpInbound();
@@ -201,6 +252,15 @@ TEST(ReplicationEndpoint, OversizedProducedSnapshotRemovesClientWithoutSending) 
     server.SetAoiChunkRadius(-1, 1);
     server.SetDeltaCompression(false);
     server.AddClient(1, &transport);
+    UsercmdMsg command;
+    command.tick = 42;
+    command.player_id = 1;
+    ASSERT_TRUE(pair.second->SendFrame(EncodeUsercmd(command)));
+    transport.on_close = [&] {
+        const auto* received = server.LatestUsercmd(1);
+        ASSERT_NE(received, nullptr);
+        EXPECT_EQ(*received, command);
+    };
     // A sized source represents an oversized world with one entity of storage.
     // The production encoder must refuse before reading or reserving frame bytes.
     const ReplEntityState entity = MakeEntity(1, 0, 0, 0);
@@ -221,6 +281,7 @@ TEST(ReplicationEndpoint, OversizedProducedSnapshotRemovesClientWithoutSending) 
     EXPECT_EQ(server.last_broadcast_max_client_bytes(), 37u + 23u * entity_count);
     EXPECT_EQ(transport.send_attempts, 0u);
     EXPECT_TRUE(transport.close_called);
+    EXPECT_EQ(transport.received_frames, 1u);
     EXPECT_FALSE(server.has_client(1));
     EXPECT_EQ(server.DisconnectedClientsLastBroadcast(), (std::vector<std::uint32_t>{1}));
 }
@@ -341,10 +402,49 @@ TEST(ReplicationEndpoint, PermanentSendFailureDuringThrottledRetryRemovesClient)
     ASSERT_EQ(server.ForcedKeyframes(1), 0u);
     const auto attempts = transport.send_attempts;
     transport.disconnect_on_failure = true;
+    UsercmdMsg command;
+    command.tick = 42;
+    command.player_id = 1;
+    ASSERT_TRUE(pair.second->SendFrame(EncodeUsercmd(command)));
+    transport.on_close = [&] {
+        const auto* received = server.LatestUsercmd(1);
+        ASSERT_NE(received, nullptr);
+        EXPECT_EQ(*received, command);
+    };
     server.BroadcastSnapshot(++tick, {});
     EXPECT_EQ(transport.send_attempts, attempts + 1);
     EXPECT_EQ(server.last_broadcast_total_bytes(), 0u); // retry, no new snapshot
     EXPECT_TRUE(transport.close_called);
+    EXPECT_EQ(transport.received_frames, 1u);
+    EXPECT_FALSE(server.has_client(1));
+    EXPECT_EQ(server.DisconnectedClientsLastBroadcast(), (std::vector<std::uint32_t>{1}));
+}
+
+TEST(ReplicationEndpoint, BackpressureDisconnectDrainsInboundBeforeClose) {
+    auto pair = MakeLoopbackPair();
+    FailingSendTransport transport(*pair.first);
+    ReplicationServer server;
+    server.SetBackpressurePolicy(true);
+    server.AddClient(1, &transport);
+    UsercmdMsg command;
+    command.player_id = 1;
+    bool drained_before_close = false;
+    transport.on_close = [&] {
+        const auto* received = server.LatestUsercmd(1);
+        ASSERT_NE(received, nullptr);
+        EXPECT_EQ(*received, command);
+        drained_before_close = true;
+    };
+    // Queue a fresh command before each broadcast without a separate inbound pump.
+    // The policy's terminal path must deliver the newest one before removal.
+    for (std::uint64_t tick = 1; tick <= 100 && server.has_client(1); ++tick) {
+        command.tick = tick;
+        ASSERT_TRUE(pair.second->SendFrame(EncodeUsercmd(command)));
+        server.BroadcastSnapshot(tick, {});
+    }
+    EXPECT_TRUE(drained_before_close);
+    EXPECT_TRUE(transport.close_called);
+    EXPECT_EQ(transport.received_frames, command.tick);
     EXPECT_FALSE(server.has_client(1));
     EXPECT_EQ(server.DisconnectedClientsLastBroadcast(), (std::vector<std::uint32_t>{1}));
 }

@@ -121,10 +121,10 @@ struct RejectingTransport final : net::ILockstepTransport {
         return inner.SendFrame(frame, delivery);
     }
     bool TryReceiveFrame(std::vector<std::uint8_t>& out) override {
-        return inner.TryReceiveFrame(out);
+        return !closed && inner.TryReceiveFrame(out);
     }
     bool IsPeerConnected() const override {
-        return !closed && inner.IsPeerConnected();
+        return !closed && !peer_disconnected && inner.IsPeerConnected();
     }
     void Close() override {
         closed = true;
@@ -135,6 +135,7 @@ struct RejectingTransport final : net::ILockstepTransport {
     std::optional<net::MessageType> rejected;
     std::function<void()> on_rejection;
     bool closed = false;
+    bool peer_disconnected = false;
 };
 
 } // namespace
@@ -388,6 +389,9 @@ TEST(LockstepSessionTest, DesyncArrivingDuringSendFailureTakesPrecedence) {
                 EXPECT_TRUE(peer->SendFrame(net::EncodeHash(mismatch)));
                 // A later matching hash must not overwrite an available mismatch.
                 EXPECT_TRUE(peer->SendFrame(net::EncodeHash(matching)));
+                // TCP can report send-side disconnect with complete receive frames
+                // still buffered. They must be compared before destructive Close.
+                transport.peer_disconnected = true;
             };
             ASSERT_TRUE(peer->SendFrame(net::EncodeInput({2, 1, {}})));
 

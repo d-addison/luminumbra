@@ -59,7 +59,12 @@ private:
     bool Send(bool isA, const std::vector<std::uint8_t>& f, FrameDelivery d) {
         const bool selfOpen = isA ? m_aOpen : m_bOpen;
         const bool peerOpen = isA ? m_bOpen : m_aOpen;
-        if (f.size() > kMaxFramePayloadBytes || !selfOpen || !peerOpen)
+        auto& queue = isA ? m_ab : m_ba;
+        auto& queued_bytes = isA ? m_abBytes : m_baBytes;
+        // Include delayed frames in the same per-direction byte/entry bounds.
+        // Reject before copying or advancing the deterministic sequence number.
+        if (f.size() > kMaxFramePayloadBytes || !selfOpen || !peerOpen ||
+            !HasReceiveQueueCapacity(queued_bytes, queue.size()))
             return false;
         const std::uint64_t seq = m_seq++;
         // Loss: UNRELIABLE only, deterministic from the seq.
@@ -83,7 +88,8 @@ private:
         pf.deliver_tick = m_tick + static_cast<std::uint64_t>(delay);
         pf.seq = seq;
         pf.data = f;
-        (isA ? m_ab : m_ba).push_back(std::move(pf));
+        queue.push_back(std::move(pf));
+        queued_bytes += f.size();
         return true;
     }
 
@@ -100,8 +106,10 @@ private:
         }
         if (best < 0)
             return false;
+        const std::size_t size = q[best].data.size();
         out = std::move(q[best].data);
         q.erase(q.begin() + best);
+        (isA ? m_baBytes : m_abBytes) -= size;
         return true;
     }
 
@@ -143,6 +151,8 @@ private:
     std::uint64_t m_seq = 0;
     std::deque<PendingFrame> m_ab; // A -> B in flight
     std::deque<PendingFrame> m_ba; // B -> A in flight
+    std::size_t m_abBytes = 0;
+    std::size_t m_baBytes = 0;
     bool m_aOpen = true;
     bool m_bOpen = true;
     Ep m_a{this, true};

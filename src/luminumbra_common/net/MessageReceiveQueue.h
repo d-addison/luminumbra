@@ -21,12 +21,26 @@ public:
             Close();
             return false;
         }
-        m_frames.emplace_back();
+        if (!CanReceive())
+            return false;
+        std::vector<std::uint8_t> frame;
         if (size != 0) {
             const auto* bytes = static_cast<const std::uint8_t*>(data);
-            m_frames.back().assign(bytes, bytes + size);
+            frame.assign(bytes, bytes + size);
         }
+        m_frames.push_back(std::move(frame));
+        // Both operands are bounded before allocation, including on 32-bit hosts.
+        m_queued_bytes += size;
         return true;
+    }
+
+    // Check before pulling one message from a backend; leave excess messages there.
+    [[nodiscard]] bool CanReceive() const {
+        return !m_closed && HasReceiveQueueCapacity(m_queued_bytes, m_frames.size());
+    }
+    // Diagnostics only: payload bytes owned by this queue, excluding delivered frames.
+    [[nodiscard]] std::size_t QueuedBytes() const {
+        return m_queued_bytes;
     }
 
     bool TryReceiveFrame(std::vector<std::uint8_t>& out) {
@@ -34,8 +48,10 @@ public:
             m_drained = m_closed;
             return false;
         }
+        const std::size_t size = m_frames.front().size();
         out = std::move(m_frames.front());
         m_frames.pop_front();
+        m_queued_bytes -= size;
         return true;
     }
 
@@ -57,6 +73,7 @@ public:
 private:
     bool m_closed = false;
     bool m_drained = false;
+    std::size_t m_queued_bytes = 0;
     std::deque<std::vector<std::uint8_t>> m_frames;
 };
 

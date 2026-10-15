@@ -45,6 +45,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <deque>
+#include <limits>
 #include <map>
 #include <memory>
 #include <optional>
@@ -154,6 +155,18 @@ enum class FrameDelivery {
 // Wire-protocol maximum for a single frame payload, enforced on send and receive.
 inline constexpr std::size_t kMaxFramePayloadBytes = 64u * 1024u * 1024u;
 
+// Message queues admit only below this payload budget, so each direction holds
+// less than 256 KiB + one maximum frame. Cap entries too, including empty frames.
+inline constexpr std::size_t kReceiveQueueByteBudget = 256u * 1024u;
+inline constexpr std::size_t kReceiveQueueFrameLimit = 1024;
+static_assert(kMaxFramePayloadBytes <=
+              (std::numeric_limits<std::size_t>::max)() - kReceiveQueueByteBudget);
+
+[[nodiscard]] inline bool HasReceiveQueueCapacity(std::size_t queued_bytes,
+                                                  std::size_t queued_frames) {
+    return queued_bytes < kReceiveQueueByteBudget && queued_frames < kReceiveQueueFrameLimit;
+}
+
 class ILockstepTransport {
 public:
     virtual ~ILockstepTransport() = default;
@@ -202,6 +215,7 @@ class LoopbackTransport final : public ILockstepTransport {
 public:
     struct Channel {
         std::deque<std::vector<std::uint8_t>> queue; // complete framed messages
+        std::size_t queued_bytes = 0;
         bool open = true;
     };
 

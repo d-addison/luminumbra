@@ -232,6 +232,8 @@ private:
         bool backed_up = false;
         int over_hwm_streak = 0;
     };
+    static void DrainClientInbound(ClientLink& link);
+    static void CloseClientTransport(ClientLink& link);
     std::map<std::uint32_t, ClientLink> m_clients; // ordered -> deterministic broadcast order
     // Intentional bandwidth default: previously false; SetDeltaCompression(false)
     // restores full snapshots.
@@ -275,6 +277,7 @@ public:
         , m_transport(transport) {}
 
     // Sends one tick of input upstream (records the latest tick for the ack).
+    // A terminal send failure applies available snapshots before closing the transport.
     void SendUsercmd(const UsercmdMsg& cmd);
 
     // Drains inbound snapshots (most-recent-wins) and sends an Ack for the newest.
@@ -291,8 +294,12 @@ public:
     }
 
 private:
+    bool DrainInbound();
+    void TransportDisconnected();
+
     std::uint32_t m_player_id = 0;
     ILockstepTransport* m_transport = nullptr;
+    bool m_disconnected = false;
     SnapshotReceiver m_receiver;
     std::uint64_t m_latest_usercmd_tick = 0;
     bool m_sent_any_usercmd = false;
