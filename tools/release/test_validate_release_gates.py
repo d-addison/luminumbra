@@ -607,7 +607,8 @@ class WiringTests(unittest.TestCase):
         positions = [documentation.index(f'"id": "{name}"') for name in EXPECTED_IDS]
         self.assertEqual(positions, sorted(positions))
         acceptance = (ROOT / "docs/v0.3-acceptance.md").read_text(encoding="utf-8")
-        self.assertIn("../tools/release/README.md#publication-gate-record", acceptance)
+        self.assertIn('`tools/release/README.md` (section "Publication gate record")', acceptance)
+        self.assertIn("## Publication gate record", documentation)
 
 
 if __name__ == "__main__":
