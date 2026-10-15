@@ -171,7 +171,7 @@ rate must equal expected ticks. A 60-second script at 30 Hz therefore measures
 1800 frames and does **not** necessarily take 60 seconds of wall time. The achieved
 wall duration is recorded as an observation in `measured_duration_seconds`, not
 used to pace the workload. Only 30 Hz,
-preset revision 6 and a fresh-process cold cache are supported. The
+preset revisions 6 and 7 and a fresh-process cold cache are supported. The
 cache declaration concerns engine world/tile caches at launch, not driver shader
 caches or OS caches. Warmup subsequently populates the engine caches.
 Seed is a uint32; the preset is a nonempty lowercase identifier using letters,
@@ -409,3 +409,10 @@ written only at final shutdown. Its existing final `jobs_drained` and optional
 default, workload, timeout, queue policy or save behavior changes. These
 diagnostics localize a future wait; they do not establish the cause of the UCRT
 timeouts or a fix for the original `0xCFFFFFFF` incident.
+
+Shipping rendering enables vsync, TAAU and tier-1 volumetrics. Benchmark startup
+continues to force vsync off. Spatial parity, upscale seam and terrain AOV captures
+explicitly disable TAAU and record zero jitter; normal-default captures retain the
+temporal path. Validators accept preset revisions 6 and 7. The shipping hills
+traversal now declares revision 7; its pinned identities need recapture from CI
+after the terrain and preset changes.
