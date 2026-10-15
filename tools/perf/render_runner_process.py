@@ -28,24 +28,52 @@ RECEIPT_SCHEMA = 'luminumbra.render_runner_process.v1'
 OUTPUT_LOCK_SUFFIX = '.lock'
 
 
-def path_without_extended_prefix(path):
-    """Use ordinary Windows drive/UNC spelling without following any links."""
+def _windows_device_name(component):
+    # Devices remain reserved with extensions or spaces before an extension.
+    stem = component.partition('.')[0].rstrip(' ').casefold()
+    return stem in ('con', 'prn', 'aux', 'nul', 'conin$', 'conout$') or (
+        len(stem) == 4 and stem[:3] in ('com', 'lpt')
+        and stem[3] in '123456789\u00b9\u00b2\u00b3')
+
+
+def path_without_extended_prefix(path, *, require_ordinary=False):
+    """Strip a Windows drive/UNC prefix only when ordinary spelling is equivalent.
+
+    Comparison callers require ordinary spelling so an alias cannot bypass their
+    identity checks. Other callers may retain an unsafe path's extended spelling.
+    """
     text = str(path)
     if os.name == 'nt':
         # Handle paths and explicitly extended input can retain this prefix.
         # Strip only drive/UNC prefixes; other device namespaces are distinct.
         if text[:8].casefold() == '\\\\?\\unc\\':
-            text = '\\\\' + text[8:]
+            ordinary = '\\\\' + text[8:]
         elif (text.startswith('\\\\?\\') and len(text) >= 7
               and text[4] in 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ'
               and text[5:7] == ':\\'):
-            text = text[4:]
+            ordinary = text[4:]
+        else:
+            return type(path)(text)
+        # Win32 normalizes names only without the prefix. MAX_PATH includes the
+        # terminating NUL and counts UTF-16 code units, not Python characters.
+        safe = (len(ordinary.encode('utf-16-le', errors='surrogatepass')) // 2 < 260
+                and '/' not in ordinary
+                and all(not component.endswith(('.', ' '))
+                        and not _windows_device_name(component)
+                        for component in ordinary.split('\\') if component))
+        if safe:
+            text = ordinary
+        elif require_ordinary:
+            raise OSError(errno.EINVAL,
+                          'Windows path cannot be safely normalized for comparison', text)
     return type(path)(text)
 
 
 def resolve_path(path):
-    """Resolve aliases, using ordinary drive/UNC spelling for Windows paths."""
-    return path_without_extended_prefix(Path(path).resolve())
+    """Resolve aliases; refuse ambiguous extended Windows comparison paths."""
+    # Check input too: lexical resolution must not erase an unsafe component.
+    path_without_extended_prefix(Path(path), require_ordinary=True)
+    return path_without_extended_prefix(Path(path).resolve(), require_ordinary=True)
 
 
 def file_sha256(path):
@@ -157,8 +185,10 @@ def resolve_executable(program, cwd, environment=None):
         candidate = Path(program)
         if not candidate.is_absolute():
             candidate = Path(cwd) / candidate
+        path_without_extended_prefix(candidate, require_ordinary=True)
         if candidate.is_file():
-            return path_without_extended_prefix(Path(os.path.abspath(candidate)))
+            return path_without_extended_prefix(Path(os.path.abspath(candidate)),
+                                                require_ordinary=True)
         raise FileNotFoundError(f'executable not found: {candidate}')
     search = environment.get('PATH') if environment else None
     if search is None:
@@ -170,7 +200,8 @@ def resolve_executable(program, cwd, environment=None):
     found = shutil.which(program, path=os.pathsep.join(entries))
     if found is None:
         raise FileNotFoundError(f'executable not found on PATH: {program}')
-    return path_without_extended_prefix(Path(os.path.abspath(found)))
+    path_without_extended_prefix(Path(found), require_ordinary=True)
+    return path_without_extended_prefix(Path(os.path.abspath(found)), require_ordinary=True)
 
 
 def _output_identity(path):
@@ -185,18 +216,14 @@ def _output_identity(path):
             if any(ord(char) < 32 or char in '<>:"|?*\\' for char in component):
                 raise OSError(errno.EINVAL, 'output path contains an invalid Windows character',
                               str(path))
-            # Windows reserves devices even with extensions, including the
-            # superscript digits and spaces immediately before an extension.
-            stem = component.partition('.')[0].rstrip(' ').casefold()
-            if stem in ('con', 'prn', 'aux', 'nul', 'conin$', 'conout$') or (
-                    len(stem) == 4 and stem[:3] in ('com', 'lpt')
-                    and stem[3] in '123456789\u00b9\u00b2\u00b3'):
+            if _windows_device_name(component):
                 raise OSError(errno.EINVAL, 'output path contains a reserved Windows device name',
                               str(path))
 
     # Validate before resolving so that an unsafe component followed by '..'
     # cannot disappear. Also validate the resolved parent of a directory symlink.
     validate_components(path)
+    path_without_extended_prefix(path, require_ordinary=True)
     parent = resolve_path(path.parent)
     validate_components(parent)
     # Preserve the directory's actual spelling on case-sensitive filesystems;
