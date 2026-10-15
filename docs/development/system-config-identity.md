@@ -104,6 +104,12 @@ runtime/soak modes) hosts validate the same Hello compatibility fields before ad
 replication client. TCP joiners send Hello before user commands. TCP lockstep and replay
 enforce both identities before simulation starts.
 
+Runtime and soak TCP client slots allow 10 seconds from accept completion (when the
+host begins awaiting Hello) for a complete matching Hello frame. A monotonic
+`std::chrono::steady_clock` deadline closes peers that miss this window, logs the
+client slot, and releases it for another connection. This transport deadline does
+not use simulation ticks or affect simulation hashes or replay.
+
 `GameSession::PresetContentHash()` captures the preset used at world creation or load.
 Its canonical form first materializes revision-dependent defaults, then stamps the
 current schema revision (the same operation used for embedded presets). It serializes

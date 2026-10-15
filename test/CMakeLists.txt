@@ -242,6 +242,8 @@ add_executable(common_tests
     common/lockstep_replay_hardening_test.cpp
     net/single_port_accept_test.cpp
     net/single_port_host_client_integration_test.cpp
+    net/runtime_tcp_hello_test.cpp
+    ../src/luminumbra_server/modes/RuntimeTcpSlot.cpp
     common/world_streaming_hardening_test.cpp
     common/HydraulicErosion_test.cpp
     common/WorldStreamingState_test.cpp
