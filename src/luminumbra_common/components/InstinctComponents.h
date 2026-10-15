@@ -97,7 +97,8 @@ struct LocomotionProfile {
     // Explicit strength zero disables this steering contribution.
     f32 separation_radius = 2.0f;   // m; neighbors within this push the agent away
     f32 separation_strength = 0.6f; // 0 = off; >0 scales the avoidance vs the seek
-    // Cohesion and alignment use flock_radius as their perception neighborhood.
+    // Cohesion and alignment are enabled by default and share flock_radius as
+    // their perception neighborhood.
     // Each explicit zero strength disables its respective steering contribution.
     f32 flock_radius = 12.0f;      // m; perception radius for cohesion + alignment
     f32 cohesion_strength = 0.5f;  // 0 = off; pull toward neighbor center of mass
