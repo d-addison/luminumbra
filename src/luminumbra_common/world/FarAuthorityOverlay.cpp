@@ -3,10 +3,12 @@
 #include "FarTierTable.h"
 #include "FarWantedSet.h"
 #include "core/Crc32.h"
+#include "core/FilesystemPath.h"
 #include "persistence/WorldSaveService.h"
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <charconv>
 #include <cmath>
 #include <cstddef>
@@ -25,6 +27,11 @@
 
 namespace Luminumbra::World {
 namespace {
+
+std::atomic<std::uint64_t>& OverlayDecodeCounter() {
+    static std::atomic<std::uint64_t> counter{0};
+    return counter;
+}
 
 constexpr std::size_t kFsv1BodyHeaderBytes = 16;
 constexpr std::size_t kFsv1DensityBytes = kFsv1SamplesPerBrick * 2;
@@ -314,7 +321,12 @@ FarOverlayError EncodeFarOverlay(const FarOverlayTile& tile, std::string& out) {
     return FarOverlayError::None;
 }
 
+std::uint64_t FarOverlayDecodeCountForTesting() {
+    return OverlayDecodeCounter().load(std::memory_order_acquire);
+}
+
 FarOverlayDecodeResult DecodeFarOverlay(std::string_view bytes, const FarTileKey& expected_key) {
+    OverlayDecodeCounter().fetch_add(1, std::memory_order_acq_rel);
     FarOverlayDecodeResult result;
     const auto fail = [&result](FarOverlayError error) {
         result.error = error;
@@ -556,7 +568,9 @@ FarOverlayDecodeResult ReadFarOverlay(const std::filesystem::path& save_dir,
 }
 
 bool ValidateFarOverlayDirectory(const std::filesystem::path& save_dir,
-                                 std::vector<std::string>* errors) {
+                                 std::vector<std::string>* errors,
+                                 std::size_t max_entries,
+                                 std::uint64_t max_total_bytes) {
     const std::filesystem::path dir = save_dir / "far";
     std::error_code ec;
     const bool exists = std::filesystem::exists(dir, ec);
@@ -584,6 +598,8 @@ bool ValidateFarOverlayDirectory(const std::filesystem::path& save_dir,
     };
     std::vector<Candidate> candidates;
     bool failed = false;
+    std::size_t visits = 0;
+    std::uint64_t total_bytes = 0;
 
     std::filesystem::directory_iterator iterator(dir, ec);
     if (ec) {
@@ -592,6 +608,11 @@ bool ValidateFarOverlayDirectory(const std::filesystem::path& save_dir,
     }
     const std::filesystem::directory_iterator end;
     while (iterator != end) {
+        if (visits == max_entries) {
+            Report(errors, "far overlay directory: entry limit");
+            return false;
+        }
+        ++visits;
         const std::filesystem::directory_entry& entry = *iterator;
         std::error_code entry_ec;
         const bool regular = entry.is_regular_file(entry_ec);
@@ -599,8 +620,17 @@ bool ValidateFarOverlayDirectory(const std::filesystem::path& save_dir,
             Report(errors, "far overlay directory: IoError");
             return false;
         }
-        const std::string file_name = entry.path().filename().string();
+        const std::string file_name = Filesystem::GenericPathString(entry.path().filename());
         if (const auto key = ParseFarOverlayFileName(file_name)) {
+            if (regular) {
+                const auto bytes = entry.file_size(entry_ec);
+                if (entry_ec || bytes > kFsv1MaxFileBytes ||
+                    bytes > max_total_bytes - total_bytes) {
+                    Report(errors, "far overlay directory: byte limit");
+                    return false;
+                }
+                total_bytes += bytes;
+            }
             candidates.push_back(Candidate{file_name, *key, regular});
         }
         iterator.increment(ec);

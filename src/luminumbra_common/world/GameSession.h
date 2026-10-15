@@ -54,6 +54,9 @@ class IrrigationGrid; // soil-moisture field (systems/IrrigationSystem.h)
 
 namespace Luminumbra {
 class JobSystem;
+namespace World {
+struct FarEditedCachePolicy;
+}
 
 namespace Persistence {
 struct EditedSourceSelection;
@@ -137,6 +140,10 @@ public:
 
     // Save the current world state
     bool SaveWorld();
+    // Owner-thread persistence opt-in, independent of simulation/render selection. The host
+    // supplies finite immutable policy and complete supports; activation is a separate concern.
+    void SetFarEditedCachePolicy(std::shared_ptr<const World::FarEditedCachePolicy> policy);
+    [[nodiscard]] bool FarEditedCacheEnabled() const;
     // Owner-thread capture at a quiescent publication boundary. Committed truth comes only from
     // disk; optional live/parked layers remain separate volatile observations. Refusal preserves
     // out.
@@ -768,6 +775,7 @@ private:
     std::string m_rootPath;
     const std::thread::id m_editedSourceOwner = std::this_thread::get_id();
     bool m_editedSourceCaptureActive = false;
+    std::shared_ptr<const World::FarEditedCachePolicy> m_farEditedCachePolicy;
 };
 
 } // namespace Luminumbra::world

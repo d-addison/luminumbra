@@ -1112,7 +1112,8 @@ std::size_t ServerWorldRunner::SaveFullSnapshot() {
         if (m_session->ActiveRegionsEnabled() && !m_session->SaveWorldState())
             return false;
         const bool metadata_saved = m_session->SaveWorld();
-        return !m_session->ActiveRegionsEnabled() || metadata_saved;
+        return (!m_session->ActiveRegionsEnabled() && !m_session->FarEditedCacheEnabled()) ||
+               metadata_saved;
     });
     if (!saved)
         return 0;

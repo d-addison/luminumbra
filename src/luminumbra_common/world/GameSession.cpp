@@ -68,12 +68,14 @@
 #include "../systems/WeatherEventSystem.h" // Pure deterministic weather-event schedule.
 #include "../systems/WeatherSystem.h"
 #include "../systems/WindFieldSystem.h"
+#include "FarEditedCache.h"
 #include "TerrainPresetLoader.h"
 #include "WorldStreamingState.h"
 #include "nlohmann/json.hpp" // For parsing JSON
 #include <array>
 #include <bit>
 #include <cmath> // std::floor (energy-layer anchor quantization)
+#include <shared_mutex>
 
 #include <algorithm> // explicit: stabilise std template instantiation for entt storage helpers
 #include <chrono>
@@ -3099,7 +3101,8 @@ public:
             Log(errors);
             return false;
         }
-        return true;
+        return World::RegisterFarEditedCacheFinalizer(
+            m_transaction, World::FarEditedCacheSaveScope::PolicyFor(m_save_dir));
     }
 
     bool Commit() {
@@ -3139,7 +3142,11 @@ StartOuterSave(const fs::path& save_dir, std::uint64_t tick, const std::optional
 
 bool GameSession::RunInSnapshotTransaction(const std::function<bool()>& body) {
     const fs::path save_dir = GetWorldSaveDir();
-    if (!m_activeRegionsEnabled || save_dir.empty() || m_transientWorld ||
+    const auto far_policy = m_farEditedCachePolicy
+                                ? m_farEditedCachePolicy
+                                : World::FarEditedCacheSaveScope::PolicyFor(save_dir);
+    World::FarEditedCacheSaveScope far_scope(save_dir, far_policy);
+    if ((!m_activeRegionsEnabled && !far_policy) || save_dir.empty() || m_transientWorld ||
         m_metadata.worldId.empty() || !m_worldOpenError.empty() || !CanSaveWorldNow() ||
         !ClockConfigurationCompatible(save_dir) ||
         Persistence::SaveTransaction::active_for(save_dir)) {
@@ -3162,7 +3169,56 @@ bool GameSession::SaveWorld() {
     return SaveWorldMetadataTo(GetWorldSaveDir());
 }
 
+bool GameSession::FarEditedCacheEnabled() const {
+    return m_farEditedCachePolicy || World::FarEditedCacheSaveScope::PolicyFor(GetWorldSaveDir());
+}
+
+void GameSession::SetFarEditedCachePolicy(
+    std::shared_ptr<const World::FarEditedCachePolicy> policy) {
+    if (m_editedSourceOwner != std::this_thread::get_id() || m_editedSourceCaptureActive)
+        throw std::logic_error("far cache policy requires the session owner boundary");
+    if (!policy) {
+        m_farEditedCachePolicy.reset();
+        return;
+    }
+    auto bound = std::make_shared<World::FarEditedCachePolicy>(*policy);
+    const auto host_boundary = bound->limits.capture_boundary;
+    bound->limits.capture_boundary = [this, host_boundary]() -> std::shared_ptr<const void> {
+        if (m_editedSourceOwner != std::this_thread::get_id() || m_editedSourceCaptureActive ||
+            !m_worldSystem)
+            return {};
+        m_worldSystem->quiesce_streaming_jobs_for_save();
+        struct Boundary {
+            Boundary(bool& active,
+                     std::shared_lock<std::shared_mutex> scope,
+                     std::shared_ptr<const void> host)
+                : active_(active)
+                , scope_(std::move(scope))
+                , host_(std::move(host)) {
+                active_ = true;
+            }
+            ~Boundary() {
+                active_ = false;
+            }
+            bool& active_;
+            std::shared_lock<std::shared_mutex> scope_;
+            std::shared_ptr<const void> host_;
+        };
+        auto host = host_boundary ? host_boundary() : nullptr;
+        if (host_boundary && !host)
+            return {};
+        return std::make_shared<Boundary>(m_editedSourceCaptureActive,
+                                          m_worldSystem->acquire_worldgen_sample_scope(),
+                                          std::move(host));
+    };
+    m_farEditedCachePolicy = std::move(bound);
+}
+
 bool GameSession::SaveWorldMetadataTo(const fs::path& save_dir) {
+    const auto far_policy = m_farEditedCachePolicy
+                                ? m_farEditedCachePolicy
+                                : World::FarEditedCacheSaveScope::PolicyFor(save_dir);
+    World::FarEditedCacheSaveScope far_scope(save_dir, far_policy);
     if (!CanSaveWorldNow() || save_dir.empty() || !ClockConfigurationCompatible(save_dir) ||
         m_transientWorld || m_metadata.worldId.empty() || !m_worldOpenError.empty())
         return false;
@@ -3198,7 +3254,8 @@ bool GameSession::SaveWorldMetadataTo(const fs::path& save_dir) {
         }
     }
     std::unique_ptr<OuterSaveTransaction> outer;
-    if (m_activeRegionsEnabled && !Persistence::SaveTransaction::active_for(save_dir)) {
+    if ((m_activeRegionsEnabled || far_policy) &&
+        !Persistence::SaveTransaction::active_for(save_dir)) {
         outer = StartOuterSave(save_dir, m_worldClock.tick(), m_activeRegionLedger.local_anchor());
         if (!outer)
             return false;
@@ -3290,6 +3347,8 @@ bool GameSession::SaveWorldMetadataTo(const fs::path& save_dir) {
                                                              save_dir)) {
         return false;
     }
+    if (!m_activeRegionsEnabled && outer && !outer->Commit())
+        return false;
     return true;
 }
 
@@ -3368,6 +3427,10 @@ bool GameSession::SaveWorldState(WorldStateSaveReport* report) {
 
 bool GameSession::SaveWorldStateTo(const std::filesystem::path& save_dir,
                                    WorldStateSaveReport* report) {
+    const auto far_policy = m_farEditedCachePolicy
+                                ? m_farEditedCachePolicy
+                                : World::FarEditedCacheSaveScope::PolicyFor(save_dir);
+    World::FarEditedCacheSaveScope far_scope(save_dir, far_policy);
     const auto save_started = std::chrono::steady_clock::now();
     const auto elapsed_ms = [&save_started]() {
         return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() -
@@ -3397,7 +3460,7 @@ bool GameSession::SaveWorldStateTo(const std::filesystem::path& save_dir,
     // journal, and the destination directory, which Start creates only after every refusal check
     // passed). Flag off keeps today's per-writer validation.
     std::unique_ptr<OuterSaveTransaction> outer;
-    if (m_activeRegionsEnabled) {
+    if (m_activeRegionsEnabled || far_policy) {
         // A caller-owned transaction (RunInSnapshotTransaction) already recovered, validated and
         // opened the journal; this save joins it and the owner commits.
         if (!Persistence::SaveTransaction::active_for(save_dir)) {
@@ -3435,25 +3498,46 @@ bool GameSession::SaveWorldStateTo(const std::filesystem::path& save_dir,
     result.chunks_total = state.size();
 
     std::error_code source_path_error, target_path_error;
-    const auto source_directory = fs::weakly_canonical(m_regionDurableDirectory, source_path_error);
+    const auto durable_directory = m_regionDurableDirectory.empty() && far_policy
+                                       ? GetWorldSaveDir()
+                                       : m_regionDurableDirectory;
+    const auto source_directory = fs::weakly_canonical(durable_directory, source_path_error);
     const auto target_directory = fs::weakly_canonical(save_dir, target_path_error);
-    if (m_activeRegionsEnabled && !m_regionDurableDirectory.empty() &&
+    if ((m_activeRegionsEnabled || far_policy) && !durable_directory.empty() &&
         (source_path_error || target_path_error)) {
         RecordPersistenceSaveOutcome(false, elapsed_ms());
         return false;
     }
-    if (m_activeRegionsEnabled && !m_regionDurableDirectory.empty() &&
+    if ((m_activeRegionsEnabled || far_policy) && !durable_directory.empty() &&
         source_directory != target_directory) {
         // Save-as must transfer distant disk-only obligations before switching their backing
         // directory. Stream one chunk at a time; live/parked state supersedes the old copy.
         Persistence::WorldSaveService copier;
         std::vector<std::string> copy_errors;
+        auto inventory = m_worldSystem->durable_chunk_inventory();
+        if (far_policy) {
+            // Far persistence also supports sessions whose simulation never tracked a durable
+            // inventory. Validate and enumerate disk authority without adopting streamed chunks.
+            WorldStreamingState source;
+            if (!copier.load_world(
+                    source,
+                    durable_directory,
+                    copy_errors,
+                    {},
+                    [](const IVec3&) { return false; },
+                    &inventory)) {
+                RecordPersistenceSaveOutcome(false, elapsed_ms());
+                return false;
+            }
+        }
         bool copied = true;
-        for (const auto& coords : m_worldSystem->durable_chunk_inventory()) {
+        for (const auto& coords : inventory) {
             if (state.find_chunk(Chunk::calculate_id(coords)))
                 continue;
-            const auto durable =
-                Persistence::WorldSaveService::read_chunk(m_regionDurableDirectory, coords, true);
+            const auto durable = Persistence::WorldSaveService::read_chunk(
+                durable_directory,
+                coords,
+                m_activeRegionsEnabled || Persistence::snapshot_index_exists(durable_directory));
             if (durable.status != Persistence::WorldSaveService::ChunkReadStatus::Found) {
                 copied = false;
                 copy_errors.push_back(durable.error.empty()
@@ -3494,8 +3578,8 @@ bool GameSession::SaveWorldStateTo(const std::filesystem::path& save_dir,
 
     const auto acknowledge =
         Persistence::WorldSaveService::chunk_save_acknowledgement(state.snapshot_chunks());
-    const auto defer_success = [this, &save_dir, &state, &elapsed_ms]() {
-        if (!m_activeRegionsEnabled)
+    const auto defer_success = [this, &save_dir, &state, &elapsed_ms, &far_policy]() {
+        if (!m_activeRegionsEnabled && !far_policy)
             return;
         std::vector<IVec3> covered;
         for (const auto& chunk : state.snapshot_chunks())
@@ -3520,14 +3604,14 @@ bool GameSession::SaveWorldStateTo(const std::filesystem::path& save_dir,
         const bool plants_ok =
             Persistence::WorldSaveService::save_plant_entities(plant_snapshot, save_dir, nullptr);
         const bool energy_ok = SaveEnergyFieldRecord(save_dir);
-        if (m_activeRegionsEnabled && (!plants_ok || !energy_ok)) {
+        if ((m_activeRegionsEnabled || far_policy) && (!plants_ok || !energy_ok)) {
             RecordPersistenceSaveOutcome(false, elapsed_ms());
             return false;
         }
         if (report) {
             *report = result;
         }
-        bool empty_ok = !m_activeRegionsEnabled || SaveWorldMetadataTo(save_dir);
+        bool empty_ok = (!m_activeRegionsEnabled && !far_policy) || SaveWorldMetadataTo(save_dir);
         if (empty_ok)
             defer_success();
         if (empty_ok && outer) {
@@ -3573,7 +3657,15 @@ bool GameSession::SaveWorldStateTo(const std::filesystem::path& save_dir,
     // would allow old derived bytes to integrate as current.
     for (const ChunkID id : dirty_ids) {
         if (const auto chunk = state.find_chunk(id)) {
-            m_worldSystem->notify_far_lod_authority_durable(chunk->get_coords());
+            const auto notify = [this, coords = chunk->get_coords()] {
+                m_worldSystem->notify_far_lod_authority_durable(coords);
+            };
+            if (far_policy) {
+                if (auto* transaction = Persistence::SaveTransaction::active_for(save_dir))
+                    transaction->defer_until_commit(notify);
+            } else {
+                notify();
+            }
         }
     }
 
@@ -3585,13 +3677,13 @@ bool GameSession::SaveWorldStateTo(const std::filesystem::path& save_dir,
     // persist the stateful energy layer alongside (null/
     // all-zero layer -> no file -> byte-identical; the plant discipline).
     const bool energy_ok = SaveEnergyFieldRecord(save_dir);
-    if (m_activeRegionsEnabled && !energy_ok)
+    if ((m_activeRegionsEnabled || far_policy) && !energy_ok)
         ok = false;
 
     for (const std::string& error : errors) {
         LUMINUMBRA_CORE_ERROR("World state save failed: {}", error);
     }
-    if (ok && m_activeRegionsEnabled)
+    if (ok && (m_activeRegionsEnabled || far_policy))
         ok = SaveWorldMetadataTo(save_dir);
     if (ok)
         defer_success();

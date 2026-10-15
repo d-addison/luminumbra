@@ -5,6 +5,7 @@
 // dirty chunks resident and requests a persistence save. Also pins the chunk-level
 // contracts the parking path relies on (normalize_for_park, the water revision and the
 // water-authority promotion).
+#include "../support/FarEditedCacheFixture.h"
 #include "../support/SimulationContentFixture.h"
 #include <gtest/gtest.h>
 
@@ -585,6 +586,51 @@ TEST(WorldDurableResidency, NonQuiescentChunkIsNotParked) {
     const auto parked = fx.world->snapshot_parked_chunks();
     EXPECT_EQ(std::find(parked.begin(), parked.end(), edited), parked.end());
     edited->set_state(Luminumbra::ChunkState::Idle);
+}
+
+TEST(WorldDurableResidency, FarCacheDefersNotificationsAcknowledgementAndParkedReleaseUntilCommit) {
+    DurableFixture fx(/*durable=*/true, /*active_regions=*/true);
+    ASSERT_TRUE(fx.created) << fx.error;
+    fx.Settle(fx.SpawnAnchor(), kSettleIterations);
+    const auto edited = fx.EditAtSpawnAndFindEdited();
+    ASSERT_TRUE(edited);
+    fx.Settle(fx.FarAnchor(), kSettleIterations);
+    ASSERT_TRUE(Contains(fx.world->snapshot_parked_chunks(), edited.get()));
+    ASSERT_TRUE(edited->is_voxel_data_dirty());
+    auto policy = Luminumbra::TestSupport::FarCachePolicy();
+    // Exercise a successful authoritative commit with optional cache work still due.
+    policy->limits.capture_source = {};
+    auto reports = std::make_shared<std::vector<Luminumbra::World::FarCacheReport>>();
+    policy->after_commit = [reports](const auto& report) {
+        reports->push_back(report);
+    };
+    fx.session->SetFarEditedCachePolicy(policy);
+    const auto revision = fx.world->far_lod_authority_revision();
+    const auto staged = [&] {
+        const bool saved = fx.session->SaveWorldState();
+        EXPECT_TRUE(saved);
+        EXPECT_TRUE(edited->is_voxel_data_dirty());
+        EXPECT_TRUE(Contains(fx.world->snapshot_parked_chunks(), edited.get()));
+        EXPECT_EQ(fx.world->far_lod_authority_revision(), revision);
+        EXPECT_TRUE(reports->empty());
+        return saved;
+    };
+    EXPECT_FALSE(fx.session->RunInSnapshotTransaction([&] {
+        staged();
+        return false;
+    }));
+    EXPECT_TRUE(edited->is_voxel_data_dirty());
+    EXPECT_TRUE(Contains(fx.world->snapshot_parked_chunks(), edited.get()));
+    EXPECT_EQ(fx.world->far_lod_authority_revision(), revision);
+    EXPECT_TRUE(reports->empty());
+    ASSERT_TRUE(fx.session->RunInSnapshotTransaction(staged));
+    EXPECT_FALSE(edited->is_voxel_data_dirty());
+    EXPECT_FALSE(Contains(fx.world->snapshot_parked_chunks(), edited.get()));
+    EXPECT_GT(fx.world->far_lod_authority_revision(), revision);
+    ASSERT_EQ(reports->size(), 1u);
+    EXPECT_TRUE(reports->back().authoritative_success);
+    EXPECT_TRUE(reports->back().derived_due);
+    fx.session->SetFarEditedCachePolicy({});
 }
 
 } // namespace

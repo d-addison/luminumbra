@@ -3,6 +3,7 @@
 #include "SaveTransaction.h"
 #include "fields/FieldPageState.h"
 #include "world/ActiveRegionLedger.h"
+#include "world/FarAuthorityOverlay.h"
 #include "world/GroundObjectStore.h"
 #include "world/WorldClock.h"
 #include "world/WorldStreamingState.h"
@@ -44,6 +45,13 @@ enum class DerivedMemberState : std::uint8_t {
     Stale,
     Unreceipted,
     RecoveryPending
+};
+
+// One operation's validated bytes and decoded overlay; consumers may retain the owned tile.
+struct DerivedMemberValidation {
+    DerivedMemberState state = DerivedMemberState::Missing;
+    MemberDigest digest;
+    World::FarOverlayTile overlay;
 };
 
 // Inputs of the region simulation digest. Priority when ids collide: live over
@@ -337,6 +345,8 @@ public:
                                         std::vector<std::string>* errors = nullptr);
     // Number of full load_world decodes since process start (single-decode contract tests).
     static std::uint64_t decode_count_for_testing();
+    // Number of bounded source-region decode passes (capture reuse regressions).
+    static std::uint64_t edited_source_region_decode_count_for_testing();
 
     // Validates one snapshot member and computes its index fingerprint (MemberDigestFn-compatible).
     // Region files hash their lod-0 record stream and are reported absent when they hold no lod-0
@@ -352,23 +362,32 @@ public:
                                             MemberDigest& out,
                                             std::string& error);
     // Structure is validated before currency. Catalog contents are supplied by the catalog
-    // consumer through catalog_digest; a present catalog without that validator refuses.
+    // consumer through catalog_digest. Ordinary load/validation uses the strict engine catalog
+    // validator; low-level derived inspection still requires its explicit validator.
     static bool derived_member_digest(const std::filesystem::path& save_dir,
                                       std::string_view relative_path,
                                       std::uint64_t source_generation_limit,
                                       MemberDigest& out,
                                       std::string& error,
-                                      MemberDigestFn catalog_digest = nullptr);
+                                      MemberDigestFn catalog_digest = nullptr,
+                                      World::FarOverlayTile* overlay = nullptr);
     static bool inspect_derived_member(const std::filesystem::path& save_dir,
                                        std::string_view relative_path,
                                        const SnapshotIndex& index,
                                        DerivedMemberState& state,
                                        std::string& error,
-                                       MemberDigestFn catalog_digest = nullptr);
-    static bool verify_derived_members(const std::filesystem::path& save_dir,
-                                       const SnapshotIndex& index,
-                                       std::vector<std::string>* errors,
-                                       MemberDigestFn catalog_digest = nullptr);
+                                       MemberDigestFn catalog_digest = nullptr,
+                                       DerivedMemberValidation* verified = nullptr);
+    // Admit the complete directory before payload reads. An optional visitor receives the
+    // same owned decode and verification result, with no additional overlay reads.
+    static bool verify_derived_members(
+        const std::filesystem::path& save_dir,
+        const SnapshotIndex& index,
+        std::vector<std::string>* errors,
+        MemberDigestFn catalog_digest = nullptr,
+        std::size_t max_entries = kMaxSnapshotMembers,
+        std::uint64_t max_overlay_bytes = World::kFsv1MaxFileBytes,
+        const std::function<bool(std::string_view, DerivedMemberValidation&&)>& visitor = {});
     // Shared with load_world; checks the installed candidate set, never a validation cache.
     static bool validate_authoritative_relationships(const std::filesystem::path& save_dir,
                                                      std::vector<std::string>& errors,

@@ -3,13 +3,13 @@
 The far authority overlay carries edit-baked signed-distance bricks for the
 volumetric far ladder described in [the distant-world contract](distant-world.md).
 One file holds the bricks of one tile. It is derived render state: it never
-enters a world hash and `validate_save` does not scan it. Older non-indexed
+enters a world hash. World-open validation scans recognized overlays and any present catalog. Older non-indexed
 readers ignore the `far/` directory; indexed readers require explicit support
 for derived far members.
 
 This page describes the codec in `world/FarAuthorityOverlay.{h,cpp}` and the pure
-edited bake in `world/FarEditedBake.{h,cpp}`. The world-open and transactional
-publication hooks are separate pieces; the codec accepts any brick producer.
+edited bake in `world/FarEditedBake.{h,cpp}`. `FarEditedCache` supplies the owner-thread
+transactional publication and immutable acquisition lifecycle described below.
 
 ## File name
 
@@ -149,3 +149,111 @@ counters expose reservation requests, candidate visits and unique counts,
 including refusals. Failure returns a typed error and preserves the previous
 whole result.
 FSV1 version, reserved bytes and existing wire layout remain unchanged.
+
+## Catalog and currency
+
+`far/catalog.json` uses schema `luminumbra.far_catalog.v1`. Its deterministic JSON
+contains sorted unique tile receipts with canonical overlay paths, source
+generations, encoded lengths and FNV fingerprints, terrain/content identities,
+numeric/cave policy, retained brick-aligned edited spans, and sorted unique
+authoritative dependencies. Each dependency includes region membership, chunk
+identity, member generation/length/digest, chunk digest and closed footprint.
+Footprints and identities must agree with the canonical chunk and region path.
+Normal-halo contributors participate alongside directly sampled edits.
+
+The strict codec refuses unknown schemas, unknown/duplicate fields, malformed
+integer values, unsupported policies, invalid coordinates/spans, duplicate or
+unordered entries, path disagreements and admission violations. The catalog
+uses at most the existing snapshot member and 16 MiB index limits. Consumers
+can choose smaller limits. Directory validation admits entry count and aggregate
+overlay lengths before reads, in addition to the unchanged per-overlay limit.
+
+`ReconcileFarEditedCache` compares immutable committed inventory with prior
+receipts and policy. It includes both before and after footprints so removal of
+the last contributor still selects a rebake. Region generation alone is never
+proof of currency. Only the persistence verifier can establish a process-local
+receipt after catalog and overlay index membership, actual bytes, FSV1 source
+generation and catalog fingerprint all agree. Receipts are scoped to the verified
+snapshot; they are never serialized as a trust flag. Unchanged dependencies may
+retain an older overlay/source/member generation across later saves.
+
+## Owner-thread save lifecycle
+
+`FarEditedCacheSaveScope(destination, policy)` opts an explicit destination into
+indexed persistence independently of simulation and rendering options. Direct
+service writers and nested session/server writers register the same keyed
+`AddFinalizerOnce` callback. Nested writers look up the key before allocating or
+charging retained policy storage. It runs after all authoritative staging and before
+index publication, including first, incremental, metadata-only and zero-dirty
+retry saves. With no policy the existing save paths and bytes remain unchanged.
+`GameSession::SetFarEditedCachePolicy` exposes this opt-in for session and server
+save routes; application selection and persistence safety activation remain the
+host's responsibility.
+
+The policy supplies canonical bounded tile supports and immutable terrain policy.
+Unselected requests remain reconstructible on demand; an edited tile awaiting
+reconstruction cannot serve pristine substitution. Capture starts with the
+policy's supports and expands vertical support through bounded immutable
+recapture until all complete rebake bricks and their contributors are covered.
+Prior edited spans are retained per key. A limit refusal preserves the previous
+cache and leaves work due.
+
+The registered finalizer captures staged authority once and reuses that producer
+image. The public `FinalizeFarEditedCache` entry checks externally supplied prepared
+images against the open transaction. Both use the existing complete-inventory rebake
+and frozen pristine sampler. Terrain/content/cave/numeric policy and prepared
+generation must agree. Volatile layers are refused. Water is explicit and remains
+in authoritative water records; FSV1 adds no water payload. Callbacks end at
+synchronous frozen capture. Session capture quiesces streaming writers and holds
+the existing worldgen scope at the session owner-thread publication boundary.
+Direct service hosts supply the equivalent boundary.
+
+Overlays and catalog publish in one optional derived group. Undo is journaled
+before replacement; the index publishes last. A failed replacement, including a
+post-rename failure, restores the entire group before authority may commit. Failed
+restoration aborts the outer save and retains journal protection. Present malformed
+data refuses rather than becoming a retry miss. Safe capture/bake/admission or
+publication failures leave authoritative success and derived work due separately
+observable in `FarCacheReport`. The `after_commit` observer runs only after durable
+index publication, as do dirty acknowledgements, parked release and far-authority
+notifications. An abort cannot publish prepared images or notifications.
+
+Every layer receives the explicit destination. Save-as stages destination
+authoritative records and derives new destination generations and receipts;
+source catalog paths or generation stamps are never copied as publication proof.
+Session save-as transfers disk-only authority whenever either far persistence or
+active regions enables transactions, including simulation-off legacy sources.
+
+## Open, acquisition and lifetime
+
+Open recovers the journal before authoritative validation. Recognized overlay and
+catalog structure is checked before classifying missing, stale or unreceipted
+content. Ordinary open admits the aggregate overlay bytes and directory entries
+before reading the first overlay. Catalog reconciliation shares each overlay decode
+with membership verification and receipt checks; acquisition retains those owned
+decodes for unchanged selected tiles. Corruption and future formats refuse even
+when stale. Read-only inspection
+reports pending recovery and performs no repair. Catalog absence, overlay absence
+and absent new identity records permit validated legacy adoption without inventing
+edits, active-region state or an index on open.
+
+Legacy unreceipted generation stamps are not indexed publication proof. First
+adoption rebuilds selected receipts with destination generations and evicts other
+recognized legacy caches in the same protected group. If baking fails, those
+legacy caches can be removed while authority commits with reconstruction due.
+Failure to make that removal durable aborts adoption; an old generation claim
+must not become a future-looking overlay beneath the newly stamped index.
+
+`AcquireFarCommittedCache(selection, expected_generation, limits, out)` captures
+eligible committed authority, validates all recognized files, verifies receipts,
+and reconstructs due selected tiles in memory. A refusal preserves the caller's
+previous output; reconstruction does not write the save. Legacy authority is
+explicit generation zero. The returned cache owns decoded overlays and retains
+its immutable source image. Workers may retain those objects after later edits
+or world closure; they perform no save-path reads or publication callbacks.
+
+The shared memory pool admits source images, frozen samples, pipeline scratch and
+catalog/control storage, encoded/decoded overlap, and retained cache storage.
+Aliases keep reservations until payload destruction, including previous outputs
+during replacement. Limits are caller admissions rather than shipping defaults.
+No GPU queue, renderer handoff, simulation activation or new hash input is added.
