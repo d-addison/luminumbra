@@ -203,7 +203,8 @@ by the source job's `contents: write`. Other permissions are unchanged.
 To evaluate captured API responses offline (Python standard library and Git):
 
 ```sh
-python3 -I -B tools/release/validate_release_gates.py --version X.Y.Z \
+python3 -I -B tools/release/validate_release_gates.py \
+  --repository OWNER/NAME --repository-id ID --version X.Y.Z \
   --tag-commit <40-hex tagged commit> --rules main-rules.json \
   --branch main-branch.json --checks check-pages.json --statuses status-pages.json
 python3 -I -B tools/release/test_validate_release_gates.py
@@ -218,6 +219,21 @@ nonfinal pages, and unique `(ruleset_id, type)` identities across pages. Missing
 extra, repeated or inconsistent pages refuse publication, including a missing
 final page after exactly 100 rules. A full final page without a next link is valid.
 Bare arrays cannot establish pagination completeness and are refused by the CLI.
+The required `--repository OWNER/NAME` and `--repository-id ID` bind every rules,
+status and check-run `Link` URL, including links on the first page, to
+`https://api.github.com` and the expected repository and endpoint. Named
+`/repos/OWNER/NAME/` URLs compare owner and repository names case-insensitively;
+canonical `/repositories/ID/` URLs must match the trusted positive decimal ID.
+Endpoint suffixes must match exactly. Mixed forms are allowed within or across
+pages only when each link matches the expected repository and endpoint. The
+workflow supplies `${GITHUB_REPOSITORY}` and `${{ github.repository_id }}`;
+offline callers must obtain both identities from a trusted source, independently
+of the captured links. A response without links has no request URL to inspect;
+capture it from the documented endpoint in that repository. HTTP page parsing
+scans whitespace and header separators by position in the original input,
+without repeatedly copying the remaining response (issue #364). A regression
+counts substring characters copied over a many-page capture and bounds that
+volume to twice the input length, without timing assertions.
 `main-branch.json` is the single JSON object from
 `gh api "repos/OWNER/NAME/branches/main"`. The `--branch` file is required, even
 when classic protection is disabled; an absent, unreadable or malformed response
@@ -232,9 +248,11 @@ endpoint. Bare arrays and incomplete pagination refuse publication. `--statuses`
 is required, including a captured HTTP 200 empty array when there are no statuses;
 omitting statuses cannot establish that no failing status exists. The workflow
 refuses publication on any API command failure, including after partial output.
-`check-pages.json` is the stream of concatenated JSON page objects from `gh api --paginate
+`check-pages.json` is the stream of concatenated HTTP headers and JSON page objects from `gh api --include --paginate
 repos/OWNER/NAME/commits/COMMIT/check-runs?filter=all&per_page=100` (quote the endpoint
-in a shell). A single array containing those pages is also accepted. The validator
+in a shell). HTTP 200 and the same complete, repository-bound link chain are
+required; links must retain the tagged commit's check-runs endpoint and `filter=all`.
+Bare JSON objects or arrays are refused by the CLI. The validator
 accepts check pages on stdin by default and bounds input
 before decoding JSON: 1 MiB each for rules and branch protection and 16 MiB each
 for check and status pages, with at most 32 nested containers in any input.
@@ -247,7 +265,10 @@ attaches them to the draft. Attestations are created before release creation and
 do not require a published release. If binary releases are separately enabled,
 their attestations also precede upload, and the later `gh release upload TAG`
 uses `GH_REPO` to select the repository and an authenticated token with
-`contents: write` to address the draft by tag. All uploads must finish before
+`contents: write` to address the draft by tag. Immediately before upload it runs
+`gh release view "$GITHUB_REF_NAME" --json isDraft` with `GH_REPO` set and requires
+`isDraft` to be true. A query failure or any other result blocks upload, including
+asset replacement on a rerun after publication. All uploads must finish before
 the owner reviews the referenced evidence and manually publishes the draft; the
 workflow never publishes it automatically.
 Independent release-download verification is a **post-publication** step using

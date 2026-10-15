@@ -46,6 +46,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_VERSION: ${{ steps.identity.outputs.version }}
+          RELEASE_REPOSITORY_ID: ${{ github.repository_id }}
         run: |
           set -euo pipefail
           git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
@@ -53,8 +54,10 @@ jobs:
           gh api --include --paginate "repos/${GITHUB_REPOSITORY}/rules/branches/main?per_page=100" > "${RUNNER_TEMP}/release-rules.json"
           gh api "repos/${GITHUB_REPOSITORY}/branches/main" > "${RUNNER_TEMP}/release-branch.json"
           gh api --include --paginate "repos/${GITHUB_REPOSITORY}/commits/${tag_commit}/statuses?per_page=100" > "${RUNNER_TEMP}/release-statuses.json"
-          gh api --paginate "repos/${GITHUB_REPOSITORY}/commits/${tag_commit}/check-runs?filter=all&per_page=100" |
+          gh api --include --paginate "repos/${GITHUB_REPOSITORY}/commits/${tag_commit}/check-runs?filter=all&per_page=100" |
             python3 -I -B tools/release/validate_release_gates.py \
+              --repository "${GITHUB_REPOSITORY}" \
+              --repository-id "$RELEASE_REPOSITORY_ID" \
               --version "$RELEASE_VERSION" --tag-commit "$tag_commit" \
               --rules "${RUNNER_TEMP}/release-rules.json" \
               --branch "${RUNNER_TEMP}/release-branch.json" \
@@ -217,4 +220,9 @@ jobs:
           GH_REPO: ${{ github.repository }}
         # contents: write allows uploads to the draft by tag. The owner publishes
         # manually after reviewing the gate record's referenced evidence.
-        run: gh release upload "${GITHUB_REF_NAME}" dist/* --clobber
+        shell: bash
+        run: |
+          set -euo pipefail
+          is_draft=$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq '.isDraft')
+          test "$is_draft" = true
+          gh release upload "${GITHUB_REF_NAME}" dist/* --clobber
