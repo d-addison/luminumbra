@@ -6,6 +6,11 @@ The required tools are CMake 3.20 or newer, Ninja, Git, and a C++20 compiler. Th
 first configure downloads pinned dependencies. Subsequent configuration can reuse
 the populated dependency sources without probing upstream repositories.
 
+Windows builds with `LUMINUMBRA_ENABLE_GNS=ON` or `LUMINUMBRA_ENABLE_STEAM=ON`
+require CMake 3.21 or newer for runtime DLL staging. Configuration rejects older
+CMake versions for these builds; builds with both backends disabled still support
+CMake 3.20.
+
 Linux builds require OpenGL, X11/Wayland development headers, FreeType, and the
 usual compiler and package-configuration tools. The exact Ubuntu package set is in
 `.github/workflows/ci.yml`. Windows CI validates both Visual C++ and MSYS2 UCRT64.
@@ -27,6 +32,23 @@ cmake --preset release
 cmake --build --preset release --parallel
 ctest --preset release -LE manual --no-tests=error --output-on-failure
 ```
+
+`NetworkingRuntimeContract` exercises runtime selection and staging refusals
+with CMake scripts on all platforms. On Windows with CMake 3.21+, `NetworkingRuntimeBuildIntegration`
+(labels `ci;tools;net`, timeout 90 seconds) configures and builds a small DLL
+fixture through the real staging module and PE scanner. It tests the current
+generator and Ninja Multi-Config, building both Debug and Release for the latter.
+The fixture checks generated input files, configuration-specific stamps, and
+staged DLL hashes, then deletes a scanned transitive DLL and rebuilds only the
+application to require repair without relinking. Both Windows CI lanes run these
+labels in their full test suite and provide the compiler and Ninja.
+
+The earlier post-build-only wiring cannot repair a deleted DLL when the
+application is already up to date. Its combined configuration inputs also admit
+DLLs with equal basenames from different configurations: this fixture rejects
+foreign configuration paths and checks Debug hashes again after building Release.
+A staging target using a shared output directory instead of the configuration's
+executable directory fails the staged-file checks before the application builds.
 
 Use `ctest --preset <name> -N` to inspect discovery. Tests marked `manual` are not
 part of the normal CI suite. Narrow local runs with `-R <expression>` only after a
@@ -91,6 +113,10 @@ classifier also forces all lanes. The classifier runs on a standard
 missing history, an empty diff, unknown paths, or missing classifier outputs keep
 the build lanes enabled. Pushes, schedules, and manual dispatches always enable
 every path-gated lane, regardless of changed files.
+
+Compiler and analysis caches can be restored on eligible PR and manual runs.
+The MSYS2 package cache is an exception: its setup action enables both restore
+and save together, so package caching is disabled outside main/devel pushes.
 
 Blocking clang-tidy analysis runs in three path-hash shards on standard Ubuntu
 runners, each with a 60-minute timeout. Together they analyse every configured

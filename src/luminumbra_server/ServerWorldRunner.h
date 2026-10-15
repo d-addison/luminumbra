@@ -20,6 +20,7 @@
 #include <vector>
 
 #include "luminumbra_common/core/JobSystem.h"
+#include "luminumbra_common/core/SystemConfig.h"
 #include "luminumbra_common/persistence/WorldPersistenceRoundtrip.h"
 #include "luminumbra_common/world/ActiveRegionLedger.h"
 #include "luminumbra_common/world/GameSession.h"
@@ -30,6 +31,8 @@ namespace Luminumbra::Server {
 struct ServerWorldRunnerConfig {
     // Runtime root with trailing separator (GameSession concatenates paths).
     std::string root_path;
+    std::optional<luminumbra::core::SystemConfig> systems_config_override;
+    std::optional<std::string> preset_json_override;
     std::string world_name = "Headless Server World";
     std::string seed = "424242";
     // World preset name (worlds/atlas/presets/<preset>.json).
@@ -47,7 +50,10 @@ struct ServerWorldRunnerConfig {
     int test_streaming_radius_cap = 0;
     // Autosave every N simulation ticks through WorldSaveService
     // (GameSession::SaveWorldState incremental contract). 0 disables.
-    std::uint64_t autosave_interval_ticks = 0;
+    // Default: five minutes at the canonical 30 Hz clock.
+    std::uint64_t autosave_interval_ticks = 9000;
+    // Explicit workload override, applied before world creation or loading.
+    bool finite_hydrology = true;
     //  number of deterministic player avatars to spawn at
     // boot (phyllotaxis ring around spawn; see World::DeterministicAvatarSpawnOffset).
     // Avatar positions feed the multi-anchor streaming vector and fold into the
@@ -103,7 +109,8 @@ struct ServerWorldRunnerConfig {
     bool water_smoke = false;
     bool sim_budget = false; // Opt-in simulation stage observation; default artifact unchanged.
     // Applied via GameSession::SetRegionSchedulerConfig right after the root path is set, so it
-    // takes effect for the fresh world Boot() creates. Empty = session default.
+    // takes effect for the fresh world Boot() creates. A loaded ledger must match an explicit
+    // override; empty restores persisted settings, or defaults when no ledger exists.
     std::optional<Luminumbra::world::RegionSchedulerConfig> region_scheduler;
 };
 

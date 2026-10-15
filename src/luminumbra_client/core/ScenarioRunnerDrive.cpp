@@ -1193,6 +1193,8 @@ bool ScenarioRunnerImpl::driveNetworkedSession() {
             net_cfg.budget_ticks = 90;
             net_cfg.hash_cadence_ticks = 30;
             net_cfg.root_path = root_path_str;
+            net_cfg.systems_config_override = scenario_config.systems_config_override;
+            net_cfg.preset_json_override = scenario_config.preset_json_override;
             net_cfg.surface_radius = scenario_config.horizon_radius;
             net_cfg.collision_radius = scenario_config.collision_radius;
             if (!networked_session_driver.Begin(gameSession.get(), net_cfg)) {

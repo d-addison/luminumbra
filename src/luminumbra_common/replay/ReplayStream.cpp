@@ -156,7 +156,7 @@ struct Cursor {
 //   [34..37] surface_radius u32
 //   [38..41] collision_radius u32
 //   then length-prefixed strings: seed_string, preset, start_world_hash,
-//   engine_version.
+//   engine_version, system_config_identity, preset_content_hash (v3).
 constexpr std::size_t kTickCountOffset = 10;
 
 void AppendHeader(std::vector<std::uint8_t>& out, const ReplayHeader& h) {
@@ -173,6 +173,8 @@ void AppendHeader(std::vector<std::uint8_t>& out, const ReplayHeader& h) {
     PutString(out, h.preset);
     PutString(out, h.start_world_hash);
     PutString(out, h.engine_version);
+    PutString(out, h.system_config_identity);
+    PutString(out, h.preset_content_hash);
 }
 
 bool ParseHeader(Cursor& c, ReplayHeader& h) {
@@ -211,6 +213,10 @@ bool ParseHeader(Cursor& c, ReplayHeader& h) {
     if (!c.GetString(h.start_world_hash))
         return false;
     if (!c.GetString(h.engine_version))
+        return false;
+    if (!c.GetString(h.system_config_identity))
+        return false;
+    if (!c.GetString(h.preset_content_hash))
         return false;
     return c.ok;
 }

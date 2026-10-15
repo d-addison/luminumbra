@@ -88,6 +88,10 @@ Python regressions overlap two invocations for both core and WER collection and
 check that each receipt contains only its own artifact. This locks cooperating
 harness invocations; unrelated dump producers still need a separate directory.
 
+A POSIX dump-preflight failure with `--allow-no-dumps` retains its diagnostics
+and disables core-directory locking and collection for that run, allowing the
+child checks to run.
+
 After a Windows crash, WER collection requires closed writers and an unchanged
 snapshot across a one-second stable window within the existing 30-second settle
 deadline. A `CreateFileW` read open with no sharing probes every observed dump;
