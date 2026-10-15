@@ -771,6 +771,8 @@ std::shared_ptr<Chunk> DecodeChunkRecord(const RegionRecord& record,
                                          const std::filesystem::path& path,
                                          std::vector<std::string>* errors,
                                          bool strict_water = false) {
+    if (auto* cache = ChunkValidationCache::active())
+        cache->record_decode(strict_water);
     std::string payload;
     if (!DecompressPayload(record, payload, errors)) {
         return nullptr;
@@ -2866,6 +2868,7 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
                                   const std::stop_token& stop,
                                   const std::function<bool(const IVec3&)>& retain_chunk,
                                   std::vector<IVec3>* authoritative_inventory) const {
+    const ChunkValidationCache::InventoryScope inventory(ChunkValidationCache::active());
     DecodeCounter().fetch_add(1, std::memory_order_acq_rel);
     state.clear();
     if (authoritative_inventory)

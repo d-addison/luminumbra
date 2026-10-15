@@ -1154,12 +1154,15 @@ std::size_t ServerWorldRunner::CreatureCount() const {
         .size();
 }
 
-void ServerWorldRunner::Shutdown(world::WorldStateSaveReport* shutdown_save_report) {
+void ServerWorldRunner::Shutdown(world::WorldStateSaveReport* shutdown_save_report,
+                                 ShutdownDiagnostics* diagnostics) {
     if (m_shutdown) {
         return;
     }
     m_shutdown = true;
 
+    using Clock = std::chrono::steady_clock;
+    const auto save_start = diagnostics ? Clock::now() : Clock::time_point{};
     if (m_booted && m_session) {
         // The host tick loop has returned, so this cannot overlap autosave/snapshot.
         // Save on shutdown via WorldSaveService (incremental contract: a
@@ -1176,11 +1179,21 @@ void ServerWorldRunner::Shutdown(world::WorldStateSaveReport* shutdown_save_repo
             save_report.saved);
     }
 
+    const auto teardown_start = diagnostics ? Clock::now() : Clock::time_point{};
+    if (diagnostics) {
+        diagnostics->save_seconds =
+            std::chrono::duration<double>(teardown_start - save_start).count();
+        if (m_session)
+            diagnostics->cache = m_session->GetChunkValidationCacheStats();
+    }
     m_session.reset();
     if (m_booted) {
         m_jobSystem.shutdown();
     }
     m_booted = false;
+    if (diagnostics)
+        diagnostics->teardown_seconds =
+            std::chrono::duration<double>(Clock::now() - teardown_start).count();
 }
 
 } // namespace Luminumbra::Server

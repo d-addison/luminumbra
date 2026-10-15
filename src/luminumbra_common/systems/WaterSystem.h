@@ -9,6 +9,7 @@
 #include <optional>
 #include <span>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace Luminumbra {
@@ -104,6 +105,15 @@ public:
         bool fixed_cohort_bound_known = false;
         std::vector<world::water_share::Grant> grants;
         std::vector<ChunkID> visits;
+        void Reset() {
+            auto retained_grants = std::move(grants);
+            auto retained_visits = std::move(visits);
+            *this = {};
+            grants = std::move(retained_grants);
+            visits = std::move(retained_visits);
+            grants.clear();
+            visits.clear();
+        }
         bool operator==(const RegionalWork&) const = default;
     };
     [[nodiscard]] const RegionalWork& regional_work() const {
@@ -310,6 +320,7 @@ private:
     std::optional<std::uint64_t> m_last_regional_tick;
     bool m_regional_scheduling = false;
     RegionalWork m_regional_work;
+    RegionalWork m_regionalScratch;
     JobSystem* m_job_system;
 
     SHIELD_WorldSystem* m_shield_system;

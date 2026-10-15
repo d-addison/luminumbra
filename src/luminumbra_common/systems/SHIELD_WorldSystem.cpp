@@ -6027,12 +6027,15 @@ SHIELD_WorldSystem::WaterAuthorityPublication
 SHIELD_WorldSystem::prepare_water_authority_publication(std::span<Chunk* const> chunks) {
     WaterAuthorityPublication publication;
     publication.lock = std::unique_lock<std::mutex>(m_far_lod_region_revision_mutex);
-    publication.revisions = m_far_lod_region_revisions;
     publication.revision = m_far_lod_authority_revision.load(std::memory_order_acquire);
     constexpr int per_region = World::kFarLodRegionSizeMeters / CHUNK_SIZE_X;
     for (const auto* chunk : chunks) {
         if (chunk->sdf_provenance() == ChunkSdfProvenance::LoadedOrEdited)
             continue;
+        if (!publication.changed) {
+            publication.revisions = m_far_lod_region_revisions;
+            publication.changed = true;
+        }
         if (publication.revision == std::numeric_limits<u64>::max())
             throw std::runtime_error("Water authority revision overflow");
         ++publication.revision;
@@ -6051,8 +6054,10 @@ SHIELD_WorldSystem::prepare_water_authority_publication(std::span<Chunk* const> 
 }
 
 void SHIELD_WorldSystem::publish_water_authority(WaterAuthorityPublication&& publication) noexcept {
-    m_far_lod_region_revisions.swap(publication.revisions);
-    m_far_lod_authority_revision.store(publication.revision, std::memory_order_release);
+    if (publication.changed) {
+        m_far_lod_region_revisions.swap(publication.revisions);
+        m_far_lod_authority_revision.store(publication.revision, std::memory_order_release);
+    }
 }
 
 void SHIELD_WorldSystem::sync_water_authority() {

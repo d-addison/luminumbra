@@ -81,8 +81,11 @@ public:
     std::vector<std::size_t> reserved, executed, selected, staged;
     std::vector<world::RegionWork> work;
     std::vector<Chunk*> participants;
+    std::vector<world::RegionWork> completion;
 
 private:
+    std::size_t RosterIndex(std::size_t position, ChunkID id) const;
+    std::vector<std::size_t> m_positions;
     void Rebuild(std::span<const std::shared_ptr<Chunk>> resident);
     std::unordered_map<ChunkID, std::size_t> m_index;
     // A byte per cached identity detects duplicates without constructing a per-tick set.

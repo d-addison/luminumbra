@@ -6071,6 +6071,12 @@ TEST(GameSessionHeadlessWorldTest, SuccessiveWorldsClearValidationCacheOnCreateA
         ASSERT_TRUE(session.GetWorldSystem()->adopt_streamed_chunk(chunk));
         ASSERT_TRUE(session.SaveWorldState());
         ASSERT_TRUE(session.SaveWorld());
+        const auto saved_bytes = RepeatedSaveBytes(session.GetWorldSaveDir());
+        // The first state save validates the new record permissively at commit;
+        // the metadata save warms a distinct strict indexed validation key.
+        // Save again without edits to reuse that key over byte-identical chunks.
+        ASSERT_TRUE(session.SaveWorldState());
+        EXPECT_EQ(RepeatedSaveBytes(session.GetWorldSaveDir()), saved_bytes);
         ASSERT_GT(session.GetChunkValidationCacheStats().entries, 0u);
         EXPECT_GT(session.GetChunkValidationCacheStats().payload_bytes, 0u);
         EXPECT_GT(session.GetChunkValidationCacheStats().hits, 0u);

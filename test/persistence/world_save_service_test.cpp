@@ -1334,6 +1334,8 @@ TEST(WorldSaveService, ValidationCacheClearReleasesBytesAndResetsStatistics) {
     cache.remember(first, "changed", {{2, 0, 0}, 8, false});
     const auto fresh = cache.find(first, "changed");
     ASSERT_TRUE(fresh.has_value());
+    if (!fresh.has_value())
+        return;
     EXPECT_EQ(fresh->coords, IVec3(2, 0, 0));
     EXPECT_EQ(fresh->sdf_size, 8u);
     EXPECT_FALSE(fresh->authoritative);

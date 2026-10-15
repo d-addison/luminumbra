@@ -531,6 +531,8 @@ private:
     RegionSchedulerConfig m_regionSchedulerConfig;
     ActiveRegionLedger m_activeRegionLedger;
     RegionSchedule m_regionSchedule;
+    world::RegionScheduleScratch m_regionScheduleScratch;
+    mutable std::vector<RegionKey> m_sortedDueRegions, m_sortedDueSource;
     std::optional<std::vector<Vec3>> m_replicatedSimulationAnchors;
     std::vector<RegionWork> m_regionWork;          // External inputs for the next schedule call.
     std::vector<RegionWork> m_regionCompletedWork; // Transient successful consumer work this tick.
@@ -540,10 +542,12 @@ private:
     GroundObjectStore m_groundObjects;
     // Authoritative in-memory field pages (S6). Empty unless the region flag is on.
     FieldPageState m_fieldPages;
+    FieldPageState m_previousFieldPages;
+    FieldPageState::ScheduledScratch m_fieldScheduleScratch;
     void LatchRegionFault(std::uint64_t tick, std::string message);
     void RunRegionScheduler(std::uint64_t current_tick);
     // Sorted, de-duplicated due regions of the current schedule.
-    [[nodiscard]] std::vector<RegionKey> SortedDueRegions() const;
+    [[nodiscard]] const std::vector<RegionKey>& SortedDueRegions() const;
     // Ages the due, owned regions' ground objects by one tick and publishes despawns.
     void AdvanceGroundObjects(std::uint64_t tick);
     // Activates and steps the due, ledger-backed regions' field pages by one tick.

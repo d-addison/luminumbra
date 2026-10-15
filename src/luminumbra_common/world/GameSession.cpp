@@ -689,7 +689,7 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
                 Systems::GatherFieldEmitterDeposits(m_registry, *m_energyFieldState);
                 if (m_activeRegionsEnabled) {
                     luminumbra::fields::EnergyFieldState::RegionalResult result;
-                    const auto due = SortedDueRegions();
+                    const auto& due = SortedDueRegions();
                     if (!m_energyFieldState->TickRegional(current_tick,
                                                           m_activeRegionLedger.records(),
                                                           due,
@@ -1686,7 +1686,7 @@ void GameSession::RunRegionalFoliageTickImpl(
                              Stage::Lifespan})
         budget.Next(stage, [] { return 0u; });
     budget.Next(Stage::Plants, [] { return 0u; });
-    const auto due = SortedDueRegions();
+    const auto& due = SortedDueRegions();
     std::map<RegionKey, std::uint32_t> windows;
     std::map<RegionKey, std::uint64_t> resumes;
     for (const auto& [key, record] : m_activeRegionLedger.records()) {
@@ -1973,7 +1973,8 @@ void GameSession::RunRegionScheduler(std::uint64_t current_tick) {
                         }
                     }
                     return owned_regions.value().contains(key);
-                });
+                },
+                &m_regionScheduleScratch);
             m_regionWork.clear();
         } catch (const std::exception& error) {
             LatchRegionFault(current_tick, error.what());
@@ -1981,12 +1982,16 @@ void GameSession::RunRegionScheduler(std::uint64_t current_tick) {
     }
 }
 
-std::vector<RegionKey> GameSession::SortedDueRegions() const {
+const std::vector<RegionKey>& GameSession::SortedDueRegions() const {
     // The schedule's own order is rank/proximity order and must not change; callers age in key
     // order.
-    std::vector<RegionKey> due = m_regionSchedule.due;
-    std::sort(due.begin(), due.end());
-    due.erase(std::unique(due.begin(), due.end()), due.end());
+    auto& due = m_sortedDueRegions;
+    if (m_sortedDueSource != m_regionSchedule.due) {
+        due.assign(m_regionSchedule.due.begin(), m_regionSchedule.due.end());
+        std::sort(due.begin(), due.end());
+        due.erase(std::unique(due.begin(), due.end()), due.end());
+        m_sortedDueSource = m_regionSchedule.due;
+    }
     return due;
 }
 
@@ -1994,8 +1999,10 @@ void GameSession::AdvanceFieldPages(std::uint64_t tick) {
     const std::uint64_t seed =
         static_cast<std::uint64_t>(static_cast<std::uint32_t>(StringToSeed(m_metadata.seed)));
     const auto& records = m_activeRegionLedger.records();
-    const auto due = SortedDueRegions();
-    const auto previous = m_fieldPages.scheduled_snapshot(records, due, tick);
+    const auto& due = SortedDueRegions();
+    m_fieldPages.scheduled_snapshot_into(
+        records, due, tick, m_previousFieldPages, m_fieldScheduleScratch);
+    const auto& previous = m_previousFieldPages;
     for (const RegionKey key : due) {
         if (records.find(key) == records.end())
             continue;
@@ -2010,7 +2017,7 @@ void GameSession::AdvanceFieldPages(std::uint64_t tick) {
             m_regionCompletedWork.push_back(RegionWork{key, 0, 0, 0, initialized});
     }
     for (const auto& [key, updates] :
-         m_fieldPages.step_scheduled(records, due, seed, tick, &previous))
+         m_fieldPages.step_scheduled(records, due, seed, tick, &previous, &m_fieldScheduleScratch))
         m_regionCompletedWork.push_back(RegionWork{key, 0, 0, 0, updates});
 }
 
@@ -2136,7 +2143,7 @@ void GameSession::AdvanceRegionalWeather(std::uint64_t tick) {
     // Weather admission is transactional without copying pages or the dense scent map.
     auto clocks = m_fieldPages.weather_clocks();
     const auto& records = m_activeRegionLedger.records();
-    const auto due_list = SortedDueRegions();
+    const auto& due_list = SortedDueRegions();
     const std::set<RegionKey> due(due_list.begin(), due_list.end());
     const auto eligible = [&records](RegionKey owner) {
         const auto found = records.find(owner);
@@ -2510,7 +2517,7 @@ bool GameSession::MarkGroundRegionEdited(const GroundObject& object) {
 }
 
 void GameSession::AdvanceGroundObjects(std::uint64_t tick) {
-    const std::vector<RegionKey> due = SortedDueRegions();
+    const auto& due = SortedDueRegions();
     // Resident chunk columns, built on the first unsettled object of this call.
     std::optional<std::set<std::pair<int, int>>> columns;
     const auto settle = [this, &columns](GroundObject& object) {

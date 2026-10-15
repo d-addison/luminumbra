@@ -1670,4 +1670,42 @@ TEST_F(RegionalWaterFixture, WorldResidentViewSharesSnapshotOrderAndObservesLoad
     cache.Refresh(shield.resident_streamed_chunks(), ledger, 8);
     ASSERT_NE(cache.Find(chunk->get_id()), nullptr);
 }
+TEST_F(RegionalWaterFixture, UnchangedAuthorityPublicationKeepsExistingRegionRevisions) {
+    auto promoted = WaterChunk({0, 0, 0});
+    std::vector<Chunk*> participants{promoted.get()};
+    {
+        auto publication = shield.prepare_water_authority_publication(participants);
+        EXPECT_TRUE(publication.changed);
+        shield.publish_water_authority(std::move(publication));
+    }
+    promoted->mark_sdf_loaded_or_edited();
+    const auto revision = shield.far_lod_authority_revision();
+    const auto region = shield.far_lod_region_authority_revision(0, 0);
+    {
+        auto publication = shield.prepare_water_authority_publication(participants);
+        EXPECT_FALSE(publication.changed);
+        EXPECT_TRUE(publication.revisions.empty());
+        shield.publish_water_authority(std::move(publication));
+    }
+    EXPECT_EQ(shield.far_lod_authority_revision(), revision);
+    EXPECT_EQ(shield.far_lod_region_authority_revision(0, 0), region);
+    EXPECT_GT(region, 0u);
+}
+
+TEST(RegionalWater, ResetWorkScratchRetainsStorageAndClearsAllOutputs) {
+    Systems::WaterSystem::RegionalWork work;
+    work.grants.reserve(8);
+    work.visits.reserve(8);
+    work.grants.push_back({});
+    work.visits.push_back(123);
+    work.total_cells = 64;
+    work.mass_ok = false;
+    const auto* grants = work.grants.data();
+    const auto* visits = work.visits.data();
+    work.Reset();
+    EXPECT_EQ(work, Systems::WaterSystem::RegionalWork{});
+    EXPECT_EQ(work.grants.data(), grants);
+    EXPECT_EQ(work.visits.data(), visits);
+}
+
 } // namespace

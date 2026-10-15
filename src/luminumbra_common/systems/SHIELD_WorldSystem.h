@@ -954,6 +954,7 @@ public:
         std::unique_lock<std::mutex> lock;
         std::map<std::pair<i32, i32>, u64> revisions;
         u64 revision = 0;
+        bool changed = false;
     };
     WaterAuthorityPublication prepare_water_authority_publication(std::span<Chunk* const> chunks);
     void publish_water_authority(WaterAuthorityPublication&& publication) noexcept;

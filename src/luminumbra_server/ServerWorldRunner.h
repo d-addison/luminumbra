@@ -275,7 +275,12 @@ public:
     // Saves world state through WorldSaveService (incremental contract: a
     // never-edited world writes nothing) and tears the session down.
     // Called by the destructor when not invoked explicitly.
-    void Shutdown(world::WorldStateSaveReport* shutdown_save_report = nullptr);
+    struct ShutdownDiagnostics {
+        double save_seconds = 0, teardown_seconds = 0;
+        Persistence::ChunkValidationCache::Stats cache;
+    };
+    void Shutdown(world::WorldStateSaveReport* shutdown_save_report = nullptr,
+                  ShutdownDiagnostics* diagnostics = nullptr);
 
 private:
     std::string m_bootError;

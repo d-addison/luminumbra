@@ -92,6 +92,16 @@ Candidates* PlanningCache::FindCandidates(RegionKey owner) {
     return found == candidates.end() || found->owner != owner ? nullptr : &*found;
 }
 
+std::size_t PlanningCache::RosterIndex(std::size_t position, ChunkID id) const {
+    if (position < m_positions.size()) {
+        const auto index = m_positions[position];
+        if (index < entries.size() && entries[index].id == id)
+            return index;
+    }
+    const auto found = m_index.find(id);
+    return found == m_index.end() ? missing : found->second;
+}
+
 void PlanningCache::Rebuild(std::span<const std::shared_ptr<Chunk>> resident) {
     // Build off to the side. A duplicate/invalid identity or allocation failure must
     // not leave a partially indexed topology available to a retry.
@@ -158,12 +168,16 @@ void PlanningCache::Rebuild(std::span<const std::shared_ptr<Chunk>> resident) {
     // tuples. Removing sealed endpoints from this sorted superset gives exactly
     // SnapshotFaces' sorted admitted subset, without exchanging physical endpoints.
     next.m_seen.resize(next.entries.size());
+    next.m_positions.assign(resident.size(), missing);
+    for (const auto position : m_roster)
+        next.m_positions[position] = next.m_index.at(resident[position]->get_id());
     // Keep reusable per-tick buffers; only topology and its indexes are replaced.
     entries.swap(next.entries);
     faces.swap(next.faces);
     candidates.swap(next.candidates);
     m_index.swap(next.m_index);
     m_seen.swap(next.m_seen);
+    m_positions.swap(next.m_positions);
 }
 
 void PlanningCache::Refresh(std::span<const std::shared_ptr<Chunk>> resident,
@@ -171,18 +185,19 @@ void PlanningCache::Refresh(std::span<const std::shared_ptr<Chunk>> resident,
                             int resolution) {
     std::fill(m_seen.begin(), m_seen.end(), 0);
     m_roster.clear();
+    m_positions.resize(resident.size(), missing);
     bool rebuild = false;
     for (std::size_t position = 0; position < resident.size(); ++position) {
         const auto& chunk = resident[position];
         if (!chunk || chunk->get_state() == ChunkState::Loading)
             continue;
         m_roster.push_back(position);
-        const auto found = m_index.find(chunk->get_id());
-        if (found == m_index.end()) {
+        const auto index = RosterIndex(position, chunk->get_id());
+        if (index == missing) {
             rebuild = true;
             continue;
         }
-        const auto index = found->second;
+        m_positions[position] = index;
         if (m_seen[index]++)
             RefuseWater("Regional water duplicate resident identity");
         const auto& old = entries[index];
@@ -522,9 +537,10 @@ void WaterSystem::UpdateRegional(entt::registry& registry,
         RefuseWater("Regional water configuration refused");
     if (m_last_regional_tick && schedule.tick <= m_last_regional_tick.value())
         RefuseWater("Regional water repeated or backward tick refused");
-    RegionalWork result;
+    auto& result = m_regionalScratch;
+    result.Reset();
     if (m_boot_paused) {
-        m_regional_work = std::move(result);
+        std::swap(m_regional_work, result);
         m_cells_stepped_last_update = 0;
         return;
     }
@@ -705,7 +721,8 @@ void WaterSystem::UpdateRegional(entt::registry& registry,
         sources.size() > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max() -
                                                     m_debug_sources_seen))
         RefuseWater("Regional water diagnostic overflow");
-    auto next_completed = completed;
+    auto& next_completed = snapshot.completion;
+    next_completed.assign(completed.begin(), completed.end());
     for (const auto& contribution : work)
         next_completed.push_back(contribution);
     auto& participants = snapshot.participants;
@@ -742,7 +759,7 @@ void WaterSystem::UpdateRegional(entt::registry& registry,
     m_dbg_awake_water_chunks = static_cast<std::size_t>(awake);
     m_dbg_cells_simmed = static_cast<std::size_t>(result.water_cells);
     m_cells_stepped_last_update = static_cast<std::size_t>(result.water_cells);
-    m_regional_work = std::move(result);
+    std::swap(m_regional_work, result);
     m_last_regional_tick = schedule.tick;
 }
 } // namespace Luminumbra::Systems

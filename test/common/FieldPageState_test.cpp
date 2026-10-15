@@ -11,6 +11,7 @@
 #include <map>
 #include <set>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -1032,4 +1033,40 @@ TEST(FieldPageStateTest, ScentColumnWalkHandlesEmptyColumnsErasureEditsLoadAndWi
         {{-2, -1}, one}, {{1, 1}, {}}, {{-2, 4}, one}, {{1, 4}, {}}});
     apply(std::vector<std::pair<ScentCellKey, ScentCell>>{
         {{-200, -2}, one}, {{200, -2}, one}, {{-200, 9}, {}}, {{200, 9}, one}});
+}
+
+TEST(FieldPageStateTest, ReusedScheduledStorageMatchesFreshAcrossAdmissionAndPhaseChanges) {
+    FieldPageState reused, fresh, previous;
+    FieldPageState::ScheduledScratch scratch;
+    std::map<RegionKey, ActiveRegionRecord> records;
+    records[{0, 0}] = {};
+    records[{1, 0}] = {};
+    ASSERT_TRUE(reused.activate_region({0, 0}, kSeed, 0));
+    ASSERT_TRUE(fresh.activate_region({0, 0}, kSeed, 0));
+    for (std::uint64_t tick = 1; tick <= 8; ++tick) {
+        SCOPED_TRACE(tick);
+        records.at({1, 0}).state = tick == 3 ? RegionState::Frozen : RegionState::Reduced;
+        records.at({1, 0}).cadence_shift = 1;
+        std::vector<RegionKey> due{{1, 0}, {0, 0}};
+        if (tick % 2)
+            due.erase(due.begin());
+        reused.scheduled_snapshot_into(records, due, tick, previous, scratch);
+        const auto expected_previous = fresh.scheduled_snapshot(records, due, tick);
+        EXPECT_EQ(previous.serialize(), expected_previous.serialize());
+        if (tick == 2) {
+            ASSERT_TRUE(reused.activate_region({1, 0}, kSeed, tick));
+            ASSERT_TRUE(fresh.activate_region({1, 0}, kSeed, tick));
+        }
+        EXPECT_EQ(reused.step_scheduled(records, due, kSeed, tick, &previous, &scratch),
+                  fresh.step_scheduled(records, due, kSeed, tick, &expected_previous));
+        EXPECT_EQ(reused.serialize(), fresh.serialize());
+        for (const auto& [key, record] : records) {
+            (void)record;
+            EXPECT_EQ(reused.owned_initialized_cells(key), fresh.owned_initialized_cells(key));
+        }
+    }
+    const auto before = reused.serialize();
+    EXPECT_THROW(reused.scheduled_snapshot_into(records, {}, 9, reused, scratch),
+                 std::invalid_argument);
+    EXPECT_EQ(reused.serialize(), before);
 }

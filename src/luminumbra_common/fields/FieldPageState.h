@@ -171,6 +171,30 @@ public:
     // seed_value(.., tick / kCadenceTicks). Returns the number of cells stepped.
     std::uint64_t step_region(RegionKey key, std::uint64_t world_seed, std::uint64_t tick);
 
+    struct ScheduledScratch {
+        struct Owner {
+            bool eligible = false, due = false;
+            std::uint8_t shift = 0;
+            std::uint64_t work = 0;
+        };
+        struct PageOwners {
+            int split_x = kPageCells + 1, split_z = kPageCells + 1;
+            std::array<Owner*, 4> tiles{};
+            Owner* at(int x, int z) const {
+                return tiles[(x >= split_x) + 2 * (z >= split_z)];
+            }
+        };
+        std::vector<RegionKey> due_keys;
+        std::vector<FieldPageKey> page_keys;
+        std::vector<std::pair<RegionKey, Owner>> owners;
+        std::vector<PageOwners> gates;
+    };
+    void scheduled_snapshot_into(const std::map<RegionKey, ActiveRegionRecord>& records,
+                                 std::span<const RegionKey> due,
+                                 std::uint64_t tick,
+                                 FieldPageState& snapshot,
+                                 ScheduledScratch& scratch) const;
+
     // Sealed page-only input for step_scheduled, captured BEFORE activation. Retains only
     // pages that can participate this tick; excludes scent, weather and frozen-only pages.
     [[nodiscard]] FieldPageState
@@ -186,7 +210,8 @@ public:
                    std::span<const RegionKey> due,
                    std::uint64_t world_seed,
                    std::uint64_t tick,
-                   const FieldPageState* previous_tick = nullptr);
+                   const FieldPageState* previous_tick = nullptr,
+                   ScheduledScratch* scratch = nullptr);
 
     // FPG1 file bytes. Empty string for an empty store (an empty store writes no file).
     [[nodiscard]] std::string serialize() const;

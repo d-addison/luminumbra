@@ -10,6 +10,7 @@
 #include "luminumbra_common/world/GameSession.h"
 #include "luminumbra_server/ServerWorldRunner.h"
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
@@ -17,6 +18,7 @@
 #include <iostream>
 #include <map>
 #include <string>
+#include <string_view>
 #include <system_error>
 #include <utility>
 
@@ -24,6 +26,47 @@ namespace {
 namespace fs = std::filesystem;
 using luminumbra::simulation::SimBudgetStage;
 using luminumbra::simulation::SimBudgetTelemetry;
+
+// Test-only wall-clock and cache observations, excluded from simulation telemetry.
+class PhaseDiagnostics {
+public:
+    using Clock = std::chrono::steady_clock;
+    using Stats = Luminumbra::Persistence::ChunkValidationCache::Stats;
+    PhaseDiagnostics(bool enabled, bool telemetry)
+        : m_enabled(enabled)
+        , m_telemetry(telemetry) {}
+    void Report(std::string_view phase, const Stats& stats) {
+        const auto end = Clock::now();
+        Print(phase, std::chrono::duration<double>(end - m_start).count(), stats);
+        m_start = Clock::now();
+    }
+    void Print(std::string_view phase, double seconds, const Stats& stats) {
+        std::cout << "[sim-budget-phase] active_regions=" << m_enabled
+                  << " telemetry=" << m_telemetry << " phase=" << phase << " seconds=" << seconds;
+        for (std::size_t i = 0; i < stats.modes.size(); ++i) {
+            const auto& now = stats.modes[i];
+            const auto& old = m_previous.modes[i];
+            std::cout << " mode=" << (i ? "strict" : "permissive")
+                      << " hits=" << now.hits - old.hits << " misses=" << now.misses - old.misses
+                      << " decodes=" << now.decodes - old.decodes
+                      << " insertions=" << now.insertions - old.insertions
+                      << " evictions=" << now.evictions - old.evictions
+                      << " absent=" << now.absent - old.absent
+                      << " byte_mismatch=" << now.byte_mismatch - old.byte_mismatch
+                      << " oversize=" << now.oversize - old.oversize
+                      << " evicted=" << now.evicted - old.evicted << " entries=" << now.entries
+                      << " payload_bytes=" << now.payload_bytes;
+        }
+        std::cout << " first_strict_records=" << stats.first_strict_records
+                  << " first_strict_bytes=" << stats.first_strict_bytes << '\n';
+        m_previous = stats;
+    }
+
+private:
+    bool m_enabled, m_telemetry;
+    Clock::time_point m_start = Clock::now();
+    Stats m_previous;
+};
 
 class SimBudgetWorldParity : public testing::TestWithParam<bool> {
 private:
@@ -95,6 +138,7 @@ void SimBudgetWorldParity::RunPopulatedPass(bool telemetry,
                                             std::string& hash,
                                             SimBudgetTelemetry& trace) {
     SCOPED_TRACE(telemetry);
+    PhaseDiagnostics phases(GetParam(), telemetry);
     Luminumbra::Server::ServerWorldRunnerConfig config;
     config.root_path = Root().generic_string() + "/";
     config.seed = "1337";
@@ -108,13 +152,16 @@ void SimBudgetWorldParity::RunPopulatedPass(bool telemetry,
     config.sim_budget = telemetry;
     Luminumbra::Server::ServerWorldRunner runner(config);
     ASSERT_TRUE(runner.Boot());
+    phases.Report("boot", runner.Session()->GetChunkValidationCacheStats());
     ASSERT_EQ(runner.Session()->ActiveRegionsEnabled(), GetParam());
     ASSERT_EQ(runner.Avatars().size(), 1u);
     ASSERT_EQ(runner.CreatureCount(), 8u);
     ASSERT_FALSE(runner.Session()->GetRegistry().view<Luminumbra::Components::PlantTag>().empty());
     const auto report = runner.RunFixedTicks(kTicks);
+    phases.Report("ticks", runner.Session()->GetChunkValidationCacheStats());
     ASSERT_EQ(report.ticks_executed, kTicks);
     hash = runner.ComputeWorldHash();
+    phases.Report("composite_hash", runner.Session()->GetChunkValidationCacheStats());
     ASSERT_FALSE(hash.empty());
     std::cout << "SimBudgetParity active_regions=" << GetParam()
               << " telemetry=" << config.sim_budget << " world_hash=" << hash << '\n';
@@ -153,16 +200,27 @@ void SimBudgetWorldParity::RunPopulatedPass(bool telemetry,
             8u);
     }
 
+    phases.Report("trace_assertions", runner.Session()->GetChunkValidationCacheStats());
+
     // Exercise the ordinary save path, including live plant persistence and
     // metadata, across the toggle at the same settled tick.
     ASSERT_TRUE(runner.Session()->SaveWorldState());
+    phases.Report("save_state_first", runner.Session()->GetChunkValidationCacheStats());
     ASSERT_TRUE(runner.Session()->SaveWorld());
+    phases.Report("save_metadata_first", runner.Session()->GetChunkValidationCacheStats());
     const auto before = SavedContentFingerprints(runner.Session()->GetWorldSaveDir());
+    phases.Report("fingerprint_before", runner.Session()->GetChunkValidationCacheStats());
     runner.Session()->SetSimBudgetTelemetryEnabled(!config.sim_budget);
     ASSERT_TRUE(runner.Session()->SaveWorldState());
+    phases.Report("save_state_second", runner.Session()->GetChunkValidationCacheStats());
     ASSERT_TRUE(runner.Session()->SaveWorld());
+    phases.Report("save_metadata_second", runner.Session()->GetChunkValidationCacheStats());
     EXPECT_EQ(SavedContentFingerprints(runner.Session()->GetWorldSaveDir()), before);
-    runner.Shutdown();
+    phases.Report("fingerprint_after", runner.Session()->GetChunkValidationCacheStats());
+    Luminumbra::Server::ServerWorldRunner::ShutdownDiagnostics shutdown;
+    runner.Shutdown(nullptr, &shutdown);
+    phases.Print("save_shutdown", shutdown.save_seconds, shutdown.cache);
+    phases.Print("teardown", shutdown.teardown_seconds, shutdown.cache);
 }
 
 // Each discovered entry runs two complete passes within the same timeout.

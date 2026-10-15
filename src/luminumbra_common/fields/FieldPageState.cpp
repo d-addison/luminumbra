@@ -10,6 +10,7 @@
 #include <map>
 #include <optional>
 #include <set>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <tuple>
@@ -553,7 +554,10 @@ FieldPageState::step_scheduled(const std::map<RegionKey, ActiveRegionRecord>& re
                                std::span<const RegionKey> due,
                                std::uint64_t world_seed,
                                std::uint64_t tick,
-                               const FieldPageState* previous_tick) {
+                               const FieldPageState* previous_tick,
+                               ScheduledScratch* scratch) {
+    ScheduledScratch local;
+    auto& storage = scratch ? *scratch : local;
     // A caller-provided snapshot is already sealed. The standalone/aliased call needs
     // its own snapshot, but never copies unrelated evolution state or frozen pages.
     const auto sealed = !previous_tick || previous_tick == this
@@ -561,36 +565,27 @@ FieldPageState::step_scheduled(const std::map<RegionKey, ActiveRegionRecord>& re
                             : FieldPageState{};
     const PageMap& previous =
         !previous_tick || previous_tick == this ? sealed.m_pages : previous_tick->m_pages;
-    struct Owner {
-        bool eligible = false, due = false;
-        std::uint8_t shift = 0;
-        std::uint64_t work = 0;
+    using Owner = ScheduledScratch::Owner;
+    using PageOwners = ScheduledScratch::PageOwners;
+    auto& due_keys = storage.due_keys;
+    due_keys.assign(due.begin(), due.end());
+    std::sort(due_keys.begin(), due_keys.end());
+    auto& owners = storage.owners;
+    owners.clear();
+    owners.reserve(records.size());
+    for (const auto& [key, record] : records)
+        owners.emplace_back(key,
+                            Owner{record.state != RegionState::Frozen,
+                                  std::binary_search(due_keys.begin(), due_keys.end(), key),
+                                  record.cadence_shift});
+    const auto resolve_owner = [&owners](RegionKey key) -> Owner* {
+        const auto found = std::lower_bound(
+            owners.begin(), owners.end(), key, [](const auto& entry, RegionKey value) {
+                return entry.first < value;
+            });
+        return found == owners.end() || found->first != key ? nullptr : &found->second;
     };
-    const std::set<RegionKey> due_keys(due.begin(), due.end());
-    std::map<RegionKey, Owner> owners;
-    const auto resolve_owner = [&owners, &records, &due_keys](RegionKey key) -> Owner* {
-        const auto cached = owners.find(key);
-        if (cached != owners.end())
-            return &cached->second;
-        const auto record = records.find(key);
-        if (record == records.end())
-            return nullptr;
-        return &owners
-                    .emplace(key,
-                             Owner{record->second.state != RegionState::Frozen,
-                                   due_keys.contains(key),
-                                   record->second.cadence_shift})
-                    .first->second;
-    };
-    // A 17-cell page plus its positive neighbours spans at most two owners per
-    // axis. Resolve record/due/work destinations once per tile, not per edge.
-    struct PageOwners {
-        int split_x = kPageCells + 1, split_z = kPageCells + 1;
-        std::array<Owner*, 4> tiles{};
-        Owner* at(int x, int z) const {
-            return tiles[(x >= split_x) + 2 * (z >= split_z)];
-        }
-    };
+    // Gate pointers refer to the stable, completely populated owner vector.
     const auto page_owners = [&resolve_owner](FieldPageKey key) {
         PageOwners result;
         const auto x0 = key.x * kPageCells, z0 = key.z * kPageCells;
@@ -616,7 +611,8 @@ FieldPageState::step_scheduled(const std::map<RegionKey, ActiveRegionRecord>& re
         channel_prefix[channel] =
             Fin(Fin(world_seed + kSeedOffset) ^ static_cast<std::uint64_t>(channel));
     const auto epoch = tick / kCadenceTicks;
-    std::vector<PageOwners> gate_cache;
+    auto& gate_cache = storage.gates;
+    gate_cache.clear();
     gate_cache.reserve(previous.size());
     // Preserve page/cell/channel order and the sealed previous values. Only
     // integer seed prefixes independent of z and epoch are hoisted.
@@ -722,8 +718,30 @@ FieldPageState
 FieldPageState::scheduled_snapshot(const std::map<RegionKey, ActiveRegionRecord>& records,
                                    std::span<const RegionKey> due,
                                    std::uint64_t tick) const {
-    const std::set<RegionKey> due_keys(due.begin(), due.end());
-    std::set<FieldPageKey> keys;
+    FieldPageState snapshot;
+    ScheduledScratch scratch;
+    scheduled_snapshot_into(records, due, tick, snapshot, scratch);
+    return snapshot;
+}
+
+void FieldPageState::scheduled_snapshot_into(const std::map<RegionKey, ActiveRegionRecord>& records,
+                                             std::span<const RegionKey> due,
+                                             std::uint64_t tick,
+                                             FieldPageState& snapshot,
+                                             ScheduledScratch& scratch) const {
+    if (&snapshot == this)
+        throw std::invalid_argument("Field snapshot must have separate storage");
+    snapshot.m_storms.clear();
+    snapshot.m_strikes.clear();
+    snapshot.m_scent.clear();
+    snapshot.m_weatherClocks.clear();
+    snapshot.m_soil = {};
+    snapshot.m_irrigation = {};
+    auto& due_keys = scratch.due_keys;
+    due_keys.assign(due.begin(), due.end());
+    std::sort(due_keys.begin(), due_keys.end());
+    auto& keys = scratch.page_keys;
+    keys.clear();
     for (const auto& [owner, record] : records) {
         if (record.state == RegionState::Frozen)
             continue;
@@ -731,23 +749,27 @@ FieldPageState::scheduled_snapshot(const std::map<RegionKey, ActiveRegionRecord>
         // If this owner's own common phase is closed, none of its edges can open.
         const bool common = record.cadence_shift < 63 &&
                             (tick & ((std::uint64_t{1} << record.cadence_shift) - 1)) == 0;
-        if (!due_keys.contains(owner) && !common)
+        if (!std::binary_search(due_keys.begin(), due_keys.end(), owner) && !common)
             continue;
         const auto x = AxisCellRange(owner.x), z = AxisCellRange(owner.z);
         if (x.lo > x.hi || z.lo > z.hi)
             continue;
         for (auto pz = FloorDiv(z.lo, kPageSpan); pz <= FloorDiv(z.hi, kPageSpan); ++pz)
             for (auto px = FloorDiv(x.lo, kPageSpan); px <= FloorDiv(x.hi, kPageSpan); ++px)
-                keys.insert({static_cast<std::int32_t>(px), static_cast<std::int32_t>(pz)});
+                keys.push_back({static_cast<std::int32_t>(px), static_cast<std::int32_t>(pz)});
     }
-    FieldPageState snapshot;
+    std::sort(keys.begin(), keys.end());
+    keys.erase(std::unique(keys.begin(), keys.end()), keys.end());
+    std::erase_if(snapshot.m_pages, [&keys, this](const auto& entry) {
+        return !std::binary_search(keys.begin(), keys.end(), entry.first) ||
+               !m_pages.contains(entry.first);
+    });
     for (const auto key : keys) {
         const auto page = m_pages.find(key);
         if (page != m_pages.end())
-            snapshot.m_pages.emplace_hint(snapshot.m_pages.end(), key, page->second);
+            snapshot.m_pages.insert_or_assign(key, page->second);
     }
     snapshot.rebuild_initialized_counts();
-    return snapshot;
 }
 
 bool FieldPageState::replace_weather(std::vector<RegionalStorm> storms,

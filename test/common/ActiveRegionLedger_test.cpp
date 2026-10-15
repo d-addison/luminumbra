@@ -12,6 +12,7 @@
 #include <limits>
 #include <optional>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -1379,6 +1380,34 @@ TEST(ActiveRegionLedgerTest, ResumeAcknowledgementCommitsWindowBetweenReducedDue
     const auto committed = ledger.encode();
     EXPECT_FALSE(ledger.acknowledge_resume(kFar, frozen));
     EXPECT_EQ(ledger.encode(), committed);
+}
+
+TEST(ActiveRegionLedger, ReusedScheduleScratchPreservesPriorityTraceAndRollback) {
+    ActiveRegionLedger reused({10, 1, 2}), fresh({10, 1, 2});
+    RegionScheduleScratch scratch;
+    for (auto* ledger : {&reused, &fresh}) {
+        ledger->mark_edited({10, 0}, WorldClock{});
+        ledger->mark_edited({-10, 0}, WorldClock{});
+        ledger->pin({10, 0}, true, WorldClock{});
+    }
+    const std::array work{RegionWork{{-10, 0}, 20, 0, 0, 0}};
+    const auto digest = [](RegionKey) {
+        return std::uint64_t{123};
+    };
+    for (std::uint64_t tick = 1; tick <= 8; ++tick) {
+        const auto actual = reused.schedule(WorldClock(tick), {}, work, digest, {}, &scratch);
+        const auto expected = fresh.schedule(WorldClock(tick), {}, work, digest);
+        EXPECT_EQ(actual, expected);
+        EXPECT_EQ(reused.encode(), fresh.encode());
+        ASSERT_FALSE(actual.due.empty());
+        EXPECT_EQ(actual.due.front(), (RegionKey{10, 0}));
+    }
+    const auto before = reused.encode();
+    EXPECT_THROW(reused.schedule(WorldClock(8), {}, work, digest, {}, &scratch),
+                 std::invalid_argument);
+    EXPECT_EQ(reused.encode(), before);
+    EXPECT_EQ(reused.schedule(WorldClock(9), {}, work, digest, {}, &scratch),
+              fresh.schedule(WorldClock(9), {}, work, digest));
 }
 
 } // namespace
