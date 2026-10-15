@@ -14,8 +14,9 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import types
 import unittest
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -316,6 +317,31 @@ class FullMatrixTests(RunnerTestBase):
 
 
 class SelectionTests(RunnerTestBase):
+    def test_client_and_checker_do_not_leak_resolved_windows_prefixes(self):
+        windows = types.SimpleNamespace(**vars(os))
+        windows.name = 'nt'
+        for resolver, path in ((rq.resolve_client, self.fake_client),
+                               (rq.resolve_checker, self.fake_checker)):
+            for parent in (r'C:\qualification', r'UNC\server\share\qualification'):
+                resolved = PureWindowsPath('\\\\?\\' + parent) / path.name
+                expected = (PureWindowsPath(r'C:\qualification') / path.name
+                            if parent.startswith('C:') else
+                            PureWindowsPath(r'\\server\share\qualification') / path.name)
+                with self.subTest(resolver=resolver.__name__, path=resolved), \
+                        mock.patch.object(rq.runner, 'os', windows), \
+                        mock.patch.object(Path, 'resolve', return_value=resolved):
+                    self.assertEqual(resolver(str(path)), str(expected))
+
+    def test_extended_windows_spelling_preserves_canonical_matrix_identity(self):
+        matrix = matrix_lib.load_matrix(MATRIX_PATH)
+        windows = types.SimpleNamespace(**vars(os))
+        windows.name = 'nt'
+        ordinary = PureWindowsPath(r'C:\qualification\matrix.json')
+        extended = PureWindowsPath(r'\\?\C:\qualification\matrix.json')
+        with mock.patch.object(rq.runner, 'os', windows), \
+                mock.patch.object(Path, 'resolve', side_effect=[extended, ordinary]):
+            self.assertTrue(rq.matrix_identity(matrix, self.matrix_path)['canonical'])
+
     def test_bare_python_filename_resolves_from_caller_cwd(self):
         previous = os.getcwd()
         os.chdir(self.tmp)

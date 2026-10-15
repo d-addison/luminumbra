@@ -270,7 +270,7 @@ def matrix_identity(matrix, path=planner.DEFAULT_MATRIX):
 
     sha256 = digest(matrix)
     canonical_sha256 = digest(matrix_lib.load_matrix(planner.DEFAULT_MATRIX))
-    canonical = (Path(path).resolve() == planner.DEFAULT_MATRIX.resolve()
+    canonical = (runner.resolve_path(path) == runner.resolve_path(planner.DEFAULT_MATRIX)
                  and sha256 == canonical_sha256)
     return {'sha256': sha256, 'canonical_sha256': canonical_sha256, 'canonical': canonical}
 
@@ -309,7 +309,7 @@ def native_executable(path):
     script_suffixes = {'.bat', '.cmd', '.com', '.ps1', '.py', '.pyw', '.sh', '.bash',
                        '.csh', '.zsh', '.fish', '.pl', '.rb', '.js', '.vbs', '.wsf'}
     if (path.suffix.lower() in script_suffixes
-            or path.resolve().suffix.lower() in script_suffixes
+            or runner.resolve_path(path).suffix.lower() in script_suffixes
             or (os.name == 'nt' and path.suffix.lower() != '.exe')
             or not os.access(path, os.X_OK)):
         return False
@@ -401,7 +401,7 @@ def native_executable(path):
 def run_client_process(command, *, client, build_manifest, **kwargs):
     """Add client-code identity to the existing receipt without changing its runner."""
     script = str(client).endswith('.py')
-    path = (Path(client).resolve() if script else
+    path = (runner.resolve_path(client) if script else
             runner.resolve_executable(command[0], kwargs['cwd'], kwargs['environment']))
     sha256 = runner.file_sha256(path)
     native = not script and native_executable(path)
@@ -588,14 +588,15 @@ def run_cells(matrix, *, client, out_dir, root=planner.ROOT, python=sys.executab
               only=None, timeout_seconds=DEFAULT_TIMEOUT_SECONDS, checker=None,
               environment=None, matrix_canonical=None, build_manifest=None):
     """Run every selected cell in matrix order; return one result dict per cell."""
-    out_dir = Path(out_dir).resolve()
+    out_dir = runner.resolve_path(out_dir)
     client = resolve_client(str(client))
     if matrix_canonical is None:
         matrix_canonical = matrix_identity(matrix)['canonical']
     if checker is None:
         checker = Path(root) / matrix_lib.VALIDATOR
     # A replacement checker may run, but its results never count toward qualification.
-    checker_canonical = Path(checker).resolve() == (Path(root) / matrix_lib.VALIDATOR).resolve()
+    checker_canonical = (runner.resolve_path(checker)
+                        == runner.resolve_path(Path(root) / matrix_lib.VALIDATOR))
     reset_settings(out_dir)
     environment = isolated_environment(out_dir, environment)
     return [run_cell(cell, matrix, client=client, out_dir=out_dir, root=root, python=python,
@@ -707,13 +708,13 @@ def exit_code(summary):
 def resolve_client(text):
     """Absolute path when the client is a path that exists from the caller's cwd."""
     if Path(text).exists():
-        return str(Path(text).resolve())
+        return str(runner.resolve_path(text))
     return text
 
 
 def resolve_checker(text):
     """Absolute path when the checker script exists from the caller's cwd."""
-    return str(Path(text).resolve()) if Path(text).exists() else text
+    return str(runner.resolve_path(text)) if Path(text).exists() else text
 
 
 def run_dry(matrix, args, out_dir):
@@ -784,7 +785,7 @@ def main(argv=None):
     except (matrix_lib.MatrixError, UsageError) as error:
         print(f'run_qualification: {error}', file=sys.stderr)
         return 2
-    out_dir = args.out_dir.resolve()
+    out_dir = runner.resolve_path(args.out_dir)
     client = resolve_client(str(args.client))
     checker = None if args.checker is None else resolve_checker(str(args.checker))
     lock = out_dir / LOCK_NAME
