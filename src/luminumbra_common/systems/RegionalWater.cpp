@@ -683,9 +683,13 @@ void WaterSystem::UpdateRegional(entt::registry& registry,
             result.preparation_volume_qmm += WaterVolume(chunk, prepared) - prior_volume;
         }
         chunk.is_water_sleeping.store(false);
-        for (const auto& source : sources) {
-            if (source.target != id)
-                continue;
+        // SnapshotSources sorts by target, cell and amount; keep that application order.
+        const auto first_source = std::lower_bound(
+            sources.begin(), sources.end(), id, [](const auto& source, ChunkID target) {
+                return source.target < target;
+            });
+        for (auto it = first_source; it != sources.end() && it->target == id; ++it) {
+            const auto& source = *it;
             const auto depth =
                 static_cast<std::int64_t>(chunk.water_depth_mm[source.cell]) + source.millimetres;
             if (depth > std::numeric_limits<std::int32_t>::max())

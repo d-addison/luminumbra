@@ -971,6 +971,77 @@ TEST_F(RegionalWaterFixture,
     EXPECT_EQ(water.regional_work().visits, (std::vector<ChunkID>{target->get_id()}));
 }
 
+TEST_F(RegionalWaterFixture, SourceRangesMatchFullScanTotalsAndLeaveUndueTargetsUntouched) {
+    Owner({0, 0});
+    Owner({1, 0});
+    Owner({2, 0});
+    chunks = {WaterChunk({0, 0, 0}, 0),
+              WaterChunk({2, 0, 0}, 0),
+              WaterChunk({32, 0, 0}, 0),
+              WaterChunk({34, 0, 0}, 0),
+              WaterChunk({64, 0, 0}, 0),
+              WaterChunk({66, 0, 0}, 0),
+              WaterChunk({68, 0, 0}, 0)};
+    struct SourceCase {
+        std::size_t target, cell;
+        float rate;
+        std::int32_t millimetres;
+    };
+    // Deliberately interleave targets, cells and amounts, including a repeated cell.
+    constexpr SourceCase sources[] = {{3, 63, 5.0f, 42},
+                                      {5, 9, 2.0f, 17},
+                                      {1, 0, 3.0f, 25},
+                                      {2, 0, 4.0f, 33},
+                                      {4, 63, 1.0f, 8},
+                                      {1, 9, 1.0f, 8},
+                                      {1, 0, 1.0f, 8}};
+    for (const auto& source : sources) {
+        auto& chunk = *chunks[source.target];
+        chunk.water_bed_mm[source.cell] = 900;
+        chunk.water_level_data[source.cell] = 0.9f;
+        chunk.water_sim_terrain_height[source.cell] = 0.9f;
+        const auto coords = chunk.get_coords();
+        Source({static_cast<float>(coords.x * CHUNK_SIZE_X + 2 * static_cast<int>(source.cell % 8) +
+                                   1),
+                0.0f,
+                static_cast<float>(2 * static_cast<int>(source.cell / 8) + 1)},
+               source.rate);
+    }
+    const auto old_first_undue = CaptureWater(*chunks[2]);
+    const auto old_second_undue = CaptureWater(*chunks[3]);
+    Step(5, {{0, 0}, {2, 0}});
+
+    // Isolated dry basins retain every injection with zero flux or sinks. The old
+    // full-list target filter therefore gives an independent exact depth oracle.
+    for (std::size_t i = 0; i < chunks.size(); ++i) {
+        SCOPED_TRACE(i);
+        std::vector<std::int32_t> expected(64, 0);
+        if (i != 2 && i != 3) {
+            for (const auto& source : sources) {
+                if (source.target == i)
+                    expected[source.cell] += source.millimetres;
+            }
+        }
+        EXPECT_EQ(chunks[i]->water_depth_mm, expected);
+        EXPECT_EQ(chunks[i]->water_edge_flux, (std::vector<std::int32_t>(128, 0)));
+    }
+    EXPECT_EQ(CaptureWater(*chunks[2]), old_first_undue);
+    EXPECT_EQ(CaptureWater(*chunks[3]), old_second_undue);
+    const auto& result = water.regional_work();
+    EXPECT_EQ(result.used_windows, 5u);
+    EXPECT_EQ(result.water_cells, 5 * 64u);
+    EXPECT_EQ(result.source_mm, 66);
+    EXPECT_EQ(result.sink_mm, 0);
+    EXPECT_EQ(result.source_volume_qmm, 66 * 16);
+    EXPECT_EQ(result.volume_before_qmm, 0);
+    EXPECT_EQ(result.volume_after_qmm, 66 * 16);
+    EXPECT_TRUE(result.mass_ok);
+    EXPECT_EQ(water.debug_sources_seen(), 7);
+    EXPECT_EQ(water.debug_source_injected_mm(), 66);
+    EXPECT_EQ(water.dbg_last_source_mm(), 66);
+    EXPECT_EQ(result.visits.size(), 5u);
+}
+
 TEST_F(RegionalWaterFixture,
        SnapshotWakeCannotCascadeAndSourceCannotVisitUnknownFrozenOrUnselected) {
     Owner({0, 0});
