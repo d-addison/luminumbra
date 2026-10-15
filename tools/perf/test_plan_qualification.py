@@ -379,6 +379,125 @@ class MatrixValidationTests(MatrixTestBase):
 
 
 class PathResolutionTests(unittest.TestCase):
+    @contextlib.contextmanager
+    def windows_paths(self):
+        class WindowsPath(PureWindowsPath):
+            def resolve(self):
+                return type(self)(ntpath.normpath(self))
+
+            def is_file(self):
+                return True
+
+        windows = types.SimpleNamespace(**vars(os))
+        windows.name, windows.sep, windows.altsep = 'nt', '\\', '/'
+        windows.path, windows.pathsep = ntpath, ';'
+        with mock.patch.object(runner, 'os', windows), \
+                mock.patch.object(runner, 'Path', WindowsPath):
+            yield WindowsPath
+
+    def test_unsafe_extended_components_preserve_their_namespace(self):
+        devices = ('CON', 'PRN', 'AUX', 'NUL', 'con.txt', 'nul .json',
+                   'CONIN$', 'conout$.txt', 'COM\u00b9', 'LPT\u00b2.txt', 'com\u00b3')
+        devices += tuple(f'{stem}{digit}{extension}'
+                         for stem in ('COM', 'LPT') for digit in range(1, 10)
+                         for extension in ('', '.exe'))
+        with self.windows_paths() as WindowsPath:
+            for root in (r'\\?\C:\qualification', r'\\?\UNC\server\share'):
+                for component in ('client.exe.', 'client.exe ', '..') + devices:
+                    for tail in ('', r'\client.exe'):
+                        text = root + '\\' + component + tail
+                        with self.subTest(path=text):
+                            self.assertEqual(runner.path_without_extended_prefix(text), text)
+                            path = WindowsPath(text)
+                            self.assertEqual(runner.path_without_extended_prefix(path), path)
+                            with self.assertRaisesRegex(OSError, 'safely normalized'):
+                                runner.resolve_path(path)
+
+    def test_literal_dot_and_space_paths_never_equal_the_normalized_twin(self):
+        def handle_path(path):
+            text = str(path)
+            if text.startswith('\\\\?\\'):
+                return PureWindowsPath(text)
+            # Model Win32's ordinary-name normalization before handle lookup.
+            text = '\\'.join(component.rstrip('. ') for component in text.split('\\'))
+            return PureWindowsPath('\\\\?\\UNC\\' + text[2:] if text.startswith('\\\\')
+                                   else '\\\\?\\' + text)
+
+        with self.windows_paths() as WindowsPath:
+            for root in (r'\\?\C:\qualification', r'\\?\UNC\server\share'):
+                for suffix in ('.', ' '):
+                    with self.subTest(root=root, suffix=suffix):
+                        literal = WindowsPath(root + r'\client.exe' + suffix)
+                        twin = WindowsPath(root + r'\client.exe')
+                        self.assertNotEqual(
+                            handle_path(runner.path_without_extended_prefix(literal)),
+                            handle_path(runner.path_without_extended_prefix(twin)))
+
+    def test_extended_path_length_limit_counts_utf16_and_terminator(self):
+        with self.windows_paths():
+            for root in ('C:\\', '\\\\server\\share\\'):
+                prefix = '\\\\?\\' if root[1] == ':' else '\\\\?\\UNC\\'
+                for length in (259, 260, 261):
+                    for character in ('x', '\U0001f332'):
+                        # Keep components below the filesystem's name limit.
+                        ordinary = root + 'a' * 120 + '\\'
+                        remaining = length - len(ordinary)
+                        units = len(character.encode('utf-16-le')) // 2
+                        ordinary += character * (remaining // units) + 'x' * (remaining % units)
+                        extended = prefix + (ordinary if root[1] == ':' else ordinary[2:])
+                        with self.subTest(root=root, length=length, character=character):
+                            self.assertEqual(runner.path_without_extended_prefix(extended),
+                                             ordinary if length < 260 else extended)
+                            if length >= 260:
+                                with self.assertRaisesRegex(OSError, 'safely normalized'):
+                                    runner.resolve_path(extended)
+
+    def test_unsafe_executables_are_refused_before_output_mutation(self):
+        with self.windows_paths() as WindowsPath:
+            for root in (r'\\?\C:\qualification', r'\\?\UNC\server\share'):
+                for component in ('client.exe.', 'client.exe ', 'CON.exe'):
+                    extended = root + '\\' + component
+                    with mock.patch.object(runner.shutil, 'which', return_value=extended):
+                        for program in (extended, 'client.exe'):
+                            with self.subTest(path=extended, program=program), \
+                                    mock.patch.object(runner, '_output_locks') as locks, \
+                                    mock.patch.object(runner, '_run_process') as run:
+                                with self.assertRaisesRegex(OSError, 'safely normalized'):
+                                    runner.run_process(
+                                        [program], cwd=WindowsPath(root), environment={},
+                                        artifact='a.json', retained='r.json',
+                                        receipt_path='receipt.json', log='log.txt')
+                                locks.assert_not_called()
+                                run.assert_not_called()
+
+    def test_unsafe_outputs_and_resolved_parents_refuse_before_mutation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            evidence = Path(directory) / 'evidence.json'
+            evidence.write_bytes(b'old evidence')
+            before = (evidence.read_bytes(), evidence.stat().st_ino)
+            with self.windows_paths() as WindowsPath:
+                for root in (r'\\?\C:\qualification', r'\\?\UNC\server\share'):
+                    for component in ('evidence.', 'evidence ', 'NUL.json', 'x' * 250):
+                        unsafe = WindowsPath(root) / component
+                        for alias in (False, True):
+                            output = (WindowsPath(r'C:\alias\capture.json') if alias
+                                      else unsafe / 'capture.json')
+                            with self.subTest(path=unsafe, alias=alias), \
+                                    mock.patch.object(WindowsPath, 'resolve',
+                                                      return_value=unsafe), \
+                                    mock.patch.object(runner, '_open_sidecar') as opened, \
+                                    mock.patch.object(runner, '_run_process') as run:
+                                with self.assertRaisesRegex(
+                                        OSError, 'safely normalized|dot or space|device name'):
+                                    runner.run_process(
+                                        [r'C:\client.exe'], cwd=WindowsPath('C:\\'),
+                                        environment={}, artifact=output, retained='r.json',
+                                        receipt_path='receipt.json', log='log.txt')
+                                opened.assert_not_called()
+                                run.assert_not_called()
+                                self.assertEqual((evidence.read_bytes(), evidence.stat().st_ino),
+                                                 before)
+
     def test_windows_executable_paths_use_ordinary_drive_and_unc_spelling(self):
         class WindowsPath(PureWindowsPath):
             def is_file(self):
