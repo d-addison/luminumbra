@@ -20,6 +20,7 @@
 #include <limits>
 #include <map>
 #include <memory>
+#include <set>
 #include <span>
 #include <sstream>
 #include <stdexcept>
@@ -46,6 +47,7 @@
 #include "luminumbra_common/systems/AetherFieldSystem.h"
 #include "luminumbra_common/systems/CropLifecycleSystem.h"
 #include "luminumbra_common/systems/FireSpreadSystem.h"
+#include "luminumbra_common/systems/FoliageRegistryStage.h"
 #include "luminumbra_common/systems/PlantDiseaseSystem.h"
 #include "luminumbra_common/systems/PlantGrowthSystem.h"
 #include "luminumbra_common/systems/RegionalFoliage.h"
@@ -4962,6 +4964,33 @@ void S7SetSnapshotStamp(Luminumbra::Ecs::EntityRegistrySnapshot& snap, std::uint
                 c.data["last_tick"] = stamp;
         }
 }
+void ExpectFoliageBorderProbe(bool along_x, std::uint8_t shift, int mode) {
+    const RegionKey owner{-2, -3};
+    const RegionKey other{owner.x + (along_x ? 1 : 0), owner.z + (along_x ? 0 : 1)};
+    const ScentCellKey a{owner.x * 512 + (along_x ? 511 : 8), owner.z * 512 + (along_x ? 8 : 511)};
+    const ScentCellKey b{a.x + (along_x ? 1 : 0), a.z + (along_x ? 0 : 1)};
+    const auto other_state =
+        mode == 1 ? RegionState::Frozen : (shift == 0 ? RegionState::Active : RegionState::Reduced);
+    const auto ledger = FixtureLedger(100,
+                                      {{owner, RegionState::Active}, {other, other_state}},
+                                      std::max<std::uint8_t>(1, shift));
+    auto records = ledger.records();
+    if (mode == 2)
+        records.erase(other);
+    FieldPageState pages;
+    ASSERT_TRUE(pages.set_irrigation(a, mode == 0 ? 0 : 800));
+    if (mode != 3)
+        ASSERT_TRUE(pages.set_irrigation(b, 0));
+    if (mode == 4)
+        records.at(owner).state = RegionState::Frozen;
+    for (std::uint64_t tick = 100; tick < 117; ++tick) {
+        auto exchanged = pages.foliage_snapshot();
+        const auto work = SF::ExchangeFoliageBorders(exchanged, pages, records, tick);
+        EXPECT_EQ(SF::HasRegionalFoliageBorderWork(pages, records, tick), !work.empty())
+            << "axis " << along_x << " shift " << static_cast<unsigned>(shift) << " mode " << mode
+            << " tick " << tick;
+    }
+}
 SF::PlantEnvSample
 S7Environment(GameSession& session, const Luminumbra::Vec3& p, std::uint64_t tick) {
     // Independent public terrain/weather/calendar samples. No session foliage
@@ -5112,6 +5141,7 @@ TEST(GameSessionHeadlessWorldTest,
         const auto mortal_before = live.GetRegistry().get<SC::MortalComponent>(e);
         const auto age = live.GetRegistry().get<SC::MortalComponent>(e).age_ticks;
         const auto infection = live.GetRegistry().get<SC::PlantHealthComponent>(e).infection;
+        const auto stage_count = SF::FoliageRegistryStageCount();
         TickOnce(live);
         ASSERT_FALSE(live.GetRegionSchedulerFault());
         const auto t = live.GetWorldClock().tick();
@@ -5119,11 +5149,13 @@ TEST(GameSessionHeadlessWorldTest,
                                    live.GetRegionSchedule().due.end(),
                                    reduced) != live.GetRegionSchedule().due.end();
         if (!due) {
+            EXPECT_EQ(SF::FoliageRegistryStageCount(), stage_count);
             S7ExpectGrowth(live.GetRegistry().get<SC::PlantGrowthComponent>(e), before);
             EXPECT_EQ(live.GetRegistry().get<SC::MortalComponent>(e).age_ticks, age);
             EXPECT_EQ(S7PlantBytes(live), living_before);
             ++skipped;
         } else {
+            EXPECT_EQ(SF::FoliageRegistryStageCount(), stage_count + 1);
             entt::registry reference;
             const auto r = ClockTestPlant(reference, {5200, 0, -1500});
             reference.get<SC::PlantGrowthComponent>(r) = before;
@@ -5172,6 +5204,114 @@ TEST(GameSessionHeadlessWorldTest,
     EnableSnapshotSession(reopened, root, jobs);
     ASSERT_TRUE(reopened.LoadWorld(base.GetMetadata().worldId));
     EXPECT_EQ(S7PlantBytes(live), S7PlantBytes(reopened));
+}
+
+TEST(GameSessionHeadlessWorldTest, OffDueFoliageSkipsStagingAndMatchesStagedEmptyTick) {
+    using Stage = luminumbra::simulation::SimBudgetStage;
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession base, fast, staged;
+    CreateGroundWorld(base, root, jobs, "Off-due foliage staging");
+    const auto plant = ClockTestPlant(base.GetRegistry(), {5200, 0, -1500});
+    base.GetRegistry().emplace<SC::MortalComponent>(plant).age_ticks = 19;
+    ASSERT_TRUE(base.SaveWorld());
+    // The next tick differs from the Reduced owner's phase, including when it
+    // is a common border phase. These isolated page cells have no border edge.
+    const auto start = 100u + (ActiveRegionLedger::phase(kFarGroundRegion, 2) + 1u) % 4u;
+    auto ledger = FixtureLedger(start, {{kFarGroundRegion, RegionState::Reduced}});
+    S7KeepAllocator(ledger, base.GetActiveRegionLedger().next_persistent_id());
+    auto plants = SF::BuildPlantEntitySnapshot(base.GetRegistry(), true);
+    S7SetSnapshotStamp(plants, start);
+    FieldPageState pages;
+    ASSERT_TRUE(pages.set_soil({5200, -1500}, 17));
+    ASSERT_TRUE(pages.set_irrigation({5200, -1500}, 80));
+    ASSERT_NO_FATAL_FAILURE(S7CommitFixture(base, ledger, pages, plants));
+    for (auto* session : {&fast, &staged}) {
+        EnableSnapshotSession(*session, root, jobs);
+        ASSERT_TRUE(session->LoadWorld(base.GetMetadata().worldId)) << session->GetWorldOpenError();
+        session->SetReplicatedSimulationAnchors({});
+        session->SetSimBudgetTelemetryEnabled(true);
+    }
+    const auto plants_before = S7PlantBytes(fast);
+    const auto allocator_before = fast.GetActiveRegionLedger().next_persistent_id();
+    const auto stage_count = SF::FoliageRegistryStageCount();
+    ASSERT_NO_FATAL_FAILURE(TickOnce(fast));
+    ASSERT_FALSE(fast.GetRegionSchedulerFault());
+    ASSERT_TRUE(fast.GetRegionSchedule().due.empty());
+    EXPECT_EQ(SF::FoliageRegistryStageCount(), stage_count);
+    ASSERT_NO_FATAL_FAILURE(TickOnce(staged));
+    ASSERT_FALSE(staged.GetRegionSchedulerFault());
+    ASSERT_TRUE(staged.GetRegionSchedule().due.empty());
+    EXPECT_EQ(SF::FoliageRegistryStageCount(), stage_count);
+
+    // The old empty-window transaction performed just this registry round trip:
+    // no stage changed an entity, and there was no border work to publish.
+    std::set<entt::entity> retained;
+    const auto registry = SF::StageFoliageRegistry(staged.GetRegistry(), retained);
+    SF::CommitFoliageRegistry(staged.GetRegistry(), registry, retained);
+    EXPECT_EQ(SF::FoliageRegistryStageCount(), stage_count + 1);
+    EXPECT_EQ(S7PlantBytes(fast), plants_before);
+    EXPECT_EQ(S7PlantBytes(fast), S7PlantBytes(staged));
+    EXPECT_EQ(fast.GetActiveRegionLedger().next_persistent_id(), allocator_before);
+    EXPECT_EQ(fast.GetActiveRegionLedger().encode(), staged.GetActiveRegionLedger().encode());
+    EXPECT_EQ(fast.GetFieldPages().serialize(), staged.GetFieldPages().serialize());
+    EXPECT_EQ(fast.GetFieldPages().soil().records(), pages.soil().records());
+    EXPECT_EQ(fast.GetFieldPages().irrigation().records(), pages.irrigation().records());
+    ExpectSameWorldHash(fast, staged);
+    EXPECT_TRUE(fast.GetSimBudgetTelemetry().WorkMatches(staged.GetSimBudgetTelemetry()));
+    for (const auto stage : {Stage::Irrigation,
+                             Stage::Soil,
+                             Stage::Plants,
+                             Stage::Pollination,
+                             Stage::Disease,
+                             Stage::Crops,
+                             Stage::Fire,
+                             Stage::Grazing,
+                             Stage::Lifespan}) {
+        const auto& samples =
+            fast.GetSimBudgetTelemetry().SamplesByStage()[static_cast<std::size_t>(stage)];
+        ASSERT_EQ(samples.size(), 1u);
+        EXPECT_EQ(samples.front().tick, start + 1u);
+        EXPECT_EQ(samples.front().work, 0u);
+    }
+}
+
+TEST(GameSessionHeadlessWorldTest, FoliageBorderWorkProbeMatchesExchangeEligibility) {
+    // Exercise both axes and negative coordinates, sparse masks, mixed
+    // cadences, sealed endpoints, and zero flux (which still reports work).
+    for (const bool along_x : {false, true})
+        for (const auto shift : {0, 1, 2, 4})
+            for (int mode = 0; mode < 6; ++mode)
+                ASSERT_NO_FATAL_FAILURE(
+                    ExpectFoliageBorderProbe(along_x, static_cast<std::uint8_t>(shift), mode));
+}
+
+TEST(GameSessionHeadlessWorldTest, EmptyFoliageWindowsPreserveStampAndResumeWork) {
+    entt::registry registry;
+    const auto plant = registry.create();
+    registry.emplace<SC::PlantTag>(plant);
+    auto& owner = registry.emplace<SC::PlantRegionComponent>(
+        plant,
+        SC::PlantRegionComponent{
+            .persistent_id = 1, .owner_x = 0, .owner_z = 0, .region_stamp = 10});
+    auto& growth = registry.emplace<SC::PlantGrowthComponent>(plant);
+    growth.last_tick = 10;
+    SF::RegionalFoliageWindows windows;
+    EXPECT_FALSE(SF::HasRegionalFoliageWindowWork(registry, windows, 10));
+    windows.elapsed[{0, 0}] = 0;
+    EXPECT_FALSE(SF::HasRegionalFoliageWindowWork(registry, windows, 10));
+    growth.last_tick = 9;
+    EXPECT_TRUE(SF::HasRegionalFoliageWindowWork(registry, windows, 10));
+    growth.last_tick = 10;
+    owner.region_stamp = 9;
+    EXPECT_TRUE(SF::HasRegionalFoliageWindowWork(registry, windows, 10));
+    owner.region_stamp = 10;
+    windows.resumes[{0, 0}] = 10;
+    EXPECT_TRUE(SF::HasRegionalFoliageWindowWork(registry, windows, 10));
+    windows.resumes.clear();
+    windows.elapsed[{0, 0}] = 1;
+    EXPECT_TRUE(SF::HasRegionalFoliageWindowWork(registry, windows, 10));
 }
 
 TEST(GameSessionHeadlessWorldTest,
@@ -5272,7 +5412,9 @@ TEST(GameSessionHeadlessWorldTest,
         EnableSnapshotSession(live, root, jobs);
         ASSERT_TRUE(live.LoadWorld(base.GetMetadata().worldId)) << live.GetWorldOpenError();
         live.SetReplicatedSimulationAnchors({});
+        const auto stage_count = SF::FoliageRegistryStageCount();
         TickOnce(live); // 104 common phase; neither Reduced interior is due
+        EXPECT_EQ(SF::FoliageRegistryStageCount(), stage_count + (mode == 0 ? 1u : 0u));
         EXPECT_TRUE(live.GetRegionSchedule().due.empty());
         EXPECT_EQ(live.GetFieldPages().soil().records(), pages.soil().records());
         if (mode == 0) {
@@ -5705,9 +5847,40 @@ TEST(GameSessionHeadlessWorldTest, S7PageCapEditAndFailedResumeAreAtomicAndRetai
     EXPECT_EQ(live.GetActiveRegionLedger().encode(), ledger_before);
     EXPECT_EQ(live.GetFieldPages().serialize(), pages_before);
     const auto plants_before = S7PlantBytes(live);
+    const auto retained_plant = S7FindPlant(live, 1);
+    ASSERT_NE(retained_plant, static_cast<entt::entity>(entt::null));
+    live.GetRegistry().emplace<std::uint32_t>(retained_plant, 42u);
+    const auto retained_source = live.GetRegistry().create();
+    live.GetRegistry().emplace<SC::TransformComponent>(retained_source).position = {
+        -8000, 0, -8000};
+    live.GetRegistry().emplace<SC::CombustibleComponent>(retained_source).burn_ticks_remaining =
+        1234;
+    const auto transforms_before = live.GetRegistry().view<SC::TransformComponent>().size();
     live.PinActiveRegion(kFarGroundRegion, true);
+    // Independently schedule the pre-foliage ledger. Only the failed birth's
+    // allocator burn may survive the transaction; no consumer work is published.
+    auto expected_ledger = live.GetActiveRegionLedger();
+    expected_ledger.schedule(WorldClock(live.GetWorldClock().tick() + 1),
+                             std::span<const Luminumbra::Vec3>{});
+    std::uint64_t burned_id = 0;
+    ASSERT_TRUE(expected_ledger.allocate_persistent_id(burned_id));
+    EXPECT_EQ(burned_id, 2u);
+    const auto stage_count = SF::FoliageRegistryStageCount();
     TickOnce(live); // resume growth then a child needs page 4097: refuse all staged foliage
-    ASSERT_TRUE(live.GetRegionSchedulerFault());
+    const auto fault = live.GetRegionSchedulerFault();
+    ASSERT_TRUE(fault.has_value());
+    if (!fault.has_value())
+        return;
+    EXPECT_NE(fault->message.find("Crop identity admission refused"), std::string::npos);
+    EXPECT_EQ(SF::FoliageRegistryStageCount(), stage_count + 1);
+    EXPECT_EQ(live.GetActiveRegionLedger().encode(), expected_ledger.encode());
+    EXPECT_EQ(live.GetRegistry().view<SC::TransformComponent>().size(), transforms_before);
+    ASSERT_TRUE(live.GetRegistry().valid(retained_plant));
+    EXPECT_EQ(live.GetRegistry().get<std::uint32_t>(retained_plant), 42u);
+    ASSERT_TRUE(live.GetRegistry().valid(retained_source));
+    EXPECT_EQ(
+        live.GetRegistry().get<SC::CombustibleComponent>(retained_source).burn_ticks_remaining,
+        1234u);
     EXPECT_EQ(S7PlantBytes(live), plants_before);
     EXPECT_EQ(live.GetFieldPages().soil().records(), pages.soil().records());
     EXPECT_EQ(live.GetFieldPages().irrigation().records(), pages.irrigation().records());

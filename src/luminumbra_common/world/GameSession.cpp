@@ -1847,6 +1847,32 @@ void GameSession::RunRegionalEnergyTick(std::uint64_t tick) {
 
 void GameSession::RunRegionalFoliageTick(
     luminumbra::simulation::SimBudgetTelemetry::TickScope& budget, std::uint64_t tick) {
+    namespace fol = luminumbra::foliage;
+    using Stage = luminumbra::simulation::SimBudgetStage;
+    // Every foliage stage has a sample even on an off-due or empty-window tick.
+    // Record coalesces the measured substeps back into these host-tick samples.
+    for (const auto stage : {Stage::Irrigation,
+                             Stage::Soil,
+                             Stage::Plants,
+                             Stage::Pollination,
+                             Stage::Disease,
+                             Stage::Crops,
+                             Stage::Fire,
+                             Stage::Grazing,
+                             Stage::Lifespan})
+        budget.Next(stage, [] { return 0u; });
+    budget.Next(Stage::Plants, [] { return 0u; });
+    const auto windows = fol::BuildRegionalFoliageWindows(
+        m_activeRegionLedger, SortedDueRegions(), m_foliagePreviousTicks, m_worldClock, tick);
+    // A zero-length resume still publishes stamps and acknowledges its token.
+    // Border work can be due independently of the interior windows.
+    if (!fol::HasRegionalFoliageWindowWork(m_registry, windows, tick) &&
+        !fol::HasRegionalFoliageBorderWork(m_fieldPages, m_activeRegionLedger.records(), tick)) {
+        budget.Next(Stage::Plants, [] { return 0u; });
+        budget.Next(Stage::Irrigation, [] { return 0u; });
+        budget.Next(Stage::Plants, [] { return 0u; });
+        return;
+    }
     auto ledger = m_activeRegionLedger;
     auto pages = m_fieldPages.foliage_snapshot();
     auto work = m_regionCompletedWork;
@@ -1855,7 +1881,7 @@ void GameSession::RunRegionalFoliageTick(
     auto original = std::move(m_registry);
     m_registry = std::move(staged);
     try {
-        RunRegionalFoliageTickImpl(budget, tick, pages);
+        RunRegionalFoliageTickImpl(budget, tick, pages, windows.elapsed, windows.resumes);
         luminumbra::foliage::CommitFoliageRegistry(original, m_registry, retained);
         m_registry = std::move(original);
     } catch (...) {
@@ -1882,46 +1908,12 @@ void GameSession::RunRegionalFoliageTick(
 void GameSession::RunRegionalFoliageTickImpl(
     luminumbra::simulation::SimBudgetTelemetry::TickScope& budget,
     std::uint64_t tick,
-    const FieldPageState& previous) {
+    const FieldPageState& previous,
+    const std::map<RegionKey, std::uint32_t>& windows,
+    const std::map<RegionKey, std::uint64_t>& resumes) {
     namespace fol = luminumbra::foliage;
     namespace C = Components;
     using Stage = luminumbra::simulation::SimBudgetStage;
-    // Every foliage stage has a sample even on an off-due or empty-window tick.
-    // Record coalesces the measured substeps back into these host-tick samples.
-    for (const auto stage : {Stage::Irrigation,
-                             Stage::Soil,
-                             Stage::Plants,
-                             Stage::Pollination,
-                             Stage::Disease,
-                             Stage::Crops,
-                             Stage::Fire,
-                             Stage::Grazing,
-                             Stage::Lifespan})
-        budget.Next(stage, [] { return 0u; });
-    budget.Next(Stage::Plants, [] { return 0u; });
-    const auto& due = SortedDueRegions();
-    std::map<RegionKey, std::uint32_t> windows;
-    std::map<RegionKey, std::uint64_t> resumes;
-    for (const auto& [key, record] : m_activeRegionLedger.records()) {
-        if (record.state == RegionState::Frozen)
-            continue;
-        if (record.frozen_at) {
-            const auto window =
-                ActiveRegionLedger::resume_window(key, record.frozen_at, m_worldClock, 36000);
-            windows[key] = static_cast<std::uint32_t>(window.elapsed_ticks);
-            resumes[key] = record.frozen_at;
-        } else if (std::binary_search(due.begin(), due.end(), key)) {
-            const auto old = m_foliagePreviousTicks.find(key);
-            // Zero is a valid persisted tick, not an uninitialized sentinel.
-            // A freshly admitted owner starts at first_active rather than replaying
-            // the entire world lifetime before its page or plant existed.
-            const auto prior = old == m_foliagePreviousTicks.end()
-                                   ? record.first_active
-                                   : std::max(old->second, record.first_active);
-            const auto elapsed = tick - prior;
-            windows[key] = static_cast<std::uint32_t>(std::min<std::uint64_t>(elapsed, 65536));
-        }
-    }
     std::map<RegionKey, std::uint64_t> page_work;
     std::set<RegionKey> completed_regions;
     struct GrowthWindow {

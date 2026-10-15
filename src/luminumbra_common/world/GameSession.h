@@ -618,7 +618,9 @@ private:
                                 std::uint64_t tick);
     void RunRegionalFoliageTickImpl(luminumbra::simulation::SimBudgetTelemetry::TickScope& budget,
                                     std::uint64_t tick,
-                                    const FieldPageState& previous);
+                                    const FieldPageState& previous,
+                                    const std::map<RegionKey, std::uint32_t>& windows,
+                                    const std::map<RegionKey, std::uint64_t>& resumes);
     void RunFoliageTick(luminumbra::simulation::SimBudgetTelemetry::TickScope& budget,
                         std::uint64_t tick);
     [[nodiscard]] luminumbra::foliage::PlantEnvSample
