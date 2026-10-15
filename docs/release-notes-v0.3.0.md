@@ -99,11 +99,21 @@ v0.4.0 as [issue #320](https://github.com/d-addison/luminumbra/issues/320).
 
 ## Pending release evidence
 
-The v0.3.0 publication gate requires all required CI checks green on the release
-commit, a signed source tag, independent release-download verification and the
-owner Windows smoke: launch the client, create a world, edit, save, quit, reload
-and confirm the edit persists; run the server smoke. No current-candidate native
-pass is claimed. Expanded acceptance deferred to v0.3.1 is not a pass.
+The v0.3.0 publication gate is the full list in the
+[acceptance record](v0.3-acceptance.md):
+
+- all required CI checks green on the release commit, with strict CI promotion;
+- final revision checks and applicable native/manual coverage;
+- the 120-second UCRT64 guard;
+- server-load qualification;
+- the paired performance gates in [performance](performance.md);
+- independent release verification;
+- signed source-only publication and independent release-download verification;
+- the owner Windows smoke: launch the client, create a world, edit, save, quit,
+  reload and confirm the edit persists, then run the server smoke.
+
+No current-candidate native pass is claimed. Expanded acceptance deferred to v0.3.1
+is not a pass.
 
 See the [acceptance record](v0.3-acceptance.md),
 [implementation limits](distant-world-implementation-status.md) and

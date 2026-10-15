@@ -53,10 +53,13 @@ share tag numbers. There are no assigned due dates or invented completion percen
   local-disk logs for native runs; current-candidate packaged hang and teardown
   qualification remain pending.
 - **Publication:** v0.3.0 is not yet published. The v0.3.0 tag gate requires all
-  required CI checks green on the release commit, a signed source tag, independent
-  release-download verification, and an owner native smoke on Windows: launch the
-  client, create a world, edit, save, quit, reload and confirm the edit persists; run
-  the server smoke. These checks remain required and are not reported as passed here.
+  required CI checks green on the release commit with strict promotion, server-load
+  qualification, the paired performance gates, independent release verification,
+  signed source-only publication with independent release-download verification, and
+  an owner native smoke on Windows: launch the client, create a world, edit, save,
+  quit, reload and confirm the edit persists; run the server smoke. These checks remain
+  required and are not reported as passed here; see the
+  [acceptance record](v0.3-acceptance.md) for the full gate.
   Draft CI and batched devel CI policies are implemented; required checks follow
   the final applicable policy rather than a fixed context count. Release notes
   belong in the GitHub release body.
