@@ -29,6 +29,7 @@
 #include <set>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -53,6 +54,13 @@ class IrrigationGrid; // soil-moisture field (systems/IrrigationSystem.h)
 
 namespace Luminumbra {
 class JobSystem;
+
+namespace Persistence {
+struct EditedSourceSelection;
+struct EditedSourceLimits;
+struct EditedSourceCapture;
+enum class EditedSourceError : std::uint8_t;
+} // namespace Persistence
 
 namespace Systems {
 class SHIELD_WorldSystem;
@@ -129,6 +137,15 @@ public:
 
     // Save the current world state
     bool SaveWorld();
+    // Owner-thread capture at a quiescent publication boundary. Committed truth comes only from
+    // disk; optional live/parked layers remain separate volatile observations. Refusal preserves
+    // out.
+    Persistence::EditedSourceError
+    CaptureFarEditedSources(std::uint64_t expected_generation,
+                            const Persistence::EditedSourceSelection& selection,
+                            const Persistence::EditedSourceLimits& limits,
+                            bool include_preview,
+                            Persistence::EditedSourceCapture& out);
     // Flag on: runs `body` (which may call SaveWorldState/SaveWorld and indexed-member writers)
     // inside ONE snapshot transaction published with a single index. Otherwise just runs `body`.
     // Owner thread only; returns the body's verdict, and false when the commit fails.
@@ -749,6 +766,8 @@ private:
     void AdvanceNearScent();
     bool HasPlantParticipants() const; //  opt-in gate
     std::string m_rootPath;
+    const std::thread::id m_editedSourceOwner = std::this_thread::get_id();
+    bool m_editedSourceCaptureActive = false;
 };
 
 } // namespace Luminumbra::world

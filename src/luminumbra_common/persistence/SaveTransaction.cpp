@@ -5,6 +5,7 @@
 
 #include "nlohmann/json.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <cstdio>
@@ -674,6 +675,28 @@ bool journal_pending(const fs::path& save_dir) {
     return !ec && exists;
 }
 
+bool admit_recovery_payloads(const fs::path& save_dir,
+                             const std::function<bool(const fs::path&)>& admit_file,
+                             const std::function<bool(std::size_t)>& admit_entries) {
+    const auto txn_path = journal_directory(save_dir) / "txn.json";
+    if (!admit_file(txn_path) || !admit_file(snapshot_index_path(save_dir)))
+        return false;
+    if (!fs::exists(txn_path))
+        return true;
+    std::string bytes;
+    JournalDocument document;
+    std::string error;
+    if (!ReadAllBytes(txn_path, bytes, nullptr) || !ParseJournal(bytes, document, error) ||
+        !admit_entries(document.entries.size()))
+        return false;
+    for (const auto& entry : document.entries) {
+        if (entry.action == "replace" && (!admit_file(save_dir / entry.path) ||
+                                          !admit_file(journal_directory(save_dir) / entry.undo)))
+            return false;
+    }
+    return true;
+}
+
 RecoveryOutcome recover_pending_journal(const fs::path& save_dir,
                                         std::vector<std::string>* errors) {
     try {
@@ -1103,6 +1126,7 @@ bool SaveTransaction::commit(std::vector<std::string>* errors) {
             return false;
         }
         m_state = State::Committed;
+        publish_edited_sources(next);
         auto actions = std::move(m_committed_actions);
         for (auto& action : actions) {
             try {
@@ -1150,6 +1174,57 @@ void SaveTransaction::abort(std::vector<std::string>* errors) {
     }
     m_state = State::RolledBack;
     m_committed_actions.clear();
+    for (auto& weak : m_edited_sources)
+        weak.reset();
+}
+
+bool SaveTransaction::capture_open_on_owner_thread() const {
+    return m_owner_thread == std::this_thread::get_id() && m_state == State::Open &&
+           active_for(m_save_dir) == this;
+}
+
+bool SaveTransaction::capture_member_protected(std::string_view path) const {
+    for (const auto& entry : m_entries) {
+        if (entry.path == path)
+            return true;
+    }
+    return false;
+}
+
+void SaveTransaction::publish_edited_sources(const SnapshotIndex& next) {
+    for (const auto& weak : m_edited_sources) {
+        const auto token = weak.lock();
+        if (!token)
+            continue;
+        bool matches = true;
+        // Capture records authoritative dependencies, including absent membership. Comparing both
+        // directions detects additions and removals after capture as well as changed bytes.
+        for (const auto& member : next.members) {
+            if (member.cls != MemberClass::Authoritative)
+                continue;
+            const auto found =
+                std::find_if(token->m_dependencies.begin(),
+                             token->m_dependencies.end(),
+                             [&member](const auto& value) { return value.path == member.path; });
+            if (found == token->m_dependencies.end()) {
+                matches = matches && !member.present;
+                continue;
+            }
+            matches = matches && found->present == member.present && found->bytes == member.bytes &&
+                      found->fnv64 == member.fnv64 && found->generation == member.generation;
+        }
+        for (const auto& dependency : token->m_dependencies) {
+            const auto found = std::find_if(
+                next.members.begin(), next.members.end(), [&dependency](const auto& member) {
+                    return member.path == dependency.path;
+                });
+            if (found == next.members.end())
+                matches = matches && !dependency.present;
+        }
+        token->m_committed.store(matches, std::memory_order_release);
+    }
+    for (auto& weak : m_edited_sources)
+        weak.reset();
 }
 
 } // namespace Luminumbra::Persistence

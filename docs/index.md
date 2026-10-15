@@ -19,6 +19,8 @@ See [world format compatibility](engine-guide.md).
 
 ## Start here
 
+- [Immutable edited source images](edited-source-images.md) describes bounded
+  committed and prepared terrain/water capture and publication eligibility.
 - [Engine/framework guide](engine-guide.md) explains the runtime lifecycle,
   fixed-tick simulation, world streaming, rendering, server host, and supported
   extension paths.

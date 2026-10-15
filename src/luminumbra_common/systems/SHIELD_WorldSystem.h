@@ -940,6 +940,11 @@ public:
     // Resident chunks plus parked chunks (parked ones sorted by id). No duplicates.
     std::vector<std::shared_ptr<::Luminumbra::Chunk>> snapshot_authoritative_chunks() const;
     std::vector<std::shared_ptr<::Luminumbra::Chunk>> snapshot_parked_chunks() const;
+    // Quiescent owner-thread publication boundary; borrowed values end at visitor return.
+    // The caller admits ordering scratch before entry. Live identities precede parked ones.
+    bool visit_edited_source_preview(
+        std::size_t max_records,
+        const std::function<bool(const Chunk&, bool parked)>& visitor) const;
     // Moves every water-dirty chunk (resident and parked) to LoadedOrEdited authority and re-arms
     // its save-dirty bit. Only call with sim.active_regions on.
     void sync_water_authority();

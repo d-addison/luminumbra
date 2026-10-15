@@ -108,7 +108,8 @@ public:
         return m_regional_work;
     }
     // Strict enabled durable decode and live preflight share the same grid checks.
-    static void ValidateRegionalGrid(const Chunk& chunk);
+    // Capture alone opts into complete legacy float grids without integer authority.
+    static void ValidateRegionalGrid(const Chunk& chunk, bool allow_legacy_float = false);
     // Refusal throws before publication, preserving chunks, ledger, work and telemetry.
     void UpdateRegional(entt::registry& registry,
                         std::span<const std::shared_ptr<Chunk>> resident,

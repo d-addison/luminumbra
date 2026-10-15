@@ -7,6 +7,7 @@
 #include "PlantPersistence.h"
 #include "SaveTransaction.h"
 #include "WorldPersistenceRoundtrip.h"
+#include "systems/WaterSystem.h"
 #include "world/FarLodStore.h"
 
 #include "nlohmann/json.hpp"
@@ -615,7 +616,8 @@ bool DecompressPayload(const RegionRecord& record,
 bool ReadRegionFile(const std::filesystem::path& path,
                     std::vector<RegionRecord>& out_records,
                     std::vector<std::string>* errors,
-                    const std::stop_token& stop = {}) {
+                    const std::stop_token& stop = {},
+                    const WorldSaveService::EditedRegionReadLimits* capture_limits = nullptr) {
     out_records.clear();
 
     std::ifstream input(path, std::ios::binary);
@@ -631,6 +633,13 @@ bool ReadRegionFile(const std::filesystem::path& path,
             return false;
         }
         input.read(read_buffer, sizeof(read_buffer));
+        if (capture_limits &&
+            (static_cast<std::uint64_t>(buffer.tellp()) > capture_limits->file_bytes ||
+             static_cast<std::uint64_t>(input.gcount()) >
+                 capture_limits->file_bytes - static_cast<std::uint64_t>(buffer.tellp()))) {
+            AddError(errors, "edited source region byte limit");
+            return false;
+        }
         buffer.write(read_buffer, input.gcount());
     }
     if (input.bad()) {
@@ -654,6 +663,10 @@ bool ReadRegionFile(const std::filesystem::path& path,
         return false;
     }
     const std::uint16_t record_count = ReadU16(data + 6);
+    if (capture_limits && record_count > capture_limits->records) {
+        AddError(errors, "edited source record limit");
+        return false;
+    }
 
     const std::size_t manifest_bytes = static_cast<std::size_t>(record_count) * kRecordHeaderSize;
     if (bytes.size() < kRegionFileHeaderSize + manifest_bytes) {
@@ -1369,7 +1382,8 @@ bool WorldSaveService::save_plant_entities(const Luminumbra::Ecs::EntityRegistry
 
 bool WorldSaveService::load_plant_entities(Luminumbra::Ecs::EntityRegistrySnapshot& out,
                                            const std::filesystem::path& save_dir,
-                                           std::vector<std::string>* errors) {
+                                           std::vector<std::string>* errors,
+                                           bool admitted_capture) {
     out = Luminumbra::Ecs::EntityRegistrySnapshot{};
     const std::filesystem::path path = plant_entities_path(save_dir);
     std::error_code ec;
@@ -1378,7 +1392,8 @@ bool WorldSaveService::load_plant_entities(Luminumbra::Ecs::EntityRegistrySnapsh
         AddError(errors, "failed to inspect plant authority: " + ec.message());
         return false;
     }
-    if (!SaveTransaction::active_for(save_dir) && snapshot_index_exists(save_dir)) {
+    if (!admitted_capture && !SaveTransaction::active_for(save_dir) &&
+        snapshot_index_exists(save_dir)) {
         SnapshotIndex index;
         if (!read_snapshot_index(save_dir, index, errors))
             return false;
@@ -1414,9 +1429,9 @@ bool WorldSaveService::load_plant_entities(Luminumbra::Ecs::EntityRegistrySnapsh
             AddError(errors, e);
         return false;
     }
-    if (out.persistent_identity &&
-        ((!SaveTransaction::active_for(save_dir) && !snapshot_index_exists(save_dir)) ||
-         Ecs::SerializeEntityRegistrySnapshotJson(out) != ss.str())) {
+    if (out.persistent_identity && ((!admitted_capture && !SaveTransaction::active_for(save_dir) &&
+                                     !snapshot_index_exists(save_dir)) ||
+                                    Ecs::SerializeEntityRegistrySnapshotJson(out) != ss.str())) {
         AddError(errors, "corrupt or unindexed persistent plant snapshot");
         return false;
     }
@@ -1456,7 +1471,8 @@ bool WorldSaveService::save_creature_entities(const luminumbra::ai::CreatureSnap
 
 bool WorldSaveService::load_creature_entities(luminumbra::ai::CreatureSnapshot& out,
                                               const std::filesystem::path& save_dir,
-                                              std::vector<std::string>* errors) {
+                                              std::vector<std::string>* errors,
+                                              bool admitted_capture) {
     const auto path = creature_entities_path(save_dir);
     std::error_code ec;
     const bool present = std::filesystem::exists(path, ec);
@@ -1464,7 +1480,7 @@ bool WorldSaveService::load_creature_entities(luminumbra::ai::CreatureSnapshot& 
         AddError(errors, "failed to inspect creature authority: " + ec.message());
         return false;
     }
-    if (!SaveTransaction::active_for(save_dir)) {
+    if (!admitted_capture && !SaveTransaction::active_for(save_dir)) {
         if (snapshot_index_exists(save_dir)) {
             SnapshotIndex index;
             if (!read_snapshot_index(save_dir, index, errors))
@@ -1564,7 +1580,8 @@ bool WorldSaveService::save_ground_objects(const world::GroundObjectStore& store
 bool WorldSaveService::load_ground_objects(world::GroundObjectStore& out,
                                            const std::filesystem::path& save_dir,
                                            std::uint64_t next_id,
-                                           std::vector<std::string>* errors) {
+                                           std::vector<std::string>* errors,
+                                           bool admitted_capture) {
     const std::filesystem::path path = ground_objects_path(save_dir);
     std::error_code ec;
     const bool present = std::filesystem::exists(path, ec);
@@ -1572,7 +1589,7 @@ bool WorldSaveService::load_ground_objects(world::GroundObjectStore& out,
         AddError(errors, "failed to inspect ground objects file: " + ec.message());
         return false;
     }
-    if (!SaveTransaction::active_for(save_dir)) {
+    if (!admitted_capture && !SaveTransaction::active_for(save_dir)) {
         if (snapshot_index_exists(save_dir)) {
             SnapshotIndex index;
             if (!read_snapshot_index(save_dir, index, errors))
@@ -1659,7 +1676,8 @@ bool GroundObjectsMatchLedger(const world::GroundObjectStore& store,
 
 bool WorldSaveService::validate_ground_objects(const std::filesystem::path& save_dir,
                                                const world::ActiveRegionLedger& ledger,
-                                               std::vector<std::string>* errors) {
+                                               std::vector<std::string>* errors,
+                                               bool admitted_capture) {
     std::error_code ec;
     const bool has_objects = std::filesystem::exists(ground_objects_path(save_dir), ec);
     if (ec) {
@@ -1679,7 +1697,8 @@ bool WorldSaveService::validate_ground_objects(const std::filesystem::path& save
         return false;
     }
     world::GroundObjectStore store;
-    if (!load_ground_objects(store, save_dir, ledger.next_persistent_id(), errors))
+    if (!load_ground_objects(
+            store, save_dir, ledger.next_persistent_id(), errors, admitted_capture))
         return false;
     world::WorldClock clock;
     bool required = false;
@@ -2299,6 +2318,104 @@ bool WorldSaveService::read_authoritative_region_chunks(
     return true;
 }
 
+bool WorldSaveService::read_edited_source_region(
+    const std::filesystem::path& region_file,
+    const EditedRegionReadLimits& limits,
+    bool strict_water,
+    const std::function<bool(const Chunk&, std::uint64_t)>& visitor,
+    MemberDigest& digest,
+    std::uint64_t& decoded_bytes,
+    std::size_t& records_read,
+    std::vector<std::string>* errors) {
+    std::error_code ec;
+    const auto size = std::filesystem::file_size(region_file, ec);
+    // Four copies cover stream growth, extracted bytes and compressed record storage.
+    // Per-record control storage includes manifest, key validation and sort scratch.
+    if (ec || size > limits.file_bytes || size > limits.scratch_bytes / 4 ||
+        limits.records > (limits.scratch_bytes - size * 4) / 512) {
+        AddError(errors, "edited source region unreadable or over byte limit");
+        return false;
+    }
+    std::vector<RegionRecord> records;
+    auto read_limits = limits;
+    read_limits.file_bytes = size;
+    if (!ReadRegionFile(region_file, records, errors, {}, &read_limits))
+        return false;
+    std::uint64_t raw_bytes = 0;
+    std::uint64_t largest_record = 0;
+    std::uint64_t source_samples = 0;
+    constexpr std::uint64_t lattice_samples =
+        static_cast<std::uint64_t>(CHUNK_SIZE_X + 1) * (CHUNK_SIZE_Y + 1) * (CHUNK_SIZE_Z + 1);
+    for (const auto& record : records) {
+        if (record.lod_level != 0)
+            continue;
+        if ((record.flags & kRecordFlagEdited) != 0) {
+            if (lattice_samples > limits.authoritative_samples - source_samples) {
+                AddError(errors, "edited source sample work limit");
+                return false;
+            }
+            source_samples += lattice_samples;
+        }
+        if (record.uncompressed_size > limits.decode_bytes - raw_bytes) {
+            AddError(errors, "edited source decode limit");
+            return false;
+        }
+        raw_bytes += record.uncompressed_size;
+        largest_record =
+            std::max(largest_record, static_cast<std::uint64_t>(record.uncompressed_size));
+    }
+    // JSON nodes and the decoded vectors coexist with input; admit a conservative envelope.
+    const auto control_bytes = static_cast<std::uint64_t>(limits.records) * 512;
+    if (largest_record > (limits.scratch_bytes - size * 4 - control_bytes) / 128) {
+        AddError(errors, "edited source decode scratch limit");
+        return false;
+    }
+    int rx = 0;
+    int rz = 0;
+    if (!ParseRegionFileName(region_file, rx, rz)) {
+        AddError(errors, "edited source region identity invalid");
+        return false;
+    }
+    std::sort(records.begin(), records.end(), [](const auto& a, const auto& b) {
+        return std::pair(a.lod_level, a.id) < std::pair(b.lod_level, b.id);
+    });
+    for (const auto& record : records) {
+        if (record.lod_level != 0)
+            continue;
+        const auto chunk = DecodeChunkRecord(record, region_file, errors, strict_water);
+        if (!chunk)
+            return false;
+        if (!strict_water)
+            Systems::WaterSystem::ValidateRegionalGrid(*chunk, true);
+        int chunk_rx = 0;
+        int chunk_rz = 0;
+        region_coords_for_chunk(chunk->get_coords(), chunk_rx, chunk_rz);
+        if (chunk_rx != rx || chunk_rz != rz) {
+            AddError(errors, "edited source chunk region mismatch");
+            return false;
+        }
+        std::string header;
+        AppendU64(header, record.id);
+        header.push_back(static_cast<char>(record.flags));
+        AppendU32(header, record.uncompressed_size);
+        AppendU32(header, static_cast<std::uint32_t>(record.compressed_payload.size()));
+        auto record_digest = fnv1a64_bytes(header.data(), header.size());
+        for (const auto byte : record.compressed_payload) {
+            record_digest ^= static_cast<unsigned char>(byte);
+            record_digest *= 1099511628211ull;
+        }
+        if ((record.flags & kRecordFlagEdited) != 0 &&
+            (!visitor || !visitor(*chunk, record_digest))) {
+            AddError(errors, "edited source chunk refused");
+            return false;
+        }
+    }
+    digest = Lod0Fingerprint(records);
+    decoded_bytes = raw_bytes;
+    records_read = records.size();
+    return true;
+}
+
 bool WorldSaveService::upsert_container_records(const std::filesystem::path& region_file,
                                                 const std::vector<ContainerRecord>& records,
                                                 std::vector<std::string>* errors) {
@@ -2470,6 +2587,21 @@ bool WorldSaveService::member_digest(const std::filesystem::path& save_dir,
                                      std::string_view relative_path,
                                      MemberDigest& out,
                                      std::string& error) {
+    return member_digest_impl(save_dir, relative_path, out, error, false);
+}
+
+bool WorldSaveService::edited_source_member_digest(const std::filesystem::path& save_dir,
+                                                   std::string_view relative_path,
+                                                   MemberDigest& out,
+                                                   std::string& error) {
+    return member_digest_impl(save_dir, relative_path, out, error, true);
+}
+
+bool WorldSaveService::member_digest_impl(const std::filesystem::path& save_dir,
+                                          std::string_view relative_path,
+                                          MemberDigest& out,
+                                          std::string& error,
+                                          bool admitted_capture) {
     out = MemberDigest{};
     try {
         if (!member_path_allowed(relative_path)) {
@@ -2569,20 +2701,21 @@ bool WorldSaveService::member_digest(const std::filesystem::path& save_dir,
             }
         } else if (relative == "chunks/region/plant-entities.json") {
             Ecs::EntityRegistrySnapshot plants;
-            if (!load_plant_entities(plants, save_dir, &diagnostics)) {
+            if (!load_plant_entities(plants, save_dir, &diagnostics, admitted_capture)) {
                 error = first_error("corrupt plant entities");
                 return false;
             }
         } else if (relative == "chunks/region/creature-entities.json") {
             luminumbra::ai::CreatureSnapshot creatures;
-            if (!load_creature_entities(creatures, save_dir, &diagnostics)) {
+            if (!load_creature_entities(creatures, save_dir, &diagnostics, admitted_capture)) {
                 error = first_error("corrupt creature entities");
                 return false;
             }
         } else if (relative == "chunks/region/ground-objects.json") {
             world::GroundObjectStore objects;
             const std::uint64_t no_id_limit = std::numeric_limits<std::uint64_t>::max();
-            if (!load_ground_objects(objects, save_dir, no_id_limit, &diagnostics)) {
+            if (!load_ground_objects(
+                    objects, save_dir, no_id_limit, &diagnostics, admitted_capture)) {
                 error = first_error("corrupt ground objects");
                 return false;
             }
@@ -2889,6 +3022,87 @@ WorldSaveService::chunk_save_acknowledgement(const std::vector<std::shared_ptr<C
     };
 }
 
+bool WorldSaveService::validate_authoritative_relationships(const std::filesystem::path& save_dir,
+                                                            std::vector<std::string>& errors,
+                                                            const std::stop_token& stop,
+                                                            bool admitted_capture) {
+    world::ActiveRegionLedger ledger;
+    if (!load_active_regions(ledger, save_dir, &errors))
+        return false;
+    if (std::filesystem::exists(active_regions_path(save_dir))) {
+        world::WorldClock clock;
+        bool required = false;
+        if (!read_clock_metadata(save_dir, clock, required, &errors))
+            return false;
+        if (ledger.header_tick() > clock.tick()) {
+            AddError(&errors, world::ActiveRegionLedger::kCorruptMessage);
+            return false;
+        }
+        for (const auto& [owner, age] : ledger.energy_ages()) {
+            (void)owner;
+            if (age > clock.tick()) {
+                errors.push_back("corrupt regional energy field age");
+                return false;
+            }
+        }
+    }
+    if (!validate_ground_objects(save_dir, ledger, &errors, admitted_capture))
+        return false;
+    if (!validate_field_pages(save_dir, ledger, &errors))
+        return false;
+    Ecs::EntityRegistrySnapshot plants;
+    if (stop.stop_requested()) {
+        errors.push_back("Saved-world validation cancelled.");
+        return false;
+    }
+    if (!load_plant_entities(plants, save_dir, &errors, admitted_capture))
+        return false;
+    luminumbra::ai::CreatureSnapshot creatures;
+    if (!load_creature_entities(creatures, save_dir, &errors, admitted_capture))
+        return false;
+    if (snapshot_index_exists(save_dir) || plants.persistent_identity ||
+        !creatures.entities.empty()) {
+        world::GroundObjectStore ground;
+        if (!load_ground_objects(
+                ground, save_dir, ledger.next_persistent_id(), &errors, admitted_capture))
+            return false;
+        std::set<std::uint64_t> creature_ids;
+        for (const auto& record : creatures.entities)
+            creature_ids.insert(record.id);
+        std::string plant_error;
+        if (!luminumbra::foliage::ValidatePlantEntitySnapshot(
+                plants, ledger, ground, plant_error, creature_ids)) {
+            errors.push_back(plant_error);
+            return false;
+        }
+        std::string creature_error;
+        if (!luminumbra::ai::ValidateCreatureSnapshot(
+                creatures, ledger, ground, plants, creature_error)) {
+            errors.push_back(creature_error);
+            return false;
+        }
+        entt::registry decoded;
+        luminumbra::foliage::ApplyPlantEntitySnapshot(decoded, plants);
+        world::FieldPageState foliage_pages;
+        if (!load_field_pages(foliage_pages, save_dir, &errors))
+            return false;
+        const auto soil_cells = luminumbra::foliage::FoliageCells(foliage_pages.soil());
+        const auto irrigation_cells = luminumbra::foliage::FoliageCells(foliage_pages.irrigation());
+        for (auto e : decoded.view<Components::PlantTag, Components::TransformComponent>()) {
+            const auto cell = luminumbra::foliage::FoliageCell(
+                decoded.get<Components::TransformComponent>(e).position);
+            if ((decoded.all_of<Components::SoilFeederComponent>(e) &&
+                 !soil_cells.contains(cell)) ||
+                (decoded.all_of<Components::WaterSourceComponent>(e) &&
+                 !irrigation_cells.contains(cell))) {
+                errors.push_back("Corrupt plant authority: missing owned foliage cell");
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
 bool WorldSaveService::load_world(WorldStreamingState& state,
                                   const std::filesystem::path& save_dir,
                                   std::vector<std::string>& errors,
@@ -3042,67 +3256,8 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
                 }
             }
         }
-        world::ActiveRegionLedger ledger;
-        if (!load_active_regions(ledger, save_dir, &errors))
+        if (!validate_authoritative_relationships(save_dir, errors, stop))
             return reject("");
-        if (std::filesystem::exists(active_regions_path(save_dir))) {
-            world::WorldClock clock;
-            bool required = false;
-            if (!read_clock_metadata(save_dir, clock, required, &errors))
-                return reject("");
-            if (ledger.header_tick() > clock.tick())
-                return reject(world::ActiveRegionLedger::kCorruptMessage);
-            for (const auto& [owner, age] : ledger.energy_ages()) {
-                (void)owner;
-                if (age > clock.tick())
-                    return reject("corrupt regional energy field age");
-            }
-        }
-        if (!validate_ground_objects(save_dir, ledger, &errors))
-            return reject("");
-        if (!validate_field_pages(save_dir, ledger, &errors))
-            return reject("");
-        Ecs::EntityRegistrySnapshot plants;
-        if (stop.stop_requested())
-            return reject("Saved-world validation cancelled.");
-        if (!load_plant_entities(plants, save_dir, &errors))
-            return reject("");
-        luminumbra::ai::CreatureSnapshot creatures;
-        if (!load_creature_entities(creatures, save_dir, &errors))
-            return reject("");
-        if (indexed || plants.persistent_identity || !creatures.entities.empty()) {
-            world::GroundObjectStore ground;
-            if (!load_ground_objects(ground, save_dir, ledger.next_persistent_id(), &errors))
-                return reject("");
-            std::set<std::uint64_t> creature_ids;
-            for (const auto& record : creatures.entities)
-                creature_ids.insert(record.id);
-            std::string plant_error;
-            if (!luminumbra::foliage::ValidatePlantEntitySnapshot(
-                    plants, ledger, ground, plant_error, creature_ids))
-                return reject(plant_error);
-            std::string creature_error;
-            if (!luminumbra::ai::ValidateCreatureSnapshot(
-                    creatures, ledger, ground, plants, creature_error))
-                return reject(creature_error);
-            entt::registry decoded;
-            luminumbra::foliage::ApplyPlantEntitySnapshot(decoded, plants);
-            world::FieldPageState foliage_pages;
-            if (!load_field_pages(foliage_pages, save_dir, &errors))
-                return reject("");
-            const auto soil_cells = luminumbra::foliage::FoliageCells(foliage_pages.soil());
-            const auto irrigation_cells =
-                luminumbra::foliage::FoliageCells(foliage_pages.irrigation());
-            for (auto e : decoded.view<Components::PlantTag, Components::TransformComponent>()) {
-                const auto cell = luminumbra::foliage::FoliageCell(
-                    decoded.get<Components::TransformComponent>(e).position);
-                if ((decoded.all_of<Components::SoilFeederComponent>(e) &&
-                     !soil_cells.contains(cell)) ||
-                    (decoded.all_of<Components::WaterSourceComponent>(e) &&
-                     !irrigation_cells.contains(cell)))
-                    return reject("Corrupt plant authority: missing owned foliage cell");
-            }
-        }
         if (indexed) {
             const std::string mismatch =
                 VerifySnapshotIndex(save_dir, snapshot_index, region_digests);
