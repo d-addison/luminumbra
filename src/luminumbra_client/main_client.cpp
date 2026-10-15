@@ -2319,7 +2319,50 @@ int main(int argc, char* argv[]) {
         return {};
     };
 
+    bool benchmark_world_checked = false;
+    nlohmann::json benchmark_world_identity;
+    const Luminumbra::world::GameSession::WorldOpenCheck check_benchmark_world =
+        [&](const Luminumbra::Persistence::SavedWorld& saved,
+            const Luminumbra::Systems::TerrainGenParams& params,
+            std::uint32_t seed) -> std::string {
+        if (!benchmark_v3)
+            return {};
+        try {
+            if (!saved.error.empty())
+                return saved.error;
+            const auto preset = nlohmann::json::parse(saved.preset_source_json);
+            benchmark_world_identity = {
+                {"seed", seed},
+                {"preset", saved.metadata.worldType},
+                {"preset_revision", preset.at("schema_rev")},
+                {"preset_identity", Luminumbra::Persistence::StableChecksum(preset.dump())},
+                {"content_identity",
+                 std::to_string(Luminumbra::World::ComputeTerrainParamsHash(params, seed))}};
+            if (traversal &&
+                (benchmark_world_identity["seed"] != traversal->seed ||
+                 benchmark_world_identity["preset"] != traversal->preset ||
+                 benchmark_world_identity["preset_revision"] != traversal->presetRevision ||
+                 benchmark_world_identity["preset_identity"] != traversal->presetIdentity ||
+                 benchmark_world_identity["content_identity"] != traversal->contentIdentity))
+                return "traversal world seed, preset or content identity mismatch";
+            benchmark_world_checked = true;
+            return {};
+        } catch (const std::exception& error) {
+            return error.what();
+        }
+    };
+
     auto finish_world_entry = [&]() {
+        if (benchmark_v3 && !benchmark_world_checked) {
+            const auto* world = gameSession->GetWorldSystem();
+            const auto error = check_benchmark_world(gameSession->InspectCurrentSavedWorld(),
+                                                     world->get_params(),
+                                                     static_cast<std::uint32_t>(world->get_seed()));
+            if (!error.empty()) {
+                refuse_world_entry(error, false);
+                return;
+            }
+        }
         g_playerController.reset();
         g_procgen = {};
         g_app.worldDressing = {};
@@ -2527,7 +2570,7 @@ int main(int argc, char* argv[]) {
         }
         // The UI's inspection is advisory: revalidate all artifacts at the moment of opening.
         prepare_world_entry();
-        if (!gameSession->LoadWorld(id)) {
+        if (!gameSession->LoadWorld(id, check_benchmark_world)) {
             refuse_world_entry("Could not load this world.");
             return;
         }
@@ -2871,7 +2914,9 @@ int main(int argc, char* argv[]) {
                                                    ? g_playerController->SavedSpawnAnchor()
                                                    : g_camera->Position);
                 // Synchronous main-thread save; shutdown cannot overlap this callback.
-                if (!gameSession->SaveWorldState() || !gameSession->SaveWorld()) {
+                if (!gameSession->SaveWorldState(
+                        nullptr, Luminumbra::world::WorldStateSaveScope::DurableChanges) ||
+                    !gameSession->SaveWorld()) {
                     if (g_uiManager)
                         g_uiManager->ShowMessage("Could not save this world. Check available disk "
                                                  "space and permissions before leaving.");
@@ -3114,8 +3159,6 @@ int main(int argc, char* argv[]) {
     std::unique_ptr<Luminumbra::Rendering::BenchmarkGpuQueries> benchmark_queries;
     std::uint64_t traversal_ticks = 0;
     int traversal_target_tick = 0;
-    bool benchmark_world_checked = false;
-    nlohmann::json benchmark_world_identity;
     std::chrono::steady_clock::time_point traversal_start{};
     double traversal_measured_duration = 0.0;
     nlohmann::json traversal_camera_samples = nlohmann::json::array();
@@ -3145,37 +3188,6 @@ int main(int argc, char* argv[]) {
             g_app.benchmark.measuredFrames < g_app.capture.render_benchmark_frames;
         const auto measured_frame_id = static_cast<std::uint64_t>(
             g_app.capture.render_benchmark_warmup + g_app.benchmark.measuredFrames);
-        if (benchmark_v3 && !benchmark_world_checked && gameSession &&
-            gameStateManager.GetCurrentState() == GameState::IN_GAME) {
-            try {
-                const auto saved = gameSession->InspectCurrentSavedWorld();
-                if (!saved.error.empty())
-                    throw std::runtime_error(saved.error);
-                const auto preset = nlohmann::json::parse(saved.preset_source_json);
-                const auto* world = gameSession->GetWorldSystem();
-                benchmark_world_identity = {
-                    {"seed", static_cast<std::uint32_t>(world->get_seed())},
-                    {"preset", gameSession->GetMetadata().worldType},
-                    {"preset_revision", preset.at("schema_rev")},
-                    {"preset_identity", Luminumbra::Persistence::StableChecksum(preset.dump())},
-                    {"content_identity",
-                     std::to_string(Luminumbra::World::ComputeTerrainParamsHash(
-                         world->get_params(), world->get_seed()))}};
-                if (traversal &&
-                    (benchmark_world_identity["seed"] != traversal->seed ||
-                     benchmark_world_identity["preset"] != traversal->preset ||
-                     benchmark_world_identity["preset_revision"] != traversal->presetRevision ||
-                     benchmark_world_identity["preset_identity"] != traversal->presetIdentity ||
-                     benchmark_world_identity["content_identity"] != traversal->contentIdentity))
-                    throw std::runtime_error(
-                        "traversal world seed, preset or content identity mismatch");
-                benchmark_world_checked = true;
-            } catch (const std::exception& error) {
-                LUMINUMBRA_CORE_ERROR("Benchmark world refused: {}", error.what());
-                exit_code = 2;
-                break;
-            }
-        }
         if (measuring_v3) {
             measured_samples->append(measured_frame_id);
             benchmark_queries->begin_frame(measured_frame_id);
@@ -3814,7 +3826,8 @@ int main(int argc, char* argv[]) {
                     if (gameSession->PersistenceSaveRequested() ||
                         gameSession->PersistenceAutosaveDue()) {
                         // Parked-bytes pressure or the periodic interval: persist now.
-                        gameSession->SaveWorldState();
+                        gameSession->SaveWorldState(
+                            nullptr, Luminumbra::world::WorldStateSaveScope::DurableChanges);
                     }
                     rb_sim_ms = std::chrono::duration<double, std::milli>(
                                     std::chrono::steady_clock::now() - _rb_sim_t0)

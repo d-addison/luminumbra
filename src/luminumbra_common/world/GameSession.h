@@ -58,6 +58,7 @@ namespace Luminumbra {
 class JobSystem;
 
 namespace Systems {
+struct TerrainGenParams;
 class SHIELD_WorldSystem;
 class PhysicsSystem;
 class WaterSystem;
@@ -79,14 +80,19 @@ struct WorldConfigValidationResult {
     std::vector<std::string> errors;
 };
 
-// Counters for one runtime world-state save pass. The on-disk layout
-// is a whole-world snapshot, so chunks_saved is the full streamed chunk count
-// whenever a write happened and zero otherwise.
+// Counters for one runtime world-state save pass. chunks_total counts resident/parked chunks;
+// chunks_saved counts the selected in-memory cohort when a chunk write succeeds.
 struct WorldStateSaveReport {
     std::size_t chunks_total = 0;
     std::size_t chunks_dirty = 0;
     std::size_t chunks_saved = 0;
     bool saved = false;
+};
+
+enum class WorldStateSaveScope {
+    ResidentSnapshot,
+    // Automatic saves retain changed authority; regenerable terrain stays a cache.
+    DurableChanges
 };
 
 struct PersistenceStatus {
@@ -130,6 +136,11 @@ public:
     bool LoadWorld(const std::string& worldId);
     // Uses the preset loader's status-reader seam for deterministic dependency I/O.
     bool LoadWorld(const std::string& worldId, const World::WorldgenFileStatusReader& read_status);
+    using WorldOpenCheck = std::function<std::string(
+        const Persistence::SavedWorld&, const Systems::TerrainGenParams&, std::uint32_t)>;
+    // Called once after metadata/preset admission, before chunk validation or terrain planning.
+    // An empty diagnostic accepts the identity; ordinary save validation still follows.
+    bool LoadWorld(const std::string& worldId, const WorldOpenCheck& check);
 
     // Owner thread only. Reinspect current files for identity consumers, reusing exact-byte
     // chunk validation facts from admission/saves while preserving catalog refusal checks.
@@ -147,11 +158,14 @@ public:
     // (worlds/saves/<world_id>). Incremental contract: nothing is written when
     // no chunk carries unsaved voxel edits, so a never-edited world stays
     // byte-for-byte on the fresh-world path. The first write of an edited
-    // world emits a full snapshot; later writes flush through
-    // WorldSaveService::save_dirty_chunks.
-    bool SaveWorldState(WorldStateSaveReport* report = nullptr);
+    // world emits the selected snapshot; later writes flush through
+    // WorldSaveService::save_dirty_chunks. Automatic hosts select DurableChanges;
+    // explicit snapshots retain generated resident cache coverage by default.
+    bool SaveWorldState(WorldStateSaveReport* report = nullptr,
+                        WorldStateSaveScope scope = WorldStateSaveScope::ResidentSnapshot);
     bool SaveWorldStateTo(const std::filesystem::path& save_dir,
-                          WorldStateSaveReport* report = nullptr);
+                          WorldStateSaveReport* report = nullptr,
+                          WorldStateSaveScope scope = WorldStateSaveScope::ResidentSnapshot);
 
     // Derived validation reuse only; excluded from persistent and hashed state.
     [[nodiscard]] Persistence::ChunkValidationCache::Stats GetChunkValidationCacheStats() const {
@@ -537,6 +551,9 @@ public:
     }
 
 private:
+    bool LoadWorldChecked(const std::string& worldId,
+                          const World::WorldgenFileStatusReader& read_status,
+                          const WorldOpenCheck& check);
     Persistence::ChunkValidationCache m_chunkValidationCache{};
 
     luminumbra::simulation::SimBudgetTelemetry m_simBudgetTelemetry;

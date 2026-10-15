@@ -252,6 +252,13 @@ public:
     static ChunkReadResult read_chunk(const std::filesystem::path& save_dir,
                                       const IVec3& coords,
                                       bool require_index = false);
+    // Save-as transfer of indexed authority. Reads the source index once and copies validated
+    // compressed records in region batches, preserving unrelated destination records.
+    // The caller must own a destination snapshot transaction covering the entire save-as.
+    static bool copy_authoritative_chunks(const std::filesystem::path& source,
+                                          const std::filesystem::path& destination,
+                                          const std::vector<IVec3>& coords,
+                                          std::vector<std::string>* errors = nullptr);
     // Capture BEFORE serialization; call only after the complete snapshot commits. A changed
     // or saturated revision retains its dirty obligation.
     static std::function<void()>

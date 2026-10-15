@@ -261,6 +261,9 @@ class RenderRunnerTests(unittest.TestCase):
                                   workload={key: original['workload'][key]})
         log = self.run_client('refused', ['--load-world', saved.name, '--traversal', str(self.script)], expected_exit=2)
         self.assertIn('content identity mismatch', log)
+        self.assertNotRegex(log, r'Loading [0-9]+ chunks')
+        self.assertNotIn('World state loaded:', log)
+        self.assertNotIn('EnsureSurfaceReadyNear:', log)
 
 
 if __name__ == '__main__':

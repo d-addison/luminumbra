@@ -32,7 +32,8 @@ SavedWorld InspectSavedWorld(const fs::path& root,
                              const std::stop_token& stop,
                              WorldSaveAdmission* admission,
                              const SavedWorldChunkSelector& retain,
-                             const World::WorldgenFileStatusReader& read_status) {
+                             const World::WorldgenFileStatusReader& read_status,
+                             const SavedWorldOpenCheck& check) {
     if (admission)
         *admission = {};
     SavedWorld result;
@@ -149,6 +150,12 @@ SavedWorld InspectSavedWorld(const fs::path& root,
         }
         result.preset_source_json = preset.source_json;
         result.preset_content_hash = preset.preset_content_hash;
+        result.error.clear();
+        if (check) {
+            result.error = check(result, preset.params);
+            if (!result.error.empty())
+                return result;
+        }
         if (admission) {
             WorldSaveAdmission decoded;
             const std::function<bool(const IVec3&)> select =

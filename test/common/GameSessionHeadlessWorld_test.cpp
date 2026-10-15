@@ -24,10 +24,12 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <utility>
 #include <vector>
 
+#include "luminumbra_client/app/SessionExit.h"
 #include "luminumbra_client/rendering/TimeOfDayModel.h"
 #include "luminumbra_common/ai/CircadianSystem.h"
 #include "luminumbra_common/ai/EcologyHash.h"
@@ -6671,4 +6673,185 @@ TEST(GameSessionHeadlessWorldTest, CatalogPresetCompatibilityUsesCapturedSource)
     // A separate inspection sees the later source and enforces the original compatibility check.
     const auto changed = P::InspectSavedWorld(root.path(), owner.GetMetadata().worldId);
     EXPECT_EQ(changed.error, "Incompatible world preset: saved preset identity does not match.");
+}
+
+TEST(GameSessionHeadlessWorldTest, AutomaticSavesRetainWaterAndEditsWithoutWritingGeneratedCache) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    EnableSnapshotSession(session, root, jobs);
+    ASSERT_TRUE(session.CreateWorld("Automatic durable save", "1337", "default"));
+    const auto water = S7HostWaterGrid({0, 0, 0}, 8);
+    auto edited = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3(1, 0, 0));
+    edited->mark_voxel_data_dirty();
+    auto generated = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3(2, 0, 0));
+    generated->mark_sdf_generated_current_params();
+    auto distant_cache = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3(64, 0, 0));
+    distant_cache->mark_sdf_generated_current_params();
+    for (const auto& chunk : {water, edited, generated, distant_cache}) {
+        chunk->set_state(Luminumbra::ChunkState::Idle);
+        ASSERT_TRUE(session.GetWorldSystem()->adopt_streamed_chunk(chunk));
+    }
+    const auto save = session.GetWorldSaveDir();
+    const auto before_hash = session.ComputeChunkStateHash();
+    const auto encodes = P::SnapshotStreamEncodeCountForTesting();
+    bool reported = false;
+    Luminumbra::Client::SaveSessionOnExit(&session, [] {}, [&] { reported = true; });
+    ASSERT_TRUE(reported);
+    EXPECT_EQ(P::SnapshotStreamEncodeCountForTesting() - encodes, 2u);
+    EXPECT_FALSE(fs::exists(P::WorldSaveService::region_file_path(save, 2, 0)));
+    EXPECT_EQ(session.ComputeChunkStateHash(), before_hash);
+    EXPECT_FALSE(water->is_voxel_data_dirty());
+    EXPECT_FALSE(edited->is_voxel_data_dirty());
+    EXPECT_TRUE(water->has_water_authority());
+
+    Luminumbra::WorldStreamingState restored;
+    std::vector<std::string> errors;
+    ASSERT_TRUE(P::WorldSaveService{}.load_world(restored, save, errors));
+    ASSERT_TRUE(errors.empty());
+    ASSERT_EQ(restored.size(), 2u);
+    ASSERT_NE(restored.find_chunk(water->get_id()), nullptr);
+    S7CompareWater(*water, *restored.find_chunk(water->get_id()));
+    EXPECT_NE(restored.find_chunk(edited->get_id()), nullptr);
+    EXPECT_EQ(restored.find_chunk(generated->get_id()), nullptr);
+
+    // A failed incremental automatic save must retain both the old snapshot and retry obligation.
+    water->water_depth_mm.front() += 7;
+    water->mark_water_state_dirty();
+    const auto before_failure = RepeatedSaveBytes(save);
+    P::WorldSaveService::set_before_active_regions_replace_for_testing([] { return false; });
+    const bool failed =
+        session.SaveWorldState(nullptr, Luminumbra::world::WorldStateSaveScope::DurableChanges);
+    P::WorldSaveService::set_before_active_regions_replace_for_testing(nullptr);
+    EXPECT_FALSE(failed);
+    EXPECT_TRUE(water->is_voxel_data_dirty());
+    EXPECT_EQ(RepeatedSaveBytes(save), before_failure);
+    const auto retry_encodes = P::SnapshotStreamEncodeCountForTesting();
+    Luminumbra::world::WorldStateSaveReport report;
+    ASSERT_TRUE(
+        session.SaveWorldState(&report, Luminumbra::world::WorldStateSaveScope::DurableChanges));
+    EXPECT_EQ(report.chunks_total, 4u);
+    EXPECT_EQ(report.chunks_dirty, 1u);
+    EXPECT_EQ(report.chunks_saved, 1u);
+    EXPECT_EQ(P::SnapshotStreamEncodeCountForTesting() - retry_encodes, 1u);
+    ASSERT_TRUE(P::WorldSaveService{}.load_world(restored, save, errors));
+    ASSERT_EQ(restored.size(), 2u);
+    ASSERT_NE(restored.find_chunk(water->get_id()), nullptr);
+    S7CompareWater(*water, *restored.find_chunk(water->get_id()));
+    EXPECT_FALSE(water->is_voxel_data_dirty());
+}
+
+namespace {
+fs::path copied_region_path;
+std::size_t copied_region_publications = 0;
+void ObserveCopiedRegion(const char* step, const fs::path& path) {
+    if (std::string_view(step) == "before-replace" && path == copied_region_path)
+        ++copied_region_publications;
+}
+struct ObserveRegionCopy {
+    explicit ObserveRegionCopy(fs::path path) {
+        copied_region_path = std::move(path);
+        copied_region_publications = 0;
+        P::set_snapshot_step_hook_for_testing(&ObserveCopiedRegion);
+    }
+    ~ObserveRegionCopy() {
+        P::set_snapshot_step_hook_for_testing(nullptr);
+        copied_region_path.clear();
+    }
+};
+} // namespace
+
+TEST(GameSessionHeadlessWorldTest, SaveAsCopiesEachDistantRegionOnceWithExactCompressedBytes) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession owner, loaded;
+    for (auto* session : {&owner, &loaded})
+        EnableSnapshotSession(*session, root, jobs);
+    ASSERT_TRUE(owner.CreateWorld("Batched durable copy", "1337", "default"));
+    for (int x : {1280, 1281, 1282}) {
+        auto chunk = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3(x, 0, -1280));
+        chunk->set_state(Luminumbra::ChunkState::Idle);
+        chunk->sdf_data.assign(17 * 17 * 17, -4.0f);
+        chunk->mark_voxel_data_dirty();
+        ASSERT_TRUE(owner.GetWorldSystem()->adopt_streamed_chunk(chunk));
+    }
+    ASSERT_TRUE(owner.SaveWorldState());
+    const auto source_region =
+        P::WorldSaveService::region_file_path(owner.GetWorldSaveDir(), 40, -40);
+    const auto source_bytes = ReadClockTestFile(source_region);
+    ASSERT_TRUE(loaded.LoadWorld(owner.GetMetadata().worldId));
+    ASSERT_TRUE(loaded.GetWorldSystem()->snapshot_streamed_chunks().empty());
+    const auto hash = loaded.ComputeChunkStateHash();
+    const auto destination = root.path() / "batched-copy";
+    const auto target_region = P::WorldSaveService::region_file_path(destination, 40, -40);
+    const ObserveRegionCopy observe(target_region);
+    ASSERT_TRUE(loaded.SaveWorldStateTo(destination));
+    EXPECT_EQ(copied_region_publications, 1u);
+    EXPECT_EQ(ReadClockTestFile(target_region), source_bytes);
+    EXPECT_EQ(ReadClockTestFile(source_region), source_bytes);
+    EXPECT_EQ(loaded.ComputeChunkStateHash(), hash);
+    EXPECT_TRUE(loaded.GetWorldSystem()->snapshot_streamed_chunks().empty());
+
+    // Failure after copying the region must roll back the destination and retain the source.
+    const auto failed_destination = root.path() / "failed-batched-copy";
+    P::WorldSaveService::set_before_active_regions_replace_for_testing([] { return false; });
+    const bool copied = loaded.SaveWorldStateTo(failed_destination);
+    P::WorldSaveService::set_before_active_regions_replace_for_testing(nullptr);
+    EXPECT_FALSE(copied);
+    EXPECT_TRUE(RepeatedSaveBytes(failed_destination).empty());
+    EXPECT_EQ(ReadClockTestFile(target_region), source_bytes);
+    EXPECT_EQ(loaded.ComputeChunkStateHash(), hash);
+    ASSERT_TRUE(loaded.SaveWorldStateTo(failed_destination));
+    EXPECT_EQ(ReadClockTestFile(P::WorldSaveService::region_file_path(failed_destination, 40, -40)),
+              source_bytes);
+}
+
+TEST(GameSessionHeadlessWorldTest, ContentRefusalPrecedesChunkValidationAndTerrainPlanning) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession owner, reopened;
+    for (auto* session : {&owner, &reopened})
+        EnableSnapshotSession(*session, root, jobs);
+    ASSERT_TRUE(owner.CreateWorld("Content admission", "1337", "default"));
+    auto chunk = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3(0, 0, 0));
+    chunk->set_state(Luminumbra::ChunkState::Idle);
+    chunk->mark_voxel_data_dirty();
+    ASSERT_TRUE(owner.GetWorldSystem()->adopt_streamed_chunk(chunk));
+    ASSERT_TRUE(owner.SaveWorldState());
+    const auto before = RepeatedSaveBytes(owner.GetWorldSaveDir());
+    const auto decodes = P::WorldSaveService::decode_count_for_testing();
+    const auto chunk_decodes = P::WorldSaveService::chunk_decode_count_for_testing();
+    std::size_t checked = 0;
+    const GameSession::WorldOpenCheck refuse =
+        [&](const P::SavedWorld& saved,
+            const Luminumbra::Systems::TerrainGenParams& params,
+            std::uint32_t seed) {
+            ++checked;
+            EXPECT_TRUE(saved.error.empty()) << saved.error;
+            EXPECT_EQ(seed, 1337u);
+            EXPECT_EQ(saved.metadata.worldId, owner.GetMetadata().worldId);
+            EXPECT_EQ(params.height_offset, owner.GetWorldSystem()->get_params().height_offset);
+            EXPECT_FALSE(saved.preset_source_json.empty());
+            return std::string("content identity mismatch");
+        };
+    EXPECT_FALSE(reopened.LoadWorld(owner.GetMetadata().worldId, refuse));
+    EXPECT_EQ(checked, 1u);
+    EXPECT_EQ(reopened.GetWorldOpenError(), "content identity mismatch");
+    EXPECT_EQ(reopened.GetWorldSystem(), nullptr);
+    EXPECT_EQ(reopened.GetLastLoadedChunkCount(), 0u);
+    EXPECT_EQ(P::WorldSaveService::decode_count_for_testing(), decodes);
+    EXPECT_EQ(P::WorldSaveService::chunk_decode_count_for_testing(), chunk_decodes);
+    EXPECT_EQ(RepeatedSaveBytes(owner.GetWorldSaveDir()), before);
+    const GameSession::WorldOpenCheck accept =
+        [](const P::SavedWorld&, const Luminumbra::Systems::TerrainGenParams&, std::uint32_t) {
+            return std::string{};
+        };
+    ASSERT_TRUE(reopened.LoadWorld(owner.GetMetadata().worldId, accept))
+        << reopened.GetWorldOpenError();
+    EXPECT_EQ(reopened.GetLastLoadedChunkCount(), 1u);
+    EXPECT_EQ(P::WorldSaveService::decode_count_for_testing() - decodes, 1u);
+    EXPECT_EQ(RepeatedSaveBytes(owner.GetWorldSaveDir()), before);
 }

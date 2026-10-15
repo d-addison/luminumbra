@@ -1419,6 +1419,16 @@ bool GameSession::LoadWorld(const std::string& worldId) {
 
 bool GameSession::LoadWorld(const std::string& worldId,
                             const World::WorldgenFileStatusReader& read_status) {
+    return LoadWorldChecked(worldId, read_status, {});
+}
+
+bool GameSession::LoadWorld(const std::string& worldId, const WorldOpenCheck& check) {
+    return LoadWorldChecked(worldId, World::ReadWorldgenSymlinkStatus, check);
+}
+
+bool GameSession::LoadWorldChecked(const std::string& worldId,
+                                   const World::WorldgenFileStatusReader& read_status,
+                                   const WorldOpenCheck& check) {
     if (!IsSimulationTickBoundary())
         return false;
     m_lastLoadedChunkCount = 0;
@@ -1474,7 +1484,20 @@ bool GameSession::LoadWorld(const std::string& worldId,
         return wanted->contains(Chunk::calculate_id(coords));
     };
     const auto saved = Persistence::InspectSavedWorld(
-        RuntimeRoot(m_rootPath), worldId, {}, &admission, retain, read_status);
+        RuntimeRoot(m_rootPath),
+        worldId,
+        {},
+        &admission,
+        retain,
+        read_status,
+        [&check, this](const Persistence::SavedWorld& candidate,
+                       const TerrainGenParams& candidate_params) {
+            if (!check)
+                return std::string{};
+            auto params = candidate_params;
+            ClampTerrainParams(params);
+            return check(candidate, params, StringToSeed(candidate.metadata.seed));
+        });
     m_worldOpenError = saved.error;
     if (m_worldOpenError.empty() && saved.requires_active_regions && !m_activeRegionsEnabled)
         m_worldOpenError = "Incompatible configuration: this world requires sim.active_regions.";
@@ -3141,7 +3164,7 @@ std::filesystem::path GameSession::GetWorldSaveDir() const {
     return RuntimeRoot(m_rootPath) / "worlds" / "saves" / m_metadata.worldId;
 }
 
-bool GameSession::SaveWorldState(WorldStateSaveReport* report) {
+bool GameSession::SaveWorldState(WorldStateSaveReport* report, WorldStateSaveScope scope) {
     if (report) {
         *report = {};
     }
@@ -3150,11 +3173,12 @@ bool GameSession::SaveWorldState(WorldStateSaveReport* report) {
         // No active world session; nothing to persist.
         return false;
     }
-    return SaveWorldStateTo(save_dir, report);
+    return SaveWorldStateTo(save_dir, report, scope);
 }
 
 bool GameSession::SaveWorldStateTo(const std::filesystem::path& save_dir,
-                                   WorldStateSaveReport* report) {
+                                   WorldStateSaveReport* report,
+                                   WorldStateSaveScope scope) {
     const Persistence::ChunkValidationCache::Scope validation_scope(m_chunkValidationCache);
     const auto save_started = std::chrono::steady_clock::now();
     const auto elapsed_ms = [&save_started]() {
@@ -3218,9 +3242,16 @@ bool GameSession::SaveWorldStateTo(const std::filesystem::path& save_dir,
     WorldStreamingState state;
     for (const auto& chunk : m_activeRegionsEnabled ? m_worldSystem->snapshot_authoritative_chunks()
                                                     : m_worldSystem->snapshot_streamed_chunks()) {
+        if (chunk)
+            ++result.chunks_total;
+        // The normal host save is not a request to persist the world's generated cache.
+        // Existing disk records are merged by region, so clean authority needs no rewrite either.
+        // Explicit snapshots and the legacy path keep their original cache coverage.
+        if (m_activeRegionsEnabled && scope == WorldStateSaveScope::DurableChanges &&
+            (!chunk || !chunk->is_voxel_data_dirty()))
+            continue;
         state.insert_chunk(chunk);
     }
-    result.chunks_total = state.size();
 
     std::error_code source_path_error, target_path_error;
     const auto source_directory = fs::weakly_canonical(m_regionDurableDirectory, source_path_error);
@@ -3230,38 +3261,27 @@ bool GameSession::SaveWorldStateTo(const std::filesystem::path& save_dir,
         RecordPersistenceSaveOutcome(false, elapsed_ms());
         return false;
     }
+    bool copied_snapshot = false;
     if (m_activeRegionsEnabled && !m_regionDurableDirectory.empty() &&
         source_directory != target_directory) {
-        // Save-as must transfer distant disk-only obligations before switching their backing
-        // directory. Stream one chunk at a time; live/parked state supersedes the old copy.
+        // Save-as transfers disk-only obligations one region at a time. Reading and rewriting
+        // the same container for each chunk is quadratic in its record count.
+        // Live/parked state supersedes the old copy, including clean resident authority.
         Persistence::WorldSaveService copier;
         std::vector<std::string> copy_errors;
-        bool copied = true;
-        for (const auto& coords : m_worldSystem->durable_chunk_inventory()) {
-            if (state.find_chunk(Chunk::calculate_id(coords)))
-                continue;
-            const auto durable =
-                Persistence::WorldSaveService::read_chunk(m_regionDurableDirectory, coords, true);
-            if (durable.status != Persistence::WorldSaveService::ChunkReadStatus::Found) {
-                copied = false;
-                copy_errors.push_back(durable.error.empty()
-                                          ? "expected durable chunk missing during save-as"
-                                          : durable.error);
-                break;
-            }
-            WorldStreamingState one;
-            one.insert_chunk(durable.chunk);
-            if (!copier.save_world(one, save_dir, &copy_errors)) {
-                copied = false;
-                break;
-            }
-        }
-        if (!copied || !copier.save_world(state, save_dir, &copy_errors)) {
+        std::vector<IVec3> distant;
+        for (const auto& coords : m_worldSystem->durable_chunk_inventory())
+            if (!state.find_chunk(Chunk::calculate_id(coords)))
+                distant.push_back(coords);
+        const bool copied = Persistence::WorldSaveService::copy_authoritative_chunks(
+            m_regionDurableDirectory, save_dir, distant, &copy_errors);
+        if (!copied || (!state.empty() && !copier.save_world(state, save_dir, &copy_errors))) {
             for (const auto& error : copy_errors)
                 LUMINUMBRA_CORE_ERROR("World save-as failed: {}", error);
             RecordPersistenceSaveOutcome(false, elapsed_ms());
             return false;
         }
+        copied_snapshot = true;
     }
 
     //  project the live plant roster ONCE and persist it as a sibling file in
@@ -3331,12 +3351,19 @@ bool GameSession::SaveWorldStateTo(const std::filesystem::path& save_dir,
     Persistence::WorldSaveService service;
     std::vector<std::string> errors;
     // Subsequent saves rewrite the edited regions of a supported container.
-    const bool has_snapshot = m_activeRegionsEnabled
-                                  ? Persistence::WorldSaveService::has_chunk_snapshot(save_dir)
-                                  : Persistence::WorldSaveService::has_world_save(save_dir);
+    const bool has_snapshot =
+        !copied_snapshot &&
+        (m_activeRegionsEnabled ? Persistence::WorldSaveService::has_chunk_snapshot(save_dir)
+                                : Persistence::WorldSaveService::has_world_save(save_dir));
 
     bool ok = false;
-    if (!has_snapshot) {
+    if (copied_snapshot) {
+        ok = true;
+        if (auto* transaction = Persistence::SaveTransaction::active_for(save_dir))
+            transaction->defer_until_commit(acknowledge);
+        else
+            acknowledge();
+    } else if (!has_snapshot) {
         // First save of this world: write the full snapshot, then clear the
         // dirty flags exactly like the incremental path does.
         ok = service.save_world(state, save_dir, &errors);
@@ -3390,7 +3417,7 @@ bool GameSession::SaveWorldStateTo(const std::filesystem::path& save_dir,
     }
     if (ok) {
         result.saved = true;
-        result.chunks_saved = result.chunks_total; // whole-snapshot layout
+        result.chunks_saved = state.size();
         LUMINUMBRA_CORE_INFO("World state saved: {} chunks ({} dirty) -> {}",
                              result.chunks_total,
                              result.chunks_dirty,

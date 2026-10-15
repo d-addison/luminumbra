@@ -701,7 +701,7 @@ bool ReadRegionFile(const std::filesystem::path& path,
         }
         record.uncompressed_size = ReadU32(header + 10);
         const std::uint32_t compressed_size = ReadU32(header + 14);
-        if (payload_offset + compressed_size > bytes.size()) {
+        if (compressed_size > bytes.size() - payload_offset) {
             AddError(errors, "region file record payload is truncated: " + path.string());
             out_records.clear();
             return false;
@@ -734,11 +734,22 @@ bool WriteRegionFile(const std::filesystem::path& path,
     });
 
     std::string bytes;
+    // The record count bounds the manifest; check the exact payload sum before reserving.
+    const std::size_t header_bytes = kRegionFileHeaderSize + records.size() * kRecordHeaderSize;
+    if (header_bytes > bytes.max_size()) {
+        AddError(errors, "region file header size overflow: " + path.string());
+        return false;
+    }
     std::size_t payload_bytes = 0;
     for (const RegionRecord& record : records) {
+        if (record.compressed_payload.size() > std::numeric_limits<std::uint32_t>::max() ||
+            record.compressed_payload.size() > bytes.max_size() - header_bytes - payload_bytes) {
+            AddError(errors, "region file payload size overflow: " + path.string());
+            return false;
+        }
         payload_bytes += record.compressed_payload.size();
     }
-    bytes.reserve(kRegionFileHeaderSize + records.size() * kRecordHeaderSize + payload_bytes);
+    bytes.reserve(header_bytes + payload_bytes);
 
     bytes.append(kRegionMagic, sizeof(kRegionMagic));
     AppendU16(bytes, kRegionVersion);
@@ -1267,6 +1278,28 @@ bool StrictWaterRegion(const std::filesystem::path& region_file) {
            snapshot_index_exists(save_dir);
 }
 
+bool VerifyIndexedRegionMembership(const std::string& relative,
+                                   const std::vector<RegionRecord>& records,
+                                   const SnapshotIndex& index,
+                                   std::vector<std::string>* errors) {
+    auto member = std::lower_bound(
+        index.members.begin(),
+        index.members.end(),
+        relative,
+        [](const SnapshotMember& value, const std::string& path) { return value.path < path; });
+    if (member != index.members.end() && member->path != relative)
+        member = index.members.end();
+    const auto digest = Lod0Fingerprint(records);
+    if ((member == index.members.end() && digest.present) ||
+        (member != index.members.end() &&
+         (member->present != digest.present ||
+          (digest.present && (member->bytes != digest.bytes || member->fnv64 != digest.fnv64))))) {
+        AddError(errors, "inconsistent snapshot: " + relative);
+        return false;
+    }
+    return true;
+}
+
 bool VerifyRegionMembership(const std::filesystem::path& region_file,
                             const std::vector<RegionRecord>& records,
                             std::vector<std::string>* errors) {
@@ -1293,19 +1326,7 @@ bool VerifyRegionMembership(const std::filesystem::path& region_file,
     SnapshotIndex index;
     if (!read_snapshot_index(save_dir, index, errors))
         return false;
-    const auto member =
-        std::find_if(index.members.begin(),
-                     index.members.end(),
-                     [&relative](const SnapshotMember& value) { return value.path == relative; });
-    const auto digest = Lod0Fingerprint(records);
-    if ((member == index.members.end() && digest.present) ||
-        (member != index.members.end() &&
-         (member->present != digest.present ||
-          (digest.present && (member->bytes != digest.bytes || member->fnv64 != digest.fnv64))))) {
-        AddError(errors, "inconsistent snapshot: " + relative);
-        return false;
-    }
-    return true;
+    return VerifyIndexedRegionMembership(relative, records, index, errors);
 }
 
 } // namespace
@@ -2875,31 +2896,14 @@ WorldSaveService::ChunkReadResult WorldSaveService::read_chunk(
         region_coords_for_chunk(coords, rx, rz);
         const auto path = region_file_path(save_dir, rx, rz);
         std::vector<std::string> errors;
-        SnapshotIndex index;
         const bool indexed = snapshot_index_exists(save_dir);
         if (require_index && !indexed)
             return fail("inconsistent snapshot: index missing");
-        if (indexed && !read_snapshot_index(save_dir, index, &errors))
-            return fail(errors.empty() ? "corrupt snapshot index" : errors.front());
         std::vector<RegionRecord> records;
         if (std::filesystem::exists(path) && !ReadRegionFile(path, records, &errors))
             return fail(errors.empty() ? "unreadable chunk region" : errors.front());
         if (!VerifyRegionMembership(path, records, &errors))
             return fail(errors.empty() ? "inconsistent snapshot" : errors.front());
-        if (indexed) {
-            const auto relative = RelativeRegionMember(rx, rz);
-            const auto member = std::find_if(
-                index.members.begin(),
-                index.members.end(),
-                [&relative](const SnapshotMember& value) { return value.path == relative; });
-            const auto digest = Lod0Fingerprint(records);
-            if ((member == index.members.end() && digest.present) ||
-                (member != index.members.end() &&
-                 (member->present != digest.present ||
-                  (digest.present &&
-                   (member->bytes != digest.bytes || member->fnv64 != digest.fnv64)))))
-                return fail("inconsistent snapshot: " + relative);
-        }
         const auto id = Chunk::calculate_id(coords);
         for (const auto& record : records) {
             if (record.lod_level != 0 || record.id != id)
@@ -2919,6 +2923,86 @@ WorldSaveService::ChunkReadResult WorldSaveService::read_chunk(
     } catch (const std::exception& error) {
         return fail(std::string("unreadable durable chunk: ") + error.what());
     }
+}
+
+bool WorldSaveService::copy_authoritative_chunks(const std::filesystem::path& source,
+                                                 const std::filesystem::path& destination,
+                                                 const std::vector<IVec3>& coords,
+                                                 std::vector<std::string>* errors) try {
+    if (coords.empty())
+        return true;
+    if (!SaveTransaction::active_for(destination)) {
+        AddError(errors, "durable region copy requires a destination snapshot transaction");
+        return false;
+    }
+    if (auto* cache = ChunkValidationCache::active())
+        cache->exclude_save_directory(destination);
+    SnapshotIndex index;
+    if (!snapshot_index_exists(source) || !read_snapshot_index(source, index, errors)) {
+        AddError(errors, "inconsistent snapshot: source index unavailable");
+        return false;
+    }
+    std::map<std::pair<int, int>, std::map<ChunkID, IVec3>> regions;
+    for (const auto& coord : coords) {
+        int rx = 0, rz = 0;
+        region_coords_for_chunk(coord, rx, rz);
+        regions[{rx, rz}].emplace(Chunk::calculate_id(coord), coord);
+    }
+    std::vector<std::string> members = {"chunks/region/world-manifest.json"};
+    for (const auto& [region, expected] : regions)
+        members.push_back(RelativeRegionMember(region.first, region.second));
+    TransactionScope scope(destination, members, errors);
+    if (!scope.ok() || !validate_save(destination, errors))
+        return false;
+    for (const auto& [region, expected] : regions) {
+        const auto relative = RelativeRegionMember(region.first, region.second);
+        const auto source_path = source / relative;
+        // LMR1 bounds each region to 65535 compressed records. Keep one source/destination
+        // region pair in memory and validate one decoded chunk at a time.
+        std::vector<RegionRecord> records;
+        if (!ReadRegionFile(source_path, records, errors) ||
+            !VerifyIndexedRegionMembership(relative, records, index, errors))
+            return false;
+        const auto target_path = destination / relative;
+        std::vector<RegionRecord> merged;
+        if (std::filesystem::exists(target_path) && !ReadRegionFile(target_path, merged, errors))
+            return false;
+        std::map<std::pair<std::uint8_t, std::uint64_t>, std::size_t> positions;
+        for (std::size_t i = 0; i < merged.size(); ++i)
+            positions.emplace(std::pair{merged[i].lod_level, merged[i].id}, i);
+        std::size_t copied = 0;
+        for (auto& record : records) {
+            const auto wanted = expected.find(record.id);
+            if (record.lod_level != 0 || wanted == expected.end())
+                continue;
+            const auto validated = ValidateChunkRecord(record, source_path, errors, true);
+            constexpr std::size_t kLattice = static_cast<std::size_t>(CHUNK_SIZE_X + 1) *
+                                             (CHUNK_SIZE_Y + 1) * (CHUNK_SIZE_Z + 1);
+            if (!validated || !validated->facts.authoritative ||
+                validated->facts.coords != wanted->second ||
+                (validated->facts.sdf_size != 0 && validated->facts.sdf_size != kLattice)) {
+                AddError(errors, "corrupt exact chunk identity or SDF lattice during save-as");
+                return false;
+            }
+            const auto previous = positions.find({record.lod_level, record.id});
+            if (previous != positions.end())
+                merged[previous->second] = std::move(record);
+            else
+                merged.push_back(std::move(record));
+            ++copied;
+        }
+        if (copied != expected.size()) {
+            AddError(errors, "expected durable chunk missing during save-as");
+            return false;
+        }
+        std::filesystem::create_directories(target_path.parent_path());
+        if (!WriteRegionFile(target_path, merged, errors))
+            return false;
+    }
+    return WriteWorldManifest(world_manifest_path(destination), errors) && scope.commit(errors);
+} catch (const std::exception& error) {
+    AddError(errors, std::string("failed to copy durable regions: ") + error.what());
+    return false;
 }
 
 std::function<void()>

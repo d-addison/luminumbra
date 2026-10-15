@@ -37,6 +37,8 @@ struct SavedWorld {
 
 using SavedWorldChunkSelector =
     std::function<bool(const SavedWorld&, const Systems::TerrainGenParams&, const IVec3&)>;
+using SavedWorldOpenCheck =
+    std::function<std::string(const SavedWorld&, const Systems::TerrainGenParams&)>;
 
 struct SavedWorldCatalog {
     std::vector<SavedWorld> worlds;
@@ -47,13 +49,15 @@ struct SavedWorldCatalog {
 // Read-only. Never creates directories or repairs files. An optional admission output
 // carries validated records into the same synchronous open. Its residency callback runs
 // after metadata/preset checks and must not mutate the save directory.
+// With admission, check can refuse content before any chunk scan or residency planning.
 SavedWorld InspectSavedWorld(
     const std::filesystem::path& root,
     const std::string& world_id,
     const std::stop_token& stop = {},
     WorldSaveAdmission* admission = nullptr,
     const SavedWorldChunkSelector& retain = {},
-    const World::WorldgenFileStatusReader& read_status = World::ReadWorldgenSymlinkStatus);
+    const World::WorldgenFileStatusReader& read_status = World::ReadWorldgenSymlinkStatus,
+    const SavedWorldOpenCheck& check = {});
 SavedWorldCatalog EnumerateSavedWorlds(const std::filesystem::path& root,
                                        const std::stop_token& stop = {});
 

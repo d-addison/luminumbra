@@ -784,7 +784,8 @@ ServerTickReport ServerWorldRunner::RunFixedTicks(std::uint64_t tick_count) {
             (simulation_tick % autosave_interval) == 0) {
             // Synchronous host-thread save. Snapshot/shutdown run between RunFixedTicks calls.
             world::WorldStateSaveReport save_report;
-            if (m_session->SaveWorldState(&save_report)) {
+            if (m_session->SaveWorldState(&save_report,
+                                          world::WorldStateSaveScope::DurableChanges)) {
                 report.autosave_passes += 1;
                 if (save_report.saved && save_report.chunks_dirty > 0) {
                     report.autosave_writes += 1;
@@ -795,7 +796,8 @@ ServerTickReport ServerWorldRunner::RunFixedTicks(std::uint64_t tick_count) {
         // Byte-limit pressure: a dirty authoritative chunk could not be parked, so persist now.
         if (m_session->PersistenceSaveRequested()) {
             world::WorldStateSaveReport pressure_report;
-            if (m_session->SaveWorldState(&pressure_report)) {
+            if (m_session->SaveWorldState(&pressure_report,
+                                          world::WorldStateSaveScope::DurableChanges)) {
                 report.autosave_passes += 1;
                 if (pressure_report.saved && pressure_report.chunks_dirty > 0) {
                     report.autosave_writes += 1;
@@ -1173,7 +1175,7 @@ void ServerWorldRunner::Shutdown(world::WorldStateSaveReport* shutdown_save_repo
         // Save on shutdown via WorldSaveService (incremental contract: a
         // never-edited world writes nothing and stays on the fresh path).
         world::WorldStateSaveReport save_report;
-        m_session->SaveWorldState(&save_report);
+        m_session->SaveWorldState(&save_report, world::WorldStateSaveScope::DurableChanges);
         if (shutdown_save_report) {
             *shutdown_save_report = save_report;
         }
