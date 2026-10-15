@@ -43,6 +43,7 @@ class FlatFoliageCells {
 public:
     using Cell = std::pair<ScentCellKey, std::int32_t>;
     static constexpr auto absent = std::numeric_limits<std::size_t>::max();
+    FlatFoliageCells() = default;
     explicit FlatFoliageCells(const FoliageFieldPages& pages) {
         cells.reserve(pages.pages().size() * 256);
         // Pages are ordered by (x,z). Expand each page column's local X before
@@ -146,126 +147,244 @@ inline bool ActivateFoliagePage(FieldPageState& pages, ScentCellKey cell, bool s
     return true;
 }
 
-// Replay bounded single integer operations with current constant stage/uptake
-// and source output. This deliberately preserves per-tick clamping and absorbed
-// ordering, rather than multiplying a net rate at depleted/saturated cells.
-// Resume uses <=36000 passes; the ledger permits ordinary cadence up to 65536. No new pages are
-// created by evolution. Historical cells continue even with an empty roster.
+// One sealed snapshot/index preparation per interleaved catch-up. Each step
+// touches only due owners; values are published before plant environment samples.
+// Births may admit soil pages between steps: import just that page on first use.
+// No replay step scans/rebuilds the dormant owners' cells or moisture indexes.
+class FoliageInteriorReplay {
+public:
+    struct Work {
+        std::uint64_t preparation_cells = 0;
+        std::uint64_t neighbor_cells = 0;
+        std::uint64_t evolved_cells = 0;
+        std::uint64_t admitted_soil_cells = 0;
+    };
+    explicit FoliageInteriorReplay(const FieldPageState& pages, bool has_steps = true) {
+        if (!has_steps)
+            return; // An off-due host tick needs no interior preparation.
+        const FlatFoliageCells soil(pages.soil());
+        const FlatFoliageCells moisture(pages.irrigation());
+        for (const auto& cell : soil)
+            owners[FieldPageState::region_of_scent_cell(cell.first)].soil.cells.push_back(cell);
+        for (const auto& cell : moisture)
+            owners[FieldPageState::region_of_scent_cell(cell.first)].moisture.cells.push_back(cell);
+        for (auto& [key, state] : owners) {
+            state.neighbors = state.moisture.interior_neighbors();
+            state.prior.resize(state.moisture.cells.size());
+        }
+        measured.preparation_cells =
+            static_cast<std::uint64_t>(soil.cells.size() + moisture.cells.size());
+        measured.neighbor_cells = static_cast<std::uint64_t>(moisture.cells.size());
+    }
+    const Work& work() const {
+        return measured;
+    }
+    void AdmitSoil(const FieldPageState& pages, ScentCellKey cell) {
+        auto& soil = owners[FieldPageState::region_of_scent_cell(cell)].soil;
+        AdmitSoilPage(pages, cell, soil);
+    }
+    std::map<RegionKey, std::uint64_t>
+    Step(entt::registry& reg,
+         FieldPageState& pages,
+         const std::map<RegionKey, std::uint32_t>& due,
+         std::optional<std::uint64_t> current_tick = {},
+         simulation::SimBudgetTelemetry::TickScope* budget = nullptr) {
+        std::map<RegionKey, std::uint64_t> completed;
+        if (budget)
+            budget->Next(simulation::SimBudgetStage::Soil,
+                         [this, &due] { return DueCells(due, true); });
+        FeedSoil(reg, pages, due, current_tick, completed);
+        EvolveSoil(pages, due, completed);
+        if (budget)
+            budget->Next(simulation::SimBudgetStage::Irrigation,
+                         [this, &due] { return DueCells(due, false); });
+        DepositMoisture(reg, due, current_tick, completed);
+        EvolveMoisture(pages, due, completed);
+        return completed;
+    }
+
+private:
+    struct Owner {
+        FlatFoliageCells soil;
+        FlatFoliageCells moisture;
+        std::vector<std::array<std::size_t, 4>> neighbors;
+        std::vector<std::int32_t> prior;
+    };
+    std::map<RegionKey, Owner> owners;
+    Work measured;
+
+    static bool
+    Existed(entt::registry& reg, entt::entity entity, std::optional<std::uint64_t> current_tick) {
+        const auto* owner = reg.try_get<Comp::PlantRegionComponent>(entity);
+        const auto* growth = reg.try_get<Comp::PlantGrowthComponent>(entity);
+        return !current_tick || !owner || !growth || owner->region_stamp < *current_tick ||
+               growth->planted_tick == *current_tick;
+    }
+    std::uint64_t DueCells(const std::map<RegionKey, std::uint32_t>& due, bool soil) const {
+        std::uint64_t count = 0;
+        for (const auto& [key, ticks] : due) {
+            const auto found = owners.find(key);
+            if (ticks != 0 && found != owners.end())
+                count += static_cast<std::uint64_t>(soil ? found->second.soil.cells.size()
+                                                         : found->second.moisture.cells.size());
+        }
+        return count;
+    }
+    // Existing cached cells retain their evolved values; only freshly initialized
+    // cells are imported. A soil birth cannot change the moisture topology.
+    void AdmitSoilPage(const FieldPageState& pages, ScentCellKey cell, FlatFoliageCells& soil) {
+        const auto floor16 = [](int value) {
+            return value >= 0 ? value / 16 : (value - 15) / 16;
+        };
+        const int px = floor16(cell.x), pz = floor16(cell.z);
+        const auto page = pages.soil().pages().find({px, pz});
+        if (page == pages.soil().pages().end())
+            throw std::runtime_error("Unadmitted soil feeder");
+        std::vector<FlatFoliageCells::Cell> added;
+        for (unsigned i = 0; i < 256; ++i) {
+            const ScentCellKey key{px * 16 + static_cast<int>(i % 16),
+                                   pz * 16 + static_cast<int>(i / 16)};
+            if (((page->second.mask[i / 64] >> (i % 64)) & 1) && !soil.contains(key))
+                added.emplace_back(key, page->second.cells[i]);
+        }
+        if (added.empty())
+            return;
+        measured.admitted_soil_cells += static_cast<std::uint64_t>(added.size());
+        soil.cells.insert(soil.cells.end(), added.begin(), added.end());
+        std::sort(soil.cells.begin(), soil.cells.end(), [](const auto& a, const auto& b) {
+            return a.first < b.first;
+        });
+    }
+    void FeedSoil(entt::registry& reg,
+                  const FieldPageState& pages,
+                  const std::map<RegionKey, std::uint32_t>& due,
+                  std::optional<std::uint64_t> current_tick,
+                  std::map<RegionKey, std::uint64_t>& completed) {
+        std::vector<entt::entity> feeders;
+        for (auto entity : reg.view<Comp::PlantTag,
+                                    Comp::SoilFeederComponent,
+                                    Comp::PlantGrowthComponent,
+                                    Comp::TransformComponent>())
+            feeders.push_back(entity);
+        std::sort(feeders.begin(), feeders.end(), [&reg](auto a, auto b) {
+            return reg.get<Comp::PlantRegionComponent>(a).persistent_id <
+                   reg.get<Comp::PlantRegionComponent>(b).persistent_id;
+        });
+        for (auto entity : feeders) {
+            const auto cell = FoliageCell(reg.get<Comp::TransformComponent>(entity).position);
+            const auto key = FieldPageState::region_of_scent_cell(cell);
+            const auto window = due.find(key);
+            if (window == due.end() || window->second == 0 || !Existed(reg, entity, current_tick))
+                continue;
+            auto& soil = owners[key].soil;
+            if (!soil.contains(cell))
+                AdmitSoilPage(pages, cell, soil);
+            auto found = soil.find(cell);
+            if (found == soil.end())
+                throw std::runtime_error("Unadmitted soil feeder");
+            auto& feeder = reg.get<Comp::SoilFeederComponent>(entity);
+            const auto draw = static_cast<std::int32_t>(
+                static_cast<std::int64_t>(feeder.uptake) *
+                SoilStageWeight(reg.get<Comp::PlantGrowthComponent>(entity).stage) / 16);
+            const auto got = std::min(found->second, draw);
+            found->second -= got;
+            feeder.absorbed += static_cast<std::uint32_t>(got);
+            ++completed[key];
+        }
+    }
+    void EvolveSoil(FieldPageState& pages,
+                    const std::map<RegionKey, std::uint32_t>& due,
+                    std::map<RegionKey, std::uint64_t>& completed) {
+        for (const auto& [key, ticks] : due) {
+            auto found = owners.find(key);
+            if (ticks == 0 || found == owners.end())
+                continue;
+            for (auto& [cell, value] : found->second.soil) {
+                value = std::min(kSoilBaseline, value + kSoilRegenPerTick);
+                if (!pages.set_soil(cell, value))
+                    throw std::runtime_error("Soil commit refused");
+                ++completed[key];
+                ++measured.evolved_cells;
+            }
+        }
+    }
+    void DepositMoisture(entt::registry& reg,
+                         const std::map<RegionKey, std::uint32_t>& due,
+                         std::optional<std::uint64_t> current_tick,
+                         std::map<RegionKey, std::uint64_t>& completed) {
+        std::map<ScentCellKey, std::int64_t> deposits;
+        for (auto entity : reg.view<Comp::WaterSourceComponent, Comp::TransformComponent>()) {
+            const auto cell = FoliageCell(reg.get<Comp::TransformComponent>(entity).position);
+            const auto key = FieldPageState::region_of_scent_cell(cell);
+            const auto window = due.find(key);
+            if (window != due.end() && window->second != 0 && Existed(reg, entity, current_tick)) {
+                deposits[cell] += reg.get<Comp::WaterSourceComponent>(entity).output;
+                ++completed[key];
+            }
+        }
+        for (const auto& [cell, amount] : deposits) {
+            auto& moisture = owners[FieldPageState::region_of_scent_cell(cell)].moisture;
+            auto found = moisture.find(cell);
+            if (found == moisture.end())
+                throw std::runtime_error("Unadmitted irrigation source");
+            found->second = static_cast<std::int32_t>(
+                std::min<std::int64_t>(kMoistureMax, found->second + amount));
+        }
+    }
+    void EvolveMoisture(FieldPageState& pages,
+                        const std::map<RegionKey, std::uint32_t>& due,
+                        std::map<RegionKey, std::uint64_t>& completed) {
+        for (const auto& [key, ticks] : due) {
+            auto found = owners.find(key);
+            if (ticks == 0 || found == owners.end())
+                continue;
+            auto& state = found->second;
+            for (std::size_t i = 0; i < state.prior.size(); ++i)
+                state.prior[i] = state.moisture.cells[i].second;
+            for (std::size_t i = 0; i < state.prior.size(); ++i) {
+                const auto flux = state.prior[i] / kMoistureDiffuseShareDen;
+                for (const auto neighbor : state.neighbors[i]) {
+                    if (neighbor == FlatFoliageCells::absent)
+                        continue;
+                    state.moisture.cells[i].second -= flux;
+                    state.moisture.cells[neighbor].second += flux;
+                }
+            }
+            for (auto& [cell, value] : state.moisture) {
+                value = std::max(0, std::min(kMoistureMax, value) - kMoistureDrainPerTick);
+                if (!pages.set_irrigation(cell, value))
+                    throw std::runtime_error("Irrigation commit refused");
+                ++completed[key];
+                ++measured.evolved_cells;
+            }
+        }
+    }
+};
+
+// Standalone constant-input replay. The host also keeps one replay object across
+// its interleaved growth/living steps, preserving per-tick clamping and samples.
 inline std::map<RegionKey, std::uint64_t>
 AdvanceFoliageInteriors(entt::registry& reg,
                         FieldPageState& pages,
                         const std::map<RegionKey, std::uint32_t>& windows,
                         std::optional<std::uint64_t> current_tick = {},
                         simulation::SimBudgetTelemetry::TickScope* budget = nullptr) {
-    auto soil = FlatFoliageCells(pages.soil());
-    auto moisture = FlatFoliageCells(pages.irrigation());
-    std::map<RegionKey, std::uint64_t> work;
-    std::vector<entt::entity> feeders, sources;
-    for (auto e : reg.view<Comp::PlantTag,
-                           Comp::SoilFeederComponent,
-                           Comp::PlantGrowthComponent,
-                           Comp::TransformComponent>())
-        feeders.push_back(e);
-    for (auto e : reg.view<Comp::WaterSourceComponent, Comp::TransformComponent>())
-        sources.push_back(e);
-    std::sort(feeders.begin(), feeders.end(), [&reg](auto a, auto b) {
-        return reg.get<Comp::PlantRegionComponent>(a).persistent_id <
-               reg.get<Comp::PlantRegionComponent>(b).persistent_id;
-    });
-    std::sort(sources.begin(), sources.end());
     std::uint32_t max_window = 0;
-    for (const auto& [owner, k] : windows) {
-        if (k > 65536)
+    for (const auto& [key, ticks] : windows) {
+        if (ticks > 65536)
             throw std::invalid_argument("Unbounded foliage window");
-        max_window = std::max(max_window, k);
+        max_window = std::max(max_window, ticks);
     }
-    const auto due = [&windows](ScentCellKey c, std::uint32_t step) {
-        const auto it = windows.find(FieldPageState::region_of_scent_cell(c));
-        return it != windows.end() && step < it->second;
-    };
-    const auto existed = [&reg, current_tick](entt::entity e) {
-        const auto* owner = reg.try_get<Comp::PlantRegionComponent>(e);
-        const auto* growth = reg.try_get<Comp::PlantGrowthComponent>(e);
-        return !current_tick || !owner || !growth || owner->region_stamp < *current_tick ||
-               growth->planted_tick == *current_tick;
-    };
-    const auto neighbors = moisture.interior_neighbors();
-    std::vector<std::int32_t> prior(moisture.cells.size());
+    FoliageInteriorReplay replay(pages);
+    std::map<RegionKey, std::uint64_t> work;
     for (std::uint32_t step = 0; step < max_window; ++step) {
-        if (budget)
-            budget->Next(simulation::SimBudgetStage::Soil, [&soil, &due, step] {
-                return static_cast<std::uint64_t>(
-                    std::count_if(soil.begin(), soil.end(), [&due, step](const auto& cell) {
-                        return due(cell.first, step);
-                    }));
-            });
-        for (auto e : feeders) {
-            const auto c = FoliageCell(reg.get<Comp::TransformComponent>(e).position);
-            if (!due(c, step) || !existed(e))
-                continue;
-            auto it = soil.find(c);
-            if (it == soil.end())
-                throw std::runtime_error("Unadmitted soil feeder");
-            auto& f = reg.get<Comp::SoilFeederComponent>(e);
-            const auto draw = static_cast<std::int32_t>(
-                static_cast<std::int64_t>(f.uptake) *
-                SoilStageWeight(reg.get<Comp::PlantGrowthComponent>(e).stage) / 16);
-            const auto got = std::min(it->second, draw);
-            it->second -= got;
-            f.absorbed += static_cast<std::uint32_t>(got);
-            ++work[FieldPageState::region_of_scent_cell(c)];
-        }
-        for (auto& [c, value] : soil)
-            if (due(c, step)) {
-                value = std::min(kSoilBaseline, value + kSoilRegenPerTick);
-                ++work[FieldPageState::region_of_scent_cell(c)];
-            }
-        if (budget)
-            budget->Next(simulation::SimBudgetStage::Irrigation, [&moisture, &due, step] {
-                return static_cast<std::uint64_t>(
-                    std::count_if(moisture.begin(), moisture.end(), [&due, step](const auto& cell) {
-                        return due(cell.first, step);
-                    }));
-            });
-        std::map<ScentCellKey, std::int64_t> deposits;
-        for (auto e : sources) {
-            const auto c = FoliageCell(reg.get<Comp::TransformComponent>(e).position);
-            if (due(c, step) && existed(e)) {
-                deposits[c] += reg.get<Comp::WaterSourceComponent>(e).output;
-                ++work[FieldPageState::region_of_scent_cell(c)];
-            }
-        }
-        for (const auto& [c, deposit] : deposits) {
-            auto it = moisture.find(c);
-            if (it == moisture.end())
-                throw std::runtime_error("Unadmitted irrigation source");
-            it->second = static_cast<std::int32_t>(
-                std::min<std::int64_t>(kMoistureMax, it->second + deposit));
-        }
-        for (std::size_t i = 0; i < prior.size(); ++i)
-            prior[i] = moisture.cells[i].second;
-        for (std::size_t i = 0; i < prior.size(); ++i)
-            if (due(moisture.cells[i].first, step)) {
-                for (const auto n : neighbors[i]) {
-                    if (n == FlatFoliageCells::absent)
-                        continue;
-                    const auto flux = prior[i] / kMoistureDiffuseShareDen;
-                    moisture.cells[i].second -= flux;
-                    moisture.cells[n].second += flux;
-                }
-            }
-        for (auto& [c, value] : moisture)
-            if (due(c, step)) {
-                value = std::max(0, std::min(kMoistureMax, value) - kMoistureDrainPerTick);
-                ++work[FieldPageState::region_of_scent_cell(c)];
-            }
+        std::map<RegionKey, std::uint32_t> due;
+        for (const auto& [key, ticks] : windows)
+            if (step < ticks)
+                due.emplace(key, 1);
+        for (const auto& [key, updates] : replay.Step(reg, pages, due, current_tick, budget))
+            work[key] += updates;
     }
-    for (const auto& [c, value] : soil)
-        if (!pages.set_soil(c, value))
-            throw std::runtime_error("Soil commit refused");
-    for (const auto& [c, value] : moisture)
-        if (!pages.set_irrigation(c, value))
-            throw std::runtime_error("Irrigation commit refused");
     return work;
 }
 

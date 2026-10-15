@@ -1,5 +1,6 @@
 #include "luminumbra_common/fields/FieldPageState.h"
 #include "luminumbra_common/fields/FoliageFieldPages.h"
+#include "luminumbra_common/persistence/WorldPersistenceRoundtrip.h"
 #include "luminumbra_common/simulation/SimBudgetTelemetry.h"
 #include "luminumbra_common/systems/RegionalFoliage.h"
 #include <gtest/gtest.h>
@@ -335,5 +336,121 @@ TEST(FoliageFieldPages, FlatSnapshotsMatchScalarEvolutionAfterEditsLoadAndCadenc
             actual = std::move(loaded);
         }
     }
+}
+entt::registry CatchupRegistry() {
+    namespace C = Luminumbra::Components;
+    entt::registry registry;
+    std::uint64_t identity = 0;
+    // Shared cells test persistent-ID uptake order and summed source clamping.
+    for (const auto position : {Luminumbra::Vec3{-1, 0, -1},
+                                Luminumbra::Vec3{511, 0, 0},
+                                Luminumbra::Vec3{511, 0, 0},
+                                Luminumbra::Vec3{512, 0, 0}}) {
+        const auto entity = registry.create();
+        registry.emplace<C::TransformComponent>(entity).position = position;
+        registry.emplace<C::PlantTag>(entity);
+        registry.emplace<C::PlantGrowthComponent>(entity).stage = 3;
+        registry.emplace<C::SoilFeederComponent>(entity).uptake = 137;
+        const auto owner = ActiveRegionLedger::region_at(position);
+        registry.emplace<C::PlantRegionComponent>(
+            entity, ++identity, owner.x, owner.z, std::uint64_t{0});
+        registry.emplace<C::WaterSourceComponent>(entity).output = 65535;
+    }
+    return registry;
+}
+
+void SetCatchupStages(entt::registry& registry, std::uint32_t step) {
+    namespace C = Luminumbra::Components;
+    for (auto entity : registry.view<C::PlantGrowthComponent>())
+        registry.get<C::PlantGrowthComponent>(entity).stage = static_cast<std::uint8_t>(step % 6);
+}
+
+void ExpectCatchupState(const FieldPageState& actual,
+                        const FieldPageState& expected,
+                        const entt::registry& actual_registry,
+                        const entt::registry& expected_registry) {
+    namespace C = Luminumbra::Components;
+    EXPECT_EQ(actual.soil().records(), expected.soil().records());
+    EXPECT_EQ(actual.irrigation().records(), expected.irrigation().records());
+    EXPECT_EQ(actual.serialize(), expected.serialize());
+    EXPECT_EQ(Luminumbra::Persistence::StableChecksum(actual.canonical_bytes()),
+              Luminumbra::Persistence::StableChecksum(expected.canonical_bytes()));
+    for (auto entity : actual_registry.view<const C::SoilFeederComponent>())
+        EXPECT_EQ(actual_registry.get<const C::SoilFeederComponent>(entity).absorbed,
+                  expected_registry.get<const C::SoilFeederComponent>(entity).absorbed);
+}
+
+TEST(FoliageFieldPages, PreparedCatchupMatchesPerStepRebuildWithStageChangesAndBirthAdmission) {
+    auto cached_registry = CatchupRegistry();
+    auto rebuilt_registry = CatchupRegistry();
+    auto scalar_registry = CatchupRegistry();
+    FieldPageState cached;
+    for (const auto cell : {ScentCellKey{-1, -1}, ScentCellKey{511, 0}, ScentCellKey{512, 0}}) {
+        ASSERT_TRUE(ActivateFoliagePage(cached, cell, true));
+        ASSERT_TRUE(ActivateFoliagePage(cached, cell, false));
+        ASSERT_TRUE(cached.set_soil(cell, 17));
+        ASSERT_TRUE(cached.set_irrigation(cell, kMoistureMax - 1));
+    }
+    // A loaded partial page must gain its missing cells even when a later birth
+    // lands on its already initialized cell.
+    ASSERT_TRUE(cached.set_soil({16, 0}, 17));
+    auto rebuilt = cached;
+    auto scalar = cached;
+    FoliageInteriorReplay replay(cached);
+    const auto preparation = replay.work().preparation_cells;
+    for (std::uint32_t step = 0; step < 24; ++step) {
+        SCOPED_TRACE(step);
+        SetCatchupStages(cached_registry, step);
+        SetCatchupStages(rebuilt_registry, step);
+        SetCatchupStages(scalar_registry, step);
+        std::map<RegionKey, std::uint32_t> due{{{0, 0}, 1}};
+        if (step >= 12)
+            due[{-1, -1}] = 1;
+        if (step >= 17)
+            due[{1, 0}] = 1;
+        if (step == 4) {
+            // A birth can admit a page and die later in the SAME substep. Its
+            // initialized page must still evolve even with no surviving feeder.
+            for (auto* pages : {&cached, &rebuilt, &scalar})
+                ASSERT_TRUE(ActivateFoliagePage(*pages, {16, 0}, true));
+            replay.AdmitSoil(cached, {16, 0});
+            // Also exercise admission of an entirely new owner during replay.
+            for (auto* pages : {&cached, &rebuilt, &scalar})
+                ASSERT_TRUE(ActivateFoliagePage(*pages, {1024, 0}, true));
+            replay.AdmitSoil(cached, {1024, 0});
+        }
+        if (step >= 4)
+            due[{2, 0}] = 1;
+        const auto tick = std::uint64_t{100} + step;
+        const auto work = replay.Step(cached_registry, cached, due, tick);
+        EXPECT_EQ(work, AdvanceFoliageInteriors(rebuilt_registry, rebuilt, due, tick));
+        EXPECT_EQ(work, ReferenceFoliageInteriors(scalar_registry, scalar, due, tick));
+        ExpectCatchupState(cached, rebuilt, cached_registry, rebuilt_registry);
+        ExpectCatchupState(cached, scalar, cached_registry, scalar_registry);
+    }
+    EXPECT_EQ(replay.work().preparation_cells, preparation);
+    EXPECT_EQ(replay.work().admitted_soil_cells, 511u);
+}
+
+TEST(FoliageFieldPages, CatchupPreparationAndEvolutionWorkExcludeDormantOwnersAtPageAndStepCaps) {
+    FieldPageState pages;
+    for (std::size_t i = 0; i < FoliageFieldPages::kMaxPages; ++i) {
+        const ScentCellKey cell{static_cast<int>(i) * 512, 0};
+        ASSERT_TRUE(pages.set_soil(cell, 0));
+        ASSERT_TRUE(pages.set_irrigation(cell, 1000));
+    }
+    const auto dormant = pages.region_bytes({1, 0});
+    FoliageInteriorReplay replay(pages);
+    entt::registry registry;
+    const std::map<RegionKey, std::uint32_t> due{{{0, 0}, 1}};
+    for (std::uint32_t step = 0; step < 65536; ++step)
+        replay.Step(registry, pages, due);
+    EXPECT_EQ(replay.work().preparation_cells, 2u * FoliageFieldPages::kMaxPages);
+    EXPECT_EQ(replay.work().neighbor_cells, FoliageFieldPages::kMaxPages);
+    EXPECT_EQ(replay.work().evolved_cells, 2u * 65536u);
+    EXPECT_EQ(replay.work().admitted_soil_cells, 0u);
+    EXPECT_EQ(pages.region_bytes({1, 0}), dormant);
+    EXPECT_EQ(pages.soil().sample({512, 0}, -1), 0);
+    EXPECT_EQ(pages.irrigation().sample({512, 0}, -1), 1000);
 }
 } // namespace
