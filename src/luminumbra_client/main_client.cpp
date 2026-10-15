@@ -1,4 +1,4 @@
-﻿#if defined(_WIN32) && !defined(NOMINMAX)
+#if defined(_WIN32) && !defined(NOMINMAX)
 #define NOMINMAX
 #endif
 
@@ -85,6 +85,7 @@ __declspec(dllexport) extern const int AmdPowerXpressRequestHighPerformance = 1;
 #include "luminumbra_common/world/FarLodStore.h"
 #include "luminumbra_common/world/GameSession.h"
 #include "luminumbra_common/world/KnobLayer.h" //  semantic-knob layer + startup invariant
+#include "luminumbra_common/world/TerrainPresetLoader.h"
 #include "nlohmann/json.hpp"
 #include "player/PlayerController.h"
 #include "rendering/Camera.h"
@@ -1354,6 +1355,29 @@ int main(int argc, char* argv[]) {
     LUMINUMBRA_CORE_INFO("Runtime root: {}", root_path_str);
 
     RuntimeScenarioConfig scenario_config = ParseRuntimeScenarioConfig(argc, argv, root_dir);
+    std::string override_error;
+    if (!scenario_config.systems_config_path.empty() ||
+        HasCommandLineFlag(argc, argv, "--systems-config") ||
+        HasCommandLineFlag(argc, argv, "--systems-config=")) {
+        luminumbra::core::SystemConfig config;
+        if (!luminumbra::core::SystemConfig::TryLoadFromFile(
+                scenario_config.systems_config_path, config, override_error)) {
+            LUMINUMBRA_CORE_ERROR("--systems-config: {}", override_error);
+            return 2;
+        }
+        scenario_config.systems_config_override = std::move(config);
+    }
+    if (!scenario_config.preset_json_path.empty() ||
+        HasCommandLineFlag(argc, argv, "--preset-json") ||
+        HasCommandLineFlag(argc, argv, "--preset-json=")) {
+        std::string json_text;
+        if (!Luminumbra::world::LoadTerrainPresetOverride(
+                scenario_config.preset_json_path, root_dir / "data", json_text, override_error)) {
+            LUMINUMBRA_CORE_ERROR("--preset-json: {}", override_error);
+            return 2;
+        }
+        scenario_config.preset_json_override = std::move(json_text);
+    }
 #if !defined(LUMINUMBRA_QA_RUNNER)
     // The shipping client does not compile the QA scenario harness (no
     // CreateScenarioRunner is linked). Refuse `--scenario` up front, before any
@@ -1530,8 +1554,11 @@ int main(int argc, char* argv[]) {
     // exposure curve remains the shipped gameplay default.
     g_app.overlay.auto_exposure_metered = HasCommandLineFlag(argc, argv, "--auto-exposure-metered");
     //  rendering (,  ): opt-in froxel volumetrics tier.
-    g_app.overlay.volumetric_quality =
-        std::stoi(GetCommandLineOption(argc, argv, "--volumetric-quality", "0"));
+    g_app.overlay.volumetric_quality = std::stoi(
+        GetCommandLineOption(argc,
+                             argv,
+                             "--volumetric-quality",
+                             std::to_string(Luminumbra::Rendering::kDefaultVolumetricQuality)));
     g_app.capture.profile_fly_seconds = static_cast<double>(GetCommandLineIntOption(
         argc, argv, "--profile-fly", 0)); // runtime telemetry: constant-speed eye-level moving
                                           // profiler (normal-play, self-exits)
@@ -1949,6 +1976,12 @@ int main(int argc, char* argv[]) {
     // can be applied immediately. Never hashed; missing overlay -> struct defaults.
     g_systemConfig = luminumbra::core::SystemConfig::LoadLayered(
         "data/common/systems.json", luminumbra::core::SystemConfig::DefaultUserOverlayPath());
+    if (scenario_config.systems_config_override) {
+        // Retain the player settings overlay; it cannot alter simulation or render flags.
+        const auto user_settings = g_systemConfig.user();
+        g_systemConfig = *scenario_config.systems_config_override;
+        g_systemConfig.user() = user_settings;
+    }
 
     if (!capture_size.empty())
         glfwWindowHint(GLFW_SCALE_FRAMEBUFFER, GLFW_FALSE);
@@ -2007,36 +2040,7 @@ int main(int argc, char* argv[]) {
     auto gameSession = std::make_unique<Luminumbra::world::GameSession>();
     gameSession->SetJobSystem(&jobSystem);
     gameSession->SetRootPath(root_path_str);
-    // Full control: data-drive every creature system from systems.json. All OFF by default ->
-    // compiled constants -> byte-identical; enable a block + set values to tune live behaviour.
-    gameSession->SetEcologyTuning(luminumbra::ai::ResolveEcologyTuning(g_systemConfig));
-    // opt-in weather-driven rain (hashed sim flag; default
-    // OFF keeps the canonical baselines byte-identical — activation is a deliberate
-    // hash bump on the owner menu).
-    gameSession->SetWeatherRainEnabled(
-        g_systemConfig.enabled(luminumbra::core::SysKey::SimHydrologyWeather));
-    // Supported opt-in High-resolution water (hashed sim flag; default OFF =
-    // Medium 8x8 grid = byte-identical baselines; ON = 16x16, 1 m cells).
-    gameSession->SetActiveRegionsEnabled(
-        g_systemConfig.enabled(luminumbra::core::SysKey::SimActiveRegions));
-    gameSession->SetWaterHighResEnabled(
-        g_systemConfig.enabled(luminumbra::core::SysKey::SimWaterHighRes));
-    // opt-in deterministic weather-event epochs (hashed sim flag).
-    gameSession->SetWeatherEventsEnabled(
-        g_systemConfig.enabled(luminumbra::core::SysKey::SimWeatherEvents));
-    // opt-in STATEFUL energy-field layer (hashed sim flag;
-    // default OFF keeps the canonical baselines byte-identical — activation is a
-    // deliberate hash bump on the owner menu).
-    gameSession->SetAetherStateEnabled(
-        g_systemConfig.enabled(luminumbra::core::SysKey::SimAetherState));
-    gameSession->SetWildlifeFoliageTuning(
-        luminumbra::ai::ResolveWildlifeFoliageTuning(g_systemConfig));
-    gameSession->SetThirstTuning(luminumbra::ai::ResolveThirstTuning(g_systemConfig));
-    gameSession->SetScavengingTuning(luminumbra::ai::ResolveScavengingTuning(g_systemConfig));
-    gameSession->SetForagingTuning(luminumbra::ai::ResolveForagingTuning(g_systemConfig));
-    gameSession->SetReproductionTuning(luminumbra::ai::ResolveReproductionTuning(g_systemConfig));
-    gameSession->SetCircadianAmplitude(luminumbra::ai::ResolveCircadianAmplitude(g_systemConfig));
-    gameSession->SetPlantMutationRate(luminumbra::ai::ResolvePlantMutationRate(g_systemConfig));
+    gameSession->ApplySystemConfig(g_systemConfig);
 
     // Load creature species metadata (display names + rarity) for the codex/discovery
     // HUD. Missing/partial data degrades gracefully: DisplayName falls back to
@@ -2068,12 +2072,14 @@ int main(int argc, char* argv[]) {
             scenario_config.audio_telemetry_path,
             scenario_config.no_audio ? Luminumbra::Client::NullAudioActivation::ExplicitNoAudio
                                      : Luminumbra::Client::NullAudioActivation::ReleaseDefaultOff);
-        LUMINUMBRA_CORE_INFO("Audio disabled for this release.");
+        LUMINUMBRA_CORE_INFO("Audio disabled by --no-audio.");
     } else {
         audioManager = Luminumbra::Client::CreateAudioManager(root_path_str);
-        LUMINUMBRA_CORE_INFO("Experimental audio enabled by --enable-audio.");
+        LUMINUMBRA_CORE_INFO("Audio playback enabled.");
     }
-    audioManager->Init();
+    if (!audioManager->Init()) {
+        LUMINUMBRA_CORE_WARN("Audio initialization failed; playback unavailable.");
+    }
     audioManager->SetMasterVolume(
         g_systemConfig.user().audio_master); // apply persisted master volume
     audioManager->SetMusicVolume(
@@ -2133,6 +2139,7 @@ int main(int argc, char* argv[]) {
         renderPipeline.set_far_world_cave_policy(Luminumbra::Rendering::ResolveFarWorldCaveField(
             g_systemConfig.param(luminumbra::core::SysParam::FarWorldCaveField,
                                  Luminumbra::Rendering::kDefaultFarWorldCaveFieldCode)));
+    // systems.json defaults to Ladder; enabled:false explicitly requests Legacy.
     renderPipeline.set_far_world_mode(Luminumbra::Rendering::RequestedFarWorldMode(
         g_systemConfig.enabled(luminumbra::core::SysKey::RenderFarWorldLadder)));
     if (g_systemConfig.enabled(luminumbra::core::SysKey::RenderFarWorldLadder)) {
@@ -2204,7 +2211,9 @@ int main(int argc, char* argv[]) {
     renderPipeline.set_cloud_quality(cloud_quality); // default 1 (half); env can set 0
     renderPipeline.set_ssao_quality(ssao_quality);   // default 2 (GTAO High); env can set 0
     //  TAAU: enable the temporal resolve from the render.taau flag (default OFF -> byte-identical).
-    renderPipeline.set_taau_enabled(g_systemConfig.enabled(luminumbra::core::SysKey::RenderTaau));
+    renderPipeline.set_taau_enabled(!g_app.capture.render_parity_active &&
+                                    terrain_coverage_dir.empty() &&
+                                    g_systemConfig.enabled(luminumbra::core::SysKey::RenderTaau));
     // (render.sky_lut_gpu is set BEFORE startup above so init_sky_lut also takes the GPU path.)
     // data-driven skinned-mesh texture set. The scenario
     // config resolved the.ltex paths (from the game archetype JSON or a generic
@@ -2483,6 +2492,10 @@ int main(int argc, char* argv[]) {
             }
         }
 
+        if (scenario_config.preset_json_override) {
+            customPresetJson = *scenario_config.preset_json_override;
+            customPtr = &customPresetJson;
+        }
         const auto asset_error = game_content_error();
         if (!asset_error.empty()) {
             refuse_world_entry(asset_error, false);
@@ -2552,6 +2565,7 @@ int main(int argc, char* argv[]) {
                     return "";
                 nlohmann::json j;
                 in >> j;
+                j = Luminumbra::world::ResolveTerrainPresetDefaults(j);
                 //  seed a semantic knob from the preset's persisted
                 // knob layer (path "knob.<id>"). Curated presets carry none -> "" ->
                 // the knob stays NEUTRAL (0.5), never inverse-lerped.
@@ -3376,8 +3390,8 @@ int main(int argc, char* argv[]) {
             // the sim never reads the mirror back, so it is determinism-neutral. Gated by
             // LUMIN_SCENT_DECAL so the default render stays byte-identical until opted in.
             if (!g_app.foragers.scentDecalInitialized) {
-                g_app.foragers.scentDecal =
-                    Luminumbra::Core::ReadEnvironment("LUMIN_SCENT_DECAL").has_value();
+                g_app.foragers.scentDecal = Luminumbra::Rendering::ScentDecalEnabled(
+                    Luminumbra::Core::ReadEnvironment("LUMIN_SCENT_DECAL"));
                 g_app.foragers.scentDecalInitialized = true;
             }
             if (g_app.foragers.scentDecal) {

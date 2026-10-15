@@ -2,9 +2,10 @@
 
 The host ledger implements the persistent-active scheduling foundation in
 [distant-world.md](distant-world.md). It is gated by the existing
-`sim.active_regions` switch, absent and false by default. No systems.json value
-is added. Budgets remain unlimited in shipped configuration. Enabled host sessions consume this schedule for field pages, ground objects,
-weather, energy, foliage and resident water. Resident water uses the checked
+`sim.active_regions` switch, enabled in compiled and packaged defaults. Explicit
+false selects the legacy clock path. Budgets remain unlimited in shipped
+configuration. Enabled host sessions consume this schedule for field pages, ground
+objects, weather, energy, foliage and resident water. Resident water uses the checked
 [regional continuation contract](regional-water-continuation.md). Diagnostics
 and measured budget activation remain separate qualification work.
 
@@ -340,7 +341,7 @@ expected component hashes on mismatch. Diagnostic sources, component values,
 compiler commands and predecessor source identities accompany the campaign receipt
 under `ci-investigation/`.
 
-The subsequent [ambient dispatch repair](https://github.com/d-addison/luminumbra/pull/172)
+The subsequent ambient dispatch repair
 caps both FBm and Simplex nodes in all three ambient systems at terrain's x86
 AVX2 ceiling, preserving lower-ISA fallback and native non-x86 selection. Its
 Debug/Release controls and native qualification retain their own source identities;

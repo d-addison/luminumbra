@@ -121,6 +121,8 @@ public:
                                     const world::WorldClock& clock,
                                     const std::filesystem::path& save_dir,
                                     std::vector<std::string>* errors = nullptr);
+    // Missing file: clear region state at absent_clock and preserve ledger.config().
+    // Present file: decode its persisted scheduler settings along with the region state.
     static bool load_active_regions(world::ActiveRegionLedger& ledger,
                                     const std::filesystem::path& save_dir,
                                     std::vector<std::string>* errors = nullptr,

@@ -92,6 +92,7 @@ protected:
     RegionalWaterFixture()
         : shield(nullptr, nullptr, Systems::TerrainGenParams{}, 1337)
         , water(nullptr, &shield) {
+        water.SetSimResolution(static_cast<int>(Systems::WaterDetailLevel::Medium));
         water.SetHydrology(true, 0, 0);
     }
     void Owner(RegionKey key) {
@@ -452,6 +453,7 @@ TEST_F(RegionalWaterFixture, SameRosterLateRefusalRetryMatchesFreshCacheComplete
     {
         // Warm both worlds identically; only the actual system retains its cache.
         Systems::WaterSystem warm_reference(nullptr, &reference_shield);
+        warm_reference.SetSimResolution(static_cast<int>(Systems::WaterDetailLevel::Medium));
         water.SetHydrology(true, 1, 0);
         warm_reference.SetHydrology(true, 1, 0);
         RegionSchedule warm_schedule;
@@ -544,6 +546,7 @@ TEST_F(RegionalWaterFixture, SameRosterLateRefusalRetryMatchesFreshCacheComplete
     ASSERT_EQ(CaptureWater(*a), valid_a);
     ASSERT_EQ(CaptureWater(*b), valid_b);
     Systems::WaterSystem cold(nullptr, &reference_shield);
+    cold.SetSimResolution(static_cast<int>(Systems::WaterDetailLevel::Medium));
     cold.SetHydrology(true, 0, 0);
     water.UpdateRegional(registry, chunks, ledger, schedule, work, 4 * kCapacity);
     cold.UpdateRegional(
@@ -775,6 +778,7 @@ TEST(RegionalWater, ZeroThroughThreeWindowsPreserveInteriorAndSealUnfundedPairs)
     for (const std::uint64_t windows : {0u, 1u, 2u, 3u}) {
         Systems::SHIELD_WorldSystem shield(nullptr, nullptr, Systems::TerrainGenParams{}, 1337);
         Systems::WaterSystem water(nullptr, &shield);
+        water.SetSimResolution(static_cast<int>(Systems::WaterDetailLevel::Medium));
         water.SetHydrology(true, 1, 0);
         ActiveRegionLedger ledger;
         ledger.mark_edited({0, 0}, WorldClock{});
@@ -823,6 +827,7 @@ TEST(RegionalWater, HugeGrantDiscardsCapacityWithoutRepeatingRainDampingSourceOr
     const auto run = [](std::uint64_t windows) {
         Systems::SHIELD_WorldSystem shield(nullptr, nullptr, Systems::TerrainGenParams{}, 1337);
         Systems::WaterSystem water(nullptr, &shield);
+        water.SetSimResolution(static_cast<int>(Systems::WaterDetailLevel::Medium));
         water.SetHydrology(true, 3, 2);
         ActiveRegionLedger ledger;
         ledger.mark_edited({0, 0}, WorldClock{});
@@ -994,6 +999,7 @@ TEST(RegionalWater, PermutedResidentsAndSourcesRetainCursorDebtPhysicalOrderAndE
     const auto run = [](bool reversed) {
         Systems::SHIELD_WorldSystem shield(nullptr, nullptr, Systems::TerrainGenParams{}, 1337);
         Systems::WaterSystem water(nullptr, &shield);
+        water.SetSimResolution(static_cast<int>(Systems::WaterDetailLevel::Medium));
         water.SetHydrology(true, 1, 0);
         ActiveRegionLedger ledger;
         ledger.mark_edited({0, 0}, WorldClock{});
@@ -1138,6 +1144,7 @@ TEST_F(RegionalWaterFixture, WorldLimitFacesDoNotWrapPackedIdentityAndBadCoordin
     chunks.push_back(WaterChunk({1048576, 0, 0}));
     const auto encoded = ledger.encode();
     Systems::WaterSystem fresh(nullptr, &shield);
+    fresh.SetSimResolution(static_cast<int>(Systems::WaterDetailLevel::Medium));
     RegionSchedule invalid;
     invalid.tick = ledger.tick();
     EXPECT_THROW(fresh.UpdateRegional(registry, chunks, ledger, invalid, work, 4 * kCapacity),
@@ -1190,6 +1197,7 @@ TEST_F(RegionalWaterFixture,
     schedule.due = {{0, 0}};
     restored_schedule.due = {{0, 0}};
     Systems::WaterSystem resumed(nullptr, &shield);
+    resumed.SetSimResolution(static_cast<int>(Systems::WaterDetailLevel::Medium));
     resumed.SetHydrology(true, 0, 0);
     std::vector<std::shared_ptr<Chunk>> copies;
     for (const auto& c : chunks) {

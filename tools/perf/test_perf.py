@@ -552,7 +552,7 @@ class PerfContractTest(unittest.TestCase):
                 ]
             )
             self.assertEqual(status, perf.UNEVALUATED)
-            self.assertEqual(json.loads(output.read_text())["status"], "unevaluated")
+            self.assertEqual(json.loads(output.read_text(encoding="utf-8"))["status"], "unevaluated")
 
 
 if __name__ == "__main__":

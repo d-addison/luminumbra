@@ -93,22 +93,15 @@ struct LocomotionProfile {
     f32 move_speed = 2.0f;     // m/s horizontal cruise speed
     f32 arrival_radius = 1.5f; // m; within this the agent is "arrived" and holds
     f32 slow_radius = 4.0f;    // m; linear arrival speed-ramp begins at this range
-    //  obstacle/crowd avoidance (Reynolds separation). DATA-FLAGGED OFF by
-    // default: separation_strength == 0 makes the avoidance term a no-op, so the
-    // canonical headless roster (which leaves these at 0) is byte-identical and
-    // world_hash is unchanged. Set > 0 per-archetype to keep agents from piling
-    // up on a shared target at scale (the 20-48-agent multiplayer scenes).
-    f32 separation_radius = 0.0f;   // m; neighbors within this push the agent away
-    f32 separation_strength = 0.0f; // 0 = off; >0 scales the avoidance vs the seek
-    //  flocking/herding: the other two Reynolds rules. Cohesion steers
-    // toward the local group's center of mass; alignment matches the group's mean
-    // heading. Both use flock_radius as the perception neighborhood and are
-    // DATA-FLAGGED OFF (strength 0) so the canonical roster stays byte-identical
-    // and world_hash is unchanged. Set all three (separation+cohesion+alignment)
-    // for true flocking; cohesion alone reads as loose herding.
-    f32 flock_radius = 0.0f;       // m; perception radius for cohesion + alignment
-    f32 cohesion_strength = 0.0f;  // 0 = off; pull toward neighbor center of mass
-    f32 alignment_strength = 0.0f; // 0 = off; match neighbor mean heading
+    // Crowd avoidance (Reynolds separation), enabled by default.
+    // Explicit strength zero disables this steering contribution.
+    f32 separation_radius = 2.0f;   // m; neighbors within this push the agent away
+    f32 separation_strength = 0.6f; // 0 = off; >0 scales the avoidance vs the seek
+    // Cohesion and alignment use flock_radius as their perception neighborhood.
+    // Each explicit zero strength disables its respective steering contribution.
+    f32 flock_radius = 12.0f;      // m; perception radius for cohesion + alignment
+    f32 cohesion_strength = 0.5f;  // 0 = off; pull toward neighbor center of mass
+    f32 alignment_strength = 0.4f; // 0 = off; match neighbor mean heading
 };
 
 // marks an entity OTHERS can sense (prey, predator, herd-mate). Pure

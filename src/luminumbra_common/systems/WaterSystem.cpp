@@ -129,19 +129,27 @@ constexpr std::int32_t EVAP_MM = 1; // cull <1mm films on non-source cells (dete
 // cross-chunk flux, which needs neighbour chunks' boundary cells to align cell-for-cell.
 // Chunks are 16 m across, so Medium (8x8) is 2 m cells and High (16x16 -> 1 m cells)
 // resolves a river channel. Visual mesh LOD, if wanted, stays a separate  concern.
-// The resolution lives in m_sim_resolution (default Medium); sim.water_high_res
-// raises a session to High ONCE at construction via SetSimResolution — never mid-run.
-// Perf: High (16) was ~4x and spiked the moving water phase to ~130ms; Medium is ~4x cheaper (~32ms
-// worst) and still uniform+deterministic. Cross-chunk flux REQUIRES a uniform resolution (boundary
-// cells must align). A mixed-resolution variant would require explicit seam resampling.
+// The resolution lives in m_sim_resolution (default High); explicit sim.water_high_res=false
+// selects Medium at construction via SetSimResolution — never mid-run.
+// With regional scheduling disabled, live solver steps share the 4096-cell budget:
+// 16 chunks at High, 64 at Medium.
+// High first-time grid seeding costs about 4x per chunk, amortized at six chunks per live tick;
+// live grid migration resizes one chunk per tick. Steady-state solver time is a few percent higher
+// (see docs/known-limitations.md). These caps do not bound resident-chunk scans or activity
+// scoring; boot settle seeds and simulates the full backlog, and world load migrates all mismatched
+// grids in one pass. Cross-chunk flux REQUIRES a uniform resolution (boundary cells must align). A
+// mixed-resolution variant would require explicit seam resampling.
+// Regional scheduling instead charges preparation, kernels and faces to budgeted
+// fixed-tick visits; loading preserves grids without stepping or bulk migration.
+// See docs/regional-water-continuation.md for window capacity and seam admission.
 
 // Per-tick rotating sim-window length in CHUNKS, derived from the cell budget at the single
 // uniform sim resolution. Medium (8x8 = 64 cells/chunk) -> 4096/64 = 64 chunks, identical to the
 // historical fixed 64-chunk window, so the persisted waterSimCursor semantics and the hashed
 // trajectory are untouched; only a resolution change re-derives it (High: 4096/256 = 16 chunks).
-// Derived at runtime from m_sim_resolution in update() — at the Medium default the
+// Derived at runtime from m_sim_resolution in update() — with explicit Medium the
 // values (64 cells/chunk, 64-chunk window) and arithmetic are identical to the old
-// constexpr pair, so the default trajectory is byte-identical.
+// constexpr pair, so the explicit Medium trajectory is byte-identical.
 
 namespace {
 
@@ -1575,7 +1583,7 @@ void WaterSystem::SetSimResolution(int cells_per_side) {
     // seam cells align cell-for-cell (see SetSimResolution's header contract). Reject
     // anything else and keep the current resolution — the caller wires this once from
     // sim.water_high_res before the first update, so a rejected value simply leaves
-    // the byte-identical Medium default in place.
+    // the current session resolution in place.
     if (cells_per_side <= 1 || CHUNK_SIZE_X % cells_per_side != 0 ||
         CHUNK_SIZE_Z % cells_per_side != 0) {
         return;

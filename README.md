@@ -14,7 +14,7 @@ the latest published source release is v0.2.1. Interfaces and content formats ma
 still change between releases. See the [coordinated roadmap](docs/roadmap.md) for
 release status and the populated engine/game milestones.
 
-The [September 13 recovery status](docs/roadmap.md#current-state) separates merged implementation, remaining verification and unpublished v0.3.0. The [recovery candidate](https://github.com/d-addison/luminumbra/pull/175) is undergoing integration checks; the [promotion gate](https://github.com/d-addison/luminumbra/pull/55) remains blocked on expanded acceptance.
+The [September 13 recovery status](docs/roadmap.md#current-state) separates merged implementation, remaining verification and unpublished v0.3.0. The recovery candidate is undergoing integration checks; the promotion gate remains blocked on expanded acceptance.
 
 ## v0.3.0 world format break
 
@@ -26,7 +26,7 @@ only metadata and no saved chunks. New world metadata declares `container_versio
 New saves use LMR1 container v2,
 the `luminumbra.persistence.world_manifest.v1` manifest with
 `container_version: 2`, and FSD2 far-LOD payload v3. Explicit preset `schema_rev`
-must be `6`; in-memory callers may omit it. Terrain shaping is always applied,
+uses `7` for new presets; `6` and omitted revisions retain historical omission defaults. Terrain shaping is always applied,
 and enabled caves always use the noise router. Content, hydrology, and biome
 controls remain available. Unknown future formats and corrupt data have distinct
 failures. See the [persistence contract](docs/engine-guide.md)

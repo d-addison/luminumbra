@@ -1,11 +1,12 @@
-﻿#include "GameSession.h"
+#include "GameSession.h"
 #include "../ai/CircadianSystem.h" // Diurnal and nocturnal activity.
 #include "../ai/CreatureBrainSystem.h"
 #include "../ai/CreatureReproductionSystem.h" // Generational evolution.
 #include "../ai/CreatureSpeciesRegistry.h"    // per-world species definitions
 #include "../ai/DecompositionSystem.h"        // Releases nutrients after death.
-#include "../ai/ForagingSystem.h"             // ant-trail foraging (Deneubourg double-bridge)
-#include "../ai/HerdAlarmSystem.h"            // Collective-vigilance alarm.
+#include "../ai/EcologyTuningConfig.h"
+#include "../ai/ForagingSystem.h"  // ant-trail foraging (Deneubourg double-bridge)
+#include "../ai/HerdAlarmSystem.h" // Collective-vigilance alarm.
 #include "../ai/InstinctLocomotionSystem.h"
 #include "../ai/InstinctSystem.h"
 #include "../ai/LifespanSystem.h"  // Age and starvation mortality.
@@ -17,6 +18,7 @@
 #include "../ai/ScentField.h"
 #include "../ai/ScentFieldGates.h"
 #include "../ai/ScentSteeringSystem.h"
+#include "../ai/SimTuningConfig.h"
 #include "../ai/SteeringConsumer.h" // Blends steering biases into desired motion.
 #include "../ai/StimulusChannels.h"
 #include "../ai/TerritorySystem.h"       // Home territory and homing bias.
@@ -196,7 +198,7 @@ void GameSession::ResetWorldSystems() {
     m_simulationClock.reset();
     m_simBudgetTelemetry.Clear();
     m_worldClock = WorldClock{};
-    m_activeRegionLedger = ActiveRegionLedger(m_regionSchedulerConfig);
+    ReplaceActiveRegionLedger(ActiveRegionLedger(m_regionSchedulerConfig));
     m_groundObjects.clear();
     m_fieldPages.clear();
     m_regionSchedule = {};
@@ -222,7 +224,7 @@ void GameSession::ResetWorldSystems() {
 // per-species behaviour block (IAUS "brain" overrides, "genome_ranges") defaults to the
 // compiled constants. The creature brain and reproduction systems consume the resolved entry;
 // absent or defaults-matching JSON remains byte-identical to compiled behaviour.
-// the deterministic weather-EVENT schedule read. OFF (the default)
+// the deterministic weather-EVENT schedule read. Explicit OFF
 // always returns Clear/0 — byte-identical for every existing consumer; ON resolves
 // WeatherEventAt(tick, worldSeed + 25) (the seed-offset registry slot the backlog
 // defines). Pure function — no state, no RNG, no wall-clock.
@@ -236,7 +238,7 @@ luminumbra::sim::WeatherEventState GameSession::CurrentWeatherEvent() const {
 
 //  ( == ): wire the weather system into the water solver's
 // per-cell rain when the owner opted in (sim.hydrology_weather -> SetWeatherRainEnabled).
-// Called from BOTH CreateWorld and LoadWorld after the systems exist. Default-OFF
+// Called from BOTH CreateWorld and LoadWorld after the systems exist. Explicit OFF
 // leaves the water solver's weather pointer null — byte-identical to pre-.
 void GameSession::ApplyWeatherRainWiring() {
     if (!m_worldSystem) {
@@ -251,18 +253,134 @@ void GameSession::ApplyWeatherRainWiring() {
     }
 }
 
+// Apply the same simulation gates and tuning before client/server world boot.
+void GameSession::ApplySystemConfig(const luminumbra::core::SystemConfig& config) {
+    m_appliedSystemConfig = config;
+    SetEcologyTuning(luminumbra::ai::ResolveEcologyTuning(config));
+    SetWeatherRainEnabled(config.enabled(luminumbra::core::SysKey::SimHydrologyWeather));
+    SetActiveRegionsEnabled(config.enabled(luminumbra::core::SysKey::SimActiveRegions));
+    SetWaterHighResEnabled(config.enabled(luminumbra::core::SysKey::SimWaterHighRes));
+    SetWeatherEventsEnabled(config.enabled(luminumbra::core::SysKey::SimWeatherEvents));
+    SetAetherStateEnabled(config.enabled(luminumbra::core::SysKey::SimAetherState));
+    SetWildlifeFoliageTuning(luminumbra::ai::ResolveWildlifeFoliageTuning(config));
+    SetThirstTuning(luminumbra::ai::ResolveThirstTuning(config));
+    SetScavengingTuning(luminumbra::ai::ResolveScavengingTuning(config));
+    SetForagingTuning(luminumbra::ai::ResolveForagingTuning(config));
+    SetReproductionTuning(luminumbra::ai::ResolveReproductionTuning(config));
+    SetCircadianAmplitude(luminumbra::ai::ResolveCircadianAmplitude(config));
+    SetPlantMutationRate(luminumbra::ai::ResolvePlantMutationRate(config));
+}
+
+std::map<std::string, bool> GameSession::EffectiveSimulationGates() const {
+    auto gates = m_appliedSystemConfig.SimulationGates();
+    gates["active_regions"] = m_activeRegionsEnabled;
+    gates["aether_state"] = m_aetherStateEnabled;
+    gates["water_high_res"] = m_waterHighResEnabled;
+    gates["hydrology_weather"] = m_weatherRainEnabled;
+    gates["weather_events"] = m_weatherEventsEnabled;
+    return gates;
+}
+
+std::string GameSession::SystemConfigIdentity() const {
+    using luminumbra::core::SysKey;
+    using luminumbra::core::SysParam;
+    luminumbra::core::SimulationIdentityValues values;
+    values.finite_hydrology_enabled = m_finiteHydrologyEnabled;
+    values.weather_rain_scale_mm = m_weatherRainScaleMm;
+    const auto& scheduler = m_activeRegionLedger.config();
+    values.region_work_limit = scheduler.work_limit;
+    values.region_hold_ticks = scheduler.hold_ticks;
+    values.region_reduced_shift = scheduler.reduced_shift;
+    // Tuning-only gates resolve to values in ApplySystemConfig; their flags are
+    // normalized to true. Erosion has no session gate. Preserve the canonical slots.
+    values.enabled[static_cast<std::size_t>(SysKey::SimHydrologyWeather)] = m_weatherRainEnabled;
+    values.enabled[static_cast<std::size_t>(SysKey::SimWeatherEvents)] = m_weatherEventsEnabled;
+    values.enabled[static_cast<std::size_t>(SysKey::SimAetherState)] = m_aetherStateEnabled;
+    values.enabled[static_cast<std::size_t>(SysKey::SimWaterHighRes)] = m_waterHighResEnabled;
+    values.enabled[static_cast<std::size_t>(SysKey::SimActiveRegions)] = m_activeRegionsEnabled;
+    values.scalars[static_cast<std::size_t>(SysParam::PlantMutationRate)] = m_plantMutationRate;
+    values.scalars[static_cast<std::size_t>(SysParam::EcoEnergyDrain)] =
+        m_ecologyTuning.energy_drain_per_second;
+    values.scalars[static_cast<std::size_t>(SysParam::EcoEnergyRestRecover)] =
+        m_ecologyTuning.energy_rest_recover;
+    values.scalars[static_cast<std::size_t>(SysParam::EcoEnergySleepRecover)] =
+        m_ecologyTuning.energy_sleep_recover;
+    values.scalars[static_cast<std::size_t>(SysParam::EcoHungerGrowth)] =
+        m_ecologyTuning.hunger_growth_per_second;
+    values.scalars[static_cast<std::size_t>(SysParam::EcoHungerGrazeSate)] =
+        m_ecologyTuning.hunger_graze_sate;
+    values.scalars[static_cast<std::size_t>(SysParam::EcoStaminaRestRecover)] =
+        m_ecologyTuning.stamina_rest_recover;
+    values.scalars[static_cast<std::size_t>(SysParam::EcoStaminaMoveDrain)] =
+        m_ecologyTuning.stamina_move_drain;
+    values.scalars[static_cast<std::size_t>(SysParam::EcoHerdWeight)] = m_ecologyTuning.herd_weight;
+    values.scalars[static_cast<std::size_t>(SysParam::EcoAlignmentWeight)] =
+        m_ecologyTuning.alignment_weight;
+    values.scalars[static_cast<std::size_t>(SysParam::EcoCatchRadius)] =
+        m_ecologyTuning.catch_radius;
+    values.scalars[static_cast<std::size_t>(SysParam::EcoCatchSatiation)] =
+        m_ecologyTuning.catch_satiation;
+    values.scalars[static_cast<std::size_t>(SysParam::EcoFlockNeighborRadius)] =
+        m_ecologyTuning.flock_neighbor_radius;
+    values.scalars[static_cast<std::size_t>(SysParam::EcoFlockSeparationRadius)] =
+        m_ecologyTuning.flock_separation_radius;
+    values.scalars[static_cast<std::size_t>(SysParam::EcoFlockCohesionWeight)] =
+        m_ecologyTuning.flock_cohesion_weight;
+    values.scalars[static_cast<std::size_t>(SysParam::EcoFlockSeparationWeight)] =
+        m_ecologyTuning.flock_separation_weight;
+    values.scalars[static_cast<std::size_t>(SysParam::WfGrazeRadius)] =
+        m_wildlifeFoliageTuning.graze_radius;
+    values.scalars[static_cast<std::size_t>(SysParam::WfGrazePerCreature)] =
+        m_wildlifeFoliageTuning.graze_per_creature;
+    values.scalars[static_cast<std::size_t>(SysParam::WfRegrowPerTick)] =
+        m_wildlifeFoliageTuning.regrow_per_tick;
+    values.scalars[static_cast<std::size_t>(SysParam::WfFeedPerGraze)] =
+        m_wildlifeFoliageTuning.feed_per_graze;
+    values.scalars[static_cast<std::size_t>(SysParam::ThirstRiseRate)] = m_thirstTuning.rise_rate;
+    values.scalars[static_cast<std::size_t>(SysParam::ThirstDrinkRate)] = m_thirstTuning.drink_rate;
+    values.scalars[static_cast<std::size_t>(SysParam::ThirstSeekThreshold)] =
+        m_thirstTuning.seek_threshold;
+    values.scalars[static_cast<std::size_t>(SysParam::ScavHungerThreshold)] =
+        m_scavengingTuning.hunger_threshold;
+    values.scalars[static_cast<std::size_t>(SysParam::ScavFeedRadius)] =
+        m_scavengingTuning.feed_radius;
+    values.scalars[static_cast<std::size_t>(SysParam::ScavFeedRate)] = m_scavengingTuning.feed_rate;
+    values.scalars[static_cast<std::size_t>(SysParam::ReproMaturityTicks)] =
+        m_reproductionTuning.maturity_ticks;
+    values.scalars[static_cast<std::size_t>(SysParam::ReproCooldownTicks)] =
+        m_reproductionTuning.cooldown_ticks;
+    values.scalars[static_cast<std::size_t>(SysParam::ReproHealthyStamina)] =
+        m_reproductionTuning.healthy_stamina;
+    values.scalars[static_cast<std::size_t>(SysParam::ReproMateSeekRadius)] =
+        m_reproductionTuning.mate_seek_radius;
+    values.scalars[static_cast<std::size_t>(SysParam::ReproCourtshipRadius)] =
+        m_reproductionTuning.courtship_radius;
+    values.scalars[static_cast<std::size_t>(SysParam::ReproCourtshipTicks)] =
+        m_reproductionTuning.courtship_ticks;
+    values.scalars[static_cast<std::size_t>(SysParam::ReproSpawnRadius)] =
+        m_reproductionTuning.spawn_radius;
+    values.scalars[static_cast<std::size_t>(SysParam::ForagingDeposit)] = m_foragingTuning.deposit;
+    values.scalars[static_cast<std::size_t>(SysParam::ForagingTrailWeight)] =
+        m_foragingTuning.trail_weight;
+    values.scalars[static_cast<std::size_t>(SysParam::ForagingGoalWeight)] =
+        m_foragingTuning.goal_weight;
+    values.scalars[static_cast<std::size_t>(SysParam::CircadianAmplitude)] = m_circadianAmplitude;
+    return values.ComputeIdentity();
+}
+
 // apply the session water-sim resolution when the owner opted in
 // (sim.water_high_res -> SetWaterHighResEnabled). Called from BOTH CreateWorld and
 // LoadWorld immediately after the water system is constructed and linked — before its
 // first update, because the uniform hashed grid resolution can never change mid-run.
-// Default-OFF never calls the setter: the solver keeps its Medium default, byte-identical.
+// Explicit OFF actively selects Medium; the shipping default selects High.
 void GameSession::ApplyWaterResolutionWiring() {
-    if (!m_worldSystem || !m_waterHighResEnabled) {
+    if (!m_worldSystem) {
         return;
     }
-    m_worldSystem->SetWaterSimResolution(static_cast<int>(Systems::WaterDetailLevel::High));
-    LUMINUMBRA_CORE_INFO(
-        "High-resolution water WIRED (16x16 grid, 1 m cells; 16-chunk sim window)");
+    m_worldSystem->SetWaterSimResolution(static_cast<int>(m_waterHighResEnabled
+                                                              ? Systems::WaterDetailLevel::High
+                                                              : Systems::WaterDetailLevel::Medium));
+    LUMINUMBRA_CORE_INFO("Water resolution wired: {}", m_waterHighResEnabled ? "High" : "Medium");
 }
 
 void GameSession::LoadSpeciesDefinitions() {
@@ -1149,16 +1267,36 @@ bool GameSession::CreateWorldInternal(const std::string& name,
         }
     }
 
-    // Customized world: embed the resolved preset in THIS world's own save dir and generate from
-    // it, so the world is self-contained (no global custom files / dangling references).
     fs::path preset_to_load = validation.preset_path;
-    if (customPresetJson) {
+    if (!transient) {
+        nlohmann::json resolved;
+        try {
+            if (customPresetJson) {
+                resolved = nlohmann::json::parse(*customPresetJson);
+            } else {
+                std::ifstream input(preset_to_load);
+                input >> resolved;
+            }
+        } catch (const nlohmann::json::exception& error) {
+            m_worldOpenError = "Could not parse this world's preset: " + std::string(error.what());
+            return false;
+        }
+        const auto validated =
+            LoadTerrainPresetFromJson(resolved, RuntimeRoot(m_rootPath) / "data");
+        if (!validated.ok) {
+            m_worldOpenError =
+                validated.errors.empty() ? "Invalid world preset." : validated.errors.front();
+            return false;
+        }
+        resolved = ResolveTerrainPresetDefaults(resolved);
+        // Materialize historical choices before upgrading the revision.
+        resolved["schema_rev"] = kTerrainPresetSchemaRevision;
         const fs::path world_preset = worldPath / "preset.json";
         std::ofstream pf(world_preset, std::ios::binary);
-        pf << *customPresetJson;
+        pf << resolved.dump(2) << '\n';
         pf.close();
         if (!pf.good()) {
-            m_worldOpenError = "Could not save this world's customized preset.";
+            m_worldOpenError = "Could not save this world's resolved preset.";
             return false;
         }
         preset_to_load = world_preset;
@@ -1171,10 +1309,12 @@ bool GameSession::CreateWorldInternal(const std::string& name,
         }
         return false;
     }
+    // Copies the immutable dependency snapshot with the identity's parameters.
     TerrainGenParams params = preset.params;
     ClampTerrainParams(params);
 
     ResetWorldSystems();
+    m_presetContentHash = preset.preset_content_hash;
     m_metadata = std::move(metadata);
     m_transientWorld = transient;
     m_physicsSystem = std::make_unique<Systems::PhysicsSystem>();
@@ -1203,10 +1343,11 @@ bool GameSession::CreateWorldInternal(const std::string& name,
     // 3. Link them together
     m_worldSystem->SetWaterSystem(m_waterSystem.get());
     m_waterSystem->SetRegionalScheduling(m_activeRegionsEnabled);
+    m_worldSystem->SetWaterHydrology(m_finiteHydrologyEnabled, 0, 0);
     LUMINUMBRA_CORE_INFO("World and water systems linked.");
 
     // sim.water_high_res: raise the solver to High BEFORE any chunk seeds
-    // (default-OFF = untouched Medium = byte-identical).
+    // (explicit OFF = selected Medium = byte-identical).
     ApplyWaterResolutionWiring();
 
     // 4.  : the deterministic wind field. Pure function of the world
@@ -1228,7 +1369,7 @@ bool GameSession::CreateWorldInternal(const std::string& name,
     LUMINUMBRA_CORE_INFO("Aether field system initialized.");
 
     // the stateful energy layer, constructed ONLY when
-    // sim.aether_state opted in (default OFF -> null -> byte-identical).
+    // sim.aether_state opted in (explicit OFF -> null -> byte-identical).
     InitializeEnergyFieldState();
 
     // Calculate appropriate spawn point based on actual terrain height
@@ -1248,7 +1389,7 @@ bool GameSession::CreateWorldInternal(const std::string& name,
     LoadSpeciesDefinitions();
 
     // wire weather-driven rain into the water solver when the
-    // owner opted in (sim.hydrology_weather via SetWeatherRainEnabled). Default-OFF =
+    // owner opted in (sim.hydrology_weather via SetWeatherRainEnabled). Explicit OFF =
     // null pointer = byte-identical.
     ApplyWeatherRainWiring();
 
@@ -1321,10 +1462,12 @@ bool GameSession::LoadWorld(const std::string& worldId) {
         }
         return false;
     }
+    // Saved-world adoption also keeps the loader's inputs through generation.
     TerrainGenParams params = preset.params;
     ClampTerrainParams(params);
 
     ResetWorldSystems();
+    m_presetContentHash = preset.preset_content_hash;
     m_metadata = saved.metadata;
     if (m_activeRegionsEnabled) {
         m_worldClock = saved.clock;
@@ -1346,10 +1489,11 @@ bool GameSession::LoadWorld(const std::string& worldId) {
     m_waterSystem = std::make_unique<Systems::WaterSystem>(m_jobSystem, m_worldSystem.get());
     m_worldSystem->SetWaterSystem(m_waterSystem.get());
     m_waterSystem->SetRegionalScheduling(m_activeRegionsEnabled);
+    m_worldSystem->SetWaterHydrology(m_finiteHydrologyEnabled, 0, 0);
 
     // sim.water_high_res: raise the solver to High BEFORE any chunk is adopted
-    // or seeded (default-OFF = untouched Medium = byte-identical). A loaded save
-    // at another resolution migrates in LoadWorldStateFrom's boot pass.
+    // or seeded (explicit OFF = selected Medium = byte-identical). Legacy loads
+    // migrate in the boot pass; regional loads resize on selected fixed-tick visits.
     ApplyWaterResolutionWiring();
 
     // The legacy path starts at zero. Active-region clocks restore the ambient
@@ -1401,7 +1545,7 @@ bool GameSession::LoadWorld(const std::string& worldId) {
         m_worldSystem->SetWaterSimWindowCursor(saved.water_sim_cursor);
     }
 
-    // same weather-rain wiring as CreateWorld (default-OFF = no-op).
+    // same weather-rain wiring as CreateWorld (explicit OFF = no-op).
     ApplyWeatherRainWiring();
 
     m_worldOpenError.clear();
@@ -1470,7 +1614,7 @@ bool GameSession::SetFoliageCell(const Vec3& position, bool soil, std::int32_t v
         ledger.mark_edited(ActiveRegionLedger::region_at(position), m_worldClock);
         if (!(soil ? pages.set_soil(cell, value) : pages.set_irrigation(cell, value)))
             return false;
-        m_activeRegionLedger = std::move(ledger);
+        ReplaceActiveRegionLedger(std::move(ledger));
         m_fieldPages = std::move(pages);
         return true;
     } catch (const std::exception& e) {
@@ -1548,7 +1692,7 @@ bool GameSession::AdmitPlantAt(entt::entity entity, std::uint64_t fresh_stamp) {
                 m_groundObjects,
                 error))
             return false;
-        m_activeRegionLedger = std::move(ledger);
+        ReplaceActiveRegionLedger(std::move(ledger));
         m_fieldPages = std::move(pages);
         growth.last_tick = fresh_stamp;
         m_registry.emplace<C::PlantRegionComponent>(entity, id, key.x, key.z, fresh_stamp);
@@ -1602,7 +1746,7 @@ void GameSession::PrepareRegionalFoliage() {
         if (!luminumbra::foliage::ActivateFoliagePage(pages, cell, soil))
             throw std::runtime_error("Foliage page admission cap");
         ledger.mark_edited(owner, m_worldClock);
-        m_activeRegionLedger = std::move(ledger);
+        ReplaceActiveRegionLedger(std::move(ledger));
         m_fieldPages = std::move(pages);
     };
     for (auto e : m_registry.view<C::PlantTag, C::SoilFeederComponent, C::TransformComponent>())
@@ -1667,7 +1811,7 @@ void GameSession::RunRegionalFoliageTick(
             if (!ledger.allocate_persistent_id(consumed))
                 break;
         }
-        m_activeRegionLedger = std::move(ledger);
+        ReplaceActiveRegionLedger(std::move(ledger));
         m_fieldPages.restore_foliage(std::move(pages));
         m_regionCompletedWork = std::move(work);
         m_registry = std::move(original);
@@ -2334,10 +2478,15 @@ void GameSession::AdvanceRegionalWeather(std::uint64_t tick) {
 void GameSession::SetRegionSchedulerConfig(RegionSchedulerConfig config) {
     if (m_worldSystem)
         throw std::logic_error("Set region scheduler configuration before creating a world");
-    m_activeRegionLedger = ActiveRegionLedger(config);
+    ReplaceActiveRegionLedger(ActiveRegionLedger(config));
+    m_regionSchedulerOverride = config;
     m_groundObjects.clear();
     m_fieldPages.clear();
-    m_regionSchedulerConfig = config;
+}
+void GameSession::ReplaceActiveRegionLedger(ActiveRegionLedger ledger) {
+    m_activeRegionLedger = std::move(ledger);
+    // Retain the effective settings when create/transient/reset clears region state.
+    m_regionSchedulerConfig = m_activeRegionLedger.config();
 }
 void GameSession::LatchRegionFault(std::uint64_t tick, std::string message) {
     if (m_regionFault)
@@ -2931,7 +3080,7 @@ bool GameSession::SaveWorldMetadataTo(const fs::path& save_dir) {
             transaction->defer_until_commit(
                 [this, expected_ledger, saved = std::move(saved_ledger)]() mutable {
                     if (m_activeRegionLedger.canonical_bytes() == expected_ledger)
-                        m_activeRegionLedger = std::move(saved);
+                        ReplaceActiveRegionLedger(std::move(saved));
                 });
         if (outer) {
             if (!outer->Commit())
@@ -3299,13 +3448,20 @@ bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
     if (m_activeRegionsEnabled) {
         const Vec3 previous_ambient_anchor = m_ambientFieldAnchor;
         m_ambientFieldAnchor = ambient_anchor.value_or(m_metadata.spawnPoint);
-        ActiveRegionLedger ledger;
+        ActiveRegionLedger ledger(m_activeRegionLedger.config());
         if (!Persistence::WorldSaveService::load_active_regions(
                 ledger, save_dir, &clock_errors, saved_clock)) {
             m_ambientFieldAnchor = previous_ambient_anchor;
             m_worldOpenError = clock_errors.empty()
                                    ? std::string(ActiveRegionLedger::kCorruptMessage)
                                    : clock_errors.front();
+            m_worldSystem->clear_world(m_physicsSystem.get());
+            return false;
+        }
+        if (m_regionSchedulerOverride && ledger.config() != *m_regionSchedulerOverride) {
+            m_ambientFieldAnchor = previous_ambient_anchor;
+            m_worldOpenError = "Incompatible configuration: persisted region scheduler differs "
+                               "from explicit override.";
             m_worldSystem->clear_world(m_physicsSystem.get());
             return false;
         }
@@ -3369,7 +3525,7 @@ bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
         }
         m_groundObjects = std::move(ground_objects);
         m_fieldPages = std::move(field_pages);
-        m_activeRegionLedger = std::move(ledger);
+        ReplaceActiveRegionLedger(std::move(ledger));
         if (!m_activeRegionLedger.local_anchor())
             m_activeRegionLedger.try_set_local_anchor(m_metadata.spawnPoint);
         m_regionDurableDirectory = save_dir;
@@ -3430,7 +3586,7 @@ bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
         }
     }
 
-    // boot-time water-resolution migration: a save written at another
+    // Legacy-path boot-time water-resolution migration: a save written at another
     // sim resolution (sim.water_high_res flipped between sessions) must converge
     // BEFORE the first live tick. Left to the live path it would resize at
     // MAX_WATER_RESIZES_PER_TICK=1 while the seam pass — which hard-gates on equal
@@ -3438,7 +3594,8 @@ bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
     // uncapped pass here (the boot-settle cap-lifting idea applied to resizes) is
     // deterministic: each chunk's integer-bilinear mm resample is a pure function of
     // its loaded state + worldgen + the session resolution. Matching saves resize
-    // nothing — the default path stays byte-identical.
+    // nothing. Regional loading preserves all grids; preparation happens only on
+    // a successful budgeted fixed-tick visit.
     if (!m_activeRegionsEnabled) {
         const std::size_t migrated = m_worldSystem->MigrateWaterSimResolution();
         if (migrated > 0) {

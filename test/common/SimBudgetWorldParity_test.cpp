@@ -7,6 +7,7 @@
 #include "luminumbra_common/components/PlantComponents.h"
 #include "luminumbra_common/persistence/SaveTransaction.h"
 #include "luminumbra_common/simulation/SimBudgetTelemetry.h"
+#include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 #include "luminumbra_common/world/GameSession.h"
 #include "luminumbra_server/ServerWorldRunner.h"
 
@@ -88,7 +89,8 @@ protected:
     void SetUp() override {
         root = Luminumbra::TestSupport::CreateUniqueTempDirectory("sim_budget_parity_");
         fs::create_directories(root / "worlds/atlas/presets");
-        fs::copy_file(fs::path(LUMINUMBRA_SOURCE_ROOT) / "worlds/atlas/presets/default.json",
+        // Telemetry neutrality uses a fixed historical terrain workload.
+        fs::copy_file(fs::path(LUMINUMBRA_SOURCE_ROOT) / "worlds/atlas/presets-rev6/default.json",
                       root / "worlds/atlas/presets/default.json");
         fs::create_directories(root / "data");
         fs::copy(fs::path(LUMINUMBRA_SOURCE_ROOT) / "data/common",
@@ -99,6 +101,11 @@ protected:
         {
             std::ifstream input(systems_path);
             input >> systems;
+        }
+        // Pin legacy simulation gates; the active-region axis remains exercised.
+        for (auto& entry : systems["sim"].items()) {
+            if (entry.value().is_object())
+                entry.value()["enabled"] = false;
         }
         systems["sim"]["active_regions"]["enabled"] = GetParam();
         std::ofstream(systems_path) << systems.dump(2) << '\n';
@@ -188,8 +195,15 @@ void SimBudgetWorldParity::RunPopulatedPass(bool telemetry,
     config.ecology_roster = true;
     config.planted_roster = true;
     config.sim_budget = telemetry;
+    config.autosave_interval_ticks = 0; // Saves are tested explicitly below.
+    config.finite_hydrology = false;
     Luminumbra::Server::ServerWorldRunner runner(config);
     ASSERT_TRUE(runner.Boot());
+    EXPECT_FALSE(runner.Session()->FiniteHydrologyEnabled());
+    EXPECT_EQ(runner.Session()->GetWorldSystem()->debug_water_sim_resolution(), 8);
+    EXPECT_FALSE(runner.Session()->WeatherRainEnabled());
+    EXPECT_FALSE(runner.Session()->WeatherEventsEnabled());
+    EXPECT_FALSE(runner.Session()->AetherStateEnabled());
     phases.Report("boot", runner.Session()->GetChunkValidationCacheStats());
     ASSERT_EQ(runner.Session()->ActiveRegionsEnabled(), GetParam());
     ASSERT_EQ(runner.Avatars().size(), 1u);
