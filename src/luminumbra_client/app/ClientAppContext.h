@@ -10,12 +10,14 @@
 // teardown contract that moved the UI hot-reload watcher into main() scope).
 
 #include "../../../include/luminumbra/core/Types.h"
+#include "app/RegionPanel.h"
 #include "luminumbra_common/ai/CreatureSpeciesRegistry.h"
 #include "luminumbra_common/animation/AnimationRuntime.h"
 #include "luminumbra_common/core/JobSystem.h"
 #include "luminumbra_common/game/Objectives.h"
 #include "luminumbra_common/game/PhotoMode.h"
 #include "luminumbra_common/systems/FarmingSystem.h"
+#include "player/InputActions.h"
 #include "rendering/LightningBolt.h"
 #include "rendering/ScentFieldRenderMirror.h"
 #include "rendering/SnowCoverModel.h"
@@ -24,12 +26,20 @@
 
 #include <glm/glm.hpp>
 
+#include <array>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <string>
 #include <unordered_map>
 #include <vector>
+
+struct GLFWwindow;
+
+namespace Luminumbra::Client {
+class PlayerController;
+}
 
 namespace Luminumbra::Client::App {
 
@@ -107,6 +117,15 @@ struct HudState {
 // Debug/dev overlay toggles: GPU profiler, shader panel + watcher, G-buffer
 // debug view, glass-pane capture subject, volumetrics tier, wireframe.
 struct OverlayState {
+    RegionPanelState region_panel;
+    bool region_panel_available = false;
+    bool region_panel_input_attached = false;
+    // Captured physical presses remain suppressed through close, until release.
+    std::array<bool, static_cast<std::size_t>(GLFW_KEY_LAST) + 1> region_panel_captured_keys{};
+    int region_panel_previous_cursor_mode = 0;
+    void (*region_panel_previous_mouse_button)(GLFWwindow*, int, int, int) = nullptr;
+    void (*region_panel_previous_cursor)(GLFWwindow*, double, double) = nullptr;
+    void (*region_panel_previous_scroll)(GLFWwindow*, double, double) = nullptr;
     bool show_gpu_profiler = false; // Live per-pass GPU profiler overlay.
     //  (live shader authoring):  = reload-all next frame (GL-thread safe);
     //  = the dev shader panel; the watcher is the opt-in once/sec mtime poll.
@@ -417,5 +436,30 @@ struct ClientAppContext {
     RuntimeTelemetryState telemetry;
     RenderBenchmarkState benchmark;
 };
+
+// Input capture replaces live movement with a neutral replay frame, preserving
+// walking gravity/collisions and scripted input paths. Queued movement actions
+// are discarded during capture. No session work is added.
+void UpdateGameplayPlayer(const RegionPanelState& panel,
+                          PlayerController& player,
+                          float delta_time);
+
+struct PlayerVerbPresses {
+    bool farmPlant = false;
+    bool farmWater = false;
+    bool farmFertilize = false;
+    bool farmHarvest = false;
+    bool farmCycleSpecies = false;
+    bool terraformDig = false;
+    bool terraformFill = false;
+};
+
+// Always reconcile physical edge latches, including during capture. Captured
+// presses cannot fire on close or repeat; release arms the next gameplay press.
+// A null reader uses GLFW; an explicit reader supplies deterministic input.
+PlayerVerbPresses PollPlayerVerbPresses(ClientAppContext& app,
+                                        GLFWwindow* window,
+                                        const PlayerController& player,
+                                        int (*read_key)(GLFWwindow*, int) = nullptr);
 
 } // namespace Luminumbra::Client::App

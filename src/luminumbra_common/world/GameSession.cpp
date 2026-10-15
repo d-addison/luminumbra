@@ -6,8 +6,8 @@
 #include "../ai/CreatureSpeciesRegistry.h"    // per-world species definitions
 #include "../ai/DecompositionSystem.h"        // Releases nutrients after death.
 #include "../ai/EcologyTuningConfig.h"
-#include "../ai/ForagingSystem.h"             // ant-trail foraging (Deneubourg double-bridge)
-#include "../ai/HerdAlarmSystem.h"            // Collective-vigilance alarm.
+#include "../ai/ForagingSystem.h"  // ant-trail foraging (Deneubourg double-bridge)
+#include "../ai/HerdAlarmSystem.h" // Collective-vigilance alarm.
 #include "../ai/InstinctLocomotionSystem.h"
 #include "../ai/InstinctSystem.h"
 #include "../ai/LifespanSystem.h"  // Age and starvation mortality.
@@ -206,6 +206,8 @@ void GameSession::ResetWorldSystems() {
     m_groundObjects.clear();
     m_fieldPages.clear();
     m_regionSchedule = {};
+    m_regionTransitions = {};
+    m_cachedRegionHashes = {};
     m_replicatedSimulationAnchors.reset();
     m_regionWork.clear();
     m_regionCompletedWork.clear();
@@ -2328,6 +2330,7 @@ void GameSession::RunRegionScheduler(std::uint64_t current_tick) {
                     }
                     return owned_regions.value().contains(key);
                 });
+            m_regionTransitions.Append(m_regionSchedule);
             m_regionWork.clear();
         } catch (const std::exception& error) {
             LatchRegionFault(current_tick, error.what());
@@ -2637,6 +2640,8 @@ void GameSession::SetRegionSchedulerConfig(RegionSchedulerConfig config) {
     if (m_worldSystem)
         throw std::logic_error("Set region scheduler configuration before creating a world");
     m_activeRegionLedger = ActiveRegionLedger(config);
+    m_regionTransitions = {};
+    m_cachedRegionHashes = {};
     m_groundObjects.clear();
     m_fieldPages.clear();
     m_regionSchedulerConfig = config;
@@ -2883,6 +2888,17 @@ void GameSession::AttachRegionEditObserver() {
             }
         });
     }
+}
+
+RegionWaterDiagnostics GameSession::ObserveRegionalWaterWork() const noexcept {
+    if (!m_waterSystem || !m_activeRegionsEnabled)
+        return {};
+    const auto& work = m_waterSystem->regional_work();
+    return {work.border_windows + work.allocated_windows,
+            work.border_windows + work.used_windows,
+            work.unused_windows,
+            work.unallocated_windows,
+            work.total_cells};
 }
 
 PersistenceStatus GameSession::GetPersistenceStatus() const {
@@ -3139,6 +3155,7 @@ bool GameSession::ComputeAuthorityWorldHashes(std::string& world_hash,
                                               const std::string& avatar_snapshot) {
     world_hash.clear();
     sub_hashes = {};
+    m_cachedRegionHashes.valid = false;
     if (!m_activeRegionsEnabled || m_regionFault)
         return false;
     const auto capture = CaptureAuthorityState(avatar_snapshot);
@@ -3149,6 +3166,13 @@ bool GameSession::ComputeAuthorityWorldHashes(std::string& world_hash,
     try {
         Persistence::ComputeAuthorityWorldHashes(
             *capture.state, m_ambientFieldAnchor, world_hash, sub_hashes);
+        m_cachedRegionHashes = {true,
+                                m_worldClock.tick(),
+                                world_hash,
+                                sub_hashes.regions,
+                                sub_hashes.creatures,
+                                sub_hashes.items,
+                                sub_hashes.pages};
         return true;
     } catch (const std::exception& error) {
         world_hash.clear();
@@ -4018,6 +4042,8 @@ bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
         m_regionDurableDirectory = save_dir;
         m_worldSystem->remember_durable_chunks(durable_inventory);
         m_regionSchedule = {};
+        m_regionTransitions = {};
+        m_cachedRegionHashes = {};
         m_regionWork.clear();
         m_regionCompletedWork.clear();
         m_regionFault.reset();

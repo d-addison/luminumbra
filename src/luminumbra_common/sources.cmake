@@ -109,6 +109,7 @@ set(COMMON_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/replay/RegionScheduleTrace.cpp
     ${CMAKE_CURRENT_LIST_DIR}/world/WorldClock.cpp
     ${CMAKE_CURRENT_LIST_DIR}/world/GameSession.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/world/RegionDiagnostics.cpp
     ${CMAKE_CURRENT_LIST_DIR}/world/GameSessionCreatures.cpp
     #  semantic-knob -> generation_params response table + persisted layer.
     ${CMAKE_CURRENT_LIST_DIR}/world/KnobLayer.cpp
