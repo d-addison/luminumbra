@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Device-free run_client controls, including a real child that outlives capture."""
+"""Device-free run_client controls with real and injected process timeouts."""
 import argparse
 import base64
 from contextlib import redirect_stderr
@@ -13,6 +13,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import types
 import unittest
 from unittest import mock
@@ -27,27 +28,29 @@ spec.loader.exec_module(runner)
 
 CHILD = r'''
 import base64, pathlib, sys, time
-artifact, payload, code, wait, loaders = sys.argv[1:]
+artifact, payload, code, loaders, ready = sys.argv[1:]
 if loaders == '1':
     print('Static-model textures registered (3 models).', flush=True)
     for part in ('trunk', 'branches', 'leaves'):
         print(f"tree_small_02_{part}.lmesh' (3 verts, 3 indices)", flush=True)
 if payload != '-':
     pathlib.Path(artifact).write_bytes(base64.b64decode(payload))
-if wait == '1':
-    time.sleep(30)
+if ready != '-':
+    print('A' * 20000, flush=True)
+    print('EnsureSurfaceReadyNear: draining generation jobs (near 0,0)...', flush=True)
+    print('EnsureSurfaceReadyNear/surface-build batch 3', flush=True)
+    print('unrelated trailing line', flush=True)
+    pathlib.Path(ready).touch()
+    while True:
+        time.sleep(1)
 sys.exit(int(code))
 '''
 
 
-SLOW_CHILD = r'''
-import sys, time
-print('A' * 20000, flush=True)
-print('EnsureSurfaceReadyNear: draining generation jobs (near 0,0)...', flush=True)
-print('EnsureSurfaceReadyNear/surface-build batch 3', flush=True)
-print('unrelated trailing line', flush=True)
-time.sleep(30)
-'''
+TIMEOUT_LOG = (b'A' * 20000 + b'\n'
+               b'EnsureSurfaceReadyNear: draining generation jobs (near 0,0)...\n'
+               b'EnsureSurfaceReadyNear/surface-build batch 3\n'
+               b'unrelated trailing line\n')
 
 
 class RenderRunnerEvidenceTests(unittest.TestCase):
@@ -71,6 +74,8 @@ class RenderRunnerEvidenceTests(unittest.TestCase):
         self.payload = b'{\n  "schema": "diagnostic_fixture", "frames": 4\n}\n'
         self.code = 0
         self.wait = False
+        self.real_timeout = True
+        self.children = []
         self.loaders = True
         self.process_exception = None
         self.original_run = subprocess.run
@@ -83,16 +88,55 @@ class RenderRunnerEvidenceTests(unittest.TestCase):
         self.assertFalse(kwargs['check'])
         artifact = command[command.index('--render-benchmark') + 1]
         payload = '-' if self.payload is None else base64.b64encode(self.payload).decode('ascii')
-        child_command = [sys.executable, str(self.child), artifact, payload,
-                         str(self.code), str(int(self.wait)), str(int(self.loaders))]
-        # Only the tiny fixture child gets a shorter timeout. Production argv,
-        # cwd, environment and the 180-second limit above are observed unchanged.
-        try:
-            return self.original_run(child_command, **dict(kwargs, timeout=0.75 if self.wait else 5))
-        except subprocess.TimeoutExpired as error:
+        if self.wait and not self.real_timeout:
+            if self.payload is not None:
+                Path(artifact).write_bytes(self.payload)
+            kwargs['stdout'].write(TIMEOUT_LOG)
+            kwargs['stdout'].flush()
+            error = subprocess.TimeoutExpired(command, kwargs['timeout'])
             self.process_exception = error
             self.process_exception_attributes = (error.cmd, error.timeout)
-            raise
+            raise error
+        ready = self.root / 'ready'
+        waiting = self.wait and self.real_timeout
+        child_command = [sys.executable, '-I', '-B', str(self.child), artifact, payload,
+                         str(self.code), str(int(self.loaders)),
+                         str(ready) if waiting else '-']
+        if waiting:
+            ready.unlink(missing_ok=True)
+            popen = subprocess.Popen
+
+            def start(*args, **options):
+                child = popen(*args, **options)
+                self.children.append(child)
+                wait = child.wait
+
+                def wait_for_timeout(timeout=None):
+                    if timeout is not None:
+                        # Only a deadlock detector: wait for the real child to
+                        # finish writing before requesting an immediate timeout.
+                        deadline = time.monotonic() + 60
+                        while not ready.exists():
+                            self.assertIsNone(child.poll(), 'child exited before capture')
+                            self.assertLess(time.monotonic(), deadline,
+                                            'child never became ready')
+                            time.sleep(0.01)
+                        self.assertIsNone(child.poll(), 'child must still be running')
+                        return wait(timeout=0)
+                    return wait()
+
+                child.wait = wait_for_timeout
+                child.kill = mock.Mock(wraps=child.kill)
+                return child
+
+            with mock.patch.object(subprocess, 'Popen', side_effect=start):
+                try:
+                    return self.original_run(child_command, **kwargs)
+                except subprocess.TimeoutExpired as error:
+                    self.process_exception = error
+                    self.process_exception_attributes = (error.cmd, error.timeout)
+                    raise
+        return self.original_run(child_command, **dict(kwargs, timeout=5))
 
     def paths(self, name='capture'):
         stem = 'test_traversal_twice-' + name
@@ -108,8 +152,26 @@ class RenderRunnerEvidenceTests(unittest.TestCase):
         self.assertIs(caught.exception, self.process_exception)
         self.assertEqual((caught.exception.cmd, caught.exception.timeout),
                          self.process_exception_attributes)
+        if self.real_timeout:
+            self.children[-1].kill.assert_called_once_with()
+            self.assertIsNotNone(self.children[-1].returncode, 'timed out child was not reaped')
 
     def test_timeout_retains_complete_capture_after_runtime_cleanup(self):
+        self.real_timeout = True
+        self.assert_retained_timeout_capture()
+        self.assertEqual(len(self.children), 1)
+        self.children[0].kill.assert_called_once_with()
+        self.assertIsNotNone(self.children[0].returncode, 'timed out child was not reaped')
+        self.assertEqual(self.receipt()['last_observed_phase'],
+                         'EnsureSurfaceReadyNear/surface-build batch 3')
+        self.assertEqual(len(self.receipt()['log_tail'].encode('utf-8')),
+                         runner.TIMEOUT_LOG_TAIL_BYTES)
+
+    def test_injected_timeout_retains_complete_capture_after_runtime_cleanup(self):
+        self.real_timeout = False
+        self.assert_retained_timeout_capture()
+
+    def assert_retained_timeout_capture(self):
         self.assert_timeout()
         shutil.rmtree(self.runtime)
         capture, receipt_path = self.paths()
@@ -349,33 +411,42 @@ class RenderRunnerEvidenceTests(unittest.TestCase):
         self.assertIn('timeout log read: fixture read refused', receipt['evidence_errors'])
 
     def test_timeout_reports_log_tail_and_last_observed_phase(self):
-        slow = self.root / 'slow_child.py'
-        slow.write_text(SLOW_CHILD)
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            self.assert_timeout()
+        self.assert_timeout_diagnostics(self.receipt(), stderr.getvalue())
+
+    def test_injected_timeout_reports_log_tail_and_last_observed_phase(self):
         log = self.root / 'timeout.log'
         artifact = self.root / 'timeout-capture.json'
         retained = self.root / 'timeout-retained.json'
         receipt_path = self.root / 'timeout-process.json'
-        original_run = self.original_run
+        error = subprocess.TimeoutExpired([sys.executable], 180)
 
-        def short_run(command, **kwargs):
-            kwargs['timeout'] = 2
-            return original_run(command, **kwargs)
+        def timeout(command, **kwargs):
+            self.assertEqual(kwargs['timeout'], 180)
+            kwargs['stdout'].write(TIMEOUT_LOG)
+            kwargs['stdout'].flush()
+            raise error
 
         stderr = io.StringIO()
-        with mock.patch.object(runner.subprocess, 'run', side_effect=short_run), \
+        with mock.patch.object(runner.subprocess, 'run', side_effect=timeout), \
                 redirect_stderr(stderr):
-            with self.assertRaises(subprocess.TimeoutExpired):
-                runner._run_process([sys.executable, str(slow)], cwd=self.root,
+            with self.assertRaises(subprocess.TimeoutExpired) as caught:
+                runner._run_process([sys.executable], cwd=self.root,
                                     environment=os.environ.copy(), log=log,
                                     artifact=artifact, retained=retained,
                                     receipt_path=receipt_path)
+        self.assertIs(caught.exception, error)
         receipt = json.loads(receipt_path.read_text())
+        self.assert_timeout_diagnostics(receipt, stderr.getvalue())
+
+    def assert_timeout_diagnostics(self, receipt, message):
         self.assertEqual(receipt['outcome'], 'timed_out')
         self.assertEqual(receipt['last_observed_phase'],
                          'EnsureSurfaceReadyNear/surface-build batch 3')
         self.assertEqual(len(receipt['log_tail'].encode('utf-8')), 8 * 1024)
         self.assertIn('unrelated trailing line', receipt['log_tail'])
-        message = stderr.getvalue()
         self.assertIn('render runner: timed out after', message)
         self.assertIn('unrelated trailing line', message)
         self.assertIn('EnsureSurfaceReadyNear/surface-build batch 3', message)

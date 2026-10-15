@@ -1,24 +1,31 @@
 #!/usr/bin/env python3
 """Parametrised client-process runner for render benchmark captures.
 
-Copy of the _file_sha256, _atomic_write, _retain_process_evidence and _run_process
-helpers and timeout diagnostics from test_render_runner.py, with the timeout
-passed in and recorded in the receipt. test_render_runner.py keeps its own copy
-with its fixed 180 s contract limit so its evidence tests stay unchanged;
-keep the two in step by hand.
+The timeout is passed in and recorded in the receipt. Shared output paths are
+locked through process execution and evidence publication. The device regression
+runner in test_render_runner.py keeps its fixed 180 s contract limit separately.
 """
+from contextlib import contextmanager
+import errno
 import hashlib
 import json
 import os
 import re
 from pathlib import Path
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
 import time
 
+if os.name == 'nt':
+    import msvcrt
+else:
+    import fcntl
+
 RECEIPT_SCHEMA = 'luminumbra.render_runner_process.v1'
+OUTPUT_LOCK_SUFFIX = '.lock'
 
 
 def file_sha256(path):
@@ -146,29 +153,202 @@ def resolve_executable(program, cwd, environment=None):
     return Path(os.path.abspath(found))
 
 
+def _output_identity(path):
+    """Return the shared destination identity after portable name validation."""
+    def validate_components(candidate):
+        for component in candidate.parts:
+            if component in (candidate.anchor, '.', '..'):
+                continue
+            if component.endswith(('.', ' ')):
+                raise OSError(errno.EINVAL, 'output path component ends in a dot or space',
+                              str(path))
+            if any(ord(char) < 32 or char in '<>:"|?*\\' for char in component):
+                raise OSError(errno.EINVAL, 'output path contains an invalid Windows character',
+                              str(path))
+            # Windows reserves devices even with extensions, including the
+            # superscript digits and spaces immediately before an extension.
+            stem = component.partition('.')[0].rstrip(' ').casefold()
+            if stem in ('con', 'prn', 'aux', 'nul', 'conin$', 'conout$') or (
+                    len(stem) == 4 and stem[:3] in ('com', 'lpt')
+                    and stem[3] in '123456789\u00b9\u00b2\u00b3'):
+                raise OSError(errno.EINVAL, 'output path contains a reserved Windows device name',
+                              str(path))
+
+    # Validate before resolving so that an unsafe component followed by '..'
+    # cannot disappear. Also validate the resolved parent of a directory symlink.
+    validate_components(path)
+    parent = path.parent.resolve()
+    validate_components(parent)
+    # Preserve the directory's actual spelling on case-sensitive filesystems;
+    # fold the destination name for every use of its identity, including locks.
+    identity = parent / path.name.casefold()
+    if identity.name.endswith(OUTPUT_LOCK_SUFFIX):
+        raise OSError(errno.EINVAL, 'output overlaps a lock sidecar', str(path))
+    return identity
+
+
+def _sidecar_stat(lock):
+    try:
+        metadata = lock.lstat()
+    except FileNotFoundError:
+        return None
+    if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+        raise OSError(errno.EINVAL, 'lock sidecar must be a regular file with one link',
+                      str(lock))
+    return metadata
+
+
+def _same_file(left, right):
+    return (left.st_dev, left.st_ino) == (right.st_dev, right.st_ino)
+
+
+def _open_sidecar(lock):
+    before = _sidecar_stat(lock)
+    flags = os.O_RDWR | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_NONBLOCK', 0)
+    if before is None:
+        # Exclusive creation also refuses a symlink installed after lstat.
+        flags |= os.O_CREAT | os.O_EXCL
+    descriptor = os.open(lock, flags, 0o600)
+    try:
+        opened = os.fstat(descriptor)
+        after = _sidecar_stat(lock)
+        if (not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1
+                or after is None or not _same_file(opened, after)
+                or (before is not None and not _same_file(opened, before))):
+            raise OSError(errno.EINVAL, 'lock sidecar changed during acquisition', str(lock))
+        handle = os.fdopen(descriptor, 'r+b')
+    except BaseException:
+        os.close(descriptor)
+        raise
+    return handle
+
+
+def _lock_handle(handle, path):
+    # Windows locks a byte range at the current position, including beyond EOF.
+    handle.seek(0)
+    try:
+        if os.name == 'nt':
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as error:
+        if error.errno not in (errno.EACCES, errno.EAGAIN, errno.EDEADLK):
+            raise
+        raise FileExistsError(errno.EEXIST, 'output is locked by another run',
+                              str(path)) from error
+
+
+def _check_output(path):
+    try:
+        before = path.lstat()
+    except FileNotFoundError:
+        return
+    if stat.S_ISLNK(before.st_mode):
+        raise OSError(errno.ELOOP, 'output must not be a symlink', str(path))
+    if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+        raise OSError(errno.EINVAL, 'output must be a regular file with one link', str(path))
+    # Probe the inode too: an older invocation may already hold this output as
+    # its lock through a sidecar symlink in an entirely different directory.
+    flags = (os.O_RDWR if os.name == 'nt' else os.O_RDONLY)
+    flags |= getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_NONBLOCK', 0)
+    descriptor = os.open(path, flags)
+    with os.fdopen(descriptor, 'rb') as handle:
+        opened = os.fstat(handle.fileno())
+        after = path.lstat()
+        if (not _same_file(opened, before) or not _same_file(opened, after)
+                or not stat.S_ISREG(after.st_mode)
+                or opened.st_nlink != 1 or after.st_nlink != 1):
+            raise OSError(errno.EINVAL, 'output changed during lock check', str(path))
+        _lock_handle(handle, path)
+        if os.name == 'nt':
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+
+
+@contextmanager
+def _output_locks(paths):
+    # Never follow the destination itself: replacing an output must not change
+    # its lock identity. Validate every path before any write-capable open.
+    paths = [(Path(path), _output_identity(Path(path))) for path in paths]
+    identities = [identity for path, identity in paths]
+    if len(set(identities)) != len(identities):
+        raise OSError(errno.EINVAL, 'output paths must be distinct')
+    paths.sort(key=lambda item: item[1])
+    for path, identity in paths:
+        _sidecar_stat(Path(str(identity) + OUTPUT_LOCK_SUFFIX))
+    for path, identity in paths:
+        _check_output(path)
+    locks = []
+    completed = False
+    try:
+        for path, identity in paths:
+            lock = Path(str(identity) + OUTPUT_LOCK_SUFFIX)
+            handle = _open_sidecar(lock)
+            locks.append((handle, False))
+            _lock_handle(handle, lock)
+            locks[-1] = (handle, True)
+            current = _sidecar_stat(lock)
+            if current is None or not _same_file(os.fstat(handle.fileno()), current):
+                raise OSError(errno.EINVAL, 'lock sidecar changed during acquisition', str(lock))
+        for path, identity in paths:
+            _check_output(path)
+        yield
+        completed = True
+    finally:
+        cleanup_error = None
+        for handle, acquired in reversed(locks):
+            try:
+                if os.name == 'nt' and acquired:
+                    handle.seek(0)
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            except OSError as error:
+                cleanup_error = error
+            try:
+                handle.close()
+            except OSError as error:
+                cleanup_error = error
+        if cleanup_error is not None and completed:
+            raise cleanup_error
+        # Never unlink lock files: contenders must keep opening the same inode.
+        # OS locks are released above or by the OS on process death.
+
+
 def run_process(command, *, cwd, environment, log, artifact, retained, receipt_path,
                 timeout_seconds=180):
     """Run one client process; return (CompletedProcess, evidence_errors).
 
     The executable is resolved once; the hash and the spawned argv[0] use that
-    same file. Raises FileNotFoundError before any process starts when unresolved,
-    and subprocess.TimeoutExpired or OSError after writing the receipt.
+    same file. Resolution and lock-acquisition refusals leave outputs unchanged.
+    Spawn and timeout failures attempt receipt publication before re-raising the
+    original exception. An active OS lock refuses the invocation; leftover lock
+    files are reusable after a crash. Symlink and overlapping outputs are refused;
+    the lock-sidecar suffix is reserved globally. Locks cover all outputs through
+    receipt publication.
     """
     artifact, retained, receipt_path, log = (Path(artifact), Path(retained),
                                              Path(receipt_path), Path(log))
     executable = resolve_executable(command[0], cwd, environment)
     command = [str(executable)] + list(command[1:])
+    with _output_locks((artifact, retained, receipt_path, log)):
+        return _run_process(command, cwd=cwd, environment=environment, log=log,
+                            artifact=artifact, retained=retained,
+                            receipt_path=receipt_path, timeout_seconds=timeout_seconds)
+
+
+def _run_process(command, *, cwd, environment, log, artifact, retained, receipt_path,
+                 timeout_seconds):
     # Retire only this case's exact outputs, including a repeated invocation in
     # the same runtime root. Never let an earlier capture appear current.
+    # The output-lock guard excludes every name in the reserved sidecar namespace.
     for path in (artifact, retained, receipt_path, log):
         path.unlink(missing_ok=True)
     receipt = dict(schema=RECEIPT_SCHEMA, command=command, cwd=str(cwd),
-                   binary_path=str(executable), binary_sha256=None,
+                   binary_path=command[0], binary_sha256=None,
                    timeout_seconds=timeout_seconds, elapsed_seconds=None,
                    outcome='spawn_error', return_code=None, capture_status='missing',
                    capture_path=None, capture_sha256=None, evidence_errors=[])
     try:
-        receipt['binary_sha256'] = file_sha256(executable)
+        receipt['binary_sha256'] = file_sha256(command[0])
         with log.open('wb') as output:
             started = time.monotonic()
             try:
