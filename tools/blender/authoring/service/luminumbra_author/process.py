@@ -471,7 +471,9 @@ def run_owned(command, payload, *, timeout, readiness_timeout=5, cancel=None,
     output, log = bytearray(), bytearray()
     ready, eof, stderr_done, writer_done, overflow = (threading.Event() for _ in range(5))
     failures, counts, threads = [], [0, 0], []
+    ready_size = 0
     def drain(stream, destination, index):
+        nonlocal ready_size
         prefix = bytearray()
         try:
             while True:
@@ -481,8 +483,13 @@ def run_owned(command, payload, *, timeout, readiness_timeout=5, cancel=None,
                 limit = 1024**2 if index == 0 else LOG_LIMIT
                 destination.extend(block[:max(0, limit-len(destination))])
                 if index == 0:
-                    if len(prefix) < 6: prefix.extend(block[:6-len(prefix)])
-                    if bytes(prefix) == b'READY\n': ready.set()
+                    if len(prefix) < 7: prefix.extend(block[:7-len(prefix)])
+                    # Text workers may emit either native line ending. Keep
+                    # the binary response intact after the exact marker.
+                    if not ready.is_set():
+                        if prefix[:6] == b'READY\n': ready_size = 6
+                        elif prefix == b'READY\r\n': ready_size = 7
+                        if ready_size: ready.set()
                     if counts[index] > limit: overflow.set()
         except (OSError, ValueError) as error: failures.append(error)
         finally:
@@ -522,7 +529,7 @@ def run_owned(command, payload, *, timeout, readiness_timeout=5, cancel=None,
             eof.wait(0.01) if process.poll() is not None else cancel.wait(0.01)
         require(not require_ready or ready.is_set(), 'worker.readiness', 'Worker exited before readiness.')
         require(process.returncode == 0 and not failures, 'worker.failed', 'Worker exited unsuccessfully or closed stdin.')
-        return {'stdout': bytes(output)[6:] if require_ready else bytes(output), 'log': bytes(log),
+        return {'stdout': bytes(output)[ready_size:] if require_ready else bytes(output), 'log': bytes(log),
                 'log_bytes': counts[1], 'log_truncated': counts[1] > LOG_LIMIT, 'returncode': process.returncode}
     finally:
         primary_error = sys.exc_info()[0] is not None

@@ -1,6 +1,6 @@
 """Static pin diagnostics and guarded launches of stdlib-only game fixtures."""
 from copy import deepcopy
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 import errno
 import json
 import os
@@ -707,6 +707,66 @@ class ScriptPins(unittest.TestCase):
         self.assertTrue(features["meshgen_configuration"])
         self.assertNotIn("max_tris_setting", features)
         self.assertNotIn("meshgen_execution", features)
+
+
+class WindowsPathVerification(unittest.TestCase):
+    def kernel(self, opened, final, attributes=0x10):
+        kernel = mock.Mock()
+        kernel.CreateFileW.return_value = 123
+        def name(value, buffer, size):
+            if buffer is None: return len(value)+1
+            buffer.value = value
+            return len(value)
+        kernel.GetLongPathNameW.side_effect = lambda path, buffer, size: name(opened, buffer, size)
+        kernel.GetFinalPathNameByHandleW.side_effect = lambda handle, buffer, size, flags: name(final, buffer, size)
+        def information(handle, kind, pointer, size):
+            if kind == 9: pointer._obj.attributes = attributes
+            return True
+        kernel.GetFileInformationByHandleEx.side_effect = information
+        return kernel
+
+    def test_short_names_case_separators_and_drive_roots_use_same_comparison(self):
+        from luminumbra_author import meshgen_scripts as scripts
+        for supplied, expanded, final in (
+                ('C:/', 'C:\\', '\\\\?\\C:\\'),
+                ('c:/users/LOCALU~1/Local', 'c:\\Users\\Local User\\Local',
+                 '\\\\?\\C:\\Users\\Local User\\Local'),
+                ('D:/Project/scripts', 'D:\\Project\\scripts', '\\\\?\\d:\\project\\SCRIPTS')):
+            with self.subTest(path=supplied):
+                kernel = self.kernel(expanded, final)
+                with mock.patch.object(scripts, '_windows_path_api', return_value=kernel):
+                    handle, identity = scripts._windows_directory(PureWindowsPath(supplied))
+                    self.assertEqual(handle, 123)
+                    self.assertEqual(scripts._windows_final_path(handle), scripts._windows_long_path(supplied))
+                kernel.CloseHandle.assert_not_called()
+                self.assertEqual(identity, (0, bytes(16)))
+                self.assertEqual(kernel.CreateFileW.call_args.args[2], 3)
+
+    def test_expansion_cannot_accept_a_different_handle_or_reparse_directory(self):
+        from luminumbra_author import meshgen_scripts as scripts
+        for final, attributes, rule in (
+                ('\\\\?\\D:\\Users\\Local User', 0x10, 'toolchain.script_path'),
+                ('\\\\?\\C:\\outside', 0x10, 'toolchain.script_path'),
+                ('\\\\?\\UNC\\server\\share', 0x10, 'toolchain.script_path'),
+                ('\\\\?\\C:\\Users\\Local User', 0x410, 'path.symlink'),
+                ('\\\\?\\C:\\Users\\Local User', 0, 'toolchain.script_path')):
+            with self.subTest(final=final, attributes=attributes):
+                kernel = self.kernel('C:\\Users\\Local User', final, attributes)
+                with mock.patch.object(scripts, '_windows_path_api', return_value=kernel):
+                    with self.assertRaises(Refusal) as caught:
+                        scripts._windows_directory(PureWindowsPath('C:/Users/LOCALU~1'))
+                self.assertEqual(caught.exception.finding['rule_id'], rule)
+                kernel.CloseHandle.assert_called_once_with(123)
+                if attributes & 0x400: kernel.GetLongPathNameW.assert_not_called()
+
+    def test_non_dos_and_traversal_spellings_are_refused_before_expansion(self):
+        from luminumbra_author import meshgen_scripts as scripts
+        for name in ('C:relative', '/relative', '//server/share/file', '//?/C:/file',
+                     'C:/project/../outside', 'C:/project/\x00file'):
+            with self.subTest(path=name), mock.patch.object(scripts, '_windows_path_api') as api:
+                with self.assertRaises(Refusal) as caught: scripts._windows_long_path(name)
+                self.assertEqual(caught.exception.finding['rule_id'], 'toolchain.script_path')
+                api.assert_not_called()
 
 
 if __name__ == "__main__":

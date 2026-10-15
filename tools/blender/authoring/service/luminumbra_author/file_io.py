@@ -157,8 +157,9 @@ def replace_file(temporary, path, *, durable=False, source_dir_fd=None, target_d
         os.replace(temporary, path, src_dir_fd=source_dir_fd, dst_dir_fd=target_dir_fd)
         return
     temporary, path = safe_path(temporary), safe_path(path)
-    require((allow_cross_directory or temporary.parent == path.parent) and temporary != path,
-            'Publication requires distinct files in verified directories')
+    require(allow_cross_directory or temporary.parent == path.parent,
+            'Publication requires same-directory files unless verified cross-directory staging is enabled')
+    require(temporary != path, 'Publication requires distinct files in verified directories')
     require(stat.S_ISREG(temporary.lstat().st_mode), 'Publication source requires a regular file')
     if path.exists():
         require(stat.S_ISREG(path.lstat().st_mode), 'Publication destination requires a regular file')

@@ -38,17 +38,22 @@ def finisher_envelope(toolchain, project, resolved, input_path, output_dir):
             and effective['finish']['uv']['method'] in ('smart_project', 'none'),
             'worker.unavailable', 'The requested native helper is unavailable.')
     require(effective['workers']['finisher']['cpu_threads'] <= 2, 'worker.limit', 'Finisher thread cap exceeded.')
-    project = Path(project).resolve()
+    project = Path(project).absolute()
     output = Path(output_dir).absolute()
-    require(output.is_relative_to(project/'.luminumbra-author-recipes'), 'candidate.path', 'Worker scratch must be in project state.')
     raw = Path(input_path).absolute()
-    require('..' not in raw.parts and '..' not in output.parts, 'candidate.path', 'Worker traversal is unsupported.')
-    require(raw.is_relative_to(project/'.luminumbra-author-recipes'), 'candidate.path', 'Worker inputs must be retained project state.')
+    require(all('..' not in path.parts for path in (project, raw, output)),
+            'candidate.path', 'Worker traversal is unsupported.')
     from . import file_io
     try:
-        file_io.safe_path(raw); file_io.safe_path(output)
+        file_io.safe_path(project); file_io.safe_path(raw); file_io.safe_path(output)
     except ValueError as error:
         raise Refusal('candidate.path', 'Worker paths cannot use reparse points.') from error
+    # Normalize existing DOS aliases only after traversal/reparse refusal;
+    # scratch leaves need not exist yet.
+    project, raw, output = project.resolve(), raw.resolve(), output.resolve()
+    require(raw.is_relative_to(project/'.luminumbra-author-recipes')
+            and output.is_relative_to(project/'.luminumbra-author-recipes'),
+            'candidate.path', 'Worker paths must remain in project state.')
     request = {'effective_config_path': str(output/'effective_config.json'),
                'effective_config_sha256': resolved.stored_sha256, 'config_digest': resolved.config_digest,
                'input_glb': str(raw), 'output_dir': str(output),
@@ -120,7 +125,7 @@ def _supervisor():
     threading.Thread(target=watch_owner, daemon=True).start()
     # Propagate readiness only after the owned child verifies its stored config.
     result = run_owned(command('_simulator'), canonical(request)+b'\n', timeout=request['timeout'],
-                       readiness_timeout=min(5, request['timeout']), cancel=cancelled, ready_callback=lambda: print('READY', flush=True),
+                       readiness_timeout=min(5, request['timeout']), cancel=cancelled, ready_callback=_ready,
                        memory_mib=request['memory_mib'], own_tree=os.name == 'nt')
     sys.stdout.buffer.write(result['stdout']); sys.stdout.buffer.flush()
     sys.stderr.buffer.write(result['log']); sys.stderr.buffer.flush()
@@ -133,7 +138,7 @@ def _simulator():
     mode = request['mode']
     if mode == 'no_ready':
         threading.Event().wait(request['timeout']+1); return 0
-    print('READY', flush=True)
+    _ready()
     if mode == 'crash': return 7
     if mode in ('hang', 'descendant'):
         if mode == 'descendant':
@@ -156,6 +161,10 @@ def _simulator():
     print(canonical({'simulated': True, 'config_digest': request['config_digest'],
           'effective_config_sha256': request['stored_sha256'], 'observations': observations}).decode(), flush=True)
     return 0
+
+
+def _ready():
+    sys.stdout.buffer.write(b'READY\n'); sys.stdout.buffer.flush()
 
 
 def main():

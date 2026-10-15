@@ -21,7 +21,8 @@ from .meshgen_contracts import (STATE_ROOT, SEALED_REQUIRED, SEALED_OPTIONAL, CA
 from .meshgen_jobs import durable_replace_directory, reject_secret, configured_tokens
 from .meshgen_metrics import inspect_artifact
 from .meshgen_provenance import make_receipt
-from .meshgen_scripts import (_posix_open, _windows_directory, _windows_path_api, _windows_final_path)
+from .meshgen_scripts import (_posix_open, _windows_directory, _windows_path_api,
+                             _windows_final_path, _windows_long_path)
 
 MAX_JSON = 1024**2
 MAX_MEMBERS = 20
@@ -57,7 +58,7 @@ def read_member(root, name, limit):
                     stack.callback(_windows_path_api().CloseHandle, handle)
                 stream = stack.enter_context(file_io.open_regular_reader(root/name))
                 import msvcrt
-                require(_windows_final_path(msvcrt.get_osfhandle(stream.fileno())) == (root/name).as_posix().casefold(),
+                require(_windows_final_path(msvcrt.get_osfhandle(stream.fileno())) == _windows_long_path(root/name),
                         'candidate.path', 'Member handle escaped its directory.')
                 require(os.fstat(stream.fileno()).st_nlink == 1, 'candidate.path', 'Hard-linked members are refused.')
             before = file_io.reader_identity(stream)
@@ -179,7 +180,7 @@ class RetainedDirectories:
                 require(stat.S_ISDIR(info.st_mode) and (info.st_dev, info.st_ino) == identity,
                         'candidate.path', 'Publication ancestor identity changed.')
             else:
-                require(_windows_final_path(handle) == path.as_posix().casefold(),
+                require(_windows_final_path(handle) == _windows_long_path(path),
                         'candidate.path', 'Publication ancestor moved.')
 
     def directory(self, path):

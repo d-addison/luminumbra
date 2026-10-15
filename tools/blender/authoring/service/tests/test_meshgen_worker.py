@@ -76,6 +76,28 @@ class WorkerSupervision(unittest.TestCase):
         self.refusal('worker.timeout', lambda: run_owned([sys.executable, '-I', '-S', '-B', '-c',
             'import threading; threading.Event().wait(60)'], b'x'*65536, timeout=1, clock=Clock(), require_ready=False))
 
+    def test_readiness_line_endings_split_reads_preserve_binary_response(self):
+        import luminumbra_author.process as owner
+        popen = subprocess.Popen
+        class ByteReader:
+            def __init__(self, stream): self.stream = stream
+            def __getattr__(self, name): return getattr(self.stream, name)
+            def read(self, size): return self.stream.read(min(size, 1))
+        def spawn(*args, **kwargs):
+            process = popen(*args, **kwargs)
+            process.stdout = ByteReader(process.stdout)
+            return process
+        payload = b'\x00\r\nREADY\n\xff'
+        for marker in (b'READY\n', b'READY\r\n', b'READY\r', b'READY\r\r\n', b'XREADY\n'):
+            with self.subTest(marker=marker), patch.object(owner.subprocess, 'Popen', side_effect=spawn):
+                source = ('import sys; sys.stdin.buffer.readline(); '
+                          f'sys.stdout.buffer.write({marker+payload!r}); sys.stdout.buffer.flush()')
+                call = lambda: run_owned([sys.executable, '-I', '-S', '-B', '-c', source], b'{}\n', timeout=5)
+                if marker in (b'READY\n', b'READY\r\n'):
+                    self.assertEqual(call()['stdout'], payload)
+                else:
+                    self.refusal('worker.readiness', call)
+
     def test_pinned_game_script_envelope_recheck_and_native_lane_unavailable(self):
         (self.root/'processor').write_bytes(b'not executed')
         script = self.root/'scripts'/'finish.py'; script.parent.mkdir(); script.write_text('import bpy\nfrom helper import run\n')
@@ -89,6 +111,10 @@ class WorkerSupervision(unittest.TestCase):
         self.assertEqual(envelope['memory_mib'], 4096)
         for flag in ('--factory-startup', '--disable-autoexec', '--threads'): self.assertIn(flag, envelope['blender_args'])
         self.assertEqual(len(envelope['resource_environment']), 3)
+        for raw, output in ((self.root/'escaped.glb', self.root/'.luminumbra-author-recipes'/'scratch'),
+                            (self.root/'.luminumbra-author-recipes'/'raw.glb', self.root/'escaped'),
+                            (self.root/'.luminumbra-author-recipes'/'..'/'raw.glb', self.root/'.luminumbra-author-recipes'/'scratch')):
+            self.refusal('candidate.path', lambda: finisher_envelope(toolchain, self.root, self.resolved, raw, output))
         helper.write_text('def run(): return 42\n')
         self.refusal('toolchain.changed', lambda: finisher_envelope(toolchain, self.root, self.resolved, self.root/'.luminumbra-author-recipes'/'raw.glb', self.root/'.luminumbra-author-recipes'/'scratch'))
         self.refusal('worker.unavailable', run_native)
