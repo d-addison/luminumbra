@@ -1536,12 +1536,20 @@ void ScenarioRunnerImpl::captureFarLodHorizon(std::chrono::steady_clock::time_po
                                               farlod_horizon_station_started_at)
                     .count();
             const auto& fw = renderPipeline.far_world_diagnostic();
+            const auto selection = renderPipeline.far_world_selection();
+            const auto& saved_renderer = renderPipeline.saved_far_world_renderer();
+            const bool saved_observation = saved_renderer.Handoff() != nullptr;
             auto& expected = farlod_horizon_expected_tiles;
             const bool expected_ok = Luminumbra::World::ComputeFarWantedSet(
                                          g_camera->Position.x, g_camera->Position.z, expected) ==
                                      Luminumbra::World::FarWantedError::None;
             bool station_ready = false;
-            if (fw.selection.effective == Luminumbra::Rendering::FarWorldMode::Ladder)
+            if (saved_observation) {
+                station_ready = expected_ok && SavedFarStationReady(saved_renderer.Diagnostic(),
+                                                                    selection,
+                                                                    expected,
+                                                                    settle_seconds);
+            } else if (fw.selection.effective == Luminumbra::Rendering::FarWorldMode::Ladder)
                 station_ready = expected_ok && Luminumbra::Rendering::FarWorldStationReady(
                                                    fw, expected, settle_seconds);
             else if (const auto* legacy = renderPipeline.legacy_far_compatibility())
@@ -1597,6 +1605,11 @@ void ScenarioRunnerImpl::captureFarLodHorizon(std::chrono::steady_clock::time_po
                     capture.station = farlod_horizon_stations[station_index];
                     // Value copy retains water capability/readiness/submission across far OFF.
                     capture.far_world = fw;
+                    capture.selected_far_world = selection;
+                    if (saved_observation)
+                        capture.saved_far_world =
+                            Luminumbra::Rendering::FarWorldHandoffDiagnosticJson(
+                                saved_renderer.Diagnostic());
                     capture.settle_seconds = settle_seconds;
                     capture.ready_within_deadline = station_ready;
                     //  record the resolved eye world position so the

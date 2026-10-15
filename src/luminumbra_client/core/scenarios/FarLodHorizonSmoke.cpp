@@ -168,6 +168,114 @@ bool ProjectWorldPointToScreenRow(const Luminumbra::Rendering::Camera& camera,
 
 } // namespace
 
+bool CaptureSavedFarHorizonPublication(
+    Luminumbra::world::GameSession& session,
+    Luminumbra::world::FarWorldPublicationRequest request,
+    SavedFarHorizonSupport& support,
+    std::shared_ptr<const Luminumbra::world::FarWorldPublication>& output,
+    std::string& diagnostic) {
+    const bool same_binding = support.world_epoch == request.world_epoch &&
+                              support.caves == request.caves &&
+                              std::equal(support.wanted.begin(),
+                                         support.wanted.end(),
+                                         request.wanted.begin(),
+                                         request.wanted.end());
+    auto terrain_height = same_binding ? support.terrain_height : std::optional<float>{};
+    const bool eye_captured = same_binding && support.eye_captured;
+    if (!terrain_height) {
+        const auto* world = session.GetWorldSystem();
+        if (!world) {
+            diagnostic = "horizon capture requires terrain authority";
+            return false;
+        }
+        const auto spawn = session.GetMetadata().spawnPoint;
+        const float height = world->GetTerrainHeightAt(spawn.x, spawn.z);
+        if (!std::isfinite(height)) {
+            diagnostic = "horizon capture requires finite terrain height";
+            return false;
+        }
+        terrain_height = height;
+    }
+    const auto stations = BuildFarLodHorizonStations();
+    const float eye_height =
+        eye_captured ? stations.back().eye_height_meters : stations.front().eye_height_meters;
+    // Match the production camera band, including its +/-16 m incremental margin.
+    request.camera_y = std::floor((*terrain_height + eye_height) / 32.0f) * 32.0f + 16.0f;
+    std::shared_ptr<const Luminumbra::world::FarWorldPublication> next;
+    if (!session.CaptureFarWorldPublication(request, next, diagnostic))
+        return false;
+    if (!eye_captured) {
+        support.terrain_height = terrain_height;
+        support.world_epoch = request.world_epoch;
+        support.caves = request.caves;
+        support.wanted.assign(request.wanted.begin(), request.wanted.end());
+        support.eye_captured = true;
+        return false; // Seed history only; the first bound target must cover both bands.
+    }
+    output = std::move(next);
+    return true;
+}
+
+bool SavedFarStationReady(const Luminumbra::Rendering::FarWorldHandoffDiagnosticSnapshot& snapshot,
+                          const Luminumbra::Rendering::FarWorldSelection& selection,
+                          std::span<const Luminumbra::World::FarTileKey> expected,
+                          double settle_seconds) {
+    if (selection.requested != Luminumbra::Rendering::FarWorldMode::Ladder || !selection.advance ||
+        !selection.submit || selection.effective != Luminumbra::Rendering::FarWorldMode::Ladder ||
+        selection.refusal != Luminumbra::Rendering::FarWorldRefusal::None ||
+        snapshot.tile_count > snapshot.tiles.size() ||
+        snapshot.draw_count > snapshot.draws.size() || snapshot.submission.refused != 0 ||
+        snapshot.submission.draws != snapshot.draw_count ||
+        !Luminumbra::Rendering::FarWorldHandoffTargetReady(snapshot) ||
+        !std::isfinite(settle_seconds) || settle_seconds < 0 || settle_seconds > 90)
+        return false;
+    std::vector<Luminumbra::World::FarTileKey> target_keys;
+    std::vector<Luminumbra::World::FarTileKey> drawable_keys;
+    for (std::size_t i = 0; i < snapshot.tile_count; ++i) {
+        const auto& tile = snapshot.tiles[i];
+        if (tile.observation.target) {
+            target_keys.push_back(tile.key);
+            if (tile.observation.target_terrain_indices != 0 ||
+                tile.observation.target_water_indices != 0)
+                drawable_keys.push_back(tile.key);
+        }
+    }
+    std::vector<Luminumbra::World::FarTileKey> submitted_keys;
+    std::uint64_t indices = 0, water_indices = 0;
+    for (std::size_t i = 0; i < snapshot.draw_count; ++i) {
+        const auto& draw = snapshot.draws[i];
+        const auto end = snapshot.tiles.begin() + snapshot.tile_count;
+        const auto tile = std::find_if(snapshot.tiles.begin(), end, [&](const auto& value) {
+            return value.observation.target && value.observation.target->identity == draw.identity;
+        });
+        if (!draw.submitted || tile == end ||
+            (tile->observation.target_terrain_indices == 0 &&
+             tile->observation.target_water_indices == 0))
+            return false;
+        submitted_keys.push_back(tile->key);
+        const auto terrain = tile->observation.target_terrain_indices;
+        const auto water = tile->observation.target_water_indices;
+        const auto maximum = std::numeric_limits<std::uint64_t>::max();
+        if (terrain > maximum - water || indices > maximum - terrain - water ||
+            water_indices > maximum - water)
+            return false;
+        indices += terrain + water;
+        water_indices += tile->observation.target_water_indices;
+    }
+    if (snapshot.submission.indices != indices ||
+        snapshot.submission.water_indices != water_indices)
+        return false;
+    std::sort(target_keys.begin(), target_keys.end());
+    std::sort(drawable_keys.begin(), drawable_keys.end());
+    std::sort(submitted_keys.begin(), submitted_keys.end());
+    if (drawable_keys != submitted_keys ||
+        std::adjacent_find(target_keys.begin(), target_keys.end()) != target_keys.end())
+        return false;
+    std::vector<Luminumbra::World::FarTileKey> expected_keys(expected.begin(), expected.end());
+    std::sort(expected_keys.begin(), expected_keys.end());
+    return target_keys == expected_keys;
+}
+
 std::vector<FarLodHorizonStation> BuildFarLodHorizonStations() {
     // Four eye-level yaw stations spanning the boundary ring in every
     // direction, plus an elevated station looking down across the boundary
@@ -947,6 +1055,50 @@ WriteLegacyFarLodHorizonAnalysis(const std::filesystem::path& artifact_dir,
     return oracle;
 }
 
+namespace {
+void WriteSavedFarHorizonAnalysis(const std::filesystem::path& artifact_dir,
+                                  const std::string& world_preset,
+                                  const std::vector<FarLodHorizonStationCapture>& captures,
+                                  std::size_t expected_station_count) {
+    nlohmann::json rows = nlohmann::json::array();
+    bool complete = !captures.empty() && captures.size() == expected_station_count;
+    for (const auto& capture : captures) {
+        complete = complete && !capture.saved_far_world.is_null() &&
+                   capture.ready_within_deadline && capture.paired_capture_preserved;
+        rows.push_back(
+            {{"name", capture.station.name},
+             {"camera",
+              {{"world_x", capture.camera_world_x},
+               {"world_y", capture.camera_world_y},
+               {"world_z", capture.camera_world_z},
+               {"yaw_degrees", capture.camera_yaw_degrees},
+               {"pitch_degrees", capture.camera_pitch_degrees}}},
+             {"requested_mode",
+              Luminumbra::Rendering::FarWorldModeName(capture.selected_far_world.requested)},
+             {"effective_mode",
+              Luminumbra::Rendering::FarWorldModeName(capture.selected_far_world.effective)},
+             {"selection_refused",
+              capture.selected_far_world.refusal != Luminumbra::Rendering::FarWorldRefusal::None},
+             {"selection_advance", capture.selected_far_world.advance},
+             {"selection_submit", capture.selected_far_world.submit},
+             {"settle_seconds", capture.settle_seconds},
+             {"ready_within_deadline", capture.ready_within_deadline},
+             {"paired_capture_preserved", capture.paired_capture_preserved},
+             {"snapshot", capture.saved_far_world}});
+    }
+    std::error_code ec;
+    std::filesystem::create_directories(artifact_dir, ec);
+    std::ofstream output(artifact_dir / "farlod-horizon-edited-oracle.json");
+    output << std::setw(2)
+           << nlohmann::json{{"schema", "luminumbra.farlod_horizon.edited.v1"},
+                             {"world_preset", world_preset},
+                             {"expected_stations", expected_station_count},
+                             {"stations", std::move(rows)},
+                             {"complete", complete}}
+           << '\n';
+}
+} // namespace
+
 void WriteFarLodHorizonAnalysis(const std::filesystem::path& artifact_dir,
                                 const std::string& world_preset,
                                 double duration_seconds,
@@ -956,6 +1108,12 @@ void WriteFarLodHorizonAnalysis(const std::filesystem::path& artifact_dir,
                                 double far_gbuffer_gpu_ms,
                                 bool gpu_timers_supported,
                                 bool enforce_sky_ratio) {
+    if (std::any_of(captures.begin(), captures.end(), [](const auto& capture) {
+            return !capture.saved_far_world.is_null();
+        })) {
+        WriteSavedFarHorizonAnalysis(artifact_dir, world_preset, captures, expected_station_count);
+        return;
+    }
     const auto mode = captures.empty() ? Luminumbra::Rendering::FarWorldMode::Legacy
                                        : captures.back().far_world.selection.effective;
     // V1 is exclusively historical Legacy evidence, including refused requests.
