@@ -26,6 +26,7 @@ RULES_LIMIT = 1024 * 1024
 CHECKS_LIMIT = 16 * 1024 * 1024
 DEPTH_LIMIT = 32
 MAIN_HISTORY_LIMIT = 100_000
+GIT_STDERR_LIMIT = 4096
 SHA = re.compile(r"[0-9a-fA-F]{40}")
 VERSION = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+")
 
@@ -207,12 +208,19 @@ def validate_check_runs(pages: object, contexts: tuple[str, ...], commit: str) -
 
 
 def git(root: Path, *arguments: str) -> bytes:
-    # Ignore location overrides and replacement objects when checking ancestry.
-    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    # Ignore inherited location overrides and configuration, and replacement objects.
+    # System/global settings must not affect read-only qualification checks.
+    env = {key: value for key, value in os.environ.items() if not key.upper().startswith("GIT_")}
+    env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull)
     result = subprocess.run(["git", "--no-replace-objects", "-C", str(root), *arguments],
                             env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                             check=False)
-    require(result.returncode == 0, f"Git prerequisite failed: {' '.join(arguments)}")
+    if result.returncode != 0:
+        detail = result.stderr[:GIT_STDERR_LIMIT].decode("utf-8", errors="replace").strip()
+        if len(result.stderr) > GIT_STDERR_LIMIT:
+            detail += "\n[stderr truncated]"
+        message = f"Git prerequisite failed: {' '.join(arguments)} (exit {result.returncode})"
+        raise GateError(f"{message}: {detail}" if detail else message)
     return result.stdout
 
 

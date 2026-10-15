@@ -303,6 +303,43 @@ class ApiTests(unittest.TestCase):
                                      ("Linux",), COMMIT)
 
 
+class GitCommandTests(unittest.TestCase):
+    def test_git_errors_include_bounded_stderr_with_replacement_decoding(self):
+        for stderr in (b"fatal: broken configuration\n", b"fatal: \xff\n",
+                       b"x" * 4096, b"x" * 4096 + b"hidden suffix", b""):
+            result = subprocess.CompletedProcess([], 128, stdout=b"", stderr=stderr)
+            with self.subTest(stderr=stderr[:40]), mock.patch.object(
+                    gate.subprocess, "run", return_value=result):
+                with self.assertRaises(gate.GateError) as caught:
+                    gate.git(ROOT, "rev-parse", "HEAD^{commit}")
+                message = str(caught.exception)
+                self.assertIn("Git prerequisite failed: rev-parse HEAD^{commit}", message)
+                self.assertIn("exit 128", message)
+                self.assertIn(stderr[:4096].decode("utf-8", errors="replace").strip(), message)
+                self.assertLessEqual(len(message), 4300)
+                self.assertNotIn("hidden suffix", message)
+                self.assertEqual("[stderr truncated]" in message, len(stderr) > 4096)
+
+    def test_git_child_configuration_is_isolated_without_mutating_parent(self):
+        overrides = {"GIT_CONFIG_NOSYSTEM": "0", "GIT_CONFIG_GLOBAL": "broken-global",
+                     "GIT_CONFIG_SYSTEM": "broken-system", "GIT_CONFIG_COUNT": "1",
+                     "GIT_CONFIG_KEY_0": "core.bare", "GIT_CONFIG_VALUE_0": "true",
+                     "GIT_DIR": "other", "GIT_WORK_TREE": "other",
+                     "GIT_OBJECT_DIRECTORY": "other", "GIT_REPLACE_REF_BASE": "refs/other/"}
+        result = subprocess.CompletedProcess([], 0, stdout=b"result\n", stderr=b"warning")
+        with mock.patch.dict(os.environ, overrides):
+            before = dict(os.environ)
+            with mock.patch.object(gate.subprocess, "run", return_value=result) as command:
+                self.assertEqual(gate.git(ROOT, "rev-parse", "HEAD^{commit}"), b"result\n")
+            self.assertEqual(dict(os.environ), before)
+        child = command.call_args.kwargs["env"]
+        self.assertEqual({key: value for key, value in child.items() if key.startswith("GIT_")},
+                         {"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull})
+        self.assertEqual(command.call_args.args[0],
+                         ["git", "--no-replace-objects", "-C", str(ROOT),
+                          "rev-parse", "HEAD^{commit}"])
+
+
 class GitTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
@@ -520,6 +557,48 @@ class GitTests(unittest.TestCase):
         self.git("replace", candidate, self.tag)
         with self.assertRaises(gate.GateError):
             self.validate(candidate)
+
+    def test_broken_ambient_global_and_system_configuration_cannot_change_validation(self):
+        home = self.root / "ambient home"
+        xdg = home / ".config"
+        (xdg / "git").mkdir(parents=True)
+        broken = home / ".gitconfig"
+        broken.write_text("[invalid configuration\n", encoding="utf-8")
+        (xdg / "git/config").write_bytes(broken.read_bytes())
+        before = self.git("show-ref")
+        overrides = {"HOME": str(home), "USERPROFILE": str(home), "XDG_CONFIG_HOME": str(xdg),
+                     "GIT_CONFIG_NOSYSTEM": "0", "GIT_CONFIG_SYSTEM": str(broken)}
+        with mock.patch.dict(os.environ, overrides):
+            # Show that Git really encounters the bad file without isolation.
+            ambient = {key: value for key, value in os.environ.items()
+                       if not key.startswith("GIT_")}
+            result = subprocess.run(["git", "-C", str(self.root), "rev-parse", "HEAD^{commit}"],
+                                    env=ambient, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                    check=False)
+            self.assertNotEqual(result.returncode, 0, result.stdout)
+            self.assertTrue(result.stderr)
+            self.validate()
+            # Exercise the publication caller's default root and stdin interface.
+            script = self.root / "tools/release/validate_release_gates.py"
+            script.parent.mkdir(parents=True)
+            script.write_bytes(Path(gate.__file__).read_bytes())
+            rules_path = self.root / "rules.json"
+            rules_path.write_text(json.dumps(rules("Linux")), encoding="utf-8")
+            result = subprocess.run([
+                sys.executable, "-I", "-B", str(script), "--version", VERSION,
+                "--tag-commit", self.tag, "--rules", str(rules_path),
+            ], input=json.dumps(pages(run(head_sha=self.tag))).encode(), cwd=home,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn(b"PASS", result.stdout)
+            # Valid configuration must not hide changes to qualified content either.
+            broken.write_text("[diff]\n\tignoreSubmodules = all\n", encoding="utf-8")
+            (xdg / "git/config").write_bytes(broken.read_bytes())
+            candidate = self.candidate(record(self.base), **{"shipping.txt": ("100644", b"changed")})
+            with self.assertRaisesRegex(gate.GateError, "outside"):
+                gate.validate_qualified_tree(self.root, self.base, candidate, RECORD_PATH)
+        self.assertEqual(self.git("show-ref"), before)
+        self.assertFalse((self.root / ".git/index").exists())
 
     def test_cli_success_and_refusals_are_read_only(self):
         rules_path, checks_path = self.root / "rules.json", self.root / "checks.json"
