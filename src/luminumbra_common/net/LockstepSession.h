@@ -302,6 +302,19 @@ public:
     // `sock` is invalid. `sock` is a native SOCKET cast to intptr_t (-1 = none).
     static std::unique_ptr<TcpTransport> FromAcceptedSocket(std::intptr_t sock);
 
+    // Diagnostics only: read-only buffer accounting, with no polling or I/O.
+    // receive_bytes includes the consumed prefix until compaction or full drain.
+    struct BufferDiagnostics {
+        std::size_t receive_bytes;
+        std::size_t receive_capacity;
+        std::size_t consumed_receive_bytes;
+        std::size_t pending_send_bytes;
+    };
+    [[nodiscard]] BufferDiagnostics GetBufferDiagnostics() const {
+        return {
+            m_recv_buffer.size(), m_recv_buffer.capacity(), m_recv_offset, m_send_q.PendingBytes()};
+    }
+
     bool SendFrame(const std::vector<std::uint8_t>& frame,
                    FrameDelivery delivery = FrameDelivery::Reliable) override;
     bool TryReceiveFrame(std::vector<std::uint8_t>& out) override;
@@ -309,7 +322,6 @@ public:
     void Close() override;
 
 private:
-    friend struct TcpTransportTestPeer;
     std::size_t ReceiveBytesNeeded(); // validates the prefix; closes on an oversized frame
     void CompactReceiveBuffer();      // discard consumed bytes only before another socket read
     bool PumpRecv();                  // bounded read-ahead; stops at a complete frame or EOF/error

@@ -29,6 +29,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <map>
 #include <vector>
 
@@ -134,6 +135,13 @@ public:
                            const std::vector<ReplEntityState>& entities,
                            const std::vector<std::uint32_t>& removed_ids = {});
 
+    // Borrow a sized entity source for a synchronous broadcast. Each reader result
+    // must remain valid until the call returns, including during AOI gathering.
+    void BroadcastSnapshot(std::uint64_t server_tick,
+                           std::size_t entity_count,
+                           const std::function<const ReplEntityState&(std::size_t)>& read_entity,
+                           const std::vector<std::uint32_t>& removed_ids = {});
+
     // Drains all currently-available inbound frames from every client: Usercmd
     // (newest-wins) and Ack (monotonic). Non-blocking.
     void PumpInbound();
@@ -190,6 +198,11 @@ public:
     }
 
 private:
+    template<typename EntityRange>
+    void BroadcastSnapshotEntities(std::uint64_t server_tick,
+                                   const EntityRange& entities,
+                                   const std::vector<std::uint32_t>& removed_ids);
+
     struct ClientLink {
         ILockstepTransport* transport = nullptr;
         UsercmdReceiver inbound;

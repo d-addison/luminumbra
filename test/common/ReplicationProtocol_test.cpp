@@ -7,6 +7,7 @@
 #include <limits>
 #include <vector>
 
+#include "luminumbra_common/net/LockstepSession.h"
 #include "luminumbra_common/net/ReplicationProtocol.h"
 
 namespace {
@@ -148,6 +149,59 @@ TEST(ReplicationProtocol, BorrowedSnapshotEntitiesPreserveHeaderAndRemovals) {
     EXPECT_EQ(decoded.removed_ids, header.removed_ids);
     EXPECT_EQ(header.entities.front().entity_id, 0u);
     EXPECT_EQ(entities.front(), entity);
+}
+
+TEST(ReplicationProtocol, OversizedSnapshotRefusesBeforeReadingOrAllocating) {
+    SnapshotMsg header;
+    const auto max = std::numeric_limits<std::size_t>::max();
+    for (const auto count : {kMaxFramePayloadBytes / 23u + 1u, max / 23u, max}) {
+        SCOPED_TRACE(count);
+        std::size_t reads = 0;
+        const auto frame = EncodeSnapshot(header, count, [&](std::size_t) {
+            ++reads;
+            return ReplEntityState{};
+        });
+        // The same encoder handles vectors and generated sets. A logically huge
+        // source needs no large fixture; refusal must precede both reads and reserve.
+        EXPECT_EQ(reads, 0u);
+        EXPECT_TRUE(frame.empty());
+        EXPECT_EQ(frame.capacity(), 0u);
+        const auto size = SnapshotEncodedSize(count, 0);
+        EXPECT_TRUE(!size || *size > kMaxFramePayloadBytes);
+    }
+}
+
+TEST(ReplicationProtocol, SnapshotSizeChecksExactLimitAndOverflowWithoutAllocation) {
+    // One entity makes the remaining wire budget divisible by the removal width.
+    const auto removals = (kMaxFramePayloadBytes - 37u - 23u) / 4u;
+    ASSERT_EQ(SnapshotEncodedSize(1, removals), kMaxFramePayloadBytes);
+    EXPECT_EQ(SnapshotEncodedSize(1, removals + 1), kMaxFramePayloadBytes + 4u);
+    EXPECT_EQ(SnapshotEncodedSize(0, 0), 37u);
+    const auto max = std::numeric_limits<std::size_t>::max();
+    EXPECT_FALSE(SnapshotEncodedSize(max, 0));
+    EXPECT_FALSE(SnapshotEncodedSize(0, max));
+    EXPECT_FALSE(SnapshotEncodedSize(max / 23u, 0));
+    EXPECT_FALSE(SnapshotEncodedSize(0, max / 4u));
+    EXPECT_FALSE(SnapshotEncodedSize((max - 37u) / 23u, 6));
+}
+
+TEST(ReplicationProtocol, GeneratedSnapshotPreservesEncodedBytes) {
+    SnapshotMsg snapshot;
+    snapshot.server_tick = 123;
+    snapshot.snapshot_seq = 7;
+    snapshot.delta_from_seq = 4;
+    snapshot.acked_usercmd_tick = 120;
+    snapshot.entities = {{1, -100, 200, 300, -10, 1, 7, 2, 128},
+                         {2, 400, -500, 600, 20, 2, 8, 3, 255}};
+    snapshot.removed_ids = {10, 20};
+    std::size_t reads = 0;
+    const auto generated = EncodeSnapshot(snapshot, snapshot.entities.size(), [&](std::size_t i) {
+        EXPECT_EQ(i, reads++);
+        return snapshot.entities[i];
+    });
+    EXPECT_EQ(reads, snapshot.entities.size());
+    EXPECT_EQ(generated, EncodeSnapshot(snapshot));
+    EXPECT_EQ(generated.size(), SnapshotEncodedSize(2, 2));
 }
 
 TEST(ReplicationProtocol, TruncatedFrameRejected) {

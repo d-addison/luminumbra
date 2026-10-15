@@ -3,12 +3,60 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdlib> // std::llabs
+#include <limits>
 #include <map>
 #include <set>
 #include <utility>
 #include <vector>
 
 namespace Luminumbra::Net {
+
+namespace {
+
+// A non-owning range for generated sources. Production broadcasts instantiate
+// BroadcastSnapshotEntities with std::vector and iterate its entities directly.
+struct GeneratedEntities {
+    std::size_t count;
+    const std::function<const ReplEntityState&(std::size_t)>& read;
+
+    struct Iterator {
+        const GeneratedEntities* source;
+        std::size_t index;
+
+        const ReplEntityState& operator*() const {
+            return source->read(index);
+        }
+        Iterator& operator++() {
+            ++index;
+            return *this;
+        }
+        bool operator!=(const Iterator& other) const {
+            return index != other.index;
+        }
+    };
+
+    Iterator begin() const {
+        return {this, 0};
+    }
+    Iterator end() const {
+        return {this, count};
+    }
+    std::size_t size() const {
+        return count;
+    }
+};
+
+std::vector<std::uint8_t> EncodeEntityRange(const SnapshotMsg& snapshot,
+                                            const std::vector<ReplEntityState>& entities) {
+    return EncodeSnapshot(snapshot, entities);
+}
+
+std::vector<std::uint8_t> EncodeEntityRange(const SnapshotMsg& snapshot,
+                                            const GeneratedEntities& entities) {
+    return EncodeSnapshot(snapshot, entities.count, entities.read);
+}
+
+} // namespace
 
 void ReplicationServer::AddClient(std::uint32_t client_id, ILockstepTransport* transport) {
     ClientLink link;
@@ -41,6 +89,22 @@ std::vector<std::uint32_t> ReplicationServer::PruneDisconnectedClients() {
 void ReplicationServer::BroadcastSnapshot(std::uint64_t server_tick,
                                           const std::vector<ReplEntityState>& entities,
                                           const std::vector<std::uint32_t>& removed_ids) {
+    BroadcastSnapshotEntities(server_tick, entities, removed_ids);
+}
+
+void ReplicationServer::BroadcastSnapshot(
+    std::uint64_t server_tick,
+    std::size_t entity_count,
+    const std::function<const ReplEntityState&(std::size_t)>& read_entity,
+    const std::vector<std::uint32_t>& removed_ids) {
+    BroadcastSnapshotEntities(
+        server_tick, GeneratedEntities{entity_count, read_entity}, removed_ids);
+}
+
+template<typename EntityRange>
+void ReplicationServer::BroadcastSnapshotEntities(std::uint64_t server_tick,
+                                                  const EntityRange& entities,
+                                                  const std::vector<std::uint32_t>& removed_ids) {
     m_last_broadcast_total_bytes = 0;
     m_last_broadcast_max_client_bytes = 0;
     m_disconnected_this_broadcast.clear();
@@ -146,7 +210,7 @@ void ReplicationServer::BroadcastSnapshot(std::uint64_t server_tick,
         }
 
         SnapshotMsg snap;
-        const std::vector<ReplEntityState>* borrowed_entities = nullptr;
+        bool borrowed_entities = false;
         snap.server_tick = server_tick;
         snap.snapshot_seq = link.next_snapshot_seq++;
         snap.acked_usercmd_tick = link.inbound.has_command() ? link.inbound.latest().tick : 0u;
@@ -203,10 +267,13 @@ void ReplicationServer::BroadcastSnapshot(std::uint64_t server_tick,
         } else {
             // Without a retained delta baseline, the encoder can read the caller's
             // full set directly for the duration of this synchronous broadcast.
-            if (m_delta)
-                snap.entities = entities;
-            else
-                borrowed_entities = &entities;
+            if (m_delta) {
+                snap.entities.reserve(entities.size());
+                for (const ReplEntityState& e : entities)
+                    snap.entities.push_back(e);
+            } else {
+                borrowed_entities = true;
+            }
         }
         snap.removed_ids = merged_removed;
 
@@ -264,12 +331,22 @@ void ReplicationServer::BroadcastSnapshot(std::uint64_t server_tick,
         // backpressure leaves frames buffered -> outbound.size is the live queue-depth
         // metric. Oversized frames and lost peers disconnect. On overflow drop the OLDEST
         // (unreliable / most-recent-wins) and count it.
-        std::vector<std::uint8_t> frame = borrowed_entities
-                                              ? EncodeSnapshot(outgoing, *borrowed_entities)
-                                              : EncodeSnapshot(outgoing);
-        m_last_broadcast_total_bytes += frame.size();
-        if (frame.size() > m_last_broadcast_max_client_bytes) {
-            m_last_broadcast_max_client_bytes = frame.size();
+        std::vector<std::uint8_t> frame =
+            borrowed_entities ? EncodeEntityRange(outgoing, entities) : EncodeSnapshot(outgoing);
+        const auto frame_size =
+            SnapshotEncodedSize(borrowed_entities ? entities.size() : outgoing.entities.size(),
+                                outgoing.removed_ids.size());
+        const auto reported_size = frame_size.value_or(std::numeric_limits<std::size_t>::max());
+        // Saturate telemetry rather than overflowing even when sizing refused a frame.
+        m_last_broadcast_total_bytes += std::min(
+            reported_size, std::numeric_limits<std::size_t>::max() - m_last_broadcast_total_bytes);
+        if (reported_size > m_last_broadcast_max_client_bytes) {
+            m_last_broadcast_max_client_bytes = reported_size;
+        }
+        if (frame.empty()) {
+            link.transport->Close();
+            to_disconnect.push_back(client_id);
+            continue;
         }
         link.outbound.push_back(std::move(frame));
         while (link.outbound.size() > kOutboundQueueCap) {

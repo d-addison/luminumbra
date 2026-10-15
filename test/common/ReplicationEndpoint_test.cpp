@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "luminumbra_common/net/LockstepSession.h"
+#include "luminumbra_common/net/NetworkSim.h"
 #include "luminumbra_common/net/ReplicationEndpoint.h"
 #include "luminumbra_common/net/ReplicationProtocol.h"
 #include "luminumbra_common/world/PlayerAvatar.h"
@@ -200,17 +201,99 @@ TEST(ReplicationEndpoint, OversizedProducedSnapshotRemovesClientWithoutSending) 
     server.SetAoiChunkRadius(-1, 1);
     server.SetDeltaCompression(false);
     server.AddClient(1, &transport);
-    // Each entity occupies 23 wire bytes (24 in memory on the normal layout).
-    // Full mode borrows this set without retaining a baseline; the encoder allocates
-    // one frame. Peak large buffers: ~66.8 MiB source + ~64 MiB frame = ~131 MiB.
-    const std::vector<ReplEntityState> entities(kMaxFramePayloadBytes / 23 + 1);
-    server.BroadcastSnapshot(1, entities);
+    // A sized source represents an oversized world with one entity of storage.
+    // The production encoder must refuse before reading or reserving frame bytes.
+    const ReplEntityState entity = MakeEntity(1, 0, 0, 0);
+    const std::size_t entity_count = kMaxFramePayloadBytes / 23 + 1;
+    std::size_t reads = 0;
+    const auto read_entity = [&](std::size_t) -> const ReplEntityState& {
+        ++reads;
+        return entity;
+    };
+    const auto refused = EncodeSnapshot({}, entity_count, read_entity);
+    EXPECT_TRUE(refused.empty());
+    EXPECT_EQ(refused.capacity(), 0u);
+    EXPECT_EQ(reads, 0u);
+    server.BroadcastSnapshot(1, entity_count, read_entity);
+    // Only the server's search for the client's AOI centre may read the source.
+    EXPECT_EQ(reads, 1u);
     EXPECT_GT(server.last_broadcast_max_client_bytes(), kMaxFramePayloadBytes);
-    EXPECT_EQ(server.last_broadcast_max_client_bytes(), 37u + 23u * entities.size());
+    EXPECT_EQ(server.last_broadcast_max_client_bytes(), 37u + 23u * entity_count);
     EXPECT_EQ(transport.send_attempts, 0u);
     EXPECT_TRUE(transport.close_called);
     EXPECT_FALSE(server.has_client(1));
     EXPECT_EQ(server.DisconnectedClientsLastBroadcast(), (std::vector<std::uint32_t>{1}));
+}
+
+TEST(ReplicationEndpoint, NetworkSimDrainsFinalUsercmdBeforePruningClosedPeer) {
+    for (const int latency : {0, 3}) {
+        SCOPED_TRACE(latency);
+        NetworkSim sim(NetworkConditions{latency, 0, 0, 1});
+        ReplicationServer server;
+        server.AddClient(1, &sim.A());
+        UsercmdMsg command;
+        command.tick = 42;
+        command.player_id = 1;
+        ASSERT_TRUE(sim.B().SendFrame(EncodeUsercmd(command)));
+        sim.B().Close();
+        EXPECT_TRUE(server.PruneDisconnectedClients().empty());
+        for (int tick = 0; tick < latency; ++tick) {
+            server.PumpInbound();
+            EXPECT_EQ(server.LatestUsercmd(1), nullptr);
+            EXPECT_TRUE(server.PruneDisconnectedClients().empty());
+            sim.Tick();
+        }
+        server.PumpInbound();
+        const auto* received = server.LatestUsercmd(1);
+        ASSERT_NE(received, nullptr);
+        EXPECT_EQ(*received, command);
+        EXPECT_FALSE(sim.A().IsPeerConnected());
+        EXPECT_EQ(server.PruneDisconnectedClients(), (std::vector<std::uint32_t>{1}));
+        EXPECT_FALSE(server.has_client(1));
+    }
+}
+
+TEST(ReplicationEndpoint, VectorAndGeneratedBroadcastsHaveIdenticalBytes) {
+    for (const bool delta : {false, true}) {
+        for (const int scope : {0, 1, 2}) {
+            SCOPED_TRACE(delta);
+            SCOPED_TRACE(scope);
+            auto vector_pair = MakeLoopbackPair();
+            auto generated_pair = MakeLoopbackPair();
+            ReplicationServer vector_server;
+            ReplicationServer generated_server;
+            for (auto* server : {&vector_server, &generated_server}) {
+                server->SetDeltaCompression(delta);
+                server->SetAoiChunkRadius(scope == 2 ? 0 : -1, 16000);
+                server->SetAoiRadiusMm(scope == 1 ? 5000 : 0);
+            }
+            vector_server.AddClient(1, vector_pair.first.get());
+            generated_server.AddClient(1, generated_pair.first.get());
+            std::vector<ReplEntityState> entities{
+                MakeEntity(1, 0, 0, 0), MakeEntity(2, 1000, 0, 0), MakeEntity(3, 100000, 0, 0)};
+            for (std::uint32_t tick = 1; tick <= 2; ++tick) {
+                entities[1].px_mm += 10;
+                vector_server.BroadcastSnapshot(tick, entities, {20, 10, 20});
+                generated_server.BroadcastSnapshot(
+                    tick,
+                    entities.size(),
+                    [&](std::size_t index) -> const ReplEntityState& { return entities[index]; },
+                    {20, 10, 20});
+                std::vector<std::uint8_t> vector_frame, generated_frame;
+                ASSERT_TRUE(vector_pair.second->TryReceiveFrame(vector_frame));
+                ASSERT_TRUE(generated_pair.second->TryReceiveFrame(generated_frame));
+                EXPECT_EQ(vector_frame, generated_frame);
+                SnapshotMsg snapshot;
+                ASSERT_TRUE(DecodeSnapshot(vector_frame, snapshot));
+                EXPECT_EQ(snapshot.delta_from_seq, delta && tick == 2 ? 1u : 0u);
+                const auto ack = EncodeAck({snapshot.snapshot_seq, tick});
+                ASSERT_TRUE(vector_pair.second->SendFrame(ack));
+                ASSERT_TRUE(generated_pair.second->SendFrame(ack));
+                vector_server.PumpInbound();
+                generated_server.PumpInbound();
+            }
+        }
+    }
 }
 
 TEST(ReplicationEndpoint, FullSnapshotsPreserveScopesAndRemovals) {

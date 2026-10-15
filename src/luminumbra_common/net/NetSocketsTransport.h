@@ -3,11 +3,11 @@
 #if defined(LUMINUMBRA_ENABLE_STEAM) || defined(LUMINUMBRA_ENABLE_GNS)
 
 #include <cstdint>
-#include <deque>
 #include <string>
 #include <vector>
 
 #include "LockstepSession.h"
+#include "MessageReceiveQueue.h"
 #include "steam/steamnetworkingtypes.h"
 
 namespace Luminumbra::Net {
@@ -55,7 +55,7 @@ private:
     bool m_connected = false;
     bool m_closed = false;
     bool m_is_host = false;
-    std::deque<std::vector<std::uint8_t>> m_recv;
+    MessageReceiveQueue m_recv;
 };
 
 } // namespace Luminumbra::Net

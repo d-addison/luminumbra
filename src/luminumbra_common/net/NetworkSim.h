@@ -106,7 +106,9 @@ private:
     }
 
     [[nodiscard]] bool PeerOpen(bool isA) const {
-        return isA ? m_bOpen : m_aOpen;
+        // Observe a clean close only after all inbound frames have drained,
+        // including frames whose simulated delivery tick has not arrived yet.
+        return isA ? (m_bOpen || !m_ba.empty()) : (m_aOpen || !m_ab.empty());
     }
     void CloseEnd(bool isA) {
         (isA ? m_aOpen : m_bOpen) = false;

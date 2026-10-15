@@ -10,6 +10,7 @@
 namespace {
 
 using Luminumbra::Net::FrameDelivery;
+using Luminumbra::Net::kMaxFramePayloadBytes;
 using Luminumbra::Net::NetworkConditions;
 using Luminumbra::Net::NetworkSim;
 
@@ -108,6 +109,93 @@ TEST(NetworkSim, PeerCloseObserved) {
     sim.B().Close();
     EXPECT_FALSE(sim.A().IsPeerConnected());
     EXPECT_FALSE(sim.A().SendFrame(frame(1)));
+}
+
+TEST(NetworkSim, RejectedOversizedSendAndClosePreserveQueuedFrames) {
+    NetworkSim sim(NetworkConditions{});
+    const std::vector<std::vector<std::uint8_t>> frames{frame(1), {}, frame(2)};
+    for (const auto& payload : frames)
+        ASSERT_TRUE(sim.A().SendFrame(payload));
+    const std::vector<std::uint8_t> oversized(kMaxFramePayloadBytes + 1, 0xAB);
+    EXPECT_FALSE(sim.A().SendFrame(oversized));
+    sim.A().Close();
+    EXPECT_TRUE(sim.B().IsPeerConnected());
+    EXPECT_FALSE(sim.A().SendFrame(frame(3)));
+    EXPECT_FALSE(sim.B().SendFrame(frame(3)));
+    std::vector<std::uint8_t> received{0xA5};
+    for (const auto& payload : frames) {
+        EXPECT_TRUE(sim.B().IsPeerConnected());
+        ASSERT_TRUE(sim.B().TryReceiveFrame(received));
+        EXPECT_EQ(received, payload);
+    }
+    EXPECT_FALSE(sim.B().IsPeerConnected());
+    const auto last = received;
+    EXPECT_FALSE(sim.B().TryReceiveFrame(received));
+    EXPECT_EQ(received, last);
+    EXPECT_FALSE(sim.A().SendFrame(frame(3)));
+    EXPECT_FALSE(sim.B().SendFrame(frame(3)));
+}
+
+TEST(NetworkSim, CloseWaitsForInboundDrainInBothDirections) {
+    for (const bool send_from_a : {false, true}) {
+        SCOPED_TRACE(send_from_a);
+        NetworkSim sim(NetworkConditions{});
+        auto& sender = send_from_a ? sim.A() : sim.B();
+        auto& receiver = send_from_a ? sim.B() : sim.A();
+        const std::vector<std::vector<std::uint8_t>> frames{frame(1), {}, frame(2)};
+        for (const auto& payload : frames)
+            ASSERT_TRUE(sender.SendFrame(payload));
+        sender.Close();
+        EXPECT_FALSE(sender.SendFrame(frame(3)));
+        EXPECT_FALSE(receiver.SendFrame(frame(3)));
+        std::vector<std::uint8_t> received;
+        for (const auto& payload : frames) {
+            EXPECT_TRUE(receiver.IsPeerConnected());
+            ASSERT_TRUE(receiver.TryReceiveFrame(received));
+            EXPECT_EQ(received, payload);
+        }
+        EXPECT_FALSE(receiver.IsPeerConnected());
+        EXPECT_FALSE(receiver.TryReceiveFrame(received));
+    }
+}
+
+TEST(NetworkSim, CloseWaitsForDelayedInboundDrainInBothDirections) {
+    for (const bool send_from_a : {false, true}) {
+        SCOPED_TRACE(send_from_a);
+        NetworkSim sim(NetworkConditions{3, 0, 0, 1});
+        auto& sender = send_from_a ? sim.A() : sim.B();
+        auto& receiver = send_from_a ? sim.B() : sim.A();
+        ASSERT_TRUE(sender.SendFrame(frame(1)));
+        sim.Tick();
+        ASSERT_TRUE(sender.SendFrame({}));
+        ASSERT_TRUE(sender.SendFrame(frame(2)));
+        sender.Close();
+        EXPECT_FALSE(sender.SendFrame(frame(3)));
+        EXPECT_FALSE(receiver.SendFrame(frame(3)));
+        std::vector<std::uint8_t> received{0xA5};
+        for (int tick = 1; tick < 3; ++tick) {
+            EXPECT_TRUE(receiver.IsPeerConnected());
+            EXPECT_FALSE(receiver.TryReceiveFrame(received));
+            EXPECT_EQ(received, frame(0xA5));
+            sim.Tick();
+        }
+        EXPECT_TRUE(receiver.IsPeerConnected());
+        ASSERT_TRUE(receiver.TryReceiveFrame(received));
+        EXPECT_EQ(received, frame(1));
+        // No frame is ready, but the later frames must still precede closure.
+        EXPECT_TRUE(receiver.IsPeerConnected());
+        EXPECT_FALSE(receiver.TryReceiveFrame(received));
+        EXPECT_EQ(received, frame(1));
+        sim.Tick();
+        EXPECT_TRUE(receiver.IsPeerConnected());
+        ASSERT_TRUE(receiver.TryReceiveFrame(received));
+        EXPECT_TRUE(received.empty());
+        EXPECT_TRUE(receiver.IsPeerConnected());
+        ASSERT_TRUE(receiver.TryReceiveFrame(received));
+        EXPECT_EQ(received, frame(2));
+        EXPECT_FALSE(receiver.IsPeerConnected());
+        EXPECT_FALSE(receiver.TryReceiveFrame(received));
+    }
 }
 
 } // namespace

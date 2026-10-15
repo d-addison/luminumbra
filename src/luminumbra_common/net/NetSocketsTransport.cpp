@@ -60,7 +60,7 @@ NetSocketsTransport::~NetSocketsTransport() {
 }
 
 bool NetSocketsTransport::Listen(std::uint16_t port) {
-    if (!m_backend.ready)
+    if (!m_backend.ready || m_closed)
         return false;
     m_is_host = true;
     SteamNetworkingIPAddr addr;
@@ -71,7 +71,7 @@ bool NetSocketsTransport::Listen(std::uint16_t port) {
 }
 
 bool NetSocketsTransport::Connect(const std::string& host, std::uint16_t port) {
-    if (!m_backend.ready)
+    if (!m_backend.ready || m_closed)
         return false;
     m_is_host = false;
     SteamNetworkingIPAddr addr;
@@ -94,6 +94,8 @@ void NetSocketsTransport::OnConnStatusChangedStatic(
 }
 
 void NetSocketsTransport::HandleConnStatusChanged(SteamNetConnectionStatusChangedCallback_t* info) {
+    if (m_closed)
+        return;
     switch (info->m_info.m_eState) {
         case k_ESteamNetworkingConnectionState_Connecting:
             // Host: a client is dialling our listen socket -> accept it as our peer.
@@ -112,6 +114,7 @@ void NetSocketsTransport::HandleConnStatusChanged(SteamNetConnectionStatusChange
         case k_ESteamNetworkingConnectionState_ProblemDetectedLocally:
             if (info->m_hConn == m_conn) {
                 m_closed = true;
+                m_recv.Close();
                 m_connected = false;
                 SteamNetworkingSockets()->CloseConnection(m_conn, 0, nullptr, false);
                 m_conn = k_HSteamNetConnection_Invalid;
@@ -124,7 +127,7 @@ void NetSocketsTransport::HandleConnStatusChanged(SteamNetConnectionStatusChange
 
 bool NetSocketsTransport::SendFrame(const std::vector<std::uint8_t>& frame,
                                     FrameDelivery delivery) {
-    if (frame.size() > kMaxFramePayloadBytes || !m_backend.ready ||
+    if (frame.size() > kMaxFramePayloadBytes || m_closed || !m_backend.ready ||
         m_conn == k_HSteamNetConnection_Invalid)
         return false;
     const int flags = (delivery == FrameDelivery::Reliable) ? k_nSteamNetworkingSend_Reliable
@@ -135,40 +138,36 @@ bool NetSocketsTransport::SendFrame(const std::vector<std::uint8_t>& frame,
 }
 
 void NetSocketsTransport::DrainInto() {
-    if (!m_backend.ready || m_conn == k_HSteamNetConnection_Invalid)
+    if (m_closed || !m_backend.ready || m_conn == k_HSteamNetConnection_Invalid)
         return;
     SteamNetworkingMessage_t* messages[32];
     const int count = SteamNetworkingSockets()->ReceiveMessagesOnConnection(m_conn, messages, 32);
     for (int i = 0; i < count; ++i) {
         SteamNetworkingMessage_t* message = messages[i];
         if (message->m_cbSize < 0 ||
-            static_cast<std::size_t>(message->m_cbSize) > kMaxFramePayloadBytes) {
+            !m_recv.Push(message->m_pData, static_cast<std::size_t>(message->m_cbSize))) {
             for (int j = i; j < count; ++j)
                 messages[j]->Release();
-            m_recv.clear();
             Close();
             return;
         }
-        const auto* data = static_cast<const std::uint8_t*>(message->m_pData);
-        m_recv.emplace_back(data, data + message->m_cbSize);
         message->Release();
     }
 }
 
 bool NetSocketsTransport::TryReceiveFrame(std::vector<std::uint8_t>& out) {
     DrainInto();
-    if (m_recv.empty())
-        return false;
-    out = std::move(m_recv.front());
-    m_recv.pop_front();
-    return true;
+    return m_recv.TryReceiveFrame(out);
 }
 
 bool NetSocketsTransport::IsPeerConnected() const {
-    return m_connected && !m_closed;
+    // Match TCP: buffered valid frames remain observable before closure.
+    return m_closed ? !m_recv.IsDrained() : m_connected;
 }
 
 void NetSocketsTransport::Close() {
+    m_closed = true;
+    m_recv.Close();
     if (m_conn != k_HSteamNetConnection_Invalid && m_backend.ready) {
         SteamNetworkingSockets()->CloseConnection(m_conn, 0, "closing", true);
     }
