@@ -1829,17 +1829,38 @@ TEST(WorldSaveService, SameLengthValidReplacementMustRevalidateFreshBytesAgainst
         std::vector<std::string> errors;
         ASSERT_TRUE(ValidateCacheFixture(save.path, errors));
     }
-    chunk->max_water_delta_last_tick = 2.0f;
     ASSERT_TRUE(WorldSaveService{}.save_world(state, replacement.path));
     const auto path = WorldSaveService::region_file_path(save.path, 0, 0);
+    const auto replacement_path = WorldSaveService::region_file_path(replacement.path, 0, 0);
     const auto original = CacheFileBytes(path);
-    const auto changed = CacheFileBytes(WorldSaveService::region_file_path(replacement.path, 0, 0));
+    auto changed = CacheFileBytes(replacement_path);
+    ASSERT_EQ(original, changed);
+    // LZ4 ends with literals, including StableDump's trailing newline. Replacing
+    // that literal with JSON whitespace preserves both record lengths and the
+    // cache key by construction, without relying on a recompressed value's size.
+    ASSERT_GT(changed.size(), 26u);
+    ASSERT_EQ(changed.back(), '\n');
+    changed.back() = '\r';
     ASSERT_EQ(original.size(), changed.size());
     ASSERT_NE(original, changed);
     std::vector<std::string> errors;
+    // Validate in the unindexed replacement directory before installation, so
+    // membership rejection cannot prevent decoding or mask invalid JSON.
+    ASSERT_TRUE(WorldSaveService::durable_write_file(replacement_path, changed, &errors));
+    std::vector<WorldSaveService::ContainerRecord> records;
+    ASSERT_TRUE(WorldSaveService::read_container_records(replacement_path, records, &errors));
+    ASSERT_EQ(records.size(), 1u);
+    WorldStreamingState decoded;
+    ASSERT_TRUE(CachePersistence::LoadWorldStreamingStateSnapshotJson(
+        records.front().payload, decoded, errors, true));
     ASSERT_TRUE(WorldSaveService::durable_write_file(path, changed, &errors));
+    const auto decodes = cache.stats().modes[1].decodes;
     ASSERT_NO_FATAL_FAILURE(ExpectColdAndCachedRefusal(save.path, cache));
     EXPECT_GT(cache.stats().modes[1].byte_mismatch, 0u);
+    EXPECT_EQ(cache.stats().modes[1].decodes, decodes + 1u);
+    ASSERT_FALSE(ValidateCacheFixture(save.path, errors));
+    EXPECT_NE(JoinErrors(errors).find("inconsistent snapshot: chunks/region/r.0.0.lmr"),
+              std::string::npos);
 }
 
 TEST(WorldSaveService,
