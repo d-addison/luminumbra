@@ -3509,9 +3509,11 @@ bool GameSession::AdoptWorldState(const std::filesystem::path& save_dir,
     if (m_activeRegionsEnabled) {
         const Vec3 previous_ambient_anchor = m_ambientFieldAnchor;
         m_ambientFieldAnchor = ambient_anchor.value_or(m_metadata.spawnPoint);
-        ActiveRegionLedger ledger = records.has_ledger
-                                        ? std::move(records.ledger)
-                                        : ActiveRegionLedger(m_activeRegionLedger.config());
+        // An absent ledger has no scheduler history: seed both ticks at the restored clock.
+        // restore_clock() below only rebases the validation header of persisted ledgers.
+        ActiveRegionLedger ledger =
+            records.has_ledger ? std::move(records.ledger)
+                               : ActiveRegionLedger(m_activeRegionLedger.config(), saved_clock);
         if (m_regionSchedulerOverride && ledger.config() != *m_regionSchedulerOverride) {
             m_ambientFieldAnchor = previous_ambient_anchor;
             m_worldOpenError = "Incompatible configuration: persisted region scheduler differs "
