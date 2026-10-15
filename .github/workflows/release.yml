@@ -19,6 +19,7 @@ jobs:
     permissions:
       contents: write
       checks: read
+      statuses: read
       id-token: write
       attestations: write
     steps:

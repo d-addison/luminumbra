@@ -172,7 +172,8 @@ cannot establish an app binding: pinned contexts require a matching successful
 check run even when a successful status exists. A latest failing same-named
 status from any creator still blocks a pinned context.
 API failures also refuse publication. The source job grants `checks: read` for check
-runs; the rules endpoint uses repository metadata access. Other permissions are unchanged.
+runs and `statuses: read` for commit statuses; the rules endpoint uses repository
+metadata access. Other permissions are unchanged.
 
 To evaluate captured API responses offline (Python standard library and Git):
 

@@ -1173,6 +1173,7 @@ class WiringTests(unittest.TestCase):
         source = workflow.split("\n  source:\n", 1)[1].split("\n  binary-linux:\n", 1)[0]
         permissions = source.split("    permissions:\n", 1)[1].split("    steps:\n", 1)[0]
         self.assertEqual(permissions, "      contents: write\n      checks: read\n"
+                         "      statuses: read\n"
                          "      id-token: write\n      attestations: write\n")
 
     def test_documented_ids_match_validator_and_acceptance_link(self):
