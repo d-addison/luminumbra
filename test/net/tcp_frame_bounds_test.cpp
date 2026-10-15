@@ -97,7 +97,7 @@ protected:
         m_receiver =
             Luminumbra::Net::TcpTransport::FromAcceptedSocket(static_cast<std::intptr_t>(accepted));
         ASSERT_NE(m_receiver, nullptr);
-        m_receive_socket = accepted; // Borrowed only to synchronize delivery before each pump.
+        m_receive_socket = accepted; // Borrowed for delivery synchronization and send shutdown.
     }
 
     void TearDown() override {
@@ -191,6 +191,65 @@ protected:
             EXPECT_EQ(received, frame);
             EXPECT_TRUE(m_receiver->IsPeerConnected());
         }
+        const auto last_frame = received;
+        for (int pump = 0; pump < 3; ++pump) {
+            EXPECT_FALSE(m_receiver->TryReceiveFrame(received));
+            EXPECT_EQ(received, last_frame);
+            EXPECT_FALSE(m_receiver->IsPeerConnected());
+            EXPECT_EQ(m_receiver->GetBufferDiagnostics().receive_bytes, 0u);
+            EXPECT_EQ(m_receiver->GetBufferDiagnostics().receive_capacity, 0u);
+            EXPECT_EQ(m_receiver->GetBufferDiagnostics().consumed_receive_bytes, 0u);
+        }
+    }
+
+    void ExpectBufferedFramesAfterSendFailure(const std::vector<std::uint8_t>& tail) {
+        const std::vector<std::uint8_t> leading{0x12};
+        const std::vector<std::vector<std::uint8_t>> frames{
+            Luminumbra::Net::EncodeBye({42}), {}, {0xAB, 0xCD}};
+        std::vector<std::uint8_t> wire;
+        AppendWireFrame(wire, leading);
+        for (const auto& frame : frames)
+            AppendWireFrame(wire, frame);
+        wire.insert(wire.end(), tail.begin(), tail.end());
+        ASSERT_TRUE(SendRaw(wire));
+        ASSERT_TRUE(WaitForBytes(wire.size()));
+        std::vector<std::uint8_t> received;
+        ASSERT_TRUE(m_receiver->TryReceiveFrame(received));
+        ASSERT_EQ(received, leading);
+        ASSERT_EQ(m_receiver->GetBufferDiagnostics().receive_bytes, wire.size());
+        ASSERT_EQ(m_receiver->GetBufferDiagnostics().consumed_receive_bytes, 4u + leading.size());
+
+        // Force a send error without consuming any buffered inbound frames.
+#ifdef _WIN32
+        ASSERT_EQ(::shutdown(m_receive_socket, SD_SEND), 0);
+#else
+#ifdef SO_NOSIGPIPE
+        const int no_sigpipe = 1;
+        ASSERT_EQ(::setsockopt(
+                      m_receive_socket, SOL_SOCKET, SO_NOSIGPIPE, &no_sigpipe, sizeof(no_sigpipe)),
+                  0);
+#endif
+        ASSERT_EQ(::shutdown(m_receive_socket, SHUT_WR), 0);
+#endif
+        ASSERT_FALSE(m_receiver->SendFrame({}));
+        m_sender.Close();
+        fd_set readable;
+        FD_ZERO(&readable);
+        FD_SET(m_receive_socket, &readable);
+        timeval timeout{1, 0};
+#ifdef _WIN32
+        ASSERT_EQ(::select(0, &readable, nullptr, nullptr, &timeout), 1);
+#else
+        ASSERT_EQ(::select(m_receive_socket + 1, &readable, nullptr, nullptr, &timeout), 1);
+#endif
+
+        for (const auto& frame : frames) {
+            ASSERT_TRUE(m_receiver->IsPeerConnected());
+            ASSERT_TRUE(m_receiver->TryReceiveFrame(received));
+            EXPECT_EQ(received, frame);
+        }
+        // Neither a consumed prefix nor an incomplete tail is a deliverable frame.
+        EXPECT_FALSE(m_receiver->IsPeerConnected());
         const auto last_frame = received;
         for (int pump = 0; pump < 3; ++pump) {
             EXPECT_FALSE(m_receiver->TryReceiveFrame(received));
@@ -355,6 +414,25 @@ TEST_F(TcpFrameBoundsTest, BufferedFramesAreDeliveredBeforeEof) {
 
 TEST_F(TcpFrameBoundsTest, BufferedFramesAreDeliveredBeforeReceiveReset) {
     ExpectBufferedFramesBeforeClosure(true);
+}
+
+TEST_F(TcpFrameBoundsTest, BufferedFramesRemainConnectedAfterSendFailure) {
+    ExpectBufferedFramesAfterSendFailure({});
+}
+
+TEST_F(TcpFrameBoundsTest, PartialPrefixAfterSendFailureDoesNotKeepPeerConnected) {
+    ExpectBufferedFramesAfterSendFailure({0x03, 0x00});
+}
+
+TEST_F(TcpFrameBoundsTest, PartialPayloadAfterSendFailureDoesNotKeepPeerConnected) {
+    ExpectBufferedFramesAfterSendFailure({0x03, 0x00, 0x00, 0x00, 0xAB});
+}
+
+TEST_F(TcpFrameBoundsTest, OversizedPrefixAfterSendFailureDoesNotKeepPeerConnected) {
+    std::vector<std::uint8_t> tail;
+    for (int i = 0; i < 4; ++i)
+        tail.push_back(static_cast<std::uint8_t>((kMaxFramePayloadBytes + 1) >> (8 * i)));
+    ExpectBufferedFramesAfterSendFailure(tail);
 }
 
 TEST_F(TcpFrameBoundsTest, EmptyFrameBatchAdvancesCursorWithoutMovingBufferedBytes) {

@@ -388,6 +388,22 @@ void TcpTransport::CompactReceiveBuffer() {
     m_recv_offset = 0;
 }
 
+bool TcpTransport::IsPeerConnected() const {
+    if (m_socket < 0)
+        return false;
+    if (!m_peer_closed)
+        return true;
+    // A send failure must not hide complete frames already received. A partial
+    // tail or an oversized prefix cannot keep a closed peer connected.
+    const std::size_t buffered = m_recv_buffer.size() - m_recv_offset;
+    if (buffered < 4)
+        return false;
+    std::uint32_t frame_len = 0;
+    for (int i = 0; i < 4; ++i)
+        frame_len |= static_cast<std::uint32_t>(m_recv_buffer[m_recv_offset + i]) << (8 * i);
+    return frame_len <= kMaxFramePayloadBytes && frame_len <= buffered - 4;
+}
+
 #ifdef _WIN32
 
 namespace {
@@ -592,11 +608,6 @@ bool TcpTransport::TryReceiveFrame(std::vector<std::uint8_t>& out) {
         m_recv_offset = 0;
     }
     return true;
-}
-
-bool TcpTransport::IsPeerConnected() const {
-    // Buffered complete frames are consumed before pumping again to observe EOF.
-    return m_socket >= 0 && !m_peer_closed;
 }
 
 void TcpTransport::Close() {
@@ -904,10 +915,6 @@ bool TcpTransport::TryReceiveFrame(std::vector<std::uint8_t>& out) {
         m_recv_offset = 0;
     }
     return true;
-}
-
-bool TcpTransport::IsPeerConnected() const {
-    return m_socket >= 0 && !m_peer_closed;
 }
 
 void TcpTransport::Close() {
