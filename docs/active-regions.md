@@ -2,10 +2,18 @@
 
 The host ledger implements the persistent-active scheduling foundation in
 [distant-world.md](distant-world.md). It is gated by the existing
-`sim.active_regions` switch, absent and false by default. No systems.json value
-is added. Budgets remain unlimited in shipped configuration. No distant system
+`sim.active_regions` switch, enabled by default for v0.3.0 with the other shipping
+features. Budgets remain unlimited in shipped configuration. No distant system
 consumes this schedule yet; field pages, creature records, water shares,
 diagnostics and measured budget activation remain separate work.
+
+Indexed authority durability/rehydration, durable completed work and ground-object
+continuation, durable regional fields/weather/scent/energy, regional foliage/water
+continuation, and strict distant policy and distant creatures (S8) are planned for
+v0.3.1. Regional continuation performance/default enablement is planned for v0.4.0
+as [issue #320](https://github.com/d-addison/luminumbra/issues/320). These consumers
+are outside the shipping scheduler foundation. The dedicated server autosaves
+every five minutes; this does not implement those continuation consumers.
 
 ## Activation and ordering
 
@@ -339,13 +347,13 @@ expected component hashes on mismatch. Diagnostic sources, component values,
 compiler commands and predecessor source identities accompany the campaign receipt
 under `ci-investigation/`.
 
-The subsequent [ambient dispatch repair](https://github.com/d-addison/luminumbra/pull/172)
+The subsequent ambient dispatch repair
 caps both FBm and Simplex nodes in all three ambient systems at terrain's x86
 AVX2 ceiling, preserving lower-ISA fallback and native non-x86 selection. Its
 Debug/Release controls and native qualification retain their own source identities;
 the historical table above is not relabelled as post-repair evidence. Integrated
-and native acceptance remain tracked by [#163](https://github.com/d-addison/luminumbra/issues/163).
-The wind input-padding defect tracked by [#173](https://github.com/d-addison/luminumbra/issues/173) was fixed afterwards on devel (df8a6716, e9b122e5); the evidence above is unchanged and pre-dates that fix.
+and native acceptance remain tracked by [issue #163](https://github.com/d-addison/luminumbra/issues/163).
+The wind input-padding defect tracked by [issue #173](https://github.com/d-addison/luminumbra/issues/173) was fixed afterwards on devel (df8a6716, e9b122e5); the evidence above is unchanged and pre-dates that fix.
 
 `RegionRecordingOverwrite` runs the shipping recorder/player with
 `--test-streaming-radius-cap 1` on every invocation. This diagnostic option applies

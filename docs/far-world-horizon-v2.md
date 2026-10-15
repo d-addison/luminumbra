@@ -1,11 +1,31 @@
 # Far world horizon v2 (FW slice D)
 
-Legacy remains the default. `farlod-horizon-analysis.json` keeps the historical
+The default requested far-world mode is **Ladder**, both in compiled configuration
+and packaged `data/common/systems.json`. To opt out, set
+`render.far_world_ladder.enabled` to `false` in that file before starting the client:
+
+```json
+{"render":{"far_world_ladder":{"enabled":false}}}
+```
+
+Merge this entry into the existing document. Missing configuration or an absent
+flag requests Ladder. The per-user `settings.json` overlay reads only `user.*`,
+so it cannot override this render flag; there is no far-mode environment or CLI
+override. Restart the client after changing the setting.
+
+Requested mode and effective mode remain separate. Unsupported backends, invalid
+or mismatched cave policy, and missing immutable authority still refuse Ladder
+and select effective Legacy. Requested/effective mode and refusal reasons remain
+visible in the debug HUD and diagnostic snapshots. Normal presets still lack
+the injected immutable fixture, so the default request does not establish native
+Ladder activation or qualification.
+
+`farlod-horizon-analysis.json` keeps the historical
 `luminumbra.farlod_horizon.v1` keys and thresholds. Its most-converged legacy
 aggregate is historical evidence; it cannot qualify ladder coverage.
 
 The adjacent `farlod-horizon-ladder-oracle.json` uses
-`luminumbra.farlod_horizon.v2`. It retains #199's legacy compatibility keys and
+`luminumbra.farlod_horizon.v2`. It retains the historical legacy compatibility keys and
 adds `expected_stations`, `stations`, `complete`, `ladder_checked` and
 `ladder_water: "absent_S13_out_of_scope"`. V2 qualification checks every station.
 Legacy evidence always has `mode: "legacy"` and `ladder_checked: false`.
@@ -73,7 +93,7 @@ degrees/metres of serialization tolerance.
 
 Qualification requires every named station to settle within 90 seconds. Each
 station's expected tile set and tier counts must exactly agree with the independent
-#199 oracle. Its current coverage must contain every expected tile and no extras,
+coverage oracle. Its current coverage must contain every expected tile and no extras,
 match binding/bake/span generations, span its requested extension, and have zero
 rejected tiles and draw refusals. Every Uploaded pair must establish successful
 indexed submission. Each nonzero draw tier must have triangle-aligned indices
@@ -96,14 +116,19 @@ python3 -B -m unittest discover -s tools/gates -p test_far_ladder_oracle.py
 python3 -B tools/gates/far_ladder_oracle.py validate ARTIFACT --renderer ladder
 ```
 
-Native gate command (not executed for this slice):
+The Python validator and PowerShell gate default to Ladder. Explicit Legacy
+evidence requires `--renderer legacy` (Python) or `-FarWorldRenderer Legacy`
+(native gate). The native gate also requires the config opt-out above; its
+renderer selector validates evidence and does not override the client setting.
+
+Native default gate command (requires immutable authority; not executed here):
 
 ```powershell
-pwsh tools/gates/validate-engine-frontier.ps1 -Mode FarLodHorizon -FarWorldRenderer Legacy
+pwsh tools/gates/validate-engine-frontier.ps1 -Mode FarLodHorizon
 ```
 
 The gate allows at least 680 seconds for the existing phase-A baseline plus five
-90-second station deadlines and capture slack. `-FarWorldRenderer Ladder` refuses
+90-second station deadlines and capture slack. The default Ladder gate refuses
 before launch because normal presets lack the injected immutable authority needed
 for ladder activation. A Legacy fallback cannot qualify Ladder. Synthetic fixtures
 can exercise the complete Ladder validator without graphics; they do not establish

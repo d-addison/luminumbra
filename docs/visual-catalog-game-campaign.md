@@ -154,9 +154,9 @@ Fixture: Fresh identified engine capture at actual controlled camera/time with c
 
 Source links:
 
-- [docs/visual-baselines.md](https://github.com/d-addison/luminumbra/blob/52d6a2642993a60bbadbc9e88fcae382b3739b02/docs/visual-baselines.md)
-- [tools/perf/validate_render_capture.py](https://github.com/d-addison/luminumbra/blob/52d6a2642993a60bbadbc9e88fcae382b3739b02/tools/perf/validate_render_capture.py)
-- [src/luminumbra_client/rendering/RenderPipeline.cpp](https://github.com/d-addison/luminumbra/blob/52d6a2642993a60bbadbc9e88fcae382b3739b02/src/luminumbra_client/rendering/RenderPipeline.cpp)
+- [docs/visual-baselines.md](https://github.com/d-addison/luminumbra/blob/6b5f955d928bc6c443fc79cc0ac4a06a38765b55/docs/visual-baselines.md)
+- [tools/perf/validate_render_capture.py](https://github.com/d-addison/luminumbra/blob/6b5f955d928bc6c443fc79cc0ac4a06a38765b55/tools/perf/validate_render_capture.py)
+- [src/luminumbra_client/rendering/RenderPipeline.cpp](https://github.com/d-addison/luminumbra/blob/6b5f955d928bc6c443fc79cc0ac4a06a38765b55/src/luminumbra_client/rendering/RenderPipeline.cpp)
 
 Required variants:
 
@@ -188,7 +188,7 @@ Acceptance checks:
 - Fresh identified engine capture at actual controlled camera/time with controller/settled proof, wide and human-height views; old filename does not identify current renderer or pack.
 - Meet the shared packet contract and preserve independent regression checks; each listed variant is required.
 
-Source reconciliation at `52d6a2642993a60bbadbc9e88fcae382b3739b02`: Foliage/terrain corrections are integrated. Historical deficient baselines remain unchanged; current native captures and visual approval are outstanding and deferred to v0.3.1.
+Source reconciliation at `6b5f955d928bc6c443fc79cc0ac4a06a38765b55`: Foliage/terrain corrections are integrated. Historical deficient baselines remain unchanged; current native captures and visual approval are outstanding and deferred to v0.3.1.
 
 Retained evidence:
 
@@ -304,9 +304,9 @@ Fixture: Use actual create/play/edit/save/menu/restart/load captures and file re
 
 Source links:
 
-- [docs/v0.3-acceptance.md](https://github.com/d-addison/luminumbra/blob/52d6a2642993a60bbadbc9e88fcae382b3739b02/docs/v0.3-acceptance.md)
-- [src/luminumbra_client/core/scenarios/PersistenceRoundtrip.cpp](https://github.com/d-addison/luminumbra/blob/52d6a2642993a60bbadbc9e88fcae382b3739b02/src/luminumbra_client/core/scenarios/PersistenceRoundtrip.cpp)
-- [test/persistence/world_open_refusal_test.cpp](https://github.com/d-addison/luminumbra/blob/52d6a2642993a60bbadbc9e88fcae382b3739b02/test/persistence/world_open_refusal_test.cpp)
+- [docs/v0.3-acceptance.md](https://github.com/d-addison/luminumbra/blob/6b5f955d928bc6c443fc79cc0ac4a06a38765b55/docs/v0.3-acceptance.md)
+- [src/luminumbra_client/core/scenarios/PersistenceRoundtrip.cpp](https://github.com/d-addison/luminumbra/blob/6b5f955d928bc6c443fc79cc0ac4a06a38765b55/src/luminumbra_client/core/scenarios/PersistenceRoundtrip.cpp)
+- [test/persistence/world_open_refusal_test.cpp](https://github.com/d-addison/luminumbra/blob/6b5f955d928bc6c443fc79cc0ac4a06a38765b55/test/persistence/world_open_refusal_test.cpp)
 
 Required variants:
 
@@ -334,7 +334,7 @@ Acceptance checks:
 - Use actual create/play/edit/save/menu/restart/load captures and file receipts from a newly pinned package; historical narrative does not substitute for published screenshot provenance.
 - Meet the shared packet contract and preserve independent regression checks; each listed variant is required.
 
-Source reconciliation at `52d6a2642993a60bbadbc9e88fcae382b3739b02`: Synthetic fixtures, catalog responsiveness, saved-world lifecycle, native refusal fixtures and scheduler-fault regression coverage are implemented. Complete native UI/persistence packets remain outstanding and are deferred to v0.3.1 when not produced for v0.3.0; the separate owner Windows tag-gate smoke remains required.
+Source reconciliation at `6b5f955d928bc6c443fc79cc0ac4a06a38765b55`: Synthetic fixtures, catalog responsiveness, saved-world lifecycle, native refusal fixtures and scheduler-fault regression coverage are implemented. Complete native UI/persistence packets remain outstanding and are deferred to v0.3.1 when not produced for v0.3.0; the separate owner Windows tag-gate smoke remains required.
 
 Retained evidence:
 
@@ -380,7 +380,7 @@ Acceptance checks:
 - Author and demonstrate a new interactive prefab in the composed game and neutral battery/heat fixtures with installed engine hashes unchanged.
 - Meet the shared packet contract for every required variant and parent mapping.
 
-Source reconciliation at `945ecd295835a838eed0169ff709e7aabc134fa1`: Authorized September 13 completion scope. This row adds explicit coverage without replacing any original group; implementation and acceptance remain unfinished.
+Source reconciliation at `945ecd295835a838eed0169ff709e7aabc134fa1`: Additional completion coverage. This row adds explicit coverage without replacing any original group; implementation and acceptance remain unfinished.
 
 Retained evidence:
 
@@ -427,7 +427,7 @@ Acceptance checks:
 - Deliver newly authored foliage with source/provenance and composed game acceptance while preserving all 30,250 accepted Tree Small 02 leaf surfaces.
 - Meet the shared packet contract for every required variant and parent mapping.
 
-Source reconciliation at `945ecd295835a838eed0169ff709e7aabc134fa1`: Authorized September 13 completion scope. This row adds explicit coverage without replacing any original group; implementation and acceptance remain unfinished.
+Source reconciliation at `945ecd295835a838eed0169ff709e7aabc134fa1`: Additional completion coverage. This row adds explicit coverage without replacing any original group; implementation and acceptance remain unfinished.
 
 Retained evidence:
 
@@ -473,7 +473,7 @@ Acceptance checks:
 - Deliver a newly authored character exercised in the composed game with actual behavior/pose trajectories and installed engine hashes unchanged.
 - Meet the shared packet contract for every required variant and parent mapping.
 
-Source reconciliation at `945ecd295835a838eed0169ff709e7aabc134fa1`: Authorized September 13 completion scope. This row adds explicit coverage without replacing any original group; implementation and acceptance remain unfinished.
+Source reconciliation at `945ecd295835a838eed0169ff709e7aabc134fa1`: Additional completion coverage. This row adds explicit coverage without replacing any original group; implementation and acceptance remain unfinished.
 
 Retained evidence:
 

@@ -1,10 +1,8 @@
 // perf-lane-and-ecology-tick ( / ): the EcologyTickPerf gate.
 //
-// This is the campaign's first PERF gate over the live ecology tick. Every other
-// ecology test proves correctness/determinism; NONE measures per-tick cost. After
-// the boids O(N^2) herd gather was replaced by a uniform spatial grid
-// (ai/SpatialGrid.h, commit c48b466) we need a gate that actually EXERCISES the
-// scaling path at N >> the 8-creature gtest roster, or the win is unverified.
+// Measure per-tick ecology cost with populations larger than the 8-creature
+// correctness roster. The boids herd gather uses a uniform spatial grid
+// (ai/SpatialGrid.h); this gate exercises its scaling path at increasing N.
 //
 // Design (plan ):
 //   * Reuse the PopulatedWorldReplay KINEMATIC roster shape (the same component set

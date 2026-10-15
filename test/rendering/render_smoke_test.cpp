@@ -6738,6 +6738,40 @@ void ExpectProjectionPlane(const glm::mat4& projection, float far_plane, glm::ve
 }
 } // namespace
 
+TEST(RenderSmokeTest, WorldSwapRetainsLegacyDiagnosticInventoryUntilShutdown) {
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    RenderPipeline pipeline;
+    pipeline.set_far_world_mode(FarWorldMode::Legacy);
+    const auto baseline_runtime = pipeline.get_runtime_render_stats();
+    const auto baseline_resources = pipeline.get_resource_registry_stats();
+    constexpr std::size_t resident_bytes = 4096, resident_vertex_arrays = 3;
+    TerrainCullingTestPeer::SeedRetainedLegacyInventory(
+        pipeline, resident_bytes, resident_vertex_arrays);
+
+    // Observe immediately after each drain, before any frame can refresh the caches.
+    for (int swap = 0; swap < 2; ++swap) {
+        pipeline.prepare_world_swap();
+        const auto runtime = pipeline.get_runtime_render_stats();
+        const auto resources = pipeline.get_resource_registry_stats();
+        EXPECT_EQ(runtime.estimated_vram_bytes,
+                  baseline_runtime.estimated_vram_bytes + resident_bytes);
+        EXPECT_EQ(resources.vertex_arrays,
+                  baseline_resources.vertex_arrays + resident_vertex_arrays);
+        EXPECT_EQ(resources.buffers, baseline_resources.buffers + resident_vertex_arrays * 2u);
+        EXPECT_FALSE(resources.empty_after_shutdown);
+    }
+
+    pipeline.shutdown();
+    EXPECT_EQ(pipeline.get_runtime_render_stats().estimated_vram_bytes,
+              baseline_runtime.estimated_vram_bytes);
+    const auto released = pipeline.get_resource_registry_stats();
+    EXPECT_EQ(released.vertex_arrays, baseline_resources.vertex_arrays);
+    EXPECT_EQ(released.buffers, baseline_resources.buffers);
+    EXPECT_TRUE(released.empty_after_shutdown);
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
+}
+
 TEST(RenderSmokeTest, FarWorldPlaneCoherenceThroughProductionConsumers) {
     HiddenGlContext context;
     ASSERT_TRUE(context.ready()) << context.error();

@@ -30,8 +30,8 @@ using Luminumbra::Systems::TerrainGenParams;
 
 namespace {
 
-// A FIXED self-contained base preset (NOT default.json — that file is owned by
-// the concurrent worldgen agent). Shaping on so knobs have real relief to move;
+// A fixed self-contained base preset, independent of authored default.json changes.
+// Shaping on so knobs have real relief to move;
 // biomes off so no data tables are needed.
 nlohmann::json FixedBasePreset() {
     return nlohmann::json::parse(R"({

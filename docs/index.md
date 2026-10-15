@@ -5,6 +5,9 @@ simulation, a GPU client, and a headless authoritative server. This site starts
 with the engine model and development contracts; the generated namespace,
 class, and file indexes are the lower-level API reference.
 
+v0.3.0 is in release preparation. The [release notes](release-notes-v0.3.0.md)
+separate included source from planned v0.3.1 work and pending Windows acceptance.
+
 ## v0.3.0 world format break
 
 > This world predates the v0.3.0 format and cannot be opened. Create a new world; migration is not supported.
@@ -83,6 +86,6 @@ build/debug/bin/luminumbra_client_app --no-audio
 build/debug/bin/luminumbra_server_app --smoke --root . --preset default --seed 1337 --ticks 90
 ```
 
-Luminumbra 0.3.0 is an early source release. The repository builds an engine and
+Luminumbra 0.3.0 is preparing an early source release. The repository builds an engine and
 its applications together; it does not yet promise a stable installed SDK or
 ABI for third-party applications.

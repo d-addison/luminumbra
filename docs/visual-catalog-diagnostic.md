@@ -617,7 +617,7 @@ Fixture: Uniform-medium analytic comparison and plotted actual samples, plus rea
 
 Source links:
 
-- [test/rendering/render_smoke_test.cpp](https://github.com/d-addison/luminumbra/blob/52d6a2642993a60bbadbc9e88fcae382b3739b02/test/rendering/render_smoke_test.cpp)
+- [test/rendering/render_smoke_test.cpp](https://github.com/d-addison/luminumbra/blob/6b5f955d928bc6c443fc79cc0ac4a06a38765b55/test/rendering/render_smoke_test.cpp)
 
 Required variants:
 
@@ -641,7 +641,7 @@ Acceptance checks:
 - Uniform-medium analytic comparison and plotted actual samples, plus real layered atmospheric scene; diagnostic explicitly labeled.
 - Meet the shared packet contract and preserve independent regression checks; each listed variant is required.
 
-Source reconciliation at `52d6a2642993a60bbadbc9e88fcae382b3739b02`: Froxel volumetrics are enabled in the shipping defaults. Analytic supporting fixtures exist; actual transmittance packets and complete native quality/performance qualification remain outstanding.
+Source reconciliation at `6b5f955d928bc6c443fc79cc0ac4a06a38765b55`: Froxel volumetrics are enabled in the shipping defaults. Analytic supporting fixtures exist; actual transmittance packets and complete native quality/performance qualification remain outstanding.
 
 Retained evidence:
 
@@ -661,7 +661,7 @@ Fixture: At least two actual GPU exposures and luminance monotonicity; manual/au
 
 Source links:
 
-- [test/rendering/render_capture_test.cpp](https://github.com/d-addison/luminumbra/blob/52d6a2642993a60bbadbc9e88fcae382b3739b02/test/rendering/render_capture_test.cpp)
+- [test/rendering/render_capture_test.cpp](https://github.com/d-addison/luminumbra/blob/6b5f955d928bc6c443fc79cc0ac4a06a38765b55/test/rendering/render_capture_test.cpp)
 
 Required variants:
 
@@ -685,7 +685,7 @@ Acceptance checks:
 - At least two actual GPU exposures and luminance monotonicity; manual/auto precedence and exact lens values, full-frame sequence.
 - Meet the shared packet contract and preserve independent regression checks; each listed variant is required.
 
-Source reconciliation at `52d6a2642993a60bbadbc9e88fcae382b3739b02`: Automatic exposure is enabled in the shipping defaults. Manual/automatic precedence and actual GPU exposure response still require a complete native packet; source defaults do not establish qualification.
+Source reconciliation at `6b5f955d928bc6c443fc79cc0ac4a06a38765b55`: Automatic exposure is enabled in the shipping defaults. Manual/automatic precedence and actual GPU exposure response still require a complete native packet; source defaults do not establish qualification.
 
 Retained evidence:
 
@@ -883,9 +883,9 @@ Fixture: Existing384²spawn_horizon plus mesh quadrant/collider/LOD counts, seam
 
 Source links:
 
-- [test/performance/runtime_world_visual_validation_test.cpp](https://github.com/d-addison/luminumbra/blob/52d6a2642993a60bbadbc9e88fcae382b3739b02/test/performance/runtime_world_visual_validation_test.cpp)
-- [test/rendering/FarVolumeRenderMesh_test.cpp](https://github.com/d-addison/luminumbra/blob/52d6a2642993a60bbadbc9e88fcae382b3739b02/test/rendering/FarVolumeRenderMesh_test.cpp)
-- [tools/gates/far_ladder_oracle.py](https://github.com/d-addison/luminumbra/blob/52d6a2642993a60bbadbc9e88fcae382b3739b02/tools/gates/far_ladder_oracle.py)
+- [test/performance/runtime_world_visual_validation_test.cpp](https://github.com/d-addison/luminumbra/blob/6b5f955d928bc6c443fc79cc0ac4a06a38765b55/test/performance/runtime_world_visual_validation_test.cpp)
+- [test/rendering/FarVolumeRenderMesh_test.cpp](https://github.com/d-addison/luminumbra/blob/6b5f955d928bc6c443fc79cc0ac4a06a38765b55/test/rendering/FarVolumeRenderMesh_test.cpp)
+- [tools/gates/far_ladder_oracle.py](https://github.com/d-addison/luminumbra/blob/6b5f955d928bc6c443fc79cc0ac4a06a38765b55/tools/gates/far_ladder_oracle.py)
 
 Required variants:
 
@@ -915,7 +915,7 @@ Acceptance checks:
 - Existing384²spawn_horizon plus mesh quadrant/collider/LOD counts, seam visualization and qualified high-resolution companion.
 - Meet the shared packet contract and preserve independent regression checks; each listed variant is required.
 
-Source reconciliation at `52d6a2642993a60bbadbc9e88fcae382b3739b02`: Canonical volumetric generation, meshing, queue, residency, upload and render integration are implemented, including water, fog, shadow exclusion and horizon diagnostics. The ladder is the default far-world mode; the legacy renderer is retired behind compatibility settings. Edited-bake runtime consumption and complete native qualification are deferred to v0.3.1. The ladder horizon gate refuses before launch today and remains a documented v0.3.1 limitation.
+Source reconciliation at `6b5f955d928bc6c443fc79cc0ac4a06a38765b55`: Canonical volumetric generation, meshing, queue, residency, upload and render integration are implemented, including water/fog infrastructure, shadow exclusion and horizon diagnostics. Ladder is the default requested far-world mode. Missing immutable authority in normal presets still causes an explicit refusal and effective Legacy fallback (roughly 3 km range and a 3,200 m far plane); the default request does not establish 16 km native coverage. The committed-generation edited-SDF producer and FW S8 consumer, immutable authority for the refusing horizon gate, and complete native qualification are planned for v0.3.1.
 
 Retained evidence:
 

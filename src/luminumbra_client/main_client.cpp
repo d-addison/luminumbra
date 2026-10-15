@@ -2133,6 +2133,7 @@ int main(int argc, char* argv[]) {
         renderPipeline.set_far_world_cave_policy(Luminumbra::Rendering::ResolveFarWorldCaveField(
             g_systemConfig.param(luminumbra::core::SysParam::FarWorldCaveField,
                                  Luminumbra::Rendering::kDefaultFarWorldCaveFieldCode)));
+    // systems.json defaults to Ladder; enabled:false explicitly requests Legacy.
     renderPipeline.set_far_world_mode(Luminumbra::Rendering::RequestedFarWorldMode(
         g_systemConfig.enabled(luminumbra::core::SysKey::RenderFarWorldLadder)));
     if (g_systemConfig.enabled(luminumbra::core::SysKey::RenderFarWorldLadder)) {
@@ -4971,6 +4972,9 @@ int main(int argc, char* argv[]) {
                     }
                 });
                 j["capture_context"]["time_of_day_at_report"] = renderPipeline.get_time_of_day();
+                j["capture_context"]["world_id"] =
+                    gameSession ? nlohmann::json(gameSession->GetMetadata().worldId)
+                                : nlohmann::json(nullptr);
                 if (g_rb_has_streaming_position) {
                     j["capture_context"]["last_world_streaming_position"] = {
                         g_rb_last_streaming_position.x,

@@ -696,6 +696,7 @@ void FarWorldRenderer::Drain() {
     // Drawing restores the caller's bindings, but retirement also handles a
     // caller that inspected/bound one of the allocation's native objects.
     if (residency_ && driver_ && driver_->ValidContext()) {
+        driver_->UnbindLiveOwnership();
         driver_->BindVertexArray(0);
         driver_->BindBuffer(FarVolumeBufferKind::Vertex, 0);
     }

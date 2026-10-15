@@ -14,9 +14,9 @@ Fixture: Blender source viewport, object IDs/transforms and matched actual targe
 
 Source links:
 
-- [tools/blender/authoring/probes/blender_fixture.py](https://github.com/d-addison/luminumbra/blob/52d6a2642993a60bbadbc9e88fcae382b3739b02/tools/blender/authoring/probes/blender_fixture.py)
-- [tools/blender/authoring/probes/compiled_readback.py](https://github.com/d-addison/luminumbra/blob/52d6a2642993a60bbadbc9e88fcae382b3739b02/tools/blender/authoring/probes/compiled_readback.py)
-- [test/static_preview/installed_viewport.py](https://github.com/d-addison/luminumbra/blob/52d6a2642993a60bbadbc9e88fcae382b3739b02/test/static_preview/installed_viewport.py)
+- [tools/blender/authoring/probes/blender_fixture.py](https://github.com/d-addison/luminumbra/blob/6b5f955d928bc6c443fc79cc0ac4a06a38765b55/tools/blender/authoring/probes/blender_fixture.py)
+- [tools/blender/authoring/probes/compiled_readback.py](https://github.com/d-addison/luminumbra/blob/6b5f955d928bc6c443fc79cc0ac4a06a38765b55/tools/blender/authoring/probes/compiled_readback.py)
+- [test/static_preview/installed_viewport.py](https://github.com/d-addison/luminumbra/blob/6b5f955d928bc6c443fc79cc0ac4a06a38765b55/test/static_preview/installed_viewport.py)
 
 Required variants:
 
@@ -41,7 +41,7 @@ Acceptance checks:
 - Blender source viewport, object IDs/transforms and matched actual target render; compiled bounds/instance readback; current fixture export alone is not viewport fidelity.
 - Meet the shared packet contract and preserve independent regression checks; each listed variant is required.
 
-Source reconciliation at `52d6a2642993a60bbadbc9e88fcae382b3739b02`: Native source export, compiled transform readback, static-prefab consumption and installed static preview are implemented. Matched source/target pixels, hierarchy and instance acceptance remain unqualified.
+Source reconciliation at `6b5f955d928bc6c443fc79cc0ac4a06a38765b55`: Native source export, compiled transform readback, static-prefab consumption and installed static preview are implemented. Matched source/target pixels, hierarchy and instance acceptance remain unqualified.
 
 Retained evidence:
 
@@ -61,10 +61,10 @@ Fixture: Eight-leaf fixture source/evaluated/result views, GN seed/counts/materi
 
 Source links:
 
-- [tools/blender/authoring/probes/blender_fixture.py](https://github.com/d-addison/luminumbra/blob/52d6a2642993a60bbadbc9e88fcae382b3739b02/tools/blender/authoring/probes/blender_fixture.py)
-- [tools/blender/authoring/extension/blender_asset.py](https://github.com/d-addison/luminumbra/blob/52d6a2642993a60bbadbc9e88fcae382b3739b02/tools/blender/authoring/extension/blender_asset.py)
-- [tools/blender/authoring/extension_tests/test_evaluated_asset.py](https://github.com/d-addison/luminumbra/blob/52d6a2642993a60bbadbc9e88fcae382b3739b02/tools/blender/authoring/extension_tests/test_evaluated_asset.py)
-- [test/rendering/static_preview_render_test.cpp](https://github.com/d-addison/luminumbra/blob/52d6a2642993a60bbadbc9e88fcae382b3739b02/test/rendering/static_preview_render_test.cpp)
+- [tools/blender/authoring/probes/blender_fixture.py](https://github.com/d-addison/luminumbra/blob/6b5f955d928bc6c443fc79cc0ac4a06a38765b55/tools/blender/authoring/probes/blender_fixture.py)
+- [tools/blender/authoring/extension/blender_asset.py](https://github.com/d-addison/luminumbra/blob/6b5f955d928bc6c443fc79cc0ac4a06a38765b55/tools/blender/authoring/extension/blender_asset.py)
+- [tools/blender/authoring/extension_tests/test_evaluated_asset.py](https://github.com/d-addison/luminumbra/blob/6b5f955d928bc6c443fc79cc0ac4a06a38765b55/tools/blender/authoring/extension_tests/test_evaluated_asset.py)
+- [test/rendering/static_preview_render_test.cpp](https://github.com/d-addison/luminumbra/blob/6b5f955d928bc6c443fc79cc0ac4a06a38765b55/test/rendering/static_preview_render_test.cpp)
 
 Required variants:
 
@@ -91,7 +91,7 @@ Acceptance checks:
 - Eight-leaf fixture source/evaluated/result views, GN seed/counts/material indices, alpha chart, matching compiled readback; production canopy is G01-G03.
 - Meet the shared packet contract and preserve independent regression checks; each listed variant is required.
 
-Source reconciliation at `52d6a2642993a60bbadbc9e88fcae382b3739b02`: The eight-leaf export fixture, evaluated-foliage validation and installed static cutout preview subset are implemented. Evaluated material identity and matched native target fidelity still need proof; production canopy approval does not transfer.
+Source reconciliation at `6b5f955d928bc6c443fc79cc0ac4a06a38765b55`: The eight-leaf export fixture, evaluated-foliage validation and installed static cutout preview subset are implemented. Evaluated material identity and matched native target fidelity still need proof; production canopy approval does not transfer.
 
 Retained evidence:
 
@@ -254,11 +254,11 @@ Fixture: Fresh isolated native Blender capture, installed build/tool hashes, com
 
 Source links:
 
-- [tools/blender/authoring/service/README.md](https://github.com/d-addison/luminumbra/blob/52d6a2642993a60bbadbc9e88fcae382b3739b02/tools/blender/authoring/service/README.md)
-- [tools/blender/authoring/service/tests/native_acceptance.py](https://github.com/d-addison/luminumbra/blob/52d6a2642993a60bbadbc9e88fcae382b3739b02/tools/blender/authoring/service/tests/native_acceptance.py)
-- [tools/blender/authoring/extension/README.md](https://github.com/d-addison/luminumbra/blob/52d6a2642993a60bbadbc9e88fcae382b3739b02/tools/blender/authoring/extension/README.md)
-- [tools/blender/authoring/extension/viewport_engine.py](https://github.com/d-addison/luminumbra/blob/52d6a2642993a60bbadbc9e88fcae382b3739b02/tools/blender/authoring/extension/viewport_engine.py)
-- [test/static_preview/installed_viewport.py](https://github.com/d-addison/luminumbra/blob/52d6a2642993a60bbadbc9e88fcae382b3739b02/test/static_preview/installed_viewport.py)
+- [tools/blender/authoring/service/README.md](https://github.com/d-addison/luminumbra/blob/6b5f955d928bc6c443fc79cc0ac4a06a38765b55/tools/blender/authoring/service/README.md)
+- [tools/blender/authoring/service/tests/native_acceptance.py](https://github.com/d-addison/luminumbra/blob/6b5f955d928bc6c443fc79cc0ac4a06a38765b55/tools/blender/authoring/service/tests/native_acceptance.py)
+- [tools/blender/authoring/extension/README.md](https://github.com/d-addison/luminumbra/blob/6b5f955d928bc6c443fc79cc0ac4a06a38765b55/tools/blender/authoring/extension/README.md)
+- [tools/blender/authoring/extension/viewport_engine.py](https://github.com/d-addison/luminumbra/blob/6b5f955d928bc6c443fc79cc0ac4a06a38765b55/tools/blender/authoring/extension/viewport_engine.py)
+- [test/static_preview/installed_viewport.py](https://github.com/d-addison/luminumbra/blob/6b5f955d928bc6c443fc79cc0ac4a06a38765b55/test/static_preview/installed_viewport.py)
 
 Required variants:
 
@@ -283,7 +283,7 @@ Acceptance checks:
 - Fresh isolated native Blender capture, installed build/tool hashes, compilation/mesh/material readback and UI progress; each integration source remains separately identified.
 - Meet the shared packet contract and preserve independent regression checks; each listed variant is required.
 
-Source reconciliation at `52d6a2642993a60bbadbc9e88fcae382b3739b02`: Installed geometry service, extension, static renderer, persistent host and Blender adapter are implemented. Matched native service/editor/render packets and full workflow qualification remain outstanding.
+Source reconciliation at `6b5f955d928bc6c443fc79cc0ac4a06a38765b55`: Installed geometry service, extension, static renderer, persistent host and Blender adapter are implemented. Matched native service/editor/render packets and full workflow qualification remain outstanding.
 
 Retained evidence:
 
@@ -303,9 +303,9 @@ Fixture: Source texture/profile and compiled image hashes, exact cutoff, bright/
 
 Source links:
 
-- [tools/blender/authoring/service/luminumbra_author/formats.py](https://github.com/d-addison/luminumbra/blob/52d6a2642993a60bbadbc9e88fcae382b3739b02/tools/blender/authoring/service/luminumbra_author/formats.py)
-- [tools/blender/authoring/probes/compiled_readback.py](https://github.com/d-addison/luminumbra/blob/52d6a2642993a60bbadbc9e88fcae382b3739b02/tools/blender/authoring/probes/compiled_readback.py)
-- [test/rendering/static_preview_render_test.cpp](https://github.com/d-addison/luminumbra/blob/52d6a2642993a60bbadbc9e88fcae382b3739b02/test/rendering/static_preview_render_test.cpp)
+- [tools/blender/authoring/service/luminumbra_author/formats.py](https://github.com/d-addison/luminumbra/blob/6b5f955d928bc6c443fc79cc0ac4a06a38765b55/tools/blender/authoring/service/luminumbra_author/formats.py)
+- [tools/blender/authoring/probes/compiled_readback.py](https://github.com/d-addison/luminumbra/blob/6b5f955d928bc6c443fc79cc0ac4a06a38765b55/tools/blender/authoring/probes/compiled_readback.py)
+- [test/rendering/static_preview_render_test.cpp](https://github.com/d-addison/luminumbra/blob/6b5f955d928bc6c443fc79cc0ac4a06a38765b55/test/rendering/static_preview_render_test.cpp)
 
 Required variants:
 
@@ -331,7 +331,7 @@ Acceptance checks:
 - Source texture/profile and compiled image hashes, exact cutoff, bright/dark edge closeups, UV orientation and material readback. Exact capture producer not verified in this audit.
 - Meet the shared packet contract and preserve independent regression checks; each listed variant is required.
 
-Source reconciliation at `52d6a2642993a60bbadbc9e88fcae382b3739b02`: Texture validation, compiled readback and the installed static opaque/cutout renderer are implemented. Exact matched source/compiled charts, native UV-alpha fidelity and complete packets remain unqualified; general translucency is unsupported.
+Source reconciliation at `6b5f955d928bc6c443fc79cc0ac4a06a38765b55`: Texture validation, compiled readback and the installed static opaque/cutout renderer are implemented. Exact matched source/compiled charts, native UV-alpha fidelity and complete packets remain unqualified; general translucency is unsupported.
 
 Retained evidence:
 
@@ -351,10 +351,10 @@ Fixture: Source/compiled placement views, hierarchy/world matrices, shared resou
 
 Source links:
 
-- [tools/blender/authoring/service/tests/test_prefab.py](https://github.com/d-addison/luminumbra/blob/52d6a2642993a60bbadbc9e88fcae382b3739b02/tools/blender/authoring/service/tests/test_prefab.py)
-- [tools/blender/authoring/service/PREFABS.md](https://github.com/d-addison/luminumbra/blob/52d6a2642993a60bbadbc9e88fcae382b3739b02/tools/blender/authoring/service/PREFABS.md)
-- [tools/blender/authoring/extension_tests/test_state.py](https://github.com/d-addison/luminumbra/blob/52d6a2642993a60bbadbc9e88fcae382b3739b02/tools/blender/authoring/extension_tests/test_state.py)
-- [test/static_preview/installed_viewport.py](https://github.com/d-addison/luminumbra/blob/52d6a2642993a60bbadbc9e88fcae382b3739b02/test/static_preview/installed_viewport.py)
+- [tools/blender/authoring/service/tests/test_prefab.py](https://github.com/d-addison/luminumbra/blob/6b5f955d928bc6c443fc79cc0ac4a06a38765b55/tools/blender/authoring/service/tests/test_prefab.py)
+- [tools/blender/authoring/service/PREFABS.md](https://github.com/d-addison/luminumbra/blob/6b5f955d928bc6c443fc79cc0ac4a06a38765b55/tools/blender/authoring/service/PREFABS.md)
+- [tools/blender/authoring/extension_tests/test_state.py](https://github.com/d-addison/luminumbra/blob/6b5f955d928bc6c443fc79cc0ac4a06a38765b55/tools/blender/authoring/extension_tests/test_state.py)
+- [test/static_preview/installed_viewport.py](https://github.com/d-addison/luminumbra/blob/6b5f955d928bc6c443fc79cc0ac4a06a38765b55/test/static_preview/installed_viewport.py)
 
 Required variants:
 
@@ -381,7 +381,7 @@ Acceptance checks:
 - Source/compiled placement views, hierarchy/world matrices, shared resources, revision cancellation/rollback and actual build receipt; current integration and immutable build receipts must be identified separately.
 - Meet the shared packet contract and preserve independent regression checks; each listed variant is required.
 
-Source reconciliation at `52d6a2642993a60bbadbc9e88fcae382b3739b02`: Prefab descriptor compilation, service publication, runtime static-prefab consumption and installed preview are implemented. Source/target placement, cancellation and revision pixels remain unqualified; general character rendering is unsupported.
+Source reconciliation at `6b5f955d928bc6c443fc79cc0ac4a06a38765b55`: Prefab descriptor compilation, service publication, runtime static-prefab consumption and installed preview are implemented. Source/target placement, cancellation and revision pixels remain unqualified; general character rendering is unsupported.
 
 Retained evidence:
 
@@ -401,10 +401,10 @@ Fixture: Installed static renderer, authenticated persistent host and Blender Re
 
 Source links:
 
-- [test/static_preview/installed_viewport.py](https://github.com/d-addison/luminumbra/blob/52d6a2642993a60bbadbc9e88fcae382b3739b02/test/static_preview/installed_viewport.py)
-- [tools/blender/authoring/extension_tests/native_viewport_presentation.py](https://github.com/d-addison/luminumbra/blob/52d6a2642993a60bbadbc9e88fcae382b3739b02/tools/blender/authoring/extension_tests/native_viewport_presentation.py)
-- [tools/blender/authoring/extension_tests/native_viewport_engine.py](https://github.com/d-addison/luminumbra/blob/52d6a2642993a60bbadbc9e88fcae382b3739b02/tools/blender/authoring/extension_tests/native_viewport_engine.py)
-- [tools/blender/authoring/extension/viewport_engine.py](https://github.com/d-addison/luminumbra/blob/52d6a2642993a60bbadbc9e88fcae382b3739b02/tools/blender/authoring/extension/viewport_engine.py)
+- [test/static_preview/installed_viewport.py](https://github.com/d-addison/luminumbra/blob/6b5f955d928bc6c443fc79cc0ac4a06a38765b55/test/static_preview/installed_viewport.py)
+- [tools/blender/authoring/extension_tests/native_viewport_presentation.py](https://github.com/d-addison/luminumbra/blob/6b5f955d928bc6c443fc79cc0ac4a06a38765b55/tools/blender/authoring/extension_tests/native_viewport_presentation.py)
+- [tools/blender/authoring/extension_tests/native_viewport_engine.py](https://github.com/d-addison/luminumbra/blob/6b5f955d928bc6c443fc79cc0ac4a06a38765b55/tools/blender/authoring/extension_tests/native_viewport_engine.py)
+- [tools/blender/authoring/extension/viewport_engine.py](https://github.com/d-addison/luminumbra/blob/6b5f955d928bc6c443fc79cc0ac4a06a38765b55/tools/blender/authoring/extension/viewport_engine.py)
 
 Required variants:
 
@@ -443,7 +443,7 @@ Required performance scope: `installed_authoring`; 1 distinct frozen profile(s).
 - `warm_material_refresh_seconds` (profile-declared statistic) < 2.
 - `small_asset_refresh_seconds` (profile-declared statistic) < 5.
 
-Source reconciliation at `52d6a2642993a60bbadbc9e88fcae382b3739b02`: Installed static renderer, persistent host, Blender RenderEngine adapter and native probes are implemented. Historical GPU presentation evidence is scoped separately; complete editor workflow, Windows runtime closure and performance qualification remain outstanding. No visual approval follows from source landing.
+Source reconciliation at `6b5f955d928bc6c443fc79cc0ac4a06a38765b55`: Installed static renderer, persistent host, Blender RenderEngine adapter and native probes are implemented. Historical GPU presentation evidence is scoped separately; complete editor workflow, Windows runtime closure and performance qualification remain outstanding. No visual approval follows from source landing.
 
 Retained evidence:
 
@@ -496,7 +496,7 @@ Acceptance checks:
 - Deliver production SDK extraction in release order and compile separate graph documents into restricted Lua with typed manifests.
 - Meet the shared packet contract for every required variant and parent mapping.
 
-Source reconciliation at `945ecd295835a838eed0169ff709e7aabc134fa1`: Authorized September 13 completion scope. This row adds explicit coverage without replacing any original group; implementation and acceptance remain unfinished.
+Source reconciliation at `945ecd295835a838eed0169ff709e7aabc134fa1`: Additional completion coverage. This row adds explicit coverage without replacing any original group; implementation and acceptance remain unfinished.
 
 Retained evidence:
 
@@ -516,8 +516,8 @@ Fixture: Bounded static morph compilation, validation and CPU evaluation are imp
 
 Source links:
 
-- [test/tools/test_morph_asset.cpp](https://github.com/d-addison/luminumbra/blob/52d6a2642993a60bbadbc9e88fcae382b3739b02/test/tools/test_morph_asset.cpp)
-- [src/luminumbra_common/animation/MorphMesh.cpp](https://github.com/d-addison/luminumbra/blob/52d6a2642993a60bbadbc9e88fcae382b3739b02/src/luminumbra_common/animation/MorphMesh.cpp)
+- [test/tools/test_morph_asset.cpp](https://github.com/d-addison/luminumbra/blob/6b5f955d928bc6c443fc79cc0ac4a06a38765b55/test/tools/test_morph_asset.cpp)
+- [src/luminumbra_common/animation/MorphMesh.cpp](https://github.com/d-addison/luminumbra/blob/6b5f955d928bc6c443fc79cc0ac4a06a38765b55/src/luminumbra_common/animation/MorphMesh.cpp)
 
 Required variants:
 
@@ -544,7 +544,7 @@ Acceptance checks:
 - Recover morph changes and show source-to-installed-engine character edits with executable/library hashes unchanged.
 - Meet the shared packet contract for every required variant and parent mapping.
 
-Source reconciliation at `52d6a2642993a60bbadbc9e88fcae382b3739b02`: Bounded static morph compilation, validation and CPU evaluation are implemented. General character and native target-render acceptance remain outstanding; static preview does not implement general morph animation.
+Source reconciliation at `6b5f955d928bc6c443fc79cc0ac4a06a38765b55`: Bounded static morph compilation, validation and CPU evaluation are implemented. General character and native target-render acceptance remain outstanding; static preview does not implement general morph animation.
 
 Retained evidence:
 
@@ -590,7 +590,7 @@ Acceptance checks:
 - Qualify actual runtime poses and trajectories with supported rig identity and bounded constraints.
 - Meet the shared packet contract for every required variant and parent mapping.
 
-Source reconciliation at `945ecd295835a838eed0169ff709e7aabc134fa1`: Authorized September 13 completion scope. This row adds explicit coverage without replacing any original group; implementation and acceptance remain unfinished.
+Source reconciliation at `945ecd295835a838eed0169ff709e7aabc134fa1`: Additional completion coverage. This row adds explicit coverage without replacing any original group; implementation and acceptance remain unfinished.
 
 Retained evidence:
 
@@ -641,7 +641,7 @@ Acceptance checks:
 - Establish explicit physics phases and one transform owner; prove impact/recovery, limits and deterministic continuation without relying on stills.
 - Meet the shared packet contract for every required variant and parent mapping.
 
-Source reconciliation at `945ecd295835a838eed0169ff709e7aabc134fa1`: Authorized September 13 completion scope. This row adds explicit coverage without replacing any original group; implementation and acceptance remain unfinished.
+Source reconciliation at `945ecd295835a838eed0169ff709e7aabc134fa1`: Additional completion coverage. This row adds explicit coverage without replacing any original group; implementation and acceptance remain unfinished.
 
 Retained evidence:
 
@@ -653,7 +653,7 @@ Next action: Identify the concrete missing feature and dependency, implement in 
 
 **Reviewed bounded recipes and graph fidelity**
 
-Extend reviewed recipes after the named-recipe integration. Demonstrate stale revision refusal, undo and rollback; optional Banso adapters depend on typed-port fidelity.
+Extend reviewed recipes after the named-recipe integration. Demonstrate stale revision refusal, undo and rollback; optional orchestration adapters depend on typed-port fidelity.
 
 Origin: added. Parents: B05, B08. Priority: P2. Execution: **not_captured**. Approval: **pending**.
 
@@ -661,8 +661,8 @@ Fixture: Bounded recipe validation, revision/refusal, undo and native probe subs
 
 Source links:
 
-- [tools/blender/authoring/extension_tests/test_recipes.py](https://github.com/d-addison/luminumbra/blob/52d6a2642993a60bbadbc9e88fcae382b3739b02/tools/blender/authoring/extension_tests/test_recipes.py)
-- [tools/blender/authoring/extension_tests/native_recipe_probe.py](https://github.com/d-addison/luminumbra/blob/52d6a2642993a60bbadbc9e88fcae382b3739b02/tools/blender/authoring/extension_tests/native_recipe_probe.py)
+- [tools/blender/authoring/extension_tests/test_recipes.py](https://github.com/d-addison/luminumbra/blob/6b5f955d928bc6c443fc79cc0ac4a06a38765b55/tools/blender/authoring/extension_tests/test_recipes.py)
+- [tools/blender/authoring/extension_tests/native_recipe_probe.py](https://github.com/d-addison/luminumbra/blob/6b5f955d928bc6c443fc79cc0ac4a06a38765b55/tools/blender/authoring/extension_tests/native_recipe_probe.py)
 
 Required variants:
 
@@ -674,7 +674,7 @@ Required variants:
 - cancel
 - rollback
 - typed-port-save-reload
-- optional-banso-after-fidelity
+- optional-adapters-after-fidelity
 
 Automated temporal evidence: **required**.
 
@@ -688,10 +688,10 @@ Capture: **missing**. Implementation and a reproducible installed/native capture
 
 Acceptance checks:
 
-- Extend reviewed recipes after the named-recipe integration. Demonstrate stale revision refusal, undo and rollback; optional Banso adapters depend on typed-port fidelity.
+- Extend reviewed recipes after the named-recipe integration. Demonstrate stale revision refusal, undo and rollback; optional orchestration adapters depend on typed-port fidelity.
 - Meet the shared packet contract for every required variant and parent mapping.
 
-Source reconciliation at `52d6a2642993a60bbadbc9e88fcae382b3739b02`: Bounded recipe validation and native probe tooling are implemented, including revision/refusal and undo checks. Typed-port graph fidelity, complete native workflow packets and visual approval remain outstanding.
+Source reconciliation at `6b5f955d928bc6c443fc79cc0ac4a06a38765b55`: Bounded recipe validation and native probe tooling are implemented, including revision/refusal and undo checks. Typed-port graph fidelity, complete native workflow packets and visual approval remain outstanding.
 
 Retained evidence:
 
@@ -711,8 +711,8 @@ Fixture: Evaluated foliage assignment/instance validation and unsafe LOD reducti
 
 Source links:
 
-- [tools/blender/authoring/extension_tests/test_evaluated_asset.py](https://github.com/d-addison/luminumbra/blob/52d6a2642993a60bbadbc9e88fcae382b3739b02/tools/blender/authoring/extension_tests/test_evaluated_asset.py)
-- [tools/blender/authoring/extension_tests/native_evaluated_asset_probe.py](https://github.com/d-addison/luminumbra/blob/52d6a2642993a60bbadbc9e88fcae382b3739b02/tools/blender/authoring/extension_tests/native_evaluated_asset_probe.py)
+- [tools/blender/authoring/extension_tests/test_evaluated_asset.py](https://github.com/d-addison/luminumbra/blob/6b5f955d928bc6c443fc79cc0ac4a06a38765b55/tools/blender/authoring/extension_tests/test_evaluated_asset.py)
+- [tools/blender/authoring/extension_tests/native_evaluated_asset_probe.py](https://github.com/d-addison/luminumbra/blob/6b5f955d928bc6c443fc79cc0ac4a06a38765b55/tools/blender/authoring/extension_tests/native_evaluated_asset_probe.py)
 
 Required variants:
 
@@ -740,7 +740,7 @@ Acceptance checks:
 - Preserve evaluated assignments and supported instance identity, declare UV/material behavior, and refuse unsafe topology reduction while retaining accepted Tree Small 02 content.
 - Meet the shared packet contract for every required variant and parent mapping.
 
-Source reconciliation at `52d6a2642993a60bbadbc9e88fcae382b3739b02`: Evaluated-foliage assignment/instance validation and unsafe LOD reduction refusal subsets are implemented. Full native source/target packets, graph fidelity and visual approval remain outstanding; accepted tree packs are retained.
+Source reconciliation at `6b5f955d928bc6c443fc79cc0ac4a06a38765b55`: Evaluated-foliage assignment/instance validation and unsafe LOD reduction refusal subsets are implemented. Full native source/target packets, graph fidelity and visual approval remain outstanding; accepted tree packs are retained.
 
 Retained evidence:
 

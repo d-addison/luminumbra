@@ -1,22 +1,22 @@
 # Distant world and distant simulation contract
 
-Status: accepted contract, September 8, 2026, revised the same day after two
-independent review rounds. Implementation is planned in bounded slices and
-is **not** present in the tree at the time of writing; each section states the
-current shipped behaviour so nothing here reads as implemented. Nothing in this
-document waives the acceptance evidence that each slice must supply, and no
-format change listed here exists until its slice lands.
+Status: accepted contract, September 8, 2026; release-scope clarification
+October 14, 2026. This is the target contract. The [implementation and acceptance
+gap map](distant-world-implementation-status.md) and
+[release notes](release-notes-v0.3.0.md) distinguish implemented source from
+planned work and pending evidence. Generation, meshing, queues, residency, upload
+accounting and renderer integration are implemented; normal presets still lack
+immutable authority and fall back from the default Ladder request to Legacy.
 
-For the September 13 recovered source, see the [implementation and acceptance
-gap map](distant-world-implementation-status.md). It distinguishes landed
-prerequisites from the remaining runtime and evidence work without changing this
-contract. The subsequent [bounded volume-generation entry point](far-volume-generation.md)
-implements the first sampler-driven part of DW01; runtime integration remains open.
-The [bounded volume mesher](far-volume-meshing.md) supplies the first CPU kernel
-part of DW03 with same-authority halo normals; runtime integration remains open.
-The [canonical discovery and authority facade](far-volume-convergence.md) adds
-the original surface-span discovery and explicit numeric profiles; queue,
-allocation and renderer integration remain separate.
+Indexed authority durability/rehydration, durable completed work and ground-object
+continuation, durable regional fields/weather/scent/energy, regional foliage/water
+continuation, strict distant policy and distant creatures (S8), remaining S9
+closure, and the committed-generation edited-SDF producer and FW S8 consumer are
+planned for v0.3.1. The per-system continuation and transaction requirements below
+describe that planned work. Regional continuation performance/default enablement
+is planned for v0.4.0 as [issue #320](https://github.com/d-addison/luminumbra/issues/320).
+No current-candidate native qualification is claimed and no acceptance threshold
+is waived by source landing.
 
 ## Scope
 
@@ -25,7 +25,7 @@ allocation and renderer integration remain separate.
   extent is set by the packed chunk identity (`Chunk.h`, ±2^20 chunks of 16 m,
   about ±16,777 km on each horizontal axis; coordinates are masked, never range
   checked). World positions are 32-bit floats. By owner decision (September 8,
-  2026) v0.3 qualifies traversal and rendering within 32 km of the world origin,
+  2026) the contract requires qualification within 32 km of the world origin,
   where positions keep sub-centimetre precision; the camera-relative
   (floating-origin) precision work that would qualify the full addressable extent
   is deliberately residual scope, not an open contract gap. Chunk identity,
@@ -57,7 +57,7 @@ authoritative volumetric overlays captured from resident chunks; simulation
 systems tick every registry participant regardless of residency; wind, weather,
 aether ambience, scent, soil and irrigation are fixed grids anchored on the
 spawn point. A host-side active-region ledger and scheduler foundation exists
-(`sim.active_regions`, off by default; see [active regions](active-regions.md)),
+(`sim.active_regions`, enabled by default for v0.3.0; see [active regions](active-regions.md)),
 but no distant-simulation consumer uses the schedule yet.
 
 This contract separates three sets that may overlap but are never equated.
@@ -285,13 +285,13 @@ chunks stops (they stay resident) and the failure is reported; dirty state is
 never dropped. Parked bytes, save latency and failures are shown in the
 diagnostic panel and qualified on the historical 5,433-chunk edited save.
 
-The default-off ledger and deterministic scheduler foundation is now implemented;
+The ledger and deterministic scheduler foundation is implemented and enabled by default;
 see [the active-region format and scheduling guide](active-regions.md) for its
 canonical bytes, refusal behaviours and bounded slice boundaries. It has no
-per-system consumers and no measured budget caps yet. Dirty parking, autosave
-policy changes, snapshot transactions and the diagnostic panel remain pending.
+per-system consumers and no measured budget caps yet. Dirty parking,
+snapshot transactions and the diagnostic panel are planned for v0.3.1.
 Current default behaviour still evicts dirty chunks without a flush, the client
-saves only on quit or shutdown, and the server autosave interval defaults to zero.
+saves only on quit or shutdown, and the dedicated server autosaves every five minutes.
 
 ## Per-system distant policy
 
@@ -328,18 +328,18 @@ record omission in the table applies without losing that phase.
 ## Simulation clock and calendar
 
 One persisted absolute tick base continues across save and load. Day length is
-36,000 ticks (20 minutes at 30 Hz) and a year is 8 days for every consumer
-below and for the rendered sky; the shorter render day remains only as a debug
-override.
+216,000 ticks (two hours at 30 Hz) and a year is 8 days (16 hours) for
+calendar consumers and the rendered sky. Explicit calendars retain their saved
+pacing; shorter render days remain available as debug overrides.
 
-| Consumer today | Period today | Under this contract |
+| Consumer | Legacy period without the calendar | Calendar period |
 |---|---|---|
 | Plant light (`GameSession.cpp`) | 36,000-tick day | Calendar day |
 | Plant season (`GameSession.cpp`) | 288,000-tick year (8 days) | Calendar year |
 | Circadian slot (`GameSession.cpp`) | 36,000-tick day | Calendar day |
 | Migration (`GameSession.cpp`) | 108,000-tick year | Calendar year |
 | Stimulus channels (`StimulusChannels.h`) | 7,200-tick day, 432,000-tick season | Calendar day and year |
-| Rendered sky (`TimeOfDayModel.h`, `RenderPipeline.h`) | 1,800-tick day, 432,000-tick season | Calendar day and year |
+| Rendered sky (`TimeOfDayModel.h`, `RenderPipeline.h`) | 216,000-tick day, 432,000-tick season | Calendar day and year |
 
 One physical origin governs every consumer: tick zero is midnight of day zero
 in midwinter, which is the origin the plant and circadian formulas use today;
@@ -356,8 +356,13 @@ Calendar phase origins equal today's formulas (phase = tick modulo period from
 tick zero), so the plant season still starts at its cold minimum. Snapshots are
 taken only on tick boundaries, never inside a batched client catch-up.
 
-Current behaviour: the tick counter restarts at zero on every load, so a loaded
-world resumes tick-zero weather, and the six durations above coexist.
+With `sim.active_regions` off, the tick counter restarts at zero on load and
+simulation consumers retain the legacy periods above. With it on, the saved
+clock governs their day and year phases. Wind and weather retain independent
+tick-based update periods. The renderer's lunar cycle is still fixed at 54,000
+ticks (30 minutes): four full cycles per default day, including two during a
+night. Its brightness therefore changes within a night rather than between
+nights; a calendar-relative lunar period needs a separate pacing decision.
 
 ## Persistence and format contract
 
@@ -540,5 +545,7 @@ and Workshop content distribution are tracked separately and are not part of
 this contract.
 
 FW renderer diagnostics and the current horizon artifact/gate contract are described in
-[Far world horizon v2](far-world-horizon-v2.md). Legacy remains the default; native
-ladder qualification and S9–S13 remain outstanding.
+[Far world horizon v2](far-world-horizon-v2.md). Ladder is the default requested mode;
+`render.far_world_ladder.enabled:false` explicitly opts out to Legacy. Effective
+Legacy fallback and refusal diagnostics remain when Ladder cannot bind. Native
+ladder qualification remains outstanding.

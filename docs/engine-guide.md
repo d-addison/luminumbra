@@ -66,22 +66,22 @@ No measured caps or distant system consumers are activated by this foundation.
 
 ### Simulation clock metadata
 
-The hashed `sim.active_regions` key is off by default. When enabled, every
+The hashed `sim.active_regions` key is enabled by default for v0.3.0. When enabled, every
 successful persistent `GameSession` save writes three additional keys in
 `world_info.json` beside `waterSimCursor`, through `WorldSaveService`'s existing
 temporary-file and atomic replacement path:
 
 ```json
 "simulationTick": 317,
-"calendar": { "dayLengthTicks": 36000, "daysPerYear": 8 },
+"calendar": { "dayLengthTicks": 216000, "daysPerYear": 8 },
 "ambientFieldAnchor": { "x": 8.0, "y": 100.0, "z": 8.0 }
 ```
 
 `simulationTick` is the absolute completed host tick; there is no wall-clock
 progression while a world is closed. Tick zero is midnight on day zero in
-midwinter. At 30 Hz the default day lasts 20 minutes and the year lasts eight
-days. Plants and circadian activity use the midnight phase directly; migration,
-stimulus seasons and the sky's seasonal sine offset the year by three quarters
+midwinter. At 30 Hz the default day lasts two hours (about one hour of daylight) and
+the eight-day year lasts 16 hours. Plants and circadian activity use the midnight
+phase directly; migration, stimulus seasons and the sky's seasonal sine offset the year by three quarters
 to their spring-equinoctial origin. Sky geometry offsets the day by half a cycle
 because its existing zero is noon. An explicit render day-length override and
 photo/scenario time pins remain presentation controls.
@@ -89,7 +89,7 @@ photo/scenario time pins remain presentation controls.
 | Metadata condition | Open / write behavior |
 |---|---|
 | `simulationTick` absent | Tick zero |
-| `calendar` absent | Pinned defaults: 36,000 ticks/day, 8 days/year |
+| `calendar` absent | Pinned defaults: 216,000 ticks/day, 8 days/year |
 | `simulationTick` present | JSON unsigned integer in `[0, 2^62)` |
 | `calendar` present | Object containing exactly `dayLengthTicks` and `daysPerYear` |
 | `dayLengthTicks` | JSON integer in `[1, 2^31)` |
@@ -111,8 +111,13 @@ Enabled transient sessions can read explicit snapshots, but saving them is
 refused before creating a directory or writing any member, just as their
 canonical saves are refused.
 
-With the key off, saves omit all three keys, loads restart at zero, and every
-legacy period and hash byte stays unchanged. With it on, clock canonical bytes fold
+Saves with an explicit calendar retain it, including older 36,000-tick days.
+Saves without the calendar key adopt the 216,000-tick default; no migration is
+needed to load them.
+
+With the key off, saves omit all three keys and loads restart at zero; simulation
+consumers retain their legacy periods and hash bytes. The renderer uses the shared
+two-hour default day even on the legacy path. With it on, clock canonical bytes fold
 into the existing ecology hash slot without changing the top-level hash order.
 The canonical clock section is ASCII `world_clock:v1:` followed by little-endian
 `u64 simulationTick`, `u32 dayLengthTicks`, and `u32 daysPerYear` (16 payload
@@ -137,7 +142,11 @@ without an anchor use their saved spawn; a historical anchor already lost by
 such a snapshot cannot be recovered. The snapshot commit index, rollback
 journal, and multi-file recovery belong to C2/C3. C1 uses the existing metadata write path and is not a
 claim of atomic publication across chunk, entity, energy and metadata files.
-The feature remains default-off until those persistence slices land. LMR1 v2,
+The shipping clock/ledger foundation is enabled by default. Indexed authority
+durability/rehydration, durable completed work and ground-object continuation,
+durable regional fields/weather/scent/energy, and regional foliage/water
+continuation are planned for v0.3.1. Five-minute dedicated-server autosave does
+not implement those persistence slices. LMR1 v2,
 world_manifest.v1, FSD2 v3, preset revision 6, and existing canonical chunk and
 entity serialization are unchanged.
 
@@ -231,9 +240,10 @@ brains and plant growth already run in this sequence. They operate on entities
 with the relevant components. The server can boot deterministic avatar, creature
 and plant rosters; an empty default roster does not mean these systems are unwired.
 
-Optional simulation features use an off-by-default, empty-neutral contract:
+Shipping simulation features are enabled by default. Explicitly disabled features
+retain the empty-neutral contract:
 when disabled or without participants they allocate no authoritative state,
-write no save records, and contribute no hash bytes. This keeps disabled/default
+write no save records, and contribute no hash bytes. This keeps disabled
 configurations stable within the current world format.
 
 ### Persistence, replay, and networking
@@ -375,6 +385,15 @@ Configuration keys are declared in the schema and generated into C++ rather
 than duplicated by hand. Authoritative keys are distinguished from render-only
 keys. Published non-source assets are classified and hashed in the public asset
 inventory, with licensing recorded in `THIRD_PARTY_LICENSES.md`.
+
+The far-world requested mode defaults to Ladder, including when systems.json is
+missing or the flag is absent. For an explicit Legacy opt-out, set
+`render.far_world_ladder.enabled` to `false` in `data/common/systems.json` and
+restart the client. The per-user settings overlay only reads `user.*`; this flag
+has no environment or CLI override. Effective selection still falls back to
+Legacy when Ladder cannot bind, with requested/effective mode and refusals in
+the debug HUD and diagnostics. See [Far world horizon v2](far-world-horizon-v2.md)
+for the config example and qualification gates.
 
 ### Environment controls
 

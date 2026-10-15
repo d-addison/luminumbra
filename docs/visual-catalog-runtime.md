@@ -759,10 +759,10 @@ Fixture: foliage-instancing.ppm, calm/wind sequence, biome density and instance 
 
 Source links:
 
-- [src/luminumbra_client/core/scenarios/FoliageInstancing.cpp](https://github.com/d-addison/luminumbra/blob/52d6a2642993a60bbadbc9e88fcae382b3739b02/src/luminumbra_client/core/scenarios/FoliageInstancing.cpp)
-- [src/luminumbra_client/core/ScenarioRunnerCapture.cpp](https://github.com/d-addison/luminumbra/blob/52d6a2642993a60bbadbc9e88fcae382b3739b02/src/luminumbra_client/core/ScenarioRunnerCapture.cpp)
-- [src/luminumbra_client/rendering/RenderPipeline.cpp](https://github.com/d-addison/luminumbra/blob/52d6a2642993a60bbadbc9e88fcae382b3739b02/src/luminumbra_client/rendering/RenderPipeline.cpp)
-- [test/rendering/render_smoke_test.cpp](https://github.com/d-addison/luminumbra/blob/52d6a2642993a60bbadbc9e88fcae382b3739b02/test/rendering/render_smoke_test.cpp)
+- [src/luminumbra_client/core/scenarios/FoliageInstancing.cpp](https://github.com/d-addison/luminumbra/blob/6b5f955d928bc6c443fc79cc0ac4a06a38765b55/src/luminumbra_client/core/scenarios/FoliageInstancing.cpp)
+- [src/luminumbra_client/core/ScenarioRunnerCapture.cpp](https://github.com/d-addison/luminumbra/blob/6b5f955d928bc6c443fc79cc0ac4a06a38765b55/src/luminumbra_client/core/ScenarioRunnerCapture.cpp)
+- [src/luminumbra_client/rendering/RenderPipeline.cpp](https://github.com/d-addison/luminumbra/blob/6b5f955d928bc6c443fc79cc0ac4a06a38765b55/src/luminumbra_client/rendering/RenderPipeline.cpp)
+- [test/rendering/render_smoke_test.cpp](https://github.com/d-addison/luminumbra/blob/6b5f955d928bc6c443fc79cc0ac4a06a38765b55/test/rendering/render_smoke_test.cpp)
 
 Required variants:
 
@@ -798,7 +798,7 @@ Required performance scope: `foliage_draw`; 1 distinct frozen profile(s).
 
 - `foliage_draw_ms` (profile-declared statistic) <= 0.6.
 
-Source reconciliation at `52d6a2642993a60bbadbc9e88fcae382b3739b02`: Foliage/terrain corrections are integrated. Historical deficient baselines remain unchanged; current native captures and visual approval are outstanding and deferred to v0.3.1.
+Source reconciliation at `6b5f955d928bc6c443fc79cc0ac4a06a38765b55`: Foliage/terrain corrections are integrated. Historical deficient baselines remain unchanged; current native captures and visual approval are outstanding and deferred to v0.3.1.
 
 Retained evidence:
 
@@ -979,10 +979,10 @@ Fixture: Existing far-horizon station captures and boundary-band water analysis,
 
 Source links:
 
-- [src/luminumbra_client/core/scenarios/FarLodHorizonSmoke.cpp](https://github.com/d-addison/luminumbra/blob/52d6a2642993a60bbadbc9e88fcae382b3739b02/src/luminumbra_client/core/scenarios/FarLodHorizonSmoke.cpp)
-- [src/luminumbra_client/core/ScenarioRunnerCapture.cpp](https://github.com/d-addison/luminumbra/blob/52d6a2642993a60bbadbc9e88fcae382b3739b02/src/luminumbra_client/core/ScenarioRunnerCapture.cpp)
-- [src/luminumbra_client/rendering/FarVolumeResidency.cpp](https://github.com/d-addison/luminumbra/blob/52d6a2642993a60bbadbc9e88fcae382b3739b02/src/luminumbra_client/rendering/FarVolumeResidency.cpp)
-- [tools/gates/far_ladder_oracle.py](https://github.com/d-addison/luminumbra/blob/52d6a2642993a60bbadbc9e88fcae382b3739b02/tools/gates/far_ladder_oracle.py)
+- [src/luminumbra_client/core/scenarios/FarLodHorizonSmoke.cpp](https://github.com/d-addison/luminumbra/blob/6b5f955d928bc6c443fc79cc0ac4a06a38765b55/src/luminumbra_client/core/scenarios/FarLodHorizonSmoke.cpp)
+- [src/luminumbra_client/core/ScenarioRunnerCapture.cpp](https://github.com/d-addison/luminumbra/blob/6b5f955d928bc6c443fc79cc0ac4a06a38765b55/src/luminumbra_client/core/ScenarioRunnerCapture.cpp)
+- [src/luminumbra_client/rendering/FarVolumeResidency.cpp](https://github.com/d-addison/luminumbra/blob/6b5f955d928bc6c443fc79cc0ac4a06a38765b55/src/luminumbra_client/rendering/FarVolumeResidency.cpp)
+- [tools/gates/far_ladder_oracle.py](https://github.com/d-addison/luminumbra/blob/6b5f955d928bc6c443fc79cc0ac4a06a38765b55/tools/gates/far_ladder_oracle.py)
 
 Required variants:
 
@@ -1013,7 +1013,7 @@ Acceptance checks:
 - Existing far-horizon station captures and boundary-band water analysis, camera/coverage, elevated and ground views, transition path.
 - Meet the shared packet contract and preserve independent regression checks; each listed variant is required.
 
-Source reconciliation at `52d6a2642993a60bbadbc9e88fcae382b3739b02`: Canonical volumetric generation, meshing, queue, residency, upload and render integration are implemented, including water, fog, shadow exclusion and horizon diagnostics. The ladder is the default far-world mode; the legacy renderer is retired behind compatibility settings. Edited-bake runtime consumption and complete native qualification are deferred to v0.3.1. The ladder horizon gate refuses before launch today and remains a documented v0.3.1 limitation.
+Source reconciliation at `6b5f955d928bc6c443fc79cc0ac4a06a38765b55`: Canonical volumetric generation, meshing, queue, residency, upload and render integration are implemented, including water/fog infrastructure, shadow exclusion and horizon diagnostics. Ladder is the default requested far-world mode. Missing immutable authority in normal presets still causes an explicit refusal and effective Legacy fallback (roughly 3 km range and a 3,200 m far plane); the default request does not establish 16 km native coverage. The committed-generation edited-SDF producer and FW S8 consumer, immutable authority for the refusing horizon gate, and complete native qualification are planned for v0.3.1.
 
 Retained evidence:
 
@@ -1136,10 +1136,10 @@ Fixture: Save/load phase frames with identical framing, file hashes and world id
 
 Source links:
 
-- [src/luminumbra_client/core/scenarios/PersistenceRoundtrip.cpp](https://github.com/d-addison/luminumbra/blob/52d6a2642993a60bbadbc9e88fcae382b3739b02/src/luminumbra_client/core/scenarios/PersistenceRoundtrip.cpp)
-- [src/luminumbra_client/core/ScenarioRunnerCapture.cpp](https://github.com/d-addison/luminumbra/blob/52d6a2642993a60bbadbc9e88fcae382b3739b02/src/luminumbra_client/core/ScenarioRunnerCapture.cpp)
-- [test/persistence/world_open_refusal_test.cpp](https://github.com/d-addison/luminumbra/blob/52d6a2642993a60bbadbc9e88fcae382b3739b02/test/persistence/world_open_refusal_test.cpp)
-- [test/persistence/host_scheduler_fault_test.cpp](https://github.com/d-addison/luminumbra/blob/52d6a2642993a60bbadbc9e88fcae382b3739b02/test/persistence/host_scheduler_fault_test.cpp)
+- [src/luminumbra_client/core/scenarios/PersistenceRoundtrip.cpp](https://github.com/d-addison/luminumbra/blob/6b5f955d928bc6c443fc79cc0ac4a06a38765b55/src/luminumbra_client/core/scenarios/PersistenceRoundtrip.cpp)
+- [src/luminumbra_client/core/ScenarioRunnerCapture.cpp](https://github.com/d-addison/luminumbra/blob/6b5f955d928bc6c443fc79cc0ac4a06a38765b55/src/luminumbra_client/core/ScenarioRunnerCapture.cpp)
+- [test/persistence/world_open_refusal_test.cpp](https://github.com/d-addison/luminumbra/blob/6b5f955d928bc6c443fc79cc0ac4a06a38765b55/test/persistence/world_open_refusal_test.cpp)
+- [test/persistence/host_scheduler_fault_test.cpp](https://github.com/d-addison/luminumbra/blob/6b5f955d928bc6c443fc79cc0ac4a06a38765b55/test/persistence/host_scheduler_fault_test.cpp)
 
 Required variants:
 
@@ -1163,7 +1163,7 @@ Acceptance checks:
 - Save/load phase frames with identical framing, file hashes and world identity; UI sequence from campaign separately qualified; corruption refusal UI captured in U03.
 - Meet the shared packet contract and preserve independent regression checks; each listed variant is required.
 
-Source reconciliation at `52d6a2642993a60bbadbc9e88fcae382b3739b02`: Synthetic fixtures, catalog responsiveness, saved-world lifecycle, native refusal fixtures and scheduler-fault regression coverage are implemented. Complete native UI/persistence packets remain outstanding and are deferred to v0.3.1 when not produced for v0.3.0; the separate owner Windows tag-gate smoke remains required.
+Source reconciliation at `6b5f955d928bc6c443fc79cc0ac4a06a38765b55`: Synthetic fixtures, catalog responsiveness, saved-world lifecycle, native refusal fixtures and scheduler-fault regression coverage are implemented. Complete native UI/persistence packets remain outstanding and are deferred to v0.3.1 when not produced for v0.3.0; the separate owner Windows tag-gate smoke remains required.
 
 Retained evidence:
 
@@ -1279,11 +1279,11 @@ Fixture: Implemented five-tier volumetric source fixtures cover generation, mesh
 
 Source links:
 
-- [test/fixtures/far_volume/foundation-reference.json](https://github.com/d-addison/luminumbra/blob/52d6a2642993a60bbadbc9e88fcae382b3739b02/test/fixtures/far_volume/foundation-reference.json)
-- [test/common/FarVolumeTile_test.cpp](https://github.com/d-addison/luminumbra/blob/52d6a2642993a60bbadbc9e88fcae382b3739b02/test/common/FarVolumeTile_test.cpp)
-- [test/common/FarVolumeMesher_test.cpp](https://github.com/d-addison/luminumbra/blob/52d6a2642993a60bbadbc9e88fcae382b3739b02/test/common/FarVolumeMesher_test.cpp)
-- [test/rendering/FarVolumeResidency_test.cpp](https://github.com/d-addison/luminumbra/blob/52d6a2642993a60bbadbc9e88fcae382b3739b02/test/rendering/FarVolumeResidency_test.cpp)
-- [test/common/FarAuthorityOverlay_test.cpp](https://github.com/d-addison/luminumbra/blob/52d6a2642993a60bbadbc9e88fcae382b3739b02/test/common/FarAuthorityOverlay_test.cpp)
+- [test/fixtures/far_volume/foundation-reference.json](https://github.com/d-addison/luminumbra/blob/6b5f955d928bc6c443fc79cc0ac4a06a38765b55/test/fixtures/far_volume/foundation-reference.json)
+- [test/common/FarVolumeTile_test.cpp](https://github.com/d-addison/luminumbra/blob/6b5f955d928bc6c443fc79cc0ac4a06a38765b55/test/common/FarVolumeTile_test.cpp)
+- [test/common/FarVolumeMesher_test.cpp](https://github.com/d-addison/luminumbra/blob/6b5f955d928bc6c443fc79cc0ac4a06a38765b55/test/common/FarVolumeMesher_test.cpp)
+- [test/rendering/FarVolumeResidency_test.cpp](https://github.com/d-addison/luminumbra/blob/6b5f955d928bc6c443fc79cc0ac4a06a38765b55/test/rendering/FarVolumeResidency_test.cpp)
+- [test/common/FarAuthorityOverlay_test.cpp](https://github.com/d-addison/luminumbra/blob/6b5f955d928bc6c443fc79cc0ac4a06a38765b55/test/common/FarAuthorityOverlay_test.cpp)
 
 Required variants:
 
@@ -1315,13 +1315,13 @@ Required performance scope: `accepted_expanded_world`; 2 distinct frozen profile
 
 - `frame_ms` (p99) <= 16.67; also report target 8.33.
 
-Source reconciliation at `52d6a2642993a60bbadbc9e88fcae382b3739b02`: Canonical volumetric generation, meshing, queue, residency, upload and render integration are implemented, including water, fog, shadow exclusion and horizon diagnostics. The ladder is the default far-world mode; the legacy renderer is retired behind compatibility settings. Edited-bake runtime consumption and complete native qualification are deferred to v0.3.1. The ladder horizon gate refuses before launch today and remains a documented v0.3.1 limitation.
+Source reconciliation at `6b5f955d928bc6c443fc79cc0ac4a06a38765b55`: Canonical volumetric generation, meshing, queue, residency, upload and render integration are implemented, including water/fog infrastructure, shadow exclusion and horizon diagnostics. Ladder is the default requested far-world mode. Missing immutable authority in normal presets still causes an explicit refusal and effective Legacy fallback (roughly 3 km range and a 3,200 m far plane); the default request does not establish 16 km native coverage. The committed-generation edited-SDF producer and FW S8 consumer, immutable authority for the refusing horizon gate, and complete native qualification are planned for v0.3.1.
 
 Retained evidence:
 
 - None qualified for this catalog row.
 
-Next action: Qualify the default ladder and its source fixtures; implement the edited-bake runtime consumer and immutable authority for the horizon gate. Resolve authoritative ground/high/cave-air poses and fixed-view workloads; add cave-walk and edited-world traversal producers before complete native profile/display qualification. Native acceptance not produced for v0.3.0 is deferred to v0.3.1.
+Next action: Implement the committed-generation edited-SDF producer and FW S8 consumer and inject immutable authority for the horizon gate. Resolve authoritative ground/high/cave-air poses and fixed-view workloads, cave-walk and edited-world traversal producers. The render qualification tooling stack, acceptance-matrix completeness and complete native profile/display qualification are planned for v0.3.1; no current native pass is claimed.
 
 ## R25
 
@@ -1331,13 +1331,13 @@ Reconcile the coarse simulation integration without losing landed telemetry; pro
 
 Origin: added. Parents: R20, R21, R22, G07. Priority: P2. Execution: **not_captured**. Approval: **pending**.
 
-Fixture: Implemented clock, ledger and scheduler-fault fixtures support S3–S7 durability; complete deterministic continuation packets with game-owned activation data and S8/S9 remain outstanding.
+Fixture: Implemented clock, ledger and scheduler-fault fixtures support the simulation foundations. Indexed authority durability/rehydration, durable completed work and ground-object continuation, durable regional fields/weather/scent/energy, regional foliage/water continuation, strict distant policy and distant creatures (S8), and remaining S9 closure are planned for v0.3.1.
 
 Source links:
 
-- [test/common/SimulationClock_test.cpp](https://github.com/d-addison/luminumbra/blob/52d6a2642993a60bbadbc9e88fcae382b3739b02/test/common/SimulationClock_test.cpp)
-- [test/common/ActiveRegionLedger_test.cpp](https://github.com/d-addison/luminumbra/blob/52d6a2642993a60bbadbc9e88fcae382b3739b02/test/common/ActiveRegionLedger_test.cpp)
-- [test/persistence/host_scheduler_fault_test.cpp](https://github.com/d-addison/luminumbra/blob/52d6a2642993a60bbadbc9e88fcae382b3739b02/test/persistence/host_scheduler_fault_test.cpp)
+- [test/common/SimulationClock_test.cpp](https://github.com/d-addison/luminumbra/blob/6b5f955d928bc6c443fc79cc0ac4a06a38765b55/test/common/SimulationClock_test.cpp)
+- [test/common/ActiveRegionLedger_test.cpp](https://github.com/d-addison/luminumbra/blob/6b5f955d928bc6c443fc79cc0ac4a06a38765b55/test/common/ActiveRegionLedger_test.cpp)
+- [test/persistence/host_scheduler_fault_test.cpp](https://github.com/d-addison/luminumbra/blob/6b5f955d928bc6c443fc79cc0ac4a06a38765b55/test/persistence/host_scheduler_fault_test.cpp)
 
 Required variants:
 
@@ -1366,10 +1366,10 @@ Acceptance checks:
 - Reconcile the coarse simulation integration without losing landed telemetry; prove game-owned activation data and deterministic persistent continuation using the existing clock.
 - Meet the shared packet contract for every required variant and parent mapping.
 
-Source reconciliation at `52d6a2642993a60bbadbc9e88fcae382b3739b02`: Clock, ledger, edited-content digest and scheduler-fault foundations are implemented. S3–S7 durability is implemented: indexed authority durability, durable completed work and ground-object continuation, durable regional fields with causal weather and scent, and regional foliage/water continuation with host persistence. S8/S9 and complete native continuation qualification are deferred to v0.3.1.
+Source reconciliation at `6b5f955d928bc6c443fc79cc0ac4a06a38765b55`: Clock, ledger, edited-content digest and scheduler-fault foundations are implemented. The S3–S7 durability stack is planned for v0.3.1: indexed authority durability/rehydration; durable completed work and ground-object continuation; durable regional fields/weather/scent/energy; regional foliage/water continuation with host persistence. Strict distant policy and distant creatures (S8), remaining S9 closure and complete native continuation qualification are planned for v0.3.1. Regional continuation performance/default enablement is planned for v0.4.0 as issue #320.
 
 Retained evidence:
 
 - None qualified for this catalog row.
 
-Next action: Qualify deterministic S3–S7 persistence and continuation with pinned game-owned activation data; complete distant-simulation S8/S9 and native consumer/hash/diagnostic packets in v0.3.1. Native acceptance not produced for v0.3.0 is deferred to v0.3.1.
+Next action: Implement and qualify the v0.3.1 durability/continuation stack, strict distant policy and distant creatures (S8), and remaining S9 closure with game-owned activation data. Preserve telemetry and clock/ledger/hash/fault foundations. Native acceptance is pending; regional continuation performance/default enablement is planned for v0.4.0 as issue #320.

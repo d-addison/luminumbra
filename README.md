@@ -15,12 +15,37 @@ v0.2.1 remains the latest published source release. The
 acceptance deferred to v0.3.1 and publication. Interfaces and content formats may
 change between releases.
 
-Shipping features are enabled by default; debug toggles, Vulkan, Steam and GNS remain disabled. Audio playback keeps its separate disabled-by-default release policy. The volumetric far-world ladder is the default mode; the legacy far-world renderer is retired behind compatibility settings.
+Every shipping v0.3.0 feature is enabled by default. Debug toggles and non-shipping
+Vulkan, Steam and GNS backends remain opt-in. Experimental audio playback remains
+outside the shipping feature set under its separate disabled-by-default release policy.
 
-The distant-simulation S3–S7 durability stack is implemented: indexed authority durability, durable completed work and ground-object continuation, durable regional fields with causal weather and scent, and regional foliage and water continuation with host persistence.
+Ladder is the default requested far-world mode. Missing immutable authority in normal
+presets still causes an explicit refusal and effective Legacy fallback (roughly 3 km
+range and a 3,200 m far plane); the default request does not establish 16 km native
+coverage.
 
-Complete render qualification, the far-world edited-bake runtime consumer, distant-simulation S8/S9, the ladder horizon gate, authoritative ground/high/cave-air poses and fixed-view workloads, cave-walk and edited-world traversal producers, outstanding acceptance capture/pinning, and native Windows evidence not produced for v0.3.0 are deferred to v0.3.1. See the
-[acceptance record](docs/v0.3-acceptance.md) for the scoped tag gate and historical evidence.
+The persisted clock, active-region ledger, edited-content digest and scheduler-fault
+foundations are implemented. The dedicated server autosaves every five minutes. Indexed
+authority durability/rehydration, durable completed work and ground-object continuation,
+durable regional fields/weather/scent/energy, and regional foliage/water continuation
+with host persistence are planned for v0.3.1. Strict distant policy and distant
+creatures (S8), remaining S9 closure, the committed-generation edited-SDF producer and
+FW S8 consumer, the render qualification tooling stack, acceptance-matrix completeness,
+the developer console, asymmetric day/night and the calendar-relative lunar cycle,
+GNS/Steam admission identity, and the MG2 E4 candidate directory are also planned for
+v0.3.1.
+
+Performance work to ship regional continuation on by default is planned for v0.4.0 as
+[issue #320](https://github.com/d-addison/luminumbra/issues/320).
+
+Complete native render qualification, the ladder horizon gate, authoritative
+ground/high/cave-air poses and fixed-view workloads, cave-walk and edited-world
+traversal producers, and outstanding acceptance capture/pinning are deferred to v0.3.1.
+Current-candidate native Windows evidence is pending; the owner runs the required
+release smoke on Windows.
+See the [acceptance record](docs/v0.3-acceptance.md) for the scoped tag gate and
+historical evidence, and the [release notes](docs/release-notes-v0.3.0.md) for
+compatibility and scope.
 
 ## v0.3.0 world format break
 

@@ -1,7 +1,7 @@
 {
   "schema": "luminumbra.visual_catalog.v1",
   "recorded_date": "2026-10-14",
-  "source_audit_commit": "52d6a2642993a60bbadbc9e88fcae382b3739b02",
+  "source_audit_commit": "6b5f955d928bc6c443fc79cc0ac4a06a38765b55",
   "original_group_count": 70,
   "original_family_counts": {
     "runtime": 23,
@@ -1107,7 +1107,7 @@
         "Meet the shared packet contract and preserve independent regression checks; each listed variant is required."
       ],
       "reconciliation": {
-        "source_commit": "52d6a2642993a60bbadbc9e88fcae382b3739b02",
+        "source_commit": "6b5f955d928bc6c443fc79cc0ac4a06a38765b55",
         "finding": "Foliage/terrain corrections are integrated. Historical deficient baselines remain unchanged; current native captures and visual approval are outstanding and deferred to v0.3.1."
       },
       "runtime_selector": "foliage_visual_smoke",
@@ -1431,8 +1431,8 @@
         "Meet the shared packet contract and preserve independent regression checks; each listed variant is required."
       ],
       "reconciliation": {
-        "source_commit": "52d6a2642993a60bbadbc9e88fcae382b3739b02",
-        "finding": "Canonical volumetric generation, meshing, queue, residency, upload and render integration are implemented, including water, fog, shadow exclusion and horizon diagnostics. The ladder is the default far-world mode; the legacy renderer is retired behind compatibility settings. Edited-bake runtime consumption and complete native qualification are deferred to v0.3.1. The ladder horizon gate refuses before launch today and remains a documented v0.3.1 limitation."
+        "source_commit": "6b5f955d928bc6c443fc79cc0ac4a06a38765b55",
+        "finding": "Canonical volumetric generation, meshing, queue, residency, upload and render integration are implemented, including water/fog infrastructure, shadow exclusion and horizon diagnostics. Ladder is the default requested far-world mode. Missing immutable authority in normal presets still causes an explicit refusal and effective Legacy fallback (roughly 3 km range and a 3,200 m far plane); the default request does not establish 16 km native coverage. The committed-generation edited-SDF producer and FW S8 consumer, immutable authority for the refusing horizon gate, and complete native qualification are planned for v0.3.1."
       },
       "runtime_selector": "farlod_horizon_smoke",
       "execution_state": "not_captured",
@@ -1638,7 +1638,7 @@
         "Meet the shared packet contract and preserve independent regression checks; each listed variant is required."
       ],
       "reconciliation": {
-        "source_commit": "52d6a2642993a60bbadbc9e88fcae382b3739b02",
+        "source_commit": "6b5f955d928bc6c443fc79cc0ac4a06a38765b55",
         "finding": "Synthetic fixtures, catalog responsiveness, saved-world lifecycle, native refusal fixtures and scheduler-fault regression coverage are implemented. Complete native UI/persistence packets remain outstanding and are deferred to v0.3.1 when not produced for v0.3.0; the separate owner Windows tag-gate smoke remains required."
       },
       "runtime_selector": "persistence_roundtrip_smoke",
@@ -1967,7 +1967,7 @@
         "Meet the shared packet contract and preserve independent regression checks; each listed variant is required."
       ],
       "reconciliation": {
-        "source_commit": "52d6a2642993a60bbadbc9e88fcae382b3739b02",
+        "source_commit": "6b5f955d928bc6c443fc79cc0ac4a06a38765b55",
         "finding": "Synthetic fixtures, catalog responsiveness, saved-world lifecycle, native refusal fixtures and scheduler-fault regression coverage are implemented. Complete native UI/persistence packets remain outstanding and are deferred to v0.3.1 when not produced for v0.3.0; the separate owner Windows tag-gate smoke remains required."
       },
       "runtime_selector": null,
@@ -3211,7 +3211,7 @@
         "Meet the shared packet contract and preserve independent regression checks; each listed variant is required."
       ],
       "reconciliation": {
-        "source_commit": "52d6a2642993a60bbadbc9e88fcae382b3739b02",
+        "source_commit": "6b5f955d928bc6c443fc79cc0ac4a06a38765b55",
         "finding": "Froxel volumetrics are enabled in the shipping defaults. Analytic supporting fixtures exist; actual transmittance packets and complete native quality/performance qualification remain outstanding."
       },
       "runtime_selector": null,
@@ -3268,7 +3268,7 @@
         "Meet the shared packet contract and preserve independent regression checks; each listed variant is required."
       ],
       "reconciliation": {
-        "source_commit": "52d6a2642993a60bbadbc9e88fcae382b3739b02",
+        "source_commit": "6b5f955d928bc6c443fc79cc0ac4a06a38765b55",
         "finding": "Automatic exposure is enabled in the shipping defaults. Manual/automatic precedence and actual GPU exposure response still require a complete native packet; source defaults do not establish qualification."
       },
       "runtime_selector": null,
@@ -3560,8 +3560,8 @@
         "Meet the shared packet contract and preserve independent regression checks; each listed variant is required."
       ],
       "reconciliation": {
-        "source_commit": "52d6a2642993a60bbadbc9e88fcae382b3739b02",
-        "finding": "Canonical volumetric generation, meshing, queue, residency, upload and render integration are implemented, including water, fog, shadow exclusion and horizon diagnostics. The ladder is the default far-world mode; the legacy renderer is retired behind compatibility settings. Edited-bake runtime consumption and complete native qualification are deferred to v0.3.1. The ladder horizon gate refuses before launch today and remains a documented v0.3.1 limitation."
+        "source_commit": "6b5f955d928bc6c443fc79cc0ac4a06a38765b55",
+        "finding": "Canonical volumetric generation, meshing, queue, residency, upload and render integration are implemented, including water/fog infrastructure, shadow exclusion and horizon diagnostics. Ladder is the default requested far-world mode. Missing immutable authority in normal presets still causes an explicit refusal and effective Legacy fallback (roughly 3 km range and a 3,200 m far plane); the default request does not establish 16 km native coverage. The committed-generation edited-SDF producer and FW S8 consumer, immutable authority for the refusing horizon gate, and complete native qualification are planned for v0.3.1."
       },
       "runtime_selector": null,
       "execution_state": "not_captured",
@@ -3745,7 +3745,7 @@
         "Meet the shared packet contract and preserve independent regression checks; each listed variant is required."
       ],
       "reconciliation": {
-        "source_commit": "52d6a2642993a60bbadbc9e88fcae382b3739b02",
+        "source_commit": "6b5f955d928bc6c443fc79cc0ac4a06a38765b55",
         "finding": "Native source export, compiled transform readback, static-prefab consumption and installed static preview are implemented. Matched source/target pixels, hierarchy and instance acceptance remain unqualified."
       },
       "runtime_selector": null,
@@ -3808,7 +3808,7 @@
         "Meet the shared packet contract and preserve independent regression checks; each listed variant is required."
       ],
       "reconciliation": {
-        "source_commit": "52d6a2642993a60bbadbc9e88fcae382b3739b02",
+        "source_commit": "6b5f955d928bc6c443fc79cc0ac4a06a38765b55",
         "finding": "The eight-leaf export fixture, evaluated-foliage validation and installed static cutout preview subset are implemented. Evaluated material identity and matched native target fidelity still need proof; production canopy approval does not transfer."
       },
       "runtime_selector": null,
@@ -4052,7 +4052,7 @@
         "Meet the shared packet contract and preserve independent regression checks; each listed variant is required."
       ],
       "reconciliation": {
-        "source_commit": "52d6a2642993a60bbadbc9e88fcae382b3739b02",
+        "source_commit": "6b5f955d928bc6c443fc79cc0ac4a06a38765b55",
         "finding": "Installed geometry service, extension, static renderer, persistent host and Blender adapter are implemented. Matched native service/editor/render packets and full workflow qualification remain outstanding."
       },
       "runtime_selector": null,
@@ -4113,7 +4113,7 @@
         "Meet the shared packet contract and preserve independent regression checks; each listed variant is required."
       ],
       "reconciliation": {
-        "source_commit": "52d6a2642993a60bbadbc9e88fcae382b3739b02",
+        "source_commit": "6b5f955d928bc6c443fc79cc0ac4a06a38765b55",
         "finding": "Texture validation, compiled readback and the installed static opaque/cutout renderer are implemented. Exact matched source/compiled charts, native UV-alpha fidelity and complete packets remain unqualified; general translucency is unsupported."
       },
       "runtime_selector": null,
@@ -4176,7 +4176,7 @@
         "Meet the shared packet contract and preserve independent regression checks; each listed variant is required."
       ],
       "reconciliation": {
-        "source_commit": "52d6a2642993a60bbadbc9e88fcae382b3739b02",
+        "source_commit": "6b5f955d928bc6c443fc79cc0ac4a06a38765b55",
         "finding": "Prefab descriptor compilation, service publication, runtime static-prefab consumption and installed preview are implemented. Source/target placement, cancellation and revision pixels remain unqualified; general character rendering is unsupported."
       },
       "runtime_selector": null,
@@ -4442,7 +4442,7 @@
         "Meet the shared packet contract and preserve independent regression checks; each listed variant is required."
       ],
       "reconciliation": {
-        "source_commit": "52d6a2642993a60bbadbc9e88fcae382b3739b02",
+        "source_commit": "6b5f955d928bc6c443fc79cc0ac4a06a38765b55",
         "finding": "Foliage/terrain corrections are integrated. Historical deficient baselines remain unchanged; current native captures and visual approval are outstanding and deferred to v0.3.1."
       },
       "runtime_selector": null,
@@ -4641,7 +4641,7 @@
         "Meet the shared packet contract and preserve independent regression checks; each listed variant is required."
       ],
       "reconciliation": {
-        "source_commit": "52d6a2642993a60bbadbc9e88fcae382b3739b02",
+        "source_commit": "6b5f955d928bc6c443fc79cc0ac4a06a38765b55",
         "finding": "Synthetic fixtures, catalog responsiveness, saved-world lifecycle, native refusal fixtures and scheduler-fault regression coverage are implemented. Complete native UI/persistence packets remain outstanding and are deferred to v0.3.1 when not produced for v0.3.0; the separate owner Windows tag-gate smoke remains required."
       },
       "runtime_selector": null,
@@ -4713,8 +4713,8 @@
         "Meet the shared packet contract for every required variant and parent mapping."
       ],
       "reconciliation": {
-        "source_commit": "52d6a2642993a60bbadbc9e88fcae382b3739b02",
-        "finding": "Canonical volumetric generation, meshing, queue, residency, upload and render integration are implemented, including water, fog, shadow exclusion and horizon diagnostics. The ladder is the default far-world mode; the legacy renderer is retired behind compatibility settings. Edited-bake runtime consumption and complete native qualification are deferred to v0.3.1. The ladder horizon gate refuses before launch today and remains a documented v0.3.1 limitation."
+        "source_commit": "6b5f955d928bc6c443fc79cc0ac4a06a38765b55",
+        "finding": "Canonical volumetric generation, meshing, queue, residency, upload and render integration are implemented, including water/fog infrastructure, shadow exclusion and horizon diagnostics. Ladder is the default requested far-world mode. Missing immutable authority in normal presets still causes an explicit refusal and effective Legacy fallback (roughly 3 km range and a 3,200 m far plane); the default request does not establish 16 km native coverage. The committed-generation edited-SDF producer and FW S8 consumer, immutable authority for the refusing horizon gate, and complete native qualification are planned for v0.3.1."
       },
       "runtime_selector": null,
       "execution_state": "not_captured",
@@ -4725,7 +4725,7 @@
         "packet_sha256": null,
         "decision_reference": null
       },
-      "next_action": "Qualify the default ladder and its source fixtures; implement the edited-bake runtime consumer and immutable authority for the horizon gate. Resolve authoritative ground/high/cave-air poses and fixed-view workloads; add cave-walk and edited-world traversal producers before complete native profile/display qualification. Native acceptance not produced for v0.3.0 is deferred to v0.3.1.",
+      "next_action": "Implement the committed-generation edited-SDF producer and FW S8 consumer and inject immutable authority for the horizon gate. Resolve authoritative ground/high/cave-air poses and fixed-view workloads, cave-walk and edited-world traversal producers. The render qualification tooling stack, acceptance-matrix completeness and complete native profile/display qualification are planned for v0.3.1; no current native pass is claimed.",
       "performance_requirements": {
         "scope": "accepted_expanded_world",
         "profile_count": 2,
@@ -4755,7 +4755,7 @@
       "visual_goal": "Reconcile the coarse simulation integration without losing landed telemetry; prove game-owned activation data and deterministic persistent continuation using the existing clock.",
       "fixture": {
         "status": "source_fixture",
-        "description": "Implemented clock, ledger and scheduler-fault fixtures support S3\u2013S7 durability; complete deterministic continuation packets with game-owned activation data and S8/S9 remain outstanding.",
+        "description": "Implemented clock, ledger and scheduler-fault fixtures support the simulation foundations. Indexed authority durability/rehydration, durable completed work and ground-object continuation, durable regional fields/weather/scent/energy, regional foliage/water continuation, strict distant policy and distant creatures (S8), and remaining S9 closure are planned for v0.3.1.",
         "source_paths": [
           "test/common/SimulationClock_test.cpp",
           "test/common/ActiveRegionLedger_test.cpp",
@@ -4790,8 +4790,8 @@
         "Meet the shared packet contract for every required variant and parent mapping."
       ],
       "reconciliation": {
-        "source_commit": "52d6a2642993a60bbadbc9e88fcae382b3739b02",
-        "finding": "Clock, ledger, edited-content digest and scheduler-fault foundations are implemented. S3\u2013S7 durability is implemented: indexed authority durability, durable completed work and ground-object continuation, durable regional fields with causal weather and scent, and regional foliage/water continuation with host persistence. S8/S9 and complete native continuation qualification are deferred to v0.3.1."
+        "source_commit": "6b5f955d928bc6c443fc79cc0ac4a06a38765b55",
+        "finding": "Clock, ledger, edited-content digest and scheduler-fault foundations are implemented. The S3\u2013S7 durability stack is planned for v0.3.1: indexed authority durability/rehydration; durable completed work and ground-object continuation; durable regional fields/weather/scent/energy; regional foliage/water continuation with host persistence. Strict distant policy and distant creatures (S8), remaining S9 closure and complete native continuation qualification are planned for v0.3.1. Regional continuation performance/default enablement is planned for v0.4.0 as issue #320."
       },
       "runtime_selector": null,
       "execution_state": "not_captured",
@@ -4802,7 +4802,7 @@
         "packet_sha256": null,
         "decision_reference": null
       },
-      "next_action": "Qualify deterministic S3\u2013S7 persistence and continuation with pinned game-owned activation data; complete distant-simulation S8/S9 and native consumer/hash/diagnostic packets in v0.3.1. Native acceptance not produced for v0.3.0 is deferred to v0.3.1.",
+      "next_action": "Implement and qualify the v0.3.1 durability/continuation stack, strict distant policy and distant creatures (S8), and remaining S9 closure with game-owned activation data. Preserve telemetry and clock/ledger/hash/fault foundations. Native acceptance is pending; regional continuation performance/default enablement is planned for v0.4.0 as issue #320.",
       "performance_requirements": {
         "scope": "report_only",
         "profile_count": 0,
@@ -4863,7 +4863,7 @@
         "Meet the shared packet contract for every required variant and parent mapping."
       ],
       "reconciliation": {
-        "source_commit": "52d6a2642993a60bbadbc9e88fcae382b3739b02",
+        "source_commit": "6b5f955d928bc6c443fc79cc0ac4a06a38765b55",
         "finding": "Installed static renderer, persistent host, Blender RenderEngine adapter and native probes are implemented. Historical GPU presentation evidence is scoped separately; complete editor workflow, Windows runtime closure and performance qualification remain outstanding. No visual approval follows from source landing."
       },
       "runtime_selector": null,
@@ -4956,7 +4956,7 @@
       ],
       "reconciliation": {
         "source_commit": "945ecd295835a838eed0169ff709e7aabc134fa1",
-        "finding": "Authorized September 13 completion scope. This row adds explicit coverage without replacing any original group; implementation and acceptance remain unfinished."
+        "finding": "Additional completion coverage. This row adds explicit coverage without replacing any original group; implementation and acceptance remain unfinished."
       },
       "runtime_selector": null,
       "execution_state": "not_captured",
@@ -5019,7 +5019,7 @@
         "Meet the shared packet contract for every required variant and parent mapping."
       ],
       "reconciliation": {
-        "source_commit": "52d6a2642993a60bbadbc9e88fcae382b3739b02",
+        "source_commit": "6b5f955d928bc6c443fc79cc0ac4a06a38765b55",
         "finding": "Bounded static morph compilation, validation and CPU evaluation are implemented. General character and native target-render acceptance remain outstanding; static preview does not implement general morph animation."
       },
       "runtime_selector": null,
@@ -5080,7 +5080,7 @@
       ],
       "reconciliation": {
         "source_commit": "945ecd295835a838eed0169ff709e7aabc134fa1",
-        "finding": "Authorized September 13 completion scope. This row adds explicit coverage without replacing any original group; implementation and acceptance remain unfinished."
+        "finding": "Additional completion coverage. This row adds explicit coverage without replacing any original group; implementation and acceptance remain unfinished."
       },
       "runtime_selector": null,
       "execution_state": "not_captured",
@@ -5146,7 +5146,7 @@
       ],
       "reconciliation": {
         "source_commit": "945ecd295835a838eed0169ff709e7aabc134fa1",
-        "finding": "Authorized September 13 completion scope. This row adds explicit coverage without replacing any original group; implementation and acceptance remain unfinished."
+        "finding": "Additional completion coverage. This row adds explicit coverage without replacing any original group; implementation and acceptance remain unfinished."
       },
       "runtime_selector": null,
       "execution_state": "not_captured",
@@ -5174,7 +5174,7 @@
       "family": "blender",
       "name": "Reviewed bounded recipes and graph fidelity",
       "priority": "P2",
-      "visual_goal": "Extend reviewed recipes after the named-recipe integration. Demonstrate stale revision refusal, undo and rollback; optional Banso adapters depend on typed-port fidelity.",
+      "visual_goal": "Extend reviewed recipes after the named-recipe integration. Demonstrate stale revision refusal, undo and rollback; optional orchestration adapters depend on typed-port fidelity.",
       "fixture": {
         "status": "missing",
         "description": "Bounded recipe validation, revision/refusal, undo and native probe subsets are implemented. The complete typed-port graph-fidelity fixture and native workflow packet remain missing; retain GLB, versioned sidecars and immutable generations.",
@@ -5192,7 +5192,7 @@
         "cancel",
         "rollback",
         "typed-port-save-reload",
-        "optional-banso-after-fidelity"
+        "optional-adapters-after-fidelity"
       ],
       "temporal_evidence_required": true,
       "dependencies": [
@@ -5207,11 +5207,11 @@
         "scope": "Implementation and a reproducible installed/native capture producer remain required."
       },
       "acceptance_checks": [
-        "Extend reviewed recipes after the named-recipe integration. Demonstrate stale revision refusal, undo and rollback; optional Banso adapters depend on typed-port fidelity.",
+        "Extend reviewed recipes after the named-recipe integration. Demonstrate stale revision refusal, undo and rollback; optional orchestration adapters depend on typed-port fidelity.",
         "Meet the shared packet contract for every required variant and parent mapping."
       ],
       "reconciliation": {
-        "source_commit": "52d6a2642993a60bbadbc9e88fcae382b3739b02",
+        "source_commit": "6b5f955d928bc6c443fc79cc0ac4a06a38765b55",
         "finding": "Bounded recipe validation and native probe tooling are implemented, including revision/refusal and undo checks. Typed-port graph fidelity, complete native workflow packets and visual approval remain outstanding."
       },
       "runtime_selector": null,
@@ -5278,7 +5278,7 @@
         "Meet the shared packet contract for every required variant and parent mapping."
       ],
       "reconciliation": {
-        "source_commit": "52d6a2642993a60bbadbc9e88fcae382b3739b02",
+        "source_commit": "6b5f955d928bc6c443fc79cc0ac4a06a38765b55",
         "finding": "Evaluated-foliage assignment/instance validation and unsafe LOD reduction refusal subsets are implemented. Full native source/target packets, graph fidelity and visual approval remain outstanding; accepted tree packs are retained."
       },
       "runtime_selector": null,
@@ -5339,7 +5339,7 @@
       ],
       "reconciliation": {
         "source_commit": "945ecd295835a838eed0169ff709e7aabc134fa1",
-        "finding": "Authorized September 13 completion scope. This row adds explicit coverage without replacing any original group; implementation and acceptance remain unfinished."
+        "finding": "Additional completion coverage. This row adds explicit coverage without replacing any original group; implementation and acceptance remain unfinished."
       },
       "runtime_selector": null,
       "execution_state": "not_captured",
@@ -5402,7 +5402,7 @@
       ],
       "reconciliation": {
         "source_commit": "945ecd295835a838eed0169ff709e7aabc134fa1",
-        "finding": "Authorized September 13 completion scope. This row adds explicit coverage without replacing any original group; implementation and acceptance remain unfinished."
+        "finding": "Additional completion coverage. This row adds explicit coverage without replacing any original group; implementation and acceptance remain unfinished."
       },
       "runtime_selector": null,
       "execution_state": "not_captured",
@@ -5463,7 +5463,7 @@
       ],
       "reconciliation": {
         "source_commit": "945ecd295835a838eed0169ff709e7aabc134fa1",
-        "finding": "Authorized September 13 completion scope. This row adds explicit coverage without replacing any original group; implementation and acceptance remain unfinished."
+        "finding": "Additional completion coverage. This row adds explicit coverage without replacing any original group; implementation and acceptance remain unfinished."
       },
       "runtime_selector": null,
       "execution_state": "not_captured",

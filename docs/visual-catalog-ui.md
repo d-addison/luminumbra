@@ -125,10 +125,10 @@ Fixture: Empty/populated/selected/pending/corrupt/missing/obsolete/future/error 
 
 Source links:
 
-- [data/ui/world_selection.rml](https://github.com/d-addison/luminumbra/blob/52d6a2642993a60bbadbc9e88fcae382b3739b02/data/ui/world_selection.rml)
-- [test/ui/ui_smoke_test.cpp](https://github.com/d-addison/luminumbra/blob/52d6a2642993a60bbadbc9e88fcae382b3739b02/test/ui/ui_smoke_test.cpp)
-- [test/ui/ui_page_load_test.cpp](https://github.com/d-addison/luminumbra/blob/52d6a2642993a60bbadbc9e88fcae382b3739b02/test/ui/ui_page_load_test.cpp)
-- [test/persistence/world_open_refusal_test.cpp](https://github.com/d-addison/luminumbra/blob/52d6a2642993a60bbadbc9e88fcae382b3739b02/test/persistence/world_open_refusal_test.cpp)
+- [data/ui/world_selection.rml](https://github.com/d-addison/luminumbra/blob/6b5f955d928bc6c443fc79cc0ac4a06a38765b55/data/ui/world_selection.rml)
+- [test/ui/ui_smoke_test.cpp](https://github.com/d-addison/luminumbra/blob/6b5f955d928bc6c443fc79cc0ac4a06a38765b55/test/ui/ui_smoke_test.cpp)
+- [test/ui/ui_page_load_test.cpp](https://github.com/d-addison/luminumbra/blob/6b5f955d928bc6c443fc79cc0ac4a06a38765b55/test/ui/ui_page_load_test.cpp)
+- [test/persistence/world_open_refusal_test.cpp](https://github.com/d-addison/luminumbra/blob/6b5f955d928bc6c443fc79cc0ac4a06a38765b55/test/persistence/world_open_refusal_test.cpp)
 
 Required variants:
 
@@ -163,7 +163,7 @@ Acceptance checks:
 - Empty/populated/selected/pending/corrupt/missing/obsolete/future/error states; actual IDs, refusal reason and live navigation proof. Existing maintained screenshot covers only one state.
 - Meet the shared packet contract and preserve independent regression checks; each listed variant is required.
 
-Source reconciliation at `52d6a2642993a60bbadbc9e88fcae382b3739b02`: Synthetic fixtures, catalog responsiveness, saved-world lifecycle, native refusal fixtures and scheduler-fault regression coverage are implemented. Complete native UI/persistence packets remain outstanding and are deferred to v0.3.1 when not produced for v0.3.0; the separate owner Windows tag-gate smoke remains required.
+Source reconciliation at `6b5f955d928bc6c443fc79cc0ac4a06a38765b55`: Synthetic fixtures, catalog responsiveness, saved-world lifecycle, native refusal fixtures and scheduler-fault regression coverage are implemented. Complete native UI/persistence packets remain outstanding and are deferred to v0.3.1 when not produced for v0.3.0; the separate owner Windows tag-gate smoke remains required.
 
 Retained evidence:
 
