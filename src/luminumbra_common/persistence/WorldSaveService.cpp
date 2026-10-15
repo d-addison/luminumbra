@@ -84,6 +84,21 @@ void ValidateRegionDigestKey(world::RegionKey key) {
     }
 }
 
+std::atomic<std::uint64_t>& ChunkDecodeCounter() {
+    static std::atomic<std::uint64_t> counter{0};
+    return counter;
+}
+
+std::atomic<std::uint64_t>& GroundObjectDecodeCounter() {
+    static std::atomic<std::uint64_t> counter{0};
+    return counter;
+}
+
+std::atomic<std::uint64_t>& FieldPageDecodeCounter() {
+    static std::atomic<std::uint64_t> counter{0};
+    return counter;
+}
+
 std::atomic<std::uint64_t>& RegionTempSequence() {
     static std::atomic<std::uint64_t> sequence{0};
     return sequence;
@@ -765,8 +780,8 @@ void SeedChunkRecord(const RegionRecord& record,
                      const std::string& payload,
                      const ChunkValidationModes& modes,
                      ChunkValidationCache& cache) try {
-    // Facts belong to the canonical DOM, never the live chunk. Prove that the
-    // compressed output decodes to exactly its dump before retaining successes.
+    // Facts describe the canonical serialization of the quiesced source chunk.
+    // Prove compressed output decodes to exactly those bytes before seeding.
     std::string decoded;
     if (!DecompressPayload(record, decoded, nullptr) || decoded != payload)
         return;
@@ -793,7 +808,7 @@ bool CompressChunkSnapshot(const std::shared_ptr<Chunk>& chunk,
     single.insert_chunk(chunk);
     auto* cache = ChunkValidationCache::active();
     ChunkValidationModes modes{};
-    const auto payload = SerializeWorldStreamingStateSnapshotJson(single, cache ? &modes : nullptr);
+    const auto payload = StreamWorldStreamingStateSnapshotJson(single, cache ? &modes : nullptr);
     if (!CompressPayload(payload, record, errors))
         return false;
     if (cache)
@@ -805,6 +820,7 @@ std::shared_ptr<Chunk> DecodeChunkRecord(const RegionRecord& record,
                                          const std::filesystem::path& path,
                                          std::vector<std::string>* errors,
                                          bool strict_water = false) {
+    ChunkDecodeCounter().fetch_add(1, std::memory_order_relaxed);
     if (auto* cache = ChunkValidationCache::active())
         cache->record_decode(strict_water);
     std::string payload;
@@ -1643,6 +1659,7 @@ bool WorldSaveService::load_ground_objects(world::GroundObjectStore& out,
     bytes.resize(static_cast<std::size_t>(in.gcount()));
     world::GroundObjectStore parsed;
     std::string error;
+    GroundObjectDecodeCounter().fetch_add(1, std::memory_order_relaxed);
     if (!world::GroundObjectStore::parse(bytes, next_id, parsed, error)) {
         AddError(errors, "Ground objects load failed: " + error);
         return false;
@@ -1674,15 +1691,19 @@ bool GroundObjectsMatchLedger(const world::GroundObjectStore& store,
 
 bool WorldSaveService::validate_ground_objects(const std::filesystem::path& save_dir,
                                                const world::ActiveRegionLedger& ledger,
-                                               std::vector<std::string>* errors) {
+                                               std::vector<std::string>* errors,
+                                               world::GroundObjectStore* validated) {
     std::error_code ec;
     const bool has_objects = std::filesystem::exists(ground_objects_path(save_dir), ec);
     if (ec) {
         AddError(errors, "failed to inspect ground objects file: " + ec.message());
         return false;
     }
-    if (!has_objects)
+    if (!has_objects) {
+        if (validated)
+            validated->clear();
         return true;
+    }
     const bool has_ledger = std::filesystem::exists(active_regions_path(save_dir), ec);
     if (ec) {
         AddError(errors, "failed to inspect active regions file: " + ec.message());
@@ -1700,7 +1721,11 @@ bool WorldSaveService::validate_ground_objects(const std::filesystem::path& save
     bool required = false;
     if (!read_clock_metadata(save_dir, clock, required, errors))
         return false;
-    return GroundObjectsMatchLedger(store, ledger, clock.tick(), errors);
+    if (!GroundObjectsMatchLedger(store, ledger, clock.tick(), errors))
+        return false;
+    if (validated)
+        *validated = std::move(store);
+    return true;
 }
 
 std::filesystem::path WorldSaveService::field_pages_path(const std::filesystem::path& save_dir) {
@@ -1782,6 +1807,7 @@ bool WorldSaveService::load_field_pages(world::FieldPageState& out,
     bytes.resize(static_cast<std::size_t>(in.gcount()));
     world::FieldPageState parsed;
     std::string error;
+    FieldPageDecodeCounter().fetch_add(1, std::memory_order_relaxed);
     if (!world::FieldPageState::parse(bytes, parsed, error)) {
         AddError(errors, "Field pages load failed: " + error);
         return false;
@@ -1856,15 +1882,19 @@ bool FieldPagesMatchLedger(const world::FieldPageState& state,
 
 bool WorldSaveService::validate_field_pages(const std::filesystem::path& save_dir,
                                             const world::ActiveRegionLedger& ledger,
-                                            std::vector<std::string>* errors) {
+                                            std::vector<std::string>* errors,
+                                            world::FieldPageState* validated) {
     std::error_code ec;
     const bool has_pages = std::filesystem::exists(field_pages_path(save_dir), ec);
     if (ec) {
         AddError(errors, "failed to inspect field pages file: " + ec.message());
         return false;
     }
-    if (!has_pages)
+    if (!has_pages) {
+        if (validated)
+            validated->clear();
         return true;
+    }
     const bool has_ledger = std::filesystem::exists(active_regions_path(save_dir), ec);
     if (ec) {
         AddError(errors, "failed to inspect active regions file: " + ec.message());
@@ -1901,7 +1931,11 @@ bool WorldSaveService::validate_field_pages(const std::filesystem::path& save_di
             return false;
         }
     }
-    return FieldPagesMatchLedger(state, ledger, errors);
+    if (!FieldPagesMatchLedger(state, ledger, errors))
+        return false;
+    if (validated)
+        *validated = std::move(state);
+    return true;
 }
 
 std::filesystem::path WorldSaveService::active_regions_path(const std::filesystem::path& save_dir) {
@@ -2382,6 +2416,18 @@ std::atomic<std::uint64_t>& DecodeCounter() {
 
 std::uint64_t WorldSaveService::decode_count_for_testing() {
     return DecodeCounter().load(std::memory_order_acquire);
+}
+
+std::uint64_t WorldSaveService::field_page_decode_count_for_testing() {
+    return FieldPageDecodeCounter().load(std::memory_order_relaxed);
+}
+
+std::uint64_t WorldSaveService::chunk_decode_count_for_testing() {
+    return ChunkDecodeCounter().load(std::memory_order_relaxed);
+}
+
+std::uint64_t WorldSaveService::ground_object_decode_count_for_testing() {
+    return GroundObjectDecodeCounter().load(std::memory_order_relaxed);
 }
 
 bool WorldSaveService::durable_flush_directory(const std::filesystem::path& directory,
@@ -2903,12 +2949,15 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
                                   std::vector<std::string>& errors,
                                   const std::stop_token& stop,
                                   const std::function<bool(const IVec3&)>& retain_chunk,
-                                  std::vector<IVec3>* authoritative_inventory) const {
+                                  std::vector<IVec3>* authoritative_inventory,
+                                  WorldSaveRecords* validated_records) const {
     if (auto* cache = ChunkValidationCache::active())
         cache->exclude_save_directory(save_dir);
     const ChunkValidationCache::InventoryScope inventory(ChunkValidationCache::active());
     DecodeCounter().fetch_add(1, std::memory_order_acq_rel);
     state.clear();
+    if (validated_records)
+        *validated_records = {};
     if (authoritative_inventory)
         authoritative_inventory->clear();
     const auto reject = [&state, &errors, authoritative_inventory](const std::string& message) {
@@ -3048,7 +3097,8 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
         world::ActiveRegionLedger ledger;
         if (!load_active_regions(ledger, save_dir, &errors))
             return reject("");
-        if (std::filesystem::exists(active_regions_path(save_dir))) {
+        const bool has_ledger = std::filesystem::exists(active_regions_path(save_dir));
+        if (has_ledger) {
             world::WorldClock clock;
             bool required = false;
             if (!read_clock_metadata(save_dir, clock, required, &errors))
@@ -3061,9 +3111,11 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
                     return reject("corrupt regional energy field age");
             }
         }
-        if (!validate_ground_objects(save_dir, ledger, &errors))
+        world::GroundObjectStore ground;
+        if (!validate_ground_objects(save_dir, ledger, &errors, &ground))
             return reject("");
-        if (!validate_field_pages(save_dir, ledger, &errors))
+        world::FieldPageState foliage_pages;
+        if (!validate_field_pages(save_dir, ledger, &errors, &foliage_pages))
             return reject("");
         Ecs::EntityRegistrySnapshot plants;
         if (stop.stop_requested())
@@ -3071,28 +3123,19 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
         if (!load_plant_entities(plants, save_dir, &errors))
             return reject("");
         if (indexed || plants.persistent_identity) {
-            world::GroundObjectStore ground;
-            if (!load_ground_objects(ground, save_dir, ledger.next_persistent_id(), &errors))
-                return reject("");
             std::string plant_error;
             if (!luminumbra::foliage::ValidatePlantEntitySnapshot(
                     plants, ledger, ground, plant_error))
                 return reject(plant_error);
             entt::registry decoded;
             luminumbra::foliage::ApplyPlantEntitySnapshot(decoded, plants);
-            world::FieldPageState foliage_pages;
-            if (!load_field_pages(foliage_pages, save_dir, &errors))
-                return reject("");
-            const auto soil_cells = luminumbra::foliage::FoliageCells(foliage_pages.soil());
-            const auto irrigation_cells =
-                luminumbra::foliage::FoliageCells(foliage_pages.irrigation());
             for (auto e : decoded.view<Components::PlantTag, Components::TransformComponent>()) {
                 const auto cell = luminumbra::foliage::FoliageCell(
                     decoded.get<Components::TransformComponent>(e).position);
                 if ((decoded.all_of<Components::SoilFeederComponent>(e) &&
-                     !soil_cells.contains(cell)) ||
+                     !foliage_pages.soil().initialized(cell)) ||
                     (decoded.all_of<Components::WaterSourceComponent>(e) &&
-                     !irrigation_cells.contains(cell)))
+                     !foliage_pages.irrigation().initialized(cell)))
                     return reject("Corrupt plant authority: missing owned foliage cell");
             }
         }
@@ -3102,8 +3145,17 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
             if (!mismatch.empty())
                 return reject("inconsistent snapshot: " + mismatch);
         }
+        if (validated_records) {
+            validated_records->ledger = std::move(ledger);
+            validated_records->ground = std::move(ground);
+            validated_records->pages = std::move(foliage_pages);
+            validated_records->plants = std::move(plants);
+            validated_records->has_ledger = has_ledger;
+        }
         return true;
     } catch (const std::exception& e) {
+        if (validated_records)
+            *validated_records = {};
         return reject(std::string("corrupt or unreadable world persistence: ") + e.what());
     }
 }

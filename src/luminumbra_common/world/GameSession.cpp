@@ -182,7 +182,7 @@ GameSession::~GameSession() {
     m_worldSystem.reset();
 }
 
-void GameSession::ResetWorldSystems() {
+void GameSession::ResetWorldSystems(bool keep_admitted_chunk_facts) {
     if (m_worldSystem)
         m_worldSystem->quiesce_streaming_jobs_for_save();
     // Keep all dependencies alive while the world destructor publishes completed work.
@@ -191,7 +191,8 @@ void GameSession::ResetWorldSystems() {
     m_worldSystem.reset();
     m_physicsSystem.reset();
     m_waterSystem.reset();
-    m_chunkValidationCache.clear();
+    if (!keep_admitted_chunk_facts)
+        m_chunkValidationCache.clear();
     m_registry.clear();
     m_soilGrid.reset();
     m_irrigationGrid.reset();
@@ -1413,6 +1414,11 @@ bool GameSession::CreateWorldInternal(const std::string& name,
 }
 
 bool GameSession::LoadWorld(const std::string& worldId) {
+    return LoadWorld(worldId, World::ReadWorldgenSymlinkStatus);
+}
+
+bool GameSession::LoadWorld(const std::string& worldId,
+                            const World::WorldgenFileStatusReader& read_status) {
     if (!IsSimulationTickBoundary())
         return false;
     m_lastLoadedChunkCount = 0;
@@ -1435,16 +1441,45 @@ bool GameSession::LoadWorld(const std::string& worldId) {
             }
         }
     }
-    const auto saved = Persistence::InspectSavedWorld(RuntimeRoot(m_rootPath), worldId);
+    if (!m_jobSystem) {
+        m_worldOpenError = "JobSystem not set before loading world.";
+        return false;
+    }
+    // Start one exact-byte validation inventory and retain it through adoption and saves.
+    m_chunkValidationCache.clear();
+    const Persistence::ChunkValidationCache::Scope validation_scope(m_chunkValidationCache);
+    // Keep the admitted siblings and only the initial resident cohort through reset.
+    // The planner itself is adopted too, so terrain/cache work is not repeated.
+    Persistence::WorldSaveAdmission admission;
+    std::unique_ptr<Systems::SHIELD_WorldSystem> prepared_world;
+    std::optional<std::set<ChunkID>> wanted;
+    const auto retain = [this, &prepared_world, &wanted](const Persistence::SavedWorld& candidate,
+                                                         const TerrainGenParams& candidate_params,
+                                                         const IVec3& coords) {
+        if (!m_activeRegionsEnabled)
+            return !candidate.requires_active_regions;
+        if (!wanted) {
+            auto planning_params = candidate_params;
+            ClampTerrainParams(planning_params);
+            prepared_world = std::make_unique<Systems::SHIELD_WorldSystem>(
+                m_jobSystem, nullptr, planning_params, StringToSeed(candidate.metadata.seed));
+            Vec3 spawn = candidate.metadata.spawnPoint;
+            if (!candidate.has_spawn_point)
+                spawn = Vec3(
+                    8.0f, prepared_world->GetTerrainHeightAt(8.0f, 8.0f) + kSpawnEyeHeight, 8.0f);
+            wanted.emplace();
+            for (const auto& initial : prepared_world->GetInitialChunkLoadList(spawn))
+                wanted->insert(Chunk::calculate_id(initial));
+        }
+        return wanted->contains(Chunk::calculate_id(coords));
+    };
+    const auto saved = Persistence::InspectSavedWorld(
+        RuntimeRoot(m_rootPath), worldId, {}, &admission, retain, read_status);
     m_worldOpenError = saved.error;
     if (m_worldOpenError.empty() && saved.requires_active_regions && !m_activeRegionsEnabled)
         m_worldOpenError = "Incompatible configuration: this world requires sim.active_regions.";
     if (!m_worldOpenError.empty()) {
         LUMINUMBRA_CORE_ERROR("World open refused: {}", m_worldOpenError);
-        return false;
-    }
-    if (!m_jobSystem) {
-        m_worldOpenError = "JobSystem not set before loading world.";
         return false;
     }
     for (const auto& asset : m_requiredClientAssets) {
@@ -1454,19 +1489,16 @@ bool GameSession::LoadWorld(const std::string& worldId) {
         }
     }
     const fs::path worldPath = RuntimeRoot(m_rootPath) / "worlds" / "saves" / worldId;
-    const auto& preset_to_load = saved.preset_path;
-    const TerrainPresetLoadResult preset = LoadTerrainPreset(preset_to_load);
+    const auto& preset = admission.preset;
     if (!preset.ok) {
-        for (const std::string& error : preset.errors) {
-            LUMINUMBRA_CORE_ERROR("World preset load failed: {}", error);
-        }
+        m_worldOpenError = "World preset admission is unavailable.";
         return false;
     }
-    // Saved-world adoption also keeps the loader's inputs through generation.
+    // The planner, generator and advertised identity all use the catalog's one load.
     TerrainGenParams params = preset.params;
     ClampTerrainParams(params);
 
-    ResetWorldSystems();
+    ResetWorldSystems(true);
     m_presetContentHash = preset.preset_content_hash;
     m_metadata = saved.metadata;
     if (m_activeRegionsEnabled) {
@@ -1480,8 +1512,9 @@ bool GameSession::LoadWorld(const std::string& worldId) {
     m_physicsSystem = std::make_unique<Systems::PhysicsSystem>();
     m_physicsSystem->startup();
 
-    m_worldSystem =
-        std::make_unique<Systems::SHIELD_WorldSystem>(m_jobSystem, nullptr, params, world_seed);
+    m_worldSystem = prepared_world ? std::move(prepared_world)
+                                   : std::make_unique<Systems::SHIELD_WorldSystem>(
+                                         m_jobSystem, nullptr, params, world_seed);
     // Worldgen seam for audio-raycast surface materials (non-owning; physics
     // is destroyed before the world system by member order, so the pointer
     // cannot dangle).
@@ -1550,7 +1583,7 @@ bool GameSession::LoadWorld(const std::string& worldId) {
 
     m_worldOpenError.clear();
     AttachRegionEditObserver();
-    if (!LoadWorldState())
+    if (!AdoptWorldState(worldPath, &admission))
         return false;
     LUMINUMBRA_CORE_INFO("World loaded successfully: {}", m_metadata.name);
     return true;
@@ -2980,6 +3013,14 @@ bool GameSession::RunInSnapshotTransaction(const std::function<bool()>& body) {
     return committed;
 }
 
+Persistence::SavedWorld GameSession::InspectCurrentSavedWorld() {
+    const Persistence::ChunkValidationCache::Scope validation_scope(m_chunkValidationCache);
+    auto saved = Persistence::InspectSavedWorld(RuntimeRoot(m_rootPath), m_metadata.worldId);
+    if (saved.error.empty() && saved.preset_content_hash != m_presetContentHash)
+        saved.error = "Incompatible world preset: content changed since world admission.";
+    return saved;
+}
+
 bool GameSession::SaveWorld() {
     return SaveWorldMetadataTo(GetWorldSaveDir());
 }
@@ -3381,6 +3422,11 @@ bool GameSession::LoadWorldState() {
 }
 
 bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
+    return AdoptWorldState(save_dir, nullptr);
+}
+
+bool GameSession::AdoptWorldState(const std::filesystem::path& save_dir,
+                                  Persistence::WorldSaveAdmission* admission) {
     const Persistence::ChunkValidationCache::Scope validation_scope(m_chunkValidationCache);
     if (!IsSimulationTickBoundary())
         return false;
@@ -3388,7 +3434,7 @@ bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
     if (!m_worldOpenError.empty() || !m_worldSystem || save_dir.empty()) {
         return false;
     }
-    {
+    if (!admission) {
         std::vector<std::string> recovery_errors;
         if (Persistence::recover_pending_journal(save_dir, &recovery_errors) ==
             Persistence::RecoveryOutcome::Failed) {
@@ -3401,25 +3447,40 @@ bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
     }
 
     Persistence::WorldSaveService service;
-    WorldStreamingState loaded;
+    WorldStreamingState decoded_chunks;
+    WorldStreamingState& loaded = admission ? *admission->chunks : decoded_chunks;
     std::vector<std::string> errors;
     std::vector<IVec3> durable_inventory;
-    std::set<ChunkID> wanted;
-    if (m_activeRegionsEnabled)
-        for (const auto& coords : m_worldSystem->GetInitialChunkLoadList(m_metadata.spawnPoint))
-            wanted.insert(Chunk::calculate_id(coords));
+    std::optional<std::set<ChunkID>> wanted;
     const std::function<bool(const IVec3&)> retain =
-        m_activeRegionsEnabled ? std::function<bool(const IVec3&)>([&wanted](const IVec3& coords) {
-            return wanted.contains(Chunk::calculate_id(coords));
-        })
-                               : std::function<bool(const IVec3&)>{};
+        m_activeRegionsEnabled
+            ? std::function<bool(const IVec3&)>([this, &wanted](const IVec3& coords) {
+                  // A fresh or metadata-only snapshot has no chunk residency decisions.
+                  // Leave terrain sampling and hydraulic cache warming to the client's
+                  // initial generation plan until a saved chunk actually needs admission.
+                  if (!wanted) {
+                      wanted.emplace();
+                      for (const auto& initial :
+                           m_worldSystem->GetInitialChunkLoadList(m_metadata.spawnPoint))
+                          wanted->insert(Chunk::calculate_id(initial));
+                  }
+                  return wanted->contains(Chunk::calculate_id(coords));
+              })
+            : std::function<bool(const IVec3&)>{};
+    Persistence::WorldSaveRecords records;
     const bool snapshot_present =
-        service.load_world(loaded,
-                           save_dir,
-                           errors,
-                           {},
-                           retain,
-                           m_activeRegionsEnabled ? &durable_inventory : nullptr);
+        admission ? admission->present
+                  : service.load_world(loaded,
+                                       save_dir,
+                                       errors,
+                                       {},
+                                       retain,
+                                       m_activeRegionsEnabled ? &durable_inventory : nullptr,
+                                       &records);
+    if (admission) {
+        records = std::move(admission->records);
+        durable_inventory = std::move(admission->inventory);
+    }
     if (!snapshot_present && !errors.empty()) {
         m_worldOpenError = errors.front();
         m_worldSystem->clear_world(m_physicsSystem.get());
@@ -3448,16 +3509,9 @@ bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
     if (m_activeRegionsEnabled) {
         const Vec3 previous_ambient_anchor = m_ambientFieldAnchor;
         m_ambientFieldAnchor = ambient_anchor.value_or(m_metadata.spawnPoint);
-        ActiveRegionLedger ledger(m_activeRegionLedger.config());
-        if (!Persistence::WorldSaveService::load_active_regions(
-                ledger, save_dir, &clock_errors, saved_clock)) {
-            m_ambientFieldAnchor = previous_ambient_anchor;
-            m_worldOpenError = clock_errors.empty()
-                                   ? std::string(ActiveRegionLedger::kCorruptMessage)
-                                   : clock_errors.front();
-            m_worldSystem->clear_world(m_physicsSystem.get());
-            return false;
-        }
+        ActiveRegionLedger ledger = records.has_ledger
+                                        ? std::move(records.ledger)
+                                        : ActiveRegionLedger(m_activeRegionLedger.config());
         if (m_regionSchedulerOverride && ledger.config() != *m_regionSchedulerOverride) {
             m_ambientFieldAnchor = previous_ambient_anchor;
             m_worldOpenError = "Incompatible configuration: persisted region scheduler differs "
@@ -3471,25 +3525,8 @@ bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
         ledger.restore_clock(saved_clock);
         // Loaded before the ledger is adopted so a refusal leaves the session state as the
         // ledger-failure path does.
-        GroundObjectStore ground_objects;
-        std::vector<std::string> ground_errors;
-        if (!Persistence::WorldSaveService::load_ground_objects(
-                ground_objects, save_dir, ledger.next_persistent_id(), &ground_errors)) {
-            m_ambientFieldAnchor = previous_ambient_anchor;
-            m_worldOpenError = ground_errors.empty() ? std::string("Corrupt ground objects.")
-                                                     : ground_errors.front();
-            m_worldSystem->clear_world(m_physicsSystem.get());
-            return false;
-        }
-        FieldPageState field_pages;
-        std::vector<std::string> page_errors;
-        if (!Persistence::WorldSaveService::load_field_pages(field_pages, save_dir, &page_errors)) {
-            m_ambientFieldAnchor = previous_ambient_anchor;
-            m_worldOpenError =
-                page_errors.empty() ? std::string("Corrupt field pages.") : page_errors.front();
-            m_worldSystem->clear_world(m_physicsSystem.get());
-            return false;
-        }
+        auto ground_objects = std::move(records.ground);
+        auto field_pages = std::move(records.pages);
         std::optional<luminumbra::fields::EnergyFieldState> energy;
         std::error_code energy_ec;
         const auto energy_path = save_dir / "aether_state.efs";
@@ -3607,40 +3644,29 @@ bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
         }
     }
 
-    //  reload persisted plant entities into the live registry (a missing file is
-    // a clean miss). Geometry rebakes from the reloaded genome+stage on the render bridge.
+    // Admission already decoded the plant snapshot. Decode components into a scratch
+    // registry before applying them to the live roster, preserving transactional refusal.
     {
-        Luminumbra::Ecs::EntityRegistrySnapshot plant_snapshot;
-        std::vector<std::string> plant_errors;
-        const bool read = Persistence::WorldSaveService::load_plant_entities(
-            plant_snapshot, save_dir, &plant_errors);
+        auto plant_snapshot = std::move(records.plants);
         std::string error;
         if (m_activeRegionsEnabled &&
-            (!read || !luminumbra::foliage::ValidatePlantEntitySnapshot(
-                          plant_snapshot, m_activeRegionLedger, m_groundObjects, error))) {
-            m_worldOpenError =
-                error.empty() ? (plant_errors.empty() ? "Corrupt plants" : plant_errors.front())
-                              : error;
+            !luminumbra::foliage::ValidatePlantEntitySnapshot(
+                plant_snapshot, m_activeRegionLedger, m_groundObjects, error)) {
+            m_worldOpenError = error.empty() ? "Corrupt plants" : error;
             m_worldSystem->clear_world(m_physicsSystem.get());
             return false;
         }
-        if (read) {
-            try {
-                // Decode completely into a scratch registry first; malformed optional
-                // components cannot leave a partially adopted live roster.
-                entt::registry scratch;
-                luminumbra::foliage::ApplyPlantEntitySnapshot(scratch, plant_snapshot);
-                luminumbra::foliage::ApplyPlantEntitySnapshot(m_registry, plant_snapshot);
-            } catch (const std::exception& e) {
-                if (!m_activeRegionsEnabled)
-                    throw;
-                m_worldOpenError = std::string("Corrupt plant payload: ") + e.what();
-                m_worldSystem->clear_world(m_physicsSystem.get());
-                return false;
-            }
-        } else
-            for (const auto& e : plant_errors)
-                LUMINUMBRA_CORE_ERROR("Plant state load failed: {}", e);
+        try {
+            entt::registry scratch;
+            luminumbra::foliage::ApplyPlantEntitySnapshot(scratch, plant_snapshot);
+            luminumbra::foliage::ApplyPlantEntitySnapshot(m_registry, plant_snapshot);
+        } catch (const std::exception& e) {
+            if (!m_activeRegionsEnabled)
+                throw;
+            m_worldOpenError = std::string("Corrupt plant payload: ") + e.what();
+            m_worldSystem->clear_world(m_physicsSystem.get());
+            return false;
+        }
     }
 
     // restore the stateful energy layer's record (a

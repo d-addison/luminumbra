@@ -9,6 +9,7 @@
 #include <cmath>
 #include <fstream>
 #include <nlohmann/json.hpp>
+#include <utility>
 
 namespace Luminumbra::Persistence {
 namespace {
@@ -26,8 +27,14 @@ bool HasFrozenPreset(const std::string& name) {
 }
 } // namespace
 
-SavedWorld
-InspectSavedWorld(const fs::path& root, const std::string& world_id, const std::stop_token& stop) {
+SavedWorld InspectSavedWorld(const fs::path& root,
+                             const std::string& world_id,
+                             const std::stop_token& stop,
+                             WorldSaveAdmission* admission,
+                             const SavedWorldChunkSelector& retain,
+                             const World::WorldgenFileStatusReader& read_status) {
+    if (admission)
+        *admission = {};
     SavedWorld result;
     result.metadata.worldId = world_id;
     result.metadata.name = world_id;
@@ -83,7 +90,7 @@ InspectSavedWorld(const fs::path& root, const std::string& world_id, const std::
             result.metadata.name = json.at("name").get<std::string>();
         // Preserve the persistence service's exact obsolete/future/corrupt diagnostics.
         std::vector<std::string> errors;
-        if (!WorldSaveService::validate_save(save, &errors, stop)) {
+        if (!admission && !WorldSaveService::validate_save(save, &errors, stop)) {
             result.error = errors.empty() ? "Corrupt world save." : errors.front();
             return result;
         }
@@ -124,7 +131,7 @@ InspectSavedWorld(const fs::path& root, const std::string& world_id, const std::
         result.preset_path = fs::exists(embedded)
                                  ? embedded
                                  : root / presets / (result.metadata.worldType + ".json");
-        const auto preset = world::LoadTerrainPreset(result.preset_path);
+        auto preset = world::LoadTerrainPreset(result.preset_path, read_status);
         if (!preset.ok) {
             result.error =
                 preset.errors.empty() ? "World preset is unavailable." : preset.errors.front();
@@ -133,18 +140,37 @@ InspectSavedWorld(const fs::path& root, const std::string& world_id, const std::
         // Within the frozen-preset compatibility scope, older metadata may omit an identity.
         // When present, it is the FNV-1a checksum of the canonical preset JSON.
         if (HasFrozenPreset(result.metadata.worldType) && json.contains("presetIdentity")) {
-            std::ifstream preset_input(result.preset_path);
-            const auto source = nlohmann::json::parse(preset_input);
             if (!json.at("presetIdentity").is_string() ||
-                json.at("presetIdentity").get<std::string>() != StableChecksum(source.dump())) {
+                json.at("presetIdentity").get<std::string>() !=
+                    StableChecksum(preset.source_json)) {
                 result.error = "Incompatible world preset: saved preset identity does not match.";
                 return result;
             }
+        }
+        result.preset_source_json = preset.source_json;
+        result.preset_content_hash = preset.preset_content_hash;
+        if (admission) {
+            WorldSaveAdmission decoded;
+            const std::function<bool(const IVec3&)> select =
+                retain ? std::function<bool(const IVec3&)>([&](const IVec3& coords) {
+                    return retain(result, preset.params, coords);
+                })
+                       : std::function<bool(const IVec3&)>{};
+            decoded.present = WorldSaveService{}.load_world(
+                *decoded.chunks, save, errors, stop, select, &decoded.inventory, &decoded.records);
+            if (!errors.empty()) {
+                result.error = errors.front();
+                return result;
+            }
+            decoded.preset = std::move(preset);
+            *admission = std::move(decoded);
         }
         result.error.clear();
     } catch (const nlohmann::json::exception& e) {
         result.error = std::string("Corrupt world metadata: ") + e.what();
     } catch (const fs::filesystem_error& e) {
+        result.error = std::string("World unavailable: ") + e.what();
+    } catch (const std::exception& e) {
         result.error = std::string("World unavailable: ") + e.what();
     }
     return result;

@@ -384,7 +384,8 @@ std::string TerrainPresetContentHash(const nlohmann::json& preset) {
     return HashPresetIdentity(preset, nlohmann::json::array());
 }
 
-TerrainPresetLoadResult LoadTerrainPreset(const std::filesystem::path& preset_path) {
+TerrainPresetLoadResult LoadTerrainPreset(const std::filesystem::path& preset_path,
+                                          const World::WorldgenFileStatusReader& read_status) {
     TerrainPresetLoadResult result;
 
     std::ifstream file(preset_path);
@@ -413,7 +414,7 @@ TerrainPresetLoadResult LoadTerrainPreset(const std::filesystem::path& preset_pa
     const std::filesystem::path data_root =
         preset_dir.parent_path().parent_path().parent_path() / "data";
     return LoadTerrainPresetFromJson(
-        data, data_root, Filesystem::GenericUtf8PathString(preset_path));
+        data, data_root, Filesystem::GenericUtf8PathString(preset_path), read_status);
 }
 
 TerrainPresetLoadResult
@@ -728,6 +729,7 @@ LoadTerrainPresetFromJson(const nlohmann::json& source,
     if (!ResolveDependencyManifest(result, data_root, manifest, result.errors, read_status))
         return result;
     result.preset_content_hash = HashPresetIdentity(source, manifest);
+    result.source_json = source.dump();
     result.ok = true;
     return result;
 }

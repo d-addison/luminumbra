@@ -1,9 +1,11 @@
 #pragma once
 
 #include "SaveTransaction.h"
+#include "ecs/EntitySnapshot.h"
 #include "fields/FieldPageState.h"
 #include "world/ActiveRegionLedger.h"
 #include "world/GroundObjectStore.h"
+#include "world/TerrainPresetLoader.h"
 #include "world/WorldClock.h"
 #include "world/WorldStreamingState.h"
 
@@ -18,10 +20,6 @@
 #include <string>
 #include <string_view>
 #include <vector>
-
-namespace Luminumbra::Ecs {
-struct EntityRegistrySnapshot;
-}
 
 namespace Luminumbra::Persistence {
 
@@ -46,6 +44,26 @@ struct RegionDigestInputs {
     // Opaque field page projection of the region (FieldPageState::region_bytes); empty when the
     // region owns no initialized field cells, which keeps the digest of such regions unchanged.
     std::string field_page_bytes;
+};
+
+// Decoded siblings from one successful admission. Published only after all record,
+// ownership and snapshot-index checks pass; never reused across separate opens.
+struct WorldSaveRecords {
+    world::ActiveRegionLedger ledger;
+    world::GroundObjectStore ground;
+    world::FieldPageState pages;
+    Ecs::EntityRegistrySnapshot plants;
+    bool has_ledger = false;
+};
+
+struct WorldSaveAdmission {
+    // Filled by the saved-world catalog: parameters, immutable dependencies and identity
+    // from one complete load, carried alongside the admitted persistence records.
+    world::TerrainPresetLoadResult preset;
+    std::unique_ptr<WorldStreamingState> chunks = std::make_unique<WorldStreamingState>();
+    WorldSaveRecords records;
+    std::vector<IVec3> inventory;
+    bool present = false;
 };
 
 // Persists WorldStreamingState snapshots beneath a world save directory.
@@ -97,9 +115,11 @@ public:
                                     std::vector<std::string>* errors = nullptr);
     // load_world refusal rules for ground objects: every object lies in a region the ledger
     // records and no object was spawned after the metadata clock. Absent file: true.
+    // On success, optional validated output receives the decoded store (empty on absence).
     static bool validate_ground_objects(const std::filesystem::path& save_dir,
                                         const world::ActiveRegionLedger& ledger,
-                                        std::vector<std::string>* errors);
+                                        std::vector<std::string>* errors,
+                                        world::GroundObjectStore* validated = nullptr);
 
     // Field pages persisted as region/field-pages.fpg (SIBLING to the chunk container). An EMPTY
     // state writes NO file (and removes a stale one). Absent file: out is cleared, true.
@@ -112,9 +132,11 @@ public:
                                  std::vector<std::string>* errors = nullptr);
     // load_world refusal rules for field pages: a present file requires a present ledger and every
     // initialized cell's owner region must have a ledger record. Absent file: true.
+    // On success, optional validated output receives the decoded pages (empty on absence).
     static bool validate_field_pages(const std::filesystem::path& save_dir,
                                      const world::ActiveRegionLedger& ledger,
-                                     std::vector<std::string>* errors);
+                                     std::vector<std::string>* errors,
+                                     world::FieldPageState* validated = nullptr);
 
     static std::filesystem::path active_regions_path(const std::filesystem::path& save_dir);
     static bool save_active_regions(world::ActiveRegionLedger& ledger,
@@ -291,6 +313,10 @@ public:
                                         std::vector<std::string>* errors = nullptr);
     // Number of full load_world decodes since process start (single-decode contract tests).
     static std::uint64_t decode_count_for_testing();
+    // Number of field-page file parses, excluding absent members (observational only).
+    static std::uint64_t field_page_decode_count_for_testing();
+    static std::uint64_t chunk_decode_count_for_testing();
+    static std::uint64_t ground_object_decode_count_for_testing();
 
     // Validates one snapshot member and computes its index fingerprint (MemberDigestFn-compatible).
     // Region files hash their lod-0 record stream and are reported absent when they hold no lod-0
@@ -354,13 +380,15 @@ public:
 
     // Loads a previously saved snapshot into state. A missing snapshot file is
     // a clean miss (fresh world): returns false WITHOUT appending an error.
-    // Malformed or unreadable snapshots return false with diagnostics.
+    // Malformed or unreadable snapshots return false with diagnostics. Optional validated
+    // siblings publish only on success; clean misses return empty siblings.
     bool load_world(WorldStreamingState& state,
                     const std::filesystem::path& save_dir,
                     std::vector<std::string>& errors,
                     const std::stop_token& stop = {},
                     const std::function<bool(const IVec3&)>& retain_chunk = {},
-                    std::vector<IVec3>* authoritative_inventory = nullptr) const;
+                    std::vector<IVec3>* authoritative_inventory = nullptr,
+                    WorldSaveRecords* validated_records = nullptr) const;
 
     // Deterministic hash of the streaming state, reusing the persistence hash
     // machinery (fnv1a_64 over the canonical snapshot bytes). Format

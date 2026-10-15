@@ -2027,3 +2027,318 @@ TEST(WorldSaveService, ConservativeFactsMissKeepsUnusualLegacyAcceptanceOnOrigin
     EXPECT_GT(cache.stats().modes[1].hits, 0u);
     EXPECT_TRUE(errors.empty());
 }
+
+TEST(WorldSaveService, SingleChunkOpenStreamsArraysWithBoundedBufferingAndUnchangedBytes) {
+    for (const int resolution : {8, 16, 32}) {
+        SCOPED_TRACE(resolution);
+        WorldStreamingState original;
+        const auto chunk = AddFixtureChunk(original, {1, -1, 2}, ChunkState::Idle, 1);
+        constexpr std::size_t lattice = static_cast<std::size_t>(Luminumbra::CHUNK_SIZE_X + 1) *
+                                        (Luminumbra::CHUNK_SIZE_Y + 1) *
+                                        (Luminumbra::CHUNK_SIZE_Z + 1);
+        chunk->sdf_data.assign(lattice, -0.25f);
+        chunk->material_data.assign(lattice, 7);
+        chunk->current_water_resolution.store(resolution);
+        const auto cells = static_cast<std::size_t>(resolution * resolution);
+        chunk->water_depth_mm.assign(cells, 1000);
+        chunk->water_bed_mm.assign(cells, -100);
+        chunk->water_edge_flux.assign(2 * cells, -10);
+        chunk->water_level_data.assign(cells, 0.9f);
+        chunk->water_flow_data.assign(cells, Vec2(0.1f, -0.2f));
+        chunk->water_sim_terrain_height.assign(cells, -0.1f);
+        chunk->water_mesh_vertices = chunk->mesh_vertices;
+        chunk->pending_mesh_vertices = chunk->mesh_vertices;
+        chunk->pending_water_mesh_vertices = chunk->mesh_vertices;
+        const auto bytes = CachePersistence::SerializeWorldStreamingStateSnapshotJson(original);
+
+        // A multi-chunk envelope forces the original DOM decoder as an independent oracle.
+        WorldStreamingState extra;
+        extra.get_or_create_chunk({7, 0, 7});
+        auto reference = nlohmann::json::parse(bytes);
+        reference["chunks"].push_back(nlohmann::json::parse(
+            CachePersistence::SerializeWorldStreamingStateSnapshotJson(extra))["chunks"][0]);
+        reference["chunk_count"] = 2;
+        for (const bool strict : {false, true}) {
+            SCOPED_TRACE(strict);
+            WorldStreamingState streamed, dom;
+            CachePersistence::SnapshotDecodeWork streamed_work, dom_work;
+            std::vector<std::string> errors;
+            ASSERT_TRUE(CachePersistence::LoadWorldStreamingStateSnapshotJson(
+                bytes, streamed, errors, strict, &streamed_work))
+                << JoinErrors(errors);
+            ASSERT_TRUE(CachePersistence::LoadWorldStreamingStateSnapshotJson(
+                reference.dump(), dom, errors, strict, &dom_work))
+                << JoinErrors(errors);
+            EXPECT_TRUE(streamed_work.streamed);
+            EXPECT_FALSE(dom_work.streamed);
+            EXPECT_GE(streamed_work.array_elements, 2 * lattice + 7 * cells);
+            EXPECT_EQ(streamed_work.peak_buffered_array_elements, 1u);
+            WorldStreamingState projected;
+            ASSERT_TRUE(projected.insert_chunk(dom.find_chunk(chunk->get_id())));
+            EXPECT_EQ(CachePersistence::SerializeWorldStreamingStateSnapshotJson(streamed), bytes);
+            EXPECT_EQ(CachePersistence::SerializeWorldStreamingStateSnapshotJson(projected), bytes);
+            EXPECT_EQ(WorldSaveService{}.world_hash(streamed),
+                      WorldSaveService{}.world_hash(projected));
+            const auto streamed_chunk = streamed.find_chunk(chunk->get_id());
+            const auto dom_chunk = dom.find_chunk(chunk->get_id());
+            ASSERT_NE(streamed_chunk, nullptr);
+            ASSERT_NE(dom_chunk, nullptr);
+            EXPECT_EQ(streamed_chunk->estimated_heap_bytes(), dom_chunk->estimated_heap_bytes());
+            EXPECT_EQ(streamed_chunk->estimated_sim_bytes(), dom_chunk->estimated_sim_bytes());
+            EXPECT_TRUE(errors.empty());
+        }
+    }
+}
+
+TEST(WorldSaveService, StreamingChunkOpenPreservesStrictRefusalsAndLegacyFluxFallback) {
+    WorldStreamingState original;
+    const auto chunk = original.get_or_create_chunk({1, 0, 2});
+    chunk->has_water_sim.store(true);
+    chunk->current_water_resolution.store(4);
+    chunk->water_depth_mm.assign(16, 1000);
+    chunk->water_bed_mm.assign(16, -100);
+    chunk->water_edge_flux.assign(32, -10);
+    chunk->water_level_data.assign(16, 0.9f);
+    chunk->water_flow_data.assign(16, Vec2(0.1f, -0.2f));
+    chunk->water_sim_terrain_height.assign(16, -0.1f);
+    const auto baseline =
+        nlohmann::json::parse(CachePersistence::SerializeWorldStreamingStateSnapshotJson(original));
+    for (int variant = 0; variant < 7; ++variant) {
+        SCOPED_TRACE(variant);
+        auto changed = baseline;
+        auto& grid = changed["chunks"][0];
+        switch (variant) {
+            case 0:
+                grid["water_depth_mm"][0] = 2147483648ULL;
+                break;
+            case 1:
+                grid["water_bed_mm"][0] = -2147483649LL;
+                break;
+            case 2:
+                grid["water_edge_flux"][0] = 1.5;
+                break;
+            case 3:
+                grid["water_flow_data"][0]["x"] = 1e100;
+                break;
+            case 4:
+                grid["water_depth_mm"][0] = -1;
+                break;
+            case 5:
+                grid["water_state"]["water_mesh_dirty_ticks"] = 16;
+                break;
+            case 6:
+                grid.erase("water_edge_flux");
+                break;
+        }
+        WorldStreamingState refused;
+        refused.get_or_create_chunk({9, 0, 9});
+        std::vector<std::string> errors;
+        EXPECT_FALSE(CachePersistence::LoadWorldStreamingStateSnapshotJson(
+            changed.dump(), refused, errors, true));
+        EXPECT_EQ(refused.size(), 0u);
+        EXPECT_FALSE(errors.empty());
+        if (variant == 6) {
+            WorldStreamingState legacy;
+            errors.clear();
+            ASSERT_TRUE(CachePersistence::LoadWorldStreamingStateSnapshotJson(
+                changed.dump(), legacy, errors, false));
+            const auto restored = legacy.find_chunk(chunk->get_id());
+            ASSERT_NE(restored, nullptr);
+            EXPECT_EQ(restored->water_edge_flux, std::vector<std::int32_t>(32, 0));
+        }
+    }
+}
+
+TEST(WorldSaveService, StreamingChunkOpenPreservesLegacyContainersAndDuplicateKeys) {
+    WorldStreamingState original;
+    const auto chunk = AddFixtureChunk(original, {1, 0, 2}, ChunkState::Idle, 1);
+    chunk->material_data = {7};
+    const auto baseline =
+        nlohmann::json::parse(CachePersistence::SerializeWorldStreamingStateSnapshotJson(original));
+    for (int variant = 0; variant < 3; ++variant) {
+        SCOPED_TRACE(variant);
+        auto changed = baseline;
+        auto& grid = changed["chunks"][0];
+        if (variant == 0)
+            grid["mesh_vertices"] = nlohmann::json{{"legacy", grid["mesh_vertices"][0]}};
+        if (variant == 1)
+            grid["water_flow_data"] = nlohmann::json{{"legacy", grid["water_flow_data"][0]}};
+        auto text = changed.dump();
+        if (variant == 2) {
+            const auto field = text.find("\"material_data\":");
+            ASSERT_NE(field, std::string::npos);
+            text.insert(field, "\"material_data\":[255],");
+        }
+        WorldStreamingState loaded;
+        CachePersistence::SnapshotDecodeWork work;
+        std::vector<std::string> errors;
+        ASSERT_TRUE(CachePersistence::LoadWorldStreamingStateSnapshotJson(
+            text, loaded, errors, false, &work))
+            << JoinErrors(errors);
+        EXPECT_FALSE(work.streamed);
+        const auto restored = loaded.find_chunk(chunk->get_id());
+        ASSERT_NE(restored, nullptr);
+        EXPECT_EQ(restored->mesh_vertices.size(), variant == 0 ? 1u : 3u);
+        EXPECT_EQ(restored->material_data, chunk->material_data);
+        ASSERT_EQ(restored->water_flow_data.size(), 1u);
+        EXPECT_EQ(restored->water_flow_data[0].x, chunk->water_flow_data[0].x);
+        EXPECT_EQ(restored->water_flow_data[0].y, chunk->water_flow_data[0].y);
+        EXPECT_TRUE(errors.empty());
+    }
+}
+
+TEST(WorldSaveService, IndexedAdmissionDecodesEachChunkAndFieldFileOnce) {
+    namespace W = Luminumbra::world;
+    TempSaveDir save("admission_work");
+    const W::WorldClock clock(16);
+    W::ActiveRegionLedger ledger({}, clock);
+    ledger.mark_edited({0, 0}, clock);
+    ledger.mark_edited({1, 0}, clock);
+    std::uint64_t id = 0;
+    ASSERT_TRUE(ledger.allocate_persistent_id(id));
+    W::GroundObjectStore ground;
+    auto object = MakeGroundObject(id, 100, 0);
+    object.z_mm = 100;
+    ASSERT_TRUE(ground.insert(object));
+    const auto pages = MakeFieldState();
+    WorldStreamingState original;
+    const auto chunk = original.get_or_create_chunk({0, 0, 0});
+    chunk->set_state(ChunkState::Idle);
+    constexpr std::size_t lattice = static_cast<std::size_t>(Luminumbra::CHUNK_SIZE_X + 1) *
+                                    (Luminumbra::CHUNK_SIZE_Y + 1) * (Luminumbra::CHUNK_SIZE_Z + 1);
+    chunk->sdf_data.assign(lattice, -0.25f);
+    chunk->mark_voxel_data_dirty();
+    WorldSaveService service;
+    nlohmann::json metadata = {{"container_version", 2}};
+    clock.write_metadata(metadata);
+    std::vector<std::string> errors;
+    {
+        WorldSaveService::SaveFactsScope facts(save.path);
+        Luminumbra::Persistence::SaveTransaction transaction(
+            save.path, clock.tick(), {}, WorldSaveService::member_digest);
+        ASSERT_TRUE(transaction.begin(&errors)) << JoinErrors(errors);
+        ASSERT_TRUE(WorldSaveService::save_metadata_and_active_regions(
+            metadata.dump(), ledger, save.path, &errors))
+            << JoinErrors(errors);
+        ASSERT_TRUE(WorldSaveService::save_field_pages(pages, save.path, &errors))
+            << JoinErrors(errors);
+        ASSERT_TRUE(WorldSaveService::save_ground_objects(ground, save.path, &errors))
+            << JoinErrors(errors);
+        ASSERT_TRUE(service.save_world(original, save.path, &errors)) << JoinErrors(errors);
+        ASSERT_TRUE(transaction.commit(&errors)) << JoinErrors(errors);
+    }
+    const auto hash = service.world_hash(original);
+    // Both admission-only and retaining loads traverse real indexed containers, without
+    // writer-seeded facts. Each cold record must decode once, regardless of residency.
+    for (const bool retain : {false, true}) {
+        SCOPED_TRACE(retain);
+        Luminumbra::Persistence::ChunkValidationCache cache;
+        const Luminumbra::Persistence::ChunkValidationCache::Scope scope(cache);
+        const auto field_decodes = WorldSaveService::field_page_decode_count_for_testing();
+        WorldStreamingState loaded;
+        std::vector<IVec3> inventory;
+        ASSERT_TRUE(service.load_world(
+            loaded, save.path, errors, {}, [retain](const IVec3&) { return retain; }, &inventory))
+            << JoinErrors(errors);
+        EXPECT_EQ(WorldSaveService::field_page_decode_count_for_testing() - field_decodes, 1u);
+        EXPECT_EQ(cache.stats().modes[1].decodes, 1u);
+        EXPECT_EQ(cache.stats().modes[0].decodes, 0u);
+        EXPECT_EQ(inventory, std::vector<IVec3>({IVec3(0, 0, 0)}));
+        if (retain) {
+            EXPECT_EQ(service.world_hash(loaded), hash);
+            EXPECT_EQ(CachePersistence::SerializeWorldStreamingStateSnapshotJson(loaded),
+                      CachePersistence::SerializeWorldStreamingStateSnapshotJson(original));
+        } else {
+            EXPECT_EQ(loaded.size(), 0u);
+        }
+    }
+    EXPECT_TRUE(errors.empty());
+}
+
+TEST(WorldSaveService, SaveStreamsBulkArraysWithBoundedWorkAndCanonicalRecordBytes) {
+    for (const int resolution : {4, 8, 16, 32}) {
+        SCOPED_TRACE(resolution);
+        WorldStreamingState original;
+        const auto chunk = AddFixtureChunk(original, {-1, -1, 2}, ChunkState::Idle, 1);
+        constexpr std::size_t lattice = static_cast<std::size_t>(Luminumbra::CHUNK_SIZE_X + 1) *
+                                        (Luminumbra::CHUNK_SIZE_Y + 1) *
+                                        (Luminumbra::CHUNK_SIZE_Z + 1);
+        chunk->sdf_data.assign(lattice, -0.25f);
+        chunk->material_data.assign(lattice, 255);
+        chunk->water_mesh_vertices = chunk->mesh_vertices;
+        chunk->water_mesh_indices = chunk->mesh_indices;
+        chunk->pending_mesh_vertices = chunk->mesh_vertices;
+        chunk->pending_mesh_indices = chunk->mesh_indices;
+        chunk->pending_water_mesh_vertices = chunk->mesh_vertices;
+        chunk->pending_water_mesh_indices = chunk->mesh_indices;
+        const auto cells = static_cast<std::size_t>(resolution * resolution);
+        chunk->current_water_resolution.store(resolution);
+        chunk->water_depth_mm.assign(cells, 1000);
+        chunk->water_bed_mm.assign(cells, -100);
+        chunk->water_edge_flux.assign(2 * cells, -10);
+        chunk->water_level_data.assign(cells, 0.9f);
+        chunk->water_flow_data.assign(cells, Vec2(0.1f, -0.2f));
+        chunk->water_sim_terrain_height.assign(cells, -0.1f);
+        CachePersistence::ChunkValidationModes dom_facts, streamed_facts;
+        const auto canonical =
+            CachePersistence::SerializeWorldStreamingStateSnapshotJson(original, &dom_facts);
+        CachePersistence::SnapshotEncodeWork work;
+        EXPECT_EQ(CachePersistence::StreamWorldStreamingStateSnapshotJson(
+                      original, &streamed_facts, &work),
+                  canonical);
+        EXPECT_GE(work.array_elements, 2 * lattice + 7 * cells);
+        EXPECT_EQ(work.peak_buffered_array_elements, 1u);
+        for (const bool strict : {false, true}) {
+            ASSERT_TRUE(dom_facts[strict].has_value());
+            ASSERT_TRUE(streamed_facts[strict].has_value());
+            EXPECT_EQ(streamed_facts[strict]->coords, dom_facts[strict]->coords);
+            EXPECT_EQ(streamed_facts[strict]->sdf_size, dom_facts[strict]->sdf_size);
+        }
+        TempSaveDir save("streamed_save");
+        const auto encodes = CachePersistence::SnapshotStreamEncodeCountForTesting();
+        std::vector<std::string> errors;
+        ASSERT_TRUE(WorldSaveService{}.save_world(original, save.path, &errors))
+            << JoinErrors(errors);
+        EXPECT_EQ(CachePersistence::SnapshotStreamEncodeCountForTesting() - encodes, 1u);
+        std::vector<WorldSaveService::ContainerRecord> records;
+        ASSERT_TRUE(WorldSaveService::read_container_records(
+            WorldSaveService::region_file_path(save.path, -1, 0), records, &errors));
+        ASSERT_EQ(records.size(), 1u);
+        EXPECT_EQ(records.front().payload, canonical);
+        // Exercise non-empty multi-chunk envelopes and canonical id ordering, too.
+        original.get_or_create_chunk({0, 0, 0});
+        EXPECT_EQ(CachePersistence::StreamWorldStreamingStateSnapshotJson(original),
+                  CachePersistence::SerializeWorldStreamingStateSnapshotJson(original));
+    }
+    WorldStreamingState empty;
+    EXPECT_EQ(CachePersistence::StreamWorldStreamingStateSnapshotJson(empty),
+              CachePersistence::SerializeWorldStreamingStateSnapshotJson(empty));
+}
+
+TEST(WorldSaveService, StreamedWriterFactsPreserveConservativeRefusals) {
+    WorldStreamingState state;
+    const auto chunk = state.get_or_create_chunk({0, 0, 0});
+    for (int variant = 0; variant < 5; ++variant) {
+        SCOPED_TRACE(variant);
+        chunk->sdf_data = {1.0f};
+        chunk->water_flow_data.clear();
+        chunk->current_water_resolution.store(0);
+        chunk->ticks_below_threshold = 0;
+        chunk->water_mesh_dirty_ticks = 0;
+        if (variant == 0)
+            chunk->sdf_data[0] = std::numeric_limits<float>::infinity();
+        if (variant == 1)
+            chunk->water_flow_data.emplace_back(0.0f, 0.0f);
+        if (variant == 2)
+            chunk->current_water_resolution.store(-1);
+        if (variant == 3)
+            chunk->ticks_below_threshold = -1;
+        if (variant == 4)
+            chunk->water_mesh_dirty_ticks = -1;
+        CachePersistence::ChunkValidationModes dom, streamed;
+        EXPECT_EQ(CachePersistence::StreamWorldStreamingStateSnapshotJson(state, &streamed),
+                  CachePersistence::SerializeWorldStreamingStateSnapshotJson(state, &dom));
+        for (const bool strict : {false, true})
+            EXPECT_EQ(streamed[strict].has_value(), dom[strict].has_value());
+    }
+}

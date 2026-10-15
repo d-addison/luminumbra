@@ -617,7 +617,11 @@ public:
     void regenerate_all_chunks(PhysicsSystem* physics_system);
     void clear_world(PhysicsSystem* physics_system);
     void SetWaterSystem(WaterSystem* water_system);
-    std::vector<IVec3> GetInitialChunkLoadList(const Vec3& center_pos) const; // <<< NEW
+    std::vector<IVec3> GetInitialChunkLoadList(const Vec3& center_pos) const;
+    // Main-thread planning work only; never serialized or used by simulation.
+    [[nodiscard]] std::size_t debug_initial_load_plan_count() const {
+        return m_initial_load_plan_count.load(std::memory_order_relaxed);
+    }
     JobHandle dispatch_generation_jobs(const std::vector<IVec3>& chunks_to_generate);
     // Generation request carrying the meshing step the chunk is being
     // generated for, so far-ring (step > 1) chunks can skip the interior SDF
@@ -1181,6 +1185,7 @@ private:
     // deterministic).
     ColumnSurfaceSpan column_surface_span(int chunk_x, int chunk_z);
     std::unordered_map<u64, ColumnSurfaceSpan> m_column_surface_span_cache;
+    mutable std::atomic<std::size_t> m_initial_load_plan_count{0};
 
     // --- Helper Functions ---
     // Returns true if it actually ran the activation pass (false if it was elided because the

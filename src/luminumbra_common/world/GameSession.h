@@ -18,6 +18,7 @@
 #include "GroundObjectStore.h"
 #include "WorldClock.h"
 #include "WorldMetadata.h"
+#include "WorldgenFileReader.h"
 #include "entt/entt.hpp"
 #include <chrono>
 #include <cstdint>
@@ -47,6 +48,11 @@ class SoilGrid; // soil nutrient field (systems/SoilNutrientSystem.h)
 struct PlantEnvSample;
 class IrrigationGrid; // soil-moisture field (systems/IrrigationSystem.h)
 } // namespace luminumbra::foliage
+
+namespace Luminumbra::Persistence {
+struct SavedWorld;
+struct WorldSaveAdmission;
+} // namespace Luminumbra::Persistence
 
 namespace Luminumbra {
 class JobSystem;
@@ -122,6 +128,12 @@ public:
 
     // Load an existing world from disk
     bool LoadWorld(const std::string& worldId);
+    // Uses the preset loader's status-reader seam for deterministic dependency I/O.
+    bool LoadWorld(const std::string& worldId, const World::WorldgenFileStatusReader& read_status);
+
+    // Owner thread only. Reinspect current files for identity consumers, reusing exact-byte
+    // chunk validation facts from admission/saves while preserving catalog refusal checks.
+    Persistence::SavedWorld InspectCurrentSavedWorld();
 
     // Save the current world state
     bool SaveWorld();
@@ -540,7 +552,9 @@ private:
     float m_plantMutationRate = luminumbra::foliage::kPollinationMutationFrac;
     WorldMetadata m_metadata;
     bool m_transientWorld = false;
-    void ResetWorldSystems();
+    void ResetWorldSystems(bool keep_admitted_chunk_facts = false);
+    bool AdoptWorldState(const std::filesystem::path& save_dir,
+                         Persistence::WorldSaveAdmission* admission);
     void RestoreWorldClock(const WorldClock& clock);
     void RestoreAmbientFieldsAtTick(std::uint64_t tick);
     bool SaveWorldMetadataTo(const std::filesystem::path& save_dir);

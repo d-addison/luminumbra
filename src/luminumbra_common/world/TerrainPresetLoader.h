@@ -98,6 +98,9 @@ struct TerrainPresetLoadResult {
     // FNV-1a-64 of canonical resolved preset JSON and a sorted manifest of
     // logical data_root-relative paths, exact-byte file hashes and loader outcomes.
     std::string preset_content_hash;
+    // Compact, sorted source JSON before revision defaults are materialized. Compatibility
+    // checks and identity consumers must use this captured source rather than reopen the file.
+    std::string source_json;
     // params.worldgen_dependencies retains the loaded objects and manifest that
     // this identity describes, including absent/rejected-input fallback decisions.
     Systems::TerrainGenParams params;
@@ -125,7 +128,9 @@ std::string TerrainPresetContentHash(const nlohmann::json& preset);
 // result carries ok=false and human-readable messages; params/extras are only
 // meaningful when ok=true. Absent optional worldgen inputs bind fallback markers;
 // present but unreadable inputs are errors.
-TerrainPresetLoadResult LoadTerrainPreset(const std::filesystem::path& preset_path);
+TerrainPresetLoadResult LoadTerrainPreset(
+    const std::filesystem::path& preset_path,
+    const World::WorldgenFileStatusReader& read_status = World::ReadWorldgenSymlinkStatus);
 
 // Explicit CLI preset override, validated against the runtime data root. Failure leaves
 // json_text unchanged; successful text is passed to GameSession::CreateWorld.

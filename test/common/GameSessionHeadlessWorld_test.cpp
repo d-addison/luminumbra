@@ -6356,3 +6356,311 @@ TEST(GameSessionHeadlessWorldTest, EffectiveIdentityUsesDefaultsAndCurrentSetter
     applied.SetCircadianAmplitude(0.5f);
     EXPECT_EQ(direct.SystemConfigIdentity(), applied.SystemConfigIdentity());
 }
+
+TEST(GameSessionHeadlessWorldTest, FreshOpenDoesNotPlanTerrainOrPopulateRegionsBeforeFirstTick) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    session.SetRootPath(root.root_string());
+    session.SetJobSystem(&jobs);
+    // Exercise the defaults-on creation path, including the client's immediate state load.
+    ASSERT_TRUE(session.CreateWorld("Fresh open work", "424242", "default"));
+    const auto id = session.GetMetadata().worldId;
+    const auto expect_unpopulated = [&session]() {
+        ASSERT_NE(session.GetWorldSystem(), nullptr);
+        EXPECT_EQ(session.GetWorldSystem()->debug_initial_load_plan_count(), 0u);
+        EXPECT_TRUE(session.GetWorldSystem()->snapshot_streamed_chunks().empty());
+        EXPECT_TRUE(session.GetWorldSystem()->durable_chunk_inventory().empty());
+        EXPECT_TRUE(session.GetFieldPages().empty());
+        EXPECT_TRUE(session.GetGroundObjects().empty());
+        EXPECT_TRUE(session.GetActiveRegionLedger().records().empty());
+        EXPECT_EQ(session.GetSimulationTickCount(), 0u);
+        EXPECT_FALSE(session.GetRegionSchedulerFault());
+    };
+    ASSERT_NO_FATAL_FAILURE(expect_unpopulated());
+    ASSERT_TRUE(session.LoadWorldState()) << session.GetWorldOpenError();
+    ASSERT_NO_FATAL_FAILURE(expect_unpopulated());
+    const auto fresh_decodes = P::WorldSaveService::chunk_decode_count_for_testing();
+    const auto fresh_identity = session.InspectCurrentSavedWorld();
+    ASSERT_TRUE(fresh_identity.error.empty()) << fresh_identity.error;
+    EXPECT_EQ(fresh_identity.metadata.worldId, id);
+    EXPECT_EQ(P::WorldSaveService::chunk_decode_count_for_testing(), fresh_decodes);
+    ASSERT_NO_FATAL_FAILURE(expect_unpopulated());
+    // A metadata-only reload also has no chunk admission decisions.
+    ASSERT_TRUE(session.LoadWorld(id)) << session.GetWorldOpenError();
+    ASSERT_NO_FATAL_FAILURE(expect_unpopulated());
+}
+
+TEST(GameSessionHeadlessWorldTest, IndexedOpenAdmitsEachRecordOnceThroughClientIdentity) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession owner, reopened;
+    for (auto* session : {&owner, &reopened}) {
+        session->SetRootPath(root.root_string());
+        session->SetJobSystem(&jobs);
+    }
+    ASSERT_TRUE(owner.CreateWorld("Indexed admission work", "1337", "default"));
+    const auto plan =
+        owner.GetWorldSystem()->GetInitialChunkLoadList(owner.GetMetadata().spawnPoint);
+    ASSERT_GE(plan.size(), 2u);
+    const Luminumbra::IVec3 excluded{plan.front().x + 64, plan.front().y, plan.front().z};
+    const auto near_a = S7HostWaterGrid(plan[0], 16);
+    const auto near_b = S7HostWaterGrid(plan[1], 8);
+    const auto far = S7HostWaterGrid(excluded, 4);
+    for (const auto& chunk : {near_a, near_b, far})
+        ASSERT_TRUE(owner.GetWorldSystem()->adopt_streamed_chunk(chunk));
+    ASSERT_NE(SpawnGround(owner, 100, 100), 0u);
+    const auto plant = ClockTestPlant(owner.GetRegistry(), {.25f, 0, .25f});
+    owner.GetRegistry().emplace<SC::SoilFeederComponent>(plant);
+    owner.GetRegistry().emplace<SC::WaterSourceComponent>(plant);
+    ASSERT_TRUE(owner.AdmitPlant(plant));
+    ASSERT_TRUE(owner.SaveWorldState());
+    ASSERT_TRUE(P::snapshot_index_exists(owner.GetWorldSaveDir()));
+    ASSERT_FALSE(owner.GetFieldPages().empty());
+    const auto saved_files = RepeatedSaveBytes(owner.GetWorldSaveDir());
+    const auto plants = S7PlantBytes(owner);
+    const auto ground = owner.GetGroundObjects().serialize();
+    const auto pages = owner.GetFieldPages().serialize();
+    using Service = Luminumbra::Persistence::WorldSaveService;
+    const auto admissions = Service::decode_count_for_testing();
+    const auto chunks = Service::chunk_decode_count_for_testing();
+    const auto fields = Service::field_page_decode_count_for_testing();
+    const auto objects = Service::ground_object_decode_count_for_testing();
+    ASSERT_TRUE(reopened.LoadWorld(owner.GetMetadata().worldId)) << reopened.GetWorldOpenError();
+    EXPECT_EQ(Service::decode_count_for_testing() - admissions, 1u);
+    EXPECT_EQ(Service::chunk_decode_count_for_testing() - chunks, 3u);
+    EXPECT_EQ(Service::field_page_decode_count_for_testing() - fields, 1u);
+    EXPECT_EQ(Service::ground_object_decode_count_for_testing() - objects, 1u);
+    EXPECT_EQ(reopened.GetWorldSystem()->debug_initial_load_plan_count(), 1u);
+    EXPECT_EQ(reopened.GetLastLoadedChunkCount(), 2u);
+    EXPECT_EQ(reopened.GetWorldSystem()->snapshot_streamed_chunks().size(), 2u);
+    EXPECT_EQ(reopened.GetWorldSystem()->find_streamed_chunk(excluded), nullptr);
+    EXPECT_EQ(reopened.GetWorldSystem()->durable_chunk_inventory().size(), 3u);
+    for (const auto& source : {near_a, near_b}) {
+        const auto loaded = reopened.GetWorldSystem()->find_streamed_chunk(source->get_coords());
+        ASSERT_NE(loaded, nullptr);
+        S7CompareWater(*source, *loaded);
+    }
+    EXPECT_EQ(reopened.GetGroundObjects().serialize(), ground);
+    EXPECT_EQ(reopened.GetFieldPages().serialize(), pages);
+    EXPECT_EQ(S7PlantBytes(reopened), plants);
+    EXPECT_EQ(reopened.GetWorldClock().canonical_bytes(), owner.GetWorldClock().canonical_bytes());
+    EXPECT_EQ(RepeatedSaveBytes(owner.GetWorldSaveDir()), saved_files);
+    // Use the same identity inspection as the render client after entering the world.
+    // Both retained and excluded authority must hit admission facts without decoding again.
+    const auto identity = reopened.InspectCurrentSavedWorld();
+    ASSERT_TRUE(identity.error.empty()) << identity.error;
+    EXPECT_EQ(identity.metadata.worldId, owner.GetMetadata().worldId);
+    EXPECT_EQ(identity.metadata.seed, owner.GetMetadata().seed);
+    EXPECT_EQ(identity.metadata.worldType, owner.GetMetadata().worldType);
+    EXPECT_EQ(identity.preset_path, owner.GetWorldSaveDir() / "preset.json");
+    EXPECT_EQ(Service::decode_count_for_testing() - admissions, 2u);
+    EXPECT_EQ(Service::chunk_decode_count_for_testing() - chunks, 3u);
+    EXPECT_EQ(RepeatedSaveBytes(owner.GetWorldSaveDir()), saved_files);
+    // Exact-byte admission facts survive reset, so the next unchanged save only
+    // verifies its baseline through the cache, including the nonresident record.
+    const auto save_decodes = Service::chunk_decode_count_for_testing();
+    ASSERT_TRUE(reopened.SaveWorldState());
+    EXPECT_EQ(Service::chunk_decode_count_for_testing(), save_decodes);
+    EXPECT_EQ(RepeatedSaveBytes(owner.GetWorldSaveDir()), saved_files);
+    // Reinspection still reads current metadata and presets. Match the uncached catalog's
+    // refusal exactly, preserve live state, and leave every on-disk byte untouched.
+    for (const auto* filename : {"preset.json", "world_info.json"}) {
+        const auto path = owner.GetWorldSaveDir() / filename;
+        const auto original = ReadClockTestFile(path);
+        {
+            std::ofstream output(path, std::ios::binary | std::ios::trunc);
+            output << "{";
+            ASSERT_TRUE(output.good());
+        }
+        const auto changed_files = RepeatedSaveBytes(owner.GetWorldSaveDir());
+        const auto cached = reopened.InspectCurrentSavedWorld();
+        const auto uncached = P::InspectSavedWorld(root.root_string(), owner.GetMetadata().worldId);
+        EXPECT_FALSE(cached.error.empty());
+        EXPECT_EQ(cached.error, uncached.error);
+        EXPECT_EQ(RepeatedSaveBytes(owner.GetWorldSaveDir()), changed_files);
+        EXPECT_TRUE(reopened.GetWorldOpenError().empty());
+        {
+            std::ofstream output(path, std::ios::binary | std::ios::trunc);
+            output << original;
+            ASSERT_TRUE(output.good());
+        }
+    }
+    EXPECT_EQ(RepeatedSaveBytes(owner.GetWorldSaveDir()), saved_files);
+    // Excluded authority stays available for later demand without eager residency.
+    ASSERT_TRUE(reopened.GetWorldSystem()->restore_authoritative_chunk(excluded));
+    const auto restored = reopened.GetWorldSystem()->find_streamed_chunk(excluded);
+    ASSERT_NE(restored, nullptr);
+    S7CompareWater(*far, *restored);
+
+    // An excluded record still undergoes strict validation, even with a valid
+    // index over its malformed bytes. A refusal cannot replace the live world.
+    far->water_edge_flux.pop_back();
+    far->mark_water_state_dirty();
+    ASSERT_TRUE(owner.SaveWorldState());
+    const auto corrupt_files = RepeatedSaveBytes(owner.GetWorldSaveDir());
+    const auto* previous_world = reopened.GetWorldSystem();
+    const auto refused_identity = reopened.InspectCurrentSavedWorld();
+    const auto uncached_refusal =
+        P::InspectSavedWorld(root.root_string(), owner.GetMetadata().worldId);
+    EXPECT_FALSE(refused_identity.error.empty());
+    EXPECT_EQ(refused_identity.error, uncached_refusal.error);
+    EXPECT_EQ(reopened.GetWorldSystem(), previous_world);
+    EXPECT_EQ(reopened.GetGroundObjects().serialize(), ground);
+    EXPECT_EQ(reopened.GetFieldPages().serialize(), pages);
+    EXPECT_EQ(S7PlantBytes(reopened), plants);
+    EXPECT_EQ(RepeatedSaveBytes(owner.GetWorldSaveDir()), corrupt_files);
+    EXPECT_FALSE(reopened.LoadWorld(owner.GetMetadata().worldId));
+    EXPECT_FALSE(reopened.GetWorldOpenError().empty());
+    EXPECT_EQ(reopened.GetWorldSystem(), previous_world);
+    EXPECT_EQ(reopened.GetGroundObjects().serialize(), ground);
+    EXPECT_EQ(reopened.GetFieldPages().serialize(), pages);
+    EXPECT_EQ(S7PlantBytes(reopened), plants);
+    EXPECT_FALSE(reopened.SaveWorldState());
+    EXPECT_EQ(RepeatedSaveBytes(owner.GetWorldSaveDir()), corrupt_files);
+}
+
+TEST(GameSessionHeadlessWorldTest,
+     OpenKeepsPresetSnapshotAndAdvertisedIdentityAcrossDependencyMutation) {
+    for (const bool persisted_chunks : {false, true}) {
+        SCOPED_TRACE(persisted_chunks);
+        const HeadlessRoot root;
+        Luminumbra::TestSupport::CopyWorldgenTestData(LUMINUMBRA_SOURCE_ROOT, root.path());
+        const auto table_path = root.path() / "data/common/biomes.json";
+        const auto structures_path = root.path() / "data/common/structures";
+        const auto write_bytes = [](const fs::path& path, const std::string& bytes) {
+            std::ofstream output(path, std::ios::binary | std::ios::trunc);
+            output << bytes;
+            output.close();
+            return output.good();
+        };
+        const std::string first_table = R"({"schema":"luminumbra.biome_table.v1","biomes":[{
+            "id":0,"name":"grassland","surface":{
+                "top":"Grass","filler":"Soil","depth":"Stone","underwater":"Sand"}}]})";
+        auto changed_table = nlohmann::json::parse(first_table);
+        changed_table["biomes"][0]["surface"]["top"] = "Stone";
+        ASSERT_TRUE(write_bytes(table_path, first_table));
+        JobSystem jobs;
+        jobs.startup(1);
+        GameSession owner, reopened;
+        for (auto* session : {&owner, &reopened}) {
+            session->SetRootPath(root.root_string());
+            session->SetJobSystem(&jobs);
+        }
+        ASSERT_TRUE(owner.CreateWorld("Preset snapshot admission", "1337", "default"));
+        if (persisted_chunks) {
+            const auto plan =
+                owner.GetWorldSystem()->GetInitialChunkLoadList(owner.GetMetadata().spawnPoint);
+            ASSERT_FALSE(plan.empty());
+            ASSERT_TRUE(owner.GetWorldSystem()->adopt_streamed_chunk(S7HostWaterGrid(plan[0], 8)));
+            ASSERT_TRUE(owner.SaveWorldState());
+        }
+        const auto preset_path = owner.GetWorldSaveDir() / "preset.json";
+        const auto first = Luminumbra::world::LoadTerrainPreset(preset_path);
+        ASSERT_TRUE(first.ok);
+        ASSERT_TRUE(first.params.worldgen_dependencies);
+        ASSERT_TRUE(first.params.worldgen_dependencies->biome_table.ok());
+        ASSERT_FALSE(first.params.worldgen_dependencies->biome_table.empty());
+        const auto saved_files = RepeatedSaveBytes(owner.GetWorldSaveDir());
+        std::size_t biome_queries = 0;
+        std::size_t structure_queries = 0;
+        // The loader queries structures only after capturing the biome table. Change that
+        // referenced file at this exact seam, before the residency planner or adoption runs.
+        const Luminumbra::World::WorldgenFileStatusReader read_status = [&](const fs::path& path,
+                                                                            std::error_code& ec) {
+            if (path == table_path)
+                ++biome_queries;
+            if (path == structures_path) {
+                ++structure_queries;
+                EXPECT_TRUE(write_bytes(table_path, changed_table.dump()));
+            }
+            return Luminumbra::World::ReadWorldgenSymlinkStatus(path, ec);
+        };
+        ASSERT_TRUE(reopened.LoadWorld(owner.GetMetadata().worldId, read_status))
+            << reopened.GetWorldOpenError();
+        EXPECT_EQ(biome_queries, 1u);
+        EXPECT_EQ(structure_queries, 1u);
+        EXPECT_EQ(reopened.PresetContentHash(), first.preset_content_hash);
+        const auto* world = reopened.GetWorldSystem();
+        ASSERT_NE(world, nullptr);
+        EXPECT_EQ(world->debug_initial_load_plan_count(), persisted_chunks ? 1u : 0u);
+        EXPECT_EQ(reopened.GetLastLoadedChunkCount(), persisted_chunks ? 1u : 0u);
+        EXPECT_EQ(world->biome_table().content_hash(),
+                  first.params.worldgen_dependencies->biome_table.content_hash());
+        ASSERT_TRUE(world->biomes_enabled());
+        const auto biome = world->BiomeIdAt(8.0f, 8.0f);
+        EXPECT_EQ(biome, 0u);
+        EXPECT_EQ(world->SurfaceMaterialForColumn(39.5f, 40.0f, biome),
+                  Luminumbra::MaterialType::Grass);
+        const auto second = Luminumbra::world::LoadTerrainPreset(preset_path);
+        ASSERT_TRUE(second.ok);
+        ASSERT_TRUE(second.params.worldgen_dependencies);
+        EXPECT_NE(second.preset_content_hash, first.preset_content_hash);
+        EXPECT_NE(second.params.worldgen_dependencies->biome_table.content_hash(),
+                  world->biome_table().content_hash());
+        // The client must refuse a current-file identity that describes a different snapshot.
+        const auto tick = reopened.GetSimulationTickCount();
+        const auto refused = reopened.InspectCurrentSavedWorld();
+        EXPECT_EQ(refused.error,
+                  "Incompatible world preset: content changed since world admission.");
+        EXPECT_EQ(reopened.GetWorldSystem(), world);
+        EXPECT_EQ(reopened.GetSimulationTickCount(), tick);
+        EXPECT_EQ(reopened.PresetContentHash(), first.preset_content_hash);
+        EXPECT_TRUE(reopened.GetWorldOpenError().empty());
+        EXPECT_EQ(RepeatedSaveBytes(owner.GetWorldSaveDir()), saved_files);
+        EXPECT_EQ(ReadClockTestFile(table_path), changed_table.dump());
+        ASSERT_TRUE(write_bytes(table_path, first_table));
+        const auto identity = reopened.InspectCurrentSavedWorld();
+        EXPECT_TRUE(identity.error.empty()) << identity.error;
+        EXPECT_EQ(identity.preset_content_hash, reopened.PresetContentHash());
+        EXPECT_EQ(identity.preset_source_json, first.source_json);
+    }
+}
+
+TEST(GameSessionHeadlessWorldTest, CatalogPresetCompatibilityUsesCapturedSource) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession owner;
+    owner.SetRootPath(root.root_string());
+    owner.SetJobSystem(&jobs);
+    owner.SetActiveRegionsEnabled(false);
+    ASSERT_TRUE(owner.CreateWorld("Captured preset compatibility", "1337", "default"));
+    const auto save_dir = owner.GetWorldSaveDir();
+    const auto preset_path = save_dir / "preset.json";
+    const auto first_source = nlohmann::json::parse(ReadClockTestFile(preset_path));
+    auto second_source = first_source;
+    second_source["generation_params"]["terrain"]["height_offset"] = 42.0f;
+    const auto metadata_path = save_dir / "world_info.json";
+    auto metadata = nlohmann::json::parse(ReadClockTestFile(metadata_path));
+    metadata["presetIdentity"] = P::StableChecksum(first_source.dump());
+    {
+        std::ofstream output(metadata_path, std::ios::binary | std::ios::trunc);
+        output << metadata.dump();
+        output.close();
+        ASSERT_TRUE(output.good());
+    }
+    std::size_t mutations = 0;
+    const Luminumbra::World::WorldgenFileStatusReader read_status = [&](const fs::path& path,
+                                                                        std::error_code& ec) {
+        if (path == root.path() / "data/common/structures") {
+            ++mutations;
+            std::ofstream output(preset_path, std::ios::binary | std::ios::trunc);
+            output << second_source.dump();
+            output.close();
+            EXPECT_TRUE(output.good());
+        }
+        return Luminumbra::World::ReadWorldgenSymlinkStatus(path, ec);
+    };
+    const auto saved = P::InspectSavedWorld(
+        root.path(), owner.GetMetadata().worldId, {}, nullptr, {}, read_status);
+    EXPECT_EQ(mutations, 1u);
+    EXPECT_TRUE(saved.error.empty()) << saved.error;
+    EXPECT_EQ(saved.preset_source_json, first_source.dump());
+    EXPECT_EQ(ReadClockTestFile(preset_path), second_source.dump());
+    // A separate inspection sees the later source and enforces the original compatibility check.
+    const auto changed = P::InspectSavedWorld(root.path(), owner.GetMetadata().worldId);
+    EXPECT_EQ(changed.error, "Incompatible world preset: saved preset identity does not match.");
+}

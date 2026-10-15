@@ -3148,12 +3148,10 @@ int main(int argc, char* argv[]) {
         if (benchmark_v3 && !benchmark_world_checked && gameSession &&
             gameStateManager.GetCurrentState() == GameState::IN_GAME) {
             try {
-                const auto saved = Luminumbra::Persistence::InspectSavedWorld(
-                    root_dir, gameSession->GetMetadata().worldId);
+                const auto saved = gameSession->InspectCurrentSavedWorld();
                 if (!saved.error.empty())
                     throw std::runtime_error(saved.error);
-                std::ifstream input(saved.preset_path, std::ios::binary);
-                const auto preset = nlohmann::json::parse(input);
+                const auto preset = nlohmann::json::parse(saved.preset_source_json);
                 const auto* world = gameSession->GetWorldSystem();
                 benchmark_world_identity = {
                     {"seed", static_cast<std::uint32_t>(world->get_seed())},

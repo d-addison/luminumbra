@@ -2701,6 +2701,7 @@ int SHIELD_WorldSystem::get_lod_step_for_level(int lod_level) const {
 }
 
 std::vector<IVec3> SHIELD_WorldSystem::GetInitialChunkLoadList(const Vec3& center_pos) const {
+    m_initial_load_plan_count.fetch_add(1, std::memory_order_relaxed);
     const IVec3 spawn_chunk_coords = world_to_chunk_coords(center_pos);
 
     const int INITIAL_LOAD_RADIUS = 12;
