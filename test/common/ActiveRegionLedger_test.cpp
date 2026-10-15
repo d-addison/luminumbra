@@ -12,6 +12,7 @@
 #include <limits>
 #include <optional>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -755,6 +756,49 @@ TEST(ActiveRegionLedgerTest, LegacyEnvelopeUpgradesOnlyAfterEveryHistoricalDiges
     AcknowledgeAllActivations(restored);
     EXPECT_EQ(Version(restored.encode()), 2u);
     EXPECT_EQ(Reload(restored).encode(), restored.encode());
+}
+
+TEST(ActiveRegionLedgerTest, FrozenProjectionAdoptionIsAtomicAcrossAllHistoricalOwners) {
+    const RegionKey second{11, -3};
+    auto original = FrozenLedger();
+    original.mark_edited(second, WorldClock(3));
+    for (std::uint64_t tick = 4; tick <= 6; ++tick)
+        Step(original, tick, 1);
+    AcknowledgeAllActivations(original);
+    ASSERT_EQ(original.records().at(second).state, RegionState::Frozen);
+    const auto encoded = original.encode();
+    // Historical v1 has the same records and checksum, without the projection extension.
+    auto bytes = encoded.substr(0, encoded.size() - 19) + std::string(8, '\0');
+    bytes[4] = 1;
+    Seal(bytes);
+    ActiveRegionLedger ledger;
+    std::string error;
+    ASSERT_TRUE(ActiveRegionLedger::decode(bytes, ledger, error)) << error;
+    ASSERT_TRUE(ledger.needs_frozen_projection_adoption());
+    std::vector<RegionKey> visited;
+    EXPECT_THROW(ledger.adopt_frozen_projection([&](RegionKey key) -> std::uint64_t {
+        visited.push_back(key);
+        if (key == second)
+            throw std::runtime_error("Unavailable candidate authority");
+        return 111;
+    }),
+                 std::runtime_error);
+    EXPECT_EQ(visited, (std::vector<RegionKey>{kFar, second}));
+    EXPECT_EQ(ledger.encode(), bytes);
+    EXPECT_TRUE(ledger.needs_frozen_projection_adoption());
+    auto expected = ledger.records();
+    expected.at(kFar).frozen_digest = 111;
+    expected.at(second).frozen_digest = 222;
+    ledger.adopt_frozen_projection([&](RegionKey key) { return key == kFar ? 111u : 222u; });
+    EXPECT_EQ(ledger.records(), expected);
+    EXPECT_FALSE(ledger.needs_frozen_projection_adoption());
+    EXPECT_EQ(Version(ledger.encode()), 2u);
+    EXPECT_EQ(Reload(ledger).canonical_bytes(), ledger.canonical_bytes());
+    const auto adopted = ledger.encode();
+    ledger.adopt_frozen_projection([](RegionKey) -> std::uint64_t {
+        throw std::runtime_error("Already adopted stamps must not be read again");
+    });
+    EXPECT_EQ(ledger.encode(), adopted);
 }
 
 const std::uint64_t kIdle = ActiveRegionLedger::kIdleEvictionTicks;

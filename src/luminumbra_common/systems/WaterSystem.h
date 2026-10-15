@@ -88,6 +88,9 @@ public:
     void SetRegionalScheduling(bool enabled) {
         m_regional_scheduling = enabled;
     }
+    [[nodiscard]] bool regional_scheduling() const {
+        return m_regional_scheduling;
+    }
     struct RegionalWork {
         std::uint64_t global_windows = 0, border_windows = 0, allocated_windows = 0;
         std::uint64_t used_windows = 0, unused_windows = 0, unallocated_windows = 0;

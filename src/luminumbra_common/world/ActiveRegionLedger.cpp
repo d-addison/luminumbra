@@ -645,6 +645,23 @@ bool ActiveRegionLedger::validate_content_identity(const SimulationContentIdenti
     error.clear();
     return true;
 }
+void ActiveRegionLedger::adopt_frozen_projection(const DurableDigest& digest) {
+    if (m_legacyFrozenDigests.empty())
+        return;
+    // Account for the new declaration before touching any record, including the v1 case
+    // where it also introduces an extension-length word.
+    const auto base_bytes = kHeaderBytes + kRecordBytes * m_records.size() + 8;
+    const auto added_bytes = encoded_size() == base_bytes ? 11u : 7u;
+    if (encoded_size() > kMaxFileBytes - added_bytes)
+        throw std::length_error("Active-region ledger byte capacity reached");
+    std::map<RegionKey, std::uint64_t> stamps;
+    for (const auto key : m_legacyFrozenDigests)
+        stamps.emplace(key, digest(key));
+    for (const auto& [key, stamp] : stamps)
+        m_records.at(key).frozen_digest = stamp;
+    m_legacyFrozenDigests.clear();
+}
+
 bool ActiveRegionLedger::any_frozen_history() const {
     for (const auto& [key, r] : m_records) {
         (void)key;
@@ -1018,7 +1035,7 @@ bool ActiveRegionLedger::decode(std::string_view bytes,
         }
         // An envelope without a projection TLV preserves historical digests verbatim, even
         // when allocator/completed-work TLVs require version 2. Do not label them projection 2
-        // until each has been recomputed at a later freeze or evicted.
+        // until validated candidate authority recomputes them during session adoption.
         // Also refuses alternate encodings (negative zero, reserved bytes).
         if (result.encode() != bytes)
             return false;

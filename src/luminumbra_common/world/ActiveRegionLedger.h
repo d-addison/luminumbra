@@ -173,6 +173,13 @@ public:
     // and compares before adopting any loaded consumer state.
     bool validate_content_identity(const SimulationContentIdentity& identity,
                                    std::string& error) const;
+    [[nodiscard]] bool needs_frozen_projection_adoption() const noexcept {
+        return !m_legacyFrozenDigests.empty();
+    }
+    // Called only after candidate authority has been validated. Recompute every historical
+    // stamp before publishing any of them; provider failure leaves the ledger unchanged.
+    // Does not schedule, advance ages or alter identities. The next save declares projection 2.
+    void adopt_frozen_projection(const DurableDigest& digest);
     // Returns false and changes nothing once next_persistent_id() reaches kPersistentIdLimit.
     bool allocate_persistent_id(std::uint64_t& id);
     using WaterDebts = std::map<RegionKey, std::uint64_t>;
@@ -279,7 +286,7 @@ private:
     WaterDebts m_waterDebts;
     RegionSchedulerConfig m_config;
     std::map<RegionKey, ActiveRegionRecord> m_records;
-    // Preserve the v1 envelope until every retained legacy digest is refreshed or evicted.
+    // Preserve the historical envelope until validated authority supplies replacement stamps.
     // This bookkeeping is excluded from the canonical projection.
     std::set<RegionKey> m_legacyFrozenDigests;
     std::optional<Vec3> m_localAnchor;
