@@ -2289,10 +2289,14 @@ TEST(WorldSaveService, SaveStreamsBulkArraysWithBoundedWorkAndCanonicalRecordByt
         EXPECT_GE(work.array_elements, 2 * lattice + 7 * cells);
         EXPECT_EQ(work.peak_buffered_array_elements, 1u);
         for (const bool strict : {false, true}) {
-            ASSERT_TRUE(dom_facts[strict].has_value());
-            ASSERT_TRUE(streamed_facts[strict].has_value());
-            EXPECT_EQ(streamed_facts[strict]->coords, dom_facts[strict]->coords);
-            EXPECT_EQ(streamed_facts[strict]->sdf_size, dom_facts[strict]->sdf_size);
+            const auto& dom_fact = dom_facts[strict];
+            const auto& streamed_fact = streamed_facts[strict];
+            ASSERT_TRUE(dom_fact.has_value());
+            ASSERT_TRUE(streamed_fact.has_value());
+            if (!dom_fact.has_value() || !streamed_fact.has_value())
+                continue;
+            EXPECT_EQ(streamed_fact->coords, dom_fact->coords);
+            EXPECT_EQ(streamed_fact->sdf_size, dom_fact->sdf_size);
         }
         TempSaveDir save("streamed_save");
         const auto encodes = CachePersistence::SnapshotStreamEncodeCountForTesting();

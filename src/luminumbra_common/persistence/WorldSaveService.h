@@ -49,7 +49,7 @@ struct RegionDigestInputs {
 // Decoded siblings from one successful admission. Published only after all record,
 // ownership and snapshot-index checks pass; never reused across separate opens.
 struct WorldSaveRecords {
-    world::ActiveRegionLedger ledger;
+    world::ActiveRegionLedger ledger{};
     world::GroundObjectStore ground;
     world::FieldPageState pages;
     Ecs::EntityRegistrySnapshot plants;

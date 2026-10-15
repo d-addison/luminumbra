@@ -6392,6 +6392,34 @@ TEST(GameSessionHeadlessWorldTest, FreshOpenDoesNotPlanTerrainOrPopulateRegionsB
     ASSERT_NO_FATAL_FAILURE(expect_unpopulated());
 }
 
+namespace {
+void AssertCatalogRefusesMalformedMetadata(const HeadlessRoot& root,
+                                           GameSession& owner,
+                                           GameSession& reopened) {
+    for (const auto* filename : {"preset.json", "world_info.json"}) {
+        const auto path = owner.GetWorldSaveDir() / filename;
+        const auto original = ReadClockTestFile(path);
+        {
+            std::ofstream output(path, std::ios::binary | std::ios::trunc);
+            output << "{";
+            ASSERT_TRUE(output.good());
+        }
+        const auto changed_files = RepeatedSaveBytes(owner.GetWorldSaveDir());
+        const auto cached = reopened.InspectCurrentSavedWorld();
+        const auto uncached = P::InspectSavedWorld(root.root_string(), owner.GetMetadata().worldId);
+        EXPECT_FALSE(cached.error.empty());
+        EXPECT_EQ(cached.error, uncached.error);
+        EXPECT_EQ(RepeatedSaveBytes(owner.GetWorldSaveDir()), changed_files);
+        EXPECT_TRUE(reopened.GetWorldOpenError().empty());
+        {
+            std::ofstream output(path, std::ios::binary | std::ios::trunc);
+            output << original;
+            ASSERT_TRUE(output.good());
+        }
+    }
+}
+} // namespace
+
 TEST(GameSessionHeadlessWorldTest, IndexedOpenAdmitsEachRecordOnceThroughClientIdentity) {
     const HeadlessRoot root;
     JobSystem jobs;
@@ -6467,27 +6495,7 @@ TEST(GameSessionHeadlessWorldTest, IndexedOpenAdmitsEachRecordOnceThroughClientI
     EXPECT_EQ(RepeatedSaveBytes(owner.GetWorldSaveDir()), saved_files);
     // Reinspection still reads current metadata and presets. Match the uncached catalog's
     // refusal exactly, preserve live state, and leave every on-disk byte untouched.
-    for (const auto* filename : {"preset.json", "world_info.json"}) {
-        const auto path = owner.GetWorldSaveDir() / filename;
-        const auto original = ReadClockTestFile(path);
-        {
-            std::ofstream output(path, std::ios::binary | std::ios::trunc);
-            output << "{";
-            ASSERT_TRUE(output.good());
-        }
-        const auto changed_files = RepeatedSaveBytes(owner.GetWorldSaveDir());
-        const auto cached = reopened.InspectCurrentSavedWorld();
-        const auto uncached = P::InspectSavedWorld(root.root_string(), owner.GetMetadata().worldId);
-        EXPECT_FALSE(cached.error.empty());
-        EXPECT_EQ(cached.error, uncached.error);
-        EXPECT_EQ(RepeatedSaveBytes(owner.GetWorldSaveDir()), changed_files);
-        EXPECT_TRUE(reopened.GetWorldOpenError().empty());
-        {
-            std::ofstream output(path, std::ios::binary | std::ios::trunc);
-            output << original;
-            ASSERT_TRUE(output.good());
-        }
-    }
+    ASSERT_NO_FATAL_FAILURE(AssertCatalogRefusesMalformedMetadata(root, owner, reopened));
     EXPECT_EQ(RepeatedSaveBytes(owner.GetWorldSaveDir()), saved_files);
     // Excluded authority stays available for later demand without eager residency.
     ASSERT_TRUE(reopened.GetWorldSystem()->restore_authoritative_chunk(excluded));

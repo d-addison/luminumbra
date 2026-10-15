@@ -790,11 +790,12 @@ public:
             !m_frames[1].value.empty())
             return false;
         Frame frame;
-        if (!m_frames.empty() && m_frames.back().target &&
-            std::holds_alternative<std::vector<Vec2>*>(*m_frames.back().target)) {
+        if (!m_frames.empty()) {
+            const auto& target = m_frames.back().target;
             // Water flow cells have only x/y. Avoid two map allocations per cell.
-            frame.flow = true;
-        } else {
+            frame.flow = target.has_value() && std::holds_alternative<std::vector<Vec2>*>(*target);
+        }
+        if (!frame.flow) {
             frame.value = Json::object();
         }
         m_frames.push_back(std::move(frame));
@@ -806,10 +807,16 @@ public:
         auto frame = std::move(m_frames.back());
         m_frames.pop_back();
         if (frame.flow) {
-            if (frame.flow_fields != 3 || m_frames.empty() || !m_frames.back().target)
+            if (frame.flow_fields != 3 || m_frames.empty())
                 return false;
-            std::get<std::vector<Vec2>*>(*m_frames.back().target)->push_back(frame.flow_value);
-            CountElement(m_frames.back());
+            auto& parent = m_frames.back();
+            if (!parent.target.has_value())
+                return false;
+            auto* flows = std::get_if<std::vector<Vec2>*>(&*parent.target);
+            if (!flows)
+                return false;
+            (*flows)->push_back(frame.flow_value);
+            CountElement(parent);
             return true;
         }
         return Value(std::move(frame.value));
