@@ -231,7 +231,8 @@ class PathGateTests(unittest.TestCase):
             ("ci", "diligent-rhi", "ready-native"),
             ("ci", "tidy-shard", "ready-native"),
             ("ci", "tidy", "aggregate"),
-            ("asan", "asan", "guarded-native"),
+            ("asan", "asan-shard", "guarded-native"),
+            ("asan", "asan", "required-aggregate"),
             ("performance", "preview-frame", "guarded-native"),
         )
         for workflow, job, route in routes:
@@ -244,7 +245,9 @@ class PathGateTests(unittest.TestCase):
                     for cpp in ("true", "false", ""):
                         for cancelled in (False, True):
                             ready = event != "pull_request" or draft is False
-                            if route == "aggregate":
+                            if route == "required-aggregate":
+                                expected = True
+                            elif route == "aggregate":
                                 expected = ready
                             elif route == "guarded-python":
                                 expected = not cancelled

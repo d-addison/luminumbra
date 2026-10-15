@@ -996,6 +996,7 @@ jobs:
           python3 tools/ci/test_check_docs.py
           python3 tools/ci/test_check_ctest_junit.py
           python3 tools/ci/test_workflow_policy.py
+          python3 tools/ci/test_asan_shards.py
           python3 tools/ci/test_tidy_cache.py
           python3 tools/ci/test_tidy_shard.py
           python3 tools/ci/test_validate_visual_catalog.py
