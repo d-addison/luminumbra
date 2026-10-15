@@ -16,6 +16,8 @@ PYTHON_TESTS = (
     "tools/ci/test_ci_paths.py",
     "tools/ci/test_cache_retention.py",
     "tools/ci/test_check_docs.py",
+    "tools/ci/test_changed_tus.py",
+    "tools/ci/test_offline_deps.py",
     "tools/ci/test_check_ctest_junit.py",
     "tools/ci/test_qualification_capture.py",
     "tools/ci/test_slowest_tests.py",
@@ -44,6 +46,7 @@ PYTHON_TESTS = (
 POSIX_PYTHON_TESTS = ("tools/ci/test_tidy_cache.py",)
 PYTHON_MODULES = {
     "tools/ci/ci_paths.py", "tools/ci/check_docs.py",
+    "tools/ci/changed_tus.py", "tools/ci/offline_deps.py",
     "tools/ci/check_ctest_junit.py", "tools/ci/slowest_tests.py",
     "tools/ci/validate_performance_measurement.py",
     "tools/ci/validate_public_tree.py", "tools/ci/validate_visual_catalog.py",
