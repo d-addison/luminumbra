@@ -131,7 +131,9 @@ const CreatureDistantPolicy& GameSession::CreaturePolicy(std::uint16_t species) 
 }
 
 namespace {
-void CaptureCreature(entt::registry& registry, entt::entity e) {
+void CaptureCreature(entt::registry& registry,
+                     entt::entity e,
+                     const std::function<void(entt::entity)>& prepare = {}) {
     auto next = registry.get<C::CreatureCoarseComponent>(e);
     const auto& position = registry.get<C::TransformComponent>(e).position;
     const auto key = QuantizedPositionOwner(position);
@@ -148,6 +150,8 @@ void CaptureCreature(entt::registry& registry, entt::entity e) {
     if (const auto* needs = registry.try_get<C::NeedsComponent>(e))
         for (const auto& need : needs->needs)
             next.needs.push_back({need.name, Pressure(need.pressure)});
+    if (prepare)
+        prepare(e);
     registry.get<C::CreatureCoarseComponent>(e) = std::move(next);
 }
 
@@ -156,7 +160,8 @@ void StageCreatureAuthority(entt::registry& registry,
                             std::uint64_t id,
                             RegionKey key,
                             std::uint64_t tick,
-                            bool physics_controlled) {
+                            bool physics_controlled,
+                            const std::function<void(entt::entity)>& prepare = {}) {
     registry.emplace<C::CreatureRegionComponent>(
         entity, C::CreatureRegionComponent{id, key.x, key.z, tick});
     registry.emplace<C::CreatureCoarseComponent>(entity);
@@ -164,11 +169,11 @@ void StageCreatureAuthority(entt::registry& registry,
         entity, C::CreatureControllerComponent{physics_controlled});
     if (physics_controlled)
         registry.get_or_emplace<C::CreatureLocomotionStateComponent>(entity);
-    CaptureCreature(registry, entity);
+    CaptureCreature(registry, entity, prepare);
 }
 } // namespace
 void GameSession::CaptureFullCreature(entt::entity e) {
-    CaptureCreature(m_registry, e);
+    CaptureCreature(m_registry, e, m_creatureProjectionPreparation);
 }
 void GameSession::StagePopulationCreature(entt::registry& stage,
                                           const CreatureSpawnCommand& command,
@@ -236,7 +241,13 @@ bool GameSession::AdmitCreature(entt::entity e, bool physics_controlled) {
         throw std::runtime_error("Creature identity allocation refused");
     const bool had_locomotion = m_registry.all_of<C::CreatureLocomotionStateComponent>(e);
     try {
-        StageCreatureAuthority(m_registry, e, id, key, m_worldClock.tick(), physics_controlled);
+        StageCreatureAuthority(m_registry,
+                               e,
+                               id,
+                               key,
+                               m_worldClock.tick(),
+                               physics_controlled,
+                               m_creatureProjectionPreparation);
         const auto snapshot = A::BuildCreatureSnapshot(m_registry);
         const auto plants = luminumbra::foliage::BuildPlantEntitySnapshot(m_registry, true);
         std::string error;

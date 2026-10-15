@@ -848,6 +848,11 @@ ServerTickReport ServerWorldRunner::RunFixedTicks(std::uint64_t tick_count) {
                 }
             }
         }
+        if (const auto& fault = m_session->GetRegionSchedulerFault()) {
+            report.region_fault = true;
+            report.region_fault_message = fault->message;
+            break;
+        }
 
         // Byte-limit pressure: a dirty authoritative chunk could not be parked, so persist now.
         if (m_session->PersistenceSaveRequested()) {
@@ -858,6 +863,11 @@ ServerTickReport ServerWorldRunner::RunFixedTicks(std::uint64_t tick_count) {
                     report.autosave_writes += 1;
                 }
             }
+        }
+        if (const auto& fault = m_session->GetRegionSchedulerFault()) {
+            report.region_fault = true;
+            report.region_fault_message = fault->message;
+            break;
         }
 
         // One server tick == one frame: delimit it for the profiler timeline.
@@ -1105,7 +1115,12 @@ void ServerWorldRunner::ComputeWorldHashAndSubHashes(
     // separately (same WorldSaveService::world_hash + same projection).
     out_world_hash.clear();
     out_sub = Persistence::WorldStreamingStateSubHashes{};
-    if (!m_booted || !m_session || !m_session->GetWorldSystem()) {
+    if (!m_booted || !m_session || !m_session->GetWorldSystem() ||
+        m_session->GetRegionSchedulerFault()) {
+        return;
+    }
+    if (m_session->ActiveRegionsEnabled() && !m_session->IsSimulationTickBoundary()) {
+        (void)m_session->ComputeAuthorityWorldHashes(out_world_hash, out_sub);
         return;
     }
 
@@ -1163,7 +1178,10 @@ std::size_t ServerWorldRunner::SaveFullSnapshot() {
         return 0;
     }
     auto* world_system = m_session->GetWorldSystem();
-    world_system->wait_for_streaming_jobs();
+    if (m_session->GetRegionSchedulerFault())
+        world_system->quiesce_streaming_jobs_for_save();
+    else
+        world_system->wait_for_streaming_jobs();
 
     WorldStreamingState state;
     for (const auto& chunk : world_system->snapshot_streamed_chunks()) {
@@ -1270,6 +1288,8 @@ void ServerWorldRunner::Shutdown(world::WorldStateSaveReport* shutdown_save_repo
             save_report.saved);
     }
 
+    if (m_session)
+        m_shutdownRegionFault = m_session->GetRegionSchedulerFault();
     m_session.reset();
     if (m_booted) {
         m_jobSystem.shutdown();

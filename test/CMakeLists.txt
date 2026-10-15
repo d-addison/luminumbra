@@ -195,6 +195,7 @@ add_executable(common_tests
     common/FarWantedSet_test.cpp
     common/FarAuthorityOverlay_test.cpp
     common/GameSessionHeadlessWorld_test.cpp
+    ../src/luminumbra_server/HeavyAuthorityReference.cpp
     common/AuthorityHashState_test.cpp
     common/FrozenAuthority_test.cpp
     common/SimulationPendingState_test.cpp

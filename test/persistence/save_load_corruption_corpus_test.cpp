@@ -24,7 +24,20 @@
 // they fail (not pass) if a gap exists -- they never assert the bug.
 #include "gtest/gtest.h"
 
+#include "../support/SimulationContentFixture.h"
 #include "../support/UniqueTempPath.h"
+#include "luminumbra_common/ai/CreaturePersistence.h"
+#include "luminumbra_common/components/CoreComponents.h"
+#include "luminumbra_common/components/CreatureComponents.h"
+#include "luminumbra_common/components/InstinctComponents.h"
+#include "luminumbra_common/core/FilesystemPath.h"
+#include "luminumbra_common/core/JobSystem.h"
+#include "luminumbra_common/persistence/SaveTransaction.h"
+#include "luminumbra_common/persistence/SimulationPendingState.h"
+#include "luminumbra_common/world/GameSession.h"
+
+#include <algorithm>
+#include <map>
 
 #include "persistence/WorldPersistenceRoundtrip.h"
 #include "persistence/WorldSaveService.h"
@@ -35,6 +48,7 @@
 #include <fstream>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace {
@@ -348,4 +362,171 @@ TEST(SaveLoadCorruptionCorpus, MissingSaveDirIsACleanMissNotAnError) {
     EXPECT_FALSE(service.load_world(state, dir.path, errors));
     EXPECT_TRUE(errors.empty()) << "a missing save must be a clean miss, not a corruption error";
     EXPECT_TRUE(state.empty());
+}
+
+namespace {
+namespace CorpusP = Luminumbra::Persistence;
+using CorpusSession = Luminumbra::world::GameSession;
+namespace CorpusC = Luminumbra::Components;
+
+std::map<std::string, std::string> CorpusTree(const std::filesystem::path& root) {
+    std::map<std::string, std::string> result;
+    for (const auto& entry : std::filesystem::recursive_directory_iterator(root))
+        if (entry.is_regular_file())
+            result.emplace(
+                Luminumbra::Filesystem::GenericPathString(entry.path().lexically_relative(root)),
+                ReadFileBytes(entry.path()));
+    return result;
+}
+void CorpusReindex(const std::filesystem::path& directory, std::string_view relative) {
+    CorpusP::SnapshotIndex index;
+    ASSERT_TRUE(CorpusP::read_snapshot_index(directory, index, nullptr));
+    const auto member =
+        std::find_if(index.members.begin(), index.members.end(), [relative](const auto& entry) {
+            return entry.path == relative;
+        });
+    ASSERT_NE(member, index.members.end());
+    ASSERT_TRUE(CorpusP::hash_file(
+        directory / relative, member->bytes, member->fnv64, member->present, nullptr));
+    ASSERT_TRUE(member->present);
+    WriteFileBytes(CorpusP::snapshot_index_path(directory), CorpusP::encode_snapshot_index(index));
+}
+CorpusP::SimulationPendingState CorpusPending(const CorpusSession& session) {
+    CorpusP::SimulationPendingState result;
+    result.events = session.GetSimulationEventBus().snapshot();
+    return result;
+}
+void CorpusCreatures(CorpusSession& session) {
+    const Luminumbra::Vec3 position{8, 100, 8};
+    session.NotifyGroundObjectEdit(position);
+    auto& registry = session.GetRegistry();
+    std::vector<entt::entity> creatures;
+    for (unsigned i = 0; i < 2; ++i) {
+        const auto entity = registry.create();
+        registry.emplace<CorpusC::TransformComponent>(entity).position = position;
+        registry.emplace<CorpusC::CreatureComponent>(entity).species_id =
+            CorpusC::CreatureSpeciesId16("fixture_creature");
+        ASSERT_TRUE(session.AdmitCreature(entity));
+        creatures.push_back(entity);
+    }
+    registry.emplace<CorpusC::SensesComponent>(creatures.front()).nearest_food_source =
+        creatures.back();
+    session.GetSimulationEventBus().publish(100, "future", "retain sequence");
+}
+} // namespace
+
+// Fingerprint refusal is tested separately from checksum-correct malformed contents.
+// Every refusal goes through public replacement of an already populated, saveable world.
+TEST(SaveLoadCorruptionCorpus, IndexedContinuationRefusalPreservesLiveWorld) {
+    enum class Damage {
+        Fingerprint,
+        Pending,
+        Reference,
+        Activation,
+        Missing,
+        Unlisted
+    };
+    for (const auto damage : {Damage::Fingerprint,
+                              Damage::Pending,
+                              Damage::Reference,
+                              Damage::Activation,
+                              Damage::Missing,
+                              Damage::Unlisted}) {
+        SCOPED_TRACE(static_cast<int>(damage));
+        TempSaveDir dir("indexed_continuation");
+        Luminumbra::TestSupport::WriteSimulationContentFixture(dir.path);
+        std::filesystem::create_directories(dir.path / "worlds/atlas/presets");
+        std::filesystem::copy_file(std::filesystem::path(LUMINUMBRA_SOURCE_ROOT) /
+                                       "worlds/atlas/presets/default.json",
+                                   dir.path / "worlds/atlas/presets/default.json");
+        Luminumbra::JobSystem jobs;
+        jobs.startup(1);
+        const auto configure = [&](CorpusSession& session) {
+            session.SetRootPath(Luminumbra::Filesystem::GenericPathString(dir.path) + "/");
+            session.SetJobSystem(&jobs);
+            session.SetActiveRegionsEnabled(true);
+        };
+        CorpusSession donor;
+        configure(donor);
+        ASSERT_TRUE(donor.CreateWorld("Indexed donor", "1337", "default"));
+        ASSERT_NO_FATAL_FAILURE(CorpusCreatures(donor));
+        ASSERT_TRUE(donor.SaveWorldState());
+        const auto directory = donor.GetWorldSaveDir();
+        const auto pending_path = directory / CorpusP::SimulationPendingState::kMember;
+        const auto creature_path = WorldSaveService::creature_entities_path(directory);
+        const auto creature_member =
+            Luminumbra::Filesystem::GenericPathString(creature_path.lexically_relative(directory));
+        if (damage == Damage::Fingerprint || damage == Damage::Pending) {
+            WriteFileBytes(pending_path, "malformed pending");
+            if (damage == Damage::Pending)
+                ASSERT_NO_FATAL_FAILURE(
+                    CorpusReindex(directory, CorpusP::SimulationPendingState::kMember));
+        } else if (damage == Damage::Reference) {
+            auto document = nlohmann::json::parse(ReadFileBytes(creature_path));
+            document["entities"][0]["components"]["Senses"]["data"]["nearest_food_source"] = {
+                {"kind", "creature"}, {"id", 99999}};
+            WriteFileBytes(creature_path, document.dump());
+            ASSERT_NO_FATAL_FAILURE(CorpusReindex(directory, creature_member));
+        } else if (damage == Damage::Activation) {
+            auto pending = CorpusPending(donor);
+            // Valid framing/checksum/sequence, but no matching ledger obligation.
+            pending.events.events.push_back(
+                {101,
+                 0,
+                 pending.events.next_sequence++,
+                 "region.activated",
+                 "9,9,pin",
+                 luminumbra::simulation::ActivationDeliveryKey{101, 9, 9}});
+            pending.events.text_bytes +=
+                std::string_view("region.activated").size() + std::string_view("9,9,pin").size();
+            WriteFileBytes(pending_path, pending.encode());
+            ASSERT_NO_FATAL_FAILURE(
+                CorpusReindex(directory, CorpusP::SimulationPendingState::kMember));
+        } else if (damage == Damage::Missing) {
+            ASSERT_TRUE(std::filesystem::remove(pending_path));
+        } else {
+            CorpusP::SnapshotIndex index;
+            ASSERT_TRUE(CorpusP::read_snapshot_index(directory, index, nullptr));
+            std::erase_if(index.members, [](const auto& member) {
+                return member.path == CorpusP::SimulationPendingState::kMember;
+            });
+            WriteFileBytes(CorpusP::snapshot_index_path(directory),
+                           CorpusP::encode_snapshot_index(index));
+        }
+        const auto damaged = CorpusTree(directory);
+        CorpusSession live;
+        configure(live);
+        ASSERT_TRUE(live.CreateWorld("Preserved live world", "1337", "default"));
+        ASSERT_NO_FATAL_FAILURE(CorpusCreatures(live));
+        ASSERT_TRUE(live.SaveWorldState());
+        const auto* world = live.GetWorldSystem();
+        const auto id = live.GetMetadata().worldId;
+        const auto clock = live.GetWorldClock().canonical_bytes();
+        const auto ledger = live.GetActiveRegionLedger().canonical_bytes();
+        const auto creatures = luminumbra::ai::SerializeCreatureSnapshot(
+            luminumbra::ai::BuildCreatureSnapshot(live.GetRegistry()));
+        const auto pending = CorpusPending(live).encode();
+        EXPECT_FALSE(live.LoadWorld(donor.GetMetadata().worldId));
+        EXPECT_FALSE(live.GetWorldOpenError().empty());
+        EXPECT_EQ(live.GetWorldSystem(), world);
+        EXPECT_EQ(live.GetMetadata().worldId, id);
+        EXPECT_EQ(live.GetWorldClock().canonical_bytes(), clock);
+        EXPECT_EQ(live.GetActiveRegionLedger().canonical_bytes(), ledger);
+        EXPECT_EQ(luminumbra::ai::SerializeCreatureSnapshot(
+                      luminumbra::ai::BuildCreatureSnapshot(live.GetRegistry())),
+                  creatures);
+        EXPECT_EQ(CorpusPending(live).encode(), pending);
+        EXPECT_FALSE(live.GetRegionSchedulerFault());
+        EXPECT_EQ(CorpusTree(directory), damaged);
+        ASSERT_TRUE(live.SaveWorldState());
+        ASSERT_TRUE(live.SaveWorld());
+        EXPECT_EQ(CorpusTree(directory), damaged);
+        CorpusSession reopened;
+        configure(reopened);
+        ASSERT_TRUE(reopened.LoadWorld(id)) << reopened.GetWorldOpenError();
+        EXPECT_EQ(luminumbra::ai::SerializeCreatureSnapshot(
+                      luminumbra::ai::BuildCreatureSnapshot(reopened.GetRegistry())),
+                  creatures);
+        EXPECT_EQ(CorpusPending(reopened).encode(), pending);
+    }
 }

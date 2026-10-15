@@ -280,6 +280,12 @@ public:
     // never-edited world writes nothing) and tears the session down.
     // Called by the destructor when not invoked explicitly.
     void Shutdown(world::WorldStateSaveReport* shutdown_save_report = nullptr);
+    // Includes checked preparation faults first encountered by the shutdown save.
+    // The first session fault remains observable after teardown and repeated shutdown.
+    [[nodiscard]] const std::optional<world::GameSession::RegionSchedulerFault>&
+    GetRegionSchedulerFault() const {
+        return m_session ? m_session->GetRegionSchedulerFault() : m_shutdownRegionFault;
+    }
 
 private:
     std::string m_bootError;
@@ -299,6 +305,7 @@ private:
     std::string ComputeAvailabilityDigest();
     bool m_booted = false;
     bool m_shutdown = false;
+    std::optional<world::GameSession::RegionSchedulerFault> m_shutdownRegionFault;
     BootSettleStats m_boot_settle; //  settle-exit stats (see getter)
 };
 

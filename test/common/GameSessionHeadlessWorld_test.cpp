@@ -27,6 +27,8 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
+#include <tuple>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -46,6 +48,7 @@
 #include "luminumbra_common/systems/AetherFieldSystem.h"
 #include "luminumbra_common/systems/CropLifecycleSystem.h"
 #include "luminumbra_common/systems/FireSpreadSystem.h"
+#include "luminumbra_common/systems/PhysicsSystem.h"
 #include "luminumbra_common/systems/PlantDiseaseSystem.h"
 #include "luminumbra_common/systems/PlantGrowthSystem.h"
 #include "luminumbra_common/systems/RegionalFoliage.h"
@@ -60,6 +63,7 @@
 #include "luminumbra_common/fields/EnergyFieldState.h"
 #include "luminumbra_common/fields/FieldPageState.h"
 #include "luminumbra_common/persistence/SaveTransaction.h"
+#include "luminumbra_common/persistence/SimulationPendingState.h"
 #include "luminumbra_common/persistence/WorldSaveService.h"
 #include "luminumbra_common/scripting/LuaState.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
@@ -68,6 +72,7 @@
 #include "luminumbra_common/world/FarWantedSet.h"
 #include "luminumbra_common/world/GameSession.h"
 #include "luminumbra_common/world/WorldStreamingState.h"
+#include "luminumbra_server/HeavyAuthorityReference.h"
 #include "luminumbra_server/SimBudgetArtifact.h"
 #include "luminumbra_server/modes/SmokeArtifact.h"
 
@@ -8762,4 +8767,755 @@ TEST(GameSessionHeadlessWorldTest, FlagOffWorldHashesUnchanged) {
 #endif
         EXPECT_EQ(ReadClockTestFile(output), expected);
     }
+}
+
+namespace {
+enum class SimulationFaultPoint {
+    Projection,
+    Admission,
+    FullGenome,
+    FullPerception,
+    CoarseGenome,
+    CoarsePerception,
+    Controller,
+    PopulationEntity,
+    PopulationCommit,
+    PopulationValidation,
+    ActivationEnqueue,
+    ActivationDelivery,
+    Freeze,
+    UnknownPreparation
+};
+using FaultFrameCase = std::tuple<SimulationFaultPoint, std::uint64_t>;
+constexpr RegionKey kPopulationRegion{9, 9};
+constexpr std::uint64_t kInitialTick = 2;
+
+std::map<std::string, std::string> SnapshotFileBytes(const fs::path& directory) {
+    std::map<std::string, std::string> result;
+    for (const auto& entry : fs::recursive_directory_iterator(directory))
+        if (entry.is_regular_file())
+            result.emplace(Luminumbra::Filesystem::GenericPathString(
+                               entry.path().lexically_relative(directory)),
+                           ReadClockTestFile(entry.path()));
+    return result;
+}
+std::vector<std::uint64_t> OriginCreatureIds(const GameSession& session) {
+    std::vector<std::uint64_t> ids;
+    const auto& registry = session.GetRegistry();
+    for (const auto entity : registry.view<const C::CreatureRegionComponent>()) {
+        const auto& owner = registry.get<const C::CreatureRegionComponent>(entity);
+        if (owner.owner_x == 0 && owner.owner_z == 0)
+            ids.push_back(owner.persistent_id);
+    }
+    std::sort(ids.begin(), ids.end());
+    return ids;
+}
+std::string PendingAuthorityBytes(const GameSession& session) {
+    P::SimulationPendingState pending;
+    pending.events = session.GetSimulationEventBus().snapshot();
+    if (const auto* energy = session.GetEnergyFieldState()) {
+        pending.energy_channels = energy->channels();
+        pending.deposits = energy->PendingDeposits();
+    }
+    return pending.encode();
+}
+Luminumbra::Server::HeavyAuthorityReference CaptureRecoveryReference(const GameSession& session) {
+    const auto authority = session.ObserveWorldAuthority();
+    if (!authority)
+        throw std::runtime_error("Recovery observation requires world authority");
+    const auto observation = session.ObserveSimulationAuthority();
+    return Luminumbra::Server::HeavyAuthorityReference::Capture(
+        {.directory = observation.durable_directory.empty() ? session.GetWorldSaveDir()
+                                                            : observation.durable_directory,
+         .chunks = {.live = authority->live,
+                    .parked = authority->parked,
+                    .durable = authority->durable},
+         .registry = session.GetRegistry(),
+         .clock = session.GetWorldClock(),
+         .ledger = session.GetActiveRegionLedger(),
+         .ground = session.GetGroundObjects(),
+         .fields = session.GetFieldPages(),
+         .energy = session.GetEnergyFieldState(),
+         .events = &session.GetSimulationEventBus(),
+         .avatars = {},
+         .ambient_anchor = observation.ambient_anchor});
+}
+// Process-local scoped hooks; each discovered parameter runs in its own process.
+class ScopedRecoveryIoHooks {
+public:
+    inline static fs::path freeze_path;
+    inline static bool freeze_armed = false, replacement_seen = false;
+    static void ReadRegion(const fs::path& path) {
+        if (freeze_armed && path == freeze_path)
+            throw std::runtime_error("Transient freeze preparation failure");
+    }
+    static void Replace(const char* step, const fs::path& path) {
+        if (std::string_view(step) == "after-replace" &&
+            path.filename() == "creature-entities.json") {
+            replacement_seen = true;
+            P::set_snapshot_step_hook_for_testing(nullptr);
+            throw std::runtime_error("Transient creature replacement failure");
+        }
+    }
+    ~ScopedRecoveryIoHooks() {
+        P::WorldSaveService::set_region_read_hook_for_testing(nullptr);
+        P::set_snapshot_step_hook_for_testing(nullptr);
+        P::WorldSaveService::set_before_active_regions_replace_for_testing(nullptr);
+        freeze_armed = false;
+        freeze_path.clear();
+    }
+};
+struct BirthConstructionHook {
+    GameSession& session;
+    std::uint64_t tick;
+    unsigned calls = 0;
+    void Construct(entt::registry&, entt::entity) {
+        if (session.GetWorldClock().tick() == tick) {
+            ++calls;
+            throw std::runtime_error("Transient newborn construction failure");
+        }
+    }
+};
+
+struct RecoveryChunkObligations {
+    std::shared_ptr<Luminumbra::Chunk> live, parked;
+    std::vector<std::shared_ptr<Luminumbra::Chunk>> parked_inventory;
+    std::vector<Luminumbra::IVec3> durable_inventory;
+    Luminumbra::world::PersistenceStatus persistence;
+    std::vector<float> live_payload, parked_payload;
+
+    void Seed(GameSession& session, const Luminumbra::Vec3& anchor) {
+        auto* world = session.GetWorldSystem();
+        parked = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3{1920, 0, 1920});
+        parked->heightmap_data = {117.0f};
+        parked->mark_voxel_data_dirty();
+        parked->mark_water_state_dirty();
+        ASSERT_TRUE(world->adopt_streamed_chunk(parked));
+        world->debug_set_streaming_radius_cap(1);
+        // One production activation interval, before the faulting frame. No streaming
+        // update is needed after the fault to establish the parked obligation.
+        for (unsigned frame = 0; frame < 4; ++frame) {
+            world->update(session.GetRegistry(), anchor, session.GetPhysicsSystem());
+            world->wait_for_streaming_jobs();
+        }
+        ASSERT_FALSE(world->find_streamed_chunk(parked->get_coords()));
+        ASSERT_EQ(world->find_authoritative_chunk(parked->get_coords()), parked);
+        live = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3{0, 1024, 0});
+        live->heightmap_data = {219.0f};
+        live->mark_voxel_data_dirty();
+        live->mark_water_state_dirty();
+        ASSERT_TRUE(world->adopt_streamed_chunk(live));
+        parked_inventory = world->snapshot_parked_chunks();
+        ASSERT_NE(std::find(parked_inventory.begin(), parked_inventory.end(), parked),
+                  parked_inventory.end());
+        durable_inventory = world->durable_chunk_inventory();
+        persistence = session.GetPersistenceStatus();
+        ASSERT_GT(persistence.parked_count, 0u);
+        ASSERT_GT(persistence.parked_bytes, 0u);
+        live_payload = live->heightmap_data;
+        parked_payload = parked->heightmap_data;
+    }
+
+    void ExpectPending(GameSession& session) const {
+        const auto* world = session.GetWorldSystem();
+        EXPECT_EQ(world->find_streamed_chunk(live->get_coords()), live);
+        EXPECT_FALSE(world->find_streamed_chunk(parked->get_coords()));
+        EXPECT_EQ(world->find_authoritative_chunk(parked->get_coords()), parked);
+        EXPECT_EQ(world->snapshot_parked_chunks(), parked_inventory);
+        EXPECT_EQ(world->durable_chunk_inventory(), durable_inventory);
+        const auto status = session.GetPersistenceStatus();
+        EXPECT_EQ(status.parked_count, persistence.parked_count);
+        EXPECT_EQ(status.parked_bytes, persistence.parked_bytes);
+        EXPECT_EQ(status.oldest_parked_tick, persistence.oldest_parked_tick);
+        EXPECT_EQ(status.save_requested, persistence.save_requested);
+        EXPECT_EQ(status.last_save_tick, persistence.last_save_tick);
+        EXPECT_EQ(status.last_save_ms, persistence.last_save_ms);
+        for (const auto& chunk : {live, parked}) {
+            EXPECT_TRUE(chunk->is_voxel_data_dirty());
+            EXPECT_TRUE(chunk->is_water_state_dirty());
+        }
+        EXPECT_EQ(live->heightmap_data, live_payload);
+        EXPECT_EQ(parked->heightmap_data, parked_payload);
+    }
+
+    void ExpectAcknowledged(GameSession& session) const {
+        const auto* world = session.GetWorldSystem();
+        EXPECT_EQ(world->find_streamed_chunk(live->get_coords()), live);
+        EXPECT_FALSE(world->find_streamed_chunk(parked->get_coords()));
+        // Parked memory is released; authority now resolves to a fresh committed durable copy.
+        const auto authoritative = world->find_authoritative_chunk(parked->get_coords());
+        ASSERT_NE(authoritative, nullptr);
+        EXPECT_NE(authoritative, parked);
+        EXPECT_EQ(authoritative->heightmap_data, parked_payload);
+        EXPECT_TRUE(world->snapshot_parked_chunks().empty());
+        const auto status = session.GetPersistenceStatus();
+        EXPECT_EQ(status.parked_count, 0u);
+        EXPECT_EQ(status.parked_bytes, 0u);
+        EXPECT_EQ(status.oldest_parked_tick, -1);
+        EXPECT_FALSE(status.save_requested);
+        EXPECT_EQ(status.last_save_tick,
+                  static_cast<std::int64_t>(session.GetSimulationTickCount()));
+        EXPECT_GT(status.last_save_tick, persistence.last_save_tick);
+        for (const auto& chunk : {live, parked}) {
+            EXPECT_FALSE(chunk->is_voxel_data_dirty());
+            EXPECT_FALSE(chunk->is_water_state_dirty());
+            const auto inventory = world->durable_chunk_inventory();
+            EXPECT_NE(std::find(inventory.begin(), inventory.end(), chunk->get_coords()),
+                      inventory.end());
+            const auto durable = P::WorldSaveService::read_chunk(
+                session.GetWorldSaveDir(), chunk->get_coords(), true);
+            ASSERT_EQ(durable.status, P::WorldSaveService::ChunkReadStatus::Found);
+            ASSERT_NE(durable.chunk, nullptr);
+            EXPECT_EQ(durable.chunk->heightmap_data, chunk->heightmap_data);
+        }
+    }
+};
+
+class FaultStopsCatchUpFrame : public testing::TestWithParam<FaultFrameCase> {};
+TEST_P(FaultStopsCatchUpFrame, PreservesCommittedAuthorityAndRecovery) {
+    const auto [kind, position] = GetParam();
+    const auto fault_tick = kInitialTick + position;
+    const bool coarse_birth = kind == SimulationFaultPoint::CoarseGenome ||
+                              kind == SimulationFaultPoint::CoarsePerception;
+    const bool full_birth =
+        kind == SimulationFaultPoint::FullGenome || kind == SimulationFaultPoint::FullPerception;
+    const bool population = kind == SimulationFaultPoint::PopulationEntity ||
+                            kind == SimulationFaultPoint::PopulationCommit ||
+                            kind == SimulationFaultPoint::PopulationValidation;
+    const HeadlessRoot root;
+    WriteSessionPolicy(root, 0);
+    const auto policy_path = root.path() / "data/common/sim/distant_policy.json";
+    auto policy = nlohmann::json::parse(ReadClockTestFile(policy_path));
+    policy["creature_species"]["fixture_creature"]["reproduce_cadences"] = 1;
+    std::ofstream(policy_path, std::ios::binary) << policy.dump() << '\n';
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    session.SetAetherStateEnabled(true);
+    session.SetSimBudgetTelemetryEnabled(true);
+    if (kind == SimulationFaultPoint::Freeze)
+        session.SetRegionSchedulerConfig({1, 1, 1});
+    auto populator = SessionPopulation();
+    const auto founders = populator.populate;
+    populator.populate = [=](const auto& request) {
+        founders(request);
+        if (kind == SimulationFaultPoint::PopulationValidation && request.key == kPopulationRegion)
+            request.sink.spawn(
+                Luminumbra::world::CreatureSpawnCommand{0, {4736.0f, 100.0f, 4736.0f}, false});
+    };
+    if (population)
+        session.SetRegionPopulator(populator);
+    ASSERT_NO_FATAL_FAILURE(CreateGroundWorld(session, root, jobs, "Fail-stop qualification"));
+    const Luminumbra::Vec3 origin{8, 100, 8};
+    session.SetReplicatedSimulationAnchors(coarse_birth ? std::vector<Luminumbra::Vec3>{}
+                                                        : std::vector<Luminumbra::Vec3>{origin});
+    session.PinActiveRegion({0, 0}, true);
+    const auto mother = S8Creature(session, origin), father = S8Creature(session, origin);
+    auto& registry = session.GetRegistry();
+    for (const auto parent : {mother, father}) {
+        auto& genome = registry.emplace<C::CreatureGenomeComponent>(parent);
+        genome.female = parent == mother;
+        genome.age_ticks = 0; // Armed only at the selected tick.
+        registry.get<C::CreatureComponent>(parent).hunger = .05f;
+    }
+    registry.emplace<C::SensesComponent>(mother).nearest_food_source = father;
+    registry.emplace<C::ActionPlanComponent>(mother).plan = {{"observe", father, 5.0f, false}};
+    const auto traveler = S8Creature(session, {2047.999f, 100, 8}, C::CreatureTier::Coarse);
+    auto& travel = registry.get<C::CreatureCoarseComponent>(traveler);
+    travel.travel_pending = true;
+    travel.destination_x = 4;
+    travel.destination_z = 0;
+    travel.transition = C::CreatureTransition::Promote;
+    travel.needs = {{"curiosity", 12345u}};
+    registry.emplace<C::NeedsComponent>(traveler).needs = {{"curiosity", .012345f, 0}};
+    ASSERT_GT(SpawnGround(session, 8000, 8000), 0u);
+    ASSERT_TRUE(session.SetFoliageCell(origin, true, 37));
+    ASSERT_TRUE(session.GetWorldSystem()->adopt_streamed_chunk(S7HostWaterGrid({0, 0, 0}, 8)));
+    ASSERT_TRUE(session.SaveWorldState());
+    // A committed edited source that is absent from both live and parked inventories.
+    const Luminumbra::IVec3 disk_coords{640, 0, 640};
+    Luminumbra::WorldStreamingState disk;
+    auto disk_chunk = std::make_shared<Luminumbra::Chunk>(disk_coords);
+    disk_chunk->heightmap_data = {71.0f};
+    disk_chunk->mark_voxel_data_dirty();
+    disk.insert_chunk(disk_chunk);
+    const Luminumbra::IVec3 freeze_coords{1280, 0, -1280};
+    auto freeze_chunk = std::make_shared<Luminumbra::Chunk>(freeze_coords);
+    freeze_chunk->heightmap_data = {93.0f};
+    freeze_chunk->mark_voxel_data_dirty();
+    disk.insert_chunk(freeze_chunk);
+    ASSERT_TRUE(P::WorldSaveService{}.save_world(disk, session.GetWorldSaveDir()));
+    session.GetWorldSystem()->remember_durable_chunks({disk_coords, freeze_coords});
+    session.GetSimulationEventBus().publish(100, "future", "first");
+    session.GetSimulationEventBus().publish(101, "future", "second");
+    for (unsigned i = 0; i < 3; ++i)
+        ASSERT_TRUE(session.GetEnergyFieldState()->QueueRegionalDeposit(42, 0, 0, 1, 200));
+    ScopedRecoveryIoHooks io_hooks;
+    ScopedRecoveryIoHooks::freeze_path = P::WorldSaveService::region_file_path(
+        session.GetWorldSaveDir(), kFaultRegion.x, kFaultRegion.z);
+    P::WorldSaveService::set_region_read_hook_for_testing(&ScopedRecoveryIoHooks::ReadRegion);
+    if (kind == SimulationFaultPoint::Freeze) {
+        session.PinActiveRegion(kFaultRegion, true);
+        session.GetSimulationEventBus().subscribe([&](const auto& event) {
+            if (event.topic != "freeze.pressure")
+                return;
+            if (event.tick < fault_tick - 2)
+                session.PinActiveRegion(kFaultRegion, true);
+            if (event.tick == fault_tick - 2 || event.tick == fault_tick - 1)
+                session.RecordActiveRegionWork({kFaultRegion, 5, 0, 0, 0});
+            if (event.tick == fault_tick - 1)
+                ScopedRecoveryIoHooks::freeze_armed = true;
+        });
+        for (std::uint64_t tick = 1; tick < fault_tick; ++tick)
+            session.GetSimulationEventBus().publish(tick, "freeze.pressure", "");
+    }
+    for (std::uint64_t tick = 1; tick <= kInitialTick; ++tick) {
+        ASSERT_NO_FATAL_FAILURE(TickOnce(session));
+    }
+    ASSERT_FALSE(session.GetRegionSchedulerFault());
+    if (population) {
+        ASSERT_GT(session.GetPopulationActivity().successes, 0u);
+        ASSERT_TRUE(session.GetActiveRegionLedger().records().at({0, 0}).populated);
+    }
+    const bool freeze_ready = ScopedRecoveryIoHooks::freeze_armed;
+    ScopedRecoveryIoHooks::freeze_armed = false;
+    ASSERT_TRUE(session.SaveWorldState());
+    const auto committed_disk = SnapshotFileBytes(session.GetWorldSaveDir());
+    RecoveryChunkObligations chunk_obligations;
+    ASSERT_NO_FATAL_FAILURE(chunk_obligations.Seed(session, origin));
+    const auto allocator = session.GetActiveRegionLedger().next_persistent_id();
+    const auto births = session.GetCreatureActivity().births;
+    const auto controllers = session.GetCreatureActivity().controllers_created;
+    const auto population_successes = session.GetPopulationActivity().successes;
+    const auto committed_origin_ids = OriginCreatureIds(session);
+    const auto parent_id = registry.get<C::CreatureRegionComponent>(mother).persistent_id;
+    const auto father_id = registry.get<C::CreatureRegionComponent>(father).persistent_id;
+    const auto traveler_id = registry.get<C::CreatureRegionComponent>(traveler).persistent_id;
+    const auto next_sequence = session.GetSimulationEventBus().snapshot().next_sequence;
+    std::string hash;
+    P::WorldStreamingStateSubHashes sub;
+    ASSERT_TRUE(session.ComputeAuthorityWorldHashes(hash, sub));
+    const auto cached = session.GetCachedRegionHashes();
+    ScopedRecoveryIoHooks::freeze_armed = freeze_ready;
+    S8A::ReproductionTuning reproduction;
+    reproduction.courtship_ticks = 1;
+    session.SetReproductionTuning(reproduction);
+    entt::entity admission = entt::null;
+    std::string projection_before;
+    const auto enable = [&] {
+        if (kind == SimulationFaultPoint::Projection ||
+            kind == SimulationFaultPoint::UnknownPreparation) {
+            session.SetReplicatedSimulationAnchors({});
+            registry.get<C::CreatureCoarseComponent>(mother).tier = C::CreatureTier::Full;
+            projection_before = PopulationCreatureBytes(session);
+        }
+        if (full_birth || coarse_birth) {
+            for (const auto parent : {mother, father}) {
+                registry.get<C::CreatureGenomeComponent>(parent).age_ticks = 120;
+                auto& state = registry.get<C::CreatureCoarseComponent>(parent);
+                if (coarse_birth) {
+                    state.tier = C::CreatureTier::Coarse;
+                    state.age_cadences = 120;
+                    state.reproduce_cadences = 120;
+                    state.courting_cadences = 2;
+                    state.hunger_ppm = 50000;
+                }
+            }
+        }
+        if (population || kind == SimulationFaultPoint::ActivationEnqueue ||
+            kind == SimulationFaultPoint::ActivationDelivery)
+            session.PinActiveRegion(kPopulationRegion, true);
+        if (kind == SimulationFaultPoint::Controller) {
+            registry.get<C::CreatureControllerComponent>(mother).physics_controlled = true;
+            registry.emplace<C::CreatureLocomotionStateComponent>(mother).velocity_y = -7;
+        }
+    };
+    auto schedule_before_fault = session.GetRegionSchedule();
+    const auto avatars_before_fault = session.GetPhysicsSystem()->avatar_character_count();
+    unsigned consumers_after = 0;
+    session.GetSimulationEventBus().subscribe([&](const auto& event) {
+        if (event.tick == fault_tick - 1)
+            schedule_before_fault = session.GetRegionSchedule();
+        if (event.tick > fault_tick)
+            ++consumers_after;
+        if (event.topic == "arm")
+            enable();
+        if (kind == SimulationFaultPoint::Admission && event.topic == "admit") {
+            admission = registry.create();
+            registry.emplace<C::TransformComponent>(admission).position = origin;
+            registry.emplace<C::CreatureComponent>(admission).species_id =
+                C::CreatureSpeciesId16("fixture_creature");
+            (void)session.AdmitCreature(admission, true);
+        }
+        if (kind == SimulationFaultPoint::ActivationDelivery && event.activation &&
+            event.activation->x == kPopulationRegion.x &&
+            event.activation->z == kPopulationRegion.z)
+            throw std::runtime_error("Transient activation delivery failure");
+    });
+    if (position == 1)
+        enable();
+    else
+        session.GetSimulationEventBus().publish(fault_tick - 1, "arm", "");
+    if (kind == SimulationFaultPoint::Admission)
+        session.GetSimulationEventBus().publish(fault_tick, "admit", "");
+    for (auto tick = kInitialTick + 1; tick <= fault_tick + 1; ++tick)
+        session.GetSimulationEventBus().publish(tick, "consumer", "");
+    session.SetCreatureProjectionPreparationHook([&](entt::entity entity) {
+        if (session.GetWorldClock().tick() != fault_tick)
+            return;
+        if (kind == SimulationFaultPoint::UnknownPreparation && entity == mother)
+            throw 7;
+        if ((kind == SimulationFaultPoint::Projection && entity == mother) ||
+            (kind == SimulationFaultPoint::Admission && entity == admission))
+            throw std::runtime_error("Transient creature projection failure");
+    });
+    session.SetCreatureControllerPreparationHook([&] {
+        if (kind == SimulationFaultPoint::Controller &&
+            session.GetWorldClock().tick() == fault_tick)
+            throw std::runtime_error("Transient controller preparation failure");
+    });
+    session.SetActivationEnqueuePreparationHook([&] {
+        if (kind == SimulationFaultPoint::ActivationEnqueue &&
+            session.GetWorldClock().tick() == fault_tick)
+            throw std::runtime_error("Transient activation enqueue failure");
+    });
+    const auto population_failure = [&] {
+        if (session.GetWorldClock().tick() == fault_tick)
+            throw std::runtime_error("Transient population preparation failure");
+    };
+    if (kind == SimulationFaultPoint::PopulationEntity)
+        session.SetPopulationPreparationHooks({population_failure, {}});
+    if (kind == SimulationFaultPoint::PopulationCommit)
+        session.SetPopulationPreparationHooks({{}, population_failure});
+    BirthConstructionHook newborn{session, fault_tick};
+    entt::scoped_connection connection;
+    if (kind == SimulationFaultPoint::FullGenome || kind == SimulationFaultPoint::CoarseGenome)
+        connection = registry.on_construct<C::CreatureGenomeComponent>()
+                         .connect<&BirthConstructionHook::Construct>(newborn);
+    if (kind == SimulationFaultPoint::FullPerception ||
+        kind == SimulationFaultPoint::CoarsePerception)
+        connection = registry.on_construct<C::PerceptionComponent>()
+                         .connect<&BirthConstructionHook::Construct>(newborn);
+    const auto sequence_before_frame = session.GetSimulationEventBus().snapshot().next_sequence;
+    const_cast<luminumbra::core::SimulationClock&>(session.GetSimulationClock()) =
+        luminumbra::core::SimulationClock(30.0, 4u);
+    const_cast<luminumbra::core::SimulationClock&>(session.GetSimulationClock())
+        .reset(kInitialTick);
+    EXPECT_EQ(session.TickSimulation(3.0 * session.GetSimulationClock().fixed_dt()), position);
+    connection.release();
+    ScopedRecoveryIoHooks::freeze_armed = false;
+    const auto fault = session.GetRegionSchedulerFault();
+    ASSERT_TRUE(fault);
+    EXPECT_EQ(fault->tick, fault_tick);
+    EXPECT_EQ(session.GetSimulationClock().tick_count(), fault_tick);
+    EXPECT_EQ(session.GetWorldClock().tick(), fault_tick);
+    EXPECT_EQ(consumers_after, 0u);
+    EXPECT_EQ(session.GetPhysicsSystem()->avatar_character_count(), avatars_before_fault);
+    if (kind == SimulationFaultPoint::Freeze)
+        EXPECT_EQ(session.GetRegionSchedule(), schedule_before_fault);
+    EXPECT_TRUE(session.IsSimulationTickBoundary());
+    EXPECT_TRUE(session.GetActiveRegionLedger().completed_work().empty());
+    EXPECT_EQ(session.GetCreatureActivity().births, births);
+    EXPECT_EQ(session.GetCreatureActivity().controllers_created, controllers);
+    EXPECT_FALSE(session.GetCachedRegionHashes().valid);
+    EXPECT_EQ(session.GetCachedRegionHashes().tick, cached.tick);
+    EXPECT_EQ(session.GetCachedRegionHashes().world, cached.world);
+    if (full_birth || coarse_birth) {
+        EXPECT_EQ(newborn.calls, 1u);
+        if (coarse_birth)
+            EXPECT_EQ(registry.get<C::CreatureCoarseComponent>(mother).courting_cadences, 2u);
+        else
+            EXPECT_GE(registry.get<C::CreatureGenomeComponent>(mother).courting_ticks, 1u);
+        EXPECT_EQ(registry.get<C::CreatureGenomeComponent>(mother).reproduce_cooldown, 0u);
+        EXPECT_EQ(registry.get<C::CreatureGenomeComponent>(father).reproduce_cooldown, 0u);
+        EXPECT_EQ(registry.view<C::CreatureGenomeComponent>().size(), 2u);
+    }
+    const auto consumed = kind == SimulationFaultPoint::Admission || full_birth ? 1u : 0u;
+    EXPECT_EQ(session.GetActiveRegionLedger().next_persistent_id(), allocator + consumed);
+    if (kind == SimulationFaultPoint::Projection ||
+        kind == SimulationFaultPoint::UnknownPreparation)
+        EXPECT_EQ(PopulationCreatureBytes(session), projection_before);
+    if (kind == SimulationFaultPoint::Admission) {
+        ASSERT_TRUE(registry.valid(admission));
+        EXPECT_FALSE((registry.any_of<C::CreatureRegionComponent,
+                                      C::CreatureCoarseComponent,
+                                      C::CreatureControllerComponent,
+                                      C::CreatureLocomotionStateComponent,
+                                      C::CreaturePhysicsComponent>(admission)));
+        registry.destroy(admission); // The caller still owns a refused source entity.
+    }
+    if (population) {
+        EXPECT_EQ(session.GetPopulationActivity().successes, population_successes);
+        EXPECT_EQ(OriginCreatureIds(session), committed_origin_ids);
+        EXPECT_TRUE(session.GetActiveRegionLedger().records().at({0, 0}).populated);
+        EXPECT_FALSE(session.GetActiveRegionLedger().records().at(kPopulationRegion).populated);
+    }
+    EXPECT_GE(session.GetSimulationEventBus().snapshot().next_sequence, next_sequence);
+    if (kind == SimulationFaultPoint::ActivationEnqueue)
+        EXPECT_EQ(session.GetSimulationEventBus().snapshot().next_sequence, sequence_before_frame);
+    if (kind == SimulationFaultPoint::ActivationEnqueue ||
+        kind == SimulationFaultPoint::ActivationDelivery)
+        ASSERT_FALSE(session.GetActiveRegionLedger().pending_activations().empty());
+    const auto pending = PendingAuthorityBytes(session);
+    ASSERT_GE(session.GetEnergyFieldState()->PendingDeposits().size(), 3u);
+    chunk_obligations.ExpectPending(session);
+    const auto at_fault = CaptureRecoveryReference(session);
+    const auto diagnostic_hashes = session.GetCachedRegionHashes();
+    // Merged regional telemetry and panel reads remain observational after a fault.
+    for (const bool descending : {false, true}) {
+        const auto panel = Luminumbra::world::BuildRegionPanelSnapshot(session, {0, 2, descending});
+        EXPECT_EQ(panel.fault_tick, fault->tick);
+        EXPECT_FALSE(panel.hashes.valid);
+        EXPECT_EQ(panel.hashes.world, cached.world);
+        EXPECT_EQ(panel.hashes.tick, cached.tick);
+        (void)session.CaptureSimBudgetTelemetry();
+        EXPECT_EQ(session.GetCachedRegionHashes(), diagnostic_hashes);
+        EXPECT_EQ(CaptureRecoveryReference(session), at_fault);
+        EXPECT_EQ(PendingAuthorityBytes(session), pending);
+        EXPECT_EQ(SnapshotFileBytes(session.GetWorldSaveDir()), committed_disk);
+    }
+    const auto original_creatures = PopulationCreatureBytes(session);
+    const auto last_schedule = session.GetRegionSchedule();
+    // A boundary failure following each selected in-tick position must preserve
+    // both the original diagnostic and the previous complete indexed snapshot.
+    for (const char* phase : {"events", "deposits"}) {
+        session.SetPendingStatePreparationHook([phase](const char* candidate) {
+            if (std::string_view(candidate) == phase)
+                throw std::runtime_error("Transient pending preparation failure");
+        });
+        EXPECT_FALSE(session.CaptureAuthorityState().state);
+        hash = "previous hash";
+        sub.regions = "previous regions";
+        sub.creatures = "previous creatures";
+        EXPECT_FALSE(session.ComputeAuthorityWorldHashes(hash, sub));
+        EXPECT_TRUE(hash.empty());
+        EXPECT_TRUE(sub.regions.empty());
+        EXPECT_TRUE(sub.creatures.empty());
+        EXPECT_FALSE(session.SaveWorldState());
+        EXPECT_EQ(PendingAuthorityBytes(session), pending);
+        EXPECT_EQ(SnapshotFileBytes(session.GetWorldSaveDir()), committed_disk);
+        EXPECT_EQ(session.GetRegionSchedulerFault()->message, fault->message);
+        chunk_obligations.ExpectPending(session);
+        session.SetPendingStatePreparationHook({});
+    }
+    P::set_snapshot_step_hook_for_testing(&ScopedRecoveryIoHooks::Replace);
+    ScopedRecoveryIoHooks::replacement_seen = false;
+    Luminumbra::world::WorldStateSaveReport failed_save;
+    EXPECT_FALSE(session.SaveWorldState(&failed_save));
+    P::set_snapshot_step_hook_for_testing(nullptr);
+    EXPECT_TRUE(ScopedRecoveryIoHooks::replacement_seen);
+    EXPECT_EQ(SnapshotFileBytes(session.GetWorldSaveDir()), committed_disk);
+    EXPECT_EQ(CaptureRecoveryReference(session), at_fault);
+    EXPECT_FALSE(failed_save.saved);
+    EXPECT_EQ(failed_save.chunks_saved, 0u);
+    EXPECT_GE(failed_save.chunks_dirty, 2u);
+    chunk_obligations.ExpectPending(session);
+    EXPECT_FALSE(P::journal_pending(session.GetWorldSaveDir()));
+    for (const bool delayed : {false, true}) {
+        if (delayed)
+            EXPECT_EQ(session.TickSimulation(3.0 * session.GetSimulationClock().fixed_dt()), 0u);
+        EXPECT_EQ(session.GetRegionSchedule(), last_schedule);
+        Luminumbra::world::WorldStateSaveReport retry_save;
+        ASSERT_TRUE(session.SaveWorldState(&retry_save));
+        if (!delayed) {
+            EXPECT_TRUE(retry_save.saved);
+            EXPECT_GE(retry_save.chunks_dirty, 2u);
+            EXPECT_GT(retry_save.chunks_saved, 0u);
+        }
+        chunk_obligations.ExpectAcknowledged(session);
+        EXPECT_EQ(PopulationCreatureBytes(session), original_creatures);
+        EXPECT_EQ(PendingAuthorityBytes(session), pending);
+        EXPECT_EQ(session.GetRegionSchedulerFault()->tick, fault->tick);
+        EXPECT_EQ(session.GetRegionSchedulerFault()->message, fault->message);
+        GameSession restored;
+        restored.SetAetherStateEnabled(true);
+        restored.SetReproductionTuning(reproduction);
+        if (population)
+            restored.SetRegionPopulator(populator);
+        EnableSnapshotSession(restored, root, jobs);
+        ASSERT_TRUE(restored.LoadWorld(session.GetMetadata().worldId))
+            << restored.GetWorldOpenError();
+        EXPECT_EQ(CaptureRecoveryReference(restored), CaptureRecoveryReference(session));
+        EXPECT_EQ(PendingAuthorityBytes(restored), pending);
+        const auto loaded_mother = S8FindCreature(restored, parent_id);
+        const auto loaded_father = S8FindCreature(restored, father_id);
+        ASSERT_NE(loaded_mother, entt::null);
+        ASSERT_NE(loaded_father, entt::null);
+        EXPECT_EQ(restored.GetRegistry().get<C::SensesComponent>(loaded_mother).nearest_food_source,
+                  loaded_father);
+        EXPECT_TRUE(restored.GetRegistry()
+                        .get<C::CreatureCoarseComponent>(S8FindCreature(restored, traveler_id))
+                        .travel_pending);
+        restored.SetReplicatedSimulationAnchors(
+            coarse_birth ? std::vector<Luminumbra::Vec3>{} : std::vector<Luminumbra::Vec3>{origin});
+        TickOnce(restored);
+        if (population)
+            EXPECT_EQ(OriginCreatureIds(restored), committed_origin_ids);
+        if (kind == SimulationFaultPoint::PopulationValidation) {
+            ASSERT_TRUE(restored.GetRegionSchedulerFault());
+            EXPECT_FALSE(
+                restored.GetActiveRegionLedger().records().at(kPopulationRegion).populated);
+            EXPECT_EQ(restored.GetActiveRegionLedger().next_persistent_id(), allocator);
+        } else {
+            ASSERT_FALSE(restored.GetRegionSchedulerFault());
+            if (population)
+                EXPECT_TRUE(
+                    restored.GetActiveRegionLedger().records().at(kPopulationRegion).populated);
+        }
+    }
+}
+INSTANTIATE_TEST_SUITE_P(
+    FaultMatrix,
+    FaultStopsCatchUpFrame,
+    testing::Combine(testing::Values(SimulationFaultPoint::Projection,
+                                     SimulationFaultPoint::Admission,
+                                     SimulationFaultPoint::FullGenome,
+                                     SimulationFaultPoint::FullPerception,
+                                     SimulationFaultPoint::CoarseGenome,
+                                     SimulationFaultPoint::CoarsePerception,
+                                     SimulationFaultPoint::Controller,
+                                     SimulationFaultPoint::PopulationEntity,
+                                     SimulationFaultPoint::PopulationCommit,
+                                     SimulationFaultPoint::PopulationValidation,
+                                     SimulationFaultPoint::ActivationEnqueue,
+                                     SimulationFaultPoint::ActivationDelivery,
+                                     SimulationFaultPoint::Freeze,
+                                     SimulationFaultPoint::UnknownPreparation),
+                     testing::Values(std::uint64_t{1}, std::uint64_t{2}, std::uint64_t{3})),
+    [](const testing::TestParamInfo<FaultFrameCase>& info) {
+        constexpr std::array names{"Projection",
+                                   "Admission",
+                                   "FullGenome",
+                                   "FullPerception",
+                                   "CoarseGenome",
+                                   "CoarsePerception",
+                                   "Controller",
+                                   "PopulationEntity",
+                                   "PopulationCommit",
+                                   "PopulationValidation",
+                                   "ActivationEnqueue",
+                                   "ActivationDelivery",
+                                   "Freeze",
+                                   "UnknownPreparation"};
+        return std::string(names.at(static_cast<std::size_t>(std::get<0>(info.param)))) +
+               "Position" + std::to_string(std::get<1>(info.param));
+    });
+} // namespace
+
+TEST(GameSessionHeadlessWorldTest, PendingCaptureFailureIsContained) {
+    for (const char* phase : {"events", "deposits"}) {
+        for (const bool saving : {false, true}) {
+            for (const bool unknown : {false, true}) {
+                SCOPED_TRACE(std::string(phase) + (saving ? ":save" : ":hash") +
+                             (unknown ? ":unknown" : ":standard"));
+                const HeadlessRoot root;
+                JobSystem jobs;
+                jobs.startup(1);
+                GameSession session;
+                session.SetAetherStateEnabled(true);
+                ASSERT_NO_FATAL_FAILURE(CreateGroundWorld(session, root, jobs, "Pending boundary"));
+                S8Creature(session, {8, 100, 8});
+                session.GetSimulationEventBus().publish(100, "future", "retained");
+                for (unsigned i = 0; i < 3; ++i)
+                    ASSERT_TRUE(
+                        session.GetEnergyFieldState()->QueueRegionalDeposit(42, 0, 0, 1, 200));
+                ASSERT_TRUE(session.SaveWorldState());
+                const auto bytes = SnapshotFileBytes(session.GetWorldSaveDir());
+                const auto pending = PendingAuthorityBytes(session);
+                const auto authority = CaptureRecoveryReference(session);
+                session.SetPendingStatePreparationHook([phase, unknown](const char* candidate) {
+                    if (std::string_view(candidate) != phase)
+                        return;
+                    if (unknown)
+                        throw 7;
+                    throw std::runtime_error("Pending boundary preparation failure");
+                });
+                // Pure observations refuse without changing authority or fault state.
+                EXPECT_FALSE(session.CaptureAuthorityState().state);
+                EXPECT_FALSE(session.GetRegionSchedulerFault());
+                if (saving) {
+                    EXPECT_FALSE(session.SaveWorldState());
+                } else {
+                    std::string hash = "old hash";
+                    P::WorldStreamingStateSubHashes sub;
+                    sub.terrain = "old terrain";
+                    sub.creatures = "old creatures";
+                    EXPECT_FALSE(session.ComputeAuthorityWorldHashes(hash, sub));
+                    EXPECT_TRUE(hash.empty());
+                    EXPECT_TRUE(sub.terrain.empty());
+                    EXPECT_TRUE(sub.creatures.empty());
+                }
+                ASSERT_TRUE(session.GetRegionSchedulerFault());
+                EXPECT_EQ(session.GetRegionSchedulerFault()->tick, 0u);
+                EXPECT_EQ(PendingAuthorityBytes(session), pending);
+                EXPECT_EQ(SnapshotFileBytes(session.GetWorldSaveDir()), bytes);
+                EXPECT_EQ(CaptureRecoveryReference(session), authority);
+                session.SetPendingStatePreparationHook({});
+                EXPECT_EQ(session.TickSimulation(1.0), 0u);
+                ASSERT_TRUE(session.SaveWorldState());
+                GameSession restored;
+                restored.SetAetherStateEnabled(true);
+                EnableSnapshotSession(restored, root, jobs);
+                ASSERT_TRUE(restored.LoadWorld(session.GetMetadata().worldId));
+                EXPECT_EQ(CaptureRecoveryReference(restored), authority);
+            }
+        }
+    }
+}
+TEST(GameSessionHeadlessWorldTest, RetryableSaveIoFailurePreservesAuthorityWithoutFault) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    ASSERT_NO_FATAL_FAILURE(CreateGroundWorld(session, root, jobs, "Retryable save"));
+    S8Creature(session, {8, 100, 8});
+    ASSERT_TRUE(session.SaveWorldState());
+    const auto authority = CaptureRecoveryReference(session);
+    const auto bytes = SnapshotFileBytes(session.GetWorldSaveDir());
+    ScopedRecoveryIoHooks io_hooks;
+    P::WorldSaveService::set_before_active_regions_replace_for_testing(+[] { return false; });
+    EXPECT_FALSE(session.SaveWorldState());
+    EXPECT_FALSE(session.GetRegionSchedulerFault());
+    EXPECT_EQ(CaptureRecoveryReference(session), authority);
+    EXPECT_EQ(SnapshotFileBytes(session.GetWorldSaveDir()), bytes);
+    P::WorldSaveService::set_before_active_regions_replace_for_testing(nullptr);
+    EXPECT_TRUE(session.SaveWorldState());
+}
+
+namespace {
+struct EarlyPreparationHook {
+    void Construct(entt::registry&, entt::entity) {
+        throw 7;
+    }
+};
+} // namespace
+
+TEST(GameSessionHeadlessWorldTest, UnknownPreparationBeforeClockAssignmentNamesFaultingTick) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    ASSERT_NO_FATAL_FAILURE(CreateGroundWorld(session, root, jobs, "Early preparation fault"));
+    S8Creature(session, {8, 100, 8});
+    ASSERT_TRUE(session.SaveWorldState());
+    ClockTestPlant(session.GetRegistry(), {8, 100, 8});
+    EarlyPreparationHook hook;
+    entt::scoped_connection connection = session.GetRegistry()
+                                             .on_construct<C::PlantRegionComponent>()
+                                             .connect<&EarlyPreparationHook::Construct>(hook);
+    const_cast<luminumbra::core::SimulationClock&>(session.GetSimulationClock()) =
+        luminumbra::core::SimulationClock(30.0, 4u);
+    EXPECT_EQ(session.TickSimulation(3.0 * session.GetSimulationClock().fixed_dt()), 1u);
+    connection.release();
+    ASSERT_TRUE(session.GetRegionSchedulerFault());
+    EXPECT_EQ(session.GetRegionSchedulerFault()->tick, 1u);
+    EXPECT_EQ(session.GetWorldClock().tick(), 1u);
+    EXPECT_EQ(session.GetSimulationClock().tick_count(), 1u);
+    EXPECT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 0u);
+    const auto authority = CaptureRecoveryReference(session);
+    ASSERT_TRUE(session.SaveWorldState());
+    GameSession restored;
+    EnableSnapshotSession(restored, root, jobs);
+    ASSERT_TRUE(restored.LoadWorld(session.GetMetadata().worldId)) << restored.GetWorldOpenError();
+    EXPECT_EQ(CaptureRecoveryReference(restored), authority);
 }

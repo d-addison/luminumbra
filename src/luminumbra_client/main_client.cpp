@@ -877,8 +877,12 @@ static void CaptureTimelapseFrame(ClientAppContext& g_app,
                 // Fast-forward the SIM (weather/wind/creatures/plants) by K EXTRA fixed
                 // ticks for the next frame (on top of the normal per-frame tick). Physics
                 // runs normally each frame so the player stays grounded.
-                for (int i = 0; i < g_app.capture.timelapse_ticks; ++i)
+                for (int i = 0; i < g_app.capture.timelapse_ticks; ++i) {
                     gameSession->TickSimulation(1.0 / 30.0);
+                    if (Luminumbra::Client::PollSessionFault(
+                            *gameSession, [&] { glfwSetWindowShouldClose(window, GLFW_TRUE); }))
+                        return;
+                }
                 if (g_app.capture.timelapse_daystep >
                     0.0f) { // drift the sun/sky for shade-over-time
                     g_app.capture.timelapse_tod += g_app.capture.timelapse_daystep;
@@ -3006,7 +3010,14 @@ int main(int argc, char* argv[]) {
         benchmark_queries->initialize();
         renderPipeline.set_benchmark_gpu_queries(benchmark_queries.get());
     }
+    const auto stop_faulted_frame = [&] {
+        return gameSession && Luminumbra::Client::PollSessionFault(*gameSession, [&] {
+                   glfwSetWindowShouldClose(window, GLFW_TRUE);
+               });
+    };
     while (!glfwWindowShouldClose(window)) {
+        if (stop_faulted_frame())
+            break;
         MainLoopHeartbeat().fetch_add(1, std::memory_order_relaxed);
         float currentFrame = (float)glfwGetTime();
         float deltaTime = currentFrame - lastFrame;
@@ -3123,6 +3134,8 @@ int main(int argc, char* argv[]) {
         // without an active scenario.
         if (scenario_runner) {
             scenario_runner->onLoopTop();
+            if (stop_faulted_frame())
+                break;
         }
 
         const auto _rb_poll_t0 = std::chrono::steady_clock::now(); // always-on (runtime telemetry)
@@ -3469,6 +3482,8 @@ int main(int argc, char* argv[]) {
                 // branches below exactly like the original else-if chain did.
                 scenario_drive = scenario_runner ? scenario_runner->onGameStateInGame(deltaTime)
                                                  : ScenarioRunner::InGameDrive::kFallThrough;
+                if (stop_faulted_frame())
+                    break;
                 if (scenario_drive == ScenarioRunner::InGameDrive::kBreakCase) {
                     break;
                 }
@@ -3644,6 +3659,8 @@ int main(int argc, char* argv[]) {
                         g_camera->updateCameraVectors();
                     }
                 }
+                if (stop_faulted_frame())
+                    break;
                 if (auto* physics = gameSession->GetPhysicsSystem())
                     physics->update(deltaTime * g_app.capture.timeScale);
                 // fixed 30 Hz simulation tick (SimulationClock +
@@ -3683,18 +3700,20 @@ int main(int argc, char* argv[]) {
                             const double step = std::min(simDt, kFourTicks);
                             const std::uint32_t t = gameSession->TickSimulation(step);
                             simDt -= step;
-                            if (t == 0u)
-                                break; // accumulator < 1 tick this frame
+                            if (stop_faulted_frame() || t == 0u)
+                                break;
                             ran += static_cast<int>(t);
                         }
                     } // g_app.capture.timeScale == 0 -> paused (no sim ticks; render/streaming
                       // continue)
-                    Luminumbra::Client::PollSessionFault(
-                        *gameSession, [&] { glfwSetWindowShouldClose(window, GLFW_TRUE); });
+                    if (stop_faulted_frame())
+                        break;
                     if (gameSession->PersistenceSaveRequested() ||
                         gameSession->PersistenceAutosaveDue()) {
                         // Parked-bytes pressure or the periodic interval: persist now.
                         gameSession->SaveWorldState();
+                        if (stop_faulted_frame())
+                            break;
                     }
                     rb_sim_ms = std::chrono::duration<double, std::milli>(
                                     std::chrono::steady_clock::now() - _rb_sim_t0)
@@ -3761,6 +3780,12 @@ int main(int argc, char* argv[]) {
                 break;
             default:
                 break;
+        }
+
+        if (stop_faulted_frame()) {
+            if (g_app.overlay.imgui_enabled)
+                ImGui::EndFrame();
+            break;
         }
 
         if (currentState != GameState::WORLD_LOADING) {
@@ -3937,6 +3962,11 @@ int main(int argc, char* argv[]) {
                 // this exact point, before the per-frame render below.
                 if (scenario_runner) {
                     scenario_runner->onPreRenderWorldSweep();
+                    if (stop_faulted_frame()) {
+                        if (g_app.overlay.imgui_enabled)
+                            ImGui::EndFrame();
+                        break;
+                    }
                 }
                 if (gameSession->GetWorldSystem() && g_camera) {
                     // Live play runs on the
@@ -4118,6 +4148,11 @@ int main(int argc, char* argv[]) {
                     // defaults above by frame order.
                     if (scenario_runner) {
                         scenario_runner->onPreRenderCapturePins();
+                        if (stop_faulted_frame()) {
+                            if (g_app.overlay.imgui_enabled)
+                                ImGui::EndFrame();
+                            break;
+                        }
                     }
                     //  re-bake the creature markers from the live (just-ticked) positions
                     // so the ecology timelapse shows them actually moving each frame.
@@ -4187,7 +4222,14 @@ int main(int argc, char* argv[]) {
                     }
                     // Apply functional foliage QA after all camera/time overrides.
                     // Normal play, other scenarios and --play-paths retain the common path.
-                    if (!scenario_runner || !scenario_runner->onPreRenderFoliage()) {
+                    const bool scenario_foliage_handled =
+                        scenario_runner && scenario_runner->onPreRenderFoliage();
+                    if (stop_faulted_frame()) {
+                        if (g_app.overlay.imgui_enabled)
+                            ImGui::EndFrame();
+                        break;
+                    }
+                    if (!scenario_foliage_handled) {
                         UpdateFoliageScatter(g_app,
                                              root_dir,
                                              scenario_config,
@@ -4492,6 +4534,11 @@ int main(int argc, char* argv[]) {
                     // at this exact position (currentState is IN_GAME here).
                     if (scenario_runner) {
                         scenario_runner->onPostRenderCapture(deltaTime);
+                        if (stop_faulted_frame()) {
+                            if (g_app.overlay.imgui_enabled)
+                                ImGui::EndFrame();
+                            break;
+                        }
                     }
                     if (runtime_boot_recorder.enabled()) {
                         runtime_boot_recorder.record_frame(deltaTime, renderPipeline);
@@ -4617,6 +4664,8 @@ int main(int argc, char* argv[]) {
 
         CaptureTimelapseFrame(
             g_app, window, currentState, gameSession.get(), renderPipeline, g_procgen);
+        if (stop_faulted_frame())
+            break;
         //  CPU-submit ends here (all GL work for the frame is
         // queued); present begins. With vsync off the swap drains the driver
         // queue, so its duration is the GPU/present wait.

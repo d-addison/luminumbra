@@ -285,13 +285,16 @@ chunks stops (they stay resident) and the failure is reported; dirty state is
 never dropped. Parked bytes, save latency and failures are shown in the
 diagnostic panel and qualified on the historical 5,433-chunk edited save.
 
-The default-off ledger and deterministic scheduler foundation is now implemented;
-see [the active-region format and scheduling guide](active-regions.md) for its
-canonical bytes, refusal behaviours and bounded slice boundaries. It has no
-per-system consumers and no measured budget caps yet. Dirty parking, autosave
-policy changes, snapshot transactions and the diagnostic panel remain pending.
-Current default behaviour still evicts dirty chunks without a flush, the client
-saves only on quit or shutdown, and the server autosave interval defaults to zero.
+The default-off ledger and deterministic scheduler are implemented, with enabled
+regional creature, foliage, ground, weather, water and energy consumers. Full/coarse
+continuation, Frozen source/target gating, dirty parking, byte-pressure saves and periodic
+autosave operate through indexed snapshot transactions. Disabled worlds retain their
+legacy paths and bytes. Regional telemetry distinguishes accepted and completed work and
+reports overflow without feeding authority. The merged F4 region panel presents bounded,
+observational snapshots, transition history and cached hashes; a fault invalidates current
+hash validity while retaining historical values. See [active regions](active-regions.md)
+for the scheduling, pending-work and host fail-stop contracts. Runtime performance caps
+and the native panel qualification still require measured evidence.
 
 `GameSession::SetRegionPopulator` registers a versioned callback before world creation or open.
 Its contract, canonical configuration and sorted object-type/payload ceilings join the immutable
@@ -426,8 +429,9 @@ Calendar phase origins equal today's formulas (phase = tick modulo period from
 tick zero), so the plant season still starts at its cold minimum. Snapshots are
 taken only on tick boundaries, never inside a batched client catch-up.
 
-Current behaviour: the tick counter restarts at zero on every load, so a loaded
-world resumes tick-zero weather, and the six durations above coexist.
+Enabled saves restore the absolute clock and deterministic ambient projections without
+running a scheduler tick, sampling a controller or performing simulation catch-up.
+Disabled worlds retain their existing clock and weather paths.
 
 ## Persistence and format contract
 
@@ -477,7 +481,7 @@ simulation are stored with the ledger and refused on mismatch.
 A save is one committed snapshot published through the commit index. The
 index enumerates every authoritative member the snapshot requires (chunk
 region files, the energy record, plant, creature, ground-object, ledger and
-page records, the clock metadata), each with its content identity and the
+page records, pending events/deposits and the clock metadata), each with its content identity and the
 generation in which it last changed, records intentionally empty or deleted
 members explicitly, and lists derived members (far overlay files) separately:
 a missing or stale derived member is rebuilt from the authoritative records,
@@ -590,14 +594,20 @@ is not retained per frame.
 |---|---|
 | Far ladder, caves, seams | `far_volume_horizon_smoke` scenario (v2 artifact) through `validate-engine-frontier.ps1 -Mode FarLodHorizon` on default, mountains, archipelago and the cave-dense fixture; `FarVolumeTile`, mesher and store gtests in the default ctest lane |
 | Edits and far authority | `edit_bake_all_tiers_test`, `far_volume_store_test`, `world_open_refusal_test` cases, the `PersistenceRoundtrip` gate with the edited-world tour save |
-| Snapshot commit and recovery | `snapshot_commit_test` (interruption after every rename and during the bake), catalog read-only inspection test, refusal matrix in `world_open_refusal_test` |
+| Snapshot commit and recovery | `SaveTransaction` interruption/crash cases, `FaultStopsCatchUpFrame.PreservesCommittedAuthorityAndRecovery` real-session rollback after creature replacement, `IndexedContinuationRefusalPreservesLiveWorld`, catalog and `world_open_refusal_test` refusal cases |
 | Clock, ledger, pages, creatures, water | Unit gtests per record, `HeadlessServerTickHeavy` oracle extended to N-save-load-K versus N+K over every persisted subsystem with negative controls, `MovingResidency` 20 km drift, `PopulatedWorldReplay` |
 | Hash and determinism | `validate-determinism-matrix.ps1` pins, `ecology_hash_test` additivity guards, `ReplayRoundtrip`, `LockstepLoopback` with checkpoint exchange enabled |
+| Host fail-stop | `FaultStopsCatchUpFrame` first/middle/last matrix; `PendingCaptureFailureIsContained`; shipping Server/Replay/Heavy cases in `host_scheduler_fault_test.cpp`; `FaultedCapturesAndRecoveryDoNotPublishQueuedGeneration`; existing `AuthorityHashIntegration` lockstep disconnect and artifact cases |
+| Observational noninterference | `HeavyAuthorityReference` regional telemetry and overflow negative controls, merged `ProductionRegionPanel` open/closed, replay/grouping and pagination tests; fault-matrix cached-hash invalidation/history assertions |
 | Performance | Benchmark schema v3 artifacts for six fixed views and three traversals per profile per display from the native command set, checked by `tools/perf/render_contract.py` and `validate_render_capture.py` |
 | Client hang | `hang_watchdog_test`, the reproduction matrix records and hang reports archived with the campaign evidence |
 
-Names of new tests are binding once their slices land; the activation slice
-fills in fixture identifiers, thresholds and artifact schemas per row.
+The host-fault extensions above are registered source coverage. They have not supplied
+native runtime results here. Existing compatibility gates retain enabled host identity
+parity, HashMsg/LREC1 bytes, exact disabled save bytes, independent-reference negative
+controls, Frozen continuation and save-neutral sampling. Native execution of those gates
+and the new fault matrix remains required. No measured dynamic water starvation bound
+is established by the planning table.
 
 ## Deferred
 
@@ -611,4 +621,9 @@ this contract.
 
 FW renderer diagnostics and the current horizon artifact/gate contract are described in
 [Far world horizon v2](far-world-horizon-v2.md). Legacy remains the default; native
-ladder qualification and S9–S13 remain outstanding.
+ladder qualification and later world-streaming milestones remain outstanding. Source
+now includes fail-stop host guards, recovery/corruption qualification and the merged
+region panel. Full acceptance still requires native GLFW fault-frame termination and
+reader-drain/exit-save evidence, F4 panel/fault presentation, Windows transaction crash/recovery semantics,
+issue #242 performance, allocation/timing and long-run qualification. These remain
+pending; source inspection and formatting checks do not establish their results.
