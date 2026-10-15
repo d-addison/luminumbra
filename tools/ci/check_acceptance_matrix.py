@@ -443,6 +443,7 @@ def _path_problem(base: Path, ref: str, must_exist: bool) -> str | None:
         return f"path must be repo-relative: {ref}"
     if ".." in re.split(r"[\\/]", ref):
         return f"path escapes root: {ref}"
+    base = base.resolve()
     target = base / ref
     try:
         target.resolve().relative_to(base)
@@ -1041,7 +1042,8 @@ def render_doc(matrix: dict[str, Any]) -> str:
         "documents is accounted for as a requirement or a justified exclusion.",
         "",
         "Statuses declare the available evidence. Static validation requires a mapping for every ID "
-        "in [the contract requirement list](distant-world.md#acceptance-requirement-ids) and checks references; it does not "
+        "in the Acceptance requirement IDs section of [the contract](distant-world.md) "
+        "and checks references; it does not "
         "prove execution. JUnit mode checks every referenced CTest identity in the supplied discovery "
         "roster, including parameter instances. Scripts, documents and native commands need separate "
         "evidence; a passing CTest gate does not qualify the full acceptance contract.",

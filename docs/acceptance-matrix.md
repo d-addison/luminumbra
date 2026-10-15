@@ -2,7 +2,7 @@
 
 This file is generated from `tools/ci/acceptance_matrix.json` by `tools/ci/check_acceptance_matrix.py --write-doc`. Do not edit it by hand; change the matrix and regenerate. The requirement inventory is `tools/ci/acceptance_requirements.json`; every statement in both reviewed documents is accounted for as a requirement or a justified exclusion.
 
-Statuses declare the available evidence. Static validation requires a mapping for every ID in [the contract requirement list](distant-world.md#acceptance-requirement-ids) and checks references; it does not prove execution. JUnit mode checks every referenced CTest identity in the supplied discovery roster, including parameter instances. Scripts, documents and native commands need separate evidence; a passing CTest gate does not qualify the full acceptance contract.
+Statuses declare the available evidence. Static validation requires a mapping for every ID in the Acceptance requirement IDs section of [the contract](distant-world.md) and checks references; it does not prove execution. JUnit mode checks every referenced CTest identity in the supplied discovery roster, including parameter instances. Scripts, documents and native commands need separate evidence; a passing CTest gate does not qualify the full acceptance contract.
 
 | Status | Rows |
 | --- | ---: |

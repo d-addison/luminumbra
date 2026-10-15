@@ -454,6 +454,18 @@ class AcceptanceMatrixTests(unittest.TestCase):
         self.assertEqual(marked, {"dw.tiers.021"})
         self.assertEqual(marked, set(MODULE.REVIEWED_EXCLUSION_OVERRIDES))
 
+    def test_inventory_accepts_root_under_symlinked_directory(self) -> None:
+        linked_parent = self.tmp / "linked"
+        try:
+            linked_parent.symlink_to(self.tmp.resolve(), target_is_directory=True)
+        except (OSError, NotImplementedError) as exc:
+            self.skipTest(f"directory symlinks unavailable: {exc}")
+        linked_root = linked_parent / self.root.name
+        self.assertNotEqual(linked_root, linked_root.resolve())
+        requirements, errors = MODULE.validate_inventory(self.inventory, linked_root)
+        self.assertEqual(errors, [])
+        self.assertEqual(requirements, {entry["id"]: entry for entry in self.inventory["requirements"]})
+
     def test_inventory_refuses_bad_sources_quotes_unknown_and_duplicate_ids(self) -> None:
         for key, value, error in (("source", "docs/missing.md#contract", "source file not found"),
                                   ("source", "docs/distant-world.md#wrong", "source anchor not found"),
