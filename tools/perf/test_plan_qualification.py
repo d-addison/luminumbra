@@ -9,8 +9,11 @@ import os
 from pathlib import Path
 import subprocess
 import shutil
+import stat
 import sys
 import tempfile
+import time
+import types
 from unittest import mock
 import unittest
 
@@ -274,7 +277,7 @@ class CheckerEvidenceTests(MatrixTestBase):
         bootstrap = ('import sys, runpy; from pathlib import Path; '
                      'sys.path.insert(0, str(Path(sys.argv[1]).resolve().parent)); '
                      'sys.argv = sys.argv[1:]; runpy.run_path(sys.argv[0], run_name="__main__")')
-        result = subprocess.run([argv[0], '-I', '-c', bootstrap, *argv[1:]],
+        result = subprocess.run([argv[0], '-I', '-B', '-c', bootstrap, *argv[1:]],
                                 capture_output=True, text=True, check=False)
         self.assertEqual(result.stderr, '')
         return result.returncode, json.loads(result.stdout)
@@ -422,7 +425,13 @@ class ExecutableResolutionTests(MatrixTestBase):
 class PlannerCliTests(MatrixTestBase):
     def run_planner(self, *extra):
         out_dir = self.tmp / 'out'
-        command = [sys.executable, str(PLANNER_SCRIPT), '--client', '/bin/client',
+        # Explicitly allow the CLI's sibling modules in the isolated interpreter.
+        bootstrap = ('import runpy, sys; from pathlib import Path; '
+                     'script = sys.argv[1]; '
+                     'sys.path.insert(0, str(Path(script).parent)); '
+                     'sys.argv = sys.argv[1:]; runpy.run_path(script, run_name="__main__")')
+        command = [sys.executable, '-I', '-B', '-c', bootstrap, str(PLANNER_SCRIPT),
+                   '--client', '/bin/client',
                    '--out-dir', str(out_dir), *extra]
         result = subprocess.run(command, capture_output=True, text=True, check=False)
         return result, out_dir / 'qualification-plan.json'
@@ -479,7 +488,7 @@ class ProcessRunnerTests(MatrixTestBase):
     def script(self, body):
         path = self.tmp / 'fake_client.py'
         path.write_text(body, encoding='utf-8')
-        return [sys.executable, str(path), str(self.artifact)]
+        return [sys.executable, '-I', '-B', str(path), str(self.artifact)]
 
     def run_case(self, command, timeout_seconds=60):
         return runner.run_process(command, cwd=self.tmp, environment=os.environ.copy(),
@@ -489,6 +498,33 @@ class ProcessRunnerTests(MatrixTestBase):
 
     def read_receipt(self):
         return json.loads(self.receipt.read_text(encoding='utf-8'))
+
+    def assert_output_locks_released(self):
+        with runner._output_locks((self.artifact, self.retained, self.receipt, self.log)):
+            pass
+
+    @contextlib.contextmanager
+    def output_lock_owners(self):
+        owners = {}
+        open_sidecar = runner._open_sidecar
+
+        def open_lock(path):
+            handle = open_sidecar(path)
+            # A contender's handle must not replace the still-active owner.
+            if path not in owners or owners[path].closed:
+                owners[path] = handle
+            return handle
+
+        with mock.patch.object(runner, '_open_sidecar', side_effect=open_lock):
+            yield owners
+
+    def read_with_lock_owner(self, path, owners):
+        owner = owners.get(path)
+        if owner is None or owner.closed:
+            return path.read_bytes()
+        # Windows mandatory byte locks also apply to other handles in this process.
+        owner.seek(0)
+        return owner.read()
 
     def test_success_retains_capture_and_records_timeout(self):
         command = self.script('import sys\nfrom pathlib import Path\n'
@@ -503,18 +539,22 @@ class ProcessRunnerTests(MatrixTestBase):
         self.assertEqual(receipt['timeout_seconds'], 60)
         self.assertTrue(self.retained.is_file())
 
-    def test_timeout_raises_and_receipt_shows_timed_out(self):
+    def test_injected_timeout_raises_and_receipt_shows_timed_out(self):
         command = self.script('')
+        error = subprocess.TimeoutExpired(command, 1)
 
         def timeout(argv, **kwargs):
+            self.assertEqual(kwargs['timeout'], 1)
             kwargs['stdout'].write(b'x' * 20000 + b'\nEnsureSurfaceReadyNear: draining\n')
-            raise subprocess.TimeoutExpired(argv, kwargs['timeout'])
+            kwargs['stdout'].flush()
+            raise error
 
         diagnostic = io.StringIO()
         with contextlib.redirect_stderr(diagnostic), \
                 mock.patch.object(runner.subprocess, 'run', side_effect=timeout), \
-                self.assertRaises(subprocess.TimeoutExpired):
+                self.assertRaises(subprocess.TimeoutExpired) as caught:
             self.run_case(command, timeout_seconds=1)
+        self.assertIs(caught.exception, error)
         receipt = self.read_receipt()
         self.assertEqual(receipt['outcome'], 'timed_out')
         self.assertEqual(receipt['timeout_seconds'], 1)
@@ -524,6 +564,881 @@ class ProcessRunnerTests(MatrixTestBase):
                          runner.TIMEOUT_LOG_TAIL_BYTES)
         self.assertIn('timed out after 1 s', diagnostic.getvalue())
         self.assertIn('EnsureSurfaceReadyNear: draining', diagnostic.getvalue())
+
+    def test_timeout_raises_and_receipt_shows_timed_out(self):
+        ready = self.tmp / 'ready'
+        command = self.script(
+            'import sys, time\nfrom pathlib import Path\n'
+            'Path(sys.argv[1]).write_bytes(b\'{"complete":true}\')\n'
+            'print("x" * 20000, flush=True)\n'
+            'print("EnsureSurfaceReadyNear: draining", flush=True)\n'
+            'Path(sys.argv[2]).touch()\n'
+            'while True: time.sleep(1)\n') + [str(ready)]
+        popen = subprocess.Popen
+        children = []
+
+        def start(*args, **kwargs):
+            child = popen(*args, **kwargs)
+            children.append(child)
+            wait = child.wait
+
+            def wait_for_timeout(timeout=None):
+                if timeout is not None:
+                    # This bound detects a deadlocked fixture; readiness, rather
+                    # than interpreter startup speed, determines when to time out.
+                    deadline = time.monotonic() + 60
+                    while not ready.exists():
+                        self.assertIsNone(child.poll(), 'child exited before capture')
+                        self.assertLess(time.monotonic(), deadline, 'child never became ready')
+                        time.sleep(0.01)
+                    self.assertIsNone(child.poll(), 'child must still be running')
+                    return wait(timeout=0)
+                return wait()
+
+            child.wait = wait_for_timeout
+            child.kill = mock.Mock(wraps=child.kill)
+            return child
+
+        diagnostic = io.StringIO()
+        with contextlib.redirect_stderr(diagnostic), \
+                mock.patch.object(runner.subprocess, 'Popen', side_effect=start), \
+                self.assertRaises(subprocess.TimeoutExpired):
+            self.run_case(command, timeout_seconds=1)
+        self.assertEqual(len(children), 1)
+        children[0].kill.assert_called_once_with()
+        self.assertIsNotNone(children[0].returncode, 'timed out child was not reaped')
+        receipt = self.read_receipt()
+        self.assertEqual(receipt['outcome'], 'timed_out')
+        self.assertEqual(receipt['timeout_seconds'], 1)
+        self.assertEqual(receipt['last_observed_phase'], 'EnsureSurfaceReadyNear: draining')
+        self.assertEqual(len(receipt['log_tail'].encode('utf-8')), runner.TIMEOUT_LOG_TAIL_BYTES)
+        self.assertIn('timed out after 1 s', diagnostic.getvalue())
+        self.assertIn('EnsureSurfaceReadyNear: draining', diagnostic.getvalue())
+        self.assertEqual(self.retained.read_bytes(), b'{"complete":true}')
+        self.assertEqual(receipt['capture_status'], 'retained')
+        self.assertEqual(receipt['capture_sha256'], runner.file_sha256(self.retained))
+        self.assert_output_locks_released()
+
+    def test_interleaved_publication_refuses_competing_invocation(self):
+        command = self.script('')
+        outer_payload = b'{"invocation":"outer"}'
+        original_write = runner.atomic_write
+        observed = []
+        interleaved = False
+        launches = 0
+
+        def emit_capture(argv, **kwargs):
+            nonlocal launches
+            launches += 1
+            self.artifact.write_bytes(outer_payload if launches == 1
+                                      else b'{"invocation":"inner"}')
+            return subprocess.CompletedProcess(argv, 0)
+
+        def interleave(path, payload):
+            nonlocal interleaved
+            original_write(path, payload)
+            if path == self.retained and not interleaved:
+                interleaved = True
+                # Inject the competing invocation exactly between capture and
+                # receipt publication, without scheduling or clock assumptions.
+                before = {p: p.read_bytes() for p in
+                          (self.artifact, self.retained, self.log)}
+                with self.assertRaises(FileExistsError):
+                    self.run_case(command)
+                self.assertEqual(before, {p: p.read_bytes() for p in before})
+                self.assertFalse(self.receipt.exists())
+                observed.append('refused')
+
+        with mock.patch.object(runner.subprocess, 'run', side_effect=emit_capture) as launch, \
+                mock.patch.object(runner, 'atomic_write', side_effect=interleave):
+            self.run_case(command)
+        self.assertEqual(launch.call_count, 1)
+        self.assertEqual(observed, ['refused'])
+        receipt = self.read_receipt()
+        self.assertEqual(Path(receipt['capture_path']).read_bytes(), outer_payload)
+        self.assertEqual(receipt['capture_sha256'], runner.file_sha256(self.retained))
+        self.assert_output_locks_released()
+        # Normal repeated invocations still replace the current evidence.
+        self.run_case(self.script('from pathlib import Path\nimport sys\n'
+                                  'Path(sys.argv[1]).write_text("{}")\n'))
+        self.assertEqual(self.retained.read_bytes(), b'{}')
+
+    def test_each_shared_output_is_locked_before_spawn_and_aliases_agree(self):
+        command = self.script('')
+        outputs = (self.artifact, self.retained, self.receipt, self.log)
+        for output in outputs:
+            Path(str(output) + '.lock').write_bytes(b'held sidecar')
+        sidecars_before = {Path(str(output) + '.lock'): Path(str(output) + '.lock').read_bytes()
+                           for output in outputs}
+
+        def interleave(argv, **kwargs):
+            for shared in outputs:
+                with self.subTest(shared=shared.name):
+                    # Use distinct other outputs and an aliased shared path.
+                    inner = [self.tmp / ('inner-' + p.name) for p in outputs]
+                    inner[outputs.index(shared)] = shared.parent / '..' / self.tmp.name / shared.name
+                    other = [p for i, p in enumerate(inner) if i != outputs.index(shared)]
+                    before = {p: sidecars_before[p] if p in sidecars_before else p.read_bytes()
+                              for p in self.tmp.iterdir() if p.is_file()}
+                    with self.assertRaises(FileExistsError):
+                        runner.run_process(command, cwd=self.tmp, environment=os.environ.copy(),
+                                           artifact=inner[0], retained=inner[1],
+                                           receipt_path=inner[2], log=inner[3])
+                    self.assertEqual(before, {
+                        p: self.read_with_lock_owner(p, owners) for p in before})
+                    self.assertFalse(any(p.exists() for p in other))
+                    # Any locks acquired before the conflict must be released.
+                    with runner._output_locks(other):
+                        pass
+            return subprocess.CompletedProcess(argv, 0)
+
+        with self.output_lock_owners() as owners, \
+                mock.patch.object(runner.subprocess, 'run', side_effect=interleave) as launch:
+            self.run_case(command)
+        self.assertEqual(launch.call_count, 1)
+        self.assert_output_locks_released()
+
+    def seed_old_evidence(self):
+        for path in (self.artifact, self.retained, self.receipt, self.log):
+            path.write_text('{"stale":true}', encoding='utf-8')
+
+    def test_overlapping_outputs_are_refused_before_mutation(self):
+        command = self.script('')
+        outputs = (self.artifact, self.retained, self.receipt, self.log)
+        self.seed_old_evidence()
+        for path in outputs:
+            Path(str(path) + '.lock').write_bytes(b'old lock file')
+        nested = self.tmp / 'nested'
+        nested.mkdir()
+        before = {p: (p.read_bytes(), p.stat().st_ino)
+                  for p in self.tmp.iterdir() if p.is_file()}
+        for source in range(len(outputs)):
+            for destination in range(len(outputs)):
+                if source == destination:
+                    continue
+                for suffix, message in (('', 'output paths must be distinct'),
+                                        ('.lock', 'output overlaps a lock sidecar')):
+                    for aliased in (False, True):
+                        with self.subTest(source=source, destination=destination,
+                                          suffix=suffix, aliased=aliased):
+                            collision = Path(str(outputs[source]) + suffix)
+                            if aliased:
+                                collision = nested / '..' / collision.name
+                            inner = list(outputs)
+                            inner[destination] = collision
+                            with mock.patch.object(Path, 'open') as opened, \
+                                    mock.patch.object(Path, 'unlink') as unlinked, \
+                                    mock.patch.object(runner.subprocess, 'run') as launch, \
+                                    self.assertRaisesRegex(OSError, message):
+                                runner.run_process(
+                                    command, cwd=self.tmp, environment=os.environ.copy(),
+                                    artifact=inner[0], retained=inner[1],
+                                    receipt_path=inner[2], log=inner[3])
+                            opened.assert_not_called()
+                            unlinked.assert_not_called()
+                            launch.assert_not_called()
+                            self.assertEqual(before, {
+                                p: (p.read_bytes(), p.stat().st_ino)
+                                for p in self.tmp.iterdir() if p.is_file()})
+
+    def test_sidecar_collision_preserves_held_lock_and_reusable_file(self):
+        command = self.script('')
+        sidecar = Path(str(self.artifact) + '.lock')
+        with runner._output_locks((self.artifact,)):
+            identity = sidecar.stat().st_ino
+            with mock.patch.object(runner.subprocess, 'run') as launch, \
+                    self.assertRaisesRegex(OSError, 'output overlaps a lock sidecar'):
+                runner.run_process(command, cwd=self.tmp, environment=os.environ.copy(),
+                                   artifact=self.artifact, retained=sidecar,
+                                   receipt_path=self.receipt, log=self.log)
+            launch.assert_not_called()
+            self.assertEqual(sidecar.stat().st_ino, identity)
+            with self.assertRaises(FileExistsError):
+                with runner._output_locks((self.artifact,)):
+                    self.fail('a competing invocation acquired the held output lock')
+        self.assertEqual(sidecar.stat().st_ino, identity)
+        with runner._output_locks((self.artifact,)):
+            self.assertEqual(sidecar.stat().st_ino, identity)
+        self.assertEqual(sidecar.stat().st_ino, identity)
+
+    def test_cross_invocation_sidecar_output_is_refused_before_mutation(self):
+        command = self.script('')
+        outputs = (self.artifact, self.retained, self.receipt, self.log)
+        sidecar = Path(str(self.artifact) + '.lock')
+        sidecar.write_bytes(b'held sidecar')
+        self.seed_old_evidence()
+        nested = self.tmp / 'nested'
+        nested.mkdir()
+        before = {p: (p.read_bytes(), p.stat().st_ino)
+                  for p in self.tmp.iterdir() if p.is_file()}
+        with self.output_lock_owners() as owners, runner._output_locks((self.artifact,)):
+            for destination in range(len(outputs)):
+                for aliased in (False, True):
+                    with self.subTest(destination=destination, aliased=aliased):
+                        inner = [self.tmp / ('other-' + p.name) for p in outputs]
+                        inner[destination] = (nested / '..' / sidecar.name
+                                              if aliased else sidecar)
+                        self.assertNotIn(self.artifact, inner)
+                        with mock.patch.object(Path, 'open', side_effect=AssertionError(
+                                'output refusal must precede file opens')) as opened, \
+                                mock.patch.object(Path, 'unlink') as unlinked, \
+                                mock.patch.object(runner.subprocess, 'run') as launch, \
+                                self.assertRaisesRegex(OSError, 'output overlaps a lock sidecar'):
+                            runner.run_process(
+                                command, cwd=self.tmp, environment=os.environ.copy(),
+                                artifact=inner[0], retained=inner[1],
+                                receipt_path=inner[2], log=inner[3])
+                        opened.assert_not_called()
+                        unlinked.assert_not_called()
+                        launch.assert_not_called()
+                        self.assertEqual(before, {
+                            p: (self.read_with_lock_owner(p, owners), p.stat().st_ino)
+                            for p in self.tmp.iterdir() if p.is_file()})
+                        with self.assertRaises(FileExistsError):
+                            with runner._output_locks((self.artifact,)):
+                                self.fail('a competing invocation acquired the held output lock')
+        self.assertEqual((sidecar.read_bytes(), sidecar.stat().st_ino), before[sidecar])
+        with self.output_lock_owners() as owners, runner._output_locks((self.artifact,)):
+            self.assertEqual((self.read_with_lock_owner(sidecar, owners), sidecar.stat().st_ino),
+                             before[sidecar])
+        self.assertEqual((sidecar.read_bytes(), sidecar.stat().st_ino), before[sidecar])
+
+    def test_sidecar_suffix_is_reserved_without_an_existing_owner(self):
+        command = self.script('')
+        outputs = (self.artifact, self.retained, self.receipt, self.log)
+        self.seed_old_evidence()
+        before = {p: (p.read_bytes(), p.stat().st_ino) for p in self.tmp.iterdir()}
+        for destination in range(len(outputs)):
+            for suffix in ('.lock', '.lock.lock', '.LOCK'):
+                with self.subTest(destination=destination, suffix=suffix):
+                    inner = list(outputs)
+                    inner[destination] = Path(str(inner[destination]) + suffix)
+                    with mock.patch.object(Path, 'open') as opened, \
+                            mock.patch.object(Path, 'unlink') as unlinked, \
+                            mock.patch.object(runner.subprocess, 'run') as launch, \
+                            self.assertRaisesRegex(OSError, 'output overlaps a lock sidecar'):
+                        runner.run_process(
+                            command, cwd=self.tmp, environment=os.environ.copy(),
+                            artifact=inner[0], retained=inner[1],
+                            receipt_path=inner[2], log=inner[3])
+                    opened.assert_not_called()
+                    unlinked.assert_not_called()
+                    launch.assert_not_called()
+                    self.assertEqual(before, {
+                        p: (p.read_bytes(), p.stat().st_ino) for p in self.tmp.iterdir()})
+
+    def test_symlink_sidecars_are_refused_before_any_open_or_mutation(self):
+        command = self.script('')
+        outputs = (self.artifact, self.retained, self.receipt, self.log)
+        self.seed_old_evidence()
+        target = self.tmp / 'alias.json'
+        for exists in (False, True):
+            if exists:
+                target.write_bytes(b'held inode')
+            for output in outputs:
+                with self.subTest(output=output.name, target_exists=exists):
+                    sidecar = Path(str(output) + '.lock')
+                    sidecar.symlink_to(target)
+                    before = {p: (p.read_bytes(), p.stat().st_ino)
+                              for p in self.tmp.iterdir() if not p.is_symlink()}
+                    with mock.patch.object(runner.os, 'open') as opened, \
+                            mock.patch.object(Path, 'unlink') as unlinked, \
+                            mock.patch.object(runner.subprocess, 'run') as launch, \
+                            self.assertRaisesRegex(OSError, 'lock sidecar must be a regular file'):
+                        self.run_case(command)
+                    opened.assert_not_called()
+                    unlinked.assert_not_called()
+                    launch.assert_not_called()
+                    self.assertTrue(sidecar.is_symlink())
+                    self.assertEqual(sidecar.readlink(), target)
+                    self.assertEqual(before, {
+                        p: (p.read_bytes(), p.stat().st_ino)
+                        for p in self.tmp.iterdir() if not p.is_symlink()})
+                    self.assertEqual(list(self.tmp.glob('*.lock')), [sidecar])
+                    sidecar.unlink()
+
+    def test_nonregular_sidecars_are_refused_before_any_open_or_mutation(self):
+        command = self.script('')
+        self.seed_old_evidence()
+        outputs = (self.artifact, self.retained, self.receipt, self.log)
+        before = {p: (p.read_bytes(), p.stat().st_ino) for p in self.tmp.iterdir()}
+        lstat = Path.lstat
+        for output in outputs:
+            sidecar = Path(str(output) + '.lock')
+            for kind in (stat.S_IFDIR, stat.S_IFIFO, stat.S_IFSOCK,
+                         stat.S_IFCHR, stat.S_IFBLK):
+                with self.subTest(output=output.name, kind=kind):
+                    def metadata(path, *args, **kwargs):
+                        if path == sidecar:
+                            return types.SimpleNamespace(st_mode=kind, st_nlink=1)
+                        return lstat(path, *args, **kwargs)
+
+                    with mock.patch.object(Path, 'lstat', metadata), \
+                            mock.patch.object(runner.os, 'open') as opened, \
+                            mock.patch.object(Path, 'unlink') as unlinked, \
+                            mock.patch.object(runner.subprocess, 'run') as launch, \
+                            self.assertRaisesRegex(OSError, 'lock sidecar must be a regular file'):
+                        self.run_case(command)
+                    opened.assert_not_called()
+                    unlinked.assert_not_called()
+                    launch.assert_not_called()
+                    self.assertEqual(before, {
+                        p: (p.read_bytes(), p.stat().st_ino) for p in self.tmp.iterdir()})
+
+    def test_symlink_sidecar_alias_cannot_unlink_another_invocations_lock(self):
+        command = self.script('')
+        self.seed_old_evidence()
+        alias = self.tmp / 'alias.json'
+        alias.write_bytes(b'{"held":true}')
+        sidecar = Path(str(self.artifact) + '.lock')
+        sidecar.symlink_to(alias)
+        before = {p: (p.read_bytes(), p.stat().st_ino) for p in self.tmp.iterdir()}
+        # Model an already active owner from before symlink acquisition was
+        # refused. POSIX permits its real exclusive lock on a read-only handle.
+        with sidecar.open('r+b' if os.name == 'nt' else 'rb') as owner:
+            runner._lock_handle(owner, sidecar)
+            try:
+                held = os.fstat(owner.fileno())
+                self.assertEqual(held.st_ino, alias.stat().st_ino)
+                inner = [self.tmp / ('other-' + p.name) for p in
+                         (self.artifact, self.retained, self.receipt, self.log)]
+                for destination in range(len(inner)):
+                    with self.subTest(destination=destination):
+                        outputs = list(inner)
+                        outputs[destination] = alias
+                        with mock.patch.object(runner, '_open_sidecar') as opened, \
+                                mock.patch.object(Path, 'unlink') as unlinked, \
+                                mock.patch.object(runner.subprocess, 'run') as launch, \
+                                self.assertRaises(FileExistsError):
+                            runner.run_process(
+                                command, cwd=self.tmp, environment=os.environ.copy(),
+                                artifact=outputs[0], retained=outputs[1],
+                                receipt_path=outputs[2], log=outputs[3])
+                        opened.assert_not_called()
+                        unlinked.assert_not_called()
+                        launch.assert_not_called()
+                        # Windows requires reads of the locked byte to use its owner.
+                        owner.seek(0)
+                        held_contents = owner.read()
+                        self.assertEqual(before, {
+                            p: (held_contents if p in (alias, sidecar) else p.read_bytes(),
+                                p.stat().st_ino) for p in self.tmp.iterdir()})
+                        self.assertTrue(sidecar.is_symlink())
+                        with self.assertRaisesRegex(OSError, 'lock sidecar must be a regular file'):
+                            with runner._output_locks((self.artifact,)):
+                                self.fail('a third invocation acquired a replacement lock')
+                        with alias.open('r+b' if os.name == 'nt' else 'rb') as contender:
+                            with self.assertRaises(FileExistsError):
+                                runner._lock_handle(contender, alias)
+            finally:
+                if os.name == 'nt':
+                    owner.seek(0)
+                    runner.msvcrt.locking(owner.fileno(), runner.msvcrt.LK_UNLCK, 1)
+        self.assertEqual((alias.read_bytes(), alias.stat().st_ino), before[alias])
+        sidecar.unlink()
+        with runner._output_locks((self.artifact,)):
+            self.assertFalse(sidecar.is_symlink())
+
+    def test_hardlinked_sidecars_and_outputs_are_refused_before_mutation(self):
+        command = self.script('')
+        self.seed_old_evidence()
+        alias = self.tmp / 'alias.json'
+        alias.hardlink_to(self.artifact)
+        with mock.patch.object(runner.os, 'open') as opened, \
+                mock.patch.object(Path, 'unlink') as unlinked, \
+                self.assertRaisesRegex(OSError, 'output must be a regular file with one link'):
+            self.run_case(command)
+        opened.assert_not_called()
+        unlinked.assert_not_called()
+        alias.unlink()
+        sidecar = Path(str(self.artifact) + '.lock')
+        sidecar.write_bytes(b'held inode')
+        alias.hardlink_to(sidecar)
+        with mock.patch.object(runner.os, 'open') as opened, \
+                mock.patch.object(Path, 'unlink') as unlinked, \
+                self.assertRaisesRegex(OSError, 'lock sidecar must be a regular file with one link'):
+            self.run_case(command)
+        opened.assert_not_called()
+        unlinked.assert_not_called()
+        self.assertEqual(sidecar.read_bytes(), b'held inode')
+        self.assertEqual(alias.stat().st_ino, sidecar.stat().st_ino)
+
+    def test_sidecar_open_refuses_symlink_installation_races(self):
+        sidecar = Path(str(self.artifact) + '.lock')
+        target = self.tmp / 'alias.json'
+        target.write_bytes(b'untouched')
+        for exists in (False, True):
+            for nofollow in (0, getattr(os, 'O_NOFOLLOW', 0)):
+                with self.subTest(existing_sidecar=exists, nofollow=nofollow):
+                    if exists:
+                        sidecar.write_bytes(b'original')
+                    system = types.SimpleNamespace(**vars(os))
+                    system.O_NOFOLLOW = nofollow
+
+                    def replace_before_open(path, flags, mode):
+                        self.assertEqual(path, sidecar)
+                        self.assertEqual(flags & nofollow, nofollow)
+                        sidecar.unlink(missing_ok=True)
+                        sidecar.symlink_to(target)
+                        return os.open(path, flags, mode)
+
+                    system.open = replace_before_open
+                    with mock.patch.object(runner, 'os', system), self.assertRaises(OSError):
+                        runner._open_sidecar(sidecar)
+                    self.assertTrue(sidecar.is_symlink())
+                    self.assertEqual(target.read_bytes(), b'untouched')
+                    sidecar.unlink()
+
+    def test_sidecar_open_compares_handle_with_both_lstat_results(self):
+        sidecar = Path(str(self.artifact) + '.lock')
+        backup = self.tmp / 'original'
+        for replace_before_open in (False, True):
+            with self.subTest(replace_before_open=replace_before_open):
+                sidecar.write_bytes(b'original')
+                system = types.SimpleNamespace(**vars(os))
+                system.O_NOFOLLOW = 0  # Exercise the Windows fallback too.
+                descriptors = []
+
+                def open_replacement(path, flags, mode):
+                    self.assertEqual(path, sidecar)
+                    sidecar.rename(backup)
+                    sidecar.write_bytes(b'replacement')
+                    # Open the original inode via its new name to model a handle
+                    # surviving replacement without renaming an open file on Windows.
+                    descriptor = os.open(path if replace_before_open else backup, flags, mode)
+                    descriptors.append(descriptor)
+                    return descriptor
+
+                system.open = open_replacement
+                with mock.patch.object(runner, 'os', system), \
+                        self.assertRaisesRegex(OSError, 'lock sidecar changed during acquisition'):
+                    runner._open_sidecar(sidecar)
+                self.assertEqual(len(descriptors), 1)
+                with self.assertRaises(OSError):
+                    os.fstat(descriptors[0])
+                self.assertEqual(backup.read_bytes(), b'original')
+                self.assertEqual(sidecar.read_bytes(), b'replacement')
+                sidecar.unlink()
+                backup.unlink()
+
+    def assert_output_names_refused(self, outputs, message):
+        command = self.script('')
+        self.seed_old_evidence()
+        for path in (self.artifact, self.retained, self.receipt, self.log):
+            Path(str(path) + '.lock').write_bytes(b'reusable sidecar')
+        before = {p: (p.read_bytes(), p.stat().st_ino) for p in self.tmp.iterdir()}
+        with mock.patch.object(Path, 'open', side_effect=AssertionError(
+                'output refusal must precede file opens')) as opened, \
+                mock.patch.object(Path, 'unlink') as unlinked, \
+                mock.patch.object(runner.subprocess, 'run') as launch, \
+                self.assertRaisesRegex(OSError, message):
+            runner.run_process(command, cwd=self.tmp, environment=os.environ.copy(),
+                               artifact=outputs[0], retained=outputs[1],
+                               receipt_path=outputs[2], log=outputs[3])
+        opened.assert_not_called()
+        unlinked.assert_not_called()
+        launch.assert_not_called()
+        self.assertEqual(before, {
+            p: (p.read_bytes(), p.stat().st_ino) for p in self.tmp.iterdir()})
+
+    def test_trailing_dots_and_spaces_are_refused_before_mutation(self):
+        outputs = (self.artifact, self.retained, self.receipt, self.log)
+        for destination in range(len(outputs)):
+            for suffix in ('.', ' ', '.lock.', '.lock ', '.LOCK. '):
+                with self.subTest(destination=destination, suffix=suffix):
+                    inner = list(outputs)
+                    inner[destination] = Path(str(self.artifact) + suffix)
+                    self.assert_output_names_refused(
+                        inner, 'output path component ends in a dot or space')
+
+    def test_trailing_dot_duplicate_is_refused_before_mutation(self):
+        self.assert_output_names_refused(
+            (self.artifact, Path(str(self.artifact) + '.'), self.receipt, self.log),
+            'output path component ends in a dot or space')
+
+    def test_windows_stream_and_device_names_are_refused_before_mutation(self):
+        outputs = (self.artifact, self.retained, self.receipt, self.log)
+        for name in ('capture.json:stream', 'capture.json.lock:stream',
+                     'capture.json::$DATA', 'CON', 'con.json', 'NUL', 'nul .json',
+                     'PRN.txt', 'aux', 'COM1.json', 'com9', 'LPT1', 'lpt9.txt',
+                     'COM\u00b9.json', 'LPT\u00b2', 'com\u00b3', 'CONIN$', 'conout$.txt'):
+            for destination in range(len(outputs)):
+                with self.subTest(name=name, destination=destination):
+                    inner = list(outputs)
+                    inner[destination] = self.tmp / name
+                    self.assert_output_names_refused(
+                        inner, 'output path contains (an invalid Windows character|'
+                        'a reserved Windows device name)')
+
+    def test_unsafe_parent_components_are_refused_before_resolution(self):
+        for component, message in (
+                ('nested.', 'ends in a dot or space'),
+                ('nested ', 'ends in a dot or space'),
+                ('nested:stream', 'invalid Windows character'),
+                ('NUL.json', 'reserved Windows device name'),
+                ('nested\x01', 'invalid Windows character'),
+                ('nested?', 'invalid Windows character')):
+            for remove_component in (False, True):
+                with self.subTest(component=component, remove_component=remove_component):
+                    parent = self.tmp / component
+                    if remove_component:
+                        parent = parent / '..'
+                    self.assert_output_names_refused(
+                        (parent / self.artifact.name, self.retained, self.receipt, self.log),
+                        message)
+
+    def test_casefolded_duplicate_outputs_are_refused_before_mutation(self):
+        outputs = (self.artifact, self.retained, self.receipt, self.log)
+        for source in range(len(outputs)):
+            for destination in range(len(outputs)):
+                if source == destination:
+                    continue
+                with self.subTest(source=source, destination=destination):
+                    inner = list(outputs)
+                    inner[destination] = outputs[source].with_name(outputs[source].name.upper())
+                    self.assert_output_names_refused(inner, 'output paths must be distinct')
+
+    def test_casefolded_output_names_contend_on_reusable_sidecars(self):
+        for output in (self.artifact, self.retained, self.receipt, self.log):
+            with self.subTest(output=output.name):
+                sidecar = Path(str(output) + '.lock')
+                sidecar.write_bytes(b'reusable sidecar')
+                before = (sidecar.read_bytes(), sidecar.stat().st_ino)
+                alias = output.with_name(output.name.upper())
+                # Either spelling must use the same sidecar, including when the
+                # uppercase invocation is the first owner on a sensitive filesystem.
+                for owner, contender in ((output, alias), (alias, output)):
+                    with runner._output_locks((owner,)):
+                        with self.assertRaises(FileExistsError):
+                            with runner._output_locks((contender,)):
+                                self.fail('a competing invocation acquired the held output lock')
+                    self.assertEqual((sidecar.read_bytes(), sidecar.stat().st_ino), before)
+                self.assertEqual([p for p in self.tmp.iterdir()
+                                  if p.name.casefold() == sidecar.name], [sidecar])
+
+    def test_windows_locks_are_unlocked_before_close(self):
+        for failure in (None, 'body', 'contention', 'acquisition'):
+            with self.subTest(failure=failure):
+                events = []
+                handles = []
+                error = OSError(runner.errno.EACCES if failure == 'contention'
+                                else runner.errno.EIO, 'fixture failure')
+                windows = types.SimpleNamespace(**vars(os))
+                windows.name = 'nt'
+                locking = mock.Mock(LK_NBLCK=1, LK_UNLCK=2)
+                open_sidecar = runner._open_sidecar
+                descriptors = {}
+
+                def open_lock(path):
+                    descriptor = len(handles) + 1
+                    original = open_sidecar(path)
+                    descriptors[original.fileno()] = descriptor
+                    handle = mock.Mock(wraps=original)
+
+                    def seek(offset):
+                        events.append(('seek', descriptor, offset))
+                        return original.seek(offset)
+
+                    def close():
+                        events.append(('close', descriptor))
+                        original.close()
+
+                    handle.seek.side_effect = seek
+                    handle.close.side_effect = close
+                    handles.append(handle)
+                    events.append(('open', descriptor, 'r+b'))
+                    return handle
+
+                def lock(fileno, operation, length):
+                    descriptor = descriptors[fileno]
+                    events.append(('lock', descriptor, operation, length))
+                    if descriptor == 2 and operation == locking.LK_NBLCK \
+                            and failure in ('contention', 'acquisition'):
+                        raise error
+
+                locking.locking.side_effect = lock
+                with mock.patch.object(runner, 'os', windows), \
+                        mock.patch.object(runner, 'msvcrt', locking, create=True), \
+                        mock.patch.object(runner, '_open_sidecar', side_effect=open_lock):
+                    def acquire():
+                        with runner._output_locks((self.artifact, self.retained)):
+                            events.append(('body',))
+                            if failure == 'body':
+                                raise error
+
+                    if failure is None:
+                        acquire()
+                    else:
+                        expected = FileExistsError if failure == 'contention' else OSError
+                        with self.assertRaises(expected) as caught:
+                            acquire()
+                        if failure != 'contention':
+                            self.assertIs(caught.exception, error)
+
+                expected = [('open', 1, 'r+b'), ('seek', 1, 0), ('lock', 1, 1, 1),
+                            ('open', 2, 'r+b'), ('seek', 2, 0), ('lock', 2, 1, 1)]
+                if failure in (None, 'body'):
+                    expected.extend([('body',), ('seek', 2, 0), ('lock', 2, 2, 1)])
+                expected.extend([('close', 2), ('seek', 1, 0), ('lock', 1, 2, 1),
+                                 ('close', 1)])
+                self.assertEqual(events, expected)
+                for handle in handles:
+                    handle.close.assert_called_once_with()
+
+    def test_symlink_parent_aliases_contend_on_the_same_destinations(self):
+        command = self.script('')
+        (self.tmp / 'nested').mkdir()
+        (self.tmp / 'aliases').mkdir()
+        alias = self.tmp / 'aliases' / 'directory'
+        try:
+            alias.symlink_to(self.tmp / 'nested', target_is_directory=True)
+        except (OSError, NotImplementedError) as error:
+            self.skipTest(f'symlink creation unavailable: {error}')
+        outputs = (self.artifact, self.retained, self.receipt, self.log)
+        self.seed_old_evidence()
+        with runner._output_locks(outputs):
+            before = {p: p.read_bytes() for p in outputs}
+            for index, shared in enumerate(outputs):
+                with self.subTest(shared=shared.name):
+                    inner = [self.tmp / ('inner-' + p.name) for p in outputs]
+                    inner[index] = alias / '..' / shared.name
+                    with mock.patch.object(runner.subprocess, 'run') as launch, \
+                            self.assertRaises(FileExistsError):
+                        runner.run_process(command, cwd=self.tmp, environment=os.environ.copy(),
+                                           artifact=inner[0], retained=inner[1],
+                                           receipt_path=inner[2], log=inner[3])
+                    launch.assert_not_called()
+                    self.assertEqual(before, {p: p.read_bytes() for p in outputs})
+                    self.assertFalse(any(p.exists() for i, p in enumerate(inner) if i != index))
+        self.assert_output_locks_released()
+
+    def test_crashed_owner_leaves_reusable_lock_files(self):
+        outputs = (self.artifact, self.retained, self.receipt, self.log)
+        child = ('import os, sys\n'
+                 'from pathlib import Path\n'
+                 'sys.path.insert(0, sys.argv[1])\n'
+                 'import render_runner_process as runner\n'
+                 'with runner._output_locks(map(Path, sys.argv[2:])):\n'
+                 '    os._exit(23)\n')
+        result = subprocess.run([sys.executable, '-I', '-B', '-c', child,
+                                 str(Path(runner.__file__).parent), *map(str, outputs)],
+                                cwd=self.tmp, check=False, capture_output=True)
+        self.assertEqual(result.returncode, 23, result.stderr)
+        self.assertEqual(len(list(self.tmp.glob('*.lock'))), 4)
+        self.assertFalse(any(path.exists() for path in outputs))
+        result, errors = self.run_case(self.script(
+            'from pathlib import Path\nimport sys\n'
+            'Path(sys.argv[1]).write_text("{}")\n'))
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(errors, [])
+        self.assertEqual(self.read_receipt()['outcome'], 'returned')
+        self.assertEqual(self.read_receipt()['capture_sha256'],
+                         runner.file_sha256(self.retained))
+        self.assert_output_locks_released()
+
+    def test_empty_abandoned_marker_files_are_reusable(self):
+        for path in (self.artifact, self.retained, self.receipt, self.log):
+            Path(str(path) + '.lock').touch()
+        result, errors = self.run_case(self.script(''))
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(errors, [])
+        self.assertEqual(self.read_receipt()['outcome'], 'returned')
+        self.assert_output_locks_released()
+
+    def test_symlink_outputs_are_refused_before_mutation(self):
+        command = self.script('')
+        outputs = (self.artifact, self.retained, self.receipt, self.log)
+        target = self.tmp / 'target.json'
+        for exists in (True, False):
+            for output in outputs:
+                with self.subTest(output=output.name, target_exists=exists):
+                    self.seed_old_evidence()
+                    if exists:
+                        target.write_bytes(b'{"target":true}')
+                    else:
+                        target.unlink(missing_ok=True)
+                    output.unlink()
+                    try:
+                        output.symlink_to(target)
+                    except (OSError, NotImplementedError) as error:
+                        self.skipTest(f'symlink creation unavailable: {error}')
+                    before = {p: p.read_bytes() for p in self.tmp.iterdir()
+                              if not p.is_symlink()}
+                    with mock.patch.object(runner.subprocess, 'run') as launch, \
+                            self.assertRaisesRegex(OSError, 'output must not be a symlink'):
+                        self.run_case(command)
+                    launch.assert_not_called()
+                    self.assertTrue(output.is_symlink())
+                    self.assertEqual(output.readlink(), target)
+                    self.assertEqual(before, {p: p.read_bytes() for p in self.tmp.iterdir()
+                                              if not p.is_symlink()})
+                    self.assertFalse(list(self.tmp.glob('*.lock')))
+                    output.unlink()
+
+    def test_capture_allocation_failure_publishes_current_failure_receipt(self):
+        self.seed_old_evidence()
+        command = self.script('from pathlib import Path\nimport sys\n'
+                              'Path(sys.argv[1]).write_text("{}")\n')
+        allocate = runner.tempfile.NamedTemporaryFile
+        error = OSError('fixture capture allocation refused')
+
+        def fail_capture(**kwargs):
+            if kwargs['prefix'] == self.retained.name + '.':
+                raise error
+            return allocate(**kwargs)
+
+        with mock.patch.object(runner.tempfile, 'NamedTemporaryFile', side_effect=fail_capture), \
+                contextlib.redirect_stderr(io.StringIO()):
+            result, errors = self.run_case(command)
+        self.assertEqual(result.returncode, 0)
+        receipt = self.read_receipt()
+        self.assertEqual(receipt['outcome'], 'returned')
+        self.assertEqual(receipt['capture_status'], 'write_error')
+        self.assertIsNone(receipt['capture_path'])
+        self.assertIsNone(receipt['capture_sha256'])
+        self.assertEqual(errors, receipt['evidence_errors'])
+        self.assertIn(str(error), errors[0])
+        self.assertFalse(self.retained.exists())
+        self.assertFalse(list(self.tmp.glob('*.tmp')))
+        self.assert_output_locks_released()
+
+    def test_receipt_allocation_failure_retires_stale_receipt(self):
+        self.seed_old_evidence()
+        allocate = runner.tempfile.NamedTemporaryFile
+
+        def fail_receipt(**kwargs):
+            if kwargs['prefix'] == self.receipt.name + '.':
+                raise OSError('fixture receipt allocation refused')
+            return allocate(**kwargs)
+
+        with mock.patch.object(runner.tempfile, 'NamedTemporaryFile', side_effect=fail_receipt), \
+                contextlib.redirect_stderr(io.StringIO()):
+            result, errors = self.run_case(self.script(''))
+        self.assertEqual(result.returncode, 0)
+        self.assertIn('process receipt:', errors[0])
+        self.assertFalse(self.receipt.exists())
+        self.assertFalse(list(self.tmp.glob('*.tmp')))
+        self.assert_output_locks_released()
+
+    def test_capture_allocation_failure_preserves_exception_and_current_receipt(self):
+        command = self.script('')
+        allocate = runner.tempfile.NamedTemporaryFile
+
+        def fail_capture(**kwargs):
+            if kwargs['prefix'] == self.retained.name + '.':
+                raise OSError('fixture capture allocation refused')
+            return allocate(**kwargs)
+
+        for error, outcome in ((OSError('fixture spawn refused'), 'spawn_error'),
+                               (subprocess.TimeoutExpired(command, 60), 'timed_out')):
+            with self.subTest(outcome=outcome):
+                self.seed_old_evidence()
+
+                def fail_process(argv, **kwargs):
+                    self.artifact.write_bytes(b'{}')
+                    raise error
+
+                with mock.patch.object(runner.subprocess, 'run', side_effect=fail_process), \
+                        mock.patch.object(runner.tempfile, 'NamedTemporaryFile',
+                                          side_effect=fail_capture), \
+                        contextlib.redirect_stderr(io.StringIO()), \
+                        self.assertRaises(type(error)) as caught:
+                    self.run_case(command)
+                self.assertIs(caught.exception, error)
+                receipt = self.read_receipt()
+                self.assertEqual(receipt['outcome'], outcome)
+                self.assertEqual(receipt['exception_type'], type(error).__name__)
+                self.assertEqual(receipt['exception_message'], str(error))
+                self.assertEqual(receipt['capture_status'], 'write_error')
+                self.assertIsNone(receipt['capture_path'])
+                self.assertIsNone(receipt['capture_sha256'])
+                self.assertIn('capture retention:', receipt['evidence_errors'][0])
+                self.assertFalse(self.retained.exists())
+                self.assertFalse(list(self.tmp.glob('*.tmp')))
+                self.assert_output_locks_released()
+
+    def test_evidence_allocation_failure_preserves_process_exception(self):
+        command = self.script('')
+        for error in (OSError('fixture spawn refused'),
+                      subprocess.TimeoutExpired(command, 60)):
+            with self.subTest(error=type(error).__name__):
+                self.seed_old_evidence()
+                with mock.patch.object(runner.subprocess, 'run', side_effect=error), \
+                        mock.patch.object(runner.tempfile, 'NamedTemporaryFile',
+                                          side_effect=OSError('fixture allocation refused')), \
+                        contextlib.redirect_stderr(io.StringIO()), \
+                        self.assertRaises(type(error)) as caught:
+                    self.run_case(command)
+                self.assertIs(caught.exception, error)
+                self.assertFalse(self.receipt.exists())
+                self.assertFalse(self.retained.exists())
+                self.assertFalse(list(self.tmp.glob('*.tmp')))
+                self.assert_output_locks_released()
+
+    def open_with_lock_close_error(self, attempted, error):
+        open_file = runner._open_sidecar
+
+        def open_output(path):
+            handle = open_file(path)
+
+            def close():
+                handle.close()
+                attempted.append(path)
+                raise error
+
+            wrapped = mock.Mock(wraps=handle)
+            wrapped.close.side_effect = close
+            return wrapped
+
+        return open_output
+
+    def test_lock_cleanup_failure_preserves_process_exception(self):
+        command = self.script('')
+        error = OSError('fixture spawn refused')
+        attempted = []
+        fail_lock_cleanup = self.open_with_lock_close_error(
+            attempted, OSError('fixture lock cleanup refused'))
+
+        with mock.patch.object(runner.subprocess, 'run', side_effect=error), \
+                mock.patch.object(runner, '_open_sidecar', side_effect=fail_lock_cleanup), \
+                self.assertRaises(OSError) as caught:
+            self.run_case(command)
+        self.assertIs(caught.exception, error)
+        self.assertEqual(len(attempted), 4)
+        self.assertEqual(self.read_receipt()['exception_message'], str(error))
+        self.assert_output_locks_released()
+
+    def test_held_lock_refuses_without_changing_old_evidence(self):
+        command = self.script('')
+        self.seed_old_evidence()
+        self.assert_output_locks_released()
+        Path(str(self.receipt) + '.lock').write_bytes(b'held sidecar')
+        before = {p: p.read_bytes() for p in self.tmp.iterdir()}
+        with self.output_lock_owners() as owners, runner._output_locks((self.receipt,)):
+            with mock.patch.object(runner.subprocess, 'run') as launch, \
+                    self.assertRaises(FileExistsError):
+                self.run_case(command)
+            launch.assert_not_called()
+            self.assertEqual(before, {
+                p: self.read_with_lock_owner(p, owners) for p in self.tmp.iterdir()})
+        self.assert_output_locks_released()
+
+    def test_lock_cleanup_failure_after_normal_exit_is_reported(self):
+        command = self.script('')
+        error = OSError('fixture lock cleanup refused')
+        attempted = []
+        fail_lock_cleanup = self.open_with_lock_close_error(attempted, error)
+
+        with mock.patch.object(runner.subprocess, 'run',
+                               return_value=subprocess.CompletedProcess(command, 0)), \
+                mock.patch.object(runner, '_open_sidecar', side_effect=fail_lock_cleanup), \
+                self.assertRaises(OSError) as caught:
+            self.run_case(command)
+        self.assertIs(caught.exception, error)
+        self.assertEqual(len(attempted), 4)
+        self.assertEqual(self.read_receipt()['outcome'], 'returned')
+        self.assertEqual(self.read_receipt()['return_code'], 0)
+        self.assert_output_locks_released()
 
     def test_nonzero_exit_code_recorded(self):
         command = self.script('import sys\nfrom pathlib import Path\n'
