@@ -17,6 +17,11 @@ import xml.etree.ElementTree as ET
 
 PROFILES = {"asan": ("debug-asan", 2, 300), "gcc": ("release", 4, 180),
             "msvc": ("release", 4, 180), "ucrt64": ("release", 4, 360)}
+FLOORS = {"gcc": 2280, "msvc": 2260, "ucrt64": 2260, "asan": 2260}
+HEAVY_NAMES = frozenset(
+    "ActiveRegions/SimBudgetWorldParity.Populated3600TicksPreserveWorldHashAndReplayWork/" + variant
+    for variant in ("Disabled", "Enabled")
+)
 RELATIONS = {"FIXTURES_SETUP", "FIXTURES_CLEANUP", "FIXTURES_REQUIRED", "DEPENDS", "RESOURCE_LOCK"}
 
 
@@ -79,6 +84,29 @@ def filtered_tests(tests):
             any("manual" in label for label in prop["value"]) for prop in test.get("properties", []))]
 
 
+def select_tests(tests, profile, selection):
+    names = [test["name"] for test in tests]
+    # None preserves the unselected library API used by the legacy ASan wrapper.
+    # Every CLI plan and merge supplies an explicit, validated policy selection.
+    if selection is None:
+        return names
+    require(selection in ("full", "light", "heavy"), "unknown correctness selection")
+    require(len(names) >= FLOORS[profile], "full discovered inventory below floor")
+    labelled = {test["name"] for test in tests if any(
+        prop["name"] == "LABELS" and "heavy" in prop["value"] for prop in test.get("properties", []))}
+    require(HEAVY_NAMES <= set(names) and labelled == HEAVY_NAMES,
+            "reviewed heavy roster or labels differ from discovered inventory")
+    heavy = [name for name in names if name in HEAVY_NAMES]
+    light = [name for name in names if name not in HEAVY_NAMES]
+    require(not set(light).intersection(heavy) and set(light) | set(heavy) == set(names),
+            "light/heavy union differs from full inventory")
+    return names if selection == "full" else light if selection == "light" else heavy
+
+
+def selection_policy(needs_heavy, explicit=None):
+    return explicit if explicit is not None else "light" if needs_heavy == "false" else "full"
+
+
 def validate_union(names, parts):
     require(isinstance(parts, list) and all(isinstance(part, list) and
             all(isinstance(name, str) and name for name in part) for part in parts), "malformed shard partitions")
@@ -128,7 +156,7 @@ def partition(all_tests, eligible, profile="gcc", timings=None):
     if profile == "asan":
         # Preserve the existing ASan placement and heavy parity balance.
         heavy = [name for name in names if name in selected and "SimBudgetWorldParity." in name]
-        require(len(heavy) in (2, 4), "expected two or four heavy parity tests")
+        require(len(heavy) in (0, 2, 4), "expected zero, two or four heavy parity tests")
         owners = {name: index % 2 for index, name in enumerate(heavy)}
         positions = {name: index for index, name in enumerate(names)}
         for name in names:
@@ -192,14 +220,14 @@ def execution_inventory(tests):
     return result
 
 
-def evidence_for(tests, parts, profile, timings=None, roots=None):
+def evidence_for(tests, parts, profile, timings=None, roots=None, selection=None):
     validate_inventory_roots(roots)
     contract = {"roots": roots, "tests": execution_inventory(tests)}
-    return {"version": 3, "profile": profile, "roots": roots, "timings": timings or {}, "inventory_digest": digest(contract),
-            "partition_digest": digest(parts), "partitions": parts}
+    return {"version": 4, "selection": selection, "profile": profile, "roots": roots, "timings": timings or {}, "inventory_digest": digest(contract),
+            "partition_digest": digest({"selection": selection, "partitions": parts}), "partitions": parts}
 
 
-def plan(directory, shard, profile="gcc", timings=None):
+def plan(directory, shard, profile="gcc", timings=None, selection=None):
     require(shard in (0, 1, 2) and not (profile == "asan" and shard == 0), "invalid shard")
     all_tests = inventory(read_json(directory / "ctest.all.json"))
     tests = roster(directory)
@@ -210,13 +238,15 @@ def plan(directory, shard, profile="gcc", timings=None):
     require(evidence_for(tests, [eligible], profile, roots=roots) ==
             evidence_for(filtered_tests(all_tests), [eligible], profile, roots=roots),
             "discovery CTest execution inventory differs between inventories")
-    parts = [eligible] if shard == 0 else partition(all_tests, eligible, profile, timings)
-    manifest = {**evidence_for(tests, parts, profile, timings, roots), "shard": shard}
+    selected = select_tests(tests, profile, selection)
+    require(shard != 0 or selection in (None, "full"), "qualification requires full selection")
+    parts = [selected] if shard == 0 else partition(all_tests, selected, profile, timings)
+    manifest = {**evidence_for(tests, parts, profile, timings, roots, selection), "shard": shard}
     names = parts[0 if shard == 0 else shard - 1]
     positions = {name: index for index, name in enumerate(eligible, 1)}
     indices = [positions[name] for name in names]
-    selection = [indices[0], indices[0], 1, *indices[1:]]
-    (directory / "ctest.shard-index.txt").write_text(",".join(map(str, selection)) + "\n", encoding="utf-8")
+    index_selection = [indices[0], indices[0], 1, *indices[1:]]
+    (directory / "ctest.shard-index.txt").write_text(",".join(map(str, index_selection)) + "\n", encoding="utf-8")
     (directory / "ctest.partition.json").write_text(json.dumps(manifest, sort_keys=True) + "\n", encoding="utf-8")
     if os.environ.get("GITHUB_OUTPUT"):
         with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
@@ -235,14 +265,16 @@ def run(directory, profile="gcc"):
     manifest = read_json(directory / "ctest.partition.json")
     require(manifest["profile"] == profile, "execution profile differs from plan")
     parts = manifest["partitions"]
-    validate_union(planned, parts)
+    selected_names = select_tests(roster(directory), profile, manifest["selection"])
+    validate_union(selected_names, parts)
     shard = manifest["shard"]
     require(shard in (0, 1, 2) and len(parts) == (1 if shard == 0 else 2), "invalid execution partition")
+    require(shard != 0 or manifest["selection"] in (None, "full"), "qualification requires full selection")
     roots = inventory_roots(directory)
-    require(manifest == {**evidence_for(roster(directory), parts, profile, manifest["timings"], roots), "shard": shard},
+    require(manifest == {**evidence_for(roster(directory), parts, profile, manifest["timings"], roots, manifest["selection"]), "shard": shard},
             "execution partition digest differs from plan")
-    require(evidence_for(current_tests, parts, profile, manifest["timings"], roots) ==
-            evidence_for(roster(directory), parts, profile, manifest["timings"], roots),
+    require(evidence_for(current_tests, parts, profile, manifest["timings"], roots, manifest["selection"]) ==
+            evidence_for(roster(directory), parts, profile, manifest["timings"], roots, manifest["selection"]),
             "CTest execution inventory differs from plan")
     selected = parts[0 if shard == 0 else shard - 1]
     positions = {name: index for index, name in enumerate(planned, 1)}
@@ -255,7 +287,8 @@ def run(directory, profile="gcc"):
                            "--timeout", str(timeout), "--output-junit", "ctest.junit.xml"]).returncode
 
 
-def merge(directory, output, profile="gcc", evidence=True, full=False):
+def merge(directory, output, profile="gcc", evidence=True, full=False, selection=None, reason=""):
+    require(not full or selection in (None, "full"), "qualification requires full selection")
     merged = ET.Element("testsuites")
     common = None
     observed = set()
@@ -271,12 +304,14 @@ def merge(directory, output, profile="gcc", evidence=True, full=False):
         if evidence:
             manifest = read_json(source / "ctest.partition.json")
             parts = manifest["partitions"]
-            validate_union(names, parts)
+            selected_names = select_tests(tests, profile, selection)
+            require(manifest["selection"] == selection, "shard selection differs from required route")
+            validate_union(selected_names, parts)
             require(len(parts) == (1 if full else 2), "unexpected partition count")
-            expected = {**evidence_for(tests, parts, profile, manifest["timings"], manifest["roots"]), "shard": shard}
+            expected = {**evidence_for(tests, parts, profile, manifest["timings"], manifest["roots"], selection), "shard": shard}
             require(manifest == expected, "shard inventory or partition digest mismatch")
             if profile != "asan" and not full:
-                require(parts == partition(tests, names, profile, manifest["timings"]),
+                require(parts == partition(tests, selected_names, profile, manifest["timings"]),
                         "partition differs from deterministic placement or relationship closure")
             if reports:
                 require(manifest["roots"] == reports[0][2], "shards recorded different source or build roots")
@@ -303,9 +338,9 @@ def merge(directory, output, profile="gcc", evidence=True, full=False):
         counts.append(sum("SimBudgetWorldParity." in name for name in executed))
         require(root.tag in ("testsuite", "testsuites"), "unexpected JUnit root")
         merged.extend([root] if root.tag == "testsuite" else root)
-    require(observed == set(common), "executed shard union differs from the planned filtered CTest inventory")
+    require(observed == set(select_tests(roster(directory / ("shard-0" if full else "shard-1")), profile, selection)), "executed shard union differs from the planned filtered CTest inventory")
     if profile == "asan":
-        require(counts in ([1, 1], [2, 2]), "heavy parity tests are not evenly split")
+        require(counts in (([0, 0],) if selection == "light" else ([1, 1], [2, 2])), "heavy parity tests are not evenly split")
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(dir=output.parent) as temporary:
         staged = Path(temporary) / "merged.xml"
@@ -314,7 +349,36 @@ def merge(directory, output, profile="gcc", evidence=True, full=False):
             shutil.copyfile(directory / "shard-0/ctest.junit.xml", staged)
         else:
             ET.ElementTree(merged).write(staged, encoding="utf-8", xml_declaration=True)
-        staged.replace(output)
+        if evidence:
+            receipt = {key: manifest[key] for key in
+                       ("version", "selection", "profile", "inventory_digest", "partition_digest")}
+            receipt["executed_digest"] = digest(sorted(observed))
+            receipt["executed_count"] = len(observed)
+            staged_receipt = Path(temporary) / "selection.json"
+            staged_receipt.write_text(json.dumps(receipt, sort_keys=True) + "\n", encoding="utf-8")
+        if evidence:
+            receipt_output = output.with_suffix(".selection.json")
+            previous_receipt = Path(temporary) / "previous-selection.json"
+            if receipt_output.exists():
+                shutil.copyfile(receipt_output, previous_receipt)
+            staged_receipt.replace(receipt_output)
+            try:
+                staged.replace(output)
+            except OSError:
+                if previous_receipt.exists():
+                    previous_receipt.replace(receipt_output)
+                else:
+                    receipt_output.unlink()
+                raise
+        else:
+            staged.replace(output)
+    if selection == "light":
+        summary = "heavy subset deferred: " + (reason if reason == "reviewed_presentation_or_docs"
+                                               else "reviewed presentation-only or safe documentation paths")
+        print(summary)
+        if os.environ.get("GITHUB_STEP_SUMMARY"):
+            with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as handle:
+                handle.write(summary + "\n")
     print(f"Merged {len(observed)} tests")
 
 
@@ -369,6 +433,9 @@ def main(default_profile="gcc", legacy_evidence=False):
         sub = commands.add_parser(mode)
         sub.add_argument("--directory", type=Path, required=True)
         sub.add_argument("--profile", choices=PROFILES, default=default_profile)
+        if mode in ("plan", "merge"):
+            sub.add_argument("--needs-heavy", default="")
+            sub.add_argument("--selection", choices=("full", "light", "heavy"))
         if mode == "plan":
             sub.add_argument("--shard", type=int, choices=(0, 1, 2), required=True)
             sub.add_argument("--timings", type=Path)
@@ -376,6 +443,7 @@ def main(default_profile="gcc", legacy_evidence=False):
         if mode == "merge":
             sub.add_argument("--output", type=Path, required=True)
             sub.add_argument("--full", action="store_true")
+            sub.add_argument("--reason", default="")
     sub = commands.add_parser("collect")
     sub.add_argument("--directory", type=Path, required=True)
     sub.add_argument("--prefix", required=True)
@@ -389,11 +457,13 @@ def main(default_profile="gcc", legacy_evidence=False):
         if args.mode == "plan":
             names = planned_roster(args.directory)
             require(all(any(suite in name for name in names) for suite in args.require_suite), "missing expected CTest suite")
-            plan(args.directory, args.shard, args.profile, read_json(args.timings) if args.timings else None)
+            plan(args.directory, args.shard, args.profile, read_json(args.timings) if args.timings else None,
+                 selection_policy(args.needs_heavy, args.selection))
         elif args.mode == "run":
             return run(args.directory, args.profile)
         elif args.mode == "merge":
-            merge(args.directory, args.output, args.profile, evidence=not legacy_evidence, full=args.full)
+            merge(args.directory, args.output, args.profile, evidence=not legacy_evidence, full=args.full,
+                  selection=selection_policy(args.needs_heavy, args.selection), reason=args.reason)
         elif args.mode == "collect":
             collect(args.directory, args.prefix, args.attempt, args.full)
         else:

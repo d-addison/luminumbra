@@ -23,8 +23,8 @@ GUARDED = {
 }
 READY = "github.event_name != 'pull_request' || github.event.pull_request.draft == false"
 UCRT_ROUTE = (
-    "github.event_name == 'pull_request' || github.ref_name == 'main' || "
-    "(github.event_name == 'workflow_dispatch' && inputs.qualification_capture)"
+    "github.event_name == 'pull_request' || github.event_name == 'push' || "
+    "github.event_name == 'workflow_dispatch'"
 )
 SERVER_ROUTE = (
     "((github.event_name == 'pull_request' && github.base_ref == 'main') || "
@@ -221,7 +221,7 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
                          'ctest --preset debug-asan -LE manual --show-only=json-v1 > build/debug-asan/ctest.inventory.json\n'
                          'ctest --preset debug-asan --show-only=json-v1 > build/debug-asan/ctest.all.json\n'
                          '# Alternate independent tests; keep fixture setup/consumers in one shard.\n'
-                         'python3 tools/ci/ctest_shards.py plan --profile asan --shard ${{ matrix.shard }} --directory build/debug-asan --require-suite SimBudgetWorldParity. --require-suite AmbientDeterminismReceipt.\n'
+                         'python3 tools/ci/ctest_shards.py plan --profile asan --shard ${{ matrix.shard }} --directory build/debug-asan --require-suite SimBudgetWorldParity. --require-suite AmbientDeterminismReceipt. --needs-heavy "$CI_NEEDS_HEAVY"\n'
                          '# Recheck the ordered roster in the same context immediately before CTest.\n'
                          'env -u WAYLAND_DISPLAY XDG_SESSION_TYPE=x11 LIBGL_ALWAYS_SOFTWARE=1 \\\n'
                          '  xvfb-run -a python3 tools/ci/ctest_shards.py run --profile asan --directory build/debug-asan')
@@ -230,7 +230,8 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
         check = aggregate_steps["Merge shard JUnit and check inventory"]
         self.assertEqual(value(check, "id", 8), "tests")
         self.assertIn("python3 tools/ci/ctest_shards.py merge --profile asan --directory build/asan-shards --output build/debug-asan/ctest.junit.xml", check)
-        self.assertIn("python3 tools/ci/check_ctest_junit.py build/debug-asan/ctest.junit.xml --minimum-tests 2260", check)
+        self.assertIn('--needs-heavy "$CI_NEEDS_HEAVY" --reason "$CI_HEAVY_REASON"', check)
+        self.assertIn("check_ctest_junit.py build/debug-asan/ctest.junit.xml --minimum-tests 1", check)
         self.assertIn("--expect-labels asan --require-probe asan", check)
         for name in ("Download shard JUnit", "Merge shard JUnit and check inventory"):
             self.assertEqual(value(aggregate_steps[name], "if", 8), "needs.asan-shard.result == 'success'")
@@ -291,11 +292,106 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
                 self.assertIn('ctest_shards.py gate --result "$SHARD_RESULT" --cpp "$NEEDS_CPP"', gate)
                 merge = next(step for step in steps(aggregate) if "name: Merge shard JUnit and check inventory\n" in step)
                 self.assertIn(f"ctest_shards.py merge --profile {profile}", merge)
-                self.assertIn("--minimum-tests " + floor, merge)
+                self.assertIn("--minimum-tests 1", merge)
+                self.assertIn("--minimum-tests " + floor, producer)
+                self.assertIn('--needs-heavy "$CI_NEEDS_HEAVY" --reason "$CI_HEAVY_REASON"', merge)
                 self.assertIn('if [ "$CI_QUALIFICATION" = true ]; then full=(--full); fi', merge)
                 self.assertIn('"${full[@]}"', merge)
                 self.assertNotIn("merge-multiple: true", aggregate)
                 self.assertNotIn("actions/cache", aggregate)
+
+
+    def test_heavy_policy_inputs_reach_every_producer_and_required_aggregate(self):
+        for filename, producers, aggregates in (
+                ("ci.yml", ("linux", "windows-msvc", "windows-ucrt64"),
+                 ("linux-result", "windows-msvc-result", "windows-ucrt64-result")),
+                ("asan.yml", ("asan-shard",), ("asan",))):
+            blocks = jobs(self.workflows[filename])
+            classifier = blocks["changes"]
+            for key in ("needs_heavy", "heavy_reason"):
+                self.assertIn(key + ": ${{ steps.paths.outputs." + key + " }}", classifier)
+            for job_id in (*producers, *aggregates):
+                with self.subTest(workflow=filename, job=job_id):
+                    job = blocks[job_id]
+                    self.assertEqual(value(job.split("    steps:\n", 1)[0], "CI_NEEDS_HEAVY", 6), "${{ needs.changes.outputs.needs_heavy }}")
+                    self.assertEqual(value(job.split("    steps:\n", 1)[0], "CI_HEAVY_REASON", 6), "${{ needs.changes.outputs.heavy_reason }}")
+                    variable = "$env:CI_NEEDS_HEAVY" if job_id == "windows-msvc" else "$CI_NEEDS_HEAVY"
+                    self.assertIn('--needs-heavy "' + variable + '"', job)
+                    self.assertNotIn("--selection light", job)
+                    if job_id in aggregates:
+                        self.assertIn("ctest_shards.py merge", job)
+                        merge = next(step for step in steps(job) if "name: Merge shard JUnit and check inventory" in step)
+                        self.assertIsNone(value(merge, "continue-on-error", 8))
+                        upload = next(step for step in steps(job) if "name: Upload merged JUnit" in step)
+                        self.assertIn("ctest.junit.selection.json", upload)
+                        self.assertEqual(value(upload, "retention-days", 10), "30")
+
+    def test_bootstrap_pins_full_events_main_prs_and_missing_or_invalid_outputs(self):
+        fallback = {"needs_cpp": "true", "needs_python": "true", "needs_heavy": "true",
+                    "heavy_reason": "classification_uncertain"}
+        light = {"needs_cpp": "true", "needs_python": "false", "needs_heavy": "false",
+                 "heavy_reason": "reviewed_presentation_or_docs"}
+        # Even an exempt diff or a base classifier asking for light cannot
+        # downgrade a merged tip, manual run, or a main-bound PR.
+        cases = [
+            ("push", "main", light, True), ("push", "devel", light, True),
+            ("workflow_dispatch", "devel", light, True),
+            ("pull_request", "main", light, True), ("pull_request", "", light, True),
+            ("pull_request", "devel", light, False),
+            ("pull_request", "devel", {"needs_cpp": "false", "needs_python": "false"}, True),
+            ("pull_request", "devel", {**light, "needs_heavy": ""}, True),
+            ("pull_request", "devel", {**light, "needs_heavy": "0"}, True),
+            ("pull_request", "devel", {**light, "heavy_reason": "unreviewed"}, True),
+            ("pull_request", "devel", {**light, "needs_cpp": "false", "needs_heavy": "true"}, True),
+        ]
+        cases = [(*case, "owner/repo", "owner/repo") for case in cases]
+        cases.extend(("pull_request", "devel", light, True, repo, head_repo)
+                     for repo, head_repo in (("", ""), ("owner/repo", ""),
+                                             ("", "owner/repo"), ("owner/repo", "fork/repo")))
+        for filename in ("ci.yml", "asan.yml"):
+            classifier = jobs(self.workflows[filename])["changes"]
+            step = next(step for step in steps(classifier) if "name: Classify merge-base diff" in step)
+            self.assertEqual(value(step, "CI_BASE_REF", 10), "${{ github.base_ref }}")
+            script = value(step, "run", 8)
+            self.assertIn('git show "$CI_BASE_SHA:tools/ci/ci_paths.py"', script)
+            self.assertNotIn("git fetch", script)
+            for event, base_ref, outputs, full, repo, head_repo in cases:
+                with self.subTest(workflow=filename, event=event, base_ref=base_ref, outputs=outputs), tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    fake_git = root / "git"
+                    fake_git.write_text('#!/bin/sh\ncase "$1" in\n'
+                                        'diff) exit 0;;\nshow) cat "$FAKE_BASE_SCRIPT";;\n'
+                                        '*) exit 1;;\nesac\n')
+                    fake_git.chmod(0o755)
+                    base = root / "base.py"
+                    content = "".join(key + "=" + val + "\n" for key, val in outputs.items())
+                    base.write_text("import os\nfrom pathlib import Path\n"
+                                    "Path(os.environ['GITHUB_OUTPUT']).write_text(" + repr(content) + ")\n")
+                    output = root / "output"
+                    # Stale temporary evidence must not survive a base script
+                    # which emits no value on this run.
+                    (root / "classified-paths.txt").write_text(content)
+                    env = dict(os.environ, PATH=str(root) + os.pathsep + os.environ["PATH"],
+                               CI_EVENT=event, CI_BASE_REF=base_ref, CI_BASE_SHA="base", CI_HEAD_SHA="head",
+                               CI_REPOSITORY=repo, CI_HEAD_REPOSITORY=head_repo,
+                               RUNNER_TEMP=str(root), GITHUB_WORKSPACE=str(root), GITHUB_OUTPUT=str(output),
+                               FAKE_BASE_SCRIPT=str(base))
+                    result = subprocess.run(["bash", "-e", "-o", "pipefail", "-c", script],
+                                            env=env, capture_output=True, text=True, timeout=10)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    actual = dict(line.split("=", 1) for line in output.read_text().splitlines())
+                    self.assertEqual(actual, fallback if full else light)
+
+    def test_ucrt64_producer_and_aggregate_enable_all_push_and_manual_routes(self):
+        blocks = jobs(self.workflows["ci.yml"])
+        expression = UCRT_ROUTE.replace("||", "or")
+        for event in ("push", "workflow_dispatch", "pull_request"):
+            self.assertTrue(eval(expression.replace("github.event_name", repr(event)), {"__builtins__": {}}))
+        self.assertIn("(" + UCRT_ROUTE + ")", value(blocks["windows-ucrt64"], "if", 4))
+        aggregate = next(step for step in steps(blocks["windows-ucrt64-result"])
+                         if "name: Require expected producers and route" in step)
+        self.assertIn("(" + UCRT_ROUTE + ")", value(aggregate, "CI_ENABLED", 10))
+        self.assertEqual(value(blocks["windows-ucrt64"], "timeout-minutes", 4), "85")
 
     def test_native_cache_writers_and_attempt_specific_retained_evidence(self):
         ci = jobs(self.workflows["ci.yml"])
