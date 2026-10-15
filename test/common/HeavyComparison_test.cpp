@@ -32,6 +32,12 @@ HeavyHashes MakeBase(bool active_regions) {
     h.sub.aether_state = "aether_state";
     h.scent_hash = "scents";
     h.active_regions = active_regions;
+    h.sub.active_regions = active_regions;
+    h.sub.regions = "regions";
+    h.sub.creatures = "creatures";
+    h.sub.items = "items";
+    h.sub.pages = "pages";
+    h.reference.emplace();
     h.clock_bytes = "clock";
     h.ledger_bytes = "ledger";
     return h;
@@ -56,7 +62,8 @@ void ExpectFieldArityMatchesTable(const HeavyHashes& hashes, std::size_t table_r
                                   active_regions,
                                   clock_bytes,
                                   ledger_bytes,
-                                  ground_objects] = hashes;
+                                  ground_objects,
+                                  reference] = hashes;
     [[maybe_unused]] const auto& [terrain,
                                   mesh,
                                   water,
@@ -64,9 +71,17 @@ void ExpectFieldArityMatchesTable(const HeavyHashes& hashes, std::size_t table_r
                                   wind,
                                   weather,
                                   aether,
-                                  aether_state] = hashes.sub;
-    constexpr std::size_t kTopLevelFields = 7;
-    constexpr std::size_t kSubFields = 8;
+                                  aether_state,
+                                  sub_active_regions,
+                                  regions,
+                                  creatures,
+                                  items,
+                                  pages,
+                                  scents,
+                                  ecology,
+                                  plants] = hashes.sub;
+    constexpr std::size_t kTopLevelFields = 8;
+    constexpr std::size_t kSubFields = 16;
     // One table row per leaf field; `sub` is a container of the kSubFields rows.
     EXPECT_EQ(table_rows, kTopLevelFields - 1 + kSubFields);
 }
@@ -74,20 +89,12 @@ void ExpectFieldArityMatchesTable(const HeavyHashes& hashes, std::size_t table_r
 TEST(HeavyComparison, TableCoversEveryHashField) {
     ExpectFieldArityMatchesTable(HeavyHashes{}, HeavySubsystemTable().size());
     const auto table = HeavySubsystemTable();
-    const std::set<std::string> expected{"terrain",
-                                         "water",
-                                         "entities",
-                                         "ground_objects",
-                                         "active_regions",
-                                         "clock",
-                                         "ledger",
-                                         "wind",
-                                         "weather",
-                                         "aether",
-                                         "aether_state",
-                                         "mesh",
-                                         "scents",
-                                         "world_hash"};
+    const std::set<std::string> expected{
+        "terrain",      "water",     "entities", "ground_objects", "active_regions",
+        "clock",        "ledger",    "wind",     "weather",        "aether",
+        "aether_state", "mesh",      "scents",   "world_hash",     "sub_active_regions",
+        "regions",      "creatures", "items",    "pages",          "authority_scents",
+        "ecology",      "plants",    "reference"};
     std::set<std::string> names;
     for (const auto& row : table) {
         names.insert(row.name);

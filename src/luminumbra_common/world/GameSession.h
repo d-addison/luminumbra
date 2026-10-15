@@ -13,6 +13,7 @@
 #include "../simulation/SimBudgetTelemetry.h"
 #include "../simulation/SimulationEventBus.h"
 #include "../systems/PollinationSystem.h"
+#include "../systems/SHIELD_WorldSystem.h"
 #include "ActiveRegionLedger.h"
 #include "AuthorityHashState.h"
 #include "GroundObjectStore.h"
@@ -314,6 +315,10 @@ public:
         return m_registry;
     }
 
+    const entt::registry& GetRegistry() const {
+        return m_registry;
+    }
+
     // Data-driven creature-brain tuning (energy/sleep/hunger/stamina/herd/
     // catch). Defaults to the compiled constants -> byte-identical until a caller overrides it from
     // SystemConfig sim.ecology (ai::ResolveEcologyTuning). Set once after construction.
@@ -573,6 +578,86 @@ public:
         return m_simulationEventBus;
     }
 
+    const luminumbra::simulation::OrderedEventBus& GetSimulationEventBus() const noexcept {
+        return m_simulationEventBus;
+    }
+
+    // Owner-thread const observation of session authority outside the stores and registry.
+    // References are valid only while this session lives and until its next mutation.
+    struct WorldAuthorityView {
+        std::vector<std::shared_ptr<const Chunk>> live;
+        std::vector<std::shared_ptr<const Chunk>> parked;
+        std::vector<IVec3> durable;
+        int seed;
+        const Systems::TerrainGenParams& params;
+        bool biomes_enabled;
+        const std::vector<World::BiomeDefinition>& biomes;
+        bool structures_enabled;
+        const std::vector<World::StructureTemplatePool>& structure_pools;
+    };
+    [[nodiscard]] std::optional<WorldAuthorityView> ObserveWorldAuthority() const {
+        if (!m_worldSystem)
+            return std::nullopt;
+        const auto live = m_worldSystem->snapshot_streamed_chunks();
+        const auto parked = m_worldSystem->snapshot_parked_chunks();
+        return WorldAuthorityView{{live.begin(), live.end()},
+                                  {parked.begin(), parked.end()},
+                                  m_worldSystem->durable_chunk_inventory(),
+                                  m_worldSystem->get_seed(),
+                                  m_worldSystem->get_params(),
+                                  m_worldSystem->biomes_enabled(),
+                                  m_worldSystem->biome_table().biomes(),
+                                  m_worldSystem->structures_enabled(),
+                                  m_worldSystem->structure_pools()};
+    }
+    struct PopulationAuthorityView {
+        const std::string& contract;
+        const std::string& configuration;
+        const std::map<std::uint32_t, std::uint32_t>& ground_types;
+    };
+    struct SimulationAuthorityView {
+        const std::filesystem::path& durable_directory;
+        const Vec3& ambient_anchor;
+        const std::string& population_contract;
+        const std::string& population_configuration;
+        std::optional<PopulationAuthorityView> population;
+        bool water_high_res;
+        bool weather_rain;
+        std::int32_t weather_rain_scale_mm;
+        bool weather_events;
+        const luminumbra::ai::EcologyTuning& ecology;
+        const luminumbra::ai::WildlifeFoliageTuning& wildlife_foliage;
+        const luminumbra::ai::ThirstTuning& thirst;
+        const luminumbra::ai::ScavengingTuning& scavenging;
+        const luminumbra::ai::ReproductionTuning& reproduction;
+        const luminumbra::ai::ForagingParams& foraging;
+        float circadian_amplitude;
+        float plant_mutation_rate;
+    };
+    [[nodiscard]] SimulationAuthorityView ObserveSimulationAuthority() const noexcept {
+        return {m_regionDurableDirectory,
+                m_ambientFieldAnchor,
+                m_populationContract,
+                m_populationConfiguration,
+                m_regionPopulator ? std::optional<PopulationAuthorityView>{PopulationAuthorityView{
+                                        m_regionPopulator->contract,
+                                        m_regionPopulator->canonical_configuration,
+                                        m_regionPopulator->ground_types}}
+                                  : std::nullopt,
+                m_waterHighResEnabled,
+                m_weatherRainEnabled,
+                m_weatherRainScaleMm,
+                m_weatherEventsEnabled,
+                m_ecologyTuning,
+                m_wildlifeFoliageTuning,
+                m_thirstTuning,
+                m_scavengingTuning,
+                m_reproductionTuning,
+                m_foragingTuning,
+                m_circadianAmplitude,
+                m_plantMutationRate};
+    }
+
     // Set the job system (must be called before CreateWorld/LoadWorld)
     void SetJobSystem(JobSystem* jobSystem) {
         m_jobSystem = jobSystem;
@@ -781,8 +866,8 @@ private:
     bool SaveEnergyFieldRecord(const std::filesystem::path& save_dir);
     bool PreflightSimulationContent(std::shared_ptr<const SimulationContent>& content);
     bool LoadSpeciesDefinitions(std::shared_ptr<const SimulationContent> content = {});
-    void ApplyWeatherRainWiring();          // Wires weather to rain when opted in.
-    void ApplyWaterResolutionWiring();      // Raises the water solver to High when opted in.
+    void ApplyWeatherRainWiring();     // Wires weather to rain when opted in.
+    void ApplyWaterResolutionWiring(); // Raises the water solver to High when opted in.
     std::shared_ptr<const luminumbra::core::SystemConfig> m_simulationConfiguration;
     bool m_waterHighResEnabled = false;     // See SetWaterHighResEnabled.
     bool m_weatherRainEnabled = false;      // See SetWeatherRainEnabled.

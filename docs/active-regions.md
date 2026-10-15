@@ -655,3 +655,74 @@ fields. Frame grouping does not change checkpoint authority at a completed tick.
 active regions disabled, the historical hash recipes and artifact bytes remain unchanged;
 new named keys are omitted even if a reused in-memory result contains diagnostic values.
 Native compiler, runtime and performance qualification remains pending.
+
+### Independent Heavy authority comparison
+
+With active regions enabled, Heavy captures the original at a completed simulation boundary
+before saving, checks that saving leaves authority unchanged, compares a fresh load before its
+first tick, and compares both sessions after identical continuation. Production hashes come
+from the combined runner capture. Every enabled named diagnostic and the composed world hash
+participates in equality; render meshes remain informational.
+The loaded enabled session restores persisted plants without reseeding the synthetic roster.
+
+`HeavyAuthorityReference` independently enumerates const simulation fields into ordered domain
+records. Its local field inventory and little-endian encoding do not consume production hash
+projections or persistence serializers. Strings and collections carry explicit lengths, float
+and double values preserve stored bits, component presence is explicit, and entity references
+use durable kind and persistent ID. Logical controller participation and locomotion continuation
+are compared; controller allocation indices are excluded.
+
+The reference covers ready resident, parked and disk-only voxel/material/water authority;
+clock, ledger configuration, allocator, ownership, activation outbox and completed work;
+complete creatures, plants, items and avatar fields; ambient masks/cells, storms, strikes,
+scent, soil, irrigation and weather clocks; dormant energy pages and retained deposits; and
+pending events with their sequence allocator. Identity includes admitted species documents,
+resolved policies, effective tuning, biome tables, structure templates and population
+configuration. Plant orientation/scale, render-only biome settings, cache state, save stamps
+and validation ceilings remain outside simulation authority.
+
+The common session exposes a const authority view and paired const store getters; it grants no
+server type privileged or mutable access. The world observation returns resident and parked
+inventories as `shared_ptr<const Chunk>`, expected durable coordinates, and const generation
+configuration; it does not expose the world system. Compile-time assertions enforce const
+chunk elements on both observation and reference inputs. The reference also observes the persisted ambient
+anchor's X, Y and Z values separately from the ledger anchor.
+
+The reference reads LMR1 manifests, LZ4 chunk payloads and the commit index itself. Its field
+decoder and fingerprint checks invoke no production world loader, projection, canonical
+serializer or projection-dependent validator. Singleton members are verified as raw bytes in
+bounded blocks; their simulation fields are observed directly from the const session stores.
+Named offline limits are 16 MiB per index, 64 MiB per raw/compressed record or singleton,
+65,535 records per region, 1,048,576 members or collection entries, 32 JSON nesting levels,
+2,097,152 JSON nodes, 1 GiB per region container, and 512 MiB of retained authoritative chunk
+payloads. Pristine records are decoded one at a time without consuming the retained budget.
+File lengths and manifest counts are checked before read/decompression buffers are allocated;
+an allocation-free lexical pass checks JSON depth, collection sizes and node counts before
+DOM construction, followed by duplicate-key, type, integer-range, identity and authority-shape
+checks. Exceeding any limit fails Heavy and publishes no passing comparison.
+
+Incomplete or pristine resident candidates are filtered before precedence selection; missing
+expected records, corrupt members and invalid entity references refuse the comparison. The
+reference does not generate replacement terrain or return a partial observation. It is an
+offline observation: normal saves and simulation ticks do not invoke it.
+
+The registered Heavy regressions cover save neutrality; immediate-load and continuation
+comparisons; independently detected omissions of creature energy/cooldowns/rotation, plant
+stress/genome, items, completed work, pending events, water debt and weather clocks; optional
+presence, persistent references, controller participation, travel and locomotion; disk-only
+edits, dormant soil/energy and pending deposits; corrupt/missing-record refusal; and exact
+legacy capture JSON bytes. Additional regressions use independently written durable records,
+check refusal before file/DOM/field allocation, verify malformed inventory leaves state and
+files unchanged, preserve legal coordinate/resolution boundaries, and run disabled Heavy against
+the executable legacy v1 contract. The latter compares the entire formatted artifact, including outer keys,
+verdicts, nested hashes and boot/settle statistics; only the newly allocated world ID is
+substituted within that property's value. The expected comparison types, helpers and exclusions
+are frozen locally from revision `f242668c`, independently of current Heavy comparisons.
+Ambient-anchor controls mutate every stored coordinate through the const view
+and retain the original production hashes. Negative controls change raw authority while retaining
+the old production digests, so a shared hashing/persistence omission cannot satisfy equality.
+
+Disabled Heavy retains its historical capture, comparison and artifact keys/bytes; enabled
+artifacts additionally expose pre-save capture, save neutrality and reference-domain mismatch
+names. No raw reference payload is serialized. Native compilation, test execution, sanitizer
+and performance qualification remain pending.
