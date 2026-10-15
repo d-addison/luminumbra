@@ -171,8 +171,8 @@ struct TerrainGenParams {
     float lake_depth = 5.0f;        // metres the basin floor sits below the lake surface
     float lake_max_carve = 22.0f;   // clamp on terrain lowered into the basin
     float lake_bank_offset = 2.0f;  // lake surface sits this far below the local land level (banks)
-    // fnv1a64 of the canonicalized biome table content, stamped by the world
-    // system when it loads the table (0 when biomes are disabled or the table
+    // fnv1a64 of the canonicalized biome table content, stamped by the preset
+    // loader and world system (0 when biomes are disabled or the table
     // failed to load). ComputeTerrainParamsHash mixes this in so pristine
     // far-LOD tiles self-invalidate when the table content changes even though
     // the path is unchanged.
@@ -212,6 +212,13 @@ struct TerrainGenParams {
     float hydro_sediment_capacity = 0.40f;
     float hydro_max_offset = 24.0f; // clamp |offset| (m)
 };
+
+// Stamp only accepted, enabled content, preserving pool order and zero hashes for
+// disabled/failed inputs. Shared by preset admission and direct world construction;
+// reads only the supplied loaded objects and performs no filesystem access.
+void FinalizeTerrainContentHashes(TerrainGenParams& params,
+                                  const World::BiomeTable& biome_table,
+                                  std::span<const World::StructureTemplatePool> structure_pools);
 
 // Immutable value data handed to far-LOD workers.  The capture owns these
 // vectors and never exposes a mutable streamed Chunk beyond the owner thread.

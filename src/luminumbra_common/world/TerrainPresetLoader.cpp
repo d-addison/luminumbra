@@ -182,6 +182,8 @@ bool ResolveDependencyManifest(TerrainPresetLoadResult& preset,
         errors.push_back("failed to resolve worldgen dependencies: " + std::string(error.what()));
         return false;
     }
+    Systems::FinalizeTerrainContentHashes(
+        preset.params, snapshot->biome_table, snapshot->structure_pools);
     preset.params.worldgen_dependencies = std::move(snapshot);
     return true;
 }
@@ -623,9 +625,8 @@ LoadTerrainPresetFromJson(const nlohmann::json& source,
         params.biome_relief_enabled = biomes.relief_enabled;
         params.biome_relief_strength = biomes.relief_strength;
     }
-    // Features river/structure flags: rivers and structures
-    // use the versioned resolved choices. The structure template content hash is stamped later by
-    // the world system when it loads the pools (mirrors the biome-table hash).
+    // Features river/structure flags use the versioned resolved choices. Content
+    // hashes are finalized below when the dependency snapshot is published.
     result.extras.features.present = true;
     result.extras.features.rivers_enabled = features.value("rivers_enabled", false);
     result.extras.features.structures_enabled = features.value("structures_enabled", false);

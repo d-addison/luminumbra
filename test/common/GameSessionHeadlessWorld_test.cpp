@@ -29,6 +29,7 @@
 #include <utility>
 #include <vector>
 
+#include "luminumbra_client/app/RenderMeasurement.h"
 #include "luminumbra_client/app/SessionExit.h"
 #include "luminumbra_client/rendering/TimeOfDayModel.h"
 #include "luminumbra_common/ai/CircadianSystem.h"
@@ -6851,6 +6852,90 @@ TEST(GameSessionHeadlessWorldTest, ContentRefusalPrecedesChunkValidationAndTerra
         };
     ASSERT_TRUE(reopened.LoadWorld(owner.GetMetadata().worldId, accept))
         << reopened.GetWorldOpenError();
+    EXPECT_EQ(reopened.GetLastLoadedChunkCount(), 1u);
+    EXPECT_EQ(P::WorldSaveService::decode_count_for_testing() - decodes, 1u);
+    EXPECT_EQ(RepeatedSaveBytes(owner.GetWorldSaveDir()), before);
+}
+
+TEST(GameSessionHeadlessWorldTest, TraversalAdmissionUsesFinalizedBiomeAndStructureContent) {
+    const HeadlessRoot root;
+    Luminumbra::TestSupport::CopyWorldgenTestData(LUMINUMBRA_SOURCE_ROOT, root.path());
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession owner, reopened;
+    for (auto* session : {&owner, &reopened})
+        EnableSnapshotSession(*session, root, jobs);
+    ASSERT_TRUE(owner.CreateWorld("Traversal content admission", "1337", "default"));
+    const auto* world = owner.GetWorldSystem();
+    ASSERT_NE(world, nullptr);
+    ASSERT_NE(world->get_params().biome_table_content_hash, 0u);
+    ASSERT_NE(world->get_params().structures_content_hash, 0u);
+    const auto world_identity =
+        Luminumbra::World::ComputeTerrainParamsHash(world->get_params(), world->get_seed());
+    const auto spawn_chunk = Luminumbra::Systems::SHIELD_WorldSystem::world_to_chunk_coords(
+        owner.GetMetadata().spawnPoint);
+    auto chunk = std::make_shared<Luminumbra::Chunk>(spawn_chunk);
+    chunk->set_state(Luminumbra::ChunkState::Idle);
+    chunk->mark_voxel_data_dirty();
+    ASSERT_TRUE(owner.GetWorldSystem()->adopt_streamed_chunk(chunk));
+    ASSERT_TRUE(owner.SaveWorldState());
+    const auto saved = owner.InspectCurrentSavedWorld();
+    ASSERT_TRUE(saved.error.empty()) << saved.error;
+    const auto preset = Luminumbra::world::LoadTerrainPreset(saved.preset_path);
+    ASSERT_TRUE(preset.ok);
+    // Direct preset consumers (including benchmarks) must see the same identity too.
+    EXPECT_EQ(Luminumbra::World::ComputeTerrainParamsHash(preset.params, world->get_seed()),
+              world_identity);
+    const auto source = nlohmann::json::parse(saved.preset_source_json);
+    std::istringstream recording("luminumbra.traversal.v1\n"
+                                 "duration_seconds 1\ntick_rate 30\nspeed_mps 1\nseed 1337\n"
+                                 "preset default\npreset_revision 7\npreset_identity " +
+                                 P::StableChecksum(source.dump()) + "\ncontent_identity " +
+                                 std::to_string(world_identity) +
+                                 "\nexpected_ticks 30\ncold_cache true\npoints 2\n"
+                                 "point 0 0 0 0 0\npoint 1 0 0 0 0\n");
+    auto traversal = Luminumbra::Client::Measurement::Traversal::read(recording);
+    std::size_t checked = 0;
+    const GameSession::WorldOpenCheck check =
+        [&](const P::SavedWorld& candidate,
+            const Luminumbra::Systems::TerrainGenParams& params,
+            std::uint32_t seed) {
+            ++checked;
+            EXPECT_EQ(params.biome_table_content_hash,
+                      world->get_params().biome_table_content_hash);
+            EXPECT_EQ(params.structures_content_hash, world->get_params().structures_content_hash);
+            const auto early_identity = Luminumbra::World::ComputeTerrainParamsHash(params, seed);
+            EXPECT_EQ(early_identity, world_identity);
+            const auto candidate_source = nlohmann::json::parse(candidate.preset_source_json);
+            if (seed != traversal.seed || candidate.metadata.worldType != traversal.preset ||
+                candidate_source.at("schema_rev") != traversal.presetRevision ||
+                P::StableChecksum(candidate_source.dump()) != traversal.presetIdentity ||
+                std::to_string(early_identity) != traversal.contentIdentity)
+                return std::string("traversal world seed, preset or content identity mismatch");
+            return std::string{};
+        };
+    const auto before = RepeatedSaveBytes(owner.GetWorldSaveDir());
+    const auto decodes = P::WorldSaveService::decode_count_for_testing();
+    const auto chunk_decodes = P::WorldSaveService::chunk_decode_count_for_testing();
+    traversal.contentIdentity = std::to_string(world_identity ^ 1ull);
+    EXPECT_FALSE(reopened.LoadWorld(owner.GetMetadata().worldId, check));
+    EXPECT_EQ(checked, 1u);
+    EXPECT_EQ(reopened.GetWorldOpenError(),
+              "traversal world seed, preset or content identity mismatch");
+    EXPECT_EQ(reopened.GetWorldSystem(), nullptr);
+    EXPECT_EQ(reopened.GetLastLoadedChunkCount(), 0u);
+    EXPECT_EQ(P::WorldSaveService::decode_count_for_testing(), decodes);
+    EXPECT_EQ(P::WorldSaveService::chunk_decode_count_for_testing(), chunk_decodes);
+    EXPECT_EQ(RepeatedSaveBytes(owner.GetWorldSaveDir()), before);
+
+    traversal.contentIdentity = std::to_string(world_identity);
+    ASSERT_TRUE(reopened.LoadWorld(owner.GetMetadata().worldId, check))
+        << reopened.GetWorldOpenError();
+    EXPECT_EQ(checked, 2u);
+    const auto* loaded = reopened.GetWorldSystem();
+    ASSERT_NE(loaded, nullptr);
+    EXPECT_EQ(Luminumbra::World::ComputeTerrainParamsHash(loaded->get_params(), loaded->get_seed()),
+              world_identity);
     EXPECT_EQ(reopened.GetLastLoadedChunkCount(), 1u);
     EXPECT_EQ(P::WorldSaveService::decode_count_for_testing() - decodes, 1u);
     EXPECT_EQ(RepeatedSaveBytes(owner.GetWorldSaveDir()), before);

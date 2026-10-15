@@ -103,6 +103,7 @@ struct TerrainPresetLoadResult {
     std::string source_json;
     // params.worldgen_dependencies retains the loaded objects and manifest that
     // this identity describes, including absent/rejected-input fallback decisions.
+    // Biome/structure content hashes are finalized for pre-construction identity checks.
     Systems::TerrainGenParams params;
     TerrainPresetExtras extras;
     std::vector<std::string> errors;

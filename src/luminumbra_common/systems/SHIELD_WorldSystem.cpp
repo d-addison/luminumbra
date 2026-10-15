@@ -383,6 +383,33 @@ void replace_chunk_collision(PhysicsSystem& physics_system, Luminumbra::Chunk& c
 
 } // namespace
 
+void FinalizeTerrainContentHashes(TerrainGenParams& params,
+                                  const World::BiomeTable& biome_table,
+                                  std::span<const World::StructureTemplatePool> structure_pools) {
+    params.biome_table_content_hash = 0;
+    if (params.biomes_enabled && biome_table.ok() && !biome_table.empty())
+        params.biome_table_content_hash = biome_table.content_hash();
+
+    params.structures_content_hash = 0;
+    if (!params.structures_enabled || params.structures_data_dir.empty())
+        return;
+    u64 combined = 14695981039346656037ull; // fnv offset basis
+    bool accepted_pool = false;
+    for (const auto& pool : structure_pools) {
+        if (!pool.ok())
+            continue;
+        const u64 ch = pool.content_hash;
+        const auto* bytes = reinterpret_cast<const unsigned char*>(&ch);
+        for (std::size_t i = 0; i < sizeof(ch); ++i) {
+            combined ^= static_cast<u64>(bytes[i]);
+            combined *= 1099511628211ull;
+        }
+        accepted_pool = true;
+    }
+    if (accepted_pool)
+        params.structures_content_hash = combined;
+}
+
 SHIELD_WorldSystem::SHIELD_WorldSystem(JobSystem* job_system,
                                        WaterSystem* water_system,
                                        const TerrainGenParams& params,
@@ -967,9 +994,6 @@ void SHIELD_WorldSystem::reinitialize_noise(const TerrainGenParams* params,
     m_humidity_generator = {};
     m_biome_table = World::BiomeTable{};
     m_biomes_enabled = false;
-    // Stamp the table content hash into params (0 unless a table actually
-    // loads) so ComputeTerrainParamsHash mixes it into the far-LOD cache key.
-    m_params.biome_table_content_hash = 0;
     if (m_params.biomes_enabled) {
         auto temperature_fractal = NewWorldNoise<FastNoise::FractalFBm>();
         temperature_fractal->SetSource(NewWorldNoise<FastNoise::Simplex>());
@@ -997,7 +1021,6 @@ void SHIELD_WorldSystem::reinitialize_noise(const TerrainGenParams* params,
             m_biomes_enabled = false;
         } else {
             m_biomes_enabled = true;
-            m_params.biome_table_content_hash = m_biome_table.content_hash();
         }
     }
 
@@ -1007,7 +1030,6 @@ void SHIELD_WorldSystem::reinitialize_noise(const TerrainGenParams* params,
     // keys track template changes (ComputeTerrainParamsHash mixes it in).
     m_structure_pools.clear();
     m_structures_enabled = false;
-    m_params.structures_content_hash = 0;
     if (m_params.structures_enabled && !m_params.structures_data_dir.empty()) {
         std::vector<World::StructureTemplatePool> pools;
         if (m_params.worldgen_dependencies) {
@@ -1034,7 +1056,6 @@ void SHIELD_WorldSystem::reinitialize_noise(const TerrainGenParams* params,
                     type_dir, Filesystem::GenericUtf8PathString(type_dir.filename())));
             }
         }
-        u64 combined = 14695981039346656037ull; // fnv offset basis
         for (auto& pool : pools) {
             const auto& type = pool.type;
             for (const std::string& warn : pool.warnings) {
@@ -1046,19 +1067,13 @@ void SHIELD_WorldSystem::reinitialize_noise(const TerrainGenParams* params,
                 }
                 continue;
             }
-            const u64 ch = pool.content_hash;
-            const auto* bytes = reinterpret_cast<const unsigned char*>(&ch);
-            for (std::size_t i = 0; i < sizeof(ch); ++i) {
-                combined ^= static_cast<u64>(bytes[i]);
-                combined *= 1099511628211ull;
-            }
             m_structure_pools.push_back(std::move(pool));
         }
         if (!m_structure_pools.empty()) {
             m_structures_enabled = true;
-            m_params.structures_content_hash = combined;
         }
     }
+    FinalizeTerrainContentHashes(m_params, m_biome_table, m_structure_pools);
 }
 
 std::optional<World::StructureSite> SHIELD_WorldSystem::LocateStructure(
