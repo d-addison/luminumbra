@@ -194,7 +194,7 @@ void GameSession::ResetWorldSystems() {
     m_lastLoadedChunkCount = 0;
 }
 
-// load the per-world species definition table at world create/load.
+// The preset dependency snapshot captures the per-world species table at create/load.
 // DETERMINISM: CreatureSpeciesRegistry::LoadFromDirectory sorts the *.json entries by
 // filename before parsing, so the table is a pure function of the files' CONTENT — never of
 // filesystem iteration order. A missing/empty directory yields an EMPTY table, and every
@@ -358,19 +358,6 @@ void GameSession::ApplyWaterResolutionWiring() {
                                                               ? Systems::WaterDetailLevel::High
                                                               : Systems::WaterDetailLevel::Medium));
     LUMINUMBRA_CORE_INFO("Water resolution wired: {}", m_waterHighResEnabled ? "High" : "Medium");
-}
-
-void GameSession::LoadSpeciesDefinitions() {
-    m_speciesTable = std::make_unique<luminumbra::ai::CreatureSpeciesRegistry>();
-    const fs::path dir = RuntimeRoot(m_rootPath) / "data" / "common" / "creatures" / "species";
-    std::vector<std::string> errors;
-    const std::size_t loaded = m_speciesTable->LoadFromDirectory(dir, errors);
-    for (const std::string& err : errors) {
-        // Content problems are warnings, not failures: a bad species file must never brick a
-        // world load (the affected species just keeps its compiled-default behaviour/absence).
-        LUMINUMBRA_CORE_WARN("Species definition load: {}", err);
-    }
-    LUMINUMBRA_CORE_INFO("Species definitions loaded: {} from {}", loaded, dir.string());
 }
 
 std::uint32_t GameSession::TickSimulation(double frame_dt) {
@@ -1174,6 +1161,8 @@ bool GameSession::CreateWorldInternal(const std::string& name,
     const WorldConfigValidationResult validation =
         ValidateWorldConfig(m_rootPath, worldType, m_requiredClientAssets);
     if (!validation.ok) {
+        m_worldOpenError =
+            validation.errors.empty() ? "Invalid world configuration." : validation.errors.front();
         for (const std::string& error : validation.errors) {
             LUMINUMBRA_CORE_ERROR("World config validation failed: {}", error);
         }
@@ -1235,6 +1224,7 @@ bool GameSession::CreateWorldInternal(const std::string& name,
 
     const TerrainPresetLoadResult preset = LoadTerrainPreset(preset_to_load);
     if (!preset.ok) {
+        m_worldOpenError = preset.errors.empty() ? "Invalid world preset." : preset.errors.front();
         for (const std::string& error : preset.errors) {
             LUMINUMBRA_CORE_ERROR("World preset load failed: {}", error);
         }
@@ -1314,8 +1304,8 @@ bool GameSession::CreateWorldInternal(const std::string& name,
     AttachRegionEditObserver();
     InitializeScentField(m_metadata.spawnPoint);
 
-    // species definitions load once at world create (content-pure; see the helper).
-    LoadSpeciesDefinitions();
+    // Adopt the registry parsed from the bytes bound into the session identity.
+    m_speciesTable = preset.params.worldgen_dependencies->species_table;
 
     // wire weather-driven rain into the water solver when the
     // owner opted in (sim.hydrology_weather via SetWeatherRainEnabled). Explicit OFF =
@@ -1367,6 +1357,7 @@ bool GameSession::LoadWorld(const std::string& worldId) {
     const auto& preset_to_load = saved.preset_path;
     const TerrainPresetLoadResult preset = LoadTerrainPreset(preset_to_load);
     if (!preset.ok) {
+        m_worldOpenError = preset.errors.empty() ? "Invalid world preset." : preset.errors.front();
         for (const std::string& error : preset.errors) {
             LUMINUMBRA_CORE_ERROR("World preset load failed: {}", error);
         }
@@ -1443,9 +1434,8 @@ bool GameSession::LoadWorld(const std::string& worldId) {
     }
     InitializeScentField(m_metadata.spawnPoint);
 
-    // species definitions load once at world load, exactly as CreateWorld does
-    // (content-pure; a loaded world resolves the same table as the created one).
-    LoadSpeciesDefinitions();
+    // Saved worlds adopt the same captured session content as new worlds.
+    m_speciesTable = preset.params.worldgen_dependencies->species_table;
 
     // restore the rotating water sim-window cursor so the loaded session
     // resimulates the exact windows the original would from the same water state.

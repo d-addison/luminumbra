@@ -18,18 +18,25 @@
 #include <map>
 #include <span>
 #include <sstream>
+#include <stdexcept>
 #include <string>
+#include <string_view>
+#include <system_error>
 #include <utility>
 #include <vector>
 
 #include "luminumbra_client/rendering/TimeOfDayModel.h"
 #include "luminumbra_common/ai/CircadianSystem.h"
+#include "luminumbra_common/ai/CreatureSpeciesRegistry.h"
 #include "luminumbra_common/ai/EcologyHash.h"
 #include "luminumbra_common/ai/MigrationSystem.h"
 #include "luminumbra_common/ai/StimulusChannels.h"
 #include "luminumbra_common/components/InstinctComponents.h"
+#include "luminumbra_common/core/FilesystemPath.h"
+#include "luminumbra_common/net/LockstepSession.h"
 #include "luminumbra_common/persistence/SavedWorldCatalog.h"
 #include "luminumbra_common/replay/RegionScheduleTrace.h"
+#include "luminumbra_common/replay/ReplayStream.h"
 #include "luminumbra_common/systems/AetherFieldSystem.h"
 #include "luminumbra_common/systems/PlantGrowthSystem.h"
 #include "luminumbra_common/systems/WeatherSystem.h"
@@ -96,6 +103,567 @@ public:
 private:
     fs::path root_;
 };
+
+// Fault injection exercises scan errors on every platform and under elevated users.
+// No permission-dependent fixture or skipped assertion is needed.
+enum class SpeciesScanFailure {
+    Open,
+    Metadata,
+    Increment
+};
+
+template<SpeciesScanFailure Failure>
+class FailingSpeciesDirectoryIterator {
+public:
+    FailingSpeciesDirectoryIterator() = default;
+    FailingSpeciesDirectoryIterator(const fs::path& dir, std::error_code& ec) {
+        entry_.file = dir / "deer.json";
+        if constexpr (Failure == SpeciesScanFailure::Open) {
+            ec = std::make_error_code(std::errc::permission_denied);
+        } else {
+            active_ = true;
+            ec.clear();
+        }
+    }
+    struct Entry {
+        fs::path file;
+        bool is_regular_file(std::error_code& ec) const {
+            if constexpr (Failure == SpeciesScanFailure::Metadata)
+                ec = std::make_error_code(std::errc::io_error);
+            else
+                ec.clear();
+            return !ec;
+        }
+        const fs::path& path() const {
+            return file;
+        }
+    };
+    const Entry& operator*() const {
+        return entry_;
+    }
+    bool operator!=(const FailingSpeciesDirectoryIterator& other) const {
+        return active_ != other.active_;
+    }
+    void increment(std::error_code& ec) {
+        ec = std::make_error_code(std::errc::io_error);
+        active_ = false;
+    }
+
+private:
+    Entry entry_;
+    bool active_ = false;
+};
+
+template<SpeciesScanFailure Failure>
+void CheckSpeciesScanFailure(const fs::path& directory, const std::string& diagnostic) {
+    luminumbra::ai::CreatureSpeciesRegistry registry;
+    std::string parse_error;
+    ASSERT_TRUE(registry.AddFromJsonText(R"({"id":"retained"})", parse_error));
+    std::vector<std::string> errors{"previous diagnostic"};
+    bool io_failed = false;
+    std::size_t reads = 0;
+    const Luminumbra::World::WorldgenFileReader reader = [&](const fs::path&, std::string&) {
+        ++reads;
+        return false;
+    };
+    std::size_t loaded = 1;
+    EXPECT_NO_THROW(loaded = registry.LoadFromDirectory<FailingSpeciesDirectoryIterator<Failure>>(
+                        directory, errors, reader, &io_failed));
+    EXPECT_EQ(loaded, 0u);
+    EXPECT_TRUE(io_failed);
+    ASSERT_EQ(errors.size(), 2u);
+    EXPECT_EQ(errors.front(), "previous diagnostic");
+    EXPECT_NE(errors.back().find(diagnostic), std::string::npos);
+    EXPECT_EQ(reads, 0u);
+    ASSERT_EQ(registry.size(), 1u);
+    EXPECT_NE(registry.FindByName("retained"), nullptr);
+    // Client/HUD callers omit io_failed and still receive a controlled diagnostic.
+    errors.clear();
+    EXPECT_NO_THROW(loaded = registry.LoadFromDirectory<FailingSpeciesDirectoryIterator<Failure>>(
+                        directory, errors, reader));
+    EXPECT_EQ(loaded, 0u);
+    ASSERT_EQ(errors.size(), 1u);
+    EXPECT_NE(errors.front().find(diagnostic), std::string::npos);
+    EXPECT_EQ(reads, 0u);
+    EXPECT_EQ(registry.size(), 1u);
+}
+
+TEST(GameSessionHeadlessWorldTest, SpeciesScanFailuresAreContainedBeforeAnyReads) {
+    const Luminumbra::TestSupport::SpeciesIdentityFixture fixture;
+    CheckSpeciesScanFailure<SpeciesScanFailure::Open>(fixture.Directory(), "cannot enumerate");
+    CheckSpeciesScanFailure<SpeciesScanFailure::Metadata>(fixture.Directory(), "cannot inspect");
+    CheckSpeciesScanFailure<SpeciesScanFailure::Increment>(fixture.Directory(), "cannot advance");
+}
+
+TEST(GameSessionHeadlessWorldTest, SpeciesEnumerationFailurePublishesNoIdentity) {
+    using Luminumbra::TestSupport::SpeciesIdentityFixture;
+    const SpeciesIdentityFixture fixture;
+    ASSERT_TRUE(fixture.Resolve().ok);
+    unsigned species_status_queries = 0;
+    const Luminumbra::World::WorldgenFileStatusReader remove_after_status =
+        [&](const fs::path& path, std::error_code& ec) {
+            const auto status = fs::symlink_status(path, ec);
+            if (path == fixture.Directory() && ++species_status_queries == 2) {
+                // The registry has valid directory metadata, but its subsequent
+                // iterator open must fail. This works without POSIX permission bits.
+                EXPECT_FALSE(ec);
+                EXPECT_TRUE(fs::is_directory(status));
+                fs::remove_all(path);
+            }
+            return status;
+        };
+    const auto refused = Luminumbra::world::LoadTerrainPresetFromJson(
+        SpeciesIdentityFixture::Preset(), fixture.Root() / "data", "<memory>", remove_after_status);
+    EXPECT_EQ(species_status_queries, 2u);
+    EXPECT_FALSE(refused.ok);
+    EXPECT_TRUE(refused.preset_content_hash.empty());
+    EXPECT_EQ(refused.params.worldgen_dependencies, nullptr);
+    ASSERT_EQ(refused.errors.size(), 2u);
+    EXPECT_NE(refused.errors.front().find("species dependencies"), std::string::npos);
+    EXPECT_NE(refused.errors.back().find("cannot enumerate creature species directory"),
+              std::string::npos);
+}
+
+TEST(GameSessionHeadlessWorldTest, SpeciesReaderExceptionsAreContainedAndRolledBack) {
+    const Luminumbra::TestSupport::SpeciesIdentityFixture fixture;
+    fixture.Write("a.json", R"({"id":"discarded"})");
+    for (const bool standard_exception : {true, false}) {
+        luminumbra::ai::CreatureSpeciesRegistry registry;
+        std::string parse_error;
+        ASSERT_TRUE(registry.AddFromJsonText(R"({"id":"retained"})", parse_error));
+        std::vector<std::string> errors;
+        bool io_failed = false;
+        unsigned reads = 0;
+        const Luminumbra::World::WorldgenFileReader throw_read = [&](const fs::path& path,
+                                                                     std::string& bytes) {
+            if (++reads == 2) {
+                if (standard_exception)
+                    throw fs::filesystem_error(
+                        "read failure", path, std::make_error_code(std::errc::io_error));
+                throw 1;
+            }
+            return Luminumbra::World::ReadWorldgenFile(path, bytes);
+        };
+        std::size_t loaded = 1;
+        EXPECT_NO_THROW(loaded = registry.LoadFromDirectory(
+                            fixture.Directory(), errors, throw_read, &io_failed));
+        EXPECT_EQ(loaded, 0u);
+        EXPECT_TRUE(io_failed);
+        EXPECT_EQ(reads, 2u);
+        ASSERT_EQ(errors.size(), 1u);
+        EXPECT_NE(errors.front().find("directory load failed"), std::string::npos);
+        ASSERT_EQ(registry.size(), 1u);
+        EXPECT_NE(registry.FindByName("retained"), nullptr);
+        EXPECT_EQ(registry.FindByName("discarded"), nullptr);
+    }
+}
+
+TEST(GameSessionHeadlessWorldTest, DependencyPathUtf8ValidationIsBoundedAndPortable) {
+    using Luminumbra::World::IsValidDependencyPathUtf8;
+    // Deliberately not null-terminated: even a one-byte input must stay in bounds.
+    const std::array<char, 1> single_byte{'0'};
+    EXPECT_TRUE(
+        IsValidDependencyPathUtf8(std::string_view(single_byte.data(), single_byte.size())));
+    const std::array<char, 1> truncated_lead{'\xc2'};
+    EXPECT_FALSE(
+        IsValidDependencyPathUtf8(std::string_view(truncated_lead.data(), truncated_lead.size())));
+    for (const std::string_view valid : {"",
+                                         "common/creatures/species/deer.json",
+                                         "\x7f",
+                                         "\xc2\x80",
+                                         "\xdf\xbf",
+                                         "\xe0\xa0\x80",
+                                         "\xed\x9f\xbf",
+                                         "\xee\x80\x80",
+                                         "\xef\xbf\xbf",
+                                         "\xf0\x90\x80\x80",
+                                         "\xf4\x8f\xbf\xbf",
+                                         "e\xcc\x81.json"}) {
+        EXPECT_TRUE(IsValidDependencyPathUtf8(valid));
+    }
+    for (const std::string_view invalid : {"\xff.json",
+                                           "\x80",
+                                           "\xbf",
+                                           "\xc0\x80",
+                                           "\xc1\xbf",
+                                           "\xc2",
+                                           "\xdf",
+                                           "\xe0",
+                                           "\xe0\xa0",
+                                           "\xf0",
+                                           "\xf0\x90",
+                                           "\xf0\x90\x80",
+                                           "\xc2/",
+                                           "\xe0\xa0/",
+                                           "\xf0\x90\x80/",
+                                           "\xe0\x9f\xbf",
+                                           "\xed\xa0\x80",
+                                           "\xed\xbf\xbf",
+                                           "\xf0\x8f\xbf\xbf",
+                                           "\xf4\x90\x80\x80",
+                                           "\xf5\x80\x80\x80",
+                                           "\xfe"}) {
+        EXPECT_FALSE(IsValidDependencyPathUtf8(invalid));
+        EXPECT_FALSE(IsValidDependencyPathUtf8(std::string("common/creatures/species/") +
+                                               std::string(invalid)));
+    }
+}
+
+TEST(GameSessionHeadlessWorldTest, PresetSerializationFailuresPublishNoIdentity) {
+    using Luminumbra::TestSupport::SpeciesIdentityFixture;
+    const SpeciesIdentityFixture fixture;
+    for (const bool invalid_key : {false, true}) {
+        auto preset = SpeciesIdentityFixture::Preset();
+        if (invalid_key)
+            preset["\xff"] = "unknown field";
+        else
+            preset["description"] = "\xff";
+        Luminumbra::world::TerrainPresetLoadResult refused;
+        EXPECT_NO_THROW(refused = Luminumbra::world::LoadTerrainPresetFromJson(
+                            preset, fixture.Root() / "data"));
+        EXPECT_FALSE(refused.ok);
+        EXPECT_TRUE(refused.preset_content_hash.empty());
+        EXPECT_EQ(refused.params.worldgen_dependencies, nullptr);
+        ASSERT_FALSE(refused.errors.empty());
+        EXPECT_NE(refused.errors.back().find("failed to resolve world preset"), std::string::npos);
+    }
+}
+
+TEST(GameSessionHeadlessWorldTest, InvalidLogicalDependencyPathPublishesNoIdentity) {
+    using Luminumbra::TestSupport::SpeciesIdentityFixture;
+    const SpeciesIdentityFixture fixture;
+    auto preset = SpeciesIdentityFixture::Preset();
+    preset["generation_params"]["biomes"]["table"] = "common/\xff.json";
+    Luminumbra::world::TerrainPresetLoadResult refused;
+    EXPECT_NO_THROW(
+        refused = Luminumbra::world::LoadTerrainPresetFromJson(preset, fixture.Root() / "data"));
+    EXPECT_FALSE(refused.ok);
+    EXPECT_TRUE(refused.preset_content_hash.empty());
+    EXPECT_EQ(refused.params.worldgen_dependencies, nullptr);
+    EXPECT_FALSE(refused.errors.empty());
+}
+
+TEST(GameSessionHeadlessWorldTest, ResolverExceptionsPublishNoIdentity) {
+    using Luminumbra::TestSupport::SpeciesIdentityFixture;
+    const SpeciesIdentityFixture fixture;
+    for (const bool standard_exception : {true, false}) {
+        const Luminumbra::World::WorldgenFileStatusReader throw_status =
+            [standard_exception](const fs::path&, std::error_code&) -> fs::file_status {
+            if (standard_exception)
+                throw std::runtime_error("dependency status failed");
+            throw 1;
+        };
+        Luminumbra::world::TerrainPresetLoadResult refused;
+        EXPECT_NO_THROW(
+            refused = Luminumbra::world::LoadTerrainPresetFromJson(SpeciesIdentityFixture::Preset(),
+                                                                   fixture.Root() / "data",
+                                                                   "<memory>",
+                                                                   throw_status));
+        EXPECT_FALSE(refused.ok);
+        EXPECT_TRUE(refused.preset_content_hash.empty());
+        EXPECT_EQ(refused.params.worldgen_dependencies, nullptr);
+        ASSERT_EQ(refused.errors.size(), 1u);
+        EXPECT_NE(refused.errors.front().find(standard_exception ? "dependency status failed"
+                                                                 : "unknown exception"),
+                  std::string::npos);
+    }
+}
+
+#ifndef _WIN32
+// Native raw-byte filenames are POSIX-only; the validation and resolver seams above
+// exercise the same refusals portably without constructing an invalid native path.
+TEST(GameSessionHeadlessWorldTest, InvalidSpeciesFilenameRefusesBeforeRegistryAndWorldAdoption) {
+    using Luminumbra::TestSupport::SpeciesIdentityFixture;
+    const SpeciesIdentityFixture fixture;
+    const auto baseline = fixture.Resolve();
+    ASSERT_TRUE(baseline.ok);
+    JobSystem jobs;
+    jobs.startup(1);
+    {
+        GameSession session;
+        session.SetJobSystem(&jobs);
+        session.SetRootPath(Luminumbra::Filesystem::GenericUtf8PathString(fixture.Root()));
+        ASSERT_TRUE(session.CreateWorld("Retained world", "777", "default"));
+        const auto world_id = session.GetMetadata().worldId;
+        const auto* world = session.GetWorldSystem();
+        const auto* table = session.GetSpeciesTable();
+        const auto tick = session.GetSimulationTickCount();
+        const auto identity = session.PresetContentHash();
+        fixture.Write(fs::path("\xff.json"), R"({"id":"invalid_filename"})");
+
+        luminumbra::ai::CreatureSpeciesRegistry registry;
+        std::string parse_error;
+        ASSERT_TRUE(registry.AddFromJsonText(R"({"id":"retained"})", parse_error));
+        std::vector<std::string> errors;
+        bool io_failed = false;
+        unsigned reads = 0;
+        const Luminumbra::World::WorldgenFileReader reader = [&](const fs::path& file,
+                                                                 std::string& bytes) {
+            ++reads;
+            return Luminumbra::World::ReadWorldgenFile(file, bytes);
+        };
+        std::size_t count = 1;
+        EXPECT_NO_THROW(
+            count = registry.LoadFromDirectory(fixture.Directory(), errors, reader, &io_failed));
+        EXPECT_EQ(count, 0u);
+        EXPECT_TRUE(io_failed);
+        EXPECT_EQ(reads, 0u);
+        ASSERT_EQ(registry.size(), 1u);
+        EXPECT_NE(registry.FindByName("retained"), nullptr);
+        ASSERT_FALSE(errors.empty());
+        EXPECT_NE(errors.front().find("not valid UTF-8"), std::string::npos);
+
+        Luminumbra::world::TerrainPresetLoadResult refused;
+        EXPECT_NO_THROW(refused = fixture.Resolve());
+        EXPECT_FALSE(refused.ok);
+        EXPECT_TRUE(refused.preset_content_hash.empty());
+        EXPECT_EQ(refused.params.worldgen_dependencies, nullptr);
+        ASSERT_FALSE(refused.errors.empty());
+        EXPECT_NE(refused.errors.back().find("not valid UTF-8"), std::string::npos);
+        const auto expect_unchanged = [&] {
+            EXPECT_EQ(session.GetWorldSystem(), world);
+            EXPECT_EQ(session.GetSpeciesTable(), table);
+            EXPECT_EQ(session.PresetContentHash(), identity);
+            EXPECT_EQ(session.GetMetadata().worldId, world_id);
+            EXPECT_EQ(session.GetSimulationTickCount(), tick);
+            EXPECT_NE(session.GetWorldOpenError().find("species"), std::string::npos);
+        };
+        bool opened = true;
+        EXPECT_NO_THROW(opened = session.CreateWorld("Refused world", "888", "default"));
+        EXPECT_FALSE(opened);
+        expect_unchanged();
+        EXPECT_NO_THROW(opened = session.LoadWorld(world_id));
+        EXPECT_FALSE(opened);
+        expect_unchanged();
+        GameSession fresh;
+        fresh.SetJobSystem(&jobs);
+        fresh.SetRootPath(Luminumbra::Filesystem::GenericUtf8PathString(fixture.Root()));
+        EXPECT_NO_THROW(opened = fresh.CreateWorld("Refused fresh world", "999", "default"));
+        EXPECT_FALSE(opened);
+        EXPECT_TRUE(fresh.PresetContentHash().empty());
+        EXPECT_EQ(fresh.GetWorldSystem(), nullptr);
+        EXPECT_EQ(fresh.GetSpeciesTable(), nullptr);
+        fs::remove(fixture.Directory() / fs::path("\xff.json"));
+        const auto recovered = fixture.Resolve();
+        ASSERT_TRUE(recovered.ok);
+        EXPECT_EQ(recovered.preset_content_hash, baseline.preset_content_hash);
+    }
+    jobs.shutdown();
+}
+#endif
+
+TEST(GameSessionHeadlessWorldTest, SpeciesSnapshotBindsExactBytesAndPortableOrder) {
+    using Luminumbra::TestSupport::SpeciesIdentityFixture;
+    const SpeciesIdentityFixture first, second;
+    // UTF-8 order differs from UTF-16 native order for these two filenames.
+    const fs::path earlier(u8"\ue000.json"), later(u8"\U00010000.json");
+    const std::string earlier_bytes = R"({"id":"first","brain":{"wander_weight":0.4}})";
+    const std::string later_bytes = R"({"id":"last","brain":{"wander_weight":0.7}})";
+    first.Write(later, later_bytes);
+    first.Write(earlier, earlier_bytes);
+    second.Write(earlier, earlier_bytes);
+    second.Write(later, later_bytes);
+    first.Write("nested/ignored.json", R"({"id":"ignored"})");
+    first.Write("ignored.txt", "not a species input");
+    const auto a = first.Resolve(), b = second.Resolve();
+    ASSERT_TRUE(a.ok);
+    ASSERT_TRUE(b.ok);
+    EXPECT_EQ(a.preset_content_hash, b.preset_content_hash);
+    const auto snapshot = a.params.worldgen_dependencies;
+    ASSERT_NE(snapshot, nullptr);
+    EXPECT_EQ(snapshot->manifest, b.params.worldgen_dependencies->manifest);
+    ASSERT_EQ(snapshot->manifest.size(), 4u);
+    EXPECT_EQ(snapshot->manifest[1],
+              (std::vector<std::string>{
+                  "common/creatures/species/deer.json",
+                  Luminumbra::Replay::Fnv1a64Hex(SpeciesIdentityFixture::OriginalBytes())}));
+    EXPECT_EQ(snapshot->manifest[2][0],
+              "common/creatures/species/" + Luminumbra::Filesystem::GenericUtf8PathString(earlier));
+    EXPECT_EQ(snapshot->manifest[3][0],
+              "common/creatures/species/" + Luminumbra::Filesystem::GenericUtf8PathString(later));
+    ASSERT_NE(snapshot->species_table, nullptr);
+    ASSERT_EQ(snapshot->species_table->size(), 3u);
+    EXPECT_EQ(snapshot->species_table->all()[1].id, "first");
+    EXPECT_EQ(snapshot->species_table->all()[2].id, "last");
+    // Reopening changed bytes changes identity, but never the captured registry.
+    first.Write("deer.json", R"({"id":"deer","brain":{"wander_weight":0.9}})");
+    const auto changed = first.Resolve();
+    ASSERT_TRUE(changed.ok);
+    EXPECT_NE(changed.preset_content_hash, a.preset_content_hash);
+    const auto* changed_deer =
+        changed.params.worldgen_dependencies->species_table->FindByName("deer");
+    ASSERT_NE(changed_deer, nullptr);
+    EXPECT_FLOAT_EQ(changed_deer->brain.wander_weight, 0.9f);
+    const auto* deer = snapshot->species_table->FindByName("deer");
+    ASSERT_NE(deer, nullptr);
+    EXPECT_FLOAT_EQ(deer->brain.wander_weight, 0.25f);
+    EXPECT_FLOAT_EQ(deer->genome_ranges.core[0].lo, 1.0f);
+    EXPECT_FLOAT_EQ(deer->genome_ranges.core[0].hi, 2.0f);
+}
+
+TEST(GameSessionHeadlessWorldTest, SpeciesChangesRefuseLockstepAndReplayBeforeTicks) {
+    namespace net = Luminumbra::Net;
+    namespace replay = Luminumbra::Replay;
+    using Luminumbra::TestSupport::SpeciesIdentityFixture;
+    const SpeciesIdentityFixture fixture;
+    const auto baseline = fixture.Resolve();
+    ASSERT_TRUE(baseline.ok);
+    const auto& content_hash = baseline.preset_content_hash;
+    std::vector<std::pair<std::string, std::string>> variants;
+    const auto capture = [&](const std::string& name) {
+        const auto resolved = fixture.Resolve();
+        EXPECT_TRUE(resolved.ok);
+        EXPECT_NE(resolved.preset_content_hash, content_hash) << name;
+        variants.emplace_back(name, resolved.preset_content_hash);
+    };
+    auto species = nlohmann::json::parse(SpeciesIdentityFixture::OriginalBytes());
+    species["brain"]["wander_weight"] = 0.9;
+    fixture.Write("deer.json", species.dump());
+    capture("brain override");
+    species = nlohmann::json::parse(SpeciesIdentityFixture::OriginalBytes());
+    species["genome_ranges"]["move_speed"] = {2, 3};
+    fixture.Write("deer.json", species.dump());
+    capture("genome bounds");
+    fixture.Write("deer.json", SpeciesIdentityFixture::OriginalBytes() + "\n");
+    capture("exact bytes including whitespace");
+    fixture.Write("deer.json", "{invalid");
+    capture("rejected JSON bytes");
+    const auto rejected = fixture.Resolve();
+    ASSERT_TRUE(rejected.ok);
+    EXPECT_FALSE(rejected.warnings.empty());
+    EXPECT_EQ(rejected.params.worldgen_dependencies->species_table->size(), 0u);
+    fixture.Write("deer.json", SpeciesIdentityFixture::OriginalBytes());
+    fs::rename(fixture.Directory() / "deer.json", fixture.Directory() / "renamed.json");
+    capture("logical path");
+    fs::rename(fixture.Directory() / "renamed.json", fixture.Directory() / "deer.json");
+    fixture.Write("added.json", R"({"id":"added"})");
+    capture("added species");
+    fs::remove(fixture.Directory() / "added.json");
+    fs::remove(fixture.Directory() / "deer.json");
+    capture("removed species, empty directory");
+    fs::remove(fixture.Directory());
+    capture("absent species directory, older preset-only identity");
+    EXPECT_EQ(variants.back().second,
+              Luminumbra::world::TerrainPresetContentHash(SpeciesIdentityFixture::Preset()));
+
+    replay::ReplayHeader header;
+    header.seed = 424242;
+    header.preset = "default";
+    header.system_config_identity = GameSession{}.SystemConfigIdentity();
+    header.preset_content_hash = content_hash;
+    const Luminumbra::TestSupport::ScopedTempFile stream("species-replay-", ".lrec1");
+    const auto path = Luminumbra::Filesystem::GenericUtf8PathString(stream.Path());
+    replay::ReplayWriter writer;
+    ASSERT_TRUE(writer.Open(path, header));
+    ASSERT_TRUE(writer.Finalize(0));
+    const auto contents = replay::ReadReplay(path);
+    ASSERT_TRUE(contents.has_value());
+    if (!contents.has_value())
+        return;
+    ASSERT_FALSE(contents->truncated);
+    ASSERT_TRUE(contents->trailer_present);
+    EXPECT_EQ(contents->header.preset_content_hash, content_hash);
+    variants.emplace_back("identical species", content_hash);
+    for (const auto& [name, peer_hash] : variants) {
+        SCOPED_TRACE(name);
+        const bool equal = name == "identical species";
+        EXPECT_EQ(replay::ConfigurationMatches(
+                      contents->header, header.system_config_identity, peer_hash),
+                  equal);
+        auto reverse = contents->header;
+        reverse.preset_content_hash = peer_hash;
+        EXPECT_EQ(
+            replay::ConfigurationMatches(reverse, header.system_config_identity, content_hash),
+            equal);
+
+        auto [host_transport, peer_transport] = net::MakeLoopbackPair();
+        net::LockstepConfig config;
+        config.seed = header.seed;
+        config.preset = header.preset;
+        config.system_config_identity = header.system_config_identity;
+        config.preset_content_hash = content_hash;
+        net::HelloMsg hello;
+        hello.seed = config.seed;
+        hello.preset = config.preset;
+        hello.client_id = 1;
+        hello.system_config_identity = config.system_config_identity;
+        hello.preset_content_hash = peer_hash;
+        ASSERT_TRUE(peer_transport->SendFrame(net::EncodeHello(hello)));
+        std::uint64_t ticks = 0;
+        net::LockstepHooks hooks;
+        hooks.user = &ticks;
+        hooks.apply_and_step = [](std::uint64_t, const std::vector<std::uint8_t>&, void* user) {
+            ++*static_cast<std::uint64_t*>(user);
+            return true;
+        };
+        net::LockstepSession host(config, host_transport.get(), hooks);
+        EXPECT_EQ(host.Handshake(), equal);
+        EXPECT_EQ(host.Status().handshaken, equal);
+        EXPECT_EQ(ticks, 0u);
+    }
+}
+
+TEST(GameSessionHeadlessWorldTest, SpeciesIdentityIsAdoptedOnCreateLoadAndIoRefusal) {
+    using Luminumbra::TestSupport::SpeciesIdentityFixture;
+    const SpeciesIdentityFixture fixture;
+    const auto baseline = fixture.Resolve();
+    ASSERT_TRUE(baseline.ok);
+    // Reader failure coverage is independent of OS privilege/permission bits.
+    luminumbra::ai::CreatureSpeciesRegistry incomplete;
+    std::vector<std::string> errors;
+    bool io_failed = false;
+    const Luminumbra::World::WorldgenFileReader fail_read = [](const fs::path&, std::string&) {
+        return false;
+    };
+    EXPECT_EQ(incomplete.LoadFromDirectory(fixture.Directory(), errors, fail_read, &io_failed), 0u);
+    EXPECT_TRUE(io_failed);
+    EXPECT_FALSE(errors.empty());
+    JobSystem jobs;
+    jobs.startup(1);
+    {
+        GameSession created, loaded;
+        for (auto* session : {&created, &loaded}) {
+            session->SetJobSystem(&jobs);
+            session->SetRootPath(Luminumbra::Filesystem::GenericUtf8PathString(fixture.Root()));
+        }
+        ASSERT_TRUE(created.CreateWorld("Species identity", "777", "default"));
+        EXPECT_EQ(created.PresetContentHash(), baseline.preset_content_hash);
+        const auto id = created.GetMetadata().worldId;
+        ASSERT_TRUE(loaded.LoadWorld(id));
+        EXPECT_EQ(loaded.PresetContentHash(), created.PresetContentHash());
+        ASSERT_NE(created.GetSpeciesTable(), nullptr);
+        const auto* deer = created.GetSpeciesTable()->FindByName("deer");
+        ASSERT_NE(deer, nullptr);
+        EXPECT_FLOAT_EQ(deer->brain.wander_weight, 0.25f);
+        fixture.Write("deer.json", R"({"id":"deer","brain":{"wander_weight":0.9}})");
+        ASSERT_TRUE(loaded.LoadWorld(id));
+        EXPECT_NE(loaded.PresetContentHash(), created.PresetContentHash());
+        EXPECT_EQ(created.PresetContentHash(), baseline.preset_content_hash);
+        EXPECT_FLOAT_EQ(deer->brain.wander_weight, 0.25f);
+        // Saves adopt current content, like preset dependencies: no content hash
+        // is persisted in world metadata. A present unreadable input refuses
+        // before replacing the live world or publishing another identity.
+        const auto adopted = loaded.PresetContentHash();
+        const auto* world = loaded.GetWorldSystem();
+        const auto* table = loaded.GetSpeciesTable();
+        fs::remove_all(fixture.Directory());
+        {
+            std::ofstream blocker(fixture.Directory(), std::ios::binary);
+            blocker << "not a directory";
+        }
+        const auto refused = fixture.Resolve();
+        EXPECT_FALSE(refused.ok);
+        EXPECT_TRUE(refused.preset_content_hash.empty());
+        ASSERT_FALSE(refused.errors.empty());
+        EXPECT_NE(refused.errors.front().find("species"), std::string::npos);
+        EXPECT_FALSE(loaded.LoadWorld(id));
+        EXPECT_NE(loaded.GetWorldOpenError().find("species"), std::string::npos);
+        EXPECT_EQ(loaded.GetWorldSystem(), world);
+        EXPECT_EQ(loaded.GetSpeciesTable(), table);
+        EXPECT_EQ(loaded.PresetContentHash(), adopted);
+    }
+    jobs.shutdown();
+}
 
 TEST(GameSessionHeadlessWorldTest, ValidateWorldConfigIsSimulationOnlyByDefault) {
     const HeadlessRoot root;
