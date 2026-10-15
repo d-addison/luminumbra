@@ -75,6 +75,7 @@ public:
     // All flags off, all params unset (queries return the caller's fallback).
     [[nodiscard]] static SystemConfig Defaults();
     // Parse a systems.json document. Malformed/empty/blank text -> all-defaults (no throw).
+    // Raw NUL bytes are malformed, including after an otherwise valid document.
     [[nodiscard]] static SystemConfig FromJsonString(const std::string& json_text);
     // Load from disk. Missing/unreadable file -> all-defaults (no throw).
     [[nodiscard]] static SystemConfig LoadFromFile(const std::string& path);

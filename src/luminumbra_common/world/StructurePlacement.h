@@ -100,6 +100,7 @@ struct StructureVoxel {
 // Loads every piece JSON under data/common/structures/<type>/ plus the
 // type's placement.json (spacing/separation/salt/density). Unknown keys are
 // warnings, never errors (loader discipline matches TerrainPresetLoader).
+// Raw NUL bytes report the same per-file parse failure before adopting that file.
 StructureTemplatePool LoadStructureTemplatePool(const std::filesystem::path& type_dir,
                                                 const std::string& type);
 

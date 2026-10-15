@@ -7,6 +7,7 @@
 #include <fstream>
 #include <initializer_list>
 #include <optional>
+#include <sstream>
 #include <type_traits>
 
 #include "nlohmann/json.hpp"
@@ -118,15 +119,24 @@ BiomeClimateRange ParseRange(const nlohmann::json& climate, const char* key) {
 BiomeTable BiomeTable::Load(const std::filesystem::path& table_path) {
     BiomeTable table;
 
-    std::ifstream file(table_path);
+    std::ifstream file(table_path, std::ios::binary);
     if (!file.is_open()) {
         table.m_errors.push_back("failed to open biome table: " + table_path.string());
         return table;
     }
 
+    std::ostringstream buffer;
+    buffer << file.rdbuf();
+    const auto bytes = buffer.str();
+    // The JSON lexer treats raw NUL as end-of-input and can ignore a trailing suffix.
+    if (bytes.find('\0') != std::string::npos) {
+        table.m_errors.push_back("failed to parse biome table JSON '" + table_path.string() +
+                                 "': raw NUL in content");
+        return table;
+    }
     nlohmann::json data;
     try {
-        data = nlohmann::json::parse(file);
+        data = nlohmann::json::parse(bytes);
     } catch (const nlohmann::json::parse_error& e) {
         table.m_errors.push_back("failed to parse biome table JSON '" + table_path.string() +
                                  "': " + e.what());

@@ -105,7 +105,7 @@ struct TerrainPresetLoadResult {
 // must be objects, the six terrain noise fields must be numeric and
 // caves_enabled/cave_frequency must be present and typed. On any error the
 // result carries ok=false and human-readable messages; params/extras are only
-// meaningful when ok=true.
+// meaningful when ok=true. Raw NUL bytes refuse before parsing.
 TerrainPresetLoadResult LoadTerrainPreset(const std::filesystem::path& preset_path);
 
 //   (ADDITIVE in-memory seam — no struct/behavior change). Parses

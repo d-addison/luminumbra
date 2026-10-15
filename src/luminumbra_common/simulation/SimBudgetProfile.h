@@ -44,6 +44,7 @@ inline constexpr std::size_t kMaxProfileBytes = 64 * 1024;
 inline constexpr std::size_t kMaxProfileStages = 64;
 inline constexpr std::size_t kMaxProfileResidencyClasses = 32;
 
+// Raw NUL bytes are malformed input, including after an otherwise valid document.
 ProfileParse ParseSimBudgetProfile(std::string_view json) noexcept;
 
 // Returns the default configuration when the profile has no region_scheduler section.

@@ -105,6 +105,8 @@ SystemConfig SystemConfig::Defaults() {
 
 SystemConfig SystemConfig::FromJsonString(const std::string& json_text) {
     SystemConfig cfg; // start from all-defaults; overlay only what the JSON names
+    if (json_text.find('\0') != std::string::npos)
+        return cfg; // raw NUL is malformed JSON, not an end-of-input marker
 
     nlohmann::json data;
     try {
@@ -169,7 +171,7 @@ SystemConfig SystemConfig::FromJsonString(const std::string& json_text) {
 }
 
 SystemConfig SystemConfig::LoadFromFile(const std::string& path) {
-    std::ifstream file(path);
+    std::ifstream file(path, std::ios::binary);
     if (!file)
         return SystemConfig{}; // missing/unreadable -> defaults
     std::ostringstream buffer;

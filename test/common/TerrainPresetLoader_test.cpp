@@ -3,6 +3,8 @@
 // warnings, and the validation error contract.
 #include <gtest/gtest.h>
 
+#include "../support/UniqueTempPath.h"
+
 #include <filesystem>
 #include <fstream>
 #include <string>
@@ -53,6 +55,37 @@ constexpr const char* kMinimalPreset = R"({
     }
   }
 })";
+
+TEST(TerrainPresetLoaderTest, RawNulRefusesBeforeAdoptingPreset) {
+    const Luminumbra::TestSupport::ScopedTempFile file("preset_bytes_", ".json");
+    const auto write = [&](const std::string& bytes) {
+        std::ofstream output(file.Path(), std::ios::binary | std::ios::trunc);
+        output << bytes;
+        output.close();
+        ASSERT_TRUE(output.good());
+    };
+    write(kMinimalPreset);
+    const auto clean = LoadTerrainPreset(file.Path());
+    ASSERT_TRUE(clean.ok);
+    EXPECT_FLOAT_EQ(clean.params.base_amplitude, 12.0f);
+    for (const auto& invalid : {std::string(kMinimalPreset) + '\0',
+                                std::string(kMinimalPreset) + '\0' + "garbage",
+                                std::string(kMinimalPreset) + '\x1a' + '\0' + "garbage",
+                                '\0' + std::string(kMinimalPreset)}) {
+        write(invalid);
+        const auto refused = LoadTerrainPreset(file.Path());
+        EXPECT_FALSE(refused.ok);
+        ASSERT_EQ(refused.errors.size(), 1u);
+        EXPECT_NE(refused.errors.front().find("raw NUL"), std::string::npos);
+        EXPECT_FLOAT_EQ(refused.params.base_amplitude,
+                        Luminumbra::Systems::TerrainGenParams{}.base_amplitude);
+    }
+    write(kMinimalPreset);
+    const auto restored = LoadTerrainPreset(file.Path());
+    ASSERT_TRUE(restored.ok);
+    EXPECT_FLOAT_EQ(restored.params.base_amplitude, clean.params.base_amplitude);
+    EXPECT_EQ(restored.warnings, clean.warnings);
+}
 
 TEST(TerrainPresetLoaderTest, LoadsShippedDefaultPreset) {
     const TerrainPresetLoadResult result = LoadTerrainPreset(PresetDir() / "default.json");

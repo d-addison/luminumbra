@@ -2,6 +2,7 @@
 
 #include <fstream>
 #include <initializer_list>
+#include <sstream>
 
 #include "nlohmann/json.hpp"
 
@@ -167,15 +168,23 @@ void ParseBiomesBlock(const nlohmann::json& gen_params,
 TerrainPresetLoadResult LoadTerrainPreset(const std::filesystem::path& preset_path) {
     TerrainPresetLoadResult result;
 
-    std::ifstream file(preset_path);
+    std::ifstream file(preset_path, std::ios::binary);
     if (!file.is_open()) {
         result.errors.push_back("failed to open world preset: " + preset_path.string());
         return result;
     }
 
+    std::ostringstream buffer;
+    buffer << file.rdbuf();
+    const auto bytes = buffer.str();
+    if (bytes.find('\0') != std::string::npos) {
+        result.errors.push_back("failed to parse world preset JSON '" + preset_path.string() +
+                                "': raw NUL in content");
+        return result;
+    }
     nlohmann::json data;
     try {
-        data = nlohmann::json::parse(file);
+        data = nlohmann::json::parse(bytes);
     } catch (const nlohmann::json::parse_error& e) {
         result.errors.push_back("failed to parse world preset JSON '" + preset_path.string() +
                                 "': " + e.what());

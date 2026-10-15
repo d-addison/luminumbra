@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <fstream>
+#include <sstream>
 #include <system_error>
 
 #include "nlohmann/json.hpp"
@@ -113,10 +114,17 @@ StructureTemplatePool LoadStructureTemplatePool(const std::filesystem::path& typ
     // placement.json (optional; defaults documented in the header).
     const std::filesystem::path placement_path = type_dir / "placement.json";
     if (std::filesystem::exists(placement_path, ec)) {
-        std::ifstream file(placement_path);
+        std::ifstream file(placement_path, std::ios::binary);
+        std::ostringstream buffer;
+        buffer << file.rdbuf();
+        const auto bytes = buffer.str();
+        if (bytes.find('\0') != std::string::npos) {
+            pool.errors.push_back("placement.json parse error: raw NUL in content");
+            return pool;
+        }
         nlohmann::json data;
         try {
-            data = nlohmann::json::parse(file);
+            data = nlohmann::json::parse(bytes);
         } catch (const nlohmann::json::parse_error& e) {
             pool.errors.push_back(std::string("placement.json parse error: ") + e.what());
             return pool;
@@ -147,10 +155,18 @@ StructureTemplatePool LoadStructureTemplatePool(const std::filesystem::path& typ
     std::sort(piece_files.begin(), piece_files.end());
 
     for (const auto& piece_path : piece_files) {
-        std::ifstream file(piece_path);
+        std::ifstream file(piece_path, std::ios::binary);
+        std::ostringstream buffer;
+        buffer << file.rdbuf();
+        const auto bytes = buffer.str();
+        if (bytes.find('\0') != std::string::npos) {
+            pool.errors.push_back(piece_path.filename().string() +
+                                  " parse error: raw NUL in content");
+            continue;
+        }
         nlohmann::json data;
         try {
-            data = nlohmann::json::parse(file);
+            data = nlohmann::json::parse(bytes);
         } catch (const nlohmann::json::parse_error& e) {
             pool.errors.push_back(piece_path.filename().string() + std::string(" parse error: ") +
                                   e.what());

@@ -95,9 +95,9 @@ struct BiomeDefinition {
 class BiomeTable {
 public:
     // Loads and parses data/common/biomes.json. On any structural error the
-    // result is empty and errors carries human-readable messages. Unknown
-    // keys emit
-    // warnings, never errors (loader discipline matches TerrainPresetLoader).
+    // result is empty and errors carries human-readable messages. Raw NUL bytes
+    // are refused before parsing. Unknown keys emit warnings, never errors
+    // (loader discipline matches TerrainPresetLoader).
     static BiomeTable Load(const std::filesystem::path& table_path);
 
     bool ok() const {

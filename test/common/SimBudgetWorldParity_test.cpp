@@ -43,6 +43,7 @@ protected:
         fs::copy(fs::path(LUMINUMBRA_SOURCE_ROOT) / "data/common",
                  root / "data/common",
                  fs::copy_options::recursive);
+        fs::create_directories(root / "data/common/sim");
         const fs::path systems_path = root / "data/common/systems.json";
         nlohmann::json systems;
         {

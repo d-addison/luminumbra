@@ -397,15 +397,22 @@ must resolve in the matching inventory. Species filenames and paths do not ident
 Captured definitions and both registries are ordered by declared name using unsigned UTF-8 bytes,
 so enumeration and biome selection remain stable across filename changes.
 
-`data/common/sim/distant_policy.json` is optional. Clean absence, including an absent optional
-parent directory, selects the compiled table. Status, permission, open, read and change-during-read
-errors refuse; directories, symlinks and reparse points cannot substitute for content files or
-parents. Present policy documents require UTF-8 without BOM, LF line endings and a final LF.
-Species documents accept ordinary JSON whitespace. Both use duplicate-key detection before
+`data/common/sim/distant_policy.json` is optional. A missing leaf in an existing readable parent
+directory selects the compiled table. A missing parent, status, permission, open, read and
+change-during-read errors refuse; directories, symlinks and reparse points cannot substitute for
+content files or parents. Present policy documents require UTF-8 without BOM, LF line endings and a final LF.
+Species documents accept ordinary JSON whitespace. Raw NUL bytes refuse before parsing in both
+domains, including after an otherwise valid document. Both use duplicate-key detection before
 adoption, a nesting cap of 32, strings of at most 256 bytes, at most 256 entries in any collection,
 and at most 65,536 parser callback events. Unknown keys, wrong types, narrowing and non-finite
 simulation numbers refuse. Adoption is transactional and the session exposes only const content
 and registries. Later file edits cannot change an open world's policy.
+
+Biome tables, terrain presets, structure placement and piece documents, and species registry text
+also refuse raw NUL before parsing. Biome and preset loads report an error without adopting a table
+or preset; structure loads retain their existing per-file error handling. Malformed systems
+configuration, including raw NUL, selects defaults; malformed operator budget profiles refuse.
+Population configuration is caller-supplied identity framing, not a parsed document.
 
 The policy root has exactly `schema`, `creature_species` and `plant_species`;
 `schema` is `luminumbra.distant_policy.v1`. Every authored creature entry has exactly

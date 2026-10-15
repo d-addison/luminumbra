@@ -4,6 +4,8 @@
 // the test keeps the generated schema and runtime registry aligned.
 #include <gtest/gtest.h>
 
+#include "../support/UniqueTempPath.h"
+
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -45,6 +47,41 @@ TEST(SystemConfig, EmptyAndBlankJsonAreDefaults) {
         const SystemConfig cfg = SystemConfig::FromJsonString(text);
         EXPECT_FALSE(cfg.enabled(SysKey::SimPlantGrowth)) << "input: " << text;
     }
+}
+
+TEST(SystemConfig, RawNulRefusesWholeConfiguration) {
+    const std::string bytes =
+        R"({"sim":{"plant_growth":{"enabled":true,"params":{"mutation_rate":0.08}}}})";
+    const auto clean = SystemConfig::FromJsonString(bytes);
+    ASSERT_TRUE(clean.enabled(SysKey::SimPlantGrowth));
+    EXPECT_FLOAT_EQ(clean.param(SysParam::PlantMutationRate, -1.0f), 0.08f);
+    const Luminumbra::TestSupport::ScopedTempFile file("config_bytes_", ".json");
+    const auto write = [&](const std::string& content) {
+        std::ofstream output(file.Path(), std::ios::binary | std::ios::trunc);
+        output << content;
+        output.close();
+        ASSERT_TRUE(output.good());
+    };
+    for (const auto& invalid : {bytes + '\0',
+                                bytes + '\0' + "garbage",
+                                bytes + '\x1a' + '\0' + "garbage",
+                                '\0' + bytes}) {
+        write(invalid);
+        const auto refused_file = SystemConfig::LoadFromFile(file.Path().string());
+        EXPECT_FALSE(refused_file.enabled(SysKey::SimPlantGrowth));
+        EXPECT_EQ(refused_file.ComputeConfigSubHash(),
+                  SystemConfig::Defaults().ComputeConfigSubHash());
+        EXPECT_FLOAT_EQ(refused_file.param(SysParam::PlantMutationRate, -1.0f), -1.0f);
+        const auto refused = SystemConfig::FromJsonString(invalid);
+        EXPECT_FALSE(refused.enabled(SysKey::SimPlantGrowth));
+        EXPECT_EQ(refused.ComputeConfigSubHash(), SystemConfig::Defaults().ComputeConfigSubHash());
+        EXPECT_FLOAT_EQ(refused.param(SysParam::PlantMutationRate, -1.0f), -1.0f);
+    }
+    write(bytes);
+    EXPECT_EQ(SystemConfig::LoadFromFile(file.Path().string()).ComputeConfigSubHash(),
+              clean.ComputeConfigSubHash());
+    EXPECT_EQ(SystemConfig::FromJsonString(bytes).ComputeConfigSubHash(),
+              clean.ComputeConfigSubHash());
 }
 
 // param parse + defaults round-trip; unknown keys ignored.
