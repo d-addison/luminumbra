@@ -53,7 +53,7 @@ Retained evidence:
 
 - None qualified for this catalog row.
 
-Next action: Refresh main-menu normal/focus/notification states at explicit display scales; submit clean image with typography/contrast and navigation evidence.
+Next action: Refresh main-menu normal/focus/notification states at explicit display scales; submit clean image with typography/contrast and navigation evidence. Native acceptance not produced for v0.3.0 is deferred to v0.3.1.
 
 ## U02
 
@@ -111,7 +111,7 @@ Retained evidence:
 
 - None qualified for this catalog row.
 
-Next action: Capture creation form and actual preview for every preset with valid/invalid inputs and small-window action visibility; measure preview changes and latest-wins behavior.
+Next action: Capture creation form and actual preview for every preset with valid/invalid inputs and small-window action visibility; measure preview changes and latest-wins behavior. Native acceptance not produced for v0.3.0 is deferred to v0.3.1.
 
 ## U03
 
@@ -125,9 +125,10 @@ Fixture: Empty/populated/selected/pending/corrupt/missing/obsolete/future/error 
 
 Source links:
 
-- [data/ui/world_selection.rml](https://github.com/d-addison/luminumbra/blob/945ecd295835a838eed0169ff709e7aabc134fa1/data/ui/world_selection.rml)
-- [test/ui/ui_smoke_test.cpp](https://github.com/d-addison/luminumbra/blob/945ecd295835a838eed0169ff709e7aabc134fa1/test/ui/ui_smoke_test.cpp)
-- [test/ui/ui_page_load_test.cpp](https://github.com/d-addison/luminumbra/blob/945ecd295835a838eed0169ff709e7aabc134fa1/test/ui/ui_page_load_test.cpp)
+- [data/ui/world_selection.rml](https://github.com/d-addison/luminumbra/blob/6b5f955d928bc6c443fc79cc0ac4a06a38765b55/data/ui/world_selection.rml)
+- [test/ui/ui_smoke_test.cpp](https://github.com/d-addison/luminumbra/blob/6b5f955d928bc6c443fc79cc0ac4a06a38765b55/test/ui/ui_smoke_test.cpp)
+- [test/ui/ui_page_load_test.cpp](https://github.com/d-addison/luminumbra/blob/6b5f955d928bc6c443fc79cc0ac4a06a38765b55/test/ui/ui_page_load_test.cpp)
+- [test/persistence/world_open_refusal_test.cpp](https://github.com/d-addison/luminumbra/blob/6b5f955d928bc6c443fc79cc0ac4a06a38765b55/test/persistence/world_open_refusal_test.cpp)
 
 Required variants:
 
@@ -162,13 +163,13 @@ Acceptance checks:
 - Empty/populated/selected/pending/corrupt/missing/obsolete/future/error states; actual IDs, refusal reason and live navigation proof. Existing maintained screenshot covers only one state.
 - Meet the shared packet contract and preserve independent regression checks; each listed variant is required.
 
-Source reconciliation at `945ecd295835a838eed0169ff709e7aabc134fa1`: Maintained screenshot test captures one default selection page; refused/corrupt/future save and interaction variants remain unqualified.
+Source reconciliation at `6b5f955d928bc6c443fc79cc0ac4a06a38765b55`: Synthetic fixtures, catalog responsiveness, saved-world lifecycle, native refusal fixtures and scheduler-fault regression coverage are implemented. Complete native UI/persistence packets remain outstanding and are deferred to v0.3.1 when not produced for v0.3.0; the separate owner Windows tag-gate smoke remains required.
 
 Retained evidence:
 
 - None qualified for this catalog row.
 
-Next action: Build disposable empty/populated/pending/refused save states; capture actual messages and selection behavior without private user saves.
+Next action: Build disposable empty/populated/pending/refused save states; capture actual messages and selection behavior without private user saves. Native acceptance not produced for v0.3.0 is deferred to v0.3.1.
 
 ## U04
 
@@ -216,7 +217,7 @@ Retained evidence:
 
 - None qualified for this catalog row.
 
-Next action: Capture all authored settings sections and disabled-audio state with actual roundtrip values, focus and scale checks.
+Next action: Capture all authored settings sections and disabled-audio state with actual roundtrip values, focus and scale checks. Native acceptance not produced for v0.3.0 is deferred to v0.3.1.
 
 ## U05
 
@@ -265,7 +266,7 @@ Retained evidence:
 
 - None qualified for this catalog row.
 
-Next action: Capture real paused gameplay and action/focus states; preserve visible world context and verify resume/settings/save transitions.
+Next action: Capture real paused gameplay and action/focus states; preserve visible world context and verify resume/settings/save transitions. Native acceptance not produced for v0.3.0 is deferred to v0.3.1.
 
 ## U06
 
@@ -312,7 +313,7 @@ Retained evidence:
 
 - None qualified for this catalog row.
 
-Next action: Trace actual photo-output path, capture control overlay and resulting clean image with camera/exposure settings; verify file and pixel identity.
+Next action: Trace actual photo-output path, capture control overlay and resulting clean image with camera/exposure settings; verify file and pixel identity. Native acceptance not produced for v0.3.0 is deferred to v0.3.1.
 
 ## U07
 
@@ -359,7 +360,7 @@ Retained evidence:
 
 - None qualified for this catalog row.
 
-Next action: Populate gallery only from captured public fixtures, record empty/populated/selected states and tie each thumbnail to full original.
+Next action: Populate gallery only from captured public fixtures, record empty/populated/selected states and tie each thumbnail to full original. Native acceptance not produced for v0.3.0 is deferred to v0.3.1.
 
 ## U08
 
@@ -406,7 +407,7 @@ Retained evidence:
 
 - None qualified for this catalog row.
 
-Next action: Enumerate implemented HUD states, then capture bright/dark/busy contexts with triggering game state and readable scale variants.
+Next action: Enumerate implemented HUD states, then capture bright/dark/busy contexts with triggering game state and readable scale variants. Native acceptance not produced for v0.3.0 is deferred to v0.3.1.
 
 ## U09
 
@@ -453,7 +454,7 @@ Retained evidence:
 
 - None qualified for this catalog row.
 
-Next action: Capture actual undiscovered/discovered species entries and navigation/scroll state from public content; separate live data from decorative examples.
+Next action: Capture actual undiscovered/discovered species entries and navigation/scroll state from public content; separate live data from decorative examples. Native acceptance not produced for v0.3.0 is deferred to v0.3.1.
 
 ## U10
 
@@ -501,4 +502,4 @@ Retained evidence:
 
 - None qualified for this catalog row.
 
-Next action: Map window.rml to actual consumers, capture rename/delete/overwrite/cancel dialogs and focus restoration instead of inventing a standalone screen.
+Next action: Map window.rml to actual consumers, capture rename/delete/overwrite/cancel dialogs and focus restoration instead of inventing a standalone screen. Native acceptance not produced for v0.3.0 is deferred to v0.3.1.
