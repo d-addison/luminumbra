@@ -48,19 +48,26 @@ def path_without_extended_prefix(path, *, require_ordinary=False):
         # Strip only drive/UNC prefixes; other device namespaces are distinct.
         if text[:8].casefold() == '\\\\?\\unc\\':
             ordinary = '\\\\' + text[8:]
+            components = text[8:].split('\\')
+            # Server and share names are not subject to Win32 filename rules.
+            valid_root = len(components) >= 2 and all(components[:2])
+            components = components[2:]
         elif (text.startswith('\\\\?\\') and len(text) >= 7
               and text[4] in 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ'
               and text[5:7] == ':\\'):
             ordinary = text[4:]
+            valid_root = True
+            components = ordinary.split('\\')
         else:
             return type(path)(text)
         # Win32 normalizes names only without the prefix. MAX_PATH includes the
         # terminating NUL and counts UTF-16 code units, not Python characters.
-        safe = (len(ordinary.encode('utf-16-le', errors='surrogatepass')) // 2 < 260
+        safe = (valid_root
+                and len(ordinary.encode('utf-16-le', errors='surrogatepass')) // 2 < 260
                 and '/' not in ordinary
                 and all(not component.endswith(('.', ' '))
                         and not _windows_device_name(component)
-                        for component in ordinary.split('\\') if component))
+                        for component in components if component))
         if safe:
             text = ordinary
         elif require_ordinary:

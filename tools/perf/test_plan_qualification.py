@@ -402,7 +402,8 @@ class PathResolutionTests(unittest.TestCase):
                          for stem in ('COM', 'LPT') for digit in range(1, 10)
                          for extension in ('', '.exe'))
         with self.windows_paths() as WindowsPath:
-            for root in (r'\\?\C:\qualification', r'\\?\UNC\server\share'):
+            for root in (r'\\?\C:\qualification', r'\\?\UNC\server\share',
+                         r'\\?\UNC\nas\aux'):
                 for component in ('client.exe.', 'client.exe ', '..') + devices:
                     for tail in ('', r'\client.exe'):
                         text = root + '\\' + component + tail
@@ -527,7 +528,8 @@ class PathResolutionTests(unittest.TestCase):
         windows.name = 'nt'
         for ordinary, extended in (
                 (r'C:\RUNNER~1\evidence', r'\\?\C:\RUNNER~1\evidence'),
-                (r'\\server\share\evidence', r'\\?\UNC\server\share\evidence')):
+                (r'\\server\share\evidence', r'\\?\UNC\server\share\evidence'),
+                (r'\\nas\aux\qualification', r'\\?\UNC\nas\aux\qualification')):
             with self.subTest(path=ordinary), \
                     mock.patch.object(runner, 'os', windows), \
                     mock.patch.object(runner, 'Path', WindowsPath):
@@ -542,6 +544,54 @@ class PathResolutionTests(unittest.TestCase):
                     WindowsPath(ordinary) / 'Capture.json'))
                 with self.assertRaisesRegex(OSError, 'output overlaps a lock sidecar'):
                     runner._output_identity(WindowsPath(extended) / 'Capture.json.LOCK')
+
+    def test_unc_share_aliases_contend_on_the_same_output_lock(self):
+        sidecar_stat = runner._sidecar_stat
+        open_sidecar = runner._open_sidecar
+        lock_handle = runner._lock_handle
+        with tempfile.TemporaryDirectory() as directory:
+            # Map the Windows path model to real local sidecars and native locks.
+            def local_sidecar(path):
+                return Path(directory) / path.name
+
+            def lock_native(handle, path):
+                with mock.patch.object(runner, 'os', os):
+                    lock_handle(handle, path)
+
+            with self.windows_paths() as WindowsPath, \
+                    mock.patch.object(runner, '_sidecar_stat',
+                                      side_effect=lambda p: sidecar_stat(local_sidecar(p))), \
+                    mock.patch.object(runner, '_open_sidecar',
+                                      side_effect=lambda p: open_sidecar(local_sidecar(p))) as opened, \
+                    mock.patch.object(runner, '_check_output'), \
+                    mock.patch.object(runner, '_lock_handle', side_effect=lock_native), \
+                    mock.patch.object(runner, 'msvcrt', getattr(runner, 'msvcrt', mock.Mock()),
+                                      create=True):
+                ordinary = WindowsPath(r'\\nas\aux\qualification\capture.json')
+                extended = WindowsPath(r'\\?\UNC\nas\aux\qualification\capture.json')
+                self.assertEqual(runner._output_identity(ordinary),
+                                 runner._output_identity(extended))
+                for owner, contender in ((ordinary, extended), (extended, ordinary)):
+                    with self.subTest(owner=owner), runner._output_locks((owner,)):
+                        with self.assertRaises(FileExistsError):
+                            with runner._output_locks((contender,)):
+                                self.fail('a competing invocation acquired the held output lock')
+                        self.assertEqual(opened.call_args_list[-2], opened.call_args_list[-1])
+
+    def test_extended_unc_root_checks_only_server_and_share_emptiness(self):
+        with self.windows_paths():
+            for root in (r'aux\share', 'nas.\\share ', r'nas\aux'):
+                ordinary = '\\\\' + root + r'\qualification\capture.json'
+                extended = '\\\\?\\UNC\\' + ordinary[2:]
+                with self.subTest(root=root):
+                    self.assertEqual(runner.path_without_extended_prefix(
+                        extended, require_ordinary=True), ordinary)
+            for root in ('nas', 'nas\\', r'\share', r'nas\\share'):
+                extended = '\\\\?\\UNC\\' + root
+                with self.subTest(root=root):
+                    self.assertEqual(runner.path_without_extended_prefix(extended), extended)
+                    with self.assertRaisesRegex(OSError, 'safely normalized'):
+                        runner.path_without_extended_prefix(extended, require_ordinary=True)
 
     def test_resolution_preserves_other_namespaces_and_posix_names(self):
         for platform, path in (
