@@ -510,13 +510,15 @@ TEST(WorldSaveRegionFormat, CorruptRegionFileReportsErrors) {
     EXPECT_FALSE(errors.empty());
 }
 
-TEST(WorldSaveRegionFormat, CompressedSizeWrappingPayloadOffsetIsRefused) {
+TEST(WorldSaveRegionFormat, MaximalCompressedSizeIsRefusedAsTruncated) {
     TempSaveDir save_dir("payload_bounds");
     const auto path = WorldSaveService::region_file_path(save_dir.path, 0, 0);
     std::filesystem::create_directories(path.parent_path());
 
-    // One valid v2 manifest entry, no payload. On 32-bit size_t, adding the
-    // declared UINT32_MAX compressed size to payload offset 26 wraps to 25.
+    // One valid v2 manifest entry, no payload, declaring a UINT32_MAX
+    // compressed size. With 64-bit size_t this checks the truncated-payload
+    // refusal; the offset + size wraparound it also guards against (26 +
+    // UINT32_MAX wrapping to 25) is only reachable where size_t is 32-bit.
     std::string bytes("LMR1\x02\x00\x01\x00", 8);
     bytes.append(18, '\0');
     bytes[8 + 10] = 1; // raw size
