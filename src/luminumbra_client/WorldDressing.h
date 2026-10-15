@@ -20,18 +20,31 @@
 // stream state threads through the three Compute* calls explicitly. Never split
 // the loops per-cell.
 //
-// placements are client decoration seeded from the spawn anchor and
-// never feed world_hash (the inline code never did either). NO GL and NO entt
-// here — the placement structs carry everything the main-thread consume needs to
+// Placements are client decoration seeded from the spawn anchor and
+// never feed world_hash. Placement computation has no GL or registry access;
+// the separate attachment inventory reads persisted creatures. The structs carry
+// everything the main-thread consume needs to
 // do the (cheap) GL upload / EnTT / physics registrations afterwards.
 
 #include <cstdint>
+#include <entt/entt.hpp>
 #include <functional>
 #include <string>
 #include <vector>
 
 #include <glm/glm.hpp>
 #include <glm/gtc/quaternion.hpp>
+
+namespace luminumbra::ai {
+struct CreatureSpecies;
+}
+namespace luminumbra::animation {
+struct Skeleton;
+struct AnimationClip;
+} // namespace luminumbra::animation
+namespace Luminumbra::Systems {
+class PhysicsSystem;
+}
 
 namespace Luminumbra::Client {
 
@@ -75,6 +88,7 @@ struct WorldDressingParams {
     // a successfully loaded rig were all present at dispatch time.
     bool compute_wildlife = false;
     int herd_count = 12; // render.creature_spawn SpawnHerdCount (config-resolved)
+    bool active_regions = false;
 };
 
 // One tree candidate that PASSED every rejection test, in loop order.
@@ -162,5 +176,33 @@ std::vector<CreaturePlacement> ComputeWildlifePlacements(const WorldDressingPara
 // ONE sequential computation — the body of the single background job.
 WorldDressingResult ComputeWorldDressing(const WorldDressingParams& params,
                                          const WorldDressingCallbacks& cbs);
+
+struct CreaturePresentationAttachment {
+    std::uint64_t persistent_id = 0;
+    entt::entity entity = entt::null;
+    std::uint16_t species_id = 0;
+};
+// Read-only, identity-ordered inventory; never admits simulation entities.
+std::vector<CreaturePresentationAttachment>
+CreaturePresentationAttachments(const entt::registry& registry);
+
+// Main-thread entity/animation/physics side effects shared by the frame consumer
+// and CPU regression tests. No rendering context is required.
+void ConsumeDressingPlacement(entt::registry& registry, const TreePlacement& placement);
+void ConsumeDressingPlacement(entt::registry& registry, const RockPlacement& placement);
+void ConsumeDressingPlacement(entt::registry& registry, const BushPlacement& placement);
+struct DressingWildlifeOptions {
+    bool active_regions = false;
+    float init_hunger = 0.0f;
+    float pred_speed = 0.0f;
+    float prey_speed = 0.0f;
+    const luminumbra::animation::Skeleton* skeleton = nullptr;
+    const luminumbra::animation::AnimationClip* clip = nullptr;
+    Luminumbra::Systems::PhysicsSystem* physics = nullptr;
+};
+bool ConsumeDressingWildlife(entt::registry& registry,
+                             const CreaturePlacement& placement,
+                             const std::vector<luminumbra::ai::CreatureSpecies>& roster,
+                             const DressingWildlifeOptions& options);
 
 } // namespace Luminumbra::Client

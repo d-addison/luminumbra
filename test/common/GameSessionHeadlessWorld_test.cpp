@@ -351,8 +351,8 @@ nlohmann::json SessionWorldSubHashes(GameSession& session) {
             {"aether", aether},
             {"scents", session.ComputeScentSubHash()},
             {"ecology",
-             session.FoldClockIntoEcologyHash(
-                 luminumbra::ai::ComputeEcologySubHash(session.GetRegistry()))},
+             session.FoldClockIntoEcologyHash(luminumbra::ai::ComputeEcologySubHash(
+                 session.GetRegistry(), session.ActiveRegionsEnabled()))},
             {"plants", session.ComputePlantSubHash()}};
 }
 
@@ -7803,8 +7803,8 @@ TEST(GameSessionHeadlessWorldTest, S8FFlagOffPreservesTrajectorySaveFileCountHas
     CheckLegacyCreatureSessionOracle();
 }
 
-TEST(GameSessionHeadlessWorldTest,
-     CreatureControllerPreparationFaultStopsBatchAndRecoverySaveContinues) {
+namespace {
+void CheckControllerFrameFaultRecovery() {
     for (const std::uint64_t fault_tick : {1ull, 2ull, 3ull}) {
         const HeadlessRoot root;
         JobSystem jobs;
@@ -7853,6 +7853,17 @@ TEST(GameSessionHeadlessWorldTest,
         ASSERT_FALSE(restored.GetRegionSchedulerFault());
         EXPECT_EQ(restored.GetActiveRegionLedger().next_persistent_id(), next);
     }
+}
+
+} // namespace
+
+TEST(GameSessionHeadlessWorldTest,
+     CreatureControllerPreparationFaultStopsBatchAndRecoverySaveContinues) {
+    CheckControllerFrameFaultRecovery();
+}
+
+TEST(CreatureHostAcceptance, ControllerFaultStopsFirstMiddleAndLastFrameTicks) {
+    CheckControllerFrameFaultRecovery();
 }
 
 namespace {
@@ -8412,4 +8423,241 @@ TEST(GameSessionHeadlessWorldTest, ActivationFaultsStopFirstMiddleAndLastFrameTi
 TEST(GameSessionHeadlessWorldTest, S8GFlagOffPreservesSaveFileCountHashAndArtifactBytes) {
     CheckLegacyCreatureSessionOracle();
 }
+} // namespace
+
+namespace {
+void CompareCompleteCreatureAuthority(GameSession& actual, GameSession& expected) {
+    EXPECT_EQ(PopulationCreatureBytes(actual), PopulationCreatureBytes(expected));
+    EXPECT_EQ(SessionWorldSubHashes(actual), SessionWorldSubHashes(expected));
+    EXPECT_EQ(SessionWorldHash(actual), SessionWorldHash(expected));
+    EXPECT_EQ(actual.GetFieldPages().canonical_bytes(), expected.GetFieldPages().canonical_bytes());
+    EXPECT_EQ(actual.GetGroundObjects().canonical_bytes(),
+              expected.GetGroundObjects().canonical_bytes());
+    EXPECT_EQ(actual.GetActiveRegionLedger().records(), expected.GetActiveRegionLedger().records());
+    EXPECT_EQ(actual.GetActiveRegionLedger().completed_work(),
+              expected.GetActiveRegionLedger().completed_work());
+    EXPECT_EQ(actual.GetActiveRegionLedger().pending_activations(),
+              expected.GetActiveRegionLedger().pending_activations());
+    EXPECT_EQ(actual.GetActiveRegionLedger().next_persistent_id(),
+              expected.GetActiveRegionLedger().next_persistent_id());
+}
+void CheckTierContinuation(unsigned checkpoint) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession base, live, restored;
+    CreateGroundWorld(base, root, jobs, "Creature tier continuation");
+    S8Creature(base, {8.0f, 100.0f, 8.0f});
+    S8Creature(base, {1025.0f, 100.0f, 8.0f}, C::CreatureTier::Coarse);
+    S8Creature(base, {-1025.0f, 100.0f, 8.0f}, C::CreatureTier::Coarse);
+    S8Creature(base, {5121.0f, 100.0f, 8.0f});
+    const auto saved_roster = S8A::BuildCreatureSnapshot(base.GetRegistry());
+    ASSERT_EQ(saved_roster.entities.size(), 4u);
+    ASSERT_TRUE(base.SaveWorld());
+    auto ledger = FixtureLedger(100,
+                                {{{0, 0}, RegionState::Active},
+                                 {{2, 0}, RegionState::Active},
+                                 {{-3, 0}, RegionState::Reduced},
+                                 {{10, 0}, RegionState::Frozen}});
+    ASSERT_NO_FATAL_FAILURE(S8InstallLedger(base, ledger));
+    EnableSnapshotSession(live, root, jobs);
+    ASSERT_TRUE(live.LoadWorld(base.GetMetadata().worldId)) << live.GetWorldOpenError();
+    const auto loaded_roster = S8A::BuildCreatureSnapshot(live.GetRegistry());
+    ASSERT_EQ(loaded_roster.entities.size(), saved_roster.entities.size());
+    for (std::size_t i = 0; i < saved_roster.entities.size(); ++i)
+        ASSERT_EQ(loaded_roster.entities[i].id, saved_roster.entities[i].id);
+    ASSERT_EQ(PopulationCreatureBytes(live), PopulationCreatureBytes(base));
+    const auto frozen_before = S8A::CreatureRegionProjection(live.GetRegistry(), {10, 0});
+    for (unsigned tick = 0; tick < checkpoint; ++tick) {
+        live.SetReplicatedSimulationAnchors(
+            tick % 2 == 0 ? std::vector<Luminumbra::Vec3>{{8.0f, 100.0f, 8.0f}}
+                          : std::vector<Luminumbra::Vec3>{});
+        TickOnce(live);
+        ASSERT_FALSE(live.GetRegionSchedulerFault());
+    }
+    ASSERT_TRUE(live.SaveWorld());
+    EnableSnapshotSession(restored, root, jobs);
+    ASSERT_TRUE(restored.LoadWorld(live.GetMetadata().worldId)) << restored.GetWorldOpenError();
+    const auto restored_roster = S8A::BuildCreatureSnapshot(restored.GetRegistry());
+    ASSERT_EQ(restored_roster.entities.size(), saved_roster.entities.size());
+    for (std::size_t i = 0; i < saved_roster.entities.size(); ++i)
+        ASSERT_EQ(restored_roster.entities[i].id, saved_roster.entities[i].id);
+    CompareCompleteCreatureAuthority(restored, live);
+    for (unsigned group = 0; group < 3; ++group) {
+        const auto anchors = group % 2 == 0 ? std::vector<Luminumbra::Vec3>{{8.0f, 100.0f, 8.0f}}
+                                            : std::vector<Luminumbra::Vec3>{};
+        live.SetReplicatedSimulationAnchors(anchors);
+        restored.SetReplicatedSimulationAnchors(anchors);
+        ASSERT_EQ(live.TickSimulation(live.GetSimulationClock().fixed_dt() * 2.0), 2u);
+        TickOnce(restored);
+        TickOnce(restored);
+        ASSERT_FALSE(live.GetRegionSchedulerFault());
+        ASSERT_FALSE(restored.GetRegionSchedulerFault());
+        CompareCompleteCreatureAuthority(restored, live);
+    }
+    EXPECT_EQ(S8A::CreatureRegionProjection(live.GetRegistry(), {10, 0}), frozen_before);
+    EXPECT_GT(live.GetCreatureActivity().promotions, 0u);
+    EXPECT_GT(live.GetCreatureActivity().demotions, 0u);
+}
+TEST(CreatureHostAcceptance, RegisteredPopulationWaitsForFirstRealTick) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    std::vector<Luminumbra::world::RegionKey> calls;
+    PreparePopulationWorld(session, root, jobs, &calls);
+    ASSERT_EQ(session.GetSimulationTickCount(), 0u);
+    ASSERT_TRUE(calls.empty());
+    ASSERT_TRUE(S8A::BuildCreatureSnapshot(session.GetRegistry()).entities.empty());
+    ASSERT_EQ(session.GetActiveRegionLedger().next_persistent_id(), 1u);
+    TickOnce(session);
+    ASSERT_FALSE(session.GetRegionSchedulerFault());
+    ASSERT_GE(calls.size(), 2u);
+    const auto roster = S8A::BuildCreatureSnapshot(session.GetRegistry());
+    ASSERT_EQ(roster.entities.size(), calls.size());
+    for (const auto& creature : roster.entities) {
+        EXPECT_EQ(creature.components.at("Region").at("data").at("region_stamp"), 1u);
+        EXPECT_EQ(creature.components.at("Coarse").at("data").at("age_cadences"), 0u);
+    }
+}
+
+TEST(CreatureHostAcceptance, SaveLoadContinuationAcrossAllCreatureTiers) {
+    for (unsigned checkpoint : {0u, 1u, 2u, 3u}) {
+        SCOPED_TRACE(checkpoint);
+        CheckTierContinuation(checkpoint);
+    }
+}
+
+void CheckBirthContinuation(unsigned checkpoint) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession live, restored;
+    CreateGroundWorld(live, root, jobs, "Creature birth continuation");
+    const auto position = live.GetMetadata().spawnPoint;
+    const auto mother = S8Creature(live, position), father = S8Creature(live, position);
+    auto& registry = live.GetRegistry();
+    for (const auto entity : {mother, father}) {
+        auto& genome = registry.emplace<C::CreatureGenomeComponent>(entity);
+        genome.female = entity == mother;
+        genome.age_ticks = 120u;
+        registry.get<C::CreatureComponent>(entity).hunger = .05f;
+    }
+    registry.emplace<C::SensesComponent>(mother).nearest_food_source = father;
+    registry.emplace<C::ActionPlanComponent>(mother).plan = {{"observe", father, 5.0f, false}};
+    S8A::ReproductionTuning tuning;
+    tuning.courtship_ticks = 2u;
+    live.SetReproductionTuning(tuning);
+    for (unsigned tick = 0; tick < checkpoint; ++tick)
+        TickOnce(live);
+    ASSERT_FALSE(live.GetRegionSchedulerFault());
+    ASSERT_TRUE(live.SaveWorld());
+    EnableSnapshotSession(restored, root, jobs);
+    restored.SetReproductionTuning(tuning);
+    ASSERT_TRUE(restored.LoadWorld(live.GetMetadata().worldId)) << restored.GetWorldOpenError();
+    CompareCompleteCreatureAuthority(restored, live);
+    const auto restored_mother = S8FindCreature(restored, 1);
+    const auto restored_father = S8FindCreature(restored, 2);
+    ASSERT_NE(restored_mother, entt::null);
+    ASSERT_NE(restored_father, entt::null);
+    EXPECT_EQ(restored.GetRegistry().get<C::SensesComponent>(restored_mother).nearest_food_source,
+              restored_father);
+    for (unsigned tick = 0; tick < 4; ++tick) {
+        TickOnce(live);
+        TickOnce(restored);
+        ASSERT_FALSE(live.GetRegionSchedulerFault());
+        ASSERT_FALSE(restored.GetRegionSchedulerFault());
+        CompareCompleteCreatureAuthority(restored, live);
+    }
+    EXPECT_GT(live.GetRegistry().view<C::CreatureComponent>().size(), 2u);
+    EXPECT_GT(live.GetCreatureActivity().births, 0u);
+}
+TEST(CreatureHostAcceptance, SaveLoadContinuationIncludesBirthsAndPersistentReferences) {
+    for (unsigned checkpoint : {0u, 1u, 2u, 3u}) {
+        SCOPED_TRACE(checkpoint);
+        CheckBirthContinuation(checkpoint);
+    }
+}
+
+TEST(CreatureHostAcceptance, SaveLoadContinuationIncludesPendingTravelAndFields) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession live, restored;
+    CreateGroundWorld(live, root, jobs, "Pending travel continuation");
+    live.SetReplicatedSimulationAnchors({});
+    const auto entity = S8Creature(live, {511.999f, 100.0f, 8.0f}, C::CreatureTier::Coarse);
+    auto& coarse = live.GetRegistry().get<C::CreatureCoarseComponent>(entity);
+    coarse.travel_pending = true;
+    coarse.destination_x = 1;
+    coarse.destination_z = 0;
+    coarse.transition = C::CreatureTransition::Promote;
+    coarse.needs = {{"curiosity", 12345u}};
+    auto& needs = live.GetRegistry().emplace<C::NeedsComponent>(entity);
+    needs.needs = {{"curiosity", .012345f, .0001f}};
+    auto& emitter = live.GetRegistry().emplace<C::FieldEmitterComponent>(entity);
+    emitter.channel = 0;
+    emitter.rate_raw_per_tick = 7u;
+    ASSERT_TRUE(live.SetFoliageCell({511.0f, 100.0f, 8.0f}, true, 37));
+    ASSERT_FALSE(live.GetRegionSchedulerFault());
+    EXPECT_TRUE(live.GetRegistry().get<C::CreatureCoarseComponent>(entity).travel_pending);
+    // Compiled zero travel retains the parked destination.
+    ASSERT_TRUE(live.SaveWorld());
+    EnableSnapshotSession(restored, root, jobs);
+    ASSERT_TRUE(restored.LoadWorld(live.GetMetadata().worldId)) << restored.GetWorldOpenError();
+    restored.SetReplicatedSimulationAnchors({});
+    CompareCompleteCreatureAuthority(restored, live);
+    for (unsigned tick = 0; tick < 4; ++tick) {
+        TickOnce(live);
+        TickOnce(restored);
+        ASSERT_FALSE(live.GetRegionSchedulerFault());
+        ASSERT_FALSE(restored.GetRegionSchedulerFault());
+        CompareCompleteCreatureAuthority(restored, live);
+        EXPECT_EQ(restored.SoilNutrientAt({511.0f, 100.0f, 8.0f}),
+                  live.SoilNutrientAt({511.0f, 100.0f, 8.0f}));
+    }
+}
+
+TEST(CreatureHostAcceptance, SaveLoadContinuationIncludesCompletedWorkAndActivationOutbox) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession live, restored;
+    PreparePopulationWorld(live, root, jobs);
+    bool saved = false;
+    std::optional<luminumbra::simulation::ActivationDeliveryKey> delivery;
+    live.GetSimulationEventBus().subscribe([&](const auto& event) {
+        if (!event.activation || saved)
+            return;
+        delivery = event.activation;
+        saved = live.SaveWorld();
+    });
+    TickOnce(live);
+    ASSERT_FALSE(live.GetRegionSchedulerFault());
+    ASSERT_TRUE(saved);
+    ASSERT_TRUE(delivery);
+    ASSERT_FALSE(live.GetActiveRegionLedger().completed_work().empty());
+    restored.SetRegionPopulator(SessionPopulation());
+    EnableSnapshotSession(restored, root, jobs);
+    ASSERT_TRUE(restored.LoadWorld(live.GetMetadata().worldId)) << restored.GetWorldOpenError();
+    restored.SetReplicatedSimulationAnchors({});
+    ASSERT_FALSE(restored.GetActiveRegionLedger().pending_activations().empty());
+    EXPECT_EQ(restored.GetActiveRegionLedger().completed_work(),
+              live.GetActiveRegionLedger().completed_work());
+    EXPECT_EQ(PopulationCreatureBytes(restored), PopulationCreatureBytes(live));
+    unsigned delivered = 0;
+    restored.GetSimulationEventBus().subscribe([&](const auto& event) {
+        if (event.activation == delivery)
+            ++delivered;
+    });
+    for (unsigned tick = 0; tick < 4; ++tick) {
+        TickOnce(live);
+        TickOnce(restored);
+        ASSERT_FALSE(live.GetRegionSchedulerFault());
+        ASSERT_FALSE(restored.GetRegionSchedulerFault());
+        CompareCompleteCreatureAuthority(restored, live);
+    }
+    EXPECT_EQ(delivered, 1u);
+}
+
 } // namespace

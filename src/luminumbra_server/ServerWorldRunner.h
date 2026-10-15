@@ -76,6 +76,8 @@ struct ServerWorldRunnerConfig {
     // the composite world_hash differs from pre-fold ONLY by the appended
     // `|ecology:` suffix (additivity guard).
     bool ecology_roster = false;
+    // Optional game-authored population contract, captured before content admission.
+    std::optional<world::RegionPopulator> region_populator;
     //  opt-in deterministic PLANT roster (6 plants) so the smoke exercises the
     // plant sub-hash + growth + persistence end-to-end. DEFAULT false -> empty -> plant_hash
     // neutral.
@@ -239,6 +241,8 @@ public:
     // into ComposeWorldHash as the 6th canonical term and surfaced to the gate
     // for the run==replay assertion.
     std::string ComputeEcologySubHash() const;
+    // Complete persisted authority, including optional components and references.
+    std::string CreatureProjection() const;
     // gate-populated-world-replay: live count of CreatureComponent-bearing
     // entities (for the gate's non-vacuity check: start != end => births/culls).
     [[nodiscard]] std::size_t CreatureCount() const;
@@ -268,7 +272,7 @@ public:
     }
 
     //  apply a player's network movement input (normalized world XZ in
-    // [-1,1]) to its avatar's physics for the next tick. player_id == avatar index.
+    // [-1,1]) to its explicitly mapped physics handle for the next tick.
     // The caller decodes this from the replicated usercmd; persists until changed.
     void SetAvatarMove(std::uint32_t player_id, float move_x, float move_z);
 
@@ -283,6 +287,7 @@ private:
     Luminumbra::JobSystem m_jobSystem;
     std::unique_ptr<world::GameSession> m_session;
     std::vector<World::PlayerAvatar> m_avatars; // Deterministic player avatars.
+    std::vector<std::size_t> m_playerHandles;
     //  gate: per-tick (tick_index, availability digest), filled by RunFixedTicks
     // only when m_config.availability_trace is set. See AvailabilityTrace.
     std::vector<std::pair<std::uint64_t, std::string>> m_avail_trace;

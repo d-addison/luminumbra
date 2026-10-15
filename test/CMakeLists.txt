@@ -404,7 +404,7 @@ target_link_libraries(environmental_audio_model_test PRIVATE
 # world-dressing placement determinism. Compiles the
 # extracted client-side WorldDressing.cpp directly (it depends only on
 # luminumbra_common's DeterministicRng / plant-genome / creature-build headers +
-# glm — no GL, no entt storage, no world system) and drives it with synthetic
+# glm; attachments read EnTT authority without GL or a world system) and uses synthetic
 # callbacks: same inputs must produce a byte-identical placement stream, and the
 # tree/rock/bush loops must share ONE sequential RNG stream (the legacy layout
 # contract that keeps the async extraction byte-equal to the old inline loops).
@@ -1508,6 +1508,7 @@ target_link_libraries(frontier_gates_test PRIVATE
 add_executable(world_open_refusal_test
     persistence/world_open_refusal_test.cpp
     common/SimBudgetWorldParity_test.cpp
+    common/CreatureHostAcceptance_test.cpp
     persistence/async_saved_world_catalog_test.cpp
     persistence/saved_world_catalog_responsiveness_test.cpp
     persistence/host_scheduler_fault_test.cpp

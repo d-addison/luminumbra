@@ -1,6 +1,7 @@
 #include "../support/SimulationContentFixture.h"
 #include <gtest/gtest.h>
 
+#include "luminumbra_common/components/CreatureComponents.h"
 #include "luminumbra_common/core/JobSystem.h"
 #include "luminumbra_common/persistence/SavedWorldCatalog.h"
 #include "luminumbra_common/persistence/SyntheticSaveFixture.h"
@@ -804,3 +805,75 @@ TEST_F(WorldOpenRefusal, LegacyExplicitSessionSnapshotsKeepLargeKeylessMetadata)
 }
 
 } // namespace
+
+TEST_F(WorldOpenRefusal, LegacyEnabledWorldWithoutS8RecordsAdoptsAndStamps) {
+    EXPECT_FALSE(fs::exists(WorldSaveService::creature_entities_path(save)));
+    EXPECT_FALSE(fs::exists(WorldSaveService::active_regions_path(save)));
+    GameSession session;
+    session.SetJobSystem(&jobs);
+    session.SetRootPath(RootString());
+    session.SetActiveRegionsEnabled(true);
+    const auto original_bytes = DiskBytes(save);
+    ASSERT_TRUE(session.LoadWorld("fixture")) << session.GetWorldOpenError();
+    EXPECT_EQ(DiskBytes(save), original_bytes);
+    EXPECT_TRUE(session.GetActiveRegionLedger().content_identity().has_value());
+    EXPECT_TRUE(session.GetRegistry().view<Luminumbra::Components::CreatureComponent>().empty());
+    ASSERT_TRUE(session.SaveWorld());
+    ASSERT_TRUE(session.SaveWorldState());
+    EXPECT_TRUE(fs::exists(WorldSaveService::active_regions_path(save)));
+    EXPECT_TRUE(Persistence::snapshot_index_exists(save));
+    GameSession reopened;
+    reopened.SetJobSystem(&jobs);
+    reopened.SetRootPath(RootString());
+    reopened.SetActiveRegionsEnabled(true);
+    ASSERT_TRUE(reopened.LoadWorld("fixture")) << reopened.GetWorldOpenError();
+    EXPECT_EQ(reopened.GetActiveRegionLedger().content_identity(),
+              session.GetActiveRegionLedger().content_identity());
+}
+
+TEST_F(WorldOpenRefusal, PresentMalformedCreatureOrActivationDataRefuses) {
+    for (const bool creatures : {true, false}) {
+        const auto path = creatures ? WorldSaveService::creature_entities_path(save)
+                                    : WorldSaveService::active_regions_path(save);
+        Write(path,
+              creatures ? "{\"schema\":\"luminumbra.creature_entities.v1\",\"entities\":[{}]}"
+                        : "malformed activation ledger");
+        const auto before = DiskBytes(save);
+        GameSession session;
+        session.SetJobSystem(&jobs);
+        session.SetRootPath(RootString());
+        session.SetActiveRegionsEnabled(true);
+        EXPECT_FALSE(session.LoadWorld("fixture"));
+        EXPECT_FALSE(session.GetWorldOpenError().empty());
+        EXPECT_EQ(DiskBytes(save), before);
+        ASSERT_TRUE(fs::remove(path));
+    }
+}
+
+TEST_F(WorldOpenRefusal, PresentContentMismatchPreservesCurrentWorld) {
+    GameSession writer;
+    writer.SetJobSystem(&jobs);
+    writer.SetRootPath(RootString());
+    writer.SetActiveRegionsEnabled(true);
+    ASSERT_TRUE(writer.LoadWorld("fixture"));
+    ASSERT_TRUE(writer.SaveWorld());
+    ASSERT_TRUE(writer.SaveWorldState());
+    Write(root / "data/common/creatures/species/fixture_creature.json",
+          R"({"id":"fixture_creature","predator":true})");
+    GameSession live;
+    live.SetJobSystem(&jobs);
+    live.SetRootPath(RootString());
+    live.SetActiveRegionsEnabled(true);
+    ASSERT_TRUE(live.CreateWorld("Current world", "1337", "default"));
+    const auto current_id = live.GetMetadata().worldId;
+    const auto current_clock = live.GetWorldClock().tick();
+    const auto current_ledger = live.GetActiveRegionLedger().canonical_bytes();
+    const auto before = DiskBytes(save);
+    EXPECT_FALSE(live.LoadWorld("fixture"));
+    EXPECT_FALSE(live.GetWorldOpenError().empty());
+    EXPECT_EQ(live.GetMetadata().worldId, current_id);
+    EXPECT_EQ(live.GetWorldClock().tick(), current_clock);
+    EXPECT_EQ(live.GetActiveRegionLedger().canonical_bytes(), current_ledger);
+    EXPECT_EQ(DiskBytes(save), before);
+    EXPECT_TRUE(live.SaveWorldState());
+}

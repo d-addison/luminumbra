@@ -1,5 +1,6 @@
 #include "ModeHelpers.h"
 #include "Modes.h"
+#include "luminumbra_common/core/SystemConfig.h"
 #include "luminumbra_common/replay/RegionScheduleTrace.h"
 
 namespace fs = std::filesystem;
@@ -25,6 +26,20 @@ namespace {
 // ---------------------------------------------------------------------------
 
 constexpr std::uint64_t kCheckpointIntervalTicks = 30; // one second at 30 Hz
+
+Luminumbra::Server::ServerWorldRunnerConfig ReplayBootConfig(const ServerCliOptions& options) {
+    const fs::path root = options.root.empty() ? fs::path(".") : fs::path(options.root);
+    fs::path systems = root / "data/common/systems.json";
+    std::error_code error;
+    if (!fs::exists(systems, error))
+        systems = fs::path("data/common/systems.json");
+    const auto configuration = luminumbra::core::SystemConfig::LoadFromFile(systems.string());
+    if (configuration.enabled(luminumbra::core::SysKey::SimActiveRegions))
+        return RunnerConfigFrom(options);
+    Luminumbra::Server::ServerWorldRunnerConfig config;
+    config.root_path = options.root;
+    return config;
+}
 
 // Captures a checkpoint record at the given tick from a booted runner. Uses the
 // single-snapshot combined hash path (one settled-state read per checkpoint).
@@ -176,8 +191,9 @@ int RunReplay(const ServerCliOptions& options) {
     }
 
     // Boot the session from the header parameters (mirror ServerWorldRunnerConfig).
-    Luminumbra::Server::ServerWorldRunnerConfig config;
-    config.root_path = options.root;
+    // Population options construct the same admitted identity as recording.
+    // start_world_hash rejects a changed identity before replay ticks execute.
+    auto config = ReplayBootConfig(options);
     config.seed = header.seed_string;
     config.preset = header.preset;
     config.world_id.clear();

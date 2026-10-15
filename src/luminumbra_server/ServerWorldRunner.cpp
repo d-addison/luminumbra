@@ -10,9 +10,11 @@
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <stdexcept>
 #include <utility>
 #include <vector>
 
+#include "luminumbra_common/ai/CreaturePersistence.h"
 #include "luminumbra_common/ai/EcologyHash.h"
 #include "luminumbra_common/components/AlarmComponents.h"
 #include "luminumbra_common/components/CoreComponents.h"
@@ -43,6 +45,26 @@
 namespace Luminumbra::Server {
 
 namespace {
+
+world::RegionPopulator AcceptancePopulation() {
+    world::RegionPopulator populator;
+    populator.contract = "headless-creatures:v1";
+    populator.canonical_configuration =
+        R"({"region":[0,0],"origin_m":[8,32,8],"species":["ridgeback_stalker","grovestrider"],"count":8,"spacing_m":2.4,"physics_controlled":false})";
+    populator.populate = [](const world::RegionPopulateRequest& request) {
+        if (request.key != world::RegionKey{0, 0})
+            return;
+        const float x = 8.0f;
+        const float z = 8.0f;
+        for (int i = 0; i < 8; ++i) {
+            const auto species =
+                Components::CreatureSpeciesId16(i < 2 ? "ridgeback_stalker" : "grovestrider");
+            request.sink.spawn(world::CreatureSpawnCommand{
+                species, Vec3(x - 7.0f + static_cast<float>(i) * 2.4f, 32.0f, z), false});
+        }
+    };
+    return populator;
+}
 
 // water-smoke: deterministic wet anchor — the nearest point to spawn where the PURE
 // worldgen samplers say standing water exists (WaterLevelAt > terrain): sea or a lake
@@ -273,6 +295,13 @@ bool ServerWorldRunner::Boot() {
     // A headless host has no client asset manifest; simulation assets alone are
     // validated and every voxel field uses the authoritative CPU generator.
 
+    if (m_session->ActiveRegionsEnabled()) {
+        if (m_config.region_populator)
+            m_session->SetRegionPopulator(*m_config.region_populator);
+        else if (m_config.ecology_roster)
+            m_session->SetRegionPopulator(AcceptancePopulation());
+    }
+
     bool world_ready = false;
     if (!m_config.world_id.empty()) {
         world_ready = m_session->LoadWorld(m_config.world_id);
@@ -354,7 +383,9 @@ bool ServerWorldRunner::Boot() {
     // vector in RunFixedTicks and fold into the `entities` sub-hash. avatar_count
     // == 0 leaves m_avatars empty -> the zero-avatar single-anchor / empty-entity lane.
     m_avatars.clear();
-    physics_system->clear_avatar_characters();
+    m_playerHandles.clear();
+    if (!m_session->ActiveRegionsEnabled())
+        physics_system->clear_avatar_characters();
     if (m_config.avatar_count > 0) {
         m_avatars.reserve(static_cast<std::size_t>(m_config.avatar_count));
         for (int i = 0; i < m_config.avatar_count; ++i) {
@@ -372,7 +403,10 @@ bool ServerWorldRunner::Boot() {
             avatar.facing = static_cast<float>(i) * 2.39996323f;
             m_avatars.push_back(avatar);
             // Create one server-authoritative physics capsule per avatar.
-            physics_system->create_avatar_character(avatar.position);
+            m_playerHandles.push_back(
+                m_session->ActiveRegionsEnabled()
+                    ? physics_system->create_avatar_handle(avatar.position, Vec3(0.0f), false)
+                    : physics_system->create_avatar_character(avatar.position));
         }
         LUMINUMBRA_CORE_INFO(
             "ServerWorldRunner: spawned {} deterministic player avatar(s) (+physics characters).",
@@ -433,7 +467,7 @@ bool ServerWorldRunner::Boot() {
     // only by the appended `|ecology:` suffix (additivity guard). The roster is
     // spawned AFTER the surface horizon is ready (anchor Y resolved), though the
     // kinematic lane never queries terrain.
-    if (m_config.ecology_roster) {
+    if (m_config.ecology_roster && !m_session->ActiveRegionsEnabled()) {
         SpawnEcologyRoster(m_session->GetRegistry(), spawn_anchor);
         LUMINUMBRA_CORE_INFO(
             "ServerWorldRunner: spawned deterministic ecology roster ({} creatures, kinematic).",
@@ -577,7 +611,13 @@ void ServerWorldRunner::SetAvatarMove(std::uint32_t player_id, float move_x, flo
         return;
     // Normalized input -> wish velocity. A gentle walk speed (zen game, not a sprinter).
     constexpr float kWalkSpeedMs = 4.0f;
-    physics->set_avatar_wish_velocity(static_cast<std::size_t>(player_id),
+    const auto found = std::find_if(m_avatars.begin(), m_avatars.end(), [player_id](const auto& a) {
+        return a.player_id == player_id;
+    });
+    if (found == m_avatars.end())
+        return;
+    const auto index = static_cast<std::size_t>(found - m_avatars.begin());
+    physics->set_avatar_wish_velocity(m_playerHandles.at(index),
                                       glm::vec2(move_x, move_z) * kWalkSpeedMs);
 }
 
@@ -635,10 +675,16 @@ ServerTickReport ServerWorldRunner::RunFixedTicks(std::uint64_t tick_count) {
         // transforms back into m_avatars, so the streaming anchors + the
         // `entities` sub-hash reflect the physics-authoritative positions.
         if (!m_avatars.empty()) {
-            physics_system->update_avatars(static_cast<float>(fixed_dt));
+            if (m_session->ActiveRegionsEnabled()) {
+                if (!physics_system->update_selected_avatars(m_playerHandles,
+                                                             static_cast<float>(fixed_dt)))
+                    throw std::runtime_error("Selected player physics step refused");
+            } else {
+                physics_system->update_avatars(static_cast<float>(fixed_dt));
+            }
             for (std::size_t i = 0; i < m_avatars.size(); ++i) {
-                m_avatars[i].position = physics_system->get_avatar_position(i);
-                m_avatars[i].velocity = physics_system->get_avatar_velocity(i);
+                m_avatars[i].position = physics_system->get_avatar_position(m_playerHandles.at(i));
+                m_avatars[i].velocity = physics_system->get_avatar_velocity(m_playerHandles.at(i));
             }
         }
         physics_budget.Finish();
@@ -1141,8 +1187,15 @@ std::string ServerWorldRunner::ComputeEcologySubHash() const {
     if (!m_session) {
         return {};
     }
-    return m_session->FoldClockIntoEcologyHash(
-        luminumbra::ai::ComputeEcologySubHash(m_session->GetRegistry()));
+    return m_session->FoldClockIntoEcologyHash(luminumbra::ai::ComputeEcologySubHash(
+        m_session->GetRegistry(), m_session->ActiveRegionsEnabled()));
+}
+
+std::string ServerWorldRunner::CreatureProjection() const {
+    if (!m_session)
+        return {};
+    return luminumbra::ai::SerializeCreatureSnapshot(
+        luminumbra::ai::BuildCreatureSnapshot(m_session->GetRegistry()));
 }
 
 std::size_t ServerWorldRunner::CreatureCount() const {

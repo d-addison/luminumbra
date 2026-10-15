@@ -6,6 +6,22 @@
 // byte-identical to what shipped inline.
 
 #include "WorldDressing.h"
+#include "app/GameAssets.h"
+#include "luminumbra_common/ai/CreatureSpeciesRegistry.h"
+#include "luminumbra_common/animation/AnimationRuntime.h"
+#include "luminumbra_common/components/AlarmComponents.h"
+#include "luminumbra_common/components/CircadianComponents.h"
+#include "luminumbra_common/components/CoreComponents.h"
+#include "luminumbra_common/components/DecayComponents.h"
+#include "luminumbra_common/components/MigratoryComponents.h"
+#include "luminumbra_common/components/MortalComponents.h"
+#include "luminumbra_common/components/PackHunterComponents.h"
+#include "luminumbra_common/components/ScavengerComponent.h"
+#include "luminumbra_common/components/TerritoryComponents.h"
+#include "luminumbra_common/components/ThirstComponents.h"
+#include "luminumbra_common/systems/PhysicsSystem.h"
+
+#include "luminumbra_common/components/CreatureComponents.h"
 
 #include "luminumbra_common/core/DeterministicRng.h"
 #include "luminumbra_common/systems/CreatureProcgen.h"   // genome -> body-proportion build
@@ -263,6 +279,8 @@ std::vector<BushPlacement> ComputeBushPlacements(const WorldDressingParams& para
 std::vector<CreaturePlacement> ComputeWildlifePlacements(const WorldDressingParams& params,
                                                          const WorldDressingCallbacks& cbs) {
     std::vector<CreaturePlacement> out;
+    if (params.active_regions)
+        return out;
     // LIVING WORLD ambient-wildlife candidate loop (moved verbatim). Its own
     // DeterministicRng stream — independent of the scatter frand stream. A
     // water-cell candidate `continue`s after only the ang/rad draws, exactly as
@@ -331,10 +349,163 @@ WorldDressingResult ComputeWorldDressing(const WorldDressingParams& params,
     result.trees = ComputeTreePlacements(params, cbs, rng);
     result.rocks = ComputeRockPlacements(params, cbs, rng);
     result.bushes = ComputeBushPlacements(params, cbs, rng);
-    if (params.compute_wildlife) {
+    if (params.compute_wildlife && !params.active_regions) {
         result.wildlife = ComputeWildlifePlacements(params, cbs);
     }
     return result;
+}
+
+std::vector<CreaturePresentationAttachment>
+CreaturePresentationAttachments(const entt::registry& registry) {
+    namespace C = Luminumbra::Components;
+    std::vector<CreaturePresentationAttachment> result;
+    const auto creatures = registry.view<const C::CreatureComponent,
+                                         const C::CreatureRegionComponent,
+                                         const C::CreatureCoarseComponent>();
+    for (const auto entity : creatures) {
+        const auto& region = creatures.get<const C::CreatureRegionComponent>(entity);
+        if (region.persistent_id != 0)
+            result.push_back({region.persistent_id,
+                              entity,
+                              creatures.get<const C::CreatureComponent>(entity).species_id});
+    }
+    std::sort(result.begin(), result.end(), [](const auto& a, const auto& b) {
+        return a.persistent_id < b.persistent_id;
+    });
+    return result;
+}
+
+void ConsumeDressingPlacement(entt::registry& reg, const TreePlacement& t) {
+    if (t.palette_index < 0)
+        return; // empty palette: counted, nothing to emit
+    const Luminumbra::Vec3 treeScale(t.eff_scale, t.eff_scale, t.eff_scale);
+    auto emit = [&](const std::string& meshKey, std::uint32_t mat) {
+        const auto e = reg.create();
+        auto& tf = reg.emplace<Luminumbra::Components::TransformComponent>(e);
+        tf.position = t.position;
+        tf.scale = treeScale;
+        tf.rotation = t.rotation;
+        auto& sm = reg.emplace<Luminumbra::Components::StaticMeshComponent>(e);
+        sm.meshPath = meshKey;
+        sm.materialId = mat;
+    };
+    emit(std::string(App::kTreeMeshPrefix) + "trunk.lmesh", 2u);
+    emit(std::string(App::kTreeMeshPrefix) + "branches.lmesh", 2u);
+    emit(std::string(App::kTreeMeshPrefix) + "leaves.lmesh", 3u);
+}
+
+void ConsumeDressingPlacement(entt::registry& reg, const RockPlacement& r) {
+    const auto e = reg.create();
+    auto& tf = reg.emplace<Luminumbra::Components::TransformComponent>(e);
+    tf.position = r.position; // settled into ground
+    tf.scale = r.scale;
+    tf.rotation = r.rotation;
+    auto& sm = reg.emplace<Luminumbra::Components::StaticMeshComponent>(e);
+    sm.meshPath = "procgen://rock_" + std::to_string(r.palette_index);
+    sm.materialId = 1u; // Stone -> stone triplanar texture
+}
+
+void ConsumeDressingPlacement(entt::registry& reg, const BushPlacement& b) {
+    const auto e = reg.create();
+    auto& tf = reg.emplace<Luminumbra::Components::TransformComponent>(e);
+    tf.position = b.position; // settled into ground
+    tf.scale = b.scale;
+    tf.rotation = b.rotation;
+    auto& sm = reg.emplace<Luminumbra::Components::StaticMeshComponent>(e);
+    sm.meshPath = "procgen://bush_" + std::to_string(b.palette_index);
+    sm.materialId = 3u; // grass/green leaf material (shrub foliage)
+}
+bool ConsumeDressingWildlife(entt::registry& reg,
+                             const CreaturePlacement& c,
+                             const std::vector<luminumbra::ai::CreatureSpecies>& roster,
+                             const DressingWildlifeOptions& options) {
+    namespace anim = luminumbra::animation;
+    if (options.active_regions)
+        return false;
+    if (c.kind == Luminumbra::Client::CreaturePlacement::Kind::WaterHole) {
+        // A DRINKING SPOT at the water so the wired thirst
+        // system has somewhere to steer creatures.
+        const auto he = reg.create();
+        auto& htf = reg.emplace<Luminumbra::Components::TransformComponent>(he);
+        htf.position = c.position;
+        reg.emplace<Luminumbra::Components::WaterHoleComponent>(he).radius = 6.0f;
+        return false;
+    }
+    if (c.species_index < 0 || static_cast<std::size_t>(c.species_index) >= roster.size())
+        return false; // defensive: the roster never changes mid-session
+    const auto& sp = roster[static_cast<std::size_t>(c.species_index)];
+    const auto e = reg.create();
+    auto& tf = reg.emplace<Luminumbra::Components::TransformComponent>(e);
+    tf.position = c.position; // settle onto ground (gy + 1.2)
+    tf.scale = Luminumbra::Vec3(c.build_scale.x, c.build_scale.y, c.build_scale.z);
+    tf.rotation = glm::angleAxis(c.yaw, glm::vec3(0.0f, 1.0f, 0.0f));
+    auto& sm = reg.emplace<Luminumbra::Components::SkinnedMeshComponent>(e);
+    sm.meshPath = "data/models/creatures/grovestrider/grovestrider.lmesh";
+    sm.materialId = 3u;
+    sm.tintR = sp.base_color[0];
+    sm.tintG = sp.base_color[1];
+    sm.tintB = sp.base_color[2];
+    auto& cr = reg.emplace<Luminumbra::Components::CreatureComponent>(e);
+    cr.species_id = sp.species_id();
+    cr.is_predator = sp.predator;
+    cr.hunger = options.init_hunger;
+    cr.move_speed = sp.predator ? options.pred_speed : options.prey_speed;
+    auto& gn = reg.emplace<Luminumbra::Components::CreatureGenomeComponent>(e);
+    gn.move_speed = cr.move_speed;
+    gn.size_scale = c.size;
+    gn.female = c.female;
+    gn.age_ticks = 100u;
+    // Survival: every creature thirsts (seeks the drinking spots
+    // above); predators also scavenge carrion. Activates the wired
+    // Thirst/Scavenging tick systems in the living world.
+    auto& th = reg.emplace<Luminumbra::Components::ThirstComponent>(e);
+    th.thirst = c.thirst;
+    if (sp.predator)
+        reg.emplace<Luminumbra::Components::ScavengerComponent>(e);
+    // a circadian clock -> the creature sleeps in its
+    // off-phase (diurnal at night, nocturnal by day). The brain's
+    // Sleep utility reads CircadianComponent.activity. Nocturnal is
+    // now a per-species DATA flag (creatures/species/*.json), so a new
+    // species can be nocturnal without a client recompile.
+    reg.emplace<Luminumbra::Components::CircadianComponent>(e).nocturnal = sp.nocturnal ? 1u : 0u;
+    // the built-but-unstamped behavior
+    // components join the CLIENT ambient roster (never feeds server
+    // hashes — this registry is client decoration): prey herds get
+    // ALARM vigilance (collective flee), predators get PACK-HUNTER
+    // flank coordination; everyone claims a TERRITORY home range at
+    // its spawn point and carries the MIGRATORY seasonal-drive slot.
+    // Mortal/Decay lifecycle prep: a long seeded lifespan so ambient
+    // populations turn over slowly (the calm-demo's fast lifecycle
+    // stays demo-only).
+    if (sp.predator) {
+        reg.emplace<Luminumbra::Components::PackHunterComponent>(e);
+    } else {
+        reg.emplace<Luminumbra::Components::AlarmComponent>(e);
+    }
+    {
+        auto& terr_home = reg.emplace<Luminumbra::Components::TerritoryComponent>(e);
+        terr_home.home_x = c.position.x;
+        terr_home.home_z = c.position.z;
+        terr_home.radius = sp.predator ? 60.0f : 35.0f;
+        terr_home.established = 1;
+        reg.emplace<Luminumbra::Components::MigratoryComponent>(e);
+        auto& mort = reg.emplace<Luminumbra::Components::MortalComponent>(e);
+        const std::uint32_t jit =
+            static_cast<std::uint32_t>(entt::to_integral(e) * 2654435761u) % 36000u;
+        mort.lifespan_ticks = 108000u + jit; // ~60-80 min @30Hz ambient turnover
+        reg.emplace<Luminumbra::Components::DecayComponent>(e).decay_duration = 900u;
+    }
+    auto& pl = reg.emplace<anim::AnimationPlayerComponent>(e);
+    pl.skeleton = options.skeleton;
+    pl.clip = options.clip;
+    pl.time = c.anim_phase * 2.0; // staggered phase
+    pl.looping = true;
+    if (options.physics) {
+        const std::size_t idx = options.physics->create_avatar_character(
+            glm::vec3(c.position.x, c.position.y, c.position.z));
+        reg.emplace<Luminumbra::Components::CreaturePhysicsComponent>(e, idx);
+    }
+    return true;
 }
 
 } // namespace Luminumbra::Client
