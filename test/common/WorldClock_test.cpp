@@ -529,11 +529,11 @@ TEST(WorldClockTest, SimulationClockResetRestoresBaseAndClearsFrameRemainder) {
     EXPECT_EQ(simulation.tick_count(), 0u); // legacy unsigned wrap, guarded by enabled WorldClock
 }
 
-TEST(WorldClockTest, ActiveRegionsIsGeneratedHashedAndDefaultOff) {
+TEST(WorldClockTest, ActiveRegionsIsGeneratedHashedAndDefaultOn) {
     using namespace luminumbra::core;
     const SystemConfig defaults;
-    EXPECT_FALSE(defaults.enabled(SysKey::SimActiveRegions));
-    EXPECT_TRUE(defaults.ComputeConfigSubHash().empty());
+    EXPECT_TRUE(defaults.enabled(SysKey::SimActiveRegions));
+    EXPECT_FALSE(defaults.ComputeConfigSubHash().empty());
     const auto enabled =
         SystemConfig::FromJsonString(R"({"sim":{"active_regions":{"enabled":true}}})");
     EXPECT_TRUE(enabled.enabled(SysKey::SimActiveRegions));

@@ -88,6 +88,10 @@ Python regressions overlap two invocations for both core and WER collection and
 check that each receipt contains only its own artifact. This locks cooperating
 harness invocations; unrelated dump producers still need a separate directory.
 
+A POSIX dump-preflight failure with `--allow-no-dumps` retains its diagnostics
+and disables core-directory locking and collection for that run, allowing the
+child checks to run. Writer-completion detection is tracked in issue #306.
+
 Receipts retain the label `process repetitions`. A passed receipt proves its
 process/gtest checks passed; it does not by itself qualify native crash-dump
 capture. Dump preflight overrides and collection errors remain recorded.

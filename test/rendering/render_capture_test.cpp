@@ -1,3 +1,4 @@
+#include "../fixtures/TerrainFixtureParams.h"
 #include "gtest/gtest.h"
 
 #define GLFW_INCLUDE_NONE
@@ -251,7 +252,7 @@ void SetMat3(GLuint program, const char* name, const glm::mat3& value) {
 }
 
 TerrainGenParams CaptureTerrainParams() {
-    TerrainGenParams params;
+    TerrainGenParams params = Luminumbra::Test::SyntheticTerrainParams();
     params.base_frequency = 0.035f;
     params.base_amplitude = 8.0f;
     params.octaves = 5;
@@ -268,7 +269,7 @@ TerrainGenParams CaptureTerrainParams() {
 }
 
 TerrainGenParams CaptureWaterParams() {
-    TerrainGenParams params;
+    TerrainGenParams params = Luminumbra::Test::SyntheticTerrainParams();
     params.base_frequency = 0.02f;
     params.base_amplitude = 1.0f;
     params.height_offset = -4.0f;
@@ -296,6 +297,8 @@ CaptureScene BuildTerrainScene() {
 CaptureScene BuildWaterScene() {
     SHIELD_WorldSystem world(nullptr, nullptr, CaptureWaterParams(), kSeed);
     WaterSystem water(nullptr, &world);
+    water.SetSimResolution(8);
+    water.SetHydrology(false, 0, 0);
     Chunk chunk({0, 0, 0});
     world.GenerateChunkData(chunk);
     chunk.water_level_data.assign(static_cast<std::size_t>(WATER_SIM_RESOLUTION_X) *

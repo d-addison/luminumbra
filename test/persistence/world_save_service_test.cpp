@@ -1,3 +1,4 @@
+#include "../fixtures/TerrainFixtureParams.h"
 #include "gtest/gtest.h"
 
 #include "../support/CalendarMetadataCases.h"
@@ -205,7 +206,7 @@ TEST(ChunkDirtyTracking, SaveDirtyChunksWithoutDirtyChunksWritesNothing) {
 }
 
 TEST(ChunkDirtyTracking, GenerationAndMeshingLeaveChunkClean) {
-    Luminumbra::Systems::TerrainGenParams params;
+    Luminumbra::Systems::TerrainGenParams params = Luminumbra::Test::SyntheticTerrainParams();
     params.base_amplitude = 0.0f;
     params.height_offset = 8.0f;
     params.caves_enabled = false;
@@ -558,13 +559,20 @@ TEST(WorldSaveService, SupportedCalendarWritesNormalizeOnlyOnSuccessfulExplicitS
         EXPECT_EQ(read(), before);
         ASSERT_TRUE(WorldSaveService::save_metadata(before, save_dir.path));
         const auto written = nlohmann::json::parse(read());
-        EXPECT_EQ(written.at(key).at("version"), 2);
-        EXPECT_EQ(written.at(key).size(), 6u);
+        EXPECT_EQ(written.at(key), metadata.at(key));
         if (required) {
+            EXPECT_EQ(written.at(key).size(), 2u);
+            EXPECT_FALSE(written.at(key).contains("version"));
             EXPECT_EQ(written.at(key).at("dayLengthTicks"), 36000);
-            EXPECT_EQ(written.at(key).at("daylightNumerator"), 1);
-            EXPECT_EQ(written.at(key).at("daylightDenominator"), 2);
+            EXPECT_EQ(written.at(key).at("daysPerYear"), 3);
+            // The two-field encoding still resolves the pinned solar/lunar values.
+            ASSERT_TRUE(WorldSaveService::read_clock_metadata(save_dir.path, clock, required));
+            EXPECT_EQ(clock.calendar().daylightNumerator, 1u);
+            EXPECT_EQ(clock.calendar().daylightDenominator, 2u);
+            EXPECT_EQ(clock.calendar().lunarCycleDays, 8u);
         } else {
+            EXPECT_EQ(written.at(key).at("version"), 2);
+            EXPECT_EQ(written.at(key).size(), 6u);
             EXPECT_FALSE(written.contains("simulationTick"));
             EXPECT_FALSE(written.contains("calendar"));
         }

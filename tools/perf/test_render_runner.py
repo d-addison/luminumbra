@@ -200,14 +200,14 @@ class RenderRunnerTests(unittest.TestCase):
         result, evidence_errors = _run_process(
             command, cwd=self.root, environment=environment or self.environment,
             log=log, artifact=artifact, retained=retained, receipt_path=receipt_path)
-        self.assertEqual(result.returncode, expected_exit, log.read_text(errors='replace')[-6000:])
+        self.assertEqual(result.returncode, expected_exit, log.read_text(errors='replace', encoding="utf-8")[-6000:])
         if expected_exit:
             self.assertFalse(artifact.exists())
             _require_evidence(evidence_errors)
-            return log.read_text(errors='replace')
+            return log.read_text(errors='replace', encoding="utf-8")
         # A completed capture alone could hide a mesh/material fallback. Require
         # the real loaders to accept the synthetic inputs on every success path.
-        output = log.read_text(errors='replace')
+        output = log.read_text(errors='replace', encoding="utf-8")
         self.assertIn('Static-model textures registered (3 models).', output)
         for part in ('trunk', 'branches', 'leaves'):
             self.assertIn(f"tree_small_02_{part}.lmesh' (3 verts, 3 indices)", output)
@@ -237,7 +237,7 @@ class RenderRunnerTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'undeclared'):
             contract.validate(data, data['adapter']['renderer'])
         declaration = self.root / 'overrides.json'
-        declaration.write_text(json.dumps({'env:LUMIN_GL_DEBUG': '1'}))
+        declaration.write_text(json.dumps({'env:LUMIN_GL_DEBUG': '1'}), encoding="utf-8")
         data = self.run_client('declared', ['--render-benchmark-frames', '4',
                                           '--declare-render-overrides', str(declaration)], environment)
         contract.validate(data, data['adapter']['renderer'])
@@ -247,11 +247,11 @@ class RenderRunnerTests(unittest.TestCase):
         saves = list((self.root / 'worlds/saves').iterdir())
         self.assertEqual(len(saves), 1)
         saved = saves[0]
-        metadata = json.loads((saved / 'world_info.json').read_text())
+        metadata = json.loads((saved / 'world_info.json').read_text(encoding="utf-8"))
         self.assertEqual(metadata['worldType'], 'default')
-        preset = json.loads((self.root / 'worlds/atlas/presets/default.json').read_text())
+        preset = json.loads((self.root / 'worlds/atlas/presets/default.json').read_text(encoding="utf-8"))
         preset['generation_params']['terrain']['height_offset'] += 1
-        (saved / 'preset.json').write_text(json.dumps(preset))
+        (saved / 'preset.json').write_text(json.dumps(preset), encoding="utf-8")
         altered = self.run_client('altered', ['--load-world', saved.name, '--render-benchmark-frames', '4'])
         self.assertEqual(altered['workload']['preset'], original['workload']['preset'])
         for key in ('preset_identity', 'content_identity'):

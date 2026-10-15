@@ -1076,7 +1076,7 @@ bool WorldSaveService::load_active_regions(world::ActiveRegionLedger& ledger,
     try {
         const auto path = active_regions_path(save_dir);
         if (!std::filesystem::exists(path)) {
-            ledger = world::ActiveRegionLedger({}, absent_clock);
+            ledger = world::ActiveRegionLedger(ledger.config(), absent_clock);
             return true;
         }
         const auto length = std::filesystem::file_size(path);
