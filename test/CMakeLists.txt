@@ -195,6 +195,7 @@ add_executable(common_tests
     common/FarWantedSet_test.cpp
     common/FarAuthorityOverlay_test.cpp
     common/GameSessionHeadlessWorld_test.cpp
+    common/AuthorityHashState_test.cpp
     common/SimBudgetTelemetry_test.cpp
     common/HeavyComparison_test.cpp
     common/SimBudgetProfile_test.cpp

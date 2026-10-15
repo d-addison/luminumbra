@@ -62,6 +62,18 @@ struct RegionDigestInputs {
 // Obsolete disk formats are refused; migration is not supported.
 class WorldSaveService {
 public:
+    // Owner-thread, read-only resolution. Validates committed disk membership even when a
+    // ready in-memory record wins. Throws on read errors or missing expected durable authority.
+    // The returned copied simulation inventory is ChunkID ordered; pristine/Loading memory
+    // cannot shadow disk. Pending water divergence is projected without source promotion.
+    static std::vector<std::shared_ptr<Chunk>>
+    capture_authoritative_chunks(const std::filesystem::path& save_dir,
+                                 const RegionDigestInputs& inputs);
+    // Existing regional composition, shared by freeze stamping and immutable hash capture.
+    static std::uint64_t compose_region_simulation_digest(const WorldStreamingState& region,
+                                                          const std::string& ground,
+                                                          const std::string& pages,
+                                                          const std::string& creatures);
     // Also recorded in world_info.json, including before the first chunk save.
     static constexpr std::uint16_t kContainerVersion = 2;
     static constexpr const char* kObsoleteWorldMessage =
@@ -286,6 +298,8 @@ public:
     // to leave real crash debris. Single-threaded persistence tests only; nullptr
     // disables the hook.
     static void set_before_active_regions_replace_for_testing(bool (*hook)());
+    // Observes actual region-file reads on this thread; nullptr disables observation.
+    static void set_region_read_hook_for_testing(void (*hook)(const std::filesystem::path&));
 
     // --- S4 durable primitives (SaveTransaction and flag-on writers) ---
     // Writes bytes beside `destination` (staged temp, file fsync), atomically replaces it and

@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <map>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -70,5 +71,8 @@ bool ValidateCreatureSnapshot(const CreatureSnapshot& snapshot,
 void ApplyCreatureSnapshot(entt::registry& registry, const CreatureSnapshot& snapshot);
 std::string CreatureRegionProjection(const entt::registry& registry,
                                      Luminumbra::world::RegionKey key);
+// Group an already captured complete snapshot once, preserving the existing codec.
+std::map<Luminumbra::world::RegionKey, std::string>
+CreatureRegionProjections(const CreatureSnapshot& snapshot);
 
 } // namespace luminumbra::ai

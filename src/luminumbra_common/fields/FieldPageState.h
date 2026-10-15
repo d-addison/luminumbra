@@ -184,6 +184,8 @@ public:
     // "" when `key` owns no initialized cell, otherwise for every owned initialized cell in
     // cells_of_region order: i32 cell_x, i32 cell_z, then kChannels u16 (all little endian).
     [[nodiscard]] std::string region_bytes(RegionKey key) const;
+    // One grouping pass across every owned store, then the existing regional codec.
+    [[nodiscard]] std::map<RegionKey, std::string> region_projections() const;
 
 private:
     std::map<FieldPageKey, FieldPage> m_pages;

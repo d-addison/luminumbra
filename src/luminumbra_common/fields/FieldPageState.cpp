@@ -9,6 +9,7 @@
 #include <map>
 #include <optional>
 #include <set>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <tuple>
@@ -952,6 +953,49 @@ std::string FieldPageState::ambient_bytes(std::uint8_t channels, bool weather) c
         AppendSection(out, 7, m_weatherClocks.size(), records);
     }
     return out;
+}
+
+std::map<RegionKey, std::string> FieldPageState::region_projections() const {
+    std::map<RegionKey, FieldPageState> grouped;
+    for (const auto& [key, page] : m_pages)
+        for (std::size_t i = 0; i < 256; ++i) {
+            if (((page.mask[i / 64] >> (i % 64)) & 1) == 0)
+                continue;
+            const auto x = key.x * kPageCells + static_cast<std::int32_t>(i % 16);
+            const auto z = key.z * kPageCells + static_cast<std::int32_t>(i / 16);
+            auto& target = grouped[region_of_cell(x, z)].m_pages[key];
+            target.mask[i / 64] |= std::uint64_t{1} << (i % 64);
+            for (int c = 0; c < kChannels; ++c)
+                target.cells[c][i] = page.cells[c][i];
+        }
+    for (const auto& storm : m_storms)
+        grouped[storm.owner].m_storms.push_back(storm);
+    for (const auto& strike : m_strikes)
+        grouped[strike.owner].m_strikes.push_back(strike);
+    for (const auto& [cell, values] : m_scent)
+        grouped[region_of_scent_cell(cell)].m_scent.emplace(cell, values);
+    for (const auto& [owner, age] : m_weatherClocks)
+        grouped[owner].m_weatherClocks.emplace(owner, age);
+    const auto foliage = [&grouped](const FoliageFieldPages& pages, bool soil) {
+        for (const auto& [key, page] : pages.pages())
+            for (std::size_t i = 0; i < 256; ++i) {
+                if (((page.mask[i / 64] >> (i % 64)) & 1) == 0)
+                    continue;
+                const ScentCellKey cell{key.x * 16 + static_cast<std::int32_t>(i % 16),
+                                        key.z * 16 + static_cast<std::int32_t>(i / 16)};
+                auto& part = grouped[region_of_scent_cell(cell)];
+                const bool accepted = soil ? part.set_soil(cell, page.cells[i])
+                                           : part.set_irrigation(cell, page.cells[i]);
+                if (!accepted)
+                    throw std::runtime_error("Cannot project owned foliage authority");
+            }
+    };
+    foliage(m_soil, true);
+    foliage(m_irrigation, false);
+    std::map<RegionKey, std::string> result;
+    for (const auto& [key, part] : grouped)
+        result.emplace(key, part.region_bytes(key));
+    return result;
 }
 
 std::string FieldPageState::region_bytes(RegionKey key) const {

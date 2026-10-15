@@ -67,6 +67,7 @@
 #include "../systems/WeatherEventSystem.h" // Pure deterministic weather-event schedule.
 #include "../systems/WeatherSystem.h"
 #include "../systems/WindFieldSystem.h"
+#include "FarLodStore.h"
 #include "TerrainPresetLoader.h"
 #include "WorldStreamingState.h"
 #include "nlohmann/json.hpp" // For parsing JSON
@@ -843,6 +844,7 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
                 PrepareRegionalFoliage();
                 m_activeRegionLedger.publish_completed_work(m_regionCompletedWork);
                 m_regionCompletedWork.clear();
+                m_worldSystem->sync_water_authority();
             }
         } catch (const std::exception& error) {
             if (!m_activeRegionsEnabled)
@@ -1774,18 +1776,6 @@ void GameSession::PrepareRegionalFoliage() {
     for (auto e : m_registry.view<C::WaterSourceComponent, C::TransformComponent>())
         admit_page(e, false);
 }
-std::string GameSession::PlantRegionProjection(RegionKey key) const {
-    auto snap = luminumbra::foliage::BuildPlantEntitySnapshot(m_registry, true);
-    std::erase_if(snap.entities, [key](const auto& entity) {
-        for (const auto& c : entity.components)
-            if (c.type == "PlantRegion")
-                return c.data.at("owner_x").template get<std::int32_t>() != key.x ||
-                       c.data.at("owner_z").template get<std::int32_t>() != key.z;
-        return true;
-    });
-    return snap.entities.empty() ? std::string{}
-                                 : "|plants:" + Ecs::SerializeEntityRegistrySnapshotJson(snap);
-}
 void GameSession::RunRegionalFoliageTick(
     luminumbra::simulation::SimBudgetTelemetry::TickScope& budget, std::uint64_t tick) {
     auto ledger = m_activeRegionLedger;
@@ -2269,21 +2259,26 @@ void GameSession::RunRegionScheduler(std::uint64_t current_tick) {
                 anchors,
                 m_regionWork,
                 [this](RegionKey key) {
-                    const auto directory = m_regionDurableDirectory.empty()
-                                               ? GetWorldSaveDir()
-                                               : m_regionDurableDirectory;
-                    return Persistence::WorldSaveService::region_simulation_digest(
-                        directory,
-                        key,
-                        Persistence::RegionDigestInputs{
-                            .live = m_worldSystem->snapshot_streamed_chunks(),
-                            .parked = m_worldSystem->snapshot_parked_chunks(),
-                            .durable = m_worldSystem->durable_chunk_inventory(),
-                            .ground_object_bytes =
-                                m_groundObjects.region_bytes(key) + PlantRegionProjection(key),
-                            .field_page_bytes = RegionalFieldProjection(key),
-                            .creature_bytes =
-                                luminumbra::ai::CreatureRegionProjection(m_registry, key)});
+                    return CaptureRegionAuthorityDigest(
+                        AuthorityHashInputs{
+                            .directory = m_regionDurableDirectory.empty()
+                                             ? GetWorldSaveDir()
+                                             : m_regionDurableDirectory,
+                            .chunks = {.live = m_worldSystem->snapshot_streamed_chunks(),
+                                       .parked = m_worldSystem->snapshot_parked_chunks(),
+                                       .durable = m_worldSystem->durable_chunk_inventory(),
+                                       .ground_object_bytes = {},
+                                       .field_page_bytes = {},
+                                       .creature_bytes = {}},
+                            .registry = m_registry,
+                            .ledger = m_activeRegionLedger,
+                            .ground = m_groundObjects,
+                            .fields = m_fieldPages,
+                            .energy = m_energyFieldState.get(),
+                            .clock_bytes = {},
+                            .identity_bytes = {},
+                            .avatar_bytes = {}},
+                        key);
                 },
                 // Plants, foliage pages and water debt retain their owners alongside fields,
                 // ground objects, pending work and authoritative chunks.
@@ -2384,7 +2379,10 @@ std::uint16_t GameSession::SampleRegionalChannel(int channel, const Vec3& positi
 }
 
 std::string GameSession::RegionalAmbientHash(std::uint8_t channels, bool weather) const {
-    auto bytes = m_fieldPages.ambient_bytes(channels, weather);
+    const auto capture = CaptureAuthorityState();
+    if (!capture.state)
+        throw std::runtime_error(capture.error);
+    auto bytes = capture.state->AmbientBytes(channels, weather);
     // The same regional authority can be projected at different anchors. The anchor
     // drives ambient diagnostics and the scent domain, so include its identity in
     // the slot hash without changing the stored region/freeze digest projection.
@@ -2439,24 +2437,6 @@ void GameSession::BindRegionalFieldQueries() {
         [this] { return RegionalAmbientHash(16, false); });
 }
 
-std::string GameSession::RegionalFieldProjection(RegionKey key) const {
-    auto bytes = m_fieldPages.region_bytes(key);
-    if (m_energyFieldState)
-        bytes += m_energyFieldState->RegionBytes(key);
-    const auto debt = m_activeRegionLedger.water_debts().find(key);
-    if (debt != m_activeRegionLedger.water_debts().end()) {
-        bytes += "|water_debt:";
-        for (int i = 0; i < 8; ++i)
-            bytes.push_back(static_cast<char>((debt->second >> (8 * i)) & 255));
-    }
-    const auto age = m_activeRegionLedger.energy_ages().find(key);
-    if (age != m_activeRegionLedger.energy_ages().end()) {
-        bytes += "|energy_age:";
-        for (int i = 0; i < 8; ++i)
-            bytes.push_back(static_cast<char>((age->second >> (8 * i)) & 255));
-    }
-    return bytes;
-}
 void GameSession::ProjectRegionalWeather(bool restoring) {
     if (!m_activeRegionsEnabled || !m_weatherSystem)
         return;
@@ -2978,69 +2958,124 @@ void GameSession::RecordPersistenceSaveOutcome(bool ok, double elapsed_ms) {
     }
 }
 
+std::string GameSession::AuthorityIdentityBytes() const {
+    std::string bytes = "authority_identity:v1:";
+    const auto append = [&bytes](std::uint64_t value, unsigned width) {
+        for (unsigned i = 0; i < width; ++i)
+            bytes.push_back(static_cast<char>((value >> (8 * i)) & 255));
+    };
+    append(m_metadata.seed.size(), 8);
+    bytes += m_metadata.seed;
+    append(World::ComputeTerrainParamsHash(m_worldSystem->get_params(), m_worldSystem->get_seed()),
+           8);
+    append(m_activeRegionsEnabled, 1);
+    append(m_aetherStateEnabled, 1);
+    append(m_waterHighResEnabled, 1);
+    append(m_weatherRainEnabled, 1);
+    append(static_cast<std::uint32_t>(m_weatherRainScaleMm), 4);
+    append(m_weatherEventsEnabled, 1);
+    append(31, 4);
+    append(std::bit_cast<std::uint32_t>(m_ecologyTuning.energy_drain_per_second), 4);
+    append(std::bit_cast<std::uint32_t>(m_ecologyTuning.energy_rest_recover), 4);
+    append(std::bit_cast<std::uint32_t>(m_ecologyTuning.energy_sleep_recover), 4);
+    append(std::bit_cast<std::uint32_t>(m_ecologyTuning.hunger_growth_per_second), 4);
+    append(std::bit_cast<std::uint32_t>(m_ecologyTuning.hunger_graze_sate), 4);
+    append(std::bit_cast<std::uint32_t>(m_ecologyTuning.stamina_rest_recover), 4);
+    append(std::bit_cast<std::uint32_t>(m_ecologyTuning.stamina_move_drain), 4);
+    append(std::bit_cast<std::uint32_t>(m_ecologyTuning.herd_weight), 4);
+    append(std::bit_cast<std::uint32_t>(m_ecologyTuning.alignment_weight), 4);
+    append(std::bit_cast<std::uint32_t>(m_ecologyTuning.catch_radius), 4);
+    append(std::bit_cast<std::uint32_t>(m_ecologyTuning.catch_satiation), 4);
+    append(std::bit_cast<std::uint32_t>(m_ecologyTuning.flock_neighbor_radius), 4);
+    append(std::bit_cast<std::uint32_t>(m_ecologyTuning.flock_separation_radius), 4);
+    append(std::bit_cast<std::uint32_t>(m_ecologyTuning.flock_cohesion_weight), 4);
+    append(std::bit_cast<std::uint32_t>(m_ecologyTuning.flock_separation_weight), 4);
+    append(std::bit_cast<std::uint32_t>(m_wildlifeFoliageTuning.graze_radius), 4);
+    append(std::bit_cast<std::uint32_t>(m_wildlifeFoliageTuning.graze_per_creature), 4);
+    append(std::bit_cast<std::uint32_t>(m_wildlifeFoliageTuning.regrow_per_tick), 4);
+    append(std::bit_cast<std::uint32_t>(m_wildlifeFoliageTuning.feed_per_graze), 4);
+    append(std::bit_cast<std::uint32_t>(m_thirstTuning.rise_rate), 4);
+    append(std::bit_cast<std::uint32_t>(m_thirstTuning.drink_rate), 4);
+    append(std::bit_cast<std::uint32_t>(m_thirstTuning.seek_threshold), 4);
+    append(std::bit_cast<std::uint32_t>(m_scavengingTuning.hunger_threshold), 4);
+    append(std::bit_cast<std::uint32_t>(m_scavengingTuning.feed_radius), 4);
+    append(std::bit_cast<std::uint32_t>(m_scavengingTuning.feed_rate), 4);
+    append(std::bit_cast<std::uint32_t>(m_reproductionTuning.healthy_stamina), 4);
+    append(std::bit_cast<std::uint32_t>(m_reproductionTuning.mate_seek_radius), 4);
+    append(std::bit_cast<std::uint32_t>(m_reproductionTuning.courtship_radius), 4);
+    append(std::bit_cast<std::uint32_t>(m_reproductionTuning.spawn_radius), 4);
+    append(std::bit_cast<std::uint32_t>(m_circadianAmplitude), 4);
+    append(std::bit_cast<std::uint32_t>(m_plantMutationRate), 4);
+    append(3, 4);
+    append(std::bit_cast<std::uint64_t>(m_foragingTuning.deposit), 8);
+    append(std::bit_cast<std::uint64_t>(m_foragingTuning.trail_weight), 8);
+    append(std::bit_cast<std::uint64_t>(m_foragingTuning.goal_weight), 8);
+    append(3, 4);
+    append(m_reproductionTuning.maturity_ticks, 4);
+    append(m_reproductionTuning.cooldown_ticks, 4);
+    append(m_reproductionTuning.courtship_ticks, 4);
+    return bytes;
+}
+
+AuthorityHashCapture GameSession::CaptureAuthorityState(const std::string& avatar_snapshot) const {
+    if (!m_activeRegionsEnabled)
+        return {std::nullopt, "Authority capture requires active regions"};
+    if (!IsSimulationTickBoundary())
+        return {std::nullopt, "Authority capture requires a completed simulation boundary"};
+    return CaptureAuthorityStateImpl(avatar_snapshot);
+}
+
+AuthorityHashCapture
+GameSession::CaptureAuthorityStateImpl(const std::string& avatar_snapshot) const {
+    if (!m_worldSystem)
+        return {std::nullopt, "Authority capture requires an open world"};
+    try {
+        return CaptureAuthorityHashState(AuthorityHashInputs{
+            .directory =
+                m_regionDurableDirectory.empty() ? GetWorldSaveDir() : m_regionDurableDirectory,
+            .chunks = {.live = m_worldSystem->snapshot_streamed_chunks(),
+                       .parked = m_worldSystem->snapshot_parked_chunks(),
+                       .durable = m_worldSystem->durable_chunk_inventory(),
+                       .ground_object_bytes = {},
+                       .field_page_bytes = {},
+                       .creature_bytes = {}},
+            .registry = m_registry,
+            .ledger = m_activeRegionLedger,
+            .ground = m_groundObjects,
+            .fields = m_fieldPages,
+            .energy = m_energyFieldState.get(),
+            .clock_bytes = m_worldClock.canonical_bytes(),
+            .identity_bytes = AuthorityIdentityBytes(),
+            .avatar_bytes = avatar_snapshot});
+    } catch (const std::exception& error) {
+        return {std::nullopt, error.what()};
+    }
+}
+
 std::string GameSession::ComputeChunkStateHash() {
-    if (m_activeRegionsEnabled && m_worldSystem)
-        m_worldSystem->sync_water_authority();
     if (!m_worldSystem)
         return {};
-    const auto live = m_worldSystem->snapshot_streamed_chunks();
     if (!m_activeRegionsEnabled) {
         WorldStreamingState state;
-        for (const auto& chunk : live)
+        for (const auto& chunk : m_worldSystem->snapshot_streamed_chunks())
             state.insert_chunk(chunk);
         return Persistence::ComputeWorldStreamingStateHash(state);
     }
-    const auto parked = m_worldSystem->snapshot_parked_chunks();
-    const auto durable = m_worldSystem->durable_chunk_inventory();
-    std::set<RegionKey> keys;
-    const auto add_key = [&keys](const IVec3& coords) {
-        int rx = 0, rz = 0;
-        Persistence::WorldSaveService::region_coords_for_chunk(coords, rx, rz);
-        keys.insert({rx, rz});
-    };
-    for (const auto& chunk : live)
-        if (chunk && chunk->needs_authority() && chunk->get_state() != ChunkState::Loading)
-            add_key(chunk->get_coords());
-    for (const auto& chunk : parked)
-        if (chunk && chunk->needs_authority())
-            add_key(chunk->get_coords());
-    for (const auto& coords : durable)
-        add_key(coords);
-    const auto directory =
-        m_regionDurableDirectory.empty() ? GetWorldSaveDir() : m_regionDurableDirectory;
-    std::string projection = "authoritative_chunks:v2:";
-    try {
-        if (!durable.empty() && !Persistence::snapshot_index_exists(directory))
-            throw std::runtime_error("inconsistent snapshot: index missing");
-        for (const auto key : keys) {
-            const auto record = m_activeRegionLedger.records().find(key);
-            const auto digest = record != m_activeRegionLedger.records().end() &&
-                                        record->second.state == RegionState::Frozen
-                                    ? record->second.frozen_digest
-                                    : Persistence::WorldSaveService::region_simulation_digest(
-                                          directory,
-                                          key,
-                                          Persistence::RegionDigestInputs{.live = live,
-                                                                          .parked = parked,
-                                                                          .durable = durable,
-                                                                          .ground_object_bytes = {},
-                                                                          .field_page_bytes = {}});
-            projection += std::to_string(key.x) + "," + std::to_string(key.z) + ":" +
-                          std::to_string(digest) + ";";
-        }
-    } catch (const std::exception& error) {
-        LatchRegionFault(m_worldClock.tick(), error.what());
+    const auto capture = CaptureAuthorityState();
+    if (!capture.state) {
+        LatchRegionFault(m_worldClock.tick(), capture.error);
+        return {};
     }
-    return Persistence::StableChecksum(projection);
+    return capture.state->chunk_hash();
 }
 
 std::string GameSession::FoldClockIntoEcologyHash(const std::string& ecology_hash) const {
-    return m_activeRegionsEnabled
-               ? Persistence::StableChecksum(ecology_hash + m_worldClock.canonical_bytes() +
-                                             m_activeRegionLedger.canonical_bytes() +
-                                             m_groundObjects.canonical_bytes() +
-                                             m_fieldPages.canonical_bytes())
-               : ecology_hash;
+    if (!m_activeRegionsEnabled)
+        return ecology_hash;
+    const auto capture = CaptureAuthorityState();
+    if (!capture.state)
+        throw std::runtime_error(capture.error);
+    return capture.state->FoldEcology(ecology_hash);
 }
 
 void GameSession::RestoreWorldClock(const WorldClock& clock) {
@@ -4231,20 +4266,11 @@ bool GameSession::HasScentParticipants(bool require_due) const {
 
 std::string GameSession::ComputeScentSubHash() const {
     if (m_activeRegionsEnabled) {
-        if (m_fieldPages.scent_cells().empty())
-            return {};
-        std::string bytes = "regional_scent:v2:";
-        for (const auto& [cell, values] : m_fieldPages.scent_cells()) {
-            const auto append = [&bytes](std::uint64_t value, int count) {
-                for (int i = 0; i < count; ++i)
-                    bytes.push_back(static_cast<char>((value >> (8 * i)) & 255));
-            };
-            append(static_cast<std::uint32_t>(cell.x), 4);
-            append(static_cast<std::uint32_t>(cell.z), 4);
-            for (const auto value : values)
-                append(value, 8);
-        }
-        return Persistence::StableChecksum(bytes);
+        const auto capture = CaptureAuthorityState();
+        if (!capture.state)
+            throw std::runtime_error(capture.error);
+        const auto& bytes = capture.state->scent_bytes();
+        return bytes.empty() ? std::string{} : Persistence::StableChecksum(bytes);
     }
     if (!m_scentField || !HasScentParticipants()) {
         return {};
@@ -4342,11 +4368,17 @@ bool GameSession::SaveEnergyFieldRecord(const std::filesystem::path& save_dir) {
 }
 
 std::string GameSession::ComputeAetherStateSubHash() const {
+    if (m_activeRegionsEnabled) {
+        const auto capture = CaptureAuthorityState();
+        if (!capture.state)
+            throw std::runtime_error(capture.error);
+        const auto& bytes = capture.state->energy_bytes();
+        return bytes.empty() ? std::string{} : Persistence::StableChecksum(bytes);
+    }
     if (!m_energyFieldState) {
         return {};
     }
-    const std::string bytes = m_activeRegionsEnabled ? m_energyFieldState->CanonicalRegionalBytes()
-                                                     : m_energyFieldState->CanonicalBytes();
+    const std::string bytes = m_energyFieldState->CanonicalBytes();
     if (bytes.empty()) {
         return {}; // all-zero == absent (the scent/plant empty-neutral contract)
     }
@@ -4355,11 +4387,11 @@ std::string GameSession::ComputeAetherStateSubHash() const {
 
 std::string GameSession::ComputePlantSubHash() const {
     if (m_activeRegionsEnabled) {
-        const auto snap = luminumbra::foliage::BuildPlantEntitySnapshot(m_registry, true);
-        return snap.entities.empty()
-                   ? std::string{}
-                   : Persistence::StableChecksum(
-                         Luminumbra::Ecs::SerializeEntityRegistrySnapshotJson(snap));
+        const auto capture = CaptureAuthorityState();
+        if (!capture.state)
+            throw std::runtime_error(capture.error);
+        const auto& bytes = capture.state->plant_bytes();
+        return bytes.empty() ? std::string{} : Persistence::StableChecksum(bytes);
     }
 
     if (!HasPlantParticipants()) {
