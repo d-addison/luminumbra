@@ -237,6 +237,41 @@ void CheckPlanningOracle(Systems::RegionalWater::PlanningCache& cache,
     }
 }
 
+void CheckIncidentSelection(Systems::RegionalWater::PlanningCache& cache) {
+    ASSERT_LE(cache.entries.size(), 12u);
+    const auto subsets = std::size_t{1} << cache.entries.size();
+    for (std::size_t mask = 0; mask < subsets; ++mask) {
+        cache.selected.clear();
+        cache.reserved.clear();
+        for (std::size_t i = 0; i < cache.entries.size(); ++i) {
+            auto& entry = cache.entries[i];
+            entry.selected = entry.admitted && (mask & (std::size_t{1} << i)) != 0;
+            if (entry.selected)
+                cache.selected.push_back(i);
+        }
+        std::vector<std::size_t> expected;
+        for (std::size_t i = 0; i < cache.faces.size(); ++i) {
+            const auto& face = cache.faces[i];
+            const bool selected =
+                cache.entries[face.positive].selected && cache.entries[face.other].selected;
+            if (face.face.owner != face.face.neighbor && selected)
+                cache.reserved.push_back(i);
+            if (selected)
+                expected.push_back(i);
+        }
+        // Endpoint visitation and reservation order must not affect Face ordering.
+        std::reverse(cache.selected.begin(), cache.selected.end());
+        std::reverse(cache.reserved.begin(), cache.reserved.end());
+        cache.SelectExecutedFaces();
+        EXPECT_EQ(cache.executed, expected);
+        for (const auto index : cache.executed) {
+            const auto& face = cache.faces.at(index);
+            EXPECT_EQ(cache.entries.at(face.positive).id, face.face.positive);
+            EXPECT_EQ(cache.entries.at(face.other).id, face.face.other);
+        }
+    }
+}
+
 TEST_F(RegionalWaterFixture, CachedTopologyFacesAndCandidatesMatchScratchAcrossAdmissionAndChurn) {
     Owner({0, 0});
     Owner({1, 0});
@@ -308,6 +343,7 @@ TEST_F(RegionalWaterFixture, CachedTopologyFacesAndCandidatesMatchScratchAcrossA
         cache.Refresh(chunks, ledger, resolution);
         ASSERT_NO_FATAL_FAILURE(
             CheckPlanningOracle(cache, chunks, ledger, resolution, step == 12, {b->get_id()}));
+        ASSERT_NO_FATAL_FAILURE(CheckIncidentSelection(cache));
         if (step == 1 || step >= 8) {
             // A permutation, freeze/thaw, new owner, config or flag refresh does
             // not sort/reallocate geometry; filtering retains scratch face order.
@@ -321,6 +357,7 @@ TEST_F(RegionalWaterFixture, CachedTopologyFacesAndCandidatesMatchScratchAcrossA
     chunks = duplicate;
     cache.Refresh(chunks, ledger, 8);
     ASSERT_NO_FATAL_FAILURE(CheckPlanningOracle(cache, chunks, ledger, 8, false, {}));
+    ASSERT_NO_FATAL_FAILURE(CheckIncidentSelection(cache));
 }
 
 TEST_F(RegionalWaterFixture, WarmPlanningCacheStillValidatesUnselectedWaterAndRefusesAtomically) {

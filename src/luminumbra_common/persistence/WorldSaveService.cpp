@@ -761,10 +761,43 @@ bool WriteRegionFile(const std::filesystem::path& path,
 }
 
 // Current lod-0 records retain canonical in-memory chunk serialization.
-std::string SerializeSingleChunkSnapshot(const std::shared_ptr<Chunk>& chunk) {
+void SeedChunkRecord(const RegionRecord& record,
+                     const std::string& payload,
+                     const ChunkValidationModes& modes,
+                     ChunkValidationCache& cache) try {
+    // Facts belong to the canonical DOM, never the live chunk. Prove that the
+    // compressed output decodes to exactly its dump before retaining successes.
+    std::string decoded;
+    if (!DecompressPayload(record, decoded, nullptr) || decoded != payload)
+        return;
+    for (const bool strict : {false, true}) {
+        if (!modes[strict])
+            continue;
+        auto facts = *modes[strict];
+        facts.authoritative = (record.flags & kRecordFlagEdited) != 0u;
+        cache.remember(
+            {record.id, record.uncompressed_size, record.lod_level, record.flags, strict},
+            record.compressed_payload,
+            facts,
+            true);
+    }
+} catch (const std::exception&) {
+    // Seeding is optional; a speculative strict refusal cannot reject a save.
+}
+
+bool CompressChunkSnapshot(const std::shared_ptr<Chunk>& chunk,
+                           RegionRecord& record,
+                           std::vector<std::string>* errors) {
     WorldStreamingState single;
     single.insert_chunk(chunk);
-    return SerializeWorldStreamingStateSnapshotJson(single);
+    auto* cache = ChunkValidationCache::active();
+    ChunkValidationModes modes{};
+    const auto payload = SerializeWorldStreamingStateSnapshotJson(single, cache ? &modes : nullptr);
+    if (!CompressPayload(payload, record, errors))
+        return false;
+    if (cache)
+        SeedChunkRecord(record, payload, modes, *cache);
+    return true;
 }
 
 std::shared_ptr<Chunk> DecodeChunkRecord(const RegionRecord& record,
@@ -2449,6 +2482,8 @@ bool WorldSaveService::member_digest(const std::filesystem::path& save_dir,
                                      std::string_view relative_path,
                                      MemberDigest& out,
                                      std::string& error) {
+    if (auto* cache = ChunkValidationCache::active())
+        cache->exclude_save_directory(save_dir);
     out = MemberDigest{};
     try {
         if (!member_path_allowed(relative_path)) {
@@ -2868,6 +2903,8 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
                                   const std::stop_token& stop,
                                   const std::function<bool(const IVec3&)>& retain_chunk,
                                   std::vector<IVec3>* authoritative_inventory) const {
+    if (auto* cache = ChunkValidationCache::active())
+        cache->exclude_save_directory(save_dir);
     const ChunkValidationCache::InventoryScope inventory(ChunkValidationCache::active());
     DecodeCounter().fetch_add(1, std::memory_order_acq_rel);
     state.clear();
@@ -3129,6 +3166,8 @@ bool WorldSaveService::write_snapshot(const std::vector<std::shared_ptr<Chunk>>&
                                       const std::filesystem::path& save_dir,
                                       std::vector<std::string>* errors,
                                       std::size_t* regions_written) const {
+    if (auto* cache = ChunkValidationCache::active())
+        cache->exclude_save_directory(save_dir);
     try {
         // Group the chunks to persist by region (deterministic order).
         std::map<std::pair<int, int>, std::vector<std::shared_ptr<Chunk>>> regions;
@@ -3186,7 +3225,7 @@ bool WorldSaveService::write_snapshot(const std::vector<std::shared_ptr<Chunk>>&
                 }
                 record.flags = ChunkRecordFlags(*chunk, previous_flags);
 
-                if (!CompressPayload(SerializeSingleChunkSnapshot(chunk), record, errors)) {
+                if (!CompressChunkSnapshot(chunk, record, errors)) {
                     return false;
                 }
 

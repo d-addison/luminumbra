@@ -1,10 +1,13 @@
 #pragma once
 
+#include "ChunkValidationCache.h"
 #include "ecs/EntitySnapshot.h"
 #include "world/WorldStreamingState.h"
 
+#include <array>
 #include <cstddef>
 #include <filesystem>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -76,7 +79,12 @@ const char* WorldHashSchema();
 const char* WorldHashAlgorithm();
 const char* EntitySnapshotArtifactSchema();
 
-std::string SerializeWorldStreamingStateSnapshotJson(const WorldStreamingState& state);
+using ChunkValidationModes = std::array<std::optional<ChunkValidationCache::Facts>, 2>;
+std::string SerializeWorldStreamingStateSnapshotJson(const WorldStreamingState& state,
+                                                     ChunkValidationModes* facts = nullptr);
+// Success-only loader-equivalent validation. Unusual input takes the original decoder path.
+std::optional<ChunkValidationCache::Facts>
+TryWorldStreamingSnapshotFacts(const std::string& text, ChunkID id, bool strict_water);
 bool LoadWorldStreamingStateSnapshotJson(const std::string& json_text,
                                          WorldStreamingState& out_state,
                                          std::vector<std::string>& errors,

@@ -6021,6 +6021,11 @@ TEST(GameSessionHeadlessWorldTest, RepeatedWorldAndStateSavesPreserveBytesWithVa
     chunk->mark_voxel_data_dirty();
     ASSERT_TRUE(session.GetWorldSystem()->adopt_streamed_chunk(chunk));
     ASSERT_TRUE(session.SaveWorldState());
+    const auto seeded = session.GetChunkValidationCacheStats();
+    EXPECT_EQ(seeded.modes[0].writer_seeded, 1u);
+    EXPECT_EQ(seeded.modes[1].writer_seeded, 1u);
+    EXPECT_EQ(seeded.modes[0].decodes, 0u);
+    EXPECT_EQ(seeded.modes[1].decodes, 0u);
     ASSERT_TRUE(session.SaveWorld());
     const auto save = session.GetWorldSaveDir();
     const auto before = RepeatedSaveBytes(save);
@@ -6041,6 +6046,11 @@ TEST(GameSessionHeadlessWorldTest, RepeatedWorldAndStateSavesPreserveBytesWithVa
         EXPECT_EQ(current.tick, previous.tick);
         previous = std::move(current);
     }
+    const auto reused = session.GetChunkValidationCacheStats();
+    EXPECT_GT(reused.modes[0].hits, 0u);
+    EXPECT_GT(reused.modes[1].hits, 0u);
+    EXPECT_EQ(reused.modes[0].decodes, 0u);
+    EXPECT_EQ(reused.modes[1].decodes, 0u);
     EXPECT_TRUE(errors.empty());
 }
 
@@ -6059,6 +6069,13 @@ TEST(GameSessionHeadlessWorldTest, SuccessiveWorldsClearValidationCacheOnCreateA
         EXPECT_EQ(stats.hits, 0u);
         EXPECT_EQ(stats.misses, 0u);
         EXPECT_EQ(stats.evictions, 0u);
+        EXPECT_EQ(stats.spill_bytes, 0u);
+        EXPECT_EQ(stats.spill_extent, 0u);
+        for (const auto& mode : stats.modes) {
+            EXPECT_EQ(mode.writer_seeded, 0u);
+            EXPECT_EQ(mode.spill_hits, 0u);
+            EXPECT_EQ(mode.spill_faults, 0u);
+        }
     };
     const auto save_chunk = [&session](float density) {
         auto chunk = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3(0, 0, 0));
@@ -6072,9 +6089,8 @@ TEST(GameSessionHeadlessWorldTest, SuccessiveWorldsClearValidationCacheOnCreateA
         ASSERT_TRUE(session.SaveWorldState());
         ASSERT_TRUE(session.SaveWorld());
         const auto saved_bytes = RepeatedSaveBytes(session.GetWorldSaveDir());
-        // The first state save validates the new record permissively at commit;
-        // the metadata save warms a distinct strict indexed validation key.
-        // Save again without edits to reuse that key over byte-identical chunks.
+        // Writer facts seed independent permissive and strict successes.
+        // Save again without edits to compare freshly read compressed bytes.
         ASSERT_TRUE(session.SaveWorldState());
         EXPECT_EQ(RepeatedSaveBytes(session.GetWorldSaveDir()), saved_bytes);
         ASSERT_GT(session.GetChunkValidationCacheStats().entries, 0u);

@@ -164,6 +164,12 @@ void PlanningCache::Rebuild(std::span<const std::shared_ptr<Chunk>> resident) {
     std::sort(next.faces.begin(), next.faces.end(), [](const auto& a, const auto& b) {
         return a.face < b.face;
     });
+    for (std::size_t i = 0; i < next.faces.size(); ++i) {
+        const auto& face = next.faces[i];
+        const std::size_t direction = face.face.is_x ? 0u : 2u;
+        next.entries[face.positive].incident_faces[direction] = i;
+        next.entries[face.other].incident_faces[direction + 1] = i;
+    }
     // Bit identity: these are the original (owner, neighbor, positive, other, is_x)
     // tuples. Removing sealed endpoints from this sorted superset gives exactly
     // SnapshotFaces' sorted admitted subset, without exchanging physical endpoints.
@@ -178,6 +184,23 @@ void PlanningCache::Rebuild(std::span<const std::shared_ptr<Chunk>> resident) {
     m_index.swap(next.m_index);
     m_seen.swap(next.m_seen);
     m_positions.swap(next.m_positions);
+}
+
+void PlanningCache::SelectExecutedFaces() {
+    executed.assign(reserved.begin(), reserved.end());
+    for (const auto index : selected) {
+        for (const auto face_index : entries[index].incident_faces) {
+            if (face_index == missing)
+                continue;
+            const auto& face = faces[face_index];
+            if (face.face.owner == face.face.neighbor && entries[face.positive].selected &&
+                entries[face.other].selected)
+                executed.push_back(face_index);
+        }
+    }
+    // Preserve the full scan's Face order and original endpoint orientation.
+    std::sort(executed.begin(), executed.end());
+    executed.erase(std::unique(executed.begin(), executed.end()), executed.end());
 }
 
 void PlanningCache::Refresh(std::span<const std::shared_ptr<Chunk>> resident,
@@ -597,16 +620,8 @@ void WaterSystem::UpdateRegional(entt::registry& registry,
     result.unallocated_windows = interior_windows - result.allocated_windows;
     // Index order is ChunkID order, regardless of grant/cursor visitation order.
     std::sort(selected.begin(), selected.end());
-    auto& executed = snapshot.executed;
-    executed.assign(snapshot.reserved.begin(), snapshot.reserved.end());
-    for (std::size_t i = 0; i < snapshot.faces.size(); ++i) {
-        const auto& indexed = snapshot.faces[i];
-        if (indexed.face.owner == indexed.face.neighbor &&
-            snapshot.entries[indexed.positive].selected && snapshot.entries[indexed.other].selected)
-            executed.push_back(i);
-    }
-    // Face indexes are already in exactly the old lexicographic Face order.
-    std::sort(executed.begin(), executed.end());
+    snapshot.SelectExecutedFaces();
+    const auto& executed = snapshot.executed;
     auto& staged = snapshot.staged;
     staged.clear();
     auto& work = snapshot.work;

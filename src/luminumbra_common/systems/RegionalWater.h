@@ -29,6 +29,7 @@ struct Resident {
     IVec3 coords{};
     world::RegionKey owner{};
     std::array<std::size_t, 4> neighbors{missing, missing, missing, missing};
+    std::array<std::size_t, 4> incident_faces{missing, missing, missing, missing};
     std::size_t candidate = missing;
     bool admitted = false, preparation = false, awake = false, source = false;
     bool selected = false, staged = false, changed = false;
@@ -65,6 +66,7 @@ public:
     void Refresh(std::span<const std::shared_ptr<Chunk>> resident,
                  const world::ActiveRegionLedger& ledger,
                  int resolution);
+    void SelectExecutedFaces();
     Resident* Find(ChunkID id);
     const Resident* Find(ChunkID id) const;
     Candidates* FindCandidates(world::RegionKey owner);
