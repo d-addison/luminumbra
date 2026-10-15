@@ -195,7 +195,7 @@ void ExpectSameGeneration(const Luminumbra::Systems::SHIELD_WorldSystem& actual,
         const auto a_site = actual.LocateStructure(a.type, 0, 0);
         const auto b_site = expected.LocateStructure(b.type, 0, 0);
         ASSERT_EQ(a_site.has_value(), b_site.has_value());
-        if (b_site) {
+        if (a_site.has_value() && b_site.has_value()) {
             EXPECT_EQ(a_site->origin, b_site->origin);
             EXPECT_EQ(a_site->site_seed, b_site->site_seed);
             EXPECT_EQ(Luminumbra::World::ComputeAssembledVoxelHash(
@@ -226,6 +226,8 @@ TEST(TerrainPresetLoaderTest, GenerationUsesLoadedSnapshotAfterDependencyMutatio
     ASSERT_TRUE(expected.structures_enabled());
     const auto site = expected.LocateStructure("cairn", 0, 0);
     ASSERT_TRUE(site.has_value());
+    if (!site.has_value())
+        return;
     const float surface = expected.GetTerrainHeightAt(static_cast<float>(site->origin.x),
                                                       static_cast<float>(site->origin.z));
     const auto coords =
