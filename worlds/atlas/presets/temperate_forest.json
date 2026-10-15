@@ -1,6 +1,6 @@
 {
   "name": "Temperate Forest",
-  "schema_rev": 6,
+  "schema_rev": 7,
   "generation_params": {
     "terrain": {
       "base_frequency": 0.008,
@@ -20,18 +20,33 @@
         "erosion_spline": [[-1.0, 0.7], [-0.4, 0.45], [0.0, 0.3], [0.5, 0.18], [1.0, 0.12]],
         "peaks_spline": [[-1.0, 0.0], [0.3, 0.05], [0.7, 0.4], [1.0, 1.0]]
       },
-      "island_mask_enabled": false,
+      "island_mask_enabled": true,
       "hydro": {
-        "enabled": false
+        "enabled": true,
+        "iterations": 4,
+        "cell_size_m": 8.0,
+        "talus_height": 2.6,
+        "thermal_rate": 0.3,
+        "solubility": 0.06,
+        "deposition": 0.15,
+        "sediment_capacity": 0.35,
+        "max_offset": 8.0
       }
     },
     "features": {
       "caves_enabled": true,
       "cave_frequency": 0.025,
-      "rivers_enabled": false,
-      "lakes_enabled": false,
-      "cliffs_enabled": false,
-      "structures_enabled": false
+      "rivers_enabled": true,
+      "river_depth": 4.0,
+      "river_max_carve": 8.0,
+      "lakes_enabled": true,
+      "cliffs_enabled": true,
+      "structures_enabled": true,
+      "surface_breaks_enabled": true
+    },
+    "biomes": {
+      "table": "common/biomes.json",
+      "relief_enabled": true
     }
   }
 }

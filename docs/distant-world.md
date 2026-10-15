@@ -43,7 +43,7 @@ allocation and renderer integration remain separate.
 - Simulation over distance runs only in **persistent active regions** and only
   while the world host runs. There is no wall-clock progression while a world is
   shut down.
-- Audio remains disabled for v0.3 and every qualification run launches with
+- Ordinary audio playback is enabled; every qualification run launches with
   `--no-audio`; nothing in this contract depends on audio.
 
 ## Three explicit sets
@@ -189,6 +189,12 @@ silhouette features to the full radius, and the acceptance stations include
 deep interiors and distant mouths beyond the noise-cave cutoff, not only within
 it.
 
+Qualification must pin the cave-dense revision and identity. The packaged
+`worlds/atlas/presets/cave_dense.json` now uses revision 7; the revision-6 fixture
+is frozen in `worlds/atlas/presets-rev6/cave_dense.json`. See the
+shipping preset identities under "Shipping defaults" in the [engine guide](engine-guide.md) before comparing
+captures or synchronizing the game repository's fixture and identity sidecar.
+
 ### Edits and the far authority overlay
 
 Edits are baked into every tier on the world host inside the save path, after
@@ -285,13 +291,14 @@ chunks stops (they stay resident) and the failure is reported; dirty state is
 never dropped. Parked bytes, save latency and failures are shown in the
 diagnostic panel and qualified on the historical 5,433-chunk edited save.
 
-The default-off ledger and deterministic scheduler foundation is now implemented;
+The ledger and deterministic scheduler foundation is enabled by default;
 see [the active-region format and scheduling guide](active-regions.md) for its
 canonical bytes, refusal behaviours and bounded slice boundaries. It has no
 per-system consumers and no measured budget caps yet. Dirty parking, autosave
 policy changes, snapshot transactions and the diagnostic panel remain pending.
 Current default behaviour still evicts dirty chunks without a flush, the client
-saves only on quit or shutdown, and the server autosave interval defaults to zero.
+saves only on quit or shutdown, and the server autosave interval defaults to 9000 ticks
+(five minutes at the canonical 30 Hz clock, to avoid saving every second during play).
 
 ## Per-system distant policy
 

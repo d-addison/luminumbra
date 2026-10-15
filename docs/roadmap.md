@@ -61,7 +61,8 @@ There are no assigned due dates or invented completion percentages.
   is blocked. Strict promotion
   requires all 15 contexts after expanded acceptance, followed by signed source-only
   publication, independent artifact verification and a newly named private preview.
-  Audio stays off; the existing preview stays unchanged.
+  Ordinary launches now enable audio; capture workloads select `--no-audio` explicitly.
+  The existing preview stays unchanged.
 - **Authoring ownership:** generic packages remain in the engine monorepo.
   The merged Blender identity review/undo package matches the retained Windows
   archive byte-for-byte and has 22 recorded native checks. Visual approval and
@@ -81,7 +82,7 @@ Engine [#141](https://github.com/d-addison/luminumbra/issues/141) owns budget en
 
 | Coordinated milestone | This repository | Counterpart repository |
 |---|---|---|
-| [v0.3.0 — Acceptance and release](https://github.com/d-addison/luminumbra/milestone/1) | Final saved-world/render/content correctness; the expanded pre-release scope (16 km unbounded world with distant cave interiors and edits, persistent-active-region distant simulation, measured 60 fps floor on two profiles, client-hang closure); native/CI acceptance, signed source release, independent verification and new private preview. | [Source/runtime art-pack verification, final canopy conversion/provenance, distant-world scenes, game distant-simulation data and packaged content/save/visual acceptance with audio off.](https://github.com/d-addison/luminumbra-game/milestone/1) |
+| [v0.3.0 — Acceptance and release](https://github.com/d-addison/luminumbra/milestone/1) | Final saved-world/render/content correctness; the expanded pre-release scope (16 km unbounded world with distant cave interiors and edits, persistent-active-region distant simulation, measured 60 fps floor on two profiles, client-hang closure); native/CI acceptance, signed source release, independent verification and new private preview. | [Source/runtime art-pack verification, final canopy conversion/provenance, distant-world scenes, game distant-simulation data and packaged content/save/visual acceptance with explicit capture audio settings.](https://github.com/d-addison/luminumbra-game/milestone/1) |
 | [Foundations — Engine/game separation and tooling](https://github.com/d-addison/luminumbra/milestone/2) | Installed SDK; lifecycle/schedule/state registration; optional field/behavior modules; script/component authoring; input, commands, inspection/profiling; dependency enforcement. | [Populated compatibility fixtures; mechanics/state/content extraction; pinned standalone launchers; script/data composition; screens/HUD/diagnostics/tests.](https://github.com/d-addison/luminumbra-game/milestone/2) |
 | [v0.4.0 — Continuing-world multiplayer](https://github.com/d-addison/luminumbra/milestone/3) | Checkpoints/catch-up; first-time authoritative admission; returning-identity and two-established-peer lockstep reconnect; physical avatars; LAN/directory and live transport/fault/load qualification. | [Real host/join/reconnect flows; LAN/public/direct/favorites/recent browser; generated animated physical avatars; network AI clients; composed previews and process acceptance.](https://github.com/d-addison/luminumbra-game/milestone/3) |
 | [v0.5.0 — Environmental audio](https://github.com/d-addison/luminumbra/milestone/4) | Diffuse RT60 DSP, weather-loop lifecycle, thunder propagation and device-independent decoding/graph acceptance. | [Soundscape/event integration, authored acoustic tuning and audible packaged acceptance.](https://github.com/d-addison/luminumbra-game/milestone/4) |
@@ -128,8 +129,8 @@ imply host migration, matchmaking or private Steam relay availability.
   Default/424242/FOV 110° native capture have separate investigation issues.
   Their causes remain unconfirmed. Tree-only tests do not close whole-scene
   appearance reports. Culling and no-UI fixes retain their separate causal evidence.
-- Audio is disabled for v0.3 and its preview; audible
-  quality and event coverage are future v0.5 work in a separate workstream. Dynamic-body
+- Audio playback is enabled by default; audible quality and event coverage remain
+  separate qualification work. Captures explicitly use `--no-audio`. Dynamic-body
   acoustic material classification currently uses Stone.
 - GNS compilation does not establish live-peer behavior. Steam private SDK/live
   service and broad NVIDIA/AMD/Intel hardware qualification remain explicit gaps.
@@ -141,8 +142,8 @@ imply host migration, matchmaking or private Steam relay availability.
 
 Software releases remain source-only. Art packs are separately versioned game
 content. Private recordings, Steam payloads and private previews remain outside
-public packs. Preset revision 6, LMR1 v2, FSD2 payload v3, canonical in-memory
-serialization, terrain-quality assertions and default-off policies are preserved;
+public packs. Preset revision 7 retains revision 6 omission compatibility. LMR1 v2, FSD2 payload v3,
+canonical in-memory serialization and terrain-quality assertions are preserved;
 obsolete-world migration and legacy loading are not planned.
 
 ## Work-package index

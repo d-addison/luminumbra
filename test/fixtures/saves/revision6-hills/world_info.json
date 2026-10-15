@@ -1,0 +1,9 @@
+{
+  "container_version": 2,
+  "name": "Revision 6 hills without an embedded preset",
+  "seed": "424242",
+  "worldType": "default",
+  "creationTime": 1,
+  "spawnPoint": {"x": 8, "y": 18, "z": 8},
+  "presetIdentity": "026f24207a8ffc7e"
+}

@@ -32,6 +32,7 @@
 #include <vector>
 
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
+#include "luminumbra_common/world/TerrainPresetLoader.h"
 #include "rendering/RenderPipeline.h"
 #include "world/WorldgenPreview.h"
 
@@ -106,6 +107,16 @@ Luminumbra::Systems::TerrainGenParams FixedCandidate() {
     p.lacunarity = 2.0f;
     p.height_offset = 8.0f;
     p.caves_enabled = false;
+    p.surface_breaks_enabled = false;
+    p.island_mask_enabled = false;
+    p.biomes_enabled = false;
+    p.biome_relief_enabled = false;
+    p.cliffs_enabled = false;
+    p.rivers_enabled = false;
+    p.lakes_enabled = false;
+    p.structures_enabled = false;
+    p.hydro_enabled = false;
+
     p.peaks_amplitude = 48.0f;
     p.peaks_frequency = 0.0025f;
     p.domain_warp_amplitude = 18.0f;
@@ -172,13 +183,14 @@ struct PreviewFixture {
     Luminumbra::Client::WorldgenPreview preview;
     bool ok = false;
 
-    PreviewFixture() {
+    explicit PreviewFixture(
+        const Luminumbra::Systems::TerrainGenParams& params = FixedCandidate()) {
         ok = pipeline.startup(kPreviewW, kPreviewH, SourceRoot());
         if (!ok)
             return;
         preview.set_active(true);
         preview.ensure_target(kPreviewW, kPreviewH);
-        preview.set_params(FixedCandidate(), /*seed*/ 4242);
+        preview.set_params(params, /*seed*/ 4242);
         // Signal the background build (past the debounce), then pump render until
         // the worker finishes and the GL-thread swap lands, so the first render has
         // a world (: the build is asynchronous).
@@ -384,4 +396,39 @@ TEST(WorldgenPreviewTest, PerFrameRenderProducesComparableObservation) {
            << "}\n";
     report.close();
     ASSERT_FALSE(report.fail()) << "could not finalize performance evidence: " << artifact;
+}
+
+TEST(WorldgenPreviewTest, ResolvedShippingHillsRendersWithDefaultTemporalPresentation) {
+    HiddenGlContext ctx;
+    ASSERT_TRUE(ctx.ready()) << ctx.error();
+    const auto preset =
+        Luminumbra::world::LoadTerrainPreset(SourceRoot() / "worlds/atlas/presets/default.json");
+    ASSERT_TRUE(preset.ok);
+    EXPECT_TRUE(preset.params.island_mask_enabled);
+    EXPECT_TRUE(preset.params.biomes_enabled);
+    EXPECT_TRUE(preset.params.biome_relief_enabled);
+    EXPECT_TRUE(preset.params.hydro_enabled);
+    EXPECT_TRUE(preset.params.structures_enabled);
+    EXPECT_TRUE(preset.params.surface_breaks_enabled);
+    EXPECT_TRUE(preset.params.rivers_enabled);
+    EXPECT_TRUE(preset.params.lakes_enabled);
+    EXPECT_TRUE(preset.params.cliffs_enabled);
+    PreviewFixture fx(preset.params);
+    ASSERT_TRUE(fx.ok);
+    ASSERT_TRUE(fx.preview.world_ready());
+    EXPECT_TRUE(fx.pipeline.taau_enabled());
+    EXPECT_EQ(fx.pipeline.volumetric_quality(), 1);
+    ASSERT_TRUE(fx.preview.render(fx.pipeline, 1.0f / 60.0f));
+    const auto pixels = ReadTarget(fx.preview);
+    EXPECT_GT(Foreground(pixels), static_cast<std::size_t>(kPreviewW * kPreviewH / 20));
+    const auto artifact = fs::path(LUMINUMBRA_TEST_ARTIFACT_DIR) / "performance/shipping_hills.ppm";
+    fs::create_directories(artifact.parent_path());
+    std::ofstream capture(artifact, std::ios::binary);
+    ASSERT_TRUE(capture);
+    capture << "P6\n" << kPreviewW << ' ' << kPreviewH << "\n255\n";
+    for (std::size_t i = 0; i < pixels.size(); i += 4)
+        capture.write(reinterpret_cast<const char*>(pixels.data() + i), 3);
+    capture.close();
+    ASSERT_TRUE(capture);
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
 }
