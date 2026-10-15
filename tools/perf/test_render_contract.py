@@ -88,7 +88,7 @@ class RenderContractTests(unittest.TestCase):
             contract.validate(data, QUALIFIED)
 
     def test_adapter_mismatch_committed_fixture(self):
-        data = json.loads((FIXTURES / 'adapter-mismatch.v3.json').read_text())
+        data = json.loads((FIXTURES / 'adapter-mismatch.v3.json').read_text(encoding="utf-8"))
         with self.assertRaisesRegex(ValueError, 'adapter does not match'):
             contract.validate(data, QUALIFIED)
         data['adapter']['renderer'] = QUALIFIED
@@ -122,7 +122,7 @@ class RenderContractTests(unittest.TestCase):
         self.assertEqual(contract.validate(data, QUALIFIED)['verdict'], 'PASS')
 
     def test_shared_cpp_percentile_fixture(self):
-        tokens = (FIXTURES / 'distribution.txt').read_text().split()
+        tokens = (FIXTURES / 'distribution.txt').read_text(encoding="utf-8").split()
         count = int(tokens[0])
         values = [float(v) for v in tokens[1:1 + count]]
         expected = [float(v) for v in tokens[1 + count:]]
@@ -170,7 +170,7 @@ class RenderContractTests(unittest.TestCase):
     def test_v2_missing_arguments_cli(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'v2.json'
-            path.write_text(json.dumps({'schema': 'luminumbra.render_benchmark.v2'}))
+            path.write_text(json.dumps({'schema': 'luminumbra.render_benchmark.v2'}), encoding="utf-8")
             for supplied, missing in [([], ['--position', '--yaw', '--pitch', '--tod']),
                                       (['--position', '0', '0', '0', '--yaw', '0'], ['--pitch', '--tod'])]:
                 result = subprocess.run([sys.executable, str(Path(capture.__file__)), str(path)] + supplied,
@@ -192,6 +192,15 @@ class RenderContractTests(unittest.TestCase):
     def test_workload_mismatch(self):
         with self.assertRaisesRegex(ValueError, 'workload manifest'):
             contract.validate(artifact(), QUALIFIED, workload={'seed': 1})
+
+    def test_current_and_legacy_preset_revisions(self):
+        text = (FIXTURES / 'surface-flight.traversal').read_text()
+        for revision in (6, 7):
+            parsed = contract.traversal_manifest(text.replace('preset_revision 7', f'preset_revision {revision}'))
+            self.assertEqual(parsed['preset_revision'], revision)
+        for revision in (5, 8):
+            with self.assertRaises(ValueError):
+                contract.traversal_manifest(text.replace('preset_revision 7', f'preset_revision {revision}'))
 
     def test_traversal_manifest_and_camera_oracle(self):
         manifest = contract.traversal_manifest((FIXTURES / 'surface-flight.traversal').read_bytes().decode('utf-8'))

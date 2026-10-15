@@ -90,3 +90,21 @@ TEST(AudioPhysicsBinding, CountsOnlyPointerChanges) {
     manager.SetPhysicsSystem(nullptr);
     EXPECT_EQ(manager.physics_binding_changes(), 3u);
 }
+
+TEST(AudioPhysicsBinding, FailedDeviceInitializationReportsUnavailableAndSuppressesPlayback) {
+    auto previous = Log::GetCoreLogger();
+    Log::GetCoreLogger() =
+        std::make_shared<spdlog::logger>("AUDIO_FAILURE_PROBE", std::make_shared<CountingSink>());
+    Luminumbra::Client::MiniaudioManager manager(".");
+    const bool initialized =
+        manager.Init([](const ma_engine_config*, ma_engine*) -> ma_result { return MA_NO_DEVICE; });
+    Log::GetCoreLogger() = previous;
+    EXPECT_FALSE(initialized);
+    EXPECT_FALSE(manager.IsPlaybackEnabled());
+    manager.SetMasterVolume(1.0f);
+    manager.SetMusicVolume(1.0f);
+    manager.SetSfxVolume(1.0f);
+    EXPECT_FALSE(manager.PlayOneShot2D("ui_click"));
+    manager.Shutdown();
+    EXPECT_FALSE(manager.IsPlaybackEnabled());
+}

@@ -24,9 +24,12 @@
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <string>
 #include <vector>
+
+#include <nlohmann/json.hpp>
 
 #include "luminumbra_common/components/CoreComponents.h" // water-source: TransformComponent
 #include "luminumbra_common/core/JobSystem.h"
@@ -54,13 +57,22 @@ using Luminumbra::world::GameSession;
 // within-run path stability still holds. The destructor removes the tree.
 class HeadlessRoot {
 public:
-    HeadlessRoot() {
+    explicit HeadlessRoot(bool disable_island_mask = false) {
         root_ = Luminumbra::TestSupport::CreateUniqueTempDirectory(
             "luminumbra_water_determinism_test_");
         const fs::path src(LUMINUMBRA_SOURCE_ROOT);
         fs::create_directories(root_ / "worlds" / "atlas" / "presets");
         fs::copy_file(src / "worlds" / "atlas" / "presets" / "default.json",
                       root_ / "worlds" / "atlas" / "presets" / "default.json");
+        if (disable_island_mask) {
+            const auto path = root_ / "worlds" / "atlas" / "presets" / "default.json";
+            std::ifstream input(path);
+            auto preset = nlohmann::json::parse(input);
+            input.close();
+            preset["generation_params"]["terrain"]["island_mask_enabled"] = false;
+            std::ofstream output(path);
+            output << preset.dump(2);
+        }
         // The `default` preset has rivers_enabled + a biome table ("common/biomes.json"); copy it
         // to the locations the loader probes so the rivers/water actually generate.
         std::error_code ec;
@@ -130,6 +142,12 @@ std::vector<std::uint64_t> run_water_sequence(const std::string& root,
     hashes.reserve(static_cast<std::size_t>(ticks));
     {
         GameSession session;
+        session.SetActiveRegionsEnabled(false);
+        session.SetAetherStateEnabled(false);
+        session.SetWaterHighResEnabled(false);
+        session.SetFiniteHydrologyEnabled(false);
+        session.SetWeatherRainEnabled(false);
+        session.SetWeatherEventsEnabled(false);
         session.SetJobSystem(&jobs);
         session.SetRootPath(root);
         // High-resolution water must be REQUESTED pre-world (the session wires it at
@@ -229,6 +247,12 @@ DigResult run_dig_drain(const std::string& root) {
     DigResult r;
     {
         GameSession session;
+        session.SetActiveRegionsEnabled(false);
+        session.SetAetherStateEnabled(false);
+        session.SetWaterHighResEnabled(false);
+        session.SetFiniteHydrologyEnabled(false);
+        session.SetWeatherRainEnabled(false);
+        session.SetWeatherEventsEnabled(false);
         session.SetJobSystem(&jobs);
         session.SetRootPath(root);
         EXPECT_TRUE(session.CreateWorld("WaterDig", "777", "default"));
@@ -287,6 +311,12 @@ DigResult run_dam_pool(const std::string& root) {
     DigResult r;
     {
         GameSession session;
+        session.SetActiveRegionsEnabled(false);
+        session.SetAetherStateEnabled(false);
+        session.SetWaterHighResEnabled(false);
+        session.SetFiniteHydrologyEnabled(false);
+        session.SetWeatherRainEnabled(false);
+        session.SetWeatherEventsEnabled(false);
         session.SetJobSystem(&jobs);
         session.SetRootPath(root);
         EXPECT_TRUE(session.CreateWorld("WaterDam", "777", "default"));
@@ -350,6 +380,12 @@ RainResult run_weather_rain(const std::string& root, bool wire_weather) {
     RainResult r;
     {
         GameSession session;
+        session.SetActiveRegionsEnabled(false);
+        session.SetAetherStateEnabled(false);
+        session.SetWaterHighResEnabled(false);
+        session.SetFiniteHydrologyEnabled(false);
+        session.SetWeatherRainEnabled(false);
+        session.SetWeatherEventsEnabled(false);
         session.SetJobSystem(&jobs);
         session.SetRootPath(root);
         // The wiring must be REQUESTED pre-world (the session wires it at create,
@@ -421,6 +457,12 @@ SourceResult run_with_source(const std::string& root, bool add_source) {
     SourceResult r;
     {
         GameSession session;
+        session.SetActiveRegionsEnabled(false);
+        session.SetAetherStateEnabled(false);
+        session.SetWaterHighResEnabled(false);
+        session.SetFiniteHydrologyEnabled(false);
+        session.SetWeatherRainEnabled(false);
+        session.SetWeatherEventsEnabled(false);
         session.SetJobSystem(&jobs);
         session.SetRootPath(root);
         EXPECT_TRUE(session.CreateWorld("WaterSrc", "777", "default"));
@@ -523,6 +565,12 @@ VoxelDigResult run_voxel_dig(const std::string& root) {
     VoxelDigResult r;
     {
         GameSession session;
+        session.SetActiveRegionsEnabled(false);
+        session.SetAetherStateEnabled(false);
+        session.SetWaterHighResEnabled(false);
+        session.SetFiniteHydrologyEnabled(false);
+        session.SetWeatherRainEnabled(false);
+        session.SetWeatherEventsEnabled(false);
         session.SetJobSystem(&jobs);
         session.SetRootPath(root);
         EXPECT_TRUE(session.CreateWorld("VoxelDig", "777", "default"));
@@ -587,6 +635,12 @@ run_rain_hydrology(const std::string& root, int ticks, std::int32_t rain_mm, std
     HydroResult r;
     {
         GameSession session;
+        session.SetActiveRegionsEnabled(false);
+        session.SetAetherStateEnabled(false);
+        session.SetWaterHighResEnabled(false);
+        session.SetFiniteHydrologyEnabled(false);
+        session.SetWeatherRainEnabled(false);
+        session.SetWeatherEventsEnabled(false);
         session.SetJobSystem(&jobs);
         session.SetRootPath(root);
         EXPECT_TRUE(session.CreateWorld("Hydro", "777", "default"));
@@ -648,16 +702,18 @@ TEST(WaterDeterminism, FiniteHydrologyRainFillsLandDeterministically) {
 constexpr int kHighResTicks = 32;
 
 TEST(WaterDeterminism, HighResWaterFlagIsDeterministicAndMovesConfigSubHash) {
-    // Config plumbing: all-defaults hashes to the empty baseline; enabling
-    // sim.water_high_res must move the sub-hash (a deliberate hash bump).
+    // Shipping High contributes to the config sub-hash; explicit Medium changes it.
     const auto defaults = luminumbra::core::SystemConfig::Defaults();
-    EXPECT_TRUE(defaults.ComputeConfigSubHash().empty());
+    EXPECT_FALSE(defaults.ComputeConfigSubHash().empty());
     const auto cfg = luminumbra::core::SystemConfig::FromJsonString(
         R"({ "sim": { "water_high_res": { "enabled": true } } })");
     ASSERT_TRUE(cfg.enabled(luminumbra::core::SysKey::SimWaterHighRes));
     EXPECT_FALSE(cfg.ComputeConfigSubHash().empty())
         << "sim.water_high_res is enabled but contributes no config sub-hash bytes";
-    EXPECT_NE(cfg.ComputeConfigSubHash(), defaults.ComputeConfigSubHash());
+    EXPECT_EQ(cfg.ComputeConfigSubHash(), defaults.ComputeConfigSubHash());
+    const auto medium = luminumbra::core::SystemConfig::FromJsonString(
+        R"({"sim":{"water_high_res":{"enabled":false}}})");
+    EXPECT_NE(cfg.ComputeConfigSubHash(), medium.ComputeConfigSubHash());
 
     const HeadlessRoot root;
     std::size_t water_chunks_a = 0, water_chunks_b = 0, water_chunks_med = 0;
@@ -717,6 +773,12 @@ void save_world_with_water(const std::string& root, const fs::path& save_dir, bo
     jobs.startup();
     {
         GameSession session;
+        session.SetActiveRegionsEnabled(false);
+        session.SetAetherStateEnabled(false);
+        session.SetWaterHighResEnabled(false);
+        session.SetFiniteHydrologyEnabled(false);
+        session.SetWeatherRainEnabled(false);
+        session.SetWeatherEventsEnabled(false);
         session.SetJobSystem(&jobs);
         session.SetRootPath(root);
         session.SetWaterHighResEnabled(high_res);
@@ -752,6 +814,12 @@ load_world_and_probe(const std::string& root, const fs::path& save_dir, bool hig
     MigrationLoadResult r;
     {
         GameSession session;
+        session.SetActiveRegionsEnabled(false);
+        session.SetAetherStateEnabled(false);
+        session.SetWaterHighResEnabled(false);
+        session.SetFiniteHydrologyEnabled(false);
+        session.SetWeatherRainEnabled(false);
+        session.SetWeatherEventsEnabled(false);
         session.SetJobSystem(&jobs);
         session.SetRootPath(root);
         session.SetWaterHighResEnabled(high_res);
@@ -853,6 +921,12 @@ PhysicsCompareResult run_bed_edit_compare(const std::string& root,
     PhysicsCompareResult r;
     {
         GameSession session;
+        session.SetActiveRegionsEnabled(false);
+        session.SetAetherStateEnabled(false);
+        session.SetWaterHighResEnabled(false);
+        session.SetFiniteHydrologyEnabled(false);
+        session.SetWeatherRainEnabled(false);
+        session.SetWeatherEventsEnabled(false);
         session.SetJobSystem(&jobs);
         session.SetRootPath(root);
         session.SetWaterHighResEnabled(high_res);
@@ -896,7 +970,9 @@ PhysicsCompareResult run_bed_edit_compare(const std::string& root,
 }
 
 TEST(WaterDeterminism, HighResWaterMatchesMediumPhysicsPerSimPass) {
-    const HeadlessRoot root;
+    // Keep the bed/shoreline used to calibrate both pit-fill and dam-displacement bands:
+    // the shipping island mask reshapes the terrain and can move find_wet_anchor.
+    const HeadlessRoot root(/*disable_island_mask=*/true);
     const int probe_high = kCompareCadence * kCompareMedTicks; // equal wall-clock horizon
     const int max_high = 2 * probe_high;                       // 2x cadence safety
 

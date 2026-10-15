@@ -5,17 +5,18 @@
 // queried by every system so each can be turned on/off + tuned from data, no recompile.
 //
 // Determinism contract (verified against persistence/WorldPersistenceRoundtrip.h):
-//   * Flags split into `sim.*` (may affect sim state) and `render.*` (render-only).
-//   * ComputeConfigSubHash is an ADDITIVE per-system sub-hash (modelled on wind/
-//     weather/aether): it does NOT alter the top-level world_hash, and it is empty
-//     ("") whenever every sim.* flag is at its compiled default -> the canonical
-//     baseline d950a6afc12a5cdc and the sub-hash SET both stay byte-identical.
-//   * render.* flags NEVER appear in the sub-hash and never touch any hash.
+//   * Flags split into `sim.*` and `render.*` (presentation, except circadian tuning).
+//   * ComputeConfigSubHash retains the diagnostic config:v1 serialization.
+//     GameSession computes effective identity for joins and replays
+//     independently of the established per-tick world_hash.
+//   * render.* flags never appear in the diagnostic sub-hash. The session identity
+//     also covers render.circadian because its amplitude is applied to simulation.
 //   * enabled is an O(1) bit test on a resolved immutable snapshot (no map lookup,
 //     no string compare, no allocation) so it is safe on the 36k-entity / 30 Hz tick.
 
 #include <array>
 #include <cstdint>
+#include <limits>
 #include <map>
 #include <string>
 
@@ -55,7 +56,7 @@ struct UserSettings {
     // video
     std::string resolution;                 // "" = native/default; else "WxH"
     std::string window_mode = "borderless"; // windowed | borderless | fullscreen
-    bool vsync = false;                     // default OFF: preserve today's uncapped 300fps target
+    bool vsync = true;                      // Saved user choices override this default.
     float fov = 45.0f;
     float render_scale = 1.0f;
     float ui_scale = 1.0f; // HUD/UI density-independent-pixel ratio (0.5..2.5); 1.0 = native px.
@@ -85,8 +86,8 @@ enum class SysKey : std::uint8_t {
 
 // Compile-time registry of tunable params (globally-unique ids; each owned by a SysKey).
 // GENERATED from ConfigSchema.json via LUMIN_CONFIG_PARAM_TABLE. Defaults are authored once
-// in the schema (and cross-checked against the owning-system constants by --check); leaving a
-// sim system OFF/unset is byte-identical to the compiled behaviour. Same edit path as SysKey.
+// in the schema (and cross-checked against the owning-system constants by --check); explicitly
+// disabling sim tuning uses the compiled behaviour. Same edit path as SysKey.
 enum class SysParam : std::uint8_t {
 #define LUMIN_CONFIG_EMIT_PARAM(ENUM, OWNER, JSON_NAME, IS_VEC3, SCALAR, VX, VY, VZ) ENUM,
     LUMIN_CONFIG_PARAM_TABLE(LUMIN_CONFIG_EMIT_PARAM)
@@ -94,14 +95,37 @@ enum class SysParam : std::uint8_t {
     Count
 };
 
+// Values supplied to the canonical serializer. Session callers supply current effective
+// values, including tuning changed through public setters. No owner-based fallback here.
+struct SimulationIdentityValues {
+    std::array<bool, static_cast<std::size_t>(SysKey::Count)> enabled{};
+    std::array<double, static_cast<std::size_t>(SysParam::Count)> scalars{};
+    std::array<glm::vec3, static_cast<std::size_t>(SysParam::Count)> vectors{};
+    // Session options outside the SystemConfig registry, in canonical wire order.
+    bool finite_hydrology_enabled = true;
+    std::int32_t weather_rain_scale_mm = 25;
+    std::uint64_t region_work_limit = std::numeric_limits<std::uint64_t>::max();
+    std::uint32_t region_hold_ticks = 30;
+    std::uint8_t region_reduced_shift = 1;
+
+    SimulationIdentityValues();
+    [[nodiscard]] std::string ComputeIdentity() const;
+};
+
 class SystemConfig {
 public:
-    // Far-world Ladder on; other flags off. Params unset (caller's fallback).
+    // Every sim.* registry flag, including tuning gates that select compiled defaults.
+    [[nodiscard]] std::map<std::string, bool> SimulationGates() const;
+    // All shipping flags on, including the far-world ladder; explicit enabled:false opts out.
+    // Params unset (caller fallback). sim.* hashed; render.* excluded from the config sub-hash.
     [[nodiscard]] static SystemConfig Defaults();
     // Parse a systems.json document. Malformed/empty/blank text -> all-defaults (no throw).
     [[nodiscard]] static SystemConfig FromJsonString(const std::string& json_text);
     // Load from disk. Missing/unreadable file -> all-defaults (no throw).
     [[nodiscard]] static SystemConfig LoadFromFile(const std::string& path);
+    // Explicit CLI overrides must be readable JSON objects; failure leaves config unchanged.
+    [[nodiscard]] static bool
+    TryLoadFromFile(const std::string& path, SystemConfig& config, std::string& error);
 
     // O(1) hot-path query: single bit test on the resolved flag set.
     [[nodiscard]] bool enabled(SysKey key) const {
@@ -112,7 +136,7 @@ public:
     [[nodiscard]] float param(SysParam id, float fallback) const;
     [[nodiscard]] glm::vec3 param3(SysParam id, glm::vec3 fallback) const;
 
-    // Additive sim-only sub-hash. Empty "" at all sim defaults; deterministic and
+    // Additive sim-only sub-hash. Empty "" when all sim flags are disabled; deterministic and
     // order-independent (canonical SysKey/SysParam enum order) otherwise. render.*/user.* excluded.
     [[nodiscard]] std::string ComputeConfigSubHash() const;
 
@@ -146,7 +170,8 @@ public:
 private:
     static constexpr std::size_t kParamCount = static_cast<std::size_t>(SysParam::Count);
 
-    std::uint32_t m_enabled = 1u << static_cast<unsigned>(SysKey::RenderFarWorldLadder);
+    static_assert(static_cast<unsigned>(SysKey::Count) < 32);
+    std::uint32_t m_enabled = (1u << static_cast<unsigned>(SysKey::Count)) - 1u;
     std::uint64_t m_param_set = 0;                 // which params were explicitly set (<=64 params)
     std::array<glm::vec3, kParamCount> m_params{}; // scalar params live in .x
     UserSettings m_user{};                         // client-only; never hashed

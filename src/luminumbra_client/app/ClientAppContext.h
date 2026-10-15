@@ -1,4 +1,5 @@
 #pragma once
+#include "rendering/RenderingDefaults.h"
 
 // The frame loop's non-scenario state clusters, grouped verbatim from the
 // former main_client.cpp file-scope globals into one struct-of-structs
@@ -120,7 +121,7 @@ struct OverlayState {
     // --auto-exposure-metered opts the GPU metering servo in.
     bool auto_exposure_metered = false;
     //  rendering: --volumetric-quality N (0 analytic-only default).
-    int volumetric_quality = 0;
+    int volumetric_quality = Luminumbra::Rendering::kDefaultVolumetricQuality;
     int debug_view_mode = 0; // render-only G-buffer debug overlay:
                              // 0=off,1=albedo,2=normal,3=depth,4=material,5=position ( cycles)
     bool wireframe_mode = false;
@@ -295,7 +296,7 @@ struct ForagerRenderState {
     float forageLog = 0.0f;
     std::uint32_t lastDeliveries = 0;
     bool scentDecalInitialized = false;
-    bool scentDecal = false;
+    bool scentDecal = true;
     Luminumbra::Rendering::ScentFieldRenderMirror scentMirror;
     int scentLog = 0;
 };
