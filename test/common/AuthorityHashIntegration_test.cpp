@@ -1,6 +1,7 @@
 #include "../fixtures/smoke_artifact/FixedInputs.h"
 #include "../support/SimulationContentFixture.h"
 #include "../support/UniqueTempPath.h"
+#include "luminumbra_client/core/scenarios/NetworkedSessionHooks.h"
 #include "luminumbra_common/ai/EcologyHash.h"
 #include "luminumbra_common/components/CreatureComponents.h"
 #include "luminumbra_common/core/FilesystemPath.h"
@@ -342,18 +343,26 @@ TEST_F(AuthorityHashIntegration, CaptureRefusalDisconnectReachesPeer) {
 
 TEST_F(AuthorityHashIntegration, NetworkCheckpointPeersShareEffectiveConfiguration) {
     using Config = luminumbra::core::SystemConfig;
+    // SystemConfig reads tuning overrides only from each system's params object.
     const auto configuration = std::make_shared<const Config>(Config::FromJsonString(R"({
         "sim": {
             "active_regions":{"enabled":true}, "aether_state":{"enabled":true},
             "water_high_res":{"enabled":true}, "hydrology_weather":{"enabled":true},
             "weather_events":{"enabled":true},
-            "ecology":{"enabled":true,"params":{"energy_drain_per_second":0.25}},
-            "thirst":{"enabled":true,"params":{"rise_rate_per_second":0.125}},
-            "wildlife_foliage":{"enabled":true,"params":{"graze_radius":1.25}},
-            "scavenging":{"enabled":true,"params":{"feed_radius":2.25}},
-            "foraging":{"enabled":true,"params":{"deposit":1.25}},
-            "reproduction":{"enabled":true,"params":{"maturity_ticks":42}},
-            "plant_growth":{"enabled":true,"params":{"mutation_rate":0.0625}}
+            "ecology":{"enabled":true,
+                "params":{"energy_drain_per_second":0.25}},
+            "thirst":{"enabled":true,
+                "params":{"rise_rate_per_second":0.125}},
+            "wildlife_foliage":{"enabled":true,
+                "params":{"graze_radius":1.25}},
+            "scavenging":{"enabled":true,
+                "params":{"feed_radius":2.25}},
+            "foraging":{"enabled":true,
+                "params":{"deposit":1.25}},
+            "reproduction":{"enabled":true,
+                "params":{"maturity_ticks":42}},
+            "plant_growth":{"enabled":true,
+                "params":{"mutation_rate":0.0625}}
         }})"));
     // Every override must be parsed, including tunings without a session getter.
     using Param = luminumbra::core::SysParam;
@@ -378,31 +387,74 @@ TEST_F(AuthorityHashIntegration, NetworkCheckpointPeersShareEffectiveConfigurati
         client.GetMetadata().spawnPoint, client.GetPhysicsSystem(), 1, 1));
     const W::GameSession::NetworkHostConfig host_config{Path(root) + "/", "1337", "default", 1, 1};
     std::string failure_reason = "previous failure";
-    auto host = W::GameSession::CreateNetworkHost(client, jobs, host_config, failure_reason);
-    ASSERT_TRUE(host) << failure_reason;
+    namespace Driver = Luminumbra::Client::ScenarioHarness::detail;
+    Driver::NetworkedSessionState network;
+    ASSERT_TRUE(
+        Driver::BeginNetworkedSession(network, &client, host_config, 1337, 1, failure_reason))
+        << failure_reason;
+    auto& host = network.host_session;
+    ASSERT_TRUE(host);
     EXPECT_TRUE(failure_reason.empty());
     ASSERT_EQ(client.GetSimulationConfiguration(), configuration);
-    // Removing the factory's configuration forwarding fails this assertion and the enabled
-    // checkpoint capture below. Begin uses this same complete host-construction function.
+    // Begin uses this complete construction path, including configuration forwarding
+    // and hook installation. Removing forwarding fails this assertion.
     ASSERT_EQ(host->GetSimulationConfiguration(), client.GetSimulationConfiguration());
     ASSERT_TRUE(host->ActiveRegionsEnabled());
     ASSERT_TRUE(client.ActiveRegionsEnabled());
     ASSERT_TRUE(host->GetEnergyFieldState());
     ASSERT_TRUE(client.GetEnergyFieldState());
     EXPECT_FLOAT_EQ(host->GetEcologyTuning().energy_drain_per_second, 0.25f);
+    EXPECT_FLOAT_EQ(client.GetEcologyTuning().energy_drain_per_second, 0.25f);
     EXPECT_THROW(host->ConfigureSimulationFromPeer(client), std::logic_error);
     EXPECT_EQ(host->GetSimulationConfiguration(), configuration);
     EXPECT_THROW(host->ConfigureSimulation(nullptr), std::logic_error);
     EXPECT_THROW(client.ConfigureSimulation(std::make_shared<const Config>(Config::Defaults())),
                  std::logic_error);
+
+    // Observe the production transport queues without replacing hooks or peers.
+    for (auto* session : {host.get(), &client})
+        session->GetWorldSystem()->debug_set_streaming_radius_cap(1);
+    auto& host_lockstep = *network.host;
+    auto& client_lockstep = *network.client;
+    host_lockstep.SetDumpPath(Path(root / "host-desync.lrec1"));
+    client_lockstep.SetDumpPath(Path(root / "client-desync.lrec1"));
+    std::uint64_t host_checkpoint_frames = 0;
+    std::uint64_t client_checkpoint_frames = 0;
+    N::HashMsg host_checkpoint, client_checkpoint;
     for (std::uint64_t tick = 0; tick <= 3; ++tick) {
         SCOPED_TRACE(tick);
         if (tick != 0) {
-            for (auto* session : {host.get(), &client}) {
-                session->SetReplicatedSimulationAnchors({});
-                ASSERT_EQ(session->TickSimulation(1.0 / 30.0), 1u);
-                ASSERT_FALSE(session->GetRegionSchedulerFault());
-            }
+            const auto expected = tick == 3 ? N::TickOutcome::Finished : N::TickOutcome::Advanced;
+            const auto host_result = host_lockstep.PumpTick(3);
+            ASSERT_EQ(host_result.outcome, expected);
+            ASSERT_TRUE(host_result.ran_hash_exchange);
+            ASSERT_FALSE(network.host_to_client->queue.empty());
+            ASSERT_TRUE(N::DecodeHash(network.host_to_client->queue.back(), host_checkpoint));
+            const auto client_result = client_lockstep.PumpTick(3);
+            ASSERT_EQ(client_result.outcome, expected);
+            ASSERT_TRUE(client_result.ran_hash_exchange);
+            ASSERT_FALSE(network.client_to_host->queue.empty());
+            ASSERT_TRUE(N::DecodeHash(network.client_to_host->queue.back(), client_checkpoint));
+            ASSERT_EQ(host_checkpoint.tick, tick);
+            ASSERT_EQ(client_checkpoint.tick, tick);
+            ASSERT_FALSE(host_checkpoint.world_hash.empty());
+            ASSERT_FALSE(client_checkpoint.world_hash.empty());
+            ASSERT_FALSE(host_checkpoint.terrain.empty());
+            ASSERT_FALSE(client_checkpoint.terrain.empty());
+            ASSERT_FALSE(host_checkpoint.water.empty());
+            ASSERT_FALSE(client_checkpoint.water.empty());
+            ASSERT_FALSE(host_checkpoint.entities.empty());
+            ASSERT_FALSE(client_checkpoint.entities.empty());
+            ++host_checkpoint_frames;
+            ++client_checkpoint_frames;
+            EXPECT_EQ(host_checkpoint.world_hash, client_checkpoint.world_hash);
+            EXPECT_EQ(host_checkpoint.terrain, client_checkpoint.terrain);
+            EXPECT_EQ(host_checkpoint.water, client_checkpoint.water);
+            EXPECT_EQ(host_checkpoint.entities, client_checkpoint.entities);
+            ASSERT_FALSE(host->GetRegionSchedulerFault());
+            ASSERT_FALSE(client.GetRegionSchedulerFault());
+            EXPECT_FALSE(host_lockstep.Status().desynced);
+            EXPECT_FALSE(client_lockstep.Status().desynced);
         }
         ASSERT_EQ(host->GetSimulationTickCount(), tick);
         ASSERT_EQ(client.GetSimulationTickCount(), tick);
@@ -413,8 +465,16 @@ TEST_F(AuthorityHashIntegration, NetworkCheckpointPeersShareEffectiveConfigurati
         ASSERT_TRUE(client.ComputeNetworkWorldHashes(*configuration, client_hash, client_sub));
         ASSERT_FALSE(host_hash.empty());
         ASSERT_TRUE(host_sub.active_regions);
+        ASSERT_TRUE(client_sub.active_regions);
         EXPECT_EQ(host_hash, client_hash);
         Same(host_sub, client_sub);
+        if (tick != 0) {
+            EXPECT_EQ(host_checkpoint.world_hash, host_hash);
+            EXPECT_EQ(client_checkpoint.world_hash, client_hash);
+            EXPECT_EQ(host_checkpoint.terrain, host_sub.terrain);
+            EXPECT_EQ(host_checkpoint.water, host_sub.water);
+            EXPECT_EQ(host_checkpoint.entities, host_sub.entities);
+        }
         std::string authority_hash;
         P::WorldStreamingStateSubHashes authority_sub;
         ASSERT_TRUE(host->ComputeAuthorityWorldHashes(authority_hash, authority_sub));
@@ -429,6 +489,9 @@ TEST_F(AuthorityHashIntegration, NetworkCheckpointPeersShareEffectiveConfigurati
         EXPECT_EQ(host_hash, client_hash);
         EXPECT_FALSE(host->GetRegionSchedulerFault());
     }
+    // A real non-empty checkpoint from each peer proves capture_hashes ran at every cadence.
+    EXPECT_EQ(host_checkpoint_frames, 3u);
+    EXPECT_EQ(client_checkpoint_frames, 3u);
 }
 
 TEST_F(AuthorityHashIntegration, NetworkPeerConfigurationRefusesMissingSnapshot) {
@@ -448,6 +511,26 @@ TEST_F(AuthorityHashIntegration, NetworkPeerConfigurationRefusesMissingSnapshot)
     EXPECT_FALSE(
         W::GameSession::CreateNetworkHost(unconfigured_peer, jobs, host_config, failure_reason));
     EXPECT_EQ(failure_reason, "simulation_configuration_missing");
+    EXPECT_FALSE(unconfigured_peer.GetSimulationConfiguration());
+    EXPECT_FALSE(unconfigured_peer.GetWorldSystem());
+    EXPECT_EQ(host.GetSimulationConfiguration(), configuration);
+    // The same construction seam used by Begin must reject before booting resources.
+    namespace Driver = Luminumbra::Client::ScenarioHarness::detail;
+    Driver::NetworkedSessionState network;
+    EXPECT_FALSE(
+        Driver::BeginNetworkedSession(network, nullptr, host_config, 1337, 1, failure_reason));
+    EXPECT_EQ(failure_reason, "client_session_null");
+    EXPECT_FALSE(Driver::BeginNetworkedSession(
+        network, &unconfigured_peer, host_config, 1337, 1, failure_reason));
+    EXPECT_EQ(failure_reason, "simulation_configuration_missing");
+    EXPECT_FALSE(network.host_booted);
+    EXPECT_FALSE(network.host_job_system.get_runtime_stats().accepting_jobs);
+    EXPECT_FALSE(network.simulation_configuration);
+    EXPECT_FALSE(network.host_session);
+    EXPECT_FALSE(network.host_transport);
+    EXPECT_FALSE(network.client_transport);
+    EXPECT_FALSE(network.host);
+    EXPECT_FALSE(network.client);
     EXPECT_FALSE(unconfigured_peer.GetSimulationConfiguration());
     EXPECT_FALSE(unconfigured_peer.GetWorldSystem());
     EXPECT_EQ(host.GetSimulationConfiguration(), configuration);
@@ -474,6 +557,16 @@ TEST_F(AuthorityHashIntegration, NetworkHostCreationFailurePreservesPeer) {
     std::string failure_reason;
     EXPECT_FALSE(W::GameSession::CreateNetworkHost(client, jobs, invalid_config, failure_reason));
     EXPECT_EQ(failure_reason, "host_create_world_failed");
+    {
+        namespace Driver = Luminumbra::Client::ScenarioHarness::detail;
+        Driver::NetworkedSessionState network;
+        EXPECT_FALSE(Driver::BeginNetworkedSession(
+            network, &client, invalid_config, 1337, 1, failure_reason));
+        EXPECT_EQ(failure_reason, "host_create_world_failed");
+        EXPECT_FALSE(network.host_session);
+        EXPECT_FALSE(network.host);
+        EXPECT_FALSE(network.client);
+    } // A failed construction releases its host jobs before checking the peer again.
     EXPECT_EQ(client.GetSimulationConfiguration(), configuration);
     EXPECT_EQ(client.GetWorldSaveDir(), save_dir);
     EXPECT_FALSE(client.GetRegionSchedulerFault());
