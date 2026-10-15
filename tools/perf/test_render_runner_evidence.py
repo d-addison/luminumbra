@@ -188,6 +188,19 @@ class RenderRunnerEvidenceTests(unittest.TestCase):
             self.children[-1].kill.assert_called_once_with()
             self.assertIsNotNone(self.children[-1].returncode, 'timed out child was not reaped')
 
+    def test_atomic_publication_replaces_existing_files_without_rename(self):
+        paths = self.paths()
+        for path in paths:
+            path.write_bytes(b'previous evidence')
+        with mock.patch.object(runner.os, 'rename', side_effect=FileExistsError(
+                'destination already exists')), \
+                mock.patch.object(runner.os, 'replace', wraps=os.replace) as replace:
+            for path in paths:
+                runner._atomic_write(path, b'current evidence')
+                self.assertEqual(path.read_bytes(), b'current evidence')
+        self.assertEqual(replace.call_count, 2)
+        self.assertFalse(list(self.artifacts.glob('*.tmp')))
+
     def test_timeout_retains_complete_capture_after_runtime_cleanup(self):
         self.real_timeout = True
         self.assert_retained_timeout_capture()

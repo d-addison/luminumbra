@@ -5,8 +5,9 @@ import copy
 import io
 import json
 import math
+import ntpath
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 import subprocess
 import shutil
 import stat
@@ -56,7 +57,9 @@ class MatrixTestBase(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
-        self.tmp = Path(self.directory.name)
+        # Temporary roots may use directory aliases or Windows short names.
+        # Match the identities used by the runner before installing path mocks.
+        self.tmp = runner.resolve_path(self.directory.name)
 
     def write_text(self, text, name='matrix.json'):
         path = self.tmp / name
@@ -383,6 +386,67 @@ class MatrixValidationTests(MatrixTestBase):
         self.assert_refused(json.dumps(matrix), "display id '3840x1601'")
 
 
+class PathResolutionTests(unittest.TestCase):
+    def test_windows_executable_paths_use_ordinary_drive_and_unc_spelling(self):
+        class WindowsPath(PureWindowsPath):
+            def is_file(self):
+                return True
+
+        windows = types.SimpleNamespace(**vars(os))
+        windows.name, windows.sep, windows.altsep = 'nt', '\\', '/'
+        windows.path, windows.pathsep = ntpath, ';'
+        for ordinary, extended in (
+                (r'C:\qualification\client.exe', r'\\?\C:\qualification\client.exe'),
+                (r'\\server\share\client.exe', r'\\?\UNC\server\share\client.exe')):
+            with self.subTest(path=ordinary), \
+                    mock.patch.object(runner, 'os', windows), \
+                    mock.patch.object(runner, 'Path', WindowsPath), \
+                    mock.patch.object(runner.shutil, 'which', return_value=extended):
+                for program in (extended, 'client.exe'):
+                    self.assertEqual(str(runner.resolve_executable(
+                        program, WindowsPath(ordinary).parent)), ordinary)
+
+    def test_resolved_windows_prefixes_do_not_change_path_identity(self):
+        class WindowsPath(PureWindowsPath):
+            def resolve(self):
+                # Model handle resolution expanding a short directory name.
+                return type(self)(str(self).replace('RUNNER~1', 'Runner Account'))
+
+        windows = types.SimpleNamespace(**vars(os))
+        windows.name = 'nt'
+        for ordinary, extended in (
+                (r'C:\RUNNER~1\evidence', r'\\?\C:\RUNNER~1\evidence'),
+                (r'\\server\share\evidence', r'\\?\UNC\server\share\evidence')):
+            with self.subTest(path=ordinary), \
+                    mock.patch.object(runner, 'os', windows), \
+                    mock.patch.object(runner, 'Path', WindowsPath):
+                expected = WindowsPath(ordinary.replace('RUNNER~1', 'Runner Account'))
+                self.assertEqual(runner.path_without_extended_prefix(WindowsPath(extended)),
+                                 WindowsPath(ordinary))
+                self.assertEqual(runner.resolve_path(extended), expected)
+                self.assertEqual(runner.resolve_path(ordinary), expected)
+                identity = runner._output_identity(WindowsPath(extended) / 'Capture.json')
+                self.assertEqual(str(identity), str(expected / 'capture.json'))
+                self.assertEqual(identity, runner._output_identity(
+                    WindowsPath(ordinary) / 'Capture.json'))
+                with self.assertRaisesRegex(OSError, 'output overlaps a lock sidecar'):
+                    runner._output_identity(WindowsPath(extended) / 'Capture.json.LOCK')
+
+    def test_resolution_preserves_other_namespaces_and_posix_names(self):
+        for platform, path in (
+                ('nt', PureWindowsPath(r'\\?\Volume{123}\evidence')),
+                ('posix', PurePosixPath('/evidence/ordinary')),
+                ('posix', PurePosixPath('/evidence/\\\\?\\literal'))):
+            system = types.SimpleNamespace(**vars(os))
+            system.name = platform
+            with self.subTest(platform=platform, path=path), \
+                    mock.patch.object(runner, 'os', system), \
+                    mock.patch.object(runner, 'Path') as constructor:
+                constructor.return_value.resolve.return_value = path
+                self.assertEqual(runner.resolve_path('input'), path)
+                constructor.return_value.resolve.assert_called_once_with()
+
+
 class ExecutableResolutionTests(MatrixTestBase):
     def test_relative_path_resolves_against_cwd(self):
         tool = self.tmp / 'bin' / 'tool'
@@ -525,6 +589,34 @@ class ProcessRunnerTests(MatrixTestBase):
         # Windows mandatory byte locks also apply to other handles in this process.
         owner.seek(0)
         return owner.read()
+
+    def test_temporary_root_matches_resolved_sidecar_paths(self):
+        identity = runner._output_identity(self.artifact)
+        self.assertEqual(self.tmp, identity.parent)
+        self.assertEqual(Path(str(identity) + '.lock'),
+                         Path(str(self.artifact) + '.lock'))
+
+    def test_sidecar_handles_share_access_while_byte_lock_contends(self):
+        sidecar = Path(str(self.artifact) + '.lock')
+        sidecar.write_bytes(b'held sidecar')
+        with self.output_lock_owners() as owners, runner._output_locks((self.artifact,)):
+            with runner._open_sidecar(sidecar) as contender:
+                with self.assertRaises(FileExistsError):
+                    runner._lock_handle(contender, sidecar)
+            self.assertEqual(self.read_with_lock_owner(sidecar, owners), b'held sidecar')
+        self.assertEqual(sidecar.read_bytes(), b'held sidecar')
+        self.assert_output_locks_released()
+
+    def test_atomic_publication_replaces_existing_files_without_rename(self):
+        self.seed_old_evidence()
+        with mock.patch.object(runner.os, 'rename', side_effect=FileExistsError(
+                'destination already exists')), \
+                mock.patch.object(runner.os, 'replace', wraps=os.replace) as replace:
+            for path in (self.retained, self.receipt):
+                runner.atomic_write(path, b'current evidence')
+                self.assertEqual(path.read_bytes(), b'current evidence')
+        self.assertEqual(replace.call_count, 2)
+        self.assertFalse(list(self.tmp.glob('*.tmp')))
 
     def test_success_retains_capture_and_records_timeout(self):
         command = self.script('import sys\nfrom pathlib import Path\n'
@@ -850,7 +942,7 @@ class ProcessRunnerTests(MatrixTestBase):
                     unlinked.assert_not_called()
                     launch.assert_not_called()
                     self.assertTrue(sidecar.is_symlink())
-                    self.assertEqual(sidecar.readlink(), target)
+                    self.assertEqual(runner.path_without_extended_prefix(sidecar.readlink()), target)
                     self.assertEqual(before, {
                         p: (p.read_bytes(), p.stat().st_ino)
                         for p in self.tmp.iterdir() if not p.is_symlink()})
@@ -1186,14 +1278,25 @@ class ProcessRunnerTests(MatrixTestBase):
                     handle.close.assert_called_once_with()
 
     def test_symlink_parent_aliases_contend_on_the_same_destinations(self):
+        self.assert_symlink_parent_aliases_contend()
+
+    def test_symlink_parent_aliases_contend_with_windows_parent_normalization(self):
+        resolve = Path.resolve
+
+        def windows_resolve(path, *args, **kwargs):
+            # Win32 removes lexical dot components before following reparse points.
+            return resolve(Path(os.path.normpath(path)), *args, **kwargs)
+
+        with mock.patch.object(Path, 'resolve', windows_resolve):
+            self.assert_symlink_parent_aliases_contend()
+
+    def assert_symlink_parent_aliases_contend(self):
         command = self.script('')
-        (self.tmp / 'nested').mkdir()
         (self.tmp / 'aliases').mkdir()
         alias = self.tmp / 'aliases' / 'directory'
-        try:
-            alias.symlink_to(self.tmp / 'nested', target_is_directory=True)
-        except (OSError, NotImplementedError) as error:
-            self.skipTest(f'symlink creation unavailable: {error}')
+        # A direct directory alias has the same meaning on POSIX and Windows;
+        # symlink/.. depends on the platform's parent-normalization semantics.
+        alias.symlink_to(self.tmp, target_is_directory=True)
         outputs = (self.artifact, self.retained, self.receipt, self.log)
         self.seed_old_evidence()
         with runner._output_locks(outputs):
@@ -1201,7 +1304,7 @@ class ProcessRunnerTests(MatrixTestBase):
             for index, shared in enumerate(outputs):
                 with self.subTest(shared=shared.name):
                     inner = [self.tmp / ('inner-' + p.name) for p in outputs]
-                    inner[index] = alias / '..' / shared.name
+                    inner[index] = alias / shared.name
                     with mock.patch.object(runner.subprocess, 'run') as launch, \
                             self.assertRaises(FileExistsError):
                         runner.run_process(command, cwd=self.tmp, environment=os.environ.copy(),
@@ -1269,7 +1372,7 @@ class ProcessRunnerTests(MatrixTestBase):
                         self.run_case(command)
                     launch.assert_not_called()
                     self.assertTrue(output.is_symlink())
-                    self.assertEqual(output.readlink(), target)
+                    self.assertEqual(runner.path_without_extended_prefix(output.readlink()), target)
                     self.assertEqual(before, {p: p.read_bytes() for p in self.tmp.iterdir()
                                               if not p.is_symlink()})
                     self.assertFalse(list(self.tmp.glob('*.lock')))

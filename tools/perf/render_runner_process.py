@@ -28,6 +28,26 @@ RECEIPT_SCHEMA = 'luminumbra.render_runner_process.v1'
 OUTPUT_LOCK_SUFFIX = '.lock'
 
 
+def path_without_extended_prefix(path):
+    """Use ordinary Windows drive/UNC spelling without following any links."""
+    text = str(path)
+    if os.name == 'nt':
+        # Handle paths and explicitly extended input can retain this prefix.
+        # Strip only drive/UNC prefixes; other device namespaces are distinct.
+        if text[:8].casefold() == '\\\\?\\unc\\':
+            text = '\\\\' + text[8:]
+        elif (text.startswith('\\\\?\\') and len(text) >= 7
+              and text[4] in 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ'
+              and text[5:7] == ':\\'):
+            text = text[4:]
+    return type(path)(text)
+
+
+def resolve_path(path):
+    """Resolve aliases, using ordinary drive/UNC spelling for Windows paths."""
+    return path_without_extended_prefix(Path(path).resolve())
+
+
 def file_sha256(path):
     digest = hashlib.sha256()
     with Path(path).open('rb') as source:
@@ -138,7 +158,7 @@ def resolve_executable(program, cwd, environment=None):
         if not candidate.is_absolute():
             candidate = Path(cwd) / candidate
         if candidate.is_file():
-            return Path(os.path.abspath(candidate))
+            return path_without_extended_prefix(Path(os.path.abspath(candidate)))
         raise FileNotFoundError(f'executable not found: {candidate}')
     search = environment.get('PATH') if environment else None
     if search is None:
@@ -150,7 +170,7 @@ def resolve_executable(program, cwd, environment=None):
     found = shutil.which(program, path=os.pathsep.join(entries))
     if found is None:
         raise FileNotFoundError(f'executable not found on PATH: {program}')
-    return Path(os.path.abspath(found))
+    return path_without_extended_prefix(Path(os.path.abspath(found)))
 
 
 def _output_identity(path):
@@ -177,7 +197,7 @@ def _output_identity(path):
     # Validate before resolving so that an unsafe component followed by '..'
     # cannot disappear. Also validate the resolved parent of a directory symlink.
     validate_components(path)
-    parent = path.parent.resolve()
+    parent = resolve_path(path.parent)
     validate_components(parent)
     # Preserve the directory's actual spelling on case-sensitive filesystems;
     # fold the destination name for every use of its identity, including locks.
