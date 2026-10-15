@@ -6,11 +6,101 @@
 #include <cstdint>
 #include <nlohmann/json.hpp>
 #include <nlohmann/json_fwd.hpp>
+#include <optional>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
 
 namespace Luminumbra::Server {
+
+inline nlohmann::json RegionDurationJson(
+    const std::optional<luminumbra::simulation::RegionTelemetry::Distribution>& duration) {
+    if (!duration)
+        return nullptr;
+    return {{"p50", duration->p50},
+            {"p95", duration->p95},
+            {"p99", duration->p99},
+            {"maximum", duration->maximum}};
+}
+
+inline nlohmann::json RegionGaugeJson(const luminumbra::simulation::RegionTelemetry::Gauge& gauge) {
+    return {{"current", gauge.current}, {"maximum", gauge.maximum}};
+}
+
+inline nlohmann::json RegionTelemetryJson(const luminumbra::simulation::RegionTelemetry& first,
+                                          const luminumbra::simulation::RegionTelemetry& replay) {
+    using R = luminumbra::simulation::RegionTelemetry;
+    const auto& totals = first.Totals();
+    nlohmann::json fault = nullptr;
+    if (const auto tick = first.FaultTick(); tick)
+        fault = {{"tick", *tick}, {"message", first.FaultMessage()}};
+    const auto first_tick = first.FirstTick();
+    const auto last_tick = first.LastTick();
+    nlohmann::json result = {
+        {"schema", "luminumbra.sim_budget.regions.v1"},
+        {"samples", first.Samples()},
+        {"first_tick", first_tick ? nlohmann::json(*first_tick) : nlohmann::json(nullptr)},
+        {"last_tick", last_tick ? nlohmann::json(*last_tick) : nlohmann::json(nullptr)},
+        {"complete", first.Complete()},
+        {"dropped_samples", first.DroppedSamples()},
+        {"duration_ms", RegionDurationJson(first.SchedulerDuration())},
+        {"scheduler",
+         {{"ledger_records", RegionGaugeJson(first.ledger_records)},
+          {"active", RegionGaugeJson(first.active)},
+          {"reduced", RegionGaugeJson(first.reduced)},
+          {"frozen", RegionGaugeJson(first.frozen)},
+          {"due_total", first.due_total},
+          {"accepted_work_total", first.accepted_work_total},
+          {"work_limit", first.work_limit},
+          {"pressure_max", first.pressure_max},
+          {"rejected_anchors", first.rejected_anchors},
+          {"rejected_work", first.rejected_work},
+          {"rejected_capacity", first.rejected_capacity}}},
+        {"creatures",
+         {{"full", first.creatures_full},
+          {"coarse", first.creatures_coarse},
+          {"frozen", first.creatures_frozen},
+          {"promotions", totals[R::Promotions]},
+          {"demotions", totals[R::Demotions]},
+          {"full_updates", totals[R::FullUpdates]},
+          {"coarse_updates", totals[R::CoarseUpdates]},
+          {"births", totals[R::Births]},
+          {"deaths", totals[R::Deaths]},
+          {"removals", totals[R::Removals]},
+          {"parked_travel", totals[R::ParkedTravel]}}},
+        {"population",
+         {{"successes", totals[R::PopulationSuccesses]},
+          {"failures", totals[R::PopulationFailures]},
+          {"pending_activations", first.pending_activations}}},
+        {"controllers",
+         {{"created", totals[R::ControllersCreated]},
+          {"removed", totals[R::ControllersRemoved]},
+          {"stale_handle_rejections", totals[R::StaleHandles]}}},
+        {"persistence",
+         {{"parked_bytes", RegionGaugeJson(first.parked_bytes)},
+          {"saves_total", first.saves_total},
+          {"failures_total", first.save_failures_total},
+          {"save_samples", first.SaveSamples()},
+          {"save_duration_ms", RegionDurationJson(first.SaveDuration())}}},
+        {"water",
+         {{"reserved", first.water_reserved},
+          {"used", first.water_used},
+          {"unused", first.water_unused},
+          {"unallocated", first.water_unallocated},
+          {"completed_cells", first.water_completed_cells},
+          {"bound_known", false},
+          {"bound", nullptr}}},
+        {"replay",
+         {{"trace_digest", first.TraceDigest()},
+          {"work_replay_match", replay.Enabled() && first.WorkMatches(replay)}}},
+        {"fault", std::move(fault)}};
+    // Fixed fields, u64 counters and bounded ASCII fault text fit even with indentation.
+    // Refuse a future accidental schema expansion before adding it to an artifact.
+    if (result.dump(8).size() > R::kMaxBlockBytes)
+        throw std::length_error("Regional telemetry block exceeds its byte cap");
+    return result;
+}
 
 // Additive artifact extension. Calling this with a disabled collector is byte-neutral.
 inline void AppendSimBudgetArtifact(nlohmann::json& artifact,
@@ -41,6 +131,8 @@ inline void AppendSimBudgetArtifact(nlohmann::json& artifact,
         {"work_replay_match", replay.Enabled() && first.WorkMatches(replay)},
         {"stages", std::move(stages)},
     };
+    if (first.Regions().Enabled())
+        artifact["sim_budget"]["regions"] = RegionTelemetryJson(first.Regions(), replay.Regions());
 }
 
 // Evaluates a budget profile against the collector's stage ticks. The engine emits no residency

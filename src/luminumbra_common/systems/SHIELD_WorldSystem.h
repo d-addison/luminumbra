@@ -929,6 +929,10 @@ public:
         m_persistence_tick = sim_tick;
     }
     ParkingStatus parking_status() const;
+    // Owner-thread observation of cached accounting; no parked-inventory scan.
+    [[nodiscard]] std::size_t parked_byte_count() const noexcept {
+        return m_parked_bytes;
+    }
     bool persistence_save_requested() const {
         return m_persistence_save_requested;
     }

@@ -453,6 +453,7 @@ public:
             throw std::logic_error("Set active regions before creating or opening a world");
         m_activeRegionsEnabled = enabled;
         m_simulationEventBus.set_durable(enabled);
+        ResetRegionTelemetry();
     }
     [[nodiscard]] bool ActiveRegionsEnabled() const {
         return m_activeRegionsEnabled;
@@ -560,7 +561,9 @@ public:
     // Opt-in observation; never part of persistent or hashed session state.
     void SetSimBudgetTelemetryEnabled(bool enabled) {
         m_simBudgetTelemetry.SetEnabled(enabled);
+        ResetRegionTelemetry();
     }
+    [[nodiscard]] luminumbra::simulation::SimBudgetTelemetry CaptureSimBudgetTelemetry() const;
     [[nodiscard]] luminumbra::simulation::SimBudgetTelemetry& GetSimBudgetTelemetry() {
         return m_simBudgetTelemetry;
     }
@@ -708,6 +711,10 @@ private:
     FieldPageState m_fieldPages;
     void LatchRegionFault(std::uint64_t tick, std::string message);
     void RunRegionScheduler(std::uint64_t current_tick);
+    void ResetRegionTelemetry();
+    void ObserveRegionActivity();
+    void ObserveRegionCapture(luminumbra::simulation::RegionTelemetry& telemetry) const;
+    [[nodiscard]] luminumbra::simulation::RegionTelemetry::Activities RegionActivityValues() const;
     [[nodiscard]] AuthorityHashCapture
     CaptureAuthorityStateImpl(const std::string& avatar_snapshot = {}) const;
     [[nodiscard]] std::string AuthorityIdentityBytes() const;

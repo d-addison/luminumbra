@@ -1,5 +1,6 @@
 #pragma once
 
+#include "RegionTelemetry.h"
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -7,6 +8,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace luminumbra::simulation {
@@ -97,9 +99,42 @@ struct SimBudgetSummary {
 class SimBudgetTelemetry {
 public:
     using Samples = std::array<std::vector<SimBudgetSample>, kSimBudgetStageNames.size()>;
+    using RegionCaptureObserver = void (*)(const void*, RegionTelemetry&);
+
+    SimBudgetTelemetry() = default;
+    SimBudgetTelemetry(const SimBudgetTelemetry& other) {
+        *this = other;
+    }
+    SimBudgetTelemetry& operator=(const SimBudgetTelemetry& other) {
+        if (this != &other)
+            *this = other.Capture();
+        return *this;
+    }
+    SimBudgetTelemetry(SimBudgetTelemetry&& other) noexcept {
+        *this = std::move(other);
+    }
+    SimBudgetTelemetry& operator=(SimBudgetTelemetry&& other) noexcept {
+        if (this != &other) {
+            enabled_ = std::exchange(other.enabled_, false);
+            samples_ = std::move(other.samples_);
+            regions_ = std::move(other.regions_);
+            // A live owner's observation binding never follows a value out of its session.
+            SetRegionCaptureObserver(nullptr, nullptr);
+            other.SetRegionCaptureObserver(nullptr, nullptr);
+        }
+        return *this;
+    }
+
+    // Owner-thread export observation. Captures never retain the owner or callback.
+    void SetRegionCaptureObserver(const void* context, RegionCaptureObserver observer) {
+        region_capture_context_ = context;
+        region_capture_observer_ = observer;
+    }
 
     void SetEnabled(bool enabled) {
         enabled_ = enabled;
+        if (!enabled)
+            regions_.SetEnabled(false);
         Clear();
     }
     [[nodiscard]] bool Enabled() const {
@@ -108,6 +143,7 @@ public:
     void Clear() {
         for (auto& stage : samples_)
             stage.clear();
+        regions_.Clear();
     }
     [[nodiscard]] const Samples& SamplesByStage() const {
         return samples_;
@@ -127,8 +163,27 @@ public:
         }
     }
 
+    [[nodiscard]] RegionTelemetry& Regions() {
+        return regions_;
+    }
+    [[nodiscard]] const RegionTelemetry& Regions() const {
+        return regions_;
+    }
+
+    [[nodiscard]] SimBudgetTelemetry Capture() const {
+        SimBudgetTelemetry result;
+        result.enabled_ = enabled_;
+        result.samples_ = samples_;
+        result.regions_ = regions_.Capture();
+        if (result.regions_.Enabled() && region_capture_observer_)
+            region_capture_observer_(region_capture_context_, result.regions_);
+        return result;
+    }
+
     // Deliberately excludes all wall-clock values, including in replay validation.
     [[nodiscard]] bool WorkMatches(const SimBudgetTelemetry& other) const {
+        if (!regions_.WorkMatches(other.regions_))
+            return false;
         for (std::size_t stage = 0; stage < samples_.size(); ++stage) {
             const auto& left = samples_[stage];
             const auto& right = other.samples_[stage];
@@ -214,6 +269,9 @@ public:
 private:
     bool enabled_ = false;
     Samples samples_;
+    RegionTelemetry regions_;
+    const void* region_capture_context_ = nullptr;
+    RegionCaptureObserver region_capture_observer_ = nullptr;
 };
 
 } // namespace luminumbra::simulation

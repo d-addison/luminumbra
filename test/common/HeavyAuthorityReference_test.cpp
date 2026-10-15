@@ -1,3 +1,4 @@
+#include "../fixtures/smoke_artifact/FixedInputs.h"
 #include "../support/SimulationContentFixture.h"
 #include "../support/UniqueTempPath.h"
 #include "luminumbra_common/components/CreatureComponents.h"
@@ -6,10 +7,14 @@
 #include "luminumbra_common/fields/EnergyFieldState.h"
 #include "luminumbra_common/persistence/PlantPersistence.h"
 #include "luminumbra_common/simulation/SimulationEventBus.h"
+#include "luminumbra_common/systems/WaterSystem.h"
 #include "luminumbra_common/world/AuthorityHashState.h"
 #include "luminumbra_server/HeavyComparison.h"
+#include "luminumbra_server/SimBudgetArtifact.h"
 #include "luminumbra_server/modes/ModeHelpers.h"
 #include "luminumbra_server/modes/Modes.h"
+#include "luminumbra_server/modes/SmokeArtifact.h"
+#include <limits>
 
 #include <array>
 #include <cstdint>
@@ -794,5 +799,669 @@ TEST_F(HeavyReference, LegacyHeavyOutputUnchanged) {
     changed.world_hash = "historically excluded";
     changed.sub.mesh = "derived mesh";
     EXPECT_TRUE(S::AuthoritativeStateEqual(hashes, changed));
+}
+} // namespace
+
+namespace {
+TEST_F(HeavyReference, HeavyContinuationRegionalCapture) {
+    auto options = Options();
+    options.sim_budget = true;
+    ASSERT_EQ(HeavyReferenceMode::RunHeavy(options), 0);
+    const auto artifact = nlohmann::json::parse(Read(root / "heavy.json"));
+    ASSERT_TRUE(artifact.at("passed").get<bool>());
+    const auto& budget = artifact.at("sim_budget");
+    EXPECT_EQ(budget.at("schema"), "luminumbra.sim_budget.v2");
+    EXPECT_TRUE(budget.at("work_replay_match").get<bool>());
+    const auto& regional = budget.at("regions");
+    EXPECT_EQ(regional.at("schema"), "luminumbra.sim_budget.regions.v1");
+    EXPECT_EQ(regional.at("samples"), options.heavy_resim);
+    EXPECT_EQ(regional.at("first_tick"), options.ticks + 1);
+    EXPECT_EQ(regional.at("last_tick"), options.ticks + options.heavy_resim);
+    EXPECT_TRUE(regional.at("complete").get<bool>());
+    EXPECT_TRUE(regional.at("replay").at("work_replay_match").get<bool>());
+    EXPECT_EQ(regional.at("dropped_samples"), 0);
+}
+} // namespace
+
+namespace {
+using RegionCollector = luminumbra::simulation::RegionTelemetry;
+namespace RegionalServer = Luminumbra::Server;
+namespace RegionalWorld = Luminumbra::world;
+
+void RecordRegionSample(RegionCollector& collector, std::uint64_t tick, double duration) {
+    const RegionCollector::SchedulerObservation observation{1, 1, 0, 0, 5};
+    collector.RecordScheduler(tick, duration, observation, 1, 5, 10, 0, 0, 0, "0123456789abcdef");
+}
+std::string ReadRegionFixture(const std::filesystem::path& path) {
+    std::ifstream input(path, std::ios::binary);
+    if (!input)
+        throw std::runtime_error("Cannot read telemetry fixture");
+    return {std::istreambuf_iterator<char>(input), {}};
+}
+std::string NativeRegionFixture(std::string bytes) {
+#ifdef _WIN32
+    std::string native;
+    for (const char value : bytes) {
+        if (value == '\n')
+            native += '\r';
+        native += value;
+    }
+    return native;
+#else
+    return bytes;
+#endif
+}
+
+TEST(RegionTelemetry, RegionsBlockRequiresBothFlags) {
+    for (const bool regions_enabled : {false, true}) {
+        for (const bool budget_enabled : {false, true}) {
+            SCOPED_TRACE(regions_enabled);
+            SCOPED_TRACE(budget_enabled);
+            RegionalWorld::GameSession session;
+            session.SetSimBudgetTelemetryEnabled(budget_enabled);
+            session.SetActiveRegionsEnabled(regions_enabled);
+            const auto capture = session.CaptureSimBudgetTelemetry();
+            EXPECT_EQ(capture.Regions().Enabled(), regions_enabled && budget_enabled);
+            EXPECT_EQ(session.GetSimBudgetTelemetry().Regions().RetainedSampleBytes() != 0,
+                      regions_enabled && budget_enabled);
+            EXPECT_EQ(capture.Regions().RetainedSampleBytes(), 0u);
+            nlohmann::json artifact = {{"legacy", 1}};
+            const auto before = artifact.dump(2);
+            RegionalServer::AppendSimBudgetArtifact(artifact, capture, capture);
+            if (!budget_enabled) {
+                EXPECT_EQ(artifact.dump(2), before);
+            } else {
+                ASSERT_TRUE(artifact.contains("sim_budget"));
+                EXPECT_EQ(artifact["sim_budget"].contains("regions"), regions_enabled);
+                EXPECT_EQ(artifact["sim_budget"]["stages"].size(),
+                          luminumbra::simulation::kSimBudgetStageNames.size());
+            }
+            session.SetSimBudgetTelemetryEnabled(false);
+            EXPECT_FALSE(session.GetSimBudgetTelemetry().Regions().Enabled());
+            EXPECT_EQ(session.GetSimBudgetTelemetry().Regions().RetainedSampleBytes(), 0u);
+        }
+    }
+}
+
+TEST(RegionTelemetry, RegionPercentilesAndEmptyCapture) {
+    RegionCollector collector;
+    collector.SetEnabled(true);
+    EXPECT_EQ(collector.Samples(), 0u);
+    EXPECT_FALSE(collector.FirstTick());
+    EXPECT_FALSE(collector.LastTick());
+    EXPECT_FALSE(collector.SchedulerDuration());
+    EXPECT_FALSE(collector.SaveDuration());
+    const auto empty = RegionalServer::RegionTelemetryJson(collector, collector);
+    EXPECT_TRUE(empty.at("duration_ms").is_null());
+    EXPECT_TRUE(empty.at("first_tick").is_null());
+    EXPECT_TRUE(empty.at("last_tick").is_null());
+    EXPECT_TRUE(empty.at("water").at("bound").is_null());
+    EXPECT_FALSE(empty.at("water").at("bound_known").get<bool>());
+    EXPECT_TRUE(empty.at("replay").at("work_replay_match").get<bool>());
+    RecordRegionSample(collector, 7, 30.0);
+    const auto single = collector.SchedulerDuration();
+    ASSERT_TRUE(single);
+    EXPECT_DOUBLE_EQ(single->p99, 30.0);
+    RecordRegionSample(collector, 8, 0.0);
+    RecordRegionSample(collector, 9, 20.0);
+    RecordRegionSample(collector, 10, 10.0);
+    const auto distribution = collector.SchedulerDuration();
+    ASSERT_TRUE(distribution);
+    EXPECT_DOUBLE_EQ(distribution->p50, 15.0);
+    EXPECT_DOUBLE_EQ(distribution->p95, 28.5);
+    EXPECT_DOUBLE_EQ(distribution->p99, 29.7);
+    EXPECT_DOUBLE_EQ(distribution->maximum, 30.0);
+    EXPECT_EQ(collector.FirstTick(), 7u);
+    EXPECT_EQ(collector.LastTick(), 10u);
+    collector.RecordSave(true, 10.0);
+    collector.RecordSave(false, 30.0);
+    const auto save_distribution = collector.SaveDuration();
+    ASSERT_TRUE(save_distribution);
+    EXPECT_DOUBLE_EQ(save_distribution->p50, 20.0);
+    EXPECT_DOUBLE_EQ(save_distribution->p99, 29.8);
+    EXPECT_EQ(collector.saves_total, 2u);
+    EXPECT_EQ(collector.save_failures_total, 1u);
+    collector.Clear();
+    EXPECT_TRUE(collector.Enabled());
+    EXPECT_EQ(collector.Samples(), 0u);
+    EXPECT_FALSE(collector.SchedulerDuration());
+    EXPECT_EQ(collector.saves_total, 0u);
+}
+
+TEST(RegionTelemetry, RegionCollectorAndArtifactRespectCaps) {
+    RegionCollector collector;
+    EXPECT_EQ(collector.RetainedSampleBytes(), 0u);
+    collector.SetEnabled(true);
+    const auto retained_bytes = collector.RetainedSampleBytes();
+    EXPECT_EQ(retained_bytes,
+              (RegionCollector::kMaxSamples + RegionCollector::kMaxSaveSamples) * sizeof(double));
+    EXPECT_EQ(retained_bytes, RegionCollector::kSampleStorageBytes);
+    EXPECT_LT(RegionCollector::kHeavySampleStorageBytes, 2u * 1024u * 1024u);
+    for (std::size_t index = 0; index < RegionCollector::kMaxSamples; ++index)
+        RecordRegionSample(collector, static_cast<std::uint64_t>(index) + 1, 1.0);
+    for (std::size_t index = 0; index < RegionCollector::kMaxSaveSamples; ++index)
+        collector.RecordSave(true, 2.0);
+    EXPECT_EQ(collector.Samples(), RegionCollector::kMaxSamples);
+    EXPECT_EQ(collector.SaveSamples(), RegionCollector::kMaxSaveSamples);
+    EXPECT_TRUE(collector.Complete());
+    const auto duration = collector.SchedulerDuration();
+    ASSERT_TRUE(duration);
+    EXPECT_DOUBLE_EQ(duration->p99, 1.0);
+    RecordRegionSample(collector, RegionCollector::kMaxSamples + 1, 3.0);
+    collector.RecordSave(false, 4.0);
+    EXPECT_FALSE(collector.Complete());
+    EXPECT_EQ(collector.DroppedSamples(), 2u);
+    EXPECT_EQ(collector.Samples(), RegionCollector::kMaxSamples);
+    EXPECT_EQ(collector.SaveSamples(), RegionCollector::kMaxSaveSamples);
+    EXPECT_EQ(collector.RetainedSampleBytes(), retained_bytes);
+    collector.RecordFault(42, std::string(1000, '"'));
+    collector.RecordFault(43, "second fault");
+    EXPECT_EQ(collector.FaultTick(), 42u);
+    EXPECT_EQ(collector.FaultMessage().size(), RegionCollector::kMaxFaultBytes);
+    const auto maximum = std::numeric_limits<std::uint64_t>::max();
+    RegionCollector::Activities large;
+    large.fill(maximum);
+    collector.ObserveActivity(large);
+    collector.ObserveGauges(maximum, maximum, maximum, maximum, maximum);
+    collector.RecordWater(maximum, maximum, 0, maximum, maximum);
+    const auto block = RegionalServer::RegionTelemetryJson(collector, collector);
+    EXPECT_LE(block.dump(8).size(), RegionCollector::kMaxBlockBytes);
+    EXPECT_FALSE(block.at("complete").get<bool>());
+    EXPECT_FALSE(block.at("replay").at("work_replay_match").get<bool>());
+    for (const auto& value : block.items())
+        EXPECT_FALSE(value.value().is_array());
+    collector.SetEnabled(false);
+    EXPECT_EQ(collector.RetainedSampleBytes(), 0u);
+    RecordRegionSample(collector, 1, 1.0);
+    EXPECT_EQ(collector.Samples(), 0u);
+}
+
+TEST(RegionTelemetry, CaptureSummariesOwnNoSampleArrays) {
+    RegionCollector collector;
+    collector.SetEnabled(true);
+    RecordRegionSample(collector, 1, 30.0);
+    collector.RecordSave(true, 10.0);
+    auto captured = collector.Capture();
+    EXPECT_TRUE(captured.Enabled());
+    EXPECT_EQ(captured.RetainedSampleBytes(), 0u);
+    EXPECT_TRUE(captured.WorkMatches(collector));
+    RecordRegionSample(collector, 2, 0.0);
+    collector.RecordSave(false, 30.0);
+    auto copied = captured;
+    auto moved = std::move(captured);
+    EXPECT_FALSE(captured.Enabled());
+    EXPECT_EQ(copied.RetainedSampleBytes(), 0u);
+    EXPECT_EQ(moved.RetainedSampleBytes(), 0u);
+    const auto scheduler_duration = moved.SchedulerDuration();
+    const auto save_duration = moved.SaveDuration();
+    ASSERT_TRUE(scheduler_duration);
+    ASSERT_TRUE(save_duration);
+    EXPECT_DOUBLE_EQ(scheduler_duration->p99, 30.0);
+    EXPECT_DOUBLE_EQ(save_duration->p99, 10.0);
+    EXPECT_EQ(moved.Samples(), 1u);
+    EXPECT_EQ(moved.SaveSamples(), 1u);
+    EXPECT_EQ(collector.Samples(), 2u);
+    EXPECT_FALSE(moved.WorkMatches(collector));
+    const auto resumed = collector.SchedulerDuration();
+    ASSERT_TRUE(resumed);
+    EXPECT_DOUBLE_EQ(resumed->p50, 15.0);
+    const auto work_trace = moved.TraceDigest();
+    RecordRegionSample(moved, 2, 1.0);
+    moved.RecordSave(true, 1.0);
+    EXPECT_EQ(moved.Samples(), 1u);
+    EXPECT_EQ(moved.SaveSamples(), 1u);
+    EXPECT_EQ(moved.TraceDigest(), work_trace);
+    EXPECT_EQ(moved.DroppedSamples(), 2u);
+    EXPECT_FALSE(moved.Complete());
+    moved.Clear();
+    EXPECT_TRUE(moved.Enabled());
+    EXPECT_EQ(moved.RetainedSampleBytes(), RegionCollector::kSampleStorageBytes);
+    EXPECT_EQ(moved.Samples(), 0u);
+    EXPECT_FALSE(moved.SchedulerDuration());
+
+    luminumbra::simulation::SimBudgetTelemetry live_budget;
+    live_budget.SetEnabled(true);
+    live_budget.Regions().SetEnabled(true);
+    const std::uint64_t observed_bytes = 55;
+    live_budget.SetRegionCaptureObserver(
+        &observed_bytes, [](const void* context, RegionCollector& captured_regions) {
+            captured_regions.ObserveParkedBytes(*static_cast<const std::uint64_t*>(context));
+        });
+    const auto observed = live_budget;
+    EXPECT_EQ(observed.Regions().parked_bytes.current, observed_bytes);
+    const auto detached = std::move(live_budget);
+    EXPECT_FALSE(live_budget.Enabled());
+    const auto detached_capture = detached.Capture();
+    EXPECT_EQ(detached_capture.Regions().parked_bytes.current, 0u);
+}
+
+TEST(RegionTelemetry, TimingExcludedFromReplayMatch) {
+    luminumbra::simulation::SimBudgetTelemetry first, replay;
+    first.SetEnabled(true);
+    replay.SetEnabled(true);
+    first.Regions().SetEnabled(true);
+    replay.Regions().SetEnabled(true);
+    RecordRegionSample(first.Regions(), 1, 0.01);
+    RecordRegionSample(replay.Regions(), 1, 999.0);
+    first.Regions().RecordSave(true, 0.1);
+    replay.Regions().RecordSave(true, 1234.0);
+    EXPECT_TRUE(first.WorkMatches(replay));
+    EXPECT_EQ(first.Regions().TraceDigest(), replay.Regions().TraceDigest());
+    EXPECT_NE(
+        RegionalServer::RegionTelemetryJson(first.Regions(), replay.Regions())["duration_ms"],
+        RegionalServer::RegionTelemetryJson(replay.Regions(), first.Regions())["duration_ms"]);
+    replay.Regions().RecordWater(1, 1, 0, 0, 64);
+    EXPECT_FALSE(first.WorkMatches(replay));
+    replay = first;
+    RegionCollector::Activities runtime_only{};
+    runtime_only[RegionCollector::ControllersCreated] = 3;
+    runtime_only[RegionCollector::ControllersRemoved] = 2;
+    runtime_only[RegionCollector::StaleHandles] = 1;
+    // Observe the same completed boundary in both collectors, with different runtime receipts.
+    first.Regions().ObserveActivity({});
+    replay.Regions().ObserveActivity(runtime_only);
+    EXPECT_TRUE(first.WorkMatches(replay));
+    EXPECT_NE(first.Regions().Totals(), replay.Regions().Totals());
+    replay = first;
+    RegionCollector::Activities changed{};
+    changed[RegionCollector::FullUpdates] = 1;
+    replay.Regions().ObserveActivity(changed);
+    EXPECT_FALSE(first.WorkMatches(replay));
+    replay = first;
+    replay.Regions().Clear();
+    const RegionCollector::SchedulerObservation observation{1, 1, 0, 0, 5};
+    replay.Regions().RecordScheduler(1, 1.0, observation, 1, 5, 10, 0, 0, 0, "fedcba9876543210");
+    replay.Regions().ObserveActivity({});
+    EXPECT_FALSE(first.WorkMatches(replay));
+    replay = first;
+    EXPECT_TRUE(first.WorkMatches(replay));
+    first.Regions().RecordScheduler(1, -1.0, {}, 0, 0, 0, 0, 0, 0, "");
+    EXPECT_FALSE(first.Regions().Complete());
+    EXPECT_FALSE(first.WorkMatches(replay));
+}
+
+TEST(RegionTelemetry, RefusalsPreserveAcceptedObservations) {
+    for (const double invalid : {-1.0,
+                                 std::numeric_limits<double>::infinity(),
+                                 std::numeric_limits<double>::quiet_NaN()}) {
+        RegionCollector collector;
+        collector.SetEnabled(true);
+        RecordRegionSample(collector, 1, 1.0);
+        const auto trace = collector.TraceDigest();
+        RecordRegionSample(collector, 2, invalid);
+        EXPECT_EQ(collector.Samples(), 1u);
+        EXPECT_EQ(collector.accepted_work_total, 5u);
+        EXPECT_EQ(collector.TraceDigest(), trace);
+        EXPECT_EQ(collector.DroppedSamples(), 1u);
+        collector.RecordSave(true, invalid);
+        EXPECT_EQ(collector.SaveSamples(), 0u);
+        EXPECT_EQ(collector.DroppedSamples(), 2u);
+        EXPECT_FALSE(collector.Complete());
+    }
+    for (const auto rejected_tick : std::array<std::uint64_t, 3>{0, 1, 3}) {
+        RegionCollector collector;
+        collector.SetEnabled(true);
+        RecordRegionSample(collector, 1, 1.0);
+        RecordRegionSample(collector, rejected_tick, 2.0);
+        EXPECT_EQ(collector.Samples(), 1u);
+        EXPECT_EQ(collector.DroppedSamples(), 1u);
+    }
+    RegionCollector collector;
+    collector.SetEnabled(true);
+    collector.RecordScheduler(1, 1.0, {}, 0, 0, 0, 0, 0, 0, "");
+    EXPECT_EQ(collector.Samples(), 0u);
+    EXPECT_EQ(collector.DroppedSamples(), 1u);
+    collector.Clear();
+    const auto maximum = std::numeric_limits<std::uint64_t>::max();
+    collector.RecordWater(maximum, maximum, 0, 0, maximum);
+    collector.RecordWater(1, 1, 0, 0, 1);
+    EXPECT_EQ(collector.water_reserved, maximum);
+    EXPECT_EQ(collector.water_used, maximum);
+    EXPECT_EQ(collector.water_completed_cells, maximum);
+    EXPECT_FALSE(collector.Complete());
+    collector.Clear();
+    RegionCollector::Activities values{};
+    values[RegionCollector::FullUpdates] = 4;
+    collector.SetActivityBaseline(values);
+    values[RegionCollector::FullUpdates] = 3;
+    collector.ObserveActivity(values);
+    EXPECT_FALSE(collector.Complete());
+    EXPECT_EQ(collector.Totals()[RegionCollector::FullUpdates], 0u);
+    collector.Clear();
+    collector.RecordFault(7, "bounded\ntext");
+    EXPECT_EQ(collector.FaultMessage(), "bounded?text");
+    EXPECT_TRUE(collector.Complete());
+    auto copied = collector;
+    RecordRegionSample(collector, 1, 2.0);
+    EXPECT_FALSE(copied.SchedulerDuration());
+    EXPECT_EQ(copied.Samples(), 0u);
+    auto moved = std::move(copied);
+    EXPECT_TRUE(moved.Enabled());
+    EXPECT_FALSE(copied.Enabled());
+    RecordRegionSample(copied, 1, 1.0);
+    EXPECT_EQ(copied.Samples(), 0u);
+    collector.Clear();
+    collector.RecordFault(8, std::string(RegionCollector::kMaxFaultBytes + 1, 'x'));
+    EXPECT_FALSE(collector.Complete());
+    EXPECT_EQ(collector.DroppedSamples(), 1u);
+}
+
+class RegionalTelemetryFixture : public testing::Test {
+protected:
+    std::filesystem::path fixture_root;
+    void SetUp() override {
+        fixture_root = Luminumbra::TestSupport::CreateUniqueTempDirectory("regional_telemetry_");
+        Luminumbra::TestSupport::WriteSimulationContentFixture(fixture_root);
+        for (const auto* species : {"grovestrider", "ridgeback_stalker"})
+            WriteRegionInput(fixture_root / "data/common/creatures/species" /
+                                 (std::string(species) + ".json"),
+                             "{\"id\":\"" + std::string(species) + "\"}");
+        WriteRegionInput(
+            fixture_root / "data/common/systems.json",
+            R"({"sim":{"active_regions":{"enabled":true},"aether_state":{"enabled":true}}})");
+        WriteRegionInput(fixture_root / "worlds/atlas/presets/default.json", R"({
+            "schema_rev":6,"generation_params":{
+                "terrain":{"base_frequency":0.01,"base_amplitude":0.0,"octaves":1,
+                    "persistence":0.5,"lacunarity":2.0,"height_offset":8.0,
+                    "shaping":{"peaks_amplitude":0.0,"domain_warp_amplitude":0.0,
+                        "continental_spline":[[-1.0,0.0],[1.0,0.0]]},
+                    "hydro":{"enabled":false}},
+                "features":{"caves_enabled":false,"cave_frequency":0.02}}})");
+    }
+    void TearDown() override {
+        std::error_code error;
+        std::filesystem::remove_all(fixture_root, error);
+    }
+    static void WriteRegionInput(const std::filesystem::path& path, std::string_view bytes) {
+        std::filesystem::create_directories(path.parent_path());
+        std::ofstream output(path, std::ios::binary | std::ios::trunc);
+        output.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+        output.close();
+        if (!output.good())
+            throw std::runtime_error("Cannot write regional fixture");
+    }
+    RegionalServer::ServerWorldRunnerConfig Configuration(bool budget_enabled) const {
+        RegionalServer::ServerWorldRunnerConfig config;
+        config.root_path = Luminumbra::Filesystem::GenericPathString(fixture_root) + "/";
+        config.seed = "1337";
+        config.surface_radius = 1;
+        config.collision_radius = 1;
+        config.test_streaming_radius_cap = 1;
+        config.avatar_count = 1;
+        config.ecology_roster = true;
+        config.planted_roster = true;
+        config.sim_budget = budget_enabled;
+        config.autosave_interval_ticks = 0;
+        return config;
+    }
+};
+
+TEST_F(RegionalTelemetryFixture, CachedParkedBytesAreConstObservations) {
+    using WorldSystem = Luminumbra::Systems::SHIELD_WorldSystem;
+    static_assert(noexcept(std::declval<const WorldSystem&>().parked_byte_count()));
+    RegionalServer::ServerWorldRunner runner(Configuration(true));
+    ASSERT_TRUE(runner.Boot());
+    auto* session = runner.Session();
+    ASSERT_NE(session, nullptr);
+    auto* world = session->GetWorldSystem();
+    ASSERT_NE(world, nullptr);
+    const WorldSystem& observation = *world;
+    EXPECT_EQ(observation.parked_byte_count(), 0u);
+    const auto spawn = session->GetMetadata().spawnPoint;
+    const Luminumbra::Vec3 near_anchor(
+        spawn.x, world->GetTerrainHeightAt(spawn.x, spawn.z) + 2.0f, spawn.z);
+    const Luminumbra::Vec3 surface(near_anchor.x, near_anchor.y - 2.0f, near_anchor.z);
+    for (int pass = 0; pass < 12; ++pass) {
+        world->update(session->GetRegistry(), {near_anchor}, session->GetPhysicsSystem());
+        world->wait_for_streaming_jobs();
+    }
+    ASSERT_GT(world->EditTerrainVoxel(surface, 3.0f, false, session->GetPhysicsSystem()), 0);
+    const float far_x = near_anchor.x + 40.0f * static_cast<float>(Luminumbra::CHUNK_SIZE_X);
+    const Luminumbra::Vec3 far_anchor(
+        far_x, world->GetTerrainHeightAt(far_x, near_anchor.z) + 2.0f, near_anchor.z);
+    world->note_persistence_tick(7);
+    for (int pass = 0; pass < 12; ++pass) {
+        world->update(session->GetRegistry(), {far_anchor}, session->GetPhysicsSystem());
+        world->wait_for_streaming_jobs();
+    }
+    const auto status = world->parking_status();
+    ASSERT_GT(status.parked_count, 0u);
+    ASSERT_GT(status.parked_bytes, 0u);
+    const auto parked = world->snapshot_parked_chunks();
+    ASSERT_FALSE(parked.empty());
+    ASSERT_TRUE(parked.front());
+    EXPECT_EQ(observation.parked_byte_count(), status.parked_bytes);
+    EXPECT_EQ(observation.parked_byte_count(), status.parked_bytes);
+    const auto captured = session->CaptureSimBudgetTelemetry();
+    EXPECT_EQ(captured.Regions().parked_bytes.current, status.parked_bytes);
+    EXPECT_EQ(captured.Regions().parked_bytes.maximum, status.parked_bytes);
+    EXPECT_EQ(world->snapshot_parked_chunks(), parked);
+    EXPECT_EQ(world->parking_status().oldest_parked_tick, status.oldest_parked_tick);
+    EXPECT_FALSE(session->GetRegionSchedulerFault());
+    ASSERT_TRUE(world->unpark_chunk(parked.front()->get_id()));
+    EXPECT_LT(observation.parked_byte_count(), status.parked_bytes);
+    EXPECT_EQ(observation.parked_byte_count(), world->parking_status().parked_bytes);
+    const auto after_unpark = session->CaptureSimBudgetTelemetry();
+    EXPECT_EQ(after_unpark.Regions().parked_bytes.current, observation.parked_byte_count());
+    runner.Shutdown();
+}
+
+TEST_F(RegionalTelemetryFixture, ProductionCapturePeakRespectsBudget) {
+    RegionalServer::ServerWorldRunner first(Configuration(true)), replay(Configuration(true));
+    ASSERT_TRUE(first.Boot());
+    ASSERT_TRUE(replay.Boot());
+    ASSERT_NE(first.Session(), nullptr);
+    ASSERT_NE(replay.Session(), nullptr);
+    const auto baseline = RegionCollector::SampleStorageUsageForTesting().current;
+    ASSERT_EQ(baseline, RegionCollector::kHeavySampleStorageBytes);
+    RegionCollector::ResetSampleStoragePeakForTesting();
+    for (auto* session : {first.Session(), replay.Session()}) {
+        session->SetSimBudgetTelemetryEnabled(true);
+        auto& collector = session->GetSimBudgetTelemetry().Regions();
+        for (std::size_t index = 0; index < RegionCollector::kMaxSamples; ++index)
+            RecordRegionSample(
+                collector, static_cast<std::uint64_t>(index) + 1, static_cast<double>(index % 100));
+        for (std::size_t index = 0; index < RegionCollector::kMaxSaveSamples; ++index)
+            collector.RecordSave(true, static_cast<double>(index % 10));
+    }
+    const auto first_capture = first.Session()->CaptureSimBudgetTelemetry();
+    const auto replay_capture = replay.Session()->CaptureSimBudgetTelemetry();
+    const auto repeated = first.Session()->CaptureSimBudgetTelemetry();
+    const auto copied = first.Session()->GetSimBudgetTelemetry();
+    nlohmann::json artifact;
+    RegionalServer::AppendSimBudgetArtifact(artifact, first_capture, replay_capture);
+    EXPECT_TRUE(first_capture.WorkMatches(replay_capture));
+    EXPECT_TRUE(first_capture.WorkMatches(repeated));
+    EXPECT_TRUE(first_capture.WorkMatches(copied));
+    EXPECT_EQ(first_capture.Regions().RetainedSampleBytes(), 0u);
+    EXPECT_EQ(replay_capture.Regions().RetainedSampleBytes(), 0u);
+    EXPECT_EQ(copied.Regions().RetainedSampleBytes(), 0u);
+    const auto usage = RegionCollector::SampleStorageUsageForTesting();
+    EXPECT_EQ(usage.current, baseline);
+    EXPECT_EQ(usage.peak, baseline);
+    EXPECT_LT(usage.peak, 2u * 1024u * 1024u);
+    const auto& block = artifact.at("sim_budget").at("regions");
+    EXPECT_EQ(block.at("samples"), RegionCollector::kMaxSamples);
+    EXPECT_EQ(block.at("persistence").at("save_samples"), RegionCollector::kMaxSaveSamples);
+    EXPECT_TRUE(block.at("complete").get<bool>());
+    EXPECT_DOUBLE_EQ(block.at("duration_ms").at("p50").get<double>(), 49.5);
+    EXPECT_DOUBLE_EQ(block.at("persistence").at("save_duration_ms").at("maximum").get<double>(),
+                     9.0);
+    first.Shutdown();
+    replay.Shutdown();
+    EXPECT_EQ(RegionCollector::SampleStorageUsageForTesting().current, 0u);
+    // Exported summaries and their copies must not retain a destroyed session callback.
+    const auto after_shutdown = copied;
+    EXPECT_TRUE(after_shutdown.WorkMatches(first_capture));
+    EXPECT_EQ(after_shutdown.Regions().RetainedSampleBytes(), 0u);
+    EXPECT_EQ(
+        RegionalServer::RegionTelemetryJson(first_capture.Regions(), replay_capture.Regions()),
+        block);
+}
+
+TEST_F(RegionalTelemetryFixture, RegionCountersMeasureAcceptedWork) {
+    RegionalWorld::WorldClock schedule_clock;
+    RegionalWorld::ActiveRegionLedger ledger;
+    ledger.mark_edited({0, 0}, schedule_clock);
+    const std::array<RegionalWorld::RegionWork, 2> inputs{
+        {{{0, 0}, 17, 0, 0, 0}, {{30000, 30000}, 999999, 0, 0, 0}}};
+    schedule_clock.set_tick(1);
+    std::uint64_t retained_records = 0;
+    const auto scheduled = ledger.schedule(
+        schedule_clock,
+        std::nullopt,
+        inputs,
+        {},
+        {},
+        [&retained_records](const RegionalWorld::ActiveRegionRecord&) { ++retained_records; });
+    EXPECT_EQ(scheduled.work, 17u);
+    EXPECT_EQ(scheduled.rejected.work, 1u);
+    EXPECT_EQ(retained_records, ledger.records().size());
+    const auto committed = ledger.canonical_bytes();
+    EXPECT_THROW(ledger.schedule(schedule_clock,
+                                 std::nullopt,
+                                 inputs,
+                                 {},
+                                 {},
+                                 [&retained_records](const RegionalWorld::ActiveRegionRecord&) {
+                                     ++retained_records;
+                                 }),
+                 std::invalid_argument);
+    EXPECT_EQ(ledger.canonical_bytes(), committed);
+    EXPECT_EQ(retained_records, ledger.records().size());
+    RegionalServer::ServerWorldRunner runner(Configuration(true));
+    ASSERT_TRUE(runner.Boot());
+    auto* session = runner.Session();
+    ASSERT_NE(session, nullptr);
+    session->RecordActiveRegionWork({{30000, 30000}, 999999, 0, 0, 0});
+    ASSERT_EQ(runner.RunFixedTicks(3).ticks_executed, 3u);
+    ASSERT_FALSE(session->GetRegionSchedulerFault());
+    const auto capture = session->CaptureSimBudgetTelemetry();
+    const auto& collector = capture.Regions();
+    const auto activity = session->GetCreatureActivity();
+    const auto population = session->GetPopulationActivity();
+    EXPECT_EQ(collector.Samples(), 3u);
+    EXPECT_EQ(collector.rejected_work, 1u);
+    EXPECT_LT(collector.accepted_work_total, 999999u);
+    EXPECT_GT(activity.full_updates + activity.coarse_updates, 0u);
+    const RegionCollector::Activities expected{activity.promotions,
+                                               activity.demotions,
+                                               activity.full_updates,
+                                               activity.coarse_updates,
+                                               activity.births,
+                                               activity.deaths,
+                                               activity.removals,
+                                               activity.parked_travel,
+                                               activity.controllers_created,
+                                               activity.controllers_removed,
+                                               activity.stale_handles,
+                                               population.successes,
+                                               population.failures};
+    EXPECT_EQ(collector.Totals(), expected);
+    EXPECT_EQ(collector.creatures_full, activity.full);
+    EXPECT_EQ(collector.creatures_coarse, activity.coarse);
+    EXPECT_EQ(collector.creatures_frozen, activity.frozen);
+    EXPECT_EQ(collector.pending_activations, population.pending_activations);
+    EXPECT_EQ(collector.ledger_records.current, session->GetActiveRegionLedger().records().size());
+    EXPECT_EQ(collector.active.current + collector.reduced.current + collector.frozen.current,
+              collector.ledger_records.current);
+    EXPECT_EQ(collector.water_reserved, collector.water_used + collector.water_unused);
+    const auto before = session->CaptureAuthorityState();
+    ASSERT_TRUE(before.state);
+    const auto repeated = session->CaptureSimBudgetTelemetry();
+    EXPECT_TRUE(capture.WorkMatches(repeated));
+    const auto after = session->CaptureAuthorityState();
+    ASSERT_TRUE(after.state);
+    EXPECT_EQ(before.state->chunk_hash(), after.state->chunk_hash());
+    runner.Shutdown();
+}
+
+TEST_F(RegionalTelemetryFixture, OverflowMarksCaptureIncompleteWithoutSimulationEffect) {
+    std::string reference_hash, reference_ledger;
+    for (const bool overflow : {false, true}) {
+        SCOPED_TRACE(overflow);
+        RegionalServer::ServerWorldRunner runner(Configuration(overflow));
+        ASSERT_TRUE(runner.Boot());
+        auto* session = runner.Session();
+        ASSERT_NE(session, nullptr);
+        const auto before = session->CaptureAuthorityState();
+        ASSERT_TRUE(before.state);
+        if (overflow) {
+            auto& collector = session->GetSimBudgetTelemetry().Regions();
+            for (std::size_t index = 0; index <= RegionCollector::kMaxSamples; ++index)
+                RecordRegionSample(collector, static_cast<std::uint64_t>(index) + 1, 1.0);
+            EXPECT_FALSE(collector.Complete());
+            EXPECT_EQ(collector.DroppedSamples(), 1u);
+            const auto after = session->CaptureAuthorityState();
+            ASSERT_TRUE(after.state);
+            EXPECT_EQ(before.state->chunk_hash(), after.state->chunk_hash());
+            EXPECT_FALSE(session->GetRegionSchedulerFault());
+        }
+        EXPECT_EQ(runner.RunFixedTicks(3).ticks_executed, 3u);
+        ASSERT_FALSE(session->GetRegionSchedulerFault());
+        const auto hash = runner.ComputeWorldHash();
+        ASSERT_FALSE(hash.empty());
+        if (!overflow) {
+            reference_hash = hash;
+            reference_ledger = session->GetActiveRegionLedger().canonical_bytes();
+        } else {
+            EXPECT_EQ(hash, reference_hash);
+            EXPECT_EQ(session->GetActiveRegionLedger().canonical_bytes(), reference_ledger);
+            const auto capture = session->CaptureSimBudgetTelemetry();
+            EXPECT_EQ(capture.Regions().Samples(), RegionCollector::kMaxSamples);
+            EXPECT_EQ(capture.Regions().DroppedSamples(), 4u);
+            nlohmann::json artifact;
+            RegionalServer::AppendSimBudgetArtifact(artifact, capture, capture);
+            EXPECT_FALSE(artifact["sim_budget"]["regions"]["complete"].get<bool>());
+            EXPECT_FALSE(artifact["sim_budget"]["work_replay_match"].get<bool>());
+        }
+        runner.Shutdown();
+    }
+}
+
+TEST(RegionTelemetry, DisabledArtifactsMatchExactExistingFixtures) {
+    const Luminumbra::TestSupport::ScopedTempFile file("regional_disabled_", ".json");
+    for (int scenario = 0; scenario < 3; ++scenario) {
+        const auto fixture = std::filesystem::path(LUMINUMBRA_SOURCE_ROOT) /
+                             "test/fixtures/smoke_artifact" /
+                             ("devel-" + std::to_string(scenario) + ".json");
+        const auto baseline = ReadRegionFixture(fixture);
+        for (const bool active_regions : {false, true}) {
+            ServerCliOptions options;
+            RegionalServer::SmokeRunResult first, replay;
+            FixedSmokeInputs(scenario, options, first, replay);
+            RegionalWorld::GameSession session;
+            session.SetActiveRegionsEnabled(active_regions);
+            session.SetSimBudgetTelemetryEnabled(false);
+            first.sim_budget = session.CaptureSimBudgetTelemetry();
+            replay.sim_budget = first.sim_budget;
+            options.artifact_path = Luminumbra::Filesystem::GenericPathString(file.Path());
+            EXPECT_EQ(RegionalServer::WriteSmokeArtifact(options, first, replay),
+                      scenario == 2 ? 1 : 0);
+            EXPECT_EQ(ReadRegionFixture(file.Path()), NativeRegionFixture(baseline));
+        }
+        // Freeze the pre-extension v2 output independently, starting from the exact fixture.
+        auto expected = nlohmann::json::parse(baseline);
+        auto stages = nlohmann::json::array();
+        for (const auto name : luminumbra::simulation::kSimBudgetStageNames)
+            stages.push_back({{"name", name},
+                              {"samples", 0},
+                              {"work_total", 0},
+                              {"work_trace", nlohmann::json::array()},
+                              {"duration_ms", nullptr}});
+        expected["sim_budget"] = {{"schema", "luminumbra.sim_budget.v2"},
+                                  {"work_replay_match", true},
+                                  {"stages", std::move(stages)}};
+        ServerCliOptions options;
+        RegionalServer::SmokeRunResult first, replay;
+        FixedSmokeInputs(scenario, options, first, replay);
+        options.sim_budget = true;
+        first.sim_budget.SetEnabled(true);
+        replay.sim_budget.SetEnabled(true);
+        options.artifact_path = Luminumbra::Filesystem::GenericPathString(file.Path());
+        EXPECT_EQ(RegionalServer::WriteSmokeArtifact(options, first, replay),
+                  scenario == 2 ? 1 : 0);
+        EXPECT_EQ(ReadRegionFixture(file.Path()), NativeRegionFixture(expected.dump(2) + "\n"));
+    }
 }
 } // namespace

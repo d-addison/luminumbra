@@ -128,6 +128,8 @@ public:
     static constexpr const char* kContentVersionMessage =
         "Incompatible simulation content version: active-region identity is missing.";
     static constexpr const char* kContentMismatchMessage = "Simulation content identity mismatch.";
+    // Candidate retained rows are const; publish observations only after schedule returns.
+    using RecordObserver = std::function<void(const ActiveRegionRecord&)>;
     using DurableDigest = std::function<std::uint64_t(RegionKey)>;
     // Reports whether a region is still owned by a consumer, so it must not be evicted.
     using OwnershipProbe = std::function<bool(RegionKey)>;
@@ -255,7 +257,8 @@ public:
                             std::optional<std::span<const Vec3>> replicated_anchors = std::nullopt,
                             std::span<const RegionWork> work = {},
                             const DurableDigest& durable_digest = {},
-                            const OwnershipProbe& owned = {});
+                            const OwnershipProbe& owned = {},
+                            const RecordObserver& observe = {});
     [[nodiscard]] std::string canonical_bytes() const;
     [[nodiscard]] std::string encode() const;
     // Transactional decode: refuses without modifying out. No IO or migration.
@@ -266,10 +269,13 @@ private:
                                      std::optional<std::span<const Vec3>> replicated_anchors,
                                      std::span<const RegionWork> work,
                                      const DurableDigest& durable_digest,
-                                     const OwnershipProbe& owned);
+                                     const OwnershipProbe& owned,
+                                     const RecordObserver& observe);
     // Drops idle, unowned, non-pinned, unedited, unpopulated records with no water cursor,
     // water debt, completed work or energy age, including records due in the current schedule.
-    void evict_idle(const WorldClock& clock, const OwnershipProbe& owned);
+    void evict_idle(const WorldClock& clock,
+                    const OwnershipProbe& owned,
+                    const RecordObserver& observe = {});
     ActiveRegionRecord& activate(RegionKey key, const WorldClock& clock);
     void visit(const Vec3& anchor, const WorldClock& clock, RegionRejections& rejected);
     void capture_activation(RegionKey key, bool creation, ActivationCause cause);

@@ -230,6 +230,22 @@ or damaged log text does not synthesize measurements. No evidence file is read
 by world loading or hashed into simulation. Compare stage work traces/totals
 separately from duration distributions. This slice proposes no limits or caps.
 
+The capture `fixture_hash` uses the `luminumbra.sim_budget.inputs.v2` domain:
+canonical headless `data/common` content, all three selected preset documents,
+and the content of each resolved biome-table reference, including references
+outside `data/common`. Common content includes simulation configuration, policy,
+species and structure placement/piece documents. Directory links are followed;
+cycles refuse capture. JSON comments and the existing render-only exclusions
+remain ignored. Missing referenced tables are recorded explicitly because the
+native generator permits a fallback; adding or removing one changes identity.
+Root locations do not enter the digest. This deliberately replaces the earlier
+common-only capture identity so differing generation inputs cannot compare as
+the same workload. The committed simulation-budget fixture identity is unpinned;
+no pinned identity changes. Other performance capture formats retain their
+existing identity recipes. An unreadable or malformed preset refuses capture
+before launching the executable or creating evidence output. Inputs are hashed
+again before publication; changed input content refuses a success manifest.
+
 ## Executable checks
 
 Seven `SimBudgetTelemetry` gtests cover complete production artifact byte equality
@@ -248,3 +264,129 @@ settings, not across active-regions settings. `SimBudgetCaptureContract` runs
 seven Python command and refusal tests, including both field paths, refusal
 of mixed coverage, and wrongly typed or malformed world hashes. Discovered totals, the measured delta against current devel,
 execution results and qualification limitations are in the campaign receipt.
+
+## Bounded regional observations
+
+When **both** `sim.active_regions` and `--sim-budget` (or the session telemetry
+switch) are enabled, `sim_budget` additionally contains `regions`, with schema
+`luminumbra.sim_budget.regions.v1`. The enclosing v2 schema, stage identities,
+order, units and existing artifact fields remain unchanged. With either switch
+off this extension is absent. The exact `devel-{0,1,2}.json` production fixtures
+and the existing v2 stage-only encoding remain the compatibility baselines.
+
+`RegionTelemetry` owns observations independently of the ledger's completed-work
+registers. It never writes those registers, schedules consumers, activates a
+region, allocates an identity, changes RNG or feeds a persistence/hash codec.
+Accepted creature/population counters come from the existing successful-operation
+counters, relative to the start of collection. Attempted work and rolled-back
+population commands receive no success credit. The scheduler's work observation
+is the sum of accepted previous-boundary work used by that schedule; unknown-owner
+work contributes only to `rejected_work`. A failed schedule publishes no scheduler
+sample or state gauges. Accepted work preceding a later consumer fault still
+stands and its activity counters are observed when the first fault latches.
+
+The block has these required fields. All counts and ticks are unsigned 64-bit
+integers; booleans and fractional counts are invalid. There are no row or tick
+arrays. Each counter has one of three meanings: **gauge** (latest observation),
+**high-water** (largest observed gauge), or **capture total** (sum since reset).
+
+| Field | Meaning and classification |
+|---|---|
+| `samples` | Capture total of retained successful scheduler samples, at most 108,000 |
+| `first_tick`, `last_tick` | First/last retained absolute scheduler tick; both null for an empty capture |
+| `complete`, `dropped_samples` | Capture validity and capture total of observations lost to a cap, invalid timing/order, counter discontinuity or arithmetic overflow |
+| `duration_ms` | Scheduler-duration summary `{p50,p95,p99,maximum}`, or null without samples |
+| `scheduler.{ledger_records,active,reduced,frozen}` | Each `{current,maximum}` contains a gauge and its high-water; measured after successful scheduling and retention |
+| `scheduler.due_total` | Capture total of surviving due-region decisions |
+| `scheduler.accepted_work_total` | Capture total of accepted work consumed by successful schedules, including resumed retained work |
+| `scheduler.work_limit` | Gauge of the configured scheduler work limit |
+| `scheduler.pressure_max` | High-water of individual retained-record pressure |
+| `scheduler.rejected_{anchors,work,capacity}` | Capture totals of deterministic scheduler rejections; frame-input rejections are excluded |
+| `creatures.{full,coarse,frozen}` | Gauges from the existing const activity snapshot at artifact capture |
+| `creatures.{promotions,demotions,full_updates,coarse_updates,births,deaths,removals,parked_travel}` | Capture totals from the corresponding accepted-operation counters; parked travel counts accepted travel updates that remain parked |
+| `population.{successes,failures}` | Capture totals of committed population transactions and refused transactions, respectively |
+| `population.pending_activations` | Gauge at artifact capture |
+| `controllers.{created,removed,stale_handle_rejections}` | Capture totals of successful runtime controller operations and explicit stale-handle rejections |
+| `persistence.parked_bytes` | `{current,maximum}` gauge/high-water, sampled at completed ticks and artifact capture |
+| `persistence.{saves_total,failures_total}` | Capture totals of completed save-outcome callbacks and their failures; no-op paths without an outcome callback do not count as saves |
+| `persistence.save_samples` | Capture total of retained save-outcome durations, at most 4,096 |
+| `persistence.save_duration_ms` | Summary of successful and failed save-outcome durations, or null without samples |
+| `water.{reserved,used,unused,unallocated}` | Capture totals of committed window grants: reserved/used include paired border windows; unused is allocated but unused interior work; unallocated is ungranted interior work. Reserved equals used plus unused |
+| `water.completed_cells` | Capture total of committed preparation and solver cell work; reservations alone receive no completed-cell credit |
+| `water.bound_known`, `water.bound` | Explicit boolean and nullable unsigned tick bound. The current dynamic-eligibility implementation always reports false/null; it establishes no fixed-cohort service theorem |
+| `replay.trace_digest`, `replay.work_replay_match` | Deterministic work/transition digest and comparison verdict; incomplete captures never match |
+| `fault` | Null, or first latched `{tick,message}`. Diagnostic text is at most 256 printable ASCII bytes; unsupported characters become `?` and excess text is truncated with an incomplete-capture indication |
+
+Each scheduler sample times the existing schedule call only, including its
+retention walk. When enabled, that walk observes each surviving record once;
+it adds no record inventory or per-record allocation. Activity deltas are fixed
+size, and water observations follow successful `UpdateRegional` publication.
+Creature gauges use the existing const snapshot only at artifact capture, outside
+the tick. Parked bytes use the owner-thread cached byte count without walking
+parked chunks. With telemetry disabled there is no regional sample allocation, clock
+read, activity snapshot or additional record scan. Observational storage is
+cleared on world reset and toggles.
+
+The collector allocates fixed arrays only when enabled: 108,000 scheduler doubles
+and 4,096 save doubles, totaling **896,768 bytes** per live collector. Export
+sorts the observational duration arrays in place and copies only scalar
+summaries; it allocates no sample arrays or percentile scratch. Sorting timing
+observations does not change tick coverage, counters or the deterministic trace,
+and collection may continue after export. Two live sessions in Heavy therefore
+retain **1,793,536 bytes** of regional samples at peak, including while both
+exports and artifact serialization coexist, below 2 MiB. Scalar observations,
+summary objects and the bounded logarithmic sorting stack also fit within the
+remaining budget. Allocation accounting tracks live and peak sample-array
+storage, and the production session/export/artifact regression fills both
+collectors to both caps before checking that export never increases that peak.
+Copies of `SimBudgetTelemetry` use the same bounded export path. The live
+session supplies final gauges through a const export observer; exported values
+retain neither that observer nor its owner, so copies remain valid after session
+destruction. Explicit copies of a raw `RegionTelemetry` collector retain
+independent arrays and are outside the capture path. Summary interpolation uses
+`(n-1)*p`, matching the existing stage convention. Empty distributions are null;
+a single duration supplies every percentile and maximum. The fixed block,
+including escaped diagnostic text and whitespace, stays below **16 KiB**; the
+serializer checks this independently. Unknown extension keys count toward the
+reader's byte cap.
+
+At either sample cap the collector checks the bound before writing, retains the
+bounded prefix, sets `complete=false` and increments `dropped_samples`. Unsigned
+counter overflow saturates observational totals and marks the capture incomplete.
+Neither condition changes simulation, completed-work authority or the scheduler
+fault latch. Capture qualification refuses incomplete evidence. Existing stage
+storage retains its earlier lifetime/size behavior; these caps apply to the new
+regional collector and block.
+
+The regional digest uses FNV-1a with domain markers and little-endian fixed-width
+values. In event order it folds scheduler ticks, accepted work, limits/rejections
+and the existing schedule digest (which covers due state and transitions),
+committed water work, and accepted simulation activity deltas. Durations,
+persistence observations, runtime controller creation/removal/stale-handle
+receipts, creature gauges, diagnostic text and presentation never enter this
+comparison. A loaded session can reconstruct runtime controllers while preserving
+the same durable work trace. No regional telemetry value enters world hashing, peer identity,
+HashMsg, LREC1 or saves. Smoke requires both the existing stage work match and the
+regional match. Enabled Heavy measures only the shared continuation window,
+resetting observations in both sessions immediately before continuation; its
+regional evidence uses the same writer and comparison.
+
+The capture reader continues to accept legacy artifacts without `regions` and
+validates every required group whenever the block is present. It refuses invalid
+types, nonfinite or unordered durations, invalid gauges/accounting, duplicate JSON
+keys, future schemas, excess bytes/samples, faults, incomplete evidence and a false
+work verdict. Unknown object keys within the byte budget remain compatible.
+For regional qualification, point the capture command at an existing fixture root
+whose `data/common/systems.json` enables `sim.active_regions` and add `--regions`:
+
+```sh
+python3 tools/perf/capture_sim_budget.py --root build/regional-fixture \
+  --regions --evidence-dir build/regional-evidence
+```
+
+The command validates both switches, records `regions_required` in the manifest,
+and requires ticks 1 through the requested last tick. It never changes the fixture
+configuration. The native trigger remains **p99 above 0.5 ms or allocation above
+2 MB/s at 2,000 records**; native allocation measurements and long-run performance
+qualification are pending. Python contract checks and source regressions do not
+establish those measurement results.
