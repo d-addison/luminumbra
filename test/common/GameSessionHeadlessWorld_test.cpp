@@ -6744,21 +6744,27 @@ TEST(GameSessionHeadlessWorldTest, AutomaticSavesRetainWaterAndEditsWithoutWriti
 }
 
 namespace {
-fs::path copied_region_path;
-std::size_t copied_region_publications = 0;
+struct CopiedRegionObservation {
+    fs::path path;
+    std::size_t publications = 0;
+};
+CopiedRegionObservation& CopiedRegion() {
+    static CopiedRegionObservation observation;
+    return observation;
+}
 void ObserveCopiedRegion(const char* step, const fs::path& path) {
-    if (std::string_view(step) == "before-replace" && path == copied_region_path)
-        ++copied_region_publications;
+    if (std::string_view(step) == "before-replace" && path == CopiedRegion().path)
+        ++CopiedRegion().publications;
 }
 struct ObserveRegionCopy {
     explicit ObserveRegionCopy(fs::path path) {
-        copied_region_path = std::move(path);
-        copied_region_publications = 0;
+        CopiedRegion().path = std::move(path);
+        CopiedRegion().publications = 0;
         P::set_snapshot_step_hook_for_testing(&ObserveCopiedRegion);
     }
     ~ObserveRegionCopy() {
         P::set_snapshot_step_hook_for_testing(nullptr);
-        copied_region_path.clear();
+        CopiedRegion().path.clear();
     }
 };
 } // namespace
@@ -6789,7 +6795,7 @@ TEST(GameSessionHeadlessWorldTest, SaveAsCopiesEachDistantRegionOnceWithExactCom
     const auto target_region = P::WorldSaveService::region_file_path(destination, 40, -40);
     const ObserveRegionCopy observe(target_region);
     ASSERT_TRUE(loaded.SaveWorldStateTo(destination));
-    EXPECT_EQ(copied_region_publications, 1u);
+    EXPECT_EQ(CopiedRegion().publications, 1u);
     EXPECT_EQ(ReadClockTestFile(target_region), source_bytes);
     EXPECT_EQ(ReadClockTestFile(source_region), source_bytes);
     EXPECT_EQ(loaded.ComputeChunkStateHash(), hash);
