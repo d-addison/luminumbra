@@ -1914,12 +1914,13 @@ TEST(WorldSaveService, CanonicalAndParsedFactsUseTheSameStrictGridAndIdentityChe
     const auto text = CachePersistence::SerializeWorldStreamingStateSnapshotJson(state, &modes);
     const auto snapshot = nlohmann::json::parse(text);
     for (const bool strict : {false, true}) {
-        ASSERT_TRUE(modes[strict]);
+        const auto& mode = modes[strict];
+        ASSERT_TRUE(mode.has_value());
         const auto parsed =
             CachePersistence::TryWorldStreamingSnapshotFacts(text, chunk->get_id(), strict);
-        ASSERT_TRUE(parsed);
-        EXPECT_EQ(parsed->coords, modes[strict]->coords);
-        EXPECT_EQ(parsed->sdf_size, modes[strict]->sdf_size);
+        ASSERT_TRUE(parsed.has_value());
+        EXPECT_EQ(parsed->coords, mode->coords);
+        EXPECT_EQ(parsed->sdf_size, mode->sdf_size);
         ASSERT_NO_FATAL_FAILURE(ExpectFactsMatchLoader(snapshot, strict));
     }
     for (int variant = 0; variant < 13; ++variant) {

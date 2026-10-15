@@ -187,7 +187,7 @@ TEST(ChunkValidationCache, WholeInventoryBeyondHeapLimitSharesExactBackingBetwee
         for (const bool strict : {false, true}) {
             for (std::uint64_t id = 0; id < 72; ++id) {
                 const auto facts = cache.find({id, 1, 0, 0, strict}, payload);
-                ASSERT_TRUE(facts);
+                ASSERT_TRUE(facts.has_value());
                 EXPECT_EQ(facts->sdf_size, 17u);
                 EXPECT_TRUE(facts->authoritative);
             }
@@ -360,7 +360,7 @@ TEST(ChunkValidationCache, RewrittenSpillCannotReturnEitherModesOriginallyValida
             for (const auto& key : {permissive, strict}) {
                 cache.remember(key, "changed", {{}, 29, false});
                 const auto facts = cache.find(key, "changed");
-                ASSERT_TRUE(facts);
+                ASSERT_TRUE(facts.has_value());
                 EXPECT_EQ(facts->sdf_size, 29u);
                 EXPECT_FALSE(facts->authoritative);
             }
@@ -389,7 +389,7 @@ TEST(ChunkValidationCache, CrossModeRetentionDropsRewrittenBackingBeforeSharing)
         EXPECT_EQ(cache.stats().spill_bytes, 7u);
         EXPECT_FALSE(cache.find(first, "changed"));
         const auto facts = cache.find(second, "changed");
-        ASSERT_TRUE(facts);
+        ASSERT_TRUE(facts.has_value());
         EXPECT_EQ(facts->sdf_size, 29u);
         EXPECT_FALSE(facts->authoritative);
     }

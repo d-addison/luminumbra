@@ -2880,6 +2880,8 @@ bool GameSession::SaveWorldMetadataTo(const fs::path& save_dir) {
         // world creation/quit/shutdown and server autosave/snapshot/shutdown.
         // Do not dispatch this pair to workers; the writer asserts non-overlap.
         // The object file joins the same transaction, so the id allocator and objects stay paired.
+        if (!plants.has_value())
+            return false;
         std::vector<std::string> plant_errors;
         if (!Persistence::WorldSaveService::save_plant_entities(*plants, save_dir, &plant_errors)) {
             for (const auto& error : plant_errors)

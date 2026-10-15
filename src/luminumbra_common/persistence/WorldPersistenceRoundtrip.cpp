@@ -400,12 +400,12 @@ void ApplyChunkJson(const nlohmann::json& value, Chunk& chunk) {
     chunk.ticks_below_threshold = water_state.at("ticks_below_threshold").get<int>();
     chunk.water_mesh_dirty_ticks = water_state.at("water_mesh_dirty_ticks").get<int>();
     if constexpr (!Materialize) {
-        for (const auto value : chunk.water_level_data)
-            CheckConvertedValue(value);
-        for (const auto& value : chunk.water_flow_data)
-            CheckConvertedValue(value);
-        for (const auto value : chunk.water_sim_terrain_height)
-            CheckConvertedValue(value);
+        for (const auto level : chunk.water_level_data)
+            CheckConvertedValue(level);
+        for (const auto& flow : chunk.water_flow_data)
+            CheckConvertedValue(flow);
+        for (const auto height : chunk.water_sim_terrain_height)
+            CheckConvertedValue(height);
         CheckConvertedValue(chunk.max_water_delta_last_tick);
     }
 }

@@ -737,24 +737,26 @@ TEST(FieldPageStateTest, WeatherCapacityIsOwnerAwareAndRefusesAtomically) {
     std::vector<RegionalStrike> strikes;
     for (int owner = 0; owner < 2; ++owner) {
         for (std::uint32_t salt = 0; salt < FieldPageState::kMaxOwnerStorms; ++salt)
-            storms.push_back({{owner, 0},
-                              std::bit_cast<std::uint32_t>(owner * 512.0f + 256.0f),
-                              std::bit_cast<std::uint32_t>(256.0f),
-                              0,
-                              0,
-                              0,
-                              0,
-                              240,
-                              static_cast<std::uint32_t>(owner * 100) + salt,
-                              0});
+            storms.push_back(
+                {{owner, 0},
+                 std::bit_cast<std::uint32_t>(static_cast<float>(owner) * 512.0f + 256.0f),
+                 std::bit_cast<std::uint32_t>(256.0f),
+                 0,
+                 0,
+                 0,
+                 0,
+                 240,
+                 static_cast<std::uint32_t>(owner * 100) + salt,
+                 0});
         for (std::uint32_t salt = 0; salt < FieldPageState::kMaxOwnerStrikes; ++salt)
-            strikes.push_back({{owner, 0},
-                               0,
-                               std::bit_cast<std::uint32_t>(owner * 512.0f + 256.0f),
-                               std::bit_cast<std::uint32_t>(256.0f),
-                               0,
-                               static_cast<std::uint32_t>(owner * 100) + salt,
-                               0});
+            strikes.push_back(
+                {{owner, 0},
+                 0,
+                 std::bit_cast<std::uint32_t>(static_cast<float>(owner) * 512.0f + 256.0f),
+                 std::bit_cast<std::uint32_t>(256.0f),
+                 0,
+                 static_cast<std::uint32_t>(owner * 100) + salt,
+                 0});
     }
     // Both owners can retain their full allowance; global legacy 16/32 caps would fail this.
     ASSERT_TRUE(store.replace_weather(storms, strikes));

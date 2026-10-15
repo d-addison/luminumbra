@@ -5455,7 +5455,6 @@ TEST(GameSessionHeadlessWorldTest,
         const auto plant = ClockTestPlant(base.GetRegistry(), {5200, 0, -1500});
         base.GetRegistry().emplace<SC::SoilFeederComponent>(plant);
         ASSERT_TRUE(base.SaveWorld());
-        const auto save = base.GetWorldSaveDir();
         auto snap = SF::BuildPlantEntitySnapshot(base.GetRegistry(), true);
         auto pages = base.GetFieldPages();
         if (mutation == 0)

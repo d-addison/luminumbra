@@ -771,9 +771,10 @@ void SeedChunkRecord(const RegionRecord& record,
     if (!DecompressPayload(record, decoded, nullptr) || decoded != payload)
         return;
     for (const bool strict : {false, true}) {
-        if (!modes[strict])
+        const auto& mode = modes[strict];
+        if (!mode.has_value())
             continue;
-        auto facts = *modes[strict];
+        auto facts = *mode;
         facts.authoritative = (record.flags & kRecordFlagEdited) != 0u;
         cache.remember(
             {record.id, record.uncompressed_size, record.lod_level, record.flags, strict},
