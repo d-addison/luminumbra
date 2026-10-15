@@ -1,7 +1,7 @@
 // LockstepSession unit tests (src/luminumbra_common/net/LockstepSession.{h,cpp}).
 //
-// These lock the ENGINE-GENERIC delay-based lockstep behavior over LoopbackTransport
-// ONLY (no real sockets/ports -- hermetic, no firewall/CI flakiness): handshake
+// These lock the ENGINE-GENERIC delay-based lockstep behavior over in-process transports
+// (no real sockets/ports -- hermetic, no firewall/CI flakiness): handshake
 // accept/reject, in-sync tick exchange, adaptive-horizon absorption of a late input,
 // desync detection + LREC1 dump emission, and clean disconnect. Both session ends run in
 // this one process, driven turn-by-turn so the loopback queues carry their frames.
@@ -18,6 +18,7 @@
 #include <vector>
 
 #include "luminumbra_common/net/LockstepSession.h"
+#include "luminumbra_common/net/NetworkSim.h"
 #include "luminumbra_common/replay/ReplayStream.h"
 
 namespace net = Luminumbra::Net;
@@ -183,6 +184,7 @@ TEST(LockstepSessionTest, HandshakeSendFailuresDisconnect) {
 }
 
 TEST(LockstepSessionTest, InputAndHashSendFailuresDisconnectPermanently) {
+    // Deliberately rejecting fake transport: a send refusal is a terminal failure.
     for (const auto type : {net::MessageType::Input, net::MessageType::Hash}) {
         auto [local, peer] = net::MakeLoopbackPair();
         RejectingTransport transport(*local);
@@ -460,6 +462,61 @@ TEST(LockstepSessionTest, ByeSendFailureStillDisconnects) {
     session.Disconnect();
     EXPECT_TRUE(transport.closed);
     EXPECT_EQ(session.PumpTick(10).outcome, net::TickOutcome::PeerDisconnected);
+}
+
+TEST(LockstepSessionTest, LargeHandshakeInputsStayConnectedAndArriveInOrder) {
+    const auto exercise = [](net::ILockstepTransport& ta,
+                             net::ILockstepTransport& tb,
+                             net::NetworkSim* sim) {
+        const auto advance_delay = [sim] {
+            if (sim) {
+                for (int tick = 0; tick < 3; ++tick)
+                    sim->Tick();
+            }
+        };
+        FakeWorld wa{0, "agree", 0}, wb{0, "agree", 0};
+        auto ha = MakeHooks(&wa);
+        auto hb = MakeHooks(&wb);
+        ha.collect_local_input = hb.collect_local_input = [](std::uint64_t tick, void*) {
+            return std::vector<std::uint8_t>(128u * 1024u, static_cast<std::uint8_t>(tick));
+        };
+        const auto ca = MakeConfig(0, 1);
+        const auto cb = MakeConfig(1, 0);
+        net::LockstepSession a(ca, &ta, ha);
+        net::LockstepSession b(cb, &tb, hb);
+
+        // Prime the peer Hello. Each handshake queues all three 128 KiB inputs
+        // within the default horizon before the receiving session drains any.
+        ASSERT_TRUE(SendPeerHello(tb, ca));
+        advance_delay();
+        ASSERT_TRUE(a.Handshake());
+        advance_delay();
+        ASSERT_TRUE(b.Handshake());
+        advance_delay();
+        ASSERT_EQ(a.Status().horizon, 3u);
+        ASSERT_EQ(b.Status().horizon, 3u);
+        for (std::uint64_t tick = 1; tick <= 3; ++tick) {
+            const std::vector<std::uint8_t> expected(256u * 1024u, static_cast<std::uint8_t>(tick));
+            const auto ra = a.PumpTick(10);
+            const auto rb = b.PumpTick(10);
+            ASSERT_EQ(ra.outcome, net::TickOutcome::Advanced);
+            ASSERT_EQ(rb.outcome, net::TickOutcome::Advanced);
+            EXPECT_EQ(ra.tick, tick);
+            EXPECT_EQ(rb.tick, tick);
+            EXPECT_EQ(ra.local_inputs, expected);
+            EXPECT_EQ(rb.local_inputs, expected);
+            EXPECT_FALSE(a.Status().peer_disconnected);
+            EXPECT_FALSE(b.Status().peer_disconnected);
+            EXPECT_TRUE(ta.IsPeerConnected());
+            EXPECT_TRUE(tb.IsPeerConnected());
+        }
+        EXPECT_EQ(wa.tick, 3u);
+        EXPECT_EQ(wb.tick, 3u);
+    };
+    auto [ta, tb] = net::MakeLoopbackPair();
+    exercise(*ta, *tb, nullptr);
+    net::NetworkSim sim(net::NetworkConditions{3, 0, 0, 1});
+    exercise(sim.A(), sim.B(), &sim);
 }
 
 // Both peers handshake successfully on matching params.

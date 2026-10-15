@@ -310,21 +310,17 @@ LoopbackTransport::LoopbackTransport(std::shared_ptr<Channel> tx, std::shared_pt
 
 bool LoopbackTransport::SendFrame(const std::vector<std::uint8_t>& frame,
                                   FrameDelivery /*delivery*/) {
-    if (frame.size() > kMaxFramePayloadBytes || !m_tx || !m_tx->open ||
-        !HasReceiveQueueCapacity(m_tx->queued_bytes, m_tx->queue.size()))
+    if (frame.size() > kMaxFramePayloadBytes || !m_tx || !m_tx->open)
         return false;
     m_tx->queue.push_back(frame);
-    m_tx->queued_bytes += frame.size();
     return true;
 }
 
 bool LoopbackTransport::TryReceiveFrame(std::vector<std::uint8_t>& out) {
     if (!m_rx || m_rx->queue.empty())
         return false;
-    const std::size_t size = m_rx->queue.front().size();
     out = std::move(m_rx->queue.front());
     m_rx->queue.pop_front();
-    m_rx->queued_bytes -= size;
     return true;
 }
 

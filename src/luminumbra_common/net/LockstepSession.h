@@ -155,7 +155,7 @@ enum class FrameDelivery {
 // Wire-protocol maximum for a single frame payload, enforced on send and receive.
 inline constexpr std::size_t kMaxFramePayloadBytes = 64u * 1024u * 1024u;
 
-// Message queues admit only below this payload budget, so each direction holds
+// Remote receive queues admit only below this payload budget, so each direction holds
 // less than 256 KiB + one maximum frame. Cap entries too, including empty frames.
 inline constexpr std::size_t kReceiveQueueByteBudget = 256u * 1024u;
 inline constexpr std::size_t kReceiveQueueFrameLimit = 1024;
@@ -171,8 +171,10 @@ class ILockstepTransport {
 public:
     virtual ~ILockstepTransport() = default;
 
-    // Sends one complete message frame. Returns false on failure, including a payload
-    // above kMaxFramePayloadBytes (rejected before any bytes are written).
+    // Sends one complete message frame. A refusal means the payload exceeds
+    // kMaxFramePayloadBytes (rejected before any bytes are written), or the transport
+    // is closed/unavailable; callers treat it as terminal. In-process transports
+    // never refuse for capacity.
     // NOTE: named SendFrame (not SendMessage) deliberately -- <windows.h> #defines
     // SendMessage to SendMessageA/W, which would rename this virtual under the macro.
     // `delivery` defaults to Reliable so existing callers (lockstep) are unchanged.
@@ -214,8 +216,9 @@ public:
 class LoopbackTransport final : public ILockstepTransport {
 public:
     struct Channel {
+        // Both ends are in-process, so no untrusted peer can enqueue frames here.
+        // Remote receive bounds do not apply to this queue.
         std::deque<std::vector<std::uint8_t>> queue; // complete framed messages
-        std::size_t queued_bytes = 0;
         bool open = true;
     };
 
