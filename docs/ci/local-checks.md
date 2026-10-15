@@ -344,21 +344,98 @@ Each command variant gets a
 separate temporary database so all target-specific configurations are analyzed.
 Failed compiler or tidy processes return nonzero with their diagnostics.
 
+## Fast hosted validation
+
+`Fast compile / GCC + clang-tidy` runs on a standard `ubuntu-24.04` runner,
+including draft pull requests, with a separate 20-minute timeout. It starts
+as a non-required check while warning baselines and duration are calibrated.
+Existing native lanes, full-tree tidy and draft merge guards remain authoritative.
+A successful fast result never substitutes for them. Ordinary small changes
+target ten minutes; shared-header changes can select the full configured tree.
+
+The job uses `tools/ci/changed_tus.py route` against the locally fetched merge
+base (pull-request base SHA or push predecessor). Only paths already proven
+non-native by `tools/ci/ci_paths.py` qualify for an explicit
+`No native work: verified documentation/Python-only changes` success. Python
+CI infrastructure, generators and unknown files take the native path. Missing
+history and empty diffs require conservative full selection; manual runs use
+that path too. Routing does not fetch or change the existing lane classifier.
+
+For native work the job installs Linux configuration dependencies plus GCC,
+Clang 18, clang-tidy 18 and ccache. It configures separate
+Release GCC and Clang compile databases with tests exposed and Diligent off.
+Configuration generates engine/stb headers; the only build target is `glad`
+for its generated headers. It does not link engine/test targets or run CTest.
+The `ci` command shares the local dependency selector, scans ordinary and
+analyzer contexts, unions both compiler selections and replays all variants
+of every selected file. A changed or cross-selected TU missing from either
+database fails visibly. Unconfigured sources and unsupported platforms/backends
+are listed explicitly and retain their specialized full gates.
+
+GCC compiles use isolated scratch object paths and the shared `msvc-approx`
+profile. CI independently makes all/extra/pedantic, shadow=global, conversion,
+sign-conversion, narrowing, unused and missing-field-initializers fatal, even
+when a target already configures a warning family.
+CI accepts the first-party CMake helper's `-Wno-error=unused-parameter`, then
+appends `-Werror=unused-parameter`: that helper's MSVC `/W4 /WX` policy enforces
+C4100 without an exception. Local calibration preserves the original demotion.
+CI conservatively refuses other per-diagnostic disables and demotions because
+subgroup precedence can defeat group enforcement. Entirely warning-disabled commands
+are also refused. The fast lane never reads or writes
+warning-calibration baselines and adds no diagnostic suppressions. MSVC remains
+necessary to validate C4456–C4459 and native conversion diagnostics.
+
+Each selected Clang command variant gets an isolated temporary database.
+clang-tidy-18 (falling back to clang-tidy) first runs the repository `.clang-tidy`
+configuration, whose additional findings remain advisory; parsing/tool failures
+still fail the lane. It also runs the curated fatal configuration through
+`scripts/tidy.sh --files0-from FILE`. That option accepts a strict NUL-terminated
+list of existing first-party sources present in the database, preserves unusual
+filenames, rejects malformed/missing/outside-checkout entries, and cannot be
+combined with `--changed-from`. An explicitly empty list succeeds. The CI
+orchestrator allows at most four workers and uses two; each per-variant shell
+gate uses one worker. Temporary databases, manifests and objects are removed
+on success and failure. The existing full-scope tidy invocation is unchanged.
+
+There are no new Actions cache restores, saves or remote cache prefixes.
+Runner-local ccache has a separate directory and a 250 MB maximum. Its namespace
+includes compiler version/path identity, Release configuration, resolved ordered
+arguments and working directories, the fatal warning profile, build/dependency
+CMake content, the dependency lock and selector/tidy policy content. ccache's
+own keys additionally cover compiler content and preprocessed dependencies.
+No result cache can omit selection scans or tidy. This adds zero remote storage
+to the existing at-most-10-GB Actions policy and requires no retention-prefix
+registration. Selected files, every command variant (working directory and
+command digest; full arguments in the log), unsupported configurations,
+scan/compile/tidy timings and local cache statistics appear in the job summary,
+including failure diagnostics when validation fails.
+
+Hosted validation is still needed for dependency provisioning, generated headers,
+real GCC/Clang warning baselines, both tidy configurations, duration on small
+and shared-header changes, and actual ccache resource usage. Mocked helper tests
+do not establish native success.
+
 ## Python helper checks
 
 These checks use stdlib Python, local Git fixtures and mocked compiler/tidy/network execution. They
 do not require configuration, native compilation, linking or a test runner.
 Their fixtures live under `scratch/` and are removed on completion. Use a
-fresh temporary directory and remove it after both suites:
+fresh temporary directory and remove it after the suites:
 
 ```bash
 mkdir -p scratch/helper-check-tmp
 export TMPDIR="$PWD/scratch/helper-check-tmp"
 nice -n 10 python3 -I -B tools/ci/test_changed_tus.py
 nice -n 10 python3 -I -B tools/ci/test_offline_deps.py
+nice -n 10 python3 -I -B tools/ci/test_tidy_shard.py
+nice -n 10 python3 -I -B tools/ci/test_workflow_policy.py
 rmdir scratch/helper-check-tmp
 ```
 
-Both suites are registered in `tools/CMakeLists.txt` and in the standalone
+The selector and dependency suites are registered in `tools/CMakeLists.txt` and in the standalone
 Python plan in `tools/ci/ci_paths.py`. Their CI infrastructure paths retain
 native qualification routing.
+
+The selector regressions also run in the fast lane; shell-selection and
+workflow-policy regressions run in the public-tree job. Shell tests isolate PATH and record every analyzer
+invocation, including tool fallback and failure propagation.

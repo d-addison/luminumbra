@@ -6,6 +6,7 @@ This is deliberately scoped to their current YAML layout, not a YAML parser.
 """
 
 import fnmatch
+import hashlib
 import os
 import re
 import subprocess
@@ -82,6 +83,89 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
             filename: (ROOT / ".github/workflows" / filename).read_text(encoding="utf-8")
             for filename in GUARDED
         }
+
+    def test_fast_lane_runs_drafts_on_a_standard_runner_with_its_own_bound(self):
+        fast = jobs(self.workflows["ci.yml"])["fast-compile"]
+        self.assertEqual(value(fast, "name", 4), "Fast compile / GCC + clang-tidy")
+        self.assertEqual(value(fast, "runs-on", 4), "ubuntu-24.04")
+        self.assertEqual(value(fast, "timeout-minutes", 4), "20")
+        self.assertIsNone(value(fast, "if", 4))
+        self.assertIsNone(value(fast, "needs", 4))
+        self.assertNotIn("draft", fast)
+        self.assertNotIn("continue-on-error", fast)
+        self.assertIn("fetch-depth: 0", fast)
+
+    def test_fast_lane_explicit_route_dual_configure_glad_and_bounded_execution(self):
+        fast = jobs(self.workflows["ci.yml"])["fast-compile"]
+        route = steps(fast)[1]
+        self.assertIn("changed_tus.py route", route)
+        self.assertIn("github.event.pull_request.base.sha || github.event.before", route)
+        self.assertIn('--output "$GITHUB_OUTPUT" --summary-file "$GITHUB_STEP_SUMMARY"', route)
+        self.assertIn("CI_FULL_SELECTION: ${{ steps.route.outputs.full }}", fast)
+        self.assertIn('if [ "$CI_FULL_SELECTION" != false ]', fast)
+        for step in steps(fast)[3:-1]:
+            self.assertEqual(value(step, "if", 8), "steps.route.outputs.native != 'false'")
+        for compiler in ("gcc", "clang"):
+            self.assertIn(f"cmake -S . -B build/fast-{compiler}", fast)
+            self.assertIn(f"cmake --build build/fast-{compiler} --target glad --parallel 2", fast)
+        self.assertEqual(fast.count("-DCMAKE_EXPORT_COMPILE_COMMANDS=ON"), 2)
+        for flag in ("-DLUMINUMBRA_WARNINGS_AS_ERRORS=ON", "-DBUILD_TESTING=ON",
+                     "-DCMAKE_BUILD_TYPE=Release", "-DLUMINUMBRA_ENABLE_DILIGENT=OFF"):
+            self.assertEqual(fast.count(flag), 2)
+        for flag in ("-DCMAKE_C_COMPILER=gcc", "-DCMAKE_CXX_COMPILER=g++",
+                     "-DCMAKE_C_COMPILER=clang-18", "-DCMAKE_CXX_COMPILER=clang++-18"):
+            self.assertIn(flag, fast)
+        self.assertIn("--build-dir build/fast-gcc --clang-build-dir build/fast-clang", fast)
+        self.assertIn('--jobs 2 --summary-file "$GITHUB_STEP_SUMMARY"', fast)
+        self.assertNotIn("ctest", fast.lower())
+        self.assertNotIn("--preset", fast)
+        self.assertNotIn("-Wno", fast)
+
+    def test_fast_lane_has_only_bounded_local_cache_and_no_required_consumers(self):
+        blocks = jobs(self.workflows["ci.yml"])
+        fast = blocks["fast-compile"]
+        self.assertIn("CCACHE_DIR: ${{ github.workspace }}/scratch/fast-ccache", fast)
+        self.assertIn("CCACHE_MAXSIZE: 250M", fast)
+        self.assertIn("CCACHE_COMPILERCHECK: content", fast)
+        self.assertIn('CCACHE_REMOTE_STORAGE: ""', fast)
+        self.assertIn("ccache --max-size 250M", fast)
+        self.assertNotIn("actions/cache", fast)
+        self.assertNotIn("save", fast.lower())
+        self.assertIn("Advisory during warning and duration calibration; never a required gate.", fast)
+        for name, job in blocks.items():
+            if name != "fast-compile":
+                self.assertNotIn("fast-compile", value(job, "needs", 4) or "")
+        for path in sorted((ROOT / ".github").rglob("*")):
+            if path.is_file() and any(word in path.name for word in ("ruleset", "required")):
+                self.assertNotIn("Fast compile / GCC + clang-tidy", path.read_text())
+        inventory = blocks["public-tree"]
+        contracts = steps(fast)[2]
+        self.assertIn("python3 -I -B tools/ci/test_changed_tus.py", contracts)
+        self.assertIsNone(value(contracts, "if", 8))
+        for suite in ("test_tidy_shard.py", "test_workflow_policy.py"):
+            self.assertIn("tools/ci/" + suite, inventory)
+
+    def test_every_preexisting_ci_job_definition_is_unchanged(self):
+        # Freeze existing routing, limits, required names and authoritative gates.
+        expected = {
+            "changes": "5036f79eb4004d8774c166590fc35c97ac1419a9ad8e8f99516c395851bd7b1e",
+            "linux": "40f5546575cd0ac371fb59d6f6105be4323a3095b053a296181de8f073c666e8",
+            "gns-compile-probe": "1d4756914d1a7d2e276e12d7b142c2b5e2496561d02dbab3e7d5c8bc5fa75648",
+            "diligent-rhi": "2a28a0e5b3c072291b194e931261e96328280d6e589f7d2478e61d6fa70afed9",
+            "windows-msvc": "36777df3b85f98b6d30df59a0b6abe10db0e33d5b46bc7f3f059c3ca9366a814",
+            "windows-ucrt64": "41079be7c1b40dd04a0f50ac7f9d605f06a0dd11b507b45b215143096812294b",
+            "linux-result": "16d04388f64d0f82e3b931f13c29b5e2a674537ecc3501c2fd079d8908861d6c",
+            "windows-msvc-result": "b99ed57798a2dfa8c1e1ea971bda2937fde6770741fb8705c6ad499ab455ce6d",
+            "windows-ucrt64-result": "a7c80ef66651d666674aeb9ac356df6a97c7cdf7910303dcc5c199e84ad42a50",
+            "lint": "dd5aa1be75b2a7139dc2fc676293422207c80c6b031b5df0d21e60dc615faa32",
+            "tidy-shard": "522c626dce80dc98e1f474bea381d9eaac93eb17979a2d5389e2d4358ca2ded6",
+            "tidy": "70a305de68fecb52c83bbd649f1b34279a598c5d4bc03e254bc945024e4703eb",
+            "public-tree": "2165b92c169b45ec8c9be7f0bf0760d176bf829dc7dc7202f71700d598f6c771",
+        }
+        actual = jobs(self.workflows["ci.yml"])
+        self.assertEqual(set(actual), set(expected) | {"fast-compile"})
+        for name, digest in expected.items():
+            self.assertEqual(hashlib.sha256(actual[name].encode()).hexdigest(), digest, name)
 
     def test_ready_and_draft_transitions_trigger_existing_pr_routes(self):
         for filename, workflow in self.workflows.items():

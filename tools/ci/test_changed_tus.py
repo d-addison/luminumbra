@@ -786,7 +786,9 @@ class ChangedTranslationUnitsTests(unittest.TestCase):
         self.save_db()
         selected, _ = self.select([self.a])
         tus.run_checks(self.arguments(warning_profile="msvc-approx"), self.root, selected, self.build)
-        for entry, (command, _) in zip(selected, self.commands):
+        # Submission indices identify variants; worker arrival order is free.
+        recorded = sorted(self.commands, key=lambda item: int(Path(item[0][-1]).stem))
+        for entry, (command, _) in zip(selected, recorded):
             replay = tus.clean_arguments(entry["arguments"])
             self.assertEqual(command[:len(replay)], replay)
             self.assertEqual(command[len(replay):len(replay) + 4],
@@ -1278,6 +1280,325 @@ class ChangedTranslationUnitsTests(unittest.TestCase):
             self.assertEqual(len({r["command_fingerprint"] for r in reports}), 3)
         with patch.object(tus, "changed_paths", side_effect=tus.SelectionError("incomplete")):
             self.assertEqual(tus.main(["compile", "--build-dir", str(self.build)]), 1)
+
+
+    def ci_args(self, **updates):
+        values = dict(jobs=2, build_dir=self.build, clang_build_dir=self.build,
+                      base_ref="base", full_selection=False, summary_file=self.root / "summary.md")
+        values.update(updates)
+        return argparse.Namespace(**values)
+
+    def run_ci(self, changed=None, missing_tools=(), tracked=None, **updates):
+        failure = changed if isinstance(changed, Exception) else None
+        paths = set([self.a] if changed is None else changed) if failure is None else set()
+        with patch.object(tus, "changed_paths", return_value=paths, side_effect=failure), \
+                patch.object(tus.subprocess, "check_output", return_value=b"".join(
+                    os.fsencode(p.relative_to(self.root)) + b"\0" for p in (tracked or [self.a]))), \
+                patch.object(tus.shutil, "which", side_effect=lambda name: None if name in missing_tools else "/bin/" + name), \
+                redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            return tus.ci_checks(self.ci_args(**updates), self.root)
+
+    def test_ci_route_only_proven_docs_python_skip_and_uncertainty_validates(self):
+        output = self.root / "route.txt"
+        args = self.ci_args(output=output)
+        cases = [({self.root / "docs/guide.md", self.root / "tools/audio/bank_validate.py"}, False),
+                 ({self.a}, True), ({self.root / "unreviewed.py"}, True),
+                 ({self.root / "tools/ci/changed_tus.py"}, True), (set(), True)]
+        for paths, native in cases:
+            output.write_text("")
+            with patch.object(tus, "changed_paths", return_value=paths), redirect_stdout(io.StringIO()):
+                self.assertEqual(tus.ci_route(args, self.root), 0)
+            self.assertIn(f"native={str(native).lower()}", output.read_text())
+        with patch.object(tus, "changed_paths", side_effect=tus.SelectionError("history unavailable")), \
+                redirect_stdout(io.StringIO()):
+            self.assertEqual(tus.ci_route(args, self.root), 0)
+        self.assertTrue(output.read_text().endswith("native=true\nfull=true\n"))
+        self.assertIn("uncertain diff", args.summary_file.read_text())
+        self.assertIn("No native work", args.summary_file.read_text())
+        self.assertEqual(self.commands, [])
+
+    def test_ci_fatal_profile_adds_categories_without_changing_local_policy(self):
+        entry = self.entries()[0]
+        original = tus.compile_command(entry, self.build / "local.o", warning_profile="msvc-approx")
+        strict = tus.compile_command(entry, self.build / "ci.o", True, "msvc-approx", True)
+        self.assertEqual(strict[0], "ccache")
+        for category in ("all", "extra", "pedantic", "shadow=global", "conversion", "sign-conversion",
+                         "narrowing", "unused", "unused-parameter", "missing-field-initializers"):
+            self.assertIn("-Werror=" + category, strict)
+            self.assertNotIn("-Werror=" + category, original)
+        self.assertNotIn("original.o", strict)
+        self.assertNotIn("original.d", strict)
+        self.assertIn("-ffp-contract=off", strict)
+        for disabled in ("-w", "-Wno-everything"):
+            bad = dict(entry, arguments=entry["arguments"] + [disabled])
+            with self.assertRaisesRegex(tus.SelectionError, "warning-disabled"):
+                tus.compile_command(bad, self.build / "ci.o", True, "msvc-approx", True)
+
+    def test_ci_enforces_every_category_with_preconfigured_warning_families(self):
+        categories = ("all", "extra", "pedantic", "shadow=global", "conversion",
+                      "sign-conversion", "narrowing", "unused", "unused-parameter", "missing-field-initializers")
+        for flags in (["-Wconversion"], ["-Wsign-conversion"], ["-Wnarrowing"],
+                      ["-Wshadow=local"], ["-Werror=conversion"],
+                      ["-Wno-error"], ["-Wno-fatal-errors"],
+                      ["-W" + category for category in categories]):
+            with self.subTest(flags=flags):
+                entry = self.entries()[0]
+                entry["arguments"] += flags
+                replay = tus.clean_arguments(entry["arguments"])
+                local = tus.compile_command(entry, self.build / "local.o", warning_profile="msvc-approx")
+                self.assertFalse(any(f.startswith("-Werror=") for f in local[len(replay):-3]))
+                strict = tus.compile_command(entry, self.build / "ci.o", warning_profile="msvc-approx",
+                                             fatal_profile=True)
+                self.assertEqual(strict[:len(replay)], replay)
+                for category in categories:
+                    self.assertIn("-Werror=" + category, strict[len(replay):-3])
+                self.assertEqual(self.commands, [])
+
+    def test_ci_refuses_group_and_subgroup_demotions_without_changing_local_policy(self):
+        # Specific subgroups can defeat a later group flag. Test both orders;
+        # only the repository's exact unused-parameter demotion is accepted.
+        for category in ("all", "extra", "pedantic", "shadow", "shadow-local", "conversion",
+                         "sign-conversion", "float-conversion", "narrowing", "unused",
+                         "unused-parameter", "unused-but-set-variable", "missing-field-initializers",
+                         "sign-compare", "deprecated-declarations"):
+            for prefix in ("-Wno-", "-Wno-error="):
+                flag = prefix + category
+                if flag == "-Wno-error=unused-parameter":
+                    continue
+                for flags in ([flag, "-Wconversion", "-Wunused"], ["-Wconversion", "-Wunused", flag]):
+                    with self.subTest(flags=flags):
+                        entry = self.entries()[0]
+                        entry["arguments"] += flags
+                        before = list(entry["arguments"])
+                        local = tus.compile_command(entry, self.build / "local.o",
+                                                    warning_profile="msvc-approx")
+                        self.assertIn(flag, local)
+                        with self.assertRaisesRegex(tus.SelectionError, re.escape(flag)):
+                            tus.compile_command(entry, self.build / "ci.o", True, "msvc-approx", True)
+                        self.assertEqual(entry["arguments"], before)
+                        self.assertEqual(self.commands, [])
+
+    def test_ci_warning_enforcement_refusal_reports_failure_before_compiling(self):
+        self.raw[0]["arguments"].append("-Wno-error=unused-but-set-variable")
+        self.save_db()
+        namespace = os.environ.get("CCACHE_NAMESPACE")
+        self.assertEqual(self.run_ci(), 1)
+        summary = (self.root / "summary.md").read_text()
+        self.assertIn('"status": "failed"', summary)
+        self.assertIn("CI cannot enforce fatal warning categories with -Wno-error=unused-but-set-variable", summary)
+        self.assertFalse(any("-c" in c or "-p" in c for c, _ in self.commands))
+        self.assertEqual(os.environ.get("CCACHE_NAMESPACE"), namespace)
+        self.assertEqual(list((self.root / "scratch").glob("fast-checks-*")), [])
+
+    def test_ci_real_cmake_warning_policy_compiles_and_runs_both_tidy_configs(self):
+        flags = self.cmake_warning_flags()
+        self.assertEqual(flags, ["-Wall", "-Wextra", "-Wpedantic", "-Werror",
+                                 "-Wno-error=unused-parameter"])
+        for raw in self.raw:
+            raw["arguments"] = self.raw_entry(Path(raw["file"]), flags)["arguments"]
+        self.save_db()
+        original = [list(raw["arguments"]) for raw in self.raw]
+        namespace = os.environ.get("CCACHE_NAMESPACE")
+        for full in (False, True):
+            with self.subTest(full_selection=full):
+                self.commands.clear()
+                self.assertEqual(self.run_ci(full_selection=full), 0)
+                compiles = [c for c, _ in self.commands if c[0] == "ccache"]
+                self.assertEqual(len(compiles), 2 if full else 1)
+                for command in compiles:
+                    self.assertEqual(self.warning_options(command)[:len(flags)], flags)
+                    self.assertGreater(command.index("-Werror=unused-parameter"),
+                                       command.index("-Wno-error=unused-parameter"))
+                self.assertEqual(sum("-p" in c for c, _ in self.commands), len(compiles))
+                self.assertEqual(sum("--files0-from" in c for c, _ in self.commands), len(compiles))
+                self.assertIn('"status": "passed"', (self.root / "summary.md").read_text())
+                self.assertEqual(os.environ.get("CCACHE_NAMESPACE"), namespace)
+                self.assertEqual(list((self.root / "scratch").glob("fast-checks-*")), [])
+        self.assertEqual([raw["arguments"] for raw in self.raw], original)
+        for entry in self.entries():
+            local = tus.compile_command(entry, self.build / "local.o", warning_profile="msvc-approx")
+            self.assertIn("-Wno-error=unused-parameter", local)
+            self.assertNotIn("-Werror=unused-parameter", local)
+
+    def test_ci_replays_duplicate_variants_and_both_tidy_configs_and_cleans(self):
+        self.raw.append(self.raw_entry(self.a, ["-DENABLE_FEATURE"]))
+        self.save_db()
+        databases = []
+        manifests = []
+        def execute(command, directory, check=True):
+            if "-p" in command:
+                db = Path(command[command.index("-p") + 1]) / "compile_commands.json"
+                databases.append(json.loads(db.read_text()))
+            if "--files0-from" in command:
+                manifests.append(Path(command[-1]).read_bytes())
+                self.assertEqual(command[command.index("--jobs") + 1], "1")
+            return self.fake_execute(command, directory, check)
+        with patch.object(tus, "execute", side_effect=execute):
+            self.assertEqual(self.run_ci(), 0)
+        compiles = [c for c, _ in self.commands if c[0] == "ccache"]
+        self.assertEqual(len(compiles), 2)
+        self.assertEqual(len({c[-1] for c in compiles}), 2)
+        self.assertTrue(all(not Path(c[-1]).exists() for c in compiles))
+        self.assertEqual(len(databases), 2)
+        self.assertTrue(all(len(db) == 1 for db in databases))
+        self.assertNotEqual(databases[0][0]["arguments"], databases[1][0]["arguments"])
+        self.assertEqual(manifests, [os.fsencode(self.a) + b"\0"] * 2)
+        summary = (self.root / "summary.md").read_text()
+        for field in ("scan_seconds", "compile_seconds", "tidy_seconds", "command_variants",
+                      "unsupported_configurations", "msvc-approx", "passed"):
+            self.assertIn(field, summary)
+        self.assertEqual(list((self.root / "scratch").glob("fast-checks-*")), [])
+
+    def test_ci_union_includes_each_compiler_context_and_all_target_variants(self):
+        self.raw.append(self.raw_entry(self.a, ["-DENABLE_FEATURE"]))
+        self.save_db()
+        entries = self.entries()
+        def select(root, database, changed, jobs, build):
+            count = getattr(select, "count", 0)
+            select.count = count + 1
+            return ([entries[0]] if count == 0 else [entries[1]]), {}
+        with patch.object(tus, "select", side_effect=select):
+            self.assertEqual(self.run_ci(), 0)
+        self.assertEqual(len([c for c, _ in self.commands if c[0] == "ccache"]), 3)
+
+    def test_ci_missing_cross_compiler_tu_and_malformed_db_fail_before_compile(self):
+        entries = self.entries()
+        with patch.object(tus, "read_database", side_effect=[entries, entries[:1]]), \
+                patch.object(tus, "select", side_effect=[(entries, {}), (entries[:1], {})]):
+            self.assertEqual(self.run_ci(), 1)
+        self.assertIn("selected TU missing", (self.root / "summary.md").read_text())
+        self.assertEqual(self.commands, [])
+        for flag in ("-Xclang", "@response", "-include-pch"):
+            self.raw[0] = self.raw_entry(self.a, [flag])
+            self.save_db()
+            self.assertEqual(self.run_ci(), 1)
+            self.assertEqual(self.commands, [])
+
+    def test_ci_failed_scan_compile_and_tidy_fail_and_cleanup(self):
+        for stage in ("scan", "compile", "tidy"):
+            self.commands.clear()
+            def fail(command, directory, check=True):
+                if ((stage == "scan" and "-M" in command)
+                        or (stage == "compile" and command[0] == "ccache")
+                        or (stage == "tidy" and ("-p" in command or "--files0-from" in command))):
+                    raise tus.SelectionError("mock " + stage + " failure")
+                return self.fake_execute(command, directory, check)
+            with self.subTest(stage=stage), patch.object(tus, "execute", side_effect=fail):
+                self.assertEqual(self.run_ci([self.header]), 1)
+                self.assertIn("mock " + stage + " failure", (self.root / "summary.md").read_text())
+                self.assertEqual(list((self.root / "scratch").glob("fast-checks-*")), [])
+                if stage == "scan":
+                    self.assertFalse(any(c[0] == "ccache" for c, _ in self.commands))
+
+    def test_ci_cache_key_covers_profile_identity_config_and_resolved_build_content(self):
+        policy = self.root / "CMakeLists.txt"
+        pin = self.root / "vendor/CMakeLists.txt"
+        pin.parent.mkdir()
+        pin.write_text("dependency revision one")
+        entries = self.entries()
+        tracked = [policy, pin]
+        key = tus.ci_cache_key(self.root, entries, tracked)
+        self.assertTrue(key.startswith("fast-compile-msvc-approx-"))
+        self.assertEqual(key, tus.ci_cache_key(self.root, entries, list(reversed(tracked))))
+        pin.write_text("dependency revision two")
+        self.assertNotEqual(key, tus.ci_cache_key(self.root, entries, tracked))
+        pin.write_text("dependency revision one")
+        for field, value in (("arguments", entries[0]["arguments"] + ["-DNEW_CONFIG"]),
+                             ("directory", self.src)):
+            variant = dict(entries[0], **{field: value})
+            self.assertNotEqual(key, tus.ci_cache_key(self.root, [variant, entries[1]], tracked))
+        with patch.object(tus, "profile_flags", return_value=["-Wshadow"]):
+            self.assertNotEqual(key, tus.ci_cache_key(self.root, entries, tracked))
+        with patch.object(tus, "execute", return_value=subprocess.CompletedProcess([], 0, "compiler v2", "")):
+            self.assertNotEqual(key, tus.ci_cache_key(self.root, entries, tracked))
+
+    def test_ci_bounds_full_selection_namespace_restoration_and_missing_tu(self):
+        for jobs in (0, 5):
+            self.assertEqual(self.run_ci(jobs=jobs), 1)
+        for directory in ("build_dir", "clang_build_dir"):
+            self.assertEqual(self.run_ci(**{directory: None}), 1)
+        self.assertEqual(self.commands, [])
+        with patch.dict(os.environ, {"CCACHE_NAMESPACE": "prior"}):
+            self.assertEqual(self.run_ci(full_selection=True), 0)
+            self.assertEqual(os.environ["CCACHE_NAMESPACE"], "prior")
+        self.assertEqual(len([c for c, _ in self.commands if c[0] == "ccache"]), 2)
+        for changed in ([], tus.SelectionError("unknown history")):
+            self.commands.clear()
+            self.assertEqual(self.run_ci(changed, full_selection=True), 0)
+            self.assertEqual(len([c for c, _ in self.commands if c[0] == "ccache"]), 2)
+        self.commands.clear()
+        self.assertEqual(self.run_ci(tus.SelectionError("unknown history")), 1)
+        self.assertEqual(self.commands, [])
+        new = self.src / "new.cpp"
+        new.write_text("new")
+        self.assertEqual(self.run_ci([new]), 1)
+        self.assertIn("missing compile database", (self.root / "summary.md").read_text())
+        self.assertEqual(self.run_ci([new], full_selection=True), 1)
+
+    def test_ci_cli_dispatch_and_calibration_refusal(self):
+        with patch.object(tus, "ci_route", return_value=0) as route:
+            self.assertEqual(tus.main(["route", "--root", str(self.root)]), 0)
+            self.assertEqual(route.call_args.args[1], self.root)
+        with patch.object(tus, "ci_checks", return_value=1) as ci:
+            self.assertEqual(tus.main(["ci", "--root", str(self.root), "--build-dir", str(self.build),
+                                       "--clang-build-dir", str(self.build), "--full-selection"]), 1)
+            self.assertTrue(ci.call_args.args[0].full_selection)
+        for command in ("route", "ci"):
+            for option in ("--warning-baseline", "--write-warning-baseline", "--conversion-clean-prefix"):
+                with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as error:
+                    tus.main([command, option, "scratch/baseline"])
+                self.assertEqual(error.exception.code, 2)
+        self.assertEqual(self.commands, [])
+
+    def test_ci_missing_tools_empty_database_and_symlink_scratch_fail_visibly(self):
+        for tools in (("ccache",), ("clang-tidy-18", "clang-tidy")):
+            self.assertEqual(self.run_ci(missing_tools=tools), 1)
+            self.assertIn("not found", (self.root / "summary.md").read_text())
+            self.assertEqual(list((self.root / "scratch").glob("fast-checks-*")), [])
+        with patch.object(tus, "read_database", return_value=[]):
+            self.assertEqual(self.run_ci(), 1)
+        self.assertIn("empty gcc", (self.root / "summary.md").read_text())
+        # Exercise the refusal on every host, including hosts without symlink
+        # privileges. Actual resolved-path behavior is covered by the selector.
+        original_is_symlink = Path.is_symlink
+        def is_symlink(path):
+            return path == self.root / "scratch" or original_is_symlink(path)
+        before = {p: p.read_bytes() for p in self.src.iterdir()}
+        with patch.object(Path, "is_symlink", is_symlink):
+            self.assertEqual(self.run_ci(), 1)
+        self.assertIn("scratch escapes", (self.root / "summary.md").read_text())
+        self.assertEqual({p: p.read_bytes() for p in self.src.iterdir()}, before)
+
+    def test_ci_reports_unconfigured_sources_and_failure_does_not_validate_them(self):
+        dormant = self.src / "DormantBackend.cpp"
+        dormant.write_text("optional source")
+        self.assertEqual(self.run_ci(tracked=[self.a, dormant]), 0)
+        summary = (self.root / "summary.md").read_text()
+        self.assertIn("gcc_unconfigured_sources", summary)
+        self.assertIn("clang_unconfigured_sources", summary)
+        self.assertIn("src/DormantBackend.cpp", summary)
+        self.commands.clear()
+        self.assertEqual(self.run_ci([dormant], tracked=[self.a, dormant]), 1)
+        self.assertEqual(self.commands, [])
+
+    def test_ci_summary_escapes_unusual_filenames(self):
+        summary = self.root / "safe-summary.md"
+        stream = io.StringIO()
+        with redirect_stdout(stream):
+            tus.publish_ci_summary(summary, {"status": "failed", "file": "src/<tag>&name\n.cpp",
+                                            "command_variants": {"gcc": [
+                                                {"file": "src/a.cpp", "directory": "/checkout",
+                                                 "arguments": ["g++", "-DVARIANT_A"]},
+                                                {"file": "src/a.cpp", "directory": "/checkout",
+                                                 "arguments": ["g++", "-DVARIANT_B"]}]}})
+        self.assertIn("&lt;tag&gt;&amp;name", summary.read_text())
+        self.assertNotIn("<tag>", summary.read_text())
+        self.assertEqual(json.loads(stream.getvalue())["file"], "src/<tag>&name\n.cpp")
+        self.assertEqual(summary.read_text().count("command_sha256"), 2)
+        self.assertNotIn("-DVARIANT", summary.read_text())
+        logged = json.loads(stream.getvalue())["command_variants"]["gcc"]
+        self.assertNotEqual(logged[0]["arguments"], logged[1]["arguments"])
+        self.assertIn("-DVARIANT_A", stream.getvalue())
 
 
 EXECUTE = tus.execute
