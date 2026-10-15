@@ -185,6 +185,11 @@ GameSession::~GameSession() {
 }
 
 void GameSession::ResetWorldSystems() {
+    m_farEditedCachePolicy.reset();
+    m_farPublication.reset();
+    m_farCapture.reset();
+    m_farCaptureAttempt.reset();
+    ++m_farPublicationChange;
     if (m_worldSystem)
         m_worldSystem->quiesce_streaming_jobs_for_save();
     // Keep all dependencies alive while the world destructor publishes completed work.
@@ -1354,7 +1359,7 @@ bool GameSession::LoadWorld(const std::string& worldId) {
     if (!IsSimulationTickBoundary())
         return false;
     m_worldLoadError.clear();
-    if (!m_activeRegionsEnabled)
+    if (!m_activeRegionsEnabled && !m_farWorldPersistenceSafety)
         return LoadWorldInternal(worldId);
 
     // Restore the entire candidate, including catalogue checks and resolved entity references,
@@ -1363,7 +1368,8 @@ bool GameSession::LoadWorld(const std::string& worldId) {
     candidate.m_rootPath = m_rootPath;
     candidate.m_jobSystem = m_jobSystem;
     candidate.m_requiredClientAssets = m_requiredClientAssets;
-    candidate.m_activeRegionsEnabled = true;
+    candidate.m_activeRegionsEnabled = m_activeRegionsEnabled;
+    candidate.m_farWorldPersistenceSafety = m_farWorldPersistenceSafety;
     candidate.m_regionSchedulerConfig = m_regionSchedulerConfig;
     candidate.m_parkedBytesLimit = m_parkedBytesLimit;
     candidate.m_populationContract = m_populationContract;
@@ -1380,11 +1386,14 @@ bool GameSession::LoadWorld(const std::string& worldId) {
     }
 
     try {
-        candidate.QueueRegionActivations();
+        if (m_activeRegionsEnabled)
+            candidate.QueueRegionActivations();
     } catch (const std::exception& error) {
         m_worldLoadError = error.what();
         return false;
     }
+    if (m_beforeWorldReplacement)
+        m_beforeWorldReplacement();
     ResetWorldSystems();
     m_registry = std::move(candidate.m_registry);
     m_simulationEventBus = std::move(candidate.m_simulationEventBus);
@@ -1413,7 +1422,8 @@ bool GameSession::LoadWorld(const std::string& worldId) {
     // Session callbacks must address the published owner after the candidate is destroyed.
     BindRegionalFieldQueries();
     AttachRegionEditObserver();
-    m_scentField->BindDepositGate([this](int x, int z) { return ScentCellDue(x, z); });
+    if (m_activeRegionsEnabled)
+        m_scentField->BindDepositGate([this](int x, int z) { return ScentCellDue(x, z); });
     m_scriptState->set_energy_field(m_energyFieldState.get());
     return true;
 }
@@ -2884,21 +2894,25 @@ void GameSession::AdvanceGroundObjects(std::uint64_t tick) {
 }
 
 void GameSession::AttachRegionEditObserver() {
-    if (m_activeRegionsEnabled && m_worldSystem) {
+    if ((m_activeRegionsEnabled || m_farWorldPersistenceSafety) && m_worldSystem) {
         m_worldSystem->set_durable_residency(true);
         m_worldSystem->set_parked_bytes_limit(m_parkedBytesLimit);
         m_worldSystem->set_durable_chunk_loader(
             [this](const IVec3& coords) {
                 const auto directory =
                     m_regionDurableDirectory.empty() ? GetWorldSaveDir() : m_regionDurableDirectory;
-                const auto result =
-                    Persistence::WorldSaveService::read_chunk(directory, coords, true);
+                const auto result = Persistence::WorldSaveService::read_chunk(
+                    directory,
+                    coords,
+                    m_activeRegionsEnabled || Persistence::snapshot_index_exists(directory));
                 if (result.status != Persistence::WorldSaveService::ChunkReadStatus::Found)
                     throw std::runtime_error(
                         result.error.empty() ? "expected durable chunk is missing" : result.error);
                 return result.chunk;
             },
             [this](std::string error) { LatchRegionFault(m_worldClock.tick(), std::move(error)); });
+    }
+    if (m_activeRegionsEnabled && m_worldSystem) {
         m_worldSystem->SetVoxelEditObserver([this](const IVec3& chunk) {
             int x = 0, z = 0;
             Persistence::WorldSaveService::region_coords_for_chunk(chunk, x, z);
@@ -2915,7 +2929,7 @@ void GameSession::AttachRegionEditObserver() {
 
 PersistenceStatus GameSession::GetPersistenceStatus() const {
     PersistenceStatus status;
-    if (!m_activeRegionsEnabled || !m_worldSystem)
+    if ((!m_activeRegionsEnabled && !m_farWorldPersistenceSafety) || !m_worldSystem)
         return status;
     const auto parking = m_worldSystem->parking_status();
     status.parked_count = parking.parked_count;
@@ -2929,7 +2943,8 @@ PersistenceStatus GameSession::GetPersistenceStatus() const {
 }
 
 bool GameSession::PersistenceSaveRequested() const {
-    if (!m_activeRegionsEnabled || !m_worldSystem || !m_worldSystem->persistence_save_requested())
+    if ((!m_activeRegionsEnabled && !m_farWorldPersistenceSafety) || !m_worldSystem ||
+        !m_worldSystem->persistence_save_requested())
         return false;
     if (m_lastSaveFailureTick >= 0 &&
         static_cast<std::int64_t>(GetSimulationTickCount()) <
@@ -2939,7 +2954,7 @@ bool GameSession::PersistenceSaveRequested() const {
 }
 
 bool GameSession::PersistenceAutosaveDue() {
-    if (!m_activeRegionsEnabled || !m_worldSystem)
+    if ((!m_activeRegionsEnabled && !m_farWorldPersistenceSafety) || !m_worldSystem)
         return false;
     const auto tick = static_cast<std::int64_t>(GetSimulationTickCount());
     if (m_lastSaveTick < 0) {
@@ -2959,12 +2974,12 @@ void GameSession::ClearPersistenceSaveRequest() {
 
 void GameSession::SetParkedBytesLimit(std::size_t bytes) {
     m_parkedBytesLimit = bytes;
-    if (m_activeRegionsEnabled && m_worldSystem)
+    if ((m_activeRegionsEnabled || m_farWorldPersistenceSafety) && m_worldSystem)
         m_worldSystem->set_parked_bytes_limit(bytes);
 }
 
 void GameSession::RecordPersistenceSaveOutcome(bool ok, double elapsed_ms) {
-    if (!m_activeRegionsEnabled)
+    if (!m_activeRegionsEnabled && !m_farWorldPersistenceSafety)
         return;
     if (m_worldSystem)
         m_worldSystem->note_persistence_outcome(ok);
@@ -3211,6 +3226,12 @@ void GameSession::SetFarEditedCachePolicy(
                                           m_worldSystem->acquire_worldgen_sample_scope(),
                                           std::move(host));
     };
+    const auto after_commit = bound->after_commit;
+    bound->after_commit = [this, after_commit](const World::FarCacheReport& report) {
+        ++m_farPublicationChange;
+        if (after_commit)
+            after_commit(report);
+    };
     m_farEditedCachePolicy = std::move(bound);
 }
 
@@ -3260,6 +3281,8 @@ bool GameSession::SaveWorldMetadataTo(const fs::path& save_dir) {
         if (!outer)
             return false;
     }
+    if (auto* transaction = Persistence::SaveTransaction::active_for(save_dir))
+        transaction->defer_until_commit([this] { ++m_farPublicationChange; });
     // Using nlohmann::json for robust saving
     nlohmann::json metadata_json = {
         {"container_version", Persistence::WorldSaveService::kContainerVersion},
@@ -3349,6 +3372,8 @@ bool GameSession::SaveWorldMetadataTo(const fs::path& save_dir) {
     }
     if (!m_activeRegionsEnabled && outer && !outer->Commit())
         return false;
+    if (!m_activeRegionsEnabled && !far_policy)
+        ++m_farPublicationChange;
     return true;
 }
 
@@ -3357,6 +3382,685 @@ std::filesystem::path GameSession::GetWorldSaveDir() const {
         return {};
     }
     return RuntimeRoot(m_rootPath) / "worlds" / "saves" / m_metadata.worldId;
+}
+
+namespace {
+using namespace World;
+
+// Source images validate lattice shape, values and shared nodes before these
+// capture-only resolvers run. Interpolation retains the bake's double Z/Y/X order.
+FarVolumeSample PublicationInterpolate(const FarEditedLattice& lattice,
+                                       const FarVolumePosition& point) {
+    const std::array<std::int64_t, 3> p{point.x, point.y, point.z};
+    const std::array<std::int64_t, 3> origin{lattice.origin.x, lattice.origin.y, lattice.origin.z};
+    std::array<std::size_t, 3> base{}, nearest{};
+    std::array<double, 3> fraction{};
+    for (std::size_t axis = 0; axis < 3; ++axis) {
+        const auto offset = p[axis] - origin[axis];
+        base[axis] = std::min<std::size_t>(offset / lattice.spacing_meters, lattice.side[axis] - 2);
+        fraction[axis] = double(offset - std::int64_t(base[axis]) * lattice.spacing_meters) /
+                         lattice.spacing_meters;
+        nearest[axis] = base[axis] + (fraction[axis] > 0.5 ? 1u : 0u);
+    }
+    const auto index = [&](std::size_t x, std::size_t y, std::size_t z) {
+        return x + lattice.side[0] * (y + lattice.side[1] * z);
+    };
+    double density = 0;
+    for (std::size_t z = 0; z < 2; ++z)
+        for (std::size_t y = 0; y < 2; ++y)
+            for (std::size_t x = 0; x < 2; ++x)
+                density += (x ? fraction[0] : 1 - fraction[0]) *
+                           (y ? fraction[1] : 1 - fraction[1]) *
+                           (z ? fraction[2] : 1 - fraction[2]) *
+                           lattice.density[index(base[0] + x, base[1] + y, base[2] + z)];
+    const auto material = lattice.material.empty()
+                              ? std::uint8_t{0}
+                              : lattice.material[index(nearest[0], nearest[1], nearest[2])];
+    return {static_cast<float>(density), material};
+}
+
+bool PublicationContains(const FarEditedFootprint& bounds, const FarVolumePosition& p) {
+    return p.x >= bounds.min.x && p.x <= bounds.max.x && p.y >= bounds.min.y &&
+           p.y <= bounds.max.y && p.z >= bounds.min.z && p.z <= bounds.max.z;
+}
+
+template<class Image>
+FarFrozenTerrainOverride PublicationTerrain(const Image& image) {
+    return [&image](std::uint8_t, const FarVolumePosition& point) {
+        FarFrozenOverride<FarVolumeSample> result;
+        const auto inventory = image.Inventory();
+        const auto lattices = image.Lattices();
+        if (inventory.size() != lattices.size()) {
+            result.presence = FarFrozenPresence::Unavailable;
+            return result;
+        }
+        for (std::size_t i = 0; i < inventory.size(); ++i) {
+            if (!PublicationContains(inventory[i].footprint, point))
+                continue;
+            const auto sample = PublicationInterpolate(lattices[i], point);
+            if (result.presence == FarFrozenPresence::Present && result.sample != sample) {
+                result.presence = FarFrozenPresence::Unavailable;
+                return result;
+            }
+            result = {FarFrozenPresence::Present, sample};
+        }
+        return result;
+    };
+}
+
+template<class Image>
+FarFrozenWaterOverride PublicationWater(const Image& image) {
+    return [&image](std::int64_t x, std::int64_t z) {
+        FarFrozenOverride<FarFrozenWaterSample> result;
+        const auto inventory = image.Inventory();
+        const auto water = image.Water();
+        if (inventory.size() != water.size())
+            return FarFrozenOverride<FarFrozenWaterSample>{FarFrozenPresence::Unavailable, {}};
+        for (std::size_t i = 0; i < inventory.size(); ++i) {
+            const auto& bounds = inventory[i].footprint;
+            // Water grids own half-open columns; shared edges select one cell.
+            if (x < bounds.min.x || x >= bounds.max.x || z < bounds.min.z || z >= bounds.max.z)
+                continue;
+            FarFrozenWaterSample sample{};
+            const auto& record = water[i];
+            if (record.has_sim) {
+                const auto side = static_cast<std::size_t>(record.resolution);
+                const bool legacy = record.bed_mm.empty() && record.depth_mm.empty();
+                if (!side || (legacy ? (record.level.size() != side * side ||
+                                        record.terrain_height.size() != side * side)
+                                     : (record.bed_mm.size() != side * side ||
+                                        record.depth_mm.size() != side * side)))
+                    return FarFrozenOverride<FarFrozenWaterSample>{FarFrozenPresence::Unavailable,
+                                                                   {}};
+                const auto cx = static_cast<std::size_t>((x - bounds.min.x) * record.resolution /
+                                                         (bounds.max.x - bounds.min.x));
+                const auto cz = static_cast<std::size_t>((z - bounds.min.z) * record.resolution /
+                                                         (bounds.max.z - bounds.min.z));
+                const auto cell = cx + side * cz;
+                if (legacy) {
+                    sample.wet = record.level[cell] > record.terrain_height[cell];
+                    sample.surface_height = record.level[cell];
+                } else {
+                    sample.wet = record.depth_mm[cell] > 0;
+                    sample.surface_height = static_cast<float>(
+                        (double(record.bed_mm[cell]) + record.depth_mm[cell]) / 1000.0);
+                }
+            }
+            // Vertical records can carry distinct surfaces. The upper wet surface
+            // is the column's render observation; an explicit dry cell stays dry.
+            if (result.presence == FarFrozenPresence::Absent ||
+                (sample.wet &&
+                 (!result.sample.wet || sample.surface_height > result.sample.surface_height)))
+                result = {FarFrozenPresence::Present, sample};
+        }
+        return result;
+    };
+}
+
+FarFrozenCaptureSource PublicationSource(const Systems::SHIELD_WorldSystem& world,
+                                         const Persistence::EditedSourceImage& image,
+                                         FarCaveMode caves,
+                                         std::uint64_t identity) {
+    FarFrozenCaptureSource source;
+    source.durable = image.Identity();
+    source.content_identity = identity;
+    source.pristine.field_identity = identity;
+    source.pristine.caves = caves;
+    source.pristine.numeric = FarVolumeNumericProfile::LegacySigned16;
+    source.pristine.height = [&world](std::int64_t x, std::int64_t z) {
+        return world.GetTerrainHeightAt(static_cast<float>(x), static_cast<float>(z));
+    };
+    source.pristine.density = [&world](const FarVolumePosition& point,
+                                       float height,
+                                       std::uint32_t spacing,
+                                       FarCaveMode mode) {
+        const Vec3 p(
+            static_cast<float>(point.x), static_cast<float>(point.y), static_cast<float>(point.z));
+        const auto material =
+            p.y < height - 4 ? MaterialType::Stone : world.SurfaceVertexMaterial(p.x, p.z, height);
+        return FarVolumeSample{world.SamplePristineFarDensity(p, height, spacing, mode),
+                               static_cast<std::uint8_t>(material)};
+    };
+    source.committed = PublicationTerrain(image);
+    const auto committed_water = PublicationWater(image);
+    source.water = [&world, committed_water](
+                       std::int64_t x, std::int64_t z) -> std::optional<FarFrozenWaterSample> {
+        const auto saved = committed_water(x, z);
+        if (saved.presence == FarFrozenPresence::Unavailable)
+            return {};
+        if (saved.presence == FarFrozenPresence::Present)
+            return saved.sample;
+        const float px = static_cast<float>(x), pz = static_cast<float>(z);
+        const float level = world.WaterLevelAt(px, pz);
+        return FarFrozenWaterSample{world.GetTerrainHeightAt(px, pz) < level, level};
+    };
+    return source;
+}
+
+bool VisitPublicationPreview(const Systems::SHIELD_WorldSystem& world,
+                             const Persistence::EditedSourceSelection& selection,
+                             const Persistence::EditedSourceLimits& limits,
+                             std::size_t max_records,
+                             const Persistence::EditedSourcePreviewVisitor& visitor) {
+    std::uint64_t probes = 0;
+    bool exhausted = false;
+    const auto relevant = [&](const Chunk& chunk) {
+        if (exhausted)
+            return false;
+        const auto c = chunk.get_coords();
+        const FarVolumePosition lo{std::int64_t(c.x) * CHUNK_SIZE_X,
+                                   std::int64_t(c.y) * CHUNK_SIZE_Y,
+                                   std::int64_t(c.z) * CHUNK_SIZE_Z};
+        const FarVolumePosition hi{lo.x + CHUNK_SIZE_X, lo.y + CHUNK_SIZE_Y, lo.z + CHUNK_SIZE_Z};
+        const auto intersects = [&](const FarEditedFootprint& box) {
+            if (probes == limits.max_selection_probes) {
+                exhausted = true;
+                return false;
+            }
+            ++probes;
+            return lo.x <= box.max.x && hi.x >= box.min.x && lo.y <= box.max.y &&
+                   hi.y >= box.min.y && lo.z <= box.max.z && hi.z >= box.min.z;
+        };
+        // Match the source factory's closed support plus six axial contributors exactly.
+        // Selection uses full legal columns, so an over-height edit remains a refusal.
+        for (const auto& tile : selection.tiles) {
+            if (intersects(tile.support))
+                return true;
+            const auto spacing = kFarTierTable[tile.key.tier - 1].sample_spacing_meters;
+            for (int axis = 0; axis < 3; ++axis) {
+                for (const auto direction : {-1, 1}) {
+                    auto box = tile.support;
+                    const auto delta = std::int64_t(spacing) * direction;
+                    if (axis == 0) {
+                        box.min.x += delta;
+                        box.max.x += delta;
+                    } else if (axis == 1) {
+                        box.min.y += delta;
+                        box.max.y += delta;
+                    } else {
+                        box.min.z += delta;
+                        box.max.z += delta;
+                    }
+                    if (intersects(box))
+                        return true;
+                }
+            }
+            if (exhausted)
+                return false;
+        }
+        return false;
+    };
+    return world.visit_edited_source_preview(max_records, visitor, relevant) && !exhausted;
+}
+
+bool ExtendPublicationInventory(std::span<const Persistence::EditedSourceInventoryEntry> inventory,
+                                const FarTileKey& key,
+                                const FarWorldPublicationRequest& request,
+                                FarVolumeSpanLedger& span) {
+    const auto edge = FarTileEdgeMeters(key.tier);
+    const auto halo = std::int64_t(kFarTierTable[key.tier - 1].sample_spacing_meters);
+    for (const auto& entry : inventory) {
+        const auto& b = entry.footprint;
+        const auto intersects_x = [&](std::int64_t shift) {
+            return b.max.x >= key.tx * edge + shift && b.min.x <= (key.tx + 1) * edge + shift;
+        };
+        const auto intersects_z = [&](std::int64_t shift) {
+            return b.max.z >= key.tz * edge + shift && b.min.z <= (key.tz + 1) * edge + shift;
+        };
+        if (!((intersects_x(0) && (intersects_z(0) || intersects_z(-halo) || intersects_z(halo))) ||
+              (intersects_z(0) && (intersects_x(-halo) || intersects_x(halo)))))
+            continue;
+        if (!span.Extend({static_cast<float>(b.min.y - halo), static_cast<float>(b.max.y + halo)},
+                         request.spans))
+            return false;
+    }
+    return true;
+}
+
+const char* CapturePublicationObservation(const FarWorldPublicationRequest& request,
+                                          FarVolumeSpanLedger& ledger,
+                                          const FarFrozenCaptureSource& source,
+                                          std::shared_ptr<const FarFrozenObservation>& frozen) {
+    auto intent = ledger.Intent();
+    if (!intent)
+        return "saved far span intent unavailable";
+    const auto pool = request.memory[intent->key.tier - 1];
+    auto discovery = source.pristine;
+    float water_min = std::numeric_limits<float>::max();
+    float water_max = std::numeric_limits<float>::lowest();
+    discovery.height = [&source, &water_min, &water_max](std::int64_t x, std::int64_t z) {
+        auto selected =
+            source.live_water ? source.live_water(x, z) : FarFrozenOverride<FarFrozenWaterSample>{};
+        if (selected.presence == FarFrozenPresence::Absent && source.parked_water)
+            selected = source.parked_water(x, z);
+        const auto sample = selected.presence == FarFrozenPresence::Present
+                                ? std::optional<FarFrozenWaterSample>(selected.sample)
+                                : source.water(x, z);
+        if (selected.presence == FarFrozenPresence::Unavailable || !sample)
+            return std::optional<float>{};
+        if (sample->wet) {
+            water_min = std::min(water_min, sample->surface_height);
+            water_max = std::max(water_max, sample->surface_height);
+        }
+        return source.pristine.height(x, z);
+    };
+    FarVolumeRequest resolved;
+    const FarVolumeAuthorityLimits work{131 * 131, request.limits.frozen.max_density_samples};
+    if (!ResolveFarVolumeCoverageCharged(
+            *intent, discovery, work, {pool.get(), nullptr, nullptr}, resolved))
+        return "saved far terrain or water discovery refused";
+    if (water_min <= water_max) {
+        if (!ledger.Extend({water_min, water_max}, request.spans))
+            return "saved far water span refused";
+        intent = ledger.Intent();
+        if (!intent ||
+            !ResolveFarVolumeCoverageCharged(
+                *intent, source.pristine, work, {pool.get(), nullptr, nullptr}, resolved))
+            return "saved far combined coverage refused";
+    }
+    if (CaptureFarVolumeObservation(resolved, source, request.limits.frozen, pool, frozen) !=
+        FarFrozenCaptureError::None)
+        return "saved far immutable terrain/water capture refused";
+    return nullptr;
+}
+} // namespace
+
+// Owner-only staging state. No callback in this object is passed to render workers.
+struct FarWorldPublicationCapture {
+    std::shared_ptr<FarWorldPublication> next;
+    std::shared_ptr<const World::FarCommittedCache> cache;
+    Persistence::EditedSourceCapture captured;
+    std::vector<Persistence::EditedSourceTileSupport> supports;
+    World::FarEditedCacheLimits limits;
+    std::uint64_t identity = 0;
+};
+
+void GameSession::EnableFarWorldPersistenceSafety() {
+    if (m_editedSourceOwner != std::this_thread::get_id() || m_editedSourceCaptureActive)
+        throw std::logic_error("far persistence safety requires the session owner boundary");
+    m_farWorldPersistenceSafety = true;
+    AttachRegionEditObserver();
+}
+
+void GameSession::ClearFarWorldPublication() {
+    if (m_editedSourceOwner != std::this_thread::get_id() || m_editedSourceCaptureActive)
+        throw std::logic_error("far publication invalidation requires the session owner boundary");
+    m_farEditedCachePolicy.reset();
+    m_farPublication.reset();
+    m_farCapture.reset();
+    m_farCaptureAttempt.reset();
+    ++m_farPublicationChange;
+}
+
+World::FarEditedCacheLimits GameSession::FarWorldPublicationLimits() {
+    World::FarEditedCacheLimits limits;
+    limits.catalog.max_tiles = 1024;
+    limits.catalog.max_dependencies = 4096;
+    limits.catalog.max_bytes = 128 * 1024;
+    auto& source = limits.source;
+    source.max_tiles = 320;
+    source.max_members = 4096;
+    source.max_records = 1024;
+    source.max_directory_entries = 16384;
+    source.max_file_bytes = 64 * 1024 * 1024;
+    source.max_decode_bytes = 128 * 1024 * 1024;
+    source.max_samples = 1024ull * 17 * 17 * 17;
+    source.max_boundary_probes = 32'000'000;
+    source.max_selection_probes = 8'000'000;
+    source.max_image_bytes = 32 * 1024 * 1024;
+    source.max_scratch_bytes = 256 * 1024 * 1024;
+    limits.bake.max_edits = 16384;
+    limits.bake.max_source_records = 1024;
+    limits.bake.max_affected_bricks = 8192;
+    limits.bake.max_tiles = 1024;
+    limits.bake.max_brick_visits_per_tier.fill(2'000'000);
+    limits.bake.max_source_samples = source.max_samples;
+    limits.bake.max_source_probes = 64'000'000;
+    limits.bake.max_density_samples = 32'000'000;
+    limits.bake.max_scratch_bytes = 16 * 1024 * 1024;
+    limits.bake.max_output_bytes = 16 * 1024 * 1024;
+    limits.frozen = {8192, 8'000'000, 32'000'000, 8'000'000, 64 * 1024 * 1024};
+    limits.max_reconcile_probes = 16'000'000;
+    limits.max_pipeline_bytes = 384 * 1024 * 1024;
+    limits.max_cache_bytes = 32 * 1024 * 1024;
+    return limits;
+}
+
+bool GameSession::BeginFarWorldPublicationCapture(const FarWorldPublicationRequest& request,
+                                                  std::string& diagnostic) {
+    const auto refuse = [&diagnostic](const char* reason) {
+        diagnostic = reason;
+        return false;
+    };
+    ++m_farCaptureCount;
+    const auto source_token = m_worldSystem->far_world_publication_token();
+    if (request.incremental && m_farCaptureAttempt)
+        m_farCaptureAttempt->source_token = source_token;
+    // Quiescing waits for jobs but deliberately does not publish their results. Cache this
+    // transient refusal only while the pending-generation token remains unchanged.
+    if (source_token[4])
+        return refuse(
+            "saved far source generation publication is pending; retry after publication");
+    const auto root =
+        m_regionDurableDirectory.empty() ? GetWorldSaveDir() : m_regionDurableDirectory;
+    if (root.empty())
+        return refuse("saved far authority has no save identity");
+    if (Persistence::SaveTransaction::active_for(root)) {
+        m_farCaptureAttempt.reset();
+        return refuse("saved far snapshot publication is busy; retry after the save boundary");
+    }
+    if (Persistence::recover_pending_journal(root, nullptr) == Persistence::RecoveryOutcome::Failed)
+        return refuse("saved far snapshot recovery failed");
+    const auto pool = request.source_memory;
+    FarVolumeMemoryLease index_charge(*pool);
+    std::error_code index_error;
+    const auto index_path = Persistence::snapshot_index_path(root);
+    if (fs::exists(index_path, index_error)) {
+        const auto index_bytes = fs::file_size(index_path, index_error);
+        if (index_error || index_bytes > request.limits.source.max_scratch_bytes / 256 ||
+            !index_charge.TryCharge(request.limits.source.max_scratch_bytes))
+            return refuse("saved far snapshot index admission refused");
+    } else if (index_error) {
+        return refuse("saved far snapshot index is unavailable");
+    }
+    Persistence::SnapshotIndex index;
+    if (!Persistence::read_snapshot_index(root, index, nullptr))
+        return refuse("saved far committed snapshot is unavailable");
+    FarVolumeMemoryLease scratch(*pool);
+    const auto bytes =
+        sizeof(FarWorldPublication) + sizeof(FarWorldPublicationCapture) + 4096 +
+        2 * sizeof(FarEditedCachePolicy) +
+        request.wanted.size() *
+            (sizeof(FarWorldPublicationTile) + 3 * sizeof(Persistence::EditedSourceTileSupport)) +
+        request.max_history_keys * sizeof(std::pair<FarTileKey, FarVolumeSpanLedger>);
+    if (!scratch.TryCharge(bytes))
+        return refuse("saved far publication memory admission refused");
+    auto state = std::make_shared<FarWorldPublicationCapture>();
+    auto next = std::make_shared<FarWorldPublication>();
+    next->memory = pool;
+    next->reservation = std::move(scratch);
+    next->world_epoch = request.world_epoch;
+    next->publication_serial = m_farPublicationSerial + 1;
+    next->committed_generation = index.generation;
+    next->caves = request.caves;
+    next->save_root = root;
+    next->source_token = source_token;
+    next->tiles.reserve(request.wanted.size());
+    next->history.reserve(request.max_history_keys);
+    if (m_farPublication && m_farPublication->world_epoch == request.world_epoch &&
+        m_farPublication->caves == request.caves && m_farPublication->save_root == root) {
+        if (m_farPublication->history.size() > request.max_history_keys)
+            return refuse("saved far keyed span history exceeds replacement admission");
+        next->history.assign(m_farPublication->history.begin(), m_farPublication->history.end());
+    }
+    std::vector<Persistence::EditedSourceTileSupport> supports;
+    supports.reserve(request.wanted.size());
+    for (const auto& key : request.wanted) {
+        const auto edge = FarTileEdgeMeters(key.tier);
+        // Inventory selection spans the legal column, independently of the
+        // render extension cap. An out-of-budget edit must refuse below,
+        // rather than disappear from the selected source as pristine.
+        constexpr auto inventory_y = kFarVolumeExactCoordinateLimitMeters - 64;
+        supports.push_back({key,
+                            {{key.tx * edge, -inventory_y, key.tz * edge},
+                             {(key.tx + 1) * edge, inventory_y, (key.tz + 1) * edge}}});
+    }
+    auto limits = request.limits;
+    limits.source.memory = pool;
+    limits.caves = request.caves;
+    limits.numeric = FarVolumeNumericProfile::LegacySigned16;
+    // Stable base tokens; sampled values supply per-request render currency.
+    std::uint64_t identity = 14695981039346656037ull;
+    for (const auto* value : {&m_metadata.worldId, &m_metadata.seed, &m_metadata.worldType})
+        for (const unsigned char c : *value)
+            identity = (identity ^ c) * 1099511628211ull;
+    identity ^=
+        World::ComputeTerrainParamsHash(m_worldSystem->get_params(), m_worldSystem->get_seed());
+    limits.terrain_identity = identity;
+    limits.content_identity = identity;
+    limits.capture_boundary = {};
+    limits.capture_source = [this, caves = request.caves, identity](const auto& image) {
+        return PublicationSource(*m_worldSystem, image, caves, identity);
+    };
+    std::shared_ptr<const FarCommittedCache> cache;
+    if (AcquireFarCommittedCache({root, {supports}}, index.generation, limits, cache) !=
+            FarCacheError::None ||
+        !cache || !cache->source || !cache->source->RendererEligible())
+        return refuse("saved far committed cache acquisition refused; authority retained");
+    Persistence::EditedSourceCapture captured;
+    captured.committed = cache->source;
+    if (Persistence::CaptureEditedSourcePreview(
+            [this, &supports, &limits](std::size_t count,
+                                       const Persistence::EditedSourcePreviewVisitor& visitor) {
+                return VisitPublicationPreview(
+                    *m_worldSystem, {supports}, limits.source, count, visitor);
+            },
+            {supports},
+            limits.source,
+            captured.live,
+            captured.parked) != Persistence::EditedSourceError::None)
+        return refuse("saved far relevant live/parked authority admission or validation refused; "
+                      "authority retained");
+    state->next = std::move(next);
+    state->cache = std::move(cache);
+    state->captured = std::move(captured);
+    state->supports = std::move(supports);
+    state->limits = std::move(limits);
+    state->identity = identity;
+    m_farCapture = std::move(state);
+    return true;
+}
+
+bool GameSession::CaptureFarWorldPublication(const FarWorldPublicationRequest& request,
+                                             std::shared_ptr<const FarWorldPublication>& out,
+                                             std::string& diagnostic) {
+    diagnostic.clear();
+    const auto refuse = [this, &diagnostic](const char* reason) {
+        m_farCapture.reset();
+        diagnostic = reason;
+        return false;
+    };
+    if (m_editedSourceOwner != std::this_thread::get_id() || m_editedSourceCaptureActive ||
+        !IsSimulationTickBoundary()) {
+        // A busy owner/tick boundary is transient even if source metadata is unchanged.
+        m_farCaptureAttempt.reset();
+        return refuse(
+            "saved far capture boundary is busy; retry at the session publication boundary");
+    }
+    if (!m_worldSystem || !m_worldOpenError.empty() || m_transientWorld ||
+        !m_farWorldPersistenceSafety)
+        return refuse("saved far capture requires validated authority and a session boundary");
+    if (!request.world_epoch || request.wanted.empty() || request.wanted.size() > 320 ||
+        request.wanted.size() > request.limits.source.max_tiles || !request.max_history_keys ||
+        request.max_history_keys > 2048 ||
+        (request.caves != FarCaveMode::BandLimited && request.caves != FarCaveMode::BoxFiltered) ||
+        !std::isfinite(request.camera_y) || !std::isfinite(request.spans.min_y) ||
+        !std::isfinite(request.spans.max_y) || request.spans.min_y < -8192 ||
+        request.spans.max_y > 8192 || request.spans.min_y > request.spans.max_y ||
+        !request.source_memory ||
+        m_farPublicationSerial == std::numeric_limits<std::uint64_t>::max())
+        return refuse("saved far capture request is invalid or exceeds admission");
+    for (const auto& pool : request.memory)
+        if (!pool)
+            return refuse("saved far capture requires the renderer memory domain");
+    for (std::size_t i = 0; i < request.wanted.size(); ++i) {
+        FarVolumeTileKey key;
+        if (!ToFarVolumeTileKey(request.wanted[i], key) ||
+            (i && !(request.wanted[i - 1] < request.wanted[i])))
+            return refuse("saved far keys must be canonical and unique");
+    }
+    if (request.incremental) {
+        FarCaptureAttempt attempt;
+        attempt.source_token = m_worldSystem->far_world_publication_token();
+        attempt.session_change = m_farPublicationChange;
+        attempt.world_epoch = request.world_epoch;
+        attempt.caves = request.caves;
+        attempt.camera_y = request.camera_y;
+        attempt.wanted_count = request.wanted.size();
+        std::copy(request.wanted.begin(), request.wanted.end(), attempt.wanted.begin());
+        const auto same = [&] {
+            if (!m_farCaptureAttempt)
+                return false;
+            const auto& old = *m_farCaptureAttempt;
+            // Finish an immutable preview even if live chunks change during staging.
+            // Worldgen/policy/identity changes still cancel before further sampling.
+            return (old.source_token == attempt.source_token ||
+                    (m_farCapture && old.source_token[3] == attempt.source_token[3])) &&
+                   old.session_change == attempt.session_change &&
+                   old.world_epoch == attempt.world_epoch && old.caves == attempt.caves &&
+                   old.camera_y == attempt.camera_y && old.wanted_count == attempt.wanted_count &&
+                   std::equal(request.wanted.begin(), request.wanted.end(), old.wanted.begin());
+        }();
+        if (same && !m_farCapture)
+            return false; // Stable refusals wait for source change; generation completion is a
+                          // change.
+        if (!same) {
+            m_farCapture.reset();
+            m_farCaptureAttempt = attempt;
+        }
+    } else {
+        m_farCapture.reset();
+        m_farCaptureAttempt.reset();
+    }
+    struct Boundary {
+        bool& active;
+        explicit Boundary(bool& flag)
+            : active(flag) {
+            active = true;
+        }
+        ~Boundary() {
+            active = false;
+        }
+    } boundary(m_editedSourceCaptureActive);
+    try {
+        m_worldSystem->quiesce_streaming_jobs_for_save();
+        auto scope = m_worldSystem->try_acquire_worldgen_sample_scope();
+        if (!scope.owns_lock()) {
+            m_farCaptureAttempt.reset();
+            return refuse("saved far worldgen sampling is busy; retry at the next boundary");
+        }
+        if (!m_farCapture) {
+            if (!BeginFarWorldPublicationCapture(request, diagnostic))
+                return false;
+            if (request.incremental)
+                return false; // Source acquisition and volume sampling have separate frame budgets.
+        }
+        const auto state = m_farCapture;
+        const auto& next = state->next;
+        const auto& cache = state->cache;
+        const auto& captured = state->captured;
+        const auto identity = state->identity;
+        auto source =
+            PublicationSource(*m_worldSystem, *captured.committed, request.caves, identity);
+        source.use = FarFrozenUse::Preview;
+        source.render_only = true;
+        if (captured.live) {
+            source.live = PublicationTerrain(*captured.live);
+            source.live_water = PublicationWater(*captured.live);
+        }
+        if (captured.parked) {
+            source.parked = PublicationTerrain(*captured.parked);
+            source.parked_water = PublicationWater(*captured.parked);
+        }
+        const auto finish = request.incremental ? next->tiles.size() + 1 : request.wanted.size();
+        while (next->tiles.size() < finish) {
+            // Coarsest fallback first; canonical key order breaks ties deterministically.
+            const auto& key = request.wanted[request.wanted.size() - next->tiles.size() - 1];
+            auto position = std::lower_bound(
+                next->history.begin(),
+                next->history.end(),
+                key,
+                [](const auto& entry, const auto& wanted) { return entry.first < wanted; });
+            if (position == next->history.end() || position->first != key) {
+                if (next->history.size() == request.max_history_keys)
+                    return refuse("saved far keyed span history exhausted");
+                FarVolumeSpanLedger ledger;
+                if (!ledger.Reset(key))
+                    return refuse("saved far span key refused");
+                position = next->history.insert(position, {key, ledger});
+            }
+            auto& ledger = position->second;
+            const float camera_margin = request.incremental ? 16.0f : 0.0f;
+            if (!ledger.Extend({request.camera_y - camera_margin, request.camera_y + camera_margin},
+                               request.spans) ||
+                !ExtendPublicationInventory(
+                    captured.committed->Inventory(), key, request, ledger) ||
+                (captured.live &&
+                 !ExtendPublicationInventory(captured.live->Inventory(), key, request, ledger)) ||
+                (captured.parked &&
+                 !ExtendPublicationInventory(captured.parked->Inventory(), key, request, ledger)))
+                return refuse("saved far edited span admission refused");
+            for (const auto& receipt : cache->catalog.tiles)
+                if (receipt.key == key &&
+                    !ledger.Extend({static_cast<float>(receipt.edited_span.min_y),
+                                    static_cast<float>(receipt.edited_span.max_y)},
+                                   request.spans))
+                    return refuse("saved far durable span admission refused");
+            std::shared_ptr<const FarFrozenObservation> frozen;
+            if (request.incremental && m_farPublication &&
+                m_farPublication->world_epoch == next->world_epoch &&
+                m_farPublication->caves == next->caves &&
+                m_farPublication->save_root == next->save_root &&
+                m_farPublication->committed_generation == next->committed_generation &&
+                m_farPublication->source_token == next->source_token) {
+                const auto old = std::lower_bound(
+                    m_farPublication->tiles.begin(),
+                    m_farPublication->tiles.end(),
+                    key,
+                    [](const auto& tile, const auto& wanted) { return tile.key < wanted; });
+                if (old != m_farPublication->tiles.end() && old->key == key && old->observation &&
+                    old->observation->memory_pool() == request.memory[key.tier - 1].get() &&
+                    old->span.Intent() == ledger.Intent()) {
+                    next->tiles.push_back({key, ledger, old->observation});
+                    continue;
+                }
+            }
+            ++m_farObservationCaptureCount;
+            if (const auto* failure =
+                    CapturePublicationObservation(request, ledger, source, frozen))
+                return refuse(failure);
+            if (m_farPublication && m_farPublication->world_epoch == next->world_epoch &&
+                m_farPublication->caves == next->caves &&
+                m_farPublication->save_root == next->save_root) {
+                const auto old = std::lower_bound(
+                    m_farPublication->tiles.begin(),
+                    m_farPublication->tiles.end(),
+                    key,
+                    [](const auto& tile, const auto& wanted) { return tile.key < wanted; });
+                if (old != m_farPublication->tiles.end() && old->key == key && old->observation &&
+                    old->observation->memory_pool() == frozen->memory_pool() &&
+                    old->observation->content_identity() == frozen->content_identity() &&
+                    old->span.Intent() == ledger.Intent())
+                    frozen = old->observation;
+            }
+            next->tiles.push_back({key, ledger, std::move(frozen)});
+        }
+        if (next->tiles.size() != request.wanted.size())
+            return false; // Pending: keep the immutable source and prior serving publication.
+        std::sort(next->tiles.begin(), next->tiles.end(), [](const auto& a, const auto& b) {
+            return a.key < b.key;
+        });
+        auto policy = std::make_shared<FarEditedCachePolicy>();
+        policy->selection = std::move(state->supports);
+        policy->limits = state->limits;
+        // The save finalizer uses the same owner/worldgen boundary, installed
+        // after this synchronous capture has released its nonrecursive scope.
+        scope.unlock();
+        m_editedSourceCaptureActive = false;
+        SetFarEditedCachePolicy(std::move(policy));
+        m_farPublicationSerial = next->publication_serial;
+        m_farPublication = next;
+        out = next;
+        m_farCapture.reset();
+        diagnostic.clear();
+        return true;
+    } catch (const std::bad_alloc&) {
+        m_farCaptureAttempt.reset();
+        return refuse(
+            "saved far publication allocation is temporarily unavailable; retry required");
+    } catch (const std::exception&) {
+        return refuse("saved far publication allocation or authority failure");
+    }
 }
 
 Persistence::EditedSourceError
@@ -3486,16 +4190,30 @@ bool GameSession::SaveWorldStateTo(const std::filesystem::path& save_dir,
     // so the saved bytes are identical to the old publishing barrier's.
     m_worldSystem->quiesce_streaming_jobs_for_save();
 
-    if (m_activeRegionsEnabled) {
+    if (m_activeRegionsEnabled || m_farWorldPersistenceSafety) {
         // After the quiesce: a finishing generation worker can no longer erase the obligation.
         m_worldSystem->sync_water_authority();
     }
     WorldStreamingState state;
-    for (const auto& chunk : m_activeRegionsEnabled ? m_worldSystem->snapshot_authoritative_chunks()
-                                                    : m_worldSystem->snapshot_streamed_chunks()) {
+    for (const auto& chunk : (m_activeRegionsEnabled || m_farWorldPersistenceSafety)
+                                 ? m_worldSystem->snapshot_authoritative_chunks()
+                                 : m_worldSystem->snapshot_streamed_chunks()) {
         state.insert_chunk(chunk);
     }
     result.chunks_total = state.size();
+    const std::vector<ChunkID> dirty_ids = state.dirty_chunk_ids();
+    struct SaveObligations {
+        WorldStreamingState& state;
+        const std::vector<ChunkID>& dirty;
+        bool enabled;
+        bool succeeded;
+        ~SaveObligations() {
+            if (enabled && !succeeded)
+                for (const auto id : dirty)
+                    if (const auto chunk = state.find_chunk(id))
+                        chunk->mark_dirty_for_save();
+        }
+    } obligations{state, dirty_ids, m_farWorldPersistenceSafety, false};
 
     std::error_code source_path_error, target_path_error;
     const auto durable_directory = m_regionDurableDirectory.empty() && far_policy
@@ -3503,13 +4221,13 @@ bool GameSession::SaveWorldStateTo(const std::filesystem::path& save_dir,
                                        : m_regionDurableDirectory;
     const auto source_directory = fs::weakly_canonical(durable_directory, source_path_error);
     const auto target_directory = fs::weakly_canonical(save_dir, target_path_error);
-    if ((m_activeRegionsEnabled || far_policy) && !durable_directory.empty() &&
-        (source_path_error || target_path_error)) {
+    if ((m_activeRegionsEnabled || m_farWorldPersistenceSafety || far_policy) &&
+        !durable_directory.empty() && (source_path_error || target_path_error)) {
         RecordPersistenceSaveOutcome(false, elapsed_ms());
         return false;
     }
-    if ((m_activeRegionsEnabled || far_policy) && !durable_directory.empty() &&
-        source_directory != target_directory) {
+    if ((m_activeRegionsEnabled || m_farWorldPersistenceSafety || far_policy) &&
+        !durable_directory.empty() && source_directory != target_directory) {
         // Save-as must transfer distant disk-only obligations before switching their backing
         // directory. Stream one chunk at a time; live/parked state supersedes the old copy.
         Persistence::WorldSaveService copier;
@@ -3579,7 +4297,7 @@ bool GameSession::SaveWorldStateTo(const std::filesystem::path& save_dir,
     const auto acknowledge =
         Persistence::WorldSaveService::chunk_save_acknowledgement(state.snapshot_chunks());
     const auto defer_success = [this, &save_dir, &state, &elapsed_ms, &far_policy]() {
-        if (!m_activeRegionsEnabled && !far_policy)
+        if (!m_activeRegionsEnabled && !m_farWorldPersistenceSafety && !far_policy)
             return;
         std::vector<IVec3> covered;
         for (const auto& chunk : state.snapshot_chunks())
@@ -3588,6 +4306,15 @@ bool GameSession::SaveWorldStateTo(const std::filesystem::path& save_dir,
         const auto completed_ms = elapsed_ms();
         auto committed =
             [this, directory = save_dir, covered = std::move(covered), completed_ms]() {
+                if (GetFarWorldSaveRoot() != directory) {
+                    if (m_beforeWorldReplacement)
+                        m_beforeWorldReplacement();
+                    m_farEditedCachePolicy.reset();
+                    m_farPublication.reset();
+                    m_farCapture.reset();
+                    m_farCaptureAttempt.reset();
+                    ++m_farPublicationChange;
+                }
                 m_regionDurableDirectory = directory;
                 m_worldSystem->remember_durable_chunks(covered);
                 m_worldSystem->release_clean_parked_chunks();
@@ -3595,8 +4322,9 @@ bool GameSession::SaveWorldStateTo(const std::filesystem::path& save_dir,
             };
         if (auto* transaction = Persistence::SaveTransaction::active_for(save_dir))
             transaction->defer_until_commit(std::move(committed));
+        else
+            committed();
     };
-    const std::vector<ChunkID> dirty_ids = state.dirty_chunk_ids();
     result.chunks_dirty = dirty_ids.size();
     if (dirty_ids.empty()) {
         // No dirty CHUNKS. Without an existing snapshot this keeps a save-less, no-plant world
@@ -3604,7 +4332,8 @@ bool GameSession::SaveWorldStateTo(const std::filesystem::path& save_dir,
         const bool plants_ok =
             Persistence::WorldSaveService::save_plant_entities(plant_snapshot, save_dir, nullptr);
         const bool energy_ok = SaveEnergyFieldRecord(save_dir);
-        if ((m_activeRegionsEnabled || far_policy) && (!plants_ok || !energy_ok)) {
+        if ((m_activeRegionsEnabled || m_farWorldPersistenceSafety || far_policy) &&
+            (!plants_ok || !energy_ok)) {
             RecordPersistenceSaveOutcome(false, elapsed_ms());
             return false;
         }
@@ -3621,6 +4350,7 @@ bool GameSession::SaveWorldStateTo(const std::filesystem::path& save_dir,
         }
         if (!empty_ok)
             RecordPersistenceSaveOutcome(false, elapsed_ms());
+        obligations.succeeded = empty_ok;
         return empty_ok;
     }
 
@@ -3677,7 +4407,7 @@ bool GameSession::SaveWorldStateTo(const std::filesystem::path& save_dir,
     // persist the stateful energy layer alongside (null/
     // all-zero layer -> no file -> byte-identical; the plant discipline).
     const bool energy_ok = SaveEnergyFieldRecord(save_dir);
-    if ((m_activeRegionsEnabled || far_policy) && !energy_ok)
+    if ((m_activeRegionsEnabled || m_farWorldPersistenceSafety || far_policy) && !energy_ok)
         ok = false;
 
     for (const std::string& error : errors) {
@@ -3700,7 +4430,7 @@ bool GameSession::SaveWorldStateTo(const std::filesystem::path& save_dir,
                              result.chunks_dirty,
                              save_dir.string());
     }
-    if (m_activeRegionsEnabled) {
+    if (m_activeRegionsEnabled || m_farWorldPersistenceSafety) {
         if (!ok) {
             // The whole save failed after chunk dirty bits may have been acknowledged: re-arm
             // every chunk this save covered so the retry rewrites it (no revision bump).
@@ -3716,6 +4446,7 @@ bool GameSession::SaveWorldStateTo(const std::filesystem::path& save_dir,
     if (report) {
         *report = result;
     }
+    obligations.succeeded = ok;
     return ok;
 }
 
@@ -3759,13 +4490,13 @@ bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
             return wanted.contains(Chunk::calculate_id(coords));
         })
                                : std::function<bool(const IVec3&)>{};
-    const bool snapshot_present =
-        service.load_world(loaded,
-                           save_dir,
-                           errors,
-                           {},
-                           retain,
-                           m_activeRegionsEnabled ? &durable_inventory : nullptr);
+    const bool snapshot_present = service.load_world(
+        loaded,
+        save_dir,
+        errors,
+        {},
+        retain,
+        (m_activeRegionsEnabled || m_farWorldPersistenceSafety) ? &durable_inventory : nullptr);
     if (!snapshot_present && !errors.empty()) {
         m_worldOpenError = errors.front();
         if (!m_activeRegionsEnabled)
@@ -3797,6 +4528,10 @@ bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
     // never become an invitation to regenerate over authoritative disk bytes.
     constexpr std::size_t kFullSdfLattice =
         static_cast<std::size_t>(CHUNK_SIZE_X + 1) * (CHUNK_SIZE_Y + 1) * (CHUNK_SIZE_Z + 1);
+    if (m_farWorldPersistenceSafety && !m_activeRegionsEnabled) {
+        m_regionDurableDirectory = save_dir;
+        m_worldSystem->remember_durable_chunks(durable_inventory);
+    }
     for (const auto& chunk : loaded.snapshot_chunks()) {
         if (chunk && !chunk->sdf_data.empty() && chunk->sdf_data.size() != kFullSdfLattice) {
             m_worldOpenError = "corrupt world chunk SDF lattice";

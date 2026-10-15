@@ -675,8 +675,8 @@ bool ReadRegionFile(const std::filesystem::path& path,
         return false;
     }
     const std::uint16_t record_count = ReadU16(data + 6);
-    if (capture_limits && record_count > capture_limits->records) {
-        AddError(errors, "edited source record limit");
+    if (capture_limits && record_count > (capture_limits->scratch_bytes - bytes.size() * 4) / 512) {
+        AddError(errors, "edited source manifest scratch limit");
         return false;
     }
 
@@ -2357,8 +2357,7 @@ bool WorldSaveService::read_edited_source_region(
     const auto size = std::filesystem::file_size(region_file, ec);
     // Four copies cover stream growth, extracted bytes and compressed record storage.
     // Per-record control storage includes manifest, key validation and sort scratch.
-    if (ec || size > limits.file_bytes || size > limits.scratch_bytes / 4 ||
-        limits.records > (limits.scratch_bytes - size * 4) / 512) {
+    if (ec || size > limits.file_bytes || size > limits.scratch_bytes / 4) {
         AddError(errors, "edited source region unreadable or over byte limit");
         return false;
     }
@@ -2370,17 +2369,23 @@ bool WorldSaveService::read_edited_source_region(
     std::uint64_t raw_bytes = 0;
     std::uint64_t largest_record = 0;
     std::uint64_t source_samples = 0;
+    std::size_t selected_records = 0;
     constexpr std::uint64_t lattice_samples =
         static_cast<std::uint64_t>(CHUNK_SIZE_X + 1) * (CHUNK_SIZE_Y + 1) * (CHUNK_SIZE_Z + 1);
     for (const auto& record : records) {
-        if (record.lod_level != 0)
+        if (record.lod_level != 0 || (record.flags & kRecordFlagEdited) == 0)
             continue;
-        if ((record.flags & kRecordFlagEdited) != 0) {
-            if (lattice_samples > limits.authoritative_samples - source_samples) {
-                AddError(errors, "edited source sample work limit");
+        if (lattice_samples > limits.authoritative_samples - source_samples) {
+            AddError(errors, "edited source sample work limit");
+            return false;
+        }
+        source_samples += lattice_samples;
+        if (!limits.selected || limits.selected(Chunk::decode_id(record.id))) {
+            if (selected_records == limits.records) {
+                AddError(errors, "edited source record limit");
                 return false;
             }
-            source_samples += lattice_samples;
+            ++selected_records;
         }
         if (record.uncompressed_size > limits.decode_bytes - raw_bytes) {
             AddError(errors, "edited source decode limit");
@@ -2391,7 +2396,7 @@ bool WorldSaveService::read_edited_source_region(
             std::max(largest_record, static_cast<std::uint64_t>(record.uncompressed_size));
     }
     // JSON nodes and the decoded vectors coexist with input; admit a conservative envelope.
-    const auto control_bytes = static_cast<std::uint64_t>(limits.records) * 512;
+    const auto control_bytes = static_cast<std::uint64_t>(records.size()) * 512;
     if (largest_record > (limits.scratch_bytes - size * 4 - control_bytes) / 128) {
         AddError(errors, "edited source decode scratch limit");
         return false;
@@ -2406,7 +2411,7 @@ bool WorldSaveService::read_edited_source_region(
         return std::pair(a.lod_level, a.id) < std::pair(b.lod_level, b.id);
     });
     for (const auto& record : records) {
-        if (record.lod_level != 0)
+        if (record.lod_level != 0 || (record.flags & kRecordFlagEdited) == 0)
             continue;
         const auto chunk = DecodeChunkRecord(record, region_file, errors, strict_water);
         if (!chunk)
@@ -2438,7 +2443,7 @@ bool WorldSaveService::read_edited_source_region(
     }
     digest = Lod0Fingerprint(records);
     decoded_bytes = raw_bytes;
-    records_read = records.size();
+    records_read = selected_records;
     return true;
 }
 

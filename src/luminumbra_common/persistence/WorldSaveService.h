@@ -261,7 +261,8 @@ public:
         std::shared_ptr<Chunk> chunk;
         std::string error;
     };
-    // Owner-thread source capture. Budgets cover the entire region before decoding any chunk.
+    // Owner-thread source capture. Container bytes/control and decode budgets cover the whole
+    // region; records counts only selected authoritative lod-0 headers, never pristine caches.
     // The visitor borrows one validated chunk; it must copy any retained values.
     struct EditedRegionReadLimits {
         std::uint64_t file_bytes = 0;
@@ -269,6 +270,9 @@ public:
         std::uint64_t scratch_bytes = 0;
         std::size_t records = 0;
         std::uint64_t authoritative_samples = 0;
+        // Empty selects every authoritative record. Identity comes from the manifest, before
+        // decode.
+        std::function<bool(const IVec3&)> selected = {};
     };
     static bool
     read_edited_source_region(const std::filesystem::path& region_file,

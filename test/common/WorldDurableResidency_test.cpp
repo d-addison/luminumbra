@@ -14,13 +14,16 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <memory>
 #include <set>
 #include <string>
 #include <utility>
 #include <vector>
 
+#include "luminumbra_common/ai/ScentField.h"
 #include "luminumbra_common/components/CoreComponents.h"
+#include "luminumbra_common/components/InstinctComponents.h"
 #include "luminumbra_common/core/JobSystem.h"
 #include "luminumbra_common/core/WaterComponents.h"
 #include "luminumbra_common/persistence/WorldSaveService.h"
@@ -28,6 +31,7 @@
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 #include "luminumbra_common/systems/WaterSystem.h"
 #include "luminumbra_common/world/Chunk.h"
+#include "luminumbra_common/world/FarDensityQuantization.h"
 #include "luminumbra_common/world/GameSession.h"
 
 namespace fs = std::filesystem;
@@ -681,4 +685,826 @@ TEST(WorldDurableResidency, S7WaterExcludesParkedAuthorityEvenWhenOwnerAndSource
     EXPECT_EQ(water->regional_work().used_windows, 0u);
     EXPECT_TRUE(work.empty());
     EXPECT_TRUE(Contains(fx.world->snapshot_parked_chunks(), edited.get()));
+}
+
+namespace {
+using Luminumbra::World::FarTileKey;
+using Luminumbra::world::FarWorldPublication;
+using Luminumbra::world::FarWorldPublicationRequest;
+
+FarWorldPublicationRequest SavedPublicationRequest(std::span<const FarTileKey> keys) {
+    FarWorldPublicationRequest request;
+    request.world_epoch = 1;
+    request.wanted = keys;
+    request.limits = GameSession::FarWorldPublicationLimits();
+    request.source_memory =
+        std::make_shared<Luminumbra::World::FarVolumeMemoryPool>(2ull * 1024 * 1024 * 1024);
+    for (auto& pool : request.memory)
+        pool = std::make_shared<Luminumbra::World::FarVolumeMemoryPool>(256ull * 1024 * 1024);
+    return request;
+}
+
+std::shared_ptr<Chunk> AdoptPublicationEdit(DurableFixture& fixture, IVec3 coordinates) {
+    auto chunk = std::make_shared<Chunk>(coordinates);
+    chunk->sdf_data.assign(17 * 17 * 17, -3.0f);
+    chunk->material_data.assign(17 * 17 * 17, 7);
+    chunk->mark_sdf_loaded_or_edited();
+    chunk->mark_voxel_data_dirty();
+    chunk->set_state(ChunkState::Idle);
+    if (!fixture.world->adopt_streamed_chunk(chunk))
+        return {};
+    return chunk;
+}
+} // namespace
+
+TEST(SavedFarWorldPublication, SuccessfulLoadPublishesAndFailedOpenKeepsCurrentBinding) {
+    DurableFixture fx(false);
+    ASSERT_TRUE(fx.created) << fx.error;
+    fx.session->EnableFarWorldPersistenceSafety();
+    ASSERT_TRUE(fx.session->SaveWorld());
+    std::size_t replacements = 0;
+    fx.session->SetBeforeWorldReplacement([&] { ++replacements; });
+    const auto id = fx.session->GetMetadata().worldId;
+    ASSERT_TRUE(fx.session->LoadWorld(id));
+    EXPECT_EQ(replacements, 1u);
+    const std::array keys{FarTileKey{5, 0, 0}};
+    auto request = SavedPublicationRequest(keys);
+    std::shared_ptr<const FarWorldPublication> publication;
+    std::string diagnostic;
+    ASSERT_TRUE(fx.session->CaptureFarWorldPublication(request, publication, diagnostic))
+        << diagnostic;
+    ASSERT_TRUE(publication);
+    EXPECT_EQ(publication->save_root, fx.session->GetFarWorldSaveRoot());
+    auto* const world = fx.session->GetWorldSystem();
+    EXPECT_FALSE(fx.session->LoadWorld("missing_saved_world"));
+    EXPECT_EQ(fx.session->GetWorldSystem(), world);
+    EXPECT_EQ(replacements, 1u);
+    EXPECT_EQ(fx.session->GetMetadata().worldId, id);
+    const auto retained = publication;
+    ASSERT_TRUE(fx.session->CaptureFarWorldPublication(request, publication, diagnostic))
+        << diagnostic;
+    EXPECT_EQ(publication->committed_generation, retained->committed_generation);
+    EXPECT_GT(publication->publication_serial, retained->publication_serial);
+    ASSERT_EQ(publication->tiles.size(), retained->tiles.size());
+    EXPECT_EQ(publication->tiles[0].observation->content_identity(),
+              retained->tiles[0].observation->content_identity());
+}
+
+TEST(SavedFarWorldPublication, DirtyParkedPreviewAndUnparkPreserveAuthorityAndFingerprint) {
+    DurableFixture fx(false);
+    ASSERT_TRUE(fx.created) << fx.error;
+    fx.session->EnableFarWorldPersistenceSafety();
+    EXPECT_FALSE(fx.session->ActiveRegionsEnabled());
+    fx.Settle(fx.SpawnAnchor(), kSettleIterations);
+    const std::array keys{FarTileKey{1, 0, 0}};
+    auto request = SavedPublicationRequest(keys);
+    std::shared_ptr<const FarWorldPublication> pristine, live, parked, unparked;
+    std::string diagnostic;
+    ASSERT_TRUE(fx.session->CaptureFarWorldPublication(request, pristine, diagnostic))
+        << diagnostic;
+    const auto edited = fx.EditAtSpawnAndFindEdited();
+    ASSERT_TRUE(edited);
+    fx.Settle(fx.SpawnAnchor(), kSettleIterations);
+    ASSERT_TRUE(fx.session->CaptureFarWorldPublication(request, live, diagnostic)) << diagnostic;
+    ASSERT_EQ(pristine->tiles.size(), 1u);
+    ASSERT_EQ(live->tiles.size(), 1u);
+    EXPECT_NE(live->tiles[0].observation->content_identity(),
+              pristine->tiles[0].observation->content_identity());
+    const auto density = edited->sdf_data;
+    fx.Settle(fx.FarAnchor(), kSettleIterations);
+    ASSERT_TRUE(Contains(fx.world->snapshot_parked_chunks(), edited.get()));
+    ASSERT_TRUE(fx.session->CaptureFarWorldPublication(request, parked, diagnostic)) << diagnostic;
+    EXPECT_TRUE(edited->is_voxel_data_dirty());
+    EXPECT_EQ(edited->sdf_data, density);
+    EXPECT_EQ(live->committed_generation, parked->committed_generation);
+    ASSERT_EQ(live->tiles.size(), 1u);
+    ASSERT_EQ(parked->tiles.size(), 1u);
+    EXPECT_EQ(live->tiles[0].observation->content_identity(),
+              parked->tiles[0].observation->content_identity());
+    ASSERT_TRUE(fx.world->unpark_chunk(edited->get_id()));
+    ASSERT_TRUE(fx.session->CaptureFarWorldPublication(request, unparked, diagnostic))
+        << diagnostic;
+    EXPECT_EQ(unparked->tiles[0].observation->content_identity(),
+              parked->tiles[0].observation->content_identity());
+    EXPECT_EQ(fx.world->find_authoritative_chunk(edited->get_coords()), edited);
+}
+
+TEST(SavedFarWorldPublication, TallDeepAndReturningKeysKeepAffectedSpansMonotone) {
+    DurableFixture fx(false);
+    ASSERT_TRUE(fx.created) << fx.error;
+    fx.session->EnableFarWorldPersistenceSafety();
+    const std::array keys{FarTileKey{5, 0, 0}, FarTileKey{5, 1, 0}};
+    auto request = SavedPublicationRequest(keys);
+    std::shared_ptr<const FarWorldPublication> before, after;
+    std::string diagnostic;
+    ASSERT_TRUE(fx.session->CaptureFarWorldPublication(request, before, diagnostic)) << diagnostic;
+    ASSERT_TRUE(AdoptPublicationEdit(fx, {4, 40, 4}));
+    ASSERT_TRUE(AdoptPublicationEdit(fx, {4, -40, 4}));
+    ASSERT_TRUE(fx.session->CaptureFarWorldPublication(request, after, diagnostic)) << diagnostic;
+    ASSERT_EQ(before->tiles.size(), 2u);
+    ASSERT_EQ(after->tiles.size(), 2u);
+    const auto affected = after->tiles[0].span.Intent();
+    ASSERT_TRUE(affected);
+    ASSERT_TRUE(affected->extra_span);
+    EXPECT_LE(affected->extra_span->min_y, -640);
+    EXPECT_GE(affected->extra_span->max_y, 656);
+    EXPECT_EQ(before->tiles[1].span.Intent(), after->tiles[1].span.Intent());
+    const auto unchanged = after->tiles[1].observation->content_identity();
+    EXPECT_EQ(before->tiles[1].observation->content_identity(), unchanged);
+    // Leaving wanted must not reset this key's history when it returns.
+    request.wanted = std::span<const FarTileKey>(keys).subspan(1);
+    ASSERT_TRUE(fx.session->CaptureFarWorldPublication(request, after, diagnostic)) << diagnostic;
+    request.wanted = keys;
+    ASSERT_TRUE(fx.session->CaptureFarWorldPublication(request, after, diagnostic)) << diagnostic;
+    EXPECT_EQ(after->tiles[0].span.Intent(), affected);
+}
+
+TEST(SavedFarWorldPublication, UnavailableEditedAuthorityNeverSubstitutesPristine) {
+    DurableFixture fx(false);
+    ASSERT_TRUE(fx.created) << fx.error;
+    fx.session->EnableFarWorldPersistenceSafety();
+    const std::array keys{FarTileKey{5, 0, 0}};
+    auto request = SavedPublicationRequest(keys);
+    std::shared_ptr<const FarWorldPublication> publication;
+    std::string diagnostic;
+    ASSERT_TRUE(fx.session->CaptureFarWorldPublication(request, publication, diagnostic))
+        << diagnostic;
+    const auto retained = publication;
+    const auto bad = AdoptPublicationEdit(fx, {4, 0, 4});
+    ASSERT_TRUE(bad);
+    bad->sdf_data.pop_back();
+    EXPECT_FALSE(fx.session->CaptureFarWorldPublication(request, publication, diagnostic));
+    EXPECT_EQ(publication, retained);
+    EXPECT_FALSE(diagnostic.empty());
+    EXPECT_TRUE(bad->is_voxel_data_dirty());
+    EXPECT_EQ(fx.world->find_authoritative_chunk(bad->get_coords()), bad);
+}
+
+TEST(SavedFarWorldPublication, OutOfBudgetColumnEditRefusesAndReleasesReplacementCharges) {
+    DurableFixture fx(false);
+    ASSERT_TRUE(fx.created) << fx.error;
+    fx.session->EnableFarWorldPersistenceSafety();
+    const std::array keys{FarTileKey{5, 0, 0}};
+    auto request = SavedPublicationRequest(keys);
+    std::shared_ptr<const FarWorldPublication> publication;
+    std::string diagnostic;
+    ASSERT_TRUE(fx.session->CaptureFarWorldPublication(request, publication, diagnostic))
+        << diagnostic;
+    const auto retained = publication;
+    ASSERT_TRUE(AdoptPublicationEdit(fx, {4, 1000, 4}));
+    std::array<std::uint64_t, 5> charges{};
+    const auto source_charge = request.source_memory->used();
+    for (std::size_t i = 0; i < charges.size(); ++i)
+        charges[i] = request.memory[i]->used();
+    EXPECT_FALSE(fx.session->CaptureFarWorldPublication(request, publication, diagnostic));
+    EXPECT_EQ(publication, retained);
+    EXPECT_FALSE(diagnostic.empty());
+    EXPECT_EQ(request.source_memory->used(), source_charge);
+    for (std::size_t i = 0; i < charges.size(); ++i)
+        EXPECT_EQ(request.memory[i]->used(), charges[i]);
+}
+
+TEST(SavedFarWorldPublication, CaptureDoesNotChangeSimulationHashesOrScheduler) {
+    DurableFixture fx(false);
+    ASSERT_TRUE(fx.created) << fx.error;
+    fx.session->EnableFarWorldPersistenceSafety();
+    ASSERT_TRUE(AdoptPublicationEdit(fx, {4, 0, 4}));
+    const auto hash = fx.session->ComputeChunkStateHash();
+    const auto water = fx.world->debug_water_state_hash();
+    const auto schedule = fx.session->GetRegionSchedule();
+    const auto tick = fx.session->GetSimulationTickCount();
+    const std::array keys{FarTileKey{5, 0, 0}};
+    auto request = SavedPublicationRequest(keys);
+    std::shared_ptr<const FarWorldPublication> publication;
+    std::string diagnostic;
+    ASSERT_TRUE(fx.session->CaptureFarWorldPublication(request, publication, diagnostic))
+        << diagnostic;
+    EXPECT_EQ(fx.session->ComputeChunkStateHash(), hash);
+    EXPECT_EQ(fx.world->debug_water_state_hash().hash, water.hash);
+    EXPECT_EQ(fx.session->GetRegionSchedule(), schedule);
+    EXPECT_EQ(fx.session->GetSimulationTickCount(), tick);
+    EXPECT_FALSE(fx.session->ActiveRegionsEnabled());
+}
+
+TEST(SavedFarWorldPublication, WaterOnlyPreviewChangesCurrencyWithoutDurableGeneration) {
+    DurableFixture fx(false);
+    ASSERT_TRUE(fx.created) << fx.error;
+    fx.session->EnableFarWorldPersistenceSafety();
+    const auto chunk = AdoptPublicationEdit(fx, {4, 0, 4});
+    ASSERT_TRUE(chunk);
+    chunk->has_water_sim.store(true);
+    chunk->current_water_resolution.store(8);
+    chunk->water_depth_mm.assign(64, 1000);
+    chunk->water_bed_mm.assign(64, 100000);
+    chunk->water_edge_flux.assign(128, 0);
+    chunk->water_src_mm.assign(64, 0);
+    chunk->water_level_data.assign(64, 101);
+    chunk->water_rest_level.assign(64, 101);
+    chunk->water_sim_terrain_height.assign(64, 100);
+    chunk->water_flow_data.assign(64, Luminumbra::Vec2(0));
+    chunk->mark_water_state_dirty();
+    const std::array keys{FarTileKey{5, 0, 0}};
+    auto request = SavedPublicationRequest(keys);
+    std::shared_ptr<const FarWorldPublication> wet, legacy, dry;
+    std::string diagnostic;
+    ASSERT_TRUE(fx.session->CaptureFarWorldPublication(request, wet, diagnostic)) << diagnostic;
+    ASSERT_EQ(wet->tiles.size(), 1u);
+    const auto water = wet->tiles[0].observation->WaterSample(0, 64, 64);
+    ASSERT_TRUE(water);
+    EXPECT_TRUE(water->wet);
+    EXPECT_FLOAT_EQ(water->surface_height, 101);
+    const auto terrain = chunk->sdf_data;
+    // Older saves retain authoritative float mirrors without integer grids.
+    chunk->water_depth_mm.clear();
+    chunk->water_bed_mm.clear();
+    chunk->water_edge_flux.clear();
+    ASSERT_TRUE(fx.session->CaptureFarWorldPublication(request, legacy, diagnostic)) << diagnostic;
+    ASSERT_EQ(legacy->tiles.size(), 1u);
+    EXPECT_EQ(wet->tiles[0].observation->content_identity(),
+              legacy->tiles[0].observation->content_identity());
+    EXPECT_TRUE(chunk->water_depth_mm.empty());
+    chunk->water_bed_mm.assign(64, 100000);
+    chunk->water_edge_flux.assign(128, 0);
+    chunk->water_depth_mm.assign(64, 0);
+    chunk->water_level_data.assign(64, 100);
+    chunk->mark_water_state_dirty();
+    ASSERT_TRUE(fx.session->CaptureFarWorldPublication(request, dry, diagnostic)) << diagnostic;
+    ASSERT_EQ(dry->tiles.size(), 1u);
+    const auto dry_water = dry->tiles[0].observation->WaterSample(0, 64, 64);
+    ASSERT_TRUE(dry_water);
+    EXPECT_FALSE(dry_water->wet);
+    EXPECT_NE(wet->tiles[0].observation->content_identity(),
+              dry->tiles[0].observation->content_identity());
+    EXPECT_EQ(wet->committed_generation, dry->committed_generation);
+    EXPECT_EQ(chunk->sdf_data, terrain);
+    EXPECT_TRUE(chunk->is_water_state_dirty());
+}
+
+TEST(SavedFarWorldPublication, FlagOffSafetyPreservesLegacySaveBytesAndLoadsWithoutCatalog) {
+    DurableFixture legacy(false), safe(false);
+    ASSERT_TRUE(legacy.created) << legacy.error;
+    ASSERT_TRUE(safe.created) << safe.error;
+    safe.session->EnableFarWorldPersistenceSafety();
+    ASSERT_TRUE(AdoptPublicationEdit(legacy, {4, 0, 4}));
+    ASSERT_TRUE(AdoptPublicationEdit(safe, {4, 0, 4}));
+    EXPECT_EQ(legacy.session->ComputeChunkStateHash(), safe.session->ComputeChunkStateHash());
+    ASSERT_TRUE(legacy.session->SaveWorldState());
+    ASSERT_TRUE(safe.session->SaveWorldState());
+    using Service = Luminumbra::Persistence::WorldSaveService;
+    const auto legacy_root = legacy.session->GetWorldSaveDir();
+    const auto safe_root = safe.session->GetWorldSaveDir();
+    const auto bytes =
+        Luminumbra::TestSupport::FarCacheRead(Service::region_file_path(legacy_root, 0, 0));
+    ASSERT_FALSE(bytes.empty());
+    EXPECT_EQ(bytes,
+              Luminumbra::TestSupport::FarCacheRead(Service::region_file_path(safe_root, 0, 0)));
+    EXPECT_FALSE(Luminumbra::Persistence::snapshot_index_exists(safe_root));
+    EXPECT_FALSE(fs::exists(safe_root / "far"));
+    ASSERT_TRUE(safe.session->LoadWorld(safe.session->GetMetadata().worldId));
+    const auto loaded = safe.session->GetWorldSystem()->find_authoritative_chunk({4, 0, 4});
+    ASSERT_TRUE(loaded);
+    EXPECT_EQ(loaded->sdf_data.front(), -3);
+}
+
+TEST(SavedFarWorldPublication, SafetyLimitAndSaveFailureKeepDirtyObligationsWithoutActiveRegions) {
+    DurableFixture fx(false);
+    ASSERT_TRUE(fx.created) << fx.error;
+    fx.session->EnableFarWorldPersistenceSafety();
+    fx.session->SetParkedBytesLimit(1);
+    fx.Settle(fx.SpawnAnchor(), kSettleIterations);
+    const auto edited = fx.EditAtSpawnAndFindEdited();
+    ASSERT_TRUE(edited);
+    fx.Settle(fx.FarAnchor(), kSettleIterations);
+    EXPECT_TRUE(fx.world->find_streamed_chunk(edited->get_coords()));
+    EXPECT_TRUE(fx.session->PersistenceSaveRequested());
+    const auto blocked = fx.session->GetWorldSaveDir() / "blocked_destination";
+    {
+        std::ofstream file(blocked);
+        file << "occupied";
+    }
+    EXPECT_FALSE(fx.session->SaveWorldStateTo(blocked));
+    EXPECT_TRUE(edited->is_voxel_data_dirty());
+    EXPECT_EQ(fx.world->find_authoritative_chunk(edited->get_coords()), edited);
+    EXPECT_FALSE(fx.session->ActiveRegionsEnabled());
+}
+
+TEST(SavedFarWorldPublication, StaleTerrainAndWaterRevisionsCannotClaimLiveOwnership) {
+    DurableFixture fx(false);
+    ASSERT_TRUE(fx.created) << fx.error;
+    fx.session->EnableFarWorldPersistenceSafety();
+    fx.Settle(fx.SpawnAnchor(), kSettleIterations);
+    std::shared_ptr<Chunk> current;
+    for (const auto& chunk : fx.world->snapshot_streamed_chunks())
+        if (chunk && fx.world->far_live_mesh_current(*chunk, false) &&
+            fx.world->far_live_mesh_current(*chunk, true)) {
+            current = chunk;
+            break;
+        }
+    ASSERT_TRUE(current);
+    current->mark_water_state_dirty();
+    EXPECT_TRUE(fx.world->far_live_mesh_current(*current, false));
+    EXPECT_FALSE(fx.world->far_live_mesh_current(*current, true));
+    current->mark_voxel_data_dirty();
+    EXPECT_FALSE(fx.world->far_live_mesh_current(*current, false));
+}
+
+TEST(SavedFarWorldPublication, LegacySafetyLoadAcceptsScentDepositsAndMatchesLegacyHashes) {
+    DurableFixture fixture(false);
+    ASSERT_TRUE(fixture.created) << fixture.error;
+    ASSERT_TRUE(fixture.session->SaveWorldState());
+    const auto root = fixture.session->GetWorldSaveDir();
+    EXPECT_FALSE(Luminumbra::Persistence::snapshot_index_exists(root));
+    EXPECT_FALSE(fs::exists(root / "far"));
+    GameSession safe;
+    safe.SetJobSystem(&fixture.jobs);
+    safe.SetRootPath(fixture.root.root_string());
+    safe.EnableFarWorldPersistenceSafety();
+    const auto id = fixture.session->GetMetadata().worldId;
+    ASSERT_TRUE(fixture.session->LoadWorld(id)); // Original flag-off load path.
+    ASSERT_TRUE(safe.LoadWorld(id));             // Candidate publication with safety enabled.
+    EXPECT_FALSE(safe.ActiveRegionsEnabled());
+    for (auto* session : {fixture.session.get(), &safe}) {
+        const auto entity = session->GetRegistry().create();
+        session->GetRegistry()
+            .emplace<Luminumbra::Components::TransformComponent>(entity)
+            .position = session->GetMetadata().spawnPoint;
+        session->GetRegistry()
+            .emplace<Luminumbra::Components::ScentSenseComponent>(entity)
+            .channel = 0;
+        auto* scent = session->GetScentField();
+        ASSERT_TRUE(scent);
+        EXPECT_TRUE(scent->SimulationCellAllowed(64, 64));
+        scent->Deposit(0, 64, 64, 7.5);
+        scent->Deposit(1, 63, 64, 2.25);
+        EXPECT_DOUBLE_EQ(scent->Sample(0, 64, 64), 7.5);
+        EXPECT_DOUBLE_EQ(scent->Sample(1, 63, 64), 2.25);
+    }
+    for (int tick = 0; tick < 4; ++tick) {
+        EXPECT_FALSE(safe.ComputeScentSubHash().empty());
+        EXPECT_EQ(safe.ComputeScentSubHash(), fixture.session->ComputeScentSubHash());
+        EXPECT_EQ(safe.ComputeChunkStateHash(), fixture.session->ComputeChunkStateHash());
+        EXPECT_EQ(safe.GetWorldSystem()->debug_water_state_hash().hash,
+                  fixture.session->GetWorldSystem()->debug_water_state_hash().hash);
+        EXPECT_EQ(safe.GetRegionSchedule(), fixture.session->GetRegionSchedule());
+        for (auto* session : {fixture.session.get(), &safe})
+            ASSERT_EQ(session->TickSimulation(session->GetSimulationClock().fixed_dt()), 1u);
+    }
+    for (int ch = 0; ch < safe.GetScentField()->channels(); ++ch)
+        for (int z = 0; z < safe.GetScentField()->height(); ++z)
+            for (int x = 0; x < safe.GetScentField()->width(); ++x)
+                EXPECT_DOUBLE_EQ(safe.GetScentField()->Sample(ch, x, z),
+                                 fixture.session->GetScentField()->Sample(ch, x, z));
+}
+
+TEST(SavedFarWorldPublication,
+     CommittedRecordAdmissionCountsSelectedAuthorityWithoutPristineDecode) {
+    DurableFixture fixture(false);
+    ASSERT_TRUE(fixture.created) << fixture.error;
+    fixture.session->EnableFarWorldPersistenceSafety();
+    const auto selected = AdoptPublicationEdit(fixture, {4, 0, 4});
+    const auto other = AdoptPublicationEdit(fixture, {20, 0, 4});
+    ASSERT_TRUE(selected);
+    ASSERT_TRUE(other);
+    auto pristine = std::make_shared<Chunk>(IVec3(6, 0, 4));
+    fixture.world->GenerateChunkData(*pristine, 4);
+    pristine->set_state(ChunkState::Idle);
+    ASSERT_TRUE(fixture.world->adopt_streamed_chunk(pristine));
+    ASSERT_TRUE(fixture.session->SaveWorldState());
+    using Service = Luminumbra::Persistence::WorldSaveService;
+    const auto path = Service::region_file_path(fixture.session->GetWorldSaveDir(), 0, 0);
+    const auto limits = GameSession::FarWorldPublicationLimits().source;
+    Service::EditedRegionReadLimits read_limits{limits.max_file_bytes,
+                                                limits.max_decode_bytes,
+                                                limits.max_scratch_bytes,
+                                                1,
+                                                limits.max_samples};
+    std::size_t records = 0, visits = 0, classifications = 0;
+    std::uint64_t decoded = 0;
+    Luminumbra::Persistence::MemberDigest digest;
+    const auto read = [&] {
+        return Service::read_edited_source_region(
+            path,
+            read_limits,
+            false,
+            [&](const Chunk&, std::uint64_t) {
+                ++visits;
+                return true;
+            },
+            digest,
+            decoded,
+            records);
+    };
+    EXPECT_FALSE(read()); // Default callers still select every edited header.
+    EXPECT_EQ(visits, 0u);
+    read_limits.selected = [&](const IVec3& coords) {
+        ++classifications;
+        return coords == selected->get_coords();
+    };
+    ASSERT_TRUE(read());
+    EXPECT_EQ(records, 1u);
+    EXPECT_EQ(classifications, 2u); // Pristine headers never even enter selection.
+    const std::array keys{FarTileKey{1, 0, 0}};
+    auto request = SavedPublicationRequest(keys);
+    request.limits.source.max_records = 1;
+    std::shared_ptr<const FarWorldPublication> publication;
+    std::string diagnostic;
+    ASSERT_TRUE(fixture.session->CaptureFarWorldPublication(request, publication, diagnostic))
+        << diagnostic;
+    ASSERT_TRUE(publication);
+    EXPECT_EQ(visits, 2u); // Unselected edited payloads still undergo validation.
+    std::vector<Service::ContainerRecord> raw;
+    ASSERT_TRUE(Service::read_container_records(path, raw));
+    std::uint64_t edited_bytes = 0;
+    for (auto& record : raw) {
+        if (record.id == pristine->get_id())
+            record.payload = "invalid cached JSON";
+        else
+            edited_bytes += record.payload.size();
+    }
+    EXPECT_EQ(decoded, edited_bytes);
+    ASSERT_TRUE(Service::upsert_container_records(path, raw));
+    EXPECT_TRUE(read()); // The manifest already proves the damaged cache is pristine.
+    for (auto& record : raw)
+        if (record.id == other->get_id())
+            record.payload = "invalid authoritative JSON";
+    ASSERT_TRUE(Service::upsert_container_records(path, raw));
+    EXPECT_FALSE(read()); // Unavailable edited data stays an error, even outside selection.
+}
+
+TEST(SavedFarWorldPublication, IncrementalTokenPollVisitsNoChunksAndTracksEveryMutation) {
+    DurableFixture fixture(false);
+    ASSERT_TRUE(fixture.created) << fixture.error;
+    fixture.session->EnableFarWorldPersistenceSafety();
+    for (int x = 0; x < 1875; ++x) {
+        auto chunk = std::make_shared<Chunk>(IVec3(x, 0, 40));
+        chunk->set_state(ChunkState::Idle);
+        ASSERT_TRUE(fixture.world->adopt_streamed_chunk(chunk));
+    }
+    const auto poll = [&] {
+        const auto work = Chunk::debug_authority_read_count();
+        const auto token = fixture.world->far_world_publication_token();
+        EXPECT_EQ(Chunk::debug_authority_read_count() - work, 0u);
+        return token;
+    };
+    auto previous = poll();
+    const auto changed = [&] {
+        const auto next = poll();
+        EXPECT_NE(next, previous);
+        previous = next;
+        for (int frame = 0; frame < 120; ++frame)
+            EXPECT_EQ(poll(), previous);
+    };
+    auto chunk = std::make_shared<Chunk>(IVec3(4, 0, 4));
+    chunk->mark_sdf_loaded_or_edited();
+    chunk->set_state(ChunkState::Idle);
+    ASSERT_TRUE(fixture.world->adopt_streamed_chunk(chunk));
+    changed();
+    chunk->mark_voxel_data_dirty();
+    changed();
+    chunk->mark_voxel_data_dirty(); // Already dirty: the revision must still notify.
+    changed();
+    chunk->clear_voxel_data_dirty();
+    changed();
+    chunk->mark_dirty_for_save();
+    changed();
+    chunk->clear_voxel_data_dirty_after_generation();
+    changed();
+    chunk->mark_water_state_dirty();
+    changed();
+    chunk->mark_water_state_dirty();
+    changed();
+    chunk->clear_water_state_dirty();
+    changed();
+    chunk->mark_sdf_generated_current_params();
+    changed();
+    chunk->mark_sdf_loaded_or_edited();
+    changed();
+    chunk->set_water_authority();
+    changed();
+    chunk->mark_sdf_generated_current_params(); // Sticky water authority remains observed.
+    changed();
+    chunk->set_state(ChunkState::Loading);
+    changed();
+    EXPECT_GT(previous[4], 0u);
+    ASSERT_TRUE(chunk->try_set_state(ChunkState::Loading, ChunkState::Idle));
+    changed();
+    EXPECT_EQ(previous[4], 0u);
+    chunk->set_state(ChunkState::Loading);
+    changed();
+    chunk->set_state(ChunkState::Idle);
+    changed(); // Both setters detect loading completion without a residency scan.
+    fixture.world->clear_world(fixture.physics);
+    changed();
+    chunk->mark_water_state_dirty(); // Detached retained handles cannot invalidate this world.
+    EXPECT_EQ(poll(), previous);
+}
+
+TEST(SavedFarWorldPublication, IncrementalTokenTracksParkUnparkAndDurableRelease) {
+    DurableFixture fixture(false);
+    ASSERT_TRUE(fixture.created) << fixture.error;
+    fixture.session->EnableFarWorldPersistenceSafety();
+    fixture.Settle(fixture.SpawnAnchor(), kSettleIterations);
+    const auto edited = fixture.EditAtSpawnAndFindEdited();
+    ASSERT_TRUE(edited);
+    fixture.Settle(fixture.SpawnAnchor(), kSettleIterations);
+    auto previous = fixture.world->far_world_publication_token();
+    fixture.Settle(fixture.FarAnchor(), kSettleIterations);
+    ASSERT_TRUE(Contains(fixture.world->snapshot_parked_chunks(), edited.get()));
+    const auto parked = fixture.world->far_world_publication_token();
+    EXPECT_GT(parked[1], previous[1]);
+    edited->mark_water_state_dirty();
+    EXPECT_GT(fixture.world->far_world_publication_token()[0], parked[0]);
+    previous = fixture.world->far_world_publication_token();
+    ASSERT_TRUE(fixture.world->unpark_chunk(edited->get_id()));
+    EXPECT_GT(fixture.world->far_world_publication_token()[1], previous[1]);
+    fixture.Settle(fixture.FarAnchor(), kSettleIterations);
+    ASSERT_TRUE(Contains(fixture.world->snapshot_parked_chunks(), edited.get()));
+    previous = fixture.world->far_world_publication_token();
+    ASSERT_TRUE(fixture.session->SaveWorldState());
+    EXPECT_FALSE(Contains(fixture.world->snapshot_parked_chunks(), edited.get()));
+    EXPECT_GT(fixture.world->far_world_publication_token()[1], previous[1]);
+    previous = fixture.world->far_world_publication_token();
+    edited->mark_voxel_data_dirty();
+    EXPECT_EQ(fixture.world->far_world_publication_token(), previous);
+    ASSERT_TRUE(fixture.world->restore_authoritative_chunk(edited->get_coords()));
+    EXPECT_GT(fixture.world->far_world_publication_token()[1], previous[1]);
+    const auto work = Chunk::debug_authority_read_count();
+    previous = fixture.world->far_world_publication_token();
+    for (int frame = 0; frame < 120; ++frame)
+        EXPECT_EQ(fixture.world->far_world_publication_token(), previous);
+    EXPECT_EQ(Chunk::debug_authority_read_count(), work);
+}
+
+TEST(SavedFarWorldPublication, UnchangedFramesDoNoCaptureAndChangesCaptureOnce) {
+    DurableFixture fixture(false);
+    ASSERT_TRUE(fixture.created) << fixture.error;
+    fixture.session->EnableFarWorldPersistenceSafety();
+    const std::array keys{FarTileKey{5, 0, 0}};
+    auto request = SavedPublicationRequest(keys);
+    request.incremental = true;
+    std::shared_ptr<const FarWorldPublication> publication;
+    std::string diagnostic;
+    const auto finish = [&] {
+        for (std::size_t frame = 0; frame <= request.wanted.size(); ++frame) {
+            if (fixture.session->CaptureFarWorldPublication(request, publication, diagnostic))
+                return true;
+            if (!diagnostic.empty())
+                return false;
+        }
+        return false;
+    };
+    ASSERT_TRUE(finish()) << diagnostic;
+    const auto unchanged = [&] {
+        const auto captures = fixture.session->FarWorldCaptureCount();
+        const auto observations = fixture.session->FarWorldObservationCaptureCount();
+        const auto attempts = request.source_memory->attempts();
+        const auto retained = publication;
+        const auto chunk_work = Chunk::debug_authority_read_count();
+        for (int frame = 0; frame < 120; ++frame) {
+            EXPECT_FALSE(
+                fixture.session->CaptureFarWorldPublication(request, publication, diagnostic));
+            EXPECT_TRUE(diagnostic.empty());
+            EXPECT_EQ(publication, retained);
+        }
+        EXPECT_EQ(Chunk::debug_authority_read_count(), chunk_work);
+        EXPECT_EQ(fixture.session->FarWorldCaptureCount(), captures);
+        EXPECT_EQ(fixture.session->FarWorldObservationCaptureCount(), observations);
+        EXPECT_EQ(request.source_memory->attempts(), attempts);
+    };
+    unchanged();
+    const auto before = fixture.session->FarWorldCaptureCount();
+    const auto edited = AdoptPublicationEdit(fixture, {4, 0, 4});
+    ASSERT_TRUE(edited);
+    ASSERT_TRUE(finish()) << diagnostic;
+    EXPECT_EQ(fixture.session->FarWorldCaptureCount(), before + 1);
+    unchanged();
+    // A direct water writer changes the metadata token without a regional scheduler.
+    const auto before_water = fixture.session->FarWorldCaptureCount();
+    edited->mark_water_state_dirty();
+    ASSERT_TRUE(finish()) << diagnostic;
+    EXPECT_EQ(fixture.session->FarWorldCaptureCount(), before_water + 1);
+    unchanged();
+    // Pristine generation publication is a transient refusal, even though it changes
+    // neither edited revisions nor the camera/wanted inputs.
+    auto loading = std::make_shared<Chunk>(IVec3(6, 0, 4));
+    fixture.world->GenerateChunkData(*loading, 4);
+    loading->set_state(ChunkState::Idle);
+    ASSERT_TRUE(fixture.world->adopt_streamed_chunk(loading));
+    loading->set_state(ChunkState::Loading);
+    ASSERT_FALSE(loading->needs_authority());
+    const auto loading_token = fixture.world->far_world_publication_token();
+    const auto before_loading = fixture.session->FarWorldCaptureCount();
+    EXPECT_FALSE(finish());
+    EXPECT_NE(diagnostic.find("generation publication is pending"), std::string::npos);
+    EXPECT_EQ(fixture.session->FarWorldCaptureCount(), before_loading + 1);
+    unchanged(); // No repeated quiescing/capture while the same generation remains pending.
+    loading->set_state(ChunkState::Idle);
+    const auto completed_token = fixture.world->far_world_publication_token();
+    EXPECT_EQ(loading_token[0], completed_token[0]);
+    EXPECT_GT(completed_token[1], loading_token[1]);
+    EXPECT_EQ(loading_token[2], completed_token[2]);
+    EXPECT_EQ(loading_token[3], completed_token[3]);
+    EXPECT_EQ(completed_token[4], 0u);
+    ASSERT_TRUE(finish()) << diagnostic;
+    EXPECT_EQ(fixture.session->FarWorldCaptureCount(), before_loading + 2);
+    unchanged();
+    // Refusal is also remembered. Repair is an explicit source change and retries once.
+    edited->sdf_data.pop_back();
+    edited->mark_voxel_data_dirty();
+    const auto before_refusal = fixture.session->FarWorldCaptureCount();
+    EXPECT_FALSE(finish());
+    EXPECT_FALSE(diagnostic.empty());
+    EXPECT_EQ(fixture.session->FarWorldCaptureCount(), before_refusal + 1);
+    unchanged();
+    edited->sdf_data.push_back(-3.0f);
+    edited->mark_voxel_data_dirty();
+    ASSERT_TRUE(finish()) << diagnostic;
+    EXPECT_EQ(fixture.session->FarWorldCaptureCount(), before_refusal + 2);
+    unchanged();
+    // A real admission refusal also suppresses every unchanged frame's retry.
+    const auto before_admission = fixture.session->FarWorldCaptureCount();
+    request.source_memory->RefuseAttemptsFrom(request.source_memory->attempts());
+    edited->mark_voxel_data_dirty();
+    EXPECT_FALSE(finish());
+    EXPECT_FALSE(diagnostic.empty());
+    EXPECT_EQ(fixture.session->FarWorldCaptureCount(), before_admission + 1);
+    unchanged();
+    request.source_memory->RefuseAttemptsFrom(std::numeric_limits<std::uint64_t>::max());
+    unchanged(); // Available memory alone does not cause frame-by-frame polling.
+    edited->mark_voxel_data_dirty();
+    ASSERT_TRUE(finish()) << diagnostic;
+    EXPECT_EQ(fixture.session->FarWorldCaptureCount(), before_admission + 2);
+    unchanged();
+    // A wanted-set change shares the old key's observation without resampling it.
+    const auto old_observation = publication->tiles[0].observation;
+    const auto observations = fixture.session->FarWorldObservationCaptureCount();
+    const std::array expanded{FarTileKey{5, 0, 0}, FarTileKey{5, 1, 0}};
+    request.wanted = expanded;
+    ASSERT_TRUE(finish()) << diagnostic;
+    ASSERT_EQ(publication->tiles.size(), expanded.size());
+    EXPECT_EQ(publication->tiles[0].observation, old_observation);
+    EXPECT_EQ(fixture.session->FarWorldObservationCaptureCount(), observations + 1);
+    unchanged();
+}
+
+TEST(SavedFarWorldPublication, SimultaneousAdjacentWaterChangesRetryCaptureOnce) {
+    DurableFixture fixture(false);
+    ASSERT_TRUE(fixture.created) << fixture.error;
+    fixture.session->EnableFarWorldPersistenceSafety();
+    const auto left = AdoptPublicationEdit(fixture, {4, 0, 4});
+    const auto right = AdoptPublicationEdit(fixture, {5, 0, 4});
+    ASSERT_TRUE(left);
+    ASSERT_TRUE(right);
+    ASSERT_EQ(left->voxel_revision(), right->voxel_revision());
+    for (const auto& chunk : {left, right}) {
+        chunk->has_water_sim.store(true);
+        chunk->current_water_resolution.store(8);
+        chunk->water_depth_mm.assign(64, 1000);
+        chunk->water_bed_mm.assign(64, 100000);
+        chunk->water_edge_flux.assign(128, 0);
+        chunk->water_src_mm.assign(64, 0);
+        chunk->water_level_data.assign(64, 101);
+        chunk->water_rest_level.assign(64, 101);
+        chunk->water_sim_terrain_height.assign(64, 100);
+        chunk->water_flow_data.assign(64, Luminumbra::Vec2(0));
+        chunk->mark_water_state_dirty();
+        chunk->mark_water_state_dirty();
+        ASSERT_EQ(chunk->water_revision(), 2u);
+        ASSERT_TRUE(chunk->is_voxel_data_dirty());
+        ASSERT_TRUE(chunk->is_water_state_dirty());
+    }
+    const std::array keys{FarTileKey{5, 0, 0}};
+    auto request = SavedPublicationRequest(keys);
+    request.incremental = true;
+    std::shared_ptr<const FarWorldPublication> publication;
+    std::string diagnostic;
+    const auto finish = [&] {
+        for (std::size_t frame = 0; frame <= request.wanted.size(); ++frame) {
+            if (fixture.session->CaptureFarWorldPublication(request, publication, diagnostic))
+                return true;
+            if (!diagnostic.empty())
+                return false;
+        }
+        return false;
+    };
+    ASSERT_TRUE(finish()) << diagnostic;
+    const auto previous = publication;
+    const auto token = fixture.world->far_world_publication_token();
+    const auto captures = fixture.session->FarWorldCaptureCount();
+    for (const auto& chunk : {left, right}) {
+        chunk->water_depth_mm.assign(64, 2000);
+        chunk->water_level_data.assign(64, 102);
+        chunk->mark_water_state_dirty();
+        ASSERT_EQ(chunk->water_revision(), 3u);
+    }
+    const auto changed = fixture.world->far_world_publication_token();
+    EXPECT_NE(changed[0], token[0]);
+    // Neither dirty membership nor durable/worldgen/loading state changed.
+    EXPECT_TRUE(std::equal(token.begin() + 1, token.end(), changed.begin() + 1));
+    ASSERT_TRUE(finish()) << diagnostic;
+    EXPECT_EQ(fixture.session->FarWorldCaptureCount(), captures + 1);
+    EXPECT_GT(publication->publication_serial, previous->publication_serial);
+    EXPECT_EQ(publication->committed_generation, previous->committed_generation);
+    EXPECT_NE(publication->tiles[0].observation->content_identity(),
+              previous->tiles[0].observation->content_identity());
+    for (int frame = 0; frame < 120; ++frame) {
+        EXPECT_FALSE(fixture.session->CaptureFarWorldPublication(request, publication, diagnostic));
+        EXPECT_TRUE(diagnostic.empty());
+    }
+    EXPECT_EQ(fixture.session->FarWorldCaptureCount(), captures + 1);
+}
+
+TEST(SavedFarWorldPublication,
+     PreviewAdmissionCountsOnlyRelevantAuthorityAndKeepsUnavailableEdits) {
+    DurableFixture fixture(false);
+    ASSERT_TRUE(fixture.created) << fixture.error;
+    fixture.session->EnableFarWorldPersistenceSafety();
+    const std::array keys{FarTileKey{5, 0, 0}};
+    auto request = SavedPublicationRequest(keys);
+    request.limits.source.max_records = 1;
+    const auto selected = AdoptPublicationEdit(fixture, {4, 0, 4});
+    ASSERT_TRUE(selected);
+    // More authority than the record allowance, but outside every wanted support/halo.
+    // Malformed unrelated payloads must not consume selected-authority admission.
+    for (const IVec3 coords : {IVec3(20000, 0, 0), IVec3(20001, 0, 0)}) {
+        auto outside = AdoptPublicationEdit(fixture, coords);
+        ASSERT_TRUE(outside);
+        outside->sdf_data.clear();
+    }
+    std::shared_ptr<const FarWorldPublication> publication;
+    std::string diagnostic;
+    ASSERT_TRUE(fixture.session->CaptureFarWorldPublication(request, publication, diagnostic))
+        << diagnostic;
+    ASSERT_TRUE(publication);
+    const auto retained = publication;
+    selected->sdf_data.pop_back();
+    selected->mark_voxel_data_dirty();
+    EXPECT_FALSE(fixture.session->CaptureFarWorldPublication(request, publication, diagnostic));
+    EXPECT_FALSE(diagnostic.empty());
+    EXPECT_EQ(publication, retained);
+    EXPECT_TRUE(selected->is_voxel_data_dirty());
+    // A second relevant edit exceeds the unchanged cap; never silently omit it.
+    selected->sdf_data.push_back(-3.0f);
+    selected->mark_voxel_data_dirty();
+    ASSERT_TRUE(AdoptPublicationEdit(fixture, {6, 0, 4}));
+    EXPECT_FALSE(fixture.session->CaptureFarWorldPublication(request, publication, diagnostic));
+    EXPECT_FALSE(diagnostic.empty());
+    EXPECT_EQ(publication, retained);
+}
+
+TEST(SavedFarWorldPublication,
+     CompactRenderSamplesMatchExistingNumericConversionAndRetainRawCurrency) {
+    using namespace Luminumbra::World;
+    for (const bool striped_material : {false, true}) {
+        FarFrozenCaptureSource source;
+        source.use = FarFrozenUse::Preview;
+        source.pristine.numeric = FarVolumeNumericProfile::LegacySigned16;
+        source.pristine.height = [](std::int64_t, std::int64_t) {
+            return 8.0f;
+        };
+        source.pristine.density =
+            [striped_material](const FarVolumePosition& p, float, std::uint32_t, FarCaveMode) {
+                const auto material = striped_material
+                                          ? static_cast<std::uint8_t>((p.x / 4 + 64) % 256)
+                                          : std::uint8_t{7};
+                return FarVolumeSample{static_cast<float>(p.y) - 0.125f, material};
+            };
+        source.water = [](std::int64_t, std::int64_t) {
+            return FarFrozenWaterSample{false, 0};
+        };
+        const FarFrozenRegion region{1, {{0, -256, 0}, {64, 16, 16}}};
+        const auto limits = GameSession::FarWorldPublicationLimits().frozen;
+        auto pool = std::make_shared<FarVolumeMemoryPool>(256ull * 1024 * 1024);
+        std::shared_ptr<const FarFrozenObservation> original, compact, changed;
+        ASSERT_EQ(CaptureFarFrozenObservation({&region, 1}, source, limits, pool, original),
+                  FarFrozenCaptureError::None);
+        source.render_only = true;
+        ASSERT_EQ(CaptureFarFrozenObservation({&region, 1}, source, limits, pool, compact),
+                  FarFrozenCaptureError::None);
+        EXPECT_LT(compact->payload_bytes(), original->payload_bytes());
+        for (std::int64_t z = -4; z <= 20; z += 4)
+            for (std::int64_t y = -260; y <= 20; y += 4)
+                for (std::int64_t x = -4; x <= 68; x += 4) {
+                    const FarVolumePosition p{x, y, z};
+                    const auto raw = original->Sample(1, p), sample = compact->Sample(1, p);
+                    ASSERT_TRUE(raw);
+                    ASSERT_TRUE(sample);
+                    EXPECT_FLOAT_EQ(sample->density,
+                                    DequantizeFarLodSdf(QuantizeFarLodSdf(raw->density)));
+                    EXPECT_EQ(sample->material, raw->material);
+                    EXPECT_FALSE(compact->Sample(1, p, true));
+                }
+        EXPECT_EQ(original->WaterSample(0, 0, 0), compact->WaterSample(0, 0, 0));
+        source.pristine.density =
+            [striped_material](const FarVolumePosition& p, float, std::uint32_t, FarCaveMode) {
+                const auto material = striped_material
+                                          ? static_cast<std::uint8_t>((p.x / 4 + 64) % 256)
+                                          : std::uint8_t{7};
+                return FarVolumeSample{static_cast<float>(p.y) - 0.125f + 0.0001f, material};
+            };
+        ASSERT_EQ(CaptureFarFrozenObservation({&region, 1}, source, limits, pool, changed),
+                  FarFrozenCaptureError::None);
+        EXPECT_EQ(compact->Sample(1, {0, 0, 0}), changed->Sample(1, {0, 0, 0}));
+        EXPECT_NE(compact->content_identity(), changed->content_identity());
+    }
 }

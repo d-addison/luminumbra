@@ -56,6 +56,9 @@ struct FarFrozenCaptureSource {
     // separate render fingerprint; it never changes durable.generation.
     std::uint64_t content_identity = 0;
     FarFrozenUse use = FarFrozenUse::Committed;
+    // Renderer-only capture keeps the LegacySigned16 density/material consumed by meshes.
+    // The default dual-image capture and its durable bake semantics are unchanged.
+    bool render_only = false;
     FarFrozenTerrainOverride committed, parked, live;
     // Required explicit committed water truth, even for dry worlds.
     std::function<std::optional<FarFrozenWaterSample>(std::int64_t, std::int64_t)> water;
@@ -103,6 +106,9 @@ public:
     }
     FarEditedImageIdentity durable_identity() const noexcept {
         return durable_;
+    }
+    bool render_only() const noexcept {
+        return render_only_;
     }
     FarFrozenUse use() const noexcept {
         return use_;
@@ -159,11 +165,21 @@ private:
     std::uint64_t identity_, pristine_identity_;
     FarEditedImageIdentity durable_;
     FarFrozenUse use_;
+    bool render_only_ = false;
     FarCaveMode caves_;
     FarVolumeNumericProfile numeric_;
     std::vector<Grid> grids_;
     std::vector<float> heights_;
     std::vector<FarVolumeSample> pristine_, composed_;
+    std::vector<std::int16_t> render_density_;
+    std::vector<std::uint8_t> render_material_;
+    template<class T>
+    struct RenderRun {
+        std::size_t end = 0;
+        T value = 0;
+    };
+    std::vector<RenderRun<std::int16_t>> render_density_runs_;
+    std::vector<RenderRun<std::uint8_t>> render_material_runs_;
     std::vector<FarFrozenWaterSample> water_;
 };
 

@@ -1,4 +1,5 @@
 #include "FarFrozenObservation.h"
+#include "FarDensityQuantization.h"
 
 #include <algorithm>
 #include <bit>
@@ -41,6 +42,32 @@ struct PoolAllocator {
         return pool == other.pool && cap == other.cap;
     }
 };
+
+template<class Value, class Run>
+void CompressRenderSamples(std::vector<Value>& dense,
+                           std::vector<Run>& encoded,
+                           FarVolumeMemoryLease& lease,
+                           std::uint64_t cap) {
+    if (dense.empty())
+        return;
+    std::size_t runs = 1;
+    for (std::size_t i = 1; i < dense.size(); ++i)
+        runs += dense[i] != dense[i - 1];
+    const auto dense_bytes = dense.capacity() * sizeof(Value);
+    if (runs > dense_bytes / sizeof(Run))
+        return;
+    const auto run_bytes = runs * sizeof(Run);
+    // Compression is lossless and optional. Admit the temporary overlap;
+    // keep dense samples if either the work's byte cap or pool refuses it.
+    if (run_bytes >= dense_bytes || run_bytes > cap - lease.bytes() ||
+        !FarVolumeReserveCharged(encoded, runs, runs, &lease))
+        return;
+    for (std::size_t i = 1; i <= dense.size(); ++i)
+        if (i == dense.size() || dense[i] != dense[i - 1])
+            encoded.push_back({i, dense[i - 1]});
+    std::vector<Value>().swap(dense);
+    lease.Uncharge(dense_bytes);
+}
 
 std::array<std::int64_t, 3> Axes(const FarVolumePosition& p) {
     return {p.x, p.y, p.z};
@@ -157,6 +184,7 @@ FarFrozenObservation::FarFrozenObservation(CaptureToken,
     , pristine_identity_(source.pristine.field_identity)
     , durable_(source.durable)
     , use_(source.use)
+    , render_only_(source.render_only)
     , caves_(source.pristine.caves)
     , numeric_(source.pristine.numeric) {}
 
@@ -176,8 +204,11 @@ CaptureFarFrozenObservation(std::span<const FarFrozenRegion> regions,
          source.pristine.numeric != FarVolumeNumericProfile::LegacySigned16))
         return Error::InvalidSource;
     // Prepared authority is bake-only; it cannot become render authority here.
-    if (source.use == FarFrozenUse::Preview &&
-        source.durable.state != FarEditedImageState::Committed)
+    if ((source.render_only &&
+         (source.use != FarFrozenUse::Preview ||
+          source.pristine.numeric != FarVolumeNumericProfile::LegacySigned16)) ||
+        (source.use == FarFrozenUse::Preview &&
+         source.durable.state != FarEditedImageState::Committed))
         return Error::IdentityMismatch;
     if (regions.empty() || regions.size() > limits.max_regions)
         return Error::WorkLimit;
@@ -212,7 +243,11 @@ CaptureFarFrozenObservation(std::span<const FarFrozenRegion> regions,
         return Error::WorkLimit;
     if (!Add(regions.size(), sizeof(FarFrozenObservation::Grid), limits.max_bytes, bytes) ||
         !Add(columns, sizeof(float) + sizeof(FarFrozenWaterSample), limits.max_bytes, bytes) ||
-        !Add(density_count, 2 * sizeof(FarVolumeSample), limits.max_bytes, bytes) ||
+        !Add(density_count,
+             source.render_only ? sizeof(std::int16_t) + sizeof(std::uint8_t)
+                                : 2 * sizeof(FarVolumeSample),
+             limits.max_bytes,
+             bytes) ||
         bytes > std::numeric_limits<std::size_t>::max())
         return Error::ByteLimit;
     try {
@@ -227,8 +262,14 @@ CaptureFarFrozenObservation(std::span<const FarFrozenRegion> regions,
         if (!reserve(image->grids_, regions.size()) ||
             !reserve(image->heights_, static_cast<std::size_t>(columns)) ||
             !reserve(image->water_, static_cast<std::size_t>(columns)) ||
-            !reserve(image->pristine_, static_cast<std::size_t>(density_count)) ||
-            !reserve(image->composed_, static_cast<std::size_t>(density_count)))
+            !reserve(image->pristine_,
+                     source.render_only ? 0 : static_cast<std::size_t>(density_count)) ||
+            !reserve(image->composed_,
+                     source.render_only ? 0 : static_cast<std::size_t>(density_count)) ||
+            !reserve(image->render_density_,
+                     source.render_only ? static_cast<std::size_t>(density_count) : 0) ||
+            !reserve(image->render_material_,
+                     source.render_only ? static_cast<std::size_t>(density_count) : 0))
             return Error::ByteLimit;
         // Containers use exact requested capacities on supported standard libraries.
         // Refuse rather than retain any implementation-specific surplus.
@@ -247,10 +288,12 @@ CaptureFarFrozenObservation(std::span<const FarFrozenRegion> regions,
         std::sort(image->grids_.begin(), image->grids_.end(), [](const auto& a, const auto& b) {
             return Before(a.region, b.region);
         });
+        std::uint64_t render_fingerprint = 14695981039346656037ULL;
         for (auto& grid : image->grids_) {
             const auto step = FarTierAt(grid.region.tier)->sample_spacing_meters;
             grid.column_offset = image->heights_.size();
-            grid.sample_offset = image->pristine_.size();
+            grid.sample_offset =
+                source.render_only ? image->render_density_.size() : image->pristine_.size();
             grid.water_bound = {
                 true, std::numeric_limits<float>::max(), std::numeric_limits<float>::lowest()};
             for (std::size_t z = 0; z < grid.side[2]; ++z) {
@@ -312,7 +355,13 @@ CaptureFarFrozenObservation(std::span<const FarFrozenRegion> regions,
                             return Error::Unavailable;
                         if (!std::isfinite(sample->density))
                             return Error::NonFiniteSample;
-                        image->pristine_.push_back(*sample);
+                        if (!source.render_only)
+                            image->pristine_.push_back(*sample);
+                        else {
+                            Fingerprint(render_fingerprint,
+                                        std::bit_cast<std::uint32_t>(sample->density));
+                            Fingerprint(render_fingerprint, sample->material);
+                        }
                         const auto error =
                             source.use == FarFrozenUse::Preview
                                 ? Resolve<FarVolumeSample>(
@@ -326,10 +375,30 @@ CaptureFarFrozenObservation(std::span<const FarFrozenRegion> regions,
                             return error;
                         if (!std::isfinite(sample->density))
                             return Error::NonFiniteSample;
-                        image->composed_.push_back(*sample);
+                        if (source.render_only) {
+                            // The mesh facade applies precisely this conversion before sampling.
+                            // Retain raw observation currency separately from numeric conversion.
+                            Fingerprint(render_fingerprint,
+                                        std::bit_cast<std::uint32_t>(sample->density));
+                            Fingerprint(render_fingerprint, sample->material);
+                            image->render_density_.push_back(QuantizeFarLodSdf(sample->density));
+                            image->render_material_.push_back(sample->material);
+                        } else {
+                            image->composed_.push_back(*sample);
+                        }
                     }
                 }
             }
+        }
+        if (source.render_only) {
+            CompressRenderSamples(image->render_density_,
+                                  image->render_density_runs_,
+                                  image->lease_,
+                                  limits.max_bytes);
+            CompressRenderSamples(image->render_material_,
+                                  image->render_material_runs_,
+                                  image->lease_,
+                                  limits.max_bytes);
         }
         std::uint64_t fingerprint = 14695981039346656037ULL;
         Fingerprint(fingerprint, image->identity_);
@@ -352,6 +421,10 @@ CaptureFarFrozenObservation(std::span<const FarFrozenRegion> regions,
                 Fingerprint(fingerprint, std::bit_cast<std::uint32_t>(sample.density));
                 Fingerprint(fingerprint, sample.material);
             }
+        if (source.render_only) {
+            Fingerprint(fingerprint, 1);
+            Fingerprint(fingerprint, render_fingerprint);
+        }
         for (const auto water : image->water_) {
             Fingerprint(fingerprint, water.wet);
             Fingerprint(fingerprint, std::bit_cast<std::uint32_t>(water.surface_height));
@@ -393,11 +466,29 @@ FarFrozenObservation::Sample(std::uint8_t tier, const FarVolumePosition& p, bool
         const auto x = AxisIndex(p.x, grid.origin.x, grid.side[0], step);
         const auto y = AxisIndex(p.y, grid.origin.y, grid.side[1], step);
         const auto z = AxisIndex(p.z, grid.origin.z, grid.side[2], step);
-        if (x && y && z)
+        if (x && y && z) {
+            const auto index = grid.sample_offset + *x + grid.side[0] * (*y + grid.side[1] * *z);
+            if (render_only_) {
+                if (pristine)
+                    return std::nullopt;
+                const auto decode = [index](const auto& dense, const auto& runs) {
+                    if (runs.empty())
+                        return dense[index];
+                    const auto run = std::upper_bound(
+                        runs.begin(), runs.end(), index, [](std::size_t sample, const auto& entry) {
+                            return sample < entry.end;
+                        });
+                    return run->value; // Closed grid indexing is strictly below the final end.
+                };
+                return FarVolumeSample{
+                    DequantizeFarLodSdf(decode(render_density_, render_density_runs_)),
+                    decode(render_material_, render_material_runs_)};
+            }
             return (
                 pristine
                     ? pristine_
                     : composed_)[grid.sample_offset + *x + grid.side[0] * (*y + grid.side[1] * *z)];
+        }
     }
     return std::nullopt;
 }
@@ -451,7 +542,8 @@ FarEditedBakeError BakeFarEditedTilesFrozen(const FarEditedSourceView& source,
                                             FarEditedBakeResult& output) {
     try {
         const auto identity = source.Identity(), captured = frozen.durable_identity();
-        if (identity.generation != captured.generation || identity.state != captured.state ||
+        if (frozen.render_only() || identity.generation != captured.generation ||
+            identity.state != captured.state ||
             frozen.numeric() != FarVolumeNumericProfile::LegacySigned16)
             return FarEditedBakeError::IdentityMismatch;
         return BakeFarEditedTiles(source, changed, frozen.PristineSampler(), limits, output);

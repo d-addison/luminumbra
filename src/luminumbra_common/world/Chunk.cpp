@@ -8,6 +8,39 @@ Chunk::Chunk(const IVec3& coords)
     , m_id(calculate_id(coords))
     , m_state(ChunkState::Unloaded) {}
 
+void Chunk::observe_authority_changes(std::shared_ptr<ChunkAuthorityChanges> changes) {
+    std::lock_guard<std::mutex> lock(m_state_mutex);
+    const auto previous = m_authority_changes.exchange(changes, std::memory_order_acq_rel);
+    if (previous == changes)
+        return;
+    const bool loading = m_state == ChunkState::Loading;
+    const bool authoritative = needs_authority();
+    if (previous) {
+        if (loading)
+            previous->loading.fetch_sub(1, std::memory_order_release);
+        if (loading || authoritative)
+            previous->membership.fetch_add(1, std::memory_order_release);
+    }
+    if (changes) {
+        if (loading)
+            changes->loading.fetch_add(1, std::memory_order_release);
+        if (loading || authoritative)
+            changes->membership.fetch_add(1, std::memory_order_release);
+    }
+}
+
+void Chunk::notify_loading_change(ChunkState before, ChunkState after) {
+    if ((before == ChunkState::Loading) == (after == ChunkState::Loading))
+        return;
+    if (const auto changes = m_authority_changes.load(std::memory_order_acquire)) {
+        if (after == ChunkState::Loading)
+            changes->loading.fetch_add(1, std::memory_order_release);
+        else
+            changes->loading.fetch_sub(1, std::memory_order_release);
+        changes->membership.fetch_add(1, std::memory_order_release);
+    }
+}
+
 bool Chunk::is_valid_state_transition(ChunkState from, ChunkState to) {
     if (from == to) {
         return true;
@@ -37,6 +70,7 @@ bool Chunk::try_set_state(ChunkState expected_state, ChunkState new_state) {
         return false;
     }
 
+    notify_loading_change(m_state, new_state);
     m_state = new_state;
     return true;
 }
