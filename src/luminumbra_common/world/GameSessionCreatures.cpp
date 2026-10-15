@@ -3,6 +3,7 @@
 #include "../ai/CreatureSpeciesRegistry.h"
 #include "../ai/DecompositionSystem.h"
 #include "../ai/ThirstSystem.h"
+#include "../components/CircadianComponents.h"
 #include "../components/CoreComponents.h"
 #include "../components/InstinctComponents.h"
 #include "../components/MortalComponents.h"
@@ -129,24 +130,73 @@ const CreatureDistantPolicy& GameSession::CreaturePolicy(std::uint16_t species) 
     return found->second;
 }
 
-void GameSession::CaptureFullCreature(entt::entity e) {
-    auto next = m_registry.get<C::CreatureCoarseComponent>(e);
-    const auto& position = m_registry.get<C::TransformComponent>(e).position;
+namespace {
+void CaptureCreature(entt::registry& registry, entt::entity e) {
+    auto next = registry.get<C::CreatureCoarseComponent>(e);
+    const auto& position = registry.get<C::TransformComponent>(e).position;
     const auto key = QuantizedPositionOwner(position);
     next.x_mm = OwnedHorizontal(position.x, key.x);
     next.y_mm = Bridge(position.y, 1000.0, -1048576000ll, 1048575999ll);
     next.z_mm = OwnedHorizontal(position.z, key.z);
-    const auto& owner = m_registry.get<C::CreatureRegionComponent>(e);
+    const auto& owner = registry.get<C::CreatureRegionComponent>(e);
     if (key != RegionKey{owner.owner_x, owner.owner_z})
         throw std::invalid_argument("Creature owner mismatch");
-    next.hunger_ppm = Pressure(m_registry.get<C::CreatureComponent>(e).hunger);
-    if (const auto* thirst = m_registry.try_get<C::ThirstComponent>(e))
+    next.hunger_ppm = Pressure(registry.get<C::CreatureComponent>(e).hunger);
+    if (const auto* thirst = registry.try_get<C::ThirstComponent>(e))
         next.thirst_ppm = Pressure(thirst->thirst);
     next.needs.clear();
-    if (const auto* needs = m_registry.try_get<C::NeedsComponent>(e))
+    if (const auto* needs = registry.try_get<C::NeedsComponent>(e))
         for (const auto& need : needs->needs)
             next.needs.push_back({need.name, Pressure(need.pressure)});
-    m_registry.get<C::CreatureCoarseComponent>(e) = std::move(next);
+    registry.get<C::CreatureCoarseComponent>(e) = std::move(next);
+}
+
+void StageCreatureAuthority(entt::registry& registry,
+                            entt::entity entity,
+                            std::uint64_t id,
+                            RegionKey key,
+                            std::uint64_t tick,
+                            bool physics_controlled) {
+    registry.emplace<C::CreatureRegionComponent>(
+        entity, C::CreatureRegionComponent{id, key.x, key.z, tick});
+    registry.emplace<C::CreatureCoarseComponent>(entity);
+    registry.emplace<C::CreatureControllerComponent>(
+        entity, C::CreatureControllerComponent{physics_controlled});
+    if (physics_controlled)
+        registry.get_or_emplace<C::CreatureLocomotionStateComponent>(entity);
+    CaptureCreature(registry, entity);
+}
+} // namespace
+void GameSession::CaptureFullCreature(entt::entity e) {
+    CaptureCreature(m_registry, e);
+}
+void GameSession::StagePopulationCreature(entt::registry& stage,
+                                          const CreatureSpawnCommand& command,
+                                          std::uint64_t id,
+                                          RegionKey key,
+                                          std::uint64_t tick,
+                                          std::uint64_t draw) const {
+    if (!m_speciesTable || !ValidCreaturePosition(command.position))
+        throw std::invalid_argument("Invalid population creature");
+    const auto* definition = m_speciesTable->Find(command.species_id);
+    if (!definition)
+        throw std::invalid_argument("Unknown population creature species");
+    luminumbra::core::DeterministicRng rng(draw);
+    auto genome = A::MutateOffspring(A::CreatureGenome{}, rng, definition->genome_ranges);
+    // Sensory genes use the same captured species bands and the founder stream.
+    genome = A::BreedSensoryInto(genome, genome, genome, rng, definition->genome_ranges);
+    A::CreatureBirthProposal founder;
+    founder.genome = genome;
+    founder.species_id = command.species_id;
+    founder.x = command.position.x;
+    founder.y = command.position.y;
+    founder.z = command.position.z;
+    founder.female = (rng.next_u64() & 1ull) != 0;
+    const auto entity = A::CreateCreatureBirthEntity(stage, founder, std::uint32_t{0});
+    stage.get<C::CreatureComponent>(entity).is_predator = definition->predator;
+    stage.emplace<C::CircadianComponent>(
+        entity, C::CircadianComponent{static_cast<std::uint8_t>(definition->nocturnal), 1.0f});
+    StageCreatureAuthority(stage, entity, id, key, tick, command.physics_controlled);
 }
 
 void GameSession::ImportCoarseCreature(entt::entity e) {
@@ -186,13 +236,7 @@ bool GameSession::AdmitCreature(entt::entity e, bool physics_controlled) {
         throw std::runtime_error("Creature identity allocation refused");
     const bool had_locomotion = m_registry.all_of<C::CreatureLocomotionStateComponent>(e);
     try {
-        m_registry.emplace<C::CreatureRegionComponent>(
-            e, C::CreatureRegionComponent{id, key.x, key.z, m_worldClock.tick()});
-        m_registry.emplace<C::CreatureCoarseComponent>(e);
-        m_registry.emplace<C::CreatureControllerComponent>(e, physics_controlled);
-        if (physics_controlled)
-            m_registry.get_or_emplace<C::CreatureLocomotionStateComponent>(e);
-        CaptureFullCreature(e);
+        StageCreatureAuthority(m_registry, e, id, key, m_worldClock.tick(), physics_controlled);
         const auto snapshot = A::BuildCreatureSnapshot(m_registry);
         const auto plants = luminumbra::foliage::BuildPlantEntitySnapshot(m_registry, true);
         std::string error;

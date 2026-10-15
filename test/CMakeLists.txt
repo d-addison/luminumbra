@@ -220,6 +220,7 @@ add_executable(common_tests
     common/ServerHeadlessHygiene_test.cpp
     common/SimulationClock_test.cpp
     common/ActiveRegionLedger_test.cpp
+    common/RegionPopulator_test.cpp
     common/DistantPolicy_test.cpp
     common/RegionConsumerGate_test.cpp
     common/RegionRng_test.cpp
@@ -1751,6 +1752,7 @@ target_include_directories(eventbus_order_gate_test PRIVATE
 )
 
 target_link_libraries(eventbus_order_gate_test PRIVATE
+    gtest
     luminumbra_common
 )
 

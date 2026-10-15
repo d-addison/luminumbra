@@ -208,6 +208,7 @@ void GameSession::ResetWorldSystems() {
     m_foliagePreviousTicks.clear();
     m_creatureTickAdmission = {};
     m_creatureActivity = {};
+    m_populationActivity = {};
     m_regionFault.reset();
     m_regionInputRejections = {};
     m_regionDurableDirectory.clear();
@@ -351,28 +352,8 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
         luminumbra::simulation::SimBudgetTelemetry::TickScope budget(m_simBudgetTelemetry,
                                                                      current_tick);
         try {
-            if (m_activeRegionsEnabled) {
-                m_regionCompletedWork.clear();
-                PrepareRegionalFoliage();
-                m_worldClock.set_tick(current_tick);
-                if (m_regionFault)
-                    return i + 1;
-                m_foliagePreviousTicks.clear();
-                for (const auto& [key, record] : m_activeRegionLedger.records())
-                    m_foliagePreviousTicks[key] = record.last_ticked;
-                RunRegionScheduler(current_tick);
-                if (m_regionFault)
-                    return i + 1;
-                ReconcileCreatureTiers();
-                SealCreatureTickAdmission(current_tick);
-                RunCoarseCreatureTick();
-                AdvanceGroundObjects(current_tick);
-                if (m_regionFault)
-                    return i + 1;
-                AdvanceFieldPages(current_tick);
-                if (m_regionFault)
-                    return i + 1;
-            }
+            if (m_activeRegionsEnabled && !PrepareRegionTick(current_tick))
+                return i + 1;
 
             const RegionEntityGate creature_gate =
                 m_activeRegionsEnabled
@@ -853,10 +834,7 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
             if (m_activeRegionsEnabled)
                 CompleteCreatureTickAdmission();
             budget.Next(Stage::Events, [&] { return m_simulationEventBus.pending_count(); });
-            if (m_activeRegionsEnabled)
-                m_simulationEventBus.drain(current_tick, [this] { return !m_regionFault; });
-            else
-                m_simulationEventBus.drain(current_tick);
+            DrainSimulationEvents(current_tick);
             // Consumer counters are published only after the ordered drain succeeds.
             budget.Finish();
             if (m_regionFault)
@@ -1387,6 +1365,7 @@ bool GameSession::LoadWorld(const std::string& worldId) {
     candidate.m_parkedBytesLimit = m_parkedBytesLimit;
     candidate.m_populationContract = m_populationContract;
     candidate.m_populationConfiguration = m_populationConfiguration;
+    candidate.m_regionPopulator = m_regionPopulator;
     candidate.m_aetherStateEnabled = m_aetherStateEnabled;
     candidate.m_waterHighResEnabled = m_waterHighResEnabled;
     candidate.m_weatherRainEnabled = m_weatherRainEnabled;
@@ -1397,8 +1376,15 @@ bool GameSession::LoadWorld(const std::string& worldId) {
         return false;
     }
 
+    try {
+        candidate.QueueRegionActivations();
+    } catch (const std::exception& error) {
+        m_worldLoadError = error.what();
+        return false;
+    }
     ResetWorldSystems();
     m_registry = std::move(candidate.m_registry);
+    m_simulationEventBus = std::move(candidate.m_simulationEventBus);
     m_metadata = std::move(candidate.m_metadata);
     m_transientWorld = candidate.m_transientWorld;
     m_worldClock = candidate.m_worldClock;
@@ -2144,6 +2130,126 @@ bool GameSession::EnergyCellDue(int x, int z) const {
            found->second.state != RegionState::Frozen &&
            std::find(m_regionSchedule.due.begin(), m_regionSchedule.due.end(), owner) !=
                m_regionSchedule.due.end();
+}
+void GameSession::SetRegionPopulator(RegionPopulator populator) {
+    if (m_worldSystem || m_simulationContent)
+        throw std::logic_error("Register population before creating or opening a world");
+    if (populator.contract == kDefaultPopulationContract) {
+        if (populator.populate || !populator.ground_types.empty() ||
+            !populator.canonical_configuration.empty())
+            throw std::invalid_argument("The default population contract has no callback");
+        m_populationContract = std::string(kDefaultPopulationContract);
+        m_populationConfiguration.clear();
+        m_regionPopulator.reset();
+        return;
+    }
+    if (!populator.populate || populator.contract.empty() || populator.contract.size() > 256 ||
+        populator.ground_types.contains(0))
+        throw std::invalid_argument("Invalid population callback contract");
+    auto captured = std::make_shared<const RegionPopulator>(std::move(populator));
+    auto configuration = captured->identity_configuration();
+    if (configuration.size() > kMaxContentDocumentBytes)
+        throw std::length_error("Population configuration capacity reached");
+    auto contract = captured->contract;
+    m_populationContract.swap(contract);
+    m_populationConfiguration.swap(configuration);
+    m_regionPopulator = std::move(captured);
+}
+luminumbra::simulation::OrderedEventBus::PreparedBatch
+GameSession::PrepareRegionActivations(const ActiveRegionLedger& ledger) const {
+    namespace S = luminumbra::simulation;
+    std::vector<S::SimulationEvent> events;
+    for (const auto& [key, activation] : ledger.pending_activations()) {
+        const auto cause = activation.cause == ActivationCause::Edit  ? "edit"
+                           : activation.cause == ActivationCause::Pin ? "pin"
+                                                                      : "presence";
+        events.push_back({activation.activation_tick,
+                          std::numeric_limits<std::int32_t>::min(),
+                          0,
+                          "region.activated",
+                          std::to_string(activation.key.x) + "," +
+                              std::to_string(activation.key.z) + "," + cause,
+                          S::ActivationDeliveryKey{key.first, key.second.x, key.second.z}});
+    }
+    return m_simulationEventBus.prepare_batch(events, m_activationEnqueuePreparation, true);
+}
+void GameSession::QueueRegionActivations() {
+    if (m_activeRegionsEnabled)
+        m_simulationEventBus.commit_batch(PrepareRegionActivations(m_activeRegionLedger));
+}
+void GameSession::DrainSimulationEvents(std::uint64_t current_tick) {
+    if (m_activeRegionsEnabled)
+        m_simulationEventBus.drain_enabled(
+            current_tick,
+            [this] { return !m_regionFault; },
+            [this](const auto& delivery) {
+                m_activeRegionLedger.acknowledge_activation(delivery.activation_tick,
+                                                            {delivery.x, delivery.z});
+            },
+            [this](bool active) { m_activationDeliveryInProgress = active; });
+    else
+        m_simulationEventBus.drain(current_tick);
+}
+bool GameSession::PrepareRegionTick(std::uint64_t current_tick) {
+    m_regionCompletedWork.clear();
+    PrepareRegionalFoliage();
+    m_worldClock.set_tick(current_tick);
+    if (m_regionFault)
+        return false;
+    m_foliagePreviousTicks.clear();
+    for (const auto& [key, record] : m_activeRegionLedger.records())
+        m_foliagePreviousTicks[key] = record.last_ticked;
+    RunRegionScheduler(current_tick);
+    if (m_regionFault)
+        return false;
+    QueueRegionActivations();
+    ReconcileCreatureTiers();
+    PopulateActiveRegions();
+    SealCreatureTickAdmission(current_tick);
+    RunCoarseCreatureTick();
+    AdvanceGroundObjects(current_tick);
+    if (m_regionFault)
+        return false;
+    AdvanceFieldPages(current_tick);
+    if (m_regionFault)
+        return false;
+    return true;
+}
+void GameSession::PopulateActiveRegions() {
+    if (!m_regionPopulator || !m_activeRegionsEnabled || m_regionFault)
+        return;
+    // Snapshot keys because committing a candidate replaces the ledger's map nodes.
+    std::vector<RegionKey> keys;
+    for (const auto& [key, record] : m_activeRegionLedger.records())
+        if (record.state == RegionState::Active && !record.populated)
+            keys.push_back(key);
+    for (const auto key : keys) {
+        try {
+            const RegionBiomeInformation biome{
+                m_worldSystem->BiomeIdAt(static_cast<float>(key.x) * 512.0f + 256.0f,
+                                         static_cast<float>(key.z) * 512.0f + 256.0f)};
+            RegionPopulationTransaction transaction(m_activeRegionLedger,
+                                                    m_groundObjects,
+                                                    m_registry,
+                                                    m_simulationEventBus,
+                                                    m_regionCompletedWork);
+            transaction.execute(
+                *m_regionPopulator,
+                key,
+                m_worldClock.tick(),
+                static_cast<std::uint64_t>(StringToSeed(m_metadata.seed)),
+                biome,
+                [this](
+                    auto& stage, const auto& command, auto id, auto owner, auto tick, auto draw) {
+                    StagePopulationCreature(stage, command, id, owner, tick, draw);
+                },
+                m_populationPreparation);
+            ++m_populationActivity.successes;
+        } catch (...) {
+            ++m_populationActivity.failures;
+            throw;
+        }
+    }
 }
 void GameSession::RunRegionScheduler(std::uint64_t current_tick) {
     if (m_activeRegionsEnabled && !m_regionFault) {
@@ -3033,7 +3139,7 @@ StartOuterSave(const fs::path& save_dir, std::uint64_t tick, const std::optional
 bool GameSession::RunInSnapshotTransaction(const std::function<bool()>& body) {
     const fs::path save_dir = GetWorldSaveDir();
     if (!m_activeRegionsEnabled || save_dir.empty() || m_transientWorld ||
-        m_metadata.worldId.empty() || !m_worldOpenError.empty() || !IsSimulationTickBoundary() ||
+        m_metadata.worldId.empty() || !m_worldOpenError.empty() || !CanSaveWorldNow() ||
         !ClockConfigurationCompatible(save_dir) ||
         Persistence::SaveTransaction::active_for(save_dir)) {
         return body(); // nothing to wrap: the writers keep their own commits
@@ -3056,9 +3162,8 @@ bool GameSession::SaveWorld() {
 }
 
 bool GameSession::SaveWorldMetadataTo(const fs::path& save_dir) {
-    if (!IsSimulationTickBoundary() || save_dir.empty() ||
-        !ClockConfigurationCompatible(save_dir) || m_transientWorld || m_metadata.worldId.empty() ||
-        !m_worldOpenError.empty())
+    if (!CanSaveWorldNow() || save_dir.empty() || !ClockConfigurationCompatible(save_dir) ||
+        m_transientWorld || m_metadata.worldId.empty() || !m_worldOpenError.empty())
         return false;
     std::optional<Ecs::EntityRegistrySnapshot> plants;
     std::optional<luminumbra::ai::CreatureSnapshot> creatures;
@@ -3160,10 +3265,15 @@ bool GameSession::SaveWorldMetadataTo(const fs::path& save_dir) {
         if (!SaveEnergyFieldRecord(save_dir))
             return false;
         const auto expected_ledger = m_activeRegionLedger.canonical_bytes();
+        auto persisted_ledger = m_activeRegionLedger;
+        // Delivery runs after all consumers but before their work is published live.
+        // Persist that same next-tick charge without changing the acknowledgement boundary.
+        if (m_activationDeliveryInProgress)
+            persisted_ledger.publish_completed_work(m_regionCompletedWork);
         auto saved_ledger = m_activeRegionLedger;
         saved_ledger.mark_saved(m_worldClock);
         if (!Persistence::WorldSaveService::save_metadata_and_active_regions(
-                metadata_json.dump(4) + "\n", m_activeRegionLedger, save_dir))
+                metadata_json.dump(4) + "\n", persisted_ledger, save_dir))
             return false;
         if (auto* transaction = Persistence::SaveTransaction::active_for(save_dir))
             transaction->defer_until_commit(
@@ -3213,7 +3323,7 @@ bool GameSession::SaveWorldStateTo(const std::filesystem::path& save_dir,
     if (report) {
         *report = result;
     }
-    if (!IsSimulationTickBoundary() || !ClockConfigurationCompatible(save_dir) ||
+    if (!CanSaveWorldNow() || !ClockConfigurationCompatible(save_dir) ||
         !m_worldOpenError.empty() || !m_worldSystem || save_dir.empty() ||
         (m_activeRegionsEnabled && (m_transientWorld || m_metadata.worldId.empty()))) {
         return false;
@@ -3552,6 +3662,7 @@ bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
 
     Luminumbra::Ecs::EntityRegistrySnapshot enabled_plants;
     luminumbra::ai::CreatureSnapshot enabled_creatures;
+    std::optional<luminumbra::simulation::OrderedEventBus::PreparedBatch> activation_batch;
     if (m_activeRegionsEnabled) {
         const Vec3 loaded_ambient_anchor = ambient_anchor.value_or(m_metadata.spawnPoint);
         ActiveRegionLedger ledger;
@@ -3683,6 +3794,15 @@ bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
             m_worldOpenError = std::string("Corrupt creature payload: ") + e.what();
             return false;
         }
+        try {
+            activation_batch = PrepareRegionActivations(ledger);
+        } catch (const std::exception& error) {
+            m_worldOpenError = error.what();
+            return false;
+        } catch (...) {
+            m_worldOpenError = "Activation enqueue preparation failed";
+            return false;
+        }
         m_ambientFieldAnchor = loaded_ambient_anchor;
         m_groundObjects = std::move(ground_objects);
         m_fieldPages = std::move(field_pages);
@@ -3774,6 +3894,8 @@ bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
     if (m_activeRegionsEnabled) {
         luminumbra::foliage::ApplyPlantEntitySnapshot(m_registry, enabled_plants);
         luminumbra::ai::ApplyCreatureSnapshot(m_registry, enabled_creatures);
+        if (activation_batch)
+            m_simulationEventBus.commit_batch(std::move(*activation_batch));
     }
 
     // restore the stateful energy layer's record (a
