@@ -146,6 +146,8 @@ void ReplicationServer::BroadcastSnapshotEntities(std::uint64_t server_tick,
         if (!link.transport)
             continue;
 
+        // Capture a plain copy: the analyzer cannot track structured bindings captured by lambdas.
+        const auto link_id = client_id;
         const auto flush_outbound = [&] {
             while (!link.outbound.empty()) {
                 const bool oversized =
@@ -157,7 +159,7 @@ void ReplicationServer::BroadcastSnapshotEntities(std::uint64_t server_tick,
                     DrainClientInbound(link);
                     if (oversized || !link.transport->IsPeerConnected()) {
                         CloseClientTransport(link);
-                        to_disconnect.push_back(client_id);
+                        to_disconnect.push_back(link_id);
                     }
                     return;
                 }

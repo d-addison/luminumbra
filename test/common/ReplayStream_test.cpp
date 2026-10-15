@@ -324,6 +324,8 @@ TEST_F(ReplayStreamTest, HugeRecordAndBlobLengthsAreTruncated) {
             }
             const auto contents = replay::ReadReplay(m_path);
             ASSERT_TRUE(contents.has_value());
+            if (!contents.has_value())
+                return;
             EXPECT_TRUE(contents->truncated);
             EXPECT_FALSE(contents->trailer_present);
             EXPECT_TRUE(contents->inputs.empty());
