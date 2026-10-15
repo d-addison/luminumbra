@@ -3,6 +3,7 @@
 // asset requirements are caller-supplied by the client. Headless CreateWorld
 // must succeed in a root containing nothing but the world preset.
 #include "../support/UniqueTempPath.h"
+#include "../support/WorldgenTestData.h"
 
 #include "../support/SystemConfigVariants.h"
 #include <gtest/gtest.h>
@@ -46,6 +47,7 @@
 #include "luminumbra_common/world/FarAuthorityOverlay.h"
 #include "luminumbra_common/world/FarWantedSet.h"
 #include "luminumbra_common/world/GameSession.h"
+#include "luminumbra_common/world/TerrainPresetLoader.h"
 #include "luminumbra_common/world/WorldStreamingState.h"
 
 namespace fs = std::filesystem;
@@ -104,6 +106,13 @@ TEST(GameSessionHeadlessWorldTest, ValidateWorldConfigIsSimulationOnlyByDefault)
         GameSession::ValidateWorldConfig(root.root_string(), "default");
     EXPECT_TRUE(result.ok) << (result.errors.empty() ? "" : result.errors.front());
     EXPECT_TRUE(result.errors.empty());
+
+    const auto preset_only = Luminumbra::world::LoadTerrainPreset(result.preset_path);
+    ASSERT_TRUE(preset_only.ok);
+    Luminumbra::TestSupport::CopyWorldgenTestData(LUMINUMBRA_SOURCE_ROOT, root.path());
+    const auto full_data = Luminumbra::world::LoadTerrainPreset(result.preset_path);
+    ASSERT_TRUE(full_data.ok);
+    EXPECT_NE(preset_only.preset_content_hash, full_data.preset_content_hash);
 }
 
 TEST(GameSessionHeadlessWorldTest, CallerSuppliedRequiredAssetsAreEnforced) {
@@ -224,7 +233,9 @@ TEST(GameSessionHeadlessWorldTest, CustomPresetEmbedsInSaveAndChangesTerrain) {
         ASSERT_NE(custom_world.GetWorldSystem(), nullptr);
         EXPECT_FALSE(base.PresetContentHash().empty());
         EXPECT_NE(base.PresetContentHash(), custom_world.PresetContentHash());
-        EXPECT_EQ(custom_world.PresetContentHash(), Luminumbra::world::TerrainPresetContentHash(j));
+        const auto identity = Luminumbra::world::LoadTerrainPresetFromJson(j, root.path() / "data");
+        ASSERT_TRUE(identity.ok);
+        EXPECT_EQ(custom_world.PresetContentHash(), identity.preset_content_hash);
 
         // The resolved preset is embedded in THIS world's save dir; worldType keeps the base name.
         const fs::path embedded =

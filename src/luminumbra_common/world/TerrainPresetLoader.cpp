@@ -1,15 +1,180 @@
 #include "TerrainPresetLoader.h"
 
+#include <algorithm>
 #include <fstream>
 #include <initializer_list>
+#include <map>
+#include <string_view>
 
 #include "nlohmann/json.hpp"
 
 #include "../core/FilesystemPath.h"
 #include "../core/Log.h"
+#include "BiomeTable.h"
+#include "StructurePlacement.h"
 
 namespace Luminumbra::world {
 namespace {
+
+constexpr std::uint64_t kFnvOffsetBasis = 14695981039346656037ull;
+constexpr std::uint64_t kFnvPrime = 1099511628211ull;
+
+void HashBytes(std::uint64_t& hash, std::string_view bytes) {
+    for (unsigned char byte : bytes) {
+        hash ^= byte;
+        hash *= kFnvPrime;
+    }
+}
+
+std::string HashHex(std::uint64_t hash) {
+    std::string hex(16, '0');
+    for (std::size_t i = 0; i < hex.size(); ++i) {
+        hex[hex.size() - 1 - i] = "0123456789abcdef"[hash & 0xfu];
+        hash >>= 4u;
+    }
+    return hex;
+}
+
+std::string HashPresetIdentity(const nlohmann::json& preset, const nlohmann::json& manifest) {
+    // Canonical envelope: sorted logical paths in dependencies, sorted preset keys,
+    // compact ASCII JSON. Delimiters/escaping bind both paths and file boundaries.
+    std::uint64_t hash = kFnvOffsetBasis;
+    HashBytes(hash, "{\"dependencies\":");
+    HashBytes(hash, manifest.dump(-1, ' ', true));
+    HashBytes(hash, ",\"preset\":");
+    HashBytes(hash, CanonicalResolvedTerrainPresetJson(preset));
+    HashBytes(hash, "}");
+    return HashHex(hash);
+}
+
+bool ResolveDependencyManifest(TerrainPresetLoadResult& preset,
+                               const std::filesystem::path& data_root,
+                               nlohmann::json& manifest,
+                               std::vector<std::string>& errors) {
+    // Use the generator's loaders to record their decisions and only the bytes
+    // they consume. In particular, a rejected placement stops that pool before
+    // any pieces are read; malformed pieces reject a pool after all piece reads.
+    std::map<std::string, nlohmann::json> entries;
+    auto snapshot = std::make_shared<World::WorldgenDependencySnapshot>();
+    const auto logical_path = [&](const std::filesystem::path& relative) {
+        const auto logical = Filesystem::LexicallyNormalPath(relative);
+        if (logical.empty() || logical == "." || Filesystem::IsAbsolutePath(logical) ||
+            logical.has_root_name() || logical.has_root_directory()) {
+            errors.push_back("worldgen dependency must be data_root-relative: " +
+                             Filesystem::GenericUtf8PathString(relative));
+            return std::string();
+        }
+        for (const auto& component : logical) {
+            if (component == "..") {
+                errors.push_back("worldgen dependency escapes data_root: " +
+                                 Filesystem::GenericUtf8PathString(relative));
+                return std::string();
+            }
+        }
+        return Filesystem::GenericUtf8PathString(logical);
+    };
+    const auto state = [&](const std::string& logical, const char* outcome) {
+        auto& entry = entries[logical];
+        if (entry.is_null())
+            entry = nlohmann::json::array({logical, outcome});
+        else
+            entry.push_back(outcome);
+    };
+    const World::WorldgenFileReader read_file = [&](const std::filesystem::path& path,
+                                                    std::string& bytes) {
+        const auto logical = logical_path(path.lexically_relative(data_root));
+        if (logical.empty())
+            return false;
+        if (!World::ReadWorldgenFile(path, bytes)) {
+            errors.push_back("failed to read worldgen dependency: " + logical);
+            return false;
+        }
+        std::uint64_t hash = kFnvOffsetBasis;
+        HashBytes(hash, bytes);
+        auto& entry = entries[logical];
+        if (entry.is_null()) {
+            entry = nlohmann::json::array({logical, HashHex(hash)});
+        } else if (entry[1] != HashHex(hash)) {
+            errors.push_back("worldgen dependency changed between reads: " + logical);
+            return false;
+        }
+        return true;
+    };
+    try {
+        if (preset.params.biomes_enabled) {
+            const auto relative = Filesystem::PathFromUtf8(preset.extras.biomes.table);
+            const auto logical = logical_path(relative);
+            if (logical.empty())
+                return false;
+            const auto path = data_root / Filesystem::LexicallyNormalPath(relative);
+            if (!std::filesystem::exists(std::filesystem::symlink_status(path))) {
+                state(logical, "biome-table-absent:legacy-classification");
+            } else {
+                snapshot->biome_table = World::BiomeTable::Load(path, read_file);
+                const auto& table = snapshot->biome_table;
+                if (!errors.empty())
+                    return false;
+                state(logical,
+                      table.ok() && !table.empty()
+                          ? "biome-table-accepted"
+                          : "biome-table-rejected/empty:legacy-classification");
+            }
+        }
+        if (preset.params.structures_enabled) {
+            const auto structures = data_root / "common/structures";
+            if (!std::filesystem::exists(std::filesystem::symlink_status(structures))) {
+                state("common/structures", "structures-directory-absent");
+            } else {
+                if (!std::filesystem::is_directory(structures)) {
+                    errors.push_back("unreadable worldgen dependency directory: common/structures");
+                    return false;
+                }
+                state("common/structures", "structures-directory-present");
+                std::vector<std::filesystem::path> type_dirs;
+                for (const auto& type : std::filesystem::directory_iterator(structures)) {
+                    if (type.is_directory())
+                        type_dirs.push_back(type.path());
+                }
+                std::sort(type_dirs.begin(), type_dirs.end(), [](const auto& a, const auto& b) {
+                    return Filesystem::GenericUtf8PathString(a.filename()) <
+                           Filesystem::GenericUtf8PathString(b.filename());
+                });
+                for (const auto& type : type_dirs) {
+                    const auto relative_type =
+                        std::filesystem::path("common/structures") / type.filename();
+                    const auto logical = logical_path(relative_type);
+                    if (logical.empty())
+                        return false;
+                    // Follow placement symlinks like the direct loader: a dangling link
+                    // is absent, so identity and snapshot both use compiled defaults.
+                    // Other status errors throw and refuse the preset below.
+                    if (!std::filesystem::exists(type / "placement.json"))
+                        state(logical + "/placement.json", "placement-absent:compiled-defaults");
+                    auto pool = World::LoadStructureTemplatePool(
+                        type, Filesystem::GenericUtf8PathString(type.filename()), read_file);
+                    if (pool.io_failed) {
+                        errors.push_back("failed to read worldgen structure pool: " + logical);
+                        return false;
+                    }
+                    if (!errors.empty())
+                        return false;
+                    state(logical, pool.ok() ? "pool-accepted" : "pool-rejected/empty");
+                    snapshot->structure_pools.push_back(std::move(pool));
+                }
+            }
+        }
+        manifest = nlohmann::json::array();
+        for (const auto& [logical, entry] : entries) {
+            manifest.push_back(entry);
+            snapshot->manifest.push_back(entry.get<std::vector<std::string>>());
+        }
+    } catch (const std::filesystem::filesystem_error& error) {
+        errors.push_back("failed to resolve worldgen dependencies: " + std::string(error.what()));
+        return false;
+    }
+    preset.params.worldgen_dependencies = std::move(snapshot);
+    return true;
+}
 
 void WarnUnknownKeys(const nlohmann::json& object,
                      const char* scope,
@@ -148,8 +313,8 @@ void ParseBiomesBlock(const nlohmann::json& gen_params,
         // explicit data_root the caller supplied (the on-disk loader derives it
         // four parents up from the preset; the in-memory seam is handed it
         // directly so the table resolves correctly without a temp file).
-        biomes.resolved_table_path =
-            Filesystem::LexicallyNormalPath(data_root / biomes.table).string();
+        biomes.resolved_table_path = Filesystem::GenericUtf8PathString(
+            Filesystem::LexicallyNormalPath(data_root / Filesystem::PathFromUtf8(biomes.table)));
     }
     WarnUnknownKeys(block,
                     "generation_params.biomes",
@@ -206,19 +371,7 @@ std::string CanonicalResolvedTerrainPresetJson(const nlohmann::json& preset) {
 }
 
 std::string TerrainPresetContentHash(const nlohmann::json& preset) {
-    // FNV-1a over canonical ASCII JSON bytes. Encode hex explicitly so neither
-    // integer width, host byte order nor the process locale can change identity.
-    std::uint64_t hash = 14695981039346656037ull;
-    for (unsigned char byte : CanonicalResolvedTerrainPresetJson(preset)) {
-        hash ^= byte;
-        hash *= 1099511628211ull;
-    }
-    std::string hex(16, '0');
-    for (std::size_t i = 0; i < hex.size(); ++i) {
-        hex[hex.size() - 1 - i] = "0123456789abcdef"[hash & 0xfu];
-        hash >>= 4u;
-    }
-    return hex;
+    return HashPresetIdentity(preset, nlohmann::json::array());
 }
 
 TerrainPresetLoadResult LoadTerrainPreset(const std::filesystem::path& preset_path) {
@@ -226,7 +379,8 @@ TerrainPresetLoadResult LoadTerrainPreset(const std::filesystem::path& preset_pa
 
     std::ifstream file(preset_path);
     if (!file.is_open()) {
-        result.errors.push_back("failed to open world preset: " + preset_path.string());
+        result.errors.push_back("failed to open world preset: " +
+                                Filesystem::GenericUtf8PathString(preset_path));
         return result;
     }
 
@@ -234,8 +388,8 @@ TerrainPresetLoadResult LoadTerrainPreset(const std::filesystem::path& preset_pa
     try {
         data = nlohmann::json::parse(file);
     } catch (const nlohmann::json::parse_error& e) {
-        result.errors.push_back("failed to parse world preset JSON '" + preset_path.string() +
-                                "': " + e.what());
+        result.errors.push_back("failed to parse world preset JSON '" +
+                                Filesystem::GenericUtf8PathString(preset_path) + "': " + e.what());
         return result;
     }
 
@@ -248,7 +402,8 @@ TerrainPresetLoadResult LoadTerrainPreset(const std::filesystem::path& preset_pa
         Filesystem::AbsolutePath(preset_path, ec).parent_path();
     const std::filesystem::path data_root =
         preset_dir.parent_path().parent_path().parent_path() / "data";
-    return LoadTerrainPresetFromJson(data, data_root, preset_path.string());
+    return LoadTerrainPresetFromJson(
+        data, data_root, Filesystem::GenericUtf8PathString(preset_path));
 }
 
 TerrainPresetLoadResult LoadTerrainPresetFromJson(const nlohmann::json& source,
@@ -466,8 +621,8 @@ TerrainPresetLoadResult LoadTerrainPresetFromJson(const nlohmann::json& source,
     if (params.structures_enabled) {
         // Resolve <data_root>/common/structures to an absolute path (the same
         // data root the biome table resolves against, supplied by the caller).
-        params.structures_data_dir =
-            Filesystem::LexicallyNormalPath(data_root / "common" / "structures").string();
+        params.structures_data_dir = Filesystem::GenericUtf8PathString(
+            Filesystem::LexicallyNormalPath(data_root / "common" / "structures"));
     }
     params.rivers_enabled = result.extras.features.rivers_enabled;
     if (params.rivers_enabled) {
@@ -557,7 +712,10 @@ TerrainPresetLoadResult LoadTerrainPresetFromJson(const nlohmann::json& source,
                     provenance,
                     result.warnings);
 
-    result.preset_content_hash = TerrainPresetContentHash(source);
+    nlohmann::json manifest;
+    if (!ResolveDependencyManifest(result, data_root, manifest, result.errors))
+        return result;
+    result.preset_content_hash = HashPresetIdentity(source, manifest);
     result.ok = true;
     return result;
 }
@@ -568,23 +726,26 @@ bool LoadTerrainPresetOverride(const std::filesystem::path& preset_path,
                                std::string& error) {
     std::ifstream file(preset_path);
     if (!file) {
-        error = "cannot read preset override: " + preset_path.string();
+        error = "cannot read preset override: " + Filesystem::GenericUtf8PathString(preset_path);
         return false;
     }
     try {
         const auto document = nlohmann::json::parse(file);
         if (file.bad()) {
-            error = "cannot read preset override: " + preset_path.string();
+            error =
+                "cannot read preset override: " + Filesystem::GenericUtf8PathString(preset_path);
             return false;
         }
-        const auto validated = LoadTerrainPresetFromJson(document, data_root, preset_path.string());
+        const auto validated = LoadTerrainPresetFromJson(
+            document, data_root, Filesystem::GenericUtf8PathString(preset_path));
         if (!validated.ok) {
             error = validated.errors.front();
             return false;
         }
         json_text = document.dump();
     } catch (const nlohmann::json::exception& exception) {
-        error = "invalid preset override: " + preset_path.string() + ": " + exception.what();
+        error = "invalid preset override: " + Filesystem::GenericUtf8PathString(preset_path) +
+                ": " + exception.what();
         return false;
     }
     error.clear();

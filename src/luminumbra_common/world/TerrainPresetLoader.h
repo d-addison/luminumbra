@@ -52,7 +52,7 @@ struct TerrainBiomesPreset {
     bool present = false;
     bool enabled = true;                      // a non-empty "table" was supplied
     std::string table = "common/biomes.json"; // verbatim relative path from the preset
-    std::string resolved_table_path;          // absolute path handed to TerrainGenParams
+    std::string resolved_table_path;          // absolute UTF-8 path handed to TerrainGenParams
     float temperature_frequency = 0.005f;
     float humidity_frequency = 0.005f;
     bool relief_enabled = true; //  temperature-driven ridge scaling
@@ -94,7 +94,11 @@ struct TerrainPresetExtras {
 
 struct TerrainPresetLoadResult {
     bool ok = false;
+    // FNV-1a-64 of canonical resolved preset JSON and a sorted manifest of
+    // logical data_root-relative paths, exact-byte file hashes and loader outcomes.
     std::string preset_content_hash;
+    // params.worldgen_dependencies retains the loaded objects and manifest that
+    // this identity describes, including absent/rejected-input fallback decisions.
     Systems::TerrainGenParams params;
     TerrainPresetExtras extras;
     std::vector<std::string> errors;
@@ -109,6 +113,8 @@ nlohmann::json ResolveTerrainPresetDefaults(const nlohmann::json& preset);
 // object keys, compact JSON, ASCII escapes and locale-independent binary64 numbers.
 // No filesystem paths derived from data_root or provenance enter this form.
 std::string CanonicalResolvedTerrainPresetJson(const nlohmann::json& preset);
+// Identity with an empty dependency manifest (for dependency-free presets/fixtures).
+// Runtime callers must use the loader's preset_content_hash to bind resolved files.
 std::string TerrainPresetContentHash(const nlohmann::json& preset);
 
 // Loads and validates a world preset JSON file. Validation contract matches
@@ -116,7 +122,8 @@ std::string TerrainPresetContentHash(const nlohmann::json& preset);
 // must be objects, the six terrain noise fields must be numeric and
 // caves_enabled/cave_frequency must be present and typed. On any error the
 // result carries ok=false and human-readable messages; params/extras are only
-// meaningful when ok=true.
+// meaningful when ok=true. Absent optional worldgen inputs bind fallback markers;
+// present but unreadable inputs are errors.
 TerrainPresetLoadResult LoadTerrainPreset(const std::filesystem::path& preset_path);
 
 // Explicit CLI preset override, validated against the runtime data root. Failure leaves
@@ -135,8 +142,8 @@ bool LoadTerrainPresetOverride(const std::filesystem::path& preset_path,
 // path to the `data/` directory (the same root the on-disk loader derives as
 // four parents up from the preset file + "data"). `provenance` only labels the
 // unknown-key warnings. LoadTerrainPreset(path) reads+parses the file and
-// DELEGATES here with the file-derived data root, so on-disk loads are
-// byte-identical to before.
+// DELEGATES here with the file-derived data root. Identity binds the selected
+// biome table and enabled structure placement/piece files through portable paths.
 TerrainPresetLoadResult LoadTerrainPresetFromJson(const nlohmann::json& data,
                                                   const std::filesystem::path& data_root,
                                                   const std::string& provenance = "<memory>");

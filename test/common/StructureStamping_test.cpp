@@ -15,6 +15,7 @@
 //                           byte-exact.
 #include "gtest/gtest.h"
 
+#include "core/FilesystemPath.h"
 #include "persistence/WorldPersistenceRoundtrip.h"
 #include "systems/SHIELD_WorldSystem.h"
 #include "world/Chunk.h"
@@ -56,8 +57,8 @@ Systems::TerrainGenParams FixedParams() {
     p.biomes_enabled = false;
     p.hydro_enabled = false;
     p.structures_enabled = true;
-    p.structures_data_dir =
-        (fs::path(LUMINUMBRA_SOURCE_ROOT) / "data" / "common" / "structures").string();
+    p.structures_data_dir = Filesystem::GenericUtf8PathString(fs::path(LUMINUMBRA_SOURCE_ROOT) /
+                                                              "data" / "common" / "structures");
     return p;
 }
 

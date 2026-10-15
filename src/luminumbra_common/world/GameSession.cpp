@@ -1240,6 +1240,7 @@ bool GameSession::CreateWorldInternal(const std::string& name,
         }
         return false;
     }
+    // Copies the immutable dependency snapshot with the identity's parameters.
     TerrainGenParams params = preset.params;
     ClampTerrainParams(params);
 
@@ -1371,6 +1372,7 @@ bool GameSession::LoadWorld(const std::string& worldId) {
         }
         return false;
     }
+    // Saved-world adoption also keeps the loader's inputs through generation.
     TerrainGenParams params = preset.params;
     ClampTerrainParams(params);
 

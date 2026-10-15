@@ -77,6 +77,8 @@ struct HelloMsg {
     std::uint16_t tick_rate_hz = 30;
     std::uint32_t client_id = 0; // the sender's id (0 = host, 1 = first remote)
     std::string system_config_identity;
+    // Canonical resolved preset plus sorted data_root-relative dependency paths
+    // and exact-byte file hashes (TerrainPresetLoadResult::preset_content_hash).
     std::string preset_content_hash;
 };
 

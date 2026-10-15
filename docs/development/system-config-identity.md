@@ -75,7 +75,7 @@ Deliberate exclusions from the setter audit:
   existing world/region hash and input contracts.
 - Budget telemetry and job-worker selection are observation/scheduling only. Root paths
   locate content, and required-client-asset lists validate client files; neither is a
-  simulation rule value. Content identity remains outside this change.
+  simulation rule value. Worldgen content is bound separately by the preset identity below.
 
 The shipping pins in `SystemConfig_test.cpp`, `GameSessionHeadlessWorld_test.cpp`, this
 document and the independent Python encoder change from `da24cea9dbc5159b` to
@@ -108,12 +108,57 @@ enforce both identities before simulation starts.
 Its canonical form first materializes revision-dependent defaults, then stamps the
 current schema revision (the same operation used for embedded presets). It serializes
 the resolved JSON with sorted object keys, no whitespace, ASCII escapes and nlohmann's
-locale-independent binary64 number serialization. Runtime-resolved absolute asset paths
-and diagnostic provenance are excluded. FNV-1a-64 over these ASCII bytes uses offset
+locale-independent binary64 number serialization. The identity envelope is compact ASCII
+JSON with the shape `{"dependencies":[["logical/path","file_hash",...],...],"preset":{...}}`.
+Entries for files carry their exact-byte hash and, for biome tables, the loader outcome.
+Directory and absent-file entries carry explicit state markers instead of file hashes.
+The manifest sorts entries by logical `data_root`-relative path, normalizes dot components
+and uses UTF-8 with `/` separators. Each file hash covers the exact bytes read in binary mode,
+including whitespace; absolute or escaping dependency paths are refused.
+Runtime-resolved absolute asset paths and diagnostic provenance are excluded.
+FNV-1a-64 for both the envelope and each dependency file uses offset
 `14695981039346656037`, prime `1099511628211`, modulo-2^64 arithmetic and exactly 16
 lowercase hex digits, encoded without locale-sensitive formatting. Equivalent key order
-and whitespace produce identical bytes and hashes; a changed terrain override under the
-same preset name is incompatible. The older numeric replay `preset_hash` remains name
+and preset whitespace produce identical bytes and hashes; a changed terrain override or
+dependency file under the same preset name is incompatible. Identical inputs under
+different runtime roots produce the same identity. Dependency-free presets use an empty
+manifest; `TerrainPresetContentHash(json)` computes only that form, so runtime callers
+must use the loader result to bind resolved files.
+
+The manifest follows the generator's actual disk reads: the selected biome table when
+biomes are enabled, and every immediate type directory under `common/structures` when
+structures are enabled. Each type contributes its optional `placement.json`, if present,
+and immediate regular `*.json` pieces actually read by `LoadStructureTemplatePool`.
+A malformed placement rejects that pool before any pieces are read; a malformed piece
+rejects the pool after the loader finishes reading its pieces. The manifest uses the
+same biome/pool loaders as the generator and records their acceptance or fallback
+decisions alongside the consumed bytes. The loader retains those objects and the
+manifest in an immutable snapshot carried by `TerrainGenParams`, including through
+GameSession's create/open adoption paths. Generation consumes that snapshot without
+reading the dependencies again, so mutations during the handoff cannot change its
+inputs. Structure types and pieces use the manifest's canonical UTF-8 logical-name
+order; authored biome rows, boxes and sockets retain their JSON array order.
+Direct generators constructed without a preset snapshot still load their biome table
+and structure pools from disk. Nested files and other extensions are
+not inputs. An absent selected biome table loads with the marker
+`biome-table-absent:legacy-classification`; a present rejected/empty table binds its bytes
+and `biome-table-rejected/empty:legacy-classification`. An absent structures directory
+loads with `structures-directory-absent`; a present directory binds
+`structures-directory-present`. Each type binds `pool-accepted` or `pool-rejected/empty`,
+including types with no pieces. An absent placement binds
+`placement-absent:compiled-defaults`. All of these states produce distinct identities.
+A present unreadable dependency, directory enumeration failure or incomplete file read
+refuses loading without publishing an identity; it never becomes an absence marker.
+Biome material names resolve to compiled material IDs, and neither biome nor structure JSON recursively references other files.
+Procedural shaping, hydro, caves, rivers, lakes, cliffs and surface breaks use preset
+parameters and compiled algorithms, without additional disk inputs. Runtime species
+definitions are loaded separately by GameSession for creature behavior, not terrain
+generation; they are outside this worldgen manifest.
+
+The same string continues through protocol-v3 Hello, replay-header-v3, server modes and
+NetworkedSessionDriver; their wire layout is unchanged. Earlier JSON-only identities
+will mismatch the expanded identity and refuse admission/verification.
+The older numeric replay `preset_hash` remains name
 provenance only; admission and verification require `preset_content_hash` as well.
 
 The GNS and Steam transports are optional and disabled by default. They do not yet
