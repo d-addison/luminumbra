@@ -103,7 +103,7 @@ def plane(path, dims, magic, channels):
 def inspect(directory, legacy_forward=False):
     manifest_path = directory / 'manifest.json'
     require(manifest_path.stat().st_size <= 16 * 1024 * 1024, 'Oversized AOV manifest')
-    manifest = json.loads(manifest_path.read_text())
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     require(manifest['schema'] == 'luminumbra.terrain_coverage_capture.v1' and
             manifest['complete'] is True and manifest['enabled'] is True, 'Incomplete AOV capture')
     require(manifest['matrix_layout'] == 'column_major', 'Unknown matrix layout')
@@ -184,7 +184,7 @@ def main(argv=None):
         first = inspect(args.aov_directory, args.legacy_forward_depth)
         report = dict(verdict='PASS', first=first[2])
         if args.benchmark:
-            report['benchmark_join'] = validate_benchmark(first[0], json.loads(args.benchmark.read_text()))
+            report['benchmark_join'] = validate_benchmark(first[0], json.loads(args.benchmark.read_text(encoding="utf-8")))
         if args.compare:
             second = inspect(args.compare, args.legacy_forward_depth)
             report.update(second=second[2], comparison=compare(first, second))

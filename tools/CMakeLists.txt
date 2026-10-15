@@ -29,6 +29,30 @@ if(LUMINUMBRA_ENABLE_STATIC_PREVIEW)
 endif()
 
 if(BUILD_TESTING)
+    add_test(
+        NAME NetworkingRuntimeContract
+        COMMAND "${CMAKE_COMMAND}"
+                "-DNETWORK_TEST_ROOT=${CMAKE_CURRENT_BINARY_DIR}/networking-runtime-contract"
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_networking_runtime.cmake")
+    set_tests_properties(NetworkingRuntimeContract
+        PROPERTIES LABELS "ci;tools;net" TIMEOUT 30)
+
+    # The staging module needs CMake 3.21+ on Windows; 3.20 builds stay networking-free.
+    if(WIN32 AND CMAKE_VERSION VERSION_GREATER_EQUAL 3.21)
+        add_test(
+            NAME NetworkingRuntimeBuildIntegration
+            COMMAND "${CMAKE_COMMAND}"
+                    "-DNETWORK_TEST_ROOT=${CMAKE_CURRENT_BINARY_DIR}/networking-runtime-integration"
+                    "-DNETWORK_TEST_GENERATOR=${CMAKE_GENERATOR}"
+                    "-DNETWORK_TEST_PLATFORM=${CMAKE_GENERATOR_PLATFORM}"
+                    "-DNETWORK_TEST_TOOLSET=${CMAKE_GENERATOR_TOOLSET}"
+                    "-DNETWORK_TEST_MAKE_PROGRAM=${CMAKE_MAKE_PROGRAM}"
+                    "-DNETWORK_TEST_COMPILER=${CMAKE_CXX_COMPILER}"
+                    -P "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_networking_runtime_integration.cmake")
+        set_tests_properties(NetworkingRuntimeBuildIntegration
+            PROPERTIES LABELS "ci;tools;net" TIMEOUT 90)
+    endif()
+
     # Acceptance fixture code is linked only by its CLI and tests, never the engine targets.
     add_library(luminumbra_save_fixture_support STATIC
         ${CMAKE_SOURCE_DIR}/src/luminumbra_common/persistence/SyntheticSaveFixture.cpp)

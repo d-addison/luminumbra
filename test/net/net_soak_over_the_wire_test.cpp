@@ -226,6 +226,7 @@ TEST(NetSoak, OverTheWireThirtyTwoClientsWithinBudget) {
     const std::uint16_t port = listener.port();
 
     ReplicationServer server;
+    server.SetDeltaCompression(false);
     server.SetAoiChunkRadius(/*chunk_radius=*/3, kChunkSizeMm); // the real dedicated-server scope
 
     // Launch the 32 driving-avatar client threads.
