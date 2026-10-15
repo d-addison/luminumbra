@@ -1938,9 +1938,13 @@ TEST(WorldSaveService, CanonicalAndParsedFactsUseTheSameStrictGridAndIdentityChe
     for (const bool strict : {false, true}) {
         const auto& mode = modes[strict];
         ASSERT_TRUE(mode.has_value());
+        if (!mode.has_value())
+            return;
         const auto parsed =
             CachePersistence::TryWorldStreamingSnapshotFacts(text, chunk->get_id(), strict);
         ASSERT_TRUE(parsed.has_value());
+        if (!parsed.has_value())
+            return;
         EXPECT_EQ(parsed->coords, mode->coords);
         EXPECT_EQ(parsed->sdf_size, mode->sdf_size);
         ASSERT_NO_FATAL_FAILURE(ExpectFactsMatchLoader(snapshot, strict));
