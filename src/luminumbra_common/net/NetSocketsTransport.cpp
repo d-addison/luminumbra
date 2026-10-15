@@ -107,16 +107,20 @@ void NetSocketsTransport::HandleConnStatusChanged(SteamNetConnectionStatusChange
             }
             break;
         case k_ESteamNetworkingConnectionState_Connected:
-            if (info->m_hConn == m_conn)
+            if (info->m_hConn == m_conn) {
                 m_connected = true;
+                m_ever_connected = true;
+            }
             break;
         case k_ESteamNetworkingConnectionState_ClosedByPeer:
         case k_ESteamNetworkingConnectionState_ProblemDetectedLocally:
             if (info->m_hConn == m_conn) {
-                // The backend may still own valid messages beyond our local budget.
-                // Keep the handle until those messages and the local queue drain.
+                // An established peer may still have messages beyond our local budget.
+                // Keep its handle until those messages and the local queue drain.
                 m_peer_closed = true;
                 m_connected = false;
+                if (!m_ever_connected)
+                    Close();
             }
             break;
         default:
@@ -146,6 +150,8 @@ bool NetSocketsTransport::SendFrame(const std::vector<std::uint8_t>& frame,
     if (result != k_EResultLimitExceeded && result != k_EResultIgnored) {
         m_peer_closed = true;
         m_connected = false;
+        if (!m_ever_connected)
+            Close();
     }
     return false;
 }
@@ -181,8 +187,8 @@ bool NetSocketsTransport::TryReceiveFrame(std::vector<std::uint8_t>& out) {
 }
 
 bool NetSocketsTransport::IsPeerConnected() const {
-    // Match TCP: buffered valid frames remain observable before closure.
-    return (m_closed || m_peer_closed) ? !m_recv.IsDrained() : m_connected;
+    // Only an established peer can have valid frames to drain before closure.
+    return m_ever_connected && ((m_closed || m_peer_closed) ? !m_recv.IsDrained() : m_connected);
 }
 
 void NetSocketsTransport::Close() {

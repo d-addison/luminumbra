@@ -57,6 +57,7 @@ private:
     HSteamListenSocket m_listen = 0; // k_HSteamListenSocket_Invalid
     HSteamNetConnection m_conn = 0;  // k_HSteamNetConnection_Invalid
     bool m_connected = false;
+    bool m_ever_connected = false; // only established connections may drain before closure
     bool m_closed = false;
     bool m_peer_closed = false; // drain the backend before releasing the connection
     bool m_is_host = false;

@@ -13,6 +13,105 @@ std::shared_ptr<spdlog::logger>& Log::GetCoreLogger() {
 namespace {
 using namespace Luminumbra::Net;
 
+TEST(NetSocketsConnectionTest, FailedAttemptsDisconnectAndReleaseImmediately) {
+    for (const bool is_host : {false, true}) {
+        SCOPED_TRACE(is_host);
+        for (const auto state : {k_ESteamNetworkingConnectionState_ClosedByPeer,
+                                 k_ESteamNetworkingConnectionState_ProblemDetectedLocally}) {
+            SCOPED_TRACE(static_cast<int>(state));
+            auto& sockets = *SteamNetworkingSockets();
+            sockets = FakeNetworkingSockets{};
+            NetSocketsBackend backend{nullptr, nullptr, nullptr, true};
+            NetSocketsTransport connection(backend, "failed-attempt");
+            if (is_host) {
+                ASSERT_TRUE(connection.Listen(1));
+            } else {
+                ASSERT_TRUE(connection.Connect("127.0.0.1", 1));
+            }
+            SteamNetConnectionStatusChangedCallback_t info{};
+            info.m_hConn = 2;
+            info.m_info.m_hListenSocket = is_host ? 1 : 0;
+            info.m_info.m_eState = k_ESteamNetworkingConnectionState_Connecting;
+            NetSocketsTransport::OnConnStatusChangedStatic(&info);
+            EXPECT_FALSE(connection.IsPeerConnected());
+            info.m_info.m_eState = state;
+            NetSocketsTransport::OnConnStatusChangedStatic(&info);
+
+            // No receive poll should be necessary to observe or release the failure.
+            EXPECT_FALSE(connection.IsPeerConnected());
+            EXPECT_EQ(sockets.close_calls, 1u);
+            EXPECT_FALSE(connection.SendFrame({0xAB}));
+            EXPECT_FALSE(connection.SendFrame({0xAB}, FrameDelivery::Unreliable));
+            EXPECT_EQ(sockets.send_calls, 0u);
+            std::vector<std::uint8_t> received;
+            EXPECT_FALSE(connection.TryReceiveFrame(received));
+            EXPECT_FALSE(connection.IsPeerConnected());
+            connection.Close();
+            EXPECT_EQ(sockets.close_calls, 1u);
+        }
+    }
+}
+
+TEST(NetSocketsConnectionTest, PermanentResultsWhileConnectingReleaseImmediately) {
+    for (const auto result :
+         {k_EResultInvalidParam, k_EResultInvalidState, k_EResultNoConnection, k_EResultFail}) {
+        SCOPED_TRACE(static_cast<int>(result));
+        auto& sockets = *SteamNetworkingSockets();
+        sockets = FakeNetworkingSockets{};
+        NetSocketsBackend backend{nullptr, nullptr, nullptr, true};
+        NetSocketsTransport connection(backend, "failed-send-attempt");
+        ASSERT_TRUE(connection.Connect("127.0.0.1", 1));
+        sockets.result = result;
+        EXPECT_FALSE(connection.SendFrame({0xAB}));
+        EXPECT_FALSE(connection.IsPeerConnected());
+        EXPECT_EQ(sockets.close_calls, 1u);
+        EXPECT_EQ(sockets.send_calls, 1u);
+        EXPECT_FALSE(connection.SendFrame({0xAB}));
+        EXPECT_EQ(sockets.send_calls, 1u);
+    }
+}
+
+TEST(NetSocketsConnectionTest, EstablishedClosuresDrainBackendAndLocalQueueInOrder) {
+    for (const auto state : {k_ESteamNetworkingConnectionState_ClosedByPeer,
+                             k_ESteamNetworkingConnectionState_ProblemDetectedLocally}) {
+        SCOPED_TRACE(static_cast<int>(state));
+        auto& sockets = *SteamNetworkingSockets();
+        sockets = FakeNetworkingSockets{};
+        NetSocketsBackend backend{nullptr, nullptr, nullptr, true};
+        NetSocketsTransport connection(backend, "established-closure");
+        ASSERT_TRUE(connection.Connect("127.0.0.1", 1));
+        SteamNetConnectionStatusChangedCallback_t info{};
+        info.m_hConn = 2;
+        info.m_info.m_eState = k_ESteamNetworkingConnectionState_Connected;
+        NetSocketsTransport::OnConnStatusChangedStatic(&info);
+        ASSERT_TRUE(connection.IsPeerConnected());
+        // Cross both the per-drain message bound and the local byte budget.
+        for (std::uint8_t index = 0; index < 40; ++index)
+            sockets.incoming.emplace_back(8192, index);
+        std::vector<std::uint8_t> received;
+        ASSERT_TRUE(connection.TryReceiveFrame(received));
+        EXPECT_EQ(received, (std::vector<std::uint8_t>(8192, 0)));
+        ASSERT_FALSE(sockets.incoming.empty());
+
+        info.m_info.m_eState = state;
+        NetSocketsTransport::OnConnStatusChangedStatic(&info);
+        EXPECT_EQ(sockets.close_calls, 0u);
+        EXPECT_TRUE(connection.IsPeerConnected());
+        EXPECT_FALSE(connection.SendFrame({0xAB}));
+        EXPECT_EQ(sockets.send_calls, 0u);
+        for (std::uint8_t index = 1; index < 40; ++index) {
+            EXPECT_TRUE(connection.IsPeerConnected());
+            ASSERT_TRUE(connection.TryReceiveFrame(received));
+            EXPECT_EQ(received, (std::vector<std::uint8_t>(8192, index)));
+        }
+        EXPECT_FALSE(connection.TryReceiveFrame(received));
+        EXPECT_FALSE(connection.IsPeerConnected());
+        EXPECT_EQ(sockets.close_calls, 1u);
+        EXPECT_EQ(sockets.released_messages, 40u);
+        EXPECT_TRUE(sockets.incoming.empty());
+    }
+}
+
 class NetSocketsTransportTest : public ::testing::Test {
 protected:
     NetSocketsBackend backend{nullptr, nullptr, nullptr, true};
