@@ -176,6 +176,12 @@ if(BUILD_TESTING)
     set_tests_properties(ReleaseVerifyScriptContract
         PROPERTIES LABELS "release;tools" TIMEOUT 60)
     add_test(
+        NAME ReleaseGatesScriptContract
+        COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/release/test_validate_release_gates.py")
+    set_tests_properties(ReleaseGatesScriptContract
+        PROPERTIES LABELS "release;tools" TIMEOUT 60)
+    add_test(
         NAME SlowestTestsScriptContract
         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_slowest_tests.py")
     set_tests_properties(SlowestTestsScriptContract
