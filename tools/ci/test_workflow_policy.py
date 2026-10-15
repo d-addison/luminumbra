@@ -17,7 +17,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 GUARDED = {
-    "ci.yml": ("linux", "Linux / GCC"),
+    "ci.yml": ("linux-result", "Linux / GCC"),
     "asan.yml": ("asan", "Linux / GCC ASan"),
     "performance.yml": ("preview-frame", "Preview frame / software OpenGL"),
 }
@@ -68,6 +68,11 @@ def guarded_jobs(workflows):
         yield filename, job_id, check_name, jobs(workflows[filename])[job_id]
     yield ("asan.yml", "asan-shard", "Linux / GCC ASan shard ${{ matrix.shard }}/2",
            jobs(workflows["asan.yml"])["asan-shard"])
+    ci = jobs(workflows["ci.yml"])
+    for job_id, name in (("linux", value(ci["linux"], "name", 4)),
+                         ("windows-msvc-result", "Windows / MSVC"),
+                         ("windows-ucrt64-result", "Windows / MSYS2 UCRT64")):
+        yield "ci.yml", job_id, name, ci[job_id]
 
 
 class WorkflowDraftPolicyTests(unittest.TestCase):
@@ -94,8 +99,9 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
                 self.assertEqual(value(job, "name", 4), check_name)
                 self.assertEqual(value(job, "runs-on", 4), "ubuntu-24.04")
                 self.assertEqual(value(job, "needs", 4),
-                                 "[changes, asan-shard]" if job_id == "asan" else "changes")
-                condition = "always()" if job_id == "asan" else "!cancelled()"
+                                 "[changes, asan-shard]" if job_id == "asan" else
+                                 f"[changes, {job_id.removesuffix('-result')}]" if job_id.endswith("-result") else "changes")
+                condition = "always()" if job_id == "asan" or job_id.endswith("-result") else "!cancelled()"
                 if filename == "performance.yml" or job_id == "asan-shard":
                     condition += (
                         " && ((github.event_name == 'pull_request' && "
@@ -215,15 +221,15 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
                          'ctest --preset debug-asan -LE manual --show-only=json-v1 > build/debug-asan/ctest.inventory.json\n'
                          'ctest --preset debug-asan --show-only=json-v1 > build/debug-asan/ctest.all.json\n'
                          '# Alternate independent tests; keep fixture setup/consumers in one shard.\n'
-                         'python3 tools/ci/asan_shards.py plan --shard ${{ matrix.shard }} --directory build/debug-asan\n'
+                         'python3 tools/ci/ctest_shards.py plan --profile asan --shard ${{ matrix.shard }} --directory build/debug-asan --require-suite SimBudgetWorldParity. --require-suite AmbientDeterminismReceipt.\n'
                          '# Recheck the ordered roster in the same context immediately before CTest.\n'
                          'env -u WAYLAND_DISPLAY XDG_SESSION_TYPE=x11 LIBGL_ALWAYS_SOFTWARE=1 \\\n'
-                         '  xvfb-run -a python3 tools/ci/asan_shards.py run --directory build/debug-asan')
+                         '  xvfb-run -a python3 tools/ci/ctest_shards.py run --profile asan --directory build/debug-asan')
         self.assertNotIn("check_ctest_junit.py", shard)
         self.assertNotIn("compare_ambient_receipts.py", shard)
         check = aggregate_steps["Merge shard JUnit and check inventory"]
         self.assertEqual(value(check, "id", 8), "tests")
-        self.assertIn("python3 tools/ci/asan_shards.py merge --directory build/asan-shards --output build/debug-asan/ctest.junit.xml", check)
+        self.assertIn("python3 tools/ci/ctest_shards.py merge --profile asan --directory build/asan-shards --output build/debug-asan/ctest.junit.xml", check)
         self.assertIn("python3 tools/ci/check_ctest_junit.py build/debug-asan/ctest.junit.xml --minimum-tests 2260", check)
         self.assertIn("--expect-labels asan --require-probe asan", check)
         for name in ("Download shard JUnit", "Merge shard JUnit and check inventory"):
@@ -248,6 +254,97 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
                          "'{\"tests\":\"${{ steps.tests.outcome }}\"}'")
         self.assertIn("name: qualification-asan-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}", aggregate)
         self.assertIn("python3 tools/ci/test_asan_shards.py", jobs(self.workflows["ci.yml"])["public-tree"])
+
+    def test_native_matrices_aggregates_limits_and_full_qualification_route(self):
+        ci = jobs(self.workflows["ci.yml"])
+        matrix = "${{ github.event_name == 'workflow_dispatch' && inputs.qualification_capture && fromJSON('[0]') || fromJSON('[1,2]') }}"
+        for job_id, profile, title, runner, limit, floor in (
+                ("linux", "gcc", "Linux / GCC", "ubuntu-24.04", "60", "2280"),
+                ("windows-msvc", "msvc", "Windows / MSVC", "windows-2025", "90", "2260"),
+                ("windows-ucrt64", "ucrt64", "Windows / MSYS2 UCRT64", "windows-2025", "85", "2260")):
+            with self.subTest(job=job_id):
+                producer, aggregate = ci[job_id], ci[job_id + "-result"]
+                self.assertEqual(value(producer, "shard", 8), matrix)
+                self.assertEqual(value(producer, "fail-fast", 6), "false")
+                self.assertEqual(value(producer, "timeout-minutes", 4), limit)
+                self.assertEqual(value(producer, "runs-on", 4), runner)
+                self.assertIn(title + " full qualification", value(producer, "name", 4))
+                self.assertIn(title + " shard {0}/2", value(producer, "name", 4))
+                self.assertEqual(value(aggregate, "name", 4), title)
+                self.assertEqual(value(aggregate, "if", 4), "${{ always() }}")
+                self.assertEqual(value(aggregate, "needs", 4), f"[changes, {job_id}]")
+                self.assertEqual(value(aggregate, "timeout-minutes", 4), "5")
+                self.assertEqual(self.workflows["ci.yml"].count("    name: " + title + "\n"), 1)
+                self.assertIsNone(value(producer, "continue-on-error", 4))
+                self.assertIsNone(value(aggregate, "continue-on-error", 4))
+                for command in ("plan", "run"):
+                    self.assertIn(f"ctest_shards.py {command} --profile {profile}", producer)
+                self.assertIn("ctest --preset release -LE manual --show-only=json-v1", producer)
+                self.assertIn("ctest --preset release --show-only=json-v1", producer)
+                self.assertIn("--require-suite SimBudgetWorldParity. --require-suite AmbientDeterminismReceipt.", producer)
+                gate = next(step for step in steps(aggregate) if "name: Require expected producers and route\n" in step)
+                self.assertEqual(value(gate, "SHARD_RESULT", 10), "${{ needs." + job_id + ".result }}")
+                for key, expression in (("NEEDS_CPP", "needs.changes.outputs.needs_cpp"),
+                                        ("CI_CANCELLED", "cancelled()"), ("CI_EVENT", "github.event_name"),
+                                        ("CI_DRAFT", "github.event.pull_request.draft")):
+                    self.assertEqual(value(gate, key, 10), "${{ " + expression + " }}")
+                self.assertIn('ctest_shards.py gate --result "$SHARD_RESULT" --cpp "$NEEDS_CPP"', gate)
+                merge = next(step for step in steps(aggregate) if "name: Merge shard JUnit and check inventory\n" in step)
+                self.assertIn(f"ctest_shards.py merge --profile {profile}", merge)
+                self.assertIn("--minimum-tests " + floor, merge)
+                self.assertIn('if [ "$CI_QUALIFICATION" = true ]; then full=(--full); fi', merge)
+                self.assertIn('"${full[@]}"', merge)
+                self.assertNotIn("merge-multiple: true", aggregate)
+                self.assertNotIn("actions/cache", aggregate)
+
+    def test_native_cache_writers_and_attempt_specific_retained_evidence(self):
+        ci = jobs(self.workflows["ci.yml"])
+        for job_id, profile in (("linux", "gcc"), ("windows-msvc", "msvc"), ("windows-ucrt64", "ucrt64")):
+            producer, aggregate = ci[job_id], ci[job_id + "-result"]
+            producer_steps = {step.splitlines()[0].removeprefix("      - name: "): step for step in steps(producer)}
+            for step in ("Clean compiler cache before saving", "Save compiler cache"):
+                self.assertTrue(value(producer_steps[step], "if", 8).startswith("${{ matrix.shard == 1 && "))
+            self.assertNotIn("matrix.shard", producer_steps["Restore compiler cache"])
+            upload = producer_steps["Upload shard JUnit"]
+            self.assertEqual(value(upload, "retention-days", 10), "30")
+            self.assertEqual(value(upload, "if-no-files-found", 10), "error")
+            self.assertEqual(value(upload, "path", 10).splitlines(), [
+                "build/release/ctest.junit.xml", "build/release/ctest.inventory.json", "build/release/ctest.partition.json"])
+            self.assertEqual(value(upload, "name", 10), profile + "-junit-${{ github.sha }}-${{ github.run_id }}-shard-${{ matrix.shard }}-attempt-${{ github.run_attempt }}")
+            self.assertIn("pattern: " + profile + "-junit-${{ github.sha }}-${{ github.run_id }}-shard-*-attempt-*", aggregate)
+            self.assertIn("--attempt ${{ github.run_attempt }}", aggregate)
+        self.assertIn("cache: ${{ matrix.shard == 1 && github.event_name == 'push'", ci["windows-ucrt64"])
+
+    def test_gcc_preserves_prefab_netsoak_packaging_and_diagnostics(self):
+        linux = jobs(self.workflows["ci.yml"])["linux"]
+        self.assertIn("-DLUMINUMBRA_ENABLE_PREFAB_RUNTIME=ON", linux)
+        self.assertIn("--require-suite PrefabRuntimeTest. --require-suite PrefabDigest.", linux)
+        prefab = next(step for step in steps(linux) if "name: Qualify installed prefab runtime\n" in step)
+        self.assertIn("steps.tests.outputs.prefab == 'true'", value(prefab, "if", 8))
+        self.assertIn("--ctest-report build/release/ctest.junit.xml", prefab)
+        netsoak = next(step for step in steps(linux) if "name: Test over-the-wire networking\n" in step)
+        self.assertIn("matrix.shard != 2", value(netsoak, "if", 8))
+        self.assertIn("-R '^NetSoak$'", netsoak)
+        self.assertIn("--parallel 1 --output-junit netsoak.junit.xml", netsoak)
+        for text in ("build/package-off", "build/package-linux", "build/release/Testing/Temporary",
+                     "build/release/test-artifacts", "include-hidden-files: true"):
+            self.assertIn(text, linux)
+        self.assertIn("python3 -I -B tools/ci/test_ctest_shards.py", jobs(self.workflows["ci.yml"])["public-tree"])
+
+    def test_ci_and_asan_bash_scripts_parse_without_executing_native_commands(self):
+        for filename in ("ci.yml", "asan.yml"):
+            for job_id, job in jobs(self.workflows[filename]).items():
+                windows = value(job, "runs-on", 4).startswith("windows-")
+                for step in steps(job):
+                    script = value(step, "run", 8)
+                    shell = value(step, "shell", 8) or ("pwsh" if windows else "bash")
+                    if script is None or not shell.startswith(("bash", "msys2")):
+                        continue
+                    script = re.sub(r"\$\{\{.*?\}\}", "1", script)
+                    with self.subTest(workflow=filename, job=job_id, step=step.splitlines()[0]):
+                        result = subprocess.run(["bash", "--noprofile", "--norc", "-n", "-c", script],
+                                                capture_output=True, text=True, timeout=10)
+                        self.assertEqual(result.returncode, 0, result.stderr)
 
     def assert_asan_rerun_artifacts(self, rerun_shards):
         blocks = jobs(self.workflows["asan.yml"])
@@ -302,11 +399,21 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
         self.assertEqual(value(upload, "path", 10).splitlines(), [
             "build/debug-asan/ctest.junit.xml",
             "build/debug-asan/ctest.inventory.json",
+            "build/debug-asan/ctest.partition.json",
             "build/debug-asan/qualification-shard.json",
         ])
 
     def test_asan_aggregate_schedules_under_cancellation_and_every_dependency_result(self):
         aggregate = jobs(self.workflows["asan.yml"])["asan"]
+        self.assert_aggregate_schedules(aggregate)
+
+    def test_native_aggregates_schedule_under_cancellation_and_every_dependency_result(self):
+        ci = jobs(self.workflows["ci.yml"])
+        for job in ("linux-result", "windows-msvc-result", "windows-ucrt64-result"):
+            with self.subTest(job=job):
+                self.assert_aggregate_schedules(ci[job])
+
+    def assert_aggregate_schedules(self, aggregate):
         expression = value(aggregate, "if", 4).removeprefix("${{ ").removesuffix(" }}")
         # Evaluate the workflow's status-only condition, including Actions'
         # implicit success() if no status function is present. A regression to

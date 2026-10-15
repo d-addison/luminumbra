@@ -306,6 +306,23 @@ def verify_producer(document):
     else:
         raise ValueError("producer job pagination did not terminate")
     matches = [job for job in jobs if job["name"] == document["job_name"]]
+    # Native qualification remains a single full producer with the original
+    # binary-bound manifest. New runs also have a required-name aggregate.
+    full = [job for job in jobs if job["name"] == document["job_name"] + " full qualification"]
+    if document["lane"] in ("linux-gcc", "windows-msvc", "windows-ucrt64"):
+        if full:
+            require(len(matches) == 1 and matches[0]["status"] == "completed" and
+                    matches[0]["conclusion"] == "success", "qualification aggregate not successful")
+            matches = full
+        else:
+            # Older full captures used the required name for the producer itself.
+            # Prove its native steps so a new aggregate alone cannot stand in.
+            required = ("Configure, build, and test",) if document["lane"] == "windows-msvc" else ("Configure", "Build", "Test")
+            require(len(matches) == 1, "full qualification producer missing")
+            for name in required:
+                native = [step for step in matches[0].get("steps", []) if step["name"] == name]
+                require(len(native) == 1 and native[0]["status"] == "completed" and
+                        native[0]["conclusion"] == "success", "full qualification native step missing or unsuccessful")
     require(len(matches) == 1 and matches[0]["status"] == "completed" and matches[0]["conclusion"] == "success", "producer job not independently successful")
     return {"job_id": matches[0]["id"], "completed_at": matches[0]["completed_at"]}
 

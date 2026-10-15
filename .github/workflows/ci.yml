@@ -90,13 +90,17 @@ jobs:
   # Drafts cannot merge. ready_for_review reruns these jobs on the same head;
   # maintainers must wait for that run's required checks to pass before merging.
   linux:
-    name: Linux / GCC
-    # Keep this existing required check red on drafts: job-level skips can
-    # satisfy GitHub branch protection before the ready run finishes.
+    name: ${{ matrix.shard == 0 && 'Linux / GCC full qualification' || format('Linux / GCC shard {0}/2', matrix.shard) }}
+    # The required-name aggregate and the producer guard both reject drafts.
     needs: changes
     if: ${{ !cancelled() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        # Qualification captures keep one full, binary-bound producer.
+        shard: ${{ github.event_name == 'workflow_dispatch' && inputs.qualification_capture && fromJSON('[0]') || fromJSON('[1,2]') }}
     env:
       CCACHE_COMPILERCHECK: content
       CCACHE_MAXSIZE: 250M
@@ -184,11 +188,11 @@ jobs:
         continue-on-error: true
         run: ccache -s || true
       - name: Clean compiler cache before saving
-        if: ${{ needs.changes.outputs.needs_cpp != 'false' && (always() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/devel') && (github.event_name != 'workflow_dispatch' || inputs.qualification_capture != true) && steps.compiler-cache.outcome == 'success' && steps.compiler-cache.outputs.cache-hit != 'true') }}
+        if: ${{ matrix.shard == 1 && needs.changes.outputs.needs_cpp != 'false' && (always() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/devel') && (github.event_name != 'workflow_dispatch' || inputs.qualification_capture != true) && steps.compiler-cache.outcome == 'success' && steps.compiler-cache.outputs.cache-hit != 'true') }}
         continue-on-error: true
         run: ccache --cleanup || true
       - name: Save compiler cache
-        if: ${{ needs.changes.outputs.needs_cpp != 'false' && (always() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/devel') && (github.event_name != 'workflow_dispatch' || inputs.qualification_capture != true) && steps.compiler-cache.outcome == 'success' && steps.compiler-cache.outputs.cache-hit != 'true') }}
+        if: ${{ matrix.shard == 1 && needs.changes.outputs.needs_cpp != 'false' && (always() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/devel') && (github.event_name != 'workflow_dispatch' || inputs.qualification_capture != true) && steps.compiler-cache.outcome == 'success' && steps.compiler-cache.outputs.cache-hit != 'true') }}
         # Cache writes are best-effort, including collisions on same-SHA reruns.
         continue-on-error: true
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -199,16 +203,20 @@ jobs:
         if: ${{ needs.changes.outputs.needs_cpp != 'false' }}
         id: tests
         run: |
+          ctest --preset release -LE manual --show-only=json-v1 > build/release/ctest.inventory.json
+          ctest --preset release --show-only=json-v1 > build/release/ctest.all.json
+          python3 tools/ci/ctest_shards.py plan --profile gcc --shard ${{ matrix.shard }} --directory build/release --require-suite SimBudgetWorldParity. --require-suite AmbientDeterminismReceipt. --require-suite PrefabRuntimeTest. --require-suite PrefabDigest.
           env -u WAYLAND_DISPLAY XDG_SESSION_TYPE=x11 LIBGL_ALWAYS_SOFTWARE=1 \
-            xvfb-run -a ctest --preset release --no-tests=error -LE manual \
-              --parallel 4 --timeout 180 --output-junit ctest.junit.xml
+            xvfb-run -a python3 tools/ci/ctest_shards.py run --profile gcc --directory build/release
           # Inventory floor: measured 2301 tests on devel b56cdba1, minus ~1% margin.
           # It exists to catch whole suites silently vanishing (a CMake guard flipping,
           # discovery failing), not to be an exact inventory. Raise it when tests are
           # added in bulk; lowering it needs a justification in the PR description.
-          python3 tools/ci/check_ctest_junit.py build/release/ctest.junit.xml --minimum-tests 2280
+          if [ '${{ matrix.shard }}' = 0 ]; then
+            python3 tools/ci/check_ctest_junit.py build/release/ctest.junit.xml --minimum-tests 2280
+          fi
       - name: Qualify installed prefab runtime
-        if: ${{ needs.changes.outputs.needs_cpp != 'false' }}
+        if: ${{ needs.changes.outputs.needs_cpp != 'false' && steps.tests.outputs.prefab == 'true' }}
         timeout-minutes: 5
         run: |
           python3 tools/ci/test_qualify_prefab_runtime.py
@@ -216,7 +224,7 @@ jobs:
             --ctest-report build/release/ctest.junit.xml \
             --output build/release/test-artifacts/prefab-runtime
       - name: Test over-the-wire networking
-        if: ${{ needs.changes.outputs.needs_cpp != 'false' }}
+        if: ${{ needs.changes.outputs.needs_cpp != 'false' && matrix.shard != 2 }}
         run: |
           ctest --preset release --no-tests=error -R '^NetSoak$' \
             --parallel 1 --output-junit netsoak.junit.xml
@@ -239,7 +247,7 @@ jobs:
         if: ${{ needs.changes.outputs.needs_cpp != 'false' && (always() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)) }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: linux-gcc-test-evidence-${{ github.sha }}
+          name: linux-gcc-test-evidence-${{ github.sha }}-${{ github.run_id }}-shard-${{ matrix.shard }}-attempt-${{ github.run_attempt }}
           path: |
             build/release/ctest.junit.xml
             build/release/netsoak.junit.xml
@@ -251,7 +259,7 @@ jobs:
         if: ${{ needs.changes.outputs.needs_cpp != 'false' && (always() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)) }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: linux-gcc-prefab-runtime-${{ github.sha }}
+          name: linux-gcc-prefab-runtime-${{ github.sha }}-${{ github.run_id }}-shard-${{ matrix.shard }}-attempt-${{ github.run_attempt }}
           path: build/release/test-artifacts/prefab-runtime
           # Retain the synthetic project's .luminumbra-author generations too.
           include-hidden-files: true
@@ -265,6 +273,18 @@ jobs:
           cmake -S . -B build/package-linux -G Ninja -DCMAKE_BUILD_TYPE=Release \
             -DBUILD_TESTING=OFF -DENABLE_BINARY_RELEASES=ON -DLUMINUMBRA_WARNINGS_AS_ERRORS=ON
           cmake --build build/package-linux --target package --parallel 4
+
+      - name: Upload shard JUnit
+        if: always() && needs.changes.outputs.needs_cpp != 'false' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: gcc-junit-${{ github.sha }}-${{ github.run_id }}-shard-${{ matrix.shard }}-attempt-${{ github.run_attempt }}
+          path: |
+            build/release/ctest.junit.xml
+            build/release/ctest.inventory.json
+            build/release/ctest.partition.json
+          if-no-files-found: error
+          retention-days: 30
 
   gns-compile-probe:
     name: GNS transport / compile probe
@@ -415,11 +435,16 @@ jobs:
           retention-days: 14
 
   windows-msvc:
-    name: Windows / MSVC
+    name: ${{ matrix.shard == 0 && 'Windows / MSVC full qualification' || format('Windows / MSVC shard {0}/2', matrix.shard) }}
     needs: changes
     if: ${{ !cancelled() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
     runs-on: windows-2025
     timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        # Qualification captures keep one full, binary-bound producer.
+        shard: ${{ github.event_name == 'workflow_dispatch' && inputs.qualification_capture && fromJSON('[0]') || fromJSON('[1,2]') }}
     env:
       CCACHE_COMPILERCHECK: content
       CCACHE_MAXSIZE: 500M
@@ -595,25 +620,29 @@ jobs:
             (Join-Path $env:RUNNER_TEMP 'mesa3d/x64/libgallium_wgl.dll') `
             -Destination build/release/bin
           $env:GALLIUM_DRIVER = 'llvmpipe'
-          ctest --preset release --no-tests=error -LE manual `
-            --parallel 4 --timeout 180 --output-junit ctest.junit.xml
+          ctest --preset release -LE manual --show-only=json-v1 | Set-Content -Encoding utf8 build/release/ctest.inventory.json
+          ctest --preset release --show-only=json-v1 | Set-Content -Encoding utf8 build/release/ctest.all.json
+          python tools/ci/ctest_shards.py plan --profile msvc --shard ${{ matrix.shard }} --directory build/release --require-suite SimBudgetWorldParity. --require-suite AmbientDeterminismReceipt.
+          python tools/ci/ctest_shards.py run --profile msvc --directory build/release
           # With llvmpipe deployed this lane holds the same standard as the
           # Linux software-GL lane: no GL-related skip is acceptable, and any
           # remaining skip is a hard failure.
           # Inventory floor: measured 2284 tests on devel b56cdba1, minus ~1% margin (see the Linux lane for the policy).
-          python tools/ci/check_ctest_junit.py build/release/ctest.junit.xml --minimum-tests 2260
+          if (${{ matrix.shard }} -eq 0) {
+            python tools/ci/check_ctest_junit.py build/release/ctest.junit.xml --minimum-tests 2260
+          }
       - name: Report compiler cache statistics
         if: ${{ needs.changes.outputs.needs_cpp != 'false' && (always() && !(github.event_name == 'workflow_dispatch' && inputs.qualification_capture) && steps.ccache-stage.outcome == 'success') }}
         continue-on-error: true
         shell: pwsh
         run: ccache -s
       - name: Clean compiler cache before saving
-        if: ${{ needs.changes.outputs.needs_cpp != 'false' && (always() && github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/devel') && !(github.event_name == 'workflow_dispatch' && inputs.qualification_capture) && steps.compiler-cache.outcome == 'success' && steps.compiler-cache.outputs.cache-hit != 'true') }}
+        if: ${{ matrix.shard == 1 && needs.changes.outputs.needs_cpp != 'false' && (always() && github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/devel') && !(github.event_name == 'workflow_dispatch' && inputs.qualification_capture) && steps.compiler-cache.outcome == 'success' && steps.compiler-cache.outputs.cache-hit != 'true') }}
         continue-on-error: true
         shell: pwsh
         run: ccache --cleanup
       - name: Save compiler cache
-        if: ${{ needs.changes.outputs.needs_cpp != 'false' && (always() && github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/devel') && !(github.event_name == 'workflow_dispatch' && inputs.qualification_capture) && steps.compiler-cache.outcome == 'success' && steps.compiler-cache.outputs.cache-hit != 'true') }}
+        if: ${{ matrix.shard == 1 && needs.changes.outputs.needs_cpp != 'false' && (always() && github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/devel') && !(github.event_name == 'workflow_dispatch' && inputs.qualification_capture) && steps.compiler-cache.outcome == 'success' && steps.compiler-cache.outputs.cache-hit != 'true') }}
         continue-on-error: true
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -638,7 +667,7 @@ jobs:
         if: ${{ needs.changes.outputs.needs_cpp != 'false' && (always()) }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: windows-msvc-test-evidence-${{ github.sha }}
+          name: windows-msvc-test-evidence-${{ github.sha }}-${{ github.run_id }}-shard-${{ matrix.shard }}-attempt-${{ github.run_attempt }}
           path: |
             build/release/ctest.junit.xml
             build/release/Testing/Temporary
@@ -649,7 +678,7 @@ jobs:
         if: ${{ needs.changes.outputs.needs_cpp != 'false' && (always()) }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: windows-msvc-worldgen-diagnostic-${{ github.sha }}
+          name: windows-msvc-worldgen-diagnostic-${{ github.sha }}-${{ github.run_id }}-shard-${{ matrix.shard }}-attempt-${{ github.run_attempt }}
           path: build/release/worldgen-diagnostic
           if-no-files-found: warn
           retention-days: 14
@@ -670,8 +699,20 @@ jobs:
             -DBUILD_TESTING=OFF -DENABLE_BINARY_RELEASES=ON -DLUMINUMBRA_WARNINGS_AS_ERRORS=ON
           cmake --build build/package-windows --target package --parallel 4
 
+      - name: Upload shard JUnit
+        if: always() && needs.changes.outputs.needs_cpp != 'false' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: msvc-junit-${{ github.sha }}-${{ github.run_id }}-shard-${{ matrix.shard }}-attempt-${{ github.run_attempt }}
+          path: |
+            build/release/ctest.junit.xml
+            build/release/ctest.inventory.json
+            build/release/ctest.partition.json
+          if-no-files-found: error
+          retention-days: 30
+
   windows-ucrt64:
-    name: Windows / MSYS2 UCRT64
+    name: ${{ matrix.shard == 0 && 'Windows / MSYS2 UCRT64 full qualification' || format('Windows / MSYS2 UCRT64 shard {0}/2', matrix.shard) }}
     # Runs on ready pull requests (devel- and main-bound) and on pushes to main, so a
     # MinGW/UCRT break shows on the PR that causes it instead of at promotion. It is
     # not a required devel context, so it informs rather than blocks there; it stays
@@ -686,6 +727,11 @@ jobs:
     # the Mesa3D download add a few more here, so the cap keeps ~1.9x
     # headroom over the projected ~45 min.
     timeout-minutes: 85
+    strategy:
+      fail-fast: false
+      matrix:
+        # Qualification captures keep one full, binary-bound producer.
+        shard: ${{ github.event_name == 'workflow_dispatch' && inputs.qualification_capture && fromJSON('[0]') || fromJSON('[1,2]') }}
     env:
       CCACHE_COMPILERCHECK: content
       CCACHE_MAXSIZE: 500M
@@ -705,7 +751,7 @@ jobs:
       - name: Set up MSYS2 UCRT64
         uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2
         with:
-          cache: ${{ github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/devel') }}
+          cache: ${{ matrix.shard == 1 && github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/devel') }}
           msystem: UCRT64
           update: true
           install: >-
@@ -786,12 +832,12 @@ jobs:
         shell: msys2 {0}
         run: ccache -s || true
       - name: Clean compiler cache before saving
-        if: ${{ always() && github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/devel') && !(github.event_name == 'workflow_dispatch' && inputs.qualification_capture) && steps.compiler-cache.outcome == 'success' && steps.compiler-cache.outputs.cache-hit != 'true' }}
+        if: ${{ matrix.shard == 1 && always() && github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/devel') && !(github.event_name == 'workflow_dispatch' && inputs.qualification_capture) && steps.compiler-cache.outcome == 'success' && steps.compiler-cache.outputs.cache-hit != 'true' }}
         continue-on-error: true
         shell: msys2 {0}
         run: ccache --cleanup || true
       - name: Save compiler cache
-        if: ${{ always() && github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/devel') && !(github.event_name == 'workflow_dispatch' && inputs.qualification_capture) && steps.compiler-cache.outcome == 'success' && steps.compiler-cache.outputs.cache-hit != 'true' }}
+        if: ${{ matrix.shard == 1 && always() && github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/devel') && !(github.event_name == 'workflow_dispatch' && inputs.qualification_capture) && steps.compiler-cache.outcome == 'success' && steps.compiler-cache.outputs.cache-hit != 'true' }}
         continue-on-error: true
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -815,13 +861,17 @@ jobs:
           # stays near 190 s -> 360 s keeps ~2x runner-variance headroom
           # while catching the multi-minute stalls the old 720 s leash was
           # raised to paper over.
-          ctest --preset release --no-tests=error -LE manual \
-            --parallel 4 --timeout 360 --output-junit ctest.junit.xml
+          ctest --preset release -LE manual --show-only=json-v1 > build/release/ctest.inventory.json
+          ctest --preset release --show-only=json-v1 > build/release/ctest.all.json
+          python tools/ci/ctest_shards.py plan --profile ucrt64 --shard ${{ matrix.shard }} --directory build/release --require-suite SimBudgetWorldParity. --require-suite AmbientDeterminismReceipt.
+          python tools/ci/ctest_shards.py run --profile ucrt64 --directory build/release
           # With llvmpipe deployed this lane holds the same standard as the
           # other software-GL lanes: no GL-related skip is acceptable, and
           # any remaining skip is a hard failure.
           # Inventory floor: measured 2284 tests on devel b56cdba1, minus ~1% margin (see the Linux lane for the policy).
-          python tools/ci/check_ctest_junit.py build/release/ctest.junit.xml --minimum-tests 2260
+          if [ '${{ matrix.shard }}' = 0 ]; then
+            python tools/ci/check_ctest_junit.py build/release/ctest.junit.xml --minimum-tests 2260
+          fi
       - name: Bind manual qualification evidence
         if: always() && (github.event_name == 'workflow_dispatch' && inputs.qualification_capture)
         shell: msys2 {0}
@@ -842,7 +892,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: windows-ucrt64-test-evidence-${{ github.sha }}
+          name: windows-ucrt64-test-evidence-${{ github.sha }}-${{ github.run_id }}-shard-${{ matrix.shard }}-attempt-${{ github.run_attempt }}
           path: |
             build/release/ctest.junit.xml
             build/release/Testing/Temporary
@@ -884,6 +934,195 @@ jobs:
         continue-on-error: true
         shell: msys2 {0}
         run: python tools/ci/slowest_tests.py build/release/ctest.junit.xml --summary-file "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload shard JUnit
+        if: always() && needs.changes.outputs.needs_cpp != 'false' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ucrt64-junit-${{ github.sha }}-${{ github.run_id }}-shard-${{ matrix.shard }}-attempt-${{ github.run_attempt }}
+          path: |
+            build/release/ctest.junit.xml
+            build/release/ctest.inventory.json
+            build/release/ctest.partition.json
+          if-no-files-found: error
+          retention-days: 30
+
+  linux-result:
+    name: Linux / GCC
+    needs: [changes, linux]
+    if: ${{ always() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Reject draft pull requests
+        shell: bash
+        env:
+          CI_EVENT_NAME: ${{ github.event_name }}
+          CI_PR_DRAFT: ${{ github.event.pull_request.draft }}
+        run: |
+          if [ "$CI_EVENT_NAME" = "pull_request" ] && [ "$CI_PR_DRAFT" != "false" ]; then
+            echo "::error::Draft pull requests cannot merge. Mark ready for review and wait for the full checks."
+            exit 1
+          fi
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Require expected producers and route
+        env:
+          SHARD_RESULT: ${{ needs.linux.result }}
+          NEEDS_CPP: ${{ needs.changes.outputs.needs_cpp }}
+          CI_CANCELLED: ${{ cancelled() }}
+          CI_EVENT: ${{ github.event_name }}
+          CI_DRAFT: ${{ github.event.pull_request.draft }}
+          CI_QUALIFICATION: ${{ github.event_name == 'workflow_dispatch' && inputs.qualification_capture }}
+          CI_ENABLED: "true"
+        run: >-
+          python3 tools/ci/ctest_shards.py gate --result "$SHARD_RESULT" --cpp "$NEEDS_CPP"
+          --cancelled "$CI_CANCELLED" --event "$CI_EVENT" --draft "$CI_DRAFT"
+          --qualification "$CI_QUALIFICATION" --enabled "$CI_ENABLED"
+      - name: Download shard JUnit
+        if: needs.linux.result == 'success' && needs.changes.outputs.needs_cpp != 'false'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          pattern: gcc-junit-${{ github.sha }}-${{ github.run_id }}-shard-*-attempt-*
+          path: build/gcc-shards
+      - name: Merge shard JUnit and check inventory
+        if: needs.linux.result == 'success' && needs.changes.outputs.needs_cpp != 'false'
+        env:
+          CI_QUALIFICATION: ${{ github.event_name == 'workflow_dispatch' && inputs.qualification_capture }}
+        run: |
+          full=()
+          if [ "$CI_QUALIFICATION" = true ]; then full=(--full); fi
+          python3 tools/ci/ctest_shards.py collect --directory build/gcc-shards \
+            --prefix gcc-junit-${{ github.sha }}-${{ github.run_id }} --attempt ${{ github.run_attempt }} "${full[@]}"
+          python3 tools/ci/ctest_shards.py merge --profile gcc --directory build/gcc-shards \
+            --output build/release/ctest.junit.xml "${full[@]}"
+          python3 tools/ci/check_ctest_junit.py build/release/ctest.junit.xml --minimum-tests 2280
+      - name: Upload merged JUnit
+        if: needs.linux.result == 'success' && needs.changes.outputs.needs_cpp != 'false'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: gcc-merged-junit-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: build/release/ctest.junit.xml
+          if-no-files-found: error
+          retention-days: 30
+
+  windows-msvc-result:
+    name: Windows / MSVC
+    needs: [changes, windows-msvc]
+    if: ${{ always() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Reject draft pull requests
+        shell: bash
+        env:
+          CI_EVENT_NAME: ${{ github.event_name }}
+          CI_PR_DRAFT: ${{ github.event.pull_request.draft }}
+        run: |
+          if [ "$CI_EVENT_NAME" = "pull_request" ] && [ "$CI_PR_DRAFT" != "false" ]; then
+            echo "::error::Draft pull requests cannot merge. Mark ready for review and wait for the full checks."
+            exit 1
+          fi
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Require expected producers and route
+        env:
+          SHARD_RESULT: ${{ needs.windows-msvc.result }}
+          NEEDS_CPP: ${{ needs.changes.outputs.needs_cpp }}
+          CI_CANCELLED: ${{ cancelled() }}
+          CI_EVENT: ${{ github.event_name }}
+          CI_DRAFT: ${{ github.event.pull_request.draft }}
+          CI_QUALIFICATION: ${{ github.event_name == 'workflow_dispatch' && inputs.qualification_capture }}
+          CI_ENABLED: "true"
+        run: >-
+          python3 tools/ci/ctest_shards.py gate --result "$SHARD_RESULT" --cpp "$NEEDS_CPP"
+          --cancelled "$CI_CANCELLED" --event "$CI_EVENT" --draft "$CI_DRAFT"
+          --qualification "$CI_QUALIFICATION" --enabled "$CI_ENABLED"
+      - name: Download shard JUnit
+        if: needs.windows-msvc.result == 'success' && needs.changes.outputs.needs_cpp != 'false'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          pattern: msvc-junit-${{ github.sha }}-${{ github.run_id }}-shard-*-attempt-*
+          path: build/msvc-shards
+      - name: Merge shard JUnit and check inventory
+        if: needs.windows-msvc.result == 'success' && needs.changes.outputs.needs_cpp != 'false'
+        env:
+          CI_QUALIFICATION: ${{ github.event_name == 'workflow_dispatch' && inputs.qualification_capture }}
+        run: |
+          full=()
+          if [ "$CI_QUALIFICATION" = true ]; then full=(--full); fi
+          python3 tools/ci/ctest_shards.py collect --directory build/msvc-shards \
+            --prefix msvc-junit-${{ github.sha }}-${{ github.run_id }} --attempt ${{ github.run_attempt }} "${full[@]}"
+          python3 tools/ci/ctest_shards.py merge --profile msvc --directory build/msvc-shards \
+            --output build/release/ctest.junit.xml "${full[@]}"
+          python3 tools/ci/check_ctest_junit.py build/release/ctest.junit.xml --minimum-tests 2260
+      - name: Upload merged JUnit
+        if: needs.windows-msvc.result == 'success' && needs.changes.outputs.needs_cpp != 'false'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: msvc-merged-junit-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: build/release/ctest.junit.xml
+          if-no-files-found: error
+          retention-days: 30
+
+  windows-ucrt64-result:
+    name: Windows / MSYS2 UCRT64
+    needs: [changes, windows-ucrt64]
+    if: ${{ always() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Reject draft pull requests
+        shell: bash
+        env:
+          CI_EVENT_NAME: ${{ github.event_name }}
+          CI_PR_DRAFT: ${{ github.event.pull_request.draft }}
+        run: |
+          if [ "$CI_EVENT_NAME" = "pull_request" ] && [ "$CI_PR_DRAFT" != "false" ]; then
+            echo "::error::Draft pull requests cannot merge. Mark ready for review and wait for the full checks."
+            exit 1
+          fi
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Require expected producers and route
+        env:
+          SHARD_RESULT: ${{ needs.windows-ucrt64.result }}
+          NEEDS_CPP: ${{ needs.changes.outputs.needs_cpp }}
+          CI_CANCELLED: ${{ cancelled() }}
+          CI_EVENT: ${{ github.event_name }}
+          CI_DRAFT: ${{ github.event.pull_request.draft }}
+          CI_QUALIFICATION: ${{ github.event_name == 'workflow_dispatch' && inputs.qualification_capture }}
+          CI_ENABLED: ${{ needs.changes.outputs.needs_cpp != 'false' && (github.event_name == 'pull_request' || github.ref_name == 'main' || (github.event_name == 'workflow_dispatch' && inputs.qualification_capture)) }}
+        run: >-
+          python3 tools/ci/ctest_shards.py gate --result "$SHARD_RESULT" --cpp "$NEEDS_CPP"
+          --cancelled "$CI_CANCELLED" --event "$CI_EVENT" --draft "$CI_DRAFT"
+          --qualification "$CI_QUALIFICATION" --enabled "$CI_ENABLED"
+      - name: Download shard JUnit
+        if: needs.windows-ucrt64.result == 'success' && needs.changes.outputs.needs_cpp != 'false'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          pattern: ucrt64-junit-${{ github.sha }}-${{ github.run_id }}-shard-*-attempt-*
+          path: build/ucrt64-shards
+      - name: Merge shard JUnit and check inventory
+        if: needs.windows-ucrt64.result == 'success' && needs.changes.outputs.needs_cpp != 'false'
+        env:
+          CI_QUALIFICATION: ${{ github.event_name == 'workflow_dispatch' && inputs.qualification_capture }}
+        run: |
+          full=()
+          if [ "$CI_QUALIFICATION" = true ]; then full=(--full); fi
+          python3 tools/ci/ctest_shards.py collect --directory build/ucrt64-shards \
+            --prefix ucrt64-junit-${{ github.sha }}-${{ github.run_id }} --attempt ${{ github.run_attempt }} "${full[@]}"
+          python3 tools/ci/ctest_shards.py merge --profile ucrt64 --directory build/ucrt64-shards \
+            --output build/release/ctest.junit.xml "${full[@]}"
+          python3 tools/ci/check_ctest_junit.py build/release/ctest.junit.xml --minimum-tests 2260
+      - name: Upload merged JUnit
+        if: needs.windows-ucrt64.result == 'success' && needs.changes.outputs.needs_cpp != 'false'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ucrt64-merged-junit-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: build/release/ctest.junit.xml
+          if-no-files-found: error
+          retention-days: 30
 
   lint:
     name: Format changed files
@@ -997,6 +1236,7 @@ jobs:
           python3 tools/ci/test_check_ctest_junit.py
           python3 tools/ci/test_workflow_policy.py
           python3 tools/ci/test_asan_shards.py
+          python3 -I -B tools/ci/test_ctest_shards.py
           python3 tools/ci/test_tidy_cache.py
           python3 tools/ci/test_tidy_shard.py
           python3 tools/ci/test_validate_visual_catalog.py

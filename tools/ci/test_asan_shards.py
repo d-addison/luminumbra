@@ -18,7 +18,7 @@ SPEC.loader.exec_module(shards)
 
 
 def test(name, **properties):
-    return {"name": name, "properties": [{"name": key, "value": value} for key, value in properties.items()]}
+    return {"name": name, "command": ["test-binary", name], "properties": [{"name": key, "value": value} for key, value in properties.items()]}
 
 
 class AsanShardTests(unittest.TestCase):
@@ -140,7 +140,7 @@ class AsanShardTests(unittest.TestCase):
                 check, execute = invoke.call_args_list
                 common = ["ctest", "--preset", "debug-asan", "--test-dir", str(self.root), "-LE", "manual"]
                 self.assertEqual(check.args[0], [*common, "--show-only=json-v1"])
-                self.assertEqual(check.kwargs, {"check": True, "capture_output": True, "text": True})
+                self.assertEqual(check.kwargs, {"check": True, "capture_output": True, "text": True, "encoding": "utf-8"})
                 self.assertEqual(execute.args[0], [*common, "--no-tests=error", "-I",
                                                  str(self.root / "ctest.shard-index.txt"),
                                                  "--parallel", "2", "--timeout", "300",
