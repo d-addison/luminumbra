@@ -50,7 +50,8 @@ std::string HashPresetIdentity(const nlohmann::json& preset, const nlohmann::jso
 bool ResolveDependencyManifest(TerrainPresetLoadResult& preset,
                                const std::filesystem::path& data_root,
                                nlohmann::json& manifest,
-                               std::vector<std::string>& errors) {
+                               std::vector<std::string>& errors,
+                               const World::WorldgenFileStatusReader& read_status) {
     // Use the generator's loaders to record their decisions and only the bytes
     // they consume. In particular, a rejected placement stops that pool before
     // any pieces are read; malformed pieces reject a pool after all piece reads.
@@ -100,6 +101,15 @@ bool ResolveDependencyManifest(TerrainPresetLoadResult& preset,
         }
         return true;
     };
+    const auto dependency_exists = [&](const std::filesystem::path& path) {
+        std::error_code ec;
+        const auto status = read_status(path, ec);
+        // A not-found status can carry ENOENT/ENOTDIR; other status failures
+        // must refuse identity construction, just like throwing symlink_status.
+        if (ec && status.type() != std::filesystem::file_type::not_found)
+            throw std::filesystem::filesystem_error("worldgen dependency status", path, ec);
+        return std::filesystem::exists(status);
+    };
     try {
         if (preset.params.biomes_enabled) {
             const auto relative = Filesystem::PathFromUtf8(preset.extras.biomes.table);
@@ -107,7 +117,7 @@ bool ResolveDependencyManifest(TerrainPresetLoadResult& preset,
             if (logical.empty())
                 return false;
             const auto path = data_root / Filesystem::LexicallyNormalPath(relative);
-            if (!std::filesystem::exists(std::filesystem::symlink_status(path))) {
+            if (!dependency_exists(path)) {
                 state(logical, "biome-table-absent:legacy-classification");
             } else {
                 snapshot->biome_table = World::BiomeTable::Load(path, read_file);
@@ -122,7 +132,7 @@ bool ResolveDependencyManifest(TerrainPresetLoadResult& preset,
         }
         if (preset.params.structures_enabled) {
             const auto structures = data_root / "common/structures";
-            if (!std::filesystem::exists(std::filesystem::symlink_status(structures))) {
+            if (!dependency_exists(structures)) {
                 state("common/structures", "structures-directory-absent");
             } else {
                 if (!std::filesystem::is_directory(structures)) {
@@ -406,9 +416,11 @@ TerrainPresetLoadResult LoadTerrainPreset(const std::filesystem::path& preset_pa
         data, data_root, Filesystem::GenericUtf8PathString(preset_path));
 }
 
-TerrainPresetLoadResult LoadTerrainPresetFromJson(const nlohmann::json& source,
-                                                  const std::filesystem::path& data_root,
-                                                  const std::string& provenance) {
+TerrainPresetLoadResult
+LoadTerrainPresetFromJson(const nlohmann::json& source,
+                          const std::filesystem::path& data_root,
+                          const std::string& provenance,
+                          const World::WorldgenFileStatusReader& read_status) {
     TerrainPresetLoadResult result;
     // Validate revision type before resolving defaults, retaining the no-throw error path.
     if (source.contains("schema_rev") && !source["schema_rev"].is_number_integer()) {
@@ -713,7 +725,7 @@ TerrainPresetLoadResult LoadTerrainPresetFromJson(const nlohmann::json& source,
                     result.warnings);
 
     nlohmann::json manifest;
-    if (!ResolveDependencyManifest(result, data_root, manifest, result.errors))
+    if (!ResolveDependencyManifest(result, data_root, manifest, result.errors, read_status))
         return result;
     result.preset_content_hash = HashPresetIdentity(source, manifest);
     result.ok = true;

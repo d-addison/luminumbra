@@ -19,6 +19,7 @@
 #include <nlohmann/json_fwd.hpp>
 
 #include "../systems/SHIELD_WorldSystem.h" // Systems::TerrainGenParams
+#include "WorldgenFileReader.h"
 
 namespace Luminumbra::world {
 
@@ -144,8 +145,11 @@ bool LoadTerrainPresetOverride(const std::filesystem::path& preset_path,
 // unknown-key warnings. LoadTerrainPreset(path) reads+parses the file and
 // DELEGATES here with the file-derived data root. Identity binds the selected
 // biome table and enabled structure placement/piece files through portable paths.
-TerrainPresetLoadResult LoadTerrainPresetFromJson(const nlohmann::json& data,
-                                                  const std::filesystem::path& data_root,
-                                                  const std::string& provenance = "<memory>");
+// The status reader queries links themselves and permits deterministic I/O failure coverage.
+TerrainPresetLoadResult LoadTerrainPresetFromJson(
+    const nlohmann::json& data,
+    const std::filesystem::path& data_root,
+    const std::string& provenance = "<memory>",
+    const World::WorldgenFileStatusReader& read_status = World::ReadWorldgenSymlinkStatus);
 
 } // namespace Luminumbra::world

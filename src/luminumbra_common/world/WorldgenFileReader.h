@@ -13,10 +13,21 @@ namespace Luminumbra::World {
 // the generator's loaders, including reads that lead to a rejected table/pool.
 using WorldgenFileReader = std::function<bool(const std::filesystem::path&, std::string&)>;
 
-inline bool ReadWorldgenFile(const std::filesystem::path& path, std::string& bytes) {
+// Keep status failures reproducible independently of native runtime error mappings.
+using WorldgenFileStatusReader =
+    std::function<std::filesystem::file_status(const std::filesystem::path&, std::error_code&)>;
+
+inline std::filesystem::file_status ReadWorldgenSymlinkStatus(const std::filesystem::path& path,
+                                                              std::error_code& ec) {
+    return std::filesystem::symlink_status(path, ec);
+}
+
+inline bool ReadWorldgenFileWithStatus(const std::filesystem::path& path,
+                                       std::string& bytes,
+                                       const WorldgenFileStatusReader& read_status) {
     bytes.clear();
     std::error_code ec;
-    if (!std::filesystem::is_regular_file(path, ec) || ec)
+    if (!std::filesystem::is_regular_file(read_status(path, ec)) || ec)
         return false;
     std::ifstream file(path, std::ios::binary);
     if (!file.is_open())
@@ -27,6 +38,13 @@ inline bool ReadWorldgenFile(const std::filesystem::path& path, std::string& byt
         bytes.append(buffer.data(), static_cast<std::size_t>(file.gcount()));
     }
     return !file.bad() && file.eof();
+}
+
+inline bool ReadWorldgenFile(const std::filesystem::path& path, std::string& bytes) {
+    return ReadWorldgenFileWithStatus(
+        path, bytes, [](const std::filesystem::path& file, std::error_code& ec) {
+            return std::filesystem::status(file, ec);
+        });
 }
 
 } // namespace Luminumbra::World

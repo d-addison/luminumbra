@@ -513,17 +513,50 @@ TEST(TerrainPresetLoaderTest, PresentUnreadableWorldgenInputsRefuseWithoutIdenti
 TEST(TerrainPresetLoaderTest, BiomeStatusErrorFallsBackDirectlyButRefusesPreset) {
     const Luminumbra::TestSupport::ScopedTempFile temp("preset-biome-status-", ".json");
     const auto root = temp.Path().parent_path();
-    // An over-long component causes a status error even on privileged runners.
-    const auto relative = fs::path(std::string(4096, 'x')) / "biomes.json";
+    // An over-long component is unavailable even on privileged runners, but
+    // Windows runtimes can classify it as not_found with a nonzero error_code.
+    const auto relative =
+        Luminumbra::Filesystem::PathFromUtf8(std::string(4096, 'x')) / "biomes.json";
     const auto path = root / relative;
     std::error_code ec;
     EXPECT_FALSE(fs::is_regular_file(path, ec));
     ASSERT_TRUE(ec);
+    const auto resolved_path =
+        root / Luminumbra::Filesystem::LexicallyNormalPath(Luminumbra::Filesystem::PathFromUtf8(
+                   Luminumbra::Filesystem::GenericUtf8PathString(relative)));
+    ASSERT_EQ(resolved_path, path);
+    const auto native_status = fs::symlink_status(resolved_path, ec);
+    RecordProperty("native_biome_status_type", static_cast<int>(native_status.type()));
+    RecordProperty("native_biome_status_error", ec.value());
+    RecordProperty("native_biome_status_category", ec.category().name());
     std::string bytes = "previous contents";
     EXPECT_FALSE(Luminumbra::World::ReadWorldgenFile(path, bytes));
     EXPECT_TRUE(bytes.empty());
+    Luminumbra::World::BiomeTable unavailable;
+    ASSERT_NO_THROW(unavailable = Luminumbra::World::BiomeTable::Load(path));
+    EXPECT_FALSE(unavailable.ok());
+    EXPECT_TRUE(unavailable.empty());
+    EXPECT_FALSE(unavailable.errors().empty());
+
+    // Inject an I/O status failure through the same query used by the
+    // reader and manifest, rather than depending on native not-found mappings.
+    const Luminumbra::World::WorldgenFileStatusReader read_status = [&](const fs::path& queried,
+                                                                        std::error_code& error) {
+        EXPECT_EQ(queried, path);
+        error = std::make_error_code(std::errc::io_error);
+        return fs::file_status(fs::file_type::none);
+    };
+    ASSERT_EQ(read_status(path, ec).type(), fs::file_type::none);
+    ASSERT_EQ(ec, std::errc::io_error);
+    const Luminumbra::World::WorldgenFileReader read_file = [&](const fs::path& file,
+                                                                std::string& contents) {
+        return Luminumbra::World::ReadWorldgenFileWithStatus(file, contents, read_status);
+    };
+    bytes = "previous contents";
+    EXPECT_FALSE(read_file(path, bytes));
+    EXPECT_TRUE(bytes.empty());
     Luminumbra::World::BiomeTable table;
-    ASSERT_NO_THROW(table = Luminumbra::World::BiomeTable::Load(path));
+    ASSERT_NO_THROW(table = Luminumbra::World::BiomeTable::Load(path, read_file));
     EXPECT_FALSE(table.ok());
     EXPECT_TRUE(table.empty());
     EXPECT_FALSE(table.errors().empty());
@@ -551,7 +584,7 @@ TEST(TerrainPresetLoaderTest, BiomeStatusErrorFallsBackDirectlyButRefusesPreset)
         Luminumbra::Filesystem::GenericUtf8PathString(relative);
     preset["generation_params"]["features"]["structures_enabled"] = false;
     TerrainPresetLoadResult refused;
-    ASSERT_NO_THROW(refused = LoadTerrainPresetFromJson(preset, root));
+    ASSERT_NO_THROW(refused = LoadTerrainPresetFromJson(preset, root, "<memory>", read_status));
     EXPECT_FALSE(refused.ok);
     EXPECT_TRUE(refused.preset_content_hash.empty());
     EXPECT_FALSE(refused.params.worldgen_dependencies);
@@ -597,8 +630,10 @@ TEST(TerrainPresetLoaderTest, DanglingPlacementUsesAbsentDefaultsAndIdentity) {
     std::error_code ec;
     fs::create_symlink("missing-placement.json", placement, ec);
 #ifdef _WIN32
-    // Only symlink coverage needs Windows developer mode or symlink privilege.
-    if (ec.value() != 1314)
+    // Only symlink coverage needs Windows developer mode/privilege and a
+    // runtime that supports symlinks; absent-defaults coverage always runs.
+    if (ec.value() != 1314 && ec != std::errc::function_not_supported &&
+        ec != std::errc::operation_not_supported)
 #endif
     {
         ASSERT_FALSE(ec) << ec.message();
