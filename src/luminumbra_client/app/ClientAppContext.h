@@ -9,6 +9,8 @@
 // byte for byte, and none of the member types logs from a destructor (the
 // teardown contract that moved the UI hot-reload watcher into main() scope).
 
+#include "app/DeveloperUiPolicy.h"
+
 #include "../../../include/luminumbra/core/Types.h"
 #include "luminumbra_common/ai/CreatureSpeciesRegistry.h"
 #include "luminumbra_common/animation/AnimationRuntime.h"
@@ -397,6 +399,7 @@ struct RenderBenchmarkState {
 struct ClientAppContext {
     HudState hud;
     OverlayState overlay;
+    bool scenario_active = false;
     CaptureModes capture;
     MenuBackdrop menu;
     LoadingState loading;
@@ -415,11 +418,17 @@ struct ClientAppContext {
 
 inline bool DeveloperUiAllowed(const ClientAppContext& app) {
     const auto& capture = app.capture;
-    return app.overlay.imgui_enabled && capture.timelapse_frames == 0 && !capture.scene_active &&
-           capture.frame_scan_path.empty() && !capture.render_parity_active &&
-           capture.render_benchmark_path.empty() && capture.survey_dir.empty() &&
-           capture.bake_impostor_path.empty() && capture.ui_screenshot_screen.empty() &&
-           capture.ui_thumbs == 0;
+    return DeveloperUiAllowed(DeveloperUiPolicy{app.overlay.imgui_enabled,
+                                                app.scenario_active,
+                                                capture.timelapse_frames != 0,
+                                                capture.scene_active,
+                                                !capture.frame_scan_path.empty(),
+                                                capture.render_parity_active,
+                                                !capture.render_benchmark_path.empty(),
+                                                !capture.survey_dir.empty(),
+                                                !capture.bake_impostor_path.empty(),
+                                                !capture.ui_screenshot_screen.empty(),
+                                                capture.ui_thumbs != 0});
 }
 
 } // namespace Luminumbra::Client::App

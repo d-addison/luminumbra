@@ -2,16 +2,18 @@
 
 The client provides one developer console and a widget registry in both ordinary
 and QA builds, including Release. F1 opens the hub by default. Ordinary Settings
-also provides **Open developer console**, so an unbound console remains accessible.
+also provides **Controls → Developer bindings and hotkey help**, so an unbound
+console remains accessible.
 Opening it leaves simulation running. Closing the hub preserves widget visibility
 and active rendering effects.
 
 ## Widgets and shortcuts
 
-The hub lists every widget, including unavailable services, with a reason. Search
-matches IDs, titles and categories. Each row provides Toggle, Show, Hide, Rebind
-and Unbind. A window close button uses the same visibility operation as its row
-and commands. Interactive panels can remain open after the hub closes; passive
+The hub lists every module with a short description, resolved hotkeys and any
+unavailable-service reason. Search matches IDs, titles, categories and descriptions.
+Panel rows provide Toggle, Show and Hide. Each binding provides Rebind and Unbind;
+effect bindings also provide Run. Action-only modules explicitly have no panel.
+A window close button uses the same visibility operation as its row and commands. Interactive panels can remain open after the hub closes; passive
 widgets draw independently and never take focus.
 
 | ID | Default visibility | Default shortcut | Presentation |
@@ -19,11 +21,12 @@ widgets draw independently and never take focus.
 | `perf.hud` | On | Unbound | Passive frame performance |
 | `perf.gpu` | Off | F3 | GPU pass diagnostics |
 | `render.shaders` | Off | F10 | Shader roster, reload and uniform editing |
-| `render.debug_views` | Off | Unbound | G-buffer view controls |
-| `render.wireframe` | Off | Unbound | Wireframe effect controls |
+| `shader.reload` | No panel | F5 | Reload all shaders |
+| `render.debug_views` | Off | F6 (cycle views) | G-buffer view controls |
+| `render.wireframe` | Off | F9 (toggle effect) | Wireframe effect controls |
 | `world.generation` | Off | F7 | Independent generation preview |
 | `client.settings` | Off | F8 | Client settings |
-| `runtime.time` | Off | Unbound | Time controls |
+| `runtime.time` | Off | `[` slower, `]` faster, `\` reset | Time controls |
 | `runtime.time_indicator` | On, when scale differs from 1 | Unbound | Passive time indicator |
 | `player.state` | Off | Unbound | Current player diagnostics |
 | `farm.debug` | Off | Unbound | Farming diagnostics |
@@ -32,13 +35,13 @@ widgets draw independently and never take focus.
 | `ui.debugger` | Off | Unbound | RmlUi debugger adapter |
 | `console.help` | Off | Unbound | Generated help |
 
-Actions have separate bindings: F5 reloads all shaders, F6 cycles debug views,
-F9 toggles the wireframe effect, `[` slows time, `]` speeds it up and `\` resets
-it. Showing or hiding their panels does not perform these actions. Photo mode
-owns `[` and `]` for aperture; developer time shortcuts are suppressed there.
+Effect bindings belong to their module rows: `shader.reload`, `render.debug-cycle`,
+`render.wireframe-toggle`, `time.slower`, `time.faster` and `time.reset`. Showing or
+hiding their panels does not perform these actions. Photo mode owns `[` and `]`
+for aperture; developer time shortcuts are suppressed there.
 
-These are defaults. **Actions and resolved bindings**, generated Help, `bindings`
-and the ordinary Settings shortcut list report the actual bindings, including
+These are defaults. Module rows, **Actions and resolved bindings**, generated Help,
+`bindings` and the ordinary Settings shortcut list report the actual bindings, including
 changes and conflicts. Help also includes gameplay bindings and loading, photo,
 objectives and farming presentation controls. Availability snapshots refresh on
 opening the hub and world/menu transitions; **Refresh services** updates them
@@ -97,8 +100,11 @@ remains usable during developer interaction; Escape closes the most recently
 focused developer interaction before gameplay pause. Developer interaction blocks
 movement, farming, terraforming, photo actions, mouse-look and gameplay scroll.
 Focused RmlUi controls retain ownership when developer interaction closes, and
-printable console bindings do not steal text-input characters. Passive widgets
-never acquire input ownership.
+printable console bindings do not steal text-input characters. Resolved developer
+actions and panel bindings, including bindings on non-function keys, remain usable
+while a panel owns input. Focused console/ImGui text entry and RmlUi text fields
+block developer actions, including function keys. Passive widgets never acquire
+input ownership.
 
 Ownership updates within the event batch, clears pending gameplay edges and
 quarantines held keys until release. Cursor mode follows remaining interactions;
@@ -107,13 +113,23 @@ conflicts in overlapping scopes, window/navigation reservations and resolved
 gameplay controls. On startup and developer reset, gameplay wins and conflicting
 developer defaults become unbound with a reported reason.
 
-Visibility and bindings live in schema 1 of the existing `user.developer` overlay.
+Visibility, bindings and interactive panel layouts live in schema 1 of the existing
+`user.developer` overlay. `layouts` records store `x`, `y`, `width`, `height` and
+`open` by module ID; the hub uses `console.toggle`. Absent layout records use the
+panel defaults. In otherwise valid JSON, malformed layout records, including numeric
+overflow at any depth, are logged and ignored without discarding valid sibling settings.
+A wrong-type `layouts` container (including an array or scalar with overflowing numbers)
+is also logged and ignored as a whole. Both initial loading and user overlays apply
+this tolerance only within `user.developer.layouts`; errors in other settings retain
+their existing loading behavior.
+The Controls settings section links to the hub for developer rebinding.
 Absent `perf.hud` means on. The hub, commands and ordinary Settings performance
 switch edit the same registry value. Changes save immediately; failed saves are
 reported, retain dirty state and can be retried with `settings save` or the hub
 button. Bounded unknown IDs survive for forward compatibility. Video, audio and
-integer gameplay controls retain their existing formats. ImGui state stores only
-layout, not visibility authority.
+integer gameplay controls retain their existing formats. The client disables ImGui
+disk ini persistence; completed moves/resizes save to the user overlay.
+Saved layout open state and registry visibility stay synchronized.
 
 Debug modes, wireframe, time scale, shader watch/uniform state and preview
 parameters remain runtime-only. Developer preferences are excluded from the
@@ -123,14 +139,16 @@ intentional runtime operations; simply displaying their controls performs neithe
 ## Capture and widget registration
 
 `--no-ui` remains a temporary override. Automated timelapse, scene, frame-scan,
-render-parity, render-benchmark, survey, impostor and UI screenshot/thumbnail runs
-suppress developer drawing and shortcuts without rewriting saved preferences.
+render-parity, render-benchmark, survey, impostor, scenario and UI screenshot/thumbnail
+runs suppress developer drawing and shortcuts without rewriting saved preferences.
 The ecology timelapse retains its explicit creature-label override. Essential
 loading and gameplay presentation keep their existing capture rules.
 
 Register definitions explicitly through `app/RegisterDeveloperWidgets.cpp` after
 configuration and services exist. `BuiltinDeveloperWidgets()` supplies stable
-IDs, titles, categories, defaults, persistence keys and presentation/focus policy.
+IDs, titles, short descriptions, categories, defaults, effect bindings, persistence
+keys and presentation/focus policy. `Presentation::ActionOnly` explicitly represents
+a module without a panel or visibility binding.
 Supply availability and contents through `DeveloperWidgetServices`; missing
 services remain listed with an unavailable reason. Definitions seal at startup;
 duplicate IDs are rejected and mutations requested while drawing are deferred.

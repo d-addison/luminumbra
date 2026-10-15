@@ -17,19 +17,18 @@ InputOwner UiInputRouter::Owner() const {
         return InputOwner::Developer;
     if (m_ownership.rml_text_input)
         return InputOwner::RmlUi;
-    if (m_ownership.imgui_keyboard || m_ownership.imgui_mouse)
+    if (m_ownership.imgui_text_input || m_ownership.imgui_keyboard || m_ownership.imgui_mouse)
         return InputOwner::Developer;
     if (m_ownership.rml_interaction || !m_ownership.in_world)
         return InputOwner::RmlUi;
     return InputOwner::Gameplay;
 }
-KeyRoute UiInputRouter::Key(
-    int key, int action, bool console_toggle, bool developer_shortcut, bool panel_shortcut) {
+KeyRoute UiInputRouter::Key(int key, int action, bool console_toggle, bool developer_shortcut) {
     m_suppressCharacter = false;
     if (action == 0) {
         m_held.erase(key);
         m_quarantined.erase(key);
-        m_consumedToggleKeys.erase(key);
+        m_consumedShortcutKeys.erase(key);
         return KeyRoute::Ignore;
     }
     m_held.insert(key);
@@ -37,7 +36,7 @@ KeyRoute UiInputRouter::Key(
         return KeyRoute::Ignore;
     if (m_ownership.binding_capture)
         return KeyRoute::Capture;
-    if (action == 2 && m_consumedToggleKeys.contains(key)) {
+    if (action == 2 && m_consumedShortcutKeys.contains(key)) {
         m_suppressCharacter = true;
         return KeyRoute::Ignore;
     }
@@ -48,23 +47,31 @@ KeyRoute UiInputRouter::Key(
         // GLFW sends character callbacks after key callbacks, including on repeat.
         m_suppressCharacter = true;
         if (action == 1)
-            m_consumedToggleKeys.insert(key);
+            m_consumedShortcutKeys.insert(key);
         return action == 1 ? KeyRoute::ConsoleToggle : KeyRoute::Ignore;
     }
     if (action == 1 && key == 256 && (Owner() == InputOwner::Developer || m_ownership.rml_debugger))
         return KeyRoute::DeveloperEscape;
-    // Existing panel function keys can also close their panel while it owns input.
-    if (action == 1 && developer_shortcut && panel_shortcut && key >= 290 && key <= 314 &&
-        Owner() == InputOwner::Developer)
+    // Panel ownership blocks gameplay, but resolved developer bindings remain usable.
+    // Text entry blocks actions for every key, including function keys.
+    const bool text_capture = m_ownership.imgui_text_input || m_ownership.rml_text_input;
+    if (action == 1 && developer_shortcut && !text_capture &&
+        (Owner() == InputOwner::Developer || m_ownership.rml_debugger)) {
+        m_suppressCharacter = true;
+        m_consumedShortcutKeys.insert(key);
         return KeyRoute::DeveloperShortcut;
+    }
     if (Owner() == InputOwner::Developer)
         return KeyRoute::Ignore;
     if (m_quarantined.contains(key))
         return KeyRoute::Ignore;
     if (Owner() == InputOwner::RmlUi)
         return KeyRoute::RmlUi;
-    if (action == 1 && developer_shortcut)
+    if (action == 1 && developer_shortcut && !text_capture) {
+        m_suppressCharacter = true;
+        m_consumedShortcutKeys.insert(key);
         return KeyRoute::DeveloperShortcut;
+    }
     return KeyRoute::Gameplay;
 }
 InputOwner UiInputRouter::Character(unsigned int codepoint) const {

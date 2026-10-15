@@ -48,16 +48,18 @@ void DeveloperConsole::Initialize(DeveloperHost host, std::vector<WidgetDef> wid
     m_initialized = true;
     m_host = std::move(host);
     for (auto& def : widgets) {
+        if (def.presentation == Presentation::ActionOnly)
+            def.available =
+                m_host.renderer_available
+                    ? m_host.renderer_available
+                    : AvailabilityFn([] { return Availability{false, "Renderer unavailable"}; });
         if (def.id == "console.help") {
             def.available = [] {
                 return Availability{};
             };
-            def.draw = [](DeveloperFrameAdapter& frame) {
-                if (frame.draw) {
-                    WidgetDef help;
-                    help.id = "console.help";
+            def.draw = [help = def](DeveloperFrameAdapter& frame) {
+                if (frame.draw)
                     frame.draw(help, {});
-                }
             };
         }
         m_widgets.Register(std::move(def));
@@ -92,12 +94,42 @@ void DeveloperConsole::SetOpen(bool open) {
         m_shellSequence = m_widgets.NextInteractionSequence();
         m_focusInput = true;
     }
+    const bool changed = m_open != open;
     m_open = open;
+    if (m_layout) {
+        m_layout->open = open;
+        if (changed)
+            PreferencesChanged();
+    }
     if (open)
         RefreshAvailability();
 }
 bool DeveloperConsole::IsOpen() const {
     return m_open;
+}
+std::optional<DeveloperPanelLayout> DeveloperConsole::Layout() const {
+    return m_layout;
+}
+void DeveloperConsole::SetLayout(DeveloperPanelLayout layout) {
+    if (!ValidDeveloperPanelLayout(layout))
+        return;
+    layout.open = m_open;
+    if (m_layout != layout) {
+        m_layout = layout;
+        m_dirty = true;
+        if (!m_batch_preferences)
+            SavePreferences();
+    }
+}
+void DeveloperConsole::RestoreLayout(DeveloperPanelLayout layout) {
+    if (!ValidDeveloperPanelLayout(layout))
+        return;
+    m_layout = layout;
+    m_open = layout.open;
+    m_focusInput = m_open;
+    if (m_open)
+        m_shellSequence = m_widgets.NextInteractionSequence();
+    RefreshAvailability();
 }
 bool DeveloperConsole::HasInteraction() const {
     return m_open || IsCapturing() || m_widgets.HasInteractivePanel();
@@ -199,8 +231,12 @@ std::string DeveloperConsole::WidgetHelp() const {
     std::ostringstream out;
     for (const auto& def : m_widgets.List()) {
         out << def.id << " — " << def.title << " ("
-            << (m_widgets.Visible(def.id) ? "shown" : "hidden") << ") "
-            << FormatKeyChord(m_bindings.Get(def.id));
+            << (def.presentation == Presentation::ActionOnly ? "action only"
+                : m_widgets.Visible(def.id)                  ? "shown"
+                                                             : "hidden")
+            << ") — " << def.description;
+        for (const auto& binding : def.BindingDefinitions())
+            out << " / " << binding.id << " = " << FormatKeyChord(m_bindings.Get(binding.id));
         if (def.available) {
             const auto a = def.available();
             if (!a.available)
@@ -383,21 +419,16 @@ void DeveloperConsole::RegisterCommands() {
                     std::find(levels.begin(), levels.end(), Text(args, 0)) - levels.begin());
                 return CommandResult{};
             });
-    auto action = [&](const char* id,
-                      int key,
-                      const char* name,
-                      unsigned scopes = Global | Gameplay | Photo) {
-        m_bindings.Register({id, KeyChord{key, 0}, scopes});
-        m_commands.BindAction(id, name);
-    };
-    action("console.toggle", 290, "console toggle");
-    action("shader.reload", 294, "shader reload");
-    action("render.debug-cycle", 295, "render debug-cycle");
-    action("render.wireframe-toggle", 298, "render wireframe-toggle");
-    action("time.slower", 91, "time slower", Gameplay);
-    action("time.faster", 93, "time faster", Gameplay);
-    action("time.reset", 92, "time reset", Gameplay | Photo);
+    m_bindings.Register({"console.toggle", KeyChord{290, 0}});
+    m_commands.BindAction("console.toggle", "console toggle");
+    m_commands.BindAction("shader.reload", "shader reload");
+    m_commands.BindAction("render.debug-cycle", "render debug-cycle");
+    m_commands.BindAction("render.wireframe-toggle", "render wireframe-toggle");
+    m_commands.BindAction("time.slower", "time slower");
+    m_commands.BindAction("time.faster", "time faster");
+    m_commands.BindAction("time.reset", "time reset");
     for (const auto& def : m_widgets.List())
-        m_commands.BindAction(def.id, "widget toggle", {def.id});
+        if (def.presentation != Presentation::ActionOnly && def.shortcuts.empty())
+            m_commands.BindAction(def.id, "widget toggle", {def.id});
 }
 } // namespace Luminumbra::Client::Debug

@@ -1087,6 +1087,8 @@ void DrawSettingsContents(ClientAppContext& app,
                 app.hud.rebindCaptureAction = idx;
         }
         ImGui::TextDisabled("click a binding, then press a key (Esc cancels)");
+        if (ImGui::Button("Developer bindings and hotkey help"))
+            console.SetOpen(true);
     }
     if (ImGui::Button("Save settings")) {
         const std::string path = luminumbra::core::SystemConfig::DefaultUserOverlayPath();

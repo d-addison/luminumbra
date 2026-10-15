@@ -28,6 +28,7 @@ struct UiInputOwnership {
     bool rml_interaction = false;
     bool rml_debugger = false;
     bool rml_text_input = false;
+    bool imgui_text_input = false;
     bool imgui_keyboard = false;
     bool imgui_mouse = false;
     bool operator==(const UiInputOwnership&) const = default;
@@ -37,11 +38,7 @@ class UiInputRouter {
 public:
     bool SetOwnership(UiInputOwnership ownership);
     InputOwner Owner() const;
-    KeyRoute Key(int key,
-                 int action,
-                 bool console_toggle,
-                 bool developer_shortcut,
-                 bool panel_shortcut = false);
+    KeyRoute Key(int key, int action, bool console_toggle, bool developer_shortcut);
     InputOwner Character(unsigned int codepoint) const;
     bool GameplayAllowed() const;
     bool GameplayKeyAllowed(int key) const;
@@ -54,7 +51,7 @@ private:
     UiInputOwnership m_ownership;
     std::set<int> m_held;
     std::set<int> m_quarantined;
-    std::set<int> m_consumedToggleKeys;
+    std::set<int> m_consumedShortcutKeys;
     std::uint64_t m_revision = 0;
     bool m_suppressCharacter = false;
 };

@@ -129,7 +129,7 @@ TEST_F(UiFixture, ShellListsCompleteInventoryAndDoesNotPollHiddenAdaptersEveryFr
     ASSERT_NE(shell, nullptr);
     EXPECT_TRUE(shell->Active);
     EXPECT_TRUE(console.HasInteraction());
-    EXPECT_EQ(console.Widgets().List().size(), 15u);
+    EXPECT_EQ(console.Widgets().List().size(), 16u);
     const auto hiddenQueries = queries["world.generation"];
     const auto unavailableQueries = queries["perf.gpu"];
     context.NextFrame();
@@ -139,7 +139,7 @@ TEST_F(UiFixture, ShellListsCompleteInventoryAndDoesNotPollHiddenAdaptersEveryFr
     EXPECT_EQ(draws["world.generation"], 0);
     EXPECT_EQ(draws["perf.gpu"], 0);
     EXPECT_EQ(effects, 0);
-    EXPECT_EQ(saves, 0);
+    EXPECT_EQ(saves, 1); // The shell geometry was saved once, rather than on every frame.
     console.SetOpen(false);
     context.NextFrame();
     console.Draw(frame);
@@ -153,14 +153,18 @@ TEST_F(UiFixture, PanelsHelpAndPassiveWidgetsDrawWithFakeServicesWithoutActions)
         console.Widgets().SetVisible(def.id, true);
     const int saved = saves;
     console.Draw(frame);
-    EXPECT_NE(ImGui::FindWindowByName("Developer help"), nullptr);
+    EXPECT_NE(ImGui::FindWindowByName("Help###console.help"), nullptr);
     EXPECT_EQ(draws["perf.gpu"], 0);
     EXPECT_EQ(draws["world.generation"], 1);
     EXPECT_EQ(draws["runtime.time"], 1);
     EXPECT_EQ(draws["render.debug_views"], 1);
     EXPECT_EQ(draws["render.wireframe"], 1);
-    EXPECT_EQ(effects, 0); // Opening or displaying controls never performs their actions.
-    EXPECT_EQ(saves, saved);
+    EXPECT_EQ(effects, 0);   // Opening or displaying controls never performs their actions.
+    EXPECT_GT(saves, saved); // Newly displayed panels persist their initial layout.
+    const int layout_saves = saves;
+    context.NextFrame();
+    console.Draw(frame);
+    EXPECT_EQ(saves, layout_saves); // Stable geometry does not write settings again.
     EXPECT_NE(console.HelpText().find("widget show"), std::string::npos);
     EXPECT_NE(console.HelpText().find("F1"), std::string::npos);
 }
@@ -178,6 +182,51 @@ TEST_F(UiFixture, HiddenInventoryTracksAvailabilityOnlyAfterAnExplicitRefresh) {
     console.Draw(frame);
     EXPECT_EQ(queries["player.state"], before + 1);
     EXPECT_EQ(draws["player.state"], 0);
+}
+
+TEST_F(UiFixture, PanelGeometryRestoresFromUserLayoutAndIgnoresImGuiIni) {
+    ScopedImGuiContext context;
+    ASSERT_EQ(ImGui::GetIO().IniFilename, nullptr);
+    const DeveloperPanelLayout saved{180, 110, 610, 430, true};
+    ASSERT_TRUE(console.Widgets().SetVisible("render.shaders", true));
+    ASSERT_TRUE(console.Widgets().SetLayout("render.shaders", saved));
+    console.Draw(frame);
+    auto* panel = ImGui::FindWindowByName("Shaders###render.shaders");
+    ASSERT_NE(panel, nullptr);
+    EXPECT_FLOAT_EQ(panel->Pos.x, saved.x);
+    EXPECT_FLOAT_EQ(panel->Pos.y, saved.y);
+    EXPECT_FLOAT_EQ(panel->Size.x, saved.width);
+    EXPECT_FLOAT_EQ(panel->Size.y, saved.height);
+    EXPECT_TRUE(panel->Flags & ImGuiWindowFlags_NoSavedSettings);
+    ImGui::SetWindowPos(panel, ImVec2(240, 160));
+    ImGui::SetWindowSize(panel, ImVec2(700, 450));
+    context.NextFrame();
+    console.Draw(frame);
+    const auto moved = console.Widgets().Layout("render.shaders");
+    ASSERT_TRUE(moved);
+    EXPECT_FLOAT_EQ(moved->x, 240);
+    EXPECT_FLOAT_EQ(moved->width, 700);
+    ImGui::SetWindowCollapsed(panel, true);
+    context.NextFrame();
+    console.Draw(frame);
+    const auto collapsed = console.Widgets().Layout("render.shaders");
+    ASSERT_TRUE(collapsed);
+    EXPECT_FLOAT_EQ(collapsed->height, 450);
+    ImGui::SetWindowCollapsed(panel, false);
+    console.Widgets().SetVisible("render.shaders", false);
+    context.NextFrame();
+    console.Draw(frame);
+    const auto closed = console.Widgets().Layout("render.shaders");
+    ASSERT_TRUE(closed);
+    EXPECT_FALSE(closed->open);
+    console.Widgets().SetVisible("render.shaders", true);
+    context.NextFrame();
+    console.Draw(frame);
+    EXPECT_FLOAT_EQ(panel->Pos.x, 240);
+    EXPECT_FLOAT_EQ(panel->Size.x, 700);
+    std::size_t ini_size = 0;
+    const std::string ini = ImGui::SaveIniSettingsToMemory(&ini_size);
+    EXPECT_EQ(ini.find("render.shaders"), std::string::npos);
 }
 
 TEST(DeveloperConsoleUi, ScopedContextRestoresPreviousContext) {

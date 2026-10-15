@@ -1643,7 +1643,8 @@ add_executable(developer_console_imgui_test
     "${_developer_imgui_source}/imgui_tables.cpp"
     "${_developer_imgui_source}/imgui_widgets.cpp"
 )
-target_include_directories(developer_console_imgui_test PRIVATE ../src/luminumbra_client)
+target_include_directories(developer_console_imgui_test PRIVATE
+    ../src/luminumbra_client ../src/luminumbra_common)
 target_include_directories(developer_console_imgui_test SYSTEM PRIVATE "${_developer_imgui_source}")
 target_link_libraries(developer_console_imgui_test PRIVATE gtest_main Threads::Threads)
 luminumbra_configure_first_party_target(developer_console_imgui_test)

@@ -41,6 +41,9 @@ public:
     std::shared_ptr<DeveloperLogSink> Log() const;
     void SetOpen(bool open);
     bool IsOpen() const;
+    std::optional<DeveloperPanelLayout> Layout() const;
+    void SetLayout(DeveloperPanelLayout layout);
+    void RestoreLayout(DeveloperPanelLayout layout);
     bool HasInteraction() const;
     bool CloseTopInteraction();
     void BeginRebind(const std::string& action);
@@ -71,6 +74,7 @@ private:
     std::uint64_t m_shellSequence = 0;
     bool m_focusInput = false;
     bool m_open = false;
+    std::optional<DeveloperPanelLayout> m_layout;
     bool m_refreshInventory = true;
     std::map<std::string, Availability> m_inventoryAvailability;
     mutable bool m_refreshHelp = true;

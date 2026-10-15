@@ -1,3 +1,4 @@
+#include "app/DeveloperUiPolicy.h"
 #include "app/RegisterDeveloperWidgets.h"
 #include "app/UiInputRouter.h"
 #include "core/LogDispatcherSink.h"
@@ -49,6 +50,7 @@ TEST_F(ConsoleFixture, CompleteInventoryDefaultsBindingsAndUnavailableRows) {
     const std::vector<std::string> ids{"perf.hud",
                                        "perf.gpu",
                                        "render.shaders",
+                                       "shader.reload",
                                        "render.debug_views",
                                        "render.wireframe",
                                        "world.generation",
@@ -69,7 +71,8 @@ TEST_F(ConsoleFixture, CompleteInventoryDefaultsBindingsAndUnavailableRows) {
         EXPECT_EQ(console.Widgets().Visible(ids[i]),
                   ids[i] == "perf.hud" || ids[i] == "runtime.time_indicator");
         ASSERT_TRUE(defs[i].available);
-        if (ids[i] != "console.help") {
+        EXPECT_FALSE(defs[i].description.empty());
+        if (ids[i] != "console.help" && ids[i] != "shader.reload") {
             EXPECT_FALSE(defs[i].available().available);
             EXPECT_FALSE(defs[i].available().reason.empty());
         }
@@ -494,6 +497,7 @@ TEST(DeveloperRouting, CapturedTypingBlocksEveryGameplayPollAndTimeShortcut) {
     auto state = World();
     router.SetOwnership(state);
     state.console_open = true;
+    state.imgui_text_input = true;
     router.SetOwnership(state);
     for (const int key : {87, 32, 70, 71, 72, 74, 82, 84, 257, 91, 93, 92}) {
         EXPECT_EQ(router.Key(key, 1, false, key >= 91 && key <= 93), KeyRoute::Ignore);
@@ -502,6 +506,7 @@ TEST(DeveloperRouting, CapturedTypingBlocksEveryGameplayPollAndTimeShortcut) {
     EXPECT_FALSE(router.GameplayMouseAllowed());
     EXPECT_FALSE(router.CursorCaptured());
     state.console_open = false;
+    state.imgui_text_input = false;
     router.SetOwnership(state);
     EXPECT_FALSE(router.GameplayKeyAllowed(87));
     EXPECT_EQ(router.Key(87, 2, false, false), KeyRoute::Ignore);
@@ -684,14 +689,14 @@ TEST(DeveloperWidgets, CompleteAdaptersShareRowsCommandsShortcutsAndCloseButtons
     frame.draw = [&](const WidgetDef&, const DrawFn& contents) {
         contents(frame);
     };
-    ASSERT_EQ(console.Widgets().List().size(), 15u);
+    ASSERT_EQ(console.Widgets().List().size(), 16u);
     console.Widgets().DrawVisible(frame, Presentation::PassiveOverlay);
     EXPECT_EQ(draws["perf.hud"], 1);
     EXPECT_EQ(draws["runtime.time_indicator"], 1);
     for (const auto& def : console.Widgets().List()) {
         if (def.id == "console.help")
             continue;
-        EXPECT_TRUE(def.draw);
+        EXPECT_EQ(static_cast<bool>(def.draw), def.presentation != Presentation::ActionOnly);
         EXPECT_TRUE(def.available || services.contains(def.id));
         if (!def.default_visible) {
             EXPECT_EQ(draws[def.id], 0);
@@ -718,7 +723,7 @@ TEST(DeveloperWidgets, CompleteAdaptersShareRowsCommandsShortcutsAndCloseButtons
         auto ownership = World();
         ownership.interactive_panel = true;
         router.SetOwnership(ownership);
-        EXPECT_EQ(router.Key(chord->key, 1, false, true, true), KeyRoute::DeveloperShortcut);
+        EXPECT_EQ(router.Key(chord->key, 1, false, true), KeyRoute::DeveloperShortcut);
         EXPECT_TRUE(console.InvokeAction(*shortcut).success);
         EXPECT_FALSE(console.Widgets().Visible(id));
         const int before = draws[id], queries = availability[id];
@@ -728,36 +733,51 @@ TEST(DeveloperWidgets, CompleteAdaptersShareRowsCommandsShortcutsAndCloseButtons
     }
 }
 
-TEST(DeveloperWidgets, EveryRegisteredWidgetCanShowHideToggleRebindUnbindAndReset) {
+TEST(DeveloperWidgets, EveryModuleCanRebindUnbindAndResetWithoutDuplicateVisibilityBindings) {
     DeveloperWidgetServices services;
     for (const auto& def : BuiltinDeveloperWidgets())
         services[def.id] = {{}, [](DeveloperFrameAdapter&) {
                             }};
+    DeveloperHost host;
+    host.renderer_available = [] {
+        return Availability{};
+    };
+    host.execute = [](const std::string&, const CommandArguments&) {
+        return CommandResult{};
+    };
     DeveloperConsole console;
-    console.Initialize({}, RegisterDeveloperWidgets(services));
+    console.Initialize(std::move(host), RegisterDeveloperWidgets(services));
     int key = 65;
     for (const auto& def : console.Widgets().List()) {
-        EXPECT_TRUE(console.Submit("widget show " + def.id).success);
-        EXPECT_TRUE(console.Widgets().Visible(def.id));
-        EXPECT_TRUE(console.Submit("widget hide " + def.id).success);
+        const bool panel = def.presentation != Presentation::ActionOnly;
+        EXPECT_EQ(console.Submit("widget show " + def.id).success, panel);
+        EXPECT_EQ(console.Widgets().Visible(def.id), panel);
+        EXPECT_EQ(console.Submit("widget hide " + def.id).success, panel);
         EXPECT_FALSE(console.Widgets().Visible(def.id));
-        std::string error;
-        const KeyChord chord{key++, 2};
-        EXPECT_TRUE(console.Widgets().Rebind(def.id, chord, error)) << error;
-        const auto matched = console.Bindings().Match(chord, 1, Gameplay);
-        ASSERT_TRUE(matched);
-        EXPECT_EQ(*matched, def.id);
-        EXPECT_TRUE(console.InvokeAction(*matched).success);
-        EXPECT_TRUE(console.Widgets().Visible(def.id));
-        EXPECT_TRUE(console.Submit("widget toggle " + def.id).success);
-        EXPECT_FALSE(console.Widgets().Visible(def.id));
-        EXPECT_TRUE(console.Submit("unbind " + def.id).success);
-        EXPECT_FALSE(console.Bindings().Get(def.id));
+        for (const auto& binding : def.BindingDefinitions()) {
+            std::string error;
+            const KeyChord chord{key++, 2};
+            EXPECT_TRUE(console.Bindings().Rebind(binding.id, chord, error)) << error;
+            const auto matched = console.Bindings().Match(chord, 1, Gameplay);
+            ASSERT_TRUE(matched);
+            EXPECT_EQ(*matched, binding.id);
+            EXPECT_TRUE(console.InvokeAction(*matched).success);
+            EXPECT_EQ(console.Widgets().Visible(def.id), panel && def.shortcuts.empty());
+            if (panel) {
+                EXPECT_TRUE(console.Submit("widget toggle " + def.id).success);
+                console.Widgets().SetVisible(def.id, false);
+            }
+            EXPECT_TRUE(console.Submit("unbind " + binding.id).success);
+            EXPECT_FALSE(console.Bindings().Get(binding.id));
+        }
     }
+    for (const auto* id : {"render.debug_views", "render.wireframe", "runtime.time"})
+        EXPECT_FALSE(console.Bindings().Contains(id));
     console.Widgets().RestoreDefaults();
     for (const auto& def : console.Widgets().List()) {
         EXPECT_EQ(console.Widgets().Visible(def.id), def.default_visible);
-        EXPECT_EQ(console.Bindings().Get(def.id), def.default_binding);
+        for (const auto& binding : def.BindingDefinitions())
+            EXPECT_EQ(console.Bindings().Get(binding.id), binding.default_binding);
     }
 }
 
@@ -770,7 +790,7 @@ TEST(DeveloperWidgets, MissingServicesStayListedAndResolveCurrentOwners) {
                                 }};
     DeveloperConsole console;
     console.Initialize({}, RegisterDeveloperWidgets(services));
-    EXPECT_EQ(console.Widgets().List().size(), 15u);
+    EXPECT_EQ(console.Widgets().List().size(), 16u);
     const auto* missing = console.Widgets().Find("perf.gpu");
     ASSERT_NE(missing, nullptr);
     EXPECT_FALSE(missing->available().available);
@@ -905,5 +925,131 @@ TEST(DeveloperRouting, CallbackSequencePreservesPrintableRmlTextAndSuppressesTog
     state.rml_text_input = true;
     router.SetOwnership(state);
     EXPECT_EQ(router.Key(290, 1, true, true), KeyRoute::ConsoleToggle); // F1 still available
+}
+TEST_F(ConsoleFixture, PanelOwnershipAllowsDeveloperActionsAndReboundPanelClose) {
+    UiInputRouter router;
+    auto state = World();
+    state.interactive_panel = true;
+    state.imgui_keyboard = true;
+    router.SetOwnership(state);
+    for (const auto* id : {"shader.reload",
+                           "render.debug-cycle",
+                           "render.wireframe-toggle",
+                           "time.slower",
+                           "time.faster",
+                           "time.reset"}) {
+        const auto chord = console.Bindings().Get(id);
+        ASSERT_TRUE(chord);
+        const auto matched = console.Bindings().Match(*chord, 1, Gameplay);
+        ASSERT_TRUE(matched);
+        ASSERT_EQ(router.Key(chord->key, 1, false, true), KeyRoute::DeveloperShortcut) << id;
+        EXPECT_TRUE(console.InvokeAction(*matched).success) << id;
+        EXPECT_EQ(router.Character(static_cast<unsigned>(chord->key)), InputOwner::Unfocused);
+        EXPECT_EQ(router.Key(chord->key, 2, false, true), KeyRoute::Ignore);
+        router.Key(chord->key, 0, false, false);
+        EXPECT_FALSE(router.GameplayAllowed());
+    }
+    EXPECT_EQ(effects, 6);
+    std::string error;
+    ASSERT_TRUE(console.Bindings().Rebind("render.shaders", KeyChord{75, 2}, error));
+    ASSERT_TRUE(console.Widgets().SetVisible("render.shaders", true));
+    const auto matched = console.Bindings().Match({75, 2}, 1, Gameplay);
+    ASSERT_TRUE(matched);
+    ASSERT_EQ(router.Key(75, 1, false, true), KeyRoute::DeveloperShortcut);
+    EXPECT_TRUE(console.InvokeAction(*matched).success);
+    EXPECT_FALSE(console.Widgets().Visible("render.shaders"));
+    EXPECT_EQ(router.Character('k'), InputOwner::Unfocused);
+}
+
+TEST(DeveloperRouting, TextCaptureBlocksFunctionActionsTimeControlsAndReboundPanels) {
+    for (const int text_owner : {0, 1, 2}) {
+        UiInputRouter router;
+        auto state = World();
+        state.interactive_panel = text_owner != 2;
+        state.console_open = text_owner == 0;
+        state.imgui_text_input = text_owner != 2;
+        state.rml_text_input = text_owner == 2;
+        state.rml_interaction = text_owner == 2;
+        router.SetOwnership(state);
+        for (const int key : {294, 295, 298, 91, 93, 92, 75}) {
+            EXPECT_EQ(router.Key(key, 1, false, true),
+                      text_owner == 2 ? KeyRoute::RmlUi : KeyRoute::Ignore);
+            EXPECT_FALSE(router.GameplayAllowed());
+            EXPECT_EQ(router.Character('x'),
+                      text_owner == 2 ? InputOwner::RmlUi : InputOwner::Developer);
+            router.Key(key, 0, false, false);
+        }
+    }
+}
+
+TEST(DeveloperCaptureSuppression, NormalPlayAndEveryAutomatedOverride) {
+    DeveloperUiPolicy normal;
+    EXPECT_TRUE(DeveloperUiAllowed(normal));
+    auto no_ui = normal;
+    no_ui.imgui_enabled = false;
+    EXPECT_FALSE(DeveloperUiAllowed(no_ui));
+    const std::vector<bool DeveloperUiPolicy::*> overrides{&DeveloperUiPolicy::scenario_active,
+                                                           &DeveloperUiPolicy::timelapse,
+                                                           &DeveloperUiPolicy::scene,
+                                                           &DeveloperUiPolicy::frame_scan,
+                                                           &DeveloperUiPolicy::render_parity,
+                                                           &DeveloperUiPolicy::render_benchmark,
+                                                           &DeveloperUiPolicy::survey,
+                                                           &DeveloperUiPolicy::bake_impostor,
+                                                           &DeveloperUiPolicy::ui_screenshot,
+                                                           &DeveloperUiPolicy::ui_thumbnails};
+    for (const auto flag : overrides) {
+        auto capture = normal;
+        capture.*flag = true;
+        EXPECT_FALSE(DeveloperUiAllowed(capture));
+        capture.*flag = false;
+        EXPECT_TRUE(DeveloperUiAllowed(capture));
+    }
+}
+
+TEST_F(ConsoleFixture, PanelLayoutFollowsVisibilityAndRejectsPassiveOrInvalidGeometry) {
+    EXPECT_FALSE(console.Widgets().Layout("render.shaders"));
+    ASSERT_TRUE(console.Widgets().SetVisible("render.shaders", true));
+    const DeveloperPanelLayout layout{120, 80, 640, 480, true};
+    ASSERT_TRUE(console.Widgets().SetLayout("render.shaders", layout));
+    EXPECT_EQ(console.Widgets().Layout("render.shaders"), layout);
+    const int saved = saves;
+    EXPECT_TRUE(console.Widgets().SetLayout("render.shaders", layout));
+    EXPECT_EQ(saves, saved);
+    ASSERT_TRUE(console.Widgets().SetVisible("render.shaders", false));
+    const auto closed_panel = console.Widgets().Layout("render.shaders");
+    ASSERT_TRUE(closed_panel);
+    EXPECT_FALSE(closed_panel->open);
+    EXPECT_EQ(closed_panel->width, 640);
+    EXPECT_FALSE(console.Widgets().SetLayout("perf.hud", layout));
+    EXPECT_FALSE(console.Widgets().SetLayout("shader.reload", layout));
+    auto invalid = layout;
+    invalid.width = -1;
+    EXPECT_FALSE(console.Widgets().SetLayout("render.shaders", invalid));
+    console.RestoreLayout(layout);
+    EXPECT_TRUE(console.IsOpen());
+    console.SetOpen(false);
+    const auto closed_console = console.Layout();
+    ASSERT_TRUE(closed_console);
+    EXPECT_FALSE(closed_console->open);
+    EXPECT_EQ(closed_console->x, 120);
+}
+
+TEST_F(ConsoleFixture, ModuleHelpIncludesDescriptionsAndResolvedActionHotkeys) {
+    for (const auto& def : console.Widgets().List()) {
+        const auto help = console.Submit("widgets").message;
+        EXPECT_NE(help.find(def.description), std::string::npos);
+        for (const auto& binding : def.BindingDefinitions())
+            EXPECT_NE(
+                help.find(binding.id + " = " + FormatKeyChord(console.Bindings().Get(binding.id))),
+                std::string::npos);
+    }
+    const auto* reload = console.Widgets().Find("shader.reload");
+    ASSERT_NE(reload, nullptr);
+    EXPECT_EQ(reload->presentation, Presentation::ActionOnly);
+    EXPECT_FALSE(reload->draw);
+    EXPECT_FALSE(console.Submit("widget show shader.reload").success);
+    EXPECT_TRUE(console.Submit("bind shader.reload Ctrl+F5").success);
+    EXPECT_NE(console.Submit("widgets").message.find("shader.reload = Ctrl+F5"), std::string::npos);
 }
 } // namespace

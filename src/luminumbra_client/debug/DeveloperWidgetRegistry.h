@@ -1,5 +1,7 @@
 #pragma once
 
+#include "core/DeveloperPanelLayout.h"
+
 #include <cstdint>
 #include <functional>
 #include <map>
@@ -8,6 +10,7 @@
 #include <vector>
 
 namespace Luminumbra::Client::Debug {
+using luminumbra::core::DeveloperPanelLayout;
 
 struct KeyChord {
     int key = -1;
@@ -78,7 +81,8 @@ using AvailabilityFn = std::function<Availability()>;
 using DrawFn = std::function<void(DeveloperFrameAdapter&)>;
 enum class Presentation {
     ConsolePanel,
-    PassiveOverlay
+    PassiveOverlay,
+    ActionOnly
 };
 enum class FocusPolicy {
     Interactive,
@@ -97,6 +101,16 @@ struct WidgetDef {
     DrawFn draw = {};
     // External presentations (such as the RmlUi debugger) mirror registry mutations.
     std::function<void(bool)> visibility_changed = {};
+    std::string description;
+    // Effect bindings belong to this module; they do not toggle panel visibility.
+    std::vector<BindingDef> shortcuts;
+    std::vector<BindingDef> BindingDefinitions() const {
+        if (!shortcuts.empty())
+            return shortcuts;
+        if (presentation == Presentation::ActionOnly)
+            return {};
+        return {{id, default_binding}};
+    }
 };
 
 std::vector<WidgetDef> BuiltinDeveloperWidgets();
@@ -112,6 +126,8 @@ public:
     bool Visible(const std::string& id) const;
     bool SetVisible(const std::string& id, bool visible);
     bool Toggle(const std::string& id);
+    std::optional<DeveloperPanelLayout> Layout(const std::string& id) const;
+    bool SetLayout(const std::string& id, DeveloperPanelLayout layout);
     bool Rebind(const std::string& id, std::optional<KeyChord> chord, std::string& error);
     void RestoreDefaults();
     void DrawVisible(DeveloperFrameAdapter& frame, Presentation presentation);
@@ -126,6 +142,7 @@ private:
     DeveloperBindings& m_bindings;
     std::vector<WidgetDef> m_definitions;
     std::map<std::string, bool> m_visible;
+    std::map<std::string, DeveloperPanelLayout> m_layouts;
     std::vector<std::pair<std::string, bool>> m_deferred;
     std::map<std::string, std::uint64_t> m_interactions;
     std::uint64_t m_interactionSequence = 0;

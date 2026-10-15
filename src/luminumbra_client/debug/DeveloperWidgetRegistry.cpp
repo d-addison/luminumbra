@@ -241,36 +241,131 @@ std::vector<WidgetDef> BuiltinDeveloperWidgets() {
     auto add = [&](const char* id,
                    const char* title,
                    const char* category,
+                   const char* description,
                    bool visible,
                    int key,
-                   bool passive) {
-        WidgetDef def{id,
-                      title,
-                      category,
-                      visible,
-                      key < 0 ? std::nullopt : std::optional<KeyChord>(KeyChord{key, 0}),
-                      id,
-                      passive ? Presentation::PassiveOverlay : Presentation::ConsolePanel,
-                      passive ? FocusPolicy::Passive : FocusPolicy::Interactive,
-                      [] { return Availability{false, "Service unavailable"}; },
-                      {}};
+                   bool passive,
+                   std::vector<BindingDef> shortcuts = {},
+                   bool action_only = false) {
+        WidgetDef def;
+        def.id = id;
+        def.title = title;
+        def.category = category;
+        def.description = description;
+        def.default_visible = visible;
+        def.default_binding = key < 0 ? std::nullopt : std::optional<KeyChord>(KeyChord{key, 0});
+        def.persistence_key = id;
+        def.presentation = action_only ? Presentation::ActionOnly
+                           : passive   ? Presentation::PassiveOverlay
+                                       : Presentation::ConsolePanel;
+        def.focus_policy = passive || action_only ? FocusPolicy::Passive : FocusPolicy::Interactive;
+        def.available = [] {
+            return Availability{false, "Service unavailable"};
+        };
+        def.shortcuts = std::move(shortcuts);
         result.push_back(std::move(def));
     };
-    add("perf.hud", "Frame performance", "Performance", true, -1, true);
-    add("perf.gpu", "GPU profiler", "Performance", false, 292, false);
-    add("render.shaders", "Shaders", "Rendering", false, 299, false);
-    add("render.debug_views", "Debug views", "Rendering", false, -1, false);
-    add("render.wireframe", "Wireframe", "Rendering", false, -1, false);
-    add("world.generation", "World generation", "World", false, 296, false);
-    add("client.settings", "Client settings", "Client", false, 297, false);
-    add("runtime.time", "Time controls", "Runtime", false, -1, false);
-    add("runtime.time_indicator", "Time indicator", "Runtime", true, -1, true);
-    add("player.state", "Player state", "Inspection", false, -1, false);
-    add("farm.debug", "Farm diagnostics", "Inspection", false, -1, false);
-    add("world.creature_labels", "Creature labels", "Inspection", false, -1, true);
-    add("ui.data_stream", "UI data stream", "UI", false, -1, false);
-    add("ui.debugger", "RmlUi debugger", "UI", false, -1, false);
-    add("console.help", "Help", "Console", false, -1, false);
+    add("perf.hud",
+        "Frame performance",
+        "Performance",
+        "Frame timing, UI cost and terrain draws",
+        true,
+        -1,
+        true);
+    add("perf.gpu", "GPU profiler", "Performance", "GPU timings by render pass", false, 292, false);
+    add("render.shaders",
+        "Shaders",
+        "Rendering",
+        "Inspect shaders, reload status and uniforms",
+        false,
+        299,
+        false);
+    add("shader.reload",
+        "Shader reload",
+        "Rendering",
+        "Reload all shaders with rollback on failure",
+        false,
+        -1,
+        false,
+        {{"shader.reload", KeyChord{294, 0}}},
+        true);
+    add("render.debug_views",
+        "Debug views",
+        "Rendering",
+        "Cycle G-buffer inspection views",
+        false,
+        -1,
+        false,
+        {{"render.debug-cycle", KeyChord{295, 0}}});
+    add("render.wireframe",
+        "Wireframe",
+        "Rendering",
+        "Toggle the wireframe rendering effect",
+        false,
+        -1,
+        false,
+        {{"render.wireframe-toggle", KeyChord{298, 0}}});
+    add("world.generation",
+        "World generation",
+        "World",
+        "Inspect and edit an independent world preview",
+        false,
+        296,
+        false);
+    add("client.settings",
+        "Client settings",
+        "Client",
+        "Video, audio, controls and developer preferences",
+        false,
+        297,
+        false);
+    add("runtime.time",
+        "Time controls",
+        "Runtime",
+        "Slow, speed up or reset simulation time",
+        false,
+        -1,
+        false,
+        {{"time.slower", KeyChord{91, 0}, Gameplay},
+         {"time.faster", KeyChord{93, 0}, Gameplay},
+         {"time.reset", KeyChord{92, 0}, Gameplay | Photo}});
+    add("runtime.time_indicator",
+        "Time indicator",
+        "Runtime",
+        "Show the active non-default time scale",
+        true,
+        -1,
+        true);
+    add("player.state",
+        "Player state",
+        "Inspection",
+        "Inspect current player state",
+        false,
+        -1,
+        false);
+    add("farm.debug",
+        "Farm diagnostics",
+        "Inspection",
+        "Inspect farming state and interactions",
+        false,
+        -1,
+        false);
+    add("world.creature_labels",
+        "Creature labels",
+        "Inspection",
+        "Label visible creatures in the world",
+        false,
+        -1,
+        true);
+    add("ui.data_stream", "UI data stream", "UI", "Inspect UI stream snapshots", false, -1, false);
+    add("ui.debugger",
+        "RmlUi debugger",
+        "UI",
+        "Inspect UI documents and elements",
+        false,
+        -1,
+        false);
+    add("console.help", "Help", "Console", "Command syntax and resolved hotkeys", false, -1, false);
     return result;
 }
 DeveloperWidgetRegistry::DeveloperWidgetRegistry(DeveloperBindings& bindings)
@@ -280,9 +375,15 @@ bool DeveloperWidgetRegistry::Register(WidgetDef def) {
         return false;
     if (def.persistence_key.empty())
         def.persistence_key = def.id;
-    if (!m_bindings.Register({def.id, def.default_binding}))
-        return false;
-    m_visible[def.id] = def.default_visible;
+    const auto bindings = def.BindingDefinitions();
+    auto candidate = m_bindings;
+    for (const auto& binding : bindings)
+        if (!candidate.Register(binding))
+            return false;
+    for (const auto& binding : bindings)
+        m_bindings.Register(binding);
+    if (def.presentation != Presentation::ActionOnly)
+        m_visible[def.id] = def.default_visible;
     const auto id = def.id;
     m_definitions.push_back(std::move(def));
     if (Visible(id))
@@ -301,6 +402,7 @@ void DeveloperWidgetRegistry::Shutdown() {
     m_definitions.clear();
     m_interactions.clear();
     m_visible.clear();
+    m_layouts.clear();
     m_deferred.clear();
 }
 const std::vector<WidgetDef>& DeveloperWidgetRegistry::List() const {
@@ -318,7 +420,7 @@ bool DeveloperWidgetRegistry::Visible(const std::string& id) const {
 }
 bool DeveloperWidgetRegistry::SetVisible(const std::string& id, bool visible) {
     const auto* def = Find(id);
-    if (!def)
+    if (!def || def->presentation == Presentation::ActionOnly)
         return false;
     if (m_drawing) {
         m_deferred.emplace_back(id, visible);
@@ -326,6 +428,8 @@ bool DeveloperWidgetRegistry::SetVisible(const std::string& id, bool visible) {
     }
     if (Visible(id) != visible) {
         m_visible[id] = visible;
+        if (auto layout = m_layouts.find(id); layout != m_layouts.end())
+            layout->second.open = visible;
         if (def->visibility_changed)
             def->visibility_changed(visible);
         if (visible)
@@ -343,6 +447,23 @@ bool DeveloperWidgetRegistry::Toggle(const std::string& id) {
         if (pending.first == id)
             value = pending.second;
     return SetVisible(id, !value);
+}
+std::optional<DeveloperPanelLayout> DeveloperWidgetRegistry::Layout(const std::string& id) const {
+    const auto it = m_layouts.find(id);
+    return it == m_layouts.end() ? std::nullopt : std::optional<DeveloperPanelLayout>(it->second);
+}
+bool DeveloperWidgetRegistry::SetLayout(const std::string& id, DeveloperPanelLayout layout) {
+    const auto* def = Find(id);
+    if (!def || def->presentation != Presentation::ConsolePanel ||
+        def->focus_policy != FocusPolicy::Interactive || !ValidDeveloperPanelLayout(layout))
+        return false;
+    layout.open = Visible(id);
+    if (Layout(id) != layout) {
+        m_layouts[id] = layout;
+        if (changed)
+            changed();
+    }
+    return true;
 }
 bool DeveloperWidgetRegistry::Rebind(const std::string& id,
                                      std::optional<KeyChord> chord,

@@ -1,4 +1,5 @@
 #include "debug/DeveloperConsole.h"
+#include "debug/widgets/DeveloperWidgetUi.h"
 
 #include <imgui.h>
 
@@ -11,8 +12,9 @@ void DeveloperConsole::Draw(DeveloperFrameAdapter& frame) {
                 m_inventoryAvailability[def.id] = def.available ? def.available() : Availability{};
             m_refreshInventory = false;
         }
-        ImGui::SetNextWindowSize(ImVec2(820, 650), ImGuiCond_FirstUseEver);
-        if (ImGui::Begin("Developer console", &m_open)) {
+        PrepareDeveloperPanel(Layout(), 820, 650);
+        bool open = m_open;
+        if (ImGui::Begin("Developer console", &open, ImGuiWindowFlags_NoSavedSettings)) {
             if (ImGui::IsWindowFocused())
                 m_shellSequence = m_widgets.NextInteractionSequence();
             if (ImGui::SmallButton("Refresh services"))
@@ -26,38 +28,60 @@ void DeveloperConsole::Draw(DeveloperFrameAdapter& frame) {
                 for (const auto& def : m_widgets.List()) {
                     const std::string search = m_search.data();
                     if (!search.empty() &&
-                        (def.id + def.title + def.category).find(search) == std::string::npos)
+                        (def.id + def.title + def.category + def.description).find(search) ==
+                            std::string::npos)
                         continue;
                     ImGui::PushID(def.id.c_str());
                     const auto& available = m_inventoryAvailability.at(def.id);
-                    ImGui::Text("%s / %s — %s (%s)",
+                    const bool action_only = def.presentation == Presentation::ActionOnly;
+                    ImGui::Text("%s / %s — %s",
                                 def.category.c_str(),
                                 def.title.c_str(),
-                                m_widgets.Visible(def.id) ? "shown" : "hidden",
-                                FormatKeyChord(m_bindings.Get(def.id)).c_str());
+                                action_only                 ? "action only"
+                                : m_widgets.Visible(def.id) ? "shown"
+                                                            : "hidden");
+                    ImGui::TextWrapped("%s", def.description.c_str());
                     if (!available.available)
                         ImGui::TextDisabled("Unavailable: %s", available.reason.c_str());
-                    if (ImGui::SmallButton("Toggle"))
-                        InvokeAction(def.id);
-                    ImGui::SameLine();
-                    if (ImGui::SmallButton("Show"))
-                        RecordResult(m_commands.Dispatch("widget show", {def.id}));
-                    ImGui::SameLine();
-                    if (ImGui::SmallButton("Hide"))
-                        RecordResult(m_commands.Dispatch("widget hide", {def.id}));
-                    ImGui::SameLine();
-                    if (ImGui::SmallButton("Rebind"))
-                        BeginRebind(def.id);
-                    ImGui::SameLine();
-                    if (ImGui::SmallButton("Unbind"))
-                        RecordResult(m_commands.Dispatch("unbind", {def.id}));
+                    if (!action_only) {
+                        if (ImGui::SmallButton("Toggle"))
+                            RecordResult(m_commands.Dispatch("widget toggle", {def.id}));
+                        ImGui::SameLine();
+                        if (ImGui::SmallButton("Show"))
+                            RecordResult(m_commands.Dispatch("widget show", {def.id}));
+                        ImGui::SameLine();
+                        if (ImGui::SmallButton("Hide"))
+                            RecordResult(m_commands.Dispatch("widget hide", {def.id}));
+                    }
+                    for (const auto& binding : def.BindingDefinitions()) {
+                        ImGui::PushID(binding.id.c_str());
+                        ImGui::Text("%s: %s",
+                                    binding.id.c_str(),
+                                    FormatKeyChord(m_bindings.Get(binding.id)).c_str());
+                        if (!def.shortcuts.empty()) {
+                            ImGui::SameLine();
+                            if (ImGui::SmallButton("Run"))
+                                InvokeAction(binding.id);
+                        }
+                        ImGui::SameLine();
+                        if (ImGui::SmallButton("Rebind"))
+                            BeginRebind(binding.id);
+                        ImGui::SameLine();
+                        if (ImGui::SmallButton("Unbind"))
+                            RecordResult(m_commands.Dispatch("unbind", {binding.id}));
+                        ImGui::PopID();
+                    }
                     ImGui::PopID();
                 }
             }
             ImGui::EndChild();
             if (ImGui::CollapsingHeader("Actions and resolved bindings")) {
                 for (const auto& def : m_bindings.List()) {
-                    if (m_widgets.Find(def.id))
+                    bool module_binding = false;
+                    for (const auto& widget : m_widgets.List())
+                        for (const auto& binding : widget.BindingDefinitions())
+                            module_binding = module_binding || binding.id == def.id;
+                    if (module_binding)
                         continue;
                     ImGui::PushID(def.id.c_str());
                     ImGui::Text(
@@ -118,22 +142,23 @@ void DeveloperConsole::Draw(DeveloperFrameAdapter& frame) {
                 ImGui::SetKeyboardFocusHere(-1);
             }
         }
+        const auto layout = CaptureDeveloperPanel(open);
         ImGui::End();
+        if (open != m_open)
+            SetOpen(open);
+        if (layout)
+            SetLayout(*layout);
     }
     DeveloperFrameAdapter panels = frame;
     panels.draw = [this, draw = frame.draw](const WidgetDef& def, const DrawFn& contents) {
+        if (!draw)
+            return;
         if (def.id == "console.help") {
-            bool visible = true;
-            if (ImGui::Begin("Developer help", &visible)) {
-                if (ImGui::IsWindowFocused())
-                    m_widgets.FocusInteraction(def.id);
+            draw(def, [this](DeveloperFrameAdapter&) {
                 const auto help = HelpText();
                 ImGui::TextUnformatted(help.c_str());
-            }
-            ImGui::End();
-            if (!visible)
-                m_widgets.SetVisible(def.id, false);
-        } else if (draw)
+            });
+        } else
             draw(def, contents);
     };
     m_widgets.DrawVisible(panels, Presentation::ConsolePanel);

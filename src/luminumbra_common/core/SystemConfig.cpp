@@ -6,9 +6,12 @@
 #include <fstream>
 #include <iomanip>
 #include <limits>
+#include <set>
 #include <sstream>
+#include <vector>
 
 #include "core/Environment.h"
+#include "core/Log.h"
 #include "nlohmann/json.hpp"
 #include "persistence/WorldPersistenceRoundtrip.h" // Luminumbra::Persistence::StableChecksum
 
@@ -78,8 +81,14 @@ bool KnownDeveloperWidget(const std::string& id) {
             return true;
     return false;
 }
+bool KnownDeveloperLayout(const std::string& id) {
+    return id == "console.toggle" || KnownDeveloperWidget(id);
+}
+bool ObsoleteDeveloperVisibilityBinding(const std::string& id) {
+    return id == "render.debug_views" || id == "render.wireframe" || id == "runtime.time";
+}
 bool KnownDeveloperBinding(const std::string& id) {
-    if (KnownDeveloperWidget(id))
+    if (KnownDeveloperWidget(id) && !ObsoleteDeveloperVisibilityBinding(id))
         return true;
     constexpr const char* ids[] = {"console.toggle",
                                    "shader.reload",
@@ -130,6 +139,110 @@ bool DeveloperInteger(const nlohmann::json& value, int minimum, int maximum, int
     return true;
 }
 
+// The DOM parser rejects overflowing numbers before layout validation can run. Locate
+// those tokens with the public SAX interface so recovery stays confined to the layouts subtree.
+class LayoutOverflowLocator : public nlohmann::json_sax<nlohmann::json> {
+public:
+    std::size_t offset = 0;
+    std::string token;
+    nlohmann::json::json_pointer invalid_path{"/user/developer/layouts"};
+
+    bool null() override {
+        return true;
+    }
+    bool boolean(bool) override {
+        return true;
+    }
+    bool number_integer(number_integer_t) override {
+        return true;
+    }
+    bool number_unsigned(number_unsigned_t) override {
+        return true;
+    }
+    bool number_float(number_float_t, const string_t&) override {
+        return true;
+    }
+    bool string(string_t&) override {
+        return true;
+    }
+    bool binary(binary_t&) override {
+        return true;
+    }
+    bool start_object(std::size_t) override {
+        m_frames.push_back({true, {}});
+        return true;
+    }
+    bool key(string_t& name) override {
+        m_frames.back().key = name;
+        return true;
+    }
+    bool end_object() override {
+        m_frames.pop_back();
+        return true;
+    }
+    bool start_array(std::size_t) override {
+        m_frames.push_back({false, {}});
+        return true;
+    }
+    bool end_array() override {
+        m_frames.pop_back();
+        return true;
+    }
+    bool parse_error(std::size_t position,
+                     const std::string& last_token,
+                     const nlohmann::json::exception& error) override {
+        if (error.id == 406 && m_frames.size() >= 3 && m_frames[0].object &&
+            m_frames[0].key == "user" && m_frames[1].object && m_frames[1].key == "developer" &&
+            m_frames[2].object && m_frames[2].key == "layouts" && position >= last_token.size()) {
+            offset = position - last_token.size();
+            token = last_token;
+            // An object contains independent records; any other container (or scalar)
+            // invalidates the whole layouts value. Appending a key also escapes it.
+            if (m_frames.size() > 3 && m_frames[3].object)
+                invalid_path /= m_frames[3].key;
+        }
+        return false;
+    }
+
+private:
+    struct Frame {
+        bool object;
+        std::string key;
+    };
+    std::vector<Frame> m_frames;
+};
+
+nlohmann::json ParseSettingsJson(const std::string& json_text) {
+    // Keep the ordinary path unchanged. Retry only numeric overflow in the layouts subtree;
+    // syntax errors and errors from sim/render or other user settings keep their behavior.
+    std::string recovered;
+    std::set<std::string> invalid_paths;
+    for (;;) {
+        const auto& text = invalid_paths.empty() ? json_text : recovered;
+        try {
+            auto data = nlohmann::json::parse(text);
+            for (const auto& path : invalid_paths) {
+                const nlohmann::json::json_pointer invalid_path(path);
+                if (data.contains(invalid_path))
+                    data.at(invalid_path) = nullptr; // Validation logs and ignores the entry.
+            }
+            return data;
+        } catch (const nlohmann::json::out_of_range& error) {
+            if (error.id != 406)
+                throw;
+            LayoutOverflowLocator locator;
+            nlohmann::json::sax_parse(text, &locator);
+            if (locator.token.empty() ||
+                text.compare(locator.offset, locator.token.size(), locator.token) != 0)
+                throw;
+            if (invalid_paths.empty())
+                recovered = json_text;
+            recovered.replace(locator.offset, locator.token.size(), "null");
+            invalid_paths.insert(locator.invalid_path.to_string());
+        }
+    }
+}
+
 // Overlay the `user.*` section of `data` onto `user`, setting only named fields (merge
 // semantics: an absent field keeps its current/default value). render-client-only; never hashed.
 void ParseUserSection(const nlohmann::json& data, UserSettings& user) {
@@ -151,8 +264,48 @@ void ParseUserSection(const nlohmann::json& data, UserSettings& user) {
                                      KnownDeveloperWidget);
             }
         }
+        if (d.contains("layouts")) {
+            if (!d["layouts"].is_object()) {
+                LUMINUMBRA_CORE_WARN("Ignoring malformed developer layouts object");
+            } else {
+                for (const auto& [id, record] : d["layouts"].items()) {
+                    const auto valid_number = [&](const char* field) {
+                        return record.is_object() && record.contains(field) &&
+                               record[field].is_number();
+                    };
+                    if (id.empty() || id.size() > DeveloperSettings::kIdLimit ||
+                        !valid_number("x") || !valid_number("y") || !valid_number("width") ||
+                        !valid_number("height") || !record.contains("open") ||
+                        !record["open"].is_boolean()) {
+                        LUMINUMBRA_CORE_WARN("Ignoring malformed developer layout entry: {}", id);
+                        continue;
+                    }
+                    const double x = record["x"].get<double>(), y = record["y"].get<double>();
+                    const double width = record["width"].get<double>(),
+                                 height = record["height"].get<double>();
+                    if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(width) ||
+                        !std::isfinite(height) || std::abs(x) > 1000000 || std::abs(y) > 1000000 ||
+                        width <= 0 || width > 1000000 || height <= 0 || height > 1000000) {
+                        LUMINUMBRA_CORE_WARN("Ignoring malformed developer layout entry: {}", id);
+                        continue;
+                    }
+                    const DeveloperPanelLayout layout{static_cast<float>(x),
+                                                      static_cast<float>(y),
+                                                      static_cast<float>(width),
+                                                      static_cast<float>(height),
+                                                      record["open"].get<bool>()};
+                    if (!ValidDeveloperPanelLayout(layout)) {
+                        LUMINUMBRA_CORE_WARN("Ignoring malformed developer layout entry: {}", id);
+                        continue;
+                    }
+                    MergeDeveloperRecord(user.developer.layouts, id, layout, KnownDeveloperLayout);
+                }
+            }
+        }
         if (d.contains("bindings") && d["bindings"].is_object()) {
             for (const auto& [id, record] : d["bindings"].items()) {
+                if (ObsoleteDeveloperVisibilityBinding(id))
+                    continue;
                 if (id.empty() || id.size() > DeveloperSettings::kIdLimit || !record.is_object() ||
                     !record.contains("key") || !record["key"].is_number_integer() ||
                     !record.contains("mods") || !record["mods"].is_number_integer())
@@ -220,7 +373,7 @@ SystemConfig SystemConfig::FromJsonString(const std::string& json_text) {
 
     nlohmann::json data;
     try {
-        data = nlohmann::json::parse(json_text);
+        data = ParseSettingsJson(json_text);
     } catch (const nlohmann::json::parse_error&) {
         return cfg; // malformed/empty/blank -> defaults (graceful)
     }
@@ -348,7 +501,7 @@ int SystemConfig::keybind(const std::string& action, int fallback) const {
 void SystemConfig::OverlayUserFromJsonString(const std::string& json_text) {
     nlohmann::json data;
     try {
-        data = nlohmann::json::parse(json_text);
+        data = ParseSettingsJson(json_text);
     } catch (const nlohmann::json::parse_error&) {
         return; // malformed overlay -> leave settings unchanged
     }
@@ -393,7 +546,8 @@ bool SystemConfig::SaveUserOverlay(const std::string& path) const {
     developer["schema_version"] = 1;
     developer["widgets"] = nlohmann::json::object();
     developer["bindings"] = nlohmann::json::object();
-    std::size_t widget_count = 0, binding_count = 0;
+    developer["layouts"] = nlohmann::json::object();
+    std::size_t widget_count = 0, binding_count = 0, layout_count = 0;
     for (const bool recognized : {true, false}) {
         for (const auto& [id, visible] : m_user.developer.widgets) {
             if (KnownDeveloperWidget(id) != recognized || id.empty() ||
@@ -403,9 +557,22 @@ bool SystemConfig::SaveUserOverlay(const std::string& path) const {
             developer["widgets"][id] = {{"visible", visible}};
             ++widget_count;
         }
-        for (const auto& [id, binding] : m_user.developer.bindings) {
-            if (KnownDeveloperBinding(id) != recognized || id.empty() ||
+        for (const auto& [id, layout] : m_user.developer.layouts) {
+            if (KnownDeveloperLayout(id) != recognized || id.empty() ||
                 id.size() > DeveloperSettings::kIdLimit ||
+                layout_count >= DeveloperSettings::kRecordLimit ||
+                !ValidDeveloperPanelLayout(layout))
+                continue;
+            developer["layouts"][id] = {{"x", layout.x},
+                                        {"y", layout.y},
+                                        {"width", layout.width},
+                                        {"height", layout.height},
+                                        {"open", layout.open}};
+            ++layout_count;
+        }
+        for (const auto& [id, binding] : m_user.developer.bindings) {
+            if (ObsoleteDeveloperVisibilityBinding(id) || KnownDeveloperBinding(id) != recognized ||
+                id.empty() || id.size() > DeveloperSettings::kIdLimit ||
                 binding_count >= DeveloperSettings::kRecordLimit)
                 continue;
             developer["bindings"][id] = {{"key", binding.key}, {"mods", binding.mods}};

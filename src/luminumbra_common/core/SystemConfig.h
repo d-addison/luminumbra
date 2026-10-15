@@ -21,6 +21,7 @@
 
 #include <glm/glm.hpp>
 
+#include "DeveloperPanelLayout.h"
 #include "SystemConfigRegistry.gen.h" // X-macro registry GENERATED from ConfigSchema.json
 
 namespace luminumbra::core {
@@ -37,6 +38,7 @@ struct DeveloperSettings {
     int schema_version = 1;
     std::map<std::string, bool> widgets;
     std::map<std::string, DeveloperBindingSetting> bindings;
+    std::map<std::string, DeveloperPanelLayout> layouts;
     bool WidgetVisible(const std::string& id, bool default_visible) const {
         const auto it = widgets.find(id);
         return it == widgets.end() ? default_visible : it->second;

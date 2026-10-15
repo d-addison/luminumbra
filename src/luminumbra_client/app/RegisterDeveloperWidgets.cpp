@@ -6,7 +6,7 @@ namespace Luminumbra::Client::App {
 std::vector<Debug::WidgetDef> RegisterDeveloperWidgets(const DeveloperWidgetServices& services) {
     auto definitions = Debug::BuiltinDeveloperWidgets();
     for (auto& def : definitions) {
-        if (def.id == "console.help")
+        if (def.id == "console.help" || def.presentation == Debug::Presentation::ActionOnly)
             continue; // The console supplies its own generated help adapter.
         const auto service = services.find(def.id);
         if (service == services.end() || !service->second.contents) {

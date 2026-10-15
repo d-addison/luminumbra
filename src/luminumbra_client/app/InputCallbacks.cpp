@@ -62,6 +62,7 @@ void RefreshInputOwnership(GLFWwindow* window) {
     ownership.rml_interaction = ownership.rml_debugger || app.hud.paused || app.hud.codexOpen ||
                                 (ui && ui->HasInputInteraction());
     ownership.rml_text_input = ui && ui->HasTextInputFocus();
+    ownership.imgui_text_input = imgui && ImGui::GetIO().WantTextInput;
     ownership.imgui_keyboard = imgui && ImGui::GetIO().WantCaptureKeyboard;
     ownership.imgui_mouse = imgui && ImGui::GetIO().WantCaptureMouse;
     if (b.router->SetOwnership(ownership)) {
@@ -128,13 +129,9 @@ void key_callback(GLFWwindow* window, int key, int scancode, int action, int mod
         console ? console->Bindings().Match({key, mods & 15}, action, scope) : std::nullopt;
     const bool consoleToggle =
         console && console->Bindings().Get("console.toggle") == Debug::KeyChord{key, mods & 15};
-    const auto* shortcutWidget = shortcut ? console->Widgets().Find(*shortcut) : nullptr;
-    const bool panelShortcut =
-        shortcutWidget && shortcutWidget->focus_policy == Debug::FocusPolicy::Interactive;
-    const auto route =
-        bindings.router
-            ? bindings.router->Key(key, action, consoleToggle, shortcut.has_value(), panelShortcut)
-            : KeyRoute::Gameplay;
+    const auto route = bindings.router
+                           ? bindings.router->Key(key, action, consoleToggle, shortcut.has_value())
+                           : KeyRoute::Gameplay;
     if (action == GLFW_RELEASE) {
         if (uiManager)
             uiManager->KeyCallback(window, key, scancode, action, mods);

@@ -1,8 +1,28 @@
 #include "debug/widgets/DeveloperWidgetUi.h"
 
 #include <imgui.h>
+#include <imgui_internal.h>
 
 namespace Luminumbra::Client::Debug {
+void PrepareDeveloperPanel(const std::optional<DeveloperPanelLayout>& layout,
+                           float width,
+                           float height) {
+    if (layout) {
+        ImGui::SetNextWindowPos(ImVec2(layout->x, layout->y), ImGuiCond_Appearing);
+        ImGui::SetNextWindowSize(ImVec2(layout->width, layout->height), ImGuiCond_Appearing);
+    } else {
+        ImGui::SetNextWindowSize(ImVec2(width, height), ImGuiCond_FirstUseEver);
+    }
+}
+std::optional<DeveloperPanelLayout> CaptureDeveloperPanel(bool open) {
+    // Persist once a move/resize finishes, rather than write the overlay throughout a drag.
+    if (ImGui::IsMouseDown(ImGuiMouseButton_Left))
+        return std::nullopt;
+    const auto position = ImGui::GetWindowPos();
+    // Preserve the expanded size when a panel is collapsed.
+    const auto size = ImGui::GetCurrentWindow()->SizeFull;
+    return DeveloperPanelLayout{position.x, position.y, size.x, size.y, open};
+}
 void DrawDeveloperWidget(DeveloperWidgetRegistry& widgets,
                          DeveloperFrameAdapter& frame,
                          const WidgetDef& def,
@@ -13,7 +33,7 @@ void DrawDeveloperWidget(DeveloperWidgetRegistry& widgets,
     }
     const bool passive = def.presentation == Presentation::PassiveOverlay;
     bool visible = true;
-    ImGuiWindowFlags flags = ImGuiWindowFlags_None;
+    ImGuiWindowFlags flags = ImGuiWindowFlags_NoSavedSettings;
     if (passive) {
         flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
                 ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoInputs |
@@ -21,8 +41,9 @@ void DrawDeveloperWidget(DeveloperWidgetRegistry& widgets,
         ImGui::SetNextWindowPos(ImVec2(10, def.id == "perf.hud" ? 10 : 60), ImGuiCond_Always);
         ImGui::SetNextWindowBgAlpha(0.55f);
     } else {
-        ImGui::SetNextWindowSize(def.id == "world.generation" ? ImVec2(550, 750) : ImVec2(480, 520),
-                                 ImGuiCond_FirstUseEver);
+        PrepareDeveloperPanel(widgets.Layout(def.id),
+                              def.id == "world.generation" ? 550 : 480,
+                              def.id == "world.generation" ? 750 : 520);
     }
     const auto name = def.title + "###" + def.id;
     if (ImGui::Begin(name.c_str(), passive ? nullptr : &visible, flags)) {
@@ -30,8 +51,11 @@ void DrawDeveloperWidget(DeveloperWidgetRegistry& widgets,
             widgets.FocusInteraction(def.id);
         contents(frame);
     }
+    const auto layout = passive ? std::nullopt : CaptureDeveloperPanel(visible);
     ImGui::End();
     if (!visible)
         widgets.SetVisible(def.id, false);
+    if (layout)
+        widgets.SetLayout(def.id, *layout);
 }
 } // namespace Luminumbra::Client::Debug

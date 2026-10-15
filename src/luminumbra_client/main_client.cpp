@@ -1410,6 +1410,7 @@ int main(int argc, char* argv[]) {
             scenario_config.crash_dir.string());
     }
     g_app.overlay.imgui_enabled = !scenario_config.no_ui;
+    g_app.scenario_active = scenario_config.active();
     runtime_state_recorder.capture("startup_requested", nullptr, nullptr, nullptr, 0, {});
 
     if (scenario_config.forced_crash()) {
@@ -1994,6 +1995,7 @@ int main(int argc, char* argv[]) {
     if (g_app.overlay.imgui_enabled) {
         IMGUI_CHECKVERSION();
         ImGui::CreateContext();
+        ImGui::GetIO().IniFilename = nullptr; // Layouts persist only through user.developer.
         ImGui::StyleColorsDark();
         ImGui_ImplGlfw_InitForOpenGL(window, false);
         ImGui_ImplOpenGL3_Init("#version 450");
@@ -2966,8 +2968,15 @@ int main(int argc, char* argv[]) {
     };
     developerHost.save = [&] {
         auto& preferences = g_systemConfig.user().developer;
-        for (const auto& def : developerConsole.Widgets().List())
+        for (const auto& def : developerConsole.Widgets().List()) {
+            if (def.presentation == Developer::Presentation::ActionOnly)
+                continue;
             preferences.widgets[def.persistence_key] = developerConsole.Widgets().Visible(def.id);
+            if (const auto layout = developerConsole.Widgets().Layout(def.id))
+                preferences.layouts[def.persistence_key] = *layout;
+        }
+        if (const auto layout = developerConsole.Layout())
+            preferences.layouts["console.toggle"] = *layout;
         for (const auto& def : developerConsole.Bindings().List()) {
             const auto chord = developerConsole.Bindings().Get(def.id);
             preferences.bindings[def.id] = {chord ? chord->key : -1, chord ? chord->mods : 0};
@@ -3154,9 +3163,22 @@ int main(int argc, char* argv[]) {
     developerConsole.Widgets().changed = {};
     developerBindings.changed = {};
     const auto& preferences = g_systemConfig.user().developer;
-    for (const auto& def : developerConsole.Widgets().List())
+    for (const auto& def : developerConsole.Widgets().List()) {
+        if (def.presentation == Developer::Presentation::ActionOnly)
+            continue;
+        const auto layout = preferences.layouts.find(def.persistence_key);
+        const bool has_layout = layout != preferences.layouts.end() &&
+                                def.presentation == Developer::Presentation::ConsolePanel;
         developerConsole.Widgets().SetVisible(
-            def.id, preferences.WidgetVisible(def.persistence_key, def.default_visible));
+            def.id,
+            has_layout ? layout->second.open
+                       : preferences.WidgetVisible(def.persistence_key, def.default_visible));
+        if (has_layout)
+            developerConsole.Widgets().SetLayout(def.id, layout->second);
+    }
+    if (const auto layout = preferences.layouts.find("console.toggle");
+        layout != preferences.layouts.end())
+        developerConsole.RestoreLayout(layout->second);
     for (const auto& [id, saved] : preferences.bindings) {
         (void)saved;
         if (developerBindings.Contains(id)) {
