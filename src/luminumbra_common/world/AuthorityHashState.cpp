@@ -5,6 +5,7 @@
 #include "fields/EnergyFieldState.h"
 #include "fields/FieldPageState.h"
 #include "persistence/PlantPersistence.h"
+#include "persistence/SimulationPendingState.h"
 #include "persistence/WorldPersistenceRoundtrip.h"
 #include "systems/FoliageRegistryStage.h"
 
@@ -242,8 +243,22 @@ AuthorityHashCapture CaptureAuthorityHashState(const AuthorityHashInputs& inputs
                     Append(state.m_scent, value, 8);
             }
         }
+        Persistence::SimulationPendingState pending;
+        if (inputs.pending_events) {
+            pending.events = inputs.pending_events->snapshot();
+            if (!pending.validate_activations(inputs.ledger))
+                throw std::runtime_error("Invalid pending activation authority");
+        }
+        if (inputs.energy) {
+            pending.energy_channels = inputs.energy->channels();
+            pending.deposits = inputs.energy->PendingDeposits();
+        }
+        state.m_pendingEvents = pending.event_bytes();
+        state.m_pendingDeposits = pending.deposit_bytes();
+        if (!pending.deposits.empty())
+            Frame(state.m_energy, "pending_deposits", state.m_pendingDeposits);
         state.m_authority = "simulation_authority:v1:";
-        Append(state.m_authority, 8, 4);
+        Append(state.m_authority, 10, 4);
         Frame(state.m_authority, "clock", inputs.clock_bytes);
         const auto ledger_bytes = inputs.ledger.canonical_bytes();
         Frame(state.m_authority, "ledger", ledger_bytes);
@@ -262,6 +277,8 @@ AuthorityHashCapture CaptureAuthorityHashState(const AuthorityHashInputs& inputs
         Frame(state.m_authority, "energy", state.m_energy);
         Frame(state.m_authority, "creatures", state.m_creatures);
         Frame(state.m_authority, "plants", state.m_plants);
+        Frame(state.m_authority, "pending_events", state.m_pendingEvents);
+        Frame(state.m_authority, "pending_deposits", state.m_pendingDeposits);
         state.m_ambient.emplace(std::make_pair(std::uint8_t{3}, false),
                                 inputs.fields.ambient_bytes(3, false));
         state.m_ambient.emplace(std::make_pair(std::uint8_t{12}, true),

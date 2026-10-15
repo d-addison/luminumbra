@@ -550,3 +550,71 @@ returns an empty string and latches a fault on capture failure; const helpers
 report failure by exception. Consumers of the checked API must require a state
 before composing or publishing a checksum. Disabled hashes, save codecs,
 checkpoint layouts and artifact serialization retain their legacy paths.
+
+Enabled snapshots also contain `chunks/region/simulation-pending.spn`, an
+indexed authoritative member committed with the clock, ledger, entities and
+energy values. It stores future and undelivered simulation events, the next
+event sequence, and retained energy deposits. An empty queue still preserves
+its sequence. The member uses SPN1 version 1, fixed-width little-endian integers,
+length-framed topic/payload bytes and a trailing FNV-1a-64 checksum. Events sort
+by `(tick, signed lane, sequence)`; deposits preserve multiplicity and sort by
+`(packed cell key, channel, emitter ID, amount)`. Decode checks the 64 MiB file
+cap, 16,384 events, 8 MiB combined event text and the existing regional deposit
+cap before allocating decoded payloads. Unknown versions, noncanonical order,
+duplicate event sequences, invalid channels, trailing bytes and checksum
+failures refuse the candidate atomically.
+
+Enabled event admission shares the codec's count, text, tick and activation-key
+bounds. Publish and ordinary batch preparation refuse before consuming a sequence;
+refused publication leaves the queue unchanged. Queued text is accounted for
+incrementally, including successful delivery and queue replacement. These
+limits apply only with active regions enabled: the legacy bus admitted events
+without these bounds and retains that behavior when the flag is off.
+Enabled prepared batches carry count and text totals with only inserted and
+removed deliveries. Ordered queue nodes transfer at commit without copying or
+recounting retained future events; activation reconciliation visits its activation
+index rather than the ordinary queue. Full queue validation occurs at restore.
+
+Within one save, validated ledger state and pending-member fingerprints are
+reused. Pending activation facts are checked against the final ledger outbox
+whenever either member changes, including ledger-only replacement or removal;
+member replacement invalidates the corresponding facts. Commit and initial
+index enumeration do not decode writer-produced pending payloads again.
+Pending-state and ledger publication and removal always join or open an indexed
+transaction, including raw member writes and first standalone publication.
+An allocator-only ledger also requires indexing; an empty legacy ledger save
+remains a no-op. Installing the first ledger makes any existing
+pending member applicable to the final snapshot; if baseline validation ignored
+it, commit performs one bounded decode and reuses its verified facts.
+Before publishing, commit also checks the pending member's original presence,
+index membership, size and fingerprint. Replacements and removals use the
+journal's original fingerprint; retained members reuse their validated digest.
+An indexed mismatch refuses and restores the original snapshot bytes.
+Disabled sessions do not probe, read, fingerprint or validate the pending
+member; clock compatibility uses the existing metadata and ledger indicators.
+
+A v0.3.0 snapshot without this member adopts an empty queue and deposit buffer;
+activation deliveries are derived from its validated ledger outbox in bounded
+prefixes ordered by durable activation key. Excess deliveries remain in that
+outbox and are admitted on later ticks as queue capacity becomes available;
+historical outboxes may exceed the general event queue's capacity. The next
+enabled save writes the member. A present member restores the exact event queue
+and sequence without enqueuing additional deliveries during load. Queued
+activation deliveries must match the separate ledger outbox; activations not yet
+enqueued remain in that outbox for the next tick. Missing indexed members and
+unlisted present members remain integrity failures. The outbox is not merged
+with or replaced by the general event queue.
+
+Enabled delivery acknowledges only completed events. A throwing handler or a
+stop requested during delivery retains the failed event and its undelivered
+suffix, including future work. Subscribers must be observational, idempotent,
+or transactional: callback side effects already performed cannot be rolled
+back by the bus. A recovery save preserves these events and deposits retained
+by a refused energy tick, without clearing the scheduler fault. Rollback and
+crash recovery restore the pending member with the rest of the snapshot.
+
+The immutable authority capture exposes framed pending event and deposit
+projections for regional and page diagnostic consumers, and includes both in
+composed authority. Nonempty retained deposits also enter the existing energy
+slot. Hash reads do not deliver events or consume deposits. Disabled delivery,
+hash recipes, saves and artifacts retain their existing paths and bytes.

@@ -5,6 +5,7 @@
 
 #include "nlohmann/json.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <cstdio>
@@ -13,6 +14,7 @@
 #include <fstream>
 #include <iterator>
 #include <map>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -433,6 +435,7 @@ bool member_path_allowed(std::string_view relative_path) {
         relative_path == "chunks/region/creature-entities.json" ||
         relative_path == "chunks/region/ground-objects.json" ||
         relative_path == "chunks/region/field-pages.fpg" ||
+        relative_path == "chunks/region/simulation-pending.spn" ||
         relative_path == "chunks/region/active-regions.arl") {
         return true;
     }
@@ -930,7 +933,13 @@ bool SaveTransaction::commit(std::vector<std::string>* errors) {
         next.txn_id = m_txn_id;
         next.anchors = m_anchors;
 
-        auto digest_member = [this, errors](const std::string& rel, MemberDigest& digest) {
+        std::optional<MemberDigest> retained_pending;
+        auto digest_member = [this, errors, &retained_pending](const std::string& rel,
+                                                               MemberDigest& digest) {
+            if (rel == "chunks/region/simulation-pending.spn" && retained_pending) {
+                digest = *retained_pending;
+                return true;
+            }
             std::string error;
             if (m_digest_fn == nullptr || !m_digest_fn(m_save_dir, rel, digest, error)) {
                 AddError(errors,
@@ -946,6 +955,54 @@ bool SaveTransaction::commit(std::vector<std::string>* errors) {
             members.emplace(member.path, member);
         }
 
+        if (m_digest_fn == &WorldSaveService::member_digest) {
+            const std::string pending_path = "chunks/region/simulation-pending.spn";
+            const auto pending_entry = std::find_if(
+                m_entries.begin(), m_entries.end(), [&pending_path](const Entry& entry) {
+                    return entry.path == pending_path;
+                });
+            const auto ledger_entry =
+                std::find_if(m_entries.begin(), m_entries.end(), [](const Entry& entry) {
+                    return entry.path == "chunks/region/active-regions.arl";
+                });
+            // Installing/replacing/removing a ledger makes retained pending state a
+            // dependency. A no-op removal of an absent ledger leaves legacy state ignored.
+            const bool ledger_dependency =
+                ledger_entry != m_entries.end() &&
+                (ledger_entry->action == "replace" ||
+                 fs::exists(WorldSaveService::active_regions_path(m_save_dir)));
+            if (pending_entry != m_entries.end() || ledger_dependency) {
+                if (auto* facts = WorldSaveService::SaveFactsScope::active_for(m_save_dir))
+                    facts->m_pending_enabled = true;
+                MemberDigest previous_pending;
+                if (pending_entry != m_entries.end()) {
+                    // The journal fingerprints the original bytes before any writer runs.
+                    // Comparing final replacement bytes with the old index would be wrong.
+                    previous_pending = {.present = pending_entry->action == "replace",
+                                        .bytes = pending_entry->prev_bytes,
+                                        .fnv64 = pending_entry->prev_fnv64};
+                } else {
+                    if (!digest_member(pending_path, previous_pending)) {
+                        abort(errors);
+                        return false;
+                    }
+                    retained_pending = previous_pending;
+                }
+                const auto indexed = members.find(pending_path);
+                if (m_previous.generation != 0 &&
+                    ((indexed == members.end() && previous_pending.present) ||
+                     (indexed != members.end() &&
+                      (indexed->second.present != previous_pending.present ||
+                       (previous_pending.present &&
+                        (indexed->second.bytes != previous_pending.bytes ||
+                         indexed->second.fnv64 != previous_pending.fnv64)))))) {
+                    AddError(errors, "inconsistent snapshot: " + pending_path);
+                    abort(errors);
+                    return false;
+                }
+            }
+        }
+
         if (m_previous.generation == 0) {
             // First indexing of this directory: enumerate the baseline members.
             std::vector<std::string> baseline = {
@@ -957,6 +1014,7 @@ bool SaveTransaction::commit(std::vector<std::string>* errors) {
                 "chunks/region/ground-objects.json",
                 "chunks/region/field-pages.fpg",
                 "chunks/region/active-regions.arl",
+                "chunks/region/simulation-pending.spn",
             };
             std::error_code ec;
             fs::directory_iterator it(m_save_dir / "chunks" / "region", ec);
@@ -976,7 +1034,14 @@ bool SaveTransaction::commit(std::vector<std::string>* errors) {
                     }
                 }
             }
+            std::sort(baseline.begin(), baseline.end());
+            baseline.erase(std::unique(baseline.begin(), baseline.end()), baseline.end());
             for (const std::string& rel : baseline) {
+                // Protected members are fingerprinted below after all writers finish.
+                if (std::any_of(m_entries.begin(), m_entries.end(), [&rel](const Entry& entry) {
+                        return entry.path == rel;
+                    }))
+                    continue;
                 MemberDigest digest;
                 if (!digest_member(rel, digest)) {
                     abort(errors);

@@ -60,6 +60,8 @@ struct RegionDigestInputs {
 // Record headers: u64 id | u8 lod | u8 flags | u32 raw_size | u32 compressed_size.
 // Lod-0 payloads retain canonical in-memory world_state_snapshot.v1 serialization.
 // Obsolete disk formats are refused; migration is not supported.
+struct SimulationPendingState;
+
 class WorldSaveService {
 public:
     // Owner-thread, read-only resolution. Validates committed disk membership even when a
@@ -142,6 +144,9 @@ public:
                                      const world::ActiveRegionLedger& ledger,
                                      std::vector<std::string>* errors);
 
+    static bool save_pending_state(const SimulationPendingState& state,
+                                   const std::filesystem::path& save_dir,
+                                   std::vector<std::string>* errors = nullptr);
     static std::filesystem::path active_regions_path(const std::filesystem::path& save_dir);
     static bool save_active_regions(world::ActiveRegionLedger& ledger,
                                     const world::WorldClock& clock,
@@ -317,6 +322,9 @@ public:
                                         std::vector<std::string>* errors = nullptr);
     // Number of full load_world decodes since process start (single-decode contract tests).
     static std::uint64_t decode_count_for_testing();
+    static std::uint64_t ledger_load_count_for_testing();
+    static std::uint64_t pending_reader_count_for_testing();
+    static std::uint64_t pending_probe_count_for_testing();
 
     // Validates one snapshot member and computes its index fingerprint (MemberDigestFn-compatible).
     // Region files hash their lod-0 record stream and are reported absent when they hold no lod-0
@@ -344,7 +352,8 @@ public:
     // post-commit actions (dirty-flag clearing) are deferred until the owning transaction commits.
     class SaveFactsScope {
     public:
-        explicit SaveFactsScope(const std::filesystem::path& save_dir);
+        explicit SaveFactsScope(const std::filesystem::path& save_dir,
+                                std::optional<bool> active_regions_enabled = std::nullopt);
         SaveFactsScope(const SaveFactsScope&) = delete;
         SaveFactsScope& operator=(const SaveFactsScope&) = delete;
         ~SaveFactsScope();
@@ -357,9 +366,11 @@ public:
         // Drops the deferred actions (rollback).
         void discard_deferred();
         void invalidate_presence_facts();
+        void invalidate_member_facts(const std::filesystem::path& path);
 
     private:
         friend class WorldSaveService;
+        friend class SaveTransaction;
         std::filesystem::path m_save_dir;
         SaveFactsScope* m_previous = nullptr;
         bool m_validated = false;
@@ -368,6 +379,13 @@ public:
         bool m_presence_known = false;
         bool m_snapshot_present = false;
         bool m_chunk_snapshot_present = false;
+        bool m_pending_enabled = false;
+        std::optional<bool> m_active_regions_enabled;
+        std::optional<world::ActiveRegionLedger> m_ledger;
+        MemberDigest m_ledger_digest;
+        std::optional<MemberDigest> m_pending_digest;
+        std::unique_ptr<SimulationPendingState> m_pending_activations;
+        void remember_pending(const SimulationPendingState& state, MemberDigest digest);
         std::vector<std::function<void()>> m_deferred;
     };
 
@@ -380,13 +398,19 @@ public:
 
     // Loads a previously saved snapshot into state. A missing snapshot file is
     // a clean miss (fresh world): returns false WITHOUT appending an error.
-    // Malformed or unreadable snapshots return false with diagnostics.
+    // Malformed or unreadable snapshots return false with diagnostics. Optional pending
+    // outputs publish only after all members validate, reusing this single file decode.
+    // Session callers supply their active-regions flag; standalone readers infer it
+    // from the existing metadata/ledger indicators without probing pending state.
     bool load_world(WorldStreamingState& state,
                     const std::filesystem::path& save_dir,
                     std::vector<std::string>& errors,
                     const std::stop_token& stop = {},
                     const std::function<bool(const IVec3&)>& retain_chunk = {},
-                    std::vector<IVec3>* authoritative_inventory = nullptr) const;
+                    std::vector<IVec3>* authoritative_inventory = nullptr,
+                    SimulationPendingState* pending_state = nullptr,
+                    bool* has_pending_state = nullptr,
+                    std::optional<bool> active_regions_enabled = std::nullopt) const;
 
     // Deterministic hash of the streaming state, reusing the persistence hash
     // machinery (fnv1a_64 over the canonical snapshot bytes). Format

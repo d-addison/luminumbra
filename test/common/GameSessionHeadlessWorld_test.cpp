@@ -1419,7 +1419,8 @@ TEST(GameSessionHeadlessWorldTest, CalendarConsumersUsePinnedPhasesOnTheRealTick
 void AdoptRegionGoldenChunk(GameSession& session, int x) {
     auto chunk = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3(x, 0, 0));
     chunk->set_state(Luminumbra::ChunkState::Idle);
-    chunk->heightmap_data = {8.0f + x, 8.5f + x, 9.0f + x};
+    chunk->heightmap_data = {
+        8.0f + static_cast<float>(x), 8.5f + static_cast<float>(x), 9.0f + static_cast<float>(x)};
     if (x == 0)
         chunk->mark_voxel_data_dirty();
     ASSERT_TRUE(session.GetWorldSystem()->adopt_streamed_chunk(chunk));
@@ -1895,7 +1896,7 @@ TEST(GameSessionHeadlessWorldTest, FirstEnabledChunkSaveIncludesCleanResidentReg
     for (const int x : {0, 32}) {
         auto chunk = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3(x, 0, 0));
         chunk->set_state(Luminumbra::ChunkState::Idle);
-        chunk->heightmap_data = {8.0f + x};
+        chunk->heightmap_data = {8.0f + static_cast<float>(x)};
         if (x == 0)
             chunk->mark_voxel_data_dirty();
         ASSERT_TRUE(session.GetWorldSystem()->adopt_streamed_chunk(chunk));
@@ -2338,8 +2339,8 @@ TEST(GameSessionHeadlessWorldTest, WalkingAnchorSurvivesNoclipAndReloadWithoutCa
     walking.SetLocalPlayerSimulationPosition(feet, true);
     noclip.SetLocalPlayerSimulationPosition(feet, true);
     for (int tick = 0; tick < 5; ++tick) {
-        noclip.SetLocalPlayerSimulationPosition(Luminumbra::Vec3(10000 + tick * 1000, 500, -20000),
-                                                false);
+        noclip.SetLocalPlayerSimulationPosition(
+            Luminumbra::Vec3(static_cast<float>(10000 + tick * 1000), 500, -20000), false);
         ASSERT_EQ(walking.TickSimulation(walking.GetSimulationClock().fixed_dt()), 1u);
         ASSERT_EQ(noclip.TickSimulation(noclip.GetSimulationClock().fixed_dt()), 1u);
         EXPECT_EQ(walking.GetRegionSchedule(), noclip.GetRegionSchedule());
@@ -4226,7 +4227,8 @@ TEST(GameSessionHeadlessWorldTest, RegionalQueriesReadStoredFieldsAndSurviveReop
     const Luminumbra::Vec3 position{5.2f, 5.0f, -1.5f};
     std::array<std::uint16_t, 5> values{};
     for (int channel = 0; channel < 5; ++channel)
-        ASSERT_TRUE(owner.GetFieldPages().sample(channel, 0, -1, values[channel]));
+        ASSERT_TRUE(owner.GetFieldPages().sample(
+            channel, 0, -1, values[static_cast<std::size_t>(channel)]));
     const auto wind =
         owner.GetWindFieldSystem()->SampleWind(position, Luminumbra::Systems::WindLayer::Ground);
     EXPECT_FLOAT_EQ(wind.x, static_cast<float>(std::bit_cast<std::int16_t>(values[0])) / 1024.0f);
@@ -4550,7 +4552,7 @@ TEST(GameSessionHeadlessWorldTest, BlockedDueStormDiscardsMotionWithinHalfOpenSo
         EXPECT_EQ(storm.owner, source);
         EXPECT_FLOAT_EQ(std::bit_cast<float>(storm.center_x), std::nextafter(512.0f, 0.0f));
         EXPECT_FLOAT_EQ(std::bit_cast<float>(storm.center_z), std::nextafter(512.0f, 0.0f));
-        EXPECT_EQ(storm.active_age, 11u + i);
+        EXPECT_EQ(storm.active_age, 11u + static_cast<unsigned>(i));
     }
 }
 
@@ -6858,7 +6860,7 @@ TEST(GameSessionHeadlessWorldTest, S8DCreatureSystemsGateFrozenReducedAndFullCoh
     GameSession base, live;
     CreateGroundWorld(base, root, jobs, "Creature cohorts");
     const std::array<RegionKey, 4> keys{{{10, -3}, {11, -3}, {12, -3}, {13, -3}}};
-    for (int i = 0; i < 4; ++i) {
+    for (std::size_t i = 0; i < 4; ++i) {
         const auto e = S8Creature(base,
                                   {static_cast<float>(keys[i].x * 512 + 16), 0, -1500},
                                   i == 3 ? C::CreatureTier::Coarse : C::CreatureTier::Full);
@@ -7312,11 +7314,11 @@ TEST(GameSessionHeadlessWorldTest, S8ECompleteFrozenCreatureInventoryRemainsBitE
     CreateGroundWorld(base, root, jobs, "Complete secondary inventory");
     const std::array<RegionKey, 5> keys{{{-1, 0}, {0, 0}, {1, 0}, {2, 0}, {3, 0}}};
     std::array<entt::entity, 5> entities;
-    for (int i = 0; i < 5; ++i)
+    for (std::size_t i = 0; i < 5; ++i)
         entities[i] = S8Creature(base,
                                  {float(keys[i].x * 512 + 8), 0, 8},
                                  i == 3 ? C::CreatureTier::Coarse : C::CreatureTier::Full);
-    for (int i = 0; i < 5; ++i)
+    for (std::size_t i = 0; i < 5; ++i)
         S8SecondaryInventory(base, entities[i], entities[(i + 1) % 5]);
     ASSERT_TRUE(base.SaveWorld());
     auto ledger = FixtureLedger(100,
@@ -8141,9 +8143,12 @@ TEST(GameSessionHeadlessWorldTest, S8GExplicitLoadEnqueueFailurePreservesLiveAut
 void SaveActivationOutbox(GameSession& session,
                           const HeadlessRoot& root,
                           JobSystem& jobs,
-                          const std::vector<Luminumbra::world::RegionKey>& keys) {
+                          const std::vector<Luminumbra::world::RegionKey>& keys,
+                          bool ordinary_event = false) {
     ASSERT_NO_FATAL_FAILURE(CreateGroundWorld(session, root, jobs, "Activation outbox"));
     session.SetReplicatedSimulationAnchors({});
+    if (ordinary_event)
+        ASSERT_EQ(session.GetSimulationEventBus().publish(1, "ordinary", "retained"), 0u);
     for (const auto key : keys)
         session.PinActiveRegion(key, true);
     session.GetSimulationEventBus().subscribe([](const auto& event) {
@@ -8162,7 +8167,8 @@ TEST(GameSessionHeadlessWorldTest, S8GExplicitLoadInsertsLowerActivationKeyInDur
     JobSystem jobs;
     jobs.startup(1);
     GameSession source, live;
-    ASSERT_NO_FATAL_FAILURE(SaveActivationOutbox(source, root, jobs, {{0, 0}, {1, 0}}));
+    // Ordinary continuation now comes from the saved authority alongside the outbox.
+    ASSERT_NO_FATAL_FAILURE(SaveActivationOutbox(source, root, jobs, {{0, 0}, {1, 0}}, true));
     ASSERT_NO_FATAL_FAILURE(CreateGroundWorld(live, root, jobs, "Live activation order"));
     live.SetReplicatedSimulationAnchors({});
     EXPECT_EQ(live.GetSimulationEventBus().publish(1, "ordinary", "retained"), 0u);
@@ -8694,8 +8700,8 @@ TEST(GameSessionHeadlessWorldTest, FlagOffWorldHashesUnchanged) {
                                  "|aether:" + legacy.at("aether").get<std::string>() +
                                  "|scents:|ecology:|plants:";
     std::uint64_t baseline_world = 14695981039346656037ull;
-    for (const unsigned char byte : envelope)
-        baseline_world = (baseline_world ^ byte) * 1099511628211ull;
+    for (const char byte : envelope)
+        baseline_world = (baseline_world ^ static_cast<unsigned char>(byte)) * 1099511628211ull;
     std::ostringstream expected_world;
     expected_world << std::hex << std::setw(16) << std::setfill('0') << baseline_world;
     EXPECT_EQ(SessionWorldHash(session), expected_world.str());

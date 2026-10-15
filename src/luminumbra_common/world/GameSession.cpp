@@ -46,6 +46,7 @@
 #include "../persistence/PlantPersistence.h"
 #include "../persistence/SaveTransaction.h"
 #include "../persistence/SavedWorldCatalog.h"
+#include "../persistence/SimulationPendingState.h"
 #include "../persistence/WorldPersistenceRoundtrip.h" // Persistence::StableChecksum (ComputeScentSubHash)
 #include "../persistence/WorldSaveService.h"
 #include "../scripting/LuaState.h"
@@ -1363,6 +1364,7 @@ bool GameSession::LoadWorld(const std::string& worldId) {
     candidate.m_jobSystem = m_jobSystem;
     candidate.m_requiredClientAssets = m_requiredClientAssets;
     candidate.m_activeRegionsEnabled = true;
+    candidate.m_simulationEventBus.set_durable(true);
     candidate.m_regionSchedulerConfig = m_regionSchedulerConfig;
     candidate.m_parkedBytesLimit = m_parkedBytesLimit;
     candidate.m_populationContract = m_populationContract;
@@ -1378,12 +1380,6 @@ bool GameSession::LoadWorld(const std::string& worldId) {
         return false;
     }
 
-    try {
-        candidate.QueueRegionActivations();
-    } catch (const std::exception& error) {
-        m_worldLoadError = error.what();
-        return false;
-    }
     ResetWorldSystems();
     m_registry = std::move(candidate.m_registry);
     m_simulationEventBus = std::move(candidate.m_simulationEventBus);
@@ -1437,6 +1433,22 @@ bool GameSession::LoadWorldInternal(const std::string& worldId) {
                                              : recovery_errors.front());
                 LUMINUMBRA_CORE_ERROR("World open refused: {}", m_worldOpenError);
                 return false;
+            }
+            // Refuse enabled snapshots before catalogue validation can inspect
+            // enabled-only members for a disabled session.
+            if (!m_activeRegionsEnabled) {
+                WorldClock clock;
+                bool required = false;
+                std::vector<std::string> clock_errors;
+                if (!Persistence::WorldSaveService::read_clock_metadata(
+                        candidate, clock, required, &clock_errors) ||
+                    required) {
+                    m_worldOpenError =
+                        clock_errors.empty()
+                            ? "Incompatible configuration: this world requires sim.active_regions."
+                            : clock_errors.front();
+                    return false;
+                }
             }
         }
     }
@@ -2146,22 +2158,11 @@ void GameSession::SetRegionPopulator(RegionPopulator populator) {
     m_regionPopulator = std::move(captured);
 }
 luminumbra::simulation::OrderedEventBus::PreparedBatch
-GameSession::PrepareRegionActivations(const ActiveRegionLedger& ledger) const {
-    namespace S = luminumbra::simulation;
-    std::vector<S::SimulationEvent> events;
-    for (const auto& [key, activation] : ledger.pending_activations()) {
-        const auto cause = activation.cause == ActivationCause::Edit  ? "edit"
-                           : activation.cause == ActivationCause::Pin ? "pin"
-                                                                      : "presence";
-        events.push_back({activation.activation_tick,
-                          std::numeric_limits<std::int32_t>::min(),
-                          0,
-                          "region.activated",
-                          std::to_string(activation.key.x) + "," +
-                              std::to_string(activation.key.z) + "," + cause,
-                          S::ActivationDeliveryKey{key.first, key.second.x, key.second.z}});
-    }
-    return m_simulationEventBus.prepare_batch(events, m_activationEnqueuePreparation, true);
+GameSession::PrepareRegionActivations(const ActiveRegionLedger& ledger,
+                                      const luminumbra::simulation::OrderedEventBus* source) const {
+    const auto events = Persistence::PendingActivationEvents(ledger);
+    return (source ? *source : m_simulationEventBus)
+        .prepare_batch(events, m_activationEnqueuePreparation, true, true);
 }
 void GameSession::QueueRegionActivations() {
     if (m_activeRegionsEnabled)
@@ -3046,7 +3047,8 @@ GameSession::CaptureAuthorityStateImpl(const std::string& avatar_snapshot) const
             .energy = m_energyFieldState.get(),
             .clock_bytes = m_worldClock.canonical_bytes(),
             .identity_bytes = AuthorityIdentityBytes(),
-            .avatar_bytes = avatar_snapshot});
+            .avatar_bytes = avatar_snapshot,
+            .pending_events = &m_simulationEventBus});
     } catch (const std::exception& error) {
         return {std::nullopt, error.what()};
     }
@@ -3112,7 +3114,7 @@ public:
     OuterSaveTransaction(const fs::path& save_dir,
                          std::uint64_t tick,
                          std::vector<std::array<float, 3>> anchors)
-        : m_facts(save_dir)
+        : m_facts(save_dir, true)
         , m_transaction(
               save_dir, tick, std::move(anchors), &Persistence::WorldSaveService::member_digest)
         , m_save_dir(save_dir) {}
@@ -3298,6 +3300,15 @@ bool GameSession::SaveWorldMetadataTo(const fs::path& save_dir) {
             return false;
         }
         if (!SaveEnergyFieldRecord(save_dir))
+            return false;
+        Persistence::SimulationPendingState pending;
+        pending.events = m_simulationEventBus.snapshot();
+        if (m_energyFieldState) {
+            pending.energy_channels = m_energyFieldState->channels();
+            pending.deposits = m_energyFieldState->PendingDeposits();
+        }
+        if (!pending.validate_activations(m_activeRegionLedger) ||
+            !Persistence::WorldSaveService::save_pending_state(pending, save_dir))
             return false;
         const auto expected_ledger = m_activeRegionLedger.canonical_bytes();
         auto persisted_ledger = m_activeRegionLedger;
@@ -3647,13 +3658,18 @@ bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
             return wanted.contains(Chunk::calculate_id(coords));
         })
                                : std::function<bool(const IVec3&)>{};
+    Persistence::SimulationPendingState pending;
+    bool has_pending = false;
     const bool snapshot_present =
         service.load_world(loaded,
                            save_dir,
                            errors,
                            {},
                            retain,
-                           m_activeRegionsEnabled ? &durable_inventory : nullptr);
+                           m_activeRegionsEnabled ? &durable_inventory : nullptr,
+                           m_activeRegionsEnabled ? &pending : nullptr,
+                           m_activeRegionsEnabled ? &has_pending : nullptr,
+                           m_activeRegionsEnabled);
     if (!snapshot_present && !errors.empty()) {
         m_worldOpenError = errors.front();
         if (!m_activeRegionsEnabled)
@@ -3772,6 +3788,17 @@ bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
                 return false;
             }
         }
+        if (has_pending &&
+            (!pending.validate_activations(ledger) ||
+             pending.energy_channels != (energy ? energy->channels() : 0) ||
+             (energy && !energy->RestorePendingDeposits(std::move(pending.deposits))))) {
+            m_worldOpenError = "Corrupt or incompatible simulation pending state";
+            return false;
+        }
+        luminumbra::simulation::OrderedEventBus pending_bus;
+        pending_bus.set_durable(true);
+        pending_bus.commit_batch(
+            luminumbra::simulation::OrderedEventBus::prepare_restore(std::move(pending.events)));
         // Validate the full plant/creature adoption against candidate stores and the
         // destination's existing durable identities before publishing any loaded member.
         std::vector<std::string> entity_errors;
@@ -3863,7 +3890,14 @@ bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
             return false;
         }
         try {
-            activation_batch = PrepareRegionActivations(ledger);
+            // A present member restores the exact queue, leaving activations not yet
+            // enqueued in the outbox. The next tick reconciles both continuations.
+            // Historical absence reconstructs a bounded prefix of the validated
+            // outbox. Excess deliveries remain there for subsequent ticks.
+            pending_bus.commit_batch(
+                has_pending ? pending_bus.prepare_batch({}, m_activationEnqueuePreparation)
+                            : PrepareRegionActivations(ledger, &pending_bus));
+            activation_batch = pending_bus.release_pending();
         } catch (const std::exception& error) {
             m_worldOpenError = error.what();
             return false;
@@ -4095,12 +4129,13 @@ void GameSession::RestoreRegionalScent() {
                                    static_cast<std::int32_t>(ScentDomainOrigin(false)) + z};
             const auto found = m_fieldPages.scent_cells().find(key);
             for (int channel = 0; channel < kScentFieldChannels; ++channel)
-                m_scentField->RestoreCell(channel,
-                                          x,
-                                          z,
-                                          found == m_fieldPages.scent_cells().end()
-                                              ? 0.0
-                                              : std::bit_cast<double>(found->second[channel]));
+                m_scentField->RestoreCell(
+                    channel,
+                    x,
+                    z,
+                    found == m_fieldPages.scent_cells().end()
+                        ? 0.0
+                        : std::bit_cast<double>(found->second[static_cast<std::size_t>(channel)]));
         }
 }
 void GameSession::CaptureRegionalScent() {
@@ -4112,7 +4147,8 @@ void GameSession::CaptureRegionalScent() {
                                    static_cast<std::int32_t>(ScentDomainOrigin(false)) + z};
             ScentCell values{};
             for (int channel = 0; channel < kScentFieldChannels; ++channel)
-                values[channel] = std::bit_cast<std::uint64_t>(m_scentField->Sample(channel, x, z));
+                values[static_cast<std::size_t>(channel)] =
+                    std::bit_cast<std::uint64_t>(m_scentField->Sample(channel, x, z));
             const auto found = m_fieldPages.scent_cells().find(key);
             const ScentCell old =
                 found == m_fieldPages.scent_cells().end() ? ScentCell{} : found->second;

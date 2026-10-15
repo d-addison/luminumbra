@@ -6,6 +6,7 @@
 #include "../systems/RegionalFoliage.h"
 #include "PlantPersistence.h"
 #include "SaveTransaction.h"
+#include "SimulationPendingState.h"
 #include "WorldPersistenceRoundtrip.h"
 #include "world/FarLodStore.h"
 
@@ -58,6 +59,9 @@ constexpr const char* kRegionDirectoryName = "region";
 constexpr const char* kWorldManifestFileName = "world-manifest.json";
 constexpr const char* kWorldManifestSchema = "luminumbra.persistence.world_manifest.v1";
 constexpr const char* kRegionFileExtension = ".lmr";
+std::atomic<std::uint64_t> LedgerLoadCount{0};
+std::atomic<std::uint64_t> PendingReaderCount{0};
+std::atomic<std::uint64_t> PendingProbeCount{0};
 
 // Container constants (the deterministic runtime contract section 3).
 constexpr char kRegionMagic[4] = {'L', 'M', 'R', '1'};
@@ -584,8 +588,10 @@ bool ReplaceMember(const std::filesystem::path& temp,
                    const std::filesystem::path& destination,
                    std::vector<std::string>* errors) {
     report_snapshot_step("before-replace", destination);
-    if (ActiveFacts() != nullptr)
+    if (ActiveFacts() != nullptr) {
         ActiveFacts()->invalidate_presence_facts();
+        ActiveFacts()->invalidate_member_facts(destination);
+    }
     if (!ReplaceRegionFileAtomically(temp, destination, errors))
         return false;
     report_snapshot_step("after-replace", destination);
@@ -1088,7 +1094,8 @@ std::string RelativeRegionMember(int rx, int rz) {
 // load_world already read; singleton members are hashed as raw bytes.
 std::string VerifySnapshotIndex(const std::filesystem::path& save_dir,
                                 const SnapshotIndex& index,
-                                const std::map<std::string, MemberDigest>& region_digests) {
+                                const std::map<std::string, MemberDigest>& region_digests,
+                                bool pending_enabled) {
     static const char* const kSingletons[] = {"world_info.json",
                                               "aether_state.efs",
                                               "chunks/region/world-manifest.json",
@@ -1096,9 +1103,12 @@ std::string VerifySnapshotIndex(const std::filesystem::path& save_dir,
                                               "chunks/region/creature-entities.json",
                                               "chunks/region/ground-objects.json",
                                               "chunks/region/field-pages.fpg",
-                                              "chunks/region/active-regions.arl"};
+                                              "chunks/region/active-regions.arl",
+                                              "chunks/region/simulation-pending.spn"};
     std::set<std::string> listed;
     for (const SnapshotMember& member : index.members) {
+        if (member.path == SimulationPendingState::kMember && !pending_enabled)
+            continue;
         listed.insert(member.path);
         MemberDigest actual;
         const auto region = region_digests.find(member.path);
@@ -1110,6 +1120,8 @@ std::string VerifySnapshotIndex(const std::filesystem::path& save_dir,
             std::uint64_t bytes = 0;
             std::uint64_t fnv64 = 0;
             bool exists = false;
+            if (member.path == SimulationPendingState::kMember)
+                PendingProbeCount.fetch_add(1, std::memory_order_relaxed);
             if (!hash_file(save_dir / member.path, bytes, fnv64, exists, nullptr))
                 return member.path;
             actual.present = exists;
@@ -1131,9 +1143,13 @@ std::string VerifySnapshotIndex(const std::filesystem::path& save_dir,
             return path;
     }
     for (const char* single : kSingletons) {
+        if (single == SimulationPendingState::kMember && !pending_enabled)
+            continue;
         if (listed.count(single) != 0)
             continue;
         std::error_code ec;
+        if (single == SimulationPendingState::kMember)
+            PendingProbeCount.fetch_add(1, std::memory_order_relaxed);
         if (std::filesystem::exists(save_dir / single, ec))
             return single;
     }
@@ -1915,6 +1931,82 @@ bool WorldSaveService::validate_field_pages(const std::filesystem::path& save_di
     return FieldPagesMatchLedger(state, ledger, errors);
 }
 
+bool WorldSaveService::save_pending_state(const SimulationPendingState& state,
+                                          const std::filesystem::path& save_dir,
+                                          std::vector<std::string>* errors) {
+    try {
+        const auto bytes = state.encode();
+        TransactionScope scope(
+            save_dir, {std::string(SimulationPendingState::kMember)}, errors, true);
+        if (!scope.ok())
+            return false;
+        const auto destination = save_dir / SimulationPendingState::kMember;
+        std::filesystem::create_directories(destination.parent_path());
+        if (!durable_write_file(destination, bytes, errors))
+            return false;
+        if (auto* facts = SaveFactsScope::active_for(save_dir)) {
+            facts->m_pending_enabled = true;
+            facts->remember_pending(state,
+                                    {.present = true,
+                                     .bytes = bytes.size(),
+                                     .fnv64 = fnv1a64_bytes(bytes.data(), bytes.size())});
+        }
+        return scope.commit(errors);
+    } catch (const std::exception& error) {
+        AddError(errors, error.what());
+        return false;
+    }
+}
+
+namespace {
+bool ReadPendingStateFile(SimulationPendingState& out,
+                          bool& present,
+                          const std::filesystem::path& save_dir,
+                          std::vector<std::string>* errors,
+                          MemberDigest* digest = nullptr) {
+    PendingReaderCount.fetch_add(1, std::memory_order_relaxed);
+    const auto path = save_dir / SimulationPendingState::kMember;
+    std::error_code ec;
+    PendingProbeCount.fetch_add(1, std::memory_order_relaxed);
+    const bool exists = std::filesystem::exists(path, ec);
+    if (ec) {
+        AddError(errors, "Cannot inspect simulation pending state: " + ec.message());
+        return false;
+    }
+    SimulationPendingState candidate;
+    if (digest)
+        *digest = {};
+    if (exists) {
+        const auto size = std::filesystem::file_size(path, ec);
+        if (ec || size > SimulationPendingState::kMaxFileBytes) {
+            AddError(errors, "Simulation pending state exceeds size cap or is unreadable");
+            return false;
+        }
+        std::ifstream input(path, std::ios::binary);
+        std::string bytes(static_cast<std::size_t>(size) + 1, '\0');
+        input.read(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+        if (input.bad() || !input.eof()) {
+            AddError(errors, "Cannot read simulation pending state");
+            return false;
+        }
+        bytes.resize(static_cast<std::size_t>(input.gcount()));
+        std::string error;
+        if (!SimulationPendingState::decode(bytes, candidate, error)) {
+            AddError(errors, "Corrupt simulation pending state: " + error);
+            return false;
+        }
+        if (digest)
+            *digest = {.present = true,
+                       .bytes = bytes.size(),
+                       .fnv64 = fnv1a64_bytes(bytes.data(), bytes.size())};
+    }
+    out = std::move(candidate);
+    present = exists;
+    return true;
+}
+
+} // namespace
+
 std::filesystem::path WorldSaveService::active_regions_path(const std::filesystem::path& save_dir) {
     return region_directory(save_dir) / "active-regions.arl";
 }
@@ -1924,6 +2016,22 @@ bool WorldSaveService::load_active_regions(world::ActiveRegionLedger& ledger,
                                            std::vector<std::string>* errors,
                                            const world::WorldClock& absent_clock) {
     try {
+        auto* facts = SaveFactsScope::active_for(save_dir);
+        if (facts && facts->m_ledger) {
+            MemberDigest actual;
+            if (!hash_file(active_regions_path(save_dir),
+                           actual.bytes,
+                           actual.fnv64,
+                           actual.present,
+                           errors))
+                return false;
+            if (actual.present && actual.bytes == facts->m_ledger_digest.bytes &&
+                actual.fnv64 == facts->m_ledger_digest.fnv64) {
+                ledger = *facts->m_ledger;
+                return true;
+            }
+            facts->m_ledger.reset();
+        }
         const auto path = active_regions_path(save_dir);
         if (!std::filesystem::exists(path)) {
             ledger = world::ActiveRegionLedger({}, absent_clock);
@@ -1935,6 +2043,7 @@ bool WorldSaveService::load_active_regions(world::ActiveRegionLedger& ledger,
             return false;
         }
         std::ifstream input(path, std::ios::binary);
+        LedgerLoadCount.fetch_add(1, std::memory_order_relaxed);
         std::string bytes(static_cast<std::size_t>(length), '\0');
         input.read(bytes.data(), static_cast<std::streamsize>(length));
         std::string error;
@@ -1942,6 +2051,12 @@ bool WorldSaveService::load_active_regions(world::ActiveRegionLedger& ledger,
             !world::ActiveRegionLedger::decode(bytes, ledger, error)) {
             AddError(errors, error.empty() ? world::ActiveRegionLedger::kCorruptMessage : error);
             return false;
+        }
+        if (facts) {
+            facts->m_ledger = ledger;
+            facts->m_ledger_digest = {.present = true,
+                                      .bytes = bytes.size(),
+                                      .fnv64 = fnv1a64_bytes(bytes.data(), bytes.size())};
         }
         return true;
     } catch (const std::exception&) {
@@ -1955,6 +2070,7 @@ bool WorldSaveService::save_active_regions(world::ActiveRegionLedger& ledger,
                                            const std::filesystem::path& save_dir,
                                            std::vector<std::string>* errors) {
     const bool has_ledger = !ledger.records().empty() || ledger.local_anchor() ||
+                            ledger.next_persistent_id() != 1 ||
                             std::filesystem::exists(active_regions_path(save_dir));
     TransactionScope scope(save_dir, {"chunks/region/active-regions.arl"}, errors, has_ledger);
     if (!scope.ok())
@@ -1994,6 +2110,12 @@ bool WorldSaveService::save_active_regions(world::ActiveRegionLedger& ledger,
         if (!ReplaceMember(temp, path, errors)) {
             RemoveTemporaryFile(temp);
             return false;
+        }
+        if (auto* facts = SaveFactsScope::active_for(save_dir)) {
+            facts->m_ledger = std::move(checked);
+            facts->m_ledger_digest = {.present = true,
+                                      .bytes = bytes.size(),
+                                      .fnv64 = fnv1a64_bytes(bytes.data(), bytes.size())};
         }
         // An outer transaction cannot retain a caller-local ledger reference. The owner can
         // acknowledge through its own lifetime-safe callback at outer commit.
@@ -2177,9 +2299,11 @@ bool SameSaveDirectory(const std::filesystem::path& lhs, const std::filesystem::
 }
 } // namespace
 
-WorldSaveService::SaveFactsScope::SaveFactsScope(const std::filesystem::path& save_dir)
+WorldSaveService::SaveFactsScope::SaveFactsScope(const std::filesystem::path& save_dir,
+                                                 std::optional<bool> active_regions_enabled)
     : m_save_dir(save_dir)
-    , m_previous(ActiveFacts()) {
+    , m_previous(ActiveFacts())
+    , m_active_regions_enabled(active_regions_enabled) {
     ActiveFacts() = this;
 }
 
@@ -2202,10 +2326,18 @@ bool WorldSaveService::SaveFactsScope::validate(std::vector<std::string>* errors
         m_diagnostics.clear();
         m_chunk_snapshot_present = false;
         m_snapshot_present = WorldSaveService{}.load_world(
-            state, m_save_dir, m_diagnostics, {}, [this](const IVec3&) {
+            state,
+            m_save_dir,
+            m_diagnostics,
+            {},
+            [this](const IVec3&) {
                 m_chunk_snapshot_present = true;
                 return false;
-            });
+            },
+            nullptr,
+            nullptr,
+            nullptr,
+            m_active_regions_enabled);
         m_chunk_snapshot_present = m_snapshot_present && m_chunk_snapshot_present;
         m_validated_ok = m_diagnostics.empty();
         m_validated = true;
@@ -2237,6 +2369,26 @@ void WorldSaveService::SaveFactsScope::discard_deferred() {
 
 void WorldSaveService::SaveFactsScope::invalidate_presence_facts() {
     m_presence_known = false;
+}
+
+void WorldSaveService::SaveFactsScope::invalidate_member_facts(const std::filesystem::path& path) {
+    if (path == active_regions_path(m_save_dir))
+        m_ledger.reset();
+    if (path == m_save_dir / SimulationPendingState::kMember) {
+        m_pending_digest.reset();
+        m_pending_activations.reset();
+    }
+}
+
+void WorldSaveService::SaveFactsScope::remember_pending(const SimulationPendingState& state,
+                                                        MemberDigest digest) {
+    // Retain only the cross-member facts, not the potentially large text/deposit payload.
+    auto activations = std::make_unique<SimulationPendingState>();
+    for (const auto& event : state.events.events)
+        if (event.activation)
+            activations->events.events.push_back(event);
+    m_pending_activations = std::move(activations);
+    m_pending_digest = digest;
 }
 
 bool WorldSaveService::has_world_save(const std::filesystem::path& save_dir) {
@@ -2464,6 +2616,15 @@ std::atomic<std::uint64_t>& DecodeCounter() {
 std::uint64_t WorldSaveService::decode_count_for_testing() {
     return DecodeCounter().load(std::memory_order_acquire);
 }
+std::uint64_t WorldSaveService::ledger_load_count_for_testing() {
+    return LedgerLoadCount.load(std::memory_order_relaxed);
+}
+std::uint64_t WorldSaveService::pending_reader_count_for_testing() {
+    return PendingReaderCount.load(std::memory_order_relaxed);
+}
+std::uint64_t WorldSaveService::pending_probe_count_for_testing() {
+    return PendingProbeCount.load(std::memory_order_relaxed);
+}
 
 bool WorldSaveService::durable_flush_directory(const std::filesystem::path& directory,
                                                std::vector<std::string>* errors) {
@@ -2531,8 +2692,10 @@ bool WorldSaveService::durable_remove(const std::filesystem::path& path,
     if (!existed)
         return true;
     report_snapshot_step("before-delete", path);
-    if (ActiveFacts() != nullptr)
+    if (ActiveFacts() != nullptr) {
         ActiveFacts()->invalidate_presence_facts();
+        ActiveFacts()->invalidate_member_facts(path);
+    }
 #if defined(_WIN32)
     // Publish absence through a write-through move before deleting the expendable
     // tombstone. If interrupted here, recovery restores the protected original;
@@ -2571,6 +2734,47 @@ bool WorldSaveService::member_digest(const std::filesystem::path& save_dir,
             return false;
         }
         const std::string relative(relative_path);
+        auto* facts = SaveFactsScope::active_for(save_dir);
+        if (relative == "chunks/region/active-regions.arl" ||
+            relative == SimulationPendingState::kMember) {
+            // A ledger-only replacement (including removal) must also preserve
+            // the queued activation dependency. The pending-member path reuses
+            // fingerprint-checked validation facts from this transaction.
+            // Baseline validation may have ignored pending state in a legacy save.
+            // An installed first ledger makes it applicable in the final snapshot.
+            std::error_code ledger_error;
+            const bool final_ledger =
+                std::filesystem::exists(active_regions_path(save_dir), ledger_error);
+            if (ledger_error) {
+                error = "Cannot inspect final active-region ledger: " + ledger_error.message();
+                return false;
+            }
+            bool enabled = final_ledger || (facts && facts->m_pending_enabled);
+            if (!facts && !enabled) {
+                world::WorldClock clock;
+                std::vector<std::string> diagnostics;
+                if (!read_clock_metadata(save_dir, clock, enabled, &diagnostics)) {
+                    error = diagnostics.empty() ? "corrupt world metadata" : diagnostics.front();
+                    return false;
+                }
+            }
+            if (facts && enabled)
+                facts->m_pending_enabled = true;
+            // Transactions validate retained dependencies against the previous index
+            // and reuse that digest during commit. Standalone digest callers still
+            // validate the final ledger/pending pair here.
+            if (enabled && relative == "chunks/region/active-regions.arl" &&
+                !SaveTransaction::active_for(save_dir)) {
+                MemberDigest pending;
+                if (!member_digest(save_dir, SimulationPendingState::kMember, pending, error))
+                    return false;
+            }
+        }
+        if (relative == SimulationPendingState::kMember) {
+            if (facts && !facts->m_pending_enabled)
+                return true;
+            PendingProbeCount.fetch_add(1, std::memory_order_relaxed);
+        }
         const std::filesystem::path path = save_dir / relative;
         std::error_code ec;
         if (!std::filesystem::exists(path, ec))
@@ -2581,6 +2785,38 @@ bool WorldSaveService::member_digest(const std::filesystem::path& save_dir,
             return diagnostics.empty() ? std::string(fallback) : diagnostics.front();
         };
 
+        if (relative == SimulationPendingState::kMember) {
+            MemberDigest actual;
+            if (!hash_file(path, actual.bytes, actual.fnv64, actual.present, &diagnostics)) {
+                error = first_error("Cannot fingerprint simulation pending state");
+                return false;
+            }
+            SimulationPendingState decoded;
+            const SimulationPendingState* pending = nullptr;
+            if (facts && facts->m_pending_digest && facts->m_pending_activations &&
+                facts->m_pending_digest->present == actual.present &&
+                facts->m_pending_digest->bytes == actual.bytes &&
+                facts->m_pending_digest->fnv64 == actual.fnv64) {
+                pending = facts->m_pending_activations.get();
+            } else {
+                bool present = false;
+                if (!ReadPendingStateFile(decoded, present, save_dir, &diagnostics) || !present) {
+                    error = first_error("Corrupt simulation pending state");
+                    return false;
+                }
+                pending = &decoded;
+            }
+            world::ActiveRegionLedger ledger;
+            if (!load_active_regions(ledger, save_dir, &diagnostics) ||
+                !pending->validate_activations(ledger)) {
+                error = first_error("Corrupt simulation pending state or activation outbox");
+                return false;
+            }
+            if (facts && pending == &decoded)
+                facts->remember_pending(decoded, actual);
+            out = actual;
+            return true;
+        }
         if (relative.rfind("chunks/region/r.", 0) == 0) {
             int rx = 0;
             int rz = 0;
@@ -2789,7 +3025,10 @@ bool WorldSaveService::write_member_bytes(const std::filesystem::path& save_dir,
         return false;
     }
     const std::string relative(relative_path);
-    TransactionScope scope(save_dir, {relative}, errors);
+    // These authority members require an index even on their first raw publication.
+    const bool require_index = relative == SimulationPendingState::kMember ||
+                               relative == "chunks/region/active-regions.arl";
+    TransactionScope scope(save_dir, {relative}, errors, require_index);
     if (!scope.ok())
         return false;
     const std::filesystem::path destination = save_dir / relative;
@@ -2806,7 +3045,9 @@ bool WorldSaveService::remove_member(const std::filesystem::path& save_dir,
         return false;
     }
     const std::string relative(relative_path);
-    TransactionScope scope(save_dir, {relative}, errors);
+    const bool require_index = relative == SimulationPendingState::kMember ||
+                               relative == "chunks/region/active-regions.arl";
+    TransactionScope scope(save_dir, {relative}, errors, require_index);
     if (!scope.ok())
         return false;
     return durable_remove(save_dir / relative, errors) && scope.commit(errors);
@@ -2993,7 +3234,10 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
                                   std::vector<std::string>& errors,
                                   const std::stop_token& stop,
                                   const std::function<bool(const IVec3&)>& retain_chunk,
-                                  std::vector<IVec3>* authoritative_inventory) const {
+                                  std::vector<IVec3>* authoritative_inventory,
+                                  SimulationPendingState* pending_state,
+                                  bool* has_pending_state,
+                                  std::optional<bool> active_regions_enabled) const {
     DecodeCounter().fetch_add(1, std::memory_order_acq_rel);
     state.clear();
     if (authoritative_inventory)
@@ -3026,14 +3270,15 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
             return reject(metadata_error);
         if (!indexed && snapshot_format >= 1)
             return reject("inconsistent snapshot: index missing");
-        if (!indexed) {
-            world::WorldClock clock;
-            bool requires_active_regions = false;
-            if (!read_clock_metadata(save_dir, clock, requires_active_regions, &errors))
-                return reject("");
-            if (requires_active_regions)
-                return reject("inconsistent snapshot: enabled records without index");
-        }
+        world::WorldClock clock;
+        bool requires_active_regions = false;
+        if (!read_clock_metadata(save_dir, clock, requires_active_regions, &errors))
+            return reject("");
+        if (!indexed && requires_active_regions)
+            return reject("inconsistent snapshot: enabled records without index");
+        const bool pending_enabled = active_regions_enabled.value_or(requires_active_regions);
+        if (auto* facts = SaveFactsScope::active_for(save_dir))
+            facts->m_pending_enabled = pending_enabled;
         const auto chunks_dir = save_dir / kChunksDirectoryName;
         const auto region_dir = region_directory(save_dir);
         if (std::filesystem::exists(world_state_path(save_dir)) ||
@@ -3057,6 +3302,8 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
             if (stop.stop_requested())
                 return reject("Saved-world validation cancelled.");
             int rx = 0, rz = 0;
+            if (!pending_enabled && entry.path() == save_dir / SimulationPendingState::kMember)
+                continue;
             if (!entry.is_regular_file())
                 return reject("corrupt world persistence artifact: " + entry.path().string());
             if (entry.path() == snapshot_index_path(save_dir)) {
@@ -3067,7 +3314,8 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
                 entry.path() == creature_entities_path(save_dir) ||
                 entry.path() == ground_objects_path(save_dir) ||
                 entry.path() == field_pages_path(save_dir) ||
-                entry.path() == active_regions_path(save_dir)) {
+                entry.path() == active_regions_path(save_dir) ||
+                entry.path() == save_dir / SimulationPendingState::kMember) {
                 present = true;
             } else if (ParseRegionFileName(entry.path(), rx, rz)) {
                 region_files.push_back(entry.path());
@@ -3080,7 +3328,8 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
             // An index-only region directory is still an indexed snapshot: verify it before
             // reporting a clean miss, or tampered metadata/energy would go unnoticed.
             if (indexed) {
-                const std::string mismatch = VerifySnapshotIndex(save_dir, snapshot_index, {});
+                const std::string mismatch =
+                    VerifySnapshotIndex(save_dir, snapshot_index, {}, pending_enabled);
                 if (!mismatch.empty())
                     return reject("inconsistent snapshot: " + mismatch);
             }
@@ -3145,10 +3394,6 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
         if (!load_active_regions(ledger, save_dir, &errors))
             return reject("");
         if (std::filesystem::exists(active_regions_path(save_dir))) {
-            world::WorldClock clock;
-            bool required = false;
-            if (!read_clock_metadata(save_dir, clock, required, &errors))
-                return reject("");
             if (ledger.header_tick() > clock.tick())
                 return reject(world::ActiveRegionLedger::kCorruptMessage);
             for (const auto& [owner, age] : ledger.energy_ages()) {
@@ -3156,6 +3401,15 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
                 if (age > clock.tick())
                     return reject("corrupt regional energy field age");
             }
+        }
+        SimulationPendingState pending;
+        bool has_pending = false;
+        MemberDigest pending_digest;
+        if (pending_enabled) {
+            if (!ReadPendingStateFile(pending, has_pending, save_dir, &errors, &pending_digest))
+                return reject("");
+            if (has_pending && (!indexed || !pending.validate_activations(ledger)))
+                return reject("Corrupt simulation pending state activation outbox");
         }
         if (!validate_ground_objects(save_dir, ledger, &errors))
             return reject("");
@@ -3204,10 +3458,17 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
         }
         if (indexed) {
             const std::string mismatch =
-                VerifySnapshotIndex(save_dir, snapshot_index, region_digests);
+                VerifySnapshotIndex(save_dir, snapshot_index, region_digests, pending_enabled);
             if (!mismatch.empty())
                 return reject("inconsistent snapshot: " + mismatch);
         }
+        if (pending_enabled)
+            if (auto* facts = SaveFactsScope::active_for(save_dir))
+                facts->remember_pending(pending, pending_digest);
+        if (pending_enabled && pending_state)
+            *pending_state = std::move(pending);
+        if (has_pending_state)
+            *has_pending_state = has_pending;
         return true;
     } catch (const std::exception& e) {
         return reject(std::string("corrupt or unreadable world persistence: ") + e.what());
