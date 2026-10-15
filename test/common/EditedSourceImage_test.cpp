@@ -270,6 +270,7 @@ TEST(EditedSourceImage, PreparedIncludesStagedAndUnchangedDiskEditsWithCommitRec
         EXPECT_EQ(prepared->Identity().state, FarEditedImageState::Prepared);
         EXPECT_EQ(PublishCommittedEditedSource(prepared, receipt), EditedSourceError::Ineligible);
         EXPECT_FALSE(receipt);
+        EXPECT_FALSE(prepared->PublicationReceipt());
         const auto* staged = Find(*prepared, changed_id);
         const auto* unchanged = Find(*prepared, disk_id);
         ASSERT_NE(staged, nullptr);
@@ -288,6 +289,12 @@ TEST(EditedSourceImage, PreparedIncludesStagedAndUnchangedDiskEditsWithCommitRec
     EXPECT_EQ(prepared->Identity().state, FarEditedImageState::Prepared);
     EXPECT_FALSE(prepared->RendererEligible());
     EXPECT_EQ(prepared->Lattices().data(), receipt->Lattices().data());
+    const auto publication = receipt->PublicationReceipt();
+    ASSERT_TRUE(publication);
+    EXPECT_EQ(publication, prepared->PublicationReceipt());
+    EXPECT_EQ(publication->generation, receipt->Identity().generation);
+    const auto index_bytes = Read(snapshot_index_path(root.path));
+    EXPECT_EQ(publication->index_fnv64, fnv1a64_bytes(index_bytes.data(), index_bytes.size()));
 }
 
 TEST(EditedSourceImage, AbortedPreparedPayloadRemainsReadableWithoutRendererAuthority) {
@@ -313,6 +320,7 @@ TEST(EditedSourceImage, AbortedPreparedPayloadRemainsReadableWithoutRendererAuth
     EXPECT_EQ(prepared->Lattices()[0].density[kInterior], -55);
     EXPECT_FALSE(prepared->RendererEligible());
     EXPECT_EQ(PublishCommittedEditedSource(prepared, output), EditedSourceError::Ineligible);
+    EXPECT_FALSE(prepared->PublicationReceipt());
     EXPECT_FALSE(output);
     ASSERT_EQ(CaptureCommittedEditedSource(root.path, 1, {tiles}, limits, output),
               EditedSourceError::None);
@@ -1150,5 +1158,51 @@ TEST(EditedSourceImage, PreviewSelectionAndBoundaryCapsAreSharedAcrossLayers) {
     EXPECT_EQ(live, old_live);
     EXPECT_EQ(parked, old_parked);
     EXPECT_EQ(limits.memory->used(), 0u);
+}
+TEST(EditedSourceImage, AuthoritativeChunksCommitAndPublishReceiptWithDerivedReconstructionDue) {
+    SaveRoot root;
+    WorldStreamingState state;
+    auto chunk = EditedChunk(state);
+    Wet(*chunk);
+    ASSERT_TRUE(Save(root, state));
+    ASSERT_TRUE(Index(root));
+    chunk->sdf_data[kInterior] = -45;
+    chunk->mark_voxel_data_dirty();
+    const std::array tiles{Tile(1)};
+    auto limits = Limits();
+    std::shared_ptr<const EditedSourceImage> prepared, committed;
+    {
+        SaveTransaction transaction(root.path, 0, {}, &WorldSaveService::member_digest);
+        ASSERT_TRUE(transaction.begin(nullptr));
+        ASSERT_TRUE(WorldSaveService{}.save_dirty_chunks(state, root.path).saved);
+        ASSERT_EQ(CapturePreparedEditedSource(transaction, {tiles}, limits, prepared),
+                  EditedSourceError::None);
+        const auto group = transaction.BeginDerivedGroup({"far/v1.0.0.lmr"});
+        ASSERT_TRUE(group.has_value());
+        if (!group.has_value())
+            return;
+        ASSERT_TRUE(transaction.WriteDerivedMember(*group, "far/v1.0.0.lmr", "malformed"));
+        EXPECT_TRUE(chunk->is_voxel_data_dirty());
+        EXPECT_EQ(PublishCommittedEditedSource(prepared, committed), EditedSourceError::Ineligible);
+        ASSERT_TRUE(transaction.commit(nullptr));
+        EXPECT_FALSE(chunk->is_voxel_data_dirty());
+        EXPECT_FALSE(fs::exists(root.path / "far/v1.0.0.lmr"));
+        ASSERT_EQ(PublishCommittedEditedSource(prepared, committed), EditedSourceError::None);
+        ASSERT_TRUE(committed);
+        EXPECT_EQ(committed->PublicationReceipt(), transaction.receipt());
+    }
+    ASSERT_TRUE(committed);
+    ASSERT_EQ(committed->Lattices().size(), 1u);
+    ASSERT_EQ(committed->Water().size(), 1u);
+    EXPECT_EQ(committed->Lattices()[0].density[kInterior], -45);
+    EXPECT_EQ(committed->Water()[0].depth_mm[0], 125);
+    EXPECT_TRUE(committed->RendererEligible());
+    std::shared_ptr<const EditedSourceImage> reopened;
+    ASSERT_EQ(CaptureCommittedEditedSource(root.path, 2, {tiles}, limits, reopened),
+              EditedSourceError::None);
+    ASSERT_TRUE(reopened);
+    ASSERT_EQ(reopened->Lattices().size(), 1u);
+    EXPECT_EQ(reopened->Lattices()[0].density[kInterior], -45);
+    EXPECT_EQ(reopened->Dependencies().size(), committed->Dependencies().size());
 }
 } // namespace

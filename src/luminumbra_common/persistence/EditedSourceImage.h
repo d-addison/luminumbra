@@ -73,6 +73,7 @@ public:
     std::span<const EditedSourceTileSupport> Selection() const;
     bool LegacyAuthority() const;
     bool RendererEligible() const;
+    std::shared_ptr<const SnapshotCommitReceipt> PublicationReceipt() const;
     std::uint64_t ReservedBytes() const;
 
 private:

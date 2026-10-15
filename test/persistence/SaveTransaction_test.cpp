@@ -239,7 +239,7 @@ SnapshotIndex MakeIndex() {
     index.members.push_back(MakeMember(
         "chunks/region/plant-entities.json", MemberClass::Authoritative, false, 0, 0, 3));
     index.members.push_back(
-        MakeMember("world_info.json", MemberClass::Derived, true, 20, 0xfeedULL, 2));
+        MakeMember("far/v1.0.0.lmr", MemberClass::Derived, true, 20, 0xfeedULL, 2));
     return index;
 }
 

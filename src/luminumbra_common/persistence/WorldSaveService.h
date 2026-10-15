@@ -36,6 +36,16 @@ struct WorldSaveDirtyReport {
     bool saved = false;
 };
 
+// Receipted means matching index bytes only. Dependency/content currency is the catalog
+// consumer's additional decision; a matching member alone never proves cache currency.
+enum class DerivedMemberState : std::uint8_t {
+    Missing,
+    Receipted,
+    Stale,
+    Unreceipted,
+    RecoveryPending
+};
+
 // Inputs of the region simulation digest. Priority when ids collide: live over
 // parked over durable edited records. Parked is the dirty-chunk parking area
 // introduced by a later slice; it is empty until then.
@@ -168,11 +178,13 @@ public:
     // A ledger or other sibling record alone is not an initial chunk snapshot.
     static bool has_chunk_snapshot(const std::filesystem::path& save_dir);
 
-    // Validates all existing persistence artifacts before a writer may modify them.
+    // Read-only validation of all existing persistence artifacts before a writer may modify them.
+    // Reports pending recovery; the owner-thread session open boundary must recover first.
     // A missing save is valid. Diagnostics distinguish obsolete, future and corrupt files.
     static bool validate_save(const std::filesystem::path& save_dir,
                               std::vector<std::string>* errors = nullptr,
-                              const std::stop_token& stop = {});
+                              const std::stop_token& stop = {},
+                              MemberDigestFn catalog_digest = nullptr);
 
     // Uses the same durable temporary-file/atomic replacement path as chunk containers.
     // Refuses an unsupported existing save before touching its metadata.
@@ -339,6 +351,24 @@ public:
                                             std::string_view relative_path,
                                             MemberDigest& out,
                                             std::string& error);
+    // Structure is validated before currency. Catalog contents are supplied by the catalog
+    // consumer through catalog_digest; a present catalog without that validator refuses.
+    static bool derived_member_digest(const std::filesystem::path& save_dir,
+                                      std::string_view relative_path,
+                                      std::uint64_t source_generation_limit,
+                                      MemberDigest& out,
+                                      std::string& error,
+                                      MemberDigestFn catalog_digest = nullptr);
+    static bool inspect_derived_member(const std::filesystem::path& save_dir,
+                                       std::string_view relative_path,
+                                       const SnapshotIndex& index,
+                                       DerivedMemberState& state,
+                                       std::string& error,
+                                       MemberDigestFn catalog_digest = nullptr);
+    static bool verify_derived_members(const std::filesystem::path& save_dir,
+                                       const SnapshotIndex& index,
+                                       std::vector<std::string>* errors,
+                                       MemberDigestFn catalog_digest = nullptr);
     // Shared with load_world; checks the installed candidate set, never a validation cache.
     static bool validate_authoritative_relationships(const std::filesystem::path& save_dir,
                                                      std::vector<std::string>& errors,
@@ -400,12 +430,14 @@ public:
     // Loads a previously saved snapshot into state. A missing snapshot file is
     // a clean miss (fresh world): returns false WITHOUT appending an error.
     // Malformed or unreadable snapshots return false with diagnostics.
+    // Read-only: pending recovery is reported, never performed by this loader.
     bool load_world(WorldStreamingState& state,
                     const std::filesystem::path& save_dir,
                     std::vector<std::string>& errors,
                     const std::stop_token& stop = {},
                     const std::function<bool(const IVec3&)>& retain_chunk = {},
-                    std::vector<IVec3>* authoritative_inventory = nullptr) const;
+                    std::vector<IVec3>* authoritative_inventory = nullptr,
+                    MemberDigestFn catalog_digest = nullptr) const;
 
     // Deterministic hash of the streaming state, reusing the persistence hash
     // machinery (fnv1a_64 over the canonical snapshot bytes). Format

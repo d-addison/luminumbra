@@ -865,6 +865,9 @@ bool EditedSourceImage::RendererEligible() const {
     return m_identity.state == World::FarEditedImageState::Committed &&
            (!m_publication || m_publication->committed());
 }
+std::shared_ptr<const SnapshotCommitReceipt> EditedSourceImage::PublicationReceipt() const {
+    return m_publication ? m_publication->receipt() : nullptr;
+}
 std::uint64_t EditedSourceImage::ReservedBytes() const {
     return m_data->reservation->lease.bytes() + (m_handleReservation ? 512 : 0);
 }
