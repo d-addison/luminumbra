@@ -107,6 +107,7 @@ struct EditedSourceCapture {
 // Owner-thread only, at a quiescent publication boundary. All refusals preserve out.
 // Committed capture recovers before reading. It refuses an open transaction in this directory.
 // Absent index is validated legacy generation zero; capture never stamps or invents edits.
+// Invalid density samples/counts or materials outside integer [0, 255] refuse with InvalidRecord.
 EditedSourceError CaptureCommittedEditedSource(const std::filesystem::path& save_root,
                                                std::uint64_t expected_generation,
                                                const EditedSourceSelection& selection,
