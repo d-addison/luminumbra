@@ -171,10 +171,14 @@ class ILockstepTransport {
 public:
     virtual ~ILockstepTransport() = default;
 
-    // Sends one complete message frame. A refusal means the payload exceeds
+    // Sends one complete message frame. Terminal refusals mean the frame exceeds
     // kMaxFramePayloadBytes (rejected before any bytes are written), or the transport
-    // is closed/unavailable; callers treat it as terminal. In-process transports
-    // never refuse for capacity.
+    // is closed/disconnected. Transient refusals leave the peer connected and accept
+    // no frame bytes: NetSockets/GNS/Steam may refuse when their send buffer is full.
+    // After false, callers check the frame size and IsPeerConnected(): an in-limit
+    // frame with a connected peer can be retried unchanged. In-process transports
+    // never refuse for capacity. Drain received frames before observing buffered
+    // peer closure.
     // NOTE: named SendFrame (not SendMessage) deliberately -- <windows.h> #defines
     // SendMessage to SendMessageA/W, which would rename this virtual under the macro.
     // `delivery` defaults to Reliable so existing callers (lockstep) are unchanged.
@@ -438,7 +442,7 @@ struct TickResult {
     std::uint64_t tick = 0; // the tick this result concerns
     std::vector<std::uint8_t>
         local_inputs; // inputs to APPLY for this tick (local + peer merged opaque set)
-    bool ran_hash_exchange = false; // a HashMsg was sent/compared at this tick
+    bool ran_hash_exchange = false; // a HashMsg was sent/queued at this tick
 };
 
 // Snapshot of session status (telemetry only -- none of this feeds the hash).
@@ -506,7 +510,11 @@ public:
     //  - if the peer's input for the wanted tick is present -> Advanced (world stepped,
     //    hashes exchanged at the cadence);
     //  - else -> WaitingForPeer (horizon grows; caller pumps again after sending/recving).
-    // `budget_ticks` is the total tick count to run; returns Finished once reached.
+    // Input/hash transient refusals retain the encoded bytes in a bounded FIFO;
+    // each pump retries them before newer sends. Terminal refusals or a full FIFO
+    // disconnect. Hello and Bye retain their immediate-send behaviour.
+    // `budget_ticks` is the total tick count to run; returns Finished once reached
+    // and all pending outbound frames have been accepted.
     TickResult PumpTick(std::uint64_t budget_ticks);
 
     // Sends a clean Bye at the current tick and closes the local transport end. Idempotent.
@@ -540,6 +548,11 @@ private:
     // Schedules + sends the local input for `tick` (collect hook), buffering it locally.
     bool ScheduleLocalInput(std::uint64_t tick);
 
+    // True means accepted by the transport or retained for ordered retry.
+    bool SendOrQueueFrame(std::vector<std::uint8_t> frame);
+    // Stops at the first transient refusal; false means a terminal disconnect.
+    bool FlushPendingOutbound();
+
     // Compares available peer hashes before closing and recording a sticky disconnect.
     void TransportDisconnected();
 
@@ -552,8 +565,14 @@ private:
 
     std::uint32_t m_horizon = 3;
     std::uint64_t m_agreed_tick = 0;                   // last tick run (0 = none yet)
-    std::uint64_t m_local_input_scheduled_through = 0; // highest tick we've sent local input for
+    std::uint64_t m_local_input_scheduled_through = 0; // highest tick with sent/queued local input
     std::uint32_t m_consecutive_slack_ticks = 0;
+
+    // At most 1024 frames and 64 MiB of encoded bytes, including framing overhead.
+    static constexpr std::size_t kPendingOutboundFrameLimit = 1024;
+    static constexpr std::size_t kPendingOutboundByteLimit = kMaxFramePayloadBytes;
+    std::deque<std::vector<std::uint8_t>> m_pending_outbound;
+    std::size_t m_pending_outbound_bytes = 0;
 
     // Buffered inputs keyed by tick: each tick holds the local + peer opaque blobs by
     // client id (ordered map => deterministic merge order). std::map (ORDERED) is used

@@ -1139,6 +1139,48 @@ void LockstepSession::TransportDisconnected() {
     if (!m_status.peer_disconnected)
         m_status.disconnect_tick = m_agreed_tick;
     m_status.peer_disconnected = true;
+    m_pending_outbound.clear();
+    m_pending_outbound_bytes = 0;
+}
+
+bool LockstepSession::SendOrQueueFrame(std::vector<std::uint8_t> frame) {
+    if (frame.size() > kMaxFramePayloadBytes) {
+        TransportDisconnected();
+        return false;
+    }
+    if (m_pending_outbound.empty()) {
+        if (m_transport->SendFrame(frame))
+            return true;
+        if (!m_transport->IsPeerConnected()) {
+            TransportDisconnected();
+            return false;
+        }
+    }
+    // Subtract before adding, so neither the capacity check nor accounting overflows.
+    if (m_pending_outbound.size() >= kPendingOutboundFrameLimit ||
+        frame.size() > kPendingOutboundByteLimit - m_pending_outbound_bytes) {
+        TransportDisconnected();
+        return false;
+    }
+    m_pending_outbound_bytes += frame.size();
+    m_pending_outbound.push_back(std::move(frame));
+    return true;
+}
+
+bool LockstepSession::FlushPendingOutbound() {
+    while (!m_pending_outbound.empty()) {
+        const auto& frame = m_pending_outbound.front();
+        if (!m_transport->SendFrame(frame)) {
+            if (!m_transport->IsPeerConnected()) {
+                TransportDisconnected();
+                return false;
+            }
+            return true;
+        }
+        m_pending_outbound_bytes -= frame.size();
+        m_pending_outbound.pop_front();
+    }
+    return true;
 }
 
 bool LockstepSession::ScheduleLocalInput(std::uint64_t tick) {
@@ -1148,15 +1190,20 @@ bool LockstepSession::ScheduleLocalInput(std::uint64_t tick) {
     if (m_hooks.collect_local_input) {
         blob = m_hooks.collect_local_input(tick, m_hooks.user);
     }
+    // Input frame: type + payload length + tick + client id + blob length + blob.
+    constexpr std::size_t overhead = 1 + 4 + 8 + 4 + 4;
+    if (blob.size() > kMaxFramePayloadBytes - overhead) {
+        TransportDisconnected();
+        return false;
+    }
     InputMsg msg;
     msg.tick = tick;
     msg.client_id = m_config.local_client_id;
     msg.inputs = blob;
-    if (!m_transport->SendFrame(EncodeInput(msg))) {
-        TransportDisconnected();
+    if (!SendOrQueueFrame(EncodeInput(msg))) {
         return false;
     }
-    // Only buffer an input locally once the transport has accepted it for the peer.
+    // Buffer locally once the frame is accepted or retained for reliable retry.
     m_inputs[tick][m_config.local_client_id] = std::move(blob);
     m_local_input_scheduled_through = tick;
     return true;
@@ -1237,7 +1284,7 @@ TickResult LockstepSession::PumpTick(std::uint64_t budget_ticks) {
     };
     if (m_status.desynced || m_status.peer_disconnected)
         return terminal_result();
-    if (m_agreed_tick >= budget_ticks) {
+    if (m_agreed_tick >= budget_ticks && m_pending_outbound.empty()) {
         result.outcome = TickOutcome::Finished;
         result.tick = m_agreed_tick;
         return result;
@@ -1246,6 +1293,14 @@ TickResult LockstepSession::PumpTick(std::uint64_t budget_ticks) {
     // 1) Drain peer messages (inputs, hash compares, disconnect). A fatal state stops here.
     if (!DrainPeerMessages())
         return terminal_result();
+    if (!FlushPendingOutbound())
+        return terminal_result();
+    if (m_agreed_tick >= budget_ticks) {
+        result.outcome =
+            m_pending_outbound.empty() ? TickOutcome::Finished : TickOutcome::WaitingForPeer;
+        result.tick = m_agreed_tick;
+        return result;
+    }
 
     const std::uint64_t want = m_agreed_tick + 1;
     result.tick = want;
@@ -1358,8 +1413,20 @@ TickResult LockstepSession::PumpTick(std::uint64_t budget_ticks) {
     if (hash_due) {
         const auto& local = m_local_hashes.at(want);
         if (m_transport->IsPeerConnected()) {
-            if (!m_transport->SendFrame(EncodeHash(local))) {
-                TransportDisconnected();
+            // Hash frame: type + payload length + tick + four string lengths/data.
+            std::size_t remaining = kMaxFramePayloadBytes - (1 + 4 + 8 + 4 * 4);
+            bool oversized = false;
+            for (const auto* part :
+                 {&local.world_hash, &local.terrain, &local.water, &local.entities}) {
+                if (part->size() > remaining) {
+                    oversized = true;
+                    break;
+                }
+                remaining -= part->size();
+            }
+            if (oversized || !SendOrQueueFrame(EncodeHash(local))) {
+                if (oversized)
+                    TransportDisconnected();
                 send_failed = true;
                 if (m_status.desynced)
                     return terminal_result();
@@ -1377,8 +1444,9 @@ TickResult LockstepSession::PumpTick(std::uint64_t budget_ticks) {
     if (send_failed)
         return terminal_result();
 
-    result.outcome =
-        (m_agreed_tick >= budget_ticks) ? TickOutcome::Finished : TickOutcome::Advanced;
+    result.outcome = (m_agreed_tick >= budget_ticks && m_pending_outbound.empty())
+                         ? TickOutcome::Finished
+                         : TickOutcome::Advanced;
     return result;
 }
 
