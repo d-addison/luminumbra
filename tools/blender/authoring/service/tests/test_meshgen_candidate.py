@@ -1,10 +1,12 @@
 """Seal/receipt crash ordering, held-reader publication and append-only evidence."""
 from copy import deepcopy
+from contextlib import contextmanager
 from pathlib import Path
 import os
 import stat
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from meshgen_e4_fixture import members
@@ -67,6 +69,37 @@ class CandidateStorage(unittest.TestCase):
         self.refusal('candidate.path', lambda: self.store.read(JOB))
         (candidate/'preview.png').unlink(); os.link(target, candidate/'preview.png')
         self.refusal('candidate.path', lambda: self.store.read(JOB))
+
+    def test_walk_uses_complete_metadata_when_directory_entries_have_zero_link_count(self):
+        self.store.publish(JOB, self.members)
+        candidate, _ = self.store.paths(JOB)
+        scandir = os.scandir
+
+        @contextmanager
+        def windows_scandir(directory):
+            with scandir(directory) as entries:
+                wrapped = []
+                for entry in entries:
+                    info = entry.stat(follow_symlinks=False)
+                    fields = {name: getattr(info, name) for name in dir(info) if name.startswith('st_')}
+                    fields.update(st_ino=0, st_dev=0, st_nlink=0)
+                    incomplete = SimpleNamespace(**fields)
+                    wrapped.append(SimpleNamespace(name=entry.name, path=entry.path,
+                        stat=lambda *, follow_symlinks=True, info=incomplete: info))
+                yield wrapped
+
+        with patch('luminumbra_author.meshgen_candidate.os.scandir', windows_scandir):
+            with os.scandir(candidate) as entries:
+                entry = next(entry for entry in entries if entry.name == 'preview.png')
+                self.assertEqual(entry.stat(follow_symlinks=False).st_nlink, 0)
+                self.assertEqual(os.lstat(entry.path).st_nlink, 1)
+            self.assertEqual(self.store._walk(candidate), set(self.members) | {'manifest.json', 'candidate.sha256'})
+            self.assertEqual(self.store.read(JOB)['members'], self.members)
+            target = self.project/'outside'; target.write_bytes(self.members['preview.png'])
+            (candidate/'preview.png').unlink(); os.link(target, candidate/'preview.png')
+            self.assertEqual(os.lstat(candidate/'preview.png').st_nlink, 2)
+            self.refusal('candidate.path', lambda: self.store._walk(candidate))
+            self.refusal('candidate.path', lambda: self.store.read(JOB))
 
     def test_seal_and_receipt_order_recovery_after_each_publication_interruption(self):
         total = 1+len(self.members)+1+1+2

@@ -406,7 +406,9 @@ class CandidateStore:
                     count += 1
                     require(count <= MAX_MEMBERS+MAX_ATTESTATIONS*2, 'candidate.limit', 'Directory entry cap exceeded.')
                     path = Path(entry.path)
-                    info = entry.stat(follow_symlinks=False)
+                    # Windows DirEntry.stat() leaves identity and link count at
+                    # zero. lstat supplies the link count without following links.
+                    info = os.lstat(path)
                     require(not path_is_link(path, info), 'candidate.path', 'Symlink/reparse candidate member.')
                     name = path.relative_to(root).as_posix()
                     if stat.S_ISDIR(info.st_mode):
