@@ -354,17 +354,38 @@ MakeLoopbackPair() {
 // stream, not message-oriented). TryReceiveFrame is non-blocking: it pumps whatever bytes
 // are available into m_recv_buffer and only returns a frame once a full one is present.
 
+namespace {
+constexpr std::size_t kTcpReadChunkBytes = 64u * 1024u;
+// Read-ahead shares the frame buffer's budget rather than extending its maximum.
+constexpr std::size_t kTcpReceiveBufferBytes = 4 + kMaxFramePayloadBytes;
+} // namespace
+
 std::size_t TcpTransport::ReceiveBytesNeeded() {
-    if (m_recv_buffer.size() < 4)
-        return 4 - m_recv_buffer.size();
+    const std::size_t buffered = m_recv_buffer.size() - m_recv_offset;
+    if (buffered < 4)
+        return 4 - buffered;
     std::uint32_t frame_len = 0;
     for (int i = 0; i < 4; ++i)
-        frame_len |= static_cast<std::uint32_t>(m_recv_buffer[i]) << (8 * i);
+        frame_len |= static_cast<std::uint32_t>(m_recv_buffer[m_recv_offset + i]) << (8 * i);
     if (frame_len > kMaxFramePayloadBytes) {
         Close();
         return 0;
     }
-    return static_cast<std::size_t>(frame_len) - (m_recv_buffer.size() - 4);
+    const std::size_t buffered_payload = buffered - 4;
+    // Read-ahead may contain later frames. Inspect only the front prefix so valid
+    // frames are delivered before an oversized prefix or EOF behind them.
+    if (buffered_payload >= frame_len)
+        return 0;
+    return static_cast<std::size_t>(frame_len) - buffered_payload;
+}
+
+void TcpTransport::CompactReceiveBuffer() {
+    if (m_recv_offset == 0)
+        return;
+    // Complete buffered frames drain by advancing the cursor. Only move the trailing
+    // incomplete frame when another socket read is needed, at most once per read batch.
+    m_recv_buffer.erase(m_recv_buffer.begin(), m_recv_buffer.begin() + m_recv_offset);
+    m_recv_offset = 0;
 }
 
 #ifdef _WIN32
@@ -384,17 +405,20 @@ bool TcpTransport::PumpRecv() {
     if (!m_send_q.Empty() && FlushSendNonBlocking() < 0) {
         m_peer_closed = true;
     }
-    char buf[4096];
+    char buf[kTcpReadChunkBytes];
     for (;;) {
-        const std::size_t needed = ReceiveBytesNeeded();
-        if (needed == 0)
+        if (ReceiveBytesNeeded() == 0)
             return m_socket >= 0;
-        const int n = ::recv(
-            static_cast<SOCKET>(m_socket), buf, static_cast<int>(std::min(needed, sizeof(buf))), 0);
+        CompactReceiveBuffer();
+        // Read beyond the current frame, bounded even for a maximum-size payload.
+        // Stop pumping once the front frame is complete; drain buffered frames first.
+        const std::size_t want =
+            std::min(sizeof(buf), kTcpReceiveBufferBytes - m_recv_buffer.size());
+        const int n = ::recv(static_cast<SOCKET>(m_socket), buf, static_cast<int>(want), 0);
         if (n > 0) {
             if (m_recv_buffer.size() + n > m_recv_buffer.capacity())
                 m_recv_buffer.reserve(
-                    std::min(4 + kMaxFramePayloadBytes,
+                    std::min(kTcpReceiveBufferBytes,
                              std::max(m_recv_buffer.size() + n, m_recv_buffer.capacity() * 2)));
             m_recv_buffer.insert(m_recv_buffer.end(), buf, buf + n);
             continue;
@@ -552,25 +576,32 @@ bool TcpTransport::SendFrame(const std::vector<std::uint8_t>& frame, FrameDelive
 bool TcpTransport::TryReceiveFrame(std::vector<std::uint8_t>& out) {
     PumpRecv();
     // Need at least the u32 length prefix.
-    if (m_recv_buffer.size() < 4)
+    const std::size_t buffered = m_recv_buffer.size() - m_recv_offset;
+    if (buffered < 4)
         return false;
     std::uint32_t frame_len = 0;
     for (int i = 0; i < 4; ++i)
-        frame_len |= static_cast<std::uint32_t>(m_recv_buffer[i]) << (8 * i);
-    if (m_recv_buffer.size() - 4 < static_cast<std::size_t>(frame_len))
+        frame_len |= static_cast<std::uint32_t>(m_recv_buffer[m_recv_offset + i]) << (8 * i);
+    if (buffered - 4 < static_cast<std::size_t>(frame_len))
         return false; // frame not fully arrived
-    out.assign(m_recv_buffer.begin() + 4, m_recv_buffer.begin() + 4 + frame_len);
-    m_recv_buffer.erase(m_recv_buffer.begin(), m_recv_buffer.begin() + 4 + frame_len);
+    const auto payload = m_recv_buffer.begin() + m_recv_offset + 4;
+    out.assign(payload, payload + frame_len);
+    m_recv_offset += 4 + frame_len;
+    if (m_recv_offset == m_recv_buffer.size()) {
+        m_recv_buffer.clear();
+        m_recv_offset = 0;
+    }
     return true;
 }
 
 bool TcpTransport::IsPeerConnected() const {
-    // PumpRecv stops at one complete frame, so EOF is seen only after it is consumed.
+    // Buffered complete frames are consumed before pumping again to observe EOF.
     return m_socket >= 0 && !m_peer_closed;
 }
 
 void TcpTransport::Close() {
     std::vector<std::uint8_t>().swap(m_recv_buffer);
+    m_recv_offset = 0;
     if (m_socket >= 0) {
         ::shutdown(static_cast<SOCKET>(m_socket), SD_BOTH);
         ::closesocket(static_cast<SOCKET>(m_socket));
@@ -707,16 +738,18 @@ bool TcpTransport::PumpRecv() {
         return false;
     if (!m_send_q.Empty() && FlushSendNonBlocking() < 0)
         m_peer_closed = true;
-    char buf[4096];
+    char buf[kTcpReadChunkBytes];
     for (;;) {
-        const std::size_t needed = ReceiveBytesNeeded();
-        if (needed == 0)
+        if (ReceiveBytesNeeded() == 0)
             return m_socket >= 0;
-        const ssize_t n = ::recv(static_cast<int>(m_socket), buf, std::min(needed, sizeof(buf)), 0);
+        CompactReceiveBuffer();
+        const std::size_t want =
+            std::min(sizeof(buf), kTcpReceiveBufferBytes - m_recv_buffer.size());
+        const ssize_t n = ::recv(static_cast<int>(m_socket), buf, want, 0);
         if (n > 0) {
             if (m_recv_buffer.size() + n > m_recv_buffer.capacity())
                 m_recv_buffer.reserve(
-                    std::min(4 + kMaxFramePayloadBytes,
+                    std::min(kTcpReceiveBufferBytes,
                              std::max(m_recv_buffer.size() + n, m_recv_buffer.capacity() * 2)));
             m_recv_buffer.insert(m_recv_buffer.end(), buf, buf + n);
             continue;
@@ -855,15 +888,21 @@ bool TcpTransport::SendFrame(const std::vector<std::uint8_t>& frame, FrameDelive
 
 bool TcpTransport::TryReceiveFrame(std::vector<std::uint8_t>& out) {
     PumpRecv();
-    if (m_recv_buffer.size() < 4)
+    const std::size_t buffered = m_recv_buffer.size() - m_recv_offset;
+    if (buffered < 4)
         return false;
     std::uint32_t frame_len = 0;
     for (int i = 0; i < 4; ++i)
-        frame_len |= static_cast<std::uint32_t>(m_recv_buffer[i]) << (8 * i);
-    if (m_recv_buffer.size() - 4 < static_cast<std::size_t>(frame_len))
+        frame_len |= static_cast<std::uint32_t>(m_recv_buffer[m_recv_offset + i]) << (8 * i);
+    if (buffered - 4 < static_cast<std::size_t>(frame_len))
         return false;
-    out.assign(m_recv_buffer.begin() + 4, m_recv_buffer.begin() + 4 + frame_len);
-    m_recv_buffer.erase(m_recv_buffer.begin(), m_recv_buffer.begin() + 4 + frame_len);
+    const auto payload = m_recv_buffer.begin() + m_recv_offset + 4;
+    out.assign(payload, payload + frame_len);
+    m_recv_offset += 4 + frame_len;
+    if (m_recv_offset == m_recv_buffer.size()) {
+        m_recv_buffer.clear();
+        m_recv_offset = 0;
+    }
     return true;
 }
 
@@ -873,6 +912,7 @@ bool TcpTransport::IsPeerConnected() const {
 
 void TcpTransport::Close() {
     std::vector<std::uint8_t>().swap(m_recv_buffer);
+    m_recv_offset = 0;
     if (m_socket >= 0)
         ::shutdown(static_cast<int>(m_socket), SHUT_RDWR);
     CloseSocket(m_socket);

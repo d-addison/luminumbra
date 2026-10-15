@@ -49,9 +49,11 @@ struct FailingSendTransport final : ILockstepTransport {
     explicit FailingSendTransport(ILockstepTransport& transport)
         : inner(transport) {}
 
-    bool SendFrame(const std::vector<std::uint8_t>&,
-                   FrameDelivery = FrameDelivery::Reliable) override {
+    bool SendFrame(const std::vector<std::uint8_t>& frame,
+                   FrameDelivery delivery = FrameDelivery::Reliable) override {
         ++send_attempts;
+        if (!fail_sends)
+            return inner.SendFrame(frame, delivery);
         if (disconnect_on_failure)
             connected = false;
         return false;
@@ -70,6 +72,7 @@ struct FailingSendTransport final : ILockstepTransport {
 
     ILockstepTransport& inner;
     unsigned send_attempts = 0;
+    bool fail_sends = true;
     bool connected = true;
     bool disconnect_on_failure = false;
     bool close_called = false;
@@ -77,8 +80,12 @@ struct FailingSendTransport final : ILockstepTransport {
 
 TEST(ReplicationEndpoint, UsercmdAndAckSendFailuresCloseTransport) {
     for (const bool send_ack : {false, true}) {
+        SCOPED_TRACE(send_ack);
         auto pair = MakeLoopbackPair();
         FailingSendTransport transport(*pair.second);
+        transport.disconnect_on_failure = true;
+        ReplicationServer server;
+        server.AddClient(1, pair.first.get());
         ReplicationClient client(1, &transport);
         if (send_ack) {
             SnapshotMsg snapshot;
@@ -94,7 +101,78 @@ TEST(ReplicationEndpoint, UsercmdAndAckSendFailuresCloseTransport) {
         EXPECT_TRUE(transport.close_called);
         EXPECT_FALSE(transport.IsPeerConnected());
         EXPECT_FALSE(pair.first->IsPeerConnected());
+        EXPECT_EQ(server.PruneDisconnectedClients(), (std::vector<std::uint32_t>{1}));
+        EXPECT_FALSE(server.has_client(1));
     }
+}
+
+TEST(ReplicationEndpoint, TransientUsercmdFailureKeepsClientAndSendBookkeeping) {
+    auto pair = MakeLoopbackPair();
+    FailingSendTransport transport(*pair.second);
+    ReplicationServer server;
+    server.AddClient(1, pair.first.get());
+    ReplicationClient client(1, &transport);
+    UsercmdMsg cmd;
+    cmd.tick = 7;
+    client.SendUsercmd(cmd);
+    client.PumpInbound();
+    // A rejected first usercmd must not enable ACKs as if an input had been sent.
+    EXPECT_EQ(transport.send_attempts, 1u);
+    EXPECT_FALSE(transport.close_called);
+    EXPECT_TRUE(transport.IsPeerConnected());
+    EXPECT_TRUE(pair.first->IsPeerConnected());
+    EXPECT_TRUE(server.PruneDisconnectedClients().empty());
+    EXPECT_TRUE(server.has_client(1));
+
+    transport.fail_sends = false;
+    client.SendUsercmd(cmd);
+    std::vector<std::uint8_t> frame;
+    ASSERT_TRUE(pair.first->TryReceiveFrame(frame));
+    UsercmdMsg sent;
+    ASSERT_TRUE(DecodeUsercmd(frame, sent));
+    EXPECT_EQ(sent, cmd);
+
+    transport.fail_sends = true;
+    cmd.tick = 99;
+    client.SendUsercmd(cmd);
+    transport.fail_sends = false;
+    client.PumpInbound();
+    ASSERT_TRUE(pair.first->TryReceiveFrame(frame));
+    AckMsg ack;
+    ASSERT_TRUE(DecodeAck(frame, ack));
+    EXPECT_EQ(ack.usercmd_tick, 7u); // Failed sends must not advance the latest tick.
+    EXPECT_FALSE(transport.close_called);
+    EXPECT_TRUE(transport.IsPeerConnected());
+    EXPECT_TRUE(server.PruneDisconnectedClients().empty());
+}
+
+TEST(ReplicationEndpoint, TransientAckFailureKeepsClientAndLaterAckSucceeds) {
+    auto pair = MakeLoopbackPair();
+    FailingSendTransport transport(*pair.second);
+    ReplicationServer server;
+    server.AddClient(1, pair.first.get());
+    ReplicationClient client(1, &transport);
+    server.BroadcastSnapshot(1, {});
+    client.PumpInbound();
+    ASSERT_TRUE(client.has_snapshot());
+    EXPECT_EQ(transport.send_attempts, 1u);
+    EXPECT_FALSE(transport.close_called);
+    EXPECT_TRUE(transport.IsPeerConnected());
+    EXPECT_TRUE(pair.first->IsPeerConnected());
+    EXPECT_TRUE(server.PruneDisconnectedClients().empty());
+    EXPECT_TRUE(server.has_client(1));
+    server.PumpInbound();
+    EXPECT_EQ(server.AckedSnapshotSeq(1), 0u);
+
+    transport.fail_sends = false;
+    server.BroadcastSnapshot(2, {});
+    client.PumpInbound();
+    server.PumpInbound();
+    EXPECT_EQ(transport.send_attempts, 2u);
+    EXPECT_EQ(server.AckedSnapshotSeq(1), 2u);
+    EXPECT_FALSE(transport.close_called);
+    EXPECT_TRUE(server.PruneDisconnectedClients().empty());
+    EXPECT_TRUE(server.has_client(1));
 }
 
 TEST(ReplicationEndpoint, SnapshotSendFailureReportsDisconnectedClient) {

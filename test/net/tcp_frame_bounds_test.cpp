@@ -37,6 +37,12 @@ struct TcpTransportTestPeer {
     static std::size_t ReceiveBufferCapacity(const TcpTransport& transport) {
         return transport.m_recv_buffer.capacity();
     }
+    static std::size_t ReceiveOffset(const TcpTransport& transport) {
+        return transport.m_recv_offset;
+    }
+    static bool PumpReceive(TcpTransport& transport) {
+        return transport.PumpRecv();
+    }
     static std::size_t PendingSendBytes(const TcpTransport& transport) {
         return transport.m_send_q.PendingBytes();
     }
@@ -47,6 +53,12 @@ namespace {
 
 using Luminumbra::Net::kMaxFramePayloadBytes;
 using Luminumbra::Net::TcpTransportTestPeer;
+
+void AppendWireFrame(std::vector<std::uint8_t>& wire, const std::vector<std::uint8_t>& frame) {
+    for (int i = 0; i < 4; ++i)
+        wire.push_back(static_cast<std::uint8_t>(frame.size() >> (8 * i)));
+    wire.insert(wire.end(), frame.begin(), frame.end());
+}
 
 #ifdef _WIN32
 using SocketHandle = SOCKET;
@@ -151,6 +163,59 @@ protected:
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
         } while (std::chrono::steady_clock::now() < deadline);
         return false;
+    }
+
+    void ExpectBufferedFramesBeforeClosure(bool reset) {
+        const std::vector<std::vector<std::uint8_t>> frames{
+            Luminumbra::Net::EncodeBye({42}), {}, {0x7E}, {0xAB, 0xCD}};
+        std::vector<std::uint8_t> wire;
+        for (const auto& frame : frames)
+            AppendWireFrame(wire, frame);
+        ASSERT_TRUE(SendRaw(wire));
+        ASSERT_TRUE(WaitForBytes(wire.size()));
+        ASSERT_TRUE(TcpTransportTestPeer::PumpReceive(*m_receiver));
+        ASSERT_EQ(TcpTransportTestPeer::ReceiveBufferSize(*m_receiver), wire.size());
+        ASSERT_EQ(TcpTransportTestPeer::ReceiveOffset(*m_receiver), 0u);
+
+        if (reset) {
+            // Abort only after all sent bytes are in the transport's buffer, so an
+            // abortive close cannot discard any of the frames under test in the kernel.
+            const linger abortive{1, 0};
+            ASSERT_EQ(::setsockopt(m_sender.handle,
+                                   SOL_SOCKET,
+                                   SO_LINGER,
+                                   reinterpret_cast<const char*>(&abortive),
+                                   sizeof(abortive)),
+                      0);
+        }
+        m_sender.Close();
+        // With no wire bytes left in the kernel, readability signals FIN or RST.
+        // Wait for it without consuming the EOF or the pending receive error.
+        fd_set readable;
+        FD_ZERO(&readable);
+        FD_SET(m_receive_socket, &readable);
+        timeval timeout{1, 0};
+#ifdef _WIN32
+        ASSERT_EQ(::select(0, &readable, nullptr, nullptr, &timeout), 1);
+#else
+        ASSERT_EQ(::select(m_receive_socket + 1, &readable, nullptr, nullptr, &timeout), 1);
+#endif
+
+        std::vector<std::uint8_t> received{0xA5};
+        for (const auto& frame : frames) {
+            ASSERT_TRUE(m_receiver->TryReceiveFrame(received));
+            EXPECT_EQ(received, frame);
+            EXPECT_TRUE(m_receiver->IsPeerConnected());
+        }
+        const auto last_frame = received;
+        for (int pump = 0; pump < 3; ++pump) {
+            EXPECT_FALSE(m_receiver->TryReceiveFrame(received));
+            EXPECT_EQ(received, last_frame);
+            EXPECT_FALSE(m_receiver->IsPeerConnected());
+            EXPECT_EQ(TcpTransportTestPeer::ReceiveBufferSize(*m_receiver), 0u);
+            EXPECT_EQ(TcpTransportTestPeer::ReceiveBufferCapacity(*m_receiver), 0u);
+            EXPECT_EQ(TcpTransportTestPeer::ReceiveOffset(*m_receiver), 0u);
+        }
     }
 
     Socket m_sender;
@@ -273,6 +338,121 @@ TEST_F(TcpFrameBoundsTest, OversizedPrefixDiscardsFollowingBytes) {
     EXPECT_EQ(received, (std::vector<std::uint8_t>{0xA5}));
     EXPECT_FALSE(m_receiver->IsPeerConnected());
     EXPECT_EQ(TcpTransportTestPeer::ReceiveBufferCapacity(*m_receiver), 0u);
+}
+
+TEST_F(TcpFrameBoundsTest, CoalescedFramesAreReadAheadAndDeliveredInOrder) {
+    const std::vector<std::vector<std::uint8_t>> frames{
+        Luminumbra::Net::EncodeBye({42}), {}, {0x7E, 0xAB, 0xCD}};
+    std::vector<std::uint8_t> wire;
+    for (const auto& frame : frames)
+        AppendWireFrame(wire, frame);
+    ASSERT_TRUE(SendRaw(wire));
+    ASSERT_TRUE(WaitForBytes(wire.size()));
+
+    std::vector<std::uint8_t> received{0xA5};
+    std::size_t remaining = wire.size();
+    for (const auto& frame : frames) {
+        ASSERT_TRUE(m_receiver->TryReceiveFrame(received));
+        EXPECT_EQ(received, frame);
+        remaining -= 4 + frame.size();
+        EXPECT_EQ(TcpTransportTestPeer::ReceiveBufferSize(*m_receiver),
+                  remaining == 0 ? 0u : wire.size());
+        EXPECT_EQ(TcpTransportTestPeer::ReceiveOffset(*m_receiver),
+                  remaining == 0 ? 0u : wire.size() - remaining);
+        EXPECT_LE(TcpTransportTestPeer::ReceiveBufferCapacity(*m_receiver),
+                  4u + kMaxFramePayloadBytes);
+        EXPECT_TRUE(m_receiver->IsPeerConnected());
+    }
+    EXPECT_FALSE(m_receiver->TryReceiveFrame(received));
+}
+
+TEST_F(TcpFrameBoundsTest, BufferedFramesAreDeliveredBeforeEof) {
+    ExpectBufferedFramesBeforeClosure(false);
+}
+
+TEST_F(TcpFrameBoundsTest, BufferedFramesAreDeliveredBeforeReceiveReset) {
+    ExpectBufferedFramesBeforeClosure(true);
+}
+
+TEST_F(TcpFrameBoundsTest, EmptyFrameBatchAdvancesCursorWithoutMovingBufferedBytes) {
+    const std::vector<std::uint8_t> wire(64u * 1024u, 0);
+    ASSERT_TRUE(SendRaw(wire));
+    ASSERT_TRUE(WaitForBytes(wire.size()));
+    std::vector<std::uint8_t> received{0xA5};
+    for (std::size_t consumed = 4; consumed <= wire.size(); consumed += 4) {
+        ASSERT_TRUE(m_receiver->TryReceiveFrame(received));
+        ASSERT_TRUE(received.empty());
+        ASSERT_EQ(TcpTransportTestPeer::ReceiveBufferSize(*m_receiver),
+                  consumed == wire.size() ? 0u : wire.size());
+        ASSERT_EQ(TcpTransportTestPeer::ReceiveOffset(*m_receiver),
+                  consumed == wire.size() ? 0u : consumed);
+    }
+    EXPECT_TRUE(m_receiver->IsPeerConnected());
+}
+
+TEST_F(TcpFrameBoundsTest, ConsumedPrefixCompactsOnlyWhenIncompleteFrameNeedsMoreBytes) {
+    const std::vector<std::uint8_t> first{0x12};
+    const std::vector<std::uint8_t> second{0x34};
+    const std::vector<std::uint8_t> third{0x56, 0x78, 0x9A, 0xBC};
+    std::vector<std::uint8_t> wire;
+    AppendWireFrame(wire, first);
+    AppendWireFrame(wire, second);
+    AppendWireFrame(wire, third);
+    const std::vector<std::uint8_t> tail(wire.end() - 2, wire.end());
+    wire.resize(wire.size() - tail.size());
+    ASSERT_TRUE(SendRaw(wire));
+    ASSERT_TRUE(WaitForBytes(wire.size()));
+
+    std::vector<std::uint8_t> received{0xA5};
+    ASSERT_TRUE(m_receiver->TryReceiveFrame(received));
+    EXPECT_EQ(received, first);
+    ASSERT_TRUE(m_receiver->TryReceiveFrame(received));
+    EXPECT_EQ(received, second);
+    EXPECT_EQ(TcpTransportTestPeer::ReceiveBufferSize(*m_receiver), wire.size());
+    EXPECT_EQ(TcpTransportTestPeer::ReceiveOffset(*m_receiver), 10u);
+
+    EXPECT_FALSE(m_receiver->TryReceiveFrame(received));
+    EXPECT_EQ(received, second);
+    EXPECT_EQ(TcpTransportTestPeer::ReceiveBufferSize(*m_receiver), 6u);
+    EXPECT_EQ(TcpTransportTestPeer::ReceiveOffset(*m_receiver), 0u);
+    EXPECT_TRUE(m_receiver->IsPeerConnected());
+    ASSERT_TRUE(SendRaw(tail));
+    ASSERT_TRUE(WaitForBytes(tail.size()));
+    ASSERT_TRUE(m_receiver->TryReceiveFrame(received));
+    EXPECT_EQ(received, third);
+    EXPECT_EQ(TcpTransportTestPeer::ReceiveBufferSize(*m_receiver), 0u);
+    EXPECT_EQ(TcpTransportTestPeer::ReceiveOffset(*m_receiver), 0u);
+    EXPECT_LE(TcpTransportTestPeer::ReceiveBufferCapacity(*m_receiver), 4u + kMaxFramePayloadBytes);
+}
+
+TEST_F(TcpFrameBoundsTest, ValidFramesPrecedeCoalescedOversizedPrefixDisconnect) {
+    const auto first = Luminumbra::Net::EncodeBye({42});
+    const std::vector<std::uint8_t> second{0x7E};
+    std::vector<std::uint8_t> wire;
+    AppendWireFrame(wire, first);
+    AppendWireFrame(wire, second);
+    for (int i = 0; i < 4; ++i)
+        wire.push_back(static_cast<std::uint8_t>((kMaxFramePayloadBytes + 1) >> (8 * i)));
+    wire.insert(wire.end(), 4096, 0xAB);
+    ASSERT_TRUE(SendRaw(wire));
+    ASSERT_TRUE(WaitForBytes(wire.size()));
+
+    std::vector<std::uint8_t> received{0xA5};
+    ASSERT_TRUE(m_receiver->TryReceiveFrame(received));
+    EXPECT_EQ(received, first);
+    EXPECT_TRUE(m_receiver->IsPeerConnected());
+    EXPECT_EQ(TcpTransportTestPeer::ReceiveBufferSize(*m_receiver), wire.size());
+    EXPECT_EQ(TcpTransportTestPeer::ReceiveOffset(*m_receiver), 4u + first.size());
+    ASSERT_TRUE(m_receiver->TryReceiveFrame(received));
+    EXPECT_EQ(received, second);
+    EXPECT_TRUE(m_receiver->IsPeerConnected());
+    EXPECT_FALSE(m_receiver->TryReceiveFrame(received));
+    EXPECT_EQ(received, second);
+    EXPECT_FALSE(m_receiver->IsPeerConnected());
+    EXPECT_FALSE(m_receiver->SendFrame({}));
+    EXPECT_EQ(TcpTransportTestPeer::ReceiveBufferSize(*m_receiver), 0u);
+    EXPECT_EQ(TcpTransportTestPeer::ReceiveBufferCapacity(*m_receiver), 0u);
+    EXPECT_EQ(TcpTransportTestPeer::ReceiveOffset(*m_receiver), 0u);
 }
 
 TEST_F(TcpFrameBoundsTest, OversizedPrefixEndsLockstepSessionPermanently) {

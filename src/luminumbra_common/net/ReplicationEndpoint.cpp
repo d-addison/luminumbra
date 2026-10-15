@@ -416,8 +416,11 @@ void ReplicationClient::SendUsercmd(const UsercmdMsg& cmd) {
         return;
     // Usercmds are UNRELIABLE: newest tick wins on the server (UsercmdReceiver),
     // a dropped one is superseded by the next tick's input.
-    if (!m_transport->SendFrame(EncodeUsercmd(cmd), FrameDelivery::Unreliable)) {
-        m_transport->Close();
+    const auto frame = EncodeUsercmd(cmd);
+    const bool oversized = frame.size() > kMaxFramePayloadBytes;
+    if (oversized || !m_transport->SendFrame(frame, FrameDelivery::Unreliable)) {
+        if (oversized || !m_transport->IsPeerConnected())
+            m_transport->Close();
         return;
     }
     m_latest_usercmd_tick = cmd.tick;
@@ -537,9 +540,11 @@ void ReplicationClient::PumpInbound() {
     // the server can reconcile). Only bother once we have something to report.
     if (got_new_snapshot || m_sent_any_usercmd) {
         // Acks are UNRELIABLE: the newest ack supersedes (monotonic on the server).
-        if (!m_transport->SendFrame(EncodeAck(m_receiver.make_ack(m_latest_usercmd_tick)),
-                                    FrameDelivery::Unreliable)) {
-            m_transport->Close();
+        const auto ack = EncodeAck(m_receiver.make_ack(m_latest_usercmd_tick));
+        const bool oversized = ack.size() > kMaxFramePayloadBytes;
+        if (oversized || !m_transport->SendFrame(ack, FrameDelivery::Unreliable)) {
+            if (oversized || !m_transport->IsPeerConnected())
+                m_transport->Close();
         }
     }
 }

@@ -311,13 +311,15 @@ public:
 private:
     friend struct TcpTransportTestPeer;
     std::size_t ReceiveBytesNeeded(); // validates the prefix; closes on an oversized frame
-    bool PumpRecv();                  // pulls one frame into m_recv_buffer; closes on EOF/error
+    void CompactReceiveBuffer();      // discard consumed bytes only before another socket read
+    bool PumpRecv();                  // bounded read-ahead; stops at a complete frame or EOF/error
     int FlushSendNonBlocking();       // drains m_send_q via non-blocking send; -1 = fatal/peer-gone
 
     std::intptr_t m_socket = -1; // SOCKET (winsock) / fd; -1 = none
     std::intptr_t m_listen_socket = -1;
     bool m_peer_closed = false;
-    std::vector<std::uint8_t> m_recv_buffer; // accumulates partial frames
+    std::vector<std::uint8_t> m_recv_buffer; // accumulates partial frames and bounded read-ahead
+    std::size_t m_recv_offset = 0;           // first unread byte; consuming a frame moves no bytes
     OutboundByteQueue m_send_q;              // bounded outbound queue; no busy-spin
 };
 
