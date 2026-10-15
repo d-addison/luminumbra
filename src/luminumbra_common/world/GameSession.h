@@ -8,6 +8,7 @@
 #include "../ai/ThirstSystem.h"               // ai::ThirstTuning
 #include "../ai/WildlifeFoliageSystem.h"      // ai::WildlifeFoliageTuning (full-control)
 #include "../core/SimulationClock.h"
+#include "../core/SystemConfig.h"
 #include "../fields/FieldPageState.h"
 #include "../simulation/SimBudgetTelemetry.h"
 #include "../simulation/SimulationEventBus.h"
@@ -101,6 +102,34 @@ class GameSession {
 public:
     GameSession();
     ~GameSession();
+
+    // Apply one immutable effective configuration before create/load. Network peers share it.
+    void ConfigureSimulation(std::shared_ptr<const luminumbra::core::SystemConfig> configuration);
+    [[nodiscard]] const std::shared_ptr<const luminumbra::core::SystemConfig>&
+    GetSimulationConfiguration() const {
+        return m_simulationConfiguration;
+    }
+    // Host setup seam: forward the peer snapshot before create/load. Missing snapshots
+    // and configuration replacement on a live destination refuse without mutation.
+    void ConfigureSimulationFromPeer(const GameSession& peer);
+    struct NetworkHostConfig {
+        std::string root_path;
+        std::string seed = "424242";
+        std::string preset = "default";
+        int surface_radius = 12;
+        int collision_radius = 4;
+    };
+    // Complete headless host boot used by the network driver. The job system must outlive
+    // the returned session. Failure returns null with a reason and leaves the peer unchanged.
+    [[nodiscard]] static std::unique_ptr<GameSession>
+    CreateNetworkHost(const GameSession& peer,
+                      JobSystem& jobs,
+                      const NetworkHostConfig& config,
+                      std::string& failure_reason);
+    // Network checkpoint recipe is chosen by the shared configuration. Refuses local flag drift.
+    bool ComputeNetworkWorldHashes(const luminumbra::core::SystemConfig& configuration,
+                                   std::string& world_hash,
+                                   Persistence::WorldStreamingStateSubHashes& sub_hashes);
 
     // Initialize a new world with the given parameters.
     // customPresetJson (optional): a fully-resolved preset JSON (base preset + create-world
@@ -505,6 +534,12 @@ public:
     // Success owns only immutable projections; failure contains no digest and changes no state.
     [[nodiscard]] AuthorityHashCapture
     CaptureAuthorityState(const std::string& avatar_snapshot = {}) const;
+    // Checked enabled host capture. Failure clears outputs and latches the first fault.
+    [[nodiscard]] bool
+    ComputeAuthorityWorldHashes(std::string& world_hash,
+                                Persistence::WorldStreamingStateSubHashes& sub_hashes,
+                                const std::string& avatar_snapshot = {});
+
     [[nodiscard]] bool IsSimulationTickBoundary() const {
         return !m_activeRegionsEnabled || (!m_simulationBatchInProgress && m_regionWork.empty());
     }
@@ -748,6 +783,7 @@ private:
     bool LoadSpeciesDefinitions(std::shared_ptr<const SimulationContent> content = {});
     void ApplyWeatherRainWiring();          // Wires weather to rain when opted in.
     void ApplyWaterResolutionWiring();      // Raises the water solver to High when opted in.
+    std::shared_ptr<const luminumbra::core::SystemConfig> m_simulationConfiguration;
     bool m_waterHighResEnabled = false;     // See SetWaterHighResEnabled.
     bool m_weatherRainEnabled = false;      // See SetWeatherRainEnabled.
     std::int32_t m_weatherRainScaleMm = 25; // Millimetres per tick at full precipitation.

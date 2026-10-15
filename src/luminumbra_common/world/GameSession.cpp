@@ -5,6 +5,7 @@
 #include "../ai/CreatureReproductionSystem.h" // Generational evolution.
 #include "../ai/CreatureSpeciesRegistry.h"    // per-world species definitions
 #include "../ai/DecompositionSystem.h"        // Releases nutrients after death.
+#include "../ai/EcologyTuningConfig.h"
 #include "../ai/ForagingSystem.h"             // ant-trail foraging (Deneubourg double-bridge)
 #include "../ai/HerdAlarmSystem.h"            // Collective-vigilance alarm.
 #include "../ai/InstinctLocomotionSystem.h"
@@ -18,6 +19,7 @@
 #include "../ai/ScentField.h"
 #include "../ai/ScentFieldGates.h"
 #include "../ai/ScentSteeringSystem.h"
+#include "../ai/SimTuningConfig.h"
 #include "../ai/SteeringConsumer.h" // Blends steering biases into desired motion.
 #include "../ai/StimulusChannels.h"
 #include "../ai/TerritorySystem.h"       // Home territory and homing bias.
@@ -1363,6 +1365,8 @@ bool GameSession::LoadWorld(const std::string& worldId) {
     candidate.m_rootPath = m_rootPath;
     candidate.m_jobSystem = m_jobSystem;
     candidate.m_requiredClientAssets = m_requiredClientAssets;
+    if (m_simulationConfiguration)
+        candidate.ConfigureSimulation(m_simulationConfiguration);
     candidate.m_activeRegionsEnabled = true;
     candidate.m_simulationEventBus.set_durable(true);
     candidate.m_regionSchedulerConfig = m_regionSchedulerConfig;
@@ -2383,17 +2387,7 @@ std::string GameSession::RegionalAmbientHash(std::uint8_t channels, bool weather
     const auto capture = CaptureAuthorityState();
     if (!capture.state)
         throw std::runtime_error(capture.error);
-    auto bytes = capture.state->AmbientBytes(channels, weather);
-    // The same regional authority can be projected at different anchors. The anchor
-    // drives ambient diagnostics and the scent domain, so include its identity in
-    // the slot hash without changing the stored region/freeze digest projection.
-    bytes += "|ambient_anchor:";
-    for (const float coordinate : {m_ambientFieldAnchor.x, m_ambientFieldAnchor.z}) {
-        const auto bits = std::bit_cast<std::uint32_t>(coordinate);
-        for (int i = 0; i < 4; ++i)
-            bytes.push_back(static_cast<char>((bits >> (8 * i)) & 255));
-    }
-    return Persistence::StableChecksum(bytes);
+    return capture.state->AmbientHash(channels, weather, m_ambientFieldAnchor);
 }
 
 void GameSession::BindRegionalFieldQueries() {
@@ -2959,6 +2953,92 @@ void GameSession::RecordPersistenceSaveOutcome(bool ok, double elapsed_ms) {
     }
 }
 
+void GameSession::ConfigureSimulation(
+    std::shared_ptr<const luminumbra::core::SystemConfig> configuration) {
+    if (!configuration || m_worldSystem || m_simulationContent)
+        throw std::logic_error("Configure simulation before creating or opening a world");
+    const auto& config = *configuration;
+    using Key = luminumbra::core::SysKey;
+    SetEcologyTuning(luminumbra::ai::ResolveEcologyTuning(config));
+    SetWeatherRainEnabled(config.enabled(Key::SimHydrologyWeather));
+    SetActiveRegionsEnabled(config.enabled(Key::SimActiveRegions));
+    SetWaterHighResEnabled(config.enabled(Key::SimWaterHighRes));
+    SetWeatherEventsEnabled(config.enabled(Key::SimWeatherEvents));
+    SetAetherStateEnabled(config.enabled(Key::SimAetherState));
+    SetWildlifeFoliageTuning(luminumbra::ai::ResolveWildlifeFoliageTuning(config));
+    SetThirstTuning(luminumbra::ai::ResolveThirstTuning(config));
+    SetScavengingTuning(luminumbra::ai::ResolveScavengingTuning(config));
+    SetForagingTuning(luminumbra::ai::ResolveForagingTuning(config));
+    SetReproductionTuning(luminumbra::ai::ResolveReproductionTuning(config));
+    SetCircadianAmplitude(luminumbra::ai::ResolveCircadianAmplitude(config));
+    SetPlantMutationRate(luminumbra::ai::ResolvePlantMutationRate(config));
+    m_simulationConfiguration = std::move(configuration);
+}
+
+void GameSession::ConfigureSimulationFromPeer(const GameSession& peer) {
+    ConfigureSimulation(peer.GetSimulationConfiguration());
+}
+
+std::unique_ptr<GameSession> GameSession::CreateNetworkHost(const GameSession& peer,
+                                                            JobSystem& jobs,
+                                                            const NetworkHostConfig& config,
+                                                            std::string& failure_reason) {
+    failure_reason.clear();
+    if (!peer.GetSimulationConfiguration()) {
+        failure_reason = "simulation_configuration_missing";
+        return nullptr;
+    }
+    auto host = std::make_unique<GameSession>();
+    host->SetJobSystem(&jobs);
+    host->SetRootPath(config.root_path);
+    host->ConfigureSimulationFromPeer(peer);
+    if (!host->CreateWorld("Networked Host", config.seed, config.preset)) {
+        failure_reason = "host_create_world_failed";
+        return nullptr;
+    }
+    if (!host->LoadWorldState()) {
+        failure_reason = host->GetWorldOpenError();
+        return nullptr;
+    }
+    auto* world_system = host->GetWorldSystem();
+    auto* physics_system = host->GetPhysicsSystem();
+    if (!world_system || !physics_system) {
+        failure_reason = "host_world_systems_missing";
+        return nullptr;
+    }
+    if (!world_system->EnsureSurfaceReadyNear(host->GetMetadata().spawnPoint,
+                                              physics_system,
+                                              config.surface_radius,
+                                              config.collision_radius)) {
+        failure_reason = "host_surface_not_ready";
+        return nullptr;
+    }
+    return host;
+}
+
+bool GameSession::ComputeNetworkWorldHashes(const luminumbra::core::SystemConfig& configuration,
+                                            std::string& world_hash,
+                                            Persistence::WorldStreamingStateSubHashes& sub_hashes) {
+    world_hash.clear();
+    sub_hashes = {};
+    const bool authority = configuration.enabled(luminumbra::core::SysKey::SimActiveRegions);
+    if (!m_worldSystem || authority != m_activeRegionsEnabled)
+        return false;
+    m_worldSystem->wait_for_streaming_jobs();
+    if (authority)
+        return ComputeAuthorityWorldHashes(world_hash, sub_hashes);
+
+    // Preserve the disabled network scenario's historical bare chunk projection.
+    WorldStreamingState state;
+    for (const auto& chunk : m_worldSystem->snapshot_streamed_chunks())
+        state.insert_chunk(chunk);
+    Persistence::WorldSaveService service;
+    world_hash = service.world_hash(state);
+    sub_hashes = Persistence::ComputeWorldStreamingStateSubHashes(
+        state, Ecs::SerializeEntityRegistrySnapshotJson(Ecs::EntityRegistrySnapshot{}));
+    return true;
+}
+
 std::string GameSession::AuthorityIdentityBytes() const {
     std::string bytes = "authority_identity:v1:";
     const auto append = [&bytes](std::uint64_t value, unsigned width) {
@@ -3051,6 +3131,30 @@ GameSession::CaptureAuthorityStateImpl(const std::string& avatar_snapshot) const
             .pending_events = &m_simulationEventBus});
     } catch (const std::exception& error) {
         return {std::nullopt, error.what()};
+    }
+}
+
+bool GameSession::ComputeAuthorityWorldHashes(std::string& world_hash,
+                                              Persistence::WorldStreamingStateSubHashes& sub_hashes,
+                                              const std::string& avatar_snapshot) {
+    world_hash.clear();
+    sub_hashes = {};
+    if (!m_activeRegionsEnabled || m_regionFault)
+        return false;
+    const auto capture = CaptureAuthorityState(avatar_snapshot);
+    if (!capture.state) {
+        LatchRegionFault(m_worldClock.tick(), capture.error);
+        return false;
+    }
+    try {
+        Persistence::ComputeAuthorityWorldHashes(
+            *capture.state, m_ambientFieldAnchor, world_hash, sub_hashes);
+        return true;
+    } catch (const std::exception& error) {
+        world_hash.clear();
+        sub_hashes = {};
+        LatchRegionFault(m_worldClock.tick(), error.what());
+        return false;
     }
 }
 

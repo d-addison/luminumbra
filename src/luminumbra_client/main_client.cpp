@@ -1935,36 +1935,8 @@ int main(int argc, char* argv[]) {
     auto gameSession = std::make_unique<Luminumbra::world::GameSession>();
     gameSession->SetJobSystem(&jobSystem);
     gameSession->SetRootPath(root_path_str);
-    // Full control: data-drive every creature system from systems.json. All OFF by default ->
-    // compiled constants -> byte-identical; enable a block + set values to tune live behaviour.
-    gameSession->SetEcologyTuning(luminumbra::ai::ResolveEcologyTuning(g_systemConfig));
-    // opt-in weather-driven rain (hashed sim flag; default
-    // OFF keeps the canonical baselines byte-identical — activation is a deliberate
-    // hash bump on the owner menu).
-    gameSession->SetWeatherRainEnabled(
-        g_systemConfig.enabled(luminumbra::core::SysKey::SimHydrologyWeather));
-    // Supported opt-in High-resolution water (hashed sim flag; default OFF =
-    // Medium 8x8 grid = byte-identical baselines; ON = 16x16, 1 m cells).
-    gameSession->SetActiveRegionsEnabled(
-        g_systemConfig.enabled(luminumbra::core::SysKey::SimActiveRegions));
-    gameSession->SetWaterHighResEnabled(
-        g_systemConfig.enabled(luminumbra::core::SysKey::SimWaterHighRes));
-    // opt-in deterministic weather-event epochs (hashed sim flag).
-    gameSession->SetWeatherEventsEnabled(
-        g_systemConfig.enabled(luminumbra::core::SysKey::SimWeatherEvents));
-    // opt-in STATEFUL energy-field layer (hashed sim flag;
-    // default OFF keeps the canonical baselines byte-identical — activation is a
-    // deliberate hash bump on the owner menu).
-    gameSession->SetAetherStateEnabled(
-        g_systemConfig.enabled(luminumbra::core::SysKey::SimAetherState));
-    gameSession->SetWildlifeFoliageTuning(
-        luminumbra::ai::ResolveWildlifeFoliageTuning(g_systemConfig));
-    gameSession->SetThirstTuning(luminumbra::ai::ResolveThirstTuning(g_systemConfig));
-    gameSession->SetScavengingTuning(luminumbra::ai::ResolveScavengingTuning(g_systemConfig));
-    gameSession->SetForagingTuning(luminumbra::ai::ResolveForagingTuning(g_systemConfig));
-    gameSession->SetReproductionTuning(luminumbra::ai::ResolveReproductionTuning(g_systemConfig));
-    gameSession->SetCircadianAmplitude(luminumbra::ai::ResolveCircadianAmplitude(g_systemConfig));
-    gameSession->SetPlantMutationRate(luminumbra::ai::ResolvePlantMutationRate(g_systemConfig));
+    gameSession->ConfigureSimulation(
+        std::make_shared<const luminumbra::core::SystemConfig>(g_systemConfig));
 
     // Load creature species metadata (display names + rarity) for the codex/discovery
     // HUD. Missing/partial data degrades gracefully: DisplayName falls back to

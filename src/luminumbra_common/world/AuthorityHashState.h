@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ActiveRegionLedger.h"
+#include "persistence/WorldPersistenceRoundtrip.h"
 #include "persistence/WorldSaveService.h"
 
 #include <entt/entt.hpp>
@@ -33,7 +34,8 @@ struct AuthorityHashInputs {
     const luminumbra::fields::EnergyFieldState* energy = nullptr;
     std::string clock_bytes;
     std::string identity_bytes;
-    // The host supplies its existing canonical avatar snapshot; empty means no avatars.
+    // The host supplies its canonical avatar snapshot; empty and the canonical empty roster
+    // denote the same absent avatar authority.
     std::string avatar_bytes;
     const luminumbra::simulation::OrderedEventBus* pending_events = nullptr;
 };
@@ -73,6 +75,11 @@ public:
     [[nodiscard]] const std::string& pending_deposit_bytes() const {
         return m_pendingDeposits;
     }
+    [[nodiscard]] const Persistence::WorldStreamingStateSubHashes& sub_hashes() const {
+        return m_subHashes;
+    }
+    [[nodiscard]] std::string
+    AmbientHash(std::uint8_t channels, bool weather, const Vec3& anchor) const;
     // Raw complete content, before Frozen stamp selection.
     [[nodiscard]] const std::map<RegionKey, std::uint64_t>& region_content() const {
         return m_regionContent;
@@ -86,6 +93,7 @@ public:
 private:
     friend AuthorityHashCapture CaptureAuthorityHashState(const AuthorityHashInputs& inputs);
     AuthorityHashState() = default;
+    Persistence::WorldStreamingStateSubHashes m_subHashes;
     std::string m_chunkHash, m_terrainHash, m_waterHash;
     std::string m_creatures, m_plants, m_energy, m_scent, m_authority;
     std::string m_pendingEvents, m_pendingDeposits;

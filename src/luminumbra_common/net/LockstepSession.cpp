@@ -1220,7 +1220,16 @@ TickResult LockstepSession::PumpTick(std::uint64_t budget_ticks) {
         HashMsg local;
         local.tick = want;
         if (m_hooks.capture_hashes) {
-            m_hooks.capture_hashes(want, local, m_hooks.user);
+            try {
+                m_hooks.capture_hashes(want, local, m_hooks.user);
+            } catch (...) {
+                Disconnect();
+                m_status.peer_disconnected = true;
+                m_status.disconnect_tick = want;
+                result.outcome = TickOutcome::PeerDisconnected;
+                result.tick = want;
+                return result;
+            }
         }
         m_local_hashes[want] = local;
         m_transport->SendFrame(EncodeHash(local));

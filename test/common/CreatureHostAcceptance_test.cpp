@@ -21,6 +21,7 @@
 #include "luminumbra_common/components/TerritoryComponents.h"
 #include "luminumbra_common/components/ThirstComponents.h"
 #include "luminumbra_common/core/Environment.h"
+#include "luminumbra_common/core/FilesystemPath.h"
 #include "luminumbra_common/core/SystemConfig.h"
 #include "luminumbra_common/core/WaterComponents.h"
 #include "luminumbra_common/persistence/WorldSaveService.h"
@@ -31,10 +32,12 @@
 #include "luminumbra_server/modes/Modes.h"
 #include <algorithm>
 #include <bit>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <gtest/gtest.h>
 #include <map>
+#include <optional>
 #include <sstream>
 #include <type_traits>
 

@@ -361,6 +361,12 @@ nlohmann::json SessionWorldSubHashes(GameSession& session) {
 }
 
 std::string SessionWorldHash(GameSession& session) {
+    if (session.ActiveRegionsEnabled()) {
+        std::string hash;
+        P::WorldStreamingStateSubHashes sub;
+        EXPECT_TRUE(session.ComputeAuthorityWorldHashes(hash, sub));
+        return hash;
+    }
     const auto hashes = SessionWorldSubHashes(session);
     return P::ComposeWorldHash(hashes.at("chunk"),
                                hashes.at("wind"),

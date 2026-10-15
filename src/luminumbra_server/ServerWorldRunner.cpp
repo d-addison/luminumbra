@@ -24,6 +24,7 @@
 #include "luminumbra_common/components/MigratoryComponents.h"
 #include "luminumbra_common/components/MortalComponents.h"
 #include "luminumbra_common/components/PackHunterComponents.h"
+#include "luminumbra_common/components/PlantComponents.h"
 #include "luminumbra_common/components/TerritoryComponents.h"
 #include "luminumbra_common/core/Environment.h"
 #include "luminumbra_common/core/Log.h"
@@ -478,6 +479,21 @@ bool ServerWorldRunner::Boot() {
     // persistence end-to-end (empty otherwise -> plant_hash neutral). Pure fn of (seed, preset).
     if (m_config.planted_roster) {
         SpawnPlantRoster(m_session->GetRegistry(), spawn_anchor);
+        if (m_session->ActiveRegionsEnabled()) {
+            // Tick-zero checkpoints must already have the same admitted roster as later ticks.
+            auto& registry = m_session->GetRegistry();
+            auto view = registry.view<Components::PlantTag>();
+            std::vector<entt::entity> plants(view.begin(), view.end());
+            std::sort(plants.begin(), plants.end());
+            for (const auto plant : plants) {
+                if (!m_session->AdmitPlant(plant)) {
+                    m_bootError = "Plant roster authority admission refused";
+                    m_session.reset();
+                    m_jobSystem.shutdown();
+                    return false;
+                }
+            }
+        }
         LUMINUMBRA_CORE_INFO("ServerWorldRunner: spawned deterministic plant roster (6 plants).");
     }
 
@@ -996,6 +1012,13 @@ std::string ServerWorldRunner::ComputeAvailabilityDigest() {
 }
 
 std::string ServerWorldRunner::ComputeWorldHash() {
+    if (m_booted && m_session && m_session->ActiveRegionsEnabled()) {
+        std::string hash;
+        Persistence::WorldStreamingStateSubHashes sub;
+        ComputeWorldHashAndSubHashes(hash, sub);
+        return hash;
+    }
+
     if (!m_booted || !m_session || !m_session->GetWorldSystem()) {
         return {};
     }
@@ -1013,8 +1036,7 @@ std::string ServerWorldRunner::ComputeWorldHash() {
     // into the top-level hash. The chunk hash itself is unchanged; the composite
     // deliberately is not.
     return Persistence::ComposeWorldHash(
-        m_session->ActiveRegionsEnabled() ? m_session->ComputeChunkStateHash()
-                                          : service.world_hash(state),
+        service.world_hash(state),
         WindSubHash(m_session.get()),
         WeatherSubHash(m_session.get()),
         AetherSubHash(m_session.get()),
@@ -1024,6 +1046,13 @@ std::string ServerWorldRunner::ComputeWorldHash() {
 }
 
 Persistence::WorldStreamingStateSubHashes ServerWorldRunner::ComputeWorldSubHashes() {
+    if (m_booted && m_session && m_session->ActiveRegionsEnabled()) {
+        std::string hash;
+        Persistence::WorldStreamingStateSubHashes sub;
+        ComputeWorldHashAndSubHashes(hash, sub);
+        return sub;
+    }
+
     // per-system sub-hashes over the SAME streamed-chunk snapshot the
     // top-level world_hash is built from. Additive desync localization; the
     // top-level hash (ComputeWorldHash) is unchanged.
@@ -1083,6 +1112,13 @@ void ServerWorldRunner::ComputeWorldHashAndSubHashes(
     auto* world_system = m_session->GetWorldSystem();
     world_system->wait_for_streaming_jobs();
 
+    if (m_session->ActiveRegionsEnabled()) {
+        const auto avatars =
+            Ecs::SerializeEntityRegistrySnapshotJson(World::BuildAvatarEntitySnapshot(m_avatars));
+        (void)m_session->ComputeAuthorityWorldHashes(out_world_hash, out_sub, avatars);
+        return;
+    }
+
     WorldStreamingState state;
     for (const auto& chunk : world_system->snapshot_streamed_chunks()) {
         state.insert_chunk(chunk);
@@ -1099,9 +1135,7 @@ void ServerWorldRunner::ComputeWorldHashAndSubHashes(
     //   +   +  + gate-populated-world-replay +
     // hash revisionS: composite world_hash (chunk + wind + weather + aether + scents + ecology +
     // plants).
-    out_world_hash = Persistence::ComposeWorldHash(m_session->ActiveRegionsEnabled()
-                                                       ? m_session->ComputeChunkStateHash()
-                                                       : service.world_hash(state),
+    out_world_hash = Persistence::ComposeWorldHash(service.world_hash(state),
                                                    wind_hash,
                                                    weather_hash,
                                                    aether_hash,
@@ -1186,6 +1220,13 @@ std::string ServerWorldRunner::ComputeEcologySubHash() const {
     // needed (creature state is registry-resident, not chunk-derived).
     if (!m_session) {
         return {};
+    }
+    if (m_session->ActiveRegionsEnabled()) {
+        std::string hash;
+        Persistence::WorldStreamingStateSubHashes sub;
+        if (!m_session->ComputeAuthorityWorldHashes(hash, sub))
+            return {};
+        return sub.ecology;
     }
     return m_session->FoldClockIntoEcologyHash(luminumbra::ai::ComputeEcologySubHash(
         m_session->GetRegistry(), m_session->ActiveRegionsEnabled()));

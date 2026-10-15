@@ -8,6 +8,10 @@
 #include <string>
 #include <vector>
 
+namespace Luminumbra::world {
+class AuthorityHashState;
+}
+
 namespace Luminumbra::Persistence {
 
 struct WorldPersistenceRoundtripCheck {
@@ -140,6 +144,11 @@ struct WorldStreamingStateSubHashes {
     // LREC1 localization) when sim.aether_state is ON. Empty when the layer is
     // off/absent/all-zero (the default world: always empty, byte-identical).
     std::string aether_state;
+    // Capture mode metadata; never serialized into hashes or checkpoint wire records.
+    bool active_regions = false;
+    // Enabled-only authority diagnostics; omitted from legacy artifacts and wire records.
+    std::string regions, creatures, items, pages;
+    std::string scents, ecology, plants;
 };
 
 // Computes the chunk-derived per-system sub-hashes (terrain/mesh/water). Pure
@@ -156,6 +165,12 @@ WorldStreamingStateSubHashes ComputeAuthoritativeChunkSubHashes(const WorldStrea
 WorldStreamingStateSubHashes
 ComputeWorldStreamingStateSubHashes(const WorldStreamingState& state,
                                     const std::string& entity_snapshot_json);
+
+// Common enabled projection for hosts and persistence comparisons. No world reads.
+void ComputeAuthorityWorldHashes(const world::AuthorityHashState& authority,
+                                 const Vec3& ambient_anchor,
+                                 std::string& world_hash,
+                                 WorldStreamingStateSubHashes& sub_hashes);
 
 // Append-only runtime hash order; shared with the production server runner.
 std::string ComposeWorldHash(const std::string& chunk_hash,

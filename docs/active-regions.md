@@ -618,3 +618,40 @@ projections for regional and page diagnostic consumers, and includes both in
 composed authority. Nonempty retained deposits also enter the existing energy
 slot. Hash reads do not deliver events or consume deposits. Disabled delivery,
 hash recipes, saves and artifacts retain their existing paths and bytes.
+
+### Named authority hashes and checkpoints
+
+Enabled server, record/replay, lockstep, smoke and networked-session captures use
+one checked `AuthorityHashState` per request. The common persistence composer consumes
+that immutable capture, including the canonical host avatar snapshot. Enabled host plant
+rosters are admitted in entity order before the first tick-zero capture. An absent avatar
+argument denotes the canonical empty roster. Enabled terrain and water diagnostics read
+the resolved authoritative inventory and exclude residency and lifecycle state.
+
+Smoke artifacts add four enabled-only `sub_hashes` keys, also present in each run and
+in `sub_hashes_replay`: `regions` frames clock, ledger/configuration and pending events;
+`creatures` covers the complete persistent creature snapshot; `items` covers canonical
+ground objects; `pages` frames complete field pages, regional energy and retained deposits.
+All four participate in the smoke verdict. Their values are diagnostics; the composed
+hash retains its existing slots and regional content recipe. Enabled network peers cover
+the same admitted content/configuration identity through the common composer at checkpoints.
+The client establishes one immutable effective `SystemConfig` before creating its world;
+the network driver's `Begin` calls the headless `GameSession::CreateNetworkHost` factory.
+That factory forwards the snapshot through `ConfigureSimulationFromPeer` before world
+creation, then loads host state and prepares the spawn surface. The snapshot includes
+active regions, water, weather, energy and all creature/plant tuning. Both checkpoint hooks
+select their recipe from that shared snapshot. A contradictory local active-regions flag
+refuses capture instead of silently switching recipes. Configuration replacement after
+world creation refuses without changing the admitted configuration.
+
+A capture failure clears all outputs, latches the session fault and prevents checkpoint
+publication. Recording checks initial, checkpoint and final captures before finalizing;
+lockstep capture refusal stops the exchange before storing or sending a hash, sends the
+existing disconnect notification at the agreed tick and closes the transport. No later
+simulation tick runs. Recovery saves continue to use the existing fault contract.
+
+HashMsg and LREC1 retain tick, world, terrain, water and entities, without named diagnostic
+fields. Frame grouping does not change checkpoint authority at a completed tick. With
+active regions disabled, the historical hash recipes and artifact bytes remain unchanged;
+new named keys are omitted even if a reused in-memory result contains diagnostic values.
+Native compiler, runtime and performance qualification remains pending.
