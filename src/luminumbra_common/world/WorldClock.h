@@ -35,8 +35,12 @@ public:
     }
     [[nodiscard]] std::uint64_t year_length_ticks() const;
     [[nodiscard]] double day_phase(std::uint64_t tick) const;
-    // Midnight-origin solar angle; calendar indices remain linear.
+    // Midnight-origin C1 solar angle; calendar indices remain linear.
     [[nodiscard]] double solar_phase(std::uint64_t tick) const;
+    // Continuous presentation mapping and inverse, with inputs in [0, 1].
+    // Tick consumers use solar_phase() to retain integer boundary decisions.
+    [[nodiscard]] double solar_phase_from_day_phase(double phase) const;
+    [[nodiscard]] double day_phase_from_solar_phase(double phase) const;
     [[nodiscard]] std::uint64_t lunar_period_ticks() const;
     [[nodiscard]] double lunar_phase(std::uint64_t tick) const;
     [[nodiscard]] double year_phase(std::uint64_t tick) const;
@@ -47,10 +51,12 @@ public:
     void set_tick(std::uint64_t tick);
     [[nodiscard]] bool can_advance(std::uint64_t ticks) const;
 
-    // Tagged canonical bytes: ASCII world_clock:v2:, then LE u64 tick and
-    // five LE u32 calendar fields in declaration order (28 payload bytes).
+    // Tagged canonical bytes: ASCII world_clock:v1: for daylight 1/2 and an
+    // eight-day lunar cycle, then LE u64 tick and LE u32 day/year (16 bytes).
+    // Otherwise v2 adds the three remaining LE u32 fields (28 payload bytes).
     [[nodiscard]] std::string canonical_bytes() const;
     void write_metadata(nlohmann::json& metadata) const;
+    // Complete v2 calendar for the presentation-only renderCalendar marker.
     [[nodiscard]] nlohmann::json calendar_metadata() const;
     static bool read_render_calendar(const nlohmann::json& metadata,
                                      std::optional<WorldCalendar>& out,

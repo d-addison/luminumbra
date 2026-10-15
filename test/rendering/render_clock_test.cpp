@@ -44,10 +44,10 @@ TEST(RenderClock, DefaultPacingAndRestoredCustomCalendarPreserveOverrides) {
     // A quarter of the default day agrees for wall-clock and tick-driven paths.
     Rendering::RenderClockTestPeer::Update(pipeline,
                                            static_cast<float>(default_day_ticks / 4) / 30.0f);
-    EXPECT_FLOAT_EQ(pipeline.get_time_of_day(), .1875f);
+    EXPECT_FLOAT_EQ(pipeline.get_time_of_day(), .1796875f);
     pipeline.set_time_of_day_tick(default_day_ticks / 4);
     Rendering::RenderClockTestPeer::Update(pipeline, 123.0f);
-    EXPECT_FLOAT_EQ(pipeline.get_time_of_day(), .1875f);
+    EXPECT_FLOAT_EQ(pipeline.get_time_of_day(), .1796875f);
     pipeline.set_world_clock(world::WorldClock(default_day_ticks / 2));
     Rendering::RenderClockTestPeer::Update(pipeline, 123.0f);
     EXPECT_FLOAT_EQ(pipeline.get_time_of_day(), 0.0f); // calendar midday == sky noon
@@ -98,7 +98,7 @@ TEST(RenderClock, DefaultPacingAndRestoredCustomCalendarPreserveOverrides) {
     Rendering::RenderClockTestPeer::Update(pipeline, 0.0f);
     EXPECT_FLOAT_EQ(pipeline.get_time_of_day(), .3f);
     Rendering::RenderClockTestPeer::Update(pipeline, 90.0f);
-    EXPECT_NEAR(pipeline.get_time_of_day(), .325f, 1e-6f); // night rate: 1.5 solar cycles/day
+    EXPECT_NEAR(pipeline.get_time_of_day(), 0.326745272f, 1e-6f); // smooth night advance
     // Both legacy setters independently clear the world season authority.
     pipeline.set_time_of_day_tick(27000);
     Rendering::RenderClockTestPeer::Update(pipeline, 100.0f);
@@ -158,7 +158,7 @@ TEST(RenderClock, DefaultPacingAndRestoredCustomCalendarPreserveOverrides) {
     pipeline.set_day_length_ticks(default_day_ticks * 2);
     pipeline.set_world_clock(asymmetric);
     Rendering::RenderClockTestPeer::Update(pipeline, 100.0f);
-    EXPECT_FLOAT_EQ(pipeline.get_time_of_day(), .9375f);
+    EXPECT_FLOAT_EQ(pipeline.get_time_of_day(), .9296875f);
     EXPECT_FLOAT_EQ(pipeline.get_season_phase(), Rendering::ComputeSeason(asymmetric).phase);
     EXPECT_FLOAT_EQ(
         pipeline.get_moon_illumination(),

@@ -624,7 +624,7 @@ public:
         m_timeOfDayHold = hold;
     }
     // drive the day clock from the AUTHORITATIVE sim tick —
-    // tod = TimeOfDayFromTick(tick, day_length) (TimeOfDayModel.h). Called per frame
+    // tod = SolarTimeFromNoonElapsed(elapsed, calendar). Called per frame
     // from live play; suppresses that frame's wall-clock advance so TOD is a pure
     // function of the tick (same tick -> same sun, independent of frame pacing).
     // Precedence unchanged: the photo-mode hold wins here, and scenario/scene pins

@@ -1362,9 +1362,9 @@ TEST(GameSessionHeadlessWorldTest, CalendarConsumersUsePinnedPhasesOnTheRealTick
         Luminumbra::world::WorldCalendar calendar{120, 4};
     };
     for (const auto pin : {Pin{20, .25f, 1.0f / 24.0f, .575f, 1.0f / 12.0f},
-                           Pin{30, .3125f, .0625f, .68125f, .125f},
+                           Pin{30, .3203125f, .0625f, .69453125f, .125f},
                            Pin{60, .5f, .125f, 1.0f, .25f},
-                           Pin{90, .6875f, .1875f, .68125f, .375f},
+                           Pin{90, .6796875f, .1875f, .69453125f, .375f},
                            Pin{100, .75f, 5.0f / 24.0f, .575f, 5.0f / 12.0f},
                            Pin{120, 0.0f, .25f, .15f, .5f},
                            Pin{240, 0.0f, .5f, .15f, 1.0f},

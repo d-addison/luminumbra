@@ -10,6 +10,15 @@
 
 namespace Luminumbra::world {
 namespace {
+// Equal endpoint rates make adjacent solar quarters C1, including the day wrap.
+// For 0 < span < denominator, slope is in (0, 2), so the derivative
+// slope + 6 * (1 - slope) * t * (1 - t) is strictly positive on [0, 1].
+double SolarQuarter(double t, std::uint64_t span, std::uint64_t denominator) {
+    const double slope = static_cast<double>(2 * span) / static_cast<double>(denominator);
+    const double correction = ((slope - 1.0) * t) * (1.0 - t);
+    return 0.25 * (t + correction * (1.0 - 2.0 * t));
+}
+
 bool ValidCalendar(WorldCalendar calendar) {
     return calendar.dayLengthTicks > 0 && calendar.dayLengthTicks < (std::uint64_t{1} << 31) &&
            calendar.daysPerYear > 0 && calendar.daysPerYear <= 366 &&
@@ -20,6 +29,11 @@ bool ValidCalendar(WorldCalendar calendar) {
            calendar.lunarCycleDays >= 1 && calendar.lunarCycleDays <= 366 &&
            calendar.dayLengthTicks <=
                std::numeric_limits<std::uint64_t>::max() / calendar.daysPerYear;
+}
+// The v1 reader supplies these values for the fields it cannot store.
+bool UsesLegacyEncoding(WorldCalendar calendar) {
+    return calendar.daylightNumerator == 1 && calendar.daylightDenominator == 2 &&
+           calendar.lunarCycleDays == 8;
 }
 bool DecodeCalendar(const nlohmann::json& value, WorldCalendar& out, bool allow_legacy) {
     if (!value.is_object())
@@ -82,22 +96,49 @@ double WorldClock::solar_phase(std::uint64_t tick) const {
     const std::uint64_t day = m_calendar.dayLengthTicks;
     const std::uint64_t n = m_calendar.daylightNumerator;
     const std::uint64_t d = m_calendar.daylightDenominator;
-    const std::uint64_t x = 2 * d * (tick % day);
+    const std::uint64_t elapsed = 2 * d * (tick % day);
+    const std::uint64_t noon = day * d;
+    const bool afternoon = elapsed > noon;
+    const std::uint64_t x = afternoon ? 2 * noon - elapsed : elapsed;
     const std::uint64_t dawn = day * (d - n);
-    const std::uint64_t dusk = day * (d + n);
-    std::uint64_t numerator;
-    std::uint64_t denominator;
-    if (x < dawn) {
-        numerator = x;
-        denominator = 4 * day * (d - n);
-    } else if (x <= dusk) {
-        numerator = day * n + x - dawn;
-        denominator = 4 * day * n;
-    } else {
-        numerator = 3 * day * (d - n) + x - dusk;
-        denominator = 4 * day * (d - n);
+    // All integer products are below 2^49 and convert to double exactly.
+    // Subtract before converting so even the shortest valid quarter is resolved.
+    const double phase =
+        x < dawn
+            ? SolarQuarter(static_cast<double>(x) / static_cast<double>(dawn), d - n, d)
+            : 0.25 +
+                  SolarQuarter(static_cast<double>(x - dawn) / static_cast<double>(day * n), n, d);
+    return afternoon ? 1.0 - phase : phase;
+}
+double WorldClock::solar_phase_from_day_phase(double phase) const {
+    if (m_calendar.daylightNumerator == 1 && m_calendar.daylightDenominator == 2)
+        return phase;
+    const std::uint64_t n = m_calendar.daylightNumerator;
+    const std::uint64_t d = m_calendar.daylightDenominator;
+    const bool afternoon = phase > 0.5;
+    const double x = (afternoon ? 1.0 - phase : phase) * static_cast<double>(2 * d);
+    const double dawn = static_cast<double>(d - n);
+    const double solar = x < dawn ? SolarQuarter(x / dawn, d - n, d)
+                                  : 0.25 + SolarQuarter((x - dawn) / static_cast<double>(n), n, d);
+    return afternoon ? 1.0 - solar : solar;
+}
+double WorldClock::day_phase_from_solar_phase(double phase) const {
+    if (phase == 0.0 || phase == 0.5 || phase == 1.0)
+        return phase;
+    if (m_calendar.daylightNumerator == 1 && m_calendar.daylightDenominator == 2)
+        return phase;
+    // Presentation pins need an inverse only when changed. Strict monotonicity
+    // permits a bounded bisection without platform-dependent roots or trig.
+    double low = 0.0;
+    double high = 1.0;
+    for (unsigned iteration = 0; iteration < 56; ++iteration) {
+        const double middle = low + (high - low) * 0.5;
+        if (solar_phase_from_day_phase(middle) < phase)
+            low = middle;
+        else
+            high = middle;
     }
-    return static_cast<double>(numerator) / static_cast<double>(denominator);
+    return low + (high - low) * 0.5;
 }
 std::uint64_t WorldClock::lunar_period_ticks() const {
     return std::uint64_t{m_calendar.dayLengthTicks} * m_calendar.lunarCycleDays;
@@ -129,7 +170,8 @@ bool WorldClock::can_advance(std::uint64_t ticks) const {
     return ticks < kTickLimit - m_tick;
 }
 std::string WorldClock::canonical_bytes() const {
-    std::string bytes = "world_clock:v2:";
+    const bool legacy = UsesLegacyEncoding(m_calendar);
+    std::string bytes = legacy ? "world_clock:v1:" : "world_clock:v2:";
     const auto append = [&bytes](std::uint64_t value, unsigned count) {
         for (unsigned i = 0; i < count; ++i)
             bytes.push_back(static_cast<char>((value >> (8 * i)) & 0xff));
@@ -137,9 +179,11 @@ std::string WorldClock::canonical_bytes() const {
     append(m_tick, 8);
     append(m_calendar.dayLengthTicks, 4);
     append(m_calendar.daysPerYear, 4);
-    append(m_calendar.daylightNumerator, 4);
-    append(m_calendar.daylightDenominator, 4);
-    append(m_calendar.lunarCycleDays, 4);
+    if (!legacy) {
+        append(m_calendar.daylightNumerator, 4);
+        append(m_calendar.daylightDenominator, 4);
+        append(m_calendar.lunarCycleDays, 4);
+    }
     return bytes;
 }
 nlohmann::json WorldClock::calendar_metadata() const {
@@ -152,7 +196,10 @@ nlohmann::json WorldClock::calendar_metadata() const {
 }
 void WorldClock::write_metadata(nlohmann::json& metadata) const {
     metadata["simulationTick"] = m_tick;
-    metadata["calendar"] = calendar_metadata();
+    metadata["calendar"] = UsesLegacyEncoding(m_calendar)
+                               ? nlohmann::json{{"dayLengthTicks", m_calendar.dayLengthTicks},
+                                                {"daysPerYear", m_calendar.daysPerYear}}
+                               : calendar_metadata();
 }
 bool WorldClock::read_render_calendar(const nlohmann::json& metadata,
                                       std::optional<WorldCalendar>& out,

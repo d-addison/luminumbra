@@ -101,8 +101,9 @@ crossings or varying daylight duration.
 | Newly created world | 162,000 / 8 / 2 / 3 / 8 |
 
 Loading and catalog inspection never rewrite metadata. A successful explicit
-save writes resolved clock metadata as version 2. Imported 36,000- and
-216,000-tick calendars remain authoritative. There is no rescaling of ticks,
+save writes the original two-field calendar for daylight 1/2 with an eight-day
+lunar cycle; other calendars use version 2. Imported 36,000- and 216,000-tick
+calendars remain authoritative. There is no rescaling of ticks,
 indices, entities, ledger timestamps or weather history.
 
 | Field / condition | Validation |
@@ -120,19 +121,33 @@ indices, entities, ledger timestamps or weather history.
 
 These checks apply to metadata-only initialized worlds, catalogs, normal and
 explicit snapshot loads, and every save writer. Products promote operands to
-`uint64_t` before multiplication. Solar branch comparisons use integer
-`2 * denominator * remainder` against `day * (denominator ± numerator)`;
-the final bounded integer ratio alone converts to double. The symmetric 1/2
-path returns the original `day_phase()` calculation, preserving its arithmetic.
-No simulation timing uses a floating accumulator or library transcendental.
+`uint64_t` before multiplication. Solar branch comparisons and local offsets use
+integer `2 * denominator * remainder` against `day * (denominator ± numerator)`
+and `day * denominator`. These products are below 2^49 and convert exactly to
+double; only the local ratios and cubic evaluation use floating point, under the
+engine's pinned floating-point contract. The symmetric 1/2 path returns the
+original `day_phase()` calculation, preserving its arithmetic. No simulation
+timing uses a floating accumulator or library transcendental.
 
 `day_phase()`, day/year indices, annual temperature and season phases stay
-linear. `solar_phase()` is midnight-origin, piecewise linear: midnight 0,
-sunrise 1/4, noon 1/2, sunset 3/4. Plant daily light, circadian activity, and
-stimulus time-of-day, daily temperature and fallback light consume this solar
-phase at enabled calendar call sites. Ambient-light and precipitation overrides
-keep precedence. Migration and stimulus/sky seasons retain the spring-equinoctial
-offset of 3/4 year. Weather, storms, wind and aether retain absolute tick periods.
+linear. `solar_phase()` is a midnight-origin, monotonic cubic Hermite mapping:
+midnight 0, sunrise 1/4, noon 1/2, sunset 3/4. For daylight fraction `f = n/d`,
+the elapsed-day knots are `0, (1-f)/2, 1/2, (1+f)/2, 1`. Each interval has solar
+span 1/4 and elapsed span `L` (either `(1-f)/2` or `f/2`). With local coordinate
+`t` in `[0,1]` and `a = 4L`, its solar offset is
+`[t + (a-1)t(1-t)(1-2t)]/4`. Afternoon quarters reflect the morning quarters.
+Its normalized derivative is `a + 6(1-a)t(1-t)`: for every valid fraction,
+`0 < a < 2`, so this derivative is positive (at least `a` for `a <= 1`, and
+`(3-a)/2` otherwise). The rate with respect to elapsed-day phase is exactly 1
+at both ends of every quarter. Thus angle and rate join continuously at dawn,
+noon, dusk and the midnight wrap, with no additional fraction bounds. Integer
+horizon ticks return exactly 1/4 and 3/4; nonintegral horizons lie between ticks.
+
+Plant daily light, circadian activity, and stimulus time-of-day, daily temperature
+and fallback light consume this solar phase at enabled calendar call sites.
+Ambient-light and precipitation overrides keep precedence. Migration and
+stimulus/sky seasons retain the spring-equinoctial offset of 3/4 year. Weather,
+storms, wind and aether retain absolute tick periods.
 
 Clock-disabled **new** worlds instead write `renderCalendar`, containing the same
 complete version 2 calendar object, with no persisted tick and no enabled-clock
@@ -149,9 +164,9 @@ pacing derives from the selected calendar and canonical tick rate (5,400 seconds
 for new worlds). World-clock inputs have a midnight origin; the legacy tick API
 and clock-disabled rendering retain their noon-at-zero origin. Sky geometry
 receives `wrap(solar_phase + 0.5)`. Direct `set_time_of_day()` values remain solar
-pins; their inverse mapping initializes fallback elapsed time for a continuous
-resume. Photo hold wins over automatic advancement, and later scenario pins keep
-frame-order precedence. Both legacy clock setters clear world-clock authority.
+pins; a fixed 56-step bisection of the same smooth curve initializes fallback
+elapsed time for a continuous resume. Photo hold wins over automatic advancement,
+and later scenario pins keep frame-order precedence. Both legacy clock setters clear world-clock authority.
 A day-length debug override changes only solar pacing: saved season and lunar
 periods retain their selected calendar. `[`, `]`, and `\` still adjust simulation
 speed, from pause through 16×, with the existing catch-up batching. At ideal 16×,
@@ -169,11 +184,13 @@ The moon remains opposite the sun; the visible disc does not depict phase.
 With the feature disabled, simulation daily/annual periods and hash bytes stay
 legacy, independently of the presentation marker. With it enabled, clock bytes
 fold into the ecology slot without changing top-level hash ordering. Canonical
-bytes are ASCII `world_clock:v2:` followed by LE `u64 simulationTick`, then five
-LE `u32` fields: `dayLengthTicks`, `daysPerYear`, `daylightNumerator`,
-`daylightDenominator`, `lunarCycleDays` (28 payload bytes). They encode resolved
-values independently of source JSON. Enabled clock hashes change even for
-symmetric imports; old replay hashes are not promised compatible. Container v2,
+bytes preserve ASCII `world_clock:v1:` followed by LE `u64 simulationTick`,
+LE `u32 dayLengthTicks` and LE `u32 daysPerYear` (16 payload bytes) for daylight
+1/2 with an eight-day lunar cycle. Other calendars use `world_clock:v2:` and
+append three LE `u32` fields: `daylightNumerator`, `daylightDenominator`,
+`lunarCycleDays` (28 payload bytes). They encode resolved values independently
+of source JSON. Representable legacy calendars preserve their enabled-clock
+hash bytes. Container v2,
 LMR1, ARL1, entity/chunk formats and replay record layout remain unchanged.
 Save calls inside a simulation catch-up batch remain refused; successful
 snapshots observe completed tick boundaries.

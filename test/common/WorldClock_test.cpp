@@ -11,8 +11,10 @@
 #include "luminumbra_common/world/WorldClock.h"
 
 #include <array>
+#include <bit>
 #include <limits>
 #include <nlohmann/json.hpp>
+#include <numeric>
 
 namespace {
 using Luminumbra::world::WorldCalendar;
@@ -91,6 +93,65 @@ TEST(WorldClockTest, CanonicalBytesAreTaggedLittleEndianAndIgnoreFrameTime) {
     EXPECT_NE(WorldClock(clock.tick(), {36000, 8, 2, 3, 7}).canonical_bytes(), expected);
 }
 
+TEST(WorldClockTest, LegacyCanonicalBytesMatchV1Exactly) {
+    const WorldClock clock(12345, WorldCalendar::Legacy());
+    // V1 stores tick (u64), day length (u32), and year length in days (u32), all LE.
+    const std::string expected =
+        std::string("world_clock:v1:") +
+        std::string("\x39\x30\x00\x00\x00\x00\x00\x00\xc0\x4b\x03\x00\x08\x00\x00\x00", 16);
+    EXPECT_EQ(clock.canonical_bytes(), expected);
+}
+
+TEST(WorldClockTest, LegacyMetadataRoundTripsAsExactTwoFieldV1Record) {
+    for (const auto calendar : {WorldCalendar::Legacy(), WorldCalendar{36000, 3, 1, 2, 8}}) {
+        SCOPED_TRACE(calendar.dayLengthTicks);
+        const WorldClock clock(12345, calendar);
+        const json expected = {
+            {"simulationTick", 12345u},
+            {"calendar",
+             {{"dayLengthTicks", calendar.dayLengthTicks}, {"daysPerYear", calendar.daysPerYear}}}};
+        json metadata;
+        clock.write_metadata(metadata);
+        EXPECT_EQ(metadata, expected);
+        WorldClock restored;
+        std::string error;
+        ASSERT_TRUE(WorldClock::from_metadata(json::parse(metadata.dump()), restored, error));
+        EXPECT_TRUE(error.empty());
+        EXPECT_EQ(restored.tick(), 12345u);
+        EXPECT_EQ(restored.calendar(), calendar);
+        EXPECT_EQ(restored.canonical_bytes(), clock.canonical_bytes());
+        EXPECT_EQ(restored.canonical_bytes().substr(0, 15), "world_clock:v1:");
+        json rewritten;
+        restored.write_metadata(rewritten);
+        EXPECT_EQ(rewritten, expected);
+
+        // Existing v2 saves with symmetric parameters still load without loss.
+        metadata["calendar"] = clock.calendar_metadata();
+        ASSERT_TRUE(WorldClock::from_metadata(json::parse(metadata.dump()), restored, error));
+        EXPECT_EQ(restored.calendar(), calendar);
+        EXPECT_EQ(restored.canonical_bytes(), clock.canonical_bytes());
+    }
+}
+
+TEST(WorldClockTest, ExtendedSolarOrLunarParametersRetainV2Encoding) {
+    for (const auto calendar : {WorldCalendar{}, WorldCalendar{216000, 8, 1, 2, 7}}) {
+        const WorldClock clock(12345, calendar);
+        EXPECT_EQ(clock.canonical_bytes().substr(0, 15), "world_clock:v2:");
+        EXPECT_EQ(clock.canonical_bytes().size(), 43u);
+        json metadata;
+        clock.write_metadata(metadata);
+        EXPECT_EQ(metadata.at("calendar"), clock.calendar_metadata());
+        EXPECT_EQ(metadata.at("calendar").size(), 6u);
+        EXPECT_EQ(metadata.at("calendar").at("version"), 2);
+        WorldClock restored;
+        std::string error;
+        ASSERT_TRUE(WorldClock::from_metadata(json::parse(metadata.dump()), restored, error));
+        EXPECT_EQ(restored.tick(), clock.tick());
+        EXPECT_EQ(restored.calendar(), calendar);
+        EXPECT_EQ(restored.canonical_bytes(), clock.canonical_bytes());
+    }
+}
+
 TEST(WorldClockTest, MissingMetadataUsesPinnedDefaults) {
     WorldClock clock(42, {100, 3});
     std::string error;
@@ -160,6 +221,163 @@ TEST(WorldClockTest, SymmetricIdentityOddDaysAndLargeIntegerProducts) {
     EXPECT_LT(odd.solar_phase(84), .75);
     EXPECT_GT(odd.solar_phase(85), .75);
     EXPECT_EQ(odd.solar_phase(101), 0.0);
+}
+
+TEST(WorldClockTest, SmoothSolarPhaseIsStrictlyMonotonicAcrossDenseTickSweeps) {
+    for (const auto calendar : {WorldCalendar{},
+                                WorldCalendar::Legacy(),
+                                WorldCalendar{120000, 8, 1, 3, 8},
+                                WorldCalendar{120000, 8, 4, 5, 8},
+                                WorldCalendar{131070, 8, 1, 65535, 8},
+                                WorldCalendar{131070, 8, 65534, 65535, 8},
+                                WorldCalendar{101, 8, 2, 3, 8},
+                                WorldCalendar{2147483647u, 8, 32768, 65535, 8}}) {
+        SCOPED_TRACE(calendar.dayLengthTicks);
+        SCOPED_TRACE(calendar.daylightNumerator);
+        const WorldClock clock(0, calendar);
+        const std::uint64_t day = calendar.dayLengthTicks;
+        const std::uint64_t samples = day < 262144 ? day : 262144;
+        double previous = -1.0;
+        for (std::uint64_t index = 0; index < samples; ++index) {
+            const auto tick = day * index / samples;
+            const double phase = clock.solar_phase(tick);
+            ASSERT_GT(phase, previous) << tick;
+            ASSERT_LT(phase, 1.0) << tick;
+            EXPECT_NEAR(phase, clock.solar_phase_from_day_phase(clock.day_phase(tick)), 5e-15);
+            previous = phase;
+        }
+        EXPECT_EQ(clock.solar_phase(day), 0.0);
+    }
+}
+
+void CheckSolarKnotsAndRates(std::uint32_t numerator, std::uint32_t denominator) {
+    // Even the shortest quarter has 8192 ticks, including extreme valid shares.
+    const std::uint64_t day = std::uint64_t{2} * denominator * 8192;
+    const WorldClock clock(0, {static_cast<std::uint32_t>(day), 8, numerator, denominator, 8});
+    const std::uint64_t dawn = 8192ull * (denominator - numerator);
+    const std::uint64_t dusk = 8192ull * (denominator + numerator);
+    const std::array<std::uint64_t, 5> knots{0, dawn, day / 2, dusk, day};
+    for (std::size_t index = 0; index < knots.size(); ++index) {
+        const auto knot = knots[index];
+        const double anchor = static_cast<double>(index) * .25;
+        EXPECT_EQ(clock.solar_phase(knot), index == 4 ? 0.0 : anchor);
+        // Unwrap around the second day so both sides of midnight are ordinary samples.
+        const auto unwrapped = [&clock, day](std::uint64_t tick) {
+            return clock.solar_phase(tick) + static_cast<double>(tick / day);
+        };
+        const auto boundary = day + knot;
+        const double center = unwrapped(boundary);
+        EXPECT_LT(unwrapped(boundary - 1), center);
+        EXPECT_GT(unwrapped(boundary + 1), center);
+        const double shortest =
+            8192.0 * (numerator < denominator - numerator ? numerator : denominator - numerator);
+        const double continuityTolerance =
+            1.0 / static_cast<double>(day) + .75 / (shortest * shortest) + 2e-15;
+        EXPECT_NEAR(unwrapped(boundary - 1), center, continuityTolerance);
+        EXPECT_NEAR(unwrapped(boundary + 1), center, continuityTolerance);
+        // One-sided cubic finite differences cancel curvature exactly. This also
+        // resolves the common endpoint rate for very short daylight/night spans.
+        const double left = (11.0 * center - 18.0 * unwrapped(boundary - 1) +
+                             9.0 * unwrapped(boundary - 2) - 2.0 * unwrapped(boundary - 3)) /
+                            6.0;
+        const double right = (-11.0 * center + 18.0 * unwrapped(boundary + 1) -
+                              9.0 * unwrapped(boundary + 2) + 2.0 * unwrapped(boundary + 3)) /
+                             6.0;
+        EXPECT_NEAR(left * static_cast<double>(day), 1.0, 2e-6);
+        EXPECT_NEAR(right * static_cast<double>(day), 1.0, 2e-6);
+        EXPECT_NEAR(left * static_cast<double>(day), right * static_cast<double>(day), 2e-6);
+    }
+}
+
+TEST(WorldClockTest, SmoothSolarKnotsHaveExactPhasesAndContinuousRates) {
+    for (std::uint32_t denominator = 2; denominator <= 32; ++denominator) {
+        for (std::uint32_t numerator = 1; numerator < denominator; ++numerator) {
+            if (std::gcd(numerator, denominator) == 1) {
+                SCOPED_TRACE(numerator);
+                SCOPED_TRACE(denominator);
+                CheckSolarKnotsAndRates(numerator, denominator);
+            }
+        }
+    }
+    for (const auto numerator : {1u, 32768u, 65534u}) {
+        SCOPED_TRACE(numerator);
+        CheckSolarKnotsAndRates(numerator, 65535);
+    }
+    const WorldClock clock;
+    constexpr std::uint64_t day = WorldCalendar{}.dayLengthTicks;
+    for (const auto boundary : {day, day + 27000, day + 81000, day + 135000}) {
+        const auto unwrapped = [&clock](std::uint64_t tick) {
+            return clock.solar_phase(tick) + static_cast<double>(tick / day);
+        };
+        const double left =
+            (unwrapped(boundary) - unwrapped(boundary - 1)) * static_cast<double>(day);
+        const double right =
+            (unwrapped(boundary + 1) - unwrapped(boundary)) * static_cast<double>(day);
+        EXPECT_NEAR(left, right, 2e-4);
+        EXPECT_NEAR(left, 1.0, 2e-4);
+        EXPECT_NEAR(right, 1.0, 2e-4);
+    }
+}
+
+TEST(WorldClockTest, SmoothSolarDaylightShareIsExactToOneTickInEverySeason) {
+    for (const auto calendar : {WorldCalendar{},
+                                WorldCalendar{132000, 8, 3, 11, 8},
+                                WorldCalendar{132000, 8, 10, 11, 8},
+                                WorldCalendar{101, 8, 2, 3, 8}}) {
+        const WorldClock clock(0, calendar);
+        const std::uint64_t day = calendar.dayLengthTicks;
+        for (std::uint64_t season = 0; season < calendar.daysPerYear; ++season) {
+            SCOPED_TRACE(season);
+            std::uint64_t daylight = 0;
+            for (std::uint64_t tick = season * day; tick < (season + 1) * day; ++tick) {
+                const double phase = clock.solar_phase(tick);
+                if (phase >= .25 && phase < .75)
+                    ++daylight;
+            }
+            EXPECT_NEAR(static_cast<double>(daylight) / static_cast<double>(day),
+                        static_cast<double>(calendar.daylightNumerator) /
+                            calendar.daylightDenominator,
+                        1.0 / static_cast<double>(day));
+        }
+    }
+}
+
+TEST(WorldClockTest, SmoothSolarPresentationInverseAndMetadataRoundTripShareTheTickCurve) {
+    namespace sky = Luminumbra::Rendering;
+    for (const auto calendar : {WorldCalendar{},
+                                WorldCalendar::Legacy(),
+                                WorldCalendar{131070, 8, 1, 65535, 8},
+                                WorldCalendar{131070, 8, 65534, 65535, 8}}) {
+        const WorldClock clock(12345, calendar);
+        json metadata;
+        clock.write_metadata(metadata);
+        WorldClock restored;
+        std::string error;
+        ASSERT_TRUE(WorldClock::from_metadata(json::parse(metadata.dump()), restored, error));
+        EXPECT_EQ(restored.canonical_bytes(), clock.canonical_bytes());
+        for (const auto tick :
+             std::array<std::uint64_t, 5>{0, 1, 12345, 81001, WorldClock::kTickLimit - 1}) {
+            const double solar = clock.solar_phase(tick);
+            EXPECT_EQ(std::bit_cast<std::uint64_t>(restored.solar_phase(tick)),
+                      std::bit_cast<std::uint64_t>(solar));
+            EXPECT_NEAR(clock.day_phase_from_solar_phase(solar), clock.day_phase(tick), 5e-12);
+            const double noonElapsed = sky::WrapDayPhase(clock.day_phase(tick) + .5);
+            const float noonSolar = static_cast<float>(sky::WrapDayPhase(solar + .5));
+            EXPECT_NEAR(sky::SolarTimeFromNoonElapsed(noonElapsed, calendar), noonSolar, 1e-7f);
+        }
+        for (const auto solar : {0.0, .1, .25, .3, .5, .75, .9, 1.0}) {
+            const double elapsed = sky::ElapsedPhaseFromSolar(solar, calendar);
+            EXPECT_NEAR(sky::SolarPhaseFromElapsed(elapsed, calendar), solar, 5e-12);
+        }
+    }
+    const WorldClock symmetric(0, WorldCalendar::Legacy());
+    for (std::uint64_t tick = 0; tick < symmetric.calendar().dayLengthTicks; ++tick) {
+        const double legacy = static_cast<double>(tick) / symmetric.calendar().dayLengthTicks;
+        EXPECT_EQ(std::bit_cast<std::uint64_t>(symmetric.solar_phase(tick)),
+                  std::bit_cast<std::uint64_t>(legacy));
+        EXPECT_EQ(symmetric.solar_phase_from_day_phase(legacy), legacy);
+        EXPECT_EQ(symmetric.day_phase_from_solar_phase(legacy), legacy);
+    }
 }
 
 TEST(WorldClockTest, LunarMonthIsIndependentOfYearAndImportsRecordedDayLength) {

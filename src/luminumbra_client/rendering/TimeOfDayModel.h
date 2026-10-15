@@ -186,26 +186,10 @@ inline constexpr std::uint64_t kDefaultDayLengthTicks = world::WorldCalendar{}.d
 static_assert(kDefaultDayLengthTicks == 162000, "90 min/day @ 30 Hz");
 
 inline double SolarPhaseFromElapsed(double phase, const world::WorldCalendar& calendar) {
-    if (calendar.daylightNumerator == 1 && calendar.daylightDenominator == 2)
-        return phase;
-    const double f = static_cast<double>(calendar.daylightNumerator) / calendar.daylightDenominator;
-    const double dawn = (1.0 - f) / 2.0;
-    const double dusk = (1.0 + f) / 2.0;
-    if (phase < dawn)
-        return phase / (2.0 * (1.0 - f));
-    if (phase <= dusk)
-        return 0.25 + (phase - dawn) / (2.0 * f);
-    return 0.75 + (phase - dusk) / (2.0 * (1.0 - f));
+    return world::WorldClock(0, calendar).solar_phase_from_day_phase(phase);
 }
 inline double ElapsedPhaseFromSolar(double solarPhase, const world::WorldCalendar& calendar) {
-    if (calendar.daylightNumerator == 1 && calendar.daylightDenominator == 2)
-        return solarPhase;
-    const double f = static_cast<double>(calendar.daylightNumerator) / calendar.daylightDenominator;
-    if (solarPhase < 0.25)
-        return solarPhase * (2.0 * (1.0 - f));
-    if (solarPhase <= 0.75)
-        return (1.0 - f) / 2.0 + (solarPhase - 0.25) * (2.0 * f);
-    return (1.0 + f) / 2.0 + (solarPhase - 0.75) * (2.0 * (1.0 - f));
+    return world::WorldClock(0, calendar).day_phase_from_solar_phase(solarPhase);
 }
 inline double WrapDayPhase(double dayPhase) {
     return dayPhase >= 1.0 ? dayPhase - 1.0 : dayPhase;
@@ -220,6 +204,8 @@ inline double NoonElapsedFromSolarTime(double phase, const world::WorldCalendar&
     return WrapDayPhase(ElapsedPhaseFromSolar(WrapDayPhase(phase + 0.5), calendar) + 0.5);
 }
 
+// Symmetric compatibility conversion. Calendar-aware readers use the shared
+// solar mapping above; this helper has no shipping call sites.
 inline float TimeOfDayFromTick(std::uint64_t simTick, std::uint64_t dayLengthTicks) {
     if (dayLengthTicks == 0) {
         dayLengthTicks = 1;
