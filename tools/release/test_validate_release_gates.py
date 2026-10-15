@@ -311,9 +311,9 @@ class GitCommandTests(unittest.TestCase):
             with self.subTest(stderr=stderr[:40]), mock.patch.object(
                     gate.subprocess, "run", return_value=result):
                 with self.assertRaises(gate.GateError) as caught:
-                    gate.git(ROOT, "rev-parse", "HEAD^{commit}")
+                    gate.git(ROOT, "rev-parse", "--verify", "HEAD^0")
                 message = str(caught.exception)
-                self.assertIn("Git prerequisite failed: rev-parse HEAD^{commit}", message)
+                self.assertIn("Git prerequisite failed: rev-parse --verify HEAD^0", message)
                 self.assertIn("exit 128", message)
                 self.assertIn(stderr[:4096].decode("utf-8", errors="replace").strip(), message)
                 self.assertLessEqual(len(message), 4300)
@@ -333,14 +333,14 @@ class GitCommandTests(unittest.TestCase):
         with mock.patch.object(gate.os, "environ", dict(os.environ, **overrides)):
             before = dict(os.environ)
             with mock.patch.object(gate.subprocess, "run", return_value=result) as command:
-                self.assertEqual(gate.git(ROOT, "rev-parse", "HEAD^{commit}"), b"result\n")
+                self.assertEqual(gate.git(ROOT, "rev-parse", "--verify", "HEAD^0"), b"result\n")
             self.assertEqual(dict(os.environ), before)
         child = command.call_args.kwargs["env"]
         self.assertEqual({key: value for key, value in child.items() if key.upper().startswith("GIT_")},
                          {"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull})
         self.assertEqual(command.call_args.args[0],
                          ["git", "--no-replace-objects", "-C", str(ROOT),
-                          "rev-parse", "HEAD^{commit}"])
+                          "rev-parse", "--verify", "HEAD^0"])
 
 
 class GitTests(unittest.TestCase):
@@ -399,6 +399,15 @@ class GitTests(unittest.TestCase):
 
     def validate(self, commit: str | None = None, version: str = VERSION) -> None:
         gate.validate_git_record(self.root, version, commit or self.tag)
+
+    def test_git_arguments_survive_msys_brace_expansion(self):
+        # MSYS2 runtimes brace-expand argv, so validator Git arguments must contain no braces.
+        with mock.patch.object(gate.subprocess, "run", wraps=subprocess.run) as command:
+            self.validate()
+        self.assertTrue(command.call_args_list)
+        for call in command.call_args_list:
+            for argument in call.args[0]:
+                self.assertNotRegex(argument, r"[{}]")
 
     def test_record_only_commit_promoted_at_tip_or_ancestor(self):
         self.validate()
@@ -575,7 +584,7 @@ class GitTests(unittest.TestCase):
             # Show that Git really encounters the bad file without isolation.
             ambient = {key: value for key, value in os.environ.items()
                        if not key.startswith("GIT_")}
-            result = subprocess.run(["git", "-C", str(self.root), "rev-parse", "HEAD^{commit}"],
+            result = subprocess.run(["git", "-C", str(self.root), "rev-parse", "HEAD^0"],
                                     env=ambient, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                     check=False)
             self.assertNotEqual(result.returncode, 0, result.stdout)

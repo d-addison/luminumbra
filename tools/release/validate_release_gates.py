@@ -246,7 +246,8 @@ def validate_git_record(root: Path, version: str, commit: str) -> None:
     require(VERSION.fullmatch(version) is not None, "version must be X.Y.Z")
     require(SHA.fullmatch(commit) is not None, "tag commit must be a full 40-hex SHA")
     commit = commit.lower()
-    require(git(root, "rev-parse", "HEAD^{commit}").decode().strip() == commit,
+    # Use a brace-free peel: MSYS2 runtimes brace-expand argv ("HEAD^{commit}" -> "HEAD^commit").
+    require(git(root, "rev-parse", "--verify", "HEAD^0").decode().strip() == commit,
             "checkout does not match tag commit")
     history = main_first_parent_history(root)
     require(commit in history, "tag commit must lie on main first-parent history")
