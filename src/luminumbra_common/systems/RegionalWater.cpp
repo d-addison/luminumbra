@@ -56,15 +56,19 @@ void ValidateWater(const Chunk& chunk) {
         chunk.water_flow_data.size() != cells || chunk.water_sim_terrain_height.size() != cells ||
         (!chunk.water_rest_level.empty() && chunk.water_rest_level.size() != cells))
         RefuseWater("Regional water grid shape refused");
-    if (chunk.ticks_below_threshold < 0 || chunk.water_mesh_dirty_ticks < 0 ||
-        chunk.water_mesh_dirty_ticks > 15 || !std::isfinite(chunk.max_water_delta_last_tick) ||
-        chunk.max_water_delta_last_tick < 0.0f)
+    const auto* depth = chunk.water_depth_mm.data();
+    const auto* level = chunk.water_level_data.data();
+    const auto* flow = chunk.water_flow_data.data();
+    const auto* terrain = chunk.water_sim_terrain_height.data();
+    const int calm_ticks = chunk.ticks_below_threshold;
+    const int mesh_ticks = chunk.water_mesh_dirty_ticks;
+    const float delta = chunk.max_water_delta_last_tick;
+    if (calm_ticks < 0 || mesh_ticks < 0 || mesh_ticks > 15 || !std::isfinite(delta) ||
+        delta < 0.0f)
         RefuseWater("Regional water continuation refused");
     for (std::size_t i = 0; i < cells; ++i) {
-        if (chunk.water_depth_mm[i] < 0 || !std::isfinite(chunk.water_level_data[i]) ||
-            !std::isfinite(chunk.water_flow_data[i].x) ||
-            !std::isfinite(chunk.water_flow_data[i].y) ||
-            !std::isfinite(chunk.water_sim_terrain_height[i]))
+        if (depth[i] < 0 || !std::isfinite(level[i]) || !std::isfinite(flow[i].x) ||
+            !std::isfinite(flow[i].y) || !std::isfinite(terrain[i]))
             RefuseWater("Regional water cell refused");
     }
 }

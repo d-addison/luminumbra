@@ -6,6 +6,7 @@
 #include "../world/Chunk.h"
 #include "../world/FarLodStore.h"
 #include "../world/FarVolume.h"
+#include "../world/ResidentChunkRoster.h"
 #include "../world/StructurePlacement.h"
 #include "FastNoise/FastNoise.h"
 #include "entt/entt.hpp"
@@ -875,6 +876,10 @@ public:
         std::uint64_t still_pending = 0; // dispatched, never activated by report time
     };
     ActivationShadowReport activation_shadow_report() const;
+    // Host-thread-only borrowed roster; refreshed from current map identities on each call.
+    // Valid until the next roster refresh, unload, clear or world-system destruction. Do not mutate
+    // streaming membership while using it. Loading transitions remain live observations.
+    std::span<const std::shared_ptr<::Luminumbra::Chunk>> resident_streamed_chunks() const;
     // Shared-ownership snapshot of every streamed chunk (save path).
     std::vector<std::shared_ptr<::Luminumbra::Chunk>> snapshot_streamed_chunks() const;
     // Owner-thread capture for a 32x32 chunk far region plus a one-chunk X/Z
@@ -1023,6 +1028,7 @@ private:
     };
 
     StreamingState m_streaming_state;
+    mutable ResidentChunkRoster m_resident_roster{};
     // the worldgen-epoch gate (see acquire_worldgen_sample_scope).
     mutable std::shared_mutex m_worldgen_epoch_mutex;
     mutable std::atomic<bool> m_worldgen_writer_pending{false};

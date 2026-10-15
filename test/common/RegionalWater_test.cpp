@@ -9,12 +9,14 @@
 #include "luminumbra_common/systems/WaterSystem.h"
 #include "luminumbra_common/systems/WeatherSystem.h"
 #include "luminumbra_common/world/Chunk.h"
+#include "luminumbra_common/world/ResidentChunkRoster.h"
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <limits>
 #include <map>
 #include <memory>
@@ -1437,3 +1439,235 @@ TEST_F(RegionalWaterFixture, ReusedStagingMatchesIndependentOracleAndColdTransac
     ASSERT_NO_FATAL_FAILURE(CheckColdStagingTransactions());
     ASSERT_NO_FATAL_FAILURE(CheckFlatStagingOracle());
 }
+
+namespace {
+TEST_F(RegionalWaterFixture, ContiguousPreflightRetainsEveryArrayCheckAndFirstDiagnostic) {
+    Owner({0, 0});
+    struct Fault {
+        const char* diagnostic = nullptr;
+        std::function<void(Chunk&)> corrupt{};
+    };
+    const auto infinity = std::numeric_limits<float>::infinity();
+    const std::vector<Fault> faults{
+        {"Regional water grid shape refused",
+         [](Chunk& c) {
+             c.water_depth_mm.pop_back();
+         }},
+        {"Regional water grid shape refused",
+         [](Chunk& c) {
+             c.water_bed_mm.pop_back();
+         }},
+        {"Regional water grid shape refused",
+         [](Chunk& c) {
+             c.water_edge_flux.pop_back();
+         }},
+        {"Regional water grid shape refused",
+         [](Chunk& c) {
+             c.water_level_data.pop_back();
+         }},
+        {"Regional water grid shape refused",
+         [](Chunk& c) {
+             c.water_flow_data.pop_back();
+         }},
+        {"Regional water grid shape refused",
+         [](Chunk& c) {
+             c.water_sim_terrain_height.pop_back();
+         }},
+        {"Regional water grid shape refused",
+         [](Chunk& c) {
+             c.water_rest_level.resize(1);
+         }},
+        {"Regional water cell refused",
+         [](Chunk& c) {
+             c.water_depth_mm[63] = -1;
+         }},
+        {"Regional water cell refused",
+         [infinity](Chunk& c) {
+             c.water_level_data[63] = infinity;
+         }},
+        {"Regional water cell refused",
+         [infinity](Chunk& c) {
+             c.water_flow_data[63].x = infinity;
+         }},
+        {"Regional water cell refused",
+         [infinity](Chunk& c) {
+             c.water_flow_data[63].y = infinity;
+         }},
+        {"Regional water cell refused",
+         [infinity](Chunk& c) {
+             c.water_sim_terrain_height[63] = infinity;
+         }},
+        {"Regional water continuation refused",
+         [](Chunk& c) {
+             c.ticks_below_threshold = -1;
+         }},
+        {"Regional water continuation refused",
+         [](Chunk& c) {
+             c.water_mesh_dirty_ticks = -1;
+         }},
+        {"Regional water continuation refused",
+         [](Chunk& c) {
+             c.water_mesh_dirty_ticks = 16;
+         }},
+        {"Regional water continuation refused",
+         [infinity](Chunk& c) {
+             c.max_water_delta_last_tick = infinity;
+         }},
+        {"Regional water continuation refused",
+         [](Chunk& c) {
+             c.max_water_delta_last_tick = -1.0f;
+         }},
+        {"Regional water resolution refused",
+         [](Chunk& c) {
+             c.current_water_resolution.store(3);
+         }},
+        {"Regional water uninitialized storage refused",
+         [](Chunk& c) {
+             c.has_water_sim.store(false);
+         }},
+        // Simultaneous defects preserve shape -> continuation -> cell precedence.
+        {"Regional water grid shape refused",
+         [](Chunk& c) {
+             c.water_bed_mm.clear();
+             c.ticks_below_threshold = -1;
+             c.water_depth_mm[0] = -1;
+         }},
+        {"Regional water continuation refused",
+         [](Chunk& c) {
+             c.ticks_below_threshold = -1;
+             c.water_depth_mm[0] = -1;
+         }},
+    };
+    for (std::size_t i = 0; i < faults.size(); ++i) {
+        SCOPED_TRACE(i);
+        chunks = {WaterChunk({0, 0, 0})};
+        chunks[0]->is_water_sleeping.store(true);
+        Systems::RegionalWater::PlanningCache cache;
+        ASSERT_NO_THROW(cache.Refresh(chunks, ledger, 8)); // Warm, off-due and sleeping.
+        faults[i].corrupt(*chunks[0]);
+        const auto before = CaptureWater(*chunks[0]);
+        try {
+            cache.Refresh(chunks, ledger, 8);
+            FAIL() << "preflight accepted corrupt water";
+        } catch (const std::runtime_error& error) {
+            EXPECT_STREQ(error.what(), faults[i].diagnostic);
+        }
+        EXPECT_EQ(CaptureWater(*chunks[0]), before);
+    }
+}
+
+TEST_F(RegionalWaterFixture, ResidentViewRefreshSeesReplacementOwnershipAndLoadingBeforePlanning) {
+    Owner({0, 0});
+    ResidentChunkRoster roster;
+    ResidentChunkRoster::Map resident;
+    auto first = WaterChunk({0, 0, 0});
+    const auto id = first->get_id();
+    resident.emplace(id, first);
+    Systems::RegionalWater::PlanningCache cache;
+    auto view = roster.refresh(resident);
+    ASSERT_EQ(view.size(), 1u);
+    cache.Refresh(view, ledger, 8);
+    const auto* storage = view.data();
+    const auto owners = first.use_count();
+    view = roster.refresh(resident);
+    EXPECT_EQ(view.data(), storage);
+    EXPECT_EQ(first.use_count(), owners); // No per-tick shared-owner acquisition.
+
+    auto replacement = WaterChunk({0, 0, 0}, 333);
+    resident.at(id) = replacement;
+    view = roster.refresh(resident);
+    cache.Refresh(view, ledger, 8);
+    ASSERT_NE(cache.Find(id), nullptr);
+    EXPECT_EQ(cache.Find(id)->chunk, replacement.get());
+    EXPECT_EQ(view[0], replacement);
+
+    // Same address with distinct shared ownership must also refresh the roster.
+    // replacement retains the actual lifetime while this no-op owner is installed.
+    const std::shared_ptr<Chunk> alternate_owner(replacement.get(), [](Chunk*) {});
+    resident.at(id) = alternate_owner;
+    view = roster.refresh(resident);
+    EXPECT_FALSE(view[0].owner_before(alternate_owner));
+    EXPECT_FALSE(alternate_owner.owner_before(view[0]));
+    cache.Refresh(view, ledger, 8);
+    ASSERT_NE(cache.Find(id), nullptr);
+    EXPECT_FALSE(cache.Find(id)->identity.owner_before(alternate_owner));
+    EXPECT_FALSE(alternate_owner.owner_before(cache.Find(id)->identity));
+
+    replacement->set_state(ChunkState::Loading);
+    view = roster.refresh(resident);
+    cache.Refresh(view, ledger, 8);
+    EXPECT_EQ(cache.Find(id), nullptr);
+    replacement->set_state(ChunkState::Idle);
+    view = roster.refresh(resident);
+    cache.Refresh(view, ledger, 8);
+    ASSERT_NE(cache.Find(id), nullptr);
+    EXPECT_EQ(cache.Find(id)->chunk, replacement.get());
+    resident.clear();
+    view = roster.refresh(resident);
+    EXPECT_TRUE(view.empty());
+    cache.Refresh(view, ledger, 8);
+    EXPECT_TRUE(cache.entries.empty());
+}
+
+TEST_F(RegionalWaterFixture, UnloadReleasesSnapshotAndRosterOwnersWithoutAnotherQuery) {
+    shield.debug_set_streaming_radius_cap(1);
+    for (const bool warm_roster : {false, true}) {
+        SCOPED_TRACE(warm_roster);
+        auto chunk = std::make_shared<Chunk>(IVec3(1000, 0, 1000));
+        chunk->set_state(ChunkState::Loading);
+        ASSERT_TRUE(shield.adopt_streamed_chunk(chunk));
+        ASSERT_EQ(chunk.use_count(), 2); // Local owner and streaming map only.
+        {
+            const auto snapshot = shield.snapshot_streamed_chunks();
+            ASSERT_EQ(snapshot.size(), 1u);
+            EXPECT_EQ(chunk.use_count(), 3);
+        }
+        EXPECT_EQ(chunk.use_count(), 2); // Ordinary snapshots leave no roster owner.
+        if (warm_roster) {
+            ASSERT_EQ(shield.resident_streamed_chunks().size(), 1u);
+            EXPECT_EQ(chunk.use_count(), 3);
+        }
+        const std::weak_ptr<Chunk> lifetime = chunk;
+        chunk.reset();
+        // One complete activation interval; no jobs or water solver own this chunk.
+        for (int frame = 0; frame < 4; ++frame)
+            shield.update(registry, Vec3(0), nullptr);
+        EXPECT_EQ(shield.get_last_streaming_budget_stats().unloaded_chunks, 1u);
+        EXPECT_TRUE(lifetime.expired()); // No subsequent snapshot or roster refresh.
+        shield.clear_world(nullptr);
+    }
+}
+
+TEST_F(RegionalWaterFixture, ClearWorldReleasesRosterOwnersWithoutAnotherQuery) {
+    auto chunk = WaterChunk({0, 0, 0});
+    ASSERT_TRUE(shield.adopt_streamed_chunk(chunk));
+    ASSERT_EQ(shield.resident_streamed_chunks().size(), 1u);
+    ASSERT_EQ(chunk.use_count(), 3);
+    const std::weak_ptr<Chunk> lifetime = chunk;
+    chunk.reset();
+    shield.clear_world(nullptr);
+    EXPECT_TRUE(lifetime.expired()); // No subsequent snapshot or roster refresh.
+}
+
+TEST_F(RegionalWaterFixture, WorldResidentViewSharesSnapshotOrderAndObservesLoading) {
+    Owner({0, 0});
+    auto chunk = WaterChunk({0, 0, 0});
+    ASSERT_TRUE(shield.adopt_streamed_chunk(chunk));
+    const auto snapshot = shield.snapshot_streamed_chunks();
+    auto view = shield.resident_streamed_chunks();
+    ASSERT_EQ(view.size(), snapshot.size());
+    EXPECT_TRUE(std::equal(view.begin(), view.end(), snapshot.begin()));
+    const auto* storage = view.data();
+    view = shield.resident_streamed_chunks();
+    EXPECT_EQ(view.data(), storage);
+    Systems::RegionalWater::PlanningCache cache;
+    cache.Refresh(view, ledger, 8);
+    ASSERT_NE(cache.Find(chunk->get_id()), nullptr);
+    chunk->set_state(ChunkState::Loading);
+    cache.Refresh(shield.resident_streamed_chunks(), ledger, 8);
+    EXPECT_EQ(cache.Find(chunk->get_id()), nullptr);
+    chunk->set_state(ChunkState::Idle);
+    cache.Refresh(shield.resident_streamed_chunks(), ledger, 8);
+    ASSERT_NE(cache.Find(chunk->get_id()), nullptr);
+}
+} // namespace

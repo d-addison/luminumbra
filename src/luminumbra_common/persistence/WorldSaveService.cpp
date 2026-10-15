@@ -1,5 +1,7 @@
 #include "WorldSaveService.h"
 
+#include "ChunkValidationCache.h"
+
 #include "../ecs/EntitySnapshot.h" //  plant entity snapshot persistence
 #include "../fields/EnergyFieldState.h"
 #include "../systems/RegionalFoliage.h"
@@ -27,6 +29,7 @@
 #include <limits>
 #include <map>
 #include <memory>
+#include <new>
 #include <set>
 #include <sstream>
 #include <stdexcept>
@@ -800,6 +803,81 @@ std::shared_ptr<Chunk> DecodeChunkRecord(const RegionRecord& record,
         chunks.front()->mark_sdf_generated_current_params();
     }
     return chunks.front();
+}
+
+struct ValidatedChunkRecord {
+    ChunkValidationCache::Facts facts{};
+    std::shared_ptr<Chunk> chunk{};
+};
+
+// Failed decodes are never cached: diagnostics retain their original path and order.
+std::optional<ValidatedChunkRecord> ValidateChunkRecord(const RegionRecord& record,
+                                                        const std::filesystem::path& path,
+                                                        std::vector<std::string>* errors,
+                                                        bool strict_water) {
+    auto* cache = ChunkValidationCache::active();
+    const ChunkValidationCache::Key key{
+        record.id, record.uncompressed_size, record.lod_level, record.flags, strict_water};
+    if (cache) {
+        if (const auto facts = cache->find(key, record.compressed_payload))
+            return ValidatedChunkRecord{*facts, {}};
+    }
+    auto chunk = DecodeChunkRecord(record, path, errors, strict_water);
+    if (!chunk)
+        return std::nullopt;
+    const ChunkValidationCache::Facts facts{chunk->get_coords(),
+                                            chunk->sdf_data.size(),
+                                            chunk->sdf_provenance() ==
+                                                ChunkSdfProvenance::LoadedOrEdited};
+    if (cache) {
+        try {
+            cache->remember(key, record.compressed_payload, facts);
+        } catch (const std::bad_alloc&) {
+            // Reuse is optional. Cache allocation failure must not turn a
+            // successfully validated record into a persistence refusal.
+        }
+    }
+    return ValidatedChunkRecord{facts, std::move(chunk)};
+}
+
+bool LoadValidatedChunkRecord(const RegionRecord& record,
+                              const std::filesystem::path& path,
+                              int rx,
+                              int rz,
+                              bool indexed,
+                              WorldStreamingState& state,
+                              std::vector<std::string>& errors,
+                              const std::function<bool(const IVec3&)>& retain_chunk,
+                              std::set<ChunkID>& decoded_ids,
+                              std::vector<IVec3>* authoritative_inventory) {
+    auto validated = ValidateChunkRecord(record, path, &errors, indexed);
+    if (!validated)
+        return false;
+    constexpr std::size_t kLattice =
+        static_cast<std::size_t>(CHUNK_SIZE_X + 1) * (CHUNK_SIZE_Y + 1) * (CHUNK_SIZE_Z + 1);
+    if ((indexed || authoritative_inventory) && validated->facts.sdf_size != 0 &&
+        validated->facts.sdf_size != kLattice) {
+        AddError(&errors, "corrupt world chunk SDF lattice");
+        return false;
+    }
+    int chunk_rx = 0, chunk_rz = 0;
+    WorldSaveService::region_coords_for_chunk(validated->facts.coords, chunk_rx, chunk_rz);
+    if (chunk_rx != rx || chunk_rz != rz || !decoded_ids.insert(record.id).second) {
+        AddError(&errors, "corrupt chunk region identity or duplicate id: " + path.string());
+        return false;
+    }
+    if (authoritative_inventory && validated->facts.authoritative)
+        authoritative_inventory->push_back(validated->facts.coords);
+    if (!retain_chunk || retain_chunk(validated->facts.coords)) {
+        // Runtime loads still construct fresh mutable chunks. Validation-only
+        // callers reuse facts without retaining runtime arrays or objects.
+        if (!validated->chunk)
+            validated->chunk = DecodeChunkRecord(record, path, &errors, indexed);
+        if (!validated->chunk)
+            return false;
+        state.insert_chunk(validated->chunk);
+    }
+    return true;
 }
 
 std::uint8_t ChunkRecordFlags(const Chunk& chunk, std::uint8_t previous_flags) {
@@ -2400,20 +2478,20 @@ bool WorldSaveService::member_digest(const std::filesystem::path& save_dir,
             }
             for (const RegionRecord& record : records) {
                 if (record.lod_level == 0) {
-                    const auto chunk = DecodeChunkRecord(record, path, &diagnostics);
-                    if (!chunk) {
+                    const auto validated = ValidateChunkRecord(record, path, &diagnostics, false);
+                    if (!validated) {
                         error = first_error("corrupt chunk record");
                         return false;
                     }
                     constexpr std::size_t kLattice = static_cast<std::size_t>(CHUNK_SIZE_X + 1) *
                                                      (CHUNK_SIZE_Y + 1) * (CHUNK_SIZE_Z + 1);
-                    if (!chunk->sdf_data.empty() && chunk->sdf_data.size() != kLattice) {
+                    if (validated->facts.sdf_size != 0 && validated->facts.sdf_size != kLattice) {
                         error = "corrupt world chunk SDF lattice";
                         return false;
                     }
                     int chunk_rx = 0;
                     int chunk_rz = 0;
-                    region_coords_for_chunk(chunk->get_coords(), chunk_rx, chunk_rz);
+                    region_coords_for_chunk(validated->facts.coords, chunk_rx, chunk_rz);
                     if (chunk_rx != rx || chunk_rz != rz) {
                         error = "corrupt chunk region identity";
                         return false;
@@ -2902,25 +2980,17 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
                 if (stop.stop_requested())
                     return reject("Saved-world validation cancelled.");
                 if (record.lod_level == 0) {
-                    const auto chunk = DecodeChunkRecord(record, path, &errors, indexed);
-                    if (!chunk)
+                    if (!LoadValidatedChunkRecord(record,
+                                                  path,
+                                                  rx,
+                                                  rz,
+                                                  indexed,
+                                                  state,
+                                                  errors,
+                                                  retain_chunk,
+                                                  decoded_ids,
+                                                  authoritative_inventory))
                         return reject("");
-                    constexpr std::size_t kLattice = static_cast<std::size_t>(CHUNK_SIZE_X + 1) *
-                                                     (CHUNK_SIZE_Y + 1) * (CHUNK_SIZE_Z + 1);
-                    if ((indexed || authoritative_inventory) && !chunk->sdf_data.empty() &&
-                        chunk->sdf_data.size() != kLattice)
-                        return reject("corrupt world chunk SDF lattice");
-                    int chunk_rx = 0, chunk_rz = 0;
-                    region_coords_for_chunk(chunk->get_coords(), chunk_rx, chunk_rz);
-                    if (chunk_rx != rx || chunk_rz != rz ||
-                        !decoded_ids.insert(chunk->get_id()).second)
-                        return reject("corrupt chunk region identity or duplicate id: " +
-                                      path.string());
-                    if (authoritative_inventory &&
-                        chunk->sdf_provenance() == ChunkSdfProvenance::LoadedOrEdited)
-                        authoritative_inventory->push_back(chunk->get_coords());
-                    if (!retain_chunk || retain_chunk(chunk->get_coords()))
-                        state.insert_chunk(chunk);
                 } else {
                     const auto tier = static_cast<World::FarLodTier>(record.lod_level);
                     if (record.id != World::FarLodStore::tile_record_id(tier, rx, rz))

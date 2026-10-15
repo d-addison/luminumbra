@@ -189,6 +189,7 @@ void GameSession::ResetWorldSystems() {
     m_worldSystem.reset();
     m_physicsSystem.reset();
     m_waterSystem.reset();
+    m_chunkValidationCache.clear();
     m_registry.clear();
     m_soilGrid.reset();
     m_irrigationGrid.reset();
@@ -909,7 +910,7 @@ GameSession::SamplePlantEnvironment(const Components::TransformComponent& tf,
 void GameSession::RunRegionalWaterTick() {
     if (!m_activeRegionsEnabled || !m_waterSystem || !m_worldSystem)
         return;
-    const auto resident = m_worldSystem->snapshot_streamed_chunks();
+    const auto resident = m_worldSystem->resident_streamed_chunks();
     m_waterSystem->UpdateRegional(
         m_registry, resident, m_activeRegionLedger, m_regionSchedule, m_regionCompletedWork);
 }
@@ -2785,6 +2786,7 @@ StartOuterSave(const fs::path& save_dir, std::uint64_t tick, const std::optional
 } // namespace
 
 bool GameSession::RunInSnapshotTransaction(const std::function<bool()>& body) {
+    const Persistence::ChunkValidationCache::Scope validation_scope(m_chunkValidationCache);
     const fs::path save_dir = GetWorldSaveDir();
     if (!m_activeRegionsEnabled || save_dir.empty() || m_transientWorld ||
         m_metadata.worldId.empty() || !m_worldOpenError.empty() || !IsSimulationTickBoundary() ||
@@ -2810,6 +2812,7 @@ bool GameSession::SaveWorld() {
 }
 
 bool GameSession::SaveWorldMetadataTo(const fs::path& save_dir) {
+    const Persistence::ChunkValidationCache::Scope validation_scope(m_chunkValidationCache);
     if (!IsSimulationTickBoundary() || save_dir.empty() ||
         !ClockConfigurationCompatible(save_dir) || m_transientWorld || m_metadata.worldId.empty() ||
         !m_worldOpenError.empty())
@@ -2936,6 +2939,7 @@ bool GameSession::SaveWorldState(WorldStateSaveReport* report) {
 
 bool GameSession::SaveWorldStateTo(const std::filesystem::path& save_dir,
                                    WorldStateSaveReport* report) {
+    const Persistence::ChunkValidationCache::Scope validation_scope(m_chunkValidationCache);
     const auto save_started = std::chrono::steady_clock::now();
     const auto elapsed_ms = [&save_started]() {
         return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() -
@@ -3202,6 +3206,7 @@ bool GameSession::LoadWorldState() {
 }
 
 bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
+    const Persistence::ChunkValidationCache::Scope validation_scope(m_chunkValidationCache);
     if (!IsSimulationTickBoundary())
         return false;
     m_lastLoadedChunkCount = 0;

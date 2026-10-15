@@ -5983,3 +5983,128 @@ TEST(GameSessionHeadlessWorldTest, S7WaterTickDoesNotLoadDurableOnlySourceTarget
     EXPECT_EQ(session.GetWaterSystem()->regional_work().used_windows, 0u);
     EXPECT_EQ(session.GetWaterSystem()->debug_source_injected_mm(), 0);
 }
+
+namespace {
+// Preserve every file byte, including compressed records and index member order.
+// Only transaction header fields vary on repeated successful commits; their
+// generation/transaction progression is checked separately below.
+std::map<std::string, std::string> RepeatedSaveBytes(const fs::path& save) {
+    std::map<std::string, std::string> files;
+    for (const auto& entry : fs::recursive_directory_iterator(save)) {
+        if (!entry.is_regular_file())
+            continue;
+        const auto relative = fs::relative(entry.path(), save).generic_string();
+        auto bytes = ReadClockTestFile(entry.path());
+        if (relative == P::kSnapshotIndexRelativePath) {
+            auto index = nlohmann::json::parse(bytes);
+            index["generation"] = 0;
+            index["txn_id"] = 0;
+            bytes = index.dump();
+        }
+        files.emplace(relative, std::move(bytes));
+    }
+    return files;
+}
+} // namespace
+
+TEST(GameSessionHeadlessWorldTest, RepeatedWorldAndStateSavesPreserveBytesWithValidationReuse) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    session.SetRootPath(root.root_string());
+    session.SetJobSystem(&jobs);
+    session.SetActiveRegionsEnabled(true);
+    ASSERT_TRUE(session.CreateWorld("Repeated saves", "1337", "default"));
+    auto chunk = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3(0, 0, 0));
+    chunk->set_state(Luminumbra::ChunkState::Idle);
+    chunk->mark_voxel_data_dirty();
+    ASSERT_TRUE(session.GetWorldSystem()->adopt_streamed_chunk(chunk));
+    ASSERT_TRUE(session.SaveWorldState());
+    ASSERT_TRUE(session.SaveWorld());
+    const auto save = session.GetWorldSaveDir();
+    const auto before = RepeatedSaveBytes(save);
+    const auto hash = SessionWorldHash(session);
+    P::SnapshotIndex previous;
+    std::vector<std::string> errors;
+    ASSERT_TRUE(P::read_snapshot_index(save, previous, &errors));
+    for (int pass = 0; pass < 3; ++pass) {
+        SCOPED_TRACE(pass);
+        ASSERT_TRUE(session.SaveWorldState());
+        ASSERT_TRUE(session.SaveWorld());
+        EXPECT_EQ(RepeatedSaveBytes(save), before);
+        EXPECT_EQ(SessionWorldHash(session), hash);
+        P::SnapshotIndex current;
+        ASSERT_TRUE(P::read_snapshot_index(save, current, &errors));
+        EXPECT_EQ(current.generation, previous.generation + 2);
+        EXPECT_EQ(current.txn_id, previous.txn_id + 2);
+        EXPECT_EQ(current.tick, previous.tick);
+        previous = std::move(current);
+    }
+    EXPECT_TRUE(errors.empty());
+}
+
+TEST(GameSessionHeadlessWorldTest, SuccessiveWorldsClearValidationCacheOnCreateAndLoad) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    session.SetRootPath(root.root_string());
+    session.SetJobSystem(&jobs);
+    session.SetActiveRegionsEnabled(true);
+    const auto expect_empty_cache = [&session]() {
+        const auto stats = session.GetChunkValidationCacheStats();
+        EXPECT_EQ(stats.entries, 0u);
+        EXPECT_EQ(stats.payload_bytes, 0u);
+        EXPECT_EQ(stats.hits, 0u);
+        EXPECT_EQ(stats.misses, 0u);
+        EXPECT_EQ(stats.evictions, 0u);
+    };
+    const auto save_chunk = [&session](float density) {
+        auto chunk = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3(0, 0, 0));
+        chunk->set_state(Luminumbra::ChunkState::Idle);
+        constexpr std::size_t lattice = static_cast<std::size_t>(Luminumbra::CHUNK_SIZE_X + 1) *
+                                        (Luminumbra::CHUNK_SIZE_Y + 1) *
+                                        (Luminumbra::CHUNK_SIZE_Z + 1);
+        chunk->sdf_data.assign(lattice, density);
+        chunk->mark_voxel_data_dirty();
+        ASSERT_TRUE(session.GetWorldSystem()->adopt_streamed_chunk(chunk));
+        ASSERT_TRUE(session.SaveWorldState());
+        ASSERT_TRUE(session.SaveWorld());
+        ASSERT_GT(session.GetChunkValidationCacheStats().entries, 0u);
+        EXPECT_GT(session.GetChunkValidationCacheStats().payload_bytes, 0u);
+        EXPECT_GT(session.GetChunkValidationCacheStats().hits, 0u);
+    };
+
+    ASSERT_TRUE(session.CreateWorld("Cache first world", "1337", "default"));
+    ASSERT_NO_FATAL_FAILURE(save_chunk(-1.0f));
+    const auto first_id = session.GetMetadata().worldId;
+    const auto first_hash = SessionWorldHash(session);
+    const auto first_bytes = RepeatedSaveBytes(session.GetWorldSaveDir());
+
+    ASSERT_TRUE(session.CreateWorld("Cache second world", "1337", "default"));
+    const auto second_id = session.GetMetadata().worldId;
+    ASSERT_NE(first_id, second_id);
+    expect_empty_cache(); // Create cleared the first world's buffers and counters.
+    ASSERT_TRUE(session.LoadWorld(first_id)) << session.GetWorldOpenError();
+    EXPECT_EQ(SessionWorldHash(session), first_hash);
+    ASSERT_GT(session.GetChunkValidationCacheStats().entries, 0u);
+    ASSERT_TRUE(session.LoadWorld(second_id)) << session.GetWorldOpenError();
+    expect_empty_cache(); // Loading an empty world also reclaims all prior facts.
+
+    // Same record identity, different exact bytes in the second world.
+    ASSERT_NO_FATAL_FAILURE(save_chunk(1.0f));
+    const auto second_hash = SessionWorldHash(session);
+    EXPECT_NE(first_hash, second_hash);
+    const auto second_bytes = RepeatedSaveBytes(session.GetWorldSaveDir());
+    EXPECT_NE(first_bytes.at("chunks/region/r.0.0.lmr"),
+              second_bytes.at("chunks/region/r.0.0.lmr"));
+    ASSERT_TRUE(session.SaveWorldState());
+    ASSERT_TRUE(session.SaveWorld());
+    EXPECT_EQ(RepeatedSaveBytes(session.GetWorldSaveDir()), second_bytes);
+    EXPECT_EQ(SessionWorldHash(session), second_hash);
+    ASSERT_TRUE(session.LoadWorld(first_id)) << session.GetWorldOpenError();
+    EXPECT_EQ(SessionWorldHash(session), first_hash);
+    ASSERT_TRUE(session.LoadWorld(second_id)) << session.GetWorldOpenError();
+    EXPECT_EQ(SessionWorldHash(session), second_hash);
+}

@@ -9,6 +9,7 @@
 #include "../ai/WildlifeFoliageSystem.h"      // ai::WildlifeFoliageTuning (full-control)
 #include "../core/SimulationClock.h"
 #include "../fields/FieldPageState.h"
+#include "../persistence/ChunkValidationCache.h"
 #include "../simulation/SimBudgetTelemetry.h"
 #include "../simulation/SimulationEventBus.h"
 #include "../systems/PollinationSystem.h"
@@ -137,6 +138,11 @@ public:
     bool SaveWorldState(WorldStateSaveReport* report = nullptr);
     bool SaveWorldStateTo(const std::filesystem::path& save_dir,
                           WorldStateSaveReport* report = nullptr);
+
+    // Derived validation reuse only; excluded from persistent and hashed state.
+    [[nodiscard]] Persistence::ChunkValidationCache::Stats GetChunkValidationCacheStats() const {
+        return m_chunkValidationCache.stats();
+    }
 
     // Durable residency (sim.active_regions only). All zero/false when the flag is off.
     [[nodiscard]] PersistenceStatus GetPersistenceStatus() const;
@@ -494,6 +500,8 @@ public:
     }
 
 private:
+    Persistence::ChunkValidationCache m_chunkValidationCache{};
+
     luminumbra::simulation::SimBudgetTelemetry m_simBudgetTelemetry;
     entt::registry m_registry;
     luminumbra::ai::EcologyTuning m_ecologyTuning{}; // Defaults match compiled constants.

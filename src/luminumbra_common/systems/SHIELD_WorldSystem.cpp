@@ -3705,6 +3705,7 @@ bool SHIELD_WorldSystem::update_chunk_activation(const std::vector<Vec3>& anchor
                 if (!dirty && m_durable_chunks.contains(id) && m_durable_chunk_loader) {
                     if (physics_system)
                         physics_system->remove_chunk_collision(id);
+                    m_resident_roster.clear();
                     m_streaming_state.chunks.erase(id);
                     shadow_note_evicted(id);
                     continue;
@@ -3730,6 +3731,7 @@ bool SHIELD_WorldSystem::update_chunk_activation(const std::vector<Vec3>& anchor
                 chunk->normalize_for_park();
                 m_parked[id] = ParkedChunk{chunk, bytes, m_persistence_tick};
                 m_parked_bytes += bytes;
+                m_resident_roster.clear();
                 m_streaming_state.chunks.erase(id);
                 shadow_note_evicted(id);
                 continue;
@@ -3738,6 +3740,7 @@ bool SHIELD_WorldSystem::update_chunk_activation(const std::vector<Vec3>& anchor
         if (physics_system) {
             physics_system->remove_chunk_collision(id);
         }
+        m_resident_roster.clear();
         m_streaming_state.chunks.erase(id);
         shadow_note_evicted(id);
     }
@@ -5626,6 +5629,7 @@ void SHIELD_WorldSystem::clear_world(PhysicsSystem* physics_system) {
             physics_system->remove_chunk_collision(id);
         }
     }
+    m_resident_roster.clear();
     m_streaming_state.chunks.clear();
     m_parked.clear();
     m_durable_chunks.clear();
@@ -5682,6 +5686,11 @@ void SHIELD_WorldSystem::wait_for_streaming_jobs() {
             "wait_for_streaming_jobs: promotion pipeline still pending after the "
             "sequenced drain — the activation queue same-tick settlement invariant is broken");
     }
+}
+
+std::span<const std::shared_ptr<Luminumbra::Chunk>>
+SHIELD_WorldSystem::resident_streamed_chunks() const {
+    return m_resident_roster.refresh(m_streaming_state.chunks);
 }
 
 std::vector<std::shared_ptr<Luminumbra::Chunk>>

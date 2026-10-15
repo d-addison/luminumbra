@@ -85,7 +85,8 @@ public:
                 const std::unordered_map<ChunkID, std::shared_ptr<Chunk>>& active_chunks);
 
     // Enabled sessions evolve water at the fixed tick, after weather. Streaming only binds
-    // the resident query map. The caller supplies snapshot_streamed_chunks(), never authority IO.
+    // the resident query map. The caller supplies the host-thread resident view, never authority
+    // IO.
     void SetRegionalScheduling(bool enabled) {
         m_regional_scheduling = enabled;
     }

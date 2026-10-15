@@ -3,6 +3,7 @@
 #include "../support/UniqueTempPath.h"
 
 #include "fields/FieldPageState.h"
+#include "persistence/ChunkValidationCache.h"
 #include "persistence/SaveTransaction.h"
 #include "persistence/WorldPersistenceRoundtrip.h"
 #include "persistence/WorldSaveService.h"
@@ -24,6 +25,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -1061,4 +1063,356 @@ TEST(WorldSaveServiceTest, PublicRegionDigestRejectsUnsupportedKeysBeforeDurable
                   expected_digest);
     }
     EXPECT_FALSE(std::filesystem::exists(missing_save));
+}
+
+namespace {
+namespace CachePersistence = Luminumbra::Persistence;
+using ValidationCache = CachePersistence::ChunkValidationCache;
+
+void WriteCacheFixture(const std::filesystem::path& path,
+                       bool invalid_water = false,
+                       const IVec3& coords = IVec3(0, 0, 0)) {
+    WorldStreamingState state;
+    auto chunk = state.get_or_create_chunk(coords);
+    chunk->set_state(ChunkState::Idle);
+    chunk->mark_sdf_loaded_or_edited();
+    if (invalid_water) {
+        // The permissive decoder accepts legacy mirrors; strict indexed water
+        // validation must still reject them after permissive facts have warmed.
+        chunk->has_water_sim.store(true);
+        chunk->water_level_data = {1.0f};
+    }
+    std::vector<std::string> errors;
+    ASSERT_TRUE(WorldSaveService{}.save_world(state, path, &errors)) << JoinErrors(errors);
+    ASSERT_TRUE(errors.empty()) << JoinErrors(errors);
+}
+
+void IndexCacheFixture(const std::filesystem::path& path) {
+    CachePersistence::SaveTransaction transaction(path, 0, {}, WorldSaveService::member_digest);
+    std::vector<std::string> errors;
+    ASSERT_TRUE(transaction.begin(&errors)) << JoinErrors(errors);
+    ASSERT_TRUE(transaction.protect(
+        {"chunks/region/r.0.0.lmr", "chunks/region/world-manifest.json"}, &errors));
+    ASSERT_TRUE(transaction.commit(&errors)) << JoinErrors(errors);
+}
+
+bool ValidateCacheFixture(const std::filesystem::path& path,
+                          std::vector<std::string>& errors,
+                          std::vector<IVec3>* inventory = nullptr) {
+    WorldStreamingState discarded;
+    return WorldSaveService{}.load_world(
+        discarded, path, errors, {}, [](const IVec3&) { return false; }, inventory);
+}
+
+std::string CacheFileBytes(const std::filesystem::path& path) {
+    std::ifstream input(path, std::ios::binary);
+    std::ostringstream bytes;
+    bytes << input.rdbuf();
+    return bytes.str();
+}
+} // namespace
+
+TEST(WorldSaveService, ValidationCacheColdWarmAndMaterializedLoadsAreEquivalent) {
+    TempSaveDir save_dir("validation_cache_equivalence");
+    ASSERT_NO_FATAL_FAILURE(WriteCacheFixture(save_dir.path));
+    ASSERT_NO_FATAL_FAILURE(IndexCacheFixture(save_dir.path));
+    ValidationCache cache;
+    std::vector<std::string> cold_errors, miss_errors, hit_errors;
+    std::vector<IVec3> cold_inventory, miss_inventory, hit_inventory;
+    ASSERT_TRUE(ValidateCacheFixture(save_dir.path, cold_errors, &cold_inventory));
+    ASSERT_EQ(cold_inventory.size(), 1u);
+    EXPECT_EQ(cold_inventory.front(), IVec3(0, 0, 0));
+    {
+        const ValidationCache::Scope scope(cache);
+        ASSERT_TRUE(ValidateCacheFixture(save_dir.path, miss_errors, &miss_inventory));
+        EXPECT_EQ(cache.stats().misses, 1u);
+        ASSERT_TRUE(ValidateCacheFixture(save_dir.path, hit_errors, &hit_inventory));
+        EXPECT_EQ(cache.stats().hits, 1u);
+        EXPECT_EQ(cache.stats().misses, 1u);
+        WorldStreamingState warm_loaded;
+        std::vector<std::string> errors;
+        ASSERT_TRUE(WorldSaveService{}.load_world(warm_loaded, save_dir.path, errors));
+        WorldStreamingState cold_loaded;
+        ValidationCache disabled(0);
+        const ValidationCache::Scope cold_scope(disabled);
+        ASSERT_TRUE(WorldSaveService{}.load_world(cold_loaded, save_dir.path, errors));
+        EXPECT_EQ(WorldSaveService{}.world_hash(warm_loaded),
+                  WorldSaveService{}.world_hash(cold_loaded));
+        EXPECT_TRUE(errors.empty());
+    }
+    EXPECT_EQ(miss_errors, cold_errors);
+    EXPECT_EQ(hit_errors, cold_errors);
+    EXPECT_EQ(miss_inventory, cold_inventory);
+    EXPECT_EQ(hit_inventory, cold_inventory);
+}
+
+TEST(WorldSaveService, ValidationCacheSeparatesPermissiveCommitAndStrictIndexedDecode) {
+    TempSaveDir save_dir("validation_cache_modes");
+    ASSERT_NO_FATAL_FAILURE(WriteCacheFixture(save_dir.path, true));
+    ValidationCache cache;
+    {
+        const ValidationCache::Scope scope(cache);
+        // Commit uses permissive decode, including on the second exact-byte hit.
+        ASSERT_NO_FATAL_FAILURE(IndexCacheFixture(save_dir.path));
+        CachePersistence::MemberDigest digest;
+        std::string error;
+        ASSERT_TRUE(WorldSaveService::member_digest(
+            save_dir.path, "chunks/region/r.0.0.lmr", digest, error))
+            << error;
+        EXPECT_EQ(cache.stats().hits, 2u);
+        EXPECT_EQ(cache.stats().misses, 1u);
+    }
+    std::vector<std::string> cold_errors, warm_errors, retry_errors;
+    ASSERT_FALSE(ValidateCacheFixture(save_dir.path, cold_errors));
+    ASSERT_FALSE(cold_errors.empty());
+    {
+        const ValidationCache::Scope scope(cache);
+        EXPECT_FALSE(ValidateCacheFixture(save_dir.path, warm_errors));
+        EXPECT_FALSE(ValidateCacheFixture(save_dir.path, retry_errors));
+    }
+    EXPECT_EQ(warm_errors, cold_errors);
+    EXPECT_EQ(retry_errors, cold_errors);
+    EXPECT_EQ(cache.stats().misses, 3u); // Failed strict results never become hits.
+    EXPECT_EQ(cache.stats().hits, 2u);
+}
+
+TEST(WorldSaveService, CachedRecordSingleByteCorruptionRetainsColdDiagnostic) {
+    TempSaveDir save_dir("validation_cache_corruption");
+    ASSERT_NO_FATAL_FAILURE(WriteCacheFixture(save_dir.path));
+    ASSERT_NO_FATAL_FAILURE(IndexCacheFixture(save_dir.path));
+    ValidationCache cache;
+    std::vector<std::string> errors;
+    {
+        const ValidationCache::Scope scope(cache);
+        ASSERT_TRUE(ValidateCacheFixture(save_dir.path, errors));
+        ASSERT_TRUE(ValidateCacheFixture(save_dir.path, errors));
+    }
+    const auto path = WorldSaveService::region_file_path(save_dir.path, 0, 0);
+    auto bytes = CacheFileBytes(path);
+    ASSERT_GT(bytes.size(), 26u); // One complete record header precedes the compressed bytes.
+    bytes.back() = static_cast<char>(static_cast<unsigned char>(bytes.back()) ^ 1u);
+    ASSERT_TRUE(WorldSaveService::durable_write_file(path, bytes, &errors));
+    std::vector<std::string> cold_errors, warm_errors;
+    ASSERT_FALSE(ValidateCacheFixture(save_dir.path, cold_errors));
+    {
+        const ValidationCache::Scope scope(cache);
+        EXPECT_FALSE(ValidateCacheFixture(save_dir.path, warm_errors));
+    }
+    EXPECT_EQ(warm_errors, cold_errors);
+    EXPECT_FALSE(warm_errors.empty());
+    EXPECT_EQ(cache.stats().hits, 1u);
+    EXPECT_EQ(cache.stats().misses, 2u);
+}
+
+TEST(WorldSaveService, ValidationCacheEvictionOnlyCausesRevalidation) {
+    TempSaveDir first("validation_cache_evict_first"), second("validation_cache_evict_second");
+    ASSERT_NO_FATAL_FAILURE(WriteCacheFixture(first.path));
+    ASSERT_NO_FATAL_FAILURE(WriteCacheFixture(second.path, false, {1, 0, 0}));
+    // Distinct identities exceed the single-entry limit.
+    ValidationCache cache(1);
+    const ValidationCache::Scope scope(cache);
+    std::vector<std::string> errors;
+    ASSERT_TRUE(ValidateCacheFixture(first.path, errors));
+    ASSERT_TRUE(ValidateCacheFixture(first.path, errors));
+    ASSERT_TRUE(ValidateCacheFixture(second.path, errors));
+    ASSERT_TRUE(ValidateCacheFixture(first.path, errors));
+    ASSERT_TRUE(ValidateCacheFixture(first.path, errors));
+    EXPECT_EQ(cache.stats().misses, 3u);
+    EXPECT_EQ(cache.stats().evictions, 2u);
+    EXPECT_EQ(cache.stats().hits, 2u);
+    EXPECT_EQ(cache.stats().entries, 1u);
+    EXPECT_TRUE(errors.empty());
+}
+
+TEST(WorldSaveService, ValidationCacheKeysAndBoundsIncludeEveryInputAndMode) {
+    ValidationCache cache(1, 64);
+    const ValidationCache::Key key{1, 7, 0, 0, false};
+    const ValidationCache::Facts facts{{0, 0, 0}, 0, false};
+    cache.remember(key, "abcdefg", facts);
+    EXPECT_TRUE(cache.find(key, "abcdefg").has_value());
+    EXPECT_FALSE(cache.find(key, "abcdef").has_value());
+    for (std::size_t i = 0; i < 7; ++i) {
+        std::string changed = "abcdefg";
+        changed[i] = 'X';
+        EXPECT_FALSE(cache.find(key, changed).has_value());
+    }
+    for (int field = 0; field < 5; ++field) {
+        auto changed = key;
+        if (field == 0)
+            ++changed.id;
+        if (field == 1)
+            ++changed.raw_size;
+        if (field == 2)
+            ++changed.lod;
+        if (field == 3)
+            ++changed.flags;
+        if (field == 4)
+            changed.strict_water = true;
+        EXPECT_FALSE(cache.find(changed, "abcdefg").has_value());
+    }
+    auto other = key;
+    ++other.id;
+    cache.remember(other, "second", facts);
+    EXPECT_EQ(cache.stats().evictions, 1u);
+    EXPECT_EQ(cache.stats().entries, 1u);
+    EXPECT_LE(cache.stats().payload_bytes, 64u);
+    EXPECT_FALSE(cache.find(key, "abcdefg").has_value());
+    cache.remember(key, std::string(65, 'x'), facts);
+    EXPECT_EQ(cache.stats().entries, 1u);
+    EXPECT_FALSE(cache.find(key, std::string(65, 'x')).has_value());
+    ValidationCache byte_limited(4, 12);
+    byte_limited.remember(key, "abcdefg", facts);
+    byte_limited.remember(other, "abcdefg", facts);
+    EXPECT_EQ(byte_limited.stats().evictions, 1u);
+    EXPECT_EQ(byte_limited.stats().entries, 1u);
+    EXPECT_EQ(byte_limited.stats().payload_bytes, 7u);
+    EXPECT_FALSE(byte_limited.find(key, "abcdefg").has_value());
+    EXPECT_TRUE(byte_limited.find(other, "abcdefg").has_value());
+}
+
+TEST(WorldSaveService, ValidationCacheEnforcesDefaultAndClampedBoundsAndRecordCap) {
+    EXPECT_EQ(ValidationCache::kMaxEntries, 16384u);
+    EXPECT_EQ(ValidationCache::kMaxPayloadBytes, 64u * 1024u * 1024u);
+    EXPECT_EQ(ValidationCache::kMaxRecordBytes, 1024u * 1024u);
+    const ValidationCache::Facts facts{};
+    const std::string payload(ValidationCache::kMaxRecordBytes, 'x');
+    for (const bool oversized_limits : {false, true}) {
+        SCOPED_TRACE(oversized_limits);
+        const auto owner =
+            oversized_limits
+                ? std::make_unique<ValidationCache>(ValidationCache::kMaxEntries + 1,
+                                                    ValidationCache::kMaxPayloadBytes + 1)
+                : std::make_unique<ValidationCache>();
+        auto& cache = *owner;
+        for (std::uint64_t id = 0; id < 65; ++id) {
+            cache.remember({id, 0, 0, 0, false}, payload, facts);
+            EXPECT_LE(cache.stats().payload_bytes, ValidationCache::kMaxPayloadBytes);
+        }
+        EXPECT_EQ(cache.stats().payload_bytes, ValidationCache::kMaxPayloadBytes);
+        EXPECT_EQ(cache.stats().entries, 64u);
+        EXPECT_EQ(cache.stats().evictions, 1u);
+        EXPECT_FALSE(cache.find({0, 0, 0, 0, false}, payload).has_value());
+        EXPECT_TRUE(cache.find({64, 0, 0, 0, false}, payload).has_value());
+        const std::string oversized(ValidationCache::kMaxRecordBytes + 1, 'x');
+        cache.remember({65, 0, 0, 0, false}, oversized, facts);
+        EXPECT_FALSE(cache.find({65, 0, 0, 0, false}, oversized).has_value());
+        EXPECT_EQ(cache.stats().entries, 64u);
+        EXPECT_EQ(cache.stats().payload_bytes, ValidationCache::kMaxPayloadBytes);
+        EXPECT_EQ(cache.stats().evictions, 1u);
+        // Oversized replacements also preserve previously validated exact bytes.
+        cache.remember({64, 0, 0, 0, false}, oversized, facts);
+        EXPECT_TRUE(cache.find({64, 0, 0, 0, false}, payload).has_value());
+        EXPECT_FALSE(cache.find({64, 0, 0, 0, false}, oversized).has_value());
+    }
+    ValidationCache entry_limited(ValidationCache::kMaxEntries + 1);
+    for (std::uint64_t id = 0; id <= ValidationCache::kMaxEntries; ++id)
+        entry_limited.remember({id, 0, 0, 0, false}, "x", facts);
+    EXPECT_EQ(entry_limited.stats().entries, ValidationCache::kMaxEntries);
+    EXPECT_EQ(entry_limited.stats().payload_bytes, ValidationCache::kMaxEntries);
+    EXPECT_EQ(entry_limited.stats().evictions, 1u);
+    EXPECT_FALSE(entry_limited.find({0, 0, 0, 0, false}, "x").has_value());
+    EXPECT_TRUE(
+        entry_limited.find({ValidationCache::kMaxEntries, 0, 0, 0, false}, "x").has_value());
+}
+
+TEST(WorldSaveService, ValidationCacheClearReleasesBytesAndResetsStatistics) {
+    ValidationCache cache(1);
+    const ValidationCache::Key first{1, 7, 0, 0, false}, second{2, 7, 0, 0, false};
+    const ValidationCache::Facts facts{{1, 0, 0}, 7, true};
+    cache.remember(first, "payload", facts);
+    ASSERT_TRUE(cache.find(first, "payload").has_value());
+    cache.remember(second, "payload", facts);
+    ASSERT_FALSE(cache.find(first, "payload").has_value());
+    cache.clear();
+    const auto cleared = cache.stats();
+    EXPECT_EQ(cleared.entries, 0u);
+    EXPECT_EQ(cleared.payload_bytes, 0u);
+    EXPECT_EQ(cleared.hits, 0u);
+    EXPECT_EQ(cleared.misses, 0u);
+    EXPECT_EQ(cleared.evictions, 0u);
+    EXPECT_FALSE(cache.find(second, "payload").has_value());
+    cache.remember(first, "changed", {{2, 0, 0}, 8, false});
+    const auto fresh = cache.find(first, "changed");
+    ASSERT_TRUE(fresh.has_value());
+    EXPECT_EQ(fresh->coords, IVec3(2, 0, 0));
+    EXPECT_EQ(fresh->sdf_size, 8u);
+    EXPECT_FALSE(fresh->authoritative);
+    EXPECT_FALSE(cache.find(first, "payload").has_value());
+}
+
+TEST(WorldSaveService, ValidationCacheScopesRestoreAndSharedCacheIsThreadSafe) {
+    ValidationCache shared, nested;
+    auto* previous = ValidationCache::active();
+    {
+        const ValidationCache::Scope outer(shared);
+        EXPECT_EQ(ValidationCache::active(), &shared);
+        {
+            const ValidationCache::Scope inner(nested);
+            EXPECT_EQ(ValidationCache::active(), &nested);
+        }
+        EXPECT_EQ(ValidationCache::active(), &shared);
+        const auto use_cache = [&shared](std::uint64_t id) {
+            const ValidationCache::Scope scope(shared);
+            EXPECT_EQ(ValidationCache::active(), &shared);
+            const ValidationCache::Key key{id, 7, 0, 0, false};
+            const ValidationCache::Facts facts{};
+            for (int pass = 0; pass < 32; ++pass) {
+                shared.remember(key, "payload", facts);
+                EXPECT_TRUE(shared.find(key, "payload").has_value());
+            }
+        };
+        std::jthread first(use_cache, 1u), second(use_cache, 2u);
+    } // Threads finish before the enclosing scope is restored.
+    EXPECT_EQ(ValidationCache::active(), previous);
+    EXPECT_EQ(shared.stats().entries, 2u);
+    EXPECT_EQ(shared.stats().hits, 64u);
+    EXPECT_EQ(shared.stats().misses, 0u);
+}
+
+TEST(WorldSaveService, WarmValidationCacheStillChecksCurrentIndexAndRegionMembership) {
+    TempSaveDir save_dir("validation_cache_context");
+    ASSERT_NO_FATAL_FAILURE(WriteCacheFixture(save_dir.path));
+    ASSERT_NO_FATAL_FAILURE(IndexCacheFixture(save_dir.path));
+    ValidationCache cache;
+    std::vector<std::string> errors;
+    {
+        const ValidationCache::Scope scope(cache);
+        ASSERT_TRUE(ValidateCacheFixture(save_dir.path, errors));
+    }
+    const auto index_path = CachePersistence::snapshot_index_path(save_dir.path);
+    const auto original_index = CacheFileBytes(index_path);
+    CachePersistence::SnapshotIndex index;
+    ASSERT_TRUE(CachePersistence::read_snapshot_index(save_dir.path, index, &errors));
+    const auto region =
+        std::find_if(index.members.begin(), index.members.end(), [](const auto& member) {
+            return member.path == "chunks/region/r.0.0.lmr";
+        });
+    ASSERT_NE(region, index.members.end());
+    ++region->bytes;
+    ASSERT_TRUE(WorldSaveService::durable_write_file(
+        index_path, CachePersistence::encode_snapshot_index(index), &errors));
+    std::vector<std::string> cold_errors, warm_errors;
+    ASSERT_FALSE(ValidateCacheFixture(save_dir.path, cold_errors));
+    {
+        const ValidationCache::Scope scope(cache);
+        EXPECT_FALSE(ValidateCacheFixture(save_dir.path, warm_errors));
+    }
+    EXPECT_EQ(warm_errors, cold_errors);
+    EXPECT_EQ(cache.stats().hits, 1u);
+    ASSERT_TRUE(WorldSaveService::durable_write_file(index_path, original_index, &errors));
+    // Exact cached bytes moved into a different region still fail contextual identity.
+    std::filesystem::rename(WorldSaveService::region_file_path(save_dir.path, 0, 0),
+                            WorldSaveService::region_file_path(save_dir.path, 1, 0));
+    cold_errors.clear();
+    warm_errors.clear();
+    ASSERT_FALSE(ValidateCacheFixture(save_dir.path, cold_errors));
+    {
+        const ValidationCache::Scope scope(cache);
+        EXPECT_FALSE(ValidateCacheFixture(save_dir.path, warm_errors));
+    }
+    EXPECT_EQ(warm_errors, cold_errors);
+    ASSERT_FALSE(warm_errors.empty());
+    EXPECT_NE(warm_errors.front().find("corrupt chunk region identity or duplicate id"),
+              std::string::npos);
+    EXPECT_EQ(cache.stats().hits, 2u);
 }
