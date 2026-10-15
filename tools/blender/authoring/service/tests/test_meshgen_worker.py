@@ -264,7 +264,9 @@ class WorkerSupervision(unittest.TestCase):
                     self.assertIsNotNone(spawned[0].returncode)
                     self.assertTrue(all(stream.closed for stream in (spawned[0].stdin, spawned[0].stdout, spawned[0].stderr)))
 
-    @unittest.skipUnless(sys.platform.startswith('linux'), 'Linux prctl regression')
+    @unittest.skipUnless(sys.platform.startswith('linux'),
+                         'prctl subreaper state is Linux-only; Windows Job path covered by '
+                         'test_windows_job_ownership_terminates_only_assigned_child_and_drains_before_close')
     def test_supervision_preserves_caller_subreaper_and_unrelated_child_lifecycle(self):
         import ctypes
         libc = ctypes.CDLL(None, use_errno=True)
@@ -324,6 +326,75 @@ class WorkerSupervision(unittest.TestCase):
         self.assertEqual(len(queries), 2); self.assertEqual(waits, [.005])
         self.assertEqual(closed, [123]); self.assertEqual(terminated, [(123, 1)])
 
+    def test_windows_job_setup_failure_kills_reaps_and_closes_without_handshake(self):
+        import ctypes
+        import io
+        from unittest.mock import Mock
+        import luminumbra_author.process as owner
+        class Handle(int): pass
+        for phase, kill_fails in (('limits', False), ('assignment', False), ('assignment', True)):
+            with self.subTest(phase=phase, kill_fails=kill_fails):
+                handle = Handle(42); handle.Close = Mock()
+                process = Mock(_handle=handle)
+                process.stdin, process.stdout, process.stderr = io.BytesIO(), io.BytesIO(), io.BytesIO()
+                kernel = Mock()
+                kernel.CreateJobObjectW.return_value = 123
+                kernel.SetInformationJobObject.return_value = phase != 'limits'
+                kernel.AssignProcessToJobObject.return_value = 0
+                events = []
+                def kill():
+                    events.append('kill')
+                    if kill_fails: raise OSError('injected kill failure')
+                process.kill.side_effect = kill
+                process.wait.side_effect = lambda **kwargs: events.append('wait')
+                handle.Close.side_effect = lambda: events.append('handle close')
+                with patch.object(owner.os, 'name', 'nt'), patch.object(ctypes, 'WinDLL', return_value=kernel, create=True), patch.object(ctypes, 'get_last_error', return_value=5, create=True), patch.object(ctypes, 'WinError', side_effect=lambda code: OSError('injected Job setup failure'), create=True), patch.object(owner.subprocess, 'Popen', return_value=process), patch.object(owner.threading, 'Thread') as thread, patch.object(owner, '_enable_subreaper') as subreaper, patch.object(owner, '_require_pidfds') as pidfds:
+                    with self.assertRaises(Refusal) as caught:
+                        run_owned(['fake'], b'handshake', timeout=2, clock=lambda: 10)
+                self.assertEqual(caught.exception.finding['rule_id'], 'worker.unavailable')
+                self.assertEqual(str(caught.exception.__cause__), 'injected Job setup failure')
+                self.assertEqual(events, ['kill', 'wait', 'handle close'])
+                process.kill.assert_called_once_with()
+                process.wait.assert_called_once_with(timeout=2)
+                kernel.CloseHandle.assert_called_once_with(123)
+                self.assertEqual(kernel.AssignProcessToJobObject.call_count, phase == 'assignment')
+                if phase == 'assignment':
+                    self.assertEqual(kernel.AssignProcessToJobObject.call_args.args[0], 123)
+                    self.assertEqual(kernel.AssignProcessToJobObject.call_args.args[1].value, 42)
+                kernel.TerminateJobObject.assert_not_called()
+                thread.assert_not_called(); subreaper.assert_not_called(); pidfds.assert_not_called()
+                self.assertTrue(all(stream.closed for stream in (process.stdin, process.stdout, process.stderr)))
+
+    def test_windows_job_ownership_terminates_only_assigned_child_and_drains_before_close(self):
+        import ctypes
+        from unittest.mock import Mock
+        import luminumbra_author.process as owner
+        kernel = Mock()
+        kernel.CreateJobObjectW.return_value = 123
+        kernel.SetInformationJobObject.return_value = 1
+        kernel.AssignProcessToJobObject.return_value = 1
+        kernel.TerminateJobObject.return_value = 1
+        events, active = [], iter((2, 1, 0))
+        kernel.TerminateJobObject.side_effect = lambda *args: events.append(('terminate', args)) or 1
+        def query(job, kind, value, size, unused):
+            value._obj.active = next(active)
+            events.append(('active', value._obj.active))
+            return 1
+        kernel.QueryInformationJobObject.side_effect = query
+        kernel.CloseHandle.side_effect = lambda job: events.append(('close', job)) or 1
+        with patch.object(owner.os, 'name', 'nt'), patch.object(ctypes, 'WinDLL', return_value=kernel, create=True), patch.object(owner, '_require_pidfds') as pidfds, patch.object(owner, '_enable_subreaper') as subreaper, patch.object(owner.os, 'kill') as kill, patch.object(owner.os, 'waitpid', create=True) as waitpid, patch.object(owner.threading, 'Event') as event:
+            tree = ProcessTree(Mock(_handle=42), 4096)
+            tree.stop()
+            tree.reap(deadline=10, clock=lambda: 9)
+            tree.close(); tree.close()
+        kernel.AssignProcessToJobObject.assert_called_once()
+        self.assertEqual(kernel.AssignProcessToJobObject.call_args.args[0], 123)
+        self.assertEqual(kernel.AssignProcessToJobObject.call_args.args[1].value, 42)
+        self.assertEqual(events, [('terminate', (123, 1)), ('active', 2), ('active', 1), ('active', 0), ('close', 123)])
+        self.assertEqual([call.args for call in event.return_value.wait.call_args_list], [(.005,), (.005,)])
+        kill.assert_not_called(); waitpid.assert_not_called()
+        pidfds.assert_not_called(); subreaper.assert_not_called()
+
     def test_cleanup_closes_job_streams_handle_and_joins_after_wait_and_kill_failures(self):
         import io
         from unittest.mock import Mock
@@ -356,28 +427,41 @@ class WorkerSupervision(unittest.TestCase):
                 self.assertTrue(all(stream.closed for stream in (process.stdin, process.stdout, process.stderr)))
                 self.assertEqual([thread.joined for thread in threads], [[1.6], [1.5], [1.4]])
 
-    @unittest.skipUnless(sys.platform.startswith('linux'), 'Linux waitpid regression')
+    @unittest.skipUnless(sys.platform.startswith('linux'),
+                         'pidfd adoption and waitpid(-1) are Linux-only here; Windows Job path covered by '
+                         'test_windows_job_ownership_terminates_only_assigned_child_and_drains_before_close')
     def test_linux_reaper_rescans_fork_races_and_waits_for_all_children(self):
         from unittest.mock import Mock
         import luminumbra_author.process as owner
         tree = ProcessTree.__new__(ProcessTree)
         tree.job, tree.control, tree.supervised, tree.same_group = None, None, False, True
-        tree._descendants = Mock(side_effect=[{101}, {101, 102}, {102}])
+        tree._pidfds = {}
+        snapshots = iter(({101}, {101, 102}, {102}))
+        def discover(**kwargs):
+            self.assertEqual(kwargs['deadline'], 1)
+            for pid in next(snapshots): tree._pidfds.setdefault((pid, 1), pid+1000)
+        tree._descendants = Mock(side_effect=discover)
+        tree._pidfd_signal, tree._pidfd_close = Mock(), Mock()
         replies = iter(((0, 0), (101, 9), (0, 0), (102, 9), ChildProcessError()))
         def reaped(selector, options):
             self.assertEqual((selector, options), (-1, os.WNOHANG))
             value = next(replies)
             if isinstance(value, BaseException): raise value
             return value
-        readings = iter((.1, .2))
         with patch.object(owner.os, 'name', 'posix'), patch.object(owner.os, 'kill') as kill, patch.object(owner.os, 'waitpid', side_effect=reaped), patch.object(owner.threading, 'Event') as event:
-            tree.reap(deadline=1, clock=lambda: next(readings))
+            tree.reap(deadline=1, clock=lambda: 0)
         self.assertEqual(tree._descendants.call_count, 3)
-        self.assertEqual({call.args[0] for call in kill.call_args_list}, {101, 102})
-        self.assertTrue(all(call.args[1] == owner.signal.SIGKILL for call in kill.call_args_list))
+        kill.assert_not_called()
+        self.assertEqual({call.args[0] for call in tree._pidfd_signal.call_args_list}, {1101, 1102})
+        self.assertTrue(all(call.args[1] == owner.signal.SIGKILL for call in tree._pidfd_signal.call_args_list))
+        self.assertEqual(tree._pidfds, {})
         self.assertEqual(event.return_value.wait.call_count, 2)
 
-    @unittest.skipUnless(sys.platform.startswith('linux'), 'Linux ownership control pipe')
+    @unittest.skipUnless(sys.platform.startswith('linux'),
+                         'Linux held-launcher/control pipe and subreaper adoption are Linux-only; '
+                         'Windows Job path covered by '
+                         'test_windows_job_ownership_terminates_only_assigned_child_and_drains_before_close '
+                         'and test_cleanup_closes_job_streams_handle_and_joins_after_wait_and_kill_failures')
     def test_real_supervisor_owner_eof_reaps_detached_orphan_descendants(self):
         import json
         from luminumbra_author.process import _owned_command

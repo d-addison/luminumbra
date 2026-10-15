@@ -609,22 +609,43 @@ reserves up to 0.5 seconds (at most half the total budget) for cleanup inside
 that deadline. Root waits, retry waits, Job accounting and thread joins all use
 its remaining time and the injected clock, without new cleanup windows. An
 unconditional finalizer attempts every tree/Job/handle close, stream close and
-thread join even when stop, kill or wait raises. Cleanup kills descendants and
-waits for every owned PID to disappear, including zombies,
-before closing streams. EOF preserves the supervisor as a reaper through
-shutdown. Only dedicated Linux ownership supervisor children enable
+thread join even when stop, kill or wait raises. Successful cleanup kills
+descendants and waits for every owned PID to disappear, including zombies,
+before closing streams. Cleanup failure prevents a successful result. EOF
+preserves the supervisor as a reaper through shutdown. Only dedicated Linux ownership supervisor children enable
 `PR_SET_CHILD_SUBREAPER`; the caller/service/test runner remains unchanged.
 Ordinary `run_owned()` commands also run under an isolated supervisor with an
-EOF ownership pipe. The supervisor repeatedly enumerates its entire descendant
-tree by `/proc` parent IDs, sends SIGKILL and drains `waitpid(-1)` until no
-children remain. Adoption and enumeration cover changed sessions/process groups
-and fork races, including successful root exits. Supervisors also apply the
+EOF ownership pipe. A separate start pipe holds a trusted launcher until the
+supervisor has established tree ownership and retained the launcher's validated
+pidfd. Startup cleanup closes both supervisor-held start-pipe ends before any
+wait, so a failed termination cannot leave the launcher waiting for release.
+All cleanup waits use the remaining absolute deadline. Direct-child termination
+uses its retained pidfd; only setup failure before pidfd ownership permits
+`Popen.kill()` on the unreleased launcher. Cleanup attempts every finalizer and
+preserves the original setup error. The supervisor repeatedly enumerates its entire
+descendant tree using `/proc` parent IDs and creation ticks. It opens and retains pidfds,
+then revalidates each child's identity and its chain to the supervisor before
+accepting the handle. SIGKILL uses `signal.pidfd_send_signal`, so later numeric
+PID reuse cannot redirect a signal. Changed parentage is retried on the next
+scan, including subreaper adoption. Cleanup checks the absolute deadline before
+and after proc iteration, identity reads, validation and signalling, and inside
+the nonblocking `waitpid(-1)` drain. Each scan builds parent adjacency lists
+once; frontier expansion and each reap pass take linear work. Scans allow at
+most 65,536 proc entries, trees and retained handles at most 4,096 processes,
+and each reap pass at most 4,096 wait calls. Deadline or work-limit exhaustion
+reports cleanup failure while final resource closure is still attempted. These
+checks bound traversal work between clock checks; OS scheduling and individual
+system calls can still finish after a deadline. Adoption and enumeration cover
+changed sessions/process groups and fork races, including successful root exits. Supervisors also apply the
 inherited address-space rlimit. Windows assigns kill-on-close Job objects with
 an aggregate memory cap before the stdin handshake; neither
 `JOB_OBJECT_LIMIT_BREAKAWAY_OK` nor `JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK` is set.
 It waits for their active process count to reach zero. Other POSIX platforms refuse the owned-worker lane
 until an equivalent adoption/reaping mechanism is qualified. Unavailable
-enforcement refuses the lane. Compiler supervision is unchanged.
+enforcement refuses the lane. Linux checks both pidfd APIs and probes kernel
+support before spawning a worker; missing or denied pidfd enforcement returns
+`worker.unavailable`. Windows continues to use Job objects without Linux/POSIX
+calls. Compiler supervision is unchanged.
 
 `finisher_envelope()` rechecks the E1 game entry/module pins and returns the
 factory-startup, disable-autoexec, two-thread, isolated-resource-directory,
@@ -638,8 +659,26 @@ No native qualification is inferred from portable simulations. Status:
 E4 tests are discovered by both existing `blender-authoring.yml` OS lanes and
 the installed service ships all four E4 modules. No workflow change is needed.
 The E4 fixtures are small GLB/PNG byte strings generated from source. Local
-network-disabled verification uses E3's existing
-`LUMINUMBRA_TEST_NO_SOCKETS=1` harness; CI retains its default socket tests.
+verification includes loopback socket tests for transport coverage.
+
+#### E4 platform mechanism tests
+
+Four tests retain Linux capability guards because their kernel mechanisms do
+not exist on the Windows Job path. Their Windows counterparts below run on
+every platform with mocked Job APIs and have no platform guards:
+
+| Linux mechanism test | Portable Windows counterpart |
+|---|---|
+| `test_real_setup_failures_prevent_execution_and_leave_no_worker_or_zombie` (pidfd held launcher) | `test_windows_job_setup_failure_kills_reaps_and_closes_without_handshake` |
+| `test_supervision_preserves_caller_subreaper_and_unrelated_child_lifecycle` (`prctl` subreaper state) | `test_windows_job_ownership_terminates_only_assigned_child_and_drains_before_close` |
+| `test_linux_reaper_rescans_fork_races_and_waits_for_all_children` (pidfd adoption and `waitpid(-1)`) | `test_windows_job_ownership_terminates_only_assigned_child_and_drains_before_close`; `test_windows_job_accounting_uses_injected_absolute_deadline_and_disallows_breakaway` |
+| `test_real_supervisor_owner_eof_reaps_detached_orphan_descendants` (held-launcher/control pipe and subreaper adoption) | `test_windows_job_ownership_terminates_only_assigned_child_and_drains_before_close`; `test_cleanup_closes_job_streams_handle_and_joins_after_wait_and_kill_failures` |
+
+The held-launcher test is in `test_meshgen_process.py`; the other tests and all
+Windows counterparts are in `test_meshgen_worker.py`. Deterministic startup
+tests also inject simultaneous setup and kill failures, require pipe closure
+before a finite wait, and verify that the original error survives deadline
+expiry and finalizer failures.
 
 Binding Q coverage below names exact E4 tests (the native and scene portions
 remain in their assigned G2/G3 slices):
@@ -663,14 +702,18 @@ remain in their assigned G2/G3 slices):
 | 43 | `test_held_shared_readers_and_durability_use_shared_publication`; `test_project_byte_quota_refuses_publication_preserving_last_receipt` (GC refuses deletion; promotion remains G3) |
 | 44 | `test_import_private_snapshot_uses_verified_bytes_despite_source_replacement`; `test_import_private_traversal_refused_before_any_destination_publication` |
 
-E4 local verification (2026-10-13): **262 service tests passed, 0 failures,
-0 skips**, including 51 E4 tests, in 50.917 s. The exact local command was:
+Run the stdlib service suite with temporary files inside the clone:
 
 ```sh
-TMPDIR="$PWD/.tmp-sol" TMP="$PWD/.tmp-sol" TEMP="$PWD/.tmp-sol" \
-  PYTHONDONTWRITEBYTECODE=1 LUMINUMBRA_TEST_NO_SOCKETS=1 \
+mkdir -p .test-tmp
+TMPDIR="$PWD/.test-tmp" TMP="$PWD/.test-tmp" TEMP="$PWD/.test-tmp" \
+  PYTHONDONTWRITEBYTECODE=1 \
   python3 -B -m unittest discover -s tools/blender/authoring/service/tests -v
+rmdir .test-tmp
 ```
 
-The clone-local `.tmp-sol` directory and generated `__pycache__` directories were
-removed afterward. Native Blender and Windows execution were not run locally.
+The suite includes deterministic proc-reader, enumeration and pidfd-signal
+fixtures in `test_meshgen_process.py` for exit/reuse, parent reuse, adoption,
+unavailable enforcement, traversal limits and deadline expiry inside cleanup
+loops. Socket tests require local loopback permission. Native Blender and
+Windows execution require their own acceptance environments.

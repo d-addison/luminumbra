@@ -337,7 +337,9 @@ ledger.commit_success(job, lambda: store.publish(job, members()))
                     try: probe.symlink_to(outside, target_is_directory=True)
                     except OSError as error:
                         shutil.rmtree(outside)
-                        self.skipTest(str(error))
+                        if os.name == 'nt' and getattr(error, 'winerror', None) == 1314:
+                            self.skipTest(str(error))  # ERROR_PRIVILEGE_NOT_HELD
+                        raise
                     probe.unlink()
                     before = {p.relative_to(outside): p.read_bytes() for p in outside.rglob('*') if p.is_file()}
                     swapped, blocked = [], []
@@ -479,7 +481,10 @@ store.append_attestation(job, 'metrics', '20261013T123456000001Z', {'score': 1})
         shutil.copytree(area, outside)
         probe = self.project/'probe'
         try: probe.symlink_to(outside, target_is_directory=True)
-        except OSError as error: self.skipTest(str(error))
+        except OSError as error:
+            if os.name == 'nt' and getattr(error, 'winerror', None) == 1314:
+                self.skipTest(str(error))  # ERROR_PRIVILEGE_NOT_HELD
+            raise
         probe.unlink()
         before = {p.relative_to(outside): p.read_bytes() for p in outside.rglob('*') if p.is_file()}
         swapped, blocked = [], []

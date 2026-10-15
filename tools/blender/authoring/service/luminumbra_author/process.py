@@ -13,6 +13,42 @@ from .contracts import atomic_json
 LOG_LIMIT = 64 * 1024
 _SUPERVISOR_PID = None
 WINDOWS_JOB_LIMITS = 0x2000  # KILL_ON_JOB_CLOSE; neither BREAKAWAY_OK nor SILENT_BREAKAWAY_OK
+MAX_PROC_ENTRIES = 65536
+MAX_OWNED_PROCESSES = 4096
+
+
+def _require_pidfds():
+    """Probe enforcement before launching any owned Linux worker."""
+    if not sys.platform.startswith('linux') or not callable(getattr(os, 'pidfd_open', None)) or not callable(getattr(signal, 'pidfd_send_signal', None)):
+        raise OSError('Linux descendant ownership requires pidfd support')
+    try:
+        fd = os.pidfd_open(os.getpid())
+        try: signal.pidfd_send_signal(fd, 0)
+        finally: os.close(fd)
+    except OSError as error:
+        raise OSError('Linux descendant ownership requires working pidfd enforcement') from error
+
+
+def _proc_entries():
+    with os.scandir('/proc') as entries:
+        for entry in entries: yield entry.name
+
+
+def _proc_identity(pid):
+    """Return parent PID and creation ticks; a vanished process is harmless."""
+    try:
+        fields = (Path('/proc')/str(pid)/'stat').read_text().rsplit(')', 1)[1].split()
+        return int(fields[1]), int(fields[19])  # fields 4 (ppid) and 22 (starttime)
+    except (FileNotFoundError, ProcessLookupError): return None
+    except (ValueError, IndexError) as error:
+        raise OSError('Cannot establish Linux process creation identity') from error
+
+
+def _cleanup_remaining(deadline, clock):
+    remaining = deadline-clock()
+    if remaining <= 0:
+        raise OSError('Owned descendants did not disappear before deadline')
+    return remaining
 
 
 def supervise(command, result_path, timeout):
@@ -77,6 +113,7 @@ def _enable_subreaper():
     # Called exclusively by dedicated ownership supervisor entry points.
     if not sys.platform.startswith('linux'):
         raise OSError('Owned descendant reaping requires Linux or Windows')
+    _require_pidfds()
     import ctypes
     libc = ctypes.CDLL(None, use_errno=True)
     if libc.prctl(36, 1, 0, 0, 0):  # PR_SET_CHILD_SUBREAPER
@@ -91,7 +128,9 @@ class ProcessTree:
     assignment to the Job happens before that handshake. This is not a launcher
     for untrusted executable code (raw bpy remains unavailable).
     """
-    def __init__(self, process, memory_mib=None, *, same_group=False):
+    def __init__(self, process, memory_mib=None, *, same_group=False,
+                 proc_entries=None, proc_reader=None, pidfd_open=None, pidfd_signal=None,
+                 pidfd_close=None):
         self.process, self.job = process, None
         if os.name != 'nt':
             if same_group and _SUPERVISOR_PID != os.getpid():
@@ -100,6 +139,18 @@ class ProcessTree:
             self.supervised = self.control is not None
             self.group = os.getpgrp() if same_group else process.pid
             self.same_group = same_group
+            self._pidfds = {}
+            if same_group:
+                _require_pidfds()
+                self._proc_entries = proc_entries or _proc_entries
+                self._proc_reader = proc_reader or _proc_identity
+                self._pidfd_open = pidfd_open or os.pidfd_open
+                self._pidfd_signal = pidfd_signal or signal.pidfd_send_signal
+                self._pidfd_close = pidfd_close or os.close
+                self._root_pid = os.getpid()
+                self._root_identity = self._proc_reader(self._root_pid)
+                if self._root_identity is None:
+                    raise OSError('Cannot establish supervisor creation identity')
             return
         import ctypes
         from ctypes import wintypes as w
@@ -138,25 +189,71 @@ class ProcessTree:
             kernel.CloseHandle(self.job); self.job = None
             raise
 
-    def _descendants(self):
-        """All descendants by parentage, including sessions/groups that escaped.
+    def _descendants(self, *, deadline, clock):
+        """Retain handles only for a creation-identity-validated parent chain.
 
-        Only an isolated supervisor uses this method: orphaned workers are
-        adopted by that supervisor, never by the service or test runner.
+        One proc scan builds adjacency lists, so frontier expansion is linear.
+        A changed/exited parent or child is deferred to the next scan, where
+        subreaper adoption can establish a new chain to this supervisor.
         """
-        parents = {}
-        for path in Path('/proc').glob('[0-9]*/stat'):
-            try:
-                fields = path.read_text().rsplit(')', 1)[1].split()
-                parents[int(path.parent.name)] = int(fields[1])
-            except (OSError, ValueError, IndexError): pass
-        owned, frontier = set(), {os.getpid()}
+        children = {}
+        entries = iter(self._proc_entries())
+        count = 0
+        try:
+            while True:
+                _cleanup_remaining(deadline, clock)
+                try: name = next(entries)
+                except StopIteration: break
+                _cleanup_remaining(deadline, clock)
+                count += 1
+                if count > MAX_PROC_ENTRIES:
+                    raise OSError('Linux process scan exceeds traversal limit')
+                if not name.isdecimal(): continue
+                pid = int(name)
+                identity = self._proc_reader(pid)
+                _cleanup_remaining(deadline, clock)
+                if identity is not None:
+                    children.setdefault(identity[0], []).append((pid, identity))
+        finally:
+            if hasattr(entries, 'close'): entries.close()
+        frontier = [(self._root_pid, self._root_identity)]
+        visited = {self._root_pid}
         while frontier:
-            frontier = {pid for pid, parent in parents.items() if parent in frontier and pid not in owned}
-            owned.update(frontier)
-        return owned
+            _cleanup_remaining(deadline, clock)
+            parent, parent_identity = frontier.pop()
+            for pid, identity in children.get(parent, ()):
+                _cleanup_remaining(deadline, clock)
+                if pid in visited: continue
+                visited.add(pid)
+                if len(visited) > MAX_OWNED_PROCESSES:
+                    raise OSError('Linux descendant tree exceeds traversal limit')
+                key = (pid, identity[1])
+                fd = self._pidfds.get(key)
+                new_fd = fd is None
+                if new_fd:
+                    if len(self._pidfds) >= MAX_OWNED_PROCESSES:
+                        raise OSError('Linux retained process handles exceed traversal limit')
+                    try: fd = self._pidfd_open(pid)
+                    except ProcessLookupError: continue
+                    except OSError as error:
+                        raise OSError('Linux descendant pidfd acquisition is unavailable') from error
+                try:
+                    _cleanup_remaining(deadline, clock)
+                    current_parent = self._proc_reader(parent)
+                    _cleanup_remaining(deadline, clock)
+                    current = self._proc_reader(pid)
+                    _cleanup_remaining(deadline, clock)
+                    if current_parent is None or current_parent[1] != parent_identity[1] or current != identity:
+                        continue
+                    # Opening before revalidation binds this handle to the
+                    # captured child, even if its numeric PID is reused later.
+                    self._pidfds[key] = fd
+                    new_fd = False
+                    frontier.append((pid, identity))
+                finally:
+                    if new_fd: self._pidfd_close(fd)
 
-    def stop(self):
+    def stop(self, *, deadline=None, clock=None):
         if os.name == 'nt':
             if self.job and not self.kernel.TerminateJobObject(self.job, 1):
                 import ctypes
@@ -166,9 +263,17 @@ class ProcessTree:
             if self.control is not None:
                 os.close(self.control); self.control = None
         elif self.same_group:
-            for pid in self._descendants():
-                try: os.kill(pid, signal.SIGKILL)
-                except ProcessLookupError: pass
+            if deadline is None or clock is None:
+                raise OSError('Linux descendant termination requires an absolute deadline and clock')
+            self._descendants(deadline=deadline, clock=clock)
+            for key, fd in list(self._pidfds.items()):
+                _cleanup_remaining(deadline, clock)
+                try: self._pidfd_signal(fd, signal.SIGKILL)
+                except ProcessLookupError:
+                    self._pidfd_close(fd); del self._pidfds[key]
+                except OSError as error:
+                    raise OSError('Linux descendant pidfd signalling is unavailable') from error
+                _cleanup_remaining(deadline, clock)
         else:
             try: os.killpg(self.group, signal.SIGKILL)
             except ProcessLookupError: pass
@@ -194,16 +299,30 @@ class ProcessTree:
             return
         if not self.same_group: return  # Caller owns only the supervisor root.
         while True:
-            self.stop()  # Repeat enumeration/kill to handle forks during a scan.
+            self.stop(deadline=deadline, clock=clock)  # Include forks during a scan.
+            reaped, no_children = set(), False
             try:
-                while os.waitpid(-1, os.WNOHANG)[0]: pass
+                for _ in range(MAX_OWNED_PROCESSES):
+                    _cleanup_remaining(deadline, clock)
+                    pid, _ = os.waitpid(-1, os.WNOHANG)
+                    _cleanup_remaining(deadline, clock)
+                    if not pid: break
+                    reaped.add(pid)
             except ChildProcessError:
+                no_children = True
+            for key in list(self._pidfds):
+                _cleanup_remaining(deadline, clock)
+                if no_children or key[0] in reaped:
+                    self._pidfd_close(self._pidfds.pop(key))
+            if no_children:
+                _cleanup_remaining(deadline, clock)
                 return
-            remaining = deadline-clock()
-            if remaining <= 0: raise OSError('Owned descendants did not disappear before deadline')
+            remaining = _cleanup_remaining(deadline, clock)
             threading.Event().wait(min(.005, remaining))
 
     def close(self):
+        for key in list(getattr(self, '_pidfds', {})):
+            self._pidfd_close(self._pidfds.pop(key))
         if os.name != 'nt' and getattr(self, 'control', None) is not None:
             os.close(self.control); self.control = None
         if self.job:
@@ -212,36 +331,84 @@ class ProcessTree:
 
 def _linux_supervisor(command, control_fd, deadline, memory_mib=None):
     """Dedicated child entry point. Inherit worker pipes; own no caller children."""
+    import json
     import select
     import time
-    _enable_subreaper()
-    if memory_mib is not None:
-        import resource
-        cap = memory_mib*1024**2
-        resource.setrlimit(resource.RLIMIT_AS, (cap, cap))
-    # No worker is launched until the caller has installed tree ownership.
+    start_read = start_write = None
+    cleanup_errors = []
+    def cleanup(action):
+        try: action()
+        except BaseException as error: cleanup_errors.append(error)
+    def close_start_read():
+        nonlocal start_read
+        fd, start_read = start_read, None
+        if fd is not None: os.close(fd)
+    def close_start_write():
+        nonlocal start_write
+        fd, start_write = start_write, None
+        if fd is not None: os.close(fd)
     try:
+        _enable_subreaper()
+        if memory_mib is not None:
+            import resource
+            cap = memory_mib*1024**2
+            resource.setrlimit(resource.RLIMIT_AS, (cap, cap))
+        # The caller first owns this supervisor. A separate pipe holds the
+        # trusted launcher until this supervisor also owns the worker tree.
         if os.read(control_fd, 1) != b'S': return 1
-        process = subprocess.Popen(command, close_fds=True)
-        tree = ProcessTree(process, same_group=True)
-        work_deadline = deadline-min(.5, max(0, deadline-time.monotonic())/2)
+        start_read, start_write = os.pipe()
+        bootstrap = ('import json,os,sys; fd=int(sys.argv[1]); start=os.read(fd,1); os.close(fd); '
+                     'command=json.loads(sys.argv[2]);\n'
+                     'if start != b"S": raise SystemExit(1)\n'
+                     'os.execvp(command[0],command)')
+        wrapped = [sys.executable, '-I', '-S', '-B', '-c', bootstrap, str(start_read), json.dumps(command)]
+        tree = None
+        process = subprocess.Popen(wrapped, close_fds=True, pass_fds=(start_read,))
         try:
+            close_start_read()
+            tree = ProcessTree(process, same_group=True)
+            tree._descendants(deadline=deadline, clock=time.monotonic)
+            if not any(pid == process.pid for pid, _ in tree._pidfds):
+                raise OSError('Cannot establish held launcher creation identity')
+            os.write(start_write, b'S')
+            close_start_write()
+            work_deadline = deadline-min(.5, max(0, deadline-time.monotonic())/2)
             while process.poll() is None:
                 remaining = work_deadline-time.monotonic()
                 if remaining <= 0: break
                 readable, _, _ = select.select([control_fd], [], [], min(.01, remaining))
                 if readable and not os.read(control_fd, 1): break
         finally:
-            # waitpid(-1) includes the root and every adopted descendant. Let
-            # Popen reap its root first, then drain the remaining children.
-            try:
-                try: tree.stop()
-                finally:
-                    try: process.wait(timeout=max(0, deadline-time.monotonic()))
-                    finally: tree.reap(deadline=deadline, clock=time.monotonic)
-            finally: tree.close()
+            # EOF releases a held launcher to exit even if termination fails.
+            # Clear each saved fd before closing so outer finalization is safe.
+            cleanup(close_start_read)
+            cleanup(close_start_write)
+            direct_fd = next((fd for (pid, _), fd in tree._pidfds.items()
+                              if pid == process.pid), None) if tree is not None else None
+            def stop_direct():
+                try:
+                    if direct_fd is not None:
+                        tree._pidfd_signal(direct_fd, signal.SIGKILL)
+                    else:
+                        # Only setup failure before pidfd ownership permits
+                        # Popen.kill(): this launcher has not been released.
+                        process.kill()
+                except ProcessLookupError: pass
+            cleanup(stop_direct)
+            if tree is not None:
+                cleanup(lambda: tree.stop(deadline=deadline, clock=time.monotonic))
+            cleanup(lambda: process.wait(timeout=max(0, deadline-time.monotonic())))
+            # waitpid(-1) includes adopted descendants; reap the root first.
+            if tree is not None:
+                cleanup(lambda: tree.reap(deadline=deadline, clock=time.monotonic))
+                cleanup(tree.close)
         return process.returncode if process.returncode is not None else 1
-    finally: os.close(control_fd)
+    finally:
+        primary_error = sys.exc_info()[0] is not None
+        cleanup(close_start_read)
+        cleanup(close_start_write)
+        cleanup(lambda: os.close(control_fd))
+        if cleanup_errors and not primary_error: raise cleanup_errors[0]
 
 
 def _owned_command(command, remaining, memory_mib):
@@ -279,6 +446,10 @@ def run_owned(command, payload, *, timeout, readiness_timeout=5, cancel=None,
             'worker.limit', 'Invalid worker memory cap.')
     cancel = cancel or threading.Event()
     require(os.name == 'nt' or sys.platform.startswith('linux'), 'worker.unavailable', 'Descendant adoption is unavailable.')
+    if os.name != 'nt':
+        try: _require_pidfds()
+        except OSError as error:
+            raise Refusal('worker.unavailable', str(error)) from error
     start = clock()
     deadline = start+timeout
     # Leave cleanup time inside the original deadline, never add a new window.
@@ -360,7 +531,7 @@ def run_owned(command, payload, *, timeout, readiness_timeout=5, cancel=None,
             try: action()
             except BaseException as error: cleanup_errors.append(error)
         try:
-            if tree is not None: cleanup(tree.stop)
+            if tree is not None: cleanup(lambda: tree.stop(deadline=deadline, clock=clock))
             else:
                 if control_write is not None:
                     cleanup(lambda: os.close(control_write))
