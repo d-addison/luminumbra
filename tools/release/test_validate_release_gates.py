@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -351,23 +352,26 @@ class ApiTests(unittest.TestCase):
             def decode(self, *args, **kwargs):
                 return MeteredText(super().decode(*args, **kwargs))
 
+        # Sixteen full pages still make repeated suffix copies exceed the
+        # two-input-volume bound by a wide margin.
+        page_count = 16
         response_pages, links = [], []
-        for page_number in range(1, 129):
+        for page_number in range(1, page_count + 1):
             response_pages.append([status(index, context=f"Context {index}")
                                    for index in range((page_number - 1) * 100 + 1, page_number * 100 + 1)])
             relations = []
             if page_number > 1:
                 relations.append(status_link(page_number - 1, "prev"))
-            if page_number < 128:
+            if page_number < page_count:
                 relations.append(status_link(page_number + 1, "next"))
-            relations.append(status_link(128, "last"))
+            relations.append(status_link(page_count, "last"))
             links.append(", ".join(relations))
         for newline in ("\n", "\r\n"):
             data = b" \t\r\n" + rule_stream(*response_pages, links=tuple(links), newline=newline) + b" \t\r\n"
             copied[0] = 0
             parsed = gate.parse_status_pages(MeteredBytes(data), COMMIT, REPOSITORY, REPOSITORY_ID)
             self.assertEqual(parsed, [item for page in response_pages for item in page])
-            self.assertEqual(len(gate.select_latest_statuses(parsed)), 12_800)
+            self.assertEqual(len(gate.select_latest_statuses(parsed)), page_count * 100)
             # Count actual substring volume, including suffixes passed to regex
             # or whitespace helpers; repeated remaining-input copies exceed this.
             self.assertGreater(copied[0], 0)
@@ -1007,26 +1011,42 @@ class GitCommandTests(unittest.TestCase):
                           "rev-parse", "--verify", "HEAD^0"])
 
 
-class GitTests(unittest.TestCase):
+class _GitFixture:
+    @classmethod
+    def setUpClass(cls):
+        # Build the immutable object graph once; each test gets independent
+        # objects, refs, configuration and worktree files, without Git startup.
+        temporary = tempfile.TemporaryDirectory()
+        cls.addClassCleanup(temporary.cleanup)
+        fixture = cls()
+        fixture.root = Path(temporary.name)
+        fixture.env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+        fixture.env.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1",
+                           GIT_AUTHOR_NAME="Fixture", GIT_AUTHOR_EMAIL="fixture@example.org",
+                           GIT_COMMITTER_NAME="Fixture", GIT_COMMITTER_EMAIL="fixture@example.org",
+                           GIT_AUTHOR_DATE="2000-01-01T00:00:00+00:00",
+                           GIT_COMMITTER_DATE="2000-01-01T00:00:00+00:00")
+        fixture.trees = {}
+        fixture.git("init", "-q", "--template=")
+        fixture.base_files = {"shipping.txt": ("100644", b"qualified content\n")}
+        fixture.base = fixture.commit(fixture.base_files)
+        fixture.tag = fixture.candidate(record(fixture.base))
+        fixture.promote(fixture.tag)
+        cls.fixture = fixture
+
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
+        shutil.copytree(self.fixture.root / ".git", self.root / ".git")
+        self.env = self.fixture.env.copy()
+        self.base_files = self.fixture.base_files.copy()
+        self.trees = self.fixture.trees.copy()
+        self.base, self.tag = self.fixture.base, self.fixture.tag
         self.statuses_path = self.root / "statuses.json"
         self.statuses_path.write_bytes(rule_stream([]))
         self.branch_path = self.root / "branch.json"
         self.branch_path.write_text(json.dumps(branch(enabled=False, level="off")), encoding="utf-8")
-        self.env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
-        self.env.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1",
-                        GIT_AUTHOR_NAME="Fixture", GIT_AUTHOR_EMAIL="fixture@example.org",
-                        GIT_COMMITTER_NAME="Fixture", GIT_COMMITTER_EMAIL="fixture@example.org",
-                        GIT_AUTHOR_DATE="2000-01-01T00:00:00+00:00",
-                        GIT_COMMITTER_DATE="2000-01-01T00:00:00+00:00")
-        self.git("init", "-q", "--template=")
-        self.base_files = {"shipping.txt": ("100644", b"qualified content\n")}
-        self.base = self.commit(self.base_files)
-        self.tag = self.candidate(record(self.base))
-        self.promote(self.tag)
 
     def git(self, *args: str, data: bytes = b"") -> str:
         result = subprocess.run(["git", "-C", str(self.root), *args], env=self.env, input=data,
@@ -1034,6 +1054,11 @@ class GitTests(unittest.TestCase):
         return result.stdout.decode().strip()
 
     def tree(self, files: dict) -> str:
+        # Object IDs depend only on content. Reuse trees already written to this
+        # fixture, including unchanged subtrees in record-only candidates.
+        key = tuple(sorted(files.items()))
+        if key in self.trees:
+            return self.trees[key]
         children = {}
         for path, value in files.items():
             head, separator, tail = path.partition("/")
@@ -1049,7 +1074,9 @@ class GitTests(unittest.TestCase):
                 mode, content = value
                 kind, object_id = "blob", self.git("hash-object", "-w", "--stdin", data=content)
             entries.append(f"{mode} {kind} {object_id}\t{name}\0".encode())
-        return self.git("mktree", "-z", data=b"".join(entries))
+        result = self.git("mktree", "-z", data=b"".join(entries))
+        self.trees[key] = result
+        return result
 
     def commit(self, files: dict, parent: str | None = None,
                second_parent: str | None = None) -> str:
@@ -1067,6 +1094,37 @@ class GitTests(unittest.TestCase):
 
     def validate(self, commit: str | None = None, version: str = VERSION) -> None:
         gate.validate_git_record(self.root, version, commit or self.tag)
+
+    def invoke_gate(self, args: list[str], *, input: bytes = b"") -> subprocess.CompletedProcess:
+        # Exercise argument parsing, bounded stdin/file reads, real Git and exit
+        # diagnostics in-process. Dedicated CLI tests retain process coverage.
+        with io.TextIOWrapper(io.BytesIO(input), encoding="utf-8") as stdin, \
+                mock.patch.object(sys, "stdin", stdin), \
+                mock.patch.object(sys, "stdout", new_callable=io.StringIO) as stdout, \
+                mock.patch.object(sys, "stderr", new_callable=io.StringIO) as stderr, \
+                mock.patch.object(sys, "argv", [str(Path(gate.__file__)), *args]), \
+                mock.patch.dict(os.environ, self.env, clear=True):
+            try:
+                returncode = gate.main()
+            except SystemExit as error:
+                returncode = error.code
+            return subprocess.CompletedProcess(args, returncode, stdout.getvalue().encode(),
+                                               stderr.getvalue().encode())
+
+
+class GitTests(_GitFixture, unittest.TestCase):
+    def test_committed_native_evidence_refusals_are_read_only(self):
+        for index in range(1, len(EXPECTED_IDS)):
+            for evidence in ("issue #123", f"{'f' * 40} https://github.com/owner/repository/actions/runs/123"):
+                value = record(self.base)
+                value["gates"][index]["evidence"] = evidence
+                candidate = self.candidate(value)
+                self.promote(candidate)
+                before = self.git("show-ref")
+                with self.subTest(index=index, evidence=evidence), self.assertRaises(gate.GateError):
+                    self.validate(candidate)
+                self.assertEqual(self.git("show-ref"), before)
+                self.assertFalse((self.root / ".git/index").exists())
 
     def test_git_arguments_survive_msys_brace_expansion(self):
         # MSYS2 runtimes brace-expand argv, so validator Git arguments must contain no braces.
@@ -1281,6 +1339,8 @@ class GitTests(unittest.TestCase):
         self.assertEqual(self.git("show-ref"), before)
         self.assertFalse((self.root / ".git/index").exists())
 
+
+class CliTests(_GitFixture, unittest.TestCase):
     def test_cli_success_and_refusals_are_read_only(self):
         rules_path, checks_path = self.root / "rules.json", self.root / "checks.json"
         rules_path.write_bytes(rule_stream(rules("Linux")))
@@ -1375,7 +1435,7 @@ class GitTests(unittest.TestCase):
         later[0]["parameters"]["required_status_checks"][0]["integration_id"] = 42
         next_link = rule_link(2, "next") + ", " + rule_link(2, "last")
         complete = rule_stream(first, later, links=(next_link, rule_link(1, "prev")))
-        args = [sys.executable, "-I", "-B", str(Path(gate.__file__)), "--repo-root", str(self.root),
+        args = ["--repo-root", str(self.root),
                 "--branch", str(self.branch_path),
                 "--repository", REPOSITORY, "--repository-id", REPOSITORY_ID, "--version", VERSION, "--tag-commit", self.tag, "--rules", str(rules_path), "--statuses", str(self.statuses_path)]
         before = self.git("show-ref")
@@ -1387,8 +1447,7 @@ class GitTests(unittest.TestCase):
                             run(2, name="Windows", head_sha=self.tag, app={"id": 99})], 1),
                 (rule_stream(first, links=(next_link,)), [run(head_sha=self.tag)], 1)):
             rules_path.write_bytes(rules_data)
-            result = subprocess.run(args, input=rule_stream(*pages(*runs)),
-                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=self.env, check=False)
+            result = self.invoke_gate(args, input=rule_stream(*pages(*runs)))
             with self.subTest(expected=expected, runs=runs):
                 self.assertEqual(result.returncode, expected, result.stderr)
                 self.assertIn(b"PASS" if expected == 0 else b"FAIL",
@@ -1396,10 +1455,12 @@ class GitTests(unittest.TestCase):
                 self.assertEqual(self.git("show-ref"), before)
                 self.assertFalse((self.root / ".git/index").exists())
 
+
+class ProtectionTests(_GitFixture, unittest.TestCase):
     def test_cli_status_results_and_incomplete_inputs_are_read_only(self):
         rules_path = self.root / "rules.json"
         rules_path.write_bytes(rule_stream(rules("Linux")))
-        args = [sys.executable, "-I", "-B", str(Path(gate.__file__)), "--repo-root", str(self.root),
+        args = ["--repo-root", str(self.root),
                 "--branch", str(self.branch_path),
                 "--repository", REPOSITORY, "--repository-id", REPOSITORY_ID, "--version", VERSION, "--tag-commit", self.tag, "--rules", str(rules_path),
                 "--statuses", str(self.statuses_path)]
@@ -1421,8 +1482,7 @@ class GitTests(unittest.TestCase):
                 (b"[]", [run(head_sha=self.tag)], 1),
                 (rule_stream([]).replace(b"200 OK", b"403 Forbidden"), [run(head_sha=self.tag)], 1)):
             self.statuses_path.write_bytes(statuses_data)
-            result = subprocess.run(args, input=rule_stream(*pages(*runs)),
-                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=self.env, check=False)
+            result = self.invoke_gate(args, input=rule_stream(*pages(*runs)))
             with self.subTest(statuses=statuses_data[-150:], runs=runs):
                 self.assertEqual(result.returncode, expected, result.stderr)
                 self.assertIn(b"PASS" if expected == 0 else b"FAIL",
@@ -1430,13 +1490,11 @@ class GitTests(unittest.TestCase):
                 self.assertEqual(self.git("show-ref"), before)
                 self.assertFalse((self.root / ".git/index").exists())
         for statuses_input in ("-", str(self.root / "missing-statuses.json")):
-            result = subprocess.run([*args, "--statuses", statuses_input],
-                                    input=rule_stream(*pages(run(head_sha=self.tag))),
-                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=self.env, check=False)
+            result = self.invoke_gate([*args, "--statuses", statuses_input],
+                                      input=rule_stream(*pages(run(head_sha=self.tag))))
             self.assertEqual(result.returncode, 1)
             self.assertIn(b"FAIL", result.stderr)
-        result = subprocess.run(args[:-2], input=rule_stream(*pages(run(head_sha=self.tag))),
-                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=self.env, check=False)
+        result = self.invoke_gate(args[:-2], input=rule_stream(*pages(run(head_sha=self.tag))))
         self.assertEqual(result.returncode, 2)
         self.assertIn(b"--statuses", result.stderr)
         self.assertEqual(self.git("show-ref"), before)
@@ -1445,7 +1503,7 @@ class GitTests(unittest.TestCase):
     def test_cli_classic_protection_merge_bindings_and_malformed_inputs(self):
         rules_path = self.root / "rules.json"
         rules_path.write_bytes(rule_stream(rules("Linux")))
-        args = [sys.executable, "-I", "-B", str(Path(gate.__file__)), "--repo-root", str(self.root),
+        args = ["--repo-root", str(self.root),
                 "--repository", REPOSITORY, "--repository-id", REPOSITORY_ID, "--version", VERSION, "--tag-commit", self.tag, "--rules", str(rules_path),
                 "--statuses", str(self.statuses_path)]
         bound = branch("Windows", checks=[{"context": "Windows", "app_id": 42}])
@@ -1461,10 +1519,9 @@ class GitTests(unittest.TestCase):
                 (None, [], 1), ({"protected": True}, [], 1),
                 ({"protected": True, "protection": {"enabled": False}}, [], 1)):
             self.branch_path.write_text(json.dumps(response), encoding="utf-8")
-            result = subprocess.run([*args, "--branch", str(self.branch_path)],
-                                    input=rule_stream(*pages(run(head_sha=self.tag), *[
-                                        dict(item, head_sha=self.tag) for item in extra_runs])),
-                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=self.env, check=False)
+            result = self.invoke_gate([*args, "--branch", str(self.branch_path)],
+                                      input=rule_stream(*pages(run(head_sha=self.tag), *[
+                                          dict(item, head_sha=self.tag) for item in extra_runs])))
             with self.subTest(response=response, runs=extra_runs):
                 self.assertEqual(result.returncode, expected, result.stderr)
                 self.assertIn(b"PASS" if expected == 0 else b"FAIL",
@@ -1472,36 +1529,20 @@ class GitTests(unittest.TestCase):
         for data in (b"", b"{", b'{"protected":false,"protected":false}',
                      b" " * (gate.RULES_LIMIT + 1)):
             self.branch_path.write_bytes(data)
-            result = subprocess.run([*args, "--branch", str(self.branch_path)],
-                                    input=rule_stream(*pages(run(head_sha=self.tag))),
-                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=self.env, check=False)
+            result = self.invoke_gate([*args, "--branch", str(self.branch_path)],
+                                      input=rule_stream(*pages(run(head_sha=self.tag))))
             with self.subTest(data=data[:50]):
                 self.assertEqual(result.returncode, 1)
                 self.assertIn(b"FAIL", result.stderr)
         for branch_input in ("-", str(self.root / "missing-branch.json")):
-            result = subprocess.run([*args, "--branch", branch_input], input=b"",
-                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=self.env, check=False)
+            result = self.invoke_gate([*args, "--branch", branch_input], input=b"")
             self.assertEqual(result.returncode, 1)
             self.assertIn(b"FAIL", result.stderr)
-        result = subprocess.run(args, input=b"", stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                env=self.env, check=False)
+        result = self.invoke_gate(args, input=b"")
         self.assertEqual(result.returncode, 2)
         self.assertIn(b"--branch", result.stderr)
         self.assertEqual(self.git("show-ref"), before)
         self.assertFalse((self.root / ".git/index").exists())
-
-    def test_committed_native_evidence_refusals_are_read_only(self):
-        for index in range(1, len(EXPECTED_IDS)):
-            for evidence in ("issue #123", f"{'f' * 40} https://github.com/owner/repository/actions/runs/123"):
-                value = record(self.base)
-                value["gates"][index]["evidence"] = evidence
-                candidate = self.candidate(value)
-                self.promote(candidate)
-                before = self.git("show-ref")
-                with self.subTest(index=index, evidence=evidence), self.assertRaises(gate.GateError):
-                    self.validate(candidate)
-                self.assertEqual(self.git("show-ref"), before)
-                self.assertFalse((self.root / ".git/index").exists())
 
 
 class WiringTests(unittest.TestCase):
@@ -1516,8 +1557,39 @@ class WiringTests(unittest.TestCase):
         cmake = (ROOT / "tools/CMakeLists.txt").read_text(encoding="utf-8")
         self.assertIn('NAME ReleaseGatesScriptContract\n', cmake)
         self.assertIn('"${CMAKE_CURRENT_SOURCE_DIR}/release/test_validate_release_gates.py"', cmake)
-        self.assertIn('set_tests_properties(ReleaseGatesScriptContract\n'
-                      '        PROPERTIES LABELS "release;tools" TIMEOUT 60)', cmake)
+        # Positional unittest class selectors keep the default Python plan's
+        # full discovery, while bounding each CTest entry's Windows startup cost.
+        registrations = re.findall(
+            r'add_test\(\s+NAME (ReleaseGates\w+)\s+'
+            r'COMMAND "\$\{Python3_EXECUTABLE\}" -I -B\s+'
+            r'"\$\{CMAKE_CURRENT_SOURCE_DIR\}/release/test_validate_release_gates.py"\s+([^)]*)\)',
+            cmake)
+        expected = {
+            "ReleaseGatesScriptContract": "RecordTests ApiTests StatusTests GitCommandTests WiringTests",
+            "ReleaseGatesGitContract": "GitTests",
+            "ReleaseGatesCliContract": "CliTests",
+            "ReleaseGatesProtectionContract": "ProtectionTests",
+        }
+        self.assertEqual(len(registrations), len(expected))
+        self.assertEqual(dict(registrations), expected)
+
+        def collect_ids(suite):
+            for item in suite:
+                if isinstance(item, unittest.TestSuite):
+                    yield from collect_ids(item)
+                else:
+                    yield item.id()
+
+        loader = unittest.defaultTestLoader
+        module = sys.modules[__name__]
+        registered = []
+        for name, selectors in registrations:
+            self.assertIn(f'set_tests_properties({name}\n'
+                          '        PROPERTIES LABELS "release;tools" TIMEOUT 60)', cmake)
+            registered.extend(collect_ids(loader.loadTestsFromNames(selectors.split(), module)))
+        discovered = list(collect_ids(loader.loadTestsFromModule(module)))
+        self.assertEqual(sorted(registered), sorted(discovered))
+        self.assertEqual(len(registered), len(set(registered)))
 
     def test_workflow_requires_gates_before_archive_and_publication(self):
         workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
@@ -1629,4 +1701,5 @@ class WiringTests(unittest.TestCase):
 
 
 if __name__ == "__main__":
+    # No selectors runs everything; CTest passes positional test class names.
     unittest.main()
