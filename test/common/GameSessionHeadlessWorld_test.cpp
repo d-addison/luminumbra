@@ -1319,6 +1319,30 @@ TEST(GameSessionHeadlessWorldTest, DefaultCalendarContinuesAcrossSaveAndExplicit
     EXPECT_EQ(SessionWorldHash(loaded), SessionWorldHash(original));
 }
 
+TEST(GameSessionHeadlessWorldTest, EnabledLegacyClockPinsEmptyEcologyFold) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    session.SetRootPath(root.root_string());
+    session.SetJobSystem(&jobs);
+    session.SetActiveRegionsEnabled(true);
+    ASSERT_TRUE(session.CreateWorld("Legacy clock fold", "1337", "default"));
+    const auto save = session.GetWorldSaveDir();
+    auto metadata = nlohmann::json::parse(ReadClockTestFile(save / "world_info.json"));
+    Luminumbra::world::WorldClock(12345, Luminumbra::world::WorldCalendar::Legacy())
+        .write_metadata(metadata);
+    ASSERT_TRUE(P::WorldSaveService::save_metadata(metadata.dump(), save));
+    ASSERT_TRUE(session.LoadWorldStateFrom(save));
+    ASSERT_EQ(session.GetWorldClock().tick(), 12345u);
+    ASSERT_EQ(session.GetWorldClock().calendar(), Luminumbra::world::WorldCalendar::Legacy());
+    ASSERT_TRUE(session.GetActiveRegionLedger().records().empty());
+    ASSERT_TRUE(session.GetActiveRegionLedger().canonical_bytes().empty());
+    const auto ecology = luminumbra::ai::ComputeEcologySubHash(session.GetRegistry());
+    ASSERT_TRUE(ecology.empty());
+    EXPECT_EQ(session.FoldClockIntoEcologyHash(ecology), "9b7d0612513877a2");
+}
+
 TEST(GameSessionHeadlessWorldTest, EnabledClockOverflowRefusesWithoutAdvancingEitherClock) {
     const HeadlessRoot root;
     JobSystem jobs;
