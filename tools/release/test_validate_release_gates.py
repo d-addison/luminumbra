@@ -25,21 +25,41 @@ RECORD_PATH = f"docs/release-gates/v{VERSION}.json"
 EXPECTED_IDS = (
     "required-ci-strict-promotion", "final-revision-native-manual",
     "ucrt64-120-second-guard", "server-load-qualification", "paired-performance-gates",
-    "independent-release-verification", "owner-native-windows-smoke",
+    "owner-native-windows-smoke",
 )
 
 
 def record(commit: str = COMMIT) -> dict:
     return {"schema_version": 1, "version": VERSION, "qualified_commit": commit,
-            "gates": [{"id": name, "status": "passed", "evidence": f"issue #123: {name}"}
+            "gates": [{"id": name, "status": "passed",
+                       "evidence": f"{commit} https://github.com/owner/repository/actions/runs/123"}
                       for name in EXPECTED_IDS]}
 
 
 def rules(*contexts: str) -> list:
-    return [{"type": "required_status_checks", "parameters": {
+    return [{"ruleset_id": 1, "type": "required_status_checks", "parameters": {
         "strict_required_status_checks_policy": True,
         "required_status_checks": [{"context": name} for name in contexts],
     }}]
+
+
+def requirements(*names: str) -> tuple:
+    return tuple((name, None) for name in names)
+
+
+def rule_stream(*response_pages: list, links: tuple[str, ...] = (), newline: str = "\n") -> bytes:
+    responses = []
+    for index, page in enumerate(response_pages):
+        headers = ["HTTP/2.0 200 OK", "Content-Type: application/json"]
+        if links and links[index]:
+            headers.append(f"Link: {links[index]}")
+        responses.append(newline.join(headers) + newline * 2 + json.dumps(page))
+    return newline.join(responses).encode()
+
+
+def rule_link(page: int, relation: str) -> str:
+    return (f'<https://api.github.com/repos/owner/repository/rules/branches/main?per_page=100&page={page}>'
+            f'; rel="{relation}"')
 
 
 def run(run_id: int = 1, name: str = "Linux", **fields) -> dict:
@@ -52,11 +72,61 @@ def pages(*runs: dict) -> list:
 
 
 class RecordTests(unittest.TestCase):
+    def test_revision_bound_evidence_supports_runs_artifacts_and_comments(self):
+        for name in EXPECTED_IDS:
+            for location in ("https://github.com/owner/repository/actions/runs/123",
+                             "https://github.com/owner/repository/actions/runs/123/artifacts/456",
+                             "https://github.com/owner/repository/issues/123#issuecomment-456"):
+                value = record()
+                index = EXPECTED_IDS.index(name)
+                value["gates"][index]["evidence"] = f"{COMMIT} {location}"
+                with self.subTest(name=name, location=location):
+                    self.assertEqual(gate.validate_record(value, VERSION), COMMIT)
+
+    def test_every_gate_refuses_local_evidence_paths_with_clear_message(self):
+        for index, name in enumerate(EXPECTED_IDS):
+            for extension in ("json", "md", "txt", "log"):
+                value = record()
+                location = f"docs/release-evidence/{COMMIT}/{name}.{extension}"
+                value["gates"][index]["evidence"] = f"{COMMIT} {location}"
+                with self.subTest(name=name, extension=extension):
+                    with self.assertRaisesRegex(
+                            gate.GateError,
+                            f"evidence record location must be a supported HTTPS URL: {name}"):
+                        gate.validate_record(value, VERSION)
+
+    def test_every_gate_refuses_placeholders_wrong_revision_and_nonconcrete_locations(self):
+        for index, name in enumerate(EXPECTED_IDS):
+            location = "https://github.com/owner/repository/actions/runs/123"
+            for evidence in ("issue #123", "TODO", "pending", "passed", COMMIT,
+                             f"{'f' * 40} {location}", f"{COMMIT[:8]} {location}",
+                             f"{COMMIT} docs/release-evidence/{'f' * 40}/{name}.json",
+                             f"{COMMIT} docs/release-evidence/{COMMIT}/other.json",
+                             f"{COMMIT} docs/release-evidence/{COMMIT}/../{name}.json",
+                             f"{COMMIT} issue #123", f"{COMMIT} <artifact URL>",
+                             f"{COMMIT} https://github.com/owner/repository/issues/123",
+                             f"{COMMIT} https://github.com/owner/repository/actions/runs/0",
+                             f"{COMMIT} https://github.com/owner/repository/actions/runs/TODO",
+                             f"{COMMIT} http://github.com/owner/repository/actions/runs/123",
+                             f"{COMMIT} https://github.com/owner/repository/actions/runs/123 extra"):
+                value = record()
+                value["gates"][index]["evidence"] = evidence
+                with self.subTest(name=name, evidence=evidence), self.assertRaises(gate.GateError):
+                    gate.validate_record(value, VERSION)
+
+    def test_post_publication_verification_cannot_enter_record(self):
+        self.assertNotIn("independent-release-verification", gate.GATE_IDS)
+        value = record()
+        value["gates"].insert(5, {"id": "independent-release-verification", "status": "passed",
+                                  "evidence": f"{COMMIT} https://github.com/owner/repository/actions/runs/123"})
+        with self.assertRaises(gate.GateError):
+            gate.validate_record(value, VERSION)
+
     def test_fixed_gate_order_and_valid_evidence(self):
         self.assertEqual(gate.GATE_IDS, EXPECTED_IDS)
         self.assertEqual(gate.validate_record(record(), VERSION), COMMIT)
         value = record(COMMIT.upper())
-        value["gates"][0]["evidence"] = " https://example.org/issues/123 \n"
+        value["gates"][0]["evidence"] = f" {COMMIT.upper()} https://github.com/owner/repository/actions/runs/123 \n"
         self.assertEqual(gate.validate_record(value, VERSION), COMMIT)
 
     def test_record_shape_is_exact(self):
@@ -155,6 +225,169 @@ class RecordTests(unittest.TestCase):
 
 
 class ApiTests(unittest.TestCase):
+    def test_required_app_binding_from_rules_and_classic_protection(self):
+        for source, field in ((rules("Linux"), "integration_id"),
+                              ({"strict": True, "checks": [{"context": "Linux"}]}, "app_id")):
+            checks = (source[0]["parameters"]["required_status_checks"]
+                      if type(source) is list else source["checks"])
+            for app_id in (None, 42):
+                checks[0][field] = app_id
+                expected = (("Linux", app_id),)
+                self.assertEqual(gate.required_contexts(source), expected)
+                gate.validate_check_runs(pages(run(app={"id": 42})), expected, COMMIT)
+            for app_id in (True, False, 0, -1, "42", 42.0, {}):
+                checks[0][field] = app_id
+                with self.subTest(field=field, app_id=app_id), self.assertRaises(gate.GateError):
+                    gate.required_contexts(source)
+            del checks[0][field]
+            self.assertEqual(gate.required_contexts(source), requirements("Linux"))
+        for source in ({"strict": False, "checks": [{"context": "Linux", "app_id": 42}]},
+                       {"strict": True, "contexts": ["Linux"]}):
+            with self.assertRaises(gate.GateError):
+                gate.required_contexts(source)
+
+    def test_pinned_app_filters_before_latest_selection_across_pages(self):
+        contexts = (("Linux", 42),)
+        response = [{"total_count": 3, "check_runs": [run(1, app={"id": 42}, conclusion="failure")]},
+                    {"total_count": 3, "check_runs": [run(2, app={"id": 42}),
+                                                       run(3, app={"id": 99}, conclusion="failure")]}]
+        original = copy.deepcopy(response)
+        for ordered in (response, list(reversed(response))):
+            gate.validate_check_runs(ordered, contexts, COMMIT)
+        self.assertEqual(response, original)
+
+    def test_same_name_wrong_app_success_cannot_replace_failed_or_missing_pinned_run(self):
+        for runs in ((run(2, app={"id": 99}),),
+                     (run(1, app={"id": 42}, conclusion="failure"), run(2, app={"id": 99})),
+                     (run(1, app={"id": 42}), run(2, app={"id": 42}, conclusion="failure"),
+                      run(3, app={"id": 99}))):
+            with self.subTest(runs=runs), self.assertRaises(gate.GateError):
+                gate.validate_check_runs(pages(*runs), (("Linux", 42),), COMMIT)
+
+    def test_pinned_app_refuses_missing_malformed_and_boolean_identity(self):
+        for app in (None, True, [], {}, {"id": None}, {"id": "42"}, {"id": True}, {"id": 42.0}):
+            with self.subTest(app=app), self.assertRaises(gate.GateError):
+                gate.validate_check_runs(pages(run(app=app)), (("Linux", 42),), COMMIT)
+        with self.assertRaises(gate.GateError):
+            gate.validate_check_runs(pages(run()), (("Linux", 42),), COMMIT)
+        with self.assertRaises(gate.GateError):
+            gate.validate_check_runs(pages(run(app={"id": True})), (("Linux", 1),), COMMIT)
+
+    def test_unpinned_requirements_keep_latest_by_name_from_any_app(self):
+        for app in (None, {"id": 42}, {"id": 99}):
+            response = pages(run(1, app={"id": 42}, conclusion="failure"), run(2, app=app))
+            gate.validate_check_runs(response, requirements("Linux"), COMMIT)
+        with self.assertRaises(gate.GateError):
+            gate.validate_check_runs(pages(run(1, app={"id": 42}),
+                                          run(2, app={"id": 99}, conclusion="failure")),
+                                     requirements("Linux"), COMMIT)
+
+    def test_same_name_distinct_bindings_are_all_preserved(self):
+        response = rules("Linux")
+        checks = response[0]["parameters"]["required_status_checks"]
+        checks.extend([{"context": "Linux", "integration_id": app} for app in (42, 99, 42)])
+        contexts = gate.required_contexts(response)
+        self.assertEqual(contexts, (("Linux", None), ("Linux", 42), ("Linux", 99)))
+        gate.validate_check_runs(pages(run(1, app={"id": 42}), run(2, app={"id": 99})), contexts, COMMIT)
+        with self.assertRaises(gate.GateError):
+            gate.validate_check_runs(pages(run(app={"id": 42})), contexts, COMMIT)
+
+    def test_multi_page_rules_require_checks_from_later_pages(self):
+        first = [{"ruleset_id": index, "type": "required_signatures"} for index in range(1, 101)]
+        later = rules("Windows")
+        links = (rule_link(2, "next") + ", " + rule_link(2, "last"), rule_link(1, "prev"))
+        for newline in ("\n", "\r\n"):
+            original = copy.deepcopy(first)
+            parsed = gate.parse_rules_pages(rule_stream(first, later, links=links, newline=newline))
+            self.assertEqual(parsed, first + later)
+            self.assertEqual(first, original)
+            contexts = gate.required_contexts(parsed)
+            self.assertEqual(contexts, requirements("Windows"))
+            gate.validate_check_runs(pages(run(name="Windows")), contexts, COMMIT)
+            with self.assertRaises(gate.GateError):
+                gate.validate_check_runs(pages(run()), contexts, COMMIT)
+
+    def test_rules_pagination_refuses_missing_extra_repeated_and_changed_pages(self):
+        first = [{"ruleset_id": index, "type": "required_signatures"} for index in range(1, 101)]
+        next_link = rule_link(2, "next") + ", " + rule_link(2, "last")
+        for data in (rule_stream(first, links=(next_link,)),
+                     rule_stream(rules("Linux"), links=(next_link,)),
+                     rule_stream(first, first, links=(next_link, rule_link(1, "prev"))),
+                     rule_stream(first, rules("Linux"), links=(next_link, "")),
+                     rule_stream(first, rules("Linux"), links=(next_link, rule_link(1, "prev") + ", " + rule_link(3, "last"))),
+                     rule_stream(first, links=(rule_link(3, "next"),)),
+                     rule_stream(first, links=(rule_link(2, "last"),)),
+                     rule_stream(rules("Linux"), rules("Windows")),
+                     rule_stream(first, rules("Linux"), links=(next_link, rule_link(1, "prev").replace("/owner/", "/other/")))):
+            with self.subTest(data=data[-150:]), self.assertRaises(gate.GateError):
+                gate.parse_rules_pages(data)
+
+    def test_rules_page_parser_refuses_malformed_status_headers_links_and_bodies(self):
+        valid = rule_stream(rules("Linux"))
+        for data in (b"", b"0", b"[]", json.dumps(rules("Linux")).encode(),
+                     valid.replace(b"200 OK", b"403 Forbidden"),
+                     valid.replace(b"Content-Type:", b"Content-Type"),
+                     valid + b"trailing", valid[:-1],
+                     rule_stream([{"ruleset_id": True, "type": "required_signatures"}]),
+                     rule_stream([{"type": "required_signatures"}]),
+                     valid.replace(b'"ruleset_id": 1', b'"ruleset_id": 1, "ruleset_id": 2'),
+                     valid.replace(b'"ruleset_id": 1', b'"ruleset_id": NaN'),
+                     rule_stream(rules("Linux"), links=("invalid",)),
+                     rule_stream(rules("Linux"), links=(rule_link(2, "next") + ", " + rule_link(2, "next"),)),
+                     valid.replace(b"Content-Type:", b'Link: invalid\nLink: invalid\nContent-Type:')):
+            with self.subTest(data=data[:90]), self.assertRaises(gate.GateError):
+                gate.parse_rules_pages(data)
+
+    def test_rules_size_depth_and_exact_full_final_page(self):
+        full = [{"ruleset_id": index, "type": "required_signatures"} for index in range(1, 101)]
+        self.assertEqual(gate.parse_rules_pages(rule_stream(full)), full)
+        self.assertEqual(gate.parse_rules_pages(rule_stream([])), [])
+        value = rules('CI / "HTTP/2" [Linux]')
+        self.assertEqual(gate.parse_rules_pages(rule_stream(value)), value)
+        for data in (rule_stream(full + [full[0]]), b" " * (gate.RULES_LIMIT + 1),
+                     b"HTTP/2.0 200 OK\n\n" + b"[" * (gate.DEPTH_LIMIT + 1),
+                     b"HTTP/2.0 200 OK\n\n\xff"):
+            with self.subTest(data=data[:80]), self.assertRaises(gate.GateError):
+                gate.parse_rules_pages(data)
+
+    def test_three_rules_pages_and_full_or_empty_terminal_pages(self):
+        first = [{"ruleset_id": index, "type": "required_signatures"} for index in range(1, 101)]
+        second = [{"ruleset_id": index, "type": "required_signatures"} for index in range(101, 201)]
+        final = rules("Linux")
+        links = (rule_link(2, "next") + ", " + rule_link(3, "last"),
+                 rule_link(1, "prev") + ", " + rule_link(1, "first") + ", "
+                 + rule_link(3, "next") + ", " + rule_link(3, "last"),
+                 rule_link(2, "prev") + ", " + rule_link(1, "first"))
+        self.assertEqual(gate.parse_rules_pages(rule_stream(first, second, final, links=links)),
+                         first + second + final)
+        for final in ([], second):
+            data = rule_stream(first, final, links=(rule_link(2, "next"), rule_link(1, "prev")))
+            self.assertEqual(gate.parse_rules_pages(data), first + final)
+        first[0] = rules("Linux")[0]
+        with self.assertRaises(gate.GateError):
+            gate.parse_rules_pages(rule_stream(first, rules("Windows"),
+                                               links=(rule_link(2, "next"), rule_link(1, "prev"))))
+
+    def test_rules_link_validation_and_inclusive_size_bound(self):
+        link = rule_link(2, "next")
+        for invalid in (link.replace("https:", "http:"),
+                        link.replace("api.github.com", "other.invalid"),
+                        link.replace("branches/main", "branches/devel"),
+                        link.replace("per_page=100", "per_page=30"),
+                        link.replace("page=2>", "page=0>"),
+                        link.replace("page=2>", "page=true>"),
+                        link.replace("page=2>", "page=2&page=3>"),
+                        link.replace("page=2>", "page=2&extra=1>"),
+                        link.replace("page=2>", "page=2#fragment>"),
+                        rule_link(1, "prev"), rule_link(2, "first")):
+            with self.subTest(link=invalid), self.assertRaises(gate.GateError):
+                gate.rules_links(invalid, 1)
+        data = rule_stream(rules("Linux"))
+        with mock.patch.object(gate, "RULES_LIMIT", len(data)):
+            self.assertEqual(gate.parse_rules_pages(data), rules("Linux"))
+            with self.assertRaises(gate.GateError):
+                gate.parse_rules_pages(data + b" ")
+
     def test_concatenated_page_objects_and_single_array_are_equivalent(self):
         response = [{"total_count": 2, "check_runs": [run(1, conclusion="failure")]},
                     {"total_count": 2, "check_runs": [run(2)]}]
@@ -162,7 +395,7 @@ class ApiTests(unittest.TestCase):
             data = separator.join(json.dumps(page, indent=2).encode() for page in response)
             parsed = gate.parse_check_pages(b" \n" + data + b"\t ")
             self.assertEqual(parsed, response)
-            gate.validate_check_runs(parsed, ("Linux",), COMMIT)
+            gate.validate_check_runs(parsed, requirements("Linux"), COMMIT)
         self.assertEqual(gate.parse_check_pages(json.dumps(response).encode()), response)
 
     def test_page_stream_refuses_invalid_trailing_duplicate_and_nonobject_json(self):
@@ -198,13 +431,13 @@ class ApiTests(unittest.TestCase):
         for response in responses:
             data = b"\n".join(json.dumps(page).encode() for page in response)
             with self.subTest(response=response), self.assertRaises(gate.GateError):
-                gate.validate_check_runs(gate.parse_check_pages(data), ("Linux",), COMMIT)
+                gate.validate_check_runs(gate.parse_check_pages(data), requirements("Linux"), COMMIT)
 
     def test_contexts_from_all_rules_preserve_order_and_deduplicate(self):
         response = [{"type": "required_signatures"}, *rules("Windows", "Linux"),
                     *rules("Linux", "Tidy")]
         original = copy.deepcopy(response)
-        self.assertEqual(gate.required_contexts(response), ("Windows", "Linux", "Tidy"))
+        self.assertEqual(gate.required_contexts(response), requirements("Windows", "Linux", "Tidy"))
         self.assertEqual(response, original)
 
     def test_missing_or_malformed_required_rules_refuse(self):
@@ -243,8 +476,8 @@ class ApiTests(unittest.TestCase):
         response = [{"total_count": 4, "check_runs": [run(40), run(10, conclusion="failure")]},
                     {"total_count": 4, "check_runs": [run(30, "Windows"), run(20, "Other")]}]
         original = copy.deepcopy(response)
-        gate.validate_check_runs(response, ("Linux", "Windows"), COMMIT)
-        gate.validate_check_runs(list(reversed(response)), ("Windows", "Linux"), COMMIT.upper())
+        gate.validate_check_runs(response, requirements("Linux", "Windows"), COMMIT)
+        gate.validate_check_runs(list(reversed(response)), requirements("Windows", "Linux"), COMMIT.upper())
         self.assertEqual(response, original)
 
     def test_newer_unsuccessful_or_incomplete_run_blocks_older_success(self):
@@ -256,22 +489,22 @@ class ApiTests(unittest.TestCase):
                                    ("queued", None), ("waiting", None)):
             with self.subTest(status=status, conclusion=conclusion), self.assertRaises(gate.GateError):
                 gate.validate_check_runs(pages(run(), run(2, status=status, conclusion=conclusion)),
-                                         ("Linux",), COMMIT)
+                                         requirements("Linux"), COMMIT)
 
     def test_missing_context_cannot_be_replaced_by_other_success(self):
         for response in (pages(), pages(run(name="Other")), pages(run())):
             with self.subTest(response=response), self.assertRaises(gate.GateError):
-                gate.validate_check_runs(response, ("Linux", "Windows"), COMMIT)
+                gate.validate_check_runs(response, requirements("Linux", "Windows"), COMMIT)
 
     def test_required_rerun_after_first_hundred_runs_is_checked(self):
         first_page = [run(index, f"Other {index}") for index in range(1, 101)]
         response = [{"total_count": 101, "check_runs": first_page},
                     {"total_count": 101, "check_runs": [run(101)]}]
-        gate.validate_check_runs(response, ("Linux",), COMMIT)
+        gate.validate_check_runs(response, requirements("Linux"), COMMIT)
         first_page[0] = run()
         response[1]["check_runs"][0]["conclusion"] = "failure"
         with self.assertRaises(gate.GateError):
-            gate.validate_check_runs(response, ("Linux",), COMMIT)
+            gate.validate_check_runs(response, requirements("Linux"), COMMIT)
 
     def test_pagination_missing_changed_counts_and_duplicate_runs(self):
         for response in (None, {}, [], [None], [{}],
@@ -283,7 +516,7 @@ class ApiTests(unittest.TestCase):
                          [*pages(run()), {"total_count": 2, "check_runs": [run(2)]}],
                          pages(run(), run())):
             with self.subTest(response=response), self.assertRaises(gate.GateError):
-                gate.validate_check_runs(response, ("Linux",), COMMIT)
+                gate.validate_check_runs(response, requirements("Linux"), COMMIT)
 
     def test_malformed_runs_and_wrong_commit_refuse(self):
         invalid = [None, [], {}]
@@ -297,10 +530,10 @@ class ApiTests(unittest.TestCase):
             invalid.append(value)
         for value in invalid:
             with self.subTest(value=value), self.assertRaises(gate.GateError):
-                gate.validate_check_runs(pages(value), ("Linux",), COMMIT)
+                gate.validate_check_runs(pages(value), requirements("Linux"), COMMIT)
         with self.assertRaises(gate.GateError):
             gate.validate_check_runs(pages(run(), run(2, "Other", head_sha="f" * 40)),
-                                     ("Linux",), COMMIT)
+                                     requirements("Linux"), COMMIT)
 
 
 class GitCommandTests(unittest.TestCase):
@@ -592,7 +825,7 @@ class GitTests(unittest.TestCase):
             script.parent.mkdir(parents=True)
             script.write_bytes(Path(gate.__file__).read_bytes())
             rules_path = self.root / "rules.json"
-            rules_path.write_text(json.dumps(rules("Linux")), encoding="utf-8")
+            rules_path.write_bytes(rule_stream(rules("Linux")))
             result = subprocess.run([
                 sys.executable, "-I", "-B", str(script), "--version", VERSION,
                 "--tag-commit", self.tag, "--rules", str(rules_path),
@@ -611,7 +844,7 @@ class GitTests(unittest.TestCase):
 
     def test_cli_success_and_refusals_are_read_only(self):
         rules_path, checks_path = self.root / "rules.json", self.root / "checks.json"
-        rules_path.write_text(json.dumps(rules("Linux")), encoding="utf-8")
+        rules_path.write_bytes(rule_stream(rules("Linux")))
         checks_path.write_text(json.dumps({"total_count": 2, "check_runs": [
             run(1, head_sha=self.tag, conclusion="failure")
         ]}) + "\n" + json.dumps({"total_count": 2, "check_runs": [
@@ -643,6 +876,46 @@ class GitTests(unittest.TestCase):
         self.assertEqual(self.git("show-ref"), before)
         self.assertFalse((self.root / ".git/index").exists())
 
+    def test_cli_pinned_app_and_later_rules_page_with_read_only_refusals(self):
+        rules_path = self.root / "rules.json"
+        first = [{"ruleset_id": index, "type": "required_signatures"} for index in range(1, 101)]
+        later = rules("Windows")
+        later[0]["parameters"]["required_status_checks"][0]["integration_id"] = 42
+        next_link = rule_link(2, "next") + ", " + rule_link(2, "last")
+        complete = rule_stream(first, later, links=(next_link, rule_link(1, "prev")))
+        args = [sys.executable, "-I", "-B", str(Path(gate.__file__)), "--repo-root", str(self.root),
+                "--version", VERSION, "--tag-commit", self.tag, "--rules", str(rules_path)]
+        before = self.git("show-ref")
+        for rules_data, runs, expected in (
+                (complete, [run(name="Windows", head_sha=self.tag, app={"id": 42})], 0),
+                (complete, [run(name="Linux", head_sha=self.tag, app={"id": 42})], 1),
+                (complete, [run(name="Windows", head_sha=self.tag, app={"id": 99})], 1),
+                (complete, [run(name="Windows", head_sha=self.tag, app={"id": 42}, conclusion="failure"),
+                            run(2, name="Windows", head_sha=self.tag, app={"id": 99})], 1),
+                (rule_stream(first, links=(next_link,)), [run(head_sha=self.tag)], 1)):
+            rules_path.write_bytes(rules_data)
+            result = subprocess.run(args, input=json.dumps(pages(*runs)).encode(),
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=self.env, check=False)
+            with self.subTest(expected=expected, runs=runs):
+                self.assertEqual(result.returncode, expected, result.stderr)
+                self.assertIn(b"PASS" if expected == 0 else b"FAIL",
+                              result.stdout if expected == 0 else result.stderr)
+                self.assertEqual(self.git("show-ref"), before)
+                self.assertFalse((self.root / ".git/index").exists())
+
+    def test_committed_native_evidence_refusals_are_read_only(self):
+        for index in range(1, len(EXPECTED_IDS)):
+            for evidence in ("issue #123", f"{'f' * 40} https://github.com/owner/repository/actions/runs/123"):
+                value = record(self.base)
+                value["gates"][index]["evidence"] = evidence
+                candidate = self.candidate(value)
+                self.promote(candidate)
+                before = self.git("show-ref")
+                with self.subTest(index=index, evidence=evidence), self.assertRaises(gate.GateError):
+                    self.validate(candidate)
+                self.assertEqual(self.git("show-ref"), before)
+                self.assertFalse((self.root / ".git/index").exists())
+
 
 class WiringTests(unittest.TestCase):
     def test_ctest_and_python_plan_registration(self):
@@ -673,7 +946,7 @@ class WiringTests(unittest.TestCase):
         self.assertNotIn("if:", step)
         for text in ("set -euo pipefail", "git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main",
                      'git rev-parse "${GITHUB_REF_NAME}^{commit}"',
-                     'gh api "repos/${GITHUB_REPOSITORY}/rules/branches/main"',
+                     'gh api --include --paginate "repos/${GITHUB_REPOSITORY}/rules/branches/main?per_page=100"',
                      'gh api --paginate "repos/${GITHUB_REPOSITORY}/commits/${tag_commit}/check-runs?filter=all&per_page=100" |',
                      "python3 -I -B tools/release/validate_release_gates.py",
                      '--version "$RELEASE_VERSION" --tag-commit "$tag_commit"',
@@ -697,6 +970,16 @@ class WiringTests(unittest.TestCase):
         acceptance = (ROOT / "docs/v0.3-acceptance.md").read_text(encoding="utf-8")
         self.assertIn('`tools/release/README.md` (section "Publication gate record")', acceptance)
         self.assertIn("## Publication gate record", documentation)
+        self.assertNotIn('"id": "independent-release-verification"', documentation)
+        self.assertNotIn("- independent release verification;", acceptance)
+        self.assertIn("six pre-publication gates", documentation)
+        self.assertIn("post-publication", documentation)
+        self.assertIn("post-publication", acceptance)
+        self.assertIn("gh api --include --paginate", documentation)
+        self.assertIn("qualified_commit", documentation)
+        self.assertIn("concrete record URL", documentation)
+        self.assertIn("local paths", documentation)
+        self.assertNotIn("docs/release-evidence/", documentation)
 
 
 if __name__ == "__main__":

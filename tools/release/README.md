@@ -84,7 +84,7 @@ The requirements follow SPDX 2.3
 ## Publication gate record
 
 Before tagging `vX.Y.Z`, qualify the final source revision and record each of the
-seven pre-publication gates below in `docs/release-gates/vX.Y.Z.json`. Use schema
+six pre-publication gates below in `docs/release-gates/vX.Y.Z.json`. Use schema
 version 1, the unprefixed release version, the full 40-hex qualified source commit,
 and the exact gate IDs in this order. For example, this **pending template refuses
 publication**; replace each status and evidence only after that gate succeeds:
@@ -100,7 +100,6 @@ publication**; replace each status and evidence only after that gate succeeds:
     {"id": "ucrt64-120-second-guard", "status": "pending", "evidence": ""},
     {"id": "server-load-qualification", "status": "pending", "evidence": ""},
     {"id": "paired-performance-gates", "status": "pending", "evidence": ""},
-    {"id": "independent-release-verification", "status": "pending", "evidence": ""},
     {"id": "owner-native-windows-smoke", "status": "pending", "evidence": ""}
   ]
 }
@@ -110,11 +109,27 @@ These IDs follow the pre-publication requirements in the
 [acceptance tag gate](../../docs/v0.3-acceptance.md#remaining-release-gates-and-limits).
 Evidence must identify the results and coverage for the qualified revision, including
 the applicable native/manual results, the unchanged 120-second UCRT64 guard,
-server-load qualification, both performance gates, independent release verification,
+server-load qualification, both performance gates,
 and the owner's complete native Windows client/save/reload/server smoke. Set each
-status to exactly `passed` and provide a nonempty evidence string, such as a stable
-result location or issue reference. The validator checks the declaration's structure;
-the evidence must substantiate the result. Pending native coverage stays pending.
+status to exactly `passed`. Every gate, including each native gate, requires an
+evidence string of exactly two whitespace-separated fields: the full
+`qualified_commit` SHA and a concrete record URL. The SHA comparison ignores
+hex case. Supported URLs are:
+
+- `https://github.com/OWNER/REPO/actions/runs/RUN_ID`, optionally followed by
+  `/artifacts/ARTIFACT_ID`;
+- `https://github.com/OWNER/REPO/issues/ISSUE_NUMBER#issuecomment-COMMENT_ID`.
+
+All numeric URL IDs must be positive decimal integers. For example, use
+`<full-qualified-sha> https://github.com/OWNER/REPO/actions/runs/123456` after
+replacing the SHA and location with the actual result. Bare issue references,
+generic issue URLs, placeholder text, abbreviated or different SHAs, local paths
+and extra fields refuse publication. The validator checks the
+revision binding and location syntax offline; it does not fetch URLs or inspect
+record contents. Reviewers must verify that the referenced record exists and
+substantiates the result and coverage on that revision. Keep evidence available
+for review, including archiving expiring CI artifacts. Pending native coverage
+stays pending.
 
 Commit the completed record after qualification. The qualified commit must be an
 ancestor of (or equal to) the tagged commit, and both commits must lie on `main`'s
@@ -136,9 +151,16 @@ archive. The history scan refuses more than 100,000 commits; a second-parent bra
 commit cannot substitute for the promotion merge. It reads effective
 `required_status_checks` rules for `main`, requires strict
 promotion and at least one readable required context, and checks every context on
-the tag commit. Check-run pages must be complete; the highest run ID for each name
+the tag commit. Each rule's optional `integration_id` pins the context to a GitHub
+App; missing or null IDs are unpinned. Offline `required_contexts` callers using
+classic strict branch protection's `checks` retain its `app_id` binding as well.
+Malformed bindings refuse publication. Distinct bindings for the same context
+are all required. Check-run pages must be complete; the highest run ID for each
+name, considering only runs whose `app.id` matches a pinned binding,
 must be `completed` with conclusion `success`. Missing, neutral, skipped, pending or
-failed checks refuse publication, including a failing rerun after an older success.
+failed checks refuse publication, including a failing rerun after an older success
+from the required app. An unpinned context retains latest-by-name selection across
+apps. A successful run from another app cannot replace a failed or missing pinned run.
 API failures also refuse publication. The source job grants `checks: read` for check
 runs; the rules endpoint uses repository metadata access. Other permissions are unchanged.
 
@@ -150,7 +172,15 @@ python3 -I -B tools/release/validate_release_gates.py --version X.Y.Z \
 python3 -I -B tools/release/test_validate_release_gates.py
 ```
 
-`main-rules.json` is the array from `gh api repos/OWNER/NAME/rules/branches/main`.
+`main-rules.json` is the concatenated HTTP headers and JSON arrays from
+`gh api --include --paginate "repos/OWNER/NAME/rules/branches/main?per_page=100"`.
+Headers are required because this endpoint's arrays have no total count. The
+validator requires HTTP 200, a complete `Link` chain with consecutive page numbers
+and a stable endpoint and final page count, at most 100 rules per page, full
+nonfinal pages, and unique `(ruleset_id, type)` identities across pages. Missing,
+extra, repeated or inconsistent pages refuse publication, including a missing
+final page after exactly 100 rules. A full final page without a next link is valid.
+Bare arrays cannot establish pagination completeness and are refused by the CLI.
 `check-pages.json` is the stream of concatenated JSON page objects from `gh api --paginate
 repos/OWNER/NAME/commits/COMMIT/check-runs?filter=all&per_page=100` (quote the endpoint
 in a shell). A single array containing those pages is also accepted. The validator

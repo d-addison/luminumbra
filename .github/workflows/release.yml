@@ -49,7 +49,7 @@ jobs:
           set -euo pipefail
           git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
           tag_commit=$(git rev-parse "${GITHUB_REF_NAME}^{commit}")
-          gh api "repos/${GITHUB_REPOSITORY}/rules/branches/main" > "${RUNNER_TEMP}/release-rules.json"
+          gh api --include --paginate "repos/${GITHUB_REPOSITORY}/rules/branches/main?per_page=100" > "${RUNNER_TEMP}/release-rules.json"
           gh api --paginate "repos/${GITHUB_REPOSITORY}/commits/${tag_commit}/check-runs?filter=all&per_page=100" |
             python3 -I -B tools/release/validate_release_gates.py \
               --version "$RELEASE_VERSION" --tag-commit "$tag_commit" \

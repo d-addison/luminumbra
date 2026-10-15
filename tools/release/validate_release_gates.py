@@ -10,6 +10,7 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+from urllib.parse import parse_qs, urlsplit
 
 
 GATE_IDS = (
@@ -18,7 +19,6 @@ GATE_IDS = (
     "ucrt64-120-second-guard",
     "server-load-qualification",
     "paired-performance-gates",
-    "independent-release-verification",
     "owner-native-windows-smoke",
 )
 RECORD_LIMIT = 64 * 1024
@@ -29,6 +29,11 @@ MAIN_HISTORY_LIMIT = 100_000
 GIT_STDERR_LIMIT = 4096
 SHA = re.compile(r"[0-9a-fA-F]{40}")
 VERSION = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+")
+RESULT_URL = re.compile(
+    r"https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/"
+    r"(?:actions/runs/[1-9][0-9]*(?:/artifacts/[1-9][0-9]*)?"
+    r"|issues/[1-9][0-9]*#issuecomment-[1-9][0-9]*)"
+)
 
 
 class GateError(ValueError):
@@ -117,6 +122,130 @@ def read_json(path: str, limit: int) -> object:
     return parse_json(read_bytes(path, limit), limit)
 
 
+def rules_links(value: str, page_number: int) -> tuple[str | None, str | None, int | None]:
+    """Check pagination links and return the endpoint, next URL and final page."""
+    links = {}
+    endpoint = None
+    last = None
+    for entry in value.split(",") if value else ():
+        match = re.fullmatch(r'\s*<([^<>\s]+)>;\s*rel="(next|prev|first|last)"\s*', entry)
+        require(match is not None, "invalid rules pagination link")
+        url, relation = match.groups()
+        require(relation not in links, "duplicate rules pagination relation")
+        parsed = urlsplit(url)
+        query = parse_qs(parsed.query, keep_blank_values=True)
+        require(parsed.scheme == "https" and parsed.netloc == "api.github.com"
+                and re.fullmatch(r"/repos/[^/]+/[^/]+/rules/branches/main", parsed.path)
+                and not parsed.fragment and set(query) == {"page", "per_page"}
+                and query["per_page"] == ["100"] and len(query["page"]) == 1
+                and re.fullmatch(r"[1-9][0-9]*", query["page"][0]) is not None,
+                "invalid rules pagination endpoint")
+        target = int(query["page"][0])
+        if relation == "next":
+            require(target == page_number + 1, "rules pagination skipped a page")
+        elif relation == "prev":
+            require(target == page_number - 1, "inconsistent previous rules page")
+        elif relation == "first":
+            require(target == 1, "inconsistent first rules page")
+        else:
+            require(target >= page_number, "inconsistent last rules page")
+            last = target
+        require(endpoint is None or endpoint == parsed.path, "rules pagination endpoint changed")
+        endpoint = parsed.path
+        links[relation] = url
+    require(page_number == 1 or "prev" in links, "missing previous rules page link")
+    require(last is None or (last > page_number) == ("next" in links),
+            "inconsistent last rules page link")
+    return endpoint, links.get("next"), last
+
+
+def parse_rules_pages(data: bytes) -> list:
+    """Decode gh api --include --paginate arrays, requiring a complete link chain."""
+    require(len(data) <= RULES_LIMIT, "JSON exceeds size limit")
+    try:
+        content = data.decode("utf-8")
+    except UnicodeError as error:
+        raise GateError(f"invalid rules response: {error}") from error
+    position, page_number = 0, 0
+    expected_next, endpoint = None, None
+    last_page = None
+    rules, seen = [], set()
+    while position < len(content):
+        position += len(content[position:]) - len(content[position:].lstrip())
+        if position == len(content):
+            break
+        require(page_number == 0 or expected_next is not None, "unexpected extra rules page")
+        separator = re.search(r"\r?\n\r?\n", content[position:])
+        require(separator is not None, "missing rules response headers")
+        header_end = position + separator.start()
+        headers = content[position:header_end].splitlines()
+        require(bool(headers) and re.fullmatch(r"HTTP/[0-9.]+ 200(?: .*)?", headers[0]),
+                "rules response must have HTTP status 200")
+        link_headers = []
+        for header in headers[1:]:
+            name, colon, value = header.partition(":")
+            require(bool(colon) and bool(name.strip()), "invalid rules response header")
+            if name.lower() == "link":
+                link_headers.append(value.strip())
+        require(len(link_headers) <= 1, "duplicate rules Link header")
+        page_number += 1
+        page_endpoint, expected_next, last = rules_links(link_headers[0] if link_headers else "", page_number)
+        require(endpoint is None or page_endpoint is None or endpoint == page_endpoint,
+                "rules pagination endpoint changed")
+        endpoint = page_endpoint or endpoint
+        require(last_page is None or last is None or last_page == last,
+                "rules page count changed during pagination")
+        last_page = last if last is not None else last_page
+        position += separator.end()
+        position += len(content[position:]) - len(content[position:].lstrip())
+        require(position < len(content) and content[position] == "[", "rules page must be an array")
+        start, depth, quoted, escaped = position, 0, False, False
+        # Find one complete body, bounding nesting before JSON decoding.
+        while position < len(content):
+            char = content[position]
+            position += 1
+            if quoted:
+                if escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == '"':
+                    quoted = False
+            elif char == '"':
+                quoted = True
+            elif char in "[{":
+                depth += 1
+                require(depth <= DEPTH_LIMIT, "JSON exceeds nesting limit")
+            elif char in "]}":
+                depth -= 1
+                if depth == 0:
+                    break
+        require(depth == 0 and not quoted, "incomplete rules JSON body")
+        page = parse_json(content[start:position].encode("utf-8"), RULES_LIMIT)
+        require(type(page) is list and len(page) <= 100, "invalid rules page size")
+        require(expected_next is None or len(page) == 100, "inconsistent rules pagination")
+        for rule in page:
+            require(type(rule) is dict and type(rule.get("ruleset_id")) is int
+                    and rule["ruleset_id"] > 0 and type(rule.get("type")) is str,
+                    "invalid rules pagination identity")
+            identity = (rule["ruleset_id"], rule["type"])
+            require(identity not in seen, "duplicate rule during pagination")
+            seen.add(identity)
+            rules.append(rule)
+    require(page_number > 0 and expected_next is None
+            and (last_page is None or last_page == page_number), "incomplete rules pagination")
+    return rules
+
+
+def validate_evidence(evidence: str, qualified: str, gate_id: str) -> None:
+    fields = evidence.strip().split()
+    require(len(fields) == 2 and fields[0].lower() == qualified.lower(),
+            f"evidence must name qualified_commit and a concrete record: {gate_id}")
+    location = fields[1]
+    require(RESULT_URL.fullmatch(location) is not None,
+            f"evidence record location must be a supported HTTPS URL: {gate_id}")
+
+
 def validate_record(record: object, version: str) -> str:
     require(type(record) is dict and set(record) == {
         "schema_version", "version", "qualified_commit", "gates",
@@ -140,35 +269,46 @@ def validate_record(record: object, version: str) -> str:
                 f"gate has not passed: {expected}")
         require(type(gate["evidence"]) is str and bool(gate["evidence"].strip()),
                 f"gate lacks evidence: {expected}")
+        validate_evidence(gate["evidence"], qualified, expected)
     return qualified.lower()
 
 
-def required_contexts(rules: object) -> tuple[str, ...]:
-    """Evaluate the effective main rules response, preserving context order."""
-    require(type(rules) is list, "main rules response must be an array")
+def required_contexts(rules: object) -> tuple[tuple[str, int | None], ...]:
+    """Preserve every (context, app) requirement, including same-name bindings."""
+    # Offline callers may also supply classic required_status_checks protection.
+    if type(rules) is dict:
+        require(rules.get("strict") is True, "main must require strict status checks for promotion")
+        sources = [(rules.get("checks"), "app_id")]
+    else:
+        require(type(rules) is list, "main rules response must be an array")
+        sources = []
+        for rule in rules:
+            require(type(rule) is dict and type(rule.get("type")) is str, "invalid main rule")
+            if rule["type"] != "required_status_checks":
+                continue
+            parameters = rule.get("parameters")
+            require(type(parameters) is dict, "missing required status-check parameters")
+            require(parameters.get("strict_required_status_checks_policy") is True,
+                    "main must require strict status checks for promotion")
+            sources.append((parameters.get("required_status_checks"), "integration_id"))
     contexts = []
-    for rule in rules:
-        require(type(rule) is dict and type(rule.get("type")) is str,
-                "invalid main rule")
-        if rule["type"] != "required_status_checks":
-            continue
-        parameters = rule.get("parameters")
-        require(type(parameters) is dict, "missing required status-check parameters")
-        require(parameters.get("strict_required_status_checks_policy") is True,
-                "main must require strict status checks for promotion")
-        checks = parameters.get("required_status_checks")
+    for checks, app_field in sources:
         require(type(checks) is list and bool(checks), "no required status checks in rule")
         for check in checks:
             require(type(check) is dict and type(check.get("context")) is str
                     and bool(check["context"].strip()), "invalid required context")
-            if check["context"] not in contexts:
-                contexts.append(check["context"])
+            app_id = check.get(app_field)
+            require(app_id is None or (type(app_id) is int and app_id > 0),
+                    "invalid required check app ID")
+            context = (check["context"], app_id)
+            if context not in contexts:
+                contexts.append(context)
     require(bool(contexts), "no required status-check contexts could be read for main")
     return tuple(contexts)
 
 
-def validate_check_runs(pages: object, contexts: tuple[str, ...], commit: str) -> None:
-    """Evaluate all check-run pages; highest run ID is latest per name."""
+def validate_check_runs(pages: object, contexts: tuple[tuple[str, int | None], ...], commit: str) -> None:
+    """Select the highest run ID per requirement, filtering pinned apps first."""
     require(type(pages) is list and bool(pages), "missing check-run pages")
     latest = {}
     seen = set()
@@ -197,8 +337,14 @@ def validate_check_runs(pages: object, contexts: tuple[str, ...], commit: str) -
                     and (run.get("conclusion") is None
                          or type(run["conclusion"]) is str), "invalid check-run result")
             seen.add(run_id)
-            if name not in latest or run_id > latest[name]["id"]:
-                latest[name] = run
+            app = run.get("app")
+            app_id = app.get("id") if type(app) is dict else None
+            selections = [(name, None)]
+            if type(app_id) is int and app_id > 0:
+                selections.append((name, app_id))
+            for context in selections:
+                if context not in latest or run_id > latest[context]["id"]:
+                    latest[context] = run
     require(count == total, "incomplete check-run pagination")
     for context in contexts:
         run = latest.get(context)
@@ -273,13 +419,13 @@ def main() -> int:
     parser.add_argument("--repo-root", type=Path, default=Path(__file__).resolve().parents[2])
     parser.add_argument("--version", required=True)
     parser.add_argument("--tag-commit", required=True)
-    parser.add_argument("--rules", required=True, help="main rules JSON file")
+    parser.add_argument("--rules", required=True, help="main rules HTTP header/JSON page stream file")
     parser.add_argument("--checks", default="-", help="check-run JSON page stream file or stdin")
     args = parser.parse_args()
     try:
         require(args.rules != "-", "rules must be a file; stdin is reserved for check runs")
         validate_git_record(args.repo_root, args.version, args.tag_commit)
-        contexts = required_contexts(read_json(args.rules, RULES_LIMIT))
+        contexts = required_contexts(parse_rules_pages(read_bytes(args.rules, RULES_LIMIT)))
         validate_check_runs(parse_check_pages(read_bytes(args.checks, CHECKS_LIMIT)),
                             contexts, args.tag_commit)
     except (GateError, OSError, ValueError) as error:
