@@ -59,7 +59,7 @@ private:
     bool Send(bool isA, const std::vector<std::uint8_t>& f, FrameDelivery d) {
         const bool selfOpen = isA ? m_aOpen : m_bOpen;
         const bool peerOpen = isA ? m_bOpen : m_aOpen;
-        if (!selfOpen || !peerOpen)
+        if (f.size() > kMaxFramePayloadBytes || !selfOpen || !peerOpen)
             return false;
         const std::uint64_t seq = m_seq++;
         // Loss: UNRELIABLE only, deterministic from the seq.

@@ -127,13 +127,24 @@ std::vector<std::uint8_t> EncodeUsercmd(const UsercmdMsg& m) {
 }
 
 std::vector<std::uint8_t> EncodeSnapshot(const SnapshotMsg& m) {
+    return EncodeSnapshot(m, m.entities);
+}
+
+std::vector<std::uint8_t> EncodeSnapshot(const SnapshotMsg& m,
+                                         const std::vector<ReplEntityState>& entities) {
+    // Encode directly into the final frame. Reserve the fixed-width wire size so
+    // large snapshots need neither vector growth nor a second payload buffer.
+    const std::size_t payload_size = 32u + 23u * entities.size() + 4u * m.removed_ids.size();
     std::vector<std::uint8_t> p;
+    p.reserve(5u + payload_size);
+    PutU8(p, static_cast<std::uint8_t>(ReplMessageType::Snapshot));
+    PutU32(p, static_cast<std::uint32_t>(payload_size));
     PutU64(p, m.server_tick);
     PutU32(p, m.snapshot_seq);
     PutU32(p, m.delta_from_seq);
     PutU64(p, m.acked_usercmd_tick);
-    PutU32(p, static_cast<std::uint32_t>(m.entities.size()));
-    for (const ReplEntityState& e : m.entities) {
+    PutU32(p, static_cast<std::uint32_t>(entities.size()));
+    for (const ReplEntityState& e : entities) {
         PutU32(p, e.entity_id);
         PutI32(p, e.px_mm);
         PutI32(p, e.py_mm);
@@ -148,7 +159,7 @@ std::vector<std::uint8_t> EncodeSnapshot(const SnapshotMsg& m) {
     for (std::uint32_t id : m.removed_ids) {
         PutU32(p, id);
     }
-    return Frame(ReplMessageType::Snapshot, p);
+    return p;
 }
 
 std::vector<std::uint8_t> EncodeAck(const AckMsg& m) {

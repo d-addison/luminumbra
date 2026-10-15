@@ -181,10 +181,10 @@ public:
     // policy is off or the client keeps up.
     [[nodiscard]] std::uint64_t ForcedKeyframes(std::uint32_t client_id) const;
 
-    // client ids the backpressure policy DISCONNECTED during the most recent
-    // BroadcastSnapshot (hopeless peers that never drained past the deadline). Consume this
+    // Client ids disconnected during the most recent
+    // BroadcastSnapshot (oversized frames, lost peers, or the backpressure deadline). Consume this
     // exactly like PruneDisconnectedClients' return -- despawn/free the player's server-side
-    // state. Empty when the policy is off or nobody was dropped.
+    // state. Empty when nobody was dropped.
     [[nodiscard]] const std::vector<std::uint32_t>& DisconnectedClientsLastBroadcast() const {
         return m_disconnected_this_broadcast;
     }
@@ -200,7 +200,7 @@ private:
         std::map<std::uint32_t, SnapshotMsg> sent_history;
         // per-client OUTBOUND send queue (backpressure substrate) + cumulative
         // telemetry. Each broadcast pushes the produced frame here, then flushes as far as the
-        // transport accepts; a would-block / gone peer leaves frames buffered, so outbound.size
+        // transport accepts; temporary backpressure leaves frames buffered, so outbound.size
         // is the live queue-depth metric. Bounded by kOutboundQueueCap: overflow drops the OLDEST
         // (snapshots are unreliable / most-recent-wins) and increments dropped_frames. A connected
         // loopback/TCP peer accepts immediately, so the queue drains fully and the wire bytes stay

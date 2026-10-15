@@ -2,6 +2,7 @@
 // the headless replacement for over-the-wire validation on a single PC.
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <vector>
 
 #include "net/NetworkSim.h"
@@ -14,6 +15,25 @@ using Luminumbra::Net::NetworkSim;
 
 std::vector<std::uint8_t> frame(std::uint8_t id) {
     return {id};
+}
+
+TEST(NetworkSim, AcceptsMaximumAndRejectsMaximumPlusOne) {
+    NetworkSim sim(NetworkConditions{});
+    for (const auto delivery : {FrameDelivery::Reliable, FrameDelivery::Unreliable}) {
+        std::vector<std::uint8_t> payload(Luminumbra::Net::kMaxFramePayloadBytes + 1, 0xAB);
+        EXPECT_FALSE(sim.A().SendFrame(payload, delivery));
+        std::vector<std::uint8_t> out{0xA5};
+        EXPECT_FALSE(sim.B().TryReceiveFrame(out));
+        EXPECT_EQ(out, (std::vector<std::uint8_t>{0xA5}));
+        EXPECT_TRUE(sim.A().IsPeerConnected());
+        payload.resize(Luminumbra::Net::kMaxFramePayloadBytes);
+        ASSERT_TRUE(sim.A().SendFrame(payload, delivery));
+        ASSERT_TRUE(sim.B().TryReceiveFrame(payload));
+        ASSERT_EQ(payload.size(), Luminumbra::Net::kMaxFramePayloadBytes);
+        EXPECT_TRUE(std::all_of(
+            payload.begin(), payload.end(), [](std::uint8_t byte) { return byte == 0xAB; }));
+        EXPECT_FALSE(sim.B().TryReceiveFrame(payload));
+    }
 }
 
 // A frame sent under N-tick latency is not delivered until N ticks pass.

@@ -124,7 +124,8 @@ void NetSocketsTransport::HandleConnStatusChanged(SteamNetConnectionStatusChange
 
 bool NetSocketsTransport::SendFrame(const std::vector<std::uint8_t>& frame,
                                     FrameDelivery delivery) {
-    if (!m_backend.ready || m_conn == k_HSteamNetConnection_Invalid)
+    if (frame.size() > kMaxFramePayloadBytes || !m_backend.ready ||
+        m_conn == k_HSteamNetConnection_Invalid)
         return false;
     const int flags = (delivery == FrameDelivery::Reliable) ? k_nSteamNetworkingSend_Reliable
                                                             : k_nSteamNetworkingSend_Unreliable;
@@ -140,6 +141,14 @@ void NetSocketsTransport::DrainInto() {
     const int count = SteamNetworkingSockets()->ReceiveMessagesOnConnection(m_conn, messages, 32);
     for (int i = 0; i < count; ++i) {
         SteamNetworkingMessage_t* message = messages[i];
+        if (message->m_cbSize < 0 ||
+            static_cast<std::size_t>(message->m_cbSize) > kMaxFramePayloadBytes) {
+            for (int j = i; j < count; ++j)
+                messages[j]->Release();
+            m_recv.clear();
+            Close();
+            return;
+        }
         const auto* data = static_cast<const std::uint8_t*>(message->m_pData);
         m_recv.emplace_back(data, data + message->m_cbSize);
         message->Release();

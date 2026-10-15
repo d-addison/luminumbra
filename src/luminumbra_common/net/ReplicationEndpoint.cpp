@@ -44,7 +44,7 @@ void ReplicationServer::BroadcastSnapshot(std::uint64_t server_tick,
     m_last_broadcast_total_bytes = 0;
     m_last_broadcast_max_client_bytes = 0;
     m_disconnected_this_broadcast.clear();
-    // hopeless clients the policy decided to drop this broadcast. Collected
+    // Clients disconnected by send failures or the backpressure policy. Collected
     // in-loop (so the broadcast iterator stays valid) and erased after the loop.
     std::vector<std::uint32_t> to_disconnect;
 
@@ -81,6 +81,22 @@ void ReplicationServer::BroadcastSnapshot(std::uint64_t server_tick,
     for (auto& [client_id, link] : m_clients) {
         if (!link.transport)
             continue;
+
+        const auto flush_outbound = [&] {
+            while (!link.outbound.empty()) {
+                const bool oversized = link.outbound.front().size() > kMaxFramePayloadBytes;
+                if (oversized ||
+                    !link.transport->SendFrame(link.outbound.front(), FrameDelivery::Unreliable)) {
+                    // Retry temporary backpressure, but never retain an unsendable frame.
+                    if (oversized || !link.transport->IsPeerConnected()) {
+                        link.transport->Close();
+                        to_disconnect.push_back(client_id);
+                    }
+                    return;
+                }
+                link.outbound.pop_front();
+            }
+        };
 
         // OUTBOUND BACKPRESSURE POLICY (default-OFF -> this whole block is
         // skipped and the send path below is byte-identical to the pre-policy code). Assess the
@@ -120,11 +136,7 @@ void ReplicationServer::BroadcastSnapshot(std::uint64_t server_tick,
                     // still try to drain what is queued. Freezing next_snapshot_seq here (nothing
                     // was sent) is deliberate -- SnapshotAge must not climb on frames we withheld.
                     ++link.throttled_frames;
-                    while (!link.outbound.empty() &&
-                           link.transport->SendFrame(link.outbound.front(),
-                                                     FrameDelivery::Unreliable)) {
-                        link.outbound.pop_front();
-                    }
+                    flush_outbound();
                     const std::uint32_t d = static_cast<std::uint32_t>(link.outbound.size());
                     if (d > link.peak_queue_depth)
                         link.peak_queue_depth = d;
@@ -134,6 +146,7 @@ void ReplicationServer::BroadcastSnapshot(std::uint64_t server_tick,
         }
 
         SnapshotMsg snap;
+        const std::vector<ReplEntityState>* borrowed_entities = nullptr;
         snap.server_tick = server_tick;
         snap.snapshot_seq = link.next_snapshot_seq++;
         snap.acked_usercmd_tick = link.inbound.has_command() ? link.inbound.latest().tick : 0u;
@@ -188,7 +201,12 @@ void ReplicationServer::BroadcastSnapshot(std::uint64_t server_tick,
                 }
             }
         } else {
-            snap.entities = entities; // AOI disabled, or this client has no avatar yet
+            // Without a retained delta baseline, the encoder can read the caller's
+            // full set directly for the duration of this synchronous broadcast.
+            if (m_delta)
+                snap.entities = entities;
+            else
+                borrowed_entities = &entities;
         }
         snap.removed_ids = merged_removed;
 
@@ -234,7 +252,7 @@ void ReplicationServer::BroadcastSnapshot(std::uint64_t server_tick,
                 link.sent_history.erase(link.sent_history.begin());
             }
         } else {
-            outgoing = snap; //  full-snapshot mode
+            outgoing = std::move(snap); // full-snapshot mode needs no retained baseline
         }
 
         // State snapshots are UNRELIABLE: a dropped one is superseded by the next
@@ -242,10 +260,13 @@ void ReplicationServer::BroadcastSnapshot(std::uint64_t server_tick,
         // route the produced frame through this client's OUTBOUND queue
         // (the backpressure substrate), then flush as far as the transport accepts. A
         // connected loopback/TCP peer accepts immediately, so the queue drains fully and
-        // the wire bytes are byte-identical to the prior direct-send path; a would-block /
-        // gone peer leaves frames buffered -> outbound.size is the live queue-depth
-        // metric. On overflow drop the OLDEST (unreliable / most-recent-wins) and count it.
-        std::vector<std::uint8_t> frame = EncodeSnapshot(outgoing);
+        // the wire bytes are byte-identical to the prior direct-send path; temporary
+        // backpressure leaves frames buffered -> outbound.size is the live queue-depth
+        // metric. Oversized frames and lost peers disconnect. On overflow drop the OLDEST
+        // (unreliable / most-recent-wins) and count it.
+        std::vector<std::uint8_t> frame = borrowed_entities
+                                              ? EncodeSnapshot(outgoing, *borrowed_entities)
+                                              : EncodeSnapshot(outgoing);
         m_last_broadcast_total_bytes += frame.size();
         if (frame.size() > m_last_broadcast_max_client_bytes) {
             m_last_broadcast_max_client_bytes = frame.size();
@@ -255,10 +276,7 @@ void ReplicationServer::BroadcastSnapshot(std::uint64_t server_tick,
             link.outbound.pop_front();
             ++link.dropped_frames;
         }
-        while (!link.outbound.empty() &&
-               link.transport->SendFrame(link.outbound.front(), FrameDelivery::Unreliable)) {
-            link.outbound.pop_front();
-        }
+        flush_outbound();
         const std::uint32_t depth = static_cast<std::uint32_t>(link.outbound.size());
         if (depth > link.peak_queue_depth)
             link.peak_queue_depth = depth;
@@ -275,7 +293,7 @@ void ReplicationServer::BroadcastSnapshot(std::uint64_t server_tick,
         }
     }
 
-    // finalize policy disconnects AFTER the decay pass, so a freshly-dropped
+    // Finalize disconnects AFTER the decay pass, so a freshly-dropped
     // client's avatar-despawn gets the FULL kRemovalRepeatBroadcasts repeats (not decremented
     // this tick). Removing the client here (not in-loop) kept the broadcast iterator valid; the
     // caller reads DisconnectedClientsLastBroadcast to free the player's server-side state.
@@ -398,7 +416,10 @@ void ReplicationClient::SendUsercmd(const UsercmdMsg& cmd) {
         return;
     // Usercmds are UNRELIABLE: newest tick wins on the server (UsercmdReceiver),
     // a dropped one is superseded by the next tick's input.
-    m_transport->SendFrame(EncodeUsercmd(cmd), FrameDelivery::Unreliable);
+    if (!m_transport->SendFrame(EncodeUsercmd(cmd), FrameDelivery::Unreliable)) {
+        m_transport->Close();
+        return;
+    }
     m_latest_usercmd_tick = cmd.tick;
     m_sent_any_usercmd = true;
 }
@@ -516,8 +537,10 @@ void ReplicationClient::PumpInbound() {
     // the server can reconcile). Only bother once we have something to report.
     if (got_new_snapshot || m_sent_any_usercmd) {
         // Acks are UNRELIABLE: the newest ack supersedes (monotonic on the server).
-        m_transport->SendFrame(EncodeAck(m_receiver.make_ack(m_latest_usercmd_tick)),
-                               FrameDelivery::Unreliable);
+        if (!m_transport->SendFrame(EncodeAck(m_receiver.make_ack(m_latest_usercmd_tick)),
+                                    FrameDelivery::Unreliable)) {
+            m_transport->Close();
+        }
     }
 }
 

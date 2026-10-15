@@ -151,11 +151,15 @@ enum class FrameDelivery {
     Reliable
 };
 
+// Wire-protocol maximum for a single frame payload, enforced on send and receive.
+inline constexpr std::size_t kMaxFramePayloadBytes = 64u * 1024u * 1024u;
+
 class ILockstepTransport {
 public:
     virtual ~ILockstepTransport() = default;
 
-    // Sends one complete message frame. Returns false if the peer is gone.
+    // Sends one complete message frame. Returns false on failure, including a payload
+    // above kMaxFramePayloadBytes (rejected before any bytes are written).
     // NOTE: named SendFrame (not SendMessage) deliberately -- <windows.h> #defines
     // SendMessage to SendMessageA/W, which would rename this virtual under the macro.
     // `delivery` defaults to Reliable so existing callers (lockstep) are unchanged.
@@ -305,8 +309,10 @@ public:
     void Close() override;
 
 private:
-    bool PumpRecv(); // pulls available bytes into m_recv_buffer; sets m_peer_closed on EOF
-    int FlushSendNonBlocking(); // drains m_send_q via non-blocking send; -1 = fatal/peer-gone
+    friend struct TcpTransportTestPeer;
+    std::size_t ReceiveBytesNeeded(); // validates the prefix; closes on an oversized frame
+    bool PumpRecv();                  // pulls one frame into m_recv_buffer; closes on EOF/error
+    int FlushSendNonBlocking();       // drains m_send_q via non-blocking send; -1 = fatal/peer-gone
 
     std::intptr_t m_socket = -1; // SOCKET (winsock) / fd; -1 = none
     std::intptr_t m_listen_socket = -1;
@@ -463,8 +469,9 @@ public:
     bool Handshake();
 
     // Advances the session by AT MOST one tick. Drains pending peer messages first, then:
-    //  - if a clean Bye/close was seen -> PeerDisconnected (clean end);
-    //  - if a peer hash mismatched the local one at a cadence tick -> Desync (HALT + dump);
+    //  - if an available peer hash mismatched an executed cadence tick -> Desync (HALT + dump);
+    //  - otherwise, if a clean Bye was seen, or a closed transport has no buffered
+    //    input for the wanted tick -> PeerDisconnected (sticky clean end);
     //  - if the peer's input for the wanted tick is present -> Advanced (world stepped,
     //    hashes exchanged at the cadence);
     //  - else -> WaitingForPeer (horizon grows; caller pumps again after sending/recving).
@@ -496,8 +503,14 @@ private:
     // at the same cadence tick). Returns false if a fatal (desync/disconnect) state was set.
     bool DrainPeerMessages();
 
+    // Compares a peer hash once its executed tick has a local cadence hash.
+    bool ComparePeerHash(const HashMsg& peer);
+
     // Schedules + sends the local input for `tick` (collect hook), buffering it locally.
-    void ScheduleLocalInput(std::uint64_t tick);
+    bool ScheduleLocalInput(std::uint64_t tick);
+
+    // Compares available peer hashes before closing and recording a sticky disconnect.
+    void TransportDisconnected();
 
     // Emits the LREC1 desync dump of the local session up to `divergence_tick`.
     void EmitDesyncDump(std::uint64_t divergence_tick, const std::string& section);

@@ -110,6 +110,10 @@ struct AckMsg {
 // --- Encode: each returns a complete framed message [u8 type][u32 len][payload]. ---
 std::vector<std::uint8_t> EncodeUsercmd(const UsercmdMsg& m);
 std::vector<std::uint8_t> EncodeSnapshot(const SnapshotMsg& m);
+// Uses the supplied entity set with m's header and removals, avoiding an owning
+// snapshot copy when a full broadcast can borrow the caller's entities.
+std::vector<std::uint8_t> EncodeSnapshot(const SnapshotMsg& m,
+                                         const std::vector<ReplEntityState>& entities);
 std::vector<std::uint8_t> EncodeAck(const AckMsg& m);
 
 // --- Decode: false on a short/garbled frame (truncation-robust). ---

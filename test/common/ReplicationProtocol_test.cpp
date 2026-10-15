@@ -121,6 +121,35 @@ TEST(ReplicationProtocol, EmptySnapshotRoundTrips) {
     EXPECT_TRUE(out.entities.empty());
 }
 
+TEST(ReplicationProtocol, BorrowedSnapshotEntitiesPreserveHeaderAndRemovals) {
+    SnapshotMsg header;
+    header.server_tick = 77;
+    header.snapshot_seq = 5;
+    header.delta_from_seq = 3;
+    header.acked_usercmd_tick = 70;
+    header.entities.push_back(ReplEntityState{}); // the supplied set must take precedence
+    header.removed_ids = {10, 20};
+    ReplEntityState entity;
+    entity.entity_id = 42;
+    entity.px_mm = -1234;
+    entity.type_id = 7;
+    entity.anim_phase = 200;
+    const std::vector<ReplEntityState> entities{entity};
+
+    const auto frame = EncodeSnapshot(header, entities);
+    EXPECT_EQ(frame.size(), 37u + 23u + 8u);
+    SnapshotMsg decoded;
+    ASSERT_TRUE(DecodeSnapshot(frame, decoded));
+    EXPECT_EQ(decoded.server_tick, header.server_tick);
+    EXPECT_EQ(decoded.snapshot_seq, header.snapshot_seq);
+    EXPECT_EQ(decoded.delta_from_seq, header.delta_from_seq);
+    EXPECT_EQ(decoded.acked_usercmd_tick, header.acked_usercmd_tick);
+    EXPECT_EQ(decoded.entities, entities);
+    EXPECT_EQ(decoded.removed_ids, header.removed_ids);
+    EXPECT_EQ(header.entities.front().entity_id, 0u);
+    EXPECT_EQ(entities.front(), entity);
+}
+
 TEST(ReplicationProtocol, TruncatedFrameRejected) {
     SnapshotMsg in;
     in.server_tick = 7;
