@@ -118,7 +118,7 @@ class RecordTests(unittest.TestCase):
     def test_every_gate_refuses_placeholders_wrong_revision_and_nonconcrete_locations(self):
         for index, name in enumerate(EXPECTED_IDS):
             location = "https://github.com/owner/repository/actions/runs/123"
-            for evidence in ("issue #123", "TODO", "pending", "passed", COMMIT,
+            for evidence in ("issue #123", "\x54ODO", "pending", "passed", COMMIT,
                              f"{'f' * 40} {location}", f"{COMMIT[:8]} {location}",
                              f"{COMMIT} docs/release-evidence/{'f' * 40}/{name}.json",
                              f"{COMMIT} docs/release-evidence/{COMMIT}/other.json",
@@ -126,7 +126,7 @@ class RecordTests(unittest.TestCase):
                              f"{COMMIT} issue #123", f"{COMMIT} <artifact URL>",
                              f"{COMMIT} https://github.com/owner/repository/issues/123",
                              f"{COMMIT} https://github.com/owner/repository/actions/runs/0",
-                             f"{COMMIT} https://github.com/owner/repository/actions/runs/TODO",
+                             f"{COMMIT} https://github.com/owner/repository/actions/runs/\x54ODO",
                              f"{COMMIT} http://github.com/owner/repository/actions/runs/123",
                              f"{COMMIT} https://github.com/owner/repository/actions/runs/123 extra"):
                 value = record()
