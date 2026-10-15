@@ -688,6 +688,22 @@ void DrawCreatureNameplates(ClientAppContext& app,
 void DrawFrameStatusOverlays(ClientAppContext& app,
                              GameState currentState,
                              const ScenarioHarness::RuntimeScenarioConfig& scenario_config,
+                             Luminumbra::Client::PlayerController* playerController,
+                             const Luminumbra::world::GameSession* gameSession) {
+    if (app.overlay.imgui_enabled && app.overlay.region_panel.open &&
+        currentState == GameState::IN_GAME && app.capture.timelapse_frames == 0 && gameSession &&
+        ImGui::GetCurrentContext()) {
+        const auto& state = app.overlay.region_panel;
+        const auto snapshot = world::BuildRegionPanelSnapshot(
+            *gameSession, {state.page, state.rows_per_page, state.descending});
+        DrawRegionPanel(snapshot, app.overlay.region_panel);
+    }
+    DrawFrameStatusOverlays(app, currentState, scenario_config, playerController);
+}
+
+void DrawFrameStatusOverlays(ClientAppContext& app,
+                             GameState currentState,
+                             const ScenarioHarness::RuntimeScenarioConfig& scenario_config,
                              Luminumbra::Client::PlayerController* playerController) {
     if (app.overlay.imgui_enabled && playerController && app.capture.timelapse_frames == 0) {
         playerController->RenderDebugUI();

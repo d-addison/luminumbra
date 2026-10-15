@@ -17,6 +17,7 @@
 #include "ActiveRegionLedger.h"
 #include "AuthorityHashState.h"
 #include "GroundObjectStore.h"
+#include "RegionDiagnostics.h"
 #include "RegionPopulator.h"
 #include "WorldClock.h"
 #include "WorldMetadata.h"
@@ -467,6 +468,14 @@ public:
     [[nodiscard]] const RegionSchedule& GetRegionSchedule() const {
         return m_regionSchedule;
     }
+    [[nodiscard]] const RegionTransitionRing& GetRegionTransitionRing() const noexcept {
+        return m_regionTransitions;
+    }
+    // Last existing host hash request only; opening the panel never requests a capture.
+    [[nodiscard]] const CachedRegionHashes& GetCachedRegionHashes() const noexcept {
+        return m_cachedRegionHashes;
+    }
+    [[nodiscard]] RegionWaterDiagnostics ObserveRegionalWaterWork() const noexcept;
     [[nodiscard]] const GroundObjectStore& GetGroundObjects() const {
         return m_groundObjects;
     }
@@ -700,6 +709,8 @@ private:
     RegionSchedulerConfig m_regionSchedulerConfig;
     ActiveRegionLedger m_activeRegionLedger;
     RegionSchedule m_regionSchedule;
+    RegionTransitionRing m_regionTransitions;
+    CachedRegionHashes m_cachedRegionHashes;
     std::optional<std::vector<Vec3>> m_replicatedSimulationAnchors;
     std::vector<RegionWork> m_regionWork;          // External inputs for the next schedule call.
     std::vector<RegionWork> m_regionCompletedWork; // Transient successful consumer work this tick.

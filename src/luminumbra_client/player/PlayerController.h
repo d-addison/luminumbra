@@ -62,6 +62,13 @@ public:
     void ResetReplayFrameCounter(std::uint64_t frame = 0);
     void ProcessKeyInput(int key, int action);
 
+    // Drop queued movement actions when a UI takes input ownership. Physics can
+    // continue through neutral replay frames without replaying these on release.
+    void DiscardPendingMovementInput() {
+        m_wantsToJump = false;
+        m_wantsToCrouch = false;
+    }
+
     MovementMode GetMovementMode() const {
         return m_mode;
     }

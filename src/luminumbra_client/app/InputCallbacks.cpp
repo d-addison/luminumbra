@@ -28,7 +28,116 @@ InputCallbackBindings& CallbackBindings(GLFWwindow* window) {
     return *static_cast<InputCallbackBindings*>(glfwGetWindowUserPointer(window));
 }
 
+void RegionPanelMouseButton(GLFWwindow* window, int button, int action, int) {
+    const auto& app = *CallbackBindings(window).app;
+    if (app.overlay.imgui_enabled && ImGui::GetCurrentContext() && button >= 0 &&
+        button < ImGuiMouseButton_COUNT)
+        ImGui::GetIO().AddMouseButtonEvent(button, action == GLFW_PRESS);
+}
+
+ImGuiKey RegionPanelKey(int key) {
+    switch (key) {
+        case GLFW_KEY_TAB:
+            return ImGuiKey_Tab;
+        case GLFW_KEY_LEFT:
+            return ImGuiKey_LeftArrow;
+        case GLFW_KEY_RIGHT:
+            return ImGuiKey_RightArrow;
+        case GLFW_KEY_UP:
+            return ImGuiKey_UpArrow;
+        case GLFW_KEY_DOWN:
+            return ImGuiKey_DownArrow;
+        case GLFW_KEY_HOME:
+            return ImGuiKey_Home;
+        case GLFW_KEY_END:
+            return ImGuiKey_End;
+        case GLFW_KEY_PAGE_UP:
+            return ImGuiKey_PageUp;
+        case GLFW_KEY_PAGE_DOWN:
+            return ImGuiKey_PageDown;
+        case GLFW_KEY_SPACE:
+            return ImGuiKey_Space;
+        case GLFW_KEY_ENTER:
+            return ImGuiKey_Enter;
+        case GLFW_KEY_ESCAPE:
+            return ImGuiKey_Escape;
+        default:
+            return ImGuiKey_None;
+    }
+}
+
 } // namespace
+
+void UpdateGameplayPlayer(const RegionPanelState& panel,
+                          PlayerController& player,
+                          float delta_time) {
+    if (panel.open) {
+        player.DiscardPendingMovementInput();
+        player.ApplyReplayInput(delta_time, PlayerReplayInputFrame{});
+    } else {
+        player.Update(delta_time);
+    }
+}
+
+PlayerVerbPresses PollPlayerVerbPresses(ClientAppContext& app,
+                                        GLFWwindow* window,
+                                        const PlayerController& player,
+                                        int (*read_key)(GLFWwindow*, int)) {
+    const auto edge = [&](int key_code, bool& was_down) {
+        const bool down =
+            (read_key ? read_key(window, key_code) : glfwGetKey(window, key_code)) == GLFW_PRESS;
+        bool suppressed = app.overlay.region_panel.open;
+        if (key_code >= 0 && key_code <= GLFW_KEY_LAST) {
+            auto& captured =
+                app.overlay.region_panel_captured_keys[static_cast<std::size_t>(key_code)];
+            if (!down)
+                captured = false;
+            else if (app.overlay.region_panel.open)
+                captured = true;
+            suppressed = suppressed || captured;
+        }
+        const bool fired = down && !was_down && !suppressed;
+        was_down = down;
+        return fired;
+    };
+    auto& previous = app.interactions;
+    PlayerVerbPresses presses;
+    presses.farmPlant = edge(player.key(InputAction::FarmPlant), previous.farmPlant);
+    presses.farmWater = edge(player.key(InputAction::FarmWater), previous.farmWater);
+    presses.farmFertilize = edge(player.key(InputAction::FarmFertilize), previous.farmFertilize);
+    presses.farmHarvest = edge(player.key(InputAction::FarmHarvest), previous.farmHarvest);
+    presses.farmCycleSpecies = edge(GLFW_KEY_V, previous.farmCycleSpecies);
+    presses.terraformDig = edge(GLFW_KEY_R, previous.terraformDig);
+    presses.terraformFill = edge(GLFW_KEY_T, previous.terraformFill);
+    return presses;
+}
+
+void CloseRegionPanelInput(GLFWwindow* window) {
+    auto& app = *CallbackBindings(window).app;
+    app.overlay.region_panel.open = false;
+    if (!app.overlay.region_panel_input_attached)
+        return;
+    if (ImGui::GetCurrentContext()) {
+        auto& io = ImGui::GetIO();
+        io.ClearEventsQueue();
+        io.ClearInputKeys();
+        io.ClearInputMouse();
+    }
+    glfwSetMouseButtonCallback(window, app.overlay.region_panel_previous_mouse_button);
+    glfwSetCursorPosCallback(window, app.overlay.region_panel_previous_cursor);
+    glfwSetScrollCallback(window, app.overlay.region_panel_previous_scroll);
+    app.overlay.region_panel_previous_mouse_button = nullptr;
+    app.overlay.region_panel_previous_cursor = nullptr;
+    app.overlay.region_panel_previous_scroll = nullptr;
+    app.overlay.region_panel_input_attached = false;
+    const bool showCursor = app.hud.show_settings || app.hud.paused ||
+                            app.overlay.show_shader_panel || app.overlay.show_worldgen_viewer;
+    const int cursorMode =
+        showCursor ? GLFW_CURSOR_NORMAL : app.overlay.region_panel_previous_cursor_mode;
+    glfwSetInputMode(window, GLFW_CURSOR, cursorMode);
+    if (cursorMode == GLFW_CURSOR_DISABLED)
+        app.input.firstMouse = true;
+}
 
 void key_callback(GLFWwindow* window, int key, int scancode, int action, int mods) {
     InputCallbackBindings& bindings = CallbackBindings(window);
@@ -51,7 +160,50 @@ void key_callback(GLFWwindow* window, int key, int scancode, int action, int mod
         app.hud.rebindCaptureAction = -1;
         return;
     }
-    // Escape: toggle the in-game pause overlay (only in a world, and not while the  panel is up).
+    // Read-only region diagnostics take ownership of interactive input.
+    if (key == GLFW_KEY_F4 && action == GLFW_PRESS) {
+        if (!app.overlay.region_panel.open &&
+            (!app.overlay.region_panel_available || !app.overlay.imgui_enabled ||
+             !ImGui::GetCurrentContext()))
+            return;
+        if (app.overlay.region_panel.open) {
+            CloseRegionPanelInput(window);
+            return;
+        }
+        app.overlay.region_panel.open = true;
+        // A gameplay press earlier in this event batch may already be queued.
+        if (playerController)
+            playerController->DiscardPendingMovementInput();
+        app.overlay.region_panel_previous_cursor_mode = glfwGetInputMode(window, GLFW_CURSOR);
+        app.overlay.region_panel_previous_mouse_button =
+            glfwSetMouseButtonCallback(window, RegionPanelMouseButton);
+        app.overlay.region_panel_previous_cursor = glfwSetCursorPosCallback(window, mouse_callback);
+        app.overlay.region_panel_previous_scroll = glfwSetScrollCallback(window, scroll_callback);
+        app.overlay.region_panel_input_attached = true;
+        glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
+        return;
+    }
+    if (key >= 0 && key <= GLFW_KEY_LAST) {
+        auto& captured = app.overlay.region_panel_captured_keys[static_cast<std::size_t>(key)];
+        const bool was_captured = captured;
+        if (action == GLFW_RELEASE)
+            captured = false;
+        else if (app.overlay.region_panel.open)
+            captured = true;
+        if (!app.overlay.region_panel.open && was_captured)
+            return;
+    }
+    if (app.overlay.region_panel.open) {
+        if (app.overlay.imgui_enabled && ImGui::GetCurrentContext()) {
+            auto& io = ImGui::GetIO();
+            io.AddKeyEvent(ImGuiMod_Shift, (mods & GLFW_MOD_SHIFT) != 0);
+            if (const auto panel_key = RegionPanelKey(key);
+                panel_key != ImGuiKey_None && (action == GLFW_PRESS || action == GLFW_RELEASE))
+                io.AddKeyEvent(panel_key, action == GLFW_PRESS);
+        }
+        return;
+    }
+    // Escape: toggle the in-game pause overlay (only in a world, and not while the panel is up).
     if (key == GLFW_KEY_ESCAPE && action == GLFW_PRESS && playerController &&
         !app.hud.show_settings) {
         SetGamePaused(window, !app.hud.paused);
@@ -160,7 +312,9 @@ void SetGameState(GLFWwindow* window, GameStateManager& gameStateManager, GameSt
     InputCallbackBindings& bindings = CallbackBindings(window);
     ClientAppContext& app = *bindings.app;
     Luminumbra::Client::Rml_UIManager* uiManager = bindings.uiManager->get();
+    CloseRegionPanelInput(window);
     gameStateManager.SetState(newState);
+    app.overlay.region_panel_available = newState == GameState::IN_GAME;
     bool cursorDisabled = (newState == GameState::IN_GAME);
 
     if (cursorDisabled) {
@@ -217,6 +371,11 @@ void SetGamePaused(GLFWwindow* window, bool paused) {
 void mouse_callback(GLFWwindow* window, double xpos, double ypos) {
     InputCallbackBindings& bindings = CallbackBindings(window);
     ClientAppContext& app = *bindings.app;
+    if (app.overlay.region_panel.open) {
+        if (app.overlay.imgui_enabled && ImGui::GetCurrentContext())
+            ImGui::GetIO().AddMousePosEvent(static_cast<float>(xpos), static_cast<float>(ypos));
+        return;
+    }
     Luminumbra::Rendering::Camera* camera = bindings.camera->get();
     (void)window;
     if (app.hud.show_settings || app.hud.paused)
@@ -237,6 +396,12 @@ void mouse_callback(GLFWwindow* window, double xpos, double ypos) {
 void scroll_callback(GLFWwindow* window, double xoffset, double yoffset) {
     InputCallbackBindings& bindings = CallbackBindings(window);
     ClientAppContext& app = *bindings.app;
+    if (app.overlay.region_panel.open) {
+        if (app.overlay.imgui_enabled && ImGui::GetCurrentContext())
+            ImGui::GetIO().AddMouseWheelEvent(static_cast<float>(xoffset),
+                                              static_cast<float>(yoffset));
+        return;
+    }
     Luminumbra::Rendering::Camera* camera = bindings.camera->get();
     Luminumbra::Client::PlayerController* playerController = bindings.playerController->get();
     Luminumbra::Client::Rml_UIManager* uiManager = bindings.uiManager->get();
