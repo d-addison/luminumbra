@@ -1394,13 +1394,25 @@ TEST(ActiveRegionLedger, ReusedScheduleScratchPreservesPriorityTraceAndRollback)
     const auto digest = [](RegionKey) {
         return std::uint64_t{123};
     };
+    // Initial wakes keep both active; overload then freezes the edited region at tick 3
+    // and the pinned region at tick 5. The pinned region's Reduced phase is 3 modulo 4.
+    const std::array<std::vector<RegionKey>, 8> due_by_tick{{
+        {{10, 0}, {-10, 0}},
+        {{10, 0}},
+        {{10, 0}},
+        {},
+        {},
+        {},
+        {},
+        {},
+    }};
     for (std::uint64_t tick = 1; tick <= 8; ++tick) {
+        SCOPED_TRACE(tick);
         const auto actual = reused.schedule(WorldClock(tick), {}, work, digest, {}, &scratch);
         const auto expected = fresh.schedule(WorldClock(tick), {}, work, digest);
         EXPECT_EQ(actual, expected);
         EXPECT_EQ(reused.encode(), fresh.encode());
-        ASSERT_FALSE(actual.due.empty());
-        EXPECT_EQ(actual.due.front(), (RegionKey{10, 0}));
+        EXPECT_EQ(actual.due, due_by_tick.at(tick - 1));
     }
     const auto before = reused.encode();
     EXPECT_THROW(reused.schedule(WorldClock(8), {}, work, digest, {}, &scratch),
