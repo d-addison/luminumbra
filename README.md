@@ -16,20 +16,33 @@ acceptance deferred to v0.3.1 and publication. Interfaces and content formats ma
 change between releases.
 
 Every shipping v0.3.0 feature is enabled by default. Debug toggles and non-shipping
-Vulkan, Steam and GNS backends remain opt-in. Experimental audio playback remains
-outside the shipping feature set under its separate disabled-by-default release policy.
+Vulkan, Steam and GNS backends remain opt-in. Ordinary client launches enable
+audio playback; captures explicitly select
+`--no-audio`. Saved user settings remain authoritative. See the
+[audio defaults](docs/audio-release-policy.md).
 
 Ladder is the default requested far-world mode. Missing immutable authority in normal
 presets still causes an explicit refusal and effective Legacy fallback (roughly 3 km
 range and a 3,200 m far plane); the default request does not establish 16 km native
-coverage.
+coverage. Saved-world far production authority remains fixture-only until FW S8
+(v0.3.1), with an explicit unavailable/refusal diagnostic in the renderer.
+
+TCP admission now requires matching effective simulation and resolved preset-content
+identities; runtime/soak peers that do not complete Hello within 10 seconds are
+disconnected and their slots released. Lockstep and replay enforce the same identities.
+World-generation identity binds the resolved preset and exact dependency bytes,
+including biome tables and structure files. See the
+[identity contract](docs/development/system-config-identity.md).
+
+Replication defaults to acknowledged deltas and radius-3 chunk AOI. The dedicated
+server defaults to 9000 ticks between autosaves (five minutes at 30 Hz); explicit
+zero disables autosave.
 
 The persisted clock, active-region ledger, edited-content digest and scheduler-fault
-foundations are implemented. The dedicated server autosaves every five minutes. Indexed
-authority durability/rehydration, durable completed work and ground-object continuation,
+foundations are implemented. Indexed authority durability/rehydration, durable completed work and ground-object continuation,
 durable regional fields/weather/scent/energy, and regional foliage/water continuation
-with host persistence are planned for v0.3.1. Strict distant policy and distant
-creatures (S8), remaining S9 closure, the committed-generation edited-SDF producer and
+with host persistence (issue #242) are planned for v0.3.1. Strict distant policy
+and distant creatures (S8), remaining S9 closure, the committed-generation edited-SDF producer and
 FW S8 consumer, the render qualification tooling stack, acceptance-matrix completeness,
 the developer console, asymmetric day/night and the calendar-relative lunar cycle,
 GNS/Steam admission identity, and the MG2 E4 candidate directory are also planned for
@@ -41,7 +54,7 @@ Performance work to ship regional continuation on by default is planned for v0.4
 Complete native render qualification, the ladder horizon gate, authoritative
 ground/high/cave-air poses and fixed-view workloads, cave-walk and edited-world
 traversal producers, and outstanding acceptance capture/pinning are deferred to v0.3.1.
-Current-candidate native Windows evidence is pending; the owner runs the required
+Current-candidate Windows results are pending native verification; the owner runs the required
 release smoke on Windows.
 See the [acceptance record](docs/v0.3-acceptance.md) for the scoped tag gate and
 historical evidence, and the [release notes](docs/release-notes-v0.3.0.md) for
@@ -57,8 +70,11 @@ only metadata and no saved chunks. New world metadata declares `container_versio
 New saves use LMR1 container v2,
 the `luminumbra.persistence.world_manifest.v1` manifest with
 `container_version: 2`, and FSD2 far-LOD payload v3. Explicit preset `schema_rev`
-must be `6`; in-memory callers may omit it. Terrain shaping is always applied,
-and enabled caves always use the noise router. Content, hydrology, and biome
+uses `7` for new presets; `6` and omitted revisions retain historical omission
+defaults. Current-format saves without an embedded preset that name one of the
+eight packaged presets use frozen revision-6 copies in
+`worlds/atlas/presets-rev6/`; new saves embed resolved choices. Terrain shaping is
+always applied, and enabled caves always use the noise router. Content, hydrology, and biome
 controls remain available. Unknown future formats and corrupt data have distinct
 failures. See the [persistence contract](docs/engine-guide.md)
 for the retired selectors and validation details.

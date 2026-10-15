@@ -54,6 +54,9 @@ TEST(InstinctLocomotion, SeeksTargetAtCruiseSpeedWhenFar) {
     entt::registry reg;
     const auto target = MakeTarget(reg, 100.0f, 0.0f);
     LocomotionProfile p;
+    p.separation_strength = 0.0f;
+    p.cohesion_strength = 0.0f;
+    p.alignment_strength = 0.0f;
     p.move_speed = 3.0f;
     p.arrival_radius = 1.5f;
     p.slow_radius = 4.0f;
@@ -75,6 +78,9 @@ TEST(InstinctLocomotion, ArrivalRampReducesSpeedNearTarget) {
     entt::registry reg;
     const auto target = MakeTarget(reg, 2.0f, 0.0f); // dist 2, slow_radius 4 -> half speed
     LocomotionProfile p;
+    p.separation_strength = 0.0f;
+    p.cohesion_strength = 0.0f;
+    p.alignment_strength = 0.0f;
     p.move_speed = 4.0f;
     p.arrival_radius = 1.0f;
     p.slow_radius = 4.0f;
@@ -127,6 +133,9 @@ TEST(InstinctLocomotion, IsDeterministicAcrossRuns) {
         entt::registry reg;
         const auto t = MakeTarget(reg, 13.7f, -8.2f);
         LocomotionProfile p;
+        p.separation_strength = 0.0f;
+        p.cohesion_strength = 0.0f;
+        p.alignment_strength = 0.0f;
         p.move_speed = 2.5f;
         const auto a = MakeAgent(reg, -3.1f, 4.4f, t, p);
         RunInstinctLocomotionOnTick(reg);
@@ -148,6 +157,9 @@ TEST(InstinctLocomotion, FollowsWaypointBeforeSeekingTarget) {
     entt::registry reg;
     const auto target = MakeTarget(reg, 10.0f, 0.0f); // target on +X
     LocomotionProfile p;
+    p.separation_strength = 0.0f;
+    p.cohesion_strength = 0.0f;
+    p.alignment_strength = 0.0f;
     p.move_speed = 3.0f;
     p.arrival_radius = 1.0f;
     p.slow_radius = 2.0f;
@@ -168,6 +180,9 @@ TEST(InstinctLocomotion, WaypointArrivalAdvancesThenPathExhaustsToTarget) {
     entt::registry reg;
     const auto target = MakeTarget(reg, 10.0f, 0.0f); // +X
     LocomotionProfile p;
+    p.separation_strength = 0.0f;
+    p.cohesion_strength = 0.0f;
+    p.alignment_strength = 0.0f;
     p.move_speed = 3.0f;
     p.arrival_radius = 1.0f;
     p.slow_radius = 2.0f;
@@ -192,6 +207,9 @@ TEST(InstinctLocomotion, FleeMovesAwayFromThreat) {
     entt::registry reg;
     const auto threat = MakeTarget(reg, 2.0f, 0.0f); // threat on +X, close
     LocomotionProfile p;
+    p.separation_strength = 0.0f;
+    p.cohesion_strength = 0.0f;
+    p.alignment_strength = 0.0f;
     p.move_speed = 3.0f;
     p.slow_radius = 5.0f; // safe distance
     const auto agent = MakeAgent(reg, 0.0f, 0.0f, threat, p);
@@ -212,6 +230,9 @@ TEST(InstinctLocomotion, FleeStopsWhenSafe) {
     entt::registry reg;
     const auto threat = MakeTarget(reg, 10.0f, 0.0f); // far -> already safe
     LocomotionProfile p;
+    p.separation_strength = 0.0f;
+    p.cohesion_strength = 0.0f;
+    p.alignment_strength = 0.0f;
     p.move_speed = 3.0f;
     p.slow_radius = 5.0f;
     const auto agent = MakeAgent(reg, 0.0f, 0.0f, threat, p);
@@ -231,6 +252,9 @@ TEST(InstinctLocomotion, CohesionPullsTowardGroupCenter) {
         entt::registry reg;
         const auto target = MakeTarget(reg, 0.0f, 100.0f); // far on +Z -> seek is +Z
         LocomotionProfile p;
+        p.separation_strength = 0.0f;
+        p.cohesion_strength = 0.0f;
+        p.alignment_strength = 0.0f;
         p.move_speed = 3.0f;
         p.flock_radius = 20.0f;
         p.cohesion_strength = strength;
@@ -253,6 +277,9 @@ TEST(InstinctLocomotion, AlignmentMatchesNeighborHeading) {
         entt::registry reg;
         const auto target = MakeTarget(reg, 0.0f, 100.0f); // agent A seeks +Z
         LocomotionProfile p;
+        p.separation_strength = 0.0f;
+        p.cohesion_strength = 0.0f;
+        p.alignment_strength = 0.0f;
         p.move_speed = 3.0f;
         p.flock_radius = 20.0f;
         p.alignment_strength = strength;
@@ -275,6 +302,9 @@ TEST(InstinctLocomotion, SeparationPushesCrowdedAgentsApart) {
     entt::registry reg;
     const auto target = MakeTarget(reg, 100.0f, 0.0f); // far, on +X
     LocomotionProfile p;
+    p.separation_strength = 0.0f;
+    p.cohesion_strength = 0.0f;
+    p.alignment_strength = 0.0f;
     p.move_speed = 3.0f;
     p.separation_radius = 3.0f;
     p.separation_strength = 1.0f;
@@ -300,11 +330,14 @@ TEST(InstinctLocomotion, SeparationPushesCrowdedAgentsApart) {
 // separation defaults OFF (strength 0) — a crowded neighbor must NOT
 // perturb the wish, so the canonical roster (which never sets separation) is
 // byte-identical and world_hash is unchanged. This is the determinism guarantee.
-TEST(InstinctLocomotion, SeparationDefaultOffIsByteIdentical) {
+TEST(InstinctLocomotion, ExplicitlyDisabledSteeringIsByteIdentical) {
     auto wish_with_neighbor = [](bool add_neighbor) {
         entt::registry reg;
         const auto target = MakeTarget(reg, 50.0f, 0.0f);
-        LocomotionProfile p; // defaults: separation_strength == 0
+        LocomotionProfile p;
+        p.separation_strength = 0.0f;
+        p.cohesion_strength = 0.0f;
+        p.alignment_strength = 0.0f; // defaults: separation_strength == 0
         p.move_speed = 2.5f;
         const auto a = MakeAgent(reg, 0.0f, 0.0f, target, p);
         if (add_neighbor) {
@@ -346,4 +379,13 @@ TEST(InstinctLocomotion, OrderIndependentPerEntityResult) {
     }
     EXPECT_NEAR(wish_a.x, wish_b.x, 1e-5f);
     EXPECT_NEAR(wish_a.y, wish_b.y, 1e-5f);
+}
+
+TEST(InstinctLocomotion, ShippingSteeringDefaults) {
+    const LocomotionProfile p;
+    EXPECT_FLOAT_EQ(p.separation_radius, 2.0f);
+    EXPECT_FLOAT_EQ(p.separation_strength, 0.6f);
+    EXPECT_FLOAT_EQ(p.flock_radius, 12.0f);
+    EXPECT_FLOAT_EQ(p.cohesion_strength, 0.5f);
+    EXPECT_FLOAT_EQ(p.alignment_strength, 0.4f);
 }

@@ -1,6 +1,6 @@
 # Coordinated delivery roadmap
 
-Updated October 14, 2026. This map distinguishes implemented release scope,
+Updated October 15, 2026. This map distinguishes implemented release scope,
 deferred acceptance and publication. Engine, game and art-pack versions need not
 share tag numbers. There are no assigned due dates or invented completion percentages.
 
@@ -14,18 +14,26 @@ share tag numbers. There are no assigned due dates or invented completion percen
   tooling are integrated. Historical verification records retain their original
   revisions and scope.
 - **v0.3.0 defaults:** Every shipping v0.3.0 feature is enabled by default. Debug
-  toggles and non-shipping Vulkan, Steam and GNS backends remain opt-in. Experimental
-  audio playback remains outside the shipping feature set under its separate
-  disabled-by-default release policy. The dedicated server autosaves every five minutes.
+  toggles and non-shipping Vulkan, Steam and GNS backends remain opt-in. Ordinary
+  client launches enable audio playback; captures explicitly use `--no-audio`.
+  Explicit false config values and saved user settings retain their opt-outs. The dedicated server autosaves every five minutes.
   Ladder is the default requested far-world mode. Missing immutable authority in normal
   presets still causes an explicit refusal and effective Legacy fallback (roughly 3 km
   range and a 3,200 m far plane); the default request does not establish 16 km native
-  coverage.
+  coverage. Saved-world far production authority remains fixture-only until FW S8
+  (v0.3.1); the renderer reports an explicit unavailable/refusal diagnostic.
+- **Session compatibility:** Effective SystemConfig identity is separate from the
+  legacy config sub-hash and presentation settings. TCP admission, lockstep and
+  replay bind simulation rules and resolved preset content, including biome/structure
+  dependency bytes. Runtime/soak TCP Hello has a 10-second deadline (issue #315).
+  Revision 7 enables preset features while revision 6 retains omission semantics;
+  current-format saves lacking embedded packaged presets use frozen revision-6
+  copies. Replication uses acknowledged deltas and radius-3 chunk AOI.
 - **Distant simulation:** Persisted clock, active-region ledger, edited-content digest
   and scheduler-fault foundations are implemented. Indexed authority
   durability/rehydration, durable completed work and ground-object continuation, durable
   regional fields/weather/scent/energy, and regional foliage/water continuation with
-  host persistence are planned for v0.3.1. Strict distant policy and distant creatures
+  host persistence (issue #242) are planned for v0.3.1. Strict distant policy and distant creatures
   (S8), remaining S9 closure, the committed-generation edited-SDF producer and FW S8
   consumer, the render qualification tooling stack, acceptance-matrix completeness, the
   developer console, asymmetric day/night and the calendar-relative lunar cycle,
@@ -34,7 +42,7 @@ share tag numbers. There are no assigned due dates or invented completion percen
 - **Qualification:** Complete native render qualification, the ladder horizon gate,
   authoritative ground/high/cave-air poses and fixed-view workloads, cave-walk and
   edited-world traversal producers, and outstanding acceptance capture/pinning are
-  deferred to v0.3.1. Current-candidate native Windows evidence is pending; the owner
+  deferred to v0.3.1. Current-candidate Windows results are pending native verification; the owner
   runs the required release smoke on Windows.
   These obligations are not recorded as passed. The five-tier contract retains
   16,384 m outer coverage and qualification within 32 km of the origin. Quality
@@ -62,8 +70,8 @@ share tag numbers. There are no assigned due dates or invented completion percen
 
 The September 13 UCRT job passed 2,245 of 2,250 cases at its recorded revision;
 the surface-loading guard and three render-process timeouts did not pass. All
-three timed-out processes emitted captures before termination. Local native
-`e1080d7f` passed the unchanged loading guard and original render cases on NVIDIA
+three timed-out processes emitted captures before termination. Separate historical
+native runs passed the unchanged loading guard and original render cases on NVIDIA
 and CI-pinned Mesa 26.1.7 llvmpipe. Different hardware and toolchains keep these
 non-reproductions separate from CI and original-hang causal closure. Later
 Debug/ASan and native records supersede the failed `ff0362b` baseline in their
@@ -84,8 +92,8 @@ commitments remain assigned.
 
 | Coordinated milestone | This repository | Counterpart repository |
 |---|---|---|
-| [v0.3.0 — Acceptance and release](https://github.com/d-addison/luminumbra/milestone/1) | Reconcile implemented world/render/persistence/authoring work, shipping defaults and five-minute server autosave; publish a signed source release with documented compatibility breaks and limitations after the scoped tag gate. | [Content/save/visual acceptance remains separate; source/runtime pack verification is historical evidence.](https://github.com/d-addison/luminumbra-game/milestone/1) |
-| v0.3.1 — Deferred qualification and continuation | Indexed authority durability/rehydration, durable completed work and ground-object continuation, durable regional fields/weather/scent/energy, and regional foliage/water continuation with host persistence are planned for v0.3.1. Strict distant policy and distant creatures (S8), remaining S9 closure, the committed-generation edited-SDF producer and FW S8 consumer, the render qualification tooling stack, acceptance-matrix completeness, the developer console, asymmetric day/night and the calendar-relative lunar cycle, GNS/Steam admission identity, and the MG2 E4 candidate directory are also planned for v0.3.1. Render qualification; acceptance captures and pinning; ladder horizon gate; authoritative poses and fixed-view workloads; cave-walk and edited-world traversal producers; native Windows evidence not produced for v0.3.0. | Composed scenes, authored workloads and game integration evidence for the deferred scopes. |
+| [v0.3.0 — Acceptance and release](https://github.com/d-addison/luminumbra/milestone/1) | Reconcile implemented world/render/persistence/authoring work, shipping defaults, session/content identity, TCP Hello admission/deadline, revision-6 preset fallback, replication defaults and five-minute server autosave; publish a signed source release with documented compatibility breaks and limitations after the scoped tag gate. | [Content/save/visual acceptance remains separate; source/runtime pack verification is historical evidence.](https://github.com/d-addison/luminumbra-game/milestone/1) |
+| v0.3.1 — Deferred qualification and continuation | Indexed authority durability/rehydration, durable completed work and ground-object continuation, durable regional fields/weather/scent/energy, and regional foliage/water continuation with host persistence (issue #242) are planned for v0.3.1. Strict distant policy and distant creatures (S8), remaining S9 closure, the committed-generation edited-SDF producer and FW S8 consumer, the render qualification tooling stack, acceptance-matrix completeness, the developer console, asymmetric day/night and the calendar-relative lunar cycle, GNS/Steam admission identity, and the MG2 E4 candidate directory are also planned for v0.3.1. Render qualification; acceptance captures and pinning; ladder horizon gate; authoritative poses and fixed-view workloads; cave-walk and edited-world traversal producers; native Windows evidence not produced for v0.3.0. | Composed scenes, authored workloads and game integration evidence for the deferred scopes. |
 | [Foundations — Engine/game separation and tooling](https://github.com/d-addison/luminumbra/milestone/2) | Installed SDK; lifecycle/schedule/state registration; optional field/behavior modules; script/component authoring; input, commands, inspection/profiling; dependency enforcement. | [Populated compatibility fixtures; mechanics/state/content extraction; pinned standalone launchers; script/data composition; screens/HUD/diagnostics/tests.](https://github.com/d-addison/luminumbra-game/milestone/2) |
 | [v0.4.0 — Continuing-world multiplayer](https://github.com/d-addison/luminumbra/milestone/3) | Regional continuation performance/default enablement (issue #320); checkpoints/catch-up; first-time authoritative admission; returning-identity and two-established-peer lockstep reconnect; physical avatars; LAN/directory and live transport/fault/load qualification. | [Real host/join/reconnect flows; LAN/public/direct/favorites/recent browser; generated animated physical avatars; network AI clients; composed previews and process acceptance.](https://github.com/d-addison/luminumbra-game/milestone/3) |
 | [v0.5.0 — Environmental audio](https://github.com/d-addison/luminumbra/milestone/4) | Diffuse RT60 DSP, weather-loop lifecycle, thunder propagation and device-independent decoding/graph acceptance. | [Soundscape/event integration, authored acoustic tuning and audible packaged acceptance.](https://github.com/d-addison/luminumbra-game/milestone/4) |
@@ -128,8 +136,8 @@ imply host migration, matchmaking or private Steam relay availability.
 - Source corrections and causal findings for water caustics/foam, soil environment
   lighting and foreground motes are recorded in the acceptance record. Final
   composed visual qualification remains deferred to v0.3.1.
-- Audio playback is disabled by default under its separate release policy.
-  Audible quality and event coverage remain future environmental-audio work.
+- Ordinary client audio playback is enabled; captures use `--no-audio`.
+  Audible quality and event coverage remain pending native verification.
   Dynamic-body acoustic material classification currently uses Stone.
 - GNS compilation does not establish live-peer behavior. Steam SDK/live service,
   broad NVIDIA/AMD/Intel hardware qualification and separate native Linux/Windows/
@@ -139,8 +147,10 @@ imply host migration, matchmaking or private Steam relay availability.
   native dump qualification. The UCRT64 120-second guard remains unchanged.
 
 Software releases remain source-only; art packs are separately versioned game
-content. Preset revision 6, LMR1 v2, FSD2 payload v3, canonical in-memory
-serialization and terrain-quality assertions remain the format contracts.
+content. Preset revision 7 retains revision 6 omission compatibility. LMR1 v2,
+FSD2 payload v3, canonical in-memory serialization and terrain-quality assertions
+remain the format contracts. Lockstep protocol and LREC1 replay layout are version 3;
+older layouts cannot bind resolved content and are refused.
 Every shipping feature is enabled by default;
 obsolete-world migration and legacy save loading are not supported.
 
@@ -198,7 +208,7 @@ planned for v0.3.1.
 Complete native render qualification, the ladder horizon gate, authoritative
 ground/high/cave-air poses and fixed-view workloads, cave-walk and edited-world
 traversal producers, and outstanding acceptance capture/pinning are deferred to v0.3.1.
-Current-candidate native Windows evidence is pending; the owner runs the required
+Current-candidate Windows results are pending native verification; the owner runs the required
 release smoke on Windows.
 
 Performance work to ship regional continuation on by default is planned for v0.4.0 as

@@ -37,6 +37,7 @@
 #include "core/JobSystem.h"
 #include "systems/PhysicsSystem.h"
 #include "systems/SHIELD_WorldSystem.h"
+#include "systems/WaterSystem.h"
 #include "world/Chunk.h"
 #include "world/MarchingCubes.h"
 #include "world/TerrainPresetLoader.h"
@@ -156,6 +157,12 @@ TerrainGenParams LoadPresetParams(const fs::path& path) {
         ADD_FAILURE() << "preset parse error: " << error;
     }
     return result.params;
+}
+
+void PinLegacyWaterWorkload(SHIELD_WorldSystem& world) {
+    // Streaming measurements retain Medium grid seeding and legacy river sources.
+    world.SetWaterSimResolution(static_cast<int>(WaterDetailLevel::Medium));
+    world.SetWaterHydrology(false, 0, 0);
 }
 
 MeshStats CalculateMeshStats(const std::vector<Chunk*>& chunks) {
@@ -386,7 +393,8 @@ void EcologyBenchmarkTick(entt::registry& r, std::uint64_t tick) {
 } // namespace
 
 TEST(InitialWorldLoadingPerfTest, MeasuresSurfaceHorizonPrep) {
-    const fs::path preset_path = SourceRoot() / "worlds/atlas/presets/default.json";
+    // Fixed terrain keeps the horizon preparation measurement comparable.
+    const fs::path preset_path = SourceRoot() / "worlds/atlas/presets-rev6/default.json";
     ASSERT_TRUE(fs::exists(preset_path)) << preset_path.string();
     fs::create_directories(ArtifactRoot());
 
@@ -394,6 +402,7 @@ TEST(InitialWorldLoadingPerfTest, MeasuresSurfaceHorizonPrep) {
     ScopedJobSystem job_system;
     ScopedPhysicsSystem physics_system;
     SHIELD_WorldSystem world(&job_system.jobs, nullptr, params, kSeed);
+    PinLegacyWaterWorkload(world);
 
     const float spawn_x = 8.0f;
     const float spawn_z = 8.0f;
@@ -509,7 +518,7 @@ TEST(InitialWorldLoadingPerfTest, MeasuresSurfaceHorizonPrep) {
 }
 
 TEST(InitialWorldLoadingPerfTest, StreamingBudgetSchedulerExpandsSurfaceBeforeVerticalStacks) {
-    const fs::path preset_path = SourceRoot() / "worlds/atlas/presets/default.json";
+    const fs::path preset_path = SourceRoot() / "worlds/atlas/presets-rev6/default.json";
     ASSERT_TRUE(fs::exists(preset_path)) << preset_path.string();
     fs::create_directories(ArtifactRoot());
 
@@ -517,6 +526,7 @@ TEST(InitialWorldLoadingPerfTest, StreamingBudgetSchedulerExpandsSurfaceBeforeVe
     ScopedJobSystem job_system;
     ScopedPhysicsSystem physics_system;
     SHIELD_WorldSystem world(&job_system.jobs, nullptr, params, kSeed);
+    PinLegacyWaterWorkload(world);
 
     const float spawn_x = 8.0f;
     const float spawn_z = 8.0f;
@@ -557,7 +567,7 @@ TEST(InitialWorldLoadingPerfTest, StreamingBudgetSchedulerExpandsSurfaceBeforeVe
 }
 
 TEST(InitialWorldLoadingPerfTest, StreamingWalkMaintainsBudgetsAndWritesWorldStateArtifact) {
-    const fs::path preset_path = SourceRoot() / "worlds/atlas/presets/default.json";
+    const fs::path preset_path = SourceRoot() / "worlds/atlas/presets-rev6/default.json";
     ASSERT_TRUE(fs::exists(preset_path)) << preset_path.string();
     fs::create_directories(ArtifactRoot());
 
@@ -565,6 +575,7 @@ TEST(InitialWorldLoadingPerfTest, StreamingWalkMaintainsBudgetsAndWritesWorldSta
     ScopedJobSystem job_system;
     ScopedPhysicsSystem physics_system;
     SHIELD_WorldSystem world(&job_system.jobs, nullptr, params, kSeed);
+    PinLegacyWaterWorkload(world);
 
     const Vec3 spawn(8.0f, world.GetTerrainHeightAt(8.0f, 8.0f) + 1.95f, 8.0f);
     ASSERT_TRUE(world.EnsureSurfaceReadyNear(spawn, &physics_system.physics, 8, 3));
@@ -673,7 +684,7 @@ TEST(InitialWorldLoadingPerfTest, StreamingWalkMaintainsBudgetsAndWritesWorldSta
 }
 
 TEST(InitialWorldLoadingPerfTest, PerformanceFrameworkBenchmarkScenariosWriteBudgetArtifacts) {
-    const fs::path preset_path = SourceRoot() / "worlds/atlas/presets/default.json";
+    const fs::path preset_path = SourceRoot() / "worlds/atlas/presets-rev6/default.json";
     ASSERT_TRUE(fs::exists(preset_path)) << preset_path.string();
     fs::create_directories(PerformanceFrameworkArtifactRoot());
 
@@ -727,6 +738,7 @@ TEST(InitialWorldLoadingPerfTest, PerformanceFrameworkBenchmarkScenariosWriteBud
 
     Timer create_timer;
     SHIELD_WorldSystem world(&job_system.jobs, nullptr, params, kSeed);
+    PinLegacyWaterWorkload(world);
     const double create_ms = create_timer.elapsed_ms();
 
     const Vec3 spawn(8.0f, world.GetTerrainHeightAt(8.0f, 8.0f) + 1.95f, 8.0f);

@@ -2,15 +2,15 @@
 
 The host ledger implements the persistent-active scheduling foundation in
 [distant-world.md](distant-world.md). It is gated by the existing
-`sim.active_regions` switch, enabled by default for v0.3.0 with the other shipping
-features. Budgets remain unlimited in shipped configuration. No distant system
-consumes this schedule yet; field pages, creature records, water shares,
+`sim.active_regions` switch, enabled in compiled and packaged defaults for
+v0.3.0. Explicit false selects the legacy clock path. Budgets remain unlimited in
+shipped configuration. No distant system consumes this schedule yet; field pages, creature records, water shares,
 diagnostics and measured budget activation remain separate work.
 
 Indexed authority durability/rehydration, durable completed work and ground-object
 continuation, durable regional fields/weather/scent/energy, regional foliage/water
-continuation, and strict distant policy and distant creatures (S8) are planned for
-v0.3.1. Regional continuation performance/default enablement is planned for v0.4.0
+continuation (issue #242), and strict distant policy and distant creatures (S8)
+are planned for v0.3.1. Regional continuation performance/default enablement is planned for v0.4.0
 as [issue #320](https://github.com/d-addison/luminumbra/issues/320). These consumers
 are outside the shipping scheduler foundation. The dedicated server autosaves
 every five minutes; this does not implement those continuation consumers.
@@ -94,8 +94,9 @@ refuses a resume before freeze. No callback consumer or catch-up is installed.
 The record is `<save>/chunks/region/active-regions.arl`, following the accepted
 contract's placement in the region integrity scan. This resolves the slice
 brief's conflicting save-root wording in favour of that contract. ARL1 does
-not alter LMR1 v2, the world manifest, preset revision 6, EFS1, plant payloads,
-FSD2 v3, or canonical chunk serialization. An anchor-only ledger is not a chunk
+not alter LMR1 v2, the world manifest, EFS1, plant payloads, FSD2 v3, or canonical
+chunk serialization. Presets now use revision 7 with revision-6 omission
+compatibility and frozen packaged-preset fallback. An anchor-only ledger is not a chunk
 snapshot: with active regions enabled, the first save with dirty chunks writes all
 resident chunks, including clean chunks in other regions. The disabled path keeps
 the legacy existing-save query: a plant-only save makes later saves incremental.

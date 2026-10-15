@@ -7,10 +7,12 @@ gap map](distant-world-implementation-status.md) and
 planned work and pending evidence. Generation, meshing, queues, residency, upload
 accounting and renderer integration are implemented; normal presets still lack
 immutable authority and fall back from the default Ladder request to Legacy.
+Saved-world far production authority remains fixture-only until FW S8 (v0.3.1);
+the renderer reports an explicit unavailable/refusal diagnostic.
 
 Indexed authority durability/rehydration, durable completed work and ground-object
 continuation, durable regional fields/weather/scent/energy, regional foliage/water
-continuation, strict distant policy and distant creatures (S8), remaining S9
+continuation (issue #242), strict distant policy and distant creatures (S8), remaining S9
 closure, and the committed-generation edited-SDF producer and FW S8 consumer are
 planned for v0.3.1. The per-system continuation and transaction requirements below
 describe that planned work. Regional continuation performance/default enablement
@@ -43,7 +45,7 @@ is waived by source landing.
 - Simulation over distance runs only in **persistent active regions** and only
   while the world host runs. There is no wall-clock progression while a world is
   shut down.
-- Audio remains disabled for v0.3 and every qualification run launches with
+- Ordinary audio playback is enabled; every qualification run launches with
   `--no-audio`; nothing in this contract depends on audio.
 
 ## Three explicit sets
@@ -189,6 +191,12 @@ silhouette features to the full radius, and the acceptance stations include
 deep interiors and distant mouths beyond the noise-cave cutoff, not only within
 it.
 
+Qualification must pin the cave-dense revision and identity. The packaged
+`worlds/atlas/presets/cave_dense.json` now uses revision 7; the revision-6 fixture
+is frozen in `worlds/atlas/presets-rev6/cave_dense.json`. See the
+shipping preset identities under "Shipping defaults" in the [engine guide](engine-guide.md) before comparing
+captures or synchronizing the game repository's fixture and identity sidecar.
+
 ### Edits and the far authority overlay
 
 Edits are baked into every tier on the world host inside the save path, after
@@ -291,7 +299,9 @@ canonical bytes, refusal behaviours and bounded slice boundaries. It has no
 per-system consumers and no measured budget caps yet. Dirty parking,
 snapshot transactions and the diagnostic panel are planned for v0.3.1.
 Current default behaviour still evicts dirty chunks without a flush, the client
-saves only on quit or shutdown, and the dedicated server autosaves every five minutes.
+saves only on quit or shutdown, and the dedicated server autosave interval defaults
+to 9000 ticks (five minutes at the canonical 30 Hz clock). Explicit zero disables
+autosave; capture and determinism fixtures explicitly use 30 ticks.
 
 ## Per-system distant policy
 
@@ -366,14 +376,19 @@ nights; a calendar-relative lunar period needs a separate pacing decision.
 
 ## Persistence and format contract
 
-Unchanged: preset revision 6, LMR1 container v2 for `chunks/region/*.lmr`
+Preset revision 7 retains revision 6 omission compatibility; current-format saves
+without embedded packaged presets use frozen revision-6 copies. Lockstep protocol
+and LREC1 replay layout are version 3 and bind effective configuration plus
+resolved preset/dependency content; older layouts are refused. See the
+[identity contract](development/system-config-identity.md).
+
+Unchanged: LMR1 container v2 for `chunks/region/*.lmr`
 including its lod-level and flag validation, the
 `luminumbra.persistence.world_manifest.v1` manifest, FSD2 far payload v3 (kept
 decodable with its existing dimensions and validation; no longer written by the
 runtime once the volumetric ladder lands), the `aether_state.efs` payload bytes
 and placement, the plant record payload, canonical in-memory serialization, the
-LREC1 replay record layout and checkpoint bytes, and the lockstep hash message
-and protocol. There is no obsolete-world migration.
+replay checkpoint bytes and lockstep hash message. There is no obsolete-world migration.
 
 New records, each declared before its slice lands with exact version identity,
 byte order, lengths, checksums, allocation limits and section-evolution rules
