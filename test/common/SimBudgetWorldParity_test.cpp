@@ -73,8 +73,13 @@ private:
     fs::path root;
 
 protected:
+    using Fingerprint = std::pair<std::uint64_t, std::uint64_t>;
+    using Fingerprints = std::map<std::string, Fingerprint>;
     static constexpr std::uint64_t kTicks = 3600;
-    void RunPopulatedPass(bool telemetry, std::string& hash, SimBudgetTelemetry& trace);
+    void RunPopulatedPass(bool telemetry,
+                          std::string& hash,
+                          Fingerprints& save_fingerprints,
+                          SimBudgetTelemetry* captured_trace = nullptr);
 
     const fs::path& Root() const {
         return root;
@@ -102,14 +107,31 @@ protected:
         std::error_code ec;
         fs::remove_all(root, ec);
     }
-    static std::map<std::string, std::pair<std::uint64_t, std::uint64_t>>
-    SavedContentFingerprints(const fs::path& directory) {
+    static Fingerprints SavedContentFingerprints(const fs::path& directory,
+                                                 Fingerprints* replay = nullptr) {
         namespace P = Luminumbra::Persistence;
-        std::map<std::string, std::pair<std::uint64_t, std::uint64_t>> result;
+        Fingerprints result;
+        Fingerprint replay_metadata;
+        if (replay) {
+            replay->clear();
+            nlohmann::json metadata;
+            std::ifstream input(directory / "world_info.json");
+            EXPECT_TRUE(input.is_open());
+            input >> metadata;
+            // Independent fresh worlds have different creation times. Only the
+            // cross-pass comparison normalizes this field and its index digest;
+            // the within-pass save-toggle comparison retains the original bytes.
+            metadata.at("creationTime") = 0;
+            const auto canonical = metadata.dump(4) + '\n';
+            replay_metadata = {canonical.size(),
+                               P::fnv1a64_bytes(canonical.data(), canonical.size())};
+        }
         for (const auto& entry : fs::recursive_directory_iterator(directory)) {
             if (!entry.is_regular_file())
                 continue;
             std::uint64_t bytes = 0, hash = 0;
+            Fingerprint replay_fingerprint;
+            const auto relative = entry.path().lexically_relative(directory).generic_string();
             if (entry.path() == P::snapshot_index_path(directory)) {
                 P::SnapshotIndex index;
                 EXPECT_TRUE(P::read_snapshot_index(directory, index, nullptr));
@@ -120,15 +142,30 @@ protected:
                 const auto canonical = P::encode_snapshot_index(index);
                 bytes = canonical.size();
                 hash = P::fnv1a64_bytes(canonical.data(), canonical.size());
+                if (replay) {
+                    for (auto& member : index.members) {
+                        if (member.path == "world_info.json" && member.present) {
+                            member.bytes = replay_metadata.first;
+                            member.fnv64 = replay_metadata.second;
+                        }
+                    }
+                    const auto replay_index = P::encode_snapshot_index(index);
+                    replay_fingerprint = {
+                        replay_index.size(),
+                        P::fnv1a64_bytes(replay_index.data(), replay_index.size())};
+                }
             } else {
                 bool exists = false;
                 EXPECT_TRUE(P::hash_file(entry.path(), bytes, hash, exists, nullptr));
                 EXPECT_TRUE(exists);
+                replay_fingerprint =
+                    relative == "world_info.json" ? replay_metadata : Fingerprint{bytes, hash};
             }
             // Stream payloads: copying two whole saves alongside the live water-authoritative
             // world can exhaust memory. The index uses this same size/FNV identity (design.md:55).
-            result.emplace(entry.path().lexically_relative(directory).generic_string(),
-                           std::make_pair(bytes, hash));
+            result.emplace(relative, Fingerprint{bytes, hash});
+            if (replay)
+                replay->emplace(relative, replay_fingerprint);
         }
         return result;
     }
@@ -136,7 +173,8 @@ protected:
 
 void SimBudgetWorldParity::RunPopulatedPass(bool telemetry,
                                             std::string& hash,
-                                            SimBudgetTelemetry& trace) {
+                                            Fingerprints& save_fingerprints,
+                                            SimBudgetTelemetry* captured_trace) {
     SCOPED_TRACE(telemetry);
     PhaseDiagnostics phases(GetParam(), telemetry);
     Luminumbra::Server::ServerWorldRunnerConfig config;
@@ -169,7 +207,10 @@ void SimBudgetWorldParity::RunPopulatedPass(bool telemetry,
         for (const auto& samples : runner.Session()->GetSimBudgetTelemetry().SamplesByStage())
             EXPECT_TRUE(samples.empty());
     } else {
-        trace = runner.Session()->GetSimBudgetTelemetry();
+        const auto& trace = runner.Session()->GetSimBudgetTelemetry();
+        // Preserve the complete trace before the save toggle clears session samples.
+        if (captured_trace)
+            *captured_trace = trace;
         for (std::size_t stage = 0; stage < trace.SamplesByStage().size(); ++stage) {
             const auto& samples = trace.SamplesByStage()[stage];
             const auto identity = static_cast<SimBudgetStage>(stage);
@@ -181,8 +222,17 @@ void SimBudgetWorldParity::RunPopulatedPass(bool telemetry,
                 continue;
             }
             ASSERT_EQ(samples.size(), kTicks);
-            for (std::size_t i = 0; i < samples.size(); ++i)
+            for (std::size_t i = 0; i < samples.size(); ++i) {
                 EXPECT_EQ(samples[i].tick, i + 1);
+                // Exact per-tick identities are stronger than field totals alone:
+                // a missing cell at one tick cannot cancel an extra cell at another.
+                if (identity == SimBudgetStage::Wind || identity == SimBudgetStage::Weather)
+                    EXPECT_EQ(samples[i].work, 64u * 64u);
+                else if (identity == SimBudgetStage::WindWeather)
+                    EXPECT_EQ(samples[i].work, 2u * 64u * 64u);
+                else if (identity == SimBudgetStage::ServerPhysics)
+                    EXPECT_EQ(samples[i].work, 1u);
+            }
         }
         EXPECT_GT(trace.Summarize(SimBudgetStage::Creatures).work_total, 0u);
         EXPECT_GT(trace.Summarize(SimBudgetStage::Plants).work_total, 0u);
@@ -208,7 +258,8 @@ void SimBudgetWorldParity::RunPopulatedPass(bool telemetry,
     phases.Report("save_state_first", runner.Session()->GetChunkValidationCacheStats());
     ASSERT_TRUE(runner.Session()->SaveWorld());
     phases.Report("save_metadata_first", runner.Session()->GetChunkValidationCacheStats());
-    const auto before = SavedContentFingerprints(runner.Session()->GetWorldSaveDir());
+    const auto before =
+        SavedContentFingerprints(runner.Session()->GetWorldSaveDir(), &save_fingerprints);
     phases.Report("fingerprint_before", runner.Session()->GetChunkValidationCacheStats());
     runner.Session()->SetSimBudgetTelemetryEnabled(!config.sim_budget);
     ASSERT_TRUE(runner.Session()->SaveWorldState());
@@ -223,23 +274,21 @@ void SimBudgetWorldParity::RunPopulatedPass(bool telemetry,
     phases.Print("teardown", shutdown.teardown_seconds, shutdown.cache);
 }
 
-// Each discovered entry runs two complete passes within the same timeout.
-// The repeated traced pass costs one extra full run across the two entries.
-TEST_P(SimBudgetWorldParity, Populated3600TicksPreserveWorldHashAndSaveToggle) {
-    std::string untraced_hash, traced_hash;
-    SimBudgetTelemetry unused, trace;
-    ASSERT_NO_FATAL_FAILURE(RunPopulatedPass(false, untraced_hash, unused));
-    ASSERT_NO_FATAL_FAILURE(RunPopulatedPass(true, traced_hash, trace));
-    EXPECT_EQ(traced_hash, untraced_hash);
-}
-
-TEST_P(SimBudgetWorldParity, Populated3600TicksRepeatTracedHashAndWork) {
-    std::string first_hash, repeated_hash;
+// Three independent populated runs per active-regions setting: traced A and B
+// compare every stage's tick/work identities, hashes and saves; untraced C checks
+// world and save parity against A across the telemetry toggle.
+TEST_P(SimBudgetWorldParity, Populated3600TicksPreserveWorldHashAndWorkCounts) {
+    std::string first_hash, repeated_hash, untraced_hash;
+    Fingerprints first_save, repeated_save, untraced_save;
     SimBudgetTelemetry first_trace, repeated_trace;
-    ASSERT_NO_FATAL_FAILURE(RunPopulatedPass(true, first_hash, first_trace));
-    ASSERT_NO_FATAL_FAILURE(RunPopulatedPass(true, repeated_hash, repeated_trace));
-    EXPECT_EQ(repeated_hash, first_hash);
+    ASSERT_NO_FATAL_FAILURE(RunPopulatedPass(true, first_hash, first_save, &first_trace));
+    ASSERT_NO_FATAL_FAILURE(RunPopulatedPass(true, repeated_hash, repeated_save, &repeated_trace));
     EXPECT_TRUE(first_trace.WorkMatches(repeated_trace));
+    EXPECT_EQ(first_hash, repeated_hash);
+    EXPECT_EQ(first_save, repeated_save);
+    ASSERT_NO_FATAL_FAILURE(RunPopulatedPass(false, untraced_hash, untraced_save));
+    EXPECT_EQ(first_hash, untraced_hash);
+    EXPECT_EQ(first_save, untraced_save);
 }
 INSTANTIATE_TEST_SUITE_P(ActiveRegions,
                          SimBudgetWorldParity,

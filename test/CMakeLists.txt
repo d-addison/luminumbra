@@ -1909,7 +1909,7 @@ foreach(_lum_gtest_target ${LUMINUMBRA_GTEST_TARGETS})
         gtest_discover_tests(${_lum_gtest_target} DISCOVERY_TIMEOUT 120
             PROPERTIES RUN_SERIAL TRUE)
     elseif(_lum_gtest_target STREQUAL world_open_refusal_test)
-        # Carries two populated 3,600-tick passes per parity entry/parameter. Keep the
+        # Carries three populated 3,600-tick passes per parity entry/parameter. Keep the
         # existing bound; HeavyTestsCTest.cmake assigns scheduling costs to these
         # discovered tests so CTest starts them early in sanitizer lanes.
         gtest_discover_tests(${_lum_gtest_target} DISCOVERY_TIMEOUT 120
