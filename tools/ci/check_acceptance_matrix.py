@@ -8,21 +8,140 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
+import unicodedata
 import xml.etree.ElementTree as ET
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
 
 
 SCHEMA = "luminumbra.acceptance_matrix.v2"
+INVENTORY_SCHEMA = "luminumbra.acceptance_requirements.v1"
+CONTRACT_DOCUMENTS = ("docs/distant-world.md", "docs/active-regions.md")
 DEFAULT_ROOT = Path(__file__).resolve().parents[2]
 REQUIREMENT_SOURCE = Path("docs/distant-world.md")
 REQUIREMENT_HEADING = "## Acceptance requirement IDs"
 STATUS_ORDER = ("covered", "partial", "needs-native-run", "planned")
 VALID_STATUSES = frozenset(STATUS_ORDER)
 EVIDENCE_KINDS = frozenset({"ctest", "script", "native", "doc"})
+EXCLUSION_CATEGORIES = frozenset({
+    "current-behaviour", "historical", "rationale", "example", "cross-reference",
+})
+NORMATIVE_MARKER_RE = re.compile(
+    r"\b(?:must|shall|requires|is\s+refused|is\s+a\s+failure|never)\b", re.IGNORECASE
+)
+# Reviewed exceptions are bound to the original source and full statement so an
+# id cannot be reused to exclude a different normative claim.
+REVIEWED_EXCLUSION_OVERRIDES = {
+    "dw.tiers.021": {
+        "source": "docs/distant-world.md#tier-ladder",
+        "text": "edits reach far tiles only through authoritative SDF brick overlays captured "
+                "from chunks that are still resident, because the far store is never attached "
+                "to a save directory at runtime;",
+        "category": "current-behaviour",
+        "reason": "Reviewed Current behaviour paragraph: 'never attached' describes the "
+                  "existing runtime gap, not an obligation of the accepted tier contract.",
+    },
+}
+
+# Closed exclusion audit: every retained quote was read in its
+# source paragraph. Entries bind id, source#anchor, category and exact UTF-8 quote
+# SHA-256. Exclusion text must equal that full quote; shorter excerpts cannot
+# hide obligations. New exclusions require a reviewed change to this table.
+# Restored requirements: dw.policy.036 / .039 (C4 behavior and omission rules),
+# ar.history.020 (historical evidence must retain its provenance).
+AUDITED_EXCLUSIONS = frozenset({
+    # Document acceptance date, implementation status and gap-map cross-references.
+    ('dw.intro.001', 'docs/distant-world.md#distant-world-and-distant-simulation-contract',
+     'rationale', 'aced6a8cb6d1a2df2dd8d150656d162f89a52036ddec61f5c6ac4b04b5c10e4f'),
+    ('dw.intro.002', 'docs/distant-world.md#distant-world-and-distant-simulation-contract',
+     'rationale', '326fb30540746afc7da9185c98542c5dae3b9ebad1bb6bd156e4af7bd5bfbb33'),
+    ('dw.intro.005', 'docs/distant-world.md#distant-world-and-distant-simulation-contract',
+     'cross-reference', 'f212d6f82b3b95b71bb77b4d5620e0168c192382f67d324f51c9be74e6bd071c'),
+    ('dw.intro.006', 'docs/distant-world.md#distant-world-and-distant-simulation-contract',
+     'cross-reference', '7dfcae21dfacd49b293d37bfe70aab0579c79e5389bda159ab356cc5fc7e1690'),
+    # Explicit Current behaviour: shipped residency, rendering and scheduler gaps.
+    ('dw.sets.001', 'docs/distant-world.md#three-explicit-sets',
+     'current-behaviour', '409611d1c1c0ea16809345f9d2bec1917737bf7443cf7dbfc871294f20ca0c93'),
+    ('dw.sets.002', 'docs/distant-world.md#three-explicit-sets',
+     'current-behaviour', '7e538cf487ec85f42fda1ab354667af457eb2e2ab9082a6c21ef2b0c9425de6e'),
+    ('dw.sets.003', 'docs/distant-world.md#three-explicit-sets',
+     'current-behaviour', 'e6651f85b6add1d62034863513d38b870a209e39a5cd8c33853a9b88e5f28589'),
+    ('dw.sets.004', 'docs/distant-world.md#three-explicit-sets',
+     'current-behaviour', '16bc03a4c85578ef6dab2ea721331aca17f7ddd37a8ffb600819296d5e924f24'),
+    ('dw.sets.005', 'docs/distant-world.md#three-explicit-sets',
+     'current-behaviour', 'fa717a05dab1ea9368baa135cde66b84c9852007953a11d2cc6f026d5baace9c'),
+    ('dw.sets.006', 'docs/distant-world.md#three-explicit-sets',
+     'current-behaviour', 'fe8ebc5f9cd959b956f8d57526e55e40616c7c5c97c3db65d762a8e7e437b5cd'),
+    # Explicit Current behaviour: existing heightfield/overlay limitations.
+    ('dw.tiers.020', 'docs/distant-world.md#tier-ladder',
+     'current-behaviour', '11a84edb05ddccd9f4db845deb18792ebadee85c2e09644cffe59783c28e78ec'),
+    ('dw.tiers.021', 'docs/distant-world.md#tier-ladder',
+     'current-behaviour', 'ac31f76707b1e82287a15e1bd1bdff03710a62da4716222463713477ca34a396'),
+    ('dw.tiers.022', 'docs/distant-world.md#tier-ladder',
+     'current-behaviour', '63df65c87941e51dd537a5019c6d8bb9465ef255a6b72e6d9b1fa25c05a0ff39'),
+    # Explicit Current behaviour: shipped systems and legacy cadence, not C4 duties.
+    ('dw.policy.031', 'docs/distant-world.md#per-system-distant-policy',
+     'current-behaviour', 'e9c01e269e8d38eadc083bf2e18abc1f4f325ad39b1cd60eee26319e2760335b'),
+    ('dw.policy.032', 'docs/distant-world.md#per-system-distant-policy',
+     'current-behaviour', '9434099b059075c7f98e7c74e83e3365561a65a59bb37ea4c1c6c731b24bddae'),
+    ('dw.policy.033', 'docs/distant-world.md#per-system-distant-policy',
+     'current-behaviour', '9e353e05c508ef37e59954ca963443e5d98106cde1ee99e8b4ab995309070e3f'),
+    ('dw.policy.034', 'docs/distant-world.md#per-system-distant-policy',
+     'current-behaviour', '794123672747d0730701bb32379773e6dc24558368d53ebc8a575d13137106e5'),
+    ('dw.policy.035', 'docs/distant-world.md#per-system-distant-policy',
+     'current-behaviour', 'ba95962c50d32ccfb4df8ad58f6885abe89b759850bceb95912ad61d237ba486'),
+    ('dw.policy.037', 'docs/distant-world.md#per-system-distant-policy',
+     'current-behaviour', 'ccf3278a7425699d76ca30c6349c1cf07c1a6dca1670288993e899606f54b7a9'),
+    ('dw.policy.038', 'docs/distant-world.md#per-system-distant-policy',
+     'current-behaviour', '9dcea40b87f68a9706b1b16728321c16fc5b11fee3ae5c2f6e9100863526c083'),
+    # Explicit Current behaviour: existing measurement gaps.
+    ('dw.perf.018', 'docs/distant-world.md#performance-measurement-contract',
+     'current-behaviour', 'cb8065e134442e599b949ec44f8413f32b66648c28c900d6fa8842df2bb9812a'),
+    ('dw.perf.019', 'docs/distant-world.md#performance-measurement-contract',
+     'current-behaviour', 'e9f5d1a853bc104b5ce2691aa95b4db3f8e411754da92dd37853d9b2037917f5'),
+    # Pre-repair investigation observations, hashes and historical artifact provenance.
+    ('ar.history.001', 'docs/active-regions.md#historical-ambient-hash-portability-investigation',
+     'historical', 'f3eb0146b2325ddd65ec2aeacf580069ea0281d8687006b5efdb20445bea41f1'),
+    ('ar.history.002', 'docs/active-regions.md#historical-ambient-hash-portability-investigation',
+     'historical', '886e7306a06cae4dedb2fb4092d755e24699eebab3661bfbbac34d3418390237'),
+    ('ar.history.003', 'docs/active-regions.md#historical-ambient-hash-portability-investigation',
+     'historical', 'fe2a41203526d9432c8d2f8d856e7034cc80359810a94b09099c2a500967b539'),
+    ('ar.history.004', 'docs/active-regions.md#historical-ambient-hash-portability-investigation',
+     'historical', '00695cbe5b36319bbf7a9c2ddc59075d7982ef58ad6fb34c7f121febe64b5537'),
+    ('ar.history.005', 'docs/active-regions.md#historical-ambient-hash-portability-investigation',
+     'historical', 'df9b1febead283bd7ca5ebccd26452d3444ac071c9714a36d43e29729071d37d'),
+    ('ar.history.006', 'docs/active-regions.md#historical-ambient-hash-portability-investigation',
+     'historical', '87ef733310ec40feb3a5d22c623c6a04097e426dc25ddf90131a8fdbc5e8fc3b'),
+    ('ar.history.007', 'docs/active-regions.md#historical-ambient-hash-portability-investigation',
+     'historical', '784ae0560f4776d8e9964f569ef42f3666b50ac04fe59dffafdbeb44f7f06e63'),
+    ('ar.history.008', 'docs/active-regions.md#historical-ambient-hash-portability-investigation',
+     'historical', '3ff566618065ec80f2d937746985c4a4a55cc61a02f7928abae7ff4ee841b194'),
+    ('ar.history.009', 'docs/active-regions.md#historical-ambient-hash-portability-investigation',
+     'historical', 'ca8d1d1f87aabe4f5242c7e529bb2da70f2e3899c2862fdd527f4e8cd7f07cc5'),
+    ('ar.history.010', 'docs/active-regions.md#historical-ambient-hash-portability-investigation',
+     'historical', '1179746e60813f609c08eb3b65b9f819689906b63417da8a1a13f62a5e0c068a'),
+    ('ar.history.011', 'docs/active-regions.md#historical-ambient-hash-portability-investigation',
+     'historical', '3a7ce33ed1c07d8c7a591ca25d922cdeb62a50d61649983fc0140631e30c8122'),
+    ('ar.history.012', 'docs/active-regions.md#historical-ambient-hash-portability-investigation',
+     'historical', '382aa197d81ca04d82c485e96160db2650a3b786cbf8ead05e34caf1c1ead580'),
+    ('ar.history.013', 'docs/active-regions.md#historical-ambient-hash-portability-investigation',
+     'historical', 'e4d2cb6a5d37b5ecf2f154445d4649d55b12739709a72f62e19591b73622ca58'),
+    ('ar.history.014', 'docs/active-regions.md#historical-ambient-hash-portability-investigation',
+     'historical', 'a015bb5aaeac0e8392289108259f39b67d28ac809259b7682afc908cfdbef6c4'),
+    ('ar.history.015', 'docs/active-regions.md#historical-ambient-hash-portability-investigation',
+     'historical', '271e6c42c937bae094e7e6215de6af43fdaa82039f4a217fe5b498224c89d5ba'),
+    ('ar.history.017', 'docs/active-regions.md#historical-ambient-hash-portability-investigation',
+     'historical', 'a3ccd5678e29ef7b79f76d23e2b8782c5c4e72a4cd3dd1a67399ae6d14ababf6'),
+    ('ar.history.022', 'docs/active-regions.md#historical-ambient-hash-portability-investigation',
+     'historical', '5f897ccbd1c1014bd7f256ff96b48b7fbf34aa30f1af8b439b81c5a5eea9b5a4'),
+    ('ar.history.023', 'docs/active-regions.md#historical-ambient-hash-portability-investigation',
+     'historical', 'd34788a580011f4ebd9e3b1aa9b2e17ef728c113b55da1d3190d30cb6269b6f4'),
+})
 
 ROW_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 RECEIPT_RE = re.compile(r"^luminumbra\.[a-z0-9_]+\.v[0-9]+$")
@@ -334,6 +453,188 @@ def _path_problem(base: Path, ref: str, must_exist: bool) -> str | None:
     return None
 
 
+def heading_slug(heading: str) -> str:
+    """GitHub heading slug: preserve Unicode letters/numbers, '-' and '_'."""
+    heading = re.sub(r"<[^>]*>", "", heading).strip().lower()
+    return "".join(
+        ch for ch in heading
+        if ch in "-_ " or unicodedata.category(ch)[0] in {"L", "N", "M"}
+    ).replace(" ", "-")
+
+
+def _headings(text: str) -> dict[int, str]:
+    headings: dict[int, str] = {}
+    used: set[str] = set()
+    fenced = False
+    for number, line in enumerate(text.splitlines()):
+        if re.match(r"^\s*(```|~~~)", line):
+            fenced = not fenced
+        if fenced:
+            continue
+        match = re.match(r"^ {0,3}#{1,6}\s+(.+?)\s*#*\s*$", line)
+        if match:
+            stem = heading_slug(match.group(1))
+            slug, suffix = stem, 0
+            while slug in used:
+                suffix += 1
+                slug = f"{stem}-{suffix}"
+            headings[number] = slug
+            used.add(slug)
+    return headings
+
+
+def _source_problem(base: Path, source: str) -> str | None:
+    if source.startswith("issue"):
+        if re.fullmatch(r"issue #[1-9][0-9]*", source) is None:
+            return f"invalid issue source: {source}"
+        return None
+    path, separator, anchor = source.partition("#")
+    problem = _path_problem(base, path, must_exist=True)
+    if problem:
+        return f"source {problem}"
+    if separator and anchor not in _headings(_read_text(base / path)).values():
+        return f"source anchor not found: {source}"
+    return None
+
+
+def contract_statements(text: str, path: str) -> list[tuple[str, str, bool]]:
+    """Account for all prose and table data, not just sentences with 'must'.
+
+    Soft wraps are normalized. Prose, bullets and table rows split at sentence
+    and semicolon boundaries. Headings and table scaffolding are not statements.
+    Current-behaviour paragraphs are explicitly descriptive.
+    Inventory ids are maintained independently of these content units.
+    """
+    lines = text.splitlines()
+    headings = _headings(text)
+    source = path
+    paragraph: list[str] = []
+    result: list[tuple[str, str, bool]] = []
+
+    def flush() -> None:
+        if not paragraph:
+            return
+        block = " ".join(line.strip() for line in paragraph)
+        descriptive = block.startswith("Current behaviour:")
+        units = re.split(r"(?<=[.!?])\s+(?=[A-Z`])|(?<=;)\s+", block)
+        result.extend((source, unit, descriptive) for unit in units)
+        paragraph.clear()
+
+    for number, line in enumerate(lines):
+        if number in headings:
+            flush()
+            source = f"{path}#{headings[number]}"
+        elif not line.strip():
+            flush()
+        elif line.startswith("|"):
+            flush()
+            # The header preceding a separator is table scaffolding as well.
+            if re.match(r"^\|[ :|\-]+\|$", line) or (
+                number + 1 < len(lines)
+                and re.match(r"^\|[ :|\-]+\|$", lines[number + 1])
+            ):
+                continue
+            paragraph.append(line)
+            flush()
+        elif line.startswith("- "):
+            flush()
+            paragraph.append(line)
+        else:
+            paragraph.append(line)
+    flush()
+    return result
+
+
+def validate_inventory(
+    inventory: dict[str, Any], root: Path
+) -> tuple[dict[str, dict[str, Any]], list[str]]:
+    """Require an explicit requirement or justified exclusion for every unit."""
+    errors: list[str] = []
+    requirements: dict[str, dict[str, Any]] = {}
+    expected: Counter[tuple[str, str]] = Counter()
+    descriptive: set[tuple[str, str]] = set()
+    if inventory.get("schema") != INVENTORY_SCHEMA:
+        errors.append(f"inventory schema must be {INVENTORY_SCHEMA}")
+    if inventory.get("documents") != list(CONTRACT_DOCUMENTS):
+        errors.append("inventory documents must name both reviewed contract documents")
+    for path in CONTRACT_DOCUMENTS:
+        problem = _path_problem(root, path, must_exist=True)
+        if problem:
+            errors.append(problem)
+            continue
+        for source, text, is_descriptive in contract_statements(_read_text(root / path), path):
+            expected[(source, text)] += 1
+            if is_descriptive:
+                descriptive.add((source, text))
+    source_problems: dict[str, str | None] = {}
+    actual: Counter[tuple[str, str]] = Counter()
+    ids: set[str] = set()
+    for kind in ("requirements", "exclusions"):
+        entries = inventory.get(kind)
+        if not isinstance(entries, list):
+            errors.append(f"inventory {kind} must be a list")
+            continue
+        for position, entry in enumerate(entries):
+            label = f"{kind}[{position}]"
+            if not isinstance(entry, dict):
+                errors.append(f"{label}: must be an object")
+                continue
+            identity = entry.get("id")
+            if not isinstance(identity, str) or not ROW_ID_RE.fullmatch(identity):
+                errors.append(f"{label}: invalid stable id")
+            elif identity in ids:
+                errors.append(f"{identity}: duplicate inventory id")
+            else:
+                label = identity
+                ids.add(identity)
+                if kind == "requirements":
+                    requirements[identity] = entry
+            source, text, quote = (entry.get(key) for key in ("source", "text", "quote"))
+            if not all(_is_nonempty_str(value) for value in (source, text, quote)):
+                errors.append(f"{label}: source, text and quote must be non-empty strings")
+                continue
+            if source not in source_problems:
+                source_problems[source] = _source_problem(root, source)
+            problem = source_problems[source]
+            if problem:
+                errors.append(f"{label}: {problem}")
+            if quote not in text:
+                errors.append(f"{label}: quote must be a verbatim excerpt of text")
+            actual[(source, text)] += 1
+            if kind == "exclusions":
+                if not _is_nonempty_str(entry.get("reason")):
+                    errors.append(f"{label}: exclusion requires a reason")
+                category = entry.get("category")
+                audited = (
+                    isinstance(identity, str) and isinstance(category, str)
+                    and text == quote
+                    and (identity, source, category, hashlib.sha256(quote.encode("utf-8")).hexdigest())
+                    in AUDITED_EXCLUSIONS
+                )
+                if not audited:
+                    errors.append(f"{label}: exclusion is not in the closed audited table")
+                if not isinstance(category, str) or category not in EXCLUSION_CATEGORIES:
+                    errors.append(f"{label}: exclusion requires an audited non-normative category")
+                if category == "current-behaviour" and (source, text) not in descriptive:
+                    errors.append(f"{label}: current-behaviour exclusion is not in a Current behaviour paragraph")
+                if category == "historical" and "historical" not in source.partition("#")[2]:
+                    errors.append(f"{label}: historical exclusion requires a historical heading")
+                # Check the full text as well as its excerpt to prevent shortening
+                # the quote from hiding a normative marker.
+                if NORMATIVE_MARKER_RE.search(re.sub(r"[*_`]+", "", text)):
+                    override = REVIEWED_EXCLUSION_OVERRIDES.get(identity) if isinstance(identity, str) else None
+                    if not (override and _is_nonempty_str(override.get("reason"))
+                            and all(entry.get(key) == override[key] for key in ("source", "text", "category"))):
+                        errors.append(f"{label}: normative exclusion requires an exact reviewed override")
+    for (source, text), count in (expected - actual).items():
+        errors.append(f"inventory unaccounted statement ({count}): {source}: {text[:100]}")
+    for (source, text), count in (actual - expected).items():
+        errors.append(f"inventory stale or duplicate statement ({count}): {source}: {text[:100]}")
+    if not requirements:
+        errors.append("inventory requirements must not be empty")
+    return requirements, errors
+
+
 def _check_planned(add: Any, planned: Any) -> None:
     if not _is_nonempty_str(planned):
         add("planned must be a non-empty descriptive string")
@@ -343,6 +644,77 @@ def _check_planned(add: Any, planned: Any) -> None:
         add("planned work description must not be empty")
     if not separator or not details.split(";", 1)[0].strip():
         add("planned must include a non-empty '; owner:' workstream")
+
+
+NATIVE_SCRIPT_RE = re.compile(r"[A-Za-z0-9_./ :\\-]+\.(?:ps1|py|sh|bash|js|rb|pl|cmd|bat)\Z")
+# Each alternative has a distinct first character and a single parse: a literal
+# character or a delimited placeholder. Malformed suffixes cannot repartition
+# runs of literal characters into exponentially many repeated groups.
+NATIVE_ARG_RE = re.compile(r"(?:[-A-Za-z0-9_./ :\\=,@+%]|<[A-Za-z0-9_.-]+>)+\Z")
+
+
+def _normalise_native_path(path: str) -> str:
+    path = path.replace("\\", "/")
+    while path.startswith("./"):
+        path = path[2:]
+    return path
+
+
+def _native_entry_point(command: str) -> str | None:
+    """Parse only the closed command grammar; never search options for a path.
+
+    Hosts are exactly pwsh, python3, python and bash. Only pwsh's optional
+    -NoProfile and -ExecutionPolicy Bypass before -File are supported, in that
+    order. Python hosts accept only .py, pwsh only .ps1, and bash .sh/.bash.
+    Arguments are literal words or documentation placeholders, with
+    exactly one script path in the command. Shell syntax is never executable
+    evidence. Quotes and Windows path separators are normalized lexically.
+    """
+    if any(ch in command for ch in "|;&`$\r\n"):
+        return None
+    lexer = shlex.shlex(command, posix=True)
+    lexer.whitespace_split = True
+    lexer.commenters = ""
+    lexer.escape = ""
+    try:
+        words = list(lexer)
+    except ValueError:
+        return None
+    if not words:
+        return None
+    position = 0
+    suffixes: set[str] | None = None
+    if words[0] in {"python3", "python", "bash"}:
+        position = 1
+        suffixes = {".py"} if words[0] in {"python3", "python"} else {".sh", ".bash"}
+    elif words[0] == "pwsh":
+        suffixes = {".ps1"}
+        position = 1
+        if position < len(words) and words[position] == "-NoProfile":
+            position += 1
+        if position < len(words) and words[position] == "-ExecutionPolicy":
+            if words[position + 1:position + 2] != ["Bypass"]:
+                return None
+            position += 2
+        if position < len(words) and words[position] == "-File":
+            position += 1
+        elif position != 1:
+            return None  # Interpreter options require the -File form.
+    if position >= len(words):
+        return None
+    path = _normalise_native_path(words[position])
+    if path.startswith("-") or NATIVE_SCRIPT_RE.fullmatch(path) is None:
+        return None
+    if suffixes is not None and PurePosixPath(path).suffix not in suffixes:
+        return None
+    for arg in words[position + 1:]:
+        if NATIVE_ARG_RE.fullmatch(arg) is None:
+            return None
+        # Paths supplied as positional or --key=path arguments also count.
+        value = _normalise_native_path(arg.partition("=")[2] if "=" in arg else arg)
+        if NATIVE_SCRIPT_RE.fullmatch(value):
+            return None
+    return path
 
 
 def _check_item(
@@ -376,8 +748,19 @@ def _check_item(
             add(problem)
 
     if kind == "native":
-        if not _is_nonempty_str(item.get("command")):
+        command = item.get("command")
+        if not _is_nonempty_str(command):
             add("native command must be a non-empty string")
+        else:
+            entry_point = _native_entry_point(command)
+            if entry_point is None:
+                add("native command must invoke a repository script entry point")
+            else:
+                problem = _path_problem(base, entry_point, must_exist=not is_planned)
+                if problem:
+                    add(f"native command entry point {problem}")
+                if entry_point != ref:
+                    add(f"native command entry point must match ref: {entry_point} != {ref}")
         receipt = item.get("receipt_schema")
         if not isinstance(receipt, str) or not RECEIPT_RE.match(receipt):
             add("native receipt_schema must match ^luminumbra\\.[a-z0-9_]+\\.v[0-9]+$")
@@ -420,6 +803,13 @@ def validate(
 ) -> list[str]:
     base = root.resolve()
     problems: list[tuple[str, str]] = []
+    try:
+        inventory = load_matrix(base / "tools/ci/acceptance_requirements.json")
+        requirements, inventory_errors = validate_inventory(inventory, base)
+    except MatrixError as exc:
+        requirements, inventory_errors = {}, [str(exc)]
+    problems.extend(("<inventory>", message) for message in inventory_errors)
+    mapped: set[str] = set()
     rows = matrix.get("rows")
 
     if matrix.get("schema") != SCHEMA:
@@ -433,6 +823,7 @@ def validate(
         problems.append(("<matrix>", "rows must be a non-empty list"))
         return [f"{label}: {message}" for label, message in sorted(problems)]
 
+    source_problems: dict[str, str | None] = {}
     seen_ids: set[str] = set()
     for position, row in enumerate(rows):
         label = f"rows[{position}]"
@@ -456,6 +847,24 @@ def validate(
         for key in ("source", "statement"):
             if not _is_nonempty_str(row.get(key)):
                 messages.append(f"{key} must be a non-empty string")
+        if "discrepancy" in row and not _is_nonempty_str(row["discrepancy"]):
+            messages.append("discrepancy must be a non-empty string")
+        if _is_nonempty_str(row.get("source")):
+            source = row["source"]
+            if source not in source_problems:
+                source_problems[source] = _source_problem(base, source)
+            problem = source_problems[source]
+            if problem:
+                messages.append(problem)
+        refs = row.get("requirements", [])
+        if not isinstance(refs, list) or any(not _is_nonempty_str(ref) for ref in refs):
+            messages.append("requirements must be a list of non-empty ids")
+        else:
+            for ref in refs:
+                if ref not in requirements:
+                    messages.append(f"unknown requirement: {ref}")
+                else:
+                    mapped.add(ref)
 
         status = row.get("status")
         if status not in VALID_STATUSES:
@@ -478,6 +887,13 @@ def validate(
         problems.extend((label, message) for message in messages)
 
     problems.extend((row_id, "required mapping missing") for row_id in required_ids - seen_ids)
+    missing = sorted(requirements.keys() - mapped)
+    problems.extend(("<inventory>", f"requirement lacks a matrix row: {ref}") for ref in missing)
+    if missing or inventory_errors:
+        for row in rows:
+            if isinstance(row, dict) and row.get("id") == "iss.126" and row.get("status") != "planned":
+                problems.append(("iss.126", "inventory incomplete: status must be planned"))
+
     return [f"{label}: {message}" for label, message in sorted(problems)]
 
 
@@ -620,7 +1036,9 @@ def render_doc(matrix: dict[str, Any]) -> str:
         "",
         "This file is generated from `tools/ci/acceptance_matrix.json` by "
         "`tools/ci/check_acceptance_matrix.py --write-doc`. Do not edit it by hand; "
-        "change the matrix and regenerate.",
+        "change the matrix and regenerate. The requirement inventory is "
+        "`tools/ci/acceptance_requirements.json`; every statement in both reviewed "
+        "documents is accounted for as a requirement or a justified exclusion.",
         "",
         "Statuses declare the available evidence. Static validation requires a mapping for every ID "
         "in [the contract requirement list](distant-world.md#acceptance-requirement-ids) and checks references; it does not "
@@ -636,15 +1054,19 @@ def render_doc(matrix: dict[str, Any]) -> str:
     lines.extend(
         [
             "",
-            "| Row | Status | Statement | Evidence |",
-            "| --- | --- | --- | --- |",
+            "| Row | Status | Source | Requirements | Statement | Evidence |",
+            "| --- | --- | --- | --- | --- | --- |",
         ]
     )
     for row in rows:
         evidence = "<br>".join(_render_item(item) for item in row["evidence"])
+        statement = row["statement"]
+        if row.get("discrepancy"):
+            statement += f" Discrepancy: {row['discrepancy']}"
         lines.append(
             f"| {_escape_cell(row['id'])} | {_escape_cell(row['status'])} "
-            f"| {_escape_cell(row['statement'])} | {evidence} |"
+            f"| {_escape_cell(row['source'])} | {_escape_cell(', '.join(row.get('requirements', [])))} "
+            f"| {_escape_cell(statement)} | {evidence} |"
         )
     return "\n".join(lines) + "\n"
 

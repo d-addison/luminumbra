@@ -8,6 +8,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 import sys
 import tempfile
 import unittest
@@ -59,6 +60,8 @@ def baseline_matrix() -> dict[str, Any]:
                 "source": SOURCE,
                 "statement": "Covered by ctest and script.",
                 "status": "covered",
+                "requirements": ["dw.synthetic", "ar.synthetic", "dw.mapping.2", "dw.mapping.3",
+                                 "dw.mapping.4", "dw.mapping.5"],
                 "evidence": [
                     {"kind": "ctest", "ref": "AlphaContract"},
                     {"kind": "ctest", "ref": "Param.*"},
@@ -134,15 +137,39 @@ class AcceptanceMatrixTests(unittest.TestCase):
         (self.root / "test" / "x_test.cpp").write_text(TEST_CPP, encoding="utf-8")
         (self.root / "tools" / "script.py").write_text("print('ok')\n", encoding="utf-8")
         (self.root / "tools" / "run.ps1").write_text("exit 0\n", encoding="utf-8")
-        (self.root / "docs" / "d.md").write_text("# Doc\n", encoding="utf-8")
-        (self.root / MODULE.REQUIREMENT_SOURCE).write_text(
-            MODULE.REQUIREMENT_HEADING + "\n\n"
+        (self.root / "docs" / "d.md").write_text("# Doc\n\n## Section\n", encoding="utf-8")
+        (self.root / "tools" / "ci").mkdir()
+        requirements = []
+        for prefix, path in zip(("dw", "ar"), MODULE.CONTRACT_DOCUMENTS):
+            text = "Every requirement has evidence."
+            (self.root / path).write_text("# Contract\n\n" + text + "\n", encoding="utf-8")
+            requirements.append({"id": prefix + ".synthetic", "source": path + "#contract",
+                                 "quote": text, "text": text})
+        self.inventory = {"schema": MODULE.INVENTORY_SCHEMA,
+                          "documents": list(MODULE.CONTRACT_DOCUMENTS),
+                          "requirements": requirements, "exclusions": []}
+        self.write_inventory()
+        source = self.root / MODULE.REQUIREMENT_SOURCE
+        source.write_text(
+            source.read_text(encoding="utf-8") + "\n" + MODULE.REQUIREMENT_HEADING + "\n\n"
             + "\n".join(f"- `{row['id']}`: Synthetic requirement." for row in baseline_matrix()["rows"])
-            + "\n\n## Deferred\n",
-            encoding="utf-8",
+            + "\n\n## Deferred\n", encoding="utf-8",
         )
+        for source_ref, text, _ in MODULE.contract_statements(
+            source.read_text(encoding="utf-8"), MODULE.REQUIREMENT_SOURCE.as_posix()
+        ):
+            if source_ref.endswith("#acceptance-requirement-ids"):
+                self.inventory["requirements"].append({
+                    "id": "dw.mapping." + str(len(self.inventory["requirements"])),
+                    "source": source_ref, "text": text, "quote": text,
+                })
+        self.write_inventory()
         self.index = MODULE.index_tests(self.root)
         self.matrix_path = self.tmp / "matrix.json"
+
+    def write_inventory(self) -> None:
+        (self.root / "tools/ci/acceptance_requirements.json").write_text(
+            json.dumps(self.inventory), encoding="utf-8")
 
     def errors(self, matrix: dict[str, Any], require_landed: bool = False) -> list[str]:
         return MODULE.validate(matrix, self.index, self.root, require_landed)
@@ -222,6 +249,300 @@ class AcceptanceMatrixTests(unittest.TestCase):
         matrix["rows"][0]["evidence"][2]["ref"] = "tools/absent.py"
         self.assertErrorContains(matrix, "file not found: tools/absent.py")
 
+    def test_missing_requirement_row_is_rejected(self) -> None:
+        matrix = baseline_matrix()
+        del matrix["rows"][0]["requirements"]
+        self.assertErrorContains(matrix, "requirement lacks a matrix row: dw.synthetic")
+
+    def test_source_paths_anchors_and_issue_syntax_are_checked_for_all_statuses(self) -> None:
+        for source, error in (("docs/missing.md#section", "source file not found"),
+                              ("docs/d.md#missing", "source anchor not found"),
+                              ("docs/d.md#", "source anchor not found"),
+                              ("../escape.md#section", "source path escapes root"),
+                              ("issue #0", "invalid issue source"),
+                              ("issue #126 trailing", "invalid issue source")):
+            for row_id in ("alpha.covered", "planned.doc"):
+                with self.subTest(source=source, row=row_id):
+                    matrix = baseline_matrix()
+                    row_of(matrix, row_id)["source"] = source
+                    self.assertErrorContains(matrix, error)
+        matrix = baseline_matrix()
+        matrix["rows"][0]["source"] = "issue #126"
+        self.assertEqual(self.errors(matrix), [])
+
+    def test_github_heading_punctuation_unicode_duplicates_and_fences(self) -> None:
+        doc = self.root / "docs/d.md"
+        doc.write_text("# Section\n## `Calendar` & Café (v1)\n## Section\n"
+                       "```\n## Ghost\n```\n", encoding="utf-8")
+        for anchor in ("section", "calendar--café-v1", "section-1"):
+            matrix = baseline_matrix()
+            matrix["rows"][0]["source"] = "docs/d.md#" + anchor
+            self.assertEqual(self.errors(matrix), [])
+        matrix["rows"][0]["source"] = "docs/d.md#ghost"
+        self.assertErrorContains(matrix, "source anchor not found")
+
+    def test_missing_covered_doc_ref_is_rejected(self) -> None:
+        matrix = baseline_matrix()
+        matrix["rows"][0]["evidence"].append({"kind": "doc", "ref": "docs/missing.md"})
+        self.assertErrorContains(matrix, "file not found: docs/missing.md")
+
+    def test_needs_native_run_keeps_planned_recording_unevaluated(self) -> None:
+        matrix = baseline_matrix()
+        row = row_of(matrix, "native.run")
+        row["evidence"][0]["planned"] = "record native qualification; owner: ac"
+        self.assertEqual(self.errors(matrix), [])
+        errors = self.errors(matrix, require_landed=True)
+        self.assertEqual(errors, [
+            "gtest.partial: planned evidence not landed: tools/later.py",
+            "native.run: planned evidence not landed: tools/run.ps1",
+            "planned.doc: planned evidence not landed: docs/future.md",
+        ])
+        discovery, report = self.execution_inputs()
+        receipt = self.execution(discovery, report, matrix=matrix)
+        self.assertFalse(receipt["full_acceptance_qualified"])
+        self.assertIn("native", {entry["kind"] for entry in receipt["unevaluated"]})
+        row["evidence"] = [row["evidence"][0]]
+        row["status"] = "planned"
+        self.assertEqual(self.errors(matrix), [])
+
+    def test_issue_126_covered_requires_mapping_and_inventory_completeness(self) -> None:
+        matrix = baseline_matrix()
+        row = copy.deepcopy(matrix["rows"][0])
+        row.update(id="iss.126", source="issue #126", requirements=[])
+        matrix["rows"].append(row)
+        self.assertEqual(self.errors(matrix), [])
+        matrix["rows"][0]["requirements"].remove("dw.synthetic")
+        self.assertErrorContains(matrix, "iss.126: inventory incomplete: status must be planned")
+        row["status"] = "planned"
+        row["evidence"] = [{"kind": "script", "ref": "tools/future.py", "planned": "supply acceptance evidence; owner: ac"}]
+        self.assertFalse(any(error.startswith("iss.126:") for error in self.errors(matrix)))
+        # Deleting the requirement itself cannot hide it from the inventory self-check.
+        self.inventory["requirements"].pop(0)
+        self.write_inventory()
+        row["status"] = "covered"
+        row["evidence"] = [{"kind": "script", "ref": "tools/script.py"}]
+        self.assertErrorContains(matrix, "inventory unaccounted statement")
+        self.assertErrorContains(matrix, "iss.126: inventory incomplete")
+
+    def test_inventory_accounts_for_new_behaviour_tables_and_current_exclusions(self) -> None:
+        doc = self.root / MODULE.CONTRACT_DOCUMENTS[0]
+        doc.write_text("# Contract\n\nEvery requirement has evidence.\n\n"
+                       "Rendering never activates regions.\n\n"
+                       "| State | Bytes |\n|---|---:|\n| Header | 56 |\n\n"
+                       "Current behaviour: the clock restarts. It is descriptive.\n", encoding="utf-8")
+        self.assertErrorContains(baseline_matrix(), "inventory unaccounted statement")
+        statements = MODULE.contract_statements(doc.read_text(), MODULE.CONTRACT_DOCUMENTS[0])
+        self.assertEqual(len(statements), 5)
+        for number, (source, text, descriptive) in enumerate(statements[1:]):
+            entry = {"id": f"new.{number}", "source": source, "text": text, "quote": text}
+            if descriptive:
+                entry["reason"] = "Descriptive Current behaviour paragraph."
+                entry["category"] = "current-behaviour"
+                self.inventory["exclusions"].append(entry)
+            else:
+                self.inventory["requirements"].append(entry)
+        self.inventory["requirements"] = [e for e in self.inventory["requirements"]
+                                          if not e["id"].startswith("dw.mapping.")]
+        requirements, errors = MODULE.validate_inventory(self.inventory, self.root)
+        # New descriptive text cannot extend the reviewed exclusion set.
+        self.assertEqual(len(errors), 2)
+        self.assertTrue(all("exclusion is not in the closed audited table" in e for e in errors))
+        self.assertEqual(len(requirements), 4)
+        del self.inventory["exclusions"][0]["reason"]
+        self.assertIn("exclusion requires a reason", "\n".join(MODULE.validate_inventory(self.inventory, self.root)[1]))
+
+    def test_scope_requirement_cannot_be_hidden_by_exclusion(self) -> None:
+        root = MODULE.DEFAULT_ROOT
+        inventory = MODULE.load_matrix(root / "tools/ci/acceptance_requirements.json")
+        matrix = MODULE.load_matrix(root / "tools/ci/acceptance_matrix.json")
+        entry = next(e for e in inventory["requirements"] if e["id"] == "dw.scope.001")
+        inventory["requirements"].remove(entry)
+        inventory["exclusions"].append(dict(entry, reason="Not in scope"))
+        for row in matrix["rows"]:
+            row["requirements"] = [ref for ref in row.get("requirements", []) if ref != entry["id"]]
+        with mock.patch.object(MODULE, "load_matrix", return_value=inventory):
+            errors = MODULE.validate(matrix, MODULE.index_tests(root), root, False)
+        self.assertIn("exclusion requires an audited non-normative category", "\n".join(errors))
+        self.assertIn("iss.126: inventory incomplete", "\n".join(errors))
+
+    def test_behaviour_and_reserved_zero_cannot_be_excluded_under_any_category(self) -> None:
+        root = MODULE.DEFAULT_ROOT
+        inventory = MODULE.load_matrix(root / "tools/ci/acceptance_requirements.json")
+        matrix = MODULE.load_matrix(root / "tools/ci/acceptance_matrix.json")
+        index = MODULE.index_tests(root)
+        for identity in ("dw.scope.001", "dw.scope.009", "ar.file.055"):
+            for category in ("rationale", "example", "cross-reference", "current-behaviour", "historical"):
+                with self.subTest(identity=identity, category=category):
+                    altered = copy.deepcopy(inventory)
+                    entry = next(e for e in altered["requirements"] if e["id"] == identity)
+                    altered["requirements"].remove(entry)
+                    altered["exclusions"].append(dict(entry, category=category, reason="Reviewed context"))
+                    unmapped = copy.deepcopy(matrix)
+                    for row in unmapped["rows"]:
+                        row["requirements"] = [ref for ref in row.get("requirements", []) if ref != identity]
+                    with mock.patch.object(MODULE, "load_matrix", return_value=altered):
+                        errors = MODULE.validate(unmapped, index, root, False)
+                    self.assertIn(f"{identity}: exclusion is not in the closed audited table", "\n".join(errors))
+                    self.assertIn("iss.126: inventory incomplete", "\n".join(errors))
+
+    def test_every_audited_exclusion_is_bound_to_id_source_category_quote_and_text(self) -> None:
+        root = MODULE.DEFAULT_ROOT
+        inventory = MODULE.load_matrix(root / "tools/ci/acceptance_requirements.json")
+        for position, entry in enumerate(inventory["exclusions"]):
+            for key, value in (("id", "unreviewed.exclusion"),
+                               ("source", "docs/distant-world.md#scope"),
+                               ("category", "example"),
+                               ("quote", entry["quote"][:-1]),
+                               ("text", entry["text"] + " Additional behavior.")):
+                with self.subTest(identity=entry["id"], key=key):
+                    altered = copy.deepcopy(inventory)
+                    altered["exclusions"][position][key] = value
+                    errors = MODULE.validate_inventory(altered, root)[1]
+                    self.assertIn("exclusion is not in the closed audited table", "\n".join(errors))
+
+    def test_exclusion_categories_are_closed_and_required_in_normative_sections(self) -> None:
+        entry = self.inventory["requirements"].pop(0)
+        self.inventory["exclusions"].append(dict(entry, reason="Descriptive context."))
+        for category in (None, "not-in-scope", "", ["rationale"]):
+            with self.subTest(category=category):
+                self.inventory["exclusions"][0]["category"] = category
+                errors = MODULE.validate_inventory(self.inventory, self.root)[1]
+                self.assertIn("exclusion requires an audited non-normative category", "\n".join(errors))
+        for category, fragment in (("current-behaviour", "not in a Current behaviour paragraph"),
+                                   ("historical", "requires a historical heading")):
+            with self.subTest(category=category):
+                self.inventory["exclusions"][0]["category"] = category
+                self.assertIn(fragment, "\n".join(MODULE.validate_inventory(self.inventory, self.root)[1]))
+
+    def test_normative_exclusions_require_reviewed_overrides_even_with_short_quotes(self) -> None:
+        entry = self.inventory["requirements"].pop(0)
+        entry.update(category="rationale", reason="Not in scope")
+        self.inventory["exclusions"].append(entry)
+        for marker in ("must", "SHALL", "requires", "must not", "is refused", "is a failure", "never", "**must**"):
+            with self.subTest(marker=marker):
+                text = f"The session {marker} save."
+                (self.root / MODULE.CONTRACT_DOCUMENTS[0]).write_text(
+                    "# Contract\n\n" + text + "\n", encoding="utf-8")
+                entry.update(text=text, quote="The session")
+                errors = MODULE.validate_inventory(self.inventory, self.root)[1]
+                self.assertIn("normative exclusion requires an exact reviewed override", "\n".join(errors))
+
+    def test_reviewed_exclusion_override_is_bound_to_id_source_text_and_category(self) -> None:
+        root = MODULE.DEFAULT_ROOT
+        inventory = MODULE.load_matrix(root / "tools/ci/acceptance_requirements.json")
+        self.assertEqual(MODULE.validate_inventory(inventory, root)[1], [])
+        for key, value in (("id", "dw.unreviewed"), ("source", "docs/distant-world.md#scope"),
+                           ("text", "The tier must retain edits."), ("category", "rationale")):
+            with self.subTest(key=key):
+                altered = copy.deepcopy(inventory)
+                entry = next(e for e in altered["exclusions"] if e["id"] == "dw.tiers.021")
+                entry[key] = value
+                if key == "text":
+                    entry["quote"] = value
+                errors = MODULE.validate_inventory(altered, root)[1]
+                self.assertIn("normative exclusion requires an exact reviewed override", "\n".join(errors))
+
+    def test_existing_exclusions_have_audited_categories_and_only_one_override(self) -> None:
+        inventory = MODULE.load_matrix(MODULE.DEFAULT_ROOT / "tools/ci/acceptance_requirements.json")
+        exclusions = inventory["exclusions"]
+        self.assertEqual(len(exclusions), 40)
+        self.assertEqual(len(MODULE.AUDITED_EXCLUSIONS), 40)
+        self.assertTrue(all(e["category"] in MODULE.EXCLUSION_CATEGORIES for e in exclusions))
+        marked = {e["id"] for e in exclusions if MODULE.NORMATIVE_MARKER_RE.search(e["text"])}
+        self.assertEqual(marked, {"dw.tiers.021"})
+        self.assertEqual(marked, set(MODULE.REVIEWED_EXCLUSION_OVERRIDES))
+
+    def test_inventory_refuses_bad_sources_quotes_unknown_and_duplicate_ids(self) -> None:
+        for key, value, error in (("source", "docs/missing.md#contract", "source file not found"),
+                                  ("source", "docs/distant-world.md#wrong", "source anchor not found"),
+                                  ("quote", "Not in the document", "quote must be a verbatim excerpt"),
+                                  ("id", "ar.synthetic", "duplicate inventory id")):
+            with self.subTest(key=key, value=value):
+                inventory = copy.deepcopy(self.inventory)
+                inventory["requirements"][0][key] = value
+                self.assertIn(error, "\n".join(MODULE.validate_inventory(inventory, self.root)[1]))
+        matrix = baseline_matrix()
+        matrix["rows"][0]["requirements"].append("absent.requirement")
+        self.assertErrorContains(matrix, "unknown requirement: absent.requirement")
+
+    def test_missing_inventory_refuses_validation(self) -> None:
+        (self.root / "tools/ci/acceptance_requirements.json").unlink()
+        self.assertErrorContains(baseline_matrix(), "cannot read")
+
+    def test_current_behaviour_heading_cannot_hide_a_requirement(self) -> None:
+        entry = self.inventory["requirements"][0]
+        text = "Current behaviour: C4 replaces the fixed fields with world-anchored pages."
+        doc = self.root / MODULE.CONTRACT_DOCUMENTS[0]
+        doc.write_text(doc.read_text(encoding="utf-8").replace(entry["text"], text), encoding="utf-8")
+        entry.update(text=text, quote=text)
+        self.write_inventory()
+        self.assertEqual(self.errors(baseline_matrix()), [])
+
+    def test_reaudited_obligations_are_requirements_with_planned_rows(self) -> None:
+        root = MODULE.DEFAULT_ROOT
+        inventory = MODULE.load_matrix(root / "tools/ci/acceptance_requirements.json")
+        matrix = MODULE.load_matrix(root / "tools/ci/acceptance_matrix.json")
+        requirements = {e["id"] for e in inventory["requirements"]}
+        exclusions = {e["id"] for e in inventory["exclusions"]}
+        for identity in ("dw.policy.036", "dw.policy.039", "ar.history.020"):
+            with self.subTest(identity=identity):
+                self.assertIn(identity, requirements)
+                self.assertNotIn(identity, exclusions)
+                rows = [r for r in matrix["rows"] if identity in r.get("requirements", [])]
+                self.assertEqual(len(rows), 1)
+                self.assertEqual(rows[0]["status"], "planned")
+
+    def test_inventory_duplicate_text_and_changed_contract_refuse(self) -> None:
+        duplicate = dict(self.inventory["requirements"][0], id="dw.duplicate")
+        self.inventory["requirements"].append(duplicate)
+        self.write_inventory()
+        self.assertErrorContains(baseline_matrix(), "inventory stale or duplicate statement")
+        self.inventory["requirements"].pop()
+        self.write_inventory()
+        (self.root / MODULE.CONTRACT_DOCUMENTS[0]).write_text(
+            "# Contract\n\nThe amended requirement has evidence.\n", encoding="utf-8")
+        self.assertErrorContains(baseline_matrix(), "inventory unaccounted statement")
+        self.assertErrorContains(baseline_matrix(), "inventory stale or duplicate statement")
+
+    def test_repository_inventory_completeness_and_generated_doc(self) -> None:
+        root = MODULE.DEFAULT_ROOT
+        inventory = MODULE.load_matrix(root / "tools/ci/acceptance_requirements.json")
+        requirements, errors = MODULE.validate_inventory(inventory, root)
+        self.assertEqual(errors, [])
+        matrix = MODULE.load_matrix(root / "tools/ci/acceptance_matrix.json")
+        self.assertEqual(MODULE.validate(matrix, MODULE.index_tests(root), root, False), [])
+        mapped = {ref for row in matrix["rows"] for ref in row.get("requirements", [])}
+        self.assertEqual(set(requirements), mapped)
+        self.assertTrue(MODULE._doc_matches(root / "docs/acceptance-matrix.md", MODULE.render_doc(matrix)))
+
+    def test_inventory_and_generated_matrix_are_publishable(self) -> None:
+        # Contract quotes and generated evidence must pass the public-tree text
+        # rules as well as schema validation, without invoking another process.
+        path = MODULE.DEFAULT_ROOT / "tools/ci/validate_public_tree.py"
+        spec = importlib.util.spec_from_file_location("acceptance_public_tree", path)
+        assert spec and spec.loader
+        public_tree = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = public_tree
+        spec.loader.exec_module(public_tree)
+        public_documents = ("tools/ci/acceptance_requirements.json", "tools/ci/acceptance_matrix.json",
+                            "docs/acceptance-matrix.md", *MODULE.CONTRACT_DOCUMENTS)
+        for relative in public_documents:
+            with self.subTest(path=relative):
+                self.assertNotRegex(
+                    (MODULE.DEFAULT_ROOT / relative).read_text(encoding="utf-8"),
+                    re.compile(r"/pull/|\bPR\s*#\s*[0-9]+\b", re.IGNORECASE),
+                )
+        for relative in ("tools/ci/acceptance_requirements.json", "tools/ci/acceptance_matrix.json",
+                         "docs/acceptance-matrix.md", "tools/ci/check_acceptance_matrix.py",
+                         "tools/ci/test_check_acceptance_matrix.py"):
+            with self.subTest(path=relative):
+                self.assertEqual(public_tree.inspect_path(relative), [])
+                self.assertEqual(public_tree.inspect_text(
+                    relative, (MODULE.DEFAULT_ROOT / relative).read_text(encoding="utf-8")), [])
+        # Run the same read-only public-tree gate from the authorized test entry
+        # point; this only enumerates local Git paths and applies stdlib rules.
+        self.assertEqual(public_tree.validate(MODULE.DEFAULT_ROOT), [])
+
     def test_path_escape_is_rejected(self) -> None:
         matrix = baseline_matrix()
         matrix["rows"][0]["evidence"][2]["ref"] = "../secret.py"
@@ -249,6 +570,200 @@ class AcceptanceMatrixTests(unittest.TestCase):
         matrix = baseline_matrix()
         del row_of(matrix, "native.run")["evidence"][0]["receipt_schema"]
         self.assertErrorContains(matrix, "native receipt_schema must match")
+
+    def test_native_command_cannot_borrow_an_unrelated_landed_ref(self) -> None:
+        matrix = baseline_matrix()
+        item = row_of(matrix, "native.run")["evidence"][0]
+        item.update(ref="tools/script.py", command="pwsh tools/gates/run-v03-acceptance.ps1")
+        self.assertErrorContains(matrix, "native command entry point file not found: tools/gates/run-v03-acceptance.ps1")
+        self.assertErrorContains(matrix, "native command entry point must match ref")
+        # A missing entry point remains missing even when its evidence ref exists.
+        root = MODULE.DEFAULT_ROOT
+        matrix = MODULE.load_matrix(root / "tools/ci/acceptance_matrix.json")
+        row = row_of(matrix, "iss.68")
+        row["status"] = "needs-native-run"
+        row["evidence"] = [{"kind": "native", "ref": "tools/ci/check_acceptance_matrix.py",
+                            "command": "pwsh tools/gates/missing-qualification.ps1", "receipt_schema": RECEIPT}]
+        errors = MODULE.validate(matrix, MODULE.index_tests(root), root, False)
+        self.assertIn("native command entry point file not found: tools/gates/missing-qualification.ps1", "\n".join(errors))
+
+    def test_native_command_entry_point_must_match_ref_even_when_both_exist(self) -> None:
+        matrix = baseline_matrix()
+        item = row_of(matrix, "native.run")["evidence"][0]
+        item["ref"] = "tools/script.py"
+        self.assertErrorContains(matrix, "native command entry point must match ref: tools/run.ps1 != tools/script.py")
+
+    def test_native_entry_point_handles_interpreters_flags_quotes_and_direct_scripts(self) -> None:
+        for command, path in (
+            ("pwsh -NoProfile -ExecutionPolicy Bypass -File tools/run.ps1 -Out <dir>", "tools/run.ps1"),
+            ('pwsh -File "./tools/run.ps1"', "tools/run.ps1"),
+            ("pwsh -NoProfile -File tools/run.ps1", "tools/run.ps1"),
+            ("pwsh -ExecutionPolicy Bypass -File tools/run.ps1", "tools/run.ps1"),
+            ("python3 tools/script.py --out <dir>", "tools/script.py"),
+            ("python './tools/script.py'", "tools/script.py"),
+            ("bash tools/run.sh --out <dir>", "tools/run.sh"),
+            ('pwsh "tools/path with spaces/run.ps1"', "tools/path with spaces/run.ps1"),
+            (r"pwsh tools\run.ps1", "tools/run.ps1"),
+            ("./tools/script.py", "tools/script.py"),
+        ):
+            with self.subTest(command=command):
+                self.assertEqual(MODULE._native_entry_point(command), path)
+        matrix = baseline_matrix()
+        item = row_of(matrix, "native.run")["evidence"][0]
+        item.update(ref="tools/script.py", command='python3 "./tools/script.py"')
+        self.assertEqual(self.errors(matrix), [])
+
+    def test_native_interpreters_refuse_incompatible_script_types_without_mutation(self) -> None:
+        for host in ("python3", "python", "pwsh", "pwsh -File", "bash"):
+            compatible = {".py"} if host in {"python3", "python"} else (
+                {".ps1"} if host.startswith("pwsh") else {".sh", ".bash"}
+            )
+            for suffix in (".py", ".ps1", ".sh", ".bash", ".js", ".rb", ".pl", ".cmd", ".bat"):
+                path = "tools/entry" + suffix
+                (self.root / path).write_text("fixture\n", encoding="utf-8")
+                matrix = baseline_matrix()
+                item = row_of(matrix, "native.run")["evidence"][0]
+                item.update(ref=path, command=host + " " + path)
+                before = copy.deepcopy(matrix)
+                with self.subTest(host=host, suffix=suffix):
+                    if suffix in compatible:
+                        self.assertEqual(MODULE._native_entry_point(item["command"]), path)
+                        self.assertEqual(self.errors(matrix), [])
+                    else:
+                        self.assertIsNone(MODULE._native_entry_point(item["command"]))
+                        self.assertEqual(self.errors(matrix), [
+                            "native.run: native command must invoke a repository script entry point"
+                        ])
+                    self.assertEqual(matrix, before)
+
+    def test_native_literal_placeholders_and_truncated_options(self) -> None:
+        self.assertEqual(MODULE._native_entry_point(
+            "python3 tools/script.py sse2=<host.xml> --output=<receipt.json> --override=0"
+        ), "tools/script.py")
+        for command in ("pwsh -ExecutionPolicy", "pwsh -NoProfile -ExecutionPolicy",
+                        "pwsh -File", "python3", "bash", "pwsh -ExecutionPolicy 0",
+                        "python3 tools/script.py --out=<bad/path>",
+                        "python3 tools/script.py --out=>bad"):
+            with self.subTest(command=command):
+                self.assertIsNone(MODULE._native_entry_point(command))
+
+    def test_native_long_malformed_arguments_are_refused_without_mutation(self) -> None:
+        # This length makes ambiguous repetition impractical even without a
+        # timing assertion. Valid literals and placeholders must still parse.
+        literal = "a" * 16384
+        matrix = baseline_matrix()
+        item = row_of(matrix, "native.run")["evidence"][0]
+        item.update(ref="tools/script.py")
+        prefix = "python3 tools/script.py --out="
+        for value in (literal, literal + "<receipt.json>", "<host>" * 4096):
+            self.assertEqual(MODULE._native_entry_point(prefix + value), "tools/script.py")
+        for suffix in (">", "<", "<bad/path>"):
+            with self.subTest(suffix=suffix):
+                item["command"] = prefix + literal + suffix
+                before = copy.deepcopy(matrix)
+                self.assertIsNone(MODULE._native_entry_point(item["command"]))
+                self.assertEqual(self.errors(matrix), [
+                    "native.run: native command must invoke a repository script entry point"
+                ])
+                self.assertEqual(matrix, before)
+
+    def test_native_closed_grammar_rejects_options_shell_syntax_and_multiple_scripts(self) -> None:
+        root = MODULE.DEFAULT_ROOT
+        matrix = MODULE.load_matrix(root / "tools/ci/acceptance_matrix.json")
+        row = row_of(matrix, "iss.68")
+        row["status"] = "needs-native-run"
+        item = {"kind": "native", "ref": "tools/ci/check_acceptance_matrix.py", "receipt_schema": RECEIPT}
+        row["evidence"] = [item]
+        index = MODULE.index_tests(root)
+        for command in (
+            'python3 -X "./tools/ci/check_acceptance_matrix.py" -c "pass"',
+            'python3 -X "./tools/ci/check_acceptance_matrix.py" "./tools/gates/run-v03-acceptance.ps1"',
+            'python3 -c "pass" tools/ci/check_acceptance_matrix.py',
+            'python3 -m tools/ci/check_acceptance_matrix.py',
+            'python3 -u tools/ci/check_acceptance_matrix.py',
+            'python3 -I tools/ci/check_acceptance_matrix.py',
+            'python3 -- tools/ci/check_acceptance_matrix.py',
+            'pwsh -Command tools/ci/check_acceptance_matrix.py',
+            'pwsh -EncodedCommand tools/ci/check_acceptance_matrix.py',
+            'pwsh -ExecutionPolicy RemoteSigned -File tools/ci/check_acceptance_matrix.py',
+            'pwsh -NoProfile tools/ci/check_acceptance_matrix.py',
+            'pwsh -File -NoProfile tools/ci/check_acceptance_matrix.py',
+            'pwsh -NoLogo -File tools/ci/check_acceptance_matrix.py',
+            'bash -x tools/ci/check_acceptance_matrix.py',
+            'sh tools/ci/check_acceptance_matrix.py',
+            'powershell.exe -File tools/ci/check_acceptance_matrix.py',
+            'python3.12 tools/ci/check_acceptance_matrix.py',
+            'env python3 tools/ci/check_acceptance_matrix.py',
+            'FLAG=1 python3 tools/ci/check_acceptance_matrix.py',
+            'python3 tools/ci/check_acceptance_matrix.py | cat',
+            'python3 tools/ci/check_acceptance_matrix.py; echo ok',
+            'python3 tools/ci/check_acceptance_matrix.py && echo ok',
+            'python3 tools/ci/check_acceptance_matrix.py `echo ok`',
+            'python3 tools/ci/check_acceptance_matrix.py $(echo ok)',
+            'python3 tools/ci/check_acceptance_matrix.py "$(echo ok)"',
+            'python3 tools/ci/check_acceptance_matrix.py > output',
+            'python3 tools/ci/check_acceptance_matrix.py\npython3 tools/ci/check_acceptance_matrix.py',
+            'python3 tools/ci/check_acceptance_matrix.py tools/gates/run-v03-acceptance.ps1',
+            'python3 tools/ci/check_acceptance_matrix.py --script=tools/gates/run-v03-acceptance.ps1',
+        ):
+            with self.subTest(command=command):
+                item["command"] = command
+                self.assertIsNone(MODULE._native_entry_point(command))
+                errors = MODULE.validate(matrix, index, root, False)
+                self.assertIn("native command must invoke a repository script entry point", "\n".join(errors))
+
+    def test_native_entry_point_refuses_missing_absolute_escaping_or_inline_commands(self) -> None:
+        matrix = baseline_matrix()
+        item = row_of(matrix, "native.run")["evidence"][0]
+        for command, fragment in (
+            ("pwsh tools/missing.ps1", "native command entry point file not found"),
+            ("pwsh ../tools/run.ps1", "native command entry point path escapes root"),
+            ("pwsh /absolute/run.ps1", "native command entry point path must be repo-relative"),
+            ("pwsh", "must invoke a repository script entry point"),
+            ('pwsh "tools/run.ps1', "must invoke a repository script entry point"),
+            ("bash -c tools/run.ps1", "must invoke a repository script entry point"),
+            ("pwsh -Command tools/run.ps1", "must invoke a repository script entry point"),
+            ("python -m tools/script.py", "must invoke a repository script entry point"),
+        ):
+            with self.subTest(command=command):
+                item["command"] = command
+                self.assertErrorContains(matrix, fragment)
+
+    def test_repository_timer_and_disc_claims_require_outstanding_evidence(self) -> None:
+        matrix = MODULE.load_matrix(MODULE.DEFAULT_ROOT / "tools/ci/acceptance_matrix.json")
+        timer = row_of(matrix, "perf.timer-coverage")
+        self.assertEqual(timer["status"], "needs-native-run")
+        for metric in ("frame wall", "CPU submit", "present", "GPU"):
+            self.assertIn(metric, timer["statement"])
+        self.assertIn("fake queries", timer["statement"])
+        self.assertIn("outstanding", timer["statement"])
+        self.assertTrue(any(item["kind"] == "native" for item in timer["evidence"]))
+        attribution = row_of(matrix, "perf.timer-attribution")
+        self.assertEqual(attribution["status"], "covered")
+        self.assertIn("fake queries", attribution["statement"])
+        self.assertIn("delayed result collection", attribution["statement"])
+        self.assertIn("frame-distinct GPU-query attribution remains unproven", attribution["statement"])
+        rows = [row for row in matrix["rows"] if "ar.activation.003" in row.get("requirements", [])]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["status"], "partial")
+        self.assertIn("outside-corner", rows[0]["statement"])
+        self.assertTrue(any("planned" in item and "tangencies" in item["planned"]
+                            for item in rows[0]["evidence"]))
+
+    def test_repository_boundary_discrepancy_and_watchdog_rearming_evidence(self) -> None:
+        matrix = MODULE.load_matrix(MODULE.DEFAULT_ROOT / "tools/ci/acceptance_matrix.json")
+        rows = [row for row in matrix["rows"] if "ar.activation.050" in row.get("requirements", [])]
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+        self.assertEqual(row["status"], "planned")
+        self.assertIn("docs/active-regions.md:66", row["discrepancy"])
+        self.assertIn("test/common/ActiveRegionLedger_test.cpp:438", row["discrepancy"])
+        self.assertIn("asymmetric", row["discrepancy"])
+        self.assertIn("owner: ds", row["evidence"][0]["planned"])
+        self.assertIn("symmetric-boundary regression", row["evidence"][0]["planned"])
+        self.assertIn(MODULE._escape_cell("Discrepancy: " + row["discrepancy"]), MODULE.render_doc(matrix))
+        watchdog = row_of(matrix, "em.client-hang")
+        self.assertIn("HangWatchdog.RearmsAfterHeartbeatResumes", {e["ref"] for e in watchdog["evidence"]})
 
     def test_planned_item_skips_existence(self) -> None:
         matrix = baseline_matrix()
@@ -342,7 +857,13 @@ class AcceptanceMatrixTests(unittest.TestCase):
                 "## Deferred", "- `future.required`: New contract requirement.\n\n## Deferred"
             ), encoding="utf-8",
         )
-        self.assertEqual(self.errors(baseline_matrix()), ["future.required: required mapping missing"])
+        errors = self.errors(baseline_matrix())
+        self.assertEqual(errors, [
+            "<inventory>: inventory unaccounted statement (1): "
+            "docs/distant-world.md#acceptance-requirement-ids: "
+            "- `future.required`: New contract requirement.",
+            "future.required: required mapping missing",
+        ])
 
     def test_test_index_handles_suffixes_multiline_and_add_test_breaks(self) -> None:
         self.assertIn("BetaMultiLine", self.index.ctest_names)
@@ -728,7 +1249,9 @@ class AcceptanceMatrixTests(unittest.TestCase):
         self.assertTrue(first.startswith("# Acceptance matrix\n"))
         self.assertTrue(first.endswith("\n"))
         self.assertFalse(first.endswith("\n\n"))
-        self.assertIn("| Row | Status | Statement | Evidence |", first)
+        self.assertIn("| Row | Status | Source | Requirements | Statement | Evidence |", first)
+        self.assertIn(SOURCE, first)
+        self.assertIn("dw.synthetic, ar.synthetic", first)
         self.assertIn("| covered | 1 |", first)
         self.assertIn("| partial | 1 |", first)
         self.assertIn("| needs-native-run | 1 |", first)
@@ -991,10 +1514,14 @@ class ProductionAcceptanceMatrixTests(unittest.TestCase):
             with self.subTest(row_id=row_id):
                 incomplete = copy.deepcopy(matrix)
                 incomplete["rows"] = [row for row in incomplete["rows"] if row["id"] != row_id]
-                self.assertEqual(
-                    MODULE.validate(incomplete, index, root, False),
-                    [f"{row_id}: required mapping missing"],
-                )
+                mapped = {ref for row in incomplete["rows"] for ref in row.get("requirements", [])}
+                inventory = MODULE.load_matrix(root / "tools/ci/acceptance_requirements.json")
+                missing = sorted({e["id"] for e in inventory["requirements"]} - mapped)
+                expected = [f"<inventory>: requirement lacks a matrix row: {ref}" for ref in missing]
+                if missing and row_id != "iss.126":
+                    expected.append("iss.126: inventory incomplete: status must be planned")
+                expected.append(f"{row_id}: required mapping missing")
+                self.assertEqual(MODULE.validate(incomplete, index, root, False), sorted(expected))
 
     def test_production_planned_notes_render_as_descriptive_text(self) -> None:
         matrix = MODULE.load_matrix(MODULE.DEFAULT_ROOT / "tools/ci/acceptance_matrix.json")
