@@ -33,6 +33,7 @@
 #include "luminumbra_common/ai/MigrationSystem.h"
 #include "luminumbra_common/ai/ScentField.h"
 #include "luminumbra_common/ai/StimulusChannels.h"
+#include "luminumbra_common/components/FieldEmitterComponents.h"
 #include "luminumbra_common/components/InstinctComponents.h"
 #include "luminumbra_common/persistence/PlantPersistence.h"
 #include "luminumbra_common/persistence/SavedWorldCatalog.h"
@@ -912,6 +913,51 @@ TEST(GameSessionHeadlessWorldTest, ClockAnchorMetadataUsesLegacySpawnAndRejectsI
         EXPECT_FALSE(P::WorldSaveService::read_clock_metadata(save, clock, required));
         std::ofstream(save / "world_info.json", std::ios::binary) << valid_bytes;
     }
+}
+
+TEST(GameSessionHeadlessWorldTest,
+     RegionalEmitterGatherRefusalDoesNotLatchFaultOrPoisonLaterTicks) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    session.SetRootPath(root.root_string());
+    session.SetJobSystem(&jobs);
+    session.SetActiveRegionsEnabled(true);
+    session.SetAetherStateEnabled(true);
+    ASSERT_TRUE(session.CreateWorld("Bounded energy emitters", "1337", "default"));
+    auto& registry = session.GetRegistry();
+    const auto add_emitter =
+        [&registry](Luminumbra::Vec3 position, int radius, std::uint32_t rate) {
+            const auto entity = registry.create();
+            registry.emplace<C::TransformComponent>(entity).position = position;
+            auto& emitter = registry.emplace<C::FieldEmitterComponent>(entity);
+            emitter.radius_cells = radius;
+            emitter.rate_raw_per_tick = rate;
+            return entity;
+        };
+    add_emitter({std::numeric_limits<float>::quiet_NaN(), 0, 0}, 0, 123);
+    add_emitter({0, 0, 0}, std::numeric_limits<int>::max(), 123);
+    add_emitter({0, 0, 0}, 0, 123);
+    using Energy = luminumbra::fields::EnergyFieldState;
+    std::vector<entt::entity> oversized;
+    for (std::size_t i = 0; i <= Energy::kMaxRegionalDeposits / (63u * 63u); ++i)
+        oversized.push_back(add_emitter({0, 0, 0}, 31, std::numeric_limits<std::uint32_t>::max()));
+    auto* energy = session.GetEnergyFieldState();
+    ASSERT_NE(energy, nullptr);
+    ASSERT_TRUE(energy->QueueRegionalDeposit(0, 0, 0, 0, 17));
+    const auto dt = session.GetSimulationClock().fixed_dt();
+    ASSERT_EQ(session.TickSimulation(dt), 1u);
+    EXPECT_FALSE(session.GetRegionSchedulerFault().has_value());
+    EXPECT_EQ(energy->total_raw(), 17u); // only previously admitted input survives
+    for (auto entity : oversized)
+        registry.destroy(entity);
+    ASSERT_EQ(session.TickSimulation(dt), 1u);
+    EXPECT_FALSE(session.GetRegionSchedulerFault().has_value());
+    EXPECT_EQ(energy->total_raw(), 140u); // invalid emitters skipped; valid gather recovers
+    ASSERT_EQ(session.TickSimulation(dt), 1u);
+    EXPECT_FALSE(session.GetRegionSchedulerFault().has_value());
+    EXPECT_EQ(energy->total_raw(), 263u);
 }
 
 TEST(GameSessionHeadlessWorldTest, EmptyEnergyResumeAlignsFirstDepositWithoutReplayingHistory) {

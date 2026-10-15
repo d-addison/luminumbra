@@ -686,20 +686,10 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
                 // gather this tick's FieldEmitterComponent deposits
                 // (id-sorted, two-phase) into the layer before it ticks.
                 // Participant-gated: no emitter component, no deposits, no bytes.
-                Systems::GatherFieldEmitterDeposits(m_registry, *m_energyFieldState);
                 if (m_activeRegionsEnabled) {
-                    luminumbra::fields::EnergyFieldState::RegionalResult result;
-                    const auto& due = SortedDueRegions();
-                    if (!m_energyFieldState->TickRegional(current_tick,
-                                                          m_activeRegionLedger.records(),
-                                                          due,
-                                                          m_activeRegionLedger.energy_ages(),
-                                                          result) ||
-                        !m_activeRegionLedger.set_energy_ages(result.ages))
-                        throw std::runtime_error("Regional energy tick refused");
-                    for (const auto& work : result.work)
-                        RecordActiveRegionWork(work);
+                    RunRegionalEnergyTick(current_tick);
                 } else {
+                    Systems::GatherFieldEmitterDeposits(m_registry, *m_energyFieldState);
                     m_energyFieldState->Tick(current_tick);
                 }
             }
@@ -1632,6 +1622,29 @@ std::string GameSession::PlantRegionProjection(RegionKey key) const {
     return snap.entities.empty() ? std::string{}
                                  : "|plants:" + Ecs::SerializeEntityRegistrySnapshotJson(snap);
 }
+void GameSession::RunRegionalEnergyTick(std::uint64_t tick) {
+    if (!m_energyFieldState)
+        return;
+    const auto gathered =
+        Systems::GatherRegionalFieldEmitterDeposits(m_registry, *m_energyFieldState);
+    if (gathered.invalid_emitters != 0 || !gathered.accepted)
+        LUMINUMBRA_CORE_WARN(
+            "Regional energy gather: {} invalid emitters skipped; batch accepted={}",
+            gathered.invalid_emitters,
+            gathered.accepted);
+    luminumbra::fields::EnergyFieldState::RegionalResult result;
+    const auto& due = SortedDueRegions();
+    if (!m_energyFieldState->TickRegional(tick,
+                                          m_activeRegionLedger.records(),
+                                          due,
+                                          m_activeRegionLedger.energy_ages(),
+                                          result) ||
+        !m_activeRegionLedger.set_energy_ages(result.ages))
+        throw std::runtime_error("Regional energy tick refused");
+    for (const auto& work : result.work)
+        RecordActiveRegionWork(work);
+}
+
 void GameSession::RunRegionalFoliageTick(
     luminumbra::simulation::SimBudgetTelemetry::TickScope& budget, std::uint64_t tick) {
     auto ledger = m_activeRegionLedger;
@@ -1724,6 +1737,7 @@ void GameSession::RunRegionalFoliageTickImpl(
         max_window = std::max(max_window, k);
     const Vec2 wind =
         m_windFieldSystem ? m_windFieldSystem->SampleWind(m_metadata.spawnPoint) : Vec2(0);
+    fol::FoliageInteriorReplay interior_replay(m_fieldPages, max_window != 0);
     for (std::uint32_t step = 0; step < max_window; ++step) {
         const auto subtick = tick - max_window + step + 1;
         std::map<RegionKey, std::uint32_t> one_tick;
@@ -1731,7 +1745,7 @@ void GameSession::RunRegionalFoliageTickImpl(
             if (max_window - step <= k)
                 one_tick[key] = 1;
         for (const auto& [key, updates] :
-             fol::AdvanceFoliageInteriors(m_registry, m_fieldPages, one_tick, subtick, &budget))
+             interior_replay.Step(m_registry, m_fieldPages, one_tick, subtick, &budget))
             page_work[key] += updates;
         // Cache the current environment/infection once for this bounded window.
         // Interleave exact PlantCoarse single steps with the integer soil and
@@ -1837,13 +1851,16 @@ void GameSession::RunRegionalFoliageTickImpl(
                 return it == m_activeRegionLedger.records().end() ||
                        it->second.state != RegionState::Frozen;
             },
-            [this, &completed_regions](entt::entity child) {
+            [this, &completed_regions, &interior_replay](entt::entity child) {
                 if (!AdmitPlantAt(child,
                                   m_registry.get<C::PlantGrowthComponent>(child).last_tick)) {
                     m_registry.destroy(child);
                     throw std::runtime_error("Crop identity admission refused");
                 }
                 const auto& owner = m_registry.get<C::PlantRegionComponent>(child);
+                interior_replay.AdmitSoil(
+                    m_fieldPages,
+                    fol::FoliageCell(m_registry.get<C::TransformComponent>(child).position));
                 const RegionKey key{owner.owner_x, owner.owner_z};
                 RecordActiveRegionWork({key, 0, 1, 0, 0});
                 completed_regions.insert(key);

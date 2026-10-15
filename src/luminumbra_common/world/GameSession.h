@@ -554,6 +554,7 @@ private:
     void AdvanceFieldPages(std::uint64_t tick);
     bool AdmitPlantAt(entt::entity entity, std::uint64_t fresh_stamp);
     void PrepareRegionalFoliage();
+    void RunRegionalEnergyTick(std::uint64_t tick);
     void RunRegionalWaterTick();
     void RunRegionalFoliageTick(luminumbra::simulation::SimBudgetTelemetry::TickScope& budget,
                                 std::uint64_t tick);

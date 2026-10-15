@@ -131,6 +131,16 @@ public:
     // pending buffer (32 bytes per deposit). False leaves the buffer untouched.
     bool QueueRegionalDeposit(
         std::uint64_t emitter_id, int cx, int cz, int channel, std::uint32_t amount_raw);
+    struct RegionalDeposit {
+        std::uint64_t emitter_id = 0;
+        int cx = 0;
+        int cz = 0;
+        int channel = 0;
+        std::uint32_t amount = 0;
+    };
+    // All-or-nothing gather admission, including any previously queued input.
+    // Refusal or an allocation exception preserves the original pending buffer.
+    bool QueueRegionalDeposits(std::span<const RegionalDeposit> deposits);
 
     // Advance to `tick`: catch-up any page re-entering the window, apply the
     // sorted deposit buffer, then (on the cadence, honouring the persisted
