@@ -86,7 +86,8 @@ ResolveWildlifeFoliageTuning(const core::SystemConfig& c) {
     return t;
 }
 
-// render.circadian.amplitude (render-only; never hashed). 1.0 when OFF -> byte-identical.
+// Despite its render namespace, this amplitude reaches simulation via RunCircadianOnTick.
+// It is therefore included in the session config identity. 1.0 when OFF.
 [[nodiscard]] inline float ResolveCircadianAmplitude(const core::SystemConfig& c) {
     if (!c.enabled(core::SysKey::RenderCircadian))
         return 1.0f;

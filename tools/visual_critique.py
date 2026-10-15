@@ -262,7 +262,7 @@ def analyze_array(a, m):
             "flags": flags}
 
 def analyze(sweep_dir):
-    man = json.load(open(os.path.join(sweep_dir, "world-visual-sweep-manifest.json")))
+    man = json.load(open(os.path.join(sweep_dir, "world-visual-sweep-manifest.json"), encoding="utf-8"))
     cells = man.get("cells") if isinstance(man, dict) else man
     png_dir = os.path.join(sweep_dir, "sweep", "png")
     out = []
@@ -301,7 +301,7 @@ def combine(sweep_dir, ai_json):
     emitted by the vision describe + adversarial flaw-hunt passes. A cell is
     HIGH CONFIDENCE when an objective flag AND an AI note land on the same cell."""
     obj = analyze(sweep_dir)
-    ai = json.load(open(ai_json)) if (ai_json and os.path.exists(ai_json)) else {}
+    ai = json.load(open(ai_json, encoding="utf-8")) if (ai_json and os.path.exists(ai_json)) else {}
     high = []
     for c in obj["cells"]:
         ac = ai.get(c["file"]) or {}
@@ -338,14 +338,14 @@ if __name__ == "__main__":
         sd = args[1]
         ai_json = args[2] if len(args) > 2 else None
         rep = combine(sd, ai_json)
-        json.dump(rep, open(os.path.join(sd, "combined-critique.json"), "w"), indent=1)
+        json.dump(rep, open(os.path.join(sd, "combined-critique.json"), "w", encoding="utf-8"), indent=1)
         print(f"combined critique: {len(rep['high_confidence'])} high-confidence cell(s) "
               f"(objective flag AND AI note); wrote {os.path.join(sd, 'combined-critique.json')}")
     else:  # analyze
         sd = args[1] if len(args) > 1 else "."
         rep = analyze(sd)
-        json.dump(rep, open(os.path.join(sd, "objective-critique.json"), "w"), indent=1)
-        open(os.path.join(sd, "objective-critique.md"), "w").write(md(rep))
+        json.dump(rep, open(os.path.join(sd, "objective-critique.json"), "w", encoding="utf-8"), indent=1)
+        open(os.path.join(sd, "objective-critique.md"), "w", encoding="utf-8").write(md(rep))
         print(md(rep))
         if strict:
             _strict_exit(rep)
