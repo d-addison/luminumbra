@@ -53,6 +53,7 @@ jobs:
           python tools/perf/test_fixture_hash.py
           python tools/perf/test_prepare_server_comparison.py
           python tools/perf/test_render_contract.py
+          python tools/perf/test_capture_sim_budget.py
           python tools/perf/test_sim_budget_gate.py
           python tools/perf/test_check_residency.py
           python tools/perf/test_render_budget.py
@@ -436,16 +437,18 @@ jobs:
             --output build/water-smoke-comparison.json
       - name: Capture simulation budget evidence
         timeout-minutes: 20
-        # limits are pinned by AC2p from the first devel push's sim-budget-evidence artifact; then this step switches to --require-complete
+        # Enforce complete pinned work limits for the head checkout's shipping defaults.
         run: |
           python3 head/tools/perf/capture_sim_budget.py \
             --binary build/head/bin/luminumbra_server_app \
-            --evidence-dir build/head/sim-budget-capture --ticks 600
+            --evidence-dir build/head/sim-budget-capture \
+            --ticks 600 --seed 1337 --radius 1 --collision-radius 1
           python3 head/tools/perf/propose_sim_budgets.py build/head/sim-budget-capture \
             --output build/head/sim-budget-proposal.json
           check_rc=0
           python3 head/tools/perf/check_sim_budgets.py build/head/sim-budget-capture \
-            head/tools/perf/baselines/sim-budgets.json --output build/head/sim-budget-check.json \
+            head/tools/perf/baselines/sim-budgets.json --require-complete \
+            --output build/head/sim-budget-check.json \
             || check_rc=$?
           python3 - <<'PY'
           import json
