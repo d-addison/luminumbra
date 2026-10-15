@@ -281,6 +281,56 @@ TEST_F(ReplayStreamTest, TruncationDetected) {
     EXPECT_FALSE(truncated->trailer_present);
 }
 
+TEST_F(ReplayStreamTest, HugeHeaderStringLengthsAreRejected) {
+    for (const std::uint32_t length : {0xFFFFFFFCu, 0xFFFFFFFDu, 0xFFFFFFFEu, 0xFFFFFFFFu}) {
+        SCOPED_TRACE(length);
+        replay::ReplayWriter writer;
+        ASSERT_TRUE(writer.Open(m_path, MakeHeader()));
+        ASSERT_TRUE(writer.Finalize(0));
+        {
+            std::fstream file(m_path, std::ios::binary | std::ios::in | std::ios::out);
+            ASSERT_TRUE(file.is_open());
+            // The fixed header is 42 bytes, followed by the seed-string length.
+            file.seekp(42);
+            for (int i = 0; i < 4; ++i)
+                file.put(static_cast<char>((length >> (8 * i)) & 0xFF));
+            file.close();
+            ASSERT_TRUE(file.good());
+        }
+        EXPECT_FALSE(replay::ReadReplay(m_path).has_value());
+    }
+}
+
+TEST_F(ReplayStreamTest, HugeRecordAndBlobLengthsAreTruncated) {
+    for (const std::uint32_t length : {0xFFFFFFFCu, 0xFFFFFFFDu, 0xFFFFFFFEu, 0xFFFFFFFFu}) {
+        SCOPED_TRACE(length);
+        // Record layout: [u8 type][u64 tick][u32 payload len][u32 empty blob len].
+        for (const std::streamoff length_offset : {9, 13}) {
+            SCOPED_TRACE(length_offset);
+            replay::ReplayWriter writer;
+            ASSERT_TRUE(writer.Open(m_path, MakeHeader()));
+            writer.RecordInput(1, {});
+            ASSERT_TRUE(writer.Finalize(1));
+            const auto header_size = fs::file_size(m_path) - sizeof(replay::kLrec1Trailer) -
+                                     3 * sizeof(std::uint64_t) - 17;
+            {
+                std::fstream file(m_path, std::ios::binary | std::ios::in | std::ios::out);
+                ASSERT_TRUE(file.is_open());
+                file.seekp(static_cast<std::streamoff>(header_size) + length_offset);
+                for (int i = 0; i < 4; ++i)
+                    file.put(static_cast<char>((length >> (8 * i)) & 0xFF));
+                file.close();
+                ASSERT_TRUE(file.good());
+            }
+            const auto contents = replay::ReadReplay(m_path);
+            ASSERT_TRUE(contents.has_value());
+            EXPECT_TRUE(contents->truncated);
+            EXPECT_FALSE(contents->trailer_present);
+            EXPECT_TRUE(contents->inputs.empty());
+        }
+    }
+}
+
 // A file too short to even hold the header (or with a bad magic) is rejected
 // outright (nullopt) -- it is not a valid LREC1 stream.
 TEST_F(ReplayStreamTest, BadMagicRejected) {

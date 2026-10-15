@@ -4,6 +4,7 @@
 // position/angle quantization round-trips within tolerance.
 #include <gtest/gtest.h>
 
+#include <limits>
 #include <vector>
 
 #include "luminumbra_common/net/ReplicationProtocol.h"
@@ -130,6 +131,27 @@ TEST(ReplicationProtocol, TruncatedFrameRejected) {
     frame.resize(frame.size() - 4);
     SnapshotMsg out;
     EXPECT_FALSE(DecodeSnapshot(frame, out));
+}
+
+TEST(ReplicationProtocol, HugeSnapshotCountsAreRejectedBeforeAllocation) {
+    // Empty snapshot: 5-byte envelope, 24-byte fixed fields, then two u32 counts.
+    for (const std::size_t count_offset : {29u, 33u}) {
+        SCOPED_TRACE(count_offset);
+        auto frame = EncodeSnapshot({});
+        ASSERT_EQ(frame.size(), 37u);
+        const auto count = std::numeric_limits<std::uint32_t>::max();
+        for (int i = 0; i < 4; ++i)
+            frame[count_offset + i] = static_cast<std::uint8_t>(count >> (8 * i));
+
+        SnapshotMsg out;
+        const auto entity_capacity = out.entities.capacity();
+        const auto removed_capacity = out.removed_ids.capacity();
+        EXPECT_FALSE(DecodeSnapshot(frame, out));
+        EXPECT_TRUE(out.entities.empty());
+        EXPECT_TRUE(out.removed_ids.empty());
+        EXPECT_EQ(out.entities.capacity(), entity_capacity);
+        EXPECT_EQ(out.removed_ids.capacity(), removed_capacity);
+    }
 }
 
 TEST(ReplicationProtocol, WrongTypeRejected) {

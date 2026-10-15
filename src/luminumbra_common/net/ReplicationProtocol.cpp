@@ -34,13 +34,13 @@ public:
     explicit Cursor(const std::vector<std::uint8_t>& buf)
         : m_buf(buf) {}
     bool GetU8(std::uint8_t& v) {
-        if (m_pos + 1 > m_buf.size())
+        if (!Remaining(1))
             return false;
         v = m_buf[m_pos++];
         return true;
     }
     bool GetU16(std::uint16_t& v) {
-        if (m_pos + 2 > m_buf.size())
+        if (!Remaining(2))
             return false;
         v = static_cast<std::uint16_t>(m_buf[m_pos]) |
             (static_cast<std::uint16_t>(m_buf[m_pos + 1]) << 8);
@@ -48,7 +48,7 @@ public:
         return true;
     }
     bool GetU32(std::uint32_t& v) {
-        if (m_pos + 4 > m_buf.size())
+        if (!Remaining(4))
             return false;
         v = 0;
         for (int i = 0; i < 4; ++i)
@@ -57,7 +57,7 @@ public:
         return true;
     }
     bool GetU64(std::uint64_t& v) {
-        if (m_pos + 8 > m_buf.size())
+        if (!Remaining(8))
             return false;
         v = 0;
         for (int i = 0; i < 8; ++i)
@@ -79,8 +79,15 @@ public:
         v = static_cast<std::int32_t>(u);
         return true;
     }
+    std::size_t RemainingBytes() const {
+        return m_buf.size() - m_pos;
+    }
 
 private:
+    bool Remaining(std::size_t n) const {
+        return m_pos <= m_buf.size() && n <= m_buf.size() - m_pos;
+    }
+
     const std::vector<std::uint8_t>& m_buf;
     std::size_t m_pos = 0;
 };
@@ -103,7 +110,7 @@ bool OpenFrame(const std::vector<std::uint8_t>& frame, ReplMessageType expected,
         return false;
     if (static_cast<ReplMessageType>(type) != expected)
         return false;
-    return frame.size() == static_cast<std::size_t>(5) + len;
+    return frame.size() - 5 == static_cast<std::size_t>(len);
 }
 
 } // namespace
@@ -175,6 +182,11 @@ bool DecodeSnapshot(const std::vector<std::uint8_t>& frame, SnapshotMsg& out) {
         !c.GetU32(out.delta_from_seq) || !c.GetU64(out.acked_usercmd_tick) || !c.GetU32(count)) {
         return false;
     }
+    // An entity is 4 u32s, 2 u16s and 3 u8s on the wire (23 bytes),
+    // independent of struct padding. Check before reserve trusts the peer's count.
+    constexpr std::size_t kEncodedEntityBytes = 23;
+    if (count > c.RemainingBytes() / kEncodedEntityBytes)
+        return false;
     out.entities.clear();
     out.entities.reserve(count);
     for (std::uint32_t i = 0; i < count; ++i) {
@@ -188,6 +200,8 @@ bool DecodeSnapshot(const std::vector<std::uint8_t>& frame, SnapshotMsg& out) {
     }
     std::uint32_t removed_count = 0;
     if (!c.GetU32(removed_count))
+        return false;
+    if (removed_count > c.RemainingBytes() / sizeof(std::uint32_t))
         return false;
     out.removed_ids.clear();
     out.removed_ids.reserve(removed_count);

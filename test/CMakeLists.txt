@@ -241,6 +241,7 @@ add_executable(common_tests
     common/replication_scale_test.cpp
     common/lockstep_replay_hardening_test.cpp
     net/single_port_accept_test.cpp
+    net/tcp_frame_bounds_test.cpp
     net/single_port_host_client_integration_test.cpp
     net/runtime_tcp_hello_test.cpp
     ../src/luminumbra_server/modes/RuntimeTcpSlot.cpp

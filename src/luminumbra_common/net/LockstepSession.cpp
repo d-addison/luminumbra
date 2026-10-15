@@ -86,7 +86,7 @@ struct Cursor {
     bool ok = true;
 
     bool Remaining(std::size_t n) const {
-        return ok && pos + n <= size;
+        return ok && pos <= size && n <= size - pos;
     }
     bool GetU8(std::uint8_t& v) {
         if (!Remaining(1)) {
@@ -536,7 +536,7 @@ bool TcpTransport::TryReceiveFrame(std::vector<std::uint8_t>& out) {
     std::uint32_t frame_len = 0;
     for (int i = 0; i < 4; ++i)
         frame_len |= static_cast<std::uint32_t>(m_recv_buffer[i]) << (8 * i);
-    if (m_recv_buffer.size() < 4u + frame_len)
+    if (m_recv_buffer.size() - 4 < static_cast<std::size_t>(frame_len))
         return false; // frame not fully arrived
     out.assign(m_recv_buffer.begin() + 4, m_recv_buffer.begin() + 4 + frame_len);
     m_recv_buffer.erase(m_recv_buffer.begin(), m_recv_buffer.begin() + 4 + frame_len);
@@ -832,7 +832,7 @@ bool TcpTransport::TryReceiveFrame(std::vector<std::uint8_t>& out) {
     std::uint32_t frame_len = 0;
     for (int i = 0; i < 4; ++i)
         frame_len |= static_cast<std::uint32_t>(m_recv_buffer[i]) << (8 * i);
-    if (m_recv_buffer.size() < 4u + frame_len)
+    if (m_recv_buffer.size() - 4 < static_cast<std::size_t>(frame_len))
         return false;
     out.assign(m_recv_buffer.begin() + 4, m_recv_buffer.begin() + 4 + frame_len);
     m_recv_buffer.erase(m_recv_buffer.begin(), m_recv_buffer.begin() + 4 + frame_len);
