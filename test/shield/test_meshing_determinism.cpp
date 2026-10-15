@@ -1,3 +1,4 @@
+#include "../fixtures/TerrainFixtureParams.h"
 // Marching cubes meshing determinism gate.
 //
 // Locks the bit-exact bytes of PolygoniseTerrain output (mesh_vertices +
@@ -203,7 +204,7 @@ void VerifyCurrentCombo(const char* combo,
 }
 
 TerrainGenParams MakeArchipelagoParams() {
-    TerrainGenParams params;
+    TerrainGenParams params = Luminumbra::Test::SyntheticTerrainParams();
     params.base_frequency = 0.004f;
     params.base_amplitude = 8.0f;
     params.octaves = 6;
@@ -216,7 +217,7 @@ TerrainGenParams MakeArchipelagoParams() {
 }
 
 TerrainGenParams MakeCaveParams() {
-    TerrainGenParams params;
+    TerrainGenParams params = Luminumbra::Test::SyntheticTerrainParams();
     params.base_amplitude = 0.0f;
     params.height_offset = 40.0f;
     params.caves_enabled = true;
@@ -227,7 +228,7 @@ TerrainGenParams MakeCaveParams() {
 }
 
 TerrainGenParams MakeFlatSurfaceParams() {
-    TerrainGenParams params;
+    TerrainGenParams params = Luminumbra::Test::SyntheticTerrainParams();
     params.base_amplitude = 0.0f;
     params.height_offset = 8.0f;
     params.caves_enabled = false;
@@ -351,7 +352,7 @@ TEST(MeshingDeterminism, CoarseStepUsesAuthoritativeSdfLattice) {
 TEST(MeshingDeterminism, Benchmark_PolygoniseTerrainStep1) {
     struct Fixture {
         const char* name;
-        TerrainGenParams params;
+        TerrainGenParams params = Luminumbra::Test::SyntheticTerrainParams();
         int seed;
         IVec3 coords;
     };

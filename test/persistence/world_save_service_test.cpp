@@ -1,3 +1,4 @@
+#include "../fixtures/TerrainFixtureParams.h"
 #include "gtest/gtest.h"
 
 #include "../support/UniqueTempPath.h"
@@ -203,7 +204,7 @@ TEST(ChunkDirtyTracking, SaveDirtyChunksWithoutDirtyChunksWritesNothing) {
 }
 
 TEST(ChunkDirtyTracking, GenerationAndMeshingLeaveChunkClean) {
-    Luminumbra::Systems::TerrainGenParams params;
+    Luminumbra::Systems::TerrainGenParams params = Luminumbra::Test::SyntheticTerrainParams();
     params.base_amplitude = 0.0f;
     params.height_offset = 8.0f;
     params.caves_enabled = false;

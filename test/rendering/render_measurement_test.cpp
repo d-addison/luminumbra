@@ -178,7 +178,7 @@ void traversal_refusal() {
              {"tick_rate 30", "tick_rate 60"},
              {"expected_ticks 1800", "expected_ticks 1799"},
              {"seed 424242", "seed -1"},
-             {"preset_revision 6", "preset_revision 7"},
+             {"preset_revision 7", "preset_revision 8"},
              {"speed_mps 8", "speed_mps 80"},
              {"cold_cache true", "cold_cache false"},
              {"point 248 80 8", "point 8 80 8"}}) {

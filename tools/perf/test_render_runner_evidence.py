@@ -28,7 +28,8 @@ spec.loader.exec_module(runner)
 
 CHILD = r'''
 import base64, pathlib, sys, time
-artifact, payload, code, loaders, ready = sys.argv[1:]
+artifact, payload, code, loaders, ready, startup_delay = sys.argv[1:]
+time.sleep(float(startup_delay))
 if loaders == '1':
     print('Static-model textures registered (3 models).', flush=True)
     for part in ('trunk', 'branches', 'leaves'):
@@ -53,6 +54,17 @@ TIMEOUT_LOG = (b'A' * 20000 + b'\n'
                b'unrelated trailing line\n')
 
 
+SLOW_CHILD = r'''
+import pathlib, sys, time
+print('A' * 20000, flush=True)
+print('EnsureSurfaceReadyNear: draining generation jobs (near 0,0)...', flush=True)
+print('EnsureSurfaceReadyNear/surface-build batch 3', flush=True)
+print('unrelated trailing line', flush=True)
+pathlib.Path(sys.argv[1]).touch()
+time.sleep(30)
+'''
+
+
 class RenderRunnerEvidenceTests(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
@@ -63,7 +75,7 @@ class RenderRunnerEvidenceTests(unittest.TestCase):
         self.runtime.mkdir()
         self.artifacts.mkdir()
         self.child = self.root / 'child.py'
-        self.child.write_text(CHILD)
+        self.child.write_text(CHILD, encoding="utf-8")
         self.case = runner.RenderRunnerTests('test_traversal_twice')
         self.case.root = self.runtime
         self.case.environment = os.environ.copy()
@@ -76,6 +88,7 @@ class RenderRunnerEvidenceTests(unittest.TestCase):
         self.wait = False
         self.real_timeout = True
         self.children = []
+        self.startup_delay = 0
         self.loaders = True
         self.process_exception = None
         self.original_run = subprocess.run
@@ -101,7 +114,7 @@ class RenderRunnerEvidenceTests(unittest.TestCase):
         waiting = self.wait and self.real_timeout
         child_command = [sys.executable, '-I', '-B', str(self.child), artifact, payload,
                          str(self.code), str(int(self.loaders)),
-                         str(ready) if waiting else '-']
+                         str(ready) if waiting else '-', str(self.startup_delay)]
         if waiting:
             ready.unlink(missing_ok=True)
             popen = subprocess.Popen
@@ -137,6 +150,25 @@ class RenderRunnerEvidenceTests(unittest.TestCase):
                     self.process_exception_attributes = (error.cmd, error.timeout)
                     raise
         return self.original_run(child_command, **dict(kwargs, timeout=5))
+
+    def run_ready_child(self, command, ready, **kwargs):
+        ready.unlink(missing_ok=True)
+        kwargs.pop('timeout')
+        kwargs.pop('check')
+        with subprocess.Popen(command, **kwargs) as process:
+            try:
+                deadline = time.monotonic() + 5
+                while not ready.exists():
+                    self.assertIsNone(process.poll(), 'fixture exited before becoming ready')
+                    self.assertLess(time.monotonic(), deadline, 'fixture did not become ready')
+                    time.sleep(0.01)
+                code = process.wait(timeout=0.05)
+                return subprocess.CompletedProcess(command, code)
+            finally:
+                # Reap the child before reading evidence or deleting its runtime.
+                if process.poll() is None:
+                    process.kill()
+                process.wait()
 
     def paths(self, name='capture'):
         stem = 'test_traversal_twice-' + name
@@ -195,19 +227,25 @@ class RenderRunnerEvidenceTests(unittest.TestCase):
         self.assertNotIn('environment', receipt)
         self.assertEqual(receipt['evidence_errors'], [])
 
+    def test_timeout_waits_for_capture_even_after_slow_interpreter_startup(self):
+        self.startup_delay = 1
+        self.assert_timeout()
+        self.assertEqual(self.paths()[0].read_bytes(), self.payload)
+        self.assertEqual(self.receipt()['capture_status'], 'retained')
+
     def test_timeout_missing_and_partial_captures_cannot_reuse_old_outputs(self):
         for payload, status in ((None, 'missing'), (b'{"incomplete":', 'invalid_json')):
             with self.subTest(status=status):
                 self.payload = payload
                 for path in (*self.paths(), self.runtime / 'capture.json'):
-                    path.write_text('{"stale":true}')
+                    path.write_text('{"stale":true}', encoding="utf-8")
                 unrelated = self.artifacts / 'other-case.json'
-                unrelated.write_text('untouched')
+                unrelated.write_text('untouched', encoding="utf-8")
                 self.assert_timeout()
                 self.assertFalse(self.paths()[0].exists())
                 self.assertEqual(self.receipt()['capture_status'], status)
                 self.assertIsNone(self.receipt()['capture_sha256'])
-                self.assertEqual(unrelated.read_text(), 'untouched')
+                self.assertEqual(unrelated.read_text(encoding="utf-8"), 'untouched')
 
     def test_success_retains_bytes_and_existing_return_value(self):
         self.assertEqual(self.case.run_client('capture'), json.loads(self.payload))
@@ -440,6 +478,36 @@ class RenderRunnerEvidenceTests(unittest.TestCase):
         self.assertIs(caught.exception, error)
         receipt = json.loads(receipt_path.read_text())
         self.assert_timeout_diagnostics(receipt, stderr.getvalue())
+
+    def test_ready_child_timeout_reports_log_tail_and_last_observed_phase(self):
+        slow = self.root / 'slow_child.py'
+        slow.write_text(SLOW_CHILD, encoding="utf-8")
+        log = self.root / 'timeout.log'
+        artifact = self.root / 'timeout-capture.json'
+        retained = self.root / 'timeout-retained.json'
+        receipt_path = self.root / 'timeout-process.json'
+        def short_run(command, **kwargs):
+            return self.run_ready_child(command, self.root / 'slow.ready', **kwargs)
+
+        stderr = io.StringIO()
+        with mock.patch.object(runner.subprocess, 'run', side_effect=short_run), \
+                redirect_stderr(stderr):
+            with self.assertRaises(subprocess.TimeoutExpired):
+                runner._run_process([sys.executable, '-I', '-B', str(slow),
+                                     str(self.root / 'slow.ready')], cwd=self.root,
+                                    environment=os.environ.copy(), log=log,
+                                    artifact=artifact, retained=retained,
+                                    receipt_path=receipt_path)
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        self.assertEqual(receipt['outcome'], 'timed_out')
+        self.assertEqual(receipt['last_observed_phase'],
+                         'EnsureSurfaceReadyNear/surface-build batch 3')
+        self.assertEqual(len(receipt['log_tail'].encode('utf-8')), 8 * 1024)
+        self.assertIn('unrelated trailing line', receipt['log_tail'])
+        message = stderr.getvalue()
+        self.assertIn('render runner: timed out after', message)
+        self.assertIn('unrelated trailing line', message)
+        self.assertIn('EnsureSurfaceReadyNear/surface-build batch 3', message)
 
     def assert_timeout_diagnostics(self, receipt, message):
         self.assertEqual(receipt['outcome'], 'timed_out')
