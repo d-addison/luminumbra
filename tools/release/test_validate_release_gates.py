@@ -8,6 +8,8 @@ import io
 import json
 import os
 from pathlib import Path
+import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -45,6 +47,14 @@ def rules(*contexts: str) -> list:
 
 def requirements(*names: str) -> tuple:
     return tuple((name, None) for name in names)
+
+
+def branch(*contexts: str, enabled: bool = True, level: str = "everyone",
+           checks: list | None = None) -> dict:
+    return {"protected": True, "protection": {"enabled": enabled,
+            "required_status_checks": {"enforcement_level": level,
+                                       "contexts": list(contexts),
+                                       "checks": [] if checks is None else checks}}}
 
 
 def rule_stream(*response_pages: list, links: tuple[str, ...] = (), newline: str = "\n") -> bytes:
@@ -235,19 +245,136 @@ class RecordTests(unittest.TestCase):
 
 
 class ApiTests(unittest.TestCase):
+    def test_classic_contexts_merge_with_rules_and_preserve_all_app_bindings(self):
+        response = branch("Linux", "Windows", "Legacy", "Legacy", checks=[
+            {"context": "Windows", "app_id": 42},
+            {"context": "Windows", "app_id": 99},
+            {"context": "Windows", "app_id": 42},
+            {"context": "Other", "app_id": None},
+        ])
+        original = copy.deepcopy(response)
+        contexts = gate.required_contexts(rules("Linux"), gate.classic_required_contexts(response))
+        self.assertEqual(contexts, (("Linux", None), ("Windows", 42), ("Windows", 99),
+                                    ("Other", None), ("Legacy", None)))
+        self.assertEqual(response, original)
+        runs = [run(), run(2, "Windows", app={"id": 42}),
+                run(3, "Windows", app={"id": 99})]
+        gate.validate_check_runs(pages(*runs), contexts, COMMIT,
+                                 [status(context="Other"), status(2, "Legacy")])
+        for missing in range(len(runs)):
+            with self.subTest(missing=missing), self.assertRaises(gate.GateError):
+                gate.validate_check_runs(pages(*(runs[:missing] + runs[missing + 1:])),
+                                         contexts, COMMIT,
+                                         [status(context="Other"), status(2, "Legacy")])
+
+    def test_disabled_classic_protection_is_ignored_including_rules_only_live_shape(self):
+        for response in ({"protected": False}, branch(enabled=False, level="off"),
+                         branch("Windows", enabled=False), branch("Windows", level="off")):
+            with self.subTest(response=response):
+                self.assertEqual(gate.classic_required_contexts(response), ())
+                contexts = gate.required_contexts(rules("Linux"), gate.classic_required_contexts(response))
+                self.assertEqual(contexts, requirements("Linux"))
+                gate.validate_check_runs(pages(run()), contexts, COMMIT, [])
+
+    def test_classic_protected_response_refuses_missing_and_malformed_fields(self):
+        for response in (None, [], {}, {"protected": 1}, {"protected": "true"},
+                         {"protected": True}, {"protected": True, "protection": None}):
+            with self.subTest(response=response), self.assertRaises(gate.GateError):
+                gate.classic_required_contexts(response)
+        for enabled in (True, False):
+            for path, invalid_values in (
+                    (("protection", "enabled"), (None, 0, "true", {})),
+                    (("protection", "required_status_checks"), (None, [], True)),
+                    (("protection", "required_status_checks", "enforcement_level"),
+                     (None, True, "unknown", "")),
+                    (("protection", "required_status_checks", "contexts"),
+                     (None, {}, [True], [""], [" \n"])),
+                    (("protection", "required_status_checks", "checks"),
+                     (None, {}, [None], [{}],
+                      [{"context": "Linux", "app_id": True}],
+                      [{"context": "Linux", "app_id": False}],
+                      [{"context": "Linux", "app_id": 0}],
+                      [{"context": "Linux", "app_id": -2}],
+                      [{"context": "Linux", "app_id": -1.0}],
+                      [{"context": "Linux", "app_id": "42"}],
+                      [{"context": "Linux", "app_id": 42.0}],
+                      [{"context": "Linux", "app_id": {}}],
+                      [{"context": "Linux", "app_id": []}],
+                      [{"context": "", "app_id": 42}]))):
+                for value in (*invalid_values, "missing"):
+                    response = branch("Linux", enabled=enabled)
+                    target = response
+                    for key in path[:-1]:
+                        target = target[key]
+                    if value == "missing":
+                        del target[path[-1]]
+                    else:
+                        target[path[-1]] = value
+                    with self.subTest(enabled=enabled, path=path, value=value):
+                        with self.assertRaises(gate.GateError):
+                            gate.classic_required_contexts(response)
+
+    def test_classic_any_app_null_and_absent_bindings_are_unpinned(self):
+        for check in ({"context": "Windows", "app_id": -1},
+                      {"context": "Windows", "app_id": None},
+                      {"context": "Windows"}):
+            response = branch("Windows", checks=[check])
+            original = copy.deepcopy(response)
+            classic = gate.classic_required_contexts(response)
+            with self.subTest(check=check):
+                self.assertEqual(classic, requirements("Windows"))
+                self.assertEqual(response, original)
+                contexts = gate.required_contexts(rules("Linux"), classic)
+                self.assertEqual(contexts, requirements("Linux", "Windows"))
+                for app_id in (42, 99):
+                    with self.subTest(app_id=app_id):
+                        gate.validate_check_runs(
+                            pages(run(), run(2, "Windows", app={"id": app_id})),
+                            contexts, COMMIT, [])
+                with self.assertRaises(gate.GateError):
+                    gate.validate_check_runs(pages(run()), contexts, COMMIT, [])
+                with self.assertRaises(gate.GateError):
+                    gate.validate_check_runs(
+                        pages(run(), run(2, "Windows", conclusion="failure")),
+                        contexts, COMMIT, [])
+
+    def test_classic_app_binding_cannot_be_satisfied_by_other_app_or_status_creator(self):
+        for level in ("non_admins", "everyone"):
+            response = branch("Windows", level=level, checks=[{"context": "Windows", "app_id": 42}])
+            contexts = gate.required_contexts(rules("Linux"), gate.classic_required_contexts(response))
+            self.assertEqual(contexts, (("Linux", None), ("Windows", 42)))
+            for runs in ([], [run(2, "Windows", app={"id": 99})],
+                         [run(2, "Windows", app={"id": 42}, conclusion="failure"),
+                          run(3, "Windows", app={"id": 99})]):
+                with self.subTest(level=level, runs=runs), self.assertRaises(gate.GateError):
+                    gate.validate_check_runs(pages(run(), *runs), contexts, COMMIT,
+                                             [status(context="Windows", creator={"id": 42})])
+            gate.validate_check_runs(pages(run(), run(2, "Windows", app={"id": 42})),
+                                     contexts, COMMIT, [])
+
+    def test_classic_contexts_do_not_replace_strict_rules_requirement(self):
+        classic = gate.classic_required_contexts(branch("Windows"))
+        for response in ([], rules()):
+            with self.subTest(response=response), self.assertRaises(gate.GateError):
+                gate.required_contexts(response, classic)
+
     def test_required_app_binding_from_rules_and_classic_protection(self):
         for source, field in ((rules("Linux"), "integration_id"),
                               ({"strict": True, "checks": [{"context": "Linux"}]}, "app_id")):
             checks = (source[0]["parameters"]["required_status_checks"]
                       if type(source) is list else source["checks"])
-            for app_id in (None, 42):
+            for app_id in ((None, -1, 42) if field == "app_id" else (None, 42)):
                 checks[0][field] = app_id
-                expected = (("Linux", app_id),)
+                expected = (("Linux", None if app_id == -1 else app_id),)
                 self.assertEqual(gate.required_contexts(source), expected)
                 gate.validate_check_runs(pages(run(app={"id": 42})), expected, COMMIT, [])
-            for app_id in (True, False, 0, -1, "42", 42.0, {}):
+            for app_id in (True, False, 0, -2, -1.0, "42", 42.0, {}, []):
                 checks[0][field] = app_id
                 with self.subTest(field=field, app_id=app_id), self.assertRaises(gate.GateError):
+                    gate.required_contexts(source)
+            if field == "integration_id":
+                checks[0][field] = -1
+                with self.assertRaises(gate.GateError):
                     gate.required_contexts(source)
             del checks[0][field]
             self.assertEqual(gate.required_contexts(source), requirements("Linux"))
@@ -743,6 +870,8 @@ class GitTests(unittest.TestCase):
         self.root = Path(temporary.name)
         self.statuses_path = self.root / "statuses.json"
         self.statuses_path.write_bytes(rule_stream([]))
+        self.branch_path = self.root / "branch.json"
+        self.branch_path.write_text(json.dumps(branch(enabled=False, level="off")), encoding="utf-8")
         self.env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
         self.env.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1",
                         GIT_AUTHOR_NAME="Fixture", GIT_AUTHOR_EMAIL="fixture@example.org",
@@ -994,6 +1123,7 @@ class GitTests(unittest.TestCase):
             result = subprocess.run([
                 sys.executable, "-I", "-B", str(script), "--version", VERSION,
                 "--tag-commit", self.tag, "--rules", str(rules_path), "--statuses", str(self.statuses_path),
+                "--branch", str(self.branch_path),
             ], input=json.dumps(pages(run(head_sha=self.tag))).encode(), cwd=home,
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
             self.assertEqual(result.returncode, 0, result.stderr)
@@ -1016,6 +1146,7 @@ class GitTests(unittest.TestCase):
             run(2, head_sha=self.tag)
         ]}), encoding="utf-8")
         args = [sys.executable, "-I", "-B", str(Path(gate.__file__)), "--repo-root", str(self.root),
+                "--branch", str(self.branch_path),
                 "--version", VERSION, "--tag-commit", self.tag, "--rules", str(rules_path), "--statuses", str(self.statuses_path)]
         before = self.git("show-ref")
         result = subprocess.run(args, input=checks_path.read_bytes(), stdout=subprocess.PIPE,
@@ -1049,6 +1180,7 @@ class GitTests(unittest.TestCase):
         next_link = rule_link(2, "next") + ", " + rule_link(2, "last")
         complete = rule_stream(first, later, links=(next_link, rule_link(1, "prev")))
         args = [sys.executable, "-I", "-B", str(Path(gate.__file__)), "--repo-root", str(self.root),
+                "--branch", str(self.branch_path),
                 "--version", VERSION, "--tag-commit", self.tag, "--rules", str(rules_path), "--statuses", str(self.statuses_path)]
         before = self.git("show-ref")
         for rules_data, runs, expected in (
@@ -1072,6 +1204,7 @@ class GitTests(unittest.TestCase):
         rules_path = self.root / "rules.json"
         rules_path.write_bytes(rule_stream(rules("Linux")))
         args = [sys.executable, "-I", "-B", str(Path(gate.__file__)), "--repo-root", str(self.root),
+                "--branch", str(self.branch_path),
                 "--version", VERSION, "--tag-commit", self.tag, "--rules", str(rules_path),
                 "--statuses", str(self.statuses_path)]
         first = [status(index, context=f"Other {index}") for index in range(1, 101)]
@@ -1110,6 +1243,54 @@ class GitTests(unittest.TestCase):
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=self.env, check=False)
         self.assertEqual(result.returncode, 2)
         self.assertIn(b"--statuses", result.stderr)
+        self.assertEqual(self.git("show-ref"), before)
+        self.assertFalse((self.root / ".git/index").exists())
+
+    def test_cli_classic_protection_merge_bindings_and_malformed_inputs(self):
+        rules_path = self.root / "rules.json"
+        rules_path.write_bytes(rule_stream(rules("Linux")))
+        args = [sys.executable, "-I", "-B", str(Path(gate.__file__)), "--repo-root", str(self.root),
+                "--version", VERSION, "--tag-commit", self.tag, "--rules", str(rules_path),
+                "--statuses", str(self.statuses_path)]
+        bound = branch("Windows", checks=[{"context": "Windows", "app_id": 42}])
+        before = self.git("show-ref")
+        for response, extra_runs, expected in (
+                (branch(enabled=False, level="off"), [], 0),
+                (branch("Windows", enabled=False), [], 0),
+                (branch("Windows", level="off"), [], 0),
+                (branch("Windows"), [], 1),
+                (branch("Windows"), [run(2, "Windows")], 0),
+                (bound, [run(2, "Windows", app={"id": 99})], 1),
+                (bound, [run(2, "Windows", app={"id": 42})], 0),
+                (None, [], 1), ({"protected": True}, [], 1),
+                ({"protected": True, "protection": {"enabled": False}}, [], 1)):
+            self.branch_path.write_text(json.dumps(response), encoding="utf-8")
+            result = subprocess.run([*args, "--branch", str(self.branch_path)],
+                                    input=json.dumps(pages(run(head_sha=self.tag), *[
+                                        dict(item, head_sha=self.tag) for item in extra_runs])).encode(),
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=self.env, check=False)
+            with self.subTest(response=response, runs=extra_runs):
+                self.assertEqual(result.returncode, expected, result.stderr)
+                self.assertIn(b"PASS" if expected == 0 else b"FAIL",
+                              result.stdout if expected == 0 else result.stderr)
+        for data in (b"", b"{", b'{"protected":false,"protected":false}',
+                     b" " * (gate.RULES_LIMIT + 1)):
+            self.branch_path.write_bytes(data)
+            result = subprocess.run([*args, "--branch", str(self.branch_path)],
+                                    input=json.dumps(pages(run(head_sha=self.tag))).encode(),
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=self.env, check=False)
+            with self.subTest(data=data[:50]):
+                self.assertEqual(result.returncode, 1)
+                self.assertIn(b"FAIL", result.stderr)
+        for branch_input in ("-", str(self.root / "missing-branch.json")):
+            result = subprocess.run([*args, "--branch", branch_input], input=b"",
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=self.env, check=False)
+            self.assertEqual(result.returncode, 1)
+            self.assertIn(b"FAIL", result.stderr)
+        result = subprocess.run(args, input=b"", stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                env=self.env, check=False)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn(b"--branch", result.stderr)
         self.assertEqual(self.git("show-ref"), before)
         self.assertFalse((self.root / ".git/index").exists())
 
@@ -1157,15 +1338,53 @@ class WiringTests(unittest.TestCase):
         for text in ("set -euo pipefail", "git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main",
                      'git rev-parse "${GITHUB_REF_NAME}^{commit}"',
                      'gh api --include --paginate "repos/${GITHUB_REPOSITORY}/rules/branches/main?per_page=100"',
+                     'gh api "repos/${GITHUB_REPOSITORY}/branches/main" > "${RUNNER_TEMP}/release-branch.json"',
                      'gh api --include --paginate "repos/${GITHUB_REPOSITORY}/commits/${tag_commit}/statuses?per_page=100" > "${RUNNER_TEMP}/release-statuses.json"',
                      'gh api --paginate "repos/${GITHUB_REPOSITORY}/commits/${tag_commit}/check-runs?filter=all&per_page=100" |',
                      "python3 -I -B tools/release/validate_release_gates.py",
                      '--version "$RELEASE_VERSION" --tag-commit "$tag_commit"',
                      '--rules "${RUNNER_TEMP}/release-rules.json"',
+                     '--branch "${RUNNER_TEMP}/release-branch.json"',
                      '--statuses "${RUNNER_TEMP}/release-statuses.json"'):
             self.assertIn(text, step)
         self.assertNotIn("--slurp", step)
         self.assertIn("fetch-depth: 0", workflow[:verification])
+
+    def test_every_release_create_path_is_draft_and_workflow_never_publishes(self):
+        workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+        commands = [shlex.split(line.strip()) for line in workflow.splitlines()
+                    if "gh release create " in line]
+        self.assertEqual(len(commands), 2)
+        for command in commands:
+            with self.subTest(command=command):
+                self.assertEqual(command[:3], ["gh", "release", "create"])
+                self.assertIn("--draft", command)
+                self.assertIn("--verify-tag", command)
+                self.assertNotIn("--draft=false", command)
+        self.assertIn("--notes-file", commands[0])
+        self.assertIn("--generate-notes", commands[1])
+        self.assertNotRegex(workflow, r"--draft(?:=|\s+)false\b")
+        self.assertNotRegex(workflow, r"--latest\b")
+        self.assertNotRegex(workflow, r"gh\s+release\s+edit\b")
+        self.assertNotRegex(workflow, r"gh\s+api[^\n]*(?:/releases|draft.*false)")
+        release_commands = re.findall(r"gh\s+release\s+(\S+)", workflow)
+        self.assertEqual(release_commands, ["create", "create", "upload"])
+
+    def test_artifacts_and_attestations_support_draft_until_owner_publication(self):
+        workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+        source, binaries = workflow.split("\n  binary-linux:\n", 1)
+        creation = source.index("gh release create ")
+        for action in ("actions/attest-build-provenance@", "actions/attest-sbom@"):
+            self.assertLess(source.index(action), creation)
+            self.assertEqual(binaries.count(action), 2)
+        upload = workflow.split("\n  publish-binaries:\n", 1)[1]
+        self.assertIn("needs: [source, binary-linux, binary-windows]", upload)
+        self.assertIn("    permissions:\n      contents: write\n", upload)
+        upload_step = upload.split("      - name: Attach binary packages\n", 1)[1]
+        self.assertIn("        env:\n          GH_TOKEN: ${{ github.token }}\n"
+                      "          GH_REPO: ${{ github.repository }}\n", upload_step)
+        self.assertIn('run: gh release upload "${GITHUB_REF_NAME}" dist/* --clobber', upload)
+        self.assertNotIn("verify_release.py", workflow)
 
     def test_source_job_has_only_required_permissions_including_checks_read(self):
         workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
@@ -1193,6 +1412,16 @@ class WiringTests(unittest.TestCase):
         self.assertIn("concrete record URL", documentation)
         self.assertIn("local paths", documentation)
         self.assertNotIn("docs/release-evidence/", documentation)
+        for path in ("tools/release/README.md", "docs/v0.3-acceptance.md", "README.md"):
+            text = (ROOT / path).read_text(encoding="utf-8")
+            with self.subTest(path=path):
+                self.assertIn("--branch", text)
+                self.assertIn("classic", text)
+                self.assertIn("draft", text)
+                self.assertIn("owner", text)
+                self.assertIn("evidence", text)
+                self.assertIn("manually", text)
+                self.assertIn("post-publication", text)
 
 
 if __name__ == "__main__":

@@ -59,10 +59,22 @@ release smoke on Windows.
 See the [acceptance record](docs/v0.3-acceptance.md) for the scoped tag gate and
 historical evidence, and the [release notes](docs/release-notes-v0.3.0.md) for
 compatibility and scope.
-Source publication checks both check runs and commit statuses on the tagged
-commit; every present latest result for a required context must succeed.
-App-pinned contexts require a matching check run. Offline gate validation requires
-complete status pages via `--statuses`; see the [release tooling guide](tools/release/README.md#publication-gate-record).
+The release workflow checks both check runs and commit statuses on the tagged
+commit; every present latest result for a required context must succeed. It merges
+active classic branch-protection contexts with ruleset requirements and preserves
+app bindings; strict ruleset promotion remains required. App-pinned contexts require
+a matching check run. Offline gate validation requires complete status pages via
+`--statuses` and the `branches/main` response via `--branch`; missing or malformed
+protected-branch fields fail closed, while disabled classic checks add no contexts.
+Evidence-syntax checks remain a fail-closed precondition. After the six
+pre-publication gates pass in their recorded order, the workflow builds and
+attests artifacts and creates a **draft** GitHub release; later enabled uploads
+attach to the draft by tag. After uploads finish, the repository owner must review
+the gate record's referenced evidence for qualification on that revision and
+manually publish the draft. That owner review and manual publication are the
+approval gate; the workflow never publishes automatically. Independent download
+verification follows as a post-publication step and refuses drafts. See the
+[release tooling guide](tools/release/README.md#publication-gate-record).
 
 ## v0.3.0 world format break
 

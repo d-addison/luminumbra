@@ -51,11 +51,13 @@ jobs:
           git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
           tag_commit=$(git rev-parse "${GITHUB_REF_NAME}^{commit}")
           gh api --include --paginate "repos/${GITHUB_REPOSITORY}/rules/branches/main?per_page=100" > "${RUNNER_TEMP}/release-rules.json"
+          gh api "repos/${GITHUB_REPOSITORY}/branches/main" > "${RUNNER_TEMP}/release-branch.json"
           gh api --include --paginate "repos/${GITHUB_REPOSITORY}/commits/${tag_commit}/statuses?per_page=100" > "${RUNNER_TEMP}/release-statuses.json"
           gh api --paginate "repos/${GITHUB_REPOSITORY}/commits/${tag_commit}/check-runs?filter=all&per_page=100" |
             python3 -I -B tools/release/validate_release_gates.py \
               --version "$RELEASE_VERSION" --tag-commit "$tag_commit" \
               --rules "${RUNNER_TEMP}/release-rules.json" \
+              --branch "${RUNNER_TEMP}/release-branch.json" \
               --statuses "${RUNNER_TEMP}/release-statuses.json"
       - name: Build source archive, SBOM, and checksums
         shell: bash
@@ -103,11 +105,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # The owner reviews the gate record's evidence and publishes manually.
           notes="docs/release-notes-${GITHUB_REF_NAME}.md"
           if test -f "$notes"; then
-            gh release create "${GITHUB_REF_NAME}" dist/* --verify-tag --notes-file "$notes" --title "Luminumbra ${GITHUB_REF_NAME}"
+            gh release create "${GITHUB_REF_NAME}" dist/* --draft --verify-tag --notes-file "$notes" --title "Luminumbra ${GITHUB_REF_NAME}"
           else
-            gh release create "${GITHUB_REF_NAME}" dist/* --verify-tag --generate-notes --title "Luminumbra ${GITHUB_REF_NAME}"
+            gh release create "${GITHUB_REF_NAME}" dist/* --draft --verify-tag --generate-notes --title "Luminumbra ${GITHUB_REF_NAME}"
           fi
 
   binary-linux:
@@ -211,4 +214,7 @@ jobs:
       - name: Attach binary packages
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        # contents: write allows uploads to the draft by tag. The owner publishes
+        # manually after reviewing the gate record's referenced evidence.
         run: gh release upload "${GITHUB_REF_NAME}" dist/* --clobber

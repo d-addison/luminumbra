@@ -83,6 +83,11 @@ The requirements follow SPDX 2.3
 
 ## Publication gate record
 
+The release sequence is: six pre-publication gates in order, draft release
+creation and any enabled uploads, owner review of the gate record's referenced
+evidence and manual publication, then independent download verification after
+publication.
+
 Before tagging `vX.Y.Z`, qualify the final source revision and record each of the
 six pre-publication gates below in `docs/release-gates/vX.Y.Z.json`. Use schema
 version 1, the unprefixed release version, the full 40-hex qualified source commit,
@@ -124,12 +129,16 @@ All numeric URL IDs must be positive decimal integers. For example, use
 `<full-qualified-sha> https://github.com/OWNER/REPO/actions/runs/123456` after
 replacing the SHA and location with the actual result. Bare issue references,
 generic issue URLs, placeholder text, abbreviated or different SHAs, local paths
-and extra fields refuse publication. The validator checks the
-revision binding and location syntax offline; it does not fetch URLs or inspect
-record contents. Reviewers must verify that the referenced record exists and
-substantiates the result and coverage on that revision. Keep evidence available
-for review, including archiving expiring CI artifacts. Pending native coverage
-stays pending.
+and extra fields refuse draft creation. These offline evidence-syntax checks are
+a fail-closed precondition; they do not fetch URLs or inspect record contents.
+The workflow creates a **draft** GitHub release with `gh release create --draft`
+on both the notes-file and generated-notes paths. Before publication, the repository
+owner must review every gate record's referenced evidence, verify that it exists
+and substantiates the qualification results and coverage on the qualified revision,
+and manually publish the draft. That evidence review and manual publication are
+the approval gate; passing syntax checks does not establish qualification or owner
+approval. Keep evidence available for review, including archiving expiring CI
+artifacts. Pending native coverage stays pending.
 
 Commit the completed record after qualification. The qualified commit must be an
 ancestor of (or equal to) the tagged commit, and both commits must lie on `main`'s
@@ -149,13 +158,28 @@ workflow retains identity and public-tree checks, fetches `main` explicitly, and
 requires both commits on `origin/main`'s first-parent history before creating any
 archive. The history scan refuses more than 100,000 commits; a second-parent branch
 commit cannot substitute for the promotion merge. It reads effective
-`required_status_checks` rules for `main`, requires strict
-promotion and at least one readable required context, and checks every context on
-the tag commit. Each rule's optional `integration_id` pins the context to a GitHub
-App; missing or null IDs are unpinned. Offline `required_contexts` callers using
-classic strict branch protection's `checks` retain its `app_id` binding as well.
-Malformed bindings refuse publication. Distinct bindings for the same context
-are all required. Check-run and commit-status pages must both be complete. For each
+`required_status_checks` rules for `main`, requires strict promotion and at least
+one readable ruleset context, and also fetches `repos/OWNER/NAME/branches/main`
+for classic branch protection. When `protected` is true, `protection.enabled` is
+true and `protection.required_status_checks.enforcement_level` is not `off`,
+classic `contexts` and `checks` are merged with the ruleset requirements.
+Each rule's optional `integration_id` and each classic check's `app_id` pin the
+context to a GitHub App when the ID is a positive integer. Null or absent IDs are
+unpinned; classic `app_id: -1` also allows any app and is normalized to unpinned.
+Booleans, non-integers, zero and other negative IDs are refused; ruleset
+`integration_id: -1` is also refused.
+Legacy classic contexts absent from `checks` are unpinned; a same-named legacy
+context does not erase a check's app binding. Malformed bindings refuse draft
+creation. Distinct bindings for the same context are all required. Disabled classic
+protection or enforcement `off` adds no contexts, including when `protected` is
+true because of rulesets alone. The branch response must have boolean `protected`;
+while protected it must also have boolean `protection.enabled` and a
+`required_status_checks` object with a valid `enforcement_level` (`off`, `non_admins`
+or `everyone`), string `contexts` array and `checks` array containing contexts with
+optional app IDs. Missing or malformed required fields fail closed even when
+classic checks are disabled.
+An unprotected branch adds no classic requirements; the strict ruleset requirement
+still applies. Check-run and commit-status pages must both be complete. For each
 required context, the highest check-run ID, considering only runs whose `app.id`
 matches a pinned binding, must be `completed` with conclusion `success` if present.
 The highest commit-status ID for the same context must have state `success` if
@@ -173,14 +197,15 @@ check run even when a successful status exists. A latest failing same-named
 status from any creator still blocks a pinned context.
 API failures also refuse publication. The source job grants `checks: read` for check
 runs and `statuses: read` for commit statuses; the rules endpoint uses repository
-metadata access. Other permissions are unchanged.
+metadata access. The branch endpoint needs only `contents: read`, already covered
+by the source job's `contents: write`. Other permissions are unchanged.
 
 To evaluate captured API responses offline (Python standard library and Git):
 
 ```sh
 python3 -I -B tools/release/validate_release_gates.py --version X.Y.Z \
   --tag-commit <40-hex tagged commit> --rules main-rules.json \
-  --checks check-pages.json --statuses status-pages.json
+  --branch main-branch.json --checks check-pages.json --statuses status-pages.json
 python3 -I -B tools/release/test_validate_release_gates.py
 ```
 
@@ -193,6 +218,11 @@ nonfinal pages, and unique `(ruleset_id, type)` identities across pages. Missing
 extra, repeated or inconsistent pages refuse publication, including a missing
 final page after exactly 100 rules. A full final page without a next link is valid.
 Bare arrays cannot establish pagination completeness and are refused by the CLI.
+`main-branch.json` is the single JSON object from
+`gh api "repos/OWNER/NAME/branches/main"`. The `--branch` file is required, even
+when classic protection is disabled; an absent, unreadable or malformed response
+cannot establish that no classic contexts are required. It must be a file because
+stdin is reserved for check-run pages.
 `status-pages.json` is the concatenated HTTP headers and JSON arrays from
 `gh api --include --paginate "repos/OWNER/NAME/commits/COMMIT/statuses?per_page=100"`,
 where `COMMIT` is the full tagged commit SHA. The same HTTP 200 and complete link
@@ -206,17 +236,26 @@ refuses publication on any API command failure, including after partial output.
 repos/OWNER/NAME/commits/COMMIT/check-runs?filter=all&per_page=100` (quote the endpoint
 in a shell). A single array containing those pages is also accepted. The validator
 accepts check pages on stdin by default and bounds input
-before decoding JSON: 1 MiB for rules and 16 MiB each for check and status pages, with at most 32
-nested containers in any input. An unreadable, malformed, oversized or incomplete
+before decoding JSON: 1 MiB each for rules and branch protection and 16 MiB each
+for check and status pages, with at most 32 nested containers in any input.
+An unreadable, malformed, oversized or incomplete
 response fails closed. The checkout must match
 the tagged commit and have an up-to-date `origin/main` reference.
 
-Signed source publication is performed by the workflow after these prerequisites.
+After these prerequisites the workflow builds and attests the source artifacts and
+attaches them to the draft. Attestations are created before release creation and
+do not require a published release. If binary releases are separately enabled,
+their attestations also precede upload, and the later `gh release upload TAG`
+uses `GH_REPO` to select the repository and an authenticated token with
+`contents: write` to address the draft by tag. All uploads must finish before
+the owner reviews the referenced evidence and manually publishes the draft; the
+workflow never publishes it automatically.
 Independent release-download verification is a **post-publication** step using
 `verify_release.py` below from a fresh directory on an operator machine. Neither
 publication nor download verification is a pre-publication record entry. Keep the
 download verification report as evidence after publication; do not declare it passed
-in advance.
+in advance. The verifier deliberately refuses drafts, so run it only after the
+owner has published the release.
 
 ## Independent verification
 

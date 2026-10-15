@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Refuse source publication unless committed qualification and required CI pass."""
+"""Refuse draft creation unless qualification syntax and required CI pass."""
 
 from __future__ import annotations
 
@@ -293,7 +293,54 @@ def validate_record(record: object, version: str) -> str:
     return qualified.lower()
 
 
-def required_contexts(rules: object) -> tuple[tuple[str, int | None], ...]:
+def check_requirement(check: object, app_field: str) -> tuple[str, int | None]:
+    require(type(check) is dict and type(check.get("context")) is str
+            and bool(check["context"].strip()), "invalid required context")
+    app_id = check.get(app_field)
+    # Classic protection uses -1 to allow any app; ruleset IDs stay strict.
+    if app_field == "app_id" and type(app_id) is int and app_id == -1:
+        app_id = None
+    require(app_id is None or (type(app_id) is int and app_id > 0),
+            "invalid required check app ID")
+    return check["context"], app_id
+
+
+def classic_required_contexts(branch: object) -> tuple[tuple[str, int | None], ...]:
+    """Read classic checks from the contents-readable branches/main response."""
+    require(type(branch) is dict and type(branch.get("protected")) is bool,
+            "invalid main branch protection response")
+    if not branch["protected"]:
+        return ()
+    protection = branch.get("protection")
+    require(type(protection) is dict and type(protection.get("enabled")) is bool,
+            "missing or invalid main protection.enabled")
+    checks = protection.get("required_status_checks")
+    require(type(checks) is dict, "missing classic required_status_checks")
+    level = checks.get("enforcement_level")
+    require(type(level) is str and level in ("off", "non_admins", "everyone"),
+            "invalid classic status-check enforcement_level")
+    names, bindings = checks.get("contexts"), checks.get("checks")
+    require(type(names) is list and all(type(name) is str and bool(name.strip()) for name in names),
+            "missing or invalid classic contexts")
+    require(type(bindings) is list, "missing or invalid classic checks")
+    contexts = []
+    for check in bindings:
+        context = check_requirement(check, "app_id")
+        if context not in contexts:
+            contexts.append(context)
+    # Legacy contexts have no binding; do not erase a binding from checks.
+    bound_names = {name for name, _ in contexts}
+    for name in names:
+        if name not in bound_names:
+            contexts.append((name, None))
+            bound_names.add(name)
+    if not protection["enabled"] or level == "off":
+        return ()
+    return tuple(contexts)
+
+
+def required_contexts(rules: object,
+                      classic: tuple[tuple[str, int | None], ...] = ()) -> tuple[tuple[str, int | None], ...]:
     """Preserve every (context, app) requirement, including same-name bindings."""
     # Offline callers may also supply classic required_status_checks protection.
     if type(rules) is dict:
@@ -315,15 +362,13 @@ def required_contexts(rules: object) -> tuple[tuple[str, int | None], ...]:
     for checks, app_field in sources:
         require(type(checks) is list and bool(checks), "no required status checks in rule")
         for check in checks:
-            require(type(check) is dict and type(check.get("context")) is str
-                    and bool(check["context"].strip()), "invalid required context")
-            app_id = check.get(app_field)
-            require(app_id is None or (type(app_id) is int and app_id > 0),
-                    "invalid required check app ID")
-            context = (check["context"], app_id)
+            context = check_requirement(check, app_field)
             if context not in contexts:
                 contexts.append(context)
     require(bool(contexts), "no required status-check contexts could be read for main")
+    for context in classic:
+        if context not in contexts:
+            contexts.append(context)
     return tuple(contexts)
 
 
@@ -468,15 +513,18 @@ def main() -> int:
     parser.add_argument("--version", required=True)
     parser.add_argument("--tag-commit", required=True)
     parser.add_argument("--rules", required=True, help="main rules HTTP header/JSON page stream file")
+    parser.add_argument("--branch", required=True, help="branches/main JSON response file")
     parser.add_argument("--checks", default="-", help="check-run JSON page stream file or stdin")
     parser.add_argument("--statuses", required=True,
                         help="commit-status HTTP header/JSON page stream file")
     args = parser.parse_args()
     try:
         require(args.rules != "-", "rules must be a file; stdin is reserved for check runs")
+        require(args.branch != "-", "branch must be a file; stdin is reserved for check runs")
         require(args.statuses != "-", "statuses must be a file; stdin is reserved for check runs")
         validate_git_record(args.repo_root, args.version, args.tag_commit)
-        contexts = required_contexts(parse_rules_pages(read_bytes(args.rules, RULES_LIMIT)))
+        contexts = required_contexts(parse_rules_pages(read_bytes(args.rules, RULES_LIMIT)),
+                                     classic_required_contexts(read_json(args.branch, RULES_LIMIT)))
         validate_check_runs(parse_check_pages(read_bytes(args.checks, CHECKS_LIMIT)),
                             contexts, args.tag_commit,
                             parse_status_pages(read_bytes(args.statuses, CHECKS_LIMIT), args.tag_commit))
