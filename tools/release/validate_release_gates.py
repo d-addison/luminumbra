@@ -122,83 +122,84 @@ def read_json(path: str, limit: int) -> object:
     return parse_json(read_bytes(path, limit), limit)
 
 
-def rules_links(value: str, page_number: int) -> tuple[str | None, str | None, int | None]:
+def pagination_links(value: str, page_number: int, resource: str, path_pattern: str) -> tuple[str | None, str | None, int | None]:
     """Check pagination links and return the endpoint, next URL and final page."""
     links = {}
     endpoint = None
     last = None
     for entry in value.split(",") if value else ():
         match = re.fullmatch(r'\s*<([^<>\s]+)>;\s*rel="(next|prev|first|last)"\s*', entry)
-        require(match is not None, "invalid rules pagination link")
+        require(match is not None, f"invalid {resource} pagination link")
         url, relation = match.groups()
-        require(relation not in links, "duplicate rules pagination relation")
+        require(relation not in links, f"duplicate {resource} pagination relation")
         parsed = urlsplit(url)
         query = parse_qs(parsed.query, keep_blank_values=True)
         require(parsed.scheme == "https" and parsed.netloc == "api.github.com"
-                and re.fullmatch(r"/repos/[^/]+/[^/]+/rules/branches/main", parsed.path)
+                and re.fullmatch(path_pattern, parsed.path)
                 and not parsed.fragment and set(query) == {"page", "per_page"}
                 and query["per_page"] == ["100"] and len(query["page"]) == 1
                 and re.fullmatch(r"[1-9][0-9]*", query["page"][0]) is not None,
-                "invalid rules pagination endpoint")
+                f"invalid {resource} pagination endpoint")
         target = int(query["page"][0])
         if relation == "next":
-            require(target == page_number + 1, "rules pagination skipped a page")
+            require(target == page_number + 1, f"{resource} pagination skipped a page")
         elif relation == "prev":
-            require(target == page_number - 1, "inconsistent previous rules page")
+            require(target == page_number - 1, f"inconsistent previous {resource} page")
         elif relation == "first":
-            require(target == 1, "inconsistent first rules page")
+            require(target == 1, f"inconsistent first {resource} page")
         else:
-            require(target >= page_number, "inconsistent last rules page")
+            require(target >= page_number, f"inconsistent last {resource} page")
             last = target
-        require(endpoint is None or endpoint == parsed.path, "rules pagination endpoint changed")
+        require(endpoint is None or endpoint == parsed.path, f"{resource} pagination endpoint changed")
         endpoint = parsed.path
         links[relation] = url
-    require(page_number == 1 or "prev" in links, "missing previous rules page link")
+    require(page_number == 1 or "prev" in links, f"missing previous {resource} page link")
     require(last is None or (last > page_number) == ("next" in links),
-            "inconsistent last rules page link")
+            f"inconsistent last {resource} page link")
     return endpoint, links.get("next"), last
 
 
-def parse_rules_pages(data: bytes) -> list:
+def parse_array_pages(data: bytes, limit: int, resource: str, path_pattern: str) -> list:
     """Decode gh api --include --paginate arrays, requiring a complete link chain."""
-    require(len(data) <= RULES_LIMIT, "JSON exceeds size limit")
+    require(len(data) <= limit, "JSON exceeds size limit")
     try:
         content = data.decode("utf-8")
     except UnicodeError as error:
-        raise GateError(f"invalid rules response: {error}") from error
+        raise GateError(f"invalid {resource} response: {error}") from error
     position, page_number = 0, 0
     expected_next, endpoint = None, None
     last_page = None
-    rules, seen = [], set()
+    items = []
     while position < len(content):
         position += len(content[position:]) - len(content[position:].lstrip())
         if position == len(content):
             break
-        require(page_number == 0 or expected_next is not None, "unexpected extra rules page")
+        require(page_number == 0 or expected_next is not None, f"unexpected extra {resource} page")
         separator = re.search(r"\r?\n\r?\n", content[position:])
-        require(separator is not None, "missing rules response headers")
+        require(separator is not None, f"missing {resource} response headers")
         header_end = position + separator.start()
         headers = content[position:header_end].splitlines()
         require(bool(headers) and re.fullmatch(r"HTTP/[0-9.]+ 200(?: .*)?", headers[0]),
-                "rules response must have HTTP status 200")
+                f"{resource} response must have HTTP status 200")
         link_headers = []
         for header in headers[1:]:
             name, colon, value = header.partition(":")
-            require(bool(colon) and bool(name.strip()), "invalid rules response header")
+            require(bool(colon) and bool(name.strip()), f"invalid {resource} response header")
             if name.lower() == "link":
                 link_headers.append(value.strip())
-        require(len(link_headers) <= 1, "duplicate rules Link header")
+        require(len(link_headers) <= 1, f"duplicate {resource} Link header")
         page_number += 1
-        page_endpoint, expected_next, last = rules_links(link_headers[0] if link_headers else "", page_number)
+        page_endpoint, expected_next, last = pagination_links(
+            link_headers[0] if link_headers else "", page_number, resource, path_pattern)
         require(endpoint is None or page_endpoint is None or endpoint == page_endpoint,
-                "rules pagination endpoint changed")
+                f"{resource} pagination endpoint changed")
         endpoint = page_endpoint or endpoint
         require(last_page is None or last is None or last_page == last,
-                "rules page count changed during pagination")
+                f"{resource} page count changed during pagination")
         last_page = last if last is not None else last_page
         position += separator.end()
         position += len(content[position:]) - len(content[position:].lstrip())
-        require(position < len(content) and content[position] == "[", "rules page must be an array")
+        require(position < len(content) and content[position] == "[", f"{resource} page must be an array")
         start, depth, quoted, escaped = position, 0, False, False
         # Find one complete body, bounding nesting before JSON decoding.
         while position < len(content):
@@ -220,21 +221,40 @@ def parse_rules_pages(data: bytes) -> list:
                 depth -= 1
                 if depth == 0:
                     break
-        require(depth == 0 and not quoted, "incomplete rules JSON body")
-        page = parse_json(content[start:position].encode("utf-8"), RULES_LIMIT)
-        require(type(page) is list and len(page) <= 100, "invalid rules page size")
-        require(expected_next is None or len(page) == 100, "inconsistent rules pagination")
-        for rule in page:
-            require(type(rule) is dict and type(rule.get("ruleset_id")) is int
-                    and rule["ruleset_id"] > 0 and type(rule.get("type")) is str,
-                    "invalid rules pagination identity")
-            identity = (rule["ruleset_id"], rule["type"])
-            require(identity not in seen, "duplicate rule during pagination")
-            seen.add(identity)
-            rules.append(rule)
+        require(depth == 0 and not quoted, f"incomplete {resource} JSON body")
+        page = parse_json(content[start:position].encode("utf-8"), limit)
+        require(type(page) is list and len(page) <= 100, f"invalid {resource} page size")
+        require(expected_next is None or len(page) == 100, f"inconsistent {resource} pagination")
+        items.extend(page)
     require(page_number > 0 and expected_next is None
-            and (last_page is None or last_page == page_number), "incomplete rules pagination")
+            and (last_page is None or last_page == page_number), f"incomplete {resource} pagination")
+    return items
+
+
+RULES_ENDPOINT = r"/repos/[^/]+/[^/]+/rules/branches/main"
+
+
+def rules_links(value: str, page_number: int) -> tuple[str | None, str | None, int | None]:
+    return pagination_links(value, page_number, "rules", RULES_ENDPOINT)
+
+
+def parse_rules_pages(data: bytes) -> list:
+    rules = parse_array_pages(data, RULES_LIMIT, "rules", RULES_ENDPOINT)
+    seen = set()
+    for rule in rules:
+        require(type(rule) is dict and type(rule.get("ruleset_id")) is int
+                and rule["ruleset_id"] > 0 and type(rule.get("type")) is str,
+                "invalid rules pagination identity")
+        identity = (rule["ruleset_id"], rule["type"])
+        require(identity not in seen, "duplicate rule during pagination")
+        seen.add(identity)
     return rules
+
+
+def parse_status_pages(data: bytes, commit: str) -> list:
+    require(SHA.fullmatch(commit) is not None, "tag commit must be a full 40-hex SHA")
+    endpoint = rf"/repos/[^/]+/[^/]+/commits/{commit}/statuses"
+    return parse_array_pages(data, CHECKS_LIMIT, "statuses", endpoint)
 
 
 def validate_evidence(evidence: str, qualified: str, gate_id: str) -> None:
@@ -307,8 +327,28 @@ def required_contexts(rules: object) -> tuple[tuple[str, int | None], ...]:
     return tuple(contexts)
 
 
-def validate_check_runs(pages: object, contexts: tuple[tuple[str, int | None], ...], commit: str) -> None:
-    """Select the highest run ID per requirement, filtering pinned apps first."""
+def select_latest_statuses(statuses: object) -> dict:
+    """Use immutable status IDs for newest-first semantics independent of page order."""
+    require(type(statuses) is list, "invalid commit statuses")
+    latest, seen = {}, set()
+    for status in statuses:
+        require(type(status) is dict, "invalid commit status")
+        status_id, name = status.get("id"), status.get("context")
+        require(type(status_id) is int and status_id > 0 and status_id not in seen,
+                "invalid or duplicate commit-status ID")
+        require(type(name) is str and bool(name.strip()), "invalid commit-status context")
+        require(status.get("state") in ("success", "pending", "failure", "error"),
+                "invalid commit-status state")
+        seen.add(status_id)
+        if name not in latest or status_id > latest[name]["id"]:
+            latest[name] = status
+    return latest
+
+
+def validate_check_runs(pages: object, contexts: tuple[tuple[str, int | None], ...],
+                        commit: str, statuses: object) -> None:
+    """Require success from both APIs, filtering pinned check-run apps first."""
+    latest_statuses = select_latest_statuses(statuses)
     require(type(pages) is list and bool(pages), "missing check-run pages")
     latest = {}
     seen = set()
@@ -347,9 +387,17 @@ def validate_check_runs(pages: object, contexts: tuple[tuple[str, int | None], .
                     latest[context] = run
     require(count == total, "incomplete check-run pagination")
     for context in contexts:
+        name, app_id = context
         run = latest.get(context)
-        require(run is not None and run["status"] == "completed"
-                and run.get("conclusion") == "success",
+        status = latest_statuses.get(name)
+        # A status creator is a user, not an authenticated GitHub App binding.
+        # Pinned requirements therefore need a matching check run as well.
+        require(run is not None or (app_id is None and status is not None),
+                f"missing required check or status: {context}")
+        require(status is None or status["state"] == "success",
+                f"latest required commit status is not SUCCESS: {context}")
+        require(run is None or (run["status"] == "completed"
+                                and run.get("conclusion") == "success"),
                 f"latest required check is not completed SUCCESS: {context}")
 
 
@@ -421,13 +469,17 @@ def main() -> int:
     parser.add_argument("--tag-commit", required=True)
     parser.add_argument("--rules", required=True, help="main rules HTTP header/JSON page stream file")
     parser.add_argument("--checks", default="-", help="check-run JSON page stream file or stdin")
+    parser.add_argument("--statuses", required=True,
+                        help="commit-status HTTP header/JSON page stream file")
     args = parser.parse_args()
     try:
         require(args.rules != "-", "rules must be a file; stdin is reserved for check runs")
+        require(args.statuses != "-", "statuses must be a file; stdin is reserved for check runs")
         validate_git_record(args.repo_root, args.version, args.tag_commit)
         contexts = required_contexts(parse_rules_pages(read_bytes(args.rules, RULES_LIMIT)))
         validate_check_runs(parse_check_pages(read_bytes(args.checks, CHECKS_LIMIT)),
-                            contexts, args.tag_commit)
+                            contexts, args.tag_commit,
+                            parse_status_pages(read_bytes(args.statuses, CHECKS_LIMIT), args.tag_commit))
     except (GateError, OSError, ValueError) as error:
         print(f"release gates: FAIL: {error}", file=sys.stderr)
         return 1

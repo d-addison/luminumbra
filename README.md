@@ -59,6 +59,10 @@ release smoke on Windows.
 See the [acceptance record](docs/v0.3-acceptance.md) for the scoped tag gate and
 historical evidence, and the [release notes](docs/release-notes-v0.3.0.md) for
 compatibility and scope.
+Source publication checks both check runs and commit statuses on the tagged
+commit; every present latest result for a required context must succeed.
+App-pinned contexts require a matching check run. Offline gate validation requires
+complete status pages via `--statuses`; see the [release tooling guide](tools/release/README.md#publication-gate-record).
 
 ## v0.3.0 world format break
 

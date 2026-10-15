@@ -50,10 +50,12 @@ jobs:
           git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
           tag_commit=$(git rev-parse "${GITHUB_REF_NAME}^{commit}")
           gh api --include --paginate "repos/${GITHUB_REPOSITORY}/rules/branches/main?per_page=100" > "${RUNNER_TEMP}/release-rules.json"
+          gh api --include --paginate "repos/${GITHUB_REPOSITORY}/commits/${tag_commit}/statuses?per_page=100" > "${RUNNER_TEMP}/release-statuses.json"
           gh api --paginate "repos/${GITHUB_REPOSITORY}/commits/${tag_commit}/check-runs?filter=all&per_page=100" |
             python3 -I -B tools/release/validate_release_gates.py \
               --version "$RELEASE_VERSION" --tag-commit "$tag_commit" \
-              --rules "${RUNNER_TEMP}/release-rules.json"
+              --rules "${RUNNER_TEMP}/release-rules.json" \
+              --statuses "${RUNNER_TEMP}/release-statuses.json"
       - name: Build source archive, SBOM, and checksums
         shell: bash
         run: |

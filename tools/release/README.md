@@ -155,12 +155,22 @@ the tag commit. Each rule's optional `integration_id` pins the context to a GitH
 App; missing or null IDs are unpinned. Offline `required_contexts` callers using
 classic strict branch protection's `checks` retain its `app_id` binding as well.
 Malformed bindings refuse publication. Distinct bindings for the same context
-are all required. Check-run pages must be complete; the highest run ID for each
-name, considering only runs whose `app.id` matches a pinned binding,
-must be `completed` with conclusion `success`. Missing, neutral, skipped, pending or
-failed checks refuse publication, including a failing rerun after an older success
-from the required app. An unpinned context retains latest-by-name selection across
-apps. A successful run from another app cannot replace a failed or missing pinned run.
+are all required. Check-run and commit-status pages must both be complete. For each
+required context, the highest check-run ID, considering only runs whose `app.id`
+matches a pinned binding, must be `completed` with conclusion `success` if present.
+The highest commit-status ID for the same context must have state `success` if
+present, regardless of its creator. Selection is independent of response order;
+older failures superseded by newer successes do not block publication. When both
+APIs report the context, both latest results must succeed. An unpinned context
+can pass with a successful status alone or a successful check run alone; neither
+result being present refuses publication. Neutral, skipped, pending or failed
+results refuse publication, including a failing rerun after an older success.
+An unpinned context retains latest-by-name check-run selection across apps.
+A successful run from another app cannot replace a failed or missing pinned run.
+Commit-status creator IDs identify users rather than GitHub Apps, so statuses
+cannot establish an app binding: pinned contexts require a matching successful
+check run even when a successful status exists. A latest failing same-named
+status from any creator still blocks a pinned context.
 API failures also refuse publication. The source job grants `checks: read` for check
 runs; the rules endpoint uses repository metadata access. Other permissions are unchanged.
 
@@ -168,7 +178,8 @@ To evaluate captured API responses offline (Python standard library and Git):
 
 ```sh
 python3 -I -B tools/release/validate_release_gates.py --version X.Y.Z \
-  --tag-commit <40-hex tagged commit> --rules main-rules.json --checks check-pages.json
+  --tag-commit <40-hex tagged commit> --rules main-rules.json \
+  --checks check-pages.json --statuses status-pages.json
 python3 -I -B tools/release/test_validate_release_gates.py
 ```
 
@@ -181,11 +192,20 @@ nonfinal pages, and unique `(ruleset_id, type)` identities across pages. Missing
 extra, repeated or inconsistent pages refuse publication, including a missing
 final page after exactly 100 rules. A full final page without a next link is valid.
 Bare arrays cannot establish pagination completeness and are refused by the CLI.
+`status-pages.json` is the concatenated HTTP headers and JSON arrays from
+`gh api --include --paginate "repos/OWNER/NAME/commits/COMMIT/statuses?per_page=100"`,
+where `COMMIT` is the full tagged commit SHA. The same HTTP 200 and complete link
+chain checks apply, with at most 100 statuses per page and unique positive status
+IDs across all pages. Status links must stay on the tagged commit's statuses
+endpoint. Bare arrays and incomplete pagination refuse publication. `--statuses`
+is required, including a captured HTTP 200 empty array when there are no statuses;
+omitting statuses cannot establish that no failing status exists. The workflow
+refuses publication on any API command failure, including after partial output.
 `check-pages.json` is the stream of concatenated JSON page objects from `gh api --paginate
 repos/OWNER/NAME/commits/COMMIT/check-runs?filter=all&per_page=100` (quote the endpoint
 in a shell). A single array containing those pages is also accepted. The validator
 accepts check pages on stdin by default and bounds input
-before decoding JSON: 1 MiB for rules and 16 MiB for check pages, with at most 32
+before decoding JSON: 1 MiB for rules and 16 MiB each for check and status pages, with at most 32
 nested containers in any input. An unreadable, malformed, oversized or incomplete
 response fails closed. The checkout must match
 the tagged commit and have an up-to-date `origin/main` reference.
