@@ -9,12 +9,56 @@ Luminumbra is a C++20 voxel engine for a persistent simulated world. It combines
 deterministic fixed-tick simulation, procedural terrain, entity-component systems,
 networking, and a GPU-driven client renderer.
 
-This is an owner-maintained hobby project. Version 0.3.0 is undergoing acceptance;
-the latest published source release is v0.2.1. Interfaces and content formats may
-still change between releases. See the [coordinated roadmap](docs/roadmap.md) for
-release status and the populated engine/game milestones.
+This is an owner-maintained hobby project. Version 0.3.0 is in release preparation;
+v0.2.1 remains the latest published source release. The
+[coordinated roadmap](docs/roadmap.md) separates implemented release scope,
+acceptance deferred to v0.3.1 and publication. Interfaces and content formats may
+change between releases.
 
-The [September 13 recovery status](docs/roadmap.md#current-state) separates merged implementation, remaining verification and unpublished v0.3.0. The recovery candidate is undergoing integration checks; the promotion gate remains blocked on expanded acceptance.
+Every shipping v0.3.0 feature is enabled by default. Debug toggles and non-shipping
+Vulkan, Steam and GNS backends remain opt-in. Ordinary client launches enable
+audio playback; captures explicitly select
+`--no-audio`. Saved user settings remain authoritative. See the
+[audio defaults](docs/audio-release-policy.md).
+
+Ladder is the default requested far-world mode. Missing immutable authority in normal
+presets still causes an explicit refusal and effective Legacy fallback (roughly 3 km
+range and a 3,200 m far plane); the default request does not establish 16 km native
+coverage. Saved-world far production authority remains fixture-only until FW S8
+(v0.3.1), with an explicit unavailable/refusal diagnostic in the renderer.
+
+TCP admission now requires matching effective simulation and resolved preset-content
+identities; runtime/soak peers that do not complete Hello within 10 seconds are
+disconnected and their slots released. Lockstep and replay enforce the same identities.
+World-generation identity binds the resolved preset and exact dependency bytes,
+including biome tables and structure files. See the
+[identity contract](docs/development/system-config-identity.md).
+
+Replication defaults to acknowledged deltas and radius-3 chunk AOI. The dedicated
+server defaults to 9000 ticks between autosaves (five minutes at 30 Hz); explicit
+zero disables autosave.
+
+The persisted clock, active-region ledger, edited-content digest and scheduler-fault
+foundations are implemented. Indexed authority durability/rehydration, durable completed work and ground-object continuation,
+durable regional fields/weather/scent/energy, and regional foliage/water continuation
+with host persistence (issue #242) are planned for v0.3.1. Strict distant policy
+and distant creatures (S8), remaining S9 closure, the committed-generation edited-SDF producer and
+FW S8 consumer, the render qualification tooling stack, acceptance-matrix completeness,
+the developer console, asymmetric day/night and the calendar-relative lunar cycle,
+GNS/Steam admission identity, and the MG2 E4 candidate directory are also planned for
+v0.3.1.
+
+Performance work to ship regional continuation on by default is planned for v0.4.0 as
+[issue #320](https://github.com/d-addison/luminumbra/issues/320).
+
+Complete native render qualification, the ladder horizon gate, authoritative
+ground/high/cave-air poses and fixed-view workloads, cave-walk and edited-world
+traversal producers, and outstanding acceptance capture/pinning are deferred to v0.3.1.
+Current-candidate Windows results are pending native verification; the owner runs the required
+release smoke on Windows.
+See the [acceptance record](docs/v0.3-acceptance.md) for the scoped tag gate and
+historical evidence, and the [release notes](docs/release-notes-v0.3.0.md) for
+compatibility and scope.
 
 ## v0.3.0 world format break
 
@@ -26,8 +70,11 @@ only metadata and no saved chunks. New world metadata declares `container_versio
 New saves use LMR1 container v2,
 the `luminumbra.persistence.world_manifest.v1` manifest with
 `container_version: 2`, and FSD2 far-LOD payload v3. Explicit preset `schema_rev`
-uses `7` for new presets; `6` and omitted revisions retain historical omission defaults. Terrain shaping is always applied,
-and enabled caves always use the noise router. Content, hydrology, and biome
+uses `7` for new presets; `6` and omitted revisions retain historical omission
+defaults. Current-format saves without an embedded preset that name one of the
+eight packaged presets use frozen revision-6 copies in
+`worlds/atlas/presets-rev6/`; new saves embed resolved choices. Terrain shaping is
+always applied, and enabled caves always use the noise router. Content, hydrology, and biome
 controls remain available. Unknown future formats and corrupt data have distinct
 failures. See the [persistence contract](docs/engine-guide.md)
 for the retired selectors and validation details.
@@ -62,9 +109,9 @@ See [Development and testing](docs/development.md) for platform dependencies,
 validation lanes, and source-list ownership.
 
 The optional [compiled static prefab runtime](docs/compiled-prefab-runtime.md)
-loads pinned authoring generations into an ECS hierarchy. Its installed headless
-consumer is qualified separately on Linux and Windows; renderer integration is
-separate work.
+loads pinned authoring generations into an ECS hierarchy. The installed static
+preview and Blender viewport are implemented. Native acceptance and performance
+scopes are documented separately.
 
 Before entering a game world, acquire the separately versioned tree pack with
 `python3 tools/assets/acquire.py` (Windows: `py -3 tools/assets/acquire.py`).
