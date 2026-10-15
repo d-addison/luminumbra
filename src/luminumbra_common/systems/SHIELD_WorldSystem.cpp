@@ -5989,9 +5989,10 @@ bool SHIELD_WorldSystem::restore_authoritative_chunk(const IVec3& coords) {
         chunk->normalize_for_park();
         if (!adopt_streamed_chunk(chunk))
             throw std::runtime_error("duplicate durable chunk adoption");
-        // Water resolution is session configuration. Migrate restored truth on the owner
-        // thread before exposing it to seams/edits; matching resolutions do no work.
-        MigrateWaterSimResolution();
+        // Legacy sessions migrate on re-entry. Regional grids retain saved truth until
+        // preparation is charged to a successful budgeted fixed-tick visit.
+        if (m_water_system && !m_water_system->regional_scheduling())
+            MigrateWaterSimResolution();
         ++m_dirty_generation;
     } catch (const std::exception& error) {
         m_durable_read_failed = true;

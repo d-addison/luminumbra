@@ -138,6 +138,9 @@ public:
         jobs.startup(2);
         session = std::make_unique<GameSession>();
         session->SetActiveRegionsEnabled(active_regions);
+        // This fixture needs regenerable dry neighbours. Rain is water divergence
+        // and correctly establishes durable authority even without a voxel edit.
+        session->SetWeatherRainEnabled(false);
         session->SetJobSystem(&jobs);
         session->SetRootPath(root.root_string());
         created = session->CreateWorld("DurableResidency", "12345", "durable");
@@ -290,6 +293,8 @@ TEST(WorldDurableResidency, WholeSnapshotCommitReleasesParkedPayloadAndReturnRes
     EXPECT_EQ(fx.session->ComputeChunkStateHash(), before);
     EXPECT_FALSE(fx.world->find_streamed_chunk(coords));
     ASSERT_TRUE(fx.world->restore_authoritative_chunk(coords));
+    EXPECT_FALSE(fx.world->durable_read_failed());
+    EXPECT_FALSE(fx.session->GetRegionSchedulerFault());
     const auto restored = fx.world->find_streamed_chunk(coords);
     ASSERT_NE(restored, nullptr);
     EXPECT_NE(restored, edited);

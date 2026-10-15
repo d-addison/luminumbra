@@ -2067,7 +2067,7 @@ void GameSession::RunRegionalFoliageTickImpl(
 }
 
 void GameSession::RunRegionScheduler(std::uint64_t current_tick) {
-    if (m_activeRegionsEnabled && !m_regionFault) {
+    if (m_activeRegionsEnabled && !m_regionFault && m_worldSystem) {
         // Water divergence becomes LoadedOrEdited authority BEFORE any digest or ownership
         // probe.
         m_worldSystem->note_persistence_tick(static_cast<std::int64_t>(current_tick));

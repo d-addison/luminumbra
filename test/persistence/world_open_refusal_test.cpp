@@ -938,7 +938,10 @@ TEST_F(WorldOpenRefusal, FreshRunnerBootAndAbsentLedgerReloadPreserveSchedulerId
     EXPECT_NE(runner.Session()->SystemConfigIdentity(), GameSession{}.SystemConfigIdentity());
     const auto ledger_path =
         WorldSaveService::active_regions_path(runner.Session()->GetWorldSaveDir());
-    ASSERT_TRUE(fs::remove(ledger_path));
+    ASSERT_TRUE(fs::exists(ledger_path));
+    // Publish absence in the index; a raw unlink would be snapshot corruption.
+    ASSERT_TRUE(WorldSaveService::remove_member(runner.Session()->GetWorldSaveDir(),
+                                                "chunks/region/active-regions.arl"));
     ASSERT_TRUE(runner.Session()->LoadWorldState()) << runner.Session()->GetWorldOpenError();
     EXPECT_EQ(runner.Session()->GetActiveRegionLedger().config(), scheduler);
     EXPECT_EQ(runner.Session()->SystemConfigIdentity(), expected.SystemConfigIdentity());
@@ -974,7 +977,7 @@ TEST_F(WorldOpenRefusal, PersistedSchedulerIdentityRefusesDifferentAdmissionAndR
         SCOPED_TRACE(static_cast<unsigned>(scheduler.reduced_shift));
         world::ActiveRegionLedger persisted(scheduler);
         persisted.set_local_anchor(Vec3(8, 18, 8));
-        Write(WorldSaveService::active_regions_path(save), persisted.encode());
+        ASSERT_TRUE(WorldSaveService::save_active_regions(persisted, world::WorldClock{}, save));
         const auto before = DiskBytes(root);
         GameSession loaded, expected;
         loaded.SetRootPath(RootString());
@@ -1038,7 +1041,7 @@ TEST_F(WorldOpenRefusal, LoadedSchedulerSurvivesTransientCreateAndAbsentLedgerRe
     const world::RegionSchedulerConfig scheduler{10, 3, 2};
     world::ActiveRegionLedger persisted(scheduler);
     persisted.set_local_anchor(Vec3(8, 18, 8));
-    Write(WorldSaveService::active_regions_path(save), persisted.encode());
+    ASSERT_TRUE(WorldSaveService::save_active_regions(persisted, world::WorldClock{}, save));
     GameSession session, expected;
     session.SetRootPath(RootString());
     session.SetJobSystem(&jobs);
@@ -1056,7 +1059,8 @@ TEST_F(WorldOpenRefusal, LoadedSchedulerSurvivesTransientCreateAndAbsentLedgerRe
     // Exercise direct state load into an existing transient world, followed by an absent file.
     ASSERT_TRUE(session.LoadWorldStateFrom(save)) << session.GetWorldOpenError();
     expect_scheduler();
-    ASSERT_TRUE(fs::remove(WorldSaveService::active_regions_path(save)));
+    ASSERT_TRUE(fs::exists(WorldSaveService::active_regions_path(save)));
+    ASSERT_TRUE(WorldSaveService::remove_member(save, "chunks/region/active-regions.arl"));
     ASSERT_TRUE(session.LoadWorldStateFrom(save)) << session.GetWorldOpenError();
     expect_scheduler();
     ASSERT_TRUE(session.CreateWorld("Scheduler reset", "1337", "default"));
@@ -1069,7 +1073,7 @@ TEST_F(WorldOpenRefusal, ExplicitSchedulerConflictRefusesLoadAndRunnerBootWithou
     const world::RegionSchedulerConfig scheduler{10, 3, 2};
     world::ActiveRegionLedger persisted(scheduler);
     persisted.set_local_anchor(Vec3(8, 18, 8));
-    Write(WorldSaveService::active_regions_path(save), persisted.encode());
+    ASSERT_TRUE(WorldSaveService::save_active_regions(persisted, world::WorldClock{}, save));
     const auto before = DiskBytes(root);
     // A matching explicit override is accepted and preserves all decoded scheduler state.
     GameSession matching;

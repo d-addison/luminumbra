@@ -530,7 +530,9 @@ TEST(RegionalEnergy, EmitterBatchAtCapSucceedsAndOverCapRefusalRecoversWithoutQu
     EXPECT_GT(consumed.clipped_raw, 0u);
     EXPECT_FALSE(field.OwnsRegion({0, 0}));
 
-    ASSERT_TRUE(field.QueueRegionalDeposit(0, 21, 0, 0, 17));
+    // Keep this queue-retention probe inside its owner: cell 21 borders owner 0
+    // and exchanges on common phases even before an intrinsic diffusion fire.
+    ASSERT_TRUE(field.QueueRegionalDeposit(0, 22, 0, 0, 17));
     const auto extra = RegionalEmitter(registry, {0, 0, 0});
     const auto before = field.SerializeRegionalRecord();
     const auto refused = Emitters::GatherRegionalFieldEmitterDeposits(registry, field);
@@ -541,7 +543,7 @@ TEST(RegionalEnergy, EmitterBatchAtCapSucceedsAndOverCapRefusalRecoversWithoutQu
     EXPECT_TRUE(field.OwnsRegion({1, 0})); // prior queue retained, rejected batch absent
     const std::array due{RegionKey{1, 0}};
     const auto recovered = RegionalStep(field, 2, TwoEnergyOwners(), due, {});
-    EXPECT_EQ(field.at_cell(21, 0), 17u);
+    EXPECT_EQ(field.at_cell(22, 0), 17u);
     EXPECT_EQ(field.total_raw(), 17u);
     registry.destroy(extra);
     const auto retry = Emitters::GatherRegionalFieldEmitterDeposits(registry, field);
