@@ -1,0 +1,132 @@
+{
+  "version": 1,
+  "status": "unresolved",
+  "dependencies": {
+    "entt": {
+      "repository": "https://github.com/skypjack/entt.git",
+      "revision": "v3.15.0",
+      "commit": null,
+      "sha256": null,
+      "submodules": null
+    },
+    "glm": {
+      "repository": "https://github.com/g-truc/glm.git",
+      "revision": "1.0.1",
+      "commit": null,
+      "sha256": null,
+      "submodules": null
+    },
+    "glfw": {
+      "repository": "https://github.com/glfw/glfw.git",
+      "revision": "3.4",
+      "commit": null,
+      "sha256": null,
+      "submodules": null
+    },
+    "glad": {
+      "repository": "https://github.com/Dav1dde/glad.git",
+      "revision": "v0.1.36",
+      "commit": null,
+      "sha256": null,
+      "submodules": null
+    },
+    "nlohmann_json": {
+      "repository": "https://github.com/nlohmann/json.git",
+      "revision": "v3.12.0",
+      "commit": null,
+      "sha256": null,
+      "submodules": null
+    },
+    "joltphysics": {
+      "repository": "https://github.com/jrouwe/JoltPhysics.git",
+      "revision": "v5.3.0",
+      "commit": null,
+      "sha256": null,
+      "submodules": null
+    },
+    "freetype": {
+      "repository": "https://github.com/freetype/freetype.git",
+      "revision": "0a0221a1347e2f1e07c395263540026e9a0aa7c7",
+      "commit": null,
+      "sha256": null,
+      "submodules": null
+    },
+    "rmlui": {
+      "repository": "https://github.com/mikke89/RmlUi.git",
+      "revision": "6.1",
+      "commit": null,
+      "sha256": null,
+      "submodules": null
+    },
+    "soil2": {
+      "repository": "https://github.com/SpartanJ/SOIL2.git",
+      "revision": "1.3.0",
+      "commit": null,
+      "sha256": null,
+      "submodules": null
+    },
+    "miniaudio": {
+      "repository": "https://github.com/mackron/miniaudio.git",
+      "revision": "0.11.22",
+      "commit": null,
+      "sha256": null,
+      "submodules": null
+    },
+    "meshoptimizer": {
+      "repository": "https://github.com/zeux/meshoptimizer.git",
+      "revision": "v0.22",
+      "commit": null,
+      "sha256": null,
+      "submodules": null
+    },
+    "lua_upstream": {
+      "repository": "https://github.com/lua/lua.git",
+      "revision": "v5.4.8",
+      "commit": null,
+      "sha256": null,
+      "submodules": null
+    },
+    "sol2": {
+      "repository": "https://github.com/ThePhD/sol2.git",
+      "revision": "v3.3.0",
+      "commit": null,
+      "sha256": null,
+      "submodules": null
+    },
+    "spdlog": {
+      "repository": "https://github.com/gabime/spdlog.git",
+      "revision": "v1.15.1",
+      "commit": null,
+      "sha256": null,
+      "submodules": null
+    },
+    "imgui_src": {
+      "repository": "https://github.com/ocornut/imgui.git",
+      "revision": "v1.92.1",
+      "commit": null,
+      "sha256": null,
+      "submodules": null
+    },
+    "stb": {
+      "repository": "https://github.com/nothings/stb.git",
+      "revision": "31c1ad37456438565541f4919958214b6e762fb4",
+      "commit": null,
+      "sha256": null,
+      "submodules": null
+    },
+    "googletest": {
+      "repository": "https://github.com/google/googletest.git",
+      "revision": "373af2e3df71599b87a40ce0e37164523849166b",
+      "commit": null,
+      "sha256": null,
+      "submodules": null
+    },
+    "lz4_upstream": {
+      "repository": "https://github.com/lz4/lz4.git",
+      "revision": "ebb370ca83af193212df4dcbadcc5d87bc0de2f0",
+      "commit": null,
+      "sha256": null,
+      "submodules": null
+    }
+  }
+}
