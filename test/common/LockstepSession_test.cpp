@@ -656,6 +656,8 @@ TEST(LockstepSessionTest, BufferedDesyncTakesPrecedenceOverInputAndHashSendFailu
         EXPECT_EQ(session.Status().dump_path, dump.string());
         const auto contents = replay::ReadReplay(dump.string());
         ASSERT_TRUE(contents.has_value());
+        if (!contents.has_value())
+            return;
         EXPECT_FALSE(contents->truncated);
         ASSERT_EQ(contents->checkpoints.size(), 1u);
         EXPECT_EQ(contents->checkpoints.front().tick, 1u);
@@ -711,6 +713,8 @@ TEST(LockstepSessionTest, QueuedDesyncTakesPrecedenceOverLocalDisconnect) {
         EXPECT_EQ(session.Status().dump_path, dump.string());
         const auto contents = replay::ReadReplay(dump.string());
         ASSERT_TRUE(contents.has_value());
+        if (!contents.has_value())
+            return;
         EXPECT_FALSE(contents->truncated);
         ASSERT_EQ(contents->inputs.size(), 1u);
         EXPECT_EQ(contents->inputs.front().tick, 1u);
@@ -763,6 +767,8 @@ TEST(LockstepSessionTest, QueuedDesyncTakesPrecedenceOverPeerByeAndTransportClos
         EXPECT_EQ(session.Status().dump_path, dump.string());
         const auto contents = replay::ReadReplay(dump.string());
         ASSERT_TRUE(contents.has_value());
+        if (!contents.has_value())
+            return;
         EXPECT_FALSE(contents->truncated);
         ASSERT_EQ(contents->checkpoints.size(), 2u);
         EXPECT_EQ(contents->checkpoints.back().tick, 2u);
@@ -817,6 +823,8 @@ TEST(LockstepSessionTest, DesyncArrivingDuringSendFailureTakesPrecedence) {
             EXPECT_EQ(session.Status().dump_path, dump.string());
             const auto contents = replay::ReadReplay(dump.string());
             ASSERT_TRUE(contents.has_value());
+            if (!contents.has_value())
+                return;
             EXPECT_FALSE(contents->truncated);
             ASSERT_EQ(contents->checkpoints.size(), mismatch_tick);
             EXPECT_EQ(contents->checkpoints.back().tick, mismatch_tick);
