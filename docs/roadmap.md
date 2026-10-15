@@ -46,7 +46,10 @@ There are no assigned due dates or invented completion percentages.
   target. The accepted [distance contract](distant-world.md) governs every slice;
   its completed design interview is not a new implementation prerequisite.
 - **Remaining runtime implementation:** the tier table alone does not render 16 km;
-  the runtime still uses legacy far ranges and a 3,200 m far plane. Telemetry and
+  Ladder is now the default request, with an explicit Legacy config opt-out.
+  Normal presets still lack injected immutable authority and fall back with a
+  visible refusal to legacy far ranges and a 3,200 m far plane. See
+  [Far world horizon v2](far-world-horizon-v2.md). Telemetry and
   a region ledger alone do not schedule distant simulation consumers.
   The pristine brick generator/mesher [#176](https://github.com/d-addison/luminumbra/pull/176)
   has separate Debug/Release and boundary/cave controls; its CI correction and
@@ -107,8 +110,9 @@ imply host migration, matchmaking or private Steam relay availability.
 
 ## Limits and acceptance still tracked
 
-- Current far rendering reaches approximately 3 km with a 3200 m camera far
-  plane; world generation itself has no fixed edge. Local full-SDF cave residency
+- Ladder is the default requested far renderer; binding refusals still select
+  Legacy with approximately 3 km range and a 3200 m camera far plane on normal
+  presets. World generation itself has no fixed edge. Local full-SDF cave residency
   is bounded (128 m horizontal/64 m vertical). Pristine far tiles are
   heightfields; bounded authoritative SDF overlays can carry resident edits, but
   the far store is not attached to saves at runtime. The five-tier table and

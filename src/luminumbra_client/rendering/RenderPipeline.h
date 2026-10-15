@@ -628,7 +628,7 @@ public:
     // function of the tick (same tick -> same sun, independent of frame pacing).
     // Precedence unchanged: the photo-mode hold wins here, and scenario/scene pins
     // (set_time_of_day) run AFTER this in the frame, overwriting it. Paths that
-    // never call this keep the legacy wall-clock advance byte-identically.
+    // never call this keep the legacy wall-clock advance at the shared day length.
     void set_time_of_day_tick(std::uint64_t sim_tick);
     void set_world_clock(const world::WorldClock& clock);
     void set_day_length_ticks(std::uint64_t ticks) {
@@ -1148,14 +1148,14 @@ private:
     std::vector<glm::mat4> get_light_space_matrices(const Camera& camera);
 
     void update_time_of_day(float deltaTime);
-    float m_timeOfDay = 0.5f;     // Start at sunrise
-    bool m_timeOfDayHold = false; // freeze auto-advance for photo-mode TOD scrub
-    float m_dayDurationSeconds = 60.0f;
+    float m_timeOfDay = 0.5f;             // Start at sunrise
+    bool m_timeOfDayHold = false;         // freeze auto-advance for photo-mode TOD scrub
+    float m_dayDurationSeconds = 7200.0f; // 2 h/day, matching the world calendar
     // tick-authority state. m_todTickDriven marks "the sim tick fed TOD this
     // frame" so update_time_of_day skips the wall-clock advance; cleared every frame.
     std::optional<world::WorldClock> m_worldClock;
     bool m_dayLengthOverride = false;
-    std::uint64_t m_dayLengthTicks = 1800; // == TimeOfDayModel kDefaultDayLengthTicks
+    std::uint64_t m_dayLengthTicks = 216000; // == TimeOfDayModel kDefaultDayLengthTicks
     bool m_todTickDriven = false;
 
     u32 m_screen_width = 0;

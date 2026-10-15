@@ -2133,6 +2133,7 @@ int main(int argc, char* argv[]) {
         renderPipeline.set_far_world_cave_policy(Luminumbra::Rendering::ResolveFarWorldCaveField(
             g_systemConfig.param(luminumbra::core::SysParam::FarWorldCaveField,
                                  Luminumbra::Rendering::kDefaultFarWorldCaveFieldCode)));
+    // systems.json defaults to Ladder; enabled:false explicitly requests Legacy.
     renderPipeline.set_far_world_mode(Luminumbra::Rendering::RequestedFarWorldMode(
         g_systemConfig.enabled(luminumbra::core::SysKey::RenderFarWorldLadder)));
     if (g_systemConfig.enabled(luminumbra::core::SysKey::RenderFarWorldLadder)) {
