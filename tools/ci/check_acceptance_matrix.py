@@ -54,16 +54,16 @@ REVIEWED_EXCLUSION_OVERRIDES = {
 # hide obligations. New exclusions require a reviewed change to this table.
 # Restored requirements: dw.policy.036 / .039 (C4 behavior and omission rules),
 # ar.history.020 (historical evidence must retain its provenance).
+# dw.intro.006 now maps the regional continuation qualification plan; the
+# superseded navigation sentence is covered by the updated dw.intro.005 quote.
 AUDITED_EXCLUSIONS = frozenset({
     # Document acceptance date, implementation status and gap-map cross-references.
     ('dw.intro.001', 'docs/distant-world.md#distant-world-and-distant-simulation-contract',
-     'rationale', 'aced6a8cb6d1a2df2dd8d150656d162f89a52036ddec61f5c6ac4b04b5c10e4f'),
+     'rationale', 'cdac254e0317b823be1051c381f63ce22d94e4ff38600125f5c53ad642d17ef4'),
     ('dw.intro.002', 'docs/distant-world.md#distant-world-and-distant-simulation-contract',
-     'rationale', '326fb30540746afc7da9185c98542c5dae3b9ebad1bb6bd156e4af7bd5bfbb33'),
+     'rationale', 'c6b7e41f9462666c5fce6bcf6b75753114eebd77a676abee2962fec9b0d7b5c4'),
     ('dw.intro.005', 'docs/distant-world.md#distant-world-and-distant-simulation-contract',
-     'cross-reference', 'f212d6f82b3b95b71bb77b4d5620e0168c192382f67d324f51c9be74e6bd071c'),
-    ('dw.intro.006', 'docs/distant-world.md#distant-world-and-distant-simulation-contract',
-     'cross-reference', '7dfcae21dfacd49b293d37bfe70aab0579c79e5389bda159ab356cc5fc7e1690'),
+     'cross-reference', 'eb1fa3406481aee5ad81b3e7d00164329382daf82a692d1b91317d8c7fad295e'),
     # Explicit Current behaviour: shipped residency, rendering and scheduler gaps.
     ('dw.sets.001', 'docs/distant-world.md#three-explicit-sets',
      'current-behaviour', '409611d1c1c0ea16809345f9d2bec1917737bf7443cf7dbfc871294f20ca0c93'),
@@ -74,7 +74,7 @@ AUDITED_EXCLUSIONS = frozenset({
     ('dw.sets.004', 'docs/distant-world.md#three-explicit-sets',
      'current-behaviour', '16bc03a4c85578ef6dab2ea721331aca17f7ddd37a8ffb600819296d5e924f24'),
     ('dw.sets.005', 'docs/distant-world.md#three-explicit-sets',
-     'current-behaviour', 'fa717a05dab1ea9368baa135cde66b84c9852007953a11d2cc6f026d5baace9c'),
+     'current-behaviour', '287cb67cd68a5aa1936826fdebf4a68f7952db0bfe3912dcb7bf76a14655b430'),
     ('dw.sets.006', 'docs/distant-world.md#three-explicit-sets',
      'current-behaviour', 'fe8ebc5f9cd959b956f8d57526e55e40616c7c5c97c3db65d762a8e7e437b5cd'),
     # Explicit Current behaviour: existing heightfield/overlay limitations.
@@ -138,7 +138,7 @@ AUDITED_EXCLUSIONS = frozenset({
     ('ar.history.017', 'docs/active-regions.md#historical-ambient-hash-portability-investigation',
      'historical', 'a3ccd5678e29ef7b79f76d23e2b8782c5c4e72a4cd3dd1a67399ae6d14ababf6'),
     ('ar.history.022', 'docs/active-regions.md#historical-ambient-hash-portability-investigation',
-     'historical', '5f897ccbd1c1014bd7f256ff96b48b7fbf34aa30f1af8b439b81c5a5eea9b5a4'),
+     'historical', 'e4e0652649044745c8a17feb97c354a3244ce70d000eda24f6cd50b956a8fc22'),
     ('ar.history.023', 'docs/active-regions.md#historical-ambient-hash-portability-investigation',
      'historical', 'd34788a580011f4ebd9e3b1aa9b2e17ef728c113b55da1d3190d30cb6269b6f4'),
 })
@@ -1065,7 +1065,7 @@ def render_doc(matrix: dict[str, Any]) -> str:
             statement += f" Discrepancy: {row['discrepancy']}"
         lines.append(
             f"| {_escape_cell(row['id'])} | {_escape_cell(row['status'])} "
-            f"| {_escape_cell(row['source'])} | {_escape_cell(', '.join(row.get('requirements', [])))} "
+            f"| `{_escape_cell(row['source'])}` | {_escape_cell(', '.join(row.get('requirements', [])))} "
             f"| {_escape_cell(statement)} | {evidence} |"
         )
     return "\n".join(lines) + "\n"

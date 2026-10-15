@@ -445,8 +445,10 @@ class AcceptanceMatrixTests(unittest.TestCase):
     def test_existing_exclusions_have_audited_categories_and_only_one_override(self) -> None:
         inventory = MODULE.load_matrix(MODULE.DEFAULT_ROOT / "tools/ci/acceptance_requirements.json")
         exclusions = inventory["exclusions"]
-        self.assertEqual(len(exclusions), 40)
-        self.assertEqual(len(MODULE.AUDITED_EXCLUSIONS), 40)
+        self.assertEqual(len(exclusions), 39)
+        self.assertEqual(len(MODULE.AUDITED_EXCLUSIONS), 39)
+        self.assertEqual({e["id"] for e in exclusions},
+                         {binding[0] for binding in MODULE.AUDITED_EXCLUSIONS})
         self.assertTrue(all(e["category"] in MODULE.EXCLUSION_CATEGORIES for e in exclusions))
         marked = {e["id"] for e in exclusions if MODULE.NORMATIVE_MARKER_RE.search(e["text"])}
         self.assertEqual(marked, {"dw.tiers.021"})
@@ -1251,6 +1253,7 @@ class AcceptanceMatrixTests(unittest.TestCase):
         self.assertFalse(first.endswith("\n\n"))
         self.assertIn("| Row | Status | Source | Requirements | Statement | Evidence |", first)
         self.assertIn(SOURCE, first)
+        self.assertIn(f"| `{SOURCE}` |", first)
         self.assertIn("dw.synthetic, ar.synthetic", first)
         self.assertIn("| covered | 1 |", first)
         self.assertIn("| partial | 1 |", first)
