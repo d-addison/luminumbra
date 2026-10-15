@@ -196,15 +196,36 @@ Deleted sources/headers and build/flag/dependency or unknown native inputs
 select the full configured scope. Scans which fail, omit the TU, name missing
 dependencies, or cannot be parsed fail the check. Missing changed-TU database
 entries fail even for optional backends. Unsupported wrappers, response files,
-plugins, modules, PCH and flags creating extra outputs fail visibly. Compiler
-options use an allowlist; unknown options are refused before execution. Supported
+plugins, modules and flags creating extra outputs fail visibly. Compiler
+options use an allowlist; unknown options are refused before execution. Exact
+codegen flags include PIC, exception/RTTI controls, fast-math controls,
+`-fno-stack-protector`, `-fno-fat-lto-objects`, `-fpch-instantiate-templates`,
+`-flto`/`-fno-lto`, `-flto=auto`/`-flto=thin` and `-ffp-model=precise`.
+The x86 ISA allowlist accepts enable/disable forms for avx, avx2, avx512dq,
+avx512f, bmi, f16c, fma, lzcnt, popcnt, sse, sse2, sse3, ssse3, sse4.1 and
+sse4.2; arbitrary `-m*` and `-f*` options remain refused. Bare `-W` is preserved.
+Output options such as `-o`, `-MF` and `-MT` are consumed and removed;
+include paths such as `-isystem` are consumed and preserved. Supported
 compiler commands are GCC/Clang drivers, optionally wrapped by ccache/sccache;
 commands are argument vectors, never evaluated by a shell. Option values are
 consumed according to an explicit arity table and cannot count as source
 operands. Every entry must have exactly one positional source matching its
 normalized database `file`; mismatches, multiple
-sources and missing sources fail before any compiler runs. PCH, pass-through,
-unknown separate-value options and MSVC/clang-cl driver syntax are refused.
+sources and missing sources fail before any compiler runs. CMake's paired
+`-Xclang -include -Xclang HEADER` is normalized to a textual `-include` only
+when the header exists and resolves inside the build tree. Binary
+`-include-pch FILE` (including its paired `-Xclang` form) is dropped only when
+FILE resolves inside the build tree and is the matching HEADER plus `.pch`.
+This lets dependency scanning, compilation and tidy use the textual header
+without requiring a prebuilt binary PCH; compile correctness must not depend
+on that cache. GCC's `-include cmake_pch.h`/`cmake_pch.hxx` likewise requires
+an existing header resolving inside the build tree. Other ordinary GCC/Clang
+textual `-include` arguments are preserved and can supply the matching header.
+PCH generation (`-x c++-header`, `-Xclang -emit-pch`) remains refused for
+first-party sources; dependency-only generation entries are outside selection.
+Other pass-through, unknown separate-value options and MSVC/clang-cl driver
+syntax are refused, including plugins, specs, tool wrappers, profile-data paths
+and response files.
 There is no cached dependency graph. Each invocation reports selected files,
 variant/scan counts, scope, selection time and check time. No-native selections
 report success.

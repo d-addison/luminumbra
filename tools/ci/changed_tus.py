@@ -35,8 +35,8 @@ HEADER_SUFFIXES = {".h", ".hh", ".hpp", ".hxx", ".inl", ".ipp", ".inc"}
 INPUT_VALUE_OPTIONS = {"-I", "-isystem", "-iquote", "-idirafter", "-include", "-imacros",
                        "-isysroot", "--sysroot", "-D", "-U", "-x", "-target", "--target"}
 # Arity and replay policy are shared by cleaning and source identification.
-# Recognize unsafe pass-through/PCH and MSVC-style value options explicitly,
-# but keep refusing them: replay uses GCC/Clang driver syntax exclusively.
+# Recognize unsafe pass-through/PCH and MSVC-style value options explicitly.
+# Bounded PCH normalization happens before parsing; other forms stay refused.
 VALUE_OPTIONS = {
     **{option: "keep" for option in INPUT_VALUE_OPTIONS},
     **{option: "drop" for option in ("-o", "-MF", "-MT", "-MQ", "-MJ")},
@@ -127,7 +127,7 @@ def read_database(root: Path, build_dir: Path) -> list[dict]:
             if "arguments" in raw and (not isinstance(raw["arguments"], list)
                     or not all(isinstance(a, str) for a in raw["arguments"])):
                 raise SelectionError("malformed compiler arguments")
-            args = _DEPS.entry_arguments(raw)
+            args = normalise_pch_arguments(_DEPS.entry_arguments(raw), directory, build_dir)
             # Validate before spawning anything, including unselected variants.
             _, operands = parse_arguments(args)
             if len(operands) != 1 or (directory / operands[0]).resolve() != source:
@@ -136,6 +136,63 @@ def read_database(root: Path, build_dir: Path) -> list[dict]:
             raise SelectionError(str(error)) from error
         entries.append({"file": source, "directory": directory, "arguments": args})
     return entries
+
+
+def normalise_pch_arguments(arguments: list[str], directory: Path, build_dir: Path) -> list[str]:
+    """Replay CMake's textual includes without requiring prebuilt Clang PCHs.
+
+    Only the paired cc1 include forms are recognized, never arbitrary -Xclang.
+    A binary PCH may be omitted only with its matching textual include present.
+    Dependency PCH generation entries are outside the first-party source scope.
+    """
+    result, headers, binaries = [], set(), []
+    index = 0
+    while index < len(arguments):
+        arg = arguments[index]
+        if arg == "-Xclang":
+            if (index + 3 >= len(arguments)
+                    or arguments[index + 1] not in {"-include", "-include-pch"}
+                    or arguments[index + 2] != "-Xclang"):
+                raise SelectionError("unsupported compiler option: -Xclang")
+            option, value = arguments[index + 1], arguments[index + 3]
+            index += 4
+        elif arg in {"-include", "-include-pch"}:
+            if index + 1 >= len(arguments):
+                raise SelectionError(f"missing value after {arg}")
+            option, value = arg, arguments[index + 1]
+            index += 2
+            if arg == "-include" and Path(value).name not in {"cmake_pch.h", "cmake_pch.hxx"}:
+                # Ordinary forced includes retain the existing input policy.
+                # They can also provide the textual counterpart of a PCH.
+                path = (directory / value).resolve()
+                if path.is_relative_to(build_dir.resolve()) and path.is_file():
+                    headers.add(path)
+                result.extend([arg, value])
+                continue
+        else:
+            result.append(arg)
+            index += 1
+            # Do not reinterpret option values as pass-through options.
+            if arg in VALUE_OPTIONS and index < len(arguments):
+                result.append(arguments[index])
+                index += 1
+            continue
+        if not value or value.startswith(("-", "@")):
+            raise SelectionError(f"missing value after {option}")
+        path = (directory / value).resolve()
+        if not path.is_relative_to(build_dir.resolve()):
+            raise SelectionError("PCH reference escapes build tree")
+        if option == "-include":
+            if not path.is_file():
+                raise SelectionError("missing textual PCH header")
+            headers.add(path)
+            result.extend(["-include", str(path)])
+        else:
+            binaries.append(path)
+    for path in binaries:
+        if path.suffix != ".pch" or path.with_suffix("") not in headers:
+            raise SelectionError("binary PCH requires matching textual include")
+    return result
 
 
 def clean_arguments(arguments: list[str]) -> list[str]:
@@ -159,19 +216,23 @@ def parse_arguments(arguments: list[str]) -> tuple[list[str], list[str]]:
     rewritten_values = {option for option, policy in VALUE_OPTIONS.items() if policy == "drop"}
     rewritten_alone = {"-c", "-MD", "-MMD", "-MP"}
     safe_exact = {
-        "-pipe", "-pthread", "-ansi", "-pedantic", "-pedantic-errors", "-w",
+        "-pipe", "-pthread", "-ansi", "-pedantic", "-pedantic-errors", "-w", "-W",
         "-fPIC", "-fpic", "-fPIE", "-fpie", "-fno-omit-frame-pointer",
         "-fomit-frame-pointer", "-fno-exceptions", "-fexceptions", "-fno-rtti", "-frtti",
         "-fno-strict-aliasing", "-fstrict-aliasing", "-fno-math-errno", "-ffast-math",
         "-fno-fast-math", "-fno-common", "-fcommon", "-fwrapv", "-fno-wrapv",
-        "-fvisibility-inlines-hidden", "-m32", "-m64", "-mavx", "-mavx2", "-mfma",
-        "-msse", "-msse2", "-msse3", "-mssse3", "-msse4.1", "-msse4.2",
-        "-mno-avx", "-mno-avx2", "-mno-fma", "-Wa,-mbig-obj",
+        "-fvisibility-inlines-hidden", "-fno-stack-protector", "-fno-fat-lto-objects",
+        "-flto", "-fno-lto", "-fpch-instantiate-templates", "-m32", "-m64", "-Wa,-mbig-obj",
     }
+    # Explicit x86 features, including their disable forms; no driver/path options.
+    x86_features = {"avx", "avx2", "avx512dq", "avx512f", "bmi", "f16c", "fma",
+                    "lzcnt", "popcnt", "sse", "sse2", "sse3", "ssse3", "sse4.1", "sse4.2"}
+    safe_exact.update(f"-m{prefix}{feature}" for prefix in ("", "no-") for feature in x86_features)
     safe_pattern = re.compile(
         r"(?:-O(?:[0-3gsz]|fast)?|-g(?:[0-3]|gdb[0-3]?|dwarf-[2-5])?"
         r"|-std=(?:gnu|c)(?:\+\+)?[a-z0-9]+|-W[a-zA-Z][a-zA-Z0-9-]*(?:=[a-zA-Z0-9,+-]+)?"
         r"|-ffp-contract=(?:off|on|fast)|-fvisibility=(?:default|hidden|protected)"
+        r"|-ffp-model=(?:precise)|-flto=(?:auto|thin)"
         r"|-fsanitize=(?:address|undefined|thread)(?:,(?:address|undefined|thread))*"
         r"|-mfpmath=(?:sse|387)|-m(?:arch|tune)=[a-zA-Z0-9_+-]+)"
     )

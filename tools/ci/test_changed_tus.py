@@ -423,6 +423,146 @@ class ChangedTranslationUnitsTests(unittest.TestCase):
                 self.entries()
         self.assertEqual(self.commands, [])
 
+    def test_configured_codegen_options_preserve_exact_source_operand(self):
+        flags = shlex.split(
+            "-fPIC -fexceptions -ffast-math -ffp-contract=off -ffp-model=precise "
+            "-flto=auto -flto=thin -fno-fast-math -fno-fat-lto-objects -fno-lto "
+            "-fno-rtti -fno-stack-protector -fpch-instantiate-templates -fvisibility=hidden "
+            "-mavx2 -mavx512dq -mavx512f -mbmi -mf16c -mfma -mfpmath=sse "
+            "-mlzcnt -mpopcnt -msse3 -msse4.1 -msse4.2 -mssse3 -W")
+        for compiler in ("g++", "clang++"):
+            with self.subTest(compiler=compiler):
+                self.raw = [self.raw_entry(self.a, [*flags, "-isystem", str(self.src),
+                                                    "-MT", str(self.b)])]
+                self.raw[0]["arguments"][0] = compiler
+                self.save_db()
+                entry = self.entries()[0]
+                cleaned, operands = tus.parse_arguments(entry["arguments"])
+                self.assertEqual(operands, [str(self.a)])
+                self.assertEqual([flag for flag in cleaned if flag in flags],
+                                 ["-ffp-contract=off", *flags])
+                self.assertNotIn(str(self.b), cleaned)
+                # A source-looking option value cannot repair a wrong operand.
+                args = self.raw[0]["arguments"]
+                args[args.index("-c") + 1] = str(self.b)
+                args.extend(["-include", str(self.a)])
+                self.save_db()
+                with self.assertRaisesRegex(tus.SelectionError, "exactly one database source"):
+                    self.entries()
+        self.assertEqual(self.commands, [])
+
+    def test_codegen_dangerous_neighbours_still_refused_without_writes(self):
+        for flags in (["-fplugin=x.so"], ["-specs=x"], ["-B/x"], ["-B", "/x"],
+                      ["-wrapper", "x"], ["@rsp"], ["-load", "x.so"],
+                      ["-fprofile-use=data"], ["-flto=plugin.so"], ["-mfoo"],
+                      ["-mno-foo"], ["-Xclang", "-load", "-Xclang", "x.so"]):
+            with self.subTest(flags=flags):
+                self.raw = [self.raw_entry(self.a, flags)]
+                self.save_db()
+                before = {p: p.read_bytes() for p in self.root.rglob("*") if p.is_file()}
+                with self.assertRaisesRegex(tus.SelectionError, "unsupported"):
+                    self.entries()
+                self.assertEqual(before, {p: p.read_bytes() for p in self.root.rglob("*") if p.is_file()})
+        self.assertEqual(self.commands, [])
+
+    def test_explicit_x86_disable_forms_are_preserved(self):
+        flags = ["-mno-bmi", "-mno-avx512f", "-mno-f16c", "-mno-popcnt"]
+        self.assertEqual(tus.clean_arguments(["g++", *flags, str(self.a)]),
+                         ["g++", *flags, str(self.a)])
+
+    def test_clang_pch_replays_textual_header_without_binary_cache(self):
+        header = self.build / "cmake_pch.hxx"
+        header.write_text('#include "ordinary.hpp"\n')
+        binary = Path(str(header) + ".pch")
+        # The recipe need not build dependency PCH binaries for local checks.
+        self.assertFalse(binary.exists())
+        for binary_args in (["-Xclang", "-include-pch", "-Xclang", str(binary)],
+                            ["-include-pch", str(binary)]):
+            for text_args in (["-Xclang", "-include", "-Xclang", str(header)],
+                              ["-include", str(header)]):
+                with self.subTest(binary_args=binary_args, text_args=text_args):
+                    self.assert_pch_replays_text(binary_args, text_args, header, binary)
+
+    def assert_pch_replays_text(self, binary_args, text_args, header, binary):
+        self.commands.clear()
+        self.raw = [self.raw_entry(self.a, [*binary_args, *text_args])]
+        self.raw[0]["arguments"][0] = "clang++"
+        self.save_db()
+        selected, _ = self.select([self.header])
+        self.assertEqual([entry["file"] for entry in selected], [self.a])
+        tus.run_checks(self.arguments(), self.root, selected, self.build)
+        databases = []
+
+        def inspect_tidy(command, directory, check=True):
+            database = Path(command[command.index("-p") + 1]) / "compile_commands.json"
+            databases.append(json.loads(database.read_text())[0]["arguments"])
+            return self.fake_execute(command, directory, check)
+
+        with patch.object(tus.shutil, "which", return_value="clang-tidy"), \
+                patch.object(tus, "execute", side_effect=inspect_tidy):
+            tus.run_checks(self.arguments("tidy", also_ci_gate=True), self.root, selected, self.build)
+        self.assertEqual(len(databases), 2)
+        for command in [c for c, _ in self.commands[:3]] + databases:
+            self.assertNotIn("-Xclang", command)
+            self.assertNotIn(str(binary), command)
+            self.assertIn(str(header), command)
+        _, operands = tus.parse_arguments(selected[0]["arguments"])
+        self.assertEqual(operands, [str(self.a)])
+
+    def test_gcc_cmake_pch_text_header_is_bounded_and_preserved(self):
+        header = self.build / "cmake_pch.hxx"
+        header.write_text("// textual header\n")
+        self.raw = [self.raw_entry(self.a, ["-include", str(header)])]
+        self.save_db()
+        command = tus.compile_command(self.entries()[0], self.build / "isolated.o")
+        self.assertIn(str(header), command)
+        outside = self.src / "cmake_pch.hxx"
+        outside.write_text("// not in the build tree\n")
+        self.raw = [self.raw_entry(self.a, ["-include", str(outside)])]
+        self.save_db()
+        with self.assertRaisesRegex(tus.SelectionError, "PCH reference escapes"):
+            self.entries()
+        self.assertEqual(self.commands, [])
+
+    def test_pch_values_do_not_count_as_source_operands(self):
+        for source in (None, self.b):
+            with self.subTest(source=source):
+                self.raw = [self.raw_entry(self.a)]
+                self.raw[0]["arguments"] = ["clang++", "-Xclang", "-include", "-Xclang",
+                                           str(self.a)] + ([str(source)] if source else [])
+                # Locate this database alongside the source so the forced
+                # include passes containment and reaches operand verification.
+                (self.src / "compile_commands.json").write_text(json.dumps(self.raw))
+                with self.assertRaisesRegex(tus.SelectionError, "exactly one database source"):
+                    tus.read_database(self.root, self.src)
+        self.assertEqual(self.commands, [])
+
+    def test_pch_refusals_are_bounded_and_leave_state_unchanged(self):
+        header = self.build / "cmake_pch.hxx"
+        header.write_text("// textual header\n")
+        cases = [
+            ["-Xclang"], ["-Xclang", "-include"], ["-Xclang", "-include", "-Xclang"],
+            ["-Xclang", "-include", "-Xclang", ""],
+            ["-Xclang", "-include", "-Xclang", "@rsp"],
+            ["-Xclang", "-include", "-Xclang", "0"],
+            ["-Xclang", "-include", "-Xclang", str(self.other)],
+            ["-Xclang", "-include", "-Xclang", str(self.build / "missing.hxx")],
+            ["-include-pch"], ["-include-pch", str(header) + ".pch"],
+            ["-include-pch", str(self.other) + ".pch"],
+            ["-include-pch", str(header) + ".gch", "-Xclang", "-include", "-Xclang", str(header)],
+            ["-include-pch", str(self.build / "different.pch"),
+             "-Xclang", "-include", "-Xclang", str(header)],
+        ]
+        for flags in cases:
+            with self.subTest(flags=flags):
+                self.raw = [self.raw_entry(self.a, flags)]
+                self.save_db()
+                before = {p: p.read_bytes() for p in self.root.rglob("*") if p.is_file()}
+                with self.assertRaises(tus.SelectionError):
+                    self.entries()
+                self.assertEqual(before, {p: p.read_bytes() for p in self.root.rglob("*") if p.is_file()})
+        self.assertEqual(self.commands, [])
+
     def test_output_options_are_removed_or_rejected_before_any_execution(self):
         outside = str(self.root / "outside")
         rejected = [
@@ -1107,6 +1247,20 @@ class ChangedTranslationUnitsTests(unittest.TestCase):
         (escaped / "scratch").symlink_to(self.build, target_is_directory=True)
         with self.assertRaisesRegex(tus.SelectionError, "scratch escapes"):
             tus.run_checks(self.arguments(), escaped, [], self.build)
+        # PCH containment must likewise inspect resolved paths, including an
+        # intermediate symlink that stays in the checkout but leaves the build.
+        alias = self.build / "pch alias"
+        alias.symlink_to(self.src, target_is_directory=True)
+        for flags in (["-Xclang", "-include", "-Xclang", str(alias / self.other.name)],
+                      ["-include-pch", str(alias / "header.pch")]):
+            with self.subTest(flags=flags):
+                self.raw = [self.raw_entry(self.a, flags)]
+                self.save_db()
+                before = {p: p.read_bytes() for p in self.root.rglob("*") if p.is_file()}
+                with self.assertRaisesRegex(tus.SelectionError, "PCH reference escapes"):
+                    self.entries()
+                self.assertEqual(before, {p: p.read_bytes() for p in self.root.rglob("*") if p.is_file()})
+        self.assertEqual(self.commands, [])
 
     def test_main_failure_exit_and_command_fingerprint(self):
         with patch.object(tus, "changed_paths", return_value={self.a}), patch.object(tus, "run_checks"):
