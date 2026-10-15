@@ -11,9 +11,10 @@ from pathlib import Path
 import sys
 
 import qualification_matrix as matrix_lib
+import render_runner_process as runner
 
-ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_MATRIX = Path(__file__).resolve().parent / 'qualification' / 'matrix.json'
+ROOT = runner.resolve_path(__file__).parents[2]
+DEFAULT_MATRIX = runner.resolve_path(__file__).parent / 'qualification' / 'matrix.json'
 PLAN_SCHEMA = 'luminumbra.qualification_plan.v1'
 PLAN_NAME = 'qualification-plan.json'
 
