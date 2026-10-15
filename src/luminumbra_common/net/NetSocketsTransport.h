@@ -36,8 +36,12 @@ public:
     bool Listen(std::uint16_t port);
     bool Connect(const std::string& host, std::uint16_t port);
 
+    // Refusals: oversized for this backend (terminal, no bytes written), permanent
+    // backend failure (terminal, closes after draining), or temporary capacity
+    // (transient, no bytes accepted; retry the same bytes after draining receives).
     bool SendFrame(const std::vector<std::uint8_t>& frame,
                    FrameDelivery delivery = FrameDelivery::Reliable) override;
+    [[nodiscard]] std::size_t MaxFramePayloadBytes() const override;
     bool TryReceiveFrame(std::vector<std::uint8_t>& out) override;
     [[nodiscard]] bool IsPeerConnected() const override;
     void Close() override;

@@ -124,16 +124,30 @@ void NetSocketsTransport::HandleConnStatusChanged(SteamNetConnectionStatusChange
     }
 }
 
+std::size_t NetSocketsTransport::MaxFramePayloadBytes() const {
+    // One backend message per frame, with no additional transport framing.
+    return std::min(kMaxFramePayloadBytes,
+                    static_cast<std::size_t>(k_cbMaxSteamNetworkingSocketsMessageSizeSend));
+}
+
 bool NetSocketsTransport::SendFrame(const std::vector<std::uint8_t>& frame,
                                     FrameDelivery delivery) {
-    if (frame.size() > kMaxFramePayloadBytes || m_closed || m_peer_closed || !m_backend.ready ||
+    if (frame.size() > MaxFramePayloadBytes() || m_closed || m_peer_closed || !m_backend.ready ||
         m_conn == k_HSteamNetConnection_Invalid)
         return false;
     const int flags = (delivery == FrameDelivery::Reliable) ? k_nSteamNetworkingSend_Reliable
                                                             : k_nSteamNetworkingSend_Unreliable;
     const EResult result = SteamNetworkingSockets()->SendMessageToConnection(
         m_conn, frame.data(), static_cast<std::uint32_t>(frame.size()), flags, nullptr);
-    return result == k_EResultOK;
+    if (result == k_EResultOK)
+        return true;
+    // LimitExceeded is send-buffer pressure; Ignored is the documented temporary
+    // refusal for UnreliableNoDelay. All other errors make this handle unsendable.
+    if (result != k_EResultLimitExceeded && result != k_EResultIgnored) {
+        m_peer_closed = true;
+        m_connected = false;
+    }
+    return false;
 }
 
 void NetSocketsTransport::DrainInto() {

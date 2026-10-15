@@ -171,19 +171,23 @@ class ILockstepTransport {
 public:
     virtual ~ILockstepTransport() = default;
 
-    // Sends one complete message frame. Terminal refusals mean the frame exceeds
-    // kMaxFramePayloadBytes (rejected before any bytes are written), or the transport
-    // is closed/disconnected. Transient refusals leave the peer connected and accept
-    // no frame bytes: NetSockets/GNS/Steam may refuse when their send buffer is full.
-    // After false, callers check the frame size and IsPeerConnected(): an in-limit
-    // frame with a connected peer can be retried unchanged. In-process transports
-    // never refuse for capacity. Drain received frames before observing buffered
-    // peer closure.
+    // Sends one complete message frame. Refusal classes:
+    // - Oversized for this transport: terminal, rejected before writing any bytes.
+    // - Permanent backend failure or disconnection: terminal; closes after draining.
+    // - Temporary capacity: transient, accepts no bytes; retry the same bytes.
+    // After false, check min(kMaxFramePayloadBytes, MaxFramePayloadBytes()), drain
+    // received frames, then check IsPeerConnected(): an in-limit frame with a still
+    // connected peer can be retried unchanged. In-process transports never refuse
+    // for capacity. Buffered received frames precede closure reporting.
     // NOTE: named SendFrame (not SendMessage) deliberately -- <windows.h> #defines
     // SendMessage to SendMessageA/W, which would rename this virtual under the macro.
     // `delivery` defaults to Reliable so existing callers (lockstep) are unchanged.
     virtual bool SendFrame(const std::vector<std::uint8_t>& frame,
                            FrameDelivery delivery = FrameDelivery::Reliable) = 0;
+
+    [[nodiscard]] virtual std::size_t MaxFramePayloadBytes() const {
+        return kMaxFramePayloadBytes;
+    }
 
     // Non-blocking: pops ONE complete framed message into `out` and returns true, or
     // returns false if none is available right now. A clean peer close is reported via
@@ -512,12 +516,12 @@ public:
     //  - else -> WaitingForPeer (horizon grows; caller pumps again after sending/recving).
     // Input/hash transient refusals retain the encoded bytes in a bounded FIFO;
     // each pump retries them before newer sends. Terminal refusals or a full FIFO
-    // disconnect. Hello and Bye retain their immediate-send behaviour.
+    // disconnect. Bye follows a final FIFO flush; a still-pending FIFO closes instead.
     // `budget_ticks` is the total tick count to run; returns Finished once reached
     // and all pending outbound frames have been accepted.
     TickResult PumpTick(std::uint64_t budget_ticks);
 
-    // Sends a clean Bye at the current tick and closes the local transport end. Idempotent.
+    // Flushes pending frames, sends Bye only if drained, then closes. Idempotent.
     void Disconnect();
 
     [[nodiscard]] LockstepStatus Status() const {

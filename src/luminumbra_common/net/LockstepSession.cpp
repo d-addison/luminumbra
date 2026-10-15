@@ -1144,14 +1144,15 @@ void LockstepSession::TransportDisconnected() {
 }
 
 bool LockstepSession::SendOrQueueFrame(std::vector<std::uint8_t> frame) {
-    if (frame.size() > kMaxFramePayloadBytes) {
+    if (frame.size() > std::min(kMaxFramePayloadBytes, m_transport->MaxFramePayloadBytes())) {
         TransportDisconnected();
         return false;
     }
     if (m_pending_outbound.empty()) {
         if (m_transport->SendFrame(frame))
             return true;
-        if (!m_transport->IsPeerConnected()) {
+        // A terminal backend refusal reports closure after its received frames drain.
+        if (!DrainPeerMessages() || !m_transport->IsPeerConnected()) {
             TransportDisconnected();
             return false;
         }
@@ -1171,7 +1172,7 @@ bool LockstepSession::FlushPendingOutbound() {
     while (!m_pending_outbound.empty()) {
         const auto& frame = m_pending_outbound.front();
         if (!m_transport->SendFrame(frame)) {
-            if (!m_transport->IsPeerConnected()) {
+            if (!DrainPeerMessages() || !m_transport->IsPeerConnected()) {
                 TransportDisconnected();
                 return false;
             }
@@ -1192,7 +1193,8 @@ bool LockstepSession::ScheduleLocalInput(std::uint64_t tick) {
     }
     // Input frame: type + payload length + tick + client id + blob length + blob.
     constexpr std::size_t overhead = 1 + 4 + 8 + 4 + 4;
-    if (blob.size() > kMaxFramePayloadBytes - overhead) {
+    const auto limit = std::min(kMaxFramePayloadBytes, m_transport->MaxFramePayloadBytes());
+    if (limit < overhead || blob.size() > limit - overhead) {
         TransportDisconnected();
         return false;
     }
@@ -1414,8 +1416,10 @@ TickResult LockstepSession::PumpTick(std::uint64_t budget_ticks) {
         const auto& local = m_local_hashes.at(want);
         if (m_transport->IsPeerConnected()) {
             // Hash frame: type + payload length + tick + four string lengths/data.
-            std::size_t remaining = kMaxFramePayloadBytes - (1 + 4 + 8 + 4 * 4);
-            bool oversized = false;
+            constexpr std::size_t overhead = 1 + 4 + 8 + 4 * 4;
+            const auto limit = std::min(kMaxFramePayloadBytes, m_transport->MaxFramePayloadBytes());
+            bool oversized = limit < overhead;
+            std::size_t remaining = oversized ? 0 : limit - overhead;
             for (const auto* part :
                  {&local.world_hash, &local.terrain, &local.water, &local.entities}) {
                 if (part->size() > remaining) {
@@ -1510,6 +1514,12 @@ void LockstepSession::EmitDesyncDump(std::uint64_t divergence_tick, const std::s
 void LockstepSession::Disconnect() {
     if (m_disconnected)
         return;
+    if (!FlushPendingOutbound())
+        return;
+    if (!m_pending_outbound.empty()) {
+        TransportDisconnected();
+        return;
+    }
     // A rejected Bye may itself close the transport, so drain before attempting it
     // as well as before the explicit Close in TransportDisconnected.
     if (!m_status.desynced)

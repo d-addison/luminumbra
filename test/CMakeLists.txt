@@ -150,6 +150,17 @@ target_link_libraries(far_pristine_field_test PRIVATE gtest_main luminumbra_comm
 luminumbra_configure_first_party_target(far_pristine_field_test)
 luminumbra_pin_fp_determinism(far_pristine_field_test)
 
+# Compile the shared socket implementation against an isolated fake SDK, without
+# requiring either SDK or replacing SDK symbols in the engine-linked test targets.
+add_executable(net_sockets_transport_test
+    net/net_sockets_transport_test.cpp
+    ../src/luminumbra_common/net/NetSocketsTransport.cpp
+)
+target_include_directories(net_sockets_transport_test PRIVATE support/net_sockets ../src)
+target_compile_definitions(net_sockets_transport_test PRIVATE LUMINUMBRA_ENABLE_GNS)
+target_link_libraries(net_sockets_transport_test PRIVATE gtest_main spdlog::spdlog)
+luminumbra_configure_first_party_target(net_sockets_transport_test)
+
 add_executable(common_tests
     common/Crc32_test.cpp
     rendering/shader_compositing_contract_test.cpp
@@ -1797,6 +1808,7 @@ set(LUMINUMBRA_GTEST_TARGETS
     morph_asset_test
     game_assets_test
     common_tests
+    net_sockets_transport_test
     filesystem_path_test
     unique_temp_path_test
     skinned_test_assets_test

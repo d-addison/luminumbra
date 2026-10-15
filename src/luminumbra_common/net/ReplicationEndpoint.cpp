@@ -148,10 +148,13 @@ void ReplicationServer::BroadcastSnapshotEntities(std::uint64_t server_tick,
 
         const auto flush_outbound = [&] {
             while (!link.outbound.empty()) {
-                const bool oversized = link.outbound.front().size() > kMaxFramePayloadBytes;
+                const bool oversized =
+                    link.outbound.front().size() >
+                    std::min(kMaxFramePayloadBytes, link.transport->MaxFramePayloadBytes());
                 if (oversized ||
                     !link.transport->SendFrame(link.outbound.front(), FrameDelivery::Unreliable)) {
                     // Retry temporary backpressure, but never retain an unsendable frame.
+                    DrainClientInbound(link);
                     if (oversized || !link.transport->IsPeerConnected()) {
                         CloseClientTransport(link);
                         to_disconnect.push_back(client_id);
@@ -331,8 +334,6 @@ void ReplicationServer::BroadcastSnapshotEntities(std::uint64_t server_tick,
         // backpressure leaves frames buffered -> outbound.size is the live queue-depth
         // metric. Oversized frames and lost peers disconnect. On overflow drop the OLDEST
         // (unreliable / most-recent-wins) and count it.
-        std::vector<std::uint8_t> frame =
-            borrowed_entities ? EncodeEntityRange(outgoing, entities) : EncodeSnapshot(outgoing);
         const auto frame_size =
             SnapshotEncodedSize(borrowed_entities ? entities.size() : outgoing.entities.size(),
                                 outgoing.removed_ids.size());
@@ -343,6 +344,14 @@ void ReplicationServer::BroadcastSnapshotEntities(std::uint64_t server_tick,
         if (reported_size > m_last_broadcast_max_client_bytes) {
             m_last_broadcast_max_client_bytes = reported_size;
         }
+        if (reported_size >
+            std::min(kMaxFramePayloadBytes, link.transport->MaxFramePayloadBytes())) {
+            CloseClientTransport(link);
+            to_disconnect.push_back(client_id);
+            continue;
+        }
+        std::vector<std::uint8_t> frame =
+            borrowed_entities ? EncodeEntityRange(outgoing, entities) : EncodeSnapshot(outgoing);
         if (frame.empty()) {
             CloseClientTransport(link);
             to_disconnect.push_back(client_id);
@@ -505,8 +514,10 @@ void ReplicationClient::SendUsercmd(const UsercmdMsg& cmd) {
     // Usercmds are UNRELIABLE: newest tick wins on the server (UsercmdReceiver),
     // a dropped one is superseded by the next tick's input.
     const auto frame = EncodeUsercmd(cmd);
-    const bool oversized = frame.size() > kMaxFramePayloadBytes;
+    const bool oversized =
+        frame.size() > std::min(kMaxFramePayloadBytes, m_transport->MaxFramePayloadBytes());
     if (oversized || !m_transport->SendFrame(frame, FrameDelivery::Unreliable)) {
+        DrainInbound();
         if (oversized || !m_transport->IsPeerConnected())
             TransportDisconnected();
         return;
@@ -642,8 +653,10 @@ void ReplicationClient::PumpInbound() {
     if (got_new_snapshot || m_sent_any_usercmd) {
         // Acks are UNRELIABLE: the newest ack supersedes (monotonic on the server).
         const auto ack = EncodeAck(m_receiver.make_ack(m_latest_usercmd_tick));
-        const bool oversized = ack.size() > kMaxFramePayloadBytes;
+        const bool oversized =
+            ack.size() > std::min(kMaxFramePayloadBytes, m_transport->MaxFramePayloadBytes());
         if (oversized || !m_transport->SendFrame(ack, FrameDelivery::Unreliable)) {
+            DrainInbound();
             if (oversized || !m_transport->IsPeerConnected())
                 TransportDisconnected();
         }
