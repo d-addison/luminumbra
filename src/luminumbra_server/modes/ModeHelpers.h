@@ -3,6 +3,8 @@
 #include "ModeIncludes.h"
 
 struct RuntimeTcpClientSlot {
+    static constexpr std::chrono::seconds kHelloTimeout{10};
+
     std::uint32_t client_id = 0;
     std::uint16_t port = 0;
     std::unique_ptr<Luminumbra::Net::TcpTransport> transport;
@@ -12,6 +14,9 @@ struct RuntimeTcpClientSlot {
     std::uint64_t left_tick = 0;
     float initial_x = 0.0f;
     bool accepting = false;
+    bool awaiting_hello = false;
+    // Transport-only deadline, valid while awaiting_hello; never uses simulation ticks.
+    std::chrono::steady_clock::time_point hello_deadline{};
     std::future<bool> accept_result;
 };
 
@@ -22,5 +27,9 @@ bool ResolveNetworkClientPort(std::uint16_t base_port,
                               std::uint32_t client_id,
                               std::uint16_t& out_port);
 void StartRuntimeTcpAccept(RuntimeTcpClientSlot& slot);
-bool PollRuntimeTcpAccept(RuntimeTcpClientSlot& slot);
+bool PollRuntimeTcpAccept(RuntimeTcpClientSlot& slot, const Luminumbra::Net::HelloMsg& expected);
+bool PollRuntimeTcpAccept(RuntimeTcpClientSlot& slot,
+                          const Luminumbra::Net::HelloMsg& expected,
+                          std::chrono::steady_clock::time_point now);
+Luminumbra::Net::HelloMsg RuntimeHelloFrom(const ServerCliOptions& options);
 void CloseRuntimeTcpSlot(RuntimeTcpClientSlot& slot);

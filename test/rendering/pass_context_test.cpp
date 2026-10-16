@@ -24,6 +24,7 @@
 #include "luminumbra_client/rendering/passes/LightingPass.h"
 #include "luminumbra_client/rendering/passes/ParticlePass.h"
 #include "luminumbra_client/rendering/passes/ShadowPass.h"
+#include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 #include <glm/gtc/type_ptr.hpp>
 #include <luminumbra/rendering/RenderView.h>
 #include <luminumbra/rendering/StaticScene.h>
@@ -1135,4 +1136,43 @@ TEST(PassContext, FoliageActualDrawFeedbackSurvivesReloadAndPreservesFrameIdenti
     pass.reset_shader();
     glDeleteFramebuffers(1, &target.fbo);
     glDeleteTextures(1, &target.tex);
+}
+
+TEST(PassContext, ShippingTemporalResolveBuildsHistoryJittersAndResets) {
+    HiddenGlContext gl;
+    ASSERT_TRUE(gl.ready()) << gl.error();
+    using namespace Luminumbra;
+    using namespace Luminumbra::Rendering;
+    ScopedEnv pinned_scale("LUMIN_RENDER_SCALE", "1.0");
+    RenderPipeline pipeline;
+    ASSERT_TRUE(pipeline.startup(64, 48, LUMINUMBRA_SOURCE_ROOT));
+    pipeline.set_far_lod_enabled(false);
+    EXPECT_TRUE(pipeline.taau_enabled());
+    EXPECT_EQ(pipeline.volumetric_quality(), 1);
+    EXPECT_FALSE(pipeline.taau_history_valid());
+    Systems::TerrainGenParams params;
+    params.biomes_enabled = params.structures_enabled = params.hydro_enabled = false;
+    Systems::SHIELD_WorldSystem world(nullptr, nullptr, params, 1337);
+    entt::registry registry;
+    Camera camera({8, 80, 8}, {0, 1, 0}, -90, 0);
+    pipeline.render_frame(registry, world, camera, 1.0f / 30.0f);
+    EXPECT_TRUE(pipeline.taau_history_valid());
+    const auto first_jitter = pipeline.taau_jitter_ndc();
+    EXPECT_NE(first_jitter, glm::vec2(0.0f));
+    pipeline.render_frame(registry, world, camera, 1.0f / 30.0f);
+    EXPECT_NE(pipeline.taau_jitter_ndc(), first_jitter);
+    pipeline.on_resize(80, 64);
+    EXPECT_FALSE(pipeline.taau_history_valid());
+    pipeline.render_frame(registry, world, camera, 1.0f / 30.0f);
+    EXPECT_TRUE(pipeline.taau_history_valid());
+    pipeline.set_taau_enabled(false);
+    EXPECT_FALSE(pipeline.taau_history_valid());
+    EXPECT_EQ(pipeline.taau_jitter_ndc(), glm::vec2(0.0f));
+    pipeline.render_frame(registry, world, camera, 1.0f / 30.0f);
+    EXPECT_FALSE(pipeline.taau_history_valid());
+    pipeline.set_taau_enabled(true);
+    pipeline.render_frame(registry, world, camera, 1.0f / 30.0f);
+    EXPECT_TRUE(pipeline.taau_history_valid());
+    EXPECT_NE(pipeline.taau_jitter_ndc(), glm::vec2(0.0f));
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
 }

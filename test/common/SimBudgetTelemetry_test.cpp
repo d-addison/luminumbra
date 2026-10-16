@@ -1,3 +1,4 @@
+#include "../fixtures/TerrainFixtureParams.h"
 #include "../support/UniqueTempPath.h"
 #include <chrono>
 #include <cstddef>
@@ -67,8 +68,11 @@ TEST(SimBudgetTelemetry, DisabledProductionArtifactMatchesDevelBytes) {
 
 TEST(SimBudgetTelemetry, WaterWorkIsZeroAfterEmptyAndPausedUpdates) {
     using namespace Luminumbra;
-    Systems::SHIELD_WorldSystem world(nullptr, nullptr, Systems::TerrainGenParams{}, 1337);
+    Systems::SHIELD_WorldSystem world(
+        nullptr, nullptr, Luminumbra::Test::SyntheticTerrainParams(), 1337);
     Systems::WaterSystem water(nullptr, &world);
+    water.SetSimResolution(8);
+    water.SetHydrology(false, 0, 0);
     entt::registry registry;
     auto chunk = std::make_shared<Chunk>(IVec3(0, 0, 0));
     chunk->has_water_sim = true;
