@@ -14,14 +14,7 @@ import time
 import unittest
 
 import render_contract as contract
-
-
-def _file_sha256(path):
-    digest = hashlib.sha256()
-    with path.open('rb') as source:
-        for block in iter(lambda: source.read(1024 * 1024), b''):
-            digest.update(block)
-    return digest.hexdigest()
+import render_runner_process as process_runner
 
 
 def _atomic_write(path, payload):
@@ -124,15 +117,17 @@ def _run_process(command, *, cwd, environment, log, artifact, retained, receipt_
                    return_code=None, capture_status='missing', capture_path=None,
                    capture_sha256=None, evidence_errors=[])
     try:
-        receipt['binary_sha256'] = _file_sha256(Path(command[0]))
-        with log.open('wb') as output:
-            started = time.monotonic()
+        executable = process_runner.resolve_executable(command[0], cwd, environment)
+        command = [str(executable), *command[1:]]
+        receipt.update(command=command, binary_path=command[0])
+        with process_runner.verified_binary(receipt), log.open('wb') as output:
+            started = time.perf_counter()
             try:
                 result = subprocess.run(command, cwd=cwd, env=environment,
                                         stdout=output, stderr=subprocess.STDOUT,
                                         timeout=180, check=False)
             finally:
-                receipt['elapsed_seconds'] = time.monotonic() - started
+                receipt['elapsed_seconds'] = time.perf_counter() - started
             receipt.update(outcome='returned', return_code=result.returncode)
     except (subprocess.TimeoutExpired, OSError) as error:
         receipt.update(outcome='timed_out' if isinstance(error, subprocess.TimeoutExpired)

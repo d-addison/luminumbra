@@ -172,6 +172,17 @@ class CommandGoldenTests(MatrixTestBase):
             '--traversal', str(ROOT / SURFACE_SCRIPT),
             '--enforce-floor', '--verdict-out', '/out/v.json'])
 
+    def test_every_ready_checker_enforces_floor(self):
+        for cell in qm.cells(with_pose(committed())):
+            if qm.readiness(cell, ROOT)[0] != 'ready':
+                continue
+            with self.subTest(cell=cell['id']):
+                command = qm.checker_command(cell, artifact='capture.json',
+                                             verdict='verdict.json',
+                                             qualified_renderer=RENDERER,
+                                             root=ROOT, python=sys.executable)
+                self.assertEqual(command.count('--enforce-floor'), 1)
+
 
 class CheckerArgparseTests(MatrixTestBase):
     def test_fixed_checker_argv_parses_with_tod(self):
@@ -192,7 +203,7 @@ class CheckerArgparseTests(MatrixTestBase):
         qm.validate_matrix(matrix)
         cells = qm.cells(matrix)
         artifact = self.tmp / 'capture.json'
-        artifact.write_text(json.dumps({'schema': contract.SCHEMA}), encoding='utf-8')
+        artifact.write_text(json.dumps(synthetic_artifact()), encoding='utf-8')
         argv = qm.checker_command(find_cell(cells, 'forest-settled.quality.3840x1600'),
                                   artifact=artifact, verdict=self.tmp / 'verdict.json',
                                   qualified_renderer=RENDERER,
@@ -289,6 +300,18 @@ class CheckerEvidenceTests(MatrixTestBase):
         code, verdict = self.run_checker(self.traversal_capture())
         self.assertEqual(code, 0)
         self.assertEqual(verdict['verdict'], 'PASS')
+
+    def test_generated_checker_rejects_capture_above_floor(self):
+        data = self.traversal_capture()
+        for row in data['frame_samples']:
+            row['frame_wall_ms'] = 16.68
+        summary = perf.summarize([16.68] * len(data['frame_samples']), 'ms')
+        data['distribution']['frame_wall_ms'].update(
+            {key: summary[key] for key in contract.STATS})
+        data['avg']['frame_wall_ms'] = 16.68
+        code, verdict = self.run_checker(data)
+        self.assertEqual(code, 4)
+        self.assertEqual(verdict['floor']['floor']['verdict'], 'fail')
 
     def test_other_profile_resolution_and_warmup_fail_generated_checker(self):
         data = self.traversal_capture(profile='quality', width=1280, height=720, warmup=2)
@@ -387,6 +410,27 @@ class MatrixValidationTests(MatrixTestBase):
 
 
 class PathResolutionTests(unittest.TestCase):
+    def test_windows_long_case_and_parent_aliases_share_sidecar_identity(self):
+        class WindowsPath(PureWindowsPath):
+            def resolve(self):
+                text = ntpath.normpath(self).lower()
+                return type(self)(text.replace('runner~1', 'runner account')
+                                  .replace('captur~1.jso', 'capture record.json'))
+
+            def is_symlink(self):
+                return False
+
+        windows = types.SimpleNamespace(**vars(os))
+        windows.name, windows.path = 'nt', ntpath
+        with mock.patch.object(runner, 'os', windows), \
+                mock.patch.object(runner, 'Path', WindowsPath):
+            expected = WindowsPath(r'C:\Runner Account\Capture Record.json')
+            aliases = (expected, WindowsPath(r'C:\RUNNER~1\CAPTUR~1.JSO'),
+                       WindowsPath(r'C:\RUNNER ACCOUNT\nested\..\CAPTURE RECORD.JSON'))
+            identities = [runner._output_identity(path) for path in aliases]
+            self.assertEqual([str(path) + '.lock' for path in identities],
+                             [str(expected).lower() + '.lock'] * len(aliases))
+
     @contextlib.contextmanager
     def windows_paths(self):
         class WindowsPath(PureWindowsPath):
@@ -395,6 +439,9 @@ class PathResolutionTests(unittest.TestCase):
 
             def is_file(self):
                 return True
+
+            def is_symlink(self):
+                return False
 
         windows = types.SimpleNamespace(**vars(os))
         windows.name, windows.sep, windows.altsep = 'nt', '\\', '/'
@@ -473,7 +520,8 @@ class PathResolutionTests(unittest.TestCase):
                                     mock.patch.object(runner, '_run_process') as run:
                                 with self.assertRaisesRegex(OSError, 'safely normalized'):
                                     runner.run_process(
-                                        [program], cwd=WindowsPath(root), environment={},
+                                        [program], cwd=WindowsPath(root),
+                                        environment={'PATH': r'C:\qualification'},
                                         artifact='a.json', retained='r.json',
                                         receipt_path='receipt.json', log='log.txt')
                                 locks.assert_not_called()
@@ -509,6 +557,9 @@ class PathResolutionTests(unittest.TestCase):
 
     def test_windows_executable_paths_use_ordinary_drive_and_unc_spelling(self):
         class WindowsPath(PureWindowsPath):
+            def resolve(self, strict=False):
+                return type(self)(ntpath.normpath(self))
+
             def is_file(self):
                 return True
 
@@ -524,13 +575,17 @@ class PathResolutionTests(unittest.TestCase):
                     mock.patch.object(runner.shutil, 'which', return_value=extended):
                 for program in (extended, 'client.exe'):
                     self.assertEqual(str(runner.resolve_executable(
-                        program, WindowsPath(ordinary).parent)), ordinary)
+                        program, WindowsPath(ordinary).parent,
+                        {'PATH': str(WindowsPath(ordinary).parent)})), ordinary)
 
     def test_resolved_windows_prefixes_do_not_change_path_identity(self):
         class WindowsPath(PureWindowsPath):
             def resolve(self):
                 # Model handle resolution expanding a short directory name.
                 return type(self)(str(self).replace('RUNNER~1', 'Runner Account'))
+
+            def is_symlink(self):
+                return False
 
         windows = types.SimpleNamespace(**vars(os))
         windows.name = 'nt'
@@ -630,12 +685,37 @@ class ExecutableResolutionTests(MatrixTestBase):
                                              {'PATH': str(Path(sys.executable).parent)})
         self.assertTrue(os.path.samefile(resolved, sys.executable))
 
-    def test_relative_path_entry_resolves_against_launch_cwd(self):
+    def test_relative_and_empty_path_entries_are_refused(self):
         name = Path(sys.executable).name
         (self.tmp / 'bin').mkdir()
         shutil.copy2(sys.executable, self.tmp / 'bin' / name)
-        resolved = runner.resolve_executable(name, self.tmp, {'PATH': 'bin'})
-        self.assertEqual(resolved.parent, Path(os.path.abspath(self.tmp / 'bin')))
+        shutil.copy2(sys.executable, self.tmp / name)
+        for search in ('bin', '', os.pathsep.join(('', '.', 'bin'))):
+            with self.subTest(search=search), mock.patch.object(runner.shutil, 'which') as which:
+                with self.assertRaises(FileNotFoundError):
+                    runner.resolve_executable(name, self.tmp, {'PATH': search})
+                which.assert_not_called()
+
+    def test_absolute_path_entry_ignores_untrusted_entries(self):
+        name = Path(sys.executable).name
+        search = os.pathsep.join(('', '.', 'bin', str(Path(sys.executable).parent)))
+        resolved = runner.resolve_executable(name, self.tmp, {'PATH': search})
+        self.assertTrue(os.path.samefile(resolved, sys.executable))
+
+    def test_executable_symlink_and_parent_components_resolve_once(self):
+        real = self.tmp / 'real'
+        (real / 'nested').mkdir(parents=True)
+        target = real / 'tool'
+        target.write_bytes(b'checked executable')
+        alias = self.tmp / 'alias'
+        alias.symlink_to(real / 'nested', target_is_directory=True)
+        program = alias / '..' / 'tool'
+        if os.name == 'nt':
+            # Win32 normalizes parent components before resolving reparse points.
+            (self.tmp / 'tool').write_bytes(b'Windows normalized executable')
+        resolved = runner.resolve_executable(program, self.tmp)
+        self.assertEqual(resolved, program.resolve(strict=True))
+        self.assertEqual(runner.file_sha256(resolved), runner.file_sha256(program))
 
     def test_unresolved_name_raises(self):
         with self.assertRaises(FileNotFoundError):
@@ -732,6 +812,82 @@ class ProcessRunnerTests(MatrixTestBase):
     def read_receipt(self):
         return json.loads(self.receipt.read_text(encoding='utf-8'))
 
+    def test_executable_changes_fail_closed_and_clear_unverified_hash(self):
+        executable = self.tmp / Path(sys.executable).name
+        for change in ('bytes', 'timestamp', 'replacement', 'missing'):
+            with self.subTest(change=change):
+                shutil.copy2(sys.executable, executable)
+
+                def launch(argv, **kwargs):
+                    before = executable.stat()
+                    if change == 'bytes':
+                        with executable.open('r+b') as stream:
+                            first = stream.read(1)
+                            stream.seek(0)
+                            stream.write(bytes([first[0] ^ 1]))
+                        os.utime(executable, ns=(before.st_atime_ns, before.st_mtime_ns))
+                    elif change == 'timestamp':
+                        os.utime(executable, ns=(before.st_atime_ns,
+                                                before.st_mtime_ns + 2000000000))
+                    else:
+                        replacement = self.tmp / 'replacement'
+                        shutil.copy2(executable, replacement)
+                        if change == 'replacement':
+                            replacement.replace(executable)
+                        else:
+                            executable.unlink()
+                            replacement.unlink()
+                    self.artifact.write_bytes(b'{}')
+                    return subprocess.CompletedProcess(argv, 0)
+
+                with mock.patch.object(runner.subprocess, 'run', side_effect=launch), \
+                        contextlib.redirect_stderr(io.StringIO()), self.assertRaises(OSError):
+                    self.run_case([str(executable)])
+                receipt = self.read_receipt()
+                self.assertIsNone(receipt['binary_sha256'])
+                self.assertEqual(receipt['binary_identity_status'], 'changed')
+                self.assertTrue(receipt['evidence_errors'])
+                self.assertEqual(receipt['capture_status'], 'retained')
+
+    def test_locks_cover_binary_reverification_and_receipt_publication(self):
+        identity = runner._binary_identity
+        write = runner.atomic_write
+        stages = []
+
+        def verify(path):
+            if stages:
+                with self.assertRaises(FileExistsError):
+                    with runner._output_locks((self.artifact,)):
+                        self.fail('output lock released before executable verification')
+                stages.append('verified')
+            else:
+                stages.append('started')
+            return identity(path)
+
+        def publish(path, payload):
+            if path == self.receipt:
+                with self.assertRaises(FileExistsError):
+                    with runner._output_locks((self.artifact,)):
+                        self.fail('output lock released before receipt publication')
+                stages.append('published')
+            return write(path, payload)
+
+        with mock.patch.object(runner, '_binary_identity', side_effect=verify), \
+                mock.patch.object(runner, 'atomic_write', side_effect=publish):
+            self.run_case(self.script('import pathlib, sys\n'
+                                      'pathlib.Path(sys.argv[1]).write_bytes(b"{}")\n'))
+        self.assertEqual(stages, ['started', 'verified', 'published'])
+        self.assert_output_locks_released()
+
+    def test_process_elapsed_uses_high_resolution_run_interval(self):
+        clock = mock.Mock()
+        clock.perf_counter.side_effect = [10.0, 10.000001]
+        with mock.patch.object(runner, 'time', clock):
+            self.run_case(self.script(''))
+        self.assertGreater(self.read_receipt()['elapsed_seconds'], 0)
+        self.assertAlmostEqual(self.read_receipt()['elapsed_seconds'], 0.000001)
+        self.assertEqual(clock.perf_counter.call_count, 2)
+
     def assert_output_locks_released(self):
         with runner._output_locks((self.artifact, self.retained, self.receipt, self.log)):
             pass
@@ -798,6 +954,11 @@ class ProcessRunnerTests(MatrixTestBase):
         self.assertEqual(receipt['capture_status'], 'retained')
         self.assertEqual(receipt['outcome'], 'returned')
         self.assertEqual(receipt['timeout_seconds'], 60)
+        self.assertEqual(receipt['binary_identity_status'], 'verified')
+        self.assertEqual(receipt['binary_path'], str(Path(command[0]).resolve(strict=True)))
+        self.assertEqual(receipt['command'][0], receipt['binary_path'])
+        self.assertEqual(receipt['binary_sha256'], runner.file_sha256(receipt['binary_path']))
+        self.assertGreater(receipt['elapsed_seconds'], 0)
         self.assertTrue(self.retained.is_file())
 
     def test_injected_timeout_raises_and_receipt_shows_timed_out(self):

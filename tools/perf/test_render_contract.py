@@ -272,22 +272,54 @@ class RenderContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'manifest does not match'):
             contract.validate(data, QUALIFIED)
 
-    def test_v2_existing_report_checks_unchanged(self):
-        # A complete synthetic v2 linked-uniform capture, without any v3 keys.
+    def report_capture(self, position=None, yaw=0, pitch=0):
+        position = [0, 0, 0] if position is None else position
         data = {'schema': 'luminumbra.render_benchmark.v2', 'width': 1280, 'height': 720,
-                'camera': {'position': [0, 0, 0], 'yaw': 0, 'pitch': 0, 'fov': 90},
-                'capture_context': {'time_of_day_at_report': 0, 'last_world_streaming_position': [0, 0, 0]},
+                'camera': {'position': position, 'yaw': yaw, 'pitch': pitch, 'fov': 90},
+                'capture_context': {'time_of_day_at_report': 0, 'last_world_streaming_position': position},
                 'render_uniforms': {'matrix_layout': 'column_major', 'observation': 'report_time_shader_state'}}
-        right, up, forward = capture.camera_basis(0, 0)
+        right, up, forward = capture.camera_basis(yaw, pitch)
         view = [right[0], up[0], -forward[0], 0, right[1], up[1], -forward[1], 0,
-                right[2], up[2], -forward[2], 0, 0, 0, 0, 1]
+                right[2], up[2], -forward[2], 0, -capture.dot(right, position),
+                -capture.dot(up, position), capture.dot(forward, position), 1]
         projection = [0.0] * 16
         projection[0], projection[5] = 720 / 1280, 1.0
         for name in ('geometry', 'instanced_static_mesh'):
             data['render_uniforms'][name] = dict(available=True, view=view, projection=projection)
-        data['render_uniforms']['lighting'] = {'available': True, 'u_viewPos': [0, 0, 0],
-            'u_inverseView': right + [0] + up + [0] + [-v for v in forward] + [0] + [0, 0, 0, 1],
+        data['render_uniforms']['lighting'] = {'available': True, 'u_viewPos': position,
+            'u_inverseView': right + [0] + up + [0] + [-v for v in forward] + [0] + position + [1],
             'u_sun.direction': [0, -1, 0]}
+        return data
+
+    def test_requested_pose_rounds_through_float32_without_relaxing_tolerance(self):
+        position = [1000.1, -2000.2, 0.1]
+        angles = [1000.1, -10.1]
+        for schema in ('luminumbra.render_benchmark.v2', contract.SCHEMA):
+            with self.subTest(schema=schema):
+                data = self.report_capture([contract.float32(value) for value in position],
+                                           *(contract.float32(value) for value in angles))
+                if schema == contract.SCHEMA:
+                    data.update(artifact())
+                expected = args(position=position, yaw=angles[0], pitch=angles[1], tod=0,
+                                qualified_renderer=QUALIFIED if schema == contract.SCHEMA else None)
+                self.assertEqual(capture.validate(data, expected)['verdict'], 'PASS')
+                for offset, component in ((0.01, 0), (0.00002, 2)):
+                    different = list(position)
+                    different[component] += offset
+                    with self.assertRaisesRegex(ValueError, 'reported/requested position'):
+                        capture.validate(data, args(**dict(vars(expected), position=different)))
+                with self.assertRaisesRegex(ValueError, 'reported/requested angles'):
+                    capture.validate(data, args(**dict(vars(expected), yaw=angles[0] + 0.01)))
+
+    def test_requested_pose_outside_float32_range_fails_closed(self):
+        with self.assertRaisesRegex(ValueError, 'outside float32 range'):
+            capture.validate(self.report_capture(), args(position=[1e300, 0, 0],
+                                                         yaw=0, pitch=0, tod=0,
+                                                         qualified_renderer=None))
+
+    def test_v2_existing_report_checks_unchanged(self):
+        # A complete synthetic v2 linked-uniform capture, without any v3 keys.
+        data = self.report_capture()
         before = copy.deepcopy(data)
         result = capture.validate(data, args(position=[0, 0, 0], yaw=0, pitch=0, tod=0, qualified_renderer=None))
         self.assertEqual(result['verdict'], 'PASS')

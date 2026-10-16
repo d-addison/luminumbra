@@ -59,7 +59,7 @@ private:
     bool Send(bool isA, const std::vector<std::uint8_t>& f, FrameDelivery d) {
         const bool selfOpen = isA ? m_aOpen : m_bOpen;
         const bool peerOpen = isA ? m_bOpen : m_aOpen;
-        if (!selfOpen || !peerOpen)
+        if (f.size() > kMaxFramePayloadBytes || !selfOpen || !peerOpen)
             return false;
         const std::uint64_t seq = m_seq++;
         // Loss: UNRELIABLE only, deterministic from the seq.
@@ -106,7 +106,9 @@ private:
     }
 
     [[nodiscard]] bool PeerOpen(bool isA) const {
-        return isA ? m_bOpen : m_aOpen;
+        // Observe a clean close only after all inbound frames have drained,
+        // including frames whose simulated delivery tick has not arrived yet.
+        return isA ? (m_bOpen || !m_ba.empty()) : (m_aOpen || !m_ab.empty());
     }
     void CloseEnd(bool isA) {
         (isA ? m_aOpen : m_bOpen) = false;
@@ -139,6 +141,8 @@ private:
     NetworkConditions m_cond;
     std::uint64_t m_tick = 0;
     std::uint64_t m_seq = 0;
+    // Both ends are in-process, so no untrusted peer can enqueue frames here.
+    // Remote receive bounds do not apply to these queues, including delayed frames.
     std::deque<PendingFrame> m_ab; // A -> B in flight
     std::deque<PendingFrame> m_ba; // B -> A in flight
     bool m_aOpen = true;

@@ -10,6 +10,7 @@ import argparse
 import json
 import math
 from pathlib import Path
+import struct
 import render_budget
 import render_contract
 
@@ -99,6 +100,13 @@ def validate(data, args):
         raise ValueError('v2 has no adapter identity; cannot qualify an adapter')
     finite_vector(args.position, 3, 'requested position')
     finite_vector([args.yaw, args.pitch, args.tod], 3, 'requested angles/time')
+    # The client stores requested camera coordinates and angles as float32.
+    # Keep the absolute tolerance while comparing the values the client can store.
+    try:
+        pose = struct.unpack('<5f', struct.pack('<5f', *args.position, args.yaw, args.pitch))
+        position, angles = list(pose[:3]), list(pose[3:])
+    except OverflowError as error:
+        raise ValueError('requested pose is outside float32 range') from error
     if not 0 <= args.tod < 1:
         raise ValueError('requested TOD must be in [0, 1)')
     if args.fov is not None:
@@ -106,20 +114,20 @@ def validate(data, args):
         if not 0 < args.fov < 180:
             raise ValueError('requested FOV must be in (0, 180)')
     camera = data['camera']
-    close(camera['position'], args.position, 1e-5, 'reported/requested position')
-    close([camera['yaw'], camera['pitch']], [args.yaw, args.pitch], 1e-5, 'reported/requested angles')
+    close(camera['position'], position, 1e-5, 'reported/requested position')
+    close([camera['yaw'], camera['pitch']], angles, 1e-5, 'reported/requested angles')
     if args.fov is not None:
         close([camera['fov']], [args.fov], 1e-5, 'reported/requested FOV')
     context = data['capture_context']
     close([context['time_of_day_at_report']], [args.tod], 1e-6, 'reported/requested TOD')
-    close(context['last_world_streaming_position'], args.position, 1e-5, 'last actual world update position')
+    close(context['last_world_streaming_position'], position, 1e-5, 'last actual world update position')
     if args.require_controller and context['controller_present'] is not True:
         raise ValueError('ordinary-play PlayerController was not present')
     if args.require_controller:
         finite_vector(context['controller_position'], 3, 'controller position')
     if args.require_distinct_controller:
         player = finite_vector(context['controller_position'], 3, 'controller position')
-        if max(abs(a-b) for a,b in zip(player,args.position)) < 1.0:
+        if max(abs(a-b) for a,b in zip(player,position)) < 1.0:
             raise ValueError('controller was not at least 1m away from the capture pose')
     programs = data['render_uniforms']
     if programs['matrix_layout'] != 'column_major':
