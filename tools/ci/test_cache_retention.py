@@ -223,8 +223,7 @@ class CacheRetentionTests(unittest.TestCase):
         # workflow_run must protect the completed run's A SHA, even if the
         # workflow itself executes on the default branch at a different SHA.
         workflow = (ROOT / ".github/workflows/cache-cleanup.yml").read_text(encoding="utf-8")
-        self.assertIn("TRIGGER_SHA: ${{ github.event_name == 'workflow_run' && "
-                      "github.event.workflow_run.head_sha || github.sha }}", workflow)
+        self.assertIn("TRIGGER_SHA: ${{ github.event.workflow_run.head_sha }}", workflow)
         caches = [self.cache(1, "tidy-cache-Linux-shard1of3-A"),
                   self.cache(2, "tidy-cache-Linux-shard1of3-B"),
                   self.cache(3, "tidy-cache-Linux-shard1of3-A"),
@@ -381,7 +380,7 @@ class CacheRetentionTests(unittest.TestCase):
     def test_cleanup_only_uses_trusted_triggers_and_serialized_deletion_permissions(self):
         cleanup = (ROOT / ".github/workflows/cache-cleanup.yml").read_text(encoding="utf-8")
         triggers = cleanup.split("on:\n", 1)[1].split("\npermissions:", 1)[0]
-        self.assertIn("  push:\n    branches: [devel, main]", triggers)
+        self.assertNotIn("  push:", triggers)
         self.assertNotIn("pull_request", triggers)
         self.assertIn("  workflow_run:", triggers)
         self.assertIn("  group: cache-cleanup\n  cancel-in-progress: false", cleanup)
@@ -397,6 +396,44 @@ class CacheRetentionTests(unittest.TestCase):
             workflow = (ROOT / f".github/workflows/{name}.yml").read_text(encoding="utf-8")
             self.assertIn(workflow.splitlines()[0].removeprefix("name: "), triggers)
 
+    def test_compiler_cache_caps_match_each_lane(self):
+        for workflow, job, cap in (
+            ("ci", "linux", "400M"),
+            ("asan", "asan", "600M"),
+            ("ci", "diligent-rhi", "250M"),
+            ("ci", "windows-msvc", "500M"),
+            ("ci", "windows-ucrt64", "500M"),
+        ):
+            with self.subTest(workflow=workflow, job=job):
+                workflow = (ROOT / f".github/workflows/{workflow}.yml").read_text(encoding="utf-8")
+                body = workflow.split(f"  {job}:\n", 1)[1].split("    steps:\n", 1)[0]
+                self.assertEqual(body.split("CCACHE_MAXSIZE: ", 1)[1].splitlines()[0], cap)
+
+    def test_two_branches_at_compiler_caps_fit_budget_and_retire_old_ucrt_generations(self):
+        sizes = {
+            "linux-x64-gcc-ccache-": 400_000_000,
+            "linux-x64-gcc-asan-ccache-": 600_000_000,
+            "diligent-rhi-linux-x64-gcc-ccache-": 250_000_000,
+            "windows-x64-msvc-ccache-": 500_000_000,
+            "windows-x64-ucrt64-gcc-ccache-": 500_000_000,
+            "perf-linux-x64-gcc-ccache-": 250_000_000,
+            "perf-paired-linux-x64-gcc-": 250_000_000,
+        }
+        self.assertEqual(self.budget, 6_000_000_000)
+        self.assertEqual(2 * sum(sizes.values()), 5_500_000_000)
+        caches = []
+        old_ids = []
+        for ref in ("refs/heads/main", "refs/heads/devel"):
+            for prefix, size in sizes.items():
+                identity = len(caches) + 1
+                old_ids.append(identity)
+                caches.extend([self.cache(identity, prefix + "old", ref, size),
+                               self.cache(identity + 1, prefix + "new", ref, size)])
+        removed = self.obsolete(caches)
+        self.assertEqual(removed, sorted(old_ids, reverse=True))
+        retained_size = sum(c["size_in_bytes"] for c in caches if c["id"] not in removed)
+        self.assertEqual(self.budget - retained_size, 500_000_000)
+
     def test_preview_key_refreshes_with_candidate_and_retains_restore_prefix(self):
         workflow = (ROOT / ".github/workflows/performance.yml").read_text(encoding="utf-8")
         preview = workflow.split("  preview-frame:\n", 1)[1].split("  server-smoke-comparison:\n", 1)[0]
@@ -407,7 +444,7 @@ class CacheRetentionTests(unittest.TestCase):
         self.assertIn("${{ github.sha }}", keys[0])
         self.assertIn("restore-keys: |", preview)
         self.assertIn("            perf-linux-x64-gcc-ccache-\n", preview)
-        self.assertIn("CCACHE_MAXSIZE: 250M", workflow)
+        self.assertEqual(workflow.split("CCACHE_MAXSIZE: ", 1)[1].splitlines()[0], "250M")
         self.assertIn("run: ccache --cleanup", preview)
 
 

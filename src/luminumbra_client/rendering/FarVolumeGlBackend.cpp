@@ -239,6 +239,8 @@ bool FarVolumeGlDriver::DrawIndexed(std::int32_t index_count) noexcept {
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 6, static_cast<GLuint>(index_buffer));
     bool success = !HasError();
     if (success) {
+        // farTileLocal SSBO addressing assumes zero index offset, zero base vertex, no
+        // instancing and no multi-draw; update reconstruction if these change.
         glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(index_count), GL_UNSIGNED_INT, nullptr);
         success = !HasError();
     }

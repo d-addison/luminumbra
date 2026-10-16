@@ -1,5 +1,6 @@
 """Portable real-process client tests; no renderer, Blender or GPU acceptance."""
 import copy
+from contextlib import contextmanager, ExitStack
 import hashlib
 import importlib
 import json
@@ -75,6 +76,68 @@ def running(pid):
         return False
 
 
+class DeadlineClock:
+    """Session time advances only at acknowledged process milestones."""
+    sleep = staticmethod(time.sleep)
+
+    def __init__(self, project):
+        self.path = project / 'deadline-clock.json'
+        self.observed = project / 'broker-clock-observed.json'
+        self._lock = threading.Lock()
+        self.value, self.samples = 0., 0
+        wire.atomic_write(self.path, wire.canonical(self.value))
+
+    def monotonic(self):
+        with self._lock:
+            self.samples += 1
+            return self.value
+
+    def advance(self, elapsed, *, broker=True):
+        with self._lock:
+            self.value += elapsed
+            self.samples = 0
+            if broker:
+                wire.atomic_write(self.path, wire.canonical(self.value))
+
+    def sampled_by_client(self):
+        with self._lock:
+            return self.samples >= 2
+
+    def sampled_by_both(self, client):
+        with self._lock:
+            value, samples = self.value, self.samples
+        # Two samples ensure a complete watchdog iteration after advancing.
+        if samples < 2 or not self.observed.exists():
+            return False
+        row = json.loads(wire.read_record_file(self.observed, 256))
+        return row == {'value': value, 'session': client.status['session'],
+                       'broker_pid': client.status['broker_pid']}
+
+
+class PhaseTime:
+    """Route time per worker thread; concurrent clients never change each other's clock.
+
+    Preflight identity checks use fixed time. Session and shutdown phases select
+    their own clock, while all scheduling sleeps and test watchdogs stay real.
+    """
+    sleep = staticmethod(time.sleep)
+
+    def __init__(self):
+        self.local = threading.local()
+
+    def monotonic(self):
+        return getattr(self.local, 'sample', lambda: 0.)()
+
+    @contextmanager
+    def using(self, sample):
+        previous = getattr(self.local, 'sample', lambda: 0.)
+        self.local.sample = sample
+        try:
+            yield
+        finally:
+            self.local.sample = previous
+
+
 class ClientTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix='viewport-client-test-')
@@ -82,6 +145,47 @@ class ClientTests(unittest.TestCase):
         self.sdk, self.project = self.root / 'sdk', self.root / 'project'
         self.sdk.mkdir(); self.project.mkdir()
         self.clients = []
+        self.modes = {}
+        self.cleaning_up = False
+        self.patches = ExitStack()
+        self.addCleanup(self.patches.close)
+        self.clock = DeadlineClock(self.project)
+        phase_time = PhaseTime()
+        original_loop, original_stop = ViewportClient._session_loop, ViewportClient._stop
+
+        def session_loop(client, *arguments):
+            with phase_time.using(self.clock.monotonic):
+                return original_loop(client, *arguments)
+
+        def stop(client, process, root, key, session):
+            # Cooperative shutdown cannot lose its receipt merely because the
+            # broker was descheduled. Expire deliberately held hosts only after
+            # stop publication (or stop consumption for the shutdown regression).
+            started = time.monotonic()
+            sampled = False
+            def shutdown_time():
+                nonlocal sampled
+                if not sampled:
+                    sampled = True
+                    return 0.
+                mode = self.modes.get(client)
+                published = (root / 'stop.bin').exists()
+                held = (mode in ('broker-hang', 'hang') or
+                        (mode in ('startup-delay', 'startup-delay-descendant', 'startup-frame-delay')
+                         and not (self.project / ('release-' + session)).exists()))
+                consumed = (self.project / ('stop-received-' + session)).exists()
+                if self.cleaning_up or (published and held) or (mode == 'stop-hang' and consumed):
+                    return client.shutdown_timeout
+                if time.monotonic() - started >= 5:
+                    raise AssertionError('Timed out waiting for actual child-process shutdown')
+                return 0.
+            with phase_time.using(shutdown_time):
+                return original_stop(client, process, root, key, session)
+
+        self.patches.enter_context(mock.patch.object(client_module, 'time', phase_time))
+        self.patches.enter_context(mock.patch.object(installation, 'time', PhaseTime()))
+        self.patches.enter_context(mock.patch.object(ViewportClient, '_session_loop', session_loop))
+        self.patches.enter_context(mock.patch.object(ViewportClient, '_stop', stop))
         self.host = self.sdk / 'bin/luminumbra_preview_capture'
         self.module = self.sdk / 'lib/libluminumbra_render_static.so'
         for path in (self.host, self.module, self.sdk / installation.SOURCE_INPUTS,
@@ -109,24 +213,75 @@ class ClientTests(unittest.TestCase):
         shutil.copyfile(AUTHORING / 'service/luminumbra_author/file_io.py', self.broker_root / 'file_io.py')
         # This trusted test wrapper uses the real Broker and real fixture child;
         # the dummy SDK is solely an installation-identity contract fixture.
-        self.broker.write_text('''import hashlib,json,os,sys,threading,time
+        self.broker.write_text('''import hashlib,json,os,subprocess,sys,threading,time
 from pathlib import Path
+from types import SimpleNamespace
 sys.path.insert(0, WIRE_PATH)
+import broker as broker_module
 from broker import Broker
+from protocol import atomic_write,canonical,read_record_file
 config=json.loads(Path(sys.argv[2]).read_text())
 project=Path(config['project_root'])
+clock=project/'deadline-clock.json'
+if clock.exists():
+    clock_value=None
+    clock_samples=0
+    def monotonic():
+        global clock_value,clock_samples
+        # A bounded scalar, read through the portable shared-reader contract.
+        value=json.loads(read_record_file(clock,64))
+        clock_samples=clock_samples+1 if value==clock_value else 1
+        clock_value=value
+        if clock_samples==2:
+            atomic_write(project/'broker-clock-observed.json',canonical({
+                'value':value,'session':config['session'],'broker_pid':os.getpid()}))
+        return value
+    broker_module.time=SimpleNamespace(monotonic=monotonic,sleep=time.sleep)
+    # Exercise the real broker's bounded waits with the same virtual clock on
+    # Windows and POSIX. Zero-time probes never grant extra product time; the
+    # unchanged five-second test watchdog still detects missing child progress.
+    def completed(done,timeout):
+        until=monotonic()+timeout
+        watchdog=time.monotonic()+5
+        while not done():
+            if monotonic()>=until:
+                return False
+            if time.monotonic()>=watchdog:
+                raise AssertionError('Timed out waiting for actual child-process wait')
+            time.sleep(.01)
+        return True
+    class Child(subprocess.Popen):
+        def wait(self,timeout=None):
+            if timeout is None:
+                return super().wait(timeout)
+            if not completed(lambda:self.poll() is not None,timeout):
+                raise subprocess.TimeoutExpired(self.args,timeout)
+            return super().wait(0)
+    class Thread(threading.Thread):
+        def join(self,timeout=None):
+            if timeout is None:
+                return super().join(timeout)
+            completed(lambda:not self.is_alive(),timeout)
+            return super().join(0)
+    broker_module.subprocess=SimpleNamespace(Popen=Child,PIPE=subprocess.PIPE,
+        TimeoutExpired=subprocess.TimeoutExpired)
+    broker_module.threading=SimpleNamespace(Thread=Thread)
 mode=(project/'mode.txt').read_text()
 os.environ['CLIENT_FIXTURE_EVIDENCE']=str(Path(config['root'])/'host-evidence')
 os.environ['CLIENT_FIXTURE_IDENTITY']=str(project/'fixture-identity.json')
 starts=project/'starts.json'
 rows=json.loads(starts.read_text()) if starts.exists() else []
 rows.append({'session':config['session'],'root':config['root'],'pid':os.getpid()})
-starts.write_text(json.dumps(rows))
-if mode=='broker-hang': time.sleep(60)
+atomic_write(starts,canonical(rows))
+if mode=='broker-hang': threading.Event().wait()
 if mode=='crash-once' and len(rows)==1: sys.exit(9)
 if mode=='crash-tree':
     mode='descendant'
-    threading.Timer(.7, lambda: os._exit(9)).start()
+    def crash():
+        while not (project/('crash-'+config['session'])).exists():
+            time.sleep(.01)
+        os._exit(9)
+    threading.Thread(target=crash,daemon=True).start()
 config['command']=[sys.executable, FIXTURE_PATH, WIRE_PATH, mode]
 config['executable_sha256']=hashlib.sha256(Path(sys.executable).read_bytes()).hexdigest()
 instance=Broker(key=bytes.fromhex(os.environ.pop('LUMINUMBRA_VIEWPORT_KEY')), **config)
@@ -146,17 +301,29 @@ except BaseException as error:
         (self.project / 'fixture-identity.json').write_text(json.dumps(native))
 
     def tearDown(self):
-        for client in self.clients:
-            self.assertTrue(client.close(wait=True, timeout=8), client.status)
-        self.temporary.cleanup()
+        try:
+            for client in self.clients:
+                self.assertTrue(client.close(wait=True, timeout=8), client.status)
+        finally:
+            self.cleaning_up = True
+            for client in self.clients:
+                client.close(wait=True, timeout=8)
+            self.patches.close()
+            self.temporary.cleanup()
 
     def client(self, mode='echo', **options):
         (self.project / 'mode.txt').write_text(mode)
         arguments = dict(startup_timeout=2, frame_timeout=2, shutdown_timeout=.5, max_restarts=0)
         arguments.update(options)
         client = ViewportClient(sys.executable, self.broker, self.host, self.project, self.manifest, **arguments)
+        self.modes[client] = mode
         self.clients.append(client)
         return client
+
+    @contextmanager
+    def controlled_deadlines(self):
+        """All clients are controlled; deadline regressions explicitly advance time."""
+        yield self.clock
 
     def diagnostics(self):
         """Capture only bounded, identity-matched fixture evidence on failure."""
@@ -219,80 +386,113 @@ except BaseException as error:
         def blocked(slots, index):
             threads.append(threading.get_ident())
             entered.set()
-            self.assertTrue(release.wait(3))
+            release.wait()
             return original(slots, index)
-        with mock.patch.object(wire.Slots, 'read', blocked):
-            client = self.client('delay')
+        with self.controlled_deadlines(), mock.patch.object(wire.Slots, 'read', blocked):
+            client = self.client()
+            child = self.wait(lambda: self.child(client))
+            root = Path(client.status['session_directory'])
+            self.wait(lambda: wire.read_readiness(root / 'broker-ready.json', child['session'],
+                      pid=child['pid'], broker_pid=client.status['broker_pid']))
             client.submit(state())
-            self.assertTrue(entered.wait(3))
-            for revision in range(2, 52):
-                client.submit(state(revision))
-                self.assertIsNone(client.poll())
-            self.assertFalse(release.is_set())  # All callbacks returned while read was blocked.
-            release.set()
+            controller = threading.Timer(3, release.set)
+            try:
+                self.assertTrue(entered.wait(3))
+                # Start only after validation enters. The timer needs no client
+                # lock, so even a callback blocked by validation can finish and
+                # fail the release assertion below instead of deadlocking.
+                controller.start()
+                for revision in range(2, 52):
+                    client.submit(state(revision))
+                    self.assertIsNone(client.poll())
+                self.assertFalse(release.is_set())  # All callbacks returned while read was blocked.
+            finally:
+                release.set()
+                controller.cancel()
+                if controller.ident is not None:
+                    controller.join(3)
             header, payload = self.wait(client.poll)
             self.assertEqual(header['state']['camera_revision'], 51)
             self.assertEqual(payload[0], 51)
             self.assertNotIn(threading.get_ident(), threads)
 
     def test_startup_timeout_and_retry_budget_use_fresh_private_sessions(self):
-        client = self.client('broker-hang', startup_timeout=.3, shutdown_timeout=.1, max_restarts=1)
-        client.submit(state())
-        self.wait(lambda: client.status['state'] == 'failed', timeout=4)
-        rows = json.loads((self.project / 'starts.json').read_text())
-        self.assertEqual(len(rows), 2)
-        self.assertEqual(len({row['session'] for row in rows}), 2)
-        self.assertEqual(len({row['root'] for row in rows}), 2)
-        self.assertEqual(client.status['restarts'], 1)
-        self.assertIn('startup deadline', client.status['error'])
-        self.assertTrue(all(not running(row['pid']) and not Path(row['root']).exists() for row in rows))
+        with self.controlled_deadlines() as clock:
+            client = self.client('broker-hang', startup_timeout=.3, shutdown_timeout=.1, max_restarts=1)
+            client.submit(state())
+            starts = self.project / 'starts.json'
+            for attempt in (1, 2):
+                # Each broker must actually start before expiring that attempt.
+                self.wait(lambda: starts.exists() and clock.sampled_by_client()
+                          and len(json.loads(wire.read_record_file(starts, 4096))) == attempt)
+                clock.advance(.31)
+            self.wait(lambda: client.status['state'] == 'failed', timeout=4)
+            rows = json.loads(wire.read_record_file(starts, 4096))
+            self.assertEqual(len(rows), 2)
+            self.assertEqual(len({row['session'] for row in rows}), 2)
+            self.assertEqual(len({row['root'] for row in rows}), 2)
+            self.assertEqual(client.status['restarts'], 1)
+            self.assertIn('startup deadline', client.status['error'])
+            self.assertTrue(all(not running(row['pid']) and not Path(row['root']).exists() for row in rows))
 
     def test_allocated_slots_do_not_start_frame_deadline_before_host_ready(self):
-        client = self.client('startup-delay', startup_timeout=3, frame_timeout=.35)
-        client.submit(state())
-        child = self.wait(lambda: self.child(client))
-        root = Path(client.status['session_directory'])
-        self.assertTrue(all((root / f'frame-{index}.bin').exists() for index in (0, 1)))
-        until = time.monotonic() + .5
-        revision = 1
-        while time.monotonic() < until:
-            revision += 1
-            client.submit(state(revision))
-            self.assertEqual(client.status['state'], 'starting', self.diagnostics())
-            self.assertFalse((root / 'desired.bin').exists())
-            time.sleep(.02)
-        (self.project / ('release-' + child['session'])).touch()
-        header, _ = self.wait(client.poll)
-        self.assertEqual(header['state']['camera_revision'], revision)
-        marker = wire.read_readiness(root / 'broker-ready.json', child['session'],
-                                     pid=child['pid'], broker_pid=client.status['broker_pid'])
-        self.assertIsNotNone(marker)
-
-    def test_late_ready_marker_cannot_extend_startup_deadline_under_flood(self):
-        stopped = threading.Event()
-        original_stop = ViewportClient._stop
-        def observed_stop(client, *arguments):
-            stopped.set()
-            return original_stop(client, *arguments)
-        with mock.patch.object(ViewportClient, '_stop', observed_stop):
-            client = self.client('startup-delay', startup_timeout=1, frame_timeout=2, shutdown_timeout=.1)
+        with self.controlled_deadlines() as clock:
+            client = self.client('startup-delay', startup_timeout=3, frame_timeout=.35)
             client.submit(state())
             child = self.wait(lambda: self.child(client))
-            started, revision = time.monotonic(), 1
-            while not stopped.is_set() and time.monotonic() - started < 1.5:
-                revision += 1
+            root = Path(client.status['session_directory'])
+            self.assertTrue(all((root / f'frame-{index}.bin').exists() for index in (0, 1)))
+            for revision in range(2, 27):
                 client.submit(state(revision))
-                time.sleep(.02)
-            self.assertTrue(stopped.is_set(), self.diagnostics())
-            # A late release must not revive the stopped attempt.
+                self.assertEqual(client.status['state'], 'starting', self.diagnostics())
+                self.assertFalse((root / 'desired.bin').exists())
+            # Exceed the unchanged .35s frame deadline while readiness is held.
+            # Both watchdogs must finish observing that time before release.
+            clock.advance(.5)
+            self.wait(lambda: clock.sampled_by_both(client))
+            self.assertEqual(client.status['state'], 'starting', self.diagnostics())
+            self.assertFalse((root / 'desired.bin').exists())
             (self.project / ('release-' + child['session'])).touch()
-            self.wait(lambda: client.status['state'] == 'failed')
-            self.assertIsNone(client.poll())
-            self.assertFalse(running(child['pid']))
-            result = client.status['last_result']
-            self.assertIsNone(result['host_ready'])
-            self.assertEqual(result['published'], 0)
-            self.assertTrue(result['child_reaped'])
+            header, _ = self.wait(client.poll)
+            self.assertEqual(header['state']['camera_revision'], revision)
+            marker = wire.read_readiness(root / 'broker-ready.json', child['session'],
+                                         pid=child['pid'], broker_pid=client.status['broker_pid'])
+            self.assertIsNotNone(marker)
+
+    def test_late_ready_marker_cannot_extend_startup_deadline_under_flood(self):
+        with self.controlled_deadlines() as clock:
+            stopped, receipt_seen = threading.Event(), threading.Event()
+            original_stop = ViewportClient._stop
+            def observed_stop(client, process, root, *arguments):
+                stopped.set()
+                # Retain the broker's completed evidence before bounded cleanup.
+                self.wait(lambda: (root / 'broker-result.json').exists())
+                receipt_seen.set()
+                return original_stop(client, process, root, *arguments)
+            with mock.patch.object(ViewportClient, '_stop', observed_stop):
+                client = self.client('startup-delay', startup_timeout=1, frame_timeout=2, shutdown_timeout=.1)
+                client.submit(state())
+                child = self.wait(lambda: self.child(client))
+                for revision in range(2, 27):
+                    client.submit(state(revision))
+                    clock.advance(.04, broker=False)
+                    self.wait(lambda: stopped.is_set() or clock.sampled_by_client())
+                clock.advance(.01, broker=False)
+                self.assertTrue(stopped.wait(1.5), self.diagnostics())
+                self.assertTrue(stopped.is_set(), self.diagnostics())
+                # First prove the client expires independently of the broker.
+                # Then let the broker finish and retain its own startup refusal.
+                clock.advance(0)
+                self.wait(receipt_seen.is_set)
+                # A late release must not revive the stopped attempt.
+                (self.project / ('release-' + child['session'])).touch()
+                self.wait(lambda: client.status['state'] == 'failed')
+                self.assertIsNone(client.poll())
+                self.assertFalse(running(child['pid']))
+                result = client.status['last_result']
+                self.assertIsNone(result['host_ready'])
+                self.assertEqual(result['published'], 0)
+                self.assertTrue(result['child_reaped'])
 
     def test_invalid_host_ready_identity_and_size_fail_closed(self):
         for mode, message in (('startup-wrong-session', 'Readiness session/schema'),
@@ -320,13 +520,27 @@ except BaseException as error:
                 self.assertTrue(result['child_reaped'])
 
     def test_first_frame_gets_frame_timeout_after_readiness(self):
-        client = self.client('startup-frame-delay', startup_timeout=2, frame_timeout=4)
-        client.submit(state())
-        child = self.wait(lambda: self.child(client))
-        (self.project / ('release-' + child['session'])).touch()
-        header, _ = self.wait(client.poll)
-        self.assertEqual(header['session'], child['session'])
-        self.assertEqual(client.status['state'], 'ready')
+        with self.controlled_deadlines() as clock:
+            client = self.client('startup-frame-delay', startup_timeout=2, frame_timeout=4)
+            client.submit(state())
+            child = self.wait(lambda: self.child(client))
+            clock.advance(1.9)
+            self.wait(lambda: clock.sampled_by_both(client))
+            (self.project / ('release-' + child['session'])).touch()
+            self.wait(lambda: (self.project / ('frame-received-' + child['session'])).exists())
+            clock.advance(0)
+            self.wait(lambda: clock.sampled_by_both(client))
+            # Total session time now exceeds both original budgets (2s and
+            # 4s), but only 2.2s of the frame budget has elapsed since readiness.
+            # Hold the response until both watchdogs observe this time.
+            clock.advance(2.2)
+            self.wait(lambda: clock.sampled_by_both(client))
+            self.assertEqual(client.status['state'], 'rendering', self.diagnostics())
+            self.assertIsNone(client.poll())
+            (self.project / ('frame-release-' + child['session'])).touch()
+            header, _ = self.wait(client.poll)
+            self.assertEqual(header['session'], child['session'])
+            self.assertEqual(client.status['state'], 'ready')
 
     def test_readiness_of_second_session_cannot_release_first_session(self):
         first = self.client('startup-delay', startup_timeout=3)
@@ -359,12 +573,16 @@ except BaseException as error:
         broker_pid = client.status['broker_pid']
         self.assertEqual(client.status['state'], 'starting')
         self.assertTrue(client.close(wait=True, timeout=5), self.diagnostics())
+        # Closing a Windows job requests descendant termination asynchronously.
+        self.wait(lambda: not running(child['pid']) and not running(child['descendant']))
         self.assertFalse(running(child['pid']))
         self.assertFalse(running(child['descendant']))
         self.assertFalse(running(broker_pid))
         self.assertFalse(root.exists())
 
     def test_restart_before_readiness_uses_fresh_session_and_latest_state(self):
+        # setUp holds identity, startup and frame clocks across both attempts;
+        # only the explicit held-host shutdown advances its own deadline.
         client = self.client('startup-delay', shutdown_timeout=.1)
         client.submit(state())
         self.wait(lambda: client.status['session_directory'])
@@ -431,67 +649,80 @@ except BaseException as error:
         self.assertNotEqual(header['session'], previous)
 
     def test_frame_timeout_does_not_get_extended_by_flooding_desired_states(self):
-        stopped, stopping = threading.Event(), {}
-        original_stop = ViewportClient._stop
-        def observed_stop(client, *arguments):
-            stopping['at'] = time.monotonic()
-            stopped.set()
-            return original_stop(client, *arguments)
-        with mock.patch.object(ViewportClient, '_stop', observed_stop):
-            client = self.client('hang', frame_timeout=.35, startup_timeout=1, shutdown_timeout=.1)
-            # Warm only fixture process startup. The frame deadline remains .35s.
-            self.wait(lambda: (self.project / 'child.json').exists())
-            child = json.loads((self.project / 'child.json').read_text())
-            broker_pid = client.status['broker_pid']
-            directory = Path(client.status['session_directory'])
-            started, revision = time.monotonic(), 0
-            # Observe the watchdog decision before SDK verification and process
-            # cleanup, whose duration is governed by separate existing bounds.
-            # A .5s scheduling allowance is explicit; flooding cannot defer this
-            # decision indefinitely or to the fixture's 60s response delay.
-            while not stopped.is_set() and time.monotonic() - started < .85:
-                revision += 1
-                client.submit(state(revision))
-                time.sleep(.02)
-            self.assertTrue(stopped.is_set(), client.status)
-            self.assertLessEqual(stopping['at'] - started, .85)
-            self.assertGreater(revision, 1)
-            self.wait(lambda: client.status['state'] == 'failed')
-            error = client.status['error']
-            if 'frame deadline' not in error:
-                # The broker and client share the .35s bound. Either may win;
-                # an unrelated disconnect/parse failure must not pass as timeout.
-                self.assertEqual(error, 'Viewport broker exited: 1')
-                exception = json.loads((self.project / 'broker-exception.json').read_text())
-                self.assertEqual(exception['session'], client.status['session'])
-                self.assertEqual(exception['broker_pid'], broker_pid)
-                self.assertEqual(exception['child_pid'], child['pid'])
-                self.assertEqual(exception['type'], 'Refusal')
-                self.assertIn(exception['error'], ('Host deadline/write', 'Frame publication deadline'))
-                self.assertTrue(client.status['last_result']['child_reaped'])
-                self.assertEqual(client.status['last_result']['status'], 'failed')
-            self.assertIsNone(client.poll())
-            self.assertFalse(running(broker_pid))
-            self.assertFalse(running(child['pid']))
-            self.assertFalse(directory.exists())
+        with self.controlled_deadlines() as clock:
+            stopped, stopping = threading.Event(), {}
+            original_stop = ViewportClient._stop
+            def observed_stop(client, *arguments):
+                stopping['at'] = clock.monotonic()
+                stopped.set()
+                return original_stop(client, *arguments)
+            with mock.patch.object(ViewportClient, '_stop', observed_stop):
+                self.check_frame_timeout_under_flood(clock, stopped, stopping)
+
+    def check_frame_timeout_under_flood(self, clock, stopped, stopping):
+        client = self.client('hang', frame_timeout=.35, startup_timeout=1, shutdown_timeout=.1)
+        # Warm only fixture process startup. The frame deadline remains .35s.
+        child = self.wait(lambda: self.child(client))
+        broker_pid = client.status['broker_pid']
+        directory = Path(client.status['session_directory'])
+        self.wait(lambda: wire.read_readiness(directory / 'broker-ready.json', child['session'],
+                  pid=child['pid'], broker_pid=broker_pid))
+        # Start the frame clock only after the client has sent a request.
+        client.submit(state())
+        self.wait(lambda: (directory / 'desired.bin').exists() and clock.sampled_by_client())
+        started, revision = clock.monotonic(), 1
+        # Observe the watchdog decision before SDK verification and process
+        # cleanup, whose duration is governed by separate existing bounds.
+        # Advance only the client clock so the broker cannot mask a client
+        # that incorrectly renews its deadline on every submitted state.
+        while not stopped.is_set() and clock.monotonic() - started < .85:
+            revision += 1
+            client.submit(state(revision))
+            clock.advance(.02, broker=False)
+            self.wait(lambda: stopped.is_set() or clock.sampled_by_client())
+        self.assertTrue(stopped.is_set(), client.status)
+        self.assertLessEqual(stopping['at'] - started, .85)
+        self.assertGreater(revision, 1)
+        self.wait(lambda: client.status['state'] == 'failed')
+        error = client.status['error']
+        if 'frame deadline' not in error:
+            # Any broker-side failure must carry deadline evidence; an
+            # unrelated disconnect/parse failure must not pass as timeout.
+            self.assertEqual(error, 'Viewport broker exited: 1')
+            exception = json.loads((self.project / 'broker-exception.json').read_text())
+            self.assertEqual(exception['session'], client.status['session'])
+            self.assertEqual(exception['broker_pid'], broker_pid)
+            self.assertEqual(exception['child_pid'], child['pid'])
+            self.assertEqual(exception['type'], 'Refusal')
+            self.assertIn(exception['error'], ('Host deadline/write', 'Frame publication deadline'))
+            self.assertTrue(client.status['last_result']['child_reaped'])
+            self.assertEqual(client.status['last_result']['status'], 'failed')
+        self.assertIsNone(client.poll())
+        self.assertFalse(running(broker_pid))
+        self.assertFalse(running(child['pid']))
+        self.assertFalse(directory.exists())
 
     def test_hung_shutdown_is_bounded_and_does_not_claim_cooperative_stop(self):
         client = self.client('stop-hang', shutdown_timeout=.15)
         client.submit(state())
         self.wait(client.poll)
         self.assertTrue(client.close(wait=True, timeout=4))
+        self.assertTrue((self.project / ('stop-received-' + client.status['session'])).exists())
         self.assertEqual(client.status['state'], 'failed')
         self.assertIn('shutdown', client.status['error'])
 
     def test_broker_crash_reaps_descendants_not_only_direct_child(self):
-        client = self.client('crash-tree')
-        client.submit(state())
-        self.wait(lambda: (self.project / 'child.json').exists())
-        child = json.loads((self.project / 'child.json').read_text())
-        self.assertTrue(child['key_removed_before_descendants'])
-        self.assertTrue(running(child['descendant']))
-        self.wait(lambda: client.status['state'] == 'failed')
-        self.wait(lambda: not running(child['pid']) and not running(child['descendant']))
+        with self.controlled_deadlines():
+            client = self.client('crash-tree')
+            client.submit(state())
+            child = self.wait(lambda: self.child(client))
+            self.assertTrue(child['key_removed_before_descendants'])
+            self.assertTrue(running(child['descendant']))
+            # A delivered frame proves the whole tree is live before the crash.
+            self.wait(client.poll)
+            (self.project / ('crash-' + child['session'])).touch()
+            self.wait(lambda: client.status['state'] == 'failed')
+            self.wait(lambda: not running(child['pid']) and not running(child['descendant']))
 
     def test_sdk_change_on_shutdown_invalidates_the_session(self):
         client = self.client()
@@ -575,7 +806,7 @@ except BaseException as error:
         try:
             with mock.patch.object(installation, 'file_hash', side_effect=swap):
                 digest, parsed = installation.verify_installation(
-                    self.manifest, self.host, time.monotonic()+2, expected_manifest=pin)
+                    self.manifest, self.host, 2, expected_manifest=pin)
             self.assertEqual(digest, pin)
             self.assertEqual(parsed, json.loads(original_bytes))
         finally:
@@ -614,7 +845,7 @@ except BaseException as error:
         value['files']['../outside'] = 'a'*64
         self.manifest.write_text(json.dumps(value))
         with self.assertRaisesRegex(ValueError, 'relative path'):
-            installation.verify_installation(self.manifest, self.host, time.monotonic()+2)
+            installation.verify_installation(self.manifest, self.host, 2)
         self.manifest.unlink()
         target = self.root / 'external-module'
         self.module.rename(target)
