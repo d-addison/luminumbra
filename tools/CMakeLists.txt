@@ -177,9 +177,28 @@ if(BUILD_TESTING)
         PROPERTIES LABELS "release;tools" TIMEOUT 60)
     add_test(
         NAME ReleaseGatesScriptContract
-        COMMAND "${Python3_EXECUTABLE}"
-                "${CMAKE_CURRENT_SOURCE_DIR}/release/test_validate_release_gates.py")
+        COMMAND "${Python3_EXECUTABLE}" -I -B
+                "${CMAKE_CURRENT_SOURCE_DIR}/release/test_validate_release_gates.py"
+                RecordTests ApiTests StatusTests GitCommandTests WiringTests)
     set_tests_properties(ReleaseGatesScriptContract
+        PROPERTIES LABELS "release;tools" TIMEOUT 60)
+    add_test(
+        NAME ReleaseGatesGitContract
+        COMMAND "${Python3_EXECUTABLE}" -I -B
+                "${CMAKE_CURRENT_SOURCE_DIR}/release/test_validate_release_gates.py" GitTests)
+    set_tests_properties(ReleaseGatesGitContract
+        PROPERTIES LABELS "release;tools" TIMEOUT 60)
+    add_test(
+        NAME ReleaseGatesCliContract
+        COMMAND "${Python3_EXECUTABLE}" -I -B
+                "${CMAKE_CURRENT_SOURCE_DIR}/release/test_validate_release_gates.py" CliTests)
+    set_tests_properties(ReleaseGatesCliContract
+        PROPERTIES LABELS "release;tools" TIMEOUT 60)
+    add_test(
+        NAME ReleaseGatesProtectionContract
+        COMMAND "${Python3_EXECUTABLE}" -I -B
+                "${CMAKE_CURRENT_SOURCE_DIR}/release/test_validate_release_gates.py" ProtectionTests)
+    set_tests_properties(ReleaseGatesProtectionContract
         PROPERTIES LABELS "release;tools" TIMEOUT 60)
     add_test(
         NAME SlowestTestsScriptContract
