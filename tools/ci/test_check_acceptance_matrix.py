@@ -9,6 +9,7 @@ import io
 import json
 import os
 import re
+import stat
 import sys
 import tempfile
 import unittest
@@ -162,7 +163,9 @@ class AcceptanceMatrixTests(unittest.TestCase):
     def setUp(self) -> None:
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
-        self.tmp = Path(tmp.name)
+        # Match the CLI's resolved root, including directory aliases on macOS
+        # and Windows short temporary-directory names, so fault injections hit.
+        self.tmp = Path(tmp.name).resolve()
         self.root = self.tmp / "repo"
         (self.root / "test").mkdir(parents=True)
         (self.root / "tools").mkdir()
@@ -249,7 +252,7 @@ class AcceptanceMatrixTests(unittest.TestCase):
         })
         self.write_matrix(matrix)
         doc = self.root / "docs/acceptance-matrix.md"
-        doc.write_text(MODULE.render_doc(matrix), encoding="utf-8")
+        doc.write_bytes(MODULE.render_doc(matrix).encode("utf-8"))
         return matrix
 
     def refresh_decisions(self, output: str) -> list[dict[str, Any]]:
@@ -589,26 +592,37 @@ class AcceptanceMatrixTests(unittest.TestCase):
         self.prepare_refresh()
         path = self.root / MODULE.CONTRACT_DOCUMENTS[1]
         original = path.read_bytes()
-        before = (self.root / "tools/ci/acceptance_requirements.json").read_bytes()
-        for content in (None, b"# Contract\n\xff"):
-            if content is None:
-                path.unlink()
-            else:
-                path.write_bytes(content)
-            code, _, err = self.run_main(*self.base_args(), "--refresh-inventory")
-            self.assertEqual(code, 2, err)
-            self.assertEqual((self.root / "tools/ci/acceptance_requirements.json").read_bytes(), before)
-        path.write_bytes(original)
+        outputs = (self.root / "tools/ci/acceptance_requirements.json", self.matrix_path,
+                   self.root / "docs/acceptance-matrix.md")
+        before = [output.read_bytes() for output in outputs]
+        for content in (None, b"# Contract\n\xff", "directory"):
+            with self.subTest(content=content):
+                path.unlink(missing_ok=True)
+                if content == "directory":
+                    path.mkdir()
+                elif content is not None:
+                    path.write_bytes(content)
+                try:
+                    with mock.patch.object(Path, "replace") as replace:
+                        code, _, err = self.run_main(*self.base_args(), "--refresh-inventory")
+                    self.assertEqual(code, 2, err)
+                    replace.assert_not_called()
+                    self.assertEqual([output.read_bytes() for output in outputs], before)
+                finally:
+                    if path.is_dir():
+                        path.rmdir()
+                    path.write_bytes(original)
         read = Path.read_text
         def denied(file: Path, *args: Any, **kwargs: Any) -> str:
             if file == path:
                 raise PermissionError("contract denied")
             return read(file, *args, **kwargs)
-        with mock.patch.object(Path, "read_text", denied):
+        with mock.patch.object(Path, "read_text", denied), mock.patch.object(Path, "replace") as replace:
             code, _, err = self.run_main(*self.base_args(), "--refresh-inventory")
         self.assertEqual(code, 2, err)
         self.assertIn("contract denied", err)
-        self.assertEqual((self.root / "tools/ci/acceptance_requirements.json").read_bytes(), before)
+        replace.assert_not_called()
+        self.assertEqual([output.read_bytes() for output in outputs], before)
 
     def test_refresh_preserves_unknown_entry_metadata_and_rejects_invalid_row_lists(self) -> None:
         matrix = self.prepare_refresh()
@@ -704,9 +718,10 @@ class AcceptanceMatrixTests(unittest.TestCase):
                 self.assertEqual(set(inventory.parent.iterdir()), {inventory})
 
     def test_refresh_stages_all_outputs_before_replacement_and_retries_partial_data(self) -> None:
-        create = MODULE.tempfile.NamedTemporaryFile
-        for fail_at in (1, 2, 3, 4):
-            with self.subTest(stage=fail_at):
+        create = open
+        for failure, fail_at in ((failure, stage) for failure in ("create", "partial")
+                                 for stage in range(1, 6)):
+            with self.subTest(failure=failure, stage=fail_at):
                 self.prepare_refresh()
                 self.write_inventory()
                 (self.root / MODULE.CONTRACT_DOCUMENTS[1]).write_text(
@@ -715,30 +730,43 @@ class AcceptanceMatrixTests(unittest.TestCase):
                          self.root / "docs/acceptance-matrix.md")
                 before = [path.read_bytes() for path in paths]
                 extra_doc = self.tmp / "additional.md"
+                receipt = self.tmp / "receipt.json"
                 extra_doc.unlink(missing_ok=True)
+                receipt.unlink(missing_ok=True)
+                discovery, report = self.execution_inputs()
+                args = [*self.base_args(), "--refresh-inventory", "--write-doc", str(extra_doc),
+                        "--junit", str(report), "--discovery", str(discovery),
+                        "--execution-receipt", str(receipt)]
+                before_paths = set(self.tmp.rglob("*"))
                 calls = 0
                 def partial_file(*args: Any, **kwargs: Any) -> Any:
                     nonlocal calls
                     calls += 1
+                    if calls == fail_at and failure == "create":
+                        raise PermissionError("staged output creation denied")
                     handle = create(*args, **kwargs)
                     if calls == fail_at:
+                        write = handle.write
                         def partial(data: bytes) -> None:
-                            handle.file.write(data[:8])
+                            write(data[:8])
                             raise OSError("partial staged output")
                         handle.write = partial
                     return handle
-                with mock.patch.object(MODULE.tempfile, "NamedTemporaryFile", side_effect=partial_file), \
+                with mock.patch.object(MODULE, "open", side_effect=partial_file, create=True), \
                         mock.patch.object(Path, "replace") as replace:
-                    code, _, err = self.run_main(*self.base_args(), "--refresh-inventory",
-                                                  "--write-doc", str(extra_doc))
+                    code, _, err = self.run_main(*args)
                 self.assertEqual(code, 2, err)
-                self.assertIn("partial staged output", err)
+                self.assertIn("partial staged output" if failure == "partial"
+                              else "staged output creation denied", err)
                 replace.assert_not_called()
                 self.assertEqual([path.read_bytes() for path in paths], before)
                 self.assertFalse(extra_doc.exists())
-                code, _, err = self.run_main(*self.base_args(), "--refresh-inventory", "--write-doc", str(extra_doc))
+                self.assertFalse(receipt.exists())
+                self.assertEqual(set(self.tmp.rglob("*")), before_paths)
+                code, _, err = self.run_main(*args)
                 self.assertEqual(code, 0, err)
                 self.assertEqual(extra_doc.read_bytes(), paths[2].read_bytes())
+                self.assertEqual(json.loads(receipt.read_bytes())["matrix_sha256"], MODULE._sha256(self.matrix_path))
 
     def test_refresh_refuses_colliding_output_paths_without_writes(self) -> None:
         self.prepare_refresh()
@@ -757,8 +785,12 @@ class AcceptanceMatrixTests(unittest.TestCase):
         self.prepare_refresh()
         (self.root / MODULE.CONTRACT_DOCUMENTS[1]).write_text(
             "# Moved\nEvery requirement has evidence.\n", encoding="utf-8")
+        extra_doc, receipt = self.tmp / "additional.md", self.tmp / "receipt.json"
+        extra_doc.write_bytes(b"stale document\n")
+        receipt.write_bytes(b"stale receipt\n")
+        discovery, report = self.execution_inputs()
         paths = (self.root / "tools/ci/acceptance_requirements.json", self.matrix_path,
-                 self.root / "docs/acceptance-matrix.md")
+                 self.root / "docs/acceptance-matrix.md", extra_doc, receipt)
         before = [path.read_bytes() for path in paths]
         read = Path.read_bytes
         for blocked in paths:
@@ -768,7 +800,9 @@ class AcceptanceMatrixTests(unittest.TestCase):
                         raise PermissionError("output read denied")
                     return read(file)
                 with mock.patch.object(Path, "read_bytes", denied), mock.patch.object(Path, "replace") as replace:
-                    code, _, err = self.run_main(*self.base_args(), "--refresh-inventory")
+                    code, _, err = self.run_main(*self.base_args(), "--refresh-inventory",
+                                                  "--write-doc", str(extra_doc), "--junit", str(report),
+                                                  "--discovery", str(discovery), "--execution-receipt", str(receipt))
                 self.assertEqual(code, 2, err)
                 self.assertIn("output read denied", err)
                 replace.assert_not_called()
@@ -824,15 +858,16 @@ class AcceptanceMatrixTests(unittest.TestCase):
         (self.root / MODULE.CONTRACT_DOCUMENTS[1]).write_text(
             "# Moved\nEvery requirement has evidence.\n", encoding="utf-8")
         before = path.read_bytes()
-        create = MODULE.tempfile.NamedTemporaryFile
+        create = open
         def partial_file(*args: Any, **kwargs: Any) -> Any:
             handle = create(*args, **kwargs)
+            write = handle.write
             def partial(data: bytes) -> None:
-                handle.file.write(data[:8])
+                write(data[:8])
                 raise OSError("partial write refused")
             handle.write = partial
             return handle
-        with mock.patch.object(MODULE.tempfile, "NamedTemporaryFile", side_effect=partial_file):
+        with mock.patch.object(MODULE, "open", side_effect=partial_file, create=True):
             code, _, err = self.run_main(*self.base_args(), "--refresh-inventory")
         self.assertEqual(code, 2, err)
         self.assertIn("partial write refused", err)
@@ -850,21 +885,89 @@ class AcceptanceMatrixTests(unittest.TestCase):
         self.assertEqual(code, 0, err)
         self.assertEqual(path.stat().st_mode, permissions)
         document.write_text("# Moved again\nEvery requirement has evidence.\n", encoding="utf-8")
+        path.chmod(0o440)
+        readonly_mode = path.stat().st_mode
         before = path.read_bytes()
         unlink = Path.unlink
         denied = []
+        replace = Path.replace
+        def locked(file: Path, target: Path) -> Path:
+            if target == path:
+                self.assertEqual(file.stat().st_mode, readonly_mode)
+                raise PermissionError("replace denied")
+            return replace(file, target)
         def readonly(file: Path, *args: Any, **kwargs: Any) -> None:
             if file.parent == path.parent and file != path and not denied:
                 denied.append(file)
                 raise PermissionError("read-only candidate")
             unlink(file, *args, **kwargs)
-        with mock.patch.object(Path, "replace", side_effect=PermissionError("replace denied")), \
-                mock.patch.object(Path, "unlink", readonly):
-            code, _, err = self.run_main(*self.base_args(), "--refresh-inventory")
+        try:
+            with mock.patch.object(Path, "replace", locked), mock.patch.object(Path, "unlink", readonly):
+                code, _, err = self.run_main(*self.base_args(), "--refresh-inventory")
+        finally:
+            path.chmod(0o640)
         self.assertEqual(code, 2, err)
-        self.assertTrue(denied)
+        self.assertIn("replace denied", err)
+        self.assertEqual(len(denied), 1)
         self.assertEqual(path.read_bytes(), before)
         self.assertEqual(list(path.parent.iterdir()), [path])
+
+    def test_output_staging_collision_never_changes_or_removes_existing_files(self) -> None:
+        matrix = self.prepare_refresh()
+        doc = self.tmp / "additional.md"
+        collision = self.tmp / (".acceptance-" + "a" * 32)
+        collision.write_bytes(b"unrelated file\r\n")
+        before = {path: path.read_bytes() for path in self.tmp.rglob("*") if path.is_file()}
+        with mock.patch.object(MODULE.secrets, "token_hex", return_value="a" * 32), \
+                mock.patch.object(Path, "replace") as replace:
+            code, _, err = self.run_main(*self.base_args(), "--refresh-inventory", "--write-doc", str(doc))
+        self.assertEqual(code, 2, err)
+        self.assertIn("cannot replace output", err)
+        replace.assert_not_called()
+        self.assertFalse(doc.exists())
+        self.assertEqual({path: path.read_bytes() for path in self.tmp.rglob("*") if path.is_file()}, before)
+        code, _, err = self.run_main(*self.base_args(), "--refresh-inventory", "--write-doc", str(doc))
+        self.assertEqual(code, 0, err)
+        self.assertEqual(doc.read_bytes(), MODULE.render_doc(matrix).encode("utf-8"))
+        self.assertEqual(collision.read_bytes(), b"unrelated file\r\n")
+
+    def test_new_document_modes_follow_umask_and_receipts_stay_private(self) -> None:
+        for refresh in (False, True):
+            self.prepare_refresh()
+            discovery, report = self.execution_inputs()
+            doc = self.tmp / "additional.md"
+            receipt = self.tmp / "receipt.json"
+            reference = self.tmp / "ordinary.md"
+            for mask in (0o022, 0o027, 0o077):
+                with self.subTest(refresh=refresh, umask=oct(mask)):
+                    doc.unlink(missing_ok=True)
+                    receipt.unlink(missing_ok=True)
+                    reference.unlink(missing_ok=True)
+                    previous = os.umask(mask)
+                    try:
+                        reference.write_bytes(b"ordinary creation\n")
+                        with tempfile.NamedTemporaryFile(dir=self.tmp) as private:
+                            private_mode = stat.S_IMODE(os.fstat(private.fileno()).st_mode)
+                        args = [*self.base_args(), "--write-doc", str(doc), "--junit", str(report),
+                                "--discovery", str(discovery), "--execution-receipt", str(receipt)]
+                        if refresh:
+                            args.append("--refresh-inventory")
+                        code, _, err = self.run_main(*args)
+                    finally:
+                        os.umask(previous)
+                    self.assertEqual(code, 0, err)
+                    self.assertEqual(stat.S_IMODE(doc.stat().st_mode),
+                                     stat.S_IMODE(reference.stat().st_mode))
+                    self.assertEqual(stat.S_IMODE(receipt.stat().st_mode), private_mode)
+                    for output in (doc, receipt):
+                        output.write_bytes(b"stale output\n")
+                        output.chmod(0o640)
+                    modes = [stat.S_IMODE(output.stat().st_mode) for output in (doc, receipt)]
+                    code, _, err = self.run_main(*args)
+                    self.assertEqual(code, 0, err)
+                    self.assertEqual([stat.S_IMODE(output.stat().st_mode) for output in (doc, receipt)], modes)
+                    self.assertEqual(doc.read_bytes(), MODULE.render_doc(MODULE.load_matrix(self.matrix_path)).encode("utf-8"))
+                    self.assertIsInstance(json.loads(receipt.read_bytes()), dict)
 
     def test_refresh_failed_permission_copy_does_not_replace_inventory(self) -> None:
         self.prepare_refresh()
@@ -880,19 +983,21 @@ class AcceptanceMatrixTests(unittest.TestCase):
         self.assertEqual(list(path.parent.iterdir()), [path])
 
     def test_refresh_consistent_crlf_doc_and_failed_doc_replacement(self) -> None:
-        self.prepare_refresh()
+        matrix = self.prepare_refresh()
         doc = self.root / "docs/acceptance-matrix.md"
-        doc.write_bytes(doc.read_bytes().replace(b"\n", b"\r\n"))
+        crlf = MODULE.render_doc(matrix).replace("\n", "\r\n").encode("utf-8")
+        doc.write_bytes(crlf)
+        self.assertNotIn(b"\r\r\n", crlf)
         before = doc.read_bytes(), doc.stat().st_mtime_ns
         code, _, err = self.run_main(*self.base_args(), "--refresh-inventory")
         self.assertEqual(code, 0, err)
         self.assertEqual((doc.read_bytes(), doc.stat().st_mtime_ns), before)
-        doc.write_text("Stale generated view.\n", encoding="utf-8")
+        doc.write_bytes(b"Stale generated view.\r\n")
         with mock.patch.object(Path, "replace", side_effect=PermissionError("doc replace denied")):
             code, _, err = self.run_main(*self.base_args(), "--refresh-inventory")
         self.assertEqual(code, 2, err)
         self.assertIn("cannot replace output", err)
-        self.assertEqual(doc.read_text(encoding="utf-8"), "Stale generated view.\n")
+        self.assertEqual(doc.read_bytes(), b"Stale generated view.\r\n")
 
     def test_unreadable_source_anchor_is_a_validation_error(self) -> None:
         original = MODULE._read_text

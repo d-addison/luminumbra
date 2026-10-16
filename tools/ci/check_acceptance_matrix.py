@@ -9,11 +9,11 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import shlex
 import stat
 import subprocess
 import sys
-import tempfile
 import unicodedata
 import xml.etree.ElementTree as ET
 from collections import Counter
@@ -860,7 +860,7 @@ def refresh_inventory(
     return refreshed, updated_matrix, decisions
 
 
-def _replace_outputs(outputs: list[tuple[Path, str]]) -> None:
+def _replace_outputs(outputs: list[tuple[Path, str]], *, private_output: Path | None = None) -> None:
     """Stage every output before replacing closed files on Windows or POSIX.
 
     Callers put the inventory last: until it is replaced, the original locators
@@ -875,8 +875,13 @@ def _replace_outputs(outputs: list[tuple[Path, str]]) -> None:
             if path.is_file() and path.read_bytes() == data:
                 continue
             mode = stat.S_IMODE(path.stat().st_mode) if path.exists() else None
-            with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as handle:
-                temporary = Path(handle.name)
+            # A 128-bit random name plus exclusive creation prevents clobbering
+            # another file. Register it for cleanup only after creation succeeds.
+            temporary = path.parent / (".acceptance-" + secrets.token_hex(16))
+            # New documents use normal creation permissions and inherited ACLs.
+            # Keep receipts and replacements private until their mode is set.
+            creation_mode = 0o600 if mode is not None or path == private_output else 0o666
+            with open(temporary, "xb", opener=lambda name, flags: os.open(name, flags, creation_mode)) as handle:
                 staged.append((temporary, path))
                 handle.write(data)
             if mode is not None:
@@ -1441,7 +1446,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"error: {exc}", file=sys.stderr)
             return 2
     try:
-        _replace_outputs(outputs)
+        _replace_outputs(outputs, private_output=args.execution_receipt)
     except OSError as exc:
         print(f"error: cannot replace output: {exc}", file=sys.stderr)
         return 2
