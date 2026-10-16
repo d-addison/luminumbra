@@ -99,7 +99,7 @@ jobs:
     timeout-minutes: 60
     env:
       CCACHE_COMPILERCHECK: content
-      CCACHE_MAXSIZE: 250M
+      CCACHE_MAXSIZE: 400M
     outputs:
       route: ${{ steps.route.outputs.route }}
     steps:
@@ -199,6 +199,7 @@ jobs:
         if: ${{ needs.changes.outputs.needs_cpp != 'false' }}
         id: tests
         run: |
+          ctest --preset release --show-only=json-v1 > build/release/ctest-discovery.json
           env -u WAYLAND_DISPLAY XDG_SESSION_TYPE=x11 LIBGL_ALWAYS_SOFTWARE=1 \
             xvfb-run -a ctest --preset release --no-tests=error -LE manual \
               --parallel 4 --timeout 180 --output-junit ctest.junit.xml
@@ -220,6 +221,13 @@ jobs:
         run: |
           ctest --preset release --no-tests=error -R '^NetSoak$' \
             --parallel 1 --output-junit netsoak.junit.xml
+      - name: Check acceptance matrix CTest execution
+        if: ${{ needs.changes.outputs.needs_cpp != 'false' }}
+        run: |
+          python3 tools/ci/check_acceptance_matrix.py \
+            --junit build/release/ctest.junit.xml --junit build/release/netsoak.junit.xml \
+            --discovery build/release/ctest-discovery.json --ci-context \
+            --execution-receipt build/release/test-artifacts/acceptance-execution.json
       - name: Bind manual qualification evidence
         if: ${{ needs.changes.outputs.needs_cpp != 'false' && (always() && (github.event_name == 'workflow_dispatch' && inputs.qualification_capture)) }}
         env:
@@ -243,6 +251,7 @@ jobs:
           path: |
             build/release/ctest.junit.xml
             build/release/netsoak.junit.xml
+            build/release/ctest-discovery.json
             build/release/Testing/Temporary
             build/release/test-artifacts
           if-no-files-found: warn
@@ -672,12 +681,12 @@ jobs:
 
   windows-ucrt64:
     name: Windows / MSYS2 UCRT64
-    # Runs on ready pull requests (devel- and main-bound) and on pushes to main, so a
-    # MinGW/UCRT break shows on the PR that causes it instead of at promotion. It is
-    # not a required devel context, so it informs rather than blocks there; it stays
-    # required on main. Pushes to devel do not run it (the PR already did).
+    # Runs on ready pull requests (devel- and main-bound) and pushes to main/devel.
+    # Devel pushes seed the compiler cache restored by pull requests into devel.
+    # A MinGW/UCRT break shows on the PR that causes it instead of at promotion.
+    # It is not a required devel context; it stays required on main.
     needs: changes
-    if: ${{ !cancelled() && needs.changes.outputs.needs_cpp != 'false' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (github.event_name == 'pull_request' || github.ref_name == 'main' || (github.event_name == 'workflow_dispatch' && inputs.qualification_capture)) }}
+    if: ${{ !cancelled() && needs.changes.outputs.needs_cpp != 'false' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (github.event_name == 'pull_request' || github.ref_name == 'main' || (github.event_name == 'push' && github.ref == 'refs/heads/devel') || (github.event_name == 'workflow_dispatch' && inputs.qualification_capture)) }}
     runs-on: windows-2025
     # Measured 40.6 min end to end on the first post-release promotion run
     # (previously two 135-minute cap kills, before the test streaming caps
@@ -997,6 +1006,8 @@ jobs:
           python3 tools/ci/test_check_ctest_junit.py
           python3 tools/ci/test_workflow_policy.py
           python3 tools/ci/test_asan_shards.py
+          python3 tools/ci/test_check_acceptance_matrix.py
+          python3 tools/ci/check_acceptance_matrix.py --check-doc docs/acceptance-matrix.md
           python3 tools/ci/test_tidy_cache.py
           python3 tools/ci/test_tidy_shard.py
           python3 tools/ci/test_validate_visual_catalog.py
