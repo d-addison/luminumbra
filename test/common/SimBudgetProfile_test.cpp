@@ -77,6 +77,27 @@ TEST(SimBudgetProfileTest, OmittedWorkLimitIsUnlimitedAndAbsentSchedulerIsDefaul
     EXPECT_EQ(ToRegionSchedulerConfig(absent.profile), RegionSchedulerConfig{});
 }
 
+TEST(SimBudgetProfileTest, RawNulRefusesWholeProfile) {
+    const auto bytes = Profile(R"("region_scheduler":{"hold_ticks":4},"stages":{"instinct":5})");
+    const auto clean = ParseSimBudgetProfile(bytes);
+    ASSERT_EQ(clean.error, ProfileError::None);
+    for (const auto& invalid : {bytes + '\0',
+                                bytes + '\0' + "garbage",
+                                bytes + '\x1a' + '\0' + "garbage",
+                                '\0' + bytes}) {
+        const auto refused = ParseSimBudgetProfile(invalid);
+        EXPECT_EQ(refused.error, ProfileError::Malformed);
+        EXPECT_NE(refused.detail.find("raw NUL"), std::string::npos);
+        EXPECT_FALSE(refused.profile.region_scheduler.has_value());
+        EXPECT_TRUE(refused.profile.stage_max_work.empty());
+        EXPECT_TRUE(refused.profile.residency_max_bytes.empty());
+    }
+    const auto restored = ParseSimBudgetProfile(bytes);
+    ASSERT_EQ(restored.error, ProfileError::None);
+    EXPECT_EQ(restored.profile.region_scheduler, clean.profile.region_scheduler);
+    EXPECT_EQ(restored.profile.stage_max_work, clean.profile.stage_max_work);
+}
+
 TEST(SimBudgetProfileTest, RefusesMalformedJson) {
     ExpectRefused("", ProfileError::Malformed, "malformed");
     ExpectRefused("{", ProfileError::Malformed, "malformed");

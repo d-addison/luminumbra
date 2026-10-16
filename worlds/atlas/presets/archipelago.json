@@ -1,7 +1,7 @@
 {
   "name": "Archipelago",
   "description": "Scattered islands across a deep ocean — rolling shores and walkable interiors, not spiky blades.",
-  "schema_rev": 6,
+  "schema_rev": 7,
   "generation_params": {
     "terrain": {
       "base_frequency": 0.008,
@@ -37,15 +37,18 @@
     },
     "biomes": {
       "temperature_frequency": 0.005,
-      "humidity_frequency": 0.005
+      "humidity_frequency": 0.005,
+      "table": "common/biomes.json",
+      "relief_enabled": true
     },
     "features": {
       "caves_enabled": true,
       "cave_frequency": 0.03,
-      "rivers_enabled": false,
-      "lakes_enabled": false,
-      "cliffs_enabled": false,
-      "structures_enabled": true
+      "rivers_enabled": true,
+      "lakes_enabled": true,
+      "cliffs_enabled": true,
+      "structures_enabled": true,
+      "surface_breaks_enabled": true
     }
   }
 }
