@@ -67,6 +67,7 @@ __declspec(dllexport) extern const int AmdPowerXpressRequestHighPerformance = 1;
 #include "luminumbra_common/core/Environment.h"
 #include "luminumbra_common/core/JobSystem.h"
 #include "luminumbra_common/core/SystemConfig.h" // user.* video/audio/controls settings
+#include "luminumbra_common/core/WaterAttribution.h"
 #include "luminumbra_common/game/CodexView.h" // pure presentation model for the codex browse screen
 #include "luminumbra_common/game/Objectives.h" // progression goals surfaced on the HUD
 #include "luminumbra_common/game/PhotoMode.h" // photo-capture feature: photo-mode capture loop (read-only observer)
@@ -3141,6 +3142,7 @@ int main(int argc, char* argv[]) {
     while (!glfwWindowShouldClose(window)) {
         const auto _frameStart = std::chrono::steady_clock::now();
         Attribution::FoliageFrameScope foliage_scope(frame_attribution_enabled);
+        const Luminumbra::WaterAttribution::FrameScope water_scope(frame_attribution_enabled);
         MainLoopHeartbeat().fetch_add(1, std::memory_order_relaxed);
         float currentFrame = (float)glfwGetTime();
         float deltaTime = currentFrame - lastFrame;
@@ -4795,7 +4797,8 @@ int main(int argc, char* argv[]) {
                                            foliage_frame.capacity,
                                            foliage_frame.count_known,
                                            foliage_frame.generated_count,
-                                           foliage_frame.count_generation))
+                                           foliage_frame.count_generation,
+                                           water_scope.snapshot()))
                     LUMINUMBRA_CORE_ERROR("Frame attribution CSV write failed");
             }
             if (_wallMs > 12.0 && g_app.telemetry.slowFrameCount++ < 400) {
@@ -4821,6 +4824,22 @@ int main(int argc, char* argv[]) {
                                      foliage_frame.rebuild_ms,
                                      rb_menu_ms,
                                      rb_ui_ms);
+                if (frame_attribution_enabled) {
+                    const auto& water = water_scope.snapshot();
+                    LUMINUMBRA_CORE_WARN(
+                        "  water-split: selection={:.3f} seed_inputs={:.3f} "
+                        "initialization={:.3f} sim={:.3f} seam={:.3f} bookkeeping={:.3f} "
+                        "precomputed={} fallback={} stale={}",
+                        water.selection_ms,
+                        water.seed_inputs_ms,
+                        water.initialization_ms,
+                        water.sim_ms,
+                        water.seam_ms,
+                        water.bookkeeping_ms,
+                        water.precomputed_columns,
+                        water.fallback_columns,
+                        water.stale_columns);
+                }
                 if (frame_attribution_enabled)
                     LUMINUMBRA_CORE_WARN(
                         "  foliage-split: signature={:.3f} sort={:.3f} surface={:.3f} "

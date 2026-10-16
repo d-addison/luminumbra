@@ -1,4 +1,5 @@
 #include "luminumbra_client/app/FrameAttribution.h"
+#include "luminumbra_common/core/WaterAttribution.h"
 
 #include <gtest/gtest.h>
 
@@ -106,20 +107,24 @@ TEST(FrameAttribution, CsvColumnsMatchHeaderAndUnknownCountsAreEmpty) {
         "repack_ms,hash_ms,upload_ms,palette_scratch_ms,dispatch_ms,cpu_fallback_ms,"
         "rebuild_calls,reason_mask,admitted_columns,surface_misses,deferred_columns,copied_bytes,"
         "hashed_bytes,uploaded_bytes,scratch_bytes,backlog,path,fallback,"
-        "instance_capacity,generated_count,count_generation\n");
+        "instance_capacity,generated_count,count_generation,water_selection_ms,"
+        "water_seed_inputs_ms,water_initialization_ms,water_sim_ms,water_seam_ms,"
+        "water_bookkeeping_ms,water_precomputed_columns,water_fallback_columns,"
+        "water_stale_columns\n");
     std::ostringstream unknown;
     write_csv_row(unknown, 401, 60, buckets, foliage, 262144, false, 262144, 7);
     EXPECT_EQ(unknown.str(),
               "401,60.000000,1.000000,2.000000,3.000000,4.000000,5.000000,6.000000,"
               "7.000000,8.000000,9.000000,10.000000,5.000000,0.125000,0.250000,0.500000,"
               "0.750000,1.000000,1.250000,1.500000,1.750000,2.000000,1,40,10,4,6,1024,"
-              "2048,4096,8192,1,cpu,column_capacity,262144,,\n");
+              "2048,4096,8192,1,cpu,column_capacity,262144,,,0.000000,0.000000,0.000000,"
+              "0.000000,0.000000,0.000000,0,0,0\n");
     EXPECT_EQ(fields(header.str()).size(), fields(unknown.str()).size());
     std::ostringstream known;
     write_csv_row(known, 402, 60, buckets, foliage, 262144, true, 123, 7);
     EXPECT_EQ(fields(known.str()).size(), fields(header.str()).size());
     EXPECT_EQ(fields(known.str()).at(35), "123");
-    EXPECT_EQ(fields(known.str()).at(36), "7\n");
+    EXPECT_EQ(fields(known.str()).at(36), "7");
     std::ostringstream zero;
     write_csv_row(zero, 403, 60, buckets, foliage, 262144, true, 0, 8);
     EXPECT_EQ(fields(zero.str()).at(35), "0");
@@ -129,7 +134,7 @@ TEST(FrameAttribution, CsvRecordsShortFramesPastTheSlowFrameWindow) {
     std::ostringstream out;
     write_csv_row(out, 9000, 1, {}, {}, 262144, false, 0, 0);
     EXPECT_EQ(out.str().substr(0, 14), "9000,1.000000,");
-    EXPECT_NE(out.str().find(",not_called,none,262144,,\n"), std::string::npos);
+    EXPECT_NE(out.str().find(",not_called,none,262144,,,0.000000,"), std::string::npos);
 }
 
 TEST(FrameAttribution, NestedRebuildsAreRemovedFromTheirParentBuckets) {
@@ -286,6 +291,59 @@ TEST(FrameAttribution, DisabledCollectionDoesNotPublishOrChangeStageTotals) {
     EXPECT_FALSE(foliage_frame_active());
 }
 
+TEST(FrameAttribution, WaterStagesAccumulateOnlyInsideEnabledFrameAndStayNested) {
+    using namespace Luminumbra::WaterAttribution;
+    const Frame update{.selection_ms = 1,
+                       .seed_inputs_ms = 2,
+                       .initialization_ms = 3,
+                       .sim_ms = 4,
+                       .seam_ms = 5,
+                       .bookkeeping_ms = 6,
+                       .precomputed_columns = 7,
+                       .fallback_columns = 8,
+                       .stale_columns = 9};
+    const FrameScope frame(true);
+    Record(update);
+    {
+        const FrameScope disabled;
+        Record(update);
+        EXPECT_EQ(disabled.snapshot().precomputed_columns, 0u);
+    }
+    {
+        const FrameScope nested(true);
+        Record(update);
+        EXPECT_EQ(nested.snapshot().fallback_columns, 8u);
+    }
+    std::thread worker([&] { Record(update); });
+    worker.join();
+    Record(update);
+    const auto& water = frame.snapshot();
+    EXPECT_DOUBLE_EQ(water.selection_ms, 2);
+    EXPECT_DOUBLE_EQ(water.seed_inputs_ms, 4);
+    EXPECT_DOUBLE_EQ(water.initialization_ms, 6);
+    EXPECT_DOUBLE_EQ(water.sim_ms, 8);
+    EXPECT_DOUBLE_EQ(water.seam_ms, 10);
+    EXPECT_DOUBLE_EQ(water.bookkeeping_ms, 12);
+    EXPECT_EQ(water.precomputed_columns, 14u);
+    EXPECT_EQ(water.fallback_columns, 16u);
+    EXPECT_EQ(water.stale_columns, 18u);
+    const FrameBuckets buckets{.stream = 100};
+    EXPECT_DOUBLE_EQ(buckets.sum(), 100);
+    std::ostringstream out;
+    ASSERT_TRUE(write_csv_row(out, 1, 110, buckets, {}, 0, false, 0, 0, water));
+    const auto columns = fields(out.str());
+    EXPECT_EQ(columns.at(12), "10.000000");
+    EXPECT_EQ(columns.at(37), "2.000000");
+    EXPECT_EQ(columns.at(38), "4.000000");
+    EXPECT_EQ(columns.at(39), "6.000000");
+    EXPECT_EQ(columns.at(40), "8.000000");
+    EXPECT_EQ(columns.at(41), "10.000000");
+    EXPECT_EQ(columns.at(42), "12.000000");
+    EXPECT_EQ(columns.at(43), "14");
+    EXPECT_EQ(columns.at(44), "16");
+    EXPECT_EQ(columns.at(45), "18\n");
+}
+
 // A bounded sink that accepts a prefix, then reports a write error on every
 // platform. It exercises the same row writer and status used by FrameRecorder.
 class FailingBuffer : public std::streambuf {
@@ -396,6 +454,8 @@ TEST_F(FrameRecorderTest, RecordsEveryShortFrameAndDrainsBufferOnClose) {
     ASSERT_EQ(rows, 502u); // Header and every frame, including beyond 400.
     EXPECT_EQ(last.substr(0, 13), "501,1.000000,");
     EXPECT_EQ(fields(last).at(34), "262144");
-    EXPECT_EQ(last.substr(last.size() - 2), ",,");
+    EXPECT_EQ(fields(last).at(35), "");
+    EXPECT_EQ(fields(last).at(36), "");
+    EXPECT_EQ(fields(last).at(45), "0");
 }
 } // namespace
