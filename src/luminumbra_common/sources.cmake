@@ -35,6 +35,7 @@ set(COMMON_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/net/LockstepSession.cpp
     #  authoritative-server state-replication wire protocol.
     ${CMAKE_CURRENT_LIST_DIR}/net/ReplicationProtocol.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/net/ReplicationAdmission.cpp
     #  server/client replication endpoints over ILockstepTransport.
     ${CMAKE_CURRENT_LIST_DIR}/net/ReplicationEndpoint.cpp
     # Steamworks ISteamNetworkingSockets transport (body guarded by
@@ -94,6 +95,7 @@ set(COMMON_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/world/FarVolumeTierMemory.cpp
     ${CMAKE_CURRENT_LIST_DIR}/world/FarWantedSet.cpp
     ${CMAKE_CURRENT_LIST_DIR}/world/FarAuthorityOverlay.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/world/FarEditedBake.cpp
     ${CMAKE_CURRENT_LIST_DIR}/world/ActiveRegionLedger.cpp
     ${CMAKE_CURRENT_LIST_DIR}/replay/RegionScheduleTrace.cpp
     ${CMAKE_CURRENT_LIST_DIR}/world/WorldClock.cpp

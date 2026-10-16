@@ -1,5 +1,6 @@
 #include "ui/Rml_UIManager.h"
 #include "audio/IAudioManager.h"
+#include "luminumbra_common/core/FramePacing.h"
 #include <GLFW/glfw3.h>
 #include <RmlUi/Core.h>
 #include <RmlUi/Core/Elements/ElementFormControl.h>
@@ -11,6 +12,7 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <imgui.h>
 #include <nlohmann/json.hpp>
 #include <string>
 #include <utility>
@@ -333,16 +335,11 @@ void Rml_UIManager::Init(GLFWwindow* window, IAudioManager* audioManager) {
 
     Rml::Debugger::Initialise(m_context);
 
-    glfwSetKeyCallback(m_window, Rml_UIManager::KeyCallback);
-    glfwSetCharCallback(m_window, Rml_UIManager::CharCallback);
-    glfwSetMouseButtonCallback(m_window, Rml_UIManager::MouseButtonCallback);
-    glfwSetCursorPosCallback(m_window, Rml_UIManager::CursorPosCallback);
-    glfwSetScrollCallback(m_window, Rml_UIManager::ScrollCallback);
-
     LUMINUMBRA_CORE_INFO("UI Manager Initialized.");
 }
 
 void Rml_UIManager::Shutdown() {
+    m_developerDebuggerVisible = false;
     m_savedWorldScan.Cancel();
     m_worldScanPending = false;
     if (m_context) {
@@ -742,7 +739,7 @@ void Rml_UIManager::BindEventListeners(Rml::ElementDocument* document) {
         Rml::ElementList tabs;
         document->GetElementsByClassName(tabs, "param-tab");
         for (Rml::Element* tab : tabs) {
-            AddClickSoundListener(tab, [this, document](Rml::Event& event) {
+            AddClickSoundListener(tab, [document](Rml::Event& event) {
                 Rml::Element* t = event.GetTargetElement();
                 while (t && t->GetAttribute<Rml::String>("data-tab", "").empty())
                     t = t->GetParentNode();
@@ -1204,6 +1201,13 @@ void Rml_UIManager::PopulateSettingsForm(Rml::ElementDocument* document) {
         return;
     const SettingsBridge& b = m_settingsBridge;
 
+    if (auto* toggle = document->GetElementById("perf_hud_toggle"))
+        toggle->SetClass("on", !b.GetPerfHud || b.GetPerfHud());
+    if (auto* help = document->GetElementById("developer_help")) {
+        if (b.GetDeveloperHelp)
+            help->SetInnerRML(Rml::StringUtilities::EncodeRml(b.GetDeveloperHelp()));
+    }
+
     // Video
     if (b.GetResolution) {
         SetControlValue(document->GetElementById("setting_resolution"), b.GetResolution());
@@ -1327,16 +1331,12 @@ void Rml_UIManager::ApplySettingFromElement(Rml::Element* element) {
     } else if (id == "setting_frame_cap") {
         // Match the complete token, rather than accepting numeric prefixes.
         if (b.SetFrameCap) {
-            if (value == "0")
-                b.SetFrameCap(0);
-            else if (value == "60")
-                b.SetFrameCap(60);
-            else if (value == "120")
-                b.SetFrameCap(120);
-            else if (value == "144")
-                b.SetFrameCap(144);
-            else if (value == "240")
-                b.SetFrameCap(240);
+            for (const int cap : luminumbra::core::kFrameCaps) {
+                if (value == std::to_string(cap)) {
+                    b.SetFrameCap(cap);
+                    break;
+                }
+            }
         }
     } else if (id == "setting_fov") {
         const float f = as_float(45.0f);
@@ -1441,6 +1441,32 @@ void Rml_UIManager::BindSettingsListeners(Rml::ElementDocument* document) {
             m_settingsBridge.Save();
     };
 
+    if (auto* toggle = document->GetElementById("perf_hud_toggle")) {
+        toggle->AddEventListener(
+            "click", new LambdaEventListener([this, document](Rml::Event&) {
+                const bool visible = !m_settingsBridge.GetPerfHud || m_settingsBridge.GetPerfHud();
+                if (m_settingsBridge.SetPerfHud)
+                    m_settingsBridge.SetPerfHud(
+                        !visible); // Registry performs immediate persistence.
+                if (auto* control = document->GetElementById("perf_hud_toggle"))
+                    control->SetClass("on",
+                                      m_settingsBridge.GetPerfHud && m_settingsBridge.GetPerfHud());
+            }));
+    }
+    if (auto* open = document->GetElementById("open_developer_console")) {
+        open->AddEventListener("click", new LambdaEventListener([this](Rml::Event&) {
+                                   if (m_settingsBridge.OpenDeveloperConsole)
+                                       m_settingsBridge.OpenDeveloperConsole();
+                               }));
+    }
+
+    if (auto* help = document->GetElementById("developer_help_btn")) {
+        help->AddEventListener("click", new LambdaEventListener([document](Rml::Event&) {
+                                   if (auto* text = document->GetElementById("developer_help"))
+                                       text->SetClass("hidden", !text->IsClassSet("hidden"));
+                               }));
+    }
+
     // vsync toggle: flip.on, mirror to hidden #setting_vsync, apply + save.
     if (auto* toggle = document->GetElementById("vsync_toggle")) {
         toggle->AddEventListener(
@@ -1521,16 +1547,73 @@ void Rml_UIManager::BindSettingsListeners(Rml::ElementDocument* document) {
     }
 }
 
+void Rml_UIManager::SetDeveloperDebuggerVisible(bool visible) {
+    visible = visible && m_context;
+    if (m_developerDebuggerVisible == visible)
+        return;
+    m_developerDebuggerVisible = visible;
+    Rml::Debugger::SetVisible(visible);
+}
+bool Rml_UIManager::DeveloperDebuggerVisible() const {
+    return m_developerDebuggerVisible;
+}
+void Rml_UIManager::DrawDeveloperDebuggerContents() {
+    ImGui::TextWrapped("The RmlUi inspector renders in its own context. Close the console and "
+                       "other developer panels to interact with it. Escape closes this adapter.");
+}
+void Rml_UIManager::RefreshDeveloperSettings() {
+    if (!m_context)
+        return;
+    for (int i = 0; i < m_context->GetNumDocuments(); ++i) {
+        auto* document = m_context->GetDocument(i);
+        if (!document || document->GetId() != "settings")
+            continue;
+        if (auto* toggle = document->GetElementById("perf_hud_toggle")) {
+            const bool visible = !m_settingsBridge.GetPerfHud || m_settingsBridge.GetPerfHud();
+            toggle->SetClass("on", visible);
+        }
+        if (auto* help = document->GetElementById("developer_help")) {
+            if (m_settingsBridge.GetDeveloperHelp) {
+                const auto text = m_settingsBridge.GetDeveloperHelp();
+                help->SetInnerRML(Rml::StringUtilities::EncodeRml(text));
+            }
+        }
+    }
+}
+
+bool Rml_UIManager::HasInputInteraction() const {
+    if (!m_context)
+        return false;
+    const auto* focus = m_context->GetFocusElement();
+    if (!focus)
+        return false;
+    const auto& tag = focus->GetTagName();
+    // Documents and HUD containers may be focused without owning keyboard input.
+    return tag == "input" || tag == "textarea" || tag == "select" || tag == "button" ||
+           tag == "a" || focus->GetAttribute<Rml::String>("contenteditable", "") == "true";
+}
+
+bool Rml_UIManager::HasTextInputFocus() const {
+    const auto* focus = m_context ? m_context->GetFocusElement() : nullptr;
+    if (!focus)
+        return false;
+    const auto& tag = focus->GetTagName();
+    if (tag == "textarea" || focus->GetAttribute<Rml::String>("contenteditable", "") == "true")
+        return true;
+    if (tag != "input")
+        return false;
+    const auto type = focus->GetAttribute<Rml::String>("type", "text");
+    return type == "text" || type == "password" || type == "number" || type == "search" ||
+           type == "email" || type == "url" || type == "tel";
+}
+
 // --- Static GLFW Callbacks ---
 void Rml_UIManager::KeyCallback(GLFWwindow*, int key, int, int action, int mods) {
     if (!s_active_manager || !s_active_manager->m_context)
         return;
 
-    if (key == GLFW_KEY_F8 && action == GLFW_PRESS) {
-        Rml::Debugger::SetVisible(!Rml::Debugger::IsVisible());
-        return;
-    }
-
+    (void)window;
+    (void)scancode;
     Rml::Input::KeyIdentifier rml_key = GlfwToRmlKey(key);
     int rml_mods = GlfwToRmlMods(mods);
 

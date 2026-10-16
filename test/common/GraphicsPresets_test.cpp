@@ -484,6 +484,89 @@ TEST(GraphicsPresets, SystemsOverridesRetainAllPlayerSettingsAndNonRecoveryLoadS
     }
 }
 
+TEST(GraphicsPresets, DeveloperLayoutRecoveryPreservesVersionedGraphicsAcrossLoadPaths) {
+    const ScopedTempFile file("graphics_layout_", ".json");
+    auto document = CurrentDocument();
+    document["user"]["graphics"]["base_preset"] = "medium";
+    document["user"]["graphics"]["overrides"]["render_scale"] = 0.75;
+    document["user"]["video"] = {{"vsync", false}, {"frame_cap", 165}};
+    document["user"]["developer"] = {
+        {"widgets", {{"perf.hud", {{"visible", false}}}}},
+        {"bindings", {{"console.toggle", {{"key", 301}, {"mods", 2}}}}},
+        {"layouts",
+         {{"render.shaders",
+           {{"x", 130}, {"y", 90}, {"width", 600}, {"height", 400}, {"open", true}}},
+          {"perf.gpu", {{"x", "overflow"}}}}}};
+    auto text = document.dump();
+    const auto offset = text.find("\"overflow\"");
+    ASSERT_NE(offset, std::string::npos);
+    text.replace(offset, std::string("\"overflow\"").size(), "1e400");
+    WriteText(file.Path(), text);
+    for (const int path : {0, 1, 2}) {
+        SCOPED_TRACE(path);
+        auto config = SystemConfig::Defaults();
+        if (path == 0)
+            config.OverlayUserFromJsonString(text);
+        else if (path == 1)
+            config = SystemConfig::FromJsonString(text);
+        else
+            config = SystemConfig::LoadLayered("", file.Path().string());
+        EXPECT_EQ(config.settings_load_report().state, SettingsLoadState::Loaded);
+        EXPECT_EQ(config.user().graphics.base_preset, GraphicsPreset::Medium);
+        EXPECT_DOUBLE_EQ(std::get<double>(config.user().graphics.overrides.at("render_scale")),
+                         0.75);
+        EXPECT_FLOAT_EQ(config.user().render_scale, 0.75f);
+        EXPECT_FALSE(config.user().vsync);
+        EXPECT_EQ(config.user().frame_cap, 165);
+        EXPECT_FALSE(config.user().developer.PerfHudVisible());
+        ASSERT_TRUE(config.user().developer.bindings.contains("console.toggle"));
+        EXPECT_EQ(config.user().developer.bindings.at("console.toggle").key, 301);
+        ASSERT_EQ(config.user().developer.layouts.size(), 1u);
+        EXPECT_FLOAT_EQ(config.user().developer.layouts.at("render.shaders").x, 130);
+        ASSERT_TRUE(config.SaveUserOverlay(file.Path().string()));
+        const auto saved = SystemConfig::LoadLayered("", file.Path().string());
+        EXPECT_EQ(saved.user().graphics.overrides, config.user().graphics.overrides);
+        EXPECT_EQ(saved.user().developer.layouts, config.user().developer.layouts);
+        ASSERT_EQ(saved.user().developer.bindings.size(), config.user().developer.bindings.size());
+        for (const auto& [id, binding] : config.user().developer.bindings) {
+            ASSERT_TRUE(saved.user().developer.bindings.contains(id));
+            EXPECT_EQ(saved.user().developer.bindings.at(id).key, binding.key);
+            EXPECT_EQ(saved.user().developer.bindings.at(id).mods, binding.mods);
+        }
+        EXPECT_EQ(saved.user().developer.widgets, config.user().developer.widgets);
+        EXPECT_EQ(saved.user().frame_cap, 165);
+        EXPECT_FALSE(saved.user().vsync);
+        WriteText(file.Path(), text);
+    }
+}
+
+TEST(GraphicsPresets, InvalidGraphicsRollBackDeveloperPreferencesAndBlockSave) {
+    const ScopedTempFile file("graphics_developer_", ".json");
+    auto config = SystemConfig::Defaults();
+    config.user().developer.widgets["perf.hud"] = true;
+    config.user().developer.bindings["console.toggle"] = {290, 0};
+    const auto widgets = config.user().developer.widgets;
+    const auto bindings = config.user().developer.bindings;
+    auto document = CurrentDocument();
+    document["user"]["developer"] = {
+        {"widgets", {{"perf.hud", {{"visible", false}}}}},
+        {"bindings", {{"console.toggle", {{"key", 301}, {"mods", 2}}}}}};
+    document["user"]["graphics"]["base_preset"] = "invalid";
+    const auto text = document.dump();
+    WriteText(file.Path(), text);
+    config.OverlayUserFromJsonString(text);
+    EXPECT_EQ(config.settings_load_report().state, SettingsLoadState::Recovery);
+    EXPECT_EQ(config.user().developer.widgets, widgets);
+    ASSERT_EQ(config.user().developer.bindings.size(), bindings.size());
+    for (const auto& [id, binding] : bindings) {
+        ASSERT_TRUE(config.user().developer.bindings.contains(id));
+        EXPECT_EQ(config.user().developer.bindings.at(id).key, binding.key);
+        EXPECT_EQ(config.user().developer.bindings.at(id).mods, binding.mods);
+    }
+    EXPECT_FALSE(config.SaveUserOverlay(file.Path().string()));
+    EXPECT_EQ(ReadText(file.Path()), text);
+}
+
 TEST(GraphicsPresets, InvalidVersionedGraphicsPreserveWholeOverlayTransaction) {
     const auto document = CurrentDocument();
     auto assert_recovery = [](const nlohmann::json& invalid) {
