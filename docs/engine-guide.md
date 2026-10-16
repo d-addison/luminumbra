@@ -41,6 +41,12 @@ Hydraulic/thermal relief defaults on in revision 7; explicit
 Biome tables, climate frequencies and biome relief retain their controls. The
 [SDF contract](shield/sdf-contract.md) describes their sampling semantics.
 
+Current-format saves without embedded presets that name one of the eight packaged
+presets resolve to frozen revision-6 copies in
+`worlds/atlas/presets-rev6/`; new saves embed resolved choices. Other named presets
+retain their previous resolution and validation. This is preset fallback within
+the current save format, not obsolete-world migration.
+
 Failures are deliberately distinct. Recognized older versions receive the refusal
 above. Higher versions report `unsupported future LMR1 container version`,
 `unsupported future world manifest schema`,
@@ -64,10 +70,12 @@ byte layout, allocation limits, checksum, absent/corrupt/future refusal rules,
 activation inputs, scheduler ordering, ecology projection and replay companion
 are specified in [Active-region ledger and scheduler](active-regions.md).
 No measured caps or distant system consumers are activated by this foundation.
+The regional plants/water continuation stack (issue #242) is planned for v0.3.1;
+performance/default enablement remains v0.4.0 (issue #320).
 
 ### Simulation clock metadata
 
-The hashed `sim.active_regions` key is off by default. When enabled, every
+The hashed `sim.active_regions` key is enabled by default for v0.3.0. When enabled, every
 successful persistent `GameSession` save writes three additional keys in
 `world_info.json` beside `waterSimCursor`, through `WorldSaveService`'s existing
 temporary-file and atomic replacement path:
@@ -143,7 +151,11 @@ without an anchor use their saved spawn; a historical anchor already lost by
 such a snapshot cannot be recovered. The snapshot commit index, rollback
 journal, and multi-file recovery belong to C2/C3. C1 uses the existing metadata write path and is not a
 claim of atomic publication across chunk, entity, energy and metadata files.
-Active regions and clock restoration are enabled by default. LMR1 v2,
+The shipping clock/ledger foundation is enabled by default. Indexed authority
+durability/rehydration, durable completed work and ground-object continuation,
+durable regional fields/weather/scent/energy, and regional foliage/water
+continuation are planned for v0.3.1. Five-minute dedicated-server autosave does
+not implement those persistence slices. LMR1 v2,
 world_manifest.v1, FSD2 v3, and existing canonical chunk and entity serialization
 are unchanged; preset revision 7 retains revision 6 omission compatibility.
 
@@ -237,9 +249,10 @@ brains and plant growth already run in this sequence. They operate on entities
 with the relevant components. The server can boot deterministic avatar, creature
 and plant rosters; an empty default roster does not mean these systems are unwired.
 
-Optional simulation features use an off-by-default, empty-neutral contract:
+Shipping simulation features are enabled by default. Explicitly disabled features
+retain the empty-neutral contract:
 when disabled or without participants they allocate no authoritative state,
-write no save records, and contribute no hash bytes. This keeps disabled/default
+write no save records, and contribute no hash bytes. This keeps disabled
 configurations stable within the current world format.
 
 ### Persistence, replay, and networking
@@ -253,6 +266,16 @@ Networking and replication live under `net/` and `network/`. Transport delivery
 is separated from simulation activation: commands and replicated state become
 authoritative only at their assigned tick/order. Hashes localize a desync without
 making logs or timing part of the state itself.
+
+TCP admission, lockstep and replay compare effective simulation configuration and
+resolved preset-content identities before admitting state or stepping ticks. The
+content identity binds canonical preset JSON and a sorted manifest of exact biome
+and structure dependency bytes; generation uses that immutable snapshot. Runtime
+and soak TCP slots release peers that fail to complete a matching Hello within
+10 seconds (issue #315). Lockstep protocol and LREC1 replay layout are version 3;
+versions 1 and 2 are refused. See the
+[identity contract](development/system-config-identity.md) for the effective
+SystemConfig/presentation split, refusal rules and dependency encoding.
 
 The shared `NetSocketsTransport` implements reliable and unreliable delivery for
 both GNS and Steam sockets. Loopback and TCP always deliver reliably and ignore
@@ -389,7 +412,9 @@ restart the client. The per-user settings overlay only reads `user.*`; this flag
 has no environment or CLI override. Effective selection still falls back to
 Legacy when Ladder cannot bind, with requested/effective mode and refusals in
 the debug HUD and diagnostics. See [Far world horizon v2](far-world-horizon-v2.md)
-for the config example and qualification gates.
+for the config example and qualification gates. Saved-world far production
+authority remains fixture-only until FW S8 (v0.3.1); the renderer reports an
+explicit unavailable/refusal diagnostic.
 
 ### Environment controls
 
@@ -508,7 +533,11 @@ selectors use the packaged tuning. `sim.erosion`, `render.moonlight` and
 turning them on does not add a new erosion pass, moon strength or wind system.
 The config:v1 serializer is unchanged: the default sim sub-hash is now nonempty,
 and an explicitly all-disabled sim configuration still has an empty sub-hash.
-`sim.*` is hashed when enabled; `render.*` is excluded from this sub-hash.
+`sim.*` is hashed when enabled; `render.*` is excluded from this diagnostic sub-hash.
+The separate effective session identity includes `render.circadian` amplitude
+because simulation consumes it, plus session options and effective scheduler
+settings. Presentation-only gates and `user.*` settings remain excluded. See the
+[identity contract](development/system-config-identity.md).
 
 Client and server apply the same GameSession resolver before Create/Load, including
 active regions/absolute clock, High water, weather rain/events, stateful aether and
