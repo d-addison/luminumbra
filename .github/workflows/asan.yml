@@ -240,9 +240,9 @@ jobs:
     needs: [changes, asan-shard]
     # Cancellation must reach the refusal step, never a successful job skip.
     # The first guard still rejects every draft (including docs-only drafts).
-    # An uncancelled needs_cpp=false + skipped shard preserves the old path
-    # gate's successful required check, even if classification failed after
-    # emitting false. Missing output still requires successful shards.
+    # A successful classification with needs_cpp=false and a skipped shard
+    # preserves the path gate's successful required check. Failed classification
+    # or missing output still requires successful shards.
     if: ${{ always() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -266,13 +266,14 @@ jobs:
         if: always() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)
         env:
           ASAN_SHARD_RESULT: ${{ needs.asan-shard.result }}
+          CI_PATHS_RESULT: ${{ needs.changes.result }}
           NEEDS_CPP: ${{ needs.changes.outputs.needs_cpp }}
           ASAN_CANCELLED: ${{ cancelled() }}
         run: |
           if [[ "$ASAN_CANCELLED" != 'false' ]]; then
             echo "ASan workflow was cancelled or cancellation status is missing" >&2
             exit 1
-          elif [[ "$NEEDS_CPP" == 'false' && "$ASAN_SHARD_RESULT" == 'skipped' ]]; then
+          elif [[ "$CI_PATHS_RESULT" == 'success' && "$NEEDS_CPP" == 'false' && "$ASAN_SHARD_RESULT" == 'skipped' ]]; then
             message="route: skipped (ASan not needed by Classify changed paths)"
             echo "$message"
             echo "$message" >> "$GITHUB_STEP_SUMMARY"
