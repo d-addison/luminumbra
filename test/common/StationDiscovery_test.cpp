@@ -367,6 +367,46 @@ TEST(StationDiscovery, NearestMouthWinsOverLargerFartherFootprint) {
     EXPECT_EQ(result.candidates[0].cell_x, -1);
 }
 
+TEST(StationDiscovery, TerrainClearanceRoundsUpAtHalfMillimetreBoundary) {
+    for (const float sign : {1.0f, -1.0f}) {
+        const float boundary = sign * 0.0625f; // Exactly representable 62.5 mm.
+        for (const float height :
+             {std::nextafter(boundary, -1.0f), boundary, std::nextafter(boundary, 1.0f)}) {
+            for (const auto kind : {StationKind::Mouth,
+                                    StationKind::Arch,
+                                    StationKind::Horizon,
+                                    StationKind::Coverage}) {
+                SCOPED_TRACE(height);
+                SCOPED_TRACE(static_cast<int>(kind));
+                auto source = Portal();
+                source.height = [height](float, float) {
+                    return height;
+                };
+                auto query = Query(kind);
+                query.y_range_m = {-4, 100};
+                const auto result = DiscoverStations(source, query);
+                ASSERT_TRUE(result.ok) << result.error;
+                ASSERT_EQ(result.candidates.size(),
+                          kind == StationKind::Coverage  ? 5u
+                          : kind == StationKind::Horizon ? 4u
+                                                         : 1u);
+                const bool control = kind == StationKind::Horizon || kind == StationKind::Coverage;
+                const double rounded_height = sign > 0 ? 0.063 : -0.062;
+                for (const auto& candidate : result.candidates) {
+                    const double offset = candidate.local_index == 4 && control ? 80.0 : 1.8;
+                    EXPECT_GE(candidate.pose.y, static_cast<double>(height) + offset);
+                    EXPECT_DOUBLE_EQ(candidate.pose.y,
+                                     (control ? rounded_height : std::max(0.0, rounded_height)) +
+                                         offset);
+                    if (control) {
+                        EXPECT_EQ(candidate.anchor_mm[1], sign > 0 ? 63 : -62);
+                    }
+                }
+            }
+        }
+    }
+}
+
 TEST(StationDiscovery, CardinalYawWrapAndOrderedDirections) {
     constexpr std::array<float, 4> yaws{{0, 90, -180, -90}};
     constexpr std::array<std::array<float, 2>, 4> eyes{{{-16, -4}, {-4, -16}, {8, -4}, {-4, 8}}};
@@ -428,7 +468,7 @@ TEST(StationDiscovery, ControlsUseEyeAndElevatedConventionsAndDistinctIds) {
 }
 
 TEST(StationDiscovery, SeededWorldControlsMatchFlatTerrainGolden) {
-    auto params = Test::SyntheticTerrainParams();
+    auto params = Luminumbra::Test::SyntheticTerrainParams();
     params.base_amplitude = 0;
     params.peaks_amplitude = 0;
     params.continental_spline = {{-1.0f, 0.0f}, {1.0f, 0.0f}};

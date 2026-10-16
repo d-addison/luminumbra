@@ -20,6 +20,7 @@
 #include <set>
 #include <stdexcept>
 #include <string>
+#include <system_error>
 #include <vector>
 
 #ifdef _WIN32
@@ -86,8 +87,11 @@ T Integer(const ArgumentChar* text) {
     const auto value = ArgumentText(text);
     T result{};
     const auto parsed = std::from_chars(value.data(), value.data() + value.size(), result);
-    if (parsed.ec != std::errc{} || parsed.ptr != value.data() + value.size()) {
+    if (parsed.ec == std::errc::invalid_argument || parsed.ptr != value.data() + value.size()) {
         throw UsageError("expected an integer");
+    }
+    if (parsed.ec == std::errc::result_out_of_range) {
+        throw std::runtime_error("integer outside supported range");
     }
     return result;
 }

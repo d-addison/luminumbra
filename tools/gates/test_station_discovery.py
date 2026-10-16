@@ -469,6 +469,35 @@ class NativeSmoke(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(result.stdout, baseline.stdout)
 
+    def test_integer_overflow_refuses_and_invalid_syntax_is_usage(self):
+        command = [self.cli, "--preset-json", "unused.json", "--data-root", ".",
+                   "--seed", "17", "--kind", "coverage", "--origin-mm", "0", "0",
+                   "--radius-m", "1", "--y-range-m", "0", "100",
+                   "--view-distance-m", "0", "--limit", "64"]
+        for option, arity, bits in (("--seed", 1, 32), ("--origin-mm", 2, 64),
+                                    ("--radius-m", 1, 32), ("--y-range-m", 2, 32),
+                                    ("--view-distance-m", 1, 32), ("--limit", 1, 32)):
+            overflow = str(2 ** (bits - 1))
+            underflow = str(-2 ** (bits - 1) - 1)
+            for axis in range(arity):
+                for text, code, diagnostic in (
+                        (overflow, 1, b"station discovery refused:"),
+                        (underflow, 1, b"station discovery refused:"),
+                        ("9" * 100, 1, b"station discovery refused:"),
+                        ("", 2, b"station discovery usage:"),
+                        ("abc", 2, b"station discovery usage:"),
+                        ("1.5", 2, b"station discovery usage:"),
+                        ("+1", 2, b"station discovery usage:"),
+                        (overflow + "x", 2, b"station discovery usage:")):
+                    with self.subTest(option=option, axis=axis, text=text):
+                        args = list(command)
+                        args[args.index(option) + 1 + axis] = text
+                        result = subprocess.run(args, capture_output=True, check=False)
+                        self.assertEqual(result.returncode, code, result.stderr)
+                        self.assertEqual(result.stdout, b"")
+                        self.assertIn(diagnostic, result.stderr)
+                        self.assertIn(b"integer", result.stderr)
+
     def test_structure_integers_are_checked_before_loading(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

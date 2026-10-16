@@ -116,7 +116,12 @@ public:
         if (!std::isfinite(h)) {
             throw std::runtime_error("nonfinite height");
         }
-        return static_cast<double>(Millimetres(h)) / 1000.0;
+        if (std::abs(static_cast<double>(h)) > 2147483647.0) {
+            throw std::runtime_error("nonfinite or unrepresentable world coordinate");
+        }
+        // Round upward so millimetre anchors never lower the eye below its
+        // minimum terrain clearance, including at negative terrain heights.
+        return std::ceil(static_cast<double>(h) * 1000.0) / 1000.0;
     }
     bool Pose(StationCandidate& candidate) {
         const double x = static_cast<double>(candidate.anchor_mm[0]) / 1000;

@@ -613,6 +613,9 @@ after ranking. IDs encode kind and signed cells (`n` negative, `p` nonnegative)
 plus local index, so ties and negative coordinates have a stable identity.
 Mouth ranking does not select the largest opening.
 
+Sampled terrain heights used for poses and control anchors are rounded upward
+to millimetres to preserve the minimum terrain clearance.
+
 `horizon` returns up to four control views at the query origin, 1.8 m above
 terrain, with yaw 0/90/-180/-90 and pitch zero. `coverage` adds the 80 m elevated
 view, yaw 45 and pitch -20. All controls share the terrain anchor Y sampled once
