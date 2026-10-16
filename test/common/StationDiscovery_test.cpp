@@ -3,11 +3,16 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstddef>
+#include <cstdint>
 #include <limits>
 #include <random>
 #include <string>
+#include <vector>
 
 #include "../fixtures/TerrainFixtureParams.h"
+#include "luminumbra/core/Types.h"
+#include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 #include "luminumbra_common/world/StationDiscovery.h"
 
 namespace {
@@ -198,13 +203,16 @@ TEST(StationDiscovery, ClippingPreservesBinary32RadiusBoundaryStations) {
             SCOPED_TRACE(transpose);
             SCOPED_TRACE(static_cast<int>(kind));
             auto query = Query(kind);
-            query.origin_mm = {base[0] * 1000, base[2] * 1000};
+            query.origin_mm = {static_cast<std::int64_t>(base[0]) * 1000,
+                               static_cast<std::int64_t>(base[2]) * 1000};
             query.radius_m = 1;
             const auto source = PortalGrid(feature, base);
             const auto expected = FullScanPortalGrid(feature, query, base);
             ASSERT_EQ(expected.size(), 1u);
             EXPECT_EQ(expected.front().anchor_mm,
-                      (std::array<std::int64_t, 3>{base[0] * 1000, 0, base[2] * 1000}));
+                      (std::array<std::int64_t, 3>{static_cast<std::int64_t>(base[0]) * 1000,
+                                                   0,
+                                                   static_cast<std::int64_t>(base[2]) * 1000}));
             EXPECT_EQ(expected.front().local_index, transpose ? 55u : 1155u);
             const auto result = DiscoverStations(source, query);
             ASSERT_TRUE(result.ok) << result.error;
@@ -643,6 +651,68 @@ TEST(StationDiscovery, DiskIntersectionBoundsLatticeVisitsAndIncludesBoundaryAnc
     }
 }
 
+TEST(StationDiscovery, DiskWithoutLatticeColumnDoesNoSampling) {
+    for (auto kind : {StationKind::Mouth, StationKind::Arch}) {
+        for (const bool transpose : {false, true}) {
+            for (const int sign : {-1, 1}) {
+                SCOPED_TRACE(static_cast<int>(kind));
+                SCOPED_TRACE(transpose);
+                SCOPED_TRACE(sign);
+                auto query = Query(kind);
+                query.radius_m = 1;
+                query.y_range_m = {0, 12};
+                // The disk lies strictly between consecutive 4 m columns.
+                query.origin_mm[transpose ? 1 : 0] += static_cast<std::int64_t>(sign) * 2000;
+                const auto result = DiscoverStations(Portal(), query);
+                ASSERT_TRUE(result.ok) << result.error;
+                EXPECT_GT(result.enumerated_cells, 0u);
+                EXPECT_TRUE(result.candidates.empty());
+                EXPECT_EQ(result.lattice_visits, 0u);
+                EXPECT_EQ(result.density_samples, 0u);
+            }
+        }
+    }
+}
+
+TEST(StationDiscovery, DiskEdgeColumnIncludesOnlyAnchorsInsideExactDisk) {
+    for (auto kind : {StationKind::Mouth, StationKind::Arch}) {
+        for (const bool transpose : {false, true}) {
+            for (const int sign : {-1, 1}) {
+                for (const int offset_mm : {999, 1000, 1001}) {
+                    for (const int cross_offset_mm : {0, 1}) {
+                        SCOPED_TRACE(static_cast<int>(kind));
+                        SCOPED_TRACE(transpose);
+                        SCOPED_TRACE(sign);
+                        SCOPED_TRACE(offset_mm);
+                        SCOPED_TRACE(cross_offset_mm);
+                        auto query = Query(kind);
+                        query.radius_m = 1;
+                        query.y_range_m = {0, 12};
+                        query.origin_mm[transpose ? 1 : 0] +=
+                            static_cast<std::int64_t>(sign) * offset_mm;
+                        query.origin_mm[transpose ? 0 : 1] += cross_offset_mm;
+                        // At 1000 mm only the tangent anchor qualifies; shifting
+                        // even 1 mm along the other axis puts it outside the disk.
+                        const bool inside =
+                            offset_mm < 1000 || (offset_mm == 1000 && cross_offset_mm == 0);
+                        const auto result = DiscoverStations(Portal(), query);
+                        ASSERT_TRUE(result.ok) << result.error;
+                        ASSERT_EQ(result.candidates.size(), inside ? 1u : 0u);
+                        EXPECT_EQ(result.lattice_visits, inside ? 1u : 0u);
+                        if (inside) {
+                            EXPECT_EQ(result.candidates.front().anchor_mm,
+                                      (std::array<std::int64_t, 3>{-4000, 0, -4000}));
+                            EXPECT_GT(result.density_samples, 0u);
+                        } else {
+                            EXPECT_EQ(result.density_samples, 0u);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 TEST(StationDiscovery, WideDiskRefusesAtVisitBudgetEvenWithoutDensitySamples) {
     for (auto kind : {StationKind::Mouth, StationKind::Arch}) {
         auto source = Portal();
@@ -700,7 +770,7 @@ TEST(StationDiscovery, SharedPlacementParityWithLargestQuery) {
     params.surface_break_density = 1;
     params.feature_cell_size = 32;
     params.max_feature_radius = 12;
-    WorldSystem world(nullptr, nullptr, params, 17);
+    const WorldSystem world(nullptr, nullptr, params, 17);
     WorldSystem::SurfaceBreakInfo expected;
     constexpr float radius = 64;
     for (int z = -3; z <= 3; ++z) {
@@ -720,7 +790,7 @@ TEST(StationDiscovery, SharedPlacementParityWithLargestQuery) {
     EXPECT_FLOAT_EQ(largest.depth, expected.depth);
     EXPECT_EQ(largest.shaft, expected.shaft);
     params.surface_breaks_enabled = false;
-    WorldSystem disabled(nullptr, nullptr, params, 17);
+    const WorldSystem disabled(nullptr, nullptr, params, 17);
     EXPECT_FALSE(disabled.SurfaceBreakInCell(-1, -1).found);
     EXPECT_EQ(disabled.SurfaceBreakCellSize(), 0);
 }

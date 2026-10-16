@@ -1,17 +1,25 @@
 #include "StationDiscovery.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <cstddef>
+#include <cstdint>
+#include <exception>
 #include <limits>
 #include <stdexcept>
+#include <string>
 #include <tuple>
+#include <vector>
 
 #include "../core/DeterministicMath.h"
+#include "../systems/SHIELD_WorldSystem.h"
 
 namespace Luminumbra::world {
 namespace {
 constexpr float kAirMargin = 0.25f;
 constexpr int kStep = 4;
+constexpr std::int64_t kStepMm = static_cast<std::int64_t>(kStep) * 1000;
 constexpr std::array<std::array<int, 2>, 4> kDirections{{{1, 0}, {0, 1}, {-1, 0}, {0, -1}}};
 
 std::int64_t Millimetres(double metres) {
@@ -354,7 +362,8 @@ StationDiscoveryResult DiscoverStations(const StationDiscoverySource& source,
                         static_cast<std::uint64_t>(static_cast<std::int64_t>(x1) - x0 + 1);
                     const auto depth =
                         static_cast<std::uint64_t>(static_cast<std::int64_t>(z1) - z0 + 1);
-                    const auto height = static_cast<std::uint64_t>(y1 - y0 + 1);
+                    const auto height =
+                        static_cast<std::uint64_t>(static_cast<std::int64_t>(y1) - y0 + 1);
                     constexpr auto max_index = std::numeric_limits<std::uint64_t>::max();
                     if (width > max_index / depth || width * depth > max_index / height) {
                         throw std::runtime_error("local lattice index outside integer domain");
@@ -370,32 +379,49 @@ StationDiscoveryResult DiscoverStations(const StationDiscoverySource& source,
                     const int nearest_x =
                         std::clamp(FloorCell((ox + kStep / 2.0) / kStep), first_x, last_x);
                     const auto nearest_dx_mm =
-                        static_cast<std::int64_t>(nearest_x) * (kStep * 1000) - query.origin_mm[0];
-                    const auto z_reach_mm = static_cast<std::int64_t>(
-                        IntegerSqrt(radius_squared -
-                                    static_cast<std::uint64_t>(nearest_dx_mm * nearest_dx_mm)));
+                        static_cast<std::int64_t>(nearest_x) * kStepMm - query.origin_mm[0];
+                    // Clipped deltas are at most the validated 16384 m radius,
+                    // so their squares fit in int64_t. Guard each disk remainder
+                    // before subtracting to keep an empty intersection empty.
+                    const auto nearest_dx_squared =
+                        static_cast<std::uint64_t>(nearest_dx_mm * nearest_dx_mm);
+                    if (nearest_dx_squared > radius_squared) {
+                        continue;
+                    }
+                    const auto z_reach_mm =
+                        static_cast<std::int64_t>(IntegerSqrt(radius_squared - nearest_dx_squared));
                     const int first_z =
                         std::max(z0,
                                  -FloorCell(-static_cast<double>(query.origin_mm[1] - z_reach_mm) /
-                                            (kStep * 1000)));
-                    const int last_z =
-                        std::min(z1,
-                                 FloorCell(static_cast<double>(query.origin_mm[1] + z_reach_mm) /
-                                           (kStep * 1000)));
+                                            kStepMm));
+                    const int last_z = std::min(
+                        z1,
+                        FloorCell(static_cast<double>(query.origin_mm[1] + z_reach_mm) / kStepMm));
                     for (int gz = first_z; gz <= last_z; ++gz) {
                         const auto dz_mm =
-                            static_cast<std::int64_t>(gz) * (kStep * 1000) - query.origin_mm[1];
-                        const auto dx_mm = static_cast<std::int64_t>(IntegerSqrt(
-                            radius_squared - static_cast<std::uint64_t>(dz_mm * dz_mm)));
-                        const int row_first_x =
-                            std::max(first_x,
-                                     -FloorCell(-static_cast<double>(query.origin_mm[0] - dx_mm) /
-                                                (kStep * 1000)));
-                        const int row_last_x =
-                            std::min(last_x,
-                                     FloorCell(static_cast<double>(query.origin_mm[0] + dx_mm) /
-                                               (kStep * 1000)));
+                            static_cast<std::int64_t>(gz) * kStepMm - query.origin_mm[1];
+                        const auto dz_squared = static_cast<std::uint64_t>(dz_mm * dz_mm);
+                        if (dz_squared > radius_squared) {
+                            continue;
+                        }
+                        const auto remaining_squared = radius_squared - dz_squared;
+                        const auto dx_mm =
+                            static_cast<std::int64_t>(IntegerSqrt(remaining_squared));
+                        const int row_first_x = std::max(
+                            first_x,
+                            -FloorCell(-static_cast<double>(query.origin_mm[0] - dx_mm) / kStepMm));
+                        const int row_last_x = std::min(
+                            last_x,
+                            FloorCell(static_cast<double>(query.origin_mm[0] + dx_mm) / kStepMm));
                         for (int gx = row_first_x; gx <= row_last_x; ++gx) {
+                            const auto candidate_dx_mm =
+                                static_cast<std::int64_t>(gx) * kStepMm - query.origin_mm[0];
+                            // Check every anchor exactly, independently of the
+                            // row clipping, before any portal or pose sampling.
+                            if (static_cast<std::uint64_t>(candidate_dx_mm * candidate_dx_mm) >
+                                remaining_squared) {
+                                continue;
+                            }
                             for (int gy = first_y; gy <= last_y; ++gy) {
                                 if (result.lattice_visits == kStationLatticeVisitBudget) {
                                     throw std::runtime_error("lattice visit budget exhausted");
