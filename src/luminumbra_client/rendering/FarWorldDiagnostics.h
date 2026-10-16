@@ -30,7 +30,8 @@ enum class FarWorldSubmissionRefusal {
     LiveOwnershipIncomplete,
     LogicalStoreAdmission,
     BackendUnavailable,
-    DrawRejected
+    DrawRejected,
+    IsolationSuppressed
 };
 struct FarWorldDiagnosticSnapshot {
     FarWorldSelection selection;
@@ -50,6 +51,20 @@ struct FarWorldDiagnosticSnapshot {
     std::array<FarWorldTileDiagnostic, kFarWorldDiagnosticTiles> tiles{};
     std::size_t tile_count = 0, draws = 0, indices = 0;
 };
+// Constant-size reporting state; coverage changes do not produce mode-transition logs.
+struct FarWorldReportingState {
+    FarWorldSelection selection;
+    FarWorldSubmissionRefusal submission_refusal = FarWorldSubmissionRefusal::None;
+    bool coverage_settled = false;
+    bool suppressed() const noexcept {
+        return !selection.submit || submission_refusal != FarWorldSubmissionRefusal::None;
+    }
+};
+bool FarWorldReportChanged(const std::optional<FarWorldReportingState>& previous,
+                           const FarWorldReportingState& current) noexcept;
+// Terrain isolation gates the shared Legacy/Ladder submission path in the G-buffer.
+FarWorldReportingState FarWorldReportState(const FarWorldDiagnosticSnapshot& snapshot,
+                                           bool terrain_submission = true) noexcept;
 // A paired render keeps selection/plane and disables only scheduling/submission.
 constexpr FarWorldSelection FarWorldSubmissionOverride(FarWorldSelection selected,
                                                        bool submission) noexcept {

@@ -13,6 +13,7 @@ import unittest
 import perf
 import render_contract as contract
 import validate_render_capture as capture
+from test_perf import far_capture, update_far_summary
 
 FIXTURES = Path(__file__).parent / 'fixtures'
 QUALIFIED = 'NVIDIA GeForce RTX 5070 Ti'
@@ -65,6 +66,75 @@ def args(**overrides):
 class RenderContractTests(unittest.TestCase):
     def test_valid_capture(self):
         self.assertEqual(capture.validate(artifact(), args())['verdict'], 'PASS')
+
+    def test_ladder_baseline_rejects_measured_frames_and_repairs(self):
+        data = artifact()
+        data['far_world'] = far_capture()['far_world']
+        self.assertEqual(capture.validate(data, args(ladder_baseline=True))['verdict'], 'PASS')
+        self.assertEqual(contract.validate(data, QUALIFIED, ladder_baseline=True)['verdict'], 'PASS')
+        for mutation in [dict(effective_mode='legacy'), dict(suppressed=True),
+                         dict(coverage_settled=False), dict(refusal='SpanRejected')]:
+            refused = copy.deepcopy(data)
+            refused['far_world']['frames'][-1].update(mutation)
+            update_far_summary(refused)
+            with self.subTest(mutation=mutation):
+                with self.assertRaisesRegex(ValueError, 'Ladder baseline refused'):
+                    capture.validate(refused, args(ladder_baseline=True))
+                with self.assertRaisesRegex(ValueError, 'Ladder baseline refused'):
+                    contract.validate(refused, QUALIFIED, ladder_baseline=True)
+                self.assertEqual(capture.validate(refused, args())['verdict'], 'PASS')
+        with self.assertRaisesRegex(ValueError, 'requires far-world frame evidence'):
+            capture.validate(artifact(), args(ladder_baseline=True))
+
+    def test_outstanding_batches_refuse_baseline_with_zero_deferred_work(self):
+        for field in ('generation_outstanding', 'meshing_outstanding'):
+            data = artifact()
+            data['far_world'] = far_capture()['far_world']
+            data['far_world']['frames'][1]['streaming'][field] = True
+            update_far_summary(data)
+            self.assertEqual(data['far_world']['summary']['unsettled_frames'], 1)
+            with self.subTest(field=field):
+                self.assertEqual(capture.validate(data, args())['verdict'], 'PASS')
+                with self.assertRaisesRegex(ValueError, 'Ladder baseline refused'):
+                    capture.validate(data, args(ladder_baseline=True))
+                with self.assertRaisesRegex(ValueError, 'Ladder baseline refused'):
+                    contract.validate(data, QUALIFIED, ladder_baseline=True)
+                data['far_world']['frames'][1]['streaming'][field] = False
+                update_far_summary(data)
+                self.assertEqual(capture.validate(data, args(ladder_baseline=True))['verdict'], 'PASS')
+
+    def test_declared_isolation_cannot_waive_submission_suppression(self):
+        data = artifact()
+        data['far_world'] = far_capture()['far_world']
+        override = {'cli:--isolation-layers': 'foliage'}
+        data['debug_overrides'] = {'active': override, 'declared': dict(override)}
+        data['far_world']['frames'][1].update(
+            suppressed=True, submission_refusal='IsolationSuppressed')
+        update_far_summary(data)
+        self.assertEqual(capture.validate(data, args())['verdict'], 'PASS')
+        self.assertEqual(contract.validate(data, QUALIFIED)['verdict'], 'PASS')
+        with self.assertRaisesRegex(ValueError, 'Ladder baseline refused'):
+            capture.validate(data, args(ladder_baseline=True))
+        with self.assertRaisesRegex(ValueError, 'Ladder baseline refused'):
+            contract.validate(data, QUALIFIED, ladder_baseline=True)
+
+    def test_ladder_baseline_cli_rejection_and_repair(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'capture.json'
+            bootstrap = ("import runpy,sys; sys.path.insert(0,sys.argv[1]); "
+                         "sys.argv=sys.argv[2:]; runpy.run_path(sys.argv[0],run_name='__main__')")
+            command = [sys.executable, '-I', '-B', '-c', bootstrap,
+                       str(Path(capture.__file__).parent), str(Path(capture.__file__)), str(path),
+                       '--qualified-renderer', QUALIFIED, '--ladder-baseline']
+            for accepted in (False, True):
+                data = artifact()
+                data['far_world'] = far_capture()['far_world']
+                data['far_world']['frames'][1]['coverage_settled'] = accepted
+                update_far_summary(data)
+                path.write_text(json.dumps(data), encoding='utf-8')
+                result = subprocess.run(command, capture_output=True, text=True, check=False)
+                self.assertEqual(result.returncode, 0 if accepted else 1, result.stderr)
+                self.assertEqual(json.loads(result.stdout)['verdict'], 'PASS' if accepted else 'FAIL')
 
     def test_whole_frame_brackets_pass_sum(self):
         data = artifact()

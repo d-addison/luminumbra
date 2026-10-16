@@ -10,6 +10,56 @@ inline nlohmann::json optional_value(const std::optional<double>& value) {
     return value ? nlohmann::json(*value) : nlohmann::json(nullptr);
 }
 
+inline void add_far_world_reporting(nlohmann::json& report, SampleRing& ring) {
+    auto& block = report["far_world"];
+    block["frames"] = nlohmann::json::array();
+    nlohmann::json summary = {{"requested_mode", nlohmann::json::object()},
+                              {"effective_mode", nlohmann::json::object()},
+                              {"refusal", nlohmann::json::object()},
+                              {"submission_refusal", nlohmann::json::object()},
+                              {"suppressed_frames", 0},
+                              {"unsettled_frames", 0}};
+    for (std::size_t i = 0; i < ring.size(); ++i) {
+        const auto& sample = ring.at(ring.first() + i);
+        const auto& far = sample.far_world;
+        block["frames"].push_back(
+            {{"frame", sample.frame},
+             {"requested_mode", far.requested_mode},
+             {"effective_mode", far.effective_mode},
+             {"refusal", far.refusal},
+             {"submission_refusal", far.submission_refusal},
+             {"suppressed", far.suppressed},
+             {"coverage_settled", far.coverage_settled},
+             {"streaming",
+              {{"generation_pending", far.generation_pending},
+               {"meshing_pending", far.meshing_pending},
+               {"generation_outstanding", far.generation_outstanding},
+               {"meshing_outstanding", far.meshing_outstanding},
+               {"terrain_uploads_pending", far.terrain_uploads_pending}}},
+             {"content_identity", std::to_string(far.content_identity)},
+             {"settings",
+              {{"gns_compiled", far.gns_compiled},
+               {"active_regions", far.active_regions},
+               {"water_cells_per_side", far.water_cells_per_side},
+               {"grass_density_scale",
+                far.grass_density_scale ? nlohmann::json(*far.grass_density_scale)
+                                        : nlohmann::json(nullptr)}}}});
+        for (const auto& [field, value] :
+             {std::pair{"requested_mode", far.requested_mode},
+              std::pair{"effective_mode", far.effective_mode},
+              std::pair{"refusal", far.refusal},
+              std::pair{"submission_refusal", far.submission_refusal}}) {
+            auto& count = summary[field][value];
+            count = count.is_null() ? 1 : count.get<std::size_t>() + 1;
+        }
+        summary["suppressed_frames"] =
+            summary["suppressed_frames"].get<std::size_t>() + far.suppressed;
+        summary["unsettled_frames"] =
+            summary["unsettled_frames"].get<std::size_t>() + !far.settled();
+    }
+    block["summary"] = std::move(summary);
+}
+
 inline void add_distributions(nlohmann::json& report, SampleRing& ring) {
     const std::array<const char*, 5> names = {
         "frame_wall_ms", "cpu_submit_ms", "present_ms", "gpu_frame_ms", "gpu_pass_sum_ms"};

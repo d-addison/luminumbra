@@ -2,19 +2,47 @@
 
 #include <algorithm>
 #include <array>
+#include <charconv>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <istream>
+#include <limits>
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
 namespace Luminumbra::Client::Measurement {
 
 inline constexpr std::size_t kMaxFrames = 18000;
+inline int benchmark_frame_count(int argc, char* argv[]) {
+    constexpr std::string_view flag = "--render-benchmark-frames";
+    std::string_view value = "120";
+    for (int i = 1; i < argc; ++i) {
+        const std::string_view arg = argv[i];
+        if (arg == flag) {
+            value = i + 1 < argc ? std::string_view(argv[i + 1]) : std::string_view{};
+            break;
+        }
+        if (arg.size() > flag.size() && arg.substr(0, flag.size()) == flag &&
+            arg[flag.size()] == '=') {
+            value = arg.substr(flag.size() + 1);
+            break;
+        }
+    }
+    if (value.empty())
+        throw std::invalid_argument("Render benchmark requires 1..18000 measured frames");
+    int count = 0;
+    const auto [end, error] = std::from_chars(value.data(), value.data() + value.size(), count);
+    if (error != std::errc{} || end != value.data() + value.size() || count < 1 ||
+        count > static_cast<int>(kMaxFrames))
+        throw std::invalid_argument("Render benchmark requires 1..18000 measured frames");
+    return count;
+}
+
 inline constexpr std::size_t kPassCount = 11;
 inline constexpr std::array<const char*, kPassCount> kPassNames = {"shadow",
                                                                    "gbuffer",
@@ -59,6 +87,25 @@ inline std::array<double, 5> summarize(const std::vector<double>& values) {
             percentile(deviations, 0.5)};
 }
 
+// Names point only to static enum-name literals. No per-frame strings or allocations.
+struct FarFrameSample {
+    const char* requested_mode = "unknown";
+    const char* effective_mode = "unknown";
+    const char* refusal = "Unknown";
+    const char* submission_refusal = "Unknown";
+    bool suppressed = false, coverage_settled = false;
+    bool gns_compiled = false, active_regions = false;
+    int water_cells_per_side = 0;
+    std::optional<float> grass_density_scale;
+    std::uint64_t content_identity = 0;
+    std::size_t generation_pending = 0, meshing_pending = 0, terrain_uploads_pending = 0;
+    bool generation_outstanding = false, meshing_outstanding = false;
+    bool settled() const noexcept {
+        return coverage_settled && generation_pending == 0 && meshing_pending == 0 &&
+               terrain_uploads_pending == 0 && !generation_outstanding && !meshing_outstanding;
+    }
+};
+
 struct FrameSample {
     std::uint64_t frame = 0;
     std::optional<double> wall;
@@ -68,6 +115,7 @@ struct FrameSample {
     std::optional<double> passSum;
     std::array<std::optional<double>, kPassCount> passes{};
     std::array<bool, kPassCount> issued{};
+    FarFrameSample far_world;
 };
 
 // One bounded measured window. Refuse overflow instead of dropping a measured frame.
@@ -75,10 +123,18 @@ struct FrameSample {
 class SampleRing {
 public:
     explicit SampleRing(std::size_t capacity)
-        : slots_(capacity) {
-        if (capacity == 0 || capacity > kMaxFrames)
+        : slots_(checked_capacity(capacity)) {}
+
+private:
+    static std::size_t checked_capacity(std::size_t capacity) {
+        // At most 18000 fixed-size samples; check before vector allocation.
+        if (capacity == 0 || capacity > kMaxFrames ||
+            capacity > std::numeric_limits<std::size_t>::max() / sizeof(FrameSample))
             throw std::invalid_argument("measured window must contain 1..18000 frames");
+        return capacity;
     }
+
+public:
     FrameSample& append(std::uint64_t frame) {
         if (count_ == slots_.size())
             throw std::runtime_error("measured sample ring exhausted");

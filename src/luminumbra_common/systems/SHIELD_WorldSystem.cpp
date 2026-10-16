@@ -3257,6 +3257,11 @@ void SHIELD_WorldSystem::update(entt::registry& registry,
     }
     m_streaming_telemetry_stats.max_deferred_age_frames = std::max(
         m_streaming_telemetry_stats.max_deferred_age_frames, m_deferred_backlog_age_frames);
+    // Cache publication-pending work after dispatch. Lane capacity and raw worker
+    // completion do not establish that the streaming pipeline has settled.
+    m_last_streaming_budget_stats.generation_job_active = generation_batch_outstanding();
+    m_last_streaming_budget_stats.meshing_job_active =
+        meshing_batch_outstanding() || promotion_pipeline_pending();
 }
 
 bool SHIELD_WorldSystem::update_chunk_activation(const std::vector<Vec3>& anchors,

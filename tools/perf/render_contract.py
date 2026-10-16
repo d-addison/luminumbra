@@ -96,11 +96,13 @@ def float32(value):
     return struct.unpack('f', struct.pack('f', value))[0]
 
 
-def validate(data, qualified_renderer=None, qualified_vendor=None, traversal=None, workload=None):
+def validate(data, qualified_renderer=None, qualified_vendor=None, traversal=None, workload=None,
+             ladder_baseline=False):
     if data.get('schema') != SCHEMA:
         raise ValueError('unsupported render measurement schema')
     if data.get('gpu_timers_supported') is not True:
         raise ValueError('GPU timers unavailable')
+    perf.validate_far_world_reporting(data, ladder_baseline)
     count = integer(data['frames'], 'frames', 1)
     warmup = integer(data['warmup_frames'], 'warmup_frames', 1)
     adapter = data['adapter']
