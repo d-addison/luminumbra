@@ -615,25 +615,32 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
         aggregate = jobs(self.workflows["asan.yml"])["asan"]
         step = next(step for step in steps(aggregate) if step.splitlines()[0].removeprefix("      - name: ") == "Require all ASan shards to pass")
         self.assertEqual(value(step, "ASAN_SHARD_RESULT", 10), "${{ needs.asan-shard.result }}")
+        self.assertEqual(value(step, "CI_PATHS_RESULT", 10), "${{ needs.changes.result }}")
         self.assertEqual(value(step, "NEEDS_CPP", 10), "${{ needs.changes.outputs.needs_cpp }}")
         self.assertEqual(value(step, "ASAN_CANCELLED", 10), "${{ cancelled() }}")
         self.assertEqual(value(step, "if", 8), "always() && (" + READY + ")")
         self.assertIsNone(value(step, "continue-on-error", 8))
+        self.check_asan_aggregate_results(value(step, "run", 8))
+
+    def check_asan_aggregate_results(self, script):
         with tempfile.TemporaryDirectory() as directory:
             for cancelled in ("false", "true", ""):
-                for cpp in ("true", "false", ""):
-                    for result in ("success", "failure", "cancelled", "skipped", "", "unknown"):
-                        with self.subTest(cancelled=cancelled, cpp=cpp, result=result):
-                            process = subprocess.run(
-                                ["bash", "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", value(step, "run", 8)],
-                                env=dict(os.environ, NEEDS_CPP=cpp, ASAN_SHARD_RESULT=result,
-                                         ASAN_CANCELLED=cancelled,
-                                         GITHUB_STEP_SUMMARY=str(Path(directory) / "summary")),
-                                capture_output=True, text=True, timeout=10,
-                            )
-                            accepted = cancelled == "false" and (
-                                result == "success" or (cpp == "false" and result == "skipped"))
-                            self.assertEqual(process.returncode == 0, accepted, process.stdout + process.stderr)
+                for classification in ("success", "failure", "cancelled", "skipped", "", "unknown"):
+                    for cpp in ("true", "false", ""):
+                        for result in ("success", "failure", "cancelled", "skipped", "", "unknown"):
+                            with self.subTest(cancelled=cancelled, classification=classification,
+                                              cpp=cpp, result=result):
+                                process = subprocess.run(
+                                    ["bash", "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", script],
+                                    env=dict(os.environ, NEEDS_CPP=cpp, ASAN_SHARD_RESULT=result,
+                                             ASAN_CANCELLED=cancelled, CI_PATHS_RESULT=classification,
+                                             GITHUB_STEP_SUMMARY=str(Path(directory) / "summary")),
+                                    capture_output=True, text=True, timeout=10,
+                                )
+                                accepted = cancelled == "false" and (
+                                    result == "success" or (classification == "success" and
+                                                            cpp == "false" and result == "skipped"))
+                                self.assertEqual(process.returncode == 0, accepted, process.stdout + process.stderr)
 
     def test_concurrency_keeps_pr_cancellation_and_batches_only_devel_pushes(self):
         group = (
