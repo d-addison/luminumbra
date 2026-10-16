@@ -199,9 +199,9 @@ The standalone plan explicitly lists tests in `tools/ci`, `tools/perf`,
 `tools/release`, `tools/assets`, `tools/audio`, `tools/persistence`, and
 `tools/rendering/acceptance`, plus visual-critique, timelapse, SDF doc,
 runtime-manifest, visual-montage, and Blender core/GLB contracts. This preserves
-Windows coverage for CTest-registered Python suites. The POSIX shebang fixtures in
-`test_tidy_cache.py` run only on Linux. Classification exemptions are explicit
-reviewed files, including covered test-backed modules; new files require builds.
+Windows coverage for CTest-registered Python suites. The interpreter-launched
+fixtures in `test_tidy_cache.py` run on Linux and Windows. Classification exemptions
+are explicit reviewed files, including covered test-backed modules; new files require builds.
 Native integrations such as `qualify_prefab_runtime.py`, its packaged service and
 installed acceptance inputs, `test_render_runner.py`, its native fixture generator
 and imports, and simulation capture tools stay on the build path.

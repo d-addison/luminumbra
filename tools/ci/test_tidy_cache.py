@@ -102,7 +102,8 @@ sys.exit(0)
 
 class TidyCacheTests(unittest.TestCase):
     def setUp(self):
-        self.root = Path(tempfile.mkdtemp(prefix="tidy-cache-test-"))
+        # Match tool identity paths even when Windows supplies an 8.3 temp path.
+        self.root = Path(tempfile.mkdtemp(prefix="tidy-cache-test-")).resolve()
         self.addCleanup(shutil.rmtree, self.root, True)
         self.src = self.root / "src"
         self.build = self.root / "build"
@@ -377,6 +378,21 @@ class TidyCacheTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertTrue(record.exists())
         self.assertFalse((stale / ("f" * 64 + ".json")).exists())
+
+
+class TidyCachePathTests(unittest.TestCase):
+    def test_fixture_paths_match_resolved_tool_paths(self):
+        parent = tempfile.TemporaryDirectory(prefix="tidy-cache-parent-")
+        self.addCleanup(parent.cleanup)
+        root = Path(parent.name) / "fixture"
+        root.mkdir()
+        # A second spelling exercises normalization without Windows-only APIs.
+        alias = root / ".." / root.name
+        fixture = TidyCacheTests("test_second_identical_run_is_a_hit")
+        self.addCleanup(fixture.doCleanups)
+        with patch.object(tempfile, "mkdtemp", return_value=str(alias)):
+            fixture.setUp()
+        fixture.test_second_identical_run_is_a_hit()
 
 
 class MakeDependencyParserTests(unittest.TestCase):

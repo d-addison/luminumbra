@@ -28,6 +28,7 @@ def _populate(root: Path) -> None:
 
 
 def _run(argv: list) -> tuple:
+    """Call the CLI in this process so filesystem mocks cover refusal paths."""
     out = io.StringIO()
     err = io.StringIO()
     with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
@@ -190,6 +191,10 @@ class SaveReceiptContract(unittest.TestCase):
             code, _, err = _run(["snapshot", str(self.tree), "--out", str(self.base / "link.json")])
             self.assertEqual(code, 2)
             self.assertIn("symlink", err)
+
+    def test_symlink_is_rejected_without_symlink_privilege(self) -> None:
+        with mock.patch.object(os, "symlink", side_effect=PermissionError(errno.EACCES, "denied")):
+            self.test_symlink_is_rejected()
 
     def test_reparse_points_are_rejected_without_symlink_privilege(self) -> None:
         status = mock.Mock(st_mode=self.tree.stat().st_mode, st_file_attributes=0x400)

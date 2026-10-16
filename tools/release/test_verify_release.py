@@ -157,7 +157,7 @@ class FakeRunner(verifier.Runner):
 
 @contextlib.contextmanager
 def report_symlink(link: Path, target: Path):
-    """Use native links when possible, otherwise simulate the lstat contract."""
+    """Use native links when possible, otherwise simulate link metadata and existence."""
     with contextlib.ExitStack() as stack:
         try:
             os.symlink(str(target), str(link))
@@ -167,12 +167,17 @@ def report_symlink(link: Path, target: Path):
                     and getattr(error, "winerror", None) not in (1, 50, 1314)):
                 raise
             original_lstat = os.lstat
+            original_lexists = os.path.lexists
             def lstat(path, *args, **kwargs):
                 if Path(path) == link:
                     return mock.Mock(st_mode=stat.S_IFLNK)
                 return original_lstat(path, *args, **kwargs)
+            def lexists(path):
+                return Path(path) == link or original_lexists(path)
             stack.enter_context(mock.patch.object(os, "lstat", new=lstat))
             stack.enter_context(mock.patch.object(Path, "lstat", new=lstat))
+            # Windows Python 3.13+ checks existence without calling lstat.
+            stack.enter_context(mock.patch.object(os.path, "lexists", new=lexists))
         yield
 
 
@@ -549,6 +554,17 @@ class VerifyReleaseTests(unittest.TestCase):
             self.assertEqual(rc, 2)
             self.assertEqual(runner.calls, [])
             self.assertFalse(target.exists())
+
+    def test_symlinked_report_refused_without_symlink_privilege(self) -> None:
+        # Model native lexists, which cannot see the simulated lstat metadata.
+        with mock.patch.object(os, "symlink", side_effect=PermissionError(errno.EACCES, "denied")), \
+                mock.patch.object(os.path, "lexists", new=os.path.exists):
+            self.test_symlinked_report_refused_before_network()
+
+    def test_dangling_symlink_report_refused_without_symlink_privilege(self) -> None:
+        with mock.patch.object(os, "symlink", side_effect=PermissionError(errno.EACCES, "denied")), \
+                mock.patch.object(os.path, "lexists", new=os.path.exists):
+            self.test_dangling_symlink_report_refused_without_creating_target()
 
     def test_existing_regular_report_refused(self) -> None:
         self.out.mkdir(parents=True)
