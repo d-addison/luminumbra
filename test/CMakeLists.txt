@@ -2056,6 +2056,10 @@ if(CAPTURE_VALIDATION_POWERSHELL)
         COMMAND "${CAPTURE_VALIDATION_POWERSHELL}" -NoLogo -NoProfile -NonInteractive
             -ExecutionPolicy Bypass -File "${CMAKE_SOURCE_DIR}/tools/gates/test-capture-artifact-validation.ps1")
     set_tests_properties(CaptureArtifactValidationContract PROPERTIES LABELS "visual;tools" TIMEOUT 60)
+    add_test(NAME RenderQualificationWrapperContract
+        COMMAND "${CAPTURE_VALIDATION_POWERSHELL}" -NoLogo -NoProfile -NonInteractive
+            -ExecutionPolicy Bypass -File "${CMAKE_SOURCE_DIR}/tools/gates/test-render-qualification.ps1")
+    set_tests_properties(RenderQualificationWrapperContract PROPERTIES LABELS "visual;tools" TIMEOUT 60)
     add_test(NAME FarLadderOracleContract
         COMMAND "${CAPTURE_VALIDATION_POWERSHELL}" -NoLogo -NoProfile -NonInteractive
             -ExecutionPolicy Bypass -File "${CMAKE_SOURCE_DIR}/tools/gates/test-far-ladder-oracle.ps1")
@@ -2074,6 +2078,7 @@ if(CAPTURE_VALIDATION_POWERSHELL)
 else()
     message(STATUS "PowerShell unavailable: AcceptancePreflightContract is not registered")
     message(STATUS "PowerShell unavailable: CaptureArtifactValidationContract is not registered")
+    message(STATUS "PowerShell unavailable: RenderQualificationWrapperContract is not registered")
     message(STATUS "PowerShell unavailable: FarLadderOracleContract is not registered")
     message(STATUS "PowerShell unavailable: SavedWorldRoundtripArtifactsContract is not registered")
     message(STATUS "PowerShell unavailable: LuaApiManifestSourceContract is not registered")
