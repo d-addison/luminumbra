@@ -208,7 +208,7 @@ bool ParseHeader(Cursor& c, ReplayHeader& h) {
     // Refuse a version mismatch LOUDLY (the header's binding contract): a future/unknown LREC1
     // version would have a different record layout, so parsing it under today's assumptions
     // would silently mis-decode into garbage. Reject instead (Factorio breaks silently; we don't).
-    if (h.version != kLrec1Version)
+    if (h.version != kLrec1Version && h.version != kLrec1ElidedVersion)
         return false;
     if (!c.GetU16(h.tick_rate_hz))
         return false;
@@ -510,6 +510,8 @@ bool BoundedReplayRecorder::Finalize(const std::string& destination,
             return false;
     }
     std::vector<std::uint8_t> header;
+    if (m_elided_tick != 0)
+        m_header.version = kLrec1ElidedVersion;
     AppendHeader(header, m_header);
     for (int i = 0; i < 8; ++i)
         header[kTickCountOffset + i] = static_cast<std::uint8_t>((tick_count >> (8 * i)) & 0xFF);
@@ -1071,7 +1073,8 @@ std::optional<ReplayContents> ReadReplay(const std::string& path) {
                 break;
             }
             contents.checkpoints.push_back(std::move(rec));
-        } else if (type == RecordType::ElidedPrefix && contents.inputs.empty() &&
+        } else if (type == RecordType::ElidedPrefix &&
+                   contents.header.version == kLrec1ElidedVersion && contents.inputs.empty() &&
                    contents.checkpoints.empty() && contents.elided_through_tick == 0 && tick != 0 &&
                    payload_len == 8) {
             if (!payload.GetU64(contents.elided_prefix_digest)) {

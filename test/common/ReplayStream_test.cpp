@@ -386,6 +386,7 @@ TEST_F(ReplayStreamTest, BoundedRecorderRejectsOverflowAndOversizedTicksBeforeWr
 TEST_F(ReplayStreamTest, BoundedRecorderKeepsCompleteReplayEncodingBeforeRotation) {
     const auto expected_path = m_path + ".expected";
     auto header = MakeHeader();
+    ASSERT_EQ(header.version, 3u);
     header.start_world_hash = "world";
     replay::ReplayWriter expected;
     ASSERT_TRUE(expected.Open(expected_path, header));
@@ -407,6 +408,13 @@ TEST_F(ReplayStreamTest, BoundedRecorderKeepsCompleteReplayEncodingBeforeRotatio
     }
     ASSERT_TRUE(expected.Finalize(3));
     ASSERT_TRUE(recorder.Finalize(m_path, 3, 3));
+    const auto parsed = replay::ReadReplay(m_path);
+    if (!parsed.has_value()) {
+        FAIL() << "complete version-3 recording could not be read";
+    }
+    const auto& contents = *parsed;
+    EXPECT_EQ(contents.header.version, 3u);
+    EXPECT_EQ(contents.elided_through_tick, 0u);
     {
         std::ifstream actual(m_path, std::ios::binary);
         std::ifstream original(expected_path, std::ios::binary);
@@ -440,12 +448,56 @@ TEST_F(ReplayStreamTest, BoundedRecorderPrefixDigestMatchesElidedWireBytes) {
     const auto& contents = *parsed;
     EXPECT_FALSE(contents.truncated);
     EXPECT_TRUE(contents.trailer_present);
+    EXPECT_EQ(contents.header.version, 4u);
+    EXPECT_TRUE(replay::ConfigurationMatches(contents.header,
+                                             contents.header.system_config_identity,
+                                             contents.header.preset_content_hash));
     EXPECT_EQ(contents.elided_through_tick, 1024u);
     EXPECT_EQ(contents.elided_prefix_digest, std::stoull(replay::Fnv1a64Hex(prefix), nullptr, 16));
     ASSERT_EQ(contents.inputs.size(), 1024u);
     EXPECT_EQ(contents.inputs.front().tick, 1025u);
     EXPECT_EQ(contents.inputs.back().tick, 2048u);
     EXPECT_EQ(contents.tick_count, 2048u);
+    // Earlier version-3 readers reject this tag. It must not be accepted under
+    // that header even by a reader that also supports diagnostic version 4.
+    {
+        std::fstream stream(m_path, std::ios::binary | std::ios::in | std::ios::out);
+        ASSERT_TRUE(stream.is_open());
+        stream.seekp(6); // magic + reserved byte, then little-endian u16 version
+        stream.put(3);
+        stream.put(0);
+        ASSERT_TRUE(stream.good());
+    }
+    const auto downgraded = replay::ReadReplay(m_path);
+    if (!downgraded.has_value()) {
+        FAIL() << "version-3 header should be accepted before record validation";
+    }
+    const auto& invalid_contents = *downgraded;
+    EXPECT_TRUE(invalid_contents.truncated);
+    EXPECT_EQ(invalid_contents.elided_through_tick, 0u);
+}
+
+TEST_F(ReplayStreamTest, VersionFourHeaderPreservesIdentityAndCompleteRecordLayout) {
+    auto header = MakeHeader();
+    header.version = 4;
+    replay::ReplayWriter writer;
+    ASSERT_TRUE(writer.Open(m_path, header));
+    writer.RecordInput(1, {0xab});
+    ASSERT_TRUE(writer.Finalize(1));
+    const auto parsed = replay::ReadReplay(m_path);
+    if (!parsed.has_value()) {
+        FAIL() << "version-4 recording could not be read";
+    }
+    const auto& contents = *parsed;
+    EXPECT_EQ(contents.header.version, 4u);
+    EXPECT_TRUE(replay::ConfigurationMatches(
+        contents.header, header.system_config_identity, header.preset_content_hash));
+    EXPECT_FALSE(contents.truncated);
+    EXPECT_TRUE(contents.trailer_present);
+    EXPECT_EQ(contents.elided_through_tick, 0u);
+    ASSERT_EQ(contents.inputs.size(), 1u);
+    EXPECT_EQ(contents.inputs.front().tick, 1u);
+    EXPECT_EQ(contents.inputs.front().inputs, (std::vector<std::uint8_t>{0xab}));
 }
 
 TEST_F(ReplayStreamTest, BoundedRecorderRotatesOnByteLimitAndRetainsMaximumTick) {

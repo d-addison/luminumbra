@@ -52,9 +52,14 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
-#include "replay/ReplayStream.h"
+#include "../HashCheckpoint.h"
+
+namespace Luminumbra::Replay {
+class QueuedReplayRecorder;
+}
 
 namespace Luminumbra::Net {
 
@@ -120,7 +125,7 @@ struct InputMsg {
 // the combined world_hash for the top-level compare.
 // Replay and wire checkpoints have the same value contract. Sharing the immutable
 // value lets the recorder retain it without copying potentially large strings.
-using HashMsg = Replay::CheckpointRecord;
+using HashMsg = HashCheckpoint;
 
 // Clean disconnect marker carrying the tick the sender stopped at.
 struct ByeMsg {
@@ -553,6 +558,7 @@ struct LockstepHooks {
 class LockstepSession {
 public:
     LockstepSession(LockstepConfig config, ILockstepTransport* transport, LockstepHooks hooks);
+    ~LockstepSession();
 
     // Exchanges Hello and validates protocol/version/seed/preset/tick-rate/config identity.
     // Returns false on a mismatch (rejected loudly) or a peer that never said Hello.
@@ -562,8 +568,8 @@ public:
 
     // Advances the session by AT MOST one tick. Drains pending peer messages first, then:
     //  - if an available peer hash mismatched an executed cadence tick -> Desync (HALT + dump);
-    //  - otherwise, if a clean Bye was seen, or a closed transport has no buffered
-    //    input for the wanted tick -> PeerDisconnected (sticky clean end);
+    //  - otherwise, after draining through Bye's executed tick, or when a closed
+    //    transport has no buffered input for the wanted tick -> PeerDisconnected;
     //  - if the peer's input for the wanted tick is present -> Advanced (world stepped,
     //    hashes exchanged at the cadence);
     //  - else -> WaitingForPeer (horizon grows; caller pumps again after sending/recving).
@@ -579,9 +585,7 @@ public:
 
     // Blocking recording barrier for explicit persistence/lifecycle boundaries.
     // PumpTick never waits for recording. Returns false for an incomplete replay.
-    bool FlushReplayRecorder() {
-        return m_replay.Flush() && m_replay_open;
-    }
+    bool FlushReplayRecorder();
 
     [[nodiscard]] LockstepStatus Status() const {
         return m_status;
@@ -592,23 +596,7 @@ public:
     [[nodiscard]] std::uint32_t Horizon() const {
         return m_horizon;
     }
-    [[nodiscard]] LockstepAdmissionStatus AdmissionStatus() const {
-        return {.input_ticks = m_inputs.size(),
-                .peer_inputs = m_peer_input_count,
-                .peer_hashes = m_peer_hashes.size(),
-                .retained_bytes = m_retained_peer_bytes,
-                .confirmed_hash_tick = m_confirmed_peer_hash_tick,
-                .frame_limit = m_frame_limit,
-                .message_limit = m_peer_message_limit,
-                .byte_limit = m_peer_byte_limit,
-                .applied_inputs = m_applied_inputs.size(),
-                .applied_input_bytes = m_applied_input_bytes,
-                .local_hashes = m_local_hashes.size(),
-                .checkpoint_window = m_checkpoint_window,
-                .replay_bytes = m_replay.RetainedBytes(),
-                .replay_byte_limit = m_replay.ByteLimit(),
-                .replay_segments = m_replay.SegmentCount()};
-    }
+    [[nodiscard]] LockstepAdmissionStatus AdmissionStatus() const;
 
     // Const allocation diagnostic for a retained checkpoint; includes the four
     // strings' inline capacities. Lookup is logarithmic and never runs per frame.
@@ -676,7 +664,7 @@ private:
     // client id (ordered map => deterministic merge order). std::map (ORDERED) is used
     // deliberately so the merged-input concatenation order is stable -- an unordered_map
     // would be a hash-order desync hazard (the Factorio lesson).
-    // At most max(start, min, max horizon) local entries plus the shared peer entry
+    // At most horizon_max local entries plus the shared peer entry
     // budget; each tick admits only the configured local and remote client ids.
     std::map<std::uint64_t, std::map<std::uint32_t, std::vector<std::uint8_t>>> m_inputs;
     std::size_t m_peer_input_count = 0;
@@ -702,7 +690,7 @@ private:
     static_assert(kMaxFramePayloadBytes <= (std::numeric_limits<std::size_t>::max)() / 3);
     std::deque<InputMsg> m_applied_inputs;
     std::size_t m_applied_input_bytes = 0;
-    Replay::QueuedReplayRecorder m_replay;
+    std::unique_ptr<Replay::QueuedReplayRecorder> m_replay;
     bool m_replay_open = false;
     bool m_replay_failed = false;
 

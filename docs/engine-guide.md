@@ -283,25 +283,26 @@ content identity binds canonical preset JSON and a sorted manifest of exact biom
 and structure dependency bytes; generation uses that immutable snapshot. Runtime
 and soak TCP slots release peers that fail to complete a matching Hello within
 10 seconds (issue #315). The shared networking Hello is version 4; LREC1 replay
-layout remains version 3. Older Hello layouts are refused. See the
+uses version 3 for complete streams and version 4 for diagnostic suffixes with
+an elided prefix. Readers accept both; older Hello layouts are refused. See the
 [identity contract](development/system-config-identity.md) for the effective
 SystemConfig/presentation split, refusal rules and dependency encoding.
 
 Lockstep is a direct two-peer protocol: Hello must match the configured remote
 client slot, and a peer can submit only its own inputs. Hello exchanges start,
 minimum and maximum horizons, checkpoint cadence, transport frame size, and
-retention budget settings. Both sides must use identical horizon, cadence and
-budget settings; incompatibility fails before input scheduling with an explicit
-`handshake_error`. The frame size is the minimum of both transports and each side's
+retention budget settings. Local and received settings must satisfy
+`0 < horizon_min <= horizon_start <= horizon_max` before any input scheduling.
+Both sides must use identical horizon, cadence and budget settings; incompatibility
+fails before input scheduling with an explicit `handshake_error`. The frame size is the minimum of both transports and each side's
 `max_frame_payload_bytes` setting; callbacks can inspect the result through the
 const `AdmissionStatus().frame_limit` diagnostic.
 Inputs must be newer than the consumed tick and no more than twice the maximum
-configured horizon ahead (including start/min). Hashes must be cadence checkpoints
-within that lookahead and newer than the contiguous confirmed checkpoint prefix;
-delayed hashes for executed ticks still participate in desync detection.
+configured horizon ahead. Hashes must be cadence checkpoints within that lookahead
+and newer than the contiguous confirmed checkpoint prefix; delayed hashes for executed ticks still participate in desync detection.
 
 Retention is derived, rather than dropping reliable messages when a container
-fills. Let `L = 2 * max(start, min, max horizon)`, `C = ceil(L / cadence)` and
+fills. Let `L = 2 * horizon_max`, `C = ceil(L / cadence)` and
 `W = kReceiveQueueFrameLimit + C + 1` (with no hash slots when cadence is zero).
 The sender pauses simulation after `W` unconfirmed checkpoints while continuing
 to receive; only the oldest unconfirmed tick advances the confirmation prefix.
@@ -315,6 +316,11 @@ fit all negotiated traffic or handshake fails. A tick within the negotiated
 window is never discarded for capacity. Invalid slot, stale/future, malformed,
 conflicting or oversized messages are dropped and counted in session status.
 These rules apply above Loopback, TCP (Windows/POSIX), GNS and Steam transports.
+
+On `Bye(T)`, the survivor compares queued hashes and drains buffered inputs only
+through the sender's final executed tick T. Pre-scheduled inputs after T are
+then discarded. Pending outbound retries cannot cut this drain short; closure
+is reported before retained input/hash storage is released.
 
 Consumed inputs and confirmed peer hashes are pruned. An out-of-order hash that
 already matches its local checkpoint releases all peer strings and retains only
@@ -372,12 +378,12 @@ simulation or hash results; a failed artifact is never reported as successful.
 On desync, the recorder finalizes LREC1 at the configured dump destination and
 populates the existing `LockstepStatus::dump_path` (the server's peer destination
 still appends `.peer`). It keeps every retained input and the local checkpoints
-through the divergence. When the prefix has rotated away, an `ElidedPrefix`
+through the divergence. When the prefix has rotated away, the header is version 4 and an `ElidedPrefix`
 record contains its last tick and a rolling FNV-1a digest of its exact encoded
 record bytes. `ReadReplay` exposes `elided_through_tick` and
 `elided_prefix_digest`; these artifacts support diagnostics, and `--replay`
 explicitly refuses to replay them from the seed. Recordings with no elided
-prefix keep the existing full LREC1 contents. The optional
+prefix keep the byte-identical version-3 LREC1 contents. The optional
 `LockstepHooks::record_replay_tick` remains available for additional bounded,
 caller-owned recording; the buffering `ReplayWriter` must not be used as an
 unbounded full-session sink.

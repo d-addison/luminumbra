@@ -96,8 +96,10 @@ Preserving an override on an absent-ledger load can change nondefault scheduling
 derived world/replay hashes compared with the previous default-substitution bug; no pins
 for that incorrect behavior are retained or introduced.
 
-Lockstep protocol and LREC1 layout versions are 3. Hello and replay headers carry
-length-prefixed configuration identity and `preset_content_hash` strings. Versions 1
+Lockstep Hello is version 4. Complete LREC1 streams use version 3; diagnostic suffixes
+with an elided prefix use version 4. Replay readers accept both versions. Hello and
+replay headers carry length-prefixed configuration identity and `preset_content_hash`
+strings. Versions 1
 and 2 are explicitly rejected because they cannot bind resolved preset content.
 Desync replay dumps include both identities captured at handshake. TCP (including
 runtime/soak modes) hosts validate the same Hello compatibility fields before adding a

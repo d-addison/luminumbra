@@ -79,8 +79,8 @@ the eight packaged names use frozen revision-6 copies in `worlds/atlas/presets-r
 other names retain their original atlas path. Any recorded identity is verified.
 Resaving a legacy world embeds its exact preset with the new metadata. Container
 versions and hash algorithms are unchanged; this fallback does not reopen
-obsolete world formats. Lockstep Hello is version 4 and negotiates admission limits; LREC1 replay remains
-version 3. Older Hello layouts and replay versions 1 and 2 are refused.
+obsolete world formats. Lockstep protocol and LREC1 replay layout are version 3;
+versions 1 and 2 are refused because they lack resolved-content identity.
 See the [format contract](engine-guide.md).
 
 ## Planned for v0.3.1

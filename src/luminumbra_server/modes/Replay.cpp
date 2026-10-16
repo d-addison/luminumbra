@@ -180,10 +180,12 @@ int RunReplay(const ServerCliOptions& options) {
     // Refuse a version / engine mismatch loudly (Factorio replays break silently
     // across versions; we refuse instead -- research Area 2 takeaway 8).
     const std::string engine_now(luminumbra::core::GetEngineVersionString());
-    if (header.version != Luminumbra::Replay::kLrec1Version) {
-        LUMINUMBRA_CORE_ERROR("replay: stream LREC version {} != engine {}",
+    if (header.version != Luminumbra::Replay::kLrec1Version &&
+        header.version != Luminumbra::Replay::kLrec1ElidedVersion) {
+        LUMINUMBRA_CORE_ERROR("replay: unsupported LREC version {} (accepted: {}, {})",
                               header.version,
-                              Luminumbra::Replay::kLrec1Version);
+                              Luminumbra::Replay::kLrec1Version,
+                              Luminumbra::Replay::kLrec1ElidedVersion);
         return 1;
     }
 

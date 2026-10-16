@@ -41,6 +41,8 @@
 #include <string_view>
 #include <vector>
 
+#include "../HashCheckpoint.h"
+
 namespace Luminumbra::Replay {
 
 // On-wire constants. Bump kLrec1Version on ANY incompatible layout change and
@@ -48,13 +50,16 @@ namespace Luminumbra::Replay {
 // section 13: replay LREC1 is versioned).
 inline constexpr char kLrec1Magic[5] = {'L', 'R', 'E', 'C', '1'};
 inline constexpr std::uint16_t kLrec1Version = 3;
+// Version 3 remains byte-identical for complete streams. Only diagnostic
+// streams with ElidedPrefix require version 4; readers accept both layouts.
+inline constexpr std::uint16_t kLrec1ElidedVersion = 4;
 inline constexpr char kLrec1Trailer[8] = {'L', 'R', 'E', 'C', 'E', 'N', 'D', '1'};
 
 // Record type tags (u8 on the wire).
 enum class RecordType : std::uint8_t {
     Input = 0x01,        // per-tick input set (may be empty -- valid + compact)
     Checkpoint = 0x02,   // world_hash + authoritative sub-hashes at a tick
-    ElidedPrefix = 0x03, // diagnostic suffix: tick and digest of the removed prefix
+    ElidedPrefix = 0x03, // version 4 diagnostic suffix: tick and digest of removed prefix
 };
 
 // Session boot parameters -- everything ServerWorldRunner boots from, so a
@@ -83,8 +88,8 @@ struct ReplayHeader {
 [[nodiscard]] inline bool ConfigurationMatches(const ReplayHeader& header,
                                                const std::string& live_identity,
                                                const std::string& live_preset_hash) {
-    return header.version == kLrec1Version && !live_identity.empty() &&
-           !header.system_config_identity.empty() &&
+    return (header.version == kLrec1Version || header.version == kLrec1ElidedVersion) &&
+           !live_identity.empty() && !header.system_config_identity.empty() &&
            header.system_config_identity == live_identity && !live_preset_hash.empty() &&
            !header.preset_content_hash.empty() && header.preset_content_hash == live_preset_hash;
 }
@@ -102,13 +107,7 @@ struct InputRecord {
 // Mesh is EXCLUDED per the  caveat (it is a derived render artifact that
 // legitimately differs across save/load; authoritative state = terrain/water/
 // entities). Hashes are stored as their hex strings (no float/endianness risk).
-struct CheckpointRecord {
-    std::uint64_t tick = 0;
-    std::string world_hash;
-    std::string terrain;
-    std::string water;
-    std::string entities;
-};
+using CheckpointRecord = HashCheckpoint;
 
 // --- Writer: append-on-record. ----------------------------------------------
 // Usage: construct with the header (writes it immediately), RecordInput once per
