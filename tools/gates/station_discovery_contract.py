@@ -175,6 +175,7 @@ def validate(document, *, expected_engine_revision=None, expected_inputs_sha256=
                 for c in query["origin_mm"]), "horizontal search or pose footprint outside bounds")
     require(len(document["candidates"]) <= query["limit"], "candidate count exceeds limit")
     seen, previous = set(), None
+    control_anchor_y = None
     pattern = re.compile(r"(mouth|arch|horizon-control|coverage-control)-z-([np])(0|[1-9][0-9]*)"
                          r"-x-([np])(0|[1-9][0-9]*)-i-(0|[1-9][0-9]*)")
     for candidate in document["candidates"]:
@@ -208,6 +209,9 @@ def validate(document, *, expected_engine_revision=None, expected_inputs_sha256=
                 abs(pose["z"]) * 1000 + 500 <= HORIZONTAL_MM, "pose outside horizontal domain")
         require(lo + 0.5 <= pose["y"] <= hi - 0.5, "eye clearance outside vertical span")
         if query["kind"] in ("horizon", "coverage"):
+            if control_anchor_y is None:
+                control_anchor_y = ay
+            require(ay == control_anchor_y, "controls must share one terrain anchor height")
             i = index
             require(cell_z == cell_x == 0 and i < (4 if query["kind"] == "horizon" else 5),
                     "invalid control identity")

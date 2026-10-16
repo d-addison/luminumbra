@@ -336,6 +336,31 @@ class ContractTests(unittest.TestCase):
             value["candidates"][0]["pose"]["yaw"] = 45
             self.refused(value)
 
+    def test_controls_must_share_terrain_height_even_with_correct_eye_offsets(self):
+        for kind in ("horizon", "coverage"):
+            count = 4 if kind == "horizon" else 5
+            for changed_index in range(count):
+                with self.subTest(kind=kind, changed_index=changed_index):
+                    value = document(kind)
+                    for index in range(count):
+                        value["candidates"].append({
+                            "id": "%s-control-z-p0-x-p0-i-%d" % (kind, index),
+                            "anchor_mm": [0, 0, 0],
+                            "pose": {"x": 0, "y": 80 if index == 4 else 1.8, "z": 0,
+                                     "yaw": (0, 90, -180, -90, 45)[index],
+                                     "pitch": -20 if index == 4 else 0}})
+                    contract.validate(value)
+                    changed = value["candidates"][changed_index]
+                    changed["anchor_mm"][1] = 4000
+                    changed["pose"]["y"] = 84 if changed_index == 4 else 5.8
+                    with self.assertRaisesRegex(contract.ContractError, "share one terrain"):
+                        contract.validate(value)
+                    # A common nonzero terrain height is valid for every control.
+                    for control in value["candidates"]:
+                        control["anchor_mm"][1] = 4000
+                        control["pose"]["y"] = 84 if control["pose"]["pitch"] == -20 else 5.8
+                    contract.validate(value)
+
     def test_control_distance_does_not_expand_pose_domain(self):
         value = document("horizon")
         value["query"]["origin_mm"] = [contract.HORIZONTAL_MM - 10000, 0]
@@ -402,6 +427,22 @@ class NativeSmoke(unittest.TestCase):
             "terrain": {"base_frequency": 0.004, "base_amplitude": 0, "octaves": 1,
                         "persistence": 0.5, "lacunarity": 2, "height_offset": 0},
             "features": {"caves_enabled": False, "cave_frequency": 0.02}}}
+
+    def test_native_unicode_input_paths(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "\u96ea station \U0001f30d"
+            data = root / "data \u96ea"
+            data.mkdir(parents=True)
+            preset = root / "flat \u96ea.json"
+            preset.write_bytes(contract.canonical(self.flat_preset()))
+            command = [self.cli, "--preset-json", str(preset), "--data-root", str(data),
+                       "--seed", "17", "--kind", "coverage", "--origin-mm", "0", "0",
+                       "--radius-m", "1", "--y-range-m", "0", "100",
+                       "--view-distance-m", "0", "--limit", "64"]
+            result = subprocess.run(command, capture_output=True, check=False)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            value = contract.validate(contract.loads(result.stdout))
+            self.assertEqual(len(value["candidates"]), 5)
 
     if os.name == "nt":
         def test_data_root_preserves_windows_device_prefix(self):

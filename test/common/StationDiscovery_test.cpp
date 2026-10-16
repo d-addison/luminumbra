@@ -5,7 +5,9 @@
 #include <cmath>
 #include <limits>
 #include <random>
+#include <string>
 
+#include "../fixtures/TerrainFixtureParams.h"
 #include "luminumbra_common/world/StationDiscovery.h"
 
 namespace {
@@ -423,6 +425,45 @@ TEST(StationDiscovery, ControlsUseEyeAndElevatedConventionsAndDistinctIds) {
     EXPECT_FLOAT_EQ(result.candidates[4].pose.pitch, -20);
     query.kind = StationKind::Horizon;
     EXPECT_EQ(DiscoverStations(source, query).candidates.size(), 4u);
+}
+
+TEST(StationDiscovery, SeededWorldControlsMatchFlatTerrainGolden) {
+    auto params = Test::SyntheticTerrainParams();
+    params.base_amplitude = 0;
+    params.peaks_amplitude = 0;
+    params.continental_spline = {{-1.0f, 0.0f}, {1.0f, 0.0f}};
+    params.height_offset = 4.25f;
+    params.caves_enabled = false;
+    // The existing synthetic fixture and null services require no GPU or assets.
+    const WorldSystem world(nullptr, nullptr, params, 17);
+    constexpr std::array<StationPose, 5> expected{{{-4.25, 6.05, 8.75, 0, 0},
+                                                   {-4.25, 6.05, 8.75, 90, 0},
+                                                   {-4.25, 6.05, 8.75, -180, 0},
+                                                   {-4.25, 6.05, 8.75, -90, 0},
+                                                   {-4.25, 84.25, 8.75, 45, -20}}};
+    for (const auto kind : {StationKind::Horizon, StationKind::Coverage}) {
+        auto query = Query(kind);
+        query.origin_mm = {-4250, 8750};
+        query.y_range_m = {0, 100};
+        const auto result = DiscoverStations(world, query);
+        ASSERT_TRUE(result.ok) << result.error;
+        ASSERT_EQ(result.candidates.size(), kind == StationKind::Horizon ? 4u : 5u);
+        for (std::size_t i = 0; i < result.candidates.size(); ++i) {
+            SCOPED_TRACE(i);
+            const auto& actual = result.candidates[i];
+            const std::string prefix = kind == StationKind::Horizon ? "horizon" : "coverage";
+            EXPECT_EQ(actual.id, prefix + "-control-z-p0-x-p0-i-" + std::to_string(i));
+            EXPECT_EQ(actual.anchor_mm, (std::array<std::int64_t, 3>{-4250, 4250, 8750}));
+            EXPECT_EQ(actual.cell_x, 0);
+            EXPECT_EQ(actual.cell_z, 0);
+            EXPECT_EQ(actual.local_index, i);
+            EXPECT_DOUBLE_EQ(actual.pose.x, expected[i].x);
+            EXPECT_DOUBLE_EQ(actual.pose.y, expected[i].y);
+            EXPECT_DOUBLE_EQ(actual.pose.z, expected[i].z);
+            EXPECT_FLOAT_EQ(actual.pose.yaw, expected[i].yaw);
+            EXPECT_FLOAT_EQ(actual.pose.pitch, expected[i].pitch);
+        }
+    }
 }
 
 TEST(StationDiscovery, BoundsAndCellBudgetRefuseWithoutPartialResults) {

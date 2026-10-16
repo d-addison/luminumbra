@@ -23,6 +23,10 @@ add_executable(luminumbra_station_discovery station_discovery.cpp)
 target_link_libraries(luminumbra_station_discovery PRIVATE luminumbra_common)
 luminumbra_configure_first_party_target(luminumbra_station_discovery)
 luminumbra_pin_fp_determinism(luminumbra_station_discovery)
+if(MINGW)
+    # Select the CRT startup that supplies UTF-16 argv to wmain.
+    target_link_options(luminumbra_station_discovery PRIVATE -municode)
+endif()
 # The front end must reach its ISA refusal before calling AVX2 world queries.
 # Source options follow transitive Jolt options; keep the common library unchanged.
 if(NOT MSVC AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang" AND

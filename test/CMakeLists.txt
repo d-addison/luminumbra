@@ -162,6 +162,7 @@ target_link_libraries(net_sockets_transport_test PRIVATE gtest_main spdlog::spdl
 luminumbra_configure_first_party_target(net_sockets_transport_test)
 
 add_executable(common_tests
+    common/StationDiscoveryArguments_test.cpp
     common/StationDiscovery_test.cpp
     common/Crc32_test.cpp
     rendering/shader_compositing_contract_test.cpp

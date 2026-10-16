@@ -1,4 +1,6 @@
 // CPU-only discovery. stdout is reserved for the complete canonical document.
+#include "StationDiscoveryArguments.h"
+
 #include <array>
 #include <atomic>
 #include <bit>
@@ -49,6 +51,10 @@ using namespace Luminumbra::world;
 namespace fs = std::filesystem;
 using Luminumbra::Filesystem::GenericUtf8PathString;
 using Luminumbra::Filesystem::PathFromUtf8;
+using Luminumbra::StationDiscoveryCli::ArgumentChar;
+using Luminumbra::StationDiscoveryCli::ArgumentPath;
+using Luminumbra::StationDiscoveryCli::ArgumentText;
+using Luminumbra::StationDiscoveryCli::UsageError;
 
 class WarningSink final : public spdlog::sinks::base_sink<std::mutex> {
 public:
@@ -68,9 +74,6 @@ private:
     std::atomic_bool m_observed{false};
 };
 
-struct UsageError : std::runtime_error {
-    using std::runtime_error::runtime_error;
-};
 struct Options {
     fs::path preset, data_root;
     int seed = 0;
@@ -79,8 +82,8 @@ struct Options {
 };
 
 template<typename T>
-T Integer(const char* text) {
-    const std::string value(text);
+T Integer(const ArgumentChar* text) {
+    const auto value = ArgumentText(text);
     T result{};
     const auto parsed = std::from_chars(value.data(), value.data() + value.size(), result);
     if (parsed.ec != std::errc{} || parsed.ptr != value.data() + value.size()) {
@@ -88,7 +91,7 @@ T Integer(const char* text) {
     }
     return result;
 }
-Options ParseOptions(int argc, char** argv) {
+Options ParseOptions(int argc, ArgumentChar** argv) {
     Options options;
     const std::map<std::string, int> arities{{"--preset-json", 1},
                                              {"--data-root", 1},
@@ -101,7 +104,7 @@ Options ParseOptions(int argc, char** argv) {
                                              {"--limit", 1}};
     std::set<std::string> seen;
     for (int i = 1; i < argc;) {
-        const std::string key(argv[i++]);
+        const auto key = ArgumentText(argv[i++]);
         const auto found = arities.find(key);
         if (found == arities.end() || !seen.insert(key).second) {
             throw UsageError("unknown or duplicate argument: " + key);
@@ -110,13 +113,13 @@ Options ParseOptions(int argc, char** argv) {
             throw UsageError("missing argument value: " + key);
         }
         if (key == "--preset-json") {
-            options.preset = argv[i];
+            options.preset = ArgumentPath(argv[i]);
         } else if (key == "--data-root") {
-            options.data_root = argv[i];
+            options.data_root = ArgumentPath(argv[i]);
         } else if (key == "--seed") {
             options.seed = Integer<int>(argv[i]);
         } else if (key == "--kind") {
-            options.kind = argv[i];
+            options.kind = ArgumentText(argv[i]);
         } else if (key == "--origin-mm") {
             options.query.origin_mm = {Integer<std::int64_t>(argv[i]),
                                        Integer<std::int64_t>(argv[i + 1])};
@@ -626,7 +629,11 @@ json Document(const Options& options,
 }
 } // namespace
 
+#ifdef _WIN32
+int wmain(int argc, wchar_t** argv) {
+#else
 int main(int argc, char** argv) {
+#endif
 #if !defined(_WIN32)
     // Protect stdout and the custom stderr logger before either can write.
     BoundedConsoleSink::IgnoreDefaultSigpipe();

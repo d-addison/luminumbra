@@ -615,7 +615,8 @@ Mouth ranking does not select the largest opening.
 
 `horizon` returns up to four control views at the query origin, 1.8 m above
 terrain, with yaw 0/90/-180/-90 and pitch zero. `coverage` adds the 80 m elevated
-view, yaw 45 and pitch -20. Control IDs explicitly contain `-control-`; they do
+view, yaw 45 and pitch -20. All controls share the terrain anchor Y sampled once
+at that origin. Control IDs explicitly contain `-control-`; they do
 not discover features, and D is echoed but does not reposition them. They also
 require sampled eye clearance and the requested Y span. Neither kind claims
 that any tier is covered or settled.
