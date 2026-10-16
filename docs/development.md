@@ -65,25 +65,36 @@ ctest --preset release -L manual \
 
 ## Continuous integration
 
-The Linux/GCC, Diligent RHI, ASan, preview-frame and paired performance lanes use
-bounded ccache (250M each); UCRT64 and MSVC use 500M each. Qualification captures
-bypass the cache. Immutable save keys include the commit SHA; restores prefer the
-matching CMake configuration prefix where available, then the lane prefix. Caches
-are trimmed with `ccache --cleanup` before saving, and cache-save failures cannot
-fail a job. Main/devel native and performance caches together retain about 4.5 GB
-across both branches. These lanes use standard runners and the existing cache
-actions, with no paid cache service.
+The Linux/GCC and ASan lanes use bounded ccache at 400M and 600M respectively.
+Diligent RHI, preview-frame and paired performance use 250M each; UCRT64 and MSVC
+use 500M each. Qualification captures bypass the cache. Immutable save keys include
+the commit SHA; restores prefer the matching CMake configuration prefix where
+available, then the lane prefix. Caches are trimmed with `ccache --cleanup`
+before saving, and cache-save failures cannot
+fail a job. Starting from the measured 1.55 GB devel generation, the two cap
+increases add 0.15 + 0.35 GB and the newly seeded UCRT64 cache adds up to 0.5 GB:
+about 2.55 GB per branch, or 5.1 GB across main/devel, leaving about 0.9 GB of the
+6 GB budget for other caches. At all seven lanes' configured caps, one generation
+per branch totals 2.75 GB, or 5.5 GB across both branches, leaving 0.5 GB for
+package and analysis caches. These lanes use standard runners and the existing
+cache actions, with no paid cache service.
 
 All Actions caches, including performance, clang-tidy results, and MSYS2 packages,
 are saved only on `push` events to `refs/heads/main` or `refs/heads/devel`; PRs,
 scheduled runs, and manual dispatches never save caches. `cache-cleanup.yml` runs
-on trusted maintainer pushes to devel/main, activating retention as soon as the
-workflow lands on devel. Once installed on the default branch (main), it also runs
-after pushed CI, AddressSanitizer or Performance observations completes. All
-cleanup runs share one concurrency group and never cancel an active cleanup.
+only after CI, AddressSanitizer or Performance observations completes for a push
+to main/devel. CI saves the Linux, Diligent, Windows MSVC/UCRT64 compiler caches,
+clang-tidy shards and MSYS2 packages; AddressSanitizer saves its compiler cache;
+Performance observations saves preview and paired compiler caches (its candidate
+cache save is also covered, though qualification capture currently runs manually).
+Documentation, game-assets, Blender authoring, release and UCRT attribution do not
+save Actions caches. The completion trigger must be installed on the default
+branch (main) to activate retention. There is no direct push trigger, so completion
+runs cannot cancel pending push cleanup runs and freeze devel. All cleanup runs
+share one concurrency group and never cancel an active cleanup.
 It retains the newest generation by creation time per branch and lane across
 configuration changes and SHA keys, protecting both live branch heads' keys and
-the triggering SHA (`github.sha` for push, `workflow_run.head_sha` for workflow_run)
+the triggering SHA (`workflow_run.head_sha`)
 even when cleanup is delayed until the branch advances. The named `RECENCY_GRACE`
 constant in `cache-cleanup.yml` is six hours: caches whose creation or last access
 (whichever is later) falls within that window are never deleted, preserving caches
@@ -199,9 +210,9 @@ The standalone plan explicitly lists tests in `tools/ci`, `tools/perf`,
 `tools/release`, `tools/assets`, `tools/audio`, `tools/persistence`, and
 `tools/rendering/acceptance`, plus visual-critique, timelapse, SDF doc,
 runtime-manifest, visual-montage, and Blender core/GLB contracts. This preserves
-Windows coverage for CTest-registered Python suites. The POSIX shebang fixtures in
-`test_tidy_cache.py` run only on Linux. Classification exemptions are explicit
-reviewed files, including covered test-backed modules; new files require builds.
+Windows coverage for CTest-registered Python suites. The interpreter-launched
+fixtures in `test_tidy_cache.py` run on Linux and Windows. Classification exemptions
+are explicit reviewed files, including covered test-backed modules; new files require builds.
 Native integrations such as `qualify_prefab_runtime.py`, its packaged service and
 installed acceptance inputs, `test_render_runner.py`, its native fixture generator
 and imports, and simulation capture tools stay on the build path.
@@ -241,10 +252,14 @@ the devel ruleset sees the following conclusions on ready PRs:
 Python changes outside the covered allowlist use the C++ PR column. Failures still
 report failure; `success` here describes an executed check that passes. Devel push
 columns describe runs that reach execution, subject to batching below.
-Windows/UCRT64 retains its existing branch/manual and draft routing in addition
-to path gating. The paired server comparison retains its main-bound ready PR and
-eligible main/devel push routing, with the same path gate. Manual qualification
-captures retain full build/test coverage and cache bypass.
+Windows/UCRT64 runs on ready PRs into main/devel, pushes to main/devel, and manual
+qualification captures, with its existing draft and path gates. Ordinary manual
+dispatches retain their main-only route. Devel pushes seed
+the devel-scoped compiler cache restored by PRs into devel; the MSYS2 package cache
+also saves on these trusted pushes. It shares the workflow-wide devel push
+concurrency group described below. The paired server comparison retains its
+main-bound ready PR and eligible main/devel push routing, with the same path gate.
+Manual qualification captures retain full build/test coverage and cache bypass.
 
 Devel pushes share one concurrency group per workflow and ref with
 `cancel-in-progress: false`. A running run completes; GitHub's queue of one
@@ -263,11 +278,20 @@ non-cancelling groups, preserving their individual evidence. PR runs retain ref
 batching and cancellation where previously configured, so `ready_for_review`
 supersedes earlier draft runs and `converted_to_draft` cancels in-flight ready
 runs. Authoring PR runs retain their independent, non-cancelling behaviour.
-The authoring workflow keeps its existing path triggers; UCRT attribution keeps
-its PR/manual-only triggers. Scheduled and release routing stays unchanged.
+The authoring workflow keeps its existing path triggers. The diagnostic
+`ucrt-attribution.yml` workflow is not a required check. Its devel PR triggers
+cover the workflow itself, `tools/ci/ucrt_attribution.sh`,
+`tools/ci/test_ucrt_attribution.py`, `tools/ci/test_ucrt_gcc_cohort.py`,
+`tools/ci/check_worldgen_probe_smoke.py`,
+`tools/ci/test_check_worldgen_probe_smoke.py`, and
+`test/diagnostics/worldgen_probe.cpp`. Devel pushes cover those same paths plus
+`tools/CMakeLists.txt` and `test/CMakeLists.txt`, catching probe build changes
+after merge. Attribution also runs weekly on Sunday at 04:43 UTC on the default
+branch and supports manual dispatch. Other scheduled and release routing stays
+unchanged.
 
 All runners remain standard hosted runners; no paid actions, larger/GPU runners,
-repository visibility changes, or cache-cap increases are introduced.
+or repository visibility changes are introduced.
 
 CTest produces JUnit and runtime artifacts. CI verifies a minimum discovered-test
 count so an empty or severely truncated suite cannot report success. Once a

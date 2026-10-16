@@ -634,9 +634,11 @@ Every visited Z/X/Y anchor counts, including those rejected before sampling;
 the read-only `StationDiscoveryResult::lattice_visits` diagnostic remains available
 on refusal.
 Exceeding any budget discards all candidates. Work limits count operations, never
-elapsed time. Unsupported/nonfinite sampling also refuses. Malformed CLI
-arguments exit 2; missing/invalid inputs, parser warnings or clamping, unsupported
-numerics, and budget exhaustion exit 1 with no partial success on stdout.
+elapsed time. Unsupported/nonfinite sampling also refuses. CLI usage errors
+(missing, repeated or unknown flags, invalid integer syntax, or an unknown kind)
+exit 2; integer overflow, out-of-range query values, missing/invalid input files,
+parser warnings or clamping, unsupported numerics, and budget exhaustion exit 1
+with no partial success on stdout.
 Completed empty/disabled catalogues exit 0 with `candidates: []`. Output writes
 are checked through completion; a write or flush failure exits 1.
 
@@ -693,6 +695,50 @@ separate follow-up; this tool does not complete the game's entire scene set.
 
 Names of new tests are binding once their slices land; the activation slice
 fills in fixture identifiers, thresholds and artifact schemas per row.
+
+## Acceptance requirement IDs
+
+This is the authoritative list of required mappings for the performance contract,
+evidence map, simulation budgets and associated acceptance issues. Each ID must
+have one evidence row in `tools/ci/acceptance_matrix.json`, even when its evidence
+is partial, planned or awaiting native qualification. Add requirements here before
+mapping their evidence; the checker reads this list independently of the matrix.
+The descriptions identify requirements, not their current coverage status.
+
+- `perf.floor-p99`: Both profiles meet the 16.67 ms p99 floor on every workload.
+- `perf.target-report-only`: Report the 8.33 ms target without failing captures.
+- `perf.adapter-identity`: Record GL identity and refuse an unqualified adapter.
+- `perf.timer-coverage`: Record frame wall, CPU submit, present and GPU timings with frame attribution and explicit unavailability.
+- `perf.percentile-definition`: Report p50, p95, p99, maximum and median absolute deviation using the shared definition.
+- `perf.fixed-view-workload`: Pin fixed-view inputs and use 400 warm-up and 240 measured frames.
+- `perf.traversal-60s`: Pin 60-second traversal inputs and include streaming transients.
+- `perf.cave-walk-and-edited-tour`: Qualify cave and edited-world traversals with snapshot commit and all-tier bake inside the measured window.
+- `perf.invalid-capture`: Refuse incomplete timers, undeclared overrides, workload mismatches and unsettled far ladders.
+- `perf.far-horizon-gate`: Require complete wanted-set coverage, bounded below-horizon sky and no seams or outer-radius edge.
+- `perf.requirement-matrix`: Map every contract requirement to named evidence, fixtures, thresholds and artifact schemas.
+- `perf.save-load-oracle`: Compare N-save-load-K with uninterrupted N+K for every persisted subsystem, with negative controls.
+- `em.far-ladder`: Qualify far ladder, caves and seams on default, mountains, archipelago and cave-dense fixtures.
+- `em.edits-far-authority`: Preserve all-tier edit authority across save and load.
+- `em.snapshot-commit`: Recover interrupted snapshot commits and inspect the catalog read-only.
+- `em.clock-ledger-pages`: Persist and round-trip clock, ledger, pages, creatures and water with negative controls.
+- `em.hash-determinism`: Verify hash pins, additivity, replay and lockstep checkpoints.
+- `em.performance`: Qualify six fixed views and three traversals for every profile and display with schema v3 artifacts.
+- `em.client-hang`: Detect client stalls and re-arm the watchdog after heartbeat recovery.
+- `sim.budget-capture`: Capture deterministic per-system work on representative worlds.
+- `sim.budget-enforcement`: Enforce measured per-system and residency limits and reject incomplete qualification.
+- `iss.60`: Bound saved-world catalog validation without blocking the UI thread.
+- `iss.61`: Qualify packaged create, edit, save, restart, select, load and world switching.
+- `iss.62`: Preserve saved-edit rendering across culling boundaries and world switches.
+- `iss.63`: Qualify clean no-UI saved-world loading with a nonblack, context-matched capture.
+- `iss.68`: Qualify serial loading, networking soak and performance together in a v0.3 receipt.
+- `iss.126`: Give every reviewed contract requirement named evidence.
+- `iss.128`: Emit client GL identity and per-frame render distributions for the qualification workloads.
+- `iss.129`: Measure representative-world simulation work and propose per-system tick budgets.
+- `iss.130`: Adopt reversed-Z float depth without GL error-severity output.
+- `iss.134`: Persist the simulation clock and unify the calendar across save and load.
+- `iss.141`: Qualify the expanded contract with production simulation and residency budget enforcement.
+- `iss.163`: Compare ambient field hashes across different hosts and active ISA dispatch levels.
+- `iss.173`: Prove production wind call sites supply padded position arrays for SIMD tail loads.
 
 ## Deferred
 
