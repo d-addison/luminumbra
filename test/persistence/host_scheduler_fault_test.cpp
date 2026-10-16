@@ -400,12 +400,18 @@ TEST_F(HostSchedulerFault, ClientMetadataSaveFailureSuppressesSuccessAndAllowsRe
     ASSERT_TRUE(session.GetWorldSystem()->adopt_streamed_chunk(chunk));
     for (std::uint64_t tick = 1; tick <= kFaultTick; ++tick)
         ASSERT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 1u);
-    ASSERT_TRUE(session.GetRegionSchedulerFault().has_value());
-    const auto fault = session.GetRegionSchedulerFault().value();
+    const auto fault_optional = session.GetRegionSchedulerFault();
+    ASSERT_TRUE(fault_optional.has_value());
+    if (!fault_optional.has_value())
+        return;
+    const auto& fault = fault_optional.value();
     const auto expect_consistent_session = [&] {
-        ASSERT_TRUE(session.GetRegionSchedulerFault().has_value());
-        EXPECT_EQ(session.GetRegionSchedulerFault()->tick, fault.tick);
-        EXPECT_EQ(session.GetRegionSchedulerFault()->message, fault.message);
+        const auto& current_fault = session.GetRegionSchedulerFault();
+        ASSERT_TRUE(current_fault.has_value());
+        if (!current_fault.has_value())
+            return;
+        EXPECT_EQ(current_fault->tick, fault.tick);
+        EXPECT_EQ(current_fault->message, fault.message);
         EXPECT_EQ(session.GetSimulationTickCount(), kFaultTick);
         EXPECT_TRUE(session.IsSimulationTickBoundary());
         EXPECT_TRUE(session.GetWorldOpenError().empty());
