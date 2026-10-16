@@ -87,6 +87,9 @@ void JobSystem::run_slot(PooledJob& slot) {
     // Take ownership locally so the slot can be cleared even if job throws.
     Job job = std::move(slot.job);
     std::shared_ptr<JobCompletionState> completion = std::move(slot.completion);
+    const auto task = slot.task;
+    auto payload = std::move(slot.payload);
+    slot.task = nullptr;
     slot.job = nullptr;
     slot.completion.reset();
 
@@ -99,6 +102,8 @@ void JobSystem::run_slot(PooledJob& slot) {
 
     if (job) {
         job();
+    } else if (task) {
+        task(payload.get());
     }
 }
 
@@ -154,6 +159,8 @@ JobSystem::PooledJob JobSystem::PooledQueue::pop() {
     // does not pin shared_ptrs / lambda captures between reuses.
     m_slots[m_head].job = nullptr;
     m_slots[m_head].completion.reset();
+    m_slots[m_head].task = nullptr;
+    m_slots[m_head].payload.reset();
     m_head = (m_head + 1) % m_slots.size();
     --m_size;
     return out;
@@ -286,7 +293,7 @@ void JobSystem::dispatch(Job job, JobPriority priority) {
             // store the caller's Job directly in a
             // pooled slot (no second std::function wrapper). Single dispatch has
             // no completion handle.
-            queue_for(priority).push(PooledJob{std::move(job), nullptr});
+            queue_for(priority).push(PooledJob{std::move(job), nullptr, nullptr, {}});
             accepted = true;
         }
     }
@@ -297,6 +304,25 @@ void JobSystem::dispatch(Job job, JobPriority priority) {
     }
 
     m_condition.notify_one();
+}
+
+bool JobSystem::try_dispatch(void (*task)(void*),
+                             std::shared_ptr<void> payload,
+                             std::size_t queue_limit,
+                             JobPriority priority) {
+    if (!task)
+        return false;
+    {
+        std::unique_lock<std::mutex> lock(m_queue_mutex);
+        // Subtraction avoids overflowing the combined lane depth.
+        if (!m_accepting_jobs || m_stop_threads.load(std::memory_order_acquire) ||
+            m_high_queue.size() >= queue_limit ||
+            m_normal_queue.size() >= queue_limit - m_high_queue.size())
+            return false;
+        queue_for(priority).push(PooledJob{{}, {}, task, std::move(payload)});
+    }
+    m_condition.notify_one();
+    return true;
 }
 
 JobHandle JobSystem::dispatch_batch(const std::vector<Job>& jobs, JobPriority priority) {
@@ -319,7 +345,7 @@ JobHandle JobSystem::dispatch_batch(const std::vector<Job>& jobs, JobPriority pr
                 // counter via run_slot's Finisher on every exit path -- the old
                 // per-job CompletionGuard lambda (which forced a heap-allocated
                 // wrapper std::function) is gone.
-                queue.push(PooledJob{job, completion});
+                queue.push(PooledJob{job, completion, nullptr, {}});
             }
             accepted = true;
         }

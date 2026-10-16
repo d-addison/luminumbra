@@ -153,6 +153,47 @@ private:
 constexpr int kHighLaneMarker = 1;
 constexpr int kNormalLaneMarker = 0;
 
+TEST(JobSystem, BoundedDispatchChecksBothLanesAndDrainsAcceptedPayloadsOnClose) {
+    GatedSingleWorker system;
+    auto completed = std::make_shared<std::atomic<int>>(0);
+    const auto task = +[](void* payload) {
+        static_cast<std::atomic<int>*>(payload)->fetch_add(1, std::memory_order_relaxed);
+    };
+    EXPECT_FALSE(system.job_system.try_dispatch(task, completed, 0));
+    EXPECT_FALSE(system.job_system.try_dispatch(nullptr, completed, 2));
+    ASSERT_TRUE(system.job_system.try_dispatch(task, completed, 2, Luminumbra::JobPriority::High));
+    ASSERT_TRUE(
+        system.job_system.try_dispatch(task, completed, 2, Luminumbra::JobPriority::Normal));
+    EXPECT_FALSE(system.job_system.try_dispatch(task, completed, 2));
+    EXPECT_EQ(system.job_system.get_runtime_stats().queue_depth, 2u);
+    system.release();
+    system.job_system.shutdown(); // Delivers both accepted payloads before closing.
+    EXPECT_EQ(completed->load(std::memory_order_relaxed), 2);
+    EXPECT_FALSE(system.job_system.try_dispatch(task, completed, 2));
+}
+
+TEST(JobSystem, BoundedDispatchRetainsPayloadUntilExecutionThenReleasesStorage) {
+    GatedSingleWorker system;
+    std::atomic<int> completed{0};
+    struct Payload {
+        std::atomic<int>* count;
+    };
+    auto payload = std::make_shared<Payload>(Payload{&completed});
+    std::weak_ptr<Payload> observer = payload;
+    ASSERT_TRUE(system.job_system.try_dispatch(
+        +[](void* data) {
+            static_cast<Payload*>(data)->count->fetch_add(1, std::memory_order_relaxed);
+        },
+        payload,
+        1));
+    payload.reset();
+    EXPECT_FALSE(observer.expired());
+    system.release();
+    system.job_system.shutdown();
+    EXPECT_EQ(completed.load(std::memory_order_relaxed), 1);
+    EXPECT_TRUE(observer.expired());
+}
+
 std::vector<Luminumbra::Job> MakeLaneMarkerJobs(int count,
                                                 int marker,
                                                 std::mutex& order_mutex,

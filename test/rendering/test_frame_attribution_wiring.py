@@ -166,6 +166,84 @@ class FrameAttributionWiring(unittest.TestCase):
         self.assertEqual(compact(block(self.header, "bool active() const")),
                          "return m_out.is_open() && m_out.good();")
 
+    def test_worker_counters_reach_frame_totals_csv_and_split_log(self):
+        for name in ("worker_dispatched", "worker_completed", "worker_stale_rejected",
+                     "worker_queue_age_frames"):
+            self.assertIn(f"std::uint64_t {name} = 0;", self.header)
+            self.assertIn(f"total.{name}", self.collector)
+            self.assertIn(f"foliage.{name}", self.collector)
+            self.assertIn(f"foliage_attribution.{name}", self.main)
+            self.assertIn(f"m_rebuild_attribution.{name}", self.foliage)
+        self.assertIn("std::max(total.worker_queue_age_frames, rebuild.worker_queue_age_frames)",
+                      compact(self.collector))
+
+    def test_worker_budget_follows_every_rendered_frame_including_nested_loops(self):
+        self.assertNotIn("foliage->begin_ground_frame();", self.main)
+        pipeline = read(CLIENT / "rendering/RenderPipeline.cpp")
+        constructor = block(pipeline, "RenderPipeline::RenderPipeline()")
+        self.assertIn("m_foliage_pass->begin_ground_frame();", constructor)
+        render = block(pipeline, "void RenderPipeline::render_frame(")
+        self.assertEqual(render.count("m_foliage_pass->begin_ground_frame();"), 1)
+        self.assertGreater(render.index("m_foliage_pass->begin_ground_frame();"),
+                           render.index("dispatch_stages(camera);"))
+        self.assertTrue(compact(render).endswith("m_foliage_pass->begin_ground_frame();"))
+        # Every nested loop uses this common boundary, including callers that do
+        # not rebuild foliage themselves (survey, boot metrics, menu screenshots).
+        for path in ("main_client.cpp", "world/WorldgenPreview.cpp",
+                     "rendering/SceneSurvey.cpp", "app/MenuScreens.cpp",
+                     "core/ScenarioRunnerCapture.cpp"):
+            self.assertIn("render_frame(", read(CLIENT / path))
+        self.assertEqual(self.foliage.count("prepare_ground_samples(chunk)"), 2)
+        self.assertIn("if (!m_ground_frame_driven) m_ground_queue.begin_frame(); "
+                      "else m_ground_queue.clear_stats();", compact(self.foliage))
+        queue = read(CLIENT / "rendering/FoliageGroundWork.h")
+        self.assertIn("kInFlight = 8;", queue)
+        self.assertIn("kPerFrame = 4;", queue)
+        self.assertNotIn("std::function", queue)
+        self.assertNotIn("glBind", queue)
+        self.assertNotIn("JobSystem::wait", self.foliage)
+        self.assertIn("m_ground_queue.invalidate(key);", self.foliage)
+        self.assertIn("m_ground_queue.invalidate();", self.foliage)
+        pipeline = read(CLIENT / "rendering/RenderPipeline.cpp")
+        self.assertIn("m_foliage_pass->attach_job_system(job_system);", pipeline)
+
+    def test_preview_rebuilds_current_support_even_with_cached_scatter_inputs(self):
+        preview = read(CLIENT / "world/WorldgenPreview.cpp")
+        rebuild = block(preview, "void WorldgenPreview::rebuild_foliage_if_needed(")
+        cached = block(rebuild, "if (m_last_foliage_generation != m_rebuild_generation)")
+        self.assertIn("m_foliage_scatter.clear();", cached)
+        self.assertNotIn("return;", cached.split("for (", 1)[0])
+        self.assertNotIn("rebuild_instances(", cached)
+        self.assertNotIn("m_last_foliage_generation == m_rebuild_generation", rebuild)
+        self.assertIn("Rendering::FoliagePass::Preparation::Complete", rebuild)
+        self.assertEqual(rebuild.count("rebuild_instances("), 1)
+        for entry in ("bool WorldgenPreview::render(", "bool WorldgenPreview::render_to_backbuffer("):
+            self.assertIn("rebuild_foliage_if_needed(pipeline);", block(preview, entry))
+
+    def test_sweep_qualification_and_capture_callers_require_complete_preparation(self):
+        sweep = read(CLIENT / "core/scenarios/WorldVisualSweep.cpp")
+        self.assertEqual(sweep.count("rebuild_instances("), 2)
+        self.assertEqual(sweep.count("FoliagePass::Preparation::Complete"), 2)
+        drive = block(read(CLIENT / "core/ScenarioRunnerDrive.cpp"),
+                      "bool ScenarioRunnerImpl::onPreRenderFoliage()")
+        self.assertIn("FoliagePass::Preparation::Complete", drive)
+        update = block(self.main, "static void UpdateFoliageScatter(")
+        for mode in ("scenario_config.active()", "capture.scene_active",
+                     "capture.render_benchmark_path.empty()", "capture.frame_scan_active",
+                     "capture.render_parity_active", "capture.timelapse_frames > 0",
+                     "capture.survey_active", "photo_mode_active"):
+            self.assertIn(mode, update)
+        self.assertIn("g_playerController->photo_mode_active()", self.main)
+        self.assertIn("FoliagePass::Preparation::Complete", update)
+        self.assertIn("FoliagePass::Preparation::Deferred", update)
+        rebuild = compact(block(self.foliage, "void FoliagePass::rebuild_instances("))
+        self.assertIn("if (preparation == Preparation::Complete) m_worker_ground_active = false;",
+                      rebuild)
+        self.assertIn("preparation == Preparation::Complete ? std::numeric_limits<int>::max() : 4;",
+                      rebuild)
+        gpu = compact(block(self.foliage, "bool FoliagePass::rebuild_instances_gpu("))
+        self.assertIn("m_readback_enabled || preparation == Preparation::Complete", gpu)
+
     def test_recorder_finalization_failure_reaches_shutdown_error_path(self):
         finish = compact(block(self.collector, "bool FrameRecorder::finish()"))
         self.assertIn("return finalize_csv(m_out);", finish)

@@ -240,7 +240,9 @@ RenderPipeline::RenderPipeline()
     , m_glass_oit_pass(std::make_unique<GlassOitPass>())
     , m_froxel_pass(std::make_unique<FroxelPass>())
     , m_waterfall_pass(std::make_unique<WaterfallPass>())
-    , m_luminance_meter_pass(std::make_unique<LuminanceMeterPass>()) {}
+    , m_luminance_meter_pass(std::make_unique<LuminanceMeterPass>()) {
+    m_foliage_pass->begin_ground_frame();
+}
 
 // forward the one-way scent snapshot to the decal pass (render-only;
 // defined here where GroundDecalPass is a complete type).
@@ -1233,6 +1235,8 @@ bool RenderPipeline::capture_ssao_parity(const std::filesystem::path& out_dir,
 }
 
 void RenderPipeline::attach_farlod_job_system(JobSystem* job_system) {
+    if (m_foliage_pass)
+        m_foliage_pass->attach_job_system(job_system);
     if (m_farlod) {
         m_farlod->attach_job_system(job_system);
     }
@@ -2455,6 +2459,9 @@ void RenderPipeline::render_frame(entt::registry& registry,
     // can reconstruct where each wind-swayed vertex WAS (camera-only reprojection ghosts
     // tree-tops).
     m_prev_time = static_cast<float>(glfwGetTime());
+    // Scatter preparation happens before render_frame. Open admission for the
+    // next rendered frame here, so nested sweeps/previews need no outer loop.
+    m_foliage_pass->begin_ground_frame();
 }
 
 FarReplayCamera RenderPipeline::replay_camera(const Camera& camera) const {
