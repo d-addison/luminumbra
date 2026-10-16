@@ -221,6 +221,7 @@ add_executable(common_tests
     audio/AudioBankIntegrity_test.cpp
     audio/synthetic_bank_fixture.h
     common/ActivationQueueSemantics_test.cpp
+    common/ActivationResidencyIndex_test.cpp
     common/WorldgenPreviewReinitRace_test.cpp
     common/MultiAnchorStreaming_test.cpp
     common/PromotionSimTruthDecoupling_test.cpp
