@@ -44,6 +44,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import stat
 import sys
 from pathlib import Path
@@ -79,7 +80,20 @@ def strip_comment_keys(value: Any) -> Any:
 def canonical_file_digest(path: Path, *, reference_root: Path | None = None,
                           dependencies: dict[str, Path] | None = None) -> str:
     """Digest one fixture file, canonicalising JSON and hashing anything else raw."""
-    raw = path.read_bytes()
+    refusal = f"fixture reference is not a regular file: {path}"
+    if not stat.S_ISREG(path.stat().st_mode):
+        raise ValueError(refusal)
+    # A regular path can be replaced with a FIFO between stat and open. Open
+    # without blocking, then check the descriptor before consuming any bytes.
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NONBLOCK", 0)
+    descriptor = os.open(path, flags)
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise ValueError(refusal)
+        with os.fdopen(descriptor, "rb", closefd=False) as source:
+            raw = source.read()
+    finally:
+        os.close(descriptor)
     if path.suffix.lower() == ".json":
         try:
             # utf-8-sig: several fixtures carry a byte-order mark.

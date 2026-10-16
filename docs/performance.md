@@ -113,6 +113,10 @@ and `prepare_server_comparison.py` select this root automatically and validate
 before launching or copying fixtures. Enumerated names never pass through the
 portable reference parser. AOV inspection checks its manifest and every
 attachment against the capture directory before opening, stat'ing or hashing.
+Referenced inputs must be regular files; directories, FIFOs, sockets and devices
+are refused. Before hashing any file, reads check both the path's type and the
+opened descriptor's type, using nonblocking open where supported so a FIFO
+substituted before open cannot stall capture or comparison preparation.
 
 The tree receipt remains path-component ordered, case sensitive, with each
 entry framed as UTF-8 name, NUL, ASCII canonical SHA-256, and newline. Referenced

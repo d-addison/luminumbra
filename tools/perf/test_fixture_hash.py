@@ -11,6 +11,7 @@ import json
 import ntpath
 import os
 import posixpath
+import stat
 import sys
 import tempfile
 import unittest
@@ -247,7 +248,7 @@ class FixtureHashTests(unittest.TestCase):
         write(self.root, "extra/biomes.json", '{"value":1}')
         if os.name != "nt":
             write(self.root, reference, '{"value":2}')
-        native = self.root / reference
+        native = self.root.resolve() / reference
         self.assertEqual(resolve_reference(self.root, reference), native)
         dependencies = {}
         before = module.fixture_hash(presets, reference_root=self.root, dependencies=dependencies)
@@ -259,6 +260,73 @@ class FixtureHashTests(unittest.TestCase):
             # The slash spelling is a different, unreferenced file on POSIX.
             write(self.root, "extra/biomes.json", '{"value":4}')
             self.assertEqual(after, module.fixture_hash(presets, reference_root=self.root))
+
+    def test_non_regular_dependencies_are_refused_before_opening(self):
+        presets = self.root / "presets"
+        write(presets, "preset.json", json.dumps({
+            "generation_params": {"biomes": {"table": "extra/biomes.json"}}}))
+        table = self.root.resolve() / "extra/biomes.json"
+        table.mkdir(parents=True)
+        with mock.patch.object(module.os, "open", wraps=os.open) as opened:
+            with self.assertRaisesRegex(ValueError, "fixture reference is not a regular file"):
+                module.fixture_hash(presets, reference_root=self.root)
+        self.assertNotIn(table, [call.args[0] for call in opened.call_args_list])
+        # Exercise every non-regular mode on all hosts without creating devices.
+        for mode in (stat.S_IFIFO, stat.S_IFSOCK, stat.S_IFCHR, stat.S_IFBLK, stat.S_IFDIR):
+            with self.subTest(mode=mode), \
+                    mock.patch.object(Path, "stat", return_value=os.stat_result((mode,) + (0,) * 9)), \
+                    mock.patch.object(module.os, "open", side_effect=AssertionError("opened non-regular file")), \
+                    self.assertRaisesRegex(ValueError, "fixture reference is not a regular file"):
+                module.canonical_file_digest(table)
+
+    def test_opened_non_regular_descriptors_are_closed_without_reading(self):
+        write(self.root, "table.json", "{}")
+        for mode in (stat.S_IFIFO, stat.S_IFSOCK, stat.S_IFCHR, stat.S_IFBLK, stat.S_IFDIR):
+            with self.subTest(mode=mode), \
+                    mock.patch.object(module.os, "fstat", return_value=os.stat_result((mode,) + (0,) * 9)), \
+                    mock.patch.object(module.os, "fdopen", side_effect=AssertionError("read non-regular file")), \
+                    mock.patch.object(module.os, "open", wraps=os.open) as opened, \
+                    mock.patch.object(module.os, "close", wraps=os.close) as closed, \
+                    self.assertRaisesRegex(ValueError, "fixture reference is not a regular file"):
+                module.canonical_file_digest(self.root / "table.json")
+            opened.assert_called_once()
+            closed.assert_called_once()
+            with self.assertRaises(OSError) as invalid:
+                os.fstat(closed.call_args.args[0])
+            self.assertEqual(invalid.exception.errno, errno.EBADF)
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "OS has no mkfifo")
+    def test_fifo_dependency_and_swap_before_open_are_refused(self):
+        presets = self.root / "presets"
+        write(presets, "preset.json", json.dumps({
+            "generation_params": {"biomes": {"table": "extra/biomes.json"}}}))
+        table = self.root.resolve() / "extra/biomes.json"
+        table.parent.mkdir()
+        os.mkfifo(table)
+        with self.assertRaisesRegex(ValueError, "fixture reference is not a regular file"):
+            module.fixture_hash(presets, reference_root=self.root)
+        table.unlink()
+        table.write_text("{}", encoding="utf-8")
+        original_open = os.open
+        opened_descriptors = []
+
+        def swap_before_open(path, flags):
+            if path == table:
+                table.unlink()
+                os.mkfifo(table)
+                self.assertTrue(flags & os.O_NONBLOCK)
+                descriptor = original_open(path, flags)
+                opened_descriptors.append(descriptor)
+                return descriptor
+            return original_open(path, flags)
+
+        with mock.patch.object(module.os, "open", side_effect=swap_before_open), \
+                self.assertRaisesRegex(ValueError, "fixture reference is not a regular file"):
+            module.fixture_hash(presets, reference_root=self.root)
+        self.assertEqual(len(opened_descriptors), 1)
+        with self.assertRaises(OSError) as closed:
+            os.fstat(opened_descriptors[0])
+        self.assertEqual(closed.exception.errno, errno.EBADF)
 
     def test_transitive_dependencies_and_cycles_are_hashed(self):
         presets = self.root / "presets"
