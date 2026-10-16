@@ -625,8 +625,10 @@ TEST_F(WorldOpenRefusal, NonEmbeddedAdditionalNamedPresetUsesOriginalFile) {
     ASSERT_FALSE(metadata.contains("presetIdentity"));
     ASSERT_FALSE(fs::exists(save / "preset.json"));
     ASSERT_FALSE(fs::exists(root / "worlds/atlas/presets-rev6/my_hills.json"));
+    const auto identity = Persistence::StableChecksum(preset.dump());
 
     for (const auto& identity_metadata : {nlohmann::json::object(),
+                                          nlohmann::json{{"presetIdentity", identity}},
                                           nlohmann::json{{"presetIdentity", "wrong"}},
                                           nlohmann::json{{"presetIdentity", 123}}}) {
         SCOPED_TRACE(identity_metadata.dump());
@@ -636,11 +638,20 @@ TEST_F(WorldOpenRefusal, NonEmbeddedAdditionalNamedPresetUsesOriginalFile) {
         const auto before = DiskBytes(root);
 
         const auto inspected = Persistence::InspectSavedWorld(root, "fixture");
-        ASSERT_TRUE(inspected.error.empty()) << inspected.error;
         EXPECT_EQ(inspected.preset_path, preset_path);
         GameSession session;
         session.SetRootPath(RootString());
         session.SetJobSystem(&jobs);
+        if (saved_metadata.contains("presetIdentity") &&
+            saved_metadata.at("presetIdentity") != identity) {
+            EXPECT_NE(inspected.error.find("identity"), std::string::npos);
+            EXPECT_FALSE(session.LoadWorld("fixture"));
+            EXPECT_NE(session.GetWorldOpenError().find("identity"), std::string::npos);
+            EXPECT_EQ(session.GetWorldSystem(), nullptr);
+            EXPECT_EQ(DiskBytes(root), before);
+            continue;
+        }
+        ASSERT_TRUE(inspected.error.empty()) << inspected.error;
         ASSERT_TRUE(session.LoadWorld("fixture")) << session.GetWorldOpenError();
         EXPECT_FLOAT_EQ(session.GetWorldSystem()->get_params().height_offset, 17.0f);
         EXPECT_FALSE(session.GetWorldSystem()->get_params().island_mask_enabled);

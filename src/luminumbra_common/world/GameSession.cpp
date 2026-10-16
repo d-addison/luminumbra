@@ -1199,6 +1199,7 @@ bool GameSession::CreateWorldInternal(const std::string& name,
     }
 
     fs::path preset_to_load = validation.preset_path;
+    std::string saved_preset_json;
     if (!transient) {
         nlohmann::json resolved;
         try {
@@ -1222,11 +1223,10 @@ bool GameSession::CreateWorldInternal(const std::string& name,
         resolved = ResolveTerrainPresetDefaults(resolved);
         // Materialize historical choices before upgrading the revision.
         resolved["schema_rev"] = kTerrainPresetSchemaRevision;
+        saved_preset_json = resolved.dump();
         const fs::path world_preset = worldPath / "preset.json";
-        std::ofstream pf(world_preset, std::ios::binary);
-        pf << resolved.dump(2) << '\n';
-        pf.close();
-        if (!pf.good()) {
+        if (!Persistence::WorldSaveService::write_file_durably(world_preset,
+                                                               saved_preset_json + "\n")) {
             m_worldOpenError = "Could not save this world's resolved preset.";
             return false;
         }
@@ -1246,6 +1246,7 @@ bool GameSession::CreateWorldInternal(const std::string& name,
 
     ResetWorldSystems();
     m_presetContentHash = preset.preset_content_hash;
+    m_savedPresetJson = std::move(saved_preset_json);
     m_metadata = std::move(metadata);
     m_transientWorld = transient;
     m_physicsSystem = std::make_unique<Systems::PhysicsSystem>();
@@ -1364,8 +1365,9 @@ bool GameSession::LoadWorld(const std::string& worldId) {
         }
     }
     const std::string worldPath = (RuntimeRoot(m_rootPath) / "worlds/saves" / worldId).string();
-    const auto& preset_to_load = saved.preset_path;
-    const TerrainPresetLoadResult preset = LoadTerrainPreset(preset_to_load);
+    // Generate from the same canonical bytes whose saved identity was verified.
+    const TerrainPresetLoadResult preset = LoadTerrainPresetFromJson(
+        nlohmann::json::parse(saved.preset_json), RuntimeRoot(m_rootPath) / "data");
     if (!preset.ok) {
         for (const std::string& error : preset.errors) {
             LUMINUMBRA_CORE_ERROR("World preset load failed: {}", error);
@@ -1378,6 +1380,7 @@ bool GameSession::LoadWorld(const std::string& worldId) {
 
     ResetWorldSystems();
     m_presetContentHash = preset.preset_content_hash;
+    m_savedPresetJson = saved.preset_json;
     m_metadata = saved.metadata;
     if (m_activeRegionsEnabled) {
         m_worldClock = saved.clock;
@@ -1612,6 +1615,23 @@ bool GameSession::SaveWorld() {
     return SaveWorldMetadataTo(GetWorldSaveDir());
 }
 
+namespace {
+bool PersistSavedPreset(const fs::path& save_dir, const std::string& canonical) {
+    if (canonical.empty())
+        return false;
+    try {
+        const auto path = save_dir / "preset.json";
+        if (fs::exists(path)) {
+            std::ifstream input(path);
+            return nlohmann::json::parse(input).dump() == canonical;
+        }
+        return Persistence::WorldSaveService::write_file_durably(path, canonical + "\n");
+    } catch (const std::exception&) {
+        return false;
+    }
+}
+} // namespace
+
 bool GameSession::SaveWorldMetadataTo(const fs::path& save_dir) {
     if (!IsSimulationTickBoundary() || save_dir.empty() ||
         !ClockConfigurationCompatible(save_dir) || m_transientWorld || m_metadata.worldId.empty() ||
@@ -1625,9 +1645,13 @@ bool GameSession::SaveWorldMetadataTo(const fs::path& save_dir) {
         if (error)
             return false;
     }
+    if (!PersistSavedPreset(save_dir, m_savedPresetJson))
+        return false;
     // Using nlohmann::json for robust saving
     nlohmann::json metadata_json = {
         {"container_version", Persistence::WorldSaveService::kContainerVersion},
+        {"presetFormat", Persistence::kSavedPresetFormat},
+        {"presetIdentity", Persistence::StableChecksum(m_savedPresetJson)},
         {"name", m_metadata.name},
         {"seed", m_metadata.seed},
         {"worldType", m_metadata.worldType},

@@ -490,6 +490,8 @@ private:
     // Stable only in the clock slice; world-anchored pages replace this grid in C4.
     Vec3 m_ambientFieldAnchor{};
     std::string m_presetContentHash;
+    // Exact canonical preset source, independent of dependency-content identity.
+    std::string m_savedPresetJson;
     luminumbra::core::SystemConfig m_appliedSystemConfig =
         luminumbra::core::SystemConfig::Defaults();
     bool m_activeRegionsEnabled = true;

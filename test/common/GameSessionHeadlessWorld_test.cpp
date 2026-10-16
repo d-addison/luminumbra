@@ -29,6 +29,7 @@
 #include "luminumbra_common/ai/StimulusChannels.h"
 #include "luminumbra_common/components/InstinctComponents.h"
 #include "luminumbra_common/persistence/SavedWorldCatalog.h"
+#include "luminumbra_common/persistence/WorldPersistenceRoundtrip.h"
 #include "luminumbra_common/replay/RegionScheduleTrace.h"
 #include "luminumbra_common/systems/AetherFieldSystem.h"
 #include "luminumbra_common/systems/PlantGrowthSystem.h"
@@ -332,6 +333,195 @@ std::string ReadClockTestFile(const fs::path& path) {
     return bytes.str();
 }
 
+void WriteSavedPresetTestJson(const fs::path& path, const nlohmann::json& json) {
+    std::ofstream output(path, std::ios::binary | std::ios::trunc);
+    output << json.dump(2) << '\n';
+    ASSERT_TRUE(output.good());
+}
+
+std::map<std::string, std::string> SavedPresetTestDiskBytes(const fs::path& root) {
+    std::map<std::string, std::string> result;
+    for (const auto& entry : fs::recursive_directory_iterator(root)) {
+        result.emplace(entry.path().lexically_relative(root).generic_string(),
+                       entry.is_directory() ? "<directory>" : ReadClockTestFile(entry.path()));
+    }
+    return result;
+}
+
+class SavedWorldPresetTest : public testing::TestWithParam<bool> {
+protected:
+    HeadlessRoot root;
+    JobSystem jobs;
+
+    void SetUp() override {
+        jobs.startup(1);
+    }
+    void TearDown() override {
+        jobs.shutdown();
+    }
+    void Configure(GameSession& session) {
+        session.SetRootPath(root.root_string());
+        session.SetJobSystem(&jobs);
+        session.SetActiveRegionsEnabled(GetParam());
+    }
+    void ExpectRefusedWithoutWrites(const std::string& id, const std::string& reason) {
+        const auto before = SavedPresetTestDiskBytes(root.path());
+        const auto inspected = P::InspectSavedWorld(root.path(), id);
+        EXPECT_NE(inspected.error.find(reason), std::string::npos) << inspected.error;
+        GameSession loaded;
+        Configure(loaded);
+        EXPECT_FALSE(loaded.LoadWorld(id));
+        EXPECT_NE(loaded.GetWorldOpenError().find(reason), std::string::npos);
+        EXPECT_EQ(loaded.GetWorldSystem(), nullptr);
+        EXPECT_FALSE(loaded.SaveWorld());
+        EXPECT_FALSE(loaded.SaveWorldState());
+        EXPECT_EQ(SavedPresetTestDiskBytes(root.path()), before);
+    }
+};
+
+TEST_P(SavedWorldPresetTest, NewSaveRoundTripsWithMarkerAndCanonicalIdentity) {
+    GameSession created;
+    Configure(created);
+    ASSERT_TRUE(created.CreateWorld("Preset identity", "1337", "default"));
+    const auto save = created.GetWorldSaveDir();
+    const auto metadata = nlohmann::json::parse(ReadClockTestFile(save / "world_info.json"));
+    const auto preset = nlohmann::json::parse(ReadClockTestFile(save / "preset.json"));
+    EXPECT_EQ(metadata.at("presetFormat"), 1);
+    EXPECT_EQ(metadata.at("presetIdentity"), P::StableChecksum(preset.dump()));
+    EXPECT_TRUE(preset.at("generation_params").at("terrain").at("island_mask_enabled").get<bool>());
+    // Formatting does not change the canonical identity, and no packaged copy is needed.
+    ASSERT_TRUE(P::WorldSaveService::write_file_durably(save / "preset.json", preset.dump(4)));
+    ASSERT_TRUE(fs::remove(root.path() / "worlds/atlas/presets/default.json"));
+    const auto before = SavedPresetTestDiskBytes(root.path());
+    const auto inspected = P::InspectSavedWorld(root.path(), created.GetMetadata().worldId);
+    ASSERT_TRUE(inspected.error.empty()) << inspected.error;
+    EXPECT_EQ(inspected.preset_path, save / "preset.json");
+    GameSession loaded;
+    Configure(loaded);
+    ASSERT_TRUE(loaded.LoadWorld(created.GetMetadata().worldId)) << loaded.GetWorldOpenError();
+    EXPECT_EQ(loaded.PresetContentHash(), created.PresetContentHash());
+    EXPECT_EQ(SavedPresetTestDiskBytes(root.path()), before);
+    ASSERT_TRUE(loaded.SaveWorld());
+    EXPECT_EQ(nlohmann::json::parse(ReadClockTestFile(save / "world_info.json")), metadata);
+}
+
+TEST_P(SavedWorldPresetTest, CustomAdditionalNamedPresetCarriesItsExactIdentity) {
+    const auto named = root.path() / "worlds/atlas/presets/other.json";
+    fs::copy_file(SourcePresetPath(), named);
+    auto custom = nlohmann::json::parse(ReadClockTestFile(named));
+    custom["generation_params"]["terrain"]["height_offset"] = 123.0;
+    const auto text = custom.dump();
+    GameSession created;
+    Configure(created);
+    ASSERT_TRUE(created.CreateWorld("Custom identity", "1337", "other", &text));
+    const auto save = created.GetWorldSaveDir();
+    const auto metadata = nlohmann::json::parse(ReadClockTestFile(save / "world_info.json"));
+    const auto embedded = nlohmann::json::parse(ReadClockTestFile(save / "preset.json"));
+    EXPECT_EQ(metadata.at("presetFormat"), 1);
+    EXPECT_EQ(metadata.at("presetIdentity"), P::StableChecksum(embedded.dump()));
+    GameSession loaded;
+    Configure(loaded);
+    ASSERT_TRUE(loaded.LoadWorld(created.GetMetadata().worldId)) << loaded.GetWorldOpenError();
+    EXPECT_FLOAT_EQ(loaded.GetWorldSystem()->get_params().height_offset, 123.0f);
+
+    auto tampered = embedded;
+    tampered["generation_params"]["terrain"]["height_offset"] = 124.0;
+    WriteSavedPresetTestJson(save / "preset.json", tampered);
+    ExpectRefusedWithoutWrites(created.GetMetadata().worldId, "identity");
+}
+
+TEST_P(SavedWorldPresetTest, MissingEmbeddedPresetRefusesWithoutWrites) {
+    GameSession created;
+    Configure(created);
+    ASSERT_TRUE(created.CreateWorld("Missing preset", "1337", "default"));
+    fs::create_directories(root.path() / "worlds/atlas/presets-rev6");
+    fs::copy_file(fs::path(LUMINUMBRA_SOURCE_ROOT) / "worlds/atlas/presets-rev6/default.json",
+                  root.path() / "worlds/atlas/presets-rev6/default.json");
+    ASSERT_TRUE(fs::remove(created.GetWorldSaveDir() / "preset.json"));
+    ExpectRefusedWithoutWrites(created.GetMetadata().worldId, "required embedded preset.json");
+}
+
+TEST_P(SavedWorldPresetTest, MissingOrInvalidIdentityRefusesWithoutWrites) {
+    GameSession created;
+    Configure(created);
+    ASSERT_TRUE(created.CreateWorld("Missing identity", "1337", "default"));
+    const auto path = created.GetWorldSaveDir() / "world_info.json";
+    auto metadata = nlohmann::json::parse(ReadClockTestFile(path));
+    metadata.erase("presetIdentity");
+    WriteSavedPresetTestJson(path, metadata);
+    ExpectRefusedWithoutWrites(created.GetMetadata().worldId, "identity");
+    for (const auto& identity : {nlohmann::json(nullptr),
+                                 nlohmann::json(123),
+                                 nlohmann::json(""),
+                                 nlohmann::json("wrong")}) {
+        SCOPED_TRACE(identity.dump());
+        metadata["presetIdentity"] = identity;
+        WriteSavedPresetTestJson(path, metadata);
+        ExpectRefusedWithoutWrites(created.GetMetadata().worldId, "identity");
+    }
+}
+
+TEST_P(SavedWorldPresetTest, TamperedEmbeddedPresetRefusesOnIdentityWithoutWrites) {
+    GameSession created;
+    Configure(created);
+    ASSERT_TRUE(created.CreateWorld("Tampered preset", "1337", "default"));
+    const auto path = created.GetWorldSaveDir() / "preset.json";
+    auto preset = nlohmann::json::parse(ReadClockTestFile(path));
+    preset["generation_params"]["terrain"]["island_mask_enabled"] = false;
+    WriteSavedPresetTestJson(path, preset);
+    ExpectRefusedWithoutWrites(created.GetMetadata().worldId, "identity");
+}
+
+TEST_P(SavedWorldPresetTest, InvalidFormatNeverFallsBack) {
+    GameSession created;
+    Configure(created);
+    ASSERT_TRUE(created.CreateWorld("Invalid format", "1337", "default"));
+    const auto save = created.GetWorldSaveDir();
+    auto metadata = nlohmann::json::parse(ReadClockTestFile(save / "world_info.json"));
+    ASSERT_TRUE(fs::remove(save / "preset.json"));
+    for (const auto& format : {nlohmann::json(nullptr),
+                               nlohmann::json(false),
+                               nlohmann::json(0),
+                               nlohmann::json(2),
+                               nlohmann::json("1")}) {
+        SCOPED_TRACE(format.dump());
+        metadata["presetFormat"] = format;
+        WriteSavedPresetTestJson(save / "world_info.json", metadata);
+        ExpectRefusedWithoutWrites(created.GetMetadata().worldId, "preset format");
+    }
+}
+
+TEST_P(SavedWorldPresetTest, UnmarkedLegacySaveUsesFrozenPresetAndEmbedsItOnResave) {
+    const auto historical = root.path() / "worlds/atlas/presets-rev6/default.json";
+    fs::create_directories(historical.parent_path());
+    fs::copy_file(fs::path(LUMINUMBRA_SOURCE_ROOT) / "worlds/atlas/presets-rev6/default.json",
+                  historical);
+    const auto save = root.path() / "worlds/saves/legacy";
+    fs::create_directories(save);
+    WriteSavedPresetTestJson(save / "world_info.json",
+                             {{"container_version", 2}, {"worldType", "default"}});
+    const auto before = SavedPresetTestDiskBytes(root.path());
+    const auto inspected = P::InspectSavedWorld(root.path(), "legacy");
+    ASSERT_TRUE(inspected.error.empty()) << inspected.error;
+    EXPECT_EQ(inspected.preset_path, historical);
+    GameSession loaded;
+    Configure(loaded);
+    ASSERT_TRUE(loaded.LoadWorld("legacy")) << loaded.GetWorldOpenError();
+    EXPECT_FALSE(loaded.GetWorldSystem()->get_params().island_mask_enabled);
+    EXPECT_EQ(SavedPresetTestDiskBytes(root.path()), before);
+    ASSERT_TRUE(loaded.SaveWorld());
+    const auto metadata = nlohmann::json::parse(ReadClockTestFile(save / "world_info.json"));
+    EXPECT_EQ(metadata.at("presetFormat"), 1);
+    EXPECT_EQ(metadata.at("presetIdentity"),
+              P::StableChecksum(nlohmann::json::parse(ReadClockTestFile(historical)).dump()));
+    EXPECT_EQ(nlohmann::json::parse(ReadClockTestFile(save / "preset.json")),
+              nlohmann::json::parse(ReadClockTestFile(historical)));
+    ASSERT_TRUE(fs::remove(historical));
+    EXPECT_TRUE(P::InspectSavedWorld(root.path(), "legacy").error.empty());
+}
+
+INSTANTIATE_TEST_SUITE_P(ActiveRegionsEnabledAndDisabled, SavedWorldPresetTest, testing::Bool());
+
 // Reads a record that production writes through a text-mode stream, so its bytes
 // carry the host's line endings: the energy record (GameSession writes
 // aether_state.efs with a default-mode ofstream) is LF on Linux and CRLF on
@@ -587,6 +777,12 @@ TEST(GameSessionHeadlessWorldTest,
     const auto alternate = root.path() / "explicit-snapshot";
     ASSERT_TRUE(session.SaveWorldStateTo(alternate));
     const auto metadata = nlohmann::json::parse(ReadClockTestFile(alternate / "world_info.json"));
+    EXPECT_EQ(metadata.at("presetFormat"), 1);
+    EXPECT_EQ(metadata.at("presetIdentity"),
+              P::StableChecksum(
+                  nlohmann::json::parse(ReadClockTestFile(alternate / "preset.json")).dump()));
+    EXPECT_EQ(nlohmann::json::parse(ReadClockTestFile(alternate / "preset.json")),
+              nlohmann::json::parse(ReadClockTestFile(session.GetWorldSaveDir() / "preset.json")));
     EXPECT_EQ(metadata.at("simulationTick"), 1u);
     EXPECT_TRUE(fs::exists(P::WorldSaveService::active_regions_path(alternate)));
     ASSERT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 1u);
@@ -1166,8 +1362,14 @@ TEST(GameSessionHeadlessWorldTest, ExplicitlyDisabledKeepsLegacyMetadataBytesAnd
     const auto path = session.GetWorldSaveDir() / "world_info.json";
     const auto before = ReadClockTestFile(path);
     const auto& m = session.GetMetadata();
+    // Clock keys remain absent; the preset marker and identity apply to every new world.
     const nlohmann::json legacy = {
         {"container_version", 2},
+        {"presetFormat", 1},
+        {"presetIdentity",
+         P::StableChecksum(
+             nlohmann::json::parse(ReadClockTestFile(session.GetWorldSaveDir() / "preset.json"))
+                 .dump())},
         {"name", m.name},
         {"seed", m.seed},
         {"worldType", m.worldType},
