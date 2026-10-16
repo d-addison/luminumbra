@@ -377,6 +377,25 @@ class ApiTests(unittest.TestCase):
             self.assertGreater(copied[0], 0)
             self.assertLessEqual(copied[0], 2 * len(data))
 
+    def test_many_check_response_pages_preserve_page_order(self):
+        page_count = 2000
+        response_pages, links = [], []
+        for page_number in range(1, page_count + 1):
+            response_pages.append({"total_count": page_count, "check_runs": [run(page_number)]})
+            relations = []
+            if page_number > 1:
+                relations.append(check_link(page_number - 1, "prev"))
+            if page_number < page_count:
+                relations.append(check_link(page_number + 1, "next"))
+            relations.append(check_link(page_count, "last"))
+            links.append(", ".join(relations))
+        for newline in ("\n", "\r\n"):
+            with self.subTest(newline=newline):
+                data = (b" \t\r\n" + rule_stream(*response_pages, links=tuple(links), newline=newline)
+                        + b" \t\r\n")
+                parsed = gate.parse_check_response_pages(data, COMMIT, REPOSITORY, REPOSITORY_ID)
+                self.assertEqual(parsed, response_pages)
+
     def test_check_response_headers_are_required_and_pagination_must_be_complete(self):
         first, final = ({"total_count": 2, "check_runs": [run(index)]} for index in (1, 2))
         links = (check_link(2, "next"), check_link(1, "prev"))
