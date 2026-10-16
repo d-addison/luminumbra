@@ -92,14 +92,38 @@ def file_sha256(path):
     return digest.hexdigest()
 
 
+def _executable_metadata(metadata):
+    """Comparable snapshot for repeated calls of the *same* stat kind.
+
+    Windows CPython 3.12's path stat copies birth time into st_ctime for
+    compatibility, whereas handle fstat can expose ChangeTime. Do not use
+    Windows ctime as a portable modification clock. Keep POSIX ctime, and
+    keep device, inode, size and mtime on both platforms, comparing path
+    snapshots separately from handle snapshots (their precision can differ).
+    The digest independently detects edits that restore size and mtime.
+    """
+    fields = (metadata.st_dev, metadata.st_ino, metadata.st_size,
+              metadata.st_mtime_ns)
+    return fields if os.name == 'nt' else fields + (metadata.st_ctime_ns,)
+
+
+def _open_binary(path):
+    # A replacement FIFO must not block before the regular-file/identity check.
+    flags = os.O_RDONLY | getattr(os, 'O_BINARY', 0) | getattr(os, 'O_NONBLOCK', 0)
+    descriptor = os.open(path, flags)
+    try:
+        return os.fdopen(descriptor, 'rb')
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
 def _binary_identity(path):
     """Hash one open file and verify that its path still names that identity."""
-    def identity(metadata):
-        return (metadata.st_dev, metadata.st_ino, metadata.st_size,
-                metadata.st_mtime_ns, metadata.st_ctime_ns)
+    named_before = _executable_metadata(os.stat(path))
 
     digest = hashlib.sha256()
-    with Path(path).open('rb') as source:
+    with _open_binary(path) as source:
         before = os.fstat(source.fileno())
         if not stat.S_ISREG(before.st_mode):
             raise OSError(errno.EINVAL, 'executable must be a regular file', str(path))
@@ -107,10 +131,18 @@ def _binary_identity(path):
         for block in iter(lambda: source.read(1024 * 1024), b''):
             digest.update(block)
         after = os.fstat(source.fileno())
-        named = os.stat(path)
-    if identity(before) != identity(after) or identity(after) != identity(named):
+        # Bind the current name to the hashed handle with another handle stat,
+        # never by comparing the platform-dependent path/handle stat fields.
+        with _open_binary(path) as current:
+            reopened = os.fstat(current.fileno())
+        named_after = _executable_metadata(os.stat(path))
+    opened = _executable_metadata(after)
+    if (not stat.S_ISREG(reopened.st_mode)
+            or _executable_metadata(before) != opened
+            or opened != _executable_metadata(reopened)
+            or named_before != named_after):
         raise OSError(errno.EIO, 'executable changed while hashing', str(path))
-    return identity(after), digest.hexdigest()
+    return (opened, named_after), digest.hexdigest()
 
 
 @contextmanager
@@ -291,6 +323,11 @@ def _output_identity(path):
         canonical = resolve_path(parent / path.name)
         canonical = Path(os.path.normcase(canonical))
         validate_components(canonical)
+        # Deleting an 8.3 leaf alias removes its mapping to the long name.
+        # Recreating that spelling could then publish under a different lock.
+        # Refuse before mutation rather than rewrite executable-specific argv.
+        if canonical.name.casefold() != path.name.casefold():
+            raise OSError(errno.EINVAL, 'output leaf alias must use its long name', str(path))
         parent, path = canonical.parent, canonical
     # Preserve the directory's actual spelling on case-sensitive filesystems;
     # fold the destination name for every use of its identity, including locks.
@@ -380,8 +417,8 @@ def _check_output(path):
 
 @contextmanager
 def _output_locks(paths):
-    # Never follow the destination itself: replacing an output must not change
-    # its lock identity. Validate every path before any write-capable open.
+    # Refuse destination symlinks and short-name leaf aliases: replacing an
+    # output must not change its lock identity. Validate before write-capable opens.
     paths = [(Path(path), _output_identity(Path(path))) for path in paths]
     identities = [identity for path, identity in paths]
     if len(set(identities)) != len(identities):
@@ -434,9 +471,9 @@ def run_process(command, *, cwd, environment, log, artifact, retained, receipt_p
     before and after execution. Resolution and lock refusals leave outputs unchanged.
     Spawn and timeout failures attempt receipt publication before re-raising the
     original exception. An active OS lock refuses the invocation; leftover lock
-    files are reusable after a crash. Symlink and overlapping outputs are refused;
-    the lock-sidecar suffix is reserved globally. Locks cover all outputs through
-    receipt publication.
+    files are reusable after a crash. Symlink, short-name leaf alias and overlapping
+    outputs are refused; the lock-sidecar suffix is reserved globally. Locks cover
+    all outputs through receipt publication.
     """
     artifact, retained, receipt_path, log = (Path(artifact), Path(retained),
                                              Path(receipt_path), Path(log))

@@ -53,6 +53,38 @@ def with_pose(matrix):
     return result
 
 
+@contextlib.contextmanager
+def windows_binary_stats():
+    """Model different path/handle metadata without changing native I/O or locks."""
+    windows = types.SimpleNamespace(**vars(os))
+    windows.name = 'nt'
+    handle_calls = 0
+
+    def snapshot(metadata):
+        return types.SimpleNamespace(**{field: getattr(metadata, field) for field in (
+            'st_mode', 'st_dev', 'st_ino', 'st_size', 'st_mtime_ns', 'st_ctime_ns')})
+
+    def fstat(descriptor):
+        nonlocal handle_calls
+        handle_calls += 1
+        result = snapshot(os.fstat(descriptor))
+        # Handle ChangeTime need not be a portable modification clock.
+        result.st_ctime_ns += handle_calls
+        return result
+
+    def named_stat(path):
+        result = snapshot(os.stat(path))
+        result.st_dev += 1
+        result.st_ino += 1
+        result.st_mtime_ns -= result.st_mtime_ns % 1000000000
+        result.st_ctime_ns = 1  # Path stat's compatibility birth time.
+        return result
+
+    windows.fstat, windows.stat = fstat, named_stat
+    with mock.patch.object(runner, 'os', windows):
+        yield
+
+
 class MatrixTestBase(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
@@ -416,11 +448,13 @@ class PathResolutionTests(unittest.TestCase):
         with mock.patch.object(runner, 'os', windows), \
                 mock.patch.object(runner, 'Path', WindowsPath):
             expected = WindowsPath(r'C:\Runner Account\Capture Record.json')
-            aliases = (expected, WindowsPath(r'C:\RUNNER~1\CAPTUR~1.JSO'),
+            aliases = (expected, WindowsPath(r'C:\RUNNER~1\Capture Record.json'),
                        WindowsPath(r'C:\RUNNER ACCOUNT\nested\..\CAPTURE RECORD.JSON'))
             identities = [runner._output_identity(path) for path in aliases]
             self.assertEqual([str(path) + '.lock' for path in identities],
                              [str(expected).lower() + '.lock'] * len(aliases))
+            with self.assertRaisesRegex(OSError, 'output leaf alias must use its long name'):
+                runner._output_identity(WindowsPath(r'C:\RUNNER~1\CAPTUR~1.JSO'))
 
     @contextlib.contextmanager
     def windows_paths(self):
@@ -779,6 +813,101 @@ class PlannerCliTests(MatrixTestBase):
         result, _ = self.run_planner('--matrix', str(bad))
         self.assertEqual(result.returncode, 2)
         self.assertNotIn('Traceback', result.stderr)
+
+
+class BinaryIdentityTests(MatrixTestBase):
+    def setUp(self):
+        super().setUp()
+        self.binary = self.tmp / 'executable'
+        self.binary.write_bytes(b'executable bytes')
+
+    def test_windows_path_and_handle_snapshots_can_differ(self):
+        receipt = dict(binary_path=str(self.binary), evidence_errors=[])
+        with windows_binary_stats():
+            with runner.verified_binary(receipt):
+                self.assertEqual(receipt['binary_identity_status'], 'pending')
+        self.assertEqual(receipt['binary_identity_status'], 'verified')
+        self.assertEqual(receipt['binary_sha256'], runner.file_sha256(self.binary))
+        self.assertEqual(receipt['evidence_errors'], [])
+
+    def test_same_kind_metadata_changes_during_hashing_are_refused(self):
+        original = self.binary.stat()
+        fields = ('st_dev', 'st_ino', 'st_size', 'st_mtime_ns', 'st_ctime_ns')
+        for platform in ('posix', 'nt'):
+            for kind in ('handle', 'name', 'reopened'):
+                for field in fields if platform == 'posix' else fields[:-1]:
+                    with self.subTest(platform=platform, kind=kind, field=field):
+                        changed = types.SimpleNamespace(st_mode=original.st_mode,
+                            **{key: getattr(original, key) + (key == field) for key in fields})
+                        system = types.SimpleNamespace(**vars(os))
+                        system.name = platform
+                        system.stat = mock.Mock(side_effect=[original, changed]
+                                                if kind == 'name' else [original, original])
+                        system.fstat = mock.Mock(side_effect={
+                            'handle': [original, changed, changed],
+                            'name': [original, original, original],
+                            'reopened': [original, original, changed]}[kind])
+                        with mock.patch.object(runner, 'os', system), \
+                                self.assertRaisesRegex(OSError, 'executable changed while hashing'):
+                            runner._binary_identity(self.binary)
+
+    def test_binary_opens_are_nonblocking_and_close_on_nonregular_replacement(self):
+        for nonregular_call in (1, 3):
+            with self.subTest(nonregular_call=nonregular_call):
+                system = types.SimpleNamespace(**vars(os))
+                # Inject the flag even where the native platform has no FIFOs.
+                system.O_NONBLOCK = 1 << 29
+                descriptors = []
+                calls = 0
+
+                def open_binary(path, flags):
+                    self.assertTrue(flags & system.O_NONBLOCK)
+                    descriptor = os.open(path, flags & ~system.O_NONBLOCK)
+                    descriptors.append(descriptor)
+                    return descriptor
+
+                def fstat(descriptor):
+                    nonlocal calls
+                    calls += 1
+                    metadata = os.fstat(descriptor)
+                    if calls == nonregular_call:
+                        return types.SimpleNamespace(st_mode=stat.S_IFIFO,
+                            **{field: getattr(metadata, field) for field in (
+                                'st_dev', 'st_ino', 'st_size', 'st_mtime_ns', 'st_ctime_ns')})
+                    return metadata
+
+                system.open, system.fstat = open_binary, fstat
+                with mock.patch.object(runner, 'os', system), self.assertRaises(OSError):
+                    runner._binary_identity(self.binary)
+                self.assertEqual(len(descriptors), 1 if nonregular_call == 1 else 2)
+                for descriptor in descriptors:
+                    with self.assertRaises(OSError):
+                        os.fstat(descriptor)
+
+    def test_windows_real_changes_across_execution_invalidate_identity(self):
+        for change in ('bytes', 'timestamp', 'replacement', 'missing'):
+            with self.subTest(change=change):
+                self.binary.write_bytes(b'executable bytes')
+                receipt = dict(binary_path=str(self.binary), evidence_errors=[])
+                with windows_binary_stats(), contextlib.redirect_stderr(io.StringIO()), \
+                        self.assertRaises(OSError):
+                    with runner.verified_binary(receipt):
+                        before = self.binary.stat()
+                        if change == 'bytes':
+                            self.binary.write_bytes(b'changed contents')
+                            os.utime(self.binary, ns=(before.st_atime_ns, before.st_mtime_ns))
+                        elif change == 'timestamp':
+                            os.utime(self.binary, ns=(before.st_atime_ns,
+                                                     before.st_mtime_ns + 2000000000))
+                        elif change == 'replacement':
+                            replacement = self.tmp / 'replacement'
+                            shutil.copy2(self.binary, replacement)
+                            replacement.replace(self.binary)
+                        else:
+                            self.binary.unlink()
+                self.assertEqual(receipt['binary_identity_status'], 'changed')
+                self.assertIsNone(receipt['binary_sha256'])
+                self.assertTrue(receipt['evidence_errors'])
 
 
 class ProcessRunnerTests(MatrixTestBase):
@@ -1511,6 +1640,52 @@ class ProcessRunnerTests(MatrixTestBase):
                     inner[destination] = outputs[source].with_name(outputs[source].name.upper())
                     self.assert_output_names_refused(inner, 'output paths must be distinct')
 
+    def test_windows_short_leaf_outputs_refuse_before_alias_mapping_can_disappear(self):
+        command = self.script('')
+        outputs = (self.artifact, self.retained, self.receipt, self.log)
+        resolve = runner.resolve_path
+        lock_handle = runner._lock_handle
+        windows = types.SimpleNamespace(**vars(os))
+        windows.name = 'nt'
+
+        def lock_native(handle, path):
+            with mock.patch.object(runner, 'os', os):
+                lock_handle(handle, path)
+
+        for index, destination in enumerate(outputs):
+            with self.subTest(destination=destination.name):
+                self.seed_old_evidence()
+                alias = self.tmp / 'EVIDEN~1.JSO'
+                alias.write_bytes(b'alias of old evidence')
+                inner = list(outputs)
+                inner[index] = alias
+                before = {p: p.read_bytes() for p in self.tmp.iterdir() if p.is_file()}
+
+                def resolve_alias(path, **kwargs):
+                    # A short-name mapping exists only while its leaf exists;
+                    # unlink/recreate would turn it into a different destination.
+                    if Path(path) == alias and alias.exists():
+                        return destination
+                    return resolve(path, **kwargs)
+
+                with mock.patch.object(runner, 'os', windows), \
+                        mock.patch.object(runner, 'resolve_path', side_effect=resolve_alias), \
+                        mock.patch.object(runner, '_lock_handle', side_effect=lock_native), \
+                        mock.patch.object(runner, 'msvcrt', mock.Mock(), create=True), \
+                        mock.patch.object(runner, '_open_sidecar', wraps=runner._open_sidecar) as opened, \
+                        mock.patch.object(runner.subprocess, 'run', return_value=
+                                          subprocess.CompletedProcess(command, 0)) as launch, \
+                        self.assertRaisesRegex(OSError, 'output leaf alias must use its long name'):
+                    runner.run_process(command, cwd=self.tmp, environment=os.environ.copy(),
+                                       artifact=inner[0], retained=inner[1],
+                                       receipt_path=inner[2], log=inner[3])
+                opened.assert_not_called()
+                launch.assert_not_called()
+                self.assertEqual(before, {p: p.read_bytes() for p in self.tmp.iterdir()
+                                          if p.is_file()})
+                self.assertFalse(list(self.tmp.glob('*.lock')))
+                alias.unlink()
+
     def test_casefolded_output_names_contend_on_reusable_sidecars(self):
         for output in (self.artifact, self.retained, self.receipt, self.log):
             with self.subTest(output=output.name):
@@ -1783,21 +1958,32 @@ class ProcessRunnerTests(MatrixTestBase):
 
     def test_evidence_allocation_failure_preserves_process_exception(self):
         command = self.script('')
-        for error in (OSError('fixture spawn refused'),
-                      subprocess.TimeoutExpired(command, 60)):
-            with self.subTest(error=type(error).__name__):
-                self.seed_old_evidence()
-                with mock.patch.object(runner.subprocess, 'run', side_effect=error), \
-                        mock.patch.object(runner.tempfile, 'NamedTemporaryFile',
-                                          side_effect=OSError('fixture allocation refused')), \
-                        contextlib.redirect_stderr(io.StringIO()), \
-                        self.assertRaises(type(error)) as caught:
-                    self.run_case(command)
-                self.assertIs(caught.exception, error)
-                self.assertFalse(self.receipt.exists())
-                self.assertFalse(self.retained.exists())
-                self.assertFalse(list(self.tmp.glob('*.tmp')))
-                self.assert_output_locks_released()
+        identity = runner._binary_identity
+
+        def verify_windows(path):
+            with windows_binary_stats():
+                return identity(path)
+
+        for verify in (identity, verify_windows):
+            for error in (OSError('fixture spawn refused'),
+                          subprocess.TimeoutExpired(command, 60)):
+                with self.subTest(verify=verify.__name__, error=type(error).__name__):
+                    self.seed_old_evidence()
+                    with mock.patch.object(runner, '_binary_identity', side_effect=verify), \
+                            mock.patch.object(runner.subprocess, 'run', side_effect=error) as launch, \
+                            mock.patch.object(runner.subprocess, 'Popen') as spawn, \
+                            mock.patch.object(runner.tempfile, 'NamedTemporaryFile',
+                                              side_effect=OSError('fixture allocation refused')), \
+                            contextlib.redirect_stderr(io.StringIO()), \
+                            self.assertRaises(type(error)) as caught:
+                        self.run_case(command)
+                    launch.assert_called_once()
+                    spawn.assert_not_called()
+                    self.assertIs(caught.exception, error)
+                    self.assertFalse(self.receipt.exists())
+                    self.assertFalse(self.retained.exists())
+                    self.assertFalse(list(self.tmp.glob('*.tmp')))
+                    self.assert_output_locks_released()
 
     def open_with_lock_close_error(self, attempted, error):
         open_file = runner._open_sidecar
