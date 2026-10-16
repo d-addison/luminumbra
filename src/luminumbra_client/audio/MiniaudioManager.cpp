@@ -22,8 +22,12 @@ MiniaudioManager::~MiniaudioManager() {
 }
 
 bool MiniaudioManager::Init() {
+    return Init(ma_engine_init);
+}
+
+bool MiniaudioManager::Init(EngineInitializer initialize_engine) {
     m_engine = std::make_unique<ma_engine>();
-    ma_result result = ma_engine_init(nullptr, m_engine.get());
+    ma_result result = initialize_engine(nullptr, m_engine.get());
     if (result != MA_SUCCESS) {
         LUMINUMBRA_CORE_ERROR("Failed to initialize miniaudio engine.");
         m_engine = nullptr;
