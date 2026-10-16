@@ -37,10 +37,15 @@ struct ProbeState {
     int identityQueries = 0;
 };
 
-ProbeState probes;
+ProbeState& GetProbeState() {
+    static ProbeState state;
+    return state;
+}
 
 class HardwareInfoTest : public testing::Test {
 protected:
+    ProbeState& probes = GetProbeState();
+
     void SetUp() override {
         probes = ProbeState{};
     }
@@ -253,6 +258,7 @@ TEST_F(HardwareInfoTest, RepeatedDetectionRecoversWithoutReusingFailedCapacity) 
 } // namespace
 
 extern "C" GLenum glGetError() {
+    auto& probes = GetProbeState();
     if (probes.pendingErrors.empty()) {
         return GL_NO_ERROR;
     }
@@ -262,6 +268,7 @@ extern "C" GLenum glGetError() {
 }
 
 extern "C" const GLubyte* glGetString(GLenum name) {
+    auto& probes = GetProbeState();
     EXPECT_TRUE(probes.pendingErrors.empty());
     ++probes.identityQueries;
     std::size_t field = 0;
@@ -281,6 +288,7 @@ extern "C" const GLubyte* glGetString(GLenum name) {
 }
 
 extern "C" void glGetIntegerv(GLenum name, GLint* value) {
+    auto& probes = GetProbeState();
     EXPECT_TRUE(probes.pendingErrors.empty());
     // No free-memory or unrelated GL query may be treated as dedicated capacity.
     EXPECT_EQ(name, 0x9047u);
@@ -292,6 +300,7 @@ extern "C" void glGetIntegerv(GLenum name, GLint* value) {
 }
 
 extern "C" int glfwExtensionSupported(const char* extension) {
+    auto& probes = GetProbeState();
     EXPECT_TRUE(probes.pendingErrors.empty());
     EXPECT_STREQ(extension, "GL_NVX_gpu_memory_info");
     ++probes.extensionQueries;

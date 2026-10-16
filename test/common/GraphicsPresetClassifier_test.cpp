@@ -671,15 +671,20 @@ TEST(GraphicsPresetClassifierTest, ConvertsNvxKilobytesBeforeClassifying) {
         inputs.dedicatedVideoMemoryBytes =
             DedicatedVideoMemoryBytesFromNvx(true, boundary * kibPerGiB);
         ASSERT_TRUE(inputs.dedicatedVideoMemoryBytes.has_value());
-        EXPECT_EQ(*inputs.dedicatedVideoMemoryBytes, static_cast<std::uint64_t>(boundary) * kGiB);
+        if (inputs.dedicatedVideoMemoryBytes.has_value()) {
+            EXPECT_EQ(*inputs.dedicatedVideoMemoryBytes,
+                      static_cast<std::uint64_t>(boundary) * kGiB);
+        }
         EXPECT_EQ(ClassifyGraphicsPreset(inputs).preset,
                   boundary == 3 ? GraphicsPreset::Medium
                                 : (boundary == 6 ? GraphicsPreset::High : GraphicsPreset::Ultra));
         inputs.dedicatedVideoMemoryBytes =
             DedicatedVideoMemoryBytesFromNvx(true, boundary * kibPerGiB - 1);
         ASSERT_TRUE(inputs.dedicatedVideoMemoryBytes.has_value());
-        EXPECT_EQ(*inputs.dedicatedVideoMemoryBytes,
-                  static_cast<std::uint64_t>(boundary) * kGiB - 1024);
+        if (inputs.dedicatedVideoMemoryBytes.has_value()) {
+            EXPECT_EQ(*inputs.dedicatedVideoMemoryBytes,
+                      static_cast<std::uint64_t>(boundary) * kGiB - 1024);
+        }
         EXPECT_EQ(ClassifyGraphicsPreset(inputs).preset,
                   boundary == 3 ? GraphicsPreset::Low
                                 : (boundary == 6 ? GraphicsPreset::Medium : GraphicsPreset::High));
