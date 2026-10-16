@@ -62,8 +62,6 @@ while True:
         sys.exit(0)
     if mode == 'hang':
         time.sleep(60)
-    if mode == 'delay':
-        time.sleep(.1)
     if mode == 'startup-frame-delay':
         time.sleep(2.2)
     pixels = state['state']['width'] * state['state']['height']
