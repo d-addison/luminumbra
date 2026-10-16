@@ -1044,6 +1044,13 @@ class DumpSettleTest(unittest.TestCase):
                 self.folder, before if before is not None else {}, timeout, errors,
             )
 
+    def collect(self, *, wer, errors=None):
+        after = self.settle(timeout=rq.DUMP_SETTLE_SECONDS, errors=errors) if wer else None
+        return rq.copy_changed_files(
+            self.folder, {}, self.root / "collected", recursive=not wer,
+            after=after, errors=errors, clock=lambda: self.now, pause=self.pause,
+        )
+
     @contextmanager
     def windows_handles(self, held):
         """Inject Win32 bidirectional read/write sharing checks on any host."""
@@ -1389,18 +1396,125 @@ class DumpSettleTest(unittest.TestCase):
                                  (path, rq.COPY_CHUNK_BYTES, 5), (path, size, 0)])
         self.assertEqual(settled[str(path)].full_sha256, rq.sha256_file(path))
 
-    def test_settled_full_hash_cannot_outlast_settle_deadline(self) -> None:
+    def test_settled_full_hash_cannot_outlast_its_io_deadline(self) -> None:
         self.dump("slow-full-hash.dmp", size=rq.COPY_CHUNK_BYTES + 5)
 
         def expire_during_full_read():
             if reads[-1][2] == rq.COPY_CHUNK_BYTES:
-                self.now = 2.0
+                self.now += rq.DUMP_COPY_MIN_SECONDS
 
         with self.track_reads(on_read=expire_during_full_read) as reads:
-            with self.assertRaisesRegex(TimeoutError, "settle deadline"):
+            with self.assertRaisesRegex(TimeoutError, "hash deadline"):
                 self.settle(timeout=2.0)
-        self.assertEqual(self.now, 2.0)
+        self.assertEqual(self.now, 1.0 + rq.DUMP_COPY_MIN_SECONDS)
         self.assertEqual(len([read for read in reads if read[2] == rq.COPY_CHUNK_BYTES]), 1)
+
+    def test_large_dump_hash_has_a_size_scaled_budget_in_both_collectors(self) -> None:
+        size = 512 * 1024 * 1024
+        path = self.dump("large.dmp", size=size)
+        expected_digest = rq.sha256_file(path)
+        for wer in (False, True):
+            with self.subTest(wer=wer):
+                self.now = 0.0
+                hashed = 0
+
+                def advance_hash_clock():
+                    nonlocal hashed
+                    _source, _offset, length = reads[-1]
+                    if length == rq.COPY_CHUNK_BYTES and hashed < size:
+                        hashed += length
+                        # Slightly faster than the throughput floor, but the full
+                        # hash alone still takes longer than the polling window.
+                        self.now += length / (rq.DUMP_COPY_BYTES_PER_SECOND + 1024 * 1024)
+
+                errors = []
+                with self.track_reads(on_read=advance_hash_clock) as reads:
+                    copies = self.collect(wer=wer, errors=errors)
+                self.assertEqual(hashed, size)
+                self.assertGreater(self.now, rq.DUMP_SETTLE_SECONDS)
+                self.assertLess(self.now, size / rq.DUMP_COPY_BYTES_PER_SECOND)
+                self.assertEqual(errors, [])
+                self.assertEqual(copies, [str(self.root / "collected" / path.name)])
+                self.assertEqual(rq.sha256_file(Path(copies[0])), expected_digest)
+                Path(copies[0]).unlink()
+
+    def test_multiple_dump_hashes_each_have_their_own_budget(self) -> None:
+        paths = [self.dump(name, size=rq.COPY_CHUNK_BYTES)
+                 for name in ("first.dmp", "second.dmp")]
+        for wer in (False, True):
+            with self.subTest(wer=wer):
+                self.now = 0.0
+                hashed = set()
+
+                def advance_hash_clock():
+                    source, _offset, length = reads[-1]
+                    if length == rq.COPY_CHUNK_BYTES and source not in hashed:
+                        hashed.add(source)
+                        self.now += 20.0
+
+                errors = []
+                with self.track_reads(on_read=advance_hash_clock) as reads:
+                    copies = self.collect(wer=wer, errors=errors)
+                self.assertEqual(hashed, set(paths))
+                self.assertEqual(self.now, 41.0 if wer else 40.0)
+                self.assertEqual(errors, [])
+                self.assertEqual(copies, [str(self.root / "collected" / path.name) for path in paths])
+                for source, target in zip(paths, copies):
+                    self.assertEqual(rq.sha256_file(Path(target)), rq.sha256_file(source))
+                    Path(target).unlink()
+
+    def test_stalled_hash_is_refused_in_both_collectors(self) -> None:
+        path = self.dump("stalled.dmp", size=rq.COPY_CHUNK_BYTES + 5)
+        for wer in (False, True):
+            with self.subTest(wer=wer):
+                self.now = 0.0
+
+                def stall_during_hash():
+                    if reads[-1][2] == rq.COPY_CHUNK_BYTES:
+                        self.now += rq.DUMP_COPY_MIN_SECONDS
+
+                errors = []
+                with self.track_reads(on_read=stall_during_hash) as reads:
+                    if wer:
+                        with self.assertRaisesRegex(TimeoutError, "hash deadline"):
+                            self.collect(wer=wer, errors=errors)
+                    else:
+                        self.assertEqual(self.collect(wer=wer, errors=errors), [])
+                        self.assertEqual(len(errors), 1)
+                        self.assertIn(f"{path}: TimeoutError: dump hash deadline expired", errors[0])
+                self.assertEqual(len([read for read in reads if read[2] == rq.COPY_CHUNK_BYTES]), 1)
+                self.assertFalse((self.root / "collected" / path.name).exists())
+
+    def test_hash_growth_or_rewrite_still_requires_polling_time_to_settle(self) -> None:
+        for wer in (False, True):
+            for grow in (False, True):
+                with self.subTest(wer=wer, grow=grow):
+                    self.now = 0.0
+                    path = self.dump("changing.dmp", size=rq.COPY_CHUNK_BYTES + 5)
+                    original = path.stat()
+                    changed = False
+
+                    def change_during_hash():
+                        nonlocal changed
+                        if reads[-1][2] == rq.COPY_CHUNK_BYTES and not changed:
+                            with path.open("ab" if grow else "r+b", buffering=0) as writer:
+                                writer.write(b"changed")
+                            os.utime(path, ns=(original.st_atime_ns,
+                                               original.st_mtime_ns + 2_000_000_000))
+                            self.now += rq.DUMP_SETTLE_SECONDS - 0.5
+                            changed = True
+
+                    errors = []
+                    with self.track_reads(on_read=change_during_hash) as reads:
+                        if wer:
+                            with self.assertRaisesRegex(TimeoutError, "settle deadline"):
+                                self.collect(wer=wer, errors=errors)
+                        else:
+                            self.assertEqual(self.collect(wer=wer, errors=errors), [])
+                            self.assertEqual(len(errors), 1)
+                            self.assertIn("TimeoutError: dump settle deadline expired", errors[0])
+                    self.assertTrue(changed)
+                    self.assertFalse((self.root / "collected" / path.name).exists())
 
     def test_change_during_settled_hash_requires_another_stable_window(self) -> None:
         path = self.dump("changing-full-hash.dmp", size=rq.COPY_CHUNK_BYTES + 5)
