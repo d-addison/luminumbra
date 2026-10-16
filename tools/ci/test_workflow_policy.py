@@ -224,8 +224,12 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
         self.assertNotIn("compare_ambient_receipts.py", shard)
         check = aggregate_steps["Merge shard JUnit and check inventory"]
         self.assertEqual(value(check, "id", 8), "tests")
-        self.assertIn("python3 tools/ci/asan_shards.py merge --directory build/asan-shards --output build/debug-asan/ctest.junit.xml", check)
-        self.assertIn("python3 tools/ci/check_ctest_junit.py build/debug-asan/ctest.junit.xml --minimum-tests 2260", check)
+        commands = value(check, "run", 8).splitlines()
+        merge_command = "python3 tools/ci/asan_shards.py merge --directory build/asan-shards --output build/debug-asan/ctest.junit.xml"
+        inventory_command = "python3 tools/ci/check_ctest_junit.py build/debug-asan/ctest.junit.xml --minimum-tests 2260"
+        self.assertIn(merge_command, commands)
+        self.assertIn(inventory_command, commands)
+        self.assertLess(commands.index(merge_command), commands.index(inventory_command))
         self.assertIn("--expect-labels asan --require-probe asan", check)
         for name in ("Download shard JUnit", "Merge shard JUnit and check inventory"):
             self.assertEqual(value(aggregate_steps[name], "if", 8), "needs.asan-shard.result == 'success'")
@@ -249,6 +253,30 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
                          "'{\"tests\":\"${{ steps.tests.outcome }}\"}'")
         self.assertIn("name: qualification-asan-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}", aggregate)
         self.assertIn("python3 tools/ci/test_asan_shards.py", jobs(self.workflows["ci.yml"])["public-tree"])
+
+    def test_asan_aggregate_requires_inventory_floor_after_merge(self):
+        workflow = self.workflows["asan.yml"]
+        merge = "          python3 tools/ci/asan_shards.py merge --directory build/asan-shards --output build/debug-asan/ctest.junit.xml\n"
+        inventory = "          python3 tools/ci/check_ctest_junit.py build/debug-asan/ctest.junit.xml --minimum-tests 2260\n"
+        for mutation in ("removed", "lowered", "commented", "before-merge"):
+            with self.subTest(mutation=mutation):
+                replacement = {
+                    "removed": "",
+                    "lowered": inventory.replace("2260", "2259"),
+                    "commented": inventory.replace("python3", "# python3", 1),
+                    "before-merge": "",
+                }[mutation]
+                mutated = workflow.replace(inventory, replacement, 1)
+                if mutation == "before-merge":
+                    mutated = mutated.replace(merge, inventory + merge, 1)
+                self.assertNotEqual(mutated, workflow)
+                case = WorkflowDraftPolicyTests(
+                    "test_asan_matrix_and_aggregate_preserve_limits_coverage_and_evidence")
+                case.workflows = {**self.workflows, "asan.yml": mutated}
+                result = unittest.TestResult()
+                case.run(result)
+                self.assertEqual(len(result.errors), 0, result.errors)
+                self.assertEqual(len(result.failures), 1, result.failures)
 
     def assert_asan_rerun_artifacts(self, rerun_shards):
         blocks = jobs(self.workflows["asan.yml"])
