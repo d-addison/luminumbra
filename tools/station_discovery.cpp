@@ -34,6 +34,7 @@
 #include <xmmintrin.h>
 #endif
 
+#include "core/FilesystemPath.h"
 #include "core/Log.h"
 #include "systems/SHIELD_WorldSystem.h"
 #include "world/BiomeTable.h"
@@ -45,6 +46,8 @@ namespace {
 using nlohmann::json;
 using namespace Luminumbra::world;
 namespace fs = std::filesystem;
+using Luminumbra::Filesystem::GenericUtf8PathString;
+using Luminumbra::Filesystem::PathFromUtf8;
 
 class WarningSink final : public spdlog::sinks::base_sink<std::mutex> {
 public:
@@ -226,7 +229,7 @@ void CheckPresetShape(const json& preset) {
         throw std::runtime_error("biomes must be an object");
     }
     if (generation.contains("biomes") && generation.at("biomes").contains("table")) {
-        const auto table = fs::path(generation.at("biomes").at("table").get<std::string>());
+        const auto table = PathFromUtf8(generation.at("biomes").at("table").get<std::string>());
         if (table.is_absolute() || table.has_root_name()) {
             throw std::runtime_error("biome table must name a relative dependency");
         }
@@ -454,19 +457,20 @@ fs::path DependencyPath(const fs::path& root, const fs::path& relative) {
 }
 
 using Snapshot = std::map<std::string, std::string>;
-Snapshot CaptureInputs(const Options& options,
-                       const Luminumbra::Systems::TerrainGenParams& params) {
+// Inspect only resolved selectors here: the preset loader itself consumes
+// dependencies, so their bytes and integer domains must be checked before it runs.
+Snapshot CaptureInputs(const Options& options, const json& resolved_preset) {
     Snapshot files{{"preset.json", ReadBytes(options.preset)}};
     const auto capture = [&files, &options](const fs::path& relative) {
-        files.emplace("data/" + relative.generic_string(),
+        files.emplace("data/" + GenericUtf8PathString(relative),
                       ReadBytes(DependencyPath(options.data_root, relative)));
     };
-    if (params.biomes_enabled) {
-        const auto relative =
-            fs::path(params.biome_table_path).lexically_relative(options.data_root);
-        capture(relative);
+    const auto& generation = resolved_preset.at("generation_params");
+    const auto table = generation.at("biomes").at("table").get<std::string>();
+    if (!table.empty()) {
+        capture(PathFromUtf8(table));
     }
-    if (params.structures_enabled) {
+    if (generation.at("features").value("structures_enabled", false)) {
         const auto root = DependencyPath(options.data_root, "common/structures");
         if (!fs::is_directory(root)) {
             throw std::runtime_error("missing structure directory");
@@ -478,16 +482,28 @@ Snapshot CaptureInputs(const Options& options,
             if (!type.is_directory()) {
                 continue;
             }
+            // Match the loader's explicit optional-file lookup, including on
+            // case-insensitive filesystems where the directory spelling differs.
+            const auto placement = type.path() / "placement.json";
+            if (fs::exists(placement)) {
+                capture(placement.lexically_relative(options.data_root));
+            }
             for (const auto& piece : fs::directory_iterator(type.path())) {
-                if (piece.path().extension() == ".json") {
+                if (piece.path().extension() == ".json" &&
+                    piece.path().filename() != "placement.json") {
                     capture(piece.path().lexically_relative(options.data_root));
                 }
             }
         }
     }
     for (const auto& [name, bytes] : files) {
-        (void)name;
-        StrictJson(bytes); // dependencies also refuse duplicates and nonfinite fields
+        const auto data = StrictJson(bytes);
+        if (name.starts_with("data/common/structures/")) {
+            // Case aliases can cause the same file to be read as placement and
+            // piece data. Check both integer domains; valid files use disjoint keys.
+            CheckStructureInput(data, true);
+            CheckStructureInput(data, false);
+        }
     }
     return files;
 }
@@ -496,19 +512,21 @@ std::string InputIdentity(const Snapshot& files) {
     for (const auto& [name, bytes] : files) {
         manifest[name] = Sha256(bytes);
     }
-    return Sha256(manifest.dump());
+    // Compact, sorted UTF-8 JSON with no trailing LF, matching the Python contract.
+    return Sha256(manifest.dump(-1, ' ', false));
 }
 void ValidateDependencies(const Options& options,
                           const Luminumbra::Systems::TerrainGenParams& params,
                           const Snapshot& files) {
     if (params.biomes_enabled) {
-        const auto table = Luminumbra::World::BiomeTable::Load(params.biome_table_path);
+        const auto table =
+            Luminumbra::World::BiomeTable::Load(PathFromUtf8(params.biome_table_path));
         if (!table.ok() || table.empty() || !table.warnings().empty()) {
             throw std::runtime_error("biome table errors or warnings refused");
         }
         const auto relative =
-            fs::path(params.biome_table_path).lexically_relative(options.data_root);
-        const auto data = StrictJson(files.at("data/" + relative.generic_string()));
+            PathFromUtf8(params.biome_table_path).lexically_relative(options.data_root);
+        const auto data = StrictJson(files.at("data/" + GenericUtf8PathString(relative)));
         for (const auto& biome : data.at("biomes")) {
             for (const auto* block : {"vegetation", "reverb"}) {
                 if (!biome.contains(block)) {
@@ -527,14 +545,6 @@ void ValidateDependencies(const Options& options,
         }
     }
     if (params.structures_enabled) {
-        // The loader uses get<int>/value<int> and a uint8 material cast. Check
-        // every captured integer before ANY pool loader can convert it.
-        for (const auto& [name, bytes] : files) {
-            if (name.starts_with("data/common/structures/")) {
-                CheckStructureInput(StrictJson(bytes),
-                                    fs::path(name).filename() == "placement.json");
-            }
-        }
         const auto root = DependencyPath(options.data_root, "common/structures");
         std::size_t pools = 0;
         for (const auto& type : fs::directory_iterator(root)) {
@@ -543,7 +553,7 @@ void ValidateDependencies(const Options& options,
             }
             ++pools;
             const auto pool = Luminumbra::World::LoadStructureTemplatePool(
-                type.path(), type.path().filename().string());
+                type.path(), GenericUtf8PathString(type.path().filename()));
             if (!pool.ok() || !pool.warnings.empty()) {
                 throw std::runtime_error("structure pool errors or warnings refused");
             }
@@ -642,6 +652,11 @@ int main(int argc, char** argv) {
             throw std::runtime_error("preset must be an object");
         }
         CheckPresetShape(preset);
+        const auto resolved_preset = ResolveTerrainPresetDefaults(preset);
+        const auto files = CaptureInputs(options, resolved_preset);
+        if (files.at("preset.json") != preset_bytes) {
+            throw std::runtime_error("preset changed while loading");
+        }
         const auto loaded = LoadTerrainPresetFromJson(preset, options.data_root, "preset.json");
         if (!loaded.ok || !loaded.warnings.empty()) {
             throw std::runtime_error("preset errors, warnings or clamping refused");
@@ -654,24 +669,25 @@ int main(int argc, char** argv) {
               params.surface_break_density < 0 || params.surface_break_density > 1))) {
             throw std::runtime_error("unsupported terrain query parameters");
         }
-        const auto files = CaptureInputs(options, params);
-        if (files.at("preset.json") != preset_bytes) {
-            throw std::runtime_error("preset changed while loading");
-        }
         ValidateDependencies(options, params, files);
         Luminumbra::Systems::SHIELD_WorldSystem world(nullptr, nullptr, params, options.seed);
         const auto result = DiscoverStations(world, options.query);
         if (!result.ok) {
             throw std::runtime_error(result.error);
         }
-        if (CaptureInputs(options, params) != files) {
+        if (CaptureInputs(options, resolved_preset) != files) {
             throw std::runtime_error("input identity changed during discovery");
         }
         if (warnings->Observed()) {
             throw std::runtime_error("input or world-query warnings refused");
         }
-        const std::string document = Document(options, InputIdentity(files), result).dump() + "\n";
+        const std::string document =
+            Document(options, InputIdentity(files), result).dump(-1, ' ', false) + "\n";
         std::cout << document;
+        std::cout.flush();
+        if (!std::cout) {
+            throw std::runtime_error("cannot write station discovery stdout");
+        }
         return 0;
     } catch (const UsageError& error) {
         std::cerr << "station discovery usage: " << error.what() << '\n';

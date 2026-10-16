@@ -13,6 +13,9 @@ namespace Luminumbra::world {
 inline constexpr std::int64_t kStationHorizontalBoundMm = 8388608000LL;
 inline constexpr std::uint64_t kStationCellBudget = 262144;
 inline constexpr std::uint64_t kStationSampleBudget = 16777216;
+// Counts every visited Z/X/Y lattice anchor, including rejected footprint points.
+// Independent of density sampling, so skipped anchors cannot evade the work bound.
+inline constexpr std::uint64_t kStationLatticeVisitBudget = 16777216;
 
 enum class StationKind {
     Mouth,
@@ -44,6 +47,8 @@ struct StationDiscoveryResult {
     std::string error;
     std::vector<StationCandidate> candidates;
     std::uint64_t enumerated_cells = 0, density_samples = 0;
+    // Read-only work diagnostic, retained on refusal; never exceeds the budget.
+    std::uint64_t lattice_visits = 0;
 };
 
 // Read-only seams also let tests describe topology without seeded numeric goldens.

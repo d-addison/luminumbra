@@ -5,6 +5,7 @@ import argparse
 import hashlib
 import json
 import math
+import os
 from pathlib import Path
 import re
 import sys
@@ -13,6 +14,7 @@ SCHEMA_ID = "luminumbra.station-discovery.v1"
 HORIZONTAL_MM = 8388608000
 CELL_BUDGET = 262144
 SAMPLE_BUDGET = 16777216
+LATTICE_VISIT_BUDGET = 16777216
 POSE_KEYS = {"x", "y", "z", "yaw", "pitch"}
 KINDS = ("mouth", "arch", "horizon", "coverage")
 
@@ -148,9 +150,11 @@ def schema_validate(value, node=SCHEMA, path="$"):
             require(predicate(value, node[key]), path + " outside bounds")
 
 
-def validate_work(cells, samples):
+def validate_work(cells, samples, lattice_visits=0):
     require(type(cells) is int and 0 <= cells <= CELL_BUDGET, "cell budget exhausted")
     require(type(samples) is int and 0 <= samples <= SAMPLE_BUDGET, "sample budget exhausted")
+    require(type(lattice_visits) is int and 0 <= lattice_visits <= LATTICE_VISIT_BUDGET,
+            "lattice visit budget exhausted")
 
 
 def validate(document, *, expected_engine_revision=None, expected_inputs_sha256=None,
@@ -238,6 +242,21 @@ def validate(document, *, expected_engine_revision=None, expected_inputs_sha256=
     return document
 
 
+def write_stdout(encoded):
+    # Write unbuffered bytes on both platforms: errors must reach the exit status,
+    # rather than surfacing during interpreter shutdown after a successful return.
+    descriptor = sys.stdout.fileno()
+    if os.name == "nt":
+        import msvcrt
+        msvcrt.setmode(descriptor, os.O_BINARY)
+    remaining = memoryview(encoded)
+    while remaining:
+        written = os.write(descriptor, remaining)
+        if written <= 0:
+            raise OSError("cannot write station discovery stdout")
+        remaining = remaining[written:]
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--schema", action="store_true")
@@ -252,20 +271,21 @@ def main():
     if args.schema:
         if args.input is not None:
             parser.error("--schema and --input are mutually exclusive")
-        sys.stdout.buffer.write(canonical(SCHEMA))
-        return 0
-    if args.input is None:
+    elif args.input is None:
         parser.error("--input is required")
     try:
-        result = validate(loads(args.input.read_bytes()),
-                          expected_engine_revision=args.expected_engine_revision,
-                          expected_inputs_sha256=args.expected_inputs_sha256,
-                          require_certified=args.require_certified)
-        encoded = canonical(result)
+        if args.schema:
+            encoded = canonical(SCHEMA)
+        else:
+            result = validate(loads(args.input.read_bytes()),
+                              expected_engine_revision=args.expected_engine_revision,
+                              expected_inputs_sha256=args.expected_inputs_sha256,
+                              require_certified=args.require_certified)
+            encoded = canonical(result)
+        write_stdout(encoded)
     except (OSError, ValueError, RecursionError) as exc:
         print("station discovery refused: " + str(exc), file=sys.stderr)
         return 1
-    sys.stdout.buffer.write(encoded)
     return 0
 
 

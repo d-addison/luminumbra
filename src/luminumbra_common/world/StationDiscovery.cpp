@@ -178,6 +178,21 @@ int FloorCell(double value) {
     }
     return static_cast<int>(std::floor(value));
 }
+
+// Exact integer square root for disk row bounds, without rounding-dependent
+// inclusion of lattice points at the disk edge. At most 32 restoring steps.
+std::uint64_t IntegerSqrt(std::uint64_t value) {
+    std::uint64_t root = 0;
+    for (std::uint64_t bit = std::uint64_t{1} << 62; bit != 0; bit >>= 2) {
+        if (value >= root + bit) {
+            value -= root + bit;
+            root = (root >> 1) + bit;
+        } else {
+            root >>= 1;
+        }
+    }
+    return root;
+}
 } // namespace
 
 std::string ValidateStationQuery(const StationQuery& query) {
@@ -281,6 +296,20 @@ StationDiscoveryResult DiscoverStations(const StationDiscoverySource& source,
                 !std::isfinite(source.max_radius_m) || source.max_radius_m <= 0 || !source.cell) {
                 throw std::runtime_error("invalid surface-break catalogue");
             }
+            // No portal can fit, even before alignment to the global lattice.
+            // Controls above have their own clearance rules and do not use this stencil.
+            if (static_cast<std::int64_t>(query.y_range_m[1]) - query.y_range_m[0] < 12) {
+                result.ok = true;
+                return result;
+            }
+            const int y0 = FloorCell(static_cast<double>(query.y_range_m[0]) / kStep);
+            const int y1 = FloorCell(static_cast<double>(query.y_range_m[1]) / kStep);
+            const int first_y = -FloorCell(-static_cast<double>(query.y_range_m[0]) / kStep);
+            const int last_y = FloorCell((static_cast<double>(query.y_range_m[1]) - 12) / kStep);
+            if (first_y > last_y) {
+                result.ok = true;
+                return result;
+            }
             const double reach = query.radius_m + static_cast<double>(source.max_radius_m);
             const int min_x = FloorCell((ox - reach) / source.cell_size_m);
             const int max_x = FloorCell((ox + reach) / source.cell_size_m);
@@ -308,25 +337,68 @@ StationDiscoveryResult DiscoverStations(const StationDiscoverySource& source,
                         feature.radius > source.max_radius_m) {
                         throw std::runtime_error("invalid surface-break descriptor");
                     }
-                    // Global lattice, with a local index over Z, X, then Y (including skipped
-                    // points).
+                    // Retain the original binary32 feature-box bounds for stable
+                    // indices, including skipped points, while clipping visits.
+                    // A tighter double-precision feature bound can exclude anchors
+                    // accepted by the binary32 radius-squared footprint predicate.
                     const int x0 = FloorCell((feature.x - feature.radius) / kStep);
                     const int x1 = FloorCell((feature.x + feature.radius) / kStep);
                     const int z0 = FloorCell((feature.z - feature.radius) / kStep);
                     const int z1 = FloorCell((feature.z + feature.radius) / kStep);
-                    const int y0 = FloorCell(static_cast<double>(query.y_range_m[0]) / kStep);
-                    const int y1 = FloorCell(static_cast<double>(query.y_range_m[1]) / kStep);
-                    std::uint64_t index = 0;
-                    for (int gz = z0; gz <= z1; ++gz) {
-                        for (int gx = x0; gx <= x1; ++gx) {
-                            for (int gy = y0; gy <= y1; ++gy, ++index) {
+                    const auto width =
+                        static_cast<std::uint64_t>(static_cast<std::int64_t>(x1) - x0 + 1);
+                    const auto depth =
+                        static_cast<std::uint64_t>(static_cast<std::int64_t>(z1) - z0 + 1);
+                    const auto height = static_cast<std::uint64_t>(y1 - y0 + 1);
+                    constexpr auto max_index = std::numeric_limits<std::uint64_t>::max();
+                    if (width > max_index / depth || width * depth > max_index / height) {
+                        throw std::runtime_error("local lattice index outside integer domain");
+                    }
+                    const int first_x = std::max(x0, -FloorCell(-(ox - query.radius_m) / kStep));
+                    const int last_x = std::min(x1, FloorCell((ox + query.radius_m) / kStep));
+                    if (first_x > last_x) {
+                        continue;
+                    }
+                    // Clip Z using the closest available lattice X as well. Each
+                    // remaining row then contains an anchor, so empty row scans
+                    // cannot evade the visit budget for a narrow intersection.
+                    const int nearest_x =
+                        std::clamp(FloorCell((ox + kStep / 2.0) / kStep), first_x, last_x);
+                    const auto nearest_dx_mm =
+                        static_cast<std::int64_t>(nearest_x) * (kStep * 1000) - query.origin_mm[0];
+                    const auto z_reach_mm = static_cast<std::int64_t>(
+                        IntegerSqrt(radius_squared -
+                                    static_cast<std::uint64_t>(nearest_dx_mm * nearest_dx_mm)));
+                    const int first_z =
+                        std::max(z0,
+                                 -FloorCell(-static_cast<double>(query.origin_mm[1] - z_reach_mm) /
+                                            (kStep * 1000)));
+                    const int last_z =
+                        std::min(z1,
+                                 FloorCell(static_cast<double>(query.origin_mm[1] + z_reach_mm) /
+                                           (kStep * 1000)));
+                    for (int gz = first_z; gz <= last_z; ++gz) {
+                        const auto dz_mm =
+                            static_cast<std::int64_t>(gz) * (kStep * 1000) - query.origin_mm[1];
+                        const auto dx_mm = static_cast<std::int64_t>(IntegerSqrt(
+                            radius_squared - static_cast<std::uint64_t>(dz_mm * dz_mm)));
+                        const int row_first_x =
+                            std::max(first_x,
+                                     -FloorCell(-static_cast<double>(query.origin_mm[0] - dx_mm) /
+                                                (kStep * 1000)));
+                        const int row_last_x =
+                            std::min(last_x,
+                                     FloorCell(static_cast<double>(query.origin_mm[0] + dx_mm) /
+                                               (kStep * 1000)));
+                        for (int gx = row_first_x; gx <= row_last_x; ++gx) {
+                            for (int gy = first_y; gy <= last_y; ++gy) {
+                                if (result.lattice_visits == kStationLatticeVisitBudget) {
+                                    throw std::runtime_error("lattice visit budget exhausted");
+                                }
+                                ++result.lattice_visits;
                                 const double x = static_cast<double>(gx) * kStep;
                                 const double y = static_cast<double>(gy) * kStep;
                                 const double z = static_cast<double>(gz) * kStep;
-                                // Complete portal stencil must fit within the requested Y span.
-                                if (y < query.y_range_m[0] || y + 12 > query.y_range_m[1]) {
-                                    continue;
-                                }
                                 const double fx = x - feature.x, fz = z - feature.z;
                                 if (fx * fx + fz * fz > feature.radius * feature.radius) {
                                     continue;
@@ -334,24 +406,22 @@ StationDiscoveryResult DiscoverStations(const StationDiscoverySource& source,
                                 StationCandidate candidate;
                                 candidate.anchor_mm = {
                                     Millimetres(x), Millimetres(y), Millimetres(z)};
-                                if (std::abs(candidate.anchor_mm[0] - query.origin_mm[0]) >
-                                        radius_mm ||
-                                    std::abs(candidate.anchor_mm[2] - query.origin_mm[1]) >
-                                        radius_mm ||
-                                    Distance(candidate, query) > radius_squared) {
-                                    continue;
-                                }
                                 if (!sampler.Portal(x, y, z, query.kind == StationKind::Arch)) {
                                     continue;
                                 }
                                 candidate.cell_x = cx;
                                 candidate.cell_z = cz;
-                                candidate.local_index = index;
+                                const auto local_z =
+                                    static_cast<std::uint64_t>(static_cast<std::int64_t>(gz) - z0);
+                                const auto local_x =
+                                    static_cast<std::uint64_t>(static_cast<std::int64_t>(gx) - x0);
+                                candidate.local_index = (local_z * width + local_x) * height +
+                                                        static_cast<std::uint64_t>(gy - y0);
                                 candidate.id =
                                     Id(query.kind == StationKind::Arch ? "arch" : "mouth",
                                        cz,
                                        cx,
-                                       index);
+                                       candidate.local_index);
                                 if (sampler.Pose(candidate)) {
                                     result.candidates.push_back(candidate);
                                 }

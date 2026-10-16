@@ -4,6 +4,7 @@
 #include <array>
 #include <cmath>
 #include <limits>
+#include <random>
 
 #include "luminumbra_common/world/StationDiscovery.h"
 
@@ -52,6 +53,93 @@ StationDiscoverySource Portal(bool two_sides = true, bool roof = true, bool supp
     return source;
 }
 
+// Translated copies of the portal, spaced 16 m apart on X and Z. Exactly the
+// anchors congruent to base on X/Z, at base Y, pass both portal and pose checks.
+StationDiscoverySource PortalGrid(const WorldSystem::SurfaceBreakInfo& feature,
+                                  const std::array<int, 3>& base) {
+    auto source = Portal();
+    source.cell_size_m = 65536;
+    source.max_radius_m = 128;
+    source.cell = [feature](int x, int z) {
+        return x == 0 && z == 0 ? feature : WorldSystem::SurfaceBreakInfo{};
+    };
+    source.height = [base](float, float) {
+        return static_cast<float>(base[1]);
+    };
+    source.density = [base](const Vec3& point) {
+        const float x = std::remainder(point.x - static_cast<float>(base[0]), 16.0f);
+        const float y = point.y - static_cast<float>(base[1]);
+        const float z = std::remainder(point.z - static_cast<float>(base[2]), 16.0f);
+        const bool roof = std::abs(x) < 2 && std::abs(z) <= 4 && y >= 3 && y <= 5;
+        const bool support = std::abs(x) < 2 && std::abs(z) >= 3 && std::abs(z) <= 5 && y <= 5;
+        return roof || support ? -1.0f : 1.0f;
+    };
+    return source;
+}
+
+// Independent full Z/X/Y traversal with the original float box and footprint
+// arithmetic. The known grid topology supplies the portal/pose acceptance rule;
+// no clipped discovery call is used to decide which anchors should survive.
+std::vector<StationCandidate> FullScanPortalGrid(const WorldSystem::SurfaceBreakInfo& feature,
+                                                 const StationQuery& query,
+                                                 const std::array<int, 3>& base) {
+    const int x0 = static_cast<int>(std::floor((feature.x - feature.radius) / 4));
+    const int x1 = static_cast<int>(std::floor((feature.x + feature.radius) / 4));
+    const int z0 = static_cast<int>(std::floor((feature.z - feature.radius) / 4));
+    const int z1 = static_cast<int>(std::floor((feature.z + feature.radius) / 4));
+    const int y0 = static_cast<int>(std::floor(static_cast<double>(query.y_range_m[0]) / 4));
+    const int y1 = static_cast<int>(std::floor(static_cast<double>(query.y_range_m[1]) / 4));
+    const auto radius_mm = static_cast<std::int64_t>(query.radius_m) * 1000;
+    std::vector<StationCandidate> candidates;
+    std::uint64_t index = 0;
+    for (int gz = z0; gz <= z1; ++gz) {
+        for (int gx = x0; gx <= x1; ++gx) {
+            for (int gy = y0; gy <= y1; ++gy, ++index) {
+                const int x = gx * 4, y = gy * 4, z = gz * 4;
+                if (y < query.y_range_m[0] || y + 12 > query.y_range_m[1]) {
+                    continue;
+                }
+                const double fx = static_cast<double>(x) - feature.x;
+                const double fz = static_cast<double>(z) - feature.z;
+                if (fx * fx + fz * fz > feature.radius * feature.radius) {
+                    continue;
+                }
+                const auto dx = static_cast<std::int64_t>(x) * 1000 - query.origin_mm[0];
+                const auto dz = static_cast<std::int64_t>(z) * 1000 - query.origin_mm[1];
+                if (std::abs(dx) > radius_mm || std::abs(dz) > radius_mm ||
+                    dx * dx + dz * dz > radius_mm * radius_mm) {
+                    continue;
+                }
+                if (y != base[1] || (x - base[0]) % 16 != 0 || (z - base[2]) % 16 != 0) {
+                    continue;
+                }
+                StationCandidate candidate;
+                candidate.anchor_mm = {static_cast<std::int64_t>(x) * 1000,
+                                       static_cast<std::int64_t>(y) * 1000,
+                                       static_cast<std::int64_t>(z) * 1000};
+                candidate.local_index = index;
+                candidate.id = std::string(query.kind == StationKind::Arch ? "arch" : "mouth") +
+                               "-z-p0-x-p0-i-" + std::to_string(index);
+                candidates.push_back(candidate);
+            }
+        }
+    }
+    RankStationCandidates(candidates, query);
+    return candidates;
+}
+
+void ExpectSameStations(const std::vector<StationCandidate>& actual,
+                        const std::vector<StationCandidate>& expected) {
+    ASSERT_EQ(actual.size(), expected.size());
+    for (std::size_t i = 0; i < expected.size(); ++i) {
+        EXPECT_EQ(actual[i].anchor_mm, expected[i].anchor_mm);
+        EXPECT_EQ(actual[i].id, expected[i].id);
+        EXPECT_EQ(actual[i].cell_x, expected[i].cell_x);
+        EXPECT_EQ(actual[i].cell_z, expected[i].cell_z);
+        EXPECT_EQ(actual[i].local_index, expected[i].local_index);
+    }
+}
+
 TEST(StationDiscovery, SampledMouthAndArchPositiveControls) {
     for (auto kind : {StationKind::Mouth, StationKind::Arch}) {
         const auto result = DiscoverStations(Portal(), Query(kind));
@@ -61,6 +149,7 @@ TEST(StationDiscovery, SampledMouthAndArchPositiveControls) {
         EXPECT_EQ(candidate.anchor_mm, (std::array<std::int64_t, 3>{-4000, 0, -4000}));
         EXPECT_EQ(candidate.cell_x, -1);
         EXPECT_EQ(candidate.cell_z, -1);
+        EXPECT_EQ(candidate.local_index, 15u); // full Z/X/Y box, including skipped anchors
     }
 }
 
@@ -71,6 +160,103 @@ TEST(StationDiscovery, OneSidedMouthIsNotAnArch) {
     const auto arch = DiscoverStations(Portal(false), Query(StationKind::Arch));
     ASSERT_TRUE(arch.ok) << arch.error;
     EXPECT_TRUE(arch.candidates.empty());
+}
+
+TEST(StationDiscovery, ClippingPreservesBinary32FeatureBoxIndices) {
+    auto source = Portal();
+    source.cell = [](int x, int z) {
+        // Binary32 subtraction rounds the lower X bound to exactly 4 m.
+        return x == 0 && z == 0
+                   ? WorldSystem::SurfaceBreakInfo{true, 5, 4, 1.00000011920928955078125f, 4, false}
+                   : WorldSystem::SurfaceBreakInfo{};
+    };
+    const auto density = source.density;
+    source.density = [density](const Vec3& point) {
+        return density(Vec3(point.x - 8, point.y, point.z - 8));
+    };
+    auto query = Query();
+    query.origin_mm = {4000, 4000};
+    query.radius_m = 1;
+    const auto result = DiscoverStations(source, query);
+    ASSERT_TRUE(result.ok) << result.error;
+    ASSERT_EQ(result.candidates.size(), 1u);
+    EXPECT_EQ(result.candidates.front().local_index, 5u);
+}
+
+TEST(StationDiscovery, ClippingPreservesBinary32RadiusBoundaryStations) {
+    for (const bool transpose : {false, true}) {
+        WorldSystem::SurfaceBreakInfo feature{
+            true, 1.5530474185943604f, 0, 41.55304718017578f, 4, false};
+        std::array<int, 3> base{-40, 0, 0};
+        if (transpose) {
+            std::swap(feature.x, feature.z);
+            std::swap(base[0], base[2]);
+        }
+        for (auto kind : {StationKind::Mouth, StationKind::Arch}) {
+            SCOPED_TRACE(transpose);
+            SCOPED_TRACE(static_cast<int>(kind));
+            auto query = Query(kind);
+            query.origin_mm = {base[0] * 1000, base[2] * 1000};
+            query.radius_m = 1;
+            const auto source = PortalGrid(feature, base);
+            const auto expected = FullScanPortalGrid(feature, query, base);
+            ASSERT_EQ(expected.size(), 1u);
+            EXPECT_EQ(expected.front().anchor_mm,
+                      (std::array<std::int64_t, 3>{base[0] * 1000, 0, base[2] * 1000}));
+            EXPECT_EQ(expected.front().local_index, transpose ? 55u : 1155u);
+            const auto result = DiscoverStations(source, query);
+            ASSERT_TRUE(result.ok) << result.error;
+            ExpectSameStations(result.candidates, expected);
+        }
+    }
+}
+
+TEST(StationDiscovery, RandomizedClippingMatchesFullScanStationsAndIds) {
+    std::mt19937 random(0x51a710u);
+    // Use engine integers directly so the cases do not depend on a library's
+    // uniform-distribution implementation. Keep full scans small and bounded.
+    const auto draw = [&random](int count) {
+        return static_cast<int>(random() % static_cast<std::uint32_t>(count));
+    };
+    std::size_t positive_cases = 0, multiple_station_cases = 0;
+    for (int iteration = 0; iteration < 256; ++iteration) {
+        const std::array<int, 3> base{4 * (draw(33) - 16), 4 * (draw(9) - 4), 4 * (draw(33) - 16)};
+        WorldSystem::SurfaceBreakInfo feature{
+            true,
+            static_cast<float>(base[0]) + static_cast<float>(draw(98305) - 49152) / 1024.0f,
+            static_cast<float>(base[2]) + static_cast<float>(draw(98305) - 49152) / 1024.0f,
+            static_cast<float>(1 + draw(96)),
+            4,
+            false};
+        if (iteration % 2 == 0) {
+            // Straddle the binary32 radius comparison at a known portal anchor.
+            const double dx = static_cast<double>(base[0]) - feature.x;
+            const double dz = static_cast<double>(base[2]) - feature.z;
+            feature.radius = static_cast<float>(std::sqrt(dx * dx + dz * dz));
+            feature.radius = std::nextafter(feature.radius, iteration % 4 == 0 ? 128.0f : 0.0f);
+        }
+        auto query = Query();
+        query.origin_mm = {static_cast<std::int64_t>(base[0]) * 1000 + draw(48001) - 24000,
+                           static_cast<std::int64_t>(base[2]) * 1000 + draw(48001) - 24000};
+        query.radius_m = 1 + draw(64);
+        query.y_range_m = {base[1] - draw(8), base[1] + 12 + draw(9)};
+        query.view_distance_m = 0;
+        query.limit = 1 + draw(64);
+        const auto source = PortalGrid(feature, base);
+        for (auto kind : {StationKind::Mouth, StationKind::Arch}) {
+            SCOPED_TRACE(iteration);
+            SCOPED_TRACE(static_cast<int>(kind));
+            query.kind = kind;
+            const auto expected = FullScanPortalGrid(feature, query, base);
+            positive_cases += !expected.empty();
+            multiple_station_cases += expected.size() > 1;
+            const auto result = DiscoverStations(source, query);
+            ASSERT_TRUE(result.ok) << result.error;
+            ExpectSameStations(result.candidates, expected);
+        }
+    }
+    EXPECT_GT(positive_cases, 0u);
+    EXPECT_GT(multiple_station_cases, 0u);
 }
 
 TEST(StationDiscovery, ArchRequiresRoofAndLateralSupports) {
@@ -272,6 +458,108 @@ TEST(StationDiscovery, DensityBudgetCountsWorkAndDiscardsEarlierCandidates) {
     EXPECT_FALSE(result.ok);
     EXPECT_EQ(result.error, "density sample budget exhausted");
     EXPECT_EQ(result.density_samples, kStationSampleBudget);
+    EXPECT_TRUE(result.candidates.empty());
+}
+
+TEST(StationDiscovery, ShortOrUnalignedPortalSpanDoesNoCatalogueOrLatticeWork) {
+    for (auto kind : {StationKind::Mouth, StationKind::Arch}) {
+        for (const auto span :
+             {std::array<int, 2>{0, 0}, std::array<int, 2>{-11, 0}, std::array<int, 2>{1, 13}}) {
+            auto source = Portal();
+            source.cell_size_m = 65536;
+            source.max_radius_m = 16384;
+            std::uint64_t cell_calls = 0, density_calls = 0;
+            source.cell = [&cell_calls](int, int) {
+                ++cell_calls;
+                return WorldSystem::SurfaceBreakInfo{true, 0, 0, 16384, 4, false};
+            };
+            source.density = [&density_calls](const Vec3&) {
+                ++density_calls;
+                return -1.0f;
+            };
+            auto query = Query(kind);
+            query.radius_m = 16384;
+            query.y_range_m = span;
+            const auto result = DiscoverStations(source, query);
+            ASSERT_TRUE(result.ok) << result.error;
+            EXPECT_TRUE(result.candidates.empty());
+            EXPECT_EQ(result.enumerated_cells, 0u);
+            EXPECT_EQ(result.lattice_visits, 0u);
+            EXPECT_EQ(result.density_samples, 0u);
+            EXPECT_EQ(cell_calls, 0u);
+            EXPECT_EQ(density_calls, 0u);
+        }
+    }
+}
+
+TEST(StationDiscovery, DiskIntersectionBoundsLatticeVisitsAndIncludesBoundaryAnchors) {
+    for (auto kind : {StationKind::Mouth, StationKind::Arch}) {
+        auto source = Portal();
+        source.cell_size_m = 65536;
+        source.max_radius_m = 4096;
+        source.cell = [](int x, int z) {
+            return x == 0 && z == 0 ? WorldSystem::SurfaceBreakInfo{true, 0, 0, 4096, 4, false}
+                                    : WorldSystem::SurfaceBreakInfo{};
+        };
+        source.density = [](const Vec3&) {
+            return -1.0f;
+        };
+        auto query = Query(kind);
+        query.origin_mm = {0, 0};
+        query.y_range_m = {0, 12};
+        for (const auto radius : {1, 4}) {
+            query.radius_m = radius;
+            const auto result = DiscoverStations(source, query);
+            ASSERT_TRUE(result.ok) << result.error;
+            EXPECT_EQ(result.lattice_visits, radius == 1 ? 1u : 5u);
+            EXPECT_EQ(result.density_samples, result.lattice_visits);
+            EXPECT_TRUE(result.candidates.empty());
+        }
+        query.origin_mm = {-3999, 4001};
+        const auto shifted = DiscoverStations(source, query);
+        ASSERT_TRUE(shifted.ok) << shifted.error;
+        EXPECT_EQ(shifted.lattice_visits, 3u);
+        EXPECT_EQ(shifted.density_samples, 3u);
+    }
+}
+
+TEST(StationDiscovery, WideDiskRefusesAtVisitBudgetEvenWithoutDensitySamples) {
+    for (auto kind : {StationKind::Mouth, StationKind::Arch}) {
+        auto source = Portal();
+        source.cell_size_m = 65536;
+        source.max_radius_m = 16384;
+        // The bounding boxes overlap the query disk, but the feature disk does
+        // not. All visited anchors fail before density sampling.
+        source.cell = [](int x, int z) {
+            return x == 0 && z == 0
+                       ? WorldSystem::SurfaceBreakInfo{true, 25000, 25000, 16384, 4, false}
+                       : WorldSystem::SurfaceBreakInfo{};
+        };
+        auto query = Query(kind);
+        query.origin_mm = {0, 0};
+        query.radius_m = 16384;
+        query.y_range_m = {0, 512};
+        const auto result = DiscoverStations(source, query);
+        EXPECT_FALSE(result.ok);
+        EXPECT_EQ(result.error, "lattice visit budget exhausted");
+        EXPECT_EQ(result.lattice_visits, kStationLatticeVisitBudget);
+        EXPECT_EQ(result.density_samples, 0u);
+        EXPECT_TRUE(result.candidates.empty());
+    }
+}
+
+TEST(StationDiscovery, UnrepresentableFullLatticeIndexRefusesBeforeVisits) {
+    auto source = Portal();
+    source.cell_size_m = 16000000000.0f;
+    source.max_radius_m = 8000000000.0f;
+    source.cell = [](int, int) {
+        return WorldSystem::SurfaceBreakInfo{true, 0, 0, 8000000000.0f, 4, false};
+    };
+    const auto result = DiscoverStations(source, Query());
+    EXPECT_FALSE(result.ok);
+    EXPECT_EQ(result.error, "local lattice index outside integer domain");
+    EXPECT_EQ(result.lattice_visits, 0u);
+    EXPECT_EQ(result.density_samples, 0u);
     EXPECT_TRUE(result.candidates.empty());
 }
 

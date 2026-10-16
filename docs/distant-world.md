@@ -572,21 +572,26 @@ visibility or continuous cave topology.
 
 The build revision is pinned by `LUMINUMBRA_STATION_ENGINE_REVISION` at configure
 time, defaulting to the checkout revision when Git is available. Input identity
-is SHA-256 of a compact key-sorted JSON manifest (no final LF), mapping logical
-relative names to exact-byte SHA-256 digests. The preset is `preset.json`;
+is SHA-256 of a compact key-sorted UTF-8 JSON manifest (non-ASCII names remain
+unescaped, no final LF), mapping logical relative names to exact-byte SHA-256
+digests. The preset is `preset.json`;
 consumed biome and structure inputs use `data/<relative-name>`. Structure inputs
 include optional placement files and every consumed piece in each type directory.
 Absolute paths, timestamps, timings and session content identities are excluded.
-Dependencies are validated before world construction and their names/bytes are
-checked again after discovery; observable changes refuse the whole result.
+Dependency bytes and structure integer domains are validated before the preset
+loader can consume them. Their names/bytes are checked again after discovery;
+observable changes refuse the whole result.
 Run against immutable pinned inputs; these checks do not promise exclusion of
 every concurrent filesystem race.
 
 `sampled-portals.v1` freezes the following sampled predicate. Enumerate all
 seeded surface-break cells whose footprints can intersect the search disk,
 using the same placement decoder as `FindLargestSurfaceBreak`. Scan global 4 m
-lattice anchors inside each accepted footprint and the query disk. Local index
-advances over Z, X, then Y, including skipped lattice points. At an anchor,
+lattice anchors inside each accepted footprint and the query disk. Loop ranges
+are clipped to the disk row by row and to Y values that fit the 12 m stencil;
+a span with no such lattice Y returns an empty feature catalogue without visits.
+Local index still refers to the full feature bounding box over Z, X, then Y,
+including skipped lattice points. At an anchor,
 air requires density >= 0.25 and solid requires density <= -0.25. A mouth has
 an air anchor, a solid roof at Y+4, and a straight face-connected path through
 air at 4 and 8 metres along an ordered cardinal direction. The 8 m endpoint is
@@ -617,11 +622,16 @@ that any tier is covered or settled.
 
 Refuse inverted vertical spans, spans over 512 m, horizontal coordinates or
 search/pose/stencil footprints beyond +/-2^23 metres, more than 262144 enumerated
-cells, or more than 16777216 density samples. Work limits count operations, never
+cells, more than 16777216 lattice visits, or more than 16777216 density samples.
+Every visited Z/X/Y anchor counts, including those rejected before sampling;
+the read-only `StationDiscoveryResult::lattice_visits` diagnostic remains available
+on refusal.
+Exceeding any budget discards all candidates. Work limits count operations, never
 elapsed time. Unsupported/nonfinite sampling also refuses. Malformed CLI
 arguments exit 2; missing/invalid inputs, parser warnings or clamping, unsupported
 numerics, and budget exhaustion exit 1 with no partial success on stdout.
-Completed empty/disabled catalogues exit 0 with `candidates: []`.
+Completed empty/disabled catalogues exit 0 with `candidates: []`. Output writes
+are checked through completion; a write or flush failure exits 1.
 
 The tool currently permits exploratory results only on the existing x86-64
 AVX2 query path with IEEE binary32 and round-to-nearest; unsupported ISA or FP

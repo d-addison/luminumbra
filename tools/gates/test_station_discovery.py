@@ -151,10 +151,15 @@ class ContractTests(unittest.TestCase):
 
     def test_work_budgets_are_inclusive(self):
         contract.validate_work(contract.CELL_BUDGET, contract.SAMPLE_BUDGET)
+        contract.validate_work(contract.CELL_BUDGET, contract.SAMPLE_BUDGET,
+                               contract.LATTICE_VISIT_BUDGET)
         for cells, samples in ((contract.CELL_BUDGET + 1, 0), (0, contract.SAMPLE_BUDGET + 1),
                                (-1, 0), (True, 0), (0, float("inf"))):
             with self.assertRaises(contract.ContractError):
                 contract.validate_work(cells, samples)
+        for visits in (contract.LATTICE_VISIT_BUDGET + 1, -1, True, float("inf")):
+            with self.assertRaises(contract.ContractError):
+                contract.validate_work(0, 0, visits)
 
     def test_identity_pins_and_mismatch(self):
         contract.validate(document(), expected_engine_revision="a" * 40, expected_inputs_sha256="b" * 64)
@@ -182,6 +187,19 @@ class ContractTests(unittest.TestCase):
         for name in ("/absolute", "../escape", "data/../escape", "C:/path", "data\\table.json"):
             with self.assertRaises(contract.ContractError):
                 contract.input_identity({"preset.json": b"{}", name: b"{}"})
+
+    def test_manifest_non_ascii_names_use_unescaped_utf8(self):
+        files = {"preset.json": b"{}", "data/common/pi\u00e8ce-\u96ea-\U0001f30d.json": b"[]"}
+        digest = hashlib.sha256(b"[]").hexdigest()
+        preset_digest = hashlib.sha256(b"{}").hexdigest()
+        expected_bytes = ('{"data/common/pi\u00e8ce-\u96ea-\U0001f30d.json":"' + digest +
+                          '","preset.json":"' + preset_digest + '"}').encode("utf-8")
+        self.assertEqual(contract.input_identity(files), hashlib.sha256(expected_bytes).hexdigest())
+        manifest = {name: hashlib.sha256(raw).hexdigest() for name, raw in files.items()}
+        self.assertEqual(contract.canonical(manifest), expected_bytes + b"\n")
+        escaped = json.dumps(manifest, sort_keys=True, separators=(",", ":"),
+                             ensure_ascii=True).encode("ascii")
+        self.assertNotEqual(contract.input_identity(files), hashlib.sha256(escaped).hexdigest())
 
     def test_distance_order_negative_coordinates_and_signed_ties(self):
         value = document()
@@ -350,6 +368,22 @@ class ContractTests(unittest.TestCase):
             self.assertEqual(usage.returncode, 2)
             self.assertEqual(usage.stdout, b"")
 
+    def test_stdout_write_failures_exit_one_for_schema_and_document(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "result.json"
+            original = contract.canonical(document())
+            path.write_bytes(original)
+            command = [sys.executable, "-I", "-B", str(HERE / "station_discovery_contract.py")]
+            for arguments in (["--schema"], ["--input", str(path)]):
+                # A read-only regular handle fails writes on Windows and POSIX,
+                # without pipe capacity, signals, or scheduling dependencies.
+                with path.open("rb") as output:
+                    result = subprocess.run(command + arguments, stdout=output,
+                                            stderr=subprocess.PIPE, check=False)
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertIn(b"station discovery refused:", result.stderr)
+                self.assertEqual(path.read_bytes(), original)
+
     def test_schema_subprocess_is_byte_identical(self):
         command = [sys.executable, "-I", "-B", str(HERE / "station_discovery_contract.py"), "--schema"]
         first = subprocess.run(command, capture_output=True, check=True)
@@ -391,6 +425,22 @@ class NativeSmoke(unittest.TestCase):
                        "--y-range-m", "0", "100", "--view-distance-m", "12", "--limit", "64"]
             baseline = subprocess.run(command, capture_output=True)
             self.assertEqual(baseline.returncode, 0, baseline.stderr)
+            # An invalid later field would throw inside the pool loader. The
+            # integer-domain error must win before that loader can read the box.
+            invalid = copy.deepcopy(valid_piece)
+            invalid["boxes"][0].update(min=[1e38, 0, 0], material="invalid")
+            piece.write_bytes(contract.canonical(invalid))
+            refusal = subprocess.run(command, capture_output=True)
+            self.assertEqual(refusal.returncode, 1, refusal.stderr)
+            self.assertEqual(refusal.stdout, b"")
+            self.assertIn(b"structure integer vector outside bounds", refusal.stderr)
+            piece.write_bytes(b'{"name":"fixture","name":"duplicate",'
+                              b'"boxes":[{"min":[1e38,0,0],"material":"invalid"}]}')
+            refusal = subprocess.run(command, capture_output=True)
+            self.assertEqual(refusal.returncode, 1, refusal.stderr)
+            self.assertEqual(refusal.stdout, b"")
+            self.assertIn(b"duplicate JSON field", refusal.stderr)
+            piece.write_bytes(contract.canonical(valid_piece))
             for key in ("spacing", "separation", "salt"):
                 for number in (1e38, 1.5, -1, 2 ** (32 if key == "salt" else 31)):
                     with self.subTest(key=key, number=number):
@@ -426,6 +476,21 @@ class NativeSmoke(unittest.TestCase):
                 refusal = subprocess.run(command, capture_output=True)
                 self.assertEqual(refusal.returncode, 1, refusal.stderr)
                 self.assertEqual(refusal.stdout, b"")
+
+            piece.write_bytes(contract.canonical(valid_piece))
+            placement.unlink()
+            alias = pool / "PLACEMENT.JSON"
+            alias.write_bytes(contract.canonical(dict(valid_placement, spacing=1e38,
+                                                      density="invalid")))
+            result = subprocess.run(command, capture_output=True)
+            if placement.exists():
+                # The loader consumes the fixed lowercase name on this filesystem.
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertEqual(result.stdout, b"")
+                self.assertIn(b"integer input outside bounds: spacing", result.stderr)
+            else:
+                # Uppercase extensions are outside the loader's piece catalogue.
+                self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_hydro_coordinate_and_parameter_refusals(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -474,19 +539,19 @@ class NativeSmoke(unittest.TestCase):
             data = root / "data"
             common = data / "common"
             common.mkdir(parents=True)
-            pool = common / "structures" / "fixture"
+            pool = common / "structures" / "pi\u00e8ces-\u96ea"
             pool.mkdir(parents=True)
-            table = common / "biomes.json"
+            table = common / "biomes-\u00e9.json"
             table.write_bytes(contract.canonical({"schema": "luminumbra.biome_table.v1",
                 "biomes": [{"id": 0, "name": "fixture", "surface": {
                     "top": "Grass", "filler": "Soil", "depth": "Stone", "underwater": "Sand"}}]}))
-            piece = pool / "piece.json"
+            piece = pool / "pi\u00e8ce-\U0001f30d.json"
             piece.write_bytes(contract.canonical({"name": "fixture", "boxes": [
                 {"min": [0, 0, 0], "size": [1, 1, 1], "material": 1}]}))
             placement = pool / "placement.json"
             placement.write_bytes(contract.canonical({"spacing": 64, "separation": 16, "density": 1}))
             fields = self.flat_preset()
-            fields["generation_params"]["biomes"] = {"table": "common/biomes.json"}
+            fields["generation_params"]["biomes"] = {"table": table.relative_to(data).as_posix()}
             fields["generation_params"]["features"]["structures_enabled"] = True
             preset = root / "flat.json"
             preset.write_bytes(contract.canonical(fields))
@@ -496,9 +561,9 @@ class NativeSmoke(unittest.TestCase):
 
             def expected():
                 return contract.input_identity({"preset.json": preset.read_bytes(),
-                    "data/common/biomes.json": table.read_bytes(),
-                    "data/common/structures/fixture/piece.json": piece.read_bytes(),
-                    "data/common/structures/fixture/placement.json": placement.read_bytes()})
+                    "data/" + table.relative_to(data).as_posix(): table.read_bytes(),
+                    "data/" + piece.relative_to(data).as_posix(): piece.read_bytes(),
+                    "data/" + placement.relative_to(data).as_posix(): placement.read_bytes()})
 
             first = subprocess.run(command, capture_output=True)
             self.assertEqual(first.returncode, 0, first.stderr)
@@ -520,6 +585,26 @@ class NativeSmoke(unittest.TestCase):
             clamped = subprocess.run(command, capture_output=True)
             self.assertEqual(clamped.returncode, 1)
             self.assertEqual(clamped.stdout, b"")
+
+    def test_stdout_failure_refuses_after_flushing(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            data = root / "data"
+            data.mkdir()
+            preset = root / "flat.json"
+            original = contract.canonical(self.flat_preset())
+            preset.write_bytes(original)
+            for kind in ("mouth", "horizon", "coverage"):
+                command = [self.cli, "--preset-json", str(preset), "--data-root", str(data),
+                           "--seed", "17", "--kind", kind, "--origin-mm", "0", "0",
+                           "--radius-m", "1", "--y-range-m", "0", "100",
+                           "--view-distance-m", "0", "--limit", "64"]
+                with preset.open("rb") as output:
+                    result = subprocess.run(command, stdout=output, stderr=subprocess.PIPE,
+                                            check=False)
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertIn(b"cannot write station discovery stdout", result.stderr)
+                self.assertEqual(preset.read_bytes(), original)
 
     def test_repeat_empty_disabled_world_and_refusals(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -598,7 +683,7 @@ class NativeSmoke(unittest.TestCase):
 
 def load_tests(loader, tests, pattern):
     # Generic unittest discovery remains stdlib-only. The ordinary CLI CTest
-    # entry supplies its built executable explicitly to run both native cases.
+    # entry supplies its built executable explicitly to run the native cases.
     return loader.loadTestsFromTestCase(ContractTests)
 
 
