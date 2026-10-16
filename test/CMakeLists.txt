@@ -211,6 +211,7 @@ add_executable(common_tests
     common/FarHorizon_test.cpp
     common/FarWantedSet_test.cpp
     common/FarAuthorityOverlay_test.cpp
+    common/FarEditedBake_test.cpp
     common/GameSessionHeadlessWorld_test.cpp
     common/SimBudgetTelemetry_test.cpp
     common/HeavyComparison_test.cpp
