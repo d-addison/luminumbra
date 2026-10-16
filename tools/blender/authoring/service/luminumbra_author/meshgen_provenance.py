@@ -15,6 +15,23 @@ from .meshgen_registry import validate_schema
 POLICY_FIELDS = frozenset(('shippable', 'origin', 'waived', 'licence_gate', 'license', 'eligibility', 'flags', 'token', 'weights'))
 
 
+def verified_policy_notes(policy, notes):
+    """Retain only policy-referenced bytes matching their committed identities."""
+    notes = notes or {}
+    require(isinstance(notes, dict), 'provenance.inconsistent', 'Malformed policy note evidence.')
+    records = [(r['note_id'], r['note_sha256']) for r in policy['attestations'].values() if r['value']]
+    records += [(r['counsel_note_id'], r['text_sha256']) for r in policy['counsel_notes']]
+    verified = {}
+    for identity, expected in records:
+        if identity not in notes: continue
+        data = notes[identity]
+        require(isinstance(data, bytes) and len(data) <= 1024**2 and digest(data) == expected,
+                'config.attestation_unverified', 'Policy note bytes differ from the committed hash.')
+        verified[identity] = data
+    require(notes.keys() == verified.keys(), 'provenance.inconsistent', 'Unregistered policy note evidence.')
+    return verified
+
+
 def validate_observations(value, effective):
     """Workers may supply observations only; policy-shaped fields fail at any depth."""
     inert_json(value, max_depth=effective['limits']['json_depth'], max_items=effective['limits']['collection_items'])
@@ -54,6 +71,7 @@ def build_evidence(*, request, resolved, card, result, image, raw_glb, artifact,
     validate_backend_params(params, card['params_schema'])
     # E4 deliberately preserves E3's disabled real-backend lane.
     require(backend['kind'] == 'mock', 'backend.unavailable', 'Real backend execution is disabled.')
+    notes = verified_policy_notes(effective['policy']['licence'], notes)
     licence = gate(card, effective['policy']['licence'], notes)
     require(licence['runnable'], 'licence.status_not_allowed', 'Parent licence admission failed.')
     validate_result(result)
@@ -128,6 +146,12 @@ def build_evidence(*, request, resolved, card, result, image, raw_glb, artifact,
         'inputs/result.json': canonical(result)+b'\n', 'inputs/backend.log': backend_log,
         'inputs/finish.log': observations.get('log', '').encode()}
     if effective['logging']['keep_prompts'] == 'text': members['inputs/prompt.txt'] = prompt.encode()
+    if notes:
+        # Lossless hex notes share the existing 1 MiB JSON member bound.
+        size = 3 + sum(len(canonical(k))+3+2*len(v) for k, v in notes.items()) + len(notes)-1
+        require(size <= 1024**2, 'candidate.limit', 'Retained policy notes exceed byte cap.')
+        members['inputs/licence_notes.json'] = canonical({k: v.hex() for k, v in notes.items()})+b'\n'
+    reject_secret(token, notes, *notes.values())
     reject_secret(token, request, provenance, observations, members, *members.values())
     return members
 

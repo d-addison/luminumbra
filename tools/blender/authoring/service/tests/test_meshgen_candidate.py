@@ -9,10 +9,13 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from meshgen_e4_fixture import members
+from meshgen_e4_fixture import arguments, members
 from luminumbra_author.contracts import Refusal, canonical, digest
 from luminumbra_author.meshgen_backend import bounded_json
 from luminumbra_author.meshgen_candidate import CandidateStore, read_member
+from luminumbra_author.meshgen_config import resolve
+from luminumbra_author.meshgen_provenance import build_evidence
+from test_meshgen_config import project_fixture
 from luminumbra_author import file_io
 
 
@@ -151,6 +154,121 @@ class CandidateStorage(unittest.TestCase):
         bad = dict(self.members); gate = bounded_json(bad['licence_gate.json']); gate['ack_ids'] = ['fabricated']
         bad['licence_gate.json'] = canonical(gate)+b'\n'
         self.refusal('provenance.inconsistent', lambda: self.store.publish(JOB, bad))
+
+    def test_configured_retention_caps_apply_to_import_and_attestation(self):
+        scandir = os.scandir
+        for cap, used_mib in ((64, 64), (8192, 4097)):
+            for operation in ('import', 'attestation'):
+                with self.subTest(cap=cap, operation=operation):
+                    store = CandidateStore(self.project, operation+str(cap))
+                    project = project_fixture(); project['budgets'] = {'target_height_m': 1}
+                    project['retention'] = {'max_total_mib': cap}
+                    args = arguments(); args['resolved'] = resolve(project, 'rock')
+                    receipt = store.publish(JOB, build_evidence(**args))
+                    candidate, area = store.paths(JOB)
+                    retained = store.root/'retained.bin'; retained.write_bytes(b'x')
+
+                    @contextmanager
+                    def retained_usage(directory):
+                        with scandir(directory) as entries:
+                            wrapped = []
+                            for entry in entries:
+                                if Path(entry.path) == retained:
+                                    info = entry.stat(follow_symlinks=False)
+                                    fields = {name: getattr(info, name) for name in dir(info) if name.startswith('st_')}
+                                    fields['st_size'] = used_mib*1024**2
+                                    entry = SimpleNamespace(name=entry.name, path=entry.path,
+                                        stat=lambda *, follow_symlinks=True, info=SimpleNamespace(**fields): info)
+                                wrapped.append(entry)
+                            yield wrapped
+
+                    destination = area/'import-private'/'snapshot.glb'
+                    def mutate():
+                        if operation == 'import':
+                            return store.stage_for_import(JOB, receipt['candidate']['sha256'],
+                                receipt['candidate']['provenance_sha256'], destination)
+                        return store.append_attestation(JOB, 'metrics', '20261013T123456000001Z', {'score': 1})
+
+                    head = store._head_path(JOB).read_bytes()
+                    # Account for large retained usage without allocating large files.
+                    with patch('luminumbra_author.meshgen_candidate.os.scandir', retained_usage):
+                        if cap == 64: self.refusal('candidate.limit', mutate)
+                        else: mutate()
+                    if cap == 64:
+                        self.assertEqual(store._head_path(JOB).read_bytes(), head)
+                        self.assertFalse(destination.exists())
+                        self.assertFalse((area/'attestations.json').exists())
+                        self.assertFalse((candidate/'attestations').exists())
+                    elif operation == 'import':
+                        self.assertEqual(destination.read_bytes(), self.members['candidate.glb'])
+                    else:
+                        self.assertEqual(store.attestations(JOB)[0]['observation'], {'score': 1})
+                    retained.unlink()
+
+    def test_attested_policy_publishes_retains_replay_notes_and_refuses_tampering(self):
+        note_bytes = b'Human reviewed revenue evidence.\n'
+        note = self.project/'authoring/meshgen/notes/revenue.md'
+        note.parent.mkdir(parents=True); note.write_bytes(note_bytes)
+        counsel_bytes = b'Archived counsel evidence.\r\n\xff'
+        counsel = note.with_name('counsel.md'); counsel.write_bytes(counsel_bytes)
+        project = project_fixture(); project['budgets'] = {'target_height_m': 1}
+        project['policy']['licence'] = {'attestations': {'revenue_under_cap': {
+            'value': True, 'attested_by': 'reviewer', 'attested_at': '2026-10-13',
+            'note_id': 'revenue', 'note_sha256': digest(note_bytes)}},
+            'counsel_notes': [{'counsel_note_id': 'counsel', 'covers_licence_ids': ['MIT'],
+                'text_sha256': digest(counsel_bytes), 'recorded_by': 'reviewer',
+                'recorded_at': '2026-10-13', 'outcome': 'cleared_internal'}]}
+        args = arguments(); args['resolved'] = resolve(project, 'rock', project_root=self.project)
+        args['notes'] = {'revenue': note_bytes, 'counsel': counsel_bytes}
+        evidence = build_evidence(**args)
+        self.refusal('config.attestation_unverified', lambda: build_evidence(
+            **{**args, 'notes': {'revenue': b'changed'}}))
+        receipt = self.store.publish(JOB, evidence)
+        note.unlink(); counsel.unlink()
+        fresh = CandidateStore(self.project)
+        self.assertEqual(fresh.read(JOB)['members'], evidence)
+        self.assertEqual(fresh.receipt(JOB), receipt)
+        self.assertEqual({k: bytes.fromhex(v) for k, v in bounded_json(evidence['inputs/licence_notes.json']).items()}, args['notes'])
+        bad = dict(evidence)
+        bad['inputs/licence_notes.json'] = canonical({'revenue': b'changed'.hex()})+b'\n'
+        self.refusal('config.attestation_unverified', lambda: self.store.publish(SECOND, bad))
+        self.assertFalse(self.store.paths(SECOND)[0].exists())
+        candidate, _ = self.store.paths(JOB)
+        (candidate/'inputs/licence_notes.json').write_bytes(bad['inputs/licence_notes.json'])
+        self.refusal('candidate.changed', lambda: fresh.read(JOB))
+
+    def test_oversize_attestation_anchor_refuses_without_durable_change(self):
+        self.store.publish(JOB, self.members)
+        payload = {'detail': 'x'*(600*1024)}
+        self.store.append_attestation(JOB, 'metrics', '20261013T123456000001Z', payload)
+        def snapshot():
+            return {p.relative_to(self.store.root): digest(p.read_bytes())
+                    for p in self.store.root.rglob('*') if p.is_file()}
+        before = snapshot()
+        self.refusal('candidate.limit', lambda: self.store.append_attestation(
+            JOB, 'metrics', '20261013T123456000002Z', payload))
+        self.assertEqual(snapshot(), before)
+        fresh = CandidateStore(self.project)
+        self.assertEqual(len(fresh.recover_attestation(JOB)), 1)
+        result = fresh.append_attestation(JOB, 'metrics', '20261013T123456000003Z', {'score': 1})
+        self.assertEqual(len(result), 2)
+        self.assertEqual(result[-1]['observation'], {'score': 1})
+
+    def test_attestation_record_nesting_refuses_before_pending_pointer(self):
+        self.store.publish(JOB, self.members)
+        payload = {}
+        for _ in range(30): payload = {'nested': payload}
+        self.assertEqual(bounded_json(canonical(payload)), payload)
+        head = self.store._head_path(JOB).read_bytes()
+        self.refusal('backend.limit', lambda: self.store.append_attestation(
+            JOB, 'metrics', '20261013T123456000001Z', payload))
+        candidate, area = self.store.paths(JOB)
+        self.assertEqual(self.store._head_path(JOB).read_bytes(), head)
+        self.assertFalse((area/'attestations.json').exists())
+        self.assertFalse((area/'attestation-history').exists())
+        self.assertFalse((candidate/'attestations').exists())
+        self.assertEqual(len(self.store.append_attestation(
+            JOB, 'metrics', '20261013T123456000002Z', {'score': 1})), 1)
 
     def test_append_only_attestations_preserve_original_seal_detect_rewrite_truncation(self):
         receipt = self.store.publish(JOB, self.members)

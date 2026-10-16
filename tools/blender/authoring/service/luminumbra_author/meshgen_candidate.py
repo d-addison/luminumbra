@@ -4,6 +4,7 @@ Mutation runs under a separate short storage guard, inside the MG2 owner's
 serialized commit callback. Read-only access never constructs BuildService.
 """
 from contextlib import contextmanager, ExitStack
+import json
 import os
 from pathlib import Path
 import re
@@ -20,7 +21,7 @@ from .meshgen_contracts import (STATE_ROOT, SEALED_REQUIRED, SEALED_OPTIONAL, CA
                                validate_manifest, validate_provenance, validate_receipt)
 from .meshgen_jobs import durable_replace_directory, reject_secret, configured_tokens
 from .meshgen_metrics import inspect_artifact
-from .meshgen_provenance import make_receipt
+from .meshgen_provenance import make_receipt, verified_policy_notes
 from .meshgen_scripts import (_posix_open, _windows_directory, _windows_path_api,
                              _windows_final_path, _windows_long_path)
 
@@ -74,6 +75,29 @@ def read_member(root, name, limit):
 def _json(data): return bounded_json(data, max_bytes=MAX_JSON)
 
 
+def _licence_notes(members, policy):
+    encoded = _json(members.get('inputs/licence_notes.json', b'{}'))
+    require(isinstance(encoded, dict) and all(isinstance(value, str) and len(value) % 2 == 0
+            and re.fullmatch(r'[0-9a-f]*', value) for value in encoded.values()),
+            'provenance.inconsistent', 'Malformed retained policy note bytes.')
+    # Decoded notes are bounded by the 1 MiB encoded JSON member.
+    return verified_policy_notes(policy, {key: bytes.fromhex(value) for key, value in encoded.items()})
+
+
+def _record_bytes(value):
+    # Keep the assembled record, including its newline, within the 1 MiB cap.
+    buffer = bytearray()
+    encoder = json.JSONEncoder(sort_keys=True, separators=(',', ':'), ensure_ascii=False, allow_nan=False)
+    for piece in encoder.iterencode(value):
+        chunk = piece.encode('utf-8')
+        require(len(chunk) <= MAX_JSON-1-len(buffer), 'candidate.limit', 'Attestation record exceeds byte cap.')
+        buffer.extend(chunk)
+    buffer.append(10)
+    data = bytes(buffer)
+    _json(data)
+    return data
+
+
 def validate_evidence(members):
     """Cross-bind every identity/policy field; never infer permission from a boolean."""
     require(SEALED_REQUIRED <= members.keys() and members.keys() <= SEALED_REQUIRED | SEALED_OPTIONAL,
@@ -92,7 +116,7 @@ def validate_evidence(members):
     from .meshgen_licence import gate
     require(p['backend']['id'] == 'mock', 'backend.unavailable', 'Real backend candidates are unavailable.')
     licence = _json(members['licence_gate.json'])
-    require(gate(card, effective['policy']['licence']) == licence and licence['runnable'],
+    require(gate(card, effective['policy']['licence'], _licence_notes(members, effective['policy']['licence'])) == licence and licence['runnable'],
             'provenance.inconsistent', 'Licence record differs from trusted parent policy.')
     require({k: licence[k] for k in ('status', 'shippable', 'components', 'dataset_chain_audited', 'ack_ids')}
             == {k: p['licence_gate'][k] for k in ('status', 'shippable', 'components', 'dataset_chain_audited', 'ack_ids')},
@@ -338,7 +362,7 @@ class CandidateStore:
         else:
             with self._publication() as directories: directories.write(path, data)
 
-    def _quota(self, incoming, byte_limit=4*1024**3):
+    def _quota(self, incoming, byte_limit):
         state = self.project/STATE_ROOT
         used, count, pending = 0, 0, [state]
         while pending:
@@ -368,6 +392,7 @@ class CandidateStore:
                 self._reject(name, data, _json(data) if name.endswith('.json') else None)
             provenance, stats = validate_evidence(members)
             effective = _json(members['effective_config.json'])
+            self._reject(*_licence_notes(members, effective['policy']['licence']).values())
             self._quota(sum(len(v) for v in members.values())+16384, effective['retention']['max_total_mib']*1024**2)
             if (area/'running.json').exists():
                 owner = _json(read_member(area, 'running.json', MAX_JSON))
@@ -463,7 +488,10 @@ class CandidateStore:
             require(digest(bundle['members']['provenance.json']) == provenance_sha256,
                     'candidate.changed', 'Import provenance differs from review.')
             data = bundle['members']['candidate.glb']
-            self._quota(len(data)+1024)
+            config = bundle['provenance']['config']
+            effective = verify_effective_config(bundle['members']['effective_config.json'],
+                config['effective_config_sha256'], config['config_digest'])
+            self._quota(len(data)+1024, effective['retention']['max_total_mib']*1024**2)
             self._write(destination, data)
             require(digest(read_member(area, destination.relative_to(area).as_posix(), 256*1024**2)) == digest(data),
                     'candidate.changed', 'Import snapshot changed during publication.')
@@ -643,11 +671,22 @@ class CandidateStore:
             data = canonical(payload)+b'\n'
             entry = {'name': name, 'sha256': digest(data), 'previous': state['entries'][-1]['sha256'] if state['entries'] else '0'*64, 'payload': payload}
             state['pending'] = entry
-            self._quota(len(canonical(state))+2*len(data)+1024)
             _, area = self.paths(job)
             head = self._head(job, bundle['sha256']); head['pending'] = entry
+            committed = {'schema': state['schema'], 'entries': state['entries']+[entry], 'pending': None}
+            advanced_head = {**head, 'count': len(committed['entries']), 'head': entry['sha256']}
+            # Each prospective record combines at most the bounded anchor and
+            # one bounded payload. Check every reader's byte/depth/item caps
+            # before the first durable transaction pointer is installed.
+            prepared_bytes = _record_bytes(state)
+            for record in (payload, entry, committed, head, advanced_head, {**advanced_head, 'pending': None}):
+                _record_bytes(record)
+            config = bundle['provenance']['config']
+            effective = verify_effective_config(bundle['members']['effective_config.json'],
+                config['effective_config_sha256'], config['config_digest'])
+            self._quota(len(prepared_bytes)+2*len(data)+1024, effective['retention']['max_total_mib']*1024**2)
             self._write_head(job, head)
-            self._write(area/'attestations.json', canonical(state)+b'\n', state)
+            self._write(area/'attestations.json', prepared_bytes, state)
             return self._recover_attestation(job)
 
     def _recover_attestation(self, job):

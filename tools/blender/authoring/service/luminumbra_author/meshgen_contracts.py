@@ -38,7 +38,7 @@ PREPARED_RECEIPT_FILE = "receipt.prepared.json"
 SEALED_REQUIRED = frozenset(("candidate.glb", "preview.png", "provenance.json", "stats.json",
     "effective_config.json", "licence_gate.json", "inputs/reference_image", "inputs/raw_backend.glb",
     "inputs/capabilities.json", "inputs/result.json", "inputs/backend.log"))
-SEALED_OPTIONAL = frozenset(("inputs/prompt.txt", "inputs/finish.log"))
+SEALED_OPTIONAL = frozenset(("inputs/prompt.txt", "inputs/finish.log", "inputs/licence_notes.json"))
 
 TEXT = string(maximum=4096)
 UINT = number(0, 2**32-1, True)
