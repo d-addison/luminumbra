@@ -56,6 +56,9 @@ protected:
     void Configure(GameSession& session) {
         session.SetRootPath(root.string() + static_cast<char>(fs::path::preferred_separator));
         session.SetJobSystem(&jobs);
+        ASSERT_TRUE(options.systems_config_override.has_value());
+        if (!options.systems_config_override.has_value())
+            return;
         session.ApplySystemConfig(*options.systems_config_override);
         session.SetFiniteHydrologyEnabled(RunnerConfigFrom(options).finite_hydrology);
     }
