@@ -1,5 +1,7 @@
 #pragma once
 
+#include "BackdropBlurQuality.h"
+
 #include "Rml_Interfaces.h"         // The one true source for interface definitions
 #include "gl3/RmlUi_Renderer_GL3.h" // RmlUi 6.1 reference backend: real blur/box-shadow/layers
 #include "persistence/AsyncSavedWorldCatalog.h"
@@ -91,6 +93,12 @@ struct SettingsBridge {
 
 class Rml_UIManager {
 public:
+    void SetBackdropBlurQuality(luminumbra::core::UiBlurQuality quality) {
+        m_backdropBlur.set(quality);
+    }
+    const BackdropBlurQuality& GetBackdropBlurQuality() const {
+        return m_backdropBlur;
+    }
     Rml_UIManager(const std::string& asset_root_path);
     ~Rml_UIManager();
 
@@ -246,6 +254,7 @@ private:
     // must already be initialised when the manager is constructed (main_client: glad at the
     // GLFW context, manager constructed right after).
     RenderInterface_GL3 m_renderInterface;
+    BackdropBlurQuality m_backdropBlur;
 
     Rml::Context* m_context = nullptr;
     GLFWwindow* m_window = nullptr;

@@ -20,6 +20,7 @@ __declspec(dllexport) extern const int AmdPowerXpressRequestHighPerformance = 1;
 #include "app/DebugOverlays.h"
 #include "app/FrameAudio.h"
 #include "app/GameAssets.h"
+#include "app/GraphicsSessionOverrides.h"
 #include "app/HangWatchdog.h"
 #include "app/InputCallbacks.h"
 #include "app/MenuScreens.h"
@@ -65,6 +66,7 @@ __declspec(dllexport) extern const int AmdPowerXpressRequestHighPerformance = 1;
 #include "luminumbra_common/components/TerritoryComponents.h" // home-range homing
 #include "luminumbra_common/components/ThirstComponents.h" // ambient-wildlife thirst + water holes
 #include "luminumbra_common/core/Environment.h"
+#include "luminumbra_common/core/GraphicsPresets.h"
 #include "luminumbra_common/core/JobSystem.h"
 #include "luminumbra_common/core/SystemConfig.h" // user.* video/audio/controls settings
 #include "luminumbra_common/game/CodexView.h" // pure presentation model for the codex browse screen
@@ -133,6 +135,7 @@ __declspec(dllexport) extern const int AmdPowerXpressRequestHighPerformance = 1;
 #include <iomanip>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <system_error>
@@ -1008,15 +1011,9 @@ static void UpdateFoliageScatter(ClientAppContext& g_app,
         auto* fol_ws = gameSession->GetWorldSystem();
         if (fol_ws != nullptr && g_camera) {
             if (!g_app.foliage.loaded) {
+                const bool grass_enabled = foliage->enabled();
                 foliage->load_scatter_set(root_dir / "data/common/foliage/scatter_set.json");
-                // Grass overhaul: concentrate the instance budget into a DENSE NEAR
-                // carpet (detail-near, texture-far — the AAA approach) instead of a
-                // thin scatter spread to 210 m. The global instance cap
-                // redistributes nearest-first, so a tighter fade makes the near
-                // field a believable carpet instead of sparse lit slivers over bare
-                // ground..
-                foliage->set_fade_distances(48.0f, 92.0f);
-                foliage->set_density_scale(1.6f);
+                foliage->set_enabled(grass_enabled);
                 g_app.foliage.loaded = true;
             }
             // skip the foliage CPU readback (a ~5 ms sync
@@ -1555,11 +1552,9 @@ int main(int argc, char* argv[]) {
     // exposure curve remains the shipped gameplay default.
     g_app.overlay.auto_exposure_metered = HasCommandLineFlag(argc, argv, "--auto-exposure-metered");
     //  rendering (,  ): opt-in froxel volumetrics tier.
-    g_app.overlay.volumetric_quality = std::stoi(
-        GetCommandLineOption(argc,
-                             argv,
-                             "--volumetric-quality",
-                             std::to_string(Luminumbra::Rendering::kDefaultVolumetricQuality)));
+    const auto volumetric_option = GetCommandLineOption(argc, argv, "--volumetric-quality", "");
+    const std::optional<int> volumetric_override =
+        volumetric_option.empty() ? std::nullopt : std::optional(std::stoi(volumetric_option));
     g_app.capture.profile_fly_seconds = static_cast<double>(GetCommandLineIntOption(
         argc, argv, "--profile-fly", 0)); // runtime telemetry: constant-speed eye-level moving
                                           // profiler (normal-play, self-exits)
@@ -2158,13 +2153,24 @@ int main(int argc, char* argv[]) {
     // (init_sky_lut, inside startup) takes the GPU compute path. render.sky_lut_gpu, default OFF.
     renderPipeline.set_sky_lut_gpu_enabled(
         g_systemConfig.enabled(luminumbra::core::SysKey::RenderSkyLutGpu));
-    // seed the internal render scale from the persisted user setting BEFORE
-    // startup so the scaled G-buffer/lighting/SSAO intermediates are sized on the first frame.
-    // The LUMIN_RENDER_SCALE env knob still WINS (startup applies it after this), preserving
-    // the A/B capture path. Default 1.0 = byte-identical (internal==output).
-    renderPipeline.set_render_scale(perf_profile.empty()        ? g_systemConfig.user().render_scale
-                                    : perf_profile == "quality" ? 1.0f
-                                                                : 0.67f);
+    std::optional<float> environment_render_scale;
+    if (const auto value = Luminumbra::Core::ReadEnvironment("LUMIN_RENDER_SCALE"))
+        environment_render_scale = std::strtof(value->c_str(), nullptr);
+    const auto graphics_session_overrides = Luminumbra::Client::GraphicsSessionOverrides(
+        perf_profile, environment_render_scale, volumetric_override);
+    auto graphics_settings_snapshot = g_systemConfig.user().graphics;
+    luminumbra::core::ResolvedGraphics resolved_graphics;
+    std::string graphics_error;
+    bool graphics_ready = luminumbra::core::ResolveGraphics(
+        graphics_settings_snapshot, graphics_session_overrides, resolved_graphics, graphics_error);
+    if (graphics_ready) {
+        graphics_ready = renderPipeline.apply_graphics(resolved_graphics);
+        g_app.overlay.volumetric_quality = resolved_graphics.values.volumetric_quality;
+        if (g_uiManager)
+            g_uiManager->SetBackdropBlurQuality(resolved_graphics.values.ui_blur);
+    } else {
+        LUMINUMBRA_CORE_ERROR("Invalid graphics configuration: {}", graphics_error);
+    }
     // Render-only sky-dome quality: unset -> 2 (quarter per axis), 1 = half,
     // 0 = full. LUMIN_CLOUD_QUALITY overrides the client default.
     // Applied after startup below once the GL targets exist. Render-only.
@@ -2174,11 +2180,11 @@ int main(int argc, char* argv[]) {
     // the unchanged 0.05 ceiling while restoring release RenderBudget margin.
     // GTAO remains the ground-truth AO. Set LUMIN_CLOUD_QUALITY=0 /
     // LUMIN_SSAO_QUALITY=0 to fall back to the legacy full-res paths for A/B.
-    int cloud_quality = 2; // 0 full, 1 half, 2 quarter (shipped default)
+    int cloud_quality = resolved_graphics.values.cloud_quality;
     if (const auto cq = Luminumbra::Core::ReadEnvironment("LUMIN_CLOUD_QUALITY")) {
         cloud_quality = std::atoi(cq->c_str());
     }
-    int ssao_quality = 3; // 0 legacy, 1 GTAO Low, 2 GTAO High, 3 GTAO half-res (default)
+    int ssao_quality = resolved_graphics.values.ao_quality;
     if (const auto sq = Luminumbra::Core::ReadEnvironment("LUMIN_SSAO_QUALITY")) {
         ssao_quality = std::atoi(sq->c_str());
     }
@@ -2186,7 +2192,7 @@ int main(int argc, char* argv[]) {
     if (!game_asset_startup_error.empty())
         LUMINUMBRA_CORE_WARN("{}", game_asset_startup_error);
     renderPipeline.enable_static_model_content(game_asset_startup_error.empty());
-    if (!renderPipeline.startup(framebufferWidth, framebufferHeight, root_dir)) {
+    if (!graphics_ready || !renderPipeline.startup(framebufferWidth, framebufferHeight, root_dir)) {
         LUMINUMBRA_CORE_ERROR("FATAL: Render pipeline startup failed.");
         runtime_state_recorder.capture("render_pipeline_startup_failed",
                                        &jobSystem,
@@ -3141,6 +3147,28 @@ int main(int argc, char* argv[]) {
     Luminumbra::Client::SteadyFrameTiming frame_timing;
     while (!glfwWindowShouldClose(window)) {
         MainLoopHeartbeat().fetch_add(1, std::memory_order_relaxed);
+        const auto& graphics_settings = g_systemConfig.user().graphics;
+        // Compare only rendering inputs (at most nine scalar overrides), with
+        // no copying, resolving, environment reads or allocation on unchanged frames.
+        if (graphics_settings.base_preset != graphics_settings_snapshot.base_preset ||
+            graphics_settings.preset_revision != graphics_settings_snapshot.preset_revision ||
+            graphics_settings.overrides != graphics_settings_snapshot.overrides) {
+            graphics_settings_snapshot = graphics_settings;
+            if (luminumbra::core::ResolveGraphics(graphics_settings,
+                                                  graphics_session_overrides,
+                                                  resolved_graphics,
+                                                  graphics_error) &&
+                renderPipeline.apply_graphics(resolved_graphics)) {
+                g_app.overlay.volumetric_quality = resolved_graphics.values.volumetric_quality;
+                if (g_uiManager)
+                    g_uiManager->SetBackdropBlurQuality(resolved_graphics.values.ui_blur);
+            } else {
+                LUMINUMBRA_CORE_ERROR("Graphics change could not be applied: {}",
+                                      graphics_error.empty()
+                                          ? "target replacement failed; previous graphics retained"
+                                          : graphics_error);
+            }
+        }
         const auto pacing = luminumbra::core::ResolveFramePacing(
             g_systemConfig.user().vsync, g_systemConfig.user().frame_cap, pacing_overrides);
         // Excluded from work buckets: wait before all frame/CPU/telemetry timers.
@@ -3323,6 +3351,17 @@ int main(int argc, char* argv[]) {
         uiHotReload.Update(); // No-op unless --ui-hot-reload enabled it; throttled to 1 second.
 
         GameState currentState = gameStateManager.GetCurrentState();
+
+        // The create-world view shares the foliage pass. Restore the resolved
+        // gameplay configuration on every exit, including cancellation to the
+        // menu, even when the saved settings have not changed.
+        if (worldgenPreview->active() && (currentState != GameState::MAIN_MENU || !g_uiManager ||
+                                          !g_uiManager->GetWorldCreationPreviewState().active)) {
+            if (renderPipeline.apply_graphics(resolved_graphics))
+                worldgenPreview->set_active(false);
+            else
+                LUMINUMBRA_CORE_ERROR("Could not restore graphics after world preview");
+        }
 
         // Frame audio — 3D listener, player footsteps, and the living-world
         // rain/creature-call region (app/FrameAudio.cpp).

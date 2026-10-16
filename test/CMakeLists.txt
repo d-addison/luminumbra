@@ -942,6 +942,7 @@ add_executable(far_lod_worker_test
     rendering/loading_overlay_test.cpp
     rendering/texture_file_test.cpp
     rendering/render_clock_test.cpp
+    rendering/graphics_runtime_test.cpp
 )
 
 target_include_directories(far_lod_worker_test PRIVATE

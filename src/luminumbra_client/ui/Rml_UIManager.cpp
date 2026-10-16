@@ -1023,13 +1023,13 @@ void Rml_UIManager::PopulateUserPresets(Rml::ElementDocument* document) {
         chip->SetInnerRML(name);
         // A small delete affordance per user chip (curated chips have none). The id encodes
         // the preset type so the e2e can target a specific chip's delete control.
-        Rml::ElementPtr del = document->CreateElement("span");
-        if (del) {
-            del->SetClassNames("preset-delete");
-            del->SetId("del_" + type);
-            del->SetAttribute("data-delete", type);
-            del->SetInnerRML("&#10005;"); // ✕
-            chip->AppendChild(std::move(del));
+        Rml::ElementPtr delete_control = document->CreateElement("span");
+        if (delete_control) {
+            delete_control->SetClassNames("preset-delete");
+            delete_control->SetId("del_" + type);
+            delete_control->SetAttribute("data-delete", type);
+            delete_control->SetInnerRML("&#10005;"); // ✕
+            chip->AppendChild(std::move(delete_control));
         }
         Rml::Element* added = row->AppendChild(std::move(chip));
         // Same behaviour as the curated chips: select + drive #world_type + re-seed the form.
@@ -1522,7 +1522,7 @@ void Rml_UIManager::BindSettingsListeners(Rml::ElementDocument* document) {
 }
 
 // --- Static GLFW Callbacks ---
-void Rml_UIManager::KeyCallback(GLFWwindow* window, int key, int scancode, int action, int mods) {
+void Rml_UIManager::KeyCallback(GLFWwindow*, int key, int, int action, int mods) {
     if (!s_active_manager || !s_active_manager->m_context)
         return;
 
@@ -1561,7 +1561,7 @@ void Rml_UIManager::CursorPosCallback(GLFWwindow*, double xpos, double ypos) {
         s_active_manager->m_context->ProcessMouseMove((int)xpos, (int)ypos, GlfwToRmlMods(0));
     }
 }
-void Rml_UIManager::ScrollCallback(GLFWwindow*, double xoffset, double yoffset) {
+void Rml_UIManager::ScrollCallback(GLFWwindow*, double, double yoffset) {
     if (s_active_manager && s_active_manager->m_context) {
         s_active_manager->m_context->ProcessMouseWheel((float)-yoffset, GlfwToRmlMods(0));
     }
