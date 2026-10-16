@@ -16,6 +16,7 @@
 #include <cstdlib> // std::llabs (hydro cache eviction distance)
 #include <cstring> // std::memcpy for the deterministic water-state hash
 #include <filesystem>
+#include <glm/common.hpp>
 #include <limits>
 #include <optional>
 #include <shared_mutex>
@@ -23,6 +24,7 @@
 #include <thread> // opt-in job-wedge watchdog monitor thread
 #include <unordered_map>
 #include <unordered_set>
+#include <vector>
 
 constexpr int BASE_WORK_BUDGET_EQUIVALENT = 320;
 const int MAX_CHUNKS_TO_PROCESS_PER_FRAME =
@@ -86,7 +88,12 @@ constexpr std::size_t kMaxMeshingBatchesInFlight =
 // back into results, so heights/materials for indices [0,count) are byte-
 // identical and the world_hash is unchanged.
 constexpr std::size_t kNoiseSimdWidth = 16;
-constexpr std::size_t PadToNoiseSimd(std::size_t count) {
+std::size_t PadToNoiseSimd(std::size_t count) {
+    // FastNoise narrows to int; every allocation leaves at most 15 tail lanes.
+    if (count > static_cast<std::size_t>(std::numeric_limits<int>::max()) ||
+        count > std::vector<float>().max_size() - (kNoiseSimdWidth - 1)) {
+        throw std::length_error("Noise position array is too large");
+    }
     return count + (kNoiseSimdWidth - 1);
 }
 
@@ -1098,8 +1105,6 @@ SHIELD_WorldSystem::ComputeShapedHeightSample(float world_x, float world_z) cons
 
 SHIELD_WorldSystem::ShapedHeightSample SHIELD_WorldSystem::ComputeShapedHeightSampleImpl(
     float world_x, float world_z, bool apply_hydro) const {
-    ShapedHeightSample sample;
-
     // Sampling scopes hold the shared epoch while reinitialization takes the
     // exclusive epoch. Shaping nodes are always built; local references pin
     // their lifetimes throughout this sample without an algorithm fallback.
@@ -1131,20 +1136,46 @@ SHIELD_WorldSystem::ShapedHeightSample SHIELD_WorldSystem::ComputeShapedHeightSa
     const float peaks_valleys = peaks_gen->GenSingle2D(
         sample_x * m_params.peaks_frequency, sample_z * m_params.peaks_frequency, m_seed + 5);
 
+    const float base_noise = m_terrain_generator->GenSingle2D(
+        sample_x * m_params.base_frequency, sample_z * m_params.base_frequency, m_seed);
+    const float island_noise =
+        m_params.island_mask_enabled
+            ? m_island_mask_generator->GenSingle2D(world_x * m_params.island_mask_frequency,
+                                                   world_z * m_params.island_mask_frequency,
+                                                   m_seed + 2)
+            : 0.0f;
+    auto sample = CombineShapedHeightSample(world_x,
+                                            world_z,
+                                            {.continentalness = continentalness,
+                                             .erosion = erosion,
+                                             .peaks_valleys = peaks_valleys,
+                                             .base_noise = base_noise,
+                                             .island_noise = island_noise},
+                                            /*complete_shaping=*/true);
+    if (apply_hydro && m_params.hydro_enabled) {
+        sample.final_height += SampleHydroOffsetMeters(world_x, world_z);
+    }
+    return sample;
+}
+
+SHIELD_WorldSystem::ShapedHeightSample SHIELD_WorldSystem::CombineShapedHeightSample(
+    float world_x, float world_z, const ShapingNoiseSample& noise, bool complete_shaping) const {
+    ShapedHeightSample sample;
+
     const float base_level =
-        EvaluateShapingSpline(m_params.continental_spline, continentalness, 0.0f);
+        EvaluateShapingSpline(m_params.continental_spline, noise.continentalness, 0.0f);
     const float amplitude_multiplier =
-        EvaluateShapingSpline(m_params.erosion_spline, erosion, 1.0f);
+        EvaluateShapingSpline(m_params.erosion_spline, noise.erosion, 1.0f);
     // Ridge term: peaks only where erosion is low (eroded land is flat).
-    const float erosion_01 = std::clamp((erosion + 1.0f) * 0.5f, 0.0f, 1.0f);
-    float ridge = EvaluateShapingSpline(m_params.peaks_spline, peaks_valleys, 0.0f) *
+    const float erosion_01 = std::clamp((noise.erosion + 1.0f) * 0.5f, 0.0f, 1.0f);
+    float ridge = EvaluateShapingSpline(m_params.peaks_spline, noise.peaks_valleys, 0.0f) *
                   m_params.peaks_amplitude * std::max(0.0f, 1.0f - erosion_01);
 
     //  per-biome morphology: scale the ridge by the (continuous)
     // temperature field — cold ground (alpine) gets taller/rugged peaks, warm
     // lowlands gentler. Only the ridge term; smooth so no seams. Byte-identical
     // to the batched path in ComputeShapedHeightGrid.
-    if (m_params.biome_relief_enabled && m_temperature_generator) {
+    if (complete_shaping && m_params.biome_relief_enabled && m_temperature_generator) {
         const float temp =
             m_temperature_generator->GenSingle2D(world_x * m_params.temperature_frequency,
                                                  world_z * m_params.temperature_frequency,
@@ -1153,23 +1184,21 @@ SHIELD_WorldSystem::ShapedHeightSample SHIELD_WorldSystem::ComputeShapedHeightSa
         ridge *= 1.0f + m_params.biome_relief_strength * (2.0f * cold01 - 1.0f);
     }
 
-    sample.base_noise = m_terrain_generator->GenSingle2D(
-        sample_x * m_params.base_frequency, sample_z * m_params.base_frequency, m_seed);
+    sample.base_noise = noise.base_noise;
     float terrain_height = m_params.height_offset + base_level +
                            amplitude_multiplier * (sample.base_noise * m_params.base_amplitude) +
                            ridge;
     //  cliffs: terrace the shaped height inside cliff zones (byte-identical
     // to ComputeShapedHeightGrid). No-op when cliffs disabled / outside a zone.
-    terrain_height = CliffTerracedHeight(world_x, world_z, terrain_height);
+    if (complete_shaping) {
+        terrain_height = CliffTerracedHeight(world_x, world_z, terrain_height);
+    }
     sample.pre_island_height = terrain_height;
     sample.final_height = terrain_height;
 
     if (m_params.island_mask_enabled) {
         sample.island_applied = true;
-        sample.island_noise =
-            m_island_mask_generator->GenSingle2D(world_x * m_params.island_mask_frequency,
-                                                 world_z * m_params.island_mask_frequency,
-                                                 m_seed + 2);
+        sample.island_noise = noise.island_noise;
         sample.island_mask = glm::smoothstep(0.1f, 0.25f, sample.island_noise);
         sample.final_height = glm::mix(m_params.height_offset, terrain_height, sample.island_mask);
     }
@@ -1193,7 +1222,7 @@ SHIELD_WorldSystem::ShapedHeightSample SHIELD_WorldSystem::ComputeShapedHeightSa
     // floor below SEA_LEVEL so the global water plane fills it (mirrors the river
     // carve; lake_max_carve gates it to low terrain only). Skipped (byte-zero) when
     // lakes are disabled. Kept byte-identical to ComputeShapedHeightGrid.
-    if (m_params.lakes_enabled) {
+    if (complete_shaping && m_params.lakes_enabled) {
         const float lake_influence = LakeInfluenceFromNoise(world_x, world_z);
         const float lake_surface = LakeSurfaceLevel(world_x, world_z);
         sample.final_height -= LakeCarveAmount(sample.final_height, lake_influence, lake_surface);
@@ -1203,17 +1232,12 @@ SHIELD_WorldSystem::ShapedHeightSample SHIELD_WorldSystem::ComputeShapedHeightSa
     // doline footprint so the feature reads at distance/coarse-LOD (the SDF carve
     // alone is invisible on the SDF-ignoring far path). Folded into ALL THREE
     // height paths byte-identically. No-op (0) when surface_breaks disabled.
-    sample.final_height -= SurfaceBreakRimDepression(world_x, world_z);
-
-    // hydraulic/thermal relief (decision a). Added LAST so the baked
-    // drainage/talus sits in the final surface EVERY height consumer reads
-    // (collision/spawn/water/far-LOD/mesh). The per-region bake samples the
-    // NO-hydro height (apply_hydro=false) so this never recurses. Skipped (byte-
-    // identical legacy path) when hydro is disabled -> world_hash unchanged.
-    if (apply_hydro && m_params.hydro_enabled) {
-        sample.final_height += SampleHydroOffsetMeters(world_x, world_z);
+    if (complete_shaping) {
+        sample.final_height -= SurfaceBreakRimDepression(world_x, world_z);
     }
 
+    // Callers add hydraulic relief LAST. The bake uses the frozen historical
+    // substrate without hydro, preserving the terrain in existing saved worlds.
     return sample;
 }
 
@@ -1262,10 +1286,11 @@ float SHIELD_WorldSystem::SampleHydroOffsetMeters(float world_x, float world_z) 
         const int m = kHydroRegionCells + 2 * halo;
         const std::size_t cells = static_cast<std::size_t>(m) * static_cast<std::size_t>(m);
         // Build the padded grid's world coords, then sample the NO-hydro base
-        // heights in ONE SIMD batch (apply_hydro=false: no recursion, and the
+        // heights in ONE SIMD batch (ApplyHydro=false: no recursion, and the
         // GenPositionArray2D path is ~10x faster than per-cell GenSingle2D --
-        // keeps the bake off the far-LOD settle critical path). Byte-identical to
-        // the scalar path (position-array parity gate), so the offset is unchanged.
+        // keeps the bake off the far-LOD settle critical path). Freeze the
+        // historical substrate: adding the four missing shaping stages here
+        // would change generated terrain in existing worlds (issue #453).
         std::vector<float> xs(cells, 0.0f);
         std::vector<float> zs(cells, 0.0f);
         for (int pz = 0; pz < m; ++pz) {
@@ -1277,11 +1302,11 @@ float SHIELD_WorldSystem::SampleHydroOffsetMeters(float world_x, float world_z) 
             }
         }
         std::vector<float> heights(cells, 0.0f);
-        ComputeShapedHeightsAtPositions(xs.data(),
-                                        zs.data(),
-                                        cells,
-                                        heights.data(),
-                                        /*apply_hydro=*/false);
+        ComputeShapedHeightsAtPositionsImpl<false>(xs.data(),
+                                                   zs.data(),
+                                                   cells,
+                                                   heights.data(),
+                                                   /*complete_shaping=*/false);
         World::HydroErosionParams p;
         p.iterations = m_params.hydro_iterations;
         p.talus_height = m_params.hydro_talus_height;
@@ -1940,10 +1965,15 @@ void SHIELD_WorldSystem::ComputeShapedHeightGrid(
     // math below mirrors ComputeShapedHeightSample EXACTLY; only the noise reads
     // move from per-point GenSingle2D to the SIMD batch entry points (which
     // produce identical float bits on this build, proven by the parity gate).
-    const std::size_t count = static_cast<std::size_t>(size_x) * static_cast<std::size_t>(size_z);
-    if (count == 0) {
+    if (size_x <= 0 || size_z <= 0) {
         return;
     }
+    // GenUniformGrid2D multiplies its signed dimensions internally.
+    if (size_x > std::numeric_limits<int>::max() / size_z) {
+        throw std::length_error("Height grid is too large");
+    }
+    const std::size_t count = static_cast<std::size_t>(size_x) * static_cast<std::size_t>(size_z);
+    const std::size_t noise_pad = PadToNoiseSimd(count);
 
     // --- 1. Unwarped control + warp channels on the integer lattice (SIMD). ---
     std::vector<float> warp_x_grid(count);
@@ -1989,7 +2019,6 @@ void SHIELD_WorldSystem::ComputeShapedHeightGrid(
     // is not a multiple of the SIMD width -- count = size_x*size_z is rarely a
     // multiple of 16) cannot over-read/over-write past the count-sized vectors.
     // Padding is never consumed (only [0,count) is read back) -> hash-neutral.
-    const std::size_t noise_pad = PadToNoiseSimd(count);
     std::vector<float> base_px(noise_pad);
     std::vector<float> base_py(noise_pad);
     std::vector<float> peaks_px(noise_pad);
@@ -2046,64 +2075,16 @@ void SHIELD_WorldSystem::ComputeShapedHeightGrid(
         for (int x = 0; x < size_x; ++x) {
             const std::size_t i = static_cast<std::size_t>(x) +
                                   static_cast<std::size_t>(z) * static_cast<std::size_t>(size_x);
-            const float continentalness = continentalness_grid[i];
-            const float erosion = erosion_grid[i];
-            const float peaks_valleys = peaks_noise[i];
-
-            const float base_level =
-                EvaluateShapingSpline(m_params.continental_spline, continentalness, 0.0f);
-            const float amplitude_multiplier =
-                EvaluateShapingSpline(m_params.erosion_spline, erosion, 1.0f);
-            const float erosion_01 = std::clamp((erosion + 1.0f) * 0.5f, 0.0f, 1.0f);
-            float ridge = EvaluateShapingSpline(m_params.peaks_spline, peaks_valleys, 0.0f) *
-                          m_params.peaks_amplitude * std::max(0.0f, 1.0f - erosion_01);
-
-            //  per-biome morphology — byte-identical to ComputeShapedHeightSampleImpl.
-            if (m_params.biome_relief_enabled && m_temperature_generator) {
-                const float world_x = static_cast<float>(base_x + x);
-                const float world_z = static_cast<float>(base_z + z);
-                const float temp =
-                    m_temperature_generator->GenSingle2D(world_x * m_params.temperature_frequency,
-                                                         world_z * m_params.temperature_frequency,
-                                                         m_seed + 8);
-                const float cold01 = std::clamp(0.5f - 0.5f * temp, 0.0f, 1.0f);
-                ridge *= 1.0f + m_params.biome_relief_strength * (2.0f * cold01 - 1.0f);
-            }
-
-            float terrain_height =
-                m_params.height_offset + base_level +
-                amplitude_multiplier * (base_noise[i] * m_params.base_amplitude) + ridge;
-
-            //  cliffs — byte-identical to ComputeShapedHeightSampleImpl.
-            terrain_height = CliffTerracedHeight(
-                static_cast<float>(base_x + x), static_cast<float>(base_z + z), terrain_height);
-
-            if (m_params.island_mask_enabled) {
-                const float mask = glm::smoothstep(0.1f, 0.25f, island_noise[i]);
-                terrain_height = glm::mix(m_params.height_offset, terrain_height, mask);
-            }
-
-            if (m_params.rivers_enabled) {
-                const float world_x = static_cast<float>(base_x + x);
-                const float world_z = static_cast<float>(base_z + z);
-                const float influence = RiverInfluenceFromNoise(world_x, world_z);
-                terrain_height -= RiverCarveAmount(terrain_height, influence);
-            }
-
-            // Lake carve — byte-identical to ComputeShapedHeightSampleImpl.
-            if (m_params.lakes_enabled) {
-                const float world_x = static_cast<float>(base_x + x);
-                const float world_z = static_cast<float>(base_z + z);
-                const float lake_influence = LakeInfluenceFromNoise(world_x, world_z);
-                const float lake_surface = LakeSurfaceLevel(world_x, world_z);
-                terrain_height -= LakeCarveAmount(terrain_height, lake_influence, lake_surface);
-            }
-
-            //  rim depression — byte-identical to ComputeShapedHeightSampleImpl.
-            terrain_height -= SurfaceBreakRimDepression(static_cast<float>(base_x + x),
-                                                        static_cast<float>(base_z + z));
-
-            out[i] = terrain_height;
+            out[i] = CombineShapedHeightSample(
+                         static_cast<float>(base_x + x),
+                         static_cast<float>(base_z + z),
+                         {.continentalness = continentalness_grid[i],
+                          .erosion = erosion_grid[i],
+                          .peaks_valleys = peaks_noise[i],
+                          .base_noise = base_noise[i],
+                          .island_noise = m_params.island_mask_enabled ? island_noise[i] : 0.0f},
+                         /*complete_shaping=*/true)
+                         .final_height;
         }
     }
 
@@ -2272,6 +2253,16 @@ MaterialType SHIELD_WorldSystem::SurfaceVertexMaterial(float world_x,
 
 void SHIELD_WorldSystem::ComputeShapedHeightsAtPositions(
     const float* xs, const float* zs, std::size_t count, float* out, bool apply_hydro) const {
+    if (apply_hydro) {
+        ComputeShapedHeightsAtPositionsImpl<true>(xs, zs, count, out, /*complete_shaping=*/true);
+    } else {
+        ComputeShapedHeightsAtPositionsImpl<false>(xs, zs, count, out, /*complete_shaping=*/true);
+    }
+}
+
+template<bool ApplyHydro>
+void SHIELD_WorldSystem::ComputeShapedHeightsAtPositionsImpl(
+    const float* xs, const float* zs, std::size_t count, float* out, bool complete_shaping) const {
     if (count == 0) {
         return;
     }
@@ -2338,35 +2329,31 @@ void SHIELD_WorldSystem::ComputeShapedHeightsAtPositions(
                                           0.0f,
                                           m_seed + 5);
 
-    std::vector<float> island_noise;
     for (std::size_t i = 0; i < count; ++i) {
-        const float base_level =
-            EvaluateShapingSpline(m_params.continental_spline, continentalness[i], 0.0f);
-        const float amplitude_multiplier =
-            EvaluateShapingSpline(m_params.erosion_spline, erosion[i], 1.0f);
-        const float erosion_01 = std::clamp((erosion[i] + 1.0f) * 0.5f, 0.0f, 1.0f);
-        const float ridge = EvaluateShapingSpline(m_params.peaks_spline, peaks_noise[i], 0.0f) *
-                            m_params.peaks_amplitude * std::max(0.0f, 1.0f - erosion_01);
-        float h = m_params.height_offset + base_level +
-                  amplitude_multiplier * (base_noise[i] * m_params.base_amplitude) + ridge;
-        if (m_params.island_mask_enabled) {
-            const float in =
-                m_island_mask_generator->GenSingle2D(xs[i] * m_params.island_mask_frequency,
-                                                     zs[i] * m_params.island_mask_frequency,
-                                                     m_seed + 2);
-            const float mask = glm::smoothstep(0.1f, 0.25f, in);
-            h = glm::mix(m_params.height_offset, h, mask);
+        const float island_noise =
+            m_params.island_mask_enabled
+                ? m_island_mask_generator->GenSingle2D(xs[i] * m_params.island_mask_frequency,
+                                                       zs[i] * m_params.island_mask_frequency,
+                                                       m_seed + 2)
+                : 0.0f;
+        const float height = CombineShapedHeightSample(xs[i],
+                                                       zs[i],
+                                                       {.continentalness = continentalness[i],
+                                                        .erosion = erosion[i],
+                                                        .peaks_valleys = peaks_noise[i],
+                                                        .base_noise = base_noise[i],
+                                                        .island_noise = island_noise},
+                                                       complete_shaping)
+                                 .final_height;
+        if constexpr (ApplyHydro) {
+            if (m_params.hydro_enabled) {
+                out[i] = height + SampleHydroOffsetMeters(xs[i], zs[i]);
+            } else {
+                out[i] = height;
+            }
+        } else {
+            out[i] = height;
         }
-        if (m_params.rivers_enabled) {
-            const float influence = RiverInfluenceFromNoise(xs[i], zs[i]);
-            h -= RiverCarveAmount(h, influence);
-        }
-        // add the baked hydro offset so this matches GetTerrainHeightAt
-        // (apply_hydro=false on the erosion bake's own base samples -> no recursion).
-        if (apply_hydro && m_params.hydro_enabled) {
-            h += SampleHydroOffsetMeters(xs[i], zs[i]);
-        }
-        out[i] = h;
     }
 }
 
@@ -2487,30 +2474,26 @@ void SHIELD_WorldSystem::ClassifyVertexMaterials(const Vec3* positions,
     for (std::size_t i = 0; i < count; ++i) {
         const Vec3& p = positions[i];
 
-        // Shaped final height at (x,z) - identical math to
-        // ComputeShapedHeightSample (no island mask in the shipped shaped
-        // presets; include it for completeness when enabled).
-        const float base_level =
-            EvaluateShapingSpline(m_params.continental_spline, continentalness[i], 0.0f);
-        const float amplitude_multiplier =
-            EvaluateShapingSpline(m_params.erosion_spline, erosion[i], 1.0f);
-        const float erosion_01 = std::clamp((erosion[i] + 1.0f) * 0.5f, 0.0f, 1.0f);
-        const float ridge = EvaluateShapingSpline(m_params.peaks_spline, peaks_noise[i], 0.0f) *
-                            m_params.peaks_amplitude * std::max(0.0f, 1.0f - erosion_01);
-        float final_height = m_params.height_offset + base_level +
-                             amplitude_multiplier * (base_noise[i] * m_params.base_amplitude) +
-                             ridge;
-        if (m_params.island_mask_enabled) {
-            const float island_noise =
-                m_island_mask_generator->GenSingle2D(p.x * m_params.island_mask_frequency,
-                                                     p.z * m_params.island_mask_frequency,
-                                                     m_seed + 2);
-            const float mask = glm::smoothstep(0.1f, 0.25f, island_noise);
-            final_height = glm::mix(m_params.height_offset, final_height, mask);
-        }
-        if (m_params.rivers_enabled) {
-            const float influence = RiverInfluenceFromNoise(p.x, p.z);
-            final_height -= RiverCarveAmount(final_height, influence);
+        const float island_noise =
+            m_params.island_mask_enabled
+                ? m_island_mask_generator->GenSingle2D(p.x * m_params.island_mask_frequency,
+                                                       p.z * m_params.island_mask_frequency,
+                                                       m_seed + 2)
+                : 0.0f;
+        // Revision 1 preserves saved mesh materials as well as activation.
+        const bool complete_shaping =
+            m_params.surface_sampling_revision >= kSurfaceSamplingRevision;
+        float final_height = CombineShapedHeightSample(p.x,
+                                                       p.z,
+                                                       {.continentalness = continentalness[i],
+                                                        .erosion = erosion[i],
+                                                        .peaks_valleys = peaks_noise[i],
+                                                        .base_noise = base_noise[i],
+                                                        .island_noise = island_noise},
+                                                       complete_shaping)
+                                 .final_height;
+        if (complete_shaping && m_params.hydro_enabled) {
+            final_height += SampleHydroOffsetMeters(p.x, p.z);
         }
 
         // Biome id (batched climate + the reused +3/+4/+5 shaping noises).
@@ -2561,13 +2544,19 @@ SHIELD_WorldSystem::compute_column_surface_span(int chunk_x, int chunk_z) const 
 
     // batch the 5 footprint height samples (center + 4
     // corners) through the SIMD position-array path instead of 5 scalar
-    // GenSingle2D sweeps. Byte-identical heights (same shaped helper), but the
+    // GenSingle2D sweeps. Revision 2 uses the complete shared shaping; revision 1
+    // preserves activation spans and scheduling for existing saved worlds. The
     // per-column span cost - the dominant cold-frame streaming cost on shaped
     // presets - drops ~5x.
     const std::array<float, 5> sample_xs{center_x, base_x, max_x, base_x, max_x};
     const std::array<float, 5> sample_zs{center_z, base_z, base_z, max_z, max_z};
     std::array<float, 5> heights{};
-    ComputeShapedHeightsAtPositions(sample_xs.data(), sample_zs.data(), 5, heights.data());
+    ComputeShapedHeightsAtPositionsImpl<true>(sample_xs.data(),
+                                              sample_zs.data(),
+                                              sample_xs.size(),
+                                              heights.data(),
+                                              m_params.surface_sampling_revision >=
+                                                  kSurfaceSamplingRevision);
     const float center_height = heights[0];
     float min_height = center_height;
     float max_height = center_height;

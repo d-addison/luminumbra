@@ -1198,47 +1198,40 @@ bool GameSession::CreateWorldInternal(const std::string& name,
         }
     }
 
-    fs::path preset_to_load = validation.preset_path;
-    std::string saved_preset_json;
-    if (!transient) {
-        nlohmann::json resolved;
-        try {
-            if (customPresetJson) {
-                resolved = nlohmann::json::parse(*customPresetJson);
-            } else {
-                std::ifstream input(preset_to_load);
-                input >> resolved;
-            }
-        } catch (const nlohmann::json::exception& error) {
-            m_worldOpenError = "Could not parse this world's preset: " + std::string(error.what());
-            return false;
+    nlohmann::json resolved;
+    try {
+        if (customPresetJson) {
+            resolved = nlohmann::json::parse(*customPresetJson);
+        } else {
+            std::ifstream input(validation.preset_path);
+            input >> resolved;
         }
-        const auto validated =
-            LoadTerrainPresetFromJson(resolved, RuntimeRoot(m_rootPath) / "data");
-        if (!validated.ok) {
-            m_worldOpenError =
-                validated.errors.empty() ? "Invalid world preset." : validated.errors.front();
-            return false;
-        }
-        resolved = ResolveTerrainPresetDefaults(resolved);
-        // Materialize historical choices before upgrading the revision.
-        resolved["schema_rev"] = kTerrainPresetSchemaRevision;
-        saved_preset_json = resolved.dump();
-        const fs::path world_preset = worldPath / "preset.json";
-        if (!Persistence::WorldSaveService::write_file_durably(world_preset,
-                                                               saved_preset_json + "\n")) {
-            m_worldOpenError = "Could not save this world's resolved preset.";
-            return false;
-        }
-        preset_to_load = world_preset;
+        resolved = ResolveEffectivePreset(resolved, TerrainPresetUse::NewWorld);
+    } catch (const nlohmann::json::exception& error) {
+        m_worldOpenError = "Could not parse this world's preset: " + std::string(error.what());
+        return false;
     }
-
-    const TerrainPresetLoadResult preset = LoadTerrainPreset(preset_to_load);
+    // Both persisted and transient worlds adopt the parameters and identity of
+    // these same resolved bytes. Explicit revision 1 remains authoritative.
+    const TerrainPresetLoadResult preset =
+        LoadTerrainPresetFromJson(resolved, RuntimeRoot(m_rootPath) / "data");
     if (!preset.ok) {
+        m_worldOpenError = preset.errors.empty() ? "Invalid world preset." : preset.errors.front();
         for (const std::string& error : preset.errors) {
             LUMINUMBRA_CORE_ERROR("World preset load failed: {}", error);
         }
         return false;
+    }
+    std::string saved_preset_json;
+    if (!transient) {
+        // Save inspection uses compact UTF-8 JSON; the content identity uses
+        // ASCII escapes of the same effective preset, including its schema.
+        saved_preset_json = resolved.dump();
+        if (!Persistence::WorldSaveService::write_file_durably(worldPath / "preset.json",
+                                                               saved_preset_json + "\n")) {
+            m_worldOpenError = "Could not save this world's resolved preset.";
+            return false;
+        }
     }
     // Copies the immutable dependency snapshot with the identity's parameters.
     TerrainGenParams params = preset.params;

@@ -46,9 +46,8 @@ bool ParseInt(const std::string& s, long long& out) {
 CustomPresetResult BuildCustomPreset(const nlohmann::json& base,
                                      const std::vector<WorldGenParam>& params) {
     CustomPresetResult result;
-    const auto resolved_base = Luminumbra::world::ResolveTerrainPresetDefaults(base);
+    const auto resolved_base = Luminumbra::world::ResolveEffectivePreset(base);
     result.json = resolved_base;
-    result.json["schema_rev"] = Luminumbra::world::kTerrainPresetSchemaRevision;
 
     for (const WorldGenParam& p : params) {
         if (p.path.empty()) {

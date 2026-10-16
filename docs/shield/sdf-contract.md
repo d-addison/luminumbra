@@ -10,7 +10,7 @@ callbacks.
 
 Current durable storage uses LMR1 container v2, the
 `luminumbra.persistence.world_manifest.v1` manifest with `container_version: 2`,
-and FSD2 far-LOD payload v3. New presets use `schema_rev: 7`; revision 6 and omitted revisions
+and FSD2 far-LOD payload v3. New presets use `schema_rev: 8` with sampling revision 2; revision 6 and omitted revisions
 retain historical missing-field choices. Older worlds have no migration path. Unknown future versions
 and corrupt data produce separate failures; see the
 [persistence contract](../engine-guide.md).

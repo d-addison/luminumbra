@@ -169,7 +169,9 @@ TEST(GameSessionHeadlessWorldTest, HeadlessCreateWorldSucceedsWithPresetOnly) {
         std::ifstream input(saved_preset);
         ASSERT_TRUE(input);
         const auto resolved = nlohmann::json::parse(input);
-        EXPECT_EQ(resolved.at("schema_rev"), 7);
+        EXPECT_EQ(resolved.at("schema_rev"), 8);
+        EXPECT_EQ(resolved.at("generation_params").at("terrain").at("surface_sampling_revision"),
+                  2);
         EXPECT_TRUE(
             resolved.at("generation_params").at("terrain").at("island_mask_enabled").get<bool>());
 
@@ -234,7 +236,10 @@ TEST(GameSessionHeadlessWorldTest, CustomPresetEmbedsInSaveAndChangesTerrain) {
         ASSERT_NE(custom_world.GetWorldSystem(), nullptr);
         EXPECT_FALSE(base.PresetContentHash().empty());
         EXPECT_NE(base.PresetContentHash(), custom_world.PresetContentHash());
-        const auto identity = Luminumbra::world::LoadTerrainPresetFromJson(j, root.path() / "data");
+        const auto identity = Luminumbra::world::LoadTerrainPresetFromJson(
+            Luminumbra::world::ResolveEffectivePreset(
+                j, Luminumbra::world::TerrainPresetUse::NewWorld),
+            root.path() / "data");
         ASSERT_TRUE(identity.ok);
         EXPECT_EQ(custom_world.PresetContentHash(), identity.preset_content_hash);
 

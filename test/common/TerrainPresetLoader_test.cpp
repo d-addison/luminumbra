@@ -6,6 +6,8 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <array>
+#include <cstddef>
 #include <filesystem>
 #include <fstream>
 #include <string>
@@ -62,6 +64,7 @@ constexpr const char* kMinimalPreset = R"({
 TEST(TerrainPresetLoaderTest, LoadsShippedDefaultPreset) {
     const TerrainPresetLoadResult result = LoadTerrainPreset(PresetDir() / "default.json");
     ASSERT_TRUE(result.ok) << (result.errors.empty() ? "" : result.errors.front());
+    EXPECT_EQ(result.params.surface_sampling_revision, 2);
 
     // DELIBERATE preset bump: default.json was
     // recalibrated against real-world DEM statistics (foothills class) and
@@ -100,6 +103,93 @@ TEST(TerrainPresetLoaderTest, LoadsShippedDefaultPreset) {
     EXPECT_TRUE(result.extras.shaping.present);
     EXPECT_FALSE(result.params.continental_spline.empty());
     EXPECT_TRUE(result.warnings.empty()) << result.warnings.front();
+}
+
+TEST(TerrainPresetLoaderTest, SurfaceSamplingRevisionPreservesSavedChoiceAndIdentity) {
+    const auto original = nlohmann::json::parse(kMinimalPreset);
+    const auto legacy = LoadTerrainPresetFromJson(original, {});
+    ASSERT_TRUE(legacy.ok);
+    EXPECT_EQ(legacy.params.surface_sampling_revision, 1);
+    EXPECT_FALSE(Luminumbra::world::ResolveTerrainPresetDefaults(original)
+                     .at("generation_params")
+                     .at("terrain")
+                     .contains("surface_sampling_revision"));
+    for (const int revision : {1, 2}) {
+        auto saved = original;
+        saved["generation_params"]["terrain"]["surface_sampling_revision"] = revision;
+        const auto loaded = LoadTerrainPresetFromJson(
+            Luminumbra::world::ResolveEffectivePreset(nlohmann::json::parse(saved.dump())), {});
+        ASSERT_TRUE(loaded.ok);
+        EXPECT_EQ(loaded.params.surface_sampling_revision, revision);
+        if (revision == 2)
+            EXPECT_FALSE(LoadTerrainPresetFromJson(saved, {}).ok);
+        EXPECT_NE(loaded.preset_content_hash, legacy.preset_content_hash);
+    }
+    for (const auto& invalid : {nlohmann::json(0),
+                                nlohmann::json(3),
+                                nlohmann::json(-1),
+                                nlohmann::json(2.0),
+                                nlohmann::json(true),
+                                nlohmann::json("2"),
+                                nlohmann::json(nullptr),
+                                nlohmann::json::array(),
+                                nlohmann::json(18446744073709551615ull)}) {
+        auto saved = original;
+        saved["generation_params"]["terrain"]["surface_sampling_revision"] = invalid;
+        const auto loaded = LoadTerrainPresetFromJson(saved, {});
+        EXPECT_FALSE(loaded.ok) << invalid.dump();
+        ASSERT_FALSE(loaded.errors.empty());
+        EXPECT_NE(loaded.errors.front().find("surface_sampling_revision"), std::string::npos);
+    }
+}
+
+TEST(TerrainPresetLoaderTest, EffectivePresetResolvesSelectorBeforeIdentityAndCompatibilityGate) {
+    using Luminumbra::world::CanonicalResolvedTerrainPresetJson;
+    using Luminumbra::world::ResolveEffectivePreset;
+    using Luminumbra::world::TerrainPresetUse;
+    const auto original = nlohmann::json::parse(kMinimalPreset);
+    const auto historical = ResolveEffectivePreset(original);
+    const auto current = ResolveEffectivePreset(original, TerrainPresetUse::NewWorld);
+    EXPECT_FALSE(
+        historical.at("generation_params").at("terrain").contains("surface_sampling_revision"));
+    EXPECT_EQ(current.at("generation_params").at("terrain").at("surface_sampling_revision"), 2);
+    EXPECT_EQ(current.at("schema_rev"), 8);
+    // Simulate the enforced upper bound of the older preset reader. The saved
+    // contract must be refused there, rather than accepted with unknown-key warnings.
+    constexpr int historical_reader_max = 7;
+    EXPECT_GT(nlohmann::json::parse(CanonicalResolvedTerrainPresetJson(current))
+                  .at("schema_rev")
+                  .get<int>(),
+              historical_reader_max);
+    EXPECT_EQ(ResolveEffectivePreset(current), current);
+    EXPECT_EQ(ResolveEffectivePreset(current, TerrainPresetUse::NewWorld), current);
+    EXPECT_NE(LoadTerrainPresetFromJson(current, {}).preset_content_hash,
+              LoadTerrainPresetFromJson(historical, {}).preset_content_hash);
+    std::array<std::string, 2> hashes;
+    for (const int revision : {1, 2}) {
+        auto explicit_preset = original;
+        explicit_preset["generation_params"]["terrain"]["surface_sampling_revision"] = revision;
+        const auto resolved = ResolveEffectivePreset(explicit_preset, TerrainPresetUse::NewWorld);
+        const auto loaded = LoadTerrainPresetFromJson(resolved, {});
+        ASSERT_TRUE(loaded.ok);
+        EXPECT_EQ(loaded.params.surface_sampling_revision, revision);
+        EXPECT_EQ(loaded.preset_content_hash,
+                  LoadTerrainPresetFromJson(ResolveEffectivePreset(explicit_preset), {})
+                      .preset_content_hash);
+        hashes[static_cast<std::size_t>(revision - 1)] = loaded.preset_content_hash;
+        const auto saved = nlohmann::json::parse(CanonicalResolvedTerrainPresetJson(resolved));
+        EXPECT_EQ(saved.at("schema_rev"), revision == 1 ? 7 : 8);
+        EXPECT_EQ(LoadTerrainPresetFromJson(saved, {}).preset_content_hash,
+                  loaded.preset_content_hash);
+    }
+    EXPECT_NE(hashes[0], hashes[1]);
+    for (const auto& schema : {nlohmann::json(5), nlohmann::json(9), nlohmann::json("8")}) {
+        auto invalid = current;
+        invalid["schema_rev"] = schema;
+        const auto resolved = ResolveEffectivePreset(invalid, TerrainPresetUse::NewWorld);
+        EXPECT_EQ(resolved.at("schema_rev"), schema);
+        EXPECT_FALSE(LoadTerrainPresetFromJson(resolved, {}).ok);
+    }
 }
 
 TEST(TerrainPresetLoaderTest, CanonicalResolvedPresetBytesAndHashAreStable) {
@@ -793,7 +883,7 @@ TEST(TerrainPresetLoaderTest, AllShippedPresetsLoadWithoutErrorsOrWarnings) {
                              "cave_dense"}) {
         std::ifstream input(PresetDir() / (std::string(name) + ".json"));
         ASSERT_TRUE(input.good()) << name;
-        EXPECT_EQ(nlohmann::json::parse(input).at("schema_rev"), 7) << name;
+        EXPECT_EQ(nlohmann::json::parse(input).at("schema_rev"), 8) << name;
         const TerrainPresetLoadResult result =
             LoadTerrainPreset(PresetDir() / (std::string(name) + ".json"));
         EXPECT_TRUE(result.ok) << name;

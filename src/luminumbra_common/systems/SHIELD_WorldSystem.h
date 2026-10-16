@@ -33,10 +33,15 @@ namespace Luminumbra::Systems {
 class PhysicsSystem;
 class WaterSystem;
 class WeatherSystem; // Weather-driven rain passthrough.
+inline constexpr int kSurfaceSamplingRevision = 2;
 struct TerrainGenParams {
     // The preset load result carries its immutable inputs through parameter
     // adoption (including GameSession create/open). Null retains direct loading.
     std::shared_ptr<const World::WorldgenDependencySnapshot> worldgen_dependencies;
+    // Saved presets without this selector retain historical activation spans and
+    // vertex materials. New worlds record revision 2 (issue #453). This does not
+    // change generated terrain or the frozen hydraulic-erosion substrate.
+    int surface_sampling_revision = 1;
     float base_frequency = 0.01f;
     float base_amplitude = 50.0f;
     int octaves = 4;
@@ -561,7 +566,7 @@ public:
 
     // SIMD-batched material classification for a list of
     // isosurface vertex world positions (the LOD0 marching-cubes mesher emits
-    // hundreds per chunk). out[i] receives the SAME material id as
+    // hundreds per chunk). At surface_sampling_revision 2, out[i] receives the SAME material id as
     // MarchingCubes::GetTerrainMaterialAt(positions[i]) would return - the
     // shaped height and the climate channels are evaluated through FastNoise's
     // SIMD GenPositionArray2D batch entry points (bit-identical to the per-point
@@ -569,8 +574,8 @@ public:
     // collapsing the per-vertex ComputeShapedHeightSample + ComputeClimateSample
     // cost (~30 us each scalar) into one batched pass. The cave channel and the
     // final band selection stay per-vertex (cheap). positions are in WORLD
-    // space. With shaping disabled this falls back to per-vertex classification
-    // so legacy worlds are byte-unchanged.
+    // space. Revision 1 keeps the historical incomplete height definition so
+    // persisted mesh materials in existing worlds remain byte-unchanged.
     void
     ClassifyVertexMaterials(const Vec3* positions, std::size_t count, u32* out_materials) const;
 
@@ -581,9 +586,9 @@ public:
     // and exercised directly by the position-array parity gate.
     // apply_hydro: when true (default) and hydro is enabled, the baked
     // erosion offset is added so this matches GetTerrainHeightAt at every position
-    // (keeps the surface-span corners consistent with collision/SDF). The erosion
-    // bake passes false to sample the NO-hydro base height (and to avoid recursion)
-    // -- this is also the fast SIMD path the bake uses to build its base grid.
+    // (keeps the surface-span corners consistent with collision/SDF).
+    // Passing false returns the complete analytic surface without hydro. The
+    // erosion bake uses a private historical substrate for save compatibility.
     void ComputeShapedHeightsAtPositions(const float* xs,
                                          const float* zs,
                                          std::size_t count,
@@ -1142,28 +1147,42 @@ private:
     void reinitialize_noise(const TerrainGenParams* params = nullptr,
                             std::optional<int> seed = std::nullopt);
 
-    // Shared terrain-height implementation.
-    // Every terrain-height consumer (GetTerrainHeightAt, SampleWorldGenLayers,
-    // GenerateChunkData full + step>1 batch loops, and the column-span cache
-    // through GetTerrainHeightAt) derives its height from this helper so the
-    // scalar and batch paths cannot diverge. All noise reads use GenSingle2D
-    // (never batch SIMD Gen* grids) when shaping is enabled, making the batch
-    // heightmap bytes EXACTLY equal to the scalar value at the same world
-    // coordinate. With shaping disabled the helper reproduces the legacy
-    // float-op sequence bit-for-bit, while GenerateChunkData keeps its
-    // GenUniformGrid2D fast path (legacy heights/hashes untouched, covered by
-    // the existing max_sdf_sample_error < 1e-4 snapshot gate).
+    // Scalar and SIMD paths share CombineShapedHeightSample's float operation
+    // order. Only their noise reads differ (GenSingle2D, GenUniformGrid2D or
+    // GenPositionArray2D); equivalence tests compare their exact float bits.
     struct ShapedHeightSample {
         float base_noise = 0.0f;        // detail FBM (at warped coords when shaping)
         float pre_island_height = 0.0f; // combined height before the island mask
         float island_noise = 0.0f;
         float island_mask = 1.0f;
-        float final_height = 0.0f;     // after the river carve
+        float final_height = 0.0f;     // after all carving and optional hydro
         float pre_carve_height = 0.0f; // final surface before the river carve
         bool island_applied = false;
     };
     ShapedHeightSample ComputeShapedHeightSample(float world_x, float world_z) const;
     float ComputeShapedHeight(float world_x, float world_z) const;
+    struct ShapingNoiseSample {
+        float continentalness = 0.0f;
+        float erosion = 0.0f;
+        float peaks_valleys = 0.0f;
+        float base_noise = 0.0f;
+        float island_noise = 0.0f;
+    };
+    // Shared float operation order for scalar, grid, position-array and material
+    // sampling. Historical shaping is reserved for revision-1 consumers and the
+    // erosion substrate; it deliberately omits relief, cliffs, lakes and rims.
+    ShapedHeightSample CombineShapedHeightSample(float world_x,
+                                                 float world_z,
+                                                 const ShapingNoiseSample& noise,
+                                                 bool complete_shaping) const;
+    // The erosion substrate instantiates ApplyHydro=false, so the bake cannot
+    // recurse. Keep the offset before the output store to permit in-place use.
+    template<bool ApplyHydro>
+    void ComputeShapedHeightsAtPositionsImpl(const float* xs,
+                                             const float* zs,
+                                             std::size_t count,
+                                             float* out,
+                                             bool complete_shaping) const;
 
     // SIMD-batched shaped heights for a chunk-aligned
     // (size_x * size_z) column grid whose origin is the integer world position
@@ -1178,13 +1197,9 @@ private:
     // GenSingle2D loop cost ~26 us/column; the batched path is ~2 us/column.
     void ComputeShapedHeightGrid(int base_x, int base_z, int size_x, int size_z, float* out) const;
 
-    // hydraulic/thermal relief (decision a). The analytic height is
-    // computed by...Impl(apply_hydro=false); ComputeShapedHeightSample adds the
-    // baked offset when hydro_enabled, so every consumer walks the eroded
-    // surface. SampleHydroOffsetMeters baked per kHydroRegionMeters region
-    // (deterministic, cached, recompute-on-load); the bake samples the NO-hydro
-    // height (apply_hydro=false) to avoid recursion. World_hash-affecting when
-    // enabled. Halo == hydro_iterations (halo-independent interior, hydraulic erosion kernel).
+    // Hydraulic relief adds a cached, deterministic offset to the final surface.
+    // The bake intentionally uses the historical incomplete analytic substrate
+    // with hydro disabled, preserving terrain in saved worlds (issue #453).
     ShapedHeightSample
     ComputeShapedHeightSampleImpl(float world_x, float world_z, bool apply_hydro) const;
     float SampleHydroOffsetMeters(float world_x, float world_z) const;

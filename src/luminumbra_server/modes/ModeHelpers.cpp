@@ -2,6 +2,7 @@
 
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <system_error>
 
 #include "luminumbra_common/core/SystemConfig.h"
@@ -28,13 +29,26 @@ Luminumbra::Net::HelloMsg RuntimeHelloFrom(const ServerCliOptions& options) {
     if (runner_config.region_scheduler)
         session.SetRegionSchedulerConfig(*runner_config.region_scheduler);
     hello.system_config_identity = session.SystemConfigIdentity();
-    const auto preset =
-        options.preset_json_override
-            ? Luminumbra::world::LoadTerrainPresetFromJson(
-                  nlohmann::json::parse(*options.preset_json_override), root / "data")
-            : Luminumbra::world::LoadTerrainPreset(root / "worlds/atlas/presets" /
-                                                   (options.preset + ".json"));
-    hello.preset_content_hash = preset.preset_content_hash;
+    try {
+        nlohmann::json source;
+        if (options.preset_json_override) {
+            source = nlohmann::json::parse(*options.preset_json_override);
+        } else {
+            std::ifstream input(root / "worlds/atlas/presets" / (options.preset + ".json"));
+            if (!input)
+                return hello;
+            input >> source;
+        }
+        const auto preset = Luminumbra::world::LoadTerrainPresetFromJson(
+            Luminumbra::world::ResolveEffectivePreset(
+                source, Luminumbra::world::TerrainPresetUse::NewWorld),
+            root / "data");
+        hello.preset_content_hash = preset.preset_content_hash;
+    } catch (const nlohmann::json::exception&) {
+        // Join and soak clients have no prior world validation. Keep the empty
+        // identity on parse/resolution failure so shared admission refuses it.
+        return hello;
+    }
     return hello;
 }
 

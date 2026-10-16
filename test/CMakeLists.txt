@@ -28,6 +28,7 @@ add_test(NAME TerrainPresetSchemaRevision COMMAND preset_schema_rev_test)
 add_executable(worldgen_layer_snapshot_test
     shield/test_worldgen_layer_snapshots.cpp
     shield/worldgen_layers_hardening_test.cpp
+    shield/height_sampling_equivalence_test.cpp
 )
 
 target_compile_definitions(worldgen_layer_snapshot_test PRIVATE
@@ -1512,6 +1513,7 @@ target_link_libraries(frontier_gates_test PRIVATE
 add_executable(world_open_refusal_test
     persistence/world_open_refusal_test.cpp
     common/SimBudgetWorldParity_test.cpp
+    common/EffectivePresetIdentity_test.cpp
     persistence/async_saved_world_catalog_test.cpp
     persistence/saved_world_catalog_responsiveness_test.cpp
     persistence/host_scheduler_fault_test.cpp

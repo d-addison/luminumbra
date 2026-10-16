@@ -1618,6 +1618,22 @@ TEST(WorldgenOverrideTest, BuildCustomPresetAppliesOnlyRealDeltas) {
     EXPECT_EQ(rb.skipped, 1);
 }
 
+TEST(WorldgenOverrideTest, CustomizationKeepsExplicitSamplingAndItsSchemaGate) {
+    for (const int revision : {1, 2}) {
+        const nlohmann::json base = {{"schema_rev", 7},
+                                     {"generation_params",
+                                      {{"terrain", {{"surface_sampling_revision", revision}}},
+                                       {"features", nlohmann::json::object()}}}};
+        const auto custom = Luminumbra::Client::BuildCustomPreset(base, {});
+        const auto knobs = Luminumbra::Client::BuildKnobResolvedPreset(base, {});
+        for (const auto* preset : {&custom.json, &knobs.json}) {
+            EXPECT_EQ(preset->at("schema_rev"), revision == 1 ? 7 : 8);
+            EXPECT_EQ(preset->at("generation_params").at("terrain").at("surface_sampling_revision"),
+                      revision);
+        }
+    }
+}
+
 // Drift guard: every worldgen-param data-path authored in world_creation.rml must be a real
 // generation_params key (present in some curated preset, or a known default-only key). Catches a
 // typo'd path that would silently no-op both seeding and the override.
