@@ -41,11 +41,18 @@ Hydraulic/thermal relief defaults on in revision 7; explicit
 Biome tables, climate frequencies and biome relief retain their controls. The
 [SDF contract](shield/sdf-contract.md) describes their sampling semantics.
 
-Current-format saves without embedded presets that name one of the eight packaged
-presets resolve to frozen revision-6 copies in
-`worlds/atlas/presets-rev6/`; new saves embed resolved choices. Other named presets
-retain their previous resolution and validation. This is preset fallback within
-the current save format, not obsolete-world migration.
+New saves embed resolved choices in `preset.json` and write `presetFormat: 1`
+and `presetIdentity` in `world_info.json`. The identity is `StableChecksum` (FNV-1a)
+of the canonical preset JSON (`nlohmann::json::parse(...).dump()`), independent of
+whitespace and distinct from the runtime identity that includes dependencies.
+A marked save refuses a missing embedded preset, a missing or mismatched identity,
+or an unsupported preset format; it never substitutes packaged content. Refusal
+does not modify files. Only legacy saves without the marker and embedded preset
+may fall back: the eight packaged names resolve to frozen revision-6 copies in
+`worlds/atlas/presets-rev6/`, and other names retain their original atlas path.
+Any recorded legacy identity is still verified. Resaving an opened legacy world
+embeds its exact preset and records the marker and identity. This is preset
+fallback within the current container format, not obsolete-world migration.
 
 Failures are deliberately distinct. Recognized older versions receive the refusal
 above. Higher versions report `unsupported future LMR1 container version`,
@@ -158,6 +165,9 @@ continuation are planned for v0.3.1. Five-minute dedicated-server autosave does
 not implement those persistence slices. LMR1 v2,
 world_manifest.v1, FSD2 v3, and existing canonical chunk and entity serialization
 are unchanged; preset revision 7 retains revision 6 omission compatibility.
+The additive metadata contract `presetFormat: 1` requires an embedded preset
+and its canonical-JSON checksum. It changes neither the container version nor
+the existing `StableChecksum` algorithm or runtime dependency-content hash.
 
 An absent energy record restores an empty layer with its next firing on the
 next absolute eight-tick boundary. A legacy import may carry a different
@@ -415,6 +425,44 @@ the debug HUD and diagnostics. See [Far world horizon v2](far-world-horizon-v2.m
 for the config example and qualification gates. Saved-world far production
 authority remains fixture-only until FW S8 (v0.3.1); the renderer reports an
 explicit unavailable/refusal diagnostic.
+
+### Developer console
+
+The ordinary and QA clients provide the same developer console in Release and
+other configurations. F1 opens its searchable widget hub by default; ordinary
+Settings provides console access and the default-on performance HUD switch.
+Visibility, resolved shortcuts and interactive panel layouts persist under
+`user.developer` without changing simulation hashes. The Controls settings section
+links to the hub for developer rebinding and hotkey help. Generated help includes
+current developer and gameplay bindings. Interactive panels share input/cursor
+ownership; passive HUDs do not capture gameplay. Opening the console does not
+pause simulation.
+
+| Default hotkey | Module / action |
+|---|---|
+| F1 | Open or close the developer hub |
+| F3 | GPU profiler panel |
+| F5 | Reload all shaders (`shader.reload`, no panel) |
+| F6 | Cycle debug views (`render.debug-cycle`) |
+| F7 | World generation preview panel |
+| F8 | Client settings panel |
+| F9 | Toggle wireframe effect (`render.wireframe-toggle`) |
+| F10 | Shader panel |
+| `[` | Slow time (`time.slower`) |
+| `]` | Speed up time (`time.faster`) |
+| `\` | Reset time scale (`time.reset`) |
+
+The hub shows every module's description and current hotkeys, including unbound
+panels and passive overlays. Debug-view, wireframe and time-control panel visibility
+is separate from their effect hotkeys. Photo mode uses `[` and `]` for aperture.
+Developer actions and rebound panel keys work while a panel owns input; focused
+text fields block them. `--no-ui`, automated captures and scenario runs suppress
+developer overlays and shortcuts without modifying saved preferences.
+
+See [Developer console](developer-console.md) for the complete inventory,
+registration API, typed commands, focus rules, save retries and capture overrides.
+The generation inspector edits an independent preview; only its explicit
+**Apply & Regenerate** button can apply changes to an ordinary local world.
 
 ### Environment controls
 

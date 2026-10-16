@@ -126,7 +126,9 @@ void RenderMenuScreens(ClientAppContext& app,
                        Luminumbra::Rendering::RenderPipeline& renderPipeline,
                        Luminumbra::Client::Rml_UIManager* uiManager,
                        Luminumbra::Client::WorldgenPreview* worldgenPreview,
-                       MenuPreviewState& previewState) {
+                       MenuSceneState& previewState,
+                       const UiInputRouter& inputRouter) {
+    const bool previewMouseAllowed = previewState.UpdateInputOwnership(inputRouter);
     const auto menu_now = std::chrono::steady_clock::now();
     const float menu_delta =
         previewState.last_menu_frame.time_since_epoch().count() == 0
@@ -281,11 +283,14 @@ void RenderMenuScreens(ClientAppContext& app,
                 // hovered element; the bare backdrop is the document body
                 // (id "world_creation"), so a null/body hover == over the world.
                 double cx = 0.0, cy = 0.0;
-                glfwGetCursorPos(window, &cx, &cy);
-                const bool lmb = glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
+                if (previewMouseAllowed)
+                    glfwGetCursorPos(window, &cx, &cy);
+                const bool lmb = previewMouseAllowed &&
+                                 glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
                 Rml::Element* hover =
                     uiManager->GetContext() ? uiManager->GetContext()->GetHoverElement() : nullptr;
-                const bool overWorld = (hover == nullptr) || (hover->GetId() == "world_creation");
+                const bool overWorld = previewMouseAllowed &&
+                                       ((hover == nullptr) || (hover->GetId() == "world_creation"));
                 if (lmb && overWorld && !previewState.dragging) {
                     previewState.dragging = true;
                     previewState.lastCursorX = cx;

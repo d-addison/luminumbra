@@ -4931,6 +4931,53 @@ public:
         return Draw(
             mesh, origin, view, 1040, cells, false, arrival, child_y, camera, false, arrival_child);
     }
+    float NearClippedBoundary(std::span<const FarWorldLiveCell> cells, int sample_column) {
+        const glm::dvec3 origin(0, -256, -1024), camera(0, 200, 0);
+        const auto view = glm::lookAt(glm::vec3(0), glm::vec3(0, -200, -200), glm::vec3(0, 1, 0));
+        FarVolumeRenderMesh mesh;
+        mesh.content = Luminumbra::World::FarVolumeContent::Mixed;
+        // World Y=0 is the exact local Y=256 boundary. All endpoints lie
+        // outside the 176 m vertex guard; only the apex crosses the near plane.
+        mesh.vertices = {{{-120, 256, 624}, {0, 1, 0}, 1},
+                         {{120, 256, 624}, {0, 1, 0}, 1},
+                         {{0, 256, 1324}, {0, 1, 0}, 1}};
+        const auto projection =
+            ReversedZPerspective(glm::radians(45.0f), 1, .1f, Luminumbra::World::kFarPlaneMeters);
+        for (std::size_t i = 0; i < 3; ++i) {
+            const auto relative = mesh.vertices[i].position + glm::vec3(origin - camera);
+            EXPECT_GT(glm::length(relative), 176);
+            const auto clip = projection * view * glm::vec4(relative, 1);
+            if (i < 2) {
+                EXPECT_GT(clip.w - clip.z, 0);
+            } else {
+                EXPECT_LT(clip.w - clip.z, 0);
+            }
+        }
+        // Give the offscreen neighbours different constant Y planes. If either
+        // piece of the clipped quad uses ID 0 or 2 instead of source ID 1,
+        // farTileLocal restores Y=240 or Y=272 and selects the wrong owner.
+        for (const float y : {240.0f, 272.0f}) {
+            for (std::size_t i = 0; i < 3; ++i) {
+                auto vertex = mesh.vertices[i];
+                vertex.position.x += 100000;
+                vertex.position.y = y;
+                mesh.vertices.push_back(vertex);
+            }
+        }
+        mesh.indices = {3, 4, 5, 2, 0, 1, 6, 7, 8};
+        return Draw(mesh,
+                    origin,
+                    view,
+                    1040,
+                    cells,
+                    false,
+                    false,
+                    {0, 256},
+                    camera,
+                    false,
+                    -1,
+                    sample_column);
+    }
 
 private:
     GLint Location(const char* name) const {
@@ -4949,7 +4996,8 @@ private:
                glm::vec2 child_y,
                const glm::dvec3& camera = glm::dvec3(0),
                bool remap_arrival_origin = true,
-               int arrival_child = -1) {
+               int arrival_child = -1,
+               int sample_column = kProbeEdge / 2) {
         glUseProgram(program_);
         const auto projection =
             ReversedZPerspective(glm::radians(45.0f), 1, .1f, Luminumbra::World::kFarPlaneMeters);
@@ -5012,7 +5060,7 @@ private:
             SubmitLive(mesh, glm::vec3(centre), projection, view, cells);
         std::array<float, 4> pixel{};
         glReadBuffer(GL_COLOR_ATTACHMENT0);
-        glReadPixels(kProbeEdge / 2, kProbeEdge / 2, 1, 1, GL_RGBA, GL_FLOAT, pixel.data());
+        glReadPixels(sample_column, kProbeEdge / 2, 1, 1, GL_RGBA, GL_FLOAT, pixel.data());
         EXPECT_EQ(glGetError(), GL_NO_ERROR);
         return pixel[2];
     }
@@ -5266,6 +5314,31 @@ TEST(RenderSmokeTest, FarWorldIndexedPlanesPreserveVaryingAxes) {
     EXPECT_LT(sample(below, 1, owner), -176);
     EXPECT_LT(sample(above, 1, lower), -176);
     EXPECT_EQ(sample(above, 1, owner), 0);
+}
+
+TEST(RenderSmokeTest, FarWorldNearClippedBoundaryRetainsSourcePrimitiveId) {
+    HiddenGlContext context;
+    if (!context.ready()) {
+        GTEST_SKIP() << context.error();
+    }
+    FarWorldShaderProbe probe;
+    ASSERT_TRUE(probe.Init());
+    const std::array owner{FarWorldLiveCell{-5, 0, -13, kFarWorldTerrainReady},
+                           FarWorldLiveCell{4, 0, -13, kFarWorldTerrainReady}};
+    const std::array below{FarWorldLiveCell{-5, -1, -13, kFarWorldTerrainReady},
+                           FarWorldLiveCell{4, -1, -13, kFarWorldTerrainReady}};
+    const std::array above{FarWorldLiveCell{-5, 1, -13, kFarWorldTerrainReady},
+                           FarWorldLiveCell{4, 1, -13, kFarWorldTerrainReady}};
+    // At centre-row NDC X=+/-174/257 these samples lie on opposite sides of
+    // either diagonal of the near-clipped quad, covering both generated pieces.
+    // They intersect world Y=0, Z=-200 at view Z=-sqrt(200^2 + 200^2).
+    for (const int column : {41, 215}) {
+        SCOPED_TRACE(::testing::Message() << "column=" << column);
+        EXPECT_NEAR(probe.NearClippedBoundary({}, column), -std::sqrt(80000.0f), .01);
+        EXPECT_EQ(probe.NearClippedBoundary(owner, column), 0);
+        EXPECT_NEAR(probe.NearClippedBoundary(below, column), -std::sqrt(80000.0f), .01);
+        EXPECT_NEAR(probe.NearClippedBoundary(above, column), -std::sqrt(80000.0f), .01);
+    }
 }
 
 TEST(RenderSmokeTest, FarWorldCanonicalArrivalUsesLocalChildAndSpanBoundaries) {

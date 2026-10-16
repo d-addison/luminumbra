@@ -66,6 +66,46 @@ class FrameAttributionWiring(unittest.TestCase):
                          r"if \(collect_attribution\) \{ // Diagnostic[^\n]*? "
                          r"Attribution::ScatterSignature components\{\};")
 
+    def test_menu_input_ownership_and_exclusive_attribution_share_the_call(self):
+        main = compact(self.main)
+        self.assertRegex(main, r"RenderMenuScreens\([^;]*menuPreviewState, uiInputRouter\); "
+                         r"menu_timer.stop\(\); rb_menu_ms = Attribution::exclusive_parent_ms\("
+                         r" rb_menu_ms, menu_foliage_before, foliage_scope.snapshot\(\).rebuild_ms\);")
+        menu = compact(block(read(CLIENT / "app/MenuScreens.cpp"), "void RenderMenuScreens("))
+        self.assertTrue(menu.startswith(
+            "const bool previewMouseAllowed = previewState.UpdateInputOwnership(inputRouter);"))
+
+    def test_cached_menu_retains_input_ownership_and_scene_state(self):
+        header = read(CLIENT / "app/MenuScreens.h")
+        state = block(header, "struct MenuSceneState : MenuPreviewState")
+        self.assertIn("MenuSceneSchedule schedule;", state)
+        self.assertIn("MenuSceneImage scene_image;", state)
+        self.assertIn("MenuSceneState& previewState,", header)
+        self.assertIn("const UiInputRouter& inputRouter", header)
+        self.assertIn("MenuSceneState menuPreviewState;", self.main)
+        menu = block(read(CLIENT / "app/MenuScreens.cpp"), "void RenderMenuScreens(")
+        self.assertLess(menu.index("UpdateInputOwnership(inputRouter)"),
+                        menu.index("schedule.update(now, key, interactive)"))
+        self.assertIn("previewMouseAllowed &&", menu)
+        self.assertIn("interactive = true;", block(menu, "if (previewState.dragging)"))
+
+    def test_poll_attribution_keeps_ownership_refresh_and_registered_overlays(self):
+        poll = self.main[self.main.index("const auto _rb_poll_t0"):
+                         self.main.index("glfwPollEvents();")]
+        self.assertIn("poll_phases_before = Attribution::phase_total_ms();", poll)
+        self.assertIn("poll_foliage_before = foliage_scope.snapshot().rebuild_ms;", poll)
+        self.assertIn("RefreshInputOwnership(window);", poll)
+        after_poll = compact(self.main[self.main.index("glfwPollEvents();"):])
+        self.assertTrue(after_poll.startswith("glfwPollEvents(); RefreshInputOwnership(window);"))
+        self.assertIn("developerConsole.Draw(developerFrame);", self.main)
+        self.assertNotIn("DrawFrameStatusOverlays(", self.main)
+        self.assertNotIn("DrawGpuProfilerOverlay(", self.main)
+        self.assertRegex(compact(self.main),
+                         r"menuPreviewState.schedule = \{\}; "
+                         r"menuPreviewState.last_menu_frame = \{\}; "
+                         r"//[^\n]*? if \(g_app.capture.timelapse_creatures\) "
+                         r"DrawCreatureNameplates\(")
+
     def test_disabled_timers_do_not_read_clocks(self):
         constructor = compact(block(self.header, "explicit StageTimer("))
         self.assertEqual(constructor, "if (m_running) m_start = std::chrono::steady_clock::now();")
@@ -138,7 +178,10 @@ class FrameAttributionWiring(unittest.TestCase):
                       "m_foliage_pass->last_draw_calls() > 0", pipeline)
         self.assertIn("m_last_render_pass_stats.foliage_instance_count_known = "
                       "m_foliage_pass->frame_instance_count_known();", pipeline)
-        overlay = compact(read(CLIENT / "app/DebugOverlays.cpp"))
+        overlay = compact(block(read(CLIENT / "app/DebugOverlays.cpp"),
+                                "void DrawGpuProfilerContents("))
+        self.assertNotIn("ImGui::Begin(", overlay)
+        self.assertNotIn("ImGui::End(", overlay)
         self.assertIn('if (gp.foliage_instance_count_known) ImGui::Text(', overlay)
         self.assertIn('capacity (count unavailable)', overlay)
         main = compact(self.main)
@@ -341,6 +384,16 @@ class FrameAttributionWiring(unittest.TestCase):
         self.assertTrue(record.startswith("if (!active()) return false; return write_csv_row(m_out,"))
         self.assertEqual(compact(block(self.header, "bool active() const")),
                          "return m_out.is_open() && m_out.good();")
+
+    def test_recorder_finalization_failure_reaches_shutdown_error_path(self):
+        finish = compact(block(self.collector, "bool FrameRecorder::finish()"))
+        self.assertIn("return finalize_csv(m_out);", finish)
+        failure = compact(block(self.main, "if (!frame_recorder.finish())"))
+        self.assertIn('LUMINUMBRA_CORE_ERROR("Frame attribution CSV finalization failed");', failure)
+        self.assertIn("if (exit_code == 0) exit_code = 1;", failure)
+        self.assertLess(self.main.index("if (!frame_recorder.finish())"),
+                        self.main.index('trace_shutdown("query_cleanup_started")'))
+        self.assertIn("return exit_code;", self.main)
 
 
 if __name__ == "__main__":
