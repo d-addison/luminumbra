@@ -196,7 +196,7 @@ SystemConfig SystemConfig::LoadFromFile(const std::string& path) {
 bool SystemConfig::TryLoadFromFile(const std::string& path,
                                    SystemConfig& config,
                                    std::string& error) {
-    std::ifstream file(path);
+    std::ifstream file(path, std::ios::binary);
     if (!file) {
         error = "cannot read systems config: " + path;
         return false;
@@ -207,13 +207,18 @@ bool SystemConfig::TryLoadFromFile(const std::string& path,
         error = "cannot read systems config: " + path;
         return false;
     }
+    const auto bytes = buffer.str();
+    if (bytes.find('\0') != std::string::npos) {
+        error = "invalid systems config: raw NUL byte: " + path;
+        return false;
+    }
     try {
-        const auto document = nlohmann::json::parse(buffer.str());
+        const auto document = nlohmann::json::parse(bytes);
         if (!document.is_object()) {
             error = "systems config must be a JSON object: " + path;
             return false;
         }
-        config = FromJsonString(document.dump());
+        config = FromJsonString(bytes);
     } catch (const nlohmann::json::exception& exception) {
         error = "invalid systems config: " + path + ": " + exception.what();
         return false;

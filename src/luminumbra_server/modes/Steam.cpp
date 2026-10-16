@@ -55,6 +55,21 @@ int RunSteamHost(const ServerCliOptions& options) {
     LUMINUMBRA_CORE_INFO("steam-host: peer connected over Steam UDP.");
 
     Luminumbra::Net::ReplicationServer server;
+    auto expected_hello = RuntimeHelloFrom(options, runner.Session());
+    RuntimeHelloAdmission admission = RuntimeHelloAdmission::Pending;
+    while (std::chrono::steady_clock::now() < deadline) {
+        Luminumbra::Net::SteamLink::RunCallbacks();
+        admission = PollRuntimeHello(transport, expected_hello, 1u);
+        if (admission != RuntimeHelloAdmission::Pending)
+            break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    if (admission != RuntimeHelloAdmission::Accepted) {
+        LUMINUMBRA_CORE_ERROR("steam-host: missing or incompatible Hello");
+        transport.Close();
+        Luminumbra::Net::SteamLink::Shutdown();
+        return 1;
+    }
     server.AddClient(1, &transport);
     server.SetAoiChunkRadius(3, Luminumbra::CHUNK_SIZE_X * 1000);
     const std::uint32_t controlled = runner.Avatars().size() > 1 ? 1u : 0u;
@@ -123,6 +138,14 @@ int RunSteamJoin(const ServerCliOptions& options) {
     }
     LUMINUMBRA_CORE_INFO("steam-join: connected over Steam UDP.");
 
+    auto hello = RuntimeHelloFrom(options);
+    hello.client_id = 1u;
+    if (!transport.SendFrame(Luminumbra::Net::EncodeHello(hello))) {
+        transport.Close();
+        Luminumbra::Net::SteamLink::Shutdown();
+        return 1;
+    }
+
     Luminumbra::Net::ReplicationClient client(1, &transport);
     std::uint32_t last_seq = 0;
     std::size_t max_entities = 0;
@@ -133,7 +156,9 @@ int RunSteamJoin(const ServerCliOptions& options) {
         cmd.tick = last_seq + 1;
         cmd.player_id = 1;
         cmd.move_x = 32767;
-        client.SendUsercmd(cmd);
+        // A snapshot proves admission. Unreliable commands must not overtake the reliable Hello.
+        if (client.has_snapshot())
+            client.SendUsercmd(cmd);
         client.PumpInbound();
         if (client.has_snapshot()) {
             last_seq = client.snapshot().snapshot_seq;

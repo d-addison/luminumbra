@@ -46,7 +46,7 @@ int RunNetHostServerMode(const ServerCliOptions& options) {
     }
 
     Luminumbra::Net::ReplicationServer server;
-    auto expected_hello = RuntimeHelloFrom(options);
+    auto expected_hello = RuntimeHelloFrom(options, runner.Session());
     std::vector<RuntimeTcpClientSlot> slots;
     slots.reserve(expected_clients);
     for (std::uint32_t client_id = 1; client_id <= expected_clients; ++client_id) {

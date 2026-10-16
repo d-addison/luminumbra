@@ -91,6 +91,23 @@ int RunGnsHost(const ServerCliOptions& options) {
             Luminumbra::Net::GnsLink::Shutdown();
             return 1;
         }
+        auto expected_hello = RuntimeHelloFrom(options, runner.Session());
+        RuntimeHelloAdmission admission = RuntimeHelloAdmission::Pending;
+        while (std::chrono::steady_clock::now() < deadline) {
+            Luminumbra::Net::GnsLink::RunCallbacks();
+            admission = PollRuntimeHello(*transport, expected_hello, client_id);
+            if (admission != RuntimeHelloAdmission::Pending)
+                break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        if (admission != RuntimeHelloAdmission::Accepted) {
+            LUMINUMBRA_CORE_ERROR("gns-host: missing or incompatible Hello");
+            transport->Close();
+            for (auto& accepted : transports)
+                accepted->Close();
+            Luminumbra::Net::GnsLink::Shutdown();
+            return 1;
+        }
         server.AddClient(client_id, transport.get());
         client_ids.push_back(client_id);
         transports.push_back(std::move(transport));
@@ -204,6 +221,14 @@ int RunGnsJoin(const ServerCliOptions& options) {
     }
     LUMINUMBRA_CORE_INFO("gns-join: player {} connected over UDP.", player_id);
 
+    auto hello = RuntimeHelloFrom(options);
+    hello.client_id = player_id;
+    if (!transport.SendFrame(Luminumbra::Net::EncodeHello(hello))) {
+        transport.Close();
+        Luminumbra::Net::GnsLink::Shutdown();
+        return 1;
+    }
+
     Luminumbra::Net::ReplicationClient client(player_id, &transport);
     std::uint32_t last_seq = 0;
     std::size_t max_entities = 0;
@@ -214,7 +239,9 @@ int RunGnsJoin(const ServerCliOptions& options) {
         cmd.tick = last_seq + 1;
         cmd.player_id = player_id;
         cmd.move_x = 32767;
-        client.SendUsercmd(cmd);
+        // A snapshot proves admission. Unreliable commands must not overtake the reliable Hello.
+        if (client.has_snapshot())
+            client.SendUsercmd(cmd);
         client.PumpInbound();
         if (client.has_snapshot()) {
             last_seq = client.snapshot().snapshot_seq;

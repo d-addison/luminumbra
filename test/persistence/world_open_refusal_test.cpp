@@ -16,6 +16,7 @@
 #include "luminumbra_common/world/GameSession.h"
 #include "luminumbra_common/world/TerrainPresetLoader.h"
 #include "luminumbra_server/ServerWorldRunner.h"
+#include "luminumbra_server/modes/ModeHelpers.h"
 
 #include <algorithm>
 #include <atomic>
@@ -961,6 +962,34 @@ TEST_F(WorldOpenRefusal, FreshRunnerBootAndAbsentLedgerReloadPreserveSchedulerId
     loaded.Shutdown();
 }
 
+TEST_F(WorldOpenRefusal, NetworkHelloUsesCapturedContentAndRefusesUnreadableJoinContent) {
+    GameSession pending;
+    EXPECT_TRUE(CapturedSimulationIdentityForHello(pending).empty());
+    pending.SetActiveRegionsEnabled(false);
+    EXPECT_EQ(CapturedSimulationIdentityForHello(pending), Net::kInactiveSimulationContentIdentity);
+    GameSession session;
+    session.SetRootPath(RootString());
+    session.SetJobSystem(&jobs);
+    ASSERT_TRUE(session.LoadWorld("fixture")) << session.GetWorldOpenError();
+    ASSERT_NE(session.GetSimulationContent(), nullptr);
+    ServerCliOptions options;
+    options.root = RootString();
+    options.seed = "1337";
+    const auto captured = RuntimeHelloFrom(options, &session);
+    EXPECT_EQ(captured.simulation_content_identity,
+              session.GetSimulationContent()->identity.encode());
+    EXPECT_EQ(captured.system_config_identity, session.SystemConfigIdentity());
+    EXPECT_EQ(captured.preset_content_hash, session.PresetContentHash());
+    const auto matching = RuntimeHelloFrom(options);
+    EXPECT_EQ(matching.simulation_content_identity, captured.simulation_content_identity);
+    Write(root / "data/common/foliage/species/fixture_plant.json", "{invalid");
+    EXPECT_EQ(RuntimeHelloFrom(options, &session).simulation_content_identity,
+              captured.simulation_content_identity);
+    const auto refused = RuntimeHelloFrom(options);
+    EXPECT_TRUE(refused.simulation_content_identity.empty());
+    EXPECT_FALSE(Net::HelloMatches(captured, refused));
+}
+
 TEST_F(WorldOpenRefusal, PersistedSchedulerIdentityRefusesDifferentAdmissionAndReplayRules) {
     // Each field changes independently while both sessions start with default member storage.
     // Identity must observe the decoded ledger rather than that original storage.
@@ -996,6 +1025,8 @@ TEST_F(WorldOpenRefusal, PersistedSchedulerIdentityRefusesDifferentAdmissionAndR
         local.peer_client_id = 1;
         local.system_config_identity = baseline_identity;
         local.preset_content_hash = loaded.PresetContentHash();
+        ASSERT_NE(loaded.GetSimulationContent(), nullptr);
+        local.simulation_content_identity = loaded.GetSimulationContent()->identity.encode();
         Net::HelloMsg hello;
         hello.seed = local.seed;
         hello.preset = local.preset;
@@ -1003,9 +1034,12 @@ TEST_F(WorldOpenRefusal, PersistedSchedulerIdentityRefusesDifferentAdmissionAndR
         hello.client_id = 1;
         hello.system_config_identity = loaded.SystemConfigIdentity();
         hello.preset_content_hash = loaded.PresetContentHash();
+        hello.simulation_content_identity = loaded.GetSimulationContent()->identity.encode();
         auto expected_hello = hello;
         expected_hello.system_config_identity = baseline_identity;
         expected_hello.preset_content_hash = loaded.PresetContentHash();
+        expected_hello.simulation_content_identity =
+            loaded.GetSimulationContent()->identity.encode();
         EXPECT_FALSE(Net::HelloMatches(expected_hello, hello)); // TCP admission
         auto [host_transport, peer_transport] = Net::MakeLoopbackPair();
         Net::LockstepSession host(local, host_transport.get(), {});

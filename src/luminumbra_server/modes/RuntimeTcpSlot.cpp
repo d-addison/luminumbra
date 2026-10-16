@@ -1,5 +1,21 @@
 #include "ModeHelpers.h"
 
+RuntimeHelloAdmission PollRuntimeHello(Luminumbra::Net::ILockstepTransport& transport,
+                                       const Luminumbra::Net::HelloMsg& expected,
+                                       std::uint32_t client_id) {
+    std::vector<std::uint8_t> frame;
+    if (!transport.TryReceiveFrame(frame))
+        return transport.IsPeerConnected() ? RuntimeHelloAdmission::Pending
+                                           : RuntimeHelloAdmission::Refused;
+    Luminumbra::Net::HelloMsg hello;
+    if (!Luminumbra::Net::DecodeHello(frame, hello) ||
+        !Luminumbra::Net::HelloMatches(expected, hello) || hello.client_id != client_id) {
+        transport.Close();
+        return RuntimeHelloAdmission::Refused;
+    }
+    return RuntimeHelloAdmission::Accepted;
+}
+
 namespace {
 
 bool PollRuntimeTcpHello(RuntimeTcpClientSlot& slot,
@@ -14,18 +30,11 @@ bool PollRuntimeTcpHello(RuntimeTcpClientSlot& slot,
         return false;
     }
 
-    std::vector<std::uint8_t> frame;
-    if (!slot.transport->TryReceiveFrame(frame)) {
-        if (!slot.transport->IsPeerConnected()) {
-            slot.transport.reset();
-            slot.awaiting_hello = false;
-        }
+    const auto admission = PollRuntimeHello(*slot.transport, expected, slot.client_id);
+    if (admission == RuntimeHelloAdmission::Pending)
         return false;
-    }
-    Luminumbra::Net::HelloMsg hello;
     slot.awaiting_hello = false;
-    if (!Luminumbra::Net::DecodeHello(frame, hello) ||
-        !Luminumbra::Net::HelloMatches(expected, hello) || hello.client_id != slot.client_id) {
+    if (admission == RuntimeHelloAdmission::Refused) {
         LUMINUMBRA_CORE_ERROR("net-host: incompatible session identity (including resolved "
                               "preset content hash) for client {}",
                               slot.client_id);

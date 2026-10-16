@@ -31,5 +31,17 @@ bool PollRuntimeTcpAccept(RuntimeTcpClientSlot& slot, const Luminumbra::Net::Hel
 bool PollRuntimeTcpAccept(RuntimeTcpClientSlot& slot,
                           const Luminumbra::Net::HelloMsg& expected,
                           std::chrono::steady_clock::time_point now);
-Luminumbra::Net::HelloMsg RuntimeHelloFrom(const ServerCliOptions& options);
+std::string CapturedSimulationIdentityForHello(const Luminumbra::world::GameSession& session);
+Luminumbra::Net::HelloMsg
+RuntimeHelloFrom(const ServerCliOptions& options,
+                 const Luminumbra::world::GameSession* captured_session = nullptr);
+enum class RuntimeHelloAdmission {
+    Pending,
+    Accepted,
+    Refused
+};
+// Consume only the first queued frame; following replication frames stay queued.
+RuntimeHelloAdmission PollRuntimeHello(Luminumbra::Net::ILockstepTransport& transport,
+                                       const Luminumbra::Net::HelloMsg& expected,
+                                       std::uint32_t client_id);
 void CloseRuntimeTcpSlot(RuntimeTcpClientSlot& slot);

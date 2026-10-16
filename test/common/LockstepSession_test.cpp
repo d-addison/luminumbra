@@ -7,11 +7,14 @@
 // this one process, driven turn-by-turn so the loopback queues carry their frames.
 
 #include "../support/SystemConfigVariants.h"
+#include "../support/SimulationContentFixture.h"
+#include "../support/UniqueTempPath.h"
 #include <gtest/gtest.h>
 
 #include <cstdint>
 #include <filesystem>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "luminumbra_common/net/LockstepSession.h"
@@ -87,6 +90,7 @@ net::LockstepConfig MakeConfig(std::uint32_t local_id, std::uint32_t peer_id) {
     c.peer_client_id = peer_id;
     c.system_config_identity = Luminumbra::world::GameSession{}.SystemConfigIdentity();
     c.preset_content_hash = Luminumbra::TestSupport::PresetIdentityFixtureHash();
+    c.simulation_content_identity = net::kInactiveSimulationContentIdentity;
     return c;
 }
 
@@ -113,6 +117,7 @@ TEST(LockstepSessionTest, HandshakeAccepts) {
         net::HelloMsg m;
         m.system_config_identity = Luminumbra::world::GameSession{}.SystemConfigIdentity();
         m.preset_content_hash = Luminumbra::TestSupport::PresetIdentityFixtureHash();
+        m.simulation_content_identity = net::kInactiveSimulationContentIdentity;
         m.seed = 424242;
         m.preset = "default";
         m.tick_rate_hz = 30;
@@ -137,6 +142,7 @@ TEST(LockstepSessionTest, EffectiveConfigIdentityAcceptsEqualAndRejectsDifferent
         auto local = MakeConfig(0, 1);
         local.system_config_identity = baseline;
         local.preset_content_hash = Luminumbra::TestSupport::PresetIdentityFixtureHash();
+        local.simulation_content_identity = net::kInactiveSimulationContentIdentity;
         net::LockstepSession host(local, host_transport.get(), MakeHooks(&world));
         net::HelloMsg hello;
         hello.seed = local.seed;
@@ -144,12 +150,14 @@ TEST(LockstepSessionTest, EffectiveConfigIdentityAcceptsEqualAndRejectsDifferent
         hello.client_id = 1;
         hello.system_config_identity = identity;
         hello.preset_content_hash = Luminumbra::TestSupport::PresetIdentityFixtureHash();
+        hello.simulation_content_identity = net::kInactiveSimulationContentIdentity;
         ASSERT_TRUE(peer_transport->SendFrame(net::EncodeHello(hello)));
         const bool equal = name == "identical";
         EXPECT_EQ(hello.system_config_identity == baseline, equal);
         auto expected_hello = hello;
         expected_hello.system_config_identity = baseline;
         expected_hello.preset_content_hash = Luminumbra::TestSupport::PresetIdentityFixtureHash();
+        expected_hello.simulation_content_identity = net::kInactiveSimulationContentIdentity;
         EXPECT_EQ(net::HelloMatches(expected_hello, hello), equal);
         EXPECT_EQ(host.Handshake(), equal);
         EXPECT_EQ(host.Status().handshaken, equal);
@@ -173,11 +181,13 @@ TEST(LockstepSessionTest, SamePresetNameBindsResolvedOverrideContent) {
         hello.client_id = 1;
         hello.system_config_identity = local.system_config_identity;
         hello.preset_content_hash = peer_hash;
+        hello.simulation_content_identity = net::kInactiveSimulationContentIdentity;
         net::HelloMsg decoded;
         ASSERT_TRUE(net::DecodeHello(net::EncodeHello(hello), decoded));
         EXPECT_EQ(decoded.preset_content_hash, peer_hash);
         auto expected = hello;
         expected.preset_content_hash = local.preset_content_hash;
+        expected.simulation_content_identity = net::kInactiveSimulationContentIdentity;
         const bool matches = peer_hash == local.preset_content_hash;
         EXPECT_EQ(net::HelloMatches(expected, decoded), matches);
         ASSERT_TRUE(peer_transport->SendFrame(net::EncodeHello(hello)));
@@ -193,12 +203,152 @@ TEST(LockstepSessionTest, LegacyHelloWithoutPresetIdentityIsRefused) {
     hello.system_config_identity = Luminumbra::world::GameSession{}.SystemConfigIdentity();
     auto frame = net::EncodeHello(hello);
     // Version 2 ended after system_config_identity, without a preset hash field.
-    frame.resize(frame.size() - 4);
+    frame.resize(frame.size() - 8);
     const auto size = static_cast<std::uint32_t>(frame.size() - 5);
     for (unsigned i = 0; i < 4; ++i)
         frame[1u + i] = static_cast<std::uint8_t>((size >> (8u * i)) & 0xffu);
     net::HelloMsg decoded;
     EXPECT_FALSE(net::DecodeHello(frame, decoded));
+}
+
+TEST(LockstepSessionTest, CapturedContentIdentityBindsPolicySpeciesAndPopulation) {
+    using namespace Luminumbra::world;
+    const Luminumbra::TestSupport::ScopedTempFile temporary("lockstep_content_", ".json");
+    const auto root = temporary.Path().parent_path();
+    Luminumbra::TestSupport::WriteSimulationContentFixture(root);
+    SimulationContent content;
+    std::string error;
+    ASSERT_TRUE(AdmitSimulationContent(root, content, error)) << error;
+    const auto baseline = content.identity.encode();
+    auto changed = content;
+    changed.policy.creatures.at("fixture_creature").coarse_need_rate_ppm = 1000;
+    const auto policy = BuildSimulationContentIdentity(changed).encode();
+    changed = content;
+    changed.creature_definitions.front().bytes =
+        R"({"id":"fixture_creature","brain":{"wander_weight":0.71}})";
+    const auto creature = BuildSimulationContentIdentity(changed).encode();
+    changed = content;
+    changed.plant_definitions.front().bytes = R"({"id":"fixture_plant","lifespan_ticks":54321})";
+    const auto plant = BuildSimulationContentIdentity(changed).encode();
+    const std::vector<std::pair<std::string, std::string>> identities{
+        {"identical", baseline},
+        {"policy", policy},
+        {"creature", creature},
+        {"plant", plant},
+        {"population contract", BuildSimulationContentIdentity(content, "populator:v1").encode()},
+        {"population configuration",
+         BuildSimulationContentIdentity(content, kDefaultPopulationContract, "config:v1").encode()},
+        {"inactive", net::kInactiveSimulationContentIdentity},
+        {"missing", {}}};
+    for (const auto& [name, identity] : identities) {
+        SCOPED_TRACE(name);
+        const bool matches = name == "identical";
+        EXPECT_EQ(identity == baseline, matches);
+        auto local = MakeConfig(0, 1);
+        local.simulation_content_identity = baseline;
+        net::HelloMsg peer;
+        peer.seed = local.seed;
+        peer.preset = local.preset;
+        peer.client_id = 1;
+        peer.system_config_identity = local.system_config_identity;
+        peer.preset_content_hash = local.preset_content_hash;
+        peer.simulation_content_identity = identity;
+        net::HelloMsg decoded;
+        ASSERT_TRUE(net::DecodeHello(net::EncodeHello(peer), decoded));
+        EXPECT_EQ(decoded.simulation_content_identity, identity);
+        auto expected = peer;
+        expected.simulation_content_identity = baseline;
+        EXPECT_EQ(net::HelloMatches(expected, decoded), matches);
+        EXPECT_EQ(net::HelloMatches(decoded, expected), matches);
+        auto [host_transport, peer_transport] = net::MakeLoopbackPair();
+        ASSERT_TRUE(peer_transport->SendFrame(net::EncodeHello(peer)));
+        FakeWorld world{0, "initial", 0};
+        net::LockstepSession host(local, host_transport.get(), MakeHooks(&world));
+        EXPECT_EQ(host.Handshake(), matches);
+        EXPECT_EQ(host.Status().handshaken, matches);
+        EXPECT_EQ(world.tick, 0u);
+        std::vector<std::uint8_t> sent;
+        ASSERT_TRUE(peer_transport->TryReceiveFrame(sent));
+        net::HelloMsg host_hello;
+        ASSERT_TRUE(net::DecodeHello(sent, host_hello));
+        EXPECT_EQ(host_hello.simulation_content_identity, baseline);
+    }
+}
+
+TEST(LockstepSessionTest, MissingContentIdentityOnEitherSideIsRefused) {
+    for (const bool missing_local : {false, true}) {
+        for (const bool missing_peer : {false, true}) {
+            auto local = MakeConfig(0, 1);
+            net::HelloMsg peer;
+            peer.seed = local.seed;
+            peer.preset = local.preset;
+            peer.client_id = 1;
+            peer.system_config_identity = local.system_config_identity;
+            peer.preset_content_hash = local.preset_content_hash;
+            peer.simulation_content_identity = local.simulation_content_identity;
+            if (missing_local)
+                local.simulation_content_identity.clear();
+            if (missing_peer)
+                peer.simulation_content_identity.clear();
+            auto [host_transport, peer_transport] = net::MakeLoopbackPair();
+            ASSERT_TRUE(peer_transport->SendFrame(net::EncodeHello(peer)));
+            FakeWorld world{0, "initial", 0};
+            net::LockstepSession host(local, host_transport.get(), MakeHooks(&world));
+            EXPECT_EQ(host.Handshake(), !missing_local && !missing_peer);
+            EXPECT_EQ(world.tick, 0u);
+        }
+    }
+}
+
+TEST(LockstepSessionTest, ContentIdentitySizeIsBoundedBeforeDecoding) {
+    EXPECT_EQ(net::kMaxSimulationContentIdentityBytes,
+              Luminumbra::world::SimulationContentIdentity::kEncodedBytes);
+    net::HelloMsg hello;
+    hello.system_config_identity = "config";
+    hello.preset_content_hash = "preset";
+    hello.simulation_content_identity = std::string(net::kMaxSimulationContentIdentityBytes, 'a');
+    auto frame = net::EncodeHello(hello);
+    net::HelloMsg decoded;
+    ASSERT_TRUE(net::DecodeHello(frame, decoded));
+    EXPECT_EQ(decoded.simulation_content_identity, hello.simulation_content_identity);
+    const auto length_at = frame.size() - hello.simulation_content_identity.size() - 4;
+    frame[length_at] = static_cast<std::uint8_t>(net::kMaxSimulationContentIdentityBytes + 1);
+    frame.push_back('b');
+    const auto payload_size = static_cast<std::uint32_t>(frame.size() - 5);
+    for (unsigned i = 0; i < 4; ++i)
+        frame[1u + i] = static_cast<std::uint8_t>((payload_size >> (8u * i)) & 0xffu);
+    decoded.simulation_content_identity = "unchanged";
+    EXPECT_FALSE(net::DecodeHello(frame, decoded));
+    EXPECT_EQ(decoded.simulation_content_identity, "unchanged");
+    for (unsigned i = 0; i < 4; ++i)
+        frame[length_at + i] = 0xff;
+    EXPECT_FALSE(net::DecodeHello(frame, decoded));
+    hello.simulation_content_identity.push_back('b');
+    EXPECT_TRUE(net::EncodeHello(hello).empty());
+    EXPECT_FALSE(net::HelloMatches(hello, hello));
+}
+
+TEST(LockstepSessionTest, OnlyHelloVersionFourIsAdmitted) {
+    net::HelloMsg local;
+    local.system_config_identity = "config";
+    local.preset_content_hash = "preset";
+    local.simulation_content_identity = net::kInactiveSimulationContentIdentity;
+    EXPECT_EQ(net::kLockstepProtocolVersion, 4u);
+    const std::uint16_t versions[]{0, 1, 2, 3, 4, 5, 65535};
+    for (const auto version : versions) {
+        auto peer = local;
+        peer.protocol_version = version;
+        net::HelloMsg decoded;
+        EXPECT_EQ(net::DecodeHello(net::EncodeHello(peer), decoded), version == 4);
+        EXPECT_EQ(net::HelloMatches(local, peer), version == 4);
+    }
+    auto truncated = net::EncodeHello(local);
+    truncated.resize(truncated.size() - 4 - local.simulation_content_identity.size());
+    const auto payload_size = static_cast<std::uint32_t>(truncated.size() - 5);
+    for (unsigned i = 0; i < 4; ++i)
+        truncated[1u + i] = static_cast<std::uint8_t>((payload_size >> (8u * i)) & 0xffu);
+    net::HelloMsg decoded;
+    EXPECT_FALSE(net::DecodeHello(truncated, decoded));
 }
 
 TEST(LockstepSessionTest, HandshakeRefusesMissingIdentityOnEitherSide) {
@@ -213,6 +363,7 @@ TEST(LockstepSessionTest, HandshakeRefusesMissingIdentityOnEitherSide) {
             peer.client_id = 1;
             peer.system_config_identity = local.system_config_identity;
             peer.preset_content_hash = Luminumbra::TestSupport::PresetIdentityFixtureHash();
+            peer.simulation_content_identity = net::kInactiveSimulationContentIdentity;
             if (missing_local)
                 local.system_config_identity.clear();
             if (missing_peer)
@@ -256,6 +407,7 @@ TEST(LockstepSessionTest, HandshakeRejectsSeedMismatch) {
     net::HelloMsg bad;
     bad.system_config_identity = Luminumbra::world::GameSession{}.SystemConfigIdentity();
     bad.preset_content_hash = Luminumbra::TestSupport::PresetIdentityFixtureHash();
+    bad.simulation_content_identity = net::kInactiveSimulationContentIdentity;
     bad.seed = 999;
     bad.preset = "default";
     bad.tick_rate_hz = 30;
@@ -273,6 +425,7 @@ TEST(LockstepSessionTest, HandshakeRejectsPresetMismatch) {
     net::HelloMsg bad;
     bad.system_config_identity = Luminumbra::world::GameSession{}.SystemConfigIdentity();
     bad.preset_content_hash = Luminumbra::TestSupport::PresetIdentityFixtureHash();
+    bad.simulation_content_identity = net::kInactiveSimulationContentIdentity;
     bad.seed = 424242;
     bad.preset = "mountains";
     bad.tick_rate_hz = 30;
@@ -331,6 +484,7 @@ TEST(LockstepSessionTest, InSyncTickExchange) {
     net::HelloMsg bh;
     bh.system_config_identity = Luminumbra::world::GameSession{}.SystemConfigIdentity();
     bh.preset_content_hash = Luminumbra::TestSupport::PresetIdentityFixtureHash();
+    bh.simulation_content_identity = net::kInactiveSimulationContentIdentity;
     bh.seed = 424242;
     bh.preset = "default";
     bh.tick_rate_hz = 30;
@@ -360,6 +514,7 @@ TEST(LockstepSessionTest, HorizonAbsorbsLateInput) {
     net::HelloMsg bh;
     bh.system_config_identity = Luminumbra::world::GameSession{}.SystemConfigIdentity();
     bh.preset_content_hash = Luminumbra::TestSupport::PresetIdentityFixtureHash();
+    bh.simulation_content_identity = net::kInactiveSimulationContentIdentity;
     bh.seed = 424242;
     bh.preset = "default";
     bh.tick_rate_hz = 30;
@@ -407,6 +562,7 @@ TEST(LockstepSessionTest, DesyncDetectedAndDumpEmitted) {
     net::HelloMsg bh;
     bh.system_config_identity = Luminumbra::world::GameSession{}.SystemConfigIdentity();
     bh.preset_content_hash = Luminumbra::TestSupport::PresetIdentityFixtureHash();
+    bh.simulation_content_identity = net::kInactiveSimulationContentIdentity;
     bh.seed = 424242;
     bh.preset = "default";
     bh.tick_rate_hz = 30;
@@ -463,6 +619,7 @@ TEST(LockstepSessionTest, CleanDisconnect) {
     net::HelloMsg bh;
     bh.system_config_identity = Luminumbra::world::GameSession{}.SystemConfigIdentity();
     bh.preset_content_hash = Luminumbra::TestSupport::PresetIdentityFixtureHash();
+    bh.simulation_content_identity = net::kInactiveSimulationContentIdentity;
     bh.seed = 424242;
     bh.preset = "default";
     bh.tick_rate_hz = 30;

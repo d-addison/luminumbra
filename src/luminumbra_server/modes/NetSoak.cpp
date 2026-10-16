@@ -63,7 +63,7 @@ int RunNetSoak(const ServerCliOptions& options) {
     }
 
     Luminumbra::Net::ReplicationServer server;
-    auto expected_hello = RuntimeHelloFrom(options);
+    auto expected_hello = RuntimeHelloFrom(options, runner.Session());
     server.SetAoiChunkRadius(/*chunk_radius=*/3, /*chunk_size_mm=*/Luminumbra::CHUNK_SIZE_X * 1000);
 
     std::vector<RuntimeTcpClientSlot> slots;

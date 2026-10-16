@@ -54,7 +54,7 @@ int RunNetHost(const ServerCliOptions& options) {
     // Each accepted connection's FIRST frame is its Hello, which carries the client id: it is
     // read PRE-AddClient (below) so the slot id comes from the HANDSHAKE, not the accept order.
     // The Hello's trailing usercmd frames stay buffered in the same transport for PumpInbound.
-    auto expected_hello = RuntimeHelloFrom(options);
+    auto expected_hello = RuntimeHelloFrom(options, runner.Session());
     expected_hello.system_config_identity = runner.Session()->SystemConfigIdentity();
     expected_hello.preset_content_hash = runner.Session()->PresetContentHash();
     const auto seed_num = expected_hello.seed;

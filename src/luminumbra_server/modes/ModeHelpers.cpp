@@ -8,17 +8,31 @@
 #include "luminumbra_common/world/TerrainPresetLoader.h"
 #include <nlohmann/json.hpp>
 
-Luminumbra::Net::HelloMsg RuntimeHelloFrom(const ServerCliOptions& options) {
+std::string CapturedSimulationIdentityForHello(const Luminumbra::world::GameSession& session) {
+    if (!session.ActiveRegionsEnabled())
+        return Luminumbra::Net::kInactiveSimulationContentIdentity;
+    const auto* content = session.GetSimulationContent();
+    return content ? content->identity.encode() : std::string{};
+}
+
+Luminumbra::Net::HelloMsg RuntimeHelloFrom(const ServerCliOptions& options,
+                                           const Luminumbra::world::GameSession* captured_session) {
     namespace fs = std::filesystem;
     const auto root = options.root.empty() ? fs::path(".") : fs::path(options.root);
-    auto path = root / "data/common/systems.json";
-    std::error_code error;
-    if (!fs::exists(path, error))
-        path = fs::path("data/common/systems.json");
     Luminumbra::Net::HelloMsg hello;
     hello.seed = std::strtoull(options.seed.c_str(), nullptr, 10);
     hello.preset = options.preset;
     hello.client_id = LocalNetworkPlayerId(options);
+    if (captured_session) {
+        hello.system_config_identity = captured_session->SystemConfigIdentity();
+        hello.preset_content_hash = captured_session->PresetContentHash();
+        hello.simulation_content_identity = CapturedSimulationIdentityForHello(*captured_session);
+        return hello;
+    }
+    auto path = root / "data/common/systems.json";
+    std::error_code error;
+    if (!fs::exists(path, error))
+        path = fs::path("data/common/systems.json");
     Luminumbra::world::GameSession session;
     session.ApplySystemConfig(options.systems_config_override
                                   ? *options.systems_config_override
@@ -28,6 +42,17 @@ Luminumbra::Net::HelloMsg RuntimeHelloFrom(const ServerCliOptions& options) {
     if (runner_config.region_scheduler)
         session.SetRegionSchedulerConfig(*runner_config.region_scheduler);
     hello.system_config_identity = session.SystemConfigIdentity();
+    if (session.ActiveRegionsEnabled()) {
+        Luminumbra::world::SimulationContent content;
+        std::string content_error;
+        if (!Luminumbra::world::AdmitSimulationContent(root, content, content_error)) {
+            LUMINUMBRA_CORE_ERROR("Network content admission refused: {}", content_error);
+            return hello; // Missing identity fails closed at admission.
+        }
+        hello.simulation_content_identity = content.identity.encode();
+    } else {
+        hello.simulation_content_identity = Luminumbra::Net::kInactiveSimulationContentIdentity;
+    }
     const auto preset =
         options.preset_json_override
             ? Luminumbra::world::LoadTerrainPresetFromJson(

@@ -20,6 +20,8 @@ This canonicalises before hashing:
     any change to a value the engine reads does.
   * Every other file is hashed byte for byte. Textures, fonts, meshes and markup
     have no comment convention to strip and are compared exactly.
+    This includes `sim/README.md`: presets can use that path as a simulation
+    dependency because dependency loading does not restrict file extensions.
 
 A file whose suffix is `.json` but which does not parse is hashed byte for byte
 rather than skipped: a malformed fixture must still be visible to the gate.
