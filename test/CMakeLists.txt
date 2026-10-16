@@ -211,6 +211,7 @@ add_executable(common_tests
     common/FarHorizon_test.cpp
     common/FarWantedSet_test.cpp
     common/FarAuthorityOverlay_test.cpp
+    common/FarEditedBake_test.cpp
     common/GameSessionHeadlessWorld_test.cpp
     common/SimBudgetTelemetry_test.cpp
     common/HeavyComparison_test.cpp
@@ -227,6 +228,7 @@ add_executable(common_tests
     common/WaterDeterminism_test.cpp
     common/PlayerAvatar_test.cpp
     common/ReplicationProtocol_test.cpp
+    common/ReplicationAdmission_test.cpp
     common/ReplicationEndpoint_test.cpp
     common/config_constant_drift_test.cpp
     common/config_hot_reload_rollback_test.cpp
@@ -1634,9 +1636,59 @@ target_link_libraries(audio_physics_binding_test PRIVATE
     spdlog::spdlog
 )
 
+find_package(Threads REQUIRED)
+
+# Developer foundations compile directly, without the client or graphics libraries.
+add_executable(developer_console_pure_test
+    client/developer_console_pure_test.cpp
+    ../src/luminumbra_client/app/RegisterDeveloperWidgets.cpp
+    ../src/luminumbra_client/debug/DeveloperWidgetRegistry.cpp
+    ../src/luminumbra_client/debug/DeveloperCommandRegistry.cpp
+    ../src/luminumbra_client/debug/DeveloperConsole.cpp
+    ../src/luminumbra_client/debug/DeveloperLogSink.cpp
+    ../src/luminumbra_client/app/UiInputRouter.cpp
+)
+target_include_directories(developer_console_pure_test PRIVATE
+    ../src/luminumbra_client ../src/luminumbra_common)
+target_link_libraries(developer_console_pure_test PRIVATE gtest_main Threads::Threads spdlog::spdlog)
+luminumbra_configure_first_party_target(developer_console_pure_test)
+
+# CPU-only ImGui acceptance compiles the pinned core directly, without GL backends
+# or the complete client. The ordinary imgui target also links graphics libraries.
+FetchContent_GetProperties(imgui_src SOURCE_DIR _developer_imgui_source)
+add_executable(developer_console_imgui_test
+    client/developer_console_imgui_test.cpp
+    ../src/luminumbra_client/app/RegisterDeveloperWidgets.cpp
+    ../src/luminumbra_client/debug/DeveloperWidgetRegistry.cpp
+    ../src/luminumbra_client/debug/DeveloperCommandRegistry.cpp
+    ../src/luminumbra_client/debug/DeveloperConsole.cpp
+    ../src/luminumbra_client/debug/DeveloperConsoleUi.cpp
+    ../src/luminumbra_client/debug/DeveloperLogSink.cpp
+    ../src/luminumbra_client/debug/widgets/DeveloperWidgetUi.cpp
+    ../src/luminumbra_client/debug/widgets/PassiveDeveloperWidgets.cpp
+    ../src/luminumbra_client/debug/widgets/RenderControlWidgets.cpp
+    "${_developer_imgui_source}/imgui.cpp"
+    "${_developer_imgui_source}/imgui_draw.cpp"
+    "${_developer_imgui_source}/imgui_tables.cpp"
+    "${_developer_imgui_source}/imgui_widgets.cpp"
+)
+target_include_directories(developer_console_imgui_test PRIVATE
+    ../src/luminumbra_client ../src/luminumbra_common)
+target_include_directories(developer_console_imgui_test SYSTEM PRIVATE "${_developer_imgui_source}")
+target_link_libraries(developer_console_imgui_test PRIVATE gtest_main Threads::Threads)
+luminumbra_configure_first_party_target(developer_console_imgui_test)
+
+# User-overlay persistence uses common services only; no client or GL linkage.
+add_executable(developer_settings_test common/developer_settings_test.cpp)
+target_include_directories(developer_settings_test PRIVATE ../src)
+target_compile_definitions(developer_settings_test PRIVATE
+    LUMINUMBRA_TEST_ARTIFACT_DIR="${CMAKE_BINARY_DIR}/test-artifacts"
+)
+target_link_libraries(developer_settings_test PRIVATE gtest_main luminumbra_common)
+luminumbra_configure_first_party_target(developer_settings_test)
+
 # main-loop stall detector (pure std; no window/GL/device). Fires once per
 # stall episode, re-arms when the heartbeat resumes.
-find_package(Threads REQUIRED)
 add_executable(hang_watchdog_test
     client/hang_watchdog_test.cpp
 ../src/luminumbra_client/app/HangWatchdog.cpp
@@ -1875,6 +1927,9 @@ set(LUMINUMBRA_GTEST_TARGETS
     hang_watchdog_test
     crash_report_test
     bounded_console_sink_test
+    developer_console_pure_test
+    developer_console_imgui_test
+    developer_settings_test
     audio_volume_readback_test
     audio_disabled_test
     capture_scale_test

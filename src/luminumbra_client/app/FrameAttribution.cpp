@@ -69,17 +69,20 @@ const char* fallback_name(FallbackReason reason) {
     return "unknown";
 }
 namespace {
-thread_local FoliageFrame* current_foliage_frame = nullptr;
+FoliageFrame*& current_foliage_frame() {
+    thread_local FoliageFrame* frame = nullptr;
+    return frame;
 }
+} // namespace
 FoliageFrameScope::FoliageFrameScope(bool enabled)
-    : m_previous(current_foliage_frame) {
-    current_foliage_frame = enabled ? &m_frame : nullptr;
+    : m_previous(current_foliage_frame()) {
+    current_foliage_frame() = enabled ? &m_frame : nullptr;
 }
 FoliageFrameScope::~FoliageFrameScope() {
-    current_foliage_frame = m_previous;
+    current_foliage_frame() = m_previous;
 }
 bool foliage_frame_active() {
-    return current_foliage_frame != nullptr;
+    return current_foliage_frame() != nullptr;
 }
 void record_render_uploads(const Rendering::UploadWorkStats& work,
                            bool water,
@@ -101,9 +104,10 @@ void record_foliage_rebuild(const FoliageRebuild& rebuild,
                             std::uint64_t capacity,
                             std::optional<std::size_t> count,
                             std::uint64_t count_generation) {
-    if (!current_foliage_frame)
+    auto* current_frame = current_foliage_frame();
+    if (!current_frame)
         return;
-    auto& frame = *current_foliage_frame;
+    auto& frame = *current_frame;
     auto& total = frame.rebuild;
     total.path =
         total.rebuild_calls == 0 || total.path == rebuild.path ? rebuild.path : FoliagePath::Mixed;
@@ -193,18 +197,30 @@ bool write_csv_row(std::ostream& out,
     out << '\n';
     return out.good();
 }
+bool finalize_csv(std::ofstream& out) {
+    out.flush();
+    out.close();
+    return out.good();
+}
 FrameRecorder::FrameRecorder(bool enabled, const std::filesystem::path& logs) {
     if (!enabled)
         return;
     std::error_code error;
     std::filesystem::create_directories(logs, error);
-    if (error)
+    if (error) {
+        m_out.setstate(std::ios::failbit);
         return;
+    }
     m_out.rdbuf()->pubsetbuf(m_buffer.data(), static_cast<std::streamsize>(m_buffer.size()));
     m_out.imbue(std::locale::classic());
     m_out.open(logs / "frame-attribution.csv", std::ios::out | std::ios::trunc | std::ios::binary);
     if (active())
         write_csv_header(m_out);
+}
+bool FrameRecorder::finish() {
+    if (!m_out.is_open())
+        return m_out.good();
+    return finalize_csv(m_out);
 }
 bool FrameRecorder::record(std::uint64_t frame,
                            double frame_ms,
