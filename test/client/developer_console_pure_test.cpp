@@ -1,3 +1,4 @@
+#include "app/DeveloperKeyDispatch.h"
 #include "app/DeveloperUiPolicy.h"
 #include "app/GameplayBindingCapture.h"
 #include "app/MenuPreviewInput.h"
@@ -709,20 +710,72 @@ TEST(DeveloperRouting, CaptureToggleEscapePriorityRepeatAndUnicodeDelivery) {
 }
 
 TEST(DeveloperRouting, ApertureCollisionAndPressVersusRepeat) {
-    EXPECT_FALSE(UiInputRouter::TimeShortcutAllowed(true, 91));
-    EXPECT_FALSE(UiInputRouter::TimeShortcutAllowed(true, 93));
-    EXPECT_TRUE(UiInputRouter::TimeShortcutAllowed(true, 92));
-    EXPECT_TRUE(UiInputRouter::TimeShortcutAllowed(false, 91));
     DeveloperConsole console;
     console.Initialize({});
     EXPECT_FALSE(console.Bindings().Match({91, 0}, 1, Photo));
+    EXPECT_FALSE(console.Bindings().Match({93, 0}, 1, Photo));
     EXPECT_TRUE(console.Bindings().Match({91, 0}, 1, Gameplay));
+    EXPECT_TRUE(console.Bindings().Match({93, 0}, 1, Gameplay));
     EXPECT_TRUE(console.Bindings().Match({92, 0}, 1, Photo));
     EXPECT_FALSE(console.Bindings().Match({91, 0}, 2, Gameplay));
     UiInputRouter router;
     router.SetOwnership(World());
     EXPECT_EQ(router.Key(91, 1, false, false), KeyRoute::Gameplay);
     EXPECT_EQ(router.Key(91, 2, false, false), KeyRoute::Gameplay);
+}
+
+TEST_F(ConsoleFixture, PhotoModeInvokesResetReboundToFreedApertureKey) {
+    // LensApertureDown has moved from '[' to F2; aperture up remains on ']'.
+    console.Bindings().external_conflict = [](KeyChord chord, unsigned scopes) {
+        return (scopes & Photo) && (chord.key == 291 || chord.key == 93)
+                   ? std::string("Conflicts with gameplay aperture")
+                   : std::string{};
+    };
+    std::string error;
+    ASSERT_TRUE(console.Bindings().Rebind("time.slower", std::nullopt, error));
+    ASSERT_TRUE(console.Bindings().Rebind("time.reset", KeyChord{91, 0}, error));
+    console.Bindings().Validate();
+    EXPECT_FALSE(console.Bindings().Match({93, 0}, 1, Photo));
+    const auto shortcut = console.Bindings().Match({91, 0}, 1, Photo);
+    ASSERT_EQ(shortcut, std::optional<std::string>("time.reset"));
+    UiInputRouter router;
+    router.SetOwnership(World());
+    ASSERT_EQ(DispatchDeveloperKey(&console, &router, 91, 1, 0, Photo),
+              KeyRoute::DeveloperShortcut);
+    EXPECT_EQ(effects, 1);
+    EXPECT_EQ(last_effect, "time reset");
+    EXPECT_EQ(router.Character('['), InputOwner::Unfocused);
+    EXPECT_FALSE(console.Bindings().Match({91, 0}, 2, Photo));
+    EXPECT_EQ(DispatchDeveloperKey(&console, &router, 91, 2, 0, Photo), KeyRoute::Ignore);
+    EXPECT_EQ(effects, 1);
+}
+
+TEST(DeveloperBindings, SavedConflictsUseRegistrationOrderAndPreserveUnknownRecords) {
+    DeveloperBindings bindings;
+    ASSERT_TRUE(bindings.Register({"z.first", KeyChord{290, 0}, Gameplay}));
+    ASSERT_TRUE(bindings.Register({"a.second", KeyChord{291, 0}, Gameplay}));
+    ASSERT_TRUE(bindings.Register({"keep.default", KeyChord{292, 0}, Gameplay}));
+    ASSERT_TRUE(bindings.Register({"explicit.unbound", KeyChord{293, 0}, Gameplay}));
+    std::vector<std::string> warnings;
+    bindings.conflict_reported = [&](const std::string& message) {
+        warnings.push_back(message);
+    };
+    const std::map<std::string, luminumbra::core::DeveloperBindingSetting> saved{
+        {"a.second", {294, 0}},
+        {"explicit.unbound", {-1, 0}},
+        {"unknown", {295, 2}},
+        {"z.first", {294, 0}}};
+    bindings.ApplySaved(saved);
+    EXPECT_EQ(bindings.Get("z.first"), (KeyChord{294, 0}));
+    EXPECT_FALSE(bindings.Get("a.second"));
+    EXPECT_EQ(bindings.Get("keep.default"), (KeyChord{292, 0}));
+    EXPECT_FALSE(bindings.Get("explicit.unbound"));
+    EXPECT_FALSE(bindings.Contains("unknown"));
+    EXPECT_EQ(saved.at("unknown").key, 295);
+    EXPECT_EQ(saved.at("unknown").mods, 2);
+    ASSERT_EQ(warnings.size(), 1u);
+    EXPECT_NE(warnings.front().find("a.second unbound: Conflicts with z.first"), std::string::npos);
+    EXPECT_EQ(bindings.Match({294, 0}, 1, Gameplay), std::optional<std::string>("z.first"));
 }
 
 TEST(DeveloperRouting, OverlappingPanelsImmediateCaptureCursorEscapeAndTransitions) {
@@ -1107,6 +1160,10 @@ TEST(DeveloperRouting, PrintableTogglePreservesImGuiAndRmlTextEntry) {
     // ImGui panel, console input, and RmlUi field.
     for (const int text_owner : {0, 1, 2}) {
         for (const int key : {96, 75, 320}) {
+            DeveloperConsole console;
+            console.Initialize({});
+            std::string error;
+            ASSERT_TRUE(console.Bindings().Rebind("console.toggle", KeyChord{key, 0}, error));
             UiInputRouter router;
             auto state = World();
             state.interactive_panel = text_owner == 0;
@@ -1118,13 +1175,14 @@ TEST(DeveloperRouting, PrintableTogglePreservesImGuiAndRmlTextEntry) {
             const auto route = text_owner == 2 ? KeyRoute::RmlUi : KeyRoute::Ignore;
             const auto owner = text_owner == 2 ? InputOwner::RmlUi : InputOwner::Developer;
             const unsigned int character = key == 96 ? '`' : (key == 75 ? 'k' : '0');
-            EXPECT_EQ(router.Key(key, 1, true, true), route);
+            EXPECT_EQ(DispatchDeveloperKey(&console, &router, key, 1, 0, Gameplay), route);
             router.SetOwnership(state); // Character callbacks refresh ownership too.
             EXPECT_EQ(router.Character(character), owner);
-            EXPECT_EQ(router.Key(key, 2, true, false), route);
+            EXPECT_EQ(DispatchDeveloperKey(&console, &router, key, 2, 0, Gameplay), route);
             EXPECT_EQ(router.Character(character), owner);
-            EXPECT_EQ(router.Key(key, 0, false, false), KeyRoute::Ignore);
-            EXPECT_EQ(router.Key(key, 1, true, true), route);
+            EXPECT_EQ(DispatchDeveloperKey(&console, &router, key, 0, 0, Gameplay),
+                      KeyRoute::Ignore);
+            EXPECT_EQ(DispatchDeveloperKey(&console, &router, key, 1, 0, Gameplay), route);
             EXPECT_EQ(router.Character(character), owner);
         }
     }

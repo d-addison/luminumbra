@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/DeveloperBindingSetting.h"
 #include "core/DeveloperPanelLayout.h"
 
 #include <cstdint>
@@ -44,6 +45,9 @@ public:
     std::vector<BindingDef> List() const;
     std::optional<std::string> Match(KeyChord chord, int action, unsigned scope) const;
     void RestoreDefaults();
+    // Startup overlay: clear recognized saved actions, then apply in registration order.
+    // Unknown records remain untouched in the caller's bounded settings map.
+    void ApplySaved(const std::map<std::string, luminumbra::core::DeveloperBindingSetting>& saved);
     void Validate();
     void Seal();
     std::function<void()> changed;

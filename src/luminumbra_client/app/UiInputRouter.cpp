@@ -90,9 +90,6 @@ bool UiInputRouter::GameplayMouseAllowed() const {
 bool UiInputRouter::CursorCaptured() const {
     return GameplayMouseAllowed();
 }
-bool UiInputRouter::TimeShortcutAllowed(bool photo_mode, int key) {
-    return !photo_mode || (key != 91 && key != 93);
-}
 std::uint64_t UiInputRouter::Revision() const {
     return m_revision;
 }

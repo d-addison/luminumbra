@@ -231,6 +231,28 @@ bool DeveloperBindings::ResolveConflicts() {
     }
     return mutated;
 }
+void DeveloperBindings::ApplySaved(
+    const std::map<std::string, luminumbra::core::DeveloperBindingSetting>& saved) {
+    for (const auto& entry : m_entries) {
+        if (saved.contains(entry.def.id)) {
+            std::string error;
+            Rebind(entry.def.id, std::nullopt, error);
+        }
+    }
+    for (const auto& entry : m_entries) {
+        const auto record = saved.find(entry.def.id);
+        if (record == saved.end())
+            continue;
+        const auto& binding = record->second;
+        const auto chord = binding.key == -1
+                               ? std::nullopt
+                               : std::optional<KeyChord>(KeyChord{binding.key, binding.mods});
+        std::string error;
+        if (!Rebind(entry.def.id, chord, error) && conflict_reported)
+            conflict_reported("Developer binding " + entry.def.id + " unbound: " + error);
+    }
+    Validate();
+}
 void DeveloperBindings::Validate() {
     if (ResolveConflicts() && changed)
         changed();

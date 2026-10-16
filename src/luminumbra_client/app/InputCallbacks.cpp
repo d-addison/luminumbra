@@ -2,6 +2,7 @@
 #include <GLFW/glfw3.h>
 #include <glad/glad.h>
 
+#include "app/DeveloperKeyDispatch.h"
 #include "app/GameplayBindingCapture.h"
 #include "app/InputCallbacks.h"
 
@@ -129,13 +130,7 @@ void key_callback(GLFWwindow* window, int key, int scancode, int action, int mod
         bindings.router ? bindings.router->WorldShortcutsAllowed() : bindings.in_world;
     const unsigned scope =
         worldShortcuts ? (photo ? Debug::Photo : Debug::Gameplay) : Debug::Global;
-    const auto shortcut =
-        console ? console->Bindings().Match({key, mods & 15}, action, scope) : std::nullopt;
-    const bool consoleToggle =
-        console && console->Bindings().Get("console.toggle") == Debug::KeyChord{key, mods & 15};
-    const auto route = bindings.router
-                           ? bindings.router->Key(key, action, consoleToggle, shortcut.has_value())
-                           : KeyRoute::Gameplay;
+    const auto route = DispatchDeveloperKey(console, bindings.router, key, action, mods, scope);
     if (action == GLFW_RELEASE) {
         if (uiManager)
             uiManager->KeyCallback(window, key, scancode, action, mods);
@@ -161,9 +156,7 @@ void key_callback(GLFWwindow* window, int key, int scancode, int action, int mod
         RefreshInputOwnership(window);
         return;
     }
-    if (route == KeyRoute::DeveloperShortcut && shortcut && console) {
-        if (UiInputRouter::TimeShortcutAllowed(photo, key))
-            console->InvokeAction(*shortcut);
+    if (route == KeyRoute::DeveloperShortcut) {
         RefreshInputOwnership(window);
         return;
     }

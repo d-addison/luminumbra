@@ -3192,26 +3192,7 @@ int main(int argc, char* argv[]) {
     if (const auto layout = preferences.layouts.find("console.toggle");
         layout != preferences.layouts.end())
         developerConsole.RestoreLayout(layout->second);
-    for (const auto& [id, saved] : preferences.bindings) {
-        (void)saved;
-        if (developerBindings.Contains(id)) {
-            std::string error;
-            developerBindings.Rebind(id, std::nullopt, error);
-        }
-    }
-    for (const auto& [id, saved] : preferences.bindings) {
-        if (!developerBindings.Contains(id))
-            continue;
-        std::string error;
-        const auto chord =
-            saved.key == -1
-                ? std::nullopt
-                : std::optional<Developer::KeyChord>(Developer::KeyChord{saved.key, saved.mods});
-        if (!developerBindings.Rebind(id, chord, error)) {
-            LUMINUMBRA_CORE_WARN("Developer binding {} unbound: {}", id, error);
-        }
-    }
-    developerBindings.Validate();
+    developerBindings.ApplySaved(preferences.bindings);
     developerConsole.Widgets().changed = std::move(visibilityChanged);
     developerBindings.changed = std::move(bindingChanged);
     InstallInputCallbacks(window);

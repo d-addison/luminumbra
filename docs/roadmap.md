@@ -197,7 +197,7 @@ verification.
 
 ### v0.3.1 — Planned continuation and qualification
 
-- [issue #77 — Provide typed commands, console help/history and bounded logs](https://github.com/d-addison/luminumbra/issues/77) — Planned for v0.3.1.
+- [issue #77 — Provide typed commands, console help/history and bounded logs](https://github.com/d-addison/luminumbra/issues/77) — Implemented — typed developer commands, generated help, session history and bounded attached logs.
 
 Indexed authority durability/rehydration, durable completed work and ground-object
 continuation, durable regional fields/weather/scent/energy, and regional foliage/water

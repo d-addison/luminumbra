@@ -46,7 +46,6 @@ public:
     bool GameplayKeyAllowed(int key) const;
     bool GameplayMouseAllowed() const;
     bool CursorCaptured() const;
-    static bool TimeShortcutAllowed(bool photo_mode, int key);
     std::uint64_t Revision() const;
 
 private:

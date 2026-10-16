@@ -22,6 +22,7 @@
 
 #include <glm/glm.hpp>
 
+#include "DeveloperBindingSetting.h"
 #include "DeveloperPanelLayout.h"
 #include "SystemConfigRegistry.gen.h" // X-macro registry GENERATED from ConfigSchema.json
 
@@ -29,10 +30,6 @@ namespace luminumbra::core {
 
 // Developer records are bounded during parsing; unknown stable ids survive overlays.
 // Runtime effects and session history are deliberately absent from this model.
-struct DeveloperBindingSetting {
-    int key = -1; // -1 explicitly unbound
-    int mods = 0;
-};
 struct DeveloperSettings {
     static constexpr std::size_t kRecordLimit = 256;
     static constexpr std::size_t kIdLimit = 128;
