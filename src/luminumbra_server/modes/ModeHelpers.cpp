@@ -2,7 +2,6 @@
 
 #include <cstdlib>
 #include <filesystem>
-#include <system_error>
 
 #include "luminumbra_common/core/SystemConfig.h"
 #include "luminumbra_common/world/TerrainPresetLoader.h"
@@ -11,10 +10,6 @@
 Luminumbra::Net::HelloMsg RuntimeHelloFrom(const ServerCliOptions& options) {
     namespace fs = std::filesystem;
     const auto root = options.root.empty() ? fs::path(".") : fs::path(options.root);
-    auto path = root / "data/common/systems.json";
-    std::error_code error;
-    if (!fs::exists(path, error))
-        path = fs::path("data/common/systems.json");
     Luminumbra::Net::HelloMsg hello;
     hello.seed = std::strtoull(options.seed.c_str(), nullptr, 10);
     hello.preset = options.preset;
@@ -22,7 +17,7 @@ Luminumbra::Net::HelloMsg RuntimeHelloFrom(const ServerCliOptions& options) {
     Luminumbra::world::GameSession session;
     session.ApplySystemConfig(options.systems_config_override
                                   ? *options.systems_config_override
-                                  : luminumbra::core::SystemConfig::LoadFromFile(path.string()));
+                                  : luminumbra::core::SystemConfig::LoadFromRuntimeRoot(root));
     const auto runner_config = RunnerConfigFrom(options);
     session.SetFiniteHydrologyEnabled(runner_config.finite_hydrology);
     if (runner_config.region_scheduler)

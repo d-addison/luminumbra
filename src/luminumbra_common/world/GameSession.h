@@ -115,11 +115,11 @@ public:
 
     // --- Runtime world-state persistence ---
     // Persists streamed chunk voxel state under the canonical world save dir
-    // (worlds/saves/<world_id>). Incremental contract: nothing is written when
-    // no chunk carries unsaved voxel edits, so a never-edited world stays
-    // byte-for-byte on the fresh-world path. The first write of an edited
-    // world emits a full snapshot; later writes flush through
-    // WorldSaveService::save_dirty_chunks.
+    // (worlds/saves/<world_id>). Only dirty chunks trigger chunk snapshot writes;
+    // plants and energy persist independently, including when no chunks are dirty.
+    // The first chunk write emits a full snapshot; later writes flush through
+    // WorldSaveService::save_dirty_chunks. Dirty chunks are acknowledged only after
+    // every required writer succeeds, so a failed composite save remains retryable.
     bool SaveWorldState(WorldStateSaveReport* report = nullptr);
     bool SaveWorldStateTo(const std::filesystem::path& save_dir,
                           WorldStateSaveReport* report = nullptr);

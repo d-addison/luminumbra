@@ -6,11 +6,11 @@ Statuses declare the available evidence. Static validation requires a mapping fo
 
 | Status | Rows |
 | --- | ---: |
-| covered | 17 |
+| covered | 19 |
 | partial | 8 |
 | needs-native-run | 17 |
 | planned | 85 |
-| Total | 127 |
+| Total | 129 |
 
 | Row | Status | Source | Requirements | Statement | Evidence |
 | --- | --- | --- | --- | --- | --- |
@@ -141,3 +141,5 @@ Statuses declare the available evidence. Static validation requires a mapping fo
 | contract.renderer-defaults | planned | `docs/distant-world.md#deferred` | dw.deferred.002, dw.deferred.003, dw.deferred.004, dw.deferred.005, dw.deferred.006 | Default Ladder selection, explicit Legacy opt-out and fallback diagnostics still require native qualification. | doc: `docs/distant-world.md` (planned: map discriminating regression and qualification evidence for the updated contract; owner: ac) |
 | contract.region-retention | planned | `docs/active-regions.md#activation-and-ordering` | ar.activation.061, ar.activation.062, ar.activation.063, ar.activation.064 | Idle retention must preserve scheduling history for pending work and all resident chunks, then release consumed work on the next tick. | doc: `docs/active-regions.md` (planned: map discriminating regression and qualification evidence for the updated contract; owner: ac) |
 | contract.ledger-extensions | planned | `docs/active-regions.md#file-and-compatibility` | ar.file.095, ar.file.096, ar.file.097, ar.file.098, ar.file.099, ar.file.100, ar.file.101, ar.file.102, ar.file.103, ar.file.104, ar.file.105, ar.file.106, ar.file.107, ar.file.108, ar.file.109, ar.file.110, ar.file.111, ar.file.112, ar.file.113, ar.file.114, ar.file.115, ar.file.116, ar.file.117, ar.file.118 | Version 2 extensions, legacy digest preservation and authoritative frozen-content selection require dedicated acceptance evidence review. | doc: `docs/active-regions.md` (planned: map discriminating regression and qualification evidence for the updated contract; owner: ac) |
+| iss.385 | covered | `issue #385` |  | Session and server full-snapshot saves propagate energy writer failure with active regions enabled or disabled, including chunk-clean saves. Dirty chunks remain pending until every required writer succeeds. Registered destination-failure regressions cover first and incremental snapshots, disk preservation on refusal, and successful retry with chunks, plants and energy restored. A legacy full snapshot also refuses metadata failure; native execution remains required. | ctest: `SnapshotEnergyFailure.FailureKeepsDirtyChunksAndRetryPersistsAllState`<br>ctest: `WorldOpenRefusal.LegacyFullSnapshotCallbackSucceedsAndMetadataFailureRefuses` |
+| iss.429 | covered | `issue #429` |  | Client defaults, server boot and network admission load systems configuration from the runtime root using generic path spelling. Registered regressions use a conflicting launch directory and cover unavailable or partial runtime defaults, user overlays and explicit overrides. Source checks also require runtime-root UI watches; native execution remains required. | ctest: `RuntimeSystemConfig.DefaultsAndUserOverlayComeFromRuntimeRoot`<br>ctest: `RuntimeSystemConfig.UnavailableOrPartialRuntimeDefaultsNeverUseLaunchDirectory`<br>ctest: `RuntimeConfigStartup.HostAndNetworkAdmissionIgnoreConflictingLaunchDefaults`<br>ctest: `RuntimeConfigSourceContract` |

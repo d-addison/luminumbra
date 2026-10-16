@@ -2373,6 +2373,8 @@ endif()
 add_test(NAME RenderContractPython COMMAND "${Python3_EXECUTABLE}" ${CMAKE_SOURCE_DIR}/tools/perf/test_render_contract.py)
 add_test(NAME SystemConfigIdentityPython COMMAND "${Python3_EXECUTABLE}" -B
     ${CMAKE_SOURCE_DIR}/test/tools/test_system_config_identity.py)
+add_test(NAME RuntimeConfigSourceContract COMMAND "${Python3_EXECUTABLE}" -I -B
+    ${CMAKE_SOURCE_DIR}/test/tools/test_runtime_config_contract.py)
 add_test(NAME FramePacingSourceContract COMMAND "${Python3_EXECUTABLE}" -I -B
     ${CMAKE_SOURCE_DIR}/test/tools/test_frame_pacing_contract.py)
 add_test(NAME RenderRunnerEvidencePython COMMAND "${Python3_EXECUTABLE}" ${CMAKE_SOURCE_DIR}/tools/perf/test_render_runner_evidence.py)

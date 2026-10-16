@@ -1796,7 +1796,7 @@ bool GameSession::SaveWorldStateTo(const std::filesystem::path& save_dir,
         const bool plants_ok =
             Persistence::WorldSaveService::save_plant_entities(plant_snapshot, save_dir, nullptr);
         const bool energy_ok = SaveEnergyFieldRecord(save_dir);
-        if (m_activeRegionsEnabled && (!plants_ok || !energy_ok))
+        if (!plants_ok || !energy_ok)
             return false;
         if (report) {
             *report = result;
@@ -1813,19 +1813,11 @@ bool GameSession::SaveWorldStateTo(const std::filesystem::path& save_dir,
 
     bool ok = false;
     if (!has_snapshot) {
-        // First save of this world: write the full snapshot, then clear the
-        // dirty flags exactly like the incremental path does.
+        // First save writes the full snapshot. Keep edits pending until all writers succeed.
         ok = service.save_world(state, save_dir, &errors);
-        if (ok) {
-            for (const ChunkID id : dirty_ids) {
-                if (const auto chunk = state.find_chunk(id)) {
-                    chunk->clear_voxel_data_dirty();
-                }
-            }
-        }
     } else {
         const Persistence::WorldSaveDirtyReport dirty_report =
-            service.save_dirty_chunks(state, save_dir, &errors);
+            service.save_dirty_chunks(state, save_dir, &errors, /*acknowledge_dirty=*/false);
         ok = dirty_report.saved;
     }
 
@@ -1849,7 +1841,7 @@ bool GameSession::SaveWorldStateTo(const std::filesystem::path& save_dir,
     // persist the stateful energy layer alongside (null/
     // all-zero layer -> no file -> byte-identical; the plant discipline).
     const bool energy_ok = SaveEnergyFieldRecord(save_dir);
-    if (m_activeRegionsEnabled && !energy_ok)
+    if (!energy_ok)
         ok = false;
 
     for (const std::string& error : errors) {
@@ -1858,6 +1850,12 @@ bool GameSession::SaveWorldStateTo(const std::filesystem::path& save_dir,
     if (ok && m_activeRegionsEnabled)
         ok = SaveWorldMetadataTo(save_dir);
     if (ok) {
+        // Chunk persistence alone is insufficient: retry every edit if any sibling writer failed.
+        for (const ChunkID id : dirty_ids) {
+            if (const auto chunk = state.find_chunk(id)) {
+                chunk->clear_voxel_data_dirty();
+            }
+        }
         result.saved = true;
         result.chunks_saved = result.chunks_total; // whole-snapshot layout
         LUMINUMBRA_CORE_INFO("World state saved: {} chunks ({} dirty) -> {}",

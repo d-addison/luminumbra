@@ -253,21 +253,12 @@ bool ServerWorldRunner::Boot() {
     // host==peer: the headless host must run the SAME water-sim resolution the
     // client derives from data/common/systems.json — sim.water_high_res is baked into
     // the hashed mm grids, so a mismatched host could never agree with its peers.
-    // Resolved against the runner root with a CWD-relative fallback (the client's
-    // load path); a missing file uses the same shipping simulation defaults.
+    // Missing runtime defaults use compiled defaults, independently of the launch directory.
     {
-        namespace fsys = std::filesystem;
-        const fsys::path root =
-            m_config.root_path.empty() ? fsys::path(".") : fsys::path(m_config.root_path);
-        fsys::path systems_json = root / "data" / "common" / "systems.json";
-        std::error_code systems_ec;
-        if (!fsys::exists(systems_json, systems_ec)) {
-            systems_json = fsys::path("data") / "common" / "systems.json";
-        }
         const auto sys_cfg =
             m_config.systems_config_override
                 ? *m_config.systems_config_override
-                : luminumbra::core::SystemConfig::LoadFromFile(systems_json.string());
+                : luminumbra::core::SystemConfig::LoadFromRuntimeRoot(m_config.root_path);
         m_session->ApplySystemConfig(sys_cfg);
     }
     m_session->SetFiniteHydrologyEnabled(m_config.finite_hydrology);
@@ -1065,7 +1056,7 @@ std::size_t ServerWorldRunner::SaveFullSnapshot() {
     // write the FULL in-memory streamed-chunk set (not dirty-gated) so
     // a loaded session can adopt exactly this set. Reuses WorldSaveService.
     if (!m_booted || !m_session || !m_session->GetWorldSystem() ||
-        !m_session->IsSimulationTickBoundary()) {
+        !m_session->IsSimulationTickBoundary() || !m_session->GetWorldOpenError().empty()) {
         return 0;
     }
     const std::filesystem::path save_dir = m_session->GetWorldSaveDir();
@@ -1097,10 +1088,9 @@ std::size_t ServerWorldRunner::SaveFullSnapshot() {
     // sim state captured there (the water sim-window cursor) reflects THIS save
     // moment, not world creation. Without this a loaded session resimulates from a
     // stale cursor and the water evolution diverges from the original's.
-    if (m_session->ActiveRegionsEnabled() && !m_session->SaveWorldState())
-        return 0;
-    const bool metadata_saved = m_session->SaveWorld();
-    if (m_session->ActiveRegionsEnabled() && !metadata_saved)
+    // Save metadata before the state writer can acknowledge chunk edits. Every
+    // region mode must also persist plants and energy before reporting success.
+    if (!m_session->SaveWorld() || !m_session->SaveWorldState())
         return 0;
     return state.size();
 }

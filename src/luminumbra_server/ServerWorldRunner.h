@@ -224,11 +224,12 @@ public:
                                       Persistence::WorldStreamingStateSubHashes& out_sub);
 
     //  heavy oracle support: persists the COMPLETE in-memory streamed-
-    // chunk snapshot via WorldSaveService::save_world (NOT the dirty-gated
-    // GameSession::SaveWorldState, which writes nothing for a never-edited
-    // world). Used so a freshly loaded session adopts exactly this chunk set and
+    // chunk snapshot via WorldSaveService::save_world, regardless of the voxel
+    // dirty flags used by GameSession::SaveWorldState. Used so a freshly loaded
+    // session adopts exactly this chunk set and
     // the save/load round-trip is comparable. Returns the chunk count written,
-    // or zero on refusal. Preset/identity refusal preserves disk bytes and pending state.
+    // or zero if any required writer fails. Preset/identity refusal preserves disk bytes
+    // and pending state; dirty chunks are acknowledged only after metadata, plants and energy.
     std::size_t SaveFullSnapshot();
 
     std::size_t StreamedChunkCount();

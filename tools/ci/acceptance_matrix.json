@@ -2915,6 +2915,46 @@
           "planned": "map discriminating regression and qualification evidence for the updated contract; owner: ac"
         }
       ]
+    },
+    {
+      "id": "iss.385",
+      "source": "issue #385",
+      "statement": "Session and server full-snapshot saves propagate energy writer failure with active regions enabled or disabled, including chunk-clean saves. Dirty chunks remain pending until every required writer succeeds. Registered destination-failure regressions cover first and incremental snapshots, disk preservation on refusal, and successful retry with chunks, plants and energy restored. A legacy full snapshot also refuses metadata failure; native execution remains required.",
+      "status": "covered",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "SnapshotEnergyFailure.FailureKeepsDirtyChunksAndRetryPersistsAllState"
+        },
+        {
+          "kind": "ctest",
+          "ref": "WorldOpenRefusal.LegacyFullSnapshotCallbackSucceedsAndMetadataFailureRefuses"
+        }
+      ]
+    },
+    {
+      "id": "iss.429",
+      "source": "issue #429",
+      "statement": "Client defaults, server boot and network admission load systems configuration from the runtime root using generic path spelling. Registered regressions use a conflicting launch directory and cover unavailable or partial runtime defaults, user overlays and explicit overrides. Source checks also require runtime-root UI watches; native execution remains required.",
+      "status": "covered",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "RuntimeSystemConfig.DefaultsAndUserOverlayComeFromRuntimeRoot"
+        },
+        {
+          "kind": "ctest",
+          "ref": "RuntimeSystemConfig.UnavailableOrPartialRuntimeDefaultsNeverUseLaunchDirectory"
+        },
+        {
+          "kind": "ctest",
+          "ref": "RuntimeConfigStartup.HostAndNetworkAdmissionIgnoreConflictingLaunchDefaults"
+        },
+        {
+          "kind": "ctest",
+          "ref": "RuntimeConfigSourceContract"
+        }
+      ]
     }
   ]
 }

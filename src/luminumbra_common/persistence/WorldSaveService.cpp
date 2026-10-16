@@ -1607,7 +1607,8 @@ std::string WorldSaveService::world_hash(const WorldStreamingState& state) const
 
 WorldSaveDirtyReport WorldSaveService::save_dirty_chunks(WorldStreamingState& state,
                                                          const std::filesystem::path& save_dir,
-                                                         std::vector<std::string>* errors) const {
+                                                         std::vector<std::string>* errors,
+                                                         bool acknowledge_dirty) const {
     WorldSaveDirtyReport report;
     report.chunks_total = state.size();
 
@@ -1646,9 +1647,11 @@ WorldSaveDirtyReport WorldSaveService::save_dirty_chunks(WorldStreamingState& st
         return report;
     }
 
-    for (const ChunkID id : dirty_ids) {
-        if (const auto chunk = state.find_chunk(id)) {
-            chunk->clear_voxel_data_dirty();
+    if (acknowledge_dirty) {
+        for (const ChunkID id : dirty_ids) {
+            if (const auto chunk = state.find_chunk(id)) {
+                chunk->clear_voxel_data_dirty();
+            }
         }
     }
     report.saved = true;

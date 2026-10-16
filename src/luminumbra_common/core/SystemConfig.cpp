@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "core/Environment.h"
+#include "core/FilesystemPath.h"
 #include "core/FramePacing.h"
 #include "core/Log.h"
 #include "nlohmann/json.hpp"
@@ -632,6 +633,12 @@ void SystemConfig::OverlayUserFromJsonString(const std::string& json_text) {
         return; // malformed overlay -> leave settings unchanged
     }
     ParseUserSection(data, m_user); // only user.*; sim/render ignored
+}
+
+SystemConfig SystemConfig::LoadFromRuntimeRoot(const std::filesystem::path& root,
+                                               const std::string& overlay_path) {
+    return LoadLayered(Luminumbra::Filesystem::GenericPathString(root / "data/common/systems.json"),
+                       overlay_path);
 }
 
 SystemConfig SystemConfig::LoadLayered(const std::string& defaults_path,

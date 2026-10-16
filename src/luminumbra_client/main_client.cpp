@@ -301,6 +301,7 @@ constexpr double kResizeDebounceSeconds = 0.12;
 
 using Luminumbra::Client::ScenarioHarness::WindowMode;
 
+#if !defined(LUMINUMBRA_QA_RUNNER)
 // Exit code for a `--scenario` request against a binary compiled WITHOUT the
 // QA harness (the shipping luminumbra_client_app). Distinct from the scenario
 // exit codes the harness itself uses (2 = scenario failed, 3 = memory
@@ -308,6 +309,7 @@ using Luminumbra::Client::ScenarioHarness::WindowMode;
 // timed run completed) so a gate script pointed at the wrong binary fails
 // loudly and unambiguously. Scenario runs belong to luminumbra_client_qa_app.
 constexpr int kExitScenarioUnavailable = 6;
+#endif
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
 static void ConsumeWorldDressing(ClientAppContext& g_app,
@@ -2003,8 +2005,8 @@ int main(int argc, char* argv[]) {
 
     // Load player settings (defaults + per-user overlay) before window setup so VSync etc.
     // can be applied immediately. Never hashed; missing overlay -> struct defaults.
-    g_systemConfig = luminumbra::core::SystemConfig::LoadLayered(
-        "data/common/systems.json", luminumbra::core::SystemConfig::DefaultUserOverlayPath());
+    g_systemConfig = luminumbra::core::SystemConfig::LoadFromRuntimeRoot(
+        root_dir, luminumbra::core::SystemConfig::DefaultUserOverlayPath());
     if (scenario_config.systems_config_override) {
         // Retain the player settings overlay; it cannot alter simulation or render flags.
         const auto user_settings = g_systemConfig.user();
@@ -2158,8 +2160,8 @@ int main(int argc, char* argv[]) {
         // opt-in UI hot reload: watch data/ui and reload the active document on edits.
         if (HasCommandLineFlag(argc, argv, "--ui-hot-reload")) {
             uiHotReload.SetEnabled(true);
-            uiHotReload.WatchDirectory("data/ui", "rml");
-            uiHotReload.WatchDirectory("data/ui", "rcss");
+            uiHotReload.WatchDirectory(root_path_str + "data/ui", "rml");
+            uiHotReload.WatchDirectory(root_path_str + "data/ui", "rcss");
             uiHotReload.SetReloadCallback([&g_uiManager](const std::string&) {
                 if (g_uiManager)
                     g_uiManager->ReloadActiveDocument();

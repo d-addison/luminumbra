@@ -236,12 +236,15 @@ public:
     // at least one dirty chunk are rewritten (all in-memory chunks of those
     // regions are refreshed; records of chunks absent from memory and far-LOD
     // tile records are preserved verbatim). Dirty flags of the saved chunks
-    // are cleared after a successful write. With no dirty chunks nothing is
-    // written and saved stays false. Before writing, validation reads the whole
+    // are cleared after a successful write unless acknowledge_dirty is false;
+    // composite saves then acknowledge only after every sibling writer succeeds.
+    // With no dirty chunks nothing is written and saved stays false.
+    // Before writing, validation reads the whole
     // existing save to refuse obsolete, mixed-format, or corrupt durable data.
     WorldSaveDirtyReport save_dirty_chunks(WorldStreamingState& state,
                                            const std::filesystem::path& save_dir,
-                                           std::vector<std::string>* errors = nullptr) const;
+                                           std::vector<std::string>* errors = nullptr,
+                                           bool acknowledge_dirty = true) const;
 
 private:
     // The single v2 write seam: serializes the given chunks into LMR1 region

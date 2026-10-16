@@ -3,6 +3,7 @@
 #include "luminumbra_common/components/CoreComponents.h"
 #include "luminumbra_common/components/PlantComponents.h"
 #include "luminumbra_common/core/JobSystem.h"
+#include "luminumbra_common/core/SystemConfig.h"
 #include "luminumbra_common/fields/EnergyFieldState.h"
 #include "luminumbra_common/net/LockstepSession.h"
 #include "luminumbra_common/persistence/SavedWorldCatalog.h"
@@ -18,7 +19,9 @@
 #include "luminumbra_common/world/FarLodStore.h"
 #include "luminumbra_common/world/GameSession.h"
 #include "luminumbra_common/world/TerrainPresetLoader.h"
+#include "luminumbra_server/ServerCliOptions.h"
 #include "luminumbra_server/ServerWorldRunner.h"
+#include "luminumbra_server/modes/ModeHelpers.h"
 
 #include <algorithm>
 #include <atomic>
@@ -31,6 +34,7 @@
 #include <random>
 #include <sstream>
 #include <string>
+#include <system_error>
 #include <tuple>
 
 #include <nlohmann/json.hpp>
@@ -1438,6 +1442,145 @@ void ExpectSnapshotReloaded(const PendingSnapshotState& pending,
     EXPECT_EQ(restored_chunks.front()->heightmap_data, chunk.heightmap_data);
 }
 
+class RuntimeConfigStartup : public WorldOpenRefusal {};
+
+TEST_P(RuntimeConfigStartup, HostAndNetworkAdmissionIgnoreConflictingLaunchDefaults) {
+    const auto [runtime_kind, explicit_override] = GetParam();
+    const auto launch = root / "launch";
+    Write(launch / "data/common/systems.json",
+          R"({"sim":{"water_high_res":{"enabled":false},"active_regions":{"enabled":false}}})");
+    const auto runtime_file = root / "data/common/systems.json";
+    if (runtime_kind == 0)
+        Write(runtime_file, R"({"sim":{"erosion":{"enabled":false}}})");
+    else if (runtime_kind == 2)
+        Write(runtime_file, "{\"sim\":");
+    else if (runtime_kind == 3)
+        fs::create_directories(runtime_file);
+    class RestoreCwd {
+    public:
+        RestoreCwd() = default;
+        ~RestoreCwd() {
+            std::error_code error;
+            fs::current_path(previous, error);
+        }
+
+    private:
+        const fs::path previous = fs::current_path();
+    };
+    const RestoreCwd restore_cwd;
+    fs::current_path(launch);
+
+    ServerCliOptions options;
+    options.root = RootString();
+    options.surface_radius = 0;
+    options.collision_radius = 0;
+    options.test_streaming_radius_cap = 1;
+    options.autosave_ticks = 0;
+    if (explicit_override != 0) {
+        options.systems_config_override = luminumbra::core::SystemConfig::FromJsonString(
+            R"({"sim":{"plant_growth":{"enabled":false}}})");
+    }
+    const auto expected =
+        options.systems_config_override
+            ? *options.systems_config_override
+            : luminumbra::core::SystemConfig::FromJsonString(
+                  runtime_kind == 0 ? R"({"sim":{"erosion":{"enabled":false}}})" : "{}");
+    GameSession expected_session;
+    expected_session.ApplySystemConfig(expected);
+    const auto identity = expected_session.SystemConfigIdentity();
+    EXPECT_EQ(RuntimeHelloFrom(options).system_config_identity, identity);
+    Server::ServerWorldRunner runner(RunnerConfigFrom(options));
+    ASSERT_TRUE(runner.Boot()) << runner.GetBootError();
+    ASSERT_NE(runner.Session(), nullptr);
+    EXPECT_EQ(runner.Session()->SystemConfigIdentity(), identity);
+    runner.Shutdown();
+}
+
+INSTANTIATE_TEST_SUITE_P(RuntimeDefaultsAndOverrides,
+                         RuntimeConfigStartup,
+                         testing::Combine(testing::Values(0, 1, 2, 3), testing::Values(0, 1)));
+
+class SnapshotEnergyFailure : public WorldOpenRefusal {};
+
+TEST_P(SnapshotEnergyFailure, FailureKeepsDirtyChunksAndRetryPersistsAllState) {
+    const auto [regions, snapshot_path] = GetParam();
+    const bool full_snapshot = snapshot_path >= 3;
+    const int snapshot_mode = snapshot_path % 3;
+    const bool active_regions = regions != 0;
+    const bool dirty = snapshot_mode != 2;
+    const auto config = SnapshotRunnerConfig(RootString(), active_regions);
+    Server::ServerWorldRunner runner(config);
+    ASSERT_NO_FATAL_FAILURE(BootSnapshotRunner(runner, active_regions));
+    auto* session = runner.Session();
+    const auto destination = session->GetWorldSaveDir();
+    std::shared_ptr<Chunk> chunk;
+    ASSERT_NO_FATAL_FAILURE(PreparePendingSnapshot(*session, chunk, snapshot_mode != 0));
+    if (!dirty) {
+        ASSERT_TRUE(session->SaveWorldState());
+        ASSERT_FALSE(chunk->is_voxel_data_dirty());
+        auto* energy = session->GetEnergyFieldState();
+        energy->QueueDeposit(3, 0, 0, 0, 500);
+        energy->Tick(0);
+    }
+    // Pin metadata at the current cursor before injecting the energy-only failure.
+    ASSERT_TRUE(session->SaveWorld());
+    const PendingSnapshotState pending(*session);
+    const auto metadata_bytes = Read(destination / "world_info.json");
+    const auto energy_file = destination / "aether_state.efs";
+    const auto preserved_energy = root / "preserved-energy.efs";
+    const bool had_energy = fs::exists(energy_file);
+    const auto old_energy_bytes = had_energy ? Read(energy_file) : std::string{};
+    if (had_energy)
+        fs::rename(energy_file, preserved_energy);
+    ASSERT_TRUE(fs::create_directory(energy_file));
+    Write(energy_file / "keep", "destination occupied");
+
+    world::WorldStateSaveReport report;
+    report.saved = true;
+    report.chunks_saved = 99;
+    if (full_snapshot) {
+        EXPECT_EQ(runner.SaveFullSnapshot(), 0u);
+        // The full writer returns a chunk count; inspect the same pending state below.
+    } else {
+        EXPECT_FALSE(session->SaveWorldState(&report));
+        EXPECT_FALSE(report.saved);
+        EXPECT_EQ(report.chunks_saved, 0u);
+        EXPECT_EQ(report.chunks_dirty, dirty ? 1u : 0u);
+    }
+    EXPECT_EQ(chunk->is_voxel_data_dirty(), dirty);
+    EXPECT_EQ(Read(destination / "world_info.json"), metadata_bytes);
+    EXPECT_EQ(Read(energy_file / "keep"), "destination occupied");
+    EXPECT_EQ(session->GetEnergyFieldState()->CanonicalBytes(), pending.energy_bytes);
+    EXPECT_EQ(session->ComputePlantSubHash(), pending.plant_hash);
+    if (dirty)
+        pending.ExpectUnchanged(*session, *chunk);
+    if (had_energy)
+        EXPECT_EQ(Read(preserved_energy), old_energy_bytes);
+
+    fs::remove_all(energy_file);
+    if (had_energy)
+        fs::rename(preserved_energy, energy_file);
+    if (full_snapshot) {
+        ASSERT_EQ(runner.SaveFullSnapshot(), 1u);
+    } else {
+        ASSERT_TRUE(session->SaveWorldState(&report));
+        EXPECT_EQ(report.chunks_dirty, dirty ? 1u : 0u);
+        if (dirty) {
+            EXPECT_TRUE(report.saved);
+            EXPECT_EQ(report.chunks_saved, 1u);
+        }
+    }
+    EXPECT_FALSE(chunk->is_voxel_data_dirty());
+    ASSERT_NO_FATAL_FAILURE(
+        ExpectSnapshotReloaded(pending, *chunk, config, session->GetMetadata().worldId, jobs));
+    runner.Shutdown();
+}
+
+// One bounded case per region mode, writer, and first/incremental/clean snapshot path.
+INSTANTIATE_TEST_SUITE_P(RegionModesAndSnapshotPaths,
+                         SnapshotEnergyFailure,
+                         testing::Combine(testing::Values(0, 1), testing::Range(0, 6)));
+
 TEST_F(WorldOpenRefusal, ServerFullSnapshotPresetChangeRefusesWithoutWritesOrAcknowledgement) {
     for (const bool active_regions : {false, true}) {
         SCOPED_TRACE(active_regions);
@@ -1474,10 +1617,6 @@ TEST_F(WorldOpenRefusal, ServerFullSnapshotPresetChangeRefusesWithoutWritesOrAck
             }
 
             ASSERT_EQ(runner.SaveFullSnapshot(), 1u);
-            if (active_regions)
-                EXPECT_FALSE(chunk->is_voxel_data_dirty());
-            // The legacy full snapshot writes chunks/metadata; flush plants and energy too.
-            ASSERT_TRUE(session->SaveWorldState());
             EXPECT_FALSE(chunk->is_voxel_data_dirty());
             ExpectSnapshotReloaded(pending, *chunk, config, session->GetMetadata().worldId, jobs);
             if (HasFatalFailure())
@@ -1487,7 +1626,7 @@ TEST_F(WorldOpenRefusal, ServerFullSnapshotPresetChangeRefusesWithoutWritesOrAck
     }
 }
 
-TEST_F(WorldOpenRefusal, LegacyFullSnapshotCallbackAndMetadataFailureKeepChunkCount) {
+TEST_F(WorldOpenRefusal, LegacyFullSnapshotCallbackSucceedsAndMetadataFailureRefuses) {
     // This case exercises the legacy clock path, independently of shipping defaults.
     Write(root / "data/common/systems.json", R"({"sim":{"active_regions":{"enabled":false}}})");
     Server::ServerWorldRunnerConfig config;
@@ -1511,11 +1650,21 @@ TEST_F(WorldOpenRefusal, LegacyFullSnapshotCallbackAndMetadataFailureKeepChunkCo
     ASSERT_EQ(runner.Session()->TickSimulation(runner.Session()->GetSimulationClock().fixed_dt()),
               1u);
     EXPECT_TRUE(called);
-    // A failed open leaves the old streamed chunks available but blocks metadata
-    // saving. The legacy full-snapshot writer still reports the chunk count.
+    // A failed open leaves old streamed chunks available but blocks metadata saving.
+    // A full snapshot must report that refusal in the legacy mode too.
+    const auto pending_chunks = runner.Session()->GetWorldSystem()->snapshot_streamed_chunks();
+    ASSERT_FALSE(pending_chunks.empty());
+    const auto& pending_chunk = pending_chunks.front();
+    ASSERT_FALSE(pending_chunk->heightmap_data.empty());
+    pending_chunk->heightmap_data.front() += 1.0f;
+    pending_chunk->mark_voxel_data_dirty();
     ASSERT_FALSE(runner.Session()->LoadWorld("missing-world"));
     ASSERT_FALSE(runner.Session()->SaveWorld());
-    EXPECT_EQ(runner.SaveFullSnapshot(), chunks);
+    const SnapshotDestinationBytes before(root);
+    EXPECT_EQ(runner.SaveFullSnapshot(), 0u);
+    before.ExpectUnchanged();
+    EXPECT_TRUE(pending_chunk->is_voxel_data_dirty());
+    EXPECT_EQ(runner.StreamedChunkCount(), chunks);
     runner.Shutdown();
 }
 

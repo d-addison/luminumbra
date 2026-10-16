@@ -16,6 +16,7 @@
 
 #include <array>
 #include <cstdint>
+#include <filesystem>
 #include <limits>
 #include <map>
 #include <string>
@@ -122,6 +123,10 @@ public:
     [[nodiscard]] static SystemConfig FromJsonString(const std::string& json_text);
     // Load from disk. Missing/unreadable file -> all-defaults (no throw).
     [[nodiscard]] static SystemConfig LoadFromFile(const std::string& path);
+    // Runtime defaults come only from this root, including missing/unreadable-file fallback.
+    // An optional overlay changes user settings only, as in LoadLayered.
+    [[nodiscard]] static SystemConfig LoadFromRuntimeRoot(const std::filesystem::path& root,
+                                                          const std::string& overlay_path = {});
     // Explicit CLI overrides must be readable JSON objects; failure leaves config unchanged.
     [[nodiscard]] static bool
     TryLoadFromFile(const std::string& path, SystemConfig& config, std::string& error);

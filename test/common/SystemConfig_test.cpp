@@ -9,8 +9,10 @@
 
 #include <filesystem>
 #include <fstream>
+#include <ios>
 #include <sstream>
 #include <string>
+#include <system_error>
 #include <utility>
 
 #include <glm/glm.hpp>
@@ -26,6 +28,76 @@ using luminumbra::core::SysParam;
 using luminumbra::core::SystemConfig;
 
 namespace {
+
+class RuntimeSystemConfig : public testing::Test {
+protected:
+    const std::filesystem::path& Directory() const {
+        return directory;
+    }
+    const std::filesystem::path& Runtime() const {
+        return runtime;
+    }
+    void SetUp() override {
+        previous_cwd = std::filesystem::current_path();
+        directory = Luminumbra::TestSupport::CreateUniqueTempDirectory("runtime-config-");
+        runtime = directory / "runtime";
+        std::filesystem::create_directories(runtime / "data/common");
+        const auto unrelated = directory / "launch";
+        std::filesystem::create_directories(unrelated / "data/common");
+        Write(unrelated / "data/common/systems.json",
+              R"({"sim":{"erosion":{"enabled":false}},"user":{"video":{"fov":60}}})");
+        std::filesystem::current_path(unrelated);
+    }
+    void TearDown() override {
+        std::error_code error;
+        std::filesystem::current_path(previous_cwd, error);
+        std::filesystem::remove_all(directory, error);
+    }
+    static void Write(const std::filesystem::path& path, const std::string& bytes) {
+        std::ofstream output(path, std::ios::binary | std::ios::trunc);
+        output << bytes;
+        ASSERT_TRUE(output.good());
+    }
+
+private:
+    std::filesystem::path directory;
+    std::filesystem::path runtime;
+    std::filesystem::path previous_cwd;
+};
+
+TEST_F(RuntimeSystemConfig, DefaultsAndUserOverlayComeFromRuntimeRoot) {
+    Write(Runtime() / "data/common/systems.json",
+          R"({"sim":{"plant_growth":{"enabled":false}},"user":{"video":{"fov":80}}})");
+    const auto defaults = SystemConfig::LoadFromRuntimeRoot(Runtime());
+    EXPECT_TRUE(defaults.enabled(SysKey::SimErosion));
+    EXPECT_FALSE(defaults.enabled(SysKey::SimPlantGrowth));
+    EXPECT_FLOAT_EQ(defaults.user().fov, 80.0f);
+
+    const auto overlay = Directory() / "settings.json";
+    Write(overlay, R"({"sim":{"plant_growth":{"enabled":true}},"user":{"video":{"fov":100}}})");
+    const auto layered = SystemConfig::LoadFromRuntimeRoot(Runtime(), overlay.string());
+    EXPECT_TRUE(layered.enabled(SysKey::SimErosion));
+    EXPECT_FALSE(layered.enabled(SysKey::SimPlantGrowth));
+    EXPECT_FLOAT_EQ(layered.user().fov, 100.0f);
+}
+
+TEST_F(RuntimeSystemConfig, UnavailableOrPartialRuntimeDefaultsNeverUseLaunchDirectory) {
+    const auto file = Runtime() / "data/common/systems.json";
+    const auto expect_defaults = [&] {
+        const auto config = SystemConfig::LoadFromRuntimeRoot(Runtime());
+        EXPECT_TRUE(config.enabled(SysKey::SimErosion));
+        EXPECT_EQ(config.ComputeConfigSubHash(), SystemConfig::Defaults().ComputeConfigSubHash());
+        EXPECT_FLOAT_EQ(config.user().fov, SystemConfig::Defaults().user().fov);
+    };
+    expect_defaults(); // Missing defaults.
+    std::filesystem::create_directory(file);
+    expect_defaults(); // A directory cannot supply a configuration document.
+    std::filesystem::remove(file);
+    for (const auto* bytes : {"", " ", "{\"sim\":"}) {
+        Write(file, bytes);
+        expect_defaults();
+    }
+}
 
 constexpr const char* kSimulationGateNames[]{
 #define SIM_GATE_Sim(NAME) NAME,
