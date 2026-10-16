@@ -255,14 +255,15 @@ void FoliagePass::update_ground_mesh(ChunkID id,
         old != m_ground_columns.end() && old->second != key)
         remove_ground_mesh(id);
     m_ground_columns[id] = key;
-    m_ground_meshes[key].insert_or_assign(
+    auto& column = m_ground_meshes[key];
+    column.meshes.insert_or_assign(
         id,
         FoliageGroundMesh(glm::vec3(coords * glm::ivec3(CHUNK_SIZE_X, CHUNK_SIZE_Y, CHUNK_SIZE_Z)),
                           vertices,
                           indices));
+    column.revision = ++m_next_ground_revision;
     m_chunk_cache.erase(key);
     m_surf_grid_cache.erase(key);
-    ++m_ground_revision;
 }
 
 void FoliagePass::clear_ground_meshes() {
@@ -278,7 +279,6 @@ void FoliagePass::clear_ground_meshes() {
     m_uploaded_input_hash.reset();
     m_uploaded_chunk_count = 0;
     m_foliage_build_backlog = false;
-    ++m_ground_revision;
     m_instance_generation = 0;
     m_instances_from_gpu_readback = false;
     m_readback_submitted_generation = 0;
@@ -297,14 +297,16 @@ void FoliagePass::remove_ground_mesh(ChunkID id) {
     const auto key = it->second;
     auto column = m_ground_meshes.find(key);
     if (column != m_ground_meshes.end()) {
-        column->second.erase(id);
-        if (column->second.empty())
+        column->second.meshes.erase(id);
+        if (column->second.meshes.empty()) {
             m_ground_meshes.erase(column);
+        } else {
+            column->second.revision = ++m_next_ground_revision;
+        }
     }
     m_ground_columns.erase(it);
     m_chunk_cache.erase(key);
     m_surf_grid_cache.erase(key);
-    ++m_ground_revision;
 }
 
 FoliagePass::SurfaceSample FoliagePass::sample_ground(
@@ -317,7 +319,7 @@ FoliagePass::SurfaceSample FoliagePass::sample_ground(
         m_ground_meshes.find(detail::pack_foliage_chunk_key(chunk.chunk_xz.x, chunk.chunk_xz.y));
     if (column == m_ground_meshes.end())
         return sample;
-    for (const auto& [id, mesh] : column->second) {
+    for (const auto& [id, mesh] : column->second.meshes) {
         (void)id;
         const auto hit = mesh.sample(x, z);
         if (hit.valid && (!sample.valid || hit.height > sample.height)) {
@@ -328,6 +330,19 @@ FoliagePass::SurfaceSample FoliagePass::sample_ground(
         }
     }
     return sample;
+}
+
+bool FoliagePass::contributes_to_scatter(const ChunkScatter& chunk,
+                                         const glm::vec3& camera_pos) const {
+    if (chunk.density <= 0.0f) {
+        return false;
+    }
+    // Preserve the CPU/GPU admission arithmetic and conservative footprint.
+    const glm::vec3 center =
+        chunk.origin + glm::vec3(chunk.extent_m * 0.5f, 0.0f, chunk.extent_m * 0.5f);
+    const float distance = std::sqrt((center.x - camera_pos.x) * (center.x - camera_pos.x) +
+                                     (center.z - camera_pos.z) * (center.z - camera_pos.z));
+    return !(distance - chunk.extent_m > m_fade_end_m);
 }
 
 namespace {
@@ -595,7 +610,6 @@ void FoliagePass::rebuild_instances(const std::vector<ChunkScatter>& chunks,
             sig *= 1099511628211ull;
         };
         mix(m_enabled ? 0x9E3779B97F4A7C15ull : 0x1ull);
-        mix(m_ground_revision);
         mix(m_evidence_phase);
         mix(static_cast<std::uint64_t>(cell(camera_pos.x)) * 73856093ull ^
             (static_cast<std::uint64_t>(cell(camera_pos.z)) * 19349663ull));
@@ -619,16 +633,33 @@ void FoliagePass::rebuild_instances(const std::vector<ChunkScatter>& chunks,
         mix(static_cast<std::uint64_t>(std::llround(m_fade_start_m)) ^
             (static_cast<std::uint64_t>(std::llround(m_fade_end_m)) << 20));
         mix(static_cast<std::uint64_t>(std::llround(m_density_scale * 100.0f)));
-        std::uint64_t chunk_acc = chunks.size();
+        std::uint64_t chunk_acc = 0;
+        std::uint64_t ground_acc = 0;
+        std::uint64_t contributing_columns = 0;
         for (const ChunkScatter& c : chunks) {
+            if (!contributes_to_scatter(c, camera_pos)) {
+                continue;
+            }
+            ++contributing_columns;
             const std::uint64_t ch = scatter_signature(c);
             chunk_acc ^= splitmix64(ch); // XOR fold -> order-independent over the chunk list
+            if (m_use_rendered_ground) {
+                const auto key = detail::pack_foliage_chunk_key(c.chunk_xz.x, c.chunk_xz.y);
+                const auto column = m_ground_meshes.find(key);
+                const auto revision = column == m_ground_meshes.end() ? 0 : column->second.revision;
+                // Include missing support, so loss/gain cannot reuse a grid of
+                // present hits. Sum mixed key/revision pairs to retain duplicate
+                // dependencies while remaining independent of scatter order.
+                ground_acc += splitmix64(key ^ splitmix64(revision));
+            }
         }
+        chunk_acc ^= contributing_columns;
+        mix(ground_acc);
         mix(chunk_acc);
         if (collect_attribution) {
             // Diagnostic signature work is skipped entirely without an active collector.
             Attribution::ScatterSignature components{};
-            components.ground_revision = m_ground_revision;
+            components.ground_revision = ground_acc;
             components.camera_cell = static_cast<std::uint64_t>(cell(camera_pos.x)) * 73856093ull ^
                                      (static_cast<std::uint64_t>(cell(camera_pos.z)) * 19349663ull);
             std::uint64_t config_sig = 1469598103934665603ull;
@@ -744,17 +775,9 @@ void FoliagePass::rebuild_instances(const std::vector<ChunkScatter>& chunks,
     int builds_left = kMaxChunkBuildsPerFrame;
     bool deferred_any = false;
     for (const ChunkScatter& chunk : ordered_chunks) {
-        if (chunk.density <= 0.0f) {
-            continue;
-        }
         // Distance cull whole chunks past the fade horizon (no per-instance work
         // for far tiles -- gate: no foliage beyond the live ring).
-        const glm::vec3 chunk_center =
-            chunk.origin + glm::vec3(chunk.extent_m * 0.5f, 0.0f, chunk.extent_m * 0.5f);
-        const float chunk_dist =
-            std::sqrt((chunk_center.x - camera_pos.x) * (chunk_center.x - camera_pos.x) +
-                      (chunk_center.z - camera_pos.z) * (chunk_center.z - camera_pos.z));
-        if (chunk_dist - chunk.extent_m > m_fade_end_m) {
+        if (!contributes_to_scatter(chunk, camera_pos)) {
             continue;
         }
 
@@ -1046,14 +1069,7 @@ bool FoliagePass::rebuild_instances_gpu(const std::vector<ChunkScatter>& chunks,
     admitted.clear();
     admitted.reserve(std::min(chunks.size(), kMaxGpuChunks));
     for (const ChunkScatter& chunk : chunks) {
-        if (chunk.density <= 0.0f) {
-            continue;
-        }
-        const glm::vec3 cc =
-            chunk.origin + glm::vec3(chunk.extent_m * 0.5f, 0.0f, chunk.extent_m * 0.5f);
-        const float cd = std::sqrt((cc.x - camera_pos.x) * (cc.x - camera_pos.x) +
-                                   (cc.z - camera_pos.z) * (cc.z - camera_pos.z));
-        if (cd - chunk.extent_m > m_fade_end_m) {
+        if (!contributes_to_scatter(chunk, camera_pos)) {
             continue;
         }
         if (admitted.size() == kMaxGpuChunks) {

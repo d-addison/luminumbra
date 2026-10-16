@@ -634,6 +634,7 @@ endif()
 # default-OFF, so a headless flip is vacuous — this is the non-vacuous proof).
 add_executable(pass_context_test
     rendering/pass_context_test.cpp
+    # Evidence reuse and column-local invalidation on both scatter backends.
     rendering/foliage_rebuild_test.cpp
 )
 

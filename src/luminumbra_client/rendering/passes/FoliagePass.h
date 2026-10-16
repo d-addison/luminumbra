@@ -140,7 +140,12 @@ public:
     void init_buffers();
     void destroy_buffers();
     void use_rendered_ground() {
-        m_use_rendered_ground = true;
+        if (!m_use_rendered_ground) {
+            m_use_rendered_ground = true;
+            m_chunk_cache.clear();
+            m_surf_grid_cache.clear();
+            m_scatter_built = false;
+        }
     }
     void update_ground_mesh(ChunkID id,
                             const glm::ivec3& coords,
@@ -420,11 +425,18 @@ private:
     void submit_foliage_readback();
     SurfaceSample sample_ground(
         const ChunkScatter& chunk, SurfaceQuery query, void* query_ctx, float x, float z) const;
+    bool contributes_to_scatter(const ChunkScatter& chunk, const glm::vec3& camera_pos) const;
     bool m_use_rendered_ground = false;
-    std::uint64_t m_ground_revision = 0;
+    // Render-only revision allocator. Only a contributing column's stored token
+    // enters the scatter signature; absent columns have revision zero. Storage
+    // follows resident columns, with no history retained for unloaded terrain.
+    std::uint64_t m_next_ground_revision = 0;
+    struct GroundColumn {
+        std::uint64_t revision = 0;
+        std::unordered_map<ChunkID, FoliageGroundMesh> meshes;
+    };
     std::unordered_map<ChunkID, std::uint64_t> m_ground_columns;
-    std::unordered_map<std::uint64_t, std::unordered_map<ChunkID, FoliageGroundMesh>>
-        m_ground_meshes;
+    std::unordered_map<std::uint64_t, GroundColumn> m_ground_meshes;
 
     //  implementation note (foliage streaming-burst amortization): build (or fetch the cached)
     // CAMERA-INDEPENDENT instance records for one chunk. The records (position/size/color/phase/
