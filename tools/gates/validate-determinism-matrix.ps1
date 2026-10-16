@@ -36,7 +36,9 @@ param(
     # (FP/optimization differences in the sim): the DEBUG sim-truth hash and the RELEASE one are
     # legitimately DIFFERENT deterministic values.  checks each build is run==replay AND
     # matches ITS OWN baseline — NOT that debug == release. Override if intentionally bumped.
+    # Pin covers the historical all-off simulation configuration and revision-6 terrain.
     [string]$BaselineHash = 'a66ab4d049ba9228',          # DEBUG canonical (the gate tree;  derived-state reclassification 2026-07-05)
+    # Pin covers the historical all-off simulation configuration and revision-6 terrain.
     [string]$ReleaseBaselineHash = '045f7c2f0645bcce',   # RELEASE canonical (distinct, also deterministic; authoritative-state change)
     # Quick mode: workers {1,2}, debug only, skip the replay + moving axes (fast pre-commit check).
     [switch]$Quick,
@@ -57,6 +59,8 @@ param(
 $ErrorActionPreference = 'Stop'
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $RepoRoot = (Resolve-Path (Join-Path $ScriptDir '..\..')).Path
+$HistoricalSystemsConfig = Join-Path $RepoRoot 'test/fixtures/historical-defaults-off.json'
+$HistoricalPresetJson = Join-Path $RepoRoot 'worlds/atlas/presets-rev6/default.json'
 
 if ($Quick) { $Workers = @(1, 2); $Builds = @('debug') }
 
@@ -83,7 +87,13 @@ function Invoke-Smoke {
         if ($WorkerCount -ge 0) { $env:LUMINUMBRA_JOB_WORKERS = "$WorkerCount" } else { Remove-Item Env:\LUMINUMBRA_JOB_WORKERS -ErrorAction SilentlyContinue }
         if ($ThrottleSeed -gt 0) { $env:LUMINUMBRA_JOB_THROTTLE = "$ThrottleSeed" } else { Remove-Item Env:\LUMINUMBRA_JOB_THROTTLE -ErrorAction SilentlyContinue }
         $smokeArg = if ($Moving) { '--smoke-moving' } else { '--smoke' }
-        $raw = & $ExePath $smokeArg 2>&1 | Out-String
+        # Static cells assert historical pins; moving cells exercise shipping simulation defaults.
+        # Pin the smoke save cadence independently of the shipping autosave default.
+        $workloadArgs = @($smokeArg, '--autosave-ticks', '30')
+        if (-not $Moving) {
+            $workloadArgs += @('--systems-config', $HistoricalSystemsConfig, '--preset-json', $HistoricalPresetJson)
+        }
+        $raw = & $ExePath @workloadArgs 2>&1 | Out-String
     } finally {
         if ($null -ne $prev) { $env:LUMINUMBRA_JOB_WORKERS = $prev } else { Remove-Item Env:\LUMINUMBRA_JOB_WORKERS -ErrorAction SilentlyContinue }
         if ($null -ne $prevThrottle) { $env:LUMINUMBRA_JOB_THROTTLE = $prevThrottle } else { Remove-Item Env:\LUMINUMBRA_JOB_THROTTLE -ErrorAction SilentlyContinue }
@@ -140,7 +150,7 @@ if ($Mode -eq 'WaterCrossBuild') {
         foreach ($proc in @('p1', 'p2')) {
             $artPath = Join-Path $artDir "water-trace-$build-$proc.json"
             Remove-Item $artPath -Force -ErrorAction SilentlyContinue
-            $raw = & $exe.FullName --smoke --water-hash-trace --artifact $artPath 2>&1 | Out-String
+            $raw = & $exe.FullName --smoke --autosave-ticks 30 --water-hash-trace --artifact $artPath 2>&1 | Out-String
             if ($raw -notmatch 'smoke passed') {
                 Write-Host "[water-crossprocess] FAIL: $build --smoke ($proc) did not pass"
                 exit 1
@@ -230,9 +240,9 @@ foreach ($build in $Builds) {
     #  replay axis (skipped in Quick): record then replay reproduces the hash.
     if (-not $Quick) {
         $rec = Join-Path $env:TEMP ("lumin_detmatrix_{0}.lrec" -f $build)
-        & $exe.FullName '--record' $rec 2>&1 | Out-Null
+        & $exe.FullName '--systems-config' $HistoricalSystemsConfig '--preset-json' $HistoricalPresetJson '--record' $rec 2>&1 | Out-Null
         if (Test-Path $rec) {
-            $rp = & $exe.FullName '--replay' $rec 2>&1 | Out-String
+            $rp = & $exe.FullName '--systems-config' $HistoricalSystemsConfig '--preset-json' $HistoricalPresetJson '--replay' $rec 2>&1 | Out-String
             $rpHash = ''
             $rm2 = [regex]::Match($rp, 'world_hash[=:\s]+([0-9a-f]{8,})')
             if ($rm2.Success) { $rpHash = $rm2.Groups[1].Value }

@@ -1,3 +1,4 @@
+#include "../fixtures/TerrainFixtureParams.h"
 #include "gtest/gtest.h"
 #include <chrono> // For performance testing
 #include <functional>
@@ -62,10 +63,10 @@ protected:
         params_sky_world.base_amplitude = 10.0f;
     }
 
-    TerrainGenParams params_guaranteed_surface;
-    TerrainGenParams params_archipelago;
-    TerrainGenParams params_underwater_world;
-    TerrainGenParams params_sky_world;
+    TerrainGenParams params_guaranteed_surface = Luminumbra::Test::SyntheticTerrainParams();
+    TerrainGenParams params_archipelago = Luminumbra::Test::SyntheticTerrainParams();
+    TerrainGenParams params_underwater_world = Luminumbra::Test::SyntheticTerrainParams();
+    TerrainGenParams params_sky_world = Luminumbra::Test::SyntheticTerrainParams();
 };
 
 /**
@@ -78,6 +79,8 @@ protected:
         world_system =
             std::make_unique<SHIELD_WorldSystem>(nullptr, nullptr, params_underwater_world, 1337);
         water_system = std::make_unique<WaterSystem>(nullptr, world_system.get());
+        water_system->SetSimResolution(8);
+        water_system->SetHydrology(false, 0, 0);
         world_system->SetWaterSystem(water_system.get());
     }
 
@@ -405,6 +408,8 @@ TEST_F(WorldAndWaterTest, DryHighAltitudeCellsStayDryAfterSimulation) {
 
     SHIELD_WorldSystem world(&jobs, nullptr, params_sky_world, 1337);
     WaterSystem water(&jobs, &world);
+    water.SetSimResolution(8);
+    water.SetHydrology(false, 0, 0);
     world.SetWaterSystem(&water);
 
     auto chunk = std::make_shared<Chunk>(IVec3{0, 6, 0});

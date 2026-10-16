@@ -301,9 +301,16 @@ TEST(ActiveRegionLedgerTest, FrozenContentsAndCursorDoNotAdvanceAndResumeIsBound
         EXPECT_EQ(r.water_cursor, 1234u);
         EXPECT_EQ(r.frozen_digest, frozen.frozen_digest);
     }
+    constexpr std::uint64_t day = Luminumbra::world::WorldCalendar{}.dayLengthTicks;
+    EXPECT_EQ(ActiveRegionLedger::resume_window(kFar, 3, WorldClock(day + 100000), UINT64_MAX)
+                  .elapsed_ticks,
+              day);
     EXPECT_EQ(
         ActiveRegionLedger::resume_window(kFar, 3, WorldClock(100000), UINT64_MAX).elapsed_ticks,
-        36000u);
+        99997u);
+    EXPECT_EQ(ActiveRegionLedger::resume_window(kFar, 3, WorldClock(100000, {36000, 8}), UINT64_MAX)
+                  .elapsed_ticks,
+              36000u);
     EXPECT_EQ(ActiveRegionLedger::resume_window(kFar, 3, WorldClock(100000), 7).elapsed_ticks, 7u);
     EXPECT_THROW(ActiveRegionLedger::resume_window(kFar, 3, WorldClock(2), 7),
                  std::invalid_argument);
@@ -461,6 +468,8 @@ TEST(ActiveRegionLedgerTest, TrySetLocalAnchorDoesNotThrowAndKeepsPreviousAnchor
     EXPECT_FALSE(ledger.try_set_local_anchor(Vec3(inf, 0, 0)));
     const std::optional<Vec3> anchor = ledger.local_anchor();
     ASSERT_TRUE(anchor.has_value());
+    if (!anchor.has_value())
+        return;
     if (anchor.has_value()) {
         const Vec3 position = anchor.value();
         EXPECT_EQ(position.x, 256.0f);
@@ -1525,6 +1534,46 @@ TEST(ActiveRegionLedgerTest, ContentAndWorkEnvelopeRefusesMalformedOrMisorderedT
         ActiveRegionLedger::kCorruptMessage);
     ExpectRefused(replace_extensions(Tlv(5, identity.encode()) + Tlv(7, "")),
                   ActiveRegionLedger::kCorruptMessage);
+}
+
+TEST(ActiveRegionLedger, ReusedScheduleScratchPreservesPriorityTraceAndRollback) {
+    ActiveRegionLedger reused({10, 1, 2}), fresh({10, 1, 2});
+    RegionScheduleScratch scratch;
+    for (auto* ledger : {&reused, &fresh}) {
+        ledger->mark_edited({10, 0}, WorldClock{});
+        ledger->mark_edited({-10, 0}, WorldClock{});
+        ledger->pin({10, 0}, true, WorldClock{});
+    }
+    const std::array work{RegionWork{{-10, 0}, 20, 0, 0, 0}};
+    const auto digest = [](RegionKey) {
+        return std::uint64_t{123};
+    };
+    // Initial wakes keep both active; overload then freezes the edited region at tick 3
+    // and the pinned region at tick 5. The pinned region's Reduced phase is 3 modulo 4.
+    const std::array<std::vector<RegionKey>, 8> due_by_tick{{
+        {{10, 0}, {-10, 0}},
+        {{10, 0}},
+        {{10, 0}},
+        {},
+        {},
+        {},
+        {},
+        {},
+    }};
+    for (std::uint64_t tick = 1; tick <= 8; ++tick) {
+        SCOPED_TRACE(tick);
+        const auto actual = reused.schedule(WorldClock(tick), {}, work, digest, {}, &scratch);
+        const auto expected = fresh.schedule(WorldClock(tick), {}, work, digest);
+        EXPECT_EQ(actual, expected);
+        EXPECT_EQ(reused.encode(), fresh.encode());
+        EXPECT_EQ(actual.due, due_by_tick.at(tick - 1));
+    }
+    const auto before = reused.encode();
+    EXPECT_THROW(reused.schedule(WorldClock(8), {}, work, digest, {}, &scratch),
+                 std::invalid_argument);
+    EXPECT_EQ(reused.encode(), before);
+    EXPECT_EQ(reused.schedule(WorldClock(9), {}, work, digest, {}, &scratch),
+              fresh.schedule(WorldClock(9), {}, work, digest));
 }
 
 } // namespace

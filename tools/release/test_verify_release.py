@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import contextlib
 import copy
+import errno
 import gzip
 import hashlib
 import io
@@ -164,7 +165,7 @@ class VerifyReleaseTests(unittest.TestCase):
         scenario = scenario or self.scenario
         args = verifier.parse_args([
             "--repo", REPO, "--tag", TAG, "--expected-commit", COMMIT,
-            "--out", str(self.out), "--source-root", self.tmp.name, "--python", "/usr/bin/true",
+            "--out", str(self.out), "--source-root", self.tmp.name, "--python", sys.executable,
         ])
         checks = verifier.run_checks(args, FakeRunner(scenario))[0]
         return {c.name: c for c in checks}
@@ -265,7 +266,7 @@ class VerifyReleaseTests(unittest.TestCase):
         runner = FakeRunner(self.scenario)
         args = verifier.parse_args([
             "--repo", REPO, "--tag", TAG, "--expected-commit", COMMIT,
-            "--out", str(self.out), "--source-root", self.tmp.name, "--python", "/usr/bin/true",
+            "--out", str(self.out), "--source-root", self.tmp.name, "--python", sys.executable,
         ])
         checks = {c.name: c for c in verifier.run_checks(args, runner)[0]}
         self.assertEqual(checks["archive-regenerated"].status, "PASS", checks["archive-regenerated"].detail)
@@ -312,7 +313,7 @@ class VerifyReleaseTests(unittest.TestCase):
 
     def cli_args(self) -> List[str]:
         return ["--repo", REPO, "--tag", TAG, "--expected-commit", COMMIT,
-                "--out", str(self.out), "--source-root", self.tmp.name, "--python", "/usr/bin/true"]
+                "--out", str(self.out), "--source-root", self.tmp.name, "--python", sys.executable]
 
     def archive_attestation(self, body: str) -> Dict[str, object]:
         scenario = copy.deepcopy(self.scenario)
@@ -505,7 +506,14 @@ class VerifyReleaseTests(unittest.TestCase):
         victim = Path(self.tmp.name) / "victim.txt"
         victim.write_text("keep", encoding="utf-8")
         link = verifier.report_path(self.out)
-        os.symlink(str(victim), str(link))
+        try:
+            os.symlink(str(victim), str(link))
+        except (OSError, NotImplementedError) as error:
+            if (isinstance(error, OSError)
+                    and error.errno not in (errno.EPERM, errno.EACCES, errno.ENOSYS, errno.EOPNOTSUPP)
+                    and getattr(error, "winerror", None) not in (1, 50, 1314)):
+                raise
+            self.skipTest(f"Symlink creation is unavailable: {error}")
         runner = FakeRunner(self.scenario)
         stderr = io.StringIO()
         with contextlib.redirect_stderr(stderr):
@@ -519,7 +527,14 @@ class VerifyReleaseTests(unittest.TestCase):
     def test_dangling_symlink_report_refused_without_creating_target(self) -> None:
         self.out.mkdir(parents=True)
         target = Path(self.tmp.name) / "nowhere.json"
-        os.symlink(str(target), str(verifier.report_path(self.out)))
+        try:
+            os.symlink(str(target), str(verifier.report_path(self.out)))
+        except (OSError, NotImplementedError) as error:
+            if (isinstance(error, OSError)
+                    and error.errno not in (errno.EPERM, errno.EACCES, errno.ENOSYS, errno.EOPNOTSUPP)
+                    and getattr(error, "winerror", None) not in (1, 50, 1314)):
+                raise
+            self.skipTest(f"Symlink creation is unavailable: {error}")
         runner = FakeRunner(self.scenario)
         with contextlib.redirect_stderr(io.StringIO()):
             rc = verifier.main(self.cli_args(), runner=runner)

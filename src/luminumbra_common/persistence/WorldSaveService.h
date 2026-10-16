@@ -1,9 +1,13 @@
 #pragma once
 
 #include "SaveTransaction.h"
+#include "SimulationPendingState.h"
+#include "ai/CreaturePersistence.h"
+#include "ecs/EntitySnapshot.h"
 #include "fields/FieldPageState.h"
 #include "world/ActiveRegionLedger.h"
 #include "world/GroundObjectStore.h"
+#include "world/TerrainPresetLoader.h"
 #include "world/WorldClock.h"
 #include "world/WorldStreamingState.h"
 
@@ -18,13 +22,6 @@
 #include <string>
 #include <string_view>
 #include <vector>
-
-namespace Luminumbra::Ecs {
-struct EntityRegistrySnapshot;
-}
-namespace luminumbra::ai {
-struct CreatureSnapshot;
-}
 
 namespace Luminumbra::Persistence {
 
@@ -50,7 +47,31 @@ struct RegionDigestInputs {
     // region owns no initialized field cells, which keeps the digest of such regions unchanged.
     std::string field_page_bytes;
     // Complete creature authority, appended after the existing inputs only when nonempty.
-    std::string creature_bytes;
+    std::string creature_bytes{};
+};
+
+// Decoded siblings from one successful admission. Published only after all record,
+// ownership and snapshot-index checks pass; never reused across separate opens.
+struct WorldSaveRecords {
+    world::ActiveRegionLedger ledger{};
+    world::GroundObjectStore ground;
+    world::FieldPageState pages;
+    Ecs::EntityRegistrySnapshot plants;
+    luminumbra::ai::CreatureSnapshot creatures;
+    bool has_ledger = false;
+    // Engaged when continuation reading is enabled, including historical member absence.
+    std::optional<SimulationPendingState> pending;
+    bool has_pending = false;
+};
+
+struct WorldSaveAdmission {
+    // Filled by the saved-world catalog: parameters, immutable dependencies and identity
+    // from one complete load, carried alongside the admitted persistence records.
+    world::TerrainPresetLoadResult preset;
+    std::unique_ptr<WorldStreamingState> chunks = std::make_unique<WorldStreamingState>();
+    WorldSaveRecords records;
+    std::vector<IVec3> inventory;
+    bool present = false;
 };
 
 // Persists WorldStreamingState snapshots beneath a world save directory.
@@ -60,8 +81,6 @@ struct RegionDigestInputs {
 // Record headers: u64 id | u8 lod | u8 flags | u32 raw_size | u32 compressed_size.
 // Lod-0 payloads retain canonical in-memory world_state_snapshot.v1 serialization.
 // Obsolete disk formats are refused; migration is not supported.
-struct SimulationPendingState;
-
 class WorldSaveService {
 public:
     // Owner-thread, read-only resolution. Validates committed disk membership even when a
@@ -125,9 +144,11 @@ public:
                                     std::vector<std::string>* errors = nullptr);
     // load_world refusal rules for ground objects: every object lies in a region the ledger
     // records and no object was spawned after the metadata clock. Absent file: true.
+    // On success, optional validated output receives the decoded store (empty on absence).
     static bool validate_ground_objects(const std::filesystem::path& save_dir,
                                         const world::ActiveRegionLedger& ledger,
-                                        std::vector<std::string>* errors);
+                                        std::vector<std::string>* errors,
+                                        world::GroundObjectStore* validated = nullptr);
 
     // Field pages persisted as region/field-pages.fpg (SIBLING to the chunk container). An EMPTY
     // state writes NO file (and removes a stale one). Absent file: out is cleared, true.
@@ -140,9 +161,11 @@ public:
                                  std::vector<std::string>* errors = nullptr);
     // load_world refusal rules for field pages: a present file requires a present ledger and every
     // initialized cell's owner region must have a ledger record. Absent file: true.
+    // On success, optional validated output receives the decoded pages (empty on absence).
     static bool validate_field_pages(const std::filesystem::path& save_dir,
                                      const world::ActiveRegionLedger& ledger,
-                                     std::vector<std::string>* errors);
+                                     std::vector<std::string>* errors,
+                                     world::FieldPageState* validated = nullptr);
 
     static bool save_pending_state(const SimulationPendingState& state,
                                    const std::filesystem::path& save_dir,
@@ -152,6 +175,8 @@ public:
                                     const world::WorldClock& clock,
                                     const std::filesystem::path& save_dir,
                                     std::vector<std::string>* errors = nullptr);
+    // Missing file: clear region state at absent_clock and preserve ledger.config().
+    // Present file: decode its persisted scheduler settings along with the region state.
     static bool load_active_regions(world::ActiveRegionLedger& ledger,
                                     const std::filesystem::path& save_dir,
                                     std::vector<std::string>* errors = nullptr,
@@ -259,6 +284,13 @@ public:
     static ChunkReadResult read_chunk(const std::filesystem::path& save_dir,
                                       const IVec3& coords,
                                       bool require_index = false);
+    // Save-as transfer of indexed authority. Reads the source index once and copies validated
+    // compressed records in region batches, preserving unrelated destination records.
+    // The caller must own a destination snapshot transaction covering the entire save-as.
+    static bool copy_authoritative_chunks(const std::filesystem::path& source,
+                                          const std::filesystem::path& destination,
+                                          const std::vector<IVec3>& coords,
+                                          std::vector<std::string>* errors = nullptr);
     // Capture BEFORE serialization; call only after the complete snapshot commits. A changed
     // or saturated revision retains its dirty obligation.
     static std::function<void()>
@@ -325,6 +357,10 @@ public:
     static std::uint64_t ledger_load_count_for_testing();
     static std::uint64_t pending_reader_count_for_testing();
     static std::uint64_t pending_probe_count_for_testing();
+    // Number of field-page file parses, excluding absent members (observational only).
+    static std::uint64_t field_page_decode_count_for_testing();
+    static std::uint64_t chunk_decode_count_for_testing();
+    static std::uint64_t ground_object_decode_count_for_testing();
 
     // Validates one snapshot member and computes its index fingerprint (MemberDigestFn-compatible).
     // Region files hash their lod-0 record stream and are reported absent when they hold no lod-0
@@ -398,18 +434,28 @@ public:
 
     // Loads a previously saved snapshot into state. A missing snapshot file is
     // a clean miss (fresh world): returns false WITHOUT appending an error.
-    // Malformed or unreadable snapshots return false with diagnostics. Optional pending
-    // outputs publish only after all members validate, reusing this single file decode.
-    // Session callers supply their active-regions flag; standalone readers infer it
-    // from the existing metadata/ledger indicators without probing pending state.
+    // Malformed or unreadable snapshots return false with diagnostics. Optional validated
+    // siblings, including pending continuation, publish only on success; clean misses
+    // return empty siblings. Session callers supply their active-regions flag;
+    // standalone readers infer it from metadata without probing pending state.
     bool load_world(WorldStreamingState& state,
                     const std::filesystem::path& save_dir,
                     std::vector<std::string>& errors,
                     const std::stop_token& stop = {},
                     const std::function<bool(const IVec3&)>& retain_chunk = {},
                     std::vector<IVec3>* authoritative_inventory = nullptr,
-                    SimulationPendingState* pending_state = nullptr,
-                    bool* has_pending_state = nullptr,
+                    WorldSaveRecords* validated_records = nullptr,
+                    std::optional<bool> active_regions_enabled = std::nullopt) const;
+
+    // Compatibility output form for callers requesting only the pending continuation.
+    bool load_world(WorldStreamingState& state,
+                    const std::filesystem::path& save_dir,
+                    std::vector<std::string>& errors,
+                    const std::stop_token& stop,
+                    const std::function<bool(const IVec3&)>& retain_chunk,
+                    std::vector<IVec3>* authoritative_inventory,
+                    SimulationPendingState* pending_state,
+                    bool* has_pending_state,
                     std::optional<bool> active_regions_enabled = std::nullopt) const;
 
     // Deterministic hash of the streaming state, reusing the persistence hash

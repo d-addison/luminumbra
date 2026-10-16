@@ -280,7 +280,7 @@ class ArchiveTests(SbomFixture):
         entries = [("pkg/", None), ("pkg/b.txt", b"same"), ("pkg/a.txt", b"same"), ("pkg/c.bin", b"\0\xff")]
         write_archive(archive, entries)
         self.cli("--archive", archive)
-        document = json.loads(self.output.read_text())
+        document = json.loads(self.output.read_text(encoding="utf-8"))
         # Independent tar enumeration and hashlib calls compare exact archive bytes.
         with tarfile.open(archive) as stream:
             expected = {"./" + member.name: stream.extractfile(member).read()
@@ -320,7 +320,7 @@ class ArchiveTests(SbomFixture):
         archive = self.base / "empty.tar.gz"
         write_archive(archive, [])
         self.cli("--archive", archive)
-        document = json.loads(self.output.read_text())
+        document = json.loads(self.output.read_text(encoding="utf-8"))
         self.assertEqual(document["files"], [])
         self.assertEqual(document["packages"][0]["packageVerificationCode"]["packageVerificationCodeValue"],
                          hashlib.sha1(b"").hexdigest())
@@ -351,7 +351,7 @@ class GitArchiveTests(SbomFixture):
         archive.write_bytes(self.git("archive", "--format=tar", "--prefix=pkg/", "HEAD"))
         self.assertEqual((self.root / "a.txt").read_bytes(), b"hello\r\n")
         self.cli("--archive", archive)
-        document = json.loads(self.output.read_text())
+        document = json.loads(self.output.read_text(encoding="utf-8"))
         files = {item["fileName"]: item for item in document["files"]}
         self.assertNotIn("./pkg/excluded.txt", files)
         self.assertEqual(files["./pkg/a.txt"]["checksums"][1]["checksumValue"],
@@ -370,7 +370,7 @@ class GitArchiveTests(SbomFixture):
         with tarfile.open(archive) as stream:
             self.assertEqual(stream.extractfile("pkg/a.txt").read(), b"hello\r\n")
         self.cli("--archive", archive)
-        document = json.loads(self.output.read_text())
+        document = json.loads(self.output.read_text(encoding="utf-8"))
         files = {item["fileName"]: item for item in document["files"]}
         self.assertEqual(files["./pkg/a.txt"]["checksums"], [
             {"algorithm": "SHA1", "checksumValue": hashlib.sha1(b"hello\r\n").hexdigest()},
