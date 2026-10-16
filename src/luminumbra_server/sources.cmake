@@ -15,6 +15,7 @@ set(SERVER_APP_SOURCES
     "${CMAKE_CURRENT_LIST_DIR}/modes/NetTcp.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/modes/Replay.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/modes/Replicate.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/modes/RuntimeTcpSlot.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/modes/Server.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/modes/Smoke.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/modes/SmokeArtifact.cpp"
