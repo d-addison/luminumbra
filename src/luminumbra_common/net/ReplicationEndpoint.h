@@ -29,6 +29,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <map>
 #include <vector>
 
@@ -134,6 +135,13 @@ public:
                            const std::vector<ReplEntityState>& entities,
                            const std::vector<std::uint32_t>& removed_ids = {});
 
+    // Borrow a sized entity source for a synchronous broadcast. Each reader result
+    // must remain valid until the call returns, including during AOI gathering.
+    void BroadcastSnapshot(std::uint64_t server_tick,
+                           std::size_t entity_count,
+                           const std::function<const ReplEntityState&(std::size_t)>& read_entity,
+                           const std::vector<std::uint32_t>& removed_ids = {});
+
     // Drains all currently-available inbound frames from every client: Usercmd
     // (newest-wins) and Ack (monotonic). Non-blocking.
     void PumpInbound();
@@ -181,15 +189,20 @@ public:
     // policy is off or the client keeps up.
     [[nodiscard]] std::uint64_t ForcedKeyframes(std::uint32_t client_id) const;
 
-    // client ids the backpressure policy DISCONNECTED during the most recent
-    // BroadcastSnapshot (hopeless peers that never drained past the deadline). Consume this
+    // Client ids disconnected during the most recent
+    // BroadcastSnapshot (oversized frames, lost peers, or the backpressure deadline). Consume this
     // exactly like PruneDisconnectedClients' return -- despawn/free the player's server-side
-    // state. Empty when the policy is off or nobody was dropped.
+    // state. Empty when nobody was dropped.
     [[nodiscard]] const std::vector<std::uint32_t>& DisconnectedClientsLastBroadcast() const {
         return m_disconnected_this_broadcast;
     }
 
 private:
+    template<typename EntityRange>
+    void BroadcastSnapshotEntities(std::uint64_t server_tick,
+                                   const EntityRange& entities,
+                                   const std::vector<std::uint32_t>& removed_ids);
+
     struct ClientLink {
         ILockstepTransport* transport = nullptr;
         UsercmdReceiver inbound;
@@ -200,7 +213,7 @@ private:
         std::map<std::uint32_t, SnapshotMsg> sent_history;
         // per-client OUTBOUND send queue (backpressure substrate) + cumulative
         // telemetry. Each broadcast pushes the produced frame here, then flushes as far as the
-        // transport accepts; a would-block / gone peer leaves frames buffered, so outbound.size
+        // transport accepts; temporary backpressure leaves frames buffered, so outbound.size
         // is the live queue-depth metric. Bounded by kOutboundQueueCap: overflow drops the OLDEST
         // (snapshots are unreliable / most-recent-wins) and increments dropped_frames. A connected
         // loopback/TCP peer accepts immediately, so the queue drains fully and the wire bytes stay
@@ -219,6 +232,8 @@ private:
         bool backed_up = false;
         int over_hwm_streak = 0;
     };
+    static void DrainClientInbound(ClientLink& link);
+    static void CloseClientTransport(ClientLink& link);
     std::map<std::uint32_t, ClientLink> m_clients; // ordered -> deterministic broadcast order
     // Intentional bandwidth default: previously false; SetDeltaCompression(false)
     // restores full snapshots.
@@ -262,6 +277,7 @@ public:
         , m_transport(transport) {}
 
     // Sends one tick of input upstream (records the latest tick for the ack).
+    // A terminal send failure applies available snapshots before closing the transport.
     void SendUsercmd(const UsercmdMsg& cmd);
 
     // Drains inbound snapshots (most-recent-wins) and sends an Ack for the newest.
@@ -278,8 +294,12 @@ public:
     }
 
 private:
+    bool DrainInbound();
+    void TransportDisconnected();
+
     std::uint32_t m_player_id = 0;
     ILockstepTransport* m_transport = nullptr;
+    bool m_disconnected = false;
     SnapshotReceiver m_receiver;
     std::uint64_t m_latest_usercmd_tick = 0;
     bool m_sent_any_usercmd = false;
