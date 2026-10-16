@@ -8,10 +8,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
-#include <map>
-#include <set>
 #include <stdexcept>
-#include <tuple>
 #include <type_traits>
 
 namespace Luminumbra::Systems {
@@ -63,73 +60,252 @@ void ValidateWater(const Chunk& chunk, bool allow_legacy_float = false) {
         chunk.water_sim_terrain_height.size() != cells ||
         (!chunk.water_rest_level.empty() && chunk.water_rest_level.size() != cells))
         RefuseWater("Regional water grid shape refused");
-    if (chunk.ticks_below_threshold < 0 || chunk.water_mesh_dirty_ticks < 0 ||
-        chunk.water_mesh_dirty_ticks > 15 || !std::isfinite(chunk.max_water_delta_last_tick) ||
-        chunk.max_water_delta_last_tick < 0.0f)
+    const auto* depth = chunk.water_depth_mm.data();
+    const auto* level = chunk.water_level_data.data();
+    const auto* flow = chunk.water_flow_data.data();
+    const auto* terrain = chunk.water_sim_terrain_height.data();
+    const int calm_ticks = chunk.ticks_below_threshold;
+    const int mesh_ticks = chunk.water_mesh_dirty_ticks;
+    const float delta = chunk.max_water_delta_last_tick;
+    if (calm_ticks < 0 || mesh_ticks < 0 || mesh_ticks > 15 || !std::isfinite(delta) ||
+        delta < 0.0f)
         RefuseWater("Regional water continuation refused");
     for (std::size_t i = 0; i < cells; ++i) {
-        if ((!legacy_float && chunk.water_depth_mm[i] < 0) ||
-            !std::isfinite(chunk.water_level_data[i]) ||
-            !std::isfinite(chunk.water_flow_data[i].x) ||
-            !std::isfinite(chunk.water_flow_data[i].y) ||
-            !std::isfinite(chunk.water_sim_terrain_height[i]))
+        if ((!legacy_float && depth[i] < 0) || !std::isfinite(level[i]) ||
+            !std::isfinite(flow[i].x) || !std::isfinite(flow[i].y) || !std::isfinite(terrain[i]))
             RefuseWater("Regional water cell refused");
     }
 }
 
-struct ResidentWater {
-    std::shared_ptr<Chunk> chunk;
-    RegionKey owner;
-    bool preparation = false, awake = false;
-};
-using WaterSnapshot = std::map<ChunkID, ResidentWater>;
+} // namespace
 
-WaterSnapshot SnapshotWater(std::span<const std::shared_ptr<Chunk>> resident,
+namespace RegionalWater {
+Resident* PlanningCache::Find(ChunkID id) {
+    const auto found = m_index.find(id);
+    return found == m_index.end() ? nullptr : &entries[found->second];
+}
+const Resident* PlanningCache::Find(ChunkID id) const {
+    const auto found = m_index.find(id);
+    return found == m_index.end() ? nullptr : &entries[found->second];
+}
+Candidates* PlanningCache::FindCandidates(RegionKey owner) {
+    const auto found = std::lower_bound(
+        candidates.begin(), candidates.end(), owner, [](const auto& entry, RegionKey key) {
+            return entry.owner < key;
+        });
+    return found == candidates.end() || found->owner != owner ? nullptr : &*found;
+}
+
+std::size_t PlanningCache::RosterIndex(std::size_t position, ChunkID id) const {
+    if (position < m_positions.size()) {
+        const auto index = m_positions[position];
+        if (index < entries.size() && entries[index].id == id)
+            return index;
+    }
+    const auto found = m_index.find(id);
+    return found == m_index.end() ? missing : found->second;
+}
+
+void PlanningCache::Rebuild(std::span<const std::shared_ptr<Chunk>> resident) {
+    // Build off to the side. A duplicate/invalid identity or allocation failure must
+    // not leave a partially indexed topology available to a retry.
+    PlanningCache next;
+    next.entries.reserve(resident.size());
+    for (const auto position : m_roster) {
+        const auto& chunk = resident[position];
+        const auto owner = WaterOwner(*chunk);
+        Resident entry;
+        entry.id = chunk->get_id();
+        entry.chunk = chunk.get();
+        entry.identity = chunk;
+        entry.coords = chunk->get_coords();
+        entry.owner = owner;
+        if (const auto* old = Find(entry.id))
+            entry.workspace = old->workspace;
+        next.entries.push_back(std::move(entry));
+    }
+    std::sort(next.entries.begin(), next.entries.end(), [](const auto& a, const auto& b) {
+        return a.id < b.id;
+    });
+    next.m_index.reserve(next.entries.size());
+    for (std::size_t i = 0; i < next.entries.size(); ++i) {
+        if (!next.m_index.emplace(next.entries[i].id, i).second)
+            RefuseWater("Regional water duplicate resident identity");
+        next.candidates.push_back({next.entries[i].owner, {}});
+    }
+    std::sort(next.candidates.begin(), next.candidates.end(), [](const auto& a, const auto& b) {
+        return a.owner < b.owner;
+    });
+    next.candidates.erase(
+        std::unique(next.candidates.begin(),
+                    next.candidates.end(),
+                    [](const auto& a, const auto& b) { return a.owner == b.owner; }),
+        next.candidates.end());
+    constexpr IVec3 offsets[] = {{1, 0, 0}, {-1, 0, 0}, {0, 0, 1}, {0, 0, -1}};
+    for (std::size_t i = 0; i < next.entries.size(); ++i) {
+        auto& entry = next.entries[i];
+        entry.candidate =
+            static_cast<std::size_t>(next.FindCandidates(entry.owner) - next.candidates.data());
+        for (std::size_t direction = 0; direction < 4; ++direction) {
+            const auto coords = entry.coords + offsets[direction];
+            // Never wrap packed x/z world limits onto the opposite edge.
+            if (coords.x < -1048576 || coords.x >= 1048576 || coords.z < -1048576 ||
+                coords.z >= 1048576)
+                continue;
+            const auto found = next.m_index.find(Chunk::calculate_id(coords));
+            if (found == next.m_index.end())
+                continue;
+            entry.neighbors[direction] = found->second;
+            if (direction == 0 || direction == 2) {
+                const auto& other = next.entries[found->second];
+                next.faces.push_back(
+                    {{entry.owner, other.owner, entry.id, other.id, direction == 0},
+                     i,
+                     found->second});
+            }
+        }
+    }
+    std::sort(next.faces.begin(), next.faces.end(), [](const auto& a, const auto& b) {
+        return a.face < b.face;
+    });
+    for (std::size_t i = 0; i < next.faces.size(); ++i) {
+        const auto& face = next.faces[i];
+        const std::size_t direction = face.face.is_x ? 0u : 2u;
+        next.entries[face.positive].incident_faces[direction] = i;
+        next.entries[face.other].incident_faces[direction + 1] = i;
+    }
+    // Bit identity: these are the original (owner, neighbor, positive, other, is_x)
+    // tuples. Removing sealed endpoints from this sorted superset gives exactly
+    // SnapshotFaces' sorted admitted subset, without exchanging physical endpoints.
+    next.m_seen.resize(next.entries.size());
+    next.m_positions.assign(resident.size(), missing);
+    for (const auto position : m_roster)
+        next.m_positions[position] = next.m_index.at(resident[position]->get_id());
+    // Keep reusable per-tick buffers; only topology and its indexes are replaced.
+    entries.swap(next.entries);
+    faces.swap(next.faces);
+    candidates.swap(next.candidates);
+    m_index.swap(next.m_index);
+    m_seen.swap(next.m_seen);
+    m_positions.swap(next.m_positions);
+}
+
+void PlanningCache::SelectExecutedFaces() {
+    executed.assign(reserved.begin(), reserved.end());
+    for (const auto index : selected) {
+        for (const auto face_index : entries[index].incident_faces) {
+            if (face_index == missing)
+                continue;
+            const auto& face = faces[face_index];
+            if (face.face.owner == face.face.neighbor && entries[face.positive].selected &&
+                entries[face.other].selected)
+                executed.push_back(face_index);
+        }
+    }
+    // Preserve the full scan's Face order and original endpoint orientation.
+    std::sort(executed.begin(), executed.end());
+    executed.erase(std::unique(executed.begin(), executed.end()), executed.end());
+}
+
+void PlanningCache::Refresh(std::span<const std::shared_ptr<Chunk>> resident,
                             const ActiveRegionLedger& ledger,
                             int resolution) {
-    WaterSnapshot snapshot;
-    std::set<ChunkID> identities;
-    for (const auto& chunk : resident) {
+    std::fill(m_seen.begin(), m_seen.end(), 0);
+    m_roster.clear();
+    m_positions.resize(resident.size(), missing);
+    bool rebuild = false;
+    for (std::size_t position = 0; position < resident.size(); ++position) {
+        const auto& chunk = resident[position];
         if (!chunk || chunk->get_state() == ChunkState::Loading)
             continue;
-        const auto owner = WaterOwner(*chunk);
-        if (!identities.insert(chunk->get_id()).second)
-            RefuseWater("Regional water duplicate resident identity");
-        const auto record = ledger.records().find(owner);
-        if (record == ledger.records().end() || record->second.state == RegionState::Frozen)
+        m_roster.push_back(position);
+        const auto index = RosterIndex(position, chunk->get_id());
+        if (index == missing) {
+            rebuild = true;
             continue;
-        ValidateWater(*chunk);
-        snapshot.emplace(
-            chunk->get_id(),
-            ResidentWater{chunk,
-                          owner,
-                          !chunk->has_water_sim.load() ||
-                              chunk->current_water_resolution.load() != resolution,
-                          chunk->has_water_sim.load() && !chunk->is_water_sleeping.load()});
+        }
+        m_positions[position] = index;
+        if (m_seen[index]++)
+            RefuseWater("Regional water duplicate resident identity");
+        const auto& old = entries[index];
+        if (old.chunk != chunk.get() || old.identity.owner_before(chunk) ||
+            chunk.owner_before(old.identity) || old.coords != chunk->get_coords())
+            rebuild = true;
     }
-    return snapshot;
+    if (rebuild || m_roster.size() != entries.size())
+        Rebuild(resident);
+    for (auto& group : candidates) {
+        const auto record = ledger.records().find(group.owner);
+        group.admitted =
+            record != ledger.records().end() && record->second.state != RegionState::Frozen;
+    }
+    for (auto& entry : entries) {
+        // Chunk coords/id are const. The validated identity therefore fixes WaterOwner;
+        // grouping that owner's immutable ledger lookup preserves admission exactly.
+        entry.admitted = candidates[entry.candidate].admitted;
+        entry.preparation = entry.awake = entry.source = entry.selected = entry.staged =
+            entry.changed = false;
+        if (!entry.admitted) {
+            entry.workspace.reset();
+            continue;
+        }
+        // Public mutable water arrays/mirrors and continuation flags do not have a
+        // complete writer revision. Retain full preflight, even on a warm topology.
+        ValidateWater(*entry.chunk);
+        entry.preparation = !entry.chunk->has_water_sim.load() ||
+                            entry.chunk->current_water_resolution.load() != resolution;
+        entry.awake = entry.chunk->has_water_sim.load() && !entry.chunk->is_water_sleeping.load();
+    }
 }
 
-WaterSnapshot::const_iterator
-NeighborWater(const WaterSnapshot& snapshot, const IVec3& coords, const IVec3& offset) {
-    const auto neighbor = coords + offset;
-    // Prevent ChunkID packing from wrapping a world-limit face onto the opposite edge.
-    if (neighbor.x < -1048576 || neighbor.x >= 1048576 || neighbor.z < -1048576 ||
-        neighbor.z >= 1048576)
-        return snapshot.end();
-    return snapshot.find(Chunk::calculate_id(neighbor));
+// Bit identity: topology index -> ChunkID is strictly increasing. Appending eligible
+// indexes in that order yields the original ascending unique per-owner candidates.
+// Eligibility reads only sealed prior flags; no newly woken chunk propagates a second hop.
+void PlanningCache::PlanCandidates(const ActiveRegionLedger& ledger,
+                                   const world::RegionSchedule& schedule,
+                                   bool raining) {
+    due.assign(schedule.due.begin(), schedule.due.end());
+    std::sort(due.begin(), due.end());
+    for (auto& group : candidates) {
+        group.ids.clear();
+        group.due = false;
+    }
+    for (std::size_t i = 0; i < due.size(); ++i) {
+        const auto found = ledger.records().find(due[i]);
+        if ((i && due[i] == due[i - 1]) || found == ledger.records().end() ||
+            found->second.state == RegionState::Frozen)
+            RefuseWater("Regional water due owner refused");
+        if (auto* group = FindCandidates(due[i]))
+            group->due = true;
+    }
+    for (std::size_t i = 0; i < entries.size(); ++i) {
+        const auto& entry = entries[i];
+        auto& group = candidates[entry.candidate];
+        if (!entry.admitted || !group.due)
+            continue;
+        bool eligible = entry.preparation || entry.awake || raining || entry.source;
+        for (const auto neighbor : entry.neighbors) {
+            if (neighbor != missing && entries[neighbor].admitted && entries[neighbor].awake)
+                eligible = true;
+        }
+        if (eligible)
+            group.ids.push_back(i);
+    }
+    claims.clear();
+    for (const auto owner : due) {
+        const auto* group = FindCandidates(owner);
+        claims.push_back({owner, group ? group->ids.size() : 0});
+    }
 }
+} // namespace RegionalWater
 
-struct SourceWater {
-    ChunkID target;
-    std::size_t cell;
-    std::int32_t millimetres;
-    auto operator<=>(const SourceWater&) const = default;
-};
+namespace {
+using WaterSnapshot = RegionalWater::PlanningCache;
+using WaterFace = RegionalWater::Face;
 
-std::vector<SourceWater>
-SnapshotSources(entt::registry& registry, const WaterSnapshot& snapshot, int resolution) {
-    std::vector<SourceWater> result;
+void SnapshotSources(entt::registry& registry, WaterSnapshot& snapshot, int resolution) {
+    auto& result = snapshot.sources;
+    result.clear();
     const auto sources = registry.view<const Components::TransformComponent,
                                        const Components::WaterFlowSourceComponent>();
     for (const auto entity : sources) {
@@ -138,14 +314,18 @@ SnapshotSources(entt::registry& registry, const WaterSnapshot& snapshot, int res
             std::abs(static_cast<double>(position.y)) >= 2097152.0 * CHUNK_SIZE_Y)
             RefuseWater("Regional water source position refused");
         auto coords = SHIELD_WorldSystem::world_to_chunk_coords(position);
-        auto target = snapshot.find(Chunk::calculate_id(coords));
+        auto* target = snapshot.Find(Chunk::calculate_id(coords));
+        if (target && !target->admitted)
+            target = nullptr;
         // Resident direct chunk first; if it has no prior grid, use the resident y=0 column.
         // Never load a parked/durable record to resolve a source.
-        if (target == snapshot.end() || !target->second.chunk->has_water_sim.load()) {
+        if (!target || !target->chunk->has_water_sim.load()) {
             coords.y = 0;
-            target = snapshot.find(Chunk::calculate_id(coords));
+            target = snapshot.Find(Chunk::calculate_id(coords));
+            if (target && !target->admitted)
+                target = nullptr;
         }
-        if (target == snapshot.end())
+        if (!target)
             continue;
         const float flow =
             sources.get<const Components::WaterFlowSourceComponent>(entity).flow_rate;
@@ -159,7 +339,7 @@ SnapshotSources(entt::registry& registry, const WaterSnapshot& snapshot, int res
         const auto amount = static_cast<std::int32_t>(quantized);
         if (amount == 0)
             continue;
-        const auto resolved = target->second.chunk->get_coords();
+        const auto resolved = target->chunk->get_coords();
         const auto x = static_cast<int>(
             std::floor((static_cast<double>(position.x) - resolved.x * CHUNK_SIZE_X) * resolution /
                        CHUNK_SIZE_X));
@@ -168,66 +348,10 @@ SnapshotSources(entt::registry& registry, const WaterSnapshot& snapshot, int res
                        CHUNK_SIZE_Z));
         if (x < 0 || x >= resolution || z < 0 || z >= resolution)
             RefuseWater("Regional water source cell refused");
-        result.push_back({target->first, static_cast<std::size_t>(z * resolution + x), amount});
+        result.push_back({target->id, static_cast<std::size_t>(z * resolution + x), amount});
+        target->source = true;
     }
     std::sort(result.begin(), result.end());
-    return result;
-}
-
-// This pass reads only prior sleeping flags. Sources/rain make their own chunk eligible;
-// newly woken neighbors cannot propagate a second hop within this tick.
-std::map<RegionKey, std::vector<ChunkID>> WaterCandidates(const WaterSnapshot& snapshot,
-                                                          const std::vector<SourceWater>& sources,
-                                                          const ActiveRegionLedger& ledger,
-                                                          const world::RegionSchedule& schedule,
-                                                          bool raining) {
-    std::map<RegionKey, std::vector<ChunkID>> candidates;
-    for (const auto key : schedule.due) {
-        const auto owner = ledger.records().find(key);
-        if (owner == ledger.records().end() || owner->second.state == RegionState::Frozen ||
-            !candidates.emplace(key, std::vector<ChunkID>{}).second)
-            RefuseWater("Regional water due owner refused");
-    }
-    std::set<ChunkID> source_targets;
-    for (const auto& source : sources)
-        source_targets.insert(source.target);
-    constexpr IVec3 offsets[] = {{1, 0, 0}, {-1, 0, 0}, {0, 0, 1}, {0, 0, -1}};
-    for (const auto& [id, entry] : snapshot) {
-        const auto owner = candidates.find(entry.owner);
-        if (owner == candidates.end())
-            continue;
-        bool eligible = entry.preparation || entry.awake || raining || source_targets.contains(id);
-        for (const auto& offset : offsets) {
-            const auto neighbor = NeighborWater(snapshot, entry.chunk->get_coords(), offset);
-            if (neighbor != snapshot.end() && neighbor->second.awake)
-                eligible = true;
-        }
-        if (eligible)
-            owner->second.push_back(id);
-    }
-    return candidates;
-}
-
-struct WaterFace {
-    RegionKey owner, neighbor;
-    ChunkID positive, other;
-    bool is_x;
-    auto operator<=>(const WaterFace&) const = default;
-};
-
-std::vector<WaterFace> SnapshotFaces(const WaterSnapshot& snapshot) {
-    std::vector<WaterFace> faces;
-    for (const auto& [id, entry] : snapshot) {
-        for (const bool is_x : {true, false}) {
-            const auto neighbor = NeighborWater(
-                snapshot, entry.chunk->get_coords(), is_x ? IVec3(1, 0, 0) : IVec3(0, 0, 1));
-            if (neighbor != snapshot.end())
-                faces.push_back({entry.owner, neighbor->second.owner, id, neighbor->first, is_x});
-        }
-    }
-    // Region-key sorting never exchanges the geometrically positive endpoint.
-    std::sort(faces.begin(), faces.end());
-    return faces;
 }
 
 bool CommonWaterPhase(const ActiveRegionLedger& ledger, const WaterFace& face, std::uint64_t tick) {
@@ -238,37 +362,33 @@ bool CommonWaterPhase(const ActiveRegionLedger& ledger, const WaterFace& face, s
     return tick % (std::uint64_t{1} << shift) == 0;
 }
 
-std::vector<WaterFace> ReserveWaterFaces(const WaterSnapshot& snapshot,
-                                         const std::vector<WaterFace>& faces,
-                                         const ActiveRegionLedger& ledger,
-                                         std::uint64_t tick,
-                                         std::uint64_t windows,
-                                         bool positive_claim,
-                                         bool raining,
-                                         const std::vector<SourceWater>& sources) {
-    std::set<ChunkID> source_targets;
-    for (const auto& source : sources)
-        source_targets.insert(source.target);
-    std::vector<WaterFace> reserved;
+void ReserveWaterFaces(WaterSnapshot& snapshot,
+                       const ActiveRegionLedger& ledger,
+                       std::uint64_t tick,
+                       std::uint64_t windows,
+                       bool positive_claim,
+                       bool raining) {
+    auto& reserved = snapshot.reserved;
+    reserved.clear();
     const std::uint64_t keep = positive_claim && windows > 0 ? 1 : 0;
-    for (const auto& face : faces) {
-        const auto& a = snapshot.at(face.positive);
-        const auto& b = snapshot.at(face.other);
-        if (face.owner == face.neighbor || a.preparation || b.preparation ||
-            (!a.awake && !b.awake && !raining && !source_targets.contains(face.positive) &&
-             !source_targets.contains(face.other)) ||
+    for (std::size_t i = 0; i < snapshot.faces.size(); ++i) {
+        const auto& indexed = snapshot.faces[i];
+        const auto& face = indexed.face;
+        const auto& a = snapshot.entries[indexed.positive];
+        const auto& b = snapshot.entries[indexed.other];
+        if (!a.admitted || !b.admitted || face.owner == face.neighbor || a.preparation ||
+            b.preparation || (!a.awake && !b.awake && !raining && !a.source && !b.source) ||
             !CommonWaterPhase(ledger, face, tick))
             continue;
         if (windows - keep < 2)
             continue;
-        reserved.push_back(face);
+        reserved.push_back(i);
         windows -= 2;
     }
-    return reserved;
 }
 
-std::unique_ptr<Chunk> StageWater(const Chunk& original) {
-    auto copy = std::make_unique<Chunk>(original.get_coords());
+void StageWater(const Chunk& original, Chunk& workspace, bool reuse_sources) {
+    auto* copy = &workspace;
     copy->water_depth_mm = original.water_depth_mm;
     copy->water_bed_mm = original.water_bed_mm;
     copy->water_edge_flux = original.water_edge_flux;
@@ -276,7 +396,15 @@ std::unique_ptr<Chunk> StageWater(const Chunk& original) {
     copy->water_flow_data = original.water_flow_data;
     copy->water_sim_terrain_height = original.water_sim_terrain_height;
     copy->water_rest_level = original.water_rest_level;
-    // water_src_mm is derived; rebuilding it deliberately also handles old resolution caches.
+    // Keep the derived source mask: the kernel checks its resolution and generator inputs.
+    // Discarding it here reran river noise for every selected cell on every tick.
+    if (reuse_sources) {
+        copy->water_src_mm = original.water_src_mm;
+        copy->water_source_inputs = original.water_source_inputs;
+    } else {
+        copy->water_src_mm.clear();
+        copy->water_source_inputs.reset();
+    }
     copy->has_water_sim.store(original.has_water_sim.load());
     copy->current_water_resolution.store(original.current_water_resolution.load());
     copy->is_water_sleeping.store(original.is_water_sleeping.load());
@@ -284,7 +412,6 @@ std::unique_ptr<Chunk> StageWater(const Chunk& original) {
     copy->max_water_delta_last_tick = original.max_water_delta_last_tick;
     copy->ticks_below_threshold = original.ticks_below_threshold;
     copy->water_mesh_dirty_ticks = original.water_mesh_dirty_ticks;
-    return copy;
 }
 
 bool WaterChanged(const Chunk& before, const Chunk& after) {
@@ -307,6 +434,7 @@ void PublishWater(Chunk& destination, Chunk& staged, bool changed) noexcept {
     destination.water_sim_terrain_height.swap(staged.water_sim_terrain_height);
     destination.water_rest_level.swap(staged.water_rest_level);
     destination.water_src_mm.swap(staged.water_src_mm);
+    destination.water_source_inputs = staged.water_source_inputs;
     destination.has_water_sim.store(staged.has_water_sim.load());
     destination.current_water_resolution.store(staged.current_water_resolution.load());
     destination.is_water_sleeping.store(staged.is_water_sleeping.load());
@@ -334,7 +462,7 @@ std::int64_t DepthSum(const Chunk& chunk) {
     return sum;
 }
 
-std::int64_t WaterVolume(const Chunk& chunk) {
+std::int64_t WaterVolume(const Chunk& chunk, std::int64_t depth_sum) {
     if (!chunk.has_water_sim.load())
         return 0;
     const auto resolution = static_cast<std::int64_t>(chunk.current_water_resolution.load());
@@ -342,7 +470,7 @@ std::int64_t WaterVolume(const Chunk& chunk) {
     // participant union by 2^20 chunks, so all whole-plan volume totals fit i64.
     const auto cell_area =
         4 * static_cast<std::int64_t>(CHUNK_SIZE_X) * CHUNK_SIZE_Z / (resolution * resolution);
-    return DepthSum(chunk) * cell_area;
+    return depth_sum * cell_area;
 }
 
 std::int32_t RoundedWaterMm(double value, bool depth) {
@@ -436,9 +564,10 @@ void WaterSystem::UpdateRegional(entt::registry& registry,
         RefuseWater("Regional water configuration refused");
     if (m_last_regional_tick && schedule.tick <= m_last_regional_tick.value())
         RefuseWater("Regional water repeated or backward tick refused");
-    RegionalWork result;
+    auto& result = m_regionalScratch;
+    result.Reset();
     if (m_boot_paused) {
-        m_regional_work = std::move(result);
+        std::swap(m_regional_work, result);
         m_cells_stepped_last_update = 0;
         return;
     }
@@ -450,69 +579,87 @@ void WaterSystem::UpdateRegional(entt::registry& registry,
     result.global_windows = cell_budget / capacity;
     if (result.global_windows > world::water_share::kMaxWindowBudget)
         RefuseWater("Regional water window cap refused");
-    const auto snapshot = SnapshotWater(resident, ledger, m_sim_resolution);
-    const auto sources = SnapshotSources(registry, snapshot, m_sim_resolution);
+    auto& snapshot = m_regionalPlanning;
+    snapshot.Refresh(resident, ledger, m_sim_resolution);
+    SnapshotSources(registry, snapshot, m_sim_resolution);
+    const auto& sources = snapshot.sources;
     const bool raining = m_rain_mm_per_tick > 0 || (m_weather_rain && m_weather_rain_scale_mm > 0);
-    // Construct this executable ascending unique array once, before any claims or mutations.
-    const auto candidates = WaterCandidates(snapshot, sources, ledger, schedule, raining);
-    std::vector<world::water_share::Claim> claims;
+    // Ascending topology indexes produce the same ascending unique ChunkID candidates.
+    snapshot.PlanCandidates(ledger, schedule, raining);
     std::uint64_t awake = 0;
-    for (const auto& [owner, ids] : candidates) {
-        claims.push_back({owner, ids.size()});
-        awake += ids.size();
-    }
-    const auto faces = SnapshotFaces(snapshot);
-    const auto reserved = ReserveWaterFaces(
-        snapshot, faces, ledger, schedule.tick, result.global_windows, awake > 0, raining, sources);
-    result.border_windows = 2 * reserved.size();
+    for (const auto& claim : snapshot.claims)
+        awake += claim.awake;
+    ReserveWaterFaces(snapshot, ledger, schedule.tick, result.global_windows, awake > 0, raining);
+    result.border_windows = 2 * snapshot.reserved.size();
     const auto interior_windows = result.global_windows - result.border_windows;
     auto next_ledger = ledger;
     auto debts = ledger.water_debts();
-    if (!world::water_share::allocate(interior_windows, claims, debts, result.grants) ||
+    if (!world::water_share::allocate(interior_windows, snapshot.claims, debts, result.grants) ||
         !next_ledger.set_water_debts(debts))
         RefuseWater("Regional water allocation refused");
-    std::set<ChunkID> selected;
+    auto& selected = snapshot.selected;
+    selected.clear();
     for (const auto& grant : result.grants) {
         result.allocated_windows += grant.windows;
-        const auto& ids = candidates.at(grant.key);
-        const auto used = std::min<std::uint64_t>(grant.windows, ids.size());
+        const auto* group = snapshot.FindCandidates(grant.key);
+        const auto count = group ? group->ids.size() : 0;
+        const auto used = std::min<std::uint64_t>(grant.windows, count);
         result.used_windows += used;
         if (used == 0)
             continue; // Includes A=0 old-debt grants; saved cursor is untouched.
+        const auto& ids = group->ids;
         const auto start = ledger.records().at(grant.key).water_cursor % ids.size();
         for (std::uint64_t j = 0; j < used; ++j) {
-            const auto id = ids[static_cast<std::size_t>((start + j) % ids.size())];
-            selected.insert(id);
-            result.visits.push_back(id);
+            const auto index = ids[static_cast<std::size_t>((start + j) % ids.size())];
+            auto& entry = snapshot.entries[index];
+            if (!entry.selected) {
+                selected.push_back(index);
+                entry.selected = true;
+            }
+            result.visits.push_back(entry.id);
         }
         next_ledger.set_water_cursor(grant.key, (start + used) % ids.size());
     }
     result.unused_windows = result.allocated_windows - result.used_windows;
     result.unallocated_windows = interior_windows - result.allocated_windows;
-    std::vector<WaterFace> executed = reserved;
-    for (const auto& face : faces) {
-        if (face.owner == face.neighbor && selected.contains(face.positive) &&
-            selected.contains(face.other))
-            executed.push_back(face);
-    }
-    std::sort(executed.begin(), executed.end());
-    std::map<ChunkID, std::unique_ptr<Chunk>> staged;
-    std::map<RegionKey, world::RegionWork> work;
-    const auto stage = [&](ChunkID id) -> Chunk& {
-        auto found = staged.find(id);
-        if (found == staged.end())
-            found = staged.emplace(id, StageWater(*snapshot.at(id).chunk)).first;
-        return *found->second;
+    // Index order is ChunkID order, regardless of grant/cursor visitation order.
+    std::sort(selected.begin(), selected.end());
+    snapshot.SelectExecutedFaces();
+    const auto& executed = snapshot.executed;
+    auto& staged = snapshot.staged;
+    staged.clear();
+    auto& work = snapshot.work;
+    work.clear();
+    const auto contribution_for = [&work](RegionKey owner) -> world::RegionWork& {
+        auto found =
+            std::lower_bound(work.begin(), work.end(), owner, [](const auto& entry, RegionKey key) {
+                return entry.key < key;
+            });
+        if (found == work.end() || found->key != owner)
+            found = work.insert(found, world::RegionWork{owner});
+        return *found;
     };
-    for (const auto id : selected) {
-        stage(id);
-        if (snapshot.at(id).preparation)
+    const auto stage = [&](std::size_t index) {
+        auto& entry = snapshot.entries[index];
+        if (!entry.staged) {
+            if (!entry.workspace)
+                entry.workspace = std::make_shared<Chunk>(entry.coords);
+            StageWater(*entry.chunk, *entry.workspace, entry.selected && !m_finite_hydrology);
+            staged.push_back(index);
+            entry.staged = true;
+        }
+    };
+    for (const auto index : selected) {
+        stage(index);
+        if (snapshot.entries[index].preparation)
             result.preparation_cells += cells;
     }
-    for (const auto& face : executed) {
+    for (const auto index : executed) {
+        const auto& face = snapshot.faces[index];
         stage(face.positive);
         stage(face.other);
     }
+    std::sort(staged.begin(), staged.end());
     result.water_cells = selected.size() * cells + executed.size() * 2 * resolution;
     result.total_cells = result.preparation_cells + result.water_cells;
     if (result.total_cells > cell_budget ||
@@ -521,25 +668,32 @@ void WaterSystem::UpdateRegional(entt::registry& registry,
         RefuseWater("Regional water exact budget refused");
     // The union includes border-only participants and counts preparation/source deltas explicitly.
     std::int64_t before = 0, after = 0, injected = 0;
-    for (const auto& [id, chunk] : staged) {
-        before += DepthSum(*chunk);
-        result.volume_before_qmm += WaterVolume(*chunk);
-        (void)id;
+    for (const auto index : staged) {
+        const auto& chunk = snapshot.entries[index].workspace;
+        const auto depth = DepthSum(*chunk);
+        before += depth;
+        result.volume_before_qmm += WaterVolume(*chunk, depth);
     }
-    for (const auto id : selected) {
-        auto& chunk = *staged.at(id);
-        const auto& entry = snapshot.at(id);
+    for (const auto index : selected) {
+        const auto& entry = snapshot.entries[index];
+        const auto id = entry.id;
+        auto& chunk = *entry.workspace;
         if (entry.preparation) {
             const auto prior = DepthSum(chunk);
-            const auto prior_volume = WaterVolume(chunk);
+            const auto prior_volume = WaterVolume(chunk, prior);
             PrepareRegionalGrid(chunk);
-            result.preparation_mm += DepthSum(chunk) - prior;
-            result.preparation_volume_qmm += WaterVolume(chunk) - prior_volume;
+            const auto prepared = DepthSum(chunk);
+            result.preparation_mm += prepared - prior;
+            result.preparation_volume_qmm += WaterVolume(chunk, prepared) - prior_volume;
         }
         chunk.is_water_sleeping.store(false);
-        for (const auto& source : sources) {
-            if (source.target != id)
-                continue;
+        // SnapshotSources sorts by target, cell and amount; keep that application order.
+        const auto first_source = std::lower_bound(
+            sources.begin(), sources.end(), id, [](const auto& source, ChunkID target) {
+                return source.target < target;
+            });
+        for (auto it = first_source; it != sources.end() && it->target == id; ++it) {
+            const auto& source = *it;
             const auto depth =
                 static_cast<std::int64_t>(chunk.water_depth_mm[source.cell]) + source.millimetres;
             if (depth > std::numeric_limits<std::int32_t>::max())
@@ -549,27 +703,32 @@ void WaterSystem::UpdateRegional(entt::registry& registry,
             injected += source.millimetres;
         }
         StepRegionalInterior(chunk, result);
-        auto& contribution = work[entry.owner];
+        auto& contribution = contribution_for(entry.owner);
         contribution.key = entry.owner;
         contribution.region_ticks = 1;
         contribution.water_cells += cells;
     }
     int wet_pairs = 0;
-    for (const auto& face : executed) {
-        wet_pairs +=
-            StepSharedWaterFace(*staged.at(face.positive), *staged.at(face.other), face.is_x, true);
+    for (const auto index : executed) {
+        const auto& indexed = snapshot.faces[index];
+        const auto& face = indexed.face;
+        wet_pairs += StepSharedWaterFace(*snapshot.entries[indexed.positive].workspace,
+                                         *snapshot.entries[indexed.other].workspace,
+                                         face.is_x,
+                                         true);
         for (const auto owner : {face.owner, face.neighbor}) {
-            auto& contribution = work[owner];
+            auto& contribution = contribution_for(owner);
             contribution.key = owner;
             contribution.region_ticks = 1;
             contribution.water_cells += resolution; // Both endpoints, including same-owner faces.
         }
     }
-    for (const auto& [id, chunk] : staged) {
+    for (const auto index : staged) {
+        const auto& chunk = snapshot.entries[index].workspace;
         ValidateWater(*chunk);
-        after += DepthSum(*chunk);
-        result.volume_after_qmm += WaterVolume(*chunk);
-        (void)id;
+        const auto depth = DepthSum(*chunk);
+        after += depth;
+        result.volume_after_qmm += WaterVolume(*chunk, depth);
     }
     const auto area_q = static_cast<std::int64_t>(4 * CHUNK_SIZE_X * CHUNK_SIZE_Z) /
                         static_cast<std::int64_t>(cells);
@@ -585,16 +744,20 @@ void WaterSystem::UpdateRegional(entt::registry& registry,
         sources.size() > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max() -
                                                     m_debug_sources_seen))
         RefuseWater("Regional water diagnostic overflow");
-    auto next_completed = completed;
-    for (const auto& [owner, contribution] : work) {
+    auto& next_completed = snapshot.completion;
+    next_completed.assign(completed.begin(), completed.end());
+    for (const auto& contribution : work)
         next_completed.push_back(contribution);
-        (void)owner;
-    }
-    std::vector<Chunk*> participants;
+    auto& participants = snapshot.participants;
+    participants.clear();
     participants.reserve(staged.size());
-    for (const auto& [id, chunk] : staged) {
-        if (WaterChanged(*snapshot.at(id).chunk, *chunk))
-            participants.push_back(snapshot.at(id).chunk.get());
+    for (const auto index : staged) {
+        auto& entry = snapshot.entries[index];
+        // Authority preparation reads provenance/coords only, so the second old
+        // WaterChanged comparison at publication necessarily had the same result.
+        entry.changed = WaterChanged(*entry.chunk, *entry.workspace);
+        if (entry.changed)
+            participants.push_back(entry.chunk);
     }
     auto authority = m_shield_system->prepare_water_authority_publication(participants);
     if (m_shield_system->durable_read_failed())
@@ -603,8 +766,10 @@ void WaterSystem::UpdateRegional(entt::registry& registry,
     // atomic/scalar writes cannot fail; no successful output is published on refusal.
     static_assert(std::is_nothrow_move_assignable_v<ActiveRegionLedger>);
     static_assert(std::is_nothrow_move_assignable_v<RegionalWork>);
-    for (const auto& [id, chunk] : staged)
-        PublishWater(*snapshot.at(id).chunk, *chunk, WaterChanged(*snapshot.at(id).chunk, *chunk));
+    for (const auto index : staged) {
+        auto& entry = snapshot.entries[index];
+        PublishWater(*entry.chunk, *entry.workspace, entry.changed);
+    }
     m_shield_system->publish_water_authority(std::move(authority));
     ledger = std::move(next_ledger);
     completed.swap(next_completed);
@@ -617,7 +782,7 @@ void WaterSystem::UpdateRegional(entt::registry& registry,
     m_dbg_awake_water_chunks = static_cast<std::size_t>(awake);
     m_dbg_cells_simmed = static_cast<std::size_t>(result.water_cells);
     m_cells_stepped_last_update = static_cast<std::size_t>(result.water_cells);
-    m_regional_work = std::move(result);
+    std::swap(m_regional_work, result);
     m_last_regional_tick = schedule.tick;
 }
 } // namespace Luminumbra::Systems

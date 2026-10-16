@@ -20,6 +20,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <set>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -276,6 +277,7 @@ private:
     std::uint64_t m_txn_id = 0;
     std::uint64_t m_new_generation = 0;
     std::vector<Entry> m_entries;
+    std::set<std::string> m_protected_paths;
     std::vector<std::function<void()>> m_committed_actions;
     std::vector<GroupState> m_derived_groups;
     std::vector<std::pair<std::string, Finalizer>> m_finalizers;

@@ -93,7 +93,9 @@ def fixture_hash(root: Path, *, scope: str = "all") -> str:
     if scope != "all":
         # Separate scoped identities from the existing full-tree hash format.
         digest.update(f"fixture-scope:{scope}\0".encode("ascii"))
-    for path in sorted(p for p in root.rglob("*") if p.is_file()):
+    paths = (p for p in root.rglob("*") if p.is_file())
+    # Native Windows Path ordering folds case; the receipt order must not.
+    for path in sorted(paths, key=lambda p: p.relative_to(root).parts):
         relative = path.relative_to(root).as_posix()
         if scope == "headless-server" and relative in SERVER_RENDER_ONLY_FILES:
             continue

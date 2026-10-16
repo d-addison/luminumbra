@@ -208,6 +208,20 @@ mountains and archipelago, with the existing ecology and planted rosters and
 `--no-audio`. The script fails on missing binaries, existing output directories,
 server errors, invalid artifacts or vacuous plant/creature/scent/field work.
 It retains partial evidence on failure and does not publish a success manifest.
+The committed shipping-default work-budget baseline and CI capture use 600 ticks
+instead. To check or re-pin that baseline, pass `--ticks 600 --seed 1337 --radius 1
+--collision-radius 1` explicitly and follow the
+budget re-pin procedure in `tools/perf/sim-budgets.md`.
+Omitting `--ticks` keeps the general 3,600-tick capture default, which will not
+match the baseline's pinned tick identity.
+The smoke artifact's `effective_simulation` object reports every `sim.*` gate from
+the generated SystemConfig registry. Tuning-only gates report whether the config
+override is enabled; runtime gates report their applied session state, including
+actual energy-field allocation and water resolution. The existing `finite_hydrology`
+and `weather_rain` fields remain present. Qualification derives required gate names
+from `data/common/systems.json`, ignoring comment entries, and refuses any absent
+or non-true gate. Adding a shipping gate therefore requires artifact coverage
+automatically. Capture, comparison and budget consumers share this validation.
 Use the same compiler, build preset, hardware, content and command arguments
 for time comparisons. The roster evolves, including births and deaths: these
 are populated starting worlds, not an enforced constant entity population.
@@ -237,12 +251,30 @@ against the pinned devel baselines, disabled callbacks and append behavior,
 water work after nonzero → empty and nonzero → paused updates, interpolation,
 duration-free replay comparisons, artifact separation, and batched tick identities
 and reset. `ActiveRegions/SimBudgetWorldParity` runs the real populated server
-three times (telemetry off, on, on) for each active-regions setting, covering all
-four switch combinations. Each run advances 3,600 ticks. It checks world hash
-equality within each active-regions setting, complete per-tick work replay,
-mutually exclusive wind/weather stage coverage and exact field work totals,
-starting plant/creature counts, and ordinary save bytes (including plants,
-metadata and clock) across a telemetry toggle at the same tick. Active regions
+three times (telemetry on, on, off) for each active-regions setting, covering all
+four switch combinations in six passes overall. Each run advances 3,600 ticks.
+The two enabled runs (A and B) use the production telemetry API; the disabled run
+(C) leaves all stage samples empty. All three runs check starting plant/creature
+counts, successful tick completion and nonempty world hashes. A and B must match
+every stage's tick/work identities through `WorkMatches`, excluding durations,
+as well as final world hashes and save fingerprints. C must match A's final
+hash and save fingerprints, checking world replay identity across the telemetry
+toggle. Each enabled trace checks complete stage coverage, consecutive tick
+identities, positive creature/plant/scent work, exact wind/weather totals, and
+initial plant/creature work counts. Wind and weather
+must each report 4,096 cells per tick on the separate path; the mutually exclusive
+combined path must report 8,192. Physics must report one scene tick per tick.
+These expected per-tick counts cannot hide compensating errors in the totals;
+the independent A/B comparison also establishes replay equality of every dynamic
+stage's work, including plants, events, streaming and water. The telemetry unit
+test separately verifies that `WorkMatches` compares stage/tick/work identities
+and ignores durations; smoke mode still compares complete traces between its
+two enabled runs.
+All three parity runs check ordinary save bytes (including plants, metadata and
+clock) across a telemetry toggle at the same tick, covering both directions.
+Save fingerprints also match across runs, normalizing only the fresh world's
+creation time and its index digest, plus the transaction header already
+normalized for save toggles; member generations remain checked. Active regions
 intentionally changes the simulation; equality is required across telemetry
 settings, not across active-regions settings. `SimBudgetCaptureContract` runs
 seven Python command and refusal tests, including both field paths, refusal

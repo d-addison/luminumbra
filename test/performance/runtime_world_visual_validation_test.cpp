@@ -1,3 +1,4 @@
+#include "../fixtures/TerrainFixtureParams.h"
 #include "gtest/gtest.h"
 
 #define GLFW_INCLUDE_NONE
@@ -926,7 +927,7 @@ nlohmann::json SeamMetricsToJson(const SeamMetrics& metrics) {
 struct ReadyWorld {
     ScopedJobSystem jobs;
     ScopedPhysicsSystem physics;
-    TerrainGenParams params;
+    TerrainGenParams params = Luminumbra::Test::SyntheticTerrainParams();
     SHIELD_WorldSystem world;
     Vec3 spawn;
 

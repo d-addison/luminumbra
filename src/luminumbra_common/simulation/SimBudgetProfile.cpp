@@ -183,6 +183,10 @@ bool ReadSchedulerMember(const Json& node,
 
 ProfileParse ParseBody(const std::string& text) {
     ProfileParse result;
+    if (text.find('\0') != std::string::npos) {
+        Reject(result, ProfileError::Malformed, "raw NUL in profile");
+        return result;
+    }
     ProfileSax sax;
     if (!Json::sax_parse(text, &sax)) {
         if (sax.error() == ProfileError::None)

@@ -5,7 +5,7 @@ import argparse
 import hashlib
 import json
 import math
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 import struct
 
@@ -37,10 +37,15 @@ def fnv(data):
 
 
 def local(root, name, limit):
-    require(type(name) is str and re.fullmatch(r'[A-Za-z0-9_./-]+', name) is not None,
+    require(type(name) is str, "unsafe artifact name")
+    relative = PurePosixPath(name)
+    require(bool(relative.parts) and not relative.is_absolute() and '..' not in relative.parts
+            and ':' not in name and '\\' not in name, "escaped artifact")
+    require(re.fullmatch(r'[A-Za-z0-9_./-]+', name) is not None,
             "unsafe artifact name")
-    path = root / name
-    require(not Path(name).is_absolute() and '..' not in Path(name).parts, "escaped artifact")
+    root = root.resolve()
+    path = root.joinpath(*relative.parts)
+    require(path.resolve().is_relative_to(root), "escaped artifact")
     check = path
     while check != root:
         require(not check.is_symlink() and not (getattr(check.lstat(), "st_file_attributes", 0) & 0x400),

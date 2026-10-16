@@ -155,8 +155,13 @@ ParseCreatureSpecies(const nlohmann::json& j, CreatureSpecies& out, std::string&
 
 class CreatureSpeciesRegistry {
 public:
-    // Add a species from raw JSON text (the unit-testable path; no filesystem).
+    // Add a species from raw JSON text; raw NUL bytes refuse without changing the registry.
     bool AddFromJsonText(const std::string& text, std::string& err) {
+        // The JSON lexer can accept a valid prefix followed by raw NUL and garbage.
+        if (text.find('\0') != std::string::npos) {
+            err = "creature species JSON parse error: raw NUL in content";
+            return false;
+        }
         try {
             CreatureSpecies s;
             if (!ParseCreatureSpecies(nlohmann::json::parse(text), s, err))

@@ -115,6 +115,8 @@ void CheckDepth(std::string_view bytes) {
 }
 Json StrictJson(std::string_view bytes, bool authored_document = true) {
     Require(!bytes.empty() && bytes.size() <= kMaxContentDocumentBytes, "content byte limit");
+    // The lexer treats a raw NUL as end-of-input, even with bounded iterators.
+    Require(bytes.find('\0') == std::string_view::npos, "content contains raw NUL");
     Require(!authored_document ||
                 (bytes.back() == '\n' && bytes.find('\r') == std::string_view::npos),
             "content requires LF only and final LF");
@@ -701,26 +703,6 @@ ContentReadResult ReadSimulationDocument(const fs::path& path,
                                          const ContentReadHook& after_read,
                                          const ContentReadBoundaries& boundaries) {
     try {
-        if (optional) {
-            auto parent = fs::absolute(path).parent_path();
-            bool absent_parent = false;
-            for (;;) {
-                std::error_code ec;
-                const auto status = fs::symlink_status(parent, ec);
-                if (ec == std::errc::no_such_file_or_directory ||
-                    (!ec && status.type() == fs::file_type::not_found)) {
-                    absent_parent = true;
-                    Require(parent != parent.parent_path(), "missing content root");
-                    parent = parent.parent_path();
-                    continue;
-                }
-                Require(!ec, "content parent status failed");
-                CheckDirectory(parent);
-                if (absent_parent)
-                    return {ContentReadStatus::Absent, {}, {}};
-                break;
-            }
-        }
         return OpenSimulationDocument(path, optional, after_read, boundaries);
     } catch (const std::exception& exception) {
         return {ContentReadStatus::Error, {}, exception.what()};
