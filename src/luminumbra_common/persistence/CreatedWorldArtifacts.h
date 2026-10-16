@@ -472,9 +472,15 @@ private:
         return false;
     }
 
-    // Initial creation owns at most eight artifacts: save root, preset,
-    // metadata + temp, chunks + region directories, and ledger + temp.
-    std::array<Artifact, 8> m_artifacts{};
+    // Bound initial creation by its full artifact set. Renamed temporary files
+    // retain their journal entries until release or rollback.
+    static constexpr std::size_t kCreationDirectories = 3;   // Save root, chunks, region.
+    static constexpr std::size_t kCreationDurableFiles = 3;  // Preset, metadata, ledger.
+    static constexpr std::size_t kEntriesPerDurableFile = 2; // Destination and temporary.
+    static constexpr std::size_t kCreationArtifactCapacity =
+        kCreationDirectories + kCreationDurableFiles * kEntriesPerDurableFile;
+    static_assert(kCreationArtifactCapacity == 9);
+    std::array<Artifact, kCreationArtifactCapacity> m_artifacts{};
     std::size_t m_count = 0;
 };
 
