@@ -235,6 +235,23 @@ class FileStamp(NamedTuple):
     metadata_complete: bool = True
 
 
+class FileSnapshot(dict[str, FileStamp]):
+    """File evidence plus whether the entire directory inventory was observed.
+
+    Per-file inspection errors retain unknown entries; directory inspection or
+    traversal errors instead make attribution unsafe for the whole folder.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.scan_complete = True
+
+
+def check_baseline_complete(before: dict[str, FileStamp]) -> None:
+    if isinstance(before, FileSnapshot) and not before.scan_complete:
+        raise OSError("incomplete baseline directory scan; dumps are unattributable")
+
+
 class DumpWriterBusyError(OSError):
     """An incompatible open handle requires another settle attempt."""
 
@@ -254,23 +271,24 @@ def snapshot_files(
     deadline: float | None = None,
     clock: Callable[[], float] | None = None,
     writer_probe: Callable[[Path], bool] | None = None,
-) -> dict[str, FileStamp]:
+) -> FileSnapshot:
     """Record metadata and bounded range hashes; never omit an oversized file.
 
     Preserve baseline coverage for files with unchanged size and identity, even
     when they have no samples. Read those ranges first; their total already fits
     SNAPSHOT_TOTAL_READ_BYTES. Allocate the remainder in sorted path order.
     Deadline expiry always propagates, even when inspection errors are collected.
-    Failed stat entries retain their paths with unknown metadata, so a later
-    successful inspection cannot turn a baseline entry into a newly appeared file.
+    Failed stat entries retain their paths with unknown metadata; a later
+    successful inspection makes them eligible as changed rather than new files.
+    Directory inspection and traversal failures mark the inventory incomplete.
     When given, writer_probe must succeed for the inventory before any reads;
     busy handles are retryable, while probe errors and failed reads are fatal.
     """
     clock = clock or time.monotonic
     check_settle_deadline(deadline, clock)
+    result = FileSnapshot()
     if root is None:
-        return {}
-    result: dict[str, FileStamp] = {}
+        return result
     remaining = SNAPSHOT_TOTAL_READ_BYTES
 
     def inspection_error(path: Path, exc: OSError) -> None:
@@ -282,25 +300,28 @@ def snapshot_files(
     try:
         root_stat = root.stat()
     except OSError as exc:
+        result.scan_complete = False
         inspection_error(root, exc)
         return result
     check_settle_deadline(deadline, clock)
     if not stat.S_ISDIR(root_stat.st_mode):
+        result.scan_complete = False
         return result
 
     def traversal_error(exc: OSError) -> None:
+        result.scan_complete = False
         inspection_error(Path(exc.filename) if exc.filename else root, exc)
 
     check_settle_deadline(deadline, clock)
 
     # os.walk's onerror reports directory traversal failures that rglob may hide.
-    paths = (
-        (Path(directory) / name
-         for directory, _directories, names in os.walk(root, onerror=traversal_error)
-         for name in names)
-        if recursive else root.iterdir()
-    )
     try:
+        paths = (
+            (Path(directory) / name
+             for directory, _directories, names in os.walk(root, onerror=traversal_error)
+             for name in names)
+            if recursive else root.iterdir()
+        )
         for path in paths:
             check_settle_deadline(deadline, clock)
             if path.name == DUMP_LOCK_NAME:
@@ -516,7 +537,11 @@ def core_collection_skip(
 
 
 def file_rewritten(before: FileStamp, after: FileStamp) -> bool:
-    if not before.read_complete or not after.read_complete:
+    if not after.read_complete or not after.metadata_complete:
+        return False
+    if not before.metadata_complete:
+        return True
+    if not before.read_complete:
         return False
     if before[:4] != after[:4]:
         return True
@@ -687,6 +712,7 @@ def copy_changed_files(
     list is given, so one unreadable entry does not discard the rest of the iteration. Without a list
     the error propagates. Changed sources and incompatible writer handles restart
     settling within the original deadline; an unverified copy is never published.
+    An incomplete baseline inventory makes the entire folder unattributable.
     opener is the platform source opener, injectable for share-mode transports.
     Each copy gets 30 seconds to five minutes, sized at 16 MiB/s, including validation.
     """
@@ -695,6 +721,7 @@ def copy_changed_files(
     opener = opener or open_dump_for_copy
     copies: list[str] = []
     try:
+        check_baseline_complete(before)
         after = after if after is not None else snapshot_files(
             root, recursive, skip, errors, baseline=before, deadline=deadline, clock=clock,
         )
@@ -1431,6 +1458,7 @@ def wait_for_dump_settle(
     Expiry during collection or probing must never be accepted as stability.
     With no changed files or busy probes, return after a two-second creation
     grace window (injectable). Busy baseline probes still require settling.
+    An incomplete baseline directory scan fails immediately as unattributable.
     """
     clock = clock or time.monotonic
     pause = pause or time.sleep
@@ -1439,6 +1467,7 @@ def wait_for_dump_settle(
     previous: dict[str, FileStamp] | None = None
     stable_since: float | None = None
     empty_since: float | None = None
+    check_baseline_complete(before)
     if any(not stamp.read_complete and stamp.metadata_complete for stamp in before.values()):
         raise OSError("incomplete baseline dump fingerprint coverage")
     while True:

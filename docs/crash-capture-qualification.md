@@ -118,8 +118,15 @@ open or read fails. Failed or short reads are recorded and make that file
 ineligible for copying; incomplete fingerprint coverage aborts WER settling
 without retrying into apparent stability. A failed baseline `stat` retains an
 unknown entry for the observed path; later successful inspection cannot make
-that stale path appear new. Unknown metadata entries remain ineligible for
-copying and do not prevent collection of other readable dumps.
+that path appear newly created, but treats it as changed because replacement
+cannot be ruled out. Entries whose metadata remains unknown are ineligible for
+copying and do not prevent collection of other readable dumps. Known unchanged
+files remain excluded. Snapshots also record whether directory inspection and
+enumeration completed, including recursive traversal for cores. If a folder's
+baseline inventory is incomplete, none of its dumps can be attributed to the
+iteration, even if later scans succeed. Collection reports the folder as
+unattributable without waiting for settling or copying from it; the child's
+result and artifacts from other folders remain available.
 The settle deadline is checked during enumeration, reads, writer probes and
 before accepting stability. Expiry or any writer probe exception (including an unavailable
 platform API) records a collection error and prevents WER copying for that

@@ -954,6 +954,7 @@ class RunDirectoryAndSnapshotTest(unittest.TestCase):
             with self.assertRaisesRegex(PermissionError, "traversal denied"):
                 rq.snapshot_files(folder, recursive=True)
         self.assertEqual(list(snapshot), [str(healthy)])
+        self.assertFalse(snapshot.scan_complete)
         self.assertEqual(len(errors), 1)
         self.assertIn(str(denied), errors[0])
         self.assertIn("PermissionError", errors[0])
@@ -962,7 +963,9 @@ class RunDirectoryAndSnapshotTest(unittest.TestCase):
     def test_snapshot_root_inspection_failure_is_reported_or_propagated(self) -> None:
         missing = self.root / "missing dumps"
         errors: list[str] = []
-        self.assertEqual(rq.snapshot_files(missing, False, errors=errors), {})
+        snapshot = rq.snapshot_files(missing, False, errors=errors)
+        self.assertEqual(snapshot, {})
+        self.assertFalse(snapshot.scan_complete)
         self.assertEqual(len(errors), 1)
         self.assertIn(str(missing), errors[0])
         self.assertIn("FileNotFoundError", errors[0])
@@ -1037,7 +1040,9 @@ class DumpSettleTest(unittest.TestCase):
                 mock.patch.object(rq.time, "sleep", side_effect=pause or self.pause), \
                 mock.patch.object(rq, "dump_writer_closed", create=True,
                                   side_effect=probe or (lambda path: True)):
-            return rq.wait_for_dump_settle(self.folder, before or {}, timeout, errors)
+            return rq.wait_for_dump_settle(
+                self.folder, before if before is not None else {}, timeout, errors,
+            )
 
     @contextmanager
     def windows_handles(self, held):
@@ -1358,6 +1363,7 @@ class DumpSettleTest(unittest.TestCase):
 
     def test_failed_baseline_stat_never_makes_stale_dump_new(self) -> None:
         old = self.dump("old.dmp", size=128)
+        known = self.dump("known.dmp", size=128)
         real_stat = Path.stat
 
         def denied_stat(path, *args, **kwargs):
@@ -1375,21 +1381,134 @@ class DumpSettleTest(unittest.TestCase):
                 self.assertIn(str(old), before)
                 self.assertFalse(before[str(old)].read_complete)
                 self.assertFalse(before[str(old)].metadata_complete)
+                self.assertTrue(before.scan_complete)
+                self.assertEqual(rq.changed_files({}, before), [str(known)])
                 after = rq.snapshot_files(self.folder, recursive, baseline=before)
-                self.assertEqual(rq.changed_files(before, after), [])
+                self.assertEqual(rq.changed_files(before, after), [str(old)])
                 self.assertEqual(rq.copy_changed_files(
                     self.folder, before, self.root / "collected", recursive=recursive,
                     after=after,
-                ), [])
+                ), [str(self.root / "collected" / old.name)])
                 new = self.dump("new.dmp", size=128)
                 settled = self.settle(before=before)
-                self.assertEqual(rq.changed_files(before, settled), [str(new)])
+                self.assertEqual(rq.changed_files(before, settled), sorted(map(str, (new, old))))
                 copies = rq.copy_changed_files(
                     self.folder, before, self.root / "collected", recursive=recursive,
                 )
-                self.assertEqual(copies, [str(self.root / "collected" / new.name)])
-                self.assertEqual(Path(copies[0]).read_bytes(), new.read_bytes())
+                self.assertEqual(copies, [str(self.root / "collected" / path.name)
+                                          for path in (new, old)])
+                self.assertEqual([Path(copy).read_bytes() for copy in copies],
+                                 [new.read_bytes(), old.read_bytes()])
+                self.assertFalse((self.root / "collected" / known.name).exists())
                 new.unlink()
+
+    def test_replaced_dump_with_unknown_baseline_metadata_is_collected(self) -> None:
+        old = self.dump("replaced.dmp", size=128)
+        known = self.dump("stale.dmp", size=128)
+        real_stat = Path.stat
+
+        def denied_stat(path, *args, **kwargs):
+            if path == old:
+                raise PermissionError("baseline inspection denied")
+            return real_stat(path, *args, **kwargs)
+
+        for recursive in (False, True):
+            with self.subTest(recursive=recursive):
+                with mock.patch.object(Path, "stat", denied_stat):
+                    before = rq.snapshot_files(self.folder, recursive, errors=[])
+                old.unlink()
+                old.write_bytes(b"replacement dump")
+                after = self.settle(before=before)
+                self.assertTrue(rq.file_rewritten(before[str(old)], after[str(old)]))
+                self.assertEqual(rq.changed_files(before, after), [str(old)])
+                copies = rq.copy_changed_files(
+                    self.folder, before, self.root / "replacement", recursive=recursive,
+                    after=after,
+                )
+                self.assertEqual(copies, [str(self.root / "replacement" / old.name)])
+                self.assertEqual(Path(copies[0]).read_bytes(), b"replacement dump")
+                self.assertFalse((self.root / "replacement" / known.name).exists())
+
+    def test_incomplete_baseline_scan_blocks_dump_and_core_attribution(self) -> None:
+        real_stat = Path.stat
+        real_iterdir = Path.iterdir
+        real_scandir = os.scandir
+        # WER enumerates only the root; core collection also visits subfolders.
+        for windows, failures in ((False, ("stat", "enumeration", "partial")),
+                                  (True, ("stat", "enumeration"))):
+            for failure in failures:
+                with self.subTest(windows=windows, failure=failure):
+                    run_dir = self.root / f"run-{windows}-{failure}"
+                    folder = run_dir / "dumps"
+                    denied = folder / "denied"
+                    denied.mkdir(parents=True)
+                    (folder / "stale.dmp").write_bytes(b"stale dump")
+                    (denied / "stale.dmp").write_bytes(b"nested stale dump")
+                    exe = run_dir / "child.exe"
+                    exe.write_bytes(b"synthetic executable")
+                    digest = hashlib.sha256(exe.read_bytes()).hexdigest()
+                    child_ran = False
+
+                    def selective_stat(path, *args, **kwargs):
+                        if not child_ran and failure == "stat" and path == folder:
+                            raise PermissionError("baseline inspection denied")
+                        return real_stat(path, *args, **kwargs)
+
+                    def selective_iterdir(path):
+                        if not child_ran and failure == "enumeration" and path == folder:
+                            raise PermissionError("baseline enumeration denied")
+                        return real_iterdir(path)
+
+                    def selective_scandir(path):
+                        blocked = denied if failure == "partial" else folder
+                        if not child_ran and failure != "stat" and Path(path) == blocked:
+                            raise PermissionError(13, "baseline traversal denied", str(blocked))
+                        return real_scandir(path)
+
+                    def child(command, cwd, env, log, timeout, core_target):
+                        nonlocal child_ran
+                        child_ran = True
+                        (folder / "new.dmp").write_bytes(b"new dump")
+                        (Path(env["LUMINUMBRA_CRASH_DIR"]) / "child.dmp").write_bytes(b"child evidence")
+                        return {
+                            "exit_code": 3, "signal": None, "timed_out": False,
+                            "duration_seconds": 0.1, "status": "exit:3",
+                            "launch_error": None, "cleanup_errors": [],
+                        }
+
+                    with mock.patch.object(Path, "stat", selective_stat), \
+                            mock.patch.object(Path, "iterdir", selective_iterdir), \
+                            mock.patch.object(rq.os, "scandir", side_effect=selective_scandir), \
+                            mock.patch.object(rq, "IS_WINDOWS", windows), \
+                            mock.patch.object(rq, "run_iteration", side_effect=child), \
+                            mock.patch.object(rq, "dump_writer_closed") as probe, \
+                            mock.patch.object(rq, "copy_stable_file", wraps=rq.copy_stable_file) as copy:
+                        entry = rq.run_locked_iteration(
+                            1, run_dir, exe, digest, "Fake.Filter", [], None, 1.0, 1,
+                            folder if windows else None, None if windows else folder,
+                            None, None, None,
+                        )
+                    self.assertTrue(child_ran)
+                    # A later scan succeeds and sees both stale and newly created
+                    # files, but no evidence in this folder can be attributed.
+                    after = rq.snapshot_files(folder, recursive=not windows)
+                    self.assertTrue(after.scan_complete)
+                    self.assertIn(str(folder / "stale.dmp"), after)
+                    self.assertIn(str(folder / "new.dmp"), after)
+                    self.assertEqual(entry["status"], "exit:3")
+                    self.assertTrue(entry["failed"])
+                    self.assertEqual(entry["failure_reason"], "exit:3")
+                    self.assertEqual([Path(path).name for path in entry["crash_artifacts"]],
+                                     ["child.dmp"])
+                    self.assertEqual(Path(entry["crash_artifacts"][0]).read_bytes(), b"child evidence")
+                    self.assertEqual(len(entry["collection_errors"]), 2)
+                    self.assertIn("baseline", entry["collection_errors"][0])
+                    self.assertIn("incomplete baseline directory scan", entry["collection_errors"][1])
+                    self.assertIn("unattributable", entry["collection_errors"][1])
+                    self.assertFalse((run_dir / "iter-1" / "wer").exists())
+                    self.assertFalse((run_dir / "iter-1" / "core").exists())
+                    probe.assert_not_called()
+                    copy.assert_not_called()
 
     def test_coverage_change_does_not_copy_stale_dump_again(self) -> None:
         old = self.dump("old.dmp")
