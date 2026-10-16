@@ -7,6 +7,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
 CLIENT = ROOT / "src/luminumbra_client"
+FRAME_CAPS = (0, 30, 60, 120, 144, 165, 240)
 
 
 def compact_cpp(source):
@@ -63,7 +64,7 @@ class FramePacingSourceContract(unittest.TestCase):
         # Guard every work clock, including the first clock read: moving the
         # limiter into any CPU, GPU, frame-wall or SLOWFRAME bucket must fail.
         for marker in (
-            "floatcurrentFrame=(float)glfwGetTime();",
+            "constdoubleobservedFrame=glfwGetTime();",
             "std::chrono::steady_clock::now()",
             "g_rb_frame_start=std::chrono::steady_clock::now();",
             "benchmark_queries->begin_frame(measured_frame_id);",
@@ -71,6 +72,10 @@ class FramePacingSourceContract(unittest.TestCase):
             "constauto_rb_poll_t0=std::chrono::steady_clock::now();",
         ):
             self.assertLess(wait, loop.index(marker), marker)
+        self.assertIn("observedFrameSeconds=observedFrame-previousObservedFrame;"
+                      "previousObservedFrame=observedFrame;"
+                      "floatcurrentFrame=(float)observedFrame;"
+                      "floatdeltaTime=currentFrame-lastFrame;", loop)
         self.assertIn("(_now-_frameStart).count()", loop)
         self.assertIn("(g_rb_before_swap-g_rb_frame_start)", loop)
 
@@ -86,13 +91,21 @@ class FramePacingSourceContract(unittest.TestCase):
         self.assertIn("us.frame_cap=luminumbra::core::kFrameCaps[selected_cap];", debug_ui)
         self.assertIn('b.SetVSync(value=="on"||value=="1"||value=="true");', rml_ui)
         self.assertIn('elseif(id=="setting_frame_cap")', rml_ui)
-        for cap in (0, 60, 120, 144, 240):
-            self.assertIn(f'if(value=="{cap}")b.SetFrameCap({cap});', rml_ui)
+        self.assertIn('for(constintcap:luminumbra::core::kFrameCaps){'
+                      'if(value==std::to_string(cap)){b.SetFrameCap(cap);break;}}', rml_ui)
 
         loop = main[main.index(LOOP):]
         resolve = loop.index("constintswap_interval=" + RESOLVE)
         self.assertLess(loop.index("g_uiManager->Update();"), resolve)
-        self.assertLess(loop.index("DrawSettingsWindow("), resolve)
+        registration = main[:main.index(LOOP)]
+        self.assertIn('widgetServices["client.settings"]={playerAvailable,', registration)
+        self.assertIn("DrawSettingsContents(g_app,window,g_camera.get(),audioManager.get(),"
+                      "g_systemConfig,g_windowState,developerConsole);", registration)
+        self.assertIn("developerConsole.Draw(developerFrame);", loop)
+        self.assertLess(loop.index("developerConsole.Draw(developerFrame);"), resolve)
+        settings = debug_ui[debug_ui.index("voidDrawSettingsContents("):]
+        self.assertIn('ImGui::Checkbox("VSync",&us.vsync);', settings)
+        self.assertIn('ImGui::Combo("Framecap",&selected_cap,cap_labels,cap_count)', settings)
         apply = "if(swap_interval!=applied_swap_interval){glfwSwapInterval(swap_interval);"
         self.assertIn(apply + "applied_swap_interval=swap_interval;}", loop)
         self.assertLess(resolve, loop.index(apply))
@@ -104,8 +117,77 @@ class FramePacingSourceContract(unittest.TestCase):
     def test_wait_is_excluded_from_work_timers(self):
         self.assert_wait_precedes_timers(self.main)
 
+    def test_observed_frame_timing_updates_are_required(self):
+        for statement in (
+            "observedFrameSeconds=observedFrame-previousObservedFrame;",
+            "previousObservedFrame=observedFrame;",
+        ):
+            with self.subTest(statement=statement):
+                self.assertIn(statement, self.main)
+                with self.assertRaises(AssertionError):
+                    self.assert_wait_precedes_timers(self.main.replace(statement, "", 1))
+
+    def test_settings_widget_must_draw_before_present(self):
+        for original in (
+            "DrawSettingsContents(g_app,window,g_camera.get(),audioManager.get(),"
+            "g_systemConfig,g_windowState,developerConsole);",
+            "developerConsole.Draw(developerFrame);",
+        ):
+            with self.subTest(call=original):
+                self.assertIn(original, self.main)
+                with self.assertRaises(AssertionError):
+                    self.assert_live_settings_wiring(
+                        self.main.replace(original, "", 1), self.debug_ui, self.rml_ui)
+
     def test_live_settings_use_the_overridden_present_path(self):
         self.assert_live_settings_wiring(self.main, self.debug_ui, self.rml_ui)
+
+    def assert_cap_choices(self, shared, markup, debug_ui):
+        caps = re.search(r"kFrameCaps\[\]=\{([^}]+)\};", shared)
+        self.assertIsNotNone(caps)
+        self.assertEqual(tuple(map(int, caps[1].split(","))), FRAME_CAPS)
+        self.assertIn('for(constintsupported_cap:kFrameCaps){'
+                      'if(cap==supported_cap)returntrue;}returnfalse;', shared)
+
+        select = re.search(r'<select\b[^>]*id="setting_frame_cap"[^>]*>(.*?)</select>',
+                           markup, re.DOTALL)
+        self.assertIsNotNone(select)
+        options = re.findall(r'<option value="(\d+)">([^<]+)</option>', select[1])
+        expected_labels = ["Unlimited", *map(str, FRAME_CAPS[1:])]
+        self.assertEqual(options, list(zip(map(str, FRAME_CAPS), expected_labels)))
+
+        labels = re.search(r"cap_labels\[\]=\{([^}]+)\};", debug_ui)
+        self.assertIsNotNone(labels)
+        self.assertEqual(re.findall(r'"([^"]+)"', labels[1]), expected_labels)
+        self.assertIn('static_assert(std::size(cap_labels)=='
+                      'std::size(luminumbra::core::kFrameCaps));', debug_ui)
+        self.assertIn('constexprintcap_count=static_cast<int>('
+                      'std::size(luminumbra::core::kFrameCaps));', debug_ui)
+        self.assertIn('for(inti=0;i<cap_count;++i)', debug_ui)
+        self.assertIn('ImGui::Combo("Framecap",&selected_cap,cap_labels,cap_count)', debug_ui)
+
+    def test_settings_choices_match_the_persisted_contract(self):
+        shared = compact_cpp((ROOT / "src/luminumbra_common/core/FramePacing.h").read_text(
+            encoding="utf-8"))
+        markup = (ROOT / "data/ui/settings.rml").read_text(encoding="utf-8")
+        self.assert_cap_choices(shared, markup, self.debug_ui)
+
+    def test_missing_advertised_choices_are_detected(self):
+        shared = compact_cpp((ROOT / "src/luminumbra_common/core/FramePacing.h").read_text(
+            encoding="utf-8"))
+        markup = (ROOT / "data/ui/settings.rml").read_text(encoding="utf-8")
+        for cap in (30, 165):
+            for location in ("shared", "rml", "debug"):
+                with self.subTest(cap=cap, location=location):
+                    changed_shared, changed_markup, changed_debug = shared, markup, self.debug_ui
+                    if location == "shared":
+                        changed_shared = shared.replace(f",{cap},", ",", 1)
+                    elif location == "rml":
+                        changed_markup = markup.replace(f'<option value="{cap}">{cap}</option>', "")
+                    else:
+                        changed_debug = self.debug_ui.replace(f',"{cap}"', "", 1)
+                    with self.assertRaises(AssertionError):
+                        self.assert_cap_choices(changed_shared, changed_markup, changed_debug)
 
     def test_each_missing_call_site_override_is_detected(self):
         starts = [match.start() for match in re.finditer(re.escape(RESOLVE), self.main)]
@@ -126,7 +208,9 @@ class FramePacingSourceContract(unittest.TestCase):
             with self.subTest(mode=field):
                 original = f".{field}={value}"
                 self.assertIn(original, self.main)
-                changed = self.main.replace(original, f".{field}=false", 1)
+                start = self.main.index("constluminumbra::core::FramePacingOverridespacing_overrides{")
+                changed = (self.main[:start] + self.main[start:].replace(
+                    original, f".{field}=false", 1))
                 with self.assertRaises(AssertionError):
                     self.assert_measurement_wiring(changed)
 

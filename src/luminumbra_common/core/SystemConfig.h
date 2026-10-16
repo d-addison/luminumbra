@@ -22,6 +22,8 @@
 
 #include <glm/glm.hpp>
 
+#include "DeveloperBindingSetting.h"
+#include "DeveloperPanelLayout.h"
 #include "GraphicsPresets.h"
 #include "SystemConfigRegistry.gen.h" // X-macro registry GENERATED from ConfigSchema.json
 
@@ -42,14 +44,33 @@ struct SettingsLoadReport {
     std::string recovery_reason;
 };
 
+// Developer records are bounded during parsing; unknown stable ids survive overlays.
+// Runtime effects and session history are deliberately absent from this model.
+struct DeveloperSettings {
+    static constexpr std::size_t kRecordLimit = 256;
+    static constexpr std::size_t kIdLimit = 128;
+    int schema_version = 1;
+    std::map<std::string, bool> widgets;
+    std::map<std::string, DeveloperBindingSetting> bindings;
+    std::map<std::string, DeveloperPanelLayout> layouts;
+    bool WidgetVisible(const std::string& id, bool default_visible) const {
+        const auto it = widgets.find(id);
+        return it == widgets.end() ? default_visible : it->second;
+    }
+    bool PerfHudVisible() const {
+        return WidgetVisible("perf.hud", true);
+    }
+};
+
 // Player-facing settings (client-only; NEVER hashed). Persisted to a writable per-user
 // overlay (%APPDATA%/Luminumbra/settings.json).
 struct UserSettings {
+    DeveloperSettings developer;
     // video
     std::string resolution;                 // "" = native/default; else "WxH"
     std::string window_mode = "borderless"; // windowed | borderless | fullscreen
     bool vsync = true;                      // Saved user choices override this default.
-    int frame_cap = 0;                      // 0 = unlimited; else 60, 120, 144 or 240 FPS.
+    int frame_cap = 0;                      // 0 = unlimited; choices in kFrameCaps.
     float fov = 45.0f;
     float render_scale = 1.0f; // Compatibility mirror on load; graphics owns persistence.
     float ui_scale = 1.0f; // HUD/UI density-independent-pixel ratio (0.5..2.5); 1.0 = native px.
@@ -108,6 +129,7 @@ struct SimulationIdentityValues {
 
 class SystemConfig {
 public:
+    SystemConfig();
     // Every sim.* registry flag, including tuning gates that select compiled defaults.
     [[nodiscard]] std::map<std::string, bool> SimulationGates() const;
     // All shipping flags on, including the far-world ladder; explicit enabled:false opts out.
@@ -153,7 +175,8 @@ public:
 
     // Parse ONLY the `user.*` section from `json_text` and overlay it onto this config
     // (sim.*/render.* ignored). Invalid input keeps values unchanged and reports
-    // Recovery, blocking saves to protect the original overlay.
+    // Recovery, blocking saves to protect the original overlay. Numeric overflow outside
+    // developer layouts also throws, retaining the strict parser refusal.
     void OverlayUserFromJsonString(const std::string& json_text);
 
     [[nodiscard]] const SettingsLoadReport& settings_load_report() const {
