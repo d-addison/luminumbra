@@ -120,7 +120,11 @@ Entries for files carry their exact-byte hash and, for biome tables, the loader 
 Directory and absent-file entries carry explicit state markers instead of file hashes.
 The manifest sorts entries by logical `data_root`-relative path, normalizes dot components
 and uses UTF-8 with `/` separators. Each file hash covers the exact bytes read in binary mode,
-including whitespace; absolute or escaping dependency paths are refused.
+including whitespace; absolute or escaping dependency paths are refused. Logical
+names must be well-formed UTF-8 before entering the manifest or species registry;
+invalid species filenames fail the scan before any reads. Resolver exceptions,
+including JSON serialization failures, return diagnostics without publishing an
+identity or dependency snapshot, leaving an existing live world unchanged.
 Runtime-resolved absolute asset paths and diagnostic provenance are excluded.
 FNV-1a-64 for both the envelope and each dependency file uses offset
 `14695981039346656037`, prime `1099511628211`, modulo-2^64 arithmetic and exactly 16
@@ -158,12 +162,36 @@ refuses loading without publishing an identity; it never becomes an absence mark
 Biome material names resolve to compiled material IDs, and neither biome nor structure JSON recursively references other files.
 Procedural shaping, hydro, caves, rivers, lakes, cliffs and surface breaks use preset
 parameters and compiled algorithms, without additional disk inputs. Runtime species
-definitions are loaded separately by GameSession for creature behavior, not terrain
-generation; they are outside this worldgen manifest.
+definitions drive GameSession creature behavior rather than terrain generation.
+The fix for issue #338 extends the same dependency manifest to bind that session
+content too: every immediate regular `*.json` under
+`data/common/creatures/species`, regardless of biome/structure feature flags.
+The logical paths are `common/creatures/species/<filename>`, converted with
+`Filesystem::GenericUtf8PathString` and sorted with the other dependency records.
+Each record uses the same exact-byte FNV-1a-64 file hash, including whitespace and
+malformed JSON. A present directory contributes `species-directory-present`;
+an absent directory contributes no records and resolves an empty registry.
+Nested files and other extensions are not consumed. Species JSON references no
+additional files; `brain` and `genome_ranges` are inline blocks.
+
+The species loader parses the bytes supplied by the manifest reader. Its immutable
+registry is retained in `WorldgenDependencySnapshot` and adopted by GameSession
+on both create and load, without reopening the files. Invalid JSON warns and skips
+that entry, preserving compiled fallback behavior while still binding its bytes.
+A present unreadable species input, non-directory species path or enumeration
+failure refuses resolution without publishing an identity. The runtime world is
+not replaced on this refusal. The registry reports directory-open, entry-status and
+iteration errors through diagnostics and its I/O failure flag; a failed scan reads
+no files and leaves existing entries unchanged. Loader exceptions are contained
+within the registry, including for client metadata callers. Registry order uses
+the same generic UTF-8 filename order, including when native UTF-16 path order
+would differ.
 
 The same string continues through protocol-v3 Hello, replay-header-v3, server modes and
 NetworkedSessionDriver; their wire layout is unchanged. Earlier JSON-only identities
-will mismatch the expanded identity and refuse admission/verification.
+will mismatch the expanded identity and refuse admission/verification. The existing
+content-mismatch diagnostics apply; lockstep and replay explicitly identify
+`preset/species` content. No additional identity field or wire version is introduced.
 The older numeric replay `preset_hash` remains name
 provenance only; admission and verification require `preset_content_hash` as well.
 
@@ -236,6 +264,26 @@ their CMake options are off.
 Saves carry no simulation identity. Loading applies the loading process's gates and
 tuning; an active-region ledger also persists its own scheduler configuration and cadence
 state. With no explicit scheduler override, a loaded ledger's settings become effective.
+
+For v0.3.0-era artifacts, replay headers that recorded a preset-only content hash
+are refused before playback when the runtime resolves species records, just like
+the earlier expansion from JSON-only to biome/structure dependencies. This is
+symmetric: older engines also refuse the expanded hash. Versions 1/2 remain
+unsupported. A dependency-free installation with no species directory has no
+additional records and retains its former identity. Existing v0.3.0-format saves
+adopt the loading installation's species definitions, as they already adopt
+current biome/structure dependencies; they do not store this session content hash.
+The optional historical `presetIdentity` metadata check remains a distinct frozen
+preset JSON check and is unchanged. No save migration or container-version change
+is introduced; pre-v0.3.0 format refusals remain unchanged.
+
+Identity coverage regressions define the expected five simulation gates and every
+applied tuning parameter from the configuration/application contract, independently
+of the encoder. Tuning-only flag changes at default values are neutral by contract.
+Every expected variant and public-setter mutation is returned and asserted to
+change identity; the helper never discards an unchanged result. An omitted input
+therefore fails coverage, handshake and replay regressions instead of disappearing.
+
 An explicit `SetRegionSchedulerConfig` override (including an explicit default, or
 `--sim-budget-profile` scheduler settings) must match all three persisted fields; a
 conflict refuses world loading with `Incompatible configuration: persisted region
@@ -261,7 +309,8 @@ JSON override and `--preset-json <path>` for a validated new-world terrain prese
 Paths are relative to the working directory. Missing or invalid overrides fail before
 world creation. Server smoke, recording, replay, and lockstep share the resolved
 configuration; the client networked smoke also supplies it to its host authority.
-Replay and Hello identities still come from `GameSession::SystemConfigIdentity()`.
+Replay and Hello configuration identities come from `GameSession::SystemConfigIdentity()`;
+their content identities come from `GameSession::PresetContentHash()`, including species.
 Record and replay must receive the same overrides.
 
 Historical determinism pins use `test/fixtures/historical-defaults-off.json` together
