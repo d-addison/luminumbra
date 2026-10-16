@@ -263,7 +263,6 @@ void FoliagePass::update_ground_mesh(ChunkID id,
                           indices));
     column.revision = ++m_next_ground_revision;
     m_chunk_cache.erase(key);
-    m_surf_grid_cache.erase(key);
 }
 
 void FoliagePass::clear_ground_meshes() {
@@ -271,6 +270,8 @@ void FoliagePass::clear_ground_meshes() {
     m_ground_columns.clear();
     m_chunk_cache.clear();
     m_surf_grid_cache.clear();
+    m_surface_slots.clear();
+    m_slot_revisions.fill(0);
     m_instances.clear();
     m_draw_instance_limit = 0;
     m_gpu_generated_count.reset();
@@ -306,7 +307,6 @@ void FoliagePass::remove_ground_mesh(ChunkID id) {
     }
     m_ground_columns.erase(it);
     m_chunk_cache.erase(key);
-    m_surf_grid_cache.erase(key);
 }
 
 FoliagePass::SurfaceSample FoliagePass::sample_ground(
@@ -428,6 +428,19 @@ void FoliagePass::init_compute(const std::filesystem::path& root_path) {
     glGenBuffers(1, &m_blade_ssbo);
     glGenBuffers(1, &m_count_ssbo);
     glGenBuffers(1, &m_arch_ssbo);
+    glGenBuffers(1, &m_slot_ssbo);
+
+    // Bounded metadata retains storage for all 512 logical columns.
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, m_chunk_ssbo);
+    glBufferData(GL_SHADER_STORAGE_BUFFER,
+                 static_cast<GLsizeiptr>(kMaxGpuChunks * sizeof(GpuChunk)),
+                 nullptr,
+                 GL_DYNAMIC_DRAW);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, m_slot_ssbo);
+    glBufferData(GL_SHADER_STORAGE_BUFFER,
+                 static_cast<GLsizeiptr>(kMaxGpuChunks * sizeof(std::uint32_t)),
+                 nullptr,
+                 GL_DYNAMIC_DRAW);
 
     // The blade SSBO is sized for the full pool and is ALSO bound as the draw's
     // instance ARRAY_BUFFER in execute (same buffer, two targets).
@@ -469,6 +482,11 @@ void FoliagePass::destroy_compute() {
     m_uploaded_input_hash.reset();
     m_uploaded_chunk_count = 0;
     m_group_storage_bytes = 0;
+    m_surface_storage_slots = 0;
+    m_slot_revisions.fill(0);
+    m_metadata_valid = false;
+    m_palette_uploaded = false;
+    m_scatter_built = false;
     m_scatter_uniforms = {};
     m_prefix_uniforms = {};
     if (m_compute_prog) {
@@ -483,6 +501,7 @@ void FoliagePass::destroy_compute() {
                      m_blade_ssbo,
                      m_count_ssbo,
                      m_arch_ssbo,
+                     m_slot_ssbo,
                      m_group_counts_ssbo,
                      m_group_offsets_ssbo};
     for (GLuint& b : bufs) {
@@ -490,6 +509,7 @@ void FoliagePass::destroy_compute() {
             glDeleteBuffers(1, &b);
     }
     m_chunk_ssbo = m_surf_ssbo = m_blade_ssbo = m_count_ssbo = m_arch_ssbo = 0;
+    m_slot_ssbo = 0;
     // Free the async-readback ring's GL slots HERE, under a live context, matching
     // the explicit-teardown convention of every other GL resource in this class
     // (so the ring's destructor shutdown is a safe no-op even if FoliagePass is
@@ -509,6 +529,7 @@ bool FoliagePass::load_scatter_set(const std::filesystem::path& json_path) {
     }
     m_archetypes.clear();
     m_palette_dirty = true;
+    m_palette_uploaded = false;
     try {
         nlohmann::json doc = nlohmann::json::parse(in);
         if (!doc.contains("archetypes") || !doc["archetypes"].is_array()) {
@@ -1073,6 +1094,8 @@ bool FoliagePass::rebuild_instances_gpu(const std::vector<ChunkScatter>& chunks,
             continue;
         }
         if (admitted.size() == kMaxGpuChunks) {
+            m_surface_slots.clear();
+            m_slot_revisions.fill(0);
             if (collect_attribution)
                 m_rebuild_attribution.fallback = Attribution::FallbackReason::ColumnCapacity;
             return false;
@@ -1092,24 +1115,67 @@ bool FoliagePass::rebuild_instances_gpu(const std::vector<ChunkScatter>& chunks,
         m_rebuild_attribution.fallback = Attribution::FallbackReason::None;
     Attribution::StageTimer repack_timer(m_rebuild_attribution.repack_ms, collect_attribution);
     const double prior_surface_ms = m_rebuild_attribution.surface_ms;
+    const double prior_storage_ms = m_rebuild_attribution.palette_scratch_ms;
     auto& chunk_params = m_chunk_params;
-    auto& surf_grid = m_surface_scratch;
     chunk_params.clear();
-    surf_grid.clear();
+    m_slot_order.clear();
+    m_surface_keys.clear();
+    m_dirty_surfaces.clear();
     chunk_params.reserve(admitted.size());
-    surf_grid.reserve(admitted.size() * kMaxCandidatesPerChunk);
+    m_slot_order.reserve(admitted.size());
+    m_surface_keys.reserve(admitted.size());
+    m_dirty_surfaces.reserve(admitted.size());
+
+    m_surface_slots.begin_frame();
+    for (const auto* chunk : admitted)
+        m_surface_slots.retain(detail::pack_foliage_chunk_key(chunk->chunk_xz.x, chunk->chunk_xz.y),
+                               scatter_signature(*chunk));
+    m_surface_slots.release_unretained();
+    for (const auto* chunk : admitted) {
+        const auto key = detail::pack_foliage_chunk_key(chunk->chunk_xz.x, chunk->chunk_xz.y);
+        const auto placement = scatter_signature(*chunk);
+        const bool existing = m_surface_slots.find(key, placement).has_value();
+        const auto slot = m_surface_slots.acquire(key, placement);
+        if (!slot) {
+            if (collect_attribution)
+                m_rebuild_attribution.fallback = Attribution::FallbackReason::ColumnCapacity;
+            return false;
+        }
+        if (!existing)
+            m_slot_revisions[*slot] = 0;
+    }
+    // Growth discards GL storage, then repopulates every referenced slot from
+    // CPU authority. No old GPU bytes are ever read or copied back to the CPU.
+    if (m_surface_slots.capacity() > m_surface_storage_slots) {
+        Attribution::StageTimer timer(m_rebuild_attribution.palette_scratch_ms,
+                                      collect_attribution);
+        m_surface_storage_slots = m_surface_slots.capacity();
+        const auto bytes = m_surface_storage_slots * kMaxCandidatesPerChunk * sizeof(glm::vec4);
+        glBindBuffer(GL_SHADER_STORAGE_BUFFER, m_surf_ssbo);
+        glBufferData(
+            GL_SHADER_STORAGE_BUFFER, static_cast<GLsizeiptr>(bytes), nullptr, GL_DYNAMIC_DRAW);
+        m_slot_revisions.fill(0);
+        if (collect_attribution)
+            m_rebuild_attribution.scratch_bytes += bytes;
+    }
     const int kMaxSurfBuildsPerFrame = m_readback_enabled ? std::numeric_limits<int>::max() : 4;
     int builds_left = kMaxSurfBuildsPerFrame;
     bool deferred_any = false;
+    std::array<bool, kMaxGpuChunks> dirty_slots{};
     for (const auto* admitted_chunk : admitted) {
         const auto& chunk = *admitted_chunk;
 
         const std::uint64_t key =
             detail::pack_foliage_chunk_key(chunk.chunk_xz.x, chunk.chunk_xz.y);
         const std::vector<glm::vec4>* gridp = nullptr;
-        auto git = m_surf_grid_cache.find(key);
         const auto placement = scatter_signature(chunk);
-        if (git != m_surf_grid_cache.end() && git->second.placement == placement) {
+        const FoliageSurfaceSlots::Key surface_key{key, placement};
+        const auto support = m_ground_meshes.find(key);
+        const auto support_revision = !m_use_rendered_ground || support == m_ground_meshes.end()
+                                          ? 0
+                                          : support->second.revision;
+        auto git = m_surf_grid_cache.find(surface_key);
+        if (git != m_surf_grid_cache.end() && git->second.support_revision == support_revision) {
             gridp = &git->second.samples;
         } else if (builds_left > 0) {
             Attribution::StageTimer timer(m_rebuild_attribution.surface_ms, collect_attribution);
@@ -1128,7 +1194,10 @@ bool FoliagePass::rebuild_instances_gpu(const std::vector<ChunkScatter>& chunks,
                 grid.emplace_back(s.height, s.moisture, s.slope, s.valid ? 1.0f : 0.0f);
             }
             gridp = &m_surf_grid_cache
-                         .insert_or_assign(key, CachedSurfaceSamples{placement, std::move(grid)})
+                         .insert_or_assign(surface_key,
+                                           CachedSurfaceSamples{support_revision,
+                                                                ++m_next_surface_revision,
+                                                                std::move(grid)})
                          .first->second.samples;
             --builds_left;
         } else {
@@ -1148,17 +1217,26 @@ bool FoliagePass::rebuild_instances_gpu(const std::vector<ChunkScatter>& chunks,
         gc.id_density[2] = static_cast<float>(chunk.biome_id);
         gc.id_density[3] = chunk.density;
         chunk_params.push_back(gc);
-        surf_grid.insert(surf_grid.end(), gridp->begin(), gridp->end());
+        const auto slot = *m_surface_slots.find(key, placement);
+        m_slot_order.push_back(static_cast<std::uint32_t>(slot));
+        m_surface_keys.push_back(surface_key);
+        const auto revision = m_surf_grid_cache.at(surface_key).revision;
+        if (m_slot_revisions[slot] != revision && !dirty_slots[slot]) {
+            m_dirty_surfaces.push_back({slot, gridp, revision});
+            dirty_slots[slot] = true;
+        }
     }
 
     if (collect_attribution)
         m_rebuild_attribution.admitted_columns = chunk_params.size();
     if (collect_attribution)
         m_rebuild_attribution.copied_bytes +=
-            chunk_params.size() * sizeof(GpuChunk) + surf_grid.size() * sizeof(glm::vec4);
+            chunk_params.size() * (sizeof(GpuChunk) + sizeof(std::uint32_t));
     repack_timer.stop();
     if (collect_attribution)
-        m_rebuild_attribution.repack_ms -= m_rebuild_attribution.surface_ms - prior_surface_ms;
+        m_rebuild_attribution.repack_ms -= m_rebuild_attribution.surface_ms - prior_surface_ms +
+                                           m_rebuild_attribution.palette_scratch_ms -
+                                           prior_storage_ms;
     if (collect_attribution)
         m_rebuild_attribution.backlog = deferred_any;
     // Suppress scatter-cache elision next frame while builds remain pending (drain the backlog even
@@ -1166,9 +1244,12 @@ bool FoliagePass::rebuild_instances_gpu(const std::vector<ChunkScatter>& chunks,
     // cap.
     m_foliage_build_backlog = deferred_any;
     if (m_surf_grid_cache.size() > 768) {
-        detail::prune_foliage_cache(m_surf_grid_cache, chunks, [](const ChunkScatter& chunk) {
-            return detail::pack_foliage_chunk_key(chunk.chunk_xz.x, chunk.chunk_xz.y);
-        });
+        for (auto it = m_surf_grid_cache.begin(); it != m_surf_grid_cache.end();) {
+            if (!m_surface_slots.find(it->first.column, it->first.placement))
+                it = m_surf_grid_cache.erase(it);
+            else
+                ++it;
+        }
     }
 
     if (chunk_params.size() > kMaxGpuChunks) {
@@ -1241,30 +1322,59 @@ bool FoliagePass::rebuild_instances_gpu(const std::vector<ChunkScatter>& chunks,
     m_uploaded_wind = m_wind_xz;
 
     Attribution::StageTimer upload_timer(m_rebuild_attribution.upload_ms, collect_attribution);
-    if (collect_attribution)
-        m_rebuild_attribution.uploaded_bytes += chunk_params.size() * sizeof(GpuChunk) +
-                                                surf_grid.size() * sizeof(glm::vec4) +
-                                                pal.size() * sizeof(float) + 5 * sizeof(GLuint);
-    // --- Upload. ---
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, m_chunk_ssbo);
-    glBufferData(GL_SHADER_STORAGE_BUFFER,
-                 static_cast<GLsizeiptr>(chunk_params.size() * sizeof(GpuChunk)),
-                 chunk_params.data(),
-                 GL_DYNAMIC_DRAW);
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, m_surf_ssbo);
-    glBufferData(GL_SHADER_STORAGE_BUFFER,
-                 static_cast<GLsizeiptr>(surf_grid.size() * sizeof(glm::vec4)),
-                 surf_grid.data(),
-                 GL_DYNAMIC_DRAW);
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, m_arch_ssbo);
-    glBufferData(GL_SHADER_STORAGE_BUFFER,
-                 static_cast<GLsizeiptr>(pal.size() * sizeof(float)),
-                 pal.data(),
-                 GL_DYNAMIC_DRAW);
-    const GLuint draw_command[5] = {0u, 12u, 0u, 0u, 0u};
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, m_count_ssbo);
-    glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, sizeof(draw_command), draw_command);
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+    {
+        LUMIN_PROFILE_ZONE_N("Foliage dirty slot upload");
+        const auto param_bytes = chunk_params.size() * sizeof(GpuChunk);
+        const auto slot_bytes = m_slot_order.size() * sizeof(std::uint32_t);
+        if (!m_metadata_valid || m_metadata_count != chunk_params.size() ||
+            std::memcmp(m_uploaded_params.data(), chunk_params.data(), param_bytes) != 0 ||
+            std::memcmp(m_uploaded_slots.data(), m_slot_order.data(), slot_bytes) != 0) {
+            glBindBuffer(GL_SHADER_STORAGE_BUFFER, m_chunk_ssbo);
+            glBufferSubData(GL_SHADER_STORAGE_BUFFER,
+                            0,
+                            static_cast<GLsizeiptr>(param_bytes),
+                            chunk_params.data());
+            glBindBuffer(GL_SHADER_STORAGE_BUFFER, m_slot_ssbo);
+            glBufferSubData(GL_SHADER_STORAGE_BUFFER,
+                            0,
+                            static_cast<GLsizeiptr>(slot_bytes),
+                            m_slot_order.data());
+            std::copy(chunk_params.begin(), chunk_params.end(), m_uploaded_params.begin());
+            std::copy(m_slot_order.begin(), m_slot_order.end(), m_uploaded_slots.begin());
+            m_metadata_count = chunk_params.size();
+            m_metadata_valid = true;
+            if (collect_attribution)
+                m_rebuild_attribution.uploaded_bytes += param_bytes + slot_bytes;
+        }
+        glBindBuffer(GL_SHADER_STORAGE_BUFFER, m_surf_ssbo);
+        constexpr auto surface_bytes = kMaxCandidatesPerChunk * sizeof(glm::vec4);
+        for (const auto& dirty : m_dirty_surfaces) {
+            glBufferSubData(GL_SHADER_STORAGE_BUFFER,
+                            static_cast<GLintptr>(dirty.slot * surface_bytes),
+                            static_cast<GLsizeiptr>(surface_bytes),
+                            dirty.samples->data());
+            m_slot_revisions[dirty.slot] = dirty.revision;
+        }
+        if (collect_attribution) {
+            m_rebuild_attribution.dirty_columns += m_dirty_surfaces.size();
+            m_rebuild_attribution.uploaded_bytes +=
+                m_dirty_surfaces.size() * surface_bytes + 5 * sizeof(GLuint);
+        }
+        if (!m_palette_uploaded) {
+            glBindBuffer(GL_SHADER_STORAGE_BUFFER, m_arch_ssbo);
+            glBufferData(GL_SHADER_STORAGE_BUFFER,
+                         static_cast<GLsizeiptr>(pal.size() * sizeof(float)),
+                         pal.data(),
+                         GL_DYNAMIC_DRAW);
+            m_palette_uploaded = true;
+            if (collect_attribution)
+                m_rebuild_attribution.uploaded_bytes += pal.size() * sizeof(float);
+        }
+        const GLuint draw_command[5] = {0u, 12u, 0u, 0u, 0u};
+        glBindBuffer(GL_SHADER_STORAGE_BUFFER, m_count_ssbo);
+        glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, sizeof(draw_command), draw_command);
+        glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+    }
 
     upload_timer.stop();
     Attribution::StageTimer dispatch_timer(m_rebuild_attribution.dispatch_ms, collect_attribution);
@@ -1349,11 +1459,17 @@ void FoliagePass::collect_input_hash() {
     Attribution::StageTimer timer(m_rebuild_attribution.hash_ms, collect_attribution);
     LUMIN_PROFILE_ZONE_N("Foliage evidence hash");
     if (collect_attribution)
-        m_rebuild_attribution.hashed_bytes += m_chunk_params.size() * sizeof(GpuChunk) +
-                                              m_surface_scratch.size() * sizeof(glm::vec4) +
-                                              m_palette.size() * sizeof(float) + 5 * sizeof(float);
+        m_rebuild_attribution.hashed_bytes +=
+            m_chunk_params.size() * sizeof(GpuChunk) +
+            m_surface_keys.size() * kMaxCandidatesPerChunk * sizeof(glm::vec4) +
+            m_palette.size() * sizeof(float) + 5 * sizeof(float);
     auto hash = fnv1a(m_chunk_params.data(), m_chunk_params.size() * sizeof(GpuChunk));
-    hash = fnv1a(m_surface_scratch.data(), m_surface_scratch.size() * sizeof(glm::vec4), hash);
+    // Hash the canonical logical stream, independent of slot layout and unused
+    // capacity. This is the original full-build recipe without concatenation.
+    for (const auto key : m_surface_keys) {
+        const auto& samples = m_surf_grid_cache.at(key).samples;
+        hash = fnv1a(samples.data(), samples.size() * sizeof(glm::vec4), hash);
+    }
     hash = fnv1a(m_palette.data(), m_palette.size() * sizeof(float), hash);
     for (const float value : m_uploaded_hash_settings)
         hash = fnv1a(&value, sizeof(value), hash);
@@ -1368,6 +1484,7 @@ void FoliagePass::dispatch_scatter() {
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 4, m_arch_ssbo);
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 5, m_group_counts_ssbo);
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 6, m_group_offsets_ssbo);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 7, m_slot_ssbo);
     constexpr GLuint groups_x = (kMaxCandidatesPerChunk + 63) / 64;
     glUseProgram(m_compute_prog);
     glUniform1i(m_scatter_uniforms.emit, GL_FALSE);

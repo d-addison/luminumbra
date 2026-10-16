@@ -477,6 +477,10 @@ add_executable(foliage_cache_prune_test
     rendering/foliage_cache_prune_test.cpp
 )
 
+add_executable(foliage_surface_slots_test rendering/foliage_surface_slots_test.cpp)
+target_include_directories(foliage_surface_slots_test PRIVATE ../src/luminumbra_client)
+target_link_libraries(foliage_surface_slots_test PRIVATE gtest_main)
+
 target_include_directories(foliage_cache_prune_test PRIVATE
 ../src
 ../src/luminumbra_client
@@ -634,7 +638,7 @@ endif()
 # default-OFF, so a headless flip is vacuous — this is the non-vacuous proof).
 add_executable(pass_context_test
     rendering/pass_context_test.cpp
-    # Evidence reuse and column-local invalidation on both scatter backends.
+    # Evidence reuse, stable surface slots and column-local invalidation on both backends.
     rendering/foliage_rebuild_test.cpp
 )
 
@@ -1835,6 +1839,7 @@ set(LUMINUMBRA_GTEST_TARGETS
     # world-dressing placement determinism (CPU-only).
     world_dressing_test
     foliage_cache_prune_test
+    foliage_surface_slots_test
     foliage_visual_contract_test
     render_view_test
     render_smoke_test

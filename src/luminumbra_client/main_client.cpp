@@ -4831,7 +4831,7 @@ int main(int argc, char* argv[]) {
                         "dispatch={:.3f} cpu_fallback={:.3f} rebuild_calls={} reason_mask={} "
                         "admitted={} "
                         "misses={} deferred={} copied_bytes={} hashed_bytes={} uploaded_bytes={} "
-                        "scratch_bytes={} backlog={} path={} fallback={}",
+                        "dirty_columns={} scratch_bytes={} backlog={} path={} fallback={}",
                         foliage_attribution.signature_ms,
                         foliage_attribution.sort_ms,
                         foliage_attribution.surface_ms,
@@ -4849,6 +4849,7 @@ int main(int argc, char* argv[]) {
                         foliage_attribution.copied_bytes,
                         foliage_attribution.hashed_bytes,
                         foliage_attribution.uploaded_bytes,
+                        foliage_attribution.dirty_columns,
                         foliage_attribution.scratch_bytes,
                         foliage_attribution.backlog,
                         Attribution::path_name(foliage_attribution.path),

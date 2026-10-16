@@ -107,6 +107,7 @@ protected:
                   gpu ? Attribution::FoliagePath::ReusedGpu : Attribution::FoliagePath::ReusedCpu);
         EXPECT_EQ(rebuild.surface_misses, 0u);
         EXPECT_EQ(rebuild.uploaded_bytes, 0u);
+        EXPECT_EQ(rebuild.dirty_columns, 0u);
         EXPECT_EQ(rebuild.hashed_bytes, 0u);
         EXPECT_FALSE(rebuild.backlog);
     }
@@ -170,22 +171,50 @@ protected:
     }
     // Independent copy of the pre-optimization recipe, using actual uploaded
     // bytes rather than the implementation's retained CPU scratch.
-    static std::uint64_t LegacyUploadedHash(const FoliagePass& pass) {
+    static std::uint64_t LegacyUploadedHash(const FoliagePass& pass, std::size_t count) {
         std::uint64_t hash = 1469598103934665603ull;
-        for (const GLuint binding : {0u, 1u, 4u}) {
+        // The fixtures supply the admitted logical count (at most three), since
+        // retained buffer capacity includes unused slots and dispatch unbinds
+        // the compute program before returning.
+        EXPECT_GT(count, 0u);
+        EXPECT_LE(count, 3u);
+        if (count == 0 || count > 3)
+            return 0;
+        const auto storage_bytes = [](GLuint binding) {
             GLint64 size = 0;
-            const auto buffer = Binding(binding);
-            glGetNamedBufferParameteri64v(buffer, GL_BUFFER_SIZE, &size);
-            // These fixtures have <= 3 columns and <= 6 archetypes.
-            EXPECT_GT(size, 0);
-            EXPECT_LE(size, 3 * 8192 * 16);
-            if (size <= 0 || size > 3 * 8192 * 16) {
+            glGetNamedBufferParameteri64v(Binding(binding), GL_BUFFER_SIZE, &size);
+            return size;
+        };
+        EXPECT_EQ(storage_bytes(0), 512 * 8 * static_cast<GLint64>(sizeof(float)));
+        EXPECT_EQ(storage_bytes(7), 512 * static_cast<GLint64>(sizeof(std::uint32_t)));
+        EXPECT_GT(storage_bytes(1), 0);
+        EXPECT_LE(storage_bytes(1), 4 * 8192 * static_cast<GLint64>(sizeof(glm::vec4)));
+        EXPECT_GT(pass.archetype_count(), 0u);
+        EXPECT_LE(pass.archetype_count(), 6u);
+        EXPECT_EQ(storage_bytes(4),
+                  static_cast<GLint64>(pass.archetype_count() * 8 * sizeof(float)));
+        std::vector<unsigned char> params(count * 8 * sizeof(float));
+        glGetNamedBufferSubData(
+            Binding(0), 0, static_cast<GLsizeiptr>(params.size()), params.data());
+        hash = Fnv(params.data(), params.size(), hash);
+        std::vector<std::uint32_t> slots(count);
+        glGetNamedBufferSubData(
+            Binding(7), 0, static_cast<GLsizeiptr>(count * sizeof(slots[0])), slots.data());
+        std::vector<unsigned char> surface(FoliagePass::kMaxCandidatesPerChunk * sizeof(glm::vec4));
+        for (const auto slot : slots) {
+            EXPECT_LT(slot, Luminumbra::Rendering::FoliageSurfaceSlots::kCapacity);
+            if (slot >= Luminumbra::Rendering::FoliageSurfaceSlots::kCapacity)
                 return 0;
-            }
-            std::vector<unsigned char> bytes(static_cast<std::size_t>(size));
-            glGetNamedBufferSubData(buffer, 0, static_cast<GLsizeiptr>(size), bytes.data());
-            hash = Fnv(bytes.data(), bytes.size(), hash);
+            glGetNamedBufferSubData(Binding(1),
+                                    static_cast<GLintptr>(slot * surface.size()),
+                                    static_cast<GLsizeiptr>(surface.size()),
+                                    surface.data());
+            hash = Fnv(surface.data(), surface.size(), hash);
         }
+        std::vector<float> palette(pass.archetype_count() * 8);
+        glGetNamedBufferSubData(
+            Binding(4), 0, static_cast<GLsizeiptr>(palette.size() * sizeof(float)), palette.data());
+        hash = Fnv(palette.data(), palette.size() * sizeof(float), hash);
         float total_weight = 0;
         for (std::size_t index = 0; index < pass.archetype_count(); ++index) {
             total_weight += pass.archetype(index).density_weight;
@@ -211,10 +240,12 @@ public:
     RebuildGlCalls() {
         current = this;
         glad_glBufferData = BufferData;
+        glad_glBufferSubData = BufferSubData;
         glad_glGetUniformLocation = UniformLocation;
     }
     ~RebuildGlCalls() {
         glad_glBufferData = original_buffer_data;
+        glad_glBufferSubData = original_buffer_sub_data;
         glad_glGetUniformLocation = original_uniform_location;
         current = nullptr;
     }
@@ -222,6 +253,9 @@ public:
     RebuildGlCalls& operator=(const RebuildGlCalls&) = delete;
     std::size_t scratch_allocations = 0;
     std::size_t uniform_queries = 0;
+    std::size_t uploaded_bytes = 0;
+    std::size_t surface_upload_bytes = 0;
+    std::size_t surface_uploads = 0;
 
 private:
     static void GLAPIENTRY BufferData(GLenum target,
@@ -231,7 +265,21 @@ private:
         if (target == GL_SHADER_STORAGE_BUFFER && data == nullptr) {
             ++current->scratch_allocations;
         }
+        if (data != nullptr)
+            current->uploaded_bytes += static_cast<std::size_t>(size);
         current->original_buffer_data(target, size, data, usage);
+    }
+    static void GLAPIENTRY BufferSubData(GLenum target,
+                                         GLintptr offset,
+                                         GLsizeiptr size,
+                                         const void* data) {
+        current->uploaded_bytes += static_cast<std::size_t>(size);
+        if (size ==
+            static_cast<GLsizeiptr>(FoliagePass::kMaxCandidatesPerChunk * sizeof(glm::vec4))) {
+            current->surface_upload_bytes += static_cast<std::size_t>(size);
+            ++current->surface_uploads;
+        }
+        current->original_buffer_sub_data(target, offset, size, data);
     }
     static GLint GLAPIENTRY UniformLocation(GLuint program, const GLchar* name) {
         ++current->uniform_queries;
@@ -239,6 +287,7 @@ private:
     }
     inline static RebuildGlCalls* current = nullptr;
     PFNGLBUFFERDATAPROC original_buffer_data = glad_glBufferData;
+    PFNGLBUFFERSUBDATAPROC original_buffer_sub_data = glad_glBufferSubData;
     PFNGLGETUNIFORMLOCATIONPROC original_uniform_location = glad_glGetUniformLocation;
 };
 
@@ -257,7 +306,7 @@ TEST_F(FoliageRebuildTest, EvidenceIsExplicitAndPreservesLegacyHashAndGpuInstanc
     }
     const auto reference = GpuRecords();
     ASSERT_FALSE(reference.empty());
-    const auto expected_hash = LegacyUploadedHash(pass);
+    const auto expected_hash = LegacyUploadedHash(pass, chunks.size());
     const auto generation = pass.build_generation();
 
     // Enabling evidence on cached inputs hashes once without a new build/upload.
@@ -324,6 +373,7 @@ TEST_F(FoliageRebuildTest, ReusedScratchMatchesFreshBuildsAcrossGrowthShrinkAndE
     ASSERT_NO_FATAL_FAILURE(Initialize(reused.pass));
     reused.pass.set_evidence_enabled(true);
     std::size_t high_water_columns = 0;
+    std::size_t surface_capacity = 0;
     GLuint reused_count_buffer = 0;
     std::uint64_t frame_id = 1;
     for (const std::size_t columns : {1u, 3u, 2u, 0u, 1u, 3u}) {
@@ -334,10 +384,17 @@ TEST_F(FoliageRebuildTest, ReusedScratchMatchesFreshBuildsAcrossGrowthShrinkAndE
             Attribution::FoliageFrameScope frame(true);
             Rebuild(reused.pass, chunks, frame_id++);
             const bool grows = columns > high_water_columns;
-            EXPECT_EQ(calls.scratch_allocations, grows ? 2u : 0u);
+            const bool surface_grows = columns > surface_capacity;
+            if (surface_grows) {
+                surface_capacity = 1;
+                while (surface_capacity < columns)
+                    surface_capacity *= 2;
+            }
+            EXPECT_EQ(calls.scratch_allocations, (grows ? 2u : 0u) + (surface_grows ? 1u : 0u));
             EXPECT_EQ(calls.uniform_queries, 0u);
             EXPECT_EQ(frame.snapshot().rebuild.scratch_bytes,
-                      grows ? 2u * columns * 128u * sizeof(GLuint) : 0u);
+                      (grows ? 2u * columns * 128u * sizeof(GLuint) : 0u) +
+                          (surface_grows ? surface_capacity * 8192u * sizeof(glm::vec4) : 0u));
         }
         high_water_columns = std::max(high_water_columns, columns);
         if (columns == 0) {
@@ -351,7 +408,7 @@ TEST_F(FoliageRebuildTest, ReusedScratchMatchesFreshBuildsAcrossGrowthShrinkAndE
         reused_count_buffer = Binding(3);
         const auto reused_records = GpuRecords();
         const auto reused_hash = reused.pass.uploaded_input_hash();
-        EXPECT_EQ(reused_hash, LegacyUploadedHash(reused.pass));
+        EXPECT_EQ(reused_hash, LegacyUploadedHash(reused.pass, chunks.size()));
         GLint64 storage_size = 0;
         glGetNamedBufferParameteri64v(Binding(5), GL_BUFFER_SIZE, &storage_size);
         EXPECT_EQ(storage_size, static_cast<GLint64>(high_water_columns * 128u * sizeof(GLuint)));
@@ -372,7 +429,9 @@ TEST_F(FoliageRebuildTest, ComputeRecreationRefreshesUniformsAndScratchStorage) 
     const auto chunks = Chunks(2);
     Rebuild(pass, chunks, 1);
     const auto reference = GpuRecords();
+    ASSERT_FALSE(reference.empty());
     const auto hash = pass.uploaded_input_hash();
+    ASSERT_TRUE(hash.has_value());
     pass.destroy_compute();
     EXPECT_FALSE(pass.uploaded_input_hash());
     {
@@ -381,17 +440,85 @@ TEST_F(FoliageRebuildTest, ComputeRecreationRefreshesUniformsAndScratchStorage) 
         ASSERT_TRUE(pass.gpu_scatter_active());
         EXPECT_EQ(calls.uniform_queries, 12u);
         calls.scratch_allocations = 0;
-        pass.set_evidence_frame(2, 2);
+        calls.uploaded_bytes = 0;
+        Attribution::FoliageFrameScope frame(true);
+        pass.set_evidence_frame(2, 1);
         pass.rebuild_instances(
             chunks,
             +[](void*, float, float) { return FoliagePass::SurfaceSample{0, 0, 0, false}; },
             nullptr,
             kCamera); // Cached exact surface inputs must be reused.
-        EXPECT_EQ(calls.scratch_allocations, 2u);
+        EXPECT_EQ(calls.scratch_allocations, 3u);
         EXPECT_EQ(calls.uniform_queries, 12u);
+        EXPECT_EQ(calls.surface_uploads, 2u);
+        EXPECT_EQ(frame.snapshot().rebuild.surface_misses, 0u);
+        EXPECT_EQ(frame.snapshot().rebuild.dirty_columns, 2u);
+        EXPECT_EQ(frame.snapshot().rebuild.uploaded_bytes, calls.uploaded_bytes);
     }
     EXPECT_EQ(pass.uploaded_input_hash(), hash);
     ExpectSame(reference, GpuRecords());
+}
+
+TEST_F(FoliageRebuildTest, FullResourceRecreationRestoresSupportAndMatchesFreshBuild) {
+    ScopedPass scoped;
+    auto& pass = scoped.pass;
+    ASSERT_NO_FATAL_FAILURE(Initialize(pass));
+    pass.use_rendered_ground();
+    pass.set_evidence_enabled(true);
+    const auto chunks = SupportedChunks(2);
+    UploadGround(pass, 1, {0, 0, 0});
+    UploadGround(pass, 2, {1, 0, 0}, 6);
+    Rebuild(pass, chunks, 1);
+    const auto original = GpuRecords();
+    ASSERT_FALSE(original.empty());
+    const auto original_hash = pass.uploaded_input_hash();
+    ASSERT_TRUE(original_hash.has_value());
+
+    pass.destroy_compute();
+    pass.destroy_buffers();
+    EXPECT_FALSE(pass.uploaded_input_hash());
+    pass.init_buffers();
+    pass.init_compute(LUMINUMBRA_SOURCE_ROOT);
+    ASSERT_TRUE(pass.gpu_scatter_active());
+    // Full teardown clears ground support and cached surfaces. Restore CPU
+    // authority before rebuilding with the valid sampler supplied by Rebuild.
+    UploadGround(pass, 1, {0, 0, 0});
+    UploadGround(pass, 2, {1, 0, 0}, 6);
+    {
+        RebuildGlCalls calls;
+        const auto rebuilt = RebuildAttributed(pass, chunks, 2);
+        EXPECT_EQ(rebuilt.path, Attribution::FoliagePath::Gpu);
+        EXPECT_EQ(rebuilt.admitted_columns, 2u);
+        EXPECT_EQ(rebuilt.surface_misses, 2u);
+        EXPECT_EQ(rebuilt.dirty_columns, 2u);
+        EXPECT_EQ(calls.surface_uploads, 2u);
+        EXPECT_EQ(calls.surface_upload_bytes, 2u * 8192u * sizeof(glm::vec4));
+        EXPECT_EQ(calls.scratch_allocations, 3u);
+        EXPECT_EQ(calls.uploaded_bytes,
+                  2u * (8192u * sizeof(glm::vec4) + 8u * sizeof(float) + sizeof(std::uint32_t)) +
+                      pass.archetype_count() * 8u * sizeof(float) + 5u * sizeof(GLuint));
+        EXPECT_EQ(rebuilt.uploaded_bytes, calls.uploaded_bytes);
+    }
+    const auto restored = GpuRecords();
+    ASSERT_FALSE(restored.empty());
+    const auto restored_hash = pass.uploaded_input_hash();
+    ASSERT_TRUE(restored_hash.has_value());
+    EXPECT_EQ(restored_hash, original_hash);
+    EXPECT_EQ(restored_hash, LegacyUploadedHash(pass, chunks.size()));
+    ExpectSame(original, restored);
+
+    ScopedPass fresh;
+    ASSERT_NO_FATAL_FAILURE(Initialize(fresh.pass));
+    fresh.pass.use_rendered_ground();
+    fresh.pass.set_evidence_enabled(true);
+    UploadGround(fresh.pass, 1, {0, 0, 0});
+    UploadGround(fresh.pass, 2, {1, 0, 0}, 6);
+    Rebuild(fresh.pass, chunks, 2);
+    const auto fresh_hash = fresh.pass.uploaded_input_hash();
+    ASSERT_TRUE(fresh_hash.has_value());
+    EXPECT_EQ(fresh_hash, LegacyUploadedHash(fresh.pass, chunks.size()));
+    EXPECT_EQ(restored_hash, fresh_hash);
+    ExpectSame(restored, GpuRecords());
 }
 
 TEST_F(FoliageRebuildTest, CpuFallbackInstanceBytesDoNotDependOnEvidence) {
@@ -426,7 +553,7 @@ TEST_F(FoliageRebuildTest, QualificationRequiresCollectedInputsAndKeepsLegacyIde
     ASSERT_FALSE(pass.instances().empty());
     EXPECT_STREQ(pass.qualification_blocker(), "input_evidence_not_collected");
     EXPECT_FALSE(pass.begin_qualification());
-    const auto expected_hash = LegacyUploadedHash(pass);
+    const auto expected_hash = LegacyUploadedHash(pass, chunks.size());
     const std::array<float, 2> wind{0, 0};
     pass.set_evidence_enabled(true);
     Rebuild(pass, chunks, 5);
@@ -451,7 +578,7 @@ TEST_F(FoliageRebuildTest, PaletteReloadUsesOnlyCurrentArchetypeBytes) {
         const auto records = GpuRecords();
         ASSERT_FALSE(records.empty());
         const auto hash = reused.pass.uploaded_input_hash();
-        EXPECT_EQ(hash, LegacyUploadedHash(reused.pass));
+        EXPECT_EQ(hash, LegacyUploadedHash(reused.pass, chunks.size()));
         GLint64 palette_size = 0;
         glGetNamedBufferParameteri64v(Binding(4), GL_BUFFER_SIZE, &palette_size);
         EXPECT_EQ(palette_size,
@@ -768,7 +895,7 @@ TEST_F(FoliageRebuildTest, LocalizedReuseMatchesLegacyForcedRebuildBytesAndHash)
             const auto rebuilt_hash = pass.uploaded_input_hash();
             ASSERT_TRUE(rebuilt_hash.has_value());
             if (rebuilt_hash.has_value()) {
-                EXPECT_EQ(*rebuilt_hash, LegacyUploadedHash(pass));
+                EXPECT_EQ(*rebuilt_hash, LegacyUploadedHash(pass, chunks.size()));
             }
         } else {
             EXPECT_EQ(pass.instance_hash(),
@@ -781,4 +908,165 @@ TEST_F(FoliageRebuildTest, LocalizedReuseMatchesLegacyForcedRebuildBytesAndHash)
         EXPECT_EQ(pass.uploaded_input_hash(), original_hash);
     }
 }
+
+TEST_F(FoliageRebuildTest, StableSlotsUploadOnlyDirtySurfacesAndRetainMetadataAndPalette) {
+    ScopedPass scoped;
+    auto& pass = scoped.pass;
+    ASSERT_NO_FATAL_FAILURE(Initialize(pass));
+    pass.use_rendered_ground();
+    pass.set_evidence_enabled(true);
+    const auto chunks = SupportedChunks(2);
+    UploadGround(pass, 1, {0, 0, 0});
+    UploadGround(pass, 2, {1, 0, 0});
+    const auto initial = RebuildAttributed(pass, chunks, 1);
+    EXPECT_EQ(initial.dirty_columns, 2u);
+    {
+        RebuildGlCalls calls;
+        ExpectReused(RebuildAttributed(pass, chunks, 2), true);
+        EXPECT_EQ(calls.uploaded_bytes, 0u);
+        EXPECT_EQ(calls.scratch_allocations, 0u);
+    }
+    // Request compute work with identical surfaces through the public phase input.
+    {
+        RebuildGlCalls calls;
+        Attribution::FoliageFrameScope frame(true);
+        pass.set_evidence_frame(3, 2);
+        pass.rebuild_instances(
+            chunks,
+            +[](void*, float, float) { return FoliagePass::SurfaceSample{0, 0, 0, false}; },
+            nullptr,
+            kCamera);
+        EXPECT_EQ(frame.snapshot().rebuild.dirty_columns, 0u);
+        EXPECT_EQ(frame.snapshot().rebuild.uploaded_bytes, 5u * sizeof(GLuint));
+        EXPECT_EQ(calls.uploaded_bytes, 5u * sizeof(GLuint));
+        EXPECT_EQ(calls.surface_upload_bytes, 0u);
+        EXPECT_EQ(calls.scratch_allocations, 0u);
+    }
+    UploadGround(pass, 2, {1, 0, 0}, 6);
+    {
+        RebuildGlCalls calls;
+        const auto edited = RebuildAttributed(pass, chunks, 4);
+        EXPECT_EQ(edited.dirty_columns, 1u);
+        EXPECT_EQ(edited.surface_misses, 1u);
+        EXPECT_EQ(calls.surface_uploads, 1u);
+        EXPECT_EQ(calls.surface_upload_bytes, 8192u * sizeof(glm::vec4));
+        EXPECT_EQ(calls.uploaded_bytes, 8192u * sizeof(glm::vec4) + 5u * sizeof(GLuint));
+        EXPECT_EQ(edited.uploaded_bytes, calls.uploaded_bytes);
+        EXPECT_EQ(calls.scratch_allocations, 0u);
+    }
+    EXPECT_EQ(pass.uploaded_input_hash(), LegacyUploadedHash(pass, chunks.size()));
+}
+
+TEST_F(FoliageRebuildTest, SlotReuseAfterEditsAndHorizonMotionMatchesFreshFullBuild) {
+    ScopedPass reused;
+    ASSERT_NO_FATAL_FAILURE(Initialize(reused.pass));
+    reused.pass.use_rendered_ground();
+    reused.pass.set_evidence_enabled(true);
+    const auto all = SupportedChunks(3);
+    for (int column = 0; column < 3; ++column)
+        UploadGround(reused.pass, static_cast<Luminumbra::ChunkID>(column + 1), {column, 0, 0});
+    std::uint64_t frame = 1;
+    constexpr std::array<std::array<std::size_t, 2>, 5> horizons{
+        {{0, 1}, {0, 1}, {1, 2}, {2, 0}, {0, 1}}};
+    for (const auto indices : horizons) {
+        const bool edited = frame >= 2;
+        if (frame == 2)
+            UploadGround(reused.pass, 2, {1, 0, 0}, 6);
+        const std::vector<FoliagePass::ChunkScatter> chunks{all[indices[0]], all[indices[1]]};
+        const auto rebuild = RebuildAttributed(reused.pass, chunks, frame);
+        EXPECT_EQ(rebuild.dirty_columns, frame == 1 ? 2u : 1u);
+        const auto records = GpuRecords();
+        ASSERT_FALSE(records.empty());
+        const auto hash = reused.pass.uploaded_input_hash();
+        EXPECT_EQ(hash, LegacyUploadedHash(reused.pass, chunks.size()));
+        ScopedPass fresh;
+        ASSERT_NO_FATAL_FAILURE(Initialize(fresh.pass));
+        fresh.pass.use_rendered_ground();
+        fresh.pass.set_evidence_enabled(true);
+        for (int column = 0; column < 3; ++column)
+            UploadGround(fresh.pass,
+                         static_cast<Luminumbra::ChunkID>(column + 1),
+                         {column, 0, 0},
+                         edited && column == 1 ? 6.0f : 8.0f);
+        Rebuild(fresh.pass, chunks, frame++);
+        EXPECT_EQ(hash, fresh.pass.uploaded_input_hash());
+        ExpectSame(records, GpuRecords());
+    }
+}
+
+TEST_F(FoliageRebuildTest, ColumnCapFallsBackBeforeSurfaceUploadsAndRecovers) {
+    ScopedPass scoped;
+    auto& pass = scoped.pass;
+    ASSERT_NO_FATAL_FAILURE(Initialize(pass));
+    const auto chunks = Chunks(1);
+    Rebuild(pass, chunks, 1);
+    const auto reference = GpuRecords();
+    // Duplicate entries stay inside the distance horizon and exercise the
+    // admitted-column cap without a large terrain fixture or sampling workload.
+    const std::vector<FoliagePass::ChunkScatter> overflow(
+        Luminumbra::Rendering::FoliageSurfaceSlots::kCapacity + 1, chunks.front());
+    {
+        RebuildGlCalls calls;
+        const auto fallback = RebuildAttributed(pass, overflow, 2);
+        EXPECT_EQ(fallback.path, Attribution::FoliagePath::Cpu);
+        EXPECT_EQ(fallback.fallback, Attribution::FallbackReason::ColumnCapacity);
+        EXPECT_EQ(fallback.dirty_columns, 0u);
+        EXPECT_EQ(calls.surface_upload_bytes, 0u);
+        EXPECT_FALSE(pass.instances().empty());
+    }
+    const auto recovered = RebuildAttributed(pass, chunks, 3);
+    EXPECT_EQ(recovered.path, Attribution::FoliagePath::Gpu);
+    ExpectSame(reference, GpuRecords());
+}
+
+TEST_F(FoliageRebuildTest, DuplicateColumnsShareUploadsAndDistinctFootprintsKeepExactInputs) {
+    ScopedPass scoped;
+    auto& pass = scoped.pass;
+    ASSERT_NO_FATAL_FAILURE(Initialize(pass));
+    pass.use_rendered_ground();
+    UploadGround(pass, 1, {0, 0, 0});
+    pass.set_evidence_enabled(true);
+    auto chunks = Chunks(1);
+    chunks.push_back(chunks.front());
+    {
+        RebuildGlCalls calls;
+        const auto rebuilt = RebuildAttributed(pass, chunks, 1);
+        EXPECT_EQ(rebuilt.path, Attribution::FoliagePath::Gpu);
+        EXPECT_EQ(rebuilt.admitted_columns, 2u);
+        EXPECT_EQ(rebuilt.dirty_columns, 1u);
+        EXPECT_EQ(calls.surface_uploads, 1u);
+    }
+    EXPECT_EQ(pass.uploaded_input_hash(), LegacyUploadedHash(pass, chunks.size()));
+    chunks.back().origin.x += 1;
+    {
+        RebuildGlCalls calls;
+        const auto rebuilt = RebuildAttributed(pass, chunks, 2);
+        EXPECT_EQ(rebuilt.path, Attribution::FoliagePath::Gpu);
+        EXPECT_EQ(rebuilt.admitted_columns, 2u);
+        EXPECT_EQ(calls.surface_uploads, 2u); // Growth reconstructs the old slot too.
+    }
+    EXPECT_EQ(pass.uploaded_input_hash(), LegacyUploadedHash(pass, chunks.size()));
+    const auto records = GpuRecords();
+    const auto hash = pass.uploaded_input_hash();
+    ScopedPass fresh;
+    ASSERT_NO_FATAL_FAILURE(Initialize(fresh.pass));
+    fresh.pass.use_rendered_ground();
+    UploadGround(fresh.pass, 1, {0, 0, 0});
+    fresh.pass.set_evidence_enabled(true);
+    Rebuild(fresh.pass, chunks, 2);
+    EXPECT_EQ(hash, fresh.pass.uploaded_input_hash());
+    ExpectSame(records, GpuRecords());
+    UploadGround(pass, 1, {0, 0, 0}, 6);
+    const auto edited = RebuildAttributed(pass, chunks, 3);
+    EXPECT_EQ(edited.surface_misses, 2u);
+    EXPECT_EQ(edited.dirty_columns, 2u);
+    const auto edited_records = GpuRecords();
+    const auto edited_hash = pass.uploaded_input_hash();
+    EXPECT_EQ(edited_hash, LegacyUploadedHash(pass, chunks.size()));
+    UploadGround(fresh.pass, 1, {0, 0, 0}, 6);
+    Rebuild(fresh.pass, chunks, 3);
+    EXPECT_EQ(edited_hash, fresh.pass.uploaded_input_hash());
+    ExpectSame(edited_records, GpuRecords());
+}
+
 } // namespace

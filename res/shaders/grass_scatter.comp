@@ -52,6 +52,8 @@ layout(std430, binding = 4) readonly buffer Archetypes { vec4 pal[]; };
 
 layout(std430, binding = 5) buffer GroupCounts { uint group_counts[]; };
 layout(std430, binding = 6) readonly buffer GroupOffsets { uint group_offsets[]; };
+// Logical scatter order remains unchanged; only surface addresses use stable slots.
+layout(std430, binding = 7) readonly buffer SurfaceSlots { uint surface_slots[]; };
 uniform bool u_emit;
 shared uint accepted_prefix[64];
 
@@ -131,7 +133,7 @@ bool candidate(uint cand, uint c, out uint record[9]) {
     float inst_dist = length(vec2(wx - u_camera_xz.x, wz - u_camera_xz.y));
     if (inst_dist > u_fade_end_m) return false;
 
-    vec4 surface = surf[c * uint(u_max_candidates) + cand];
+    vec4 surface = surf[surface_slots[c] * uint(u_max_candidates) + cand];
     if (surface.w < 0.5) return false;
     float height = surface.x;
     float moisture = surface.y;

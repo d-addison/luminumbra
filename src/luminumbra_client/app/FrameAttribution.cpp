@@ -112,6 +112,7 @@ void record_foliage_rebuild(const FoliageRebuild& rebuild,
     total.copied_bytes += rebuild.copied_bytes;
     total.hashed_bytes += rebuild.hashed_bytes;
     total.uploaded_bytes += rebuild.uploaded_bytes;
+    total.dirty_columns += rebuild.dirty_columns;
     total.scratch_bytes += rebuild.scratch_bytes;
     total.backlog = total.backlog || rebuild.backlog;
     frame.rebuild_ms += milliseconds;
@@ -133,7 +134,7 @@ void write_csv_header(std::ostream& out) {
            "rebuild_calls,reason_mask,admitted_columns,surface_misses,deferred_columns,copied_"
            "bytes,"
            "hashed_bytes,uploaded_bytes,scratch_bytes,backlog,path,fallback,"
-           "instance_capacity,generated_count,count_generation\n";
+           "instance_capacity,generated_count,count_generation,dirty_columns\n";
 }
 bool write_csv_row(std::ostream& out,
                    std::uint64_t frame,
@@ -164,6 +165,7 @@ bool write_csv_row(std::ostream& out,
     out << ',';
     if (count_known)
         out << count_generation;
+    out << ',' << foliage.dirty_columns;
     out << '\n';
     return out.good();
 }

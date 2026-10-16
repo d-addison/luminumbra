@@ -78,6 +78,7 @@ struct FoliageRebuild {
     std::uint64_t copied_bytes = 0;
     std::uint64_t hashed_bytes = 0;
     std::uint64_t uploaded_bytes = 0;
+    std::uint64_t dirty_columns = 0;
     // Storage allocated with null glBufferData, separate from transferred bytes.
     std::uint64_t scratch_bytes = 0;
     bool backlog = false;
