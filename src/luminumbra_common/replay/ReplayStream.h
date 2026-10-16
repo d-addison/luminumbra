@@ -228,7 +228,6 @@ private:
     std::uint64_t m_elided_tick = 0;
     std::uint64_t m_elided_digest = 1469598103934665603ULL;
     std::uint64_t m_last_tick = 0;
-    bool m_have_first_hash = false;
 };
 
 // Ordered recording on one existing JobSystem worker. Open is a setup operation;

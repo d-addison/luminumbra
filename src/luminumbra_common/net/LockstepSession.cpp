@@ -317,10 +317,11 @@ bool DecodeHello(const std::vector<std::uint8_t>& frame, HelloMsg& out) {
         return false;
     if (!c.GetString(out.preset_content_hash))
         return false;
+    // The shared decoder permits trailing bytes. Admission validates the exact
+    // frame separately, without changing this decoder's compatibility contract.
     return c.GetU32(out.horizon_start) && c.GetU32(out.horizon_min) && c.GetU32(out.horizon_max) &&
            c.GetU64(out.hash_cadence_ticks) && c.GetU64(out.max_frame_bytes) &&
-           c.GetU64(out.retained_byte_limit) && c.GetU64(out.retained_message_limit) &&
-           c.pos == c.size;
+           c.GetU64(out.retained_byte_limit) && c.GetU64(out.retained_message_limit);
 }
 
 bool DecodeInput(const std::vector<std::uint8_t>& frame, InputMsg& out) {
@@ -1290,6 +1291,10 @@ bool LockstepSession::SendOrQueueFrame(std::vector<std::uint8_t> frame) {
             TransportDisconnected();
             return false;
         }
+        // Bye can arrive during the refusal drain. Its sender no longer needs
+        // this frame, so do not recreate the retry queue just discarded by that drain.
+        if (m_received_bye_tick)
+            return true;
     }
     // Subtract before adding, so neither the capacity check nor accounting overflows.
     if (m_pending_outbound.size() >= kPendingOutboundFrameLimit ||
@@ -1303,8 +1308,7 @@ bool LockstepSession::SendOrQueueFrame(std::vector<std::uint8_t> frame) {
 }
 
 bool LockstepSession::FlushPendingOutbound() {
-    // Bye's sender has stopped. Keep pending sends bounded until final release,
-    // while allowing its already-received inputs and hashes to drain through T.
+    // Bye discards obsolete retries; received inputs and hashes still drain through T.
     while (!m_pending_outbound.empty() && !m_received_bye_tick) {
         const auto& frame = m_pending_outbound.front();
         if (!m_transport->SendFrame(frame)) {
@@ -1586,12 +1590,17 @@ bool LockstepSession::DrainPeerMessages() {
             }
             case MessageType::Bye: {
                 ByeMsg bye;
-                DecodeBye(frame, bye);
+                if (!DecodeBye(frame, bye)) {
+                    ++m_status.rejected_peer_messages;
+                    break;
+                }
                 // End cleanly after draining: a queued hash for an executed tick
                 // still takes precedence over this Bye.
                 if (!m_received_bye_tick) {
                     m_received_bye_tick = bye.tick;
                     m_bye_admission_tick = m_agreed_tick;
+                    m_pending_outbound.clear();
+                    m_pending_outbound_bytes = 0;
                 }
                 break;
             }
@@ -1863,6 +1872,11 @@ bool LockstepSession::OpenReplayRecorder() {
     header.preset_hash =
         std::strtoull(Luminumbra::Replay::Fnv1a64Hex(m_config.preset).c_str(), nullptr, 16);
     header.engine_version = std::string(luminumbra::core::GetEngineVersionString());
+    if (m_hooks.capture_hashes) {
+        HashMsg boot;
+        m_hooks.capture_hashes(0, boot, m_hooks.user);
+        header.start_world_hash = std::move(boot.world_hash);
+    }
     m_replay_open = m_replay->Open(m_dump_path, header);
     m_replay_failed = !m_replay_open;
     if (m_replay_failed) {

@@ -389,7 +389,6 @@ bool BoundedReplayRecorder::Open(const std::string& destination, const ReplayHea
             m_elided_tick = 0;
             m_elided_digest = m_digest;
             m_last_tick = 0;
-            m_have_first_hash = false;
             m_output.clear();
             return true;
         }
@@ -459,11 +458,6 @@ bool BoundedReplayRecorder::RecordTick(std::uint64_t tick,
         for (const auto part : *hashes) {
             PutU32(encoded, static_cast<std::uint32_t>(part.size()));
             encoded.insert(encoded.end(), part.begin(), part.end());
-        }
-        if (!m_have_first_hash) {
-            // Preserve the pre-existing lockstep dump's first-checkpoint header.
-            m_header.start_world_hash = (*hashes)[0];
-            m_have_first_hash = true;
         }
     }
     const bool rotate = !m_segments.empty() &&

@@ -387,7 +387,7 @@ TEST_F(ReplayStreamTest, BoundedRecorderKeepsCompleteReplayEncodingBeforeRotatio
     const auto expected_path = m_path + ".expected";
     auto header = MakeHeader();
     ASSERT_EQ(header.version, 3u);
-    header.start_world_hash = "world";
+    header.start_world_hash = "boot";
     replay::ReplayWriter expected;
     ASSERT_TRUE(expected.Open(expected_path, header));
     replay::BoundedReplayRecorder recorder;
@@ -414,6 +414,7 @@ TEST_F(ReplayStreamTest, BoundedRecorderKeepsCompleteReplayEncodingBeforeRotatio
     }
     const auto& contents = *parsed;
     EXPECT_EQ(contents.header.version, 3u);
+    EXPECT_EQ(contents.header.start_world_hash, "boot");
     EXPECT_EQ(contents.elided_through_tick, 0u);
     {
         std::ifstream actual(m_path, std::ios::binary);
