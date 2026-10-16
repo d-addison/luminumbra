@@ -22,6 +22,7 @@ set(COMMON_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/core/EngineVersion.cpp
     ${CMAKE_CURRENT_LIST_DIR}/core/EventBus.cpp
     ${CMAKE_CURRENT_LIST_DIR}/core/FilesystemPath.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/core/GraphicsPresetClassifier.cpp
     ${CMAKE_CURRENT_LIST_DIR}/core/JobSystem.cpp
     ${CMAKE_CURRENT_LIST_DIR}/core/Log.cpp
     ${CMAKE_CURRENT_LIST_DIR}/core/BoundedConsoleSink.cpp
