@@ -66,8 +66,8 @@ DEFAULT_TIMEOUT_SECONDS = 120.0
 CLEANUP_TIMEOUT_SECONDS = 5.0
 DUMP_SETTLE_SECONDS = 30.0
 DUMP_STABLE_SECONDS = 1.0
-# Allow WER two seconds to create a dump when no candidate or busy writer exists.
-DUMP_EMPTY_GRACE_SECONDS = 2.0
+# Poll for delayed WER creation for five seconds, bounded by the settle deadline.
+DUMP_EMPTY_GRACE_SECONDS = 5.0
 DUMP_COPY_MIN_SECONDS = 30.0
 DUMP_COPY_MAX_SECONDS = 300.0
 DUMP_COPY_BYTES_PER_SECOND = 16 * 1024 * 1024
@@ -233,6 +233,8 @@ class FileStamp(NamedTuple):
     read_complete: bool = True
     # Failed stat entries retain the path without claiming any metadata evidence.
     metadata_complete: bool = True
+    # Settled candidates retain a digest of every byte, including unsampled ranges.
+    full_sha256: str | None = None
 
 
 class FileSnapshot(dict[str, FileStamp]):
@@ -250,6 +252,11 @@ class FileSnapshot(dict[str, FileStamp]):
 def check_baseline_complete(before: dict[str, FileStamp]) -> None:
     if isinstance(before, FileSnapshot) and not before.scan_complete:
         raise OSError("incomplete baseline directory scan; dumps are unattributable")
+
+
+def check_snapshot_complete(snapshot: dict[str, FileStamp]) -> None:
+    if isinstance(snapshot, FileSnapshot) and not snapshot.scan_complete:
+        raise OSError("incomplete dump directory scan; stability and copying are unsafe")
 
 
 class DumpWriterBusyError(OSError):
@@ -559,6 +566,42 @@ def changed_files(before: dict[str, FileStamp], after: dict[str, FileStamp]) -> 
                   (path not in before or file_rewritten(before[path], stamp)))
 
 
+def hash_dump_content(
+    source: Path, expected: FileStamp, deadline: float, clock: Callable[[], float],
+) -> FileStamp:
+    """Bind a snapshot to all source bytes within the existing settle deadline.
+
+    Snapshot sampling and writer probes precede this pass. Use bounded reads and
+    reject metadata changes during hashing; copying must match the resulting hash.
+    """
+    def check_metadata() -> None:
+        info = source.stat()
+        check_settle_deadline(deadline, clock)
+        if (info.st_size, info.st_mtime_ns, info.st_ctime_ns,
+                (info.st_dev, info.st_ino)) != expected[:4]:
+            raise DumpWriterBusyError(f"{source}: dump changed during settle hashing")
+
+    check_settle_deadline(deadline, clock)
+    check_metadata()
+    digest = hashlib.sha256()
+    with source.open("rb", buffering=0) as reader:
+        remaining = expected.size
+        while remaining:
+            check_settle_deadline(deadline, clock)
+            chunk = reader.read(min(remaining, COPY_CHUNK_BYTES))
+            check_settle_deadline(deadline, clock)
+            if not chunk:
+                raise DumpWriterBusyError(f"{source}: dump shortened during settle hashing")
+            digest.update(chunk)
+            remaining -= len(chunk)
+        extra = reader.read(1)
+        check_settle_deadline(deadline, clock)
+        if extra:
+            raise DumpWriterBusyError(f"{source}: dump grew during settle hashing")
+    check_metadata()
+    return expected._replace(full_sha256=digest.hexdigest())
+
+
 @contextmanager
 def open_dump_for_copy(path: Path) -> Iterator[BinaryIO]:
     """Select the platform source transport for the verified copier."""
@@ -608,7 +651,7 @@ def copy_stable_file(
     deadline: float,
     clock: Callable[[], float],
 ) -> None:
-    """Publish only bytes matching a full post-copy source read and metadata.
+    """Publish only bytes matching the settled hash, a source reread and metadata.
 
     An opener must retain the same readable file through both passes. Windows'
     default opener additionally prevents writers from reopening during them.
@@ -660,7 +703,6 @@ def copy_stable_file(
                 check_copy_deadline()
                 if extra:
                     raise DumpWriterBusyError(f"{source}: dump grew during copy")
-
             # Hash the source again after the copy, through the same handle. A
             # path stat also detects replacement of the name on POSIX. Bound
             # this pass to the copied size so a growing file cannot extend it.
@@ -684,6 +726,8 @@ def copy_stable_file(
                         for info in (post_copy, final, source.stat())) or
                     source_digest.digest() != copied_digest.digest()):
                 raise DumpWriterBusyError(f"{source}: dump changed during copy")
+            if copied_digest.hexdigest() != expected.full_sha256:
+                raise DumpWriterBusyError(f"{source}: dump content changed since settling")
             check_copy_deadline()
             os.utime(temporary_path, ns=(initial.st_atime_ns, initial.st_mtime_ns))
             os.replace(temporary_path, target)
@@ -725,6 +769,27 @@ def copy_changed_files(
         after = after if after is not None else snapshot_files(
             root, recursive, skip, errors, baseline=before, deadline=deadline, clock=clock,
         )
+        check_snapshot_complete(after)
+        pending = deque(changed_files(before, after))
+        # Record all direct collectors' full hashes before copying can consume
+        # time beyond the settle deadline. WER settling already supplies them.
+        for source in pending:
+            if after[source].full_sha256 is not None:
+                continue
+            try:
+                after[source] = hash_dump_content(Path(source), after[source], deadline, clock)
+            except DumpWriterBusyError:
+                assert root is not None
+                after = wait_for_dump_settle(
+                    root, before, max(0.0, deadline - clock()), errors, skip,
+                    clock=clock, pause=pause, recursive=recursive,
+                )
+                break
+            except OSError as exc:
+                if errors is None:
+                    raise
+                errors.append(f"{source}: {type(exc).__name__}: {exc}")
+                after[source] = after[source]._replace(read_complete=False)
         pending = deque(changed_files(before, after))
     except OSError as exc:
         if errors is None:
@@ -1456,14 +1521,15 @@ def wait_for_dump_settle(
     Byte sampling alone cannot rule out a middle-only rewrite with deferred file
     timestamps. The writer probe is required on both ends of the stable window.
     Expiry during collection or probing must never be accepted as stability.
-    With no changed files or busy probes, return after a two-second creation
-    grace window (injectable). Busy baseline probes still require settling.
+    With no changed files or busy probes, poll through the creation grace window
+    (injectable), bounded by timeout. Busy baseline probes still require settling.
     An incomplete baseline directory scan fails immediately as unattributable.
     """
     clock = clock or time.monotonic
     pause = pause or time.sleep
     probe = probe or dump_writer_closed
     deadline = clock() + timeout
+    empty_grace = min(empty_grace, timeout)
     previous: dict[str, FileStamp] | None = None
     stable_since: float | None = None
     empty_since: float | None = None
@@ -1481,6 +1547,7 @@ def wait_for_dump_settle(
             snapshot = {}
             closed = False
         else:
+            check_snapshot_complete(snapshot)
             if any(not stamp.read_complete and stamp.metadata_complete for stamp in snapshot.values()):
                 raise OSError("incomplete dump fingerprint coverage")
             closed = True
@@ -1500,7 +1567,15 @@ def wait_for_dump_settle(
             stable_since = now
         elif now - stable_since >= DUMP_STABLE_SECONDS:
             check_settle_deadline(deadline, clock)
-            return snapshot
+            try:
+                for source in current:
+                    snapshot[source] = hash_dump_content(Path(source), snapshot[source], deadline, clock)
+            except DumpWriterBusyError:
+                # A change while recording full content needs a fresh stable window.
+                stable_since = None
+            else:
+                check_settle_deadline(deadline, clock)
+                return snapshot
         previous = current
         next_check = deadline
         if empty_since is not None:

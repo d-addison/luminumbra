@@ -102,13 +102,14 @@ the POSIX fallback uses an advisory file lock, which only detects cooperating
 writers.
 
 If scans find no new or changed dump and all observed baseline writer probes
-succeed, collection returns after a two-second creation grace window rather than
-waiting out the settle deadline. The grace window is injectable for tests.
+succeed, collection keeps scanning through a five-second creation grace window
+before returning an empty result. This named grace window is injectable for tests
+and is bounded by the existing settle deadline; it never extends that deadline.
 Busy baseline writers defer this return, so deferred timestamps and writes
 still require successful probes before collection can finish. A dump appearing
 during the grace window must pass the full stable window.
 
-Snapshots read at most 64 KiB per file and 1 MiB total, sampling the prefix and
+Inventory snapshots read at most 64 KiB per file and 1 MiB total, sampling the prefix and
 suffix. Every regular file retains its size, file times and identity even when
 the read budget is exhausted, so large dumps remain detectable. Fingerprints
 record exact byte ranges and are compared only when coverage matches. A change
@@ -127,11 +128,20 @@ baseline inventory is incomplete, none of its dumps can be attributed to the
 iteration, even if later scans succeed. Collection reports the folder as
 unattributable without waiting for settling or copying from it; the child's
 result and artifacts from other folders remain available.
+An incomplete post-run directory scan also fails collection, including scans
+that returned an empty or partial inventory; it cannot establish stability or
+authorize copying from that folder.
 The settle deadline is checked during enumeration, reads, writer probes and
 before accepting stability. Expiry or any writer probe exception (including an unavailable
 platform API) records a collection error and prevents WER copying for that
 iteration, preserving the child's crash classification and other artifacts.
-Successful settling supplies the snapshot used to select copies.
+Before successful settling returns, each changed candidate is hashed in full with
+SHA-256, using bounded reads within the same settle deadline. This content hash
+accompanies the snapshot used to select copies. Direct core and dump collection
+also records full content hashes before copying. A middle-only rewrite between
+settling and copying must match this hash even when metadata and sampled ranges
+remain unchanged; otherwise collection restarts settling within the original
+deadline and never publishes the mismatched bytes.
 
 Each file copy and its full source verification pass share a separate deadline,
 starting when that copy begins: the source size divided by 16 MiB/s, with a
@@ -142,8 +152,9 @@ the temporary bytes. Reads and verification retain the same source handle,
 including the Windows read-only handle that permits only read sharing.
 Destinations are staged in their target directory with short names of the form
 `.lumdump-<unique suffix>.tmp`, independent of the source basename. The closed
-temporary destination is atomically renamed to the final name only after
-verification, and temporary files are removed on failure.
+temporary destination is atomically renamed to the final name only after its
+full hash matches the settled content and the source verification pass succeeds.
+Temporary files are removed on failure.
 
 Stdlib regressions cover large, multiple, growing and middle-rewritten dumps,
 stale-file coverage changes and deadline expiry. Native WER production and

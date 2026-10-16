@@ -1095,7 +1095,8 @@ class DumpSettleTest(unittest.TestCase):
                     settled = self.settle(probe=rq.windows_dump_writer_closed,
                                           pause=close_writer, errors=errors)
                 self.assertEqual(self.now, 3.0)
-                self.assertEqual(reads, [(path, 2.0), (path, 3.0)])
+                # Two sampled snapshots followed by the full settled-content hash.
+                self.assertEqual(reads, [(path, 2.0), (path, 3.0), (path, 3.0)])
                 self.assertEqual(kernel.CreateFileW.call_count, 4)
                 self.assertEqual(kernel.CloseHandle.call_count, 2)
                 self.assertEqual(errors, [])
@@ -1360,6 +1361,129 @@ class DumpSettleTest(unittest.TestCase):
         self.assertEqual(self.now, 4.5)
         self.assertEqual(settled, before)
         self.assertEqual(probes, [(old, tick) for tick in (0.0, 1.0, 2.0, 3.0, 4.0, 4.5)])
+
+    def test_delayed_wer_creation_after_two_seconds_is_collected(self) -> None:
+        path = self.folder / "delayed.dmp"
+
+        def delayed_creation(seconds):
+            self.pause(seconds)
+            if self.now == 3.0:
+                self.dump(path.name, size=128)
+
+        settled = self.settle(pause=delayed_creation)
+        self.assertEqual(self.now, 4.0)
+        self.assertEqual(rq.changed_files({}, settled), [str(path)])
+        self.assertEqual(settled[str(path)].full_sha256,
+                         hashlib.sha256(path.read_bytes()).hexdigest())
+        copies = rq.copy_changed_files(self.folder, {}, self.root / "collected", after=settled)
+        self.assertEqual(copies, [str(self.root / "collected" / path.name)])
+        self.assertEqual(Path(copies[0]).read_bytes(), path.read_bytes())
+
+    def test_settled_full_hash_covers_bytes_outside_sampling_budget(self) -> None:
+        size = rq.COPY_CHUNK_BYTES + 5
+        path = self.dump("full-hash.dmp", size=size)
+        with mock.patch.object(rq, "SNAPSHOT_TOTAL_READ_BYTES", 0), self.track_reads() as reads:
+            settled = self.settle()
+        self.assertEqual(settled[str(path)].fingerprints, ())
+        self.assertEqual(reads, [(path, 0, rq.COPY_CHUNK_BYTES),
+                                 (path, rq.COPY_CHUNK_BYTES, 5), (path, size, 0)])
+        self.assertEqual(settled[str(path)].full_sha256, rq.sha256_file(path))
+
+    def test_settled_full_hash_cannot_outlast_settle_deadline(self) -> None:
+        self.dump("slow-full-hash.dmp", size=rq.COPY_CHUNK_BYTES + 5)
+
+        def expire_during_full_read():
+            if reads[-1][2] == rq.COPY_CHUNK_BYTES:
+                self.now = 2.0
+
+        with self.track_reads(on_read=expire_during_full_read) as reads:
+            with self.assertRaisesRegex(TimeoutError, "settle deadline"):
+                self.settle(timeout=2.0)
+        self.assertEqual(self.now, 2.0)
+        self.assertEqual(len([read for read in reads if read[2] == rq.COPY_CHUNK_BYTES]), 1)
+
+    def test_change_during_settled_hash_requires_another_stable_window(self) -> None:
+        path = self.dump("changing-full-hash.dmp", size=rq.COPY_CHUNK_BYTES + 5)
+        original = path.stat()
+        changed = False
+
+        def rewrite_during_full_read():
+            nonlocal changed
+            if reads[-1][2] == rq.COPY_CHUNK_BYTES and not changed:
+                with path.open("r+b", buffering=0) as writer:
+                    writer.write(b"changed")
+                os.utime(path, ns=(original.st_atime_ns, original.st_mtime_ns + 2_000_000_000))
+                changed = True
+
+        with self.track_reads(on_read=rewrite_during_full_read) as reads:
+            settled = self.settle()
+        self.assertTrue(changed)
+        self.assertEqual(self.now, 3.0)
+        self.assertEqual(settled[str(path)].full_sha256, rq.sha256_file(path))
+
+    def test_empty_creation_grace_never_extends_settle_deadline(self) -> None:
+        pauses = []
+
+        def pause(seconds):
+            pauses.append(seconds)
+            self.pause(seconds)
+
+        with self.assertRaisesRegex(TimeoutError, "settle deadline"):
+            rq.wait_for_dump_settle(
+                self.folder, {}, 1.5, clock=lambda: self.now, pause=pause,
+                empty_grace=rq.DUMP_EMPTY_GRACE_SECONDS,
+            )
+        self.assertEqual(self.now, 1.5)
+        self.assertEqual(pauses, [1.0, 0.5])
+
+    def test_incomplete_post_run_scan_cannot_settle_or_copy(self) -> None:
+        real_iterdir = Path.iterdir
+        real_walk = os.walk
+        for recursive in (False, True):
+            for partial in (False, True):
+                with self.subTest(recursive=recursive, partial=partial):
+                    self.now = 0.0
+                    path = self.dump("visible.dmp", size=128) if partial else None
+
+                    def failing_iterdir(folder):
+                        yield from real_iterdir(folder)
+                        if folder == self.folder and self.now >= 1.0:
+                            raise PermissionError("post-run enumeration denied")
+
+                    def failing_walk(folder, *, onerror):
+                        yield from real_walk(folder, onerror=onerror)
+                        if folder == self.folder and self.now >= 1.0:
+                            onerror(PermissionError(13, "post-run traversal denied", str(folder)))
+
+                    errors = []
+                    with mock.patch.object(Path, "iterdir", failing_iterdir), \
+                            mock.patch.object(rq.os, "walk", side_effect=failing_walk), \
+                            mock.patch.object(rq, "copy_stable_file", wraps=rq.copy_stable_file) as copy:
+                        with self.assertRaisesRegex(OSError, "incomplete dump directory scan"):
+                            rq.wait_for_dump_settle(
+                                self.folder, {}, 10.0, errors, recursive=recursive,
+                                probe=lambda candidate: True, clock=lambda: self.now, pause=self.pause,
+                            )
+                        self.assertEqual(self.now, 1.0)
+                        self.assertEqual(len(errors), 1)
+                        snapshot = rq.snapshot_files(self.folder, recursive, errors=errors)
+                        self.assertFalse(snapshot.scan_complete)
+                        self.assertEqual(len(snapshot), int(partial))
+                        # Both an explicitly supplied snapshot and a fresh direct
+                        # collection scan must reject an incomplete inventory.
+                        with self.assertRaisesRegex(OSError, "incomplete dump directory scan"):
+                            rq.copy_changed_files(
+                                self.folder, {}, self.root / "collected", recursive=recursive,
+                                after=snapshot,
+                            )
+                        self.assertEqual(rq.copy_changed_files(
+                            self.folder, {}, self.root / "collected", recursive=recursive, errors=errors,
+                        ), [])
+                        self.assertIn("incomplete dump directory scan", errors[-1])
+                        copy.assert_not_called()
+                    self.assertFalse((self.root / "collected").exists())
+                    if path is not None:
+                        path.unlink()
 
     def test_failed_baseline_stat_never_makes_stale_dump_new(self) -> None:
         old = self.dump("old.dmp", size=128)
@@ -2072,6 +2196,91 @@ class DumpCopyTest(unittest.TestCase):
         self.assertEqual(errors, [])
         self.assertEqual(list(self.destination.glob(".*.tmp")), [])
 
+    def test_middle_rewrite_since_settling_requires_a_fresh_full_hash(self) -> None:
+        for recursive in (False, True):
+            with self.subTest(recursive=recursive):
+                self.now = 0.0
+                self.destination = self.root / f"collected-{recursive}"
+                path = self.dump()
+                original_stat = path.stat()
+                real_stat = Path.stat
+                real_fstat = os.fstat
+                descriptors = set()
+                opens = []
+                published = []
+                real_replace = os.replace
+
+                @contextmanager
+                def rewrite_middle(source):
+                    opens.append(self.now)
+                    if len(opens) == 1:
+                        with source.open("r+b", buffering=0) as writer:
+                            writer.seek(64)
+                            writer.write(b"b")
+                        os.utime(source, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
+                    with source.open("rb", buffering=0) as reader:
+                        descriptors.add(reader.fileno())
+                        try:
+                            yield reader
+                        finally:
+                            descriptors.remove(reader.fileno())
+
+                def publish(source, target):
+                    published.append((self.now, Path(source).read_bytes()))
+                    return real_replace(source, target)
+
+                with mock.patch.object(rq, "SNAPSHOT_FILE_READ_BYTES", 8), \
+                        mock.patch.object(Path, "stat", lambda candidate, *args, **kwargs:
+                                          original_stat if candidate == path else
+                                          real_stat(candidate, *args, **kwargs)), \
+                        mock.patch.object(rq.os, "fstat", side_effect=lambda descriptor:
+                                          original_stat if descriptor in descriptors else real_fstat(descriptor)), \
+                        mock.patch.object(rq.os, "replace", side_effect=publish):
+                    after = self.settle()
+                    self.assertEqual(after[str(path)].full_sha256, hashlib.sha256(b"a" * 128).hexdigest())
+                    copies = self.collect(after, opener=rewrite_middle, recursive=recursive)
+                self.assertEqual(opens, [1.0, 2.0])
+                self.assertEqual(copies, [str(self.destination / path.name)])
+                expected = b"a" * 64 + b"b" + b"a" * 63
+                self.assertEqual(published, [(2.0, expected)])
+                self.assertEqual(Path(copies[0]).read_bytes(), expected)
+                self.assertEqual(list(self.destination.glob(".*.tmp")), [])
+
+    def test_middle_rewrite_cannot_publish_after_settle_retry_deadline(self) -> None:
+        path = self.dump()
+        with mock.patch.object(rq, "SNAPSHOT_FILE_READ_BYTES", 8):
+            after = self.settle()
+            expected = after[str(path)]
+            with path.open("r+b", buffering=0) as writer:
+                writer.seek(64)
+                writer.write(b"b")
+            # Conceal every metadata change as on a deferred-timestamp writer.
+            actual = path.stat()
+            concealed = SimpleNamespace(
+                st_size=expected.size, st_mtime_ns=expected.mtime_ns,
+                st_ctime_ns=expected.ctime_ns, st_dev=expected.identity[0], st_ino=expected.identity[1],
+                st_atime_ns=actual.st_atime_ns, st_mode=actual.st_mode,
+            )
+            real_stat = Path.stat
+            real_fstat = os.fstat
+
+            @contextmanager
+            def open_source(source):
+                with source.open("rb", buffering=0) as reader:
+                    descriptor = reader.fileno()
+                    with mock.patch.object(rq.os, "fstat", side_effect=lambda fd:
+                                           concealed if fd == descriptor else real_fstat(fd)):
+                        yield reader
+
+            errors = []
+            with mock.patch.object(Path, "stat", lambda candidate, *args, **kwargs:
+                                   concealed if candidate == path else real_stat(candidate, *args, **kwargs)):
+                self.assertEqual(self.collect(after, opener=open_source, errors=errors, deadline=1.5), [])
+        self.assertEqual(self.now, 1.5)
+        self.assertEqual(len(errors), 1)
+        self.assertIn("copy settle: TimeoutError: dump settle deadline expired", errors[0])
+        self.assertEqual(list(self.destination.iterdir()), [])
+
     def test_post_copy_digest_rejects_torn_bytes_with_unchanged_metadata(self) -> None:
         path = self.dump()
         original_stat = path.stat()
@@ -2298,6 +2507,36 @@ class DumpCopyTest(unittest.TestCase):
                     path, self.destination / path.name, sized[str(path)],
                     opener=rq.open_dump_for_copy, deadline=29.5 + seconds, clock=mock.ANY,
                 )
+
+    def test_direct_collection_hashes_all_candidates_before_slow_copies(self) -> None:
+        paths = [self.dump("first.dmp"), self.dump("second.dmp")]
+        after = rq.snapshot_files(self.folder, True)
+        opens = []
+
+        @contextmanager
+        def slow_reader(source):
+            opens.append(self.now)
+            with source.open("rb", buffering=0) as reader:
+                wrapped = mock.Mock(wraps=reader)
+
+                def read(length):
+                    data = reader.read(length)
+                    if length == 8:
+                        self.now += 0.25
+                    return data
+
+                wrapped.read.side_effect = read
+                yield wrapped
+
+        errors = []
+        with mock.patch.object(rq, "COPY_CHUNK_BYTES", 8):
+            copies = self.collect(after, opener=slow_reader, errors=errors, deadline=1.25, recursive=True)
+        self.assertEqual(opens, [0.0, 8.0])
+        self.assertEqual(self.now, 16.0)
+        self.assertEqual(errors, [])
+        self.assertEqual(copies, [str(self.destination / path.name) for path in paths])
+        self.assertEqual([Path(copy).read_bytes() for copy in copies], [b"a" * 128] * 2)
+        self.assertEqual(list(self.destination.glob(".*.tmp")), [])
 
     def test_long_dump_basename_uses_short_temporary_name(self) -> None:
         path = self.dump("a" * 236 + ".dmp")
@@ -2940,8 +3179,9 @@ class QualificationSafetyTest(HarnessTestCase):
             code, _ = self.qualify(self.safety_args(count=1, folder=folder),
                                    failed_child, self.dump_query(folder))
         self.assertEqual(code, 1)
-        self.assertEqual(now[0], 2.0)
-        self.assertEqual(probe.call_args_list, [mock.call(old)] * 3)
+        self.assertEqual(now[0], rq.DUMP_EMPTY_GRACE_SECONDS)
+        self.assertEqual(probe.call_args_list,
+                         [mock.call(old)] * (int(rq.DUMP_EMPTY_GRACE_SECONDS) + 1))
         entry = self.assert_finalized("failed")["iterations"][0]
         self.assertEqual(entry["status"], "exit:5")
         self.assertEqual(entry["failure_reason"], "exit:5")
