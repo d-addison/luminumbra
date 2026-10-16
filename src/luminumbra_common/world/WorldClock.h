@@ -8,7 +8,7 @@
 namespace Luminumbra::world {
 
 struct WorldCalendar {
-    std::uint32_t dayLengthTicks = 36000;
+    std::uint32_t dayLengthTicks = 216000; // 2 h/day at the canonical 30 Hz
     std::uint32_t daysPerYear = 8;
     bool operator==(const WorldCalendar&) const = default;
 };

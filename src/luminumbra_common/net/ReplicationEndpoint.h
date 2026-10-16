@@ -35,6 +35,7 @@
 #include "LockstepSession.h"  // ILockstepTransport
 #include "ReplicationDelta.h" // MakeSnapshotDelta / ApplySnapshotDelta
 #include "ReplicationProtocol.h"
+#include "luminumbra/core/Types.h"
 
 namespace Luminumbra::Net {
 
@@ -76,7 +77,10 @@ public:
     // aligned with the grid the world actually streams on. Scales as
     // O(E + clients * (2r+1)^2) instead of the mm-radius path's O(clients * E), so a
     // 20+ player world with many entities stays cheap. Takes PRECEDENCE over the mm
-    // radius when enabled. chunk_radius < 0 (default) = chunk AOI off.
+    // radius when enabled. Intentionally defaults to radius 3 chunks (previously disabled)
+    // to bound entity fanout and bandwidth. SetAoiChunkRadius(-1, CHUNK_SIZE_X * 1000)
+    // disables chunk AOI; any chunk_radius < 0 does so. With the default mm radius 0,
+    // this restores the full entity set; SetAoiRadiusMm(0) also clears a custom mm radius.
     void SetAoiChunkRadius(int chunk_radius, std::int64_t chunk_size_mm) {
         m_aoi_chunk_radius = chunk_radius;
         m_aoi_chunk_size_mm = chunk_size_mm;
@@ -86,17 +90,14 @@ public:
     }
 
     //  ack-driven DELTA-vs-acked snapshot compression (the bandwidth win
-    // that makes 20-32+ players affordable). OFF by default -> full snapshots, wire-
-    // identical to  (the canonical baselines hold). When ON, each client is sent
-    // only what CHANGED since the snapshot it last ACKed (MakeSnapshotDelta), tagged
-    // with that baseline's seq (delta_from_seq); the client reconstructs the full set
-    // (ApplySnapshotDelta). Loss-tolerant by construction: the server keeps deltaing
-    // against the last-ACKED baseline until a newer ack arrives, so a dropped delta is
-    // recovered by the next one (no stranded client). Validate over NetworkSim
-    // (injected loss/jitter) -- the single-PC unblocker for this slice.
-    // SCALE PATH: default-OFF keeps the canonical full-snapshot
-    // baselines bit-exact, but the 20-32 player session ENABLES this -- delta-vs-acked
-    // is the bandwidth win that makes scale affordable.
+    // that makes 20-32+ players affordable). Intentionally enabled by default (previously off)
+    // to reduce snapshot bandwidth. SetDeltaCompression(false) restores full snapshots.
+    // When ON, each client is sent only what CHANGED since the snapshot it last ACKed
+    // (MakeSnapshotDelta), tagged with that baseline's seq (delta_from_seq); the client
+    // reconstructs the full set (ApplySnapshotDelta). Loss-tolerant by construction: the server
+    // keeps deltaing against the last-ACKED baseline until a newer ack arrives, so a dropped delta
+    // is recovered by the next one (no stranded client). Validate over NetworkSim (injected
+    // loss/jitter) -- the single-PC unblocker for this slice.
     void SetDeltaCompression(bool on) {
         m_delta = on;
     }
@@ -104,7 +105,7 @@ public:
         return m_delta;
     }
 
-    // OUTBOUND BACKPRESSURE POLICY. Default-OFF (like delta + AOI):
+    // OUTBOUND BACKPRESSURE POLICY. Default-OFF:
     // while off, BroadcastSnapshot is byte-identical to the pre-policy send path (the canonical
     // baselines + every existing backpressure/soak test hold, and ThrottledFrames stays 0).
     // When ON, a client whose per-client outbound queue crosses the high-water mark is
@@ -219,7 +220,9 @@ private:
         int over_hwm_streak = 0;
     };
     std::map<std::uint32_t, ClientLink> m_clients; // ordered -> deterministic broadcast order
-    bool m_delta = false;               // delta-vs-acked compression (off = full snapshots)
+    // Intentional bandwidth default: previously false; SetDeltaCompression(false)
+    // restores full snapshots.
+    bool m_delta = true;
     bool m_backpressure_policy = false; //  policy default-OFF (byte-identical fast path)
     static constexpr std::size_t kServerHistoryCap = 256; // bound per-client baseline retention
     static constexpr std::size_t kOutboundQueueCap =
@@ -236,9 +239,11 @@ private:
     static constexpr int kDisconnectDeadlineStreak =
         16; // backed-up broadcasts w/o draining -> disconnect
     std::vector<std::uint32_t> m_disconnected_this_broadcast; //  drops from the last broadcast
-    std::int64_t m_aoi_radius_mm = 0;     // 0 = mm-radius AOI disabled (full set)
-    int m_aoi_chunk_radius = -1;          // < 0 = chunk AOI disabled
-    std::int64_t m_aoi_chunk_size_mm = 0; // chunk edge length (mm) for chunk AOI
+    std::int64_t m_aoi_radius_mm = 0; // 0 = mm-radius AOI disabled (full set)
+    // Intentional fanout default: previously -1 (disabled). Restore with
+    // SetAoiChunkRadius(-1, CHUNK_SIZE_X * 1000); SetAoiRadiusMm(0) clears any mm AOI.
+    int m_aoi_chunk_radius = 3;
+    std::int64_t m_aoi_chunk_size_mm = CHUNK_SIZE_X * 1000; // chunk edge length (mm) for chunk AOI
     std::size_t m_last_broadcast_total_bytes = 0;
     std::size_t m_last_broadcast_max_client_bytes = 0;
     //  polish: PENDING despawns. PruneDisconnectedClients enqueues the

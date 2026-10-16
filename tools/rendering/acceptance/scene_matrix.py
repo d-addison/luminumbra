@@ -16,6 +16,7 @@ as world_seed_implied and never emitted as a flag.
 import argparse
 import json
 import math
+import os
 import re
 import shlex
 import sys
@@ -41,7 +42,7 @@ SCENE_KEYS = ("camera", "time_of_day", "moon", "weather", "clouds")
 VARIANT_KEYS = ("id", "weather", "layers", "exclude_layers")
 POSE_SOURCES = ("explicit", "recorded-evidence")
 IMPLIED_SEED = 424242
-CLIENT_BINARY = "luminumbra_client_app"
+CLIENT_BINARY = "luminumbra_client_app" + (".exe" if os.name == "nt" else "")
 VALIDATOR = "tools/perf/validate_render_capture.py"
 NAME_RE = re.compile(r"^[a-z0-9_-]+$")
 EXIT_INVALID = 1
@@ -244,6 +245,8 @@ def _fmt(value):
 
 
 def _join(args):
+    # commands.txt is a Bash recipe, including on the hosted Windows job.
+    # Forward slashes keep native Windows paths intact in that shell.
     return " ".join(shlex.quote(str(arg)) for arg in args)
 
 
@@ -252,7 +255,7 @@ def command_blocks(entry, preset, scene_path, bench_path, build_dir):
     camera = entry["scene"]["scene"]["camera"]
     name = entry["name"]
     base = [
-        f"{build_dir}/bin/{CLIENT_BINARY}",
+        (Path(build_dir) / "bin" / CLIENT_BINARY).as_posix(),
         "--auto-create-world",
         "--auto-enter-world",
         "--world-preset",
@@ -266,7 +269,7 @@ def command_blocks(entry, preset, scene_path, bench_path, build_dir):
         base += ["--isolation-layers", ",".join(entry["layers"])]
     benchmark = base + ["--render-benchmark", bench_path]
     validator = [
-        "python3",
+        Path(sys.executable).as_posix(),
         VALIDATOR,
         bench_path,
         "--position",
@@ -314,7 +317,7 @@ def emit(data, out_dir, build_dir, allow_unresolved):
         config = scene_config(entry, str(screenshot))
         scene_path.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
         bench_path = out / f"{name}.render_benchmark.json"
-        lines.extend(command_blocks(entry, preset, str(scene_path), str(bench_path), build_dir))
+        lines.extend(command_blocks(entry, preset, scene_path.as_posix(), bench_path.as_posix(), build_dir))
         lines.append("")
     (out / "commands.txt").write_text("\n".join(lines), encoding="utf-8")
     print(f"wrote {len(entries)} scene configs and commands.txt to {out}")
