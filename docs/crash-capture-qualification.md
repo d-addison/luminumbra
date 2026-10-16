@@ -104,8 +104,12 @@ Snapshots read at most 64 KiB per file and 1 MiB total, sampling the prefix and
 suffix. Every regular file retains its size, file times and identity even when
 the read budget is exhausted, so large dumps remain detectable. Fingerprints
 record exact byte ranges and are compared only when coverage matches. A change
-in coverage alone does not make stale evidence eligible for copying. The settle
-deadline is checked during enumeration, reads, writer probes and before accepting
+in coverage alone does not make stale evidence eligible for copying. Reserved
+ranges, including reused baseline samples, consume the read budget even if an
+open or read fails. Failed or short reads are recorded and make that file
+ineligible for copying; incomplete fingerprint coverage aborts WER settling
+without retrying into apparent stability. The settle deadline is checked during
+enumeration, reads, writer probes and before accepting
 stability. Expiry or any writer probe exception (including an unavailable
 platform API) records a collection error and prevents WER copying for that
 iteration, preserving the child's crash classification and other artifacts.

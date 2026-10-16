@@ -1339,7 +1339,7 @@ class DumpSettleTest(unittest.TestCase):
                         ), [])
                     copy.assert_not_called()
 
-    def test_read_error_changes_coverage_and_collects_conservatively(self) -> None:
+    def test_read_error_keeps_lost_coverage_ineligible_for_copying(self) -> None:
         path = self.dump("old.dmp", size=128)
         other = self.dump("other.dmp", size=128)
         for recursive in (False, True):
@@ -1353,12 +1353,158 @@ class DumpSettleTest(unittest.TestCase):
                 sampled = next(source for source, stamp in before.items() if stamp.fingerprints)
                 self.assertTrue(before[sampled].fingerprints)
                 self.assertFalse(after[sampled].fingerprints)
+                self.assertFalse(after[sampled].read_complete)
                 self.assertEqual(len(errors), 1)
                 self.assertIn("read denied", errors[0])
-                self.assertEqual(rq.changed_files(before, after), [sampled])
+                self.assertEqual(rq.changed_files(before, after), [])
+                with mock.patch.object(rq.shutil, "copy2") as copy:
+                    self.assertEqual(rq.copy_changed_files(
+                        self.folder, before, self.root / "collected", recursive=recursive,
+                        after=after,
+                    ), [])
+                copy.assert_not_called()
                 with mock.patch.object(rq, "SNAPSHOT_TOTAL_READ_BYTES", 0):
                     unsampled = self.ordered_snapshot([path], recursive)
                 self.assertEqual(rq.changed_files(unsampled, unsampled), [])
+
+    def test_failed_baseline_reads_reserve_budget_before_new_files(self) -> None:
+        old = self.dump("z-old.dmp", size=128)
+        real_open = Path.open
+        for recursive in (False, True):
+            with self.subTest(recursive=recursive), \
+                    mock.patch.object(rq, "SNAPSHOT_TOTAL_READ_BYTES", 96), \
+                    mock.patch.object(rq, "SNAPSHOT_FILE_READ_BYTES", 64):
+                before = rq.snapshot_files(self.folder, recursive)
+                new = self.dump("a-new.dmp", size=128)
+                for failure in ("open", "read", "short"):
+                    with self.subTest(failure=failure), self.track_reads() as reads:
+                        tracked_open = Path.open
+
+                        @contextmanager
+                        def failing_open(path, *args, **kwargs):
+                            if path != old:
+                                with tracked_open(path, *args, **kwargs) as handle:
+                                    yield handle
+                                return
+                            if failure == "open":
+                                raise PermissionError("read denied")
+                            with real_open(path, *args, **kwargs) as handle:
+                                wrapped = mock.Mock(wraps=handle)
+                                if failure == "read":
+                                    wrapped.read.side_effect = OSError("read failed")
+                                else:
+                                    wrapped.read.return_value = b""
+                                yield wrapped
+
+                        errors: list[str] = []
+                        with mock.patch.object(Path, "open", failing_open):
+                            after = rq.snapshot_files(self.folder, recursive,
+                                                      baseline=before, errors=errors)
+                    self.assertEqual(len(errors), 1)
+                    self.assertFalse(after[str(old)].read_complete)
+                    self.assertEqual(reads, [(new, 0, 16), (new, 112, 16)])
+                    self.assertEqual(sum(length for _, length, _ in before[str(old)].fingerprints) +
+                                     sum(length for _, _, length in reads), 96)
+                    self.assertEqual(rq.changed_files(before, after), [str(new)])
+                new.unlink()
+
+    def test_read_failure_excludes_new_and_metadata_changed_files(self) -> None:
+        old = self.dump("old.dmp", size=128)
+        for recursive in (False, True):
+            with self.subTest(recursive=recursive):
+                before = rq.snapshot_files(self.folder, recursive)
+                with old.open("ab") as handle:
+                    handle.write(b"more")
+                new = self.dump("new.dmp", size=128)
+                errors: list[str] = []
+                with mock.patch.object(Path, "open", side_effect=PermissionError("read denied")):
+                    after = rq.snapshot_files(self.folder, recursive, baseline=before, errors=errors)
+                    with mock.patch.object(rq.shutil, "copy2") as copy:
+                        self.assertEqual(rq.copy_changed_files(
+                            self.folder, before, self.root / "collected", recursive=recursive,
+                            errors=[],
+                        ), [])
+                    copy.assert_not_called()
+                self.assertEqual(len(errors), 2)
+                self.assertNotEqual(before[str(old)].size, after[str(old)].size)
+                self.assertTrue(all(not stamp.read_complete for stamp in after.values()))
+                self.assertEqual(rq.changed_files(before, after), [])
+                self.assertEqual(rq.changed_files({}, after), [])
+                # A readable follow-up cannot turn an unknown baseline into evidence.
+                recovered = rq.snapshot_files(self.folder, recursive, baseline=after)
+                self.assertEqual(rq.changed_files(after, recovered), [])
+                new.unlink()
+
+    def test_unequal_sample_ranges_do_not_establish_rewrite(self) -> None:
+        path = self.dump("old.dmp", size=128)
+        before = rq.snapshot_files(self.folder, False)
+        stamp = before[str(path)]
+        self.assertEqual(len(stamp.fingerprints), 2)
+        after = {str(path): stamp._replace(fingerprints=stamp.fingerprints[:1])}
+        self.assertTrue(after[str(path)].read_complete)
+        self.assertEqual(rq.changed_files(before, after), [])
+        with mock.patch.object(rq.shutil, "copy2") as copy:
+            self.assertEqual(rq.copy_changed_files(
+                self.folder, before, self.root / "collected", after=after,
+            ), [])
+        copy.assert_not_called()
+
+    def test_short_fingerprint_read_is_reported_and_never_settles(self) -> None:
+        path = self.dump("short.dmp", size=128)
+        real_open = Path.open
+
+        @contextmanager
+        def short_read(candidate, *args, **kwargs):
+            with real_open(candidate, *args, **kwargs) as handle:
+                wrapped = mock.Mock(wraps=handle)
+                wrapped.read.side_effect = [handle.read(64), b""]
+                yield wrapped
+
+        errors: list[str] = []
+        with mock.patch.object(Path, "open", short_read):
+            after = rq.snapshot_files(self.folder, False, errors=errors)
+            with self.assertRaisesRegex(OSError, "short dump fingerprint read"):
+                rq.snapshot_files(self.folder, False)
+            probe = mock.Mock(return_value=True)
+            with self.assertRaisesRegex(OSError, "incomplete dump fingerprint coverage"):
+                self.settle(probe=probe, errors=errors)
+        self.assertEqual(len(errors), 2)
+        self.assertTrue(all("short dump fingerprint read" in error for error in errors))
+        self.assertFalse(after[str(path)].read_complete)
+        self.assertFalse(after[str(path)].fingerprints)
+        self.assertEqual(rq.changed_files({}, after), [])
+        probe.assert_not_called()
+        self.assertEqual(self.now, 0.0)
+
+    def test_failed_read_cannot_recover_into_settled_evidence(self) -> None:
+        old = self.dump("old.dmp", size=128)
+        before = rq.snapshot_files(self.folder, False)
+        self.dump("new.dmp", size=128)
+        real_open = Path.open
+        attempts = 0
+
+        def transient_failure(path, *args, **kwargs):
+            nonlocal attempts
+            if path == old:
+                attempts += 1
+                if attempts == 1:
+                    raise PermissionError("read denied")
+            return real_open(path, *args, **kwargs)
+
+        errors: list[str] = []
+        probe = mock.Mock(return_value=True)
+        with mock.patch.object(Path, "open", transient_failure):
+            with self.assertRaisesRegex(OSError, "incomplete dump fingerprint coverage"):
+                self.settle(before=before, probe=probe, errors=errors)
+        self.assertEqual(len(errors), 1)
+        self.assertIn("read denied", errors[0])
+        self.assertEqual(attempts, 1)
+        self.assertEqual(self.now, 0.0)
+        probe.assert_not_called()
+        failed_baseline = {str(old): before[str(old)]._replace(read_complete=False, fingerprints=())}
+        with self.assertRaisesRegex(OSError, "incomplete baseline dump fingerprint coverage"):
+            self.settle(before=failed_baseline, probe=probe)
+        probe.assert_not_called()
 
     def test_deadline_expiry_during_fingerprint_read_stops_collection(self) -> None:
         self.dump("slow.dmp")

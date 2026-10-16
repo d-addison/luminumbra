@@ -223,6 +223,8 @@ class FileStamp(NamedTuple):
     identity: tuple[int, int]
     # At most two range digests per file; raw sample bytes are never retained.
     fingerprints: tuple[tuple[int, int, str], ...]
+    # Budget exhaustion is valid empty coverage; a failed read is not.
+    read_complete: bool = True
 
 
 def check_settle_deadline(deadline: float | None, clock: Callable[[], float]) -> None:
@@ -322,20 +324,24 @@ def snapshot_files(
                 ranges.append((stamp.size - (allowance - prefix), allowance - prefix))
         fingerprints: list[tuple[int, int, str]] = []
         if ranges:
+            # Reserve all ranges, including reused baseline samples, even if
+            # opening or reading fails before any bytes can be fingerprinted.
+            remaining -= sum(length for _offset, length in ranges)
             try:
                 with Path(source).open("rb", buffering=0) as handle:
                     for offset, length in ranges:
                         check_settle_deadline(deadline, clock)
                         handle.seek(offset)
-                        # Charge requested bytes even if the read fails or is short.
                         # Each transient chunk is at most SNAPSHOT_FILE_READ_BYTES.
-                        remaining -= length
                         chunk = handle.read(length)
                         check_settle_deadline(deadline, clock)
-                        fingerprints.append((offset, len(chunk), hashlib.sha256(chunk).hexdigest()))
+                        if len(chunk) != length:
+                            raise OSError(errno.EIO, "short dump fingerprint read")
+                        fingerprints.append((offset, length, hashlib.sha256(chunk).hexdigest()))
             except OSError as exc:
                 inspection_error(Path(source), exc)
                 fingerprints = []
+                stamp = stamp._replace(read_complete=False)
         result[source] = stamp._replace(fingerprints=tuple(fingerprints))
     check_settle_deadline(deadline, clock)
     return result
@@ -474,17 +480,22 @@ def core_collection_skip(
 
 
 def file_rewritten(before: FileStamp, after: FileStamp) -> bool:
+    if not before.read_complete or not after.read_complete:
+        return False
     if before[:4] != after[:4]:
         return True
-    # Equal coverage compares digests; changed coverage (e.g. a read error) fails
-    # closed. Two empty samples rely on metadata; the settle writer probe covers
-    # deferred-timestamp rewrites when there is no sampling budget.
-    return before.fingerprints != after.fingerprints
+    # Only equal byte-range coverage can establish a content change. Two empty
+    # samples rely on metadata; the settle writer probe covers deferred-timestamp
+    # rewrites when there is no sampling budget.
+    before_ranges = [(offset, length) for offset, length, _digest in before.fingerprints]
+    after_ranges = [(offset, length) for offset, length, _digest in after.fingerprints]
+    return before_ranges == after_ranges and before.fingerprints != after.fingerprints
 
 
 def changed_files(before: dict[str, FileStamp], after: dict[str, FileStamp]) -> list[str]:
     return sorted(path for path, stamp in after.items()
-                  if path not in before or file_rewritten(before[path], stamp))
+                  if stamp.read_complete and
+                  (path not in before or file_rewritten(before[path], stamp)))
 
 
 def copy_changed_files(
@@ -1197,10 +1208,14 @@ def wait_for_dump_settle(
     deadline = clock() + timeout
     previous: dict[str, FileStamp] | None = None
     stable_since: float | None = None
+    if any(not stamp.read_complete for stamp in before.values()):
+        raise OSError("incomplete baseline dump fingerprint coverage")
     while True:
         check_settle_deadline(deadline, clock)
         snapshot = snapshot_files(folder, False, skip, errors, baseline=before,
                                   deadline=deadline, clock=clock)
+        if any(not stamp.read_complete for stamp in snapshot.values()):
+            raise OSError("incomplete dump fingerprint coverage")
         current = {path: snapshot[path] for path in changed_files(before, snapshot)}
         closed = bool(current)
         # Probe all observed dumps: an old file may still be open with its file
