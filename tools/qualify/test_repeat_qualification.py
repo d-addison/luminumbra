@@ -1409,10 +1409,9 @@ class DumpSettleTest(unittest.TestCase):
         self.assertEqual(self.now, 1.0 + rq.DUMP_COPY_MIN_SECONDS)
         self.assertEqual(len([read for read in reads if read[2] == rq.COPY_CHUNK_BYTES]), 1)
 
-    def test_large_dump_hash_has_a_size_scaled_budget_in_both_collectors(self) -> None:
+    def test_large_dump_hash_is_bounded_by_settle_deadline_in_both_collectors(self) -> None:
         size = 512 * 1024 * 1024
         path = self.dump("large.dmp", size=size)
-        expected_digest = rq.sha256_file(path)
         for wer in (False, True):
             with self.subTest(wer=wer):
                 self.now = 0.0
@@ -1423,45 +1422,65 @@ class DumpSettleTest(unittest.TestCase):
                     _source, _offset, length = reads[-1]
                     if length == rq.COPY_CHUNK_BYTES and hashed < size:
                         hashed += length
-                        # Slightly faster than the throughput floor, but the full
-                        # hash alone still takes longer than the polling window.
+                        # The size-scaled budget permits this throughput, but
+                        # the original settle deadline expires first.
                         self.now += length / (rq.DUMP_COPY_BYTES_PER_SECOND + 1024 * 1024)
 
                 errors = []
                 with self.track_reads(on_read=advance_hash_clock) as reads:
-                    copies = self.collect(wer=wer, errors=errors)
-                self.assertEqual(hashed, size)
-                self.assertGreater(self.now, rq.DUMP_SETTLE_SECONDS)
-                self.assertLess(self.now, size / rq.DUMP_COPY_BYTES_PER_SECOND)
-                self.assertEqual(errors, [])
-                self.assertEqual(copies, [str(self.root / "collected" / path.name)])
-                self.assertEqual(rq.sha256_file(Path(copies[0])), expected_digest)
-                Path(copies[0]).unlink()
+                    if wer:
+                        with self.assertRaisesRegex(TimeoutError, "hash deadline"):
+                            self.collect(wer=wer, errors=errors)
+                    else:
+                        self.assertEqual(self.collect(wer=wer, errors=errors), [])
+                        self.assertEqual(len(errors), 1)
+                        self.assertIn(f"{path}: TimeoutError: dump hash deadline expired", errors[0])
+                self.assertGreater(hashed, 0)
+                self.assertLess(hashed, size)
+                self.assertGreaterEqual(self.now, rq.DUMP_SETTLE_SECONDS)
+                self.assertLess(self.now, rq.DUMP_SETTLE_SECONDS + 1.0)
+                self.assertLess(self.now, rq.dump_io_budget(size))
+                self.assertFalse((self.root / "collected" / path.name).exists())
 
-    def test_multiple_dump_hashes_each_have_their_own_budget(self) -> None:
-        paths = [self.dump(name, size=rq.COPY_CHUNK_BYTES)
-                 for name in ("first.dmp", "second.dmp")]
+    def test_multiple_large_dump_hashes_share_the_original_settle_deadline(self) -> None:
+        size = 48 * rq.COPY_CHUNK_BYTES
+        paths = sorted(self.dump(name, size=size)
+                       for name in ("third.dmp", "second.dmp", "first.dmp"))
         for wer in (False, True):
             with self.subTest(wer=wer):
                 self.now = 0.0
-                hashed = set()
+                hashed = dict.fromkeys(paths, 0)
+                hash_order = []
 
                 def advance_hash_clock():
                     source, _offset, length = reads[-1]
-                    if length == rq.COPY_CHUNK_BYTES and source not in hashed:
-                        hashed.add(source)
-                        self.now += 20.0
+                    if length == rq.COPY_CHUNK_BYTES and self.now < rq.DUMP_SETTLE_SECONDS:
+                        if not hashed[source]:
+                            hash_order.append(source)
+                        hashed[source] += length
+                        self.now += 0.25
 
                 errors = []
                 with self.track_reads(on_read=advance_hash_clock) as reads:
-                    copies = self.collect(wer=wer, errors=errors)
-                self.assertEqual(hashed, set(paths))
-                self.assertEqual(self.now, 41.0 if wer else 40.0)
-                self.assertEqual(errors, [])
-                self.assertEqual(copies, [str(self.root / "collected" / path.name) for path in paths])
-                for source, target in zip(paths, copies):
-                    self.assertEqual(rq.sha256_file(Path(target)), rq.sha256_file(source))
-                    Path(target).unlink()
+                    if wer:
+                        with self.assertRaisesRegex(TimeoutError, "hash deadline"):
+                            self.collect(wer=wer, errors=errors)
+                        self.assertFalse((self.root / "collected").exists())
+                    else:
+                        copies = self.collect(wer=wer, errors=errors)
+                        self.assertEqual(len(errors), 1)
+                        self.assertIn(f"{paths[-1]}: TimeoutError: dump hash deadline expired", errors[0])
+                        self.assertEqual(copies, [str(self.root / "collected" / path.name)
+                                                  for path in paths[:2]])
+                        for source, target in zip(paths, copies):
+                            self.assertEqual(rq.sha256_file(Path(target)), rq.sha256_file(source))
+                            Path(target).unlink()
+                        (self.root / "collected").rmdir()
+                self.assertEqual(hash_order, paths)
+                self.assertEqual([hashed[path] for path in paths[:2]], [size, size])
+                self.assertEqual(hashed[paths[-1]], (20 if wer else 24) * rq.COPY_CHUNK_BYTES)
+                self.assertEqual(self.now, rq.DUMP_SETTLE_SECONDS)
+                self.assertFalse((self.root / "collected" / paths[-1].name).exists())
 
     def test_stalled_hash_is_refused_in_both_collectors(self) -> None:
         path = self.dump("stalled.dmp", size=rq.COPY_CHUNK_BYTES + 5)
@@ -1501,7 +1520,9 @@ class DumpSettleTest(unittest.TestCase):
                                 writer.write(b"changed")
                             os.utime(path, ns=(original.st_atime_ns,
                                                original.st_mtime_ns + 2_000_000_000))
-                            self.now += rq.DUMP_SETTLE_SECONDS - 0.5
+                            # Detect the change before expiry, leaving too little
+                            # time for another complete stable window.
+                            self.now = rq.DUMP_SETTLE_SECONDS - 0.5
                             changed = True
 
                     errors = []
@@ -1549,6 +1570,53 @@ class DumpSettleTest(unittest.TestCase):
             )
         self.assertEqual(self.now, 1.5)
         self.assertEqual(pauses, [1.0, 0.5])
+
+    def test_unknown_metadata_defers_empty_grace_until_inspection_succeeds(self) -> None:
+        path = self.dump("unreadable.dmp", size=128)
+        real_stat = Path.stat
+
+        def temporarily_denied(candidate, *args, **kwargs):
+            if candidate == path and self.now < rq.DUMP_EMPTY_GRACE_SECONDS + 1.0:
+                raise PermissionError("dump inspection temporarily denied")
+            return real_stat(candidate, *args, **kwargs)
+
+        for known_baseline in (False, True):
+            with self.subTest(known_baseline=known_baseline):
+                self.now = 0.0
+                before = rq.snapshot_files(self.folder, False) if known_baseline else {}
+                with path.open("ab") as writer:
+                    writer.write(b"rewritten")
+                errors = []
+                with mock.patch.object(Path, "stat", temporarily_denied):
+                    settled = self.settle(before=before, errors=errors)
+                self.assertEqual(self.now, rq.DUMP_EMPTY_GRACE_SECONDS + 2.0)
+                self.assertEqual(len(errors), int(rq.DUMP_EMPTY_GRACE_SECONDS) + 1)
+                self.assertTrue(all("dump inspection temporarily denied" in error for error in errors))
+                self.assertEqual(rq.changed_files(before, settled), [str(path)])
+                self.assertEqual(settled[str(path)].full_sha256, rq.sha256_file(path))
+                copies = rq.copy_changed_files(
+                    self.folder, before, self.root / "collected", after=settled,
+                    clock=lambda: self.now, pause=self.pause,
+                )
+                self.assertEqual(copies, [str(self.root / "collected" / path.name)])
+                self.assertEqual(Path(copies[0]).read_bytes(), path.read_bytes())
+
+    def test_unknown_metadata_defers_empty_grace_until_settle_deadline(self) -> None:
+        path = self.dump("unreadable.dmp", size=128)
+        real_stat = Path.stat
+
+        def denied(candidate, *args, **kwargs):
+            if candidate == path:
+                raise PermissionError("dump inspection denied")
+            return real_stat(candidate, *args, **kwargs)
+
+        errors = []
+        with mock.patch.object(Path, "stat", denied):
+            with self.assertRaisesRegex(TimeoutError, "settle deadline"):
+                self.settle(errors=errors)
+        self.assertEqual(self.now, 10.0)
+        self.assertEqual(len(errors), 10)
+        self.assertTrue(all("dump inspection denied" in error for error in errors))
 
     def test_incomplete_post_run_scan_cannot_settle_or_copy(self) -> None:
         real_iterdir = Path.iterdir
@@ -1966,10 +2034,45 @@ class DumpSettleTest(unittest.TestCase):
                 self.assertTrue(all(not stamp.read_complete for stamp in after.values()))
                 self.assertEqual(rq.changed_files(before, after), [])
                 self.assertEqual(rq.changed_files({}, after), [])
-                # A readable follow-up cannot turn an unknown baseline into evidence.
+                # Incomplete baseline reads retain readable candidates for full
+                # verification instead of silently claiming they are unchanged.
                 recovered = rq.snapshot_files(self.folder, recursive, baseline=after)
-                self.assertEqual(rq.changed_files(after, recovered), [])
+                self.assertEqual(rq.changed_files(after, recovered), sorted(map(str, (old, new))))
                 new.unlink()
+
+    def test_failed_baseline_read_keeps_recovered_core_as_candidate(self) -> None:
+        path = self.dump("core.123", size=128)
+        real_open = Path.open
+
+        def denied(candidate, *args, **kwargs):
+            if candidate == path:
+                raise PermissionError("baseline read denied")
+            return real_open(candidate, *args, **kwargs)
+
+        for recursive in (False, True):
+            for rewrite in (False, True):
+                with self.subTest(recursive=recursive, rewrite=rewrite):
+                    errors = []
+                    with mock.patch.object(Path, "open", denied):
+                        before = rq.snapshot_files(self.folder, recursive, errors=errors)
+                    self.assertEqual(len(errors), 1)
+                    self.assertIn("baseline read denied", errors[0])
+                    self.assertTrue(before[str(path)].metadata_complete)
+                    self.assertFalse(before[str(path)].read_complete)
+                    if rewrite:
+                        with path.open("ab") as writer:
+                            writer.write(b"rewritten core")
+                    after = rq.snapshot_files(self.folder, recursive, baseline=before)
+                    self.assertEqual(before[str(path)].size != after[str(path)].size, rewrite)
+                    self.assertTrue(after[str(path)].read_complete)
+                    self.assertEqual(rq.changed_files(before, after), [str(path)])
+                    copies = rq.copy_changed_files(
+                        self.folder, before, self.root / "collected", recursive=recursive,
+                        errors=errors, clock=lambda: self.now, pause=self.pause,
+                    )
+                    self.assertEqual(len(errors), 1)
+                    self.assertEqual(copies, [str(self.root / "collected" / path.name)])
+                    self.assertEqual(rq.sha256_file(Path(copies[0])), rq.sha256_file(path))
 
     def test_unequal_sample_ranges_do_not_establish_rewrite(self) -> None:
         path = self.dump("old.dmp", size=128)

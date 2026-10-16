@@ -117,12 +117,16 @@ in coverage alone does not make stale evidence eligible for copying. Reserved
 ranges, including reused baseline samples, consume the read budget even if an
 open or read fails. Failed or short reads are recorded and make that file
 ineligible for copying; incomplete fingerprint coverage aborts WER settling
-without retrying into apparent stability. A failed baseline `stat` retains an
-unknown entry for the observed path; later successful inspection cannot make
-that path appear newly created, but treats it as changed because replacement
-cannot be ruled out. Entries whose metadata remains unknown are ineligible for
-copying and do not prevent collection of other readable dumps. Known unchanged
-files remain excluded. Snapshots also record whether directory inspection and
+without retrying into apparent stability. Direct collection keeps files with
+failed baseline reads as candidates once readable, even if their metadata is
+unchanged, and requires full content verification before copying. A failed
+baseline `stat` retains an unknown entry for the observed path; later successful
+inspection cannot make that path appear newly created, but treats it as changed
+because replacement cannot be ruled out. Entries whose metadata remains unknown
+are ineligible for copying and do not prevent collection of other readable dumps.
+Known unchanged files remain excluded. When there are no readable changed candidates, unknown
+metadata resets the empty creation grace until inspection succeeds or the
+settle deadline expires. Snapshots also record whether directory inspection and
 enumeration completed, including recursive traversal for cores. If a folder's
 baseline inventory is incomplete, none of its dumps can be attributed to the
 iteration, even if later scans succeed. Collection reports the folder as
@@ -136,12 +140,15 @@ before accepting stability. Expiry or any writer probe exception (including an u
 platform API) records a collection error and prevents WER copying for that
 iteration, preserving the child's crash classification and other artifacts.
 Before successful settling returns, each changed candidate is hashed in full with
-SHA-256, using bounded reads within the same settle deadline. This content hash
-accompanies the snapshot used to select copies. Direct core and dump collection
-also records full content hashes before copying. A middle-only rewrite between
-settling and copying must match this hash even when metadata and sampled ranges
-remain unchanged; otherwise collection restarts settling within the original
-deadline and never publishes the mismatched bytes.
+SHA-256, using bounded reads. Each hash is limited by the earlier of the original
+settle deadline and its size-scaled I/O budget (size divided by 16 MiB/s, with a
+30-second floor and a five-minute cap). All candidates share the settle deadline;
+starting another hash never extends it. This content hash accompanies the
+snapshot used to select copies. Direct core and dump collection also records
+full content hashes before copying, bounded by its settle deadline. A middle-only
+rewrite between settling and copying must match this hash even when metadata and
+sampled ranges remain unchanged; otherwise collection restarts settling within
+the original deadline and never publishes the mismatched bytes.
 
 Each file copy and its full source verification pass share a separate deadline,
 starting when that copy begins: the source size divided by 16 MiB/s, with a

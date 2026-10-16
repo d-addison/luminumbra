@@ -548,9 +548,11 @@ def file_rewritten(before: FileStamp, after: FileStamp) -> bool:
         return False
     if not before.metadata_complete:
         return True
-    if not before.read_complete:
-        return False
     if before[:4] != after[:4]:
+        return True
+    if not before.read_complete:
+        # Missing baseline bytes cannot establish that a readable file is stale.
+        # Keep it as a candidate for full verification or a settling refusal.
         return True
     # Only equal byte-range coverage can establish a content change. Two empty
     # samples rely on metadata; the settle writer probe covers deferred-timestamp
@@ -575,13 +577,15 @@ def dump_io_budget(size: int) -> float:
 
 def hash_dump_content(
     source: Path, expected: FileStamp, clock: Callable[[], float],
+    *, settle_deadline: float,
 ) -> FileStamp:
-    """Bind a snapshot to all source bytes within its own size-scaled deadline.
+    """Bind a snapshot to all source bytes within both collection deadlines.
 
     Snapshot sampling and writer probes precede this pass. Use bounded reads and
     reject metadata changes during hashing; copying must match the resulting hash.
+    The original settle deadline also bounds every candidate's size-scaled budget.
     """
-    deadline = clock() + dump_io_budget(expected.size)
+    deadline = min(settle_deadline, clock() + dump_io_budget(expected.size))
 
     def check_hash_deadline() -> None:
         if clock() >= deadline:
@@ -771,7 +775,8 @@ def copy_changed_files(
     settling within the original deadline; an unverified copy is never published.
     An incomplete baseline inventory makes the entire folder unattributable.
     opener is the platform source opener, injectable for share-mode transports.
-    Each full hash and each verified copy gets its own size-scaled I/O budget.
+    Each full hash has a size-scaled I/O budget bounded by the settle deadline.
+    Verified copies have separate size-scaled budgets starting when copying begins.
     """
     clock = clock or time.monotonic
     deadline = deadline if deadline is not None else clock() + DUMP_SETTLE_SECONDS
@@ -785,12 +790,14 @@ def copy_changed_files(
         check_snapshot_complete(after)
         pending = deque(changed_files(before, after))
         # Record all direct collectors' full hashes before copying. WER settling
-        # already supplies them. Each hash has its own budget, separate from polling.
+        # already supplies them. All hashes share the original settle deadline.
         for source in pending:
             if after[source].full_sha256 is not None:
                 continue
             try:
-                after[source] = hash_dump_content(Path(source), after[source], clock)
+                after[source] = hash_dump_content(
+                    Path(source), after[source], clock, settle_deadline=deadline,
+                )
             except DumpWriterBusyError:
                 assert root is not None
                 after = wait_for_dump_settle(
@@ -1535,7 +1542,8 @@ def wait_for_dump_settle(
     With no changed files or busy probes, poll through the creation grace window
     (injectable), bounded by timeout. Busy baseline probes still require settling.
     An incomplete baseline directory scan fails immediately as unattributable.
-    The timeout bounds polling; each final full hash has a separate I/O budget.
+    The timeout bounds polling and all final full hashes. Unknown metadata defers
+    the empty creation grace until inspection succeeds or the deadline expires.
     """
     clock = clock or time.monotonic
     pause = pause or time.sleep
@@ -1566,10 +1574,11 @@ def wait_for_dump_settle(
         current = {path: snapshot[path] for path in changed_files(before, snapshot)}
         check_settle_deadline(deadline, clock)
         now = clock()
-        if closed and not current:
+        if closed and not current and all(stamp.metadata_complete for stamp in snapshot.values()):
             if empty_since is None:
                 empty_since = now
             if now - empty_since >= empty_grace:
+                check_settle_deadline(deadline, clock)
                 return snapshot
         else:
             empty_since = None
@@ -1581,11 +1590,14 @@ def wait_for_dump_settle(
             check_settle_deadline(deadline, clock)
             try:
                 for source in current:
-                    snapshot[source] = hash_dump_content(Path(source), snapshot[source], clock)
+                    snapshot[source] = hash_dump_content(
+                        Path(source), snapshot[source], clock, settle_deadline=deadline,
+                    )
             except DumpWriterBusyError:
                 # A change while recording full content needs a fresh stable window.
                 stable_since = None
             else:
+                check_settle_deadline(deadline, clock)
                 return snapshot
         previous = current
         next_check = deadline
