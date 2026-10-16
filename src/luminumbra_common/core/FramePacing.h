@@ -3,10 +3,14 @@
 namespace luminumbra::core {
 
 // Persisted user.video.frame_cap: zero means unlimited.
-inline constexpr int kFrameCaps[] = {0, 60, 120, 144, 240};
+inline constexpr int kFrameCaps[] = {0, 30, 60, 120, 144, 165, 240};
 
 [[nodiscard]] constexpr bool IsValidFrameCap(int cap) {
-    return cap == 0 || cap == 60 || cap == 120 || cap == 144 || cap == 240;
+    for (const int supported_cap : kFrameCaps) {
+        if (cap == supported_cap)
+            return true;
+    }
+    return false;
 }
 
 struct FramePacing {

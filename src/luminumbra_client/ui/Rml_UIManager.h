@@ -73,7 +73,7 @@ struct SettingsBridge {
     std::function<void(const std::string&)> SetWindowMode;
     std::function<bool()> GetVSync;
     std::function<void(bool)> SetVSync;
-    std::function<int()> GetFrameCap; // 0 = unlimited; else 60, 120, 144 or 240 FPS.
+    std::function<int()> GetFrameCap; // 0 = unlimited; choices in core::kFrameCaps.
     std::function<void(int)> SetFrameCap;
     std::function<float()> GetFov;
     std::function<void(float)> SetFov;
@@ -92,6 +92,11 @@ struct SettingsBridge {
     // request to capture the next key press as that action's new binding. Optional/skippable.
     std::function<std::string(const std::string&)> GetKeybind;
     std::function<void(const std::string&)> BeginRebind;
+    // Developer preferences share the console registry authority.
+    std::function<bool()> GetPerfHud;
+    std::function<void(bool)> SetPerfHud;
+    std::function<void()> OpenDeveloperConsole;
+    std::function<std::string()> GetDeveloperHelp;
     // Persist the user overlay (returns true on success).
     std::function<bool()> Save;
 };
@@ -209,6 +214,13 @@ public:
         m_galleryImgPrefix = std::move(img_prefix);
     }
 
+    void SetDeveloperDebuggerVisible(bool visible);
+    bool DeveloperDebuggerVisible() const;
+    void DrawDeveloperDebuggerContents();
+    void RefreshDeveloperSettings();
+    bool HasInputInteraction() const;
+    bool HasTextInputFocus() const;
+
     // Static GLFW callbacks that forward to the active manager instance
     static void KeyCallback(GLFWwindow* window, int key, int scancode, int action, int mods);
     static void CharCallback(GLFWwindow* window, unsigned int codepoint);
@@ -219,6 +231,7 @@ public:
 private:
     // This is now a public function on the manager, called by Update.
     void ProcessDocumentLoadRequest();
+    void AddClickSoundListener(Rml::Element* element, std::function<void(Rml::Event&)> callback);
     void BindEventListeners(Rml::ElementDocument* document);
     void LoadDocument(const std::string& rml_path);
     void StartWorldScan(Rml::ElementDocument* document);
@@ -280,6 +293,7 @@ private:
     SettingsBridge m_settingsBridge;
     bool m_populatingGraphics = false;
     bool m_settingsSaveFailed = false;
+    bool m_developerDebuggerVisible = false;
     PauseActionCallback m_pauseActionCallback;
 
     std::string m_documentToLoad;

@@ -81,6 +81,34 @@ class GraphicsUiContract(unittest.TestCase):
         self.assertIn("g_systemConfig.settings_load_report().needs_first_launch_detection", startup)
         self.assertIn("if (graphics_first_launch || graphics_detect_requested)", startup)
 
+    def test_explicit_saves_share_graphics_and_developer_transaction(self):
+        main = (ROOT / "src/luminumbra_client/main_client.cpp").read_text(encoding="utf-8")
+        bridge = main.split("sb.Save = [&] {", 1)[1].split("};", 1)[0]
+        self.assertEqual(bridge.strip(), "return developerConsole.SavePreferences();")
+        host = main.split("developerHost.save = [&] {", 1)[1].split(
+            "developerHost.gameplay_help", 1)[0]
+        self.assertRegex(host, r"if \(!apply_pending_graphics\(\)\)\s+return false;")
+        ordered = [
+            "if (!apply_pending_graphics())", "auto& preferences",
+            "preferences.widgets[", "preferences.layouts[", "preferences.bindings[",
+            "return save_graphics();",
+        ]
+        positions = [host.index(fragment) for fragment in ordered]
+        self.assertEqual(positions, sorted(positions))
+        writer = main.split("const auto save_graphics = [&] {", 1)[1].split("};", 1)[0]
+        self.assertIn("graphics_state.Saved(saved);", writer)
+        self.assertIn("return saved;", writer)
+        # Every overlay writer in the client must participate in the shared transaction.
+        writers = []
+        for path in sorted((ROOT / "src/luminumbra_client").rglob("*.cpp")):
+            for line in path.read_text(encoding="utf-8").splitlines():
+                if ".SaveUserOverlay(" in line:
+                    writers.append(path.name)
+        self.assertEqual(writers, ["main_client.cpp"])
+        overlays = (ROOT / "src/luminumbra_client/app/DebugOverlays.cpp").read_text(encoding="utf-8")
+        settings_save = overlays.split('ImGui::Button("Save settings")', 1)[1].split("}", 1)[0]
+        self.assertIn("const bool ok = console.SavePreferences();", settings_save)
+
 
 if __name__ == "__main__":
     unittest.main()

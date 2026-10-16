@@ -76,22 +76,6 @@
 // incremental). The.ipp opens its own Luminumbra::Rendering namespace.
 #include "SkyAtmosphereLut.ipp"
 
-namespace {
-inline bool AABBOutsidePlane(const glm::vec3& minp, const glm::vec3& maxp, const glm::vec4& plane) {
-    glm::vec3 p = glm::vec3(plane.x >= 0 ? maxp.x : minp.x,
-                            plane.y >= 0 ? maxp.y : minp.y,
-                            plane.z >= 0 ? maxp.z : minp.z);
-    return (glm::dot(glm::vec3(plane), p) + plane.w) < 0.0f;
-}
-inline bool
-AABBFrustumCulled(const glm::vec3& minp, const glm::vec3& maxp, const glm::vec4 planes[6]) {
-    for (int i = 0; i < 6; ++i)
-        if (AABBOutsidePlane(minp, maxp, planes[i]))
-            return true;
-    return false;
-}
-} // namespace
-
 namespace Luminumbra::Rendering {
 
 namespace {
@@ -5642,10 +5626,6 @@ namespace {
 
 constexpr uint32_t kLtexMagic = 0x5845544C; // 'LTEX' little-endian
 constexpr uint16_t kLtexVersion = 1;
-// Layers reserved per size-class array. Over-provisioning is cheap (storage is
-// allocated lazily per uploaded layer in this iteration; growth reallocates).
-constexpr uint32_t kResidencyArrayInitialCapacity = 8;
-
 template<typename T>
 bool ReadPod(std::ifstream& in, T& value) {
     in.read(reinterpret_cast<char*>(&value), sizeof(T));

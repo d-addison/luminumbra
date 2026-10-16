@@ -7,6 +7,7 @@ using HSteamListenSocket = std::uint32_t;
 using HSteamNetConnection = std::uint32_t;
 inline constexpr HSteamListenSocket k_HSteamListenSocket_Invalid = 0;
 inline constexpr HSteamNetConnection k_HSteamNetConnection_Invalid = 0;
+inline constexpr int k_cchSteamNetworkingMaxConnectionCloseReason = 128;
 inline constexpr int k_cbMaxSteamNetworkingSocketsMessageSizeSend = 512 * 1024;
 inline constexpr int k_nSteamNetworkingSend_Reliable = 8;
 inline constexpr int k_nSteamNetworkingSend_Unreliable = 0;
@@ -38,6 +39,9 @@ struct SteamNetworkingIPAddr {
 struct SteamNetConnectionInfo_t {
     HSteamListenSocket m_hListenSocket = 0;
     ESteamNetworkingConnectionState m_eState = k_ESteamNetworkingConnectionState_Connecting;
+    int m_eEndReason = 0;
+    // NUL-terminated diagnostic text, matching the public SDK buffer and bound.
+    char m_szEndDebug[k_cchSteamNetworkingMaxConnectionCloseReason]{};
 };
 struct SteamNetConnectionStatusChangedCallback_t {
     HSteamNetConnection m_hConn = 0;
@@ -46,6 +50,8 @@ struct SteamNetConnectionStatusChangedCallback_t {
 struct SteamNetworkingMessage_t {
     void* m_pData = nullptr;
     int m_cbSize = 0;
+    // The reliable bit describes delivery of this received message.
+    int m_nFlags = k_nSteamNetworkingSend_Unreliable;
     void (*m_pfnRelease)(SteamNetworkingMessage_t*) = nullptr;
     void Release() {
         m_pfnRelease(this);

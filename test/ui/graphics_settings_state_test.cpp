@@ -33,7 +33,12 @@ TEST(GraphicsSettingsState, CustomRetainsBaseAndResetRestoresIt) {
     GraphicsSettingsState state(settings, {});
     EXPECT_EQ(state.Display().preset_label, "Custom (base: High)");
     ASSERT_TRUE(state.Stage(GraphicsEdit{}));
-    EXPECT_TRUE(state.Pending()->overrides.empty());
+    const auto& pending = state.Pending();
+    if (!pending.has_value()) {
+        ADD_FAILURE() << "Staging the reset must queue graphics settings";
+        return;
+    }
+    EXPECT_TRUE(pending->overrides.empty());
     EXPECT_EQ(state.Settings().overrides, settings.overrides); // No commit before renderer success.
     state.Applied(true, 0.0);
     EXPECT_EQ(state.Settings().base_preset, GraphicsPreset::High);
@@ -73,9 +78,13 @@ TEST(GraphicsSettingsState, InvalidRequestsDoNotReplaceAnAlreadyQueuedTransactio
                              Override("water_resolution", 8.0),
                              Preset(static_cast<GraphicsPreset>(255))}) {
         EXPECT_FALSE(state.Stage(edit));
-        ASSERT_TRUE(state.Pending());
-        EXPECT_EQ(state.Pending()->base_preset, GraphicsPreset::Low);
-        EXPECT_TRUE(state.Pending()->overrides.empty());
+        const auto& pending = state.Pending();
+        if (!pending.has_value()) {
+            ADD_FAILURE() << "An invalid edit must retain the queued graphics settings";
+            return;
+        }
+        EXPECT_EQ(pending->base_preset, GraphicsPreset::Low);
+        EXPECT_TRUE(pending->overrides.empty());
         EXPECT_FALSE(state.Display().status.empty());
     }
 }
