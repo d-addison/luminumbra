@@ -1,22 +1,24 @@
 # Distant world and distant simulation contract
 
-Status: accepted contract, September 8, 2026, revised the same day after two
-independent review rounds. Implementation is planned in bounded slices and
-is **not** present in the tree at the time of writing; each section states the
-current shipped behaviour so nothing here reads as implemented. Nothing in this
-document waives the acceptance evidence that each slice must supply, and no
-format change listed here exists until its slice lands.
+Status: accepted contract, September 8, 2026; release-scope clarification
+October 14, 2026. This is the target contract. The [implementation and acceptance
+gap map](distant-world-implementation-status.md) and
+[release notes](release-notes-v0.3.0.md) distinguish implemented source from
+planned work and pending evidence. Generation, meshing, queues, residency, upload
+accounting and renderer integration are implemented; normal presets still lack
+immutable authority and fall back from the default Ladder request to Legacy.
+Saved-world far production authority remains fixture-only until FW S8 (v0.3.1);
+the renderer reports an explicit unavailable/refusal diagnostic.
 
-For the September 13 recovered source, see the [implementation and acceptance
-gap map](distant-world-implementation-status.md). It distinguishes landed
-prerequisites from the remaining runtime and evidence work without changing this
-contract. The subsequent [bounded volume-generation entry point](far-volume-generation.md)
-implements the first sampler-driven part of DW01; runtime integration remains open.
-The [bounded volume mesher](far-volume-meshing.md) supplies the first CPU kernel
-part of DW03 with same-authority halo normals; runtime integration remains open.
-The [canonical discovery and authority facade](far-volume-convergence.md) adds
-the original surface-span discovery and explicit numeric profiles; queue,
-allocation and renderer integration remain separate.
+Indexed authority durability/rehydration, durable completed work and ground-object
+continuation, durable regional fields/weather/scent/energy, regional foliage/water
+continuation (issue #242), strict distant policy and distant creatures (S8), remaining S9
+closure, and the committed-generation edited-SDF producer and FW S8 consumer are
+planned for v0.3.1. The per-system continuation and transaction requirements below
+describe that planned work. Regional continuation performance/default enablement
+is planned for v0.4.0 as [issue #320](https://github.com/d-addison/luminumbra/issues/320).
+No current-candidate native qualification is claimed and no acceptance threshold
+is waived by source landing.
 
 ## Scope
 
@@ -25,7 +27,7 @@ allocation and renderer integration remain separate.
   extent is set by the packed chunk identity (`Chunk.h`, ±2^20 chunks of 16 m,
   about ±16,777 km on each horizontal axis; coordinates are masked, never range
   checked). World positions are 32-bit floats. By owner decision (September 8,
-  2026) v0.3 qualifies traversal and rendering within 32 km of the world origin,
+  2026) the contract requires qualification within 32 km of the world origin,
   where positions keep sub-centimetre precision; the camera-relative
   (floating-origin) precision work that would qualify the full addressable extent
   is deliberately residual scope, not an open contract gap. Chunk identity,
@@ -43,7 +45,7 @@ allocation and renderer integration remain separate.
 - Simulation over distance runs only in **persistent active regions** and only
   while the world host runs. There is no wall-clock progression while a world is
   shut down.
-- Audio remains disabled for v0.3 and every qualification run launches with
+- Ordinary audio playback is enabled; every qualification run launches with
   `--no-audio`; nothing in this contract depends on audio.
 
 ## Three explicit sets
@@ -57,7 +59,7 @@ authoritative volumetric overlays captured from resident chunks; simulation
 systems tick every registry participant regardless of residency; wind, weather,
 aether ambience, scent, soil and irrigation are fixed grids anchored on the
 spawn point. A host-side active-region ledger and scheduler foundation exists
-(`sim.active_regions`, off by default; see [active regions](active-regions.md)),
+(`sim.active_regions`, enabled by default for v0.3.0; see [active regions](active-regions.md)),
 but no distant-simulation consumer uses the schedule yet.
 
 This contract separates three sets that may overlap but are never equated.
@@ -189,6 +191,12 @@ silhouette features to the full radius, and the acceptance stations include
 deep interiors and distant mouths beyond the noise-cave cutoff, not only within
 it.
 
+Qualification must pin the cave-dense revision and identity. The packaged
+`worlds/atlas/presets/cave_dense.json` now uses revision 7; the revision-6 fixture
+is frozen in `worlds/atlas/presets-rev6/cave_dense.json`. See the
+shipping preset identities under "Shipping defaults" in the [engine guide](engine-guide.md) before comparing
+captures or synchronizing the game repository's fixture and identity sidecar.
+
 ### Edits and the far authority overlay
 
 Edits are baked into every tier on the world host inside the save path, after
@@ -285,13 +293,15 @@ chunks stops (they stay resident) and the failure is reported; dirty state is
 never dropped. Parked bytes, save latency and failures are shown in the
 diagnostic panel and qualified on the historical 5,433-chunk edited save.
 
-The default-off ledger and deterministic scheduler foundation is now implemented;
+The ledger and deterministic scheduler foundation is implemented and enabled by default;
 see [the active-region format and scheduling guide](active-regions.md) for its
 canonical bytes, refusal behaviours and bounded slice boundaries. It has no
-per-system consumers and no measured budget caps yet. Dirty parking, autosave
-policy changes, snapshot transactions and the diagnostic panel remain pending.
+per-system consumers and no measured budget caps yet. Dirty parking,
+snapshot transactions and the diagnostic panel are planned for v0.3.1.
 Current default behaviour still evicts dirty chunks without a flush, the client
-saves only on quit or shutdown, and the server autosave interval defaults to zero.
+saves only on quit or shutdown, and the dedicated server autosave interval defaults
+to 9000 ticks (five minutes at the canonical 30 Hz clock). Explicit zero disables
+autosave; capture and determinism fixtures explicitly use 30 ticks.
 
 `GameSession::SetRegionPopulator` registers a versioned callback before world creation or open.
 Its contract, canonical configuration and sorted object-type/payload ceilings join the immutable
@@ -436,14 +446,19 @@ nights; a calendar-relative lunar period needs a separate pacing decision.
 
 ## Persistence and format contract
 
-Unchanged: preset revision 6, LMR1 container v2 for `chunks/region/*.lmr`
+Preset revision 7 retains revision 6 omission compatibility; current-format saves
+without embedded packaged presets use frozen revision-6 copies. Lockstep protocol
+and LREC1 replay layout are version 3 and bind effective configuration plus
+resolved preset/dependency content; older layouts are refused. See the
+[identity contract](development/system-config-identity.md).
+
+Unchanged: LMR1 container v2 for `chunks/region/*.lmr`
 including its lod-level and flag validation, the
 `luminumbra.persistence.world_manifest.v1` manifest, FSD2 far payload v3 (kept
 decodable with its existing dimensions and validation; no longer written by the
 runtime once the volumetric ladder lands), the `aether_state.efs` payload bytes
 and placement, the plant record payload, canonical in-memory serialization, the
-LREC1 replay record layout and checkpoint bytes, and the lockstep hash message
-and protocol. There is no obsolete-world migration.
+replay checkpoint bytes and lockstep hash message. There is no obsolete-world migration.
 
 New records, each declared before its slice lands with exact version identity,
 byte order, lengths, checksums, allocation limits and section-evolution rules

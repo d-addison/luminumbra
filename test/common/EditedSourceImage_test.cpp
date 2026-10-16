@@ -859,14 +859,18 @@ TEST(EditedSourceImage, SessionCaptureIsOwnerThreadOnlyAndSimulationNeutralAfter
         WorldStreamingState state;
         const auto chunk = EditedChunk(state);
         ASSERT_TRUE(WorldSaveService{}.save_world(state, session.GetWorldSaveDir()));
+        SnapshotIndex index;
+        ASSERT_TRUE(read_snapshot_index(session.GetWorldSaveDir(), index, nullptr));
+        ASSERT_GT(index.generation, 0u);
         ASSERT_TRUE(session.GetWorldSystem()->adopt_streamed_chunk(chunk));
         chunk->sdf_data[kInterior] = -99;
         chunk->mark_voxel_data_dirty();
         const auto region = WorldSaveService::region_file_path(session.GetWorldSaveDir(), 0, 0);
         const auto bytes = Read(region);
         const auto hash = session.ComputeChunkStateHash();
-        ASSERT_EQ(session.CaptureFarEditedSources(0, {tiles}, limits, true, captured),
-                  EditedSourceError::None);
+        ASSERT_EQ(
+            session.CaptureFarEditedSources(index.generation, {tiles}, limits, true, captured),
+            EditedSourceError::None);
         ASSERT_TRUE(captured.committed);
         ASSERT_TRUE(captured.live);
         ASSERT_EQ(captured.live->Lattices().size(), 1u);
@@ -878,7 +882,8 @@ TEST(EditedSourceImage, SessionCaptureIsOwnerThreadOnlyAndSimulationNeutralAfter
         const auto previous = captured.committed;
         EditedSourceError off_thread = EditedSourceError::None;
         std::thread worker([&] {
-            off_thread = session.CaptureFarEditedSources(0, {tiles}, limits, true, captured);
+            off_thread =
+                session.CaptureFarEditedSources(index.generation, {tiles}, limits, true, captured);
         });
         worker.join();
         EXPECT_EQ(off_thread, EditedSourceError::Ineligible);

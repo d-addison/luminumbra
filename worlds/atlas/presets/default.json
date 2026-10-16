@@ -1,7 +1,7 @@
 {
   "name": "Default",
   "description": "Varied, DEM-grounded foothills with biomes, rivers, and hydraulic drainage relief",
-  "schema_rev": 6,
+  "schema_rev": 7,
   "generation_params": {
     "terrain": {
       "base_frequency": 0.01,
@@ -10,7 +10,7 @@
       "persistence": 0.5,
       "lacunarity": 2.0,
       "height_offset": 5.0,
-      "island_mask_enabled": false,
+      "island_mask_enabled": true,
       "shaping": {
         "continentalness_frequency": 0.0012,
         "erosion_frequency": 0.0018,

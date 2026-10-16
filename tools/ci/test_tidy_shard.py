@@ -216,9 +216,13 @@ class ShardWorkflowTests(unittest.TestCase):
         aggregate = self.jobs["tidy"]
         guard = "github.event_name != 'pull_request' || github.event.pull_request.draft == false"
         self.assertIn("    name: Static analysis / clang-tidy\n", aggregate)
-        self.assertIn("    needs: tidy-shard\n", aggregate)
+        self.assertIn("    needs: [changes, tidy-shard]\n", aggregate)
         self.assertIn("    if: always() && (" + guard + ")\n", aggregate)
-        self.assertIn("    if: " + guard + "\n", self.jobs["tidy-shard"])
+        self.assertIn("    needs: changes\n", self.jobs["tidy-shard"])
+        self.assertIn("    if: ${{ !cancelled() && needs.changes.outputs.needs_cpp != 'false' && (" + guard + ") }}\n",
+                      self.jobs["tidy-shard"])
+        self.assertIn("CI_PATHS_RESULT: ${{ needs.changes.result }}", aggregate)
+        self.assertIn("NEEDS_CPP: ${{ needs.changes.outputs.needs_cpp }}", aggregate)
         self.assertIn("    runs-on: ubuntu-24.04\n", aggregate)
         self.assertIn("    timeout-minutes: 5\n", aggregate)
         self.assertIn("TIDY_SHARD_RESULT: ${{ needs.tidy-shard.result }}", aggregate)
@@ -230,9 +234,34 @@ class ShardWorkflowTests(unittest.TestCase):
         for status in ("success", "failure", "cancelled", "skipped", ""):
             with self.subTest(status=status):
                 result = subprocess.run(["bash", "-e", "-c", script],
-                                        env=dict(os.environ, TIDY_SHARD_RESULT=status),
+                                        env=dict(os.environ, TIDY_SHARD_RESULT=status, CI_PATHS_RESULT="success", NEEDS_CPP="true"),
                                         capture_output=True, text=True, check=False)
                 self.assertEqual(result.returncode == 0, status == "success", result.stderr)
+
+    def test_routed_skip_requires_successful_explicit_non_native_classification(self):
+        script = self.jobs["tidy"].split("        run: |\n", 1)[1]
+        script = "\n".join(line[10:] for line in script.splitlines() if line.startswith("          "))
+        with tempfile.TemporaryDirectory() as directory:
+            summary = Path(directory) / "summary"
+            for classification in ("success", "failure", "cancelled", "skipped", ""):
+                for cpp in ("true", "false", ""):
+                    for status in ("success", "failure", "cancelled", "skipped", ""):
+                        routed = classification == "success" and cpp == "false" and status == "skipped"
+                        with self.subTest(classification=classification, cpp=cpp, status=status):
+                            summary.unlink(missing_ok=True)
+                            result = subprocess.run(
+                                ["bash", "-e", "-c", script],
+                                env=dict(os.environ, TIDY_SHARD_RESULT=status,
+                                         CI_PATHS_RESULT=classification, NEEDS_CPP=cpp,
+                                         GITHUB_STEP_SUMMARY=str(summary)),
+                                capture_output=True, text=True, check=False,
+                            )
+                            self.assertEqual(result.returncode == 0, status == "success" or routed,
+                                             result.stderr)
+                            self.assertEqual(summary.exists(), routed)
+                            if routed:
+                                self.assertEqual(summary.read_text(), result.stdout)
+                                self.assertIn("route: skipped", result.stdout)
 
     def test_public_tree_runs_shard_regressions(self):
         self.assertIn("          python3 tools/ci/test_tidy_shard.py\n", self.workflow)
