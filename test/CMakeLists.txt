@@ -481,6 +481,11 @@ add_executable(foliage_surface_slots_test rendering/foliage_surface_slots_test.c
 target_include_directories(foliage_surface_slots_test PRIVATE ../src/luminumbra_client)
 target_link_libraries(foliage_surface_slots_test PRIVATE gtest_main)
 
+add_executable(foliage_ground_work_test rendering/foliage_ground_work_test.cpp)
+target_include_directories(foliage_ground_work_test PRIVATE ../src)
+target_link_libraries(foliage_ground_work_test PRIVATE gtest_main luminumbra_common)
+luminumbra_configure_first_party_target(foliage_ground_work_test)
+
 target_include_directories(foliage_cache_prune_test PRIVATE
 ../src
 ../src/luminumbra_client
@@ -1840,6 +1845,7 @@ set(LUMINUMBRA_GTEST_TARGETS
     world_dressing_test
     foliage_cache_prune_test
     foliage_surface_slots_test
+    foliage_ground_work_test
     foliage_visual_contract_test
     render_view_test
     render_smoke_test

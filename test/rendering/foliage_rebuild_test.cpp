@@ -1,4 +1,8 @@
+#include "luminumbra_client/rendering/Camera.h"
+#include "luminumbra_client/rendering/RenderPipeline.h"
 #include "luminumbra_client/rendering/passes/FoliagePass.h"
+#include "luminumbra_common/core/JobSystem.h"
+#include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 
 #define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
@@ -7,9 +11,12 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
+#include <condition_variable>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
+#include <mutex>
 #include <vector>
 
 namespace {
@@ -83,7 +90,8 @@ protected:
     }
     static void Rebuild(FoliagePass& pass,
                         const std::vector<FoliagePass::ChunkScatter>& chunks,
-                        std::uint64_t frame) {
+                        std::uint64_t frame,
+                        FoliagePass::Preparation preparation = FoliagePass::Preparation::Deferred) {
         pass.set_evidence_frame(frame, 1);
         pass.rebuild_instances(
             chunks,
@@ -91,14 +99,16 @@ protected:
                 return FoliagePass::SurfaceSample{10.0f + x * 0.01f + z * 0.02f, 0.1f, 0.7f, true};
             },
             nullptr,
-            kCamera);
+            kCamera,
+            preparation);
     }
     static Attribution::FoliageRebuild
     RebuildAttributed(FoliagePass& pass,
                       const std::vector<FoliagePass::ChunkScatter>& chunks,
-                      std::uint64_t frame_id) {
+                      std::uint64_t frame_id,
+                      FoliagePass::Preparation preparation = FoliagePass::Preparation::Deferred) {
         Attribution::FoliageFrameScope frame(true);
-        Rebuild(pass, chunks, frame_id);
+        Rebuild(pass, chunks, frame_id, preparation);
         return frame.snapshot().rebuild;
     }
     static void ExpectReused(const Attribution::FoliageRebuild& rebuild, bool gpu) {
@@ -1067,6 +1077,415 @@ TEST_F(FoliageRebuildTest, DuplicateColumnsShareUploadsAndDistinctFootprintsKeep
     Rebuild(fresh.pass, chunks, 3);
     EXPECT_EQ(edited_hash, fresh.pass.uploaded_input_hash());
     ExpectSame(edited_records, GpuRecords());
+}
+
+TEST_F(FoliageRebuildTest, WorkerResultsMatchSynchronousInstanceBytesAndInputHash) {
+    for (const bool gpu : {false, true}) {
+        Luminumbra::JobSystem jobs;
+        jobs.startup(1);
+        ScopedPass scoped;
+        auto& pass = scoped.pass;
+        ASSERT_NO_FATAL_FAILURE(Initialize(pass, gpu));
+        pass.use_rendered_ground();
+        pass.attach_job_system(&jobs);
+        pass.set_evidence_enabled(true);
+        const auto chunks = SupportedChunks(2);
+        UploadGround(pass, 1, {0, 0, 0});
+        UploadGround(pass, 2, {1, 0, 0}, 6);
+        const auto submitted = RebuildAttributed(pass, chunks, 1);
+        EXPECT_EQ(submitted.worker_dispatched, 2u);
+        EXPECT_EQ(submitted.admitted_columns, 0u);
+        EXPECT_TRUE(submitted.backlog);
+        jobs.shutdown(); // Deterministic test barrier, never a render-path wait.
+        const auto completed = RebuildAttributed(pass, chunks, 2);
+        EXPECT_EQ(completed.worker_completed, 2u);
+        EXPECT_EQ(completed.worker_stale_rejected, 0u);
+        EXPECT_EQ(completed.worker_queue_age_frames, 1u);
+        EXPECT_FALSE(completed.backlog);
+        const auto records = Records(pass, gpu);
+        ASSERT_FALSE(records.empty());
+        const auto hash = pass.uploaded_input_hash();
+        if (gpu)
+            EXPECT_EQ(hash, LegacyUploadedHash(pass, chunks.size()));
+
+        ScopedPass fresh;
+        ASSERT_NO_FATAL_FAILURE(Initialize(fresh.pass, gpu));
+        fresh.pass.use_rendered_ground();
+        fresh.pass.set_evidence_enabled(true);
+        UploadGround(fresh.pass, 1, {0, 0, 0});
+        UploadGround(fresh.pass, 2, {1, 0, 0}, 6);
+        Rebuild(fresh.pass, chunks, 2);
+        ExpectSame(records, Records(fresh.pass, gpu));
+        EXPECT_EQ(hash, fresh.pass.uploaded_input_hash());
+        EXPECT_EQ(pass.instance_hash(), fresh.pass.instance_hash());
+    }
+}
+
+TEST_F(FoliageRebuildTest, WorkerCompletionsAfterRemeshRemovalOrSupportChangeAreNeverDrawn) {
+    for (const bool gpu : {false, true}) {
+        for (const int edit : {0, 1, 2}) {
+            SCOPED_TRACE(edit);
+            Luminumbra::JobSystem jobs;
+            jobs.startup(1);
+            ScopedPass scoped;
+            auto& pass = scoped.pass;
+            ASSERT_NO_FATAL_FAILURE(Initialize(pass, gpu));
+            pass.use_rendered_ground();
+            pass.attach_job_system(&jobs);
+            pass.set_evidence_enabled(true);
+            auto chunks = SupportedChunks(1);
+            UploadGround(pass, 1, {0, 0, 0});
+            EXPECT_EQ(RebuildAttributed(pass, chunks, 1).worker_dispatched, 1u);
+            if (edit == 0)
+                UploadGround(pass, 1, {0, 0, 0}, 6);
+            else if (edit == 1)
+                pass.remove_ground_mesh(1);
+            else
+                chunks.front().origin.x += 0.5f;
+            jobs.shutdown();
+            jobs.startup(1);
+            const auto rejected = RebuildAttributed(pass, chunks, 2);
+            EXPECT_EQ(rejected.worker_completed, 1u);
+            EXPECT_EQ(rejected.worker_stale_rejected, 1u);
+            EXPECT_EQ(rejected.worker_dispatched, 1u);
+            EXPECT_EQ(rejected.admitted_columns, 0u);
+            EXPECT_EQ(rejected.dirty_columns, 0u);
+            EXPECT_EQ(pass.frame_instance_count(), 0u);
+            EXPECT_TRUE(pass.instances().empty());
+            jobs.shutdown();
+            const auto current = RebuildAttributed(pass, chunks, 3);
+            EXPECT_EQ(current.worker_completed, 1u);
+            EXPECT_EQ(current.worker_stale_rejected, 0u);
+            EXPECT_FALSE(current.backlog);
+            const auto records = Records(pass, gpu);
+            const auto hash = pass.uploaded_input_hash();
+            ScopedPass fresh;
+            ASSERT_NO_FATAL_FAILURE(Initialize(fresh.pass, gpu));
+            fresh.pass.use_rendered_ground();
+            fresh.pass.set_evidence_enabled(true);
+            if (edit != 1)
+                UploadGround(fresh.pass, 1, {0, 0, 0}, edit == 0 ? 6.0f : 8.0f);
+            Rebuild(fresh.pass, chunks, 3);
+            ExpectSame(records, Records(fresh.pass, gpu));
+            EXPECT_EQ(hash, fresh.pass.uploaded_input_hash());
+        }
+    }
+}
+
+// A parked executor makes admission tests independent of OS scheduling. All
+// accepted jobs are drained before the gate/payload storage is destroyed.
+struct ParkedFoliageJobs {
+    struct Gate {
+        std::mutex mutex;
+        std::condition_variable condition;
+        bool entered = false;
+        bool released = false;
+    };
+    Luminumbra::JobSystem jobs;
+    std::shared_ptr<Gate> gate = std::make_shared<Gate>();
+    ParkedFoliageJobs() {
+        jobs.startup(1);
+        const bool accepted = jobs.try_dispatch(
+            +[](void* data) {
+                auto& state = *static_cast<Gate*>(data);
+                std::unique_lock lock(state.mutex);
+                state.entered = true;
+                state.condition.notify_all();
+                state.condition.wait(lock, [&] { return state.released; });
+            },
+            gate,
+            1);
+        EXPECT_TRUE(accepted);
+        if (accepted) {
+            std::unique_lock lock(gate->mutex);
+            gate->condition.wait(lock, [&] { return gate->entered; });
+        }
+    }
+    ~ParkedFoliageJobs() {
+        drain();
+    }
+    void drain() {
+        {
+            std::unique_lock lock(gate->mutex);
+            gate->released = true;
+        }
+        gate->condition.notify_all();
+        jobs.shutdown();
+    }
+};
+
+TEST_F(FoliageRebuildTest, NestedRenderedFramesRenewAdmissionAndRetryStaleColumns) {
+    // The actual pipeline owns the boundary: no main-loop reset or explicit
+    // begin_ground_frame calls are allowed in this nested rendering sequence.
+    ParkedFoliageJobs executor;
+    Luminumbra::Rendering::RenderPipeline pipeline;
+    ASSERT_TRUE(pipeline.startup(64, 64, LUMINUMBRA_SOURCE_ROOT));
+    pipeline.set_far_lod_enabled(false);
+    auto& pass = *pipeline.foliage();
+    ASSERT_TRUE(pass.gpu_scatter_active());
+    pass.set_readback_enabled(false);
+    pass.set_evidence_enabled(true);
+    pass.set_fade_distances(900, 1000);
+    pass.set_density_scale(1.6f);
+    pass.set_wind({0, 0});
+    ASSERT_TRUE(pass.load_scatter_set(std::filesystem::path(LUMINUMBRA_SOURCE_ROOT) /
+                                      "data/common/foliage/scatter_set.json"));
+    pass.attach_job_system(&executor.jobs);
+    Luminumbra::Systems::TerrainGenParams params;
+    params.biomes_enabled = params.structures_enabled = params.hydro_enabled = false;
+    Luminumbra::Systems::SHIELD_WorldSystem world(nullptr, nullptr, params, 1337);
+    entt::registry registry;
+    const Luminumbra::Rendering::Camera camera(kCamera);
+    auto chunks = SupportedChunks(6);
+    for (int column = 0; column < 6; ++column)
+        UploadGround(pass, static_cast<Luminumbra::ChunkID>(column + 1), {column, 0, 0});
+    EXPECT_EQ(RebuildAttributed(pass, chunks, 1).worker_dispatched, 4u);
+    EXPECT_EQ(RebuildAttributed(pass, chunks, 1).worker_dispatched, 0u);
+    UploadGround(pass, 1, {0, 0, 0}, 6);
+    chunks[1].origin.x += 0.5f;
+    pipeline.render_frame(registry, world, camera, 1.0f / 60.0f);
+    executor.drain();
+    executor.jobs.startup(1);
+    const auto retry = RebuildAttributed(pass, chunks, 2);
+    EXPECT_EQ(retry.worker_completed, 4u);
+    EXPECT_EQ(retry.worker_stale_rejected, 2u);
+    EXPECT_EQ(retry.worker_dispatched, 4u);
+    EXPECT_EQ(retry.worker_queue_age_frames, 1u);
+    EXPECT_TRUE(retry.backlog);
+    executor.jobs.shutdown();
+    pipeline.render_frame(registry, world, camera, 1.0f / 60.0f);
+    const auto complete = RebuildAttributed(pass, chunks, 3);
+    EXPECT_EQ(complete.worker_completed, 4u);
+    EXPECT_EQ(complete.worker_stale_rejected, 0u);
+    EXPECT_FALSE(complete.backlog);
+    const auto records = GpuRecords();
+    ASSERT_FALSE(records.empty());
+    const auto hash = pass.uploaded_input_hash();
+    ASSERT_TRUE(hash.has_value());
+
+    ScopedPass fresh;
+    ASSERT_NO_FATAL_FAILURE(Initialize(fresh.pass));
+    fresh.pass.use_rendered_ground();
+    fresh.pass.set_evidence_enabled(true);
+    fresh.pass.set_fade_distances(900, 1000);
+    for (int column = 0; column < 6; ++column)
+        UploadGround(fresh.pass,
+                     static_cast<Luminumbra::ChunkID>(column + 1),
+                     {column, 0, 0},
+                     column == 0 ? 6.0f : 8.0f);
+    Rebuild(fresh.pass, chunks, 1);
+    Rebuild(fresh.pass, chunks, 2);
+    ExpectSame(records, GpuRecords());
+    EXPECT_EQ(hash, fresh.pass.uploaded_input_hash());
+}
+
+TEST_F(FoliageRebuildTest,
+       CompletePreparationBuildsPreviewAfterSupportArrivesWithoutWorkerProgress) {
+    for (const bool gpu : {false, true}) {
+        SCOPED_TRACE(gpu);
+        ParkedFoliageJobs executor;
+        ScopedPass scoped;
+        auto& pass = scoped.pass;
+        ASSERT_NO_FATAL_FAILURE(Initialize(pass, gpu));
+        pass.use_rendered_ground();
+        pass.attach_job_system(&executor.jobs);
+        pass.set_evidence_enabled(true);
+        pass.set_fade_distances(900, 1000);
+        const auto chunks = SupportedChunks(6); // More than one frame's deferred budget.
+        const auto absent = RebuildAttributed(pass, chunks, 1, FoliagePass::Preparation::Complete);
+        EXPECT_EQ(absent.worker_dispatched, 0u);
+        EXPECT_FALSE(absent.backlog);
+        EXPECT_TRUE(Records(pass, gpu).empty());
+
+        // Preview adoption precedes terrain uploads. The same scatter generation
+        // must be rebuilt when support arrives on subsequent preview frames.
+        for (int column = 0; column < 6; ++column)
+            UploadGround(pass, static_cast<Luminumbra::ChunkID>(column + 1), {column, 0, 0});
+        const auto ready = RebuildAttributed(pass, chunks, 2, FoliagePass::Preparation::Complete);
+        EXPECT_EQ(ready.worker_dispatched, 0u);
+        EXPECT_EQ(ready.admitted_columns, chunks.size());
+        EXPECT_EQ(ready.deferred_columns, 0u);
+        EXPECT_FALSE(ready.backlog);
+        EXPECT_EQ(executor.jobs.get_runtime_stats().queue_depth, 0u);
+        const auto records = Records(pass, gpu);
+        ASSERT_FALSE(records.empty());
+        const auto hash = pass.uploaded_input_hash();
+        if (gpu)
+            ASSERT_TRUE(hash.has_value());
+
+        ScopedPass fresh;
+        ASSERT_NO_FATAL_FAILURE(Initialize(fresh.pass, gpu));
+        fresh.pass.use_rendered_ground();
+        fresh.pass.set_evidence_enabled(true);
+        fresh.pass.set_fade_distances(900, 1000);
+        for (int column = 0; column < 6; ++column)
+            UploadGround(fresh.pass, static_cast<Luminumbra::ChunkID>(column + 1), {column, 0, 0});
+        Rebuild(fresh.pass, chunks, 1);
+        Rebuild(fresh.pass, chunks, 2); // Drain the existing synchronous four-column budget.
+        ExpectSame(records, Records(fresh.pass, gpu));
+        EXPECT_EQ(hash, fresh.pass.uploaded_input_hash());
+        ExpectReused(RebuildAttributed(pass, chunks, 3, FoliagePass::Preparation::Complete), gpu);
+    }
+}
+
+TEST_F(FoliageRebuildTest, CompleteCaptureMatchesFreshBuildWithBlockedAndStaleWorkers) {
+    for (const bool gpu : {false, true}) {
+        SCOPED_TRACE(gpu);
+        ParkedFoliageJobs executor;
+        ScopedPass scoped;
+        auto& pass = scoped.pass;
+        ASSERT_NO_FATAL_FAILURE(Initialize(pass, gpu));
+        pass.use_rendered_ground();
+        pass.attach_job_system(&executor.jobs);
+        pass.set_evidence_enabled(true);
+        pass.set_fade_distances(900, 1000);
+        auto chunks = SupportedChunks(6);
+        for (int column = 0; column < 6; ++column)
+            UploadGround(pass, static_cast<Luminumbra::ChunkID>(column + 1), {column, 0, 0});
+        pass.begin_ground_frame();
+        EXPECT_EQ(RebuildAttributed(pass, chunks, 1).worker_dispatched, 4u);
+        UploadGround(pass, 1, {0, 0, 0}, 6);
+        chunks[1].origin.x += 0.5f;
+        // Admission is exhausted and the worker is still parked. A capture must
+        // nevertheless be complete, including the edited support and footprint.
+        const auto captured =
+            RebuildAttributed(pass, chunks, 1, FoliagePass::Preparation::Complete);
+        EXPECT_EQ(captured.worker_dispatched, 0u);
+        EXPECT_EQ(captured.admitted_columns, chunks.size());
+        EXPECT_FALSE(captured.backlog);
+        const auto records = Records(pass, gpu);
+        ASSERT_FALSE(records.empty());
+        const auto hash = pass.uploaded_input_hash();
+        if (gpu)
+            ASSERT_TRUE(hash.has_value());
+        EXPECT_EQ(executor.jobs.get_runtime_stats().queue_depth, 4u);
+
+        executor.drain();
+        pass.begin_ground_frame();
+        const auto completed = RebuildAttributed(pass, chunks, 2);
+        EXPECT_EQ(completed.worker_completed, 4u);
+        EXPECT_EQ(completed.worker_stale_rejected, 2u);
+        ExpectSame(records, Records(pass, gpu));
+        EXPECT_EQ(hash, pass.uploaded_input_hash());
+
+        ScopedPass fresh;
+        ASSERT_NO_FATAL_FAILURE(Initialize(fresh.pass, gpu));
+        fresh.pass.use_rendered_ground();
+        fresh.pass.set_evidence_enabled(true);
+        fresh.pass.set_fade_distances(900, 1000);
+        for (int column = 0; column < 6; ++column)
+            UploadGround(fresh.pass,
+                         static_cast<Luminumbra::ChunkID>(column + 1),
+                         {column, 0, 0},
+                         column == 0 ? 6.0f : 8.0f);
+        Rebuild(fresh.pass, chunks, 1);
+        Rebuild(fresh.pass, chunks, 2);
+        ExpectSame(records, Records(fresh.pass, gpu));
+        EXPECT_EQ(hash, fresh.pass.uploaded_input_hash());
+    }
+}
+
+TEST_F(FoliageRebuildTest,
+       WorkerInputHashAndInstanceBytesMatchFreshGpuBuildInEveryCompletionOrder) {
+    std::array<int, 3> order{0, 1, 2};
+    do {
+        std::array<ParkedFoliageJobs, 3> executors;
+        Luminumbra::JobSystem consumer_jobs;
+        consumer_jobs.startup(1);
+        ScopedPass scoped;
+        auto& pass = scoped.pass;
+        ASSERT_NO_FATAL_FAILURE(Initialize(pass));
+        pass.use_rendered_ground();
+        pass.set_evidence_enabled(true);
+        const auto chunks = SupportedChunks(3);
+        for (int column = 0; column < 3; ++column)
+            UploadGround(pass,
+                         static_cast<Luminumbra::ChunkID>(column + 1),
+                         {column, 0, 0},
+                         static_cast<float>(column + 6));
+        std::uint64_t frame = 0;
+        for (std::size_t index = 0; index < executors.size(); ++index) {
+            pass.attach_job_system(&executors[index].jobs);
+            const std::vector<FoliagePass::ChunkScatter> prefix(
+                chunks.begin(), chunks.begin() + static_cast<std::ptrdiff_t>(index + 1));
+            EXPECT_EQ(RebuildAttributed(pass, prefix, ++frame).worker_dispatched, 1u);
+        }
+        // Keep a live executor attached while releasing the three independent
+        // submissions in each permutation. No synchronous fallback can fill a
+        // pending surface and hide completion-order bugs.
+        pass.attach_job_system(&consumer_jobs);
+        for (const int index : order) {
+            executors[static_cast<std::size_t>(index)].drain();
+            const auto completed = RebuildAttributed(pass, chunks, ++frame);
+            EXPECT_EQ(completed.worker_completed, 1u);
+            EXPECT_EQ(completed.worker_stale_rejected, 0u);
+            EXPECT_EQ(completed.worker_dispatched, 0u);
+            EXPECT_EQ(completed.surface_misses, 0u);
+            EXPECT_EQ(completed.dirty_columns, 1u);
+        }
+        const auto records = GpuRecords();
+        ASSERT_FALSE(records.empty());
+        const auto hash = pass.uploaded_input_hash();
+        ASSERT_TRUE(hash);
+        EXPECT_EQ(hash, LegacyUploadedHash(pass, chunks.size()));
+        ScopedPass fresh;
+        ASSERT_NO_FATAL_FAILURE(Initialize(fresh.pass));
+        fresh.pass.use_rendered_ground();
+        fresh.pass.set_evidence_enabled(true);
+        for (int column = 0; column < 3; ++column)
+            UploadGround(fresh.pass,
+                         static_cast<Luminumbra::ChunkID>(column + 1),
+                         {column, 0, 0},
+                         static_cast<float>(column + 6));
+        Rebuild(fresh.pass, chunks, frame);
+        EXPECT_EQ(hash, fresh.pass.uploaded_input_hash());
+        ExpectSame(records, GpuRecords());
+    } while (std::next_permutation(order.begin(), order.end()));
+}
+
+TEST_F(FoliageRebuildTest, WorkerAdmissionBoundsEveryFrameAndLeavesAFloodedExecutorAlone) {
+    for (const bool gpu : {false, true}) {
+        ParkedFoliageJobs executor;
+        ScopedPass scoped;
+        auto& pass = scoped.pass;
+        ASSERT_NO_FATAL_FAILURE(Initialize(pass, gpu));
+        pass.use_rendered_ground();
+        pass.attach_job_system(&executor.jobs);
+        pass.set_fade_distances(900, 1000);
+        const auto chunks = SupportedChunks(12);
+        for (int column = 0; column < 12; ++column)
+            UploadGround(pass, static_cast<Luminumbra::ChunkID>(column + 1), {column, 0, 0});
+        pass.begin_ground_frame();
+        const auto first = RebuildAttributed(pass, chunks, 1);
+        EXPECT_EQ(first.worker_dispatched, 4u);
+        EXPECT_EQ(executor.jobs.get_runtime_stats().queue_depth, 4u);
+        EXPECT_EQ(RebuildAttributed(pass, chunks, 1).worker_dispatched, 0u);
+        EXPECT_EQ(executor.jobs.get_runtime_stats().queue_depth, 4u);
+        pass.begin_ground_frame();
+        const auto second = RebuildAttributed(pass, chunks, 2);
+        EXPECT_EQ(second.worker_dispatched, 4u);
+        EXPECT_EQ(executor.jobs.get_runtime_stats().queue_depth, 8u);
+        pass.begin_ground_frame();
+        const auto third = RebuildAttributed(pass, chunks, 3);
+        EXPECT_EQ(third.worker_dispatched, 0u);
+        EXPECT_EQ(third.worker_queue_age_frames, 2u);
+        EXPECT_EQ(executor.jobs.get_runtime_stats().queue_depth, 8u);
+        // Destroying the pass with queued jobs is safe: each job owns only
+        // immutable snapshots, and the executor drains after the pass is gone.
+    }
+    ParkedFoliageJobs executor;
+    auto calls = std::make_shared<std::atomic<int>>(0);
+    for (std::size_t index = 0; index < 64; ++index)
+        ASSERT_TRUE(executor.jobs.try_dispatch(
+            +[](void* data) { static_cast<std::atomic<int>*>(data)->fetch_add(1); }, calls, 64));
+    ScopedPass scoped;
+    ASSERT_NO_FATAL_FAILURE(Initialize(scoped.pass));
+    scoped.pass.use_rendered_ground();
+    scoped.pass.attach_job_system(&executor.jobs);
+    const auto deferred = RebuildAttributed(scoped.pass, SupportedChunks(1), 1);
+    EXPECT_EQ(deferred.worker_dispatched, 0u);
+    EXPECT_TRUE(deferred.backlog);
+    EXPECT_EQ(executor.jobs.get_runtime_stats().queue_depth, 64u);
 }
 
 } // namespace

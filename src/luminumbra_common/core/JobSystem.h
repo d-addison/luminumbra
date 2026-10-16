@@ -54,6 +54,13 @@ public:
     void startup(std::size_t worker_count = 0);
     void shutdown();
     void dispatch(Job job, JobPriority priority = JobPriority::Normal);
+    // Nonblocking admission under the queue lock. The shared payload owns all
+    // task state until execution finishes; no callable wrapper is allocated.
+    // Rejects when either lane's combined depth reaches queue_limit, or closed.
+    bool try_dispatch(void (*task)(void*),
+                      std::shared_ptr<void> payload,
+                      std::size_t queue_limit,
+                      JobPriority priority = JobPriority::Normal);
     JobHandle dispatch_batch(const std::vector<Job>& jobs,
                              JobPriority priority = JobPriority::Normal);
     void wait(const JobHandle& handle);
@@ -74,6 +81,8 @@ private:
     struct PooledJob {
         Job job;
         std::shared_ptr<JobCompletionState> completion;
+        void (*task)(void*) = nullptr;
+        std::shared_ptr<void> payload;
     };
 
     // a contiguous ring buffer of PooledJob slots.

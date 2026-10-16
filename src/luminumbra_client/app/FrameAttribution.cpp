@@ -1,5 +1,6 @@
 #include "FrameAttribution.h"
 
+#include <algorithm>
 #include <iomanip>
 #include <locale>
 #include <ostream>
@@ -113,6 +114,11 @@ void record_foliage_rebuild(const FoliageRebuild& rebuild,
     total.hashed_bytes += rebuild.hashed_bytes;
     total.uploaded_bytes += rebuild.uploaded_bytes;
     total.dirty_columns += rebuild.dirty_columns;
+    total.worker_dispatched += rebuild.worker_dispatched;
+    total.worker_completed += rebuild.worker_completed;
+    total.worker_stale_rejected += rebuild.worker_stale_rejected;
+    total.worker_queue_age_frames =
+        std::max(total.worker_queue_age_frames, rebuild.worker_queue_age_frames);
     total.scratch_bytes += rebuild.scratch_bytes;
     total.backlog = total.backlog || rebuild.backlog;
     frame.rebuild_ms += milliseconds;
@@ -134,7 +140,8 @@ void write_csv_header(std::ostream& out) {
            "rebuild_calls,reason_mask,admitted_columns,surface_misses,deferred_columns,copied_"
            "bytes,"
            "hashed_bytes,uploaded_bytes,scratch_bytes,backlog,path,fallback,"
-           "instance_capacity,generated_count,count_generation,dirty_columns\n";
+           "instance_capacity,generated_count,count_generation,dirty_columns,worker_dispatched,"
+           "worker_completed,worker_stale_rejected,worker_queue_age_frames\n";
 }
 bool write_csv_row(std::ostream& out,
                    std::uint64_t frame,
@@ -165,7 +172,9 @@ bool write_csv_row(std::ostream& out,
     out << ',';
     if (count_known)
         out << count_generation;
-    out << ',' << foliage.dirty_columns;
+    out << ',' << foliage.dirty_columns << ',' << foliage.worker_dispatched << ','
+        << foliage.worker_completed << ',' << foliage.worker_stale_rejected << ','
+        << foliage.worker_queue_age_frames;
     out << '\n';
     return out.good();
 }

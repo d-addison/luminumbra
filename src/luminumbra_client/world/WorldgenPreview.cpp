@@ -365,15 +365,12 @@ bool WorldgenPreview::tick(float dt) {
 }
 
 void WorldgenPreview::rebuild_foliage_if_needed(Rendering::RenderPipeline& pipeline) {
-    // build the deterministic per-chunk foliage scatter ONCE per actual
-    // world rebuild (cached by m_rebuild_generation), mirroring the live-game
-    // path (main_client normal-play rebake).: the FoliagePass hashes
-    // nothing into world_hash.
+    // Cache scatter inputs per world generation, but rebuild against current
+    // support each frame: terrain uploads may still be arriving after adoption.
+    // Complete preparation keeps the diorama independent of worker scheduling;
+    // unchanged inputs are elided by the pass.
     if (m_world == nullptr) {
         return;
-    }
-    if (m_last_foliage_generation == m_rebuild_generation) {
-        return; // already built for this world rebuild
     }
     Rendering::FoliagePass* foliage = pipeline.foliage();
     if (foliage == nullptr) {
@@ -396,36 +393,39 @@ void WorldgenPreview::rebuild_foliage_if_needed(Rendering::RenderPipeline& pipel
     // Build the per-chunk scatter inputs from the live world's renderable chunks —
     // derived EXACTLY like the real path (chunk origin/extent, biome id, biome
     // vegetation density), so the preview scatter matches the game.
-    m_foliage_scatter.clear();
-    const auto& renderable = m_world->get_renderable_chunks();
-    m_foliage_scatter.reserve(renderable.size());
-    for (const Luminumbra::Chunk* chunk : renderable) {
-        if (chunk == nullptr) {
-            continue;
+    if (m_last_foliage_generation != m_rebuild_generation) {
+        m_foliage_scatter.clear();
+        const auto& renderable = m_world->get_renderable_chunks();
+        m_foliage_scatter.reserve(renderable.size());
+        for (const Luminumbra::Chunk* chunk : renderable) {
+            if (chunk == nullptr) {
+                continue;
+            }
+            const Luminumbra::IVec3 c = chunk->get_coords();
+            const float origin_x = static_cast<float>(c.x * Luminumbra::CHUNK_SIZE_X);
+            const float origin_z = static_cast<float>(c.z * Luminumbra::CHUNK_SIZE_Z);
+            const float center_x = origin_x + Luminumbra::CHUNK_SIZE_X * 0.5f;
+            const float center_z = origin_z + Luminumbra::CHUNK_SIZE_Z * 0.5f;
+            const float surf_h = m_world->GetTerrainHeightAt(center_x, center_z);
+            // Only the chunk straddling the surface column contributes scatter (skip
+            // clearly sub-surface / sky chunks).
+            const float chunk_y0 = static_cast<float>(c.y * Luminumbra::CHUNK_SIZE_Y);
+            if (surf_h < chunk_y0 || surf_h >= chunk_y0 + Luminumbra::CHUNK_SIZE_Y) {
+                continue;
+            }
+            const Luminumbra::u8 biome_id = m_world->BiomeIdAt(center_x, center_z);
+            const float density = m_world->biomes_enabled()
+                                      ? m_world->biome_table().vegetation_for(biome_id).density
+                                      : 0.3f; // default temperate density when biomes are off
+            Rendering::FoliagePass::ChunkScatter cs;
+            cs.chunk_xz = glm::ivec2(c.x, c.z);
+            cs.origin = glm::vec3(origin_x, 0.0f, origin_z);
+            cs.extent_m = static_cast<float>(Luminumbra::CHUNK_SIZE_X);
+            cs.biome_id = biome_id;
+            cs.density = density;
+            m_foliage_scatter.push_back(cs);
         }
-        const Luminumbra::IVec3 c = chunk->get_coords();
-        const float origin_x = static_cast<float>(c.x * Luminumbra::CHUNK_SIZE_X);
-        const float origin_z = static_cast<float>(c.z * Luminumbra::CHUNK_SIZE_Z);
-        const float center_x = origin_x + Luminumbra::CHUNK_SIZE_X * 0.5f;
-        const float center_z = origin_z + Luminumbra::CHUNK_SIZE_Z * 0.5f;
-        const float surf_h = m_world->GetTerrainHeightAt(center_x, center_z);
-        // Only the chunk straddling the surface column contributes scatter (skip
-        // clearly sub-surface / sky chunks).
-        const float chunk_y0 = static_cast<float>(c.y * Luminumbra::CHUNK_SIZE_Y);
-        if (surf_h < chunk_y0 || surf_h >= chunk_y0 + Luminumbra::CHUNK_SIZE_Y) {
-            continue;
-        }
-        const Luminumbra::u8 biome_id = m_world->BiomeIdAt(center_x, center_z);
-        const float density = m_world->biomes_enabled()
-                                  ? m_world->biome_table().vegetation_for(biome_id).density
-                                  : 0.3f; // default temperate density when biomes are off
-        Rendering::FoliagePass::ChunkScatter cs;
-        cs.chunk_xz = glm::ivec2(c.x, c.z);
-        cs.origin = glm::vec3(origin_x, 0.0f, origin_z);
-        cs.extent_m = static_cast<float>(Luminumbra::CHUNK_SIZE_X);
-        cs.biome_id = biome_id;
-        cs.density = density;
-        m_foliage_scatter.push_back(cs);
+        m_last_foliage_generation = m_rebuild_generation;
     }
 
     // No wind in the static diorama (the shader still animates sway via u_time);
@@ -435,9 +435,8 @@ void WorldgenPreview::rebuild_foliage_if_needed(Rendering::RenderPipeline& pipel
     foliage->rebuild_instances(m_foliage_scatter,
                                &Rendering::FoliageSurfaceQuery,
                                &ctx,
-                               glm::vec3(kCenterX, kCenterY, kCenterZ));
-
-    m_last_foliage_generation = m_rebuild_generation;
+                               glm::vec3(kCenterX, kCenterY, kCenterZ),
+                               Rendering::FoliagePass::Preparation::Complete);
 }
 
 void WorldgenPreview::configure_camera(Rendering::Camera& cam) const {
