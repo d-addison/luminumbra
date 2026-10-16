@@ -272,8 +272,17 @@ non-cancelling groups, preserving their individual evidence. PR runs retain ref
 batching and cancellation where previously configured, so `ready_for_review`
 supersedes earlier draft runs and `converted_to_draft` cancels in-flight ready
 runs. Authoring PR runs retain their independent, non-cancelling behaviour.
-The authoring workflow keeps its existing path triggers; UCRT attribution keeps
-its PR/manual-only triggers. Scheduled and release routing stays unchanged.
+The authoring workflow keeps its existing path triggers. The diagnostic
+`ucrt-attribution.yml` workflow is not a required check. Its devel PR triggers
+cover the workflow itself, `tools/ci/ucrt_attribution.sh`,
+`tools/ci/test_ucrt_attribution.py`, `tools/ci/test_ucrt_gcc_cohort.py`,
+`tools/ci/check_worldgen_probe_smoke.py`,
+`tools/ci/test_check_worldgen_probe_smoke.py`, and
+`test/diagnostics/worldgen_probe.cpp`. Devel pushes cover those same paths plus
+`tools/CMakeLists.txt` and `test/CMakeLists.txt`, catching probe build changes
+after merge. Attribution also runs weekly on Sunday at 04:43 UTC on the default
+branch and supports manual dispatch. Other scheduled and release routing stays
+unchanged.
 
 All runners remain standard hosted runners; no paid actions, larger/GPU runners,
 or repository visibility changes are introduced.
