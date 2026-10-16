@@ -508,6 +508,19 @@ bool SHIELD_WorldSystem::generation_batch_outstanding() const {
     return !m_streaming_state.generation_batches.empty();
 }
 
+std::size_t SHIELD_WorldSystem::pending_publication_chunks() const {
+    std::size_t pending = m_streaming_state.promotion_job_chunks.size() +
+                          m_streaming_state.pending_promotion_mesh.size();
+    // Streaming updates bound FIFO depths to kMaxGenerationBatchesInFlight (3)
+    // and kMaxMeshingBatchesInFlight (9); boot generation callers drain explicitly.
+    // No per-chunk scan or worker-counter read.
+    for (const auto& batch : m_streaming_state.generation_batches)
+        pending += batch.chunks.size();
+    for (const auto& batch : m_streaming_state.meshing_batches)
+        pending += batch.chunks.size();
+    return pending;
+}
+
 bool SHIELD_WorldSystem::sim_available_lod0(const ::Luminumbra::Chunk& chunk) {
     // Barrier-era definition: the LOD0 render mesh has published. The
     // activation queue redefines this to tick-keyed availability at the
@@ -771,14 +784,14 @@ void SHIELD_WorldSystem::process_completed_promotion_jobs(bool force) {
     }
 }
 
-void SHIELD_WorldSystem::dispatch_promotion_jobs(
-    const std::vector<MeshingWorkItem>& chunks_to_promote) {
+std::size_t
+SHIELD_WorldSystem::dispatch_promotion_jobs(const std::vector<MeshingWorkItem>& chunks_to_promote) {
     process_completed_promotion_jobs(/*force=*/false);
     if (promotion_jobs_active()) {
         // One promotion batch in flight at a time (the meshing lane's
         // semantics); refused items re-candidate on a later pass, exactly as
         // a refused meshing dispatch would.
-        return;
+        return 0;
     }
 
     std::vector<Luminumbra::Job> high_priority_jobs;
@@ -860,6 +873,7 @@ void SHIELD_WorldSystem::dispatch_promotion_jobs(
         }
         process_completed_promotion_jobs(/*force=*/true);
     }
+    return chunks_to_promote.size();
 }
 
 void SHIELD_WorldSystem::reinitialize_noise(const TerrainGenParams* params,
@@ -2883,9 +2897,6 @@ void SHIELD_WorldSystem::update(entt::registry& registry,
                                  activation_ran_this_tick || !m_last_pass_drained;
     m_last_anchor_positions = anchor_positions;
     m_last_chunk_count = m_streaming_state.chunks.size();
-    // Hoisted out of the gated block: the queue-depth telemetry below (after the gate) reads it.
-    // Recomputed FRESH inside every non-elided pass (never a stale cross-frame dispatch input).
-    std::size_t terrain_meshing_backlog = 0;
     if (streaming_dirty) {
         // Snapshot meshed-chunk LODs per horizontal column so the candidate loop
         // below can cheaply detect coarse chunks whose transition skirts went
@@ -3057,7 +3068,7 @@ void SHIELD_WorldSystem::update(entt::registry& registry,
         }
 
         m_last_streaming_budget_stats.meshing_candidates = meshing_candidates.size();
-        terrain_meshing_backlog = 0;
+        std::size_t terrain_meshing_backlog = 0;
         for (const MeshingCandidate& candidate : meshing_candidates) {
             if (candidate.terrain_mesh_required) {
                 ++terrain_meshing_backlog;
@@ -3136,7 +3147,8 @@ void SHIELD_WorldSystem::update(entt::registry& registry,
         }
 
         if (!chunks_to_mesh_jobs.empty() && !meshing_job_active) {
-            dispatch_meshing_jobs(chunks_to_mesh_jobs);
+            m_last_streaming_budget_stats.submitted_meshing =
+                dispatch_meshing_jobs(chunks_to_mesh_jobs);
         }
 
         // Post-pass QUIESCENCE test (decides whether a FUTURE tick may elide — NOT whether THIS
@@ -3218,8 +3230,12 @@ void SHIELD_WorldSystem::update(entt::registry& registry,
         }
     }
 
+    // Pending items leave the candidate set at dispatch, even when their
+    // active mesh keeps them Ready. Count them through publication, plus
+    // candidates not submitted this frame (including a backpressured lane).
     const std::size_t queue_depth =
-        m_last_streaming_budget_stats.loading_chunks + terrain_meshing_backlog;
+        pending_publication_chunks() + (m_last_streaming_budget_stats.meshing_candidates -
+                                        m_last_streaming_budget_stats.submitted_meshing);
     ++m_streaming_telemetry_stats.frames_observed;
     m_streaming_telemetry_stats.last_queue_depth = queue_depth;
     m_streaming_telemetry_stats.peak_queue_depth =
@@ -5036,12 +5052,13 @@ JobHandle SHIELD_WorldSystem::dispatch_generation_jobs(
     return {}; // no batch dispatched (all requests skipped, or no job system)
 }
 
-void SHIELD_WorldSystem::dispatch_meshing_jobs(const std::vector<MeshingWorkItem>& chunks_to_mesh) {
+std::size_t
+SHIELD_WorldSystem::dispatch_meshing_jobs(const std::vector<MeshingWorkItem>& chunks_to_mesh) {
     process_completed_meshing_jobs(/*force=*/false);
     //  5b: refuse by FIFO depth (deterministic), not by raw job
     // activity. Refused items re-candidate on a later pass, as always.
     if (m_streaming_state.meshing_batches.size() >= kMaxMeshingBatchesInFlight) {
-        return;
+        return 0;
     }
 
     //  ( step 1): LOD0 promotions of chunks without a full
@@ -5087,11 +5104,12 @@ void SHIELD_WorldSystem::dispatch_meshing_jobs(const std::vector<MeshingWorkItem
     // dispatch_promotion_jobs' head can only ever see empty state from here),
     // rather than relying on the caller-side scheduling gate alone. Refused
     // items re-candidate on a later pass — the meshing lane's semantics.
+    std::size_t accepted_promotions = 0;
     if (!promotion_items.empty() && !promotion_pipeline_pending()) {
-        dispatch_promotion_jobs(promotion_items);
+        accepted_promotions = dispatch_promotion_jobs(promotion_items);
     }
     if (mesh_items.empty()) {
-        return;
+        return accepted_promotions;
     }
 
     // Snapshot meshed-chunk LODs per horizontal column once so the
@@ -5302,6 +5320,7 @@ void SHIELD_WorldSystem::dispatch_meshing_jobs(const std::vector<MeshingWorkItem
         m_streaming_state.meshing_batches.push_back(std::move(mesh_batch));
         process_completed_meshing_jobs(/*force=*/true);
     }
+    return accepted_promotions + mesh_items.size();
 }
 
 bool SHIELD_WorldSystem::publish_front_meshing_batch(bool force) {

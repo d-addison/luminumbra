@@ -8,6 +8,7 @@
 #include "luminumbra_common/world/ActiveRegionLedger.h"
 #include "luminumbra_common/world/Chunk.h"
 #include "luminumbra_common/world/GameSession.h"
+#include "luminumbra_common/world/MarchingCubes.h"
 #include "luminumbra_server/ServerStreamingBudget.h"
 #include "luminumbra_server/SimBudgetArtifact.h"
 
@@ -29,6 +30,208 @@ using TestSupport::CheckWork;
 using TestSupport::CompareWork;
 using TestSupport::WorkCounts;
 using TestSupport::WorkLimits;
+
+Systems::TerrainGenParams FlatWorkBudgetTerrain() {
+    auto params = Test::SyntheticTerrainParams();
+    params.base_amplitude = 0;
+    params.peaks_amplitude = 0;
+    params.height_offset = 32.5f;
+    params.continental_spline.clear();
+    params.caves_enabled = false;
+    return params;
+}
+
+std::uint64_t StreamingBacklog(const Systems::SHIELD_WorldSystem& world) {
+    const auto runtime = world.get_runtime_chunk_stats();
+    const auto& streaming = world.get_last_streaming_budget_stats();
+    // Loading, Meshing and Ready remesh/promotion items all belong to the
+    // publication queues. Idle chunks still need dispatch. Do not substitute
+    // worker activity: completed jobs can still be waiting for their due tick.
+    return world.pending_publication_chunks() + runtime.idle_chunks +
+           streaming.deferred_generation +
+           (streaming.meshing_candidates - streaming.submitted_meshing);
+}
+
+TEST(DeterministicWorkBudget, ReadyPendingLodKeepsBacklogUntilRemeshPublication) {
+    for (const bool needs_promotion : {false, true}) {
+        SCOPED_TRACE(needs_promotion);
+        const auto params = FlatWorkBudgetTerrain();
+        JobSystem jobs;
+        jobs.startup(1);
+        Systems::SHIELD_WorldSystem world(&jobs, nullptr, params, 1337);
+        world.debug_set_streaming_radius_cap(1);
+        entt::registry registry;
+        const Vec3 anchor{8, 35, 8};
+        auto chunk =
+            std::make_shared<Chunk>(Systems::SHIELD_WorldSystem::world_to_chunk_coords(anchor));
+        world.GenerateChunkData(*chunk, needs_promotion ? 2 : 1);
+        World::MarchingCubes::PolygoniseTerrain(world, *chunk, 0.0f, 2);
+        ASSERT_FALSE(chunk->mesh_vertices.empty());
+        ASSERT_FALSE(chunk->mesh_indices.empty());
+        chunk->current_lod = 1;
+        chunk->set_state(ChunkState::Ready);
+        ASSERT_TRUE(world.adopt_streamed_chunk(chunk));
+        const auto old_version = chunk->mesh_version.load();
+
+        world.begin_tick(1);
+        world.update(registry, anchor, nullptr);
+        ASSERT_EQ(world.get_last_streaming_budget_stats().scheduled_meshing, 1u);
+        ASSERT_EQ(chunk->get_state(), ChunkState::Ready);
+        ASSERT_EQ(chunk->pending_lod.load(), 0);
+        EXPECT_EQ(StreamingBacklog(world), 1u);
+
+        // Worker completion cannot settle an unpublished remesh. The next
+        // candidate scan sees no work because pending_lod already owns it.
+        world.quiesce_streaming_jobs_for_save();
+        world.begin_tick(2);
+        world.update(registry, std::vector<Vec3>{anchor}, nullptr);
+        const auto& streaming = world.get_last_streaming_budget_stats();
+        EXPECT_EQ(streaming.generation_candidates, 0u);
+        EXPECT_EQ(streaming.meshing_candidates, 0u);
+        EXPECT_EQ(streaming.scheduled_meshing, 0u);
+        EXPECT_EQ(StreamingBacklog(world), 1u);
+        EXPECT_EQ(world.get_streaming_telemetry_stats().last_queue_depth, 1u);
+
+        // The fixed activation latency is eight ticks for each stage.
+        world.begin_tick(8);
+        world.activate_due(8);
+        EXPECT_EQ(StreamingBacklog(world), 1u);
+        EXPECT_EQ(chunk->current_lod.load(), 1);
+        EXPECT_EQ(chunk->mesh_version.load(), old_version);
+        world.begin_tick(9);
+        world.activate_due(9);
+        if (needs_promotion) {
+            // Publishing sim truth dispatches stage B; the active coarse mesh
+            // remains Ready and the backlog stays nonzero until B publishes.
+            ASSERT_FALSE(chunk->sdf_data.empty());
+            EXPECT_EQ(chunk->get_state(), ChunkState::Ready);
+            EXPECT_EQ(chunk->pending_lod.load(), 0);
+            EXPECT_EQ(chunk->current_lod.load(), 1);
+            EXPECT_EQ(StreamingBacklog(world), 1u);
+            world.quiesce_streaming_jobs_for_save();
+            world.begin_tick(16);
+            world.activate_due(16);
+            EXPECT_EQ(StreamingBacklog(world), 1u);
+            world.begin_tick(17);
+            world.activate_due(17);
+        }
+        EXPECT_EQ(chunk->get_state(), ChunkState::Ready);
+        EXPECT_EQ(chunk->pending_lod.load(), -1);
+        EXPECT_EQ(chunk->current_lod.load(), 0);
+        EXPECT_EQ(chunk->mesh_version.load(), old_version + 1u);
+        EXPECT_EQ(StreamingBacklog(world), 0u);
+    }
+}
+
+TEST(DeterministicWorkBudget, InitialGenerationAndMeshingStayInBacklogUntilPublication) {
+    JobSystem jobs;
+    jobs.startup(1);
+    Systems::SHIELD_WorldSystem world(&jobs, nullptr, FlatWorkBudgetTerrain(), 1337);
+    entt::registry registry;
+    const Vec3 anchor{8, 35, 8};
+    const auto coords = Systems::SHIELD_WorldSystem::world_to_chunk_coords(anchor);
+    world.begin_tick(1);
+    world.dispatch_generation_jobs(std::vector<IVec3>{coords});
+    world.quiesce_streaming_jobs_for_save();
+    const auto chunk = world.find_streamed_chunk(coords);
+    ASSERT_NE(chunk, nullptr);
+    EXPECT_EQ(chunk->get_state(), ChunkState::Loading);
+    EXPECT_EQ(world.pending_publication_chunks(), 1u);
+    EXPECT_EQ(StreamingBacklog(world), 1u);
+    world.begin_tick(9);
+    world.activate_due(9);
+    EXPECT_EQ(chunk->get_state(), ChunkState::Idle);
+    EXPECT_EQ(world.pending_publication_chunks(), 0u);
+    EXPECT_EQ(StreamingBacklog(world), 1u);
+
+    world.update(registry, anchor, nullptr);
+    world.quiesce_streaming_jobs_for_save();
+    EXPECT_EQ(chunk->get_state(), ChunkState::Meshing);
+    EXPECT_EQ(world.pending_publication_chunks(), 1u);
+    EXPECT_EQ(StreamingBacklog(world), 1u);
+    EXPECT_EQ(world.get_streaming_telemetry_stats().last_queue_depth, 1u);
+    world.begin_tick(17);
+    world.activate_due(17);
+    EXPECT_EQ(chunk->get_state(), ChunkState::Ready);
+    EXPECT_EQ(world.pending_publication_chunks(), 0u);
+    EXPECT_EQ(StreamingBacklog(world), 0u);
+}
+
+TEST(DeterministicWorkBudget, OccupiedPromotionLaneKeepsRefusedCandidatesInBacklog) {
+    for (const bool include_regular_remesh : {false, true}) {
+        SCOPED_TRACE(include_regular_remesh);
+        JobSystem jobs;
+        jobs.startup(1);
+        Systems::SHIELD_WorldSystem world(&jobs, nullptr, FlatWorkBudgetTerrain(), 1337);
+        world.debug_set_streaming_radius_cap(1);
+        entt::registry registry;
+        const Vec3 anchor{8, 35, 8};
+        const auto origin = Systems::SHIELD_WorldSystem::world_to_chunk_coords(anchor);
+        const std::array<IVec3, 4> offsets{
+            IVec3{0, 0, 0}, IVec3{1, 0, 0}, IVec3{0, 0, 1}, IVec3{1, 0, 1}};
+        std::array<std::shared_ptr<Chunk>, 4> chunks{};
+        for (std::size_t i = 0; i < chunks.size(); ++i) {
+            auto& chunk = chunks[i];
+            chunk = std::make_shared<Chunk>(origin + offsets[i]);
+            world.GenerateChunkData(*chunk, i == 3 ? 1 : 2);
+            World::MarchingCubes::PolygoniseTerrain(world, *chunk, 0.0f, 2);
+            ASSERT_FALSE(chunk->mesh_vertices.empty());
+            ASSERT_FALSE(chunk->mesh_indices.empty());
+            chunk->current_lod = 1;
+            chunk->set_state(ChunkState::Ready);
+        }
+        ASSERT_TRUE(world.adopt_streamed_chunk(chunks[0]));
+        world.begin_tick(1);
+        world.update(registry, anchor, nullptr);
+        world.quiesce_streaming_jobs_for_save();
+        ASSERT_EQ(chunks[0]->pending_lod.load(), 0);
+        ASSERT_EQ(world.pending_publication_chunks(), 1u);
+
+        ASSERT_TRUE(world.adopt_streamed_chunk(chunks[1]));
+        ASSERT_TRUE(world.adopt_streamed_chunk(chunks[2]));
+        if (include_regular_remesh)
+            ASSERT_TRUE(world.adopt_streamed_chunk(chunks[3]));
+        world.begin_tick(2);
+        world.update(registry, std::vector<Vec3>{anchor}, nullptr);
+        const std::size_t regular_remeshes = include_regular_remesh ? 1u : 0u;
+        const auto& streaming = world.get_last_streaming_budget_stats();
+        EXPECT_EQ(streaming.meshing_candidates, 2u + regular_remeshes);
+        EXPECT_EQ(streaming.scheduled_meshing, 2u + regular_remeshes);
+        EXPECT_EQ(streaming.deferred_meshing, 0u);
+        for (std::size_t i = 1; i <= 2; ++i) {
+            EXPECT_EQ(chunks[i]->get_state(), ChunkState::Ready);
+            EXPECT_EQ(chunks[i]->pending_lod.load(), -1);
+        }
+        // The occupied lane refuses both selected promotions. An ordinary
+        // remesh in the same batch is accepted, so only it leaves candidates.
+        EXPECT_EQ(world.pending_publication_chunks(), 1u + regular_remeshes);
+        EXPECT_EQ(world.get_streaming_telemetry_stats().last_queue_depth, 3u + regular_remeshes);
+        EXPECT_EQ(StreamingBacklog(world), 3u + regular_remeshes);
+
+        world.quiesce_streaming_jobs_for_save();
+        world.begin_tick(9);
+        world.activate_due(9);
+        world.update(registry, anchor, nullptr);
+        EXPECT_EQ(chunks[1]->pending_lod.load(), 0);
+        EXPECT_EQ(chunks[2]->pending_lod.load(), 0);
+        EXPECT_EQ(world.pending_publication_chunks(), 3u + regular_remeshes);
+        EXPECT_EQ(world.get_streaming_telemetry_stats().last_queue_depth, 3u + regular_remeshes);
+        EXPECT_EQ(StreamingBacklog(world), 3u + regular_remeshes);
+
+        world.begin_tick(17);
+        world.activate_due(17);
+        EXPECT_EQ(StreamingBacklog(world), 2u);
+        world.begin_tick(25);
+        world.activate_due(25);
+        EXPECT_EQ(StreamingBacklog(world), 0u);
+        const std::size_t adopted_chunks = 3u + regular_remeshes;
+        for (std::size_t i = 0; i < adopted_chunks; ++i) {
+            EXPECT_EQ(chunks[i]->get_state(), ChunkState::Ready);
+            EXPECT_EQ(chunks[i]->pending_lod.load(), -1);
+            EXPECT_EQ(chunks[i]->current_lod.load(), 0);
+        }
+    }
+}
 
 TEST(DeterministicWorkBudget, EveryPinnedLimitRejectsAnInjectedExcess) {
     const auto data = TestSupport::WorkBudgetData();
@@ -82,12 +285,7 @@ TEST(DeterministicWorkBudget, MissingOrExtraMeasurementsRefuse) {
 
 TEST(DeterministicWorkBudget, LiveSubsystemMovementEditAndDrainStayBounded) {
     const auto limits = WorkLimits("simulation");
-    auto params = Test::SyntheticTerrainParams();
-    params.base_amplitude = 0;
-    params.peaks_amplitude = 0;
-    params.height_offset = 32.5f;
-    params.continental_spline.clear();
-    params.caves_enabled = false;
+    const auto params = FlatWorkBudgetTerrain();
     JobSystem jobs;
     jobs.startup(1);
     // Destruction order keeps the worker host alive until the world drains.
@@ -122,6 +320,7 @@ TEST(DeterministicWorkBudget, LiveSubsystemMovementEditAndDrainStayBounded) {
     std::uint64_t previous_backlog = 0;
     std::uint64_t generated = 0, meshed = 0, queries = 0, copies = 0;
     bool drained = false;
+    std::uint64_t zero_backlog_step = 0;
     WorkCounts peak;
     for (std::uint64_t step = 1; step <= limits.at("drain_steps"); ++step) {
         SCOPED_TRACE(step);
@@ -151,9 +350,7 @@ TEST(DeterministicWorkBudget, LiveSubsystemMovementEditAndDrainStayBounded) {
         EXPECT_EQ(snapshot_work, snapshot.size() + renderable.size());
         const auto& streaming = world.get_last_streaming_budget_stats();
         const auto physics_work = physics.work_items();
-        const auto runtime = world.get_runtime_chunk_stats();
-        const auto backlog = runtime.loading_chunks + runtime.idle_chunks + runtime.meshing_chunks +
-                             streaming.deferred_generation + streaming.deferred_meshing;
+        const auto backlog = StreamingBacklog(world);
         const auto growth = backlog > previous_backlog ? backlog - previous_backlog : 0;
         previous_backlog = backlog;
         const WorkCounts observed{{"water_cells", water.cells_stepped_last_update()},
@@ -191,8 +388,20 @@ TEST(DeterministicWorkBudget, LiveSubsystemMovementEditAndDrainStayBounded) {
                       observed.at(std::string(luminumbra::simulation::kSimWorkNames[i])));
         }
         if (step >= 32 && backlog == 0) {
-            drained = true;
-            break;
+            if (zero_backlog_step == 0)
+                zero_backlog_step = step;
+            // Drive a full activation interval after zero backlog so another
+            // activation scan can reveal work hidden by the previous scan.
+            // These confirmation updates use the same per-step work budgets.
+            if (step - zero_backlog_step >=
+                static_cast<std::uint64_t>(streaming.update_interval_frames)) {
+                EXPECT_EQ(streaming.scheduled_generation, 0u);
+                EXPECT_EQ(streaming.scheduled_meshing, 0u);
+                drained = streaming.scheduled_generation == 0 && streaming.scheduled_meshing == 0;
+                break;
+            }
+        } else {
+            zero_backlog_step = 0;
         }
     }
     EXPECT_TRUE(drained) << "streaming backlog failed to reach zero within the pinned step bound";

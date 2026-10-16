@@ -41,10 +41,12 @@ a one-column streaming radius, one dynamic physics body, one local character,
 one server avatar, and one 8-by-8 fixed-point water tile. It moves at step 8 and
 edits resident terrain at step 24. Both streaming update overloads run, with
 tick-keyed activation. After the script ends, the fixture requires the backlog
-to reach zero within the pinned 64-step bound. Each step checks work ceilings;
-positive assertions prevent empty workloads from passing. The separate water
-tile and standalone physics scene keep their input sizes fixed while streaming
-changes. Streaming terrain collision is not installed in that physics scene.
+to reach zero and remain empty through another activation interval within the
+pinned 64-step bound. The confirming scan must schedule no new work. Each step
+checks work ceilings; positive assertions prevent empty workloads from passing.
+The separate water tile and standalone physics scene keep their input sizes
+fixed while streaming changes. Streaming terrain collision is not installed in
+that physics scene.
 
 The time-free `SimBudgetTelemetry::WorkItems()` trace extends simulation
 diagnostics with these units:
@@ -64,8 +66,13 @@ diagnostics with these units:
 These units describe inputs/submissions, not solver iterations or all terrain
 generation performed by synchronous editing/preparation APIs. Snapshot counts
 cover pointer snapshots, not deep SDF captures or render mesh metadata. The
-live fixture also bounds the resident loading/idle/meshing backlog and its
-positive growth. The existing generation and water counters retain their units.
+live fixture also bounds the unpublished generation/promotion/meshing items,
+idle chunks and deferred candidates, and their positive backlog growth. Ready
+chunks with an active mesh and pending LOD remain in that backlog until
+publication, even after their workers finish. Queue telemetry and the fixture
+subtract only accepted dispatches from meshing candidates; promotions refused
+by an occupied lane remain outstanding. The existing selection counters and
+work budgets are unchanged. The generation and water counters retain their units.
 
 Collection adds an optional `work_items` object with schema
 `luminumbra.sim_work.v1` to the enabled `sim_budget` artifact, with ordered named
