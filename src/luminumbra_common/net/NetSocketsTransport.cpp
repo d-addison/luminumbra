@@ -115,6 +115,12 @@ void NetSocketsTransport::HandleConnStatusChanged(SteamNetConnectionStatusChange
         case k_ESteamNetworkingConnectionState_ClosedByPeer:
         case k_ESteamNetworkingConnectionState_ProblemDetectedLocally:
             if (info->m_hConn == m_conn) {
+                if (m_close_reason.empty())
+                    m_close_reason = info->m_info.m_szEndDebug;
+                LUMINUMBRA_CORE_WARN("{}: connection ended ({}): {}",
+                                     m_name,
+                                     info->m_info.m_eEndReason,
+                                     m_close_reason);
                 // An established peer may still have messages beyond our local budget.
                 // Keep its handle until those messages and the local queue drain.
                 m_peer_closed = true;
@@ -173,6 +179,11 @@ void NetSocketsTransport::DrainInto() {
         const bool accepted =
             message->m_cbSize >= 0 &&
             m_recv.Push(message->m_pData, static_cast<std::size_t>(message->m_cbSize));
+        if (accepted) {
+            m_recv_delivery.push_back((message->m_nFlags & k_nSteamNetworkingSend_Reliable) != 0
+                                          ? FrameDelivery::Reliable
+                                          : FrameDelivery::Unreliable);
+        }
         message->Release();
         if (!accepted) {
             Close();
@@ -182,8 +193,18 @@ void NetSocketsTransport::DrainInto() {
 }
 
 bool NetSocketsTransport::TryReceiveFrame(std::vector<std::uint8_t>& out) {
+    FrameDelivery delivery = FrameDelivery::Reliable;
+    return TryReceiveFrameWithDelivery(out, delivery);
+}
+
+bool NetSocketsTransport::TryReceiveFrameWithDelivery(std::vector<std::uint8_t>& out,
+                                                      FrameDelivery& delivery) {
     DrainInto();
-    return m_recv.TryReceiveFrame(out);
+    if (!m_recv.TryReceiveFrame(out))
+        return false;
+    delivery = m_recv_delivery.front();
+    m_recv_delivery.pop_front();
+    return true;
 }
 
 bool NetSocketsTransport::IsPeerConnected() const {
@@ -192,10 +213,18 @@ bool NetSocketsTransport::IsPeerConnected() const {
 }
 
 void NetSocketsTransport::Close() {
+    CloseWithReason(m_close_reason.empty() ? "closing" : m_close_reason);
+}
+
+void NetSocketsTransport::CloseWithReason(const std::string& reason) {
+    // Cleanup and admission's disconnect observation retain the original cause.
+    if (m_close_reason.empty())
+        m_close_reason = reason;
     m_closed = true;
     m_recv.Close();
     if (m_conn != k_HSteamNetConnection_Invalid && m_backend.ready) {
-        SteamNetworkingSockets()->CloseConnection(m_conn, 0, "closing", true);
+        LUMINUMBRA_CORE_INFO("{}: closing connection: {}", m_name, m_close_reason);
+        SteamNetworkingSockets()->CloseConnection(m_conn, 0, m_close_reason.c_str(), true);
     }
     m_conn = k_HSteamNetConnection_Invalid;
     if (m_listen != k_HSteamListenSocket_Invalid && m_backend.ready) {
