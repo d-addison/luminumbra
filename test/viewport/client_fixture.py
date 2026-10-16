@@ -6,6 +6,7 @@ from pathlib import Path
 import struct
 import subprocess
 import sys
+import threading
 import time
 
 sys.path.insert(0, sys.argv[1])
@@ -16,9 +17,11 @@ key = bytes.fromhex(os.environ.pop('LUMINUMBRA_VIEWPORT_KEY'))
 project = Path(os.environ['LUMINUMBRA_VIEWPORT_PROJECT'])
 session = os.environ.pop('LUMINUMBRA_VIEWPORT_SESSION')
 ready_path = Path(os.environ.pop('LUMINUMBRA_VIEWPORT_READY'))
+# Intentional hangs below stay inside owned child processes. Parent watchdogs
+# terminate their job/process group without needing a lock held by this fixture.
 descendant = None
 if mode in ('descendant', 'startup-delay-descendant'):
-    descendant = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'],
+    descendant = subprocess.Popen([sys.executable, '-c', 'import threading; threading.Event().wait()'],
         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 child = {'session': session, 'pid': os.getpid(), 'broker_pid': os.getppid(),
     'descendant': descendant.pid if descendant else None,
@@ -31,7 +34,7 @@ if mode in ('startup-delay', 'startup-delay-descendant', 'startup-frame-delay'):
     while not (project / ('release-' + session)).exists():
         time.sleep(.01)
 elif mode == 'startup-hang':
-    time.sleep(60)
+    threading.Event().wait()
 elif mode == 'startup-exit':
     sys.exit(7)
 elif mode == 'startup-wrong-session':
@@ -45,8 +48,9 @@ if mode != 'startup-oversized':
 while True:
     state, _ = read_record(sys.stdin.buffer, key)
     if state['kind'] == 'stop':
+        (project / ('stop-received-' + session)).touch()
         if mode == 'stop-hang':
-            time.sleep(60)
+            threading.Event().wait()
         if mode in ('receipt', 'failure-receipt', 'large-receipt'):
             evidence = Path(os.environ['CLIENT_FIXTURE_EVIDENCE'])
             evidence.mkdir()
@@ -61,9 +65,11 @@ while True:
                 (evidence / 'session.json').write_bytes(b' ' * (1024 * 1024 + 1))
         sys.exit(0)
     if mode == 'hang':
-        time.sleep(60)
+        threading.Event().wait()
     if mode == 'startup-frame-delay':
-        time.sleep(2.2)
+        (project / ('frame-received-' + session)).touch()
+        while not (project / ('frame-release-' + session)).exists():
+            time.sleep(.01)
     pixels = state['state']['width'] * state['state']['height']
     color = state['state']['camera_revision'] % 256
     payload = bytes((color, 2, 3, 255)) * pixels + struct.pack('<f', .5) * pixels + bytes([1]) * pixels
