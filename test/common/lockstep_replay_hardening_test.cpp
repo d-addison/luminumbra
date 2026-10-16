@@ -431,6 +431,34 @@ TEST(LockstepCodecHardening, DecodeInputRejectsLyingPayloadLength) {
     EXPECT_FALSE(net::DecodeInput(frame, out));
 }
 
+TEST(LockstepCodecHardening, HugeLengthsAreRejectedAtEveryEnvelope) {
+    for (const std::uint32_t length : {0xFFFFFFFCu, 0xFFFFFFFDu, 0xFFFFFFFEu, 0xFFFFFFFFu}) {
+        SCOPED_TRACE(length);
+        std::vector<std::uint8_t> prefix;
+        for (int i = 0; i < 4; ++i)
+            prefix.push_back(static_cast<std::uint8_t>(length >> (8 * i)));
+
+        // The message envelope has no payload, only a type and a huge length.
+        std::vector<std::uint8_t> envelope{static_cast<std::uint8_t>(net::MessageType::Input)};
+        envelope.insert(envelope.end(), prefix.begin(), prefix.end());
+        net::InputMsg input;
+        EXPECT_FALSE(net::DecodeInput(envelope, input));
+
+        // Keep the outer length valid but corrupt the nested blob length.
+        auto blob = net::EncodeInput({});
+        for (std::size_t i = 0; i < prefix.size(); ++i)
+            blob[blob.size() - 4 + i] = prefix[i];
+        EXPECT_FALSE(net::DecodeInput(blob, input));
+
+        // Hash payload: [u64 tick][four length-prefixed strings].
+        auto strings = net::EncodeHash({});
+        for (std::size_t i = 0; i < prefix.size(); ++i)
+            strings[5 + 8 + i] = prefix[i];
+        net::HashMsg hash;
+        EXPECT_FALSE(net::DecodeHash(strings, hash));
+    }
+}
+
 // A frame decoded as the WRONG type must fail (type tag is checked).
 TEST(LockstepCodecHardening, DecodeRejectsTypeMismatch) {
     const auto hello = net::EncodeHello({});
