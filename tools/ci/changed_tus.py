@@ -340,7 +340,12 @@ def configured_header_inputs(root: Path, build_dir: Path) -> tuple[dict[Path, se
             if name == "CMakeLists.txt" and script.parent == root:
                 variables.update(CMAKE_CURRENT_SOURCE_DIR=str(root),
                                  CMAKE_CURRENT_BINARY_DIR=str(build_dir))
-            text = script.read_text(encoding="utf-8")
+            try:
+                text = script.read_text(encoding="utf-8")
+            except UnicodeError:
+                # An unreadable script cannot establish configure provenance.
+                incomplete = True
+                continue
             # Preserve quoted '#' while dropping comments. Bracket quoting is
             # outside this reader's grammar and cannot establish provenance.
             if re.search(r"\[=*\[", text):
@@ -426,7 +431,7 @@ def configured_header_inputs(root: Path, build_dir: Path) -> tuple[dict[Path, se
 def select(root: Path, entries: list[dict], changed: set[Path], jobs=2,
            build_dir: Path | None = None) -> tuple[list[dict], dict]:
     by_file = {entry["file"] for entry in entries}
-    direct, headers = set(), set()
+    sources, headers = set(), set()
     full = False
     for path in changed:
         relative = path.relative_to(root)
@@ -434,9 +439,7 @@ def select(root: Path, entries: list[dict], changed: set[Path], jobs=2,
         if suffix in SOURCE_SUFFIXES and first_party(relative):
             if path.exists():
                 resolved = path.resolve()
-                if resolved not in by_file:
-                    raise SelectionError(f"missing compile database entry (possibly disabled configuration): {relative}")
-                direct.add(resolved)
+                sources.add(resolved)
             else:
                 # A removed TU has nothing to compile, but can invalidate targets.
                 full = True
@@ -448,8 +451,14 @@ def select(root: Path, entries: list[dict], changed: set[Path], jobs=2,
     if (full or headers) and not entries:
         raise SelectionError("incomplete selection: no first-party compile database entries")
     scans = []
-    if full or headers:
+    if full or headers or sources:
         scans = parallel(dependencies, entries, jobs)
+    matched_sources = set().union(*scans) if scans else set()
+    missing_sources = sources - by_file - matched_sources
+    if missing_sources:
+        source = min(missing_sources)
+        raise SelectionError("missing compile database entry (possibly disabled configuration): "
+                             f"{source.relative_to(root)}")
     fallback = []
     if headers and not full:
         mappings, incomplete = configured_header_inputs(root, build_dir) if build_dir else ({}, True)
@@ -478,8 +487,9 @@ def select(root: Path, entries: list[dict], changed: set[Path], jobs=2,
             fallback.append("unresolved configure/copy relationships")
         full = bool(fallback)
     selected = []
+    changed_inputs = sources | headers
     for index, entry in enumerate(entries):
-        if full or entry["file"] in direct or (headers and scans[index] & headers):
+        if full or (scans and scans[index] & changed_inputs):
             if not entry["file"].is_file():
                 raise SelectionError(f"stale database entry for deleted TU: {entry['file']}")
             selected.append(entry)

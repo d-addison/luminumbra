@@ -40,7 +40,7 @@ class OfflineDependenciesTests(unittest.TestCase):
         self.addCleanup(patch.stopall)
 
     def fake_git(self, source, *args, **kwargs):
-        if args == ("rev-parse", "--verify", "HEAD^{commit}"):
+        if args == ("rev-parse", "--verify", "HEAD^0"):
             return self.commit
         if args == ("ls-tree", "-rz", "HEAD"):
             return ""
@@ -430,7 +430,7 @@ class OfflineDependenciesTests(unittest.TestCase):
             if args[:1] == ("checkout",):
                 (source / ".git").mkdir()
                 (source / "source").write_text("complete")
-            if args == ("rev-parse", "--verify", "HEAD^{commit}"):
+            if args == ("rev-parse", "--verify", "HEAD^0"):
                 return self.commit
             return ""
         self.git_mock.side_effect = snapshot_git
@@ -623,7 +623,50 @@ class CachedGitSafetyTests(unittest.TestCase):
     def write_alternates(self, objects, *targets):
         info = objects / "info"
         info.mkdir(parents=True, exist_ok=True)
-        (info / "alternates").write_text("\n".join(targets) + "\n")
+        # Alternate pathnames are LF-delimited even on Windows.
+        (info / "alternates").write_bytes(os.fsencode("\n".join(targets) + "\n"))
+
+    def test_alternate_fixture_uses_lf_path_delimiters(self):
+        objects = self.source / ".git/objects"
+        self.write_alternates(objects, "first", "second")
+        self.assertEqual((objects / "info/alternates").read_bytes(), b"first\nsecond\n")
+
+    def test_unicode_separators_are_preserved_in_contained_alternate_paths(self):
+        objects = self.source / ".git/objects"
+        before = self.lock.read_bytes()
+        for separator in ("\x85", "\u2028", "\u2029"):
+            with self.subTest(separator=separator):
+                alternate = self.cache / f"alternate{separator}objects"
+                alternate.mkdir()
+                self.write_alternates(objects, str(alternate))
+                state = self.cache_state()
+                deps.verify(self.root, self.cache, self.lock)
+                self.assertEqual(self.cache_state(), state)
+                self.assertEqual(self.lock.read_bytes(), before)
+
+    def test_alternate_path_separators_cannot_split_containment_checks(self):
+        objects = self.source / ".git/objects"
+        (self.cache / "x").mkdir()
+        (self.cache / "outside").mkdir()
+        # Each fragment alone is inside the cache; the actual pathname escapes.
+        # Refuse before pathname lookup so Windows also exercises these bytes.
+        for separator in (b"\v", b"\f", b"\r", b"\x1c", b"\x1d", b"\x1e",
+                          b"\xc2\x85", b"\xe2\x80\xa8", b"\xe2\x80\xa9"):
+            with self.subTest(separator=separator):
+                path = os.fsencode(self.cache) + b"/x" + separator + b"../../../outside\n"
+                (objects / "info/alternates").write_bytes(path)
+                with patch.object(deps.subprocess, "check_output", side_effect=AssertionError("Git ran")):
+                    with self.assertRaisesRegex(deps.DependencyError, "strictly inside"):
+                        deps.git_metadata(self.source, self.cache)
+                    self.assert_refused_without_writes()
+
+    def test_head_uses_commit_peeling_without_argument_globs(self):
+        expected = json.loads(self.lock.read_text())["dependencies"]["sample"]["commit"]
+        for ending in (b"\n", b"\r\n"):
+            with self.subTest(ending=ending), patch.object(
+                    deps.subprocess, "check_output", return_value=expected.encode("ascii") + ending) as run:
+                self.assertEqual(deps.head(self.source, self.cache), expected)
+                self.assertEqual(run.call_args.args[0][-3:], ["rev-parse", "--verify", "HEAD^0"])
 
     def test_common_directory_alternates_cannot_escape_cache(self):
         metadata = self.source / ".git"

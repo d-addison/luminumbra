@@ -64,7 +64,8 @@ class ChangedTranslationUnitsTests(unittest.TestCase):
     def fake_execute(self, command, directory, check=True):
         self.commands.append((command, directory))
         if "-M" in command:
-            source = self.a if str(self.a) in command else self.b
+            _, operands = tus.parse_arguments(command[:-3])
+            source = (directory / operands[0]).resolve()
             paths = [source, self.other, self.generated]
             # A transitive conditional header is consumed by only one target
             # variant, and a separate include is visible only to the analyzer.
@@ -78,6 +79,13 @@ class ChangedTranslationUnitsTests(unittest.TestCase):
     def select(self, changed):
         return tus.select(self.root, self.entries(), set(changed), 2, self.build)
 
+    def check_commands(self):
+        return [(command, directory) for command, directory in self.commands if "-M" not in command]
+
+    def compile_commands_by_variant(self):
+        # Workers may finish in either order; output names retain input indices.
+        return sorted(self.check_commands(), key=lambda item: int(Path(item[0][-1]).stem))
+
     def arguments(self, command="compile", **updates):
         values = dict(command=command, ccache=False, jobs=2,
                       config_file=Path(".clang-tidy"), also_ci_gate=False,
@@ -86,13 +94,56 @@ class ChangedTranslationUnitsTests(unittest.TestCase):
         values.update(updates)
         return argparse.Namespace(**values)
 
-    def test_changed_source_selects_every_command_variant_without_scanning(self):
+    def test_changed_source_selects_every_command_variant_after_scanning(self):
         self.raw.append(self.raw_entry(self.a, ["-DENABLE_FEATURE"]))
         self.save_db()
         selected, report = self.select([self.a])
         self.assertEqual([e["file"] for e in selected], [self.a, self.a])
-        self.assertEqual(report["scan_variants"], 0)
-        self.assertEqual(self.commands, [])
+        self.assertEqual(report["scan_variants"], 3)
+        self.assertEqual(len(self.commands), 6)
+        self.assertTrue(all("-M" in command for command, _ in self.commands))
+
+    def test_changed_source_selects_its_includers_in_both_contexts(self):
+        self.raw.append(self.raw_entry(self.b, ["-DENABLE_FEATURE"]))
+        self.raw[-1]["arguments"][0] = "clang++"
+        self.save_db()
+        execute = self.fake_execute
+
+        def including_execute(command, directory, check=True):
+            result = execute(command, directory, check)
+            if str(self.b) in command and ("-DENABLE_FEATURE" in command
+                                          or "-D__clang_analyzer__" in command):
+                escaped = str(self.a).replace(" ", "\\ ")
+                result.stdout = result.stdout.rstrip("\n") + " " + escaped + "\n"
+            return result
+
+        self.mock_execute.side_effect = including_execute
+        selected, report = self.select([self.a])
+        self.assertEqual([e["file"] for e in selected], [self.a, self.b, self.b])
+        self.assertEqual(report["scan_variants"], 3)
+        self.assertFalse(report["full_selection"])
+        self.assertEqual(len(self.commands), 6)
+
+    def test_included_only_source_selects_only_consuming_variants(self):
+        included = self.src / "included.cpp"
+        included.write_text("// included fixture\n", encoding="utf-8")
+        self.raw.append(self.raw_entry(self.b, ["-DENABLE_FEATURE"]))
+        self.save_db()
+
+        def scan(entry):
+            return {entry["file"]} | ({included} if "-DENABLE_FEATURE" in entry["arguments"] else set())
+
+        with patch.object(tus, "dependencies", side_effect=scan):
+            selected, report = self.select([included])
+        self.assertEqual(len(selected), 1)
+        self.assertEqual(selected[0]["file"], self.b)
+        self.assertIn("-DENABLE_FEATURE", selected[0]["arguments"])
+        self.assertFalse(report["full_selection"])
+
+    def test_failed_source_scan_never_silently_omits_includers(self):
+        self.mock_execute.side_effect = tus.SelectionError("scan failed")
+        with self.assertRaisesRegex(tus.SelectionError, "scan failed"):
+            self.select([self.a])
 
     def test_transitive_headers_scan_actual_flags_in_both_contexts(self):
         self.raw.append(self.raw_entry(self.a, ["-DENABLE_FEATURE"]))
@@ -305,12 +356,20 @@ class ChangedTranslationUnitsTests(unittest.TestCase):
         self.assertEqual(tus.configured_header_inputs(self.root, self.build), ({}, True))
 
     def test_engine_version_script_requires_full_scope_for_control_flow(self):
-        declaration = (ROOT / "cmake/engine_version.cmake").read_text()
+        declaration = (ROOT / "cmake/engine_version.cmake").read_text(encoding="utf-8")
         self.assertIn('"${CMAKE_SOURCE_DIR}/src/luminumbra_common/core/EngineVersion.h.in"', declaration)
         self.assertIn("if(Git_FOUND)", declaration)
         mappings, incomplete = tus.configured_header_inputs(ROOT, self.build)
         self.assertEqual(mappings, {})
         self.assertTrue(incomplete)
+
+    def test_non_utf8_cmake_script_requires_full_scope(self):
+        (self.root / "external.cmake").write_bytes(b"# legacy comment: \x92\n")
+        self.assertEqual(tus.configured_header_inputs(self.root, self.build), ({}, True))
+        selected, report = self.select([self.header])
+        self.assertEqual([e["file"] for e in selected], [self.a, self.b])
+        self.assertTrue(report["full_selection"])
+        self.assertIn("unresolved configure/copy relationships", report["selection_fallback"])
 
     def test_cmake_fallback_reason_is_printed_and_inputs_are_unchanged(self):
         self.assert_unproven_cmake_selects_full_scope('if(OFF)\nendif()\n')
@@ -404,8 +463,13 @@ class ChangedTranslationUnitsTests(unittest.TestCase):
         newline.write_text("source")
         self.raw = [self.raw_entry(newline)]
         self.save_db()
-        selected, _ = self.select([newline])
+        # Selection preserves pathname bytes when a dependency graph is known.
+        # Make output cannot encode this name unambiguously; scanning refuses it.
+        with patch.object(tus, "dependencies", return_value={newline}):
+            selected, _ = self.select([newline])
         self.assertEqual(selected[0]["file"], newline)
+        with self.assertRaisesRegex(tus.SelectionError, "incomplete dependency scan"):
+            self.select([newline])
 
     def test_relative_database_source_and_shell_quoted_command(self):
         self.raw[0]["file"] = os.path.relpath(self.a, self.build)
@@ -624,7 +688,8 @@ class ChangedTranslationUnitsTests(unittest.TestCase):
                     self.assertEqual([entry["file"] for entry in selected], [self.b])
                     command = tus.compile_command(selected[0], self.build / "isolated.o")
                     self.assertEqual(command[1:5], [option, str(self.a), "-x", "c++"])
-        self.assertEqual(self.commands, [])
+        self.assertEqual(len(self.commands), 8)
+        self.assertTrue(all("-M" in command for command, _ in self.commands))
 
     def test_database_requires_one_source_and_refuses_ambiguous_value_options(self):
         for arguments in (
@@ -722,8 +787,8 @@ class ChangedTranslationUnitsTests(unittest.TestCase):
         self.save_db()
         selected, _ = self.select([client, strict])
         tus.run_checks(self.arguments(), self.root, selected, self.build)
-        self.assertEqual(len(self.commands), 2)
-        for command, _ in self.commands:
+        self.assertEqual(len(self.check_commands()), 2)
+        for command, _ in self.check_commands():
             self.assertEqual(self.warning_options(command), [] if str(client) in command else strict_flags)
 
     def test_warning_exceptions_match_all_explicit_ci_definitions(self):
@@ -753,7 +818,7 @@ class ChangedTranslationUnitsTests(unittest.TestCase):
         self.save_db()
         selected, _ = self.select([self.a])
         tus.run_checks(self.arguments(), self.root, selected, self.build)
-        self.assertEqual([self.warning_options(c) for c, _ in self.commands], [[], flags])
+        self.assertEqual([self.warning_options(c) for c, _ in self.compile_commands_by_variant()], [[], flags])
 
     def test_c_source_does_not_receive_cxx_narrowing_option(self):
         source = self.src / "plain.c"
@@ -785,14 +850,20 @@ class ChangedTranslationUnitsTests(unittest.TestCase):
                     self.raw_entry(self.a, ["-DFEATURE", "-Wno-error"])]
         self.save_db()
         selected, _ = self.select([self.a])
-        tus.run_checks(self.arguments(warning_profile="msvc-approx"), self.root, selected, self.build)
-        for entry, (command, _) in zip(selected, self.commands):
+        def reverse_parallel(function, items, jobs):
+            return [function(item) for item in reversed(items)][::-1]
+
+        with patch.object(tus, "parallel", side_effect=reverse_parallel):
+            tus.run_checks(self.arguments(warning_profile="msvc-approx"), self.root, selected, self.build)
+        commands = self.compile_commands_by_variant()
+        self.assertEqual([int(Path(command[-1]).stem) for command, _ in commands], [0, 1])
+        for entry, (command, _) in zip(selected, commands):
             replay = tus.clean_arguments(entry["arguments"])
             self.assertEqual(command[:len(replay)], replay)
             self.assertEqual(command[len(replay):len(replay) + 4],
                              ["-Wshadow", "-Wconversion", "-Wnarrowing", "-Wsign-conversion"])
             self.assertEqual(command[-3], "-c")
-        self.assertEqual(len(self.commands), 2)
+        self.assertEqual(len(commands), 2)
 
     def test_profile_preserves_target_exceptions_and_existing_warning_families(self):
         for flags in ([], self.cmake_warning_flags(), ["-Wno-error"],
@@ -1105,7 +1176,7 @@ class ChangedTranslationUnitsTests(unittest.TestCase):
         self.save_db()
         selected, _ = self.select([self.a])
         tus.run_checks(self.arguments(), self.root, selected, self.build)
-        outputs = [Path(command[-1]) for command, _ in self.commands]
+        outputs = [Path(command[-1]) for command, _ in self.check_commands()]
         self.assertEqual(len(set(outputs)), 2)
         self.assertTrue(all(p.is_relative_to(self.root / "scratch") for p in outputs))
         self.assertTrue(all(not p.parent.exists() for p in outputs))
@@ -1174,8 +1245,8 @@ class ChangedTranslationUnitsTests(unittest.TestCase):
         selected, _ = self.select([source])
         with patch.object(tus.shutil, "which", return_value="clang-tidy"):
             tus.run_checks(self.arguments("tidy", also_ci_gate=True), self.root, selected, self.build)
-        self.assertEqual(len(self.commands), 1)
-        self.assertTrue(any(arg.startswith("--config-file=") for arg in self.commands[0][0]))
+        self.assertEqual(len(self.check_commands()), 1)
+        self.assertTrue(any(arg.startswith("--config-file=") for arg in self.check_commands()[0][0]))
 
     def test_suites_are_registered_and_retain_native_routing(self):
         commands = tus._PATHS.python_test_commands(ROOT)
@@ -1194,10 +1265,11 @@ class ChangedTranslationUnitsTests(unittest.TestCase):
         script = self.root / "scripts/tidy.sh"
         script.write_text(script.read_text().replace("tools/*.c|", "$dynamic/*.cpp|tools/*.c|"))
         selected, _ = self.select([self.a])
+        selection_commands = list(self.commands)
         with patch.object(tus.shutil, "which", return_value="clang-tidy"):
             with self.assertRaisesRegex(tus.SelectionError, "curated tidy file pattern"):
                 tus.run_checks(self.arguments("tidy", also_ci_gate=True), self.root, selected, self.build)
-        self.assertEqual(self.commands, [])
+        self.assertEqual(self.commands, selection_commands)
         self.assertEqual(list((self.root / "scratch").glob("local-checks-*")), [])
 
     def test_check_failures_propagate_and_cleanup(self):

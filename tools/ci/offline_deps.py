@@ -172,14 +172,16 @@ def git_metadata(source: Path, cache: Path) -> None:
         else:
             alternates = resolved / "info/alternates"
             if alternates.exists():
-                for line in alternates.read_text(encoding="utf-8").splitlines():
-                    if not line or line.startswith("#"):
+                # Git splits this file only on LF. Other separators, including
+                # CR, are pathname bytes and must not alter containment checks.
+                for line in alternates.read_bytes().split(b"\n"):
+                    if not line or line.startswith(b"#"):
                         continue
                     # Quoted encodings need Git's C-string parser; refuse
                     # rather than validate a different path from Git's input.
-                    if line.startswith('"') or "\0" in line:
+                    if line.startswith(b'"') or b"\0" in line:
                         raise DependencyError("unsupported Git alternate path encoding")
-                    redirect("objects", resolved / line, depth + 1)
+                    redirect("objects", resolved / os.fsdecode(line), depth + 1)
         active.remove(key)
         complete[key] = depth
 
@@ -216,7 +218,8 @@ def git(source: Path, *args: str, cache: Path, network=False) -> str:
 
 
 def head(source: Path, cache: Path) -> str:
-    return git(source, "rev-parse", "--verify", "HEAD^{commit}", cache=cache).strip()
+    # ^0 peels to a commit without braces that MSYS argument globbing expands.
+    return git(source, "rev-parse", "--verify", "HEAD^0", cache=cache).strip()
 
 
 def submodules(source: Path, cache: Path) -> dict:

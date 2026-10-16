@@ -54,7 +54,9 @@ allow HTTPS. Metadata symlinks and submodule gitdir, common-directory and
 alternate-object references must stay inside the cache; dangling metadata links
 are refused. Redirections are checked recursively, including relative alternate
 paths and alternates in common directories or other object stores. Blank and
-`#` comment lines in alternate lists are ignored. Redirection cycles and chains
+`#` comment lines in alternate lists are ignored. Only LF separates alternate
+paths; other separator bytes remain part of the pathname checked for containment.
+Write these lists with LF endings on every platform. Redirection cycles and chains
 deeper than 32 edges are refused, as are quoted alternate path encodings.
 Inherited object-directory and alternate-directory environment overrides are
 removed before Git runs. Top-level source `.git` directories cannot be symlinks.
@@ -176,8 +178,9 @@ owned by the current checkout and no longer in use.
 First-party TUs are `.c`, `.cc`, `.cpp` and `.cxx` files below `src/`,
 `include/`, `test/` and `tools/`, excluding the upstream RmlUi GL3 backend at
 `src/luminumbra_client/ui/gl3/`. Changed sources select every database command
-variant. Changed headers scan every configured first-party variant using its
-actual compiler, defines, include paths and working directory, both normally
+variant and the variants that include them. Changed sources and headers scan
+every configured first-party variant using its actual compiler, defines, include
+paths and working directory, both normally
 and with `__clang_analyzer__`. Transitive, conditional and generated headers
 are included. New headers are scanned too, so newly shadowing includes count.
 Literal `configure_file`, `file(COPY_FILE)` and single-file `file(COPY)` outputs
@@ -195,8 +198,10 @@ reason included in the report. Header edits never silently select no work.
 Deleted sources/headers and build/flag/dependency or unknown native inputs
 select the full configured scope. Scans which fail, omit the TU, name missing
 dependencies, or cannot be parsed fail the check. Missing changed-TU database
-entries fail even for optional backends. Unsupported wrappers, response files,
-plugins, modules and flags creating extra outputs fail visibly. Compiler
+entries fail even for optional backends, unless dependency scans prove that the
+source is an included-only input consumed by configured translation units.
+Unsupported wrappers, response files, plugins, modules and flags creating extra
+outputs fail visibly. Compiler
 options use an allowlist; unknown options are refused before execution. Exact
 codegen flags include PIC, exception/RTTI controls, fast-math controls,
 `-fno-stack-protector`, `-fno-fat-lto-objects`, `-fpch-instantiate-templates`,
