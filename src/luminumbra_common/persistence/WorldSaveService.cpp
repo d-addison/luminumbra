@@ -676,7 +676,7 @@ bool ReadRegionFile(const std::filesystem::path& path,
         }
         record.uncompressed_size = ReadU32(header + 10);
         const std::uint32_t compressed_size = ReadU32(header + 14);
-        if (payload_offset + compressed_size > bytes.size()) {
+        if (payload_offset > bytes.size() || compressed_size > bytes.size() - payload_offset) {
             AddError(errors, "region file record payload is truncated: " + path.string());
             out_records.clear();
             return false;
@@ -1042,7 +1042,7 @@ bool WorldSaveService::load_active_regions(world::ActiveRegionLedger& ledger,
     try {
         const auto path = active_regions_path(save_dir);
         if (!std::filesystem::exists(path)) {
-            ledger = world::ActiveRegionLedger({}, absent_clock);
+            ledger = world::ActiveRegionLedger(ledger.config(), absent_clock);
             return true;
         }
         const auto length = std::filesystem::file_size(path);
