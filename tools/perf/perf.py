@@ -351,7 +351,7 @@ def validate_far_world_reporting(document: Any, ladder_baseline: bool = False) -
                 for key in ("gns_compiled", "active_regions")):
             raise ValueError("missing resolved far-world settings")
         water = settings.get("water_cells_per_side")
-        if type(water) is not int or water <= 0:
+        if type(water) is not int or water < 0 or (ladder_baseline and water == 0):
             raise ValueError("invalid resolved water resolution")
         if "grass_density_scale" not in settings:
             raise ValueError("missing resolved grass density")

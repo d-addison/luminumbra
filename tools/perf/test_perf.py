@@ -91,6 +91,23 @@ def update_far_summary(data):
 
 
 class FarModeReportingTest(unittest.TestCase):
+    def test_zero_water_resolution_is_valid_for_diagnostic_captures(self):
+        for index in range(4):
+            with self.subTest(index=index):
+                data = far_capture()
+                data['far_world']['frames'][index]['settings']['water_cells_per_side'] = 0
+                perf.validate_far_world_reporting(data)
+
+    def test_zero_water_resolution_is_refused_for_ladder_baselines(self):
+        for index in range(4):
+            with self.subTest(index=index):
+                data = far_capture()
+                data['far_world']['frames'][index]['settings']['water_cells_per_side'] = 0
+                with self.assertRaisesRegex(ValueError, 'water resolution'):
+                    perf.validate_far_world_reporting(data, ladder_baseline=True)
+                data['far_world']['frames'][index]['settings']['water_cells_per_side'] = 16
+                perf.validate_far_world_reporting(data, ladder_baseline=True)
+
     def test_ladder_positive_and_rejection_controls(self):
         valid = far_capture()
         perf.validate_far_world_reporting(valid, ladder_baseline=True)

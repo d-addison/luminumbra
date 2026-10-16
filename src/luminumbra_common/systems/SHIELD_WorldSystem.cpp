@@ -2787,7 +2787,11 @@ void SHIELD_WorldSystem::update(entt::registry& registry,
         PrefetchHydroRegions(anchor.x, anchor.z, 768.0f);
     }
 
+    // Diagnostic backlog survives between activation passes, even after dispatched
+    // batches drain. Only the next activation pass recomputes these deferrals.
+    const auto deferred_generation = m_last_streaming_budget_stats.deferred_generation;
     m_last_streaming_budget_stats = {};
+    m_last_streaming_budget_stats.deferred_generation = deferred_generation;
     m_last_streaming_budget_stats.update_interval_frames = STREAMING_ACTIVATION_INTERVAL_FRAMES;
     m_last_streaming_budget_stats.requested_render_radius = RENDER_DISTANCE;
     m_last_streaming_budget_stats.max_active_chunks_budget = STREAMING_MAX_ACTIVE_CHUNKS_BUDGET;

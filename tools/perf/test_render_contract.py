@@ -67,6 +67,17 @@ class RenderContractTests(unittest.TestCase):
     def test_valid_capture(self):
         self.assertEqual(capture.validate(artifact(), args())['verdict'], 'PASS')
 
+    def test_zero_water_resolution_in_v3_captures(self):
+        data = artifact()
+        data['far_world'] = far_capture()['far_world']
+        data['far_world']['frames'][1]['settings']['water_cells_per_side'] = 0
+        self.assertEqual(capture.validate(data, args())['verdict'], 'PASS')
+        self.assertEqual(contract.validate(data, QUALIFIED)['verdict'], 'PASS')
+        with self.assertRaisesRegex(ValueError, 'water resolution'):
+            capture.validate(data, args(ladder_baseline=True))
+        with self.assertRaisesRegex(ValueError, 'water resolution'):
+            contract.validate(data, QUALIFIED, ladder_baseline=True)
+
     def test_ladder_baseline_rejects_measured_frames_and_repairs(self):
         data = artifact()
         data['far_world'] = far_capture()['far_world']
@@ -342,6 +353,15 @@ class RenderContractTests(unittest.TestCase):
         result = capture.validate(data, args(position=[0, 0, 0], yaw=0, pitch=0, tod=0, qualified_renderer=None))
         self.assertEqual(result['verdict'], 'PASS')
         self.assertEqual(data, before)
+        data.update(frames=4, warmup_frames=2, far_world=far_capture()['far_world'])
+        data['far_world']['frames'][1]['settings']['water_cells_per_side'] = 0
+        report_args = args(position=[0, 0, 0], yaw=0, pitch=0, tod=0, qualified_renderer=None)
+        self.assertEqual(capture.validate(data, report_args)['verdict'], 'PASS')
+        report_args.ladder_baseline = True
+        with self.assertRaisesRegex(ValueError, 'water resolution'):
+            capture.validate(data, report_args)
+        data['far_world']['frames'][1]['settings']['water_cells_per_side'] = 16
+        self.assertEqual(capture.validate(data, report_args)['verdict'], 'PASS')
         data.update(artifact())
         result = capture.validate(data, args(position=[0, 0, 0], yaw=0, pitch=0, tod=0))
         self.assertEqual(result['measurement']['verdict'], 'PASS')
