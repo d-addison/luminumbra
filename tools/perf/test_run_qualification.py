@@ -856,14 +856,15 @@ class DirectoryLockTests(RunnerTestBase):
 
     def test_held_lock_refuses_without_touching_any_run_files(self):
         self.assertEqual(self.run_main(self.argv('--only', SURFACE_CELL))[0], 0)
-        lock = self.out / rq.LOCK_NAME
+        # Exercise resolved diagnostics even when the temp root has no short-name alias.
+        lock = self.out / '..' / self.out.name / rq.LOCK_NAME
         lock.write_text('held by another worker', encoding='utf-8')
         before = {path: path.read_bytes() for path in self.out.rglob('*') if path.is_file()}
         with mock.patch.object(rq, 'run_cells') as launch:
             code, _, err = self.run_main(self.argv('--only', SURFACE_CELL))
         self.assertEqual(code, 2)
         launch.assert_not_called()
-        self.assertIn(str(lock), err)
+        self.assertIn(str(lock.resolve()), err)
         self.assertIn('no automatic stale-lock reclaim', err)
         self.assertEqual(before, {path: path.read_bytes() for path in self.out.rglob('*')
                                   if path.is_file()})
@@ -941,13 +942,14 @@ class RuntimeRootTests(RunnerTestBase):
     def test_explicit_runtime_root_is_used_without_ancestor_fallback(self):
         runtime = self.tmp / 'explicit-runtime'
         self.make_runtime(runtime)
-        code, _, _ = self.run_main(self.argv('--only', SURFACE_CELL,
-                                              '--runtime-root', str(runtime)))
-        self.assertEqual(code, 0)
-        receipt = rq.read_json_object(self.out / 'cells' / f'{SURFACE_CELL}.process.json')
-        self.assertEqual(receipt['runtime_root'], str(runtime.resolve()))
-        self.assertEqual(receipt['systems_config']['path'],
-                         str(runtime.resolve() / 'data/common/systems.json'))
+        for option in (['--runtime-root', str(runtime)], [f'--runtime-root={runtime}']):
+            with self.subTest(option=option):
+                code, _, _ = self.run_main(self.argv('--only', SURFACE_CELL, *option))
+                self.assertEqual(code, 0)
+                receipt = rq.read_json_object(self.out / 'cells' / f'{SURFACE_CELL}.process.json')
+                self.assertEqual(receipt['runtime_root'], str(runtime.resolve()))
+                self.assertEqual(receipt['systems_config']['path'],
+                                 str(runtime.resolve() / 'data/common/systems.json'))
         for root in (Path('relative'), self.tmp / 'missing-runtime', self.tmp / 'incomplete'):
             with self.subTest(root=root), \
                     mock.patch.object(rq.runner, 'run_process') as launch:

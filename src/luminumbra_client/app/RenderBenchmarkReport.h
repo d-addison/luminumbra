@@ -99,6 +99,9 @@ inline nlohmann::json render_overrides(int argc, char** argv) {
         const std::string arg = argv[i];
         if (std::find(flags.begin(), flags.end(), arg) != flags.end())
             continue;
+        // Assignment-form roots carry their value in this argument; consume no successor.
+        if (arg.rfind("--runtime-root=", 0) == 0 || arg.rfind("--save-root=", 0) == 0)
+            continue;
         const bool hasValue = i + 1 < argc && std::string(argv[i + 1]).rfind("--", 0) != 0;
         if (std::find(options.begin(), options.end(), arg) != options.end()) {
             if (hasValue)
