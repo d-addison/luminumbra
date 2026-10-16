@@ -16,6 +16,8 @@ struct RuntimeScenarioConfig;
 
 namespace Luminumbra::Client::App {
 struct ClientAppContext;
+inline constexpr char kRegionPanelWindowTitle[] = "Regions [F4]";
+
 // F4 opens the production overlay. Previous/next, row count and signed-key order
 // change only display selection. The future console can own this same state.
 struct RegionPanelState {

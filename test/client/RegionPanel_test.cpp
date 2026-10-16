@@ -5,6 +5,7 @@
 #include "../support/UniqueTempPath.h"
 #include "luminumbra_client/app/DebugOverlays.h"
 #include "luminumbra_client/app/InputCallbacks.h"
+#include "luminumbra_client/app/RegionPanel.h"
 #include "luminumbra_client/player/PlayerController.h"
 #include "luminumbra_client/rendering/Camera.h"
 #include "luminumbra_client/ui/Rml_UIManager.h"
@@ -630,7 +631,7 @@ TEST_F(ProductionRegionPanel, PanelPaginationIsBoundedAndObservational) {
     }
     app.overlay.region_panel = {true, 0, 64, false};
     Draw(session, app);
-    auto* window = ImGui::FindWindowByName("Regions (F4)");
+    auto* window = ImGui::FindWindowByName(A::kRegionPanelWindowTitle);
     ASSERT_NE(window, nullptr);
     ImGui::ActivateItemByID(window->GetID("Next page"));
     Draw(session, app);
@@ -955,7 +956,7 @@ TEST_F(ProductionRegionPanel, ProductionPanelEveryCloseReconcilesHeldAndQueuedIn
             A::key_callback(attached.input.window, GLFW_KEY_F4, 0, GLFW_PRESS, 0);
             attached.ExpectRestored();
         } else if (close_path == 1) {
-            auto* panel_window = ImGui::FindWindowByName("Regions (F4)");
+            auto* panel_window = ImGui::FindWindowByName(A::kRegionPanelWindowTitle);
             ASSERT_NE(panel_window, nullptr);
             ImGui::ActivateItemByID(panel_window->GetID("#CLOSE"));
             Draw(session, app);
@@ -1040,8 +1041,13 @@ TEST_F(ProductionRegionPanel, PanelWaterCountersIncludeBordersAndPreparation) {
     auto fresh = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3{0, 0, 0});
     fresh->set_state(Luminumbra::ChunkState::Idle);
     chunks = {fresh};
-    session.RestoreWorldClock(W::WorldClock{1});
-    schedule = ledger.schedule(session.GetWorldClock());
+    // Advance the public clock/scheduler while reserving water work for the explicit fixture.
+    water->SetBootPaused(true);
+    ASSERT_EQ(session.TickSimulation(1.0 / 30.0 + 1e-12), 1u);
+    water->SetBootPaused(false);
+    ASSERT_FALSE(session.GetRegionSchedulerFault());
+    ASSERT_EQ(session.GetWorldClock().tick(), 1u);
+    schedule = session.GetRegionSchedule();
     schedule.due = {{0, 0}};
     water->UpdateRegional(session.GetRegistry(), chunks, ledger, schedule, completed, window_cells);
     const auto& preparation_work = water->regional_work();
