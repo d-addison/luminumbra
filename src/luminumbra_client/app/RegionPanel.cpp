@@ -140,7 +140,7 @@ bool DrawRegionPanel(const world::RegionPanelSnapshot& snapshot, RegionPanelStat
     state.rows_per_page = snapshot.rows_per_page;
     state.descending = snapshot.descending;
     ImGui::SetNextWindowSize(ImVec2(1100.0f, 720.0f), ImGuiCond_FirstUseEver);
-    if (ImGui::Begin("Regions (F4)", &state.open, ImGuiWindowFlags_NoSavedSettings)) {
+    if (ImGui::Begin(kRegionPanelWindowTitle, &state.open, ImGuiWindowFlags_NoSavedSettings)) {
         if (!snapshot.enabled) {
             ImGui::TextUnformatted("Active regions disabled");
         } else {

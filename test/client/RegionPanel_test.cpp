@@ -5,6 +5,7 @@
 #include "../support/UniqueTempPath.h"
 #include "luminumbra_client/app/DebugOverlays.h"
 #include "luminumbra_client/app/InputCallbacks.h"
+#include "luminumbra_client/app/RegionPanel.h"
 #include "luminumbra_client/player/PlayerController.h"
 #include "luminumbra_client/rendering/Camera.h"
 #include "luminumbra_client/ui/Rml_UIManager.h"
@@ -630,7 +631,7 @@ TEST_F(ProductionRegionPanel, PanelPaginationIsBoundedAndObservational) {
     }
     app.overlay.region_panel = {true, 0, 64, false};
     Draw(session, app);
-    auto* window = ImGui::FindWindowByName("Regions (F4)");
+    auto* window = ImGui::FindWindowByName(A::kRegionPanelWindowTitle);
     ASSERT_NE(window, nullptr);
     ImGui::ActivateItemByID(window->GetID("Next page"));
     Draw(session, app);
@@ -955,7 +956,7 @@ TEST_F(ProductionRegionPanel, ProductionPanelEveryCloseReconcilesHeldAndQueuedIn
             A::key_callback(attached.input.window, GLFW_KEY_F4, 0, GLFW_PRESS, 0);
             attached.ExpectRestored();
         } else if (close_path == 1) {
-            auto* panel_window = ImGui::FindWindowByName("Regions (F4)");
+            auto* panel_window = ImGui::FindWindowByName(A::kRegionPanelWindowTitle);
             ASSERT_NE(panel_window, nullptr);
             ImGui::ActivateItemByID(panel_window->GetID("#CLOSE"));
             Draw(session, app);
@@ -1001,24 +1002,30 @@ TEST_F(ProductionRegionPanel, PanelWaterCountersIncludeBordersAndPreparation) {
     ASSERT_NE(water, nullptr);
     water->SetHydrology(true, 0, 0);
     auto& ledger = const_cast<W::ActiveRegionLedger&>(session.GetActiveRegionLedger());
-    const auto grid = [](const Luminumbra::IVec3& coordinates, std::int32_t depth) {
+    const int resolution = water->sim_resolution();
+    ASSERT_TRUE(resolution == 4 || resolution == 8 || resolution == 16 || resolution == 32);
+    // Legal resolutions bound each fixture grid to 1024 cells, with two flux entries per cell.
+    const auto side = static_cast<std::size_t>(resolution);
+    const auto cells = side * side;
+    const auto grid = [resolution, cells](const Luminumbra::IVec3& coordinates,
+                                          std::int32_t depth) {
         auto chunk = std::make_shared<Luminumbra::Chunk>(coordinates);
         chunk->set_state(Luminumbra::ChunkState::Idle);
         chunk->has_water_sim.store(true);
-        chunk->current_water_resolution.store(8);
-        chunk->water_depth_mm.assign(64, depth);
-        chunk->water_bed_mm.assign(64, 1000);
-        chunk->water_edge_flux.assign(128, 0);
-        chunk->water_level_data.assign(64, static_cast<float>(depth) / 1000.0f + 1.0f);
-        chunk->water_flow_data.assign(64, Luminumbra::Vec2(0));
-        chunk->water_sim_terrain_height.assign(64, 1.0f);
+        chunk->current_water_resolution.store(resolution);
+        chunk->water_depth_mm.assign(cells, depth);
+        chunk->water_bed_mm.assign(cells, 1000);
+        chunk->water_edge_flux.assign(2 * cells, 0);
+        chunk->water_level_data.assign(cells, static_cast<float>(depth) / 1000.0f + 1.0f);
+        chunk->water_flow_data.assign(cells, Luminumbra::Vec2(0));
+        chunk->water_sim_terrain_height.assign(cells, 1.0f);
         return chunk;
     };
     std::vector<std::shared_ptr<Luminumbra::Chunk>> chunks{grid({31, 0, 0}, 1000),
                                                            grid({32, 0, 0}, 0)};
     W::RegionSchedule schedule;
     std::vector<W::RegionWork> completed;
-    constexpr std::uint64_t window_cells = 2 * 64 + 4 * 8;
+    const std::uint64_t window_cells = 2 * static_cast<std::uint64_t>(cells) + 4 * side;
     water->UpdateRegional(
         session.GetRegistry(), chunks, ledger, schedule, completed, 4 * window_cells);
     const auto& border_work = water->regional_work();
@@ -1040,8 +1047,13 @@ TEST_F(ProductionRegionPanel, PanelWaterCountersIncludeBordersAndPreparation) {
     auto fresh = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3{0, 0, 0});
     fresh->set_state(Luminumbra::ChunkState::Idle);
     chunks = {fresh};
-    session.RestoreWorldClock(W::WorldClock{1});
-    schedule = ledger.schedule(session.GetWorldClock());
+    // Advance the public clock/scheduler while reserving water work for the explicit fixture.
+    water->SetBootPaused(true);
+    ASSERT_EQ(session.TickSimulation(1.0 / 30.0 + 1e-12), 1u);
+    water->SetBootPaused(false);
+    ASSERT_FALSE(session.GetRegionSchedulerFault());
+    ASSERT_EQ(session.GetWorldClock().tick(), 1u);
+    schedule = session.GetRegionSchedule();
     schedule.due = {{0, 0}};
     water->UpdateRegional(session.GetRegistry(), chunks, ledger, schedule, completed, window_cells);
     const auto& preparation_work = water->regional_work();
