@@ -163,13 +163,14 @@ TEST(ItemCatalogueTest, EntryLimitAndRequiredSeedAdmission) {
     EXPECT_FALSE(catalogue.ValidateGameAdmission(error));
     for (std::size_t i = 0; i < ItemCatalogue::kMaxItems; ++i) {
         const auto digits = std::to_string(i);
-        document["items"].push_back({{"id", "item-" + std::string(4 - digits.size(), '0') + digits},
-                                     {"payload", 0},
-                                     {"despawn_after", 0}});
+        document["items"].push_back(
+            {{"id", "entry-" + std::string(4 - digits.size(), '0') + digits},
+             {"payload", 0},
+             {"despawn_after", 0}});
     }
     ASSERT_TRUE(ItemCatalogue::parse(Bytes(document), catalogue, error)) << error;
-    EXPECT_NE(catalogue.FindByName("item-4095"), nullptr);
-    document["items"].push_back({{"id", "item-4096"}, {"payload", 0}, {"despawn_after", 0}});
+    EXPECT_NE(catalogue.FindByName("entry-4095"), nullptr);
+    document["items"].push_back({{"id", "entry-4096"}, {"payload", 0}, {"despawn_after", 0}});
     EXPECT_FALSE(ItemCatalogue::parse(Bytes(document), catalogue, error));
     EXPECT_NE(error.find("limit"), std::string::npos);
 }
