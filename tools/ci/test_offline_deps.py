@@ -730,6 +730,40 @@ class CachedGitSafetyTests(unittest.TestCase):
         self.assertFalse(self.marker.exists())
         self.assertEqual(self.cache_state(), before)
 
+    def test_config_includes_are_refused_in_all_metadata_configs_before_git_runs(self):
+        outside = self.base / "outside config"
+        outside.write_text("[core]\n\tbare = false\n")
+        metadata = self.source / ".git"
+        for relative in ("config", "config.worktree", "worktrees/linked/config.worktree",
+                         "modules/nested/config"):
+            config = metadata / relative
+            config.parent.mkdir(parents=True, exist_ok=True)
+            original = config.read_bytes() if config.exists() else None
+            for section in ('include', 'includeIf "gitdir:never-matches"', 'INCLUDE',
+                            'IncludeIf "onbranch:never-matches"', 'include.path',
+                            'core] [include', 'core] [includeIf "gitdir:never-matches"',
+                            'core] [fixture "a]b"] [includeIf "onbranch:never-matches"'):
+                with self.subTest(config=relative, section=section):
+                    config.write_bytes((original or b"") +
+                                       f'\n[{section}]\n\tpath = "{outside.as_posix()}"\n'.encode())
+                    with patch.object(deps.subprocess, "check_output",
+                                      side_effect=AssertionError("Git ran")):
+                        with self.assertRaisesRegex(deps.DependencyError, "config includes"):
+                            deps.git_metadata(self.source, self.cache)
+                        self.assert_refused_without_writes()
+            if original is None:
+                config.unlink()
+            else:
+                config.write_bytes(original)
+        deps.verify(self.root, self.cache, self.lock)
+
+    def test_config_include_text_in_values_and_comments_is_allowed(self):
+        config = self.source / ".git/config"
+        with config.open("a") as handle:
+            handle.write('\n# [include] and [includeIf "gitdir:*"]\n'
+                         '[fixture]\n\ttext = "[include]"\n')
+        deps.verify(self.root, self.cache, self.lock)
+
     @unittest.skipIf(os.name == "nt", "POSIX metadata symlinks")
     def test_escaping_symlinked_git_config_is_refused_before_git_runs(self):
         self.git(self.source, "config", "core.fsmonitor", self.command)

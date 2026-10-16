@@ -131,11 +131,52 @@ def git_alternate_paths(data: bytes, *, windows: bool) -> list[str]:
     return result
 
 
+def config_has_includes(text: str) -> bool:
+    """Tokenize section headers, including adjacent headers on the same line.
+
+    Skip variable values as a whole, respecting comments, quotes and escaped
+    newlines so header-like text in a value cannot become a directive.
+    """
+    section = re.compile(r'\[[ \t]*([\w.-]+)(?:[ \t]+"(?:\\.|[^"\\\n])*")?[ \t]*\]')
+    index = 0
+    statement = True
+    quoted = False
+    while index < len(text):
+        char = text[index]
+        if char == "\\" and index + 1 < len(text):
+            index += 2
+            continue
+        if not quoted and char in "#;":
+            newline = text.find("\n", index)
+            index = len(text) if newline < 0 else newline
+            continue
+        if char == "\n":
+            statement, quoted = True, False
+        elif statement and char in " \t\r":
+            pass
+        elif statement and char == "[":
+            match = section.match(text, index)
+            if match:
+                if match[1].casefold().split(".", 1)[0] in {"include", "includeif"}:
+                    return True
+                index = match.end()
+                continue
+            statement = False
+        else:
+            statement = False
+            if char == '"':
+                quoted = not quoted
+        index += 1
+    return False
+
+
 def git_metadata(source: Path, cache: Path) -> None:
     """Require self-contained metadata, including submodule gitdir files.
 
     Follow internal directory links only once. Resolve every link before Git
     sees it, even links in otherwise unused metadata such as hooks and refs.
+    Refuse config include sections (including inactive conditional includes)
+    instead of allowing Git to discover unvalidated files outside the cache.
     """
     marker = source / ".git"
     if marker.is_symlink():
@@ -148,6 +189,12 @@ def git_metadata(source: Path, cache: Path) -> None:
             if not path.exists():
                 raise DependencyError("dangling Git metadata symlink")
         resolved = contained(path, cache)
+        # Check the logical name before deduplicating resolved symlink targets:
+        # a config alias may point at an already visited, differently named file.
+        if path.name.casefold() in {"config", "config.worktree"} and path.is_file():
+            text = path.read_text(encoding="utf-8-sig", errors="surrogateescape")
+            if config_has_includes(text):
+                raise DependencyError(f"Git config includes are not allowed: {path}")
         if resolved in seen:
             return
         seen.add(resolved)

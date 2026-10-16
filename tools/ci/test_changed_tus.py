@@ -47,6 +47,9 @@ class ChangedTranslationUnitsTests(unittest.TestCase):
         self.save_db()
         self.commands = []
         self.mock_execute = patch.object(tus, "execute", side_effect=self.fake_execute).start()
+        # Most tests model compiler replay; dedicated search-list tests below
+        # exercise the real probe with subprocess results for both drivers.
+        patch.object(tus, "compiler_header_roots", return_value=set()).start()
         self.addCleanup(patch.stopall)
 
     def raw_entry(self, source, extra=(), directory=None):
@@ -499,10 +502,11 @@ class ChangedTranslationUnitsTests(unittest.TestCase):
                     self.raw[0]["arguments"][0] = compiler
                     if command_string:
                         arguments = self.raw[0].pop("arguments")
-                        # Windows databases quote paths containing backslashes
-                        # or spaces. Preserve the executable token for replay.
-                        self.raw[0]["command"] = ('"' + compiler + '" '
-                                                  + shlex.join(arguments[1:]))
+                        self.raw[0]["command"] = (subprocess.list2cmdline(arguments)
+                                                  if compiler.lower().endswith(".exe")
+                                                  else shlex.join(arguments))
+                        if compiler.lower().endswith(".exe"):
+                            self.raw[0]["command_platform"] = "windows"
                     self.save_db()
                     entry = self.entries()[0]
                     command = tus.check_arguments(entry, "msvc-approx")
@@ -511,6 +515,27 @@ class ChangedTranslationUnitsTests(unittest.TestCase):
                                   else "-Wshadow", command)
                     self.assertIn("-Wnarrowing", command)
         self.assertEqual(self.commands, [])
+
+    def test_quoted_windows_command_preserves_paths_and_embedded_quotes(self):
+        for compiler in (r"C:\msys64\ucrt64\bin\g++.exe",
+                         r"C:\Program Files\LLVM\bin\clang++.exe"):
+            with self.subTest(compiler=compiler):
+                arguments = [compiler, '-DVALUE=a"b', r'-DPATH=C:\some\path\\',
+                             "-c", str(self.a)]
+                self.raw = [{"file": str(self.a), "directory": str(self.build),
+                             "command_platform": "windows",
+                             "command": subprocess.list2cmdline(arguments)}]
+                self.save_db()
+                self.assertEqual(self.entries()[0]["arguments"], arguments)
+        self.assertEqual(self.commands, [])
+
+    def test_posix_exe_command_keeps_shell_quoted_source(self):
+        for compiler in ("g++.exe", "clang++.exe"):
+            arguments = [compiler, "-c", str(self.a)]
+            self.raw = [{"file": str(self.a), "directory": str(self.build),
+                         "command_platform": "posix", "command": shlex.join(arguments)}]
+            self.save_db()
+            self.assertEqual(self.entries()[0]["arguments"], arguments)
 
     def test_windows_warning_profiles_ignore_compiler_directory_names(self):
         for compiler, shadow, cxx in ((r"C:\clang++\gcc.exe", "-Wshadow", False),
@@ -693,6 +718,153 @@ class ChangedTranslationUnitsTests(unittest.TestCase):
                         else:
                             binary.unlink()
         self.assertEqual(self.commands, [])
+
+    def test_ordinary_include_binary_cache_is_refused_in_every_search_root(self):
+        self.a.write_text('#include "nested/current.hpp"\n')
+        search = self.build / "header search"
+        for flags, directory in (([], self.src), (["-I", str(search)], search),
+                                 (["-I" + str(search)], search),
+                                 (["-iquote", str(search)], search),
+                                 (["-isystem", str(search)], search),
+                                 (["-idirafter", str(search)], search)):
+            nested = directory / "nested"
+            nested.mkdir(parents=True, exist_ok=True)
+            (nested / "current.hpp").write_text("// edited header\n")
+            self.raw = [self.raw_entry(self.a, flags)]
+            self.save_db()
+            entry = self.entries()[0]
+            for is_directory in (False, True):
+                binary = nested / "current.hpp.gch"
+                if is_directory:
+                    binary.mkdir()
+                else:
+                    binary.write_bytes(b"stale binary header")
+                actions = [self.entries, lambda: tus.dependencies(entry),
+                           lambda: tus.run_checks(self.arguments(), self.root, [entry], self.build),
+                           lambda: tus.run_checks(self.arguments("tidy"), self.root, [entry], self.build)]
+                with patch.object(tus.shutil, "which", return_value="clang-tidy"):
+                    for index, action in enumerate(actions):
+                        with self.subTest(flags=flags, directory=is_directory, action=index):
+                            with self.assertRaisesRegex(tus.SelectionError, "binary PCH.*remove"):
+                                action()
+                if is_directory:
+                    binary.rmdir()
+                else:
+                    binary.unlink()
+            self.assertEqual(tus.replay_arguments(entry), tus.clean_arguments(entry["arguments"]))
+        self.assertEqual(self.commands, [])
+
+    def test_unrelated_binary_cache_outside_search_roots_does_not_block_replay(self):
+        (self.build / "unrelated.hpp.gch").write_bytes(b"unrelated cache")
+        entry = self.entries()[0]
+        self.assertEqual(tus.replay_arguments(entry), tus.clean_arguments(entry["arguments"]))
+
+    def test_environment_header_roots_are_checked_before_every_replay(self):
+        search = self.root / "environment headers"
+        nested = search / "nested"
+        nested.mkdir(parents=True)
+        (nested / "current.hpp").write_text("// edited header\n")
+        self.a.write_text("#include <nested/current.hpp>\n")
+        for variable in ("CPATH", "C_INCLUDE_PATH", "CPLUS_INCLUDE_PATH"):
+            # Cover multiple components, relative paths and empty components
+            # (which GCC interprets as the command's working directory).
+            for value, root in ((os.pathsep.join(["missing", os.path.relpath(search, self.build)]), nested),
+                                ("missing" + os.pathsep, self.build)):
+                with self.subTest(variable=variable, value=value), patch.dict(os.environ, {variable: value}):
+                    entry = self.entries()[0]
+                    for is_directory in (False, True):
+                        binary = root / "current.hpp.gch"
+                        if is_directory:
+                            binary.mkdir()
+                        else:
+                            binary.write_bytes(b"stale cache")
+                        try:
+                            actions = [self.entries, lambda: tus.dependencies(entry),
+                                       lambda: tus.compile_command(entry, self.build / "isolated.o"),
+                                       lambda: tus.run_checks(self.arguments("tidy"), self.root, [entry], self.build)]
+                            with patch.object(tus.shutil, "which", return_value="clang-tidy"):
+                                for action in actions:
+                                    with self.assertRaisesRegex(tus.SelectionError, "binary PCH.*remove"):
+                                        action()
+                        finally:
+                            binary.rmdir() if is_directory else binary.unlink()
+        self.assertEqual(self.commands, [])
+
+    def test_compiler_default_and_system_header_roots_are_checked_at_replay(self):
+        search = self.root / "compiler system headers"
+        search.mkdir()
+        header = search / "current.hpp"
+        header.write_text("// edited header\n")
+        self.a.write_text("#include <current.hpp>\n")
+        for compiler in ("g++", "clang++"):
+            self.raw = [self.raw_entry(self.a, ["--sysroot", "sdk", "--target=x86_64-linux-gnu",
+                                               "-include", str(self.other)])]
+            self.raw[0]["arguments"][0] = compiler
+            self.save_db()
+            entry = self.entries()[0]
+            result = subprocess.CompletedProcess([], 0, "", '#include "..." search starts here:\r\n'
+                '#include <...> search starts here:\r\n ' + str(search) + '\r\nEnd of search list.\r\n')
+            with patch.object(tus, "compiler_header_roots", side_effect=COMPILER_HEADER_ROOTS), \
+                    patch.object(tus.subprocess, "run", return_value=result) as probe:
+                self.assertEqual(tus.replay_arguments(entry), tus.clean_arguments(entry["arguments"]))
+                for is_directory in (False, True):
+                    binary = Path(str(header) + ".gch")
+                    if is_directory:
+                        binary.mkdir()
+                    else:
+                        binary.write_bytes(b"stale cache")
+                    try:
+                        for action in (lambda: tus.dependencies(entry),
+                                       lambda: tus.compile_command(entry, self.build / "isolated.o"),
+                                       lambda: tus.run_checks(self.arguments("tidy"), self.root, [entry], self.build)):
+                            with patch.object(tus.shutil, "which", return_value="clang-tidy"):
+                                with self.assertRaisesRegex(tus.SelectionError, "binary PCH.*remove"):
+                                    action()
+                    finally:
+                        binary.rmdir() if is_directory else binary.unlink()
+                self.assertEqual(probe.call_count, 7)
+                for call in probe.call_args_list:
+                    command = call.args[0]
+                    self.assertEqual(command[0], compiler)
+                    self.assertEqual(command[-5:], ["-E", "-v", "-x", "c++", "-"])
+                    self.assertIn("--sysroot", command)
+                    self.assertIn("sdk", command)
+                    self.assertIn("--target=x86_64-linux-gnu", command)
+                    self.assertNotIn(str(self.a), command)
+                    self.assertNotIn(str(self.other), command)
+                    self.assertNotIn("-include", command)
+                    self.assertEqual(call.kwargs["env"]["LC_ALL"], "C")
+                    self.assertEqual(call.kwargs["cwd"], self.build)
+                    self.assertEqual(call.kwargs["stdin"], subprocess.DEVNULL)
+        self.assertEqual(self.commands, [])
+
+    def test_compiler_search_probe_refuses_unavailable_or_unknown_defaults(self):
+        entry = self.entries()[0]
+        results = [OSError("compiler unavailable"),
+                   subprocess.CompletedProcess([], 1, "", "unsupported target"),
+                   subprocess.CompletedProcess([], 0, "", "unrecognized search output"),
+                   subprocess.CompletedProcess([], 0, "", '#include <...> search starts here:\n /headers\n')]
+        for result in results:
+            with self.subTest(result=result), \
+                    patch.object(tus, "compiler_header_roots", side_effect=COMPILER_HEADER_ROOTS), \
+                    patch.object(tus.subprocess, "run", side_effect=[result]):
+                with self.assertRaisesRegex(tus.SelectionError, "compiler header search paths"):
+                    tus.replay_arguments(entry)
+        self.assertEqual(self.commands, [])
+
+    def test_compiler_search_probe_uses_effective_language(self):
+        result = subprocess.CompletedProcess([], 0, "", '#include <...> search starts here:\nEnd of search list.\n')
+        for compiler in ("gcc", "g++", "clang", "clang++"):
+            for suffix in (".c", ".cpp"):
+                for language in (None, "c", "c++"):
+                    source = self.src / ("unit" + suffix)
+                    arguments = [compiler, *(["-x", language] if language else []), str(source)]
+                    expected = language or ("c++" if "++" in compiler or suffix == ".cpp" else "c")
+                    for trailing in ([], ["-x", "c"], ["-x", "c++"]):
+                        with self.subTest(arguments=arguments, trailing=trailing), \
+                                patch.object(tus.subprocess, "run", return_value=result) as run:
+                            self.assertEqual(COMPILER_HEADER_ROOTS(arguments + trailing, self.build), set())
+                            self.assertEqual(run.call_args.args[0][-3:], ["-x", expected, "-"])
 
     def test_msvc_pch_replay_is_refused_before_execution(self):
         for compiler in ("cl", "cl.exe", "clang-cl", "g++", "clang++"):
@@ -1504,6 +1676,7 @@ class ChangedTranslationUnitsTests(unittest.TestCase):
 
 
 EXECUTE = tus.execute
+COMPILER_HEADER_ROOTS = tus.compiler_header_roots
 # The implementation is saved before any setUp patch replaces the entry point.
 if __name__ == "__main__":
     unittest.main()

@@ -40,6 +40,7 @@ import argparse
 import concurrent.futures
 import hashlib
 import json
+import ntpath
 import os
 import re
 import shlex
@@ -174,11 +175,86 @@ def parse_make_deps(text: str) -> list[str]:
     return deps
 
 
+def windows_command_arguments(command: str) -> list[str]:
+    """Split a Windows command without a shell, using CommandLineToArgvW rules.
+
+    Backslashes are literal except immediately before a double quote: pairs
+    produce one slash, and an odd remaining slash escapes the quote. Quote
+    runs use the Windows three-quote rule, including within quoted arguments.
+    """
+    arguments, index = [], 0
+    while index < len(command):
+        if command[index] in " \t":
+            index += 1
+            continue
+        current, quotes, backslashes = [], 0, 0
+        while index < len(command):
+            char = command[index]
+            if char in " \t" and not quotes:
+                break
+            if char == "\\":
+                current.append(char)
+                backslashes += 1
+                index += 1
+            elif char == '"':
+                remove = (backslashes + 1) // 2
+                if remove:
+                    del current[-remove:]
+                if backslashes % 2:
+                    current.append('"')
+                else:
+                    quotes += 1
+                index += 1
+                backslashes = 0
+                while index < len(command) and command[index] == '"':
+                    quotes += 1
+                    if quotes == 3:
+                        current.append('"')
+                        quotes = 0
+                    index += 1
+                if quotes == 2:
+                    quotes = 0
+            else:
+                current.append(char)
+                backslashes = 0
+                index += 1
+        arguments.append("".join(current))
+    return arguments
+
+
 def entry_arguments(entry: dict) -> list[str]:
+    """Parse using the producer's context; command_platform can override it.
+
+    Absolute database working directories distinguish native Windows from
+    POSIX/MSYS producers. Without that context, a native driver path is useful
+    evidence; an .exe suffix alone is not. Ambiguous commands retain POSIX
+    quoting for compatibility, independent of the host inspecting the database.
+    """
     if "arguments" in entry:
         arguments = [str(a) for a in entry["arguments"]]
     elif "command" in entry:
-        arguments = shlex.split(entry["command"])
+        command = entry["command"]
+        windows = windows_command_arguments(command)
+        drivers = windows[:1]
+        if drivers and ntpath.basename(drivers[0]).casefold().removesuffix(".exe") in {"ccache", "sccache"}:
+            drivers += windows[1:2]
+        platform = entry.get("command_platform")
+        if platform not in {None, "windows", "posix"}:
+            raise CacheMiss("command_platform must be windows or posix")
+        directory = str(entry.get("directory", ""))
+        if platform is None:
+            if ntpath.splitdrive(directory)[0]:
+                platform = "windows"
+            elif directory.startswith("/"):
+                platform = "posix"
+            elif any(ntpath.splitdrive(driver)[0] or "\\" in driver for driver in drivers):
+                platform = "windows"
+            else:
+                platform = "posix"
+        if platform == "windows":
+            arguments = windows
+        else:
+            arguments = shlex.split(command)
     else:
         raise CacheMiss("compile database entry has no command")
     if not arguments:

@@ -201,15 +201,75 @@ def clean_arguments(arguments: list[str]) -> list[str]:
     return parse_arguments(arguments)[0]
 
 
-def validate_textual_includes(arguments: list[str], directory: Path) -> None:
-    """Refuse implicit binary PCH lookup for every replayed forced include.
+def compiler_header_roots(arguments: list[str], directory: Path) -> set[Path]:
+    """Query effective GCC/Clang roots with the variant's target and sysroot.
+
+    Preprocess empty stdin, never a header or TU, so the probe cannot consume
+    a PCH. Fail closed if the compiler is unavailable or its list is unknown.
+    Do not cache the result: toolchains and their directories can change.
+    """
+    command, operands = parse_arguments(arguments)
+    language = "c++" if "++" in executable_name(command[0]) or Path(operands[0]).suffix != ".c" else "c"
+    probe = command[:1]
+    source_seen = False
+    index = 1
+    while index < len(command):
+        option = command[index]
+        if option == "-x":
+            # -x affects only later operands; flags after the TU cannot
+            # change its language (other search flags remain global).
+            if not source_seen:
+                language = command[index + 1]
+        elif option in VALUE_OPTIONS:
+            if option not in {"-include", "-imacros"}:
+                probe.extend(command[index:index + 2])
+        elif option.startswith("-"):
+            probe.append(option)
+        else:
+            source_seen = True
+        index += 2 if option in VALUE_OPTIONS else 1
+    probe.extend(["-E", "-v", "-x", language, "-"])
+    try:
+        result = subprocess.run(probe, cwd=directory, stdin=subprocess.DEVNULL,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                text=True, timeout=1800,
+                                env={**os.environ, "LC_ALL": "C", "LANG": "C"})
+    except (OSError, subprocess.SubprocessError) as error:
+        raise SelectionError(f"cannot query compiler header search paths: {error}") from error
+    roots, scanning, complete = set(), False, False
+    for line in result.stderr.splitlines():
+        line = line.strip()
+        if line in {'#include "..." search starts here:', '#include <...> search starts here:'}:
+            scanning = True
+        elif scanning and line == "End of search list.":
+            complete = True
+            break
+        elif scanning:
+            roots.add(directory / line.removesuffix(" (framework directory)"))
+    if result.returncode or not complete:
+        raise SelectionError("cannot establish compiler header search paths; refusing replay")
+    return roots
+
+
+def validate_textual_includes(arguments: list[str], directory: Path, *, compiler_roots=False) -> None:
+    """Refuse implicit binary PCH lookup for forced and ordinary includes.
 
     Check both the spelled and resolved names: a header symlink can have a
     cache beside either name. Directories and dangling cache links also count.
     Require an explicit file so compiler include-search paths cannot select an
-    unchecked header. Call again at replay in case a build populated the cache
-    after database validation.
+    unchecked header. For ordinary includes, conservatively scan all explicit
+    search roots, environment roots and source/forced-header directories,
+    including subdirectories and directory links. Before replay also query
+    compiler defaults/system roots; never guess platform-specific locations.
+    GCC may silently use a stale .gch without diagnostics;
+    rejecting the cache is safer than relying on invalid-PCH warnings. Call
+    again at replay in case a build populated it after database validation.
     """
+    search = set()
+    for variable in ("CPATH", "C_INCLUDE_PATH", "CPLUS_INCLUDE_PATH"):
+        if variable in os.environ:
+            # An empty component means the compiler's working directory.
+            search.update(directory / value for value in os.environ[variable].split(os.pathsep))
     index = 1
     while index < len(arguments):
         option = arguments[index]
@@ -224,12 +284,42 @@ def validate_textual_includes(arguments: list[str], directory: Path) -> None:
             if not header.is_file():
                 raise SelectionError(f"cannot locate textual forced include: {header}; "
                                      "use an existing absolute header path")
+            search.update((header.parent, header.resolve().parent))
+        elif option in {"-I", "-iquote", "-isystem", "-idirafter"}:
+            search.add(directory / arguments[index + 1])
+        elif option.startswith("-I"):
+            search.add(directory / option[2:])
+        elif option not in VALUE_OPTIONS and not option.startswith("-"):
+            source = directory / option
+            search.update((source.parent, source.resolve().parent))
         index += 2 if option in VALUE_OPTIONS else 1
+
+    if compiler_roots:
+        search.update(compiler_header_roots(arguments, directory))
+    seen = set()
+
+    def fail(error):
+        raise SelectionError(f"cannot check binary PCH search directory: {error}") from error
+
+    for root in sorted(search):
+        if not root.exists():
+            continue  # Compilers also ignore nonexistent include directories.
+        for current, children, files in os.walk(root, followlinks=True, onerror=fail):
+            resolved = Path(current).resolve()
+            if resolved in seen:
+                children[:] = []
+                continue
+            seen.add(resolved)
+            children.sort()
+            for name in sorted(children + files):
+                if name.lower().endswith(".gch"):
+                    raise SelectionError(f"binary PCH cache in header search path: {Path(current) / name}; "
+                                         "remove the cache before replaying textual headers")
 
 
 def replay_arguments(entry: dict) -> list[str]:
     arguments = clean_arguments(entry["arguments"])
-    validate_textual_includes(arguments, entry["directory"])
+    validate_textual_includes(arguments, entry["directory"], compiler_roots=True)
     return arguments
 
 

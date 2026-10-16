@@ -5,6 +5,7 @@ whole analysis input is identical to an earlier passing run."""
 import importlib.util
 import json
 import os
+import shlex
 import shutil
 import stat
 import subprocess
@@ -13,6 +14,7 @@ import tempfile
 import textwrap
 import time
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -367,6 +369,68 @@ class TidyCacheTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertTrue(record.exists())
         self.assertFalse((stale / ("f" * 64 + ".json")).exists())
+
+
+class CompileCommandParserTests(unittest.TestCase):
+    def test_windows_compiler_paths_choose_windows_quoting(self):
+        for compiler in ("g++.exe", "clang++.exe", r"C:\msys64\ucrt64\bin\g++.exe",
+                         r"C:\Program Files\LLVM\bin\clang++.exe", r"C:\tools\g++"):
+            arguments = [compiler, "-c", r"C:\source dir\unit.cpp", '-DVALUE=a"b',
+                         r'-DPATH=C:\some\path\\', ""]
+            with self.subTest(compiler=compiler):
+                self.assertEqual(MODULE.entry_arguments({"directory": r"C:\build",
+                                                        "command": subprocess.list2cmdline(arguments)}),
+                                 arguments)
+
+    def test_windows_embedded_quotes_and_backslash_runs(self):
+        cases = [
+            (r'"a b" c', ["a b", "c"]),
+            (r'a\\\b d"e f"g h', [r'a\\\b', "de fg", "h"]),
+            (r'a\\\"b c d', [r'a\"b', "c", "d"]),
+            (r'a\\\\"b c" d e', [r'a\\b c', "d", "e"]),
+            ('"" "unterminated space', ["", "unterminated space"]),
+            ('"a"""b', ['a"b']),
+        ]
+        for tail, expected in cases:
+            with self.subTest(tail=tail):
+                self.assertEqual(MODULE.entry_arguments({"command_platform": "windows",
+                                                        "command": "g++.exe " + tail}),
+                                 ["g++.exe", *expected])
+
+    def test_posix_commands_keep_shell_quoting_and_escapes(self):
+        for compiler in ("/usr/bin/g++", "g++.exe", "clang++.exe", "/ucrt64/bin/g++.exe"):
+            with self.subTest(compiler=compiler):
+                self.assertEqual(MODULE.entry_arguments({"directory": "/build",
+                    "command": compiler + r''' '-DVALUE=a"b' -Iwith\ space -c 'unit file.cpp' '''}),
+                    [compiler, '-DVALUE=a"b', "-Iwith space", "-c", "unit file.cpp"])
+
+    def test_quoting_context_overrides_host_and_compiler_suffix(self):
+        with patch.object(MODULE.os, "name", "nt"):
+            self.assertEqual(MODULE.entry_arguments({"command": "g++.exe -c 'unit file.cpp'"}),
+                             ["g++.exe", "-c", "unit file.cpp"])
+            self.assertEqual(MODULE.entry_arguments({"directory": "/msys/build",
+                "command": "g++.exe -c 'unit file.cpp'"}), ["g++.exe", "-c", "unit file.cpp"])
+        for directory in (r"C:\build", r"\\server\share\build"):
+            self.assertEqual(MODULE.entry_arguments({"directory": directory,
+                "command": 'g++.exe -c "unit file.cpp"'}), ["g++.exe", "-c", "unit file.cpp"])
+        arguments = [r"C:\bin\g++.exe", "-c", "unit file.cpp"]
+        self.assertEqual(MODULE.entry_arguments({"directory": "/msys/build",
+            "command": shlex.join(arguments)}), arguments)
+        self.assertEqual(MODULE.entry_arguments({"directory": r"C:\build", "command_platform": "posix",
+            "command": "g++.exe -c 'unit file.cpp'"}), ["g++.exe", "-c", "unit file.cpp"])
+        self.assertEqual(MODULE.entry_arguments({"directory": "/build", "command_platform": "windows",
+            "command": subprocess.list2cmdline(arguments)}), arguments)
+
+    def test_native_driver_paths_without_directory_choose_windows_quoting(self):
+        for prefix in ([], [r"C:\tools\ccache.exe"], ["sccache.exe"]):
+            arguments = [*prefix, r"C:\bin\g++.exe", "-c", "unit file.cpp"]
+            self.assertEqual(MODULE.entry_arguments({"command": subprocess.list2cmdline(arguments)}),
+                             arguments)
+
+    def test_arguments_array_is_never_reparsed(self):
+        arguments = [r"C:\bin\g++.exe", '"quoted value"', r"back\slash", ""]
+        self.assertEqual(MODULE.entry_arguments({"arguments": arguments, "command": "ignored"}),
+                         arguments)
 
 
 class MakeDependencyParserTests(unittest.TestCase):
