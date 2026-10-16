@@ -1,3 +1,4 @@
+#include "../fixtures/TerrainFixtureParams.h"
 //  ( implementation note): the worldgen-preview reinit-vs-far-LOD race
 // is closed by a QUIESCE, not a point guard. Worker threads soak far-LOD-style
 // sampling under the worldgen-epoch gate (acquire_worldgen_sample_scope) while
@@ -20,7 +21,7 @@ using namespace Luminumbra::Systems;
 namespace {
 
 TEST(WorldgenPreviewReinitRace, ConcurrentReinitAndSamplingSoak) {
-    TerrainGenParams params;
+    TerrainGenParams params = Luminumbra::Test::SyntheticTerrainParams();
     SHIELD_WorldSystem world(nullptr, nullptr, params, 424242);
     SHIELD_WorldSystem original(nullptr, nullptr, params, 424242);
 

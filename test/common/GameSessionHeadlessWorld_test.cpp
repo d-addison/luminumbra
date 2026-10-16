@@ -3,7 +3,9 @@
 // asset requirements are caller-supplied by the client. Headless CreateWorld
 // must succeed in a root containing nothing but the world preset.
 #include "../support/UniqueTempPath.h"
+#include "../support/WorldgenTestData.h"
 
+#include "../support/SystemConfigVariants.h"
 #include <gtest/gtest.h>
 
 #include <algorithm>
@@ -36,6 +38,7 @@
 #include <nlohmann/json.hpp>
 
 #include "luminumbra_common/core/JobSystem.h"
+#include "luminumbra_common/core/SystemConfig.h"
 #include "luminumbra_common/fields/EnergyFieldState.h"
 #include "luminumbra_common/persistence/WorldSaveService.h"
 #include "luminumbra_common/scripting/LuaState.h"
@@ -44,6 +47,7 @@
 #include "luminumbra_common/world/FarAuthorityOverlay.h"
 #include "luminumbra_common/world/FarWantedSet.h"
 #include "luminumbra_common/world/GameSession.h"
+#include "luminumbra_common/world/TerrainPresetLoader.h"
 #include "luminumbra_common/world/WorldStreamingState.h"
 
 namespace fs = std::filesystem;
@@ -102,6 +106,13 @@ TEST(GameSessionHeadlessWorldTest, ValidateWorldConfigIsSimulationOnlyByDefault)
         GameSession::ValidateWorldConfig(root.root_string(), "default");
     EXPECT_TRUE(result.ok) << (result.errors.empty() ? "" : result.errors.front());
     EXPECT_TRUE(result.errors.empty());
+
+    const auto preset_only = Luminumbra::world::LoadTerrainPreset(result.preset_path);
+    ASSERT_TRUE(preset_only.ok);
+    Luminumbra::TestSupport::CopyWorldgenTestData(LUMINUMBRA_SOURCE_ROOT, root.path());
+    const auto full_data = Luminumbra::world::LoadTerrainPreset(result.preset_path);
+    ASSERT_TRUE(full_data.ok);
+    EXPECT_NE(preset_only.preset_content_hash, full_data.preset_content_hash);
 }
 
 TEST(GameSessionHeadlessWorldTest, CallerSuppliedRequiredAssetsAreEnforced) {
@@ -145,6 +156,22 @@ TEST(GameSessionHeadlessWorldTest, HeadlessCreateWorldSucceedsWithPresetOnly) {
         EXPECT_NE(session.GetWorldSystem(), nullptr);
         EXPECT_NE(session.GetPhysicsSystem(), nullptr);
         EXPECT_FALSE(session.GetMetadata().worldId.empty());
+        EXPECT_TRUE(session.ActiveRegionsEnabled());
+        EXPECT_TRUE(session.AetherStateEnabled());
+        EXPECT_TRUE(session.WeatherRainEnabled());
+        EXPECT_TRUE(session.WeatherEventsEnabled());
+        EXPECT_TRUE(session.FiniteHydrologyEnabled());
+        EXPECT_EQ(session.GetWorldSystem()->debug_water_sim_resolution(), 16);
+        EXPECT_NE(session.GetEnergyFieldState(), nullptr);
+        const auto saved_preset =
+            root.path() / "worlds/saves" / session.GetMetadata().worldId / "preset.json";
+        std::ifstream input(saved_preset);
+        ASSERT_TRUE(input);
+        const auto resolved = nlohmann::json::parse(input);
+        EXPECT_EQ(resolved.at("schema_rev"), 7);
+        EXPECT_TRUE(
+            resolved.at("generation_params").at("terrain").at("island_mask_enabled").get<bool>());
+
         // World metadata landed inside the headless root.
         EXPECT_TRUE(fs::exists(root.path() / "worlds" / "saves" / session.GetMetadata().worldId /
                                "world_info.json"));
@@ -204,6 +231,11 @@ TEST(GameSessionHeadlessWorldTest, CustomPresetEmbedsInSaveAndChangesTerrain) {
         custom_world.SetRootPath(root.root_string());
         ASSERT_TRUE(custom_world.CreateWorld("Custom", "777", "default", &custom));
         ASSERT_NE(custom_world.GetWorldSystem(), nullptr);
+        EXPECT_FALSE(base.PresetContentHash().empty());
+        EXPECT_NE(base.PresetContentHash(), custom_world.PresetContentHash());
+        const auto identity = Luminumbra::world::LoadTerrainPresetFromJson(j, root.path() / "data");
+        ASSERT_TRUE(identity.ok);
+        EXPECT_EQ(custom_world.PresetContentHash(), identity.preset_content_hash);
 
         // The resolved preset is embedded in THIS world's save dir; worldType keeps the base name.
         const fs::path embedded =
@@ -1023,13 +1055,29 @@ TEST(GameSessionHeadlessWorldTest, EnergyOnlyExplicitSnapshotCreatesDestinationA
     }
 }
 
-TEST(GameSessionHeadlessWorldTest, DefaultOffCallbacksKeepLegacySavesLoadsAndNestedTicks) {
+TEST(GameSessionHeadlessWorldTest, ExplicitlyDisabledCallbacksKeepLegacySavesLoadsAndNestedTicks) {
     const HeadlessRoot root;
+    {
+        const auto path = root.path() / "worlds/atlas/presets/default.json";
+        std::ifstream input(path);
+        auto preset = nlohmann::json::parse(input);
+        input.close();
+        preset["generation_params"]["terrain"]["island_mask_enabled"] = false;
+        std::ofstream output(path);
+        output << preset.dump(2);
+    }
     JobSystem jobs;
     jobs.startup(1);
     GameSession session;
     session.SetRootPath(root.root_string());
     session.SetJobSystem(&jobs);
+    session.SetActiveRegionsEnabled(false);
+    session.SetAetherStateEnabled(false);
+    session.SetWaterHighResEnabled(false);
+    session.SetWeatherRainEnabled(false);
+    session.SetWeatherEventsEnabled(false);
+    session.SetFiniteHydrologyEnabled(false);
+
     ASSERT_TRUE(session.CreateWorld("Legacy callbacks", "1337", "default"));
     const auto save = session.GetWorldSaveDir();
     const auto before = ReadClockTestFile(save / "world_info.json");
@@ -1090,14 +1138,29 @@ TEST(GameSessionHeadlessWorldTest, ClockSnapshotsRefuseInsideCatchUpBatch) {
     EXPECT_EQ(nlohmann::json::parse(ReadClockTestFile(metadata)).at("simulationTick"), 2u);
 }
 
-TEST(GameSessionHeadlessWorldTest, DefaultOffKeepsLegacyMetadataBytesAndTickZeroLoad) {
+TEST(GameSessionHeadlessWorldTest, ExplicitlyDisabledKeepsLegacyMetadataBytesAndTickZeroLoad) {
     const HeadlessRoot root;
+    {
+        const auto path = root.path() / "worlds/atlas/presets/default.json";
+        std::ifstream input(path);
+        auto preset = nlohmann::json::parse(input);
+        input.close();
+        preset["generation_params"]["terrain"]["island_mask_enabled"] = false;
+        std::ofstream output(path);
+        output << preset.dump(2);
+    }
     JobSystem jobs;
     jobs.startup(1);
     GameSession session, loaded;
     for (auto* s : {&session, &loaded}) {
         s->SetRootPath(root.root_string());
         s->SetJobSystem(&jobs);
+        s->SetActiveRegionsEnabled(false);
+        s->SetAetherStateEnabled(false);
+        s->SetWaterHighResEnabled(false);
+        s->SetWeatherRainEnabled(false);
+        s->SetWeatherEventsEnabled(false);
+        s->SetFiniteHydrologyEnabled(false);
     }
     ASSERT_TRUE(session.CreateWorld("Legacy clock", "1337", "default"));
     const auto path = session.GetWorldSaveDir() / "world_info.json";
@@ -1268,13 +1331,30 @@ void ExpectSameWorldHash(GameSession& actual, GameSession& expected) {
 
 TEST(GameSessionHeadlessWorldTest, DisabledRegionsMatchDevelWorldHashAndExactSaveBytes) {
     const HeadlessRoot root;
+    {
+        const auto path = root.path() / "worlds/atlas/presets/default.json";
+        std::ifstream input(path);
+        auto preset = nlohmann::json::parse(input);
+        input.close();
+        preset["generation_params"]["terrain"]["island_mask_enabled"] = false;
+        std::ofstream output(path);
+        output << preset.dump(2);
+    }
     JobSystem jobs;
     jobs.startup(1);
     GameSession session, expected;
     for (auto* s : {&session, &expected}) {
         s->SetRootPath(root.root_string());
         s->SetJobSystem(&jobs);
+        s->SetActiveRegionsEnabled(false);
+        s->SetAetherStateEnabled(false);
+        s->SetWaterHighResEnabled(false);
+        s->SetWeatherRainEnabled(false);
+        s->SetWeatherEventsEnabled(false);
+        s->SetFiniteHydrologyEnabled(false);
+
         ASSERT_TRUE(s->CreateWorld("Region golden", "1337", "default"));
+        s->GetWorldSystem()->SetWaterHydrology(false, 0, 0);
         ASSERT_NO_FATAL_FAILURE(AdoptRegionGoldenChunk(*s, 0));
     }
     // Disabled entry points must be inert, including otherwise invalid inputs.
@@ -1318,12 +1398,28 @@ void SavePlantRosterThenMultiRegionEdit(GameSession& session, const fs::path& sa
 TEST(GameSessionHeadlessWorldTest,
      DisabledPlantRosterThenMultiRegionEditMatchesDevelHashAndExactSaveBytes) {
     const HeadlessRoot root;
+    {
+        const auto path = root.path() / "worlds/atlas/presets/default.json";
+        std::ifstream input(path);
+        auto preset = nlohmann::json::parse(input);
+        input.close();
+        preset["generation_params"]["terrain"]["island_mask_enabled"] = false;
+        std::ofstream output(path);
+        output << preset.dump(2);
+    }
     JobSystem jobs;
     jobs.startup(1);
     GameSession session, loaded, expected_live, expected_loaded;
     for (auto* s : {&session, &loaded, &expected_live, &expected_loaded}) {
         s->SetRootPath(root.root_string());
         s->SetJobSystem(&jobs);
+        s->SetActiveRegionsEnabled(false);
+        s->SetAetherStateEnabled(false);
+        s->SetWaterHighResEnabled(false);
+        s->SetWeatherRainEnabled(false);
+        s->SetWeatherEventsEnabled(false);
+        s->SetFiniteHydrologyEnabled(false);
+
         ASSERT_TRUE(s->CreateTransientWorld("Plant region golden", "1337", "default"));
     }
     for (auto* s : {&expected_live, &expected_loaded}) {
@@ -1989,6 +2085,7 @@ TEST(GameSessionHeadlessWorldTest, LedgerFileAbsenceCorruptionFutureAndDisabledR
     }
     std::ofstream(path, std::ios::binary) << good;
     GameSession disabled;
+    disabled.SetActiveRegionsEnabled(false); // Exercise the incompatible-config refusal.
     disabled.SetRootPath(root.root_string());
     disabled.SetJobSystem(&jobs);
     EXPECT_FALSE(disabled.LoadWorld(owner.GetMetadata().worldId));
@@ -2278,4 +2375,65 @@ TEST(GameSessionHeadlessWorldTest, FarOverlayFilesDoNotChangeTheWorldHash) {
     fs::remove_all(save / "far");
     ASSERT_TRUE(reloaded.LoadWorld(original.GetMetadata().worldId)) << reloaded.GetWorldOpenError();
     EXPECT_EQ(SessionWorldHash(reloaded), before);
+}
+
+TEST(GameSessionHeadlessWorldTest, SharedSystemConfigPreservesExplicitOff) {
+    GameSession session;
+    const auto off = luminumbra::core::SystemConfig::FromJsonString(R"({"sim":{
+        "active_regions":{"enabled":false}, "aether_state":{"enabled":false},
+        "water_high_res":{"enabled":false}, "hydrology_weather":{"enabled":false},
+        "weather_events":{"enabled":false}}})");
+    session.ApplySystemConfig(off);
+    EXPECT_FALSE(session.ActiveRegionsEnabled());
+    EXPECT_FALSE(session.AetherStateEnabled());
+    EXPECT_FALSE(session.WeatherRainEnabled());
+    EXPECT_FALSE(session.WeatherEventsEnabled());
+    // Finite hydrology is an independent shipping gate, not a tuning selector.
+    EXPECT_TRUE(session.FiniteHydrologyEnabled());
+    session.SetFiniteHydrologyEnabled(false);
+    EXPECT_FALSE(session.FiniteHydrologyEnabled());
+}
+
+TEST(GameSessionHeadlessWorldTest, WaterRuleIdentitiesObserveIndependentSetters) {
+    GameSession first, second;
+    EXPECT_EQ(first.SystemConfigIdentity(), second.SystemConfigIdentity());
+    first.SetFiniteHydrologyEnabled(false);
+    EXPECT_NE(first.SystemConfigIdentity(), second.SystemConfigIdentity());
+    second.SetFiniteHydrologyEnabled(false);
+    EXPECT_EQ(first.SystemConfigIdentity(), second.SystemConfigIdentity());
+    first.SetFiniteHydrologyEnabled(true);
+    second.SetFiniteHydrologyEnabled(true);
+    first.SetWeatherRainEnabled(true, 26);
+    EXPECT_NE(first.SystemConfigIdentity(), second.SystemConfigIdentity());
+    second.SetWeatherRainEnabled(true, 26);
+    EXPECT_EQ(first.SystemConfigIdentity(), second.SystemConfigIdentity());
+}
+
+TEST(GameSessionHeadlessWorldTest, EffectiveIdentityUsesDefaultsAndCurrentSetters) {
+    using luminumbra::core::SystemConfig;
+    GameSession direct, applied;
+    applied.ApplySystemConfig(SystemConfig::Defaults());
+    const auto baseline = direct.SystemConfigIdentity();
+    EXPECT_FALSE(baseline.empty());
+    EXPECT_EQ(baseline, applied.SystemConfigIdentity());
+    EXPECT_EQ(baseline, "60ab3c242d54ce89");
+    for (const auto& [name, identity] : Luminumbra::TestSupport::EffectiveIdentityMismatches()) {
+        SCOPED_TRACE(name);
+        EXPECT_NE(identity, baseline);
+    }
+    // Turning off a tuning override with no nondefault tuning changes no effective rules.
+    applied.ApplySystemConfig(SystemConfig::FromJsonString(
+        R"({"sim":{"ecology":{"enabled":false,"params":{"herd_weight":0.9}}},
+            "render":{"circadian":{"enabled":false,"params":{"amplitude":0.5}}}})"));
+    EXPECT_EQ(applied.SystemConfigIdentity(), baseline);
+    applied.ApplySystemConfig(SystemConfig::FromJsonString(
+        R"({"sim":{"reproduction":{"params":{"maturity_ticks":90.75}}}})"));
+    EXPECT_EQ(applied.SystemConfigIdentity(), baseline);
+    const auto variants = Luminumbra::TestSupport::EffectiveIdentityMismatches();
+    ASSERT_GE(variants.size(), 2u);
+    EXPECT_NE(variants[variants.size() - 2].second, variants.back().second);
+    applied.SetEcologyTuning(direct.GetEcologyTuning());
+    direct.SetCircadianAmplitude(0.5f);
+    applied.SetCircadianAmplitude(0.5f);
+    EXPECT_EQ(direct.SystemConfigIdentity(), applied.SystemConfigIdentity());
 }
