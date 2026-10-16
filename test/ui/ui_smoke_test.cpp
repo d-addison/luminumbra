@@ -862,7 +862,8 @@ TEST(UiSmokeTest, DisabledAudioShowsStatusAndPreservesSavedVolumes) {
     ASSERT_NE(settings, nullptr);
     auto* status = settings->GetElementById("setting_audio_status");
     ASSERT_NE(status, nullptr);
-    EXPECT_NE(status->GetInnerRML().find("Audio is disabled for this release."), std::string::npos);
+    EXPECT_NE(status->GetInnerRML().find("Audio playback disabled or unavailable."),
+              std::string::npos);
     for (const char* id : {"setting_audio_master", "setting_audio_music", "setting_audio_sfx"}) {
         auto* control = dynamic_cast<Rml::ElementFormControl*>(settings->GetElementById(id));
         ASSERT_NE(control, nullptr);
@@ -1766,4 +1767,22 @@ TEST(UiSmokeTest, SemanticKnobsSeedDriveCallbackAndPreview) {
     EXPECT_TRUE(preview_has_knob) << "the knob must drive the live preview state";
 
     ui.Shutdown();
+}
+
+TEST(WorldgenOverrideTest, OmittedShippingBiomesCanBeExplicitlyDisabled) {
+    nlohmann::json base = {
+        {"schema_rev", 7},
+        {"generation_params",
+         {{"terrain", nlohmann::json::object()}, {"features", nlohmann::json::object()}}}};
+    const std::vector<Luminumbra::Client::WorldGenParam> off = {
+        {"biomes.enabled", "false", "bool"}};
+    const auto custom = Luminumbra::Client::BuildCustomPreset(base, off);
+    EXPECT_TRUE(custom.changed);
+    EXPECT_TRUE(
+        custom.json.at("generation_params").at("biomes").at("table").get<std::string>().empty());
+    const auto knobs = Luminumbra::Client::BuildKnobResolvedPreset(base, off);
+    EXPECT_TRUE(knobs.changed);
+    EXPECT_EQ(knobs.override_count, 1);
+    EXPECT_TRUE(
+        knobs.json.at("generation_params").at("biomes").at("table").get<std::string>().empty());
 }

@@ -282,7 +282,8 @@ class CaptureContract(unittest.TestCase):
         for preset in capture.PRESETS:
             argv = [str(source / capture.SERVER_BINARY), "--root", str(source), "--smoke",
                     "--no-audio", "--sim-budget", "--ecology-roster", "--planted-roster",
-                    "--preset", preset, "--seed", "1337", "--ticks", "600", "--radius", "1",
+                    "--preset", preset, "--seed", "1337", "--ticks", "600",
+                    "--autosave-ticks", "30", "--radius", "1",
                     "--collision-radius", "1", "--artifact",
                     str(source / f"build/qualification/sim-budget-capture/{preset}.json")]
             commands[preset] = argv
