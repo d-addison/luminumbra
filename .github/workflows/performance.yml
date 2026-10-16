@@ -109,6 +109,7 @@ jobs:
           python tools/perf/test_render_contract.py
           python tools/perf/test_capture_sim_budget.py
           python tools/perf/test_sim_budget_gate.py
+          python tools/perf/test_terrain_aov_paths.py
           python tools/perf/test_check_residency.py
           python tools/perf/test_render_budget.py
           python tools/ci/test_validate_performance_measurement.py

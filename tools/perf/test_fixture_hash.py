@@ -4,17 +4,135 @@
 from __future__ import annotations
 
 import contextlib
+import errno
 import hashlib
 import io
 import json
+import ntpath
+import os
+import posixpath
 import sys
 import tempfile
 import unittest
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import fixture_hash as module  # noqa: E402
+import fixture_paths
+from fixture_paths import reference_parts, resolve_reference
+
+
+ROOTED_REFERENCES = (
+    "/outside.json", "//server/share/outside.json",
+    "C:/outside.json", "c:\\outside.json", "C:outside.json",
+    "\\\\server\\share\\outside.json", "\\outside.json",
+    "\\\\?\\C:\\outside.json", "\\\\.\\C:\\outside.json",
+    "./C:/outside.json", "sub/../C:/outside.json", ".\\C:outside.json",
+    "sub\\..\\C:\\outside.json",
+)
+ESCAPING_REFERENCES = (
+    "../outside.json", "../../outside.json", "sub/../../outside.json",
+    "..\\outside.json", "..\\..\\outside.json", "sub\\..\\..\\outside.json",
+    "sub/..\\../outside.json",
+)
+
+
+def symlink_or_skip(test, link, target, *, directory=False):
+    try:
+        link.symlink_to(target, target_is_directory=directory)
+    except NotImplementedError as exc:
+        test.skipTest(f"OS cannot create symlinks: {exc}")
+    except OSError as exc:
+        if exc.errno not in (errno.EPERM, errno.EACCES, errno.ENOSYS, errno.ENOTSUP):
+            raise
+        test.skipTest(f"OS cannot create symlinks: {exc}")
+
+
+class FixtureReferenceTests(unittest.TestCase):
+    def test_both_path_grammars_reject_rooted_references_without_io(self):
+        with mock.patch.object(Path, "resolve", side_effect=AssertionError("unexpected I/O")):
+            for reference in ROOTED_REFERENCES:
+                with self.subTest(reference=reference):
+                    with self.assertRaisesRegex(ValueError, "must be root-relative"):
+                        resolve_reference(Path("unused"), reference)
+
+    def test_both_path_grammars_reject_escapes_without_io(self):
+        with mock.patch.object(Path, "resolve", side_effect=AssertionError("unexpected I/O")):
+            for reference in ESCAPING_REFERENCES:
+                with self.subTest(reference=reference):
+                    with self.assertRaisesRegex(ValueError, "escapes root"):
+                        resolve_reference(Path("unused"), reference)
+
+    def test_normalized_in_root_references_and_empty_paths(self):
+        self.assertEqual(reference_parts("common/./sub/../biomes.json"), ("common", "biomes.json"))
+        for reference in ("", ".", "./", "sub/..", "sub\\..", "bad\0name"):
+            with self.subTest(reference=reference), self.assertRaisesRegex(ValueError, "root-relative"):
+                reference_parts(reference)
+
+    def test_accepted_references_follow_each_native_path_grammar(self):
+        references = (
+            "extra\\biomes.json", "extra\\sub\\..\\biomes.json",
+            "extra/./sub/../biomes.json", "extra\\sub/../biomes.json",
+            "extra/sub/..\\biomes.json", "extra//biomes.json",
+        )
+        for grammar, normalize in ((PurePosixPath, posixpath.normpath),
+                                   (PureWindowsPath, ntpath.normpath)):
+            root = grammar("fixtures")
+            with mock.patch.object(fixture_paths, "Path", grammar), \
+                    mock.patch.object(fixture_paths, "contain_path", side_effect=lambda r, p: p):
+                for reference in references:
+                    with self.subTest(grammar=grammar.__name__, reference=reference):
+                        self.assertEqual(reference_parts(reference), grammar(normalize(reference)).parts)
+                        self.assertEqual(resolve_reference(root, reference), root / normalize(reference))
+                for reference in ROOTED_REFERENCES + ESCAPING_REFERENCES:
+                    with self.subTest(grammar=grammar.__name__, refused=reference), \
+                            self.assertRaisesRegex(ValueError, "fixture reference"):
+                        resolve_reference(root, reference)
+
+    def test_native_normalization_also_refuses_empty_and_escaping_paths(self):
+        # The portable Windows interpretation counts two directory components;
+        # POSIX sees one literal name containing a backslash.
+        for reference, message in (("extra\\sub/..", "root-relative"),
+                                   ("extra\\sub/../../biomes.json", "escapes root")):
+            with self.subTest(reference=reference):
+                with mock.patch.object(fixture_paths, "Path", PurePosixPath), \
+                        self.assertRaisesRegex(ValueError, message):
+                    reference_parts(reference)
+                with mock.patch.object(fixture_paths, "Path", PureWindowsPath):
+                    self.assertEqual(reference_parts(reference),
+                                     PureWindowsPath(ntpath.normpath(reference)).parts)
+
+    def test_real_links_are_contained_at_every_component(self):
+        with tempfile.TemporaryDirectory() as temp:
+            parent = Path(temp)
+            root, outside = parent / "root", parent / "root-sibling"
+            root.mkdir()
+            outside.mkdir()
+            write(outside, "table.json", "{}")
+            write(root, "common/biomes.json", "{}")
+            symlink_or_skip(self, root / "file.json", outside / "table.json")
+            symlink_or_skip(self, root / "directory", outside, directory=True)
+            symlink_or_skip(self, root / "dangling.json", outside / "missing.json")
+            symlink_or_skip(self, outside / "back", root / "common", directory=True)
+            if os.name != "nt":
+                # Backslashes name separate entries under POSIX native rules.
+                symlink_or_skip(self, root / "directory\\table.json", outside / "table.json")
+                symlink_or_skip(self, root / "directory\\back\\biomes.json", outside / "table.json")
+            for reference in ("file.json", "directory/table.json", "directory\\table.json",
+                              "directory/back/biomes.json", "directory\\back\\biomes.json",
+                              "dangling.json"):
+                with self.subTest(reference=reference):
+                    with self.assertRaisesRegex(ValueError, "resolves outside root"):
+                        resolve_reference(root, reference)
+            symlink_or_skip(self, root / "valid", root / "common", directory=True)
+            if os.name != "nt":
+                symlink_or_skip(self, root / "valid\\biomes.json", root / "common/biomes.json")
+            for reference in ("valid/biomes.json", "valid\\biomes.json"):
+                self.assertEqual(resolve_reference(root, reference).read_text(), "{}")
+            self.assertEqual(resolve_reference(root, "common/missing.json"),
+                             root.resolve() / "common/missing.json")
 
 
 def write(root: Path, relative: str, text: str) -> None:
@@ -30,6 +148,166 @@ class FixtureHashTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self._tmp.cleanup()
+
+    def test_external_biome_references_are_refused_in_both_scopes(self):
+        for scope in module.SCOPES:
+            for reference in ROOTED_REFERENCES + ESCAPING_REFERENCES:
+                with self.subTest(scope=scope, reference=reference):
+                    write(self.root, "preset.json", json.dumps({
+                        "generation_params": {"biomes": {"table": reference}}}))
+                    with self.assertRaisesRegex(ValueError, "fixture reference"):
+                        module.fixture_hash(self.root, scope=scope)
+
+    def test_in_root_biome_reference_preserves_hash_format(self):
+        for reference in ("common/./sub/../biomes.json", "common\\biomes.json", ""):
+            write(self.root, "preset.json", json.dumps({
+                "generation_params": {"biomes": {"table": reference}}}))
+            write(self.root, "common/biomes.json", '{"biomes":[]}')
+            write(self.root, "common\\biomes.json", '{"biomes":[]}')
+            expected = hashlib.sha256()
+            names = {"common/biomes.json", Path("common\\biomes.json").as_posix(), "preset.json"}
+            for name in sorted(names):
+                expected.update(name.encode() + b"\0")
+                expected.update(module.canonical_file_digest(self.root / name).encode() + b"\n")
+            self.assertEqual(module.fixture_hash(self.root), expected.hexdigest())
+
+    def test_tree_hash_refuses_external_file_directory_and_dangling_links(self):
+        with tempfile.TemporaryDirectory() as temp:
+            outside = Path(temp)
+            write(outside, "table.json", "{}")
+            for target, directory in ((outside / "table.json", False), (outside, True),
+                                      (outside / "missing.json", False)):
+                link = self.root / "link"
+                symlink_or_skip(self, link, target, directory=directory)
+                try:
+                    for scope in module.SCOPES:
+                        with self.assertRaisesRegex(ValueError, "resolves outside root"):
+                            module.fixture_hash(self.root, scope=scope)
+                finally:
+                    link.unlink()
+
+    def test_in_root_file_link_hashes_with_its_original_logical_name(self):
+        write(self.root, "table.json", "{}")
+        symlink_or_skip(self, self.root / "alias.json", self.root / "table.json")
+        linked = module.fixture_hash(self.root)
+        (self.root / "alias.json").unlink()
+        write(self.root, "alias.json", "{}")
+        self.assertEqual(module.fixture_hash(self.root), linked)
+
+    def test_enumerated_native_backslash_filename_keeps_its_bytes(self):
+        if os.name == "nt":
+            # Windows has no literal backslash filename. The native spelling
+            # case is covered below on every filesystem that supports it.
+            self.assertEqual(Path("literal\\table.json").parts, ("literal", "table.json"))
+            return
+        write(self.root, "literal\\table.json", '{"literal":1}')
+        write(self.root, "literal/table.json", '{"nested":2}')
+        expected = hashlib.sha256()
+        for name in ("literal/table.json", "literal\\table.json"):
+            expected.update(name.encode() + b"\0")
+            expected.update(module.canonical_file_digest(self.root / name).encode() + b"\n")
+        before = module.fixture_hash(self.root)
+        self.assertEqual(before, expected.hexdigest())
+        write(self.root, "literal\\table.json", '{"literal":3}')
+        self.assertNotEqual(before, module.fixture_hash(self.root))
+
+    def test_dependencies_outside_tree_are_hashed_with_stable_framing(self):
+        common = self.root / "common"
+        for name, reference in (("Z", "extra/z.json"), ("a", "extra/a.json"),
+                                ("alias", "extra\\a.json")):
+            write(common, name + ".json", json.dumps({
+                "generation_params": {"biomes": {"table": reference}}}))
+        write(self.root, "extra/a.json", '{"value":1}')
+        if os.name != "nt":
+            write(self.root, "extra\\a.json", '{"value":4}')
+        write(self.root, "extra/z.json", '{"value":2}')
+        expected = hashlib.sha256()
+        for name in ("Z.json", "a.json", "alias.json"):
+            expected.update(name.encode() + b"\0")
+            expected.update(module.canonical_file_digest(common / name).encode() + b"\n")
+        expected.update(b"\0fixture-dependencies:v1\0")
+        names = {"extra/a.json", "extra/z.json", Path("extra\\a.json").as_posix()}
+        entries = [(name, module.canonical_file_digest(self.root / name)) for name in sorted(names)]
+        expected.update(json.dumps(entries, ensure_ascii=True, separators=(",", ":")).encode("ascii"))
+        before = module.fixture_hash(common, reference_root=self.root)
+        self.assertEqual(before, expected.hexdigest())
+        write(self.root, "extra/a.json", '{"value":3}')
+        self.assertNotEqual(before, module.fixture_hash(common, reference_root=self.root))
+        (self.root / "extra/a.json").unlink()
+        missing = module.fixture_hash(common, reference_root=self.root)
+        self.assertNotEqual(before, missing)
+        write(self.root, "extra/a.json", '{"value":1}')
+        self.assertEqual(before, module.fixture_hash(common, reference_root=self.root))
+
+    def test_authored_backslash_dependency_hashes_the_native_file(self):
+        presets = self.root / "presets"
+        reference = "extra\\biomes.json"
+        write(presets, "preset.json", json.dumps({
+            "generation_params": {"biomes": {"table": reference}}}))
+        write(self.root, "extra/biomes.json", '{"value":1}')
+        if os.name != "nt":
+            write(self.root, reference, '{"value":2}')
+        native = self.root / reference
+        self.assertEqual(resolve_reference(self.root, reference), native)
+        dependencies = {}
+        before = module.fixture_hash(presets, reference_root=self.root, dependencies=dependencies)
+        self.assertEqual(dependencies, {Path(reference).as_posix(): native})
+        write(self.root, reference, '{"value":3}')
+        after = module.fixture_hash(presets, reference_root=self.root)
+        self.assertNotEqual(before, after)
+        if os.name != "nt":
+            # The slash spelling is a different, unreferenced file on POSIX.
+            write(self.root, "extra/biomes.json", '{"value":4}')
+            self.assertEqual(after, module.fixture_hash(presets, reference_root=self.root))
+
+    def test_transitive_dependencies_and_cycles_are_hashed(self):
+        presets = self.root / "presets"
+        document = lambda table: json.dumps({"generation_params": {"biomes": {"table": table}}})
+        write(presets, "first.json", document("extra/second.json"))
+        write(self.root, "extra/second.json", document("extra/third.json"))
+        write(self.root, "extra/third.json", document("extra/second.json"))
+        before = module.fixture_hash(presets, reference_root=self.root)
+        write(self.root, "extra/third.json", document("extra/second.json")[:-1] + ',"value":1}')
+        self.assertNotEqual(before, module.fixture_hash(presets, reference_root=self.root))
+
+    def test_existing_fixture_tree_receipts_and_preset_dependency_extension(self):
+        checkout = Path(__file__).resolve().parents[2]
+        cases = (
+            ("data", "all"), ("data/common", "all"),
+            ("data/common", "headless-server"), ("worlds/atlas/presets", "all"),
+        )
+        for relative, scope in cases:
+            with self.subTest(relative=relative, scope=scope):
+                root = checkout / relative
+                # Preserve the original receipt algorithm as an oracle. Raw
+                # non-JSON text bytes depend on the checkout newline policy.
+                expected = hashlib.sha256()
+                if scope != "all":
+                    expected.update(f"fixture-scope:{scope}\0".encode("ascii"))
+                for path in sorted((p for p in root.rglob("*") if p.is_file()),
+                                   key=lambda p: p.relative_to(root).parts):
+                    name = path.relative_to(root).as_posix()
+                    if scope == "headless-server" and name in module.SERVER_RENDER_ONLY_FILES:
+                        continue
+                    expected.update(name.encode("utf-8") + b"\0")
+                    expected.update(module.canonical_file_digest(path).encode("ascii") + b"\n")
+                if relative == "worlds/atlas/presets":
+                    # Presets reference common data outside their hashed tree.
+                    # Their identity must now bind those bytes too.
+                    expected.update(b"\0fixture-dependencies:v1\0")
+                    entries = [("common/biomes.json", module.canonical_file_digest(
+                        checkout / "data/common/biomes.json"))]
+                    expected.update(json.dumps(entries, ensure_ascii=True,
+                                               separators=(",", ":")).encode("ascii"))
+                self.assertEqual(module.fixture_hash(checkout / relative, scope=scope,
+                                                    reference_root=checkout / "data"), expected.hexdigest())
+
+    def test_cli_reports_containment_refusal(self):
+        write(self.root, "preset.json", json.dumps({
+            "generation_params": {"biomes": {"table": "../outside.json"}}}))
+        with contextlib.redirect_stderr(io.StringIO()) as error:
+            self.assertEqual(module.main(["fixture_hash.py", str(self.root)]), 2)
+        self.assertIn("fixture refused: fixture reference escapes root", error.getvalue())
 
     def test_comment_key_edit_does_not_move_the_hash(self) -> None:
         # The case that made a documentation-only change unable to pass the gate.

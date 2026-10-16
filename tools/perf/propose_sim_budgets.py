@@ -35,6 +35,8 @@ def build_proposal(capture: dict[str, Any], num: int, den: int) -> dict[str, Any
     identity = {key: manifest[key] for key in (
         "revision", "fixture_hash", "seed", "ticks", "binary_sha256", "source_dirty",
         "surface_radius", "collision_radius")}
+    if "preset_hash" in manifest:
+        identity["preset_hash"] = manifest["preset_hash"]
     for key in ("seed", "ticks"):
         identity[key] = sim_budget_io.validate_workload_integer(manifest[key], key)
     presets: dict[str, Any] = {}
@@ -74,10 +76,13 @@ def build_proposal(capture: dict[str, Any], num: int, den: int) -> dict[str, Any
 
 def build_budgets(proposal: dict[str, Any]) -> dict[str, Any]:
     identity = proposal["identity"]
+    budget_identity = {key: identity[key] for key in (
+        "revision", "fixture_hash", "seed", "ticks", "surface_radius", "collision_radius")}
+    if "preset_hash" in identity:
+        budget_identity["preset_hash"] = identity["preset_hash"]
     return {
         "schema": BUDGETS_SCHEMA,
-        "identity": {key: identity[key] for key in (
-            "revision", "fixture_hash", "seed", "ticks", "surface_radius", "collision_radius")},
+        "identity": budget_identity,
         "headroom": dict(proposal["headroom"]),
         "presets": {
             preset: {

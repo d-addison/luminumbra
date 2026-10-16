@@ -9,6 +9,8 @@ from pathlib import Path, PurePosixPath
 import re
 import struct
 
+from fixture_paths import resolve_reference
+
 
 class Refusal(ValueError):
     pass
@@ -44,8 +46,10 @@ def local(root, name, limit):
     require(re.fullmatch(r'[A-Za-z0-9_./-]+', name) is not None,
             "unsafe artifact name")
     root = root.resolve()
-    path = root.joinpath(*relative.parts)
-    require(path.resolve().is_relative_to(root), "escaped artifact")
+    try:
+        path = resolve_reference(root, name)
+    except ValueError as exc:
+        raise Refusal("escaped artifact") from exc
     check = path
     while check != root:
         require(not check.is_symlink() and not (getattr(check.lstat(), "st_file_attributes", 0) & 0x400),

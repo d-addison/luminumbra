@@ -6,9 +6,52 @@ import tempfile
 import unittest
 
 import prepare_server_comparison as comparison
+from test_fixture_hash import ROOTED_REFERENCES, ESCAPING_REFERENCES, symlink_or_skip
 
 
 class ComparisonFixtureTest(unittest.TestCase):
+    def test_identity_refuses_external_preset_references(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "data/common").mkdir(parents=True)
+            presets = root / "worlds/atlas/presets"
+            presets.mkdir(parents=True)
+            (root / comparison.MARKER).write_text("controlled")
+            for reference in ROOTED_REFERENCES + ESCAPING_REFERENCES:
+                (presets / "default.json").write_text(json.dumps({
+                    "generation_params": {"biomes": {"table": reference}}}))
+                with self.subTest(reference=reference):
+                    with self.assertRaisesRegex(ValueError, "fixture reference"):
+                        comparison.identity(root)
+
+    def test_preparation_refuses_unsafe_links_before_copy_or_source_changes(self):
+        with tempfile.TemporaryDirectory() as temp:
+            parent = Path(temp)
+            base, head = parent / "base", parent / "head"
+            common = base / "data/common"
+            common.mkdir(parents=True)
+            (base / "worlds/atlas/presets").mkdir(parents=True)
+            outside = parent / "outside.json"
+            outside.write_text("{}")
+            symlink_or_skip(self, common / "systems.json", outside)
+            with self.assertRaisesRegex(ValueError, "resolves outside root"):
+                comparison.prepare(base, head, parent / "receipt.json")
+            self.assertFalse((base / "perf-common").exists())
+            self.assertFalse((head / "perf-common").exists())
+            self.assertFalse((parent / "receipt.json").exists())
+
+    def test_preparation_refuses_unsafe_preset_before_copy(self):
+        with tempfile.TemporaryDirectory() as temp:
+            base, head = Path(temp) / "base", Path(temp) / "head"
+            (base / "data/common").mkdir(parents=True)
+            presets = base / "worlds/atlas/presets"
+            presets.mkdir(parents=True)
+            (presets / "default.json").write_text(json.dumps({
+                "generation_params": {"biomes": {"table": "../outside.json"}}}))
+            with self.assertRaisesRegex(ValueError, "escapes root"):
+                comparison.prepare(base, head, Path(temp) / "receipt.json")
+            self.assertFalse((base / "perf-common").exists())
+
     def test_inputs_match_and_saves_do_not_change_identity(self):
         with tempfile.TemporaryDirectory() as temp:
             base, head = Path(temp) / "base", Path(temp) / "head"
@@ -22,7 +65,11 @@ class ComparisonFixtureTest(unittest.TestCase):
             (common / "systems.json").write_text('{"sim":{"erosion":{"enabled":true}}}')
             presets = base / "worlds/atlas/presets"
             presets.mkdir(parents=True)
-            (presets / "default.json").write_text('{"schema_rev":6}')
+            (presets / "default.json").write_text(json.dumps({"schema_rev": 6,
+                "generation_params": {"biomes": {"table": "extra/biomes.json"}}}))
+            extra = base / "data/extra"
+            extra.mkdir()
+            (extra / "biomes.json").write_text('{"biomes":[]}')
             schema = head / "src/luminumbra_common/core/ConfigSchema.json"
             schema.parent.mkdir(parents=True)
             schema.write_text(json.dumps({"keys": [dict(section="sim", json_name="erosion"),
@@ -40,11 +87,16 @@ class ComparisonFixtureTest(unittest.TestCase):
                 flags = json.loads((root / "data/common/systems.json").read_text())
                 self.assertFalse(flags["sim"]["active_regions"]["enabled"])
                 self.assertFalse(flags["render"]["taau"]["enabled"])
+                self.assertEqual((root / "data/extra/biomes.json").read_bytes(),
+                                 (extra / "biomes.json").read_bytes())
                 before = comparison.identity(root)
                 saves = root / "worlds/saves"
                 saves.mkdir()
                 (saves / "generated.json").write_text('{"tick":30}')
                 self.assertEqual(before, comparison.identity(root))
+                (root / "data/extra/biomes.json").write_text('{"biomes":[1]}')
+                self.assertNotEqual(before, comparison.identity(root))
+                before = comparison.identity(root)
                 (root / "worlds/atlas/presets/default.json").write_text('{"schema_rev":7}')
                 self.assertNotEqual(before, comparison.identity(root))
                 source = (checkout / "src/luminumbra_server/ServerWorldRunner.cpp").read_text()

@@ -14,6 +14,7 @@ import subprocess
 from typing import Any
 
 from fixture_hash import fixture_hash
+from fixture_paths import resolve_reference
 
 
 PRESETS = ("default", "mountains", "archipelago")
@@ -32,7 +33,7 @@ def integer(value: Any) -> bool:
 
 def shipping_simulation_gates() -> tuple[str, ...]:
     """Use the shipping systems document, ignoring its explanatory comment entries."""
-    path = Path(__file__).resolve().parents[2] / "data/common/systems.json"
+    path = resolve_reference(Path(__file__).resolve().parents[2] / "data/common", "systems.json")
     systems = json.loads(path.read_text(encoding="utf-8-sig"))
     return tuple(sorted(name for name, gate in systems["sim"].items()
                         if isinstance(gate, dict) and "enabled" in gate))
@@ -136,6 +137,12 @@ def main() -> int:
         parser.error(f"evidence directory already exists: {evidence}")
     if not args.seed:
         parser.error("seed must be explicit and nonempty")
+    try:
+        common_hash = fixture_hash(resolve_reference(root, "data/common"), scope="headless-server")
+        preset_hash = fixture_hash(resolve_reference(root, "worlds/atlas/presets"),
+                                   reference_root=resolve_reference(root, "data"))
+    except (OSError, ValueError) as exc:
+        parser.exit(1, f"Capture refused: {exc}\n")
     evidence.mkdir(parents=True)
     binary_digest = hashlib.sha256()
     with binary.open("rb") as stream:
@@ -146,7 +153,8 @@ def main() -> int:
         "revision": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip(),
         "source_dirty": bool(subprocess.check_output(["git", "status", "--porcelain"], cwd=root, text=True)),
         "binary_sha256": binary_digest.hexdigest(),
-        "fixture_hash": fixture_hash(root / "data/common", scope="headless-server"),
+        "fixture_hash": common_hash,
+        "preset_hash": preset_hash,
         "seed": args.seed, "ticks": args.ticks, "surface_radius": args.radius,
         "collision_radius": args.collision_radius, "runs": [],
     }
@@ -158,7 +166,7 @@ def main() -> int:
             print(f"Capturing {preset}: {args.ticks} ticks per replay", flush=True)
             with (evidence / f"{preset}.log").open("wb") as log:
                 subprocess.run(argv, cwd=root, stdout=log, stderr=subprocess.STDOUT, check=True)
-            data = json.loads(artifact.read_text(encoding="utf-8-sig"))
+            data = json.loads(resolve_reference(evidence, artifact.name).read_text(encoding="utf-8-sig"))
             validate_artifact(data, preset, args.seed, args.ticks)
             manifest["runs"].append({"preset": preset, "artifact": artifact.name, "command": argv})
         (evidence / "capture.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")

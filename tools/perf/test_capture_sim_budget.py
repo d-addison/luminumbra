@@ -15,6 +15,7 @@ from unittest import mock
 
 import capture_sim_budget as capture
 from fixture_hash import fixture_hash
+from test_fixture_hash import ROOTED_REFERENCES, ESCAPING_REFERENCES
 
 
 def artifact() -> dict:
@@ -38,6 +39,31 @@ def artifact() -> dict:
 
 
 class SimBudgetCaptureTests(unittest.TestCase):
+    def test_capture_refuses_external_preset_references_before_launch(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "data/common").mkdir(parents=True)
+            presets = root / "worlds/atlas/presets"
+            presets.mkdir(parents=True)
+            binary = root / "server"
+            binary.write_bytes(b"synthetic server")
+            evidence = root / "evidence"
+            for reference in ROOTED_REFERENCES + ESCAPING_REFERENCES:
+                (presets / "default.json").write_text(json.dumps({
+                    "generation_params": {"biomes": {"table": reference}}}))
+                with self.subTest(reference=reference), \
+                        mock.patch.object(capture, "__file__", str(root / "tools/perf/capture_sim_budget.py")), \
+                        mock.patch("sys.argv", ["capture_sim_budget.py", "--binary", str(binary),
+                                                "--evidence-dir", str(evidence)]), \
+                        mock.patch.object(capture.subprocess, "run") as launch, \
+                        contextlib.redirect_stderr(io.StringIO()) as error:
+                    with self.assertRaises(SystemExit) as refused:
+                        capture.main()
+                    self.assertEqual(refused.exception.code, 1)
+                    self.assertIn("fixture reference", error.getvalue())
+                    launch.assert_not_called()
+                    self.assertFalse(evidence.exists())
+
     def validate(self, data: dict) -> None:
         capture.validate_artifact(data, "default", "1337", 2)
 
@@ -214,6 +240,8 @@ class SimBudgetCaptureTests(unittest.TestCase):
             manifest = json.loads((evidence / "capture.json").read_text(encoding="utf-8"))
             self.assertEqual(manifest["fixture_hash"], fixture_hash(root / "data/common",
                                                                    scope="headless-server"))
+            self.assertEqual(manifest["preset_hash"], fixture_hash(root / "worlds/atlas/presets",
+                                                                  reference_root=root / "data"))
             self.assertEqual(manifest["seed"], "1337")
             self.assertEqual(manifest["surface_radius"], 1)
             self.assertEqual(manifest["collision_radius"], 1)

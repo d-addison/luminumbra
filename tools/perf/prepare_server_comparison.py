@@ -14,6 +14,7 @@ from pathlib import Path
 import shutil
 
 from fixture_hash import fixture_hash
+from fixture_paths import resolve_reference
 
 GATES = ("ActiveRegions", "WaterHighRes", "WeatherRain", "WeatherEvents", "AetherState")
 TUNINGS = ("Ecology", "WildlifeFoliage", "Thirst", "Scavenging", "Foraging", "Reproduction")
@@ -21,17 +22,25 @@ MARKER = ".perf-controlled"
 
 
 def identity(root: Path) -> str:
-    inputs = {"common": fixture_hash(root / "data/common", scope="headless-server"),
-              "presets": fixture_hash(root / "worlds/atlas/presets"),
-              "configuration": (root / MARKER).read_text(encoding="utf-8")}
+    data = resolve_reference(root, "data")
+    inputs = {"common": fixture_hash(resolve_reference(root, "data/common"), scope="headless-server"),
+              "presets": fixture_hash(resolve_reference(root, "worlds/atlas/presets"),
+                                      reference_root=data),
+              "configuration": resolve_reference(root, MARKER).read_text(encoding="utf-8")}
     return hashlib.sha256(json.dumps(inputs, sort_keys=True).encode()).hexdigest()
 
 
 def prepare(base: Path, head: Path, receipt: Path) -> None:
     # Take the base content once. The source adapters pin lower-layer defaults,
     # including finite hydrology, which systems.json alone cannot configure.
-    common = base / "data/common"
-    presets = base / "worlds/atlas/presets"
+    common = resolve_reference(base, "data/common")
+    presets = resolve_reference(base, "worlds/atlas/presets")
+    # Refuse unsafe source trees before copytree follows links or adapters edit
+    # either checkout. Retain dependencies outside common in the copied fixture.
+    fixture_hash(common, scope="headless-server")
+    dependencies: dict[str, Path] = {}
+    fixture_hash(presets, reference_root=resolve_reference(base, "data"),
+                 dependencies=dependencies)
     systems = json.loads((common / "systems.json").read_text(encoding="utf-8-sig"))
     schema = json.loads((head / "src/luminumbra_common/core/ConfigSchema.json").read_text(encoding="utf-8-sig"))
     # Registry fields are authored in the schema; do not omit an absent base key.
@@ -44,6 +53,11 @@ def prepare(base: Path, head: Path, receipt: Path) -> None:
             raise ValueError(f"refusing to replace existing fixture: {root}")
         shutil.copytree(common, root / "data/common")
         shutil.copytree(presets, root / "worlds/atlas/presets")
+        for name, path in sorted(dependencies.items()):
+            destination = resolve_reference(root / "data", name)
+            if not destination.exists() and path.exists():
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(path, destination)
         (root / "data/common/systems.json").write_text(json.dumps(systems, indent=2) + "\n")
         (root / MARKER).write_text(json.dumps(dict(schema="luminumbra.controlled_server.v1",
             gates=False, finite_hydrology=False, autosave_ticks=0), sort_keys=True) + "\n")

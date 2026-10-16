@@ -17,6 +17,7 @@ import check_sim_budgets
 import propose_sim_budgets
 import sim_budget_compare
 import sim_budget_io
+from test_fixture_hash import ROOTED_REFERENCES, ESCAPING_REFERENCES, symlink_or_skip
 
 
 PRESETS = capture.PRESETS
@@ -94,6 +95,41 @@ def read_budgets(path: Path) -> dict[str, Any]:
 
 
 class SimBudgetGateTests(unittest.TestCase):
+    def test_preset_identity_is_preserved_and_enforced(self):
+        before = self.capture_dir("preset-before", overrides={"preset_hash": FIXTURE_HASH})
+        after = self.capture_dir("preset-after", overrides={"preset_hash": ZERO_HASH})
+        budgets = self.root / "preset-budgets.json"
+        emit_budgets(before, budgets)
+        self.assertEqual(read_budgets(budgets)["identity"]["preset_hash"], FIXTURE_HASH)
+        code, output, error = run_tool(propose_sim_budgets, [str(before)])
+        self.assertEqual(code, 0, error)
+        self.assertEqual(json.loads(output)["identity"]["preset_hash"], FIXTURE_HASH)
+        for module, argv in ((check_sim_budgets, [str(after), str(budgets)]),
+                             (sim_budget_compare, [str(before), str(after)])):
+            code, output, error = run_tool(module, argv)
+            self.assertEqual((code, output), (2, ""))
+            self.assertIn("preset_hash", error)
+        historical = self.capture_dir("historical-preset")
+        code, _, error = run_tool(sim_budget_compare, [str(before), str(historical)])
+        self.assertEqual(code, 2)
+        self.assertIn("preset_hash", error)
+
+    def test_invalid_preset_hash_is_refused(self):
+        budgets = self.root / "preset-format-budgets.json"
+        emit_budgets(self.capture_dir("preset-format-base"), budgets)
+        data = read_budgets(budgets)
+        for index, value in enumerate((None, 3, True, "a" * 63, "A" * 64, "")):
+            directory = self.capture_dir(f"bad-preset-{index}", overrides={"preset_hash": value})
+            with self.assertRaisesRegex(ValueError, "preset_hash"):
+                sim_budget_io.load_capture(directory)
+            data["identity"]["preset_hash"] = value
+            budgets.write_text(json.dumps(data), encoding="utf-8")
+            if value is None:
+                self.assertIsNone(check_sim_budgets.load_budgets(budgets)["identity"]["preset_hash"])
+            else:
+                with self.assertRaisesRegex(ValueError, "preset_hash"):
+                    check_sim_budgets.load_budgets(budgets)
+
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
@@ -101,6 +137,48 @@ class SimBudgetGateTests(unittest.TestCase):
 
     def capture_dir(self, name: str, **kwargs: Any) -> Path:
         return write_capture(self.root / name, **kwargs)
+
+    def test_every_budget_tool_refuses_external_artifact_references(self):
+        reference = self.capture_dir("reference")
+        budgets = self.root / "budgets.json"
+        emit_budgets(reference, budgets)
+        directory = self.capture_dir("unsafe")
+        manifest_path = directory / "capture.json"
+        manifest = read_budgets(manifest_path)
+        for artifact in ROOTED_REFERENCES + ESCAPING_REFERENCES:
+            manifest["runs"][0]["artifact"] = artifact
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            with self.subTest(artifact=artifact):
+                with self.assertRaisesRegex(ValueError, "fixture reference"):
+                    sim_budget_io.load_capture(directory)
+                for module, argv in (
+                        (propose_sim_budgets, [str(directory)]),
+                        (check_sim_budgets, [str(directory), str(budgets)]),
+                        (sim_budget_compare, [str(reference), str(directory)])):
+                    code, out, err = run_tool(module, argv)
+                    self.assertEqual((code, out), (2, ""))
+                    self.assertIn("fixture reference", err)
+
+    def test_artifact_links_cannot_leave_capture_directory(self):
+        directory = self.capture_dir("linked")
+        target = self.root / "outside.json"
+        artifact = directory / "default.json"
+        artifact.rename(target)
+        symlink_or_skip(self, artifact, target)
+        with self.assertRaisesRegex(ValueError, "resolves outside root"):
+            sim_budget_io.load_capture(directory)
+
+    def test_normalized_nested_artifact_reference_stays_valid(self):
+        directory = self.capture_dir("nested")
+        (directory / "nested").mkdir()
+        (directory / "default.json").rename(directory / "nested/default.json")
+        (directory / "nested\\default.json").write_bytes((directory / "nested/default.json").read_bytes())
+        manifest_path = directory / "capture.json"
+        manifest = read_budgets(manifest_path)
+        for artifact in ("nested/./unused/../default.json", "nested\\default.json"):
+            manifest["runs"][0]["artifact"] = artifact
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            self.assertEqual(list(sim_budget_io.load_capture(directory)["presets"]), list(PRESETS))
 
     def assert_workload_acceptance(self, directory: Path, reference: Path, budgets: Path,
                                    key: str, accepted: bool) -> None:

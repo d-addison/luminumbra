@@ -13,6 +13,8 @@ from pathlib import Path
 
 import numpy as np
 
+from fixture_paths import resolve_reference
+
 LEGACY_DEPTH_DESCRIPTION = 'float32 OpenGL window depth [0,1], clear=1; bottom-up'
 DEPTH_DESCRIPTION = ('float32 reversed-Z OpenGL window depth [0,1], '
                      'near=1, far/clear=0; bottom-up')
@@ -101,7 +103,9 @@ def plane(path, dims, magic, channels):
 
 
 def inspect(directory, legacy_forward=False):
-    manifest_path = directory / 'manifest.json'
+    manifest_path = resolve_reference(directory, 'manifest.json')
+    attachments = {name: resolve_reference(directory, name) for name in
+                   ('color.ppm', 'depth.pfm', 'position.pfm', 'normal.pfm', 'albedo.pfm', 'material.pgm')}
     require(manifest_path.stat().st_size <= 16 * 1024 * 1024, 'Oversized AOV manifest')
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     require(manifest['schema'] == 'luminumbra.terrain_coverage_capture.v1' and
@@ -119,7 +123,7 @@ def inspect(directory, legacy_forward=False):
                                   ('position.pfm', b'PF', 3), ('normal.pfm', b'PF', 3),
                                   ('albedo.pfm', b'PF', 3), ('material.pgm', b'P5', 1)]:
         dims = manifest['color_dimensions'] if name == 'color.ppm' else manifest['gbuffer_dimensions']
-        arrays[name] = plane(directory / name, dims, magic, channels)
+        arrays[name] = plane(attachments[name], dims, magic, channels)
     require(set(manifest['attachments']) == set(arrays), 'Incomplete attachment declarations')
     solid = coverage_mask(arrays['depth.pfm'][:, :, 0], convention)
     require(((arrays['albedo.pfm'] >= 0) & (arrays['albedo.pfm'] <= 1)).all(), 'Invalid albedo range')
@@ -133,8 +137,8 @@ def inspect(directory, legacy_forward=False):
                   manifest_sha256=hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
                   coverage_fraction=float(solid.mean()), covered_pixels=int(solid.sum()),
                   clear_depth_pixels=int((~solid).sum()),
-                  attachments={name: dict(bytes=(directory / name).stat().st_size,
-                      sha256=hashlib.sha256((directory / name).read_bytes()).hexdigest()) for name in arrays})
+                  attachments={name: dict(bytes=attachments[name].stat().st_size,
+                      sha256=hashlib.sha256(attachments[name].read_bytes()).hexdigest()) for name in arrays})
     return manifest, arrays, report
 
 

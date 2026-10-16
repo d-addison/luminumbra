@@ -89,6 +89,43 @@ policy. Base and candidate results with different keys are reported as
 unevaluated rather than compared. The key is recomputed during validation rather
 than trusted from the file.
 
+Fixture references are relative to the selected data root. The shared perf
+resolver follows the native preset loader's lexical rule: normalize `.` and
+`..`, reject an empty normalized path, and reject any path that escapes the
+root. The native loader (`TerrainPresetLoader.cpp`) uses host filesystem rules.
+Perf deliberately adds stricter portable parsing for authored references:
+POSIX absolute paths and Windows drive, UNC, and rooted backslash paths
+are refused on every host, including drive-relative forms such as `C:table.json`.
+Traversal escapes using either slash spelling are also refused on every host.
+These portable checks only reject references; accepted references are normalized
+using the native loader's host rules without respelling them. On POSIX,
+`extra\biomes.json` names a literal backslash filename, distinct from
+`extra/biomes.json`; on Windows, both spellings use a directory separator.
+Each normalized native path component is also checked for symlink targets
+outside the root; in-root links remain valid.
+
+`tools/perf/fixture_hash.py` checks tree entries physically before reading them,
+preserving their native names (including literal backslashes on POSIX), and validates
+authored `generation_params.biomes.table` references. Empty table strings still
+disable biomes. When hashing a preset directory separately, pass
+`--reference-root data` to select the root used by the engine. Simulation capture
+and `prepare_server_comparison.py` select this root automatically and validate
+before launching or copying fixtures. Enumerated names never pass through the
+portable reference parser. AOV inspection checks its manifest and every
+attachment against the capture directory before opening, stat'ing or hashing.
+
+The tree receipt remains path-component ordered, case sensitive, with each
+entry framed as UTF-8 name, NUL, ASCII canonical SHA-256, and newline. Referenced
+dependencies already included in that tree add no bytes, preserving its hash.
+Other dependencies (including transitive references) are deduplicated by their
+normalized data-root-relative name and appended after the tree receipt as
+`NUL fixture-dependencies:v1 NUL`, followed by a compact ASCII JSON array of
+`[name, canonical_sha256]` pairs, sorted case sensitively by name. JSON escaping
+frames unusual filenames unambiguously. Missing in-root dependencies use JSON
+`null` instead of a digest, retaining fallback behavior while making their
+appearance visible. Preset-only hashes now include their referenced biome
+tables; full data and common-tree hashes without extra dependencies stay unchanged.
+
 ### Re-baselining after a deliberate fixture change
 
 Refusing to compare across a changed key is correct: if the workload's inputs

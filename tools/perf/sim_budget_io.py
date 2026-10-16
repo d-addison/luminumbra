@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 import capture_sim_budget
+from fixture_paths import resolve_reference
 
 
 CAPTURE_SCHEMA = "luminumbra.sim_budget_capture.v1"
@@ -72,6 +73,10 @@ def validate_manifest(manifest: dict[str, Any]) -> None:
     fixture = manifest["fixture_hash"]
     if not isinstance(fixture, str) or SHA256_HEX.fullmatch(fixture) is None:
         raise ValueError("capture.json has an invalid fixture_hash")
+    if "preset_hash" in manifest:
+        preset = manifest["preset_hash"]
+        if not isinstance(preset, str) or SHA256_HEX.fullmatch(preset) is None:
+            raise ValueError("capture.json has an invalid preset_hash")
     for key in ("surface_radius", "collision_radius"):
         value = manifest[key]
         if type(value) is not int or value <= 0:
@@ -79,7 +84,7 @@ def validate_manifest(manifest: dict[str, Any]) -> None:
 
 
 def load_capture(directory: Path) -> dict[str, Any]:
-    manifest = read_json(directory / "capture.json")
+    manifest = read_json(resolve_reference(directory, "capture.json"))
     if not isinstance(manifest, dict) or manifest.get("schema") != CAPTURE_SCHEMA:
         raise ValueError("capture.json has a missing or unsupported schema")
     absent = [key for key in MANIFEST_KEYS if key not in manifest]
@@ -99,7 +104,7 @@ def load_capture(directory: Path) -> dict[str, Any]:
         preset, artifact = run["preset"], run["artifact"]
         if preset in presets:
             raise ValueError(f"duplicate preset in capture.json: {preset}")
-        data = read_json(directory / artifact)
+        data = read_json(resolve_reference(directory, artifact))
         if not isinstance(data, dict):
             raise ValueError(f"{artifact} is not a JSON object")
         try:

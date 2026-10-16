@@ -35,11 +35,35 @@ source adapter does not apply to the shipping capture root.
 Baseline `identity.fixture_hash` and `identity.revision` remain null so the
 work limits can gate later content and code revisions. The capture manifest
 and proposal retain the measured revision and fixture hash for evidence.
-The hash uses `fixture_hash(..., scope="headless-server")` over `data/common`;
+New captures also record `preset_hash`, hashing the preset tree and referenced
+dependencies under `data`, including tables outside `data/common`. Proposals
+and emitted budgets retain it; comparisons refuse different preset hashes and
+the budget checker enforces a non-null pinned preset hash. It uses the same
+64 lowercase hexadecimal format. Historical captures may omit it, but cannot
+compare with captures that record it. Existing baselines may leave it unpinned.
+The common-data `fixture_hash` uses `fixture_hash(..., scope="headless-server")` over `data/common`;
 that scope still includes some client-only content, so pinning it would reject
 unrelated changes before checking simulation work. Simulation work changes
 still have to satisfy the pinned limits or receive a new capture and explicit
 budget calibration. Seed, ticks and both radii remain pinned.
+
+Capture validates preset biome references against `data` before launching the
+server. All perf fixture consumers use the shared containment resolver: absolute
+POSIX and Windows paths, normalized escapes, and symlink targets outside the
+selected root are refused on every host. Portable parsing of authored references
+is deliberately stricter than the native loader's host path grammar. Enumerated
+filenames retain their native spelling and undergo physical containment checks.
+Accepted authored references also retain native spelling: backslashes are literal
+filename characters on POSIX and separators on Windows.
+In-root references remain valid; hashes without additional dependencies stay
+unchanged. See the
+[fixture reference rules](../../docs/performance.md).
+
+Each `capture.json` run's `artifact` is relative to its capture directory and
+uses the same containment rules. Proposal, comparison and budget checking all
+refuse an escaping artifact before reading it, including file or directory
+symlinks. Nested in-root artifact paths use host path semantics, including literal
+backslash filenames on POSIX.
 
 Positive stage maxima and the maximum of the summed per-tick traces receive
 integer ceiling headroom of 3/2. All three presets measured a total maximum
