@@ -115,6 +115,8 @@ jobs:
           python tools/perf/test_render_budget.py
           python tools/ci/test_validate_performance_measurement.py
           python tools/ci/test_qualification_capture.py
+      - name: Test acceptance matrix execution contract
+        run: python tools/ci/test_check_acceptance_matrix.py
 
   # Drafts cannot merge. ready_for_review reruns these jobs on the same
   # head; maintainers must wait for its required checks to pass before merging.

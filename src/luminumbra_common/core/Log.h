@@ -3,6 +3,8 @@
 #include <spdlog/sinks/stdout_color_sinks.h>
 #include <spdlog/spdlog.h>
 
+class LogDispatcherSink;
+
 class Log {
 public:
     /// Explicit one-time initializer. Optional: GetCoreLogger() lazy-inits
@@ -11,6 +13,7 @@ public:
     /// clarity and to pin the pattern early; tests and isolated tools don't
     /// have to.
     static void Init();
+    static std::shared_ptr<LogDispatcherSink> GetDispatcherSink();
 
     /// Lazy accessor: returns a valid logger even if Init() was never called
     /// (test binaries that use gtest_main, ad-hoc tooling, etc.). Calling this

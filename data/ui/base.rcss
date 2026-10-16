@@ -12,7 +12,7 @@
 
 /* Structural elements are block-level (like a browser's UA stylesheet). */
 body, div, section, article, header, footer, nav, main, aside,
-h1, h2, h3, h4, h5, h6, p, ul, ol, li, form, fieldset, figure, blockquote {
+h1, h2, h3, h4, h5, h6, p, pre, ul, ol, li, form, fieldset, figure, blockquote {
     display: block;
 }
 

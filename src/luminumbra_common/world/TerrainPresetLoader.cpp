@@ -1,13 +1,16 @@
 #include "TerrainPresetLoader.h"
 
 #include <algorithm>
+#include <exception>
 #include <fstream>
 #include <initializer_list>
 #include <map>
+#include <memory>
 #include <string_view>
 
 #include "nlohmann/json.hpp"
 
+#include "../ai/CreatureSpeciesRegistry.h"
 #include "../core/FilesystemPath.h"
 #include "../core/Log.h"
 #include "BiomeTable.h"
@@ -72,7 +75,12 @@ bool ResolveDependencyManifest(TerrainPresetLoadResult& preset,
                 return std::string();
             }
         }
-        return Filesystem::GenericUtf8PathString(logical);
+        auto text = Filesystem::GenericUtf8PathString(logical);
+        if (!World::IsValidDependencyPathUtf8(text)) {
+            errors.push_back("worldgen dependency logical path is not valid UTF-8");
+            return std::string();
+        }
+        return text;
     };
     const auto state = [&](const std::string& logical, const char* outcome) {
         auto& entry = entries[logical];
@@ -173,6 +181,31 @@ bool ResolveDependencyManifest(TerrainPresetLoadResult& preset,
                 }
             }
         }
+        // Species are session inputs even when biome/structure generation is off.
+        // Parse through the manifest reader, then retain that exact registry so
+        // GameSession cannot reopen different bytes after identity construction.
+        auto species = std::make_shared<luminumbra::ai::CreatureSpeciesRegistry>();
+        const auto species_dir = data_root / "common/creatures/species";
+        if (dependency_exists(species_dir)) {
+            state("common/creatures/species", "species-directory-present");
+            std::vector<std::string> species_errors;
+            bool species_io_failed = false;
+            species->LoadFromDirectory(
+                species_dir, species_errors, read_file, &species_io_failed, read_status);
+            if (species_io_failed) {
+                errors.push_back("failed to read session species dependencies");
+                for (const auto& message : species_errors)
+                    errors.push_back("Species definition load: " + message);
+                return false;
+            }
+            if (!errors.empty())
+                return false;
+            for (const auto& message : species_errors) {
+                preset.warnings.push_back("Species definition load: " + message);
+                LUMINUMBRA_CORE_WARN("Species definition load: {}", message);
+            }
+        }
+        snapshot->species_table = std::move(species);
         manifest = nlohmann::json::array();
         for (const auto& [logical, entry] : entries) {
             manifest.push_back(entry);
@@ -419,7 +452,7 @@ TerrainPresetLoadResult
 LoadTerrainPresetFromJson(const nlohmann::json& source,
                           const std::filesystem::path& data_root,
                           const std::string& provenance,
-                          const World::WorldgenFileStatusReader& read_status) {
+                          const World::WorldgenFileStatusReader& read_status) try {
     TerrainPresetLoadResult result;
     // Validate revision type before resolving defaults, retaining the no-throw error path.
     if (source.contains("schema_rev") && !source["schema_rev"].is_number_integer()) {
@@ -729,6 +762,16 @@ LoadTerrainPresetFromJson(const nlohmann::json& source,
     result.preset_content_hash = HashPresetIdentity(source, manifest);
     result.ok = true;
     return result;
+} catch (const std::exception& error) {
+    // Include serialization/hashing in the resolver boundary. Discard any captured
+    // snapshot as well as the identity so callers cannot adopt a partial result.
+    TerrainPresetLoadResult refused;
+    refused.errors.push_back("failed to resolve world preset: " + std::string(error.what()));
+    return refused;
+} catch (...) {
+    TerrainPresetLoadResult refused;
+    refused.errors.push_back("failed to resolve world preset: unknown exception");
+    return refused;
 }
 
 bool LoadTerrainPresetOverride(const std::filesystem::path& preset_path,

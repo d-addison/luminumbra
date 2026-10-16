@@ -324,7 +324,8 @@ def checker_command(cell, *, artifact, verdict, qualified_renderer, root, python
                                      for key in ('x', 'y', 'z')),
                     f"--yaw={pose['yaw']!r}", f"--pitch={pose['pitch']!r}",
                     f"--tod={cell['time_of_day']!r}",
-                    f"--frames={cell['measured_frames']}"]
+                    f"--frames={cell['measured_frames']}",
+                    '--require-geometry', '--require-settled']
     else:
         command += ['--traversal', str(Path(root) / cell['script'])]
     return command + ['--enforce-floor', '--verdict-out', str(verdict)]
