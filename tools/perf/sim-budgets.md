@@ -55,6 +55,12 @@ is deliberately stricter than the native loader's host path grammar. Enumerated
 filenames retain their native spelling and undergo physical containment checks.
 Accepted authored references also retain native spelling: backslashes are literal
 filename characters on POSIX and separators on Windows.
+Contained directory links and junctions contribute files under each logical name;
+directory cycles are refused. Fixture and capture readers require regular files,
+open without blocking where supported, and validate the opened descriptor before
+reading. POSIX opens anchor canonical components to directory descriptors;
+Windows checks the owning handle's normalized long path. Path validation alone
+does not authorize a later pathname read.
 In-root references remain valid; hashes without additional dependencies stay
 unchanged. See the
 [fixture reference rules](../../docs/performance.md).
@@ -64,6 +70,8 @@ uses the same containment rules. Proposal, comparison and budget checking all
 refuse an escaping artifact before reading it, including file or directory
 symlinks. Nested in-root artifact paths use host path semantics, including literal
 backslash filenames on POSIX.
+Capture recomputes both common-data and preset hashes after all three runs and
+refuses to publish `capture.json` if either changed during capture.
 
 Positive stage maxima and the maximum of the summed per-tick traces receive
 integer ceiling headroom of 3/2. All three presets measured a total maximum

@@ -12,8 +12,10 @@ import ntpath
 import os
 import posixpath
 import stat
+import subprocess
 import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from unittest import mock
@@ -49,6 +51,22 @@ def symlink_or_skip(test, link, target, *, directory=False):
         if exc.errno not in (errno.EPERM, errno.EACCES, errno.ENOSYS, errno.ENOTSUP):
             raise
         test.skipTest(f"OS cannot create symlinks: {exc}")
+
+
+def directory_link(link, target):
+    """Junctions need no symlink privilege on Windows."""
+    if os.name == "nt":
+        subprocess.run(["cmd.exe", "/d", "/c", "mklink", "/J", str(link), str(target)],
+                       check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    else:
+        link.symlink_to(target, target_is_directory=True)
+
+
+def remove_directory_link(link):
+    if os.name == "nt":
+        link.rmdir()
+    else:
+        link.unlink()
 
 
 class FixtureReferenceTests(unittest.TestCase):
@@ -149,6 +167,203 @@ class FixtureHashTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self._tmp.cleanup()
+
+    def test_text_reader_matches_universal_newlines_and_encoding_errors(self):
+        path = self.root / "text.json"
+        for raw in (b"one\ntwo\nthree\n", b"one\r\ntwo\r\nthree\r\n",
+                    b"one\rtwo\rthree\r", b"one\r\ntwo\rthree\n", b"", b"\xef\xbb\xbftext\r\n"):
+            path.write_bytes(raw)
+            for encoding in ("utf-8", "utf-8-sig"):
+                with self.subTest(raw=raw, encoding=encoding):
+                    self.assertEqual(fixture_paths.read_text(self.root, path, encoding=encoding),
+                                     path.read_text(encoding=encoding))
+                    self.assertEqual(fixture_paths.read_bytes(self.root, path), raw)
+        for raw in (b"\xff", b"\xe2\x82"):
+            path.write_bytes(raw)
+            with self.subTest(raw=raw), self.assertRaises(UnicodeDecodeError):
+                fixture_paths.read_text(self.root, path)
+
+    def test_text_reader_enforces_byte_limit_before_decoding(self):
+        path = self.root / "text.json"
+        path.write_bytes(b"\xef\xbb\xbf\r\n")
+        self.assertEqual(fixture_paths.read_text(self.root, path, encoding="utf-8-sig", limit=5), "\n")
+        with self.assertRaisesRegex(ValueError, "oversized fixture"):
+            fixture_paths.read_text(self.root, path, encoding="utf-8-sig", limit=4)
+
+    def test_text_reader_refuses_growth_after_size_check(self):
+        path = self.root / "text.json"
+        path.write_bytes(b"text")
+        original_fstat = os.fstat
+        checked = 0
+
+        def grow(descriptor):
+            nonlocal checked
+            status = original_fstat(descriptor)
+            if stat.S_ISREG(status.st_mode):
+                checked += 1
+                if checked == 2:
+                    with path.open("ab") as output:
+                        output.write(b"\r\n")
+            return status
+
+        with mock.patch.object(os, "fstat", side_effect=grow), \
+                self.assertRaisesRegex(ValueError, "oversized fixture"):
+            fixture_paths.read_text(self.root, path, limit=4)
+        self.assertEqual(checked, 2)
+
+    @unittest.skipIf(os.name != "posix" or not hasattr(os, "geteuid") or os.geteuid() == 0,
+                     "requires POSIX permission checks without root privileges")
+    def test_readable_fixture_below_search_only_ancestor(self):
+        ancestor = self.root / "shared"
+        ancestor.mkdir()
+        path = ancestor / "fixture.json"
+        path.write_bytes(b"{}")
+        # Reproduce a non-owner's access through a shared 0711 directory.
+        ancestor.chmod(0o111)
+        try:
+            self.assertEqual(stat.S_IMODE(ancestor.stat().st_mode), 0o111)
+            with self.assertRaises(PermissionError):
+                list(ancestor.iterdir())
+            self.assertEqual(path.read_bytes(), b"{}")
+            self.assertEqual(fixture_paths.read_bytes(self.root, path), b"{}")
+            ancestor.chmod(0o600)
+            with self.assertRaises(PermissionError):
+                fixture_paths.read_bytes(self.root, path)
+        finally:
+            ancestor.chmod(0o700)
+
+    @unittest.skipUnless(os.name == "posix", "requires directory descriptor anchoring")
+    def test_directory_flag_fallbacks_keep_anchoring_and_close_on_failure(self):
+        path = self.root / "fixture.json"
+        path.write_bytes(b"{}")
+        original_open = os.open
+        for mode in ("search", "read"):
+            attributes = {key: value for key, value in vars(os).items()
+                          if key not in ("O_PATH", "O_SEARCH")}
+            if mode == "search":
+                # Exercise selection on hosts that expose only O_SEARCH.
+                attributes["O_SEARCH"] = os.O_RDONLY
+            descriptors = []
+
+            def anchored_open(name, flags, *args, **kwargs):
+                self.assertTrue(flags & os.O_NOFOLLOW)
+                if name in (path.name, path):
+                    self.assertIn(kwargs["dir_fd"], descriptors)
+                    raise PermissionError("fixture is unreadable")
+                self.assertTrue(flags & os.O_DIRECTORY)
+                descriptor = original_open(name, flags, *args, **kwargs)
+                descriptors.append(descriptor)
+                return descriptor
+
+            with self.subTest(mode=mode), \
+                    mock.patch.object(fixture_paths, "os", types.SimpleNamespace(**attributes)):
+                self.assertEqual(fixture_paths.read_bytes(self.root, path), b"{}")
+            with self.subTest(mode=mode), \
+                    mock.patch.object(fixture_paths, "os", types.SimpleNamespace(**attributes)), \
+                    mock.patch.object(fixture_paths.os, "open", side_effect=anchored_open), \
+                    self.assertRaises(PermissionError):
+                fixture_paths.read_bytes(self.root, path)
+            for descriptor in descriptors:
+                with self.assertRaises(OSError):
+                    os.fstat(descriptor)
+
+    def test_directory_alias_adds_a_logical_pool_to_hash(self):
+        write(self.root, "structures/template/pool.json", '{"weight":1}')
+        before = module.fixture_hash(self.root)
+        link = self.root / "structures/cairn"
+        directory_link(link, self.root / "structures/template")
+        try:
+            linked = module.fixture_hash(self.root)
+            self.assertNotEqual(before, linked)
+        finally:
+            remove_directory_link(link)
+        write(self.root, "structures/cairn/pool.json", '{"weight":1}')
+        self.assertEqual(linked, module.fixture_hash(self.root))
+
+    def test_directory_alias_cycle_is_refused(self):
+        write(self.root, "structures/pool.json", "{}")
+        link = self.root / "structures/back"
+        directory_link(link, self.root)
+        try:
+            with self.assertRaisesRegex(ValueError, "cyclic fixture directory"):
+                module.fixture_hash(self.root)
+        finally:
+            remove_directory_link(link)
+
+    def test_swapped_ancestor_cannot_redirect_fixture_reads(self):
+        with tempfile.TemporaryDirectory() as temp:
+            outside = Path(temp)
+            write(self.root, "common/table.json", '{"inside":1}')
+            write(outside, "table.json", '{"outside":1}')
+            original_open = os.open
+            original_read = io.open
+            swapped = False
+
+            def swap():
+                nonlocal swapped
+                if not swapped:
+                    swapped = True
+                    (self.root / "common").rename(self.root / "retained")
+                    directory_link(self.root / "common", outside)
+
+            def open_descriptor(path, flags, *args, **kwargs):
+                if path in (self.root / "common/table.json", "table.json"):
+                    swap()
+                return original_open(path, flags, *args, **kwargs)
+
+            def open_stream(path, *args, **kwargs):
+                if path == self.root / "common/table.json":
+                    swap()
+                return original_read(path, *args, **kwargs)
+
+            try:
+                with mock.patch.object(os, "open", side_effect=open_descriptor), \
+                        mock.patch.object(io, "open", side_effect=open_stream):
+                    try:
+                        result = module.canonical_file_digest(self.root / "common/table.json",
+                                                              reference_root=self.root)
+                    except (OSError, ValueError):
+                        pass
+                    else:
+                        self.assertEqual(result, hashlib.sha256(b'{"inside":1}').hexdigest())
+                self.assertTrue(swapped)
+            finally:
+                if swapped:
+                    remove_directory_link(self.root / "common")
+
+    def test_regular_file_replacement_before_open_is_refused(self):
+        table = self.root / "table.json"
+        write(self.root, table.name, "{}")
+        replacement = self.root / "replacement.json"
+        replacement.write_text('{"replacement":1}')
+        original_open = os.open
+
+        def replace(path, flags, *args, **kwargs):
+            if path in (table, table.name):
+                table.rename(self.root / "retained.json")
+                replacement.rename(table)
+            return original_open(path, flags, *args, **kwargs)
+
+        with mock.patch.object(os, "open", side_effect=replace), \
+                self.assertRaisesRegex(ValueError, "changed target"):
+            module.canonical_file_digest(table)
+
+    def test_windows_opened_path_is_checked_before_reading(self):
+        table = self.root / "table.json"
+        write(self.root, table.name, "{}")
+        windows_os = types.SimpleNamespace(**(vars(os) | {"name": "nt"}))
+        with mock.patch.object(fixture_paths, "os", windows_os, create=True), \
+                mock.patch.object(fixture_paths, "_windows_final_path", create=True,
+                                  return_value=self.root.parent / "outside.json"), \
+                mock.patch.object(os, "fdopen", side_effect=AssertionError("unchecked read")), \
+                self.assertRaisesRegex(ValueError, "changed target"):
+            module.canonical_file_digest(table)
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "OS has no mkfifo")
+    def test_fifo_tree_entry_is_refused(self):
+        os.mkfifo(self.root / "pool.json")
+        with self.assertRaisesRegex(ValueError, "not a regular file"):
+            module.fixture_hash(self.root)
 
     def test_external_biome_references_are_refused_in_both_scopes(self):
         for scope in module.SCOPES:
@@ -267,7 +482,7 @@ class FixtureHashTests(unittest.TestCase):
             "generation_params": {"biomes": {"table": "extra/biomes.json"}}}))
         table = self.root.resolve() / "extra/biomes.json"
         table.mkdir(parents=True)
-        with mock.patch.object(module.os, "open", wraps=os.open) as opened:
+        with mock.patch.object(os, "open", wraps=os.open) as opened:
             with self.assertRaisesRegex(ValueError, "fixture reference is not a regular file"):
                 module.fixture_hash(presets, reference_root=self.root)
         self.assertNotIn(table, [call.args[0] for call in opened.call_args_list])
@@ -275,7 +490,7 @@ class FixtureHashTests(unittest.TestCase):
         for mode in (stat.S_IFIFO, stat.S_IFSOCK, stat.S_IFCHR, stat.S_IFBLK, stat.S_IFDIR):
             with self.subTest(mode=mode), \
                     mock.patch.object(Path, "stat", return_value=os.stat_result((mode,) + (0,) * 9)), \
-                    mock.patch.object(module.os, "open", side_effect=AssertionError("opened non-regular file")), \
+                    mock.patch.object(os, "open", side_effect=AssertionError("opened non-regular file")), \
                     self.assertRaisesRegex(ValueError, "fixture reference is not a regular file"):
                 module.canonical_file_digest(table)
 
@@ -283,14 +498,16 @@ class FixtureHashTests(unittest.TestCase):
         write(self.root, "table.json", "{}")
         for mode in (stat.S_IFIFO, stat.S_IFSOCK, stat.S_IFCHR, stat.S_IFBLK, stat.S_IFDIR):
             with self.subTest(mode=mode), \
-                    mock.patch.object(module.os, "fstat", return_value=os.stat_result((mode,) + (0,) * 9)), \
-                    mock.patch.object(module.os, "fdopen", side_effect=AssertionError("read non-regular file")), \
-                    mock.patch.object(module.os, "open", wraps=os.open) as opened, \
-                    mock.patch.object(module.os, "close", wraps=os.close) as closed, \
+                    mock.patch.object(os, "fstat", return_value=os.stat_result((mode,) + (0,) * 9)), \
+                    mock.patch.object(os, "fdopen", side_effect=AssertionError("read non-regular file")), \
+                    mock.patch.object(os, "open", wraps=os.open) as opened, \
+                    mock.patch.object(os, "close", wraps=os.close) as closed, \
                     self.assertRaisesRegex(ValueError, "fixture reference is not a regular file"):
                 module.canonical_file_digest(self.root / "table.json")
-            opened.assert_called_once()
-            closed.assert_called_once()
+            self.assertEqual(opened.call_count, closed.call_count)
+            file_opens = [call for call in opened.call_args_list
+                          if call.args[0] in (self.root / "table.json", "table.json")]
+            self.assertEqual(len(file_opens), 1)
             with self.assertRaises(OSError) as invalid:
                 os.fstat(closed.call_args.args[0])
             self.assertEqual(invalid.exception.errno, errno.EBADF)
@@ -310,17 +527,17 @@ class FixtureHashTests(unittest.TestCase):
         original_open = os.open
         opened_descriptors = []
 
-        def swap_before_open(path, flags):
-            if path == table:
+        def swap_before_open(path, flags, *args, **kwargs):
+            if path in (table, table.name):
                 table.unlink()
                 os.mkfifo(table)
                 self.assertTrue(flags & os.O_NONBLOCK)
-                descriptor = original_open(path, flags)
+                descriptor = original_open(path, flags, *args, **kwargs)
                 opened_descriptors.append(descriptor)
                 return descriptor
-            return original_open(path, flags)
+            return original_open(path, flags, *args, **kwargs)
 
-        with mock.patch.object(module.os, "open", side_effect=swap_before_open), \
+        with mock.patch.object(os, "open", side_effect=swap_before_open), \
                 self.assertRaisesRegex(ValueError, "fixture reference is not a regular file"):
             module.fixture_hash(presets, reference_root=self.root)
         self.assertEqual(len(opened_descriptors), 1)
@@ -519,6 +736,133 @@ class FixtureHashTests(unittest.TestCase):
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as raised:
             module.main(["fixture_hash.py", str(self.root), "--scope", "typo"])
         self.assertEqual(raised.exception.code, 2)
+
+
+class FixtureEvidenceReaderTests(unittest.TestCase):
+    def setUp(self):
+        import check_residency
+        import perf
+        import render_contract
+        import validate_render_capture
+        from test_perf import run_document, write_build_manifest
+        from test_render_contract import artifact, args, QUALIFIED
+
+        self.refusals = (OSError, ValueError, check_residency.InvalidInput)
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.parent = Path(self.temporary.name)
+        self.root = self.parent / "inputs"
+        self.root.mkdir()
+        build = self.parent / "build.json"
+        write_build_manifest(build)
+        text = (Path(__file__).parent / "fixtures/surface-flight.traversal").read_bytes().decode("utf-8")
+        text = text.replace("duration_seconds 60", "duration_seconds 0.13333333333333333")
+        text = text.replace("expected_ticks 1800", "expected_ticks 4")
+        manifest = render_contract.traversal_manifest(text)
+        traversal = artifact()
+        traversal["workload"].update({key: value for key, value in manifest.items() if key != "path"})
+        traversal["workload"].update(kind="traversal", actual_ticks=4, measured_duration_seconds=0.01,
+                                     script=text, camera_samples=[render_contract.camera_sample(manifest, tick)
+                                                                 for tick in range(1, 5)])
+
+        def capture_cli(path):
+            with mock.patch.object(sys, "argv", ["validate_render_capture.py", str(path),
+                                                 "--qualified-renderer", QUALIFIED]), \
+                    contextlib.redirect_stdout(io.StringIO()) as output:
+                status = validate_render_capture.main()
+            if status:
+                raise ValueError(output.getvalue())
+            self.assertEqual(json.loads(output.getvalue())["verdict"], "PASS")
+
+        parameters = dict(ticks=2, surface_radius=1, collision_radius=1, seed=9, world_preset="default")
+        smoke = dict(schema="luminumbra.server_tick.v1", passed=True, deterministic=True,
+                     ticks_requested=2, surface_radius=1, collision_radius=1, seed="9", preset="default",
+                     runs=[dict(ok=True, ticks_executed=2, chunks_streamed=1)] * 2,
+                     world_hash="stable", world_hash_replay="stable")
+        self.readers = [
+            ("build manifest", perf.load_build_manifest, build.read_bytes()),
+            ("server evidence", lambda p: perf.validate_server_smoke_evidence(p, parameters),
+             json.dumps(smoke).encode()),
+            ("evidence metric", lambda p: perf.read_evidence_metric(p, "water_phase_p95_ms"),
+             b'{"water_phase_ms":{"total":{"p95":3.5}}}'),
+            ("run", perf.load_run, json.dumps(run_document([1.0, 2.0, 3.0])).encode()),
+            ("rebaseline", perf.load_rebaseline, json.dumps(dict(schema=perf.REBASELINE_SCHEMA,
+                retired_comparability_key="a" * 64, replacement_comparability_key="b" * 64,
+                reason="Fixture data changed")).encode()),
+            ("residency profile", check_residency.load_profile,
+             json.dumps(dict(schema=check_residency.PROFILE_SCHEMA, residency={})).encode()),
+            ("residency artifact", check_residency.load_rows, b'{"residency":[]}'),
+            ("traversal", lambda p: render_contract.validate(traversal, QUALIFIED, traversal=p), text.encode()),
+            ("workload manifest", lambda p: validate_render_capture.validate(artifact(), args(workload_manifest=p)),
+             b'{"seed":424242}'),
+            ("render capture", capture_cli, json.dumps(artifact()).encode()),
+        ]
+
+    def check_replacement(self, reader, payload, replacement, *, before_read=False):
+        path = self.root / "input.json"
+        path.write_bytes(payload)
+        reader(path)  # Every reader must accept the positive control first.
+        outside = self.parent / "outside.json"
+        outside.write_bytes(payload)
+        if replacement == "symlink":
+            probe = self.root / "probe"
+            symlink_or_skip(self, probe, outside)
+            probe.unlink()
+        original_open, original_io_open = os.open, io.open
+        swapped = False
+
+        def swap():
+            nonlocal swapped
+            if not swapped:
+                path.unlink()
+                if replacement == "symlink":
+                    path.symlink_to(outside)
+                else:
+                    os.mkfifo(path)
+                swapped = True
+
+        def open_descriptor(name, flags, *args, **kwargs):
+            if name in (path, str(path), path.name):
+                swap()
+            return original_open(name, flags, *args, **kwargs)
+
+        def open_stream(name, *args, **kwargs):
+            if name in (path, str(path)):
+                swap()
+                if replacement == "fifo":
+                    raise AssertionError("unchecked FIFO read")
+            return original_io_open(name, *args, **kwargs)
+
+        try:
+            if before_read:
+                swap()
+            with mock.patch.object(os, "open", side_effect=open_descriptor), \
+                    mock.patch.object(io, "open", side_effect=open_stream), \
+                    self.assertRaises(self.refusals):
+                reader(path)
+            self.assertTrue(swapped)
+        finally:
+            path.unlink(missing_ok=True)
+
+    def test_all_evidence_readers_refuse_symlink_swap_before_open(self):
+        for name, reader, payload in self.readers:
+            with self.subTest(reader=name):
+                self.check_replacement(reader, payload, "symlink")
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "OS has no mkfifo")
+    def test_all_evidence_readers_refuse_fifo_before_and_during_open(self):
+        for name, reader, payload in self.readers:
+            for before_read in (False, True):
+                with self.subTest(reader=name, before_read=before_read):
+                    self.check_replacement(reader, payload, "fifo", before_read=before_read)
+
+    def test_all_evidence_readers_refuse_empty_partial_and_non_utf8_data(self):
+        path = self.root / "input.json"
+        for name, reader, payload in self.readers:
+            for invalid in (b"", b'{"schema":', b"\xe2\x82", b"\xff"):
+                path.write_bytes(invalid)
+                with self.subTest(reader=name, invalid=invalid), self.assertRaises(self.refusals):
+                    reader(path)
 
 
 if __name__ == "__main__":

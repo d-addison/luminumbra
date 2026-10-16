@@ -10,6 +10,8 @@ import argparse
 import json
 import math
 from pathlib import Path
+
+from fixture_paths import read_text
 import render_budget
 import render_contract
 
@@ -66,7 +68,7 @@ def validate(data, args):
     measurement = None
     if schema == render_contract.SCHEMA:
         manifest_path = getattr(args, 'workload_manifest', None)
-        workload = json.loads(Path(manifest_path).read_text(encoding='utf-8')) if manifest_path else None
+        workload = json.loads(read_text(Path(manifest_path).parent, Path(manifest_path))) if manifest_path else None
         measurement = render_contract.validate(data, getattr(args, 'qualified_renderer', None),
             getattr(args, 'qualified_vendor', None), getattr(args, 'traversal', None), workload)
         if args.position is None:
@@ -179,7 +181,7 @@ def main():
     if args.verdict_out is not None and not args.enforce_floor:
         parser.error('--verdict-out requires --enforce-floor')
     try:
-        data = json.loads(args.artifact.read_text(encoding='utf-8-sig'))
+        data = json.loads(read_text(args.artifact.parent, args.artifact, encoding='utf-8-sig'))
         result = validate(data, args)
         if args.enforce_floor:
             if data.get('schema') != render_contract.SCHEMA:

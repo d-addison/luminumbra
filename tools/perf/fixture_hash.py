@@ -44,13 +44,12 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import os
 import stat
 import sys
 from pathlib import Path
 from typing import Any, Iterator
 
-from fixture_paths import contain_path, resolve_reference
+from fixture_paths import contain_path, read_bytes, resolve_reference
 
 # JSON object keys beginning with this prefix are documentation for humans, not
 # input to the engine. `data/common/systems.json` uses the convention heavily
@@ -78,22 +77,10 @@ def strip_comment_keys(value: Any) -> Any:
 
 
 def canonical_file_digest(path: Path, *, reference_root: Path | None = None,
-                          dependencies: dict[str, Path] | None = None) -> str:
+                          dependencies: dict[str, Path] | None = None,
+                          containment_root: Path | None = None) -> str:
     """Digest one fixture file, canonicalising JSON and hashing anything else raw."""
-    refusal = f"fixture reference is not a regular file: {path}"
-    if not stat.S_ISREG(path.stat().st_mode):
-        raise ValueError(refusal)
-    # A regular path can be replaced with a FIFO between stat and open. Open
-    # without blocking, then check the descriptor before consuming any bytes.
-    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NONBLOCK", 0)
-    descriptor = os.open(path, flags)
-    try:
-        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
-            raise ValueError(refusal)
-        with os.fdopen(descriptor, "rb", closefd=False) as source:
-            raw = source.read()
-    finally:
-        os.close(descriptor)
+    raw = read_bytes(containment_root if containment_root is not None else path.parent, path)
     if path.suffix.lower() == ".json":
         try:
             # utf-8-sig: several fixtures carry a byte-order mark.
@@ -121,18 +108,23 @@ def canonical_file_digest(path: Path, *, reference_root: Path | None = None,
 
 def fixture_files(root: Path) -> Iterator[tuple[Path, Path]]:
     """Check containment before reading files or descending into directories."""
-    pending = [root]
+    pending = [(root, frozenset({root.resolve()}))]
     while pending:
-        for path in pending.pop().iterdir():
+        directory, ancestors = pending.pop()
+        for path in directory.iterdir():
             contained = contain_path(root, path)
-            status = contained.lstat()
-            if stat.S_ISREG(status.st_mode) or contained.is_file():
+            status = contained.stat()
+            if stat.S_ISREG(status.st_mode):
                 yield path, contained
-            elif (stat.S_ISDIR(status.st_mode)
-                  and not (getattr(status, "st_file_attributes", 0) & 0x400)):
-                # Match rglob's exclusion of linked directories. The reparse
-                # bit covers Windows junctions too; use lstat, not DirEntry.stat.
-                pending.append(path)
+            elif stat.S_ISDIR(status.st_mode):
+                target = contained.resolve()
+                if target in ancestors:
+                    raise ValueError(f"cyclic fixture directory reference: {path}")
+                # Track ancestry, not a global visited set: each logical pool
+                # name contributes even when it aliases an existing template.
+                pending.append((path, ancestors | {target}))
+            else:
+                raise ValueError(f"fixture reference is not a regular file: {path}")
 
 
 def fixture_hash(root: Path, *, scope: str = "all", reference_root: Path | None = None,
@@ -159,7 +151,7 @@ def fixture_hash(root: Path, *, scope: str = "all", reference_root: Path | None 
         digest.update(relative.encode("utf-8"))
         digest.update(b"\0")
         file_digest = canonical_file_digest(contained, reference_root=reference_root,
-                                            dependencies=referenced)
+                                            dependencies=referenced, containment_root=root.resolve())
         hashed.add(contained)
         digest.update(file_digest.encode("ascii"))
         digest.update(b"\n")
@@ -178,7 +170,8 @@ def fixture_hash(root: Path, *, scope: str = "all", reference_root: Path | None 
             if path.exists():
                 discovered: dict[str, Path] = {}
                 extra[name] = canonical_file_digest(path, reference_root=reference_root,
-                                                     dependencies=discovered)
+                                                     dependencies=discovered,
+                                                     containment_root=reference_root.resolve())
                 referenced.update(discovered)
                 pending.extend(discovered.items())
             else:

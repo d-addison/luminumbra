@@ -4,6 +4,8 @@ import math
 import re
 import struct
 from pathlib import Path
+
+from fixture_paths import read_bytes
 import perf
 
 SCHEMA = 'luminumbra.render_benchmark.v3'
@@ -201,7 +203,7 @@ def validate(data, qualified_renderer=None, qualified_vendor=None, traversal=Non
             if observed.get(key) != value:
                 raise ValueError(f'workload manifest does not match: {key}')
     if observed['kind'] == 'traversal':
-        if traversal is None or observed['script'] != Path(traversal).read_bytes().decode('utf-8'):
+        if traversal is None or observed['script'] != read_bytes(Path(traversal).parent, Path(traversal)).decode('utf-8'):
             raise ValueError('traversal manifest does not match --traversal')
         manifest = traversal_manifest(observed['script'])
         for key in ('duration_seconds', 'tick_rate', 'speed_mps', 'seed', 'preset', 'preset_revision', 'preset_identity', 'content_identity', 'expected_ticks', 'cold_cache'):

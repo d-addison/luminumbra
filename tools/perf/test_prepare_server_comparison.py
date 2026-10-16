@@ -10,6 +10,18 @@ from test_fixture_hash import ROOTED_REFERENCES, ESCAPING_REFERENCES, symlink_or
 
 
 class ComparisonFixtureTest(unittest.TestCase):
+    def test_identity_normalizes_configuration_newlines(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "data/common").mkdir(parents=True)
+            (root / "worlds/atlas/presets").mkdir(parents=True)
+            marker = root / comparison.MARKER
+            identities = []
+            for newline in (b"\n", b"\r\n", b"\r"):
+                marker.write_bytes(b'{"controlled":true}' + newline)
+                identities.append(comparison.identity(root))
+            self.assertEqual(identities, [identities[0]] * 3)
+
     def test_identity_refuses_external_preset_references(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

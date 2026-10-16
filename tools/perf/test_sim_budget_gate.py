@@ -7,10 +7,13 @@ import contextlib
 import copy
 import io
 import json
+import os
 from pathlib import Path
+import stat
 import tempfile
 from typing import Any
 import unittest
+from unittest import mock
 
 import capture_sim_budget as capture
 import check_sim_budgets
@@ -167,6 +170,51 @@ class SimBudgetGateTests(unittest.TestCase):
         symlink_or_skip(self, artifact, target)
         with self.assertRaisesRegex(ValueError, "resolves outside root"):
             sim_budget_io.load_capture(directory)
+
+    def test_manifest_and_run_require_regular_files_before_read(self):
+        directory = self.capture_dir("non-regular")
+        original_stat = Path.stat
+        original_read = Path.read_text
+        for name in ("capture.json", "default.json"):
+            for mode in (stat.S_IFIFO, stat.S_IFSOCK, stat.S_IFCHR, stat.S_IFBLK, stat.S_IFDIR):
+                def status(path, *args, **kwargs):
+                    if path == directory / name:
+                        return os.stat_result((mode,) + (0,) * 9)
+                    return original_stat(path, *args, **kwargs)
+
+                def read(path, *args, **kwargs):
+                    if path == directory / name:
+                        raise AssertionError("unchecked read")
+                    return original_read(path, *args, **kwargs)
+
+                with self.subTest(name=name, mode=mode), \
+                        mock.patch.object(Path, "stat", status), \
+                        mock.patch.object(Path, "read_text", read), \
+                        self.assertRaisesRegex(ValueError, "not a regular file"):
+                    sim_budget_io.load_capture(directory)
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "OS has no mkfifo")
+    def test_fifo_manifest_and_run_are_refused_without_reading(self):
+        directory = self.capture_dir("fifo")
+        original_read = Path.read_text
+        for name in ("capture.json", "default.json"):
+            path = directory / name
+            content = path.read_bytes()
+            path.unlink()
+            os.mkfifo(path)
+
+            def read(candidate, *args, **kwargs):
+                if candidate == path:
+                    raise AssertionError("unchecked read")
+                return original_read(candidate, *args, **kwargs)
+
+            try:
+                with self.subTest(name=name), mock.patch.object(Path, "read_text", read), \
+                        self.assertRaisesRegex(ValueError, "not a regular file"):
+                    sim_budget_io.load_capture(directory)
+            finally:
+                path.unlink()
+                path.write_bytes(content)
 
     def test_normalized_nested_artifact_reference_stays_valid(self):
         directory = self.capture_dir("nested")

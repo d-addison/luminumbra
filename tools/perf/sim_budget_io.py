@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 import capture_sim_budget
-from fixture_paths import resolve_reference
+from fixture_paths import read_text, resolve_reference
 
 
 CAPTURE_SCHEMA = "luminumbra.sim_budget_capture.v1"
@@ -35,9 +35,9 @@ def validate_workload_integer(value: Any, key: str) -> int:
     return parsed
 
 
-def read_json(path: Path) -> Any:
+def read_json(path: Path, *, root: Path | None = None) -> Any:
     try:
-        text = path.read_text(encoding="utf-8-sig")
+        text = read_text(root if root is not None else path.parent, path, encoding="utf-8-sig")
     except OSError as exc:
         raise ValueError(f"cannot read {path.name}: {exc.strerror or exc}") from exc
     try:
@@ -84,7 +84,7 @@ def validate_manifest(manifest: dict[str, Any]) -> None:
 
 
 def load_capture(directory: Path) -> dict[str, Any]:
-    manifest = read_json(resolve_reference(directory, "capture.json"))
+    manifest = read_json(resolve_reference(directory, "capture.json"), root=directory.resolve())
     if not isinstance(manifest, dict) or manifest.get("schema") != CAPTURE_SCHEMA:
         raise ValueError("capture.json has a missing or unsupported schema")
     absent = [key for key in MANIFEST_KEYS if key not in manifest]
@@ -104,7 +104,7 @@ def load_capture(directory: Path) -> dict[str, Any]:
         preset, artifact = run["preset"], run["artifact"]
         if preset in presets:
             raise ValueError(f"duplicate preset in capture.json: {preset}")
-        data = read_json(resolve_reference(directory, artifact))
+        data = read_json(resolve_reference(directory, artifact), root=directory.resolve())
         if not isinstance(data, dict):
             raise ValueError(f"{artifact} is not a JSON object")
         try:

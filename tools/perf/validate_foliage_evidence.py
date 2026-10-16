@@ -9,7 +9,7 @@ from pathlib import Path, PurePosixPath
 import re
 import struct
 
-from fixture_paths import resolve_reference
+from fixture_paths import read_bytes, resolve_reference
 
 
 class Refusal(ValueError):
@@ -56,7 +56,10 @@ def local(root, name, limit):
                 "linked artifact")
         check = check.parent
     require(path.is_file() and 0 < path.stat().st_size <= limit, "missing/oversized artifact")
-    return path.read_bytes()
+    try:
+        return read_bytes(root, path, limit=limit)
+    except ValueError as exc:
+        raise Refusal(str(exc)) from exc
 
 
 def expected_view_projection(camera):
