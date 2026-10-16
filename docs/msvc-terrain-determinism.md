@@ -59,6 +59,6 @@ archipelago, match the existing CI sample bits. Height, topology and serializati
 expectations were not edited.
 
 Qualification receipts must retain executable, library, compiler, command and
-input identities. [Issue #115](https://github.com/d-addison/luminumbra/issues/115)
+input identities. [issue #115](https://github.com/d-addison/luminumbra/issues/115)
 tracks the final committed CI/native/package acceptance. This bounded source
 verification is not release approval or a universal cross-compiler bitwise claim.

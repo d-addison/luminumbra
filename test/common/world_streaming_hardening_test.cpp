@@ -1,3 +1,4 @@
+#include "../fixtures/TerrainFixtureParams.h"
 // Adversarial determinism-hardening gates for the E2E streaming path:
 // world-streaming-state serialization + sub-hash, structure placement, and the
 // far-LOD store. These hunt the bug classes the happy-path siblings
@@ -163,7 +164,7 @@ std::vector<std::size_t> ScrambledOrder() {
 }
 
 TerrainGenParams FixtureParams() {
-    TerrainGenParams params;
+    TerrainGenParams params = Luminumbra::Test::SyntheticTerrainParams();
     params.base_frequency = 0.005f;
     params.base_amplitude = 40.0f;
     params.height_offset = 10.0f;

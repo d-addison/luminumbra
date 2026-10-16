@@ -108,7 +108,7 @@ native terrain source currently pinned at `983e6abc338637a226d623ef20ffafc10f07e
 ## Selected Lane A evidence retained on devel
 
 Lane B remains the sole canonical volume model and mesher. The regression-only
-port retains these controls from Lane A #176 head
+port retains these controls from Lane A's historical head
 `9b04e1a6c9f575ab02cca62f829454d5553b93f7:test/common/FarVolume_test.cpp`:
 
 - Line 327: V1/V2 live-router bit equality for both cave modes, now in
@@ -133,7 +133,7 @@ experiment (line 554) are excluded from routine regression CI. Their historical
 measurements remain attributed to the same Lane A head's
 `docs/far-volume-foundation.md`; they are not Lane B performance qualification.
 Already-covered winding, seam and subspacing controls retain the canonical
-suites' existing oracles. World-to-mesh-to-renderer composition from #194 belongs
-to the separate FW-based slice, and #195's canonical page planning and page
+suites' existing oracles. World-to-mesh-to-renderer composition belongs
+to the separate FW-based slice, and canonical page planning and page
 completeness oracles remain deferred. Explicit aligned spans do not establish
 page residency, uploaded coverage or complete bounded runtime page streaming.
