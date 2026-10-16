@@ -3,10 +3,11 @@
 whole analysis input is identical to an earlier passing run."""
 
 import importlib.util
+import contextlib
+import io
 import json
 import os
 import shutil
-import stat
 import subprocess
 import sys
 import tempfile
@@ -14,6 +15,7 @@ import textwrap
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = REPO_ROOT / "scripts" / "tidy_cache.py"
@@ -23,7 +25,7 @@ MODULE = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = MODULE
 SPEC.loader.exec_module(MODULE)
 
-FAKE_COMPILER = f"""#!{sys.executable}
+FAKE_COMPILER = """
 import os, re, sys
 args = sys.argv[1:]
 if args == ["--version"]:
@@ -74,7 +76,7 @@ visit(source)
 print("main.o: " + " \\\\\\n ".join(p.replace(" ", "\\\\ ") for p in order))
 """
 
-FAKE_TIDY = f"""#!{sys.executable}
+FAKE_TIDY = """
 import os, sys
 args = sys.argv[1:]
 if args == ["--version"]:
@@ -98,14 +100,10 @@ sys.exit(0)
 """
 
 
-def write_executable(path: Path, text: str) -> None:
-    path.write_text(text, encoding="utf-8")
-    path.chmod(path.stat().st_mode | stat.S_IXUSR)
-
-
 class TidyCacheTests(unittest.TestCase):
     def setUp(self):
-        self.root = Path(tempfile.mkdtemp(prefix="tidy-cache-test-"))
+        # Match tool identity paths even when Windows supplies an 8.3 temp path.
+        self.root = Path(tempfile.mkdtemp(prefix="tidy-cache-test-")).resolve()
         self.addCleanup(shutil.rmtree, self.root, True)
         self.src = self.root / "src"
         self.build = self.root / "build"
@@ -113,10 +111,10 @@ class TidyCacheTests(unittest.TestCase):
         self.cache = self.root / "cache"
         for directory in (self.src, self.build, self.system):
             directory.mkdir()
-        self.cc = self.root / "fakecc"
-        self.tidy = self.root / "faketidy"
-        write_executable(self.cc, FAKE_COMPILER)
-        write_executable(self.tidy, FAKE_TIDY)
+        self.cc = self.root / "fakecc.py"
+        self.tidy = self.root / "faketidy.py"
+        self.cc.write_text(FAKE_COMPILER, encoding="utf-8")
+        self.tidy.write_text(FAKE_TIDY, encoding="utf-8")
         self.tool_file = self.root / "tidy.sh"
         self.tool_file.write_text("# check list v1\n", encoding="utf-8")
         self.log = self.root / "tidy.log"
@@ -146,12 +144,25 @@ class TidyCacheTests(unittest.TestCase):
     def run_cache(self, files=None, config="{}", mode="readwrite", tool_file=None):
         files = files or [self.main]
         command = [
-            sys.executable, str(SCRIPT), "run", "--build-dir", str(self.build),
+            "run", "--build-dir", str(self.build),
             "--cache-dir", str(self.cache), "--mode", mode, "--jobs", "2",
             "--clang-tidy", str(self.tidy), "--config", config,
             "--tool-file", str(tool_file or self.tool_file), "--", *map(str, files),
         ]
-        return subprocess.run(command, env=self.env, capture_output=True, text=True, check=False)
+        original_run = subprocess.run
+
+        def run_fixture(argv, **kwargs):
+            # Preserve tool-file hashing, argv, output and exit status; only the
+            # fixture launch needs an interpreter instead of a POSIX shebang.
+            self.assertIn(Path(argv[0]), (self.cc, self.tidy))
+            return original_run([sys.executable, "-I", "-B", *argv], **kwargs)
+
+        out, err = io.StringIO(), io.StringIO()
+        with patch.dict(os.environ, self.env, clear=True), patch.object(
+            MODULE.subprocess, "run", side_effect=run_fixture
+        ), contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            status = MODULE.main(command)
+        return subprocess.CompletedProcess(command, status, out.getvalue(), err.getvalue())
 
     def tidy_runs(self):
         if not self.log.exists():
@@ -367,6 +378,21 @@ class TidyCacheTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertTrue(record.exists())
         self.assertFalse((stale / ("f" * 64 + ".json")).exists())
+
+
+class TidyCachePathTests(unittest.TestCase):
+    def test_fixture_paths_match_resolved_tool_paths(self):
+        parent = tempfile.TemporaryDirectory(prefix="tidy-cache-parent-")
+        self.addCleanup(parent.cleanup)
+        root = Path(parent.name) / "fixture"
+        root.mkdir()
+        # A second spelling exercises normalization without Windows-only APIs.
+        alias = root / ".." / root.name
+        fixture = TidyCacheTests("test_second_identical_run_is_a_hit")
+        self.addCleanup(fixture.doCleanups)
+        with patch.object(tempfile, "mkdtemp", return_value=str(alias)):
+            fixture.setUp()
+        fixture.test_second_identical_run_is_a_hit()
 
 
 class MakeDependencyParserTests(unittest.TestCase):

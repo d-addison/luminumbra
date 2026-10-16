@@ -167,10 +167,71 @@ will mismatch the expanded identity and refuse admission/verification.
 The older numeric replay `preset_hash` remains name
 provenance only; admission and verification require `preset_content_hash` as well.
 
-The GNS and Steam transports are optional and disabled by default. They do not yet
-exchange or check the SystemConfig identity. Identity admission for these transports is
-tracked for the next release. Their SDK declarations and mode implementations remain
-guarded when their CMake options are off.
+The GNS and Steam transports are optional and disabled by default. Both use the
+unconditionally compiled `Luminumbra::Net` replication admission gate from issue #278.
+A connected joiner sends the existing v3 Hello reliably. The host checks its assigned
+client ID and `HelloMatches` compatibility (protocol, seed, preset, tick rate, nonempty
+SystemConfig identity and resolved preset content hash). Host identities come from the
+booted runner session, replacing the two identity fields constructed by
+`RuntimeHelloFrom(options)`. GNS retains its port-to-client-slot mapping; Steam retains
+one remote slot, client ID 1.
+
+The host's reliable Hello with `client_id = 0` is the admission acknowledgement.
+Successful enqueueing admits the host slot and permits `AddClient`; the joiner admits
+only after validating the acknowledgement. Until then the adapter suppresses command
+and snapshot-ack sends and discards snapshots without updating reconstruction history.
+Commands arriving before Hello are discarded without disconnecting or extending the
+deadline. Unreliable Hello or acknowledgement frames are rejected. Repeated compatible
+Hello frames are consumed as control and may resend the acknowledgement without
+registering another client. Malformed control, incompatible identity, send failure,
+disconnect and deadline expiry close with specific diagnostic reasons. Received delivery
+flags are retained before releasing each sockets message.
+
+`kAdmissionTimeoutTicks = 150` uses elapsed `steady_clock` time at the local 30 Hz
+handshake cadence: 150 ticks / approximately 5 seconds, independent of simulation
+progress and callback or replication loop iteration counts. The host starts at
+connection establishment; the joiner starts when its Hello is successfully enqueued.
+Expiry is at elapsed tick `>= 150`. Each admission pump drains at most 32 frames, so
+continuous traffic cannot postpone deadline checks. The connection-establishment limit
+remains separately 30 seconds. The separate runtime TCP policy
+`kRuntimeTcpHelloTimeoutTicks` introduced by issue #315 is also 150 ticks / approximately
+5 seconds; the constants remain separately named. This optional-transport gate does not
+alter TCP admission or add a TCP acknowledgement.
+
+Hello and user commands share tag `0x01`. Admission validates the complete outer frame
+length first: exactly `kUsercmdPayloadBytes = 19` payload bytes (24 total) identifies a
+command, even when its tick starts with `LSTP1`. Other frames with this tag must carry
+the Hello magic and satisfy `DecodeHello(frame, hello) && EncodeHello(hello) == frame`.
+Failed Hello decoding never falls back to command decoding. The general Hello decoder
+keeps its existing permissive TCP/lockstep behavior. `DecodeUsercmd` now rejects trailing
+extensions, including those whose outer length was adjusted to include the extra bytes.
+All valid encoder output is unchanged: lockstep protocol 3, replication protocol 1 and
+LREC1 layout 3 remain unchanged, as do TCP wire bytes, replay and hash layouts. Hello
+versions 1 and 2 remain rejected. Older optional joiners cannot admit through commands;
+new joiners discard older hosts' snapshots until acknowledgement timeout.
+
+The command-length compatibility audit found one production command encoder,
+`EncodeUsercmd`, writing exactly `u64 tick + u32 player_id + 3 * i16 + u8 = 19` bytes,
+with no extension path. `ReplicationClient::SendUsercmd` sends those bytes unchanged;
+`ReplicationServer::PumpInbound` is the production replication decoder. TCP replication
+uses these same endpoints. TCP lockstep instead encodes `InputMsg` through
+`EncodeInput`/`DecodeInput` with a separately length-prefixed opaque blob. Desync dumps
+write those merged blobs through `ReplayWriter::RecordInput`; replay streams use
+`RecordInput`/`ReadReplay`, never `DecodeUsercmd`. Headless recordings use empty input
+blobs. Replay regression fixtures generate empty or arbitrary opaque blobs with those
+replay APIs; smoke artifact fixtures contain options and result/hash metadata, not encoded
+replication commands. No checked-in binary replay/command stream or alternate command
+encoder was found. Thus no existing valid command stream requires trailing bytes; opaque
+lockstep/replay blobs keep their existing independent length contracts.
+
+Admission regressions run in `common_tests` with both SDKs disabled, using explicit
+ticks and scripted paired transports that preserve delivery flags and can suppress a
+reliable acknowledgement. Ordinary `NetworkSim` packet loss does not drop reliable
+frames and cannot exercise that timeout. The GNS compile probe builds both
+`luminumbra_common` and `luminumbra_server_app`, and checks the shared sockets and GNS
+mode objects. No CI job enables Steam; its guarded modes still require an SDK-equipped
+Windows preview build. SDK declarations and mode implementations remain guarded when
+their CMake options are off.
 
 Saves carry no simulation identity. Loading applies the loading process's gates and
 tuning; an active-region ledger also persists its own scheduler configuration and cadence

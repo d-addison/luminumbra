@@ -76,6 +76,30 @@ protected:
         }
         return result;
     }
+    static void
+    ExpectTickSequences(const SimBudgetTelemetry& trace, std::uint64_t ticks, bool active_regions) {
+        for (std::size_t counter = 0; counter < trace.WorkItems().size(); ++counter) {
+            SCOPED_TRACE(counter);
+            const auto& samples = trace.WorkItems()[counter];
+            ASSERT_EQ(samples.size(), ticks);
+            for (std::size_t i = 0; i < samples.size(); ++i)
+                EXPECT_EQ(samples[i].tick, i + 1);
+        }
+        for (std::size_t stage = 0; stage < trace.SamplesByStage().size(); ++stage) {
+            const auto& samples = trace.SamplesByStage()[stage];
+            const auto identity = static_cast<SimBudgetStage>(stage);
+            const bool unexecuted = active_regions ? identity == SimBudgetStage::Wind ||
+                                                         identity == SimBudgetStage::Weather
+                                                   : identity == SimBudgetStage::WindWeather;
+            if (unexecuted) {
+                EXPECT_TRUE(samples.empty());
+                continue;
+            }
+            ASSERT_EQ(samples.size(), ticks);
+            for (std::size_t i = 0; i < samples.size(); ++i)
+                EXPECT_EQ(samples[i].tick, i + 1);
+        }
+    }
 };
 
 TEST_P(SimBudgetWorldParity, Populated3600TicksPreserveWorldHashAndReplayWork) {
@@ -122,27 +146,7 @@ TEST_P(SimBudgetWorldParity, Populated3600TicksPreserveWorldHashAndReplayWork) {
             const auto& trace = runner.Session()->GetSimBudgetTelemetry();
             // Exercise the real runner/session wiring for every time-free
             // counter while the existing hash/save parity checks remain live.
-            for (std::size_t counter = 0; counter < trace.WorkItems().size(); ++counter) {
-                SCOPED_TRACE(counter);
-                const auto& samples = trace.WorkItems()[counter];
-                ASSERT_EQ(samples.size(), ticks);
-                for (std::size_t i = 0; i < samples.size(); ++i)
-                    EXPECT_EQ(samples[i].tick, i + 1);
-            }
-            for (std::size_t stage = 0; stage < trace.SamplesByStage().size(); ++stage) {
-                const auto& samples = trace.SamplesByStage()[stage];
-                const auto identity = static_cast<SimBudgetStage>(stage);
-                const bool unexecuted = GetParam() ? identity == SimBudgetStage::Wind ||
-                                                         identity == SimBudgetStage::Weather
-                                                   : identity == SimBudgetStage::WindWeather;
-                if (unexecuted) {
-                    EXPECT_TRUE(samples.empty());
-                    continue;
-                }
-                ASSERT_EQ(samples.size(), ticks);
-                for (std::size_t i = 0; i < samples.size(); ++i)
-                    EXPECT_EQ(samples[i].tick, i + 1);
-            }
+            ASSERT_NO_FATAL_FAILURE(ExpectTickSequences(trace, ticks, GetParam()));
             EXPECT_GT(trace.Summarize(SimBudgetStage::Creatures).work_total, 0u);
             EXPECT_GT(trace.Summarize(SimBudgetStage::Plants).work_total, 0u);
             EXPECT_GT(trace.Summarize(SimBudgetStage::Scent).work_total, 0u);
