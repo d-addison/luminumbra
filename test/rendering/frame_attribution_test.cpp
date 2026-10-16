@@ -9,6 +9,7 @@
 #include <sstream>
 #include <streambuf>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -33,10 +34,26 @@ TEST(FrameAttribution, CapacityMarkerIsNeverAnObservedCount) {
     EXPECT_FALSE(generated_instance_count(true, false, false, capacity).has_value());
     EXPECT_FALSE(generated_instance_count(true, false, true, capacity).has_value());
     EXPECT_FALSE(generated_instance_count(true, true, false, capacity).has_value());
-    EXPECT_EQ(generated_instance_count(true, true, true, 123).value(), 123u);
-    EXPECT_EQ(generated_instance_count(true, true, true, 0).value(), 0u);
-    EXPECT_EQ(generated_instance_count(false, false, false, 123).value(), 123u);
-    EXPECT_EQ(generated_instance_count(false, false, false, 0).value(), 0u);
+    const auto gpu_count = generated_instance_count(true, true, true, 123);
+    ASSERT_TRUE(gpu_count.has_value());
+    if (!gpu_count)
+        return;
+    EXPECT_EQ(gpu_count.value(), 123u);
+    const auto gpu_zero = generated_instance_count(true, true, true, 0);
+    ASSERT_TRUE(gpu_zero.has_value());
+    if (!gpu_zero)
+        return;
+    EXPECT_EQ(gpu_zero.value(), 0u);
+    const auto cpu_count = generated_instance_count(false, false, false, 123);
+    ASSERT_TRUE(cpu_count.has_value());
+    if (!cpu_count)
+        return;
+    EXPECT_EQ(cpu_count.value(), 123u);
+    const auto cpu_zero = generated_instance_count(false, false, false, 0);
+    ASSERT_TRUE(cpu_zero.has_value());
+    if (!cpu_zero)
+        return;
+    EXPECT_EQ(cpu_zero.value(), 0u);
 }
 
 TEST(FrameAttribution, ExclusiveBucketsSumToFrameIncludingRemainder) {
@@ -235,6 +252,40 @@ TEST(FrameAttribution, FrameCollectorIncludesAllCallersAndDoesNotLeakBetweenFram
     EXPECT_DOUBLE_EQ(next_frame.snapshot().rebuild_ms, 0);
 }
 
+TEST(FrameAttribution, FrameCollectorsAreIsolatedAcrossThreads) {
+    FoliageFrameScope frame(true);
+    record_foliage_rebuild({}, 10, 262144, 123, 7);
+    // The parent stays idle until join so a shared-pointer regression fails
+    // deterministically without racing accesses to either frame.
+    bool worker_initially_active = false;
+    bool worker_scope_active = false;
+    bool worker_finally_active = false;
+    FoliageFrame worker_snapshot{};
+    std::thread worker([&] {
+        worker_initially_active = foliage_frame_active();
+        record_foliage_rebuild({}, 20, 262144, 456, 8);
+        {
+            FoliageFrameScope worker_frame(true);
+            worker_scope_active = foliage_frame_active();
+            record_foliage_rebuild({}, 30, 262144, 789, 9);
+            worker_snapshot = worker_frame.snapshot();
+        }
+        worker_finally_active = foliage_frame_active();
+    });
+    worker.join();
+    EXPECT_FALSE(worker_initially_active);
+    EXPECT_TRUE(worker_scope_active);
+    EXPECT_FALSE(worker_finally_active);
+    EXPECT_EQ(worker_snapshot.rebuild.rebuild_calls, 1u);
+    EXPECT_EQ(worker_snapshot.generated_count, 789u);
+    EXPECT_TRUE(foliage_frame_active());
+    EXPECT_EQ(frame.snapshot().rebuild.rebuild_calls, 1u);
+    EXPECT_EQ(frame.snapshot().generated_count, 123u);
+    record_foliage_rebuild({}, 40, 262144, 321, 10);
+    EXPECT_EQ(frame.snapshot().rebuild.rebuild_calls, 2u);
+    EXPECT_EQ(frame.snapshot().generated_count, 321u);
+}
+
 TEST(FrameAttribution, DisabledCollectionDoesNotPublishOrChangeStageTotals) {
     double milliseconds = 7;
     {
@@ -303,6 +354,20 @@ TEST(FrameAttribution, PartialWriteFailureIsReportedAndRemainsInactive) {
     EXPECT_EQ(buffer.written(), 64);
 }
 
+// Accept writes without retaining data, but fail only when explicitly flushed.
+class FlushFailingBuffer : public std::streambuf {
+protected:
+    std::streamsize xsputn(const char*, std::streamsize count) override {
+        return count;
+    }
+    int_type overflow(int_type value) override {
+        return traits_type::not_eof(value);
+    }
+    int sync() override {
+        return -1;
+    }
+};
+
 class FrameRecorderTest : public ::testing::Test {
 protected:
     void SetUp() override {
@@ -330,6 +395,8 @@ TEST_F(FrameRecorderTest, DisabledRecorderCreatesNoLogs) {
     FrameRecorder recorder(false, root / "logs");
     EXPECT_FALSE(recorder.active());
     EXPECT_FALSE(std::filesystem::exists(root / "logs"));
+    EXPECT_TRUE(recorder.finish());
+    EXPECT_TRUE(recorder.finish());
     EXPECT_FALSE(recorder.record(1, 1, {}, {}, 0, false, 0, 0));
 }
 
@@ -343,6 +410,8 @@ TEST_F(FrameRecorderTest, DirectoryCreationFailureLeavesRecorderInactive) {
     EXPECT_FALSE(recorder.active());
     EXPECT_FALSE(recorder.record(1, 1, {}, {}, 0, false, 0, 0));
     EXPECT_TRUE(std::filesystem::is_regular_file(logs));
+    EXPECT_FALSE(recorder.finish());
+    EXPECT_FALSE(recorder.finish());
 }
 
 TEST_F(FrameRecorderTest, FileOpenFailureLeavesRecorderInactive) {
@@ -352,6 +421,34 @@ TEST_F(FrameRecorderTest, FileOpenFailureLeavesRecorderInactive) {
     EXPECT_FALSE(recorder.active());
     EXPECT_FALSE(recorder.record(1, 1, {}, {}, 0, false, 0, 0));
     EXPECT_TRUE(std::filesystem::is_directory(destination));
+    EXPECT_FALSE(recorder.finish());
+    EXPECT_FALSE(recorder.finish());
+}
+
+TEST_F(FrameRecorderTest, FinalFlushFailureIsReportedAfterSuccessfulWrites) {
+    FlushFailingBuffer buffer;
+    std::ofstream out(root / "frame-attribution.csv", std::ios::binary);
+    ASSERT_TRUE(out.is_open());
+    // Replace only the ostream buffer; close still releases the owned file.
+    static_cast<std::ostream&>(out).rdbuf(&buffer);
+    write_csv_header(out);
+    ASSERT_TRUE(write_csv_row(out, 1, 1, {}, {}, 262144, false, 0, 0));
+    ASSERT_TRUE(out.good());
+    EXPECT_FALSE(finalize_csv(out));
+    EXPECT_FALSE(out.is_open());
+    EXPECT_FALSE(out.good());
+    EXPECT_FALSE(write_csv_row(out, 2, 1, {}, {}, 262144, false, 0, 0));
+}
+
+TEST_F(FrameRecorderTest, FinalizationPreservesEarlierWriteFailure) {
+    FailingBuffer buffer;
+    std::ofstream out(root / "frame-attribution.csv", std::ios::binary);
+    ASSERT_TRUE(out.is_open());
+    static_cast<std::ostream&>(out).rdbuf(&buffer);
+    ASSERT_FALSE(write_csv_row(out, 1, 1, {}, {}, 262144, false, 0, 0));
+    EXPECT_FALSE(finalize_csv(out));
+    EXPECT_FALSE(out.is_open());
+    EXPECT_FALSE(out.good());
 }
 
 TEST_F(FrameRecorderTest, RecordsEveryShortFrameAndDrainsBufferOnClose) {
@@ -360,6 +457,10 @@ TEST_F(FrameRecorderTest, RecordsEveryShortFrameAndDrainsBufferOnClose) {
         ASSERT_TRUE(recorder.active());
         for (std::uint64_t frame = 1; frame <= 501; ++frame)
             ASSERT_TRUE(recorder.record(frame, 1, {}, {}, 262144, false, 262144, 0));
+        EXPECT_TRUE(recorder.finish());
+        EXPECT_FALSE(recorder.active());
+        EXPECT_FALSE(recorder.record(502, 1, {}, {}, 262144, false, 262144, 0));
+        EXPECT_TRUE(recorder.finish());
     }
     // Close the writer before reading/removing files, including on Windows.
     std::ifstream input(root / "logs/frame-attribution.csv", std::ios::binary);
