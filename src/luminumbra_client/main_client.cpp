@@ -37,6 +37,7 @@ __declspec(dllexport) extern const int AmdPowerXpressRequestHighPerformance = 1;
 #include "core/BenchmarkPose.h"
 #include "core/Debug.h"
 #include "core/GameState.h"
+#include "core/HardwareInfo.h"
 #include "core/IsolationConfig.h" // ScenarioHarness::ParseIsolationConfig (render-only layer isolation)
 #include "core/Log.h"
 #include "core/NvmlSampler.h" //  optional GPU power/clock sampling
@@ -2005,6 +2006,13 @@ int main(int argc, char* argv[]) {
     // compile with warnings as errors.
     [[maybe_unused]] const int status = gladLoadGLLoader((GLADloadproc)glfwGetProcAddress);
     LUMINUMBRA_ASSERT(status, "Failed to initialize GLAD!");
+
+    g_app.hardwareInfo = Luminumbra::Client::DetectHardwareInfo(window);
+    if (const auto diagnostics = Luminumbra::Client::FormatHardwareDiagnostics(
+            *g_app.hardwareInfo, HasCommandLineFlag(argc, argv, "--hardware-diagnostics"));
+        !diagnostics.empty()) {
+        LUMINUMBRA_CORE_INFO("{}", diagnostics);
+    }
 
     if (g_app.overlay.imgui_enabled) {
         IMGUI_CHECKVERSION();

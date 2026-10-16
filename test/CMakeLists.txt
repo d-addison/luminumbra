@@ -111,6 +111,23 @@ target_link_libraries(morph_asset_test PRIVATE gtest_main nlohmann_json meshopti
 luminumbra_configure_first_party_target(morph_asset_test)
 luminumbra_pin_fp_determinism(morph_asset_test)
 
+# The preset classifier has no client, GL or world-service dependency.
+add_executable(graphics_preset_classifier_test
+    common/GraphicsPresetClassifier_test.cpp
+    ../src/luminumbra_common/core/GraphicsPresetClassifier.cpp)
+target_include_directories(graphics_preset_classifier_test PRIVATE ../src)
+target_link_libraries(graphics_preset_classifier_test PRIVATE gtest_main)
+luminumbra_configure_first_party_target(graphics_preset_classifier_test)
+
+# Exercise the production collector with deterministic GL/GLFW responses, without a GPU.
+add_executable(hardware_info_test
+    client/HardwareInfo_test.cpp
+    ../src/luminumbra_client/core/HardwareInfo.cpp
+    ../src/luminumbra_common/core/GraphicsPresetClassifier.cpp)
+target_include_directories(hardware_info_test PRIVATE support/hardware_info ../src)
+target_link_libraries(hardware_info_test PRIVATE gtest_main)
+luminumbra_configure_first_party_target(hardware_info_test)
+
 # Table-driven volume generation has no client, GL or world-service dependency.
 add_executable(far_volume_tile_test
     common/FarVolumeTile_test.cpp
@@ -1798,6 +1815,8 @@ if(LUMINUMBRA_ENABLE_STATIC_PREVIEW)
     gtest_discover_tests(viewport_protocol_test PROPERTIES LABELS "authoring;tools" TIMEOUT 30)
 endif()
 set(LUMINUMBRA_GTEST_TARGETS
+    graphics_preset_classifier_test
+    hardware_info_test
     far_volume_tile_test
     far_volume_mesher_test
     far_volume_facade_test
