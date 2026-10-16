@@ -404,9 +404,8 @@ in `build/profile`. Start a matching Tracy viewer and launch the client from tha
 build. Tracy runs on demand, recording when the viewer connects. Configuring this
 variant fetches the upstream source; for offline use, supply an already
 provisioned checkout with `-DFETCHCONTENT_SOURCE_DIR_TRACY=/path/to/tracy`.
-The fetch settings in `cmake/tracy.cmake` pin Tracy v0.13.1 to commit
-`05cceee0df3b8d7c6fa87e9638af311dbabc63cb`; use that revision for an offline
-checkout as well. Tracy uses the BSD-3-Clause licence; its verbatim notice is in
+The fetch settings in `cmake/tracy.cmake` pin Tracy v0.13.1 to an exact
+upstream revision; check out that same revision for offline use. Tracy uses the BSD-3-Clause licence; its verbatim notice is in
 [Third-party licenses](../THIRD_PARTY_LICENSES.md#tracy-v0131) and must accompany
 redistributed Tracy-enabled binaries.
 

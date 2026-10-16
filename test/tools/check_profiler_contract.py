@@ -220,7 +220,7 @@ def check_dependency():
             == "16f7df4828bd89c880c17dd2f45e834b754b6d5e8c9a9ee886af1be4b89475ca",
             "Tracy licence must match the complete upstream v0.13.1 text")
     documentation = read("docs/render-benchmark.md")
-    for token in (tag[1], revision[1], "BSD-3-Clause", "../THIRD_PARTY_LICENSES.md#tracy-v0131"):
+    for token in (tag[1], "BSD-3-Clause", "../THIRD_PARTY_LICENSES.md#tracy-v0131"):
         require(token in documentation, f"Missing profile dependency documentation: {token}")
 
 
