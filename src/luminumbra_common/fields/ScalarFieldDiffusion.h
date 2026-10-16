@@ -54,11 +54,14 @@ public:
     using EdgeGate = std::function<bool(std::size_t, std::size_t, std::size_t, std::size_t)>;
     [[nodiscard]] ScalarDiffusionReport
     diffuse(std::size_t iterations, double diffusion_rate, const EdgeGate& gate = {});
+    // Identical evolution without constructing a diagnostic report or scanning for metrics.
+    void advance(std::size_t iterations, double diffusion_rate, const EdgeGate& gate = {});
 
 private:
+    template<bool Report>
+    ScalarDiffusionReport
+    evolve(std::size_t iterations, double diffusion_rate, const EdgeGate& gate);
     [[nodiscard]] std::size_t index(std::size_t x, std::size_t y) const;
-    [[nodiscard]] bool can_exchange(std::size_t lhs, std::size_t rhs) const noexcept;
-    [[nodiscard]] double edge_conductance(std::size_t lhs, std::size_t rhs) const noexcept;
 
     std::size_t width_ = 0;
     std::size_t height_ = 0;

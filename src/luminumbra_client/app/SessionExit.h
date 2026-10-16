@@ -25,7 +25,7 @@ template<typename UpdateSpawn, typename MarkSaved>
 void SaveSessionOnExit(world::GameSession* session,
                        UpdateSpawn update_spawn,
                        MarkSaved mark_saved) {
-    if (session && session->SaveWorldState()) {
+    if (session && session->SaveWorldState(nullptr, world::WorldStateSaveScope::DurableChanges)) {
         update_spawn();
         if (session->SaveWorld())
             mark_saved();

@@ -5,6 +5,7 @@
 #include "luminumbra_common/simulation/SimBudgetTelemetry.h"
 #include <cstddef>
 #include <cstdint>
+#include <map>
 #include <string>
 #include <utility>
 #include <vector>
@@ -13,6 +14,7 @@ namespace Luminumbra::Server {
 
 struct SmokeRunResult {
     bool ok = false;
+    std::map<std::string, bool> effective_simulation;
     luminumbra::simulation::SimBudgetTelemetry sim_budget;
     std::string world_hash;
     // per-system sub-hashes (additive; top-level world_hash unchanged).

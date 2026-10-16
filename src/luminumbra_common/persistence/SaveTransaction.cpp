@@ -836,14 +836,7 @@ bool SaveTransaction::protect(const std::vector<std::string>& relative_paths,
         const fs::path undo_directory = journal_directory(m_save_dir) / "undo";
         bool added = false;
         for (const std::string& rel : todo) {
-            bool already = false;
-            for (const Entry& entry : m_entries) {
-                if (entry.path == rel) {
-                    already = true;
-                    break;
-                }
-            }
-            if (already) {
+            if (m_protected_paths.contains(rel)) {
                 continue;
             }
             if (rel != kSnapshotIndexRelativePath && !member_path_allowed(rel)) {
@@ -878,6 +871,7 @@ bool SaveTransaction::protect(const std::vector<std::string>& relative_paths,
                 entry.action = "create";
             }
             m_entries.push_back(std::move(entry));
+            m_protected_paths.insert(rel);
             added = true;
         }
         if (!added) {

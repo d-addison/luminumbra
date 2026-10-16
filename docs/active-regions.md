@@ -2,12 +2,19 @@
 
 The host ledger implements the persistent-active scheduling foundation in
 [distant-world.md](distant-world.md). It is gated by the existing
-`sim.active_regions` switch, absent and false by default. No systems.json value
-is added. Budgets remain unlimited in shipped configuration. Enabled host sessions consume this schedule for field pages, ground objects,
-weather, energy, foliage and resident water. Resident water uses the checked
-[regional continuation contract](regional-water-continuation.md). Diagnostics
+`sim.active_regions` switch, enabled in compiled and packaged defaults since
+v0.3.0. Explicit false selects the legacy clock path. Budgets remain unlimited in
+shipped configuration. Enabled host sessions consume this schedule for field pages,
+ground objects, weather, energy, foliage and resident water. Resident water uses the
+checked [regional continuation contract](regional-water-continuation.md). Diagnostics
 and measured budget activation remain separate qualification work. Creature records and
 snapshot compatibility are specified in [creature-entities.md](creature-entities.md).
+
+Strict distant policy and simulation content identity are adopted before enabled
+world creation or loading. Distant creature simulation remains planned for v0.3.1.
+Regional continuation performance qualification is planned for v0.4.0 as
+[issue #320](https://github.com/d-addison/luminumbra/issues/320). The dedicated
+server autosaves every five minutes.
 
 ## Activation and ordering
 
@@ -108,8 +115,9 @@ refuses a resume before freeze. No callback consumer or catch-up is installed.
 The record is `<save>/chunks/region/active-regions.arl`, following the accepted
 contract's placement in the region integrity scan. This resolves the slice
 brief's conflicting save-root wording in favour of that contract. ARL1 does
-not alter LMR1 v2, the world manifest, preset revision 6, EFS1, plant payloads,
-FSD2 v3, or canonical chunk serialization. An anchor-only ledger is not a chunk
+not alter LMR1 v2, the world manifest, EFS1, plant payloads, FSD2 v3, or canonical
+chunk serialization. Presets now use revision 7 with revision-6 omission
+compatibility and frozen packaged-preset fallback. An anchor-only ledger is not a chunk
 snapshot: with active regions enabled, the first save with dirty chunks writes all
 resident chunks, including clean chunks in other regions. The disabled path keeps
 the legacy existing-save query: a plant-only save makes later saves incremental.
@@ -372,13 +380,13 @@ expected component hashes on mismatch. Diagnostic sources, component values,
 compiler commands and predecessor source identities accompany the campaign receipt
 under `ci-investigation/`.
 
-The subsequent [ambient dispatch repair](https://github.com/d-addison/luminumbra/pull/172)
+The subsequent ambient dispatch repair
 caps both FBm and Simplex nodes in all three ambient systems at terrain's x86
 AVX2 ceiling, preserving lower-ISA fallback and native non-x86 selection. Its
 Debug/Release controls and native qualification retain their own source identities;
 the historical table above is not relabelled as post-repair evidence. Integrated
-and native acceptance remain tracked by [#163](https://github.com/d-addison/luminumbra/issues/163).
-The wind input-padding defect tracked by [#173](https://github.com/d-addison/luminumbra/issues/173) was fixed afterwards on devel (df8a6716, e9b122e5); the evidence above is unchanged and pre-dates that fix.
+and native acceptance remain tracked by [issue #163](https://github.com/d-addison/luminumbra/issues/163).
+The wind input-padding defect tracked by [issue #173](https://github.com/d-addison/luminumbra/issues/173) was fixed afterwards on devel (df8a6716, e9b122e5); the evidence above is unchanged and pre-dates that fix.
 
 `RegionRecordingOverwrite` runs the shipping recorder/player with
 `--test-streaming-radius-cap 1` on every invocation. This diagnostic option applies
@@ -429,15 +437,22 @@ must resolve in the matching inventory. Species filenames and paths do not ident
 Captured definitions and both registries are ordered by declared name using unsigned UTF-8 bytes,
 so enumeration and biome selection remain stable across filename changes.
 
-`data/common/sim/distant_policy.json` is optional. Clean absence, including an absent optional
-parent directory, selects the compiled table. Status, permission, open, read and change-during-read
-errors refuse; directories, symlinks and reparse points cannot substitute for content files or
-parents. Present policy documents require UTF-8 without BOM, LF line endings and a final LF.
-Species documents accept ordinary JSON whitespace. Both use duplicate-key detection before
+`data/common/sim/distant_policy.json` is optional. A missing leaf in an existing readable parent
+directory selects the compiled table. A missing parent, status, permission, open, read and
+change-during-read errors refuse; directories, symlinks and reparse points cannot substitute for
+content files or parents. Present policy documents require UTF-8 without BOM, LF line endings and a final LF.
+Species documents accept ordinary JSON whitespace. Raw NUL bytes refuse before parsing in both
+domains, including after an otherwise valid document. Both use duplicate-key detection before
 adoption, a nesting cap of 32, strings of at most 256 bytes, at most 256 entries in any collection,
 and at most 65,536 parser callback events. Unknown keys, wrong types, narrowing and non-finite
 simulation numbers refuse. Adoption is transactional and the session exposes only const content
 and registries. Later file edits cannot change an open world's policy.
+
+Biome tables, terrain presets, structure placement and piece documents, and species registry text
+also refuse raw NUL before parsing. Biome and preset loads report an error without adopting a table
+or preset; structure loads retain their existing per-file error handling. Malformed systems
+configuration, including raw NUL, selects defaults; malformed operator budget profiles refuse.
+Population configuration is caller-supplied identity framing, not a parsed document.
 
 The policy root has exactly `schema`, `creature_species` and `plant_species`;
 `schema` is `luminumbra.distant_policy.v1`. Every authored creature entry has exactly
@@ -748,7 +763,7 @@ files unchanged, preserve legal coordinate/resolution boundaries, and run disabl
 the executable legacy v1 contract. The latter compares the entire formatted artifact, including outer keys,
 verdicts, nested hashes and boot/settle statistics; only the newly allocated world ID is
 substituted within that property's value. The expected comparison types, helpers and exclusions
-are frozen locally from revision `f242668c`, independently of current Heavy comparisons.
+are frozen locally from the legacy v1 Heavy contract, independently of current Heavy comparisons.
 Ambient-anchor controls mutate every stored coordinate through the const view
 and retain the original production hashes. Negative controls change raw authority while retaining
 the old production digests, so a shared hashing/persistence omission cannot satisfy equality.

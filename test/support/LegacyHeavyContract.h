@@ -12,7 +12,7 @@
 #include "luminumbra_common/persistence/WorldPersistenceRoundtrip.h"
 #include "luminumbra_common/world/GroundObjectStore.h"
 
-// Frozen from src/luminumbra_server/HeavyComparison.h at revision f242668c.
+// Frozen copy of the legacy v1 contract from src/luminumbra_server/HeavyComparison.h.
 // Keep the historical types, comparison helpers and exclusions independent of production.
 namespace world = Luminumbra::world;
 
