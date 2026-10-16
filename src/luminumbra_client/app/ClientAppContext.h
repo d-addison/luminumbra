@@ -13,6 +13,7 @@
 #include "app/DeveloperUiPolicy.h"
 
 #include "../../../include/luminumbra/core/Types.h"
+#include "core/HardwareInfo.h"
 #include "luminumbra_common/ai/CreatureSpeciesRegistry.h"
 #include "luminumbra_common/animation/AnimationRuntime.h"
 #include "luminumbra_common/core/JobSystem.h"
@@ -30,6 +31,7 @@
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -398,6 +400,8 @@ struct RenderBenchmarkState {
 };
 
 struct ClientAppContext {
+    // Startup diagnostics and recommendation, available to settings presentation.
+    std::optional<HardwareInfo> hardwareInfo;
     HudState hud;
     OverlayState overlay;
     bool scenario_active = false;
