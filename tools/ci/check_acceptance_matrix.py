@@ -4,13 +4,16 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 import json
 import os
 import re
 import shlex
+import stat
 import subprocess
 import sys
+import tempfile
 import unicodedata
 import xml.etree.ElementTree as ET
 from collections import Counter
@@ -50,9 +53,10 @@ REVIEWED_EXCLUSION_OVERRIDES = {
 }
 
 # Closed exclusion audit: every retained quote was read in its
-# source paragraph. Entries bind id, source#anchor, category and exact UTF-8 quote
+# source paragraph. Entries bind id, reviewed source#anchor, category and exact UTF-8 quote
 # SHA-256. Exclusion text must equal that full quote; shorter excerpts cannot
-# hide obligations. New exclusions require a reviewed change to this table.
+# hide obligations. Unique exact-text relocations retain the audit and its context
+# checks; new exclusions require a reviewed change to this table.
 # Restored requirements: dw.policy.036 / .039 (C4 behavior and omission rules),
 # ar.history.020 (historical evidence must retain its provenance).
 # dw.intro.006 now maps the regional continuation qualification plan; the
@@ -439,6 +443,10 @@ def _is_nonempty_str(value: Any) -> bool:
     return isinstance(value, str) and value.strip() != ""
 
 
+def _string_problem(value: Any, field: str) -> str | None:
+    return None if _is_nonempty_str(value) else f"{field} must be a non-empty string"
+
+
 def _path_problem(base: Path, ref: str, must_exist: bool) -> str | None:
     if ref.startswith("/") or re.match(r"^[A-Za-z]:", ref) or PurePosixPath(ref).is_absolute():
         return f"path must be repo-relative: {ref}"
@@ -507,7 +515,10 @@ def _source_problem(
         return f"source {problem}"
     if separator:
         if anchors is None:
-            anchors = frozenset(_headings(_read_text(base / path)).values())
+            try:
+                anchors = frozenset(_headings(_read_text(base / path)).values())
+            except OSError as exc:
+                return f"source cannot read {path}: {exc}"
             documents[path] = (None, anchors)
         if anchor not in anchors:
             return f"source anchor not found: {source}"
@@ -585,7 +596,12 @@ def validate_inventory(
         if problem:
             errors.append(problem)
             continue
-        for source, text, is_descriptive in contract_statements(_read_text(root / path), path):
+        try:
+            document = (root / path).read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            errors.append(f"cannot read contract {path}: {exc}")
+            continue
+        for source, text, is_descriptive in contract_statements(document, path):
             expected[(source, text)] += 1
             if is_descriptive:
                 descriptive.add((source, text))
@@ -632,8 +648,7 @@ def validate_inventory(
                 audited = (
                     isinstance(identity, str) and isinstance(category, str)
                     and text == quote
-                    and (identity, source, category, hashlib.sha256(quote.encode("utf-8")).hexdigest())
-                    in AUDITED_EXCLUSIONS
+                    and _audited_locator(identity, source, category, quote, expected)
                 )
                 if not audited:
                     errors.append(f"{label}: exclusion is not in the closed audited table")
@@ -648,7 +663,8 @@ def validate_inventory(
                 if NORMATIVE_MARKER_RE.search(re.sub(r"[*_`]+", "", text)):
                     override = REVIEWED_EXCLUSION_OVERRIDES.get(identity) if isinstance(identity, str) else None
                     if not (override and _is_nonempty_str(override.get("reason"))
-                            and all(entry.get(key) == override[key] for key in ("source", "text", "category"))):
+                            and all(entry.get(key) == override[key] for key in ("text", "category"))
+                            and _audited_locator(identity, source, category, quote, expected)):
                         errors.append(f"{label}: normative exclusion requires an exact reviewed override")
     for (source, text), count in (expected - actual).items():
         errors.append(f"inventory unaccounted statement ({count}): {source}: {text[:100]}")
@@ -657,6 +673,224 @@ def validate_inventory(
     if not requirements:
         errors.append("inventory requirements must not be empty")
     return requirements, errors
+
+
+def _audited_locator(
+    identity: str, source: str, category: str, quote: str,
+    expected: Counter[tuple[str, str]],
+) -> bool:
+    """An exact reviewed quote can follow a unique relocation, never a copy."""
+    digest = hashlib.sha256(quote.encode("utf-8")).hexdigest()
+    if (identity, source, category, digest) in AUDITED_EXCLUSIONS:
+        return True
+    return (
+        expected[(source, quote)] == 1
+        and sum(count for (_, text), count in expected.items() if text == quote) == 1
+        and any(
+            (identity, category, digest) == (old_id, old_category, old_digest)
+            and not expected[(old_source, quote)]
+            for old_id, old_source, old_category, old_digest in AUDITED_EXCLUSIONS
+        )
+    )
+
+
+def _inventory_units(root: Path) -> Counter[tuple[str, str]]:
+    units: Counter[tuple[str, str]] = Counter()
+    for path in CONTRACT_DOCUMENTS:
+        problem = _path_problem(root, path, must_exist=True)
+        if problem:
+            raise MatrixError(problem)
+        try:
+            document = (root / path).read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            raise MatrixError(f"cannot read contract {path}: {exc}") from exc
+        units.update((source, text) for source, text, _ in contract_statements(document, path))
+    return units
+
+
+def _candidate_rows(matrix: dict[str, Any], source: str, identity: str = "") -> list[dict[str, Any]]:
+    rows = matrix.get("rows", [])
+    if not isinstance(rows, list):
+        return []
+    return sorted(
+        ({key: sorted(row.get(key, [])) if key == "requirements" else row.get(key)
+          for key in ("id", "source", "status", "requirements")}
+         for row in rows if isinstance(row, dict)
+         and (identity in row.get("requirements", [])
+              or str(row.get("source", "")).partition("#")[0] == source.partition("#")[0])),
+        key=lambda row: str(row["id"]),
+    )
+
+
+def refresh_inventory(
+    inventory: dict[str, Any], matrix: dict[str, Any], root: Path,
+) -> tuple[dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
+    """Pair exact statement text only, after reserving unchanged occurrences.
+
+    No fuzzy matching, new accounting, retirement, or status changes are allowed.
+    A duplicated old locator cannot identify which stable ID moved.
+    """
+    expected = _inventory_units(root)
+    remaining = expected.copy()
+    refreshed = copy.deepcopy(inventory)
+    updated_matrix = copy.deepcopy(matrix)
+    entries: list[tuple[str, dict[str, Any]]] = []
+    rows = matrix.get("rows")
+    if (not isinstance(rows, list) or any(
+            not isinstance(row, dict) or not _is_nonempty_str(row.get("id"))
+            or not ROW_ID_RE.fullmatch(row["id"])
+            or not isinstance(row.get("requirements", []), list)
+            or any(not _is_nonempty_str(ref) for ref in row.get("requirements", []))
+            for row in rows)
+            or len({row["id"] for row in rows}) != len(rows)):
+        raise MatrixError("refresh requires valid matrix row identities and requirement lists")
+    for row in rows:
+        problem = _string_problem(row.get("source"), "source")
+        if problem:
+            raise MatrixError(f"{row['id']}: {problem}")
+    if (inventory.get("schema") != INVENTORY_SCHEMA
+            or inventory.get("documents") != list(CONTRACT_DOCUMENTS)):
+        raise MatrixError("refresh requires the reviewed inventory schema and documents")
+    for kind in ("requirements", "exclusions"):
+        values = refreshed.get(kind)
+        if not isinstance(values, list):
+            raise MatrixError(f"inventory {kind} must be a list")
+        for entry in values:
+            if (not isinstance(entry, dict)
+                    or not all(_is_nonempty_str(entry.get(key)) for key in ("id", "source", "text", "quote"))
+                    or not ROW_ID_RE.fullmatch(entry["id"])
+                    or entry["quote"] not in entry["text"]):
+                raise MatrixError(f"refresh requires valid {kind} entries")
+            if entry["source"].partition("#")[0] not in CONTRACT_DOCUMENTS:
+                raise MatrixError("refresh requires inventory locators in the reviewed documents")
+            entries.append((kind, entry))
+    if len({entry["id"] for _, entry in entries}) != len(entries):
+        raise MatrixError("refresh refuses duplicate inventory ids")
+    entries.sort(key=lambda item: item[1]["id"])
+    old_counts = Counter((entry["source"], entry["text"]) for _, entry in entries)
+    unmatched: list[tuple[str, dict[str, Any]]] = []
+    for kind, entry in entries:
+        key = (entry["source"], entry["text"])
+        if remaining[key]:
+            remaining[key] -= 1
+        else:
+            unmatched.append((kind, entry))
+    old_by_text: dict[str, list[tuple[str, dict[str, Any]]]] = {}
+    new_by_text: dict[str, list[str]] = {}
+    for kind, entry in unmatched:
+        old_by_text.setdefault(entry["text"], []).append((kind, entry))
+    for (source, text), count in remaining.items():
+        if count:
+            new_by_text.setdefault(text, []).extend([source] * count)
+    moved: set[str] = set()
+    for text, old in sorted(old_by_text.items()):
+        targets = new_by_text.get(text, [])
+        if len(old) != 1 or len(targets) != 1:
+            continue
+        kind, entry = old[0]
+        if old_counts[(entry["source"], text)] != 1:
+            continue
+        target = targets[0]
+        if kind == "exclusions":
+            candidate = dict(entry, source=target)
+            # Reuse all audit and context checks before moving any exclusion.
+            trial = copy.deepcopy(refreshed)
+            trial["exclusions"] = [candidate if item["id"] == entry["id"] else item
+                                   for item in trial["exclusions"]]
+            if any(error.startswith(entry["id"] + ":")
+                   for error in validate_inventory(trial, root)[1]):
+                continue
+        entry["source"] = target
+        remaining[(target, text)] -= 1
+        moved.add(entry["id"])
+    decisions: list[dict[str, Any]] = []
+    suggested_ids = {entry["id"] for _, entry in entries}
+    for (source, text), count in sorted(remaining.items()):
+        if not count:
+            continue
+        digest = hashlib.sha256((source + "\n" + text).encode("utf-8")).hexdigest()[:16]
+        stem = "statement." + digest
+        suffix = 1
+        for _ in range(count):
+            identity = stem if suffix == 1 else f"{stem}.{suffix}"
+            while identity in suggested_ids:
+                suffix += 1
+                identity = f"{stem}.{suffix}"
+            suggested_ids.add(identity)
+            decisions.append({"decision": "unaccounted", "kind": "requirements",
+                              "entry": {"id": identity, "source": source,
+                                        "text": text, "quote": text},
+                              "candidate_rows": _candidate_rows(matrix, source)})
+    for kind, entry in unmatched:
+        if entry["id"] not in moved:
+            decisions.append({"decision": "removed-or-reworded-or-ambiguous", "kind": kind,
+                              "entry": entry,
+                              "candidate_rows": _candidate_rows(matrix, entry["source"], entry["id"])})
+    by_id = {entry["id"]: entry for _, entry in entries}
+    mapped = {ref for row in rows for ref in row.get("requirements", [])}
+    stale_ids = {entry["id"] for _, entry in unmatched if entry["id"] not in moved}
+    for kind, entry in entries:
+        if kind == "requirements" and entry["id"] not in mapped and entry["id"] not in stale_ids:
+            decisions.append({"decision": "unmapped-requirement", "kind": kind, "entry": entry,
+                              "candidate_rows": _candidate_rows(matrix, entry["source"], entry["id"])})
+    old_by_id = {entry["id"]: entry for kind in ("requirements", "exclusions")
+                 for entry in inventory[kind]}
+    for row in updated_matrix.get("rows", []):
+        if not isinstance(row, dict) or not isinstance(row.get("requirements"), list):
+            continue
+        refs = row["requirements"]
+        if not refs or not any(ref in moved for ref in refs) or any(ref not in by_id for ref in refs):
+            continue
+        sources = {by_id[ref]["source"] for ref in refs}
+        old_sources = {old_by_id[ref]["source"] for ref in refs}
+        if len(sources) == 1 and row.get("source") in old_sources:
+            row["source"] = next(iter(sources))
+        elif row.get("source") in old_sources:
+            decisions.append({"decision": "row-source", "entry": row,
+                              "candidate_sources": sorted(sources),
+                              "candidate_rows": _candidate_rows(matrix, row["source"], refs[0])})
+    if moved:
+        for kind in ("requirements", "exclusions"):
+            refreshed[kind].sort(key=lambda entry: entry["id"])
+        updated_matrix["rows"].sort(key=lambda row: row["id"])
+        for row in updated_matrix["rows"]:
+            if "requirements" in row:
+                row["requirements"].sort()
+    decisions.sort(key=lambda decision: json.dumps(decision, sort_keys=True))
+    return refreshed, updated_matrix, decisions
+
+
+def _replace_outputs(outputs: list[tuple[Path, str]]) -> None:
+    """Stage every output before replacing closed files on Windows or POSIX.
+
+    Callers put the inventory last: until it is replaced, the original locators
+    remain available to recompute every relocation on retry. Earlier outputs
+    may already contain their new bytes after a failed replacement; a retry
+    compares bytes and completes the remaining outputs without consuming moves.
+    """
+    staged: list[tuple[Path, Path]] = []
+    try:
+        for path, text in outputs:
+            data = text.encode("utf-8")
+            if path.is_file() and path.read_bytes() == data:
+                continue
+            mode = stat.S_IMODE(path.stat().st_mode) if path.exists() else None
+            with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as handle:
+                temporary = Path(handle.name)
+                staged.append((temporary, path))
+                handle.write(data)
+            if mode is not None:
+                temporary.chmod(mode)
+        for temporary, path in staged:
+            temporary.replace(path)
+    finally:
+        for temporary, _ in staged:
+            try:
+                temporary.unlink(missing_ok=True)
+            except PermissionError:
+                # Windows refuses to unlink a read-only replacement candidate.
+                temporary.chmod(stat.S_IRUSR | stat.S_IWUSR)
+                temporary.unlink()
 
 
 def _check_planned(add: Any, planned: Any) -> None:
@@ -752,7 +986,7 @@ def _check_item(
         add("evidence item must be an object")
         return
     kind = item.get("kind")
-    if kind not in EVIDENCE_KINDS:
+    if not isinstance(kind, str) or kind not in EVIDENCE_KINDS:
         add(f"unknown evidence kind: {kind}")
         return
     ref = item.get("ref")
@@ -796,7 +1030,7 @@ def _check_item(
 def _check_status(add: Any, status: str, items: list[dict[str, Any]]) -> None:
     has_planned = any("planned" in item for item in items)
     has_plain = any("planned" not in item for item in items)
-    kinds = {item.get("kind") for item in items}
+    kinds = {item["kind"] for item in items if isinstance(item.get("kind"), str)}
 
     def fail(why: str) -> None:
         add(f"status {status} inconsistent with evidence: {why}")
@@ -824,11 +1058,14 @@ def validate(
     index: TestIndex,
     root: Path,
     require_landed: bool,
+    *, inventory: dict[str, Any] | None = None,
 ) -> list[str]:
+    """Validate disk inputs, or a prospective inventory before publishing it."""
     base = root.resolve()
     problems: list[tuple[str, str]] = []
     try:
-        inventory = load_matrix(base / "tools/ci/acceptance_requirements.json")
+        if inventory is None:
+            inventory = load_matrix(base / "tools/ci/acceptance_requirements.json")
         requirements, inventory_errors = validate_inventory(inventory, base)
     except MatrixError as exc:
         requirements, inventory_errors = {}, [str(exc)]
@@ -870,8 +1107,9 @@ def validate(
             seen_ids.add(row_id)
 
         for key in ("source", "statement"):
-            if not _is_nonempty_str(row.get(key)):
-                messages.append(f"{key} must be a non-empty string")
+            problem = _string_problem(row.get(key), key)
+            if problem:
+                messages.append(problem)
         if "discrepancy" in row and not _is_nonempty_str(row["discrepancy"]):
             messages.append("discrepancy must be a non-empty string")
         if _is_nonempty_str(row.get("source")):
@@ -892,7 +1130,7 @@ def validate(
                     mapped.add(ref)
 
         status = row.get("status")
-        if status not in VALID_STATUSES:
+        if not isinstance(status, str) or status not in VALID_STATUSES:
             messages.append(f"unknown status: {status}")
 
         evidence = row.get("evidence")
@@ -904,7 +1142,7 @@ def validate(
                 _check_item(item_messages.append, item, base, index, require_landed)
                 messages.extend(item_messages)
             dict_items = [item for item in evidence if isinstance(item, dict)]
-            if status in VALID_STATUSES and len(dict_items) == len(evidence):
+            if isinstance(status, str) and status in VALID_STATUSES and len(dict_items) == len(evidence):
                 status_messages: list[str] = []
                 _check_status(status_messages.append, status, dict_items)
                 messages.extend(status_messages)
@@ -1115,6 +1353,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--matrix", type=Path, default=None)
     parser.add_argument("--check-doc", type=Path, default=None)
     parser.add_argument("--write-doc", type=Path, default=None)
+    parser.add_argument("--refresh-inventory", action="store_true",
+                        help="refresh unique exact-text relocations and print human decision fragments")
     parser.add_argument("--require-landed", action="store_true")
     parser.add_argument("--junit", type=Path, action="append", default=[])
     parser.add_argument("--discovery", type=Path)
@@ -1136,22 +1376,51 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
+    refreshed = None
+    decisions: list[dict[str, Any]] = []
+    outputs: list[tuple[Path, str]] = []
+    if args.refresh_inventory:
+        inventory_path = root / "tools/ci/acceptance_requirements.json"
+        doc = root / "docs/acceptance-matrix.md"
+        try:
+            targets = [inventory_path, matrix_path, doc]
+            if args.write_doc is not None and args.write_doc.resolve() != doc.resolve():
+                targets.append(args.write_doc)
+            if args.execution_receipt is not None:
+                targets.append(args.execution_receipt)
+            if len({path.resolve() for path in targets}) != len(targets):
+                raise MatrixError("refresh output paths must be distinct")
+            inventory = load_matrix(inventory_path)
+            refreshed, refreshed_matrix, decisions = refresh_inventory(inventory, matrix, root)
+            # Matrix precedes inventory even when only canonical formatting changes.
+            # Retaining old inventory locators makes every partial replacement retryable.
+            if refreshed_matrix != matrix or refreshed != inventory:
+                outputs.append((matrix_path, json.dumps(refreshed_matrix, indent=2, sort_keys=True) + "\n"))
+            if refreshed != inventory:
+                outputs.append((inventory_path, json.dumps(refreshed, indent=2, sort_keys=True) + "\n"))
+            matrix = refreshed_matrix
+        except (MatrixError, OSError) as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        for decision in decisions:
+            print("inventory decision: " + json.dumps(decision, sort_keys=True))
+
     index = index_tests(root)
-    errors = validate(matrix, index, root, args.require_landed)
-    if errors:
+    errors = validate(matrix, index, root, args.require_landed, inventory=refreshed)
+    if errors or decisions:
         for message in errors:
             print(f"error: {message}", file=sys.stderr)
         return 1
 
+    rendered = render_doc(matrix)
+    if args.refresh_inventory and not _doc_matches(doc, rendered):
+        outputs.insert(0, (doc, rendered))
     if args.write_doc is not None:
-        try:
-            with open(args.write_doc, "w", encoding="utf-8", newline="\n") as handle:
-                handle.write(render_doc(matrix))
-        except OSError as exc:
-            print(f"error: cannot write {args.write_doc}: {exc}", file=sys.stderr)
-            return 2
+        outputs.insert(0, (args.write_doc, rendered))
 
-    if args.check_doc is not None and not _doc_matches(args.check_doc, render_doc(matrix)):
+    if (args.check_doc is not None
+            and not any(path.resolve() == args.check_doc.resolve() and text == rendered for path, text in outputs)
+            and not _doc_matches(args.check_doc, rendered)):
         print(
             f"error: {args.check_doc} is stale; regenerate with --write-doc",
             file=sys.stderr,
@@ -1161,14 +1430,22 @@ def main(argv: list[str] | None = None) -> int:
     if args.junit:
         try:
             receipt = validate_execution(matrix, index, args.junit, args.discovery)
-            receipt["matrix_sha256"] = _sha256(matrix_path)
+            matrix_text = next((text for path, text in outputs if path == matrix_path), None)
+            receipt["matrix_sha256"] = (hashlib.sha256(matrix_text.encode("utf-8")).hexdigest()
+                                        if matrix_text is not None else _sha256(matrix_path))
             receipt["identity"] = _ci_identity(root) if args.ci_context else None
             if args.execution_receipt:
                 args.execution_receipt.parent.mkdir(parents=True, exist_ok=True)
-                args.execution_receipt.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+                outputs.insert(0, (args.execution_receipt, json.dumps(receipt, indent=2, sort_keys=True) + "\n"))
         except (MatrixError, OSError) as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 2
+    try:
+        _replace_outputs(outputs)
+    except OSError as exc:
+        print(f"error: cannot replace output: {exc}", file=sys.stderr)
+        return 2
+    if args.junit:
         for reference in receipt["references"]:
             if not reference["passed"]:
                 print(f"error: {reference['row']}: CTest execution incomplete or failing: {reference['ref']}", file=sys.stderr)

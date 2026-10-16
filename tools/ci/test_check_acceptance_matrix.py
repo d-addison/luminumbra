@@ -238,6 +238,731 @@ class AcceptanceMatrixTests(unittest.TestCase):
             {"covered", "partial", "needs-native-run", "planned"},
         )
 
+    def prepare_refresh(self) -> dict[str, Any]:
+        matrix = baseline_matrix()
+        matrix["rows"][0]["requirements"].remove("ar.synthetic")
+        matrix["rows"].append({
+            "id": "iss.126", "source": MODULE.CONTRACT_DOCUMENTS[1] + "#contract",
+            "statement": "Every requirement has evidence.", "status": "covered",
+            "requirements": ["ar.synthetic"],
+            "evidence": [{"kind": "script", "ref": "tools/script.py"}],
+        })
+        self.write_matrix(matrix)
+        doc = self.root / "docs/acceptance-matrix.md"
+        doc.write_text(MODULE.render_doc(matrix), encoding="utf-8")
+        return matrix
+
+    def refresh_decisions(self, output: str) -> list[dict[str, Any]]:
+        return [json.loads(line.removeprefix("inventory decision: "))
+                for line in output.splitlines() if line.startswith("inventory decision: ")]
+
+    def test_refresh_moves_statement_and_clears_only_derived_inventory_error(self) -> None:
+        matrix = self.prepare_refresh()
+        document = self.root / MODULE.CONTRACT_DOCUMENTS[1]
+        document.write_text("# Moved\n\nEvery requirement has evidence.\n", encoding="utf-8")
+        self.assertErrorContains(matrix, "iss.126: inventory incomplete")
+        code, out, err = self.run_main(*self.base_args(), "--refresh-inventory")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.refresh_decisions(out), [])
+        refreshed = MODULE.load_matrix(self.root / "tools/ci/acceptance_requirements.json")
+        expected = copy.deepcopy(self.inventory)
+        next(entry for entry in expected["requirements"] if entry["id"] == "ar.synthetic")["source"] = (
+            MODULE.CONTRACT_DOCUMENTS[1] + "#moved")
+        expected["requirements"].sort(key=lambda entry: entry["id"])
+        self.assertEqual(refreshed, expected)
+        updated = MODULE.load_matrix(self.matrix_path)
+        self.assertEqual(row_of(updated, "iss.126"), dict(row_of(matrix, "iss.126"),
+                         source=MODULE.CONTRACT_DOCUMENTS[1] + "#moved"))
+        self.assertEqual(self.errors(updated), [])
+        self.assertEqual((self.root / "docs/acceptance-matrix.md").read_text(encoding="utf-8"),
+                         MODULE.render_doc(updated))
+        document.write_text(document.read_text(encoding="utf-8") + "\nA new obligation.\n", encoding="utf-8")
+        code, out, err = self.run_main(*self.base_args(), "--refresh-inventory")
+        self.assertEqual(code, 1, err)
+        self.assertIn("iss.126: inventory incomplete", err)
+        self.assertEqual(self.refresh_decisions(out)[0]["entry"]["text"], "A new obligation.")
+
+    def test_refresh_rewrapped_statement_preserves_exact_accounting(self) -> None:
+        self.prepare_refresh()
+        (self.root / MODULE.CONTRACT_DOCUMENTS[1]).write_bytes(
+            b"# Contract\r\n\r\nEvery requirement\r\n  has evidence.\r\n")
+        before = (self.root / "tools/ci/acceptance_requirements.json").read_bytes()
+        code, out, err = self.run_main(*self.base_args(), "--refresh-inventory")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.refresh_decisions(out), [])
+        self.assertEqual((self.root / "tools/ci/acceptance_requirements.json").read_bytes(), before)
+
+    def test_refresh_existing_unmapped_requirement_gets_fragment_and_remains_incomplete(self) -> None:
+        matrix = self.prepare_refresh()
+        row_of(matrix, "iss.126")["requirements"] = []
+        self.write_matrix(matrix)
+        code, out, err = self.run_main(*self.base_args(), "--refresh-inventory")
+        self.assertEqual(code, 1, err)
+        self.assertIn("iss.126: inventory incomplete", err)
+        decisions = self.refresh_decisions(out)
+        self.assertEqual(len(decisions), 1)
+        self.assertEqual(decisions[0]["decision"], "unmapped-requirement")
+        self.assertEqual(decisions[0]["entry"], self.inventory["requirements"][1])
+        self.assertIn("iss.126", [row["id"] for row in decisions[0]["candidate_rows"]])
+        self.assertEqual(MODULE.load_matrix(self.matrix_path), matrix)
+
+    def test_refresh_new_reworded_removed_and_punctuation_changes_need_decisions(self) -> None:
+        matrix = self.prepare_refresh()
+        path = self.root / MODULE.CONTRACT_DOCUMENTS[1]
+        original = path.read_text(encoding="utf-8")
+        for document, new_text in (
+            (original + "\nNew statements require evidence.\n", "New statements require evidence."),
+            (original.replace("Every requirement", "Each requirement"), "Each requirement has evidence."),
+            (original.replace("evidence.", "evidence!"), "Every requirement has evidence!"),
+            ("# Contract\n", None),
+        ):
+            with self.subTest(document=document):
+                path.write_text(document, encoding="utf-8")
+                before = (self.root / "tools/ci/acceptance_requirements.json").read_bytes()
+                code, out, err = self.run_main(*self.base_args(), "--refresh-inventory")
+                self.assertEqual(code, 1, err)
+                self.assertIn("iss.126: inventory incomplete", err)
+                self.assertEqual((self.root / "tools/ci/acceptance_requirements.json").read_bytes(), before)
+                decisions = self.refresh_decisions(out)
+                missing = [item for item in decisions if item["decision"] == "unaccounted"]
+                if new_text is not None:
+                    self.assertEqual(len(missing), 1)
+                    stub = missing[0]
+                    self.assertEqual(stub["entry"]["text"], new_text)
+                    self.assertEqual(stub["entry"]["quote"], new_text)
+                    self.assertEqual(stub["entry"]["source"], MODULE.CONTRACT_DOCUMENTS[1] + "#contract")
+                    self.assertIn("iss.126", [row["id"] for row in stub["candidate_rows"]])
+                    self.assertRegex(stub["entry"]["id"], MODULE.ROW_ID_RE)
+                else:
+                    self.assertEqual(missing, [])
+                    self.assertIn("inventory stale or duplicate statement", err)
+                if document != original + "\nNew statements require evidence.\n":
+                    retained = [item for item in decisions if item["decision"] != "unaccounted"]
+                    self.assertEqual([item["entry"]["id"] for item in retained], ["ar.synthetic"])
+                self.assertEqual(MODULE.load_matrix(self.matrix_path), matrix)
+
+    def test_refresh_is_idempotent_and_consistent_tree_is_byte_and_mtime_noop(self) -> None:
+        self.prepare_refresh()
+        paths = [self.matrix_path, self.root / "tools/ci/acceptance_requirements.json",
+                 self.root / "docs/acceptance-matrix.md"]
+        for move in (False, True):
+            if move:
+                path = self.root / MODULE.CONTRACT_DOCUMENTS[1]
+                path.write_text(path.read_text(encoding="utf-8").replace("# Contract", "# Moved"), encoding="utf-8")
+                self.assertEqual(self.run_main(*self.base_args(), "--refresh-inventory")[0], 0)
+            before = [(path.read_bytes(), path.stat().st_mtime_ns) for path in paths]
+            code, _, err = self.run_main(*self.base_args(), "--refresh-inventory")
+            self.assertEqual(code, 0, err)
+            self.assertEqual([(path.read_bytes(), path.stat().st_mtime_ns) for path in paths], before)
+
+    def test_refresh_bytes_do_not_depend_on_entry_row_or_object_key_order(self) -> None:
+        matrix = self.prepare_refresh()
+        path = self.root / MODULE.CONTRACT_DOCUMENTS[1]
+        path.write_text(path.read_text(encoding="utf-8").replace("# Contract", "# Moved")
+                        + "\nA new obligation.\n", encoding="utf-8")
+        outputs = []
+        for reverse in (False, True):
+            inventory = copy.deepcopy(self.inventory)
+            reordered = copy.deepcopy(matrix)
+            if reverse:
+                inventory["requirements"].reverse()
+                inventory = dict(reversed(list(inventory.items())))
+                inventory["requirements"] = [dict(reversed(list(entry.items())))
+                                             for entry in inventory["requirements"]]
+                reordered["rows"].reverse()
+                for row in reordered["rows"]:
+                    row.get("requirements", []).reverse()
+            (self.root / "tools/ci/acceptance_requirements.json").write_text(json.dumps(inventory), encoding="utf-8")
+            self.write_matrix(reordered)
+            paths = (self.root / "tools/ci/acceptance_requirements.json", self.matrix_path,
+                     self.root / "docs/acceptance-matrix.md")
+            before = [file.read_bytes() for file in paths]
+            code, out, err = self.run_main(*self.base_args(), "--refresh-inventory")
+            self.assertEqual(code, 1, err)
+            self.assertEqual([file.read_bytes() for file in paths], before)
+            outputs.append(out)
+        self.assertEqual(outputs[0], outputs[1])
+
+    def test_refresh_inventory_only_move_canonicalizes_matrix_object_order(self) -> None:
+        matrix = self.prepare_refresh()
+        row_of(matrix, "iss.126")["source"] = "issue #126"
+        matrix["rows"].sort(key=lambda row: row["id"])
+        for row in matrix["rows"]:
+            row.get("requirements", []).sort()
+        (self.root / MODULE.CONTRACT_DOCUMENTS[1]).write_text(
+            "# Moved\nEvery requirement has evidence.\n", encoding="utf-8")
+        outputs = []
+        for sort_keys in (False, True):
+            self.write_inventory()
+            self.matrix_path.write_text(json.dumps(matrix, sort_keys=sort_keys), encoding="utf-8")
+            code, _, err = self.run_main(*self.base_args(), "--refresh-inventory")
+            self.assertEqual(code, 0, err)
+            outputs.append(self.matrix_path.read_bytes())
+        self.assertEqual(outputs[0], outputs[1])
+
+    def test_refresh_duplicate_new_occurrences_get_distinct_editable_fragments(self) -> None:
+        self.prepare_refresh()
+        path = self.root / MODULE.CONTRACT_DOCUMENTS[1]
+        path.write_text(path.read_text(encoding="utf-8")
+                        + "\nNew evidence is required.\n\nNew evidence is required.\n", encoding="utf-8")
+        code, out, err = self.run_main(*self.base_args(), "--refresh-inventory")
+        self.assertEqual(code, 1, err)
+        stubs = self.refresh_decisions(out)
+        self.assertEqual(len(stubs), 2)
+        self.assertEqual(len({stub["entry"]["id"] for stub in stubs}), 2)
+        self.assertTrue(all(stub["entry"]["text"] == "New evidence is required." for stub in stubs))
+        self.inventory["requirements"].append(stubs[0]["entry"])
+        self.write_inventory()
+        matrix = MODULE.load_matrix(self.matrix_path)
+        row_of(matrix, "iss.126")["requirements"].append(stubs[0]["entry"]["id"])
+        self.write_matrix(matrix)
+        code, out, err = self.run_main(*self.base_args(), "--refresh-inventory")
+        self.assertEqual(code, 1, err)
+        remaining = self.refresh_decisions(out)
+        self.assertEqual([stub["entry"]["id"] for stub in remaining], [stubs[1]["entry"]["id"]])
+        self.inventory["requirements"].append(remaining[0]["entry"])
+        self.write_inventory()
+        row_of(matrix, "iss.126")["requirements"].append(remaining[0]["entry"]["id"])
+        self.write_matrix(matrix)
+        code, out, err = self.run_main(*self.base_args(), "--refresh-inventory")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.refresh_decisions(out), [])
+
+    def test_refresh_unicode_fragments_preserve_text_in_ascii_pipes(self) -> None:
+        self.prepare_refresh()
+        path = self.root / MODULE.CONTRACT_DOCUMENTS[1]
+        statement = "Caf\u00e9 \u2264 \u03bb requires evidence."
+        path.write_text(path.read_text(encoding="utf-8") + "\n" + statement + "\n", encoding="utf-8")
+        code, out, err = self.run_main(*self.base_args(), "--refresh-inventory")
+        self.assertEqual(code, 1, err)
+        self.assertTrue(out.isascii())
+        self.assertEqual(self.refresh_decisions(out)[0]["entry"]["text"], statement)
+
+    def test_refresh_empty_inventory_or_documents_remains_incomplete(self) -> None:
+        self.prepare_refresh()
+        self.inventory["requirements"] = []
+        self.write_inventory()
+        code, out, err = self.run_main(*self.base_args(), "--refresh-inventory")
+        self.assertEqual(code, 1, err)
+        self.assertEqual(len(self.refresh_decisions(out)), 6)
+        for document in MODULE.CONTRACT_DOCUMENTS:
+            (self.root / document).write_text("# Empty\n", encoding="utf-8")
+        code, out, err = self.run_main(*self.base_args(), "--refresh-inventory")
+        self.assertEqual(code, 1, err)
+        self.assertIn("inventory requirements must not be empty", err)
+        self.assertEqual(self.refresh_decisions(out), [])
+
+    def test_refresh_cross_document_move_and_aggregate_source_decision(self) -> None:
+        matrix = self.prepare_refresh()
+        source = self.root / MODULE.CONTRACT_DOCUMENTS[1]
+        target = self.root / MODULE.CONTRACT_DOCUMENTS[0]
+        source.write_text("# Contract\n", encoding="utf-8")
+        target.write_text(target.read_text(encoding="utf-8")
+                          + "\n## Relocated\nEvery requirement has evidence.\n", encoding="utf-8")
+        code, _, err = self.run_main(*self.base_args(), "--refresh-inventory")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(row_of(MODULE.load_matrix(self.matrix_path), "iss.126")["source"],
+                         MODULE.CONTRACT_DOCUMENTS[0] + "#relocated")
+        self.write_inventory()
+        row_of(matrix, "iss.126")["requirements"].append("dw.synthetic")
+        self.write_matrix(matrix)
+        paths = (self.root / "tools/ci/acceptance_requirements.json", self.matrix_path,
+                 self.root / "docs/acceptance-matrix.md")
+        before = [(path.read_bytes(), path.stat().st_mtime_ns) for path in paths]
+        first = self.run_main(*self.base_args(), "--refresh-inventory")
+        code, out, err = first
+        self.assertEqual(code, 1, err)
+        decision = self.refresh_decisions(out)[0]
+        self.assertEqual(decision["decision"], "row-source")
+        self.assertEqual(decision["entry"], row_of(matrix, "iss.126"))
+        self.assertEqual(decision["candidate_sources"], [MODULE.CONTRACT_DOCUMENTS[0] + "#contract",
+                                                       MODULE.CONTRACT_DOCUMENTS[0] + "#relocated"])
+        self.assertEqual(self.run_main(*self.base_args(), "--refresh-inventory"), first)
+        self.assertEqual([(path.read_bytes(), path.stat().st_mtime_ns) for path in paths], before)
+
+    def test_refresh_decisions_persist_without_any_writes_alongside_a_move(self) -> None:
+        for decision_kind in ("row-source", "unaccounted", "removed-or-reworded-or-ambiguous",
+                              "unmapped-requirement"):
+            with self.subTest(decision=decision_kind):
+                matrix = self.prepare_refresh()
+                self.write_inventory()
+                path = self.root / MODULE.CONTRACT_DOCUMENTS[1]
+                # The original heading remains valid, so ordinary validation alone
+                # cannot detect an unresolved aggregate row-source decision.
+                path.write_text("# Contract\n\n# Moved\nEvery requirement has evidence.\n", encoding="utf-8")
+                if decision_kind == "row-source":
+                    row_of(matrix, "iss.126")["requirements"].append("dw.synthetic")
+                elif decision_kind == "unaccounted":
+                    path.write_text(path.read_text(encoding="utf-8") + "\nA new obligation.\n", encoding="utf-8")
+                elif decision_kind == "removed-or-reworded-or-ambiguous":
+                    document = self.root / MODULE.CONTRACT_DOCUMENTS[0]
+                    original = document.read_text(encoding="utf-8")
+                    document.write_text(original.replace("Every requirement has evidence.",
+                                                         "Every requirement needs evidence."), encoding="utf-8")
+                else:
+                    matrix["rows"][0]["requirements"].remove("dw.synthetic")
+                self.write_matrix(matrix)
+                paths = (self.root / "tools/ci/acceptance_requirements.json", self.matrix_path,
+                         self.root / "docs/acceptance-matrix.md")
+                before = [(file.read_bytes(), file.stat().st_mtime_ns) for file in paths]
+                extra_doc = self.tmp / "additional.md"
+                first = self.run_main(*self.base_args(), "--refresh-inventory", "--write-doc", str(extra_doc))
+                self.assertEqual(first[0], 1, first[2])
+                self.assertIn(decision_kind, {item["decision"] for item in self.refresh_decisions(first[1])})
+                self.assertEqual(self.run_main(*self.base_args(), "--refresh-inventory", "--write-doc", str(extra_doc)),
+                                 first)
+                self.assertEqual([(file.read_bytes(), file.stat().st_mtime_ns) for file in paths], before)
+                self.assertFalse(extra_doc.exists())
+                if decision_kind == "removed-or-reworded-or-ambiguous":
+                    document.write_text(original, encoding="utf-8")
+
+    def test_refresh_invalid_sources_use_validation_messages_before_any_relocation(self) -> None:
+        matrix = self.prepare_refresh()
+        (self.root / MODULE.CONTRACT_DOCUMENTS[1]).write_text(
+            "# Moved\nEvery requirement has evidence.\n", encoding="utf-8")
+        for row_id in ("iss.126", "planned.doc"):
+            for invalid in ([], {}, 17, None, False, "", " "):
+                for aggregate in (False, True):
+                    with self.subTest(row=row_id, source=invalid, aggregate=aggregate):
+                        malformed = copy.deepcopy(matrix)
+                        row_of(malformed, row_id)["source"] = invalid
+                        if aggregate:
+                            row_of(malformed, "iss.126")["requirements"].append("dw.synthetic")
+                        self.write_matrix(malformed)
+                        paths = (self.root / "tools/ci/acceptance_requirements.json", self.matrix_path,
+                                 self.root / "docs/acceptance-matrix.md")
+                        before = [path.read_bytes() for path in paths]
+                        message = f"{row_id}: source must be a non-empty string"
+                        self.assertIn(message, self.errors(malformed))
+                        code, _, err = self.run_main(*self.base_args(), "--refresh-inventory")
+                        self.assertEqual(code, 2, err)
+                        self.assertIn(message, err)
+                        self.assertEqual([path.read_bytes() for path in paths], before)
+
+    def test_refresh_and_validation_refuse_unhashable_status_and_evidence_kind(self) -> None:
+        matrix = self.prepare_refresh()
+        (self.root / MODULE.CONTRACT_DOCUMENTS[1]).write_text(
+            "# Moved\nEvery requirement has evidence.\n", encoding="utf-8")
+        for key in ("status", "kind"):
+            for invalid in ([], {}, 17, None, False):
+                with self.subTest(key=key, value=invalid):
+                    malformed = copy.deepcopy(matrix)
+                    row = row_of(malformed, "iss.126")
+                    (row if key == "status" else row["evidence"][0])[key] = invalid
+                    self.write_matrix(malformed)
+                    paths = (self.root / "tools/ci/acceptance_requirements.json", self.matrix_path,
+                             self.root / "docs/acceptance-matrix.md")
+                    before = [path.read_bytes() for path in paths]
+                    message = "unknown status:" if key == "status" else "unknown evidence kind:"
+                    self.assertErrorContains(malformed, message)
+                    code, _, err = self.run_main(*self.base_args(), "--refresh-inventory")
+                    self.assertEqual(code, 1, err)
+                    self.assertIn(message, err)
+                    self.assertEqual([path.read_bytes() for path in paths], before)
+
+    def test_refresh_ambiguous_and_duplicate_accounting_is_never_guessed(self) -> None:
+        self.prepare_refresh()
+        path = self.root / MODULE.CONTRACT_DOCUMENTS[1]
+        path.write_text("# First\nEvery requirement has evidence.\n\n"
+                        "# Second\nEvery requirement has evidence.\n", encoding="utf-8")
+        code, out, err = self.run_main(*self.base_args(), "--refresh-inventory")
+        self.assertEqual(code, 1, err)
+        self.assertEqual(len(self.refresh_decisions(out)), 3)
+        self.assertEqual(MODULE.load_matrix(self.root / "tools/ci/acceptance_requirements.json"), self.inventory)
+        self.inventory["requirements"].append(dict(self.inventory["requirements"][1], id="ar.duplicate"))
+        self.write_inventory()
+        path.write_text("# Contract\nEvery requirement has evidence.\n\n"
+                        "# Moved\nEvery requirement has evidence.\n", encoding="utf-8")
+        code, out, err = self.run_main(*self.base_args(), "--refresh-inventory")
+        self.assertEqual(code, 1, err)
+        decisions = self.refresh_decisions(out)
+        self.assertEqual(len(decisions), 3)
+        self.assertEqual([item["entry"]["id"] for item in decisions
+                          if item["decision"] == "unmapped-requirement"], ["ar.duplicate"])
+        self.assertEqual([item["entry"]["id"] for item in decisions
+                          if item["decision"] == "removed-or-reworded-or-ambiguous"], ["ar.synthetic"])
+        self.assertEqual([item["entry"]["source"] for item in decisions
+                          if item["decision"] == "unaccounted"], [MODULE.CONTRACT_DOCUMENTS[1] + "#moved"])
+        self.assertEqual(MODULE.load_matrix(self.root / "tools/ci/acceptance_requirements.json"), self.inventory)
+
+    def test_refresh_missing_unreadable_or_partial_contract_never_writes(self) -> None:
+        self.prepare_refresh()
+        path = self.root / MODULE.CONTRACT_DOCUMENTS[1]
+        original = path.read_bytes()
+        before = (self.root / "tools/ci/acceptance_requirements.json").read_bytes()
+        for content in (None, b"# Contract\n\xff"):
+            if content is None:
+                path.unlink()
+            else:
+                path.write_bytes(content)
+            code, _, err = self.run_main(*self.base_args(), "--refresh-inventory")
+            self.assertEqual(code, 2, err)
+            self.assertEqual((self.root / "tools/ci/acceptance_requirements.json").read_bytes(), before)
+        path.write_bytes(original)
+        read = Path.read_text
+        def denied(file: Path, *args: Any, **kwargs: Any) -> str:
+            if file == path:
+                raise PermissionError("contract denied")
+            return read(file, *args, **kwargs)
+        with mock.patch.object(Path, "read_text", denied):
+            code, _, err = self.run_main(*self.base_args(), "--refresh-inventory")
+        self.assertEqual(code, 2, err)
+        self.assertIn("contract denied", err)
+        self.assertEqual((self.root / "tools/ci/acceptance_requirements.json").read_bytes(), before)
+
+    def test_refresh_preserves_unknown_entry_metadata_and_rejects_invalid_row_lists(self) -> None:
+        matrix = self.prepare_refresh()
+        self.inventory["requirements"][1]["review_note"] = "Retained metadata."
+        self.write_inventory()
+        (self.root / MODULE.CONTRACT_DOCUMENTS[1]).write_text(
+            "# Moved\nEvery requirement has evidence.\n", encoding="utf-8")
+        code, _, err = self.run_main(*self.base_args(), "--refresh-inventory")
+        self.assertEqual(code, 0, err)
+        refreshed = MODULE.load_matrix(self.root / "tools/ci/acceptance_requirements.json")
+        self.assertEqual(next(item for item in refreshed["requirements"] if item["id"] == "ar.synthetic")["review_note"],
+                         "Retained metadata.")
+        for rows in (None, [None], [dict(matrix["rows"][0], requirements=None)],
+                     [dict(matrix["rows"][0], requirements=[{}])],
+                     [dict(matrix["rows"][0], id="Invalid ID")],
+                     [matrix["rows"][0], matrix["rows"][0]]):
+            with self.subTest(rows=rows):
+                self.write_matrix(dict(matrix, rows=rows))
+                code, _, err = self.run_main(*self.base_args(), "--refresh-inventory")
+                self.assertEqual(code, 2, err)
+                self.assertIn("valid matrix row", err)
+
+    def test_refresh_malformed_metadata_is_rejected_without_writes(self) -> None:
+        self.prepare_refresh()
+        for mutate in (
+            lambda item: item.update(schema="unknown"),
+            lambda item: item.update(documents=[]),
+            lambda item: item.update(requirements=None),
+            lambda item: item["requirements"].append(None),
+            lambda item: item["requirements"][0].update(quote="absent quote"),
+            lambda item: item["requirements"].append(item["requirements"][0]),
+        ):
+            inventory = copy.deepcopy(self.inventory)
+            mutate(inventory)
+            path = self.root / "tools/ci/acceptance_requirements.json"
+            path.write_text(json.dumps(inventory), encoding="utf-8")
+            before = path.read_bytes()
+            code, _, err = self.run_main(*self.base_args(), "--refresh-inventory")
+            self.assertEqual(code, 2, err)
+            self.assertEqual(path.read_bytes(), before)
+
+    def test_refresh_write_failure_keeps_old_bytes_and_removes_closed_temporary_file(self) -> None:
+        self.prepare_refresh()
+        path = self.root / "tools/ci/acceptance_requirements.json"
+        document = self.root / MODULE.CONTRACT_DOCUMENTS[1]
+        document.write_text("# Moved\nEvery requirement has evidence.\n", encoding="utf-8")
+        before = path.read_bytes()
+        with mock.patch.object(Path, "replace", side_effect=PermissionError("replace denied")):
+            code, _, err = self.run_main(*self.base_args(), "--refresh-inventory")
+        self.assertEqual(code, 2, err)
+        self.assertIn("replace denied", err)
+        self.assertEqual(path.read_bytes(), before)
+        self.assertEqual(list(path.parent.iterdir()), [path])
+
+    def test_refresh_retries_every_partial_replacement_including_windows_locks(self) -> None:
+        for failed_name in ("document", "matrix", "inventory"):
+            with self.subTest(failure=failed_name):
+                self.prepare_refresh()
+                self.write_inventory()
+                (self.root / MODULE.CONTRACT_DOCUMENTS[1]).write_text(
+                    "# Moved\nEvery requirement has evidence.\n", encoding="utf-8")
+                inventory = self.root / "tools/ci/acceptance_requirements.json"
+                doc = self.root / "docs/acceptance-matrix.md"
+                paths = {"document": doc, "matrix": self.matrix_path, "inventory": inventory}
+                before = {key: path.read_bytes() for key, path in paths.items()}
+                replaced = []
+                replace = Path.replace
+                def locked(file: Path, target: Path) -> Path:
+                    if target == paths[failed_name]:
+                        raise PermissionError("destination locked")
+                    replaced.append(target)
+                    return replace(file, target)
+                with mock.patch.object(Path, "replace", locked):
+                    code, _, err = self.run_main(*self.base_args(), "--refresh-inventory")
+                self.assertEqual(code, 2, err)
+                self.assertIn("destination locked", err)
+                self.assertEqual(inventory.read_bytes(), before["inventory"])
+                expected_replaced = {"document": [], "matrix": [doc],
+                                     "inventory": [doc, self.matrix_path]}
+                self.assertEqual(replaced, expected_replaced[failed_name])
+                for name, path in paths.items():
+                    self.assertEqual(path.read_bytes() != before[name], path in replaced)
+                code, _, err = self.run_main(*self.base_args(), "--refresh-inventory",
+                                              "--check-doc", str(doc))
+                self.assertEqual(code, 0, err)
+                matrix = MODULE.load_matrix(self.matrix_path)
+                self.assertEqual(self.errors(matrix), [])
+                self.assertEqual(row_of(matrix, "iss.126")["source"], MODULE.CONTRACT_DOCUMENTS[1] + "#moved")
+                self.assertEqual(doc.read_text(encoding="utf-8"), MODULE.render_doc(matrix))
+                after = [(path.read_bytes(), path.stat().st_mtime_ns) for path in paths.values()]
+                self.assertEqual(self.run_main(*self.base_args(), "--refresh-inventory")[0], 0)
+                self.assertEqual([(path.read_bytes(), path.stat().st_mtime_ns) for path in paths.values()], after)
+                self.assertEqual(set(inventory.parent.iterdir()), {inventory})
+
+    def test_refresh_stages_all_outputs_before_replacement_and_retries_partial_data(self) -> None:
+        create = MODULE.tempfile.NamedTemporaryFile
+        for fail_at in (1, 2, 3, 4):
+            with self.subTest(stage=fail_at):
+                self.prepare_refresh()
+                self.write_inventory()
+                (self.root / MODULE.CONTRACT_DOCUMENTS[1]).write_text(
+                    "# Moved\nEvery requirement has evidence.\n", encoding="utf-8")
+                paths = (self.root / "tools/ci/acceptance_requirements.json", self.matrix_path,
+                         self.root / "docs/acceptance-matrix.md")
+                before = [path.read_bytes() for path in paths]
+                extra_doc = self.tmp / "additional.md"
+                extra_doc.unlink(missing_ok=True)
+                calls = 0
+                def partial_file(*args: Any, **kwargs: Any) -> Any:
+                    nonlocal calls
+                    calls += 1
+                    handle = create(*args, **kwargs)
+                    if calls == fail_at:
+                        def partial(data: bytes) -> None:
+                            handle.file.write(data[:8])
+                            raise OSError("partial staged output")
+                        handle.write = partial
+                    return handle
+                with mock.patch.object(MODULE.tempfile, "NamedTemporaryFile", side_effect=partial_file), \
+                        mock.patch.object(Path, "replace") as replace:
+                    code, _, err = self.run_main(*self.base_args(), "--refresh-inventory",
+                                                  "--write-doc", str(extra_doc))
+                self.assertEqual(code, 2, err)
+                self.assertIn("partial staged output", err)
+                replace.assert_not_called()
+                self.assertEqual([path.read_bytes() for path in paths], before)
+                self.assertFalse(extra_doc.exists())
+                code, _, err = self.run_main(*self.base_args(), "--refresh-inventory", "--write-doc", str(extra_doc))
+                self.assertEqual(code, 0, err)
+                self.assertEqual(extra_doc.read_bytes(), paths[2].read_bytes())
+
+    def test_refresh_refuses_colliding_output_paths_without_writes(self) -> None:
+        self.prepare_refresh()
+        inventory = self.root / "tools/ci/acceptance_requirements.json"
+        doc = self.root / "docs/acceptance-matrix.md"
+        for target in (inventory, self.matrix_path):
+            before = [path.read_bytes() for path in (inventory, self.matrix_path, doc)]
+            code, _, err = self.run_main(*self.base_args(), "--refresh-inventory", "--write-doc", str(target))
+            self.assertEqual(code, 2, err)
+            self.assertIn("output paths must be distinct", err)
+            self.assertEqual([path.read_bytes() for path in (inventory, self.matrix_path, doc)], before)
+        code, _, err = self.run_main(*self.base_args(), "--refresh-inventory", "--write-doc", str(doc))
+        self.assertEqual(code, 0, err)
+
+    def test_refresh_unreadable_output_prevents_every_replacement(self) -> None:
+        self.prepare_refresh()
+        (self.root / MODULE.CONTRACT_DOCUMENTS[1]).write_text(
+            "# Moved\nEvery requirement has evidence.\n", encoding="utf-8")
+        paths = (self.root / "tools/ci/acceptance_requirements.json", self.matrix_path,
+                 self.root / "docs/acceptance-matrix.md")
+        before = [path.read_bytes() for path in paths]
+        read = Path.read_bytes
+        for blocked in paths:
+            with self.subTest(path=blocked):
+                def denied(file: Path) -> bytes:
+                    if file == blocked:
+                        raise PermissionError("output read denied")
+                    return read(file)
+                with mock.patch.object(Path, "read_bytes", denied), mock.patch.object(Path, "replace") as replace:
+                    code, _, err = self.run_main(*self.base_args(), "--refresh-inventory")
+                self.assertEqual(code, 2, err)
+                self.assertIn("output read denied", err)
+                replace.assert_not_called()
+                self.assertEqual([path.read_bytes() for path in paths], before)
+
+    def test_refresh_prepares_optional_doc_and_receipt_before_writes_and_retries(self) -> None:
+        self.prepare_refresh()
+        (self.root / MODULE.CONTRACT_DOCUMENTS[1]).write_text(
+            "# Moved\nEvery requirement has evidence.\n", encoding="utf-8")
+        paths = (self.root / "tools/ci/acceptance_requirements.json", self.matrix_path,
+                 self.root / "docs/acceptance-matrix.md")
+        before = [path.read_bytes() for path in paths]
+        discovery, report = self.execution_inputs()
+        original = discovery.read_bytes()
+        receipt = self.tmp / "receipt.json"
+        extra_doc = self.tmp / "additional.md"
+        args = [*self.base_args(), "--refresh-inventory", "--write-doc", str(extra_doc),
+                "--junit", str(report), "--discovery", str(discovery), "--execution-receipt", str(receipt)]
+        for content in (b"{", b"[]", b'{"kind":"ctestInfo","tests":[]}', b"\xff"):
+            discovery.write_bytes(content)
+            code, _, err = self.run_main(*args)
+            self.assertEqual(code, 2, err)
+            self.assertFalse(receipt.exists())
+            self.assertFalse(extra_doc.exists())
+            self.assertEqual([path.read_bytes() for path in paths], before)
+        discovery.write_bytes(original)
+        replace = Path.replace
+        def locked(file: Path, target: Path) -> Path:
+            if target == self.matrix_path:
+                raise PermissionError("matrix locked")
+            return replace(file, target)
+        with mock.patch.object(Path, "replace", locked):
+            code, _, err = self.run_main(*args)
+        self.assertEqual(code, 2, err)
+        self.assertEqual(paths[0].read_bytes(), before[0])
+        self.assertTrue(receipt.exists())
+        self.assertTrue(extra_doc.exists())
+        code, _, err = self.run_main(*args)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(json.loads(receipt.read_text(encoding="utf-8"))["matrix_sha256"],
+                         MODULE._sha256(self.matrix_path))
+        self.assertEqual(self.errors(MODULE.load_matrix(self.matrix_path)), [])
+        self.assertEqual(extra_doc.read_bytes(), paths[2].read_bytes())
+        for target in (*paths, extra_doc):
+            with self.subTest(collision=target):
+                code, _, err = self.run_main(*args, "--execution-receipt", str(target))
+                self.assertEqual(code, 2, err)
+                self.assertIn("output paths must be distinct", err)
+
+    def test_refresh_partial_write_does_not_publish_partial_inventory(self) -> None:
+        self.prepare_refresh()
+        path = self.root / "tools/ci/acceptance_requirements.json"
+        (self.root / MODULE.CONTRACT_DOCUMENTS[1]).write_text(
+            "# Moved\nEvery requirement has evidence.\n", encoding="utf-8")
+        before = path.read_bytes()
+        create = MODULE.tempfile.NamedTemporaryFile
+        def partial_file(*args: Any, **kwargs: Any) -> Any:
+            handle = create(*args, **kwargs)
+            def partial(data: bytes) -> None:
+                handle.file.write(data[:8])
+                raise OSError("partial write refused")
+            handle.write = partial
+            return handle
+        with mock.patch.object(MODULE.tempfile, "NamedTemporaryFile", side_effect=partial_file):
+            code, _, err = self.run_main(*self.base_args(), "--refresh-inventory")
+        self.assertEqual(code, 2, err)
+        self.assertIn("partial write refused", err)
+        self.assertEqual(path.read_bytes(), before)
+        self.assertEqual(list(path.parent.iterdir()), [path])
+
+    def test_refresh_preserves_file_permissions_and_cleans_readonly_replacement_failure(self) -> None:
+        self.prepare_refresh()
+        path = self.root / "tools/ci/acceptance_requirements.json"
+        path.chmod(0o640)
+        permissions = path.stat().st_mode
+        document = self.root / MODULE.CONTRACT_DOCUMENTS[1]
+        document.write_text("# Moved\nEvery requirement has evidence.\n", encoding="utf-8")
+        code, _, err = self.run_main(*self.base_args(), "--refresh-inventory")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(path.stat().st_mode, permissions)
+        document.write_text("# Moved again\nEvery requirement has evidence.\n", encoding="utf-8")
+        before = path.read_bytes()
+        unlink = Path.unlink
+        denied = []
+        def readonly(file: Path, *args: Any, **kwargs: Any) -> None:
+            if file.parent == path.parent and file != path and not denied:
+                denied.append(file)
+                raise PermissionError("read-only candidate")
+            unlink(file, *args, **kwargs)
+        with mock.patch.object(Path, "replace", side_effect=PermissionError("replace denied")), \
+                mock.patch.object(Path, "unlink", readonly):
+            code, _, err = self.run_main(*self.base_args(), "--refresh-inventory")
+        self.assertEqual(code, 2, err)
+        self.assertTrue(denied)
+        self.assertEqual(path.read_bytes(), before)
+        self.assertEqual(list(path.parent.iterdir()), [path])
+
+    def test_refresh_failed_permission_copy_does_not_replace_inventory(self) -> None:
+        self.prepare_refresh()
+        path = self.root / "tools/ci/acceptance_requirements.json"
+        (self.root / MODULE.CONTRACT_DOCUMENTS[1]).write_text(
+            "# Moved\nEvery requirement has evidence.\n", encoding="utf-8")
+        before = path.read_bytes()
+        with mock.patch.object(Path, "chmod", side_effect=PermissionError("permission copy denied")):
+            code, _, err = self.run_main(*self.base_args(), "--refresh-inventory")
+        self.assertEqual(code, 2, err)
+        self.assertIn("permission copy denied", err)
+        self.assertEqual(path.read_bytes(), before)
+        self.assertEqual(list(path.parent.iterdir()), [path])
+
+    def test_refresh_consistent_crlf_doc_and_failed_doc_replacement(self) -> None:
+        self.prepare_refresh()
+        doc = self.root / "docs/acceptance-matrix.md"
+        doc.write_bytes(doc.read_bytes().replace(b"\n", b"\r\n"))
+        before = doc.read_bytes(), doc.stat().st_mtime_ns
+        code, _, err = self.run_main(*self.base_args(), "--refresh-inventory")
+        self.assertEqual(code, 0, err)
+        self.assertEqual((doc.read_bytes(), doc.stat().st_mtime_ns), before)
+        doc.write_text("Stale generated view.\n", encoding="utf-8")
+        with mock.patch.object(Path, "replace", side_effect=PermissionError("doc replace denied")):
+            code, _, err = self.run_main(*self.base_args(), "--refresh-inventory")
+        self.assertEqual(code, 2, err)
+        self.assertIn("cannot replace output", err)
+        self.assertEqual(doc.read_text(encoding="utf-8"), "Stale generated view.\n")
+
+    def test_unreadable_source_anchor_is_a_validation_error(self) -> None:
+        original = MODULE._read_text
+        def denied(path: Path) -> str:
+            if path == self.root / "docs/d.md":
+                raise PermissionError("source denied")
+            return original(path)
+        with mock.patch.object(MODULE, "_read_text", side_effect=denied):
+            self.assertErrorContains(baseline_matrix(), "source cannot read docs/d.md")
+
+    def test_refresh_audited_historical_exclusion_follows_only_unique_exact_relocation(self) -> None:
+        self.prepare_refresh()
+        audited = MODULE.load_matrix(MODULE.DEFAULT_ROOT / "tools/ci/acceptance_requirements.json")
+        entry = next(item for item in audited["exclusions"] if item["id"] == "ar.history.001")
+        self.inventory["exclusions"].append(entry)
+        self.write_inventory()
+        path = self.root / MODULE.CONTRACT_DOCUMENTS[1]
+        original = path.read_text(encoding="utf-8")
+        heading = "Historical ambient hash portability investigation"
+        path.write_text(original + "\n## " + heading + "\n\n" + entry["text"] + "\n", encoding="utf-8")
+        self.assertEqual(self.run_main(*self.base_args())[0], 0)
+        path.write_text(original + "\n## Historical moved\n\n" + entry["text"] + "\n", encoding="utf-8")
+        code, _, err = self.run_main(*self.base_args(), "--refresh-inventory")
+        self.assertEqual(code, 0, err)
+        refreshed = MODULE.load_matrix(self.root / "tools/ci/acceptance_requirements.json")
+        self.assertEqual(refreshed["exclusions"], [dict(entry, source=MODULE.CONTRACT_DOCUMENTS[1] + "#historical-moved")])
+        self.assertEqual(self.run_main(*self.base_args())[0], 0)
+        for heading, changed_entry, copy_old in (
+            ("Ordinary section", entry, False),
+            ("Historical moved", dict(entry, category="example"), False),
+            ("Historical moved", dict(entry, id="unreviewed.exclusion"), False),
+            ("Historical moved", entry, True),
+        ):
+            with self.subTest(heading=heading, changed_entry=changed_entry, copy_old=copy_old):
+                self.inventory["exclusions"] = [changed_entry]
+                self.write_inventory()
+                text = original + "\n## " + heading + "\n\n" + entry["text"] + "\n"
+                if copy_old:
+                    text += "\n## Historical ambient hash portability investigation\n\n" + entry["text"] + "\n"
+                path.write_text(text, encoding="utf-8")
+                code, out, err = self.run_main(*self.base_args(), "--refresh-inventory")
+                self.assertEqual(code, 1, err)
+                self.assertTrue(self.refresh_decisions(out))
+                self.assertEqual(MODULE.load_matrix(self.root / "tools/ci/acceptance_requirements.json"), self.inventory)
+
+    def test_refresh_reviewed_normative_override_retains_current_behaviour_context(self) -> None:
+        self.prepare_refresh()
+        audited = MODULE.load_matrix(MODULE.DEFAULT_ROOT / "tools/ci/acceptance_requirements.json")
+        entries = [item for item in audited["exclusions"] if item["id"] in
+                   {"dw.tiers.020", "dw.tiers.021", "dw.tiers.022"}]
+        self.inventory["exclusions"] = entries
+        self.write_inventory()
+        path = self.root / MODULE.CONTRACT_DOCUMENTS[0]
+        original = path.read_text(encoding="utf-8")
+        paragraph = " ".join(entry["text"] for entry in entries)
+        path.write_text(original + "\n## Moved tiers\n\n" + paragraph + "\n", encoding="utf-8")
+        code, _, err = self.run_main(*self.base_args(), "--refresh-inventory")
+        self.assertEqual(code, 0, err)
+        refreshed = MODULE.load_matrix(self.root / "tools/ci/acceptance_requirements.json")
+        self.assertEqual({entry["source"] for entry in refreshed["exclusions"]},
+                         {MODULE.CONTRACT_DOCUMENTS[0] + "#moved-tiers"})
+        self.write_inventory()
+        path.write_text(original + "\n## Moved tiers\n\n" + paragraph.replace("Current behaviour:", "Observed behaviour:")
+                        + "\n", encoding="utf-8")
+        code, out, err = self.run_main(*self.base_args(), "--refresh-inventory")
+        self.assertEqual(code, 1, err)
+        self.assertIn("not in a Current behaviour paragraph", err)
+        self.assertTrue(self.refresh_decisions(out))
+        self.assertEqual(MODULE.load_matrix(self.root / "tools/ci/acceptance_requirements.json"), self.inventory)
+
     def test_duplicate_id_is_rejected(self) -> None:
         matrix = baseline_matrix()
         matrix["rows"][1]["id"] = "alpha.covered"
