@@ -440,6 +440,8 @@ bool TcpTransport::PumpRecv() {
             continue;
         }
         if (n == 0) {
+            // recv runs only while the front frame is incomplete (the loop returns as
+            // soon as it is complete), so EOF can discard only a truncated tail.
             Close();
             return true;
         } // graceful close
@@ -766,6 +768,8 @@ bool TcpTransport::PumpRecv() {
             continue;
         }
         if (n == 0) {
+            // recv runs only while the front frame is incomplete (the loop returns as
+            // soon as it is complete), so EOF can discard only a truncated tail.
             Close();
             return true;
         }
