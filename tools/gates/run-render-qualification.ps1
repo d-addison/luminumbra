@@ -143,21 +143,25 @@ foreach ($entry in $DeclareRefresh) { $argv += @("--declare-refresh", $entry) }
 foreach ($cell in $Only) { $argv += @("--only", $cell) }
 if ($DryRun) { $argv += "--dry-run" }
 
+$code = 1
 try {
     $host_record | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $hostTemporary -Encoding UTF8
     Write-Host "[render-qualification] python $($argv -join ' ')"
     & python @argv
     $code = $LASTEXITCODE
+    if ($DryRun) {
+        Write-Host "[render-qualification] dry run: plan only, see qualification-plan.json in $outPath"
+    } else {
+        $qualification = Join-Path $outPath "qualification.json"
+        Write-Host "[render-qualification] qualification.json: $qualification"
+    }
 } finally {
-    if (Test-Path -LiteralPath $hostTemporary) {
-        Remove-Item -LiteralPath $hostTemporary -Force
+    try {
+        if (Test-Path -LiteralPath $hostTemporary) {
+            Remove-Item -LiteralPath $hostTemporary -Force
+        }
+    } finally {
+        # Preserve the runner's status even if reporting or cleanup fails.
+        exit $code
     }
 }
-
-if ($DryRun) {
-    Write-Host "[render-qualification] dry run: plan only, see qualification-plan.json in $outPath"
-} else {
-    $qualification = Join-Path $outPath "qualification.json"
-    Write-Host "[render-qualification] qualification.json: $qualification"
-}
-exit $code

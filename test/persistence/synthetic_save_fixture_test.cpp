@@ -121,7 +121,8 @@ TEST_F(SyntheticSaveFixture, WritesCatalogValidWorld) {
     EXPECT_EQ(report.chunks_written, 24u);
     EXPECT_GT(report.region_files, 0u);
 
-    const auto inspected = Persistence::InspectSavedWorld(root, spec.world_id);
+    const auto inspected = Persistence::InspectSavedWorld(
+        root, fs::path(LUMINUMBRA_SOURCE_ROOT) / "data", spec.world_id);
     EXPECT_EQ(inspected.error, "");
     EXPECT_TRUE(WorldSaveService::validate_save(report.save_dir));
     EXPECT_TRUE(fs::exists(WorldSaveService::world_manifest_path(report.save_dir)));

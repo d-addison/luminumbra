@@ -123,8 +123,11 @@ std::string TerrainPresetContentHash(const nlohmann::json& preset);
 // must be objects, the six terrain noise fields must be numeric and
 // caves_enabled/cave_frequency must be present and typed. On any error the
 // result carries ok=false and human-readable messages; params/extras are only
-// meaningful when ok=true. Absent optional worldgen inputs bind fallback markers;
-// present but unreadable inputs are errors.
+// meaningful when ok=true. Enabled biome tables and structure pools must exist.
+// Runtime callers supply data_root independently of the preset's storage location.
+TerrainPresetLoadResult LoadTerrainPreset(const std::filesystem::path& preset_path,
+                                          const std::filesystem::path& data_root);
+// Convenience for presets in the standard worlds/atlas/presets layout.
 TerrainPresetLoadResult LoadTerrainPreset(const std::filesystem::path& preset_path);
 
 // Explicit CLI preset override, validated against the runtime data root. Failure leaves
@@ -134,16 +137,10 @@ bool LoadTerrainPresetOverride(const std::filesystem::path& preset_path,
                                std::string& json_text,
                                std::string& error);
 
-//   (ADDITIVE in-memory seam — no struct/behavior change). Parses
-// an ALREADY-PARSED preset JSON with an EXPLICIT data root, so a host that holds
-// candidate preset JSON in memory (the create-world live preview) gets identical
-// TerrainGenParams WITHOUT round-tripping through a temp file (the temp-file
-// route resolves the biome/structure table paths against the wrong data root —
-// they are resolved relative to <data_root> here). `data_root` is the absolute
-// path to the `data/` directory (the same root the on-disk loader derives as
-// four parents up from the preset file + "data"). `provenance` only labels the
-// unknown-key warnings. LoadTerrainPreset(path) reads+parses the file and
-// DELEGATES here with the file-derived data root. Identity binds the selected
+// Parses an already-parsed preset with the runtime data directory supplied
+// explicitly. The disk loader delegates here. Enabled dependencies must be
+// readable and valid; disabled features require no files. `provenance` only
+// labels diagnostics. Identity binds the selected
 // biome table and enabled structure placement/piece files through portable paths.
 // The status reader queries links themselves and permits deterministic I/O failure coverage.
 TerrainPresetLoadResult LoadTerrainPresetFromJson(

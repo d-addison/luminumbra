@@ -118,22 +118,25 @@ bool ResolveDependencyManifest(TerrainPresetLoadResult& preset,
                 return false;
             const auto path = data_root / Filesystem::LexicallyNormalPath(relative);
             if (!dependency_exists(path)) {
-                state(logical, "biome-table-absent:legacy-classification");
+                errors.push_back("missing worldgen biome table: " + logical);
+                return false;
             } else {
                 snapshot->biome_table = World::BiomeTable::Load(path, read_file);
                 const auto& table = snapshot->biome_table;
                 if (!errors.empty())
                     return false;
-                state(logical,
-                      table.ok() && !table.empty()
-                          ? "biome-table-accepted"
-                          : "biome-table-rejected/empty:legacy-classification");
+                if (!table.ok() || table.empty()) {
+                    errors.push_back("invalid worldgen biome table: " + logical);
+                    return false;
+                }
+                state(logical, "biome-table-accepted");
             }
         }
         if (preset.params.structures_enabled) {
             const auto structures = data_root / "common/structures";
             if (!dependency_exists(structures)) {
-                state("common/structures", "structures-directory-absent");
+                errors.push_back("missing worldgen structure pools: common/structures");
+                return false;
             } else {
                 if (!std::filesystem::is_directory(structures)) {
                     errors.push_back("unreadable worldgen dependency directory: common/structures");
@@ -144,6 +147,10 @@ bool ResolveDependencyManifest(TerrainPresetLoadResult& preset,
                 for (const auto& type : std::filesystem::directory_iterator(structures)) {
                     if (type.is_directory())
                         type_dirs.push_back(type.path());
+                }
+                if (type_dirs.empty()) {
+                    errors.push_back("missing worldgen structure pools: common/structures");
+                    return false;
                 }
                 std::sort(type_dirs.begin(), type_dirs.end(), [](const auto& a, const auto& b) {
                     return Filesystem::GenericUtf8PathString(a.filename()) <
@@ -166,9 +173,13 @@ bool ResolveDependencyManifest(TerrainPresetLoadResult& preset,
                         errors.push_back("failed to read worldgen structure pool: " + logical);
                         return false;
                     }
+                    if (!pool.ok()) {
+                        errors.push_back("invalid or empty worldgen structure pool: " + logical);
+                        return false;
+                    }
                     if (!errors.empty())
                         return false;
-                    state(logical, pool.ok() ? "pool-accepted" : "pool-rejected/empty");
+                    state(logical, "pool-accepted");
                     snapshot->structure_pools.push_back(std::move(pool));
                 }
             }
@@ -320,9 +331,7 @@ void ParseBiomesBlock(const nlohmann::json& gen_params,
     biomes.enabled = !biomes.table.empty();
     if (biomes.enabled) {
         // The table path is relative to the data/ root, resolved against the
-        // explicit data_root the caller supplied (the on-disk loader derives it
-        // four parents up from the preset; the in-memory seam is handed it
-        // directly so the table resolves correctly without a temp file).
+        // explicit data_root the caller supplied, independently of save storage.
         biomes.resolved_table_path = Filesystem::GenericUtf8PathString(
             Filesystem::LexicallyNormalPath(data_root / Filesystem::PathFromUtf8(biomes.table)));
     }
@@ -385,6 +394,14 @@ std::string TerrainPresetContentHash(const nlohmann::json& preset) {
 }
 
 TerrainPresetLoadResult LoadTerrainPreset(const std::filesystem::path& preset_path) {
+    std::error_code ec;
+    const auto preset_dir = Filesystem::AbsolutePath(preset_path, ec).parent_path();
+    return LoadTerrainPreset(preset_path,
+                             preset_dir.parent_path().parent_path().parent_path() / "data");
+}
+
+TerrainPresetLoadResult LoadTerrainPreset(const std::filesystem::path& preset_path,
+                                          const std::filesystem::path& data_root) {
     TerrainPresetLoadResult result;
 
     std::ifstream file(preset_path);
@@ -403,15 +420,6 @@ TerrainPresetLoadResult LoadTerrainPreset(const std::filesystem::path& preset_pa
         return result;
     }
 
-    // The table/structure paths are relative to the data/ root. Presets live at
-    // <root>/worlds/atlas/presets/<name>.json, so the data root is four parents
-    // up from the preset file. Derive it here and hand it to the in-memory parse
-    // so on-disk loads are byte-identical to before.
-    std::error_code ec;
-    const std::filesystem::path preset_dir =
-        Filesystem::AbsolutePath(preset_path, ec).parent_path();
-    const std::filesystem::path data_root =
-        preset_dir.parent_path().parent_path().parent_path() / "data";
     return LoadTerrainPresetFromJson(
         data, data_root, Filesystem::GenericUtf8PathString(preset_path));
 }

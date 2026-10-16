@@ -1125,9 +1125,9 @@ GameSession::ValidateWorldConfig(const std::string& root_path,
         AddValidationError(result, "missing world preset: " + result.preset_path.string());
     }
 
-    // simulation needs only the preset. Any further runtime assets
-    // are caller-supplied (the client registers shaders/RML/fonts; a headless
-    // host registers none).
+    // Preset loading below validates simulation dependencies. Further runtime
+    // assets are caller-supplied (the client registers shaders/RML/fonts; a
+    // headless host registers none).
     for (const fs::path& relative : required_assets) {
         const fs::path path = root / relative;
         if (!fs::exists(path)) {
@@ -1136,7 +1136,7 @@ GameSession::ValidateWorldConfig(const std::string& root_path,
     }
 
     if (result.ok) {
-        const TerrainPresetLoadResult preset = LoadTerrainPreset(result.preset_path);
+        const TerrainPresetLoadResult preset = LoadTerrainPreset(result.preset_path, root / "data");
         if (!preset.ok) {
             for (const std::string& error : preset.errors) {
                 AddValidationError(result, error);
@@ -1174,6 +1174,8 @@ bool GameSession::CreateWorldInternal(const std::string& name,
     const WorldConfigValidationResult validation =
         ValidateWorldConfig(m_rootPath, worldType, m_requiredClientAssets);
     if (!validation.ok) {
+        m_worldOpenError =
+            validation.errors.empty() ? "Invalid world configuration." : validation.errors.front();
         for (const std::string& error : validation.errors) {
             LUMINUMBRA_CORE_ERROR("World config validation failed: {}", error);
         }
@@ -1233,8 +1235,11 @@ bool GameSession::CreateWorldInternal(const std::string& name,
         preset_to_load = world_preset;
     }
 
-    const TerrainPresetLoadResult preset = LoadTerrainPreset(preset_to_load);
+    const TerrainPresetLoadResult preset =
+        LoadTerrainPreset(preset_to_load, RuntimeRoot(m_rootPath) / "data");
     if (!preset.ok) {
+        m_worldOpenError =
+            preset.errors.empty() ? "World preset is unavailable." : preset.errors.front();
         for (const std::string& error : preset.errors) {
             LUMINUMBRA_CORE_ERROR("World preset load failed: {}", error);
         }
@@ -1345,7 +1350,8 @@ bool GameSession::LoadWorld(const std::string& worldId) {
     if (!IsSimulationTickBoundary())
         return false;
     m_lastLoadedChunkCount = 0;
-    const auto saved = Persistence::InspectSavedWorld(GetSaveRootPath(), worldId);
+    const auto saved = Persistence::InspectSavedWorld(
+        GetSaveRootPath(), RuntimeRoot(m_rootPath) / "data", worldId);
     m_worldOpenError = saved.error;
     if (m_worldOpenError.empty() && saved.requires_active_regions && !m_activeRegionsEnabled)
         m_worldOpenError = "Incompatible configuration: this world requires sim.active_regions.";
@@ -1365,8 +1371,11 @@ bool GameSession::LoadWorld(const std::string& worldId) {
     }
     const std::string worldPath = (GetSaveRootPath() / "worlds/saves" / worldId).string();
     const auto& preset_to_load = saved.preset_path;
-    const TerrainPresetLoadResult preset = LoadTerrainPreset(preset_to_load);
+    const TerrainPresetLoadResult preset =
+        LoadTerrainPreset(preset_to_load, RuntimeRoot(m_rootPath) / "data");
     if (!preset.ok) {
+        m_worldOpenError =
+            preset.errors.empty() ? "World preset is unavailable." : preset.errors.front();
         for (const std::string& error : preset.errors) {
             LUMINUMBRA_CORE_ERROR("World preset load failed: {}", error);
         }

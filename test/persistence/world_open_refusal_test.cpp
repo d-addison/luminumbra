@@ -1,3 +1,4 @@
+#include "../support/WorldgenTestData.h"
 #include <gtest/gtest.h>
 
 #include "luminumbra_common/core/JobSystem.h"
@@ -104,6 +105,7 @@ protected:
         fs::create_directories(root / "worlds/atlas/presets");
         fs::copy_file(fs::path(LUMINUMBRA_SOURCE_ROOT) / "worlds/atlas/presets/default.json",
                       root / "worlds/atlas/presets/default.json");
+        TestSupport::CopyWorldgenTestData(LUMINUMBRA_SOURCE_ROOT, root);
         fs::copy(fs::path(LUMINUMBRA_SOURCE_ROOT) / "worlds/atlas/presets-rev6",
                  root / "worlds/atlas/presets-rev6",
                  fs::copy_options::recursive);

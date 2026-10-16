@@ -2560,10 +2560,11 @@ int main(int argc, char* argv[]) {
         }
         g_uiManager->SetWorldCreationCallback(start_world_creation);
         g_uiManager->SetLoadWorldCallback(start_world_load);
-        g_uiManager->SetSavedWorldList(
-            [save_root = gameSession->GetSaveRootPath()](const std::stop_token& stop) {
-                return Luminumbra::Persistence::EnumerateSavedWorlds(save_root, stop);
-            });
+        g_uiManager->SetSavedWorldList([save_root = gameSession->GetSaveRootPath(),
+                                        data_root = std::filesystem::path(root_path_str) /
+                                                    "data"](const std::stop_token& stop) {
+            return Luminumbra::Persistence::EnumerateSavedWorlds(save_root, data_root, stop);
+        });
         // Seed the create-world customize form from a preset: read generation_params.<path>.
         g_uiManager->SetWorldParamGetter([root_path_str](const std::string& worldType,
                                                          const std::string& path) -> std::string {
@@ -3159,7 +3160,9 @@ int main(int argc, char* argv[]) {
             gameStateManager.GetCurrentState() == GameState::IN_GAME) {
             try {
                 const auto saved = Luminumbra::Persistence::InspectSavedWorld(
-                    gameSession->GetSaveRootPath(), gameSession->GetMetadata().worldId);
+                    gameSession->GetSaveRootPath(),
+                    std::filesystem::path(root_path_str) / "data",
+                    gameSession->GetMetadata().worldId);
                 if (!saved.error.empty())
                     throw std::runtime_error(saved.error);
                 std::ifstream input(saved.preset_path, std::ios::binary);

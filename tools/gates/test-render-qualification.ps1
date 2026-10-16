@@ -71,7 +71,7 @@ function Get-CimInstance {
 
 function Invoke-Wrapper {
     param([hashtable]$Parameters = @{}, [int]$RunnerExitCode = 0,
-        [switch]$UseDefaultExe, [switch]$AsProcess)
+        [switch]$UseDefaultExe, [switch]$AsProcess, [switch]$FailCleanup)
     $wrapperParameters = @{ Exe = $clientRelative; OutDir = $outRelative }
     foreach ($key in $Parameters.Keys) { $wrapperParameters[$key] = $Parameters[$key] }
     if ($UseDefaultExe) { $wrapperParameters.Remove("Exe") }
@@ -85,6 +85,7 @@ function Invoke-Wrapper {
             @{
                 Wrapper = $wrapper; Parameters = $wrapperParameters
                 RecordPath = $recordPath; RunnerExitCode = $RunnerExitCode
+                FailCleanup = [bool]$FailCleanup
             } | Export-Clixml -LiteralPath $childConfiguration -Depth 5
             $output = @(& $powershell -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass `
                 -File $childHarness -Configuration $childConfiguration 2>&1)
@@ -100,7 +101,8 @@ function Invoke-Wrapper {
         $recordedArgv = @((Get-Content -LiteralPath $recordPath -Raw | ConvertFrom-Json).argv)
     }
     return [pscustomobject]@{
-        Code = $code; Message = ($output | Out-String); Invoked = $invoked; Argv = $recordedArgv
+        Code = $code; Message = (($output | ForEach-Object { $_.ToString() }) -join "`n")
+        Invoked = $invoked; Argv = $recordedArgv
     }
 }
 
@@ -137,9 +139,10 @@ try {
     [System.IO.File]::WriteAllText((Join-Path $repo $clientRelative), "fixture")
     [System.IO.File]::WriteAllText((Join-Path (Join-Path $repo $packageRelative) "luminumbra_client_qa_app.exe"), "fixture")
     [System.IO.File]::WriteAllText((Join-Path $repo $manifestRelative), "{}")
-    # Reuse the exact stubs in a clean child process. Dot-sourcing here makes the
-    # wrapper's exit terminate that process; falling through is an explicit error.
-    # Thus deleting the wrapper's final exit cannot pass using a stale LASTEXITCODE.
+    # Reuse the exact stubs in a clean child process, invoking the wrapper like
+    # the acceptance driver. Script exit returns to the caller in both supported
+    # shells. Cleanup clears the stale native status, so only an explicit exit
+    # can publish the captured runner status back to the caller.
     $harness = @'
 param([string]$Configuration)
 $ErrorActionPreference = "Stop"
@@ -147,13 +150,22 @@ Set-StrictMode -Version 2.0
 $config = Import-Clixml -LiteralPath $Configuration
 $recordPath = $config.RecordPath
 $runnerExitCode = $config.RunnerExitCode
+$failCleanup = $config.FailCleanup
 $parameters = $config.Parameters
 '@
     $harness += "`nfunction python {`n" + ${function:python}.ToString() + "`n}`n"
     $harness += "function Get-CimInstance {`n" + ${function:Get-CimInstance}.ToString() + "`n}`n"
     $harness += @'
-. $config.Wrapper @parameters
-throw "wrapper returned without exiting"
+function Remove-Item {
+    param([string]$LiteralPath, [switch]$Force)
+    Microsoft.PowerShell.Management\Remove-Item -LiteralPath $LiteralPath -Force:$Force
+    $global:LASTEXITCODE = $null
+    if ($script:failCleanup) { throw "fixture cleanup failure" }
+}
+$global:LASTEXITCODE = $null
+& $config.Wrapper @parameters
+if ($null -eq $global:LASTEXITCODE) { throw "wrapper returned without exiting" }
+exit $global:LASTEXITCODE
 '@
     [System.IO.File]::WriteAllText($childHarness, $harness)
     # Newer runtimes retain an empty environment entry when passed a null string.
@@ -205,7 +217,7 @@ throw "wrapper returned without exiting"
     $tail = @("--build-manifest", (Join-Path $repo $manifestRelative))
     foreach ($entry in $refresh) { $tail += @("--declare-refresh", $entry) }
     foreach ($cell in $cells) { $tail += @("--only", $cell) }
-    foreach ($exitCode in @(0, 1, 2)) {
+    foreach ($exitCode in @(0, 1, 2, 3, 7)) {
         $parameters = @{
             BuildManifest = $manifestRelative; DeclareRefresh = $refresh; Only = $cells; TimeoutSeconds = 37
         }
@@ -218,15 +230,20 @@ throw "wrapper returned without exiting"
         Assert-Test ($run.Code -eq $exitCode) "runner exit $exitCode is propagated unchanged: $($run.Message)"
         Assert-RunnerArguments $run (Join-Path $repo $clientRelative) -Tail $tail -TimeoutSeconds 37
     }
+    foreach ($exitCode in @(0, 7)) {
+        $run = Invoke-Wrapper -RunnerExitCode $exitCode -AsProcess -FailCleanup
+        Assert-Test ($run.Code -eq $exitCode) "cleanup failure preserves runner exit $exitCode`: $($run.Message)"
+        Assert-RunnerArguments $run (Join-Path $repo $clientRelative)
+    }
     foreach ($package in @($packageRelative, (Join-Path $repo $packageRelative))) {
         $run = Invoke-Wrapper @{ Package = $package } -UseDefaultExe
         Assert-Test ($run.Code -eq 0) "package client runs successfully"
         Assert-RunnerArguments $run (Join-Path (Join-Path $repo $packageRelative) "luminumbra_client_qa_app.exe")
     }
-    $run = Invoke-Wrapper @{ DryRun = $true } -UseDefaultExe
+    $run = Invoke-Wrapper @{ DryRun = $true } -UseDefaultExe -AsProcess
     Assert-Test ($run.Code -eq 0) "default client supports dry run"
     Assert-RunnerArguments $run (Join-Path $repo "build/release/bin/luminumbra_client_app.exe") -Tail @("--dry-run")
-    $run = Invoke-Wrapper @{ Exe = $missingClient; DryRun = $true }
+    $run = Invoke-Wrapper @{ Exe = $missingClient; DryRun = $true } -AsProcess
     Assert-Test ($run.Code -eq 0) "dry run permits a missing explicit client"
     Assert-RunnerArguments $run $missingClient -Tail @("--dry-run")
     Write-Host "RenderQualificationWrapperContract: $checks assertions passed (stub runner; no native client)."
