@@ -7,6 +7,7 @@ import hashlib
 import importlib.util
 import json
 import math
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -402,6 +403,31 @@ class NativeSmoke(unittest.TestCase):
                         "persistence": 0.5, "lacunarity": 2, "height_offset": 0},
             "features": {"caves_enabled": False, "cave_frequency": 0.02}}}
 
+    if os.name == "nt":
+        def test_data_root_preserves_windows_device_prefix(self):
+            with tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                data = root / "data with spaces"
+                data.mkdir()
+                preset = root / "flat.json"
+                preset.write_bytes(contract.canonical(self.flat_preset()))
+                command = [self.cli, "--preset-json", str(preset), "--data-root", str(data),
+                           "--seed", "17", "--kind", "coverage", "--origin-mm", "0", "0",
+                           "--radius-m", "1", "--y-range-m", "0", "100",
+                           "--view-distance-m", "0", "--limit", "64"]
+                baseline = subprocess.run(command, capture_output=True, check=False)
+                self.assertEqual(baseline.returncode, 0, baseline.stderr)
+                contract.validate(contract.loads(baseline.stdout))
+                # Device prefixes take the same UNC-safe helper branch, without
+                # requiring an available network share or administrative rights.
+                native = str(data.resolve())
+                device = ("\\\\?\\UNC\\" + native[2:] if native.startswith("\\\\")
+                          else "\\\\?\\" + native)
+                command[command.index("--data-root") + 1] = device
+                result = subprocess.run(command, capture_output=True, check=False)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout, baseline.stdout)
+
     def test_structure_integers_are_checked_before_loading(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -605,6 +631,31 @@ class NativeSmoke(unittest.TestCase):
                 self.assertEqual(result.returncode, 1, result.stderr)
                 self.assertIn(b"cannot write station discovery stdout", result.stderr)
                 self.assertEqual(preset.read_bytes(), original)
+
+    if os.name == "posix":
+        def test_closed_stdout_pipe_refuses(self):
+            with tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                data = root / "data"
+                data.mkdir()
+                preset = root / "flat.json"
+                preset.write_bytes(contract.canonical(self.flat_preset()))
+                for kind in ("mouth", "arch", "horizon", "coverage"):
+                    with self.subTest(kind=kind):
+                        command = [self.cli, "--preset-json", str(preset), "--data-root", str(data),
+                                   "--seed", "17", "--kind", kind, "--origin-mm", "0", "0",
+                                   "--radius-m", "1", "--y-range-m", "0", "100",
+                                   "--view-distance-m", "0", "--limit", "64"]
+                        read_fd, write_fd = os.pipe()
+                        # Close before launch: no pipe capacity or reader scheduling race.
+                        os.close(read_fd)
+                        with os.fdopen(write_fd, "wb") as output:
+                            # Restore SIGPIPE to default after Python's inherited ignore.
+                            result = subprocess.run(command, stdout=output, stderr=subprocess.PIPE,
+                                                    restore_signals=True, check=False)
+                        self.assertEqual(result.returncode, 1, result.stderr)
+                        self.assertIn(b"station discovery refused: cannot write station discovery stdout",
+                                      result.stderr)
 
     def test_repeat_empty_disabled_world_and_refusals(self):
         with tempfile.TemporaryDirectory() as temporary:

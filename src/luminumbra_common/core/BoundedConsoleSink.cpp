@@ -275,6 +275,13 @@ std::shared_ptr<ConsoleOutput> BoundedConsoleSink::MakeStdoutOutput() {
     }
     return std::make_shared<HandleOutput>(duplicate);
 #else
+    IgnoreDefaultSigpipe();
+    return MakeFileDescriptorOutput(STDOUT_FILENO);
+#endif
+}
+
+#ifndef _WIN32
+void BoundedConsoleSink::IgnoreDefaultSigpipe() {
     // A write to a pipe whose reader has exited raises SIGPIPE, which terminates
     // the process by default. Only the default disposition is changed; a handler
     // the host application installed is left alone.
@@ -282,11 +289,8 @@ std::shared_ptr<ConsoleOutput> BoundedConsoleSink::MakeStdoutOutput() {
     if (sigaction(SIGPIPE, nullptr, &current) == 0 && current.sa_handler == SIG_DFL) {
         std::signal(SIGPIPE, SIG_IGN);
     }
-    return MakeFileDescriptorOutput(STDOUT_FILENO);
-#endif
 }
 
-#ifndef _WIN32
 std::shared_ptr<ConsoleOutput>
 BoundedConsoleSink::MakeFileDescriptorOutput(int fd, FileDescriptorWriteFn write_fn) {
     const int duplicate = ::dup(fd);

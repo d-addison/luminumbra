@@ -53,6 +53,19 @@ TEST(FilesystemPath, RuntimeRootStringKeepsOrdinaryPlatformSpelling) {
 }
 
 #if defined(_WIN32) && !defined(__CYGWIN__)
+TEST(FilesystemPath, UncDataRootNormalizationKeepsDependencyPathsOnTheShare) {
+    for (const fs::path& input : {fs::path(LR"(//server/share/data with spaces/./nested/..)"),
+                                  fs::path(LR"(\\server\share\data with spaces\.\nested\..)"),
+                                  fs::path(LR"(//server/share\data with spaces/nested\..)")}) {
+        const auto root = paths::LexicallyNormalPath(paths::AbsolutePath(input));
+        EXPECT_EQ(root.native(), fs::path(LR"(\\server\share\data with spaces)").native());
+        const auto dependency = root / "common" / "biomes.json";
+        EXPECT_TRUE(paths::IsWindowsUncPath(dependency));
+        EXPECT_EQ(paths::GenericUtf8PathString(dependency),
+                  "//server/share/data with spaces/common/biomes.json");
+    }
+}
+
 TEST(FilesystemPath, UncNormalizationPreservesServerShareAcrossSlashForms) {
     const fs::path expected(LR"(\\server\share\folder with spaces\shader.vert)");
     for (const fs::path& input :

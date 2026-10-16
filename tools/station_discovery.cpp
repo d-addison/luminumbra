@@ -34,6 +34,7 @@
 #include <xmmintrin.h>
 #endif
 
+#include "core/BoundedConsoleSink.h"
 #include "core/FilesystemPath.h"
 #include "core/Log.h"
 #include "systems/SHIELD_WorldSystem.h"
@@ -626,6 +627,10 @@ json Document(const Options& options,
 } // namespace
 
 int main(int argc, char** argv) {
+#if !defined(_WIN32)
+    // Protect stdout and the custom stderr logger before either can write.
+    BoundedConsoleSink::IgnoreDefaultSigpipe();
+#endif
     // Register before Log's lazy initializer, avoiding stdout and log-file side effects.
     auto sink = std::make_shared<spdlog::sinks::stderr_color_sink_mt>();
     sink->set_pattern("%v");
@@ -642,7 +647,8 @@ int main(int argc, char** argv) {
 #endif
         auto options = ParseOptions(argc, argv);
         CheckNumerics();
-        options.data_root = fs::absolute(options.data_root).lexically_normal();
+        options.data_root = Luminumbra::Filesystem::LexicallyNormalPath(
+            Luminumbra::Filesystem::AbsolutePath(options.data_root));
         if (!fs::is_directory(options.data_root)) {
             throw std::runtime_error("data root must be a directory");
         }
