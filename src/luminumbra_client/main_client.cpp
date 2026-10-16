@@ -113,6 +113,7 @@ __declspec(dllexport) extern const int AmdPowerXpressRequestHighPerformance = 1;
 #include "rendering/passes/ParticlePass.h"     //  EmitterDescriptor + accessor type
 #include "rendering/passes/PlantProcgenPass.h" //  render-only procedural plant bake (flag-gated)
 #include "rendering/passes/WaterPass.h"
+#include "ui/GraphicsSettingsState.h"
 #include "ui/Rml_UIManager.h"
 #include "ui/core/UIHotReload.h"
 #include "world/WorldgenOverride.h"
@@ -2005,6 +2006,30 @@ int main(int argc, char* argv[]) {
     LUMINUMBRA_ASSERT(status, "Failed to initialize GLAD!");
 
     g_app.hardwareInfo = Luminumbra::Client::DetectHardwareInfo(window);
+    const bool graphics_first_launch =
+        g_systemConfig.settings_load_report().needs_first_launch_detection;
+    const bool graphics_detect_requested =
+        HasCommandLineFlag(argc, argv, "--detect-and-apply-graphics");
+    if (graphics_first_launch || graphics_detect_requested) {
+        Luminumbra::Client::GraphicsEdit edit;
+        edit.kind = Luminumbra::Client::GraphicsEditKind::DetectApply;
+        luminumbra::core::GraphicsSettings detected;
+        std::string error;
+        if (Luminumbra::Client::ReduceGraphicsSettings(g_systemConfig.user().graphics,
+                                                       edit,
+                                                       g_app.hardwareInfo->inputs,
+                                                       detected,
+                                                       error)) {
+            g_systemConfig.user().graphics = std::move(detected);
+            if (graphics_detect_requested) {
+                LUMINUMBRA_CORE_INFO(
+                    "{} | Recommended and selected: {}",
+                    Luminumbra::Client::GraphicsHardwareSummary(g_app.hardwareInfo->inputs),
+                    luminumbra::core::GraphicsPresetDisplayName(
+                        g_app.hardwareInfo->recommendation.preset));
+            }
+        }
+    }
     if (const auto diagnostics = Luminumbra::Client::FormatHardwareDiagnostics(
             *g_app.hardwareInfo, HasCommandLineFlag(argc, argv, "--hardware-diagnostics"));
         !diagnostics.empty()) {
@@ -2166,11 +2191,14 @@ int main(int argc, char* argv[]) {
         environment_render_scale = std::strtof(value->c_str(), nullptr);
     const auto graphics_session_overrides = Luminumbra::Client::GraphicsSessionOverrides(
         perf_profile, environment_render_scale, volumetric_override);
-    auto graphics_settings_snapshot = g_systemConfig.user().graphics;
+    Luminumbra::Client::GraphicsSettingsState graphics_state(
+        g_systemConfig.user().graphics,
+        graphics_session_overrides,
+        g_systemConfig.settings_load_report().recovery_reason);
     luminumbra::core::ResolvedGraphics resolved_graphics;
     std::string graphics_error;
     bool graphics_ready = luminumbra::core::ResolveGraphics(
-        graphics_settings_snapshot, graphics_session_overrides, resolved_graphics, graphics_error);
+        graphics_state.Settings(), graphics_session_overrides, resolved_graphics, graphics_error);
     if (graphics_ready) {
         graphics_ready = renderPipeline.apply_graphics(resolved_graphics);
         g_app.overlay.volumetric_quality = resolved_graphics.values.volumetric_quality;
@@ -2179,6 +2207,43 @@ int main(int argc, char* argv[]) {
     } else {
         LUMINUMBRA_CORE_ERROR("Invalid graphics configuration: {}", graphics_error);
     }
+    if (graphics_first_launch || graphics_detect_requested)
+        graphics_state.ScheduleSave(glfwGetTime());
+    const auto save_graphics = [&] {
+        const bool saved = g_systemConfig.SaveUserOverlay(
+            luminumbra::core::SystemConfig::DefaultUserOverlayPath());
+        graphics_state.Saved(saved);
+        if (!saved)
+            LUMINUMBRA_CORE_ERROR("Could not save graphics settings; current values remain active");
+        if (g_uiManager) {
+            g_uiManager->RefreshGraphicsSettings();
+            if (!saved)
+                g_uiManager->ShowMessage(graphics_state.Display().status);
+        }
+        return saved;
+    };
+    const auto apply_pending_graphics = [&] {
+        if (!graphics_state.Pending())
+            return true;
+        luminumbra::core::ResolvedGraphics candidate;
+        const bool applied =
+            luminumbra::core::ResolveGraphics(
+                *graphics_state.Pending(), graphics_session_overrides, candidate, graphics_error) &&
+            renderPipeline.apply_graphics(candidate);
+        graphics_state.Applied(applied, glfwGetTime());
+        if (applied) {
+            g_systemConfig.user().graphics = graphics_state.Settings();
+            resolved_graphics = std::move(candidate);
+            g_app.overlay.volumetric_quality = resolved_graphics.values.volumetric_quality;
+            if (g_uiManager)
+                g_uiManager->SetBackdropBlurQuality(resolved_graphics.values.ui_blur);
+        } else {
+            LUMINUMBRA_CORE_ERROR("Graphics apply failed: {}", graphics_error);
+        }
+        if (g_uiManager)
+            g_uiManager->RefreshGraphicsSettings();
+        return applied;
+    };
     // Render-only sky-dome quality: unset -> 2 (quarter per axis), 1 = half,
     // 0 = full. LUMIN_CLOUD_QUALITY overrides the client default.
     // Applied after startup below once the GL targets exist. Render-only.
@@ -2772,6 +2837,31 @@ int main(int argc, char* argv[]) {
         // Wire the RML Settings screen (settings.rml) to the SystemConfig user settings.
         // Live-apply mirrors the  ImGui panel; Save persists the per-user overlay.
         Luminumbra::Client::SettingsBridge sb;
+        sb.GetGraphics = [&] {
+            auto display = graphics_state.Display();
+            const auto& recovery = g_systemConfig.settings_load_report().recovery_reason;
+            if (!recovery.empty())
+                display.status += " | Settings recovery: " + recovery + "; original file preserved";
+            if (g_app.hardwareInfo) {
+                display.hardware =
+                    Luminumbra::Client::GraphicsHardwareSummary(g_app.hardwareInfo->inputs) +
+                    " | Recommended: " +
+                    std::string(luminumbra::core::GraphicsPresetDisplayName(
+                        g_app.hardwareInfo->recommendation.preset));
+            }
+            return display;
+        };
+        sb.EditGraphics = [&](const Luminumbra::Client::GraphicsEdit& edit) {
+            if (edit.kind == Luminumbra::Client::GraphicsEditKind::DetectApply) {
+                g_app.hardwareInfo = Luminumbra::Client::DetectHardwareInfo(window);
+                graphics_state.Stage(edit, g_app.hardwareInfo->inputs);
+            } else {
+                graphics_state.Stage(edit);
+            }
+        };
+        sb.SaveGraphics = [&] {
+            graphics_state.ScheduleSave(glfwGetTime());
+        };
         sb.GetResolution = [&] {
             return g_systemConfig.user().resolution;
         };
@@ -2869,8 +2959,10 @@ int main(int argc, char* argv[]) {
             }
         };
         sb.Save = [&] {
-            return g_systemConfig.SaveUserOverlay(
-                luminumbra::core::SystemConfig::DefaultUserOverlayPath());
+            // Existing explicit saves flush the same transaction and writer as the debounce.
+            if (!apply_pending_graphics())
+                return false;
+            return save_graphics();
         };
         g_uiManager->SetSettingsBridge(std::move(sb));
         // Apply the PERSISTED UI/HUD scale to the freshly-created RmlUi context so the HUD
@@ -3155,28 +3247,9 @@ int main(int argc, char* argv[]) {
     Luminumbra::Client::SteadyFrameTiming frame_timing;
     while (!glfwWindowShouldClose(window)) {
         MainLoopHeartbeat().fetch_add(1, std::memory_order_relaxed);
-        const auto& graphics_settings = g_systemConfig.user().graphics;
-        // Compare only rendering inputs (at most nine scalar overrides), with
-        // no copying, resolving, environment reads or allocation on unchanged frames.
-        if (graphics_settings.base_preset != graphics_settings_snapshot.base_preset ||
-            graphics_settings.preset_revision != graphics_settings_snapshot.preset_revision ||
-            graphics_settings.overrides != graphics_settings_snapshot.overrides) {
-            graphics_settings_snapshot = graphics_settings;
-            if (luminumbra::core::ResolveGraphics(graphics_settings,
-                                                  graphics_session_overrides,
-                                                  resolved_graphics,
-                                                  graphics_error) &&
-                renderPipeline.apply_graphics(resolved_graphics)) {
-                g_app.overlay.volumetric_quality = resolved_graphics.values.volumetric_quality;
-                if (g_uiManager)
-                    g_uiManager->SetBackdropBlurQuality(resolved_graphics.values.ui_blur);
-            } else {
-                LUMINUMBRA_CORE_ERROR("Graphics change could not be applied: {}",
-                                      graphics_error.empty()
-                                          ? "target replacement failed; previous graphics retained"
-                                          : graphics_error);
-            }
-        }
+        apply_pending_graphics();
+        if (graphics_state.SavePending() && graphics_state.SaveDue(glfwGetTime()))
+            save_graphics();
         const auto pacing = luminumbra::core::ResolveFramePacing(
             g_systemConfig.user().vsync, g_systemConfig.user().frame_cap, pacing_overrides);
         // Excluded from work buckets: wait before all frame/CPU/telemetry timers.
@@ -5301,6 +5374,10 @@ int main(int argc, char* argv[]) {
             }
         }
     }
+    // Flush a final queued edit and debounce before releasing the renderer/context.
+    apply_pending_graphics();
+    if (graphics_state.SavePending())
+        save_graphics();
     std::vector<std::string> shutdown_milestones;
     const bool incremental_shutdown_record = scenario_config.hang_watchdog_seconds > 0;
     auto mark_shutdown = [&](const std::string& milestone) {

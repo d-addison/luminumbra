@@ -6,6 +6,7 @@
 #include <RmlUi/Core/Factory.h>
 #include <RmlUi/Debugger.h>
 #include <algorithm>
+#include <charconv>
 #include <chrono>
 #include <cstdio>
 #include <filesystem>
@@ -447,12 +448,17 @@ void Rml_UIManager::LoadDocument(const std::string& rml_path) {
 
     m_activeDocument = rml_path;
     m_selectedWorldId.clear();
+    ApplyBackdropClass(document);
     if (document->GetId() == "world_selection")
         StartWorldScan(document);
     BindEventListeners(document);
     if (document->GetId() == "gallery")
         PopulateGallery(document);
     document->Show();
+    if (m_settingsSaveFailed) {
+        ShowMessage("Settings could not be saved. Reopen settings for details.");
+        m_settingsSaveFailed = false;
+    }
 }
 
 void Rml_UIManager::ShowMessage(const std::string& message) {
@@ -648,7 +654,7 @@ void Rml_UIManager::BindEventListeners(Rml::ElementDocument* document) {
             // Leaving settings persists the live-applied changes (sliders apply on change; the
             // overlay is saved here since there's no explicit apply button in the new design).
             if (document->GetId() == "settings" && m_settingsBridge.Save)
-                m_settingsBridge.Save();
+                m_settingsSaveFailed = !m_settingsBridge.Save();
             this->RequestLoadDocument("main_menu.rml");
         });
     // Pause menu (pause.rml): route resume / quit-to-menu back to main_client (it owns cursor +
@@ -1099,6 +1105,29 @@ void Rml_UIManager::CommitSavePreset(Rml::ElementDocument* document, const std::
 }
 
 // --- settings.rml support ---
+
+void Rml_UIManager::ApplyBackdropClass(Rml::ElementDocument* document) {
+    document->SetClass("backdrop-off", m_backdropBlur.radius(1.0f) == 0.0f);
+    document->SetClass("backdrop-half", m_backdropBlur.radius(1.0f) == 0.5f);
+}
+
+void Rml_UIManager::SetBackdropBlurQuality(luminumbra::core::UiBlurQuality quality) {
+    m_backdropBlur.set(quality);
+    if (m_context) {
+        for (int i = 0; i < m_context->GetNumDocuments(); ++i)
+            ApplyBackdropClass(m_context->GetDocument(i));
+    }
+}
+
+void Rml_UIManager::RefreshGraphicsSettings() {
+    if (m_context) {
+        for (int i = 0; i < m_context->GetNumDocuments(); ++i) {
+            auto* document = m_context->GetDocument(i);
+            if (document->GetId() == "settings")
+                PopulateGraphicsForm(document);
+        }
+    }
+}
 namespace {
 
 // Set a form control's value (works for <select>, <input type=range>, etc.).
@@ -1203,6 +1232,7 @@ void Rml_UIManager::PopulateSettingsForm(Rml::ElementDocument* document) {
     if (!document)
         return;
     const SettingsBridge& b = m_settingsBridge;
+    PopulateGraphicsForm(document);
 
     // Video
     if (b.GetResolution) {
@@ -1291,6 +1321,60 @@ void Rml_UIManager::PopulateSettingsForm(Rml::ElementDocument* document) {
             }
         }
     }
+}
+
+void Rml_UIManager::PopulateGraphicsForm(Rml::ElementDocument* document) {
+    if (m_populatingGraphics || !m_settingsBridge.GetGraphics)
+        return;
+    m_populatingGraphics = true;
+    const auto display = m_settingsBridge.GetGraphics();
+    const auto& values = display.effective.values;
+    // Hardware identity and error text are data, never authored markup.
+    SetValueLabel(
+        document, "graphics_state", Rml::StringUtilities::EncodeRml(display.preset_label));
+    SetValueLabel(document, "graphics_hardware", Rml::StringUtilities::EncodeRml(display.hardware));
+    SetValueLabel(document, "graphics_status", Rml::StringUtilities::EncodeRml(display.status));
+    SetControlValue(
+        document->GetElementById("graphics_preset"),
+        std::string(luminumbra::core::GraphicsPresetName(display.effective.base_preset)));
+    const auto numeric = [&](const char* key, double value) {
+        const std::string id = std::string("graphics_") + key;
+        // Validated values are at most 3000; 32 bytes covers fixed-point text and sign.
+        char buffer[32];
+        const auto formatted =
+            std::to_chars(buffer, buffer + sizeof(buffer), value, std::chars_format::fixed, 2);
+        const std::string text(buffer, formatted.ptr);
+        SetControlValue(document->GetElementById(id), text);
+        SetValueLabel(document, id + "_value", text);
+    };
+    numeric("render_scale", values.render_scale);
+    numeric("grass_density", values.grass_density);
+    numeric("grass_fade_start_m", values.grass_fade_start_m);
+    numeric("grass_fade_end_m", values.grass_fade_end_m);
+    numeric("far_terrain_radius_m", values.far_terrain_radius_m);
+    SetControlValue(document->GetElementById("graphics_shadow_resolution"),
+                    std::to_string(values.shadow_resolution));
+    SetControlValue(document->GetElementById("graphics_volumetric_quality"),
+                    std::to_string(values.volumetric_quality));
+    SetControlValue(document->GetElementById("graphics_grass_enabled"),
+                    values.grass_enabled ? "on" : "off");
+    SetControlValue(document->GetElementById("graphics_ui_blur"),
+                    values.ui_blur == luminumbra::core::UiBlurQuality::Off    ? "off"
+                    : values.ui_blur == luminumbra::core::UiBlurQuality::Half ? "half"
+                                                                              : "full");
+    Rml::ElementList controls;
+    document->GetElementsByClassName(controls, "graphics-control");
+    for (auto* control : controls) {
+        const auto key = control->GetAttribute<Rml::String>("data-key", "");
+        const bool session = display.effective.session_overrides.contains(key);
+        if (session)
+            control->SetAttribute("disabled", "");
+        else
+            control->RemoveAttribute("disabled");
+        if (auto* label = document->GetElementById("graphics_" + key + "_session"))
+            label->SetInnerRML(session ? " (session override)" : "");
+    }
+    m_populatingGraphics = false;
 }
 
 void Rml_UIManager::ApplySettingFromElement(Rml::Element* element) {
@@ -1388,6 +1472,70 @@ void Rml_UIManager::BindSettingsListeners(Rml::ElementDocument* document) {
 
     // Seed widgets from the current settings.
     PopulateSettingsForm(document);
+
+    const auto edit_graphics = [this, document](const GraphicsEdit& edit) {
+        if (m_populatingGraphics)
+            return;
+        if (m_settingsBridge.EditGraphics)
+            m_settingsBridge.EditGraphics(edit);
+        PopulateGraphicsForm(document);
+    };
+    if (auto* save = document->GetElementById("graphics_retry_save")) {
+        AddClickSoundListener(save, [this](Rml::Event&) {
+            if (m_settingsBridge.SaveGraphics)
+                m_settingsBridge.SaveGraphics();
+            RefreshGraphicsSettings();
+        });
+    }
+    if (auto* preset = document->GetElementById("graphics_preset")) {
+        preset->AddEventListener(
+            "change", new LambdaEventListener([edit_graphics](Rml::Event& event) {
+                GraphicsEdit edit;
+                edit.kind = GraphicsEditKind::Preset;
+                if (luminumbra::core::ParseGraphicsPreset(
+                        ReadFormControlValue(event.GetTargetElement(), ""), edit.preset))
+                    edit_graphics(edit);
+            }));
+    }
+    for (const auto& [id, kind] : {std::pair{"graphics_reset", GraphicsEditKind::Reset},
+                                   std::pair{"graphics_detect", GraphicsEditKind::DetectApply}}) {
+        if (auto* button = document->GetElementById(id)) {
+            AddClickSoundListener(button, [edit_graphics, kind](Rml::Event&) {
+                GraphicsEdit edit;
+                edit.kind = kind;
+                edit_graphics(edit);
+            });
+        }
+    }
+    Rml::ElementList graphics_controls;
+    document->GetElementsByClassName(graphics_controls, "graphics-control");
+    for (auto* control : graphics_controls) {
+        control->AddEventListener(
+            "change", new LambdaEventListener([edit_graphics](Rml::Event& event) {
+                auto* target = event.GetTargetElement();
+                if (target->HasAttribute("disabled"))
+                    return;
+                GraphicsEdit edit;
+                edit.kind = GraphicsEditKind::Override;
+                edit.key = target->GetAttribute<Rml::String>("data-key", "");
+                const auto text = ReadFormControlValue(target, "");
+                if (edit.key == "ui_blur") {
+                    edit.value = text;
+                } else if (edit.key == "grass_enabled") {
+                    if (text != "on" && text != "off")
+                        return;
+                    edit.value = text == "on";
+                } else {
+                    double number = 0.0;
+                    const auto parsed =
+                        std::from_chars(text.data(), text.data() + text.size(), number);
+                    if (parsed.ec != std::errc{} || parsed.ptr != text.data() + text.size())
+                        return;
+                    edit.value = number;
+                }
+                edit_graphics(edit);
+            }));
+    }
 
     // Live-apply every control on "change" (sliders, selects).
     static const char* kControlIds[] = {

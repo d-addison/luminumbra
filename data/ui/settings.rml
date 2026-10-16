@@ -128,6 +128,81 @@
                     </div>
                 </div>
 
+                <div class="graphics-section settings-section">
+                    <h2 class="settings-heading">graphics</h2>
+                    <div id="graphics_state"></div>
+                    <div class="form-group settings-row">
+                        <label for="graphics_preset">base preset</label>
+                        <select id="graphics_preset" class="form-control">
+                            <option value="low">Low</option>
+                            <option value="medium">Medium</option>
+                            <option value="high">High</option>
+                            <option value="ultra">Ultra</option>
+                        </select>
+                    </div>
+                    <button id="graphics_reset">Reset overrides</button>
+                    <button id="graphics_detect">Detect &amp; Apply</button>
+                    <div id="graphics_hardware"></div>
+                    <div id="graphics_status"></div>
+                    <div class="settings-columns">
+                        <div class="settings-column">
+                            <div class="form-group settings-row">
+                                <label for="graphics_render_scale">render scale <span id="graphics_render_scale_value" class="settings-value"></span><span id="graphics_render_scale_session"></span></label>
+                                <input type="range" id="graphics_render_scale" data-key="render_scale" min="0.5" max="1" step="0.01" class="form-control settings-slider graphics-control" />
+                            </div>
+                            <div class="form-group settings-row">
+                                <label for="graphics_grass_density">grass density <span id="graphics_grass_density_value" class="settings-value"></span><span id="graphics_grass_density_session"></span></label>
+                                <input type="range" id="graphics_grass_density" data-key="grass_density" min="0.1" max="2" step="0.01" class="form-control settings-slider graphics-control" />
+                            </div>
+                            <div class="form-group settings-row">
+                                <label for="graphics_grass_fade_start_m">grass fade start (m) <span id="graphics_grass_fade_start_m_value" class="settings-value"></span><span id="graphics_grass_fade_start_m_session"></span></label>
+                                <input type="range" id="graphics_grass_fade_start_m" data-key="grass_fade_start_m" min="0" max="160" step="1" class="form-control settings-slider graphics-control" />
+                            </div>
+                            <div class="form-group settings-row">
+                                <label for="graphics_grass_fade_end_m">grass fade end (m) <span id="graphics_grass_fade_end_m_value" class="settings-value"></span><span id="graphics_grass_fade_end_m_session"></span></label>
+                                <input type="range" id="graphics_grass_fade_end_m" data-key="grass_fade_end_m" min="1" max="160" step="1" class="form-control settings-slider graphics-control" />
+                            </div>
+                            <div class="form-group settings-row">
+                                <label for="graphics_far_terrain_radius_m">far terrain distance (m) <span id="graphics_far_terrain_radius_m_value" class="settings-value"></span><span id="graphics_far_terrain_radius_m_session"></span></label>
+                                <input type="range" id="graphics_far_terrain_radius_m" data-key="far_terrain_radius_m" min="768" max="3000" step="1" class="form-control settings-slider graphics-control" />
+                            </div>
+                        </div>
+                        <div class="settings-column">
+                            <div class="form-group settings-row">
+                                <label for="graphics_grass_enabled">grass<span id="graphics_grass_enabled_session"></span></label>
+                                <select id="graphics_grass_enabled" data-key="grass_enabled" class="form-control graphics-control">
+                                    <option value="on">On</option>
+                                    <option value="off">Off</option>
+                                </select>
+                            </div>
+                            <div class="form-group settings-row">
+                                <label for="graphics_shadow_resolution">shadow resolution<span id="graphics_shadow_resolution_session"></span></label>
+                                <select id="graphics_shadow_resolution" data-key="shadow_resolution" class="form-control graphics-control">
+                                    <option value="1024">1024</option>
+                                    <option value="1536">1536</option>
+                                    <option value="2048">2048</option>
+                                </select>
+                            </div>
+                            <div class="form-group settings-row">
+                                <label for="graphics_volumetric_quality">froxel volumetrics<span id="graphics_volumetric_quality_session"></span></label>
+                                <select id="graphics_volumetric_quality" data-key="volumetric_quality" class="form-control graphics-control">
+                                    <option value="0">Off</option>
+                                    <option value="1">On</option>
+                                </select>
+                            </div>
+                            <div class="form-group settings-row">
+                                <label for="graphics_ui_blur">UI backdrop blur<span id="graphics_ui_blur_session"></span></label>
+                                <select id="graphics_ui_blur" data-key="ui_blur" class="form-control graphics-control">
+                                    <option value="off">Off</option>
+                                    <option value="half">Half</option>
+                                    <option value="full">Full</option>
+                                </select>
+                            </div>
+                        </div>
+                    </div>
+                    <button id="graphics_retry_save">Save graphics</button>
+                </div>
+
                 <!-- Back link (settings apply live; apply button kept hidden for C++). -->
                 <span id="back_btn" class="back-link">&#8249; back</span>
                 <button id="apply_settings_btn" class="btn hidden">

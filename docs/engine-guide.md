@@ -560,6 +560,21 @@ are refused so the original file is never overwritten. Locations are
 `%APPDATA%/Luminumbra/settings.json`, `$XDG_CONFIG_HOME/luminumbra/settings.json`,
 or `$HOME/.config/luminumbra/settings.json`.
 
+Settings → Graphics offers Low, Medium, High and Ultra, with Custom displayed when
+overrides differ from the retained base. Reset overrides restores that base;
+selecting a preset clears overrides. Controls show session-only CLI/environment
+values and identify and disable those overridden controls. They never save those
+temporary values. Graphics edits apply together on the render thread, invalidate
+temporal history, and save after a 500 ms debounce. Save failures remain visible;
+Save graphics retries, and leaving settings or exiting flushes pending changes.
+
+Detect & Apply recollects the active GPU, logical CPU threads and available
+dedicated VRAM, displays the recommendation, and applies it with overrides cleared.
+`--detect-and-apply-graphics` performs the same explicit action at startup. Only
+a first launch automatically selects and saves a recommendation. Existing and
+migrated selections remain intact across GPU/driver changes. Recovery continues
+to protect malformed or unsupported overlays from writes, including explicit saves.
+
 Replication defaults to acknowledged deltas and radius-3 chunk AOI with a 16,000 mm
 chunk edge. Millimeter AOI is an alternative: disable chunk AOI before selecting it.
 Locomotion defaults use separation radius 2 m/strength 0.6, flock radius 12 m,

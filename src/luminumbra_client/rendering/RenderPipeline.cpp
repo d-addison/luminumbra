@@ -3746,6 +3746,7 @@ bool RenderPipeline::resize_graphics_targets(float scale, u32 shadow_resolution)
 
 bool RenderPipeline::apply_graphics(const luminumbra::core::ResolvedGraphics& resolved) {
     const auto config = GraphicsRuntimeValues(resolved);
+    const auto previous = graphics_runtime_config();
     if (!resize_graphics_targets(config.render_scale, static_cast<u32>(config.shadow_resolution)))
         return false;
     m_foliage_pass->set_enabled(config.grass_enabled);
@@ -3754,6 +3755,12 @@ bool RenderPipeline::apply_graphics(const luminumbra::core::ResolvedGraphics& re
     m_farlod->set_horizon(config.far_radius_m, config.far_outer_clip_m);
     set_volumetric_quality(config.volumetric_quality);
     m_ui_blur = config.ui_blur;
+    // Scale changes already reset history during target publication. Other presentation
+    // changes also invalidate the accumulated image, even with unchanged target extents.
+    if (config != previous && config.render_scale == previous.render_scale) {
+        m_taau_pass->invalidate_history();
+        m_frustumCache.valid = false;
+    }
     return true;
 }
 

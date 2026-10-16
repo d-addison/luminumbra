@@ -1,6 +1,7 @@
 #pragma once
 
 #include "BackdropBlurQuality.h"
+#include "GraphicsSettingsState.h"
 
 #include "Rml_Interfaces.h"         // The one true source for interface definitions
 #include "gl3/RmlUi_Renderer_GL3.h" // RmlUi 6.1 reference backend: real blur/box-shadow/layers
@@ -61,6 +62,10 @@ using PauseActionCallback = std::function<void(const std::string&)>;
 // pushes live changes via the setters, and persists via Save. Every field is optional —
 // any null callback is simply skipped, so the screen degrades gracefully if unwired.
 struct SettingsBridge {
+    // Graphics requests are queued by the host and applied together on the render thread.
+    std::function<GraphicsSettingsDisplay()> GetGraphics;
+    std::function<void(const GraphicsEdit&)> EditGraphics;
+    std::function<void()> SaveGraphics;
     // Video
     std::function<std::string()> GetResolution; // "" = native/default, else "WxH"
     std::function<void(const std::string&)> SetResolution;
@@ -93,9 +98,8 @@ struct SettingsBridge {
 
 class Rml_UIManager {
 public:
-    void SetBackdropBlurQuality(luminumbra::core::UiBlurQuality quality) {
-        m_backdropBlur.set(quality);
-    }
+    void SetBackdropBlurQuality(luminumbra::core::UiBlurQuality quality);
+    void RefreshGraphicsSettings();
     const BackdropBlurQuality& GetBackdropBlurQuality() const {
         return m_backdropBlur;
     }
@@ -229,6 +233,8 @@ private:
     // each thumbnail loaded from data/ui/captures/cap_<N>.tga written at shutter time.
     void PopulateGallery(Rml::ElementDocument* document);
     void PopulateSettingsForm(Rml::ElementDocument* document);
+    void PopulateGraphicsForm(Rml::ElementDocument* document);
+    void ApplyBackdropClass(Rml::ElementDocument* document);
     void ApplySettingFromElement(Rml::Element* element);
     void BindSettingsListeners(Rml::ElementDocument* document);
 
@@ -272,6 +278,8 @@ private:
     WorldPresetRenamer m_worldPresetRenamer;
     LoadWorldCallback m_loadWorldCallback;
     SettingsBridge m_settingsBridge;
+    bool m_populatingGraphics = false;
+    bool m_settingsSaveFailed = false;
     PauseActionCallback m_pauseActionCallback;
 
     std::string m_documentToLoad;
