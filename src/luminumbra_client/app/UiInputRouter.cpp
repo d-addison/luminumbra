@@ -41,8 +41,10 @@ KeyRoute UiInputRouter::Key(int key, int action, bool console_toggle, bool devel
         return KeyRoute::Ignore;
     }
     const bool printable = (key >= 32 && key <= 162) || (key >= 320 && key <= 334);
-    if (m_ownership.rml_text_input && Owner() == InputOwner::RmlUi && printable)
-        return KeyRoute::RmlUi;
+    const bool text_capture = m_ownership.imgui_text_input || m_ownership.rml_text_input;
+    // ImGui already receives key callbacks; RmlUi needs an explicit route for typing.
+    if (text_capture && printable)
+        return Owner() == InputOwner::RmlUi ? KeyRoute::RmlUi : KeyRoute::Ignore;
     if (console_toggle) {
         // GLFW sends character callbacks after key callbacks, including on repeat.
         m_suppressCharacter = true;
@@ -53,8 +55,7 @@ KeyRoute UiInputRouter::Key(int key, int action, bool console_toggle, bool devel
     if (action == 1 && key == 256 && (Owner() == InputOwner::Developer || m_ownership.rml_debugger))
         return KeyRoute::DeveloperEscape;
     // UI ownership blocks gameplay, but resolved developer bindings remain usable.
-    // Text entry blocks actions for every key, including function keys.
-    const bool text_capture = m_ownership.imgui_text_input || m_ownership.rml_text_input;
+    // Text entry blocks other actions for every key, including function keys.
     if (action == 1 && developer_shortcut && !text_capture &&
         (Owner() != InputOwner::Gameplay || !m_quarantined.contains(key))) {
         m_suppressCharacter = true;

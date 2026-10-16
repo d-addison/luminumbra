@@ -103,8 +103,8 @@ Focused RmlUi controls retain ownership when developer interaction closes, and
 printable console bindings do not steal text-input characters. Resolved developer
 actions and panel bindings, including bindings on non-function keys, remain usable
 while a panel owns input. Focused console/ImGui text entry and RmlUi text fields
-block developer actions, including function keys. Passive widgets never acquire
-input ownership.
+block developer actions, including function keys, except for a non-printable
+console toggle binding such as F1. Passive widgets never acquire input ownership.
 
 Ownership updates within the event batch, clears pending gameplay edges and
 quarantines held keys until release. Cursor mode follows remaining interactions;

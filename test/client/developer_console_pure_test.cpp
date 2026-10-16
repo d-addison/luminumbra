@@ -1103,6 +1103,75 @@ TEST(DeveloperRouting, CallbackSequencePreservesPrintableRmlTextAndSuppressesTog
     EXPECT_EQ(router.Key(290, 1, true, true), KeyRoute::ConsoleToggle); // F1 still available
 }
 
+TEST(DeveloperRouting, PrintableTogglePreservesImGuiAndRmlTextEntry) {
+    // ImGui panel, console input, and RmlUi field.
+    for (const int text_owner : {0, 1, 2}) {
+        for (const int key : {96, 75, 320}) {
+            UiInputRouter router;
+            auto state = World();
+            state.interactive_panel = text_owner == 0;
+            state.console_open = text_owner == 1;
+            state.imgui_text_input = text_owner != 2;
+            state.rml_text_input = text_owner == 2;
+            state.rml_interaction = text_owner == 2;
+            router.SetOwnership(state);
+            const auto route = text_owner == 2 ? KeyRoute::RmlUi : KeyRoute::Ignore;
+            const auto owner = text_owner == 2 ? InputOwner::RmlUi : InputOwner::Developer;
+            const unsigned int character = key == 96 ? '`' : (key == 75 ? 'k' : '0');
+            EXPECT_EQ(router.Key(key, 1, true, true), route);
+            router.SetOwnership(state); // Character callbacks refresh ownership too.
+            EXPECT_EQ(router.Character(character), owner);
+            EXPECT_EQ(router.Key(key, 2, true, false), route);
+            EXPECT_EQ(router.Character(character), owner);
+            EXPECT_EQ(router.Key(key, 0, false, false), KeyRoute::Ignore);
+            EXPECT_EQ(router.Key(key, 1, true, true), route);
+            EXPECT_EQ(router.Character(character), owner);
+        }
+    }
+}
+
+TEST(DeveloperRouting, PrintableToggleOutsideTextEntryStillTogglesAndSuppressesCharacters) {
+    for (const int ui_owner : {0, 1, 2}) {
+        UiInputRouter router;
+        auto state = World();
+        state.interactive_panel = ui_owner == 1;
+        state.rml_interaction = ui_owner == 2;
+        router.SetOwnership(state);
+        EXPECT_EQ(router.Key(96, 1, true, true), KeyRoute::ConsoleToggle);
+        state.console_open = true;
+        state.imgui_text_input = true;
+        router.SetOwnership(state);
+        EXPECT_EQ(router.Character('`'), InputOwner::Unfocused);
+        // A consumed press stays consumed after text ownership or modifiers change.
+        EXPECT_EQ(router.Key(96, 2, false, false), KeyRoute::Ignore);
+        EXPECT_EQ(router.Character('`'), InputOwner::Unfocused);
+        router.Key(96, 0, false, false);
+        EXPECT_EQ(router.Key(96, 1, true, true), KeyRoute::Ignore);
+        EXPECT_EQ(router.Character('`'), InputOwner::Developer);
+    }
+}
+
+TEST(DeveloperRouting, FunctionKeyToggleRemainsAvailableDuringImGuiAndRmlTextEntry) {
+    for (const bool rml_text_input : {false, true}) {
+        UiInputRouter router;
+        auto state = World();
+        state.imgui_text_input = !rml_text_input;
+        state.rml_text_input = rml_text_input;
+        state.rml_interaction = rml_text_input;
+        router.SetOwnership(state);
+        EXPECT_EQ(router.Key(290, 1, true, true), KeyRoute::ConsoleToggle); // F1
+        EXPECT_EQ(router.Key(290, 2, true, true), KeyRoute::Ignore);
+        router.Key(290, 0, false, false);
+        state.console_open = true;
+        router.SetOwnership(state);
+        EXPECT_EQ(router.Key(256, 1, false, false), KeyRoute::DeveloperEscape);
+        state.binding_capture = true;
+        router.SetOwnership(state);
+        EXPECT_EQ(router.Key(96, 1, true, true), KeyRoute::Capture);
+        EXPECT_EQ(router.Key(290, 1, true, true), KeyRoute::Capture);
+    }
+}
+
 void ExpectPanelShortcut(DeveloperConsole& console, UiInputRouter& router, const char* id) {
     const auto chord = console.Bindings().Get(id);
     ASSERT_TRUE(chord.has_value());
