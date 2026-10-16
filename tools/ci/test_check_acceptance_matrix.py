@@ -40,6 +40,29 @@ def repository_index() -> Any:
     return MODULE.index_tests(MODULE.DEFAULT_ROOT)
 
 
+@contextlib.contextmanager
+def immutable_repository_reads() -> Any:
+    # These mutation sweeps alter only in-memory JSON. Cache immutable filesystem
+    # answers (at most 256 per operation) for the sweep, then discard them before
+    # any other test runs.
+    with contextlib.ExitStack() as stack:
+        for name in ("_read_text", "_path_problem", "load_required_ids"):
+            cached = lru_cache(maxsize=256)(getattr(MODULE, name))
+            stack.enter_context(mock.patch.object(MODULE, name, cached))
+        yield
+
+
+def document_read_count(read: Any, document: Path) -> int:
+    identity = document.resolve()
+    return sum(Path(call.args[0]).resolve() == identity for call in read.call_args_list)
+
+
+@lru_cache(maxsize=1)
+def repository_paths() -> tuple[str, ...]:
+    # All partitions use the same immutable discovery, including untracked files.
+    return tuple(PUBLIC_TREE.tracked_paths(MODULE.DEFAULT_ROOT))
+
+
 TEST_CMAKE = """add_test(NAME AlphaContract COMMAND alpha)
 add_test(
     NAME
@@ -314,11 +337,54 @@ class AcceptanceMatrixTests(unittest.TestCase):
             row["source"] = "docs/d.md#" + anchor
         with mock.patch.object(MODULE, "_read_text", wraps=MODULE._read_text) as read:
             self.assertEqual(self.errors(matrix), [])
-            self.assertEqual(sum(call.args[0] == doc for call in read.call_args_list), 1)
+            self.assertEqual(document_read_count(read, doc), 1)
         doc.write_text("# Changed\n", encoding="utf-8")
         self.assertErrorContains(matrix, "source anchor not found: docs/d.md#first")
         doc.unlink()
         self.assertErrorContains(matrix, "source file not found: docs/d.md")
+
+    def test_document_read_counts_accept_platform_root_spellings(self) -> None:
+        root = self.root.resolve()
+        resolve = Path.resolve
+        # Model the resolved-root boundary on any host, without needing a macOS
+        # temporary-directory alias or Windows directory-link privileges.
+        spellings = (
+            (Path("/var/folders/fixture/repo"), Path("/private/var/folders/fixture/repo")),
+            (Path(r"c:\FIXTUR~1\repo"), Path("C:/Fixture Directory/repo")),
+        )
+        for original, canonical in spellings:
+            with self.subTest(original=original, canonical=canonical):
+                aliases = {alias / suffix: root / suffix
+                           for alias in (original, canonical)
+                           for suffix in (Path("."), Path("docs/d.md"))}
+
+                def resolve_alias(path: Path, *args: Any, **kwargs: Any) -> Path:
+                    return resolve(aliases.get(path, path), *args, **kwargs)
+
+                with mock.patch.object(Path, "resolve", resolve_alias), \
+                        mock.patch.object(MODULE, "_read_text", wraps=MODULE._read_text) as read:
+                    self.assertEqual(MODULE.validate(baseline_matrix(), self.index, original, False), [])
+                    self.assertEqual(document_read_count(read, original / "docs/d.md"), 1)
+                    self.assertEqual(document_read_count(read, canonical / "docs/d.md"), 1)
+                    self.assertEqual(sum(call.args[0] == root / "docs/d.md"
+                                         for call in read.call_args_list), 1)
+
+    def test_immutable_read_cache_is_discarded_after_each_sweep(self) -> None:
+        doc = self.root / "docs/d.md"
+        with mock.patch.object(MODULE, "_read_text", wraps=MODULE._read_text) as read:
+            with immutable_repository_reads():
+                for _ in range(3):
+                    self.assertEqual(MODULE._read_text(doc), "# Doc\n\n## Section\n")
+                    self.assertIsNone(MODULE._path_problem(self.root, "docs/d.md", True))
+                self.assertEqual(read.call_count, 1)
+            doc.write_text("# Changed\n", encoding="utf-8")
+            with immutable_repository_reads():
+                self.assertEqual(MODULE._read_text(doc), "# Changed\n")
+                self.assertEqual(read.call_count, 2)
+            doc.unlink()
+            with immutable_repository_reads():
+                self.assertEqual(MODULE._path_problem(self.root, "docs/d.md", True),
+                                 "file not found: docs/d.md")
 
     def test_execution_workflow_uses_the_native_producer_condition(self) -> None:
         workflow = (MODULE.DEFAULT_ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
@@ -417,6 +483,7 @@ class AcceptanceMatrixTests(unittest.TestCase):
         self.assertIn("exclusion requires an audited non-normative category", "\n".join(errors))
         self.assertIn("iss.126: inventory incomplete", "\n".join(errors))
 
+    @immutable_repository_reads()
     def test_behaviour_and_reserved_zero_cannot_be_excluded_under_any_category(self) -> None:
         root = MODULE.DEFAULT_ROOT
         inventory = MODULE.load_matrix(root / "tools/ci/acceptance_requirements.json")
@@ -437,6 +504,7 @@ class AcceptanceMatrixTests(unittest.TestCase):
                     self.assertIn(f"{identity}: exclusion is not in the closed audited table", "\n".join(errors))
                     self.assertIn("iss.126: inventory incomplete", "\n".join(errors))
 
+    @immutable_repository_reads()
     def test_every_audited_exclusion_is_bound_to_id_source_category_quote_and_text(self) -> None:
         root = MODULE.DEFAULT_ROOT
         inventory = MODULE.load_matrix(root / "tools/ci/acceptance_requirements.json")
@@ -482,6 +550,7 @@ class AcceptanceMatrixTests(unittest.TestCase):
                 errors = MODULE.validate_inventory(self.inventory, self.root)[1]
                 self.assertIn("normative exclusion requires an exact reviewed override", "\n".join(errors))
 
+    @immutable_repository_reads()
     def test_reviewed_exclusion_override_is_bound_to_id_source_text_and_category(self) -> None:
         root = MODULE.DEFAULT_ROOT
         inventory = MODULE.load_matrix(root / "tools/ci/acceptance_requirements.json")
@@ -583,29 +652,6 @@ class AcceptanceMatrixTests(unittest.TestCase):
         mapped = {ref for row in matrix["rows"] for ref in row.get("requirements", [])}
         self.assertEqual(set(requirements), mapped)
         self.assertTrue(MODULE._doc_matches(root / "docs/acceptance-matrix.md", MODULE.render_doc(matrix)))
-
-    def test_inventory_and_generated_matrix_are_publishable(self) -> None:
-        # Contract quotes and generated evidence must pass the public-tree text
-        # rules as well as schema validation, without invoking another process.
-        public_tree = PUBLIC_TREE
-        public_documents = ("tools/ci/acceptance_requirements.json", "tools/ci/acceptance_matrix.json",
-                            "docs/acceptance-matrix.md", *MODULE.CONTRACT_DOCUMENTS)
-        for relative in public_documents:
-            with self.subTest(path=relative):
-                self.assertNotRegex(
-                    (MODULE.DEFAULT_ROOT / relative).read_text(encoding="utf-8"),
-                    re.compile(r"/pull/|\bPR\s*#\s*[0-9]+\b", re.IGNORECASE),
-                )
-        for relative in ("tools/ci/acceptance_requirements.json", "tools/ci/acceptance_matrix.json",
-                         "docs/acceptance-matrix.md", "tools/ci/check_acceptance_matrix.py",
-                         "tools/ci/test_check_acceptance_matrix.py"):
-            with self.subTest(path=relative):
-                self.assertEqual(public_tree.inspect_path(relative), [])
-                self.assertEqual(public_tree.inspect_text(
-                    relative, (MODULE.DEFAULT_ROOT / relative).read_text(encoding="utf-8")), [])
-        # Run the same read-only public-tree gate from the authorized test entry
-        # point; this only enumerates local Git paths and applies stdlib rules.
-        self.assertEqual(public_tree.validate(MODULE.DEFAULT_ROOT), [])
 
     def test_path_escape_is_rejected(self) -> None:
         matrix = baseline_matrix()
@@ -731,6 +777,7 @@ class AcceptanceMatrixTests(unittest.TestCase):
                 ])
                 self.assertEqual(matrix, before)
 
+    @immutable_repository_reads()
     def test_native_closed_grammar_rejects_options_shell_syntax_and_multiple_scripts(self) -> None:
         root = MODULE.DEFAULT_ROOT
         matrix = MODULE.load_matrix(root / "tools/ci/acceptance_matrix.json")
@@ -1568,6 +1615,7 @@ class AcceptanceMatrixTests(unittest.TestCase):
 
 
 class ProductionAcceptanceMatrixTests(unittest.TestCase):
+    @immutable_repository_reads()
     def test_deleting_any_required_production_mapping_fails_validation(self) -> None:
         root = MODULE.DEFAULT_ROOT
         matrix = MODULE.load_matrix(root / "tools/ci/acceptance_matrix.json")
@@ -1599,6 +1647,54 @@ class ProductionAcceptanceMatrixTests(unittest.TestCase):
             self.assertTrue(note.strip())
             self.assertIn(f"(planned: {MODULE._escape_cell(note)})", rendered)
         self.assertNotRegex(rendered, r"(?i)\b(?:PR|pull request|change)\s*#?\s*\d+")
+
+
+class AcceptanceMatrixPublishabilityTests(unittest.TestCase):
+    def test_inventory_and_generated_matrix_are_publishable(self) -> None:
+        public_documents = ("tools/ci/acceptance_requirements.json", "tools/ci/acceptance_matrix.json",
+                            "docs/acceptance-matrix.md", *MODULE.CONTRACT_DOCUMENTS)
+        for relative in public_documents:
+            with self.subTest(path=relative):
+                self.assertNotRegex(
+                    (MODULE.DEFAULT_ROOT / relative).read_text(encoding="utf-8"),
+                    re.compile(r"/pull/|\bPR\s*#\s*[0-9]+\b", re.IGNORECASE),
+                )
+        for relative in ("tools/ci/acceptance_requirements.json", "tools/ci/acceptance_matrix.json",
+                         "docs/acceptance-matrix.md", "tools/ci/check_acceptance_matrix.py",
+                         "tools/ci/test_check_acceptance_matrix.py"):
+            with self.subTest(path=relative):
+                self.assertEqual(PUBLIC_TREE.inspect_path(relative), [])
+                self.assertEqual(PUBLIC_TREE.inspect_text(
+                    relative, (MODULE.DEFAULT_ROOT / relative).read_text(encoding="utf-8")), [])
+
+    def test_public_tree_partitions_cover_each_path_once(self) -> None:
+        paths = repository_paths()
+        partitions = [paths[number::4] for number in range(4)]
+        self.assertTrue(all(partitions))
+        self.assertEqual(sorted(path for partition in partitions for path in partition), list(paths))
+        self.assertEqual(len(paths), len(set(paths)))
+
+
+class AcceptanceMatrixPublicTreeTests(unittest.TestCase):
+    # The complete public tree is much broader than the matrix fixtures. Keep
+    # its four disjoint scans in separate CTest entries under the same timeout.
+    def check_partition(self, number: int) -> None:
+        paths = repository_paths()[number::4]
+        self.assertTrue(paths)
+        with mock.patch.object(PUBLIC_TREE, "tracked_paths", return_value=paths):
+            self.assertEqual(PUBLIC_TREE.validate(MODULE.DEFAULT_ROOT), [])
+
+    def test_partition_0(self) -> None:
+        self.check_partition(0)
+
+    def test_partition_1(self) -> None:
+        self.check_partition(1)
+
+    def test_partition_2(self) -> None:
+        self.check_partition(2)
+
+    def test_partition_3(self) -> None:
+        self.check_partition(3)
 
 
 class PublicTreeScanTests(unittest.TestCase):

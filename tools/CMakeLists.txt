@@ -123,8 +123,34 @@ if(BUILD_TESTING)
     add_test(
         NAME AcceptanceMatrixContract
         COMMAND "${Python3_EXECUTABLE}"
-                "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py")
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                AcceptanceMatrixTests ProductionAcceptanceMatrixTests
+                AcceptanceMatrixPublishabilityTests PublicTreeScanTests)
     set_tests_properties(AcceptanceMatrixContract
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME AcceptanceMatrixPublicTreeContract1
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                AcceptanceMatrixPublicTreeTests.test_partition_0)
+    add_test(
+        NAME AcceptanceMatrixPublicTreeContract2
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                AcceptanceMatrixPublicTreeTests.test_partition_1)
+    add_test(
+        NAME AcceptanceMatrixPublicTreeContract3
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                AcceptanceMatrixPublicTreeTests.test_partition_2)
+    add_test(
+        NAME AcceptanceMatrixPublicTreeContract4
+        COMMAND "${Python3_EXECUTABLE}"
+                -I -B "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_acceptance_matrix.py"
+                AcceptanceMatrixPublicTreeTests.test_partition_3)
+    set_tests_properties(
+        AcceptanceMatrixPublicTreeContract1 AcceptanceMatrixPublicTreeContract2
+        AcceptanceMatrixPublicTreeContract3 AcceptanceMatrixPublicTreeContract4
         PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
     add_test(
         NAME AcceptanceMatrixTree
