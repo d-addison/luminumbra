@@ -1187,7 +1187,7 @@ bool GameSession::CreateWorldInternal(const std::string& name,
     metadata.worldId = transient ? std::string{} : GenerateWorldId();
     metadata.creationTime = std::time(nullptr);
     metadata.spawnPoint = Vec3(0, 100, 0);
-    const auto worldPath = RuntimeRoot(m_rootPath) / "worlds/saves" / metadata.worldId;
+    const auto worldPath = GetSaveRootPath() / "worlds/saves" / metadata.worldId;
     if (!transient) {
         try {
             fs::create_directories(worldPath);
@@ -1345,7 +1345,7 @@ bool GameSession::LoadWorld(const std::string& worldId) {
     if (!IsSimulationTickBoundary())
         return false;
     m_lastLoadedChunkCount = 0;
-    const auto saved = Persistence::InspectSavedWorld(RuntimeRoot(m_rootPath), worldId);
+    const auto saved = Persistence::InspectSavedWorld(GetSaveRootPath(), worldId);
     m_worldOpenError = saved.error;
     if (m_worldOpenError.empty() && saved.requires_active_regions && !m_activeRegionsEnabled)
         m_worldOpenError = "Incompatible configuration: this world requires sim.active_regions.";
@@ -1363,7 +1363,7 @@ bool GameSession::LoadWorld(const std::string& worldId) {
             return false;
         }
     }
-    const std::string worldPath = (RuntimeRoot(m_rootPath) / "worlds/saves" / worldId).string();
+    const std::string worldPath = (GetSaveRootPath() / "worlds/saves" / worldId).string();
     const auto& preset_to_load = saved.preset_path;
     const TerrainPresetLoadResult preset = LoadTerrainPreset(preset_to_load);
     if (!preset.ok) {
@@ -1665,11 +1665,15 @@ bool GameSession::SaveWorldMetadataTo(const fs::path& save_dir) {
     return true;
 }
 
+std::filesystem::path GameSession::GetSaveRootPath() const {
+    return m_saveRootPath.empty() ? RuntimeRoot(m_rootPath) : m_saveRootPath;
+}
+
 std::filesystem::path GameSession::GetWorldSaveDir() const {
     if (m_transientWorld || m_metadata.worldId.empty()) {
         return {};
     }
-    return RuntimeRoot(m_rootPath) / "worlds/saves" / m_metadata.worldId;
+    return GetSaveRootPath() / "worlds/saves" / m_metadata.worldId;
 }
 
 bool GameSession::SaveWorldState(WorldStateSaveReport* report) {

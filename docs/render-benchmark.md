@@ -282,8 +282,10 @@ Committed and generated evidence has these compatibility rules:
 --build-manifest <performance-build.json>` writes
 `qualification.json` with schema `luminumbra.render_qualification.v1`.
 The output directory is held exclusively with `.qualification.lock`, created with
-`O_CREAT | O_EXCL`, from before any output/settings changes through aggregate
-publication. A held lock refuses the run and names the lock file; it is never
+`O_CREAT | O_EXCL`, after the output directory is validated/created and before any
+run files or settings change, through aggregate publication. Directory creation
+and lock creation failures without an existing lock report `cannot write` and
+exit 2. A held lock refuses the run and names the lock file; it is never
 automatically reclaimed. Normal returns and exceptions release the lock. After
 an abrupt termination, the operator must establish that the owner has stopped
 before removing its lock. Aggregate publication uses a sibling temporary file
@@ -312,6 +314,32 @@ identifies the script. Both script and native client hashes are checked before
 and after execution; a changed or unverifiable client makes the cell fail.
 Existing client paths, including bare `.py` filenames, resolve from the caller's
 directory before the child enters its per-cell working directory.
+
+Every launched cell receives `--systems-config` with the absolute path to the
+selected runtime's `data/common/systems.json`. The client parses this option in
+`src/luminumbra_client/core/RuntimeScenarioConfig.cpp` and strictly loads the
+override in `src/luminumbra_client/main_client.cpp`. Each process receipt records
+`systems_config.path`, `systems_config.sha256` and `systems_config.sha256_verified`.
+A missing/unreadable configuration prevents launch; changed or unreadable bytes
+after execution fail the cell before the checker runs.
+
+Every launched cell receives an absolute `--runtime-root`. The runner resolves
+the selected client executable before launch and searches only its directory and
+ancestors for `res/shaders/g_buffer.vert`, `data/audio/music.bank.json` and
+`worlds/atlas/presets/default.json`. For other layouts, supply the runner's
+`--runtime-root <absolute-directory>` argument. An incomplete explicit root fails
+without falling back to discovery. The output directory and per-cell working
+directory never select runtime assets, including when output is inside a checkout.
+
+Each cell also receives its own absolute `--save-root` at
+`<out-dir>/work/<cell-id>/storage`, with world saves and the world catalog beneath
+`worlds/saves` there. Its working directory remains `<out-dir>/work/<cell-id>`.
+Process receipts record `runtime_root` and `save_root` alongside the exact command.
+The client refuses relative, empty, missing-value or repeated root options,
+runtime roots missing required files, and save roots that cannot be created.
+`GameSession` uses the save-root override for world creation, loading, saving and
+catalog inspection; runtime assets still come from the runtime root. Ordinary
+client launches without either option retain discovery and runtime-root storage.
 
 The supplied manifest uses the existing `luminumbra.performance_build.v1` schema:
 compiler (`id`, `version`, `target`), configuration (the existing build options
@@ -375,18 +403,36 @@ old outputs are retired before another invocation, preventing stale evidence.
 
 The adjacent `<test-method>-<case>.process.json` has schema
 `luminumbra.render_runner_process.v1`. It records the exact command array, cwd,
-binary path and SHA-256, the 180-second limit, monotonic process elapsed seconds,
+binary path and SHA-256, the 180-second limit, high-resolution process elapsed seconds,
 and outcome `returned`, `timed_out` or `spawn_error`. `return_code` is null when no
 exit status was returned; exception type/message describe timeout or launch
 failure. Binary identity is null if the executable could not be read, and elapsed
-time is null if execution was never attempted. Hashing and evidence finalization
+time is null if execution was never attempted. Elapsed time uses `perf_counter()`
+around the process call. Hashing and evidence finalization
 are outside the recorded process interval. No capture-completion timestamp or
 teardown duration is inferred from these receipts.
+
+Both receipt producers resolve the executable to its real path and verify its
+device/file identifier, size, nanosecond modification/change times and SHA-256
+before and after execution. The original directory preserves runtime library
+discovery. `binary_identity_status` is `verified` after a matching final check;
+a changed or unreadable executable at the final check records `changed`, clears `binary_sha256`,
+adds an evidence error and fails the invocation. Captures remain diagnostic
+evidence on this failure. An existing process exception retains priority.
+Bare executable names search only absolute, nonempty PATH entries.
+
+The parameterized runner holds output locks through executable verification,
+capture retention and receipt publication. Lock identities resolve directory
+aliases and, on Windows, long destination names and case aliases.
+Generated qualification checker commands include `--enforce-floor` for the
+16.67 ms frame-wall p99 limit. Requested poses are rounded to float32 before
+comparison with client camera and streaming positions; the absolute comparison
+tolerance stays unchanged.
 
 `capture_status` is `retained`, `missing`, `invalid_json`, `read_error` or
 `write_error`; retained bytes have a path and SHA-256. A retained document with an
 unsupported schema remains diagnostic evidence and still fails normal validation.
-`evidence_errors` records persistence failures where a receipt can be written;
+`evidence_errors` records verification or persistence failures where a receipt can be written;
 receipt-write failures are reported to stderr. Evidence errors never replace the
 original timeout, launch error or validation assertion. A normally returning
 process cannot silently succeed when required evidence persistence failed.

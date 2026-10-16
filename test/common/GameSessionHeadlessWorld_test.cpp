@@ -143,6 +143,48 @@ TEST(GameSessionHeadlessWorldTest, SessionRequiredAssetListFailsCreateWorldWhenM
     jobs.shutdown();
 }
 
+TEST(GameSessionHeadlessWorldTest, SaveRootOverrideRoutesCreateLoadSaveAndCatalog) {
+    const HeadlessRoot assets;
+    const HeadlessRoot storage;
+    JobSystem jobs;
+    jobs.startup(1);
+    std::string world_id;
+    {
+        GameSession session;
+        session.SetJobSystem(&jobs);
+        session.SetRootPath(assets.root_string());
+        EXPECT_EQ(session.GetSaveRootPath(), fs::path(assets.root_string()));
+        session.SetSaveRootPath(storage.path());
+        EXPECT_EQ(session.GetSaveRootPath(), storage.path());
+        EXPECT_TRUE(session.GetWorldSaveDir().empty());
+        ASSERT_TRUE(session.CreateWorld("PrivateWorld", "12345", "default"));
+        world_id = session.GetMetadata().worldId;
+        const auto expected = storage.path() / "worlds/saves" / world_id;
+        EXPECT_EQ(session.GetWorldSaveDir(), expected);
+        EXPECT_TRUE(fs::is_regular_file(expected / "preset.json"));
+        ASSERT_TRUE(session.SaveWorld());
+        ASSERT_TRUE(session.SaveWorldState());
+        EXPECT_TRUE(fs::is_regular_file(expected / "world_info.json"));
+        const auto catalog =
+            Luminumbra::Persistence::EnumerateSavedWorlds(session.GetSaveRootPath());
+        EXPECT_TRUE(catalog.error.empty());
+        ASSERT_EQ(catalog.worlds.size(), 1u);
+        EXPECT_EQ(catalog.worlds.front().metadata.worldId, world_id);
+        EXPECT_FALSE(fs::exists(assets.path() / "worlds/saves"));
+    }
+    {
+        GameSession session;
+        session.SetJobSystem(&jobs);
+        session.SetRootPath(assets.root_string());
+        session.SetSaveRootPath(storage.path());
+        ASSERT_TRUE(session.LoadWorld(world_id)) << session.GetWorldOpenError();
+        EXPECT_EQ(session.GetMetadata().name, "PrivateWorld");
+        ASSERT_TRUE(session.SaveWorld());
+        EXPECT_FALSE(fs::exists(assets.path() / "worlds/saves"));
+    }
+    jobs.shutdown();
+}
+
 TEST(GameSessionHeadlessWorldTest, HeadlessCreateWorldSucceedsWithPresetOnly) {
     const HeadlessRoot root;
     JobSystem jobs;

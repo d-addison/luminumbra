@@ -222,10 +222,20 @@ class RunnerTestBase(unittest.TestCase):
         self.tmp = Path(self.directory.name).resolve()
         self.fake_client = self.tmp / 'fake_client.py'
         self.fake_client.write_text(FAKE_CLIENT, encoding='utf-8')
+        self.make_runtime(self.tmp)
         self.fake_checker = self.tmp / 'fake_checker.py'
         self.fake_checker.write_text(FAKE_CHECKER, encoding='utf-8')
         self.out = self.tmp / 'out'
         self.matrix_path = self.write_matrix(with_poses=True)
+
+    def make_runtime(self, root):
+        for name in rq.RUNTIME_SENTINELS:
+            path = root / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text('fixture', encoding='utf-8')
+        config = root / 'data/common/systems.json'
+        config.parent.mkdir(parents=True, exist_ok=True)
+        config.write_bytes((planner.ROOT / 'data/common/systems.json').read_bytes())
 
     def write_matrix(self, with_poses):
         matrix = json.loads(MATRIX_PATH.read_text(encoding='utf-8'))
@@ -284,6 +294,12 @@ class DryRunTests(RunnerTestBase):
         self.assertEqual(plan['schema'], planner.PLAN_SCHEMA)
         self.assertEqual(plan['cell_count'], 36)
         self.assertEqual(plan['summary'], {'ready': 28, 'unevaluated': 8})
+        for cell in plan['cells']:
+            if cell['command'] is not None:
+                for option in ('--runtime-root', '--save-root'):
+                    self.assertEqual(cell['command'].count(option), 1)
+                    self.assertTrue(Path(cell['command'][cell['command'].index(option) + 1])
+                                    .is_absolute())
         self.assertIn('qualification plan: 36 cells', out)
 
     def test_dry_run_does_not_touch_existing_aggregate(self):
@@ -315,6 +331,32 @@ class FullMatrixTests(RunnerTestBase):
         self.assertEqual(sources, {'3840x1600': 'matrix', '3440x1440': 'undeclared'})
         self.assertIn('pass 28', out)
         self.assertTrue((self.out / 'cells' / f'{SURFACE_CELL}.verdict.json').is_file())
+        systems_config = rq.runner.resolve_path(self.tmp / 'data/common/systems.json')
+        receipts = list((self.out / 'cells').glob('*.process.json'))
+        self.assertEqual(len(receipts), 28)
+        for path in receipts:
+            with self.subTest(receipt=path.name):
+                receipt = rq.read_json_object(path)
+                command = receipt['command']
+                for option in ('--runtime-root', '--save-root'):
+                    self.assertEqual(command.count(option), 1)
+                    value = command[command.index(option) + 1]
+                    self.assertTrue(Path(value).is_absolute())
+                    self.assertEqual(receipt[option[2:].replace('-', '_')], value)
+                self.assertEqual(Path(receipt['runtime_root']), self.tmp.resolve())
+                save_root = Path(receipt['save_root'])
+                self.assertEqual(save_root, self.out.resolve() / 'work' /
+                                 path.name.removesuffix('.process.json') / 'storage')
+                self.assertTrue(save_root.is_relative_to(self.out.resolve()))
+                self.assertEqual(Path(receipt['cwd']), save_root.parent)
+                self.assertEqual(command.count('--systems-config'), 1)
+                config_arg = command[command.index('--systems-config') + 1]
+                self.assertTrue(Path(config_arg).is_absolute())
+                self.assertEqual(config_arg, str(systems_config))
+                self.assertEqual(receipt['systems_config'],
+                                 {'path': str(systems_config),
+                                  'sha256': rq.runner.file_sha256(systems_config),
+                                  'sha256_verified': True})
 
     def test_declared_refresh_recorded_but_unevaluated_cells_block(self):
         code, _, _ = self.run_main(self.argv('--declare-refresh', '3440x1440=60'))
@@ -754,6 +796,32 @@ class SettingsResetTests(RunnerTestBase):
 
 
 class DirectoryLockTests(RunnerTestBase):
+    def test_output_directory_file_is_cannot_write_before_lock_creation(self):
+        self.out.write_text('not a directory', encoding='utf-8')
+        with mock.patch.object(rq.os, 'open') as open_lock:
+            code, _, err = self.run_main(self.argv('--only', SURFACE_CELL))
+        self.assertEqual(code, 2)
+        self.assertIn('cannot write', err)
+        self.assertNotIn('output directory locked', err)
+        open_lock.assert_not_called()
+        self.assertEqual(self.out.read_text(encoding='utf-8'), 'not a directory')
+
+    def test_lock_creation_file_exists_error_without_lock_is_cannot_write(self):
+        with mock.patch.object(rq.os, 'open', side_effect=FileExistsError('cannot create')):
+            code, _, err = self.run_main(self.argv('--only', SURFACE_CELL))
+        self.assertEqual(code, 2)
+        self.assertIn('cannot write', err)
+        self.assertNotIn('output directory locked', err)
+        self.assertFalse((self.out / rq.LOCK_NAME).exists())
+
+    def test_lock_creation_permission_error_is_cannot_write(self):
+        with mock.patch.object(rq.os, 'open', side_effect=PermissionError('access denied')):
+            code, _, err = self.run_main(self.argv('--only', SURFACE_CELL))
+        self.assertEqual(code, 2)
+        self.assertIn('cannot write', err)
+        self.assertNotIn('output directory locked', err)
+        self.assertFalse((self.out / rq.LOCK_NAME).exists())
+
     def test_held_lock_refuses_without_touching_any_run_files(self):
         self.assertEqual(self.run_main(self.argv('--only', SURFACE_CELL))[0], 0)
         lock = self.out / rq.LOCK_NAME
@@ -897,6 +965,15 @@ class HostEvidenceTests(RunnerTestBase):
         self.assertEqual(lock.read_text(encoding='utf-8'), 'held')
 
     def test_dry_run_preserves_pair_and_publishes_separate_host(self):
+        with mock.patch.object(rq, 'run_cells') as launch:
+            code, _, err = self.run_main(self.host_argv(
+                '--dry-run', '--runtime-root', str(self.tmp / 'missing-runtime')))
+        self.assertEqual(code, 2, err)
+        self.assertIn('runtime root missing', err)
+        launch.assert_not_called()
+        self.assert_previous_pair()
+        self.assertFalse((self.out / 'host-dryrun.json').exists())
+        self.assertFalse((self.out / rq.LOCK_NAME).exists())
         with mock.patch.object(rq, 'run_cells') as launch:
             self.assertEqual(self.run_main(self.host_argv('--dry-run'))[0], 0)
         launch.assert_not_called()
@@ -1225,9 +1302,157 @@ class HostEvidenceTests(RunnerTestBase):
                         self.assertFalse((self.out / rq.LOCK_NAME).exists())
 
 
+class RuntimeRootTests(RunnerTestBase):
+    def test_package_root_is_independent_of_output_and_working_directory(self):
+        package = self.tmp / 'package'
+        self.make_runtime(package)
+        client = package / 'bin/client.py'
+        client.parent.mkdir()
+        client.write_text(FAKE_CLIENT, encoding='utf-8')
+        checkout = self.tmp / 'checkout'
+        self.make_runtime(checkout)
+        previous = Path.cwd()
+        try:
+            os.chdir(checkout)
+            for out in (self.tmp / 'external-output', checkout / 'build/qualification-native'):
+                with self.subTest(out=out):
+                    args = self.argv('--only', SURFACE_CELL, out=out)
+                    args[1] = str(client)
+                    code, _, _ = self.run_main(args)
+                    self.assertEqual(code, 0)
+                    receipt = rq.read_json_object(out / 'cells' / f'{SURFACE_CELL}.process.json')
+                    self.assertEqual(Path(receipt['runtime_root']), package.resolve())
+                    self.assertEqual(Path(receipt['systems_config']['path']),
+                                     package.resolve() / 'data/common/systems.json')
+                    self.assertEqual(Path(receipt['save_root']),
+                                     out.resolve() / 'work' / SURFACE_CELL / 'storage')
+                    self.assertEqual(Path(receipt['cwd']),
+                                     out.resolve() / 'work' / SURFACE_CELL)
+        finally:
+            os.chdir(previous)
+
+    def test_explicit_runtime_root_is_used_without_ancestor_fallback(self):
+        runtime = self.tmp / 'explicit-runtime'
+        self.make_runtime(runtime)
+        code, _, _ = self.run_main(self.argv('--only', SURFACE_CELL,
+                                              '--runtime-root', str(runtime)))
+        self.assertEqual(code, 0)
+        receipt = rq.read_json_object(self.out / 'cells' / f'{SURFACE_CELL}.process.json')
+        self.assertEqual(receipt['runtime_root'], str(runtime.resolve()))
+        self.assertEqual(receipt['systems_config']['path'],
+                         str(runtime.resolve() / 'data/common/systems.json'))
+        for root in (Path('relative'), self.tmp / 'missing-runtime', self.tmp / 'incomplete'):
+            with self.subTest(root=root), \
+                    mock.patch.object(rq.runner, 'run_process') as launch:
+                code, _, _ = self.run_main(self.argv('--only', SURFACE_CELL,
+                                                      '--runtime-root', str(root)))
+                self.assertEqual(code, 1)
+                self.assertFalse(self.load_qualification()['render_floor_qualified'])
+                self.assertIn('runtime', self.load_qualification()['error'])
+                launch.assert_not_called()
+
+    def test_missing_runtime_files_refuse_without_ancestor_fallback(self):
+        for name in rq.RUNTIME_SENTINELS:
+            path = self.tmp / name
+            original = path.read_bytes()
+            path.unlink()
+            try:
+                with self.subTest(name=name), \
+                        mock.patch.object(rq.runner, 'run_process') as launch:
+                    code, _, _ = self.run_main(self.argv('--only', SURFACE_CELL,
+                                                          '--runtime-root', str(self.tmp)))
+                    self.assertEqual(code, 1)
+                    self.assertIn('runtime root missing', self.load_qualification()['error'])
+                    self.assertFalse(self.load_qualification()['render_floor_qualified'])
+                    launch.assert_not_called()
+            finally:
+                path.write_bytes(original)
+
+    def test_discovery_does_not_fall_back_to_working_directory(self):
+        with mock.patch.object(rq.runner, 'run_process') as launch:
+            args = self.argv('--only', SURFACE_CELL)
+            args[1] = sys.executable
+            code, _, _ = self.run_main(args)
+        self.assertEqual(code, 1)
+        self.assertIn('runtime root missing', self.load_qualification()['error'])
+        self.assertFalse(self.load_qualification()['render_floor_qualified'])
+        launch.assert_not_called()
+
+
+class SystemsConfigTests(RunnerTestBase):
+    def setUp(self):
+        super().setUp()
+        (self.tmp / 'data/common/systems.json').unlink()
+
+    def run_fixed_view(self):
+        return rq.run_cells(matrix_lib.load_matrix(self.matrix_path), client=self.fake_client,
+                            out_dir=self.out, root=self.tmp, only=[FOREST_CELL],
+                            checker=self.fake_checker, matrix_canonical=False)[0]
+
+    def test_missing_config_prevents_launch(self):
+        with mock.patch.object(rq.runner, 'run_process',
+                               return_value=(subprocess.CompletedProcess([], 0), [])) as launch:
+            cell = self.run_fixed_view()
+        launch.assert_not_called()
+        self.assertEqual(cell['state'], 'process_failed')
+        self.assertIn('systems.json', cell['reason'])
+        self.assertIsNone(cell['artifact'])
+        self.assertFalse((self.out / 'cells' / f'{FOREST_CELL}.check.log').exists())
+
+    def test_changed_or_removed_config_is_refused(self):
+        systems_config = self.tmp / 'data/common/systems.json'
+        systems_config.parent.mkdir(parents=True, exist_ok=True)
+        original = rq.runner.run_process
+        for change in ('replace', 'remove'):
+            with self.subTest(change=change):
+                systems_config.write_text('{}', encoding='utf-8')
+                before = rq.runner.file_sha256(systems_config)
+
+                def run_process(*args, **kwargs):
+                    result = original(*args, **kwargs)
+                    if change == 'replace':
+                        systems_config.write_text('{"render": {}}', encoding='utf-8')
+                    else:
+                        systems_config.unlink()
+                    return result
+
+                with mock.patch.object(rq.runner, 'run_process', side_effect=run_process):
+                    cell = self.run_fixed_view()
+                self.assertEqual(cell['state'], 'process_failed')
+                self.assertIn('systems configuration SHA-256 changed', cell['reason'])
+                receipt = rq.read_json_object(self.out / 'cells' / f'{FOREST_CELL}.process.json')
+                self.assertEqual(receipt['systems_config'],
+                                 {'path': str(rq.runner.resolve_path(systems_config)),
+                                  'sha256': before, 'sha256_verified': False})
+                self.assertFalse((self.out / 'cells' / f'{FOREST_CELL}.check.log').exists())
+
+
 class ClientIdentityTests(RunnerTestBase):
     def receipt(self):
         return rq.read_json_object(self.out / 'cells' / f'{SURFACE_CELL}.process.json')
+
+    def test_unverified_interpreter_identity_is_refused(self):
+        original = rq.runner.run_process
+        for status in ('changed', 'pending', None):
+            for clear_hash in (False, True):
+                with self.subTest(status=status, clear_hash=clear_hash):
+                    def run_process(*args, **kwargs):
+                        result = original(*args, **kwargs)
+                        receipt = rq.read_json_object(kwargs['receipt_path'])
+                        receipt['binary_identity_status'] = status
+                        if clear_hash:
+                            receipt['binary_sha256'] = None
+                        kwargs['receipt_path'].write_text(json.dumps(receipt), encoding='utf-8')
+                        return result
+
+                    with mock.patch.object(rq.runner, 'run_process', side_effect=run_process):
+                        code, _, _ = self.run_main(self.argv('--only', SURFACE_CELL))
+                    self.assertEqual(code, 1)
+                    cell = self.load_qualification()['cells'][0]
+                    self.assertEqual(cell['state'], 'process_failed')
+                    self.assertEqual(cell['reason'], 'capture evidence: process receipt unsuccessful')
+                    self.assertIsNone(cell['artifact'])
+                    self.assertFalse((self.out / 'cells' / f'{SURFACE_CELL}.check.log').exists())
 
     def test_script_receipt_hashes_client_separately_from_interpreter(self):
         self.assertEqual(self.run_main(self.argv('--only', SURFACE_CELL))[0], 0)
@@ -1559,6 +1784,18 @@ class BuildManifestTests(RealCheckerTests):
         self.assertIsNone(cell['artifact'])
         self.assertFalse((self.out / 'cells' / f"{cell['id']}.check.log").exists())
 
+    def test_unverified_native_identity_is_refused(self):
+        for status in ('changed', 'pending', None):
+            with self.subTest(status=status):
+                code, cell, receipt = self.native_control(
+                    receipt_defect={'binary_identity_status': status})
+                self.assertEqual(code, 1)
+                self.assertEqual(cell['state'], 'process_failed')
+                self.assertEqual(cell['reason'], 'capture evidence: process receipt unsuccessful')
+                self.assertIsNone(cell['artifact'])
+                self.assertFalse((self.out / 'cells' / f"{cell['id']}.check.log").exists())
+                self.assertFalse(self.load_qualification()['render_floor_qualified'])
+
     def test_capture_changed_before_checker_is_refused(self):
         code, cell, receipt = self.native_control(mutate_checked_capture=True)
         self.assertEqual(code, 1)
@@ -1582,6 +1819,9 @@ class BuildManifestTests(RealCheckerTests):
         code, cell, receipt = self.native_control(mutate=True)
         self.assertEqual(code, 1)
         self.assertEqual(cell['state'], 'process_failed')
+        self.assertEqual(receipt['binary_identity_status'], 'changed')
+        self.assertIsNone(receipt['binary_sha256'])
+        self.assertTrue(receipt['evidence_errors'])
         self.assertFalse(receipt['client']['sha256_verified'])
         self.assertFalse(receipt['client']['native_build'])
 

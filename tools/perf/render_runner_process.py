@@ -76,11 +76,12 @@ def path_without_extended_prefix(path, *, require_ordinary=False):
     return type(path)(text)
 
 
-def resolve_path(path):
+def resolve_path(path, *, strict=False):
     """Resolve aliases; refuse ambiguous extended Windows comparison paths."""
     # Check input too: lexical resolution must not erase an unsafe component.
     path_without_extended_prefix(Path(path), require_ordinary=True)
-    return path_without_extended_prefix(Path(path).resolve(), require_ordinary=True)
+    resolved = Path(path).resolve(strict=True) if strict else Path(path).resolve()
+    return path_without_extended_prefix(resolved, require_ordinary=True)
 
 
 def file_sha256(path):
@@ -89,6 +90,56 @@ def file_sha256(path):
         for block in iter(lambda: source.read(1024 * 1024), b''):
             digest.update(block)
     return digest.hexdigest()
+
+
+def _binary_identity(path):
+    """Hash one open file and verify that its path still names that identity."""
+    def identity(metadata):
+        return (metadata.st_dev, metadata.st_ino, metadata.st_size,
+                metadata.st_mtime_ns, metadata.st_ctime_ns)
+
+    digest = hashlib.sha256()
+    with Path(path).open('rb') as source:
+        before = os.fstat(source.fileno())
+        if not stat.S_ISREG(before.st_mode):
+            raise OSError(errno.EINVAL, 'executable must be a regular file', str(path))
+        # Hash in bounded 1 MiB blocks, independently of executable size.
+        for block in iter(lambda: source.read(1024 * 1024), b''):
+            digest.update(block)
+        after = os.fstat(source.fileno())
+        named = os.stat(path)
+    if identity(before) != identity(after) or identity(after) != identity(named):
+        raise OSError(errno.EIO, 'executable changed while hashing', str(path))
+    return identity(after), digest.hexdigest()
+
+
+@contextmanager
+def verified_binary(receipt):
+    """Fail closed if executable metadata or bytes change across execution.
+
+    Keep the original location so adjacent runtime libraries remain discoverable.
+    A process exception retains priority, but an unverified hash is never published.
+    """
+    path = receipt['binary_path']
+    before = _binary_identity(path)
+    receipt.update(binary_sha256=before[1], binary_identity_status='pending')
+    failed = False
+    try:
+        yield
+    except BaseException:
+        failed = True
+        raise
+    finally:
+        try:
+            if _binary_identity(path) != before:
+                raise OSError(errno.EIO, 'executable changed during execution', path)
+        except OSError as error:
+            receipt.update(binary_sha256=None, binary_identity_status='changed')
+            receipt['evidence_errors'].append(f'executable verification: {error}')
+            if not failed:
+                raise
+        else:
+            receipt['binary_identity_status'] = 'verified'
 
 
 def atomic_write(path, payload):
@@ -185,30 +236,29 @@ def resolve_executable(program, cwd, environment=None):
     """Return the absolute executable that a spawn of `program` would run.
 
     A name with a path separator resolves against `cwd` when relative; a bare name
-    resolves through PATH from `environment`. Raises FileNotFoundError when unresolved.
+    searches only absolute, nonempty PATH entries. All checks use the resolved path.
     """
     program = str(program)
     if os.sep in program or (os.altsep and os.altsep in program):
         candidate = Path(program)
         if not candidate.is_absolute():
             candidate = Path(cwd) / candidate
-        path_without_extended_prefix(candidate, require_ordinary=True)
+        candidate = resolve_path(candidate, strict=True)
         if candidate.is_file():
-            return path_without_extended_prefix(Path(os.path.abspath(candidate)),
-                                                require_ordinary=True)
+            return candidate
         raise FileNotFoundError(f'executable not found: {candidate}')
-    search = environment.get('PATH') if environment else None
-    if search is None:
-        search = os.environ.get('PATH', os.defpath)
-    entries = []
+    search = (environment if environment is not None else os.environ).get('PATH', os.defpath)
     for entry in search.split(os.pathsep):
-        base = Path(entry) if entry else Path('.')
-        entries.append(str(base if base.is_absolute() else Path(cwd) / base))
-    found = shutil.which(program, path=os.pathsep.join(entries))
-    if found is None:
-        raise FileNotFoundError(f'executable not found on PATH: {program}')
-    path_without_extended_prefix(Path(found), require_ordinary=True)
-    return path_without_extended_prefix(Path(os.path.abspath(found)), require_ordinary=True)
+        if not entry or not Path(entry).is_absolute():
+            continue
+        # Passing a directory-qualified name prevents Windows which() from
+        # implicitly prepending the current directory to the supplied search path.
+        found = shutil.which(str(Path(entry) / program), path=entry)
+        if found is not None:
+            candidate = resolve_path(found, strict=True)
+            if candidate.is_file():
+                return candidate
+    raise FileNotFoundError(f'executable not found on PATH: {program}')
 
 
 def _output_identity(path):
@@ -233,6 +283,15 @@ def _output_identity(path):
     path_without_extended_prefix(path, require_ordinary=True)
     parent = resolve_path(path.parent)
     validate_components(parent)
+    if os.name == 'nt':
+        # Resolve existing destination short names as well as parent aliases.
+        # Refuse symlinks before resolving: they cannot acquire a new identity.
+        if path.is_symlink():
+            raise OSError(errno.ELOOP, 'output must not be a symlink', str(path))
+        canonical = resolve_path(parent / path.name)
+        canonical = Path(os.path.normcase(canonical))
+        validate_components(canonical)
+        parent, path = canonical.parent, canonical
     # Preserve the directory's actual spelling on case-sensitive filesystems;
     # fold the destination name for every use of its identity, including locks.
     identity = parent / path.name.casefold()
@@ -371,8 +430,8 @@ def run_process(command, *, cwd, environment, log, artifact, retained, receipt_p
                 timeout_seconds=180):
     """Run one client process; return (CompletedProcess, evidence_errors).
 
-    The executable is resolved once; the hash and the spawned argv[0] use that
-    same file. Resolution and lock-acquisition refusals leave outputs unchanged.
+    The executable is resolved once and its identity and digest are verified
+    before and after execution. Resolution and lock refusals leave outputs unchanged.
     Spawn and timeout failures attempt receipt publication before re-raising the
     original exception. An active OS lock refuses the invocation; leftover lock
     files are reusable after a crash. Symlink and overlapping outputs are refused;
@@ -402,15 +461,14 @@ def _run_process(command, *, cwd, environment, log, artifact, retained, receipt_
                    outcome='spawn_error', return_code=None, capture_status='missing',
                    capture_path=None, capture_sha256=None, evidence_errors=[])
     try:
-        receipt['binary_sha256'] = file_sha256(command[0])
-        with log.open('wb') as output:
-            started = time.monotonic()
+        with verified_binary(receipt), log.open('wb') as output:
+            started = time.perf_counter()
             try:
                 result = subprocess.run(command, cwd=cwd, env=environment,
                                         stdout=output, stderr=subprocess.STDOUT,
                                         timeout=timeout_seconds, check=False)
             finally:
-                receipt['elapsed_seconds'] = time.monotonic() - started
+                receipt['elapsed_seconds'] = time.perf_counter() - started
             receipt.update(outcome='returned', return_code=result.returncode)
     except (subprocess.TimeoutExpired, OSError) as error:
         receipt.update(outcome='timed_out' if isinstance(error, subprocess.TimeoutExpired)
