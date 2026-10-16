@@ -21,6 +21,7 @@
 #include "persistence/WorldSaveService.h"
 #include "world/WorldStreamingState.h"
 
+#include <cmath>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -273,6 +274,122 @@ TEST(PersistenceHardening, SnapshotRoundTripIsByteStable) {
     // encode(decode(encode(x))) == encode(x): the canonical bytes are stable.
     const std::string reserialized = SerializeWorldStreamingStateSnapshotJson(restored);
     EXPECT_EQ(reserialized, json) << "snapshot is not byte-stable across a roundtrip";
+}
+
+TEST(PersistenceHardening, InvalidMaterialChannelRefusesLoadAndFormatWithoutPartialWorld) {
+    const auto maximum_unsigned = (std::numeric_limits<std::uint64_t>::max)();
+    const std::vector<nlohmann::json> invalid_materials{
+        nlohmann::json::array({256}),
+        nlohmann::json::array({maximum_unsigned}),
+        nlohmann::json::array({-1}),
+        nlohmann::json::array({1.0}),
+        nlohmann::json::array({true}),
+        nlohmann::json::array({nullptr}),
+        nlohmann::json::array({"255"}),
+        nlohmann::json::array({nlohmann::json::object()}),
+        nullptr,
+        255,
+        nlohmann::json::object()};
+    WorldStreamingState original;
+    PopulateRichWorld(original);
+    const auto snapshot = nlohmann::json::parse(SerializeWorldStreamingStateSnapshotJson(original));
+    for (const auto& materials : invalid_materials) {
+        SCOPED_TRACE(materials.dump());
+        auto invalid = snapshot;
+        // Reject after a valid chunk was inserted, and clear a pre-existing destination.
+        invalid["chunks"][1]["material_data"] = materials;
+        WorldStreamingState restored;
+        PopulateRichWorld(restored);
+        std::vector<std::string> errors;
+        EXPECT_FALSE(LoadWorldStreamingStateSnapshotJson(invalid.dump(), restored, errors));
+        EXPECT_TRUE(restored.empty());
+        ASSERT_FALSE(errors.empty());
+        EXPECT_NE(errors.back().find("material_data"), std::string::npos);
+        errors.clear();
+        EXPECT_FALSE(Luminumbra::Persistence::ValidateWorldStreamingChunkFormatJson(
+            invalid["chunks"][1].dump(), errors));
+        ASSERT_FALSE(errors.empty());
+        EXPECT_NE(errors.front().find("material_data"), std::string::npos);
+    }
+}
+
+TEST(PersistenceHardening, InvalidDensityChannelRefusesLoadAndFormatWithoutPartialWorld) {
+    constexpr std::size_t lattice_samples = static_cast<std::size_t>(Luminumbra::CHUNK_SIZE_X + 1) *
+                                            (Luminumbra::CHUNK_SIZE_Y + 1) *
+                                            (Luminumbra::CHUNK_SIZE_Z + 1);
+    const auto maximum_unsigned = (std::numeric_limits<std::uint64_t>::max)();
+    WorldStreamingState original;
+    PopulateRichWorld(original);
+    const auto snapshot = nlohmann::json::parse(SerializeWorldStreamingStateSnapshotJson(original));
+    const std::vector<nlohmann::json> invalid_elements{
+        true, nullptr, "1", nlohmann::json::object(), nlohmann::json::array(), 1e100, -1e100};
+    for (std::size_t corruption = 0; corruption < invalid_elements.size() + 4; ++corruption) {
+        SCOPED_TRACE(corruption);
+        auto invalid = snapshot;
+        auto& density = invalid["chunks"][1]["sdf_data"];
+        density = std::vector<float>(lattice_samples, 1.0f);
+        if (corruption < invalid_elements.size())
+            density[lattice_samples - 1] = invalid_elements[corruption];
+        else if (corruption == invalid_elements.size())
+            density.push_back(1.0);
+        else if (corruption == invalid_elements.size() + 1)
+            density.push_back(maximum_unsigned);
+        else if (corruption == invalid_elements.size() + 2)
+            density = nullptr;
+        else
+            density = nlohmann::json::object();
+        WorldStreamingState restored;
+        PopulateRichWorld(restored);
+        std::vector<std::string> errors;
+        EXPECT_FALSE(LoadWorldStreamingStateSnapshotJson(invalid.dump(), restored, errors));
+        EXPECT_TRUE(restored.empty());
+        ASSERT_FALSE(errors.empty());
+        EXPECT_NE(errors.back().find("sdf_data"), std::string::npos);
+        errors.clear();
+        EXPECT_FALSE(Luminumbra::Persistence::ValidateWorldStreamingChunkFormatJson(
+            invalid["chunks"][1].dump(), errors));
+        ASSERT_FALSE(errors.empty());
+        EXPECT_NE(errors.front().find("sdf_data"), std::string::npos);
+    }
+}
+
+TEST(PersistenceHardening, ChannelBoundariesAndLegacyMaterialFormsRemainReadable) {
+    WorldStreamingState original;
+    PopulateRichWorld(original);
+    const auto snapshot = nlohmann::json::parse(SerializeWorldStreamingStateSnapshotJson(original));
+    for (const int representation : {0, 1, 2}) {
+        auto candidate = snapshot;
+        auto& record = candidate["chunks"][1];
+        if (representation == 0)
+            record.erase("material_data");
+        else if (representation == 1)
+            record["material_data"] = nlohmann::json::array();
+        else
+            record["material_data"] = {0, 255};
+        record["sdf_data"] = {0u,
+                              (std::numeric_limits<std::uint64_t>::max)(),
+                              -1,
+                              -0.0,
+                              (std::numeric_limits<float>::max)()};
+        WorldStreamingState restored;
+        std::vector<std::string> errors;
+        ASSERT_TRUE(LoadWorldStreamingStateSnapshotJson(candidate.dump(), restored, errors));
+        EXPECT_TRUE(errors.empty());
+        const auto loaded = restored.find_chunk(
+            Luminumbra::Chunk::decode_id(record.at("chunk_id").get<Luminumbra::ChunkID>()));
+        ASSERT_TRUE(loaded);
+        EXPECT_EQ(loaded->material_data,
+                  representation == 2 ? std::vector<Luminumbra::u8>({0, 255})
+                                      : std::vector<Luminumbra::u8>{});
+        ASSERT_EQ(loaded->sdf_data.size(), 5u);
+        EXPECT_EQ(loaded->sdf_data[1],
+                  static_cast<float>((std::numeric_limits<std::uint64_t>::max)()));
+        EXPECT_TRUE(std::signbit(loaded->sdf_data[3]));
+        EXPECT_EQ(loaded->sdf_data[4], (std::numeric_limits<float>::max)());
+        EXPECT_TRUE(
+            Luminumbra::Persistence::ValidateWorldStreamingChunkFormatJson(record.dump(), errors));
+        EXPECT_TRUE(errors.empty());
+    }
 }
 
 TEST(PersistenceHardening, SnapshotRoundTripPreservesEveryFieldExactly) {
