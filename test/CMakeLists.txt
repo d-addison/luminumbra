@@ -1159,7 +1159,7 @@ endif()
 add_executable(world_entry_test client/world_entry_test.cpp)
 target_include_directories(world_entry_test PRIVATE ../src)
 target_compile_definitions(world_entry_test PRIVATE LUMINUMBRA_SOURCE_ROOT="${CMAKE_SOURCE_DIR}")
-target_link_libraries(world_entry_test PRIVATE gtest_main luminumbra_common)
+target_link_libraries(world_entry_test PRIVATE gtest_main luminumbra_common luminumbra_save_fixture_support)
 luminumbra_configure_first_party_target(world_entry_test)
 
 # Native-call interception is isolated from engine definitions of the journal.
