@@ -636,6 +636,8 @@ add_executable(pass_context_test
     rendering/pass_context_test.cpp
     # Evidence reuse and column-local invalidation on both scatter backends.
     rendering/foliage_rebuild_test.cpp
+    # Fresh-pass equivalence and moving horizons on both scatter backends.
+    rendering/foliage_invalidation_test.cpp
 )
 
 target_compile_definitions(pass_context_test PRIVATE
