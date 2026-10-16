@@ -3,7 +3,9 @@
 
 import importlib.util
 import json
+import re
 from pathlib import Path
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -19,6 +21,18 @@ SPEC.loader.exec_module(shards)
 
 def test(name, **properties):
     return {"name": name, "command": ["test-binary", name], "properties": [{"name": key, "value": value} for key, value in properties.items()]}
+
+
+def aggregate_inventory_arguments():
+    workflow = Path(__file__).resolve().parents[2] / ".github/workflows/asan.yml"
+    command = next(line for line in workflow.read_text(encoding="utf-8").splitlines()
+                   if line.strip().startswith("python3 tools/ci/check_ctest_junit.py "))
+    arguments = shlex.split(command)[3:]
+    floor = re.search(r"(?m)^          minimum_tests=([0-9]+)$", workflow.read_text(encoding="utf-8"))
+    assert arguments[:2] == ["--minimum-tests", "$minimum_tests"]
+    assert floor is not None
+    arguments[1] = floor.group(1)
+    return arguments
 
 
 class AsanShardTests(unittest.TestCase):
@@ -208,9 +222,12 @@ class AsanShardTests(unittest.TestCase):
                 self.assertFalse((self.root / "merged.xml").exists())
 
     def test_merged_report_passes_the_unchanged_floor_and_required_probe_checks(self):
+        arguments = aggregate_inventory_arguments()
+        self.names += [arguments[index + 1] for index, argument in enumerate(arguments)
+                       if argument == "--require-test"]
         self.names += ["AmbientDeterminismReceipt.EmitsConstructorAndEvolvedHashes",
                        "AmbientInputBounds.UnpaddedTwoElementInputFaultsAtActiveIsa"]
-        self.names += [f"ordinary-{index}" for index in range(2260 - len(self.names))]
+        self.names += [f"ordinary-{index}" for index in range(2320 - len(self.names))]
         self.tests = [test(name) for name in self.names]
         self.reports()
         for shard in (1, 2):
@@ -228,12 +245,46 @@ class AsanShardTests(unittest.TestCase):
         output = self.root / "merged.xml"
         shards.merge(self.root, output)
         for script, arguments in (
-            ("check_ctest_junit.py", [str(output), "--minimum-tests", "2260"]),
+            ("check_ctest_junit.py", [str(output), *arguments]),
             ("compare_ambient_receipts.py", [f"asan={output}", "--expect-labels", "asan", "--require-probe", "asan"]),
         ):
             result = subprocess.run([sys.executable, "-I", "-B", str(Path(__file__).with_name(script)), *arguments],
                                     capture_output=True, text=True, timeout=10)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_complete_shard_union_cannot_replace_a_required_test_with_extra_coverage(self):
+        arguments = aggregate_inventory_arguments()
+        required = [arguments[index + 1] for index, argument in enumerate(arguments)
+                    if argument == "--require-test"]
+        self.assertGreaterEqual(len(required), 3)
+        self.names += required
+        self.names += [f"ordinary-{index}" for index in range(2320 - len(self.names))]
+        complete = self.names[:]
+        for name in required:
+            with self.subTest(missing=name):
+                self.names = [item if item != name else "replacement-coverage" for item in complete]
+                self.tests = [test(item) for item in self.names]
+                self.reports()
+                output = self.root / "merged.xml"
+                shards.merge(self.root, output)
+                result = subprocess.run(
+                    [sys.executable, "-I", "-B", str(Path(__file__).with_name("check_ctest_junit.py")),
+                     str(output), *arguments], capture_output=True, text=True, timeout=10)
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn(f"Required CTest cases are missing:\n  - {name}\n", result.stderr)
+
+    def test_complete_shard_union_below_inventory_floor_is_rejected(self):
+        self.names += [f"ordinary-{index}" for index in range(2319 - len(self.names))]
+        self.tests = [test(name) for name in self.names]
+        self.reports()
+        output = self.root / "merged.xml"
+        shards.merge(self.root, output)
+        result = subprocess.run(
+            [sys.executable, "-I", "-B", str(Path(__file__).with_name("check_ctest_junit.py")),
+             str(output), "--minimum-tests", "2320"],
+            capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("evaluated 2319 tests, requires at least 2320", result.stderr)
 
     def test_empty_missing_duplicate_short_extra_and_unbalanced_shards_refuse(self):
         for parts in (([], [1, 2, 3, 4, 5, 6]), ([1, 2, 4, 5], [3]),
