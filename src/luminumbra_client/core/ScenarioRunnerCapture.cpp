@@ -1063,7 +1063,25 @@ void ScenarioRunnerImpl::captureFoliageVisual(std::chrono::steady_clock::time_po
                                               foliage->instance_available_frame(),
                                               scenario_frame_count);
     const std::uint32_t phase = foliage_calm.sampled ? 2u : 1u;
-    const bool capture_due = phase == 1 ? progress >= 0.30 : progress >= 0.85;
+    const auto write_instances = [&](const char* name) {
+        std::ofstream output(scenario_config.artifact_dir / name, std::ios::binary);
+        const auto& records = foliage->instances();
+        output.write(reinterpret_cast<const char*>(records.data()),
+                     static_cast<std::streamsize>(records.size() * sizeof(records[0])));
+        output.close();
+        return bool(output);
+    };
+    if (fresh && progress >= 0.30 && !foliage->qualification_started() &&
+        foliage->begin_qualification())
+        foliage_first_rebuild_written = write_instances("foliage-rebuild-first.bin");
+    if (fresh && foliage->qualification_rebuild_complete() && !foliage_calm.sampled &&
+        !foliage_second_rebuild_written)
+        foliage_second_rebuild_written = write_instances("foliage-rebuild-second.bin");
+    // The still is read on the transform-feedback SUBMISSION frame. Delayed GPU
+    // completion never substitutes an image from a later frame.
+    const bool capture_due = foliage && foliage_first_rebuild_written &&
+                             foliage_second_rebuild_written &&
+                             foliage->vertex_submission_frame(phase) == scenario_frame_count;
     if (fresh && capture_due && foliage->build_phase() == phase && stats.foliage_draws > 0 &&
         stats.foliage_instances_drawn > 0 && g_camera && gameSession) {
         FoliagePhaseEvidence sample;
@@ -1105,37 +1123,42 @@ void ScenarioRunnerImpl::captureFoliageVisual(std::chrono::steady_clock::time_po
         }
         if (sample.sampled && phase == 1) {
             foliage_calm = sample;
-        } else if (sample.sampled) {
-            FoliageInstancingResult result;
-            result.calm = foliage_calm;
-            result.windy = sample;
-            result.density_multiplier = scenario_config.foliage_density_scale;
-            if (auto* ws = gameSession->GetWorldSystem()) {
-                result.world_seed =
-                    static_cast<std::uint64_t>(static_cast<std::uint32_t>(ws->get_seed()));
-                const auto biome = ws->BiomeIdAt(g_camera->Position.x, g_camera->Position.z);
-                result.biome_density =
-                    ws->biomes_enabled() ? ws->biome_table().vegetation_for(biome).density : 0.3;
-            }
-            result.instances_total = foliage->instances().size();
-            result.live_ring_radius_m = foliage->fade_end_m();
-            result.fade_start_m = foliage->fade_start_m();
-            result.fade_end_m = foliage->fade_end_m();
-            result.instances_within_ring =
-                foliage->instances_within(g_camera->Position, foliage->fade_end_m());
-            result.instances_beyond_fade =
-                foliage->instances_beyond(g_camera->Position, foliage->fade_end_m());
-            // Historical saturated-workload calibration, not a measured emission fraction.
-            result.measured_density =
-                std::clamp(static_cast<double>(result.instances_within_ring) / 873813.0, 0.0, 1.0);
-            result.foliage_gpu_ms = stats.foliage_gpu_ms;
-            result.gpu_timers_supported = stats.gpu_timers_supported;
-            result.foliage_draws = stats.foliage_draws;
-            result.foliage_instances_drawn = stats.foliage_instances_drawn;
-            WriteFoliageInstancingAnalysis(
-                scenario_config.artifact_dir, sample.screenshot, result, stats);
-            foliage_capture_written = true;
+        } else if (sample.sampled && write_instances("foliage-windy.bin")) {
+            foliage_windy = sample;
         }
+    }
+    if (foliage_windy.sampled && foliage && foliage->vertex_evidence_ready()) {
+        const auto& sample = foliage_windy;
+        FoliageInstancingResult result;
+        result.evidence = foliage->qualification_evidence();
+        result.calm = foliage_calm;
+        result.windy = sample;
+        result.density_multiplier = scenario_config.foliage_density_scale;
+        if (auto* ws = gameSession->GetWorldSystem()) {
+            result.world_seed =
+                static_cast<std::uint64_t>(static_cast<std::uint32_t>(ws->get_seed()));
+            const auto biome = ws->BiomeIdAt(g_camera->Position.x, g_camera->Position.z);
+            result.biome_density =
+                ws->biomes_enabled() ? ws->biome_table().vegetation_for(biome).density : 0.3;
+        }
+        result.instances_total = foliage->instances().size();
+        result.live_ring_radius_m = foliage->fade_end_m();
+        result.fade_start_m = foliage->fade_start_m();
+        result.fade_end_m = foliage->fade_end_m();
+        result.instances_within_ring =
+            foliage->instances_within(g_camera->Position, foliage->fade_end_m());
+        result.instances_beyond_fade =
+            foliage->instances_beyond(g_camera->Position, foliage->fade_end_m());
+        // Historical saturated-workload calibration, not a measured emission fraction.
+        result.measured_density =
+            std::clamp(static_cast<double>(result.instances_within_ring) / 873813.0, 0.0, 1.0);
+        result.foliage_gpu_ms = stats.foliage_gpu_ms;
+        result.gpu_timers_supported = stats.gpu_timers_supported;
+        result.foliage_draws = stats.foliage_draws;
+        result.foliage_instances_drawn = stats.foliage_instances_drawn;
+        WriteFoliageInstancingAnalysis(
+            scenario_config.artifact_dir, sample.screenshot, result, stats);
+        foliage_capture_written = true;
     }
     if (!foliage_capture_written && progress >= 0.97) {
         foliage_capture_written = true;
@@ -1144,19 +1167,38 @@ void ScenarioRunnerImpl::captureFoliageVisual(std::chrono::steady_clock::time_po
             : !foliage->readback_enabled() ? "readback disabled; play-path captures do not qualify"
             : !foliage_calm.sampled        ? "no fresh calm sample and screenshot before deadline"
             : !fresh ? "windy readback generation did not match the rendered build before deadline"
-                     : "windy draw, instance data or screenshot unavailable before deadline";
-        const nlohmann::json refusal = {
-            {"schema", "luminumbra.foliage_instancing.v2"},
-            {"profile", FoliageVisualProfile::id},
-            {"passed", false},
-            {"refusal", reason},
-            {"phases",
-             {{"calm", FoliagePhaseReport(foliage_calm)},
-              {"windy", FoliagePhaseReport(FoliagePhaseEvidence{})}}},
-            {"capture_frame", scenario_frame_count},
-            {"render_pass",
-             {{"foliage_draws", stats.foliage_draws},
-              {"foliage_instances_drawn", stats.foliage_instances_drawn}}}};
+                     : "windy draw, vertex proof, instance data or screenshot unavailable before "
+                       "deadline";
+        nlohmann::json refusal = {{"schema", "luminumbra.foliage_instancing.v3"},
+                                  {"profile", FoliageVisualProfile::id},
+                                  {"passed", false},
+                                  {"refusal", reason},
+                                  {"phases",
+                                   {{"calm", FoliagePhaseReport(foliage_calm)},
+                                    {"windy", FoliagePhaseReport(FoliagePhaseEvidence{})}}},
+                                  {"capture_frame", scenario_frame_count},
+                                  {"render_pass",
+                                   {{"foliage_draws", stats.foliage_draws},
+                                    {"foliage_instances_drawn", stats.foliage_instances_drawn}}}};
+        if (foliage) {
+            const auto* blocker = foliage->qualification_blocker();
+            refusal["qualification_state"] = {
+                {"start_blocker", blocker ? blocker : "none"},
+                {"started", foliage->qualification_started()},
+                {"rebuild_complete", foliage->qualification_rebuild_complete()},
+                {"first_rebuild_written", foliage_first_rebuild_written},
+                {"second_rebuild_written", foliage_second_rebuild_written},
+                {"fresh_instances", fresh},
+                {"from_gpu_readback", foliage->instances_from_gpu_readback()},
+                {"instance_count", foliage->instances().size()},
+                {"build_generation", foliage->build_generation()},
+                {"instance_generation", foliage->instance_generation()},
+                {"build_frame", foliage->build_frame()},
+                {"available_frame", foliage->instance_available_frame()},
+                {"build_phase", foliage->build_phase()},
+                {"vertex_submission_frame", foliage->vertex_submission_frame(phase)},
+                {"vertex_evidence_ready", foliage->vertex_evidence_ready()}};
+        }
         std::ofstream output(scenario_config.artifact_dir / "foliage-instancing-analysis.json");
         output << std::setw(2) << refusal << '\n';
         LUMINUMBRA_CORE_ERROR("FoliageInstancing: REFUSAL analysis written ({})", reason);
@@ -1468,6 +1510,7 @@ void ScenarioRunnerImpl::capturePlayerView(std::chrono::steady_clock::time_point
 
 void ScenarioRunnerImpl::captureFarLodHorizon(std::chrono::steady_clock::time_point now,
                                               float deltaTime) {
+    (void)deltaTime; // paired replay uses the retained prepared frame
     if (scenario_config.farlod_horizon_smoke() && scenario_ready &&
         !farlod_horizon_stations.empty() && g_camera) {
         const double elapsed_play_seconds =
@@ -1487,29 +1530,30 @@ void ScenarioRunnerImpl::captureFarLodHorizon(std::chrono::steady_clock::time_po
         }
 
         if (progress >= kFarLodHorizonPhaseSplit) {
-            const double sweep =
-                (progress - kFarLodHorizonPhaseSplit) / (1.0 - kFarLodHorizonPhaseSplit);
-            const std::size_t station_count = farlod_horizon_stations.size();
-            const std::size_t time_station_index =
-                std::min(station_count - 1u,
-                         static_cast<std::size_t>(sweep * static_cast<double>(station_count)));
-            // capture the station the
-            // rendered back buffer actually shows (the camera-apply
-            // clamp), not the bare time index. station_progress is
-            // only meaningful when station_index == time_station_index.
             const std::size_t station_index = farlod_horizon_applied_station;
-            const double station_progress =
-                sweep * static_cast<double>(station_count) - static_cast<double>(station_index);
-            // when behind schedule the
-            // settle wait is skipped - the stations are yaw rotations
-            // of an already-settled world (and at ~1 fps a full second
-            // of simulation precedes each frame), so capture
-            // immediately to catch up; when on schedule, keep the 0.7
-            // settle gate.
-            const bool behind_schedule = station_index < time_station_index;
+            const double settle_seconds =
+                std::chrono::duration<double>(std::chrono::steady_clock::now() -
+                                              farlod_horizon_station_started_at)
+                    .count();
+            const auto& fw = renderPipeline.far_world_diagnostic();
+            auto& expected = farlod_horizon_expected_tiles;
+            const bool expected_ok = Luminumbra::World::ComputeFarWantedSet(
+                                         g_camera->Position.x, g_camera->Position.z, expected) ==
+                                     Luminumbra::World::FarWantedError::None;
+            bool station_ready = false;
+            if (fw.selection.effective == Luminumbra::Rendering::FarWorldMode::Ladder)
+                station_ready = expected_ok && Luminumbra::Rendering::FarWorldStationReady(
+                                                   fw, expected, settle_seconds);
+            else if (const auto* legacy = renderPipeline.legacy_far_compatibility())
+                station_ready =
+                    fw.captured &&
+                    fw.selection.requested == Luminumbra::Rendering::FarWorldMode::Legacy &&
+                    fw.selection.refusal == Luminumbra::Rendering::FarWorldRefusal::None &&
+                    legacy->stats().regions_wanted > 0 && legacy->stats().regions_missing == 0 &&
+                    settle_seconds >= 0 && settle_seconds <= 90;
             if (station_index < farlod_horizon_captures_written.size() &&
                 !farlod_horizon_captures_written[station_index] &&
-                (behind_schedule || station_progress >= 0.7)) {
+                (station_ready || settle_seconds >= 90)) {
                 int screenshot_width = 0;
                 int screenshot_height = 0;
                 glfwGetFramebufferSize(window, &screenshot_width, &screenshot_height);
@@ -1551,12 +1595,23 @@ void ScenarioRunnerImpl::captureFarLodHorizon(std::chrono::steady_clock::time_po
 
                     FarLodHorizonStationCapture capture;
                     capture.station = farlod_horizon_stations[station_index];
+                    // Value copy retains water capability/readiness/submission across far OFF.
+                    capture.far_world = fw;
+                    capture.settle_seconds = settle_seconds;
+                    capture.ready_within_deadline = station_ready;
                     //  record the resolved eye world position so the
                     // analysis can confirm all stations share one XZ (constant
                     // ring).
                     capture.camera_world_x = g_camera->Position.x;
                     capture.camera_world_y = g_camera->Position.y;
                     capture.camera_world_z = g_camera->Position.z;
+                    // Derive from the rendered direction; stale Euler labels cannot
+                    // certify a different pose than the view matrix actually uses.
+                    const auto rendered_direction = glm::normalize(g_camera->Front);
+                    capture.camera_yaw_degrees =
+                        glm::degrees(std::atan2(rendered_direction.z, rendered_direction.x));
+                    capture.camera_pitch_degrees =
+                        glm::degrees(std::asin(std::clamp(rendered_direction.y, -1.0f, 1.0f)));
                     capture.sky = AnalyzePlayerViewPixels(
                         frame_pixels, screenshot_width, screenshot_height, horizon_row_from_top);
                     int band_top = 0;
@@ -1602,13 +1657,10 @@ void ScenarioRunnerImpl::captureFarLodHorizon(std::chrono::steady_clock::time_po
                     // above-horizon thin-sliver scan (far ON).
                     capture.sky_sliver = AnalyzeFarLodHorizonSkySliver(
                         frame_pixels, screenshot_width, screenshot_height, horizon_row_from_top);
-                    // snapshot the far-LOD
-                    // scheduler stats for the ON frame BEFORE the paired
-                    // far-OFF render below - that render updates
-                    // farlod->stats to the disabled frame (no wanted/
-                    // resident regions, zero draws), which is not the
-                    // state this capture asserts on.
-                    if (const auto* farlod = renderPipeline.farlod()) {
+                    // Retained v1 counters belong only to effective Legacy.
+                    // Ladder evidence uses the immutable ON value snapshot;
+                    // the paired replay mutates neither scheduler nor snapshot.
+                    if (const auto* farlod = renderPipeline.legacy_far_compatibility()) {
                         const auto& farlod_stats = farlod->stats();
                         capture.regions_wanted = farlod_stats.regions_wanted;
                         capture.regions_resident = farlod_stats.regions_resident;
@@ -1646,15 +1698,8 @@ void ScenarioRunnerImpl::captureFarLodHorizon(std::chrono::steady_clock::time_po
                     // live streak and the legitimate far-LOD horizon
                     // silhouette fuse into one far-ON-only span.)
                     int far_off_sliver_px = -1;
-                    if (auto* farlod = renderPipeline.farlod()) {
-                        const bool was_enabled = farlod->enabled();
-                        farlod->set_enabled(false);
-                        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-                        renderPipeline.render_frame(gameSession->GetRegistry(),
-                                                    *gameSession->GetWorldSystem(),
-                                                    *g_camera,
-                                                    deltaTime,
-                                                    g_app.overlay.wireframe_mode);
+                    if (renderPipeline.render_far_world_off_pair(*g_camera)) {
+                        capture.paired_capture_preserved = true;
                         std::vector<unsigned char> off_pixels(
                             static_cast<std::size_t>(screenshot_width) *
                             static_cast<std::size_t>(screenshot_height) * 3u);
@@ -1670,7 +1715,7 @@ void ScenarioRunnerImpl::captureFarLodHorizon(std::chrono::steady_clock::time_po
                         const auto off_sliver = AnalyzeFarLodHorizonSkySliver(
                             off_pixels, screenshot_width, screenshot_height, horizon_row_from_top);
                         far_off_sliver_px = off_sliver.tallest_sliver_px;
-                        farlod->set_enabled(was_enabled);
+                        // The retained ON diagnostic and scheduler were never mutated.
                         // Masked far-attributable analysis of the ON
                         // frame, cancelling the paired far-OFF intrusion
                         // pixels in a 3x3 neighborhood.

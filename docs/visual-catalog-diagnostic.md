@@ -52,7 +52,7 @@ Retained evidence:
 
 - None qualified for this catalog row.
 
-Next action: Retain all five deterministic 256x256 fixture originals and assertions; improve labels/diagnostic readability and link real production scenes rather than prettifying synthetic truth.
+Next action: Retain all five deterministic 256x256 fixture originals and assertions; improve labels/diagnostic readability and link real production scenes rather than prettifying synthetic truth. Native acceptance not produced for v0.3.0 is deferred to v0.3.1.
 
 ## D02
 
@@ -108,7 +108,7 @@ Retained evidence:
 
 - None qualified for this catalog row.
 
-Next action: Capture every neutral/lit material and gray/white plate with controlled settings, scales and color/contrast/clipping values; link R08 and G04 defects.
+Next action: Capture every neutral/lit material and gray/white plate with controlled settings, scales and color/contrast/clipping values; link R08 and G04 defects. Native acceptance not produced for v0.3.0 is deferred to v0.3.1.
 
 ## D03
 
@@ -139,7 +139,13 @@ Implementation dependencies:
 - S2: Serialized native capture and source-correlated measurement on freshly identified local hardware.
 - S3: Current lighting, material, water and weather paths; diagnose existing defects first.
 
-Capture: **missing**. No reviewed command retaining the complete required image/temporal packet has been established. Supporting source tests do not fill this gap.
+Capture: **existing_subset**. Writes emissive-calibration.json (intensity-to-luminance table and monotonic flag) to the build-defined artifact directory. No retained image, no nonemissive control scene, no temporal packet; GL-skips without a context, so a zero-test or skipped exit 0 is not evidence.
+
+Arguments are a command template, not a newly executed run. Replace placeholders with owned native paths and a fresh output directory; reserve the native slot first.
+
+```text
+<build>/bin/render_smoke_test --gtest_filter=RenderSmokeTest.EmissiveCalibrationMonotonic
+```
 
 Acceptance checks:
 
@@ -153,7 +159,7 @@ Retained evidence:
 
 - None qualified for this catalog row.
 
-Next action: Capture emitter intensity ladder with nonemissive controls and scene context; retain actual monotonicity and material identity.
+Next action: Capture emitter intensity ladder with nonemissive controls and scene context; retain actual monotonicity and material identity. Native acceptance not produced for v0.3.0 is deferred to v0.3.1.
 
 ## D04
 
@@ -198,7 +204,7 @@ Retained evidence:
 
 - None qualified for this catalog row.
 
-Next action: Capture procedural leaf alpha closeups on light/dark backgrounds and mips; attach silhouette/color measures and compare authored canopy separately.
+Next action: Capture procedural leaf alpha closeups on light/dark backgrounds and mips; attach silhouette/color measures and compare authored canopy separately. Native acceptance not produced for v0.3.0 is deferred to v0.3.1.
 
 ## D05
 
@@ -242,7 +248,7 @@ Retained evidence:
 
 - None qualified for this catalog row.
 
-Next action: Capture matched shaded/full-frame material detail and bright reference with luminance/contrast values; do not conceal current black-band geometry defect through grading.
+Next action: Capture matched shaded/full-frame material detail and bright reference with luminance/contrast values; do not conceal current black-band geometry defect through grading. Native acceptance not produced for v0.3.0 is deferred to v0.3.1.
 
 ## D06
 
@@ -286,7 +292,7 @@ Retained evidence:
 
 - None qualified for this catalog row.
 
-Next action: Capture common shadow edge across grass/terrain with matched projection and ordered samples, reusing R12 scene where exact support holds.
+Next action: Capture common shadow edge across grass/terrain with matched projection and ordered samples, reusing R12 scene where exact support holds. Native acceptance not produced for v0.3.0 is deferred to v0.3.1.
 
 ## D07
 
@@ -331,7 +337,7 @@ Retained evidence:
 
 - None qualified for this catalog row.
 
-Next action: Capture wet/dry/far-depth caustic controls with normalized target readback; add clear scene-level shoreline context from R06.
+Next action: Capture wet/dry/far-depth caustic controls with normalized target readback; add clear scene-level shoreline context from R06. Native acceptance not produced for v0.3.0 is deferred to v0.3.1.
 
 ## D08
 
@@ -376,7 +382,7 @@ Retained evidence:
 
 - None qualified for this catalog row.
 
-Next action: Capture ground/elevated fog and aerial-haze comparisons with terrain/sky ROI classification and actual camera metadata.
+Next action: Capture ground/elevated fog and aerial-haze comparisons with terrain/sky ROI classification and actual camera metadata. Native acceptance not produced for v0.3.0 is deferred to v0.3.1.
 
 ## D09
 
@@ -420,7 +426,7 @@ Retained evidence:
 
 - None qualified for this catalog row.
 
-Next action: Capture occluded/unoccluded ray scenes with source attachment and blocker evidence, preserving full-frame context and measured ROI.
+Next action: Capture occluded/unoccluded ray scenes with source attachment and blocker evidence, preserving full-frame context and measured ROI. Native acceptance not produced for v0.3.0 is deferred to v0.3.1.
 
 ## D10
 
@@ -464,7 +470,7 @@ Retained evidence:
 
 - None qualified for this catalog row.
 
-Next action: Capture matched weather stationarity and storm soft-edge controls after ownership fixes; confirm projection and normal invariants.
+Next action: Capture matched weather stationarity and storm soft-edge controls after ownership fixes; confirm projection and normal invariants. Native acceptance not produced for v0.3.0 is deferred to v0.3.1.
 
 ## D11
 
@@ -509,7 +515,7 @@ Retained evidence:
 
 - None qualified for this catalog row.
 
-Next action: Use current bounded-blade tests to distinguish raw wind from actual deformation; capture taper/slope/wind controls and connect to repaired R14.
+Next action: Use current bounded-blade tests to distinguish raw wind from actual deformation; capture taper/slope/wind controls and connect to repaired R14. Native acceptance not produced for v0.3.0 is deferred to v0.3.1.
 
 ## D12
 
@@ -553,7 +559,7 @@ Retained evidence:
 
 - None qualified for this catalog row.
 
-Next action: Capture actual roughness/light-direction controls with analytic evidence and material range, without invented off-path shading panels.
+Next action: Capture actual roughness/light-direction controls with analytic evidence and material range, without invented off-path shading panels. Native acceptance not produced for v0.3.0 is deferred to v0.3.1.
 
 ## D13
 
@@ -597,7 +603,7 @@ Retained evidence:
 
 - None qualified for this catalog row.
 
-Next action: Capture transmitted colored light with blocker/surface context and Beer-Lambert references, checking clip/color against measurements.
+Next action: Capture transmitted colored light with blocker/surface context and Beer-Lambert references, checking clip/color against measurements. Native acceptance not produced for v0.3.0 is deferred to v0.3.1.
 
 ## D14
 
@@ -611,7 +617,7 @@ Fixture: Uniform-medium analytic comparison and plotted actual samples, plus rea
 
 Source links:
 
-- [test/rendering/render_smoke_test.cpp](https://github.com/d-addison/luminumbra/blob/945ecd295835a838eed0169ff709e7aabc134fa1/test/rendering/render_smoke_test.cpp)
+- [test/rendering/render_smoke_test.cpp](https://github.com/d-addison/luminumbra/blob/6b5f955d928bc6c443fc79cc0ac4a06a38765b55/test/rendering/render_smoke_test.cpp)
 
 Required variants:
 
@@ -635,13 +641,13 @@ Acceptance checks:
 - Uniform-medium analytic comparison and plotted actual samples, plus real layered atmospheric scene; diagnostic explicitly labeled.
 - Meet the shared packet contract and preserve independent regression checks; each listed variant is required.
 
-Source reconciliation at `945ecd295835a838eed0169ff709e7aabc134fa1`: Source fixture or supporting assertions are present. Current native screenshots, all required variants and performance have not been qualified for this catalog.
+Source reconciliation at `6b5f955d928bc6c443fc79cc0ac4a06a38765b55`: Froxel volumetrics are enabled in the shipping defaults. Analytic supporting fixtures exist; actual transmittance packets and complete native quality/performance qualification remain outstanding.
 
 Retained evidence:
 
 - None qualified for this catalog row.
 
-Next action: Qualify enabled froxel path and actual transmittance output before plotting density/depth residuals; mark opt-in quality profile in screenshots and timings.
+Next action: Qualify shipping-default froxel transmittance and layered atmospheric output; plot density/depth residuals with actual default settings and timings. Native acceptance not produced for v0.3.0 is deferred to v0.3.1.
 
 ## D15
 
@@ -655,7 +661,7 @@ Fixture: At least two actual GPU exposures and luminance monotonicity; manual/au
 
 Source links:
 
-- [test/rendering/render_capture_test.cpp](https://github.com/d-addison/luminumbra/blob/945ecd295835a838eed0169ff709e7aabc134fa1/test/rendering/render_capture_test.cpp)
+- [test/rendering/render_capture_test.cpp](https://github.com/d-addison/luminumbra/blob/6b5f955d928bc6c443fc79cc0ac4a06a38765b55/test/rendering/render_capture_test.cpp)
 
 Required variants:
 
@@ -679,13 +685,13 @@ Acceptance checks:
 - At least two actual GPU exposures and luminance monotonicity; manual/auto precedence and exact lens values, full-frame sequence.
 - Meet the shared packet contract and preserve independent regression checks; each listed variant is required.
 
-Source reconciliation at `945ecd295835a838eed0169ff709e7aabc134fa1`: Source fixture or supporting assertions are present. Current native screenshots, all required variants and performance have not been qualified for this catalog.
+Source reconciliation at `6b5f955d928bc6c443fc79cc0ac4a06a38765b55`: Automatic exposure is enabled in the shipping defaults. Manual/automatic precedence and actual GPU exposure response still require a complete native packet; source defaults do not establish qualification.
 
 Retained evidence:
 
 - None qualified for this catalog row.
 
-Next action: Capture actual manual/auto exposure pair and settings with monotonic luminance proof, preserving shipped versus opt-in meter distinction.
+Next action: Capture shipping-default automatic exposure and manual override behavior with exact lens/settings and actual GPU luminance monotonicity proof. Native acceptance not produced for v0.3.0 is deferred to v0.3.1.
 
 ## D16
 
@@ -731,7 +737,7 @@ Retained evidence:
 
 - None qualified for this catalog row.
 
-Next action: Qualify each existing raw-GL/Diligent/Vulkan pilot on local host, retain reference/current/diff with exact metric version; never claim complete backend parity.
+Next action: Qualify each existing raw-GL/Diligent/Vulkan pilot on local host, retain reference/current/diff with exact metric version; never claim complete backend parity. Native acceptance not produced for v0.3.0 is deferred to v0.3.1.
 
 ## D17
 
@@ -776,7 +782,7 @@ Retained evidence:
 
 - None qualified for this catalog row.
 
-Next action: Retain actual glass occlusion pixels before/after resize with shared-depth attachment proof; add output retention if assertions currently discard pixels.
+Next action: Retain actual glass occlusion pixels before/after resize with shared-depth attachment proof; add output retention if assertions currently discard pixels. Native acceptance not produced for v0.3.0 is deferred to v0.3.1.
 
 ## D18
 
@@ -819,7 +825,7 @@ Retained evidence:
 
 - None qualified for this catalog row.
 
-Next action: Produce separate actual albedo and decal/scent-placement diagnostic images with G-buffer/context and world-position proof.
+Next action: Produce separate actual albedo and decal/scent-placement diagnostic images with G-buffer/context and world-position proof. Native acceptance not produced for v0.3.0 is deferred to v0.3.1.
 
 ## D19
 
@@ -863,7 +869,7 @@ Retained evidence:
 
 - None qualified for this catalog row.
 
-Next action: Retain blocker/grass-mesh lifecycle before/after frames and depth/readback evidence to expose stale shadows or orphan grass.
+Next action: Retain blocker/grass-mesh lifecycle before/after frames and depth/readback evidence to expose stale shadows or orphan grass. Native acceptance not produced for v0.3.0 is deferred to v0.3.1.
 
 ## D20
 
@@ -877,7 +883,9 @@ Fixture: Existing384²spawn_horizon plus mesh quadrant/collider/LOD counts, seam
 
 Source links:
 
-- [test/performance/runtime_world_visual_validation_test.cpp](https://github.com/d-addison/luminumbra/blob/945ecd295835a838eed0169ff709e7aabc134fa1/test/performance/runtime_world_visual_validation_test.cpp)
+- [test/performance/runtime_world_visual_validation_test.cpp](https://github.com/d-addison/luminumbra/blob/6b5f955d928bc6c443fc79cc0ac4a06a38765b55/test/performance/runtime_world_visual_validation_test.cpp)
+- [test/rendering/FarVolumeRenderMesh_test.cpp](https://github.com/d-addison/luminumbra/blob/6b5f955d928bc6c443fc79cc0ac4a06a38765b55/test/rendering/FarVolumeRenderMesh_test.cpp)
+- [tools/gates/far_ladder_oracle.py](https://github.com/d-addison/luminumbra/blob/6b5f955d928bc6c443fc79cc0ac4a06a38765b55/tools/gates/far_ladder_oracle.py)
 
 Required variants:
 
@@ -893,7 +901,13 @@ Implementation dependencies:
 - S2: Serialized native capture and source-correlated measurement on freshly identified local hardware.
 - S6: Terrain/streaming/spatial continuity, independent coverage, persistent world authority.
 
-Capture: **missing**. No reviewed command retaining the complete required image/temporal packet has been established. Supporting source tests do not fill this gap.
+Capture: **existing_subset**. Writes spawn_horizon.ppm and runtime_world_visual.json (horizon coverage metrics) and lod_seams.json (mixed-LOD seam metrics) to the build-defined artifact directory. No high-resolution companion or per-region diagnosis; GL-skips without a context, so a skipped exit 0 is not evidence.
+
+Arguments are a command template, not a newly executed run. Replace placeholders with owned native paths and a fresh output directory; reserve the native slot first.
+
+```text
+<build>/bin/runtime_world_visual_validation_test --gtest_filter=RuntimeWorldVisualValidationTest.SpawnHorizonRendersBroadVisibleCoverage:RuntimeWorldVisualValidationTest.MixedLodBoundariesAreContinuousAndReported
+```
 
 Acceptance checks:
 
@@ -901,13 +915,13 @@ Acceptance checks:
 - Existing384²spawn_horizon plus mesh quadrant/collider/LOD counts, seam visualization and qualified high-resolution companion.
 - Meet the shared packet contract and preserve independent regression checks; each listed variant is required.
 
-Source reconciliation at `945ecd295835a838eed0169ff709e7aabc134fa1`: Source fixture or supporting assertions are present. Current native screenshots, all required variants and performance have not been qualified for this catalog.
+Source reconciliation at `6b5f955d928bc6c443fc79cc0ac4a06a38765b55`: Canonical volumetric generation, meshing, queue, residency, upload and render integration are implemented, including water/fog infrastructure, shadow exclusion and horizon diagnostics. Ladder is the default requested far-world mode. Missing immutable authority in normal presets still causes an explicit refusal and effective Legacy fallback (roughly 3 km range and a 3,200 m far plane); the default request does not establish 16 km native coverage. The committed-generation edited-SDF producer and FW S8 consumer, immutable authority for the refusing horizon gate, and complete native qualification are planned for v0.3.1.
 
 Retained evidence:
 
 - None qualified for this catalog row.
 
-Next action: Re-capture 384x384 runtime horizon alongside high-resolution companion and regional coverage, using black-band findings to strengthen per-region diagnosis.
+Next action: Re-capture 384x384 runtime horizon alongside high-resolution companion and regional coverage, using black-band findings to strengthen per-region diagnosis. Native acceptance not produced for v0.3.0 is deferred to v0.3.1.
 
 ## D21
 
@@ -941,7 +955,13 @@ Implementation dependencies:
 - S6: Terrain/streaming/spatial continuity, independent coverage, persistent world authority.
 - S8: Diagnostic atlas/backend outputs with honest native versus supporting evidence labels.
 
-Capture: **missing**. No reviewed command retaining the complete required image/temporal packet has been established. Supporting source tests do not fill this gap.
+Capture: **existing_subset**. Writes the named layer snapshot maps and metrics to the build-defined artifact directory. Biome and river tests in the same binary retain only aggregate metrics JSON and the preset test produces its own atlas; none of those are claimed here; no matched engine views.
+
+Arguments are a command template, not a newly executed run. Replace placeholders with owned native paths and a fresh output directory; reserve the native slot first.
+
+```text
+<build>/bin/worldgen_layer_snapshot_test --gtest_filter=WorldGenLayerSnapshotTest.ExportsLayerMetricsAndImages
+```
 
 Acceptance checks:
 
@@ -955,7 +975,7 @@ Retained evidence:
 
 - None qualified for this catalog row.
 
-Next action: Enumerate all layer/preset/biome/river atlas variants, regenerate maps with scales and hashes, then attach matched engine views for interpretation.
+Next action: Enumerate all layer/preset/biome/river atlas variants, regenerate maps with scales and hashes, then attach matched engine views for interpretation. Native acceptance not produced for v0.3.0 is deferred to v0.3.1.
 
 ## D22
 
@@ -1003,4 +1023,4 @@ Retained evidence:
 
 - None qualified for this catalog row.
 
-Next action: Run existing far-field GPU truth/G-buffer/max-mip producers on qualified native backend, retain residual images and timer status; missing platform support stays blocked.
+Next action: Run existing far-field GPU truth/G-buffer/max-mip producers on qualified native backend, retain residual images and timer status; missing platform support stays blocked. Native acceptance not produced for v0.3.0 is deferred to v0.3.1.

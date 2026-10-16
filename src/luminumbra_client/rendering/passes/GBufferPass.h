@@ -1,5 +1,7 @@
 #pragma once
 
+#include "FarWorldPassUniforms.h"
+
 #include "../GBuffer.h"       // GBuffer attachments (value member)
 #include "../RenderContext.h" // per-frame pass contract (RenderContext)
 #include "../RenderInputs.h"  // GBufferPassInput / GBufferDrawStats
@@ -20,6 +22,7 @@
 namespace Luminumbra::Rendering {
 
 class Camera;
+class StaticDrawPass;
 class Shader;
 struct Mesh;
 class RenderResourceRegistry;
@@ -58,6 +61,10 @@ public:
     void destroy_skinned_mesh();
     void reset_shaders();
 
+    // Validate every required variant before the frame selects its scheduler,
+    // camera plane and pass programs. A failed reload retains its valid program.
+    FarWorldSelection SelectFarWorldRenderer(FarWorldSelection selection) const;
+
     // RenderContext seam. Returns the draw stats the
     // call site folds into RenderPassFrameStats with the exact =/+= policy
     // (terrain_visible_chunks '=', all other counters '+=').
@@ -70,14 +77,17 @@ public:
     const GBuffer& gbuffer() const {
         return m_gbuffer;
     }
-    const std::unique_ptr<Shader>& geometry_shader() const {
-        return m_geometry_shader;
+    const std::unique_ptr<Shader>& geometry_shader(FarWorldMode mode = FarWorldMode::Legacy) const {
+        return mode == FarWorldMode::Ladder ? m_geometry_ladder_shader : m_geometry_shader;
     }
-    const std::unique_ptr<Shader>& instanced_static_mesh_shader() const {
-        return m_instanced_static_mesh_shader;
+    const std::unique_ptr<Shader>&
+    instanced_static_mesh_shader(FarWorldMode mode = FarWorldMode::Legacy) const {
+        return mode == FarWorldMode::Ladder ? m_instanced_static_mesh_ladder_shader
+                                            : m_instanced_static_mesh_shader;
     }
-    const std::unique_ptr<Shader>& skinned_mesh_shader() const {
-        return m_skinned_mesh_shader;
+    const std::unique_ptr<Shader>&
+    skinned_mesh_shader(FarWorldMode mode = FarWorldMode::Legacy) const {
+        return mode == FarWorldMode::Ladder ? m_skinned_mesh_ladder_shader : m_skinned_mesh_shader;
     }
     GLuint instance_matrix_vbo() const {
         return m_instanceMatrixVBO;
@@ -106,7 +116,8 @@ private:
                                      const GBufferPassInput& input,
                                      entt::registry& registry,
                                      const Camera& camera,
-                                     const glm::vec4 (&frustum_planes)[6]);
+                                     const glm::vec4 (&frustum_planes)[6],
+                                     GBufferDrawStats& stats);
     void geometry_pass_skinned_meshes(const RenderContext& ctx,
                                       const GBufferPassInput& input,
                                       entt::registry& registry,
@@ -114,10 +125,17 @@ private:
                                       const glm::vec4 (&frustum_planes)[6],
                                       GBufferDrawStats& stats);
 
+    FarWorldPassUniforms m_geometry_far_uniforms, m_static_far_uniforms, m_skinned_far_uniforms;
+    FarWorldPassUniforms m_geometry_ladder_uniforms, m_static_ladder_uniforms,
+        m_skinned_ladder_uniforms;
     GBuffer m_gbuffer;
+    std::unique_ptr<StaticDrawPass> m_authored_pass;
     std::unique_ptr<Shader> m_geometry_shader;
+    std::unique_ptr<Shader> m_geometry_ladder_shader;
     std::unique_ptr<Shader> m_instanced_static_mesh_shader;
+    std::unique_ptr<Shader> m_instanced_static_mesh_ladder_shader;
     std::unique_ptr<Shader> m_skinned_mesh_shader;
+    std::unique_ptr<Shader> m_skinned_mesh_ladder_shader;
     std::map<std::string, std::unique_ptr<Mesh>> m_meshCache;
     std::map<std::string, std::unique_ptr<Mesh>> m_skinnedMeshCache;
     GLuint m_instanceMatrixVBO = 0;

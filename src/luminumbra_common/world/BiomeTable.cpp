@@ -1,12 +1,17 @@
 #include "BiomeTable.h"
 
 #include <algorithm>
+#include <array>
+#include <bit>
+#include <cstring>
 #include <fstream>
 #include <initializer_list>
 #include <optional>
+#include <type_traits>
 
 #include "nlohmann/json.hpp"
 
+#include "../core/FilesystemPath.h"
 #include "../core/Log.h"
 
 namespace Luminumbra::World {
@@ -23,9 +28,18 @@ void FnvMix(u64& hash, const void* data, std::size_t size) {
     }
 }
 
+// Mixes the value's object representation in canonical little-endian byte order so the hash does
+// not depend on the host byte order (identical to the previous native-order mixing on little-endian
+// hosts).
 template<typename T>
 void FnvMixValue(u64& hash, const T& value) {
-    FnvMix(hash, &value, sizeof(T));
+    static_assert(std::is_trivially_copyable_v<T>, "FnvMixValue hashes the object representation");
+    std::array<unsigned char, sizeof(T)> bytes{};
+    std::memcpy(bytes.data(), &value, sizeof(T));
+    if constexpr (std::endian::native == std::endian::big) {
+        std::reverse(bytes.begin(), bytes.end());
+    }
+    FnvMix(hash, bytes.data(), bytes.size());
 }
 
 // Climate range edges are quantized onto a fixed 1/1024 grid before hashing so
@@ -77,8 +91,8 @@ void WarnUnknownKeys(const nlohmann::json& object,
             }
         }
         if (!known) {
-            std::string warning = "biome table '" + table_path.string() + "' has unknown key " +
-                                  scope + "." + item.key();
+            std::string warning = "biome table '" + Filesystem::GenericUtf8PathString(table_path) +
+                                  "' has unknown key " + scope + "." + item.key();
             LUMINUMBRA_CORE_WARN("{}", warning);
             warnings.push_back(std::move(warning));
         }
@@ -102,26 +116,29 @@ BiomeClimateRange ParseRange(const nlohmann::json& climate, const char* key) {
 
 } // namespace
 
-BiomeTable BiomeTable::Load(const std::filesystem::path& table_path) {
+BiomeTable BiomeTable::Load(const std::filesystem::path& table_path,
+                            const WorldgenFileReader& read_file) {
     BiomeTable table;
 
-    std::ifstream file(table_path);
-    if (!file.is_open()) {
-        table.m_errors.push_back("failed to open biome table: " + table_path.string());
+    std::string bytes;
+    if (!read_file(table_path, bytes)) {
+        table.m_errors.push_back("failed to open biome table: " +
+                                 Filesystem::GenericUtf8PathString(table_path));
         return table;
     }
 
     nlohmann::json data;
     try {
-        data = nlohmann::json::parse(file);
+        data = nlohmann::json::parse(bytes);
     } catch (const nlohmann::json::parse_error& e) {
-        table.m_errors.push_back("failed to parse biome table JSON '" + table_path.string() +
-                                 "': " + e.what());
+        table.m_errors.push_back("failed to parse biome table JSON '" +
+                                 Filesystem::GenericUtf8PathString(table_path) + "': " + e.what());
         return table;
     }
 
     if (!data.is_object() || !data.contains("biomes") || !data["biomes"].is_array()) {
-        table.m_errors.push_back("biome table is missing array 'biomes': " + table_path.string());
+        table.m_errors.push_back("biome table is missing array 'biomes': " +
+                                 Filesystem::GenericUtf8PathString(table_path));
         return table;
     }
 

@@ -1,12 +1,11 @@
-// Regressions from the independent review of candidate 2c32211:
-//  (1) saving while crouched reloaded the player 0.81 m below the saved feet because both
-//      quit/shutdown saves recorded the live camera position while world entry derives the
-//      feet from the spawn point minus the STANDING eye height;
-//  (2) the LUMIN_TREE_IMPOSTORS switch was interpreted differently by the render pipeline
-//      (empty or '0'-prefixed disables) and the world-entry gate (only exactly "0"), so a
-//      documented disable value could refuse world entry.
+// Save and world-entry contracts:
+//  (1) quit/shutdown saves use the standing eye anchor regardless of stance, so world
+//      entry derives the saved feet from the spawn point minus the standing eye height;
+//  (2) the render pipeline and world-entry gate share the LUMIN_TREE_IMPOSTORS policy:
+//      empty or '0'-prefixed values disable impostors without refusing world entry.
 #include <gtest/gtest.h>
 
+#include "core/BenchmarkPose.h"
 #include "player/SaveAnchor.h"
 #include "rendering/TreeImpostorPolicy.h"
 
@@ -54,4 +53,75 @@ TEST(TreeImpostorPolicy, DocumentedDisableValuesDisableEverywhere) {
     EXPECT_FALSE(TreeImpostorsRequested(std::string("0abc")));
     EXPECT_TRUE(TreeImpostorsRequested(std::string("1")));
     EXPECT_TRUE(TreeImpostorsRequested(std::string("yes")));
+}
+
+namespace {
+using Luminumbra::BenchmarkPose::SelectStreamingPosition;
+using Luminumbra::BenchmarkPose::StreamingInputs;
+
+StreamingInputs BaseInputs() {
+    StreamingInputs in{};
+    in.fixed_cam_pos = glm::vec3(1.0f, 2.0f, 3.0f);
+    in.camera_pos = glm::vec3(30.0f, 40.0f, 50.0f);
+    in.player_pos = glm::vec3(-5.0f, -6.0f, -7.0f);
+    return in;
+}
+} // namespace
+
+TEST(BenchmarkPose, FixedCameraWinsOverEverything) {
+    StreamingInputs in = BaseInputs();
+    in.fixed_cam = true;
+    in.benchmark_active = true;
+    in.has_camera = true;
+    in.cam_anchored = true;
+    in.has_player = true;
+    EXPECT_EQ(SelectStreamingPosition(in), in.fixed_cam_pos);
+}
+
+TEST(BenchmarkPose, BenchmarkWithCameraUsesDefaultPose) {
+    StreamingInputs in = BaseInputs();
+    in.benchmark_active = true;
+    in.has_camera = true;
+    in.has_player = true;
+    EXPECT_EQ(SelectStreamingPosition(in), glm::vec3(8.0f, 56.0f, 8.0f));
+}
+
+TEST(BenchmarkPose, BenchmarkWithoutCameraFallsBackToPlayer) {
+    StreamingInputs in = BaseInputs();
+    in.benchmark_active = true;
+    in.has_camera = false;
+    in.has_player = true;
+    EXPECT_EQ(SelectStreamingPosition(in), in.player_pos);
+}
+
+TEST(BenchmarkPose, InactiveBenchmarkAnchoredUsesCamera) {
+    StreamingInputs in = BaseInputs();
+    in.has_camera = true;
+    in.cam_anchored = true;
+    in.has_player = true;
+    EXPECT_EQ(SelectStreamingPosition(in), in.camera_pos);
+}
+
+TEST(BenchmarkPose, UnanchoredWithPlayerUsesPlayer) {
+    StreamingInputs in = BaseInputs();
+    in.has_camera = true;
+    in.has_player = true;
+    EXPECT_EQ(SelectStreamingPosition(in), in.player_pos);
+}
+
+TEST(BenchmarkPose, UnanchoredWithoutPlayerUsesCamera) {
+    StreamingInputs in = BaseInputs();
+    in.has_camera = true;
+    in.has_player = false;
+    EXPECT_EQ(SelectStreamingPosition(in), in.camera_pos);
+}
+
+TEST(BenchmarkPose, ConstantsMatchRenderBenchmarkDefaults) {
+    namespace BP = Luminumbra::BenchmarkPose;
+    EXPECT_FLOAT_EQ(BP::kPosX, 8.0f);
+    EXPECT_FLOAT_EQ(BP::kPosY, 56.0f);
+    EXPECT_FLOAT_EQ(BP::kPosZ, 8.0f);
+    EXPECT_FLOAT_EQ(BP::kYaw, 35.0f);
+    EXPECT_FLOAT_EQ(BP::kPitch, -6.0f);
+    EXPECT_FLOAT_EQ(BP::kTimeOfDay, 0.04f);
 }

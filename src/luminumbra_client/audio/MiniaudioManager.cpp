@@ -22,8 +22,12 @@ MiniaudioManager::~MiniaudioManager() {
 }
 
 bool MiniaudioManager::Init() {
+    return Init(ma_engine_init);
+}
+
+bool MiniaudioManager::Init(EngineInitializer initialize_engine) {
     m_engine = std::make_unique<ma_engine>();
-    ma_result result = ma_engine_init(nullptr, m_engine.get());
+    ma_result result = initialize_engine(nullptr, m_engine.get());
     if (result != MA_SUCCESS) {
         LUMINUMBRA_CORE_ERROR("Failed to initialize miniaudio engine.");
         m_engine = nullptr;
@@ -921,9 +925,8 @@ void MiniaudioManager::SetPhysicsSystem(::Luminumbra::Systems::PhysicsSystem* ph
     m_spatial_cluster->SetPhysicsSystem(physics_system);
     // The caller re-issues this binding every in-game frame (FrameAudio.cpp) so that a
     // world (re)load rebinds without extra plumbing. Logging is edge-triggered: the
-    // previous unconditional INFO line produced one synchronous logger write per rendered
-    // frame on the render thread (77,659 lines in the PID 66604 session, see
-    // docs/v0.3-acceptance.md), which is a defect regardless of that session's hang cause.
+    // binding emits an INFO line only when it changes, avoiding synchronous logger
+    // writes on the render thread for an unchanged binding.
     if (physics_system == m_cluster_physics_system) {
         return;
     }

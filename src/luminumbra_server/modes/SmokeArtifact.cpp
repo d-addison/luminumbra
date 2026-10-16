@@ -74,8 +74,9 @@ int WriteSmokeArtifact(const ServerCliOptions& options,
                                   first.ecology_hash == replay.ecology_hash &&
                                   first.plant_hash == replay.plant_hash;
 
-    const bool deterministic =
-        first.ok && replay.ok && first.world_hash == replay.world_hash && sub_hashes_match;
+    const bool deterministic = first.ok && replay.ok && first.world_hash == replay.world_hash &&
+                               sub_hashes_match &&
+                               first.effective_simulation == replay.effective_simulation;
 
     // The per-tick availability-set trace must be run==replay. This proves the
     // activation queue preserves deterministic availability tick-for-tick, not
@@ -114,7 +115,14 @@ int WriteSmokeArtifact(const ServerCliOptions& options,
         !options.sim_budget || first.sim_budget.WorkMatches(replay.sim_budget);
     if (!sim_budget_match)
         LUMINUMBRA_CORE_ERROR("Simulation budget work trace does not match replay");
-    const bool passed = sim_budget_match && deterministic &&
+    // Budget profile violations fail the smoke. Unevaluated profile entries do not. The verdict
+    // is recomputed identically by AppendSimBudgetEnforcement when the artifact is written.
+    const bool sim_budget_profile_ok =
+        !options.sim_budget_profile ||
+        EvaluateSimBudgetProfile(*options.sim_budget_profile, first.sim_budget).no_violation;
+    if (!sim_budget_profile_ok)
+        LUMINUMBRA_CORE_ERROR("Simulation budget profile violated (see sim_budget.enforcement)");
+    const bool passed = sim_budget_match && deterministic && sim_budget_profile_ok &&
                         first.ticks.ticks_executed == options.ticks &&
                         replay.ticks.ticks_executed == options.ticks && first.chunks_streamed > 0 &&
                         water_nonvacuous;
@@ -294,7 +302,15 @@ int WriteSmokeArtifact(const ServerCliOptions& options,
         }
     }
 
+    if (!first.effective_simulation.empty())
+        artifact["effective_simulation"] = first.effective_simulation;
     Luminumbra::Server::AppendSimBudgetArtifact(artifact, first.sim_budget, replay.sim_budget);
+    if (options.sim_budget_profile) {
+        Luminumbra::Server::AppendSimBudgetEnforcement(artifact,
+                                                       *options.sim_budget_profile,
+                                                       options.sim_budget_profile_bytes,
+                                                       first.sim_budget);
+    }
 
     if (!options.artifact_path.empty()) {
         const fs::path artifact_path(options.artifact_path);

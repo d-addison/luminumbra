@@ -6,12 +6,18 @@
 # the comparison and the commit happen on normalised bytes, so the churn can
 # neither be seen nor be committed. Binary files are detected and left alone.
 * text=auto
+# Upstream schema pin and embedded traversal identity use exact file bytes.
+tools/release/spdx/spdx-2.3.schema.json -text
+tools/perf/fixtures/*.traversal -text
 # Devel persistence oracle: preserve exact fixture bytes on every platform.
 test/fixtures/active-regions/devel-off/* -text
 test/fixtures/active-regions/devel-off-plant-edit/* -text
 
 # Fixed serializer baseline bytes; the test handles native Windows stream newlines.
 test/fixtures/smoke_artifact/devel-*.json -text
+
+# Original acceptance receipts retain byte identity across platforms.
+docs/evidence/blender-presentation-20260913/*.json -text
 
 # Catalog and historical receipt identities must survive native Windows checkout.
 docs/visual-catalog*.json text eol=lf

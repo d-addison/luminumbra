@@ -1,6 +1,51 @@
 # File-only capture checks. Dot-sourcing this file defines functions without
 # running a gate, creating artifacts, or changing the caller's preferences.
 
+function Read-JsonArtifact {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true, Position = 0)][string]$Path,
+        [Parameter(Mandatory = $true, Position = 1)][string]$Schema
+    )
+
+    $stream = $null
+    try {
+        if ([string]::IsNullOrWhiteSpace($Schema)) { throw "expected a nonempty schema" }
+        $resolved = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path)
+        $stream = [System.IO.File]::OpenRead($resolved)
+        if ($stream.Length -le 0 -or $stream.Length -gt 16777216) {
+            throw "expected a JSON artifact between 1 byte and 16 MiB"
+        }
+        # Strict UTF-8 without encoding sniffing: invalid bytes throw instead of
+        # becoming U+FFFD, and UTF-16/32 byte-order marks are refused.
+        $bytes = New-Object byte[] ([int]$stream.Length)
+        $read = 0
+        while ($read -lt $bytes.Length) {
+            $count = $stream.Read($bytes, $read, $bytes.Length - $read)
+            if ($count -le 0) { throw "artifact ended while reading" }
+            $read += $count
+        }
+        $offset = 0
+        if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) {
+            $offset = 3
+        }
+        $strictUtf8 = New-Object System.Text.UTF8Encoding($false, $true)
+        $json = $strictUtf8.GetString($bytes, $offset, $bytes.Length - $offset)
+        if ($json -notmatch '^\s*\{') { throw "artifact root must be a JSON object" }
+        $artifact = $json | ConvertFrom-Json -ErrorAction Stop
+        if ($artifact -isnot [pscustomobject] -or
+            $artifact.PSObject.Properties.Name -cnotcontains "schema" -or
+            $artifact.schema -isnot [string] -or $artifact.schema -cne $Schema) {
+            throw "expected schema '$Schema'"
+        }
+        return $artifact
+    } catch {
+        throw "JSON artifact '$Path': $($_.Exception.Message)"
+    } finally {
+        if ($null -ne $stream) { $stream.Dispose() }
+    }
+}
+
 function Get-CapturePinProfile {
     param([string]$Profile = "runtime_scenario_v1")
 

@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <initializer_list>
 #include <optional>
 #include <stop_token>
 #include <string>
@@ -24,6 +25,14 @@ struct WorldSaveDirtyReport {
     std::size_t chunks_dirty = 0;
     std::size_t regions_written = 0;
     bool saved = false;
+};
+
+// Inputs of the region simulation digest. Priority when ids collide: live over
+// parked over durable edited records. Parked is the dirty-chunk parking area
+// introduced by a later slice; it is empty until then.
+struct RegionDigestInputs {
+    std::vector<std::shared_ptr<Chunk>> live;
+    std::vector<std::shared_ptr<Chunk>> parked;
 };
 
 // Persists WorldStreamingState snapshots beneath a world save directory.
@@ -68,15 +77,27 @@ public:
                                     const world::WorldClock& clock,
                                     const std::filesystem::path& save_dir,
                                     std::vector<std::string>* errors = nullptr);
+    // Missing file: clear region state at absent_clock and preserve ledger.config().
+    // Present file: decode its persisted scheduler settings along with the region state.
     static bool load_active_regions(world::ActiveRegionLedger& ledger,
                                     const std::filesystem::path& save_dir,
                                     std::vector<std::string>* errors = nullptr,
                                     const world::WorldClock& absent_clock = world::WorldClock{});
-    // Content-only lod-0 projection; live chunks override durable records by id.
+    // Content-only projection region_content_v2: live over parked over durable records flagged
+    // edited; pristine chunks excluded. Loading is excluded only for live/parked inputs.
+    static std::uint64_t region_simulation_digest(const std::filesystem::path& save_dir,
+                                                  world::RegionKey key,
+                                                  const RegionDigestInputs& inputs);
+    // Compatibility call shape: live chunks with no parked inputs, using the same v2 projection.
     static std::uint64_t
     region_simulation_digest(const std::filesystem::path& save_dir,
                              world::RegionKey key,
                              const std::vector<std::shared_ptr<Chunk>>& live_chunks);
+    // Preserve braced chunk lists, including {}, without ambiguity with RegionDigestInputs.
+    static std::uint64_t
+    region_simulation_digest(const std::filesystem::path& save_dir,
+                             world::RegionKey key,
+                             std::initializer_list<std::shared_ptr<Chunk>> live_chunks);
 
     // Region addressing: rx = floor(chunk_x / 32), rz = floor(chunk_z / 32).
     static constexpr int kRegionChunkSpan = 32;
@@ -163,6 +184,27 @@ public:
     // process-global and must only be used by single-threaded persistence
     // tests.
     static void set_interrupt_before_region_replace_for_testing(bool enabled);
+
+    // Test seam for POSIX directory flushes: the next flush after `flushes_to_skip`
+    // successful ones fails once, then the seam disarms. A negative value disarms it.
+    // Flushes covered are the ancestor-entry flushes of write_file_durably and the
+    // post-rename destination-directory flush of every region replacement; Windows
+    // builds never consult it. Process-global; single-threaded persistence tests only.
+    static void set_directory_flush_failure_for_testing(int flushes_to_skip);
+
+    // Writes `bytes` to `destination` with the same durability contract as an LMR1
+    // region rewrite: the parent directory is created, a unique temporary file in
+    // the destination directory is flushed to stable storage, and it atomically
+    // replaces the destination. On POSIX the entry of every ancestor directory is
+    // flushed on every call, so a retry after a failed flush repeats the missing
+    // flushes. A failed or interrupted write (including the interrupt-before-replace
+    // test seam above) removes the temporary file; the destination is then the
+    // previous complete file, or on POSIX the new complete file when only the final
+    // directory flush failed, never a partial file. Used for derived files that live
+    // beside the save, such as the far authority overlay.
+    static bool write_file_durably(const std::filesystem::path& destination,
+                                   const std::string& bytes,
+                                   std::vector<std::string>* errors = nullptr);
 
     // Called after ledger staging is flushed/closed, before replacement. Returning
     // false fails the write and cleans up; a test subprocess may terminate here

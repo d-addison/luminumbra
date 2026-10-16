@@ -1,0 +1,398 @@
+{
+  "headroom": {
+    "den": 2,
+    "num": 3
+  },
+  "identity": {
+    "collision_radius": 1,
+    "fixture_hash": null,
+    "revision": null,
+    "seed": 1337,
+    "surface_radius": 1,
+    "ticks": 600
+  },
+  "presets": {
+    "archipelago": {
+      "stages": {
+        "aether": {
+          "expect_inactive": false,
+          "max_work_per_tick": 6144
+        },
+        "alarm": {
+          "expect_inactive": false,
+          "max_work_per_tick": 9
+        },
+        "animation": {
+          "expect_inactive": false,
+          "max_work_per_tick": 0
+        },
+        "circadian": {
+          "expect_inactive": false,
+          "max_work_per_tick": 0
+        },
+        "creatures": {
+          "expect_inactive": false,
+          "max_work_per_tick": 17
+        },
+        "crops": {
+          "expect_inactive": false,
+          "max_work_per_tick": 9
+        },
+        "decay": {
+          "expect_inactive": false,
+          "max_work_per_tick": 9
+        },
+        "disease": {
+          "expect_inactive": false,
+          "max_work_per_tick": 0
+        },
+        "energy": {
+          "expect_inactive": false,
+          "max_work_per_tick": 0
+        },
+        "events": {
+          "expect_inactive": false,
+          "max_work_per_tick": 0
+        },
+        "fire": {
+          "expect_inactive": false,
+          "max_work_per_tick": 0
+        },
+        "grazing": {
+          "expect_inactive": false,
+          "max_work_per_tick": 9
+        },
+        "instinct": {
+          "expect_inactive": false,
+          "max_work_per_tick": 0
+        },
+        "irrigation": {
+          "expect_inactive": false,
+          "max_work_per_tick": 0
+        },
+        "lifespan": {
+          "expect_inactive": false,
+          "max_work_per_tick": 12
+        },
+        "locomotion": {
+          "expect_inactive": false,
+          "max_work_per_tick": 0
+        },
+        "migration": {
+          "expect_inactive": false,
+          "max_work_per_tick": 9
+        },
+        "packs": {
+          "expect_inactive": false,
+          "max_work_per_tick": 3
+        },
+        "perception": {
+          "expect_inactive": false,
+          "max_work_per_tick": 0
+        },
+        "plants": {
+          "expect_inactive": false,
+          "max_work_per_tick": 9
+        },
+        "pollination": {
+          "expect_inactive": false,
+          "max_work_per_tick": 9
+        },
+        "scent": {
+          "expect_inactive": false,
+          "max_work_per_tick": 98304
+        },
+        "server_physics": {
+          "expect_inactive": false,
+          "max_work_per_tick": 2
+        },
+        "server_streaming": {
+          "expect_inactive": false,
+          "max_work_per_tick": 0
+        },
+        "server_water": {
+          "expect_inactive": false,
+          "max_work_per_tick": 6144
+        },
+        "soil": {
+          "expect_inactive": false,
+          "max_work_per_tick": 98304
+        },
+        "territory": {
+          "expect_inactive": false,
+          "max_work_per_tick": 9
+        },
+        "weather": {
+          "expect_inactive": true,
+          "max_work_per_tick": 0
+        },
+        "wind": {
+          "expect_inactive": true,
+          "max_work_per_tick": 0
+        },
+        "wind_weather": {
+          "expect_inactive": false,
+          "max_work_per_tick": 12288
+        }
+      },
+      "total": {
+        "max_work_per_tick": 221289
+      }
+    },
+    "default": {
+      "stages": {
+        "aether": {
+          "expect_inactive": false,
+          "max_work_per_tick": 6144
+        },
+        "alarm": {
+          "expect_inactive": false,
+          "max_work_per_tick": 9
+        },
+        "animation": {
+          "expect_inactive": false,
+          "max_work_per_tick": 0
+        },
+        "circadian": {
+          "expect_inactive": false,
+          "max_work_per_tick": 0
+        },
+        "creatures": {
+          "expect_inactive": false,
+          "max_work_per_tick": 17
+        },
+        "crops": {
+          "expect_inactive": false,
+          "max_work_per_tick": 9
+        },
+        "decay": {
+          "expect_inactive": false,
+          "max_work_per_tick": 9
+        },
+        "disease": {
+          "expect_inactive": false,
+          "max_work_per_tick": 0
+        },
+        "energy": {
+          "expect_inactive": false,
+          "max_work_per_tick": 0
+        },
+        "events": {
+          "expect_inactive": false,
+          "max_work_per_tick": 0
+        },
+        "fire": {
+          "expect_inactive": false,
+          "max_work_per_tick": 0
+        },
+        "grazing": {
+          "expect_inactive": false,
+          "max_work_per_tick": 9
+        },
+        "instinct": {
+          "expect_inactive": false,
+          "max_work_per_tick": 0
+        },
+        "irrigation": {
+          "expect_inactive": false,
+          "max_work_per_tick": 0
+        },
+        "lifespan": {
+          "expect_inactive": false,
+          "max_work_per_tick": 12
+        },
+        "locomotion": {
+          "expect_inactive": false,
+          "max_work_per_tick": 0
+        },
+        "migration": {
+          "expect_inactive": false,
+          "max_work_per_tick": 9
+        },
+        "packs": {
+          "expect_inactive": false,
+          "max_work_per_tick": 3
+        },
+        "perception": {
+          "expect_inactive": false,
+          "max_work_per_tick": 0
+        },
+        "plants": {
+          "expect_inactive": false,
+          "max_work_per_tick": 9
+        },
+        "pollination": {
+          "expect_inactive": false,
+          "max_work_per_tick": 9
+        },
+        "scent": {
+          "expect_inactive": false,
+          "max_work_per_tick": 98304
+        },
+        "server_physics": {
+          "expect_inactive": false,
+          "max_work_per_tick": 2
+        },
+        "server_streaming": {
+          "expect_inactive": false,
+          "max_work_per_tick": 0
+        },
+        "server_water": {
+          "expect_inactive": false,
+          "max_work_per_tick": 6144
+        },
+        "soil": {
+          "expect_inactive": false,
+          "max_work_per_tick": 98304
+        },
+        "territory": {
+          "expect_inactive": false,
+          "max_work_per_tick": 9
+        },
+        "weather": {
+          "expect_inactive": true,
+          "max_work_per_tick": 0
+        },
+        "wind": {
+          "expect_inactive": true,
+          "max_work_per_tick": 0
+        },
+        "wind_weather": {
+          "expect_inactive": false,
+          "max_work_per_tick": 12288
+        }
+      },
+      "total": {
+        "max_work_per_tick": 221289
+      }
+    },
+    "mountains": {
+      "stages": {
+        "aether": {
+          "expect_inactive": false,
+          "max_work_per_tick": 6144
+        },
+        "alarm": {
+          "expect_inactive": false,
+          "max_work_per_tick": 9
+        },
+        "animation": {
+          "expect_inactive": false,
+          "max_work_per_tick": 0
+        },
+        "circadian": {
+          "expect_inactive": false,
+          "max_work_per_tick": 0
+        },
+        "creatures": {
+          "expect_inactive": false,
+          "max_work_per_tick": 17
+        },
+        "crops": {
+          "expect_inactive": false,
+          "max_work_per_tick": 9
+        },
+        "decay": {
+          "expect_inactive": false,
+          "max_work_per_tick": 9
+        },
+        "disease": {
+          "expect_inactive": false,
+          "max_work_per_tick": 0
+        },
+        "energy": {
+          "expect_inactive": false,
+          "max_work_per_tick": 0
+        },
+        "events": {
+          "expect_inactive": false,
+          "max_work_per_tick": 0
+        },
+        "fire": {
+          "expect_inactive": false,
+          "max_work_per_tick": 0
+        },
+        "grazing": {
+          "expect_inactive": false,
+          "max_work_per_tick": 9
+        },
+        "instinct": {
+          "expect_inactive": false,
+          "max_work_per_tick": 0
+        },
+        "irrigation": {
+          "expect_inactive": false,
+          "max_work_per_tick": 0
+        },
+        "lifespan": {
+          "expect_inactive": false,
+          "max_work_per_tick": 12
+        },
+        "locomotion": {
+          "expect_inactive": false,
+          "max_work_per_tick": 0
+        },
+        "migration": {
+          "expect_inactive": false,
+          "max_work_per_tick": 9
+        },
+        "packs": {
+          "expect_inactive": false,
+          "max_work_per_tick": 3
+        },
+        "perception": {
+          "expect_inactive": false,
+          "max_work_per_tick": 0
+        },
+        "plants": {
+          "expect_inactive": false,
+          "max_work_per_tick": 9
+        },
+        "pollination": {
+          "expect_inactive": false,
+          "max_work_per_tick": 9
+        },
+        "scent": {
+          "expect_inactive": false,
+          "max_work_per_tick": 98304
+        },
+        "server_physics": {
+          "expect_inactive": false,
+          "max_work_per_tick": 2
+        },
+        "server_streaming": {
+          "expect_inactive": false,
+          "max_work_per_tick": 0
+        },
+        "server_water": {
+          "expect_inactive": false,
+          "max_work_per_tick": 6144
+        },
+        "soil": {
+          "expect_inactive": false,
+          "max_work_per_tick": 98304
+        },
+        "territory": {
+          "expect_inactive": false,
+          "max_work_per_tick": 9
+        },
+        "weather": {
+          "expect_inactive": true,
+          "max_work_per_tick": 0
+        },
+        "wind": {
+          "expect_inactive": true,
+          "max_work_per_tick": 0
+        },
+        "wind_weather": {
+          "expect_inactive": false,
+          "max_work_per_tick": 12288
+        }
+      },
+      "total": {
+        "max_work_per_tick": 221289
+      }
+    }
+  },
+  "schema": "luminumbra.sim_budgets.v1"
+}

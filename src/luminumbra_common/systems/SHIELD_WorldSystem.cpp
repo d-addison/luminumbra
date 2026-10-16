@@ -1,4 +1,5 @@
 #include "SHIELD_WorldSystem.h"
+#include "../core/FilesystemPath.h"
 #include "../core/JobWatchdog.h" // opt-in named-phase wedge reporter for unbounded waits
 #include "../core/Log.h"
 #include "../world/FarLodStore.h"
@@ -18,6 +19,7 @@
 #include <limits>
 #include <optional>
 #include <shared_mutex>
+#include <stdexcept>
 #include <thread> // opt-in job-wedge watchdog monitor thread
 #include <unordered_map>
 #include <unordered_set>
@@ -977,7 +979,10 @@ void SHIELD_WorldSystem::reinitialize_noise(const TerrainGenParams* params,
         humidity_fractal->SetOctaveCount(2);
         m_humidity_generator = humidity_fractal;
 
-        m_biome_table = World::BiomeTable::Load(m_params.biome_table_path);
+        m_biome_table =
+            m_params.worldgen_dependencies
+                ? m_params.worldgen_dependencies->biome_table
+                : World::BiomeTable::Load(Filesystem::PathFromUtf8(m_params.biome_table_path));
         if (!m_biome_table.ok() || m_biome_table.empty()) {
             for (const std::string& error : m_biome_table.errors()) {
                 LUMINUMBRA_CORE_WARN("biome table load error: {}", error);
@@ -1002,22 +1007,34 @@ void SHIELD_WorldSystem::reinitialize_noise(const TerrainGenParams* params,
     m_structures_enabled = false;
     m_params.structures_content_hash = 0;
     if (m_params.structures_enabled && !m_params.structures_data_dir.empty()) {
-        const std::filesystem::path structures_root(m_params.structures_data_dir);
-        std::error_code ec;
-        std::vector<std::filesystem::path> type_dirs;
-        if (std::filesystem::is_directory(structures_root, ec)) {
-            for (const auto& entry : std::filesystem::directory_iterator(structures_root, ec)) {
-                if (entry.is_directory()) {
-                    type_dirs.push_back(entry.path());
+        std::vector<World::StructureTemplatePool> pools;
+        if (m_params.worldgen_dependencies) {
+            pools = m_params.worldgen_dependencies->structure_pools;
+        } else {
+            // Direct generators without a preset retain filesystem loading.
+            const auto structures_root = Filesystem::PathFromUtf8(m_params.structures_data_dir);
+            std::error_code ec;
+            std::vector<std::filesystem::path> type_dirs;
+            if (std::filesystem::is_directory(structures_root, ec)) {
+                for (const auto& entry : std::filesystem::directory_iterator(structures_root, ec)) {
+                    if (entry.is_directory()) {
+                        type_dirs.push_back(entry.path());
+                    }
                 }
             }
+            // Match the manifest's UTF-8 order, including non-BMP type names.
+            std::sort(type_dirs.begin(), type_dirs.end(), [](const auto& a, const auto& b) {
+                return Filesystem::GenericUtf8PathString(a.filename()) <
+                       Filesystem::GenericUtf8PathString(b.filename());
+            });
+            for (const auto& type_dir : type_dirs) {
+                pools.push_back(World::LoadStructureTemplatePool(
+                    type_dir, Filesystem::GenericUtf8PathString(type_dir.filename())));
+            }
         }
-        // Sort by type name so the combined content hash is order-independent.
-        std::sort(type_dirs.begin(), type_dirs.end());
         u64 combined = 14695981039346656037ull; // fnv offset basis
-        for (const auto& type_dir : type_dirs) {
-            const std::string type = type_dir.filename().string();
-            World::StructureTemplatePool pool = World::LoadStructureTemplatePool(type_dir, type);
+        for (auto& pool : pools) {
+            const auto& type = pool.type;
             for (const std::string& warn : pool.warnings) {
                 LUMINUMBRA_CORE_WARN("structure pool '{}': {}", type, warn);
             }
@@ -1619,6 +1636,85 @@ float SHIELD_WorldSystem::EvaluateCaveDensity(const Vec3& wp,
     }
 
     return density;
+}
+
+float SHIELD_WorldSystem::AnalyticSurfaceOpeningDensity(const Vec3& wp, float surface_h) const {
+    for (float component : {wp.x, wp.y, wp.z, surface_h})
+        if (!std::isfinite(component) ||
+            std::abs(component) >= World::kFarVolumeExactCoordinateLimitMeters - 64)
+            throw std::invalid_argument("Invalid coarse analytic coordinate");
+    float density = wp.y - surface_h;
+    if (!m_params.caves_enabled || !m_params.surface_breaks_enabled ||
+        m_params.feature_cell_size <= 0.0f)
+        return density;
+    const float cs = m_params.feature_cell_size;
+    if (!std::isfinite(cs) || std::abs(static_cast<double>(wp.x) / cs) >= 2147483646.0 ||
+        std::abs(static_cast<double>(wp.z) / cs) >= 2147483646.0)
+        throw std::invalid_argument("Invalid coarse analytic feature cell");
+    // Keep the checked division in double through floor; float can round up to INT_MAX+1.
+    const int cx = static_cast<int>(std::floor(static_cast<double>(wp.x) / cs));
+    const int cz = static_cast<int>(std::floor(static_cast<double>(wp.z) / cs));
+    for (int dz = -1; dz <= 1; ++dz) {
+        for (int dx = -1; dx <= 1; ++dx) {
+            const SurfaceBreakFeature f =
+                DecodeSurfaceBreakCell(m_seed, cx + dx, cz + dz, m_params);
+            if (!f.valid)
+                continue;
+            const float x = wp.x - f.center_x, z = wp.z - f.center_z;
+            const float distance = std::sqrt(x * x + z * z);
+            if (distance >= f.radius)
+                continue;
+            const float depth = surface_h - wp.y;
+            const float sd =
+                f.shaft ? sdVerticalCapsule(distance, depth, 0.0f, f.depth, f.radius * 0.45f)
+                        : sdCappedCone(distance,
+                                       depth - f.depth * 0.5f,
+                                       0.0f,
+                                       f.depth * 0.5f,
+                                       f.radius * 0.15f,
+                                       f.radius);
+            // A negative feature SDF becomes positive air when subtracted from
+            // negative-solid terrain. Do not clamp away the feature's sign.
+            density = std::max(density, -sd);
+        }
+    }
+    return density;
+}
+
+float SHIELD_WorldSystem::SamplePristineFarDensity(const Vec3& wp,
+                                                   float surface_h,
+                                                   std::uint32_t spacing,
+                                                   World::FarCaveMode mode) const {
+    if ((spacing != 4 && spacing != 8 && spacing != 16 && spacing != 32 && spacing != 64) ||
+        (mode != World::FarCaveMode::BandLimited && mode != World::FarCaveMode::BoxFiltered))
+        throw std::invalid_argument("Invalid pristine far density sampling mode");
+    for (float component : {wp.x, wp.y, wp.z, surface_h})
+        if (!std::isfinite(component) ||
+            std::abs(component) >= World::kFarVolumeExactCoordinateLimitMeters - 64)
+            throw std::invalid_argument("Invalid pristine far density coordinate");
+    if (spacing <= 8)
+        return get_density_at_from_precalculated(wp, surface_h);
+    const float terrain = wp.y - surface_h;
+    if (!m_params.caves_enabled)
+        return terrain;
+    const float analytic = AnalyticSurfaceOpeningDensity(wp, surface_h);
+    if (mode == World::FarCaveMode::BandLimited && spacing > 16)
+        return analytic;
+
+    // Fixed 2x2x2 midpoint quadrature of a cell-width box. Filter only the
+    // noise carve contribution: terrain and analytic silhouettes stay at the
+    // shared lattice position. World coordinates make the kernel independent
+    // of tile/brick boundaries. This finite kernel retains residual aliasing;
+    // the qualification compares phases, rather than claiming an ideal low-pass.
+    const float carve = World::BoxFilterFarVolumeCarve(wp, spacing, [this](const Vec3& p) {
+        const float height = GetTerrainHeightAt(p.x, p.z);
+        const float base = p.y - height;
+        const auto surface_break = sample_surface_breaks(p, height);
+        const float carved = EvaluateCaveDensity(p, base, surface_break.effective_cap, 0.0f);
+        return std::max(0.0f, carved - base);
+    });
+    const float filtered = terrain + carve;
+    return std::max(filtered, analytic);
 }
 
 SHIELD_WorldSystem::SurfaceBreakInfo

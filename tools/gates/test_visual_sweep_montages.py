@@ -39,10 +39,10 @@ class SweepReview(unittest.TestCase):
                     non_black_cell_count=len(cells), cells=cells)
 
     def run_tool(self, manifest):
-        self.manifest_path.write_text(json.dumps(manifest))
+        self.manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             code = TOOL.main([str(self.root)])
-        report = json.loads((self.root / "sweep/montages/review.json").read_text())
+        report = json.loads((self.root / "sweep/montages/review.json").read_text(encoding="utf-8"))
         return code, report
 
     def test_complete_matrix_preserves_original_pixels_and_has_no_visual_approval(self):
@@ -113,7 +113,7 @@ class SweepReview(unittest.TestCase):
     def test_unknown_schema_and_matrix_fail_before_deriving_images(self):
         manifest = self.fixture()
         for change in ({"schema": "unknown"}, {"matrix": {"seasons": True}}, {"cells": [None]}):
-            self.manifest_path.write_text(json.dumps({**manifest, **change}))
+            self.manifest_path.write_text(json.dumps({**manifest, **change}), encoding="utf-8")
             with contextlib.redirect_stderr(io.StringIO()):
                 self.assertEqual(TOOL.main([str(self.root)]), 2)
             self.assertFalse((self.root/"sweep/montages").exists())

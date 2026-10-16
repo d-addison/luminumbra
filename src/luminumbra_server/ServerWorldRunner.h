@@ -14,12 +14,15 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 
 #include <vector>
 
 #include "luminumbra_common/core/JobSystem.h"
+#include "luminumbra_common/core/SystemConfig.h"
 #include "luminumbra_common/persistence/WorldPersistenceRoundtrip.h"
+#include "luminumbra_common/world/ActiveRegionLedger.h"
 #include "luminumbra_common/world/GameSession.h"
 #include "luminumbra_common/world/PlayerAvatar.h"
 
@@ -28,6 +31,8 @@ namespace Luminumbra::Server {
 struct ServerWorldRunnerConfig {
     // Runtime root with trailing separator (GameSession concatenates paths).
     std::string root_path;
+    std::optional<luminumbra::core::SystemConfig> systems_config_override;
+    std::optional<std::string> preset_json_override;
     std::string world_name = "Headless Server World";
     std::string seed = "424242";
     // World preset name (worlds/atlas/presets/<preset>.json).
@@ -45,7 +50,10 @@ struct ServerWorldRunnerConfig {
     int test_streaming_radius_cap = 0;
     // Autosave every N simulation ticks through WorldSaveService
     // (GameSession::SaveWorldState incremental contract). 0 disables.
-    std::uint64_t autosave_interval_ticks = 0;
+    // Default: five minutes at the canonical 30 Hz clock.
+    std::uint64_t autosave_interval_ticks = 9000;
+    // Explicit workload override, applied before world creation or loading.
+    bool finite_hydrology = true;
     //  number of deterministic player avatars to spawn at
     // boot (phyllotaxis ring around spawn; see World::DeterministicAvatarSpawnOffset).
     // Avatar positions feed the multi-anchor streaming vector and fold into the
@@ -100,11 +108,17 @@ struct ServerWorldRunnerConfig {
     // (no new reads, no anchor change).
     bool water_smoke = false;
     bool sim_budget = false; // Opt-in simulation stage observation; default artifact unchanged.
+    // Applied via GameSession::SetRegionSchedulerConfig right after the root path is set, so it
+    // takes effect for the fresh world Boot() creates. A loaded ledger must match an explicit
+    // override; empty restores persisted settings, or defaults when no ledger exists.
+    std::optional<Luminumbra::world::RegionSchedulerConfig> region_scheduler;
 };
 
 struct ServerTickReport {
     std::uint64_t ticks_executed = 0;
     std::uint64_t frames_executed = 0;
+    bool region_fault = false;
+    std::string region_fault_message;
     std::uint64_t autosave_passes = 0;
     std::uint64_t autosave_writes = 0;
     double simulated_seconds = 0.0;
@@ -213,7 +227,8 @@ public:
     // chunk snapshot via WorldSaveService::save_world (NOT the dirty-gated
     // GameSession::SaveWorldState, which writes nothing for a never-edited
     // world). Used so a freshly loaded session adopts exactly this chunk set and
-    // the save/load round-trip is comparable. Returns the chunk count written.
+    // the save/load round-trip is comparable. Returns the chunk count written,
+    // or zero on refusal. Preset/identity refusal preserves disk bytes and pending state.
     std::size_t SaveFullSnapshot();
 
     std::size_t StreamedChunkCount();

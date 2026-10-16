@@ -8,7 +8,7 @@
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 #include "luminumbra_common/world/GameSession.h"
 #include "rendering/Camera.h"
-#include "rendering/FarLodSystem.h" // farlod()->stats() in build_state_json
+#include "rendering/FarLodSystem.h" // retained Legacy compatibility telemetry
 #include "rendering/RenderPipeline.h"
 
 #include <algorithm>
@@ -451,8 +451,11 @@ RuntimeStateRecorder::build_state_json(const std::string& phase,
         state["resize_generation"] = render_pipeline->resize_generation();
         state["upload_queue"] = UploadStatsToJson(render_pipeline->get_last_mesh_upload_stats());
         state["render_pass"] = RenderPassStatsToJson(render_pipeline->get_last_render_pass_stats());
-        // Far-LOD scheduler telemetry (, FarLodHorizon gate inputs).
-        if (const auto* farlod = render_pipeline->farlod()) {
+        // D value schema includes immutable water readiness and submitted subtotals.
+        state["far_world"] =
+            Luminumbra::Rendering::FarWorldDiagnosticJson(render_pipeline->far_world_diagnostic());
+        // Historical counters are Legacy evidence, never Ladder qualification.
+        if (const auto* farlod = render_pipeline->legacy_far_compatibility()) {
             const auto& farlod_stats = farlod->stats();
             state["farlod"] = {
                 {"enabled", farlod_stats.enabled},

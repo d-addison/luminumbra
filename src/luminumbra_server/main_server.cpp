@@ -13,6 +13,7 @@
 //                  world_hash == world_hash_replay.
 #include <algorithm>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
@@ -21,6 +22,7 @@
 #include <memory>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include "nlohmann/json.hpp"
@@ -30,6 +32,8 @@
 #include "luminumbra_common/ai/InstinctLocomotionSystem.h"
 #include "luminumbra_common/components/CoreComponents.h"
 #include "luminumbra_common/components/InstinctComponents.h"
+#include "luminumbra_common/core/CrashReport.h"
+#include "luminumbra_common/core/Environment.h"
 #include "luminumbra_common/core/Log.h"
 #include "luminumbra_common/net/GnsTransport.h" // body #ifdef LUMINUMBRA_ENABLE_GNS
 #include "luminumbra_common/net/LockstepSession.h"
@@ -46,6 +50,7 @@
 #include "luminumbra_common/systems/WeatherSystem.h"
 #include "luminumbra_common/systems/WindFieldSystem.h"
 #include "luminumbra_common/world/GameSession.h"
+#include "luminumbra_common/world/TerrainPresetLoader.h"
 #include <cmath>
 #include <entt/entt.hpp>
 
@@ -141,6 +146,16 @@ ServerCliOptions ParseOptions(int argc, char* argv[]) {
         } else if (std::strcmp(arg, "--lockstep-dump") == 0) {
             if (const char* v = next_value(i))
                 options.lockstep_dump_path = v;
+        } else if (std::strcmp(arg, "--systems-config") == 0) {
+            if (const char* v = next_value(i)) {
+                options.systems_config_path = v;
+                options.parse_error = options.parse_error || options.systems_config_path.empty();
+            }
+        } else if (std::strcmp(arg, "--preset-json") == 0) {
+            if (const char* v = next_value(i)) {
+                options.preset_json_path = v;
+                options.parse_error = options.parse_error || options.preset_json_path.empty();
+            }
         } else if (std::strcmp(arg, "--root") == 0) {
             if (const char* v = next_value(i))
                 options.root = v;
@@ -189,6 +204,17 @@ ServerCliOptions ParseOptions(int argc, char* argv[]) {
         } else if (std::strcmp(arg, "--sim-budget") == 0) {
             options.smoke = true;
             options.sim_budget = true;
+        } else if (std::strcmp(arg, "--sim-budget-profile") == 0) {
+            // A profile only constrains the sim_budget artifact, which exists only in smoke.
+            options.smoke = true;
+            options.sim_budget = true;
+            if (const char* v = next_value(i)) {
+                options.sim_budget_profile_path = v;
+                if (options.sim_budget_profile_path.empty()) {
+                    LUMINUMBRA_CORE_ERROR("--sim-budget-profile requires a non-empty path");
+                    options.parse_error = true;
+                }
+            }
         } else if (std::strcmp(arg, "--no-audio") == 0) {
             // The headless executable has no audio subsystem.
         } else if (std::strcmp(arg, "--water-smoke") == 0) {
@@ -236,12 +262,58 @@ ServerCliOptions ParseOptions(int argc, char* argv[]) {
         } else if (std::strcmp(arg, "--artifact") == 0) {
             if (const char* v = next_value(i))
                 options.artifact_path = v;
+        } else if (std::strcmp(arg, "--crash-dir") == 0) {
+            if (const char* v = next_value(i))
+                options.crash_dir = v;
         } else {
             LUMINUMBRA_CORE_ERROR("Unknown argument '{}'", arg);
             options.parse_error = true;
         }
     }
     return options;
+}
+
+// Loads and validates --sim-budget-profile before any world is created. Returns 0 when no
+// profile was requested or it was accepted, 2 when it could not be read or was refused.
+int LoadSimBudgetProfileOption(ServerCliOptions& options) {
+    if (options.sim_budget_profile_path.empty()) {
+        return 0;
+    }
+    // Only the smoke lane evaluates a profile; refuse modes that dispatch earlier or elsewhere
+    // rather than accepting the flag and silently not enforcing it.
+    if (!options.mutate_replay_fixture.empty() || options.lockstep_loopback ||
+        !options.replay_path.empty() || !options.record_path.empty() || options.heavy ||
+        options.weather_bench || options.aether_bench || options.wind_bench || options.net_soak ||
+        options.net_soak_client || options.net_host || options.net_join || options.replicate) {
+        LUMINUMBRA_CORE_ERROR("sim-budget-profile refused: only the smoke lane enforces a "
+                              "profile; remove the incompatible mode flag");
+        return 2;
+    }
+    const std::string& path = options.sim_budget_profile_path;
+    std::ifstream in(path, std::ios::binary);
+    if (!in.is_open()) {
+        LUMINUMBRA_CORE_ERROR("sim-budget-profile unreadable: cannot open '{}'", path);
+        return 2;
+    }
+    // One byte past the limit lets the parser report TooLarge for oversized files.
+    std::string text(luminumbra::simulation::kMaxProfileBytes + 1, '\0');
+    in.read(text.data(), static_cast<std::streamsize>(text.size()));
+    if (in.bad() || (in.fail() && !in.eof())) {
+        LUMINUMBRA_CORE_ERROR("sim-budget-profile unreadable: read failed for '{}'", path);
+        return 2;
+    }
+    text.resize(static_cast<std::size_t>(in.gcount()));
+    luminumbra::simulation::ProfileParse parsed =
+        luminumbra::simulation::ParseSimBudgetProfile(text);
+    if (parsed.error != luminumbra::simulation::ProfileError::None) {
+        LUMINUMBRA_CORE_ERROR("sim-budget-profile refused: {}: {}",
+                              luminumbra::simulation::ProfileErrorName(parsed.error),
+                              parsed.detail);
+        return 2;
+    }
+    options.sim_budget_profile = std::move(parsed.profile);
+    options.sim_budget_profile_bytes = static_cast<std::uint64_t>(text.size());
+    return 0;
 }
 
 int main(int argc, char* argv[]) {
@@ -252,15 +324,32 @@ int main(int argc, char* argv[]) {
     if (options.parse_error) {
         LUMINUMBRA_CORE_ERROR(
             "Usage: luminumbra_server_app [--smoke] [--water-smoke] [--sim-budget] [--no-audio] "
+            "[--sim-budget-profile <path>] "
             "[--heavy [--heavy-resim <n>]] "
             "[--record <path>] [--replay <path>] [--mutate-replay-fixture <path>] "
             "[--lockstep-loopback [--lockstep-delay-input <n>] [--lockstep-corrupt-tick <t>] "
             "[--lockstep-dump <path>]] "
-            "[--root <path>] [--preset <name>] "
+            "[--root <path>] [--preset <name>] [--systems-config <path>] [--preset-json <path>] "
             "[--seed <seed>] [--world-id <id>] [--ticks <n>] [--radius <chunks>] "
             "[--collision-radius <chunks>] [--autosave-ticks <n>] [--clients <n>] "
-            "[--player-id <id>] [--server-mode] [--artifact <path>]");
+            "[--player-id <id>] [--server-mode] [--crash-dir <path>] [--artifact <path>]");
         return 2;
+    }
+    if (const int profile_status = LoadSimBudgetProfileOption(options); profile_status != 0) {
+        return profile_status;
+    }
+
+    {
+        const auto crash_dir_environment =
+            Luminumbra::Core::ReadEnvironment("LUMINUMBRA_CRASH_DIR");
+        const fs::path crash_dir = ResolveServerCrashDirectory(
+            options.crash_dir, crash_dir_environment ? crash_dir_environment->c_str() : nullptr);
+        if (luminumbra::crash::InstallCrashCapture(crash_dir, "luminumbra_server_app")) {
+            LUMINUMBRA_CORE_INFO("Crash report path: {}",
+                                 luminumbra::crash::CrashReportPath().string());
+        } else {
+            LUMINUMBRA_CORE_ERROR("Could not install crash capture in '{}'", crash_dir.string());
+        }
     }
 
     if (options.root.empty()) {
@@ -269,6 +358,30 @@ int main(int argc, char* argv[]) {
         options.root = RootString(fs::path(options.root));
     }
     LUMINUMBRA_CORE_INFO("Server runtime root: {}", options.root);
+
+    // Resolve explicit overrides once, before dispatch, so every run and peer uses the
+    // same snapshot. Relative override paths are relative to the working directory.
+    std::string override_error;
+    if (!options.systems_config_path.empty()) {
+        luminumbra::core::SystemConfig config;
+        if (!luminumbra::core::SystemConfig::TryLoadFromFile(
+                options.systems_config_path, config, override_error)) {
+            LUMINUMBRA_CORE_ERROR("--systems-config: {}", override_error);
+            return 2;
+        }
+        options.systems_config_override = std::move(config);
+    }
+    if (!options.preset_json_path.empty()) {
+        std::string json_text;
+        if (!Luminumbra::world::LoadTerrainPresetOverride(options.preset_json_path,
+                                                          fs::path(options.root) / "data",
+                                                          json_text,
+                                                          override_error)) {
+            LUMINUMBRA_CORE_ERROR("--preset-json: {}", override_error);
+            return 2;
+        }
+        options.preset_json_override = std::move(json_text);
+    }
 
     if (!options.mutate_replay_fixture.empty()) {
         return RunMutateReplayFixture(options);

@@ -72,6 +72,8 @@ int RunRecord(const ServerCliOptions& options) {
     header.collision_radius = static_cast<std::uint32_t>(options.collision_radius);
     header.engine_version = std::string(luminumbra::core::GetEngineVersionString());
     header.start_world_hash = runner.ComputeWorldHash();
+    header.system_config_identity = runner.Session()->SystemConfigIdentity();
+    header.preset_content_hash = runner.Session()->PresetContentHash();
 
     Luminumbra::Replay::RegionScheduleTrace schedule_trace;
     Luminumbra::Replay::ReplayWriter writer;
@@ -91,6 +93,13 @@ int RunRecord(const ServerCliOptions& options) {
         writer.RecordInput(executed + 1, empty_inputs);
         const auto step = runner.RunFixedTicks(1);
         executed += step.ticks_executed;
+        if (step.region_fault) {
+            LUMINUMBRA_CORE_ERROR(
+                "record: region scheduler fault at tick {}: {}; recording aborted",
+                executed,
+                step.region_fault_message);
+            return 1;
+        }
         if (step.ticks_executed == 0) {
             LUMINUMBRA_CORE_ERROR("record: tick {} did not advance", executed + 1);
             return 1;
@@ -148,7 +157,9 @@ int RunReplay(const ServerCliOptions& options) {
 
     auto contents = Luminumbra::Replay::ReadReplay(options.replay_path);
     if (!contents.has_value()) {
-        LUMINUMBRA_CORE_ERROR("replay: '{}' is not a valid LREC1 stream", options.replay_path);
+        LUMINUMBRA_CORE_ERROR("replay: '{}' is invalid or has an unsupported LREC1 version; "
+                              "requires v3 resolved preset identity",
+                              options.replay_path);
         return 1;
     }
     if (contents->truncated || !contents->trailer_present) {
@@ -171,6 +182,8 @@ int RunReplay(const ServerCliOptions& options) {
     // Boot the session from the header parameters (mirror ServerWorldRunnerConfig).
     Luminumbra::Server::ServerWorldRunnerConfig config;
     config.root_path = options.root;
+    config.systems_config_override = options.systems_config_override;
+    config.preset_json_override = options.preset_json_override;
     config.seed = header.seed_string;
     config.preset = header.preset;
     config.world_id.clear();
@@ -179,10 +192,19 @@ int RunReplay(const ServerCliOptions& options) {
     config.collision_radius = static_cast<int>(header.collision_radius);
     config.test_streaming_radius_cap = options.test_streaming_radius_cap;
     config.autosave_interval_ticks = 0;
+    config.region_scheduler = RunnerConfigFrom(options).region_scheduler;
 
     Luminumbra::Server::ServerWorldRunner runner(std::move(config));
     if (!runner.Boot()) {
         LUMINUMBRA_CORE_ERROR("replay: session failed to boot from header");
+        return 1;
+    }
+
+    if (!Luminumbra::Replay::ConfigurationMatches(header,
+                                                  runner.Session()->SystemConfigIdentity(),
+                                                  runner.Session()->PresetContentHash())) {
+        LUMINUMBRA_CORE_ERROR(
+            "replay: incompatible simulation configuration or resolved preset content hash");
         return 1;
     }
 
@@ -231,6 +253,13 @@ int RunReplay(const ServerCliOptions& options) {
         (void)input; // applied by the transport in; no-op for empty sets
         const auto step = runner.RunFixedTicks(1);
         executed += step.ticks_executed;
+        if (step.region_fault) {
+            LUMINUMBRA_CORE_ERROR("replay: region scheduler fault at tick {}: {}",
+                                  executed,
+                                  step.region_fault_message);
+            runner.Shutdown();
+            return 1;
+        }
         if (step.ticks_executed == 0) {
             LUMINUMBRA_CORE_ERROR("replay: tick {} did not advance", next_tick);
             runner.Shutdown();

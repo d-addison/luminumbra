@@ -17,13 +17,13 @@ cmake --build --preset perf --target luminumbra_server_app --parallel
 python tools/perf/perf.py run \
   --workload server-smoke --layer end-to-end --preset perf \
   --build-manifest build/perf/performance-build.json --mode gating \
-  --parameter ticks=30 --parameter surface_radius=1 \
+  --parameter ticks=30 --parameter autosave_ticks=30 --parameter surface_radius=1 \
   --parameter collision_radius=1 --parameter seed=1337 \
   --parameter world_preset=default --fixture-hash "$(git rev-parse HEAD:data)" \
   --evidence-contract server-smoke --evidence build/perf/server-smoke-evidence.json \
   --warmup 1 --samples 20 --output build/perf/server-smoke.json -- \
   build/perf/bin/luminumbra_server_app --smoke --preset default --seed 1337 \
-    --ticks 30 --radius 1 --collision-radius 1 \
+    --ticks 30 --autosave-ticks 30 --radius 1 --collision-radius 1 \
     --artifact build/perf/server-smoke-evidence.json
 ```
 
@@ -232,17 +232,21 @@ endianness declared by the PFM scale sign. Position and normal are view-space;
 normal is decoded from the production octahedral encoding. TAAU state and jitter
 are recorded; keep TAAU disabled for spatial coverage comparisons because its
 color contains history. Depth is OpenGL window
-depth with clear value 1. PPM and PGM use top-down rows; PGM stores the material ID,
+depth with the convention recorded in the manifest: current reversed-Z uses
+clear value 0; historical forward-depth packets use 1. PPM and PGM use top-down
+rows; PGM stores the material ID,
 including clear ID 255. Ignore position/normal/material values where depth is
 clear. These are the deferred attachments from the same rendered frame as color;
 they do not represent all transparent-surface contributions to final color.
 
-For a controlled diagnostic A/B only,
-`--render-benchmark-aovs-bypass-camera-region-guard` suppresses the whole camera
-region's draw guard while retaining the production 176 m near clipping and 3 km
-far range. It requires AOV capture and is recorded in every region receipt. This
-is an experiment control, not a supported terrain-ownership policy or a cave/edit
-correctness claim. Ordinary rendering is unchanged without diagnostics.
+The historical `--render-benchmark-aovs-bypass-camera-region-guard` option now
+remains only for command compatibility and has no rendering effect. Ordinary
+terrain and water use the same 176 m fragment exclusion in all regions, including
+the camera region, instead of suppressing that entire 512 m region. The effective
+`camera_region_guard_bypassed` receipt field is false. Near exclusion still applies
+when live geometry is missing; it does not authorize heightfield fill over caves
+or edits. Compare separate parent/candidate ordinary captures to qualify changes,
+retaining each source/binary identity.
 
 Existing output directories are refused. Successful publication requires every
 attachment and a final complete manifest; a failed capture exits nonzero and
@@ -255,3 +259,17 @@ See [Terrain coverage diagnostics](terrain-coverage-diagnostics.md) for a record
 same-camera guard/bypass pair, original images, provenance joins and reproduction
 commands. Its coverage findings do not qualify a production ownership policy or
 ordinary-play performance.
+
+The paired server lane prepares an explicit common historical workload in isolated
+`base/perf-common` and `head/perf-common` roots. Both checkouts compile the same
+guarded fixture adapter, selected only by `.perf-controlled`, to pin legacy
+simulation gates, tuning and finite hydrology. Autosave is explicitly zero. The
+receipt records source hashes and the canonical input identity, including presets
+and systems.json. Generated saves do not enter that input hash. This measures a
+common workload with the existing 5% limit; a fixture transition alone is not a pass.
+
+Native candidate simulation-budget capture runs separately without that marker and
+requires effective active regions, High water, finite hydrology, weather rain/events
+and allocated stateful aether. Its repeated stage traces supply the existing budget
+proposal process. Null baseline identity/work ceilings require CI evidence before
+pinning; they must not be invented or treated as passing performance qualification.

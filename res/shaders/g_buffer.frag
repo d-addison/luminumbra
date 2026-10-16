@@ -1,6 +1,7 @@
 #version 450 core
+layout (location = 5) out vec4 gAuthoredSurface; // RGB emission, A material lane
 layout (location = 0) out vec3 gPosition;          // RGB16F: full view-space position
-layout (location = 1) out vec4 gNormalMaterial;    // RGB10A2: Octahedral normal + material ID
+layout (location = 1) out vec4 gNormalMaterial;    // RGBA8: Oct normal, marker emissivity, material ID
 layout (location = 2) out vec4 gAlbedoRoughness;   // RGBA8: RGB albedo + roughness
 layout (location = 3) out vec2 gMetallicAO;        // RG16F: Metallic + AO
 layout (location = 4) out vec2 gMotionVector;      // RG16F: screen motion (NDC delta); /TAAU
@@ -119,6 +120,59 @@ uniform mat4 u_prev_view_proj;
 uniform vec2 u_inv_screen_size;
 uniform vec2 u_jitter_ndc;
 
+// Ladder-only ownership and clipping. All other shared shader paths are inert.
+uniform int u_farWorldLadder;
+#ifdef LUMINUMBRA_FAR_WORLD_LADDER
+uniform float u_farRayBiasMeters;
+// Shared with the vertex stage: exactly the projection used for rasterization.
+uniform mat4 projection;
+#endif
+uniform float u_farOuterRadius;
+uniform float u_farTileEdge;
+uniform int u_farArrivalEligible;
+uniform float u_farFinerOuterRadius;
+uniform vec2 u_farChildY[4];
+uniform ivec3 u_farOriginChunk;
+uniform vec3 u_farOriginRemainder;
+uniform int u_farLiveCellCount;
+layout(std430, binding = 7) readonly buffer FarWorldLiveOwnership {
+    ivec4 u_farLiveCells[];
+};
+// Aliases of the current ladder draw's existing VBO/EBO, not extra stores.
+// VoxelVertex is seven 32-bit words; position occupies the first three.
+layout(std430, binding = 5) readonly buffer FarWorldVertices {
+    float u_farVertexWords[];
+};
+layout(std430, binding = 6) readonly buffer FarWorldIndices {
+    uint u_farIndices[];
+};
+bool farCellLess(ivec3 a, ivec3 b) {
+    if (a.x != b.x) return a.x < b.x;
+    if (a.y != b.y) return a.y < b.y;
+    return a.z < b.z;
+}
+bool farLiveOwns(vec3 local, uint materialId) {
+    // Canonical tile/span origins are integer multiples of 16 (remainder=0).
+    // Adding zero preserves the stored float local; /16 is exact binary scaling.
+    // Integer boundary locals, or integer remainder + integer local below 2^24,
+    // are exact. farTileLocal restores constant axes from the indexed vertices.
+    // floor supplies negative half-open semantics; key addition stays integer.
+    // CPU mirror: FarWorldChunkCell(FarWorldCellOrigin, local). Never use camera
+    // relative round trips or view rotation to decide a chunk or child boundary.
+    ivec3 cell = u_farOriginChunk + ivec3(floor((u_farOriginRemainder + local) / 16.0));
+    int lo = 0;
+    int hi = u_farLiveCellCount;
+    // 8192 cells need at most 14 lower-bound steps, including the final cell.
+    for (int stepIndex = 0; stepIndex < 14 && lo < hi; ++stepIndex) {
+        int middle = lo + (hi - lo) / 2;
+        if (farCellLess(u_farLiveCells[middle].xyz, cell)) lo = middle + 1;
+        else hi = middle;
+    }
+    int readiness = materialId == 200u ? 2 : 1;
+    return lo < u_farLiveCellCount && all(equal(u_farLiveCells[lo].xyz, cell)) &&
+           (u_farLiveCells[lo].w & readiness) != 0;
+}
+
 // Input from the vertex shader, with "flat" interpolation for the integer ID
 in VS_OUT {
     vec3 FragPos;      // VIEW SPACE
@@ -129,7 +183,28 @@ in VS_OUT {
     flat uint MaterialID;
     vec3 Tint;         // per-instance albedo tint (1,1,1 = no-op)
     vec3 PrevWorldPos; //  TAAU: world pos with PREVIOUS-frame wind sway (== WorldPos for static)
+    vec3 FarRelativeWorldPos; // ladder-only, unbiased and never view-rotated
+    vec3 FarTileLocalPos; // unbiased stored vertex position, before camera subtraction
 } fs_in;
+
+vec3 farVertexLocal(uint index) {
+    uint word = index * 7u;
+    return vec3(u_farVertexWords[word], u_farVertexWords[word + 1u], u_farVertexWords[word + 2u]);
+}
+vec3 farTileLocal() {
+    uint first = uint(gl_PrimitiveID) * 3u;
+    vec3 a = farVertexLocal(u_farIndices[first]);
+    vec3 b = farVertexLocal(u_farIndices[first + 1u]);
+    vec3 c = farVertexLocal(u_farIndices[first + 2u]);
+    // Smooth perspective interpolation can move even a constant nonzero local
+    // one ULP below its boundary. Exact vertex equality proves a constant plane;
+    // select its stored coordinate without rounding or snapping varying axes.
+    // This also survives near clipping, which retains the source primitive ID.
+    bvec3 constantAxis = bvec3(equal(a, b).x && equal(a, c).x,
+                               equal(a, b).y && equal(a, c).y,
+                               equal(a, b).z && equal(a, c).z);
+    return mix(fs_in.FarTileLocalPos, a, constantAxis);
+}
 
 //  terrain visual-fidelity (visual-fidelity warm palette floor),: the 256px terrain
 // textures read muddy/low-contrast. Amplify the EXISTING high-frequency detail
@@ -242,6 +317,33 @@ float triplanar_roughness(vec3 worldPos, vec3 weights, float layer, float scale)
 
 void main()
 {
+#ifdef LUMINUMBRA_FAR_WORLD_LADDER
+    // A program writing gl_FragDepth must assign it on every surviving path.
+    // Live, legacy, static and skinned depth/material outputs stay inert.
+    gl_FragDepth = gl_FragCoord.z;
+    vec3 depthPosition = fs_in.FragPos;
+    if (u_farWorldLadder == 1) {
+        if (any(isnan(depthPosition)) || any(isinf(depthPosition)) ||
+            isnan(u_farRayBiasMeters) || isinf(u_farRayBiasMeters) || u_farRayBiasMeters < 0.0)
+            discard;
+        float radius = length(depthPosition);
+        if (isnan(radius) || isinf(radius) || radius <= 0.0) discard;
+        depthPosition *= 1.0 + u_farRayBiasMeters / radius;
+        if (any(isnan(depthPosition)) || any(isinf(depthPosition))) discard;
+        vec4 biasedClip = projection * vec4(depthPosition, 1.0);
+        if (any(isnan(biasedClip)) || any(isinf(biasedClip)) || biasedClip.w <= 0.0) discard;
+        float biasedDepth = biasedClip.z / biasedClip.w;
+        // Production float near-plane rounding: exactly nextafter(1.0f, 2.0f),
+        // matching ProjectFarWorldRayBias without widening any other boundary.
+        float nearDepthUpperBound = uintBitsToFloat(floatBitsToUint(1.0) + 1u);
+        if (biasedDepth > 1.0 && biasedDepth <= nearDepthUpperBound)
+            biasedDepth = 1.0;
+        if (isnan(biasedDepth) || isinf(biasedDepth) || biasedDepth < 0.0 || biasedDepth > 1.0)
+            discard;
+        gl_FragDepth = biasedDepth;
+    }
+#endif
+    gAuthoredSurface = vec4(0.0);
     // Public procedural trees have no leaf-card texture. Give their cards an
     // explicit silhouette instead of drawing opaque rectangular terrain patches.
     bool proceduralLeaf = u_alphaTest == 2;
@@ -253,7 +355,26 @@ void main()
     if (fs_in.MaterialID == 7u) { // Water
         discard;
     }
-    if (u_farClipInnerRadius > 0.0 &&
+    if (u_farWorldLadder == 1) {
+        vec3 relativeWorld = fs_in.FarRelativeWorldPos;
+        // Q25/Q27 bind continuous camera-relative sphere/XZ distance tests,
+        // not cell decisions. Float roundoff is confined to the radius surface;
+        // the prescribed strict comparisons retain exactly representable limits
+        // without expanding a clip band. It cannot change half-open cell ownership.
+        float horizontalSquared = dot(relativeWorld.xz, relativeWorld.xz);
+        vec3 local = farTileLocal();
+        if (dot(relativeWorld, relativeWorld) < 176.0 * 176.0 ||
+            horizontalSquared > u_farOuterRadius * u_farOuterRadius || farLiveOwns(local, fs_in.MaterialID))
+            discard;
+        if (u_farArrivalEligible == 1 &&
+            horizontalSquared <= u_farFinerOuterRadius * u_farFinerOuterRadius &&
+            all(greaterThanEqual(local.xz, vec2(0.0))) && all(lessThan(local.xz, vec2(u_farTileEdge)))) {
+            int child = int(local.x >= u_farTileEdge * 0.5) + 2 * int(local.z >= u_farTileEdge * 0.5);
+            if (local.y >= u_farChildY[child].x && local.y <= u_farChildY[child].y)
+                discard;
+        }
+    }
+    if (u_farWorldLadder != 1 && u_farClipInnerRadius > 0.0 &&
         dot(fs_in.FragPos, fs_in.FragPos) < u_farClipInnerRadius * u_farClipInnerRadius) {
         discard; // far-region fragment inside the live ring: live wins
     }
@@ -458,7 +579,13 @@ void main()
     }
 
     // --- G-Buffer output ---
+#ifdef LUMINUMBRA_FAR_WORLD_LADDER
+    // Depth and position describe the same point. Clips, ownership, material
+    // sampling and previous-world reprojection retain their unbiased inputs.
+    gPosition = depthPosition;
+#else
     gPosition = fs_in.FragPos;
+#endif
 
     // The flat-shaded path keeps the interpolated view-space normal exactly as
     // before (byte-identical for untextured ids); the textured path rotates the
@@ -471,6 +598,13 @@ void main()
 
     gAlbedoRoughness = vec4(albedo * fs_in.Tint, roughness);
     gMetallicAO = vec2(metallic, ao);
+#ifdef LUMINUMBRA_FAR_WORLD_LADDER
+    // Signed RG16F AO tag, mirrored by FarWorldSurfaceTag.h. Keep RGBA8
+    // normal/material and marker emissivity intact. This common output also
+    // tags material-200 water; no distance or material-ID classification.
+    if (u_farWorldLadder == 1)
+        gMetallicAO.g = -(1.0 + ao);
+#endif
     //  (TAAU): screen-space motion vector = current screen pos - reprojected previous pos.
     // Current pos is exact from gl_FragCoord (NDC); previous pos reprojects this surface point's
     // ABSOLUTE world position through last frame's view-proj. Captures camera/rigid motion
@@ -480,6 +614,13 @@ void main()
     // reproject the PREVIOUS-frame world position (wind sway included) through the previous
     // view-proj. For static geometry PrevWorldPos == WorldPos, so this is identical to camera-only
     // reprojection; for wind-swayed foliage it cancels the per-frame sway delta (no tree-top ghosting).
+#ifdef LUMINUMBRA_FAR_WORLD_LADDER
+    // projection[2].xy += jitter shifts raster NDC by MINUS jitter in RH
+    // perspective (w=-z). Correct it for ladder camera-only motion, preserving
+    // the existing non-ladder convention above verbatim.
+    if (u_farWorldLadder == 1)
+        currNdc = gl_FragCoord.xy * u_inv_screen_size * 2.0 - 1.0 + u_jitter_ndc;
+#endif
     vec4 prevClip = u_prev_view_proj * vec4(fs_in.PrevWorldPos, 1.0);
     gMotionVector = (prevClip.w > 1e-5) ? (currNdc - prevClip.xy / prevClip.w): vec2(0.0);
 }

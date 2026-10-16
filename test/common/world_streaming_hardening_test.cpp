@@ -1,3 +1,4 @@
+#include "../fixtures/TerrainFixtureParams.h"
 // Adversarial determinism-hardening gates for the E2E streaming path:
 // world-streaming-state serialization + sub-hash, structure placement, and the
 // far-LOD store. These hunt the bug classes the happy-path siblings
@@ -27,6 +28,8 @@
 
 #include "gtest/gtest.h"
 
+#include "../support/UniqueTempPath.h"
+
 #include "persistence/WorldPersistenceRoundtrip.h"
 #include "persistence/WorldSaveService.h"
 #include "systems/SHIELD_WorldSystem.h"
@@ -35,7 +38,6 @@
 #include "world/StructurePlacement.h"
 #include "world/WorldStreamingState.h"
 
-#include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <memory>
@@ -162,7 +164,7 @@ std::vector<std::size_t> ScrambledOrder() {
 }
 
 TerrainGenParams FixtureParams() {
-    TerrainGenParams params;
+    TerrainGenParams params = Luminumbra::Test::SyntheticTerrainParams();
     params.base_frequency = 0.005f;
     params.base_amplitude = 40.0f;
     params.height_offset = 10.0f;
@@ -185,10 +187,8 @@ World::StructureTemplatePool LoadRuin() {
 
 struct TempSaveDir {
     explicit TempSaveDir(const std::string& tag) {
-        const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
-        path = fs::temp_directory_path() /
-               ("luminumbra_streaming_hardening_" + tag + "_" + std::to_string(stamp));
-        fs::create_directories(path);
+        path = Luminumbra::TestSupport::CreateUniqueTempDirectory(
+            "luminumbra_streaming_hardening_" + tag + "_");
     }
     ~TempSaveDir() {
         std::error_code ec;

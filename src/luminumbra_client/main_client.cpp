@@ -1,4 +1,4 @@
-﻿#if defined(_WIN32) && !defined(NOMINMAX)
+#if defined(_WIN32) && !defined(NOMINMAX)
 #define NOMINMAX
 #endif
 
@@ -27,12 +27,14 @@ __declspec(dllexport) extern const int AmdPowerXpressRequestHighPerformance = 1;
 #include "app/RenderBenchmarkReport.h"
 #include "app/RuntimeRoot.h"
 #include "app/RuntimeStateRecorder.h"
+#include "app/SessionExit.h"
 #include "app/WindowModeControls.h"
 #include "audio/AudioManagerFactory.h"
 #include "audio/AudioPropagationSystem.h"   // ComputeWaterfallRoar (static)
 #include "audio/EnvironmentalAudioSystem.h" // /09: day/night beds + biome/weather reverb
 #include "audio/IAudioManager.h"
 #include "audio/NullAudioManager.h"
+#include "core/BenchmarkPose.h"
 #include "core/Debug.h"
 #include "core/GameState.h"
 #include "core/IsolationConfig.h" // ScenarioHarness::ParseIsolationConfig (render-only layer isolation)
@@ -83,6 +85,7 @@ __declspec(dllexport) extern const int AmdPowerXpressRequestHighPerformance = 1;
 #include "luminumbra_common/world/FarLodStore.h"
 #include "luminumbra_common/world/GameSession.h"
 #include "luminumbra_common/world/KnobLayer.h" //  semantic-knob layer + startup invariant
+#include "luminumbra_common/world/TerrainPresetLoader.h"
 #include "nlohmann/json.hpp"
 #include "player/PlayerController.h"
 #include "rendering/Camera.h"
@@ -1352,6 +1355,29 @@ int main(int argc, char* argv[]) {
     LUMINUMBRA_CORE_INFO("Runtime root: {}", root_path_str);
 
     RuntimeScenarioConfig scenario_config = ParseRuntimeScenarioConfig(argc, argv, root_dir);
+    std::string override_error;
+    if (!scenario_config.systems_config_path.empty() ||
+        HasCommandLineFlag(argc, argv, "--systems-config") ||
+        HasCommandLineFlag(argc, argv, "--systems-config=")) {
+        luminumbra::core::SystemConfig config;
+        if (!luminumbra::core::SystemConfig::TryLoadFromFile(
+                scenario_config.systems_config_path, config, override_error)) {
+            LUMINUMBRA_CORE_ERROR("--systems-config: {}", override_error);
+            return 2;
+        }
+        scenario_config.systems_config_override = std::move(config);
+    }
+    if (!scenario_config.preset_json_path.empty() ||
+        HasCommandLineFlag(argc, argv, "--preset-json") ||
+        HasCommandLineFlag(argc, argv, "--preset-json=")) {
+        std::string json_text;
+        if (!Luminumbra::world::LoadTerrainPresetOverride(
+                scenario_config.preset_json_path, root_dir / "data", json_text, override_error)) {
+            LUMINUMBRA_CORE_ERROR("--preset-json: {}", override_error);
+            return 2;
+        }
+        scenario_config.preset_json_override = std::move(json_text);
+    }
 #if !defined(LUMINUMBRA_QA_RUNNER)
     // The shipping client does not compile the QA scenario harness (no
     // CreateScenarioRunner is linked). Refuse `--scenario` up front, before any
@@ -1528,8 +1554,11 @@ int main(int argc, char* argv[]) {
     // exposure curve remains the shipped gameplay default.
     g_app.overlay.auto_exposure_metered = HasCommandLineFlag(argc, argv, "--auto-exposure-metered");
     //  rendering (,  ): opt-in froxel volumetrics tier.
-    g_app.overlay.volumetric_quality =
-        std::stoi(GetCommandLineOption(argc, argv, "--volumetric-quality", "0"));
+    g_app.overlay.volumetric_quality = std::stoi(
+        GetCommandLineOption(argc,
+                             argv,
+                             "--volumetric-quality",
+                             std::to_string(Luminumbra::Rendering::kDefaultVolumetricQuality)));
     g_app.capture.profile_fly_seconds = static_cast<double>(GetCommandLineIntOption(
         argc, argv, "--profile-fly", 0)); // runtime telemetry: constant-speed eye-level moving
                                           // profiler (normal-play, self-exits)
@@ -1947,6 +1976,12 @@ int main(int argc, char* argv[]) {
     // can be applied immediately. Never hashed; missing overlay -> struct defaults.
     g_systemConfig = luminumbra::core::SystemConfig::LoadLayered(
         "data/common/systems.json", luminumbra::core::SystemConfig::DefaultUserOverlayPath());
+    if (scenario_config.systems_config_override) {
+        // Retain the player settings overlay; it cannot alter simulation or render flags.
+        const auto user_settings = g_systemConfig.user();
+        g_systemConfig = *scenario_config.systems_config_override;
+        g_systemConfig.user() = user_settings;
+    }
 
     if (!capture_size.empty())
         glfwWindowHint(GLFW_SCALE_FRAMEBUFFER, GLFW_FALSE);
@@ -2005,36 +2040,7 @@ int main(int argc, char* argv[]) {
     auto gameSession = std::make_unique<Luminumbra::world::GameSession>();
     gameSession->SetJobSystem(&jobSystem);
     gameSession->SetRootPath(root_path_str);
-    // Full control: data-drive every creature system from systems.json. All OFF by default ->
-    // compiled constants -> byte-identical; enable a block + set values to tune live behaviour.
-    gameSession->SetEcologyTuning(luminumbra::ai::ResolveEcologyTuning(g_systemConfig));
-    // opt-in weather-driven rain (hashed sim flag; default
-    // OFF keeps the canonical baselines byte-identical — activation is a deliberate
-    // hash bump on the owner menu).
-    gameSession->SetWeatherRainEnabled(
-        g_systemConfig.enabled(luminumbra::core::SysKey::SimHydrologyWeather));
-    // Supported opt-in High-resolution water (hashed sim flag; default OFF =
-    // Medium 8x8 grid = byte-identical baselines; ON = 16x16, 1 m cells).
-    gameSession->SetActiveRegionsEnabled(
-        g_systemConfig.enabled(luminumbra::core::SysKey::SimActiveRegions));
-    gameSession->SetWaterHighResEnabled(
-        g_systemConfig.enabled(luminumbra::core::SysKey::SimWaterHighRes));
-    // opt-in deterministic weather-event epochs (hashed sim flag).
-    gameSession->SetWeatherEventsEnabled(
-        g_systemConfig.enabled(luminumbra::core::SysKey::SimWeatherEvents));
-    // opt-in STATEFUL energy-field layer (hashed sim flag;
-    // default OFF keeps the canonical baselines byte-identical — activation is a
-    // deliberate hash bump on the owner menu).
-    gameSession->SetAetherStateEnabled(
-        g_systemConfig.enabled(luminumbra::core::SysKey::SimAetherState));
-    gameSession->SetWildlifeFoliageTuning(
-        luminumbra::ai::ResolveWildlifeFoliageTuning(g_systemConfig));
-    gameSession->SetThirstTuning(luminumbra::ai::ResolveThirstTuning(g_systemConfig));
-    gameSession->SetScavengingTuning(luminumbra::ai::ResolveScavengingTuning(g_systemConfig));
-    gameSession->SetForagingTuning(luminumbra::ai::ResolveForagingTuning(g_systemConfig));
-    gameSession->SetReproductionTuning(luminumbra::ai::ResolveReproductionTuning(g_systemConfig));
-    gameSession->SetCircadianAmplitude(luminumbra::ai::ResolveCircadianAmplitude(g_systemConfig));
-    gameSession->SetPlantMutationRate(luminumbra::ai::ResolvePlantMutationRate(g_systemConfig));
+    gameSession->ApplySystemConfig(g_systemConfig);
 
     // Load creature species metadata (display names + rarity) for the codex/discovery
     // HUD. Missing/partial data degrades gracefully: DisplayName falls back to
@@ -2066,12 +2072,14 @@ int main(int argc, char* argv[]) {
             scenario_config.audio_telemetry_path,
             scenario_config.no_audio ? Luminumbra::Client::NullAudioActivation::ExplicitNoAudio
                                      : Luminumbra::Client::NullAudioActivation::ReleaseDefaultOff);
-        LUMINUMBRA_CORE_INFO("Audio disabled for this release.");
+        LUMINUMBRA_CORE_INFO("Audio disabled by --no-audio.");
     } else {
         audioManager = Luminumbra::Client::CreateAudioManager(root_path_str);
-        LUMINUMBRA_CORE_INFO("Experimental audio enabled by --enable-audio.");
+        LUMINUMBRA_CORE_INFO("Audio playback enabled.");
     }
-    audioManager->Init();
+    if (!audioManager->Init()) {
+        LUMINUMBRA_CORE_WARN("Audio initialization failed; playback unavailable.");
+    }
     audioManager->SetMasterVolume(
         g_systemConfig.user().audio_master); // apply persisted master volume
     audioManager->SetMusicVolume(
@@ -2127,6 +2135,23 @@ int main(int argc, char* argv[]) {
         scenario_config.isolation_layers, scenario_config.isolation_backdrop));
     // far-LOD tile builds ride the JobSystem Normal lane.
     renderPipeline.attach_farlod_job_system(&jobSystem);
+    const auto farWorldCavePolicy =
+        renderPipeline.set_far_world_cave_policy(Luminumbra::Rendering::ResolveFarWorldCaveField(
+            g_systemConfig.param(luminumbra::core::SysParam::FarWorldCaveField,
+                                 Luminumbra::Rendering::kDefaultFarWorldCaveFieldCode)));
+    // systems.json defaults to Ladder; enabled:false explicitly requests Legacy.
+    renderPipeline.set_far_world_mode(Luminumbra::Rendering::RequestedFarWorldMode(
+        g_systemConfig.enabled(luminumbra::core::SysKey::RenderFarWorldLadder)));
+    if (g_systemConfig.enabled(luminumbra::core::SysKey::RenderFarWorldLadder)) {
+        if (!farWorldCavePolicy.requested)
+            LUMINUMBRA_CORE_WARN(
+                "Far-world Ladder refused: cave_field requires exact 0 (BandLimited) "
+                "or 1 (BoxFiltered). Legacy remains effective.");
+        else
+            LUMINUMBRA_CORE_WARN(
+                "Far-world Ladder requested; normal world activation refuses without "
+                "immutable committed authority and dirty parking. Legacy remains effective.");
+    }
     // set the sky-LUT GPU flag BEFORE startup so the one-shot precompute
     // (init_sky_lut, inside startup) takes the GPU compute path. render.sky_lut_gpu, default OFF.
     renderPipeline.set_sky_lut_gpu_enabled(
@@ -2186,7 +2211,9 @@ int main(int argc, char* argv[]) {
     renderPipeline.set_cloud_quality(cloud_quality); // default 1 (half); env can set 0
     renderPipeline.set_ssao_quality(ssao_quality);   // default 2 (GTAO High); env can set 0
     //  TAAU: enable the temporal resolve from the render.taau flag (default OFF -> byte-identical).
-    renderPipeline.set_taau_enabled(g_systemConfig.enabled(luminumbra::core::SysKey::RenderTaau));
+    renderPipeline.set_taau_enabled(!g_app.capture.render_parity_active &&
+                                    terrain_coverage_dir.empty() &&
+                                    g_systemConfig.enabled(luminumbra::core::SysKey::RenderTaau));
     // (render.sky_lut_gpu is set BEFORE startup above so init_sky_lut also takes the GPU path.)
     // data-driven skinned-mesh texture set. The scenario
     // config resolved the.ltex paths (from the game archetype JSON or a generic
@@ -2465,6 +2492,10 @@ int main(int argc, char* argv[]) {
             }
         }
 
+        if (scenario_config.preset_json_override) {
+            customPresetJson = *scenario_config.preset_json_override;
+            customPtr = &customPresetJson;
+        }
         const auto asset_error = game_content_error();
         if (!asset_error.empty()) {
             refuse_world_entry(asset_error, false);
@@ -2534,6 +2565,7 @@ int main(int argc, char* argv[]) {
                     return "";
                 nlohmann::json j;
                 in >> j;
+                j = Luminumbra::world::ResolveTerrainPresetDefaults(j);
                 //  seed a semantic knob from the preset's persisted
                 // knob layer (path "knob.<id>"). Curated presets carry none -> "" ->
                 // the knob stays NEUTRAL (0.5), never inverse-lerped.
@@ -3075,7 +3107,9 @@ int main(int argc, char* argv[]) {
     std::chrono::steady_clock::time_point g_rb_before_swap{};
     Luminumbra::Vec3 g_rb_last_streaming_position{};
     bool g_rb_has_streaming_position = false;
-    const glm::vec3 kRenderBenchmarkCameraPosition(8.0f, 56.0f, 8.0f);
+    const glm::vec3 kRenderBenchmarkCameraPosition(Luminumbra::BenchmarkPose::kPosX,
+                                                   Luminumbra::BenchmarkPose::kPosY,
+                                                   Luminumbra::BenchmarkPose::kPosZ);
     std::unique_ptr<Measurement::SampleRing> measured_samples;
     std::unique_ptr<Luminumbra::Rendering::BenchmarkGpuQueries> benchmark_queries;
     std::uint64_t traversal_ticks = 0;
@@ -3356,8 +3390,8 @@ int main(int argc, char* argv[]) {
             // the sim never reads the mirror back, so it is determinism-neutral. Gated by
             // LUMIN_SCENT_DECAL so the default render stays byte-identical until opted in.
             if (!g_app.foragers.scentDecalInitialized) {
-                g_app.foragers.scentDecal =
-                    Luminumbra::Core::ReadEnvironment("LUMIN_SCENT_DECAL").has_value();
+                g_app.foragers.scentDecal = Luminumbra::Rendering::ScentDecalEnabled(
+                    Luminumbra::Core::ReadEnvironment("LUMIN_SCENT_DECAL"));
                 g_app.foragers.scentDecalInitialized = true;
             }
             if (g_app.foragers.scentDecal) {
@@ -3750,7 +3784,7 @@ int main(int argc, char* argv[]) {
                             g_playerController->GetMovementMode() ==
                                 Luminumbra::Client::MovementMode::Walking);
                     if (traversal) {
-                        while (measuring_v3 &&
+                        while (measuring_v3 && !gameSession->GetRegionSchedulerFault() &&
                                traversal_ticks < static_cast<std::uint64_t>(traversal_target_tick))
                             traversal_ticks +=
                                 gameSession->TickSimulation(1.0 / traversal->tickRate);
@@ -3777,6 +3811,8 @@ int main(int argc, char* argv[]) {
                         }
                     } // g_app.capture.timeScale == 0 -> paused (no sim ticks; render/streaming
                       // continue)
+                    Luminumbra::Client::PollSessionFault(
+                        *gameSession, [&] { glfwSetWindowShouldClose(window, GLFW_TRUE); });
                     rb_sim_ms = std::chrono::duration<double, std::milli>(
                                     std::chrono::steady_clock::now() - _rb_sim_t0)
                                     .count();                         //
@@ -3809,15 +3845,19 @@ int main(int argc, char* argv[]) {
                         // PlayerController::Update may have moved g_camera back to
                         // the player this frame; the capture pose is reapplied later
                         // for rendering. Stream that same position now as well.
+                        Luminumbra::BenchmarkPose::StreamingInputs streaming_in{};
+                        streaming_in.fixed_cam = g_app.capture.fixed_cam;
+                        streaming_in.fixed_cam_pos = g_app.capture.fixed_cam_pos;
+                        streaming_in.benchmark_active = g_rb_active;
+                        streaming_in.has_camera = g_camera != nullptr;
+                        streaming_in.camera_pos = g_camera ? g_camera->Position : glm::vec3(0.0f);
+                        streaming_in.cam_anchored = cam_anchored;
+                        streaming_in.has_player = g_playerController != nullptr;
+                        streaming_in.player_pos = g_playerController
+                                                      ? g_playerController->GetPosition()
+                                                      : glm::vec3(0.0f);
                         const Luminumbra::Vec3 streaming_position =
-                            g_app.capture.fixed_cam ? Luminumbra::Vec3(g_app.capture.fixed_cam_pos)
-                            : g_rb_active && g_camera
-                                ? Luminumbra::Vec3(kRenderBenchmarkCameraPosition)
-                            : cam_anchored
-                                ? Luminumbra::Vec3(g_camera->Position)
-                                : (g_playerController
-                                       ? Luminumbra::Vec3(g_playerController->GetPosition())
-                                       : Luminumbra::Vec3(g_camera->Position));
+                            Luminumbra::BenchmarkPose::SelectStreamingPosition(streaming_in);
                         if (g_rb_active) {
                             g_rb_last_streaming_position = streaming_position;
                             g_rb_has_streaming_position = true;
@@ -4216,11 +4256,11 @@ int main(int argc, char* argv[]) {
                     if (g_rb_active) {
                         if (!g_app.capture.fixed_cam) {
                             g_camera->Position = kRenderBenchmarkCameraPosition;
-                            g_camera->Yaw = 35.0f;
-                            g_camera->Pitch = -6.0f;
+                            g_camera->Yaw = Luminumbra::BenchmarkPose::kYaw;
+                            g_camera->Pitch = Luminumbra::BenchmarkPose::kPitch;
                             g_camera->updateCameraVectors();
                         }
-                        renderPipeline.set_time_of_day(0.04f);
+                        renderPipeline.set_time_of_day(Luminumbra::BenchmarkPose::kTimeOfDay);
                     }
                     if (g_app.capture.fixed_cam && g_camera) {
                         g_camera->Position = g_app.capture.fixed_cam_pos;
@@ -4945,6 +4985,9 @@ int main(int argc, char* argv[]) {
                     }
                 });
                 j["capture_context"]["time_of_day_at_report"] = renderPipeline.get_time_of_day();
+                j["capture_context"]["world_id"] =
+                    gameSession ? nlohmann::json(gameSession->GetMetadata().worldId)
+                                : nlohmann::json(nullptr);
                 if (g_rb_has_streaming_position) {
                     j["capture_context"]["last_world_streaming_position"] = {
                         g_rb_last_streaming_position.x,
@@ -5236,13 +5279,15 @@ int main(int argc, char* argv[]) {
     // is active or when no chunk carries unsaved edits.
     // The main loop and its quit callback have returned; keep saving on this thread.
     trace_shutdown("world_save_started");
-    if (gameSession && gameSession->SaveWorldState()) {
-        if (!g_app.menu.menu_backdrop_active && g_camera)
-            gameSession->SetSpawnPoint(g_playerController ? g_playerController->SavedSpawnAnchor()
-                                                          : g_camera->Position);
-        if (gameSession->SaveWorld())
-            mark_shutdown("world_state_saved");
-    }
+    Luminumbra::Client::SaveSessionOnExit(
+        gameSession.get(),
+        [&] {
+            if (!g_app.menu.menu_backdrop_active && g_camera)
+                gameSession->SetSpawnPoint(g_playerController
+                                               ? g_playerController->SavedSpawnAnchor()
+                                               : g_camera->Position);
+        },
+        [&] { mark_shutdown("world_state_saved"); });
 
     // Finished means the save stage returned; only world_state_saved reports success.
     trace_shutdown("world_save_finished");

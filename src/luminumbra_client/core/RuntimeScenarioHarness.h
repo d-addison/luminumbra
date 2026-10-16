@@ -15,6 +15,7 @@
 #include <filesystem>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -995,6 +996,10 @@ AnalyzeFarLodHorizonSkySliver(const std::vector<unsigned char>& pixels,
 
 struct FarLodHorizonStationCapture {
     FarLodHorizonStation station;
+    // Includes combined water readiness and actual water indices from far ON.
+    Luminumbra::Rendering::FarWorldDiagnosticSnapshot far_world;
+    double settle_seconds = 0;
+    bool ready_within_deadline = false, paired_capture_preserved = false;
     std::string file;
     PlayerViewPixelStats sky;               // full below-horizon machinery
     FarLodBoundaryBandStats boundary;       // live/far boundary band ROI
@@ -1050,6 +1055,8 @@ struct FarLodHorizonStationCapture {
     float camera_world_x = 0.0f;
     float camera_world_y = 0.0f;
     float camera_world_z = 0.0f;
+    float camera_yaw_degrees = 0.0f;
+    float camera_pitch_degrees = 0.0f;
 };
 
 // classifies the live/far
@@ -1393,6 +1400,8 @@ public:
         std::uint64_t budget_ticks = 90;
         std::uint64_t hash_cadence_ticks = 30;
         std::string root_path;
+        std::optional<luminumbra::core::SystemConfig> systems_config_override;
+        std::optional<std::string> preset_json_override;
         int surface_radius = 12;
         int collision_radius = 4;
     };

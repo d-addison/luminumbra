@@ -3,15 +3,21 @@
     [string]$Mode = "All",
 
     [string]$BuildPreset = "debug",
-    [int]$SmokeSeconds = 30
+    [int]$SmokeSeconds = 30,
+    [ValidateSet("Legacy", "Ladder")]
+    [string]$FarWorldRenderer = "Ladder"
 )
 
 $ErrorActionPreference = "Stop"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 . (Join-Path $ScriptDir "nightly-provenance.ps1")
 . (Join-Path $ScriptDir "capture-artifact-validation.ps1")
+. (Join-Path $ScriptDir "far-ladder-oracle.ps1")
 
 $ArtifactDir = "tools/gates/baselines"
+# Compatibility pins use explicit historical systems and the frozen terrain preset.
+$HistoricalSystemsConfig = Join-Path $ScriptDir "../../test/fixtures/historical-defaults-off.json"
+$HistoricalPresetJson = Join-Path $ScriptDir "../../worlds/atlas/presets-rev6/default.json"
 
 function Test-Build {
     # Preflight: the SystemConfig registry is generated from
@@ -2781,7 +2787,7 @@ function Test-FoliageInstancing {
     }
 
     $analysis = Get-Content $analysisPath -Raw | ConvertFrom-Json
-    if ($analysis.schema -ne "luminumbra.foliage_instancing.v2" -or
+    if ($analysis.schema -cnotin @("luminumbra.foliage_instancing.v2", "luminumbra.foliage_instancing.v3") -or
         $analysis.profile -ne "luminumbra.foliage_control.v2") {
         throw "Unexpected foliage analysis schema/profile '$($analysis.schema)' / '$($analysis.profile)'"
     }
@@ -2813,6 +2819,18 @@ function Test-FoliageInstancing {
         $analysis.coverage_density.instances_within_ring, `
         $analysis.phases.calm.maximum_instance_wind_magnitude, `
         $analysis.phases.windy.maximum_instance_wind_magnitude, $analysis.gpu_timer.status)
+    if ($analysis.schema -ceq "luminumbra.foliage_instancing.v3") {
+        $foliagePython = $null
+        foreach ($candidate in @($env:VISUAL_SWEEP_PYTHON, "python", "python3", "py")) {
+            if ([string]::IsNullOrWhiteSpace($candidate)) { continue }
+            if (-not (Get-Command $candidate -ErrorAction SilentlyContinue)) { continue }
+            & $candidate -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)" 2>$null
+            if ($LASTEXITCODE -eq 0) { $foliagePython = $candidate; break }
+        }
+        if (-not $foliagePython) { throw "Foliage v3 proof requires Python 3.10+ (standard library only)" }
+        & $foliagePython (Join-Path $PSScriptRoot "../perf/validate_foliage_evidence.py") $visualDir
+        if ($LASTEXITCODE -ne 0) { throw "Foliage raw rebuild/vertex/GPU proof validation refused" }
+    }
     # Do not replace the old full gate with a weaker green control-only gate.
     # Snapshot equality and wind-input magnitude cannot close the original requirements.
     if ($analysis.qualification.status -ne "complete" -or $analysis.passed -isnot [bool] -or
@@ -3432,19 +3450,57 @@ function Test-PlayerView {
 # run measures the gbuffer GPU time with far-LOD DISABLED (the honest in-run
 # baseline; the committed perf baseline records frame times, not per-pass GPU
 # times); phase B enables far-LOD and sweeps eye-level + elevated stations.
-# Gates: zero reported missing regions in the legacy runtime wanted set after
-# settle (no independent radius assertion); farlod_resident_bytes below the
+# Gates: camera-derived legacy wanted counts and zero missing regions at every
+# captured station; farlod_resident_bytes below the
 # artifact's resident_budget_bytes threshold; gbuffer_gpu_ms delta
 # < 1.5 ms; horizon screenshots show terrain to the horizon (below-horizon
 # sky ratio bounded); the live/far boundary band ROI (~192 m at the smoke
 # radii) shows no sky-leak band and no strict void clusters (the
 # Distant-Horizons failure mode).
-# FarTierTable.h declares the future volumetric ranges; this gate still reads
-# the legacy artifact and does not qualify coverage of that ladder.
+# The legacy scheduler is checked against an independent legacy oracle
+# (far-ladder-oracle.ps1, from the v2 oracle artifact). The volumetric ladder is
+# checked only when the artifact mode is ladder; otherwise ladder_checked is
+# reported false. Complete v2 checks every required station's retained ON frame,
+# deadline <=90 seconds, current spanning identities and independent wanted set.
+# An explicit Ladder run refuses until immutable fixture authority is supported.
+
+# File-only controls exercise selected-mode dispatch and combined water evidence
+# through the same independent validator used below.
+function Assert-FarHorizonWaterNegativeControls {
+    $waterPython = $null
+    foreach ($candidate in @("python3", "python", "py")) {
+        if (Get-Command $candidate -ErrorAction SilentlyContinue) { $waterPython = $candidate; break }
+    }
+    if (-not $waterPython) { throw "far water controls require Python 3 (stdlib only)" }
+    & $waterPython -B -m unittest discover -s (Join-Path $PSScriptRoot ".") -p "test_far_ladder_oracle.py"
+    if ($LASTEXITCODE -ne 0) { throw "FarLodHorizon v2 mode/water negative controls failed" }
+}
+
+function Assert-FarHorizonLegacyCompatibility {
+    param([object]$SelectedEvidence)
+    # V1 thresholds and F1/F2 counts qualify only this retained compatibility
+    # branch. Never infer selection from a requested flag or resident regions.
+    if ($SelectedEvidence.Mode -cne "legacy" -or
+        $SelectedEvidence.LadderChecked -ne $false) {
+        throw "FarLodHorizon wrong-mode: v1 requires effective Legacy compatibility evidence"
+    }
+}
 
 function Test-FarLodHorizon {
+    Assert-FarHorizonWaterNegativeControls
+    if ($FarWorldRenderer -eq "Ladder") {
+        throw "FarLodHorizon Ladder qualification is unsupported: the world presets lack injected immutable authority; native cave/edit/budget/water qualification remains NEEDS-NATIVE-RUN. A refused Legacy fallback cannot qualify Ladder."
+    }
+    # The validator selector does not override the client's systems.json request.
+    # Legacy qualification must explicitly opt out through the existing setting.
+    $systems = Get-Content -LiteralPath "data/common/systems.json" -Raw | ConvertFrom-Json
+    if ($systems.render.far_world_ladder.enabled -isnot [bool] -or
+        $systems.render.far_world_ladder.enabled -ne $false) {
+        throw "FarLodHorizon Legacy requires explicit render.far_world_ladder.enabled:false in data/common/systems.json. The default request is Ladder; a refused fallback is not an explicit Legacy request."
+    }
+    Write-Host "FarLodHorizon selected renderer: $FarWorldRenderer (explicit Legacy opt-out; ladder_checked:false)"
     $exe = Get-ClientExe
-    $runSeconds = [Math]::Max(50, $SmokeSeconds)
+    $runSeconds = [Math]::Max(680, $SmokeSeconds)
 
     # archipelago (sea to horizon) added so the
     # water-continuity assertion below runs on an open-water preset alongside
@@ -3471,8 +3527,24 @@ function Test-FarLodHorizon {
             "--runtime-artifact-dir", $viewDir
         ) -TimeoutSeconds ([Math]::Max(180, $runSeconds + 120))
 
+        $oracle = Read-JsonArtifact -Path (Join-Path $viewDir "farlod-horizon-ladder-oracle.json") -Schema "luminumbra.farlod_horizon.v2"
+        # Runs retained #199 aggregate checks plus the strict station/pose validator.
+        $oracleResult = Assert-FarHorizonV2Artifact -Path (Join-Path $viewDir "farlod-horizon-ladder-oracle.json") -Renderer ($FarWorldRenderer.ToLowerInvariant())
+        if ($oracle.world_preset -ne $preset) { throw "farlod horizon ($preset) wrong v2 preset" }
+        Assert-FarHorizonLegacyCompatibility -SelectedEvidence $oracleResult
         $analysisPath = Join-Path $viewDir "farlod-horizon-analysis.json"
         $analysis = Read-JsonArtifact -Path $analysisPath -Schema "luminumbra.farlod_horizon.v1"
+        Assert-FarLodHorizonStationCoverage -Analysis $analysis -Name "farlod horizon ($preset)"
+        foreach ($counter in @("regions_wanted", "regions_resident", "regions_missing")) {
+            $oracleCount = Get-FarOracleInteger $oracle.legacy.$counter "farlod horizon ($preset) oracle" "legacy.$counter"
+            $analysisCount = Get-FarOracleInteger $analysis.farlod.$counter "farlod horizon ($preset)" "farlod.$counter"
+            if ($oracleCount -ne $analysisCount) {
+                throw "farlod horizon ($preset) oracle legacy.$counter $oracleCount differs from runtime farlod.$counter $analysisCount"
+            }
+        }
+        $ladderCheckedText = "false"
+        if ($oracleResult.LadderChecked) { $ladderCheckedText = "true" }
+        Write-Host "  ladder_checked: $ladderCheckedText (mode $($oracle.mode))"
 
         if ($analysis.world_preset -ne $preset) {
             throw "farlod horizon ($preset) artifact has unexpected world_preset '$($analysis.world_preset)'"
@@ -3484,10 +3556,8 @@ function Test-FarLodHorizon {
             throw "farlod horizon ($preset) captured $($analysis.aggregates.captured_stations) of $($analysis.aggregates.expected_stations) stations"
         }
 
-        # After settle: zero reported missing regions in the runtime wanted set.
-        # This does not check thresholds.f2_outer_range_m (legacy metadata) or
-        # compute an expected set independently. See world/FarTierTable.h for
-        # the future volumetric ladder; assertions stay unchanged here.
+        # Retain the aggregate checks alongside the per-station independent
+        # coverage checks above. thresholds.f2_outer_range_m is v1 metadata.
         if ([int64]$analysis.farlod.regions_missing -gt 0) {
             throw "farlod horizon ($preset) has $($analysis.farlod.regions_missing) missing wanted far regions after settle"
         }
@@ -3742,7 +3812,7 @@ function Test-HeadlessServerTick {
         Remove-Item $artifactPath
     }
 
-    & $serverExe --smoke --ticks 90 --artifact $artifactPath
+    & $serverExe --smoke --ticks 90 --autosave-ticks 30 --artifact $artifactPath
     if ($LASTEXITCODE -ne 0) {
         throw "headless server smoke exited with code $LASTEXITCODE"
     }
@@ -3835,7 +3905,7 @@ function Test-PopulatedWorldReplay {
         Remove-Item $artifactPath
     }
 
-    & $serverExe --smoke --ecology-roster --planted-roster --ticks 90 --artifact $artifactPath # Include plants in the live feeding loop.
+    & $serverExe --systems-config $HistoricalSystemsConfig --preset-json $HistoricalPresetJson --smoke --ecology-roster --planted-roster --ticks 90 --autosave-ticks 30 --artifact $artifactPath # Include plants in the live feeding loop.
     if ($LASTEXITCODE -ne 0) {
         throw "populated world replay smoke exited with code $LASTEXITCODE"
     }
@@ -3901,6 +3971,7 @@ function Test-PopulatedWorldReplay {
     # (Re-pinned 2026-07-05 for: the roster now ALSO plants (--planted-roster),
     # so the previously-dormant feeding loop runs LIVE in this gate - grazeable biomass +
     # creature hunger now evolve and hash. The defined  extended-roster transition.)
+    # Pin covers the historical all-off simulation configuration and revision-6 terrain.
     $expectedHash = "d281053b8de4b891"
     if ($analysis.world_hash -ne $expectedHash) {
         throw "populated world replay end hash $($analysis.world_hash) != pinned golden $expectedHash (the populated ecology world diverged / non-deterministic)"
@@ -4159,8 +4230,8 @@ function Test-AetherFieldDeterminism {
     # across runs and STABLE; the field EVOLVES over time (not vacuous); geometry
     # matches the PINNED 24 m / 64-extent / 8-sweep shape. The `aether` sub-hash is
     # folded into the world_hash (deliberate bump #4 d950a6afc12a5cdc ->
-    # f17726d44054d133; then bump #5 f17726d44054d133 -> 8a6b7bb6795da912 from commit
-    # 0cb9ce8 appending the |scents: term; then bump #6
+    # f17726d44054d133; then bump #5 f17726d44054d133 -> 8a6b7bb6795da912
+    # appending the |scents: term; then bump #6
     # 8a6b7bb6795da912 -> d8f84cf6d7d0b978 from gate-populated-world-replay appending the
     # |ecology: term to ComposeWorldHash — the SERVER composite hash, run==replay proven —
     # asserted by the headless tick / replay / lockstep gates. NOTE the NetworkedSession gate pins a DIFFERENT quantity:
@@ -4340,7 +4411,7 @@ function Test-HeadlessServerTickHeavy {
     # aether_state: the STATEFUL energy layer is authoritative
     # round-trip state (unlike the recompute-and-excluded re-derivable wind/weather/
     # aether trio). Empty on the default OFF world ("" == "" passes); the ON fixture
-    # rides the sim.aether_state activation bump (Codex sign-off finding A).
+    # rides the sim.aether_state activation bump.
     foreach ($section in @("terrain", "water", "entities", "aether_state")) {
         if ($h.original_at_save.sub_hashes.$section -ne $h.loaded_at_load.sub_hashes.$section) {
             throw "heavy oracle: round-trip $section sub-hash mismatch: $($h.original_at_save.sub_hashes.$section) != $($h.loaded_at_load.sub_hashes.$section)"
@@ -4388,7 +4459,7 @@ function Test-ReplayRoundtrip {
     #  -> 0857e683b4b8c47e [ weather slot] -> d950a6afc12a5cdc [
     #  lightning strike schedule folded into the weather sub-hash, hash revision]
     #  -> f17726d44054d133 [ aether slot appended, bump #4]
-    #  -> 8a6b7bb6795da912 [commit 0cb9ce8  appended the |scents: term to
+    #  -> 8a6b7bb6795da912 [appended the |scents: term to
     #  ComposeWorldHash, bump #5]
     #  -> d8f84cf6d7d0b978 [gate-populated-world-replay appended the |ecology: term to
     #  ComposeWorldHash, bump #6; the EMPTY-roster ecology sub-hash is neutral, so this
@@ -4406,7 +4477,7 @@ function Test-ReplayRoundtrip {
     Remove-Item -Force -ErrorAction SilentlyContinue $streamPath, $artifactPath
 
     # 1) Record a 90-tick run.
-    $recCode = Invoke-ServerWithCrashRetry -ServerExe $serverExe -ServerArgs @("--record", $streamPath, "--ticks", "90")
+    $recCode = Invoke-ServerWithCrashRetry -ServerExe $serverExe -ServerArgs @("--systems-config", $HistoricalSystemsConfig, "--preset-json", $HistoricalPresetJson, "--record", $streamPath, "--ticks", "90")
     if ($recCode -ne 0) {
         throw "replay record exited with code $recCode"
     }
@@ -4415,7 +4486,7 @@ function Test-ReplayRoundtrip {
     }
 
     # 2) Replay the recorded stream.
-    $repCode = Invoke-ServerWithCrashRetry -ServerExe $serverExe -ServerArgs @("--replay", $streamPath, "--artifact", $artifactPath)
+    $repCode = Invoke-ServerWithCrashRetry -ServerExe $serverExe -ServerArgs @("--systems-config", $HistoricalSystemsConfig, "--preset-json", $HistoricalPresetJson, "--replay", $streamPath, "--artifact", $artifactPath)
     if ($repCode -ne 0) {
         throw "replay playback exited with code $repCode (the recorded stream failed to replay deterministically)"
     }
@@ -4443,6 +4514,7 @@ function Test-ReplayRoundtrip {
     # (Re-pinned 2026-07-05 for the  authoritative-state change: settle contract + flux
     # persistence + order-independent wake propagation. Prior canonical was
     # 6f008a9f637c40b7.)
+    # Pin covers the historical all-off simulation configuration and revision-6 terrain.
     $expectedHash = "a66ab4d049ba9228"
     if ($r.end_world_hash -ne $expectedHash) {
         throw "replay roundtrip end hash $($r.end_world_hash) != canonical $expectedHash (recording perturbed the simulation)"
@@ -4539,7 +4611,7 @@ function Test-LockstepLoopback {
     $artifactPath = Join-Path $lockstepDir "lockstep-loopback.json"
     Remove-Item -Force -ErrorAction SilentlyContinue $artifactPath
 
-    & $serverExe --lockstep-loopback --ticks 90 --artifact $artifactPath
+    & $serverExe --systems-config $HistoricalSystemsConfig --preset-json $HistoricalPresetJson --lockstep-loopback --ticks 90 --artifact $artifactPath
     if ($LASTEXITCODE -ne 0) {
         throw "lockstep loopback exited with code $LASTEXITCODE"
     }
@@ -4562,6 +4634,7 @@ function Test-LockstepLoopback {
     # Determinism proof: lockstep must NOT perturb the sim. The in-sync end hash must equal
     # the canonical HeadlessServerTick hash, unchanged. (Re-pinned 2026-07-05 for the
     #  authoritative-state change; prior canonical was 6f008a9f637c40b7.)
+    # Pin covers the historical all-off simulation configuration and revision-6 terrain.
     $expectedHash = "a66ab4d049ba9228"
     if ($a.host.world_hash -ne $expectedHash) {
         throw "lockstep loopback end hash $($a.host.world_hash) != canonical $expectedHash (lockstep perturbed the simulation)"
@@ -4616,6 +4689,8 @@ function Test-NetworkedSession {
     # exits; --timed-run is a generous outer ceiling only.
     Invoke-Checked -FilePath $exe -ArgumentList @(
         "--scenario", "networked_session_smoke",
+        "--systems-config", $HistoricalSystemsConfig,
+        "--preset-json", $HistoricalPresetJson,
         "--auto-create-world",
         "--auto-enter-world",
         "--timed-run", "600",
@@ -4669,6 +4744,7 @@ function Test-NetworkedSession {
     # Re-pinned 2026-07-10 after three independent 90-tick runs all produced
     # 354be8d009c08703 with host==client at every cadence, clean disconnect,
     # and zero GL errors. This remains the client-path bare streamed-chunk hash.
+    # Pin covers the historical all-off simulation configuration and revision-6 terrain.
     $expectedHash = "354be8d009c08703"
     if ($a.end_hash -ne $expectedHash) {
         throw "networked session end hash $($a.end_hash) != expected $expectedHash (client streamed-chunk world diverged / non-deterministic)"
@@ -4701,7 +4777,7 @@ function Test-LockstepFaultInjection {
     # --- Scenario 1: horizon absorbs a delayed/dropped input (stays in sync). ---
     $absorbArtifact = Join-Path $lockstepDir "lockstep-absorb.json"
     Remove-Item -Force -ErrorAction SilentlyContinue $absorbArtifact
-    & $serverExe --lockstep-loopback --ticks 90 --lockstep-delay-input 8 --artifact $absorbArtifact
+    & $serverExe --systems-config $HistoricalSystemsConfig --preset-json $HistoricalPresetJson --lockstep-loopback --ticks 90 --lockstep-delay-input 8 --artifact $absorbArtifact
     if ($LASTEXITCODE -ne 0) {
         throw "lockstep fault-injection (absorb) exited with code $LASTEXITCODE"
     }
@@ -4719,6 +4795,7 @@ function Test-LockstepFaultInjection {
     if ([int64]$absorb.host.late_input_events -le 0) {
         throw "lockstep fault-injection: no late-input events recorded (the delay was not exercised)"
     }
+    # Pin covers the historical all-off simulation configuration and revision-6 terrain.
     if (-not $absorb.end_hashes_equal -or $absorb.host.world_hash -ne "a66ab4d049ba9228") {
         throw "lockstep fault-injection: absorbed-jitter run did not reach the canonical in-sync end hash (host=$($absorb.host.world_hash))"
     }
@@ -4727,7 +4804,7 @@ function Test-LockstepFaultInjection {
     $corruptArtifact = Join-Path $lockstepDir "lockstep-corrupt.json"
     $dumpPath = Join-Path $lockstepDir "lockstep-desync.lrec1"
     Remove-Item -Force -ErrorAction SilentlyContinue $corruptArtifact, $dumpPath, ($dumpPath + ".peer")
-    & $serverExe --lockstep-loopback --ticks 90 --lockstep-corrupt-tick 30 --lockstep-dump $dumpPath --artifact $corruptArtifact
+    & $serverExe --systems-config $HistoricalSystemsConfig --preset-json $HistoricalPresetJson --lockstep-loopback --ticks 90 --lockstep-corrupt-tick 30 --lockstep-dump $dumpPath --artifact $corruptArtifact
     if ($LASTEXITCODE -ne 0) {
         throw "lockstep fault-injection (corrupt) exited with code $LASTEXITCODE"
     }
@@ -5199,9 +5276,9 @@ function Test-SimOptLevelParity {
     New-Item -ItemType Directory -Force -Path (Split-Path $parityArtifact) | Out-Null
     Remove-Item -ErrorAction SilentlyContinue $normalArtifact, $parityArtifact
 
-    & $normalExe --smoke --ticks 90 --artifact $normalArtifact
+    & $normalExe --smoke --ticks 90 --autosave-ticks 30 --artifact $normalArtifact
     if ($LASTEXITCODE -ne 0) { throw "sim-opt-parity: normal (-O1) smoke exited $LASTEXITCODE" }
-    & $parityExe --smoke --ticks 90 --artifact $parityArtifact
+    & $parityExe --smoke --ticks 90 --autosave-ticks 30 --artifact $parityArtifact
     if ($LASTEXITCODE -ne 0) { throw "sim-opt-parity: parity (-) smoke exited $LASTEXITCODE" }
 
     $normal = Read-JsonArtifact $normalArtifact "luminumbra.server_tick.v1"
@@ -6370,7 +6447,7 @@ function Test-MovingResidency {
     $artifactPath = "build/$BuildPreset/test-artifacts/server/moving-residency.json"
     if (Test-Path $artifactPath) { Remove-Item $artifactPath -Force }
 
-    & $serverExe --smoke-moving --avail-trace --ticks 90 --artifact $artifactPath
+    & $serverExe --smoke-moving --avail-trace --ticks 90 --autosave-ticks 30 --artifact $artifactPath
     if ($LASTEXITCODE -ne 0) {
         throw "moving-residency smoke exited with code $LASTEXITCODE"
     }

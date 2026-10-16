@@ -1,9 +1,10 @@
+#include "../support/UniqueTempPath.h"
+
 #include <gtest/gtest.h>
 
 #include "audio/NullAudioManager.h"
 #include "core/RuntimeScenarioConfig.h"
 
-#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <string>
@@ -26,10 +27,7 @@ auto Parse(std::vector<std::string> arguments, const fs::path& root = {}) {
 class TemporaryDirectory {
 public:
     TemporaryDirectory() {
-        path = fs::temp_directory_path() /
-               ("luminumbra-null-audio-" +
-                std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
-        fs::create_directory(path);
+        path = Luminumbra::TestSupport::CreateUniqueTempDirectory("luminumbra-null-audio-");
     }
     ~TemporaryDirectory() {
         std::error_code error;
@@ -38,8 +36,8 @@ public:
     fs::path path;
 };
 
-TEST(AudioDisabledTest, RealLaunchParserRequiresOptInAndDisableWinsInEitherOrder) {
-    EXPECT_FALSE(Parse({"client"}).audio_playback_enabled());
+TEST(AudioDisabledTest, RealLaunchParserDefaultsOnAndDisableWinsInEitherOrder) {
+    EXPECT_TRUE(Parse({"client"}).audio_playback_enabled());
     EXPECT_FALSE(Parse({"client", "--no-audio"}).audio_playback_enabled());
     EXPECT_TRUE(Parse({"client", "--enable-audio"}).audio_playback_enabled());
     EXPECT_FALSE(Parse({"client", "--enable-audio", "--no-audio"}).audio_playback_enabled());
@@ -52,7 +50,7 @@ TEST(AudioDisabledTest, RealLaunchParserRequiresOptInAndDisableWinsInEitherOrder
 
 TEST(AudioDisabledTest, SavedNonzeroVolumesCannotEnablePlaybackOrRetainRequestHistory) {
     TemporaryDirectory directory;
-    const auto config = Parse({"client"}, directory.path);
+    const auto config = Parse({"client", "--no-audio"}, directory.path);
     ASSERT_FALSE(config.audio_playback_enabled());
     NullAudioManager audio(config.audio_telemetry_path);
     ASSERT_TRUE(audio.Init());

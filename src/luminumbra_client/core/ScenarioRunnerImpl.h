@@ -174,6 +174,9 @@ private:
     bool foliage_scatter_loaded = false;
     bool foliage_capture_written = false;
     FoliagePhaseEvidence foliage_calm;
+    FoliagePhaseEvidence foliage_windy;
+    bool foliage_first_rebuild_written = false;
+    bool foliage_second_rebuild_written = false;
     float foliage_terrain_height = 0.0f;
     bool foliage_camera_initialized = false;
     Luminumbra::Vec3 foliage_camera_position{};
@@ -228,6 +231,7 @@ private:
     std::vector<PlayerViewStationCapture> player_view_station_captures;
     bool player_view_sky_enforced = true;
     std::vector<FarLodHorizonStation> farlod_horizon_stations;
+    std::vector<Luminumbra::World::FarTileKey> farlod_horizon_expected_tiles;
     std::vector<bool> farlod_horizon_captures_written;
     std::vector<FarLodHorizonStationCapture> farlod_horizon_station_captures;
     bool farlod_horizon_sky_enforced = true;
@@ -247,6 +251,8 @@ private:
     // station the camera was applied to this frame;
     // the post-render capture targets exactly this station so the analyzed back
     // buffer always matches the camera that rendered it.
+    std::chrono::steady_clock::time_point farlod_horizon_station_started_at{};
+    std::size_t farlod_horizon_timed_station = static_cast<std::size_t>(-1);
     std::size_t farlod_horizon_applied_station = 0;
     // skinned_mesh_visual_smoke: rig spawned once after readiness;
     // captures at two clip times prove the skinned stage renders and animates.

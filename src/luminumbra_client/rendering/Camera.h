@@ -1,9 +1,10 @@
 #pragma once
 
-#include <glad/glad.h>
 #include <glm/ext/matrix_clip_space.hpp>
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
+
+#include "FarWorldSelection.h"
 
 #include <vector>
 
@@ -25,12 +26,12 @@ const float SPEED = 2.5f;
 const float SENSITIVITY = 0.1f;
 const float ZOOM = 45.0f;
 const float NEAR_PLANE = 0.1f;
-// Legacy two-tier heightfield path: F2 streams to 3000 m and fragments clip
-// at 3050 m; the 3200 m far plane leaves projection margin. Far-region
-// triangles straddling that plane can rasterize as sky-crossing slivers.
-// The volumetric FarTierTable.h ladder supersedes these ranges when it lands;
-// its camera far-plane change is separate from the declaration.
-const float FAR_PLANE = 3200.0f;
+// Legacy two-tier heightfield path: the legacy path streams F2 to 3000 m and
+// fragments clip at 3050 m; the 3200 m far plane leaves projection margin.
+// Far-region triangles straddling that plane can rasterize as sky-crossing
+// slivers. The ladder plane is Luminumbra::World::kFarPlaneMeters and is
+// selected only when the ladder renders.
+const float FAR_PLANE = Luminumbra::World::kLegacyFarPlaneMeters;
 
 // Right-handed, finite reversed-Z projection for GL_ZERO_TO_ONE: near -> 1,
 // far -> 0. Swapping the planes avoids subtracting conventional depth from 1,
@@ -94,8 +95,10 @@ public:
     glm::mat4 GetProjectionMatrix(int screen_width, int screen_height) const {
         if (screen_height == 0)
             screen_height = 1; // Prevent division by zero
-        return ReversedZPerspective(
-            glm::radians(Zoom), (float)screen_width / (float)screen_height, NEAR_PLANE, FAR_PLANE);
+        return ReversedZPerspective(glm::radians(Zoom),
+                                    (float)screen_width / (float)screen_height,
+                                    GetNearPlane(),
+                                    GetFarPlane());
     }
 
     // --- ADD THESE TWO GETTERS ---
@@ -103,7 +106,13 @@ public:
         return NEAR_PLANE;
     }
     float GetFarPlane() const {
-        return FAR_PLANE;
+        return m_frame_far_plane;
+    }
+
+    // Render metadata is selected once between frames; camera pose stays const.
+    // All pass projections, inverses, frusta and captures consume this plane.
+    void SelectFarWorldPlane(FarWorldMode effective) const {
+        m_frame_far_plane = FarWorldPlane(effective);
     }
 
     // processes input received from any keyboard-like input system. Accepts input parameter in the
@@ -122,7 +131,7 @@ public:
 
     // processes input received from a mouse input system. Expects the offset value in both the x
     // and y direction.
-    void ProcessMouseMovement(float xoffset, float yoffset, GLboolean constrainPitch = true) {
+    void ProcessMouseMovement(float xoffset, float yoffset, bool constrainPitch = true) {
         xoffset *= MouseSensitivity;
         yoffset *= MouseSensitivity;
 
@@ -162,5 +171,6 @@ public:
     }
 
 private:
+    mutable float m_frame_far_plane = FAR_PLANE;
 };
 } // namespace Luminumbra::Rendering

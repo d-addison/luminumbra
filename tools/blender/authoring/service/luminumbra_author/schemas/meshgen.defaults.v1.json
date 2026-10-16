@@ -1,0 +1,268 @@
+{
+  "agent": {
+    "ops": {
+      "max_ops": 256,
+      "max_script_bytes": 65536,
+      "max_voxel_cells": 8000000
+    },
+    "staging": {
+      "max_incomplete": 4,
+      "max_project_bytes": 33554432,
+      "max_session_bytes": 8388608
+    },
+    "tier_a": {
+      "enabled": true
+    },
+    "tier_b": {
+      "enabled": false,
+      "max_processes": 64,
+      "output_mib": 64,
+      "qualification_max_age_days": 180,
+      "scratch_mib": 256
+    }
+  },
+  "anim": {
+    "enabled": false,
+    "sample_rate_hz": 30
+  },
+  "backend": {
+    "params": {}
+  },
+  "backends": {},
+  "budgets": {
+    "bounds_m": [
+      8.0,
+      8.0,
+      8.0
+    ],
+    "max_extent_m": 200,
+    "max_tris_final": 8000,
+    "max_tris_prefinish": 4000000
+  },
+  "candidates": {
+    "count": 1,
+    "score_weights": {},
+    "seed_policy": "fixed",
+    "select": "manual"
+  },
+  "collider": {
+    "decompose": {
+      "decimate": true,
+      "max_hull_vertices": 64,
+      "max_hulls": 16,
+      "preprocess": "on",
+      "threshold": 0.05,
+      "tool": "coacd"
+    },
+    "enabled": false,
+    "hull_max_vertices": 64,
+    "max_total_hulls": 32,
+    "mode": "none",
+    "output_naming": "LUM_COL.{kind}.{index:02d}",
+    "primitive_fit_max_error_rel": 0.05
+  },
+  "config_schema_version": 1,
+  "evaluation": {
+    "gates": {},
+    "judge": {
+      "enabled": false
+    },
+    "waivable": []
+  },
+  "experimental": {
+    "eval3d": false,
+    "nuvo": false,
+    "partuv": false
+  },
+  "finish": {
+    "decimate": {
+      "hausdorff_max_rel": 0.01,
+      "max_attempts": 4,
+      "method": "blender_collapse",
+      "min_ray_hit_rate": 0.5,
+      "on_over_budget": "refuse",
+      "open_sheet_min_retention": 0.8,
+      "thin_shell_guard": true,
+      "thin_shell_p10_min_ratio": 0.5
+    },
+    "degenerate": {
+      "area_eps_rel": 1e-12
+    },
+    "holes": {
+      "max_edges": 0
+    },
+    "loose": {
+      "min_fraction": 0.01,
+      "policy": "keep"
+    },
+    "material": {
+      "mode": "neutral"
+    },
+    "normals": {
+      "mode": "smooth_angle",
+      "repair_zero": true,
+      "sharp_angle_deg": 40
+    },
+    "scale": {
+      "pivot": "base_center",
+      "scene_scale": 1.0,
+      "up_axis": "Y"
+    },
+    "steps": [
+      "validate_input",
+      "weld",
+      "degenerate",
+      "loose_pieces",
+      "holes",
+      "decimate",
+      "normals",
+      "scale_pivot",
+      "uv",
+      "material",
+      "stats"
+    ],
+    "uv": {
+      "angle_limit_deg": 66,
+      "island_margin": 0.003,
+      "max_charts": 512,
+      "method": "smart_project"
+    },
+    "weld": {
+      "distance_rel": 1e-05
+    }
+  },
+  "limits": {
+    "collection_items": 65536,
+    "glb_accessor_elements": 16000000,
+    "image_bytes": 16777216,
+    "image_dimension": 16384,
+    "image_pixels": 16777216,
+    "json_depth": 32,
+    "log_bytes": 16384,
+    "metadata_bytes": 1048576,
+    "outstanding_jobs": 1,
+    "plans": 32,
+    "prompt_chars": 1024,
+    "request_bytes": 65536,
+    "response_bytes": 1048576,
+    "result_bytes": 268435456,
+    "terminal_requests": 256
+  },
+  "lod": {
+    "enabled": false,
+    "ratios": [
+      0.5,
+      0.2
+    ],
+    "switch_source": "farworld"
+  },
+  "logging": {
+    "keep_prompts": "digest"
+  },
+  "naming": {
+    "collection_template": "LUM_CANDIDATE.{job8}",
+    "object_template": "LUM_CAND.{job8}.{index:02d}"
+  },
+  "policy": {
+    "bounds": {},
+    "hard_ceilings": {
+      "agent.ops.max_ops": 256,
+      "agent.ops.max_voxel_cells": 8000000,
+      "agent.staging.max_incomplete": 4,
+      "agent.staging.max_project_bytes": 33554432,
+      "agent.staging.max_session_bytes": 8388608,
+      "budgets.max_tris_prefinish": 4000000,
+      "limits.collection_items": 65536,
+      "limits.glb_accessor_elements": 16000000,
+      "limits.image_bytes": 16777216,
+      "limits.image_dimension": 16384,
+      "limits.image_pixels": 16777216,
+      "limits.json_depth": 32,
+      "limits.log_bytes": 16384,
+      "limits.metadata_bytes": 1048576,
+      "limits.outstanding_jobs": 1,
+      "limits.plans": 32,
+      "limits.prompt_chars": 1024,
+      "limits.request_bytes": 65536,
+      "limits.response_bytes": 1048576,
+      "limits.result_bytes": 268435456,
+      "limits.terminal_requests": 256,
+      "timeouts.finish_s": 600,
+      "timeouts.job_s": 1800
+    },
+    "licence": {
+      "allowed_status": [
+        "shippable"
+      ],
+      "attestations": {
+        "no_ai_improvement": {
+          "value": false
+        },
+        "registration_done": {
+          "value": false
+        },
+        "revenue_under_cap": {
+          "value": false
+        }
+      },
+      "counsel_notes": [],
+      "dataset_chain_waivers": [],
+      "internal_acknowledgements": [],
+      "reference_image_provenance": "refuse_if_ai_training_reserved"
+    },
+    "locks": [
+      "policy.licence",
+      "naming.collection_template",
+      "backends.*.endpoint",
+      "agent.tier_b.enabled",
+      "finish.normals.repair_zero"
+    ],
+    "validation_profile": "internal"
+  },
+  "profiles": {},
+  "retention": {
+    "failed_days": 14,
+    "gc": "manual",
+    "keep_last": 20,
+    "max_total_mib": 4096
+  },
+  "rig": {
+    "enabled": false
+  },
+  "schema": "luminumbra.authoring.meshgen.config.v1",
+  "texture": {
+    "enabled": false
+  },
+  "timeouts": {
+    "connect_s": 5,
+    "finish_s": 180,
+    "job_s": 600,
+    "step_s": {
+      "decimate": 60,
+      "degenerate": 60,
+      "holes": 60,
+      "loose_pieces": 60,
+      "material": 60,
+      "normals": 60,
+      "scale_pivot": 60,
+      "stats": 60,
+      "uv": 60,
+      "validate_input": 60,
+      "weld": 60
+    }
+  },
+  "verify": {
+    "tolerance_rel": 0.005
+  },
+  "workers": {
+    "blender": {},
+    "finisher": {
+      "cpu_threads": 2,
+      "memory_mib": 4096
+    },
+    "ops": {
+      "cpu_threads": 2,
+      "memory_mib": 4096
+    }
+  }
+}

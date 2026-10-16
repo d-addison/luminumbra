@@ -1,11 +1,19 @@
 #pragma once
 
+#include "luminumbra_common/core/SystemConfig.h"
+#include "luminumbra_common/simulation/SimBudgetProfile.h"
+
 #include <cstdint>
 #include <filesystem>
+#include <optional>
 #include <string>
 
 struct ServerCliOptions {
     std::string root;
+    std::string systems_config_path;
+    std::string preset_json_path;
+    std::optional<luminumbra::core::SystemConfig> systems_config_override;
+    std::optional<std::string> preset_json_override;
     std::string preset = "default";
     std::string seed = "424242";
     std::string world_id;
@@ -13,7 +21,8 @@ struct ServerCliOptions {
     int surface_radius = 4;
     int collision_radius = 2;
     int test_streaming_radius_cap = 0;
-    std::uint64_t autosave_ticks = 0;
+    // Five minutes at the canonical 30 Hz clock; 0 disables autosave.
+    std::uint64_t autosave_ticks = 9000;
     //  spawn N deterministic player avatars (phyllotaxis ring
     // around spawn). 0 = none (byte-identical to the zero-avatar lane). With --smoke the
     // double-run already asserts the entities sub-hash matches, so --smoke --avatars N
@@ -46,6 +55,11 @@ struct ServerCliOptions {
     // ServerWorldRunnerConfig::water_smoke). Observability only; implies --smoke.
     bool water_smoke = false;
     bool sim_budget = false; // Opt-in simulation stage observation; default artifact unchanged.
+    // --sim-budget-profile <path>: operator-supplied budget profile (implies --sim-budget and
+    // --smoke). Parsed and validated before any world creation; never affects simulation output.
+    std::string sim_budget_profile_path;
+    std::optional<luminumbra::simulation::SimBudgetProfile> sim_budget_profile;
+    std::uint64_t sim_budget_profile_bytes = 0;
 
     //  --replicate runs the authoritative server + an in-process loopback
     // ReplicationClient, broadcasts the avatar states each tick, and asserts the client
@@ -135,8 +149,22 @@ struct ServerCliOptions {
     std::uint64_t lockstep_delay_input = 0;
     std::uint64_t lockstep_corrupt_tick = 0;
     std::string lockstep_dump_path;
+    // --crash-dir: where the crash report is written. Empty uses nonempty
+    // LUMINUMBRA_CRASH_DIR, then logs/crash under the working directory.
+    std::string crash_dir;
     bool parse_error = false;
 };
+
+inline std::filesystem::path ResolveServerCrashDirectory(const std::string& explicit_directory,
+                                                         const char* environment_directory) {
+    if (!explicit_directory.empty()) {
+        return std::filesystem::path(explicit_directory);
+    }
+    if (environment_directory != nullptr && environment_directory[0] != '\0') {
+        return std::filesystem::path(environment_directory);
+    }
+    return std::filesystem::path("logs") / "crash";
+}
 
 bool HasWorldPresets(const std::filesystem::path& candidate);
 std::filesystem::path ResolveServerRoot(const char* argv0);

@@ -23,6 +23,7 @@
 #include <map>
 #include <set>
 #include <sstream>
+#include <stdexcept>
 #include <system_error>
 #include <utility>
 
@@ -62,6 +63,17 @@ constexpr std::size_t kRecordHeaderSize = 18;
 constexpr std::uint8_t kRecordFlagEdited = 0x01;
 constexpr std::uint8_t kRecordFlagWaterPresent = 0x02;
 
+void ValidateRegionDigestKey(world::RegionKey key) {
+    // Packed chunk coordinates are [-2^20,2^20); reject unsupported public
+    // region keys before multiplying bounds or reading any durable member.
+    constexpr int minimum_key = -(1 << 20) / WorldSaveService::kRegionChunkSpan;
+    constexpr int maximum_key = (1 << 20) / WorldSaveService::kRegionChunkSpan;
+    if (key.x < minimum_key || key.x >= maximum_key || key.z < minimum_key ||
+        key.z >= maximum_key) {
+        throw std::invalid_argument("Invalid region digest key");
+    }
+}
+
 std::atomic<std::uint64_t>& RegionTempSequence() {
     static std::atomic<std::uint64_t> sequence{0};
     return sequence;
@@ -71,6 +83,29 @@ std::atomic<bool>& InterruptBeforeRegionReplaceForTesting() {
     static std::atomic<bool> interrupt{false};
     return interrupt;
 }
+
+// Number of POSIX directory flushes to let succeed before the next one fails;
+// negative disables the seam.
+std::atomic<int>& DirectoryFlushFailureCountdownForTesting() {
+    static std::atomic<int> countdown{-1};
+    return countdown;
+}
+
+#if !defined(_WIN32)
+// True when the injected flush failure fires on this flush.
+bool ConsumeDirectoryFlushFailureForTesting() {
+    std::atomic<int>& countdown = DirectoryFlushFailureCountdownForTesting();
+    int current = countdown.load(std::memory_order_acquire);
+    while (current >= 0) {
+        const int next = current == 0 ? -1 : current - 1;
+        if (countdown.compare_exchange_weak(
+                current, next, std::memory_order_acq_rel, std::memory_order_acquire)) {
+            return current == 0;
+        }
+    }
+    return false;
+}
+#endif
 
 using ActiveRegionsReplaceHook = bool (*)();
 ActiveRegionsReplaceHook& BeforeActiveRegionsReplaceForTesting() {
@@ -444,6 +479,12 @@ bool ReplaceRegionFileAtomically(const std::filesystem::path& temp,
     // power loss may resurrect the prior directory entry on some filesystems.
     const std::filesystem::path parent =
         destination.has_parent_path() ? destination.parent_path() : std::filesystem::path(".");
+    if (ConsumeDirectoryFlushFailureForTesting()) {
+        AddError(errors,
+                 "region file was replaced but its directory flush failed (test seam): " +
+                     parent.string());
+        return false;
+    }
     int directory_flags = O_RDONLY;
 #if defined(O_DIRECTORY)
     directory_flags |= O_DIRECTORY;
@@ -472,6 +513,47 @@ bool ReplaceRegionFileAtomically(const std::filesystem::path& temp,
         AddError(errors,
                  "region directory close failed after durable replacement: " + parent.string() +
                      ": " + PosixErrorMessage(error));
+        return false;
+    }
+    return true;
+}
+
+// Flushes the directory that holds a newly created entry so the entry survives
+// power loss.
+bool FlushDirectoryEntry(const std::filesystem::path& directory_path,
+                         std::vector<std::string>* errors) {
+    if (ConsumeDirectoryFlushFailureForTesting()) {
+        AddError(errors, "directory flush failed (test seam): " + directory_path.string());
+        return false;
+    }
+    int directory_flags = O_RDONLY;
+#if defined(O_DIRECTORY)
+    directory_flags |= O_DIRECTORY;
+#endif
+    const int directory = ::open(directory_path.c_str(), directory_flags);
+    if (directory < 0) {
+        const int error = errno;
+        AddError(errors,
+                 "cannot open directory for durable flush: " + directory_path.string() + ": " +
+                     PosixErrorMessage(error));
+        return false;
+    }
+    while (::fsync(directory) != 0) {
+        if (errno == EINTR) {
+            continue;
+        }
+        const int error = errno;
+        ::close(directory);
+        AddError(errors,
+                 "directory flush failed: " + directory_path.string() + ": " +
+                     PosixErrorMessage(error));
+        return false;
+    }
+    if (::close(directory) != 0) {
+        const int error = errno;
+        AddError(errors,
+                 "directory close failed after flush: " + directory_path.string() + ": " +
+                     PosixErrorMessage(error));
         return false;
     }
     return true;
@@ -594,7 +676,7 @@ bool ReadRegionFile(const std::filesystem::path& path,
         }
         record.uncompressed_size = ReadU32(header + 10);
         const std::uint32_t compressed_size = ReadU32(header + 14);
-        if (payload_offset + compressed_size > bytes.size()) {
+        if (payload_offset > bytes.size() || compressed_size > bytes.size() - payload_offset) {
             AddError(errors, "region file record payload is truncated: " + path.string());
             out_records.clear();
             return false;
@@ -960,7 +1042,7 @@ bool WorldSaveService::load_active_regions(world::ActiveRegionLedger& ledger,
     try {
         const auto path = active_regions_path(save_dir);
         if (!std::filesystem::exists(path)) {
-            ledger = world::ActiveRegionLedger({}, absent_clock);
+            ledger = world::ActiveRegionLedger(ledger.config(), absent_clock);
             return true;
         }
         const auto length = std::filesystem::file_size(path);
@@ -1031,30 +1113,64 @@ bool WorldSaveService::save_active_regions(world::ActiveRegionLedger& ledger,
     }
 }
 
-std::uint64_t
-WorldSaveService::region_simulation_digest(const std::filesystem::path& save_dir,
-                                           world::RegionKey key,
-                                           const std::vector<std::shared_ptr<Chunk>>& live_chunks) {
+std::uint64_t WorldSaveService::region_simulation_digest(const std::filesystem::path& save_dir,
+                                                         world::RegionKey key,
+                                                         const RegionDigestInputs& inputs) {
+    ValidateRegionDigestKey(key);
     WorldStreamingState region;
-    for (const auto& chunk : live_chunks) {
-        if (!chunk)
-            continue;
+    // Filtering precedes insertion: a live pristine or Loading chunk must not shadow a durable
+    // edited record with the same id. insert_chunk preserves the first record per id.
+    const auto qualifies = [&key](const std::shared_ptr<Chunk>& chunk) {
+        if (!chunk || chunk->sdf_provenance() != ChunkSdfProvenance::LoadedOrEdited)
+            return false;
         int rx = 0, rz = 0;
         region_coords_for_chunk(chunk->get_coords(), rx, rz);
-        if (rx == key.x && rz == key.z)
+        return rx == key.x && rz == key.z;
+    };
+    for (const auto& chunk : inputs.live) {
+        if (qualifies(chunk) && chunk->get_state() != ChunkState::Loading)
+            region.insert_chunk(chunk);
+    }
+    for (const auto& chunk : inputs.parked) {
+        if (qualifies(chunk) && chunk->get_state() != ChunkState::Loading)
             region.insert_chunk(chunk);
     }
     if (!save_dir.empty()) {
         std::vector<std::shared_ptr<Chunk>> durable_chunks;
         std::vector<std::string> errors;
-        if (!read_region_chunks(region_file_path(save_dir, key.x, key.z), durable_chunks, &errors))
+        if (!read_authoritative_region_chunks(region_file_path(save_dir, key.x, key.z),
+                                              key.x * kRegionChunkSpan,
+                                              key.x * kRegionChunkSpan + kRegionChunkSpan - 1,
+                                              key.z * kRegionChunkSpan,
+                                              key.z * kRegionChunkSpan + kRegionChunkSpan - 1,
+                                              durable_chunks,
+                                              &errors))
             throw std::runtime_error(errors.empty() ? "Cannot read durable region records"
                                                     : errors.front());
-        // insert_chunk preserves the first record for an id: live simulation wins.
-        for (const auto& chunk : durable_chunks)
-            region.insert_chunk(chunk);
+        for (const auto& chunk : durable_chunks) {
+            // Durable edited content is complete even if its saved lifecycle was Loading.
+            if (qualifies(chunk))
+                region.insert_chunk(chunk);
+        }
     }
     return std::stoull(ComputeRegionContentHash(region), nullptr, 16);
+}
+
+std::uint64_t
+WorldSaveService::region_simulation_digest(const std::filesystem::path& save_dir,
+                                           world::RegionKey key,
+                                           const std::vector<std::shared_ptr<Chunk>>& live_chunks) {
+    ValidateRegionDigestKey(key);
+    return region_simulation_digest(save_dir, key, RegionDigestInputs{live_chunks, {}});
+}
+
+std::uint64_t WorldSaveService::region_simulation_digest(
+    const std::filesystem::path& save_dir,
+    world::RegionKey key,
+    std::initializer_list<std::shared_ptr<Chunk>> live_chunks) {
+    ValidateRegionDigestKey(key);
+    return region_simulation_digest(
+        save_dir, key, RegionDigestInputs{std::vector<std::shared_ptr<Chunk>>(live_chunks), {}});
 }
 
 void WorldSaveService::region_coords_for_chunk(const IVec3& chunk_coords,
@@ -1251,6 +1367,56 @@ bool WorldSaveService::upsert_container_records(const std::filesystem::path& reg
 
 void WorldSaveService::set_interrupt_before_region_replace_for_testing(bool enabled) {
     InterruptBeforeRegionReplaceForTesting().store(enabled, std::memory_order_release);
+}
+
+bool WorldSaveService::write_file_durably(const std::filesystem::path& destination,
+                                          const std::string& bytes,
+                                          std::vector<std::string>* errors) {
+    std::error_code directory_error;
+    if (destination.has_parent_path()) {
+        std::filesystem::create_directories(destination.parent_path(), directory_error);
+    }
+    if (directory_error) {
+        AddError(errors,
+                 "cannot create directory " + destination.parent_path().string() + ": " +
+                     directory_error.message());
+        return false;
+    }
+#if !defined(_WIN32)
+    // Flush the entry of every ancestor directory, deepest first. A retry after a
+    // failed flush finds the directories already present, so the chain is flushed
+    // on every call rather than only for directories this call created. The
+    // replacement helper flushes the destination directory itself.
+    for (std::filesystem::path ancestor = destination.parent_path();
+         !ancestor.empty() && ancestor != ancestor.root_path();
+         ancestor = ancestor.parent_path()) {
+        const std::filesystem::path holder =
+            ancestor.has_parent_path() ? ancestor.parent_path() : std::filesystem::path(".");
+        if (!FlushDirectoryEntry(holder, errors)) {
+            return false;
+        }
+    }
+#endif
+    std::filesystem::path temp_path;
+    if (!WriteDurableRegionTemp(destination, bytes, temp_path, errors)) {
+        return false;
+    }
+    if (InterruptBeforeRegionReplaceForTesting().exchange(false, std::memory_order_acq_rel)) {
+        RemoveTemporaryFile(temp_path);
+        AddError(errors,
+                 "file replacement interrupted by test seam before replacing: " +
+                     destination.string());
+        return false;
+    }
+    if (!ReplaceRegionFileAtomically(temp_path, destination, errors)) {
+        RemoveTemporaryFile(temp_path);
+        return false;
+    }
+    return true;
+}
+
+void WorldSaveService::set_directory_flush_failure_for_testing(int flushes_to_skip) {
+    DirectoryFlushFailureCountdownForTesting().store(flushes_to_skip, std::memory_order_release);
 }
 
 void WorldSaveService::set_before_active_regions_replace_for_testing(bool (*hook)()) {

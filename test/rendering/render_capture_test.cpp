@@ -1,3 +1,4 @@
+#include "../fixtures/TerrainFixtureParams.h"
 #include "gtest/gtest.h"
 
 #define GLFW_INCLUDE_NONE
@@ -251,7 +252,7 @@ void SetMat3(GLuint program, const char* name, const glm::mat3& value) {
 }
 
 TerrainGenParams CaptureTerrainParams() {
-    TerrainGenParams params;
+    TerrainGenParams params = Luminumbra::Test::SyntheticTerrainParams();
     params.base_frequency = 0.035f;
     params.base_amplitude = 8.0f;
     params.octaves = 5;
@@ -268,7 +269,7 @@ TerrainGenParams CaptureTerrainParams() {
 }
 
 TerrainGenParams CaptureWaterParams() {
-    TerrainGenParams params;
+    TerrainGenParams params = Luminumbra::Test::SyntheticTerrainParams();
     params.base_frequency = 0.02f;
     params.base_amplitude = 1.0f;
     params.height_offset = -4.0f;
@@ -296,6 +297,8 @@ CaptureScene BuildTerrainScene() {
 CaptureScene BuildWaterScene() {
     SHIELD_WorldSystem world(nullptr, nullptr, CaptureWaterParams(), kSeed);
     WaterSystem water(nullptr, &world);
+    water.SetSimResolution(8);
+    water.SetHydrology(false, 0, 0);
     Chunk chunk({0, 0, 0});
     world.GenerateChunkData(chunk);
     chunk.water_level_data.assign(static_cast<std::size_t>(WATER_SIM_RESOLUTION_X) *
@@ -1265,6 +1268,32 @@ TEST(RenderGraph, CanonicalGraphSchedulesToAuthoredOrderAndValidatesClean) {
     EXPECT_LT(index_of("god_rays"), index_of("final_blit"));
     // the tint cascade flows shadow -> lighting.
     EXPECT_LT(index_of("shadow"), index_of("lighting"));
+
+    // index_of returns scheduled.size() for a missing node, so existence is checked first.
+    const auto schedule_size = static_cast<std::ptrdiff_t>(scheduled.size());
+    EXPECT_LT(index_of("god_rays"), schedule_size) << "god_rays missing from schedule";
+    EXPECT_LT(index_of("foliage"), schedule_size) << "foliage missing from schedule";
+    EXPECT_LT(index_of("weather_overlay"), schedule_size) << "weather_overlay missing";
+    EXPECT_LT(index_of("aerial"), schedule_size) << "aerial missing from schedule";
+    EXPECT_LT(index_of("taau_resolve"), schedule_size) << "taau_resolve missing from schedule";
+    EXPECT_LT(index_of("particles"), schedule_size) << "particles missing from schedule";
+    EXPECT_LT(index_of("god_rays"), index_of("foliage"));
+    EXPECT_LT(index_of("foliage"), index_of("weather_overlay"));
+    EXPECT_LT(index_of("weather_overlay"), index_of("aerial"));
+    EXPECT_LT(index_of("aerial"), index_of("taau_resolve"));
+    EXPECT_LT(index_of("taau_resolve"), index_of("particles"));
+
+    // The foliage node must read and write the shared lighting depth.
+    const auto& nodes = g.nodes();
+    auto is_foliage = [](const R::RenderGraphNode& n) {
+        return n.name == "foliage";
+    };
+    const auto foliage_node = std::find_if(nodes.begin(), nodes.end(), is_foliage);
+    ASSERT_NE(foliage_node, nodes.end());
+    EXPECT_NE(std::find(foliage_node->reads.begin(), foliage_node->reads.end(), "lighting.depth"),
+              foliage_node->reads.end());
+    EXPECT_NE(std::find(foliage_node->writes.begin(), foliage_node->writes.end(), "lighting.depth"),
+              foliage_node->writes.end());
 }
 
 // the tinted-transmission model (GlassTintModel.h) is the
@@ -1398,22 +1427,24 @@ TEST(SnowCoverModel, AccumulatesUnderSnowMeltsUnderSunAndClamps) {
 // TIME AUTHORITY — time-of-day is a pure function of the
 // sim tick. Same tick -> same TOD, bit-for-bit, no matter how many times or in
 // what order it is evaluated (there is no accumulator to drift with frame
-// pacing); the default day length reproduces the legacy 60 s/day wall pacing.
+// pacing); the default day length matches the world calendar's 2 h day.
 TEST(TodTickPurity, SameTickSameTodIndependentOfFramePacing) {
     namespace R = Luminumbra::Rendering;
-    EXPECT_EQ(R::kDefaultDayLengthTicks, 1800u) << "60 s/day at 30 Hz — the legacy pacing";
+    EXPECT_EQ(R::kDefaultDayLengthTicks, 216000u) << "2 h/day at 30 Hz";
+    EXPECT_EQ(R::kDefaultDayLengthTicks, Luminumbra::world::WorldCalendar{}.dayLengthTicks);
+    constexpr auto day = R::kDefaultDayLengthTicks;
     // Anchors: tick 0 == noon (tod 0); half a day == midnight (tod 0.5); wraps.
-    EXPECT_FLOAT_EQ(R::TimeOfDayFromTick(0, 1800), 0.0f);
-    EXPECT_FLOAT_EQ(R::TimeOfDayFromTick(900, 1800), 0.5f);
-    EXPECT_FLOAT_EQ(R::TimeOfDayFromTick(1800, 1800), 0.0f);
-    EXPECT_FLOAT_EQ(R::TimeOfDayFromTick(1800ull * 1000ull + 450ull, 1800), 0.25f);
+    EXPECT_FLOAT_EQ(R::TimeOfDayFromTick(0, day), 0.0f);
+    EXPECT_FLOAT_EQ(R::TimeOfDayFromTick(day / 2, day), 0.5f);
+    EXPECT_FLOAT_EQ(R::TimeOfDayFromTick(day, day), 0.0f);
+    EXPECT_FLOAT_EQ(R::TimeOfDayFromTick(day * 1000 + day / 4, day), 0.25f);
     // Purity: evaluating out of order / repeatedly yields bit-identical values —
     // the property a wall-clock accumulator can never have.
     const std::uint64_t ticks[] = {7ull, 12345ull, 99999999ull, 3ull, 7ull};
-    const float first_seven = R::TimeOfDayFromTick(7, 1800);
+    const float first_seven = R::TimeOfDayFromTick(7, day);
     for (std::uint64_t t : ticks) {
-        const float a = R::TimeOfDayFromTick(t, 1800);
-        const float b = R::TimeOfDayFromTick(t, 1800);
+        const float a = R::TimeOfDayFromTick(t, day);
+        const float b = R::TimeOfDayFromTick(t, day);
         EXPECT_EQ(a, b);
         if (t == 7ull) {
             EXPECT_EQ(a, first_seven);

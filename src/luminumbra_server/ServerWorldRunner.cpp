@@ -248,11 +248,13 @@ bool ServerWorldRunner::Boot() {
     m_session->SetSimBudgetTelemetryEnabled(m_config.sim_budget);
     m_session->SetJobSystem(&m_jobSystem);
     m_session->SetRootPath(m_config.root_path);
+    if (m_config.region_scheduler)
+        m_session->SetRegionSchedulerConfig(*m_config.region_scheduler);
     // host==peer: the headless host must run the SAME water-sim resolution the
     // client derives from data/common/systems.json — sim.water_high_res is baked into
     // the hashed mm grids, so a mismatched host could never agree with its peers.
     // Resolved against the runner root with a CWD-relative fallback (the client's
-    // load path); a missing file is all-defaults = Medium = byte-identical.
+    // load path); a missing file uses the same shipping simulation defaults.
     {
         namespace fsys = std::filesystem;
         const fsys::path root =
@@ -262,12 +264,13 @@ bool ServerWorldRunner::Boot() {
         if (!fsys::exists(systems_json, systems_ec)) {
             systems_json = fsys::path("data") / "common" / "systems.json";
         }
-        const auto sys_cfg = luminumbra::core::SystemConfig::LoadFromFile(systems_json.string());
-        m_session->SetActiveRegionsEnabled(
-            sys_cfg.enabled(luminumbra::core::SysKey::SimActiveRegions));
-        m_session->SetWaterHighResEnabled(
-            sys_cfg.enabled(luminumbra::core::SysKey::SimWaterHighRes));
+        const auto sys_cfg =
+            m_config.systems_config_override
+                ? *m_config.systems_config_override
+                : luminumbra::core::SystemConfig::LoadFromFile(systems_json.string());
+        m_session->ApplySystemConfig(sys_cfg);
     }
+    m_session->SetFiniteHydrologyEnabled(m_config.finite_hydrology);
     // A headless host has no client asset manifest; simulation assets alone are
     // validated and every voxel field uses the authoritative CPU generator.
 
@@ -275,7 +278,11 @@ bool ServerWorldRunner::Boot() {
     if (!m_config.world_id.empty()) {
         world_ready = m_session->LoadWorld(m_config.world_id);
     } else {
-        world_ready = m_session->CreateWorld(m_config.world_name, m_config.seed, m_config.preset);
+        world_ready = m_session->CreateWorld(
+            m_config.world_name,
+            m_config.seed,
+            m_config.preset,
+            m_config.preset_json_override ? &*m_config.preset_json_override : nullptr);
     }
     if (!world_ready) {
         m_bootError = m_session->GetWorldOpenError();
@@ -612,6 +619,12 @@ ServerTickReport ServerWorldRunner::RunFixedTicks(std::uint64_t tick_count) {
 
     const auto wall_start = std::chrono::steady_clock::now();
     while (report.ticks_executed < tick_count) {
+        if (const auto& region_fault = m_session->GetRegionSchedulerFault();
+            region_fault.has_value()) {
+            report.region_fault = true;
+            report.region_fault_message = region_fault.value().message;
+            break;
+        }
         LUMIN_PROFILE_ZONE_N("server_tick"); // no-op unless LUMINUMBRA_ENABLE_TRACY
         // One frame == one fixed tick: feeding the clock exactly fixed_dt
         // keeps the frame/tick mapping 1:1 and removes wall-clock timing from
@@ -642,6 +655,11 @@ ServerTickReport ServerWorldRunner::RunFixedTicks(std::uint64_t tick_count) {
         }
         report.ticks_executed += m_session->TickSimulation(fixed_dt);
         report.frames_executed += 1;
+        if (const auto& fault = m_session->GetRegionSchedulerFault()) {
+            report.region_fault = true;
+            report.region_fault_message = fault->message;
+            break;
+        }
         const std::uint64_t simulation_tick = m_session->ActiveRegionsEnabled()
                                                   ? m_session->GetSimulationTickCount()
                                                   : report.ticks_executed;
@@ -985,8 +1003,8 @@ Persistence::WorldStreamingStateSubHashes ServerWorldRunner::ComputeWorldSubHash
     // AetherFieldDeterminism gate and the desync-localization oracle.
     sub.aether = AetherSubHash(m_session.get());
     // the STATE-ONLY stateful-layer sub-hash — the heavy
-    // oracle's authoritative-compare slot when sim.aether_state is ON (Codex
-    // finding A). Always empty on the default (OFF) world.
+    // oracle's authoritative-compare slot when sim.aether_state is ON.
+    // Always empty on the default (OFF) world.
     sub.aether_state = m_session ? m_session->ComputeAetherStateSubHash() : std::string();
     return sub;
 }
@@ -1050,6 +1068,15 @@ std::size_t ServerWorldRunner::SaveFullSnapshot() {
         !m_session->IsSimulationTickBoundary()) {
         return 0;
     }
+    const std::filesystem::path save_dir = m_session->GetWorldSaveDir();
+    if (save_dir.empty()) {
+        return 0;
+    }
+    if (!m_session->SavedPresetCompatible(save_dir)) {
+        LUMINUMBRA_CORE_ERROR(
+            "SaveFullSnapshot failed: destination preset or identity is incompatible");
+        return 0;
+    }
     auto* world_system = m_session->GetWorldSystem();
     world_system->wait_for_streaming_jobs();
 
@@ -1058,10 +1085,6 @@ std::size_t ServerWorldRunner::SaveFullSnapshot() {
         state.insert_chunk(chunk);
     }
 
-    const std::filesystem::path save_dir = m_session->GetWorldSaveDir();
-    if (save_dir.empty()) {
-        return 0;
-    }
     Persistence::WorldSaveService service;
     std::vector<std::string> errors;
     if (!service.save_world(state, save_dir, &errors)) {

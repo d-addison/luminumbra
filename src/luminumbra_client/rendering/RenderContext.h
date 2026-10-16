@@ -1,4 +1,5 @@
 #pragma once
+#include "RenderingDefaults.h"
 
 #include "../../include/luminumbra/core/Types.h"
 #include "RenderFrameTypes.h" // DirectionalLight/PointLight/WeatherType/Weather/Cloud/Lightning (by value/ptr)
@@ -34,14 +35,36 @@ class SHIELD_WorldSystem;
 namespace Luminumbra::Rendering {
 
 class Camera;
+class RenderView;
 
 struct RenderContext {
     // Frame / camera / time.
     u64 frame_index = 0;
+    bool frozen_replay = false; // No queries, readbacks or evidence publication.
     const Camera* camera = nullptr;
+    // Validated neutral view used verbatim by the static geometry/lighting path.
+    const RenderView* render_view = nullptr;
+    bool static_studio = false;
+    glm::vec3 studio_background{0.02f, 0.025f, 0.03f};
+    TextureHandle authored_surface{}; // RGB emission, A authored-material selector
+
     float delta_time = 0.0f;
     glm::mat4 view = glm::mat4(1.0f);
     glm::mat4 projection = glm::mat4(1.0f);
+
+    // Value-only depth contract. The caller supplies C's selected projection;
+    // apply current jitter once, without selecting another plane. Every Ladder
+    // G-buffer depth writer uses gbuffer_projection; every reader uses its inverse.
+    bool far_world_ladder = false;
+    glm::mat4 gbuffer_projection{1.0f};
+    glm::mat4 gbuffer_inverse_projection{1.0f};
+    void set_gbuffer_depth_contract(bool ladder, glm::mat4 selected_projection, glm::vec2 jitter) {
+        far_world_ladder = ladder;
+        selected_projection[2][0] += jitter.x;
+        selected_projection[2][1] += jitter.y;
+        gbuffer_projection = selected_projection;
+        gbuffer_inverse_projection = glm::inverse(selected_projection);
+    }
 
     // Backbuffer / screen geometry (== OUTPUT extent).
     u32 screen_width = 0;
@@ -136,7 +159,7 @@ struct RenderContext {
     float aether_glow_intensity = 2.0f;
     //  ( -6): emissive materials scale by
     // (1 + aether * modulation). 0.0 = multiply by exactly 1.0 = pixel-identical.
-    float aether_material_modulation = 0.0f;
+    float aether_material_modulation = kDefaultAetherMaterialModulation;
     // render-only snow ground cover [0,1]; 0 = untouched.
     float snow_cover = 0.0f;
 
@@ -198,7 +221,8 @@ struct RenderContext {
     float exposure = 0.0f;
 
     // Group O — froxel volumetric quality (0 = both compute stages are no-ops).
-    int volumetric_quality = 0; // <- m_volumetric_quality
+    int volumetric_quality =
+        Luminumbra::Rendering::kDefaultVolumetricQuality; // <- m_volumetric_quality
 
     // Group P — waterfall live-water mirror. The pass reads this one-way world
     // view to extinguish a dammed/drained fall; it never mutates simulation state.

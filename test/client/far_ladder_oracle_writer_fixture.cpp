@@ -1,0 +1,108 @@
+#include "core/RuntimeScenarioHarness.h"
+
+#include <cstdlib>
+#include <exception>
+#include <filesystem>
+#include <iostream>
+#include <optional>
+#include <string>
+#include <vector>
+
+namespace {
+using Luminumbra::Client::ScenarioHarness::FarLodHorizonStationCapture;
+using Luminumbra::Client::ScenarioHarness::WriteFarLodHorizonAnalysis;
+
+std::vector<FarLodHorizonStationCapture> MakeCaptures() {
+    FarLodHorizonStationCapture origin{};
+    origin.station.name = "origin";
+    origin.file = "origin.ppm";
+    // Deliberately differ from station labels: v2 must serialize the measured pose.
+    origin.camera_yaw_degrees = 12.0f;
+    origin.camera_pitch_degrees = -4.0f;
+    // At a 512 m grid intersection the 3000 m disc intersects 132 regions:
+    // four quadrants, each with 6 + 6 + 6 + 6 + 5 + 4 nearest-point pairs.
+    origin.regions_wanted = 132;
+    origin.regions_resident = 132;
+    origin.resident_bytes = 4096;
+    origin.region_draws = 1;
+    origin.far_indices_drawn = 3;
+    origin.far_world.captured = true;
+    origin.far_world.selection =
+        Luminumbra::Rendering::SelectFarWorld(Luminumbra::Rendering::FarWorldMode::Legacy,
+                                              Luminumbra::Rendering::FarWorldPurpose::World,
+                                              Luminumbra::Rendering::FarWorldRefusal::None);
+    origin.far_world.requested_cave_policy = Luminumbra::World::FarCaveMode::BoxFiltered;
+    origin.far_world.bound_cave_policy = std::nullopt;
+    origin.far_world.world_epoch = 1;
+    origin.far_world.frame = 1;
+    origin.far_world.advanced = true;
+    origin.far_world.submission_occurred = true;
+    origin.far_world.draws = 1;
+    origin.far_world.indices = 3;
+    origin.ready_within_deadline = true;
+    origin.paired_capture_preserved = true;
+
+    FarLodHorizonStationCapture translated = origin;
+    translated.station.name = "translated";
+    translated.file = "translated.ppm";
+    translated.camera_world_x = -512.0f;
+    translated.camera_world_z = 1024.0f;
+    translated.far_world.frame = 2;
+    translated.far_world.camera = {-512.0, 0.0, 1024.0};
+    return {origin, translated};
+}
+} // namespace
+
+int main(int argc, char** argv) {
+    if (argc != 3) {
+        std::cerr << "Usage: far_ladder_oracle_writer_fixture <artifact-dir> "
+                     "<complete|incomplete|ladder|mixed|refused|preview>\n";
+        return EXIT_FAILURE;
+    }
+    const std::string mode = argv[2];
+    if (mode != "complete" && mode != "incomplete" && mode != "ladder" && mode != "mixed" &&
+        mode != "refused" && mode != "preview") {
+        std::cerr << "Unknown fixture mode: " << mode << '\n';
+        return EXIT_FAILURE;
+    }
+
+    try {
+        std::vector<FarLodHorizonStationCapture> captures = MakeCaptures();
+        if (mode == "incomplete") {
+            captures.back().regions_missing = 1;
+            --captures.back().regions_resident;
+        }
+        using namespace Luminumbra::Rendering;
+        for (std::size_t i = 0; i < captures.size(); ++i) {
+            auto& snapshot = captures[i].far_world;
+            if (mode == "ladder" || (mode == "mixed" && i != 0)) {
+                snapshot.selection = SelectFarWorld(
+                    FarWorldMode::Ladder, FarWorldPurpose::World, FarWorldRefusal::None);
+                snapshot.far_plane = FarWorldPlane(snapshot.selection.effective);
+                // Deliberately unqualified: emission must not invent v1 evidence
+                // or make retained Legacy counters a Ladder readiness proof.
+                snapshot.complete = false;
+            } else if (mode == "refused" || mode == "preview") {
+                snapshot.selection = SelectFarWorld(FarWorldMode::Ladder,
+                                                    mode == "preview" ? FarWorldPurpose::Preview
+                                                                      : FarWorldPurpose::World,
+                                                    FarWorldRefusal::ImmutableAuthorityUnavailable);
+            }
+        }
+        // File-only production writer call: no window, GL context, or smoke run.
+        // These synthetic captures do not establish readiness within 90 seconds.
+        WriteFarLodHorizonAnalysis(std::filesystem::path(argv[1]),
+                                   "mountains",
+                                   0.0,
+                                   captures,
+                                   captures.size(),
+                                   0.0,
+                                   0.0,
+                                   false,
+                                   false);
+    } catch (const std::exception& error) {
+        std::cerr << "Writer fixture failed: " << error.what() << '\n';
+        return EXIT_FAILURE;
+    }
+    return EXIT_SUCCESS;
+}

@@ -18,6 +18,8 @@ jobs:
     timeout-minutes: 20
     permissions:
       contents: write
+      checks: read
+      statuses: read
       id-token: write
       attestations: write
     steps:
@@ -39,6 +41,27 @@ jobs:
           python3 tools/ci/validate_public_tree.py
           python3 tools/ci/validate_assets.py --check config/public-asset-inventory.json
           echo "version=${version}" >> "$GITHUB_OUTPUT"
+      - name: Verify release gates
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ steps.identity.outputs.version }}
+          RELEASE_REPOSITORY_ID: ${{ github.repository_id }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          tag_commit=$(git rev-parse "${GITHUB_REF_NAME}^{commit}")
+          gh api --include --paginate "repos/${GITHUB_REPOSITORY}/rules/branches/main?per_page=100" > "${RUNNER_TEMP}/release-rules.json"
+          gh api "repos/${GITHUB_REPOSITORY}/branches/main" > "${RUNNER_TEMP}/release-branch.json"
+          gh api --include --paginate "repos/${GITHUB_REPOSITORY}/commits/${tag_commit}/statuses?per_page=100" > "${RUNNER_TEMP}/release-statuses.json"
+          gh api --include --paginate "repos/${GITHUB_REPOSITORY}/commits/${tag_commit}/check-runs?filter=all&per_page=100" |
+            python3 -I -B tools/release/validate_release_gates.py \
+              --repository "${GITHUB_REPOSITORY}" \
+              --repository-id "$RELEASE_REPOSITORY_ID" \
+              --version "$RELEASE_VERSION" --tag-commit "$tag_commit" \
+              --rules "${RUNNER_TEMP}/release-rules.json" \
+              --branch "${RUNNER_TEMP}/release-branch.json" \
+              --statuses "${RUNNER_TEMP}/release-statuses.json"
       - name: Build source archive, SBOM, and checksums
         shell: bash
         run: |
@@ -82,7 +105,16 @@ jobs:
       - name: Create source-only GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "${GITHUB_REF_NAME}" dist/* --verify-tag --generate-notes --title "Luminumbra ${GITHUB_REF_NAME}"
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The owner reviews the gate record's evidence and publishes manually.
+          notes="docs/release-notes-${GITHUB_REF_NAME}.md"
+          if test -f "$notes"; then
+            gh release create "${GITHUB_REF_NAME}" dist/* --draft --verify-tag --notes-file "$notes" --title "Luminumbra ${GITHUB_REF_NAME}"
+          else
+            gh release create "${GITHUB_REF_NAME}" dist/* --draft --verify-tag --generate-notes --title "Luminumbra ${GITHUB_REF_NAME}"
+          fi
 
   binary-linux:
     name: Dormant binary package / Linux
@@ -114,7 +146,7 @@ jobs:
         with:
           subject-path: build/package/luminumbra-*.tar.gz
           sbom-path: build/package/luminumbra-linux.spdx.json
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-linux
           path: |
@@ -158,7 +190,7 @@ jobs:
         with:
           subject-path: build/package/luminumbra-*.zip
           sbom-path: build/package/luminumbra-windows.spdx.json
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-windows
           path: |
@@ -177,7 +209,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           pattern: release-*
           path: dist
@@ -185,4 +217,12 @@ jobs:
       - name: Attach binary packages
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload "${GITHUB_REF_NAME}" dist/* --clobber
+          GH_REPO: ${{ github.repository }}
+        # contents: write allows uploads to the draft by tag. The owner publishes
+        # manually after reviewing the gate record's referenced evidence.
+        shell: bash
+        run: |
+          set -euo pipefail
+          is_draft=$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq '.isDraft')
+          test "$is_draft" = true
+          gh release upload "${GITHUB_REF_NAME}" dist/* --clobber

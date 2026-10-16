@@ -1,4 +1,5 @@
 #version 450 core
+#include "far_world_position.glsl"
 #include "config_constants.gen.glsl"
 out vec4 FragColor;
 
@@ -6,11 +7,16 @@ in vec2 TexCoords;
 
 // G-Buffer samplers (match g_buffer.frag output names)
 uniform sampler2D gPosition;          // RGB16F: full view-space position
-uniform sampler2D gNormalMaterial;    // RGB10A2: Octahedral normal + material ID
+uniform sampler2D gNormalMaterial;    // RGBA8: Oct normal, marker emissivity, material ID
 uniform sampler2D gAlbedoRoughness;   // RGBA8: RGB albedo + roughness
 uniform sampler2D gMetallicAO;        // RG16F: Metallic + AO
 uniform sampler2D u_ssao;
 uniform sampler2D u_environmentBrdf;
+uniform sampler2D u_sceneDepth;
+uniform sampler2D u_authoredSurface;
+uniform int u_authoredEnabled = 0;
+uniform int u_staticStudio = 0;
+uniform vec3 u_studioBackground = vec3(0.02, 0.025, 0.03);
 
 // Material lookup (256 x 4 rows; row 2 holds emissive_intensity/scale)
 uniform sampler2D u_materialLUT;
@@ -38,7 +44,7 @@ uniform float u_aetherGlowIntensity = 2.0;
 // aether — crystalGlow scales by (1 + aether * modulation). Default 0.0 is a
 // multiply by exactly 1.0, so the untouched path is pixel-identical even with
 // an active field tap; luminance is monotonic non-decreasing in the uniform.
-uniform float u_aetherMaterialModulation = 0.0;
+uniform float u_aetherMaterialModulation = 1.0;
 //  ( -8): Lumin/Umbra polarity tint. When the RG32F
 // dual tap is live (u_aetherPolarityActive = 1), the field's G channel in
 // [-1, 1] mixes the glow color toward the matching pole by |polarity|.
@@ -80,6 +86,7 @@ uniform float u_time;
 
 uniform vec3 u_terrainOrigin;
 uniform vec3 u_viewPos;
+uniform int u_orthographic;
 uniform mat4 u_inverseView;
 uniform vec3 u_skyAmbientColor;
 struct SunLight {
@@ -115,7 +122,7 @@ struct PointLight {
 uniform PointLight u_pointLights[MAX_POINT_LIGHTS];
 uniform int u_pointLightCount;
 
-// --- Cave / sky-visibility ambient occlusion (render-only, default OFF) ---
+// --- Cave / sky-visibility ambient occlusion (render-only, enabled by default) ---
 // SSAO uses a ~0.8m radius, so a fragment deep in a cave still receives the FULL
 // daylight sky-ambient and reads as flat-lit grey, swamping any point light placed
 // there. This term marches a short ray from the fragment toward the sky through the
@@ -123,7 +130,7 @@ uniform int u_pointLightCount;
 // from the sky and its AMBIENT (sky+ground-bounce) fades toward u_caveAmbientFloor.
 // Sun/moon/point lights are NOT touched, so a lamp in a now-dark cave reads naturally.
 // GATED by u_caveAmbientOcclusion (0 = OFF => skyVis==1 => pixel-identical to pre-fix).
-uniform float u_caveAmbientOcclusion;  // master gate: 0 = OFF (default, C++ sets it)
+uniform float u_caveAmbientOcclusion;  // master gate: 0 = OFF (C++ sets the shipping default to 1)
 uniform float u_caveSkyMaxDist;        // metres of upward ray to probe
 uniform int   u_caveSkySteps;          // march samples
 uniform float u_caveAmbientFloor;      // residual ambient deep inside (0..1)
@@ -402,7 +409,8 @@ float computeSkyVisibility(vec3 viewPosFrag, vec3 viewNrm) {
         if (clip.w <= 0.0) break;               // behind eye -> stop
         vec2 uv = (clip.xy / clip.w) * 0.5 + 0.5;
         if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) break; // off-screen = treat as open
-        vec3 sampPos = texture(gPosition, uv).rgb;
+        vec3 sampPos = vec3(0.0);
+        if (!farWorldPosition(gPosition, u_sceneDepth, uv, sampPos)) continue;
         // gPosition is 0 where nothing was rendered (sky); skip those (open).
         if (dot(sampPos, sampPos) < 1e-6) continue;
         // The ray point p and the stored surface sampPos share the same screen
@@ -421,9 +429,20 @@ float computeSkyVisibility(vec3 viewPosFrag, vec3 viewNrm) {
 }
 
 void main() {
+    if (u_staticStudio != 0 && texture(u_sceneDepth, TexCoords).r == 0.0) {
+        FragColor = vec4(u_studioBackground, 0.0);
+        return;
+    }
+    vec4 authoredSurface = u_authoredEnabled != 0
+        ? texture(u_authoredSurface, TexCoords) : vec4(0.0);
+    bool authored = authoredSurface.a > 0.5;
     // --- Step 1: Decode compressed G-Buffer ---
 
-    vec3 viewPos = texture(gPosition, TexCoords).rgb;
+    vec3 viewPos = vec3(0.0);
+    if (!farWorldPosition(gPosition, u_sceneDepth, TexCoords, viewPos)) {
+        FragColor = vec4(0.0);
+        return;
+    }
 
     // Decode octahedral normal and material ID
     vec4 normalData = texture(gNormalMaterial, TexCoords);
@@ -438,7 +457,12 @@ void main() {
     // Get metallic and AO
     vec2 matData = texture(gMetallicAO, TexCoords).xy;
     float Metallic = matData.r;
-    float ao = texture(u_ssao, TexCoords).r;
+    // Signed RG16F AO tag, mirrored by FarWorldSurfaceTag.h. Untagged values
+    // retain their original AO and shadow arithmetic, including Legacy water.
+    bool isFarSurface = matData.g < 0.0;
+    float materialAO = isFarSurface ? -matData.g - 1.0 : matData.g;
+    float ao = u_staticStudio != 0 ? 1.0 : texture(u_ssao, TexCoords).r;
+    if (authored) ao *= clamp(materialAO, 0.0, 1.0);
 
     // Transform to world space
     vec3 FragPos = vec3(u_inverseView * vec4(viewPos, 1.0));
@@ -454,13 +478,16 @@ void main() {
     // albedo, fully rough) by the render-only cover scalar, BEFORE F0/roughness
     // derive from them. u_snowCover == 0 (the default) touches nothing:
     // byte-identical. The far-water sheet (200) keeps its authored look.
-    if (u_snowCover > 0.001 && MaterialID != 200u) {
+    if (!authored && u_snowCover > 0.001 && MaterialID != 200u) {
         float snowAmt = u_snowCover * clamp(Normal.y, 0.0, 1.0);
         Albedo = mix(Albedo, vec3(0.88, 0.91, 0.96), snowAmt);
         Roughness = mix(Roughness, 0.95, snowAmt);
     }
 
-    vec3 V = normalize(u_viewPos - FragPos);
+    // Orthographic rays are parallel: camera-space +Z points toward the
+    // viewer at every fragment, including off-center orthographic views.
+    vec3 V = u_orthographic != 0 ? normalize(u_inverseView[2].xyz)
+                                 : normalize(u_viewPos - FragPos);
     vec3 F0 = mix(vec3(0.04), Albedo, Metallic);
     // the far-water sheet (material 200) is a flat
     // albedo-only sky-reflection-tint approximation. With ANY F0, grazing-angle
@@ -482,7 +509,7 @@ void main() {
     vec3 Lo = vec3(0.0);
     // The input is the ray-travel direction; the BRDF needs surface-to-light.
     vec3 L_sun = normalize(-u_sun.direction);
-    float shadow = CalculateShadow(FragPos, Normal, L_sun, abs(viewPos.z));
+    float shadow = (isFarSurface || u_staticStudio != 0) ? 1.0 : CalculateShadow(FragPos, Normal, L_sun, abs(viewPos.z));
     // Convert the authored sun COLOR into surface IRRADIANCE (x PI) so the
     // diffuse 1/PI division round-trips albedo faithfully (exposure-audit root
     // fix; see SUN_IRRADIANCE_SCALE above).
@@ -496,7 +523,7 @@ void main() {
     // tint the DIRECT key light by the glass
     // transmission along the light ray (white = no glass = identity). Applies to
     // whichever key the cascades hold (sun by day, the moon key at night).
-    vec3 shadowTint = SampleShadowTint(FragPos, abs(viewPos.z));
+    vec3 shadowTint = isFarSurface ? vec3(1.0) : SampleShadowTint(FragPos, abs(viewPos.z));
     Lo += CalculateLightContribution(L_sun, V, Normal, F0, Albedo, Metallic, a2, k, sunRadiance)
           * shadow * (1.0 - cloud_shadow) * shadowTint;
 
@@ -509,7 +536,7 @@ void main() {
     // avoid a second shadow pass). u_sun.color is already x-transmittance scaled.
     float sunLum = max(u_sun.color.r, max(u_sun.color.g, u_sun.color.b));
     float nightFactor = 1.0 - smoothstep(0.0, 0.06, sunLum); // ~0 day -> ~1 night
-    if (nightFactor > 0.001) {
+    if (u_staticStudio == 0 && nightFactor > 0.001) {
         // MoonGeometry supplies a ray-travel direction too. Use its opposite for
         // lighting, matching foliage and the cascade camera convention.
         vec3 L_moon = normalize(-u_moonDir);
@@ -518,14 +545,14 @@ void main() {
         // a touch of softening: lift the floor a hair to avoid harsh black edges /
         // peter-panning from the wider-spread night cascade, while still reading as
         // a directional shadow.
-        float moonShadow = CalculateShadow(FragPos, Normal, L_moon, abs(viewPos.z));
+        float moonShadow = isFarSurface ? 1.0 : CalculateShadow(FragPos, Normal, L_moon, abs(viewPos.z));
         //  rendering: the moon-shadow FLOOR scales with the lunar phase.
         // A FULL moon throws PROPER, crisp cast shadows (floor ~0.25 -> shadows read as real
         // directional contrast, DayZ bright-night feel); toward NEW moon the moon is too dim
         // to cast hard shadow, so the floor lifts (~0.7) and shadows fade out gracefully
         // rather than crushing the already-dark scene to black. (Was a flat 0.5.)
         float moonShadowFloor = mix(0.70, 0.25, u_moonIllum);
-        moonShadow = mix(moonShadowFloor, 1.0, moonShadow);
+        if (!isFarSurface) moonShadow = mix(moonShadowFloor, 1.0, moonShadow);
         // Cool moonlight key. Brighter than the old fill so a moonlit night is
         // clearly NAVIGABLE (form + value), but obviously cooler + dimmer than day.
         // Terrain albedos are dark (linear ~0.01-0.07), so the albedo*radiance
@@ -594,7 +621,7 @@ void main() {
     // documents the transfer curve). The crystal's prismatic look is preserved
     // as the glow's color/shape; intensity only scales magnitude.
     // material LUT widened to 4 rows; row 2 = emissive (center via lutRowV).
-    float emissiveIntensity = texture(u_materialLUT, vec2(float(MaterialID) / 255.0, lutRowV(2))).r * u_emissiveLutScale;
+    float emissiveIntensity = authored ? 0.0 : texture(u_materialLUT, vec2(float(MaterialID) / 255.0, lutRowV(2))).r * u_emissiveLutScale;
     if (emissiveIntensity > 0.0) {
         // Inner magical glow
         float glowPulse = sin(u_time * 2.0) * 0.3 + 0.7;
@@ -679,7 +706,7 @@ void main() {
     }
     // Long-range sky visibility: roofed-over (cave/overhang) fragments lose the
     // flat sky-ambient fill so deep interiors go near-black and any point light
-    // placed there reads as a real pool of light. GATED (default OFF) -> the
+    // placed there reads as a real pool of light. GATED (explicit zero disables modulation) -> the
     // skyVis multiplier is exactly 1.0 when u_caveAmbientOcclusion==0, so the
     // shipped path is pixel-identical. Applied to AMBIENT ONLY; Lo (sun/moon/
     // point) is untouched.
@@ -703,7 +730,8 @@ void main() {
         markerGlow = Albedo * (markerEmissive * 6.0 * dayFade);
     }
 
-    vec3 color = ambient + Lo + crystalGlow + aetherGlow + markerGlow; // + emissive markers
+    vec3 color = ambient + Lo + crystalGlow + aetherGlow + markerGlow
+        + (authored ? authoredSurface.rgb : vec3(0.0)); // + emissive markers
 
     // the lightning light-pulse + bolt are injected by a dedicated
     // FULL-SCREEN overlay (lightning_overlay.frag) drawn AFTER the skybox, so the
