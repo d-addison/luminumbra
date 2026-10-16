@@ -282,8 +282,10 @@ Committed and generated evidence has these compatibility rules:
 --build-manifest <performance-build.json>` writes
 `qualification.json` with schema `luminumbra.render_qualification.v1`.
 The output directory is held exclusively with `.qualification.lock`, created with
-`O_CREAT | O_EXCL`, from before any output/settings changes through aggregate
-publication. A held lock refuses the run and names the lock file; it is never
+`O_CREAT | O_EXCL`, after the output directory is validated/created and before any
+run files or settings change, through aggregate publication. Directory creation
+and lock creation failures without an existing lock report `cannot write` and
+exit 2. A held lock refuses the run and names the lock file; it is never
 automatically reclaimed. Normal returns and exceptions release the lock. After
 an abrupt termination, the operator must establish that the owner has stopped
 before removing its lock. Aggregate publication uses a sibling temporary file
@@ -302,6 +304,24 @@ identifies the script. Both script and native client hashes are checked before
 and after execution; a changed or unverifiable client makes the cell fail.
 Existing client paths, including bare `.py` filenames, resolve from the caller's
 directory before the child enters its per-cell working directory.
+
+Every launched cell receives `--systems-config` with the absolute path to the
+runner repository's `data/common/systems.json`. The client parses this option in
+`src/luminumbra_client/core/RuntimeScenarioConfig.cpp` and strictly loads the
+override in `src/luminumbra_client/main_client.cpp`. Each process receipt records
+`systems_config.path`, `systems_config.sha256` and `systems_config.sha256_verified`.
+A missing/unreadable configuration prevents launch; changed or unreadable bytes
+after execution fail the cell before the checker runs.
+
+World storage isolation is unavailable through a client CLI/environment override.
+`src/luminumbra_client/app/RuntimeRoot.cpp` discovers the root from working-directory
+ancestors followed by executable-directory ancestors, using shader, audio and
+default-preset sentinels. `main_client.cpp` passes that root to `GameSession`, whose
+`src/luminumbra_common/world/GameSession.cpp` creates and saves worlds beneath
+`<runtime-root>/worlds/saves`. An empty per-cell working directory therefore does
+not isolate world storage: it can still select the source or installed asset root.
+Redirecting user-settings locations does not redirect those saves. The runner does
+not currently provide world storage isolation.
 
 The supplied manifest uses the existing `luminumbra.performance_build.v1` schema:
 compiler (`id`, `version`, `target`), configuration (the existing build options

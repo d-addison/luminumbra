@@ -398,12 +398,13 @@ def native_executable(path):
         return macho(0, size)
 
 
-def run_client_process(command, *, client, build_manifest, **kwargs):
-    """Add client-code identity to the existing receipt without changing its runner."""
+def run_client_process(command, *, client, build_manifest, systems_config, **kwargs):
+    """Bind client-code and systems configuration identities to the process receipt."""
     script = str(client).endswith('.py')
     path = (runner.resolve_path(client) if script else
             runner.resolve_executable(command[0], kwargs['cwd'], kwargs['environment']))
     sha256 = runner.file_sha256(path)
+    config_sha256 = runner.file_sha256(systems_config)
     native = not script and native_executable(path)
     identity = {'sha256': sha256, 'sha256_verified': False, 'native_build': False,
                     'kind': 'native' if native else 'script', 'reason': 'client_not_native_build',
@@ -433,7 +434,16 @@ def run_client_process(command, *, client, build_manifest, **kwargs):
                 if (verified and build_manifest is not None
                         and build_manifest['client_sha256'] == sha256):
                     identity.update(native_build=True, reason=None)
-            receipt.update(client_path=str(path), client=identity)
+            try:
+                config_verified = runner.file_sha256(systems_config) == config_sha256
+            except OSError as error:
+                config_verified = False
+                errors.append(f'systems configuration read: {error}')
+            if not config_verified:
+                errors.append('systems configuration SHA-256 changed during execution')
+            receipt.update(client_path=str(path), client=identity,
+                           systems_config={'path': str(systems_config), 'sha256': config_sha256,
+                                           'sha256_verified': config_verified})
             try:
                 capture_path = receipt.get('capture_path')
                 if capture_path is not None:
@@ -516,10 +526,13 @@ def run_cell(cell, matrix, *, client, out_dir, root, python, checker, timeout_se
         with tempfile.TemporaryDirectory(prefix='.capture-', dir=work) as staging:
             capture = Path(staging) / 'capture.json'
             command = matrix_lib.build_command(cell, client=client, artifact=capture, root=root)
+            systems_config = runner.resolve_path(Path(root) / 'data/common/systems.json')
+            command += ['--systems-config', str(systems_config)]
             if str(client).endswith('.py'):
                 command = [sys.executable, str(client)] + command[1:]
             completed, evidence, client_evidence = run_client_process(
-                command, client=client, build_manifest=build_manifest, cwd=work,
+                command, client=client, build_manifest=build_manifest,
+                systems_config=systems_config, cwd=work,
                 environment=environment, log=cells_dir / f'{cell_id}.log',
                 artifact=capture, retained=retained, receipt_path=receipt_path,
                 timeout_seconds=timeout_seconds)
@@ -791,13 +804,17 @@ def main(argv=None):
     lock = out_dir / LOCK_NAME
     try:
         out_dir.mkdir(parents=True, exist_ok=True)
-        descriptor = os.open(lock, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    except FileExistsError:
-        print(f'run_qualification: output directory locked: {lock}; '
-              'no automatic stale-lock reclaim', file=sys.stderr)
-        return 2
     except OSError as error:
         print(f'run_qualification: cannot write under {out_dir}: {error}', file=sys.stderr)
+        return 2
+    try:
+        descriptor = os.open(lock, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except OSError as error:
+        if isinstance(error, FileExistsError) and os.path.lexists(lock):
+            print(f'run_qualification: output directory locked: {lock}; '
+                  'no automatic stale-lock reclaim', file=sys.stderr)
+        else:
+            print(f'run_qualification: cannot write under {out_dir}: {error}', file=sys.stderr)
         return 2
     try:
         os.close(descriptor)

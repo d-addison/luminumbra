@@ -307,6 +307,21 @@ class FullMatrixTests(RunnerTestBase):
         self.assertEqual(sources, {'3840x1600': 'matrix', '3440x1440': 'undeclared'})
         self.assertIn('pass 28', out)
         self.assertTrue((self.out / 'cells' / f'{SURFACE_CELL}.verdict.json').is_file())
+        systems_config = rq.runner.resolve_path(planner.ROOT / 'data/common/systems.json')
+        receipts = list((self.out / 'cells').glob('*.process.json'))
+        self.assertEqual(len(receipts), 28)
+        for path in receipts:
+            with self.subTest(receipt=path.name):
+                receipt = rq.read_json_object(path)
+                command = receipt['command']
+                self.assertEqual(command.count('--systems-config'), 1)
+                config_arg = command[command.index('--systems-config') + 1]
+                self.assertTrue(Path(config_arg).is_absolute())
+                self.assertEqual(config_arg, str(systems_config))
+                self.assertEqual(receipt['systems_config'],
+                                 {'path': str(systems_config),
+                                  'sha256': rq.runner.file_sha256(systems_config),
+                                  'sha256_verified': True})
 
     def test_declared_refresh_recorded_but_unevaluated_cells_block(self):
         code, _, _ = self.run_main(self.argv('--declare-refresh', '3440x1440=60'))
@@ -714,6 +729,32 @@ class SettingsResetTests(RunnerTestBase):
 
 
 class DirectoryLockTests(RunnerTestBase):
+    def test_output_directory_file_is_cannot_write_before_lock_creation(self):
+        self.out.write_text('not a directory', encoding='utf-8')
+        with mock.patch.object(rq.os, 'open') as open_lock:
+            code, _, err = self.run_main(self.argv('--only', SURFACE_CELL))
+        self.assertEqual(code, 2)
+        self.assertIn('cannot write', err)
+        self.assertNotIn('output directory locked', err)
+        open_lock.assert_not_called()
+        self.assertEqual(self.out.read_text(encoding='utf-8'), 'not a directory')
+
+    def test_lock_creation_file_exists_error_without_lock_is_cannot_write(self):
+        with mock.patch.object(rq.os, 'open', side_effect=FileExistsError('cannot create')):
+            code, _, err = self.run_main(self.argv('--only', SURFACE_CELL))
+        self.assertEqual(code, 2)
+        self.assertIn('cannot write', err)
+        self.assertNotIn('output directory locked', err)
+        self.assertFalse((self.out / rq.LOCK_NAME).exists())
+
+    def test_lock_creation_permission_error_is_cannot_write(self):
+        with mock.patch.object(rq.os, 'open', side_effect=PermissionError('access denied')):
+            code, _, err = self.run_main(self.argv('--only', SURFACE_CELL))
+        self.assertEqual(code, 2)
+        self.assertIn('cannot write', err)
+        self.assertNotIn('output directory locked', err)
+        self.assertFalse((self.out / rq.LOCK_NAME).exists())
+
     def test_held_lock_refuses_without_touching_any_run_files(self):
         self.assertEqual(self.run_main(self.argv('--only', SURFACE_CELL))[0], 0)
         lock = self.out / rq.LOCK_NAME
@@ -767,6 +808,50 @@ class DirectoryLockTests(RunnerTestBase):
         self.assertIn('publication failed', err)
         self.assertFalse((self.out / rq.LOCK_NAME).exists())
         self.assertEqual(self.run_main(self.argv('--only', SURFACE_CELL))[0], 0)
+
+
+class SystemsConfigTests(RunnerTestBase):
+    def run_fixed_view(self):
+        return rq.run_cells(matrix_lib.load_matrix(self.matrix_path), client=self.fake_client,
+                            out_dir=self.out, root=self.tmp, only=[FOREST_CELL],
+                            checker=self.fake_checker, matrix_canonical=False)[0]
+
+    def test_missing_config_prevents_launch(self):
+        with mock.patch.object(rq.runner, 'run_process',
+                               return_value=(subprocess.CompletedProcess([], 0), [])) as launch:
+            cell = self.run_fixed_view()
+        launch.assert_not_called()
+        self.assertEqual(cell['state'], 'process_failed')
+        self.assertIn('systems.json', cell['reason'])
+        self.assertIsNone(cell['artifact'])
+        self.assertFalse((self.out / 'cells' / f'{FOREST_CELL}.check.log').exists())
+
+    def test_changed_or_removed_config_is_refused(self):
+        systems_config = self.tmp / 'data/common/systems.json'
+        systems_config.parent.mkdir(parents=True)
+        original = rq.runner.run_process
+        for change in ('replace', 'remove'):
+            with self.subTest(change=change):
+                systems_config.write_text('{}', encoding='utf-8')
+                before = rq.runner.file_sha256(systems_config)
+
+                def run_process(*args, **kwargs):
+                    result = original(*args, **kwargs)
+                    if change == 'replace':
+                        systems_config.write_text('{"render": {}}', encoding='utf-8')
+                    else:
+                        systems_config.unlink()
+                    return result
+
+                with mock.patch.object(rq.runner, 'run_process', side_effect=run_process):
+                    cell = self.run_fixed_view()
+                self.assertEqual(cell['state'], 'process_failed')
+                self.assertIn('systems configuration SHA-256 changed', cell['reason'])
+                receipt = rq.read_json_object(self.out / 'cells' / f'{FOREST_CELL}.process.json')
+                self.assertEqual(receipt['systems_config'],
+                                 {'path': str(rq.runner.resolve_path(systems_config)),
+                                  'sha256': before, 'sha256_verified': False})
+                self.assertFalse((self.out / 'cells' / f'{FOREST_CELL}.check.log').exists())
 
 
 class ClientIdentityTests(RunnerTestBase):
