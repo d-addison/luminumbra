@@ -350,6 +350,33 @@ def cmake_string(value: str) -> str:
     return "[" + equals + "[" + value + "]" + equals + "]"
 
 
+def remove_stage(dest: Path) -> None:
+    """Remove copied read-only directories and Windows read-only files."""
+    def writable(path):
+        mode = path.lstat().st_mode
+        if stat.S_ISLNK(mode):
+            return
+        # Older Windows Python lacks follow_symlinks for chmod. Only chmod
+        # non-links there; use explicit no-follow semantics where supported.
+        options = {"follow_symlinks": False} if os.chmod in os.supports_follow_symlinks else {}
+        os.chmod(path, mode | stat.S_IWUSR, **options)
+
+    def retry(function, path, exc_info):
+        if (not isinstance(exc_info[1], PermissionError)
+                or function not in (os.unlink, os.remove, os.rmdir)):
+            raise exc_info[1]
+        path = Path(path)
+        # POSIX unlink needs a writable parent; Windows deletion also needs
+        # the file's read-only attribute cleared. Never chmod link targets.
+        if path != dest:
+            writable(path.parent)
+        writable(path)
+        function(path)
+
+    # onerror is available on every supported Python, including 3.10/3.11.
+    shutil.rmtree(dest, onerror=retry)
+
+
 def stage(root: Path, cache: Path, lock_path: Path, dest: Path, init: Path) -> None:
     scratch = root / "scratch"
     if scratch.is_symlink():
@@ -397,12 +424,21 @@ def stage(root: Path, cache: Path, lock_path: Path, dest: Path, init: Path) -> N
             candidate = Path(handle.name)
             handle.write("\n".join(lines) + "\n")
         os.replace(candidate, init)
-    except BaseException:
-        shutil.rmtree(dest)
+    except BaseException as error:
+        # Attempt both cleanups independently, preserving the initiating error
+        # even if storage becomes inaccessible while unwinding.
+        try:
+            remove_stage(dest)
+        except BaseException as cleanup_error:
+            if sys.version_info >= (3, 11):
+                error.add_note(f"stage cleanup failed: {cleanup_error}")
+        try:
+            if candidate is not None:
+                candidate.unlink(missing_ok=True)
+        except BaseException as cleanup_error:
+            if sys.version_info >= (3, 11):
+                error.add_note(f"initial cache cleanup failed: {cleanup_error}")
         raise
-    finally:
-        if candidate is not None:
-            candidate.unlink(missing_ok=True)
 
 
 def main(argv=None) -> int:

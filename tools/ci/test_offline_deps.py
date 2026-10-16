@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import shlex
+import stat
 import subprocess
 import sys
 import tempfile
@@ -353,6 +354,100 @@ class OfflineDependenciesTests(unittest.TestCase):
             self.stage()
         self.assertEqual(replace.call_count, 1)
         self.assertIn("FETCHCONTENT_FULLY_DISCONNECTED ON", init.read_text())
+
+    def readonly_source(self):
+        directory = self.source / "readonly directory"
+        directory.mkdir()
+        content = directory / "readonly.h"
+        content.write_text("readonly content\n")
+        for path in (directory, content):
+            mode = path.stat().st_mode
+            self.addCleanup(path.chmod, mode)
+            path.chmod(mode & ~0o222)
+        self.write_lock()
+        return directory, content
+
+    def test_readonly_stage_publication_failure_cleans_up_and_retry_succeeds(self):
+        directory, content = self.readonly_source()
+        modes = [path.stat().st_mode for path in (directory, content)]
+        dest = self.root / "scratch/copied sources"
+        init = self.root / "scratch/initial cache.cmake"
+        original = OSError("injected cache publication failure")
+
+        def fail(source, target):
+            self.assertEqual(Path(target), init)
+            self.assertEqual((dest / "sample/readonly directory/readonly.h").read_text(),
+                             "readonly content\n")
+            self.assertFalse((dest / "sample/readonly directory").stat().st_mode & stat.S_IWUSR)
+            raise original
+
+        with patch.object(deps.os, "replace", side_effect=fail):
+            with self.assertRaises(OSError) as caught:
+                self.stage()
+        self.assertIs(caught.exception, original)
+        self.assertFalse(dest.exists())
+        self.assertFalse(init.exists())
+        self.assertEqual(list(init.parent.glob(init.name + ".*.tmp")), [])
+        self.assertEqual([path.stat().st_mode for path in (directory, content)], modes)
+        self.stage()
+        self.assertEqual((dest / "sample/readonly directory/readonly.h").read_text(),
+                         "readonly content\n")
+        self.assertIn("FETCHCONTENT_SOURCE_DIR_SAMPLE", init.read_text())
+
+    def test_readonly_partial_copy_failure_cleans_up_and_retry_succeeds(self):
+        self.readonly_source()
+        dest = self.root / "scratch/copied sources"
+        original = OSError("injected later copy failure")
+        real_copy = deps.shutil.copytree
+
+        def fail(source, target, *args, **kwargs):
+            result = real_copy(source, target, *args, **kwargs)
+            if Path(target) == dest / "sample":
+                raise original
+            return result
+
+        with patch.object(deps.shutil, "copytree", side_effect=fail):
+            with self.assertRaises(OSError) as caught:
+                self.stage()
+        self.assertIs(caught.exception, original)
+        self.assertFalse(dest.exists())
+        self.stage()
+        self.assertTrue((self.root / "scratch/initial cache.cmake").is_file())
+
+    def test_stage_cleanup_failures_preserve_original_exception(self):
+        original = OSError("injected cache publication failure")
+        real_unlink = Path.unlink
+        real_rmtree = deps.shutil.rmtree
+        dest = self.root / "scratch/copied sources"
+
+        for stage_failure, cache_failure in ((True, False), (False, True), (True, True)):
+            with self.subTest(stage_failure=stage_failure, cache_failure=cache_failure):
+                attempts = []
+
+                def remove(*args, **kwargs):
+                    if stage_failure:
+                        raise PermissionError("injected stage cleanup failure")
+                    return real_rmtree(*args, **kwargs)
+
+                def unlink(path, *args, **kwargs):
+                    if path.name.startswith("initial cache.cmake."):
+                        attempts.append(path)
+                        if cache_failure:
+                            raise PermissionError("injected temporary cache cleanup failure")
+                    return real_unlink(path, *args, **kwargs)
+
+                with patch.object(deps.os, "replace", side_effect=original), \
+                        patch.object(deps.shutil, "rmtree", side_effect=remove), \
+                        patch.object(Path, "unlink", unlink):
+                    with self.assertRaises(OSError) as caught:
+                        self.stage()
+                self.assertIs(caught.exception, original)
+                self.assertEqual(len(attempts), 1)
+                self.assertEqual(dest.exists(), stage_failure)
+                self.assertEqual(attempts[0].exists(), cache_failure)
+                if dest.exists():
+                    real_rmtree(dest)
+                attempts[0].unlink(missing_ok=True)
 
     def test_stage_never_writes_initial_cache_inside_source_cache(self):
         local_cache = self.root / "scratch/source cache"
