@@ -732,7 +732,7 @@ files unchanged, preserve legal coordinate/resolution boundaries, and run disabl
 the executable legacy v1 contract. The latter compares the entire formatted artifact, including outer keys,
 verdicts, nested hashes and boot/settle statistics; only the newly allocated world ID is
 substituted within that property's value. The expected comparison types, helpers and exclusions
-are frozen locally from revision `f242668c`, independently of current Heavy comparisons.
+are frozen locally from the legacy v1 Heavy contract, independently of current Heavy comparisons.
 Ambient-anchor controls mutate every stored coordinate through the const view
 and retain the original production hashes. Negative controls change raw authority while retaining
 the old production digests, so a shared hashing/persistence omission cannot satisfy equality.
