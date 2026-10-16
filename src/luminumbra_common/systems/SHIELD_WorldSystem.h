@@ -879,6 +879,11 @@ public:
     ActivationShadowReport activation_shadow_report() const;
     // Shared-ownership snapshot of every streamed chunk (save path).
     std::vector<std::shared_ptr<::Luminumbra::Chunk>> snapshot_streamed_chunks() const;
+    // Lifetime count of pointer entries copied by streamed/renderable snapshots.
+    // Const diagnostic only; relaxed atomic supports concurrent diagnostic reads.
+    [[nodiscard]] std::uint64_t snapshot_copies() const {
+        return m_snapshot_copies.load(std::memory_order_relaxed);
+    }
     // Owner-thread capture for a 32x32 chunk far region plus a one-chunk X/Z
     // halo. Only exact full SDF lattices are copied into the immutable result.
     std::shared_ptr<const FarLodSdfSnapshot> capture_far_lod_sdf_snapshot(i32 rx, i32 rz) const;
@@ -983,6 +988,7 @@ private:
     void shadow_note_promotion_published(ChunkID id);
     void shadow_note_evicted(ChunkID id);
     StreamingBudgetFrameStats m_last_streaming_budget_stats;
+    mutable std::atomic<std::uint64_t> m_snapshot_copies{0};
     // debug_set_streaming_radius_cap: 0 = uncapped (production behaviour).
     int m_streaming_radius_cap = 0;
     DbgStreamTimings m_dbg_stream; // runtime telemetry

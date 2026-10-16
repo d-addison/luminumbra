@@ -1,3 +1,4 @@
+#include "../support/DeterministicWorkBudget.h"
 #include "luminumbra_client/rendering/passes/FoliagePass.h"
 
 #define GLFW_INCLUDE_NONE
@@ -83,7 +84,8 @@ protected:
     }
     static void Rebuild(FoliagePass& pass,
                         const std::vector<FoliagePass::ChunkScatter>& chunks,
-                        std::uint64_t frame) {
+                        std::uint64_t frame,
+                        const glm::vec3& camera = kCamera) {
         pass.set_evidence_frame(frame, 1);
         pass.rebuild_instances(
             chunks,
@@ -91,14 +93,15 @@ protected:
                 return FoliagePass::SurfaceSample{10.0f + x * 0.01f + z * 0.02f, 0.1f, 0.7f, true};
             },
             nullptr,
-            kCamera);
+            camera);
     }
     static Attribution::FoliageRebuild
     RebuildAttributed(FoliagePass& pass,
                       const std::vector<FoliagePass::ChunkScatter>& chunks,
-                      std::uint64_t frame_id) {
+                      std::uint64_t frame_id,
+                      const glm::vec3& camera = kCamera) {
         Attribution::FoliageFrameScope frame(true);
-        Rebuild(pass, chunks, frame_id);
+        Rebuild(pass, chunks, frame_id, camera);
         return frame.snapshot().rebuild;
     }
     static void ExpectReused(const Attribution::FoliageRebuild& rebuild, bool gpu) {
@@ -780,5 +783,127 @@ TEST_F(FoliageRebuildTest, LocalizedReuseMatchesLegacyForcedRebuildBytesAndHash)
         ExpectSame(original, Records(pass, gpu));
         EXPECT_EQ(pass.uploaded_input_hash(), original_hash);
     }
+}
+
+TEST_F(FoliageRebuildTest, DeterministicWorkBudgetMovementEditDrainAndIdle) {
+    using namespace Luminumbra::TestSupport;
+    for (const bool gpu : {false, true}) {
+        SCOPED_TRACE(gpu);
+        ScopedPass scoped;
+        auto& pass = scoped.pass;
+        ASSERT_NO_FATAL_FAILURE(Initialize(pass, gpu));
+        pass.use_rendered_ground();
+        // Nine supported columns exceed the production four-column admission
+        // bound. Fixture storage is bounded to 9 * 8192 candidate records.
+        auto chunks = SupportedChunks(9);
+        for (std::size_t index = 0; index < chunks.size(); ++index) {
+            const auto x = static_cast<int>(index % 3);
+            const auto z = static_cast<int>(index / 3);
+            chunks[index].chunk_xz = {x, z};
+            chunks[index].origin = {
+                static_cast<float>(x) * kColumnExtent, 0, static_cast<float>(z) * kColumnExtent};
+            UploadGround(pass, static_cast<Luminumbra::ChunkID>(index + 1), {x, 0, z});
+        }
+        const auto limits = WorkLimits("foliage");
+        WorkCounts peak;
+        std::uint64_t frame_id = 0;
+        std::uint64_t previous_backlog = 0;
+        const auto measure = [&](const glm::vec3& camera, std::uint64_t step) {
+            const auto work = RebuildAttributed(pass, chunks, ++frame_id, camera);
+            const auto growth = work.deferred_columns > previous_backlog
+                                    ? work.deferred_columns - previous_backlog
+                                    : 0;
+            previous_backlog = work.deferred_columns;
+            const WorkCounts observed{{"surface_misses", work.surface_misses},
+                                      {"surface_samples", work.surface_samples},
+                                      {"uploaded_bytes", work.uploaded_bytes},
+                                      {"uploads", work.uploads},
+                                      {"copied_bytes", work.copied_bytes},
+                                      {"hashed_bytes", work.hashed_bytes},
+                                      {"deferred_columns", work.deferred_columns},
+                                      {"backlog_growth", growth},
+                                      {"drain_steps", step}};
+            EXPECT_TRUE(CheckWork(observed, "foliage"));
+            PeakWork(peak, observed);
+            EXPECT_EQ(work.backlog, work.deferred_columns != 0);
+            return work;
+        };
+        Attribution::FoliageRebuild work{};
+        for (std::uint64_t step = 1; step <= limits.at("drain_steps"); ++step) {
+            work = measure(kCamera, step);
+            if (step == 1) {
+                EXPECT_EQ(work.surface_misses, 4u);
+                EXPECT_GT(work.surface_samples, 0u);
+                EXPECT_EQ(work.deferred_columns, 5u);
+                EXPECT_EQ(work.uploads, gpu ? 4u : 1u);
+            }
+            if (!work.backlog)
+                break;
+        }
+        ASSERT_FALSE(work.backlog) << "foliage failed to converge in the pinned step bound";
+        ASSERT_EQ(work.deferred_columns, 0u);
+        EXPECT_EQ(pass.gpu_scatter_active(), gpu);
+        EXPECT_FALSE(Records(pass, gpu).empty());
+
+        // Cross a signature cell while reusing the same column support.
+        const glm::vec3 moved_camera{kCamera.x + 16, kCamera.y, kCamera.z};
+        const auto moved = measure(moved_camera, 1);
+        EXPECT_EQ(moved.surface_misses, 0u);
+        EXPECT_GT(moved.uploaded_bytes, 0u);
+        EXPECT_EQ(moved.uploads, gpu ? 4u : 1u);
+        EXPECT_FALSE(moved.backlog);
+        // A real support revision must invalidate exactly one column.
+        UploadGround(pass, 1, {0, 0, 0}, 6);
+        const auto edited = measure(moved_camera, 1);
+        EXPECT_EQ(edited.surface_misses, 1u);
+        EXPECT_GT(edited.surface_samples, 0u);
+        EXPECT_GT(edited.uploaded_bytes, 0u);
+        EXPECT_EQ(edited.uploads, gpu ? 4u : 1u);
+        EXPECT_FALSE(edited.backlog);
+
+        // A standing camera after settlement must do precisely zero work for
+        // every idle counter, including a single upload/hash byte.
+        for (int idle_step = 0; idle_step < 8; ++idle_step) {
+            const auto idle = RebuildAttributed(pass, chunks, ++frame_id, moved_camera);
+            EXPECT_TRUE(CheckWork({{"uploaded_bytes", idle.uploaded_bytes},
+                                   {"hashed_bytes", idle.hashed_bytes},
+                                   {"uploads", idle.uploads},
+                                   {"surface_misses", idle.surface_misses},
+                                   {"surface_samples", idle.surface_samples},
+                                   {"deferred_columns", idle.deferred_columns}},
+                                  "idle"));
+            ExpectReused(idle, gpu);
+        }
+        EXPECT_TRUE(CheckWork(peak, "foliage"));
+    }
+}
+
+TEST_F(FoliageRebuildTest, OutdatedRevisionReadbackIsDiscardedBeforeAdoption) {
+    ScopedPass scoped;
+    auto& pass = scoped.pass;
+    ASSERT_NO_FATAL_FAILURE(Initialize(pass));
+    pass.use_rendered_ground();
+    pass.set_readback_enabled(true);
+    const auto chunks = SupportedChunks(1);
+    UploadGround(pass, 1, {0, 0, 0});
+    Rebuild(pass, chunks, 1);
+    const auto outdated_generation = pass.build_generation();
+    // Finish commands without consuming the public asynchronous result. This
+    // makes readiness deterministic; no timing value participates in the test.
+    glFinish();
+    ASSERT_FALSE(GpuRecords().empty());
+    ASSERT_TRUE(pass.instances().empty());
+    UploadGround(pass, 1, {0, 0, 0}, 6);
+    const auto changed = RebuildAttributed(pass, chunks, 2);
+    EXPECT_EQ(changed.stale_results, 1u);
+    EXPECT_EQ(pass.build_generation(), outdated_generation + 1);
+    EXPECT_TRUE(pass.instances().empty());
+    EXPECT_NE(pass.frame_instance_count_generation(), outdated_generation);
+    glFinish();
+    Rebuild(pass, chunks, 3);
+    ASSERT_FALSE(pass.instances().empty());
+    EXPECT_EQ(pass.frame_instance_count_generation(), pass.build_generation());
+    for (const auto& record : pass.instances())
+        EXPECT_LT(record.pos[1], 8.0f);
 }
 } // namespace

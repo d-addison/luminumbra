@@ -115,9 +115,20 @@ TEST_P(SimBudgetWorldParity, Populated3600TicksPreserveWorldHashAndReplayWork) {
             untraced_hash = hash;
             for (const auto& samples : runner.Session()->GetSimBudgetTelemetry().SamplesByStage())
                 EXPECT_TRUE(samples.empty());
+            for (const auto& samples : runner.Session()->GetSimBudgetTelemetry().WorkItems())
+                EXPECT_TRUE(samples.empty());
         } else {
             EXPECT_EQ(hash, untraced_hash);
             const auto& trace = runner.Session()->GetSimBudgetTelemetry();
+            // Exercise the real runner/session wiring for every time-free
+            // counter while the existing hash/save parity checks remain live.
+            for (std::size_t counter = 0; counter < trace.WorkItems().size(); ++counter) {
+                SCOPED_TRACE(counter);
+                const auto& samples = trace.WorkItems()[counter];
+                ASSERT_EQ(samples.size(), ticks);
+                for (std::size_t i = 0; i < samples.size(); ++i)
+                    EXPECT_EQ(samples[i].tick, i + 1);
+            }
             for (std::size_t stage = 0; stage < trace.SamplesByStage().size(); ++stage) {
                 const auto& samples = trace.SamplesByStage()[stage];
                 const auto identity = static_cast<SimBudgetStage>(stage);

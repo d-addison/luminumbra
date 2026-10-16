@@ -213,6 +213,8 @@ add_executable(common_tests
     common/FarAuthorityOverlay_test.cpp
     common/GameSessionHeadlessWorld_test.cpp
     common/SimBudgetTelemetry_test.cpp
+    # Deterministic work ceilings and injected negative gates (issue #396).
+    common/DeterministicWorkBudget_test.cpp
     common/HeavyComparison_test.cpp
     common/SimBudgetProfile_test.cpp
     ../src/luminumbra_server/modes/SmokeArtifact.cpp
@@ -636,6 +638,7 @@ add_executable(pass_context_test
     rendering/pass_context_test.cpp
     # Evidence reuse and column-local invalidation on both scatter backends.
     rendering/foliage_rebuild_test.cpp
+    # Includes deterministic CPU/compute work budgets, idle zero and stale results.
 )
 
 target_compile_definitions(pass_context_test PRIVATE

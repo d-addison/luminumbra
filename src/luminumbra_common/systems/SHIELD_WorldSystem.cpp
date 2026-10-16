@@ -4510,6 +4510,7 @@ std::vector<Luminumbra::Chunk*> SHIELD_WorldSystem::get_renderable_chunks() {
 
     // Performance logging removed from hot path - use profiler instead
 
+    m_snapshot_copies.fetch_add(renderable.size(), std::memory_order_relaxed);
     return renderable;
 }
 
@@ -5467,6 +5468,7 @@ SHIELD_WorldSystem::snapshot_streamed_chunks() const {
             chunks.push_back(chunk_ptr);
         }
     }
+    m_snapshot_copies.fetch_add(chunks.size(), std::memory_order_relaxed);
     return chunks;
 }
 
