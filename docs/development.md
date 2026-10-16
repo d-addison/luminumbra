@@ -65,14 +65,19 @@ ctest --preset release -L manual \
 
 ## Continuous integration
 
-The Linux/GCC, Diligent RHI, ASan, preview-frame and paired performance lanes use
-bounded ccache (250M each); UCRT64 and MSVC use 500M each. Qualification captures
-bypass the cache. Immutable save keys include the commit SHA; restores prefer the
-matching CMake configuration prefix where available, then the lane prefix. Caches
-are trimmed with `ccache --cleanup` before saving, and cache-save failures cannot
-fail a job. Main/devel native and performance caches together retain about 4.5 GB
-across both branches. These lanes use standard runners and the existing cache
-actions, with no paid cache service.
+The Linux/GCC and ASan lanes use bounded ccache at 400M and 600M respectively.
+Diligent RHI, preview-frame and paired performance use 250M each; UCRT64 and MSVC
+use 500M each. Qualification captures bypass the cache. Immutable save keys include
+the commit SHA; restores prefer the matching CMake configuration prefix where
+available, then the lane prefix. Caches are trimmed with `ccache --cleanup`
+before saving, and cache-save failures cannot
+fail a job. Starting from the measured 1.55 GB devel generation, the two cap
+increases add 0.15 + 0.35 GB and the newly seeded UCRT64 cache adds up to 0.5 GB:
+about 2.55 GB per branch, or 5.1 GB across main/devel, leaving about 0.9 GB of the
+6 GB budget for other caches. At all seven lanes' configured caps, one generation
+per branch totals 2.75 GB, or 5.5 GB across both branches, leaving 0.5 GB for
+package and analysis caches. These lanes use standard runners and the existing
+cache actions, with no paid cache service.
 
 All Actions caches, including performance, clang-tidy results, and MSYS2 packages,
 are saved only on `push` events to `refs/heads/main` or `refs/heads/devel`; PRs,
@@ -209,10 +214,12 @@ The required `Linux / GCC`, `Windows / MSVC`, `Windows / MSYS2 UCRT64` and
 They reject drafts, missing draft metadata, cancellations and missing or
 unsuccessful expected producers. GCC and MSVC retain their Python-only route;
 UCRT64 runs on ready native PR routes, every main/devel push, and every manual
-dispatch. The existing draft guard and job limit remain in place. Manual native
-qualification captures instead use a single full-suite producer, explicitly distinguished from two-shard evidence. Their existing
-binary-bound manifests, report bytes and qualification artifact paths remain
-intact. Qualification validation checks both the full producer and its aggregate.
+dispatch. Devel pushes seed its trusted compiler cache. The existing draft
+guard and job limit remain in place. Manual native qualification captures use
+a single full-suite producer, explicitly distinguished from two-shard evidence.
+Their existing binary-bound manifests, report bytes and qualification artifact
+paths remain intact. Qualification validation checks both the full producer and
+its aggregate.
 
 Native shard artifact names include lane, shard, SHA, run and attempt. Reports,
 inventories and partition evidence are retained for 30 days. An aggregate-only
@@ -220,7 +227,16 @@ or failed-shard rerun selects the latest attempt of each producer within the sam
 run, retaining evidence from successful earlier attempts. ASan retains its
 existing overwrite-per-shard artifact contract and the same 30-day retention.
 Only shard 1 saves each lane's compiler cache; only UCRT64 shard 1 enables the
-MSYS2 package cache. Cache sizes and the existing 6 GB cleanup budget are unchanged.
+MSYS2 package cache. The cache caps and 6 GB cleanup budget described above apply
+per lane, shared by its test shards.
+
+The GCC aggregate checks acceptance-matrix execution after merging and validating
+the exact selected JUnit union. It also consumes unfiltered discovery and serial NetSoak
+evidence from shard 1, or shard 0 for manual full qualification. Those inputs and
+the acceptance execution receipt are retained with the merged report and its
+selection receipt for 30 days, so aggregate reruns can reuse successful producers'
+evidence.
+
 Native validation against each platform's unsharded inventory is still required
 before rollout; offline regressions do not establish platform qualification.
 
@@ -356,10 +372,13 @@ Python tooling changes require native correctness; coverage-list membership
 does not grant a heavy exemption. Failures still
 report failure; `success` here describes an executed check that passes. Devel push
 columns describe runs that reach execution, subject to batching below.
-Windows/UCRT64 runs on main/devel pushes and manual dispatches as well as ready
-native PR routes, retaining its draft guard. The paired server comparison retains
-its main-bound ready PR and eligible main/devel push routing, with the same path gate. Manual qualification
-captures retain full build/test coverage and cache bypass.
+Windows/UCRT64 runs on main/devel pushes and every manual dispatch as well as
+ready native PR routes, retaining its draft and path gates. Devel pushes seed
+the devel-scoped compiler cache restored by PRs into devel; the MSYS2 package
+cache also saves on these trusted pushes. It shares the workflow-wide devel
+push concurrency group described below. The paired server comparison retains
+its main-bound ready PR and eligible main/devel push routing, with the same path
+gate. Manual qualification captures retain full build/test coverage and cache bypass.
 
 Devel pushes share one concurrency group per workflow and ref with
 `cancel-in-progress: false`. A running run completes; GitHub's queue of one
@@ -378,11 +397,20 @@ non-cancelling groups, preserving their individual evidence. PR runs retain ref
 batching and cancellation where previously configured, so `ready_for_review`
 supersedes earlier draft runs and `converted_to_draft` cancels in-flight ready
 runs. Authoring PR runs retain their independent, non-cancelling behaviour.
-The authoring workflow keeps its existing path triggers; UCRT attribution keeps
-its PR/manual-only triggers. Scheduled and release routing stays unchanged.
+The authoring workflow keeps its existing path triggers. The diagnostic
+`ucrt-attribution.yml` workflow is not a required check. Its devel PR triggers
+cover the workflow itself, `tools/ci/ucrt_attribution.sh`,
+`tools/ci/test_ucrt_attribution.py`, `tools/ci/test_ucrt_gcc_cohort.py`,
+`tools/ci/check_worldgen_probe_smoke.py`,
+`tools/ci/test_check_worldgen_probe_smoke.py`, and
+`test/diagnostics/worldgen_probe.cpp`. Devel pushes cover those same paths plus
+`tools/CMakeLists.txt` and `test/CMakeLists.txt`, catching probe build changes
+after merge. Attribution also runs weekly on Sunday at 04:43 UTC on the default
+branch and supports manual dispatch. Other scheduled and release routing stays
+unchanged.
 
 All runners remain standard hosted runners; no paid actions, larger/GPU runners,
-repository visibility changes, or cache-cap increases are introduced.
+or repository visibility changes are introduced.
 
 CTest produces JUnit and runtime artifacts. CI verifies a minimum discovered-test
 count so an empty or severely truncated suite cannot report success. Once a
