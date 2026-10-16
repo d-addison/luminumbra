@@ -1,6 +1,7 @@
 #include "WorldLoadingVisualizer.h"
 #include "core/Log.h"
 #include <GLFW/glfw3.h>
+#include <filesystem>
 #include <glm/gtc/matrix_transform.hpp>
 #include <imgui.h>
 
@@ -10,9 +11,7 @@ WorldLoadingVisualizer::WorldLoadingVisualizer() {}
 
 WorldLoadingVisualizer::~WorldLoadingVisualizer() {}
 
-void WorldLoadingVisualizer::Startup(const std::filesystem::path& root_path,
-                                     int screen_width,
-                                     int screen_height) {
+void WorldLoadingVisualizer::Startup(const std::filesystem::path& root_path, int, int) {
     m_shader = std::make_unique<Rendering::Shader>(
         (root_path / "res/shaders/loading_hologram.vert").string().c_str(),
         (root_path / "res/shaders/loading_hologram.frag").string().c_str());

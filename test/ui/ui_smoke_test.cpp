@@ -390,6 +390,10 @@ TEST(UiSmokeTest, AuthoredRmlDocumentsLoadAndExposeRequiredElements) {
           "apply_settings_btn",
           "back_btn",
           "vsync_toggle",
+          "perf_hud_toggle",
+          "open_developer_console",
+          "developer_help_btn",
+          "developer_help",
           "window_mode_prev",
           "window_mode_next",
           "window_mode_value"}},
@@ -713,6 +717,8 @@ TEST(UiSmokeTest, SettingsScreenRoundTripsThroughTheBridge) {
         std::string resolution = "1920x1080";
         std::string window_mode = "borderless";
         bool vsync = true;
+        bool perf_hud = true;
+        int console_opens = 0;
         float fov = 45.0f;
         float sensitivity = 0.025f;
         float audio_master = 1.0f;
@@ -733,6 +739,19 @@ TEST(UiSmokeTest, SettingsScreenRoundTripsThroughTheBridge) {
     };
     sb.SetWindowMode = [&](const std::string& v) {
         model.window_mode = v;
+    };
+    sb.GetPerfHud = [&] {
+        return model.perf_hud;
+    };
+    sb.SetPerfHud = [&](bool visible) {
+        model.perf_hud = visible;
+        ++model.save_count; // The real setter mutates the registry and saves immediately.
+    };
+    sb.OpenDeveloperConsole = [&] {
+        ++model.console_opens;
+    };
+    sb.GetDeveloperHelp = [] {
+        return std::string("console.toggle = F1\nshader.reload = F5");
     };
     sb.GetVSync = [&] {
         return model.vsync;
@@ -827,6 +846,35 @@ TEST(UiSmokeTest, SettingsScreenRoundTripsThroughTheBridge) {
     EXPECT_EQ(model.save_count, 0);
     ClickAndUpdate(ui, settings->GetElementById("apply_settings_btn"));
     EXPECT_EQ(model.save_count, 1) << "Apply & Save must invoke the bridge Save()";
+
+    auto* perf_toggle = settings->GetElementById("perf_hud_toggle");
+    ASSERT_NE(perf_toggle, nullptr);
+    EXPECT_TRUE(perf_toggle->IsClassSet("on"));
+    ClickAndUpdate(ui, perf_toggle);
+    EXPECT_FALSE(model.perf_hud);
+    EXPECT_FALSE(perf_toggle->IsClassSet("on"));
+    EXPECT_EQ(model.save_count, 2);
+    settings = LoadDocumentAndFind(ui, "settings.rml", "settings");
+    ASSERT_NE(settings, nullptr);
+    perf_toggle = settings->GetElementById("perf_hud_toggle");
+    ASSERT_NE(perf_toggle, nullptr);
+    EXPECT_FALSE(perf_toggle->IsClassSet("on"));
+    ClickAndUpdate(ui, settings->GetElementById("open_developer_console"));
+    EXPECT_EQ(model.console_opens, 1);
+    auto* help = settings->GetElementById("developer_help");
+    ASSERT_NE(help, nullptr);
+    EXPECT_NE(help->GetInnerRML().find("console.toggle = F1"), std::string::npos);
+    EXPECT_EQ(help->GetDisplay(), Rml::Style::Display::None);
+    ClickAndUpdate(ui, settings->GetElementById("developer_help_btn"));
+    EXPECT_FALSE(help->IsClassSet("hidden"));
+    EXPECT_EQ(help->GetDisplay(), Rml::Style::Display::Block);
+    ClickAndUpdate(ui, settings->GetElementById("developer_help_btn"));
+    EXPECT_TRUE(help->IsClassSet("hidden"));
+    EXPECT_EQ(help->GetDisplay(), Rml::Style::Display::None);
+    // A change made in the hub refreshes the ordinary settings value from the same getter.
+    model.perf_hud = true;
+    ui.RefreshDeveloperSettings();
+    EXPECT_TRUE(perf_toggle->IsClassSet("on"));
 
     ui.Shutdown();
 }

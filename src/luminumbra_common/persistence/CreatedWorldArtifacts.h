@@ -96,8 +96,8 @@ public:
         target.identity = source.identity;
     }
 
-    // The preset has no durable staging writer. Exclusively create it here so
-    // even a partial write has an identity recorded before the first byte.
+    // Exclusively create a file and record its identity before the first byte.
+    // Callers requiring durable publication use WorldSaveService.
     void write_file(const std::filesystem::path& path, const std::string& bytes) {
         reserve_file(path);
 #if defined(_WIN32)
