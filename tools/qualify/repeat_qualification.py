@@ -45,11 +45,11 @@ import subprocess
 import sys
 import tempfile
 import time
-from collections import Counter
+from collections import Counter, deque
 from contextlib import ExitStack, contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Iterator, NamedTuple
+from typing import Any, BinaryIO, Callable, ContextManager, Iterator, NamedTuple
 
 try:
     import resource as _resource_module
@@ -68,6 +68,7 @@ DUMP_SETTLE_SECONDS = 30.0
 DUMP_STABLE_SECONDS = 1.0
 SNAPSHOT_FILE_READ_BYTES = 64 * 1024
 SNAPSHOT_TOTAL_READ_BYTES = 1024 * 1024
+COPY_CHUNK_BYTES = 1024 * 1024  # Bound every transient copy and verification buffer to 1 MiB.
 REGISTRY_QUERY_TIMEOUT_SECONDS = 30.0
 PREFLIGHT_EXIT_CODE = 3
 CRASH_DIR_ENV = "LUMINUMBRA_CRASH_DIR"
@@ -518,6 +519,123 @@ def changed_files(before: dict[str, FileStamp], after: dict[str, FileStamp]) -> 
                   (path not in before or file_rewritten(before[path], stamp)))
 
 
+@contextmanager
+def open_dump_for_copy(path: Path) -> Iterator[BinaryIO]:
+    """Select the platform source transport for the verified copier."""
+    if os.name == "nt":
+        with windows_dump_for_copy(path) as reader:
+            yield reader
+    else:
+        with path.open("rb", buffering=0) as reader:
+            yield reader
+
+
+@contextmanager
+def windows_dump_for_copy(path: Path) -> Iterator[BinaryIO]:
+    """On Windows, retain a read-only share-mode handle through copy and validation.
+
+    The CRT descriptor owns the original Win32 handle, so reads (including the
+    verification pass) never reopen a path or bypass mandatory byte-range locks.
+    """
+    try:
+        import msvcrt
+
+        kernel32, handle = open_windows_dump_handle(path)
+        try:
+            descriptor = msvcrt.open_osfhandle(handle, os.O_RDONLY | os.O_BINARY)
+        except BaseException:
+            kernel32.CloseHandle(handle)
+            raise
+        try:
+            reader = os.fdopen(descriptor, "rb", buffering=0)
+        except BaseException:
+            os.close(descriptor)
+            raise
+    except OSError:
+        raise
+    except Exception as exc:
+        raise OSError(f"{path} copy open: {type(exc).__name__}: {exc}") from exc
+    with reader:
+        yield reader
+
+
+def copy_stable_file(
+    source: Path,
+    target: Path,
+    expected: FileStamp,
+    *,
+    opener: Callable[[Path], ContextManager[BinaryIO]],
+    deadline: float,
+    clock: Callable[[], float],
+) -> None:
+    """Publish only bytes matching a full post-copy source read and metadata.
+
+    An opener must retain the same readable file through both passes. Windows'
+    default opener additionally prevents writers from reopening during them.
+    A temporary destination is closed before publication or removal on all hosts.
+    """
+    def metadata(info: os.stat_result) -> tuple[int, int, tuple[int, int]]:
+        return info.st_size, info.st_mtime_ns, (info.st_dev, info.st_ino)
+
+    temporary_path: Path | None = None
+    try:
+        check_settle_deadline(deadline, clock)
+        with opener(source) as reader:
+            initial = os.fstat(reader.fileno())
+            if metadata(initial) != (expected.size, expected.mtime_ns, expected.identity):
+                raise DumpWriterBusyError(f"{source}: dump changed before copy")
+            # Validate the final snapshot's samples using the retained handle.
+            for offset, length, digest in expected.fingerprints:
+                check_settle_deadline(deadline, clock)
+                reader.seek(offset)
+                if hashlib.sha256(reader.read(length)).hexdigest() != digest:
+                    raise DumpWriterBusyError(f"{source}: dump changed before copy")
+            reader.seek(0)
+            copied_digest = hashlib.sha256()
+            with tempfile.NamedTemporaryFile(dir=target.parent, prefix=f".{target.name}.",
+                                             suffix=".tmp", delete=False) as temporary:
+                temporary_path = Path(temporary.name)
+                remaining = initial.st_size
+                while remaining:
+                    check_settle_deadline(deadline, clock)
+                    chunk = reader.read(min(remaining, COPY_CHUNK_BYTES))
+                    if not chunk:
+                        raise DumpWriterBusyError(f"{source}: dump shortened during copy")
+                    if temporary.write(chunk) != len(chunk):
+                        raise OSError(errno.EIO, "short dump copy write")
+                    copied_digest.update(chunk)
+                    remaining -= len(chunk)
+                if reader.read(1):
+                    raise DumpWriterBusyError(f"{source}: dump grew during copy")
+
+            # Hash the source again after the copy, through the same handle. A
+            # path stat also detects replacement of the name on POSIX. Bound
+            # this pass to the copied size so a growing file cannot extend it.
+            post_copy = source.stat()
+            reader.seek(0)
+            source_digest = hashlib.sha256()
+            remaining = initial.st_size
+            while remaining:
+                check_settle_deadline(deadline, clock)
+                chunk = reader.read(min(remaining, COPY_CHUNK_BYTES))
+                if not chunk:
+                    raise DumpWriterBusyError(f"{source}: dump shortened after copy")
+                source_digest.update(chunk)
+                remaining -= len(chunk)
+            final = os.fstat(reader.fileno())
+            if (reader.read(1) or
+                    any(metadata(info) != metadata(initial) or info.st_ctime_ns != initial.st_ctime_ns
+                        for info in (post_copy, final, source.stat())) or
+                    source_digest.digest() != copied_digest.digest()):
+                raise DumpWriterBusyError(f"{source}: dump changed during copy")
+            check_settle_deadline(deadline, clock)
+            os.utime(temporary_path, ns=(initial.st_atime_ns, initial.st_mtime_ns))
+            os.replace(temporary_path, target)
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+
+
 def copy_changed_files(
     root: Path | None,
     before: dict[str, FileStamp],
@@ -527,34 +645,66 @@ def copy_changed_files(
     errors: list[str] | None = None,
     *,
     after: dict[str, FileStamp] | None = None,
+    opener: Callable[[Path], ContextManager[BinaryIO]] | None = None,
+    deadline: float | None = None,
+    clock: Callable[[], float] | None = None,
+    pause: Callable[[float], None] | None = None,
 ) -> list[str]:
     """Copy new or rewritten files under root, keeping their path relative to root.
 
     A file that cannot be copied, or a directory that cannot be listed, is described in errors when a
     list is given, so one unreadable entry does not discard the rest of the iteration. Without a list
-    the error propagates.
+    the error propagates. Changed sources and incompatible writer handles restart
+    settling within the original deadline; an unverified copy is never published.
+    opener is the platform source opener, injectable for share-mode transports.
     """
+    clock = clock or time.monotonic
+    deadline = deadline if deadline is not None else clock() + DUMP_SETTLE_SECONDS
+    opener = opener or open_dump_for_copy
     copies: list[str] = []
     try:
-        changed = changed_files(before, after if after is not None else
-                                snapshot_files(root, recursive, skip, errors, baseline=before))
+        after = after if after is not None else snapshot_files(
+            root, recursive, skip, errors, baseline=before, deadline=deadline, clock=clock,
+        )
+        pending = deque(changed_files(before, after))
     except OSError as exc:
         if errors is None:
             raise
         errors.append(f"{root} listing: {type(exc).__name__}: {exc}")
         return copies
-    for source in changed:
+    completed: set[str] = set()
+    while pending:
+        source = pending.popleft()
         relative = Path(source).relative_to(root) if root is not None else Path(source).name
         target = destination / relative
         try:
             target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source, target)
+            copy_stable_file(Path(source), target, after[source], opener=opener,
+                             deadline=deadline, clock=clock)
+        except DumpWriterBusyError:
+            try:
+                # Keep probe-before-read ordering, including baseline entries,
+                # and require a fresh full stable window after a copy race.
+                assert root is not None
+                after = wait_for_dump_settle(
+                    root, before, max(0.0, deadline - clock()), errors, skip,
+                    clock=clock, pause=pause, recursive=recursive,
+                )
+            except OSError as exc:
+                if errors is None:
+                    raise
+                errors.append(f"{source} copy settle: {type(exc).__name__}: {exc}")
+                return copies
+            pending = deque(path for path in changed_files(before, after) if path not in completed)
+            continue
         except OSError as exc:
             if errors is None:
                 raise
             errors.append(f"{source}: {type(exc).__name__}: {exc}")
+            completed.add(source)
             continue
         copies.append(str(target))
+        completed.add(source)
     return copies
 
 
@@ -1134,11 +1284,13 @@ def run_locked_iteration(
     except OSError as exc:
         collection_errors.append(f"crash directory listing: {type(exc).__name__}: {exc}")
     dump_ready = True
+    dump_deadline = time.monotonic() + DUMP_SETTLE_SECONDS
     settled: dict[str, FileStamp] | None = None
     if IS_WINDOWS and dump_folder is not None and result["status"] not in ("exit:0", "timeout"):
         try:
             settled = wait_for_dump_settle(
-                dump_folder, dump_before, DUMP_SETTLE_SECONDS, collection_errors, dump_skip,
+                dump_folder, dump_before, max(0.0, dump_deadline - time.monotonic()),
+                collection_errors, dump_skip,
             )
         except OSError as exc:
             collection_errors.append(f"dump folder settle: {type(exc).__name__}: {exc}")
@@ -1146,7 +1298,7 @@ def run_locked_iteration(
     if dump_ready:
         artifacts += copy_changed_files(
             dump_folder, dump_before, iter_dir / "wer", skip=dump_skip,
-            errors=collection_errors, after=settled,
+            errors=collection_errors, after=settled, deadline=dump_deadline,
         )
     artifacts += copy_changed_files(
         core_directory, core_before, iter_dir / "core", recursive=True, skip=core_skip,
@@ -1157,8 +1309,8 @@ def run_locked_iteration(
     )
 
 
-def windows_dump_writer_closed(path: Path) -> bool:
-    """Allow compatible readers, but reject handles with write/delete access.
+def open_windows_dump_handle(path: Path) -> tuple[Any, int]:
+    """Open for reading with FILE_SHARE_READ only; the caller owns the handle.
 
     CreateFileW checks sharing in both directions: FILE_SHARE_READ permits an
     existing reader that shares our GENERIC_READ access, while omitting
@@ -1182,8 +1334,20 @@ def windows_dump_writer_closed(path: Path) -> bool:
     if handle == ctypes.c_void_p(-1).value:
         error = ctypes.get_last_error()
         if error in (32, 33):  # ERROR_SHARING_VIOLATION / ERROR_LOCK_VIOLATION
-            return False
+            raise DumpWriterBusyError(f"{path}: dump writer still open")
         raise ctypes.WinError(error)
+    return kernel32, handle
+
+
+def windows_dump_writer_closed(path: Path) -> bool:
+    """Probe with the same sharing contract as the retained copy handle."""
+    import ctypes
+
+    try:
+        kernel32, handle = open_windows_dump_handle(path)
+    except DumpWriterBusyError:
+        return False
+    close_handle = kernel32.CloseHandle
     if not close_handle(handle):
         raise ctypes.WinError(ctypes.get_last_error())
     return True
@@ -1222,6 +1386,7 @@ def wait_for_dump_settle(
     probe: Callable[[Path], bool] | None = None,
     clock: Callable[[], float] | None = None,
     pause: Callable[[float], None] | None = None,
+    recursive: bool = False,
 ) -> dict[str, FileStamp]:
     """Require closed writers and unchanged snapshots for the full stable window.
 
@@ -1242,7 +1407,7 @@ def wait_for_dump_settle(
         try:
             # Probe even baseline files before reading: Windows may defer their
             # timestamps until close. Compatible readers do not block the probe.
-            snapshot = snapshot_files(folder, False, skip, errors, baseline=before,
+            snapshot = snapshot_files(folder, recursive, skip, errors, baseline=before,
                                       deadline=deadline, clock=clock, writer_probe=probe)
         except DumpWriterBusyError:
             snapshot = {}
