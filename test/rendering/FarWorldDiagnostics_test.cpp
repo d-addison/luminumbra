@@ -581,10 +581,11 @@ TEST(FarWorldDiagnostics, SerializerContainsBindingPoliciesCoverageCountersAndLo
                               "tiers",
                               "tiles",
                               "frame_upload",
-                              "ladder_water_available"})
+                              "ladder_water_available"}) {
         EXPECT_TRUE(json.contains(field)) << field;
+    }
     ASSERT_EQ(json["tiers"].size(), 5u);
-    for (const auto& tier : json["tiers"])
+    for (const auto& tier : json["tiers"]) {
         for (const char* field : {"wanted",
                                   "pending",
                                   "building",
@@ -607,8 +608,10 @@ TEST(FarWorldDiagnostics, SerializerContainsBindingPoliciesCoverageCountersAndLo
                                   "water_known_dry_tiles",
                                   "water_wet_tiles",
                                   "retained_water_indices",
-                                  "submitted_water_indices"})
+                                  "submitted_water_indices"}) {
             EXPECT_TRUE(tier.contains(field)) << field;
+        }
+    }
     EXPECT_EQ(json["tiles"].size(), station.expected.size());
     EXPECT_EQ(json["tiles"][0]["built"], json["tiles"][0]["desired"]);
     EXPECT_EQ(json["tiles"][0]["desired"]["cave_policy"], json["bound_cave_policy"]);

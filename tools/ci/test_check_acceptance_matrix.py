@@ -869,6 +869,7 @@ class AcceptanceMatrixTests(unittest.TestCase):
         self.assertEqual(row["status"], "planned")
         self.assertIn("outside -2^24 <= x,z < 2^24", row["statement"])
         self.assertIn("docs/active-regions.md#activation-and-ordering", row["discrepancy"])
+        self.assertIn("`docs/active-regions.md#activation-and-ordering`", row["discrepancy"])
         self.assertIn("ActiveRegionLedgerTest.ValidAnchorBoundaries", row["discrepancy"])
         self.assertIn("half-open interval [-2^24, 2^24)", row["discrepancy"])
         self.assertIn("still require end-to-end evidence", row["discrepancy"])

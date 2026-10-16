@@ -147,7 +147,9 @@ std::string Patched(std::string bytes,
 }
 
 std::string ReadBytes(const std::filesystem::path& path) {
-    const std::ifstream input(path, std::ios::binary);
+    // Consuming rdbuf() mutates the buffer; keep its owning stream mutable.
+    std::ifstream input;
+    input.open(path, std::ios::binary);
     std::ostringstream bytes;
     bytes << input.rdbuf();
     return bytes.str();

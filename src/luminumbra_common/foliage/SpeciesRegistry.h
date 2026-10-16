@@ -23,6 +23,8 @@
 
 #include "../components/PlantComponents.h"
 #include "../core/DeterministicRng.h"
+#include "../core/FilesystemPath.h"
+#include "../world/WorldgenDependencySnapshot.h"
 
 namespace luminumbra::foliage {
 
@@ -128,8 +130,9 @@ public:
         }
     }
 
-    // Load every *.json under `dir` (sorted by filename for determinism). Returns the count loaded;
-    // per-file failures are appended to `errors` and skipped.
+    // Load immediate regular *.json in UTF-8 filename order. Returns the count loaded;
+    // per-file failures are appended to `errors` and skipped. Invalid UTF-8 filenames
+    // fail the scan before any reads or registry changes, as in the creature registry.
     std::size_t LoadFromDirectory(const std::filesystem::path& dir,
                                   std::vector<std::string>& errors) {
         std::error_code ec;
@@ -139,10 +142,20 @@ public:
         }
         std::vector<std::filesystem::path> files;
         for (const auto& entry : std::filesystem::directory_iterator(dir, ec)) {
-            if (entry.is_regular_file() && entry.path().extension() == ".json")
+            if (entry.is_regular_file() && entry.path().extension() == ".json") {
+                const auto filename =
+                    ::Luminumbra::Filesystem::GenericUtf8PathString(entry.path().filename());
+                if (!::Luminumbra::World::IsValidDependencyPathUtf8(filename)) {
+                    errors.push_back("species filename is not valid UTF-8");
+                    return 0;
+                }
                 files.push_back(entry.path());
+            }
         }
-        std::sort(files.begin(), files.end());
+        std::sort(files.begin(), files.end(), [](const auto& first, const auto& second) {
+            return ::Luminumbra::Filesystem::GenericUtf8PathString(first.filename()) <
+                   ::Luminumbra::Filesystem::GenericUtf8PathString(second.filename());
+        });
         std::size_t loaded = 0;
         for (const auto& f : files) {
             std::ifstream in(f, std::ios::binary);

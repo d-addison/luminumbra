@@ -68,7 +68,9 @@ protected:
         for (const auto& entry : fs::recursive_directory_iterator(directory)) {
             if (!entry.is_regular_file())
                 continue;
-            const std::ifstream input(entry.path(), std::ios::binary);
+            // Consuming rdbuf() mutates the buffer; keep its owning stream mutable.
+            std::ifstream input;
+            input.open(entry.path(), std::ios::binary);
             std::ostringstream bytes;
             bytes << input.rdbuf();
             result.emplace(entry.path().lexically_relative(directory).generic_string(),
@@ -113,8 +115,9 @@ TEST_P(SimBudgetWorldParity, Populated3600TicksPreserveWorldHashAndReplayWork) {
                   << " telemetry=" << config.sim_budget << " world_hash=" << hash << '\n';
         if (pass == 0) {
             untraced_hash = hash;
-            for (const auto& samples : runner.Session()->GetSimBudgetTelemetry().SamplesByStage())
+            for (const auto& samples : runner.Session()->GetSimBudgetTelemetry().SamplesByStage()) {
                 EXPECT_TRUE(samples.empty());
+            }
         } else {
             EXPECT_EQ(hash, untraced_hash);
             const auto& trace = runner.Session()->GetSimBudgetTelemetry();
@@ -129,8 +132,9 @@ TEST_P(SimBudgetWorldParity, Populated3600TicksPreserveWorldHashAndReplayWork) {
                     continue;
                 }
                 ASSERT_EQ(samples.size(), ticks);
-                for (std::size_t i = 0; i < samples.size(); ++i)
+                for (std::size_t i = 0; i < samples.size(); ++i) {
                     EXPECT_EQ(samples[i].tick, i + 1);
+                }
             }
             EXPECT_GT(trace.Summarize(SimBudgetStage::Creatures).work_total, 0u);
             EXPECT_GT(trace.Summarize(SimBudgetStage::Plants).work_total, 0u);
@@ -149,8 +153,9 @@ TEST_P(SimBudgetWorldParity, Populated3600TicksPreserveWorldHashAndReplayWork) {
                 8u);
             if (pass == 1)
                 first_trace = trace;
-            else
+            else {
                 EXPECT_TRUE(first_trace.WorkMatches(trace));
+            }
         }
 
         // Exercise the ordinary save path, including live plant persistence and
@@ -168,7 +173,7 @@ TEST_P(SimBudgetWorldParity, Populated3600TicksPreserveWorldHashAndReplayWork) {
 INSTANTIATE_TEST_SUITE_P(ActiveRegions,
                          SimBudgetWorldParity,
                          testing::Bool(),
-                         [](const testing::TestParamInfo<bool>& info) {
-                             return info.param ? "Enabled" : "Disabled";
+                         [](const testing::TestParamInfo<bool>& parameter) {
+                             return parameter.param ? "Enabled" : "Disabled";
                          });
 } // namespace

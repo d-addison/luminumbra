@@ -2,13 +2,17 @@
 
 #include <cmath>
 #include <cstddef>
+#include <filesystem>
+#include <fstream>
 #include <limits>
 #include <string>
 #include <utility>
 #include <vector>
 
+#include <gtest/gtest.h>
 #include <nlohmann/json.hpp>
 
+#include "UniqueTempPath.h"
 #include "luminumbra_common/core/SystemConfig.h"
 #include "luminumbra_common/world/GameSession.h"
 #include "luminumbra_common/world/TerrainPresetLoader.h"
@@ -26,8 +30,59 @@ inline std::string PresetIdentityFixtureHash() {
     return world::TerrainPresetContentHash(PresetIdentityFixture());
 }
 
-// Change each input independently from the shipping defaults, including the circadian
-// setting that is consumed by GameSession simulation despite its render namespace.
+// Hermetic runtime content for admission/replay regressions. Each caller owns
+// its reserved root; filenames and bytes, never that root, enter the identity.
+class SpeciesIdentityFixture {
+public:
+    SpeciesIdentityFixture()
+        : storage_("species-identity-", ".json") {
+        const auto preset_path = Root() / "worlds/atlas/presets/default.json";
+        std::filesystem::create_directories(preset_path.parent_path());
+        std::ofstream preset_file(preset_path, std::ios::binary);
+        preset_file << Preset().dump();
+        preset_file.close();
+        EXPECT_TRUE(preset_file.good());
+        Write("deer.json", OriginalBytes());
+    }
+
+    static nlohmann::json Preset() {
+        auto preset = PresetIdentityFixture();
+        preset["schema_rev"] = 6; // keep terrain-only work small; species always apply
+        return preset;
+    }
+
+    static std::string OriginalBytes() {
+        return R"({"id":"deer","brain":{"wander_weight":0.25},"genome_ranges":{"move_speed":[1,2]}})";
+    }
+
+    std::filesystem::path Root() const {
+        return storage_.Path().parent_path();
+    }
+
+    std::filesystem::path Directory() const {
+        return Root() / "data/common/creatures/species";
+    }
+
+    void Write(const std::filesystem::path& filename, const std::string& bytes) const {
+        const auto path = Directory() / filename;
+        std::filesystem::create_directories(path.parent_path());
+        std::ofstream file(path, std::ios::binary | std::ios::trunc);
+        file << bytes;
+        file.close();
+        EXPECT_TRUE(file.good());
+    }
+
+    world::TerrainPresetLoadResult Resolve() const {
+        return world::LoadTerrainPresetFromJson(Preset(), Root() / "data");
+    }
+
+private:
+    ScopedTempFile storage_;
+};
+
+// Expected effective inputs, defined from the application contract, never by
+// asking the identity whether a mutation mattered. Tuning-only flags select
+// compiled defaults, so only these five flags independently change the rules.
 inline std::vector<std::pair<std::string, luminumbra::core::SystemConfig>>
 SimulationConfigVariants() {
     using luminumbra::core::SysKey;
@@ -47,9 +102,13 @@ SimulationConfigVariants() {
                key == SysKey::RenderCircadian;
     };
     std::vector<std::pair<std::string, SystemConfig>> variants;
-    for (unsigned i = 0; i < static_cast<unsigned>(SysKey::Count); ++i) {
-        if (!relevant(static_cast<SysKey>(i)))
-            continue;
+    constexpr SysKey gates[]{SysKey::SimHydrologyWeather,
+                             SysKey::SimWeatherEvents,
+                             SysKey::SimAetherState,
+                             SysKey::SimWaterHighRes,
+                             SysKey::SimActiveRegions};
+    for (const auto gate : gates) {
+        const auto i = static_cast<std::size_t>(gate);
         nlohmann::json document;
         document[sections[i]][names[i]]["enabled"] = false;
         variants.emplace_back(names[i], SystemConfig::FromJsonString(document.dump()));
@@ -67,8 +126,8 @@ SimulationConfigVariants() {
     return variants;
 }
 
-// Exercise the live-session API rather than document identities. Tuning-only OFF
-// flags may resolve to exactly the defaults and are deliberately omitted here.
+// Every expected mutation is returned and asserted, including omissions in the
+// encoder. Never filter this list by its computed identity.
 inline std::vector<std::pair<std::string, std::string>> EffectiveIdentityMismatches() {
     world::GameSession baseline;
     const auto identity = baseline.SystemConfigIdentity();
@@ -77,8 +136,7 @@ inline std::vector<std::pair<std::string, std::string>> EffectiveIdentityMismatc
         world::GameSession session;
         session.ApplySystemConfig(config);
         auto changed = session.SystemConfigIdentity();
-        if (changed != identity)
-            variants.emplace_back(name, std::move(changed));
+        variants.emplace_back(name, std::move(changed));
     }
     world::GameSession session;
     session.ApplySystemConfig(luminumbra::core::SystemConfig::Defaults());
@@ -127,6 +185,9 @@ inline std::vector<std::pair<std::string, std::string>> EffectiveIdentityMismatc
     --reproduction.maturity_ticks;
     session.SetReproductionTuning(reproduction);
     variants.emplace_back("u32 adjacent setter", session.SystemConfigIdentity());
+    for (const auto& [name, changed] : variants) {
+        EXPECT_NE(changed, identity) << "identity omitted applied input: " << name;
+    }
     return variants;
 }
 

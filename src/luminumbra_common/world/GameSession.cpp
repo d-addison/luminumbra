@@ -1,8 +1,9 @@
 #include "GameSession.h"
+#include "../../../include/luminumbra/core/Types.h"
 #include "../ai/CircadianSystem.h" // Diurnal and nocturnal activity.
+#include "../ai/CreatureBrain.h"
 #include "../ai/CreatureBrainSystem.h"
 #include "../ai/CreatureReproductionSystem.h" // Generational evolution.
-#include "../ai/CreatureSpeciesRegistry.h"    // per-world species definitions
 #include "../ai/DecompositionSystem.h"        // Releases nutrients after death.
 #include "../ai/EcologyTuningConfig.h"
 #include "../ai/ForagingSystem.h"  // ant-trail foraging (Deneubourg double-bridge)
@@ -28,8 +29,11 @@
 #include "../components/CircadianComponents.h"
 #include "../components/CombustionComponents.h"
 #include "../components/CoreComponents.h"
+#include "../components/CreatureComponents.h"
+#include "../components/CropLifecycleComponents.h"
 #include "../components/DecayComponents.h"
 #include "../components/DiseaseComponents.h"
+#include "../components/ForagingComponents.h"
 #include "../components/GrazeableComponent.h"
 #include "../components/InstinctComponents.h"
 #include "../components/IrrigationComponents.h"
@@ -38,16 +42,19 @@
 #include "../components/PackHunterComponents.h"
 #include "../components/PlantComponents.h"
 #include "../components/PollinationComponents.h"
+#include "../components/ScavengerComponent.h"
 #include "../components/SoilComponents.h"
 #include "../components/TerritoryComponents.h"
-#include "../core/JobSystem.h"
+#include "../components/ThirstComponents.h"
 #include "../core/Log.h"
+#include "../core/SystemConfig.h"
 #include "../fields/EnergyFieldState.h"
 #include "../persistence/PlantPersistence.h"
 #include "../persistence/SavedWorldCatalog.h"
 #include "../persistence/WorldPersistenceRoundtrip.h" // Persistence::StableChecksum (ComputeScentSubHash)
 #include "../persistence/WorldSaveService.h"
 #include "../scripting/LuaState.h"
+#include "../simulation/SimBudgetTelemetry.h"
 #include "../systems/AetherFieldSystem.h"
 #include "../systems/CropLifecycleSystem.h"
 #include "../systems/FieldEmitterSystem.h" // Gathers field-emitter deposits.
@@ -63,10 +70,26 @@
 #include "../systems/WeatherEventSystem.h" // Pure deterministic weather-event schedule.
 #include "../systems/WeatherSystem.h"
 #include "../systems/WindFieldSystem.h"
+#include "ActiveRegionLedger.h"
+#include "Chunk.h"
 #include "TerrainPresetLoader.h"
 #include "WorldStreamingState.h"
+#include "entt/entity/entity.hpp"
+#include "entt/entity/fwd.hpp"
 #include "nlohmann/json.hpp" // For parsing JSON
-#include <cmath>             // std::floor (energy-layer anchor quantization)
+#include "nlohmann/json_fwd.hpp"
+#include <atomic>
+#include <cmath> // std::floor (energy-layer anchor quantization)
+#include <cstddef>
+#include <cstdint>
+#include <ctime>
+#include <exception>
+#include <functional>
+#include <ios>
+#include <map>
+#include <span>
+#include <string>
+#include <system_error>
 
 #include <algorithm> // explicit: stabilise std template instantiation for entt storage helpers
 #include <chrono>
@@ -194,7 +217,7 @@ void GameSession::ResetWorldSystems() {
     m_lastLoadedChunkCount = 0;
 }
 
-// load the per-world species definition table at world create/load.
+// The preset dependency snapshot captures the per-world species table at create/load.
 // DETERMINISM: CreatureSpeciesRegistry::LoadFromDirectory sorts the *.json entries by
 // filename before parsing, so the table is a pure function of the files' CONTENT — never of
 // filesystem iteration order. A missing/empty directory yields an EMPTY table, and every
@@ -360,28 +383,17 @@ void GameSession::ApplyWaterResolutionWiring() {
     LUMINUMBRA_CORE_INFO("Water resolution wired: {}", m_waterHighResEnabled ? "High" : "Medium");
 }
 
-void GameSession::LoadSpeciesDefinitions() {
-    m_speciesTable = std::make_unique<luminumbra::ai::CreatureSpeciesRegistry>();
-    const fs::path dir = RuntimeRoot(m_rootPath) / "data" / "common" / "creatures" / "species";
-    std::vector<std::string> errors;
-    const std::size_t loaded = m_speciesTable->LoadFromDirectory(dir, errors);
-    for (const std::string& err : errors) {
-        // Content problems are warnings, not failures: a bad species file must never brick a
-        // world load (the affected species just keeps its compiled-default behaviour/absence).
-        LUMINUMBRA_CORE_WARN("Species definition load: {}", err);
-    }
-    LUMINUMBRA_CORE_INFO("Species definitions loaded: {} from {}", loaded, dir.string());
-}
-
 std::uint32_t GameSession::TickSimulation(double frame_dt) {
     if (m_regionFault)
         return 0;
     // Queued work belongs to this next tick; only reentrant batches must refuse.
     if (m_activeRegionsEnabled && m_simulationBatchInProgress)
         return 0;
-    struct BatchGuard {
+    class BatchGuard {
         bool& active;
         bool previous;
+
+    public:
         BatchGuard(bool& value, bool enabled)
             : active(value)
             , previous(value) {
@@ -390,7 +402,8 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
         ~BatchGuard() {
             active = previous;
         }
-    } guard(m_simulationBatchInProgress, m_activeRegionsEnabled);
+    };
+    const BatchGuard guard(m_simulationBatchInProgress, m_activeRegionsEnabled);
     std::uint32_t ticks_executed;
     if (m_activeRegionsEnabled) {
         auto advanced_clock = m_simulationClock;
@@ -851,7 +864,7 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
         // growth runs AFTER weather. Integer/fixed-point + id-ordered = run==replay.
         // Temperature, light, soil, weather, and irrigation are sampled below.
         if (HasPlantParticipants()) {
-            luminumbra::foliage::EnvSampler plant_env =
+            const luminumbra::foliage::EnvSampler plant_env =
                 [this, foliageOriginX, foliageOriginZ, current_tick](
                     const Luminumbra::Components::TransformComponent& tf) {
                     luminumbra::foliage::PlantEnvSample s;
@@ -1174,6 +1187,8 @@ bool GameSession::CreateWorldInternal(const std::string& name,
     const WorldConfigValidationResult validation =
         ValidateWorldConfig(m_rootPath, worldType, m_requiredClientAssets);
     if (!validation.ok) {
+        m_worldOpenError =
+            validation.errors.empty() ? "Invalid world configuration." : validation.errors.front();
         for (const std::string& error : validation.errors) {
             LUMINUMBRA_CORE_ERROR("World config validation failed: {}", error);
         }
@@ -1235,6 +1250,7 @@ bool GameSession::CreateWorldInternal(const std::string& name,
 
     const TerrainPresetLoadResult preset = LoadTerrainPreset(preset_to_load);
     if (!preset.ok) {
+        m_worldOpenError = preset.errors.empty() ? "Invalid world preset." : preset.errors.front();
         for (const std::string& error : preset.errors) {
             LUMINUMBRA_CORE_ERROR("World preset load failed: {}", error);
         }
@@ -1252,7 +1268,7 @@ bool GameSession::CreateWorldInternal(const std::string& name,
     m_physicsSystem = std::make_unique<Systems::PhysicsSystem>();
     m_physicsSystem->startup();
 
-    int world_seed = StringToSeed(m_metadata.seed);
+    const int world_seed = static_cast<int>(StringToSeed(m_metadata.seed));
     LUMINUMBRA_CORE_INFO("Loaded world preset '{}': height_offset={}, amplitude={}, caves={}",
                          worldType,
                          params.height_offset,
@@ -1303,8 +1319,8 @@ bool GameSession::CreateWorldInternal(const std::string& name,
     InitializeEnergyFieldState();
 
     // Calculate appropriate spawn point based on actual terrain height
-    float spawn_x = 8.0f;
-    float spawn_z = 8.0f;
+    const float spawn_x = 8.0f;
+    const float spawn_z = 8.0f;
     float terrain_height = m_worldSystem->GetTerrainHeightAt(spawn_x, spawn_z);
     LUMINUMBRA_CORE_INFO("Initial terrain height sampled at spawn: {}.", terrain_height);
 
@@ -1315,8 +1331,8 @@ bool GameSession::CreateWorldInternal(const std::string& name,
     AttachRegionEditObserver();
     InitializeScentField(m_metadata.spawnPoint);
 
-    // species definitions load once at world create (content-pure; see the helper).
-    LoadSpeciesDefinitions();
+    // Adopt the registry parsed from the bytes bound into the session identity.
+    m_speciesTable = preset.params.worldgen_dependencies->species_table;
 
     // wire weather-driven rain into the water solver when the
     // owner opted in (sim.hydrology_weather via SetWeatherRainEnabled). Explicit OFF =
@@ -1369,6 +1385,7 @@ bool GameSession::LoadWorld(const std::string& worldId) {
     const TerrainPresetLoadResult preset = LoadTerrainPresetFromJson(
         nlohmann::json::parse(saved.preset_json), RuntimeRoot(m_rootPath) / "data");
     if (!preset.ok) {
+        m_worldOpenError = preset.errors.empty() ? "Invalid world preset." : preset.errors.front();
         for (const std::string& error : preset.errors) {
             LUMINUMBRA_CORE_ERROR("World preset load failed: {}", error);
         }
@@ -1387,7 +1404,7 @@ bool GameSession::LoadWorld(const std::string& worldId) {
         m_simulationClock.reset(m_worldClock.tick());
     }
     m_transientWorld = false;
-    int world_seed = StringToSeed(m_metadata.seed);
+    const int world_seed = static_cast<int>(StringToSeed(m_metadata.seed));
 
     // Initialize Physics System after config and preset validation passes.
     m_physicsSystem = std::make_unique<Systems::PhysicsSystem>();
@@ -1421,7 +1438,9 @@ bool GameSession::LoadWorld(const std::string& worldId) {
     InitializeEnergyFieldState();
     if (m_energyFieldState) {
         const std::string recordPath = worldPath + "/aether_state.efs";
-        std::ifstream recordFile(recordPath);
+        // Consuming rdbuf() mutates the buffer; keep its owning stream mutable.
+        std::ifstream recordFile;
+        recordFile.open(recordPath);
         if (recordFile) {
             std::ostringstream recordBytes;
             recordBytes << recordFile.rdbuf();
@@ -1446,9 +1465,8 @@ bool GameSession::LoadWorld(const std::string& worldId) {
     }
     InitializeScentField(m_metadata.spawnPoint);
 
-    // species definitions load once at world load, exactly as CreateWorld does
-    // (content-pure; a loaded world resolves the same table as the created one).
-    LoadSpeciesDefinitions();
+    // Saved worlds adopt the same captured session content as new worlds.
+    m_speciesTable = preset.params.worldgen_dependencies->species_table;
 
     // restore the rotating water sim-window cursor so the loaded session
     // resimulates the exact windows the original would from the same water state.
@@ -1808,7 +1826,7 @@ bool GameSession::SaveWorldStateTo(const std::filesystem::path& save_dir,
         return !m_activeRegionsEnabled || SaveWorldMetadataTo(save_dir);
     }
 
-    Persistence::WorldSaveService service;
+    const Persistence::WorldSaveService service;
     std::vector<std::string> errors;
     // Subsequent saves rewrite the edited regions of a supported container.
     const bool has_snapshot = m_activeRegionsEnabled
@@ -1889,7 +1907,7 @@ bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
         return false;
     }
 
-    Persistence::WorldSaveService service;
+    const Persistence::WorldSaveService service;
     WorldStreamingState loaded;
     std::vector<std::string> errors;
     const bool snapshot_present = service.load_world(loaded, save_dir, errors);
@@ -2038,7 +2056,9 @@ bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
     // onto the loaded session's tick stream (-4).
     if (m_energyFieldState) {
         const fs::path recordPath = save_dir / "aether_state.efs";
-        std::ifstream recordFile(recordPath);
+        // Consuming rdbuf() mutates the buffer; keep its owning stream mutable.
+        std::ifstream recordFile;
+        recordFile.open(recordPath);
         if (recordFile) {
             std::ostringstream recordBytes;
             recordBytes << recordFile.rdbuf();
@@ -2085,7 +2105,7 @@ uint32_t GameSession::StringToSeed(const std::string& seedStr) const {
         return static_cast<uint32_t>(std::stoull(seedStr));
     } catch (...) {
         // If not a number, hash the string
-        std::hash<std::string> hasher;
+        const std::hash<std::string> hasher;
         return static_cast<uint32_t>(hasher(seedStr));
     }
 }

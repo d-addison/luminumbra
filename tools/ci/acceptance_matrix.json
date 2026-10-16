@@ -1137,7 +1137,7 @@
       "requirements": [
         "ar.activation.050"
       ],
-      "discrepancy": "docs/active-regions.md#activation-and-ordering and ActiveRegionLedgerTest.ValidAnchorBoundaries agree on the half-open interval [-2^24, 2^24). The validator regression covers both axes; boundary rejection and counting through walking anchors, ground-object edits and region pins still require end-to-end evidence.",
+      "discrepancy": "`docs/active-regions.md#activation-and-ordering` and ActiveRegionLedgerTest.ValidAnchorBoundaries agree on the half-open interval [-2^24, 2^24). The validator regression covers both axes; boundary rejection and counting through walking anchors, ground-object edits and region pins still require end-to-end evidence.",
       "evidence": [
         {
           "kind": "ctest",
