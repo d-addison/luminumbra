@@ -53,6 +53,30 @@ if(LUMINUMBRA_ENABLE_STATIC_PREVIEW)
 endif()
 
 if(BUILD_TESTING)
+    add_test(
+        NAME NetworkingRuntimeContract
+        COMMAND "${CMAKE_COMMAND}"
+                "-DNETWORK_TEST_ROOT=${CMAKE_CURRENT_BINARY_DIR}/networking-runtime-contract"
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_networking_runtime.cmake")
+    set_tests_properties(NetworkingRuntimeContract
+        PROPERTIES LABELS "ci;tools;net" TIMEOUT 30)
+
+    # The staging module needs CMake 3.21+ on Windows; 3.20 builds stay networking-free.
+    if(WIN32 AND CMAKE_VERSION VERSION_GREATER_EQUAL 3.21)
+        add_test(
+            NAME NetworkingRuntimeBuildIntegration
+            COMMAND "${CMAKE_COMMAND}"
+                    "-DNETWORK_TEST_ROOT=${CMAKE_CURRENT_BINARY_DIR}/networking-runtime-integration"
+                    "-DNETWORK_TEST_GENERATOR=${CMAKE_GENERATOR}"
+                    "-DNETWORK_TEST_PLATFORM=${CMAKE_GENERATOR_PLATFORM}"
+                    "-DNETWORK_TEST_TOOLSET=${CMAKE_GENERATOR_TOOLSET}"
+                    "-DNETWORK_TEST_MAKE_PROGRAM=${CMAKE_MAKE_PROGRAM}"
+                    "-DNETWORK_TEST_COMPILER=${CMAKE_CXX_COMPILER}"
+                    -P "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_networking_runtime_integration.cmake")
+        set_tests_properties(NetworkingRuntimeBuildIntegration
+            PROPERTIES LABELS "ci;tools;net" TIMEOUT 90)
+    endif()
+
     # Acceptance fixture code is linked only by its CLI and tests, never the engine targets.
     add_library(luminumbra_save_fixture_support STATIC
         ${CMAKE_SOURCE_DIR}/src/luminumbra_common/persistence/SyntheticSaveFixture.cpp)
@@ -174,6 +198,31 @@ if(BUILD_TESTING)
         COMMAND "${Python3_EXECUTABLE}"
                 "${CMAKE_CURRENT_SOURCE_DIR}/release/test_verify_release.py")
     set_tests_properties(ReleaseVerifyScriptContract
+        PROPERTIES LABELS "release;tools" TIMEOUT 60)
+    add_test(
+        NAME ReleaseGatesScriptContract
+        COMMAND "${Python3_EXECUTABLE}" -I -B
+                "${CMAKE_CURRENT_SOURCE_DIR}/release/test_validate_release_gates.py"
+                RecordTests ApiTests StatusTests GitCommandTests WiringTests)
+    set_tests_properties(ReleaseGatesScriptContract
+        PROPERTIES LABELS "release;tools" TIMEOUT 60)
+    add_test(
+        NAME ReleaseGatesGitContract
+        COMMAND "${Python3_EXECUTABLE}" -I -B
+                "${CMAKE_CURRENT_SOURCE_DIR}/release/test_validate_release_gates.py" GitTests)
+    set_tests_properties(ReleaseGatesGitContract
+        PROPERTIES LABELS "release;tools" TIMEOUT 60)
+    add_test(
+        NAME ReleaseGatesCliContract
+        COMMAND "${Python3_EXECUTABLE}" -I -B
+                "${CMAKE_CURRENT_SOURCE_DIR}/release/test_validate_release_gates.py" CliTests)
+    set_tests_properties(ReleaseGatesCliContract
+        PROPERTIES LABELS "release;tools" TIMEOUT 60)
+    add_test(
+        NAME ReleaseGatesProtectionContract
+        COMMAND "${Python3_EXECUTABLE}" -I -B
+                "${CMAKE_CURRENT_SOURCE_DIR}/release/test_validate_release_gates.py" ProtectionTests)
+    set_tests_properties(ReleaseGatesProtectionContract
         PROPERTIES LABELS "release;tools" TIMEOUT 60)
     add_test(
         NAME SlowestTestsScriptContract

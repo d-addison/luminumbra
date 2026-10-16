@@ -1,5 +1,6 @@
 #include "LightingPass.h"
 #include "../FarWorldReplay.h"
+#include "../RenderingDefaults.h"
 
 #include "../EnvironmentBrdfLut.gen.h"
 #include "../PassShaderLayouts.h"
@@ -329,14 +330,8 @@ void LightingPass::execute(const RenderContext& ctx) {
                     0.92f}; // richer sat + punchier contrast (de-wash
                             // noon; owner "white filter" pass 2026-07-07)
             if (const auto env = Core::ReadEnvironment("LUMIN_GRADE")) {
-                std::sscanf(env->c_str(),
-                            "%f,%f,%f,%f,%f,%f",
-                            &g.exposure,
-                            &g.saturation,
-                            &g.contrast,
-                            &g.wr,
-                            &g.wg,
-                            &g.wb);
+                ParseCommaSeparatedPrefix(
+                    *env, g.exposure, g.saturation, g.contrast, g.wr, g.wg, g.wb);
             }
             return g;
         }();
@@ -377,21 +372,8 @@ void LightingPass::execute(const RenderContext& ctx) {
         if (ctx.static_studio) {
             m_lighting_shader->setFloat("u_caveAmbientOcclusion", 0.0f);
         } else {
-            struct CaveAO {
-                float enabled, maxDist, floor, thickness;
-                int steps;
-            };
-            static const CaveAO s_caveAO = [] {
-                CaveAO c{0.0f, 24.0f, 0.06f, 1.5f, 8}; // DEFAULT OFF (enabled=0)
-                if (const auto env = Core::ReadEnvironment("LUMIN_CAVE_AO")) {
-                    // "enabled,maxDist,floor,steps,thickness"
-                    float en = 0, md = 24, fl = 0.06f, th = 1.5f;
-                    int st = 8;
-                    std::sscanf(env->c_str(), "%f,%f,%f,%d,%f", &en, &md, &fl, &st, &th);
-                    c = CaveAO{en, md, fl, th, st};
-                }
-                return c;
-            }();
+            static const auto s_caveAO =
+                ResolveCaveAmbientOcclusion(Core::ReadEnvironment("LUMIN_CAVE_AO"));
             m_lighting_shader->setFloat("u_caveAmbientOcclusion", s_caveAO.enabled);
             m_lighting_shader->setFloat("u_caveSkyMaxDist", s_caveAO.maxDist);
             m_lighting_shader->setInt("u_caveSkySteps", s_caveAO.steps);

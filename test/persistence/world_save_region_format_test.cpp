@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <memory>
 #include <sstream>
 #include <string>
@@ -507,6 +508,38 @@ TEST(WorldSaveRegionFormat, CorruptRegionFileReportsErrors) {
     std::vector<std::string> errors;
     EXPECT_FALSE(service.load_world(state, save_dir.path, errors));
     EXPECT_FALSE(errors.empty());
+}
+
+TEST(WorldSaveRegionFormat, MaximalCompressedSizeIsRefusedAsTruncated) {
+    TempSaveDir save_dir("payload_bounds");
+    const auto path = WorldSaveService::region_file_path(save_dir.path, 0, 0);
+    std::filesystem::create_directories(path.parent_path());
+
+    // One valid v2 manifest entry, no payload, declaring a UINT32_MAX
+    // compressed size. With 64-bit size_t this checks the truncated-payload
+    // refusal; the offset + size wraparound it also guards against (26 +
+    // UINT32_MAX wrapping to 25) is only reachable where size_t is 32-bit.
+    std::string bytes("LMR1\x02\x00\x01\x00", 8);
+    bytes.append(18, '\0');
+    bytes[8 + 10] = 1; // raw size
+    const auto compressed_size = std::numeric_limits<std::uint32_t>::max();
+    for (int i = 0; i < 4; ++i)
+        bytes[8 + 14 + i] = static_cast<char>(compressed_size >> (8 * i));
+    {
+        std::ofstream output(path, std::ios::binary | std::ios::trunc);
+        ASSERT_TRUE(output.is_open());
+        output.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+        output.close();
+        ASSERT_TRUE(output.good());
+    }
+
+    std::vector<WorldSaveService::ContainerRecord> records;
+    std::vector<std::string> errors;
+    EXPECT_FALSE(WorldSaveService::read_container_records(path, records, &errors));
+    EXPECT_TRUE(records.empty());
+    ASSERT_EQ(errors.size(), 1u);
+    EXPECT_NE(errors.front().find("record payload is truncated"), std::string::npos);
+    EXPECT_EQ(ReadFileBytes(path), bytes);
 }
 
 TEST(WorldSaveRegionFormat, HasWorldSaveRecognizesOnlySupportedContainers) {

@@ -7,6 +7,7 @@
 
 #include "nlohmann/json.hpp"
 
+#include "../core/FilesystemPath.h"
 #include "../core/Log.h"
 
 namespace Luminumbra::World {
@@ -100,23 +101,31 @@ IVec3 ParseIVec3(const nlohmann::json& arr, const IVec3& fallback) {
 } // namespace
 
 StructureTemplatePool LoadStructureTemplatePool(const std::filesystem::path& type_dir,
-                                                const std::string& type) {
+                                                const std::string& type,
+                                                const WorldgenFileReader& read_file) {
     StructureTemplatePool pool;
     pool.type = type;
 
     std::error_code ec;
     if (!std::filesystem::is_directory(type_dir, ec)) {
-        pool.errors.push_back("structure type dir not found: " + type_dir.string());
+        pool.io_failed = bool(ec);
+        pool.errors.push_back("structure type dir not found: " +
+                              Filesystem::GenericUtf8PathString(type_dir));
         return pool;
     }
 
     // placement.json (optional; defaults documented in the header).
     const std::filesystem::path placement_path = type_dir / "placement.json";
     if (std::filesystem::exists(placement_path, ec)) {
-        std::ifstream file(placement_path);
+        std::string bytes;
+        if (!read_file(placement_path, bytes)) {
+            pool.io_failed = true;
+            pool.errors.push_back("failed to read placement.json");
+            return pool;
+        }
         nlohmann::json data;
         try {
-            data = nlohmann::json::parse(file);
+            data = nlohmann::json::parse(bytes);
         } catch (const nlohmann::json::parse_error& e) {
             pool.errors.push_back(std::string("placement.json parse error: ") + e.what());
             return pool;
@@ -132,9 +141,11 @@ StructureTemplatePool LoadStructureTemplatePool(const std::filesystem::path& typ
     }
 
     // Every *.json under the type dir EXCEPT placement.json is a piece. Sort by
-    // filename so piece order is deterministic regardless of directory order.
+    // UTF-8 logical filename, matching preset manifest ordering on every platform.
     std::vector<std::filesystem::path> piece_files;
-    for (const auto& entry : std::filesystem::directory_iterator(type_dir, ec)) {
+    std::filesystem::directory_iterator entry_it(type_dir, ec), end;
+    for (; !ec && entry_it != end; entry_it.increment(ec)) {
+        const auto& entry = *entry_it;
         if (!entry.is_regular_file()) {
             continue;
         }
@@ -144,25 +155,39 @@ StructureTemplatePool LoadStructureTemplatePool(const std::filesystem::path& typ
         }
         piece_files.push_back(p);
     }
-    std::sort(piece_files.begin(), piece_files.end());
+    if (ec) {
+        pool.io_failed = true;
+        pool.errors.push_back("failed to enumerate structure pieces: " + ec.message());
+        return pool;
+    }
+    std::sort(piece_files.begin(), piece_files.end(), [](const auto& a, const auto& b) {
+        return Filesystem::GenericUtf8PathString(a.filename()) <
+               Filesystem::GenericUtf8PathString(b.filename());
+    });
 
     for (const auto& piece_path : piece_files) {
-        std::ifstream file(piece_path);
+        std::string bytes;
+        if (!read_file(piece_path, bytes)) {
+            pool.io_failed = true;
+            pool.errors.push_back("failed to read structure piece: " +
+                                  Filesystem::GenericUtf8PathString(piece_path.filename()));
+            continue;
+        }
         nlohmann::json data;
         try {
-            data = nlohmann::json::parse(file);
+            data = nlohmann::json::parse(bytes);
         } catch (const nlohmann::json::parse_error& e) {
-            pool.errors.push_back(piece_path.filename().string() + std::string(" parse error: ") +
-                                  e.what());
+            pool.errors.push_back(Filesystem::GenericUtf8PathString(piece_path.filename()) +
+                                  std::string(" parse error: ") + e.what());
             continue;
         }
         WarnUnknownKeys(data,
                         {"name", "boxes", "sockets", "_comment"},
-                        piece_path.filename().string(),
+                        Filesystem::GenericUtf8PathString(piece_path.filename()),
                         pool.warnings);
 
         StructurePiece piece;
-        piece.name = data.value("name", piece_path.stem().string());
+        piece.name = data.value("name", Filesystem::GenericUtf8PathString(piece_path.stem()));
         if (data.contains("boxes") && data["boxes"].is_array()) {
             for (const auto& box_json : data["boxes"]) {
                 StructureBox box;

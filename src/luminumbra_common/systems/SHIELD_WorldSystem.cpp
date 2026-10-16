@@ -1,4 +1,5 @@
 #include "SHIELD_WorldSystem.h"
+#include "../core/FilesystemPath.h"
 #include "../core/JobWatchdog.h" // opt-in named-phase wedge reporter for unbounded waits
 #include "../core/Log.h"
 #include "../world/FarLodStore.h"
@@ -978,7 +979,10 @@ void SHIELD_WorldSystem::reinitialize_noise(const TerrainGenParams* params,
         humidity_fractal->SetOctaveCount(2);
         m_humidity_generator = humidity_fractal;
 
-        m_biome_table = World::BiomeTable::Load(m_params.biome_table_path);
+        m_biome_table =
+            m_params.worldgen_dependencies
+                ? m_params.worldgen_dependencies->biome_table
+                : World::BiomeTable::Load(Filesystem::PathFromUtf8(m_params.biome_table_path));
         if (!m_biome_table.ok() || m_biome_table.empty()) {
             for (const std::string& error : m_biome_table.errors()) {
                 LUMINUMBRA_CORE_WARN("biome table load error: {}", error);
@@ -1003,22 +1007,34 @@ void SHIELD_WorldSystem::reinitialize_noise(const TerrainGenParams* params,
     m_structures_enabled = false;
     m_params.structures_content_hash = 0;
     if (m_params.structures_enabled && !m_params.structures_data_dir.empty()) {
-        const std::filesystem::path structures_root(m_params.structures_data_dir);
-        std::error_code ec;
-        std::vector<std::filesystem::path> type_dirs;
-        if (std::filesystem::is_directory(structures_root, ec)) {
-            for (const auto& entry : std::filesystem::directory_iterator(structures_root, ec)) {
-                if (entry.is_directory()) {
-                    type_dirs.push_back(entry.path());
+        std::vector<World::StructureTemplatePool> pools;
+        if (m_params.worldgen_dependencies) {
+            pools = m_params.worldgen_dependencies->structure_pools;
+        } else {
+            // Direct generators without a preset retain filesystem loading.
+            const auto structures_root = Filesystem::PathFromUtf8(m_params.structures_data_dir);
+            std::error_code ec;
+            std::vector<std::filesystem::path> type_dirs;
+            if (std::filesystem::is_directory(structures_root, ec)) {
+                for (const auto& entry : std::filesystem::directory_iterator(structures_root, ec)) {
+                    if (entry.is_directory()) {
+                        type_dirs.push_back(entry.path());
+                    }
                 }
             }
+            // Match the manifest's UTF-8 order, including non-BMP type names.
+            std::sort(type_dirs.begin(), type_dirs.end(), [](const auto& a, const auto& b) {
+                return Filesystem::GenericUtf8PathString(a.filename()) <
+                       Filesystem::GenericUtf8PathString(b.filename());
+            });
+            for (const auto& type_dir : type_dirs) {
+                pools.push_back(World::LoadStructureTemplatePool(
+                    type_dir, Filesystem::GenericUtf8PathString(type_dir.filename())));
+            }
         }
-        // Sort by type name so the combined content hash is order-independent.
-        std::sort(type_dirs.begin(), type_dirs.end());
         u64 combined = 14695981039346656037ull; // fnv offset basis
-        for (const auto& type_dir : type_dirs) {
-            const std::string type = type_dir.filename().string();
-            World::StructureTemplatePool pool = World::LoadStructureTemplatePool(type_dir, type);
+        for (auto& pool : pools) {
+            const auto& type = pool.type;
             for (const std::string& warn : pool.warnings) {
                 LUMINUMBRA_CORE_WARN("structure pool '{}': {}", type, warn);
             }
