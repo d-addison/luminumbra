@@ -5312,6 +5312,11 @@ int main(int argc, char* argv[]) {
             }
         }
     }
+    if (!frame_recorder.finish()) {
+        LUMINUMBRA_CORE_ERROR("Frame attribution CSV finalization failed");
+        if (exit_code == 0)
+            exit_code = 1;
+    }
     std::vector<std::string> shutdown_milestones;
     const bool incremental_shutdown_record = scenario_config.hang_watchdog_seconds > 0;
     auto mark_shutdown = [&](const std::string& milestone) {

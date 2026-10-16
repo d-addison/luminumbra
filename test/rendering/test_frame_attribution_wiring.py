@@ -154,6 +154,16 @@ class FrameAttributionWiring(unittest.TestCase):
         self.assertEqual(compact(block(self.header, "bool active() const")),
                          "return m_out.is_open() && m_out.good();")
 
+    def test_recorder_finalization_failure_reaches_shutdown_error_path(self):
+        finish = compact(block(self.collector, "bool FrameRecorder::finish()"))
+        self.assertIn("return finalize_csv(m_out);", finish)
+        failure = compact(block(self.main, "if (!frame_recorder.finish())"))
+        self.assertIn('LUMINUMBRA_CORE_ERROR("Frame attribution CSV finalization failed");', failure)
+        self.assertIn("if (exit_code == 0) exit_code = 1;", failure)
+        self.assertLess(self.main.index("if (!frame_recorder.finish())"),
+                        self.main.index('trace_shutdown("query_cleanup_started")'))
+        self.assertIn("return exit_code;", self.main)
+
 
 if __name__ == "__main__":
     unittest.main()
