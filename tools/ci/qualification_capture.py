@@ -173,6 +173,8 @@ def asan_producers(binding, records):
         successful_producers("asan", record["producers"])
         require(re.fullmatch(r"[0-9a-f]{64}", record["binary_sha256"])
                 and re.fullmatch(r"[0-9a-f]{64}", record["junit_sha256"]), "ASan shard digest missing")
+    require(records[0]["binary_sha256"] == records[1]["binary_sha256"],
+            "ASan shard binary digests differ")
     receipts = [record for record in records if "ambient" in record]
     require(len(receipts) == 1, "exactly one ASan shard must produce the ambient receipt")
     return receipts[0]

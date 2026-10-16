@@ -100,7 +100,7 @@ class CaptureContract(unittest.TestCase):
     def asan_records(self):
         return [{**self.asan_binding(), "shard": shard,
                  "producers": dict.fromkeys(capture.LANES["asan"][2], "success"),
-                 "binary_sha256": str(shard) * 64, "junit_sha256": HASH,
+                 "binary_sha256": "2" * 64, "junit_sha256": HASH,
                  **({"ambient": RECEIPT} if shard == 2 else {})} for shard in (1, 2)]
 
     def test_asan_combines_both_producers_and_uses_receipt_producers_binary(self):
@@ -124,6 +124,15 @@ class CaptureContract(unittest.TestCase):
                         [records[0], {key: value for key, value in records[1].items() if key != "ambient"}]):
             with self.subTest(changed=changed), self.assertRaises(ValueError):
                 capture.asan_producers(self.asan_binding(), changed)
+
+    def test_asan_producers_reject_different_binaries_in_either_shard_or_attempt(self):
+        for shard in (1, 2):
+            for attempt in (1, 2):
+                records = self.asan_records()
+                records[shard - 1].update(binary_sha256="3" * 64, run_attempt=attempt)
+                with self.subTest(shard=shard, attempt=attempt), \
+                        self.assertRaisesRegex(ValueError, "ASan shard binary digests differ"):
+                    capture.asan_producers(self.asan_binding(), records)
 
     def write_asan_capture(self, shard_attempts=(2, 2)):
         binary = self.root / "common_tests"
@@ -164,6 +173,31 @@ class CaptureContract(unittest.TestCase):
         self.assertEqual(document["status"], "complete")
         self.assertEqual(document["run_attempt"], 2)
         self.assertEqual([record["run_attempt"] for record in document["asan_shards"]], [1, 2])
+
+    def test_asan_manifest_writer_refuses_different_shard_binaries(self):
+        args, _, _ = self.write_asan_capture((1, 2))
+        args.output.unlink()
+        record_path = self.root / "shard-1/qualification-shard.json"
+        record = {**capture.read_json(record_path), "binary_sha256": "3" * 64}
+        record_path.write_text(json.dumps(record), encoding="utf-8")
+        with patch.object(capture, "source_identity", return_value=self.asan_binding()), \
+                patch.dict(capture.os.environ, {"QUALIFICATION_PRODUCERS": '{"tests":"success"}'}), \
+                patch.object(capture, "module", return_value=self.comparator()), \
+                self.assertRaisesRegex(ValueError, "ASan shard binary digests differ"):
+            capture.write_manifest(args)
+        self.assertEqual(capture.read_json(args.output)["status"], "incomplete")
+
+    def test_asan_chain_refuses_different_shard_binaries_before_producer_proof(self):
+        args, _, _ = self.write_asan_capture((1, 2))
+        document = capture.read_json(args.output)
+        document["asan_shards"][0]["binary_sha256"] = "3" * 64
+        args.output.write_text(json.dumps(document), encoding="utf-8")
+        with patch.object(capture, "command", side_effect=[HEAD, ""]), \
+                patch.object(capture, "module", return_value=types.SimpleNamespace(fixture_hash=lambda *_args, **_kwargs: HASH)), \
+                patch.object(capture, "verify_producer") as proof, \
+                self.assertRaisesRegex(ValueError, "ASan shard binary digests differ"):
+            capture.validate_chain(HEAD, [args.output])
+        proof.assert_not_called()
 
     def test_asan_rerun_attempts_and_reused_producer_identity_and_outcomes_fail_closed(self):
         records = self.asan_records()
