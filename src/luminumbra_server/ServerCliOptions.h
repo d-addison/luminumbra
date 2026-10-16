@@ -1,5 +1,6 @@
 #pragma once
 
+#include "luminumbra_common/core/SystemConfig.h"
 #include "luminumbra_common/simulation/SimBudgetProfile.h"
 
 #include <cstdint>
@@ -9,6 +10,10 @@
 
 struct ServerCliOptions {
     std::string root;
+    std::string systems_config_path;
+    std::string preset_json_path;
+    std::optional<luminumbra::core::SystemConfig> systems_config_override;
+    std::optional<std::string> preset_json_override;
     std::string preset = "default";
     std::string seed = "424242";
     std::string world_id;
@@ -16,7 +21,8 @@ struct ServerCliOptions {
     int surface_radius = 4;
     int collision_radius = 2;
     int test_streaming_radius_cap = 0;
-    std::uint64_t autosave_ticks = 0;
+    // Five minutes at the canonical 30 Hz clock; 0 disables autosave.
+    std::uint64_t autosave_ticks = 9000;
     //  spawn N deterministic player avatars (phyllotaxis ring
     // around spawn). 0 = none (byte-identical to the zero-avatar lane). With --smoke the
     // double-run already asserts the entities sub-hash matches, so --smoke --avatars N
