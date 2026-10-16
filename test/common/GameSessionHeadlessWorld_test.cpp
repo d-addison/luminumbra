@@ -712,6 +712,61 @@ TEST(GameSessionHeadlessWorldTest, SessionRequiredAssetListFailsCreateWorldWhenM
     jobs.shutdown();
 }
 
+void ExpectRuntimePresetIdentity(const GameSession& session, const fs::path& runtime_root) {
+    const auto saved = session.GetWorldSaveDir() / "preset.json";
+    const auto expected = Luminumbra::world::LoadTerrainPreset(saved, runtime_root / "data");
+    const auto without_runtime = Luminumbra::world::LoadTerrainPreset(saved);
+    ASSERT_TRUE(expected.ok);
+    ASSERT_TRUE(without_runtime.ok);
+    EXPECT_NE(expected.preset_content_hash, without_runtime.preset_content_hash);
+    EXPECT_EQ(session.PresetContentHash(), expected.preset_content_hash);
+}
+
+TEST(GameSessionHeadlessWorldTest, SaveRootOverrideRoutesCreateLoadSaveAndCatalog) {
+    const HeadlessRoot assets;
+    const HeadlessRoot storage;
+    Luminumbra::TestSupport::CopyWorldgenTestData(LUMINUMBRA_SOURCE_ROOT, assets.path());
+    JobSystem jobs;
+    jobs.startup(1);
+    std::string world_id;
+    {
+        GameSession session;
+        session.SetJobSystem(&jobs);
+        session.SetRootPath(assets.root_string());
+        EXPECT_EQ(session.GetSaveRootPath(), fs::path(assets.root_string()));
+        session.SetSaveRootPath(storage.path());
+        EXPECT_EQ(session.GetSaveRootPath(), storage.path());
+        EXPECT_TRUE(session.GetWorldSaveDir().empty());
+        ASSERT_TRUE(session.CreateWorld("PrivateWorld", "12345", "default"));
+        ExpectRuntimePresetIdentity(session, assets.path());
+        world_id = session.GetMetadata().worldId;
+        const auto expected = storage.path() / "worlds/saves" / world_id;
+        EXPECT_EQ(session.GetWorldSaveDir(), expected);
+        EXPECT_TRUE(fs::is_regular_file(expected / "preset.json"));
+        ASSERT_TRUE(session.SaveWorld());
+        ASSERT_TRUE(session.SaveWorldState());
+        EXPECT_TRUE(fs::is_regular_file(expected / "world_info.json"));
+        const auto catalog =
+            Luminumbra::Persistence::EnumerateSavedWorlds(session.GetSaveRootPath(), assets.path());
+        EXPECT_TRUE(catalog.error.empty());
+        ASSERT_EQ(catalog.worlds.size(), 1u);
+        EXPECT_EQ(catalog.worlds.front().metadata.worldId, world_id);
+        EXPECT_FALSE(fs::exists(assets.path() / "worlds/saves"));
+    }
+    {
+        GameSession session;
+        session.SetJobSystem(&jobs);
+        session.SetRootPath(assets.root_string());
+        session.SetSaveRootPath(storage.path());
+        ASSERT_TRUE(session.LoadWorld(world_id)) << session.GetWorldOpenError();
+        ExpectRuntimePresetIdentity(session, assets.path());
+        EXPECT_EQ(session.GetMetadata().name, "PrivateWorld");
+        ASSERT_TRUE(session.SaveWorld());
+        EXPECT_FALSE(fs::exists(assets.path() / "worlds/saves"));
+    }
+    jobs.shutdown();
+}
+
 TEST(GameSessionHeadlessWorldTest, HeadlessCreateWorldSucceedsWithPresetOnly) {
     const HeadlessRoot root;
     JobSystem jobs;
