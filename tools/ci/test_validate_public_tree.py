@@ -117,6 +117,57 @@ class PublicTreeValidatorTests(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertEqual(MODULE.inspect_text("docs/example.md", text), [])
 
+    def test_signature_attribution_uses_production_vocabulary(self):
+        names = ("\x63\x6f\x64\x65\x78", "\x63\x6c\x61\x75\x64\x65")
+        with patch.object(MODULE, "AGENT_NAME_DIGESTS", self.production_digests):
+            for name in names:
+                self.assertIn(MODULE.name_digest(name), self.production_digests)
+                for dash in ("—", "--"):
+                    for prefix in ("", "Public attribution "):
+                        for path, leader in (("docs/example.md", ""), ("src/example.cpp", "// "),
+                                             ("tools/example.ps1", "# ")):
+                            text = f"{prefix}{dash} {name}."
+                            with self.subTest(name=name, dash=dash, prefix=prefix, path=path):
+                                findings = MODULE.inspect_text(path, "Contract.\r\n" + leader + text)
+                                self.assertEqual([(f.rule, f.line) for f in findings],
+                                                 [("internal-reviewer-provenance", 2)])
+                                self.assertTrue(MODULE._may_name_attribution(text))
+
+    def test_attribution_prefilter_covers_every_matcher_alternative(self):
+        pattern = next(pattern for rule, pattern in MODULE.PROVENANCE_TEXT_RULES
+                       if rule == "internal-reviewer-provenance" and pattern.groups)
+        name = "ExampleTool"
+        # Each alternative captures exactly one name; require coverage of every
+        # capture so adding an alternative also requires extending this matrix.
+        alternatives = (
+            tuple(f"{name}/{tier}" for tier in ("low", "medium", "high", "xhigh", "max", "ultra")),
+            tuple(f"{name} {context}" for context in (
+                "review", "audit", "verification", "analysis", "model", "agent", "sign-off",
+                "signed-off", "authoritative", "finding", "critique", "source review",
+                "independent-code-agent-review")),
+            tuple(f"{name} {verb}" for verb in (
+                "reviewed", "audited", "verified", "accepted", "approved", "rejected", "found", "corrected")),
+            tuple(f"{name} {reference}" for reference in ("#1", "# 2", "r3", "#\u0661", "r\u0662")),
+            tuple(f"{context} {name}" for context in (
+                "review", "reviewed", "audit", "audited", "verified", "verification", "review by",
+                "audit with", "verification using", "review from", "audit the", "review by the actual")),
+            tuple(f"{dash}{gap}{name}." for dash in ("—", "--") for gap in ("", " ")),
+            (f"{name} adapter", f"{name} adapters"),
+        )
+        self.assertEqual(len(alternatives), pattern.groups)
+        for group, passages in enumerate(alternatives, 1):
+            for passage in passages:
+                for separator in (" ", "\t", "\n", "\r\n"):
+                    wrapped = passage.replace(" ", separator)
+                    for text in (wrapped, wrapped.lower(), wrapped.upper()):
+                        with self.subTest(group=group, text=text):
+                            match = pattern.search(text)
+                            self.assertIsNotNone(match)
+                            self.assertEqual(match.lastindex, group)
+                            self.assertIn(MODULE.name_digest(match[group]), MODULE.AGENT_NAME_DIGESTS)
+                            self.assertTrue(MODULE._may_name_attribution(text))
+                            self.assertTrue(MODULE._may_name_attribution(text, text.casefold()))
+
     def test_provenance_rules_cover_all_first_party_text_formats(self):
         paths_and_leaders = (
             ("docs/example.md", ""),
@@ -158,6 +209,7 @@ class PublicTreeValidatorTests(unittest.TestCase):
                 ("internal-reviewer-provenance", f"Synthetic {agent} #6."),
                 ("internal-reviewer-provenance", f"Synthetic {agent} r2."),
                 ("internal-reviewer-provenance", f"Synthetic attribution — {agent}."),
+                ("internal-reviewer-provenance", f"Synthetic attribution -- {agent}."),
             )
         for path, leader in paths_and_leaders:
             for rule, text in cases:
