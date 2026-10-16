@@ -895,6 +895,7 @@ TEST(PassContext, FoliageCappedCompactionAndIndependentRebuildAreByteStable) {
         pass.set_density_scale(1.6f);
         pass.set_wind({0, 0});
         pass.set_readback_enabled(true);
+        pass.set_evidence_enabled(true);
         for (std::uint64_t frame = 1; frame <= 4; ++frame) {
             pass.set_evidence_frame(frame, 1);
             pass.rebuild_instances(chunks, ground, nullptr, {8, 12.4f, 8});
@@ -964,6 +965,7 @@ TEST(PassContext, FoliageGpuCapacityCountsOnlyColumnsInsideTheScatterHorizon) {
         pass.set_fade_distances(48, 92);
         pass.set_density_scale(1.6f);
         pass.set_readback_enabled(true);
+        pass.set_evidence_enabled(true);
         pass.set_wind({0, 0});
         std::size_t queries = 0;
         for (std::uint64_t frame = 1; frame <= 4; ++frame) {
@@ -1022,6 +1024,7 @@ TEST(PassContext, FoliageGpuCapacityKeepsTheExistingUploadedColumnLimit) {
         pass.set_fade_distances(900, 1000);
         pass.set_density_scale(1.6f);
         pass.set_readback_enabled(true);
+        pass.set_evidence_enabled(true);
         pass.set_wind({0, 0});
         for (std::uint64_t frame = 1; frame <= 4; ++frame) {
             pass.set_evidence_frame(frame, 1);
@@ -1061,6 +1064,7 @@ TEST(PassContext, FoliageActualDrawFeedbackSurvivesReloadAndPreservesFrameIdenti
     pass.set_fade_distances(48, 92);
     pass.set_density_scale(1.6f);
     pass.set_readback_enabled(true);
+    pass.set_evidence_enabled(true);
     Camera camera({8, 12.4f, 8}, {0, 1, 0}, 35, -18);
     camera.Zoom = 60;
     const auto ground = +[](void*, float, float) {
