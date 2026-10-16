@@ -1,15 +1,190 @@
 #include "TerrainPresetLoader.h"
 
+#include <algorithm>
 #include <fstream>
 #include <initializer_list>
+#include <map>
+#include <string_view>
 
 #include "nlohmann/json.hpp"
 
 #include "../core/FilesystemPath.h"
 #include "../core/Log.h"
+#include "BiomeTable.h"
+#include "StructurePlacement.h"
 
 namespace Luminumbra::world {
 namespace {
+
+constexpr std::uint64_t kFnvOffsetBasis = 14695981039346656037ull;
+constexpr std::uint64_t kFnvPrime = 1099511628211ull;
+
+void HashBytes(std::uint64_t& hash, std::string_view bytes) {
+    for (unsigned char byte : bytes) {
+        hash ^= byte;
+        hash *= kFnvPrime;
+    }
+}
+
+std::string HashHex(std::uint64_t hash) {
+    std::string hex(16, '0');
+    for (std::size_t i = 0; i < hex.size(); ++i) {
+        hex[hex.size() - 1 - i] = "0123456789abcdef"[hash & 0xfu];
+        hash >>= 4u;
+    }
+    return hex;
+}
+
+std::string HashPresetIdentity(const nlohmann::json& preset, const nlohmann::json& manifest) {
+    // Canonical envelope: sorted logical paths in dependencies, sorted preset keys,
+    // compact ASCII JSON. Delimiters/escaping bind both paths and file boundaries.
+    std::uint64_t hash = kFnvOffsetBasis;
+    HashBytes(hash, "{\"dependencies\":");
+    HashBytes(hash, manifest.dump(-1, ' ', true));
+    HashBytes(hash, ",\"preset\":");
+    HashBytes(hash, CanonicalResolvedTerrainPresetJson(preset));
+    HashBytes(hash, "}");
+    return HashHex(hash);
+}
+
+bool ResolveDependencyManifest(TerrainPresetLoadResult& preset,
+                               const std::filesystem::path& data_root,
+                               nlohmann::json& manifest,
+                               std::vector<std::string>& errors,
+                               const World::WorldgenFileStatusReader& read_status) {
+    // Use the generator's loaders to record their decisions and only the bytes
+    // they consume. In particular, a rejected placement stops that pool before
+    // any pieces are read; malformed pieces reject a pool after all piece reads.
+    std::map<std::string, nlohmann::json> entries;
+    auto snapshot = std::make_shared<World::WorldgenDependencySnapshot>();
+    const auto logical_path = [&](const std::filesystem::path& relative) {
+        const auto logical = Filesystem::LexicallyNormalPath(relative);
+        if (logical.empty() || logical == "." || Filesystem::IsAbsolutePath(logical) ||
+            logical.has_root_name() || logical.has_root_directory()) {
+            errors.push_back("worldgen dependency must be data_root-relative: " +
+                             Filesystem::GenericUtf8PathString(relative));
+            return std::string();
+        }
+        for (const auto& component : logical) {
+            if (component == "..") {
+                errors.push_back("worldgen dependency escapes data_root: " +
+                                 Filesystem::GenericUtf8PathString(relative));
+                return std::string();
+            }
+        }
+        return Filesystem::GenericUtf8PathString(logical);
+    };
+    const auto state = [&](const std::string& logical, const char* outcome) {
+        auto& entry = entries[logical];
+        if (entry.is_null())
+            entry = nlohmann::json::array({logical, outcome});
+        else
+            entry.push_back(outcome);
+    };
+    const World::WorldgenFileReader read_file = [&](const std::filesystem::path& path,
+                                                    std::string& bytes) {
+        const auto logical = logical_path(path.lexically_relative(data_root));
+        if (logical.empty())
+            return false;
+        if (!World::ReadWorldgenFile(path, bytes)) {
+            errors.push_back("failed to read worldgen dependency: " + logical);
+            return false;
+        }
+        std::uint64_t hash = kFnvOffsetBasis;
+        HashBytes(hash, bytes);
+        auto& entry = entries[logical];
+        if (entry.is_null()) {
+            entry = nlohmann::json::array({logical, HashHex(hash)});
+        } else if (entry[1] != HashHex(hash)) {
+            errors.push_back("worldgen dependency changed between reads: " + logical);
+            return false;
+        }
+        return true;
+    };
+    const auto dependency_exists = [&](const std::filesystem::path& path) {
+        std::error_code ec;
+        const auto status = read_status(path, ec);
+        // A not-found status can carry ENOENT/ENOTDIR; other status failures
+        // must refuse identity construction, just like throwing symlink_status.
+        if (ec && status.type() != std::filesystem::file_type::not_found)
+            throw std::filesystem::filesystem_error("worldgen dependency status", path, ec);
+        return std::filesystem::exists(status);
+    };
+    try {
+        if (preset.params.biomes_enabled) {
+            const auto relative = Filesystem::PathFromUtf8(preset.extras.biomes.table);
+            const auto logical = logical_path(relative);
+            if (logical.empty())
+                return false;
+            const auto path = data_root / Filesystem::LexicallyNormalPath(relative);
+            if (!dependency_exists(path)) {
+                state(logical, "biome-table-absent:legacy-classification");
+            } else {
+                snapshot->biome_table = World::BiomeTable::Load(path, read_file);
+                const auto& table = snapshot->biome_table;
+                if (!errors.empty())
+                    return false;
+                state(logical,
+                      table.ok() && !table.empty()
+                          ? "biome-table-accepted"
+                          : "biome-table-rejected/empty:legacy-classification");
+            }
+        }
+        if (preset.params.structures_enabled) {
+            const auto structures = data_root / "common/structures";
+            if (!dependency_exists(structures)) {
+                state("common/structures", "structures-directory-absent");
+            } else {
+                if (!std::filesystem::is_directory(structures)) {
+                    errors.push_back("unreadable worldgen dependency directory: common/structures");
+                    return false;
+                }
+                state("common/structures", "structures-directory-present");
+                std::vector<std::filesystem::path> type_dirs;
+                for (const auto& type : std::filesystem::directory_iterator(structures)) {
+                    if (type.is_directory())
+                        type_dirs.push_back(type.path());
+                }
+                std::sort(type_dirs.begin(), type_dirs.end(), [](const auto& a, const auto& b) {
+                    return Filesystem::GenericUtf8PathString(a.filename()) <
+                           Filesystem::GenericUtf8PathString(b.filename());
+                });
+                for (const auto& type : type_dirs) {
+                    const auto relative_type =
+                        std::filesystem::path("common/structures") / type.filename();
+                    const auto logical = logical_path(relative_type);
+                    if (logical.empty())
+                        return false;
+                    // Follow placement symlinks like the direct loader: a dangling link
+                    // is absent, so identity and snapshot both use compiled defaults.
+                    // Other status errors throw and refuse the preset below.
+                    if (!std::filesystem::exists(type / "placement.json"))
+                        state(logical + "/placement.json", "placement-absent:compiled-defaults");
+                    auto pool = World::LoadStructureTemplatePool(
+                        type, Filesystem::GenericUtf8PathString(type.filename()), read_file);
+                    if (pool.io_failed) {
+                        errors.push_back("failed to read worldgen structure pool: " + logical);
+                        return false;
+                    }
+                    if (!errors.empty())
+                        return false;
+                    state(logical, pool.ok() ? "pool-accepted" : "pool-rejected/empty");
+                    snapshot->structure_pools.push_back(std::move(pool));
+                }
+            }
+        }
+        manifest = nlohmann::json::array();
+        for (const auto& [logical, entry] : entries) {
+            manifest.push_back(entry);
+            snapshot->manifest.push_back(entry.get<std::vector<std::string>>());
+        }
+    } catch (const std::filesystem::filesystem_error& error) {
+        errors.push_back("failed to resolve worldgen dependencies: " + std::string(error.what()));
+        return false;
+    }
+    preset.params.worldgen_dependencies = std::move(snapshot);
+    return true;
+}
 
 void WarnUnknownKeys(const nlohmann::json& object,
                      const char* scope,
@@ -141,15 +316,15 @@ void ParseBiomesBlock(const nlohmann::json& gen_params,
     biomes.humidity_frequency = block.value("humidity_frequency", biomes.humidity_frequency);
     biomes.relief_enabled = block.value("relief_enabled", biomes.relief_enabled);
     biomes.relief_strength = block.value("relief_strength", biomes.relief_strength);
-    biomes.table = block.value("table", std::string{});
+    biomes.table = block.value("table", biomes.table);
     biomes.enabled = !biomes.table.empty();
     if (biomes.enabled) {
         // The table path is relative to the data/ root, resolved against the
         // explicit data_root the caller supplied (the on-disk loader derives it
         // four parents up from the preset; the in-memory seam is handed it
         // directly so the table resolves correctly without a temp file).
-        biomes.resolved_table_path =
-            Filesystem::LexicallyNormalPath(data_root / biomes.table).string();
+        biomes.resolved_table_path = Filesystem::GenericUtf8PathString(
+            Filesystem::LexicallyNormalPath(data_root / Filesystem::PathFromUtf8(biomes.table)));
     }
     WarnUnknownKeys(block,
                     "generation_params.biomes",
@@ -164,12 +339,58 @@ void ParseBiomesBlock(const nlohmann::json& gen_params,
 
 } // namespace
 
+nlohmann::json ResolveTerrainPresetDefaults(const nlohmann::json& preset) {
+    nlohmann::json out = preset;
+    if (!out.is_object())
+        return out;
+    const bool on = out.value("schema_rev", kMinTerrainPresetSchemaRevision) >= 7;
+    if (!JsonHasObject(out, "generation_params"))
+        return out;
+    auto& gen = out["generation_params"];
+    auto fill = [](nlohmann::json& block, const char* key, const nlohmann::json& value) {
+        if (!block.contains(key))
+            block[key] = value;
+    };
+    if (JsonHasObject(gen, "terrain")) {
+        auto& terrain = gen["terrain"];
+        fill(terrain, "island_mask_enabled", on);
+        fill(terrain, "hydro", nlohmann::json::object());
+        if (terrain["hydro"].is_object())
+            fill(terrain["hydro"], "enabled", on);
+    }
+    fill(gen, "biomes", nlohmann::json::object());
+    if (gen["biomes"].is_object()) {
+        fill(gen["biomes"], "table", on ? "common/biomes.json" : "");
+        fill(gen["biomes"], "relief_enabled", on);
+    }
+    if (JsonHasObject(gen, "features")) {
+        for (const char* key : {"rivers_enabled",
+                                "lakes_enabled",
+                                "cliffs_enabled",
+                                "structures_enabled",
+                                "surface_breaks_enabled"})
+            fill(gen["features"], key, on);
+    }
+    return out;
+}
+
+std::string CanonicalResolvedTerrainPresetJson(const nlohmann::json& preset) {
+    auto resolved = ResolveTerrainPresetDefaults(preset);
+    resolved["schema_rev"] = kTerrainPresetSchemaRevision;
+    return resolved.dump(-1, ' ', true);
+}
+
+std::string TerrainPresetContentHash(const nlohmann::json& preset) {
+    return HashPresetIdentity(preset, nlohmann::json::array());
+}
+
 TerrainPresetLoadResult LoadTerrainPreset(const std::filesystem::path& preset_path) {
     TerrainPresetLoadResult result;
 
     std::ifstream file(preset_path);
     if (!file.is_open()) {
-        result.errors.push_back("failed to open world preset: " + preset_path.string());
+        result.errors.push_back("failed to open world preset: " +
+                                Filesystem::GenericUtf8PathString(preset_path));
         return result;
     }
 
@@ -177,8 +398,8 @@ TerrainPresetLoadResult LoadTerrainPreset(const std::filesystem::path& preset_pa
     try {
         data = nlohmann::json::parse(file);
     } catch (const nlohmann::json::parse_error& e) {
-        result.errors.push_back("failed to parse world preset JSON '" + preset_path.string() +
-                                "': " + e.what());
+        result.errors.push_back("failed to parse world preset JSON '" +
+                                Filesystem::GenericUtf8PathString(preset_path) + "': " + e.what());
         return result;
     }
 
@@ -191,13 +412,22 @@ TerrainPresetLoadResult LoadTerrainPreset(const std::filesystem::path& preset_pa
         Filesystem::AbsolutePath(preset_path, ec).parent_path();
     const std::filesystem::path data_root =
         preset_dir.parent_path().parent_path().parent_path() / "data";
-    return LoadTerrainPresetFromJson(data, data_root, preset_path.string());
+    return LoadTerrainPresetFromJson(
+        data, data_root, Filesystem::GenericUtf8PathString(preset_path));
 }
 
-TerrainPresetLoadResult LoadTerrainPresetFromJson(const nlohmann::json& data,
-                                                  const std::filesystem::path& data_root,
-                                                  const std::string& provenance) {
+TerrainPresetLoadResult
+LoadTerrainPresetFromJson(const nlohmann::json& source,
+                          const std::filesystem::path& data_root,
+                          const std::string& provenance,
+                          const World::WorldgenFileStatusReader& read_status) {
     TerrainPresetLoadResult result;
+    // Validate revision type before resolving defaults, retaining the no-throw error path.
+    if (source.contains("schema_rev") && !source["schema_rev"].is_number_integer()) {
+        result.errors.push_back("world preset schema_rev must be an integer: " + provenance);
+        return result;
+    }
+    const nlohmann::json data = ResolveTerrainPresetDefaults(source);
 
     // schema_rev is validated when declared, not required. Every preset under
     // worlds/atlas/presets/ carries it, but in-memory fixtures construct minimal
@@ -212,7 +442,7 @@ TerrainPresetLoadResult LoadTerrainPresetFromJson(const nlohmann::json& data,
 
     const std::int64_t schema_revision = data.contains("schema_rev")
                                              ? data["schema_rev"].get<std::int64_t>()
-                                             : kTerrainPresetSchemaRevision;
+                                             : kMinTerrainPresetSchemaRevision;
     if (schema_revision < kMinTerrainPresetSchemaRevision ||
         schema_revision > kTerrainPresetSchemaRevision) {
         result.errors.push_back("world preset schema revision out of range: supported " +
@@ -241,6 +471,40 @@ TerrainPresetLoadResult LoadTerrainPresetFromJson(const nlohmann::json& data,
 
     const nlohmann::json& terrain = gen_params["terrain"];
     const nlohmann::json& features = gen_params["features"];
+    // Defaults only fill absent fields; malformed explicit choices must return
+    // contract errors before the typed reads below.
+    auto require_type = [&](bool valid, const char* type, const std::string& field) {
+        if (!valid) {
+            result.errors.push_back("world preset field must be " + std::string(type) + ": " +
+                                    field + ": " + provenance);
+        }
+    };
+    require_type(terrain["island_mask_enabled"].is_boolean(),
+                 "boolean",
+                 "generation_params.terrain.island_mask_enabled");
+    require_type(terrain["hydro"].is_object(), "object", "generation_params.terrain.hydro");
+    if (terrain["hydro"].is_object()) {
+        require_type(terrain["hydro"]["enabled"].is_boolean(),
+                     "boolean",
+                     "generation_params.terrain.hydro.enabled");
+    }
+    require_type(gen_params["biomes"].is_object(), "object", "generation_params.biomes");
+    if (gen_params["biomes"].is_object()) {
+        require_type(
+            gen_params["biomes"]["table"].is_string(), "string", "generation_params.biomes.table");
+        require_type(gen_params["biomes"]["relief_enabled"].is_boolean(),
+                     "boolean",
+                     "generation_params.biomes.relief_enabled");
+    }
+    for (const char* key : {"rivers_enabled",
+                            "lakes_enabled",
+                            "cliffs_enabled",
+                            "structures_enabled",
+                            "surface_breaks_enabled"}) {
+        require_type(features[key].is_boolean(),
+                     "boolean",
+                     std::string("generation_params.features.") + key);
+    }
     if (features.contains("cave_style")) {
         result.errors.push_back(
             "retired world preset selector generation_params.features.cave_style: " + provenance);
@@ -272,9 +536,15 @@ TerrainPresetLoadResult LoadTerrainPresetFromJson(const nlohmann::json& data,
         return result;
     }
 
-    // Consumed generation parameters. Defaults match Systems::TerrainGenParams
-    // so an absent optional key never drifts behavior.
+    // Consume the versioned, materialized generation parameters.
     Systems::TerrainGenParams& params = result.params;
+    // Missing optional blocks retain historical off semantics in revision 6.
+    const bool shipping_defaults = schema_revision >= 7;
+    result.extras.hydro.enabled = shipping_defaults;
+    params.hydro_enabled = shipping_defaults;
+    result.extras.biomes.enabled = false;
+    result.extras.biomes.table = shipping_defaults ? "common/biomes.json" : "";
+    result.extras.biomes.relief_enabled = shipping_defaults;
     params.base_frequency = terrain.value("base_frequency", params.base_frequency);
     params.base_amplitude = terrain.value("base_amplitude", params.base_amplitude);
     params.octaves = terrain.value("octaves", params.octaves);
@@ -309,10 +579,15 @@ TerrainPresetLoadResult LoadTerrainPresetFromJson(const nlohmann::json& data,
         params.peaks_spline = shaping.peaks_spline;
     }
 
-    // Hydro block: hydraulic/thermal relief. Default-off; a preset opts
-    // in via "hydro": {"enabled": true,...}. Mapped into TerrainGenParams.hydro_*
+    // Hydro block: versioned hydraulic/thermal relief, with explicit off preserved.
+    // Mapped into TerrainGenParams.hydro_*
     // (deliberate world_hash-affecting feature when enabled).
     ParseHydroBlock(terrain, result.extras.hydro, provenance, result.warnings);
+    // Resolution materializes historical off choices for saved presets before
+    // revision upgrades. Legacy extras still report whether a block was authored.
+    if (!shipping_defaults)
+        result.extras.hydro.present =
+            JsonHasObject(source["generation_params"]["terrain"], "hydro");
     if (result.extras.hydro.present) {
         const TerrainHydroPreset& hydro = result.extras.hydro;
         params.hydro_enabled = hydro.enabled;
@@ -332,7 +607,13 @@ TerrainPresetLoadResult LoadTerrainPresetFromJson(const nlohmann::json& data,
     // table. With no table the consumed params keep biomes_enabled=false ->
     // byte-zero drift from the pre-biome implementation.
     ParseBiomesBlock(gen_params, result.extras.biomes, data_root, provenance, result.warnings);
-    if (result.extras.biomes.present && result.extras.biomes.enabled) {
+    if (!shipping_defaults)
+        result.extras.biomes.present = JsonHasObject(source["generation_params"], "biomes");
+    params.biomes_enabled = result.extras.biomes.enabled;
+    params.biome_relief_enabled =
+        result.extras.biomes.enabled && result.extras.biomes.relief_enabled;
+    params.biome_table_path.clear();
+    if (result.extras.biomes.enabled) {
         const TerrainBiomesPreset& biomes = result.extras.biomes;
         params.biomes_enabled = true;
         params.biome_table_path = biomes.resolved_table_path;
@@ -342,30 +623,30 @@ TerrainPresetLoadResult LoadTerrainPresetFromJson(const nlohmann::json& data,
         params.biome_relief_strength = biomes.relief_strength;
     }
     // Features river/structure flags: rivers and structures
-    // are CONSUMED when the preset opts in; an absent flag keeps the feature off
-    // -> byte-zero drift. The structure template content hash is stamped later by
+    // use the versioned resolved choices. The structure template content hash is stamped later by
     // the world system when it loads the pools (mirrors the biome-table hash).
     result.extras.features.present = true;
     result.extras.features.rivers_enabled = features.value("rivers_enabled", false);
     result.extras.features.structures_enabled = features.value("structures_enabled", false);
     params.structures_enabled = result.extras.features.structures_enabled;
+    params.structures_data_dir.clear();
     if (params.structures_enabled) {
         // Resolve <data_root>/common/structures to an absolute path (the same
         // data root the biome table resolves against, supplied by the caller).
-        params.structures_data_dir =
-            Filesystem::LexicallyNormalPath(data_root / "common" / "structures").string();
+        params.structures_data_dir = Filesystem::GenericUtf8PathString(
+            Filesystem::LexicallyNormalPath(data_root / "common" / "structures"));
     }
-    if (result.extras.features.rivers_enabled) {
-        params.rivers_enabled = true;
+    params.rivers_enabled = result.extras.features.rivers_enabled;
+    if (params.rivers_enabled) {
         params.river_frequency = features.value("river_frequency", params.river_frequency);
         params.river_depth = features.value("river_depth", params.river_depth);
         params.river_pv_min = features.value("river_pv_min", params.river_pv_min);
         params.river_pv_max = features.value("river_pv_max", params.river_pv_max);
         params.river_max_carve = features.value("river_max_carve", params.river_max_carve);
     }
-    //  lakes. Opt-in via features.lakes_enabled; absent -> off (byte-zero).
-    if (features.value("lakes_enabled", false)) {
-        params.lakes_enabled = true;
+    // Lakes: the resolver supplies the versioned missing-field choice.
+    params.lakes_enabled = features.value("lakes_enabled", false);
+    if (params.lakes_enabled) {
         params.lake_frequency = features.value("lake_frequency", params.lake_frequency);
         params.lake_threshold = features.value("lake_threshold", params.lake_threshold);
         params.lake_depth = features.value("lake_depth", params.lake_depth);
@@ -373,10 +654,10 @@ TerrainPresetLoadResult LoadTerrainPresetFromJson(const nlohmann::json& data,
         params.lake_bank_offset = features.value("lake_bank_offset", params.lake_bank_offset);
     }
     // surface-breaking caves / sinkholes / cave-mouths. Opt-in via
-    // features.surface_breaks_enabled; absent -> off (byte-zero drift). When on, the
+    // features.surface_breaks_enabled, resolved by revision. When on, the
     // 18 m cave cap becomes a per-column field inside hashed doline footprints.
-    if (features.value("surface_breaks_enabled", false)) {
-        params.surface_breaks_enabled = true;
+    params.surface_breaks_enabled = features.value("surface_breaks_enabled", false);
+    if (params.surface_breaks_enabled) {
         params.surface_break_density =
             features.value("surface_break_density", params.surface_break_density);
         params.feature_cell_size = features.value("feature_cell_size", params.feature_cell_size);
@@ -392,9 +673,9 @@ TerrainPresetLoadResult LoadTerrainPresetFromJson(const nlohmann::json& data,
             params.max_feature_radius = params.feature_cell_size * 0.49f;
         }
     }
-    //  cliffs. Opt-in via features.cliffs_enabled; absent -> off (byte-zero).
-    if (features.value("cliffs_enabled", false)) {
-        params.cliffs_enabled = true;
+    // Cliffs: the resolver supplies the versioned missing-field choice.
+    params.cliffs_enabled = features.value("cliffs_enabled", false);
+    if (params.cliffs_enabled) {
         params.cliff_frequency = features.value("cliff_frequency", params.cliff_frequency);
         params.cliff_threshold = features.value("cliff_threshold", params.cliff_threshold);
         params.cliff_step = features.value("cliff_step", params.cliff_step);
@@ -443,8 +724,44 @@ TerrainPresetLoadResult LoadTerrainPresetFromJson(const nlohmann::json& data,
                     provenance,
                     result.warnings);
 
+    nlohmann::json manifest;
+    if (!ResolveDependencyManifest(result, data_root, manifest, result.errors, read_status))
+        return result;
+    result.preset_content_hash = HashPresetIdentity(source, manifest);
     result.ok = true;
     return result;
+}
+
+bool LoadTerrainPresetOverride(const std::filesystem::path& preset_path,
+                               const std::filesystem::path& data_root,
+                               std::string& json_text,
+                               std::string& error) {
+    std::ifstream file(preset_path);
+    if (!file) {
+        error = "cannot read preset override: " + Filesystem::GenericUtf8PathString(preset_path);
+        return false;
+    }
+    try {
+        const auto document = nlohmann::json::parse(file);
+        if (file.bad()) {
+            error =
+                "cannot read preset override: " + Filesystem::GenericUtf8PathString(preset_path);
+            return false;
+        }
+        const auto validated = LoadTerrainPresetFromJson(
+            document, data_root, Filesystem::GenericUtf8PathString(preset_path));
+        if (!validated.ok) {
+            error = validated.errors.front();
+            return false;
+        }
+        json_text = document.dump();
+    } catch (const nlohmann::json::exception& exception) {
+        error = "invalid preset override: " + Filesystem::GenericUtf8PathString(preset_path) +
+                ": " + exception.what();
+        return false;
+    }
+    error.clear();
+    return true;
 }
 
 } // namespace Luminumbra::world

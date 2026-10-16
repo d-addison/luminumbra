@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import io
 import json
 import sys
@@ -97,6 +98,17 @@ class FixtureHashTests(unittest.TestCase):
         # perf.py requires [0-9a-f]{40,64} for a fixture hash.
         self.assertEqual(len(first), 64)
         self.assertTrue(all(c in "0123456789abcdef" for c in first))
+
+    def test_path_order_is_case_sensitive_and_preserves_component_order(self) -> None:
+        (self.root / "a.bin").write_bytes(b"lower")
+        (self.root / "Z.bin").write_bytes(b"upper")
+        (self.root / "a").mkdir()
+        (self.root / "a/child.bin").write_bytes(b"nested")
+        expected = hashlib.sha256()
+        for name, payload in (("Z.bin", b"upper"), ("a/child.bin", b"nested"), ("a.bin", b"lower")):
+            expected.update(name.encode("utf-8") + b"\0")
+            expected.update(hashlib.sha256(payload).hexdigest().encode("ascii") + b"\n")
+        self.assertEqual(module.fixture_hash(self.root), expected.hexdigest())
 
     def test_server_scope_omits_scatter_but_default_detects_its_values(self) -> None:
         write(self.root, "systems.json", '{"water":true}')
