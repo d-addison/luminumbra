@@ -1,4 +1,5 @@
 #include "luminumbra_common/world/FarEditedBake.h"
+#include "luminumbra_common/world/FarVolume.h"
 
 #include <gtest/gtest.h>
 
@@ -826,28 +827,29 @@ TEST(FarEditedBake, OverlayResolverChecksPresentConflictsAbsenceAndFiniteInvento
     positive.bricks.push_back(right);
     std::array tiles{negative, positive};
     std::optional<FarVolumeSample> sample{{9, 9}};
-    ASSERT_EQ(SampleFarOverlay(tiles, 1, {0, 8, 8}, 9, 2, sample), FarOverlaySampleError::None);
+    // At 4 m spacing, (0, 4, 4) is right-brick local (0, 1, 1), slot 30.
+    constexpr FarVolumePosition boundary{0, 4, 4};
+    ASSERT_EQ(SampleFarOverlay(tiles, 1, boundary, 9, 2, sample), FarOverlaySampleError::None);
     EXPECT_EQ(sample, (std::optional<FarVolumeSample>{{1, 3}}));
-    tiles[1].bricks.front().density[10 + 50] = 257;
-    EXPECT_EQ(SampleFarOverlay(tiles, 1, {0, 8, 8}, 9, 2, sample),
+    tiles[1].bricks.front().density[30] = 257;
+    EXPECT_EQ(SampleFarOverlay(tiles, 1, boundary, 9, 2, sample),
               FarOverlaySampleError::BoundaryConflict);
     EXPECT_EQ(sample, (std::optional<FarVolumeSample>{{1, 3}}));
-    tiles[1].bricks.front().density[60] = 256;
-    tiles[1].bricks.front().material[60] = 4;
-    EXPECT_EQ(SampleFarOverlay(tiles, 1, {0, 8, 8}, 9, 2, sample),
+    tiles[1].bricks.front().density[30] = 256;
+    tiles[1].bricks.front().material[30] = 4;
+    EXPECT_EQ(SampleFarOverlay(tiles, 1, boundary, 9, 2, sample),
               FarOverlaySampleError::BoundaryConflict);
-    EXPECT_EQ(SampleFarOverlay(tiles, 1, {0, 8, 8}, 9, 1, sample),
-              FarOverlaySampleError::WorkLimit);
-    EXPECT_EQ(SampleFarOverlay(tiles, 1, {1, 8, 8}, 9, 2, sample),
+    EXPECT_EQ(SampleFarOverlay(tiles, 1, boundary, 9, 1, sample), FarOverlaySampleError::WorkLimit);
+    EXPECT_EQ(SampleFarOverlay(tiles, 1, {1, 4, 4}, 9, 2, sample),
               FarOverlaySampleError::InvalidInput);
     ASSERT_EQ(SampleFarOverlay(tiles, 1, {64, 64, 64}, 9, 2, sample), FarOverlaySampleError::None);
     EXPECT_FALSE(sample);
     tiles[0].bricks.front().state = FarBrickState::HomogeneousAir;
     tiles[1].bricks.front().state = FarBrickState::HomogeneousSolid;
-    EXPECT_EQ(SampleFarOverlay(tiles, 1, {0, 8, 8}, 9, 2, sample),
+    EXPECT_EQ(SampleFarOverlay(tiles, 1, boundary, 9, 2, sample),
               FarOverlaySampleError::BoundaryConflict);
     tiles[1].bricks.front().state = FarBrickState::Present;
-    ASSERT_EQ(SampleFarOverlay(tiles, 1, {0, 8, 8}, 9, 2, sample), FarOverlaySampleError::None);
+    ASSERT_EQ(SampleFarOverlay(tiles, 1, boundary, 9, 2, sample), FarOverlaySampleError::None);
     ASSERT_TRUE(sample);
     EXPECT_EQ(*sample, (FarVolumeSample{1, 4}));
 }
