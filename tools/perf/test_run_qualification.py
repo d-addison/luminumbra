@@ -1402,7 +1402,7 @@ class SystemsConfigTests(RunnerTestBase):
     def test_changed_or_removed_config_is_refused(self):
         systems_config = self.tmp / 'data/common/systems.json'
         systems_config.parent.mkdir(parents=True, exist_ok=True)
-        original = rq.runner.run_process
+        original = rq.runner.subprocess.run
         for change in ('replace', 'remove'):
             with self.subTest(change=change):
                 systems_config.write_text('{}', encoding='utf-8')
@@ -1416,7 +1416,7 @@ class SystemsConfigTests(RunnerTestBase):
                         systems_config.unlink()
                     return result
 
-                with mock.patch.object(rq.runner, 'run_process', side_effect=run_process):
+                with mock.patch.object(rq.runner.subprocess, 'run', side_effect=run_process):
                     cell = self.run_fixed_view()
                 self.assertEqual(cell['state'], 'process_failed')
                 self.assertIn('systems configuration SHA-256 changed', cell['reason'])
@@ -1430,6 +1430,75 @@ class SystemsConfigTests(RunnerTestBase):
 class ClientIdentityTests(RunnerTestBase):
     def receipt(self):
         return rq.read_json_object(self.out / 'cells' / f'{SURFACE_CELL}.process.json')
+
+    def test_client_receipt_finalization_holds_all_process_output_locks(self):
+        cells = self.out / 'cells'
+        cells.mkdir(parents=True)
+        artifact = self.tmp / 'capture.json'
+        retained = cells / 'capture.artifact.json'
+        receipt_path = cells / 'capture.process.json'
+        log = self.tmp / 'client.log'
+        outputs = (artifact, retained, receipt_path, log)
+        kwargs = dict(cwd=self.tmp, environment=os.environ.copy(), log=log,
+                      artifact=artifact, retained=retained, receipt_path=receipt_path)
+        original_write = rq.runner.atomic_write
+        publications = []
+
+        def snapshot():
+            return {path: path.read_bytes() if path.exists() else None for path in outputs}
+
+        def publish(path, payload):
+            if path == receipt_path and 'client' in json.loads(payload):
+                before = snapshot()
+                for output in outputs:
+                    with self.assertRaises(FileExistsError):
+                        with rq.runner._output_locks((output,)):
+                            self.fail('process output unlocked during client finalization')
+                with self.assertRaises(FileExistsError):
+                    rq.runner.run_process([sys.executable], **kwargs)
+                self.assertEqual(snapshot(), before)
+                publications.append(json.loads(payload)['outcome'])
+            return original_write(path, payload)
+
+        def run():
+            return rq.run_client_process(
+                [sys.executable], client=self.fake_client, build_manifest=None,
+                systems_config=self.tmp / 'data/common/systems.json',
+                runtime_root=self.tmp, save_root=self.tmp / 'saves', **kwargs)
+
+        for outcome in ('returned', 'timed_out', 'spawn_error'):
+            error = (subprocess.TimeoutExpired([sys.executable], 180) if outcome == 'timed_out'
+                     else OSError('fixture launch refused'))
+
+            def launch(command, **spawn_kwargs):
+                artifact.write_bytes(b'{}')
+                if outcome != 'returned':
+                    raise error
+                return subprocess.CompletedProcess(command, 0)
+
+            with self.subTest(outcome=outcome), \
+                    mock.patch.object(rq.runner, 'atomic_write', side_effect=publish), \
+                    mock.patch.object(rq.runner.subprocess, 'run', side_effect=launch), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                if outcome == 'returned':
+                    completed, errors, identity = run()
+                    self.assertEqual(completed.returncode, 0)
+                    self.assertEqual(errors, [])
+                    self.assertTrue(identity['sha256_verified'])
+                else:
+                    with self.assertRaises(type(error)) as caught:
+                        run()
+                    self.assertIs(caught.exception, error)
+                receipt = rq.read_json_object(receipt_path)
+                self.assertEqual(receipt['outcome'], outcome)
+                self.assertTrue(receipt['client']['sha256_verified'])
+                self.assertTrue(receipt['systems_config']['sha256_verified'])
+                with rq.runner._output_locks(outputs):
+                    before = snapshot()
+                    with self.assertRaises(FileExistsError):
+                        run()
+                    self.assertEqual(snapshot(), before)
+        self.assertEqual(publications, ['returned', 'timed_out', 'spawn_error'])
 
     def test_unverified_interpreter_identity_is_refused(self):
         original = rq.runner.run_process

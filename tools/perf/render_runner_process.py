@@ -107,7 +107,11 @@ def _binary_identity(path):
         for block in iter(lambda: source.read(1024 * 1024), b''):
             digest.update(block)
         after = os.fstat(source.fileno())
-        named = os.stat(path)
+        # Windows path stat and descriptor stat can give ctime different
+        # meanings (change time versus creation time). Compare open handles on
+        # both platforms, including a fresh open of the current path.
+        with Path(path).open('rb') as named_source:
+            named = os.fstat(named_source.fileno())
     if identity(before) != identity(after) or identity(after) != identity(named):
         raise OSError(errno.EIO, 'executable changed while hashing', str(path))
     return identity(after), digest.hexdigest()
@@ -427,7 +431,7 @@ def _output_locks(paths):
 
 
 def run_process(command, *, cwd, environment, log, artifact, retained, receipt_path,
-                timeout_seconds=180):
+                timeout_seconds=180, finalize_receipt=None):
     """Run one client process; return (CompletedProcess, evidence_errors).
 
     The executable is resolved once and its identity and digest are verified
@@ -436,7 +440,8 @@ def run_process(command, *, cwd, environment, log, artifact, retained, receipt_p
     original exception. An active OS lock refuses the invocation; leftover lock
     files are reusable after a crash. Symlink and overlapping outputs are refused;
     the lock-sidecar suffix is reserved globally. Locks cover all outputs through
-    receipt publication.
+    receipt publication. Optional receipt finalization runs under the same locks,
+    including after process failure, before any competing invocation can publish.
     """
     artifact, retained, receipt_path, log = (Path(artifact), Path(retained),
                                              Path(receipt_path), Path(log))
@@ -445,11 +450,12 @@ def run_process(command, *, cwd, environment, log, artifact, retained, receipt_p
     with _output_locks((artifact, retained, receipt_path, log)):
         return _run_process(command, cwd=cwd, environment=environment, log=log,
                             artifact=artifact, retained=retained,
-                            receipt_path=receipt_path, timeout_seconds=timeout_seconds)
+                            receipt_path=receipt_path, timeout_seconds=timeout_seconds,
+                            finalize_receipt=finalize_receipt)
 
 
 def _run_process(command, *, cwd, environment, log, artifact, retained, receipt_path,
-                 timeout_seconds):
+                 timeout_seconds, finalize_receipt=None):
     # Retire only this case's exact outputs, including a repeated invocation in
     # the same runtime root. Never let an earlier capture appear current.
     # The output-lock guard excludes every name in the reserved sidecar namespace.
@@ -479,6 +485,10 @@ def _run_process(command, *, cwd, environment, log, artifact, retained, receipt_
                 report_timeout(receipt, log)
         finally:
             retain_process_evidence(receipt, artifact, retained, receipt_path)
+            if finalize_receipt is not None:
+                finalize_receipt()
         raise
     errors = retain_process_evidence(receipt, artifact, retained, receipt_path)
+    if finalize_receipt is not None:
+        finalize_receipt()
     return result, errors

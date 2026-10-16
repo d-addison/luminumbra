@@ -95,6 +95,33 @@ class ProcessReceiptSummaryTest(unittest.TestCase):
         self.assertFalse(entry['log_missing'])
         self.assertEqual(document['counts']['timed_out'], 1)
 
+    def test_changed_executable_keeps_original_process_classification(self):
+        for outcome in summary.OUTCOMES:
+            with self.subTest(outcome=outcome):
+                path = self.write_receipt(
+                    outcome + '.process.json', outcome=outcome,
+                    return_code=0 if outcome == 'returned' else None,
+                    exception_type='TimeoutExpired' if outcome == 'timed_out' else 'OSError',
+                    binary_sha256=None, binary_identity_status='changed',
+                    evidence_errors=['executable verification: executable changed during execution'])
+                entry = self.document([str(path)])['receipts'][0]
+                self.assertEqual(entry['classification'], outcome)
+                if outcome == 'returned':
+                    self.assertEqual(entry['return_code'], 0)
+
+    def test_null_executable_hash_requires_changed_identity_and_verification_error(self):
+        for outcome in ('returned', 'timed_out'):
+            for status, errors in ((None, []), ('verified', ['executable verification: changed']),
+                                   ('pending', ['executable verification: changed']),
+                                   ('changed', []), ('changed', ['capture read: denied'])):
+                with self.subTest(outcome=outcome, status=status, errors=errors):
+                    path = self.write_receipt(
+                        'invalid.process.json', outcome=outcome,
+                        return_code=0 if outcome == 'returned' else None,
+                        exception_type='TimeoutExpired', binary_sha256=None,
+                        binary_identity_status=status, evidence_errors=errors)
+                    self.assert_refused([str(path)], 'binary_sha256')
+
     def test_timed_out_without_breadcrumbs(self):
         self.write_timeout('run2', 'client started\nno stage reached\n')
         entry = self.document([str(self.root)])['receipts'][0]

@@ -530,9 +530,8 @@ def run_client_process(command, *, client, build_manifest, systems_config,
                     'build_manifest_sha256': None if build_manifest is None else
                     build_manifest['sha256']}
     errors = []
-    try:
-        completed, errors = runner.run_process(command, **kwargs)
-    finally:
+
+    def finalize_receipt():
         receipt = read_json_object(kwargs['receipt_path'])
         if receipt is not None:
             try:
@@ -575,7 +574,9 @@ def run_client_process(command, *, client, build_manifest, systems_config,
                 errors.append(f'client identity evidence: {error}')
         else:
             errors.append('client identity: process receipt missing/malformed')
-    return completed, errors, identity
+    completed, process_errors = runner.run_process(
+        command, finalize_receipt=finalize_receipt, **kwargs)
+    return completed, process_errors + errors, identity
 
 
 def check_command(cell, *, matrix, artifact, verdict_path, root, python, checker):

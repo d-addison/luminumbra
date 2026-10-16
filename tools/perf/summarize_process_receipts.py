@@ -93,7 +93,13 @@ def load_receipt(path):
     for name in ('cwd', 'binary_path'):
         require(name, text)
     spawn_error = data['outcome'] == 'spawn_error'
-    require('binary_sha256', lambda v: digest(v) or (spawn_error and v is None))
+    require('evidence_errors', lambda v: isinstance(v, list) and len(v) <= MAX_RECORDS
+            and all(isinstance(item, str) for item in v))
+    changed_binary = (data.get('binary_identity_status') == 'changed'
+                      and any(error.startswith('executable verification: ')
+                              for error in data['evidence_errors']))
+    require('binary_sha256', lambda v: digest(v) or
+            ((spawn_error or changed_binary) and v is None))
     require('timeout_seconds', lambda v: number(v) and v > 0)
     require('elapsed_seconds', lambda v: number(v) or (spawn_error and v is None))
     require('return_code', lambda v: type(v) is int if data['outcome'] == 'returned'
@@ -102,8 +108,6 @@ def load_receipt(path):
                                              'write_error', 'retained'))
     require('capture_path', lambda v: v is None or text(v))
     require('capture_sha256', lambda v: v is None or digest(v))
-    require('evidence_errors', lambda v: isinstance(v, list) and len(v) <= MAX_RECORDS
-            and all(isinstance(item, str) for item in v))
     if data['outcome'] != 'returned':
         require('exception_type', text)
         require('exception_message', lambda v: isinstance(v, str))

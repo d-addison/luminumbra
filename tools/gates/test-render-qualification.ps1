@@ -46,6 +46,11 @@ function Assert-Test {
     $script:checks++
 }
 
+function Remove-Override {
+    param([string]$Name)
+    if (Test-Path -LiteralPath "Env:$Name") { Remove-Item -LiteralPath "Env:$Name" }
+}
+
 # Function lookup intercepts the wrapper's command without a production test seam.
 # In-process preflight checks use the same script invocation as the acceptance driver.
 function python {
@@ -151,7 +156,12 @@ $parameters = $config.Parameters
 throw "wrapper returned without exiting"
 '@
     [System.IO.File]::WriteAllText($childHarness, $harness)
-    foreach ($name in $overrideNames) { [Environment]::SetEnvironmentVariable($name, $null, "Process") }
+    # Newer runtimes retain an empty environment entry when passed a null string.
+    # Remove the entry explicitly: presence itself is a qualification refusal.
+    foreach ($name in $overrideNames) { Remove-Override $name }
+    foreach ($name in $overrideNames) {
+        Assert-Test (-not (Test-Path -LiteralPath "Env:$name")) "override is absent before isolated checks: $name"
+    }
 
     # Presence alone refuses each override, even a value that looks disabled.
     # DryRun must not bypass either override refusal or argument preflight.
@@ -161,13 +171,13 @@ throw "wrapper returned without exiting"
             foreach ($dryRun in @($false, $true)) {
                 Assert-Refused @{ DryRun = $dryRun } "[render-qualification] refusing to run: render overrides set: $name"
             }
-        } finally { [Environment]::SetEnvironmentVariable($name, $null, "Process") }
+        } finally { Remove-Override $name }
     }
     foreach ($name in $overrideNames) { [Environment]::SetEnvironmentVariable($name, "0", "Process") }
     try {
         Assert-Refused @{} ("[render-qualification] refusing to run: render overrides set: " + ($overrideNames -join ", "))
     } finally {
-        foreach ($name in $overrideNames) { [Environment]::SetEnvironmentVariable($name, $null, "Process") }
+        foreach ($name in $overrideNames) { Remove-Override $name }
     }
 
     foreach ($dryRun in @($false, $true)) {
@@ -221,6 +231,12 @@ throw "wrapper returned without exiting"
     Assert-RunnerArguments $run $missingClient -Tail @("--dry-run")
     Write-Host "RenderQualificationWrapperContract: $checks assertions passed (stub runner; no native client)."
 } finally {
-    foreach ($name in $overrideNames) { [Environment]::SetEnvironmentVariable($name, $savedOverrides[$name], "Process") }
+    foreach ($name in $overrideNames) {
+        if ($null -eq $savedOverrides[$name]) {
+            Remove-Override $name
+        } else {
+            [Environment]::SetEnvironmentVariable($name, $savedOverrides[$name], "Process")
+        }
+    }
     if (Test-Path -LiteralPath $fixtureRoot) { Remove-Item -LiteralPath $fixtureRoot -Recurse -Force }
 }

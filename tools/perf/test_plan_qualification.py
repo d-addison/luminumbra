@@ -589,6 +589,7 @@ class PathResolutionTests(unittest.TestCase):
 
         windows = types.SimpleNamespace(**vars(os))
         windows.name = 'nt'
+        windows.path = ntpath
         for ordinary, extended in (
                 (r'C:\RUNNER~1\evidence', r'\\?\C:\RUNNER~1\evidence'),
                 (r'\\server\share\evidence', r'\\?\UNC\server\share\evidence'),
@@ -602,7 +603,7 @@ class PathResolutionTests(unittest.TestCase):
                 self.assertEqual(runner.resolve_path(extended), expected)
                 self.assertEqual(runner.resolve_path(ordinary), expected)
                 identity = runner._output_identity(WindowsPath(extended) / 'Capture.json')
-                self.assertEqual(str(identity), str(expected / 'capture.json'))
+                self.assertEqual(str(identity), ntpath.normcase(str(expected / 'capture.json')))
                 self.assertEqual(identity, runner._output_identity(
                     WindowsPath(ordinary) / 'Capture.json'))
                 with self.assertRaisesRegex(OSError, 'output overlaps a lock sidecar'):
@@ -812,6 +813,29 @@ class ProcessRunnerTests(MatrixTestBase):
     def read_receipt(self):
         return json.loads(self.receipt.read_text(encoding='utf-8'))
 
+    def test_executable_identity_uses_consistent_handle_metadata(self):
+        executable = runner.resolve_path(sys.executable)
+        original_stat = os.stat
+
+        def path_stat(path, *args, **kwargs):
+            metadata = original_stat(path, *args, **kwargs)
+            if Path(path) == executable:
+                # Windows path stat reports change time while descriptor stat
+                # can report creation time for the same unchanged executable.
+                values = {name: getattr(metadata, name) for name in (
+                    'st_dev', 'st_ino', 'st_mode', 'st_size', 'st_mtime_ns', 'st_ctime_ns')}
+                values['st_ctime_ns'] += 2000000000
+                return types.SimpleNamespace(**values)
+            return metadata
+
+        with mock.patch.object(runner.os, 'stat', side_effect=path_stat):
+            identity, digest = runner._binary_identity(executable)
+        with executable.open('rb') as source:
+            metadata = os.fstat(source.fileno())
+        self.assertEqual(identity, (metadata.st_dev, metadata.st_ino, metadata.st_size,
+                                    metadata.st_mtime_ns, metadata.st_ctime_ns))
+        self.assertEqual(digest, runner.file_sha256(executable))
+
     def test_executable_changes_fail_closed_and_clear_unverified_hash(self):
         executable = self.tmp / Path(sys.executable).name
         for change in ('bytes', 'timestamp', 'replacement', 'missing'):
@@ -848,6 +872,27 @@ class ProcessRunnerTests(MatrixTestBase):
                 self.assertEqual(receipt['binary_identity_status'], 'changed')
                 self.assertTrue(receipt['evidence_errors'])
                 self.assertEqual(receipt['capture_status'], 'retained')
+
+    def test_retirement_failure_does_not_finalize_a_previous_receipt(self):
+        self.artifact.write_bytes(b'previous capture')
+        self.receipt.write_bytes(b'previous receipt')
+        original_unlink = Path.unlink
+        failure = PermissionError('fixture output retirement refused')
+        finalize = mock.Mock()
+
+        def unlink(path, *args, **kwargs):
+            if path == self.artifact:
+                raise failure
+            return original_unlink(path, *args, **kwargs)
+
+        with mock.patch.object(Path, 'unlink', unlink), self.assertRaises(PermissionError) as caught:
+            runner.run_process([sys.executable], cwd=self.tmp, environment=os.environ.copy(),
+                               log=self.log, artifact=self.artifact, retained=self.retained,
+                               receipt_path=self.receipt, finalize_receipt=finalize)
+        self.assertIs(caught.exception, failure)
+        finalize.assert_not_called()
+        self.assertEqual(self.receipt.read_bytes(), b'previous receipt')
+        self.assert_output_locks_released()
 
     def test_locks_cover_binary_reverification_and_receipt_publication(self):
         identity = runner._binary_identity
