@@ -10,10 +10,12 @@ import os
 from pathlib import Path
 import re
 import shlex
+import stat
 import subprocess
 import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -822,7 +824,7 @@ class ChangedTranslationUnitsTests(unittest.TestCase):
                                     action()
                     finally:
                         binary.rmdir() if is_directory else binary.unlink()
-                self.assertEqual(probe.call_count, 7)
+                self.assertEqual(probe.call_count, 1)
                 for call in probe.call_args_list:
                     command = call.args[0]
                     self.assertEqual(command[0], compiler)
@@ -838,6 +840,40 @@ class ChangedTranslationUnitsTests(unittest.TestCase):
                     self.assertEqual(call.kwargs["stdin"], subprocess.DEVNULL)
         self.assertEqual(self.commands, [])
 
+    def test_equivalent_variants_reuse_compiler_roots_and_pch_scans(self):
+        search = self.root / "compiler headers"
+        (search / "nested").mkdir(parents=True)
+        self.raw = [self.raw_entry(self.a), self.raw_entry(self.b, ["-DENABLE_FEATURE"])]
+        self.save_db()
+        entries = self.entries()
+        result = subprocess.CompletedProcess([], 0, "", '#include <...> search starts here:\n '
+            + str(search) + '\nEnd of search list.\n')
+        with patch.object(tus, "compiler_header_roots", side_effect=COMPILER_HEADER_ROOTS), \
+                patch.object(tus.subprocess, "run", return_value=result) as probe, \
+                patch.object(tus.os, "walk", wraps=os.walk) as walk:
+            tus.dependencies(entries[0])
+            self.assertGreater(walk.call_count, 0)
+            first_scans = walk.call_count
+            tus.dependencies(entries[1])
+            tus.compile_command(entries[1], self.build / "isolated.o")
+            with patch.object(tus.shutil, "which", return_value="clang-tidy"):
+                tus.run_checks(self.arguments("tidy"), self.root, entries, self.build)
+            self.assertEqual(walk.call_count, first_scans)
+            self.assertEqual(probe.call_count, 1)
+            # Reuse must not conceal caches added below an already scanned root.
+            binary = search / "nested/current.hpp.gch"
+            binary.mkdir()
+            with self.assertRaisesRegex(tus.SelectionError, "binary PCH.*remove"):
+                tus.dependencies(entries[1])
+            self.assertGreater(walk.call_count, first_scans)
+            refused_scans = walk.call_count
+            with self.assertRaisesRegex(tus.SelectionError, "binary PCH.*remove"):
+                tus.dependencies(entries[0])
+            self.assertEqual(walk.call_count, refused_scans)
+            binary.rmdir()
+            tus.dependencies(entries[1])
+            self.assertEqual(probe.call_count, 1)
+
     def test_compiler_search_probe_refuses_unavailable_or_unknown_defaults(self):
         entry = self.entries()[0]
         results = [OSError("compiler unavailable"),
@@ -852,6 +888,147 @@ class ChangedTranslationUnitsTests(unittest.TestCase):
                     tus.replay_arguments(entry)
         self.assertEqual(self.commands, [])
 
+    def test_pch_cache_tracks_dangling_directory_symlink_targets(self):
+        search = self.root / "header search"
+        link = search / "linked headers"
+        source = search / "unit.cpp"
+        entry = {"arguments": ["g++", "-c", str(source)], "directory": self.build}
+        stamp = tus.directory_stamp(self.src)
+        target_stamp = None
+        frames = [(str(search), [], [source.name, link.name])]
+
+        def entries(path, names=None):
+            for current, children, files in frames:
+                if Path(current) == path:
+                    return tuple((name, stat.S_IFLNK if name == link.name else
+                                  stat.S_IFDIR if name in children else stat.S_IFREG, 1, 1)
+                                 for name in sorted(children + files))
+            self.fail(f"unexpected directory: {path}")
+
+        # Model os.walk's dangling-link classification on every platform,
+        # including Windows hosts without permission to create symlinks.
+        with patch.object(tus, "directory_stamp", side_effect=lambda path:
+                          target_stamp if path == link else stamp), \
+                patch.object(Path, "is_symlink", autospec=True,
+                             side_effect=lambda path: path == link), \
+                patch.object(tus, "directory_entries", side_effect=entries), \
+                patch.object(tus.os, "walk", side_effect=lambda *args, **kwargs: iter(frames)) as walk:
+            tus.replay_arguments(entry)
+            tus.replay_arguments(entry)
+            self.assertEqual(walk.call_count, 1)
+            for is_directory in (False, True):
+                with self.subTest(directory=is_directory):
+                    # Only the target appears: the parent stamp and membership
+                    # are unchanged, so the link's target must invalidate reuse.
+                    target_stamp = stamp
+                    binary = "current.hpp.gch"
+                    frames = [(str(search), [link.name], [source.name]),
+                              (str(link), [binary] if is_directory else [],
+                               [] if is_directory else [binary])]
+                    with self.assertRaisesRegex(tus.SelectionError, "binary PCH.*remove"):
+                        tus.replay_arguments(entry)
+                    target_stamp = None
+                    frames = [(str(search), [], [source.name, link.name])]
+                    tus.replay_arguments(entry)
+                    scans = walk.call_count
+                    tus.replay_arguments(entry)
+                    self.assertEqual(walk.call_count, scans)
+        self.assertEqual(self.commands, [])
+
+    def test_pch_cache_detects_changes_with_identical_directory_timestamps(self):
+        search = self.root / "compiler headers"
+        (search / "nested").mkdir(parents=True)
+        entry = self.entries()[0]
+        stamp = tus.directory_stamp
+        snapshots = {}
+
+        def same_tick(path):
+            if path not in snapshots:
+                snapshots[path] = stamp(path)
+            return snapshots[path]
+
+        with patch.object(tus, "compiler_header_roots", return_value={search}), \
+                patch.object(tus, "directory_stamp", side_effect=same_tick), \
+                patch.object(tus.time, "time_ns", return_value=search.stat().st_mtime_ns):
+            tus.replay_arguments(entry)
+            for is_directory in (False, True):
+                with self.subTest(directory=is_directory):
+                    binary = search / "nested/current.hpp.gch"
+                    if is_directory:
+                        binary.mkdir()
+                    else:
+                        binary.write_bytes(b"stale cache")
+                    with self.assertRaisesRegex(tus.SelectionError, "binary PCH.*remove"):
+                        tus.replay_arguments(entry)
+                    binary.rmdir() if is_directory else binary.unlink()
+                    tus.replay_arguments(entry)
+        self.assertEqual(self.commands, [])
+
+    def test_pch_cache_detects_same_tick_insertion_on_delayed_replay(self):
+        tick = 10_000_000_000
+        entry = self.entries()[0]
+        original_stamp = tus.directory_stamp
+        for compiler in ("g++", "clang++"):
+            for is_directory in (False, True):
+                with self.subTest(compiler=compiler, directory=is_directory):
+                    search = self.root / f"headers-{compiler}-{is_directory}"
+                    (search / "nested").mkdir(parents=True)
+                    snapshots = {}
+
+                    def same_tick(path):
+                        if path not in snapshots:
+                            stamp = original_stamp(path)
+                            snapshots[path] = (*stamp[:4], tick, tick) if stamp else None
+                        return snapshots[path]
+
+                    variant = {**entry, "arguments": [compiler, *entry["arguments"][1:]]}
+                    with patch.object(tus, "compiler_header_roots", return_value={search}), \
+                            patch.object(tus, "directory_stamp", side_effect=same_tick), \
+                            patch.object(tus.time, "time_ns", return_value=tick + 500_000_000) as clock:
+                        tus.replay_arguments(variant)
+                        binary = search / "nested/current.hpp.gch"
+                        binary.mkdir() if is_directory else binary.write_bytes(b"stale cache")
+                        # The insertion shared the walk's timestamp tick, but
+                        # no replay occurs until that tick has already closed.
+                        clock.return_value = tick + 2_000_000_001
+                        with self.assertRaisesRegex(tus.SelectionError, "binary PCH.*remove"):
+                            tus.replay_arguments(variant)
+        self.assertEqual(self.commands, [])
+
+    def test_pch_cache_promotes_only_after_membership_check_outside_tick(self):
+        search = self.root / "header search"
+        search.mkdir()
+        tick = 10_000_000_000
+        stamp = (*tus.directory_stamp(search)[:4], tick, tick)
+        with patch.object(tus, "directory_stamp", return_value=stamp), \
+                patch.object(tus.time, "time_ns", return_value=tick + 500_000_000) as clock, \
+                patch.object(tus.os, "listdir", wraps=os.listdir) as membership, \
+                patch.object(tus.os, "walk", wraps=os.walk) as walk:
+            tus.check_pch_search_roots("g++", {search})
+            self.assertEqual(membership.call_count, 0)
+            tus.check_pch_search_roots("g++", {search})
+            self.assertEqual(membership.call_count, 1)
+            clock.return_value = tick + 2_000_000_000
+            tus.check_pch_search_roots("g++", {search})
+            self.assertEqual(membership.call_count, 2)
+            tus.check_pch_search_roots("g++", {search})
+            self.assertEqual(membership.call_count, 2)
+            self.assertEqual(walk.call_count, 1)
+
+    def test_pch_cache_trusts_walk_taken_after_tick_closes(self):
+        search = self.root / "header search"
+        search.mkdir()
+        tick = 10_000_000_000
+        stamp = (*tus.directory_stamp(search)[:4], tick, tick)
+        with patch.object(tus, "directory_stamp", return_value=stamp), \
+                patch.object(tus.time, "time_ns", return_value=tick + 2_000_000_000), \
+                patch.object(tus.os, "listdir", wraps=os.listdir) as membership, \
+                patch.object(tus.os, "walk", wraps=os.walk) as walk:
+            tus.check_pch_search_roots("g++", {search})
+            tus.check_pch_search_roots("g++", {search})
+            self.assertEqual(membership.call_count, 0)
+            self.assertEqual(walk.call_count, 1)
+
     def test_compiler_search_probe_uses_effective_language(self):
         result = subprocess.CompletedProcess([], 0, "", '#include <...> search starts here:\nEnd of search list.\n')
         for compiler in ("gcc", "g++", "clang", "clang++"):
@@ -861,6 +1038,9 @@ class ChangedTranslationUnitsTests(unittest.TestCase):
                     arguments = [compiler, *(["-x", language] if language else []), str(source)]
                     expected = language or ("c++" if "++" in compiler or suffix == ".cpp" else "c")
                     for trailing in ([], ["-x", "c"], ["-x", "c++"]):
+                        # Exercise each probe independently; equivalent probes
+                        # are intentionally memoized during normal replay.
+                        tus._compiler_header_roots.cache_clear()
                         with self.subTest(arguments=arguments, trailing=trailing), \
                                 patch.object(tus.subprocess, "run", return_value=result) as run:
                             self.assertEqual(COMPILER_HEADER_ROOTS(arguments + trailing, self.build), set())
@@ -1678,5 +1858,114 @@ class ChangedTranslationUnitsTests(unittest.TestCase):
 EXECUTE = tus.execute
 COMPILER_HEADER_ROOTS = tus.compiler_header_roots
 # The implementation is saved before any setUp patch replaces the entry point.
+
+
+class PchEntryIdentityTests(unittest.TestCase):
+    def setUp(self):
+        self.root = Path("virtual headers").absolute()
+        self.child = self.root / "generated"
+        self.binary = self.child / "header.hpp.gch"
+        self.tick = 10_000_000_000
+        self.nodes = {self.root: (stat.S_IFDIR, 1, 1)}
+        # Keep stamps fixed to isolate entry identity from timestamp detection.
+        stamp = (1, 1, stat.S_IFDIR, 0, self.tick, self.tick)
+
+        def names(path):
+            return sorted(node.name for node in self.nodes if node.parent == path)
+
+        def walk(path, **kwargs):
+            children, files = [], []
+            for name in names(path):
+                kind = self.nodes[path / name][0]
+                (children if kind == stat.S_IFDIR else files).append(name)
+            yield str(path), children, files
+            for name in children:
+                yield from walk(path / name, **kwargs)
+
+        def lstat(path):
+            kind, device, inode = self.nodes[Path(path)]
+            return SimpleNamespace(st_mode=kind, st_dev=device, st_ino=inode)
+
+        patches = [patch.object(tus, "_PCH_SEARCH_CACHE", {}),
+                   patch.object(tus, "directory_stamp",
+                                side_effect=lambda path: stamp if path in self.nodes
+                                and self.nodes[path][0] != stat.S_IFLNK else None),
+                   patch.object(tus.os, "listdir", side_effect=names),
+                   patch.object(tus.os, "lstat", side_effect=lstat),
+                   patch.object(Path, "resolve", autospec=True, side_effect=lambda path: path),
+                   patch.object(Path, "is_symlink", autospec=True,
+                                side_effect=lambda path: self.nodes[path][0] == stat.S_IFLNK)]
+        for mock in patches:
+            mock.start()
+            self.addCleanup(mock.stop)
+        self.walk = patch.object(tus.os, "walk", side_effect=walk).start()
+        self.clock = patch.object(tus.time, "time_ns", return_value=self.tick + 500_000_000).start()
+        self.addCleanup(patch.stopall)
+
+    def test_file_becoming_directory_with_pch_invalidates_approval(self):
+        for compiler in ("g++", "clang++"):
+            for replay_delay in (750_000_000, 2_000_000_000):
+                with self.subTest(compiler=compiler, replay_delay=replay_delay):
+                    tus._PCH_SEARCH_CACHE.clear()
+                    self.walk.reset_mock()
+                    self.clock.return_value = self.tick + 500_000_000
+                    self.nodes = {self.root: (stat.S_IFDIR, 1, 1),
+                                  self.child: (stat.S_IFREG, 1, 2)}
+                    tus.check_pch_search_roots(compiler, {self.root})
+                    self.nodes[self.child] = (stat.S_IFDIR, 1, 2)
+                    self.nodes[self.binary] = (stat.S_IFREG, 1, 3)
+                    self.clock.return_value = self.tick + replay_delay
+                    for _ in range(2):
+                        with self.assertRaisesRegex(tus.SelectionError, "binary PCH.*remove"):
+                            tus.check_pch_search_roots(compiler, {self.root})
+                    self.assertEqual(self.walk.call_count, 2)
+
+    def test_directory_becoming_file_requires_rescan(self):
+        for compiler in ("g++", "clang++"):
+            for replay_delay in (750_000_000, 2_000_000_000):
+                with self.subTest(compiler=compiler, replay_delay=replay_delay):
+                    tus._PCH_SEARCH_CACHE.clear()
+                    self.walk.reset_mock()
+                    self.clock.return_value = self.tick + 500_000_000
+                    self.nodes = {self.root: (stat.S_IFDIR, 1, 1),
+                                  self.child: (stat.S_IFDIR, 1, 2)}
+                    tus.check_pch_search_roots(compiler, {self.root})
+                    self.nodes[self.child] = (stat.S_IFREG, 1, 2)
+                    self.clock.return_value = self.tick + replay_delay
+                    tus.check_pch_search_roots(compiler, {self.root})
+                    tus.check_pch_search_roots(compiler, {self.root})
+                    self.assertEqual(self.walk.call_count, 2)
+
+    def test_entry_kind_device_and_inode_changes_require_rescan(self):
+        replacements = [(stat.S_IFLNK, 1, 2), (stat.S_IFIFO, 1, 2),
+                        (stat.S_IFREG, 2, 2), (stat.S_IFREG, 1, 3)]
+        for replacement in replacements:
+            with self.subTest(replacement=replacement):
+                tus._PCH_SEARCH_CACHE.clear()
+                self.walk.reset_mock()
+                self.clock.return_value = self.tick + 500_000_000
+                self.nodes = {self.root: (stat.S_IFDIR, 1, 1),
+                              self.child: (stat.S_IFREG, 1, 2)}
+                tus.check_pch_search_roots("g++", {self.root})
+                self.nodes[self.child] = replacement
+                self.clock.return_value = self.tick + 2_000_000_000
+                tus.check_pch_search_roots("g++", {self.root})
+                self.assertEqual(self.walk.call_count, 2)
+                tus.check_pch_search_roots("g++", {self.root})
+                self.assertEqual(self.walk.call_count, 2)
+
+    def test_type_change_during_walk_refuses_snapshot(self):
+        for kind in (stat.S_IFDIR, stat.S_IFLNK):
+            with self.subTest(kind=kind):
+                self.nodes[self.child] = (kind, 1, 2)
+                self.walk.side_effect = None
+                self.walk.return_value = [(str(self.root), [], [self.child.name])]
+                stamp = (1, 1, stat.S_IFDIR, 0, self.tick, self.tick)
+                with patch.object(tus, "directory_stamp", return_value=stamp), \
+                        self.assertRaisesRegex(tus.SelectionError, "entry changed type during scan"):
+                    tus.check_pch_search_roots("g++", {self.root})
+                self.assertEqual(tus._PCH_SEARCH_CACHE, {})
+
+
 if __name__ == "__main__":
     unittest.main()

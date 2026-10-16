@@ -14,6 +14,7 @@ import tempfile
 import textwrap
 import time
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 from pathlib import Path
 
@@ -427,10 +428,112 @@ class CompileCommandParserTests(unittest.TestCase):
             self.assertEqual(MODULE.entry_arguments({"command": subprocess.list2cmdline(arguments)}),
                              arguments)
 
+    def test_native_working_directory_preserves_posix_producer_quoting(self):
+        for directory in (r"C:\build with spaces", r"\\server\share\build"):
+            for compiler in ("/usr/bin/g++", "g++.exe", "g++-14", "clang++-18",
+                             r"C:\msys64\ucrt64\bin\g++.exe"):
+                arguments = [compiler, "-I", r"C:\headers with spaces", "-c",
+                             r"C:\changed_tus\unit file.cpp", '-DVALUE=a"b', "-DNAME=O'Brien"]
+                with self.subTest(directory=directory, compiler=compiler):
+                    self.assertEqual(MODULE.entry_arguments({"directory": directory,
+                        "command": shlex.join(arguments)}), arguments)
+
+    def test_native_quotes_can_contain_literal_apostrophes(self):
+        arguments = [r"C:\O'Brien\g++.exe", "-c", r"C:\unit file.cpp",
+                     "-DNAME=one 'two' three"]
+        for directory in (r"C:\build", r"\\server\share\build"):
+            with self.subTest(directory=directory):
+                self.assertEqual(MODULE.entry_arguments({"directory": directory,
+                    "command": subprocess.list2cmdline(arguments)}), arguments)
+
     def test_arguments_array_is_never_reparsed(self):
         arguments = [r"C:\bin\g++.exe", '"quoted value"', r"back\slash", ""]
         self.assertEqual(MODULE.entry_arguments({"arguments": arguments, "command": "ignored"}),
                          arguments)
+
+
+class ToolIdentityTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="tool-identity-")
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.tool = self.root / "compiler"
+        self.tick = 10_000_000_000
+        self.write_tool(b"old tool")
+        self.tools = MODULE.ToolIdentity()
+
+    def write_tool(self, content):
+        self.tool.write_bytes(content)
+        os.utime(self.tool, ns=(self.tick, self.tick))
+
+    def test_same_tick_rewrite_is_detected_on_delayed_reuse(self):
+        result = subprocess.CompletedProcess([], 0, b"tool version\n", b"")
+        with patch.object(MODULE.subprocess, "run", return_value=result) as version, \
+                patch.object(MODULE.time, "time_ns", return_value=self.tick + 500_000_000) as clock:
+            before = self.tools.describe(str(self.tool), str(self.root))
+            self.write_tool(b"new tool")
+            clock.return_value = self.tick + 2_000_000_001
+            after = self.tools.describe(str(self.tool), str(self.root))
+            self.assertNotEqual(before, after)
+            self.assertIn(MODULE.sha256_bytes(b"new tool"), after)
+            self.assertEqual(version.call_count, 2)
+            self.assertEqual(self.tools.describe(str(self.tool), str(self.root)), after)
+            self.assertEqual(version.call_count, 2)
+
+    def test_identity_is_revalidated_until_tick_closes(self):
+        result = subprocess.CompletedProcess([], 0, b"tool version\n", b"")
+        with patch.object(MODULE.subprocess, "run", return_value=result) as version, \
+                patch.object(MODULE.time, "time_ns", return_value=self.tick + 500_000_000) as clock:
+            before = self.tools.describe(str(self.tool), str(self.root))
+            self.assertEqual(self.tools.describe(str(self.tool), str(self.root)), before)
+            self.assertEqual(version.call_count, 2)
+            clock.return_value = self.tick + 2_000_000_000
+            self.assertEqual(self.tools.describe(str(self.tool), str(self.root)), before)
+            self.assertEqual(version.call_count, 3)
+            self.assertEqual(self.tools.describe(str(self.tool), str(self.root)), before)
+            self.assertEqual(version.call_count, 3)
+
+    def test_identity_observed_after_tick_closes_uses_fingerprint(self):
+        result = subprocess.CompletedProcess([], 0, b"tool version\n", b"")
+        with patch.object(MODULE.subprocess, "run", return_value=result) as version, \
+                patch.object(MODULE.time, "time_ns", return_value=self.tick + 2_000_000_000):
+            before = self.tools.describe(str(self.tool), str(self.root))
+            self.assertEqual(self.tools.describe(str(self.tool), str(self.root)), before)
+            self.assertEqual(version.call_count, 1)
+
+    def test_device_and_inode_changes_invalidate_trusted_identity(self):
+        result = subprocess.CompletedProcess([], 0, b"tool version\n", b"")
+        for field in ("st_dev", "st_ino"):
+            with self.subTest(field=field):
+                tools = MODULE.ToolIdentity()
+                self.write_tool(b"old tool")
+                info = SimpleNamespace(st_mode=stat.S_IFREG, st_dev=1, st_ino=1,
+                                       st_size=8, st_mtime_ns=self.tick)
+                with patch.object(MODULE.os, "stat", return_value=info), \
+                        patch.object(MODULE.subprocess, "run", return_value=result) as version, \
+                        patch.object(MODULE.time, "time_ns", return_value=self.tick + 2_000_000_000):
+                    before = tools.describe(str(self.tool), str(self.root))
+                    self.write_tool(b"new tool")
+                    setattr(info, field, 2)
+                    after = tools.describe(str(self.tool), str(self.root))
+                    self.assertNotEqual(before, after)
+                    self.assertIn(MODULE.sha256_bytes(b"new tool"), after)
+                    self.assertEqual(version.call_count, 2)
+
+    def test_kind_change_after_path_check_cannot_reuse_trusted_identity(self):
+        result = subprocess.CompletedProcess([], 0, b"tool version\n", b"")
+        info = SimpleNamespace(st_mode=stat.S_IFREG, st_dev=1, st_ino=1,
+                               st_size=8, st_mtime_ns=self.tick)
+        with patch.object(MODULE.os.path, "isfile", return_value=True), \
+                patch.object(MODULE.os, "stat", return_value=info), \
+                patch.object(MODULE.subprocess, "run", return_value=result) as version, \
+                patch.object(MODULE.time, "time_ns", return_value=self.tick + 2_000_000_000):
+            self.tools.describe(str(self.tool), str(self.root))
+            # Model a replacement between the path check and the stat call.
+            info.st_mode = stat.S_IFDIR
+            with self.assertRaisesRegex(MODULE.CacheMiss, "not a regular file"):
+                self.tools.describe(str(self.tool), str(self.root))
+            self.assertEqual(version.call_count, 1)
 
 
 class MakeDependencyParserTests(unittest.TestCase):

@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import shlex
+import shutil
 import stat
 import subprocess
 import sys
@@ -973,9 +974,15 @@ class CachedGitSafetyTests(unittest.TestCase):
         common = self.cache / "common metadata"
         outside = self.base / "outside objects"
         outside.mkdir()
+        # Build complete common metadata before installing the hostile
+        # alternate. Fixture construction must not invoke the guarded Git
+        # wrapper after introducing the escape it is intended to refuse.
+        shutil.copytree(metadata, common)
         self.write_alternates(common / "objects", str(outside))
         (metadata / "commondir").write_text(os.path.relpath(common, metadata) + "\n")
         with patch.object(deps.subprocess, "check_output", side_effect=AssertionError("Git ran")):
+            with self.assertRaisesRegex(deps.DependencyError, "strictly inside"):
+                deps.git_metadata(self.source, self.cache)
             self.assert_refused_without_writes()
 
     def test_chained_relative_alternates_cannot_escape_cache(self):
@@ -1139,7 +1146,10 @@ class CachedGitSafetyTests(unittest.TestCase):
     def test_cache_transport_config_cannot_enable_external_or_file_helpers(self):
         for protocol, url in (("ext", "ext::" + self.command), ("file", str(self.source))):
             with self.subTest(protocol=protocol):
-                self.git(self.source, "config", f"protocol.{protocol}.allow", "always")
+                # Write the hostile fixture directly; only the operation
+                # under test should pass it through the guarded Git wrapper.
+                with (self.source / ".git/config").open("a", encoding="utf-8") as config:
+                    config.write(f'\n[protocol "{protocol}"]\n\tallow = always\n')
                 with self.assertRaises(subprocess.CalledProcessError) as refused:
                     self.git(self.source, "ls-remote", url)
                 self.assertIn(f"transport '{protocol}' not allowed".encode(), refused.exception.stderr)

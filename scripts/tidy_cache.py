@@ -45,6 +45,7 @@ import os
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -222,13 +223,33 @@ def windows_command_arguments(command: str) -> list[str]:
     return arguments
 
 
+def has_posix_quoted_token(command: str) -> bool:
+    """Recognize shell-quoted tokens, excluding native paths and double quotes."""
+    index, double_quoted = 0, False
+    while index < len(command):
+        char = command[index]
+        if char == "\\":
+            index += 2
+            continue
+        if char == '"':
+            double_quoted = not double_quoted
+        elif char == "'" and not double_quoted and (index == 0 or command[index - 1].isspace()):
+            try:
+                shlex.split(command)
+            except ValueError:
+                return False
+            return True
+        index += 1
+    return False
+
+
 def entry_arguments(entry: dict) -> list[str]:
     """Parse using the producer's context; command_platform can override it.
 
-    Absolute database working directories distinguish native Windows from
-    POSIX/MSYS producers. Without that context, a native driver path is useful
-    evidence; an .exe suffix alone is not. Ambiguous commands retain POSIX
-    quoting for compatibility, independent of the host inspecting the database.
+    POSIX shell quoting is also used by MSYS producers with native working
+    directories. Prefer that syntax when present, then use the directory or
+    native driver path as evidence; an .exe suffix alone is not evidence.
+    Explicit markers resolve commands that are valid in both dialects.
     """
     if "arguments" in entry:
         arguments = [str(a) for a in entry["arguments"]]
@@ -243,7 +264,13 @@ def entry_arguments(entry: dict) -> list[str]:
             raise CacheMiss("command_platform must be windows or posix")
         directory = str(entry.get("directory", ""))
         if platform is None:
-            if ntpath.splitdrive(directory)[0]:
+            # shlex.join uses single-quoted tokens, including on Windows.
+            # Ignore apostrophes inside double quotes or native path words.
+            # A complete shell-quoted token is producer evidence stronger than
+            # the working directory's path syntax (MSYS uses both forms).
+            if has_posix_quoted_token(command):
+                platform = "posix"
+            elif ntpath.splitdrive(directory)[0]:
                 platform = "windows"
             elif directory.startswith("/"):
                 platform = "posix"
@@ -292,12 +319,14 @@ class ToolIdentity:
     """Executable identity: resolved path, content SHA-256 and --version output.
 
     The (expensive) content hash and version query are memoized per executable
-    fingerprint (realpath, size, mtime_ns, inode), which is re-stat'ed for every
-    key, so replacing or rebuilding a tool invalidates its identity.
+    fingerprint (realpath, kind, device, inode, size, mtime_ns), re-stat'ed for every
+    key, so replacing or rebuilding a tool invalidates its identity. A sample
+    taken within its mtime's two-second tick is revalidated on reuse until an
+    observation after the tick closes establishes a stable identity.
     """
 
     def __init__(self) -> None:
-        self._cache: dict[tuple, str] = {}
+        self._cache: dict[tuple, tuple[str, int]] = {}
         self._lock = threading.Lock()
 
     def describe(self, executable: str, directory: str) -> str:
@@ -308,15 +337,20 @@ class ToolIdentity:
         if not resolved or not os.path.isfile(resolved):
             raise CacheMiss(f"cannot resolve executable {executable}")
         resolved = os.path.realpath(resolved)
+        # Record the start, not the end: identification itself can span ticks.
+        checked_at = time.time_ns()
         try:
             info = os.stat(resolved)
         except OSError as error:
             raise CacheMiss(f"cannot stat {resolved}: {error}") from error
-        fingerprint = (resolved, info.st_size, info.st_mtime_ns, info.st_ino)
+        if not stat.S_ISREG(info.st_mode):
+            raise CacheMiss(f"executable is not a regular file: {resolved}")
+        fingerprint = (resolved, stat.S_IFMT(info.st_mode), info.st_dev, info.st_ino,
+                       info.st_size, info.st_mtime_ns)
         with self._lock:
             known = self._cache.get(fingerprint)
-        if known is not None:
-            return known
+        if known is not None and info.st_mtime_ns + 2_000_000_000 <= known[1]:
+            return known[0]
         try:
             content = sha256_file(resolved)
             completed = subprocess.run(
@@ -333,7 +367,7 @@ class ToolIdentity:
         text = completed.stdout.decode("utf-8", "replace")
         value = f"{resolved}\n{content}\n{text}"
         with self._lock:
-            self._cache[fingerprint] = value
+            self._cache[fingerprint] = (value, checked_at)
         return value
 
 

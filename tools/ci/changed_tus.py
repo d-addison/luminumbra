@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import concurrent.futures
 import fnmatch
+import functools
 import hashlib
 import importlib.util
 import json
@@ -19,9 +20,11 @@ from pathlib import Path
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -74,6 +77,13 @@ MSVC_APPROX = (
 
 class SelectionError(ValueError):
     pass
+
+
+# Compiler installations/search lists are stable during one invocation. PCH
+# scan results also record directory identities and timestamps: adding a cache
+# after database validation must still invalidate a successful scan.
+_HEADER_SEARCH_LOCK = threading.RLock()
+_PCH_SEARCH_CACHE: dict[tuple, tuple[dict, Path | None, int]] = {}
 
 
 def first_party(relative: Path) -> bool:
@@ -206,7 +216,8 @@ def compiler_header_roots(arguments: list[str], directory: Path) -> set[Path]:
 
     Preprocess empty stdin, never a header or TU, so the probe cannot consume
     a PCH. Fail closed if the compiler is unavailable or its list is unknown.
-    Do not cache the result: toolchains and their directories can change.
+    Memoize equivalent probes for this process; macros and TU paths do not
+    affect the driver's search list. Directory contents are checked separately.
     """
     command, operands = parse_arguments(arguments)
     language = "c++" if "++" in executable_name(command[0]) or Path(operands[0]).suffix != ".c" else "c"
@@ -221,19 +232,29 @@ def compiler_header_roots(arguments: list[str], directory: Path) -> set[Path]:
             if not source_seen:
                 language = command[index + 1]
         elif option in VALUE_OPTIONS:
-            if option not in {"-include", "-imacros"}:
+            if option not in {"-include", "-imacros", "-D", "-U"}:
                 probe.extend(command[index:index + 2])
         elif option.startswith("-"):
-            probe.append(option)
+            if not option.startswith(("-D", "-U")):
+                probe.append(option)
         else:
             source_seen = True
         index += 2 if option in VALUE_OPTIONS else 1
     probe.extend(["-E", "-v", "-x", language, "-"])
+    environment = tuple(sorted({**os.environ, "LC_ALL": "C", "LANG": "C"}.items()))
+    # Serialize misses too, so parallel TU variants cannot duplicate a probe.
+    with _HEADER_SEARCH_LOCK:
+        return set(_compiler_header_roots(tuple(probe), directory, environment))
+
+
+@functools.lru_cache(maxsize=None)
+def _compiler_header_roots(probe: tuple[str, ...], directory: Path,
+                           environment: tuple[tuple[str, str], ...]) -> frozenset[Path]:
     try:
-        result = subprocess.run(probe, cwd=directory, stdin=subprocess.DEVNULL,
+        result = subprocess.run(list(probe), cwd=directory, stdin=subprocess.DEVNULL,
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                 text=True, timeout=1800,
-                                env={**os.environ, "LC_ALL": "C", "LANG": "C"})
+                                env=dict(environment))
     except (OSError, subprocess.SubprocessError) as error:
         raise SelectionError(f"cannot query compiler header search paths: {error}") from error
     roots, scanning, complete = set(), False, False
@@ -248,7 +269,114 @@ def compiler_header_roots(arguments: list[str], directory: Path) -> set[Path]:
             roots.add(directory / line.removesuffix(" (framework directory)"))
     if result.returncode or not complete:
         raise SelectionError("cannot establish compiler header search paths; refusing replay")
-    return roots
+    return frozenset(roots)
+
+
+def directory_stamp(path: Path) -> tuple | None:
+    """Use stat, not DirEntry's incomplete Windows identity fields."""
+    try:
+        info = path.stat()
+    except FileNotFoundError:
+        return None
+    return (info.st_dev, info.st_ino, info.st_mode, info.st_size,
+            info.st_mtime_ns, info.st_ctime_ns)
+
+
+def directory_entries(path: Path, names=None) -> tuple:
+    """Record entry kinds and identities without following symlink targets.
+
+    Use lstat because Windows DirEntry.stat omits device and inode identity.
+    Target changes, including dangling links, have separate directory stamps.
+    """
+    entries = []
+    for name in sorted(os.listdir(path) if names is None else names):
+        info = os.lstat(path / name)
+        entries.append((name, stat.S_IFMT(info.st_mode), info.st_dev, info.st_ino))
+    return tuple(entries)
+
+
+def check_pch_search_roots(compiler: str, search: set[Path]) -> None:
+    """Reuse directory walks until a directory's identity or contents change.
+
+    Retain both successes and refusals per compiler/root set for this process.
+    Stat the visited directories on reuse, including links and missing roots;
+    newly added nested .gch entries or retargeted links require another walk.
+    Track dangling links too, so creating their targets invalidates reuse.
+    """
+    roots = tuple(sorted(search))
+    key = (compiler, roots)
+
+    def fail(error):
+        raise SelectionError(f"cannot check binary PCH search directory: {error}") from error
+
+    def unchanged(stamps, checked_at):
+        for path, (stamp, entries) in stamps.items():
+            if directory_stamp(path) != stamp:
+                return False
+            # Directory timestamps can have DOS's two-second granularity.
+            # A snapshot captured within that tick remains suspect even when
+            # replay happens later. Check membership until an observation
+            # after the tick closes confirms the recorded entry identities.
+            if (entries is not None and stamp is not None
+                    and stamp[4] + 2_000_000_000 > checked_at
+                    and directory_entries(path) != entries):
+                return False
+        return True
+
+    with _HEADER_SEARCH_LOCK:
+        try:
+            # Sample before walking or checking membership, so crossing a
+            # timestamp tick during either operation cannot confer trust.
+            checked_at = time.time_ns()
+            cached = _PCH_SEARCH_CACHE.get(key)
+            if cached is not None and unchanged(cached[0], cached[2]):
+                stamps, binary = cached[:2]
+            else:
+                stamps, seen, binary = {}, set(), None
+                for root in roots:
+                    stamps[root] = (directory_stamp(root), None)
+                    if stamps[root][0] is None:
+                        continue  # Compilers ignore nonexistent include directories.
+                    for current, children, files in os.walk(root, followlinks=True, onerror=fail):
+                        path = Path(current)
+                        # Capture each directory before os.walk enumerates it,
+                        # so a concurrent insertion cannot acquire a cached
+                        # timestamp newer than the membership we checked.
+                        entries = directory_entries(path, children + files)
+                        stamps[path] = (stamps[path][0], entries)
+                        directories = set(children)
+                        for name, kind, _, _ in entries:
+                            child = path / name
+                            if name in directories or kind == stat.S_IFLNK:
+                                # Track targets even for links classified as files;
+                                # dangling targets may become traversable later.
+                                child_stamp = directory_stamp(child)
+                                stamps[child] = (child_stamp, None)
+                                if kind == stat.S_IFLNK:
+                                    kind = stat.S_IFMT(child_stamp[2]) if child_stamp else None
+                            if (kind == stat.S_IFDIR) != (name in directories):
+                                raise SelectionError(
+                                    f"header search entry changed type during scan: {child}")
+                        resolved = path.resolve()
+                        if resolved in seen:
+                            children[:] = []
+                            continue
+                        seen.add(resolved)
+                        children.sort()
+                        for name in sorted(children + files):
+                            if name.lower().endswith(".gch"):
+                                binary = path / name
+                                break
+                        if binary is not None:
+                            break
+                    if binary is not None:
+                        break
+            _PCH_SEARCH_CACHE[key] = (stamps, binary, checked_at)
+        except OSError as error:
+            fail(error)
+        if binary is not None:
+            raise SelectionError(f"binary PCH cache in header search path: {binary}; "
+                                 "remove the cache before replaying textual headers")
 
 
 def validate_textual_includes(arguments: list[str], directory: Path, *, compiler_roots=False) -> None:
@@ -296,25 +424,7 @@ def validate_textual_includes(arguments: list[str], directory: Path, *, compiler
 
     if compiler_roots:
         search.update(compiler_header_roots(arguments, directory))
-    seen = set()
-
-    def fail(error):
-        raise SelectionError(f"cannot check binary PCH search directory: {error}") from error
-
-    for root in sorted(search):
-        if not root.exists():
-            continue  # Compilers also ignore nonexistent include directories.
-        for current, children, files in os.walk(root, followlinks=True, onerror=fail):
-            resolved = Path(current).resolve()
-            if resolved in seen:
-                children[:] = []
-                continue
-            seen.add(resolved)
-            children.sort()
-            for name in sorted(children + files):
-                if name.lower().endswith(".gch"):
-                    raise SelectionError(f"binary PCH cache in header search path: {Path(current) / name}; "
-                                         "remove the cache before replaying textual headers")
+    check_pch_search_roots(arguments[0], search)
 
 
 def replay_arguments(entry: dict) -> list[str]:
