@@ -6,7 +6,10 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
+#include <cstdint>
 #include <fstream>
+#include <limits>
 #include <nlohmann/json.hpp>
 
 namespace Luminumbra::Persistence {
@@ -119,7 +122,9 @@ InspectSavedWorld(const fs::path& root, const std::string& world_id, const std::
                 return result;
             }
         }
-        if (json.contains("waterSimCursor") && (!json.at("waterSimCursor").is_number_unsigned())) {
+        if (json.contains("waterSimCursor") && (!json.at("waterSimCursor").is_number_unsigned() ||
+                                                json.at("waterSimCursor").get<std::uint64_t>() >
+                                                    std::numeric_limits<std::size_t>::max())) {
             result.error = "Corrupt world metadata: invalid water simulation cursor.";
             return result;
         }

@@ -1,12 +1,20 @@
 #include "SHIELD_WorldSystem.h"
+#include "../components/CoreComponents.h"
 #include "../core/FilesystemPath.h"
 #include "../core/JobWatchdog.h" // opt-in named-phase wedge reporter for unbounded waits
 #include "../core/Log.h"
+#include "../core/WaterComponents.h"
+#include "../persistence/WorldPersistenceRoundtrip.h"
+#include "../persistence/WorldSaveService.h"
+#include "../world/ActiveRegionLedger.h"
+#include "../world/Chunk.h"
 #include "../world/FarLodStore.h"
 #include "../world/HydraulicErosion.h" //
 #include "../world/MarchingCubes.h"
+#include "../world/WorldStreamingState.h"
 #include "WaterSystem.h"
 #include "entt/entt.hpp"
+#include "luminumbra/core/Types.h"
 #include "systems/PhysicsSystem.h"
 #include <algorithm> // Required for std::max and std::min
 #include <array>
@@ -17,9 +25,14 @@
 #include <cstring> // std::memcpy for the deterministic water-state hash
 #include <filesystem>
 #include <limits>
+#include <memory>
 #include <optional>
+#include <random>
+#include <set>
 #include <shared_mutex>
 #include <stdexcept>
+#include <string>
+#include <system_error>
 #include <thread> // opt-in job-wedge watchdog monitor thread
 #include <unordered_map>
 #include <unordered_set>
@@ -37,7 +50,8 @@ const int MAX_COLLISION_MESHES_PER_FRAME = 16;
 // lane that generation batches ride on, delaying neighbor arrival and
 // inflating late-neighbor transition remesh churn.
 constexpr std::size_t MAX_HIGH_PRIORITY_MESHING_JOBS_PER_DISPATCH = 32;
-constexpr size_t STREAMING_MAX_ACTIVE_CHUNKS_BUDGET = 8192;
+constexpr size_t STREAMING_MAX_ACTIVE_CHUNKS_BUDGET =
+    Luminumbra::Systems::SHIELD_WorldSystem::kActiveChunkBudget;
 constexpr int STREAMING_ACTIVATION_INTERVAL_FRAMES = 4;
 constexpr int STREAMING_NEAR_VERTICAL_STACK_RADIUS = 4;
 constexpr int STREAMING_MID_VERTICAL_STACK_RADIUS = 12;
@@ -386,8 +400,10 @@ void replace_chunk_collision(PhysicsSystem& physics_system, Luminumbra::Chunk& c
 SHIELD_WorldSystem::SHIELD_WorldSystem(JobSystem* job_system,
                                        WaterSystem* water_system,
                                        const TerrainGenParams& params,
-                                       int seed)
-    : m_job_system(job_system)
+                                       int seed,
+                                       bool retain_region_authority)
+    : m_retainRegionAuthority(retain_region_authority)
+    , m_job_system(job_system)
     , m_params(params)
     , m_seed(seed)
     , m_water_system(water_system) {
@@ -405,6 +421,10 @@ SHIELD_WorldSystem::~SHIELD_WorldSystem() {
         m_job_system->wait(m_streaming_state.promotion_job_handle);
     }
     wait_for_meshing_jobs();
+    if (!m_temporaryAuthorityDirectory.empty()) {
+        std::error_code error;
+        std::filesystem::remove_all(m_temporaryAuthorityDirectory, error);
+    }
 }
 
 void SHIELD_WorldSystem::wait_for_generation_jobs() {
@@ -706,7 +726,8 @@ void SHIELD_WorldSystem::process_completed_promotion_jobs(bool force) {
             }
             const bool ready = chunk->pending_promotion_ready.load(std::memory_order_acquire);
             const bool failed = chunk->pending_promotion_failed.load(std::memory_order_acquire);
-            if (ready && !failed && !chunk->pending_sdf_data.empty()) {
+            if (ready && !failed && !chunk->pending_sdf_data.empty() &&
+                chunk->sdf_provenance() != ChunkSdfProvenance::LoadedOrEdited) {
                 // The LOD0-promotion publish (, moved here from
                 // process_completed_meshing_jobs by ): pure
                 // generation output, not an edit — the dirty flag stays
@@ -2762,6 +2783,8 @@ void SHIELD_WorldSystem::update(entt::registry& registry,
 void SHIELD_WorldSystem::update(entt::registry& registry,
                                 const std::vector<Vec3>& anchor_positions,
                                 PhysicsSystem* physics_system) {
+    if (m_authorityFault)
+        return;
     // runtime telemetry ( implementation note): split the 300ms+ streaming spike by sub-phase.
     m_dbg_stream = {};
     auto _dbg_prev = std::chrono::steady_clock::now();
@@ -2843,11 +2866,13 @@ void SHIELD_WorldSystem::update(entt::registry& registry,
         activation_ran_this_tick = update_chunk_activation(anchor_positions, physics_system);
         m_update_tick_counter = 0;
     }
+    if (m_authorityFault)
+        return;
     _dbg_split(m_dbg_stream.activation); // runtime telemetry
 
     // Step 2: Update the water system using the now-current list of active chunks.
     // This MUST happen before meshing jobs are dispatched.
-    if (m_water_system) {
+    if (m_water_system && !m_retainRegionAuthority) {
         m_water_system->update(registry, m_streaming_state.chunks);
     }
     _dbg_split(m_dbg_stream.water); // runtime telemetry
@@ -2988,6 +3013,9 @@ void SHIELD_WorldSystem::update(entt::registry& registry,
                                                           chunk_center,
                                                           closest_anchor,
                                                           chunk_ptr->current_lod.load());
+                if (chunk_ptr->sdf_provenance() == ChunkSdfProvenance::LoadedOrEdited &&
+                    chunk_ptr->sdf_data.empty())
+                    required_lod = std::max(required_lod, 1);
 
                 if (required_lod != chunk_ptr->current_lod.load()) {
                     needs_meshing = true;
@@ -3021,6 +3049,9 @@ void SHIELD_WorldSystem::update(entt::registry& registry,
                                                               closest_anchor,
                                                               chunk_ptr->current_lod.load());
                 }
+                if (chunk_ptr->sdf_provenance() == ChunkSdfProvenance::LoadedOrEdited &&
+                    chunk_ptr->sdf_data.empty())
+                    required_lod = std::max(required_lod, 1);
                 // The column-surface cache samples the same chunk positions, so
                 // this replaces per-candidate fractal noise evaluations with a
                 // hash lookup (terrain height is a pure function of seed/params).
@@ -3161,18 +3192,21 @@ void SHIELD_WorldSystem::update(entt::registry& registry,
     _dbg_split(
         m_dbg_stream.meshing_pass); // runtime telemetry: Step 3 meshing-candidate pass + dispatch
 
-    // Step 4. Time-slice the creation of expensive physics colliders on the main thread.
+    // Step 4. Legacy streaming time-slices colliders on the main thread.
+    // Active-region collision bodies are created only by fixed-tick preparation;
+    // render scheduling must not influence physics body allocation or contacts.
     //  the eligibility scan is O(N) over every streamed chunk. Gate it on
     // m_collision_pass_dirty so a SETTLED world skips it entirely. The flag is set at the two
     // has_collision=false reset sites (remesh/LOD0 promotion + synchronous rebuild) and cleared
     // here once a scan drains all eligible chunks without hitting the per-frame cap. The scan body
     // is unchanged, so the set of colliders created (and has_collision, which feeds world_hash) is
     // identical to before — only redundant settled-tick walks are removed.
-    if (physics_system && m_collision_pass_dirty) {
+    if (physics_system && !m_retainRegionAuthority && m_collision_pass_dirty) {
         int collision_meshes_created_this_frame = 0;
         bool hit_frame_cap = false;
         for (auto const& [id, chunk_ptr] : m_streaming_state.chunks) {
-            if (chunk_ptr->get_state() == ChunkState::Ready && !chunk_ptr->has_collision.load()) {
+            if (!m_simulationChunks.contains(id) && chunk_ptr->get_state() == ChunkState::Ready &&
+                !chunk_ptr->has_collision.load()) {
                 // Only create collision once the chunk is sim-available at
                 // LOD0 ( : predicate centralized — collision is
                 // built from the HEIGHTMAP; sim_available_lod0 is the single
@@ -3541,8 +3575,8 @@ bool SHIELD_WorldSystem::update_chunk_activation(const std::vector<Vec3>& anchor
         // highest-priority (nearest, surface-first) chunks always win the
         // remaining slots.
         const std::size_t budget_headroom =
-            m_streaming_state.chunks.size() < STREAMING_MAX_ACTIVE_CHUNKS_BUDGET
-                ? STREAMING_MAX_ACTIVE_CHUNKS_BUDGET - m_streaming_state.chunks.size()
+            resident_chunk_count() < STREAMING_MAX_ACTIVE_CHUNKS_BUDGET
+                ? STREAMING_MAX_ACTIVE_CHUNKS_BUDGET - resident_chunk_count()
                 : 0u;
         const std::size_t budget =
             std::min(std::min(to_create.size(), budget_headroom),
@@ -3562,7 +3596,10 @@ bool SHIELD_WorldSystem::update_chunk_activation(const std::vector<Vec3>& anchor
     if (!generate_now.empty()) {
         dispatch_generation_jobs(generate_now);
         for (const ChunkGenerationRequest& request : generate_now) {
-            shadow_note_generation_dispatch(::Luminumbra::Chunk::calculate_id(request.coords));
+            const auto chunk = find_streamed_chunk(request.coords);
+            // Restored authority did not dispatch generation work.
+            if (chunk && chunk->sdf_provenance() != ChunkSdfProvenance::LoadedOrEdited)
+                shadow_note_generation_dispatch(chunk->get_id());
         }
     }
 
@@ -3620,9 +3657,19 @@ bool SHIELD_WorldSystem::update_chunk_activation(const std::vector<Vec3>& anchor
 
     m_last_streaming_budget_stats.unloaded_chunks = to_unload.size();
     for (ChunkID id : to_unload) {
+        if (m_simulationChunks.contains(id))
+            continue; // deterministic simulation residency shares the active budget
+        const auto chunk = m_streaming_state.chunks.at(id);
+        // Simulation ownership survives render eviction. Everything else must
+        // reach durable storage before releasing its last authoritative owner.
+        if (m_retainRegionAuthority && !m_simulationChunks.contains(id) &&
+            chunk->sdf_provenance() == ChunkSdfProvenance::LoadedOrEdited &&
+            !persist_authority(chunk))
+            break;
         if (physics_system) {
             physics_system->remove_chunk_collision(id);
         }
+        chunk->has_collision.store(false, std::memory_order_release);
         m_streaming_state.chunks.erase(id);
         shadow_note_evicted(id);
     }
@@ -3709,10 +3756,34 @@ bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(const Vec3& world_pos,
     std::vector<SurfaceHorizonChunk> chunks_to_build;
     std::vector<SurfaceHorizonChunk> chunks_to_consider_for_collision;
     std::array<std::size_t, 3> lod_counts{0u, 0u, 0u};
+    // Reserve at most the shared resident budget, with checked multiplication.
+    const std::size_t diameter = static_cast<std::size_t>(radius) * 2u + 1u;
     const std::size_t surface_capacity =
-        static_cast<std::size_t>((radius * 2 + 1) * (radius * 2 + 1) * 5);
+        diameter <= STREAMING_MAX_ACTIVE_CHUNKS_BUDGET / diameter &&
+                diameter * diameter <= STREAMING_MAX_ACTIVE_CHUNKS_BUDGET / 5u
+            ? diameter * diameter * 5u
+            : STREAMING_MAX_ACTIVE_CHUNKS_BUDGET;
     chunks_to_build.reserve(surface_capacity);
     chunks_to_consider_for_collision.reserve(surface_capacity);
+
+    if (m_retainRegionAuthority) {
+        std::set<ChunkID> required;
+        for (int dz = -radius; dz <= radius; ++dz) {
+            for (int dx = -radius; dx <= radius; ++dx) {
+                const int x = center_chunk.x + dx;
+                const int z = center_chunk.z + dz;
+                const auto span = column_surface_span(x, z);
+                for (int y = span.min_y - 1; y <= span.max_y + 1; ++y) {
+                    // At most the shared resident budget of required ids is stored.
+                    const auto id = Chunk::calculate_id(IVec3(x, y, z));
+                    if (required.size() == kActiveChunkBudget && !required.contains(id))
+                        return false;
+                    required.insert(id);
+                }
+            }
+        }
+        prepare_authority_eviction(required);
+    }
 
     for (int dz = -radius; dz <= radius; ++dz) {
         for (int dx = -radius; dx <= radius; ++dx) {
@@ -3734,15 +3805,32 @@ bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(const Vec3& world_pos,
 
                 auto it = m_streaming_state.chunks.find(id);
                 if (it == m_streaming_state.chunks.end()) {
-                    auto chunk = std::make_shared<Luminumbra::Chunk>(coords);
+                    if (m_retainRegionAuthority && !make_authority_room(physics_system))
+                        return false;
+                    auto chunk = restore_authority(coords);
+                    if (m_authorityFault)
+                        return false;
+                    if (!chunk)
+                        chunk = std::make_shared<Luminumbra::Chunk>(coords);
                     it = m_streaming_state.chunks.emplace(id, std::move(chunk)).first;
                 }
 
                 auto& chunk = it->second;
+                if (chunk->sdf_provenance() == ChunkSdfProvenance::LoadedOrEdited &&
+                    !chunk->sdf_data.empty() && chunk->sdf_data.size() != kFullSdfLattice)
+                    return false;
                 SurfaceHorizonChunk surface_chunk{
                     chunk, IVec2(dx, dz), std::abs(chunk_y - span.center_y), lod, step};
+                if (chunk->sdf_provenance() == ChunkSdfProvenance::LoadedOrEdited &&
+                    chunk->sdf_data.empty()) {
+                    if (chunk->heightmap_data.empty())
+                        return false;
+                    surface_chunk.lod = std::max(surface_chunk.lod, 1);
+                    surface_chunk.step = get_lod_step_for_level(surface_chunk.lod);
+                }
                 chunks_to_consider_for_collision.push_back(surface_chunk);
-                if (chunk->get_state() != ChunkState::Ready || chunk->current_lod.load() != lod ||
+                if (chunk->get_state() != ChunkState::Ready ||
+                    chunk->current_lod.load() != surface_chunk.lod ||
                     chunk->mesh_vertices.empty() || chunk->mesh_indices.empty()) {
                     chunk->set_state(ChunkState::Loading);
                     chunks_to_build.push_back(surface_chunk);
@@ -3754,7 +3842,8 @@ bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(const Vec3& world_pos,
     std::vector<Luminumbra::Job> build_jobs;
     build_jobs.reserve(chunks_to_build.size());
     for (const SurfaceHorizonChunk& build_chunk : chunks_to_build) {
-        build_jobs.emplace_back([this, build_chunk]() {
+        const bool simulation_owned = m_simulationChunks.contains(build_chunk.chunk->get_id());
+        build_jobs.emplace_back([this, build_chunk, simulation_owned]() {
             const auto worldgen_scope = acquire_worldgen_sample_scope(); //
             const auto& chunk = build_chunk.chunk;
             const bool needs_full_sdf = build_chunk.step <= 1;
@@ -3805,9 +3894,12 @@ bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(const Vec3& world_pos,
             chunk->applied_transition_faces.store(0, std::memory_order_release);
             chunk->water_mesh_vertices.clear();
             chunk->water_mesh_indices.clear();
+            if (m_retainRegionAuthority && m_water_system)
+                Luminumbra::World::MarchingCubes::GenerateWaterMesh(*m_water_system, *this, *chunk);
             chunk->current_lod.store(build_chunk.lod);
             chunk->mesh_version++;
-            chunk->has_collision.store(false);
+            if (!simulation_owned)
+                chunk->has_collision.store(false);
             chunk->set_state(ChunkState::Ready);
         });
     }
@@ -3915,9 +4007,9 @@ bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(const Vec3& world_pos,
     for (const SurfaceHorizonChunk& surface_chunk : chunks_to_consider_for_collision) {
         const auto& chunk = surface_chunk.chunk;
         const IVec2& offset = surface_chunk.offset;
-        if (surface_chunk.lod == 0 && surface_chunk.vertical_rank == 0 &&
-            std::abs(offset.x) <= collision_range && std::abs(offset.y) <= collision_range &&
-            !chunk->has_collision.load()) {
+        if (!m_retainRegionAuthority && surface_chunk.lod == 0 &&
+            surface_chunk.vertical_rank == 0 && std::abs(offset.x) <= collision_range &&
+            std::abs(offset.y) <= collision_range && !chunk->has_collision.load()) {
             replace_chunk_collision(*physics_system, *chunk);
             ++collision_count;
         }
@@ -4864,6 +4956,8 @@ void SHIELD_WorldSystem::GenerateChunkData(Luminumbra::Chunk& chunk, int target_
             base_pos.x, base_pos.z, size_x, size_z, chunk.heightmap_data.data());
         chunk.mark_sdf_generated_current_params();
         chunk.clear_voxel_data_dirty();
+        if (m_retainRegionAuthority && m_water_system && !chunk.has_water_sim.load())
+            m_water_system->InitializeGeneratedWater(chunk);
         return;
     }
 
@@ -4968,6 +5062,8 @@ void SHIELD_WorldSystem::GenerateChunkData(Luminumbra::Chunk& chunk, int target_
     // count as unsaved dirty state.
     chunk.mark_sdf_generated_current_params();
     chunk.clear_voxel_data_dirty();
+    if (m_retainRegionAuthority && m_water_system && !chunk.has_water_sim.load())
+        m_water_system->InitializeGeneratedWater(chunk);
 }
 
 JobHandle
@@ -4999,12 +5095,29 @@ JobHandle SHIELD_WorldSystem::dispatch_generation_jobs(
         // surface-band heightmap) is a no-op for untouched chunks and the
         // load/generation contract for saved ones. A surface-band chunk later
         // promoted to LOD0 gets its full SDF via the  promotion lane.
-        const auto existing = m_streaming_state.chunks.find(Chunk::calculate_id(coords));
+        const auto id = Chunk::calculate_id(coords);
+        const auto existing = m_streaming_state.chunks.find(id);
         if (existing != m_streaming_state.chunks.end() && existing->second &&
             (!existing->second->sdf_data.empty() || !existing->second->heightmap_data.empty())) {
             continue;
         }
+        if (!m_streaming_state.chunks.contains(id) &&
+            resident_chunk_count() >= STREAMING_MAX_ACTIVE_CHUNKS_BUDGET)
+            break;
+        if (auto restored = restore_authority(coords)) {
+            // Complete authority needs no generation publication to become usable.
+            // Collision is rebuilt by the normal pass after render reactivation.
+            restored->set_state(ChunkState::Idle);
+            m_streaming_state.chunks.insert_or_assign(id, std::move(restored));
+            m_activation_has_run = false;
+            m_collision_pass_dirty = true;
+            continue;
+        }
+        if (m_authorityFault)
+            break;
 
+        if (resident_chunk_count() >= STREAMING_MAX_ACTIVE_CHUNKS_BUDGET)
+            break;
         auto chunk = std::make_shared<Luminumbra::Chunk>(coords);
         chunk->set_state(Luminumbra::ChunkState::Loading);
         m_streaming_state.chunks[chunk->get_id()] = chunk;
@@ -5067,6 +5180,15 @@ void SHIELD_WorldSystem::dispatch_meshing_jobs(const std::vector<MeshingWorkItem
                                        work_item.chunk->sdf_data.size() != kFullSdfLattice;
         const bool needs_sim_truth = work_item.terrain_mesh_required && step <= 1 &&
                                      work_item.chunk->sdf_data.size() != kFullSdfLattice;
+        if (work_item.chunk->sdf_provenance() == ChunkSdfProvenance::LoadedOrEdited) {
+            if (has_malformed_sdf)
+                continue;
+            auto render_item = work_item;
+            if (needs_sim_truth)
+                render_item.lod_level = std::max(render_item.lod_level, 1);
+            mesh_items.push_back(render_item);
+            continue;
+        }
         if (has_malformed_sdf) {
             LUMINUMBRA_CORE_WARN(
                 "Meshing promotion: chunk ({},{},{}) has malformed sdf_data "
@@ -5344,7 +5466,8 @@ bool SHIELD_WorldSystem::publish_front_meshing_batch(bool force) {
                 chunk->applied_transition_faces.store(job_chunk.transition_faces,
                                                       std::memory_order_release);
                 chunk->mesh_version++;
-                chunk->has_collision.store(false, std::memory_order_release);
+                if (!m_simulationChunks.contains(chunk->get_id()))
+                    chunk->has_collision.store(false, std::memory_order_release);
                 //  a remesh / LOD0 promotion just cleared this chunk's collider, so
                 // re-open the gated collision scan (Step 4) to rebuild it. Main-thread store.
                 m_collision_pass_dirty = true;
@@ -5409,6 +5532,14 @@ void SHIELD_WorldSystem::clear_world(PhysicsSystem* physics_system) {
         }
     }
     m_streaming_state.chunks.clear();
+    m_simulationChunks.clear();
+    if (m_water_system)
+        m_water_system->ResetActivityCache();
+    m_simulationRegions.clear();
+    m_authorityEvictionCandidates.clear();
+    m_activation_has_run = false;
+    m_collision_pass_dirty = true;
+    m_authorityFault.reset();
     m_shadow_generation_dispatch_tick.clear();
     m_shadow_promotion_dispatch_tick.clear();
     LUMINUMBRA_CORE_INFO("World cleared.");
@@ -5468,6 +5599,391 @@ SHIELD_WorldSystem::snapshot_streamed_chunks() const {
         }
     }
     return chunks;
+}
+
+std::vector<std::shared_ptr<Luminumbra::Chunk>>
+SHIELD_WorldSystem::snapshot_region_authority(i32 rx, i32 rz) const {
+    std::vector<std::shared_ptr<Luminumbra::Chunk>> chunks;
+    const auto append_region = [&](const auto& source) {
+        for (const auto& [id, chunk] : source) {
+            (void)id;
+            if (!chunk || chunk->sdf_provenance() != ChunkSdfProvenance::LoadedOrEdited)
+                continue;
+            const auto coords = chunk->get_coords();
+            const auto floor_region = [](i32 value) {
+                const i32 quotient = value / 32;
+                return value % 32 < 0 ? quotient - 1 : quotient;
+            };
+            if (floor_region(coords.x) == rx && floor_region(coords.z) == rz)
+                chunks.push_back(chunk);
+        }
+    };
+    append_region(m_streaming_state.chunks);
+    return chunks;
+}
+
+std::vector<ChunkID> SHIELD_WorldSystem::simulation_chunk_ids() const {
+    std::vector<ChunkID> ids;
+    ids.reserve(m_simulationChunks.size());
+    for (const auto& [id, chunk] : m_simulationChunks) {
+        (void)chunk;
+        ids.push_back(id);
+    }
+    std::sort(ids.begin(), ids.end());
+    return ids;
+}
+
+Persistence::WorldAuthorityHashes SHIELD_WorldSystem::compute_chunk_hashes() const {
+    std::vector<std::shared_ptr<Chunk>> live;
+    live.reserve(m_streaming_state.chunks.size());
+    WorldStreamingState legacy;
+    for (const auto& [id, chunk] : m_streaming_state.chunks) {
+        (void)id;
+        if (m_retainRegionAuthority) {
+            if (chunk && chunk->sdf_provenance() == ChunkSdfProvenance::LoadedOrEdited)
+                live.push_back(chunk);
+        } else {
+            legacy.insert_chunk(chunk);
+        }
+    }
+    if (m_retainRegionAuthority)
+        return Persistence::WorldSaveService::authority_hashes(m_authorityDirectory, live);
+    return {.world = Persistence::ComputeWorldStreamingStateHash(legacy),
+            .sub = Persistence::ComputeWorldStreamingStateSubHashes(legacy)};
+}
+
+void SHIELD_WorldSystem::set_authority_directory(const std::filesystem::path& directory) {
+    if (directory.empty()) {
+        if (!m_authorityDirectory.empty())
+            return;
+        // Transient replay/headless worlds need the same bounded durability
+        // contract. The scratch name is observational and never enters hashes.
+        try {
+            std::random_device random;
+            for (int attempt = 0; attempt < 32; ++attempt) {
+                const auto candidate = std::filesystem::temp_directory_path() /
+                                       ("luminumbra-authority-" + std::to_string(random()) + "-" +
+                                        std::to_string(random()));
+                if (std::filesystem::create_directory(candidate)) {
+                    m_temporaryAuthorityDirectory = candidate;
+                    m_authorityDirectory = candidate;
+                    return;
+                }
+            }
+        } catch (const std::exception&) {
+            m_authorityFault = "Cannot create transient authority storage";
+            return;
+        }
+        m_authorityFault = "Cannot create transient authority storage";
+        return;
+    }
+    if (m_authorityDirectory != directory) {
+        m_authorityDirectory = directory;
+        m_simulationRegions.clear();
+    }
+}
+
+bool SHIELD_WorldSystem::relocate_authority_directory(const std::filesystem::path& directory) {
+    if (m_authorityDirectory == directory)
+        return true;
+    if (!Persistence::WorldSaveService::copy_chunk_authority(m_authorityDirectory, directory))
+        return false;
+    set_authority_directory(directory);
+    return true;
+}
+
+std::size_t SHIELD_WorldSystem::resident_chunk_count() const {
+    // Simulation pointers always alias entries in the streaming map. This is
+    // one shared 8,192-chunk budget, with no second parking allocation.
+    return m_streaming_state.chunks.size();
+}
+
+bool SHIELD_WorldSystem::persist_authority(const std::shared_ptr<Chunk>& chunk) {
+    if (m_authorityFault)
+        return false;
+    quiesce_streaming_jobs_for_save();
+    try {
+        if (Persistence::WorldSaveService::persist_chunk_authority(m_authorityDirectory, chunk)) {
+            notify_far_lod_authority_durable(chunk->get_coords());
+            return true;
+        }
+    } catch (const std::exception&) {
+        // Retain the last owner, including dirty flags, on every failure path.
+        m_authorityFault = "Cannot persist evicted chunk authority";
+        return false;
+    }
+    m_authorityFault = "Cannot persist evicted chunk authority";
+    return false;
+}
+
+void SHIELD_WorldSystem::prepare_authority_eviction(const std::set<ChunkID>& required) {
+    m_authorityEvictionCandidates.clear();
+    for (const auto& [id, chunk] : m_streaming_state.chunks) {
+        (void)chunk;
+        if (!m_simulationChunks.contains(id) && !required.contains(id))
+            m_authorityEvictionCandidates.push_back(id);
+    }
+    std::sort(m_authorityEvictionCandidates.rbegin(), m_authorityEvictionCandidates.rend());
+}
+
+bool SHIELD_WorldSystem::make_authority_room(PhysicsSystem* physics_system) {
+    if (resident_chunk_count() < STREAMING_MAX_ACTIVE_CHUNKS_BUDGET)
+        return true;
+    // This runs only for deterministic authority admission, never per render
+    // candidate. Displace a render cache before allocating another chunk.
+    while (!m_authorityEvictionCandidates.empty()) {
+        const auto id = m_authorityEvictionCandidates.back();
+        m_authorityEvictionCandidates.pop_back();
+        const auto it = m_streaming_state.chunks.find(id);
+        if (it == m_streaming_state.chunks.end() || m_simulationChunks.contains(id))
+            continue;
+        const auto& chunk = it->second;
+        if (chunk->sdf_provenance() == ChunkSdfProvenance::LoadedOrEdited &&
+            !persist_authority(chunk))
+            return false;
+        if (physics_system)
+            physics_system->remove_chunk_collision(it->first);
+        chunk->has_collision.store(false, std::memory_order_release);
+        shadow_note_evicted(it->first);
+        m_streaming_state.chunks.erase(it);
+        m_collision_pass_dirty = true;
+        return true;
+    }
+    m_authorityFault = "Authoritative simulation exceeds the active chunk budget";
+    return false;
+}
+
+std::shared_ptr<Chunk> SHIELD_WorldSystem::restore_authority(const IVec3& coords) try {
+    if (!m_retainRegionAuthority)
+        return nullptr;
+    auto existing = find_streamed_chunk(coords);
+    if (existing && existing->sdf_provenance() == ChunkSdfProvenance::LoadedOrEdited)
+        return existing;
+    if (m_authorityDirectory.empty())
+        return nullptr;
+    using Save = Persistence::WorldSaveService;
+    int rx = 0, rz = 0;
+    Save::region_coords_for_chunk(coords, rx, rz);
+    Save::AuthorityReader reader;
+    if (!Save::open_region_authority(Save::region_file_path(m_authorityDirectory, rx, rz),
+                                     reader)) {
+        m_authorityFault = "Cannot read durable chunk authority";
+        return nullptr;
+    }
+    const auto id = Chunk::calculate_id(coords);
+    for (std::size_t index = 0; index < reader.records.size(); ++index) {
+        if (reader.records[index].id != id)
+            continue;
+        reader.next = index;
+        try {
+            auto chunk = Save::read_next_authority(reader);
+            chunk->has_collision.store(false, std::memory_order_release);
+            return chunk;
+        } catch (const std::exception& error) {
+            m_authorityFault = error.what();
+            return nullptr;
+        }
+    }
+    return nullptr;
+} catch (const std::exception& error) {
+    m_authorityFault = error.what();
+    return nullptr;
+}
+
+void SHIELD_WorldSystem::prepare_region_authority(entt::registry& registry,
+                                                  const std::set<std::pair<i32, i32>>& regions,
+                                                  const std::vector<Vec3>& anchors,
+                                                  PhysicsSystem* physics_system) try {
+    if (!m_retainRegionAuthority || m_authorityFault)
+        return;
+    using Save = Persistence::WorldSaveService;
+    const auto region_of = [](const Chunk& chunk) {
+        int rx = 0, rz = 0;
+        Save::region_coords_for_chunk(chunk.get_coords(), rx, rz);
+        return std::pair<i32, i32>{rx, rz};
+    };
+    bool render_changed = false;
+    // No streaming jobs may be reading water mirrors during the fixed tick.
+    quiesce_streaming_jobs_for_save();
+    for (auto it = m_simulationChunks.begin(); it != m_simulationChunks.end();) {
+        if (!regions.contains(region_of(*it->second))) {
+            it = m_simulationChunks.erase(it);
+            m_activation_has_run = false;
+        } else
+            ++it;
+    }
+    // Register live edits before rehydration so durable images never overwrite
+    // newer authority. Regenerable render chunks are excluded on every path.
+    for (const auto& [id, chunk] : m_streaming_state.chunks) {
+        if (chunk->sdf_provenance() == ChunkSdfProvenance::LoadedOrEdited &&
+            regions.contains(region_of(*chunk))) {
+            if (!m_simulationChunks.contains(id))
+                chunk->has_collision.store(false, std::memory_order_release);
+            m_simulationChunks.insert_or_assign(id, chunk);
+        }
+    }
+    prepare_authority_eviction({});
+    for (const auto& [rx, rz] : regions) {
+        if (m_simulationRegions.contains({rx, rz}) || m_authorityDirectory.empty())
+            continue;
+        Save::AuthorityReader reader;
+        if (!Save::open_region_authority(Save::region_file_path(m_authorityDirectory, rx, rz),
+                                         reader))
+            throw std::runtime_error("Cannot restore simulation region authority");
+        while (reader.next < reader.records.size()) {
+            const auto id = reader.records[reader.next].id;
+            if (m_simulationChunks.contains(id)) {
+                ++reader.next;
+                continue;
+            }
+            if (!m_streaming_state.chunks.contains(id) && !make_authority_room(physics_system))
+                throw std::runtime_error(*m_authorityFault);
+            auto chunk = Save::read_next_authority(reader);
+            chunk->set_state(ChunkState::Idle);
+            chunk->has_collision.store(false, std::memory_order_release);
+            m_streaming_state.chunks.insert_or_assign(id, chunk);
+            m_simulationChunks.emplace(id, std::move(chunk));
+            m_collision_pass_dirty = true;
+            render_changed = true;
+        }
+    }
+    // The natural-water simulation horizon is the 3x3 surface columns around
+    // each replicated/walking anchor. This fixed one-chunk ring is simulation
+    // policy, independent of render distance, LOD and asynchronous load timing.
+    std::set<ChunkID> required;
+    const auto require_chunk = [&required](ChunkID id) {
+        // Natural/source ids share the resident bound; reject before allocating.
+        if (required.size() == kActiveChunkBudget && !required.contains(id))
+            throw std::runtime_error("Authoritative simulation exceeds the active chunk budget");
+        required.insert(id);
+    };
+    for (const auto& anchor : anchors) {
+        if (!world::ActiveRegionLedger::valid_anchor(anchor))
+            continue;
+        const auto centre = world_to_chunk_coords(Vec3(anchor.x, 0.0f, anchor.z));
+        for (int dz = -1; dz <= 1; ++dz) {
+            for (int dx = -1; dx <= 1; ++dx) {
+                const float x =
+                    static_cast<float>(centre.x + dx) * CHUNK_SIZE_X + CHUNK_SIZE_X / 2.0f;
+                const float z =
+                    static_cast<float>(centre.z + dz) * CHUNK_SIZE_Z + CHUNK_SIZE_Z / 2.0f;
+                const float terrain = GetTerrainHeightAt(x, z);
+                // Submerged ground can occupy a lower chunk than the water
+                // surface. Physics requires its terrain-containing chunk too.
+                for (const float height : {terrain, std::max(terrain, WaterLevelAt(x, z))}) {
+                    const auto coords = world_to_chunk_coords(Vec3(x, height, z));
+                    if (coords.x >= Chunk::kPackedMinXz && coords.x <= Chunk::kPackedMaxXz &&
+                        coords.z >= Chunk::kPackedMinXz && coords.z <= Chunk::kPackedMaxXz &&
+                        coords.y >= Chunk::kPackedMinY && coords.y <= Chunk::kPackedMaxY)
+                        require_chunk(Chunk::calculate_id(coords));
+                }
+            }
+        }
+    }
+    // Explicit ECS sources admit their exact (including vertical) chunks too.
+    const auto sources = registry.view<const Components::TransformComponent,
+                                       const Components::FlowingWaterSourceComponent>();
+    for (const auto entity : sources) {
+        const auto& position = sources.get<const Components::TransformComponent>(entity).position;
+        if (!world::ActiveRegionLedger::valid_anchor(position) ||
+            position.y < static_cast<float>(Chunk::kPackedMinY) * CHUNK_SIZE_Y ||
+            position.y >= (static_cast<float>(Chunk::kPackedMaxY) + 1.0f) * CHUNK_SIZE_Y)
+            continue;
+        const auto coords = world_to_chunk_coords(position);
+        int rx = 0, rz = 0;
+        Save::region_coords_for_chunk(coords, rx, rz);
+        if (regions.contains({rx, rz}))
+            require_chunk(Chunk::calculate_id(coords));
+    }
+    for (const auto id : required) {
+        if (m_simulationChunks.contains(id))
+            continue;
+        if (!m_streaming_state.chunks.contains(id) && !make_authority_room(physics_system))
+            throw std::runtime_error(*m_authorityFault);
+        const auto coords = Chunk::decode_id(id);
+        auto chunk = restore_authority(coords);
+        if (m_authorityFault)
+            throw std::runtime_error(*m_authorityFault);
+        if (!chunk) {
+            // Replace a render cache with canonical full generation. Its coarse
+            // voxel shape or earlier frozen initialization cannot enter authority.
+            chunk = std::make_shared<Chunk>(coords);
+            GenerateChunkData(*chunk);
+            chunk->mark_voxel_data_dirty();
+        }
+        chunk->set_state(ChunkState::Idle);
+        chunk->has_collision.store(false, std::memory_order_release);
+        m_streaming_state.chunks.insert_or_assign(id, chunk);
+        m_simulationChunks.emplace(id, std::move(chunk));
+        m_collision_pass_dirty = true;
+        render_changed = true;
+    }
+    // Live edits and loaded residents also need collision, even with no render
+    // update. Stable id order makes body creation independent of map insertion.
+    if (physics_system) {
+        // Render-only terrain must not affect creatures outside the horizon.
+        // Prune the physics registry itself: remeshing flags and renderer eviction
+        // need not reflect whether a body is still installed.
+        physics_system->retain_chunk_collisions(m_simulationChunks);
+        for (const auto& [id, chunk] : m_streaming_state.chunks) {
+            if (!m_simulationChunks.contains(id))
+                chunk->has_collision.store(false, std::memory_order_release);
+        }
+        // At most the shared resident budget; steady ticks allocate nothing.
+        std::vector<Chunk*> collision_candidates;
+        // Partial edited records have no complete collision surface. Never index
+        // them as the padded 17x17 heightfield consumed by the physics backend.
+        constexpr std::size_t kCollisionSide = CHUNK_SIZE_X + 1;
+        constexpr std::size_t kCollisionSamples = kCollisionSide * kCollisionSide;
+        for (const auto& [id, chunk] : m_simulationChunks) {
+            (void)id;
+            if (!chunk->has_collision.load(std::memory_order_acquire) &&
+                chunk->heightmap_data.size() == kCollisionSamples)
+                collision_candidates.push_back(chunk.get());
+        }
+        std::sort(collision_candidates.begin(),
+                  collision_candidates.end(),
+                  [](const Chunk* lhs, const Chunk* rhs) { return lhs->get_id() < rhs->get_id(); });
+        for (auto* chunk : collision_candidates)
+            replace_chunk_collision(*physics_system, *chunk);
+    }
+    m_simulationRegions = regions;
+    if (render_changed)
+        ++m_dirty_generation;
+} catch (const std::exception& error) {
+    if (!m_authorityFault)
+        m_authorityFault = error.what();
+    throw;
+}
+
+void SHIELD_WorldSystem::simulate_region_authority(entt::registry& registry,
+                                                   const std::set<std::pair<i32, i32>>& regions,
+                                                   const std::vector<Vec3>& anchors,
+                                                   PhysicsSystem* physics_system) try {
+    prepare_region_authority(registry, regions, anchors, physics_system);
+    if (!m_retainRegionAuthority || m_authorityFault)
+        return;
+    bool render_changed = false;
+    if (m_water_system) {
+        // Boot settling is a render-loading concern. Fixed session ticks use
+        // the same bounded solver path on new, loaded and headless peers.
+        m_water_system->SetBootPaused(false);
+        m_water_system->SetBootSettleMode(false);
+        m_water_system->update(registry, m_simulationChunks, true);
+        // Initialization, flux, depth and sleep counters are all authority.
+        // A metadata/chunk save must never acknowledge newer water implicitly.
+        for (const auto& [id, chunk] : m_simulationChunks) {
+            (void)id;
+            chunk->mark_water_data_dirty();
+            render_changed |= !chunk->water_mesh_generated.load(std::memory_order_acquire);
+        }
+    }
+    if (render_changed)
+        ++m_dirty_generation;
+} catch (const std::exception& error) {
+    if (!m_authorityFault)
+        m_authorityFault = error.what();
+    throw;
 }
 
 void SHIELD_WorldSystem::bump_far_lod_authority_revision(const IVec3& chunk_coords) {
@@ -5611,6 +6127,8 @@ bool SHIELD_WorldSystem::adopt_streamed_chunk(const std::shared_ptr<Luminumbra::
     if (!chunk) {
         return false;
     }
+    if (m_retainRegionAuthority && resident_chunk_count() >= STREAMING_MAX_ACTIVE_CHUNKS_BUDGET)
+        return false;
     //   lifecycle rule (streaming-owned, NOT the persistence
     // codec's business): a save captured between generation-job completion and
     // the main-thread Loading→Idle publish (the save quiesce is deliberately
@@ -5621,7 +6139,13 @@ bool SHIELD_WorldSystem::adopt_streamed_chunk(const std::shared_ptr<Luminumbra::
         (!chunk->sdf_data.empty() || !chunk->heightmap_data.empty())) {
         chunk->set_state(Luminumbra::ChunkState::Idle);
     }
+    if (m_retainRegionAuthority && m_water_system &&
+        chunk->sdf_provenance() != ChunkSdfProvenance::LoadedOrEdited &&
+        (!chunk->sdf_data.empty() || !chunk->heightmap_data.empty()))
+        m_water_system->InitializeGeneratedWater(*chunk);
     const bool adopted = m_streaming_state.chunks.emplace(chunk->get_id(), chunk).second;
+    if (adopted)
+        m_activation_has_run = false;
     if (adopted && chunk->sdf_provenance() == ChunkSdfProvenance::LoadedOrEdited) {
         bump_far_lod_authority_revision(chunk->get_coords());
     }

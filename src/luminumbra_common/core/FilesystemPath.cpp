@@ -1,19 +1,112 @@
 #include "FilesystemPath.h"
 
-#include <algorithm>
+#include <cerrno>
+#include <cstddef>
+#include <cstdint>
+#include <cstdio>
+#include <filesystem>
+#include <limits>
+#include <string>
+#include <string_view>
+#include <sys/stat.h>
+#include <system_error>
 #include <utility>
 
 #if defined(_WIN32) && !defined(__CYGWIN__)
+#include <algorithm>
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
+#include <fcntl.h>
+#include <io.h>
 #include <windows.h>
+#else
+#include <stdio.h>
 #endif
 
 namespace Luminumbra::Filesystem {
+
+ReplacementSafeInputFile::~ReplacementSafeInputFile() {
+    close();
+}
+ReplacementSafeInputFile::ReplacementSafeInputFile(ReplacementSafeInputFile&& other) noexcept
+    : m_file(std::exchange(other.m_file, nullptr)) {}
+ReplacementSafeInputFile&
+ReplacementSafeInputFile::operator=(ReplacementSafeInputFile&& other) noexcept {
+    if (this != &other) {
+        close();
+        m_file = std::exchange(other.m_file, nullptr);
+    }
+    return *this;
+}
+bool ReplacementSafeInputFile::open(const std::filesystem::path& path) {
+    close();
+#if defined(_WIN32) && !defined(__CYGWIN__)
+    const HANDLE handle = CreateFileW(path.c_str(),
+                                      GENERIC_READ,
+                                      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                      nullptr,
+                                      OPEN_EXISTING,
+                                      FILE_ATTRIBUTE_NORMAL,
+                                      nullptr);
+    if (handle == INVALID_HANDLE_VALUE)
+        return false;
+    const int descriptor =
+        _open_osfhandle(reinterpret_cast<std::intptr_t>(handle), _O_RDONLY | _O_BINARY);
+    if (descriptor == -1) {
+        CloseHandle(handle);
+        return false;
+    }
+    m_file = _fdopen(descriptor, "rb");
+    if (!m_file)
+        _close(descriptor);
+#else
+    m_file = std::fopen(path.c_str(), "rb");
+#endif
+    return is_open();
+}
+void ReplacementSafeInputFile::close() {
+    if (m_file)
+        std::fclose(std::exchange(m_file, nullptr));
+}
+std::uint64_t ReplacementSafeInputFile::size(std::error_code& error) const {
+    error.clear();
+    if (!m_file) {
+        error = std::make_error_code(std::errc::bad_file_descriptor);
+        return 0;
+    }
+#if defined(_WIN32) && !defined(__CYGWIN__)
+    struct _stat64 info {};
+    const int result = _fstat64(_fileno(m_file), &info);
+#else
+    struct stat info {};
+    const int result = fstat(fileno(m_file), &info);
+#endif
+    if (result != 0 || info.st_size < 0) {
+        error = std::error_code(result != 0 ? errno : EINVAL, std::generic_category());
+        return 0;
+    }
+    return static_cast<std::uint64_t>(info.st_size);
+}
+bool ReplacementSafeInputFile::seek(std::uint64_t offset) {
+    if (!m_file)
+        return false;
+#if defined(_WIN32) && !defined(__CYGWIN__)
+    if (offset > static_cast<std::uint64_t>(std::numeric_limits<__int64>::max()))
+        return false;
+    return _fseeki64(m_file, static_cast<__int64>(offset), SEEK_SET) == 0;
+#else
+    if (offset > static_cast<std::uint64_t>(std::numeric_limits<off_t>::max()))
+        return false;
+    return fseeko(m_file, static_cast<off_t>(offset), SEEK_SET) == 0;
+#endif
+}
+bool ReplacementSafeInputFile::read(char* destination, std::size_t bytes) {
+    return m_file && std::fread(destination, 1, bytes, m_file) == bytes;
+}
 
 bool IsWindowsUncPath(const std::filesystem::path& path) noexcept {
 #if defined(_WIN32) && !defined(__CYGWIN__)

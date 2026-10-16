@@ -4,8 +4,10 @@
 #include "world/WorldStreamingState.h"
 
 #include <cstddef>
+#include <cstdint>
 #include <filesystem>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace Luminumbra::Persistence {
@@ -90,6 +92,32 @@ std::string ComputeWorldStreamingStateHash(const WorldStreamingState& state);
 // Caller filters incomplete live/parked inputs; durable edited records allow every lifecycle.
 // Lifecycle, collider and render bookkeeping are excluded. Legacy hashes and
 // persistence continue to use their existing projections.
+// Incremental version of the same canonical region_content_v2 JSON projection.
+// Append authoritative chunks in strictly increasing id order. Only one chunk's
+// JSON is materialized at a time, including when reading a large durable region.
+class RegionContentHasher {
+public:
+    RegionContentHasher();
+    void append(const Chunk& chunk);
+    [[nodiscard]] std::uint64_t value() const;
+    [[nodiscard]] std::uint64_t terrain_value() const {
+        return m_terrainHash;
+    }
+    [[nodiscard]] std::uint64_t water_value() const {
+        return m_waterHash;
+    }
+    [[nodiscard]] bool empty() const {
+        return !m_hasChunks;
+    }
+
+private:
+    void feed(std::string_view bytes);
+    std::uint64_t m_hash = 14695981039346656037ull;
+    std::uint64_t m_waterHash = 14695981039346656037ull;
+    std::uint64_t m_terrainHash = 14695981039346656037ull;
+    ChunkID m_lastId = 0;
+    bool m_hasChunks = false;
+};
 std::string ComputeRegionContentHash(const WorldStreamingState& state);
 
 //  determinism contract: per-system sub-hashes for desync localization.
@@ -139,6 +167,13 @@ struct WorldStreamingStateSubHashes {
     // LREC1 localization) when sim.aether_state is ON. Empty when the layer is
     // off/absent/all-zero (the default world: always empty, byte-identical).
     std::string aether_state;
+};
+
+// Production chunk oracle. Active regions use versioned authority projections;
+// legacy worlds retain the historical snapshot projection.
+struct WorldAuthorityHashes {
+    std::string world;
+    WorldStreamingStateSubHashes sub;
 };
 
 // Computes the chunk-derived per-system sub-hashes (terrain/mesh/water). Pure

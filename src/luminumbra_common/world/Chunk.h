@@ -76,6 +76,11 @@ public:
     void clear_voxel_data_dirty() {
         m_voxel_data_dirty.store(false, std::memory_order_release);
     }
+    // Water shares the durable chunk record but does not change voxel geometry
+    // or invalidate SDF/render revisions. The owner must already hold authority.
+    void mark_water_data_dirty() {
+        m_voxel_data_dirty.store(true, std::memory_order_release);
+    }
     bool is_voxel_data_dirty() const {
         return m_voxel_data_dirty.load(std::memory_order_acquire);
     }

@@ -10,12 +10,17 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
+#include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <limits>
 #include <map>
+#include <memory>
+#include <set>
 #include <span>
 #include <sstream>
 #include <string>
@@ -27,19 +32,25 @@
 #include "luminumbra_common/ai/EcologyHash.h"
 #include "luminumbra_common/ai/MigrationSystem.h"
 #include "luminumbra_common/ai/StimulusChannels.h"
+#include "luminumbra_common/components/CreatureComponents.h"
 #include "luminumbra_common/components/InstinctComponents.h"
 #include "luminumbra_common/persistence/SavedWorldCatalog.h"
 #include "luminumbra_common/persistence/WorldPersistenceRoundtrip.h"
 #include "luminumbra_common/replay/RegionScheduleTrace.h"
 #include "luminumbra_common/systems/AetherFieldSystem.h"
+#include "luminumbra_common/systems/PhysicsSystem.h"
 #include "luminumbra_common/systems/PlantGrowthSystem.h"
 #include "luminumbra_common/systems/WeatherSystem.h"
 #include "luminumbra_common/systems/WindFieldSystem.h"
 
 #include <nlohmann/json.hpp>
 
+#include "luminumbra/core/Types.h"
+#include "luminumbra_common/components/CoreComponents.h"
+#include "luminumbra_common/components/IrrigationComponents.h"
 #include "luminumbra_common/core/JobSystem.h"
 #include "luminumbra_common/core/SystemConfig.h"
+#include "luminumbra_common/core/WaterComponents.h"
 #include "luminumbra_common/fields/EnergyFieldState.h"
 #include "luminumbra_common/persistence/WorldSaveService.h"
 #include "luminumbra_common/scripting/LuaState.h"
@@ -48,6 +59,7 @@
 #include "luminumbra_common/world/FarAuthorityOverlay.h"
 #include "luminumbra_common/world/FarWantedSet.h"
 #include "luminumbra_common/world/GameSession.h"
+#include "luminumbra_common/world/MarchingCubes.h"
 #include "luminumbra_common/world/TerrainPresetLoader.h"
 #include "luminumbra_common/world/WorldStreamingState.h"
 
@@ -716,14 +728,12 @@ std::string ReadClockTestTextRecord(const fs::path& path) {
 }
 
 nlohmann::json SessionWorldSubHashes(GameSession& session) {
-    Luminumbra::WorldStreamingState state;
-    for (const auto& chunk : session.GetWorldSystem()->snapshot_streamed_chunks())
-        state.insert_chunk(chunk);
+    const auto chunk_hashes = session.GetWorldSystem()->compute_chunk_hashes();
     std::string aether = session.GetAetherFieldSystem()->ComputeAetherSubHash();
     const auto energy = session.ComputeAetherStateSubHash();
     if (!energy.empty())
         aether = P::StableChecksum(aether + "|state:" + energy);
-    return {{"chunk", P::ComputeWorldStreamingStateHash(state)},
+    return {{"chunk", chunk_hashes.world},
             {"wind", session.GetWindFieldSystem()->ComputeWindSubHash()},
             {"weather", session.GetWeatherSystem()->ComputeWeatherSubHash()},
             {"aether", aether},
@@ -743,6 +753,68 @@ std::string SessionWorldHash(GameSession& session) {
                                hashes.at("scents"),
                                hashes.at("ecology"),
                                hashes.at("plants"));
+}
+
+TEST(GameSessionHeadlessWorldTest, DefaultAuthorityHashIgnoresStreamedCollisionNormalization) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session, loaded;
+    for (auto* current : {&session, &loaded}) {
+        current->SetRootPath(root.root_string());
+        current->SetJobSystem(&jobs);
+    }
+    ASSERT_TRUE(session.CreateWorld("Authority hash", "1337", "default"));
+    ASSERT_TRUE(session.ActiveRegionsEnabled());
+    const Luminumbra::IVec3 coords(0, 0, 0);
+    auto edited = std::make_shared<Luminumbra::Chunk>(coords);
+    edited->set_state(Luminumbra::ChunkState::Idle);
+    edited->heightmap_data = {8.0f};
+    edited->has_collision.store(true);
+    edited->mark_voxel_data_dirty();
+    ASSERT_TRUE(session.GetWorldSystem()->adopt_streamed_chunk(edited));
+    const auto before = SessionWorldHash(session);
+    ASSERT_TRUE(session.SaveWorldState());
+    ASSERT_TRUE(loaded.LoadWorld(session.GetMetadata().worldId));
+    const auto restored = loaded.GetWorldSystem()->find_streamed_chunk(coords);
+    ASSERT_NE(restored, nullptr);
+    EXPECT_FALSE(restored->has_collision.load());
+    EXPECT_EQ(SessionWorldHash(loaded), before);
+
+    // Extra generated cache residency and its collider do not become authority.
+    auto natural = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3(64, 0, 64));
+    natural->set_state(Luminumbra::ChunkState::Idle);
+    natural->heightmap_data = {12.0f};
+    natural->has_collision.store(true);
+    ASSERT_TRUE(session.GetWorldSystem()->adopt_streamed_chunk(natural));
+    EXPECT_EQ(SessionWorldHash(session), before);
+    edited->heightmap_data[0] = 9.0f;
+    edited->mark_voxel_data_dirty();
+    EXPECT_NE(SessionWorldHash(session), before);
+}
+
+TEST(GameSessionHeadlessWorldTest, DisabledRegionsKeepLegacyStreamedCollisionHash) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    session.SetRootPath(root.root_string());
+    session.SetJobSystem(&jobs);
+    session.SetActiveRegionsEnabled(false);
+    ASSERT_TRUE(session.CreateTransientWorld("Legacy hash", "1337", "default"));
+    auto chunk = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3(0, 0, 0));
+    chunk->set_state(Luminumbra::ChunkState::Idle);
+    chunk->heightmap_data = {8.0f};
+    ASSERT_TRUE(session.GetWorldSystem()->adopt_streamed_chunk(chunk));
+    Luminumbra::WorldStreamingState legacy;
+    legacy.insert_chunk(chunk);
+    const auto before = SessionWorldHash(session);
+    EXPECT_EQ(SessionWorldSubHashes(session).at("chunk"),
+              P::ComputeWorldStreamingStateHash(legacy));
+    chunk->has_collision.store(true);
+    EXPECT_EQ(SessionWorldSubHashes(session).at("chunk"),
+              P::ComputeWorldStreamingStateHash(legacy));
+    EXPECT_NE(SessionWorldHash(session), before);
 }
 
 entt::entity ClockTestPlant(entt::registry& registry, const Luminumbra::Vec3& position) {
@@ -1936,10 +2008,12 @@ TEST(GameSessionHeadlessWorldTest, RegionScheduleAndWorldHashResumeAcrossBothHol
             // Change live simulation after the save at tick 3. At freeze, the
             // durable copy is stale and must lose to the dirty resident chunk.
             for (auto* session : {&original, &uninterrupted, &render_only, &loaded}) {
-                const auto chunks = session->GetWorldSystem()->snapshot_streamed_chunks();
-                ASSERT_EQ(chunks.size(), 1u);
-                chunks.front()->heightmap_data[0] = 12.0f;
-                chunks.front()->mark_voxel_data_dirty();
+                const auto chunk = session->GetWorldSystem()->find_streamed_chunk(coords);
+                ASSERT_NE(chunk, nullptr);
+                ASSERT_EQ(chunk->get_id(), Luminumbra::Chunk::calculate_id(coords));
+                ASSERT_FALSE(chunk->heightmap_data.empty());
+                chunk->heightmap_data[0] = 12.0f;
+                chunk->mark_voxel_data_dirty();
             }
         }
         for (auto* session : {&original, &uninterrupted, &render_only}) {
@@ -2291,7 +2365,7 @@ TEST(GameSessionHeadlessWorldTest, QueuedRegionWorkRefusesSaveUntilTickCompletes
     EXPECT_EQ(SessionWorldHash(loaded), SessionWorldHash(session));
 }
 
-TEST(GameSessionHeadlessWorldTest, IdleRetentionMatchesWorkAndAllResidentOwnership) {
+TEST(GameSessionHeadlessWorldTest, IdleRetentionUsesWorkRegardlessOfStreamedResidency) {
     using Luminumbra::world::ActiveRegionLedger;
     using Luminumbra::world::RegionKey;
     using Luminumbra::world::RegionWork;
@@ -2299,12 +2373,15 @@ TEST(GameSessionHeadlessWorldTest, IdleRetentionMatchesWorkAndAllResidentOwnersh
     const HeadlessRoot root;
     JobSystem jobs;
     jobs.startup(1);
-    GameSession session;
-    session.SetRootPath(root.root_string());
-    session.SetJobSystem(&jobs);
-    session.SetActiveRegionsEnabled(true);
+    GameSession session, peer;
+    for (auto* current : {&session, &peer}) {
+        current->SetRootPath(root.root_string());
+        current->SetJobSystem(&jobs);
+        current->SetActiveRegionsEnabled(true);
+    }
     ASSERT_TRUE(session.CreateWorld("Idle retention", "1337", "default"));
     ASSERT_TRUE(session.SaveWorldState());
+    ASSERT_TRUE(peer.CreateTransientWorld("Idle peer", "1337", "default"));
 
     const RegionKey pending{40, -40}, duplicate{41, -40}, zero_count{42, -40};
     const RegionKey resident{43, -40}, pristine{44, -40}, unowned{45, -40};
@@ -2325,9 +2402,11 @@ TEST(GameSessionHeadlessWorldTest, IdleRetentionMatchesWorkAndAllResidentOwnersh
     before_idle.write_metadata(metadata);
     ASSERT_TRUE(
         P::WorldSaveService::save_metadata_and_active_regions(metadata.dump(), staged, save));
-    ASSERT_TRUE(session.LoadWorldStateFrom(save)) << session.GetWorldOpenError();
-    ASSERT_EQ(session.GetActiveRegionLedger().records().size(), keys.size());
-    session.SetReplicatedSimulationAnchors({});
+    for (auto* current : {&session, &peer}) {
+        ASSERT_TRUE(current->LoadWorldStateFrom(save)) << current->GetWorldOpenError();
+        ASSERT_EQ(current->GetActiveRegionLedger().records().size(), keys.size());
+        current->SetReplicatedSimulationAnchors({});
+    }
 
     for (const auto key : {resident, pristine, loading, pristine_loading}) {
         auto chunk =
@@ -2341,7 +2420,15 @@ TEST(GameSessionHeadlessWorldTest, IdleRetentionMatchesWorkAndAllResidentOwnersh
         // Adoption settles populated Loading chunks; explicitly exercise an in-flight resident.
         if (key == loading || key == pristine_loading)
             chunk->set_state(Luminumbra::ChunkState::Loading);
-        // Residency protects the record regardless of provenance or lifecycle state.
+        // Both peers have identical authoritative edits; only this session has
+        // the extra pristine residents, including an in-flight Loading cache.
+        if (key == resident || key == loading) {
+            auto copy = std::make_shared<Luminumbra::Chunk>(chunk->get_coords());
+            copy->set_state(Luminumbra::ChunkState::Idle);
+            copy->heightmap_data = chunk->heightmap_data;
+            copy->mark_voxel_data_dirty();
+            ASSERT_TRUE(peer.GetWorldSystem()->adopt_streamed_chunk(copy));
+        }
         ASSERT_FALSE(session.GetActiveRegionLedger().records().at(key).edited);
     }
     const std::array work{RegionWork{pending, 3, 0, 0, 0},
@@ -2349,11 +2436,11 @@ TEST(GameSessionHeadlessWorldTest, IdleRetentionMatchesWorkAndAllResidentOwnersh
                           RegionWork{duplicate, 2, 0, 0, 0},
                           RegionWork{zero_count, 0, 0, 0, 0},
                           RegionWork{zero_count, 0, 0, 0, 0}};
-    for (const auto& entry : work)
-        session.RecordActiveRegionWork(entry);
+    for (auto* current : {&session, &peer})
+        for (const auto& entry : work)
+            current->RecordActiveRegionWork(entry);
     auto expected = session.GetActiveRegionLedger();
-    const std::array owned_keys{
-        pending, duplicate, zero_count, resident, pristine, loading, pristine_loading};
+    const std::array owned_keys{pending, duplicate, zero_count};
     const auto expected_schedule = expected.schedule(
         WorldClock(ActiveRegionLedger::kIdleEvictionTicks),
         std::span<const Luminumbra::Vec3>{},
@@ -2363,7 +2450,14 @@ TEST(GameSessionHeadlessWorldTest, IdleRetentionMatchesWorkAndAllResidentOwnersh
             return std::find(owned_keys.begin(), owned_keys.end(), key) != owned_keys.end();
         });
     const auto dt = session.GetSimulationClock().fixed_dt();
-    ASSERT_EQ(session.TickSimulation(dt), 1u);
+    for (auto* current : {&session, &peer})
+        ASSERT_EQ(current->TickSimulation(dt), 1u);
+    EXPECT_EQ(session.GetActiveRegionLedger().canonical_bytes(),
+              peer.GetActiveRegionLedger().canonical_bytes());
+    EXPECT_EQ(
+        session.FoldClockIntoEcologyHash(
+            luminumbra::ai::ComputeEcologySubHash(session.GetRegistry())),
+        peer.FoldClockIntoEcologyHash(luminumbra::ai::ComputeEcologySubHash(peer.GetRegistry())));
     ASSERT_FALSE(session.GetRegionSchedulerFault());
     EXPECT_EQ(session.GetRegionSchedule(), expected_schedule);
     EXPECT_EQ(session.GetActiveRegionLedger().canonical_bytes(), expected.canonical_bytes());
@@ -2374,22 +2468,622 @@ TEST(GameSessionHeadlessWorldTest, IdleRetentionMatchesWorkAndAllResidentOwnersh
     EXPECT_FALSE(session.GetActiveRegionLedger().records().contains(unowned));
 
     // Consumed work must stop owning records on the next scheduling call.
-    const auto next_schedule = expected.schedule(
-        WorldClock(ActiveRegionLedger::kIdleEvictionTicks + 1),
-        std::span<const Luminumbra::Vec3>{},
-        {},
-        {},
-        [resident, pristine, loading, pristine_loading](RegionKey key) {
-            return key == resident || key == pristine || key == loading || key == pristine_loading;
-        });
-    ASSERT_EQ(session.TickSimulation(dt), 1u);
+    const auto next_schedule =
+        expected.schedule(WorldClock(ActiveRegionLedger::kIdleEvictionTicks + 1),
+                          std::span<const Luminumbra::Vec3>{},
+                          {},
+                          {},
+                          [](RegionKey) { return false; });
+    for (auto* current : {&session, &peer})
+        ASSERT_EQ(current->TickSimulation(dt), 1u);
+    EXPECT_EQ(session.GetActiveRegionLedger().canonical_bytes(),
+              peer.GetActiveRegionLedger().canonical_bytes());
+    EXPECT_EQ(
+        session.FoldClockIntoEcologyHash(
+            luminumbra::ai::ComputeEcologySubHash(session.GetRegistry())),
+        peer.FoldClockIntoEcologyHash(luminumbra::ai::ComputeEcologySubHash(peer.GetRegistry())));
     ASSERT_FALSE(session.GetRegionSchedulerFault());
     EXPECT_EQ(session.GetRegionSchedule(), next_schedule);
     EXPECT_EQ(session.GetActiveRegionLedger().canonical_bytes(), expected.canonical_bytes());
     EXPECT_EQ(session.GetActiveRegionLedger().encode(), expected.encode());
-    ASSERT_EQ(session.GetActiveRegionLedger().records().size(), 4u);
-    for (const auto key : {resident, pristine, loading, pristine_loading})
-        EXPECT_TRUE(session.GetActiveRegionLedger().records().contains(key));
+    EXPECT_TRUE(session.GetActiveRegionLedger().records().empty());
+}
+
+TEST(GameSessionHeadlessWorldTest, FrozenDigestSurvivesDurableCameraEviction) {
+    using Luminumbra::Chunk;
+    using Luminumbra::ChunkState;
+    using Luminumbra::IVec3;
+    using Luminumbra::Vec3;
+    using Luminumbra::world::RegionKey;
+    using Luminumbra::world::RegionState;
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession resident, moved, loaded;
+    for (auto* session : {&resident, &moved, &loaded}) {
+        session->SetRootPath(root.root_string());
+        session->SetJobSystem(&jobs);
+        session->SetActiveRegionsEnabled(true);
+        session->SetRegionSchedulerConfig({0, 1, 1});
+    }
+    ASSERT_TRUE(resident.CreateWorld("Resident edits", "1337", "default"));
+    ASSERT_TRUE(moved.CreateWorld("Parked edits", "1337", "default"));
+    const RegionKey key{-40, -40};
+    const float x = static_cast<float>(key.x * 512 + 24);
+    const float z = static_cast<float>(key.z * 512 + 24);
+    const float height = resident.GetWorldSystem()->GetTerrainHeightAt(x, z);
+    const IVec3 coords(
+        key.x * 32 + 1, static_cast<int>(std::floor(height / 16.0f)), key.z * 32 + 1);
+    const Vec3 edit_anchor(x, static_cast<float>(coords.y * 16 + 8), z);
+    std::array<std::shared_ptr<Chunk>, 2> chunks;
+    for (std::size_t index = 0; index < chunks.size(); ++index) {
+        auto* session = index == 0 ? &resident : &moved;
+        auto& chunk = chunks[index];
+        chunk = std::make_shared<Chunk>(coords);
+        chunk->set_state(ChunkState::Idle);
+        chunk->sdf_data.assign(std::size_t{17} * 17 * 17, 1.0f);
+        chunk->heightmap_data.assign(std::size_t{17} * 17, 8.0f);
+        chunk->mark_voxel_data_dirty();
+        ASSERT_TRUE(session->GetWorldSystem()->adopt_streamed_chunk(chunk));
+        session->PinActiveRegion(key, true);
+        session->SetReplicatedSimulationAnchors({});
+        ASSERT_TRUE(session->SaveWorldState());
+        // The current authoritative edit must override the stale durable image.
+        chunk->heightmap_data[0] = 12.0f;
+        chunk->mark_voxel_data_dirty();
+        // Complete authority remains valid during a render lifecycle transition.
+        chunk->set_state(ChunkState::Loading);
+    }
+    const auto expected_digest = P::WorldSaveService::region_simulation_digest(
+        {}, key, P::RegionDigestInputs{{chunks[0]}, {}, true});
+    EXPECT_NE(expected_digest,
+              P::WorldSaveService::region_simulation_digest(moved.GetWorldSaveDir(), key, {}));
+    EXPECT_NE(expected_digest, P::WorldSaveService::region_simulation_digest({}, key, {}));
+
+    auto* world = moved.GetWorldSystem();
+    // Four render frames reach the activation pass. Water remains attached:
+    // render frames cannot mutate authoritative water.
+    world->debug_set_streaming_radius_cap(1);
+    chunks[1]->has_collision.store(true);
+    const auto move_camera = [&](const Vec3& camera) {
+        for (int frame = 0; frame < 4; ++frame) {
+            world->update(moved.GetRegistry(), camera, nullptr);
+            world->wait_for_streaming_jobs();
+        }
+    };
+    move_camera(moved.GetMetadata().spawnPoint);
+    ASSERT_EQ(world->find_streamed_chunk(coords), nullptr);
+    EXPECT_EQ(world->simulation_chunk_count(), 0u);
+    EXPECT_EQ(P::WorldSaveService::region_simulation_digest(moved.GetWorldSaveDir(), key, {}),
+              expected_digest);
+    EXPECT_FALSE(chunks[1]->has_collision.load());
+    ASSERT_EQ(resident.GetWorldSystem()->find_streamed_chunk(coords), chunks[0]);
+
+    const auto dt = resident.GetSimulationClock().fixed_dt();
+    for (int tick = 1; tick <= 3; ++tick) {
+        for (auto* session : {&resident, &moved}) {
+            session->RecordActiveRegionWork({key, 1, 0, 0, 0});
+            ASSERT_EQ(session->TickSimulation(dt), 1u);
+            ASSERT_FALSE(session->GetRegionSchedulerFault());
+        }
+        EXPECT_EQ(resident.GetActiveRegionLedger().canonical_bytes(),
+                  moved.GetActiveRegionLedger().canonical_bytes());
+        EXPECT_EQ(resident.FoldClockIntoEcologyHash(
+                      luminumbra::ai::ComputeEcologySubHash(resident.GetRegistry())),
+                  moved.FoldClockIntoEcologyHash(
+                      luminumbra::ai::ComputeEcologySubHash(moved.GetRegistry())));
+    }
+    ASSERT_EQ(moved.GetActiveRegionLedger().records().at(key).state, RegionState::Frozen);
+    EXPECT_EQ(moved.GetActiveRegionLedger().records().at(key).frozen_digest, expected_digest);
+    EXPECT_EQ(resident.GetActiveRegionLedger().records().at(key).frozen_digest, expected_digest);
+    ASSERT_TRUE(moved.SaveWorldState());
+    EXPECT_FALSE(chunks[1]->is_voxel_data_dirty());
+    EXPECT_EQ(P::WorldSaveService::region_simulation_digest(moved.GetWorldSaveDir(), key, {}),
+              expected_digest);
+    ASSERT_TRUE(loaded.LoadWorld(moved.GetMetadata().worldId)) << loaded.GetWorldOpenError();
+    EXPECT_EQ(loaded.GetActiveRegionLedger().canonical_bytes(),
+              moved.GetActiveRegionLedger().canonical_bytes());
+    EXPECT_EQ(
+        loaded.FoldClockIntoEcologyHash(
+            luminumbra::ai::ComputeEcologySubHash(loaded.GetRegistry())),
+        moved.FoldClockIntoEcologyHash(luminumbra::ai::ComputeEcologySubHash(moved.GetRegistry())));
+
+    // Both synchronous surface loading and ordinary streaming restore the
+    // durable authority rather than generating over edited data.
+    world->EnsureSurfaceReadyNear(edit_anchor, moved.GetPhysicsSystem(), 0, 0);
+    ASSERT_NE(world->find_streamed_chunk(coords), nullptr);
+    EXPECT_NE(world->find_streamed_chunk(coords), chunks[1]);
+    EXPECT_EQ(world->simulation_chunk_count(), 0u);
+    move_camera(moved.GetMetadata().spawnPoint);
+    ASSERT_EQ(world->find_streamed_chunk(coords), nullptr);
+    move_camera(edit_anchor);
+    ASSERT_NE(world->find_streamed_chunk(coords), nullptr);
+    EXPECT_NE(world->find_streamed_chunk(coords), chunks[1]);
+    EXPECT_NE(world->find_streamed_chunk(coords)->get_state(), ChunkState::Loading);
+    EXPECT_EQ(world->simulation_chunk_count(), 0u);
+    EXPECT_EQ(P::WorldSaveService::region_simulation_digest(
+                  {},
+                  key,
+                  P::RegionDigestInputs{world->snapshot_region_authority(key.x, key.z), {}, true}),
+              expected_digest);
+    world->clear_world(nullptr);
+    EXPECT_TRUE(world->snapshot_region_authority(key.x, key.z).empty());
+    EXPECT_EQ(world->simulation_chunk_count(), 0u);
+}
+
+namespace {
+std::shared_ptr<Luminumbra::Chunk> FlowingRegionChunk(const Luminumbra::IVec3& coords) {
+    auto chunk = std::make_shared<Luminumbra::Chunk>(coords);
+    chunk->set_state(Luminumbra::ChunkState::Idle);
+    chunk->sdf_data.assign(std::size_t{17} * 17 * 17, 1.0f);
+    chunk->heightmap_data.assign(std::size_t{17} * 17, 0.0f);
+    chunk->material_data.assign(std::size_t{17} * 17 * 17, 2);
+    constexpr std::size_t cells = std::size_t{16} * 16;
+    chunk->has_water_sim.store(true);
+    chunk->current_water_resolution.store(16);
+    chunk->water_depth_mm.assign(cells, 1000);
+    chunk->water_depth_mm[15] = 4000;
+    chunk->water_bed_mm.assign(cells, 0);
+    chunk->water_edge_flux.assign(2 * cells, 7);
+    chunk->water_level_data.assign(cells, 1.0f);
+    chunk->water_flow_data.assign(cells, Luminumbra::Vec2(0.0f));
+    chunk->water_sim_terrain_height.assign(cells, 0.0f);
+    chunk->water_rest_level.assign(cells, 0.0f);
+    chunk->is_water_sleeping.store(false);
+    chunk->max_water_delta_last_tick = 0.25f;
+    chunk->ticks_below_threshold = 2;
+    chunk->mark_voxel_data_dirty();
+    return chunk;
+}
+} // namespace
+
+TEST(GameSessionHeadlessWorldTest, BoundaryWaterAndFreezeIgnoreCameraFramesAndRestore) {
+    using Luminumbra::IVec3;
+    using Luminumbra::Vec3;
+    using Luminumbra::world::RegionKey;
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession resident, restored, reloaded;
+    for (auto* session : {&resident, &restored, &reloaded}) {
+        session->SetRootPath(root.root_string());
+        session->SetJobSystem(&jobs);
+        session->SetActiveRegionsEnabled(true);
+        session->SetWeatherRainEnabled(false);
+        session->SetWaterHighResEnabled(true);
+        session->SetRegionSchedulerConfig({0, 1, 1});
+    }
+    ASSERT_TRUE(resident.CreateWorld("Boundary resident", "1337", "default"));
+    ASSERT_TRUE(restored.CreateWorld("Boundary durable", "1337", "default"));
+    const std::array keys{RegionKey{0, 0}, RegionKey{1, 0}};
+    for (const auto coords : {IVec3(31, 0, 0), IVec3(32, 0, 0)}) {
+        auto live = FlowingRegionChunk(coords);
+        auto durable = FlowingRegionChunk(coords);
+        ASSERT_TRUE(resident.GetWorldSystem()->adopt_streamed_chunk(live));
+        ASSERT_TRUE(
+            P::WorldSaveService::persist_chunk_authority(restored.GetWorldSaveDir(), durable));
+    }
+    for (auto* session : {&resident, &restored}) {
+        session->SetReplicatedSimulationAnchors({Vec3(504, 8, 8)});
+        for (const auto key : keys)
+            session->NotifyGroundObjectEdit(Vec3(static_cast<float>(key.x * 512 + 8), 8, 8));
+    }
+    auto* camera_world = restored.GetWorldSystem();
+    camera_world->debug_set_streaming_radius_cap(1);
+    const auto camera_frames = [&] {
+        for (int frame = 0; frame < 4; ++frame) {
+            camera_world->update(restored.GetRegistry(), Vec3(-4096, 8, -4096), nullptr);
+            camera_world->wait_for_streaming_jobs();
+        }
+    };
+    camera_frames();
+    // Rehydration must replace unrelated render-cache contents at the same ids,
+    // including their collider bookkeeping, before any authoritative water tick.
+    for (const auto coords : {IVec3(31, 0, 0), IVec3(32, 0, 0)}) {
+        auto cache = std::make_shared<Luminumbra::Chunk>(coords);
+        cache->set_state(Luminumbra::ChunkState::Idle);
+        cache->heightmap_data.assign(std::size_t{17} * 17, 999.0f);
+        cache->has_collision.store(true);
+        ASSERT_TRUE(camera_world->adopt_streamed_chunk(cache));
+    }
+    const auto dt = resident.GetSimulationClock().fixed_dt();
+    for (int tick = 0; tick < 8; ++tick) {
+        ASSERT_EQ(resident.TickSimulation(dt), 1u);
+        ASSERT_EQ(restored.TickSimulation(dt), 1u);
+        ASSERT_FALSE(resident.GetRegionSchedulerFault());
+        ASSERT_FALSE(restored.GetRegionSchedulerFault());
+        EXPECT_TRUE(camera_world->find_streamed_chunk(IVec3(31, 0, 0))->has_collision.load());
+        const auto restored_ground =
+            restored.GetPhysicsSystem()->audio_raycast(Vec3(504, 2, 8), Vec3(504, -2, 8));
+        ASSERT_TRUE(restored_ground.hit);
+        EXPECT_NEAR(restored_ground.hit_point.y, 0.0f, 0.01f);
+        const auto before_frames = P::WorldSaveService::region_simulation_digest(
+            {},
+            keys[0],
+            P::RegionDigestInputs{camera_world->snapshot_region_authority(0, 0), {}, true});
+        camera_frames();
+        EXPECT_EQ(
+            before_frames,
+            P::WorldSaveService::region_simulation_digest(
+                {},
+                keys[0],
+                P::RegionDigestInputs{camera_world->snapshot_region_authority(0, 0), {}, true}));
+        for (const auto key : keys) {
+            EXPECT_EQ(P::WorldSaveService::region_simulation_digest(
+                          {},
+                          key,
+                          P::RegionDigestInputs{
+                              resident.GetWorldSystem()->snapshot_region_authority(key.x, key.z),
+                              {},
+                              true}),
+                      P::WorldSaveService::region_simulation_digest(
+                          restored.GetWorldSaveDir(),
+                          key,
+                          P::RegionDigestInputs{
+                              camera_world->snapshot_region_authority(key.x, key.z), {}, true}));
+        }
+        const auto live_oracle = resident.GetWorldSystem()->compute_chunk_hashes();
+        const auto durable_oracle = camera_world->compute_chunk_hashes();
+        EXPECT_EQ(live_oracle.world, durable_oracle.world);
+        EXPECT_EQ(live_oracle.sub.water, durable_oracle.sub.water);
+        EXPECT_EQ(resident.GetActiveRegionLedger().canonical_bytes(),
+                  restored.GetActiveRegionLedger().canonical_bytes());
+    }
+    EXPECT_GT(resident.GetWorldSystem()->debug_water_seam_wet_pairs(), 0);
+    ASSERT_NE(resident.GetWorldSystem()->find_streamed_chunk(IVec3(31, 0, 0))->water_depth_mm,
+              FlowingRegionChunk(IVec3(31, 0, 0))->water_depth_mm);
+    ASSERT_TRUE(restored.SaveWorldState());
+    ASSERT_TRUE(reloaded.LoadWorld(restored.GetMetadata().worldId));
+    reloaded.SetReplicatedSimulationAnchors({Vec3(504, 8, 8)});
+    for (auto* session : {&resident, &restored, &reloaded})
+        ASSERT_EQ(session->TickSimulation(dt), 1u);
+    EXPECT_TRUE(
+        reloaded.GetWorldSystem()->find_streamed_chunk(IVec3(31, 0, 0))->is_voxel_data_dirty());
+    for (const auto key : keys) {
+        EXPECT_EQ(
+            P::WorldSaveService::region_simulation_digest(
+                {},
+                key,
+                P::RegionDigestInputs{
+                    resident.GetWorldSystem()->snapshot_region_authority(key.x, key.z), {}, true}),
+            P::WorldSaveService::region_simulation_digest(
+                reloaded.GetWorldSaveDir(),
+                key,
+                P::RegionDigestInputs{
+                    reloaded.GetWorldSystem()->snapshot_region_authority(key.x, key.z), {}, true}));
+    }
+    for (auto* session : {&resident, &restored, &reloaded})
+        session->SetReplicatedSimulationAnchors({});
+    for (int tick = 0; tick < 8; ++tick) {
+        for (auto* session : {&resident, &restored, &reloaded}) {
+            for (const auto key : keys)
+                session->RecordActiveRegionWork({key, 1, 0, 0, 0});
+            ASSERT_EQ(session->TickSimulation(dt), 1u);
+            ASSERT_FALSE(session->GetRegionSchedulerFault());
+        }
+        camera_frames();
+        for (const auto key : keys)
+            EXPECT_TRUE(camera_world->snapshot_region_authority(key.x, key.z).empty());
+        for (auto* peer : {&restored, &reloaded}) {
+            EXPECT_EQ(resident.GetWorldSystem()->compute_chunk_hashes().world,
+                      peer->GetWorldSystem()->compute_chunk_hashes().world);
+            EXPECT_EQ(resident.GetWorldSystem()->compute_chunk_hashes().sub.water,
+                      peer->GetWorldSystem()->compute_chunk_hashes().sub.water);
+            EXPECT_EQ(resident.GetActiveRegionLedger().canonical_bytes(),
+                      peer->GetActiveRegionLedger().canonical_bytes());
+            EXPECT_EQ(resident.FoldClockIntoEcologyHash(
+                          luminumbra::ai::ComputeEcologySubHash(resident.GetRegistry())),
+                      peer->FoldClockIntoEcologyHash(
+                          luminumbra::ai::ComputeEcologySubHash(peer->GetRegistry())));
+        }
+    }
+    for (const auto key : keys) {
+        const auto& record = resident.GetActiveRegionLedger().records().at(key);
+        EXPECT_EQ(record.state, Luminumbra::world::RegionState::Frozen);
+        EXPECT_NE(record.frozen_digest, 0u);
+    }
+}
+
+TEST(GameSessionHeadlessWorldTest, BoundedSnapshotLoadValidatesRecordsBeyondResidentPrefix) {
+    const HeadlessRoot root;
+    const auto directory = root.path() / "bounded-save";
+    auto first = FlowingRegionChunk(Luminumbra::IVec3(0, 0, 0));
+    auto second = FlowingRegionChunk(Luminumbra::IVec3(32, 0, 0));
+    ASSERT_TRUE(P::WorldSaveService::persist_chunk_authority(directory, first));
+    ASSERT_TRUE(P::WorldSaveService::persist_chunk_authority(directory, second));
+    const P::WorldSaveService service;
+    Luminumbra::WorldStreamingState state;
+    std::vector<std::string> errors;
+    ASSERT_TRUE(service.load_world(state, directory, errors, {}, 1, true));
+    EXPECT_EQ(state.size(), 1u);
+    EXPECT_TRUE(errors.empty());
+    // A bad record beyond the retained prefix still refuses the complete load.
+    second->sdf_data.resize(3);
+    second->mark_voxel_data_dirty();
+    ASSERT_TRUE(P::WorldSaveService::persist_chunk_authority(directory, second));
+    EXPECT_FALSE(service.load_world(state, directory, errors, {}, 1, true));
+    EXPECT_TRUE(state.empty());
+    ASSERT_FALSE(errors.empty());
+    EXPECT_NE(errors.front().find("SDF lattice"), std::string::npos);
+}
+
+TEST(GameSessionHeadlessWorldTest, RenderingCannotRegenerateCoarseEditedAuthority) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    session.SetRootPath(root.root_string());
+    session.SetJobSystem(&jobs);
+    session.SetActiveRegionsEnabled(true);
+    ASSERT_TRUE(session.CreateTransientWorld("Coarse authority", "1337", "default"));
+    auto* world = session.GetWorldSystem();
+    const float x = 520.0f, z = 520.0f;
+    const float height = world->GetTerrainHeightAt(x, z);
+    const Luminumbra::IVec3 coords(32, static_cast<int>(std::floor(height / 16.0f)), 32);
+    auto chunk = FlowingRegionChunk(coords);
+    chunk->sdf_data.clear();
+    ASSERT_TRUE(world->adopt_streamed_chunk(chunk));
+    const auto before = P::WorldSaveService::region_simulation_digest(
+        {}, {1, 1}, P::RegionDigestInputs{{chunk}, {}, true});
+    world->EnsureSurfaceReadyNear(
+        Luminumbra::Vec3(x, height + 8, z), session.GetPhysicsSystem(), 0, 0);
+    world->wait_for_streaming_jobs();
+    EXPECT_TRUE(chunk->sdf_data.empty());
+    EXPECT_EQ(P::WorldSaveService::region_simulation_digest(
+                  {}, {1, 1}, P::RegionDigestInputs{{chunk}, {}, true}),
+              before);
+}
+
+TEST(GameSessionHeadlessWorldTest, ExplicitWaterSourcesOwnChunksWithoutRendering) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    session.SetRootPath(root.root_string());
+    session.SetJobSystem(&jobs);
+    session.SetActiveRegionsEnabled(true);
+    session.SetWeatherRainEnabled(false);
+    ASSERT_TRUE(session.CreateTransientWorld("Source authority", "1337", "default"));
+    const Luminumbra::Vec3 position(520, 8, 24);
+    session.SetReplicatedSimulationAnchors({position});
+    const auto source = session.GetRegistry().create();
+    session.GetRegistry().emplace<Luminumbra::Components::TransformComponent>(source).position =
+        position;
+    session.GetRegistry()
+        .emplace<Luminumbra::Components::FlowingWaterSourceComponent>(source)
+        .flow_rate = 40.0f;
+    // Irrigation is an independent component with a different layout. The two
+    // emitters must coexist without aliasing entt storage across systems.
+    session.GetRegistry().emplace<Luminumbra::Components::WaterSourceComponent>(source).output =
+        123;
+    ASSERT_TRUE(session.GetWorldSystem()->snapshot_streamed_chunks().empty());
+    ASSERT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 1u);
+    ASSERT_FALSE(session.GetRegionSchedulerFault());
+    auto chunk = session.GetWorldSystem()->find_streamed_chunk(Luminumbra::IVec3(32, 0, 1));
+    ASSERT_NE(chunk, nullptr);
+    EXPECT_TRUE(chunk->has_water_sim.load());
+    EXPECT_EQ(
+        session.GetRegistry().get<Luminumbra::Components::WaterSourceComponent>(source).output,
+        123);
+    EXPECT_EQ(session.GetRegistry()
+                  .get<Luminumbra::Components::FlowingWaterSourceComponent>(source)
+                  .flow_rate,
+              40.0f);
+    std::set<Luminumbra::ChunkID> expected_chunks;
+    const auto centre = Luminumbra::Systems::SHIELD_WorldSystem::world_to_chunk_coords(position);
+    for (int dz = -1; dz <= 1; ++dz) {
+        for (int dx = -1; dx <= 1; ++dx) {
+            const float x = static_cast<float>(centre.x + dx) * 16 + 8;
+            const float z = static_cast<float>(centre.z + dz) * 16 + 8;
+            const auto* world = session.GetWorldSystem();
+            const float terrain = world->GetTerrainHeightAt(x, z);
+            for (const float height : {terrain, std::max(terrain, world->WaterLevelAt(x, z))}) {
+                const auto coords = Luminumbra::Systems::SHIELD_WorldSystem::world_to_chunk_coords(
+                    Luminumbra::Vec3(x, height, z));
+                expected_chunks.insert(Luminumbra::Chunk::calculate_id(coords));
+                ASSERT_NE(world->find_streamed_chunk(coords), nullptr);
+                EXPECT_TRUE(world->find_streamed_chunk(coords)->has_water_sim.load());
+            }
+        }
+    }
+    expected_chunks.insert(chunk->get_id());
+    EXPECT_EQ(session.GetWorldSystem()->simulation_chunk_count(), expected_chunks.size());
+    EXPECT_GT(session.GetWorldSystem()->debug_water_source_injected_mm(), 0);
+}
+
+TEST(GameSessionHeadlessWorldTest, WaterInitializationUsesIdsAcrossDifferentInsertionOrders) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession forward, reverse;
+    for (auto* session : {&forward, &reverse}) {
+        session->SetRootPath(root.root_string());
+        session->SetJobSystem(&jobs);
+        session->SetActiveRegionsEnabled(true);
+        session->SetWeatherRainEnabled(false);
+        session->SetWaterHighResEnabled(false);
+        ASSERT_TRUE(session->CreateTransientWorld("Water admission", "1337", "default"));
+        session->SetReplicatedSimulationAnchors({Luminumbra::Vec3(504, 8, 8)});
+    }
+    for (int index = 0; index < 10; ++index) {
+        for (auto* session : {&forward, &reverse}) {
+            const int x = session == &forward ? 27 + index : 36 - index;
+            auto chunk = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3(x, 0, 0));
+            chunk->sdf_data.assign(std::size_t{17} * 17 * 17, 1.0f);
+            chunk->heightmap_data.assign(std::size_t{17} * 17, 0.0f);
+            chunk->current_lod.store(session == &forward ? 0 : 2);
+            chunk->set_state(Luminumbra::ChunkState::Idle);
+            chunk->mark_voxel_data_dirty();
+            ASSERT_TRUE(session->GetWorldSystem()->adopt_streamed_chunk(chunk));
+        }
+    }
+    for (int tick = 0; tick < 3; ++tick) {
+        ASSERT_EQ(forward.TickSimulation(forward.GetSimulationClock().fixed_dt()), 1u);
+        ASSERT_EQ(reverse.TickSimulation(reverse.GetSimulationClock().fixed_dt()), 1u);
+        for (const auto key :
+             {Luminumbra::world::RegionKey{0, 0}, Luminumbra::world::RegionKey{1, 0}}) {
+            EXPECT_EQ(P::WorldSaveService::region_simulation_digest(
+                          {},
+                          key,
+                          P::RegionDigestInputs{
+                              forward.GetWorldSystem()->snapshot_region_authority(key.x, key.z),
+                              {},
+                              true}),
+                      P::WorldSaveService::region_simulation_digest(
+                          {},
+                          key,
+                          P::RegionDigestInputs{
+                              reverse.GetWorldSystem()->snapshot_region_authority(key.x, key.z),
+                              {},
+                              true}));
+        }
+    }
+}
+
+TEST(GameSessionHeadlessWorldTest,
+     SuccessiveEditedRegionsReleaseChunksAndRestoreCompleteAuthority) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    session.SetRootPath(root.root_string());
+    session.SetJobSystem(&jobs);
+    session.SetActiveRegionsEnabled(true);
+    ASSERT_TRUE(session.CreateWorld("Bounded authority", "1337", "default"));
+    session.SetReplicatedSimulationAnchors({});
+    auto* world = session.GetWorldSystem();
+    world->debug_set_streaming_radius_cap(1);
+    const auto evict = [&] {
+        for (int frame = 0; frame < 4; ++frame) {
+            world->update(session.GetRegistry(), session.GetMetadata().spawnPoint, nullptr);
+            world->wait_for_streaming_jobs();
+        }
+    };
+    for (int region = 0; region < 12; ++region) {
+        const Luminumbra::world::RegionKey key{10 + region * 4, -40};
+        const Luminumbra::IVec3 coords(key.x * 32 + 1, 0, key.z * 32 + 1);
+        auto chunk = FlowingRegionChunk(coords);
+        const auto expected = P::WorldSaveService::region_simulation_digest(
+            {}, key, P::RegionDigestInputs{{chunk}, {}, true});
+        std::weak_ptr<Luminumbra::Chunk> ownership = chunk;
+        ASSERT_TRUE(world->adopt_streamed_chunk(chunk));
+        chunk.reset();
+        evict();
+        ASSERT_FALSE(world->authority_fault());
+        EXPECT_TRUE(ownership.expired()) << region;
+        EXPECT_EQ(world->simulation_chunk_count(), 0u);
+        EXPECT_TRUE(world->snapshot_region_authority(key.x, key.z).empty());
+        EXPECT_LE(world->snapshot_streamed_chunks().size(), 8192u);
+        EXPECT_EQ(P::WorldSaveService::region_simulation_digest(session.GetWorldSaveDir(), key, {}),
+                  expected);
+        world->dispatch_generation_jobs(std::vector<Luminumbra::IVec3>{coords});
+        world->wait_for_streaming_jobs();
+        chunk = world->find_streamed_chunk(coords);
+        ASSERT_NE(chunk, nullptr);
+        EXPECT_EQ(P::WorldSaveService::region_simulation_digest(
+                      {}, key, P::RegionDigestInputs{{chunk}, {}, true}),
+                  expected);
+        EXPECT_FALSE(chunk->is_voxel_data_dirty());
+        ownership = chunk;
+        chunk.reset();
+        evict();
+        EXPECT_TRUE(ownership.expired()) << region;
+    }
+    const auto alternate = root.path() / "bounded-snapshot";
+    ASSERT_TRUE(session.SaveWorldStateTo(alternate));
+    for (int region = 0; region < 12; ++region) {
+        const Luminumbra::world::RegionKey key{10 + region * 4, -40};
+        EXPECT_EQ(
+            P::WorldSaveService::region_simulation_digest(alternate, key, {}),
+            P::WorldSaveService::region_simulation_digest(session.GetWorldSaveDir(), key, {}));
+    }
+}
+
+TEST(GameSessionHeadlessWorldTest, EvictionPersistenceFailureRetainsAuthorityAndStopsSession) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    session.SetRootPath(root.root_string());
+    session.SetJobSystem(&jobs);
+    session.SetActiveRegionsEnabled(true);
+    ASSERT_TRUE(session.CreateWorld("Failed authority eviction", "1337", "default"));
+    session.SetReplicatedSimulationAnchors({});
+    const Luminumbra::world::RegionKey key{-40, -40};
+    const Luminumbra::IVec3 coords(-1279, 0, -1279);
+    auto chunk = FlowingRegionChunk(coords);
+    ASSERT_TRUE(P::WorldSaveService::persist_chunk_authority(session.GetWorldSaveDir(), chunk));
+    const auto old_digest =
+        P::WorldSaveService::region_simulation_digest(session.GetWorldSaveDir(), key, {});
+    chunk->water_depth_mm[0] += 123;
+    chunk->mark_voxel_data_dirty();
+    auto* world = session.GetWorldSystem();
+    ASSERT_TRUE(world->adopt_streamed_chunk(chunk));
+    world->debug_set_streaming_radius_cap(1);
+    P::WorldSaveService::set_interrupt_before_region_replace_for_testing(true);
+    for (int frame = 0; frame < 4; ++frame) {
+        world->update(session.GetRegistry(), session.GetMetadata().spawnPoint, nullptr);
+        world->wait_for_streaming_jobs();
+    }
+    P::WorldSaveService::set_interrupt_before_region_replace_for_testing(false);
+    ASSERT_TRUE(world->authority_fault());
+    EXPECT_EQ(world->find_streamed_chunk(coords), chunk);
+    EXPECT_TRUE(chunk->is_voxel_data_dirty());
+    EXPECT_EQ(P::WorldSaveService::region_simulation_digest(session.GetWorldSaveDir(), key, {}),
+              old_digest);
+    EXPECT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 0u);
+    ASSERT_TRUE(session.GetRegionSchedulerFault());
+    EXPECT_EQ(world->find_streamed_chunk(coords), chunk);
+    EXPECT_NE(P::WorldSaveService::region_simulation_digest(
+                  {}, key, P::RegionDigestInputs{{chunk}, {}, true}),
+              old_digest);
+}
+
+TEST(GameSessionHeadlessWorldTest, SnapshotDestinationCannotImportDivergentAuthority) {
+    using Luminumbra::IVec3;
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    // Cover a sibling in the same LMR1 file, a destination-only region, and
+    // a source with no durable chunks at all. Refusal must precede any write.
+    for (const int variant : {0, 1, 2}) {
+        SCOPED_TRACE(variant);
+        GameSession session;
+        session.SetRootPath(root.root_string());
+        session.SetJobSystem(&jobs);
+        session.SetActiveRegionsEnabled(true);
+        ASSERT_TRUE(session.CreateWorld("Snapshot isolation", "1337", "default"));
+        session.SetReplicatedSimulationAnchors({});
+        auto* world = session.GetWorldSystem();
+        if (variant != 2) {
+            auto chunk = FlowingRegionChunk(IVec3(0, 0, 0));
+            ASSERT_TRUE(world->adopt_streamed_chunk(chunk));
+        }
+        ASSERT_TRUE(session.SaveWorldState());
+        const auto source = world->authority_directory();
+        const auto destination = root.path() / ("divergent-snapshot-" + std::to_string(variant));
+        fs::copy(source, destination, fs::copy_options::recursive);
+        const IVec3 extra_coords(variant == 1 ? 32 : 1, 0, 0);
+        auto extra = FlowingRegionChunk(extra_coords);
+        extra->heightmap_data.assign(std::size_t{17} * 17, 13.0f);
+        ASSERT_TRUE(P::WorldSaveService::persist_chunk_authority(destination, extra));
+        ASSERT_TRUE(P::WorldSaveService::validate_save(destination));
+        ASSERT_TRUE(session.SavedPresetCompatible(destination));
+        const auto before_disk = SavedPresetTestDiskBytes(root.path());
+        const auto before_hash = world->compute_chunk_hashes();
+        EXPECT_FALSE(session.SaveWorldStateTo(destination));
+        EXPECT_FALSE(world->relocate_authority_directory(destination));
+        EXPECT_EQ(world->authority_directory(), source);
+        EXPECT_EQ(world->compute_chunk_hashes().world, before_hash.world);
+        EXPECT_EQ(world->compute_chunk_hashes().sub.water, before_hash.sub.water);
+        EXPECT_EQ(SavedPresetTestDiskBytes(root.path()), before_disk);
+        // A later visit must generate this chunk, never resurrect the other save's edit.
+        world->dispatch_generation_jobs(std::vector<IVec3>{extra_coords});
+        world->wait_for_streaming_jobs();
+        const auto visited = world->find_streamed_chunk(extra_coords);
+        ASSERT_NE(visited, nullptr);
+        EXPECT_NE(visited->sdf_provenance(), Luminumbra::ChunkSdfProvenance::LoadedOrEdited);
+    }
 }
 
 TEST(GameSessionHeadlessWorldTest, WalkingAnchorSurvivesNoclipAndReloadWithoutCameraInputs) {
@@ -2666,6 +3360,58 @@ TEST(GameSessionHeadlessWorldTest, SchedulerFaultStopsTheFrameAndLeavesASavableC
     }
 }
 
+TEST(GameSessionHeadlessWorldTest, AdmissionFailureDoesNotCommitAnUnsimulatedTick) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    for (const std::uint64_t completed : {0u, 2u}) {
+        SCOPED_TRACE(completed);
+        GameSession session, loaded;
+        for (auto* current : {&session, &loaded}) {
+            current->SetRootPath(root.root_string());
+            current->SetJobSystem(&jobs);
+            current->SetActiveRegionsEnabled(true);
+        }
+        ASSERT_TRUE(session.CreateWorld("Admission failure", "1337", "default"));
+        session.SetReplicatedSimulationAnchors({});
+        const auto dt = session.GetSimulationClock().fixed_dt();
+        for (std::uint64_t tick = 0; tick < completed; ++tick)
+            ASSERT_EQ(session.TickSimulation(dt), 1u);
+        const auto before_hash = SessionWorldHash(session);
+        const auto before_ledger = session.GetActiveRegionLedger().canonical_bytes();
+        const auto region_file = P::WorldSaveService::region_file_path(
+            session.GetWorldSaveDir(), kFaultRegion.x, kFaultRegion.z);
+        fs::create_directories(region_file.parent_path());
+        {
+            std::ofstream output(region_file, std::ios::binary);
+            output << "not a region file";
+            ASSERT_TRUE(output.good());
+        }
+        session.SetReplicatedSimulationAnchors(
+            {Luminumbra::Vec3(kFaultRegion.x * 512 + 8, 8, kFaultRegion.z * 512 + 8)});
+        int events_run = 0;
+        session.GetSimulationEventBus().subscribe([&](const auto&) { ++events_run; });
+        session.GetSimulationEventBus().publish(completed + 1, "must not run", "");
+        EXPECT_EQ(session.TickSimulation(2.5 * dt), 0u);
+        const auto& fault = session.GetRegionSchedulerFault();
+        ASSERT_TRUE(fault.has_value());
+        if (fault.has_value())
+            EXPECT_EQ(fault->tick, completed);
+        EXPECT_EQ(session.GetSimulationTickCount(), completed);
+        EXPECT_EQ(session.GetSimulationClock().tick_count(), completed);
+        EXPECT_EQ(session.GetActiveRegionLedger().canonical_bytes(), before_ledger);
+        EXPECT_EQ(events_run, 0);
+        EXPECT_TRUE(session.IsSimulationTickBoundary());
+        EXPECT_EQ(session.TickSimulation(dt), 0u);
+        ASSERT_TRUE(fs::remove(region_file));
+        EXPECT_EQ(SessionWorldHash(session), before_hash);
+        ASSERT_TRUE(session.SaveWorldState());
+        ASSERT_TRUE(loaded.LoadWorld(session.GetMetadata().worldId)) << loaded.GetWorldOpenError();
+        EXPECT_EQ(loaded.GetSimulationTickCount(), completed);
+        EXPECT_EQ(SessionWorldHash(loaded), before_hash);
+    }
+}
+
 TEST(GameSessionHeadlessWorldTest, ThrowingDigestProviderWithQueuedWorkLeavesNoStaleWork) {
     const HeadlessRoot root;
     JobSystem jobs;
@@ -2799,7 +3545,7 @@ TEST(GameSessionHeadlessWorldTest, EffectiveIdentityUsesDefaultsAndCurrentSetter
     const auto baseline = direct.SystemConfigIdentity();
     EXPECT_FALSE(baseline.empty());
     EXPECT_EQ(baseline, applied.SystemConfigIdentity());
-    EXPECT_EQ(baseline, "60ab3c242d54ce89");
+    EXPECT_EQ(baseline, "49f2cb57730f3caf");
     for (const auto& [name, identity] : Luminumbra::TestSupport::EffectiveIdentityMismatches()) {
         SCOPED_TRACE(name);
         EXPECT_NE(identity, baseline);
@@ -2819,4 +3565,324 @@ TEST(GameSessionHeadlessWorldTest, EffectiveIdentityUsesDefaultsAndCurrentSetter
     direct.SetCircadianAmplitude(0.5f);
     applied.SetCircadianAmplitude(0.5f);
     EXPECT_EQ(direct.SystemConfigIdentity(), applied.SystemConfigIdentity());
+}
+
+TEST(ActiveRegions, IncrementalRegionDigestPreservesCanonicalJsonBytes) {
+    namespace P = Luminumbra::Persistence;
+    Luminumbra::WorldStreamingState state;
+    const auto verify = [&state] {
+        const auto snapshot =
+            nlohmann::json::parse(P::SerializeWorldStreamingStateSnapshotJson(state));
+        auto contents = nlohmann::json::array();
+        for (const auto& chunk : snapshot.at("chunks")) {
+            nlohmann::json content;
+            for (const auto* field : {"chunk_id",
+                                      "coords",
+                                      "sdf_data",
+                                      "heightmap_data",
+                                      "material_data",
+                                      "water_depth_mm",
+                                      "water_bed_mm",
+                                      "water_edge_flux",
+                                      "has_water_sim",
+                                      "current_water_resolution",
+                                      "is_water_sleeping",
+                                      "max_water_delta_last_tick",
+                                      "ticks_below_threshold"})
+                content[field] = chunk.at(field);
+            contents.push_back(std::move(content));
+        }
+        const nlohmann::json canonical = {{"hash_scope", "region_content_v2"},
+                                          {"chunks", contents}};
+        EXPECT_EQ(P::ComputeRegionContentHash(state), P::StableChecksum(canonical.dump(4) + "\n"));
+    };
+    verify();
+    state.insert_chunk(FlowingRegionChunk({32, 0, 0}));
+    verify();
+    state.insert_chunk(FlowingRegionChunk({31, 0, 0}));
+    verify();
+}
+
+TEST(GameSessionHeadlessWorldTest, ExplicitReloadRestoresWaterWindowAfterRewind) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    session.SetRootPath(root.root_string());
+    session.SetJobSystem(&jobs);
+    session.SetActiveRegionsEnabled(true);
+    session.SetWaterHighResEnabled(true);
+    session.SetWeatherRainEnabled(false);
+    ASSERT_TRUE(session.CreateWorld("Water window", "1337", "default"));
+    for (int x = 0; x < 24; ++x)
+        ASSERT_TRUE(session.GetWorldSystem()->adopt_streamed_chunk(
+            FlowingRegionChunk(Luminumbra::IVec3(x, 0, 0))));
+    const Luminumbra::Vec3 anchor(8, 8, 8);
+    session.SetReplicatedSimulationAnchors({anchor});
+    const auto dt = session.GetSimulationClock().fixed_dt();
+    ASSERT_EQ(session.TickSimulation(dt), 1u);
+    const auto cursor = session.GetWorldSystem()->GetWaterSimWindowCursor();
+    ASSERT_NE(cursor, 0u);
+    const auto save = root.path() / "water-window";
+    ASSERT_TRUE(session.SaveWorldStateTo(save));
+    ASSERT_EQ(session.TickSimulation(dt), 1u);
+    const auto expected = P::WorldSaveService::region_simulation_digest(
+        {},
+        {0, 0},
+        P::RegionDigestInputs{session.GetWorldSystem()->snapshot_region_authority(0, 0), {}, true});
+    const auto expected_ledger = session.GetActiveRegionLedger().canonical_bytes();
+    ASSERT_TRUE(session.LoadWorldStateFrom(save));
+    EXPECT_EQ(session.GetWorldSystem()->GetWaterSimWindowCursor(), cursor);
+    session.SetReplicatedSimulationAnchors({anchor});
+    ASSERT_EQ(session.TickSimulation(dt), 1u);
+    EXPECT_EQ(P::WorldSaveService::region_simulation_digest(
+                  {},
+                  {0, 0},
+                  P::RegionDigestInputs{
+                      session.GetWorldSystem()->snapshot_region_authority(0, 0), {}, true}),
+              expected);
+    EXPECT_EQ(session.GetActiveRegionLedger().canonical_bytes(), expected_ledger);
+}
+
+TEST(GameSessionHeadlessWorldTest, ExternalChunkAdoptionSharesResidentBudget) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    session.SetRootPath(root.root_string());
+    session.SetJobSystem(&jobs);
+    session.SetActiveRegionsEnabled(true);
+    ASSERT_TRUE(session.CreateTransientWorld("Resident budget", "1337", "default"));
+    auto* world = session.GetWorldSystem();
+    constexpr auto budget = Luminumbra::Systems::SHIELD_WorldSystem::kActiveChunkBudget;
+    for (std::size_t index = 0; index < budget; ++index) {
+        auto chunk =
+            std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3(static_cast<int>(index), 0, 0));
+        ASSERT_TRUE(world->adopt_streamed_chunk(chunk));
+    }
+    EXPECT_FALSE(world->adopt_streamed_chunk(
+        std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3(static_cast<int>(budget), 0, 0))));
+    EXPECT_EQ(world->snapshot_streamed_chunks().size(), budget);
+}
+
+TEST(GameSessionHeadlessWorldTest, FreshNaturalWaterAndFrozenRenderWaterShareInitialization) {
+    using Luminumbra::IVec3;
+    using Luminumbra::Vec3;
+    const HeadlessRoot root;
+    // Keep both locations submerged without depending on a particular noise sample.
+    const auto preset_path = root.path() / "worlds/atlas/presets/default.json";
+    auto preset = nlohmann::json::parse(ReadClockTestFile(preset_path));
+    preset["generation_params"]["terrain"]["height_offset"] = -256.0;
+    {
+        std::ofstream output(preset_path);
+        output << preset.dump();
+        ASSERT_TRUE(output.good());
+    }
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession near_camera, far_camera;
+    const Vec3 anchor(81928, 8, 81928);
+    for (auto* session : {&near_camera, &far_camera}) {
+        session->SetRootPath(root.root_string());
+        session->SetJobSystem(&jobs);
+        session->SetActiveRegionsEnabled(true);
+        session->SetWeatherRainEnabled(false);
+        ASSERT_TRUE(session->CreateTransientWorld("Natural water", "1337", "default"));
+        session->SetReplicatedSimulationAnchors({anchor});
+    }
+    auto* near_world = near_camera.GetWorldSystem();
+    auto* far_world = far_camera.GetWorldSystem();
+    ASSERT_GT(near_world->WaterLevelAt(anchor.x, anchor.z),
+              near_world->GetTerrainHeightAt(anchor.x, anchor.z));
+    const auto natural_coords = Luminumbra::Systems::SHIELD_WorldSystem::world_to_chunk_coords(
+        Vec3(anchor.x, near_world->WaterLevelAt(anchor.x, anchor.z), anchor.z));
+    const IVec3 far_coords(-5120, natural_coords.y, -5120);
+    far_world->dispatch_generation_jobs(std::vector<IVec3>{far_coords});
+    far_world->wait_for_streaming_jobs();
+    auto frozen = far_world->find_streamed_chunk(far_coords);
+    ASSERT_NE(frozen, nullptr);
+    ASSERT_TRUE(frozen->has_water_sim.load());
+    ASSERT_NE(frozen->sdf_provenance(), Luminumbra::ChunkSdfProvenance::LoadedOrEdited);
+    Luminumbra::WorldStreamingState frozen_state;
+    frozen_state.insert_chunk(frozen);
+    const auto frozen_water = P::ComputeWorldStreamingStateSubHashes(frozen_state).water;
+    Luminumbra::World::MarchingCubes::GenerateWaterMesh(
+        *far_camera.GetWaterSystem(), *far_world, *frozen);
+    EXPECT_FALSE(frozen->water_mesh_vertices.empty());
+    EXPECT_FALSE(frozen->water_mesh_indices.empty());
+    for (int tick = 0; tick < 4; ++tick) {
+        for (auto* session : {&near_camera, &far_camera}) {
+            ASSERT_EQ(session->TickSimulation(session->GetSimulationClock().fixed_dt()), 1u);
+            ASSERT_FALSE(session->GetRegionSchedulerFault());
+        }
+        EXPECT_EQ(P::ComputeWorldStreamingStateSubHashes(frozen_state).water, frozen_water);
+        const auto near_hashes = near_world->compute_chunk_hashes();
+        const auto far_hashes = far_world->compute_chunk_hashes();
+        EXPECT_EQ(near_hashes.world, far_hashes.world);
+        EXPECT_EQ(near_hashes.sub.water, far_hashes.sub.water);
+        EXPECT_EQ(near_camera.GetActiveRegionLedger().canonical_bytes(),
+                  far_camera.GetActiveRegionLedger().canonical_bytes());
+    }
+    auto natural = near_world->find_streamed_chunk(natural_coords);
+    ASSERT_NE(natural, nullptr);
+    EXPECT_TRUE(natural->has_water_sim.load());
+    EXPECT_FALSE(natural->water_depth_mm.empty());
+    EXPECT_GT(*std::max_element(natural->water_depth_mm.begin(), natural->water_depth_mm.end()), 0);
+    Luminumbra::World::MarchingCubes::GenerateWaterMesh(
+        *near_camera.GetWaterSystem(), *near_world, *natural);
+    EXPECT_FALSE(natural->water_mesh_vertices.empty());
+    EXPECT_FALSE(natural->water_mesh_indices.empty());
+    EXPECT_EQ(near_world->simulation_chunk_count(), 18u);
+    EXPECT_EQ(far_world->simulation_chunk_count(), 18u);
+}
+
+TEST(GameSessionHeadlessWorldTest, SubmergedTerrainCollisionIgnoresRenderSchedule) {
+    using Luminumbra::Vec3;
+    using World = Luminumbra::Systems::SHIELD_WorldSystem;
+    const HeadlessRoot root;
+    const auto preset_path = root.path() / "worlds/atlas/presets/default.json";
+    auto preset = nlohmann::json::parse(ReadClockTestFile(preset_path));
+    preset["generation_params"]["terrain"]["height_offset"] = -256.0;
+    {
+        std::ofstream output(preset_path);
+        output << preset.dump();
+        ASSERT_TRUE(output.good());
+    }
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession rendered, headless;
+    const Vec3 anchor(81928, 8, 81928);
+    for (auto* session : {&rendered, &headless}) {
+        session->SetRootPath(root.root_string());
+        session->SetJobSystem(&jobs);
+        session->SetActiveRegionsEnabled(true);
+        session->SetWeatherRainEnabled(false);
+        ASSERT_TRUE(session->CreateTransientWorld("Submerged collision", "1337", "default"));
+        session->SetReplicatedSimulationAnchors({anchor});
+        session->GetWorldSystem()->debug_set_streaming_radius_cap(1);
+    }
+    for (int tick = 0; tick < 2; ++tick) {
+        rendered.GetWorldSystem()->update(
+            rendered.GetRegistry(), anchor, rendered.GetPhysicsSystem());
+        rendered.GetWorldSystem()->wait_for_streaming_jobs();
+        for (auto* session : {&rendered, &headless}) {
+            // Admission must provide collision before any simulation/physics tick.
+            session->PrepareSimulationCollisions();
+            ASSERT_FALSE(session->GetRegionSchedulerFault());
+            for (int dz = -1; dz <= 1; ++dz) {
+                for (int dx = -1; dx <= 1; ++dx) {
+                    const float x = anchor.x + static_cast<float>(dx * Luminumbra::CHUNK_SIZE_X);
+                    const float z = anchor.z + static_cast<float>(dz * Luminumbra::CHUNK_SIZE_Z);
+                    auto* world = session->GetWorldSystem();
+                    const float ground = world->GetTerrainHeightAt(x, z);
+                    const auto ground_coords = World::world_to_chunk_coords(Vec3(x, ground, z));
+                    const auto water_coords =
+                        World::world_to_chunk_coords(Vec3(x, world->WaterLevelAt(x, z), z));
+                    ASSERT_LT(ground_coords.y, water_coords.y);
+                    ASSERT_NE(world->find_streamed_chunk(ground_coords), nullptr);
+                    EXPECT_TRUE(world->find_streamed_chunk(ground_coords)->has_collision.load());
+                    const auto hit = session->GetPhysicsSystem()->audio_raycast(
+                        Vec3(x, ground + 2.0f, z), Vec3(x, ground - 2.0f, z));
+                    ASSERT_TRUE(hit.hit);
+                    EXPECT_NEAR(hit.hit_point.y, ground, 0.05f);
+                }
+            }
+            ASSERT_EQ(session->TickSimulation(session->GetSimulationClock().fixed_dt()), 1u);
+        }
+        EXPECT_EQ(rendered.GetWorldSystem()->compute_chunk_hashes().world,
+                  headless.GetWorldSystem()->compute_chunk_hashes().world);
+        EXPECT_EQ(rendered.GetActiveRegionLedger().canonical_bytes(),
+                  headless.GetActiveRegionLedger().canonical_bytes());
+    }
+}
+
+TEST(GameSessionHeadlessWorldTest, SimulationCollisionPrecedesPhysicsAcrossRenderSchedules) {
+    using Luminumbra::Vec3;
+    namespace C = Luminumbra::Components;
+    const HeadlessRoot root;
+    const auto preset_path = root.path() / "worlds/atlas/presets/default.json";
+    auto preset = nlohmann::json::parse(ReadClockTestFile(preset_path));
+    preset["generation_params"]["terrain"]["height_offset"] = 256.0;
+    {
+        std::ofstream output(preset_path);
+        output << preset.dump();
+        ASSERT_TRUE(output.good());
+    }
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession rendered, headless;
+    const Vec3 anchor(81928, 512, 81928);
+    std::array<entt::entity, 2> creatures{}, outside_creatures{};
+    const Vec3 outside(-81928, 512, -81928);
+    std::size_t session_index = 0;
+    for (auto* session : {&rendered, &headless}) {
+        session->SetRootPath(root.root_string());
+        session->SetJobSystem(&jobs);
+        session->SetActiveRegionsEnabled(true);
+        session->SetWeatherRainEnabled(false);
+        ASSERT_TRUE(session->CreateTransientWorld("Collision schedule", "1337", "default"));
+        session->SetReplicatedSimulationAnchors({anchor});
+        session->GetWorldSystem()->debug_set_streaming_radius_cap(1);
+        const float ground = session->GetWorldSystem()->GetTerrainHeightAt(anchor.x, anchor.z);
+        ASSERT_GT(ground, session->GetWorldSystem()->WaterLevelAt(anchor.x, anchor.z));
+        const Vec3 feet(anchor.x, ground + 0.25f, anchor.z);
+        auto& registry = session->GetRegistry();
+        const auto creature = registry.create();
+        registry.emplace<C::TransformComponent>(creature).position = feet;
+        registry.emplace<C::CreatureComponent>(creature).move_speed = 0.0f;
+        registry.emplace<C::CreaturePhysicsComponent>(creature).avatar_index =
+            session->GetPhysicsSystem()->create_avatar_character(feet);
+        creatures[session_index] = creature;
+        const auto outside_creature = registry.create();
+        const float outside_ground =
+            session->GetWorldSystem()->GetTerrainHeightAt(outside.x, outside.z);
+        const Vec3 outside_feet(outside.x, outside_ground + 0.25f, outside.z);
+        registry.emplace<C::TransformComponent>(outside_creature).position = outside_feet;
+        registry.emplace<C::CreatureComponent>(outside_creature).move_speed = 0.0f;
+        registry.emplace<C::CreaturePhysicsComponent>(outside_creature).avatar_index =
+            session->GetPhysicsSystem()->create_avatar_character(outside_feet);
+        outside_creatures[session_index++] = outside_creature;
+    }
+    // Only one execution has completed rendering its surface horizon at tick zero.
+    ASSERT_TRUE(rendered.GetWorldSystem()->EnsureSurfaceReadyNear(
+        anchor, rendered.GetPhysicsSystem(), 0, 0));
+    ASSERT_TRUE(rendered.GetWorldSystem()->EnsureSurfaceReadyNear(
+        outside, rendered.GetPhysicsSystem(), 0, 0));
+    for (int tick = 0; tick < 8; ++tick) {
+        ASSERT_EQ(rendered.TickSimulation(rendered.GetSimulationClock().fixed_dt()), 1u);
+        ASSERT_EQ(headless.TickSimulation(headless.GetSimulationClock().fixed_dt()), 1u);
+        ASSERT_FALSE(rendered.GetRegionSchedulerFault());
+        ASSERT_FALSE(headless.GetRegionSchedulerFault());
+        EXPECT_EQ(rendered.GetRegistry().get<C::TransformComponent>(creatures[0]).position,
+                  headless.GetRegistry().get<C::TransformComponent>(creatures[1]).position);
+        EXPECT_EQ(rendered.GetRegistry().get<C::TransformComponent>(outside_creatures[0]).position,
+                  headless.GetRegistry().get<C::TransformComponent>(outside_creatures[1]).position);
+        EXPECT_EQ(rendered.GetActiveRegionLedger().canonical_bytes(),
+                  headless.GetActiveRegionLedger().canonical_bytes());
+        EXPECT_EQ(luminumbra::ai::ComputeEcologySubHash(rendered.GetRegistry()),
+                  luminumbra::ai::ComputeEcologySubHash(headless.GetRegistry()));
+        const float ground = headless.GetWorldSystem()->GetTerrainHeightAt(anchor.x, anchor.z);
+        EXPECT_TRUE(headless.GetPhysicsSystem()
+                        ->audio_raycast(Vec3(anchor.x, ground + 2.0f, anchor.z),
+                                        Vec3(anchor.x, ground - 2.0f, anchor.z))
+                        .hit);
+        EXPECT_EQ(rendered.GetWorldSystem()->compute_chunk_hashes().world,
+                  headless.GetWorldSystem()->compute_chunk_hashes().world);
+        for (const auto id : headless.GetWorldSystem()->simulation_chunk_ids()) {
+            const auto chunk =
+                headless.GetWorldSystem()->find_streamed_chunk(Luminumbra::Chunk::decode_id(id));
+            ASSERT_NE(chunk, nullptr);
+            EXPECT_TRUE(chunk->has_collision.load());
+        }
+        if (tick % 2 == 0) {
+            rendered.GetWorldSystem()->update(
+                rendered.GetRegistry(), anchor, rendered.GetPhysicsSystem());
+            rendered.GetWorldSystem()->wait_for_streaming_jobs();
+        }
+        if (tick % 3 == 0) {
+            headless.GetWorldSystem()->update(
+                headless.GetRegistry(), Vec3(-81928, 512, -81928), headless.GetPhysicsSystem());
+            headless.GetWorldSystem()->wait_for_streaming_jobs();
+        }
+    }
 }

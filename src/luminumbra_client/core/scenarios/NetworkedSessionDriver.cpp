@@ -41,6 +41,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
@@ -138,6 +139,10 @@ bool NetSessionApplyStep(std::uint64_t /*tick*/,
     // then quiesce so the next scheduler decision observes the identical settled
     // state on both peers. The streaming anchor is the spawn point -- NOT the
     // client camera -- so render-side look can never alter the hashed world.
+    ctx->session->SetReplicatedSimulationAnchors({ctx->spawn_anchor});
+    ctx->session->PrepareSimulationCollisions();
+    if (ctx->session->GetRegionSchedulerFault())
+        return false;
     physics_system->update(static_cast<float>(ctx->fixed_dt));
     const std::uint32_t ran = ctx->session->TickSimulation(ctx->fixed_dt);
     world_system->update(ctx->session->GetRegistry(), ctx->spawn_anchor, physics_system);
@@ -145,8 +150,9 @@ bool NetSessionApplyStep(std::uint64_t /*tick*/,
     return ran == 1;
 }
 
-// Captures this peer's CLIENT-PATH hashes (the BARE streamed-chunk world_hash +
-// terrain/water/entities sub-hashes) over the live streamed-chunk snapshot.
+// Captures this peer's bare chunk oracle plus terrain/water/entities projections.
+// Active regions merge complete resident and durable authority; legacy worlds
+// retain their historical streamed snapshot hash.
 //
 // This is not the same quantity as ServerWorldRunner::ComputeWorldHashAndSubHashes.
 // The server COMPOSITE world_hash ComposeWorldHash-folds five MORE
@@ -170,21 +176,12 @@ void NetSessionCaptureHashes(std::uint64_t tick, Luminumbra::Net::HashMsg& out, 
     auto* world_system = ctx->session->GetWorldSystem();
     world_system->wait_for_streaming_jobs();
 
-    Luminumbra::WorldStreamingState state;
-    for (const auto& chunk : world_system->snapshot_streamed_chunks()) {
-        state.insert_chunk(chunk);
-    }
-    Luminumbra::Persistence::WorldSaveService service;
-    out.world_hash = service.world_hash(state);
-
-    // Terrain/water authority only here (no streamed game entities), so the
-    // entities sub-hash is the stable checksum of the EMPTY canonical ECS
-    // snapshot -- present (not blank) so an entity-bearing world reports an
-    // entity-section divergence rather than a silent gap. Same as the server.
+    auto hashes = world_system->compute_chunk_hashes();
+    out.world_hash = hashes.world;
     const std::string empty_entities = Luminumbra::Ecs::SerializeEntityRegistrySnapshotJson(
         Luminumbra::Ecs::EntityRegistrySnapshot{});
-    const Luminumbra::Persistence::WorldStreamingStateSubHashes sub =
-        Luminumbra::Persistence::ComputeWorldStreamingStateSubHashes(state, empty_entities);
+    hashes.sub.entities = Luminumbra::Persistence::StableChecksum(empty_entities);
+    const auto& sub = hashes.sub;
     out.terrain = sub.terrain;
     out.water = sub.water;
     out.entities = sub.entities;

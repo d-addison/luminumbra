@@ -617,6 +617,17 @@ ServerTickReport ServerWorldRunner::RunFixedTicks(std::uint64_t tick_count) {
         water_total_samples.reserve(n);
     }
 
+    const auto workload_anchor = [&](std::uint64_t tick) {
+        if (m_config.water_smoke) {
+            const float distance = 2.0f * static_cast<float>(tick);
+            return Vec3(water_walk_start.x + distance, water_walk_start.y, water_walk_start.z);
+        }
+        if (m_config.moving_anchor) {
+            const float distance = 0.5f * static_cast<float>(tick);
+            return Vec3(spawn_anchor.x + distance, spawn_anchor.y, spawn_anchor.z + distance);
+        }
+        return spawn_anchor;
+    };
     const auto wall_start = std::chrono::steady_clock::now();
     while (report.ticks_executed < tick_count) {
         if (const auto& region_fault = m_session->GetRegionSchedulerFault();
@@ -634,6 +645,26 @@ ServerTickReport ServerWorldRunner::RunFixedTicks(std::uint64_t tick_count) {
         const std::uint64_t budget_tick = m_session->GetSimulationTickCount() + 1;
         luminumbra::simulation::SimBudgetTelemetry::TickScope physics_budget(budget, budget_tick);
         physics_budget.Next(BudgetStage::ServerPhysics, [] { return 1u; });
+        // Publish deterministic workload inputs before any physics or fixed tick.
+        // Zero-avatar smoke runs still have a simulation horizon.
+        const auto tick_anchor = workload_anchor(
+            m_session->ActiveRegionsEnabled() ? budget_tick : report.ticks_executed + 1);
+        if (m_session->ActiveRegionsEnabled()) {
+            std::vector<Vec3> anchors;
+            anchors.reserve(std::max<std::size_t>(1, m_avatars.size()));
+            if (m_avatars.empty())
+                anchors.push_back(tick_anchor);
+            else
+                for (const auto& avatar : m_avatars)
+                    anchors.push_back(avatar.position);
+            m_session->SetReplicatedSimulationAnchors(std::move(anchors));
+            m_session->PrepareSimulationCollisions();
+            if (const auto& fault = m_session->GetRegionSchedulerFault()) {
+                report.region_fault = true;
+                report.region_fault_message = fault->message;
+                break;
+            }
+        }
         physics_system->update(static_cast<float>(fixed_dt));
         //  step the server-authoritative avatar characters (gravity +
         // world collision; deterministic index order) and read their settled
@@ -647,8 +678,9 @@ ServerTickReport ServerWorldRunner::RunFixedTicks(std::uint64_t tick_count) {
             }
         }
         physics_budget.Finish();
-        if (m_session->ActiveRegionsEnabled()) {
+        if (m_session->ActiveRegionsEnabled() && !m_avatars.empty()) {
             std::vector<Vec3> anchors;
+            anchors.reserve(std::max<std::size_t>(1, m_avatars.size()));
             for (const auto& avatar : m_avatars)
                 anchors.push_back(avatar.position);
             m_session->SetReplicatedSimulationAnchors(std::move(anchors));
@@ -682,23 +714,7 @@ ServerTickReport ServerWorldRunner::RunFixedTicks(std::uint64_t tick_count) {
         ServerStreamingBudget streaming_budget(budget);
         streaming_budget.MeasureUpdate([&] {
             if (m_avatars.empty()) {
-                Vec3 anchor = spawn_anchor;
-                if (m_config.water_smoke) {
-                    // water-smoke walk: +X 2 m/tick from the wet anchor, so the run keeps
-                    // streaming fresh columns THROUGH/along the wet body — first-time grid
-                    // inits, the rotating sim window, and cross-chunk seam flux all engage
-                    // every activation. Pure fn of the tick -> run==replay holds.
-                    const float d = 2.0f * static_cast<float>(report.ticks_executed);
-                    anchor = Vec3(water_walk_start.x + d, water_walk_start.y, water_walk_start.z);
-                } else if (m_config.moving_anchor) {
-                    // B' harness: walk the streaming anchor +X/+Z each tick so chunks stream IN
-                    // ahead and OUT behind during the run. ~0.5 m/tick -> ~45 m over 90 ticks (~3
-                    // chunks). Pure fn of the tick -> both --smoke runs drift identically; any
-                    // run!=replay is the moving-case water nondeterminism (boot warm-up only
-                    // settles the INITIAL residency).
-                    const float d = 0.5f * static_cast<float>(report.ticks_executed);
-                    anchor = Vec3(spawn_anchor.x + d, spawn_anchor.y, spawn_anchor.z + d);
-                }
+                const Vec3 anchor = workload_anchor(simulation_tick);
                 world_system->update(m_session->GetRegistry(), anchor, physics_system);
             } else {
                 std::vector<Vec3> anchors;
@@ -905,20 +921,21 @@ std::string ServerWorldRunner::ComputeAvailabilityDigest() {
     if (!world_system) {
         return {};
     }
-    // The availability set = the COORDS of chunks the sim can actually read this tick, i.e.
-    // those settled to ChunkState::Ready after the barrier. We digest sorted coords ONLY —
+    // Active regions expose fixed-tick participants. Legacy availability remains
+    // the chunks settled to Ready after the barrier. We digest sorted coords only —
     // deliberately NOT the transient state/lod/has_collision timing, which can legitimately
     // jitter run-to-run during streaming while converging to the same final world_hash. The
     // activation-queue contract is about WHICH chunks are available per tick, not
     // the micro-timing of their LOD/collision bring-up.
     std::vector<std::int64_t> ready_ids;
-    for (const auto& chunk : world_system->snapshot_streamed_chunks()) {
-        if (!chunk)
-            continue;
-        if (chunk->get_state() != ChunkState::Ready)
-            continue;
-        ready_ids.push_back(
-            static_cast<std::int64_t>(::Luminumbra::Chunk::calculate_id(chunk->get_coords())));
+    if (m_session->ActiveRegionsEnabled()) {
+        for (const auto id : world_system->simulation_chunk_ids())
+            ready_ids.push_back(static_cast<std::int64_t>(id));
+    } else {
+        for (const auto& chunk : world_system->snapshot_streamed_chunks()) {
+            if (chunk && chunk->get_state() == ChunkState::Ready)
+                ready_ids.push_back(static_cast<std::int64_t>(chunk->get_id()));
+        }
     }
     std::sort(ready_ids.begin(), ready_ids.end());
 
@@ -946,17 +963,13 @@ std::string ServerWorldRunner::ComputeWorldHash() {
     auto* world_system = m_session->GetWorldSystem();
     world_system->wait_for_streaming_jobs();
 
-    WorldStreamingState state;
-    for (const auto& chunk : world_system->snapshot_streamed_chunks()) {
-        state.insert_chunk(chunk);
-    }
+    const auto chunk_hashes = world_system->compute_chunk_hashes();
 
-    Persistence::WorldSaveService service;
     //   +   hash revisionS: fold the wind AND weather sub-hashes
     // into the top-level hash. The chunk hash itself is unchanged; the composite
     // deliberately is not.
     return Persistence::ComposeWorldHash(
-        service.world_hash(state),
+        chunk_hashes.world,
         WindSubHash(m_session.get()),
         WeatherSubHash(m_session.get()),
         AetherSubHash(m_session.get()),
@@ -966,9 +979,7 @@ std::string ServerWorldRunner::ComputeWorldHash() {
 }
 
 Persistence::WorldStreamingStateSubHashes ServerWorldRunner::ComputeWorldSubHashes() {
-    // per-system sub-hashes over the SAME streamed-chunk snapshot the
-    // top-level world_hash is built from. Additive desync localization; the
-    // top-level hash (ComputeWorldHash) is unchanged.
+    // Per-system projections of the same authority oracle as ComputeWorldHash.
     Persistence::WorldStreamingStateSubHashes empty;
     if (!m_booted || !m_session || !m_session->GetWorldSystem()) {
         return empty;
@@ -977,10 +988,7 @@ Persistence::WorldStreamingStateSubHashes ServerWorldRunner::ComputeWorldSubHash
     auto* world_system = m_session->GetWorldSystem();
     world_system->wait_for_streaming_jobs();
 
-    WorldStreamingState state;
-    for (const auto& chunk : world_system->snapshot_streamed_chunks()) {
-        state.insert_chunk(chunk);
-    }
+    const auto chunk_hashes = world_system->compute_chunk_hashes();
 
     // The entities sub-hash is the stable checksum of the canonical ECS snapshot.
     //  that snapshot now carries the deterministic player avatars (empty
@@ -988,11 +996,11 @@ Persistence::WorldStreamingStateSubHashes ServerWorldRunner::ComputeWorldSubHash
     // lane, so the default world_hash/entities sub-hash is unchanged).
     const std::string entities_snapshot =
         Ecs::SerializeEntityRegistrySnapshotJson(World::BuildAvatarEntitySnapshot(m_avatars));
-    Persistence::WorldStreamingStateSubHashes sub =
-        Persistence::ComputeWorldStreamingStateSubHashes(state, entities_snapshot);
+    Persistence::WorldStreamingStateSubHashes sub = chunk_hashes.sub;
     // the wind sub-hash slot, supplied from the session's wind
     // field (not chunk-derived). Present + stable for the WindFieldDeterminism
     // gate and the desync-localization oracle.
+    sub.entities = Persistence::StableChecksum(entities_snapshot);
     sub.wind = WindSubHash(m_session.get());
     // the weather sub-hash slot, supplied from the session's weather
     // core (not chunk-derived). Present + stable for the WeatherVisual state-hash
@@ -1025,10 +1033,7 @@ void ServerWorldRunner::ComputeWorldHashAndSubHashes(
     auto* world_system = m_session->GetWorldSystem();
     world_system->wait_for_streaming_jobs();
 
-    WorldStreamingState state;
-    for (const auto& chunk : world_system->snapshot_streamed_chunks()) {
-        state.insert_chunk(chunk);
-    }
+    const auto chunk_hashes = world_system->compute_chunk_hashes();
 
     const std::string wind_hash = WindSubHash(m_session.get());
     const std::string weather_hash = WeatherSubHash(m_session.get());
@@ -1037,11 +1042,10 @@ void ServerWorldRunner::ComputeWorldHashAndSubHashes(
     const std::string ecology_hash = ComputeEcologySubHash();
     const std::string plant_hash = m_session->ComputePlantSubHash(); //  empty-neutral
 
-    Persistence::WorldSaveService service;
     //   +   +  + gate-populated-world-replay +
     // hash revisionS: composite world_hash (chunk + wind + weather + aether + scents + ecology +
     // plants).
-    out_world_hash = Persistence::ComposeWorldHash(service.world_hash(state),
+    out_world_hash = Persistence::ComposeWorldHash(chunk_hashes.world,
                                                    wind_hash,
                                                    weather_hash,
                                                    aether_hash,
@@ -1051,7 +1055,8 @@ void ServerWorldRunner::ComputeWorldHashAndSubHashes(
 
     const std::string entities_snapshot =
         Ecs::SerializeEntityRegistrySnapshotJson(World::BuildAvatarEntitySnapshot(m_avatars));
-    out_sub = Persistence::ComputeWorldStreamingStateSubHashes(state, entities_snapshot);
+    out_sub = chunk_hashes.sub;
+    out_sub.entities = Persistence::StableChecksum(entities_snapshot);
     out_sub.wind = wind_hash;
     out_sub.weather = weather_hash;
     out_sub.aether = aether_hash;

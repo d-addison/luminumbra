@@ -4,6 +4,7 @@
 #include "../core/ResidencyContract.h" // the hash scope derives from the contract
 #include "ecs/EntitySnapshot.h"
 #include "nlohmann/json.hpp"
+#include "world/Chunk.h"
 
 #include <algorithm>
 #include <atomic>
@@ -909,36 +910,102 @@ std::string ComputeWorldStreamingStateHash(const WorldStreamingState& state) {
     return Checksum(SerializeWorldStreamingStateSimTruthForHash(state));
 }
 
+RegionContentHasher::RegionContentHasher() {
+    feed("{\n    \"chunks\": [");
+}
+
+void RegionContentHasher::feed(std::string_view bytes) {
+    for (const unsigned char byte : bytes) {
+        m_hash ^= static_cast<std::uint64_t>(byte);
+        m_hash *= 1099511628211ull;
+    }
+}
+
+void RegionContentHasher::append(const Chunk& chunk) {
+    if (chunk.sdf_provenance() != ChunkSdfProvenance::LoadedOrEdited)
+        return;
+    if (m_hasChunks && chunk.get_id() <= m_lastId)
+        throw std::invalid_argument("Region content chunks must have increasing ids");
+    feed(m_hasChunks ? ",\n" : "\n");
+    m_lastId = chunk.get_id();
+    m_hasChunks = true;
+    const nlohmann::json content = {
+        {"chunk_id", chunk.get_id()},
+        {"coords", IVec3ToJson(chunk.get_coords())},
+        {"sdf_data", chunk.sdf_data},
+        {"heightmap_data", chunk.heightmap_data},
+        {"material_data", chunk.material_data},
+        {"water_depth_mm", chunk.water_depth_mm},
+        {"water_bed_mm", chunk.water_bed_mm},
+        {"water_edge_flux", chunk.water_edge_flux},
+        {"has_water_sim", chunk.has_water_sim.load(std::memory_order_acquire)},
+        {"current_water_resolution",
+         chunk.current_water_resolution.load(std::memory_order_acquire)},
+        {"is_water_sleeping", chunk.is_water_sleeping.load(std::memory_order_acquire)},
+        {"max_water_delta_last_tick", chunk.max_water_delta_last_tick},
+        {"ticks_below_threshold", chunk.ticks_below_threshold}};
+    // Fixed field order and JSON delimiters make each terrain row unambiguous,
+    // without copying the full voxel arrays into a second JSON object.
+    for (const char* field :
+         {"chunk_id", "coords", "sdf_data", "heightmap_data", "material_data"}) {
+        for (const unsigned char byte : content.at(field).dump()) {
+            m_terrainHash ^= static_cast<std::uint64_t>(byte);
+            m_terrainHash *= 1099511628211ull;
+        }
+        m_terrainHash ^= static_cast<std::uint64_t>('|');
+        m_terrainHash *= 1099511628211ull;
+    }
+    nlohmann::json water;
+    for (const char* field : {"chunk_id",
+                              "water_depth_mm",
+                              "water_bed_mm",
+                              "water_edge_flux",
+                              "has_water_sim",
+                              "current_water_resolution",
+                              "is_water_sleeping",
+                              "max_water_delta_last_tick",
+                              "ticks_below_threshold"})
+        water[field] = content.at(field);
+    // Separate versioned water projection, independent of voxel/render residency.
+    for (const unsigned char byte : water.dump()) {
+        m_waterHash ^= static_cast<std::uint64_t>(byte);
+        m_waterHash *= 1099511628211ull;
+    }
+    // Match StableDump's four-space layout, at the array's eight-space depth.
+    // The byte protocol stays identical without retaining the whole region JSON.
+    const auto bytes = content.dump(4);
+    feed("        ");
+    std::size_t begin = 0;
+    for (;;) {
+        const auto end = bytes.find('\n', begin);
+        if (end == std::string::npos) {
+            feed(std::string_view(bytes).substr(begin));
+            break;
+        }
+        feed(std::string_view(bytes).substr(begin, end - begin + 1));
+        feed("        ");
+        begin = end + 1;
+    }
+}
+
+std::uint64_t RegionContentHasher::value() const {
+    auto finished = *this;
+    finished.feed(m_hasChunks ? "\n    ],\n" : "],\n");
+    finished.feed("    \"hash_scope\": \"region_content_v2\"\n}\n");
+    return finished.m_hash;
+}
+
 std::string ComputeRegionContentHash(const WorldStreamingState& state) {
     auto chunks = state.snapshot_chunks();
     std::sort(chunks.begin(), chunks.end(), [](const auto& lhs, const auto& rhs) {
         return lhs->get_id() < rhs->get_id();
     });
-    nlohmann::json contents = nlohmann::json::array();
-    for (const auto& chunk : chunks) {
-        // The provider filters incomplete live/parked inputs before merging. Durable
-        // edited records may retain any lifecycle state, including Loading; this
-        // content projection must not filter them again by residency bookkeeping.
-        if (chunk->sdf_provenance() != ChunkSdfProvenance::LoadedOrEdited)
-            continue;
-        contents.push_back(
-            {{"chunk_id", chunk->get_id()},
-             {"coords", IVec3ToJson(chunk->get_coords())},
-             {"sdf_data", chunk->sdf_data},
-             {"heightmap_data", chunk->heightmap_data},
-             {"material_data", chunk->material_data},
-             {"water_depth_mm", chunk->water_depth_mm},
-             {"water_bed_mm", chunk->water_bed_mm},
-             {"water_edge_flux", chunk->water_edge_flux},
-             {"has_water_sim", chunk->has_water_sim.load(std::memory_order_acquire)},
-             {"current_water_resolution",
-              chunk->current_water_resolution.load(std::memory_order_acquire)},
-             {"is_water_sleeping", chunk->is_water_sleeping.load(std::memory_order_acquire)},
-             {"max_water_delta_last_tick", chunk->max_water_delta_last_tick},
-             {"ticks_below_threshold", chunk->ticks_below_threshold}});
-    }
-    return Checksum(StableDump(
-        nlohmann::json{{"hash_scope", "region_content_v2"}, {"chunks", std::move(contents)}}));
+    RegionContentHasher hasher;
+    for (const auto& chunk : chunks)
+        hasher.append(*chunk);
+    std::ostringstream stream;
+    stream << std::hex << std::setw(16) << std::setfill('0') << hasher.value();
+    return stream.str();
 }
 
 WorldStreamingStateSubHashes ComputeWorldStreamingStateSubHashes(const WorldStreamingState& state) {

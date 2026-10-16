@@ -26,16 +26,22 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <memory>
 #include <string>
+#include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include <nlohmann/json.hpp>
 
+#include "luminumbra/core/Types.h"
 #include "luminumbra_common/components/CoreComponents.h" // water-source: TransformComponent
 #include "luminumbra_common/core/JobSystem.h"
 #include "luminumbra_common/core/SystemConfig.h"    // sim.water_high_res gate
-#include "luminumbra_common/core/WaterComponents.h" // water-source: WaterSourceComponent
+#include "luminumbra_common/core/WaterComponents.h" // water-source: FlowingWaterSourceComponent
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
+#include "luminumbra_common/systems/WaterSystem.h"
+#include "luminumbra_common/world/Chunk.h"
 #include "luminumbra_common/world/GameSession.h"
 
 namespace fs = std::filesystem;
@@ -191,7 +197,7 @@ std::vector<std::uint64_t> run_water_sequence(const std::string& root,
     return hashes;
 }
 
-constexpr int kTicks = 64;
+constexpr int kReplayTicks = 64;
 constexpr int kWeatherRainTicks = 32;
 constexpr int kSourceWarmupTicks = 24;
 constexpr int kSourceObservationTicks = 8;
@@ -205,10 +211,10 @@ TEST(WaterDeterminism, LiveWaterSimIsRunReplayDeterministic) {
     std::size_t water_chunks_a = 0, water_chunks_b = 0;
     std::int64_t max_depth_a = 0, max_depth_b = 0;
     int seam_wet_a = 0, seam_wet_b = 0;
-    const auto seq_a =
-        run_water_sequence(root.root_string(), kTicks, water_chunks_a, max_depth_a, seam_wet_a);
-    const auto seq_b =
-        run_water_sequence(root.root_string(), kTicks, water_chunks_b, max_depth_b, seam_wet_b);
+    const auto seq_a = run_water_sequence(
+        root.root_string(), kReplayTicks, water_chunks_a, max_depth_a, seam_wet_a);
+    const auto seq_b = run_water_sequence(
+        root.root_string(), kReplayTicks, water_chunks_b, max_depth_b, seam_wet_b);
 
     ASSERT_GT(water_chunks_a, 0u)
         << "no water chunks were simulated — the test is vacuous (no live water exercised); "
@@ -440,9 +446,9 @@ TEST(WaterDeterminism, WeatherDrivenRainIsDeterministic) {
 
 // water-source: SOURCE INJECTION routes through the fixed-point mm domain.
 // The proof leans on derived-state reclassification: the water hash covers ONLY the mm truth (the
-// float mirrors are Render-classified) — so if the WaterSourceComponent injection still wrote only
-// the float mirror (the pre-water-source bug), the sourced world's hash would EQUAL the control's
-// and this test would fail. Deterministic: two sourced runs match.
+// float mirrors are Render-classified) — so if the FlowingWaterSourceComponent injection still
+// wrote only the float mirror (the pre-water-source bug), the sourced world's hash would EQUAL the
+// control's and this test would fail. Deterministic: two sourced runs match.
 struct SourceResult {
     std::vector<std::uint64_t> hashes;
     bool mass_ok = true;
@@ -507,7 +513,7 @@ SourceResult run_with_source(const std::string& root, bool add_source) {
             const auto e = reg.create();
             auto& tf = reg.emplace<Luminumbra::Components::TransformComponent>(e);
             tf.position = Vec3(pit.x, world->GetTerrainHeightAt(pit.x, pit.z), pit.z);
-            auto& src = reg.emplace<Luminumbra::Components::WaterSourceComponent>(e);
+            auto& src = reg.emplace<Luminumbra::Components::FlowingWaterSourceComponent>(e);
             src.flow_rate = 40.0f; // strong spring: >= 1 mm/cell/tick after quantization
         }
         for (int t = 0; t < kSourceObservationTicks; ++t) {
@@ -543,7 +549,7 @@ TEST(WaterDeterminism, SourceInjectionRoutesThroughFixedPoint) {
     // Compare the FULL sequences: even if a sink eventually re-equilibrates the
     // body, SOME post-tick state along the way must differ once mm water landed.
     EXPECT_NE(a.hashes, control.hashes)
-        << "the WaterSourceComponent injection did not reach the HASHED mm truth at "
+        << "the FlowingWaterSourceComponent injection did not reach the HASHED mm truth at "
            "ANY tick — it is writing the float mirror only (the pre-water-source bug)";
 }
 
@@ -1022,3 +1028,54 @@ TEST(WaterDeterminism, HighResWaterMatchesMediumPhysicsPerSimPass) {
 // The common test target enumerates this translation unit explicitly. Keep the cadence regression
 // in its contract-owned source file while compiling it through the existing Water test unit.
 #include "water_sim_cadence_test.cpp"
+
+TEST(WaterDeterminism, DisabledRegionsKeepHistoricalInitAndResizeOrder) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    session.SetRootPath(root.root_string());
+    session.SetJobSystem(&jobs);
+    session.SetActiveRegionsEnabled(false);
+    ASSERT_TRUE(session.CreateTransientWorld("Legacy water backlog", "1337", "default"));
+    auto* water = session.GetWaterSystem();
+    std::unordered_map<Luminumbra::ChunkID, std::shared_ptr<Luminumbra::Chunk>> chunks;
+    std::vector<Luminumbra::ChunkID> resize_ids;
+    water->SetSimResolution(8);
+    for (int index = 0; index < 4; ++index) {
+        auto chunk = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3(index, 0, 0));
+        water->InitializeGeneratedWater(*chunk);
+        resize_ids.push_back(chunk->get_id());
+        chunks.emplace(chunk->get_id(), std::move(chunk));
+    }
+    water->SetSimResolution(16);
+    for (int index = 4; index < 18; ++index) {
+        auto chunk = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3(index, 0, 0));
+        chunks.emplace(chunk->get_id(), std::move(chunk));
+    }
+    std::sort(resize_ids.begin(), resize_ids.end());
+    std::vector<Luminumbra::ChunkID> historical_init_order;
+    for (const auto& [id, chunk] : chunks) {
+        if (!chunk->has_water_sim.load())
+            historical_init_order.push_back(id);
+    }
+    // Historical selection: first six pending entries in map order; one resize
+    // from the id-sorted pending list, with a rotating cursor over that list.
+    for (std::size_t tick = 0; tick < 3; ++tick) {
+        water->update(session.GetRegistry(), chunks);
+        for (std::size_t index = 0; index < historical_init_order.size(); ++index)
+            EXPECT_EQ(chunks.at(historical_init_order[index])->has_water_sim.load(),
+                      index < (tick + 1) * 6);
+        if (tick == 0) {
+            EXPECT_EQ(chunks.at(resize_ids[0])->current_water_resolution.load(), 16);
+            EXPECT_EQ(chunks.at(resize_ids[1])->current_water_resolution.load(), 8);
+        } else if (tick == 1) {
+            // Cursor 1 in the remaining [1,2,3] list selects id 2.
+            EXPECT_EQ(chunks.at(resize_ids[1])->current_water_resolution.load(), 8);
+            EXPECT_EQ(chunks.at(resize_ids[2])->current_water_resolution.load(), 16);
+        } else {
+            EXPECT_EQ(chunks.at(resize_ids[1])->current_water_resolution.load(), 16);
+            EXPECT_EQ(chunks.at(resize_ids[3])->current_water_resolution.load(), 8);
+        }
+    }
+}

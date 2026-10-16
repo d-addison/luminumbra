@@ -7,6 +7,7 @@
 #include <cmath>
 #include <stdexcept>
 #include <tuple>
+#include <vector>
 
 namespace Luminumbra::world {
 namespace {
@@ -159,9 +160,10 @@ RegionResumeWindow ActiveRegionLedger::resume_window(RegionKey key,
                       system_cap,
                       std::uint64_t{clock.calendar().dayLengthTicks}})};
 }
-void ActiveRegionLedger::visit(const Vec3& anchor,
-                               const WorldClock& clock,
-                               RegionRejections& rejected) {
+std::vector<RegionKey> ActiveRegionLedger::activation_regions(const Vec3& anchor) {
+    std::vector<RegionKey> keys;
+    if (!valid_anchor(anchor))
+        return keys;
     const auto centre = region_at(anchor);
     // The fixed disc intersects a region's closed XZ square; corner-only
     // AABB candidates outside the circle are excluded. Streaming is unrelated.
@@ -174,14 +176,22 @@ void ActiveRegionLedger::visit(const Vec3& anchor,
             const double dz = std::max({z * 512.0 - anchor.z, 0.0, anchor.z - (z + 1) * 512.0});
             if (dx * dx + dz * dz > 512.0 * 512.0)
                 continue;
-            if (!m_records.contains(key) && m_records.size() == kMaxRegions) {
-                ++rejected.capacity;
-                continue;
-            }
-            auto& record = activate(key, clock);
-            record.visited = true;
-            record.last_proximity = clock.tick();
+            keys.push_back(key);
         }
+    return keys;
+}
+void ActiveRegionLedger::visit(const Vec3& anchor,
+                               const WorldClock& clock,
+                               RegionRejections& rejected) {
+    for (const RegionKey key : activation_regions(anchor)) {
+        if (!m_records.contains(key) && m_records.size() == kMaxRegions) {
+            ++rejected.capacity;
+            continue;
+        }
+        auto& record = activate(key, clock);
+        record.visited = true;
+        record.last_proximity = clock.tick();
+    }
 }
 void ActiveRegionLedger::evict_idle(const WorldClock& clock, const OwnershipProbe& owned) {
     if (!owned)

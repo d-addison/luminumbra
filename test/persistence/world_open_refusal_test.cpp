@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include "luminumbra/core/Types.h"
 #include "luminumbra_common/components/CoreComponents.h"
 #include "luminumbra_common/components/PlantComponents.h"
 #include "luminumbra_common/core/JobSystem.h"
@@ -1442,6 +1443,256 @@ TEST_F(WorldOpenRefusal, LegacyExplicitSessionSnapshotsKeepLargeKeylessMetadata)
     ASSERT_TRUE(session.LoadWorldStateFrom(save)) << session.GetWorldOpenError();
     EXPECT_TRUE(session.SaveWorldStateTo(save));
     EXPECT_EQ(Read(save / "world_info.json"), metadata.dump());
+}
+
+// 8,193 edited records exercise both sides of the runtime resident boundary.
+// Empty SDF is a supported edited heightfield; each record has a unique marker.
+void WriteLargeEditedSnapshot(const fs::path& directory) {
+    WorldStreamingState state;
+    constexpr std::size_t count = Systems::SHIELD_WorldSystem::kActiveChunkBudget + 1;
+    for (std::size_t index = 0; index < count; ++index) {
+        auto chunk = state.get_or_create_chunk(IVec3(32768 + static_cast<int>(index), 0, 0));
+        chunk->heightmap_data.assign(std::size_t{17} * 17, static_cast<float>(index) + 0.25f);
+        chunk->mark_sdf_loaded_or_edited();
+        chunk->set_state(ChunkState::Idle);
+    }
+    ASSERT_TRUE(WorldSaveService{}.save_world(state, directory));
+}
+
+TEST_F(WorldOpenRefusal, LegacySnapshotLoadsEveryEditedRecordBeyondActiveBudget) {
+    fs::remove_all(save / "chunks");
+    ASSERT_NO_FATAL_FAILURE(WriteLargeEditedSnapshot(save));
+    GameSession session;
+    session.SetRootPath(RootString());
+    session.SetJobSystem(&jobs);
+    session.SetActiveRegionsEnabled(false);
+    ASSERT_TRUE(session.LoadWorld("fixture")) << session.GetWorldOpenError();
+    constexpr auto count = Systems::SHIELD_WorldSystem::kActiveChunkBudget + 1;
+    EXPECT_EQ(session.GetLastLoadedChunkCount(), count);
+    EXPECT_EQ(session.GetWorldSystem()->snapshot_streamed_chunks().size(), count);
+    for (std::size_t index = 0; index < count; ++index) {
+        const auto chunk = session.GetWorldSystem()->find_streamed_chunk(
+            IVec3(32768 + static_cast<int>(index), 0, 0));
+        ASSERT_NE(chunk, nullptr) << index;
+        ASSERT_FALSE(chunk->heightmap_data.empty());
+        EXPECT_EQ(chunk->heightmap_data.front(), static_cast<float>(index) + 0.25f);
+    }
+}
+
+TEST_F(WorldOpenRefusal, ActiveSnapshotKeepsOverflowDurableAndRestoresSavedContents) {
+    fs::remove_all(save / "chunks");
+    ASSERT_NO_FATAL_FAILURE(WriteLargeEditedSnapshot(save));
+    GameSession session;
+    session.SetRootPath(RootString());
+    session.SetJobSystem(&jobs);
+    session.SetActiveRegionsEnabled(true);
+    ASSERT_TRUE(session.LoadWorld("fixture")) << session.GetWorldOpenError();
+    session.SetReplicatedSimulationAnchors({});
+    auto* world = session.GetWorldSystem();
+    constexpr auto budget = Systems::SHIELD_WorldSystem::kActiveChunkBudget;
+    EXPECT_EQ(session.GetLastLoadedChunkCount(), budget);
+    EXPECT_EQ(world->snapshot_streamed_chunks().size(), budget);
+    const IVec3 overflow(32768 + static_cast<int>(budget), 0, 0);
+    EXPECT_EQ(world->find_streamed_chunk(overflow), nullptr);
+    // Activating each saved area restores its durable records even when the
+    // resident prefix filled the budget. Only displaced records are rewritten.
+    for (const auto index : {std::size_t{0}, budget / 2, budget}) {
+        const IVec3 coords(32768 + static_cast<int>(index), 0, 0);
+        session.SetReplicatedSimulationAnchors(
+            {Vec3(static_cast<float>(coords.x) * CHUNK_SIZE_X + 8, 8, 8)});
+        ASSERT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 1u);
+        ASSERT_FALSE(session.GetRegionSchedulerFault());
+        const auto chunk = world->find_streamed_chunk(coords);
+        ASSERT_NE(chunk, nullptr) << index;
+        ASSERT_FALSE(chunk->heightmap_data.empty());
+        EXPECT_EQ(chunk->heightmap_data.front(), static_cast<float>(index) + 0.25f);
+        EXPECT_EQ(chunk->sdf_provenance(), ChunkSdfProvenance::LoadedOrEdited);
+        EXPECT_LE(world->snapshot_streamed_chunks().size(), budget);
+    }
+}
+
+TEST_F(WorldOpenRefusal, RequiredSpawnHorizonDisplacesFullRetainedSnapshot) {
+    fs::remove_all(save / "chunks");
+    ASSERT_NO_FATAL_FAILURE(WriteLargeEditedSnapshot(save));
+    Server::ServerWorldRunnerConfig config;
+    config.root_path = RootString();
+    config.world_id = "fixture";
+    config.surface_radius = 0;
+    config.collision_radius = 0;
+    config.test_streaming_radius_cap = 1;
+    config.systems_config_override = luminumbra::core::SystemConfig::FromJsonString(
+        R"({"sim":{"active_regions":{"enabled":true}}})");
+    Server::ServerWorldRunner runner(config);
+    ASSERT_TRUE(runner.Boot()) << runner.GetBootError();
+    auto* world = runner.Session()->GetWorldSystem();
+    EXPECT_EQ(runner.Session()->GetLastLoadedChunkCount(),
+              Systems::SHIELD_WorldSystem::kActiveChunkBudget);
+    EXPECT_LE(world->snapshot_streamed_chunks().size(),
+              Systems::SHIELD_WorldSystem::kActiveChunkBudget);
+    EXPECT_FALSE(world->authority_fault());
+    // The saved prefix was far from spawn. Its first deterministic victim
+    // remains durable after synchronous loading and subsequent boot streaming.
+    WorldSaveService::AuthorityReader reader;
+    ASSERT_TRUE(WorldSaveService::open_region_authority(
+        WorldSaveService::region_file_path(save, 1024, 0), reader));
+    auto first = WorldSaveService::read_next_authority(reader);
+    ASSERT_NE(first, nullptr);
+    EXPECT_EQ(first->get_coords(), IVec3(32768, 0, 0));
+    EXPECT_EQ(first->heightmap_data.front(), 0.25f);
+}
+
+TEST_F(WorldOpenRefusal, ProductionChunkOracleIgnoresCameraAndDurableWaterResidency) {
+    Server::ServerWorldRunnerConfig config;
+    config.root_path = RootString();
+    config.world_id = "fixture";
+    config.surface_radius = 0;
+    config.collision_radius = 0;
+    config.test_streaming_radius_cap = 1;
+    config.availability_trace = true;
+    config.systems_config_override = luminumbra::core::SystemConfig::FromJsonString(
+        R"({"sim":{"active_regions":{"enabled":true}}})");
+    Server::ServerWorldRunner resident(config), evicted(config);
+    ASSERT_TRUE(resident.Boot()) << resident.GetBootError();
+    ASSERT_TRUE(evicted.Boot()) << evicted.GetBootError();
+    const IVec3 coords(4096, 0, 4096);
+    for (auto* runner : {&resident, &evicted}) {
+        auto chunk = std::make_shared<Chunk>(coords);
+        chunk->heightmap_data.assign(std::size_t{17} * 17, -2.0f);
+        chunk->has_water_sim.store(true);
+        chunk->current_water_resolution.store(16);
+        chunk->water_depth_mm.assign(256, 2000);
+        chunk->water_bed_mm.assign(256, -2000);
+        chunk->water_edge_flux.assign(512, 7);
+        chunk->water_level_data.assign(256, 0.0f);
+        chunk->water_sim_terrain_height.assign(256, -2.0f);
+        chunk->water_flow_data.assign(256, Vec2(0.0f));
+        chunk->water_rest_level.assign(256, 0.0f);
+        chunk->is_water_sleeping.store(false);
+        chunk->ticks_below_threshold = 17;
+        chunk->mark_sdf_loaded_or_edited();
+        chunk->set_state(ChunkState::Idle);
+        ASSERT_TRUE(runner->Session()->GetWorldSystem()->adopt_streamed_chunk(chunk));
+    }
+    auto* moving_world = evicted.Session()->GetWorldSystem();
+    const auto content_before = moving_world->compute_chunk_hashes();
+    auto changed_water = moving_world->find_streamed_chunk(coords);
+    ++changed_water->ticks_below_threshold;
+    const auto content_after = moving_world->compute_chunk_hashes();
+    EXPECT_NE(content_before.sub.water, content_after.sub.water);
+    EXPECT_NE(content_before.world, content_after.world);
+    EXPECT_EQ(content_before.sub.terrain, content_after.sub.terrain);
+    --changed_water->ticks_below_threshold;
+    changed_water.reset();
+    const auto before = evicted.ComputeWorldHash();
+    const auto water_before = evicted.ComputeWorldSubHashes().water;
+    EXPECT_EQ(resident.ComputeWorldHash(), before);
+    for (int frame = 0; frame < 4; ++frame) {
+        moving_world->update(evicted.Session()->GetRegistry(), Vec3(-4096, 8, -4096), nullptr);
+        moving_world->wait_for_streaming_jobs();
+    }
+    ASSERT_EQ(moving_world->find_streamed_chunk(coords), nullptr);
+    ASSERT_NE(resident.Session()->GetWorldSystem()->find_streamed_chunk(coords), nullptr);
+    EXPECT_EQ(evicted.ComputeWorldHash(), before);
+    EXPECT_EQ(evicted.ComputeWorldSubHashes().water, water_before);
+    EXPECT_EQ(resident.ComputeWorldSubHashes().water, water_before);
+    std::string combined;
+    Persistence::WorldStreamingStateSubHashes sub;
+    evicted.ComputeWorldHashAndSubHashes(combined, sub);
+    EXPECT_EQ(combined, before);
+    EXPECT_EQ(sub.water, water_before);
+    // Restoring through the public generation request preserves the same oracle.
+    moving_world->dispatch_generation_jobs(std::vector<IVec3>{coords});
+    moving_world->wait_for_streaming_jobs();
+    ASSERT_NE(moving_world->find_streamed_chunk(coords), nullptr);
+    EXPECT_EQ(evicted.ComputeWorldHash(), before);
+    EXPECT_EQ(evicted.ComputeWorldSubHashes().water, water_before);
+    // The recorded availability oracle uses simulation participants too, even
+    // while the peers retain different render caches from the preceding frames.
+    ASSERT_EQ(resident.RunFixedTicks(1).ticks_executed, 1u);
+    ASSERT_EQ(evicted.RunFixedTicks(1).ticks_executed, 1u);
+    ASSERT_EQ(resident.AvailabilityTrace().size(), 1u);
+    ASSERT_EQ(evicted.AvailabilityTrace().size(), 1u);
+    EXPECT_EQ(resident.AvailabilityTrace(), evicted.AvailabilityTrace());
+}
+
+TEST_F(WorldOpenRefusal, RegionReplacementPreservesIndependentReaderImage) {
+    const IVec3 coords(0, 0, 0);
+    auto original = std::make_shared<Chunk>(coords);
+    original->heightmap_data.assign(std::size_t{17} * 17, 3.0f);
+    original->mark_sdf_loaded_or_edited();
+    ASSERT_TRUE(WorldSaveService::persist_chunk_authority(save, original));
+    const auto path = WorldSaveService::region_file_path(save, 0, 0);
+    // Simulate a far-LOD worker retaining its own open reader across eviction.
+    // It must finish the old image while a new reader observes the replacement.
+    WorldSaveService::AuthorityReader independent_reader;
+    ASSERT_TRUE(WorldSaveService::open_region_authority(path, independent_reader));
+    auto replacement = std::make_shared<Chunk>(coords);
+    replacement->heightmap_data.assign(std::size_t{17} * 17, 7.0f);
+    replacement->mark_sdf_loaded_or_edited();
+    ASSERT_TRUE(WorldSaveService::persist_chunk_authority(save, replacement));
+    auto old_image = WorldSaveService::read_next_authority(independent_reader);
+    ASSERT_NE(old_image, nullptr);
+    EXPECT_EQ(old_image->heightmap_data, original->heightmap_data);
+    WorldSaveService::AuthorityReader new_reader;
+    ASSERT_TRUE(WorldSaveService::open_region_authority(path, new_reader));
+    auto new_image = WorldSaveService::read_next_authority(new_reader);
+    ASSERT_NE(new_image, nullptr);
+    EXPECT_EQ(new_image->heightmap_data, replacement->heightmap_data);
+}
+
+TEST_F(WorldOpenRefusal, ActiveRegionWaterSmokePublishesZeroAvatarWorkloadAnchor) {
+    // A submerged world guarantees both wet cells and adjacent wet seams.
+    const auto preset_path = root / "worlds/atlas/presets/default.json";
+    auto preset = nlohmann::json::parse(Read(preset_path));
+    preset["generation_params"]["terrain"]["height_offset"] = -256.0;
+    Write(preset_path, preset.dump());
+    Server::ServerWorldRunnerConfig config;
+    config.root_path = RootString();
+    config.world_name = "Water workload";
+    config.surface_radius = 0;
+    config.collision_radius = 0;
+    config.test_streaming_radius_cap = 1;
+    config.water_smoke = true;
+    config.systems_config_override = luminumbra::core::SystemConfig::FromJsonString(
+        R"({"sim":{"active_regions":{"enabled":true}}})");
+    Server::ServerWorldRunner runner(config);
+    ASSERT_TRUE(runner.Boot()) << runner.GetBootError();
+    ASSERT_TRUE(runner.Session()->ActiveRegionsEnabled());
+    const auto report = runner.RunFixedTicks(4);
+    ASSERT_FALSE(report.region_fault) << report.region_fault_message;
+    ASSERT_EQ(report.ticks_executed, 4u);
+    EXPECT_TRUE(report.water.enabled);
+    EXPECT_GT(report.water.cells_simmed_total, 0u);
+    EXPECT_GT(report.water.seam_wet_pairs_max, 0);
+    EXPECT_TRUE(report.water.mass_ok);
+    EXPECT_GT(runner.Session()->GetWorldSystem()->simulation_chunk_count(), 0u);
+    // Workload anchors use the absolute simulation tick, including across calls.
+    Server::ServerWorldRunner split(config);
+    ASSERT_TRUE(split.Boot()) << split.GetBootError();
+    for (int batch = 0; batch < 2; ++batch) {
+        const auto partial = split.RunFixedTicks(2);
+        ASSERT_FALSE(partial.region_fault) << partial.region_fault_message;
+        ASSERT_EQ(partial.ticks_executed, 2u);
+    }
+    EXPECT_EQ(runner.ComputeWorldHash(), split.ComputeWorldHash());
+    EXPECT_EQ(runner.Session()->GetActiveRegionLedger().canonical_bytes(),
+              split.Session()->GetActiveRegionLedger().canonical_bytes());
+}
+
+TEST_F(WorldOpenRefusal, PartialAuthorityHasNoSimulationCollisionSurface) {
+    GameSession session;
+    session.SetRootPath(RootString());
+    session.SetJobSystem(&jobs);
+    session.SetActiveRegionsEnabled(true);
+    ASSERT_TRUE(session.CreateTransientWorld("Partial surface", "1337", "default"));
+    session.SetReplicatedSimulationAnchors({Vec3(8, 100, 8)});
+    auto chunk = std::make_shared<Chunk>(IVec3(4, 0, 4));
+    chunk->heightmap_data = {8.0f};
+    chunk->mark_voxel_data_dirty();
+    ASSERT_TRUE(session.GetWorldSystem()->adopt_streamed_chunk(chunk));
+    ASSERT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 1u);
+    ASSERT_FALSE(session.GetRegionSchedulerFault());
+    EXPECT_FALSE(chunk->has_collision.load());
 }
 
 } // namespace

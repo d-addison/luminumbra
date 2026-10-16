@@ -178,6 +178,10 @@ public:
     Systems::WaterSystem* GetWaterSystem() {
         return m_waterSystem.get();
     }
+    // Owner-thread simulation preparation. Call after publishing anchors and before
+    // external avatar physics; TickSimulation also calls this before creature physics.
+    void PrepareSimulationCollisions();
+
     Systems::PhysicsSystem* GetPhysicsSystem() {
         return m_physicsSystem.get();
     }

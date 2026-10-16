@@ -47,6 +47,10 @@ public:
     // --- World Geometry ---
     void add_chunk_collision(Chunk& chunk);
     void remove_chunk_collision(ChunkID chunk_id);
+    // Before authoritative physics, discard render-only terrain bodies, including
+    // bodies whose chunk has already left renderer residency.
+    void retain_chunk_collisions(
+        const std::unordered_map<ChunkID, std::shared_ptr<Chunk>>& simulation_chunks);
 
     // ---  : dynamic rigid bodies (projectiles e.g. an arrow) ---
     // Spawns a small dynamic sphere with an initial velocity: it falls under the
