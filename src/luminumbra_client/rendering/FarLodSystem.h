@@ -13,6 +13,7 @@
 // - Residency is bounded by 384 MiB. Regions leaving the wanted set are
 //   freed immediately; over-budget residency evicts the farthest regions.
 
+#include "FarLodIntegrationBudget.h"
 #include "luminumbra_common/core/JobSystem.h"
 #include "luminumbra_common/world/FarLodStore.h"
 
@@ -20,6 +21,7 @@
 #include <glm/glm.hpp>
 
 #include <cstddef>
+#include <deque>
 #include <filesystem>
 #include <memory>
 #include <mutex>
@@ -91,7 +93,7 @@ public:
     // visible hitch when flying through fill-in. So it stays at 6 — the deliberate smoothness
     // value. Mountains residency is a release-lane property; the gate fix + diagnostics stand.
     static constexpr std::size_t kMaxBuildDispatchesPerFrame = 8;
-    static constexpr std::size_t kMaxUploadsPerFrame = 6;
+    static constexpr std::size_t kMaxUploadsPerFrame = FarLodIntegrationBudget::kMaxUploads;
 
     struct FrameStats {
         bool enabled = false;
@@ -124,7 +126,12 @@ public:
         std::size_t builds_failed_total =
             0; // cumulative rejected builds (nonzero => empty-mesh failures, hypothesis b)
         std::size_t evictions_this_frame = 0; // regions evicted this frame (wanted-set + budget)
-        std::size_t pending_depth = 0;        // build jobs in flight at end of update()
+        u64 tiles_saved_async = 0;            // worker completions observed this frame
+        std::size_t pending_saves = 0;
+        u64 tile_save_failures = 0;
+        std::size_t snapshot_bytes_copied = 0;
+        std::size_t integration_uploads_deferred = 0;
+        std::size_t pending_depth = 0; // build jobs in flight at end of update()
     };
 
     // Opt-in capture diagnostics. No region walk or allocation while disabled.
@@ -174,9 +181,8 @@ public:
     }
     // Optional persistence root: when set, edited (authoritative) far tiles
     // load from the LMR1 store before falling back to pristine generation.
-    void set_save_dir(std::filesystem::path save_dir) {
-        m_save_dir = std::move(save_dir);
-    }
+    // Drains the old path before accepting any work for a replacement world.
+    void set_save_dir(std::filesystem::path save_dir);
     void set_enabled(bool enabled) {
         m_enabled = enabled;
     }
@@ -266,6 +272,9 @@ private:
     };
 
     struct BuildResult {
+        u64 queued_frame = 0;
+        std::size_t upload_bytes = 0;
+        bool has_edited_samples = false;
         u64 epoch = 0;
         // Immutable owner-thread capture used by this build.  Keeping the
         // shared value through completion lets integration reject results from
@@ -297,13 +306,15 @@ private:
 
     struct SharedBuildState {
         std::mutex mutex;
-        std::vector<BuildResult> completed;
+        std::deque<BuildResult> completed;
     };
 
     static u64 region_key(int rx, int rz);
     void bind_world(const Systems::SHIELD_WorldSystem& world_system);
     void wait_for_builds();
     void release_region(ResidentRegion& region);
+    bool build_result_current(const BuildResult& result) const;
+    void queue_completed_saves();
     void integrate_completed_builds();
     std::size_t total_resident_bytes() const;
 
@@ -330,6 +341,9 @@ private:
     u64 m_frame = 0;
 
     std::shared_ptr<SharedBuildState> m_shared = std::make_shared<SharedBuildState>();
+    std::deque<BuildResult> m_ready_builds;
+    World::AsyncFarLodStore m_tile_saves;
+    u64 m_saved_observed = 0;
     std::vector<JobHandle> m_inflight_handles;
     std::unordered_map<u64, World::FarLodTier> m_pending;
     std::unordered_map<u64, ResidentRegion> m_residents;

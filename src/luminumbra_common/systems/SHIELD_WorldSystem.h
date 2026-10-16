@@ -212,29 +212,21 @@ struct TerrainGenParams {
 };
 
 // Immutable value data handed to far-LOD workers.  The capture owns these
-// vectors and never exposes a mutable streamed Chunk beyond the owner thread.
+// payloads and never exposes a mutable streamed Chunk beyond the owner thread.
 struct FarLodSdfSnapshotEntry {
     IVec3 coords{};
     ChunkSdfProvenance provenance = ChunkSdfProvenance::GeneratedCurrentParams;
     u32 voxel_revision = 0;
     bool authority_durable = true;
-    std::vector<f32> sdf_data;
-    std::vector<u8> material_data;
+    std::shared_ptr<const World::FarLodSdfSnapshot> payload;
 
-    World::FarLodSdfSnapshot as_reduction_snapshot() const {
-        World::FarLodSdfSnapshot snapshot;
-        snapshot.coords = coords;
-        snapshot.revision = voxel_revision;
-        snapshot.source_kind = provenance == ChunkSdfProvenance::LoadedOrEdited
-                                   ? World::FarLodBrickSourceKind::Authoritative
-                                   : World::FarLodBrickSourceKind::RegenerableCache;
-        snapshot.sdf_data = sdf_data;
-        snapshot.material_data = material_data;
-        return snapshot;
+    const World::FarLodSdfSnapshot& as_reduction_snapshot() const {
+        return *payload;
     }
 };
 
 struct FarLodSdfSnapshot {
+    std::size_t bytes_copied = 0; // this capture only; render diagnostic, never hashed
     u64 capture_epoch = 0;
     u64 params_hash = 0;
     u64 authority_revision = 0;
@@ -880,7 +872,7 @@ public:
     // Shared-ownership snapshot of every streamed chunk (save path).
     std::vector<std::shared_ptr<::Luminumbra::Chunk>> snapshot_streamed_chunks() const;
     // Owner-thread capture for a 32x32 chunk far region plus a one-chunk X/Z
-    // halo. Only exact full SDF lattices are copied into the immutable result.
+    // halo. Only exact full SDF lattices enter the shared immutable result.
     std::shared_ptr<const FarLodSdfSnapshot> capture_far_lod_sdf_snapshot(i32 rx, i32 rz) const;
     // Eviction does not stale a copied snapshot; changed SDF authority or
     // worldgen parameters do.

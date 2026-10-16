@@ -7,6 +7,8 @@
 #include "luminumbra_client/rendering/Camera.h"
 #include "luminumbra_client/rendering/FarLodSystem.h"
 #include "luminumbra_client/rendering/Shader.h"
+#include "luminumbra_common/world/Chunk.h"
+#include "luminumbra_common/world/FarLodStore.h"
 #include "luminumbra_common/world/TerrainPresetLoader.h"
 #define GLFW_INCLUDE_NONE
 #include "luminumbra_common/persistence/WorldSaveService.h"
@@ -1713,4 +1715,21 @@ TEST(FarLodWorker, DefaultCaveStreamsEveryNeighbouringMesh) {
         }
     }
     jobs.shutdown();
+}
+
+TEST(FarLodWorker, MissingImmutableAuthorityPayloadIsRejected) {
+    const SHIELD_WorldSystem world(nullptr, nullptr, FlatParams(), 1337);
+    Systems::FarLodSdfSnapshot snapshot;
+    snapshot.params_hash = ComputeTerrainParamsHash(world.get_params(), world.get_seed());
+    snapshot.entries.push_back(FarLodSdfSnapshotEntry{
+        .coords = IVec3(0, 0, 0),
+        .provenance = ChunkSdfProvenance::LoadedOrEdited,
+        .voxel_revision = 1,
+        .authority_durable = true,
+        .payload = {},
+    });
+    const auto outcome = BuildFarLodWorkerTile(world, snapshot, FarLodTier::F1, 0, 0, {});
+    EXPECT_FALSE(outcome.ok);
+    EXPECT_FALSE(outcome.error.empty());
+    EXPECT_TRUE(outcome.mesh.vertices.empty());
 }

@@ -1764,7 +1764,7 @@ bool GameSession::SaveWorldStateTo(const std::filesystem::path& save_dir,
         const bool plants_ok =
             Persistence::WorldSaveService::save_plant_entities(plant_snapshot, save_dir, nullptr);
         const bool energy_ok = SaveEnergyFieldRecord(save_dir);
-        if (m_activeRegionsEnabled && (!plants_ok || !energy_ok))
+        if (!plants_ok || (m_activeRegionsEnabled && !energy_ok))
             return false;
         if (report) {
             *report = result;

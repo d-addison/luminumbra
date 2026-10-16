@@ -1,0 +1,825 @@
+#include "../fixtures/TerrainFixtureParams.h"
+#include "../support/PersistenceFileOps.h"
+#include "../support/UniqueTempPath.h"
+#include "gtest/gtest.h"
+
+#include "luminumbra/core/Types.h"
+#include "luminumbra_client/rendering/FarLodIntegrationBudget.h"
+#include "luminumbra_client/rendering/FarLodSystem.h"
+#include "luminumbra_common/core/JobSystem.h"
+#include "luminumbra_common/ecs/EntitySnapshot.h"
+#include "luminumbra_common/persistence/RegionFileWriteGuard.h"
+#include "luminumbra_common/persistence/WorldSaveService.h"
+#include "luminumbra_common/systems/SHIELD_WorldSystem.h"
+#include "luminumbra_common/world/ActiveRegionLedger.h"
+#include "luminumbra_common/world/Chunk.h"
+#include "luminumbra_common/world/FarLodStore.h"
+#include "luminumbra_common/world/WorldClock.h"
+#include "luminumbra_common/world/WorldStreamingState.h"
+
+#include <atomic>
+#include <cstddef>
+#include <cstdint>
+#include <deque>
+#include <filesystem>
+#include <fstream>
+#include <ios>
+#include <iterator>
+#include <latch>
+#include <memory>
+#include <nlohmann/json.hpp>
+#include <nlohmann/json_fwd.hpp>
+#include <string>
+#include <system_error>
+#include <thread>
+#include <utility>
+#include <vector>
+
+namespace {
+using namespace Luminumbra;
+using namespace Luminumbra::World;
+using Luminumbra::Persistence::WorldSaveService;
+using Luminumbra::Persistence::detail::RegionFileWriteGuard;
+using Luminumbra::Rendering::FarLodIntegrationBudget;
+
+class SaveDirectory {
+public:
+    const std::filesystem::path& path() const {
+        return m_path;
+    }
+    ~SaveDirectory() {
+        std::error_code error;
+        std::filesystem::remove_all(m_path, error);
+    }
+
+private:
+    std::filesystem::path m_path = TestSupport::CreateUniqueTempDirectory("luminumbra_far_async_");
+};
+
+std::string Bytes(const std::filesystem::path& path) {
+    std::ifstream input(path, std::ios::binary);
+    return {std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
+}
+
+FarLodTile Tile(FarLodTier tier, u16 height) {
+    FarLodTile tile;
+    tile.tier = tier;
+    tile.rx = -1;
+    tile.rz = 2;
+    tile.params_hash = 1234;
+    tile.samples_per_side = FarLodSamplesPerSide(tier);
+    tile.height_q.assign(tile.sample_count(), height);
+    tile.material.assign(tile.sample_count(), 7u);
+    tile.flags.assign(tile.sample_count(), kFarLodSampleFlagWater);
+    return tile;
+}
+
+// The owner holds a real writer transaction, so a competing writer cannot
+// pass acquisition until the test releases it. This const diagnostic confirms
+// that the worker reached acquisition; there is no sleep or scheduling wager.
+void WaitForCompetingWriter(const RegionFileWriteGuard& transaction) {
+    while (transaction.waiting_writers() == 0)
+        std::this_thread::yield();
+}
+
+void ExpectNoTemps(const std::filesystem::path& root) {
+    for (const auto& entry : std::filesystem::recursive_directory_iterator(root))
+        EXPECT_EQ(entry.path().filename().string().find(".tmp."), std::string::npos);
+}
+
+enum class SiblingSave : std::uint8_t {
+    Metadata,
+    Ledger,
+    Plants,
+    DeletePlants,
+    RewindClock
+};
+
+struct FileOverlap {
+    std::filesystem::path path;
+    std::filesystem::path blocking_path;
+    std::thread::id validator{};
+    std::latch opened{1};
+    std::latch release{1};
+    std::atomic<bool> block_first_read{true};
+    std::atomic<unsigned> readers{0};
+    std::atomic<unsigned> publications{0};
+    std::atomic<unsigned> sharing_violations{0};
+    bool refuse_removal = false;
+    bool refuse_replacement = false;
+    unsigned validator_reads_to_skip = 0;
+
+    static FileOverlap* active;
+    static void ObserveRead(const std::filesystem::path& target, bool opening) {
+        auto& overlap = *active;
+        if (target == overlap.path) {
+            if (opening)
+                overlap.readers.fetch_add(1);
+            else
+                overlap.readers.fetch_sub(1);
+        }
+        if (opening && target == overlap.blocking_path &&
+            std::this_thread::get_id() == overlap.validator) {
+            if (overlap.validator_reads_to_skip != 0) {
+                --overlap.validator_reads_to_skip;
+                return;
+            }
+            if (overlap.block_first_read.exchange(false)) {
+                overlap.opened.count_down();
+                overlap.release.wait();
+            }
+        }
+    }
+    static bool Publish(const std::filesystem::path& target, bool removing) {
+        auto& overlap = *active;
+        if (target != overlap.path)
+            return true;
+        overlap.publications.fetch_add(1);
+        // Emulate Windows' refusal to replace/delete an open read stream even
+        // on POSIX, where rename/unlink would otherwise hide the regression.
+        if (overlap.readers.load() != 0) {
+            overlap.sharing_violations.fetch_add(1);
+            return false;
+        }
+        return removing ? !overlap.refuse_removal : !overlap.refuse_replacement;
+    }
+};
+FileOverlap* FileOverlap::active = nullptr;
+
+class FileOverlapGuard {
+public:
+    explicit FileOverlapGuard(FileOverlap& overlap) {
+        FileOverlap::active = &overlap;
+        Persistence::detail::set_file_read_observer_for_testing(&FileOverlap::ObserveRead);
+        Persistence::detail::set_file_publication_hook_for_testing(&FileOverlap::Publish);
+    }
+    ~FileOverlapGuard() {
+        Persistence::detail::set_file_read_observer_for_testing(nullptr);
+        Persistence::detail::set_file_publication_hook_for_testing(nullptr);
+        FileOverlap::active = nullptr;
+    }
+    FileOverlapGuard(const FileOverlapGuard&) = delete;
+    FileOverlapGuard& operator=(const FileOverlapGuard&) = delete;
+};
+
+// Admission transfers the payload only on success. Keep the test's lvalue so
+// refusal assertions can inspect every byte without an unconditional move.
+bool TryEnqueue(AsyncFarLodStore& writer, const std::filesystem::path& path, FarLodTile& tile) {
+    return writer.enqueue(path, std::move(tile));
+}
+
+Ecs::EntityRegistrySnapshot Plants(const std::string& name) {
+    Ecs::EntityRegistrySnapshot plants;
+    plants.entities.push_back(
+        Ecs::EntitySnapshotRecord{.entity_id = 1, .name = name, .components = {}});
+    return plants;
+}
+
+void ExpectSiblingOverlap(SiblingSave operation) {
+    const SaveDirectory world;
+    const WorldStreamingState state;
+    const WorldSaveService service;
+    ASSERT_TRUE(service.save_world(state, world.path()));
+    const world::WorldClock clock(100);
+    nlohmann::json metadata = {{"container_version", WorldSaveService::kContainerVersion}};
+    clock.write_metadata(metadata);
+    world::ActiveRegionLedger ledger({}, clock);
+    ledger.set_local_anchor(Vec3(1, 2, 3));
+    ASSERT_TRUE(
+        WorldSaveService::save_metadata_and_active_regions(metadata.dump(), ledger, world.path()));
+    ASSERT_TRUE(WorldSaveService::save_plant_entities(Plants("before"), world.path()));
+    const auto target = operation == SiblingSave::Metadata ? world.path() / "world_info.json"
+                        : operation == SiblingSave::Ledger || operation == SiblingSave::RewindClock
+                            ? WorldSaveService::active_regions_path(world.path())
+                            : WorldSaveService::plant_entities_path(world.path());
+    const auto before = Bytes(target);
+    FileOverlap overlap{.path = target, .blocking_path = target};
+    const FileOverlapGuard observing(overlap);
+    if (operation == SiblingSave::RewindClock) {
+        // Pause after reading the ledger, with metadata open for the second
+        // (pair comparison) read. The ledger stream is already closed, so only
+        // the pair gate can block this rewind.
+        overlap.blocking_path = world.path() / "world_info.json";
+        overlap.validator_reads_to_skip = 1;
+    }
+    std::vector<std::string> validation_errors;
+    std::vector<std::string> save_errors;
+    bool validated = false;
+    bool saved = false;
+    std::atomic<bool> writer_done{false};
+    std::jthread validator([&] {
+        overlap.validator = std::this_thread::get_id();
+        validated = WorldSaveService::validate_save(world.path(), &validation_errors);
+    });
+    overlap.opened.wait();
+    std::jthread writer([&] {
+        switch (operation) {
+            case SiblingSave::Metadata:
+                metadata["name"] = "after";
+                saved =
+                    WorldSaveService::save_metadata(metadata.dump(), world.path(), &save_errors);
+                break;
+            case SiblingSave::Ledger:
+                ledger.set_local_anchor(Vec3(4, 5, 6));
+                saved = WorldSaveService::save_active_regions(
+                    ledger, clock, world.path(), &save_errors);
+                break;
+            case SiblingSave::Plants:
+                saved = WorldSaveService::save_plant_entities(
+                    Plants("after"), world.path(), &save_errors);
+                break;
+            case SiblingSave::DeletePlants:
+                saved = WorldSaveService::save_plant_entities({}, world.path(), &save_errors);
+                break;
+            case SiblingSave::RewindClock: {
+                const world::WorldClock rewound(50);
+                world::ActiveRegionLedger restored({}, rewound);
+                restored.set_local_anchor(Vec3(4, 5, 6));
+                rewound.write_metadata(metadata);
+                saved = WorldSaveService::save_metadata_and_active_regions(
+                    metadata.dump(), restored, world.path(), &save_errors);
+                break;
+            }
+        }
+        writer_done.store(true);
+    });
+    // Release only after a failed try_lock proves actual reader/writer overlap,
+    // or after an unprotected publication attempt exposes the sharing violation.
+    while (Persistence::detail::waiting_file_publishers_for_testing(target) == 0 &&
+           overlap.publications.load() == 0 && !writer_done.load())
+        std::this_thread::yield();
+    EXPECT_GT(Persistence::detail::waiting_file_publishers_for_testing(target), 0u);
+    EXPECT_EQ(overlap.publications.load(), 0u);
+    overlap.release.count_down();
+    validator.join();
+    writer.join();
+    EXPECT_TRUE(validated);
+    EXPECT_TRUE(saved);
+    EXPECT_TRUE(validation_errors.empty());
+    EXPECT_TRUE(save_errors.empty());
+    EXPECT_EQ(overlap.sharing_violations.load(), 0u);
+    EXPECT_EQ(overlap.publications.load(), 1u);
+    EXPECT_EQ(overlap.readers.load(), 0u);
+    if (operation == SiblingSave::DeletePlants)
+        EXPECT_FALSE(std::filesystem::exists(target));
+    else
+        EXPECT_NE(Bytes(target), before);
+    EXPECT_TRUE(WorldSaveService::validate_save(world.path()));
+    ExpectNoTemps(world.path());
+}
+} // namespace
+
+TEST(FarLodPersistence, ValidationMetadataStreamClosesBeforeSaveReplacement) {
+    ExpectSiblingOverlap(SiblingSave::Metadata);
+}
+
+TEST(FarLodPersistence, ValidationLedgerStreamClosesBeforeSaveReplacement) {
+    ExpectSiblingOverlap(SiblingSave::Ledger);
+}
+
+TEST(FarLodPersistence, ValidationPlantStreamClosesBeforeSaveReplacement) {
+    ExpectSiblingOverlap(SiblingSave::Plants);
+}
+
+TEST(FarLodPersistence, ValidationPlantStreamClosesBeforeSaveDeletion) {
+    ExpectSiblingOverlap(SiblingSave::DeletePlants);
+}
+
+TEST(FarLodPersistence, ValidationClockLedgerComparisonExcludesConcurrentRewind) {
+    ExpectSiblingOverlap(SiblingSave::RewindClock);
+}
+
+TEST(FarLodPersistence, PlantReplacementFailurePreservesAuthorityAndRemovesStaging) {
+    const SaveDirectory world;
+    ASSERT_TRUE(WorldSaveService::save_plant_entities(Plants("retained"), world.path()));
+    const auto path = WorldSaveService::plant_entities_path(world.path());
+    const auto before = Bytes(path);
+    FileOverlap overlap{.path = path, .blocking_path = path};
+    const FileOverlapGuard observing(overlap);
+    overlap.refuse_replacement = true;
+    std::vector<std::string> errors;
+    EXPECT_FALSE(WorldSaveService::save_plant_entities(Plants("refused"), world.path(), &errors));
+    EXPECT_FALSE(errors.empty());
+    EXPECT_EQ(overlap.publications.load(), 1u);
+    EXPECT_EQ(Bytes(path), before);
+    ExpectNoTemps(world.path());
+}
+
+TEST(FarLodPersistence, PlantDeletionFailureReportsFailureAndRetainsAuthority) {
+    const SaveDirectory world;
+    ASSERT_TRUE(WorldSaveService::save_plant_entities(Plants("retained"), world.path()));
+    const auto path = WorldSaveService::plant_entities_path(world.path());
+    const auto before = Bytes(path);
+    {
+        FileOverlap overlap{.path = path, .blocking_path = path};
+        const FileOverlapGuard observing(overlap);
+        overlap.refuse_removal = true;
+        std::vector<std::string> errors;
+        EXPECT_FALSE(WorldSaveService::save_plant_entities({}, world.path(), &errors));
+        ASSERT_FALSE(errors.empty());
+        EXPECT_NE(errors.back().find("failed to remove plant entities file"), std::string::npos);
+        EXPECT_EQ(overlap.publications.load(), 1u);
+        EXPECT_EQ(Bytes(path), before);
+    }
+    Ecs::EntityRegistrySnapshot loaded;
+    ASSERT_TRUE(WorldSaveService::load_plant_entities(loaded, world.path()));
+    EXPECT_EQ(Ecs::SerializeEntityRegistrySnapshotJson(loaded), before);
+    ASSERT_TRUE(WorldSaveService::save_plant_entities({}, world.path()));
+    EXPECT_FALSE(std::filesystem::exists(path));
+    ExpectNoTemps(world.path());
+}
+
+TEST(FarLodPersistence, AsyncBytesMatchSynchronousIncludingOrderedSameTileWrites) {
+    const SaveDirectory synchronous;
+    const SaveDirectory asynchronous;
+    AsyncFarLodStore writer;
+    std::vector<std::string> errors;
+    // Interleaved tiers share one region container. Repeated writes to the same
+    // key must leave the last payload, with exactly the synchronous file bytes.
+    for (const u16 height : {u16{100}, u16{200}, u16{300}}) {
+        for (const FarLodTier tier : {FarLodTier::F1, FarLodTier::F2}) {
+            FarLodTile tile = Tile(tier, height);
+            FarLodSdfSnapshot source;
+            source.coords = IVec3(-1, 0, 64);
+            source.revision = height;
+            constexpr std::size_t kSamples = static_cast<std::size_t>(CHUNK_SIZE_X + 1) *
+                                             (CHUNK_SIZE_Y + 1) * (CHUNK_SIZE_Z + 1);
+            source.sdf_data.assign(kSamples, -1.0f);
+            source.material_data.assign(kSamples, 11u);
+            ASSERT_EQ(ReduceChunkSdfIntoFarTile(tile, source), FarLodSdfReduceResult::Inserted);
+            ASSERT_TRUE(FarLodStore(synchronous.path()).save_tile(tile, &errors));
+            ASSERT_TRUE(writer.enqueue(asynchronous.path(), std::move(tile)));
+        }
+    }
+    writer.flush();
+    const auto diagnostics = writer.diagnostics();
+    EXPECT_EQ(diagnostics.saved, 6u);
+    EXPECT_EQ(diagnostics.pending, 0u);
+    EXPECT_EQ(diagnostics.failed, 0u);
+    const auto relative = std::filesystem::path("chunks/region/r.-1.2.lmr");
+    ASSERT_TRUE(std::filesystem::exists(asynchronous.path() / relative));
+    EXPECT_EQ(Bytes(asynchronous.path() / relative), Bytes(synchronous.path() / relative));
+    ExpectNoTemps(asynchronous.path());
+}
+
+TEST(FarLodPersistence, WorldBoundaryDrainsCapturedPathsAndCloseRejectsNewWork) {
+    const SaveDirectory old_world;
+    const SaveDirectory new_world;
+    AsyncFarLodStore writer;
+    // All accepted saves are drained at the world boundary. No assertion depends
+    // on how far the worker has progressed when the owner requests that drain.
+    for (const u16 height : {u16{100}, u16{200}, u16{300}, u16{400}})
+        ASSERT_TRUE(writer.enqueue(old_world.path(), Tile(FarLodTier::F1, height)));
+    writer.flush();
+    const auto path = WorldSaveService::region_file_path(old_world.path(), -1, 2);
+    const std::string old_bytes = Bytes(path);
+    ASSERT_FALSE(old_bytes.empty());
+    EXPECT_TRUE(std::filesystem::is_empty(new_world.path()));
+    ASSERT_TRUE(writer.enqueue(new_world.path(), Tile(FarLodTier::F2, 999)));
+    writer.close(); // drains accepted new-world work before reporting closure
+    EXPECT_EQ(writer.diagnostics().pending, 0u);
+    EXPECT_EQ(writer.diagnostics().saved, 5u);
+    EXPECT_EQ(writer.diagnostics().failed, 0u);
+    EXPECT_TRUE(writer.diagnostics().closed);
+    FarLodTile refused = Tile(FarLodTier::F1, 555);
+    EXPECT_FALSE(TryEnqueue(writer, new_world.path(), refused));
+    EXPECT_EQ(refused.height_q.front(), 555u);
+    EXPECT_EQ(Bytes(path), old_bytes);
+    FarLodTile loaded;
+    ASSERT_TRUE(FarLodStore(old_world.path()).load_tile(FarLodTier::F1, -1, 2, 1234, loaded));
+    EXPECT_EQ(loaded.height_q.front(), 400u);
+    EXPECT_FALSE(FarLodStore(old_world.path()).load_tile(FarLodTier::F2, -1, 2, 1234, loaded));
+    ASSERT_TRUE(FarLodStore(new_world.path()).load_tile(FarLodTier::F2, -1, 2, 1234, loaded));
+    EXPECT_EQ(loaded.height_q.front(), 999u);
+    EXPECT_FALSE(FarLodStore(new_world.path()).load_tile(FarLodTier::F1, -1, 2, 1234, loaded));
+    ExpectNoTemps(old_world.path());
+    ExpectNoTemps(new_world.path());
+}
+
+TEST(FarLodPersistence, RejectedMalformedTileLeavesNoStagingAndDoesNotPreventLaterDrain) {
+    const SaveDirectory world;
+    AsyncFarLodStore writer;
+    const auto path = WorldSaveService::region_file_path(world.path(), -1, 2);
+    ASSERT_TRUE(FarLodStore(world.path()).save_tile(Tile(FarLodTier::F1, 100)));
+    const auto before = Bytes(path);
+    FarLodTile malformed = Tile(FarLodTier::F1, 200);
+    malformed.material.pop_back();
+    ASSERT_TRUE(writer.enqueue(world.path(), std::move(malformed)));
+    writer.flush();
+    EXPECT_EQ(writer.diagnostics().failed, 1u);
+    EXPECT_EQ(Bytes(path), before);
+    ExpectNoTemps(world.path());
+    ASSERT_TRUE(writer.enqueue(world.path(), Tile(FarLodTier::F1, 300)));
+    writer.close();
+    EXPECT_EQ(writer.diagnostics().saved, 1u);
+    ExpectNoTemps(world.path());
+}
+
+TEST(FarLodPersistence, AsyncTileAndChunkMergesPreserveAuthorityAndSimulationHash) {
+    const SaveDirectory world;
+    WorldStreamingState state;
+    auto chunk = state.get_or_create_chunk(IVec3(-1, 0, 64));
+    chunk->sdf_data = {-1.0f, 2.0f};
+    chunk->material_data = {7u, 11u};
+    chunk->mark_voxel_data_dirty();
+    auto unrelated = state.get_or_create_chunk(IVec3(40, 0, 0));
+    unrelated->sdf_data = {-3.0f, 4.0f};
+    unrelated->material_data = {9u, 13u};
+    unrelated->mark_voxel_data_dirty();
+    const WorldSaveService service;
+    ASSERT_TRUE(service.save_world(state, world.path()));
+    const auto unrelated_hash =
+        WorldSaveService::region_simulation_digest(world.path(), {1, 0}, {});
+    const auto path = WorldSaveService::region_file_path(world.path(), -1, 2);
+    AsyncFarLodStore writer;
+    for (const u16 height : {u16{100}, u16{200}, u16{300}}) {
+        std::uint64_t region_hash = 0;
+        {
+            // Open the chunk transaction before releasing the tile producer.
+            // The tile worker must reach the same transaction lock before the
+            // chunk rewrite proceeds, forcing the formerly racy overlap.
+            const RegionFileWriteGuard transaction(path);
+            std::latch submit(1);
+            bool queued = false;
+            std::jthread producer([&] {
+                submit.wait();
+                queued = writer.enqueue(world.path(), Tile(FarLodTier::F1, height));
+            });
+            submit.count_down();
+            producer.join();
+            ASSERT_TRUE(queued);
+            WaitForCompetingWriter(transaction);
+            chunk->sdf_data.front() = -static_cast<float>(height);
+            chunk->mark_voxel_data_dirty();
+            ASSERT_TRUE(service.save_world(state, world.path()));
+            // A different thread must read the same and unrelated regions and
+            // validate the world while this transaction remains held. Joining
+            // here also detects an accidentally recursive shared reader lock.
+            bool validated = false;
+            std::uint64_t observed_unrelated_hash = 0;
+            std::jthread reader([&] {
+                region_hash = WorldSaveService::region_simulation_digest(world.path(), {-1, 2}, {});
+                observed_unrelated_hash =
+                    WorldSaveService::region_simulation_digest(world.path(), {1, 0}, {});
+                validated = WorldSaveService::validate_save(world.path());
+            });
+            reader.join();
+            EXPECT_TRUE(validated);
+            EXPECT_EQ(observed_unrelated_hash, unrelated_hash);
+        }
+        writer.flush();
+        EXPECT_EQ(WorldSaveService::region_simulation_digest(world.path(), {-1, 2}, {}),
+                  region_hash);
+    }
+    writer.close();
+    EXPECT_EQ(writer.diagnostics().saved, 3u);
+    EXPECT_EQ(writer.diagnostics().failed, 0u);
+    WorldStreamingState loaded;
+    std::vector<std::string> errors;
+    ASSERT_TRUE(service.load_world(loaded, world.path(), errors));
+    EXPECT_EQ(service.world_hash(loaded), service.world_hash(state));
+    FarLodTile tile;
+    ASSERT_TRUE(FarLodStore(world.path()).load_tile(FarLodTier::F1, -1, 2, 1234, tile));
+    EXPECT_EQ(tile.height_q.front(), 300u);
+    ExpectNoTemps(world.path());
+}
+
+TEST(FarLodPersistence, ChunkMergeWaitsForTileTransactionAndPreservesItsPublishedBytes) {
+    const SaveDirectory world;
+    WorldStreamingState state;
+    auto chunk = state.get_or_create_chunk(IVec3(-1, 0, 64));
+    chunk->sdf_data = {-1.0f, 2.0f};
+    chunk->material_data = {7u, 11u};
+    chunk->mark_voxel_data_dirty();
+    const WorldSaveService service;
+    ASSERT_TRUE(service.save_world(state, world.path()));
+    const auto path = WorldSaveService::region_file_path(world.path(), -1, 2);
+    const auto simulation_hash = service.world_hash(state);
+    const auto region_hash = WorldSaveService::region_simulation_digest(world.path(), {-1, 2}, {});
+    std::jthread chunk_writer;
+    bool saved = false;
+    {
+        // Reverse the overlap: hold a tile transaction while the chunk writer
+        // validates the world and then reaches the same-file merge lock.
+        const RegionFileWriteGuard transaction(path);
+        std::latch begin_chunk(1);
+        chunk_writer = std::jthread([&] {
+            begin_chunk.wait();
+            saved = service.save_world(state, world.path());
+        });
+        begin_chunk.count_down();
+        WaitForCompetingWriter(transaction);
+        EXPECT_TRUE(FarLodStore(world.path()).save_tile(Tile(FarLodTier::F1, 999)));
+        EXPECT_EQ(WorldSaveService::region_simulation_digest(world.path(), {-1, 2}, {}),
+                  region_hash);
+    }
+    chunk_writer.join();
+    EXPECT_TRUE(saved);
+    FarLodTile tile;
+    ASSERT_TRUE(FarLodStore(world.path()).load_tile(FarLodTier::F1, -1, 2, 1234, tile));
+    EXPECT_EQ(tile.height_q.front(), 999u);
+    WorldStreamingState loaded;
+    std::vector<std::string> errors;
+    ASSERT_TRUE(service.load_world(loaded, world.path(), errors));
+    EXPECT_EQ(service.world_hash(loaded), simulation_hash);
+    ExpectNoTemps(world.path());
+}
+
+TEST(FarLodPersistence, SaturatedQueueRefusesAt64WithoutMovingAndDrainsInOrder) {
+    const SaveDirectory world;
+    const SaveDirectory other_world;
+    AsyncFarLodStore writer;
+    const auto path = WorldSaveService::region_file_path(world.path(), -1, 2);
+    FarLodTile refused = Tile(FarLodTier::F2, 999);
+    {
+        const RegionFileWriteGuard transaction(path);
+        ASSERT_TRUE(writer.enqueue(world.path(), Tile(FarLodTier::F1, 100)));
+        WaitForCompetingWriter(transaction);
+        // One active write is blocked at acquisition. The remaining slots stay
+        // queued, so admission and refusal are independent of worker scheduling.
+        for (std::size_t index = 1; index < AsyncFarLodStore::kMaxPendingSaves; ++index)
+            ASSERT_TRUE(
+                writer.enqueue(world.path(), Tile(FarLodTier::F1, static_cast<u16>(100 + index))));
+        EXPECT_EQ(writer.diagnostics().pending, 64u);
+        EXPECT_EQ(writer.diagnostics().saved, 0u);
+        const auto refused_hash = ComputeFarLodTileHash(refused);
+        EXPECT_FALSE(TryEnqueue(writer, other_world.path(), refused));
+        EXPECT_EQ(ComputeFarLodTileHash(refused), refused_hash);
+        EXPECT_EQ(writer.diagnostics().pending, 64u);
+        EXPECT_TRUE(std::filesystem::is_empty(other_world.path()));
+        ExpectNoTemps(world.path());
+    }
+    writer.flush();
+    EXPECT_EQ(writer.diagnostics().pending, 0u);
+    EXPECT_EQ(writer.diagnostics().saved, 64u);
+    EXPECT_EQ(writer.diagnostics().failed, 0u);
+    FarLodTile loaded;
+    ASSERT_TRUE(FarLodStore(world.path()).load_tile(FarLodTier::F1, -1, 2, 1234, loaded));
+    EXPECT_EQ(loaded.height_q.front(), 163u);
+    ASSERT_TRUE(TryEnqueue(writer, other_world.path(), refused));
+    writer.close();
+    EXPECT_EQ(writer.diagnostics().saved, 65u);
+    ASSERT_TRUE(FarLodStore(other_world.path()).load_tile(FarLodTier::F2, -1, 2, 1234, loaded));
+    EXPECT_EQ(loaded.height_q.front(), 999u);
+    ExpectNoTemps(world.path());
+    ExpectNoTemps(other_world.path());
+}
+
+TEST(FarLodIntegration, CountAndByteBudgetsDeferAndEventuallyDrainFifo) {
+    struct Upload {
+        std::size_t bytes;
+        u64 queued_frame;
+    };
+    std::deque<Upload> queue;
+    for (std::size_t index = 0; index < FarLodIntegrationBudget::kMaxBacklog; ++index)
+        queue.push_back(Upload{.bytes = index == 17 ? FarLodIntegrationBudget::kMaxBytes + 1 : 1,
+                               .queued_frame = 0});
+    std::size_t completed = 0;
+    bool deferred = false;
+    for (u64 frame = 0; frame < 32 && !queue.empty(); ++frame) {
+        FarLodIntegrationBudget budget;
+        std::size_t frame_completed = 0;
+        while (
+            !queue.empty() &&
+            budget.admit(queue.front().bytes, frame - queue.front().queued_frame, queue.size())) {
+            queue.pop_front();
+            ++frame_completed;
+            ++completed;
+        }
+        EXPECT_LE(frame_completed, FarLodIntegrationBudget::kMaxUploads);
+        deferred = deferred || !queue.empty();
+    }
+    EXPECT_TRUE(deferred);
+    EXPECT_TRUE(queue.empty());
+    EXPECT_EQ(completed, FarLodIntegrationBudget::kMaxBacklog);
+}
+
+TEST(FarLodIntegration, OversizedHeadWaitsForAgeOrBacklogAndConsumesOneFrameAlone) {
+    for (u64 age = 0; age < FarLodIntegrationBudget::kMaxDeferredFrames; ++age) {
+        FarLodIntegrationBudget budget;
+        EXPECT_FALSE(budget.admit(FarLodIntegrationBudget::kMaxBytes + 1, age, 1));
+    }
+    FarLodIntegrationBudget aged;
+    EXPECT_TRUE(aged.admit(
+        FarLodIntegrationBudget::kMaxBytes + 1, FarLodIntegrationBudget::kMaxDeferredFrames, 1));
+    EXPECT_FALSE(aged.admit(1, FarLodIntegrationBudget::kMaxDeferredFrames, 1));
+    FarLodIntegrationBudget pressure;
+    EXPECT_TRUE(pressure.admit(
+        FarLodIntegrationBudget::kMaxBytes + 1, 0, FarLodIntegrationBudget::kBacklogPressure));
+    EXPECT_FALSE(pressure.admit(1, 0, FarLodIntegrationBudget::kBacklogPressure));
+    FarLodIntegrationBudget exact;
+    EXPECT_TRUE(exact.admit(FarLodIntegrationBudget::kMaxBytes, 0, 1));
+    EXPECT_FALSE(exact.admit(1, 0, 1));
+}
+
+TEST(FarLodPersistence, UnchangedAndOverlappingCapturesShareBytesAndEditsCopyOnce) {
+    const auto params = Luminumbra::Test::SyntheticTerrainParams();
+    Systems::SHIELD_WorldSystem world(nullptr, nullptr, params, 1337);
+    auto chunk = std::make_shared<Chunk>(IVec3(31, 0, 0)); // shared region halo
+    constexpr std::size_t kSamples =
+        static_cast<std::size_t>(CHUNK_SIZE_X + 1) * (CHUNK_SIZE_Y + 1) * (CHUNK_SIZE_Z + 1);
+    chunk->sdf_data.assign(kSamples, -1.0f);
+    chunk->material_data.assign(kSamples, 7u);
+    ASSERT_TRUE(world.adopt_streamed_chunk(chunk));
+    const auto first = world.capture_far_lod_sdf_snapshot(0, 0);
+    const auto again = world.capture_far_lod_sdf_snapshot(0, 0);
+    const auto neighbour = world.capture_far_lod_sdf_snapshot(1, 0);
+    ASSERT_EQ(first->entries.size(), 1u);
+    ASSERT_EQ(again->entries.size(), 1u);
+    ASSERT_EQ(neighbour->entries.size(), 1u);
+    EXPECT_EQ(first->bytes_copied, kSamples * (sizeof(f32) + sizeof(u8)));
+    EXPECT_EQ(again->bytes_copied, 0u);
+    EXPECT_EQ(neighbour->bytes_copied, 0u);
+    EXPECT_EQ(first->entries.front().payload, again->entries.front().payload);
+    EXPECT_EQ(first->entries.front().payload, neighbour->entries.front().payload);
+    chunk->material_data.front() = 9u; // even an unmarked replacement must copy
+    const auto changed = world.capture_far_lod_sdf_snapshot(0, 0);
+    ASSERT_EQ(changed->entries.size(), 1u);
+    EXPECT_EQ(changed->bytes_copied, first->bytes_copied);
+    EXPECT_NE(changed->entries.front().payload, first->entries.front().payload);
+    EXPECT_EQ(first->entries.front().payload->material_data.front(), 7u);
+    EXPECT_EQ(changed->entries.front().payload->material_data.front(), 9u);
+    EXPECT_EQ(world.capture_far_lod_sdf_snapshot(0, 0)->bytes_copied, 0u);
+    chunk->sdf_data.front() = 3.0f;
+    chunk->mark_voxel_data_dirty();
+    const auto edited = world.capture_far_lod_sdf_snapshot(0, 0);
+    EXPECT_EQ(edited->bytes_copied, first->bytes_copied);
+    EXPECT_EQ(edited->entries.front().payload->sdf_data.front(), 3.0f);
+    EXPECT_EQ(first->entries.front().payload->sdf_data.front(), -1.0f);
+    EXPECT_FALSE(world.is_far_lod_sdf_snapshot_current(*first));
+    EXPECT_TRUE(world.is_far_lod_sdf_snapshot_current(*edited));
+    EXPECT_FALSE(edited->entries.front().authority_durable);
+    chunk->clear_voxel_data_dirty();
+    const auto durable = world.capture_far_lod_sdf_snapshot(0, 0);
+    EXPECT_EQ(durable->bytes_copied, 0u);
+    EXPECT_TRUE(durable->entries.front().authority_durable);
+    EXPECT_EQ(durable->entries.front().payload, edited->entries.front().payload);
+}
+
+namespace {
+// Exercise the production owner-thread integration and world-swap paths with
+// recorded GL entry points. No context, display, driver, clock or test skip.
+template<typename T>
+class ScopedGlEntry {
+public:
+    ScopedGlEntry(T& entry, T replacement)
+        : m_entry(entry)
+        , m_previous(entry) {
+        m_entry = replacement;
+    }
+    ~ScopedGlEntry() {
+        m_entry = m_previous;
+    }
+
+private:
+    T& m_entry;
+    T m_previous;
+};
+
+void APIENTRY GenerateObjects(GLsizei count, GLuint* names) {
+    static GLuint next_name = 1;
+    for (GLsizei index = 0; index < count; ++index)
+        names[index] = next_name++;
+}
+void APIENTRY DeleteObjects(GLsizei, const GLuint*) {}
+void APIENTRY BindVertexArray(GLuint) {}
+void APIENTRY BindBuffer(GLenum, GLuint) {}
+void APIENTRY UploadBuffer(GLenum, GLsizeiptr, const void*, GLenum) {}
+void APIENTRY EnableAttribute(GLuint) {}
+void APIENTRY FloatAttribute(GLuint, GLint, GLenum, GLboolean, GLsizei, const void*) {}
+void APIENTRY IntegerAttribute(GLuint, GLint, GLenum, GLsizei, const void*) {}
+GLboolean APIENTRY IsObject(GLuint) {
+    return GL_TRUE;
+}
+
+// Recorded GL entries shared by owner-thread integration regressions.
+struct ScopedFarGl {
+    const ScopedGlEntry<decltype(glGenBuffers)> gen_buffers{glGenBuffers, &GenerateObjects};
+    const ScopedGlEntry<decltype(glGenVertexArrays)> gen_arrays{glGenVertexArrays,
+                                                                &GenerateObjects};
+    const ScopedGlEntry<decltype(glDeleteBuffers)> delete_buffers{glDeleteBuffers, &DeleteObjects};
+    const ScopedGlEntry<decltype(glDeleteVertexArrays)> delete_arrays{glDeleteVertexArrays,
+                                                                      &DeleteObjects};
+    const ScopedGlEntry<decltype(glBindVertexArray)> bind_array{glBindVertexArray,
+                                                                &BindVertexArray};
+    const ScopedGlEntry<decltype(glBindBuffer)> bind_buffer{glBindBuffer, &BindBuffer};
+    const ScopedGlEntry<decltype(glBufferData)> upload{glBufferData, &UploadBuffer};
+    const ScopedGlEntry<decltype(glEnableVertexAttribArray)> enable{glEnableVertexAttribArray,
+                                                                    &EnableAttribute};
+    const ScopedGlEntry<decltype(glVertexAttribPointer)> float_attribute{glVertexAttribPointer,
+                                                                         &FloatAttribute};
+    const ScopedGlEntry<decltype(glVertexAttribIPointer)> integer_attribute{glVertexAttribIPointer,
+                                                                            &IntegerAttribute};
+    const ScopedGlEntry<decltype(glIsBuffer)> is_buffer{glIsBuffer, &IsObject};
+    const ScopedGlEntry<decltype(glIsVertexArray)> is_array{glIsVertexArray, &IsObject};
+    const ScopedGlEntry<decltype(glObjectLabel)> label{
+        glObjectLabel, static_cast<decltype(glObjectLabel)>(nullptr)};
+};
+} // namespace
+
+TEST(FarLodPersistence, ProductionWorldSwapFlushesSavesEvenWhenUploadsAreDeferred) {
+    const ScopedFarGl gl;
+
+    const SaveDirectory old_world;
+    const SaveDirectory new_world;
+    auto params = Luminumbra::Test::SyntheticTerrainParams();
+    params.base_amplitude = 0.0f;
+    params.height_offset = 12.0f;
+    params.caves_enabled = false;
+    const Systems::SHIELD_WorldSystem world(nullptr, nullptr, params, 1337);
+    JobSystem jobs;
+    jobs.startup(1);
+    Rendering::FarLodSystem far;
+    far.attach_job_system(&jobs);
+    far.set_save_dir(old_world.path());
+    const Vec3 camera(256, 100, 256);
+    far.update(world, camera);
+    ASSERT_EQ(far.stats().builds_dispatched, Rendering::FarLodSystem::kMaxBuildDispatchesPerFrame);
+    // One FIFO worker and a following fence complete precisely the first batch.
+    jobs.wait(jobs.dispatch_batch({[] {
+    }}));
+    far.update(world, camera);
+    EXPECT_LE(far.stats().builds_integrated_ok, FarLodIntegrationBudget::kMaxUploads);
+    EXPECT_GT(far.stats().integration_uploads_deferred, 0u);
+    EXPECT_EQ(far.stats().builds_integrated_ok + far.stats().integration_uploads_deferred,
+              Rendering::FarLodSystem::kMaxBuildDispatchesPerFrame);
+    // Cancels builds not accepted for persistence and flushes the eight accepted
+    // saves before changing the path. Deferred GL work cannot hold saves back.
+    far.set_save_dir(new_world.path());
+    far.set_enabled(false);
+    far.update(world, camera);
+    EXPECT_EQ(far.stats().tiles_saved_async, Rendering::FarLodSystem::kMaxBuildDispatchesPerFrame);
+    EXPECT_EQ(far.stats().pending_saves, 0u);
+    EXPECT_EQ(far.stats().tile_save_failures, 0u);
+    std::size_t regions = 0;
+    for (const auto& entry : std::filesystem::recursive_directory_iterator(old_world.path()))
+        if (entry.path().extension() == ".lmr")
+            ++regions;
+    EXPECT_EQ(regions, Rendering::FarLodSystem::kMaxBuildDispatchesPerFrame);
+    EXPECT_TRUE(std::filesystem::is_empty(new_world.path()));
+    ExpectNoTemps(old_world.path());
+    ExpectNoTemps(new_world.path());
+    far.shutdown();
+    jobs.shutdown();
+}
+
+TEST(FarLodPersistence, SaveBackpressureBoundsBuildBacklogAndResumesAfterDrain) {
+    const ScopedFarGl gl;
+    const SaveDirectory world_save;
+    auto params = Luminumbra::Test::SyntheticTerrainParams();
+    params.base_amplitude = 0.0f;
+    params.height_offset = 12.0f;
+    params.caves_enabled = false;
+    const Systems::SHIELD_WorldSystem world(nullptr, nullptr, params, 1337);
+    JobSystem jobs;
+    jobs.startup(1);
+    Rendering::FarLodSystem far;
+    far.attach_job_system(&jobs);
+    far.set_save_dir(world_save.path());
+    const Vec3 camera(256, 100, 256);
+    std::size_t dispatched = 0;
+    const auto path = WorldSaveService::region_file_path(world_save.path(), 0, 0);
+    {
+        // This is the unique nearest tile to the camera, hence the first save
+        // on the single FIFO worker. Keep it blocked until both queues fill.
+        const RegionFileWriteGuard transaction(path);
+        far.update(world, camera);
+        dispatched += far.stats().builds_dispatched;
+        jobs.wait(jobs.dispatch_batch({[] {
+        }}));
+        far.update(world, camera);
+        dispatched += far.stats().builds_dispatched;
+        WaitForCompetingWriter(transaction);
+        // Every fence finishes the preceding build batch. Persistence cannot
+        // advance, so 24 frames suffice to reach both unchanged capacity limits.
+        for (std::size_t frame = 0; frame < 24; ++frame) {
+            jobs.wait(jobs.dispatch_batch({[] {
+            }}));
+            far.update(world, camera);
+            dispatched += far.stats().builds_dispatched;
+            EXPECT_LE(far.stats().pending_saves, AsyncFarLodStore::kMaxPendingSaves);
+            EXPECT_LE(far.stats().pending_depth, FarLodIntegrationBudget::kMaxBacklog);
+            EXPECT_LE(far.stats().builds_integrated_ok, FarLodIntegrationBudget::kMaxUploads);
+        }
+        EXPECT_EQ(far.stats().pending_saves, AsyncFarLodStore::kMaxPendingSaves);
+        EXPECT_EQ(far.stats().pending_depth, FarLodIntegrationBudget::kMaxBacklog);
+        EXPECT_EQ(far.stats().builds_dispatched, 0u);
+        EXPECT_EQ(dispatched,
+                  AsyncFarLodStore::kMaxPendingSaves + FarLodIntegrationBudget::kMaxBacklog);
+    }
+    // World-boundary flush is a deterministic worker fence. It cancels the
+    // unaccepted build backlog and preserves every previously accepted save.
+    far.prepare_world_swap();
+    far.set_enabled(false);
+    far.update(world, camera);
+    EXPECT_EQ(far.stats().pending_saves, 0u);
+    EXPECT_EQ(far.stats().tiles_saved_async, AsyncFarLodStore::kMaxPendingSaves);
+    EXPECT_EQ(far.stats().tile_save_failures, 0u);
+    EXPECT_EQ(far.stats().pending_depth, 0u);
+    ExpectNoTemps(world_save.path());
+    far.set_enabled(true);
+    far.update(world, camera);
+    EXPECT_GT(far.stats().builds_dispatched, 0u);
+    far.shutdown();
+    jobs.shutdown();
+}
