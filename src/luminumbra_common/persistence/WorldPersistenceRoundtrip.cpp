@@ -8,9 +8,11 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <cstdint>
 #include <fstream>
 #include <iomanip>
+#include <limits>
 #include <memory>
 #include <sstream>
 #include <stdexcept>
@@ -306,13 +308,84 @@ nlohmann::json ChunkToJson(const Chunk& chunk, bool sim_only = false) {
         {"water_state", WaterStateToJson(chunk)}};
 }
 
+// Snapshot fixtures may contain partial lattices; durable capture requires the exact size.
+constexpr std::size_t kMaxDensitySamples =
+    static_cast<std::size_t>(CHUNK_SIZE_X + 1) * (CHUNK_SIZE_Y + 1) * (CHUNK_SIZE_Z + 1);
+
+bool ReadDensityValue(const nlohmann::json& value, float& out) {
+    if (value.is_number_unsigned()) {
+        out = static_cast<float>(value.get<std::uint64_t>());
+        return true;
+    }
+    if (value.is_number_integer()) {
+        out = static_cast<float>(value.get<std::int64_t>());
+        return true;
+    }
+    if (!value.is_number_float())
+        return false;
+    const auto density = value.get<double>();
+    const auto maximum = static_cast<double>((std::numeric_limits<float>::max)());
+    if (!std::isfinite(density) || density < -maximum || density > maximum)
+        return false;
+    out = static_cast<float>(density);
+    return true;
+}
+
+bool ReadMaterialValue(const nlohmann::json& value, u8& out) {
+    if (value.is_number_unsigned()) {
+        const auto material = value.get<std::uint64_t>();
+        if (material > 255u)
+            return false;
+        out = static_cast<u8>(material);
+        return true;
+    }
+    if (value.is_number_integer()) {
+        const auto material = value.get<std::int64_t>();
+        if (material < 0 || material > 255)
+            return false;
+        out = static_cast<u8>(material);
+        return true;
+    }
+    return false;
+}
+
+std::vector<float> DensityFromJson(const nlohmann::json& values) {
+    if (!values.is_array() || values.size() > kMaxDensitySamples)
+        throw std::invalid_argument("sdf_data must be an array no larger than the chunk lattice");
+    std::vector<float> density;
+    density.reserve(values.size());
+    for (const auto& value : values) {
+        float sample = 0;
+        if (!ReadDensityValue(value, sample))
+            throw std::invalid_argument("sdf_data must contain only finite float values");
+        density.push_back(sample);
+    }
+    return density;
+}
+
+std::vector<u8> MaterialFromJson(const nlohmann::json& values) {
+    if (!values.is_array())
+        throw std::invalid_argument("material_data must be an array");
+    std::vector<u8> materials;
+    materials.reserve(values.size());
+    for (const auto& value : values) {
+        u8 material = 0;
+        if (!ReadMaterialValue(value, material))
+            throw std::invalid_argument("material_data must contain only integers in [0, 255]");
+        materials.push_back(material);
+    }
+    return materials;
+}
+
 void ApplyChunkJson(const nlohmann::json& value, Chunk& chunk) {
     chunk.set_state(ChunkStateFromName(value.at("state").get<std::string>()));
-    chunk.sdf_data = value.at("sdf_data").get<std::vector<float>>();
+    chunk.sdf_data = DensityFromJson(value.at("sdf_data"));
     chunk.heightmap_data = value.at("heightmap_data").get<std::vector<float>>();
     // tolerant read (default empty) so old saves without the field still
     // load and the single-missing-field negative fixture is unaffected.
-    chunk.material_data = value.value("material_data", std::vector<u8>{});
+    chunk.material_data = value.contains("material_data")
+                              ? MaterialFromJson(value.at("material_data"))
+                              : std::vector<u8>{};
     chunk.mesh_vertices = MeshVerticesFromJson(value.at("mesh_vertices"));
     chunk.mesh_indices = value.at("mesh_indices").get<std::vector<u32>>();
     chunk.water_mesh_vertices = MeshVerticesFromJson(value.at("water_mesh_vertices"));
@@ -539,6 +612,39 @@ bool ValidateCoordsObject(const nlohmann::json& value, std::vector<std::string>&
     return true;
 }
 
+void RequireDensityArray(const nlohmann::json& chunk, std::vector<std::string>& errors) {
+    if (!chunk.contains("sdf_data") || !chunk.at("sdf_data").is_array() ||
+        chunk.at("sdf_data").size() > kMaxDensitySamples) {
+        errors.push_back("sdf_data must be an array no larger than the chunk lattice");
+    } else {
+        for (const auto& value : chunk.at("sdf_data")) {
+            float sample = 0;
+            if (!ReadDensityValue(value, sample)) {
+                errors.push_back("sdf_data must contain only finite float values");
+                break;
+            }
+        }
+    }
+}
+
+void ValidateMaterialArray(const nlohmann::json& chunk, std::vector<std::string>& errors) {
+    // Missing material_data remains a supported legacy representation.
+    if (chunk.contains("material_data")) {
+        const auto& materials = chunk.at("material_data");
+        if (!materials.is_array()) {
+            errors.push_back("material_data must be an array");
+        } else {
+            for (const auto& value : materials) {
+                u8 material = 0;
+                if (!ReadMaterialValue(value, material)) {
+                    errors.push_back("material_data must contain only integers in [0, 255]");
+                    break;
+                }
+            }
+        }
+    }
+}
+
 void RequireNumberArray(const nlohmann::json& chunk,
                         const std::string& field_name,
                         std::vector<std::string>& errors) {
@@ -701,8 +807,9 @@ bool ValidateChunkFormatObject(const nlohmann::json& chunk, std::vector<std::str
         errors.push_back("state_value must be an integer");
     }
 
-    for (const char* field :
-         {"sdf_data", "heightmap_data", "water_level_data", "water_sim_terrain_height"}) {
+    RequireDensityArray(chunk, errors);
+    ValidateMaterialArray(chunk, errors);
+    for (const char* field : {"heightmap_data", "water_level_data", "water_sim_terrain_height"}) {
         RequireNumberArray(chunk, field, errors);
     }
     for (const char* field : {"mesh_indices",
