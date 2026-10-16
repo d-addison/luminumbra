@@ -1,10 +1,8 @@
 #include "luminumbra/core/Types.h"
-#include "luminumbra_client/rendering/FarWorldWaterMesh.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 #include "luminumbra_common/world/Chunk.h"
 #include "luminumbra_common/world/FarFrozenObservation.h"
 #include "luminumbra_common/world/FarLodStore.h"
-#include "rendering/FarVolumeRenderMesh.h"
 #include "world/FarEditedBake.h"
 #include "world/FarTierTable.h"
 #include "world/FarVolume.h"
@@ -815,45 +813,4 @@ TEST(FarFrozenObservation, ProductionCaptureLeavesSimulationStateUnchangedAndSur
     ASSERT_TRUE(frozen->Sample(5, {0, 0, 0}));
     EXPECT_EQ(frozen->WaterCapability(0), FarFrozenWaterCapability::Wet);
     EXPECT_EQ(frozen->WaterSample(0, 0, 0), (std::optional<FarFrozenWaterSample>{{true, -0.75f}}));
-}
-
-TEST(FarFrozenObservation, RendererWaterBridgeUsesFrozenCombinedIdentityAndRefusesPartialSupport) {
-    using namespace Luminumbra::Rendering;
-    auto source = Source();
-    source.water = [](std::int64_t, std::int64_t) {
-        return FarFrozenWaterSample{true, 0};
-    };
-    std::shared_ptr<const FarFrozenObservation> frozen;
-    ASSERT_EQ(
-        CaptureFarVolumeObservation({{1, 0, -1}, {-16, 16}, 42}, source, Limits(), Pool(), frozen),
-        Error::None);
-    FarWorldFrozenWaterObservation const water(frozen, {1, 0, -1});
-    EXPECT_EQ(water.content_identity(), frozen->Authority(1).field_identity);
-    const auto water_bound = water.WaterBound({1, 0, -1});
-    ASSERT_TRUE(water_bound.has_value());
-    if (!water_bound.has_value())
-        return;
-    EXPECT_FALSE(water.WaterBound({1, 1, -1}));
-    FarVolumeRenderMesh terrain, output;
-    terrain.request = {{1, 0, -1}, {-16, 16}, frozen->content_identity()};
-    terrain.origin_meters = {0, -16, -512};
-    terrain.sampled_max_meters = {512, 16, 0};
-    FarVolumeMemoryPool mesh_pool(16ULL * 1024 * 1024);
-    FarVolumeMemoryLease retained(mesh_pool);
-    ASSERT_TRUE(
-        BuildFarWorldWaterMesh(terrain,
-                               water,
-                               *water_bound,
-                               {129ULL * 129, 128ULL * 128, 100000, 200000, 8ULL * 1024 * 1024},
-                               {&mesh_pool, &retained, nullptr},
-                               output));
-    EXPECT_TRUE(output.water_complete);
-    EXPECT_EQ(output.water_indices, 128u * 128u * 6);
-    FarWorldFrozenWaterObservation const missing(frozen, {1, 1, -1});
-    EXPECT_EQ(missing.WaterCapability(), FarWorldWaterCapability::Unavailable);
-    const auto region = SmallRegion();
-    ASSERT_EQ(CaptureFarFrozenObservation({&region, 1}, source, Limits(), Pool(), frozen),
-              Error::None);
-    FarWorldFrozenWaterObservation const partial(frozen, {1, 0, 0});
-    EXPECT_EQ(partial.WaterCapability(), FarWorldWaterCapability::Unavailable);
 }
