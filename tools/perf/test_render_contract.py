@@ -709,6 +709,83 @@ class ScriptedWorkloadTests(unittest.TestCase):
                 with self.subTest(kind=kind, delay=delay), self.assertRaisesRegex(ValueError, 'presentation time'):
                     capture.validate(data, args(traversal=script))
 
+    def test_comparison_requires_equal_warmup_presentation_offsets(self):
+        script = self.scripts['edit']
+        reference = workload_artifact('edit', script)
+        candidate = copy.deepcopy(reference)
+        offset = 60
+        candidate['warmup_frames'] += offset
+        for row in candidate['frame_samples']:
+            row['frame'] += offset
+            row['gpu_frame'] += offset
+        for row in candidate['workload']['observations']:
+            row['frame'] += offset
+            row['presentation_seconds'] += offset / 30
+        candidate['excluded_windows'][0]['last_frame'] += offset
+        for key in ('first_frame', 'last_frame'):
+            candidate['excluded_windows'][1][key] += offset
+        window = candidate['windows']['warmup']
+        window['frame_wall_samples_ms'] += [1.0] * offset
+        summary = perf.summarize(window['frame_wall_samples_ms'], 'ms')
+        window['distribution'].update({key: summary[key] for key in contract.STATS})
+        window['distribution']['sample_count'] += offset
+        # Each capture is valid on its own, with identical settings identities.
+        for data in (reference, candidate):
+            self.assertEqual(capture.validate(data, args(traversal=script))['verdict'], 'PASS')
+        contract.require_matching_render_identity(reference, copy.deepcopy(reference))
+        with self.assertRaisesRegex(ValueError, 'warmup/presentation offset differs'):
+            contract.require_matching_render_identity(reference, candidate)
+        path = Path(self.directory.name) / 'warmup-reference.json'
+        path.write_text(json.dumps(reference), encoding='utf-8')
+        with self.assertRaisesRegex(ValueError, 'warmup/presentation offset differs'):
+            capture.validate(candidate, args(traversal=script, reference_capture=path))
+
+    def test_menu_only_frames_can_have_no_scene_passes(self):
+        script = self.scripts['menu_entry']
+        data = workload_artifact('menu_entry', script)
+
+        def clear_passes(row):
+            row['passes'] = {name: dict(issued=False, ms=None) for name in contract.PASSES}
+            row['gpu_pass_sum_ms'] = 0.0
+
+        def refresh_pass_statistics():
+            values = [row['gpu_pass_sum_ms'] for row in data['frame_samples']]
+            summary = perf.summarize(values, 'ms')
+            data['distribution']['gpu_pass_sum_ms'].update({key: summary[key] for key in contract.STATS})
+            data['avg']['gpu_pass_sum_ms'] = sum(values) / len(values)
+            for name in contract.PASSES:
+                data['avg_ms'][name] = sum(row['passes'][name]['ms'] or 0
+                                           for row in data['frame_samples']) / len(values)
+            data['avg_ms']['total'] = data['avg']['gpu_pass_sum_ms']
+
+        documents = set()
+        for sample, observation in zip(data['frame_samples'], data['workload']['observations']):
+            if observation['ui_document'] in ('pause', 'settings', 'main_menu'):
+                documents.add(observation['ui_document'])
+                clear_passes(sample)
+        self.assertEqual(documents, {'pause', 'settings', 'main_menu'})
+        refresh_pass_statistics()
+        self.assertEqual(capture.validate(data, args(traversal=script))['verdict'], 'PASS')
+        self.assertEqual(len(data['frame_samples']), data['frames'])
+        # Gameplay still requires scene timers, including gameplay in this script.
+        index = next(i for i, row in enumerate(data['workload']['observations'])
+                     if row['ui_document'] == 'hud')
+        clear_passes(data['frame_samples'][index])
+        refresh_pass_statistics()
+        with self.assertRaisesRegex(ValueError, 'no render pass timers issued'):
+            capture.validate(data, args(traversal=script))
+
+    def test_reload_without_settlement_is_rejected(self):
+        script = self.scripts['save_load']
+        data = workload_artifact('save_load', script)
+        request = data['workload']['reload']['request_frame']
+        data['workload']['reload'] = None
+        for row in data['workload']['observations']:
+            if row['frame'] >= request:
+                row.update(settled=False, stream_meshing_batches=1, stream_pending_lod_chunks=1)
+        with self.assertRaisesRegex(ValueError, 'did not settle after reload'):
+            capture.validate(data, args(traversal=script))
+
     def test_reload_duration_covers_every_complete_frame_interval(self):
         script = FIXTURES / 'save-load.traversal'
         original = workload_artifact('save_load', script)

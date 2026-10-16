@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Device-free run_client controls, including a real child that outlives capture."""
 import argparse
-import base64
 from contextlib import redirect_stderr
 import hashlib
 import importlib.util
@@ -29,7 +28,7 @@ runner = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(runner)
 
 CHILD = r'''
-import base64, pathlib, sys, time
+import pathlib, sys, time
 artifact, payload, code, wait, loaders, ready, startup_delay = sys.argv[1:]
 time.sleep(float(startup_delay))
 if loaders == '1':
@@ -37,7 +36,7 @@ if loaders == '1':
     for part in ('trunk', 'branches', 'leaves'):
         print(f"tree_small_02_{part}.lmesh' (3 verts, 3 indices)", flush=True)
 if payload != '-':
-    pathlib.Path(artifact).write_bytes(base64.b64decode(payload))
+    pathlib.Path(artifact).write_bytes(pathlib.Path(payload).read_bytes())
 pathlib.Path(ready).touch()
 if wait == '1':
     time.sleep(30)
@@ -129,8 +128,14 @@ class RenderRunnerEvidenceTests(unittest.TestCase):
         self.assertEqual(kwargs['timeout'], 180)
         self.assertFalse(kwargs['check'])
         artifact = command[command.index('--render-benchmark') + 1]
-        payload = '-' if self.payload is None else base64.b64encode(self.payload).decode('ascii')
-        child_command = [sys.executable, str(self.child), artifact, payload,
+        payload = '-'
+        if self.payload is not None:
+            # Capture JSON can exceed both Windows' command-line limit and the
+            # POSIX per-argument bound. Close the fixture file before spawning.
+            fixture = self.root / 'child-payload.json'
+            fixture.write_bytes(self.payload)
+            payload = str(fixture)
+        child_command = [sys.executable, '-I', '-B', str(self.child), artifact, payload,
                          str(self.code), str(int(self.wait)), str(int(self.loaders)),
                          str(self.root / 'child.ready'), str(self.startup_delay)]
         # Production argv and its 180-second limit are observed unchanged.
@@ -181,8 +186,7 @@ class RenderRunnerEvidenceTests(unittest.TestCase):
     def test_successful_v4_workload_runs_through_report_validation(self):
         source = Path(__file__).resolve().parents[2]
         runner.OPTIONS.source = source
-        script = self.case.short_save_load_script()
-        data = contract_fixtures.workload_artifact('save_load', script)
+        data = self.delayed_reload_capture()
         self.payload = (json.dumps(data) + '\n').encode('utf-8')
         self.case.test_v4_save_load_success()
         self.assertEqual(len(self.calls), 1)
@@ -199,8 +203,7 @@ class RenderRunnerEvidenceTests(unittest.TestCase):
 
     def test_successful_v4_without_audio_runs_through_report_validation(self):
         runner.OPTIONS.source = Path(__file__).resolve().parents[2]
-        script = self.case.short_save_load_script()
-        data = contract_fixtures.workload_artifact('save_load', script)
+        data = self.delayed_reload_capture()
         content = data['settings']['content_files']
         for path in list(content):
             if path.startswith('assets/audio/'):
@@ -216,6 +219,42 @@ class RenderRunnerEvidenceTests(unittest.TestCase):
         self.assertFalse((self.runtime / 'assets/audio').exists())
         self.assertEqual(json.loads(self.paths('save-load')[0].read_bytes()), data)
         self.assertEqual(self.receipt('save-load')['return_code'], 0)
+
+    def delayed_reload_capture(self):
+        script = self.case.save_load_script()
+        data = contract_fixtures.workload_artifact('save_load', script)
+        manifest = runner.contract.traversal_manifest(script.read_text(encoding='utf-8'))
+        reload = data['workload']['reload']
+        request = reload['request_frame']
+        settled = request + 30
+        for row in data['workload']['observations']:
+            if request <= row['frame'] < settled:
+                row.update(settled=False, stream_meshing_batches=1, stream_pending_lod_chunks=1)
+        reload['first_settled_frame'] = settled
+        samples = data['frame_samples']
+        warmup = data['warmup_frames']
+        reload['elapsed_ms'] = sum(row['frame_wall_ms'] for row in
+                                   samples[request - warmup:settled - warmup])
+        # No streaming churn from camera movement while the reload is settling.
+        poses = [runner.contract.camera_sample(manifest, tick)['position'] for tick in
+                 range(manifest['actions'][-1]['tick'], settled - warmup + 2)]
+        self.assertTrue(all(pose == poses[0] for pose in poses))
+        self.assertTrue(any(runner.contract.camera_sample(manifest, tick)['position'] != poses[0]
+                            for tick in range(settled - warmup + 2, manifest['expected_ticks'] + 1)))
+        return data
+
+    def test_v4_success_case_rejects_reload_that_never_settles(self):
+        runner.OPTIONS.source = Path(__file__).resolve().parents[2]
+        data = self.delayed_reload_capture()
+        request = data['workload']['reload']['request_frame']
+        data['workload']['reload'] = None
+        for row in data['workload']['observations']:
+            if row['frame'] >= request:
+                row.update(settled=False, stream_meshing_batches=1, stream_pending_lod_chunks=1)
+        self.payload = json.dumps(data).encode('utf-8')
+        with self.assertRaisesRegex(ValueError, 'did not settle after reload'):
+            self.case.test_v4_save_load_success()
+        self.assertEqual(self.receipt('save-load')['capture_status'], 'retained')
 
     def test_timeout_retains_complete_capture_after_runtime_cleanup(self):
         self.assert_timeout()
@@ -476,7 +515,7 @@ class RenderRunnerEvidenceTests(unittest.TestCase):
         with mock.patch.object(runner.subprocess, 'run', side_effect=short_run), \
                 redirect_stderr(stderr):
             with self.assertRaises(subprocess.TimeoutExpired):
-                runner._run_process([sys.executable, str(slow), str(self.root / 'slow.ready')], cwd=self.root,
+                runner._run_process([sys.executable, '-I', '-B', str(slow), str(self.root / 'slow.ready')], cwd=self.root,
                                     environment=os.environ.copy(), log=log,
                                     artifact=artifact, retained=retained,
                                     receipt_path=receipt_path)

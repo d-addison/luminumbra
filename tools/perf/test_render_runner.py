@@ -253,15 +253,30 @@ class RenderRunnerTests(unittest.TestCase):
         self.assertIsNone(data['settings']['content_files']['assets/audio'])
 
     def validate_save_load_capture(self, audio):
-        script = self.short_save_load_script()
+        script = self.save_load_script()
         data = self.run_client('save-load', ['--traversal', str(script)], schema='v4', audio=audio)
         contract.validate(data, data['adapter']['renderer'], traversal=script)
         self.assertEqual(data['schema'], contract.WORKLOAD_SCHEMA)
-        self.assertEqual(data['workload']['actual_ticks'], 4)
+        self.assertEqual(data['workload']['actual_ticks'],
+                         contract.traversal_manifest(script.read_text(encoding='utf-8'))['expected_ticks'])
         self.assertEqual([(row['name'], row['succeeded']) for row in data['workload']['actions']],
                          [('save', True), ('reload', True)])
         self.assertIsNotNone(data['workload']['reload'])
         return data
+
+    def save_load_script(self):
+        # Hold the view while asynchronous reload/meshing completes, then resume
+        # motion inside the same chunk. The four-tick refusal script cannot
+        # supply a successful reload's quiescence and resumed-camera evidence.
+        script = self.short_save_load_script()
+        text = script.read_text(encoding='utf-8').split('points ', 1)[0]
+        text = text.replace('duration_seconds 0.13333333333333333', 'duration_seconds 10')
+        text = text.replace('expected_ticks 4', 'expected_ticks 300')
+        text += ('points 3\npoint 0 8 80 8 0 -6\npoint 240 8 80 8 0 -6\n'
+                 'point 300 9 80 8 0 -6\nactions 2\n'
+                 'action 1 save 0 0 0 0\naction 2 reload 0 0 0 0\n')
+        script.write_bytes(text.encode('utf-8'))
+        return script
 
     def test_escaping_audio_refusal(self):
         bank = self.root / 'data/audio/sfx_main.bank.json'

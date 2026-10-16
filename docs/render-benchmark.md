@@ -414,7 +414,9 @@ refused even inside a known v3 artifact. This checker does not certify the futur
 far-volume ladder or its 90-second settle obligation.
 
 Use `--reference-capture reference.json` with the same expected traversal and
-adapter arguments to validate two captures and require equal render identities.
+adapter arguments to validate two captures and require equal render identities
+and warmup frame counts. Warmup shifts the presentation clock, so different
+counts produce different animation and cloud phases even with equal settings.
 Changes to default `systems.json` flags or parameters change this identity even
 without a CLI or environment override. The canonical hash uses sorted objects,
 length-prefixed UTF-8 strings, typed values and little-endian IEEE double bytes;

@@ -1,23 +1,40 @@
 #include "luminumbra_client/app/RenderConfiguration.h"
+#include "luminumbra_client/app/RenderMeasurement.h"
 #include "luminumbra_client/app/RenderWorkload.h"
+#include "luminumbra_common/core/CaptureContentPaths.h"
+#include "luminumbra_common/core/FilesystemPath.h"
+#include "luminumbra_common/core/SystemConfig.h"
 #include "luminumbra_common/world/GameSession.h"
 #include "luminumbra_common/world/WorldgenFileReader.h"
 
+#include <array>
 #include <chrono>
 #include <cstdlib>
+#include <exception>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <source_location>
 #include <sstream>
 #include <stdexcept>
+#include <string>
+#include <string_view>
+#include <system_error>
+#include <vector>
+
+#include <nlohmann/json.hpp>
+#include <nlohmann/json_fwd.hpp>
 
 namespace {
 using namespace Luminumbra::Client::Measurement;
 using luminumbra::core::SystemConfig;
 using nlohmann::json;
 
-void require(bool condition) {
+void require(bool condition,
+             const std::source_location& location = std::source_location::current()) {
     if (!condition)
-        throw std::runtime_error("render configuration assertion failed");
+        throw std::runtime_error("render configuration assertion failed at line " +
+                                 std::to_string(location.line()));
 }
 
 void configuration() {
@@ -56,6 +73,9 @@ void configuration() {
             auto replacement = value;
             if (replacement.is_array())
                 replacement[0] = static_cast<float>(replacement[0].get<double>() + 0.125);
+            else if (name == "far_world_ladder" && param == "cave_field")
+                // This scalar is an exact enum code, not a continuous tuning value.
+                replacement = value == 0 ? 1.0f : 0.0f;
             else
                 replacement = static_cast<float>(replacement.get<double>() + 0.125);
             const json configured = {{"render", {{name, {{"params", {{param, replacement}}}}}}}};
@@ -91,6 +111,36 @@ void simulation_configuration() {
             identity);
 }
 
+class TemporaryContent {
+public:
+    TemporaryContent()
+        : root_(std::filesystem::temp_directory_path() /
+                ("render-content-" +
+                 std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()))) {
+        require(std::filesystem::create_directory(root_));
+        for (const auto* tree : Luminumbra::Filesystem::kCaptureContentTrees)
+            require(std::filesystem::create_directories(root_ / tree));
+    }
+    ~TemporaryContent() {
+        std::error_code error;
+        std::filesystem::remove_all(root_, error);
+    }
+    const std::filesystem::path& root() const {
+        return root_;
+    }
+    void write(const std::filesystem::path& relative, const std::string& bytes) const {
+        const auto path = root_ / relative;
+        std::filesystem::create_directories(path.parent_path());
+        std::ofstream output(path, std::ios::binary);
+        output << bytes;
+        output.close();
+        require(output.good());
+    }
+
+private:
+    const std::filesystem::path root_;
+};
+
 void content_configuration() {
     std::istringstream empty;
     std::istringstream hello("hello");
@@ -100,17 +150,8 @@ void content_configuration() {
     std::istringstream changed(std::string(65536, 'a') + "\n");
     require(content_digest(large) != content_digest(changed));
 
-    const auto root = std::filesystem::temp_directory_path() /
-                      ("render-content-" +
-                       std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
-    require(std::filesystem::create_directory(root));
-    struct Cleanup {
-        std::filesystem::path path;
-        ~Cleanup() {
-            std::error_code error;
-            std::filesystem::remove_all(path, error);
-        }
-    } cleanup{root};
+    const TemporaryContent content;
+    const auto& root = content.root();
     const std::array files = {"data/common/systems.json",
                               "data/common/foliage/scatter_set.json",
                               "data/common/creatures/species/example.json",
@@ -148,30 +189,6 @@ void content_configuration() {
     require(render_identity(workload_content(root)) != identity);
 }
 
-struct TemporaryContent {
-    std::filesystem::path root =
-        std::filesystem::temp_directory_path() /
-        ("render-authority-" +
-         std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
-    TemporaryContent() {
-        require(std::filesystem::create_directory(root));
-        for (const auto* tree : Luminumbra::Filesystem::kCaptureContentTrees)
-            require(std::filesystem::create_directories(root / tree));
-    }
-    ~TemporaryContent() {
-        std::error_code error;
-        std::filesystem::remove_all(root, error);
-    }
-    void write(const std::filesystem::path& relative, const std::string& bytes) const {
-        const auto path = root / relative;
-        std::filesystem::create_directories(path.parent_path());
-        std::ofstream output(path, std::ios::binary);
-        output << bytes;
-        output.close();
-        require(output.good());
-    }
-};
-
 template<class Callback>
 void require_refusal(Callback callback) {
     bool refused = false;
@@ -183,16 +200,29 @@ void require_refusal(Callback callback) {
     require(refused);
 }
 
+std::string native_path_utf8(const std::filesystem::path& path) {
+    const auto utf8 = path.u8string();
+    return std::string(utf8.begin(), utf8.end());
+}
+
 void link_directory(const std::filesystem::path& link, const std::filesystem::path& target) {
+    const auto native_link = std::filesystem::path(link).make_preferred();
+    const auto native_target = std::filesystem::path(target).make_preferred();
 #ifdef _WIN32
     // Real NTFS junctions do not require symbolic-link privilege.
-    require(link.wstring().find_first_of(L"\"%\r\n") == std::wstring::npos);
-    require(target.wstring().find_first_of(L"\"%\r\n") == std::wstring::npos);
-    const auto command =
-        L"cmd.exe /d /c mklink /j \"" + link.wstring() + L"\" \"" + target.wstring() + L"\" >nul";
-    require(_wsystem(command.c_str()) == 0);
+    require(native_link.wstring().find_first_of(L"\"%\r\n") == std::wstring::npos);
+    require(native_target.wstring().find_first_of(L"\"%\r\n") == std::wstring::npos);
+    const auto command = L"cmd.exe /d /v:off /c mklink /j \"" + native_link.wstring() + L"\" \"" +
+                         native_target.wstring() + L"\" >nul";
+    const auto status = _wsystem(command.c_str());
+    if (status != 0)
+        throw std::runtime_error("junction creation failed: " +
+                                 json{{"link", native_path_utf8(native_link)},
+                                      {"target", native_path_utf8(native_target)},
+                                      {"exit_status", status}}
+                                     .dump());
 #else
-    std::filesystem::create_directory_symlink(target, link);
+    std::filesystem::create_directory_symlink(native_target, native_link);
 #endif
 }
 
@@ -200,7 +230,7 @@ void saved_authority() {
     const TemporaryContent content;
     content.write("save/world.json", "{\"worldId\":\"capture-world\",\"seed\":424242}\r\n");
     content.write("save/chunks/part.bin", std::string("\0\1\r\n", 4));
-    const auto directory = content.root / "save";
+    const auto directory = content.root() / "save";
     std::string recorded;
     const auto save = [&](bool) {
         recorded = saved_world_digest(directory);
@@ -227,7 +257,7 @@ void saved_authority() {
     require_saved_world_digest(directory, recorded);
     content.write("copy/chunks/part.bin", std::string("\0\1\r\n", 4));
     content.write("copy/world.json", "{\"worldId\":\"capture-world\",\"seed\":424242}\r\n");
-    require(saved_world_digest(content.root / "copy") == recorded);
+    require(saved_world_digest(content.root() / "copy") == recorded);
     content.write("save/chunks/part.bin", std::string("\0\1\n\r", 4));
     require_refusal([&] { require_saved_world_digest(directory, recorded); });
     content.write("save/chunks/part.bin", std::string("\0\1\r\n", 4));
@@ -253,52 +283,137 @@ void saved_authority() {
     require_refusal([&] { require_saved_world_digest(directory, {}); });
 }
 
+json path_diagnostics(const std::filesystem::path& path) {
+    json result = {{"native", native_path_utf8(path)},
+                   {"generic", Luminumbra::Filesystem::GenericUtf8PathString(path)},
+                   {"lexically_normal", native_path_utf8(path.lexically_normal())}};
+    std::error_code error;
+    const auto canonical = std::filesystem::canonical(path, error);
+    result["canonical"] = {{"path", native_path_utf8(canonical)},
+                           {"error", error.value()},
+                           {"message", error.message()}};
+    const auto weakly_canonical = std::filesystem::weakly_canonical(path, error);
+    result["weakly_canonical"] = {{"path", native_path_utf8(weakly_canonical)},
+                                  {"error", error.value()},
+                                  {"message", error.message()}};
+    const auto status = std::filesystem::symlink_status(path, error);
+    result["symlink_status"] = {{"type", static_cast<int>(status.type())},
+                                {"error", error.value()},
+                                {"message", error.message()}};
+    return result;
+}
+
 void optional_audio() {
     const TemporaryContent content;
-    require(std::filesystem::remove(content.root / "assets/audio"));
     Luminumbra::Filesystem::CaptureContentPaths policy;
-    policy.enable(content.root);
-    require(policy.active());
-    require(!policy.refused());
-    const auto absent = workload_content(content.root);
-    require(absent.contains("assets/audio"));
-    require(absent.at("assets/audio").is_null());
+    const auto check = [&](bool condition,
+                           std::string_view expectation,
+                           const json& actual,
+                           const std::source_location& location = std::source_location::current()) {
+        if (!condition)
+            throw std::runtime_error(
+                "optional audio assertion failed at line " + std::to_string(location.line()) +
+                ": " +
+                json{{"expectation", expectation},
+                     {"actual", actual},
+                     {"policy_active", policy.active()},
+                     {"policy_refused", policy.refused()},
+                     {"root", path_diagnostics(content.root())},
+                     {"assets", path_diagnostics(content.root() / "assets")},
+                     {"audio", path_diagnostics(content.root() / "assets/audio")},
+                     {"included", path_diagnostics(content.root() / "assets/audio/included.ogg")},
+                     {"escape", path_diagnostics(content.root() / "assets/audio/../private.ogg")}}
+                    .dump(2));
+    };
+    const auto removed_audio = std::filesystem::remove(content.root() / "assets/audio");
+    check(removed_audio, "remove initial audio directory returns true", removed_audio);
+    policy.enable(content.root());
+    check(policy.active(), "policy is active", policy.active());
+    check(!policy.refused(), "policy has no refusal after enable", policy.refused());
+    const auto absent = workload_content(content.root());
+    check(absent.contains("assets/audio"), "absent inventory contains assets/audio", absent);
+    check(absent.at("assets/audio").is_null(), "absent audio entry is null", absent);
     const auto identity = render_identity(absent);
-    require(std::filesystem::create_directory(content.root / "assets/audio"));
-    const auto empty = workload_content(content.root);
-    require(!empty.contains("assets/audio"));
-    require(render_identity(empty) != identity);
+    const auto created_audio = std::filesystem::create_directory(content.root() / "assets/audio");
+    check(created_audio, "create empty audio directory returns true", created_audio);
+    const auto empty = workload_content(content.root());
+    check(!empty.contains("assets/audio"), "empty inventory omits absence entry", empty);
+    const auto empty_identity = render_identity(empty);
+    check(empty_identity != identity,
+          "empty and absent identities differ",
+          {{"empty", empty_identity}, {"absent", identity}, {"inventory", empty}});
     content.write("assets/audio/included.ogg", "audio bytes");
-    const auto present = workload_content(content.root);
-    require(!present.contains("assets/audio"));
-    require(present.at("assets/audio/included.ogg") ==
-            content_digest(content.root / "assets/audio/included.ogg"));
-    require(render_identity(present) != identity);
-    require(render_identity(present) != render_identity(empty));
-    require(policy.allows(content.root / "assets/audio/included.ogg"));
-    require(!policy.refused());
-    require(std::filesystem::remove(content.root / "assets/audio/included.ogg"));
-    require(std::filesystem::remove(content.root / "assets/audio"));
-    require(workload_content(content.root) == absent);
+    const auto present = workload_content(content.root());
+    check(!present.contains("assets/audio"), "present inventory omits absence entry", present);
+    check(present.contains("assets/audio/included.ogg"),
+          "present inventory contains audio file",
+          present);
+    const auto digest = content_digest(content.root() / "assets/audio/included.ogg");
+    check(present.at("assets/audio/included.ogg") == digest,
+          "audio digest matches file bytes",
+          {{"inventory", present}, {"expected_digest", digest}});
+    const auto present_identity = render_identity(present);
+    check(present_identity != identity,
+          "present and absent identities differ",
+          {{"present", present_identity}, {"absent", identity}});
+    check(present_identity != empty_identity,
+          "present and empty identities differ",
+          {{"present", present_identity}, {"empty", empty_identity}});
+    const auto included_allowed = policy.allows(content.root() / "assets/audio/included.ogg");
+    check(included_allowed, "policy allows included audio file", included_allowed);
+    check(!policy.refused(), "policy has no refusal after included audio", policy.refused());
+    const auto removed_file = std::filesystem::remove(content.root() / "assets/audio/included.ogg");
+    check(removed_file, "remove audio file returns true", removed_file);
+    const auto removed_empty = std::filesystem::remove(content.root() / "assets/audio");
+    check(removed_empty, "remove empty audio directory returns true", removed_empty);
+    const auto removed = workload_content(content.root());
+    check(removed == absent,
+          "removed inventory equals absent inventory",
+          {{"removed", removed}, {"absent", absent}});
     content.write("assets/private.ogg", "outside audio tree");
-    require(!policy.allows(content.root / "assets/audio/../private.ogg"));
-    require(policy.refused());
+    const auto escape_allowed = policy.allows(content.root() / "assets/audio/../private.ogg");
+    check(!escape_allowed, "policy denies parent-relative private audio file", escape_allowed);
+    check(policy.refused(), "policy records escaping audio refusal", policy.refused());
     // A missing tree cannot hide a redirected parent, including NTFS junctions.
-    require(std::filesystem::remove(content.root / "assets/private.ogg"));
-    require(std::filesystem::remove(content.root / "assets"));
+    const auto removed_private = std::filesystem::remove(content.root() / "assets/private.ogg");
+    check(removed_private, "remove private audio file returns true", removed_private);
+    const auto removed_assets = std::filesystem::remove(content.root() / "assets");
+    check(removed_assets, "remove assets directory returns true", removed_assets);
     const TemporaryContent outside;
-    link_directory(content.root / "assets", outside.root);
+    link_directory(content.root() / "assets", outside.root());
     Luminumbra::Filesystem::CaptureContentPaths redirected;
-    require_refusal([&] { redirected.enable(content.root); });
-    require_refusal([&] { workload_content(content.root); });
-    require(std::filesystem::remove(content.root / "assets"));
+    bool enable_refused = false;
+    try {
+        redirected.enable(content.root());
+    } catch (const std::runtime_error&) {
+        enable_refused = true;
+    }
+    check(enable_refused,
+          "enable rejects redirected parent with missing audio",
+          {{"threw_runtime_error", enable_refused},
+           {"redirected_active", redirected.active()},
+           {"outside", path_diagnostics(outside.root())}});
+    bool inventory_refused = false;
+    json redirected_inventory;
+    try {
+        redirected_inventory = workload_content(content.root());
+    } catch (const std::runtime_error&) {
+        inventory_refused = true;
+    }
+    check(inventory_refused,
+          "inventory rejects redirected parent with missing audio",
+          {{"threw_runtime_error", inventory_refused},
+           {"inventory", redirected_inventory},
+           {"outside", path_diagnostics(outside.root())}});
+    const auto removed_link = std::filesystem::remove(content.root() / "assets");
+    check(removed_link, "remove redirected assets directory returns true", removed_link);
 }
 
 void audio_references() {
     const TemporaryContent content;
     content.write("assets/audio/music/themes/main_menu_theme.mp3", "audio bytes");
     Luminumbra::Filesystem::CaptureContentPaths policy;
-    policy.enable(content.root);
+    policy.enable(content.root());
     // These are the startup banks loaded with default audio enabled. Inspect
     // every file reference through the same containment policy as LoadBank.
     for (const char* bank : {"sfx_main.bank.json", "music.bank.json"}) {
@@ -306,17 +421,17 @@ void audio_references() {
         const auto document = json::parse(input);
         for (const auto& event : document.at("events"))
             for (const auto& file : event.at("files"))
-                require(policy.allows(content.root / file.get<std::string>()));
+                require(policy.allows(content.root() / file.get<std::string>()));
     }
     require(!policy.refused());
-    const auto original = workload_content(content.root);
+    const auto original = workload_content(content.root());
     const auto identity = render_identity(original);
     content.write("assets/audio/music/themes/main_menu_theme.mp3", "different audio bytes");
-    require(workload_content(content.root).at("assets/audio/music/themes/main_menu_theme.mp3") !=
+    require(workload_content(content.root()).at("assets/audio/music/themes/main_menu_theme.mp3") !=
             original.at("assets/audio/music/themes/main_menu_theme.mp3"));
-    require(render_identity(workload_content(content.root)) != identity);
+    require(render_identity(workload_content(content.root())) != identity);
     content.write("assets/private.mp3", "outside audio tree");
-    require(!policy.allows(content.root / "assets/audio/../private.mp3"));
+    require(!policy.allows(content.root() / "assets/audio/../private.mp3"));
     require(policy.refused());
 }
 
@@ -325,54 +440,55 @@ void content_references() {
     content.write("data/texture.ltex", "inventoried bytes");
     content.write("external.ltex", "external bytes");
     Luminumbra::Filesystem::CaptureContentPaths policy;
-    require(policy.allows(content.root / "external.ltex"));
-    policy.enable(content.root);
+    require(policy.allows(content.root() / "external.ltex"));
+    policy.enable(content.root());
     for (const auto* tree : Luminumbra::Filesystem::kCaptureContentTrees) {
         content.write(std::filesystem::path(tree) / "included.json", "{}");
-        require(policy.allows(content.root / tree / "included.json"));
+        require(policy.allows(content.root() / tree / "included.json"));
     }
-    require(policy.allows(content.root / "data/../res/included.json"));
+    require(policy.allows(content.root() / "data/../res/included.json"));
     require(!policy.refused());
     // Both absolute and parent-relative references resolve outside the inventory.
-    require(!policy.allows(content.root / "external.ltex"));
-    require(!policy.allows(content.root / "data/../external.ltex"));
-    require(!policy.allows(content.root / "data/../../external.ltex"));
+    require(!policy.allows(content.root() / "external.ltex"));
+    require(!policy.allows(content.root() / "data/../external.ltex"));
+    require(!policy.allows(content.root() / "data/../../external.ltex"));
     require(policy.refused());
-    require(policy.allows(content.root / "data/texture.ltex"));
+    require(policy.allows(content.root() / "data/texture.ltex"));
     require(policy.refused()); // A subsequent fallback cannot clear refusal.
 
     // Exercise the public JSON dependency loader with the shared capture policy.
     std::string bytes;
-    require(Luminumbra::World::ReadWorldgenFile(content.root / "external.ltex", bytes));
-    Luminumbra::Filesystem::capture_content_paths.enable(content.root);
-    require(Luminumbra::World::ReadWorldgenFile(content.root / "res/included.json", bytes));
+    require(Luminumbra::World::ReadWorldgenFile(content.root() / "external.ltex", bytes));
+    Luminumbra::Filesystem::capture_content_paths.enable(content.root());
+    require(Luminumbra::World::ReadWorldgenFile(content.root() / "res/included.json", bytes));
     require(bytes == "{}");
-    require(!Luminumbra::World::ReadWorldgenFile(content.root / "external.ltex", bytes));
+    require(!Luminumbra::World::ReadWorldgenFile(content.root() / "external.ltex", bytes));
     require(bytes.empty());
-    require(!Luminumbra::World::ReadWorldgenFile(content.root / "data/../external.ltex", bytes));
+    require(!Luminumbra::World::ReadWorldgenFile(content.root() / "data/../external.ltex", bytes));
     require(bytes.empty());
     require(Luminumbra::Filesystem::capture_content_paths.refused());
 
-    content.write("outside/included.json", "{}");
-    const auto link = content.root / "data/redirected";
-    const auto outside = content.root / "outside";
+    // Both command arguments include generic separators and shell-sensitive characters.
+    content.write("outside & (target)!/nested/included.json", "{}");
+    const auto link = content.root() / "data/redirected & (link)!";
+    const auto outside = content.root() / "outside & (target)!/nested";
     link_directory(link, outside);
     require(!policy.allows(link / "included.json"));
     require(!Luminumbra::World::ReadWorldgenFile(link / "included.json", bytes));
     require(bytes.empty());
-    require_refusal([&] { workload_content(content.root); });
+    require_refusal([&] { workload_content(content.root()); });
     require(std::filesystem::remove(link));
 
     // Both the selected root spelling and its canonical spelling remain usable.
     const TemporaryContent aliases;
-    const auto alias = aliases.root / "alias";
-    link_directory(alias, content.root);
+    const auto alias = aliases.root() / "alias";
+    link_directory(alias, content.root());
     Luminumbra::Filesystem::CaptureContentPaths aliased_policy;
     aliased_policy.enable(alias);
     require(aliased_policy.allows(alias / "data/texture.ltex"));
-    require(aliased_policy.allows(content.root / "data/texture.ltex"));
+    require(aliased_policy.allows(content.root() / "data/texture.ltex"));
     require(!aliased_policy.refused());
-    require(workload_content(alias) == workload_content(content.root));
+    require(workload_content(alias) == workload_content(content.root()));
     require(std::filesystem::remove(alias));
 }
 } // namespace

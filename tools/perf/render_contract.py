@@ -271,6 +271,10 @@ def require_matching_render_identity(first, second):
         raise ValueError('capture comparison requires complete v4 render identities')
     if validate_render_identity(first) != validate_render_identity(second):
         raise ValueError('capture render identity differs')
+    # Presentation phases include warmup even though settings identity does not.
+    offsets = [integer(data['warmup_frames'], 'warmup_frames', 1) for data in (first, second)]
+    if offsets[0] != offsets[1]:
+        raise ValueError('capture warmup/presentation offset differs')
 
 
 def validate(data, qualified_renderer=None, qualified_vendor=None, traversal=None, workload=None):
@@ -333,7 +337,9 @@ def validate(data, qualified_renderer=None, qualified_vendor=None, traversal=Non
                 raise ValueError('unissued timer must be unavailable, not zero')
         if (not any(timer['issued'] for timer in row['passes'].values()) and
             not (data['schema'] == WORKLOAD_SCHEMA and
-                 data['workload']['observations'][index]['state'] == 'main_menu')):
+                 data['workload']['kind'] == 'menu_entry' and
+                 data['workload']['observations'][index]['ui_document'] in
+                 ('pause', 'settings', 'main_menu'))):
             raise ValueError('no render pass timers issued')
         equal_number(row['gpu_pass_sum_ms'], total, 'pass sum')
     for metric in METRICS:
@@ -613,6 +619,8 @@ def validate_workload(data, manifest):
             raise ValueError('edit workload must hold the camera after edits')
     if kind == 'save_load':
         reload = observed['reload']
+        if not isinstance(reload, dict):
+            raise ValueError('save/load workload did not settle after reload')
         request = warmup + actions[-1]['tick'] - 1
         if type(reload['request_frame']) is not int or reload['request_frame'] != request:
             raise ValueError('reload request does not match script')

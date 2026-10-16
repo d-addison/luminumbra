@@ -7,6 +7,7 @@ POSIX sources are both checked. Vendor includes and external libraries are
 outside this check; no configure, compiler, or downloaded dependencies are used.
 """
 
+from copy import deepcopy
 from functools import lru_cache
 from pathlib import Path
 import re
@@ -77,8 +78,8 @@ def targets_in(root, cmake):
     return targets
 
 
-def audit(root):
-    """Find targets reaching the policy without the implementation in their closure."""
+def repository_targets(root):
+    """Read platform-unioned source and library lists once per repository scan."""
     targets = {}
     cmake_files = sorted(path for directory in ("src", "tools", "test")
                          for path in (root / directory).rglob("CMakeLists.txt"))
@@ -86,20 +87,34 @@ def audit(root):
         relative = cmake.relative_to(root)
         for name, target in targets_in(root, cmake).items():
             targets[(relative, name)] = target
+    return targets
+
+
+class IncludeGraph:
+    """Snapshot source dependencies; target mutations never require rereading files."""
+    def __init__(self, root):
+        self.root = root
+        self.edges = {}
+
+    def includes(self, source):
+        if source not in self.edges:
+            result = set()
+            for name in INCLUDE.findall((self.root / source).read_text(encoding="utf-8")):
+                # Local headers take priority, followed by the engine include roots.
+                for directory in (source.parent, Path("src"), Path("src/luminumbra_common"),
+                                  Path("src/luminumbra_client"), Path("include"), Path("tools")):
+                    candidate = (self.root / directory / name).resolve()
+                    if candidate.is_relative_to(self.root) and candidate.is_file():
+                        result.add(candidate.relative_to(self.root))
+                        break
+            self.edges[source] = result
+        return self.edges[source]
+
+
+def audit(targets, graph):
+    """Find targets reaching the policy without the implementation in their closure."""
 
     @lru_cache(maxsize=None)
-    def includes(source):
-        result = set()
-        for name in INCLUDE.findall((root / source).read_text(encoding="utf-8")):
-            # Local headers take priority, followed by the engine include roots.
-            for directory in (source.parent, Path("src"), Path("src/luminumbra_common"),
-                              Path("src/luminumbra_client"), Path("include"), Path("tools")):
-                candidate = (root / directory / name).resolve()
-                if candidate.is_relative_to(root) and candidate.is_file():
-                    result.add(candidate.relative_to(root))
-                    break
-        return result
-
     def uses_policy(sources):
         pending = list(sources)
         seen = set()
@@ -109,7 +124,7 @@ def audit(root):
                 return True
             if source not in seen:
                 seen.add(source)
-                pending.extend(includes(source))
+                pending.extend(graph.includes(source))
         return False
 
     def closure(key, seen):
@@ -132,7 +147,7 @@ def audit(root):
     users = {}
     failures = []
     for key, target in targets.items():
-        if uses_policy(target["sources"]):
+        if uses_policy(frozenset(target["sources"])):
             users[key] = target
             if OWNER not in closure(key, set()):
                 failures.append(f"{key[0]}: {key[1]} uses containment without {OWNER}")
@@ -140,8 +155,13 @@ def audit(root):
 
 
 class ContainmentLinkClosureTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.targets = repository_targets(ROOT)
+        cls.graph = IncludeGraph(ROOT)
+
     def test_repository_targets_have_complete_closures(self):
-        users, failures = audit(ROOT)
+        users, failures = audit(self.targets, self.graph)
         self.assertFalse(failures, "\n".join(failures))
         # Guard the audit's ability to see header-only and indirect users.
         for cmake, target in (
@@ -159,7 +179,6 @@ class ContainmentLinkClosureTests(unittest.TestCase):
                 self.assertIn((Path(cmake), target), users)
 
     def test_missing_owners_are_detected_in_each_standalone_project(self):
-        parse_targets = targets_in
         for cmake, name in (
             ("tools/CMakeLists.txt", "asset_processor"),
             ("tools/blender/authoring/probes/tool_build/CMakeLists.txt", "asset_processor"),
@@ -169,18 +188,20 @@ class ContainmentLinkClosureTests(unittest.TestCase):
             ("tools/prefab_runtime/CMakeLists.txt", "luminumbra_prefab_runtime"),
         ):
             with self.subTest(target=name, cmake=cmake):
-                def without_owner(root, path):
-                    targets = parse_targets(root, path)
-                    if path == root / cmake:
-                        targets[name]["sources"].discard(OWNER)
-                    return targets
-
-                with patch(__name__ + ".targets_in", side_effect=without_owner):
-                    _, failures = audit(ROOT)
+                targets = deepcopy(self.targets)
+                targets[(Path(cmake), name)]["sources"].remove(OWNER)
+                _, failures = audit(targets, self.graph)
                 self.assertIn(f"{Path(cmake)}: {name} uses containment without {OWNER}", failures)
                 if name == "luminumbra_prefab_runtime":
                     self.assertTrue(any("luminumbra_render_static uses containment" in failure
                                         for failure in failures))
+
+    def test_repeated_audits_reuse_source_graph(self):
+        audit(self.targets, self.graph)
+        with patch.object(Path, 'read_text', side_effect=AssertionError('source graph reread')):
+            users, failures = audit(self.targets, self.graph)
+        self.assertTrue(users)
+        self.assertFalse(failures, '\n'.join(failures))
 
 
 if __name__ == "__main__":
