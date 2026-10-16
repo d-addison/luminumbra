@@ -14,7 +14,7 @@ struct RenderClockTestPeer {
 };
 } // namespace Luminumbra::Rendering
 
-TEST(RenderClock, RestoredCustomCalendarDrivesSkyAndPreservesOverrides) {
+TEST(RenderClock, DefaultPacingAndRestoredCustomCalendarPreserveOverrides) {
     ASSERT_TRUE(glfwInit());
     struct GlLifetime {
         GLFWwindow* window = nullptr;
@@ -35,6 +35,18 @@ TEST(RenderClock, RestoredCustomCalendarDrivesSkyAndPreservesOverrides) {
 
     using namespace Luminumbra;
     Rendering::RenderPipeline pipeline;
+    constexpr std::uint64_t default_day_ticks = world::WorldCalendar{}.dayLengthTicks;
+    pipeline.set_time_of_day(0.0f);
+    // A quarter of the default day agrees for wall-clock and tick-driven paths.
+    Rendering::RenderClockTestPeer::Update(pipeline,
+                                           static_cast<float>(default_day_ticks / 4) / 30.0f);
+    EXPECT_FLOAT_EQ(pipeline.get_time_of_day(), .25f);
+    pipeline.set_time_of_day_tick(default_day_ticks / 4);
+    Rendering::RenderClockTestPeer::Update(pipeline, 123.0f);
+    EXPECT_FLOAT_EQ(pipeline.get_time_of_day(), .25f);
+    pipeline.set_world_clock(world::WorldClock(default_day_ticks / 2));
+    Rendering::RenderClockTestPeer::Update(pipeline, 123.0f);
+    EXPECT_FLOAT_EQ(pipeline.get_time_of_day(), 0.0f); // calendar midday == sky noon
     world::WorldClock restored;
     std::string error;
     ASSERT_TRUE(world::WorldClock::from_metadata(

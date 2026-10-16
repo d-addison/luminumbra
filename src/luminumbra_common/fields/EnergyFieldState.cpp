@@ -572,6 +572,26 @@ bool EnergyFieldState::RestorePendingDeposits(std::vector<PendingDeposit> deposi
     return true;
 }
 
+bool EnergyFieldState::QueueRegionalDeposits(std::span<const RegionalDeposit> deposits) {
+    const auto original_size = m_pending.size();
+    if (original_size > kMaxRegionalDeposits ||
+        deposits.size() > kMaxRegionalDeposits - original_size)
+        return false;
+    try {
+        for (const auto& deposit : deposits) {
+            if (!QueueRegionalDeposit(
+                    deposit.emitter_id, deposit.cx, deposit.cz, deposit.channel, deposit.amount)) {
+                m_pending.resize(original_size);
+                return false;
+            }
+        }
+    } catch (...) {
+        m_pending.resize(original_size);
+        throw;
+    }
+    return true;
+}
+
 bool EnergyFieldState::OwnsRegion(RegionKey owner) const {
     for (const auto& deposit : m_pending) {
         int cx = 0, cz = 0;

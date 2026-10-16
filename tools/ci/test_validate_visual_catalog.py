@@ -5,13 +5,16 @@ from __future__ import annotations
 
 import base64
 import copy
+import errno
 import json
 from pathlib import Path
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 import validate_visual_catalog as check
 
@@ -109,36 +112,88 @@ class CatalogTests(unittest.TestCase):
 
     def test_source_discovery_catches_unmapped_runtime_selector(self):
         path = self.root / "src/luminumbra_client/core/RuntimeScenarioConfig.h"
-        previous = path.read_text()
+        previous = path.read_bytes()
         try:
-            path.write_text(previous + '\nbool new_capture() { return scenario == "new_capture"; }\n')
+            path.write_bytes(previous + b'\nbool new_capture() { return scenario == "new_capture"; }\n')
             self.rejected("selector discovery")
         finally:
-            path.write_text(previous)
+            path.write_bytes(previous)
 
     def test_source_discovery_catches_new_ui_page(self):
         path = self.root / "data/ui/new_page.rml"
         try:
-            path.write_text("<rml/>")
+            path.write_text("<rml/>", encoding="utf-8")
             self.rejected("UI documents")
         finally:
             path.unlink(missing_ok=True)
 
     def test_private_or_escaping_source_paths_are_rejected(self):
-        for path in ("../private.json", "/tmp/private.json", "build/run/receipt.json", "."):
+        for path in ("../private.json", "/tmp/private.json", "build/run/receipt.json", ".",
+                     "./C:x", "safe/C:x", "file.json:stream", ".GIT/config", "BUILD/receipt.json"):
             with self.subTest(path=path):
                 self.row("B09")["fixture"]["source_paths"] = [path]
                 self.rejected("path")
 
+    def test_drive_and_stream_paths_are_rejected_before_filesystem_access(self):
+        for path in ("C:x", "C:/file.json", "./C:x", "safe/C:x", "file.json:stream"):
+            with self.subTest(path=path), mock.patch.object(Path, "lstat") as lstat:
+                with self.assertRaisesRegex(ValueError, "path must be repository relative"):
+                    check.local_file(self.root, path)
+                lstat.assert_not_called()
+
+    def test_private_path_check_is_case_insensitive(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            root = Path(workspace)
+            for relative in (".GIT/config", "BUILD/receipt.json", ".CODEX/config", ".AGENTS/config"):
+                with self.subTest(path=relative):
+                    path = root / relative
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text("{}", encoding="utf-8")
+                    with self.assertRaisesRegex(ValueError, "private/build path"):
+                        check.local_file(root, relative)
+
+    def test_reparse_points_are_rejected_in_every_component(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            root = Path(workspace).resolve()
+            candidate = root / "safe/file.json"
+            candidate.parent.mkdir()
+            candidate.write_text("{}", encoding="utf-8")
+            original_lstat = Path.lstat
+            for redirected in (candidate.parent, candidate):
+                with self.subTest(path=redirected):
+                    def lstat(path, *args, **kwargs):
+                        if path == redirected:
+                            mode = stat.S_IFDIR if path == candidate.parent else stat.S_IFREG
+                            return mock.Mock(st_mode=mode, st_file_attributes=0x400)
+                        return original_lstat(path, *args, **kwargs)
+                    with mock.patch.object(Path, "lstat", new=lstat):
+                        with self.assertRaisesRegex(ValueError, "linked evidence"):
+                            check.local_file(root, "safe/file.json")
+
+    def test_resolved_candidate_must_remain_inside_root(self):
+        root = self.root.resolve()
+        candidate = root / check.CATALOG
+        original_resolve = Path.resolve
+        def resolve(path, *args, **kwargs):
+            if path == candidate:
+                return root.parent / "outside.json"
+            return original_resolve(path, *args, **kwargs)
+        with mock.patch.object(Path, "resolve", new=resolve):
+            with self.assertRaisesRegex(ValueError, "path must be repository relative"):
+                check.local_file(root, check.CATALOG)
+
     def test_symlink_does_not_publish_external_evidence(self):
         with tempfile.TemporaryDirectory() as outside:
             external = Path(outside) / "source.json"
-            external.write_text("{}")
+            external.write_text("{}", encoding="utf-8")
             link = self.root / "linked.json"
             try:
                 link.symlink_to(external)
-            except OSError:
-                self.skipTest("symlink creation unavailable")
+            except OSError as error:
+                if (error.errno not in (errno.EPERM, errno.EACCES, errno.ENOSYS, errno.EOPNOTSUPP)
+                        and getattr(error, "winerror", None) not in (1, 50, 1314)):
+                    raise
+                self.skipTest(f"Symlink creation is unavailable: {error}")
             try:
                 self.row("B09")["fixture"]["source_paths"] = ["linked.json"]
                 self.rejected("linked evidence")
@@ -244,7 +299,7 @@ class CatalogTests(unittest.TestCase):
 
     def save_packet(self, packet):
         path = self.root / "docs/assets/contract-fixture/packet.json"
-        path.write_text(json.dumps(packet))
+        path.write_text(json.dumps(packet), encoding="utf-8")
         self.row(self.packet_scenario)["review_packet"] = {"path": path.relative_to(self.root).as_posix(),
                                               "sha256": check.digest(path.read_bytes())}
 
@@ -324,7 +379,7 @@ class CatalogTests(unittest.TestCase):
 
     def test_duplicate_json_keys_are_rejected(self):
         file = self.root / "duplicate.json"
-        file.write_text('{"approval":"pending","approval":"approved"}')
+        file.write_text('{"approval":"pending","approval":"approved"}', encoding="utf-8")
         with self.assertRaisesRegex(ValueError, "duplicate JSON key"):
             check.read_json(file)
 

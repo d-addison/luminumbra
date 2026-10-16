@@ -80,14 +80,22 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
                 )
                 self.assertEqual(value(pr, "branches", 4), "[main, devel]")
 
-    def test_guard_runs_first_under_existing_check_name_without_job_skip(self):
+    def test_guard_runs_first_under_existing_check_name_without_draft_job_skip(self):
         for filename, (job_id, check_name) in GUARDED.items():
             with self.subTest(workflow=filename):
                 job = jobs(self.workflows[filename])[job_id]
                 self.assertEqual(value(job, "name", 4), check_name)
                 self.assertEqual(value(job, "runs-on", 4), "ubuntu-24.04")
-                for key in ("if", "needs", "continue-on-error"):
-                    self.assertIsNone(value(job, key, 4))
+                self.assertEqual(value(job, "needs", 4), "changes")
+                condition = "!cancelled()"
+                if filename != "ci.yml":
+                    condition += (
+                        " && ((github.event_name == 'pull_request' && "
+                        "toJSON(github.event.pull_request.draft) != 'false') || "
+                        "needs.changes.outputs.needs_cpp != 'false')"
+                    )
+                self.assertEqual(value(job, "if", 4), "${{ " + condition + " }}")
+                self.assertIsNone(value(job, "continue-on-error", 4))
                 guard = steps(job)[0]
                 self.assertTrue(guard.startswith("      - name: Reject draft pull requests\n"))
                 self.assertEqual(value(guard, "shell", 8), "bash")
@@ -142,35 +150,37 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
 
     def test_other_heavy_jobs_still_skip_drafts_and_keep_routed_skips(self):
         ci = jobs(self.workflows["ci.yml"])
-        for job_id in ("gns-compile-probe", "diligent-rhi", "windows-msvc", "tidy-shard"):
+        for job_id in ("gns-compile-probe", "diligent-rhi", "tidy-shard"):
             with self.subTest(job=job_id):
-                self.assertEqual(value(ci[job_id], "if", 4), READY)
-        # The aggregator keeps the required check name and must report skipped
-        # or failed shards, so it runs on always() but still excludes drafts.
-        self.assertEqual(value(ci["tidy"], "if", 4), f"always() && ({READY})")
-        self.assertEqual(value(ci["tidy"], "needs", 4), "tidy-shard")
-        self.assertEqual(value(ci["windows-ucrt64"], "if", 4), f"({READY}) && ({UCRT_ROUTE})")
+                self.assertEqual(value(ci[job_id], "needs", 4), "changes")
+                self.assertEqual(value(ci[job_id], "if", 4),
+                                 "${{ !cancelled() && needs.changes.outputs.needs_cpp != 'false' && (" + READY + ") }}")
+        self.assertEqual(value(ci["windows-msvc"], "needs", 4), "changes")
+        self.assertEqual(value(ci["windows-msvc"], "if", 4), "${{ !cancelled() && (" + READY + ") }}")
+        self.assertEqual(value(ci["tidy"], "needs", 4), "[changes, tidy-shard]")
+        self.assertEqual(value(ci["tidy"], "if", 4), "always() && (" + READY + ")")
+        self.assertEqual(value(ci["windows-ucrt64"], "if", 4), "${{ !cancelled() && needs.changes.outputs.needs_cpp != 'false' && " + f"({READY}) && ({UCRT_ROUTE})" + " }}")
         perf = jobs(self.workflows["performance.yml"])
-        self.assertEqual(value(perf["server-smoke-comparison"], "if", 4), f"({READY}) && {SERVER_ROUTE}")
+        self.assertEqual(value(perf["server-smoke-comparison"], "if", 4), "!cancelled() && needs.changes.outputs.needs_cpp != 'false' && " + f"({READY}) && {SERVER_ROUTE}")
         self.assertEqual(
             value(perf["qualification-capture"], "if", 4),
-            "github.event_name == 'workflow_dispatch' && inputs.qualification_capture",
+            "${{ !cancelled() && needs.changes.outputs.needs_cpp != 'false' && "
+            "github.event_name == 'workflow_dispatch' && inputs.qualification_capture }}",
         )
         for job in (ci["lint"], ci["public-tree"], perf["runner-contract"]):
             self.assertIsNone(value(job, "if", 4))
 
-    def test_concurrency_keeps_pr_ref_cancellation_and_manual_devel_exceptions(self):
+    def test_concurrency_keeps_pr_cancellation_and_batches_only_devel_pushes(self):
         group = (
-            "${{ github.event_name == 'workflow_dispatch' && inputs.qualification_capture && "
-            "format('{0}-qualification-{1}', github.workflow, github.run_id) || "
-            "format('{0}-{1}{2}', github.workflow, github.ref, "
+            "${{ github.event_name == 'workflow_dispatch' && "
+            "format('{0}-manual-{1}', github.workflow, github.run_id) || "
+            "github.event_name == 'push' && github.ref == 'refs/heads/main' && "
+            "format('{0}-{1}-{2}-{3}', github.workflow, github.ref, github.sha, github.run_id) || "
             "github.event_name == 'push' && github.ref == 'refs/heads/devel' && "
-            "format('-{0}', github.sha) || '') }}"
+            "format('{0}-{1}-push', github.workflow, github.ref) || "
+            "format('{0}-{1}', github.workflow, github.ref) }}"
         )
-        cancellation = (
-            "${{ !((github.event_name == 'workflow_dispatch' && inputs.qualification_capture) || "
-            "(github.event_name == 'push' && github.ref == 'refs/heads/devel')) }}"
-        )
+        cancellation = "${{ github.event_name != 'push' && github.event_name != 'workflow_dispatch' }}"
         for filename, workflow in self.workflows.items():
             with self.subTest(workflow=filename):
                 self.assertEqual(value(workflow, "group", 2), group)
@@ -179,6 +189,27 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
     def test_policy_suite_is_part_of_cheap_inventory_check(self):
         inventory = jobs(self.workflows["ci.yml"])["public-tree"]
         self.assertIn("python3 tools/ci/test_workflow_policy.py", inventory)
+
+    def test_freeze_audit_comment_is_identical_in_every_workflow(self):
+        expected = {
+            "ci.yml", "asan.yml", "performance.yml", "docs.yml",
+            "game-assets.yml", "blender-authoring.yml", "ucrt-attribution.yml",
+        }
+        comments = {}
+        for path in (ROOT / ".github/workflows").glob("*.yml"):
+            workflow = path.read_text(encoding="utf-8")
+            matches = re.findall(
+                r"^  # The campaign freeze audit[^\n]*\n(?:  #[^\n]*\n)*?"
+                r"(?=  # Main pushes)", workflow, re.MULTILINE,
+            )
+            with self.subTest(workflow=path.name):
+                if path.name in expected:
+                    self.assertEqual(len(matches), 1)
+                if matches:
+                    self.assertEqual(len(matches), 1)
+                    comments[path.name] = matches[0]
+        self.assertEqual(set(comments), expected)
+        self.assertEqual(len(set(comments.values())), 1, comments)
 
 
 if __name__ == "__main__":

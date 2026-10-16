@@ -9,9 +9,13 @@
 
 #include "world/StructurePlacement.h"
 
+#include "../support/UniqueTempPath.h"
+
 #include <filesystem>
+#include <fstream>
 #include <optional>
 #include <set>
+#include <string>
 #include <vector>
 
 #ifndef LUMINUMBRA_SOURCE_ROOT
@@ -41,6 +45,52 @@ StructureTemplatePool LoadRuin() {
 }
 
 } // namespace
+
+TEST(StructurePlacementTest, RawNulPlacementAndPieceRefusePool) {
+    const Luminumbra::TestSupport::ScopedTempFile placement("structure_bytes_", ".json");
+    const auto directory = placement.Path().parent_path();
+    const auto placement_path = directory / "placement.json";
+    const auto piece_path = directory / "piece.json";
+    const std::string placement_bytes = R"({"spacing":32,"salt":17})";
+    const std::string piece_bytes =
+        R"({"name":"block","boxes":[{"min":[0,0,0],"size":[1,1,1],"material":1}]})";
+    const auto write = [](const fs::path& path, const std::string& bytes) {
+        std::ofstream output(path, std::ios::binary | std::ios::trunc);
+        output << bytes;
+        output.close();
+        ASSERT_TRUE(output.good());
+    };
+    write(placement_path, placement_bytes);
+    write(piece_path, piece_bytes);
+    const auto clean = LoadStructureTemplatePool(directory, "fixture");
+    ASSERT_TRUE(clean.ok());
+    ASSERT_EQ(clean.pieces.size(), 1u);
+    EXPECT_EQ(clean.spacing, 32);
+    EXPECT_EQ(clean.salt, 17u);
+    for (const bool corrupt_placement : {true, false}) {
+        SCOPED_TRACE(corrupt_placement);
+        const auto& path = corrupt_placement ? placement_path : piece_path;
+        const auto& bytes = corrupt_placement ? placement_bytes : piece_bytes;
+        for (const auto& invalid : {bytes + '\0',
+                                    bytes + '\0' + "garbage",
+                                    bytes + '\x1a' + '\0' + "garbage",
+                                    '\0' + bytes}) {
+            write(path, invalid);
+            const auto refused = LoadStructureTemplatePool(directory, "fixture");
+            EXPECT_FALSE(refused.ok());
+            EXPECT_TRUE(refused.pieces.empty());
+            ASSERT_EQ(refused.errors.size(), 1u);
+            EXPECT_NE(refused.errors.front().find("raw NUL"), std::string::npos);
+        }
+        write(path, bytes);
+    }
+    const auto restored = LoadStructureTemplatePool(directory, "fixture");
+    ASSERT_TRUE(restored.ok());
+    EXPECT_EQ(restored.content_hash, clean.content_hash);
+    EXPECT_EQ(restored.spacing, clean.spacing);
+    EXPECT_EQ(restored.salt, clean.salt);
+    EXPECT_EQ(restored.pieces.size(), clean.pieces.size());
+}
 
 TEST(StructurePlacementTest, FixturePoolsLoad) {
     StructureTemplatePool cairn = LoadCairn();

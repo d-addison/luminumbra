@@ -46,6 +46,16 @@ using ScentCell = std::array<std::uint64_t, 4>; // exact finite, nonnegative bin
 
 class FieldPageState {
 public:
+    FieldPageState() = default;
+    FieldPageState(const FieldPageState&) = default;
+    FieldPageState(FieldPageState&&) noexcept = default;
+    FieldPageState& operator=(FieldPageState&&) noexcept = default;
+    FieldPageState& operator=(const FieldPageState& other) {
+        // Publish masks and their derived counts together even if copying allocates.
+        FieldPageState copy(other);
+        return *this = std::move(copy);
+    }
+
     static constexpr std::int64_t kCellMm = 24'000;
     static constexpr std::int32_t kPageCells = 16;
     static constexpr int kChannels = 5; // wind_x, wind_z, moisture, front, charge (all u16)
@@ -89,6 +99,7 @@ public:
     }
     void clear() {
         m_pages.clear();
+        m_initializedRegionCounts.clear();
         m_storms.clear();
         m_strikes.clear();
         m_scent.clear();
@@ -116,6 +127,10 @@ public:
     [[nodiscard]] const FoliageFieldPages& irrigation() const {
         return m_irrigation;
     }
+    // Foliage evolution and admission write only soil/irrigation. Retain these
+    // channels for both border reads and rollback, without copying ambient state.
+    [[nodiscard]] FieldPageState foliage_snapshot() const;
+    void restore_foliage(FieldPageState&& snapshot) noexcept;
     bool set_soil(ScentCellKey cell, std::int32_t value) {
         return m_soil.set(cell, value, kSoilBaseline);
     }
@@ -156,6 +171,30 @@ public:
     // seed_value(.., tick / kCadenceTicks). Returns the number of cells stepped.
     std::uint64_t step_region(RegionKey key, std::uint64_t world_seed, std::uint64_t tick);
 
+    struct ScheduledScratch {
+        struct Owner {
+            bool eligible = false, due = false;
+            std::uint8_t shift = 0;
+            std::uint64_t work = 0;
+        };
+        struct PageOwners {
+            int split_x = kPageCells + 1, split_z = kPageCells + 1;
+            std::array<Owner*, 4> tiles{};
+            Owner* at(int x, int z) const {
+                return tiles[(x >= split_x) + 2 * (z >= split_z)];
+            }
+        };
+        std::vector<RegionKey> due_keys;
+        std::vector<FieldPageKey> page_keys;
+        std::vector<std::pair<RegionKey, Owner>> owners;
+        std::vector<PageOwners> gates;
+    };
+    void scheduled_snapshot_into(const std::map<RegionKey, ActiveRegionRecord>& records,
+                                 std::span<const RegionKey> due,
+                                 std::uint64_t tick,
+                                 FieldPageState& snapshot,
+                                 ScheduledScratch& scratch) const;
+
     // Sealed page-only input for step_scheduled, captured BEFORE activation. Retains only
     // pages that can participate this tick; excludes scent, weather and frozen-only pages.
     [[nodiscard]] FieldPageState
@@ -171,7 +210,8 @@ public:
                    std::span<const RegionKey> due,
                    std::uint64_t world_seed,
                    std::uint64_t tick,
-                   const FieldPageState* previous_tick = nullptr);
+                   const FieldPageState* previous_tick = nullptr,
+                   ScheduledScratch* scratch = nullptr);
 
     // FPG1 file bytes. Empty string for an empty store (an empty store writes no file).
     [[nodiscard]] std::string serialize() const;
@@ -188,6 +228,9 @@ public:
     [[nodiscard]] std::map<RegionKey, std::string> region_projections() const;
 
 private:
+    // Derived only from initialized masks; excluded from all serialized projections.
+    std::map<RegionKey, std::size_t> m_initializedRegionCounts;
+    void rebuild_initialized_counts();
     std::map<FieldPageKey, FieldPage> m_pages;
     std::vector<RegionalStorm> m_storms;
     std::vector<RegionalStrike> m_strikes;
