@@ -169,6 +169,7 @@ add_executable(common_tests
     common/BiomeReverb_test.cpp
     common/DeterministicMath_test.cpp
     common/SystemConfig_test.cpp
+    common/GraphicsPresets_test.cpp
     common/FrameLimiter_test.cpp
     common/PlantProcgen_test.cpp
     common/NetworkSim_test.cpp

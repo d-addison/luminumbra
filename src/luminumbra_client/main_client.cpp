@@ -1978,10 +1978,8 @@ int main(int argc, char* argv[]) {
     g_systemConfig = luminumbra::core::SystemConfig::LoadLayered(
         "data/common/systems.json", luminumbra::core::SystemConfig::DefaultUserOverlayPath());
     if (scenario_config.systems_config_override) {
-        // Retain the player settings overlay; it cannot alter simulation or render flags.
-        const auto user_settings = g_systemConfig.user();
-        g_systemConfig = *scenario_config.systems_config_override;
-        g_systemConfig.user() = user_settings;
+        // Retain player settings and their load report, including Recovery save protection.
+        g_systemConfig.ReplaceSystemsFrom(*scenario_config.systems_config_override);
     }
 
     if (!capture_size.empty())

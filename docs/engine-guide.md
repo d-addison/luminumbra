@@ -549,8 +549,14 @@ Diagnostic rosters and telemetry remain opt-in.
 Playback, vsync, TAAU, tier-1 froxel volumetrics, cave AO, scent decals and aether
 material gain 1 are on. `--no-audio`, `--volumetric-quality 0`, `LUMIN_CAVE_AO=0`,
 `LUMIN_SCENT_DECAL=0`, explicit config values and renderer setters remain available.
-User overlays still contain only `user.*`: saved false vsync and saved volumes
-win over defaults without a settings version bump. Locations are
+User overlays contain only `user.*` plus `settings_schema_version` (currently 1,
+independent of world, save and protocol formats). Saved false vsync and saved
+volumes win over defaults. `user.graphics` owns presentation settings: a
+`base_preset`, its `preset_revision`, explicit `overrides` and optional detection
+metadata. A file without a schema version migrates to Ultra plus its explicit
+values, including `user.video.render_scale`. A malformed, unreadable or future
+version file is reported as Recovery: defaults apply for the session and saves
+are refused so the original file is never overwritten. Locations are
 `%APPDATA%/Luminumbra/settings.json`, `$XDG_CONFIG_HOME/luminumbra/settings.json`,
 or `$HOME/.config/luminumbra/settings.json`.
 
