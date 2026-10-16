@@ -1789,6 +1789,18 @@ add_test(
 # timeout" during the post-build gtest_discover_tests step (no test actually ran).
 # 120 s is generous headroom; it only affects the one-time list-tests probe.
 include(GoogleTest)
+if(UNIX)
+    # Isolate allocation replacement used to observe alternate-stack release.
+    add_executable(crash_report_teardown_test
+        common/crash_report_teardown_test.cpp
+        ../src/luminumbra_common/core/CrashReport.cpp)
+    target_include_directories(crash_report_teardown_test PRIVATE
+        ../src
+        ../src/luminumbra_common)
+    target_link_libraries(crash_report_teardown_test PRIVATE gtest_main Threads::Threads)
+    luminumbra_configure_first_party_target(crash_report_teardown_test)
+    gtest_discover_tests(crash_report_teardown_test)
+endif()
 if(LUMINUMBRA_ENABLE_STATIC_PREVIEW)
     add_executable(viewport_protocol_test static_preview/viewport_protocol_test.cpp
         ../tools/static_preview/ViewportProtocol.cpp)
