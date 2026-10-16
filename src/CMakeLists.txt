@@ -4,7 +4,8 @@
 add_subdirectory(luminumbra_common)
 
 # --- Client Library (Rendering, UI, Input) ---
-# The shared source manifest is the single source of truth for the client.
+# The shared manifest includes the developer registry and widget adapters in every
+# client build configuration, including Release and the QA client.
 include("${CMAKE_CURRENT_LIST_DIR}/luminumbra_client/sources.cmake")
 
 # Create the library from the first-party client source manifest.
