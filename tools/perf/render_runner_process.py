@@ -355,7 +355,15 @@ def _open_sidecar(lock):
     if before is None:
         # Exclusive creation also refuses a symlink installed after lstat.
         flags |= os.O_CREAT | os.O_EXCL
-    descriptor = os.open(lock, flags, 0o600)
+    try:
+        descriptor = os.open(lock, flags, 0o600)
+    except FileExistsError:
+        # Another spelling or process may have created this same sidecar since
+        # lstat. Open and validate that inode, then let the OS lock arbitrate.
+        before = _sidecar_stat(lock)
+        if before is None:
+            raise OSError(errno.EINVAL, 'lock sidecar changed during acquisition', str(lock))
+        descriptor = os.open(lock, flags & ~(os.O_CREAT | os.O_EXCL), 0o600)
     try:
         opened = os.fstat(descriptor)
         after = _sidecar_stat(lock)
@@ -413,29 +421,41 @@ def _check_output(path):
 
 
 @contextmanager
-def _output_locks(paths, *, normcase=None):
-    """Lock comparison keys using the platform's injectable case normalization."""
+def _output_locks(paths):
+    """Lock destination sidecar inodes using the filesystem's alias rules."""
     # Refuse destination symlinks and short-name leaf aliases: replacing an
     # output must not change its lock identity. Validate before write-capable opens.
-    # Keep resolved spelling separate from comparison and sidecar keys. Windows
-    # normcase folds aliases; POSIX normcase preserves distinct case-sensitive names.
-    normcase = os.path.normcase if normcase is None else normcase
-    paths = [(Path(path), normcase(str(_output_identity(Path(path))))) for path in paths]
+    # Preserve spelling: case rules can vary by volume or directory on both
+    # Windows and POSIX. Aliases open the same sidecar inode even before the
+    # output exists, and keep doing so when that output is replaced.
+    paths = [(Path(path), str(_output_identity(Path(path)))) for path in paths]
     keys = [key for path, key in paths]
     if len(set(keys)) != len(keys):
         raise OSError(errno.EINVAL, 'output paths must be distinct')
     paths.sort(key=lambda item: item[1])
+    sidecars = set()
     for path, key in paths:
-        _sidecar_stat(Path(key + OUTPUT_LOCK_SUFFIX))
+        metadata = _sidecar_stat(Path(key + OUTPUT_LOCK_SUFFIX))
+        if metadata is not None:
+            identity = (metadata.st_dev, metadata.st_ino)
+            if identity in sidecars:
+                raise OSError(errno.EINVAL, 'output paths must be distinct')
+            sidecars.add(identity)
     for path, key in paths:
         _check_output(path)
     locks = []
+    sidecars = set()
     completed = False
     try:
         for path, key in paths:
             lock = Path(key + OUTPUT_LOCK_SUFFIX)
             handle = _open_sidecar(lock)
             locks.append((handle, False))
+            metadata = os.fstat(handle.fileno())
+            identity = (metadata.st_dev, metadata.st_ino)
+            if identity in sidecars:
+                raise OSError(errno.EINVAL, 'output paths must be distinct')
+            sidecars.add(identity)
             _lock_handle(handle, lock)
             locks[-1] = (handle, True)
             current = _sidecar_stat(lock)

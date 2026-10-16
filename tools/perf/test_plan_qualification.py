@@ -7,7 +7,6 @@ import json
 import math
 import ntpath
 import os
-import posixpath
 from pathlib import Path, PurePosixPath, PureWindowsPath
 import subprocess
 import shutil
@@ -707,7 +706,7 @@ class PathResolutionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             # Map the Windows path model to real local sidecars and native locks.
             def local_sidecar(path):
-                return Path(directory) / path.name
+                return Path(directory) / path.name.lower()
 
             def lock_native(handle, path):
                 with mock.patch.object(runner, 'os', os):
@@ -734,8 +733,9 @@ class PathResolutionTests(unittest.TestCase):
                         with self.assertRaises(FileExistsError):
                             with runner._output_locks((contender,)):
                                 self.fail('a competing invocation acquired the held output lock')
-                        self.assertEqual(opened.call_args_list[-2], opened.call_args_list[-1])
-                        self.assertEqual(str(opened.call_args.args[0]),
+                        self.assertEqual(local_sidecar(opened.call_args_list[-2].args[0]),
+                                         local_sidecar(opened.call_args_list[-1].args[0]))
+                        self.assertEqual(str(opened.call_args.args[0]).lower(),
                                          str(ordinary) + '.lock')
 
     def test_extended_unc_root_checks_only_server_and_share_emptiness(self):
@@ -1703,6 +1703,7 @@ class ProcessRunnerTests(MatrixTestBase):
 
     def test_casefolded_duplicate_outputs_are_refused_before_mutation(self):
         outputs = (self.artifact, self.retained, self.receipt, self.log)
+        sidecar_stat = runner._sidecar_stat
         for source in range(len(outputs)):
             for destination in range(len(outputs)):
                 if source == destination:
@@ -1710,9 +1711,8 @@ class ProcessRunnerTests(MatrixTestBase):
                 with self.subTest(source=source, destination=destination):
                     inner = list(outputs)
                     inner[destination] = outputs[source].with_name(outputs[source].name.upper())
-                    locks = runner._output_locks
-                    with mock.patch.object(runner, '_output_locks',
-                                           side_effect=lambda paths: locks(paths, normcase=str.lower)):
+                    with mock.patch.object(runner, '_sidecar_stat', side_effect=lambda path:
+                                           sidecar_stat(path.with_name(path.name.lower()))):
                         self.assert_output_names_refused(inner, 'output paths must be distinct')
 
     def test_windows_short_leaf_outputs_refuse_before_alias_mapping_can_disappear(self):
@@ -1762,6 +1762,12 @@ class ProcessRunnerTests(MatrixTestBase):
                 alias.unlink()
 
     def test_casefolded_output_names_contend_on_reusable_sidecars(self):
+        sidecar_stat = runner._sidecar_stat
+        open_sidecar = runner._open_sidecar
+
+        def local_sidecar(path):
+            return path.with_name(path.name.lower())
+
         for output in (self.artifact, self.retained, self.receipt, self.log):
             with self.subTest(output=output.name):
                 sidecar = Path(str(output) + '.lock')
@@ -1770,62 +1776,137 @@ class ProcessRunnerTests(MatrixTestBase):
                 alias = output.with_name(output.name.upper())
                 # Simulate an insensitive filesystem on every host. Either spelling
                 # must use the same sidecar regardless of which owner arrives first.
-                for owner, contender in ((output, alias), (alias, output)):
-                    with runner._output_locks((owner,), normcase=str.lower):
-                        with self.assertRaises(FileExistsError):
-                            with runner._output_locks((contender,), normcase=str.lower):
-                                self.fail('a competing invocation acquired the held output lock')
-                    self.assertEqual((sidecar.read_bytes(), sidecar.stat().st_ino), before)
+                with mock.patch.object(runner, '_sidecar_stat',
+                                       side_effect=lambda p: sidecar_stat(local_sidecar(p))), \
+                        mock.patch.object(runner, '_open_sidecar',
+                                          side_effect=lambda p: open_sidecar(local_sidecar(p))):
+                    for owner, contender in ((output, alias), (alias, output)):
+                        with runner._output_locks((owner,)):
+                            with self.assertRaisesRegex(FileExistsError,
+                                                        'output is locked by another run'):
+                                with runner._output_locks((contender,)):
+                                    self.fail('a competing invocation acquired the held output lock')
+                        self.assertEqual((sidecar.read_bytes(), sidecar.stat().st_ino), before)
                 self.assertEqual([p for p in self.tmp.iterdir()
                                   if p.name.casefold() == sidecar.name], [sidecar])
 
+    def assert_output_case_policy(self, aliases, sidecar_path=Path):
+        upper = self.artifact.with_name('Capture.json')
+        for owner, contender in ((upper, self.artifact), (self.artifact, upper)):
+            with runner._output_locks((owner,)):
+                if aliases:
+                    with self.assertRaisesRegex(FileExistsError, 'output is locked by another run'):
+                        with runner._output_locks((contender,)):
+                            self.fail('a contender acquired an aliased output lock')
+                else:
+                    with runner._output_locks((contender,)):
+                        for path in (owner, contender):
+                            with self.assertRaisesRegex(FileExistsError,
+                                                        'output is locked by another run'):
+                                with runner._output_locks((path,)):
+                                    self.fail('a contender acquired a held output lock')
+        # Check overlapping destinations both with reusable and absent sidecars.
+        for existing in (True, False):
+            if not existing:
+                for path in (upper, self.artifact):
+                    sidecar_path(Path(str(path) + '.lock')).unlink(missing_ok=True)
+            if aliases:
+                with self.assertRaisesRegex(OSError, 'output paths must be distinct'):
+                    with runner._output_locks((upper, self.artifact)):
+                        self.fail('case aliases acquired distinct output locks')
+            else:
+                with runner._output_locks((upper, self.artifact)):
+                    pass
+            # Refusal and success must both release every acquired handle.
+            for path in (upper, self.artifact):
+                with runner._output_locks((path,)):
+                    pass
+
+    def assert_filesystem_output_case_policy(self, aliases):
+        # Map each policy onto real, numerically named sidecars so both branches
+        # exercise native OS locks regardless of the host filesystem's rules.
+        sidecar_stat = runner._sidecar_stat
+        open_sidecar = runner._open_sidecar
+        with tempfile.TemporaryDirectory(dir=self.tmp) as folder:
+            targets = {}
+
+            def local_sidecar(path):
+                if path.parent == Path(folder):
+                    return path
+                key = str(path).casefold() if aliases else str(path)
+                if key not in targets:
+                    targets[key] = Path(folder) / f'{len(targets)}.lock'
+                return targets[key]
+
+            with mock.patch.object(runner, '_sidecar_stat',
+                                   side_effect=lambda p: sidecar_stat(local_sidecar(p))), \
+                    mock.patch.object(runner, '_open_sidecar',
+                                      side_effect=lambda p: open_sidecar(local_sidecar(p))):
+                self.assert_output_case_policy(aliases, local_sidecar)
+            expected = {str(path) + '.lock' for path in
+                        (self.artifact, self.artifact.with_name('Capture.json'))}
+            if aliases:
+                expected = {path.casefold() for path in expected}
+            self.assertEqual(set(targets), expected)
+            self.assertEqual(len(list(Path(folder).iterdir())), 1 if aliases else 2)
+
     def test_sensitive_output_names_have_distinct_keys_and_locks(self):
-        # Model path identity independently of the host filesystem's case rules.
-        lower = PurePosixPath('/evidence/capture.json')
-        upper = PurePosixPath('/evidence/Capture.json')
-        handles = []
-        locks = []
+        self.assert_filesystem_output_case_policy(False)
 
-        def open_sidecar(path):
-            handle = mock.Mock()
-            handles.append(handle)
-            return handle
-
-        def lock_handle(handle, path):
-            if path in locks:
-                raise FileExistsError('output is locked by another run')
-            locks.append(path)
-
-        with mock.patch.object(runner, 'Path', PurePosixPath), \
-                mock.patch.object(runner, 'resolve_path', side_effect=lambda path: path), \
-                mock.patch.object(runner, 'os', types.SimpleNamespace(
-                    name='posix', fstat=lambda descriptor: object())), \
-                mock.patch.object(runner, '_check_output'), \
-                mock.patch.object(runner, '_sidecar_stat', return_value=object()), \
-                mock.patch.object(runner, '_same_file', return_value=True), \
-                mock.patch.object(runner, '_open_sidecar', side_effect=open_sidecar), \
-                mock.patch.object(runner, '_lock_handle', side_effect=lock_handle):
-            self.assertEqual(str(runner._output_identity(upper)), str(upper))
-            with runner._output_locks((lower, upper), normcase=posixpath.normcase):
-                self.assertEqual(set(map(str, locks)),
-                                 {'/evidence/Capture.json.lock', '/evidence/capture.json.lock'})
-            self.assertTrue(all(handle.close.called for handle in handles))
+    def test_insensitive_output_names_share_keys_and_locks(self):
+        self.assert_filesystem_output_case_policy(True)
 
     def test_native_output_case_policy(self):
-        upper = self.artifact.with_name('Capture.json')
-        if os.path.normcase(str(upper)) == os.path.normcase(str(self.artifact)):
-            with self.assertRaisesRegex(OSError, 'output paths must be distinct'):
-                with runner._output_locks((upper, self.artifact)):
-                    self.fail('case aliases acquired distinct output locks')
-        else:
-            with runner._output_locks((upper, self.artifact)):
-                for path in (upper, self.artifact):
-                    with self.assertRaises(FileExistsError):
-                        with runner._output_locks((path,)):
-                            self.fail('a contender acquired a held output lock')
-        # Both platform branches leave the locks available for a later owner.
-        with runner._output_locks((upper,)):
-            pass
+        probe = self.tmp / 'CaseProbe'
+        probe.write_bytes(b'case sensitivity probe')
+        aliases = probe.with_name(probe.name.swapcase()).exists()
+        probe.unlink()
+        for existing in (False, True):
+            with self.subTest(existing=existing):
+                if existing:
+                    self.artifact.write_bytes(b'old capture')
+                self.assert_output_case_policy(aliases)
+                if existing:
+                    self.assertEqual(self.artifact.read_bytes(), b'old capture')
+                else:
+                    self.assertFalse(self.artifact.exists())
+                    self.assertFalse(self.artifact.with_name('Capture.json').exists())
+
+    def test_sidecar_created_by_contender_during_acquisition(self):
+        sidecar = Path(str(self.artifact) + '.lock')
+        native_open = os.open
+        for held in (False, True):
+            with self.subTest(held=held), contextlib.ExitStack() as cleanup:
+                sidecar.unlink(missing_ok=True)
+                owners = []
+
+                def open_after_contender(path, flags, mode=0o777):
+                    if Path(path) == sidecar and flags & os.O_EXCL:
+                        owner = cleanup.enter_context(os.fdopen(native_open(path, flags, mode),
+                                                                 'r+b'))
+                        owners.append(owner)
+                        if held:
+                            runner._lock_handle(owner, sidecar)
+                            if os.name == 'nt':
+                                cleanup.callback(runner.msvcrt.locking, owner.fileno(),
+                                                 runner.msvcrt.LK_UNLCK, 1)
+                        raise FileExistsError(runner.errno.EEXIST, 'sidecar already created',
+                                              str(path))
+                    return native_open(path, flags, mode)
+
+                with mock.patch.object(runner.os, 'open', side_effect=open_after_contender):
+                    if held:
+                        with self.assertRaisesRegex(FileExistsError,
+                                                    'output is locked by another run'):
+                            with runner._output_locks((self.artifact,)):
+                                self.fail('a contender acquired a held output lock')
+                    else:
+                        with runner._output_locks((self.artifact,)):
+                            pass
+                self.assertEqual(len(owners), 1)
+                self.assertTrue(runner._same_file(os.fstat(owners[0].fileno()), sidecar.lstat()))
+            with runner._output_locks((self.artifact,)):
+                pass
 
     def test_windows_locks_are_unlocked_before_close(self):
         for failure in (None, 'body', 'contention', 'acquisition'):
