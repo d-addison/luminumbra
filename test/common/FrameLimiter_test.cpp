@@ -4,11 +4,15 @@
 
 #include <chrono>
 #include <initializer_list>
+#include <iterator>
+#include <limits>
 
 namespace {
 using Clock = std::chrono::steady_clock;
 using namespace std::chrono_literals;
 
+// Models policy deterministically; native SteadyFrameTiming timer and sleep
+// behavior remains unqualified until measured on Windows.
 struct VirtualTiming {
     Clock::time_point time{};
     Clock::time_point sleep_deadline{};
@@ -18,6 +22,8 @@ struct VirtualTiming {
     Clock::duration spin_step = 10us;
     int sleeps = 0;
     int spins = 0;
+    bool fail_next_sleep = false;
+    int failed_sleeps = 0;
 
     [[nodiscard]] Clock::time_point now() const {
         return time;
@@ -27,7 +33,18 @@ struct VirtualTiming {
         return margin;
     }
 
+    [[nodiscard]] Clock::duration coarse_sleep_quantum() const {
+        return fail_next_sleep ? Clock::duration::zero() : sleep_quantum;
+    }
+
     void sleep_until(Clock::time_point deadline) {
+        if (fail_next_sleep) {
+            fail_next_sleep = false;
+            ++failed_sleeps;
+            margin = Luminumbra::Client::CoarseFrameSleepMargin(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(sleep_quantum));
+            return;
+        }
         ++sleeps;
         sleep_deadline = deadline;
         auto wait = deadline - time;
@@ -47,7 +64,7 @@ struct VirtualTiming {
 };
 
 TEST(FrameLimiter, SupportedCapsSleepThenSpinToTheDeadline) {
-    for (const int cap : {60, 120, 144, 240}) {
+    for (const int cap : {30, 60, 120, 144, 165, 240}) {
         SCOPED_TRACE(cap);
         VirtualTiming timing;
         Luminumbra::Client::FrameLimiter limiter;
@@ -71,7 +88,7 @@ TEST(FrameLimiter, SupportedCapsSleepThenSpinToTheDeadline) {
 
 TEST(FrameLimiter, QuantizedSleepsMaintainTheSelectedRate) {
     for (const auto quantum : {1000us, 2000us, 15625us}) {
-        for (const int cap : {240, 144, 120, 60}) {
+        for (const int cap : {240, 165, 144, 120, 60, 30}) {
             SCOPED_TRACE(quantum.count());
             SCOPED_TRACE(cap);
             VirtualTiming timing;
@@ -93,11 +110,42 @@ TEST(FrameLimiter, QuantizedSleepsMaintainTheSelectedRate) {
             EXPECT_LE(achieved, static_cast<double>(cap));
             EXPECT_NEAR(achieved, static_cast<double>(cap), static_cast<double>(cap) * 0.0005);
             EXPECT_GT(timing.spins, 0);
-            if (quantum <= 2ms)
+            if (quantum <= 2ms || cap <= 60)
                 EXPECT_EQ(timing.sleeps, frames);
             else
                 EXPECT_EQ(timing.sleeps, 0);
         }
+    }
+}
+
+TEST(FrameLimiter, CoarseFallbackAtSixtyFpsBoundsSpinShare) {
+    for (const bool timer_fails : {false, true}) {
+        SCOPED_TRACE(timer_fails);
+        VirtualTiming timing;
+        timing.sleep_quantum = 15625us;
+        timing.margin = timer_fails ? 200us : Luminumbra::Client::CoarseFrameSleepMargin(15625us);
+        timing.spin_step = 1us;
+        timing.fail_next_sleep = timer_fails;
+        Luminumbra::Client::FrameLimiter limiter;
+        limiter.pace(60, timing);
+        constexpr int frames = 120;
+        const auto start = timing.time;
+        const auto period = std::chrono::ceil<Clock::duration>(1s / 60.0);
+        for (int frame = 0; frame < frames; ++frame) {
+            const auto frame_start = timing.time;
+            const int spins_before = timing.spins;
+            timing.time += 100us * (1 + frame % 7);
+            limiter.pace(60, timing);
+            const auto spin_time = (timing.spins - spins_before) * timing.spin_step;
+            // One 15.625 ms sleep leaves at most 1.042 ms of a 60 FPS frame.
+            EXPECT_LT(spin_time, period / 10);
+            EXPECT_GE(timing.time - frame_start, period);
+            EXPECT_LT(timing.time - frame_start, period + timing.spin_step);
+        }
+        EXPECT_EQ(timing.failed_sleeps, timer_fails ? 1 : 0);
+        EXPECT_EQ(timing.sleeps, frames);
+        EXPECT_GT(timing.spins, 0);
+        EXPECT_LT(timing.spins * timing.spin_step, (timing.time - start) / 10);
     }
 }
 
@@ -167,6 +215,35 @@ TEST(FramePacing, PlayerSettingsAndInvalidCapFallback) {
     EXPECT_EQ(pacing.frame_cap, 0);
 }
 
+TEST(FramePacing, SupportedCapsMatchTheContractAndRejectNeighboringValues) {
+    constexpr int expected[] = {0, 30, 60, 120, 144, 165, 240};
+    ASSERT_EQ(std::size(luminumbra::core::kFrameCaps), std::size(expected));
+    for (std::size_t i = 0; i < std::size(expected); ++i) {
+        EXPECT_EQ(luminumbra::core::kFrameCaps[i], expected[i]);
+        EXPECT_TRUE(luminumbra::core::IsValidFrameCap(expected[i]));
+    }
+    for (const int cap : {std::numeric_limits<int>::min(),
+                          -1,
+                          1,
+                          29,
+                          31,
+                          59,
+                          61,
+                          119,
+                          121,
+                          143,
+                          145,
+                          164,
+                          166,
+                          239,
+                          241,
+                          std::numeric_limits<int>::max()}) {
+        SCOPED_TRACE(cap);
+        EXPECT_FALSE(luminumbra::core::IsValidFrameCap(cap));
+        EXPECT_EQ(luminumbra::core::ResolveFramePacing(true, cap).frame_cap, 0);
+    }
+}
+
 TEST(FramePacing, BenchmarkAndPerfCaptureOverridesAlwaysDisableBothLimits) {
     using luminumbra::core::FramePacingOverrides;
     using luminumbra::core::ResolveFramePacing;
@@ -216,7 +293,7 @@ TEST(FramePacing, LiveSettingsEditsStayOverriddenUntilMeasurementEnds) {
               .benchmark_active = false, .scenario_active = false, .profiling_active = true}}) {
         VirtualTiming timing;
         Luminumbra::Client::FrameLimiter limiter;
-        for (const int cap : {240, 60, 144, 120, 0}) {
+        for (const int cap : {240, 30, 60, 165, 144, 120, 0}) {
             for (const bool vsync : {true, false}) {
                 const auto pacing = ResolveFramePacing(vsync, cap, overrides);
                 EXPECT_FALSE(pacing.vsync);

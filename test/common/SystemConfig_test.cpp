@@ -440,7 +440,7 @@ TEST(SystemConfig, UserVideoDefaults) {
 }
 
 TEST(SystemConfig, FramePacingPersistsEverySupportedChoice) {
-    for (const int cap : luminumbra::core::kFrameCaps) {
+    for (const int cap : {0, 30, 60, 120, 144, 165, 240}) {
         for (const bool vsync : {false, true}) {
             SCOPED_TRACE(cap);
             SCOPED_TRACE(vsync);
@@ -462,8 +462,9 @@ TEST(SystemConfig, FramePacingPersistsEverySupportedChoice) {
 
 TEST(SystemConfig, InvalidFramePacingValuesKeepDefaultsOrPreviousOverlay) {
     const auto invalid_caps = nlohmann::json::parse(
-        R"([null,true,false,"60","unlimited",60.0,60.5,-1,1,61,300,[],{},
-            4294967356,18446744073709551615,-9223372036854775808])");
+        R"([null,true,false,"30","60","165","unlimited",30.0,60.0,60.5,165.0,
+            -1,1,29,31,61,164,166,300,[],{},4294967326,4294967356,4294967461,
+            18446744073709551615,-9223372036854775808])");
     for (const auto& cap : invalid_caps) {
         SCOPED_TRACE(cap.dump());
         const nlohmann::json document = {{"user", {{"video", {{"frame_cap", cap}}}}}};

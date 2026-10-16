@@ -1114,10 +1114,10 @@
       "source": "Luminumbra first-party runtime data"
     },
     {
-      "bytes": 8466,
+      "bytes": 8594,
       "license": "MIT",
       "path": "data/ui/settings.rml",
-      "sha256": "f126fc9f43a095d58601de17a688f54a2d419ebd373ccf488524b6c057262ba8",
+      "sha256": "d883e9256a08b6b71fcfb5446a18ed04fa78fdfb72cf62df229d717cd9818b37",
       "source": "Luminumbra first-party runtime data"
     },
     {

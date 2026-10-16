@@ -824,7 +824,7 @@ TEST(UiSmokeTest, SettingsScreenRoundTripsThroughTheBridge) {
     change_control("setting_vsync", "off");
     EXPECT_FALSE(model.vsync);
 
-    for (const int cap : {60, 120, 144, 240, 0}) {
+    for (const int cap : {30, 60, 120, 144, 165, 240, 0}) {
         change_control("setting_frame_cap", std::to_string(cap));
         EXPECT_EQ(model.frame_cap, cap);
         EXPECT_EQ(control_value("setting_frame_cap"), std::to_string(cap));

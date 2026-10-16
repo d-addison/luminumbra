@@ -27,6 +27,7 @@
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -1089,13 +1090,15 @@ void DrawSettingsWindow(ClientAppContext& app,
                 camera->Zoom = us.fov;
             }
             ImGui::Checkbox("VSync", &us.vsync);
-            const char* cap_labels[] = {"Unlimited", "60", "120", "144", "240"};
+            const char* cap_labels[] = {"Unlimited", "30", "60", "120", "144", "165", "240"};
+            static_assert(std::size(cap_labels) == std::size(luminumbra::core::kFrameCaps));
+            constexpr int cap_count = static_cast<int>(std::size(luminumbra::core::kFrameCaps));
             int selected_cap = 0;
-            for (int i = 0; i < 5; ++i) {
+            for (int i = 0; i < cap_count; ++i) {
                 if (us.frame_cap == luminumbra::core::kFrameCaps[i])
                     selected_cap = i;
             }
-            if (ImGui::Combo("Frame cap", &selected_cap, cap_labels, 5))
+            if (ImGui::Combo("Frame cap", &selected_cap, cap_labels, cap_count))
                 us.frame_cap = luminumbra::core::kFrameCaps[selected_cap];
             ImGui::Separator();
             ImGui::SliderFloat("Time scale", &app.capture.timeScale, 0.0f, 8.0f, "%.2fx");

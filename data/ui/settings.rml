@@ -76,9 +76,11 @@
                             <label for="setting_frame_cap">frame cap</label>
                             <select id="setting_frame_cap" name="frame_cap" class="form-control">
                                 <option value="0">Unlimited</option>
+                                <option value="30">30</option>
                                 <option value="60">60</option>
                                 <option value="120">120</option>
                                 <option value="144">144</option>
+                                <option value="165">165</option>
                                 <option value="240">240</option>
                             </select>
                         </div>

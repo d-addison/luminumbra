@@ -1,5 +1,6 @@
 #include "ui/Rml_UIManager.h"
 #include "audio/IAudioManager.h"
+#include "luminumbra_common/core/FramePacing.h"
 #include <GLFW/glfw3.h>
 #include <RmlUi/Core.h>
 #include <RmlUi/Core/Elements/ElementFormControl.h>
@@ -1327,16 +1328,12 @@ void Rml_UIManager::ApplySettingFromElement(Rml::Element* element) {
     } else if (id == "setting_frame_cap") {
         // Match the complete token, rather than accepting numeric prefixes.
         if (b.SetFrameCap) {
-            if (value == "0")
-                b.SetFrameCap(0);
-            else if (value == "60")
-                b.SetFrameCap(60);
-            else if (value == "120")
-                b.SetFrameCap(120);
-            else if (value == "144")
-                b.SetFrameCap(144);
-            else if (value == "240")
-                b.SetFrameCap(240);
+            for (const int cap : luminumbra::core::kFrameCaps) {
+                if (value == std::to_string(cap)) {
+                    b.SetFrameCap(cap);
+                    break;
+                }
+            }
         }
     } else if (id == "setting_fov") {
         const float f = as_float(45.0f);
