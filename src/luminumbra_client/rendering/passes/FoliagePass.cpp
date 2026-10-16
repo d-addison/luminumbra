@@ -335,7 +335,10 @@ GLuint compile_compute_program(const std::string& source) {
     const char* src = source.c_str();
     GLuint s = glCreateShader(GL_COMPUTE_SHADER);
     glShaderSource(s, 1, &src, nullptr);
-    glCompileShader(s);
+    {
+        LUMIN_PROFILE_ZONE_N("Shader compile");
+        glCompileShader(s);
+    }
     GLint ok = GL_FALSE;
     glGetShaderiv(s, GL_COMPILE_STATUS, &ok);
     if (!ok) {
@@ -347,7 +350,10 @@ GLuint compile_compute_program(const std::string& source) {
     }
     GLuint p = glCreateProgram();
     glAttachShader(p, s);
-    glLinkProgram(p);
+    {
+        LUMIN_PROFILE_ZONE_N("Shader link");
+        glLinkProgram(p);
+    }
     glGetProgramiv(p, GL_LINK_STATUS, &ok);
     glDeleteShader(s);
     if (!ok) {
@@ -1388,6 +1394,7 @@ void FoliagePass::map_instances_for_frame() {
 }
 
 std::size_t FoliagePass::execute(const RenderContext& ctx, const Camera& camera) {
+    LUMIN_PROFILE_ZONE_N("GL FoliagePass.execute");
     const auto saved_draws = m_last_draw_calls;
     const auto saved_time = m_last_draw_shader_time;
     ReplayRollback rollback([this, &ctx, saved_draws, saved_time]() noexcept {

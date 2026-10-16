@@ -1,4 +1,5 @@
 #include "GroundDecalPass.h"
+#include "core/Profiler.h"
 
 #include "../Camera.h"
 #include "../PassShaderLayouts.h" // enumerable ExpectedLayout registry
@@ -80,6 +81,7 @@ void GroundDecalPass::update_scent(const ScentFieldRenderMirror& mirror) {
 }
 
 void GroundDecalPass::execute(const RenderContext& ctx) {
+    LUMIN_PROFILE_ZONE_N("GL GroundDecalPass.execute");
     if (!m_active || !m_shader || !m_shader->IsValid() || m_vao == 0 || m_scent_tex == 0)
         return;
 

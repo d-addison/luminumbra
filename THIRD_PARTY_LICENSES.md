@@ -45,6 +45,7 @@ The upstream generator expressions and explicit fused operations are retained.
 | [stb](https://github.com/nothings/stb) | Image loading and utility headers | MIT or public domain |
 | [GoogleTest](https://github.com/google/googletest) | Unit and integration test framework | BSD-3-Clause |
 | [LZ4](https://github.com/lz4/lz4) | Fast compression | BSD-2-Clause |
+| [Tracy](https://github.com/wolfpld/tracy) | On-demand profiling (optional, `LUMINUMBRA_ENABLE_TRACY`) | BSD-3-Clause |
 
 The stb resize header receives a local coefficient-copy correction in a private
 generated build header. `cmake/stb_resize.cmake` checks the pinned upstream header
@@ -52,6 +53,42 @@ and replaces two unaligned integer-copy macros with overlap-safe byte copies.
 It also applies the SIMD lookup-table offset to each index instead of forming a
 pointer before the table.
 The fetched source, filtering arithmetic and SIMD paths are retained.
+
+### Tracy v0.13.1
+
+The optional profile variant pins Tracy to commit
+`05cceee0df3b8d7c6fa87e9638af311dbabc63cb`. Its upstream `LICENSE` is reproduced
+verbatim below; retain this notice when redistributing Tracy-enabled binaries.
+
+```text
+Tracy Profiler (https://github.com/wolfpld/tracy) is licensed under the
+3-clause BSD license.
+
+Copyright (c) 2017-2025, Bartosz Taudul <wolf@nereid.pl>
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+    * Redistributions of source code must retain the above copyright
+      notice, this list of conditions and the following disclaimer.
+    * Redistributions in binary form must reproduce the above copyright
+      notice, this list of conditions and the following disclaimer in the
+      documentation and/or other materials provided with the distribution.
+    * Neither the name of the <organization> nor the
+      names of its contributors may be used to endorse or promote products
+      derived from this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL <COPYRIGHT HOLDER> BE LIABLE FOR ANY
+DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+(INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
+ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+```
 
 ---
 
@@ -94,4 +131,5 @@ directly from Valve under their own agreement.
 
 Full license texts ship with each dependency in its own source tree. Where a
 project's license requires that its copyright notice accompany redistribution,
-that notice is preserved in the vendored source rather than reproduced here.
+that notice is preserved in the dependency's source tree. Tracy's notice is also
+reproduced above.

@@ -2,6 +2,7 @@
 #include "../../../include/luminumbra/core/Types.h"
 #include "core/Environment.h"
 #include "core/Log.h"
+#include "core/Profiler.h"
 #include <algorithm>
 #include <cstddef>
 #include <cstdlib>
@@ -71,7 +72,8 @@ void complete_job(const std::shared_ptr<JobCompletionState>& completion) {
         // between the waiter releasing the mutex inside wait and finishing its
         // CV enqueue. Hardening (not the root cause of this task's crash, which
         // was a FastNoise SIMD over-read), kept because it is the correct idiom.
-        std::lock_guard<std::mutex> lock(completion->mutex);
+        LUMIN_PROFILE_LOCK(
+            std::lock_guard<std::mutex>, lock, completion->mutex, "Job completion lock wait");
         completion->condition.notify_all();
     }
 }
@@ -84,6 +86,13 @@ void complete_job(const std::shared_ptr<JobCompletionState>& completion) {
 // per-job CompletionGuard lambda the old dispatch_batch wrapped each job in.
 // A member (declared in the header) so it can name the private PooledJob type.
 void JobSystem::run_slot(PooledJob& slot) {
+    LUMIN_PROFILE_ZONE_N("Worker job execution");
+#if defined(LUMINUMBRA_ENABLE_TRACY)
+    LUMIN_PROFILE_PLOT("Job queue delay (ms)",
+                       std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() -
+                                                                 slot.enqueued_at)
+                           .count());
+#endif
     // Take ownership locally so the slot can be cleared even if job throws.
     Job job = std::move(slot.job);
     std::shared_ptr<JobCompletionState> completion = std::move(slot.completion);
@@ -142,6 +151,9 @@ void JobSystem::PooledQueue::push(PooledJob&& slot) {
     if (m_size == m_slots.size()) {
         grow();
     }
+#if defined(LUMINUMBRA_ENABLE_TRACY)
+    slot.enqueued_at = std::chrono::steady_clock::now();
+#endif
     m_slots[m_tail] = std::move(slot);
     m_tail = (m_tail + 1) % m_slots.size();
     ++m_size;
@@ -186,7 +198,8 @@ void JobSystem::startup(std::size_t worker_count) {
     }
 
     {
-        std::unique_lock<std::mutex> lock(m_queue_mutex);
+        LUMIN_PROFILE_LOCK(
+            std::unique_lock<std::mutex>, lock, m_queue_mutex, "Job queue lock wait");
         if (m_accepting_jobs || !m_workers.empty()) {
             LUMINUMBRA_CORE_WARN("JobSystem startup requested while already running.");
             return;
@@ -226,7 +239,8 @@ void JobSystem::startup(std::size_t worker_count) {
 
 void JobSystem::shutdown() {
     {
-        std::unique_lock<std::mutex> lock(m_queue_mutex);
+        LUMIN_PROFILE_LOCK(
+            std::unique_lock<std::mutex>, lock, m_queue_mutex, "Job queue lock wait");
         if (!m_accepting_jobs && m_workers.empty()) {
             return;
         }
@@ -244,7 +258,8 @@ void JobSystem::shutdown() {
     }
 
     {
-        std::unique_lock<std::mutex> lock(m_queue_mutex);
+        LUMIN_PROFILE_LOCK(
+            std::unique_lock<std::mutex>, lock, m_queue_mutex, "Job queue lock wait");
         m_workers.clear();
     }
 }
@@ -281,7 +296,8 @@ void JobSystem::dispatch(Job job, JobPriority priority) {
 
     bool accepted = false;
     {
-        std::unique_lock<std::mutex> lock(m_queue_mutex);
+        LUMIN_PROFILE_LOCK(
+            std::unique_lock<std::mutex>, lock, m_queue_mutex, "Job queue lock wait");
         if (m_accepting_jobs && !m_stop_threads.load(std::memory_order_acquire)) {
             // store the caller's Job directly in a
             // pooled slot (no second std::function wrapper). Single dispatch has
@@ -310,7 +326,8 @@ JobHandle JobSystem::dispatch_batch(const std::vector<Job>& jobs, JobPriority pr
     bool accepted = false;
 
     {
-        std::unique_lock<std::mutex> lock(m_queue_mutex);
+        LUMIN_PROFILE_LOCK(
+            std::unique_lock<std::mutex>, lock, m_queue_mutex, "Job queue lock wait");
         if (m_accepting_jobs && !m_stop_threads.load(std::memory_order_acquire)) {
             PooledQueue& queue = queue_for(priority);
             for (const auto& job : jobs) {
@@ -331,7 +348,8 @@ JobHandle JobSystem::dispatch_batch(const std::vector<Job>& jobs, JobPriority pr
         // HELD so a waiter that called wait concurrently with this rejection
         // cannot miss the wakeup.
         {
-            std::lock_guard<std::mutex> lock(completion->mutex);
+            LUMIN_PROFILE_LOCK(
+                std::lock_guard<std::mutex>, lock, completion->mutex, "Job completion lock wait");
             completion->counter.store(0, std::memory_order_release);
             completion->condition.notify_all();
         }
@@ -344,11 +362,15 @@ JobHandle JobSystem::dispatch_batch(const std::vector<Job>& jobs, JobPriority pr
 }
 
 void JobSystem::wait(const JobHandle& handle) {
+    LUMIN_PROFILE_ZONE_N("Job completion wait");
     if (handle.completion) {
-        std::unique_lock<std::mutex> lock(handle.completion->mutex);
-        handle.completion->condition.wait(lock, [&handle] {
+        LUMIN_PROFILE_LOCK(std::unique_lock<std::mutex>,
+                           lock,
+                           handle.completion->mutex,
+                           "Job completion lock wait");
+        LUMIN_PROFILE_WAIT("Job condition wait", handle.completion->condition.wait(lock, [&handle] {
             return handle.completion->counter.load(std::memory_order_acquire) <= 0;
-        });
+        }));
     } else if (handle.counter) {
         while (handle.counter->load(std::memory_order_acquire) > 0) {
             std::this_thread::yield();
@@ -357,7 +379,7 @@ void JobSystem::wait(const JobHandle& handle) {
 }
 
 JobSystem::RuntimeStats JobSystem::get_runtime_stats() const {
-    std::unique_lock<std::mutex> lock(m_queue_mutex);
+    LUMIN_PROFILE_LOCK(std::unique_lock<std::mutex>, lock, m_queue_mutex, "Job queue lock wait");
     RuntimeStats stats;
     stats.worker_count = m_workers.size();
     stats.high_priority_queue_depth = m_high_queue.size();
@@ -369,13 +391,15 @@ JobSystem::RuntimeStats JobSystem::get_runtime_stats() const {
 }
 
 void JobSystem::worker_loop() {
+    LUMIN_PROFILE_THREAD("Job worker");
     while (true) {
         PooledJob slot;
         {
-            std::unique_lock<std::mutex> lock(m_queue_mutex);
-            m_condition.wait(lock, [this] {
+            LUMIN_PROFILE_LOCK(
+                std::unique_lock<std::mutex>, lock, m_queue_mutex, "Job queue lock wait");
+            LUMIN_PROFILE_WAIT("Worker condition wait", m_condition.wait(lock, [this] {
                 return !m_high_queue.empty() || !m_normal_queue.empty() || m_stop_threads.load();
-            });
+            }));
 
             if (m_stop_threads.load() && m_high_queue.empty() && m_normal_queue.empty()) {
                 return;

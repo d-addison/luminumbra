@@ -1,5 +1,6 @@
 #include "FroxelPass.h"
 #include "../FarWorldReplay.h"
+#include "core/Profiler.h"
 
 #include "../FroxelGrid.h"
 #include "../ShaderReflection.h"
@@ -37,6 +38,7 @@ FroxelPass::FroxelPass() = default;
 FroxelPass::~FroxelPass() = default;
 
 bool FroxelPass::execute_inject(const RenderContext& ctx, const std::filesystem::path& root_path) {
+    LUMIN_PROFILE_ZONE_N("GL FroxelPass.execute_inject");
     //  rendering: per-froxel media density + in-scatter into
     // the scatter volume, sampling the shadow depth AND the  tint cascade so
     // stained glass throws COLORED shafts. Quality 0 = zero-GL no-op.
@@ -139,6 +141,7 @@ bool FroxelPass::execute_inject(const RenderContext& ctx, const std::filesystem:
 }
 
 void FroxelPass::execute_integrate(const RenderContext& ctx) {
+    LUMIN_PROFILE_ZONE_N("GL FroxelPass.execute_integrate");
     //  rendering: front-to-back march of the scatter volume —
     // per-column accumulated in-scatter L + transmittance T.
     if (ctx.volumetric_quality <= 0 || m_integrate_program == 0) {

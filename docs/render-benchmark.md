@@ -392,9 +392,54 @@ snapshot belongs to the last invocation in that frame. With no invocation,
 capacity is zero and the generated count is empty. Each pass also exposes its
 last collected invocation's diagnostic without affecting its rebuild decision.
 
-The optional profiling build uses `-DLUMINUMBRA_ENABLE_TRACY=ON` in a separate
-build directory. The client links the profiler interface in all variants; with
-the default `OFF` setting it adds no profiling definitions or dependencies.
+Use the dedicated `profile` variant for Tracy captures (issue #395):
+
+```sh
+cmake --preset profile
+cmake --build --preset profile --target luminumbra_client_app
+```
+
+This uses `RelWithDebInfo`, frame pointers, and `LUMINUMBRA_ENABLE_TRACY=ON`
+in `build/profile`. Start a matching Tracy viewer and launch the client from that
+build. Tracy runs on demand, recording when the viewer connects. Configuring this
+variant fetches the upstream source; for offline use, supply an already
+provisioned checkout with `-DFETCHCONTENT_SOURCE_DIR_TRACY=/path/to/tracy`.
+The fetch settings in `cmake/tracy.cmake` pin Tracy v0.13.1 to commit
+`05cceee0df3b8d7c6fa87e9638af311dbabc63cb`; use that revision for an offline
+checkout as well. Tracy uses the BSD-3-Clause licence; its verbatim notice is in
+[Third-party licenses](../THIRD_PARTY_LICENSES.md#tracy-v0131) and must accompany
+redistributed Tracy-enabled binaries.
+
+The `perf`, default, debug and release configurations disable Tracy. Their event
+macros expand to nothing, discard arguments, and add no profiler symbols,
+allocations, threads, dependency links or Tracy network fetch. Use `perf` for
+uninstrumented benchmark results and determinism gates. The shared worker library
+and client/server consumers inherit the same profiling definition in a profile
+build.
+
+Stable timeline names include `Client frame` (scope begin/end, including early
+exit), the `Client` frame mark, `Worker job execution`, and `Job queue delay (ms)`.
+Capture-only rendering uses `Client capture frame` and `Client capture` marks.
+The queue plot measures from ring insertion to execution start for both priority
+lanes and both single and batch dispatch. Its timestamp storage and clock reads
+exist only in profile builds. Worker thread names identify the job pool, world
+preview, audio propagation, saved-world catalog and TCP accept workers.
+
+`Job queue lock wait`, `Job completion lock wait`, `World chunks lock wait`,
+`Chunk state lock wait`, `Worldgen epoch lock wait`, the hydrology and far-build
+lock zones cover acquisition only. Condition waits, job completion waits, TCP
+future waits and `Client present wait` have separate scopes. File zones cover
+world/save reads, durable writes and replacement on Windows and POSIX, and both
+preset loading paths. `Shader compile` and `Shader link` cover driver calls in
+the material, compute, foliage, impostor and both UI shader paths.
+
+`GL <PassClass>.execute*` zones measure CPU submission for each major pass,
+including offscreen/preview consumers. Depth blits and opaque snapshots have
+their own `GL` zones. These complement the existing foliage rebuild/upload zones
+and frame-attribution buckets. GPU elapsed times still come from the existing
+asynchronous GPU queries; CPU submission zones do not imply GPU completion.
+All profiling values are observational: scheduling, wait predicates, simulation
+ordering and authoritative decisions never consume them.
 
 Completed GPU counts are only exposed with readback active and carry their
 source generation (which can precede this frame's rebuild); CPU fallback counts

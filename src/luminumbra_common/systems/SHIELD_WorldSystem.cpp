@@ -6,6 +6,7 @@
 #include "../world/HydraulicErosion.h" //
 #include "../world/MarchingCubes.h"
 #include "WaterSystem.h"
+#include "core/Profiler.h"
 #include "entt/entt.hpp"
 #include "systems/PhysicsSystem.h"
 #include <algorithm> // Required for std::max and std::min
@@ -877,7 +878,10 @@ void SHIELD_WorldSystem::reinitialize_noise(const TerrainGenParams* params,
             pending.store(false, std::memory_order_release);
         }
     } writer_intent_reset{m_worldgen_writer_pending};
-    std::unique_lock<std::shared_mutex> worldgen_epoch(m_worldgen_epoch_mutex);
+    LUMIN_PROFILE_LOCK(std::unique_lock<std::shared_mutex>,
+                       worldgen_epoch,
+                       m_worldgen_epoch_mutex,
+                       "Worldgen epoch lock wait");
     // Publish parameters and seed under the same epoch as their generators.
     // Preview readers must retain the previous complete world until they release it.
     if (params) {
@@ -1354,6 +1358,7 @@ float SHIELD_WorldSystem::SampleHydroOffsetMeters(float world_x, float world_z) 
 }
 
 void SHIELD_WorldSystem::PrefetchHydroRegions(float cx, float cz, float radius_m) const {
+    LUMIN_PROFILE_ZONE_N("Hydrology prefetch batch");
     // Warm the hydraulic-erosion region cache AHEAD of chunk-gen demand on
     // background jobs, so the (expensive) per-region bake never lands on the
     // gen/main critical path when the camera flies into new terrain. Each region
@@ -1934,6 +1939,7 @@ float SHIELD_WorldSystem::ComputeShapedHeight(float world_x, float world_z) cons
 
 void SHIELD_WorldSystem::ComputeShapedHeightGrid(
     int base_x, int base_z, int size_x, int size_z, float* out) const {
+    LUMIN_PROFILE_ZONE_N("Terrain height grid batch");
     // SIMD-batched twin of ComputeShapedHeightSample over an integer-aligned
     // column grid. MUST stay byte-for-byte equal to calling ComputeShapedHeight
     // per column (the batch-vs-scalar parity gtest pins ==), so the per-channel
@@ -2272,6 +2278,7 @@ MaterialType SHIELD_WorldSystem::SurfaceVertexMaterial(float world_x,
 
 void SHIELD_WorldSystem::ComputeShapedHeightsAtPositions(
     const float* xs, const float* zs, std::size_t count, float* out, bool apply_hydro) const {
+    LUMIN_PROFILE_ZONE_N("Terrain height position batch");
     if (count == 0) {
         return;
     }
@@ -5498,7 +5505,10 @@ void SHIELD_WorldSystem::bump_far_lod_authority_revision(const IVec3& chunk_coor
         affected_z[z_count++] = home_rz + 1;
 
     const u64 revision = m_far_lod_authority_revision.fetch_add(1u, std::memory_order_acq_rel) + 1u;
-    std::lock_guard<std::mutex> lock(m_far_lod_region_revision_mutex);
+    LUMIN_PROFILE_LOCK(std::lock_guard<std::mutex>,
+                       lock,
+                       m_far_lod_region_revision_mutex,
+                       "Far region revision lock wait");
     for (std::size_t z = 0; z < z_count; ++z) {
         for (std::size_t x = 0; x < x_count; ++x) {
             m_far_lod_region_revisions[{affected_x[x], affected_z[z]}] = revision;
@@ -5507,7 +5517,10 @@ void SHIELD_WorldSystem::bump_far_lod_authority_revision(const IVec3& chunk_coor
 }
 
 u64 SHIELD_WorldSystem::far_lod_region_authority_revision(i32 rx, i32 rz) const {
-    std::lock_guard<std::mutex> lock(m_far_lod_region_revision_mutex);
+    LUMIN_PROFILE_LOCK(std::lock_guard<std::mutex>,
+                       lock,
+                       m_far_lod_region_revision_mutex,
+                       "Far region revision lock wait");
     const auto found = m_far_lod_region_revisions.find({rx, rz});
     return found == m_far_lod_region_revisions.end() ? 0u : found->second;
 }

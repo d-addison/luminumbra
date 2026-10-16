@@ -1,4 +1,5 @@
 #include "SsaoPass.h"
+#include "core/Profiler.h"
 
 #include "../PassShaderLayouts.h" // enumerable ExpectedLayout registry
 #include "../RenderResourceRegistry.h"
@@ -169,6 +170,7 @@ void SsaoPass::reset_shaders() {
 // the fullscreen quad, screen size, quality, and camera from the RenderContext.
 // The ssao_draws stat bump moved to the call site (the pipeline owns stats).
 void SsaoPass::execute_ssao(const RenderContext& ctx) {
+    LUMIN_PROFILE_ZONE_N("GL SsaoPass.execute_ssao");
     const Camera& camera = *ctx.camera;
     const int quality = ctx.ssao_quality;
     // quality 3 = half-res GTAO: render into the 1/2-per-axis FBO (1/4 the fragments),
@@ -248,6 +250,7 @@ void SsaoPass::execute_ssao(const RenderContext& ctx) {
 }
 
 void SsaoPass::execute_blur(const RenderContext& ctx) {
+    LUMIN_PROFILE_ZONE_N("GL SsaoPass.execute_blur");
     // Half-res GTAO (quality 3): joint-bilateral depth-aware upsample of the half-res
     // AO into the full-res blur target (replaces the box blur; also denoises).
     if (ctx.ssao_quality == 3 && m_ssao.halfFBO != 0 && m_ssao.upsampleShader &&

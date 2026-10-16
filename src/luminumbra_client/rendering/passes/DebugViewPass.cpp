@@ -1,4 +1,5 @@
 #include "DebugViewPass.h"
+#include "core/Profiler.h"
 
 #include "../Camera.h"            // near/far planes for Depth-mode linearization
 #include "../PassShaderLayouts.h" // enumerable ExpectedLayout registry
@@ -39,6 +40,7 @@ void DebugViewPass::reset_shader() {
 }
 
 void DebugViewPass::execute(const RenderContext& ctx) {
+    LUMIN_PROFILE_ZONE_N("GL DebugViewPass.execute");
     // Default-OFF guard: Mode::None (0) is a true no-op so the normal render is untouched.
     if (m_mode == Mode::None)
         return;

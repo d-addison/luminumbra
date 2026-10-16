@@ -1,4 +1,5 @@
 #include "ModeHelpers.h"
+#include "core/Profiler.h"
 
 namespace {
 
@@ -46,6 +47,8 @@ void StartRuntimeTcpAccept(RuntimeTcpClientSlot& slot) {
     const std::uint16_t port = slot.port;
     slot.accepting = true;
     slot.accept_result = std::async(std::launch::async, [transport, port]() {
+        LUMIN_PROFILE_THREAD("TCP accept worker");
+        LUMIN_PROFILE_ZONE_N("TCP accept worker job");
         return transport->Listen(port, /*timeout_ms=*/250);
     });
 }
@@ -67,11 +70,13 @@ bool PollRuntimeTcpAccept(RuntimeTcpClientSlot& slot,
         StartRuntimeTcpAccept(slot);
     }
     if (!slot.accept_result.valid() ||
-        slot.accept_result.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready) {
+        LUMIN_PROFILE_WAIT("TCP accept future poll",
+                           slot.accept_result.wait_for(std::chrono::milliseconds(0))) !=
+            std::future_status::ready) {
         return false;
     }
 
-    const bool accepted = slot.accept_result.get();
+    const bool accepted = LUMIN_PROFILE_WAIT("TCP accept future get", slot.accept_result.get());
     slot.accepting = false;
     if (accepted) {
         slot.awaiting_hello = true;
@@ -85,7 +90,7 @@ bool PollRuntimeTcpAccept(RuntimeTcpClientSlot& slot,
 
 void CloseRuntimeTcpSlot(RuntimeTcpClientSlot& slot) {
     if (slot.accepting && slot.accept_result.valid()) {
-        slot.accept_result.wait();
+        LUMIN_PROFILE_WAIT("TCP accept future wait", slot.accept_result.wait());
     }
     if (slot.transport) {
         slot.transport->Close();
