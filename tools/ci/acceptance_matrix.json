@@ -1132,17 +1132,17 @@
     {
       "id": "contract.region-symmetric-boundary",
       "source": "docs/active-regions.md#activation-and-ordering",
-      "statement": "Non-finite or out-of-range (|x|,|z| >= 2^24) walking anchors, ground-object edit positions and region pins are ignored and counted.",
+      "statement": "Non-finite or out-of-range (outside -2^24 <= x,z < 2^24) walking anchors, ground-object edit positions and region pins are ignored and counted.",
       "status": "planned",
       "requirements": [
         "ar.activation.050"
       ],
-      "discrepancy": "docs/active-regions.md:66 requires symmetric rejection at |coord| >= 2^24, but test/common/ActiveRegionLedger_test.cpp:438 accepts -2^24. src/luminumbra_common/world/ActiveRegionLedger.cpp:65 implements the asymmetric interval [-2^24, 2^24). Reconciliation of the contract wording or the bound is tracked in #250.",
+      "discrepancy": "The contract and ledger specify [-2^24, 2^24). ActiveRegionLedgerTest.ValidAnchorBoundaries covers the ledger predicate; exact endpoint coverage across walking anchors, ground-object edits and pins remains tracked in issue #250.",
       "evidence": [
         {
           "kind": "ctest",
           "ref": "ActiveRegionLedgerTest.SymmetricAnchorBoundaries",
-          "planned": "Add a symmetric-boundary regression rejecting both -2^24 and +2^24 on X and Z for walking anchors, ground-object edits and pins, while accepting the adjacent interior coordinates.; owner: ds"
+          "planned": "Cover both X and Z endpoints for walking anchors, ground-object edits and pins: accept -2^24 and the adjacent interior coordinates, and reject +2^24 and the adjacent exterior coordinates.; owner: ds"
         }
       ]
     },

@@ -1,9 +1,11 @@
+#include "../support/UniqueTempPath.h"
 #include "luminumbra_client/app/RuntimeRoot.h"
 #include "luminumbra_common/core/FilesystemPath.h"
 #include <gtest/gtest.h>
 
 #include <filesystem>
 #include <fstream>
+#include <stdexcept>
 #include <string>
 
 namespace fs = std::filesystem;
@@ -50,6 +52,43 @@ TEST(FilesystemPath, RuntimeRootStringKeepsOrdinaryPlatformSpelling) {
         expected.push_back('/');
     }
     EXPECT_EQ(Luminumbra::Client::App::RuntimeRootString(root), expected);
+}
+
+TEST(FilesystemPath, ExplicitRuntimeRootBypassesDiscoveryAndRefusesIncompleteLayouts) {
+    const fs::path directory = Luminumbra::TestSupport::CreateUniqueTempDirectory("runtime-root-");
+    struct Cleanup {
+        fs::path path;
+        ~Cleanup() {
+            std::error_code error;
+            fs::remove_all(path, error);
+        }
+    } cleanup{directory};
+    const auto resolve = [&](const fs::path& root) {
+        return Luminumbra::Client::App::ResolveRuntimeRoot("client", root);
+    };
+    EXPECT_THROW(resolve("relative"), std::invalid_argument);
+    EXPECT_THROW(resolve(directory / "missing"), std::invalid_argument);
+    EXPECT_THROW(resolve(directory), std::invalid_argument);
+    for (const char* sentinel : {"res/shaders/g_buffer.vert",
+                                 "data/audio/music.bank.json",
+                                 "worlds/atlas/presets/default.json"}) {
+        const auto path = directory / sentinel;
+        fs::create_directories(path.parent_path());
+        std::ofstream(path) << "fixture";
+    }
+    EXPECT_EQ(resolve(directory), directory);
+    for (const char* sentinel : {"res/shaders/g_buffer.vert",
+                                 "data/audio/music.bank.json",
+                                 "worlds/atlas/presets/default.json"}) {
+        const auto path = directory / sentinel;
+        fs::remove(path);
+        EXPECT_THROW(resolve(directory), std::invalid_argument);
+        fs::create_directory(path);
+        EXPECT_THROW(resolve(directory), std::invalid_argument);
+        fs::remove(path);
+        std::ofstream(path) << "fixture";
+    }
+    EXPECT_THROW(resolve(directory / "res/shaders/g_buffer.vert"), std::invalid_argument);
 }
 
 #if defined(_WIN32) && !defined(__CYGWIN__)
