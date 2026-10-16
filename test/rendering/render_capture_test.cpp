@@ -1,4 +1,5 @@
 #include "../fixtures/TerrainFixtureParams.h"
+#include "luminumbra_client/app/RenderBenchmarkReport.h"
 #include "gtest/gtest.h"
 
 #define GLFW_INCLUDE_NONE
@@ -44,6 +45,28 @@
 #include "rendering/OitModel.h"           // Weighted blended OIT model.
 #include "rendering/RenderGraph.h"
 #include "rendering/SnowCoverModel.h" // Render-only snow cover.
+
+TEST(RenderBenchmarkOverrides, RuntimeLocationsLeaveSystemsConfigurationDeclared) {
+    std::array<std::string, 9> arguments = {"client",
+                                            "--runtime-root",
+                                            "runtime",
+                                            "--save-root",
+                                            "storage",
+                                            "--systems-config",
+                                            "systems.json",
+                                            "--render-scale",
+                                            "0.5"};
+    std::array<char*, 9> argv{};
+    std::transform(arguments.begin(), arguments.end(), argv.begin(), [](std::string& value) {
+        return value.data();
+    });
+    const auto active = Luminumbra::Client::Measurement::render_overrides(
+        static_cast<int>(argv.size()), argv.data());
+    EXPECT_FALSE(active.contains("cli:--runtime-root"));
+    EXPECT_FALSE(active.contains("cli:--save-root"));
+    EXPECT_EQ(active.at("cli:--systems-config"), "systems.json");
+    EXPECT_EQ(active.at("cli:--render-scale"), "0.5");
+}
 
 namespace fs = std::filesystem;
 

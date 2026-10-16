@@ -1136,7 +1136,7 @@ GameSession::ValidateWorldConfig(const std::string& root_path,
     }
 
     if (result.ok) {
-        const TerrainPresetLoadResult preset = LoadTerrainPreset(result.preset_path);
+        const TerrainPresetLoadResult preset = LoadTerrainPreset(result.preset_path, root / "data");
         if (!preset.ok) {
             for (const std::string& error : preset.errors) {
                 AddValidationError(result, error);
@@ -1233,7 +1233,8 @@ bool GameSession::CreateWorldInternal(const std::string& name,
         preset_to_load = world_preset;
     }
 
-    const TerrainPresetLoadResult preset = LoadTerrainPreset(preset_to_load);
+    const TerrainPresetLoadResult preset =
+        LoadTerrainPreset(preset_to_load, RuntimeRoot(m_rootPath) / "data");
     if (!preset.ok) {
         for (const std::string& error : preset.errors) {
             LUMINUMBRA_CORE_ERROR("World preset load failed: {}", error);
@@ -1345,7 +1346,8 @@ bool GameSession::LoadWorld(const std::string& worldId) {
     if (!IsSimulationTickBoundary())
         return false;
     m_lastLoadedChunkCount = 0;
-    const auto saved = Persistence::InspectSavedWorld(GetSaveRootPath(), worldId);
+    const auto saved =
+        Persistence::InspectSavedWorld(GetSaveRootPath(), RuntimeRoot(m_rootPath), worldId);
     m_worldOpenError = saved.error;
     if (m_worldOpenError.empty() && saved.requires_active_regions && !m_activeRegionsEnabled)
         m_worldOpenError = "Incompatible configuration: this world requires sim.active_regions.";
@@ -1365,7 +1367,8 @@ bool GameSession::LoadWorld(const std::string& worldId) {
     }
     const std::string worldPath = (GetSaveRootPath() / "worlds/saves" / worldId).string();
     const auto& preset_to_load = saved.preset_path;
-    const TerrainPresetLoadResult preset = LoadTerrainPreset(preset_to_load);
+    const TerrainPresetLoadResult preset =
+        LoadTerrainPreset(preset_to_load, RuntimeRoot(m_rootPath) / "data");
     if (!preset.ok) {
         for (const std::string& error : preset.errors) {
             LUMINUMBRA_CORE_ERROR("World preset load failed: {}", error);

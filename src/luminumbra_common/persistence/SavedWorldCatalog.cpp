@@ -27,6 +27,13 @@ bool HasFrozenPreset(const std::string& name) {
 
 SavedWorld
 InspectSavedWorld(const fs::path& root, const std::string& world_id, const std::stop_token& stop) {
+    return InspectSavedWorld(root, root, world_id, stop);
+}
+
+SavedWorld InspectSavedWorld(const fs::path& root,
+                             const fs::path& runtime_root,
+                             const std::string& world_id,
+                             const std::stop_token& stop) {
     SavedWorld result;
     result.metadata.worldId = world_id;
     result.metadata.name = world_id;
@@ -98,8 +105,8 @@ InspectSavedWorld(const fs::path& root, const std::string& world_id, const std::
                                  : "worlds/atlas/presets";
         result.preset_path = fs::exists(embedded)
                                  ? embedded
-                                 : root / presets / (result.metadata.worldType + ".json");
-        const auto preset = world::LoadTerrainPreset(result.preset_path);
+                                 : runtime_root / presets / (result.metadata.worldType + ".json");
+        const auto preset = world::LoadTerrainPreset(result.preset_path, runtime_root / "data");
         if (!preset.ok) {
             result.error =
                 preset.errors.empty() ? "World preset is unavailable." : preset.errors.front();
@@ -126,6 +133,12 @@ InspectSavedWorld(const fs::path& root, const std::string& world_id, const std::
 }
 
 SavedWorldCatalog EnumerateSavedWorlds(const fs::path& root, const std::stop_token& stop) {
+    return EnumerateSavedWorlds(root, root, stop);
+}
+
+SavedWorldCatalog EnumerateSavedWorlds(const fs::path& root,
+                                       const fs::path& runtime_root,
+                                       const std::stop_token& stop) {
     SavedWorldCatalog result;
     if (stop.stop_requested()) {
         result.error = "Saved-world validation cancelled.";
@@ -143,7 +156,7 @@ SavedWorldCatalog EnumerateSavedWorlds(const fs::path& root, const std::stop_tok
             }
             if (entry.is_directory() || entry.is_symlink())
                 result.worlds.push_back(
-                    InspectSavedWorld(root, entry.path().filename().string(), stop));
+                    InspectSavedWorld(root, runtime_root, entry.path().filename().string(), stop));
         }
         std::sort(result.worlds.begin(), result.worlds.end(), [](const auto& a, const auto& b) {
             if (a.metadata.creationTime != b.metadata.creationTime)

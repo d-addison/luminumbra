@@ -312,6 +312,9 @@ override in `src/luminumbra_client/main_client.cpp`. Each process receipt record
 `systems_config.path`, `systems_config.sha256` and `systems_config.sha256_verified`.
 A missing/unreadable configuration prevents launch; changed or unreadable bytes
 after execution fail the cell before the checker runs.
+The runner writes a per-cell `render-overrides.json` declaring the exact
+`cli:--systems-config` argument. Runtime and save roots select file locations and
+are excluded from render overrides.
 
 Every launched cell receives an absolute `--runtime-root`. The runner resolves
 the selected client executable before launch and searches only its directory and
@@ -330,6 +333,16 @@ runtime roots missing required files, and save roots that cannot be created.
 `GameSession` uses the save-root override for world creation, loading, saving and
 catalog inspection; runtime assets still come from the runtime root. Ordinary
 client launches without either option retain discovery and runtime-root storage.
+Embedded presets resolve biome and structure dependencies from the runtime's
+`data/` directory. Legacy saves without an embedded preset use the runtime's
+frozen or named atlas preset, even when storage is separate.
+
+Traversal qualification binds both the script path and its expected SHA-256.
+The runner snapshots each manifest into `work/<cell-id>/workload.traversal`
+(at most 64 KiB) and passes that same file to the client and checker. It verifies
+the snapshot after each process and records its digest and verification status
+in the cell's `traversal` object. Editing the source fixture changes its digest
+and prevents qualification; edits after snapshot creation cannot change that run.
 
 The supplied manifest uses the existing `luminumbra.performance_build.v1` schema:
 compiler (`id`, `version`, `target`), configuration (the existing build options

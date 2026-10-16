@@ -75,6 +75,7 @@ inline void add_distributions(nlohmann::json& report, SampleRing& ring) {
 inline nlohmann::json render_overrides(int argc, char** argv) {
     nlohmann::json result = nlohmann::json::object();
     // Treat every non-workload CLI option as an override requiring an exact declaration.
+    // Roots select file locations; --systems-config still requires a declaration.
     const std::vector<std::string> flags = {
         "--no-audio", "--auto-create-world", "--auto-enter-world", "--no-menu-backdrop"};
     const std::vector<std::string> options = {"--render-benchmark",
@@ -86,6 +87,8 @@ inline nlohmann::json render_overrides(int argc, char** argv) {
                                               "--load-world",
                                               "--perf-profile",
                                               "--traversal",
+                                              "--runtime-root",
+                                              "--save-root",
                                               "--declare-render-overrides",
                                               "--world-preset",
                                               "--cam-pos",

@@ -107,7 +107,13 @@ def _binary_identity(path):
         for block in iter(lambda: source.read(1024 * 1024), b''):
             digest.update(block)
         after = os.fstat(source.fileno())
-        named = os.stat(path)
+        # Windows path stat and descriptor stat can expose different timestamp
+        # semantics/precision. Compare handles through the same API, including
+        # a fresh open to detect replacement of the executable's pathname.
+        # A concurrent replacement with a pipe must fail without blocking.
+        flags = os.O_RDONLY | getattr(os, 'O_BINARY', 0) | getattr(os, 'O_NONBLOCK', 0)
+        with os.fdopen(os.open(path, flags), 'rb') as named_source:
+            named = os.fstat(named_source.fileno())
     if identity(before) != identity(after) or identity(after) != identity(named):
         raise OSError(errno.EIO, 'executable changed while hashing', str(path))
     return identity(after), digest.hexdigest()

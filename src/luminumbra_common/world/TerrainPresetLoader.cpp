@@ -385,6 +385,14 @@ std::string TerrainPresetContentHash(const nlohmann::json& preset) {
 }
 
 TerrainPresetLoadResult LoadTerrainPreset(const std::filesystem::path& preset_path) {
+    std::error_code ec;
+    const auto preset_dir = Filesystem::AbsolutePath(preset_path, ec).parent_path();
+    return LoadTerrainPreset(preset_path,
+                             preset_dir.parent_path().parent_path().parent_path() / "data");
+}
+
+TerrainPresetLoadResult LoadTerrainPreset(const std::filesystem::path& preset_path,
+                                          const std::filesystem::path& data_root) {
     TerrainPresetLoadResult result;
 
     std::ifstream file(preset_path);
@@ -403,15 +411,6 @@ TerrainPresetLoadResult LoadTerrainPreset(const std::filesystem::path& preset_pa
         return result;
     }
 
-    // The table/structure paths are relative to the data/ root. Presets live at
-    // <root>/worlds/atlas/presets/<name>.json, so the data root is four parents
-    // up from the preset file. Derive it here and hand it to the in-memory parse
-    // so on-disk loads are byte-identical to before.
-    std::error_code ec;
-    const std::filesystem::path preset_dir =
-        Filesystem::AbsolutePath(preset_path, ec).parent_path();
-    const std::filesystem::path data_root =
-        preset_dir.parent_path().parent_path().parent_path() / "data";
     return LoadTerrainPresetFromJson(
         data, data_root, Filesystem::GenericUtf8PathString(preset_path));
 }

@@ -373,6 +373,39 @@ TEST_F(WorldOpenRefusal, MissingMetadataRefusesCatalogClientAndServerWithoutChan
     EXPECT_EQ(DiskBytes(root), before);
 }
 
+TEST_F(WorldOpenRefusal, SeparateSaveRootUsesRuntimeFallbackForLegacyPresets) {
+    const auto storage = root / "storage";
+    fs::create_directories(storage / "worlds");
+    fs::rename(root / "worlds/saves", storage / "worlds/saves");
+    save = storage / "worlds/saves/fixture";
+    ASSERT_FALSE(fs::exists(save / "preset.json"));
+    for (const std::string name : {"default", "legacy_custom"}) {
+        SCOPED_TRACE(name);
+        const auto preset =
+            root / (name == "default" ? "worlds/atlas/presets-rev6" : "worlds/atlas/presets") /
+            (name + ".json");
+        if (name != "default")
+            fs::copy_file(root / "worlds/atlas/presets/default.json", preset);
+        auto metadata = nlohmann::json::parse(Read(save / "world_info.json"));
+        metadata["worldType"] = name;
+        Write(save / "world_info.json", metadata.dump());
+        const auto inspected = Persistence::InspectSavedWorld(storage, root, "fixture");
+        ASSERT_TRUE(inspected.error.empty()) << inspected.error;
+        EXPECT_EQ(inspected.preset_path, preset);
+        const auto catalog = Persistence::EnumerateSavedWorlds(storage, root);
+        ASSERT_TRUE(catalog.error.empty()) << catalog.error;
+        ASSERT_EQ(catalog.worlds.size(), 1u);
+        EXPECT_TRUE(catalog.worlds.front().error.empty());
+        EXPECT_EQ(catalog.worlds.front().preset_path, preset);
+        GameSession session;
+        session.SetRootPath(RootString());
+        session.SetSaveRootPath(storage);
+        session.SetJobSystem(&jobs);
+        ASSERT_TRUE(session.LoadWorld("fixture")) << session.GetWorldOpenError();
+        EXPECT_EQ(session.GetMetadata().worldType, name);
+    }
+}
+
 TEST_F(WorldOpenRefusal, MissingEmbeddedPresetAndAtlasFallbackRefuseBeforeGeneration) {
     const auto atlas = root / "worlds/atlas/presets-rev6/default.json";
     const auto embedded = save / "preset.json";

@@ -589,6 +589,7 @@ class PathResolutionTests(unittest.TestCase):
 
         windows = types.SimpleNamespace(**vars(os))
         windows.name = 'nt'
+        windows.path = ntpath
         for ordinary, extended in (
                 (r'C:\RUNNER~1\evidence', r'\\?\C:\RUNNER~1\evidence'),
                 (r'\\server\share\evidence', r'\\?\UNC\server\share\evidence'),
@@ -602,7 +603,8 @@ class PathResolutionTests(unittest.TestCase):
                 self.assertEqual(runner.resolve_path(extended), expected)
                 self.assertEqual(runner.resolve_path(ordinary), expected)
                 identity = runner._output_identity(WindowsPath(extended) / 'Capture.json')
-                self.assertEqual(str(identity), str(expected / 'capture.json'))
+                self.assertEqual(str(identity),
+                                 windows.path.normcase(str(expected / 'capture.json')))
                 self.assertEqual(identity, runner._output_identity(
                     WindowsPath(ordinary) / 'Capture.json'))
                 with self.assertRaisesRegex(OSError, 'output overlaps a lock sidecar'):
@@ -811,6 +813,38 @@ class ProcessRunnerTests(MatrixTestBase):
 
     def read_receipt(self):
         return json.loads(self.receipt.read_text(encoding='utf-8'))
+
+    def test_executable_identity_uses_consistent_handle_metadata(self):
+        executable = Path(sys.executable)
+        real_stat = os.stat
+
+        def path_stat(path, *args, **kwargs):
+            metadata = real_stat(path, *args, **kwargs)
+            if not isinstance(path, int) and Path(path) == executable:
+                fields = {key: getattr(metadata, key) for key in
+                          ('st_dev', 'st_ino', 'st_size', 'st_mtime_ns', 'st_ctime_ns')}
+                fields['st_ctime_ns'] += 1
+                return types.SimpleNamespace(**fields)
+            return metadata
+
+        # Model the Windows path/descriptor timestamp discrepancy without
+        # changing any descriptor metadata or executable bytes.
+        with mock.patch.object(runner.os, 'stat', side_effect=path_stat):
+            identity, digest = runner._binary_identity(executable)
+        metadata = os.stat(executable)
+        self.assertEqual(identity[:3], (metadata.st_dev, metadata.st_ino, metadata.st_size))
+        self.assertEqual(digest, runner.file_sha256(executable))
+
+    def test_executable_path_replaced_with_pipe_is_refused(self):
+        reader, writer = os.pipe()
+        try:
+            with os.fdopen(reader, 'rb') as pipe, \
+                    mock.patch.object(runner.os, 'open',
+                                      side_effect=lambda path, flags: os.dup(pipe.fileno())), \
+                    self.assertRaisesRegex(OSError, 'executable changed while hashing'):
+                runner._binary_identity(sys.executable)
+        finally:
+            os.close(writer)
 
     def test_executable_changes_fail_closed_and_clear_unverified_hash(self):
         executable = self.tmp / Path(sys.executable).name

@@ -73,6 +73,10 @@ CANONICAL_SURFACE_SCRIPT = 'tools/perf/fixtures/surface-flight.traversal'
 # edited-world-tour are deliberately absent: they stay non-canonical (never qualify) until
 # AC8 commits their scripts and binds them here.
 BOUND_TRAVERSAL_SCRIPTS = {'surface-flight': CANONICAL_SURFACE_SCRIPT}
+BOUND_TRAVERSAL_SHA256 = {
+    'surface-flight': '029e54d693c993472d84d7a9a38b2c3bbf513f129a1922534906c0f91b479e4e',
+}
+TRAVERSAL_MAX_BYTES = 64 * 1024  # Traversal manifests are bounded to 64 KiB.
 
 
 class UsageError(ValueError):
@@ -143,7 +147,7 @@ def adapter_triple(data):
 
 
 def finish(cell, state, reason, artifact, verdict=None, *, checker_canonical,
-           out_dir, matrix_canonical, client_evidence):
+           out_dir, matrix_canonical, client_evidence, traversal_evidence=None):
     """Cell result; the artifact path and adapter are reported only when the file exists."""
     present = Path(artifact).is_file()
     return {'id': cell['id'], 'workload': cell['workload'], 'kind': cell['kind'],
@@ -152,7 +156,8 @@ def finish(cell, state, reason, artifact, verdict=None, *, checker_canonical,
                 'adapter': adapter_triple(read_json_object(artifact)) if present else None,
                 'artifact': Path(artifact).relative_to(out_dir).as_posix() if present else None,
                 'verdict': verdict, 'checker_canonical': checker_canonical,
-                'matrix_canonical': matrix_canonical, 'client': client_evidence}
+                'matrix_canonical': matrix_canonical, 'client': client_evidence,
+                'traversal': traversal_evidence}
 
 
 def binding_mismatch(cell, data):
@@ -244,8 +249,12 @@ def canonical_record(result):
         return False
     if result['kind'] == 'fixed_view':
         return result['measured_frames'] == CANONICAL_FIXED_FRAMES
+    traversal = result.get('traversal') or {}
+    expected = BOUND_TRAVERSAL_SHA256.get(result['workload'])
     return (result['script'] is not None
-            and BOUND_TRAVERSAL_SCRIPTS.get(result['workload']) == result['script'])
+            and BOUND_TRAVERSAL_SCRIPTS.get(result['workload']) == result['script']
+            and expected is not None and traversal.get('sha256') == expected
+            and traversal.get('verified') is True)
 
 
 def cell_qualifies(result):
@@ -503,6 +512,12 @@ def capture_ownership(receipt, retained, capture, out_dir):
     return None
 
 
+def runtime_options(systems_config, runtime_root, save_root):
+    """The configuration is a declared override; the roots select file locations."""
+    return ['--systems-config', str(systems_config), '--runtime-root', str(runtime_root),
+            '--save-root', str(save_root)]
+
+
 def run_cell(cell, matrix, *, client, out_dir, root, python, checker, timeout_seconds,
              environment, checker_canonical, matrix_canonical, build_manifest, runtime_root):
     state, reason = matrix_lib.readiness(cell, root)
@@ -510,11 +525,13 @@ def run_cell(cell, matrix, *, client, out_dir, root, python, checker, timeout_se
     cell_id = cell['id']
     artifact = cells_dir / f'{cell_id}.json'
     client_evidence = None
+    traversal_evidence = None
 
     def record(state, reason, artifact, verdict=None):
         return finish(cell, state, reason, artifact, verdict,
                       checker_canonical=checker_canonical, out_dir=out_dir,
-                      matrix_canonical=matrix_canonical, client_evidence=client_evidence)
+                      matrix_canonical=matrix_canonical, client_evidence=client_evidence,
+                      traversal_evidence=traversal_evidence)
 
     verdict_path = cells_dir / f'{cell_id}.verdict.json'
     for previous in (artifact, verdict_path, cells_dir / f'{cell_id}.artifact.json',
@@ -534,8 +551,22 @@ def run_cell(cell, matrix, *, client, out_dir, root, python, checker, timeout_se
             capture = Path(staging) / 'capture.json'
             command = matrix_lib.build_command(cell, client=client, artifact=capture, root=root)
             systems_config = runner.resolve_path(runtime_root / 'data/common/systems.json')
-            command += ['--systems-config', str(systems_config),
-                        '--runtime-root', str(runtime_root), '--save-root', str(save_root)]
+            command += runtime_options(systems_config, runtime_root, save_root)
+            declaration = work / 'render-overrides.json'
+            runner.atomic_write(declaration, json.dumps(
+                {'cli:--systems-config': str(systems_config)}).encode('utf-8'))
+            command += ['--declare-render-overrides', str(declaration)]
+            traversal_path = None
+            if cell['kind'] == 'traversal':
+                with (Path(root) / cell['script']).open('rb') as source:
+                    payload = source.read(TRAVERSAL_MAX_BYTES + 1)
+                if len(payload) > TRAVERSAL_MAX_BYTES:
+                    return record('invalid', 'traversal exceeds 64 KiB', artifact)
+                traversal_path = work / 'workload.traversal'
+                runner.atomic_write(traversal_path, payload)
+                traversal_evidence = {'sha256': hashlib.sha256(payload).hexdigest(),
+                                      'verified': False}
+                command[command.index('--traversal') + 1] = str(traversal_path)
             if str(client).endswith('.py'):
                 command = [sys.executable, str(client)] + command[1:]
             completed, evidence, client_evidence = run_client_process(
@@ -545,6 +576,11 @@ def run_cell(cell, matrix, *, client, out_dir, root, python, checker, timeout_se
                 environment=environment, log=cells_dir / f'{cell_id}.log',
                 artifact=capture, retained=retained, receipt_path=receipt_path,
                 timeout_seconds=timeout_seconds)
+            if traversal_path is not None:
+                traversal_evidence['verified'] = (
+                    runner.file_sha256(traversal_path) == traversal_evidence['sha256'])
+                if not traversal_evidence['verified']:
+                    return record('invalid', 'traversal changed during execution', artifact)
             receipt = read_json_object(receipt_path)
             ownership = capture_ownership(receipt, retained, capture, out_dir)
             if ownership is None:
@@ -576,7 +612,8 @@ def run_cell(cell, matrix, *, client, out_dir, root, python, checker, timeout_se
     field = None if data is None else binding_mismatch(cell, data)
     if field is not None:
         return record('invalid', f'capture-does-not-match-cell: {field}', artifact)
-    check = check_command(cell, matrix=matrix, artifact=artifact, verdict_path=verdict_path,
+    checked_cell = cell if traversal_path is None else dict(cell, script=str(traversal_path))
+    check = check_command(checked_cell, matrix=matrix, artifact=artifact, verdict_path=verdict_path,
                           root=root, python=python, checker=checker)
     try:
         with (cells_dir / f'{cell_id}.check.log').open('wb') as log:
@@ -588,6 +625,14 @@ def run_cell(cell, matrix, *, client, out_dir, root, python, checker, timeout_se
                       f'checker timed out after {CHECKER_TIMEOUT_SECONDS} s', artifact)
     except OSError as error:
         return record('invalid', f'checker spawn-failed: {error}', artifact)
+    if traversal_path is not None:
+        try:
+            traversal_evidence['verified'] = (
+                runner.file_sha256(traversal_path) == traversal_evidence['sha256'])
+        except OSError:
+            traversal_evidence['verified'] = False
+        if not traversal_evidence['verified']:
+            return record('invalid', 'traversal changed during checking', artifact)
     try:
         unchanged = (runner.file_sha256(artifact) == capture_sha256
                      and runner.file_sha256(retained) == capture_sha256)
@@ -693,7 +738,7 @@ def aggregate(matrix, results, *, partial, declared_refresh, matrix_provenance=N
                     'adapter': result['adapter'], 'artifact': result['artifact'],
                     'verdict': result['verdict'], 'checker_canonical': result['checker_canonical'],
                     'matrix_canonical': result.get('matrix_canonical', False),
-                    'client': result.get('client')}
+                    'client': result.get('client'), 'traversal': result.get('traversal')}
                for result in results],
         'summary': summary, 'adapter_identical': adapter_identical,
         'adapter_matches_qualified': adapter_matches, 'harness_complete': harness_complete,
@@ -770,8 +815,10 @@ def run_dry(matrix, args, out_dir):
     for cell in plan['cells']:
         if cell['command'] is not None:
             save_root = out_dir / 'work' / cell['id'] / 'storage'
-            cell['command'] += ['--runtime-root', str(runtime_root), '--save-root', str(save_root),
-                                '--systems-config', str(runtime_root / 'data/common/systems.json')]
+            systems_config = runner.resolve_path(runtime_root / 'data/common/systems.json')
+            cell['command'] += runtime_options(systems_config, runtime_root, save_root)
+            cell['command'] += ['--declare-render-overrides',
+                                str(save_root.parent / 'render-overrides.json')]
     path = out_dir / planner.PLAN_NAME
     path.write_text(json.dumps(plan, indent=2) + '\n', encoding='utf-8')
     print(f"qualification plan: {plan['cell_count']} cells, "
