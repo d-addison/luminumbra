@@ -72,8 +72,8 @@ public:
                  u32 index_count,
                  const char* label_seed);
     // Overwrites an existing allocation in place when the new geometry fits the
-    // reserved slots; otherwise frees and reallocates. Returns the (possibly
-    // new) handle.
+    // reserved slots; otherwise allocates before freeing the resident slice.
+    // Failure returns kInvalid and leaves the resident slice untouched.
     u32 update(u32 handle,
                const VoxelVertex* vertices,
                u32 vertex_count,

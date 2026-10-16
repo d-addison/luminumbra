@@ -1,7 +1,9 @@
 #include "ChunkGeometryPool.h"
+#include "../UploadBudget.h"
 
 #include <algorithm>
 #include <cstring>
+#include <limits>
 #include <string>
 
 namespace Luminumbra::Rendering {
@@ -86,6 +88,10 @@ u32 ChunkGeometryPool::add_block(u32 min_vertices, u32 min_indices, const char* 
     Block block;
     block.vertex_capacity = std::max(kPoolBlockVertexCapacity, round_up_pool(min_vertices));
     block.index_capacity = std::max(kPoolBlockIndexCapacity, round_up_pool(min_indices));
+    std::size_t checked_bytes = 0;
+    if (!mesh_upload_bytes(
+            block.vertex_capacity, sizeof(VoxelVertex), block.index_capacity, checked_bytes))
+        return kInvalid;
 
     const GLbitfield storage_flags = GL_MAP_WRITE_BIT | GL_MAP_PERSISTENT_BIT | GL_MAP_COHERENT_BIT;
     const GLbitfield map_flags = GL_MAP_WRITE_BIT | GL_MAP_PERSISTENT_BIT | GL_MAP_COHERENT_BIT;
@@ -140,6 +146,31 @@ u32 ChunkGeometryPool::add_block(u32 min_vertices, u32 min_indices, const char* 
     glBindVertexArray(0);
     glBindBuffer(GL_ARRAY_BUFFER, 0);
 
+    // A failed mapping must never enter the pool or reach a memcpy. Release
+    // successful partial mappings and all object names before retrying later.
+    const auto allocation_error = glGetError();
+    if (!block.vertex_ptr || !block.index_ptr || allocation_error != GL_NO_ERROR || !block.vao ||
+        !block.vbo || !block.ebo) {
+        if (block.vertex_ptr) {
+            glBindBuffer(GL_ARRAY_BUFFER, block.vbo);
+            glUnmapBuffer(GL_ARRAY_BUFFER);
+        }
+        if (block.index_ptr) {
+            glBindVertexArray(block.vao);
+            glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, block.ebo);
+            glUnmapBuffer(GL_ELEMENT_ARRAY_BUFFER);
+        }
+        glBindVertexArray(0);
+        glBindBuffer(GL_ARRAY_BUFFER, 0);
+        glDeleteVertexArrays(1, &block.vao);
+        glDeleteBuffers(1, &block.vbo);
+        glDeleteBuffers(1, &block.ebo);
+        // Consume the failed allocation's error, including a null mapping.
+        // GL exposes a finite set of error flags; each read clears one.
+        for (unsigned error = 0; error < 8 && glGetError() != GL_NO_ERROR; ++error) {}
+        return kInvalid;
+    }
+
     const u32 block_index = static_cast<u32>(m_blocks.size());
     if (label_seed != nullptr) {
         const std::string base =
@@ -180,11 +211,12 @@ bool ChunkGeometryPool::reserve_in_block(Block& block,
         if (best != free_slices.size()) {
             out_offset = free_slices[best].first;
             out_slot = free_slices[best].second; // reuse the whole freed slot
-            free_slices.erase(free_slices.begin() + static_cast<std::ptrdiff_t>(best));
+            free_slices[best] = free_slices.back();
+            free_slices.pop_back();
             return true;
         }
         // Otherwise bump-allocate from the frontier.
-        if (high_water + want <= capacity) {
+        if (high_water <= capacity && want <= capacity - high_water) {
             out_offset = high_water;
             out_slot = want;
             return true;
@@ -207,8 +239,10 @@ bool ChunkGeometryPool::reserve_in_block(Block& block,
                     want_i,
                     i_off,
                     i_slot)) {
-        // Roll back the vertex reservation: return it to the free list rather
-        // than leaking it (do not touch the bump frontier here).
+        // Return the vertex reservation to the free list. A bump reservation
+        // must advance the frontier so larger later slices cannot overlap it.
+        if (v_off == block.vertex_high_water)
+            block.vertex_high_water += v_slot;
         block.free_vertex_slices.emplace_back(v_off, v_slot);
         return false;
     }
@@ -230,7 +264,11 @@ u32 ChunkGeometryPool::allocate(const VoxelVertex* vertices,
                                 const u32* indices,
                                 u32 index_count,
                                 const char* label_seed) {
-    if (vertex_count == 0 || index_count == 0)
+    std::size_t checked_bytes = 0;
+    if (!vertices || !indices || vertex_count == 0 || index_count == 0 ||
+        vertex_count > std::numeric_limits<u32>::max() - (kPoolSlotAlign - 1u) ||
+        index_count > std::numeric_limits<u32>::max() - (kPoolSlotAlign - 1u) ||
+        !mesh_upload_bytes(vertex_count, sizeof(VoxelVertex), index_count, checked_bytes))
         return kInvalid;
     // A fresh block always grows to host any single mesh (add_block uses
     // std::max(block_cap, rounded_request)), so allocation cannot fail on size.
@@ -251,6 +289,8 @@ u32 ChunkGeometryPool::allocate(const VoxelVertex* vertices,
     }
     if (block_index == kInvalid) {
         block_index = add_block(vertex_count, index_count, label_seed);
+        if (block_index == kInvalid)
+            return kInvalid;
         if (!reserve_in_block(m_blocks[block_index],
                               vertex_count,
                               index_count,
@@ -290,6 +330,8 @@ u32 ChunkGeometryPool::update(u32 handle,
                               const u32* indices,
                               u32 index_count,
                               const char* label_seed) {
+    if (!vertices || !indices || vertex_count == 0 || index_count == 0)
+        return kInvalid;
     if (handle == kInvalid || handle >= m_allocations.size() || !m_allocations[handle].live) {
         return allocate(vertices, vertex_count, indices, index_count, label_seed);
     }
@@ -308,9 +350,12 @@ u32 ChunkGeometryPool::update(u32 handle,
         alloc.index_count = index_count;
         return handle;
     }
-    // Outgrew the slot: free and reallocate (handle changes).
-    free(handle);
-    return allocate(vertices, vertex_count, indices, index_count, label_seed);
+    // Keep the old slice resident until its replacement has been allocated.
+    return replace_upload(
+        handle,
+        kInvalid,
+        [&] { return allocate(vertices, vertex_count, indices, index_count, label_seed); },
+        [this](u32 resident) { free(resident); });
 }
 
 void ChunkGeometryPool::free(u32 handle) {
@@ -342,9 +387,11 @@ void ChunkGeometryPool::destroy() {
             glUnmapBuffer(GL_ARRAY_BUFFER);
         }
         if (block.ebo) {
+            glBindVertexArray(block.vao);
             glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, block.ebo);
             glUnmapBuffer(GL_ELEMENT_ARRAY_BUFFER);
         }
+        glBindVertexArray(0);
         if (block.vao)
             glDeleteVertexArrays(1, &block.vao);
         if (block.vbo)
@@ -352,8 +399,8 @@ void ChunkGeometryPool::destroy() {
         if (block.ebo)
             glDeleteBuffers(1, &block.ebo);
     }
+    glBindVertexArray(0);
     glBindBuffer(GL_ARRAY_BUFFER, 0);
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
     m_blocks.clear();
     m_allocations.clear();
     m_free_handles.clear();

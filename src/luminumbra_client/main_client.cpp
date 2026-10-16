@@ -3138,6 +3138,39 @@ int main(int argc, char* argv[]) {
     if (frame_csv_enabled && !frame_recorder.active())
         LUMINUMBRA_CORE_ERROR("Cannot open logs/frame-attribution.csv");
     std::uint64_t attribution_frame = 0;
+    std::uint64_t upload_warmup_wait_frames = 0;
+    std::uint64_t upload_capture_wait_frames = 0;
+    using Luminumbra::Rendering::UploadSettlingWait;
+    UploadSettlingWait scene_upload_wait, survey_upload_wait, scan_upload_wait;
+    UploadSettlingWait warmup_upload_wait, capture_upload_wait;
+    bool upload_warmup_complete = false;
+    const auto wait_for_uploads = [&](UploadSettlingWait& wait,
+                                      const char* phase,
+                                      const std::filesystem::path& report) {
+        const auto& work = renderPipeline.get_last_mesh_upload_stats();
+        const auto pending = work.terrain_uploads_deferred + work.water_uploads_deferred;
+        const bool waiting =
+            wait.waiting(pending, work.terrain_budget.adopted + work.water_budget.adopted);
+        if (wait.failed()) {
+            const nlohmann::json failure{{"status", "failed"},
+                                         {"capture_complete", false},
+                                         {"reason", "render_uploads_did_not_settle"},
+                                         {"phase", phase},
+                                         {"settling_frames", wait.frames()},
+                                         {"uploads_pending", pending}};
+            if (!report.empty()) {
+                std::error_code error;
+                if (!report.parent_path().empty())
+                    std::filesystem::create_directories(report.parent_path(), error);
+                std::ofstream(report) << failure.dump(2) << '\n';
+            }
+            LUMINUMBRA_CORE_ERROR("Capture failed during {}: render uploads did not settle", phase);
+            exit_code = 2;
+            glfwSetWindowShouldClose(window, GLFW_TRUE);
+            return false;
+        }
+        return !waiting;
+    };
     while (!glfwWindowShouldClose(window)) {
         const auto _frameStart = std::chrono::steady_clock::now();
         Attribution::FoliageFrameScope foliage_scope(frame_attribution_enabled);
@@ -3152,7 +3185,8 @@ int main(int argc, char* argv[]) {
             g_rb_frame_start = std::chrono::steady_clock::now();
         const bool measuring_v3 =
             benchmark_v3 && gameStateManager.GetCurrentState() == GameState::IN_GAME &&
-            gameSession && g_app.benchmark.warmupFrames >= g_app.capture.render_benchmark_warmup &&
+            gameSession && upload_warmup_complete &&
+            g_app.benchmark.warmupFrames >= g_app.capture.render_benchmark_warmup &&
             g_app.benchmark.measuredFrames < g_app.capture.render_benchmark_frames;
         const auto measured_frame_id = static_cast<std::uint64_t>(
             g_app.capture.render_benchmark_warmup + g_app.benchmark.measuredFrames);
@@ -4389,7 +4423,9 @@ int main(int argc, char* argv[]) {
                     if (g_app.capture.scene_active && g_app.capture.render_benchmark_path.empty()) {
                         if (g_app.sceneCapture.settleFrames < 55) {
                             ++g_app.sceneCapture.settleFrames;
-                        } else {
+                        } else if (wait_for_uploads(scene_upload_wait,
+                                                    "scene_capture",
+                                                    g_app.capture.scene_shot.string() + ".json")) {
                             int vw = 0, vh = 0;
                             glfwGetFramebufferSize(window, &vw, &vh);
                             if (vw > 0 && vh > 0) {
@@ -4416,15 +4452,28 @@ int main(int argc, char* argv[]) {
                         gameSession && gameSession->GetWorldSystem() && g_camera) {
                         if (g_app.capture.survey_settle < 45) {
                             ++g_app.capture.survey_settle;
-                        } else {
-                            Luminumbra::Rendering::RunSceneSurvey(
-                                window,
-                                *gameSession,
-                                renderPipeline,
-                                *g_camera,
-                                std::filesystem::path(g_app.capture.survey_dir),
-                                root_dir / "data/common/materials.json",
-                                g_app.overlay.wireframe_mode);
+                        } else if (wait_for_uploads(
+                                       survey_upload_wait,
+                                       "survey",
+                                       std::filesystem::path(g_app.capture.survey_dir) /
+                                           "survey.json")) {
+                            if (!Luminumbra::Rendering::RunSceneSurvey(
+                                    window,
+                                    *gameSession,
+                                    renderPipeline,
+                                    *g_camera,
+                                    std::filesystem::path(g_app.capture.survey_dir),
+                                    root_dir / "data/common/materials.json",
+                                    g_app.overlay.wireframe_mode)) {
+                                exit_code = 2;
+                                std::ofstream(std::filesystem::path(g_app.capture.survey_dir) /
+                                              "survey.json")
+                                    << nlohmann::json{{"status", "failed"},
+                                                      {"capture_complete", false},
+                                                      {"reason", "survey_capture_incomplete"}}
+                                           .dump(2)
+                                    << '\n';
+                            }
                             glfwSetWindowShouldClose(window, GLFW_TRUE);
                         }
                     }
@@ -4447,10 +4496,17 @@ int main(int argc, char* argv[]) {
                                               "without a report.",
                                               kFrameScanWatchdogFrames,
                                               static_cast<int>(currentState));
+                        exit_code = 2;
+                        std::ofstream(g_app.capture.frame_scan_path)
+                            << nlohmann::json{{"status", "failed"},
+                                              {"capture_complete", false},
+                                              {"reason", "frame_scan_watchdog"}}
+                                   .dump(2)
+                            << '\n';
                         glfwSetWindowShouldClose(window, GLFW_TRUE);
                     }
                     if (g_app.capture.frame_scan_active && currentState == GameState::IN_GAME &&
-                        gameSession) {
+                        gameSession && !glfwWindowShouldClose(window)) {
                         if (g_camera) {
                             // Eye-level ground-inspection pose: low + a gentle down-pitch so
                             // the near-field grass/rock/terrain fill the lower frame (card
@@ -4464,9 +4520,10 @@ int main(int argc, char* argv[]) {
                         renderPipeline.set_time_of_day(0.04f); // fixed near-noon (lit terrain)
                         if (g_app.capture.frame_scan_settle <
                             g_app.capture.frame_scan_settle_target) {
-                            ++g_app.capture
-                                  .frame_scan_settle; // let chunks stream + atmosphere settle
-                        } else {
+                            ++g_app.capture.frame_scan_settle;
+                        } else if (wait_for_uploads(scan_upload_wait,
+                                                    "frame_scan",
+                                                    g_app.capture.frame_scan_path)) {
                             if (g_app.capture.render_parity_active) {
                                 bool parity_ok = false;
                                 if (g_app.capture.render_parity_pass == "ssao" && g_camera)
@@ -4714,6 +4771,7 @@ int main(int argc, char* argv[]) {
         // Using the frame after the measured interval keeps readback out of its timings.
         if (g_rb_active && currentState == GameState::IN_GAME &&
             g_app.benchmark.measuredFrames == g_app.capture.render_benchmark_frames &&
+            renderPipeline.render_uploads_settled() &&
             !g_app.capture.render_benchmark_screenshot.empty()) {
             int width = 0, height = 0;
             glfwGetFramebufferSize(window, &width, &height);
@@ -4742,7 +4800,7 @@ int main(int argc, char* argv[]) {
 
         if (g_rb_active && currentState == GameState::IN_GAME &&
             g_app.benchmark.measuredFrames == g_app.capture.render_benchmark_frames &&
-            !terrain_coverage_dir.empty()) {
+            renderPipeline.render_uploads_settled() && !terrain_coverage_dir.empty()) {
             terrain_coverage_capture_ok =
                 renderPipeline.capture_terrain_coverage(terrain_coverage_dir);
             if (!terrain_coverage_capture_ok) {
@@ -4795,7 +4853,8 @@ int main(int argc, char* argv[]) {
                                            foliage_frame.capacity,
                                            foliage_frame.count_known,
                                            foliage_frame.generated_count,
-                                           foliage_frame.count_generation))
+                                           foliage_frame.count_generation,
+                                           foliage_frame.uploads))
                     LUMINUMBRA_CORE_ERROR("Frame attribution CSV write failed");
             }
             if (_wallMs > 12.0 && g_app.telemetry.slowFrameCount++ < 400) {
@@ -4913,7 +4972,24 @@ int main(int argc, char* argv[]) {
             double gpu_power_w = 0.0, gpu_clock_mhz = 0.0;
             const bool nv = g_rb_nvml_ok && g_rb_nvml.sample(gpu_power_w, gpu_clock_mhz);
 
-            if (!terrain_coverage_dir.empty()) {
+            // At most the requested warmup and measured frames plus one final
+            // capture observation (8192 total); retries never grow this array.
+            const bool record_warmup =
+                g_app.benchmark.warmupFrames < g_app.capture.render_benchmark_warmup &&
+                (g_app.benchmark.warmupFrames + 1 < g_app.capture.render_benchmark_warmup ||
+                 renderPipeline.render_uploads_settled());
+            const bool record_measured =
+                upload_warmup_complete &&
+                g_app.benchmark.measuredFrames < g_app.capture.render_benchmark_frames;
+            const bool record_capture =
+                upload_warmup_complete &&
+                g_app.benchmark.measuredFrames == g_app.capture.render_benchmark_frames &&
+                renderPipeline.render_uploads_settled();
+            if (!terrain_coverage_dir.empty() &&
+                (record_warmup || record_measured || record_capture) &&
+                terrain_coverage_frames.size() <
+                    static_cast<std::size_t>(g_app.capture.render_benchmark_warmup +
+                                             g_app.capture.render_benchmark_frames + 1)) {
                 auto coverage = renderPipeline.terrain_coverage_diagnostics();
                 coverage["benchmark_phase"] =
                     g_app.benchmark.warmupFrames < g_app.capture.render_benchmark_warmup ? "warmup"
@@ -4957,8 +5033,23 @@ int main(int argc, char* argv[]) {
             auto& rb_scatter = g_app.benchmark.scatter; // unattributed-CPU localization
             auto& rb_nv_ever = g_app.benchmark.nvmlEver;
 
-            if (rb_warm < g_app.capture.render_benchmark_warmup) {
-                ++rb_warm;
+            if (rb_warm >= g_app.capture.render_benchmark_warmup &&
+                rb_count >= g_app.capture.render_benchmark_frames &&
+                !renderPipeline.render_uploads_settled())
+                ++upload_capture_wait_frames;
+
+            if (!upload_warmup_complete) {
+                // Warmup is a minimum. Hold its final frame until presentation
+                // has caught up; traversal measurement still includes streaming.
+                if (rb_warm + 1 < g_app.capture.render_benchmark_warmup ||
+                    wait_for_uploads(warmup_upload_wait,
+                                     "benchmark_warmup",
+                                     g_app.capture.render_benchmark_path)) {
+                    if (rb_warm < g_app.capture.render_benchmark_warmup)
+                        ++rb_warm;
+                    upload_warmup_complete = rb_warm >= g_app.capture.render_benchmark_warmup;
+                } else
+                    ++upload_warmup_wait_frames;
             } else if (rb_count < g_app.capture.render_benchmark_frames) {
                 rb_shadow += s.shadow_gpu_ms;
                 rb_gbuffer += s.gbuffer_gpu_ms;
@@ -5009,7 +5100,9 @@ int main(int argc, char* argv[]) {
                     }
                 }
 
-            } else {
+            } else if (wait_for_uploads(capture_upload_wait,
+                                        "benchmark_capture",
+                                        g_app.capture.render_benchmark_path)) {
                 const double n = static_cast<double>(std::max(1, rb_count));
                 const double np = static_cast<double>(std::max(1, rb_nv_count));
                 const double gpu_sum = rb_total / n;
@@ -5027,6 +5120,8 @@ int main(int argc, char* argv[]) {
                 }
                 j["frames"] = rb_count;
                 j["warmup_frames"] = g_app.capture.render_benchmark_warmup;
+                j["upload_settling_frames"] = {{"warmup", upload_warmup_wait_frames},
+                                               {"capture", upload_capture_wait_frames}};
                 j["width"] = renderPipeline.screen_width();
                 j["height"] = renderPipeline.screen_height();
                 j["render_scale"] = renderPipeline.render_scale();
@@ -5111,6 +5206,25 @@ int main(int argc, char* argv[]) {
                                       {"terrain_visible_chunks", s.terrain_visible_chunks}};
                     const auto& uploads = renderPipeline.get_last_mesh_upload_stats();
                     j["streaming"]["terrain_uploads_pending"] = uploads.terrain_uploads_deferred;
+                    j["streaming"]["water_uploads_pending"] = uploads.water_uploads_deferred;
+                    j["streaming"]["render_uploads_settled"] =
+                        renderPipeline.render_uploads_settled();
+                    const auto upload_observation = [](const auto& work, const auto& limits) {
+                        return nlohmann::json{{"attempts", work.attempts},
+                                              {"adopted", work.adopted},
+                                              {"bytes", work.bytes},
+                                              {"byte_overshoot", work.byte_overshoot},
+                                              {"elapsed_ms", work.elapsed_ms},
+                                              {"overshoot_ms", work.overshoot_ms},
+                                              {"byte_limit", limits.bytes},
+                                              {"count_limit", limits.count},
+                                              {"progress_floor", limits.progress},
+                                              {"time_limit_ms", limits.milliseconds}};
+                    };
+                    j["streaming"]["terrain_upload_budget"] = upload_observation(
+                        uploads.terrain_budget, Luminumbra::Rendering::kTerrainUploadLimits);
+                    j["streaming"]["water_upload_budget"] = upload_observation(
+                        uploads.water_budget, Luminumbra::Rendering::kWaterUploadLimits);
                     j["streaming"]["terrain_draws"] = s.terrain_draws;
                     j["camera"]["yaw"] = g_camera->Yaw;
                     j["camera"]["pitch"] = g_camera->Pitch;

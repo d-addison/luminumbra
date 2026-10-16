@@ -65,7 +65,7 @@ frame_target(const std::string& label, glm::vec3 poi, float back, float up, floa
 
 } // namespace
 
-void RunSceneSurvey(GLFWwindow* window,
+bool RunSceneSurvey(GLFWwindow* window,
                     world::GameSession& session,
                     RenderPipeline& pipeline,
                     Camera& camera,
@@ -76,7 +76,7 @@ void RunSceneSurvey(GLFWwindow* window,
     Systems::PhysicsSystem* phys = session.GetPhysicsSystem();
     if (w == nullptr || phys == nullptr) {
         LUMINUMBRA_CORE_ERROR("SceneSurvey: no world/physics");
-        return;
+        return false;
     }
     const glm::vec3 spawn(session.GetMetadata().spawnPoint);
     // Mid-angle sun (NOT near-zenith): a high sun grazes vertical rock/waterfall faces (they read
@@ -278,6 +278,20 @@ void RunSceneSurvey(GLFWwindow* window,
             w->update(session.GetRegistry(), anchor, phys);
             pipeline.render_frame(session.GetRegistry(), *w, camera, 1.0f / 60.0f, wireframe);
         }
+        if (!settle_uploads(
+                [&] {
+                    const auto& pending = pipeline.get_last_mesh_upload_stats();
+                    return std::pair{pending.terrain_uploads_deferred +
+                                         pending.water_uploads_deferred,
+                                     pending.terrain_budget.adopted + pending.water_budget.adopted};
+                },
+                [&] {
+                    pipeline.render_frame(
+                        session.GetRegistry(), *w, camera, 1.0f / 60.0f, wireframe);
+                })) {
+            LUMINUMBRA_CORE_ERROR("SceneSurvey '{}': render uploads did not settle", t.label);
+            return false;
+        }
         //  probe: report the live sim's max water depth (mm) so river-fill is verifiable by DATA
         // even when the dark survey scene / pixel heuristic can't show it.
         LUMINUMBRA_CORE_INFO("SceneSurvey '{}': live max water depth = {} mm",
@@ -315,6 +329,7 @@ void RunSceneSurvey(GLFWwindow* window,
     std::ofstream(out_dir / "survey.json") << index.dump(2) << "\n";
     LUMINUMBRA_CORE_INFO(
         "SceneSurvey: wrote {} POI captures -> {}", targets.size(), out_dir.string());
+    return true;
 }
 
 } // namespace Luminumbra::Rendering

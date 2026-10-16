@@ -97,20 +97,24 @@ TEST(FrameAttribution, CsvColumnsMatchHeaderAndUnknownCountsAreEmpty) {
         "repack_ms,hash_ms,upload_ms,palette_scratch_ms,dispatch_ms,cpu_fallback_ms,"
         "rebuild_calls,reason_mask,admitted_columns,surface_misses,deferred_columns,copied_bytes,"
         "hashed_bytes,uploaded_bytes,scratch_bytes,backlog,path,fallback,"
-        "instance_capacity,generated_count,count_generation\n");
+        "instance_capacity,generated_count,count_generation,"
+        "terrain_work_ms,terrain_overshoot_ms,terrain_attempts,terrain_adopted,terrain_work_bytes,"
+        "terrain_byte_overshoot,terrain_pending,water_work_ms,water_overshoot_ms,water_attempts,"
+        "water_adopted,water_work_bytes,water_byte_overshoot,water_pending\n");
     std::ostringstream unknown;
     write_csv_row(unknown, 401, 60, buckets, foliage, 262144, false, 262144, 7);
     EXPECT_EQ(unknown.str(),
               "401,60.000000,1.000000,2.000000,3.000000,4.000000,5.000000,6.000000,"
               "7.000000,8.000000,9.000000,10.000000,5.000000,0.125000,0.250000,0.500000,"
               "0.750000,1.000000,1.250000,1.500000,1.750000,2.000000,1,40,10,4,6,1024,"
-              "2048,4096,8192,1,cpu,column_capacity,262144,,\n");
+              "2048,4096,8192,1,cpu,column_capacity,262144,,,"
+              "0.000000,0.000000,0,0,0,0,0,0.000000,0.000000,0,0,0,0,0\n");
     EXPECT_EQ(fields(header.str()).size(), fields(unknown.str()).size());
     std::ostringstream known;
     write_csv_row(known, 402, 60, buckets, foliage, 262144, true, 123, 7);
     EXPECT_EQ(fields(known.str()).size(), fields(header.str()).size());
     EXPECT_EQ(fields(known.str()).at(35), "123");
-    EXPECT_EQ(fields(known.str()).at(36), "7\n");
+    EXPECT_EQ(fields(known.str()).at(36), "7");
     std::ostringstream zero;
     write_csv_row(zero, 403, 60, buckets, foliage, 262144, true, 0, 8);
     EXPECT_EQ(fields(zero.str()).at(35), "0");
@@ -120,7 +124,39 @@ TEST(FrameAttribution, CsvRecordsShortFramesPastTheSlowFrameWindow) {
     std::ostringstream out;
     write_csv_row(out, 9000, 1, {}, {}, 262144, false, 0, 0);
     EXPECT_EQ(out.str().substr(0, 14), "9000,1.000000,");
-    EXPECT_NE(out.str().find(",not_called,none,262144,,\n"), std::string::npos);
+    EXPECT_NE(out.str().find(",not_called,none,262144,,,0.000000"), std::string::npos);
+}
+
+TEST(FrameAttribution, UploadCountersAccumulateAcrossRenderAndMenuAndResetEveryFrame) {
+    {
+        FoliageFrameScope frame(true);
+        record_render_uploads({1, 1, 500, 400, 5, 2}, false, 3);
+        record_render_uploads({2, 1, 100, 0, 2, 0}, false, 1);
+        record_render_uploads({1, 1, 20, 0, 1.5, 0.5}, true, 2);
+        const auto& uploads = frame.snapshot().uploads;
+        EXPECT_EQ(uploads.terrain.attempts, 3u);
+        EXPECT_EQ(uploads.terrain.adopted, 2u);
+        EXPECT_EQ(uploads.terrain.bytes, 600u);
+        EXPECT_EQ(uploads.terrain.byte_overshoot, 400u);
+        EXPECT_DOUBLE_EQ(uploads.terrain.elapsed_ms, 7);
+        EXPECT_DOUBLE_EQ(uploads.terrain.overshoot_ms, 2);
+        EXPECT_EQ(uploads.terrain_pending, 4u);
+        EXPECT_EQ(uploads.water_pending, 2u);
+        std::ostringstream row;
+        write_csv_row(row, 1, 20, {}, {}, 0, false, 0, 0, uploads);
+        const auto columns = fields(row.str());
+        EXPECT_EQ(columns.at(37), "7.000000");
+        EXPECT_EQ(columns.at(38), "2.000000");
+        EXPECT_EQ(columns.at(41), "600");
+        EXPECT_EQ(columns.at(42), "400");
+        EXPECT_EQ(columns.at(43), "4");
+        EXPECT_EQ(columns.at(44), "1.500000");
+        EXPECT_EQ(columns.at(50), "2\n");
+    }
+    record_render_uploads({1, 1, 10, 0, 1, 0}, false, 10);
+    FoliageFrameScope next(true);
+    EXPECT_EQ(next.snapshot().uploads.terrain.attempts, 0u);
+    EXPECT_EQ(next.snapshot().uploads.terrain_pending, 0u);
 }
 
 TEST(FrameAttribution, NestedRebuildsAreRemovedFromTheirParentBuckets) {

@@ -145,6 +145,21 @@ void ScenarioRunnerImpl::onPreRenderWorldSweep() {
                                         *g_camera,
                                         1.0f / 60.0f,
                                         g_app.overlay.wireframe_mode);
+            if (!Luminumbra::Rendering::settle_uploads(
+                    [&] {
+                        const auto& pending = renderPipeline.get_last_mesh_upload_stats();
+                        return std::pair{
+                            pending.terrain_uploads_deferred + pending.water_uploads_deferred,
+                            pending.terrain_budget.adopted + pending.water_budget.adopted};
+                    },
+                    [&] {
+                        renderPipeline.render_frame(gameSession->GetRegistry(),
+                                                    *gameSession->GetWorldSystem(),
+                                                    *g_camera,
+                                                    1.0f / 60.0f,
+                                                    g_app.overlay.wireframe_mode);
+                    }))
+                return false;
             glfwGetFramebufferSize(window, &w, &h);
             if (w <= 0 || h <= 0) {
                 return false;

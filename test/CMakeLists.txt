@@ -1803,7 +1803,13 @@ target_include_directories(frame_attribution_test PRIVATE ../src)
 target_link_libraries(frame_attribution_test PRIVATE gtest_main)
 luminumbra_configure_first_party_target(frame_attribution_test)
 
+add_executable(upload_budget_test rendering/upload_budget_test.cpp)
+target_include_directories(upload_budget_test PRIVATE ../src)
+target_link_libraries(upload_budget_test PRIVATE gtest_main)
+luminumbra_configure_first_party_target(upload_budget_test)
+
 set(LUMINUMBRA_GTEST_TARGETS
+    upload_budget_test
     frame_attribution_test
     far_volume_tile_test
     far_volume_mesher_test
@@ -2001,6 +2007,8 @@ set_tests_properties(ShieldRtSpike PROPERTIES
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
 add_test(NAME FrameAttributionWiringPython COMMAND "${Python3_EXECUTABLE}" -I -B
     "${CMAKE_SOURCE_DIR}/test/rendering/test_frame_attribution_wiring.py")
+add_test(NAME UploadBudgetWiringPython COMMAND "${Python3_EXECUTABLE}" -I -B
+    "${CMAKE_SOURCE_DIR}/test/rendering/test_upload_budget_wiring.py")
 add_test(NAME SimBudgetCaptureContract
     COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tools/perf/test_capture_sim_budget.py")
 set_tests_properties(SimBudgetCaptureContract PROPERTIES LABELS "simulation;tools" TIMEOUT 60)

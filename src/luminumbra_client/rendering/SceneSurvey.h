@@ -30,7 +30,8 @@ class Camera;
 // (.json) plus a survey index. Blocking headless capture; issues no sim writes
 //. Pure glue over existing engine primitives.
 // ===========================================================================
-void RunSceneSurvey(GLFWwindow* window,
+// False means the survey is incomplete; callers must report capture failure.
+bool RunSceneSurvey(GLFWwindow* window,
                     world::GameSession& session,
                     RenderPipeline& pipeline,
                     Camera& camera,
