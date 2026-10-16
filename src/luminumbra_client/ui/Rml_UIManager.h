@@ -66,6 +66,8 @@ struct SettingsBridge {
     std::function<void(const std::string&)> SetWindowMode;
     std::function<bool()> GetVSync;
     std::function<void(bool)> SetVSync;
+    std::function<int()> GetFrameCap; // 0 = unlimited; choices in core::kFrameCaps.
+    std::function<void(int)> SetFrameCap;
     std::function<float()> GetFov;
     std::function<void(float)> SetFov;
     std::function<float()> GetMouseSensitivity;
