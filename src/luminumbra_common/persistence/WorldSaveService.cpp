@@ -108,14 +108,20 @@ namespace detail {
 using ReadObserver = void (*)(const std::filesystem::path&, bool);
 using PublicationHook = bool (*)(const std::filesystem::path&, bool);
 namespace {
-std::atomic<ReadObserver> read_observer{nullptr};
-std::atomic<PublicationHook> publication_hook{nullptr};
+std::atomic<ReadObserver>& ReadObserverForTesting() {
+    static std::atomic<ReadObserver> observer{nullptr};
+    return observer;
+}
+std::atomic<PublicationHook>& PublicationHookForTesting() {
+    static std::atomic<PublicationHook> hook{nullptr};
+    return hook;
+}
 } // namespace
 void set_file_read_observer_for_testing(ReadObserver observer) {
-    read_observer.store(observer, std::memory_order_release);
+    ReadObserverForTesting().store(observer, std::memory_order_release);
 }
 void set_file_publication_hook_for_testing(PublicationHook hook) {
-    publication_hook.store(hook, std::memory_order_release);
+    PublicationHookForTesting().store(hook, std::memory_order_release);
 }
 std::size_t waiting_file_publishers_for_testing(const std::filesystem::path& path) {
     return RegionFileSyncFor(path).waiting_publishers.load(std::memory_order_acquire);
@@ -131,14 +137,16 @@ public:
         : m_stream(path, std::ios::binary)
         , m_path(path) {
         if (m_stream.is_open()) {
-            if (const auto observer = detail::read_observer.load(std::memory_order_acquire))
+            if (const auto observer =
+                    detail::ReadObserverForTesting().load(std::memory_order_acquire))
                 observer(m_path, true);
         }
     }
     ~ObservedInput() {
         if (m_stream.is_open()) {
             m_stream.close();
-            if (const auto observer = detail::read_observer.load(std::memory_order_acquire))
+            if (const auto observer =
+                    detail::ReadObserverForTesting().load(std::memory_order_acquire))
                 observer(m_path, false);
         }
     }
@@ -341,7 +349,7 @@ void AddError(std::vector<std::string>* errors, std::string message) {
 bool AllowPublication(const std::filesystem::path& path,
                       bool removing,
                       std::vector<std::string>* errors) {
-    if (const auto hook = detail::publication_hook.load(std::memory_order_acquire);
+    if (const auto hook = detail::PublicationHookForTesting().load(std::memory_order_acquire);
         hook && !hook(path, removing)) {
         AddError(errors, "file publication refused: " + path.string());
         return false;
@@ -1646,9 +1654,10 @@ void WorldSaveService::set_interrupt_before_region_replace_for_testing(bool enab
 
 bool WorldSaveService::write_file_durably(const std::filesystem::path& destination,
                                           const std::string& bytes,
-                                          std::vector<std::string>* errors) {
+                                          std::vector<std::string>* errors,
+                                          CreatedWorldArtifacts* artifacts) {
     std::error_code directory_error;
-    if (destination.has_parent_path()) {
+    if (!artifacts && destination.has_parent_path()) {
         std::filesystem::create_directories(destination.parent_path(), directory_error);
     }
     if (directory_error) {
@@ -1672,19 +1681,23 @@ bool WorldSaveService::write_file_durably(const std::filesystem::path& destinati
         }
     }
 #endif
+    if (artifacts)
+        artifacts->reserve_file(destination);
     std::filesystem::path temp_path;
-    if (!WriteDurableRegionTemp(destination, bytes, temp_path, errors)) {
+    if (!WriteDurableRegionTemp(destination, bytes, temp_path, errors, artifacts)) {
         return false;
     }
     if (InterruptBeforeRegionReplaceForTesting().exchange(false, std::memory_order_acq_rel)) {
-        RemoveTemporaryFile(temp_path);
+        RemoveTemporaryFile(temp_path, artifacts);
         AddError(errors,
                  "file replacement interrupted by test seam before replacing: " +
                      destination.string());
         return false;
     }
+    if (artifacts)
+        artifacts->publishing_file(temp_path, destination);
     if (!ReplaceRegionFileAtomically(temp_path, destination, errors)) {
-        RemoveTemporaryFile(temp_path);
+        RemoveTemporaryFile(temp_path, artifacts);
         return false;
     }
     return true;

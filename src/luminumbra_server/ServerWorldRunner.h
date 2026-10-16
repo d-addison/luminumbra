@@ -227,7 +227,8 @@ public:
     // chunk snapshot via WorldSaveService::save_world (NOT the dirty-gated
     // GameSession::SaveWorldState, which writes nothing for a never-edited
     // world). Used so a freshly loaded session adopts exactly this chunk set and
-    // the save/load round-trip is comparable. Returns the chunk count written.
+    // the save/load round-trip is comparable. Returns the chunk count written,
+    // or zero on refusal. Preset/identity refusal preserves disk bytes and pending state.
     std::size_t SaveFullSnapshot();
 
     std::size_t StreamedChunkCount();

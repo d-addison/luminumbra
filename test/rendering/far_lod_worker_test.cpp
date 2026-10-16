@@ -141,56 +141,6 @@ std::vector<PlaneSegmentBits> SharedPlaneSegments(const FarLodRegionMesh& mesh,
     return segments;
 }
 
-std::size_t CountIndexedWorldVertex(const FarLodRegionMesh& mesh,
-                                    int region_x,
-                                    int region_z,
-                                    float world_x,
-                                    float world_y,
-                                    float world_z,
-                                    u32 material) {
-    const float local_x = world_x - static_cast<float>(region_x * kFarLodRegionSizeMeters);
-    const float local_z = world_z - static_cast<float>(region_z * kFarLodRegionSizeMeters);
-    std::set<u32> matches;
-    for (const u32 index : mesh.indices) {
-        if (index >= mesh.vertices.size())
-            continue;
-        const VoxelVertex& vertex = mesh.vertices[index];
-        if (vertex.position.x == local_x && vertex.position.y == world_y &&
-            vertex.position.z == local_z && vertex.material_id == material) {
-            matches.insert(index);
-        }
-    }
-    return matches.size();
-}
-
-std::size_t CountIndexedWorldPosition(const FarLodRegionMesh& mesh,
-                                      int region_x,
-                                      int region_z,
-                                      float world_x,
-                                      float world_y,
-                                      float world_z) {
-    const float local_x = world_x - static_cast<float>(region_x * kFarLodRegionSizeMeters);
-    const float local_z = world_z - static_cast<float>(region_z * kFarLodRegionSizeMeters);
-    std::set<u32> matches;
-    for (const u32 index : mesh.indices) {
-        if (index >= mesh.vertices.size())
-            continue;
-        const VoxelVertex& vertex = mesh.vertices[index];
-        if (vertex.position.x == local_x && vertex.position.y == world_y &&
-            vertex.position.z == local_z) {
-            matches.insert(index);
-        }
-    }
-    return matches.size();
-}
-
-bool PlaneSegmentsContainHeight(const std::vector<PlaneSegmentBits>& segments, float world_y) {
-    const u32 height_bits = std::bit_cast<u32>(world_y);
-    return std::any_of(segments.begin(), segments.end(), [&](const auto& segment) {
-        return segment[0][1] == height_bits || segment[1][1] == height_bits;
-    });
-}
-
 struct CrossRegionBuildResult {
     bool ok = false;
     std::string error;
@@ -224,27 +174,6 @@ bool SetPlanarAuthority(Chunk& chunk, float surface_y, u8 material) {
                                           static_cast<std::size_t>(y) * side +
                                           static_cast<std::size_t>(z) * side * side;
                 chunk.sdf_data[index] = static_cast<float>(y) - surface_y;
-            }
-        }
-    }
-    chunk.mark_voxel_data_dirty();
-    return true;
-}
-
-bool SetBoundaryRampedAuthority(Chunk& chunk, float shared_face_y, float interior_y, u8 material) {
-    const int side = CHUNK_SIZE_X + 1;
-    const std::size_t expected_samples = static_cast<std::size_t>(side) * side * side;
-    if (chunk.sdf_data.size() != expected_samples)
-        return false;
-    chunk.material_data.assign(expected_samples, material);
-    for (int z = 0; z <= CHUNK_SIZE_Z; ++z) {
-        for (int y = 0; y <= CHUNK_SIZE_Y; ++y) {
-            for (int x = 0; x <= CHUNK_SIZE_X; ++x) {
-                const float surface = x == 0 ? shared_face_y : interior_y;
-                const std::size_t index = static_cast<std::size_t>(x) +
-                                          static_cast<std::size_t>(y) * side +
-                                          static_cast<std::size_t>(z) * side * side;
-                chunk.sdf_data[index] = static_cast<float>(y) - surface;
             }
         }
     }
