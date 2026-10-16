@@ -264,9 +264,11 @@ The paired server lane prepares an explicit common historical workload in isolat
 `base/perf-common` and `head/perf-common` roots. Both checkouts compile the same
 guarded fixture adapter, selected only by `.perf-controlled`, to pin legacy
 simulation gates, tuning and finite hydrology. Autosave is explicitly zero. The
-receipt records source hashes and the canonical input identity, including presets
-and systems.json. Generated saves do not enter that input hash. This measures a
-common workload with the existing 5% limit; a fixture transition alone is not a pass.
+receipt records source hashes and the shared resolved-input identity used by
+simulation-budget capture, including selected presets, resolved external biome
+tables, systems.json and the control marker. Generated saves do not enter that
+input hash. This measures a common workload with the existing 5% limit; a fixture
+transition alone is not a pass.
 
 Native candidate simulation-budget capture runs separately without that marker and
 requires effective active regions, High water, finite hydrology, weather rain/events
