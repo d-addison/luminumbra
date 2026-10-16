@@ -448,16 +448,55 @@ TEST(StationDiscovery, DensityBudgetCountsWorkAndDiscardsEarlierCandidates) {
     auto source = Portal();
     source.cell_size_m = 1;
     source.max_radius_m = 3;
+    auto query = Query();
+    query.radius_m = 250;
+    query.y_range_m = {0, 16};
+    query.view_distance_m = 256;
+    // Each cell visits eight anchors: six miss the footprint, one passes the
+    // portal and pose (7 + 7 + 65 samples), and one fails in solid (1 sample).
+    // Prove that the topology yields a candidate before repeating it to refusal.
+    const auto single = DiscoverStations(source, query);
+    ASSERT_TRUE(single.ok) << single.error;
+    ASSERT_EQ(single.candidates.size(), 1u);
+    EXPECT_EQ(single.lattice_visits, 8u);
+    EXPECT_EQ(single.density_samples, 80u);
     source.cell = [](int, int) {
         return WorldSystem::SurfaceBreakInfo{true, -4, -4, 3, 4, false};
     };
-    auto query = Query();
-    query.radius_m = 250;
-    query.y_range_m = {0, 512};
     const auto result = DiscoverStations(source, query);
     EXPECT_FALSE(result.ok);
     EXPECT_EQ(result.error, "density sample budget exhausted");
+    // 209715 complete cells, then 16 samples in the seventh visit of the next.
+    EXPECT_EQ(result.enumerated_cells, 209716u);
+    EXPECT_EQ(result.lattice_visits, 1677727u);
     EXPECT_EQ(result.density_samples, kStationSampleBudget);
+    EXPECT_TRUE(result.candidates.empty());
+}
+
+TEST(StationDiscovery, LatticeBudgetCountsWorkAndDiscardsEarlierCandidates) {
+    auto source = Portal();
+    source.cell_size_m = 1;
+    source.max_radius_m = 3;
+    auto query = Query();
+    query.radius_m = 250;
+    query.y_range_m = {0, 512};
+    // Each cell visits 4 * 126 anchors. Only the final X/Z column samples:
+    // 18 samples for the accepted portal/pose, 1 in solid, then 124 * 2 in air.
+    const auto single = DiscoverStations(source, query);
+    ASSERT_TRUE(single.ok) << single.error;
+    ASSERT_EQ(single.candidates.size(), 1u);
+    EXPECT_EQ(single.lattice_visits, 504u);
+    EXPECT_EQ(single.density_samples, 267u);
+    source.cell = [](int, int) {
+        return WorldSystem::SurfaceBreakInfo{true, -4, -4, 3, 4, false};
+    };
+    const auto result = DiscoverStations(source, query);
+    EXPECT_FALSE(result.ok);
+    EXPECT_EQ(result.error, "lattice visit budget exhausted");
+    // 33288 complete cells, then 64 footprint misses before the next refusal.
+    EXPECT_EQ(result.enumerated_cells, 33289u);
+    EXPECT_EQ(result.lattice_visits, kStationLatticeVisitBudget);
+    EXPECT_EQ(result.density_samples, 8887896u);
     EXPECT_TRUE(result.candidates.empty());
 }
 
@@ -542,6 +581,7 @@ TEST(StationDiscovery, WideDiskRefusesAtVisitBudgetEvenWithoutDensitySamples) {
         const auto result = DiscoverStations(source, query);
         EXPECT_FALSE(result.ok);
         EXPECT_EQ(result.error, "lattice visit budget exhausted");
+        EXPECT_EQ(result.enumerated_cells, 4u);
         EXPECT_EQ(result.lattice_visits, kStationLatticeVisitBudget);
         EXPECT_EQ(result.density_samples, 0u);
         EXPECT_TRUE(result.candidates.empty());
