@@ -143,6 +143,9 @@ exclusive byte-range lock on `.luminumbra-author/session.lock`. The Windows lock
 coordinates logon sessions through the same file and uses the project's file
 access controls. Any thread can close it; release failures are reported and can
 be retried. Filesystems that cannot provide byte-range locks refuse acquisition.
+Windows also retains the legacy session-local mutex name while holding the file
+lock, excluding older services during an upgrade. This mutex is an unowned
+existence marker, so closing it does not depend on the acquiring thread.
 Simultaneous Windows/Linux access is not qualified. Use a canonical project path
 and trusted local collaborators.
 Source writers should publish sidecars atomically and advance revisions; arbitrary
@@ -192,6 +195,10 @@ interrupted jobs move intact to timestamped directories under
 automatically. Before moving an interrupted job, recovery records an intent and
 replays it on startup until the failed status receipt is saved. Process exits and
 write failures during quarantine therefore retain the job for status queries.
+On Windows, recovery retries directory access/sharing violations while the prior
+compiler supervisor releases its working directory. All startup moves share a
+ten-second retry deadline; expiry preserves the source and pending intent for
+the next startup.
 Completed jobs and committed generations remain in place.
 
 Receipts record the host/Python profile, source/dependency hashes, exporter metadata through the hashed

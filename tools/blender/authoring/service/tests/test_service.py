@@ -14,10 +14,11 @@ import time
 import unittest
 import zipfile
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from luminumbra_author import service as service_module
+from luminumbra_author import locking as locking_module
 from luminumbra_author.__main__ import dispatch
 from luminumbra_author.contracts import (ASSET, PROFILE, PREFAB_PROFILE, TOOLCHAIN, Refusal, atomic_json,
                                          canonical, digest, read_json, validate_asset)
@@ -80,6 +81,87 @@ class Locking(unittest.TestCase):
                            backend=self.backend if backend is None else backend)
         self.addCleanup(lock.close)
         return lock
+
+    def windows_kernel(self):
+        kernel = SimpleNamespace(CreateMutexW=Mock(return_value=41),
+                                 CloseHandle=Mock(return_value=True))
+        for replacement in (
+                patch.object(locking_module.ctypes, "WinDLL", return_value=kernel, create=True),
+                patch.object(locking_module.ctypes, "get_last_error", return_value=0, create=True)):
+            replacement.start()
+            self.addCleanup(replacement.stop)
+        return kernel
+
+    def test_windows_migration_marker_matches_legacy_name_and_is_not_thread_owned(self):
+        kernel = self.windows_kernel()
+        marker = locking_module.WindowsMigrationLock(self.project)
+        marker.acquire()
+        identity = digest(os.path.normcase(str(self.project.resolve())).encode("utf-8"))
+        kernel.CreateMutexW.assert_called_once_with(None, False, "Local\\LuminumbraAuthorBuild_" + identity)
+        errors = []
+        def close():
+            try:
+                marker.close()
+            except Exception as error:
+                errors.append(error)
+        thread = threading.Thread(target=close)
+        thread.start()
+        thread.join(timeout=5)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(errors, [])
+        marker.close()
+        kernel.CloseHandle.assert_called_once_with(41)
+        self.assertIsNone(marker.handle)
+
+    def test_windows_migration_refuses_existing_mutex_and_closes_failed_handle(self):
+        kernel = self.windows_kernel()
+        marker = locking_module.WindowsMigrationLock(self.project)
+        with patch.object(locking_module.ctypes, "get_last_error", return_value=183):
+            with self.assertRaises(BlockingIOError):
+                marker.acquire()
+        kernel.CloseHandle.assert_called_once_with(41)
+        self.assertIsNone(marker.handle)
+        kernel.CreateMutexW.return_value = None
+        with self.assertRaisesRegex(OSError, "Cannot create"):
+            marker.acquire()
+        kernel.CloseHandle.assert_called_once_with(41)
+
+    def test_windows_file_lock_retains_marker_until_unlock_and_retries_handle_close(self):
+        kernel = self.windows_kernel()
+        runtime = SimpleNamespace(LK_NBLCK=1, LK_UNLCK=0, locking=Mock())
+        with patch.dict(sys.modules, msvcrt=runtime):
+            lock = self.open(WindowsFileLock(self.project))
+            def close(handle):
+                runtime.locking.assert_called_with(lock.stream.fileno(), runtime.LK_UNLCK, 1)
+                return False
+            kernel.CloseHandle.side_effect = close
+            with self.assertRaisesRegex(OSError, "Cannot close"):
+                lock.close()
+            self.assertFalse(lock.closed)
+            self.assertFalse(lock.stream.closed)
+            self.assertEqual(lock.backend.migration.handle, 41)
+            kernel.CloseHandle.side_effect = None
+            lock.close()
+            self.assertTrue(lock.closed)
+            self.assertIsNone(lock.backend.migration.handle)
+            self.assertEqual(runtime.locking.call_count, 2)
+
+    def test_windows_legacy_contention_closes_file_handle(self):
+        kernel = self.windows_kernel()
+        backend = WindowsFileLock(self.project)
+        runtime = SimpleNamespace(LK_NBLCK=1, LK_UNLCK=0, locking=Mock())
+        streams = []
+        def acquire(stream):
+            streams.append(stream)
+            WindowsFileLock.acquire(backend, stream)
+        with patch.dict(sys.modules, msvcrt=runtime), \
+             patch.object(locking_module.ctypes, "get_last_error", return_value=183), \
+             patch.object(backend, "acquire", side_effect=acquire):
+            with self.assertRaises(BlockingIOError):
+                self.open(backend)
+        self.assertEqual(len(streams), 1)
+        self.assertTrue(streams[0].closed)
+        kernel.CloseHandle.assert_called_once_with(41)
 
     def close_from_threads(self, lock, count=1):
         errors = []
@@ -156,6 +238,7 @@ class Locking(unittest.TestCase):
         self.assertEqual(len(self.backend.release_threads), 1)
 
     def test_windows_backend_uses_nonblocking_byte_zero_and_surfaces_errors(self):
+        self.windows_kernel()
         runtime = SimpleNamespace(LK_NBLCK=1, LK_UNLCK=0)
         calls = []
         def locking(fd, mode, size):
@@ -163,11 +246,12 @@ class Locking(unittest.TestCase):
         runtime.locking = locking
         with self.lockfile.open("a+b") as stream, patch.dict(sys.modules, msvcrt=runtime):
             stream.seek(23)
-            backend = WindowsFileLock()
+            backend = WindowsFileLock(self.project)
             backend.acquire(stream)
             stream.seek(42)
             backend.release(stream)
             self.assertEqual(calls, [(stream.fileno(), 1, 1, 0), (stream.fileno(), 0, 1, 0)])
+            backend.acquire(stream)
             with patch.object(runtime, "locking", side_effect=OSError(errno.EACCES, "Locked")):
                 with self.assertRaises(BlockingIOError):
                     backend.acquire(stream)
@@ -178,19 +262,20 @@ class Locking(unittest.TestCase):
                 with self.assertRaises(OSError) as caught:
                     backend.acquire(stream)
                 self.assertIs(caught.exception, error)
+            backend.release(stream)
 
     @unittest.skipUnless(os.name == "nt", "Windows file locking")
     def test_windows_lock_releases_from_another_thread(self):
-        lock = self.open(WindowsFileLock())
+        lock = self.open(WindowsFileLock(self.project))
         with self.assertRaises(BlockingIOError):
-            self.open(WindowsFileLock())
+            self.open(WindowsFileLock(self.project))
         self.close_from_threads(lock)
         lock.close()
-        self.open(WindowsFileLock())
+        self.open(WindowsFileLock(self.project))
 
     @unittest.skipUnless(os.name == "nt", "Windows file locking")
     def test_windows_lock_contends_with_another_process(self):
-        lock = self.open(WindowsFileLock())
+        lock = self.open(WindowsFileLock(self.project))
         script = """
 import sys
 from pathlib import Path
@@ -207,9 +292,52 @@ lock.close()
                    str(Path(__file__).resolve().parents[1]), str(self.project)]
         result = subprocess.run(command, capture_output=True, text=True, timeout=10)
         self.assertEqual(result.returncode, 2, result.stderr)
+        legacy_script = """
+import ctypes
+from ctypes import wintypes
+import hashlib
+import os
+from pathlib import Path
+import sys
+project = Path(sys.argv[2])
+kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+kernel.CreateMutexW.argtypes = [ctypes.c_void_p, wintypes.BOOL, wintypes.LPCWSTR]
+kernel.CreateMutexW.restype = wintypes.HANDLE
+kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+kernel.CloseHandle.restype = wintypes.BOOL
+kernel.ReleaseMutex.argtypes = [wintypes.HANDLE]
+kernel.ReleaseMutex.restype = wintypes.BOOL
+identity = hashlib.sha256(os.path.normcase(str(project.resolve())).encode('utf-8')).hexdigest()
+handle = kernel.CreateMutexW(None, True, 'Local\\\\LuminumbraAuthorBuild_' + identity)
+error = ctypes.get_last_error()
+if not handle:
+    raise ctypes.WinError(error)
+if error != 183:
+    kernel.ReleaseMutex(handle)
+kernel.CloseHandle(handle)
+sys.exit(2 if error == 183 else 0)
+"""
+        legacy_command = [sys.executable, "-I", "-B", "-c", legacy_script, command[-2], command[-1]]
+        result = subprocess.run(legacy_command, capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 2, result.stderr)
         lock.close()
         result = subprocess.run(command, capture_output=True, text=True, timeout=10)
         self.assertEqual(result.returncode, 0, result.stderr)
+        result = subprocess.run(legacy_command, capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        # Hold the exact older service mutex and probe from a new process.
+        marker = locking_module.WindowsMigrationLock(self.project)
+        handle = marker.kernel.CreateMutexW(None, True, marker.name)
+        self.assertTrue(handle)
+        try:
+            result = subprocess.run(command, capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 2, result.stderr)
+        finally:
+            marker.kernel.ReleaseMutex.argtypes = [locking_module.wintypes.HANDLE]
+            marker.kernel.ReleaseMutex.restype = locking_module.wintypes.BOOL
+            marker.kernel.ReleaseMutex(handle)
+            marker.kernel.CloseHandle(handle)
+        self.open(WindowsFileLock(self.project))
 
     @unittest.skipUnless(os.name == "nt", "Windows file locking")
     def test_windows_process_exit_releases_lock(self):
@@ -227,7 +355,7 @@ os._exit(7)
                                  str(Path(__file__).resolve().parents[1]), str(self.project)],
                                 capture_output=True, text=True, timeout=10)
         self.assertEqual(result.returncode, 7, result.stderr)
-        self.open(WindowsFileLock())
+        self.open(WindowsFileLock(self.project))
 
 
 class Project(unittest.TestCase):
@@ -967,6 +1095,159 @@ class Project(unittest.TestCase):
         self.assertEqual(recovered.status(first["job_id"])["status"], "failed")
         self.assertEqual(recovered.status(second["job_id"])["status"], "succeeded")
         self.assertEqual(recovered.generation()["job_id"], second["job_id"])
+
+    def recovery_directory(self, service, job_id, *, receipt=True):
+        directory = service.root / "jobs" / job_id
+        directory.mkdir()
+        if receipt:
+            atomic_json(directory / "receipt.json", {
+                "schema": service_module.RECEIPT, "mode": "NATIVE",
+                "job_id": job_id, "status": "compiling", "findings": []})
+        (directory / "source.data").write_bytes(b"Preserved source")
+        (directory / "outputs").mkdir()
+        (directory / "outputs" / "partial.data").write_bytes(b"Partial output")
+        return directory
+
+    def test_quarantine_waits_for_windows_supervisor_directory_release(self):
+        service = self.open()
+        service.close()
+        rename = Path.rename
+        cases = ((5, False, False), (32, True, False), (33, True, True))
+        for index, (code, receipt, replay) in enumerate(cases, 1):
+            with self.subTest(winerror=code, receipt=receipt, replay=replay):
+                directory = self.recovery_directory(service, f"{index:032x}", receipt=receipt)
+                before = {path.relative_to(directory): path.read_bytes()
+                          for path in directory.rglob("*") if path.is_file()}
+                intent = service.root / "quarantine-pending.json"
+                if replay:
+                    container = service.root / "quarantine" / "20000101T000000Z"
+                    container.mkdir(parents=True, exist_ok=True)
+                    atomic_json(intent, {"job_id": directory.name, "container": container.name})
+                error = PermissionError(errno.EACCES, "Supervisor still holds its working directory")
+                error.winerror = code
+                attempts, sleeps = [], []
+                def move(path, target):
+                    if path == directory:
+                        attempts.append(target)
+                        if len(attempts) <= 2:
+                            if receipt:
+                                self.assertEqual(read_json(intent)["job_id"], directory.name)
+                            self.assertEqual({member.relative_to(directory): member.read_bytes()
+                                              for member in directory.rglob("*") if member.is_file()}, before)
+                            raise error
+                    return rename(path, target)
+                with patch.object(Path, "rename", move), \
+                     patch.object(service_module.time, "monotonic", return_value=0), \
+                     patch.object(service_module.time, "sleep", side_effect=sleeps.append):
+                    recovered = self.open()
+                self.assertEqual(len(attempts), 3)
+                self.assertEqual(attempts, [attempts[0]] * 3)
+                self.assertEqual(sleeps, [0.05, 0.05])
+                archived = attempts[0]
+                self.assertEqual({path.relative_to(archived): path.read_bytes()
+                                  for path in archived.rglob("*") if path.is_file()}, before)
+                self.assertFalse(intent.exists())
+                if receipt:
+                    self.assertEqual(recovered.status(directory.name)["status"], "failed")
+                    self.assertEqual(recovered.status(directory.name)["findings"][0]["rule_id"],
+                                     "job.orphaned")
+                    self.assertEqual([path.name for path in directory.iterdir()], ["receipt.json"])
+                else:
+                    self.assertFalse(directory.exists())
+                recovered.close()
+
+    def test_quarantine_deadline_keeps_intent_and_releases_project_for_replay(self):
+        service = self.open()
+        service.close()
+        directory = self.recovery_directory(service, "1" * 32)
+        original = read_json(directory / "receipt.json")
+        rename = Path.rename
+        clock, sleeps = [100.0], []
+        error = PermissionError(errno.EACCES, "Supervisor directory remains pinned")
+        error.winerror = 32
+        def move(path, target):
+            if path == directory:
+                raise error
+            return rename(path, target)
+        def sleep(delay):
+            self.assertGreater(delay, 0)
+            self.assertLessEqual(delay, 0.05)
+            sleeps.append(delay)
+            clock[0] += delay
+        with patch.object(Path, "rename", move), \
+             patch.object(service_module.time, "monotonic", side_effect=lambda: clock[0]), \
+             patch.object(service_module.time, "sleep", side_effect=sleep):
+            with self.assertRaises(OSError) as caught:
+                self.open()
+        self.assertIs(caught.exception, error)
+        self.assertAlmostEqual(sum(sleeps), 10)
+        self.assertEqual(read_json(directory / "receipt.json"), original)
+        intent = read_json(service.root / "quarantine-pending.json")
+        archived = service.root / "quarantine" / intent["container"] / directory.name
+        self.assertFalse(archived.exists())
+        recovered = self.open()
+        self.assertEqual(recovered.status(directory.name)["status"], "failed")
+        self.assertEqual(read_json(archived / "receipt.json"), original)
+        self.assertEqual((archived / "outputs" / "partial.data").read_bytes(), b"Partial output")
+        self.assertFalse((service.root / "quarantine-pending.json").exists())
+
+    def test_quarantine_does_not_retry_other_errors(self):
+        service = self.open()
+        service.close()
+        directory = self.recovery_directory(service, "1" * 32)
+        original = read_json(directory / "receipt.json")
+        rename = Path.rename
+        for code in (None, 2, 80):
+            with self.subTest(winerror=code):
+                error = OSError(errno.EIO, "Unrelated rename failure")
+                if code is not None:
+                    error.winerror = code
+                def move(path, target):
+                    if path == directory:
+                        raise error
+                    return rename(path, target)
+                with patch.object(Path, "rename", move), \
+                     patch.object(service_module.time, "sleep") as sleep:
+                    with self.assertRaises(OSError) as caught:
+                        self.open()
+                self.assertIs(caught.exception, error)
+                sleep.assert_not_called()
+                self.assertEqual(read_json(directory / "receipt.json"), original)
+        self.assertEqual(self.open().status(directory.name)["status"], "failed")
+
+    def test_quarantine_moves_share_one_recovery_deadline(self):
+        service = self.open()
+        service.close()
+        directories = {self.recovery_directory(service, digit * 32) for digit in ("1", "2")}
+        rename = Path.rename
+        clock, sleeps, moved = [0.0], [], []
+        error = PermissionError(errno.EACCES, "Supervisor directory remains pinned")
+        error.winerror = 32
+        def move(path, target):
+            if path in directories:
+                if not moved and clock[0] >= 6:
+                    moved.append((path, target))
+                else:
+                    raise error
+            return rename(path, target)
+        def sleep(delay):
+            sleeps.append(delay)
+            clock[0] += delay
+        with patch.object(Path, "rename", move), \
+             patch.object(service_module.time, "monotonic", side_effect=lambda: clock[0]), \
+             patch.object(service_module.time, "sleep", side_effect=sleep):
+            with self.assertRaises(OSError) as caught:
+                self.open()
+        self.assertIs(caught.exception, error)
+        self.assertAlmostEqual(sum(sleeps), 10)
+        self.assertEqual(len(moved), 1)
+        self.assertEqual(read_json(moved[0][1] / "receipt.json")["status"], "compiling")
+        self.assertEqual(read_json(moved[0][0] / "receipt.json")["status"], "failed")
+        pending = read_json(service.root / "quarantine-pending.json")
+        self.assertNotEqual(pending["job_id"], moved[0][0].name)
+        recovered = self.open()
+        for directory in directories:
+            self.assertEqual(recovered.status(directory.name)["status"], "failed")
 
     def test_recovery_quarantines_stale_jobs_only_after_lock_acquisition(self):
         backend = FileLockBackend()
