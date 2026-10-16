@@ -1,7 +1,7 @@
 {
   "name": "Amplified",
   "description": "Minecraft-Amplified style: towering peaks, deep valleys, perched alpine lakes and cliffs. Deliberately exaggerated (not DEM-realistic).",
-  "schema_rev": 6,
+  "schema_rev": 7,
   "realism_exempt": true,
   "generation_params": {
     "terrain": {
@@ -22,7 +22,7 @@
         "erosion_spline": [[-1.0, 0.85], [-0.5, 0.55], [0.0, 0.35], [0.5, 0.2], [1.0, 0.1]],
         "peaks_spline": [[-1.0, 0.0], [0.2, 0.06], [0.6, 0.45], [1.0, 1.0]]
       },
-      "island_mask_enabled": false,
+      "island_mask_enabled": true,
       "hydro": {
         "enabled": true,
         "iterations": 8,
@@ -61,7 +61,8 @@
       "cliff_frequency": 0.0013,
       "cliff_threshold": 0.38,
       "cliff_step": 14.0,
-      "structures_enabled": true
+      "structures_enabled": true,
+      "surface_breaks_enabled": true
     }
   }
 }

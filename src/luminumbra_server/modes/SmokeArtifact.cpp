@@ -97,8 +97,9 @@ int WriteSmokeArtifact(const ServerCliOptions& options,
         first.scent_hash == replay.scent_hash && first.ecology_hash == replay.ecology_hash &&
         first.plant_hash == replay.plant_hash && NamedHashesMatch(first, replay);
 
-    const bool deterministic =
-        first.ok && replay.ok && first.world_hash == replay.world_hash && sub_hashes_match;
+    const bool deterministic = first.ok && replay.ok && first.world_hash == replay.world_hash &&
+                               sub_hashes_match &&
+                               first.effective_simulation == replay.effective_simulation;
 
     // The per-tick availability-set trace must be run==replay. This proves the
     // activation queue preserves deterministic availability tick-for-tick, not
@@ -327,6 +328,8 @@ int WriteSmokeArtifact(const ServerCliOptions& options,
         }
     }
 
+    if (!first.effective_simulation.empty())
+        artifact["effective_simulation"] = first.effective_simulation;
     Luminumbra::Server::AppendSimBudgetArtifact(artifact, first.sim_budget, replay.sim_budget);
     if (options.sim_budget_profile) {
         Luminumbra::Server::AppendSimBudgetEnforcement(artifact,
