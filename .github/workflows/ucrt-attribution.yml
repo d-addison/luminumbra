@@ -2,8 +2,20 @@ name: UCRT64 package attribution
 
 on:
   workflow_dispatch:
+  schedule:
+    - cron: "43 4 * * 0"
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
+    branches: [devel]
+    paths:
+      - .github/workflows/ucrt-attribution.yml
+      - tools/ci/ucrt_attribution.sh
+      - tools/ci/test_ucrt_attribution.py
+      - tools/ci/test_ucrt_gcc_cohort.py
+      - tools/ci/check_worldgen_probe_smoke.py
+      - tools/ci/test_check_worldgen_probe_smoke.py
+      - test/diagnostics/worldgen_probe.cpp
+  push:
     branches: [devel]
     paths:
       - .github/workflows/ucrt-attribution.yml

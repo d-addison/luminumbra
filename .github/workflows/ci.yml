@@ -125,7 +125,7 @@ jobs:
       CI_NEEDS_HEAVY: ${{ needs.changes.outputs.needs_heavy }}
       CI_HEAVY_REASON: ${{ needs.changes.outputs.heavy_reason }}
       CCACHE_COMPILERCHECK: content
-      CCACHE_MAXSIZE: 250M
+      CCACHE_MAXSIZE: 400M
     outputs:
       route: ${{ steps.route.outputs.route }}
     steps:
@@ -228,6 +228,7 @@ jobs:
           ctest --preset release -LE manual --show-only=json-v1 > build/release/ctest.inventory.json
           ctest --preset release --show-only=json-v1 > build/release/ctest.all.json
           python3 tools/ci/ctest_shards.py plan --profile gcc --shard ${{ matrix.shard }} --directory build/release --require-suite SimBudgetWorldParity. --require-suite AmbientDeterminismReceipt. --require-suite PrefabRuntimeTest. --require-suite PrefabDigest. --needs-heavy "$CI_NEEDS_HEAVY"
+          ctest --preset release --show-only=json-v1 > build/release/ctest-discovery.json
           env -u WAYLAND_DISPLAY XDG_SESSION_TYPE=x11 LIBGL_ALWAYS_SOFTWARE=1 \
             xvfb-run -a python3 tools/ci/ctest_shards.py run --profile gcc --directory build/release
           # Inventory floor: measured 2301 tests on devel b56cdba1, minus ~1% margin.
@@ -273,6 +274,7 @@ jobs:
           path: |
             build/release/ctest.junit.xml
             build/release/netsoak.junit.xml
+            build/release/ctest-discovery.json
             build/release/Testing/Temporary
             build/release/test-artifacts
           if-no-files-found: warn
@@ -305,6 +307,8 @@ jobs:
             build/release/ctest.junit.xml
             build/release/ctest.inventory.json
             build/release/ctest.partition.json
+            build/release/ctest-discovery.json
+            build/release/netsoak.junit.xml
           if-no-files-found: error
           retention-days: 30
 
@@ -737,10 +741,10 @@ jobs:
 
   windows-ucrt64:
     name: ${{ matrix.shard == 0 && 'Windows / MSYS2 UCRT64 full qualification' || format('Windows / MSYS2 UCRT64 shard {0}/2', matrix.shard) }}
-    # Runs on ready pull requests (devel- and main-bound) and on pushes to main, so a
-    # MinGW/UCRT break shows on the PR that causes it instead of at promotion. It is
-    # not a required devel context, so it informs rather than blocks there; it stays
-    # required on main. Every main/devel push and manual run exercises it.
+    # Runs on ready pull requests (devel- and main-bound), main/devel pushes,
+    # and every manual dispatch. Devel pushes seed the compiler cache restored
+    # by pull requests into devel. A MinGW/UCRT break shows on the pull request
+    # that causes it. It is not a required devel context; it stays required on main.
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.needs_cpp != 'false' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (github.event_name == 'pull_request' || github.event_name == 'push' || github.event_name == 'workflow_dispatch') }}
     runs-on: windows-2025
@@ -1026,14 +1030,31 @@ jobs:
           python3 tools/ci/ctest_shards.py merge --profile gcc --directory build/gcc-shards \
             --output build/release/ctest.junit.xml "${full[@]}" --needs-heavy "$CI_NEEDS_HEAVY" --reason "$CI_HEAVY_REASON"
           python3 tools/ci/check_ctest_junit.py build/release/ctest.junit.xml --minimum-tests 1
-      - name: Upload merged JUnit
+      - name: Check acceptance matrix CTest execution
         if: needs.linux.result == 'success' && needs.changes.outputs.needs_cpp != 'false'
+        env:
+          CI_QUALIFICATION: ${{ github.event_name == 'workflow_dispatch' && inputs.qualification_capture }}
+        run: |
+          # The networking owner is shard 1, or shard 0 for full qualification.
+          owner=1
+          if [ "$CI_QUALIFICATION" = true ]; then owner=0; fi
+          cp "build/gcc-shards/shard-$owner/ctest-discovery.json" build/release/ctest-discovery.json
+          cp "build/gcc-shards/shard-$owner/netsoak.junit.xml" build/release/netsoak.junit.xml
+          python3 tools/ci/check_acceptance_matrix.py \
+            --junit build/release/ctest.junit.xml --junit build/release/netsoak.junit.xml \
+            --discovery build/release/ctest-discovery.json --ci-context \
+            --execution-receipt build/release/test-artifacts/acceptance-execution.json
+      - name: Upload merged JUnit
+        if: always() && needs.linux.result == 'success' && needs.changes.outputs.needs_cpp != 'false' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: gcc-merged-junit-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             build/release/ctest.junit.xml
             build/release/ctest.junit.selection.json
+            build/release/ctest-discovery.json
+            build/release/netsoak.junit.xml
+            build/release/test-artifacts/acceptance-execution.json
           if-no-files-found: error
           retention-days: 30
 
@@ -1346,6 +1367,8 @@ jobs:
           python3 tools/ci/test_workflow_policy.py
           python3 tools/ci/test_asan_shards.py
           python3 -I -B tools/ci/test_ctest_shards.py
+          python3 tools/ci/test_check_acceptance_matrix.py
+          python3 tools/ci/check_acceptance_matrix.py --check-doc docs/acceptance-matrix.md
           python3 tools/ci/test_tidy_cache.py
           python3 tools/ci/test_tidy_shard.py
           python3 tools/ci/test_validate_visual_catalog.py

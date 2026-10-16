@@ -489,7 +489,8 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
             self.assertEqual(value(upload, "retention-days", 10), "30")
             self.assertEqual(value(upload, "if-no-files-found", 10), "error")
             self.assertEqual(value(upload, "path", 10).splitlines(), [
-                "build/release/ctest.junit.xml", "build/release/ctest.inventory.json", "build/release/ctest.partition.json"])
+                "build/release/ctest.junit.xml", "build/release/ctest.inventory.json", "build/release/ctest.partition.json",
+                *(["build/release/ctest-discovery.json", "build/release/netsoak.junit.xml"] if profile == "gcc" else [])])
             self.assertEqual(value(upload, "name", 10), profile + "-junit-${{ github.sha }}-${{ github.run_id }}-shard-${{ matrix.shard }}-attempt-${{ github.run_attempt }}")
             self.assertIn("pattern: " + profile + "-junit-${{ github.sha }}-${{ github.run_id }}-shard-*-attempt-*", aggregate)
             self.assertIn("--attempt ${{ github.run_attempt }}", aggregate)
@@ -510,6 +511,59 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
                      "build/release/test-artifacts", "include-hidden-files: true"):
             self.assertIn(text, linux)
         self.assertIn("python3 -I -B tools/ci/test_ctest_shards.py", jobs(self.workflows["ci.yml"])["public-tree"])
+
+    def test_acceptance_execution_uses_verified_union_and_retains_networking_evidence(self):
+        ci = jobs(self.workflows["ci.yml"])
+        producer, aggregate = ci["linux"], ci["linux-result"]
+        self.assertNotIn("check_acceptance_matrix.py", producer)
+        self.assertIn("ctest --preset release --show-only=json-v1 > build/release/ctest-discovery.json", producer)
+        named = {step.splitlines()[0].removeprefix("      - name: "): step for step in steps(aggregate)}
+        check = named["Check acceptance matrix CTest execution"]
+        self.assertLess(aggregate.index("name: Merge shard JUnit and check inventory\n"),
+                        aggregate.index("name: Check acceptance matrix CTest execution\n"))
+        self.assertEqual(value(check, "if", 8),
+                         "needs.linux.result == 'success' && needs.changes.outputs.needs_cpp != 'false'")
+        self.assertIsNone(value(check, "continue-on-error", 8))
+        self.assertEqual(value(check, "CI_QUALIFICATION", 10),
+                         "${{ github.event_name == 'workflow_dispatch' && inputs.qualification_capture }}")
+        script = value(check, "run", 8)
+        prepare, command = script.split("python3 tools/ci/check_acceptance_matrix.py", 1)
+        self.assertEqual(" ".join(command.replace("\\\n", "").split()),
+                         "--junit build/release/ctest.junit.xml --junit build/release/netsoak.junit.xml "
+                         "--discovery build/release/ctest-discovery.json --ci-context "
+                         "--execution-receipt build/release/test-artifacts/acceptance-execution.json")
+        upload = named["Upload merged JUnit"]
+        self.assertEqual(value(upload, "if", 8),
+                         "always() && needs.linux.result == 'success' && "
+                         "needs.changes.outputs.needs_cpp != 'false' && (" + READY + ")")
+        self.assertEqual(value(upload, "path", 10).splitlines(), [
+            "build/release/ctest.junit.xml", "build/release/ctest.junit.selection.json",
+            "build/release/ctest-discovery.json",
+            "build/release/netsoak.junit.xml", "build/release/test-artifacts/acceptance-execution.json"])
+        self.assertEqual(value(upload, "retention-days", 10), "30")
+        public = ci["public-tree"]
+        self.assertIn("python3 tools/ci/test_check_acceptance_matrix.py", public)
+        self.assertIn("python3 tools/ci/check_acceptance_matrix.py --check-doc docs/acceptance-matrix.md", public)
+        # Run the actual evidence-selection script for both execution routes.
+        for full, owner in (("false", 1), ("true", 0)):
+            for missing in (None, "ctest-discovery.json", "netsoak.junit.xml"):
+                with self.subTest(full=full, missing=missing), tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    (root / "build/release").mkdir(parents=True)
+                    source = root / f"build/gcc-shards/shard-{owner}"
+                    source.mkdir(parents=True)
+                    for filename in ("ctest-discovery.json", "netsoak.junit.xml"):
+                        if filename != missing:
+                            (source / filename).write_text(f"owner-{owner}-{filename}", encoding="utf-8")
+                    result = subprocess.run(
+                        ["bash", "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", prepare],
+                        cwd=root, env=dict(os.environ, CI_QUALIFICATION=full),
+                        capture_output=True, text=True, timeout=10)
+                    self.assertEqual(result.returncode == 0, missing is None, result.stderr)
+                    if missing is None:
+                        for filename in ("ctest-discovery.json", "netsoak.junit.xml"):
+                            self.assertEqual((root / "build/release" / filename).read_bytes(),
+                                             (source / filename).read_bytes())
 
     def test_ci_and_asan_bash_scripts_parse_without_executing_native_commands(self):
         for filename in ("ci.yml", "asan.yml"):
@@ -642,6 +696,66 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
                                                             cpp == "false" and result == "skipped"))
                                 self.assertEqual(process.returncode == 0, accepted, process.stdout + process.stderr)
 
+    def test_ucrt_route_seeds_devel_and_preserves_other_event_and_path_guards(self):
+        ci = jobs(self.workflows["ci.yml"])
+        job = ci["windows-ucrt64"]
+        self.assertEqual(value(job, "needs", 4), "changes")
+        gate = next(step for step in steps(ci["windows-ucrt64-result"])
+                    if step.startswith("      - name: Require expected producers and route\n"))
+        self.assertEqual(value(gate, "CI_ENABLED", 10),
+                         "${{ needs.changes.outputs.needs_cpp != 'false' && (" + UCRT_ROUTE + ") }}")
+        expression = value(job, "if", 4).removeprefix("${{ ").removesuffix(" }}")
+        for event in ("pull_request", "push", "workflow_dispatch", "schedule"):
+            for branch in ("main", "devel", "feature"):
+                for draft in (True, False, None):
+                    for cpp in ("true", "false", ""):
+                        for cancelled in (False, True):
+                            for capture in (False, True):
+                                expected = (
+                                    not cancelled and cpp != "false"
+                                    and (event != "pull_request" or draft is False)
+                                    and event in ("pull_request", "push", "workflow_dispatch")
+                                )
+                                actual = expression.replace("!cancelled()", repr(not cancelled))
+                                for key, replacement in (
+                                    ("github.event_name", event), ("github.ref_name", branch),
+                                    ("github.ref", f"refs/heads/{branch}"),
+                                    ("github.event.pull_request.draft", draft),
+                                    ("needs.changes.outputs.needs_cpp", cpp),
+                                    ("inputs.qualification_capture", capture),
+                                ):
+                                    actual = actual.replace(key, repr(replacement))
+                                actual = actual.replace("== false", "== False").replace(
+                                    "&&", "and"
+                                ).replace("||", "or")
+                                with self.subTest(event=event, branch=branch, draft=draft,
+                                                  cpp=cpp, cancelled=cancelled, capture=capture):
+                                    self.assertEqual(eval(actual, {"__builtins__": {}}), expected)
+
+    def test_ucrt_cache_guards_keep_saves_on_trusted_pushes_and_bypass_captures(self):
+        job = jobs(self.workflows["ci.yml"])["windows-ucrt64"]
+        named = {step.splitlines()[0].removeprefix("      - name: "): step for step in steps(job)}
+        trusted_push = (
+            "github.event_name == 'push' && "
+            "(github.ref == 'refs/heads/main' || github.ref == 'refs/heads/devel')"
+        )
+        capture = "github.event_name == 'workflow_dispatch' && inputs.qualification_capture"
+        self.assertEqual(value(named["Set up MSYS2 UCRT64"], "cache", 10),
+                         "${{ matrix.shard == 1 && " + trusted_push + " }}")
+        disable = named["Disable compiler cache for qualification captures"]
+        self.assertEqual(value(disable, "if", 8), capture)
+        self.assertIn('CCACHE_DISABLE=1', value(disable, "run", 8))
+        self.assertEqual(value(named["Restore compiler cache"], "if", 8),
+                         "${{ !(" + capture + ") }}")
+        for name in ("Clean compiler cache before saving", "Save compiler cache"):
+            with self.subTest(step=name):
+                self.assertEqual(
+                    value(named[name], "if", 8),
+                    "${{ matrix.shard == 1 && always() && " + trusted_push + " && !(" + capture + ") && "
+                    "steps.compiler-cache.outcome == 'success' && "
+                    "steps.compiler-cache.outputs.cache-hit != 'true' }}",
+                )
+
     def test_concurrency_keeps_pr_cancellation_and_batches_only_devel_pushes(self):
         group = (
             "${{ github.event_name == 'workflow_dispatch' && "
@@ -653,7 +767,11 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
             "format('{0}-{1}', github.workflow, github.ref) }}"
         )
         cancellation = "${{ github.event_name != 'push' && github.event_name != 'workflow_dispatch' }}"
-        for filename, workflow in self.workflows.items():
+        workflows = dict(self.workflows)
+        workflows["ucrt-attribution.yml"] = (
+            ROOT / ".github/workflows/ucrt-attribution.yml"
+        ).read_text(encoding="utf-8")
+        for filename, workflow in workflows.items():
             with self.subTest(workflow=filename):
                 self.assertEqual(value(workflow, "group", 2), group)
                 self.assertEqual(value(workflow, "cancel-in-progress", 2), cancellation)
@@ -682,6 +800,80 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
                     comments[path.name] = matches[0]
         self.assertEqual(set(comments), expected)
         self.assertEqual(len(set(comments.values())), 1, comments)
+
+
+class WorkflowAttributionPolicyTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.workflow = (ROOT / ".github/workflows/ucrt-attribution.yml").read_text(encoding="utf-8")
+        triggers = cls.workflow.split("\non:\n", 1)[1].split("\npermissions:\n", 1)[0]
+        cls.events = dict(re.findall(
+            r"^  (\w+):\n(.*?)(?=^  \w+:|\Z)", triggers, re.MULTILINE | re.DOTALL,
+        ))
+        cls.input_paths = [
+            ".github/workflows/ucrt-attribution.yml",
+            "tools/ci/ucrt_attribution.sh",
+            "tools/ci/test_ucrt_attribution.py",
+            "tools/ci/test_ucrt_gcc_cohort.py",
+            "tools/ci/check_worldgen_probe_smoke.py",
+            "tools/ci/test_check_worldgen_probe_smoke.py",
+            "test/diagnostics/worldgen_probe.cpp",
+        ]
+
+    def test_only_input_changes_trigger_devel_pull_requests(self):
+        pr = self.events["pull_request"]
+        self.assertEqual(value(pr, "branches", 4), "[devel]")
+        self.assertEqual(value(pr, "types", 4), "[opened, synchronize, reopened, ready_for_review]")
+        self.assertEqual(re.findall(r"^      - (.+)$", pr, re.MULTILINE), self.input_paths)
+
+    def test_devel_pushes_also_cover_probe_build_definitions(self):
+        push = self.events["push"]
+        self.assertEqual(value(push, "branches", 4), "[devel]")
+        self.assertEqual(
+            re.findall(r"^      - (.+)$", push, re.MULTILINE),
+            self.input_paths[:-1] + ["tools/CMakeLists.txt", "test/CMakeLists.txt"] + self.input_paths[-1:],
+        )
+
+    def test_weekly_schedule_and_manual_dispatch_remain_available(self):
+        self.assertEqual(set(self.events), {"pull_request", "push", "schedule", "workflow_dispatch"})
+        self.assertEqual(self.events["schedule"].strip(), '- cron: "43 4 * * 0"')
+        self.assertEqual(self.events["workflow_dispatch"].strip(), "")
+
+    def test_concurrency_separates_schedules_pushes_and_manual_runs(self):
+        # Evaluate the actual routing expressions for both possible default refs.
+        cases = [
+            ("push", "refs/heads/devel", 1, "attribution-refs/heads/devel-push", False),
+            ("push", "refs/heads/devel", 2, "attribution-refs/heads/devel-push", False),
+            ("schedule", "refs/heads/devel", 3, "attribution-refs/heads/devel", True),
+            ("schedule", "refs/heads/main", 4, "attribution-refs/heads/main", True),
+            ("push", "refs/heads/main", 5, "attribution-refs/heads/main-sha-5", False),
+            ("workflow_dispatch", "refs/heads/devel", 6, "attribution-manual-6", False),
+            ("workflow_dispatch", "refs/heads/devel", 7, "attribution-manual-7", False),
+            ("pull_request", "refs/pull/example/merge", 8, "attribution-refs/pull/example/merge", True),
+            ("pull_request", "refs/pull/example/merge", 9, "attribution-refs/pull/example/merge", True),
+        ]
+        for event, ref, run_id, group, cancel in cases:
+            for key, expected in (("group", group), ("cancel-in-progress", cancel)):
+                expression = value(self.workflow, key, 2).removeprefix("${{ ").removesuffix(" }}")
+                for name, replacement in (
+                    ("event_name", event), ("ref", ref), ("workflow", "attribution"),
+                    ("sha", "sha"), ("run_id", run_id),
+                ):
+                    expression = expression.replace("github." + name, repr(replacement))
+                expression = expression.replace("&&", "and").replace("||", "or")
+                with self.subTest(event=event, ref=ref, run_id=run_id, key=key):
+                    self.assertEqual(eval(expression, {"__builtins__": {}, "format": str.format}), expected)
+
+    def test_revision_recording_handles_missing_pull_request_metadata(self):
+        step = next(step for step in steps(jobs(self.workflow)["attribution"])
+                    if step.startswith("      - name: Record revisions and runner image\n"))
+        self.assertEqual(value(step, "shell", 8), "pwsh")
+        self.assertEqual(value(step, "HEAD_SHA", 10), "${{ github.event.pull_request.head.sha }}")
+        self.assertEqual(value(step, "MERGE_SHA", 10), "${{ github.sha }}")
+        script = value(step, "run", 8)
+        self.assertIn("$headSha = if ($env:HEAD_SHA) { $env:HEAD_SHA } else { 'not a pull request' }", script)
+        self.assertIn('"| pull request head sha | $headSha |"', script)
+        self.assertIn('"| checked out sha | $env:MERGE_SHA |"', script)
 
 
 if __name__ == "__main__":
