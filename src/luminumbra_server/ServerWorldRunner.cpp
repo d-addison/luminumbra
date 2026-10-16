@@ -1068,6 +1068,15 @@ std::size_t ServerWorldRunner::SaveFullSnapshot() {
         !m_session->IsSimulationTickBoundary()) {
         return 0;
     }
+    const std::filesystem::path save_dir = m_session->GetWorldSaveDir();
+    if (save_dir.empty()) {
+        return 0;
+    }
+    if (!m_session->SavedPresetCompatible(save_dir)) {
+        LUMINUMBRA_CORE_ERROR(
+            "SaveFullSnapshot failed: destination preset or identity is incompatible");
+        return 0;
+    }
     auto* world_system = m_session->GetWorldSystem();
     world_system->wait_for_streaming_jobs();
 
@@ -1076,10 +1085,6 @@ std::size_t ServerWorldRunner::SaveFullSnapshot() {
         state.insert_chunk(chunk);
     }
 
-    const std::filesystem::path save_dir = m_session->GetWorldSaveDir();
-    if (save_dir.empty()) {
-        return 0;
-    }
     Persistence::WorldSaveService service;
     std::vector<std::string> errors;
     if (!service.save_world(state, save_dir, &errors)) {
