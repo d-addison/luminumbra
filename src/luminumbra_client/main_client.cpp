@@ -1370,7 +1370,15 @@ int main(int argc, char* argv[]) {
     Luminumbra::Client::Debug::DeveloperLogAttachment developerLogAttachment(
         developerConsole.Log());
     UiInputRouter uiInputRouter;
-    std::filesystem::path root_dir = ResolveRuntimeRoot(argc > 0 ? argv[0] : nullptr);
+    RuntimePathOptions path_options;
+    std::filesystem::path root_dir;
+    try {
+        path_options = ParseRuntimePathOptions(argc, argv);
+        root_dir = ResolveRuntimeRoot(argc > 0 ? argv[0] : nullptr, path_options.runtime_root);
+    } catch (const std::exception& error) {
+        LUMINUMBRA_CORE_ERROR("{}", error.what());
+        return 2;
+    }
     std::string root_path_str = RuntimeRootString(root_dir);
     LUMINUMBRA_CORE_INFO("Runtime root: {}", root_path_str);
 
@@ -2072,6 +2080,7 @@ int main(int argc, char* argv[]) {
     auto gameSession = std::make_unique<Luminumbra::world::GameSession>();
     gameSession->SetJobSystem(&jobSystem);
     gameSession->SetRootPath(root_path_str);
+    gameSession->SetSaveRootPath(path_options.save_root);
     gameSession->ApplySystemConfig(g_systemConfig);
 
     // Load creature species metadata (display names + rarity) for the codex/discovery
@@ -2585,8 +2594,9 @@ int main(int argc, char* argv[]) {
         }
         g_uiManager->SetWorldCreationCallback(start_world_creation);
         g_uiManager->SetLoadWorldCallback(start_world_load);
-        g_uiManager->SetSavedWorldList([root_path_str](const std::stop_token& stop) {
-            return Luminumbra::Persistence::EnumerateSavedWorlds(root_path_str, stop);
+        g_uiManager->SetSavedWorldList([save_root = gameSession->GetSaveRootPath(),
+                                        root_path_str](const std::stop_token& stop) {
+            return Luminumbra::Persistence::EnumerateSavedWorlds(save_root, root_path_str, stop);
         });
         // Seed the create-world customize form from a preset: read generation_params.<path>.
         g_uiManager->SetWorldParamGetter([root_path_str](const std::string& worldType,
@@ -3474,8 +3484,10 @@ int main(int argc, char* argv[]) {
         if (benchmark_v3 && !benchmark_world_checked && gameSession &&
             gameStateManager.GetCurrentState() == GameState::IN_GAME) {
             try {
-                const auto saved = Luminumbra::Persistence::InspectSavedWorld(
-                    root_dir, gameSession->GetMetadata().worldId);
+                const auto saved =
+                    Luminumbra::Persistence::InspectSavedWorld(gameSession->GetSaveRootPath(),
+                                                               root_path_str,
+                                                               gameSession->GetMetadata().worldId);
                 if (!saved.error.empty())
                     throw std::runtime_error(saved.error);
                 std::ifstream input(saved.preset_path, std::ios::binary);
