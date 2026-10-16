@@ -181,7 +181,11 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
             "format('{0}-{1}', github.workflow, github.ref) }}"
         )
         cancellation = "${{ github.event_name != 'push' && github.event_name != 'workflow_dispatch' }}"
-        for filename, workflow in self.workflows.items():
+        workflows = dict(self.workflows)
+        workflows["ucrt-attribution.yml"] = (
+            ROOT / ".github/workflows/ucrt-attribution.yml"
+        ).read_text(encoding="utf-8")
+        for filename, workflow in workflows.items():
             with self.subTest(workflow=filename):
                 self.assertEqual(value(workflow, "group", 2), group)
                 self.assertEqual(value(workflow, "cancel-in-progress", 2), cancellation)
@@ -210,6 +214,80 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
                     comments[path.name] = matches[0]
         self.assertEqual(set(comments), expected)
         self.assertEqual(len(set(comments.values())), 1, comments)
+
+
+class WorkflowAttributionPolicyTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.workflow = (ROOT / ".github/workflows/ucrt-attribution.yml").read_text(encoding="utf-8")
+        triggers = cls.workflow.split("\non:\n", 1)[1].split("\npermissions:\n", 1)[0]
+        cls.events = dict(re.findall(
+            r"^  (\w+):\n(.*?)(?=^  \w+:|\Z)", triggers, re.MULTILINE | re.DOTALL,
+        ))
+        cls.input_paths = [
+            ".github/workflows/ucrt-attribution.yml",
+            "tools/ci/ucrt_attribution.sh",
+            "tools/ci/test_ucrt_attribution.py",
+            "tools/ci/test_ucrt_gcc_cohort.py",
+            "tools/ci/check_worldgen_probe_smoke.py",
+            "tools/ci/test_check_worldgen_probe_smoke.py",
+            "test/diagnostics/worldgen_probe.cpp",
+        ]
+
+    def test_only_input_changes_trigger_devel_pull_requests(self):
+        pr = self.events["pull_request"]
+        self.assertEqual(value(pr, "branches", 4), "[devel]")
+        self.assertEqual(value(pr, "types", 4), "[opened, synchronize, reopened, ready_for_review]")
+        self.assertEqual(re.findall(r"^      - (.+)$", pr, re.MULTILINE), self.input_paths)
+
+    def test_devel_pushes_also_cover_probe_build_definitions(self):
+        push = self.events["push"]
+        self.assertEqual(value(push, "branches", 4), "[devel]")
+        self.assertEqual(
+            re.findall(r"^      - (.+)$", push, re.MULTILINE),
+            self.input_paths[:-1] + ["tools/CMakeLists.txt", "test/CMakeLists.txt"] + self.input_paths[-1:],
+        )
+
+    def test_weekly_schedule_and_manual_dispatch_remain_available(self):
+        self.assertEqual(set(self.events), {"pull_request", "push", "schedule", "workflow_dispatch"})
+        self.assertEqual(self.events["schedule"].strip(), '- cron: "43 4 * * 0"')
+        self.assertEqual(self.events["workflow_dispatch"].strip(), "")
+
+    def test_concurrency_separates_schedules_pushes_and_manual_runs(self):
+        # Evaluate the actual routing expressions for both possible default refs.
+        cases = [
+            ("push", "refs/heads/devel", 1, "attribution-refs/heads/devel-push", False),
+            ("push", "refs/heads/devel", 2, "attribution-refs/heads/devel-push", False),
+            ("schedule", "refs/heads/devel", 3, "attribution-refs/heads/devel", True),
+            ("schedule", "refs/heads/main", 4, "attribution-refs/heads/main", True),
+            ("push", "refs/heads/main", 5, "attribution-refs/heads/main-sha-5", False),
+            ("workflow_dispatch", "refs/heads/devel", 6, "attribution-manual-6", False),
+            ("workflow_dispatch", "refs/heads/devel", 7, "attribution-manual-7", False),
+            ("pull_request", "refs/pull/example/merge", 8, "attribution-refs/pull/example/merge", True),
+            ("pull_request", "refs/pull/example/merge", 9, "attribution-refs/pull/example/merge", True),
+        ]
+        for event, ref, run_id, group, cancel in cases:
+            for key, expected in (("group", group), ("cancel-in-progress", cancel)):
+                expression = value(self.workflow, key, 2).removeprefix("${{ ").removesuffix(" }}")
+                for name, replacement in (
+                    ("event_name", event), ("ref", ref), ("workflow", "attribution"),
+                    ("sha", "sha"), ("run_id", run_id),
+                ):
+                    expression = expression.replace("github." + name, repr(replacement))
+                expression = expression.replace("&&", "and").replace("||", "or")
+                with self.subTest(event=event, ref=ref, run_id=run_id, key=key):
+                    self.assertEqual(eval(expression, {"__builtins__": {}, "format": str.format}), expected)
+
+    def test_revision_recording_handles_missing_pull_request_metadata(self):
+        step = next(step for step in steps(jobs(self.workflow)["attribution"])
+                    if step.startswith("      - name: Record revisions and runner image\n"))
+        self.assertEqual(value(step, "shell", 8), "pwsh")
+        self.assertEqual(value(step, "HEAD_SHA", 10), "${{ github.event.pull_request.head.sha }}")
+        self.assertEqual(value(step, "MERGE_SHA", 10), "${{ github.sha }}")
+        script = value(step, "run", 8)
+        self.assertIn("$headSha = if ($env:HEAD_SHA) { $env:HEAD_SHA } else { 'not a pull request' }", script)
+        self.assertIn('"| pull request head sha | $headSha |"', script)
+        self.assertIn('"| checked out sha | $env:MERGE_SHA |"', script)
 
 
 if __name__ == "__main__":
