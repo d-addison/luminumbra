@@ -303,6 +303,7 @@ def checker_command(cell, *, artifact, qualified_renderer, root, python):
     _require_ready(cell, root)
     command = [str(python), str(Path(root) / VALIDATOR), str(artifact),
                '--qualified-renderer', qualified_renderer,
+               '--enforce-floor',
                '--profile', cell['profile'],
                f"--width={cell['width']}", f"--height={cell['height']}",
                f"--warmup-frames={cell['warmup_frames']}",

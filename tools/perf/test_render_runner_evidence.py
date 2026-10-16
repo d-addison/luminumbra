@@ -231,8 +231,9 @@ class RenderRunnerEvidenceTests(unittest.TestCase):
         self.assertEqual(receipt['timeout_seconds'], 180)
         self.assertEqual(receipt['command'], self.calls[0][0])
         self.assertEqual(receipt['cwd'], str(self.runtime))
-        self.assertEqual(receipt['binary_path'], str(self.client))
+        self.assertEqual(receipt['binary_path'], str(self.client.resolve(strict=True)))
         self.assertEqual(receipt['binary_sha256'], hashlib.sha256(self.client.read_bytes()).hexdigest())
+        self.assertEqual(receipt['binary_identity_status'], 'verified')
         self.assertGreater(receipt['elapsed_seconds'], 0)
         self.assertEqual(receipt['capture_status'], 'retained')
         self.assertEqual(receipt['capture_path'], str(capture))
@@ -399,12 +400,41 @@ class RenderRunnerEvidenceTests(unittest.TestCase):
     def test_process_elapsed_excludes_evidence_finalization(self):
         # Use a private clock object so subprocess's real deadline clock stays real.
         clock = mock.Mock()
-        clock.monotonic.side_effect = [10.0, 12.5]
+        clock.perf_counter.side_effect = [10.0, 12.5]
         with mock.patch.object(runner, 'time', clock):
             self.case.run_client('capture')
         self.assertEqual(self.receipt()['elapsed_seconds'], 2.5)
-        self.assertEqual(clock.monotonic.call_count, 2)
+        self.assertEqual(clock.perf_counter.call_count, 2)
         self.assertFalse(list(self.artifacts.glob('*.tmp')))
+
+    def test_executable_change_invalidates_receipt_on_return_and_timeout(self):
+        executable = self.root / Path(sys.executable).name
+        runner.OPTIONS.client = executable
+        for timed_out in (False, True):
+            with self.subTest(timed_out=timed_out):
+                shutil.copy2(sys.executable, executable)
+                error = subprocess.TimeoutExpired([str(executable)], 180)
+
+                def launch(command, **kwargs):
+                    metadata = executable.stat()
+                    os.utime(executable, ns=(metadata.st_atime_ns,
+                                            metadata.st_mtime_ns + 2000000000))
+                    Path(command[command.index('--render-benchmark') + 1]).write_bytes(self.payload)
+                    if timed_out:
+                        raise error
+                    return subprocess.CompletedProcess(command, 0)
+
+                with mock.patch.object(runner.subprocess, 'run', side_effect=launch), \
+                        redirect_stderr(io.StringIO()), \
+                        self.assertRaises(subprocess.TimeoutExpired if timed_out else OSError) as caught:
+                    self.case.run_client('capture')
+                if timed_out:
+                    self.assertIs(caught.exception, error)
+                receipt = self.receipt()
+                self.assertIsNone(receipt['binary_sha256'])
+                self.assertEqual(receipt['binary_identity_status'], 'changed')
+                self.assertTrue(receipt['evidence_errors'])
+                self.assertEqual(self.paths()[0].read_bytes(), self.payload)
 
     def test_timeout_log_read_is_bounded_and_old_phase_is_not_retained(self):
         payload = b'EnsureSurfaceReadyNear: outside retained window\n' + b'x' * 20000
