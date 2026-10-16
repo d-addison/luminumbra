@@ -1,6 +1,10 @@
 # Changelog
 
-## v0.3.0 — in preparation
+## v0.3.1 — in preparation
+
+- Development continues on top of v0.3.0.
+
+## v0.3.0 — 2026-10-16
 
 - Enable all shipping simulation/render SystemConfig gates in compiled and
   packaged defaults, plus rendering and ordinary client audio defaults. Explicit
