@@ -1,6 +1,7 @@
 #include "../support/UniqueTempPath.h"
 #include "../support/WorldgenTestData.h"
 #include "luminumbra_client/app/RenderMeasurement.h"
+#include "luminumbra_client/world/WorldgenOverride.h"
 #include "luminumbra_common/core/JobSystem.h"
 #include "luminumbra_common/core/SystemConfig.h"
 #include "luminumbra_common/net/LockstepSession.h"
@@ -8,11 +9,14 @@
 #include "luminumbra_common/persistence/WorldPersistenceRoundtrip.h"
 #include "luminumbra_common/world/FarLodStore.h"
 #include "luminumbra_common/world/GameSession.h"
+#include "luminumbra_common/world/KnobLayer.h"
 #include "luminumbra_common/world/TerrainPresetLoader.h"
+#include "luminumbra_server/ServerCliOptions.h"
 #include "luminumbra_server/modes/ModeHelpers.h"
 
 #include <gtest/gtest.h>
 #include <nlohmann/json.hpp>
+#include <nlohmann/json_fwd.hpp>
 
 #include <cstdint>
 #include <filesystem>
@@ -20,6 +24,7 @@
 #include <optional>
 #include <string>
 #include <system_error>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -29,13 +34,15 @@ using Luminumbra::world::LoadTerrainPresetFromJson;
 using Luminumbra::world::ResolveEffectivePreset;
 using Luminumbra::world::TerrainPresetUse;
 
-class EffectivePresetIdentity : public ::testing::Test {
-protected:
+struct PresetIdentityData {
     fs::path root;
     Luminumbra::JobSystem jobs;
     nlohmann::json shipping;
     ServerCliOptions options;
+};
 
+class EffectivePresetIdentity : public ::testing::Test, protected PresetIdentityData {
+protected:
     void SetUp() override {
         root = Luminumbra::TestSupport::CreateUniqueTempDirectory("effective_preset_");
         Luminumbra::TestSupport::CopyWorldgenTestData(LUMINUMBRA_SOURCE_ROOT, root);
@@ -235,6 +242,80 @@ TEST_F(EffectivePresetIdentity, TransientWorldsHashTheResolvedSelector) {
         else
             current_hash = transient.PresetContentHash();
     }
+}
+
+TEST_F(EffectivePresetIdentity, UnstampedPreviewCandidatesMatchWorldCreation) {
+    auto source = shipping;
+    source["schema_rev"] = 7;
+    source["generation_params"]["terrain"].erase("surface_sampling_revision");
+    WriteCatalog(source);
+    GameSession created;
+    Configure(created);
+    ASSERT_TRUE(created.CreateTransientWorld("Preview agreement", options.seed, options.preset));
+    const auto custom = Luminumbra::Client::BuildCustomPreset(source, {});
+    const auto knobs = Luminumbra::Client::BuildKnobResolvedPreset(source, {});
+    EXPECT_FALSE(custom.changed);
+    EXPECT_FALSE(knobs.changed);
+    const auto expected = ResolveEffectivePreset(source, TerrainPresetUse::NewWorld);
+    // Numeric knobs take absolute spline outputs, including at neutral; flags
+    // and unmapped values inherit the resolved baseline.
+    const auto expected_knobs =
+        Luminumbra::world::ApplyKnobLayer(expected, Luminumbra::world::NeutralKnobVector());
+    EXPECT_EQ(custom.json, expected);
+    for (const auto& [candidate, expected_candidate] :
+         {std::pair{&custom.json, &expected}, std::pair{&knobs.json, &expected_knobs}}) {
+        SCOPED_TRACE(candidate == &knobs.json ? "knob preview" : "raw preview");
+        EXPECT_EQ(candidate->at("schema_rev"), expected.at("schema_rev"));
+        EXPECT_EQ(candidate->at("generation_params").at("terrain"),
+                  expected_candidate->at("generation_params").at("terrain"));
+        auto generation = candidate->at("generation_params");
+        generation.erase("knob_layer");
+        EXPECT_EQ(generation, expected_candidate->at("generation_params"));
+        const auto preview = LoadTerrainPresetFromJson(*candidate, root / "data");
+        ASSERT_TRUE(preview.ok);
+        EXPECT_EQ(preview.params.surface_sampling_revision, 2);
+        EXPECT_EQ(preview.params.surface_sampling_revision,
+                  created.GetWorldSystem()->get_params().surface_sampling_revision);
+        WriteCatalog(*candidate);
+        GameSession candidate_world;
+        Configure(candidate_world);
+        ASSERT_TRUE(candidate_world.CreateTransientWorld(
+            "Preview candidate", options.seed, options.preset));
+        EXPECT_EQ(preview.params.surface_sampling_revision,
+                  candidate_world.GetWorldSystem()->get_params().surface_sampling_revision);
+        EXPECT_EQ(preview.preset_content_hash, candidate_world.PresetContentHash());
+    }
+    EXPECT_EQ(knobs.json.at("generation_params")
+                  .at("knob_layer")
+                  .at("baseline")
+                  .at("generation_params")
+                  .at("terrain"),
+              expected.at("generation_params").at("terrain"));
+}
+
+TEST_F(EffectivePresetIdentity, MalformedHydroIterationsReturnRefusalsAcrossLoadPaths) {
+    auto invalid = shipping;
+    invalid["generation_params"]["terrain"]["hydro"]["iterations"] = "bad";
+    WriteCatalog(invalid);
+    Luminumbra::world::TerrainPresetLoadResult loaded;
+    ASSERT_NO_THROW(loaded = LoadTerrainPresetFromJson(invalid, root / "data"));
+    EXPECT_FALSE(loaded.ok);
+    EXPECT_TRUE(loaded.preset_content_hash.empty());
+    ASSERT_EQ(loaded.errors.size(), 1u);
+    EXPECT_NE(loaded.errors.front().find("invalid world preset JSON values"), std::string::npos);
+    ASSERT_NO_THROW(
+        loaded = Luminumbra::world::LoadTerrainPreset(root / "worlds/atlas/presets/default.json"));
+    EXPECT_FALSE(loaded.ok);
+    EXPECT_TRUE(loaded.preset_content_hash.empty());
+    ASSERT_EQ(loaded.errors.size(), 1u);
+    EXPECT_NE(loaded.errors.front().find("invalid world preset JSON values"), std::string::npos);
+    GameSession created;
+    Configure(created);
+    bool created_ok = true;
+    ASSERT_NO_THROW(
+        created_ok = created.CreateTransientWorld("Invalid hydro", options.seed, options.preset));
+    EXPECT_FALSE(created_ok);
+    EXPECT_TRUE(created.PresetContentHash().empty());
 }
 
 TEST_F(EffectivePresetIdentity, SurfaceFlightCaptureMatchesSavedAndGeneratedIdentity) {

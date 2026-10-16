@@ -1514,13 +1514,14 @@ add_executable(world_open_refusal_test
     persistence/world_open_refusal_test.cpp
     common/SimBudgetWorldParity_test.cpp
     common/EffectivePresetIdentity_test.cpp
+    ../src/luminumbra_client/world/WorldgenOverride.cpp
     persistence/async_saved_world_catalog_test.cpp
     persistence/saved_world_catalog_responsiveness_test.cpp
     persistence/host_scheduler_fault_test.cpp
     ../src/luminumbra_server/ServerWorldRunner.cpp
     ../src/luminumbra_server/modes/ModeHelpers.cpp
 )
-target_include_directories(world_open_refusal_test PRIVATE ../src ../src/luminumbra_common)
+target_include_directories(world_open_refusal_test PRIVATE ../src ../src/luminumbra_common ../src/luminumbra_client)
 target_compile_definitions(world_open_refusal_test PRIVATE LUMINUMBRA_SOURCE_ROOT="${CMAKE_SOURCE_DIR}")
 target_link_libraries(world_open_refusal_test PRIVATE gtest_main luminumbra_common luminumbra_save_fixture_support)
 

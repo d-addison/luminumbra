@@ -1,17 +1,30 @@
 #include "TerrainPresetLoader.h"
 
 #include <algorithm>
+#include <array>
+#include <cstddef>
+#include <cstdint>
+#include <filesystem>
 #include <fstream>
 #include <initializer_list>
 #include <map>
+#include <memory>
+#include <string>
 #include <string_view>
+#include <system_error>
+#include <utility>
+#include <vector>
 
 #include "nlohmann/json.hpp"
+#include "nlohmann/json_fwd.hpp"
 
 #include "../core/FilesystemPath.h"
 #include "../core/Log.h"
+#include "../systems/SHIELD_WorldSystem.h"
 #include "BiomeTable.h"
 #include "StructurePlacement.h"
+#include "WorldgenDependencySnapshot.h"
+#include "WorldgenFileReader.h"
 
 namespace Luminumbra::world {
 namespace {
@@ -20,7 +33,7 @@ constexpr std::uint64_t kFnvOffsetBasis = 14695981039346656037ull;
 constexpr std::uint64_t kFnvPrime = 1099511628211ull;
 
 void HashBytes(std::uint64_t& hash, std::string_view bytes) {
-    for (unsigned char byte : bytes) {
+    for (const unsigned char byte : bytes) {
         hash ^= byte;
         hash *= kFnvPrime;
     }
@@ -441,7 +454,7 @@ TerrainPresetLoadResult
 LoadTerrainPresetFromJson(const nlohmann::json& source,
                           const std::filesystem::path& data_root,
                           const std::string& provenance,
-                          const World::WorldgenFileStatusReader& read_status) {
+                          const World::WorldgenFileStatusReader& read_status) try {
     TerrainPresetLoadResult result;
     // schema_rev is validated when declared, not required. Every preset under
     // worlds/atlas/presets/ carries it, but in-memory fixtures construct minimal
@@ -765,6 +778,12 @@ LoadTerrainPresetFromJson(const nlohmann::json& source,
         return result;
     result.preset_content_hash = HashPresetIdentity(source, manifest);
     result.ok = true;
+    return result;
+} catch (const nlohmann::json::exception& error) {
+    // File and in-memory callers share the same refusal for malformed typed values.
+    TerrainPresetLoadResult result;
+    result.errors.push_back("invalid world preset JSON values '" + provenance +
+                            "': " + error.what());
     return result;
 }
 
