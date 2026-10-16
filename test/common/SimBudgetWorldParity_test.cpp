@@ -71,6 +71,47 @@ static_assert(
     }(),
     "Compare every simulation budget stage exactly once in enum order");
 
+void ExpectStageSamples(const SimBudgetTelemetry& trace, std::uint64_t ticks, bool active_regions) {
+    for (std::size_t stage = 0; stage < trace.SamplesByStage().size(); ++stage) {
+        SCOPED_TRACE(std::string(luminumbra::simulation::kSimBudgetStageNames[stage]));
+        const auto& samples = trace.SamplesByStage()[stage];
+        const auto identity = static_cast<SimBudgetStage>(stage);
+        const bool unexecuted =
+            active_regions ? identity == SimBudgetStage::Wind || identity == SimBudgetStage::Weather
+                           : identity == SimBudgetStage::WindWeather;
+        if (unexecuted) {
+            EXPECT_TRUE(samples.empty());
+            continue;
+        }
+        ASSERT_EQ(samples.size(), ticks);
+        for (std::size_t i = 0; i < samples.size(); ++i) {
+            EXPECT_EQ(samples[i].tick, i + 1);
+            if (identity == SimBudgetStage::Wind || identity == SimBudgetStage::Weather)
+                EXPECT_EQ(samples[i].work, 64u * 64u);
+            else if (identity == SimBudgetStage::WindWeather)
+                EXPECT_EQ(samples[i].work, 2u * 64u * 64u);
+            else if (identity == SimBudgetStage::ServerPhysics)
+                EXPECT_EQ(samples[i].work, 1u);
+        }
+    }
+}
+
+// Call after ExpectStageSamples succeeds so the first plant and creature samples exist.
+void ExpectWorkSummary(const SimBudgetTelemetry& trace, std::uint64_t ticks, bool active_regions) {
+    EXPECT_GT(trace.Summarize(SimBudgetStage::Creatures).work_total, 0u);
+    EXPECT_GT(trace.Summarize(SimBudgetStage::Plants).work_total, 0u);
+    EXPECT_GT(trace.Summarize(SimBudgetStage::Scent).work_total, 0u);
+    EXPECT_EQ(trace.Summarize(SimBudgetStage::Wind).work_total,
+              active_regions ? 0u : ticks * 64u * 64u);
+    EXPECT_EQ(trace.Summarize(SimBudgetStage::Weather).work_total,
+              active_regions ? 0u : ticks * 64u * 64u);
+    EXPECT_EQ(trace.Summarize(SimBudgetStage::WindWeather).work_total,
+              active_regions ? ticks * 2u * 64u * 64u : 0u);
+    EXPECT_EQ(trace.SamplesByStage()[static_cast<std::size_t>(SimBudgetStage::Plants)][0].work, 6u);
+    EXPECT_EQ(trace.SamplesByStage()[static_cast<std::size_t>(SimBudgetStage::Creatures)][0].work,
+              8u);
+}
+
 void ExpectMatchingWork(const SimBudgetTelemetry& first, const SimBudgetTelemetry& repeated) {
     for (const auto identity : kWorkComparedStages) {
         const auto stage = static_cast<std::size_t>(identity);
@@ -180,43 +221,8 @@ TEST_P(SimBudgetWorldParity, Populated3600TicksPreserveWorldHashAndReplayWork) {
         } else {
             EXPECT_EQ(hash, untraced_hash);
             const auto& trace = runner.Session()->GetSimBudgetTelemetry();
-            for (std::size_t stage = 0; stage < trace.SamplesByStage().size(); ++stage) {
-                SCOPED_TRACE(std::string(luminumbra::simulation::kSimBudgetStageNames[stage]));
-                const auto& samples = trace.SamplesByStage()[stage];
-                const auto identity = static_cast<SimBudgetStage>(stage);
-                const bool unexecuted = GetParam() ? identity == SimBudgetStage::Wind ||
-                                                         identity == SimBudgetStage::Weather
-                                                   : identity == SimBudgetStage::WindWeather;
-                if (unexecuted) {
-                    EXPECT_TRUE(samples.empty());
-                    continue;
-                }
-                ASSERT_EQ(samples.size(), ticks);
-                for (std::size_t i = 0; i < samples.size(); ++i) {
-                    EXPECT_EQ(samples[i].tick, i + 1);
-                    if (identity == SimBudgetStage::Wind || identity == SimBudgetStage::Weather)
-                        EXPECT_EQ(samples[i].work, 64u * 64u);
-                    else if (identity == SimBudgetStage::WindWeather)
-                        EXPECT_EQ(samples[i].work, 2u * 64u * 64u);
-                    else if (identity == SimBudgetStage::ServerPhysics)
-                        EXPECT_EQ(samples[i].work, 1u);
-                }
-            }
-            EXPECT_GT(trace.Summarize(SimBudgetStage::Creatures).work_total, 0u);
-            EXPECT_GT(trace.Summarize(SimBudgetStage::Plants).work_total, 0u);
-            EXPECT_GT(trace.Summarize(SimBudgetStage::Scent).work_total, 0u);
-            EXPECT_EQ(trace.Summarize(SimBudgetStage::Wind).work_total,
-                      GetParam() ? 0u : ticks * 64u * 64u);
-            EXPECT_EQ(trace.Summarize(SimBudgetStage::Weather).work_total,
-                      GetParam() ? 0u : ticks * 64u * 64u);
-            EXPECT_EQ(trace.Summarize(SimBudgetStage::WindWeather).work_total,
-                      GetParam() ? ticks * 2u * 64u * 64u : 0u);
-            EXPECT_EQ(
-                trace.SamplesByStage()[static_cast<std::size_t>(SimBudgetStage::Plants)][0].work,
-                6u);
-            EXPECT_EQ(
-                trace.SamplesByStage()[static_cast<std::size_t>(SimBudgetStage::Creatures)][0].work,
-                8u);
+            ASSERT_NO_FATAL_FAILURE(ExpectStageSamples(trace, ticks, GetParam()));
+            ExpectWorkSummary(trace, ticks, GetParam());
             // Capture before the save toggle clears session telemetry.
             if (pass == 1)
                 first_trace = trace;
