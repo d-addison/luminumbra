@@ -1,5 +1,7 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
+
 #include "luminumbra_common/core/Log.h"
 #include "luminumbra_common/net/NetSocketsTransport.h"
 #include "steam/isteamnetworkingsockets.h"
@@ -35,11 +37,15 @@ TEST(NetSocketsConnectionTest, FailedAttemptsDisconnectAndReleaseImmediately) {
             NetSocketsTransport::OnConnStatusChangedStatic(&info);
             EXPECT_FALSE(connection.IsPeerConnected());
             info.m_info.m_eState = state;
+            info.m_info.m_eEndReason = 4001;
+            constexpr char reason[] = "connection attempt failed";
+            std::copy(reason, reason + sizeof(reason), info.m_info.m_szEndDebug);
             NetSocketsTransport::OnConnStatusChangedStatic(&info);
 
             // No receive poll should be necessary to observe or release the failure.
             EXPECT_FALSE(connection.IsPeerConnected());
             EXPECT_EQ(sockets.close_calls, 1u);
+            EXPECT_EQ(sockets.close_reason, reason);
             EXPECT_FALSE(connection.SendFrame({0xAB}));
             EXPECT_FALSE(connection.SendFrame({0xAB}, FrameDelivery::Unreliable));
             EXPECT_EQ(sockets.send_calls, 0u);
@@ -87,7 +93,7 @@ TEST(NetSocketsConnectionTest, EstablishedClosuresDrainBackendAndLocalQueueInOrd
         ASSERT_TRUE(connection.IsPeerConnected());
         // Cross both the per-drain message bound and the local byte budget.
         for (std::uint8_t index = 0; index < 40; ++index)
-            sockets.incoming.emplace_back(8192, index);
+            sockets.incoming.push_back({.bytes = std::vector<std::uint8_t>(8192, index)});
         std::vector<std::uint8_t> received;
         ASSERT_TRUE(connection.TryReceiveFrame(received));
         EXPECT_EQ(received, (std::vector<std::uint8_t>(8192, 0)));
@@ -128,6 +134,132 @@ protected:
     }
 };
 
+// These connected transports have exchanged no Hello or acknowledgement yet.
+TEST_F(NetSocketsTransportTest, BeforeHelloReceiveDrainStopsAtByteBudget) {
+    auto& sockets = *SteamNetworkingSockets();
+    sockets.incoming.push_back({.bytes = std::vector<std::uint8_t>(kReceiveQueueByteBudget - 1, 1),
+                                .flags = k_nSteamNetworkingSend_Reliable});
+    sockets.incoming.push_back({.bytes = {2, 2}});
+    sockets.incoming.push_back({.bytes = {3}, .flags = k_nSteamNetworkingSend_Reliable});
+    std::vector<std::uint8_t> received;
+    FrameDelivery delivery = FrameDelivery::Unreliable;
+    ASSERT_TRUE(transport.TryReceiveFrameWithDelivery(received, delivery));
+    EXPECT_EQ(received, (std::vector<std::uint8_t>(kReceiveQueueByteBudget - 1, 1)));
+    EXPECT_EQ(delivery, FrameDelivery::Reliable);
+    // The message crossing the byte budget fits; the next stays in the backend.
+    EXPECT_EQ(sockets.released_messages, 2u);
+    ASSERT_EQ(sockets.incoming.size(), 1u);
+    ASSERT_TRUE(transport.TryReceiveFrameWithDelivery(received, delivery));
+    EXPECT_EQ(received, (std::vector<std::uint8_t>{2, 2}));
+    EXPECT_EQ(delivery, FrameDelivery::Unreliable);
+    EXPECT_EQ(sockets.released_messages, 3u);
+    ASSERT_TRUE(transport.TryReceiveFrameWithDelivery(received, delivery));
+    EXPECT_EQ(received, (std::vector<std::uint8_t>{3}));
+    EXPECT_EQ(delivery, FrameDelivery::Reliable);
+    EXPECT_FALSE(transport.TryReceiveFrame(received));
+    EXPECT_TRUE(transport.IsPeerConnected());
+    EXPECT_EQ(sockets.close_calls, 0u);
+    EXPECT_EQ(sockets.send_calls, 0u);
+}
+
+TEST_F(NetSocketsTransportTest, BeforeHelloEmptyFramesStopAtFrameLimitAndResume) {
+    auto& sockets = *SteamNetworkingSockets();
+    constexpr std::size_t frame_count = kReceiveQueueFrameLimit + 64;
+    for (std::size_t index = 0; index < frame_count; ++index) {
+        sockets.incoming.push_back({.bytes = {},
+                                    .flags = index % 2 == 0 ? k_nSteamNetworkingSend_Reliable
+                                                            : k_nSteamNetworkingSend_Unreliable});
+    }
+    std::vector<std::uint8_t> received;
+    // Repeated drains fill the queue despite returning one empty frame per call.
+    for (std::size_t delivered = 0; delivered < frame_count; ++delivered) {
+        const auto released_before = sockets.released_messages;
+        const auto queued_before = released_before - delivered;
+        FrameDelivery delivery = FrameDelivery::Unreliable;
+        ASSERT_TRUE(transport.TryReceiveFrameWithDelivery(received, delivery));
+        EXPECT_TRUE(received.empty());
+        EXPECT_EQ(delivery,
+                  delivered % 2 == 0 ? FrameDelivery::Reliable : FrameDelivery::Unreliable);
+        const auto pulled = sockets.released_messages - released_before;
+        EXPECT_LE(pulled, 32u);
+        EXPECT_LE(queued_before + pulled, kReceiveQueueFrameLimit);
+        if (delivered == 0)
+            EXPECT_EQ(pulled, 32u);
+        if (delivered == 34) {
+            EXPECT_EQ(queued_before, kReceiveQueueFrameLimit - 1);
+            EXPECT_EQ(pulled, 1u);
+            EXPECT_FALSE(sockets.incoming.empty());
+        }
+    }
+    EXPECT_EQ(sockets.released_messages, frame_count);
+    EXPECT_TRUE(sockets.incoming.empty());
+    EXPECT_FALSE(transport.TryReceiveFrame(received));
+    EXPECT_TRUE(transport.IsPeerConnected());
+    EXPECT_EQ(sockets.close_calls, 0u);
+    EXPECT_EQ(sockets.send_calls, 0u);
+}
+
+TEST_F(NetSocketsTransportTest, BeforeHelloMaximumFrameDrainsBeforeOversizedClosure) {
+    auto& sockets = *SteamNetworkingSockets();
+    EXPECT_EQ(kMaxFramePayloadBytes, 64u * 1024u * 1024u);
+    sockets.incoming.push_back({.bytes = std::vector<std::uint8_t>(kMaxFramePayloadBytes, 0xAB),
+                                .flags = k_nSteamNetworkingSend_Reliable});
+    sockets.incoming.push_back({.bytes = {0xCD}});
+    sockets.incoming.push_back(
+        {.bytes = {}, .reported_size = static_cast<int>(kMaxFramePayloadBytes + 1)});
+    std::vector<std::uint8_t> received;
+    FrameDelivery delivery = FrameDelivery::Unreliable;
+    ASSERT_TRUE(transport.TryReceiveFrameWithDelivery(received, delivery));
+    ASSERT_EQ(received.size(), kMaxFramePayloadBytes);
+    EXPECT_EQ(received.front(), 0xAB);
+    EXPECT_EQ(received.back(), 0xAB);
+    EXPECT_EQ(delivery, FrameDelivery::Reliable);
+    EXPECT_EQ(sockets.released_messages, 1u);
+    EXPECT_EQ(sockets.incoming.size(), 2u);
+    EXPECT_EQ(sockets.close_calls, 0u);
+    ASSERT_TRUE(transport.TryReceiveFrameWithDelivery(received, delivery));
+    EXPECT_EQ(received, (std::vector<std::uint8_t>{0xCD}));
+    EXPECT_EQ(delivery, FrameDelivery::Unreliable);
+    EXPECT_EQ(sockets.released_messages, 3u);
+    EXPECT_EQ(sockets.close_calls, 1u);
+    EXPECT_TRUE(transport.IsPeerConnected());
+    EXPECT_FALSE(transport.TryReceiveFrame(received));
+    EXPECT_FALSE(transport.IsPeerConnected());
+    EXPECT_EQ(sockets.send_calls, 0u);
+}
+
+TEST_F(NetSocketsTransportTest, DeliveryFlagsDrainWithPayloadsAcrossBoundsAndClosure) {
+    auto& sockets = *SteamNetworkingSockets();
+    constexpr std::uint8_t frame_count = 80;
+    for (std::uint8_t index = 0; index < frame_count; ++index) {
+        sockets.incoming.push_back({.bytes = std::vector<std::uint8_t>(8192, index),
+                                    .flags = index % 2 == 0 ? k_nSteamNetworkingSend_Reliable
+                                                            : k_nSteamNetworkingSend_Unreliable});
+    }
+    std::vector<std::uint8_t> received;
+    FrameDelivery delivery = FrameDelivery::Unreliable;
+    ASSERT_TRUE(transport.TryReceiveFrameWithDelivery(received, delivery));
+    EXPECT_EQ(received, (std::vector<std::uint8_t>(8192, 0)));
+    EXPECT_EQ(delivery, FrameDelivery::Reliable);
+    EXPECT_EQ(sockets.released_messages, 32u);
+    SteamNetConnectionStatusChangedCallback_t info{};
+    info.m_hConn = 2;
+    info.m_info.m_eState = k_ESteamNetworkingConnectionState_ClosedByPeer;
+    NetSocketsTransport::OnConnStatusChangedStatic(&info);
+    EXPECT_EQ(sockets.close_calls, 0u);
+    for (std::uint8_t index = 1; index < frame_count; ++index) {
+        EXPECT_TRUE(transport.IsPeerConnected());
+        ASSERT_TRUE(transport.TryReceiveFrameWithDelivery(received, delivery));
+        EXPECT_EQ(received, (std::vector<std::uint8_t>(8192, index)));
+        EXPECT_EQ(delivery, index % 2 == 0 ? FrameDelivery::Reliable : FrameDelivery::Unreliable);
+    }
+    EXPECT_FALSE(transport.TryReceiveFrameWithDelivery(received, delivery));
+    EXPECT_FALSE(transport.IsPeerConnected());
+    EXPECT_EQ(sockets.close_calls, 1u);
+    EXPECT_EQ(sockets.released_messages, frame_count);
+    EXPECT_TRUE(sockets.incoming.empty());
+}
+
 TEST_F(NetSocketsTransportTest, TemporaryResultsRetryIdenticalBytes) {
     auto& sockets = *SteamNetworkingSockets();
     const std::vector<std::uint8_t> frame{1, 0, 0xFF};
@@ -161,7 +293,7 @@ TEST_F(NetSocketsTransportTest, PermanentResultsDrainBackendAndLocalQueueBeforeC
         NetSocketsTransport::OnConnStatusChangedStatic(&info);
         // Cross both the per-drain message bound and the local byte budget.
         for (std::uint8_t index = 0; index < 40; ++index)
-            sockets.incoming.emplace_back(8192, index);
+            sockets.incoming.push_back({.bytes = std::vector<std::uint8_t>(8192, index)});
         std::vector<std::uint8_t> received;
         ASSERT_TRUE(connection.TryReceiveFrame(received));
         EXPECT_EQ(received.front(), 0u);

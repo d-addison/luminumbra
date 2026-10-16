@@ -89,6 +89,9 @@ public:
 
     bool SendFrame(const std::vector<std::uint8_t>& frame,
                    FrameDelivery delivery = FrameDelivery::Reliable) override;
+    [[nodiscard]] std::size_t MaxFramePayloadBytes() const override {
+        return m_transport.MaxFramePayloadBytes();
+    }
     bool TryReceiveFrame(std::vector<std::uint8_t>& out) override;
     bool TryReceiveFrameWithDelivery(std::vector<std::uint8_t>& out,
                                      FrameDelivery& delivery) override;

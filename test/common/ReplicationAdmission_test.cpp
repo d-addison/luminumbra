@@ -50,6 +50,9 @@ public:
             m_tx->packets.push_back({frame, delivery});
         return true;
     }
+    std::size_t MaxFramePayloadBytes() const override {
+        return max_frame_payload_bytes;
+    }
     bool TryReceiveFrame(std::vector<std::uint8_t>& out) override {
         FrameDelivery delivery = FrameDelivery::Reliable;
         return TryReceiveFrameWithDelivery(out, delivery);
@@ -76,6 +79,7 @@ public:
         m_tx->packets.clear();
         m_rx->packets.clear();
     }
+    std::size_t max_frame_payload_bytes = kMaxFramePayloadBytes;
     bool suppress_delivery = false;
     bool fail_send = false;
     std::size_t receives = 0;
@@ -102,6 +106,65 @@ struct Pair {
         join.PumpAdmission(0);
     }
 };
+
+TEST(ReplicationAdmission, ForwardsBackendFrameLimitBeforeAndAfterAdmission) {
+    Pair pair;
+    const ILockstepTransport& host = pair.host;
+    const ILockstepTransport& join = pair.join;
+    EXPECT_EQ(host.MaxFramePayloadBytes(), kMaxFramePayloadBytes);
+    EXPECT_EQ(join.MaxFramePayloadBytes(), kMaxFramePayloadBytes);
+    pair.host_wire.max_frame_payload_bytes = 512u * 1024u;
+    pair.join_wire.max_frame_payload_bytes = 512u * 1024u;
+    EXPECT_EQ(host.MaxFramePayloadBytes(), 512u * 1024u);
+    EXPECT_EQ(join.MaxFramePayloadBytes(), 512u * 1024u);
+    pair.Admit();
+    ASSERT_TRUE(pair.host.admission().admitted());
+    ASSERT_TRUE(pair.join.admission().admitted());
+    EXPECT_EQ(host.MaxFramePayloadBytes(), 512u * 1024u);
+    EXPECT_EQ(join.MaxFramePayloadBytes(), 512u * 1024u);
+}
+
+TEST(ReplicationAdmission, UnreliableHelloClosesHostAndJoinerBeforeAdmission) {
+    for (const bool is_host : {false, true}) {
+        SCOPED_TRACE(is_host);
+        Pair pair;
+        auto& gate = is_host ? pair.host : pair.join;
+        auto& wire = is_host ? pair.host_wire : pair.join_wire;
+        auto& peer = is_host ? pair.join_wire : pair.host_wire;
+        gate.Begin(0);
+        ASSERT_FALSE(gate.admission().admitted());
+        ASSERT_TRUE(gate.IsPeerConnected());
+        const auto sends_before = wire.sends.size();
+        ASSERT_TRUE(
+            peer.SendFrame(EncodeHello(Identity(is_host ? 1u : 0u)), FrameDelivery::Unreliable));
+        gate.PumpAdmission(1);
+        EXPECT_TRUE(gate.admission().failed());
+        EXPECT_FALSE(gate.admission().admitted());
+        EXPECT_FALSE(gate.IsPeerConnected());
+        EXPECT_FALSE(wire.IsPeerConnected());
+        EXPECT_EQ(gate.admission().reason(), "unreliable admission Hello");
+        EXPECT_EQ(wire.close_reason, "unreliable admission Hello");
+        EXPECT_EQ(wire.sends.size(), sends_before);
+    }
+}
+
+TEST(ReplicationAdmission, FailedConnectionBeforeBeginReportsDisconnectedWithoutHello) {
+    for (const bool is_host : {false, true}) {
+        SCOPED_TRACE(is_host);
+        Pair pair;
+        auto& gate = is_host ? pair.host : pair.join;
+        auto& wire = is_host ? pair.host_wire : pair.join_wire;
+        wire.Close();
+        gate.Begin(0);
+        gate.PumpAdmission(1);
+        EXPECT_TRUE(gate.admission().failed());
+        EXPECT_FALSE(gate.admission().admitted());
+        EXPECT_FALSE(gate.IsPeerConnected());
+        EXPECT_EQ(gate.admission().reason(), "admission disconnected");
+        EXPECT_EQ(wire.close_reason, "admission disconnected");
+        EXPECT_TRUE(wire.sends.empty());
+    }
+}
 
 TEST(ReplicationAdmission, CommandsBeforeHelloAreDiscardedAndLaterCommandsReachServer) {
     for (const bool command_first : {false, true}) {
