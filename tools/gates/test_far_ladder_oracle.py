@@ -139,6 +139,26 @@ def required_station_fixture(mode="ladder"):
 
 
 class HorizonValidatorTests(unittest.TestCase):
+    def test_default_renderer_requires_ladder_and_legacy_is_explicit(self):
+        self.assertTrue(validate_artifact(fixture())["LadderChecked"])
+        with self.assertRaisesRegex(ArtifactError, "wrong-mode"):
+            validate_artifact(fixture("legacy"))
+        self.assertFalse(validate_artifact(fixture("legacy"), "legacy")["LadderChecked"])
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "artifact.json"
+            helper = Path(__file__).with_name("far_ladder_oracle.py")
+            for mode in ("ladder", "legacy"):
+                path.write_text(json.dumps(required_station_fixture(mode)))
+                result = subprocess.run([sys.executable, "-B", str(helper), "validate", str(path)],
+                                        capture_output=True, text=True)
+                with self.subTest(mode=mode):
+                    if mode == "ladder":
+                        self.assertEqual(result.returncode, 0, result.stderr)
+                        self.assertTrue(json.loads(result.stdout)["LadderChecked"])
+                    else:
+                        self.assertNotEqual(result.returncode, 0)
+                        self.assertIn("wrong-mode", result.stderr)
+
     def test_wet_fixture_and_all_water_negative_controls(self):
         self.validate(wet_fixture())
         for name, artifact in invalid_water_fixtures():
@@ -356,7 +376,7 @@ class HorizonValidatorTests(unittest.TestCase):
             self.validate(a)
         self.refused(lambda a: a["stations"][0]["snapshot"].update(submission_refusal="BackendUnavailable"), "refusal")
 
-    def test_gate_cli_requires_stations_and_explicit_renderer(self):
+    def test_gate_cli_requires_stations_and_matching_renderer(self):
         with tempfile.TemporaryDirectory() as d:
             path = Path(d) / "artifact.json"
             path.write_text(json.dumps(fixture(mixed=True)))
@@ -365,10 +385,10 @@ class HorizonValidatorTests(unittest.TestCase):
             missing = subprocess.run(base + ["--renderer", "ladder"], capture_output=True, text=True)
             self.assertNotEqual(missing.returncode, 0)
             self.assertIn("required station", missing.stderr)
-            wrong = subprocess.run(base + ["--station", "origin"], capture_output=True, text=True)
+            wrong = subprocess.run(base + ["--renderer", "legacy", "--station", "origin"], capture_output=True, text=True)
             self.assertNotEqual(wrong.returncode, 0)
             self.assertIn("wrong-mode", wrong.stderr)
-            valid = subprocess.run(base + ["--renderer", "ladder", "--station", "origin"], capture_output=True, text=True)
+            valid = subprocess.run(base + ["--station", "origin"], capture_output=True, text=True)
             self.assertEqual(valid.returncode, 0, valid.stderr)
             self.assertTrue(json.loads(valid.stdout)["LadderChecked"])
 

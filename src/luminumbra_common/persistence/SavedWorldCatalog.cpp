@@ -1,6 +1,7 @@
 #include "SavedWorldCatalog.h"
 
 #include "SaveTransaction.h"
+#include "WorldPersistenceRoundtrip.h"
 #include "WorldSaveService.h"
 #include "world/TerrainPresetLoader.h"
 
@@ -8,6 +9,7 @@
 #include <cmath>
 #include <fstream>
 #include <nlohmann/json.hpp>
+#include <utility>
 
 namespace Luminumbra::Persistence {
 namespace {
@@ -17,10 +19,23 @@ bool SafeName(const std::string& name) {
     return !name.empty() && name != "." && name != ".." &&
            name.find_first_of("/\\:") == std::string::npos;
 }
+
+bool HasFrozenPreset(const std::string& name) {
+    return name == "amplified" || name == "archipelago" || name == "cave_dense" ||
+           name == "caverns" || name == "default" || name == "flat_lands" || name == "mountains" ||
+           name == "temperate_forest";
+}
 } // namespace
 
-SavedWorld
-InspectSavedWorld(const fs::path& root, const std::string& world_id, const std::stop_token& stop) {
+SavedWorld InspectSavedWorld(const fs::path& root,
+                             const std::string& world_id,
+                             const std::stop_token& stop,
+                             WorldSaveAdmission* admission,
+                             const SavedWorldChunkSelector& retain,
+                             const World::WorldgenFileStatusReader& read_status,
+                             const SavedWorldOpenCheck& check) {
+    if (admission)
+        *admission = {};
     SavedWorld result;
     result.metadata.worldId = world_id;
     result.metadata.name = world_id;
@@ -76,7 +91,7 @@ InspectSavedWorld(const fs::path& root, const std::string& world_id, const std::
             result.metadata.name = json.at("name").get<std::string>();
         // Preserve the persistence service's exact obsolete/future/corrupt diagnostics.
         std::vector<std::string> errors;
-        if (!WorldSaveService::validate_save(save, &errors, stop)) {
+        if (!admission && !WorldSaveService::validate_save(save, &errors, stop)) {
             result.error = errors.empty() ? "Corrupt world save." : errors.front();
             return result;
         }
@@ -109,19 +124,60 @@ InspectSavedWorld(const fs::path& root, const std::string& world_id, const std::
             return result;
         }
         const auto embedded = save / "preset.json";
-        result.preset_path = fs::exists(embedded) ? embedded
-                                                  : root / "worlds/atlas/presets" /
-                                                        (result.metadata.worldType + ".json");
-        const auto preset = world::LoadTerrainPreset(result.preset_path);
+        // Changed packaged presets have frozen revision-6 copies.
+        // Additional named presets retain their original resolution path.
+        const auto presets = HasFrozenPreset(result.metadata.worldType)
+                                 ? "worlds/atlas/presets-rev6"
+                                 : "worlds/atlas/presets";
+        result.preset_path = fs::exists(embedded)
+                                 ? embedded
+                                 : root / presets / (result.metadata.worldType + ".json");
+        auto preset = world::LoadTerrainPreset(result.preset_path, read_status);
         if (!preset.ok) {
             result.error =
                 preset.errors.empty() ? "World preset is unavailable." : preset.errors.front();
             return result;
         }
+        // Within the frozen-preset compatibility scope, older metadata may omit an identity.
+        // When present, it is the FNV-1a checksum of the canonical preset JSON.
+        if (HasFrozenPreset(result.metadata.worldType) && json.contains("presetIdentity")) {
+            if (!json.at("presetIdentity").is_string() ||
+                json.at("presetIdentity").get<std::string>() !=
+                    StableChecksum(preset.source_json)) {
+                result.error = "Incompatible world preset: saved preset identity does not match.";
+                return result;
+            }
+        }
+        result.preset_source_json = preset.source_json;
+        result.preset_content_hash = preset.preset_content_hash;
+        result.error.clear();
+        if (check) {
+            result.error = check(result, preset.params);
+            if (!result.error.empty())
+                return result;
+        }
+        if (admission) {
+            WorldSaveAdmission decoded;
+            const std::function<bool(const IVec3&)> select =
+                retain ? std::function<bool(const IVec3&)>([&](const IVec3& coords) {
+                    return retain(result, preset.params, coords);
+                })
+                       : std::function<bool(const IVec3&)>{};
+            decoded.present = WorldSaveService{}.load_world(
+                *decoded.chunks, save, errors, stop, select, &decoded.inventory, &decoded.records);
+            if (!errors.empty()) {
+                result.error = errors.front();
+                return result;
+            }
+            decoded.preset = std::move(preset);
+            *admission = std::move(decoded);
+        }
         result.error.clear();
     } catch (const nlohmann::json::exception& e) {
         result.error = std::string("Corrupt world metadata: ") + e.what();
     } catch (const fs::filesystem_error& e) {
+        result.error = std::string("World unavailable: ") + e.what();
+    } catch (const std::exception& e) {
         result.error = std::string("World unavailable: ") + e.what();
     }
     return result;

@@ -64,8 +64,8 @@ must have an explicit state and compatibility contract before it is advertised.
 - CI enforces target/header/schema/content dependency direction; registered UI,
   commands, inspectors and render/audio adapters have safe lifetimes and authority.
 
-Preserve preset revision 6, LMR1 v2, FSD2 payload v3, canonical in-memory
-serialization, terrain-quality assertions and default-off policies. No obsolete
+Preset revision 7 preserves revision 6 omission compatibility. Preserve LMR1 v2,
+FSD2 payload v3, canonical in-memory serialization and terrain-quality assertions. No obsolete
 world migration or legacy loading is introduced. A necessary format change requires
 separate explanation and review, not altered expectations hidden in extraction.
 
