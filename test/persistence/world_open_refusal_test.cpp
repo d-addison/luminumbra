@@ -1335,6 +1335,7 @@ void ExpectSnapshotReloaded(const PendingSnapshotState& pending,
     GameSession loaded;
     loaded.SetRootPath(config.root_path);
     loaded.SetJobSystem(&jobs);
+    ASSERT_TRUE(config.systems_config_override.has_value());
     loaded.ApplySystemConfig(*config.systems_config_override);
     ASSERT_TRUE(loaded.LoadWorld(world_id)) << loaded.GetWorldOpenError();
     EXPECT_EQ(loaded.ComputePlantSubHash(), pending.plant_hash);
