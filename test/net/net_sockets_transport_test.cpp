@@ -183,8 +183,9 @@ TEST_F(NetSocketsTransportTest, BeforeHelloEmptyFramesStopAtFrameLimitAndResume)
         const auto pulled = sockets.released_messages - released_before;
         EXPECT_LE(pulled, 32u);
         EXPECT_LE(queued_before + pulled, kReceiveQueueFrameLimit);
-        if (delivered == 0)
+        if (delivered == 0) {
             EXPECT_EQ(pulled, 32u);
+        }
         if (delivered == 34) {
             EXPECT_EQ(queued_before, kReceiveQueueFrameLimit - 1);
             EXPECT_EQ(pulled, 1u);
