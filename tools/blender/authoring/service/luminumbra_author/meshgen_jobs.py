@@ -542,7 +542,7 @@ def read_notes(project, policy):
 class BackendBroker:
     """Small backend-only API. Finishing and candidate publication require E4."""
     def __init__(self, project, *, document="_headless", session="headless", clock=time.monotonic,
-                 loader=load_config, client_factory=BackendClient, owner_start=process_start):
+                 loader=load_config, client_factory=BackendClient, owner_start=process_start, executor=None):
         self.project = Path(project).resolve()
         self.session, self.clock, self.loader, self.client_factory = session, clock, loader, client_factory
         self.plans, self.clients, self.raw = {}, {}, {}
@@ -552,7 +552,9 @@ class BackendBroker:
         self._tokens, self._token_sources = set(), {}
         self.ledger = RequestLedger(project, document=document, owner_start=owner_start, recover_cancel=self._recover_cancel,
                                     secret_source=self._ledger_tokens)
-        self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="meshgen-backend")
+        # The broker owns and shuts down the supplied executor, too.
+        self.executor = executor if executor is not None else ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="meshgen-backend")
 
     def _client(self, effective):
         backend = effective["backends"][effective["backend"]["id"]]
