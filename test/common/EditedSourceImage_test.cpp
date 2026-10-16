@@ -13,10 +13,12 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <iterator>
+#include <limits>
 #include <memory>
 #include <sstream>
 #include <string>
@@ -410,11 +412,134 @@ TEST(EditedSourceImage, InvalidLatticeNonfiniteDensityAndMaterialCountRefuse) {
         bad.payload = payload.dump();
         ASSERT_TRUE(WorldSaveService::upsert_container_records(
             WorldSaveService::region_file_path(root.path, 0, 0), {bad}));
-        EXPECT_NE(CaptureCommittedEditedSource(root.path, 0, {tiles}, limits, output),
-                  EditedSourceError::None);
+        EXPECT_EQ(CaptureCommittedEditedSource(root.path, 0, {tiles}, limits, output),
+                  EditedSourceError::InvalidRecord);
         EXPECT_EQ(output, previous);
         EXPECT_EQ(limits.memory->used(), used);
     }
+}
+
+TEST(EditedSourceImage, FingerprintConsistentInvalidChannelsRefuseWithoutCaptureOrReservation) {
+    const auto maximum_unsigned = (std::numeric_limits<std::uint64_t>::max)();
+    const std::array<nlohmann::json, 8> invalid_materials{
+        256, maximum_unsigned, -1, 1.0, true, nullptr, "255", nlohmann::json::object()};
+    for (std::size_t corruption = 0; corruption < invalid_materials.size() + 7; ++corruption) {
+        SCOPED_TRACE(corruption);
+        SaveRoot root;
+        WorldStreamingState state;
+        const auto chunk = EditedChunk(state);
+        ASSERT_TRUE(Save(root, state));
+        ASSERT_TRUE(Index(root));
+        SnapshotIndex index;
+        ASSERT_TRUE(read_snapshot_index(root.path, index, nullptr));
+        const auto path = WorldSaveService::region_file_path(root.path, 0, 0);
+        const auto member =
+            std::find_if(index.members.begin(), index.members.end(), [](const auto& entry) {
+                return entry.path == "chunks/region/r.0.0.lmr";
+            });
+        ASSERT_NE(member, index.members.end());
+        const auto fingerprint_bytes = [](const std::string& region_bytes) {
+            return region_bytes.substr(8, 8) + region_bytes.substr(17);
+        };
+        // Calibrate the independent byte projection against a valid production fingerprint.
+        const auto baseline_bytes = Read(path);
+        ASSERT_GE(baseline_bytes.size(), 26u);
+        const auto baseline = fingerprint_bytes(baseline_bytes);
+        ASSERT_EQ(member->bytes, static_cast<std::uint64_t>(baseline.size()));
+        ASSERT_EQ(member->fnv64, fnv1a64_bytes(baseline.data(), baseline.size()));
+        // The raw fixture writer is intentionally unindexed; install a matching index below.
+        ASSERT_TRUE(fs::remove(snapshot_index_path(root.path)));
+        auto payload = nlohmann::json::parse(SerializeWorldStreamingStateSnapshotJson(state));
+        auto& record = payload["chunks"][0];
+        if (corruption < invalid_materials.size()) {
+            record["material_data"][kSamples - 1] = invalid_materials[corruption];
+        } else {
+            switch (corruption - invalid_materials.size()) {
+                case 0:
+                    record["material_data"] = {256};
+                    break;
+                case 1:
+                    record["material_data"] = {maximum_unsigned};
+                    break;
+                case 2:
+                    record["sdf_data"].push_back(1.0);
+                    break;
+                case 3:
+                    record["sdf_data"].push_back(maximum_unsigned);
+                    break;
+                case 4:
+                    record["sdf_data"][kSamples - 1] = true;
+                    break;
+                case 5:
+                    record["sdf_data"][kSamples - 1] = "1";
+                    break;
+                case 6:
+                    record["sdf_data"][kSamples - 1] = nullptr;
+                    break;
+            }
+        }
+        WorldSaveService::ContainerRecord bad;
+        bad.id = chunk->get_id();
+        bad.flags = 1;
+        bad.payload = payload.dump();
+        ASSERT_TRUE(WorldSaveService::upsert_container_records(path, {bad}));
+        const auto limits = Limits();
+        const std::array tiles{Tile(1)};
+        std::shared_ptr<const EditedSourceImage> output, prepared, published;
+        EXPECT_EQ(CaptureCommittedEditedSource(root.path, 0, {tiles}, limits, output),
+                  EditedSourceError::InvalidRecord);
+        EXPECT_FALSE(output);
+        EXPECT_EQ(limits.memory->used(), 0u);
+
+        // Independently fingerprint the single-record LMR1 bytes, omitting the container
+        // header and the LOD byte, exactly as the authoritative member contract specifies.
+        const auto bytes = Read(path);
+        ASSERT_GE(bytes.size(), 26u);
+        ASSERT_EQ(bytes.substr(0, 4), "LMR1");
+        ASSERT_EQ(static_cast<unsigned char>(bytes[6]), 1u);
+        ASSERT_EQ(static_cast<unsigned char>(bytes[7]), 0u);
+        ASSERT_EQ(static_cast<unsigned char>(bytes[16]), 0u);
+        const auto fingerprinted = fingerprint_bytes(bytes);
+        member->bytes = static_cast<std::uint64_t>(fingerprinted.size());
+        member->fnv64 = fnv1a64_bytes(fingerprinted.data(), fingerprinted.size());
+        ASSERT_TRUE(WorldSaveService::durable_write_file(
+            snapshot_index_path(root.path), encode_snapshot_index(index), nullptr));
+        EXPECT_EQ(CaptureCommittedEditedSource(root.path, 1, {tiles}, limits, output),
+                  EditedSourceError::InvalidRecord);
+        EXPECT_FALSE(output);
+        EXPECT_EQ(limits.memory->used(), 0u);
+        SaveTransaction transaction(root.path, 0, {}, &WorldSaveService::member_digest);
+        ASSERT_TRUE(transaction.begin(nullptr));
+        EXPECT_EQ(CapturePreparedEditedSource(transaction, {tiles}, limits, prepared),
+                  EditedSourceError::InvalidRecord);
+        EXPECT_FALSE(prepared);
+        EXPECT_EQ(PublishCommittedEditedSource(prepared, published), EditedSourceError::Ineligible);
+        EXPECT_FALSE(published);
+        EXPECT_EQ(limits.memory->used(), 0u);
+        transaction.abort(nullptr);
+    }
+}
+
+TEST(EditedSourceImage, UnrelatedSaveTransactionAllowsCommittedCapture) {
+    SaveRoot root, unrelated;
+    WorldStreamingState state;
+    EditedChunk(state);
+    ASSERT_TRUE(Save(root, state));
+    ASSERT_TRUE(Index(root));
+    ASSERT_TRUE(Save(unrelated, state));
+    ASSERT_TRUE(Index(unrelated));
+    SaveTransaction transaction(unrelated.path, 0, {}, &WorldSaveService::member_digest);
+    ASSERT_TRUE(transaction.begin(nullptr));
+    const auto limits = Limits();
+    const std::array tiles{Tile(1)};
+    std::shared_ptr<const EditedSourceImage> output;
+    ASSERT_EQ(CaptureCommittedEditedSource(root.path, 1, {tiles}, limits, output),
+              EditedSourceError::None);
+    ASSERT_TRUE(output);
+    EXPECT_TRUE(output->RendererEligible());
+    output.reset();
+    EXPECT_EQ(limits.memory->used(), 0u);
+    transaction.abort(nullptr);
 }
 
 TEST(EditedSourceImage, SharedBoundaryDisagreementRefusesBeforeCoarseSampling) {
