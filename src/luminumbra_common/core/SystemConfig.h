@@ -33,6 +33,7 @@ struct UserSettings {
     std::string resolution;                 // "" = native/default; else "WxH"
     std::string window_mode = "borderless"; // windowed | borderless | fullscreen
     bool vsync = true;                      // Saved user choices override this default.
+    int frame_cap = 0;                      // 0 = unlimited; else 60, 120, 144 or 240 FPS.
     float fov = 45.0f;
     float render_scale = 1.0f;
     float ui_scale = 1.0f; // HUD/UI density-independent-pixel ratio (0.5..2.5); 1.0 = native px.

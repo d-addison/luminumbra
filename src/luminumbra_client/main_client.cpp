@@ -36,6 +36,7 @@ __declspec(dllexport) extern const int AmdPowerXpressRequestHighPerformance = 1;
 #include "audio/NullAudioManager.h"
 #include "core/BenchmarkPose.h"
 #include "core/Debug.h"
+#include "core/FrameLimiter.h"
 #include "core/GameState.h"
 #include "core/IsolationConfig.h" // ScenarioHarness::ParseIsolationConfig (render-only layer isolation)
 #include "core/Log.h"
@@ -1990,16 +1991,19 @@ int main(int argc, char* argv[]) {
     LUMINUMBRA_ASSERT(window, "Failed to create GLFW window!");
     glfwMakeContextCurrent(window);
 
-    // VSync from user settings (user.video.vsync). This is the ONLY glfwSwapInterval call;
-    // before this the swap interval was never set (driver default = uncapped). Default OFF
-    // preserves the uncapped 300fps target; the settings menu flips it.
-    // the --render-benchmark capture ALWAYS runs uncapped (swap interval 0) regardless
-    // of the persisted user vsync setting — a vsync-capped present leaves the GPU idle between
-    // frames, which downclocks it and inflates every per-pass GPU timer, making the budget gate
-    // unreproducible. The fixed-scenario budget must measure the saturated/boosted GPU state.
-    glfwSwapInterval(
-        (!g_app.capture.render_benchmark_path.empty() || g_systemConfig.user().vsync == false) ? 0
-                                                                                               : 1);
+    // Extend the benchmark's presentation override to scenario/perf captures.
+    // Keep saved player choices intact, including when either settings UI is used.
+    const luminumbra::core::FramePacingOverrides pacing_overrides{
+        .benchmark_active = !g_app.capture.render_benchmark_path.empty(),
+        .scenario_active = scenario_config.active(),
+        .profiling_active = g_app.capture.profile_fly_seconds > 0.0};
+    int applied_swap_interval =
+        luminumbra::core::ResolveFramePacing(
+            g_systemConfig.user().vsync, g_systemConfig.user().frame_cap, pacing_overrides)
+                .vsync
+            ? 1
+            : 0;
+    glfwSwapInterval(applied_swap_interval);
 
     // [[maybe_unused]]: LUMINUMBRA_ASSERT compiles out in release builds, which
     // compile with warnings as errors.
@@ -2773,7 +2777,13 @@ int main(int argc, char* argv[]) {
         };
         sb.SetVSync = [&](bool v) {
             g_systemConfig.user().vsync = v;
-            glfwSwapInterval(v ? 1 : 0);
+        };
+        sb.GetFrameCap = [&] {
+            return g_systemConfig.user().frame_cap;
+        };
+        sb.SetFrameCap = [&](int cap) {
+            if (luminumbra::core::IsValidFrameCap(cap))
+                g_systemConfig.user().frame_cap = cap;
         };
         sb.GetFov = [&] {
             return g_systemConfig.user().fov;
@@ -3129,8 +3139,15 @@ int main(int argc, char* argv[]) {
         benchmark_queries->initialize();
         renderPipeline.set_benchmark_gpu_queries(benchmark_queries.get());
     }
+    Luminumbra::Client::FrameLimiter frame_limiter;
+    Luminumbra::Client::SteadyFrameTiming frame_timing;
     while (!glfwWindowShouldClose(window)) {
         MainLoopHeartbeat().fetch_add(1, std::memory_order_relaxed);
+        const auto pacing = luminumbra::core::ResolveFramePacing(
+            g_systemConfig.user().vsync, g_systemConfig.user().frame_cap, pacing_overrides);
+        // Excluded from work buckets: wait before all frame/CPU/telemetry timers.
+        // Delta time below still includes pacing so simulation follows real time.
+        frame_limiter.pace(pacing.frame_cap, frame_timing);
         float currentFrame = (float)glfwGetTime();
         float deltaTime = currentFrame - lastFrame;
         lastFrame = currentFrame;
@@ -4736,6 +4753,17 @@ int main(int argc, char* argv[]) {
         if (g_rb_active)
             g_rb_before_swap = std::chrono::steady_clock::now();
         const auto _beforeSwap = std::chrono::steady_clock::now();
+        // Resolve again after UI changes; settings callbacks only change the model.
+        const int swap_interval =
+            luminumbra::core::ResolveFramePacing(
+                g_systemConfig.user().vsync, g_systemConfig.user().frame_cap, pacing_overrides)
+                    .vsync
+                ? 1
+                : 0;
+        if (swap_interval != applied_swap_interval) {
+            glfwSwapInterval(swap_interval);
+            applied_swap_interval = swap_interval;
+        }
         glfwSwapBuffers(window);
         const auto benchmark_present_end = benchmark_v3 ? std::chrono::steady_clock::now()
                                                         : std::chrono::steady_clock::time_point{};

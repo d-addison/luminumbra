@@ -10,6 +10,7 @@
 #include "luminumbra_common/components/CoreComponents.h"
 #include "luminumbra_common/components/CreatureComponents.h"
 #include "luminumbra_common/components/PlantComponents.h"
+#include "luminumbra_common/core/FramePacing.h"
 #include "luminumbra_common/core/SystemConfig.h"
 #include "luminumbra_common/game/CodexView.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
@@ -1087,9 +1088,15 @@ void DrawSettingsWindow(ClientAppContext& app,
             if (ImGui::SliderFloat("FOV", &us.fov, 30.0f, 110.0f, "%.0f deg")) {
                 camera->Zoom = us.fov;
             }
-            if (ImGui::Checkbox("VSync", &us.vsync)) {
-                glfwSwapInterval(us.vsync ? 1 : 0);
+            ImGui::Checkbox("VSync", &us.vsync);
+            const char* cap_labels[] = {"Unlimited", "60", "120", "144", "240"};
+            int selected_cap = 0;
+            for (int i = 0; i < 5; ++i) {
+                if (us.frame_cap == luminumbra::core::kFrameCaps[i])
+                    selected_cap = i;
             }
+            if (ImGui::Combo("Frame cap", &selected_cap, cap_labels, 5))
+                us.frame_cap = luminumbra::core::kFrameCaps[selected_cap];
             ImGui::Separator();
             ImGui::SliderFloat("Time scale", &app.capture.timeScale, 0.0f, 8.0f, "%.2fx");
             ImGui::SameLine();

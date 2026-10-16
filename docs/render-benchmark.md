@@ -325,7 +325,21 @@ diagnostics localize a future wait; they do not establish the cause of the UCRT
 timeouts or a fix for the original `0xCFFFFFFF` incident.
 
 Shipping rendering enables vsync, TAAU and tier-1 volumetrics. Benchmark startup
-continues to force vsync off. Spatial parity, upscale seam and terrain AOV captures
+forces vsync off and the frame cap to unlimited, regardless of saved settings.
+The same presentation override applies throughout `--scenario` and `--profile-fly`
+runs, including live settings edits; it does not modify the saved choices.
+Players can set `user.video.vsync` (boolean, existing default on) and
+`user.video.frame_cap` (integer: 0 for unlimited, 60, 120, 144 or 240; default 0)
+through the settings screen. Invalid fields retain their previous/default values.
+The client limiter uses `steady_clock` and sleeps before spinning to its deadline.
+Windows prefers a high-resolution waitable timer. If unavailable, it reserves a
+margin of at least 2 milliseconds, sized to cover the queried system timer tick
+plus 1 millisecond of slack, without changing the global timer period. Other
+platforms and the high-resolution timer reserve 200 microseconds. Its wait runs
+before the frame work timers and is excluded from CPU/work buckets; benchmark
+wall timing has no cap wait because measurement always runs uncapped.
+
+Spatial parity, upscale seam and terrain AOV captures
 explicitly disable TAAU and record zero jitter; normal-default captures retain the
 temporal path. Validators accept preset revisions 6 and 7. The shipping hills
 traversal now declares revision 7; its pinned identities need recapture from CI
