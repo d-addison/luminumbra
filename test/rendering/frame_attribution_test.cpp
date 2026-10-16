@@ -1,0 +1,358 @@
+#include "luminumbra_client/app/FrameAttribution.h"
+
+#include <gtest/gtest.h>
+
+#include <algorithm>
+#include <array>
+#include <filesystem>
+#include <fstream>
+#include <sstream>
+#include <streambuf>
+#include <string>
+#include <vector>
+
+namespace {
+using namespace Luminumbra::Client::Attribution;
+
+TEST(FrameAttribution, RebuildReasonsIdentifyEachSignatureComponent) {
+    const ScatterSignature previous{11, 22, 33, 44};
+    EXPECT_EQ(classify_rebuild(previous, previous, false, false), Initial);
+    EXPECT_EQ(classify_rebuild(previous, previous, false, true), Initial | Backlog);
+    EXPECT_EQ(classify_rebuild(previous, previous, true, false), 0u);
+    EXPECT_EQ(classify_rebuild(previous, previous, true, true), Backlog);
+    EXPECT_EQ(classify_rebuild(previous, {12, 22, 33, 44}, true, false), Config);
+    EXPECT_EQ(classify_rebuild(previous, {11, 23, 33, 44}, true, false), CameraCell);
+    EXPECT_EQ(classify_rebuild(previous, {11, 22, 34, 44}, true, false), GroundRevision);
+    EXPECT_EQ(classify_rebuild(previous, {11, 22, 33, 45}, true, false), ScatterChunks);
+    EXPECT_EQ(classify_rebuild(previous, {12, 23, 34, 45}, true, true),
+              Config | CameraCell | GroundRevision | ScatterChunks | Backlog);
+}
+
+TEST(FrameAttribution, CapacityMarkerIsNeverAnObservedCount) {
+    constexpr std::size_t capacity = 262144;
+    EXPECT_FALSE(generated_instance_count(true, false, false, capacity).has_value());
+    EXPECT_FALSE(generated_instance_count(true, false, true, capacity).has_value());
+    EXPECT_FALSE(generated_instance_count(true, true, false, capacity).has_value());
+    EXPECT_EQ(generated_instance_count(true, true, true, 123).value(), 123u);
+    EXPECT_EQ(generated_instance_count(true, true, true, 0).value(), 0u);
+    EXPECT_EQ(generated_instance_count(false, false, false, 123).value(), 123u);
+    EXPECT_EQ(generated_instance_count(false, false, false, 0).value(), 0u);
+}
+
+TEST(FrameAttribution, ExclusiveBucketsSumToFrameIncludingRemainder) {
+    const FrameBuckets gameplay{1, 2, 3, 4, 5, 6, 7, 8, 0, 9};
+    EXPECT_DOUBLE_EQ(gameplay.sum(), 45);
+    EXPECT_DOUBLE_EQ(gameplay.other(50), 5);
+    const FrameBuckets menu{0, 0, 0, 2, 0, 0, 0, 1, 7, 3};
+    EXPECT_DOUBLE_EQ(menu.sum(), 13);
+    EXPECT_DOUBLE_EQ(menu.other(15), 2);
+    const std::array<FrameBuckets, 3> cases{FrameBuckets{}, gameplay, menu};
+    for (const auto& buckets : cases) {
+        for (const double frame : {0.0, 16.666666, 50.0, 218.0})
+            EXPECT_NEAR(buckets.sum() + buckets.other(frame), frame, 1e-12);
+    }
+    // Preserve a negative remainder to reveal overlapping/broken scope inputs.
+    EXPECT_DOUBLE_EQ(gameplay.other(44), -1);
+}
+
+std::vector<std::string> fields(const std::string& row) {
+    std::vector<std::string> result;
+    std::istringstream input(row);
+    std::string field;
+    while (std::getline(input, field, ','))
+        result.push_back(field);
+    return result;
+}
+
+TEST(FrameAttribution, CsvColumnsMatchHeaderAndUnknownCountsAreEmpty) {
+    FoliageRebuild foliage{};
+    foliage.rebuild_calls = 1;
+    foliage.signature_ms = 0.125;
+    foliage.sort_ms = 0.25;
+    foliage.surface_ms = 0.5;
+    foliage.repack_ms = 0.75;
+    foliage.hash_ms = 1;
+    foliage.upload_ms = 1.25;
+    foliage.palette_scratch_ms = 1.5;
+    foliage.dispatch_ms = 1.75;
+    foliage.cpu_fallback_ms = 2;
+    foliage.reasons = GroundRevision | Backlog;
+    foliage.admitted_columns = 10;
+    foliage.surface_misses = 4;
+    foliage.deferred_columns = 6;
+    foliage.copied_bytes = 1024;
+    foliage.hashed_bytes = 2048;
+    foliage.uploaded_bytes = 4096;
+    foliage.scratch_bytes = 8192;
+    foliage.backlog = true;
+    foliage.path = FoliagePath::Cpu;
+    foliage.fallback = FallbackReason::ColumnCapacity;
+    const FrameBuckets buckets{1, 2, 3, 4, 5, 6, 7, 8, 9, 10};
+    std::ostringstream header;
+    write_csv_header(header);
+    EXPECT_EQ(
+        header.str(),
+        "frame,frame_ms,sim_ms,stream_ms,render_ms,present_ms,foliage_ms,scatter_ms,"
+        "rebake_ms,poll_ms,menu_ms,ui_ms,other_ms,signature_ms,sort_ms,surface_ms,"
+        "repack_ms,hash_ms,upload_ms,palette_scratch_ms,dispatch_ms,cpu_fallback_ms,"
+        "rebuild_calls,reason_mask,admitted_columns,surface_misses,deferred_columns,copied_bytes,"
+        "hashed_bytes,uploaded_bytes,scratch_bytes,backlog,path,fallback,"
+        "instance_capacity,generated_count,count_generation\n");
+    std::ostringstream unknown;
+    write_csv_row(unknown, 401, 60, buckets, foliage, 262144, false, 262144, 7);
+    EXPECT_EQ(unknown.str(),
+              "401,60.000000,1.000000,2.000000,3.000000,4.000000,5.000000,6.000000,"
+              "7.000000,8.000000,9.000000,10.000000,5.000000,0.125000,0.250000,0.500000,"
+              "0.750000,1.000000,1.250000,1.500000,1.750000,2.000000,1,40,10,4,6,1024,"
+              "2048,4096,8192,1,cpu,column_capacity,262144,,\n");
+    EXPECT_EQ(fields(header.str()).size(), fields(unknown.str()).size());
+    std::ostringstream known;
+    write_csv_row(known, 402, 60, buckets, foliage, 262144, true, 123, 7);
+    EXPECT_EQ(fields(known.str()).size(), fields(header.str()).size());
+    EXPECT_EQ(fields(known.str()).at(35), "123");
+    EXPECT_EQ(fields(known.str()).at(36), "7\n");
+    std::ostringstream zero;
+    write_csv_row(zero, 403, 60, buckets, foliage, 262144, true, 0, 8);
+    EXPECT_EQ(fields(zero.str()).at(35), "0");
+}
+
+TEST(FrameAttribution, CsvRecordsShortFramesPastTheSlowFrameWindow) {
+    std::ostringstream out;
+    write_csv_row(out, 9000, 1, {}, {}, 262144, false, 0, 0);
+    EXPECT_EQ(out.str().substr(0, 14), "9000,1.000000,");
+    EXPECT_NE(out.str().find(",not_called,none,262144,,\n"), std::string::npos);
+}
+
+TEST(FrameAttribution, NestedRebuildsAreRemovedFromTheirParentBuckets) {
+    FrameBuckets buckets{};
+    buckets.render = exclusive_parent_ms(20, 3, 8);
+    buckets.menu = exclusive_parent_ms(12, 8, 15);
+    buckets.foliage = 15; // 3 outside parents, 5 inside render, 7 inside menu.
+    buckets.present = 2;
+    EXPECT_DOUBLE_EQ(buckets.render, 15);
+    EXPECT_DOUBLE_EQ(buckets.menu, 5);
+    EXPECT_DOUBLE_EQ(buckets.sum(), 37);
+    EXPECT_DOUBLE_EQ(buckets.other(40), 3);
+}
+
+TEST(FrameAttribution, FrameCollectorIncludesAllCallersAndDoesNotLeakBetweenFrames) {
+    EXPECT_FALSE(foliage_frame_active());
+    FoliageRebuild gpu{};
+    gpu.path = FoliagePath::Gpu;
+    gpu.reasons = Initial;
+    gpu.signature_ms = 1;
+    gpu.sort_ms = 2;
+    gpu.surface_ms = 3;
+    gpu.repack_ms = 4;
+    gpu.hash_ms = 5;
+    gpu.upload_ms = 6;
+    gpu.palette_scratch_ms = 7;
+    gpu.dispatch_ms = 8;
+    gpu.admitted_columns = 5;
+    gpu.surface_misses = 4;
+    gpu.deferred_columns = 1;
+    gpu.copied_bytes = 100;
+    gpu.hashed_bytes = 200;
+    gpu.uploaded_bytes = 300;
+    gpu.scratch_bytes = 400;
+    gpu.backlog = true;
+    {
+        FoliageFrameScope frame(true);
+        EXPECT_TRUE(foliage_frame_active());
+        record_foliage_rebuild(gpu, 40, 262144, std::nullopt, 0);
+        record_foliage_rebuild(gpu, 40, 262144, 123, 7);
+        const auto& first = frame.snapshot();
+        EXPECT_EQ(first.rebuild.rebuild_calls, 2u);
+        EXPECT_EQ(first.rebuild.path, FoliagePath::Gpu);
+        EXPECT_EQ(first.rebuild.fallback, FallbackReason::None);
+        EXPECT_EQ(first.rebuild.reasons, Initial);
+        EXPECT_DOUBLE_EQ(first.rebuild.signature_ms, 2);
+        EXPECT_DOUBLE_EQ(first.rebuild.sort_ms, 4);
+        EXPECT_DOUBLE_EQ(first.rebuild.surface_ms, 6);
+        EXPECT_DOUBLE_EQ(first.rebuild.repack_ms, 8);
+        EXPECT_DOUBLE_EQ(first.rebuild.hash_ms, 10);
+        EXPECT_DOUBLE_EQ(first.rebuild.upload_ms, 12);
+        EXPECT_DOUBLE_EQ(first.rebuild.palette_scratch_ms, 14);
+        EXPECT_DOUBLE_EQ(first.rebuild.dispatch_ms, 16);
+        EXPECT_EQ(first.rebuild.admitted_columns, 10u);
+        EXPECT_EQ(first.rebuild.surface_misses, 8u);
+        EXPECT_EQ(first.rebuild.deferred_columns, 2u);
+        EXPECT_EQ(first.rebuild.copied_bytes, 200u);
+        EXPECT_EQ(first.rebuild.hashed_bytes, 400u);
+        EXPECT_EQ(first.rebuild.uploaded_bytes, 600u);
+        EXPECT_EQ(first.rebuild.scratch_bytes, 800u);
+        EXPECT_TRUE(first.rebuild.backlog);
+        EXPECT_DOUBLE_EQ(first.rebuild_ms, 80);
+        EXPECT_TRUE(first.count_known);
+        EXPECT_EQ(first.generated_count, 123u);
+        EXPECT_EQ(first.count_generation, 7u);
+        {
+            FoliageFrameScope nested_frame(true);
+            record_foliage_rebuild(gpu, 40, 262144, 1, 8);
+            EXPECT_EQ(nested_frame.snapshot().rebuild.rebuild_calls, 1u);
+            EXPECT_EQ(frame.snapshot().rebuild.rebuild_calls, 2u);
+        }
+        FoliageRebuild cpu{};
+        cpu.path = FoliagePath::Cpu;
+        cpu.fallback = FallbackReason::ColumnCapacity;
+        cpu.reasons = Backlog;
+        cpu.cpu_fallback_ms = 10;
+        record_foliage_rebuild(cpu, 11, 262144, std::nullopt, 0);
+        EXPECT_EQ(frame.snapshot().rebuild.rebuild_calls, 3u);
+        EXPECT_EQ(frame.snapshot().rebuild.path, FoliagePath::Mixed);
+        EXPECT_EQ(frame.snapshot().rebuild.fallback, FallbackReason::Mixed);
+        EXPECT_EQ(frame.snapshot().rebuild.reasons, Initial | Backlog);
+        EXPECT_DOUBLE_EQ(frame.snapshot().rebuild.cpu_fallback_ms, 10);
+        EXPECT_DOUBLE_EQ(frame.snapshot().rebuild_ms, 91);
+        EXPECT_FALSE(frame.snapshot().count_known);
+    }
+    EXPECT_FALSE(foliage_frame_active());
+    record_foliage_rebuild(gpu, 40, 262144, 123, 7);
+    FoliageFrameScope next_frame(true);
+    EXPECT_EQ(next_frame.snapshot().rebuild.rebuild_calls, 0u);
+    EXPECT_EQ(next_frame.snapshot().rebuild.path, FoliagePath::NotCalled);
+    EXPECT_DOUBLE_EQ(next_frame.snapshot().rebuild_ms, 0);
+}
+
+TEST(FrameAttribution, DisabledCollectionDoesNotPublishOrChangeStageTotals) {
+    double milliseconds = 7;
+    {
+        StageTimer timer(milliseconds, false);
+        timer.stop();
+        timer.stop();
+    }
+    EXPECT_DOUBLE_EQ(milliseconds, 7);
+    FoliageFrameScope disabled;
+    EXPECT_FALSE(foliage_frame_active());
+    record_foliage_rebuild({}, 10, 262144, 123, 7);
+    EXPECT_EQ(disabled.snapshot().rebuild.rebuild_calls, 0u);
+    EXPECT_DOUBLE_EQ(disabled.snapshot().rebuild_ms, 0);
+    {
+        FoliageFrameScope enabled(true);
+        ASSERT_TRUE(foliage_frame_active());
+        {
+            FoliageFrameScope nested_disabled(false);
+            EXPECT_FALSE(foliage_frame_active());
+            record_foliage_rebuild({}, 10, 262144, 123, 7);
+        }
+        EXPECT_TRUE(foliage_frame_active());
+        EXPECT_EQ(enabled.snapshot().rebuild.rebuild_calls, 0u);
+        record_foliage_rebuild({}, 10, 262144, 123, 7);
+        EXPECT_EQ(enabled.snapshot().rebuild.rebuild_calls, 1u);
+    }
+    EXPECT_FALSE(foliage_frame_active());
+}
+
+// A bounded sink that accepts a prefix, then reports a write error on every
+// platform. It exercises the same row writer and status used by FrameRecorder.
+class FailingBuffer : public std::streambuf {
+public:
+    std::streamsize written() const {
+        return m_written;
+    }
+
+protected:
+    std::streamsize xsputn(const char*, std::streamsize count) override {
+        const auto accepted = std::min(count, kCapacity - m_written);
+        m_written += accepted;
+        return accepted;
+    }
+    int_type overflow(int_type value) override {
+        if (traits_type::eq_int_type(value, traits_type::eof()))
+            return traits_type::not_eof(value);
+        if (m_written == kCapacity)
+            return traits_type::eof();
+        ++m_written;
+        return value;
+    }
+
+private:
+    // Accept at most 64 bytes without retaining any data.
+    static constexpr std::streamsize kCapacity = 64;
+    std::streamsize m_written = 0;
+};
+
+TEST(FrameAttribution, PartialWriteFailureIsReportedAndRemainsInactive) {
+    FailingBuffer buffer;
+    std::ostream out(&buffer);
+    EXPECT_FALSE(write_csv_row(out, 1, 1, {}, {}, 262144, false, 0, 0));
+    EXPECT_FALSE(out.good());
+    EXPECT_EQ(buffer.written(), 64);
+    EXPECT_FALSE(write_csv_row(out, 2, 1, {}, {}, 262144, false, 0, 0));
+    EXPECT_EQ(buffer.written(), 64);
+}
+
+class FrameRecorderTest : public ::testing::Test {
+protected:
+    void SetUp() override {
+        // Atomic directory creation isolates concurrently launched CTest cases.
+        const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
+        for (int attempt = 0; attempt < 64; ++attempt) {
+            const auto candidate = std::filesystem::temp_directory_path() /
+                                   ("luminumbra-frame-attribution-" + std::to_string(stamp) + "-" +
+                                    std::to_string(attempt));
+            if (std::filesystem::create_directory(candidate)) {
+                root = candidate;
+                break;
+            }
+        }
+        ASSERT_FALSE(root.empty());
+    }
+    void TearDown() override {
+        if (!root.empty())
+            std::filesystem::remove_all(root);
+    }
+    std::filesystem::path root;
+};
+
+TEST_F(FrameRecorderTest, DisabledRecorderCreatesNoLogs) {
+    FrameRecorder recorder(false, root / "logs");
+    EXPECT_FALSE(recorder.active());
+    EXPECT_FALSE(std::filesystem::exists(root / "logs"));
+    EXPECT_FALSE(recorder.record(1, 1, {}, {}, 0, false, 0, 0));
+}
+
+TEST_F(FrameRecorderTest, DirectoryCreationFailureLeavesRecorderInactive) {
+    const auto logs = root / "logs";
+    {
+        std::ofstream blocker(logs, std::ios::binary);
+        ASSERT_TRUE(blocker.good());
+    }
+    FrameRecorder recorder(true, logs);
+    EXPECT_FALSE(recorder.active());
+    EXPECT_FALSE(recorder.record(1, 1, {}, {}, 0, false, 0, 0));
+    EXPECT_TRUE(std::filesystem::is_regular_file(logs));
+}
+
+TEST_F(FrameRecorderTest, FileOpenFailureLeavesRecorderInactive) {
+    const auto destination = root / "logs/frame-attribution.csv";
+    ASSERT_TRUE(std::filesystem::create_directories(destination));
+    FrameRecorder recorder(true, root / "logs");
+    EXPECT_FALSE(recorder.active());
+    EXPECT_FALSE(recorder.record(1, 1, {}, {}, 0, false, 0, 0));
+    EXPECT_TRUE(std::filesystem::is_directory(destination));
+}
+
+TEST_F(FrameRecorderTest, RecordsEveryShortFrameAndDrainsBufferOnClose) {
+    {
+        FrameRecorder recorder(true, root / "logs");
+        ASSERT_TRUE(recorder.active());
+        for (std::uint64_t frame = 1; frame <= 501; ++frame)
+            ASSERT_TRUE(recorder.record(frame, 1, {}, {}, 262144, false, 262144, 0));
+    }
+    // Close the writer before reading/removing files, including on Windows.
+    std::ifstream input(root / "logs/frame-attribution.csv", std::ios::binary);
+    ASSERT_TRUE(input.good());
+    std::string line;
+    std::string last;
+    std::size_t rows = 0;
+    while (std::getline(input, line)) {
+        last = line;
+        ++rows;
+    }
+    ASSERT_EQ(rows, 502u); // Header and every frame, including beyond 400.
+    EXPECT_EQ(last.substr(0, 13), "501,1.000000,");
+    EXPECT_EQ(fields(last).at(34), "262144");
+    EXPECT_EQ(last.substr(last.size() - 2), ",,");
+}
+} // namespace

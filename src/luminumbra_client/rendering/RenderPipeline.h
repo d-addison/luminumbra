@@ -236,7 +236,9 @@ public:
         // when foliage is disabled (the pass is a no-op), keeping existing
         // visual gates byte-stable.
         size_t foliage_draws = 0;
-        size_t foliage_instances_drawn = 0;
+        size_t foliage_instances_drawn = 0; // Only a CPU-known count, never capacity.
+        size_t foliage_instance_capacity = 0;
+        bool foliage_instance_count_known = true;
         size_t final_blits = 0;
         // Per-pass GPU timings sampled from a GL_TIMESTAMP query ring
         // (frame N publishes the timings recorded at frame ). Values stay

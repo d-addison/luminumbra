@@ -28,6 +28,8 @@ target_include_directories(luminumbra_client PUBLIC
 
 target_link_libraries(luminumbra_client PUBLIC
     luminumbra_common
+    # Empty in default builds; profiling builds opt in through the interface.
+    luminumbra_profiler
     rmlui
     glfw
     miniaudio

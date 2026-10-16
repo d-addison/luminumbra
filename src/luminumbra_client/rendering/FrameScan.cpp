@@ -183,6 +183,8 @@ FrameScanReport ScanFrame(const RenderPipeline& pipeline,
     // --- 5. Foliage tally (separate alpha-keyed scatter pass) -----------------
     if (const FoliagePass* fol = pipeline.foliage()) {
         report.foliage_instances = static_cast<std::uint64_t>(fol->frame_instance_count());
+        report.foliage_instance_capacity = fol->instance_capacity();
+        report.foliage_instance_count_known = fol->frame_instance_count_known();
     }
 
     report.ok = true;
@@ -217,7 +219,10 @@ bool WriteFrameScanReport(const FrameScanReport& report, const std::filesystem::
     j["water"] = std::move(water);
 
     nlohmann::json foliage;
-    foliage["instances"] = report.foliage_instances;
+    foliage["instances"] = report.foliage_instance_count_known
+                               ? nlohmann::json(report.foliage_instances)
+                               : nlohmann::json(nullptr);
+    foliage["instance_capacity"] = report.foliage_instance_capacity;
     j["foliage"] = std::move(foliage);
 
     std::error_code ec;

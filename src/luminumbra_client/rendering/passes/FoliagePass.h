@@ -4,11 +4,13 @@
 #include "../FoliageEvidence.h"
 #include "../FoliageGroundMesh.h"
 #include "../RenderContext.h"
+#include "app/FrameAttribution.h"
 
 #include <array>
 #include <cstdint>
 #include <filesystem>
 #include <memory>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -178,8 +180,32 @@ public:
     void set_enabled(bool on) {
         m_enabled = on;
     }
+    // A GPU indirect draw has no CPU-known count until readback completes.
+    bool frame_instance_count_known() const {
+        return Client::Attribution::generated_instance_count(
+                   m_gpu_active,
+                   m_readback_enabled,
+                   m_gpu_generated_count.has_value(),
+                   m_gpu_active ? m_gpu_generated_count.value_or(0) : m_draw_instance_limit)
+            .has_value();
+    }
     std::size_t frame_instance_count() const {
-        return m_frame_instance_count;
+        return Client::Attribution::generated_instance_count(
+                   m_gpu_active,
+                   m_readback_enabled,
+                   m_gpu_generated_count.has_value(),
+                   m_gpu_active ? m_gpu_generated_count.value_or(0) : m_draw_instance_limit)
+            .value_or(0);
+    }
+    std::uint64_t frame_instance_count_generation() const {
+        return m_gpu_active ? m_gpu_count_generation : m_instance_generation;
+    }
+    std::size_t instance_capacity() const {
+        return kMaxInstances;
+    }
+    // Last collected invocation; timings measure CPU submission, not GPU completion.
+    const Client::Attribution::FoliageRebuild& rebuild_attribution() const {
+        return m_rebuild_attribution;
     }
 
     // Loads the scatter archetype set from data/common/foliage/scatter_set.json.
@@ -238,9 +264,11 @@ public:
     // the gate exact)..
     void set_readback_enabled(bool e) {
         m_readback_enabled = e;
+        if (!e)
+            m_gpu_generated_count.reset();
     }
-    // the gate must be able to tell a real instance count from the
-    // play-mode kMaxInstances marker (readback OFF publishes the marker).
+    // Gate readback provides generated counts; normal indirect draws expose capacity
+    // separately and leave the generated count unknown.
     bool readback_enabled() const {
         return m_readback_enabled;
     }
@@ -283,7 +311,7 @@ public:
     // Reads scene depth for occlusion. No-op (returns 0) when no instances or
     // disabled. -T17: reads frame state from the RenderContext seam
     // (sun/ambient/moon/cloud/time/lit_scene) instead of RenderPipeline; RETURNS
-    // the instance count drawn so the call site owns the stat bump.
+    // the known instance count drawn (0 if unknown); last_draw_calls reports submission.
     std::size_t execute(const RenderContext& ctx, const Camera& camera);
 
     // Opt-in, same-device qualification. Freezes uploaded public scatter/surface
@@ -360,6 +388,10 @@ public:
     }
 
 private:
+    Client::Attribution::FoliageRebuild m_rebuild_attribution{};
+    Client::Attribution::ScatterSignature m_attributed_signature{};
+    Client::Attribution::FallbackReason m_last_fallback =
+        Client::Attribution::FallbackReason::GpuDisabled;
     void map_instances_for_frame();
     //  #4: GPU scatter rebuild (dispatch compute -> SSBO, read back into
     // m_instances for the gate/cache surface). Returns false if it could not run
@@ -457,7 +489,11 @@ private:
     std::vector<ArchetypeData> m_archetypes;
     // CPU-side mirror of the instances built this frame (gate read-back source).
     std::vector<InstanceRecord> m_instances;
-    std::size_t m_frame_instance_count = 0;
+    // Private indirect draw guard may hold capacity; diagnostics use the separate
+    // completed readback snapshot so toggling readback cannot publish the marker.
+    std::size_t m_draw_instance_limit = 0;
+    std::optional<std::size_t> m_gpu_generated_count;
+    std::uint64_t m_gpu_count_generation = 0;
 
     bool m_enabled = false;
     glm::vec2 m_wind_xz{0.0f, 0.0f};

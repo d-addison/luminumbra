@@ -330,3 +330,73 @@ explicitly disable TAAU and record zero jitter; normal-default captures retain t
 temporal path. Validators accept preset revisions 6 and 7. The shipping hills
 traversal now declares revision 7; its pinned identities need recapture from CI
 after the terrain and preset changes.
+
+## Continuous CPU attribution (issue #387)
+
+Detailed CPU attribution is off by default. `--frame-attribution` enables the
+frame collector, foliage stage timings, work counters and the `foliage-split`
+slow-frame log. Disabled collectors and stage timers take a branch without clock
+reads. This applies to gameplay, preview/menu and qualification callers alike.
+
+`--frame-attribution-csv` also enables that collection and writes every presented
+frame to `logs/frame-attribution.csv` in the process working directory, independently of
+benchmark warmup, the 12 ms slow-frame threshold and the 400-line log window.
+It is off by default, replaces the previous session's CSV, streams through a
+bounded buffer and closes on normal exit. It does not change vsync or the frame
+cap; “uncapped” refers to the recording duration and number of rows.
+
+The frame interval runs from loop entry through buffer swap. Its exclusive
+buckets are sim, stream, render submission, present, foliage rebuilds,
+scatter input preparation, plant rebake, event polling, menu rendering and UI
+rendering. `other_ms` is the remainder; these buckets plus the remainder sum to
+`frame_ms`. Rebuilds from preview and QA callers also enter the foliage bucket;
+any nested rebuild time is subtracted from its render or menu parent. Menu
+rendering includes the menu's UI; `ui_ms` covers the separate
+in-game RmlUi and final ImGui render calls. SLOWFRAME preserves its existing
+field order and appends `foliage`, `menu` and `ui`; with attribution enabled,
+`other` excludes all listed exclusive buckets. The legacy `foliage_inst` field
+remains rebuild time only.
+
+Foliage stage times are CPU wall time, including GL submission calls, without
+GPU waits or new readbacks. `signature_ms` includes polling existing evidence
+and early-out handling. `surface_ms` covers complete uncached column builds
+(including CPU placement in fallback), never individual candidate timers.
+`repack_ms` covers aggregate GPU input assembly excluding surface builds.
+`cpu_fallback_ms` is inclusive of its surface builds and mapped uploads; do not
+add it to those sub-times. Palette/scratch time includes null-data storage
+allocation; `scratch_bytes` records that allocation separately from actual
+`uploaded_bytes`. Copy bytes include the sorted working copy, aggregate inputs,
+completed readback snapshots and CPU emitted/mapped records; hash bytes describe
+the unchanged evidence input hash. Frozen qualification rebuilds are identified
+as `frozen_gpu`; their submission time includes output clears and existing
+readback submission, including the first rebuild started by qualification.
+
+`reason_mask` combines: 1 initial build, 2 config (enabled, evidence phase,
+quantized gate wind, fade or density), 4 camera cell, 8 ground revision,
+16 scatter chunks, 32 pending backlog. Components mirror the existing signature;
+they do not introduce invalidation. `admitted_columns` counts columns included
+in the selected build after culling and budgeting; `surface_misses` counts
+uncached column builds. `deferred_columns` counts budget deferrals encountered
+before the existing capacity stop; `backlog` is the existing pending-work flag.
+Early-outs report zero rebuild work and `reused_gpu` or `reused_cpu`; an existing
+readback consumed before the early-out still contributes its copy bytes.
+`fallback` distinguishes GPU disabled/unavailable, missing resources and the
+GPU column capacity limit. No readback is enabled by recording.
+
+`instance_capacity` is storage capacity, never a generated count. The CSV's
+`generated_count` and `count_generation` are empty when no count is known.
+The per-frame stage times and work counters aggregate all calls on the render
+thread; `rebuild_calls` reports the number of invocations, reason bits and backlog
+are ORed, and differing path/fallback tokens become `mixed`. The instance
+snapshot belongs to the last invocation in that frame. With no invocation,
+capacity is zero and the generated count is empty. Each pass also exposes its
+last collected invocation's diagnostic without affecting its rebuild decision.
+
+The optional profiling build uses `-DLUMINUMBRA_ENABLE_TRACY=ON` in a separate
+build directory. The client links the profiler interface in all variants; with
+the default `OFF` setting it adds no profiling definitions or dependencies.
+
+Completed GPU counts are only exposed with readback active and carry their
+source generation (which can precede this frame's rebuild); CPU fallback counts
+are available directly. The frame scan similarly writes a null instance count
+when unavailable, and the overlay labels capacity explicitly.

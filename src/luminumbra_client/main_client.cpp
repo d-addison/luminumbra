@@ -18,6 +18,7 @@ __declspec(dllexport) extern const int AmdPowerXpressRequestHighPerformance = 1;
 #include "app/ClientAppContext.h"
 #include "app/CrashHandler.h"
 #include "app/DebugOverlays.h"
+#include "app/FrameAttribution.h"
 #include "app/FrameAudio.h"
 #include "app/GameAssets.h"
 #include "app/HangWatchdog.h"
@@ -3129,7 +3130,17 @@ int main(int argc, char* argv[]) {
         benchmark_queries->initialize();
         renderPipeline.set_benchmark_gpu_queries(benchmark_queries.get());
     }
+    namespace Attribution = Luminumbra::Client::Attribution;
+    const bool frame_csv_enabled = HasCommandLineFlag(argc, argv, "--frame-attribution-csv");
+    const bool frame_attribution_enabled =
+        frame_csv_enabled || HasCommandLineFlag(argc, argv, "--frame-attribution");
+    Attribution::FrameRecorder frame_recorder(frame_csv_enabled, "logs");
+    if (frame_csv_enabled && !frame_recorder.active())
+        LUMINUMBRA_CORE_ERROR("Cannot open logs/frame-attribution.csv");
+    std::uint64_t attribution_frame = 0;
     while (!glfwWindowShouldClose(window)) {
+        const auto _frameStart = std::chrono::steady_clock::now();
+        Attribution::FoliageFrameScope foliage_scope(frame_attribution_enabled);
         MainLoopHeartbeat().fetch_add(1, std::memory_order_relaxed);
         float currentFrame = (float)glfwGetTime();
         float deltaTime = currentFrame - lastFrame;
@@ -3199,16 +3210,17 @@ int main(int argc, char* argv[]) {
         }
         // runtime telemetry ( implementation note): always-on frame wall to localize
         // slideshow-on-move frames.
-        const auto _frameStart = std::chrono::steady_clock::now();
+        double rb_menu_ms = 0.0;
         double rb_sim_ms = 0.0;     // this frame's sim-tick CPU cost
         double rb_stream_ms = 0.0;  // this frame's streaming CPU cost
         double rb_foliage_ms = 0.0; // this frame's foliage rebuild_instances cost
         double rb_ui_ms = 0.0;      // this frame's UI (RmlUi + ImGui) render cost
         double rb_render_call_ms =
             0.0; // Full render_frame wall time, including unmeasured pass CPU submission.
-        double rb_poll_ms = 0.0;    // glfwPollEvents wall time for input and window messages.
-        double rb_scatter_ms = 0.0; // Per-frame foliage chunk-scatter build (terrain/biome
-                                    //  sample per renderable chunk)
+        double rb_render_bucket_ms = 0.0; // Excludes any nested foliage rebuilds.
+        double rb_poll_ms = 0.0;          // glfwPollEvents wall time for input and window messages.
+        double rb_scatter_ms = 0.0;       // Per-frame foliage chunk-scatter build (terrain/biome
+                                          //  sample per renderable chunk)
         double rb_rebake_ms =
             0.0; // runtime telemetry: per-frame RebakeAllPlants (procgen plant composite re-bake)
         // Declared at loop scope (not inside the case) so the case labels below
@@ -4347,6 +4359,7 @@ int main(int argc, char* argv[]) {
                                            std::chrono::steady_clock::now() - _fb0)
                                            .count();
                     }
+                    const double render_foliage_before = foliage_scope.snapshot().rebuild_ms;
                     const auto _rb_rcall_t0 =
                         std::chrono::steady_clock::now(); // always-on (runtime telemetry)
                     renderPipeline.set_debug_view(
@@ -4364,6 +4377,10 @@ int main(int argc, char* argv[]) {
                     rb_render_call_ms = std::chrono::duration<double, std::milli>(
                                             std::chrono::steady_clock::now() - _rb_rcall_t0)
                                             .count();
+                    rb_render_bucket_ms =
+                        Attribution::exclusive_parent_ms(rb_render_call_ms,
+                                                         render_foliage_before,
+                                                         foliage_scope.snapshot().rebuild_ms);
 
                     // --scene-config: self-contained capture. Settle a few frames (world
                     // stream + atmosphere), then read the clean back buffer (BEFORE any UI
@@ -4487,13 +4504,16 @@ int main(int argc, char* argv[]) {
                                     rep, std::filesystem::path(g_app.capture.frame_scan_path))) {
                                 LUMINUMBRA_CORE_INFO(
                                     "Frame-scan written -> {} ({}x{}): {} materials, water "
-                                    "{:.1f}%, foliage {} inst, mean luma {:.3f}",
+                                    "{:.1f}%, foliage {} inst (capacity {}), mean luma {:.3f}",
                                     g_app.capture.frame_scan_path,
                                     rep.width,
                                     rep.height,
                                     rep.materials.size(),
                                     rep.water_coverage * 100.0,
-                                    rep.foliage_instances,
+                                    rep.foliage_instance_count_known
+                                        ? std::to_string(rep.foliage_instances)
+                                        : "unknown",
+                                    rep.foliage_instance_capacity,
                                     rep.mean_frame_luminance);
                                 // Also dump the scanned back buffer as a PPM next to the JSON,
                                 // so the scan is a full diagnostic (numbers + the exact image
@@ -4625,6 +4645,8 @@ int main(int argc, char* argv[]) {
                 // Menu-branch rendering: thumbs capture, menu backdrop,
                 // create-world preview diorama, UI pass, and the
                 // --ui-screenshot batch (app/MenuScreens.cpp).
+                const double menu_foliage_before = foliage_scope.snapshot().rebuild_ms;
+                Attribution::StageTimer menu_timer(rb_menu_ms, frame_attribution_enabled);
                 RenderMenuScreens(g_app,
                                   window,
                                   deltaTime,
@@ -4635,6 +4657,9 @@ int main(int argc, char* argv[]) {
                                   g_uiManager.get(),
                                   worldgenPreview.get(),
                                   menuPreviewState);
+                menu_timer.stop();
+                rb_menu_ms = Attribution::exclusive_parent_ms(
+                    rb_menu_ms, menu_foliage_before, foliage_scope.snapshot().rebuild_ms);
             }
         }
 
@@ -4679,7 +4704,7 @@ int main(int argc, char* argv[]) {
             ImGui::Render();
             ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
         }
-        if (g_rb_active)
+        if (g_rb_active || frame_attribution_enabled)
             rb_ui_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() -
                                                                  _rb_ui_t0)
                            .count(); //
@@ -4749,23 +4774,82 @@ int main(int argc, char* argv[]) {
                 std::chrono::duration<double, std::milli>(_now - _frameStart).count();
             const double _presentMs =
                 std::chrono::duration<double, std::milli>(_now - _beforeSwap).count();
+            const auto& foliage_frame = foliage_scope.snapshot();
+            const auto& foliage_attribution = foliage_frame.rebuild;
+            const Attribution::FrameBuckets buckets{.sim = rb_sim_ms,
+                                                    .stream = rb_stream_ms,
+                                                    .render = rb_render_bucket_ms,
+                                                    .present = _presentMs,
+                                                    .foliage = foliage_frame.rebuild_ms,
+                                                    .scatter = rb_scatter_ms,
+                                                    .rebake = rb_rebake_ms,
+                                                    .poll = rb_poll_ms,
+                                                    .menu = rb_menu_ms,
+                                                    .ui = rb_ui_ms};
+            ++attribution_frame;
+            if (frame_recorder.active()) {
+                if (!frame_recorder.record(attribution_frame,
+                                           _wallMs,
+                                           buckets,
+                                           foliage_attribution,
+                                           foliage_frame.capacity,
+                                           foliage_frame.count_known,
+                                           foliage_frame.generated_count,
+                                           foliage_frame.count_generation))
+                    LUMINUMBRA_CORE_ERROR("Frame attribution CSV write failed");
+            }
             if (_wallMs > 12.0 && g_app.telemetry.slowFrameCount++ < 400) {
                 const double _other =
-                    _wallMs - rb_sim_ms - rb_stream_ms - rb_render_call_ms - _presentMs;
+                    frame_attribution_enabled
+                        ? buckets.other(_wallMs)
+                        : _wallMs - rb_sim_ms - rb_stream_ms - rb_render_call_ms - _presentMs;
                 LUMINUMBRA_CORE_WARN("SLOWFRAME {:.1f}ms ({:.0f}fps): sim={:.1f} stream={:.1f} "
                                      "render={:.1f} present={:.1f} other={:.1f} | "
-                                     "foliage_inst={:.1f} scatter={:.1f} rebake={:.1f} poll={:.1f}",
+                                     "foliage_inst={:.1f} scatter={:.1f} rebake={:.1f} poll={:.1f} "
+                                     "foliage={:.1f} menu={:.1f} ui={:.1f}",
                                      _wallMs,
                                      1000.0 / _wallMs,
                                      rb_sim_ms,
                                      rb_stream_ms,
-                                     rb_render_call_ms,
+                                     rb_render_bucket_ms,
                                      _presentMs,
                                      _other,
                                      rb_foliage_ms,
                                      rb_scatter_ms,
                                      rb_rebake_ms,
-                                     rb_poll_ms);
+                                     rb_poll_ms,
+                                     foliage_frame.rebuild_ms,
+                                     rb_menu_ms,
+                                     rb_ui_ms);
+                if (frame_attribution_enabled)
+                    LUMINUMBRA_CORE_WARN(
+                        "  foliage-split: signature={:.3f} sort={:.3f} surface={:.3f} "
+                        "repack={:.3f} hash={:.3f} upload={:.3f} palette_scratch={:.3f} "
+                        "dispatch={:.3f} cpu_fallback={:.3f} rebuild_calls={} reason_mask={} "
+                        "admitted={} "
+                        "misses={} deferred={} copied_bytes={} hashed_bytes={} uploaded_bytes={} "
+                        "scratch_bytes={} backlog={} path={} fallback={}",
+                        foliage_attribution.signature_ms,
+                        foliage_attribution.sort_ms,
+                        foliage_attribution.surface_ms,
+                        foliage_attribution.repack_ms,
+                        foliage_attribution.hash_ms,
+                        foliage_attribution.upload_ms,
+                        foliage_attribution.palette_scratch_ms,
+                        foliage_attribution.dispatch_ms,
+                        foliage_attribution.cpu_fallback_ms,
+                        foliage_attribution.rebuild_calls,
+                        foliage_attribution.reasons,
+                        foliage_attribution.admitted_columns,
+                        foliage_attribution.surface_misses,
+                        foliage_attribution.deferred_columns,
+                        foliage_attribution.copied_bytes,
+                        foliage_attribution.hashed_bytes,
+                        foliage_attribution.uploaded_bytes,
+                        foliage_attribution.scratch_bytes,
+                        foliage_attribution.backlog,
+                        Attribution::path_name(foliage_attribution.path),
+                        Attribution::fallback_name(foliage_attribution.fallback));
                 if (gameSession && gameSession->GetWorldSystem()) {
                     const auto& st = gameSession->GetWorldSystem()->dbg_stream_timings();
                     LUMINUMBRA_CORE_WARN(

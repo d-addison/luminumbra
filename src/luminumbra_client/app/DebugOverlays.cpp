@@ -852,9 +852,14 @@ void DrawGpuProfilerOverlay(ClientAppContext& app,
             }
             ImGui::TextUnformatted(
                 "Pool samples are asynchronous diagnostics, not atomic admission values.");
-            ImGui::Text("foliage: %5zu draws  %7zu instances",
-                        gp.foliage_draws,
-                        gp.foliage_instances_drawn);
+            if (gp.foliage_instance_count_known)
+                ImGui::Text("foliage: %5zu draws  %7zu instances",
+                            gp.foliage_draws,
+                            gp.foliage_instances_drawn);
+            else
+                ImGui::Text("foliage: %5zu draws  %7zu capacity (count unavailable)",
+                            gp.foliage_draws,
+                            gp.foliage_instance_capacity);
             ImGui::Text(
                 "particle: %5zu draws  %7zu instances", gp.particle_draws, gp.particles_drawn);
             ImGui::Text("shadow: %5zu draws", gp.shadow_draws);
