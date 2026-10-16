@@ -87,7 +87,7 @@ inline std::vector<std::pair<std::string, luminumbra::core::SystemConfig>>
 SimulationConfigVariants() {
     using luminumbra::core::SysKey;
     using luminumbra::core::SystemConfig;
-    constexpr const char* sections[]{
+    static constexpr const char* sections[]{
 #define CONFIG_SECTION(ENUM, SECTION, JSON_SECTION, NAME, RESIDENCY) JSON_SECTION,
         LUMIN_CONFIG_KEY_TABLE(CONFIG_SECTION)
 #undef CONFIG_SECTION
@@ -97,7 +97,7 @@ SimulationConfigVariants() {
         LUMIN_CONFIG_KEY_TABLE(CONFIG_NAME)
 #undef CONFIG_NAME
     };
-    const auto relevant = [&sections](SysKey key) {
+    const auto relevant = [](SysKey key) {
         return std::string(sections[static_cast<std::size_t>(key)]) == "sim" ||
                key == SysKey::RenderCircadian;
     };
