@@ -861,6 +861,18 @@
       ]
     },
     {
+      "id": "iss.480",
+      "source": "issue #480",
+      "statement": "Meshing scratch chunks retain edit-aware standing water depth. Initial meshes, terrain remeshes and water-only remeshes through worker queues and the inline fallback match synchronous dug-pond water and terrain geometry at every supported water resolution; missing and truncated depth grids retain procedural culling.",
+      "status": "covered",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "AsyncWaterMeshing.*"
+        }
+      ]
+    },
+    {
       "id": "contract.tier-values",
       "source": "docs/distant-world.md#far-range-declaration-and-compatibility",
       "statement": "The published one-based tier dimensions, nominal horizontal bands and invalid-input refusals have landed unit evidence; runtime adoption is tracked separately.",

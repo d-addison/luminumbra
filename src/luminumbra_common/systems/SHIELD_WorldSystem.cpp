@@ -5194,6 +5194,9 @@ void SHIELD_WorldSystem::dispatch_meshing_jobs(const std::vector<MeshingWorkItem
                 scratch.water_level_data = chunk->water_level_data;
                 scratch.water_flow_data = chunk->water_flow_data;
                 scratch.water_sim_terrain_height = chunk->water_sim_terrain_height;
+                // Keep edit-aware culling with the water mirrors. This job owns one
+                // resolution^2 depth grid (at most 32*32 cells), released on completion.
+                scratch.water_depth_mm = chunk->water_depth_mm;
                 scratch.has_water_sim.store(chunk->has_water_sim.load(std::memory_order_acquire),
                                             std::memory_order_release);
                 scratch.water_mesh_generated.store(false, std::memory_order_release);
