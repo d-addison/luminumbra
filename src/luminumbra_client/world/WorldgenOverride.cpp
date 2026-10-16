@@ -4,6 +4,7 @@
 #include <cmath>
 
 #include "luminumbra_common/world/KnobLayer.h"
+#include "luminumbra_common/world/TerrainPresetLoader.h"
 
 namespace Luminumbra::Client {
 
@@ -45,7 +46,9 @@ bool ParseInt(const std::string& s, long long& out) {
 CustomPresetResult BuildCustomPreset(const nlohmann::json& base,
                                      const std::vector<WorldGenParam>& params) {
     CustomPresetResult result;
-    result.json = base;
+    const auto resolved_base = Luminumbra::world::ResolveTerrainPresetDefaults(base);
+    result.json = resolved_base;
+    result.json["schema_rev"] = Luminumbra::world::kTerrainPresetSchemaRevision;
 
     for (const WorldGenParam& p : params) {
         if (p.path.empty()) {
@@ -59,9 +62,10 @@ CustomPresetResult BuildCustomPreset(const nlohmann::json& base,
         if (p.path == "biomes.enabled") {
             const bool on = (p.value == "true" || p.value == "1");
             const auto tjp = nlohmann::json::json_pointer("/generation_params/biomes/table");
-            const std::string base_table = (base.contains(tjp) && base.at(tjp).is_string())
-                                               ? base.at(tjp).get<std::string>()
-                                               : std::string();
+            const std::string base_table =
+                (resolved_base.contains(tjp) && resolved_base.at(tjp).is_string())
+                    ? resolved_base.at(tjp).get<std::string>()
+                    : std::string();
             const std::string desired =
                 on ? (base_table.empty() ? std::string("common/biomes.json") : base_table)
                    : std::string();
@@ -74,11 +78,13 @@ CustomPresetResult BuildCustomPreset(const nlohmann::json& base,
         }
 
         const nlohmann::json::json_pointer jp = PointerFor(p.path);
-        const bool base_has = base.contains(jp);
+        const bool base_has = resolved_base.contains(jp);
 
         if (p.type == "bool") {
             const bool v = (p.value == "true" || p.value == "1");
-            const bool base_v = base_has && base.at(jp).is_boolean() ? base.at(jp).get<bool>() : !v;
+            const bool base_v = base_has && resolved_base.at(jp).is_boolean()
+                                    ? resolved_base.at(jp).get<bool>()
+                                    : !v;
             if (!base_has || base_v != v) {
                 result.json[jp] = v;
                 result.changed = true;
@@ -90,8 +96,9 @@ CustomPresetResult BuildCustomPreset(const nlohmann::json& base,
                 ++result.skipped;
                 continue;
             }
-            const long long base_v =
-                base_has && base.at(jp).is_number() ? base.at(jp).get<long long>() : v + 1;
+            const long long base_v = base_has && resolved_base.at(jp).is_number()
+                                         ? resolved_base.at(jp).get<long long>()
+                                         : v + 1;
             if (!base_has || base_v != v) {
                 result.json[jp] = v;
                 result.changed = true;
@@ -103,8 +110,9 @@ CustomPresetResult BuildCustomPreset(const nlohmann::json& base,
                 ++result.skipped;
                 continue;
             }
-            const double base_v =
-                base_has && base.at(jp).is_number() ? base.at(jp).get<double>() : v + 1.0;
+            const double base_v = base_has && resolved_base.at(jp).is_number()
+                                      ? resolved_base.at(jp).get<double>()
+                                      : v + 1.0;
             if (!base_has || std::fabs(base_v - static_cast<double>(v)) > 1e-6) {
                 result.json[jp] = v;
                 result.changed = true;
@@ -166,7 +174,8 @@ KnobPresetResult BuildKnobResolvedPreset(const nlohmann::json& base,
         std::string ptr = "/generation_params/";
         for (char ch : p.path)
             ptr += (ch == '.') ? '/' : ch;
-        const nlohmann::json::json_pointer jp(ptr);
+        const nlohmann::json::json_pointer jp(
+            p.path == "biomes.enabled" ? "/generation_params/biomes/table" : ptr);
         if (!diff.json.contains(jp))
             continue;
         // Keep only entries whose value actually differs from the knob-applied base.
@@ -179,7 +188,7 @@ KnobPresetResult BuildKnobResolvedPreset(const nlohmann::json& base,
 
     // 4. Persist BOTH layers: resolved generation_params (full) + the knob_layer
     //    (knobs + baseline snapshot + override diff) for exact reopen.
-    result.json = base;
+    result.json = Luminumbra::world::ResolveTerrainPresetDefaults(base);
     WriteKnobLayer(result.json, base, knobs, overrides);
     result.changed = knob_moved || !overrides.empty();
     return result;

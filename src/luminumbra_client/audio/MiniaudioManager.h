@@ -110,6 +110,8 @@ public:
 
     // --- IAudioManager Interface ---
     bool Init() override;
+    using EngineInitializer = ma_result (*)(const ma_engine_config*, ma_engine*);
+    bool Init(EngineInitializer initialize_engine);
     void Update() override;
     void Shutdown() override;
     bool IsPlaybackEnabled() const override {

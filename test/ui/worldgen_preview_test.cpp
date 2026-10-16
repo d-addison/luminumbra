@@ -7,8 +7,8 @@
 // changes the FBO pixels, (c) orbit changes the view, (d) the per-frame render
 // holds a budget at the preview FBO size, and (e) rapid param changes collapse
 // into ONE debounced, latest-wins rebuild. They use a FIXED TerrainGenParams
-// literal (NOT default.json — that file is owned/enriched by the concurrent
-// worldgen agent), so they never go RED on a preset change.
+// literal rather than default.json, keeping these assertions independent of
+// changes to the authored world-generation presets.
 //
 // GL-required: the cases GTEST_SKIP without a GL context, and the UI gate
 // promotes any "SKIPPED" line on this target to a CTest failure,
@@ -38,6 +38,7 @@
 #include "luminumbra_common/persistence/WorldSaveService.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 #include "luminumbra_common/world/GameSession.h"
+#include "luminumbra_common/world/TerrainPresetLoader.h"
 #include "rendering/Camera.h"
 #include "rendering/RenderPipeline.h"
 #include "world/WorldgenPreview.h"
@@ -113,6 +114,16 @@ Luminumbra::Systems::TerrainGenParams FixedCandidate() {
     p.lacunarity = 2.0f;
     p.height_offset = 8.0f;
     p.caves_enabled = false;
+    p.surface_breaks_enabled = false;
+    p.island_mask_enabled = false;
+    p.biomes_enabled = false;
+    p.biome_relief_enabled = false;
+    p.cliffs_enabled = false;
+    p.rivers_enabled = false;
+    p.lakes_enabled = false;
+    p.structures_enabled = false;
+    p.hydro_enabled = false;
+
     p.peaks_amplitude = 48.0f;
     p.peaks_frequency = 0.0025f;
     p.domain_warp_amplitude = 18.0f;
@@ -179,13 +190,14 @@ struct PreviewFixture {
     Luminumbra::Client::WorldgenPreview preview;
     bool ok = false;
 
-    PreviewFixture() {
+    explicit PreviewFixture(
+        const Luminumbra::Systems::TerrainGenParams& params = FixedCandidate()) {
         ok = pipeline.startup(kPreviewW, kPreviewH, SourceRoot());
         if (!ok)
             return;
         preview.set_active(true);
         preview.ensure_target(kPreviewW, kPreviewH);
-        preview.set_params(FixedCandidate(), /*seed*/ 4242);
+        preview.set_params(params, /*seed*/ 4242);
         // Signal the background build (past the debounce), then pump render until
         // the worker finishes and the GL-thread swap lands, so the first render has
         // a world (: the build is asynchronous).
@@ -216,6 +228,9 @@ struct SavedBindingFixture {
         }
         Luminumbra::TestSupport::WriteSimulationContentFixture(root);
         session = std::make_unique<Luminumbra::world::GameSession>();
+        // Exercise saved rendering independently of regional simulation and rain divergence.
+        session->SetActiveRegionsEnabled(false);
+        session->SetWeatherRainEnabled(false);
         session->SetJobSystem(&jobs);
         session->SetRootPath(Luminumbra::Filesystem::GenericPathString(root) + "/");
         session->EnableFarWorldPersistenceSafety();
@@ -295,6 +310,27 @@ TEST(SavedFarWorldBinding, SuccessfulLoadBindsAndFailedOpenRetainsTarget) {
     EXPECT_EQ(fixture.pipeline.saved_far_world_renderer().Handoff(), handoff);
     EXPECT_EQ(handoff->State().target_serial, serial);
     EXPECT_TRUE(fixture.pipeline.bind_saved_far_world(publication));
+    const auto id = fixture.session->GetMetadata().worldId;
+    std::size_t checks = 0;
+    const Luminumbra::world::GameSession::WorldOpenCheck reject =
+        [&checks](const auto&, const auto&, std::uint32_t) {
+            ++checks;
+            return std::string("saved world identity refused");
+        };
+    EXPECT_FALSE(fixture.session->LoadWorld(id, reject));
+    EXPECT_EQ(checks, 1u);
+    EXPECT_EQ(fixture.session->GetWorldOpenError(), "saved world identity refused");
+    EXPECT_EQ(fixture.pipeline.saved_far_world_renderer().Handoff(), handoff);
+    EXPECT_EQ(handoff->State().target_serial, serial);
+    const Luminumbra::World::WorldgenFileStatusReader unavailable = [](const fs::path&,
+                                                                       std::error_code& error) {
+        error = std::make_error_code(std::errc::permission_denied);
+        return fs::file_status(fs::file_type::none);
+    };
+    EXPECT_FALSE(fixture.session->LoadWorld(id, unavailable));
+    EXPECT_EQ(fixture.pipeline.saved_far_world_renderer().Handoff(), handoff);
+    EXPECT_EQ(handoff->State().target_serial, serial);
+    EXPECT_TRUE(fixture.session->SaveWorld());
 }
 
 TEST(SavedFarWorldBinding, FirstStateSaveOfNormalResidencyCapturesReopensAndBinds) {
@@ -572,7 +608,25 @@ TEST(SavedFarWorldBinding, CaveSaveAsAndWorldReplacementDrainOldTargets) {
     advance();
     const auto before_save_as = publication;
     const auto copy = fixture.root / "copy";
+    // Persistence safety must cover save-as even when rendering has no save policy installed.
+    fixture.session->SetFarEditedCachePolicy({});
+    ASSERT_FALSE(fixture.session->FarEditedCacheEnabled());
+    const auto source = fixture.session->GetWorldSaveDir();
+    Luminumbra::Persistence::SnapshotIndex committed;
+    ASSERT_TRUE(Luminumbra::Persistence::read_snapshot_index(source, committed, nullptr));
+    EXPECT_FALSE(fixture.session->RunInSnapshotTransaction([&] {
+        EXPECT_NE(Luminumbra::Persistence::SaveTransaction::active_for(source), nullptr);
+        EXPECT_TRUE(fixture.session->SaveWorld());
+        return false;
+    }));
+    Luminumbra::Persistence::SnapshotIndex rolled_back;
+    ASSERT_TRUE(Luminumbra::Persistence::read_snapshot_index(source, rolled_back, nullptr));
+    EXPECT_EQ(rolled_back.generation, committed.generation);
+    ASSERT_TRUE(fixture.pipeline.saved_far_world_renderer().Handoff());
+    EXPECT_EQ(fixture.pipeline.saved_far_world_renderer().Handoff()->State().target_serial,
+              before_save_as->publication_serial);
     ASSERT_TRUE(fixture.session->SaveWorldStateTo(copy));
+    EXPECT_TRUE(fs::is_regular_file(copy / "world_info.json"));
     EXPECT_FALSE(fixture.pipeline.saved_far_world_renderer().Handoff());
     EXPECT_EQ(fixture.pipeline.prev_view_proj(), glm::mat4(1));
     EXPECT_FALSE(fixture.pipeline.bind_saved_far_world(before_save_as));
@@ -887,4 +941,39 @@ TEST(WorldgenPreviewTest, PerFrameRenderProducesComparableObservation) {
            << "}\n";
     report.close();
     ASSERT_FALSE(report.fail()) << "could not finalize performance evidence: " << artifact;
+}
+
+TEST(WorldgenPreviewTest, ResolvedShippingHillsRendersWithDefaultTemporalPresentation) {
+    HiddenGlContext ctx;
+    ASSERT_TRUE(ctx.ready()) << ctx.error();
+    const auto preset =
+        Luminumbra::world::LoadTerrainPreset(SourceRoot() / "worlds/atlas/presets/default.json");
+    ASSERT_TRUE(preset.ok);
+    EXPECT_TRUE(preset.params.island_mask_enabled);
+    EXPECT_TRUE(preset.params.biomes_enabled);
+    EXPECT_TRUE(preset.params.biome_relief_enabled);
+    EXPECT_TRUE(preset.params.hydro_enabled);
+    EXPECT_TRUE(preset.params.structures_enabled);
+    EXPECT_TRUE(preset.params.surface_breaks_enabled);
+    EXPECT_TRUE(preset.params.rivers_enabled);
+    EXPECT_TRUE(preset.params.lakes_enabled);
+    EXPECT_TRUE(preset.params.cliffs_enabled);
+    PreviewFixture fx(preset.params);
+    ASSERT_TRUE(fx.ok);
+    ASSERT_TRUE(fx.preview.world_ready());
+    EXPECT_TRUE(fx.pipeline.taau_enabled());
+    EXPECT_EQ(fx.pipeline.volumetric_quality(), 1);
+    ASSERT_TRUE(fx.preview.render(fx.pipeline, 1.0f / 60.0f));
+    const auto pixels = ReadTarget(fx.preview);
+    EXPECT_GT(Foreground(pixels), static_cast<std::size_t>(kPreviewW * kPreviewH / 20));
+    const auto artifact = fs::path(LUMINUMBRA_TEST_ARTIFACT_DIR) / "performance/shipping_hills.ppm";
+    fs::create_directories(artifact.parent_path());
+    std::ofstream capture(artifact, std::ios::binary);
+    ASSERT_TRUE(capture);
+    capture << "P6\n" << kPreviewW << ' ' << kPreviewH << "\n255\n";
+    for (std::size_t i = 0; i < pixels.size(); i += 4)
+        capture.write(reinterpret_cast<const char*>(pixels.data() + i), 3);
+    capture.close();
+    ASSERT_TRUE(capture);
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
 }

@@ -233,6 +233,24 @@ void ExpectSameRegistryOrder(const SimulationContent& actual, const SimulationCo
         }
     }
 }
+void ExpectUnchangedContent(const SimulationContent& actual, const SimulationContent& expected) {
+    EXPECT_EQ(actual.identity, expected.identity);
+    EXPECT_EQ(actual.policy, expected.policy);
+    EXPECT_EQ(actual.creatures, expected.creatures);
+    EXPECT_EQ(actual.plants, expected.plants);
+    const auto compare_definitions = [](const auto& definitions, const auto& originals) {
+        ASSERT_EQ(definitions.size(), originals.size());
+        for (std::size_t i = 0; i < originals.size(); ++i) {
+            EXPECT_EQ(definitions[i].name, originals[i].name);
+            EXPECT_EQ(definitions[i].species_id, originals[i].species_id);
+            EXPECT_EQ(definitions[i].bytes, originals[i].bytes);
+        }
+    };
+    compare_definitions(actual.creature_definitions, expected.creature_definitions);
+    compare_definitions(actual.plant_definitions, expected.plant_definitions);
+    EXPECT_EQ(BuildSimulationContentIdentity(actual), expected.identity);
+    ExpectSameRegistryOrder(actual, expected);
+}
 void ExpectPolicyRefusal(std::string_view bytes, DistantPolicyOverrides& policy) {
     const auto before = policy;
     std::string error;
@@ -385,6 +403,18 @@ TEST(DistantPolicyTest, PolicyUtf8BomCrFinalLfAndDepthRefuse) {
     input["plant_species"][std::string(256, 'a')] = FullPolicy()["plant_species"]["wheat"];
     EXPECT_TRUE(DistantPolicyOverrides::parse(Document(input), policy, error)) << error;
 }
+TEST(DistantPolicyTest, ShippedContentAdmitsWithMissingOptionalPolicy) {
+    const auto root = fs::path(LUMINUMBRA_SOURCE_ROOT);
+    ASSERT_EQ(ReadSimulationDocument(root / "data/common/sim/distant_policy.json", true).status,
+              ContentReadStatus::Absent);
+    SimulationContent content;
+    std::string error;
+    ASSERT_TRUE(AdmitSimulationContent(root, content, error)) << error;
+    EXPECT_TRUE(error.empty());
+    EXPECT_EQ(BuildSimulationContentIdentity(content), content.identity);
+    EXPECT_FALSE(content.creature_definitions.empty());
+    EXPECT_FALSE(content.plant_definitions.empty());
+}
 TEST(DistantPolicyTest, PolicyCleanAbsenceSelectsDefaults) {
     const ContentFixture fixture;
     DistantPolicyOverrides policy;
@@ -394,13 +424,86 @@ TEST(DistantPolicyTest, PolicyCleanAbsenceSelectsDefaults) {
               ContentReadStatus::Absent);
     EXPECT_TRUE(policy.creatures().empty());
     EXPECT_TRUE(error.empty());
-    EXPECT_EQ(DistantPolicyOverrides::load(fixture.root / "missing/leaf.json", policy, error),
-              ContentReadStatus::Absent);
     EXPECT_EQ(ReadSimulationDocument(fixture.policy(), false).status, ContentReadStatus::Error);
+}
+TEST(DistantPolicyTest, MissingPolicyParentRefusesWithoutChangingAdoptedContent) {
+    const ContentFixture fixture;
+    DistantPolicyOverrides policy;
+    std::string error;
+    ASSERT_TRUE(DistantPolicyOverrides::parse(Document(FullPolicy()), policy, error));
+    const auto before_policy = policy;
+    auto content = Admit(fixture);
+    const auto before = content;
+    EXPECT_EQ(DistantPolicyOverrides::load(fixture.root / "missing/leaf.json", policy, error),
+              ContentReadStatus::Error);
+    EXPECT_FALSE(error.empty());
+    EXPECT_EQ(policy, before_policy);
     fs::remove_all(fixture.root / "data/common/sim");
-    SimulationContent candidate;
-    EXPECT_TRUE(AdmitSimulationContent(fixture.root, candidate, error)) << error;
-    EXPECT_TRUE(error.empty());
+    EXPECT_EQ(DistantPolicyOverrides::load(fixture.policy(), policy, error),
+              ContentReadStatus::Error);
+    EXPECT_EQ(policy, before_policy);
+    EXPECT_FALSE(error.empty());
+    EXPECT_FALSE(AdmitSimulationContent(fixture.root, content, error));
+    EXPECT_FALSE(error.empty());
+    ExpectUnchangedContent(content, before);
+}
+TEST(DistantPolicyTest, RawNulPolicyRefusesWithoutChangingAdoptedContent) {
+    const ContentFixture fixture;
+    Write(fixture.policy(), Document(FullPolicy()));
+    auto content = Admit(fixture);
+    const auto before = content;
+    DistantPolicyOverrides policy;
+    std::string error;
+    ASSERT_EQ(DistantPolicyOverrides::load(fixture.policy(), policy, error),
+              ContentReadStatus::Found);
+    const auto before_policy = policy;
+    // The prefix would change adopted policy if the lexer ignored the suffix.
+    auto replacement = FullPolicy();
+    replacement["creature_species"]["grovestrider"]["coarse_need_rate_ppm"] = 1u;
+    const auto invalid = Document(replacement) + '\0' + "garbage\n";
+    ExpectPolicyRefusal(invalid, policy);
+    Write(fixture.policy(), invalid);
+    EXPECT_EQ(DistantPolicyOverrides::load(fixture.policy(), policy, error),
+              ContentReadStatus::Error);
+    EXPECT_EQ(policy, before_policy);
+    EXPECT_NE(error.find("raw NUL"), std::string::npos);
+    EXPECT_FALSE(AdmitSimulationContent(fixture.root, content, error));
+    EXPECT_NE(error.find("raw NUL"), std::string::npos);
+    ExpectUnchangedContent(content, before);
+}
+TEST(DistantPolicyTest, RawNulDefinitionsRefuseWithoutChangingAdoptedContentOrIdentityOutput) {
+    const ContentFixture fixture;
+    auto content = Admit(fixture);
+    const auto before = content;
+    std::string error;
+    for (const bool creature : {true, false}) {
+        SCOPED_TRACE(creature);
+        const auto* name = creature ? "grovestrider" : "wheat";
+        auto definitions = creature ? content.creature_definitions : content.plant_definitions;
+        const auto entry =
+            std::find_if(definitions.begin(), definitions.end(), [name](const auto& definition) {
+                return definition.name == name;
+            });
+        ASSERT_NE(entry, definitions.end());
+        const auto original = entry->bytes;
+        Json replacement{{"id", name}};
+        if (creature)
+            replacement["predator"] = true;
+        else
+            replacement["lifespan_ticks"] = 1u;
+        entry->bytes = Document(replacement) + '\0' + "garbage\n";
+        Write(fixture.species(creature, name), entry->bytes);
+        EXPECT_FALSE(AdmitSimulationContent(fixture.root, content, error));
+        EXPECT_NE(error.find("raw NUL"), std::string::npos);
+        ExpectUnchangedContent(content, before);
+        // Identity construction reparses captured definitions through the same strict gate.
+        auto tampered = before;
+        (creature ? tampered.creature_definitions : tampered.plant_definitions) = definitions;
+        auto identity = before.identity;
+        EXPECT_THROW(identity = BuildSimulationContentIdentity(tampered), std::invalid_argument);
+        EXPECT_EQ(identity, before.identity);
+        Write(fixture.species(creature, name), original);
+    }
 }
 TEST(DistantPolicyTest, PolicyIoSymlinkNonregularOversizeAndChangedReadRefuse) {
     const ContentFixture fixture;

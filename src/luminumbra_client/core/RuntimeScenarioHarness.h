@@ -1426,6 +1426,8 @@ public:
         std::uint64_t budget_ticks = 90;
         std::uint64_t hash_cadence_ticks = 30;
         std::string root_path;
+        std::optional<luminumbra::core::SystemConfig> systems_config_override;
+        std::optional<std::string> preset_json_override;
         int surface_radius = 12;
         int collision_radius = 4;
     };

@@ -12,6 +12,7 @@
 #include "RenderContext.h" // per-frame pass contract
 #include "RenderGraph.h"   // Declarative frame graph validated against the trace.
 #include "RenderSystem.h"
+#include "RenderingDefaults.h"
 #include "SunLightModel.h"  //  rendering: SunIrradiance (transmittance-coupled sun magnitude)
 #include "TimeOfDayModel.h" // Pure time-of-day policy helpers.
 #include "core/Log.h"
@@ -276,6 +277,19 @@ RenderPipeline::~RenderPipeline() {
 }
 
 // --- PUBLIC INTERFACE ---
+
+void RenderPipeline::set_taau_enabled(bool enabled) {
+    if (m_taau_enabled == enabled)
+        return;
+    m_taau_enabled = enabled;
+    m_taau_frame = 0;
+    m_taau_jitter_ndc = glm::vec2(0.0f);
+    m_taau_pass->invalidate_history();
+}
+
+bool RenderPipeline::taau_history_valid() const {
+    return m_taau_pass->history_valid();
+}
 
 bool RenderPipeline::startup(u32 screen_width,
                              u32 screen_height,
@@ -3997,12 +4011,11 @@ RenderContext RenderPipeline::make_aerial_context(const Camera& camera) {
         std::optional<AtmosphereParams> ov;
         if (const auto env = Core::ReadEnvironment("LUMIN_ATMOS")) {
             AtmosphereParams p{};
-            if (std::sscanf(env->c_str(),
-                            "%f,%f,%f,%f",
-                            &p.aerial_density,
-                            &p.aerial_max_distance,
-                            &p.inscatter_strength,
-                            &p.warmth) == 4) {
+            if (ParseCommaSeparatedPrefix(*env,
+                                          p.aerial_density,
+                                          p.aerial_max_distance,
+                                          p.inscatter_strength,
+                                          p.warmth) == 4) {
                 ov = p;
             }
         }
