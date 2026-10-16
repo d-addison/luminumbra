@@ -13,7 +13,8 @@ void DeveloperConsole::Draw(DeveloperFrameAdapter& frame) {
             m_refreshInventory = false;
         }
         PrepareDeveloperPanel(Layout(), 820, 650);
-        bool open = m_open;
+        const bool was_open = m_open;
+        bool open = was_open;
         if (ImGui::Begin("Developer console", &open, ImGuiWindowFlags_NoSavedSettings)) {
             if (ImGui::IsWindowFocused())
                 m_shellSequence = m_widgets.NextInteractionSequence();
@@ -144,7 +145,7 @@ void DeveloperConsole::Draw(DeveloperFrameAdapter& frame) {
         }
         const auto layout = CaptureDeveloperPanel(open);
         ImGui::End();
-        if (open != m_open)
+        if (open != was_open)
             SetOpen(open);
         if (layout)
             SetLayout(*layout);

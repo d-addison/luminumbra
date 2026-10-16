@@ -2,6 +2,7 @@
 #include <GLFW/glfw3.h>
 #include <glad/glad.h>
 
+#include "app/GameplayBindingCapture.h"
 #include "app/InputCallbacks.h"
 
 #include "core/Log.h"
@@ -144,7 +145,8 @@ void key_callback(GLFWwindow* window, int key, int scancode, int action, int mod
         return;
     }
     if (route == KeyRoute::ConsoleToggle) {
-        console->InvokeAction("console.toggle");
+        if (console)
+            console->InvokeAction("console.toggle");
         RefreshInputOwnership(window);
         return;
     }
@@ -197,23 +199,21 @@ void key_callback(GLFWwindow* window, int key, int scancode, int action, int mod
     // Rebind capture: while waiting for a key for some action, the next key press becomes
     // its binding (Escape cancels). Intercept first so any key — even F-keys — can be bound.
     if (app.hud.rebindCaptureAction >= 0) {
-        if (action != GLFW_PRESS || Debug::IsModifierKey(key))
-            return;
-        if (key != GLFW_KEY_ESCAPE &&
-            app.hud.rebindCaptureAction < static_cast<int>(Luminumbra::Client::kInputActionCount)) {
-            const char* name =
-                Luminumbra::Client::kInputActionDefs[app.hud.rebindCaptureAction].name;
+        const auto captured = CaptureGameplayBinding(app.hud.rebindCaptureAction, key, action);
+        if (captured &&
+            captured->actionIndex < static_cast<int>(Luminumbra::Client::kInputActionCount)) {
+            const char* name = Luminumbra::Client::kInputActionDefs[captured->actionIndex].name;
             bool conflict = false;
             if (console) {
                 const auto actionDef =
-                    Luminumbra::Client::kInputActionDefs[app.hud.rebindCaptureAction].action;
+                    Luminumbra::Client::kInputActionDefs[captured->actionIndex].action;
                 const bool photoOnly =
                     actionDef >= Luminumbra::Client::InputAction::Shutter &&
                     actionDef <= Luminumbra::Client::InputAction::PhotoWeatherCycle;
                 const unsigned scopes = photoOnly ? Debug::Photo : Debug::Gameplay | Debug::Photo;
                 for (const auto& def : console->Bindings().List()) {
                     const auto chord = console->Bindings().Get(def.id);
-                    if (chord && chord->key == key && (def.scopes & scopes)) {
+                    if (chord && chord->key == captured->key && (def.scopes & scopes)) {
                         conflict = true;
                         break;
                     }
@@ -222,7 +222,7 @@ void key_callback(GLFWwindow* window, int key, int scancode, int action, int mod
             if (conflict)
                 LUMINUMBRA_CORE_WARN("Gameplay binding conflicts with a developer action");
             else {
-                systemConfig.user().keybinds[name] = key;
+                systemConfig.user().keybinds[name] = captured->key;
                 if (playerController)
                     playerController->ApplyKeyBindings(systemConfig);
                 if (console)
@@ -231,7 +231,6 @@ void key_callback(GLFWwindow* window, int key, int scancode, int action, int mod
                     uiManager->RefreshDeveloperSettings();
             }
         }
-        app.hud.rebindCaptureAction = -1;
         RefreshInputOwnership(window);
         return;
     }

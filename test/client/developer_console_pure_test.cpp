@@ -1,4 +1,6 @@
 #include "app/DeveloperUiPolicy.h"
+#include "app/GameplayBindingCapture.h"
+#include "app/MenuPreviewInput.h"
 #include "app/RegisterDeveloperWidgets.h"
 #include "app/UiInputRouter.h"
 #include "core/LogDispatcherSink.h"
@@ -215,7 +217,7 @@ TEST(DeveloperWidgets, BindingMutationsDuringDrawAreValidatedThenDeferred) {
 TEST(DeveloperBindings, KeyChordParsingFormattingAndInvalidValues) {
     for (const auto& text : {"F1", "Ctrl+F12", "Shift+Alt+A", "[", "\\", "Space", "Ctrl+320"}) {
         const auto chord = ParseKeyChord(text);
-        ASSERT_TRUE(chord) << text;
+        ASSERT_TRUE(chord.has_value()) << text;
         EXPECT_EQ(ParseKeyChord(FormatKeyChord(chord)), chord);
     }
     for (const auto& text :
@@ -275,9 +277,11 @@ TEST(DeveloperBindings, ScopeConflictsReservationsAndPressOnly) {
 
 TEST_F(ConsoleFixture, ModifierCaptureWaitsEscapeCancelsAndConflictsDoNotMutate) {
     console.BeginRebind("console.toggle");
-    console.CaptureKey(340, 1);
-    EXPECT_TRUE(console.IsCapturing());
-    EXPECT_EQ(saves, 0);
+    for (const int key : {340, 341, 342, 343, 344, 345, 346, 347}) {
+        console.CaptureKey(key, 15);
+        EXPECT_TRUE(console.IsCapturing());
+        EXPECT_EQ(saves, 0);
+    }
     console.CaptureKey(256, 0);
     EXPECT_FALSE(console.IsCapturing());
     EXPECT_EQ(saves, 0);
@@ -287,6 +291,39 @@ TEST_F(ConsoleFixture, ModifierCaptureWaitsEscapeCancelsAndConflictsDoNotMutate)
     console.BeginRebind("console.toggle");
     console.CaptureKey(301, 2);
     EXPECT_EQ(console.Bindings().Get("console.toggle"), (KeyChord{301, 2}));
+}
+
+void ExpectGameplayModifierCapture(int actionIndex, int key) {
+    UiInputRouter router;
+    UiInputOwnership ownership;
+    ownership.binding_capture = true;
+    router.SetOwnership(ownership);
+    ASSERT_EQ(router.Key(key, 1, false, false), KeyRoute::Capture);
+    int pendingAction = actionIndex;
+    const auto captured = CaptureGameplayBinding(pendingAction, key, 1);
+    ASSERT_TRUE(captured.has_value());
+    EXPECT_EQ(captured->actionIndex, actionIndex);
+    EXPECT_EQ(captured->key, key);
+    EXPECT_EQ(pendingAction, -1);
+}
+
+TEST(GameplayBindingCapture, StandaloneLeftAndRightModifiersCompleteCapture) {
+    // Crouch/Sprint occupy indices 5/6 and default to GLFW Control/Shift (341/340).
+    for (const int actionIndex : {5, 6})
+        for (const int key : {340, 341, 342, 343, 344, 345, 346, 347})
+            ExpectGameplayModifierCapture(actionIndex, key);
+}
+
+TEST(GameplayBindingCapture, ReleasesRepeatsAndEscapePreserveBindingSemantics) {
+    int pendingAction = 5;
+    EXPECT_FALSE(CaptureGameplayBinding(pendingAction, 341, 0));
+    EXPECT_EQ(pendingAction, 5);
+    EXPECT_FALSE(CaptureGameplayBinding(pendingAction, 341, 2));
+    EXPECT_EQ(pendingAction, 5);
+    EXPECT_FALSE(CaptureGameplayBinding(pendingAction, 256, 1));
+    EXPECT_EQ(pendingAction, -1);
+    EXPECT_FALSE(CaptureGameplayBinding(pendingAction, 340, 1));
+    EXPECT_EQ(pendingAction, -1);
 }
 
 TEST_F(ConsoleFixture, InvalidTypedCommandsHaveNoEffects) {
@@ -340,7 +377,7 @@ TEST_F(ConsoleFixture, TextButtonsAndBindingsDispatchTheSameOperation) {
     console.InvokeAction("perf.gpu");
     EXPECT_FALSE(console.Widgets().Visible("perf.gpu"));
     const auto match = console.Bindings().Match({292, 0}, 1, Gameplay);
-    ASSERT_TRUE(match);
+    ASSERT_TRUE(match.has_value());
     console.InvokeAction(*match);
     EXPECT_TRUE(console.Widgets().Visible("perf.gpu"));
     EXPECT_TRUE(console.Submit("help \"time scale\"").message.find("time scale") !=
@@ -513,6 +550,44 @@ TEST(DeveloperRouting, CapturedTypingBlocksEveryGameplayPollAndTimeShortcut) {
     router.Key(87, 0, false, false);
     EXPECT_TRUE(router.GameplayKeyAllowed(87));
     EXPECT_EQ(router.Key(87, 1, false, false), KeyRoute::Gameplay);
+}
+
+void ExpectPreviewMouseBlocked(UiInputOwnership ownership) {
+    UiInputRouter router;
+    router.SetOwnership(ownership);
+    MenuPreviewState preview;
+    preview.dragging = true;
+    preview.lastCursorX = 120.0;
+    preview.lastCursorY = 80.0;
+    EXPECT_FALSE(preview.UpdateInputOwnership(router));
+    EXPECT_FALSE(preview.dragging);
+    EXPECT_DOUBLE_EQ(preview.lastCursorX, 120.0);
+    EXPECT_DOUBLE_EQ(preview.lastCursorY, 80.0);
+    router.SetOwnership({});
+    EXPECT_TRUE(preview.UpdateInputOwnership(router));
+    EXPECT_FALSE(preview.dragging); // Returning ownership does not resume the old drag.
+}
+
+TEST(DeveloperRouting, PreviewMouseOwnershipCancelsDragForDeveloperUiAndFocusLoss) {
+    UiInputRouter router;
+    MenuPreviewState preview;
+    EXPECT_TRUE(preview.UpdateInputOwnership(router));
+    preview.dragging = true;
+    EXPECT_TRUE(preview.UpdateInputOwnership(router));
+    EXPECT_TRUE(preview.dragging);
+    for (const auto flag : {&UiInputOwnership::console_open,
+                            &UiInputOwnership::interactive_panel,
+                            &UiInputOwnership::binding_capture,
+                            &UiInputOwnership::imgui_mouse,
+                            &UiInputOwnership::imgui_keyboard,
+                            &UiInputOwnership::imgui_text_input}) {
+        UiInputOwnership ownership;
+        ownership.*flag = true;
+        ExpectPreviewMouseBlocked(ownership);
+    }
+    UiInputOwnership unfocused;
+    unfocused.window_focused = false;
+    ExpectPreviewMouseBlocked(unfocused);
 }
 
 TEST(DeveloperRouting, CaptureToggleEscapePriorityRepeatAndUnicodeDelivery) {
@@ -711,9 +786,9 @@ TEST(DeveloperWidgets, CompleteAdaptersShareRowsCommandsShortcutsAndCloseButtons
         EXPECT_TRUE(console.Widgets().SetVisible(id, false)); // shared window close operation
         EXPECT_FALSE(console.Widgets().Visible(id));
         const auto chord = console.Bindings().Get(id);
-        ASSERT_TRUE(chord);
+        ASSERT_TRUE(chord.has_value());
         const auto shortcut = console.Bindings().Match(*chord, 1, Gameplay);
-        ASSERT_TRUE(shortcut);
+        ASSERT_TRUE(shortcut.has_value());
         UiInputRouter router;
         router.SetOwnership(World());
         ASSERT_EQ(router.Key(chord->key, 1, false, true), KeyRoute::DeveloperShortcut);
@@ -759,7 +834,7 @@ TEST(DeveloperWidgets, EveryModuleCanRebindUnbindAndResetWithoutDuplicateVisibil
             const KeyChord chord{key++, 2};
             EXPECT_TRUE(console.Bindings().Rebind(binding.id, chord, error)) << error;
             const auto matched = console.Bindings().Match(chord, 1, Gameplay);
-            ASSERT_TRUE(matched);
+            ASSERT_TRUE(matched.has_value());
             EXPECT_EQ(*matched, binding.id);
             EXPECT_TRUE(console.InvokeAction(*matched).success);
             EXPECT_EQ(console.Widgets().Visible(def.id), panel && def.shortcuts.empty());
@@ -926,6 +1001,20 @@ TEST(DeveloperRouting, CallbackSequencePreservesPrintableRmlTextAndSuppressesTog
     router.SetOwnership(state);
     EXPECT_EQ(router.Key(290, 1, true, true), KeyRoute::ConsoleToggle); // F1 still available
 }
+
+void ExpectPanelShortcut(DeveloperConsole& console, UiInputRouter& router, const char* id) {
+    const auto chord = console.Bindings().Get(id);
+    ASSERT_TRUE(chord.has_value());
+    const auto matched = console.Bindings().Match(*chord, 1, Gameplay);
+    ASSERT_TRUE(matched.has_value());
+    ASSERT_EQ(router.Key(chord->key, 1, false, true), KeyRoute::DeveloperShortcut) << id;
+    EXPECT_TRUE(console.InvokeAction(*matched).success) << id;
+    EXPECT_EQ(router.Character(static_cast<unsigned>(chord->key)), InputOwner::Unfocused);
+    EXPECT_EQ(router.Key(chord->key, 2, false, true), KeyRoute::Ignore);
+    router.Key(chord->key, 0, false, false);
+    EXPECT_FALSE(router.GameplayAllowed());
+}
+
 TEST_F(ConsoleFixture, PanelOwnershipAllowsDeveloperActionsAndReboundPanelClose) {
     UiInputRouter router;
     auto state = World();
@@ -937,24 +1026,14 @@ TEST_F(ConsoleFixture, PanelOwnershipAllowsDeveloperActionsAndReboundPanelClose)
                            "render.wireframe-toggle",
                            "time.slower",
                            "time.faster",
-                           "time.reset"}) {
-        const auto chord = console.Bindings().Get(id);
-        ASSERT_TRUE(chord);
-        const auto matched = console.Bindings().Match(*chord, 1, Gameplay);
-        ASSERT_TRUE(matched);
-        ASSERT_EQ(router.Key(chord->key, 1, false, true), KeyRoute::DeveloperShortcut) << id;
-        EXPECT_TRUE(console.InvokeAction(*matched).success) << id;
-        EXPECT_EQ(router.Character(static_cast<unsigned>(chord->key)), InputOwner::Unfocused);
-        EXPECT_EQ(router.Key(chord->key, 2, false, true), KeyRoute::Ignore);
-        router.Key(chord->key, 0, false, false);
-        EXPECT_FALSE(router.GameplayAllowed());
-    }
+                           "time.reset"})
+        ExpectPanelShortcut(console, router, id);
     EXPECT_EQ(effects, 6);
     std::string error;
     ASSERT_TRUE(console.Bindings().Rebind("render.shaders", KeyChord{75, 2}, error));
     ASSERT_TRUE(console.Widgets().SetVisible("render.shaders", true));
     const auto matched = console.Bindings().Match({75, 2}, 1, Gameplay);
-    ASSERT_TRUE(matched);
+    ASSERT_TRUE(matched.has_value());
     ASSERT_EQ(router.Key(75, 1, false, true), KeyRoute::DeveloperShortcut);
     EXPECT_TRUE(console.InvokeAction(*matched).success);
     EXPECT_FALSE(console.Widgets().Visible("render.shaders"));
@@ -1018,7 +1097,7 @@ TEST_F(ConsoleFixture, PanelLayoutFollowsVisibilityAndRejectsPassiveOrInvalidGeo
     EXPECT_EQ(saves, saved);
     ASSERT_TRUE(console.Widgets().SetVisible("render.shaders", false));
     const auto closed_panel = console.Widgets().Layout("render.shaders");
-    ASSERT_TRUE(closed_panel);
+    ASSERT_TRUE(closed_panel.has_value());
     EXPECT_FALSE(closed_panel->open);
     EXPECT_EQ(closed_panel->width, 640);
     EXPECT_FALSE(console.Widgets().SetLayout("perf.hud", layout));
@@ -1030,7 +1109,7 @@ TEST_F(ConsoleFixture, PanelLayoutFollowsVisibilityAndRejectsPassiveOrInvalidGeo
     EXPECT_TRUE(console.IsOpen());
     console.SetOpen(false);
     const auto closed_console = console.Layout();
-    ASSERT_TRUE(closed_console);
+    ASSERT_TRUE(closed_console.has_value());
     EXPECT_FALSE(closed_console->open);
     EXPECT_EQ(closed_console->x, 120);
 }

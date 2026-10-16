@@ -341,13 +341,13 @@ void DeveloperConsole::RegisterCommands() {
                 SetOpen(!m_open);
                 return CommandResult{};
             });
-    auto host_command = [&](std::string name,
+    auto host_command = [&](const std::string& name,
                             std::string description,
                             std::vector<CommandArgument> args,
                             bool renderer) {
         command(
             name,
-            description,
+            std::move(description),
             std::move(args),
             [this, name](const CommandArguments& values) {
                 if (!m_host.execute)

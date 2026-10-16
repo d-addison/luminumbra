@@ -38,12 +38,13 @@ void DrawDeveloperWidget(DeveloperWidgetRegistry& widgets,
         flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
                 ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoInputs |
                 ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoMove;
-        ImGui::SetNextWindowPos(ImVec2(10, def.id == "perf.hud" ? 10 : 60), ImGuiCond_Always);
+        ImGui::SetNextWindowPos(ImVec2(10.0f, def.id == "perf.hud" ? 10.0f : 60.0f),
+                                ImGuiCond_Always);
         ImGui::SetNextWindowBgAlpha(0.55f);
     } else {
         PrepareDeveloperPanel(widgets.Layout(def.id),
-                              def.id == "world.generation" ? 550 : 480,
-                              def.id == "world.generation" ? 750 : 520);
+                              def.id == "world.generation" ? 550.0f : 480.0f,
+                              def.id == "world.generation" ? 750.0f : 520.0f);
     }
     const auto name = def.title + "###" + def.id;
     if (ImGui::Begin(name.c_str(), passive ? nullptr : &visible, flags)) {

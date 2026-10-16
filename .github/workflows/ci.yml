@@ -206,7 +206,8 @@ jobs:
           # It exists to catch whole suites silently vanishing (a CMake guard flipping,
           # discovery failing), not to be an exact inventory. Raise it when tests are
           # added in bulk; lowering it needs a justification in the PR description.
-          python3 tools/ci/check_ctest_junit.py build/release/ctest.junit.xml --minimum-tests 2280
+          # Ratcheted by 55 developer cases and five input/UI regressions.
+          python3 tools/ci/check_ctest_junit.py build/release/ctest.junit.xml --minimum-tests 2340
       - name: Qualify installed prefab runtime
         if: ${{ needs.changes.outputs.needs_cpp != 'false' }}
         timeout-minutes: 5
@@ -601,7 +602,8 @@ jobs:
           # Linux software-GL lane: no GL-related skip is acceptable, and any
           # remaining skip is a hard failure.
           # Inventory floor: measured 2284 tests on devel b56cdba1, minus ~1% margin (see the Linux lane for the policy).
-          python tools/ci/check_ctest_junit.py build/release/ctest.junit.xml --minimum-tests 2260
+          # Ratcheted by 55 developer cases and five input/UI regressions.
+          python tools/ci/check_ctest_junit.py build/release/ctest.junit.xml --minimum-tests 2320
       - name: Report compiler cache statistics
         if: ${{ needs.changes.outputs.needs_cpp != 'false' && (always() && !(github.event_name == 'workflow_dispatch' && inputs.qualification_capture) && steps.ccache-stage.outcome == 'success') }}
         continue-on-error: true
@@ -821,7 +823,8 @@ jobs:
           # other software-GL lanes: no GL-related skip is acceptable, and
           # any remaining skip is a hard failure.
           # Inventory floor: measured 2284 tests on devel b56cdba1, minus ~1% margin (see the Linux lane for the policy).
-          python tools/ci/check_ctest_junit.py build/release/ctest.junit.xml --minimum-tests 2260
+          # Ratcheted by 55 developer cases and five input/UI regressions.
+          python tools/ci/check_ctest_junit.py build/release/ctest.junit.xml --minimum-tests 2320
       - name: Bind manual qualification evidence
         if: always() && (github.event_name == 'workflow_dispatch' && inputs.qualification_capture)
         shell: msys2 {0}

@@ -294,8 +294,9 @@ TEST_F(DeveloperPersistence, LayoutNumericOverflowLogsAndPreservesSiblingsInBoth
         ASSERT_EQ(cfg.user().developer.layouts.size(), overlay ? 3u : 2u);
         EXPECT_FLOAT_EQ(cfg.user().developer.layouts.at("render.shaders").x, 130);
         EXPECT_FALSE(cfg.user().developer.layouts.at("console.toggle").open);
-        if (overlay)
+        if (overlay) {
             EXPECT_EQ(cfg.user().developer.layouts.at("perf.gpu"), previous);
+        }
         EXPECT_FLOAT_EQ(cfg.user().fov, 82);
         EXPECT_FLOAT_EQ(cfg.user().audio_master, 0.4f);
         EXPECT_EQ(cfg.keybind("Jump", 32), 90);

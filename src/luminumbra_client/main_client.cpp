@@ -4960,7 +4960,8 @@ int main(int argc, char* argv[]) {
                                   renderPipeline,
                                   g_uiManager.get(),
                                   worldgenPreview.get(),
-                                  menuPreviewState);
+                                  menuPreviewState,
+                                  uiInputRouter);
             }
         }
 
