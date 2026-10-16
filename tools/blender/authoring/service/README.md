@@ -138,9 +138,16 @@ the owned worker stops. A request arriving after publication observes success.
 Use these RPC operations within the same session to inspect or cancel live jobs;
 independent CLI invocations cannot take over another session's project lock.
 
-One service owns a project per host. Linux uses `flock`; Windows uses a kernel
-mutex. These locks do not coordinate simultaneous Windows/Linux access or different
-path aliases. Use a canonical project path and trusted local collaborators.
+One service owns a project. Linux uses `flock`; Windows uses a nonblocking
+exclusive byte-range lock on `.luminumbra-author/session.lock`. The Windows lock
+coordinates logon sessions through the same file and uses the project's file
+access controls. Any thread can close it; release failures are reported and can
+be retried. Filesystems that cannot provide byte-range locks refuse acquisition.
+Windows also retains the legacy session-local mutex name while holding the file
+lock, excluding older services during an upgrade. This mutex is an unowned
+existence marker, so closing it does not depend on the acquiring thread.
+Simultaneous Windows/Linux access is not qualified. Use a canonical project path
+and trusted local collaborators.
 Source writers should publish sidecars atomically and advance revisions; arbitrary
 concurrent hostile filesystem mutation is outside this profile.
 
@@ -181,6 +188,18 @@ automatically deleted. Garbage collection and power-loss durability are future
 work; an atomic pointer does not imply a durable directory fsync on every host.
 Startup marks interrupted jobs failed, except when their generation pointer
 already committed. That case recovers as success after hash verification.
+Recovery runs only after acquiring the project lock. Receiptless directories and
+interrupted jobs move intact to timestamped directories under
+`.luminumbra-author/quarantine/`; interrupted jobs retain a failed receipt under
+`jobs/` for status queries. Quarantine preserves all files and is never deleted
+automatically. Before moving an interrupted job, recovery records an intent and
+replays it on startup until the failed status receipt is saved. Process exits and
+write failures during quarantine therefore retain the job for status queries.
+On Windows, recovery retries directory access/sharing violations while the prior
+compiler supervisor releases its working directory. All startup moves share a
+ten-second retry deadline; expiry preserves the source and pending intent for
+the next startup.
+Completed jobs and committed generations remain in place.
 
 Receipts record the host/Python profile, source/dependency hashes, exporter metadata through the hashed
 sidecar, service-code hashes, compiler/library identities, settings, outputs and
@@ -491,3 +510,229 @@ on Windows. Every interactive child is killed when needed, reaped, and has its
 streams closed before its temporary directory is removed. Parser adversarial
 fixtures assert exact refusal rules, bounded allocations/input work, and finite
 execution time without large memory inputs.
+
+## MG2 E4: candidate evidence and worker ownership
+
+`meshgen_provenance.build_evidence()` accepts the broker's exact validated
+image/raw-GLB snapshots, resolved config, pinned card/result metadata and bounded
+finisher observations. The trusted parent recomputes licence permission and
+candidate eligibility, validates the exported GLB and preview, and assembles
+provenance v2 and the registered sealed members. Workers cannot submit policy
+fields, even inside a step's statistics. Mock GPU fields remain unavailable;
+synthetic finisher/preview observations explicitly say `simulated`. Licence
+permission does not make a mock candidate shippable. Prompt bytes are retained
+only with `logging.keep_prompts=text`; model weights and credentials are never
+retained. Config identity and the hash of the stored config bytes are distinct.
+
+`CandidateStore(project, document)` publishes at
+`.luminumbra-author-recipes/<document>/candidates/<32-hex-job>/`. Use
+`CandidateLedger.commit_success(job, trusted_callback)` to serialize this
+publication with cancellation. `CandidateLedger` is an opt-in E4 extension of
+the E3 ledger; existing E3 callers retain their behavior. A ready owner's
+request, plan and backend/config identity must match the candidate before
+publication, and its backend work must already be stopped and drained. The
+storage guard lives beside `jobs/`, so E3 job enumeration stays compatible.
+Lock order is owner transition, storage guard, then ledger publication guard;
+MG2 ownership still precedes the independent build-session lock.
+
+The transaction prepares `jobs/<job>/receipt.prepared.json` first, publishes all
+registered members and `manifest.json`, validates their actual bytes, then
+publishes `candidate.sha256`. This marker hashes the manifest; it is distinct
+from the GLB's artifact hash. `receipt.json` and `receipt.sha256` are published
+last outside the seal. Publication retains every verified ancestor until
+replacement and durability finish. POSIX uses `O_NOFOLLOW` directory descriptors
+for creation, staging, replacement and directory fsync; retained identities are
+checked before and after mutation. Windows retains non-delete-sharing directory
+handles and refuses reparse points. Regular files use shared
+`file_io.replace_file`: temporary file fsync, Windows publication-handle flush
+and POSIX fsync of both source and destination directories. File and directory
+temporaries live outside seals in document-owned `.candidate-staging/` (initial
+state-directory temporaries also remain outside seals). Ordinary failures remove
+the current temporary; abrupt process death can retain staging evidence there.
+Recovery does not delete that evidence, and retained-state quotas count it.
+Interrupted pre-seal work remains uncommitted evidence;
+it is refused by reads and recovery. After seal commitment, recovery verifies
+the entire bundle and prepared receipt before completing receipt publication.
+A valid committed candidate wins subsequent cancellation and E4 orphan
+recovery, including a crash before E3's terminal result publication.
+
+Readers reject missing/extra/changed members, escaped paths, symlinks, Windows
+reparse points, hard links, malformed JSON and unsupported geometry encodings.
+Containment and content checks use the same retained regular-file handle.
+`stage_for_import()` copies already-verified GLB bytes into new job-private
+staging; it does not reopen the candidate path after validation. G3 still owns
+the scene/session/scope plan and main-thread mutation. Existing publications
+are preserved on refusal. Project entry/byte quotas refuse new evidence;
+`delete()` refuses deletion, protecting retained and future promoted evidence.
+Durable game-owned promotion packages and scene lineage remain G3 work.
+
+`append_attestation(job, kind, utc, observation)` writes
+`attestations/<kind>.<YYYYMMDDTHHMMSSffffffZ>.json` and its separate hash. The
+original seal/provenance never changes. Each payload hashes its predecessor,
+current candidate seal, candidate job ID, kind and timestamp, and observation.
+Entries and hashes must be unique. The anchor in `jobs/<job>/attestations.json`
+and numbered records in `jobs/<job>/attestation-history/` are retained evidence;
+they are ordinary mutable filesystem files, not an immutable authority.
+
+The authoritative project-state pointer at
+`<state-root>/<document>/attestation-heads/<job>.json`, beside the E3 job ledger
+and outside both candidate and job evidence, retains the committed count and
+head hash, candidate ID, seal and a prepared append. It uses the existing
+ancestor-retaining, durable publication primitives and the document storage
+guard. Every read validates all remaining payloads, hashes and numbered records
+against the chain and this independent committed pointer. Coordinated suffix
+or whole-history deletion and coordinated replacement of candidate attestations,
+anchor and numbered history are refused with `attestation.changed` across fresh
+service instances. A prepared payload is durably retained in the pointer before
+candidate mutation; recovery finishes only that append, including interruptions
+between evidence publication and head advancement in either order. The pointer
+keeps its prepared payload until anchor completion, then clears it. Missing
+committed evidence outside a prepared transaction is refused, not reconstructed.
+
+The threat model is tamper evidence for the candidate directory (and its job
+anchor/history copies) relative to the service's independently committed project
+state. An actor who rewrites the authoritative state store itself is out of
+scope. These files are append-only through the service API; there is no claim
+that ordinary filesystem records are physically immutable. Crashes during file
+creation, fsync, replacement or Windows directory publication leave temporaries
+outside the seal and do not obstruct recovery. Evidence is advisory and grants
+no policy permission.
+
+`meshgen_metrics` provides bounded exported accessor inspection, connectivity
+across split UV seams, finite nonzero normals, exported height/pivot and texture stripping checks, positive-area UV intersection
+with an X sweep broad phase and exact rational predicates/clipping on accepted
+binary floating-point coordinates, deterministic area-weighted sampling in a common
+metres/Y-up frame, matched-component/open-sheet decisions, and baseline-restored
+decimation/whole-chain retry helpers. Fixed metric work limits are versioned
+measurement ceilings: one million expanded elements, 200,000 UV broad-phase
+pairs and 20,000 area-weighted samples. Exhausted UV evidence is unavailable and
+fails `uv_overlap_zero`; it never becomes a raster-based clearance. The raw
+reference is retained before any repair. Thickness requires both hit rates;
+open-sheet fallback matches distinct raw components and uses each raw
+component's largest fixed X/Y/Z projected view. No independent geometry refit
+is performed. Native BVH distance/ray queries and actual Blender repair/unwrap
+operations are G2 responsibilities. Watertightness and other advisory statistics
+are not added as universal gates. Waivers still require committed internal
+policy plus a new human-reviewed plan; sealed evidence is never edited to add
+acceptance.
+
+`meshgen_worker.run_simulated()` uses a fresh isolated, no-site, no-bytecode
+interpreter, bounded request and output pipes, configuration byte/identity
+rechecks, scrubbed environment, and an ownership supervisor. Pipe reads/writes
+run in threads with bounded buffers, so Windows anonymous pipes need no
+`select`. Readiness has its own deadline; execution deadlines and cancellation
+use injectable clocks/events. A successful result requires process exit and
+completion of stdout, stderr and stdin processing under the same absolute
+deadline; late I/O failures are validated before result construction. Execution
+reserves up to 0.5 seconds (at most half the total budget) for cleanup inside
+that deadline. Root waits, retry waits, Job accounting and thread joins all use
+its remaining time and the injected clock, without new cleanup windows. An
+unconditional finalizer attempts every tree/Job/handle close, stream close and
+thread join even when stop, kill or wait raises. Successful cleanup kills
+descendants and waits for every owned PID to disappear, including zombies,
+before closing streams. Cleanup failure prevents a successful result. EOF
+preserves the supervisor as a reaper through shutdown. Only dedicated Linux ownership supervisor children enable
+`PR_SET_CHILD_SUBREAPER`; the caller/service/test runner remains unchanged.
+Ordinary `run_owned()` commands also run under an isolated supervisor with an
+EOF ownership pipe. A separate start pipe holds a trusted launcher until the
+supervisor has established tree ownership and retained the launcher's validated
+pidfd. Startup cleanup closes both supervisor-held start-pipe ends before any
+wait, so a failed termination cannot leave the launcher waiting for release.
+All cleanup waits use the remaining absolute deadline. Direct-child termination
+uses its retained pidfd; only setup failure before pidfd ownership permits
+`Popen.kill()` on the unreleased launcher. Cleanup attempts every finalizer and
+preserves the original setup error. The supervisor repeatedly enumerates its entire
+descendant tree using `/proc` parent IDs and creation ticks. It opens and retains pidfds,
+then revalidates each child's identity and its chain to the supervisor before
+accepting the handle. SIGKILL uses `signal.pidfd_send_signal`, so later numeric
+PID reuse cannot redirect a signal. Changed parentage is retried on the next
+scan, including subreaper adoption. Cleanup checks the absolute deadline before
+and after proc iteration, identity reads, validation and signalling, and inside
+the nonblocking `waitpid(-1)` drain. Each scan builds parent adjacency lists
+once; frontier expansion and each reap pass take linear work. Scans allow at
+most 65,536 proc entries, trees and retained handles at most 4,096 processes,
+and each reap pass at most 4,096 wait calls. Deadline or work-limit exhaustion
+reports cleanup failure while final resource closure is still attempted. These
+checks bound traversal work between clock checks; OS scheduling and individual
+system calls can still finish after a deadline. Adoption and enumeration cover
+changed sessions/process groups and fork races, including successful root exits. Supervisors also apply the
+inherited address-space rlimit. Windows assigns kill-on-close Job objects with
+an aggregate memory cap before the stdin handshake; neither
+`JOB_OBJECT_LIMIT_BREAKAWAY_OK` nor `JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK` is set.
+It waits for their active process count to reach zero. Other POSIX platforms refuse the owned-worker lane
+until an equivalent adoption/reaping mechanism is qualified. Unavailable
+enforcement refuses the lane. Linux checks both pidfd APIs and probes kernel
+support before spawning a worker; missing or denied pidfd enforcement returns
+`worker.unavailable`. Windows continues to use Job objects without Linux/POSIX
+calls. Compiler supervision is unchanged.
+
+`finisher_envelope()` rechecks the E1 game entry/module pins and returns the
+factory-startup, disable-autoexec, two-thread, isolated-resource-directory,
+bounded-stdin, deadline and memory contract. It executes no game code or
+Blender. G1 currently pins only the companion skeleton; its finisher is planned
+for G2. `run_native()` deliberately returns `worker.unavailable`, and
+capabilities advertise `meshgen_native_finisher=false` and real backends false.
+No native qualification is inferred from portable simulations. Status:
+**portable Linux verified; Windows and native acceptance pending** on Windows Blender 5.1.0.
+
+E4 tests are discovered by both existing `blender-authoring.yml` OS lanes and
+the installed service ships all four E4 modules. No workflow change is needed.
+The E4 fixtures are small GLB/PNG byte strings generated from source. Local
+verification includes loopback socket tests for transport coverage.
+
+#### E4 platform mechanism tests
+
+Four tests retain Linux capability guards because their kernel mechanisms do
+not exist on the Windows Job path. Their Windows counterparts below run on
+every platform with mocked Job APIs and have no platform guards:
+
+| Linux mechanism test | Portable Windows counterpart |
+|---|---|
+| `test_real_setup_failures_prevent_execution_and_leave_no_worker_or_zombie` (pidfd held launcher) | `test_windows_job_setup_failure_kills_reaps_and_closes_without_handshake` |
+| `test_supervision_preserves_caller_subreaper_and_unrelated_child_lifecycle` (`prctl` subreaper state) | `test_windows_job_ownership_terminates_only_assigned_child_and_drains_before_close` |
+| `test_linux_reaper_rescans_fork_races_and_waits_for_all_children` (pidfd adoption and `waitpid(-1)`) | `test_windows_job_ownership_terminates_only_assigned_child_and_drains_before_close`; `test_windows_job_accounting_uses_injected_absolute_deadline_and_disallows_breakaway` |
+| `test_real_supervisor_owner_eof_reaps_detached_orphan_descendants` (held-launcher/control pipe and subreaper adoption) | `test_windows_job_ownership_terminates_only_assigned_child_and_drains_before_close`; `test_cleanup_closes_job_streams_handle_and_joins_after_wait_and_kill_failures` |
+
+The held-launcher test is in `test_meshgen_process.py`; the other tests and all
+Windows counterparts are in `test_meshgen_worker.py`. Deterministic startup
+tests also inject simultaneous setup and kill failures, require pipe closure
+before a finite wait, and verify that the original error survives deadline
+expiry and finalizer failures.
+
+Binding Q coverage below names exact E4 tests (the native and scene portions
+remain in their assigned G2/G3 slices):
+
+| Q | Tests |
+|---|---|
+| 1, 3, 13, 27, 52 | `test_worker_modules_ship_without_ml_bpy_and_work_in_installed_package`; `test_pinned_game_script_envelope_recheck_and_native_lane_unavailable` |
+| 5, 28, 29 | `test_pinned_game_script_envelope_recheck_and_native_lane_unavailable`; `test_unavailable_tree_enforcement_refuses_and_reaps_without_handshake` |
+| 9, 11, 17, 21 | `test_actual_final_budget_refused_and_grounded_pivot_verified`; `test_config_image_raw_result_exporter_and_capability_identity_mismatch`; `test_configuration_bytes_and_resolved_identity_rechecked_before_spawn`; `test_v2_superset_parent_mock_policy_gpu_unavailable_exact_retained_bytes` |
+| 18, 42 | `test_policy_forgery_in_worker_observations_and_nested_fields`; `test_parent_policy_forgery_rejected_even_with_rehashed_members`; `test_v2_superset_parent_mock_policy_gpu_unavailable_exact_retained_bytes`; `test_forged_gate_stats_and_prepared_owner_plan_refused` |
+| 22, 23, 34 | `test_exported_accessor_counts_normals_uv_bounds_and_split_seam_bodies`; `test_malformed_bounds_indices_attributes_expansion_and_encodings`; `test_preview_parser_bounded_chunks_and_dimensions` |
+| 24, 29 | `test_windows_compatible_readiness_timeout_cancellation_and_reaping`; `test_crash_missing_readiness_bounded_stdout_stderr_and_stdin`; `test_blocked_stdin_writer_is_bounded_and_reaped`; `test_eof_stops_simulated_worker_tree_with_bounded_readiness`; `test_every_owned_pid_disappears_after_timeout_cancellation_and_exception`; `test_result_waits_for_delayed_stderr_and_writer_and_validates_late_failures`; `test_real_supervisor_owner_eof_reaps_detached_orphan_descendants`; `test_linux_reaper_rescans_fork_races_and_waits_for_all_children`; `test_supervision_preserves_caller_subreaper_and_unrelated_child_lifecycle`; `test_windows_job_accounting_uses_injected_absolute_deadline_and_disallows_breakaway`; `test_cleanup_closes_job_streams_handle_and_joins_after_wait_and_kill_failures` |
+| 25, 26, 40, 46 | `test_cancellation_and_commit_share_e3_owner_transition`; `test_committed_seal_wins_cancel_and_recovers_original_e3_terminal_replay`; `test_orphan_recovery_uses_seal_prepared_receipt_and_refuses_policy_tampering`; `test_subprocess_crash_at_candidate_marker_recovers_seal_and_terminal_success` |
+| 31, 32, 33 | `test_area_weighted_sampling_deterministic_in_common_frame_and_whole_chain_retry`; `test_closed_shell_and_matched_open_sheet_guard_modes`; `test_under_budget_guard_runs_retry_starts_same_baseline_restores_last_accepted` |
+| 35 | `test_exact_uv_positive_area_overlap_shared_edges_and_bounded_adversarial_pairs`; `test_uv_overlap_translated_thin_and_nearly_touching` |
+| 36, 37 | `test_missing_guard_evidence_fails_under_budget_and_accept_flagged_needs_human_plan`; `test_v2_superset_parent_mock_policy_gpu_unavailable_exact_retained_bytes` |
+| 38 | `test_worker_step_inventory_bound_and_preview_no_fake_claim`; `test_simulated_worker_verifies_config_and_records_no_native_measurement` (sequential seeds retain E3 coverage) |
+| 39 | `test_member_tamper_missing_extra_and_manifest_rewrite`; `test_escapes_symlinks_and_hardlinks_refused`; `test_append_only_attestations_preserve_original_seal_detect_rewrite_truncation`; `test_attestation_interrupted_append_recovery`; `test_attestation_reorder_duplicate_replay_and_anchor_truncation_refused`; `test_publication_ancestor_swaps_refuse_and_preserve_outside`; `test_new_directory_ancestor_swap_refused_during_creation`; `test_authoritative_head_refuses_coordinated_suffix_deletion_and_replacement` |
+| 40 | `test_seal_and_receipt_order_recovery_after_each_publication_interruption`; `test_recovery_refuses_changed_prepared_and_terminal_receipt`; `test_regular_publication_fsyncs_before_shared_replace_and_posix_directory_after`; `test_held_shared_readers_and_durability_use_shared_publication`; `test_attestation_publication_internal_crashes_recover_outside_seal_staging`; `test_attestation_pointer_and_candidate_crash_recovery_in_both_orders` |
+| 41 | `test_complete_seal_retains_replay_distinct_identities_and_receipt`; `test_prompt_retention_opt_in_and_no_secret_payloads`; `test_secret_exclusion_decoded_json_glb_logs_and_rotation`; `test_dynamic_token_rotation_refuses_document_before_state_and_attestation_before_anchor` |
+| 43 | `test_held_shared_readers_and_durability_use_shared_publication`; `test_project_byte_quota_refuses_publication_preserving_last_receipt` (GC refuses deletion; promotion remains G3) |
+| 44 | `test_import_private_snapshot_uses_verified_bytes_despite_source_replacement`; `test_import_private_traversal_refused_before_any_destination_publication` |
+
+Run the stdlib service suite with temporary files inside the clone:
+
+```sh
+mkdir -p .test-tmp
+TMPDIR="$PWD/.test-tmp" TMP="$PWD/.test-tmp" TEMP="$PWD/.test-tmp" \
+  PYTHONDONTWRITEBYTECODE=1 \
+  python3 -B -m unittest discover -s tools/blender/authoring/service/tests -v
+rmdir .test-tmp
+```
+
+The suite includes deterministic proc-reader, enumeration and pidfd-signal
+fixtures in `test_meshgen_process.py` for exit/reuse, parent reuse, adoption,
+unavailable enforcement, traversal limits and deadline expiry inside cleanup
+loops. Socket tests require local loopback permission. Native Blender and
+Windows execution require their own acceptance environments.

@@ -1266,7 +1266,9 @@ TEST(LockstepSessionTest, DesyncDetectedAndDumpEmitted) {
     // At least one side must report the desync (the one that holds both hashes at tick 30).
     const bool a_desync = a.Status().desynced;
     const bool b_desync = b.Status().desynced;
-    EXPECT_TRUE(a_desync || b_desync) << "oracle is vacuous: a real divergence was not caught";
+    EXPECT_TRUE(a_desync || b_desync)
+        << "oracle is vacuous: a real divergence was not caught at ticks " << r.a_tick << ", "
+        << r.b_tick;
 
     // The catching side localizes to tick 30, section terrain, and wrote a dump.
     if (a_desync) {

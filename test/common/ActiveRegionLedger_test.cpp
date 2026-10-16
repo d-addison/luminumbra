@@ -303,8 +303,13 @@ TEST(ActiveRegionLedgerTest, FrozenContentsAndCursorDoNotAdvanceAndResumeIsBound
                   .elapsed_ticks,
               36000u);
     EXPECT_EQ(ActiveRegionLedger::resume_window(kFar, 3, WorldClock(100000), 7).elapsed_ticks, 7u);
-    EXPECT_THROW(ActiveRegionLedger::resume_window(kFar, 3, WorldClock(2), 7),
-                 std::invalid_argument);
+    EXPECT_THROW(
+        {
+            const auto window = ActiveRegionLedger::resume_window(kFar, 3, WorldClock(2), 7);
+            ADD_FAILURE() << "Backward resume accepted with elapsed ticks: "
+                          << window.elapsed_ticks;
+        },
+        std::invalid_argument);
 }
 
 TEST(ActiveRegionLedgerTest, UnlimitedDefaultNeverReducesOrFreezes) {
@@ -438,12 +443,16 @@ TEST(ActiveRegionLedgerTest, CadenceRunsOnlyAtDerivedPhaseAndFailedFreezeLeavesL
 TEST(ActiveRegionLedgerTest, ValidAnchorBoundaries) {
     const auto nan = std::numeric_limits<float>::quiet_NaN();
     const auto inf = std::numeric_limits<float>::infinity();
-    EXPECT_TRUE(ActiveRegionLedger::valid_anchor(Vec3(-16777216.0f, 0, -16777216.0f)));
-    EXPECT_TRUE(ActiveRegionLedger::valid_anchor(Vec3(16777215.0f, 5, 16777215.0f)));
+    EXPECT_TRUE(ActiveRegionLedger::valid_anchor(Vec3(-16777216.0f, 0, 0)));
+    EXPECT_TRUE(ActiveRegionLedger::valid_anchor(Vec3(0, 0, -16777216.0f)));
+    EXPECT_TRUE(ActiveRegionLedger::valid_anchor(Vec3(16777215.0f, 5, 0)));
+    EXPECT_TRUE(ActiveRegionLedger::valid_anchor(Vec3(0, 5, 16777215.0f)));
     EXPECT_TRUE(ActiveRegionLedger::valid_anchor(Vec3(0, -1e30f, 0)));
     EXPECT_FALSE(ActiveRegionLedger::valid_anchor(Vec3(16777216.0f, 0, 0)));
     EXPECT_FALSE(ActiveRegionLedger::valid_anchor(Vec3(0, 0, 16777216.0f)));
+    // -2^24 - 1 rounds to -2^24 in binary32; -16777218 is the next lower float.
     EXPECT_FALSE(ActiveRegionLedger::valid_anchor(Vec3(-16777218.0f, 0, 0)));
+    EXPECT_FALSE(ActiveRegionLedger::valid_anchor(Vec3(0, 0, -16777218.0f)));
     EXPECT_FALSE(ActiveRegionLedger::valid_anchor(Vec3(nan, 0, 0)));
     EXPECT_FALSE(ActiveRegionLedger::valid_anchor(Vec3(0, 0, inf)));
     EXPECT_FALSE(ActiveRegionLedger::valid_anchor(Vec3(0, nan, 0)));

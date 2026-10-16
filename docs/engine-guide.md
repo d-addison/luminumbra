@@ -499,6 +499,44 @@ for the config example and qualification gates. Saved-world far production
 authority remains fixture-only until FW S8 (v0.3.1); the renderer reports an
 explicit unavailable/refusal diagnostic.
 
+### Developer console
+
+The ordinary and QA clients provide the same developer console in Release and
+other configurations. F1 opens its searchable widget hub by default; ordinary
+Settings provides console access and the default-on performance HUD switch.
+Visibility, resolved shortcuts and interactive panel layouts persist under
+`user.developer` without changing simulation hashes. The Controls settings section
+links to the hub for developer rebinding and hotkey help. Generated help includes
+current developer and gameplay bindings. Interactive panels share input/cursor
+ownership; passive HUDs do not capture gameplay. Opening the console does not
+pause simulation.
+
+| Default hotkey | Module / action |
+|---|---|
+| F1 | Open or close the developer hub |
+| F3 | GPU profiler panel |
+| F5 | Reload all shaders (`shader.reload`, no panel) |
+| F6 | Cycle debug views (`render.debug-cycle`) |
+| F7 | World generation preview panel |
+| F8 | Client settings panel |
+| F9 | Toggle wireframe effect (`render.wireframe-toggle`) |
+| F10 | Shader panel |
+| `[` | Slow time (`time.slower`) |
+| `]` | Speed up time (`time.faster`) |
+| `\` | Reset time scale (`time.reset`) |
+
+The hub shows every module's description and current hotkeys, including unbound
+panels and passive overlays. Debug-view, wireframe and time-control panel visibility
+is separate from their effect hotkeys. Photo mode uses `[` and `]` for aperture.
+Developer actions and rebound panel keys work while a panel owns input; focused
+text fields block them. `--no-ui`, automated captures and scenario runs suppress
+developer overlays and shortcuts without modifying saved preferences.
+
+See [Developer console](developer-console.md) for the complete inventory,
+registration API, typed commands, focus rules, save retries and capture overrides.
+The generation inspector edits an independent preview; only its explicit
+**Apply & Regenerate** button can apply changes to an ordinary local world.
+
 ### Environment controls
 
 These are the `LUMIN_*` controls read by the current client/render source. Set
@@ -628,6 +666,37 @@ all simulation tuning. Finite hydrology is on, with existing rain scale 25 mm an
 zero constant rain/evaporation rates. Explicit false water resolution selects
 Medium; lower-level session setters can retain disabled compatibility workloads.
 Diagnostic rosters and telemetry remain opt-in.
+
+TCP Hello admission, the lockstep handshake and replay playback compare the same
+`GameSession::PresetContentHash()` alongside the effective configuration identity.
+The content hash binds the resolved preset and its biome/structure dependencies,
+plus every immediate regular `data/common/creatures/species/*.json` file, including
+inline `brain` and `genome_ranges` overrides (issue #338). Species apply even with
+biomes and structures disabled. All dependencies use one manifest: sorted generic
+UTF-8 logical paths with `/` separators and exact-byte FNV-1a-64 file hashes, folded
+with the canonical preset JSON. Absolute runtime roots and clocks are excluded.
+The loader captures the species registry from those same bytes and GameSession
+adopts it on create/load; it never rereads species after computing the hash.
+Malformed JSON warns and skips the entry while its bytes remain bound; present
+unreadable files/directories refuse resolution without replacing a running world.
+Directory-open, entry-status and iteration failures are reported by the registry
+without escaping to client metadata callers; a failed scan adds no species. Logical
+dependency names must be well-formed UTF-8, and an invalid species filename refuses
+the scan before any reads. Resolver exceptions, including JSON serialization
+failures, return diagnostics without publishing an identity or dependency snapshot;
+failed create/load leaves the live world unchanged.
+
+Protocol-v3 Hello and LREC1-v3 headers retain their layouts. A species mismatch
+refuses TCP admission, lockstep handshake and replay verification before simulation
+advances. Existing content-mismatch diagnostics apply; lockstep and replay name
+`preset/species` content. Older v0.3.0-era preset-only replay hashes mismatch when
+species records are present, in either engine direction, following the existing
+preset dependency compatibility rule. With no species directory, no new records
+are added. Current-format saves store no session content identity and adopt the
+loading installation's species content; the optional historical `presetIdentity`
+check still checks frozen preset JSON only. Older world-format refusals and save
+container versions are unchanged. See the full
+[identity contract](development/system-config-identity.md).
 
 Playback, vsync, TAAU, tier-1 froxel volumetrics, cave AO, scent decals and aether
 material gain 1 are on. `--no-audio`, `--volumetric-quality 0`, `LUMIN_CAVE_AO=0`,

@@ -382,12 +382,14 @@ explicit saves preserve the two-field calendar for symmetric 1/2 daylight with
 an eight-day lunar cycle; other calendars use version 2. Simulation ticks and
 state are never rescaled. Enabled clock canonical bytes preserve `world_clock:v1:`
 and its 16-byte payload for those legacy-representable calendars; other calendars
-use `world_clock:v2:` and a 28-byte payload. Imported legacy enabled-clock hashes
-stay unchanged. The calendar change does not alter replay layouts; the current
-configuration and preset identity contract is described below.
+use `world_clock:v2:` and a 28-byte payload. Imported legacy calendars retain
+the enabled clock's canonical hash contribution. The calendar change does not
+alter replay layouts; the current configuration and preset identity contract
+is described below.
 
-With `sim.active_regions` disabled, the tick counter restarts at zero on load
-and biological consumers retain their legacy periods. New disabled worlds carry
+With `sim.active_regions` disabled, opening a world restarts the tick counter
+at zero and biological consumers retain their legacy periods. Explicit snapshot
+loads retain the running simulation tick. New disabled worlds carry
 a presentation-only `renderCalendar` marker with the complete version 2 object;
 it neither requires active regions nor contributes to the disabled simulation
 hash. Existing unmarked disabled worlds retain symmetric 216,000-tick rendering
