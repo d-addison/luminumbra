@@ -438,6 +438,8 @@ TEST(FarEditedBake, RebakeRetainsEarlierEditsOutsideChangedBricksAndTallDeepExte
         }));
     for (const auto& tile : result.tiles) {
         ASSERT_TRUE(tile.edited_span.has_value());
+        if (!tile.edited_span.has_value())
+            return;
         EXPECT_LE(tile.edited_span->min_y, -160);
         EXPECT_GE(tile.edited_span->max_y, 144);
         EXPECT_EQ(tile.max_member_generation, 7u);
@@ -471,6 +473,8 @@ TEST(FarEditedBake, AirAndSolidTombstonesAcrossAllFiveTiersOverrideOppositePrist
                 SampleFarOverlay(tiles, tier, {-e / 2, -e / 2, -e / 2}, 19, tiles.size(), sample),
                 FarOverlaySampleError::None);
             ASSERT_TRUE(sample.has_value());
+            if (!sample.has_value())
+                return;
             EXPECT_EQ(sample->density,
                       QuantizeFarDensity(density < 0 ? -static_cast<float>(edge)
                                                      : static_cast<float>(edge)) /
@@ -497,6 +501,8 @@ TEST(FarEditedBake, ExactZeroAndPresentTombstoneBordersUseIdenticalCoordinateSam
         ASSERT_EQ(SampleFarOverlay(tiles, tier, {0, 0, 0}, 9, tiles.size(), sample),
                   FarOverlaySampleError::None);
         ASSERT_TRUE(sample.has_value());
+        if (!sample.has_value())
+            return;
         EXPECT_EQ(*sample, (FarVolumeSample{0, 3}));
     }
     // Homogeneous core beside Present neighbours: every shared boundary resolves
@@ -508,6 +514,8 @@ TEST(FarEditedBake, ExactZeroAndPresentTombstoneBordersUseIdenticalCoordinateSam
     ASSERT_EQ(SampleFarOverlay(tiles, 1, {0, -8, -8}, 9, tiles.size(), sample),
               FarOverlaySampleError::None);
     ASSERT_TRUE(sample.has_value());
+    if (!sample.has_value())
+        return;
     EXPECT_EQ(*sample, (FarVolumeSample{7, 3}));
 }
 
@@ -524,6 +532,8 @@ TEST(FarEditedBake, InterpolationMaterialTieFallbackAndTinyNonzeroSigns) {
     ASSERT_EQ(SampleFarOverlay(tiles, 1, {4, 0, 4}, 9, tiles.size(), sample),
               FarOverlaySampleError::None);
     ASSERT_TRUE(sample.has_value());
+    if (!sample.has_value())
+        return;
     EXPECT_EQ(*sample, (FarVolumeSample{0, 5}));
     source.owned.front().material.clear();
     source.Refresh();
@@ -532,6 +542,8 @@ TEST(FarEditedBake, InterpolationMaterialTieFallbackAndTinyNonzeroSigns) {
     ASSERT_EQ(SampleFarOverlay(tiles, 1, {4, 0, 4}, 9, tiles.size(), sample),
               FarOverlaySampleError::None);
     ASSERT_TRUE(sample.has_value());
+    if (!sample.has_value())
+        return;
     EXPECT_EQ(*sample, (FarVolumeSample{0, 0}));
     source.owned.front().density.assign(8, -0.0001f);
     source.Refresh();
@@ -578,6 +590,8 @@ TEST(FarEditedBake, EmptyInventoryRemovesOldOverridesAndRetainsChangedSpanReques
         EXPECT_EQ(tile.bytes.size(), kFsv1HeaderBytes + kFsv1TrailerBytes);
         EXPECT_EQ(tile.max_member_generation, 0u);
         ASSERT_TRUE(tile.edited_span.has_value());
+        if (!tile.edited_span.has_value())
+            return;
         EXPECT_LE(tile.edited_span->min_y, -2048);
         EXPECT_GE(tile.edited_span->max_y, -2032);
     }
@@ -851,5 +865,7 @@ TEST(FarEditedBake, OverlayResolverChecksPresentConflictsAbsenceAndFiniteInvento
     tiles[1].bricks.front().state = FarBrickState::Present;
     ASSERT_EQ(SampleFarOverlay(tiles, 1, boundary, 9, 2, sample), FarOverlaySampleError::None);
     ASSERT_TRUE(sample.has_value());
+    if (!sample.has_value())
+        return;
     EXPECT_EQ(*sample, (FarVolumeSample{1, 4}));
 }
