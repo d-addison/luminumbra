@@ -129,9 +129,10 @@ def read_database(root: Path, build_dir: Path) -> list[dict]:
                 raise SelectionError("malformed compiler arguments")
             args = normalise_pch_arguments(_DEPS.entry_arguments(raw), directory, build_dir)
             # Validate before spawning anything, including unselected variants.
-            _, operands = parse_arguments(args)
+            cleaned, operands = parse_arguments(args)
             if len(operands) != 1 or (directory / operands[0]).resolve() != source:
                 raise SelectionError(f"command must compile exactly one database source: {source}")
+            validate_textual_includes(cleaned, directory)
         except (_DEPS.CacheMiss, ValueError, TypeError) as error:
             raise SelectionError(str(error)) from error
         entries.append({"file": source, "directory": directory, "arguments": args})
@@ -197,6 +198,38 @@ def normalise_pch_arguments(arguments: list[str], directory: Path, build_dir: Pa
 
 def clean_arguments(arguments: list[str]) -> list[str]:
     return parse_arguments(arguments)[0]
+
+
+def validate_textual_includes(arguments: list[str], directory: Path) -> None:
+    """Refuse implicit binary PCH lookup for every replayed forced include.
+
+    Check both the spelled and resolved names: a header symlink can have a
+    cache beside either name. Directories and dangling cache links also count.
+    Require an explicit file so compiler include-search paths cannot select an
+    unchecked header. Call again at replay in case a build populated the cache
+    after database validation.
+    """
+    index = 1
+    while index < len(arguments):
+        option = arguments[index]
+        if option in {"-include", "-imacros"}:
+            header = directory / arguments[index + 1]
+            for path in (header, header.resolve()):
+                for suffix in (".gch", ".pch"):
+                    binary = Path(str(path) + suffix)
+                    if os.path.lexists(binary):
+                        raise SelectionError(f"binary PCH cache beside forced include: {binary}; "
+                                             "remove the cache before replaying textual headers")
+            if not header.is_file():
+                raise SelectionError(f"cannot locate textual forced include: {header}; "
+                                     "use an existing absolute header path")
+        index += 2 if option in VALUE_OPTIONS else 1
+
+
+def replay_arguments(entry: dict) -> list[str]:
+    arguments = clean_arguments(entry["arguments"])
+    validate_textual_includes(arguments, entry["directory"])
+    return arguments
 
 
 def parse_arguments(arguments: list[str]) -> tuple[list[str], list[str]]:
@@ -278,7 +311,7 @@ def execute(command, directory: Path, check=True):
 
 
 def dependencies(entry: dict) -> set[Path]:
-    command = clean_arguments(entry["arguments"])
+    command = replay_arguments(entry)
     found = set()
     for analyzer in (False, True):
         args = command[:1] + (["-D__clang_analyzer__"] if analyzer else []) + command[1:]
@@ -560,7 +593,7 @@ def profile_flags(entry: dict, profile: str) -> list[str]:
 
 
 def check_arguments(entry: dict, profile="none") -> list[str]:
-    command = clean_arguments(entry["arguments"])
+    command = replay_arguments(entry)
     if profile != "none":
         compiler = profile_compiler(entry)
         command += profile_flags(entry, profile) + [
@@ -758,7 +791,7 @@ def run_checks(args, root: Path, selected: list[dict], build_dir: Path) -> list[
                 directory.mkdir()
                 (directory / "compile_commands.json").write_text(json.dumps([{
                     "file": str(entry["file"]), "directory": str(entry["directory"]),
-                    "arguments": clean_arguments(entry["arguments"]) + ["-c", "-o", str(directory / "tidy.o")],
+                    "arguments": replay_arguments(entry) + ["-c", "-o", str(directory / "tidy.o")],
                 }]), encoding="utf-8")
                 commands = [[tidy, "-quiet", "-p", str(directory),
                              f"--config-file={config}", str(entry["file"])]]

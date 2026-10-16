@@ -631,6 +631,87 @@ class CachedGitSafetyTests(unittest.TestCase):
         self.write_alternates(objects, "first", "second")
         self.assertEqual((objects / "info/alternates").read_bytes(), b"first\nsecond\n")
 
+    def test_alternate_chain_supplies_real_git_objects(self):
+        objects = self.source / ".git/objects"
+        alternate = self.cache / "alternate objects"
+        objects.rename(alternate)
+        first = self.cache / "first objects"
+        # Moving the objects requires Git itself to follow both references.
+        # Use Git's LF framing; Windows text-writer output is checked separately.
+        for parent, target in ((objects, first), (first, alternate)):
+            info = parent / "info"
+            info.mkdir(parents=True)
+            (info / "alternates").write_bytes(os.fsencode(str(target)) + b"\n")
+        before = self.cache_state()
+        for action in self.actions():
+            action()
+        self.assertEqual(self.cache_state(), before)
+        self.assertEqual((self.root / "scratch/staged/sample/input.h").read_text(), "content\n")
+
+    def test_windows_alternate_parser_preserves_path_bytes(self):
+        data = (b"# comment\r\n\r\nC:\\cache with spaces\\objects\r\n"
+                b"C:/cache/objects\n../embedded\rcarriage\r\n"
+                b"../trailing space \r\n../unterminated\r")
+        self.assertEqual(deps.git_alternate_paths(data, windows=True),
+                         ["C:\\cache with spaces\\objects", "C:/cache/objects",
+                          "../embedded\rcarriage", "../trailing space ", "../unterminated\r"])
+        self.assertEqual(deps.git_alternate_paths(data, windows=False),
+                         ["\r", "C:\\cache with spaces\\objects\r", "C:/cache/objects",
+                          "../embedded\rcarriage\r", "../trailing space \r", "../unterminated\r"])
+        for windows in (False, True):
+            for invalid in (b'"quoted path"\r\n', b"nul\0path\r\n"):
+                with self.subTest(windows=windows, invalid=invalid):
+                    with self.assertRaisesRegex(deps.DependencyError, "path encoding"):
+                        deps.git_alternate_paths(invalid, windows=windows)
+
+    def test_windows_crlf_alternate_metadata_is_contained_on_every_host(self):
+        objects = self.source / ".git/objects"
+        alternate = self.cache / "alternate objects"
+        alternate.mkdir()
+        reference = objects / "info/alternates"
+        parser = deps.git_alternate_paths
+        with patch.object(deps, "git_alternate_paths",
+                          side_effect=lambda data, **kwargs: parser(data, windows=True)), \
+                patch.object(deps.subprocess, "check_output", side_effect=AssertionError("Git ran")):
+            reference.write_bytes(os.fsencode(str(alternate)) + b"\r\n")
+            before = self.cache_state()
+            deps.git_metadata(self.source, self.cache)
+            self.assertEqual(self.cache_state(), before)
+            outside = self.base / "outside objects"
+            outside.mkdir()
+            reference.write_bytes(os.fsencode(str(outside)) + b"\r\n")
+            with self.assertRaisesRegex(deps.DependencyError, "strictly inside"):
+                deps.git_metadata(self.source, self.cache)
+
+    def test_crlf_alternate_escape_is_refused_before_git(self):
+        alternate = self.base / "outside objects"
+        alternate.mkdir()
+        objects = self.source / ".git/objects"
+        (objects / "info/alternates").write_bytes(os.fsencode(str(alternate)) + b"\r\n")
+        with patch.object(deps.subprocess, "check_output", side_effect=AssertionError("Git ran")):
+            with self.assertRaisesRegex(deps.DependencyError, "strictly inside"):
+                deps.git_metadata(self.source, self.cache)
+            self.assert_refused_without_writes()
+
+    def test_crlf_gitdir_and_common_directory_references_remain_contained(self):
+        metadata = self.source / ".git"
+        saved = self.cache / "saved metadata"
+        metadata.rename(saved)
+        common = self.cache / "common metadata"
+        common.mkdir()
+        metadata.write_bytes(os.fsencode("gitdir: " + os.path.relpath(saved, metadata.parent)) + b"\r\n")
+        reference = saved / "commondir"
+        reference.write_bytes(os.fsencode(os.path.relpath(common, saved)) + b"\r\n")
+        with patch.object(deps.subprocess, "check_output", side_effect=AssertionError("Git ran")):
+            before = self.cache_state()
+            deps.git_metadata(self.source, self.cache)
+            self.assertEqual(self.cache_state(), before)
+            outside = self.base / "outside metadata"
+            outside.mkdir()
+            reference.write_bytes(os.fsencode(str(outside)) + b"\r\n")
+            with self.assertRaisesRegex(deps.DependencyError, "strictly inside"):
+                deps.git_metadata(self.source, self.cache)
+
     def test_unicode_separators_are_preserved_in_contained_alternate_paths(self):
         objects = self.source / ".git/objects"
         before = self.lock.read_bytes()

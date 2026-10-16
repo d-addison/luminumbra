@@ -601,6 +601,99 @@ class ChangedTranslationUnitsTests(unittest.TestCase):
                     tus.read_database(self.root, self.src)
         self.assertEqual(self.commands, [])
 
+    def test_adjacent_binary_pch_files_and_directories_are_refused(self):
+        for compiler in ("g++", "clang++"):
+            for name in ("cmake_pch.h", "cmake_pch.hxx", "ordinary.hpp"):
+                header = self.build / name
+                header.write_text("// current textual header\n")
+                forms = [["-include", str(header)], ["-imacros", str(header)]]
+                if compiler == "clang++":
+                    forms += [["-Xclang", "-include", "-Xclang", str(header)],
+                              ["-include-pch", str(header) + ".pch", "-include", str(header)]]
+                for suffix in (".gch", ".pch"):
+                    for directory in (False, True):
+                        binary = Path(str(header) + suffix)
+                        if directory:
+                            binary.mkdir()
+                            (binary / "cached").write_bytes(b"stale binary header")
+                        else:
+                            binary.write_bytes(b"stale binary header")
+                        for flags in forms:
+                            with self.subTest(compiler=compiler, header=name, suffix=suffix,
+                                              directory=directory, flags=flags):
+                                self.raw = [self.raw_entry(self.a, flags)]
+                                self.raw[0]["arguments"][0] = compiler
+                                self.save_db()
+                                before = {p: p.read_bytes() for p in self.root.rglob("*") if p.is_file()}
+                                with self.assertRaisesRegex(tus.SelectionError, "binary PCH.*remove"):
+                                    self.entries()
+                                self.assertEqual(before, {p: p.read_bytes() for p in self.root.rglob("*")
+                                                          if p.is_file()})
+                        if directory:
+                            (binary / "cached").unlink()
+                            binary.rmdir()
+                        else:
+                            binary.unlink()
+        self.assertEqual(self.commands, [])
+
+    def test_msvc_pch_replay_is_refused_before_execution(self):
+        for compiler in ("cl", "cl.exe", "clang-cl", "g++", "clang++"):
+            for flags in (["/Yu", "header.hpp"], ["/Yuheader.hpp"],
+                          ["/Fp", "cached.pch"], ["/Fpcached.pch"],
+                          ["/Yu", "header.hpp", "/Fp", "cached.pch"],
+                          ["/Yuheader.hpp", "/Fpcached.pch"]):
+                with self.subTest(compiler=compiler, flags=flags):
+                    self.raw = [self.raw_entry(self.a, flags)]
+                    self.raw[0]["arguments"][0] = compiler
+                    self.save_db()
+                    with self.assertRaisesRegex(tus.SelectionError, "unsupported"):
+                        self.entries()
+        self.assertEqual(self.commands, [])
+
+    def test_binary_pch_created_after_database_read_is_refused_by_every_replay(self):
+        header = self.build / "cmake_pch.hxx"
+        header.write_text("// current textual header\n")
+        self.raw = [self.raw_entry(self.a, ["-include", str(header)])]
+        self.save_db()
+        entry = self.entries()[0]
+        actions = [lambda: tus.dependencies(entry),
+                   lambda: tus.run_checks(self.arguments(), self.root, [entry], self.build),
+                   lambda: tus.run_checks(self.arguments("tidy", also_ci_gate=True),
+                                          self.root, [entry], self.build)]
+        for suffix in (".gch", ".pch"):
+            binary = Path(str(header) + suffix)
+            binary.mkdir()
+            with patch.object(tus.shutil, "which", return_value="clang-tidy"):
+                for index, action in enumerate(actions):
+                    with self.subTest(suffix=suffix, replay=index):
+                        with self.assertRaisesRegex(tus.SelectionError, "binary PCH.*remove"):
+                            action()
+            binary.rmdir()
+        self.assertEqual(self.commands, [])
+        self.assertEqual(list((self.root / "scratch").glob("local-checks-*")), [])
+
+    def test_forced_include_search_cannot_bypass_binary_cache_check(self):
+        header = self.src / "ordinary.hpp"
+        Path(str(header) + ".gch").write_bytes(b"stale binary header")
+        for option in ("-include", "-imacros"):
+            with self.subTest(option=option):
+                self.raw = [self.raw_entry(self.a, [option, header.name])]
+                self.save_db()
+                with self.assertRaisesRegex(tus.SelectionError, "use an existing absolute header path"):
+                    self.entries()
+        self.assertEqual(self.commands, [])
+
+    def test_relative_textual_forced_include_is_checked_beside_command_directory(self):
+        header = self.build / "ordinary.hpp"
+        header.write_text("// current textual header\n")
+        self.raw = [self.raw_entry(self.a, ["-include", header.name])]
+        self.save_db()
+        self.assertIn(header.name, self.entries()[0]["arguments"])
+        Path(str(header) + ".gch").mkdir()
+        with self.assertRaisesRegex(tus.SelectionError, "binary PCH.*remove"):
+            self.entries()
+        self.assertEqual(self.commands, [])
+
     def test_pch_refusals_are_bounded_and_leave_state_unchanged(self):
         header = self.build / "cmake_pch.hxx"
         header.write_text("// textual header\n")

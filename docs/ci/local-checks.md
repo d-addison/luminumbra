@@ -226,6 +226,12 @@ without requiring a prebuilt binary PCH; compile correctness must not depend
 on that cache. GCC's `-include cmake_pch.h`/`cmake_pch.hxx` likewise requires
 an existing header resolving inside the build tree. Other ordinary GCC/Clang
 textual `-include` arguments are preserved and can supply the matching header.
+Every forced include (`-include` or `-imacros`) must name an existing file
+directly, relative to the command directory or by absolute path. Include-search
+names must be replaced with absolute paths. An adjacent `.gch` or `.pch` file,
+directory or link causes an actionable refusal; remove that cache before
+replaying. Both the spelled header path and its resolved target are checked,
+at database validation and again for dependency, compile and tidy replay.
 PCH generation (`-x c++-header`, `-Xclang -emit-pch`) remains refused for
 first-party sources; dependency-only generation entries are outside selection.
 Other pass-through, unknown separate-value options and MSVC/clang-cl driver

@@ -110,6 +110,27 @@ def source_digest(source: Path) -> str:
     return digest.hexdigest()
 
 
+def git_alternate_paths(data: bytes, *, windows: bool) -> list[str]:
+    """Accept Windows CRLF records without changing POSIX pathname semantics.
+
+    Windows text writers translate LF to CRLF; CR cannot occur in an ordinary
+    Windows filename. POSIX Git retains CR as a pathname byte. Preserve embedded
+    CR, an unpaired final CR, whitespace and Unicode separators on both platforms.
+    """
+    if windows:
+        data = data.replace(b"\r\n", b"\n")
+    result = []
+    for line in data.split(b"\n"):
+        if not line or line.startswith(b"#"):
+            continue
+        # Quoted encodings need Git's C-string parser; refuse rather than
+        # validate a different path from Git's input.
+        if line.startswith(b'"') or b"\0" in line:
+            raise DependencyError("unsupported Git alternate path encoding")
+        result.append(os.fsdecode(line))
+    return result
+
+
 def git_metadata(source: Path, cache: Path) -> None:
     """Require self-contained metadata, including submodule gitdir files.
 
@@ -172,16 +193,8 @@ def git_metadata(source: Path, cache: Path) -> None:
         else:
             alternates = resolved / "info/alternates"
             if alternates.exists():
-                # Git splits this file only on LF. Other separators, including
-                # CR, are pathname bytes and must not alter containment checks.
-                for line in alternates.read_bytes().split(b"\n"):
-                    if not line or line.startswith(b"#"):
-                        continue
-                    # Quoted encodings need Git's C-string parser; refuse
-                    # rather than validate a different path from Git's input.
-                    if line.startswith(b'"') or b"\0" in line:
-                        raise DependencyError("unsupported Git alternate path encoding")
-                    redirect("objects", resolved / os.fsdecode(line), depth + 1)
+                for target in git_alternate_paths(alternates.read_bytes(), windows=os.name == "nt"):
+                    redirect("objects", resolved / target, depth + 1)
         active.remove(key)
         complete[key] = depth
 
