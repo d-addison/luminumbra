@@ -15,6 +15,7 @@ import unicodedata
 import xml.etree.ElementTree as ET
 from collections import Counter
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -463,7 +464,9 @@ def heading_slug(heading: str) -> str:
     ).replace(" ", "-")
 
 
-def _headings(text: str) -> dict[int, str]:
+@lru_cache(maxsize=16)
+def _heading_items(text: str) -> tuple[tuple[int, str], ...]:
+    # Bound retained document versions; content keys keep edits visible.
     headings: dict[int, str] = {}
     used: set[str] = set()
     fenced = False
@@ -481,24 +484,42 @@ def _headings(text: str) -> dict[int, str]:
                 slug = f"{stem}-{suffix}"
             headings[number] = slug
             used.add(slug)
-    return headings
+    return tuple(headings.items())
 
 
-def _source_problem(base: Path, source: str) -> str | None:
+def _headings(text: str) -> dict[int, str]:
+    return dict(_heading_items(text))
+
+
+def _source_problem(
+    base: Path, source: str,
+    documents: dict[str, tuple[str | None, frozenset[str] | None]],
+) -> str | None:
     if source.startswith("issue"):
         if re.fullmatch(r"issue #[1-9][0-9]*", source) is None:
             return f"invalid issue source: {source}"
         return None
     path, separator, anchor = source.partition("#")
-    problem = _path_problem(base, path, must_exist=True)
+    if path not in documents:
+        documents[path] = (_path_problem(base, path, must_exist=True), None)
+    problem, anchors = documents[path]
     if problem:
         return f"source {problem}"
-    if separator and anchor not in _headings(_read_text(base / path)).values():
-        return f"source anchor not found: {source}"
+    if separator:
+        if anchors is None:
+            anchors = frozenset(_headings(_read_text(base / path)).values())
+            documents[path] = (None, anchors)
+        if anchor not in anchors:
+            return f"source anchor not found: {source}"
     return None
 
 
 def contract_statements(text: str, path: str) -> list[tuple[str, str, bool]]:
+    return list(_contract_statements(text, path))
+
+
+@lru_cache(maxsize=16)
+def _contract_statements(text: str, path: str) -> tuple[tuple[str, str, bool], ...]:
     """Account for all prose and table data, not just sentences with 'must'.
 
     Soft wraps are normalized. Prose, bullets and table rows split at sentence
@@ -506,6 +527,7 @@ def contract_statements(text: str, path: str) -> list[tuple[str, str, bool]]:
     Current-behaviour paragraphs are explicitly descriptive.
     Inventory ids are maintained independently of these content units.
     """
+    # Bound retained versions and return immutable units to all validations.
     lines = text.splitlines()
     headings = _headings(text)
     source = path
@@ -543,7 +565,7 @@ def contract_statements(text: str, path: str) -> list[tuple[str, str, bool]]:
         else:
             paragraph.append(line)
     flush()
-    return result
+    return tuple(result)
 
 
 def validate_inventory(
@@ -568,6 +590,7 @@ def validate_inventory(
             if is_descriptive:
                 descriptive.add((source, text))
     source_problems: dict[str, str | None] = {}
+    documents: dict[str, tuple[str | None, frozenset[str] | None]] = {}
     actual: Counter[tuple[str, str]] = Counter()
     ids: set[str] = set()
     for kind in ("requirements", "exclusions"):
@@ -595,7 +618,7 @@ def validate_inventory(
                 errors.append(f"{label}: source, text and quote must be non-empty strings")
                 continue
             if source not in source_problems:
-                source_problems[source] = _source_problem(root, source)
+                source_problems[source] = _source_problem(root, source, documents)
             problem = source_problems[source]
             if problem:
                 errors.append(f"{label}: {problem}")
@@ -825,6 +848,7 @@ def validate(
         return [f"{label}: {message}" for label, message in sorted(problems)]
 
     source_problems: dict[str, str | None] = {}
+    documents: dict[str, tuple[str | None, frozenset[str] | None]] = {}
     seen_ids: set[str] = set()
     for position, row in enumerate(rows):
         label = f"rows[{position}]"
@@ -853,7 +877,7 @@ def validate(
         if _is_nonempty_str(row.get("source")):
             source = row["source"]
             if source not in source_problems:
-                source_problems[source] = _source_problem(base, source)
+                source_problems[source] = _source_problem(base, source, documents)
             problem = source_problems[source]
             if problem:
                 messages.append(problem)

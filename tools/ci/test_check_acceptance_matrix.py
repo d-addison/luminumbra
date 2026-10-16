@@ -14,6 +14,7 @@ import tempfile
 import unittest
 from unittest import mock
 import xml.etree.ElementTree as ET
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +25,19 @@ assert SPEC and SPEC.loader
 MODULE = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = MODULE
 SPEC.loader.exec_module(MODULE)
+
+PUBLIC_SPEC = importlib.util.spec_from_file_location(
+    "acceptance_public_tree", MODULE_PATH.with_name("validate_public_tree.py"))
+assert PUBLIC_SPEC and PUBLIC_SPEC.loader
+PUBLIC_TREE = importlib.util.module_from_spec(PUBLIC_SPEC)
+sys.modules[PUBLIC_SPEC.name] = PUBLIC_TREE
+PUBLIC_SPEC.loader.exec_module(PUBLIC_TREE)
+
+
+@lru_cache(maxsize=1)
+def repository_index() -> Any:
+    # Repository sources are read-only throughout this suite; the index is frozen.
+    return MODULE.index_tests(MODULE.DEFAULT_ROOT)
 
 
 TEST_CMAKE = """add_test(NAME AlphaContract COMMAND alpha)
@@ -281,6 +295,44 @@ class AcceptanceMatrixTests(unittest.TestCase):
         matrix["rows"][0]["source"] = "docs/d.md#ghost"
         self.assertErrorContains(matrix, "source anchor not found")
 
+    def test_heading_parses_are_shared_without_stale_results_or_mutable_aliases(self) -> None:
+        text = "# Shared source headings\n## Repeated\n## Repeated\n"
+        with mock.patch.object(MODULE, "heading_slug", wraps=MODULE.heading_slug) as slug:
+            for _ in range(10):
+                headings = MODULE._headings(text)
+                self.assertEqual(headings, {0: "shared-source-headings", 1: "repeated", 2: "repeated-1"})
+                headings.clear()
+            self.assertEqual(slug.call_count, 3)
+            self.assertEqual(MODULE._headings(text + "## Added\n")[3], "added")
+            self.assertEqual(slug.call_count, 7)
+
+    def test_sources_share_document_reads_only_within_one_validation(self) -> None:
+        doc = self.root / "docs/d.md"
+        doc.write_text("# First\n## Second\n## Third\n## Fourth\n", encoding="utf-8")
+        matrix = baseline_matrix()
+        for row, anchor in zip(matrix["rows"], ("first", "second", "third", "fourth")):
+            row["source"] = "docs/d.md#" + anchor
+        with mock.patch.object(MODULE, "_read_text", wraps=MODULE._read_text) as read:
+            self.assertEqual(self.errors(matrix), [])
+            self.assertEqual(sum(call.args[0] == doc for call in read.call_args_list), 1)
+        doc.write_text("# Changed\n", encoding="utf-8")
+        self.assertErrorContains(matrix, "source anchor not found: docs/d.md#first")
+        doc.unlink()
+        self.assertErrorContains(matrix, "source file not found: docs/d.md")
+
+    def test_execution_workflow_uses_the_native_producer_condition(self) -> None:
+        workflow = (MODULE.DEFAULT_ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        linux = workflow.split("\n  linux:\n", 1)[1].split("\n  gns-compile-probe:\n", 1)[0]
+        for name in ("Configure", "Test", "Test over-the-wire networking",
+                     "Check acceptance matrix CTest execution", "Upload test evidence"):
+            with self.subTest(step=name):
+                step = linux.split("      - name: " + name + "\n", 1)[1].split("      - name: ", 1)[0]
+                condition = re.search(r"^        if: (.+)$", step, re.MULTILINE)
+                self.assertIsNotNone(condition)
+                self.assertTrue(condition[1].startswith("${{ needs.changes.outputs.needs_cpp != 'false'"))
+                if name != "Upload test evidence":
+                    self.assertEqual(condition[1], "${{ needs.changes.outputs.needs_cpp != 'false' }}")
+
     def test_missing_covered_doc_ref_is_rejected(self) -> None:
         matrix = baseline_matrix()
         matrix["rows"][0]["evidence"].append({"kind": "doc", "ref": "docs/missing.md"})
@@ -361,7 +413,7 @@ class AcceptanceMatrixTests(unittest.TestCase):
         for row in matrix["rows"]:
             row["requirements"] = [ref for ref in row.get("requirements", []) if ref != entry["id"]]
         with mock.patch.object(MODULE, "load_matrix", return_value=inventory):
-            errors = MODULE.validate(matrix, MODULE.index_tests(root), root, False)
+            errors = MODULE.validate(matrix, repository_index(), root, False)
         self.assertIn("exclusion requires an audited non-normative category", "\n".join(errors))
         self.assertIn("iss.126: inventory incomplete", "\n".join(errors))
 
@@ -369,7 +421,7 @@ class AcceptanceMatrixTests(unittest.TestCase):
         root = MODULE.DEFAULT_ROOT
         inventory = MODULE.load_matrix(root / "tools/ci/acceptance_requirements.json")
         matrix = MODULE.load_matrix(root / "tools/ci/acceptance_matrix.json")
-        index = MODULE.index_tests(root)
+        index = repository_index()
         for identity in ("dw.scope.001", "dw.scope.009", "ar.file.055"):
             for category in ("rationale", "example", "cross-reference", "current-behaviour", "historical"):
                 with self.subTest(identity=identity, category=category):
@@ -395,7 +447,10 @@ class AcceptanceMatrixTests(unittest.TestCase):
                                ("quote", entry["quote"][:-1]),
                                ("text", entry["text"] + " Additional behavior.")):
                 with self.subTest(identity=entry["id"], key=key):
-                    altered = copy.deepcopy(inventory)
+                    # Only this exclusion changes; all other fixture entries
+                    # remain read-only inputs to the validator.
+                    altered = dict(inventory, exclusions=list(inventory["exclusions"]))
+                    altered["exclusions"][position] = dict(entry)
                     altered["exclusions"][position][key] = value
                     errors = MODULE.validate_inventory(altered, root)[1]
                     self.assertIn("exclusion is not in the closed audited table", "\n".join(errors))
@@ -524,7 +579,7 @@ class AcceptanceMatrixTests(unittest.TestCase):
         requirements, errors = MODULE.validate_inventory(inventory, root)
         self.assertEqual(errors, [])
         matrix = MODULE.load_matrix(root / "tools/ci/acceptance_matrix.json")
-        self.assertEqual(MODULE.validate(matrix, MODULE.index_tests(root), root, False), [])
+        self.assertEqual(MODULE.validate(matrix, repository_index(), root, False), [])
         mapped = {ref for row in matrix["rows"] for ref in row.get("requirements", [])}
         self.assertEqual(set(requirements), mapped)
         self.assertTrue(MODULE._doc_matches(root / "docs/acceptance-matrix.md", MODULE.render_doc(matrix)))
@@ -532,12 +587,7 @@ class AcceptanceMatrixTests(unittest.TestCase):
     def test_inventory_and_generated_matrix_are_publishable(self) -> None:
         # Contract quotes and generated evidence must pass the public-tree text
         # rules as well as schema validation, without invoking another process.
-        path = MODULE.DEFAULT_ROOT / "tools/ci/validate_public_tree.py"
-        spec = importlib.util.spec_from_file_location("acceptance_public_tree", path)
-        assert spec and spec.loader
-        public_tree = importlib.util.module_from_spec(spec)
-        sys.modules[spec.name] = public_tree
-        spec.loader.exec_module(public_tree)
+        public_tree = PUBLIC_TREE
         public_documents = ("tools/ci/acceptance_requirements.json", "tools/ci/acceptance_matrix.json",
                             "docs/acceptance-matrix.md", *MODULE.CONTRACT_DOCUMENTS)
         for relative in public_documents:
@@ -598,7 +648,7 @@ class AcceptanceMatrixTests(unittest.TestCase):
         row["status"] = "needs-native-run"
         row["evidence"] = [{"kind": "native", "ref": "tools/ci/check_acceptance_matrix.py",
                             "command": "pwsh tools/gates/missing-qualification.ps1", "receipt_schema": RECEIPT}]
-        errors = MODULE.validate(matrix, MODULE.index_tests(root), root, False)
+        errors = MODULE.validate(matrix, repository_index(), root, False)
         self.assertIn("native command entry point file not found: tools/gates/missing-qualification.ps1", "\n".join(errors))
 
     def test_native_command_entry_point_must_match_ref_even_when_both_exist(self) -> None:
@@ -688,7 +738,7 @@ class AcceptanceMatrixTests(unittest.TestCase):
         row["status"] = "needs-native-run"
         item = {"kind": "native", "ref": "tools/ci/check_acceptance_matrix.py", "receipt_schema": RECEIPT}
         row["evidence"] = [item]
-        index = MODULE.index_tests(root)
+        index = repository_index()
         for command in (
             'python3 -X "./tools/ci/check_acceptance_matrix.py" -c "pass"',
             'python3 -X "./tools/ci/check_acceptance_matrix.py" "./tools/gates/run-v03-acceptance.ps1"',
@@ -1522,15 +1572,15 @@ class ProductionAcceptanceMatrixTests(unittest.TestCase):
         root = MODULE.DEFAULT_ROOT
         matrix = MODULE.load_matrix(root / "tools/ci/acceptance_matrix.json")
         required_ids = MODULE.load_required_ids(root / MODULE.REQUIREMENT_SOURCE)
-        index = MODULE.index_tests(root)
+        index = repository_index()
         self.assertIn("perf.floor-p99", required_ids)
         self.assertEqual(MODULE.validate(matrix, index, root, False), [])
+        inventory = MODULE.load_matrix(root / "tools/ci/acceptance_requirements.json")
         for row_id in sorted(required_ids):
             with self.subTest(row_id=row_id):
-                incomplete = copy.deepcopy(matrix)
-                incomplete["rows"] = [row for row in incomplete["rows"] if row["id"] != row_id]
+                # Validation reads rows without mutating the shared fixture.
+                incomplete = dict(matrix, rows=[row for row in matrix["rows"] if row["id"] != row_id])
                 mapped = {ref for row in incomplete["rows"] for ref in row.get("requirements", [])}
-                inventory = MODULE.load_matrix(root / "tools/ci/acceptance_requirements.json")
                 missing = sorted({e["id"] for e in inventory["requirements"]} - mapped)
                 expected = [f"<inventory>: requirement lacks a matrix row: {ref}" for ref in missing]
                 if missing and row_id != "iss.126":
@@ -1549,6 +1599,165 @@ class ProductionAcceptanceMatrixTests(unittest.TestCase):
             self.assertTrue(note.strip())
             self.assertIn(f"(planned: {MODULE._escape_cell(note)})", rendered)
         self.assertNotRegex(rendered, r"(?i)\b(?:PR|pull request|change)\s*#?\s*\d+")
+
+
+class PublicTreeScanTests(unittest.TestCase):
+    def test_binary_files_only_read_the_classification_prefix(self) -> None:
+        reads: list[int] = []
+
+        class BinaryInput(io.BytesIO):
+            def read(self, size: int = -1) -> bytes:
+                reads.append(size)
+                return super().read(size)
+
+        stream = BinaryInput(b"\0" + b"x" * 16384)
+        with mock.patch.object(PUBLIC_TREE, "tracked_paths", return_value=["assets/example.bin"]), \
+                mock.patch.object(Path, "open", return_value=stream):
+            self.assertEqual(PUBLIC_TREE.validate(Path(".")), [])
+        self.assertEqual(reads, [8192])
+        self.assertTrue(stream.closed)
+
+    def test_excluded_text_still_receives_path_checks_without_file_reads(self) -> None:
+        with mock.patch.object(PUBLIC_TREE, "tracked_paths", return_value=["vendor/example.exe"]), \
+                mock.patch.object(Path, "open") as opened:
+            self.assertEqual([finding.rule for finding in PUBLIC_TREE.validate(Path("."))], ["generated-binary"])
+            opened.assert_not_called()
+
+    def test_comment_masks_preserve_all_language_branches_and_offsets(self) -> None:
+        cases = (
+            ('auto n = 0x1f\'ff; auto s = R"tag(hidden)tag"; // visible\n',
+             False, {"cpp": True}, "// visible"),
+            ('char *s = "hidden"; /* visible */\n', False, {}, "/* visible */"),
+            ('$s = @"\nhidden\n"@\n<# visible <# nested #> #>\n',
+             True, {}, "<# visible <# nested #> #>"),
+            ('s = """hidden # literal"""\n# visible\n',
+             False, {"hash_comments": True, "triple_quotes": True}, "# visible"),
+            ('s="hidden # literal"\n# visible\n',
+             False, {"hash_comments": True}, "# visible"),
+            ('set(s [==[hidden # literal]==]) # visible\n',
+             False, {"hash_comments": True, "cmake": True}, "# visible"),
+            ('label: owner\'s scalar # visible\nquoted: &value "hidden # literal"\n',
+             False, {"hash_comments": True, "yaml": True}, "# visible"),
+        )
+        for text, powershell, options, comment in cases:
+            with self.subTest(options=options, powershell=powershell):
+                expected = ["\n" if ch == "\n" else " " for ch in text]
+                start = text.index(comment)
+                expected[start:start + len(comment)] = comment
+                self.assertEqual(PUBLIC_TREE.code_mask(
+                    text, powershell, comments_only=True, **options), "".join(expected))
+                code = PUBLIC_TREE.code_mask(text, powershell, **options)
+                self.assertEqual(len(code), len(text))
+                self.assertEqual([i for i, ch in enumerate(code) if ch == "\n"],
+                                 [i for i, ch in enumerate(text) if ch == "\n"])
+                self.assertNotIn("hidden", code)
+                self.assertNotIn("visible", code)
+
+    def test_line_prefilter_preserves_findings_for_all_line_boundaries(self) -> None:
+        for separator in ("\n", "\r\n", "\r", "\v", "\f", "\x1c", "\x1d", "\x1e",
+                          "\x85", "\u2028", "\u2029"):
+            text = separator.join(("Public contract.", "# P1: example", "\x54ODO", "issue #220"))
+            expected = [(rule, match[0], line_number)
+                        for line_number, full_line in enumerate(text.splitlines(keepends=True), 1)
+                        for rule, pattern in PUBLIC_TREE.TEXT_RULES
+                        for match in pattern.finditer(full_line.rstrip("\r\n"))]
+            with self.subTest(separator=repr(separator)):
+                actual = [(finding.rule, finding.detail, finding.line)
+                          for finding in PUBLIC_TREE.inspect_text("docs/example.md", text)
+                          if finding.rule in {rule for rule, _ in PUBLIC_TREE.TEXT_RULES}]
+                self.assertEqual(actual, expected)
+                self.assertTrue(actual)
+
+    def test_text_prefilters_preserve_every_rule_and_unicode_case_policy(self) -> None:
+        passages = (
+            "\x54ODO \x46IXME \x57IP \x54BD \x58XX",
+            "\x73pec 12; \u017fpec 12; \x74ask #3; \x57ave 7; \x50R #12",
+            "\x46R-RENDER \x54-NET \x41C-foo \x502-T3 \x41-T4 \x41UDIO-FOO",
+            "\x494-TEST \x57S-9 \x4fQ-A \x4eFR-x \x4bDD-a \x46FF-3 \x52D-4 \x4bD-a \x54123 \x502.1",
+            "\x70hase 2; \u0130tem 2; \u0131tem 2",
+            "\x28A2)", "\x28A\u0661)", "# \x501: example",
+            "\x50illar A; \x54rack B; pre-\x503; \x49ncrement 3; \x69nc 3",
+            "\x73pec.md \x70lan.md \x68andoff.md \x64esign-decisions.md",
+            "\x2fhome/example/file \x2fmnt/c/path", "//\x77sl.localhost/distro",
+            "Q:\\\x55sers\\Example\\a", "ghp_" + "a" * 30,
+            "sk-" + "a" * 24, "AKIA" + "A" * 16,
+            "-----BEGIN " + "PRIVATE KEY-----",
+        )
+        text = "\n".join(passages)
+        expected = [(rule, match[0], line_number)
+                    for line_number, line in enumerate(text.splitlines(), 1)
+                    for rule, pattern in PUBLIC_TREE.TEXT_RULES for match in pattern.finditer(line)]
+        self.assertEqual({rule for rule, _, _ in expected}, {rule for rule, _ in PUBLIC_TREE.TEXT_RULES})
+        actual = [(finding.rule, finding.detail, finding.line)
+                  for finding in PUBLIC_TREE.inspect_text("docs/example.md", text)
+                  if finding.rule in {rule for rule, _ in PUBLIC_TREE.TEXT_RULES}]
+        self.assertEqual(actual, expected)
+
+    def test_hash_masking_requires_a_possible_hash_and_preserves_wrapped_comments(self) -> None:
+        with mock.patch.object(PUBLIC_TREE, "candidate_prose", wraps=PUBLIC_TREE.candidate_prose) as prose:
+            self.assertEqual(PUBLIC_TREE.inspect_text("example.cpp", "// Public contract.\n" * 100), [])
+            prose.assert_not_called()
+        for suffix, leader in ((".cpp", "// "), (".ps1", "# "), (".py", "# "),
+                               (".cmake", "# "), (".yaml", "# "), (".yml", "# ")):
+            with self.subTest(suffix=suffix):
+                text = leader + "Synthetic package\r\n" + leader + "deadbee inspected.\r\n"
+                self.assertEqual([(finding.rule, finding.line)
+                                  for finding in PUBLIC_TREE.inspect_text("example" + suffix, text)],
+                                 [("candidate-provenance", 1)])
+
+    def test_provenance_hints_preserve_wrapped_and_unicode_findings(self) -> None:
+        for suffix, leader in ((".cpp", "// "), (".psm1", "# "), (".py", "# "),
+                               (".sh", "# "), (".cmake", "# "), (".yaml", "# "), (".md", "")):
+            for first, last, rule in (("A \x70rivate", "native fixture.", "private-provenance"),
+                                      ("The \x6fperator", "stopped it.", "private-process-provenance"),
+                                      ("\x50\u0131D:", "12345", "private-process-provenance")):
+                with self.subTest(suffix=suffix, rule=rule):
+                    text = leader + first + "\r\n" + leader + last
+                    self.assertEqual([(finding.rule, finding.line)
+                                      for finding in PUBLIC_TREE.inspect_text("example" + suffix, text)],
+                                     [(rule, 1)])
+
+    def test_exemption_scanning_requires_a_possible_code_token(self) -> None:
+        with mock.patch.object(PUBLIC_TREE, "code_mask", wraps=PUBLIC_TREE.code_mask) as mask:
+            for suffix in (".cpp", ".cc", ".cxx", ".h", ".hpp", ".ps1", ".psm1"):
+                self.assertEqual(PUBLIC_TREE.code_token_exemptions("example" + suffix,
+                                                                 "ordinary code\n" * 100), set())
+            mask.assert_not_called()
+        text = "auto n = counts[\x70hase - 1]; // counts[\x70hase - 1]\n"
+        spans = PUBLIC_TREE.code_token_exemptions("example.cpp", text)
+        self.assertEqual(len(spans), 1)
+        self.assertEqual(text[slice(*next(iter(spans)))], "\x70hase - 1")
+        for path, text in (("example.cpp", "auto n = counts[/* gap */\x70hase - 1];"),
+                           ("example.ps1", "$x. <# gap #> \x49tem1")):
+            with self.subTest(path=path):
+                self.assertEqual(len(PUBLIC_TREE.code_token_exemptions(path, text)), 1)
+
+    def test_name_prefilter_preserves_exact_matcher_findings(self) -> None:
+        token = "AttributionToken"
+        named_pattern = next(pattern for rule, pattern in PUBLIC_TREE.PROVENANCE_TEXT_RULES
+                             if rule == "internal-reviewer-provenance" and pattern.groups)
+        passages = (token + " reviewed.", token + "-review.", "prefix-" + token + " review.",
+                    "review by " + token + ".", token.upper() + "/low review.",
+                    token.replace("k", "\u212a") + " reviewed.",
+                    "one-two-three-four-five review.", "Ordinary public language.")
+        passages += tuple(token + " " + context for context in (
+            "audit", "verification", "analysis", "model", "agent", "signed-off", "authoritative",
+            "finding", "critique", "audited", "verified", "accepted", "approved", "rejected", "found",
+            "corrected", "#123", "r4", "adapters"))
+        passages += tuple(token + "/" + tier for tier in ("low", "medium", "high", "xhigh", "max", "ultra"))
+        for name in (token, "prefix-" + token):
+            with mock.patch.object(PUBLIC_TREE, "AGENT_NAME_DIGESTS", {PUBLIC_TREE.name_digest(name)}):
+                for passage in passages:
+                    expected = [match[0] for match in named_pattern.finditer(passage)
+                                if any(PUBLIC_TREE.name_digest(group) in PUBLIC_TREE.AGENT_NAME_DIGESTS
+                                       for group in match.groups() if group is not None)]
+                    with self.subTest(name=name, passage=passage):
+                        actual = [finding.detail for finding in PUBLIC_TREE.inspect_text("docs/example.md", passage)
+                                  if finding.rule == "internal-reviewer-provenance"]
+                        self.assertEqual(actual, expected)
+                        if expected:
+                            self.assertTrue(PUBLIC_TREE._may_name_attribution(passage))
+                self.assertFalse(PUBLIC_TREE._may_name_attribution("Ordinary public language."))
 
 
 if __name__ == "__main__":
