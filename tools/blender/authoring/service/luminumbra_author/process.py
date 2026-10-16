@@ -35,13 +35,12 @@ def _proc_entries():
 
 
 def _proc_identity(pid):
-    """Return parent PID and creation ticks; a vanished process is harmless."""
+    """Return parent PID and creation ticks, or skip an unavailable stat record."""
     try:
-        fields = (Path('/proc')/str(pid)/'stat').read_text().rsplit(')', 1)[1].split()
+        # comm is arbitrary bytes and may contain spaces or closing parentheses.
+        fields = (Path('/proc')/str(pid)/'stat').read_bytes().rsplit(b')', 1)[1].split()
         return int(fields[1]), int(fields[19])  # fields 4 (ppid) and 22 (starttime)
-    except (FileNotFoundError, ProcessLookupError): return None
-    except (ValueError, IndexError) as error:
-        raise OSError('Cannot establish Linux process creation identity') from error
+    except (OSError, ValueError, IndexError): return None
 
 
 def _cleanup_remaining(deadline, clock):

@@ -12,7 +12,59 @@ import unittest
 from unittest.mock import Mock, patch
 
 from luminumbra_author import process as owner
+from luminumbra_author.meshgen_jobs import process_start
 from luminumbra_author.contracts import Refusal
+
+
+def stat_bytes(pid, parent, start, comm=b'worker', state=b'S'):
+    # Fields 3..22: state, ppid, seventeen intervening numbers, starttime.
+    fields = [state, str(parent).encode('ascii')] + [b'0']*17 + [str(start).encode('ascii')]
+    return str(pid).encode('ascii')+b' ('+comm+b') '+b' '.join(fields)+b'\n'
+
+
+class ProcessStatReaders(unittest.TestCase):
+    def setUp(self):
+        context = patch.object(Path, 'read_text', side_effect=AssertionError('Process identity must read bytes'))
+        context.start(); self.addCleanup(context.stop)
+
+    def test_creation_identity_ignores_comm_encoding_and_delimiters(self):
+        path_type = type(Path())
+        for comm in (b'worker\xff', b'worker\xe2\x82', b'worker ) with spaces)'):
+            with self.subTest(comm=comm), patch.object(Path, 'read_bytes',
+                    return_value=stat_bytes(123, 45, 678, comm)), patch.object(os, 'name', 'posix'), \
+                    patch.object(owner, 'Path', path_type), \
+                    patch('luminumbra_author.meshgen_jobs.Path', path_type):
+                self.assertEqual(owner._proc_identity(123), (45, 678))
+                self.assertEqual(process_start(123), '678')
+
+    def test_empty_and_malformed_scan_entries_are_skipped(self):
+        for record in (b'', b'123 missing comm', b'123 (worker) S',
+                       stat_bytes(123, 45, 678).replace(b'S 45', b'S invalid'),
+                       stat_bytes(123, 45, 678).replace(b'678', b'invalid')):
+            with self.subTest(record=record), patch.object(Path, 'read_bytes', return_value=record):
+                self.assertIsNone(owner._proc_identity(123))
+
+    def test_unreadable_and_vanished_scan_entries_are_skipped(self):
+        for error in (FileNotFoundError(), ProcessLookupError(), PermissionError(), OSError('read failed')):
+            with self.subTest(error=type(error).__name__), patch.object(Path, 'read_bytes', side_effect=error):
+                self.assertIsNone(owner._proc_identity(123))
+
+    def test_lock_identity_preserves_zombie_and_unreadable_owner_policy(self):
+        path_type = type(Path())
+        with patch.object(os, 'name', 'posix'), patch('luminumbra_author.meshgen_jobs.Path', path_type):
+            for state in (b'Z', b'X'):
+                with self.subTest(state=state), patch.object(path_type, 'read_bytes',
+                        return_value=stat_bytes(123, 45, 678, b'worker\xff', state)):
+                    self.assertIsNone(process_start(123))
+            with patch.object(path_type, 'read_bytes', side_effect=FileNotFoundError()):
+                self.assertIsNone(process_start(123))
+            for result in (b'', b'123 (worker) S', stat_bytes(123, 45, 678).replace(b'678', b'\xff')):
+                with self.subTest(record=result), patch.object(path_type, 'read_bytes', return_value=result):
+                    with self.assertRaises(Refusal) as caught: process_start(123)
+                    self.assertEqual(caught.exception.finding['rule_id'], 'busy')
+            with patch.object(path_type, 'read_bytes', side_effect=PermissionError()):
+                with self.assertRaises(Refusal) as caught: process_start(123)
+                self.assertEqual(caught.exception.finding['rule_id'], 'busy')
 
 
 class WorkerCompletion(unittest.TestCase):
@@ -256,6 +308,7 @@ class LinuxSupervisorStartup(unittest.TestCase):
 
 class LinuxProcessOwnership(unittest.TestCase):
     def setUp(self):
+        self.path_type = type(Path())
         self.root = os.getpid()
         for target, attribute, value in ((owner.os, 'name', 'posix'),
                                          (owner.sys, 'platform', 'linux'),
@@ -308,6 +361,41 @@ class LinuxProcessOwnership(unittest.TestCase):
         self.assertFalse(self.closed)
         tree.close(); tree.close()
         self.assertEqual(sorted(self.closed), sorted(self.bindings))
+
+    def test_stat_bytes_authorize_owned_children_and_ignore_unrelated_names(self):
+        names = {101: b'worker\xff', 102: b'worker\xe2\x82', 201: b'unrelated ) with spaces)'}
+        def read(path):
+            pid = int(path.parent.name)
+            return stat_bytes(pid, *self.data[pid], names.get(pid, b'worker'))
+        with patch.object(owner, 'Path', self.path_type), \
+                patch.object(self.path_type, 'read_bytes', autospec=True, side_effect=read):
+            tree = self.tree(proc_reader=owner._proc_identity)
+            self.stop(tree)
+        self.assertEqual(self.opened, [101, 102])
+        self.assertEqual(self.delivered, [(101, 20), (102, 30)])
+
+    def test_bad_stat_entries_do_not_abort_scan_or_owned_child_cleanup(self):
+        for failure in (b'', b'201 (bad) S', PermissionError(), FileNotFoundError()):
+            with self.subTest(failure=failure):
+                self.opened.clear(); self.closed.clear(); self.delivered.clear(); self.bindings.clear()
+                reads = []
+                def read(path):
+                    pid = int(path.parent.name)
+                    reads.append(pid)
+                    if pid == 201:
+                        if isinstance(failure, OSError): raise failure
+                        return failure
+                    return stat_bytes(pid, *self.data[pid])
+                with patch.object(owner, 'Path', self.path_type), \
+                        patch.object(self.path_type, 'read_bytes', autospec=True, side_effect=read):
+                    # The unrelated process can disappear after enumeration.
+                    tree = self.tree(proc_entries=lambda: iter(('201', '101', '102')),
+                                     proc_reader=owner._proc_identity)
+                    self.stop(tree)
+                self.assertIn(201, reads)
+                self.assertEqual(self.opened, [101, 102])
+                self.assertEqual(self.delivered, [(101, 20), (102, 30)])
+                tree.close()
 
     def test_exit_and_reuse_before_handle_acquisition_or_revalidation_is_discarded(self):
         for phase in ('before_open', 'after_open', 'exit'):

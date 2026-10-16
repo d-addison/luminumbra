@@ -155,13 +155,13 @@ def process_start(pid):
         finally:
             kernel.CloseHandle(handle)
     try:
-        # comm may contain spaces and parentheses; fields after its final ')' are fixed.
-        record = Path(f"/proc/{pid}/stat").read_text()
-        fields = record.rsplit(")", 1)[1].split()
-        return None if fields[0] in ("Z", "X") else fields[19]
+        # comm is arbitrary bytes; fields after its final ')' are fixed.
+        record = Path(f"/proc/{pid}/stat").read_bytes()
+        fields = record.rsplit(b")", 1)[1].split()
+        return None if fields[0] in (b"Z", b"X") else str(int(fields[19]))
     except FileNotFoundError:
         return None
-    except (OSError, IndexError) as error:
+    except (OSError, ValueError, IndexError) as error:
         raise Refusal("busy", "Cannot verify MG2 owner creation time on this platform.") from error
 
 
