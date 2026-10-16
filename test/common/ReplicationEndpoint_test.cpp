@@ -186,6 +186,7 @@ TEST(ReplicationEndpoint, AoiScopesSnapshotPerClient) {
     // Radius 5 m. Client 1's avatar (id 1) at the origin; client 2's avatar (id 2)
     // 100 m away. A "near-1" entity (id 10) sits 2 m from avatar 1; a "near-2"
     // entity (id 20) sits 2 m from avatar 2.
+    server.SetAoiChunkRadius(-1, 0);
     server.SetAoiRadiusMm(5000);
     std::vector<ReplEntityState> entities = {
         MakeEntity(1, 0, 0, 0),       // client 1's avatar
@@ -212,9 +213,11 @@ TEST(ReplicationEndpoint, AoiScopesSnapshotPerClient) {
     EXPECT_EQ(ids(client_b.snapshot()), (std::vector<std::uint32_t>{2, 20}));
 }
 
-TEST(ReplicationEndpoint, AoiDisabledByDefaultSendsAll) {
+TEST(ReplicationEndpoint, ExplicitlyDisabledAoiSendsAll) {
     auto pair = MakeLoopbackPair();
     ReplicationServer server;
+    server.SetAoiChunkRadius(-1, 0);
+    server.SetAoiRadiusMm(0);
     server.AddClient(1, pair.first.get());
     ReplicationClient client(1, pair.second.get());
     std::vector<ReplEntityState> entities = {
@@ -712,3 +715,18 @@ TEST(ReplicationBackpressurePolicy, ThrottleThenKeyframeThenDisconnectWhileHealt
 }
 
 } // namespace
+
+TEST(ReplicationEndpoint, DefaultChunkAoiScopesToThreeChunks) {
+    auto pair = MakeLoopbackPair();
+    ReplicationServer server;
+    EXPECT_TRUE(server.delta_compression());
+    EXPECT_EQ(server.aoi_chunk_radius(), 3);
+    server.AddClient(1, pair.first.get());
+    ReplicationClient client(1, pair.second.get());
+    server.BroadcastSnapshot(
+        1, {MakeEntity(1, 0, 0, 0), MakeEntity(2, 48000, 0, 0), MakeEntity(3, 64000, 0, 0)});
+    client.PumpInbound();
+    ASSERT_TRUE(client.has_snapshot());
+    ASSERT_EQ(client.snapshot().entities.size(), 2u);
+    EXPECT_EQ(client.snapshot().entities[1].entity_id, 2u);
+}
