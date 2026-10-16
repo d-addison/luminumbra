@@ -10,8 +10,10 @@ and content formats may still change.
 
 - **v0.3.0 breaks saved-world compatibility.** Create a new world. Current saves
   use LMR1 v2, the `luminumbra.persistence.world_manifest.v1` schema declaring
-  container version 2, and FSD2 v3. Explicit preset revisions must be 6; in-memory
-  callers may omit the revision. Shaping is unconditional and enabled caves use
+  container version 2, and FSD2 v3. New packaged presets use revision 7; revision 6
+  and omitted revisions retain historical defaults. Saves without an embedded
+  packaged preset resolve to frozen revision-6 bytes, including `cave_dense`.
+  Shaping is unconditional and enabled caves use
   the noise router; content, hydro and biome controls remain. Retired selectors
   are rejected regardless of value. Future-format and corruption errors remain
   distinct from this obsolete-world refusal. See the
@@ -20,26 +22,31 @@ and content formats may still change.
   surface authority only; caves and player voxel edits are not carried at
   distance. The [SHIELD SDF contract](shield/sdf-contract.md) defines the
   exact tier semantics.
-- **Water simulates at 2 m cells by default.** Chunks are 16 m across and the
-  live water solver runs an 8×8 grid per chunk, so each cell is 2 m. Broad
+- **Water simulates at 1 m cells by default.** Chunks are 16 m across and the
+  live water solver runs a 16×16 grid per chunk, so each cell is 1 m. Broad
   bodies, rain, and terraform coupling resolve well; channels narrower than a
   few cells (a small river's inner bank) are below the solver's spatial
-  resolution. The `sim.water_high_res` flag switches a session to a 16×16 grid
-  (1 m cells). Its per-edge flow constants are resolution-scaled (derivation in
+  resolution. Explicit `sim.water_high_res=false` selects Medium's 8×8 grid
+  (2 m cells). High's per-edge flow constants are resolution-scaled (derivation in
   `WaterSystem.cpp`), so per simulated step High reproduces Medium's physics — a
   dug pit gains the same physical volume per unit of simulated-chunk-time, within
   a tested band.
 
-  The per-tick budget is expressed in cells rather than chunks, so a higher
-  resolution shrinks the chunk window (16 instead of 64) to hold per-tick work
-  constant. Chunks carrying active edge flux are scheduled ahead of the rotating
+  The live solver budget is 4096 cells per tick rather than a fixed chunk count, so
+  High shrinks the chunk window (16 instead of 64) to bound solver cell steps
+  at uniform resolution. This does not bound the entire update, including scans
+  over resident chunks and activity scoring.
+  Chunks carrying active edge flux are scheduled ahead of the rotating
   cursor, so active flow fronts advance every tick at either resolution while the
   cursor's share keeps every awake chunk starvation-free; Medium's rotating window
   is unchanged byte-for-byte. What High still costs: first-time grid seeding is
   ~4× more expensive per chunk, and steady-state solver time is a few percent
-  higher. Grid resizes are amortized one chunk per tick during live play (world
-  load migrates all chunks at once), so mid-run resolution changes converge over
-  many ticks by design.
+  higher. First-time seeding is amortized at six chunks per live tick, and grid
+  resizes at one chunk per live tick, so mid-run resolution changes converge over
+  many ticks by design. Boot settle bypasses the init and solver caps, seeding
+  every pending chunk and simulating every awake chunk per update. World load
+  migrates all mismatched grids in one pass before the first live tick. Neither
+  loading path is bounded by the live solver's cell budget.
 
   The resolution is baked into the hashed water grids, so every peer in a session
   must match and enabling the flag deliberately changes the world hash.
