@@ -207,9 +207,12 @@ public:
     // previous complete file, or on POSIX the new complete file when only the final
     // directory flush failed, never a partial file. Used for derived files that live
     // beside the save, such as the far authority overlay.
+    // With a creation journal, the parent must already be owned. Temporary and
+    // published files remain journal-owned on failure until writers drain and rollback runs.
     static bool write_file_durably(const std::filesystem::path& destination,
                                    const std::string& bytes,
-                                   std::vector<std::string>* errors = nullptr);
+                                   std::vector<std::string>* errors = nullptr,
+                                   CreatedWorldArtifacts* artifacts = nullptr);
 
     // Called after ledger staging is flushed/closed, before replacement. Returning
     // false fails the write and cleans up; a test subprocess may terminate here
