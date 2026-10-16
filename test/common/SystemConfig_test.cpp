@@ -158,8 +158,9 @@ TEST(SystemConfig, ExplicitOverrideLoadsHistoricalConfiguration) {
     ASSERT_TRUE(SystemConfig::TryLoadFromFile(path.string(), config, error)) << error;
     EXPECT_TRUE(error.empty());
 #define EXPECT_HISTORICAL_KEY(ENUM, SECTION, JSON_SECTION, JSON_NAME, RESIDENCY)                   \
-    if (std::string(JSON_SECTION) == "sim")                                                        \
-        EXPECT_FALSE(config.enabled(SysKey::ENUM)) << JSON_NAME;
+    if (std::string(JSON_SECTION) == "sim") {                                                      \
+        EXPECT_FALSE(config.enabled(SysKey::ENUM)) << JSON_NAME;                                   \
+    }
     LUMIN_CONFIG_KEY_TABLE(EXPECT_HISTORICAL_KEY)
 #undef EXPECT_HISTORICAL_KEY
     EXPECT_TRUE(config.ComputeConfigSubHash().empty());

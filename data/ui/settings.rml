@@ -84,6 +84,12 @@
                                 <option value="240">240</option>
                             </select>
                         </div>
+                        <div class="form-group settings-row-inline">
+                            <label>performance HUD</label>
+                            <button class="toggle on" id="perf_hud_toggle"><span class="toggle-knob"></span></button>
+                        </div>
+                        <button id="developer_help_btn" class="btn">Show resolved shortcuts</button>
+                        <pre id="developer_help" class="hidden" style="white-space: pre; max-height: 160px; overflow: auto;"></pre>
 
                         <!-- window mode stepper (drives hidden #setting_window_mode) -->
                         <div class="form-group settings-row-inline">
@@ -99,6 +105,7 @@
                     <!-- ===================== CONTROLS ===================== -->
                     <div class="settings-column settings-section">
                         <h2 class="settings-heading">controls</h2>
+                        <button id="open_developer_console" class="btn">Developer bindings and hotkey help</button>
 
                         <!-- Keybind rows bound to real input actions; click a row to rebind
                              (the next key press is captured). Chips are filled from the current

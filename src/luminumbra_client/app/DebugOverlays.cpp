@@ -638,7 +638,7 @@ void DrawCreatureNameplates(ClientAppContext& app,
     // the world position to screen via the camera and draws a label (id + sex + generation)
     // into the ImGui foreground list, so it shows in the live view AND in the demo capture
     // (this runs even during the timelapse, unlike the gated debug windows below).
-    if (app.overlay.imgui_enabled && app.capture.timelapse_creatures && camera && gameSession) {
+    if (app.overlay.imgui_enabled && camera && gameSession) {
         int fbw = 0, fbh = 0;
         glfwGetFramebufferSize(window, &fbw, &fbh);
         if (fbw > 0 && fbh > 0) {
@@ -687,183 +687,124 @@ void DrawCreatureNameplates(ClientAppContext& app,
     }
 }
 
-void DrawFrameStatusOverlays(ClientAppContext& app,
-                             GameState currentState,
-                             const ScenarioHarness::RuntimeScenarioConfig& scenario_config,
-                             Luminumbra::Client::PlayerController* playerController) {
-    if (app.overlay.imgui_enabled && playerController && app.capture.timelapse_frames == 0) {
-        playerController->RenderDebugUI();
-    }
-    // Always-on time-scale indicator (when not real-time) so slow-mo / fast-forward
-    // / pause is obvious at a glance.
-    if (app.overlay.imgui_enabled && app.capture.timeScale != 1.0f &&
-        app.capture.timelapse_frames == 0) {
-        ImGui::SetNextWindowPos(ImVec2(10.0f, 60.0f), ImGuiCond_Always);
-        ImGui::SetNextWindowBgAlpha(0.5f);
-        if (ImGui::Begin("##timescale",
-                         nullptr,
-                         ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
-                             ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoInputs |
-                             ImGuiWindowFlags_NoMove)) {
-            if (app.capture.timeScale == 0.0f)
-                ImGui::Text("|| PAUSED  (\\ to resume)");
-            else
-                ImGui::Text("TIME  x%.2f", app.capture.timeScale);
-        }
-        ImGui::End();
-    }
-    //  minimal crop HUD — seed/harvest inventory + the farming verb hints.
-    if (app.overlay.imgui_enabled && currentState == GameState::IN_GAME &&
-        !scenario_config.active() && app.capture.timelapse_frames == 0) {
-        ImGui::SetNextWindowPos(ImVec2(10.0f, 92.0f), ImGuiCond_Always);
-        ImGui::SetNextWindowBgAlpha(0.45f);
-        if (ImGui::Begin("##farmhud",
-                         nullptr,
-                         ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
-                             ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoInputs |
-                             ImGuiWindowFlags_NoMove)) {
-            ImGui::Text("FARM  seeds:%d  harvests:%d  yield:%.1f",
-                        app.hud.farming.seeds,
-                        app.hud.farming.harvests,
-                        app.hud.farming.total_yield);
-            ImGui::TextDisabled("F plant   G water   H fertilize   J harvest");
-        }
-        ImGui::End();
-    }
+void DrawFarmDiagnosticsContents(ClientAppContext& app) {
+    ImGui::Text("Seeds: %d  harvests: %d  yield: %.1f",
+                app.hud.farming.seeds,
+                app.hud.farming.harvests,
+                app.hud.farming.total_yield);
 }
 
-void DrawGpuProfilerOverlay(ClientAppContext& app,
-                            GameState currentState,
-                            Luminumbra::Rendering::RenderPipeline& renderPipeline,
-                            Luminumbra::Client::Rml_UIManager* uiManager) {
-    // Live GPU profiler : per-pass GPU-ms + draw/instance counts read from the render
-    // pipeline's GL_TIMESTAMP timer ring (render-side only; never hashed). The first real
-    // interactive readout for the engine optimization pass.
-    if (app.overlay.imgui_enabled && app.overlay.show_gpu_profiler &&
-        currentState == GameState::IN_GAME && app.capture.timelapse_frames == 0) {
-        const auto& gp = renderPipeline.get_last_render_pass_stats();
-        ImGui::SetNextWindowPos(ImVec2(10.0f, 120.0f), ImGuiCond_FirstUseEver);
-        ImGui::SetNextWindowBgAlpha(0.85f);
-        if (ImGui::Begin("GPU Profiler ",
-                         &app.overlay.show_gpu_profiler,
-                         ImGuiWindowFlags_AlwaysAutoResize)) {
-            const double total_ms = gp.shadow_gpu_ms + gp.gbuffer_gpu_ms + gp.ssao_gpu_ms +
-                                    gp.ssao_blur_gpu_ms + gp.lighting_gpu_ms + gp.water_gpu_ms +
-                                    gp.skybox_gpu_ms + gp.particle_gpu_ms + gp.foliage_gpu_ms +
-                                    gp.aerial_gpu_ms + gp.final_blit_gpu_ms;
-            if (!gp.gpu_timers_supported) {
-                ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.2f, 1.0f),
-                                   "GPU timers unsupported on this context");
-            }
-            const ImVec4 over(1.0f, 0.45f, 0.45f, 1.0f);
-            const ImVec4 okc(0.70f, 0.85f, 0.70f, 1.0f);
-            ImGui::TextColored(total_ms > 3.333 ? over : okc,
-                               "GPU frame total: %6.3f ms   (budget 3.333 ms @ 300fps)",
-                               total_ms);
-            const double ui_ms = uiManager ? uiManager->GetLastUiFrameMs() : 0.0;
-            ImGui::Text("UI submit (CPU): %6.3f ms", ui_ms);
-            ImGui::Separator();
-            auto row = [&](const char* name, double ms) {
-                ImGui::TextColored(ms > 1.0 ? over : okc, "  %-11s %7.3f ms", name, ms);
-            };
-            row("gbuffer", gp.gbuffer_gpu_ms);
-            row("shadow", gp.shadow_gpu_ms);
-            row("lighting", gp.lighting_gpu_ms);
-            row("foliage", gp.foliage_gpu_ms);
-            row("particle", gp.particle_gpu_ms);
-            row("water", gp.water_gpu_ms);
-            row("ssao", gp.ssao_gpu_ms + gp.ssao_blur_gpu_ms);
-            row("aerial", gp.aerial_gpu_ms);
-            row("skybox", gp.skybox_gpu_ms);
-            row("final_blit", gp.final_blit_gpu_ms);
-            ImGui::Separator();
-            ImGui::Text("terrain: %5zu draws  %5zu chunks  %7zu tris",
-                        gp.terrain_draws,
-                        gp.terrain_visible_chunks,
-                        gp.terrain_indices_drawn / 3);
-            ImGui::Text(
-                "far-LOD: %5zu draws  %7zu tris", gp.far_region_draws, gp.far_indices_drawn / 3);
-            const auto& fw = renderPipeline.far_world_diagnostic();
-            using namespace Luminumbra::Rendering;
-            ImGui::Text("far world: requested %s / effective %s / %s",
-                        FarWorldModeName(fw.selection.requested),
-                        FarWorldModeName(fw.selection.effective),
-                        FarWorldRefusalName(fw.selection.refusal));
-            ImGui::Text("epoch %llu frame %llu plane %.0f numeric %d; advanced %d submitted %d",
-                        static_cast<unsigned long long>(fw.world_epoch),
-                        static_cast<unsigned long long>(fw.frame),
-                        static_cast<double>(fw.far_plane),
-                        static_cast<int>(fw.numeric),
-                        fw.advanced,
-                        fw.submission_occurred);
-            const auto cave_policy_name = [](std::optional<Luminumbra::World::FarCaveMode> policy) {
-                if (!policy)
-                    return "none";
-                return *policy == Luminumbra::World::FarCaveMode::BoxFiltered ? "BoxFiltered"
-                                                                              : "BandLimited";
-            };
-            ImGui::Text("cave policy: requested %s / bound %s",
-                        cave_policy_name(fw.requested_cave_policy),
-                        cave_policy_name(fw.bound_cave_policy));
-            ImGui::Text("submission refusal: %s",
-                        FarWorldSubmissionRefusalName(fw.submission_refusal));
-            ImGui::Text("selected %d; draws %zu indices %zu; suppression %s; water capability %d",
-                        fw.selection.effective == FarWorldMode::Ladder,
-                        fw.draws,
-                        fw.indices,
-                        fw.selection.submit ? "None" : "SubmissionOverride",
-                        static_cast<int>(fw.water_capability));
-            ImGui::Text("upload attempts %zu debit %llu success %llu horizon refusal %d",
-                        fw.upload.upload_attempts,
-                        static_cast<unsigned long long>(fw.upload.upload_bytes),
-                        static_cast<unsigned long long>(fw.upload.successful_upload_bytes),
-                        fw.upload.horizon_refused);
-            for (std::size_t ti = 0; ti < fw.tiers.size(); ++ti) {
-                const auto& t = fw.tiers[ti];
-                const auto& v = t.resident;
-                ImGui::Text("V%zu wanted %zu pending %zu building %zu ready %zu pairs %zu/%zu "
-                            "covering %zu drawn %zu/%zu",
-                            ti + 1,
-                            v.wanted,
-                            v.pending,
-                            v.building,
-                            v.ready,
-                            v.uploaded_pairs,
-                            v.empty_pairs,
-                            v.covering,
-                            t.draws,
-                            t.indices);
-                ImGui::Text("  water dry/wet %zu/%zu retained/submitted indices %llu/%llu",
-                            v.water_known_dry_tiles,
-                            v.water_wet_tiles,
-                            static_cast<unsigned long long>(v.retained_water_indices),
-                            static_cast<unsigned long long>(v.submitted_water_indices));
-                ImGui::Text(
-                    "  reject %zu budget latch %zu; range/budget/stale totals %llu/%llu/%llu",
+void DrawGpuProfilerContents(Luminumbra::Rendering::RenderPipeline& renderPipeline,
+                             Luminumbra::Client::Rml_UIManager* uiManager) {
+    const auto& gp = renderPipeline.get_last_render_pass_stats();
+    const double total_ms = gp.shadow_gpu_ms + gp.gbuffer_gpu_ms + gp.ssao_gpu_ms +
+                            gp.ssao_blur_gpu_ms + gp.lighting_gpu_ms + gp.water_gpu_ms +
+                            gp.skybox_gpu_ms + gp.particle_gpu_ms + gp.foliage_gpu_ms +
+                            gp.aerial_gpu_ms + gp.final_blit_gpu_ms;
+    if (!gp.gpu_timers_supported) {
+        ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.2f, 1.0f),
+                           "GPU timers unsupported on this context");
+    }
+    const ImVec4 over(1.0f, 0.45f, 0.45f, 1.0f);
+    const ImVec4 okc(0.70f, 0.85f, 0.70f, 1.0f);
+    ImGui::TextColored(total_ms > 3.333 ? over : okc,
+                       "Selected GPU passes: %6.3f ms   (reference 3.333 ms @ 300fps)",
+                       total_ms);
+    const double ui_ms = uiManager ? uiManager->GetLastUiFrameMs() : 0.0;
+    ImGui::Text("UI submit (CPU): %6.3f ms", ui_ms);
+    ImGui::Separator();
+    auto row = [&](const char* name, double ms) {
+        ImGui::TextColored(ms > 1.0 ? over : okc, "  %-11s %7.3f ms", name, ms);
+    };
+    row("gbuffer", gp.gbuffer_gpu_ms);
+    row("shadow", gp.shadow_gpu_ms);
+    row("lighting", gp.lighting_gpu_ms);
+    row("foliage", gp.foliage_gpu_ms);
+    row("particle", gp.particle_gpu_ms);
+    row("water", gp.water_gpu_ms);
+    row("ssao", gp.ssao_gpu_ms + gp.ssao_blur_gpu_ms);
+    row("aerial", gp.aerial_gpu_ms);
+    row("skybox", gp.skybox_gpu_ms);
+    row("final_blit", gp.final_blit_gpu_ms);
+    ImGui::Separator();
+    ImGui::Text("terrain: %5zu draws  %5zu chunks  %7zu tris",
+                gp.terrain_draws,
+                gp.terrain_visible_chunks,
+                gp.terrain_indices_drawn / 3);
+    ImGui::Text("far-LOD: %5zu draws  %7zu tris", gp.far_region_draws, gp.far_indices_drawn / 3);
+    const auto& fw = renderPipeline.far_world_diagnostic();
+    using namespace Luminumbra::Rendering;
+    ImGui::Text("far world: requested %s / effective %s / %s",
+                FarWorldModeName(fw.selection.requested),
+                FarWorldModeName(fw.selection.effective),
+                FarWorldRefusalName(fw.selection.refusal));
+    ImGui::Text("epoch %llu frame %llu plane %.0f numeric %d; advanced %d submitted %d",
+                static_cast<unsigned long long>(fw.world_epoch),
+                static_cast<unsigned long long>(fw.frame),
+                static_cast<double>(fw.far_plane),
+                static_cast<int>(fw.numeric),
+                fw.advanced,
+                fw.submission_occurred);
+    const auto cave_policy_name = [](std::optional<Luminumbra::World::FarCaveMode> policy) {
+        if (!policy)
+            return "none";
+        return *policy == Luminumbra::World::FarCaveMode::BoxFiltered ? "BoxFiltered"
+                                                                      : "BandLimited";
+    };
+    ImGui::Text("cave policy: requested %s / bound %s",
+                cave_policy_name(fw.requested_cave_policy),
+                cave_policy_name(fw.bound_cave_policy));
+    ImGui::Text("submission refusal: %s", FarWorldSubmissionRefusalName(fw.submission_refusal));
+    ImGui::Text("selected %d; draws %zu indices %zu; suppression %s; water capability %d",
+                fw.selection.effective == FarWorldMode::Ladder,
+                fw.draws,
+                fw.indices,
+                fw.selection.submit ? "None" : "SubmissionOverride",
+                static_cast<int>(fw.water_capability));
+    ImGui::Text("upload attempts %zu debit %llu success %llu horizon refusal %d",
+                fw.upload.upload_attempts,
+                static_cast<unsigned long long>(fw.upload.upload_bytes),
+                static_cast<unsigned long long>(fw.upload.successful_upload_bytes),
+                fw.upload.horizon_refused);
+    for (std::size_t ti = 0; ti < fw.tiers.size(); ++ti) {
+        const auto& t = fw.tiers[ti];
+        const auto& v = t.resident;
+        ImGui::Text("V%zu wanted %zu pending %zu building %zu ready %zu pairs %zu/%zu "
+                    "covering %zu drawn %zu/%zu",
+                    ti + 1,
+                    v.wanted,
+                    v.pending,
+                    v.building,
+                    v.ready,
+                    v.uploaded_pairs,
+                    v.empty_pairs,
+                    v.covering,
+                    t.draws,
+                    t.indices);
+        ImGui::Text("  water dry/wet %zu/%zu retained/submitted indices %llu/%llu",
+                    v.water_known_dry_tiles,
+                    v.water_wet_tiles,
+                    static_cast<unsigned long long>(v.retained_water_indices),
+                    static_cast<unsigned long long>(v.submitted_water_indices));
+        ImGui::Text("  reject %zu budget latch %zu; range/budget/stale totals %llu/%llu/%llu",
                     v.request_rejected,
                     v.budget_evicted,
                     static_cast<unsigned long long>(t.evicted_range),
                     static_cast<unsigned long long>(t.evicted_budget),
                     static_cast<unsigned long long>(t.stale_rebuilds));
-                ImGui::Text(
-                    "  sampled CPU/GPU logical stores %llu/%llu; retained ready CPU/GPU %llu/%llu",
+        ImGui::Text("  sampled CPU/GPU logical stores %llu/%llu; retained ready CPU/GPU %llu/%llu",
                     static_cast<unsigned long long>(v.memory.bytes_cpu),
                     static_cast<unsigned long long>(v.memory.bytes_gpu),
                     static_cast<unsigned long long>(v.ready_cpu_bytes),
                     static_cast<unsigned long long>(v.retained_gpu_bytes));
-            }
-            ImGui::TextUnformatted(
-                "Pool samples are asynchronous diagnostics, not atomic admission values.");
-            ImGui::Text("foliage: %5zu draws  %7zu instances",
-                        gp.foliage_draws,
-                        gp.foliage_instances_drawn);
-            ImGui::Text(
-                "particle: %5zu draws  %7zu instances", gp.particle_draws, gp.particles_drawn);
-            ImGui::Text("shadow: %5zu draws", gp.shadow_draws);
-            ImGui::Text("water: %5zu draws", gp.water_draws);
-        }
-        ImGui::End();
     }
+    ImGui::TextUnformatted(
+        "Pool samples are asynchronous diagnostics, not atomic admission values.");
+    ImGui::Text(
+        "foliage: %5zu draws  %7zu instances", gp.foliage_draws, gp.foliage_instances_drawn);
+    ImGui::Text("particle: %5zu draws  %7zu instances", gp.particle_draws, gp.particles_drawn);
+    ImGui::Text("shadow: %5zu draws", gp.shadow_draws);
+    ImGui::Text("water: %5zu draws", gp.water_draws);
 }
 
 void SpawnDebugGlassPanes(ClientAppContext& app,
@@ -905,10 +846,10 @@ void SpawnDebugGlassPanes(ClientAppContext& app,
 void UpdateShaderTools(ClientAppContext& app,
                        GameState currentState,
                        Luminumbra::Rendering::RenderPipeline& renderPipeline) {
-    // live shader authoring (crawl  + walk: watcher + panel ).
+    // Render-thread requests and the opt-in watcher run independently of widget drawing.
     // Render-only end to end: shaders/uniforms never feed the sim or world_hash.
     if (currentState == GameState::IN_GAME && app.capture.timelapse_frames == 0) {
-        // Crawl: reload-all requested by  (executed here, on the GL thread).
+        // Reload requests are executed here, on the GL thread.
         if (app.overlay.request_shader_reload) {
             app.overlay.request_shader_reload = false;
             renderPipeline.reload_all_shaders();
@@ -947,253 +888,232 @@ void UpdateShaderTools(ClientAppContext& app,
                     });
             }
         }
-        // Walk (-4): the dev shader panel — roster status, per-shader
-        // reload, and LIVE uniform editing via glProgramUniform (GL 4.5 DSA).
-        // Honesty note (-5): passes re-set most uniforms per draw; an
-        // edit persists only for uniforms a pass never sets (u_dev_*).
-        if (app.overlay.imgui_enabled && app.overlay.show_shader_panel) {
-            ImGui::SetNextWindowPos(ImVec2(10.0f, 420.0f), ImGuiCond_FirstUseEver);
-            ImGui::SetNextWindowSize(ImVec2(440.0f, 520.0f), ImGuiCond_FirstUseEver);
-            if (ImGui::Begin("Shaders ", &app.overlay.show_shader_panel)) {
-                ImGui::TextWrapped(
-                    "Live shader authoring (): edit res/shaders/ in any editor, "
-                    "reload hot-swaps rollback-safe. Uniform edits persist only for "
-                    "uniforms a pass does not re-set per frame (u_dev_* convention).");
-                if (ImGui::Button("Reload All "))
-                    app.overlay.request_shader_reload = true;
-                ImGui::SameLine();
-                ImGui::Checkbox("Auto-reload on file change", &app.overlay.shader_auto_reload);
-                ImGui::Separator();
-                renderPipeline.enumerate_shaders([&](const char* sh_name,
-                                                     Luminumbra::Rendering::Shader* sh) {
-                    if (!sh)
-                        return;
-                    ImGui::PushID(sh_name);
-                    if (ImGui::CollapsingHeader(sh_name)) {
-                        const bool sh_ok = sh->IsValid();
-                        ImGui::TextColored(sh_ok ? ImVec4(0.70f, 0.85f, 0.70f, 1.0f)
-                                                 : ImVec4(1.0f, 0.45f, 0.45f, 1.0f),
-                                           sh_ok ? "valid" : "INVALID (prior program kept)");
-                        if (!sh->Diagnostic().empty()) {
-                            ImGui::TextWrapped("%s", sh->Diagnostic().c_str());
-                        }
-                        if (ImGui::Button("Reload"))
-                            sh->Reload();
-                        const GLuint prog = sh->Id();
-                        GLint uniform_count = 0;
-                        glGetProgramiv(prog, GL_ACTIVE_UNIFORMS, &uniform_count);
-                        for (GLint u = 0; u < uniform_count; ++u) {
-                            char uname[128];
-                            GLsizei ulen = 0;
-                            GLint usize = 0;
-                            GLenum utype = 0;
-                            glGetActiveUniform(prog,
-                                               static_cast<GLuint>(u),
-                                               sizeof(uname),
-                                               &ulen,
-                                               &usize,
-                                               &utype,
-                                               uname);
-                            if (usize != 1)
-                                continue; // arrays: not editable here
-                            const GLint loc = glGetUniformLocation(prog, uname);
-                            if (loc < 0)
-                                continue;
-                            ImGui::PushID(u);
-                            const bool looks_color =
-                                std::string_view(uname).find("olor") != std::string_view::npos;
-                            switch (utype) {
-                                case GL_FLOAT: {
-                                    float v = 0.0f;
-                                    glGetUniformfv(prog, loc, &v);
-                                    if (ImGui::DragFloat(uname, &v, 0.01f))
-                                        glProgramUniform1f(prog, loc, v);
-                                    break;
-                                }
-                                case GL_FLOAT_VEC2: {
-                                    float v[2] = {};
-                                    glGetUniformfv(prog, loc, v);
-                                    if (ImGui::DragFloat2(uname, v, 0.01f))
-                                        glProgramUniform2fv(prog, loc, 1, v);
-                                    break;
-                                }
-                                case GL_FLOAT_VEC3: {
-                                    float v[3] = {};
-                                    glGetUniformfv(prog, loc, v);
-                                    const bool edited =
-                                        looks_color
-                                            ? ImGui::ColorEdit3(uname, v, ImGuiColorEditFlags_Float)
-                                            : ImGui::DragFloat3(uname, v, 0.01f);
-                                    if (edited)
-                                        glProgramUniform3fv(prog, loc, 1, v);
-                                    break;
-                                }
-                                case GL_FLOAT_VEC4: {
-                                    float v[4] = {};
-                                    glGetUniformfv(prog, loc, v);
-                                    const bool edited =
-                                        looks_color
-                                            ? ImGui::ColorEdit4(uname, v, ImGuiColorEditFlags_Float)
-                                            : ImGui::DragFloat4(uname, v, 0.01f);
-                                    if (edited)
-                                        glProgramUniform4fv(prog, loc, 1, v);
-                                    break;
-                                }
-                                case GL_INT: {
-                                    GLint v = 0;
-                                    glGetUniformiv(prog, loc, &v);
-                                    if (ImGui::DragInt(uname, &v))
-                                        glProgramUniform1i(prog, loc, v);
-                                    break;
-                                }
-                                case GL_BOOL: {
-                                    GLint v = 0;
-                                    glGetUniformiv(prog, loc, &v);
-                                    bool b = v != 0;
-                                    if (ImGui::Checkbox(uname, &b))
-                                        glProgramUniform1i(prog, loc, b ? 1 : 0);
-                                    break;
-                                }
-                                default:
-                                    break; // samplers/matrices: display-only, skip
-                            }
-                            ImGui::PopID();
-                        }
-                    }
-                    ImGui::PopID();
-                });
-            }
-            ImGui::End();
-        }
     }
 }
 
-void DrawSettingsWindow(ClientAppContext& app,
-                        GLFWwindow* window,
-                        Luminumbra::Rendering::Camera* camera,
-                        Luminumbra::Client::IAudioManager* audioManager,
-                        luminumbra::core::SystemConfig& systemConfig,
-                        WindowState& windowState) {
-    // Settings menu ( to toggle; frees the cursor). Render-only; user.* is never
-    // hashed. Changes apply live and "Save" persists them to the per-user overlay.
-    // The polished RML settings screen (settings.rml) is the follow-on.
-    if (app.overlay.imgui_enabled && app.hud.show_settings && camera &&
-        app.capture.timelapse_frames == 0) {
-        ImGui::SetNextWindowSize(ImVec2(340, 0), ImGuiCond_FirstUseEver);
-        if (ImGui::Begin("Settings ")) {
-            luminumbra::core::UserSettings& us = systemConfig.user();
-            if (ImGui::SliderFloat(
-                    "Look sensitivity", &us.mouse_sensitivity, 0.01f, 1.0f, "%.3f")) {
-                camera->MouseSensitivity = us.mouse_sensitivity; // applied live
+void DrawShaderContents(ClientAppContext& app,
+                        Luminumbra::Rendering::RenderPipeline& renderPipeline,
+                        Debug::DeveloperConsole& console) {
+    ImGui::TextWrapped("Live shader authoring: edit res/shaders/ in any editor, "
+                       "reload hot-swaps rollback-safe. Uniform edits persist only for "
+                       "uniforms a pass does not re-set per frame (u_dev_* convention).");
+    if (ImGui::Button("Reload all"))
+        console.Submit("shader reload all");
+    ImGui::SameLine();
+    bool watch = app.overlay.shader_auto_reload;
+    if (ImGui::Checkbox("Auto-reload on file change", &watch))
+        console.Submit(watch ? "shader watch true" : "shader watch false");
+    ImGui::Separator();
+    renderPipeline.enumerate_shaders([&](const char* sh_name, Luminumbra::Rendering::Shader* sh) {
+        if (!sh)
+            return;
+        ImGui::PushID(sh_name);
+        if (ImGui::CollapsingHeader(sh_name)) {
+            const bool sh_ok = sh->IsValid();
+            ImGui::TextColored(sh_ok ? ImVec4(0.70f, 0.85f, 0.70f, 1.0f)
+                                     : ImVec4(1.0f, 0.45f, 0.45f, 1.0f),
+                               sh_ok ? "valid" : "INVALID (prior program kept)");
+            if (!sh->Diagnostic().empty()) {
+                ImGui::TextWrapped("%s", sh->Diagnostic().c_str());
             }
-            if (ImGui::SliderFloat("FOV", &us.fov, 30.0f, 110.0f, "%.0f deg")) {
-                camera->Zoom = us.fov;
-            }
-            ImGui::Checkbox("VSync", &us.vsync);
-            const char* cap_labels[] = {"Unlimited", "30", "60", "120", "144", "165", "240"};
-            static_assert(std::size(cap_labels) == std::size(luminumbra::core::kFrameCaps));
-            constexpr int cap_count = static_cast<int>(std::size(luminumbra::core::kFrameCaps));
-            int selected_cap = 0;
-            for (int i = 0; i < cap_count; ++i) {
-                if (us.frame_cap == luminumbra::core::kFrameCaps[i])
-                    selected_cap = i;
-            }
-            if (ImGui::Combo("Frame cap", &selected_cap, cap_labels, cap_count))
-                us.frame_cap = luminumbra::core::kFrameCaps[selected_cap];
-            ImGui::Separator();
-            ImGui::SliderFloat("Time scale", &app.capture.timeScale, 0.0f, 8.0f, "%.2fx");
-            ImGui::SameLine();
-            if (ImGui::SmallButton("1x"))
-                app.capture.timeScale = 1.0f;
-            ImGui::SameLine();
-            if (ImGui::SmallButton(app.capture.timeScale == 0.0f ? "Resume" : "Pause"))
-                app.capture.timeScale = (app.capture.timeScale == 0.0f) ? 1.0f : 0.0f;
-            ImGui::TextDisabled("engine time: [ slower   ] faster   \\ reset");
-            ImGui::Separator();
-            {
-                // Window mode — applied live via ApplyWindowMode (no-op on capture-pinned
-                // runs).
-                const char* modes[] = {"windowed", "borderless", "fullscreen"};
-                int cur = 1; // default borderless
-                for (int i = 0; i < 3; ++i)
-                    if (us.window_mode == modes[i])
-                        cur = i;
-                if (ImGui::Combo("Window mode", &cur, modes, 3)) {
-                    us.window_mode = modes[cur];
-                    const WindowMode m = ParseWindowMode(us.window_mode, windowState.mode);
-                    ApplyWindowMode(window, windowState, m);
-                }
-            }
-            {
-                // Resolution — applied live in windowed mode (borderless/fullscreen use
-                // the monitor's resolution); suppressed on capture-pinned gate runs.
-                const char* resos[] = {
-                    "1280x720", "1920x1080", "2560x1440", "3440x1440", "3840x1600", "3840x2160"};
-                int rcur = -1;
-                for (int i = 0; i < 6; ++i)
-                    if (us.resolution == resos[i])
-                        rcur = i;
-                if (ImGui::Combo("Resolution", &rcur, resos, 6) && rcur >= 0) {
-                    us.resolution = resos[rcur];
-                    const std::string& r = us.resolution;
-                    const auto xp = r.find('x');
-                    if (xp != std::string::npos) {
-                        const int rw = std::atoi(r.substr(0, xp).c_str());
-                        const int rh = std::atoi(r.substr(xp + 1).c_str());
-                        if (rw > 0 && rh > 0) {
-                            windowState.windowedWidth = rw;
-                            windowState.windowedHeight = rh;
-                            if (us.window_mode == "windowed" && !windowState.capture_pinned)
-                                glfwSetWindowSize(window, rw, rh);
-                        }
+            if (ImGui::Button("Reload"))
+                console.Commands().Dispatch("shader reload", {std::string(sh_name)});
+            const GLuint prog = sh->Id();
+            GLint uniform_count = 0;
+            glGetProgramiv(prog, GL_ACTIVE_UNIFORMS, &uniform_count);
+            for (GLint u = 0; u < uniform_count; ++u) {
+                char uname[128];
+                GLsizei ulen = 0;
+                GLint usize = 0;
+                GLenum utype = 0;
+                glGetActiveUniform(
+                    prog, static_cast<GLuint>(u), sizeof(uname), &ulen, &usize, &utype, uname);
+                if (usize != 1)
+                    continue; // arrays: not editable here
+                const GLint loc = glGetUniformLocation(prog, uname);
+                if (loc < 0)
+                    continue;
+                ImGui::PushID(u);
+                const bool looks_color =
+                    std::string_view(uname).find("olor") != std::string_view::npos;
+                switch (utype) {
+                    case GL_FLOAT: {
+                        float v = 0.0f;
+                        glGetUniformfv(prog, loc, &v);
+                        if (ImGui::DragFloat(uname, &v, 0.01f))
+                            glProgramUniform1f(prog, loc, v);
+                        break;
                     }
+                    case GL_FLOAT_VEC2: {
+                        float v[2] = {};
+                        glGetUniformfv(prog, loc, v);
+                        if (ImGui::DragFloat2(uname, v, 0.01f))
+                            glProgramUniform2fv(prog, loc, 1, v);
+                        break;
+                    }
+                    case GL_FLOAT_VEC3: {
+                        float v[3] = {};
+                        glGetUniformfv(prog, loc, v);
+                        const bool edited =
+                            looks_color ? ImGui::ColorEdit3(uname, v, ImGuiColorEditFlags_Float)
+                                        : ImGui::DragFloat3(uname, v, 0.01f);
+                        if (edited)
+                            glProgramUniform3fv(prog, loc, 1, v);
+                        break;
+                    }
+                    case GL_FLOAT_VEC4: {
+                        float v[4] = {};
+                        glGetUniformfv(prog, loc, v);
+                        const bool edited =
+                            looks_color ? ImGui::ColorEdit4(uname, v, ImGuiColorEditFlags_Float)
+                                        : ImGui::DragFloat4(uname, v, 0.01f);
+                        if (edited)
+                            glProgramUniform4fv(prog, loc, 1, v);
+                        break;
+                    }
+                    case GL_INT: {
+                        GLint v = 0;
+                        glGetUniformiv(prog, loc, &v);
+                        if (ImGui::DragInt(uname, &v))
+                            glProgramUniform1i(prog, loc, v);
+                        break;
+                    }
+                    case GL_BOOL: {
+                        GLint v = 0;
+                        glGetUniformiv(prog, loc, &v);
+                        bool b = v != 0;
+                        if (ImGui::Checkbox(uname, &b))
+                            glProgramUniform1i(prog, loc, b ? 1 : 0);
+                        break;
+                    }
+                    default:
+                        break; // samplers/matrices: display-only, skip
                 }
+                ImGui::PopID();
             }
-            const bool audio_disabled = audioManager && !audioManager->IsPlaybackEnabled();
-            ImGui::TextWrapped(audio_disabled ? "Audio playback disabled or unavailable."
-                               : audioManager ? "Experimental audio enabled."
-                                              : "Saved audio levels.");
-            ImGui::BeginDisabled(audio_disabled);
-            if (ImGui::SliderFloat("Master volume", &us.audio_master, 0.0f, 1.0f, "%.2f")) {
-                if (audioManager)
-                    audioManager->SetMasterVolume(us.audio_master); // applied live
-            }
-            if (ImGui::SliderFloat("Music volume", &us.audio_music, 0.0f, 1.0f, "%.2f")) {
-                if (audioManager)
-                    audioManager->SetMusicVolume(us.audio_music); // applied live (music bus)
-            }
-            if (ImGui::SliderFloat("SFX volume", &us.audio_sfx, 0.0f, 1.0f, "%.2f")) {
-                if (audioManager)
-                    audioManager->SetSfxVolume(us.audio_sfx); // applied live (sfx bus)
-            }
-            ImGui::EndDisabled();
-            if (ImGui::CollapsingHeader("Controls (keyboard)")) {
-                for (const auto& def : Luminumbra::Client::kInputActionDefs) {
-                    const int idx = static_cast<int>(def.action);
-                    const int kc = systemConfig.keybind(def.name, def.default_key);
-                    const char* kn = glfwGetKeyName(kc, 0);
-                    char btn[48];
-                    if (app.hud.rebindCaptureAction == idx)
-                        std::snprintf(btn, sizeof(btn), "press a key...##%s", def.name);
-                    else if (kn)
-                        std::snprintf(btn, sizeof(btn), "%s##%s", kn, def.name);
-                    else
-                        std::snprintf(btn, sizeof(btn), "key %d##%s", kc, def.name);
-                    ImGui::Text("%-12s", def.name);
-                    ImGui::SameLine(150);
-                    if (ImGui::Button(btn))
-                        app.hud.rebindCaptureAction = idx;
-                }
-                ImGui::TextDisabled("click a binding, then press a key (Esc cancels)");
-            }
-            if (ImGui::Button("Save settings")) {
-                const std::string path = luminumbra::core::SystemConfig::DefaultUserOverlayPath();
-                const bool ok = systemConfig.SaveUserOverlay(path);
-                LUMINUMBRA_CORE_INFO("Settings {} ({})", ok ? "saved" : "save FAILED", path);
-            }
-            ImGui::TextDisabled("user.* — client-only, never hashed");
         }
-        ImGui::End();
+        ImGui::PopID();
+    });
+}
+
+void DrawSettingsContents(ClientAppContext& app,
+                          GLFWwindow* window,
+                          Luminumbra::Rendering::Camera* camera,
+                          Luminumbra::Client::IAudioManager* audioManager,
+                          luminumbra::core::SystemConfig& systemConfig,
+                          WindowState& windowState,
+                          Debug::DeveloperConsole& console) {
+    luminumbra::core::UserSettings& us = systemConfig.user();
+    if (ImGui::SliderFloat("Look sensitivity", &us.mouse_sensitivity, 0.01f, 1.0f, "%.3f")) {
+        camera->MouseSensitivity = us.mouse_sensitivity; // applied live
+    }
+    if (ImGui::SliderFloat("FOV", &us.fov, 30.0f, 110.0f, "%.0f deg")) {
+        camera->Zoom = us.fov;
+    }
+    ImGui::Checkbox("VSync", &us.vsync);
+    const char* cap_labels[] = {"Unlimited", "30", "60", "120", "144", "165", "240"};
+    static_assert(std::size(cap_labels) == std::size(luminumbra::core::kFrameCaps));
+    constexpr int cap_count = static_cast<int>(std::size(luminumbra::core::kFrameCaps));
+    int selected_cap = 0;
+    for (int i = 0; i < cap_count; ++i) {
+        if (us.frame_cap == luminumbra::core::kFrameCaps[i])
+            selected_cap = i;
+    }
+    if (ImGui::Combo("Frame cap", &selected_cap, cap_labels, cap_count))
+        us.frame_cap = luminumbra::core::kFrameCaps[selected_cap];
+    ImGui::Separator();
+    {
+        // Window mode — applied live via ApplyWindowMode (no-op on capture-pinned
+        // runs).
+        const char* modes[] = {"windowed", "borderless", "fullscreen"};
+        int cur = 1; // default borderless
+        for (int i = 0; i < 3; ++i)
+            if (us.window_mode == modes[i])
+                cur = i;
+        if (ImGui::Combo("Window mode", &cur, modes, 3)) {
+            us.window_mode = modes[cur];
+            const WindowMode m = ParseWindowMode(us.window_mode, windowState.mode);
+            ApplyWindowMode(window, windowState, m);
+        }
+    }
+    {
+        // Resolution — applied live in windowed mode (borderless/fullscreen use
+        // the monitor's resolution); suppressed on capture-pinned gate runs.
+        const char* resos[] = {
+            "1280x720", "1920x1080", "2560x1440", "3440x1440", "3840x1600", "3840x2160"};
+        int rcur = -1;
+        for (int i = 0; i < 6; ++i)
+            if (us.resolution == resos[i])
+                rcur = i;
+        if (ImGui::Combo("Resolution", &rcur, resos, 6) && rcur >= 0) {
+            us.resolution = resos[rcur];
+            const std::string& r = us.resolution;
+            const auto xp = r.find('x');
+            if (xp != std::string::npos) {
+                const int rw = std::atoi(r.substr(0, xp).c_str());
+                const int rh = std::atoi(r.substr(xp + 1).c_str());
+                if (rw > 0 && rh > 0) {
+                    windowState.windowedWidth = rw;
+                    windowState.windowedHeight = rh;
+                    if (us.window_mode == "windowed" && !windowState.capture_pinned)
+                        glfwSetWindowSize(window, rw, rh);
+                }
+            }
+        }
+    }
+    const bool audio_disabled = audioManager && !audioManager->IsPlaybackEnabled();
+    ImGui::TextWrapped(audio_disabled ? "Audio playback disabled or unavailable."
+                       : audioManager ? "Experimental audio enabled."
+                                      : "Saved audio levels.");
+    ImGui::BeginDisabled(audio_disabled);
+    if (ImGui::SliderFloat("Master volume", &us.audio_master, 0.0f, 1.0f, "%.2f")) {
+        if (audioManager)
+            audioManager->SetMasterVolume(us.audio_master); // applied live
+    }
+    if (ImGui::SliderFloat("Music volume", &us.audio_music, 0.0f, 1.0f, "%.2f")) {
+        if (audioManager)
+            audioManager->SetMusicVolume(us.audio_music); // applied live (music bus)
+    }
+    if (ImGui::SliderFloat("SFX volume", &us.audio_sfx, 0.0f, 1.0f, "%.2f")) {
+        if (audioManager)
+            audioManager->SetSfxVolume(us.audio_sfx); // applied live (sfx bus)
+    }
+    ImGui::EndDisabled();
+    if (ImGui::CollapsingHeader("Controls (keyboard)")) {
+        for (const auto& def : Luminumbra::Client::kInputActionDefs) {
+            const int idx = static_cast<int>(def.action);
+            const int kc = systemConfig.keybind(def.name, def.default_key);
+            const char* kn = glfwGetKeyName(kc, 0);
+            char btn[48];
+            if (app.hud.rebindCaptureAction == idx)
+                std::snprintf(btn, sizeof(btn), "press a key...##%s", def.name);
+            else if (kn)
+                std::snprintf(btn, sizeof(btn), "%s##%s", kn, def.name);
+            else
+                std::snprintf(btn, sizeof(btn), "key %d##%s", kc, def.name);
+            ImGui::Text("%-12s", def.name);
+            ImGui::SameLine(150);
+            if (ImGui::Button(btn))
+                app.hud.rebindCaptureAction = idx;
+        }
+        ImGui::TextDisabled("click a binding, then press a key (Esc cancels)");
+        if (ImGui::Button("Developer bindings and hotkey help"))
+            console.SetOpen(true);
+    }
+    if (ImGui::Button("Save settings")) {
+        const std::string path = luminumbra::core::SystemConfig::DefaultUserOverlayPath();
+        const bool ok = systemConfig.SaveUserOverlay(path);
+        LUMINUMBRA_CORE_INFO("Settings {} ({})", ok ? "saved" : "save FAILED", path);
+    }
+    ImGui::TextDisabled("user.* — client-only, never hashed");
+    bool perf = console.Widgets().Visible("perf.hud");
+    if (ImGui::Checkbox("Performance HUD", &perf))
+        console.Widgets().SetVisible("perf.hud", perf);
+    if (ImGui::Button("Open developer console"))
+        console.SetOpen(true);
+    if (ImGui::CollapsingHeader("Resolved shortcuts")) {
+        const auto help = console.HelpText();
+        ImGui::TextUnformatted(help.c_str());
     }
 }
 
