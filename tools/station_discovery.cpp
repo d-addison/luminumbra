@@ -7,12 +7,14 @@
 #include <cfenv>
 #include <charconv>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <exception>
 #include <filesystem>
 #include <fstream>
+#include <iosfwd>
 #include <iostream>
-#include <iterator>
 #include <limits>
 #include <map>
 #include <memory>
@@ -30,8 +32,13 @@
 
 #include <FastSIMD/FastSIMD.h>
 #include <nlohmann/json.hpp>
+#include <nlohmann/json_fwd.hpp>
+#include <spdlog/common.h>
+#include <spdlog/details/log_msg.h>
+#include <spdlog/logger.h>
 #include <spdlog/sinks/base_sink.h>
 #include <spdlog/sinks/stdout_color_sinks.h>
+#include <spdlog/spdlog.h>
 
 #if defined(__x86_64__) || defined(_M_X64)
 #include <xmmintrin.h>
@@ -39,7 +46,6 @@
 
 #include "core/BoundedConsoleSink.h"
 #include "core/FilesystemPath.h"
-#include "core/Log.h"
 #include "systems/SHIELD_WorldSystem.h"
 #include "world/BiomeTable.h"
 #include "world/StationDiscovery.h"
@@ -163,31 +169,57 @@ Options ParseOptions(int argc, ArgumentChar** argv) {
     return options;
 }
 
-std::string ReadBytes(const fs::path& path) {
+// Bound each file to 1 MiB and each snapshot (preset plus dependencies) to 8 MiB.
+// Two simultaneous snapshots plus the initial preset retain at most 17 MiB of bytes.
+constexpr std::size_t kInputFileByteLimit = std::size_t{1024} * 1024;
+constexpr std::size_t kInputSnapshotByteLimit = 8 * kInputFileByteLimit;
+struct InputByteBudget {
+    std::size_t remaining = kInputSnapshotByteLimit;
+};
+class InputLimitError final : public std::runtime_error {
+public:
+    using std::runtime_error::runtime_error;
+};
+
+std::string ReadBytes(const fs::path& path, InputByteBudget& budget) {
     if (!fs::is_regular_file(fs::symlink_status(path))) {
         throw std::runtime_error("input is missing, nonregular or a symlink: " + path.string());
     }
-    std::ifstream input(path, std::ios::binary);
+    // Measure through the opened stream, before allocating; recheck for growth below.
+    std::ifstream input(path, std::ios::binary | std::ios::ate);
     if (!input) {
         throw std::runtime_error("cannot open input: " + path.string());
     }
-    const std::string bytes{std::istreambuf_iterator<char>(input),
-                            std::istreambuf_iterator<char>()};
-    if (input.bad()) {
-        throw std::runtime_error("cannot read input: " + path.string());
+    const auto end = input.tellg();
+    if (end < std::streampos(0)) {
+        throw std::runtime_error("cannot measure input: " + GenericUtf8PathString(path));
+    }
+    const auto size = static_cast<std::uintmax_t>(static_cast<std::streamoff>(end));
+    if (size > kInputFileByteLimit) {
+        throw InputLimitError("per-file byte limit exceeded (1048576 bytes): " +
+                              GenericUtf8PathString(path));
+    }
+    if (size > budget.remaining) {
+        throw InputLimitError("aggregate byte limit exceeded (8388608 bytes): " +
+                              GenericUtf8PathString(path));
+    }
+    // Both comparisons precede narrowing, subtraction and allocation.
+    const auto count = static_cast<std::size_t>(size);
+    budget.remaining -= count;
+    std::string bytes(count, '\0');
+    input.seekg(0);
+    input.read(bytes.data(), static_cast<std::streamsize>(count));
+    if (!input || input.peek() != std::char_traits<char>::eof() || input.bad()) {
+        throw std::runtime_error("input unreadable or changed size while reading: " +
+                                 GenericUtf8PathString(path));
     }
     return bytes;
 }
-void CheckNumbers(const json& value) {
+void CheckNumber(const json& value) {
     if (value.is_number()) {
         const double number = value.get<double>();
         if (!std::isfinite(number) || std::abs(number) > std::numeric_limits<float>::max()) {
             throw std::runtime_error("nonfinite or unsupported input number");
-        }
-    }
-    if (value.is_structured()) {
-        for (const auto& child : value) {
-            CheckNumbers(child);
         }
     }
 }
@@ -205,12 +237,12 @@ json StrictJson(const std::string& bytes) {
             }
         } else if (event == json::parse_event_t::object_end) {
             keys.pop_back();
+        } else if (event == json::parse_event_t::value) {
+            CheckNumber(parsed);
         }
         return true;
     };
-    json value = json::parse(bytes, callback);
-    CheckNumbers(value);
-    return value;
+    return json::parse(bytes, callback);
 }
 
 void CheckIntegerField(const json& object,
@@ -279,16 +311,16 @@ void CheckHydroDomain(const Options& options, const Luminumbra::Systems::Terrain
         params.hydro_iterations > 512) {
         throw std::runtime_error("hydro cell size or iterations outside supported domain");
     }
-    for (float value : {params.hydro_talus_height,
-                        params.hydro_rain_per_sweep,
-                        params.hydro_solubility,
-                        params.hydro_sediment_capacity,
-                        params.hydro_max_offset}) {
+    for (const float value : {params.hydro_talus_height,
+                              params.hydro_rain_per_sweep,
+                              params.hydro_solubility,
+                              params.hydro_sediment_capacity,
+                              params.hydro_max_offset}) {
         if (!std::isfinite(value) || value < 0) {
             throw std::runtime_error("hydro parameter must be finite and nonnegative");
         }
     }
-    for (float value :
+    for (const float value :
          {params.hydro_thermal_rate, params.hydro_deposition, params.hydro_evaporation}) {
         if (!std::isfinite(value) || value < 0 || value > 1) {
             throw std::runtime_error("hydro rate outside finite unit interval");
@@ -468,10 +500,11 @@ using Snapshot = std::map<std::string, std::string>;
 // Inspect only resolved selectors here: the preset loader itself consumes
 // dependencies, so their bytes and integer domains must be checked before it runs.
 Snapshot CaptureInputs(const Options& options, const json& resolved_preset) {
-    Snapshot files{{"preset.json", ReadBytes(options.preset)}};
-    const auto capture = [&files, &options](const fs::path& relative) {
+    InputByteBudget budget;
+    Snapshot files{{"preset.json", ReadBytes(options.preset, budget)}};
+    const auto capture = [&files, &options, &budget](const fs::path& relative) {
         files.emplace("data/" + GenericUtf8PathString(relative),
-                      ReadBytes(DependencyPath(options.data_root, relative)));
+                      ReadBytes(DependencyPath(options.data_root, relative), budget));
     };
     const auto& generation = resolved_preset.at("generation_params");
     const auto table = generation.at("biomes").at("table").get<std::string>();
@@ -663,7 +696,8 @@ int main(int argc, char** argv) {
         if (!fs::is_directory(options.data_root)) {
             throw std::runtime_error("data root must be a directory");
         }
-        const auto preset_bytes = ReadBytes(options.preset);
+        InputByteBudget preset_budget;
+        const auto preset_bytes = ReadBytes(options.preset, preset_budget);
         const auto preset = StrictJson(preset_bytes);
         if (!preset.is_object()) {
             throw std::runtime_error("preset must be an object");
@@ -687,7 +721,7 @@ int main(int argc, char** argv) {
             throw std::runtime_error("unsupported terrain query parameters");
         }
         ValidateDependencies(options, params, files);
-        Luminumbra::Systems::SHIELD_WorldSystem world(nullptr, nullptr, params, options.seed);
+        const Luminumbra::Systems::SHIELD_WorldSystem world(nullptr, nullptr, params, options.seed);
         const auto result = DiscoverStations(world, options.query);
         if (!result.ok) {
             throw std::runtime_error(result.error);
@@ -709,6 +743,9 @@ int main(int argc, char** argv) {
     } catch (const UsageError& error) {
         std::cerr << "station discovery usage: " << error.what() << '\n';
         return 2;
+    } catch (const InputLimitError& error) {
+        std::cerr << "station discovery refused: input-limit: " << error.what() << '\n';
+        return 1;
     } catch (const std::exception& error) {
         std::cerr << "station discovery refused: " << error.what() << '\n';
         return 1;

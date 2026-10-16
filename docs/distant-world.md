@@ -578,6 +578,9 @@ digests. The preset is `preset.json`;
 consumed biome and structure inputs use `data/<relative-name>`. Structure inputs
 include optional placement files and every consumed piece in each type directory.
 Absolute paths, timestamps, timings and session content identities are excluded.
+Each input file is limited to 1048576 bytes and each snapshot (preset plus
+dependencies) to 8388608 bytes, checked before allocating file contents.
+Exceeding either byte limit exits 1 with an `input-limit` refusal and empty stdout.
 Dependency bytes and structure integer domains are validated before the preset
 loader can consume them. Their names/bytes are checked again after discovery;
 observable changes refuse the whole result.

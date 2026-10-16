@@ -428,6 +428,104 @@ class NativeSmoke(unittest.TestCase):
                         "persistence": 0.5, "lacunarity": 2, "height_offset": 0},
             "features": {"caves_enabled": False, "cave_frequency": 0.02}}}
 
+    def test_input_file_byte_limit_includes_preset_and_every_dependency_kind(self):
+        file_limit = 1024 * 1024
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            data = root / "data"
+            pool = data / "common" / "structures" / "fixture"
+            pool.mkdir(parents=True)
+            table = data / "common" / "biomes.json"
+            piece = pool / "piece.json"
+            placement = pool / "placement.json"
+            preset = root / "flat.json"
+            fields = self.flat_preset()
+            fields["generation_params"]["biomes"] = {"table": "common/biomes.json"}
+            fields["generation_params"]["features"]["structures_enabled"] = True
+            inputs = {
+                preset: contract.canonical(fields),
+                table: contract.canonical({"schema": "luminumbra.biome_table.v1", "biomes": [
+                    {"id": 0, "name": "fixture", "surface": {
+                        "top": "Grass", "filler": "Soil", "depth": "Stone", "underwater": "Sand"}}]}),
+                piece: contract.canonical({"name": "fixture", "boxes": [
+                    {"min": [0, 0, 0], "size": [1, 1, 1], "material": 1}]}),
+                placement: contract.canonical({"spacing": 64, "separation": 16, "density": 1}),
+            }
+            for path, raw in inputs.items():
+                path.write_bytes(raw)
+            command = [self.cli, "--preset-json", str(preset), "--data-root", str(data),
+                       "--seed", "17", "--kind", "mouth", "--origin-mm", "0", "0",
+                       "--radius-m", "1", "--y-range-m", "0", "100",
+                       "--view-distance-m", "0", "--limit", "64"]
+            for path, raw in inputs.items():
+                with self.subTest(input=path.name):
+                    padded = raw + b" " * (file_limit - len(raw))
+                    path.write_bytes(padded)
+                    accepted = subprocess.run(command, capture_output=True, check=False)
+                    self.assertEqual(accepted.returncode, 0, accepted.stderr)
+                    manifest = {"preset.json" if item == preset else
+                                "data/" + item.relative_to(data).as_posix(): item.read_bytes()
+                                for item in inputs}
+                    contract.validate(contract.loads(accepted.stdout),
+                                      expected_inputs_sha256=contract.input_identity(manifest))
+                    # A sparse oversized input is refused by its size, before JSON parsing.
+                    with path.open("wb") as output:
+                        output.truncate(file_limit + 1)
+                    refused = subprocess.run(command, capture_output=True, check=False)
+                    self.assertEqual(refused.returncode, 1, refused.stderr)
+                    self.assertEqual(refused.stdout, b"")
+                    self.assertIn(b"input-limit: per-file byte limit exceeded", refused.stderr)
+                    path.write_bytes(raw)
+
+    def test_aggregate_input_byte_limit_is_inclusive(self):
+        file_limit = 1024 * 1024
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            data = root / "data"
+            pool = data / "common" / "structures" / "fixture"
+            pool.mkdir(parents=True)
+            preset = root / "flat.json"
+            fields = self.flat_preset()
+            fields["generation_params"]["features"]["structures_enabled"] = True
+            inputs = {preset: contract.canonical(fields)}
+            for index in range(7):
+                inputs[pool / ("piece-%d.json" % index)] = contract.canonical({
+                    "name": "piece-%d" % index, "boxes": [
+                        {"min": [0, 0, 0], "size": [1, 1, 1], "material": 1}]})
+            for path, raw in inputs.items():
+                path.write_bytes(raw + b" " * (file_limit - len(raw)))
+            command = [self.cli, "--preset-json", str(preset), "--data-root", str(data),
+                       "--seed", "17", "--kind", "mouth", "--origin-mm", "0", "0",
+                       "--radius-m", "1", "--y-range-m", "0", "100",
+                       "--view-distance-m", "0", "--limit", "64"]
+            accepted = subprocess.run(command, capture_output=True, check=False)
+            self.assertEqual(accepted.returncode, 0, accepted.stderr)
+            # Exactly 8 MiB succeeds; one additional byte must beat even invalid JSON.
+            (pool / "extra.json").write_bytes(b" ")
+            refused = subprocess.run(command, capture_output=True, check=False)
+            self.assertEqual(refused.returncode, 1, refused.stderr)
+            self.assertEqual(refused.stdout, b"")
+            self.assertIn(b"input-limit: aggregate byte limit exceeded", refused.stderr)
+
+    def test_input_number_range_is_checked_at_every_json_depth(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            data = root / "data"
+            data.mkdir()
+            preset = root / "input.json"
+            command = [self.cli, "--preset-json", str(preset), "--data-root", str(data),
+                       "--seed", "17", "--kind", "mouth", "--origin-mm", "0", "0",
+                       "--radius-m", "1", "--y-range-m", "0", "100",
+                       "--view-distance-m", "0", "--limit", "64"]
+            for raw in (b'1e39', b'{"ignored":1e39}', b'{"ignored":[{"value":-1e39}]}',
+                        b'[{"value":1e39}]'):
+                with self.subTest(raw=raw):
+                    preset.write_bytes(raw)
+                    refused = subprocess.run(command, capture_output=True, check=False)
+                    self.assertEqual(refused.returncode, 1, refused.stderr)
+                    self.assertEqual(refused.stdout, b"")
+                    self.assertIn(b"nonfinite or unsupported input number", refused.stderr)
+
     def test_native_unicode_input_paths(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary) / "\u96ea station \U0001f30d"
