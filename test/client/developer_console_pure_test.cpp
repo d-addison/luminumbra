@@ -218,6 +218,8 @@ TEST(DeveloperBindings, KeyChordParsingFormattingAndInvalidValues) {
     for (const auto& text : {"F1", "Ctrl+F12", "Shift+Alt+A", "[", "\\", "Space", "Ctrl+320"}) {
         const auto chord = ParseKeyChord(text);
         ASSERT_TRUE(chord.has_value()) << text;
+        if (!chord.has_value())
+            return;
         EXPECT_EQ(ParseKeyChord(FormatKeyChord(chord)), chord);
     }
     for (const auto& text :
@@ -302,6 +304,8 @@ void ExpectGameplayModifierCapture(int actionIndex, int key) {
     int pendingAction = actionIndex;
     const auto captured = CaptureGameplayBinding(pendingAction, key, 1);
     ASSERT_TRUE(captured.has_value());
+    if (!captured.has_value())
+        return;
     EXPECT_EQ(captured->actionIndex, actionIndex);
     EXPECT_EQ(captured->key, key);
     EXPECT_EQ(pendingAction, -1);
@@ -378,6 +382,8 @@ TEST_F(ConsoleFixture, TextButtonsAndBindingsDispatchTheSameOperation) {
     EXPECT_FALSE(console.Widgets().Visible("perf.gpu"));
     const auto match = console.Bindings().Match({292, 0}, 1, Gameplay);
     ASSERT_TRUE(match.has_value());
+    if (!match.has_value())
+        return;
     console.InvokeAction(*match);
     EXPECT_TRUE(console.Widgets().Visible("perf.gpu"));
     EXPECT_TRUE(console.Submit("help \"time scale\"").message.find("time scale") !=
@@ -527,6 +533,95 @@ UiInputOwnership World() {
     UiInputOwnership state;
     state.in_world = true;
     return state;
+}
+
+void ExpectGlobalShortcut(DeveloperConsole& console, UiInputRouter& router, const char* id) {
+    const auto chord = console.Bindings().Get(id);
+    ASSERT_TRUE(chord.has_value());
+    if (!chord.has_value())
+        return;
+    const unsigned scope = router.WorldShortcutsAllowed() ? Gameplay : Global;
+    const auto matched = console.Bindings().Match(*chord, 1, scope);
+    ASSERT_TRUE(matched.has_value());
+    if (!matched.has_value())
+        return;
+    EXPECT_EQ(*matched, id);
+    ASSERT_EQ(router.Key(chord->key, 1, false, true), KeyRoute::DeveloperShortcut);
+    EXPECT_TRUE(console.InvokeAction(*matched).success);
+    EXPECT_TRUE(console.Widgets().Visible(id));
+    EXPECT_EQ(router.Character('x'), InputOwner::Unfocused);
+    EXPECT_EQ(router.Key(chord->key, 2, false, true), KeyRoute::Ignore);
+    router.Key(chord->key, 0, false, false);
+    ASSERT_EQ(router.Key(chord->key, 1, false, true), KeyRoute::DeveloperShortcut);
+    EXPECT_TRUE(console.InvokeAction(*matched).success);
+    EXPECT_FALSE(console.Widgets().Visible(id));
+    router.Key(chord->key, 0, false, false);
+}
+
+TEST_F(ConsoleFixture, GlobalShortcutsOpenAndClosePanelsFromMenusAndPausedScreens) {
+    // Main menu, focused menu control, and an in-world pause screen.
+    for (const int screen : {0, 1, 2}) {
+        UiInputRouter router;
+        UiInputOwnership state;
+        state.in_world = screen == 2;
+        state.rml_interaction = screen != 0;
+        router.SetOwnership(state);
+        EXPECT_EQ(router.Owner(), InputOwner::RmlUi);
+        EXPECT_FALSE(router.WorldShortcutsAllowed());
+        for (const auto* id : {"world.generation", "perf.gpu"})
+            ExpectGlobalShortcut(console, router, id);
+        for (const int key : {91, 93, 92}) {
+            const auto shortcut = console.Bindings().Match({key, 0}, 1, Global);
+            EXPECT_FALSE(shortcut.has_value());
+            EXPECT_EQ(router.Key(key, 1, false, shortcut.has_value()), KeyRoute::RmlUi);
+            router.Key(key, 0, false, false);
+        }
+        EXPECT_EQ(router.Key(65, 1, false, false), KeyRoute::RmlUi);
+        EXPECT_EQ(router.Character('a'), InputOwner::RmlUi);
+        EXPECT_FALSE(router.GameplayAllowed());
+    }
+}
+
+TEST(DeveloperRouting, GlobalShortcutsRespectCaptureTextAndFocusInMenusAndPausedScreens) {
+    for (const bool in_world : {false, true}) {
+        UiInputRouter router;
+        UiInputOwnership state;
+        state.in_world = in_world;
+        state.rml_interaction = true;
+        state.binding_capture = true;
+        router.SetOwnership(state);
+        EXPECT_EQ(router.Key(296, 1, false, true), KeyRoute::Capture);
+        router.Key(296, 0, false, false);
+        state.binding_capture = false;
+        state.rml_text_input = true;
+        router.SetOwnership(state);
+        EXPECT_EQ(router.Key(296, 1, false, true), KeyRoute::RmlUi);
+        router.Key(296, 0, false, false);
+        state.rml_text_input = false;
+        state.imgui_text_input = true;
+        router.SetOwnership(state);
+        EXPECT_EQ(router.Key(296, 1, false, true), KeyRoute::Ignore);
+        router.Key(296, 0, false, false);
+        state.imgui_text_input = false;
+        state.window_focused = false;
+        router.SetOwnership(state);
+        EXPECT_EQ(router.Key(296, 1, false, true), KeyRoute::Ignore);
+    }
+}
+
+TEST(DeveloperRouting, DeveloperPanelsRetainWorldShortcutContext) {
+    UiInputRouter router;
+    auto state = World();
+    router.SetOwnership(state);
+    EXPECT_TRUE(router.WorldShortcutsAllowed());
+    state.interactive_panel = true;
+    state.imgui_keyboard = true;
+    router.SetOwnership(state);
+    EXPECT_TRUE(router.WorldShortcutsAllowed());
+    EXPECT_FALSE(router.GameplayAllowed());
+    state.in_world = false;
+    router.SetOwnership(state);
+    EXPECT_FALSE(router.WorldShortcutsAllowed());
 }
 
 TEST(DeveloperRouting, CapturedTypingBlocksEveryGameplayPollAndTimeShortcut) {
@@ -787,8 +882,12 @@ TEST(DeveloperWidgets, CompleteAdaptersShareRowsCommandsShortcutsAndCloseButtons
         EXPECT_FALSE(console.Widgets().Visible(id));
         const auto chord = console.Bindings().Get(id);
         ASSERT_TRUE(chord.has_value());
+        if (!chord.has_value())
+            return;
         const auto shortcut = console.Bindings().Match(*chord, 1, Gameplay);
         ASSERT_TRUE(shortcut.has_value());
+        if (!shortcut.has_value())
+            return;
         UiInputRouter router;
         router.SetOwnership(World());
         ASSERT_EQ(router.Key(chord->key, 1, false, true), KeyRoute::DeveloperShortcut);
@@ -835,6 +934,8 @@ TEST(DeveloperWidgets, EveryModuleCanRebindUnbindAndResetWithoutDuplicateVisibil
             EXPECT_TRUE(console.Bindings().Rebind(binding.id, chord, error)) << error;
             const auto matched = console.Bindings().Match(chord, 1, Gameplay);
             ASSERT_TRUE(matched.has_value());
+            if (!matched.has_value())
+                return;
             EXPECT_EQ(*matched, binding.id);
             EXPECT_TRUE(console.InvokeAction(*matched).success);
             EXPECT_EQ(console.Widgets().Visible(def.id), panel && def.shortcuts.empty());
@@ -1005,8 +1106,12 @@ TEST(DeveloperRouting, CallbackSequencePreservesPrintableRmlTextAndSuppressesTog
 void ExpectPanelShortcut(DeveloperConsole& console, UiInputRouter& router, const char* id) {
     const auto chord = console.Bindings().Get(id);
     ASSERT_TRUE(chord.has_value());
+    if (!chord.has_value())
+        return;
     const auto matched = console.Bindings().Match(*chord, 1, Gameplay);
     ASSERT_TRUE(matched.has_value());
+    if (!matched.has_value())
+        return;
     ASSERT_EQ(router.Key(chord->key, 1, false, true), KeyRoute::DeveloperShortcut) << id;
     EXPECT_TRUE(console.InvokeAction(*matched).success) << id;
     EXPECT_EQ(router.Character(static_cast<unsigned>(chord->key)), InputOwner::Unfocused);
@@ -1034,6 +1139,8 @@ TEST_F(ConsoleFixture, PanelOwnershipAllowsDeveloperActionsAndReboundPanelClose)
     ASSERT_TRUE(console.Widgets().SetVisible("render.shaders", true));
     const auto matched = console.Bindings().Match({75, 2}, 1, Gameplay);
     ASSERT_TRUE(matched.has_value());
+    if (!matched.has_value())
+        return;
     ASSERT_EQ(router.Key(75, 1, false, true), KeyRoute::DeveloperShortcut);
     EXPECT_TRUE(console.InvokeAction(*matched).success);
     EXPECT_FALSE(console.Widgets().Visible("render.shaders"));
@@ -1098,6 +1205,8 @@ TEST_F(ConsoleFixture, PanelLayoutFollowsVisibilityAndRejectsPassiveOrInvalidGeo
     ASSERT_TRUE(console.Widgets().SetVisible("render.shaders", false));
     const auto closed_panel = console.Widgets().Layout("render.shaders");
     ASSERT_TRUE(closed_panel.has_value());
+    if (!closed_panel.has_value())
+        return;
     EXPECT_FALSE(closed_panel->open);
     EXPECT_EQ(closed_panel->width, 640);
     EXPECT_FALSE(console.Widgets().SetLayout("perf.hud", layout));
@@ -1110,6 +1219,8 @@ TEST_F(ConsoleFixture, PanelLayoutFollowsVisibilityAndRejectsPassiveOrInvalidGeo
     console.SetOpen(false);
     const auto closed_console = console.Layout();
     ASSERT_TRUE(closed_console.has_value());
+    if (!closed_console.has_value())
+        return;
     EXPECT_FALSE(closed_console->open);
     EXPECT_EQ(closed_console->x, 120);
 }

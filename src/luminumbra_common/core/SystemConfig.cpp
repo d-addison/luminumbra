@@ -366,6 +366,8 @@ void ParseUserSection(const nlohmann::json& data, UserSettings& user) {
 
 } // namespace
 
+SystemConfig::SystemConfig() = default;
+
 SystemConfig SystemConfig::Defaults() {
     return SystemConfig{};
 }

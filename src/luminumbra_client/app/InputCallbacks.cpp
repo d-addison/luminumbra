@@ -125,7 +125,10 @@ void key_callback(GLFWwindow* window, int key, int scancode, int action, int mod
     RefreshInputOwnership(window);
     auto* console = DeveloperUiAllowed(app) ? bindings.developerConsole : nullptr;
     const bool photo = playerController && playerController->photo_mode_active();
-    const unsigned scope = photo ? Debug::Photo : Debug::Gameplay;
+    const bool worldShortcuts =
+        bindings.router ? bindings.router->WorldShortcutsAllowed() : bindings.in_world;
+    const unsigned scope =
+        worldShortcuts ? (photo ? Debug::Photo : Debug::Gameplay) : Debug::Global;
     const auto shortcut =
         console ? console->Bindings().Match({key, mods & 15}, action, scope) : std::nullopt;
     const bool consoleToggle =

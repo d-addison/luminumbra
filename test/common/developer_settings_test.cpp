@@ -32,6 +32,26 @@ protected:
         std::filesystem::remove_all(directory, error);
     }
 };
+TEST_F(DeveloperPersistence, DirectConstructionMatchesFactoryDefaultsAndInitializesRecords) {
+    SystemConfig direct;
+    SystemConfig value{};
+    const auto defaults = SystemConfig::Defaults();
+    for (auto* cfg : {&direct, &value}) {
+        EXPECT_EQ(cfg->ComputeConfigSubHash(), defaults.ComputeConfigSubHash());
+        EXPECT_EQ(cfg->SimulationGates(), defaults.SimulationGates());
+        EXPECT_TRUE(cfg->user().developer.widgets.empty());
+        EXPECT_TRUE(cfg->user().developer.bindings.empty());
+        EXPECT_TRUE(cfg->user().developer.layouts.empty());
+        cfg->user().developer.widgets["perf.hud"] = false;
+        cfg->user().developer.bindings["console.toggle"] = {301, 2};
+        cfg->user().developer.layouts["console.toggle"] = {70, 40, 820, 650, false};
+        EXPECT_FALSE(cfg->user().developer.PerfHudVisible());
+        EXPECT_EQ(cfg->user().developer.bindings.at("console.toggle").key, 301);
+        EXPECT_FALSE(cfg->user().developer.layouts.at("console.toggle").open);
+        EXPECT_EQ(cfg->ComputeConfigSubHash(), defaults.ComputeConfigSubHash());
+    }
+}
+
 TEST_F(DeveloperPersistence, OldSettingsDefaultsAndFalseRoundTrip) {
     auto cfg = SystemConfig::FromJsonString(
         R"({"user":{"video":{"fov":70,"vsync":true},"audio":{"master":0.5},"controls":{"Jump":90}}})");
@@ -164,7 +184,20 @@ TEST_F(DeveloperPersistence, MergePrecedenceAndHashExclusion) {
     EXPECT_EQ(cfg.ComputeConfigSubHash(), baseline.ComputeConfigSubHash());
     cfg.OverlayUserFromJsonString("malformed");
     EXPECT_FALSE(cfg.user().developer.PerfHudVisible());
-    EXPECT_TRUE(SystemConfig::Defaults().ComputeConfigSubHash().empty());
+    auto defaults_config = SystemConfig::Defaults();
+    const auto default_hash = defaults_config.ComputeConfigSubHash();
+    EXPECT_FALSE(default_hash.empty());
+    defaults_config.user().developer = cfg.user().developer;
+    EXPECT_EQ(defaults_config.ComputeConfigSubHash(), default_hash);
+    nlohmann::json disabled;
+    for (const auto& [name, enabled] : defaults_config.SimulationGates()) {
+        EXPECT_TRUE(enabled);
+        disabled["sim"][name]["enabled"] = false;
+    }
+    auto disabled_config = SystemConfig::FromJsonString(disabled.dump());
+    EXPECT_TRUE(disabled_config.ComputeConfigSubHash().empty());
+    disabled_config.user().developer = cfg.user().developer;
+    EXPECT_TRUE(disabled_config.ComputeConfigSubHash().empty());
 }
 TEST_F(DeveloperPersistence, EffectModulesDiscardDuplicateVisibilityBindings) {
     auto cfg = SystemConfig::FromJsonString(R"({"user":{"developer":{"bindings":{
@@ -369,7 +402,8 @@ TEST_F(DeveloperPersistence, LayoutRecoveryDoesNotSwallowOverflowOutsideLayouts)
           R"({"user":{"developer":{"layouts":[1e400]},"video":{"fov":1e400}}})",
           R"({"user":{"developer":{"layouts":{"bad":1e400}},"video":{"fov":1e400}}})"}) {
         SCOPED_TRACE(json);
-        EXPECT_THROW(SystemConfig::FromJsonString(json), nlohmann::json::out_of_range);
+        EXPECT_THROW(static_cast<void>(SystemConfig::FromJsonString(json)),
+                     nlohmann::json::out_of_range);
         auto cfg = SystemConfig::Defaults();
         EXPECT_THROW(cfg.OverlayUserFromJsonString(json), nlohmann::json::out_of_range);
     }
@@ -380,7 +414,7 @@ TEST_F(DeveloperPersistence, LayoutRecoveryDoesNotSwallowOtherSectionTypeErrors)
         "user":{"developer":{"layouts":{"bad":{"x":1e400}}}},
         "render":{"moonlight":{"params":{"color":["invalid",0.7,1.0]}}}
     })";
-    EXPECT_THROW(SystemConfig::FromJsonString(json), nlohmann::json::type_error);
+    EXPECT_THROW(static_cast<void>(SystemConfig::FromJsonString(json)), nlohmann::json::type_error);
 }
 
 TEST_F(DeveloperPersistence, LayoutRecordsAreBoundedAndKnownPanelsSurviveUnknownEntries) {

@@ -41,6 +41,8 @@ public:
     KeyRoute Key(int key, int action, bool console_toggle, bool developer_shortcut);
     InputOwner Character(unsigned int codepoint) const;
     bool GameplayAllowed() const;
+    // Developer panels retain world bindings; menus and modal world screens use global ones.
+    bool WorldShortcutsAllowed() const;
     bool GameplayKeyAllowed(int key) const;
     bool GameplayMouseAllowed() const;
     bool CursorCaptured() const;

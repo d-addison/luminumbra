@@ -203,6 +203,8 @@ TEST_F(UiFixture, TypedConsoleToggleClosesShellAndPersistsClosedLayout) {
     EXPECT_FALSE(console.IsOpen());
     const auto layout = console.Layout();
     ASSERT_TRUE(layout.has_value());
+    if (!layout.has_value())
+        return;
     EXPECT_FALSE(layout->open);
     io.AddKeyEvent(ImGuiKey_Enter, false);
     context.NextFrame();
@@ -234,6 +236,8 @@ TEST_F(UiFixture, TitleBarCloseControlClosesShellAndPersistsClosedLayout) {
     EXPECT_FALSE(console.IsOpen());
     const auto layout = console.Layout();
     ASSERT_TRUE(layout.has_value());
+    if (!layout.has_value())
+        return;
     EXPECT_FALSE(layout->open);
 }
 
@@ -257,6 +261,8 @@ TEST_F(UiFixture, PanelGeometryRestoresFromUserLayoutAndIgnoresImGuiIni) {
     console.Draw(frame);
     const auto moved = console.Widgets().Layout("render.shaders");
     ASSERT_TRUE(moved.has_value());
+    if (!moved.has_value())
+        return;
     EXPECT_FLOAT_EQ(moved->x, 240);
     EXPECT_FLOAT_EQ(moved->width, 700);
     ImGui::SetWindowCollapsed(panel, true);
@@ -264,6 +270,8 @@ TEST_F(UiFixture, PanelGeometryRestoresFromUserLayoutAndIgnoresImGuiIni) {
     console.Draw(frame);
     const auto collapsed = console.Widgets().Layout("render.shaders");
     ASSERT_TRUE(collapsed.has_value());
+    if (!collapsed.has_value())
+        return;
     EXPECT_FLOAT_EQ(collapsed->height, 450);
     ImGui::SetWindowCollapsed(panel, false);
     console.Widgets().SetVisible("render.shaders", false);
@@ -271,6 +279,8 @@ TEST_F(UiFixture, PanelGeometryRestoresFromUserLayoutAndIgnoresImGuiIni) {
     console.Draw(frame);
     const auto closed = console.Widgets().Layout("render.shaders");
     ASSERT_TRUE(closed.has_value());
+    if (!closed.has_value())
+        return;
     EXPECT_FALSE(closed->open);
     console.Widgets().SetVisible("render.shaders", true);
     context.NextFrame();
