@@ -473,10 +473,10 @@ TEST(GameSessionHeadlessWorldTest, SpeciesSnapshotBindsExactBytesAndPortableOrde
     ASSERT_NE(snapshot, nullptr);
     EXPECT_EQ(snapshot->manifest, b.params.worldgen_dependencies->manifest);
     ASSERT_EQ(snapshot->manifest.size(), 4u);
+    // Exact-byte FNV-1a-64 of SpeciesIdentityFixture::OriginalBytes(), using
+    // the manifest's offset basis 14695981039346656037.
     EXPECT_EQ(snapshot->manifest[1],
-              (std::vector<std::string>{
-                  "common/creatures/species/deer.json",
-                  Luminumbra::Replay::Fnv1a64Hex(SpeciesIdentityFixture::OriginalBytes())}));
+              (std::vector<std::string>{"common/creatures/species/deer.json", "f730450646ea14a9"}));
     EXPECT_EQ(snapshot->manifest[2][0],
               "common/creatures/species/" + Luminumbra::Filesystem::GenericUtf8PathString(earlier));
     EXPECT_EQ(snapshot->manifest[3][0],
