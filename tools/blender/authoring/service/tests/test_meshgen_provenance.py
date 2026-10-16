@@ -126,3 +126,33 @@ class ParentProvenance(unittest.TestCase):
             y = struct.unpack_from('<f', blob, i*12+4)[0]; struct.pack_into('<f', blob, i*12+4, y+.25)
         args['artifact'] = glb(doc, bytes(blob))
         self.refusal('finish.gate_failed', args)
+
+    def test_maximum_extent_rejects_centered_export_at_publication_and_replay(self):
+        from test_meshgen_config import project_fixture
+        project = project_fixture()
+        project['budgets'] = {'target_height_m': 1, 'bounds_m': [8, 8, 8], 'max_extent_m': 2}
+        project['finish'] = {'scale': {'pivot': 'bbox_center'}}
+        args = arguments(); args['resolved'] = resolve(project, 'rock')
+        data = args['artifact']; size = struct.unpack_from('<I', data, 12)[0]
+        doc = bounded_json(data[20:20+size])
+        blob = bytearray(data[28+size:])
+        for i in range(36):
+            x, y, z = struct.unpack_from('<3f', blob, i*12)
+            struct.pack_into('<3f', blob, i*12, 2*x, y-.5, z)
+        args['artifact'] = glb(doc, bytes(blob))
+        bundle = build_evidence(**args)
+        self.assertEqual(validate_evidence(bundle)[1]['artifact']['bounds_m'], [2, 1, 1])
+
+        project['budgets']['max_extent_m'] = 1
+        args['resolved'] = resolve(project, 'rock')
+        with self.subTest(stage='publication'): self.refusal('finish.gate_failed', args)
+        # Rebind a previously passing bundle to the stricter retained config.
+        # Replay must recompute the extent gate even when all hashes agree.
+        bundle['effective_config.json'] = args['resolved'].stored_bytes
+        provenance = bounded_json(bundle['provenance.json'])
+        provenance['config'].update(config_digest=args['resolved'].config_digest,
+            effective_config_sha256=args['resolved'].stored_sha256, sources=args['resolved'].sources)
+        bundle['provenance.json'] = canonical(provenance)+b'\n'
+        with self.subTest(stage='replay'):
+            with self.assertRaises(Refusal) as caught: validate_evidence(bundle)
+            self.assertEqual(caught.exception.finding['rule_id'], 'provenance.inconsistent')

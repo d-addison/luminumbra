@@ -1,10 +1,12 @@
 """Seal/receipt crash ordering, held-reader publication and append-only evidence."""
 from copy import deepcopy
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from pathlib import Path
 import os
 import stat
 import tempfile
+import threading
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -66,7 +68,8 @@ class CandidateStorage(unittest.TestCase):
         target = self.project/'outside'; target.write_bytes(self.members['preview.png'])
         (candidate/'preview.png').unlink()
         try: (candidate/'preview.png').symlink_to(target)
-        except (OSError, NotImplementedError):
+        except OSError as error:
+            if os.name != 'nt' or getattr(error, 'winerror', None) != 1314: raise
             # Windows CI without symlink privileges still proves hard-link refusal.
             os.link(target, candidate/'preview.png')
         self.refusal('candidate.path', lambda: self.store.read(JOB))
@@ -203,6 +206,61 @@ class CandidateStorage(unittest.TestCase):
                         self.assertEqual(destination.read_bytes(), self.members['candidate.glb'])
                     else:
                         self.assertEqual(store.attestations(JOB)[0]['observation'], {'score': 1})
+                    retained.unlink()
+
+    def test_project_quota_serializes_imports_and_attestations_across_documents(self):
+        cap = 64*1024**2
+        for operation in ('import', 'attestation'):
+            with self.subTest(operation=operation):
+                stores = [CandidateStore(self.project, operation+suffix) for suffix in ('_first', '_second')]
+                project = project_fixture(); project['budgets'] = {'target_height_m': 1}
+                project['retention'] = {'max_total_mib': 64}
+                args = arguments(); args['resolved'] = resolve(project, 'rock')
+                evidence = build_evidence(**args)
+                receipts = [store.publish(JOB, evidence) for store in stores]
+                destinations = [store.paths(JOB)[1]/'import-private'/'snapshot.glb' for store in stores]
+                payload = {'detail': 'x'*(64*1024)}
+                remaining = (len(evidence['candidate.glb'])+1152 if operation == 'import'
+                             else 11*len(canonical(payload))//2)
+                state = stores[0].root.parent
+                retained = state/'retained.bin'
+                used = sum(p.stat().st_size for p in state.rglob('*') if p.is_file())
+                # Sparse filler leaves room for one operation, but not both.
+                with retained.open('wb') as stream: stream.truncate(cap-used-remaining)
+
+                def mutate(index):
+                    if operation == 'import':
+                        receipt = receipts[index]['candidate']
+                        return stores[index].stage_for_import(JOB, receipt['sha256'],
+                            receipt['provenance_sha256'], destinations[index])
+                    return stores[index].append_attestation(JOB, 'metrics', '20261013T123456000001Z', payload)
+
+                admitted, resume = threading.Event(), threading.Event()
+                quota = stores[0]._quota
+                def hold_after_admission(incoming, byte_limit):
+                    quota(incoming, byte_limit)
+                    admitted.set()
+                    self.assertTrue(resume.wait(5), 'Publication was not released.')
+
+                try:
+                    with patch.object(stores[0], '_quota', side_effect=hold_after_admission):
+                        with ThreadPoolExecutor(max_workers=1) as pool:
+                            first = pool.submit(mutate, 0)
+                            try:
+                                self.assertTrue(admitted.wait(5), 'First document did not reach quota admission.')
+                                self.refusal('busy', lambda: mutate(1))
+                            finally:
+                                resume.set()
+                            first.result(timeout=5)
+                    self.refusal('candidate.limit', lambda: mutate(1))
+                    if operation == 'import':
+                        self.assertEqual(destinations[0].read_bytes(), evidence['candidate.glb'])
+                        self.assertFalse(destinations[1].exists())
+                    else:
+                        self.assertEqual(stores[0].attestations(JOB)[0]['observation'], payload)
+                        self.assertEqual(stores[1].attestations(JOB), [])
+                    self.assertLessEqual(sum(p.stat().st_size for p in state.rglob('*') if p.is_file()), cap)
+                finally:
                     retained.unlink()
 
     def test_attestation_peak_quota_refuses_before_pointer_and_allows_smaller_append(self):

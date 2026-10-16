@@ -184,6 +184,7 @@ def quality_gates(artifact_stats, guard, effective):
         all(abs(v) <= epsilon for v in centers) if pivot == 'bbox_center' else True)
     gates = {'final_tris_within_budget': artifact_stats['budget_ok'],
              'bounds_within_budgets': all(v <= cap for v, cap in zip(artifact_stats['bounds_m'], effective['budgets']['bounds_m']))
+                and max(artifact_stats['bounds_m']) <= effective['budgets']['max_extent_m']
                 and abs(artifact_stats['bounds_m'][1]-target) <= epsilon and pivot_ok,
              'thin_shell_guard': guard['pass'] if effective['finish']['decimate']['thin_shell_guard'] else True,
              'uv_present': artifact_stats['has_uv'], 'uv_overlap_zero': artifact_stats['uv_overlap_zero'] is True}

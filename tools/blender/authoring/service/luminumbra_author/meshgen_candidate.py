@@ -1,6 +1,6 @@
 """Durable sealed candidate/receipt transactions and append-only attestations.
 
-Mutation runs under a separate short storage guard, inside the MG2 owner's
+Mutation runs under project and document storage guards, inside the MG2 owner's
 serialized commit callback. Read-only access never constructs BuildService.
 """
 from contextlib import contextmanager, ExitStack
@@ -324,21 +324,25 @@ class CandidateStore:
 
     @contextmanager
     def _guard(self):
-        with self.mutex, self._publication() as directories:
-            root_fd = directories.directory(self.root)
+        with self.mutex, self._publication() as directories, ExitStack() as locks:
+            # Quota covers every document. Hold the project guard through all
+            # publication, always acquiring it before the document guard.
+            for root in (self.root.parent, self.root):
+                root_fd = directories.directory(root)
+                if os.name == 'posix':
+                    import fcntl
+                    fd = os.open('.candidate.guard', os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW,
+                                 0o600, dir_fd=root_fd)
+                    guard = os.fdopen(fd, 'a+b')
+                    locks.callback(guard.close)
+                    try: fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    except BlockingIOError as error:
+                        raise Refusal('busy', 'Candidate storage is busy.') from error
+                else:
+                    try: guard = ProjectLock(root/'candidate-storage', root/'.candidate.guard')
+                    except BlockingIOError as error: raise Refusal('busy', 'Candidate storage is busy.') from error
+                    locks.callback(guard.close)
             directories.directory(self.root/'jobs')
-            if os.name == 'posix':
-                import fcntl
-                fd = os.open('.candidate.guard', os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW,
-                             0o600, dir_fd=root_fd)
-                guard = os.fdopen(fd, 'a+b')
-                try: fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                except BlockingIOError as error:
-                    guard.close()
-                    raise Refusal('busy', 'Candidate storage is busy.') from error
-            else:
-                try: guard = ProjectLock(self.root/'candidate-storage', self.root/'.candidate.guard')
-                except BlockingIOError as error: raise Refusal('busy', 'Candidate storage is busy.') from error
             self._directories = directories
             try:
                 directories.verify()
@@ -346,7 +350,6 @@ class CandidateStore:
                 directories.verify()
             finally:
                 self._directories = None
-                guard.close()
 
     def _write(self, path, data, decoded=None):
         require(type(data) is bytes, 'candidate.members', 'Publication requires bytes.')
@@ -746,7 +749,8 @@ class CandidateLedger(RequestLedger):
 
     E3's RequestLedger remains unchanged. G2 owners use this ledger and invoke
     commit_success only after backend and worker tasks are stopped and drained.
-    Lock order is owner transition -> candidate-storage guard -> ledger guard.
+    Lock order is owner transition -> project storage guard -> document storage
+    guard -> ledger guard.
     """
     def _store(self, document=None):
         return CandidateStore(self.project, document or self.document, tokens=self.secret_source())
