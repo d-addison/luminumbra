@@ -178,12 +178,19 @@ bool write_csv_row(std::ostream& out,
                    std::uint64_t generated_count,
                    std::uint64_t count_generation);
 
+// Flush and close an open CSV file, preserving write, flush, and close failures.
+// Uses the default non-throwing stream exception mask, as do the CSV writers.
+bool finalize_csv(std::ofstream& out);
+
 class FrameRecorder {
 public:
     FrameRecorder(bool enabled, const std::filesystem::path& logs);
     bool active() const {
         return m_out.is_open() && m_out.good();
     }
+    // Call before shutdown to observe buffered write and close failures. Repeated
+    // calls return the same result; a disabled recorder finishes successfully.
+    bool finish();
     bool record(std::uint64_t frame,
                 double frame_ms,
                 const FrameBuckets& buckets,
