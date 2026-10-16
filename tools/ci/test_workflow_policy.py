@@ -23,6 +23,7 @@ GUARDED = {
 READY = "github.event_name != 'pull_request' || github.event.pull_request.draft == false"
 UCRT_ROUTE = (
     "github.event_name == 'pull_request' || github.ref_name == 'main' || "
+    "(github.event_name == 'push' && github.ref == 'refs/heads/devel') || "
     "(github.event_name == 'workflow_dispatch' && inputs.qualification_capture)"
 )
 SERVER_ROUTE = (
@@ -169,6 +170,63 @@ class WorkflowDraftPolicyTests(unittest.TestCase):
         )
         for job in (ci["lint"], ci["public-tree"], perf["runner-contract"]):
             self.assertIsNone(value(job, "if", 4))
+
+    def test_ucrt_route_seeds_devel_and_preserves_other_event_and_path_guards(self):
+        job = jobs(self.workflows["ci.yml"])["windows-ucrt64"]
+        self.assertEqual(value(job, "needs", 4), "changes")
+        expression = value(job, "if", 4).removeprefix("${{ ").removesuffix(" }}")
+        for event in ("pull_request", "push", "workflow_dispatch", "schedule"):
+            for branch in ("main", "devel", "feature"):
+                for draft in (True, False, None):
+                    for cpp in ("true", "false", ""):
+                        for cancelled in (False, True):
+                            for capture in (False, True):
+                                expected = (
+                                    not cancelled and cpp != "false"
+                                    and (event != "pull_request" or draft is False)
+                                    and (event == "pull_request" or branch == "main"
+                                         or (event == "push" and branch == "devel")
+                                         or (event == "workflow_dispatch" and capture))
+                                )
+                                actual = expression.replace("!cancelled()", repr(not cancelled))
+                                for key, replacement in (
+                                    ("github.event_name", event), ("github.ref_name", branch),
+                                    ("github.ref", f"refs/heads/{branch}"),
+                                    ("github.event.pull_request.draft", draft),
+                                    ("needs.changes.outputs.needs_cpp", cpp),
+                                    ("inputs.qualification_capture", capture),
+                                ):
+                                    actual = actual.replace(key, repr(replacement))
+                                actual = actual.replace("== false", "== False").replace(
+                                    "&&", "and"
+                                ).replace("||", "or")
+                                with self.subTest(event=event, branch=branch, draft=draft,
+                                                  cpp=cpp, cancelled=cancelled, capture=capture):
+                                    self.assertEqual(eval(actual, {"__builtins__": {}}), expected)
+
+    def test_ucrt_cache_guards_keep_saves_on_trusted_pushes_and_bypass_captures(self):
+        job = jobs(self.workflows["ci.yml"])["windows-ucrt64"]
+        named = {step.splitlines()[0].removeprefix("      - name: "): step for step in steps(job)}
+        trusted_push = (
+            "github.event_name == 'push' && "
+            "(github.ref == 'refs/heads/main' || github.ref == 'refs/heads/devel')"
+        )
+        capture = "github.event_name == 'workflow_dispatch' && inputs.qualification_capture"
+        self.assertEqual(value(named["Set up MSYS2 UCRT64"], "cache", 10),
+                         "${{ " + trusted_push + " }}")
+        disable = named["Disable compiler cache for qualification captures"]
+        self.assertEqual(value(disable, "if", 8), capture)
+        self.assertIn('CCACHE_DISABLE=1', value(disable, "run", 8))
+        self.assertEqual(value(named["Restore compiler cache"], "if", 8),
+                         "${{ !(" + capture + ") }}")
+        for name in ("Clean compiler cache before saving", "Save compiler cache"):
+            with self.subTest(step=name):
+                self.assertEqual(
+                    value(named[name], "if", 8),
+                    "${{ always() && " + trusted_push + " && !(" + capture + ") && "
+                    "steps.compiler-cache.outcome == 'success' && "
+                    "steps.compiler-cache.outputs.cache-hit != 'true' }}",
+                )
 
     def test_concurrency_keeps_pr_cancellation_and_batches_only_devel_pushes(self):
         group = (
