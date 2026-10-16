@@ -426,6 +426,44 @@ for the config example and qualification gates. Saved-world far production
 authority remains fixture-only until FW S8 (v0.3.1); the renderer reports an
 explicit unavailable/refusal diagnostic.
 
+### Developer console
+
+The ordinary and QA clients provide the same developer console in Release and
+other configurations. F1 opens its searchable widget hub by default; ordinary
+Settings provides console access and the default-on performance HUD switch.
+Visibility, resolved shortcuts and interactive panel layouts persist under
+`user.developer` without changing simulation hashes. The Controls settings section
+links to the hub for developer rebinding and hotkey help. Generated help includes
+current developer and gameplay bindings. Interactive panels share input/cursor
+ownership; passive HUDs do not capture gameplay. Opening the console does not
+pause simulation.
+
+| Default hotkey | Module / action |
+|---|---|
+| F1 | Open or close the developer hub |
+| F3 | GPU profiler panel |
+| F5 | Reload all shaders (`shader.reload`, no panel) |
+| F6 | Cycle debug views (`render.debug-cycle`) |
+| F7 | World generation preview panel |
+| F8 | Client settings panel |
+| F9 | Toggle wireframe effect (`render.wireframe-toggle`) |
+| F10 | Shader panel |
+| `[` | Slow time (`time.slower`) |
+| `]` | Speed up time (`time.faster`) |
+| `\` | Reset time scale (`time.reset`) |
+
+The hub shows every module's description and current hotkeys, including unbound
+panels and passive overlays. Debug-view, wireframe and time-control panel visibility
+is separate from their effect hotkeys. Photo mode uses `[` and `]` for aperture.
+Developer actions and rebound panel keys work while a panel owns input; focused
+text fields block them. `--no-ui`, automated captures and scenario runs suppress
+developer overlays and shortcuts without modifying saved preferences.
+
+See [Developer console](developer-console.md) for the complete inventory,
+registration API, typed commands, focus rules, save retries and capture overrides.
+The generation inspector edits an independent preview; only its explicit
+**Apply & Regenerate** button can apply changes to an ordinary local world.
+
 ### Environment controls
 
 These are the `LUMIN_*` controls read by the current client/render source. Set

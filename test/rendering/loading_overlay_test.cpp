@@ -57,6 +57,7 @@ TEST(LoadingOverlay, NoContextDrawsNothing) {
 TEST(LoadingOverlay, WithContextBuildsOneWindow) {
     ScopedImGuiContext context;
     ImGuiIO& io = ImGui::GetIO();
+    io.IniFilename = nullptr;
     io.DisplaySize = ImVec2(1280, 720);
     io.DeltaTime = 1.0f / 60.0f;
     unsigned char* pixels = nullptr;

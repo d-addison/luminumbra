@@ -10,6 +10,7 @@ set(CLIENT_INTERNAL_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/app/DebugOverlays.cpp
     ${CMAKE_CURRENT_LIST_DIR}/app/FrameAudio.cpp
     ${CMAKE_CURRENT_LIST_DIR}/app/GameAssets.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/app/UiInputRouter.cpp
     ${CMAKE_CURRENT_LIST_DIR}/app/InputCallbacks.cpp
     ${CMAKE_CURRENT_LIST_DIR}/app/MenuScreens.cpp
     ${CMAKE_CURRENT_LIST_DIR}/app/ProcgenPalettes.cpp
@@ -28,6 +29,16 @@ set(CLIENT_INTERNAL_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/audio/MiniaudioManager.cpp
 
     # Debug
+    ${CMAKE_CURRENT_LIST_DIR}/app/RegisterDeveloperWidgets.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/debug/widgets/DeveloperWidgetUi.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/debug/widgets/PassiveDeveloperWidgets.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/debug/widgets/RenderControlWidgets.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/debug/DeveloperWidgetRegistry.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/debug/DeveloperCommandRegistry.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/debug/DeveloperConsole.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/debug/DeveloperConsoleUi.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/debug/DeveloperLogSink.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/debug/DeveloperLogAttachment.cpp
     ${CMAKE_CURRENT_LIST_DIR}/debug/RuntimeOverlaySchema.cpp
     ${CMAKE_CURRENT_LIST_DIR}/debug/WorldGenViewer.cpp
     ${CMAKE_CURRENT_LIST_DIR}/debug/DebugCamera.cpp
