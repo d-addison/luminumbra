@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Device-free run_client controls, including a real child that outlives capture."""
+"""Device-free run_client controls with real and injected process timeouts."""
 import argparse
 import base64
 from contextlib import redirect_stderr
@@ -28,7 +28,7 @@ spec.loader.exec_module(runner)
 
 CHILD = r'''
 import base64, pathlib, sys, time
-artifact, payload, code, wait, loaders, ready, startup_delay = sys.argv[1:]
+artifact, payload, code, loaders, ready, startup_delay = sys.argv[1:]
 time.sleep(float(startup_delay))
 if loaders == '1':
     print('Static-model textures registered (3 models).', flush=True)
@@ -36,11 +36,22 @@ if loaders == '1':
         print(f"tree_small_02_{part}.lmesh' (3 verts, 3 indices)", flush=True)
 if payload != '-':
     pathlib.Path(artifact).write_bytes(base64.b64decode(payload))
-pathlib.Path(ready).touch()
-if wait == '1':
-    time.sleep(30)
+if ready != '-':
+    print('A' * 20000, flush=True)
+    print('EnsureSurfaceReadyNear: draining generation jobs (near 0,0)...', flush=True)
+    print('EnsureSurfaceReadyNear/surface-build batch 3', flush=True)
+    print('unrelated trailing line', flush=True)
+    pathlib.Path(ready).touch()
+    while True:
+        time.sleep(1)
 sys.exit(int(code))
 '''
+
+
+TIMEOUT_LOG = (b'A' * 20000 + b'\n'
+               b'EnsureSurfaceReadyNear: draining generation jobs (near 0,0)...\n'
+               b'EnsureSurfaceReadyNear/surface-build batch 3\n'
+               b'unrelated trailing line\n')
 
 
 SLOW_CHILD = r'''
@@ -75,6 +86,8 @@ class RenderRunnerEvidenceTests(unittest.TestCase):
         self.payload = b'{\n  "schema": "diagnostic_fixture", "frames": 4\n}\n'
         self.code = 0
         self.wait = False
+        self.real_timeout = True
+        self.children = []
         self.startup_delay = 0
         self.loaders = True
         self.process_exception = None
@@ -88,19 +101,55 @@ class RenderRunnerEvidenceTests(unittest.TestCase):
         self.assertFalse(kwargs['check'])
         artifact = command[command.index('--render-benchmark') + 1]
         payload = '-' if self.payload is None else base64.b64encode(self.payload).decode('ascii')
-        child_command = [sys.executable, str(self.child), artifact, payload,
-                         str(self.code), str(int(self.wait)), str(int(self.loaders)),
-                         str(self.root / 'child.ready'), str(self.startup_delay)]
-        # Production argv and its 180-second limit are observed unchanged.
-        # Time only the fixture's intentional wait after its writes are complete.
-        try:
-            if self.wait:
-                return self.run_ready_child(child_command, self.root / 'child.ready', **kwargs)
-            return self.original_run(child_command, **dict(kwargs, timeout=5))
-        except subprocess.TimeoutExpired as error:
+        if self.wait and not self.real_timeout:
+            if self.payload is not None:
+                Path(artifact).write_bytes(self.payload)
+            kwargs['stdout'].write(TIMEOUT_LOG)
+            kwargs['stdout'].flush()
+            error = subprocess.TimeoutExpired(command, kwargs['timeout'])
             self.process_exception = error
             self.process_exception_attributes = (error.cmd, error.timeout)
-            raise
+            raise error
+        ready = self.root / 'ready'
+        waiting = self.wait and self.real_timeout
+        child_command = [sys.executable, '-I', '-B', str(self.child), artifact, payload,
+                         str(self.code), str(int(self.loaders)),
+                         str(ready) if waiting else '-', str(self.startup_delay)]
+        if waiting:
+            ready.unlink(missing_ok=True)
+            popen = subprocess.Popen
+
+            def start(*args, **options):
+                child = popen(*args, **options)
+                self.children.append(child)
+                wait = child.wait
+
+                def wait_for_timeout(timeout=None):
+                    if timeout is not None:
+                        # Only a deadlock detector: wait for the real child to
+                        # finish writing before requesting an immediate timeout.
+                        deadline = time.monotonic() + 60
+                        while not ready.exists():
+                            self.assertIsNone(child.poll(), 'child exited before capture')
+                            self.assertLess(time.monotonic(), deadline,
+                                            'child never became ready')
+                            time.sleep(0.01)
+                        self.assertIsNone(child.poll(), 'child must still be running')
+                        return wait(timeout=0)
+                    return wait()
+
+                child.wait = wait_for_timeout
+                child.kill = mock.Mock(wraps=child.kill)
+                return child
+
+            with mock.patch.object(subprocess, 'Popen', side_effect=start):
+                try:
+                    return self.original_run(child_command, **kwargs)
+                except subprocess.TimeoutExpired as error:
+                    self.process_exception = error
+                    self.process_exception_attributes = (error.cmd, error.timeout)
+                    raise
+        return self.original_run(child_command, **dict(kwargs, timeout=5))
 
     def run_ready_child(self, command, ready, **kwargs):
         ready.unlink(missing_ok=True)
@@ -135,8 +184,39 @@ class RenderRunnerEvidenceTests(unittest.TestCase):
         self.assertIs(caught.exception, self.process_exception)
         self.assertEqual((caught.exception.cmd, caught.exception.timeout),
                          self.process_exception_attributes)
+        if self.real_timeout:
+            self.children[-1].kill.assert_called_once_with()
+            self.assertIsNotNone(self.children[-1].returncode, 'timed out child was not reaped')
+
+    def test_atomic_publication_replaces_existing_files_without_rename(self):
+        paths = self.paths()
+        for path in paths:
+            path.write_bytes(b'previous evidence')
+        with mock.patch.object(runner.os, 'rename', side_effect=FileExistsError(
+                'destination already exists')), \
+                mock.patch.object(runner.os, 'replace', wraps=os.replace) as replace:
+            for path in paths:
+                runner._atomic_write(path, b'current evidence')
+                self.assertEqual(path.read_bytes(), b'current evidence')
+        self.assertEqual(replace.call_count, 2)
+        self.assertFalse(list(self.artifacts.glob('*.tmp')))
 
     def test_timeout_retains_complete_capture_after_runtime_cleanup(self):
+        self.real_timeout = True
+        self.assert_retained_timeout_capture()
+        self.assertEqual(len(self.children), 1)
+        self.children[0].kill.assert_called_once_with()
+        self.assertIsNotNone(self.children[0].returncode, 'timed out child was not reaped')
+        self.assertEqual(self.receipt()['last_observed_phase'],
+                         'EnsureSurfaceReadyNear/surface-build batch 3')
+        self.assertEqual(len(self.receipt()['log_tail'].encode('utf-8')),
+                         runner.TIMEOUT_LOG_TAIL_BYTES)
+
+    def test_injected_timeout_retains_complete_capture_after_runtime_cleanup(self):
+        self.real_timeout = False
+        self.assert_retained_timeout_capture()
+
+    def assert_retained_timeout_capture(self):
         self.assert_timeout()
         shutil.rmtree(self.runtime)
         capture, receipt_path = self.paths()
@@ -151,8 +231,9 @@ class RenderRunnerEvidenceTests(unittest.TestCase):
         self.assertEqual(receipt['timeout_seconds'], 180)
         self.assertEqual(receipt['command'], self.calls[0][0])
         self.assertEqual(receipt['cwd'], str(self.runtime))
-        self.assertEqual(receipt['binary_path'], str(self.client))
+        self.assertEqual(receipt['binary_path'], str(self.client.resolve(strict=True)))
         self.assertEqual(receipt['binary_sha256'], hashlib.sha256(self.client.read_bytes()).hexdigest())
+        self.assertEqual(receipt['binary_identity_status'], 'verified')
         self.assertGreater(receipt['elapsed_seconds'], 0)
         self.assertEqual(receipt['capture_status'], 'retained')
         self.assertEqual(receipt['capture_path'], str(capture))
@@ -319,12 +400,41 @@ class RenderRunnerEvidenceTests(unittest.TestCase):
     def test_process_elapsed_excludes_evidence_finalization(self):
         # Use a private clock object so subprocess's real deadline clock stays real.
         clock = mock.Mock()
-        clock.monotonic.side_effect = [10.0, 12.5]
+        clock.perf_counter.side_effect = [10.0, 12.5]
         with mock.patch.object(runner, 'time', clock):
             self.case.run_client('capture')
         self.assertEqual(self.receipt()['elapsed_seconds'], 2.5)
-        self.assertEqual(clock.monotonic.call_count, 2)
+        self.assertEqual(clock.perf_counter.call_count, 2)
         self.assertFalse(list(self.artifacts.glob('*.tmp')))
+
+    def test_executable_change_invalidates_receipt_on_return_and_timeout(self):
+        executable = self.root / Path(sys.executable).name
+        runner.OPTIONS.client = executable
+        for timed_out in (False, True):
+            with self.subTest(timed_out=timed_out):
+                shutil.copy2(sys.executable, executable)
+                error = subprocess.TimeoutExpired([str(executable)], 180)
+
+                def launch(command, **kwargs):
+                    metadata = executable.stat()
+                    os.utime(executable, ns=(metadata.st_atime_ns,
+                                            metadata.st_mtime_ns + 2000000000))
+                    Path(command[command.index('--render-benchmark') + 1]).write_bytes(self.payload)
+                    if timed_out:
+                        raise error
+                    return subprocess.CompletedProcess(command, 0)
+
+                with mock.patch.object(runner.subprocess, 'run', side_effect=launch), \
+                        redirect_stderr(io.StringIO()), \
+                        self.assertRaises(subprocess.TimeoutExpired if timed_out else OSError) as caught:
+                    self.case.run_client('capture')
+                if timed_out:
+                    self.assertIs(caught.exception, error)
+                receipt = self.receipt()
+                self.assertIsNone(receipt['binary_sha256'])
+                self.assertEqual(receipt['binary_identity_status'], 'changed')
+                self.assertTrue(receipt['evidence_errors'])
+                self.assertEqual(self.paths()[0].read_bytes(), self.payload)
 
     def test_timeout_log_read_is_bounded_and_old_phase_is_not_retained(self):
         payload = b'EnsureSurfaceReadyNear: outside retained window\n' + b'x' * 20000
@@ -382,6 +492,37 @@ class RenderRunnerEvidenceTests(unittest.TestCase):
         self.assertIn('timeout log read: fixture read refused', receipt['evidence_errors'])
 
     def test_timeout_reports_log_tail_and_last_observed_phase(self):
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            self.assert_timeout()
+        self.assert_timeout_diagnostics(self.receipt(), stderr.getvalue())
+
+    def test_injected_timeout_reports_log_tail_and_last_observed_phase(self):
+        log = self.root / 'timeout.log'
+        artifact = self.root / 'timeout-capture.json'
+        retained = self.root / 'timeout-retained.json'
+        receipt_path = self.root / 'timeout-process.json'
+        error = subprocess.TimeoutExpired([sys.executable], 180)
+
+        def timeout(command, **kwargs):
+            self.assertEqual(kwargs['timeout'], 180)
+            kwargs['stdout'].write(TIMEOUT_LOG)
+            kwargs['stdout'].flush()
+            raise error
+
+        stderr = io.StringIO()
+        with mock.patch.object(runner.subprocess, 'run', side_effect=timeout), \
+                redirect_stderr(stderr):
+            with self.assertRaises(subprocess.TimeoutExpired) as caught:
+                runner._run_process([sys.executable], cwd=self.root,
+                                    environment=os.environ.copy(), log=log,
+                                    artifact=artifact, retained=retained,
+                                    receipt_path=receipt_path)
+        self.assertIs(caught.exception, error)
+        receipt = json.loads(receipt_path.read_text())
+        self.assert_timeout_diagnostics(receipt, stderr.getvalue())
+
+    def test_ready_child_timeout_reports_log_tail_and_last_observed_phase(self):
         slow = self.root / 'slow_child.py'
         slow.write_text(SLOW_CHILD, encoding="utf-8")
         log = self.root / 'timeout.log'
@@ -395,7 +536,8 @@ class RenderRunnerEvidenceTests(unittest.TestCase):
         with mock.patch.object(runner.subprocess, 'run', side_effect=short_run), \
                 redirect_stderr(stderr):
             with self.assertRaises(subprocess.TimeoutExpired):
-                runner._run_process([sys.executable, str(slow), str(self.root / 'slow.ready')], cwd=self.root,
+                runner._run_process([sys.executable, '-I', '-B', str(slow),
+                                     str(self.root / 'slow.ready')], cwd=self.root,
                                     environment=os.environ.copy(), log=log,
                                     artifact=artifact, retained=retained,
                                     receipt_path=receipt_path)
@@ -406,6 +548,16 @@ class RenderRunnerEvidenceTests(unittest.TestCase):
         self.assertEqual(len(receipt['log_tail'].encode('utf-8')), 8 * 1024)
         self.assertIn('unrelated trailing line', receipt['log_tail'])
         message = stderr.getvalue()
+        self.assertIn('render runner: timed out after', message)
+        self.assertIn('unrelated trailing line', message)
+        self.assertIn('EnsureSurfaceReadyNear/surface-build batch 3', message)
+
+    def assert_timeout_diagnostics(self, receipt, message):
+        self.assertEqual(receipt['outcome'], 'timed_out')
+        self.assertEqual(receipt['last_observed_phase'],
+                         'EnsureSurfaceReadyNear/surface-build batch 3')
+        self.assertEqual(len(receipt['log_tail'].encode('utf-8')), 8 * 1024)
+        self.assertIn('unrelated trailing line', receipt['log_tail'])
         self.assertIn('render runner: timed out after', message)
         self.assertIn('unrelated trailing line', message)
         self.assertIn('EnsureSurfaceReadyNear/surface-build batch 3', message)
