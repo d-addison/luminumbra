@@ -1416,9 +1416,10 @@ void WorldSaveService::set_interrupt_before_region_replace_for_testing(bool enab
 
 bool WorldSaveService::write_file_durably(const std::filesystem::path& destination,
                                           const std::string& bytes,
-                                          std::vector<std::string>* errors) {
+                                          std::vector<std::string>* errors,
+                                          CreatedWorldArtifacts* artifacts) {
     std::error_code directory_error;
-    if (destination.has_parent_path()) {
+    if (!artifacts && destination.has_parent_path()) {
         std::filesystem::create_directories(destination.parent_path(), directory_error);
     }
     if (directory_error) {
@@ -1442,19 +1443,23 @@ bool WorldSaveService::write_file_durably(const std::filesystem::path& destinati
         }
     }
 #endif
+    if (artifacts)
+        artifacts->reserve_file(destination);
     std::filesystem::path temp_path;
-    if (!WriteDurableRegionTemp(destination, bytes, temp_path, errors)) {
+    if (!WriteDurableRegionTemp(destination, bytes, temp_path, errors, artifacts)) {
         return false;
     }
     if (InterruptBeforeRegionReplaceForTesting().exchange(false, std::memory_order_acq_rel)) {
-        RemoveTemporaryFile(temp_path);
+        RemoveTemporaryFile(temp_path, artifacts);
         AddError(errors,
                  "file replacement interrupted by test seam before replacing: " +
                      destination.string());
         return false;
     }
+    if (artifacts)
+        artifacts->publishing_file(temp_path, destination);
     if (!ReplaceRegionFileAtomically(temp_path, destination, errors)) {
-        RemoveTemporaryFile(temp_path);
+        RemoveTemporaryFile(temp_path, artifacts);
         return false;
     }
     return true;

@@ -310,12 +310,12 @@ TEST_F(WorldEntryFilesystem, WorldRevisionDistinguishesRefusalFromPartialReplace
 
         // A false return does not imply that the menu world survived: metadata
         // publication happens after the old world has been released.
-        Luminumbra::Persistence::WorldSaveService::set_interrupt_before_region_replace_for_testing(
-            true);
+        Luminumbra::Persistence::WorldSaveService::set_before_active_regions_replace_for_testing(
+            [] { return false; });
         const bool created =
             session.CreateWorld("Interrupted", "1337", "default", nullptr, artifacts);
-        Luminumbra::Persistence::WorldSaveService::set_interrupt_before_region_replace_for_testing(
-            false);
+        Luminumbra::Persistence::WorldSaveService::set_before_active_regions_replace_for_testing(
+            nullptr);
         EXPECT_FALSE(created);
         EXPECT_NE(session.WorldRevision(), menu_revision);
         EXPECT_EQ(session.GetMetadata().name, "Interrupted");
@@ -510,6 +510,59 @@ TEST_F(WorldEntryFilesystem, UncreatedFileReservationDoesNotClaimLaterFile) {
     Write(file, "existing file created by another writer\n");
     EXPECT_NE(artifacts.rollback().find("changed identity"), std::string::npos);
     EXPECT_EQ(Read(file), "existing file created by another writer\n");
+}
+
+TEST_F(WorldEntryFilesystem, DurablePresetWriterPublishesOwnedFileAndRollsBack) {
+    using Luminumbra::Persistence::WorldSaveService;
+    CreatedWorldArtifacts artifacts;
+    const auto save = root / "created-world";
+    artifacts.create_root(save);
+    std::vector<std::string> errors;
+    ASSERT_TRUE(WorldSaveService::write_file_durably(
+        save / "preset.json", "preset bytes\n", &errors, &artifacts));
+    EXPECT_TRUE(errors.empty());
+    EXPECT_EQ(Read(save / "preset.json"), "preset bytes\n");
+    EXPECT_EQ(DiskBytes(save).size(), 1u);
+    EXPECT_TRUE(artifacts.rollback().empty());
+    EXPECT_FALSE(std::filesystem::exists(save));
+}
+
+TEST_F(WorldEntryFilesystem, InterruptedDurablePresetWriterRetainsOwnedTemporaryFile) {
+    using Luminumbra::Persistence::WorldSaveService;
+    CreatedWorldArtifacts artifacts;
+    const auto save = root / "created-world";
+    artifacts.create_root(save);
+    WorldSaveService::set_interrupt_before_region_replace_for_testing(true);
+    struct ResetInterruption {
+        ~ResetInterruption() {
+            WorldSaveService::set_interrupt_before_region_replace_for_testing(false);
+        }
+    } reset;
+    std::vector<std::string> errors;
+    EXPECT_FALSE(WorldSaveService::write_file_durably(
+        save / "preset.json", "preset bytes\n", &errors, &artifacts));
+    EXPECT_FALSE(errors.empty());
+    EXPECT_FALSE(std::filesystem::exists(save / "preset.json"));
+    const auto bytes = DiskBytes(save);
+    ASSERT_EQ(bytes.size(), 1u);
+    EXPECT_TRUE(bytes.begin()->first.starts_with("preset.json.tmp."));
+    EXPECT_EQ(bytes.begin()->second, "preset bytes\n");
+    EXPECT_TRUE(artifacts.rollback().empty());
+    EXPECT_FALSE(std::filesystem::exists(save));
+}
+
+TEST_F(WorldEntryFilesystem, DurablePresetWriterRefusesExistingDestination) {
+    using Luminumbra::Persistence::WorldSaveService;
+    CreatedWorldArtifacts artifacts;
+    const auto save = root / "created-world";
+    artifacts.create_root(save);
+    Write(save / "preset.json", "existing preset\n");
+    EXPECT_THROW(WorldSaveService::write_file_durably(
+                     save / "preset.json", "new preset\n", nullptr, &artifacts),
+                 std::runtime_error);
+    EXPECT_EQ(Read(save / "preset.json"), "existing preset\n");
+    EXPECT_FALSE(artifacts.rollback().empty());
+    EXPECT_EQ(Read(save / "preset.json"), "existing preset\n");
 }
 
 TEST_F(WorldEntryFilesystem, InterruptedMetadataWriterRetainsOwnedTemporaryFileUntilRollback) {

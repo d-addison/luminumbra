@@ -126,6 +126,9 @@ public:
     // Save the current world state
     bool SaveWorld();
 
+    // Read-only destination preset/identity check, before any save writes or acknowledgements.
+    [[nodiscard]] bool SavedPresetCompatible(const std::filesystem::path& save_dir) const;
+
     // --- Runtime world-state persistence ---
     // Persists streamed chunk voxel state under the canonical world save dir
     // (worlds/saves/<world_id>). Incremental contract: nothing is written when
@@ -267,6 +270,8 @@ public:
     void ApplySystemConfig(const luminumbra::core::SystemConfig& config);
     // Computed on demand from the current effective simulation gates and tuning.
     [[nodiscard]] std::string SystemConfigIdentity() const;
+    // Resolved preset, biome/structure dependencies and captured species bytes.
+    // Shared by TCP Hello, lockstep and replay; never re-reads content.
     [[nodiscard]] const std::string& PresetContentHash() const {
         return m_presetContentHash;
     }
@@ -508,6 +513,8 @@ private:
     // Stable only in the clock slice; world-anchored pages replace this grid in C4.
     Vec3 m_ambientFieldAnchor{};
     std::string m_presetContentHash;
+    // Exact canonical preset source, independent of dependency-content identity.
+    std::string m_savedPresetJson;
     luminumbra::core::SystemConfig m_appliedSystemConfig =
         luminumbra::core::SystemConfig::Defaults();
     bool m_activeRegionsEnabled = true;
@@ -540,9 +547,9 @@ private:
     std::unique_ptr<Luminumbra::scripting::LuaState> m_scriptState;
     bool m_aetherStateEnabled = true;
     std::unique_ptr<luminumbra::ai::ScentField> m_scentField;
-    // Species definitions (see GetSpeciesTable). unique_ptr so this header only
-    // needs the forward declaration (the registry is header-only nlohmann-parsing code).
-    std::unique_ptr<luminumbra::ai::CreatureSpeciesRegistry> m_speciesTable;
+    // Immutable species definitions shared with the captured dependency snapshot.
+    // Only the forward declaration is needed for the header-only parsing registry.
+    std::shared_ptr<const luminumbra::ai::CreatureSpeciesRegistry> m_speciesTable;
     // Living-world substrate fields (lazily created when a participant first opts in, so a world
     // with none stays byte-identical). Anchored at the spawn point with a fixed grid extent.
     std::unique_ptr<luminumbra::foliage::SoilGrid> m_soilGrid;
@@ -566,7 +573,6 @@ private:
     // Persist the layer's record beside the chunk save (null/all-zero -> no
     // file). Serialize normalizes, which is state-idempotent at save time.
     bool SaveEnergyFieldRecord(const std::filesystem::path& save_dir);
-    void LoadSpeciesDefinitions();     // fills m_speciesTable (world create + load)
     void ApplyWeatherRainWiring();     // Wires weather to rain when opted in.
     void ApplyWaterResolutionWiring(); // Raises the water solver to High when opted in.
     bool m_finiteHydrologyEnabled = true;

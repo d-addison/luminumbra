@@ -49,22 +49,12 @@ void WorldGenViewer::RecreateWorldSystem() {
         std::make_unique<Systems::SHIELD_WorldSystem>(nullptr, nullptr, m_params, m_seed);
 }
 
-void WorldGenViewer::UpdateAndRender(bool& is_open,
-                                     Systems::SHIELD_WorldSystem* main_world_system) {
-    if (!is_open)
-        return;
-
+void WorldGenViewer::DrawContents(Systems::SHIELD_WorldSystem* main_world_system) {
     // Re-create the world system if parameters have changed, then regenerate the texture.
     if (m_paramsChanged) {
         RecreateWorldSystem();
         RegenerateTexture();
         m_paramsChanged = false;
-    }
-
-    ImGui::SetNextWindowSize(ImVec2(550, 750), ImGuiCond_FirstUseEver);
-    if (!ImGui::Begin("SHIELD Generator Inspector", &is_open)) {
-        ImGui::End();
-        return;
     }
 
     // --- Preview Section ---
@@ -88,7 +78,8 @@ void WorldGenViewer::UpdateAndRender(bool& is_open,
             m_paramsChanged = true;
         }
 
-        if (ImGui::Button("Apply to World & Regenerate")) {
+        ImGui::BeginDisabled(!main_world_system);
+        if (ImGui::Button("Apply & Regenerate")) {
             if (main_world_system) {
                 LUMINUMBRA_CORE_INFO("Applying new generator settings to the world.");
                 main_world_system->set_params(m_params);
@@ -96,6 +87,9 @@ void WorldGenViewer::UpdateAndRender(bool& is_open,
                 main_world_system->regenerate_all_chunks(nullptr); // Pass physics system if needed
             }
         }
+        ImGui::EndDisabled();
+        if (!main_world_system)
+            ImGui::TextDisabled("Live application requires an ordinary local world");
     }
 
     if (ImGui::CollapsingHeader("Artifact Layers", ImGuiTreeNodeFlags_DefaultOpen)) {
@@ -154,8 +148,6 @@ void WorldGenViewer::UpdateAndRender(bool& is_open,
     if (m_graphEnabled) {
         RenderLayerGraphPanel();
     }
-
-    ImGui::End();
 }
 
 void WorldGenViewer::RenderLayerGraphPanel() {
