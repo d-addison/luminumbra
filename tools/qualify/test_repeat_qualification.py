@@ -803,13 +803,13 @@ if os.name == "posix":
             real_snapshot = rq.snapshot_files
             recursive_calls: list[Path] = []
 
-            def listing_fails_after_crash(root, recursive, skip=None, errors=None):  # type: ignore[no-untyped-def]
+            def listing_fails_after_crash(root, recursive, skip=None, errors=None, **kwargs):
                 # The first recursive snapshot is taken before the child runs; the next is post-crash.
                 if recursive and root == self.work:
                     recursive_calls.append(root)
                     if len(recursive_calls) > 1:
                         raise PermissionError("listing denied")
-                return real_snapshot(root, recursive, skip, errors)
+                return real_snapshot(root, recursive, skip, errors, **kwargs)
 
             with mock.patch.object(rq, "snapshot_files", side_effect=listing_fails_after_crash):
                 code = rq.run_qualification(
@@ -1068,7 +1068,7 @@ class DumpSettleTest(unittest.TestCase):
         paths = [self.dump("mini.dmp"), self.dump("full.dmp", 200 * 1024 * 1024)]
         with self.track_reads() as reads:
             snapshot = rq.snapshot_files(self.folder, False)
-        self.assertTrue(reads, "snapshots must fingerprint dump contents")
+        self.assertTrue(reads, "snapshots must sample dump contents")
         self.assertEqual(set(snapshot), {str(path) for path in paths})
         self.assertEqual(rq.changed_files({}, snapshot), sorted(map(str, paths)))
         self.assertLessEqual(sum(length for _, _, length in reads), rq.SNAPSHOT_TOTAL_READ_BYTES)
@@ -1105,6 +1105,57 @@ class DumpSettleTest(unittest.TestCase):
         self.assertEqual(set(settled), set(snapshot))
         self.assertEqual(self.now, 3.0)
         self.assertEqual(probes.count(unsampled), 4)
+
+    def test_preexisting_dumps_exhaust_budget_without_false_collection(self) -> None:
+        count = rq.SNAPSHOT_TOTAL_READ_BYTES // rq.SNAPSHOT_FILE_READ_BYTES + 2
+        old = [self.dump(f"old-{index:02}.dmp") for index in range(count)]
+        for recursive in (False, True):
+            with self.subTest(recursive=recursive):
+                before = rq.snapshot_files(self.folder, recursive)
+                unsampled = [source for source, stamp in before.items() if not stamp.fingerprints]
+                self.assertEqual(len(unsampled), 2)
+                with self.track_reads() as reads:
+                    unchanged = self.ordered_snapshot(list(reversed(old)), recursive, before)
+                self.assertEqual(before, unchanged)
+                self.assertEqual(rq.changed_files(before, unchanged), [])
+                self.assertEqual(sum(length for _, _, length in reads), rq.SNAPSHOT_TOTAL_READ_BYTES)
+                with mock.patch.object(rq.shutil, "copy2") as copy:
+                    self.assertEqual(rq.copy_changed_files(
+                        self.folder, before, self.root / "unchanged", recursive=recursive,
+                    ), [])
+                copy.assert_not_called()
+                # Old dumps alone cannot satisfy the requirement for a new dump.
+                with self.assertRaisesRegex(TimeoutError, "settle deadline"):
+                    self.settle(before=before, timeout=2.0)
+
+                new = self.dump("a-new.dmp", size=128)
+                with self.track_reads() as reads:
+                    after = self.ordered_snapshot([new, *reversed(old)], recursive, before)
+                self.assertEqual(sum(length for _, _, length in reads), rq.SNAPSHOT_TOTAL_READ_BYTES)
+                self.assertFalse(after[str(new)].fingerprints)
+                self.assertEqual({source: after[source] for source in before}, before)
+                self.assertEqual(rq.changed_files(before, after), [str(new)])
+                start = self.now
+                probes: list[Path] = []
+
+                def probe(path):
+                    probes.append(path)
+                    return str(path) != unsampled[0] or self.now >= start + 2.0
+
+                settled = self.settle(before=before, probe=probe)
+                self.assertEqual(self.now, start + 3.0)
+                self.assertEqual(probes.count(Path(unsampled[0])), 4)
+                self.assertEqual(rq.changed_files(before, settled), [str(new)])
+                for snapshot in (None, settled):
+                    with mock.patch.object(rq.shutil, "copy2", wraps=shutil.copy2) as copy:
+                        copies = rq.copy_changed_files(
+                            self.folder, before, self.root / "collected", recursive=recursive,
+                            after=snapshot,
+                        )
+                    self.assertEqual(copies, [str(self.root / "collected" / new.name)])
+                    copy.assert_called_once_with(str(new), Path(copies[0]))
+                    self.assertEqual(Path(copies[0]).read_bytes(), new.read_bytes())
+                new.unlink()
 
     def test_growing_dump_resets_stable_window(self) -> None:
         path = self.dump("growing.dmp")
@@ -1167,11 +1218,10 @@ class DumpSettleTest(unittest.TestCase):
                 mock.patch.object(rq, "SNAPSHOT_FILE_READ_BYTES", 64):
             before = rq.snapshot_files(self.folder, False)
             new = self.dump("new.dmp")
-            # Directory enumeration order is not guaranteed. Make the new file
-            # consume the old file's previous coverage deterministically.
+            # The new file sorts first, but cannot consume baseline coverage.
             with mock.patch.object(Path, "iterdir", return_value=iter([new, old])):
-                after = rq.snapshot_files(self.folder, False)
-            self.assertNotEqual(before[str(old)].fingerprints, after[str(old)].fingerprints)
+                after = rq.snapshot_files(self.folder, False, baseline=before)
+            self.assertEqual(before[str(old)].fingerprints, after[str(old)].fingerprints)
             self.assertEqual(rq.changed_files(before, after), [str(new)])
             with mock.patch.object(Path, "iterdir", return_value=iter([new, old])), \
                     mock.patch.object(rq.shutil, "copy2") as copy:
@@ -1190,6 +1240,125 @@ class DumpSettleTest(unittest.TestCase):
                                original_stat if candidate == path else real_stat(candidate, *a, **kw)):
             after = rq.snapshot_files(self.folder, False)
         self.assertEqual(rq.changed_files(before, after), [str(path)])
+
+    def ordered_snapshot(self, paths, recursive, baseline=None):
+        with mock.patch.object(Path, "iterdir", return_value=iter(paths)), \
+                mock.patch.object(rq.os, "walk", return_value=iter([
+                    (str(self.folder), [], [path.name for path in paths]),
+                ])):
+            return rq.snapshot_files(self.folder, recursive, baseline=baseline)
+
+    def test_remaining_budget_samples_new_and_resized_files_in_path_order(self) -> None:
+        old = self.dump("z-old.dmp", size=128)
+        resized = self.dump("b-resized.dmp", size=128)
+        for recursive in (False, True):
+            with self.subTest(recursive=recursive):
+                with resized.open("r+b") as handle:
+                    handle.truncate(1)
+                with mock.patch.object(rq, "SNAPSHOT_TOTAL_READ_BYTES", 160), \
+                        mock.patch.object(rq, "SNAPSHOT_FILE_READ_BYTES", 64):
+                    before = self.ordered_snapshot([old, resized], recursive)
+                    with resized.open("r+b") as handle:
+                        handle.truncate(128)
+                    first = self.dump("a-new.dmp", size=128)
+                    last = self.dump("c-new.dmp", size=128)
+                    with self.track_reads() as reads:
+                        after = self.ordered_snapshot([last, resized, first, old], recursive, before)
+                self.assertEqual(reads, [
+                    (old, 0, 32), (old, 96, 32),
+                    (first, 0, 32), (first, 96, 32),
+                    (resized, 0, 16), (resized, 112, 16),
+                ])
+                self.assertEqual(after[str(old)], before[str(old)])
+                self.assertFalse(after[str(last)].fingerprints)
+                self.assertEqual(rq.changed_files(before, after), sorted(map(str, [first, resized, last])))
+                first.unlink()
+                last.unlink()
+
+    def test_budget_shift_detects_rewrite_with_unchanged_metadata(self) -> None:
+        path = self.dump("rewrite.dmp", size=128)
+        other = self.dump("other.dmp", size=128)
+        real_stat = Path.stat
+        for recursive in (False, True):
+            for shrinking in (False, True):
+                for offset in (0, path.stat().st_size - 1):
+                    with self.subTest(recursive=recursive, shrinking=shrinking, offset=offset):
+                        with other.open("r+b") as handle:
+                            handle.truncate(128 if shrinking else 1)
+                        original_stat = path.stat()
+                        first = [path, other] if shrinking else [other, path]
+                        with mock.patch.object(rq, "SNAPSHOT_TOTAL_READ_BYTES", 96), \
+                                mock.patch.object(rq, "SNAPSHOT_FILE_READ_BYTES", 64):
+                            before = self.ordered_snapshot(first, recursive)
+                            with other.open("r+b") as handle:
+                                handle.truncate(1 if shrinking else 128)
+                            with path.open("r+b") as handle:
+                                handle.seek(offset)
+                                previous = handle.read(1)
+                                handle.seek(offset)
+                                handle.write(bytes([previous[0] ^ 1]))
+                            os.utime(path, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
+                            # Model deferred change times as well as a restored mtime.
+                            with mock.patch.object(Path, "stat", lambda candidate, *a, **kw:
+                                                   original_stat if candidate == path else
+                                                   real_stat(candidate, *a, **kw)):
+                                with self.track_reads() as reads:
+                                    after = self.ordered_snapshot(list(reversed(first)), recursive, before)
+                        self.assertEqual(
+                            [(offset, length) for source, offset, length in reads if source == path],
+                            [(offset, length) for offset, length, _ in before[str(path)].fingerprints],
+                        )
+                        self.assertEqual(reads[0][0], path)
+                        self.assertLessEqual(sum(length for _, _, length in reads), 96)
+                        self.assertEqual(before[str(path)][:4], after[str(path)][:4])
+                        self.assertNotEqual(before[str(path)].fingerprints, after[str(path)].fingerprints)
+                        self.assertEqual(rq.changed_files(before, after), sorted(map(str, [path, other])))
+                        copies = rq.copy_changed_files(
+                            self.folder, before, self.root / "collected", after=after,
+                        )
+                        self.assertEqual(copies, [str(self.root / "collected" / source.name)
+                                                  for source in sorted([path, other])])
+                        self.assertEqual((self.root / "collected" / path.name).read_bytes(), path.read_bytes())
+
+    def test_budget_shift_preserves_unchanged_dump(self) -> None:
+        path = self.dump("unchanged.dmp", size=128)
+        other = self.dump("other.dmp", size=128)
+        for recursive in (False, True):
+            for shrinking in (False, True):
+                with self.subTest(recursive=recursive, shrinking=shrinking):
+                    first = [path, other] if shrinking else [other, path]
+                    with mock.patch.object(rq, "SNAPSHOT_TOTAL_READ_BYTES", 96), \
+                            mock.patch.object(rq, "SNAPSHOT_FILE_READ_BYTES", 64):
+                        before = self.ordered_snapshot(first, recursive)
+                        after = self.ordered_snapshot(list(reversed(first)), recursive, before)
+                    self.assertEqual(before[str(path)].fingerprints, after[str(path)].fingerprints)
+                    self.assertEqual(rq.changed_files(before, after), [])
+                    with mock.patch.object(rq.shutil, "copy2") as copy:
+                        self.assertEqual(rq.copy_changed_files(
+                            self.folder, before, self.root / "collected", after=after,
+                        ), [])
+                    copy.assert_not_called()
+
+    def test_read_error_changes_coverage_and_collects_conservatively(self) -> None:
+        path = self.dump("old.dmp", size=128)
+        other = self.dump("other.dmp", size=128)
+        for recursive in (False, True):
+            with self.subTest(recursive=recursive):
+                with mock.patch.object(rq, "SNAPSHOT_TOTAL_READ_BYTES", 64), \
+                        mock.patch.object(rq, "SNAPSHOT_FILE_READ_BYTES", 64):
+                    before = self.ordered_snapshot([path, other], recursive)
+                    errors: list[str] = []
+                    with mock.patch.object(Path, "open", side_effect=PermissionError("read denied")):
+                        after = rq.snapshot_files(self.folder, recursive, baseline=before, errors=errors)
+                sampled = next(source for source, stamp in before.items() if stamp.fingerprints)
+                self.assertTrue(before[sampled].fingerprints)
+                self.assertFalse(after[sampled].fingerprints)
+                self.assertEqual(len(errors), 1)
+                self.assertIn("read denied", errors[0])
+                self.assertEqual(rq.changed_files(before, after), [sampled])
+                with mock.patch.object(rq, "SNAPSHOT_TOTAL_READ_BYTES", 0):
+                    unsampled = self.ordered_snapshot([path], recursive)
+                self.assertEqual(rq.changed_files(unsampled, unsampled), [])
 
     def test_deadline_expiry_during_fingerprint_read_stops_collection(self) -> None:
         self.dump("slow.dmp")

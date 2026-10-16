@@ -221,7 +221,7 @@ class FileStamp(NamedTuple):
     mtime_ns: int
     ctime_ns: int
     identity: tuple[int, int]
-    # Each fingerprint records its exact offset and length, including short reads.
+    # At most two range digests per file; raw sample bytes are never retained.
     fingerprints: tuple[tuple[int, int, str], ...]
 
 
@@ -236,13 +236,15 @@ def snapshot_files(
     skip: Callable[[Path], bool] | None = None,
     errors: list[str] | None = None,
     *,
+    baseline: dict[str, FileStamp] | None = None,
     deadline: float | None = None,
     clock: Callable[[], float] | None = None,
 ) -> dict[str, FileStamp]:
-    """Record metadata and bounded prefix/suffix hashes; never omit an oversized file.
+    """Record metadata and bounded range hashes; never omit an oversized file.
 
-    The shared read budget can leave files with metadata alone. Coverage is part of
-    each stamp, so changing that budget's allocation cannot imply a content rewrite.
+    Preserve baseline coverage for files with unchanged size and identity, even
+    when they have no samples. Read those ranges first; their total already fits
+    SNAPSHOT_TOTAL_READ_BYTES. Allocate the remainder in sorted path order.
     Deadline expiry always propagates, even when inspection errors are collected.
     """
     clock = clock or time.monotonic
@@ -293,34 +295,48 @@ def snapshot_files(
                 continue
             check_settle_deadline(deadline, clock)
             if stat.S_ISREG(file_stat.st_mode):
-                allowance = min(file_stat.st_size, SNAPSHOT_FILE_READ_BYTES, remaining)
-                fingerprints: list[tuple[int, int, str]] = []
-                if allowance:
-                    prefix = (allowance + 1) // 2
-                    ranges = [(0, prefix)]
-                    if allowance > prefix:
-                        ranges.append((file_stat.st_size - (allowance - prefix), allowance - prefix))
-                    try:
-                        with path.open("rb", buffering=0) as handle:
-                            for offset, length in ranges:
-                                check_settle_deadline(deadline, clock)
-                                handle.seek(offset)
-                                # Charge requested bytes even if the read fails or is short.
-                                remaining -= length
-                                chunk = handle.read(length)
-                                check_settle_deadline(deadline, clock)
-                                fingerprints.append((offset, len(chunk), hashlib.sha256(chunk).hexdigest()))
-                    except OSError as exc:
-                        inspection_error(path, exc)
-                        fingerprints = []
                 result[str(path)] = FileStamp(
                     file_stat.st_size, file_stat.st_mtime_ns, file_stat.st_ctime_ns,
-                    (file_stat.st_dev, file_stat.st_ino), tuple(fingerprints),
+                    (file_stat.st_dev, file_stat.st_ino), (),
                 )
     except OSError as exc:
         if errors is None:
             raise
         traversal_error(exc)
+
+    def pinned(path: str) -> bool:
+        previous = baseline.get(path) if baseline is not None else None
+        return (previous is not None and previous.size == result[path].size and
+                previous.identity == result[path].identity)
+
+    for source in sorted(result, key=lambda path: (not pinned(path), path)):
+        check_settle_deadline(deadline, clock)
+        stamp = result[source]
+        if baseline is not None and pinned(source):
+            ranges = [(offset, length) for offset, length, _digest in baseline[source].fingerprints]
+        else:
+            allowance = min(stamp.size, SNAPSHOT_FILE_READ_BYTES, remaining)
+            prefix = (allowance + 1) // 2
+            ranges = [(0, prefix)] if allowance else []
+            if allowance > prefix:
+                ranges.append((stamp.size - (allowance - prefix), allowance - prefix))
+        fingerprints: list[tuple[int, int, str]] = []
+        if ranges:
+            try:
+                with Path(source).open("rb", buffering=0) as handle:
+                    for offset, length in ranges:
+                        check_settle_deadline(deadline, clock)
+                        handle.seek(offset)
+                        # Charge requested bytes even if the read fails or is short.
+                        # Each transient chunk is at most SNAPSHOT_FILE_READ_BYTES.
+                        remaining -= length
+                        chunk = handle.read(length)
+                        check_settle_deadline(deadline, clock)
+                        fingerprints.append((offset, len(chunk), hashlib.sha256(chunk).hexdigest()))
+            except OSError as exc:
+                inspection_error(Path(source), exc)
+                fingerprints = []
+        result[source] = stamp._replace(fingerprints=tuple(fingerprints))
     check_settle_deadline(deadline, clock)
     return result
 
@@ -460,11 +476,10 @@ def core_collection_skip(
 def file_rewritten(before: FileStamp, after: FileStamp) -> bool:
     if before[:4] != after[:4]:
         return True
-    before_ranges = tuple((offset, length) for offset, length, _digest in before.fingerprints)
-    after_ranges = tuple((offset, length) for offset, length, _digest in after.fingerprints)
-    # Unequal coverage provides no evidence of a rewrite. Metadata still detects
-    # growth, replacement and completed writes even when no read budget remains.
-    return before_ranges == after_ranges and before.fingerprints != after.fingerprints
+    # Equal coverage compares digests; changed coverage (e.g. a read error) fails
+    # closed. Two empty samples rely on metadata; the settle writer probe covers
+    # deferred-timestamp rewrites when there is no sampling budget.
+    return before.fingerprints != after.fingerprints
 
 
 def changed_files(before: dict[str, FileStamp], after: dict[str, FileStamp]) -> list[str]:
@@ -491,7 +506,7 @@ def copy_changed_files(
     copies: list[str] = []
     try:
         changed = changed_files(before, after if after is not None else
-                                snapshot_files(root, recursive, skip, errors))
+                                snapshot_files(root, recursive, skip, errors, baseline=before))
     except OSError as exc:
         if errors is None:
             raise
@@ -1184,7 +1199,8 @@ def wait_for_dump_settle(
     stable_since: float | None = None
     while True:
         check_settle_deadline(deadline, clock)
-        snapshot = snapshot_files(folder, False, skip, errors, deadline=deadline, clock=clock)
+        snapshot = snapshot_files(folder, False, skip, errors, baseline=before,
+                                  deadline=deadline, clock=clock)
         current = {path: snapshot[path] for path in changed_files(before, snapshot)}
         closed = bool(current)
         # Probe all observed dumps: an old file may still be open with its file
