@@ -110,6 +110,9 @@ public:
     // Save the current world state
     bool SaveWorld();
 
+    // Read-only destination preset/identity check, before any save writes or acknowledgements.
+    [[nodiscard]] bool SavedPresetCompatible(const std::filesystem::path& save_dir) const;
+
     // --- Runtime world-state persistence ---
     // Persists streamed chunk voxel state under the canonical world save dir
     // (worlds/saves/<world_id>). Incremental contract: nothing is written when

@@ -1615,6 +1615,39 @@ bool GameSession::SaveWorld() {
     return SaveWorldMetadataTo(GetWorldSaveDir());
 }
 
+bool GameSession::SavedPresetCompatible(const fs::path& save_dir) const {
+    const auto& canonical = m_savedPresetJson;
+    try {
+        const auto preset_path = save_dir / "preset.json";
+        const bool has_preset = fs::exists(preset_path);
+        const auto metadata_path = save_dir / "world_info.json";
+        if (fs::exists(metadata_path)) {
+            std::ifstream input(metadata_path);
+            const auto metadata = nlohmann::json::parse(input);
+            if (!metadata.is_object())
+                return false;
+            if (metadata.contains("presetFormat") &&
+                (!metadata.at("presetFormat").is_number_integer() ||
+                 metadata.at("presetFormat") != Persistence::kSavedPresetFormat || !has_preset ||
+                 !metadata.contains("presetIdentity")))
+                return false;
+            if (metadata.contains("presetIdentity") &&
+                (canonical.empty() || !metadata.at("presetIdentity").is_string() ||
+                 metadata.at("presetIdentity").get<std::string>() !=
+                     Persistence::StableChecksum(canonical)))
+                return false;
+        }
+        if (has_preset) {
+            std::ifstream input(preset_path);
+            return !canonical.empty() && nlohmann::json::parse(input).dump() == canonical;
+        }
+        // Unmarked legacy saves and new destinations may embed the session's preset later.
+        return true;
+    } catch (const std::exception&) {
+        return false;
+    }
+}
+
 namespace {
 bool PersistSavedPreset(const fs::path& save_dir, const std::string& canonical) {
     if (canonical.empty())
@@ -1635,7 +1668,7 @@ bool PersistSavedPreset(const fs::path& save_dir, const std::string& canonical) 
 bool GameSession::SaveWorldMetadataTo(const fs::path& save_dir) {
     if (!IsSimulationTickBoundary() || save_dir.empty() ||
         !ClockConfigurationCompatible(save_dir) || m_transientWorld || m_metadata.worldId.empty() ||
-        !m_worldOpenError.empty())
+        !m_worldOpenError.empty() || !SavedPresetCompatible(save_dir))
         return false;
     if (m_activeRegionsEnabled) {
         if (!Persistence::WorldSaveService::validate_save(save_dir))
@@ -1721,6 +1754,11 @@ bool GameSession::SaveWorldStateTo(const std::filesystem::path& save_dir,
     }
 
     if (!Persistence::WorldSaveService::validate_save(save_dir))
+        return false;
+
+    // Refuse a changed preset or identity before any snapshot write or dirty acknowledgement,
+    // including the chunk-free plant/energy path and saves with active regions disabled.
+    if (!SavedPresetCompatible(save_dir))
         return false;
 
     // Clock snapshots can contain energy or metadata without any chunk/plant writer
