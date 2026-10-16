@@ -415,7 +415,7 @@ TEST(WorldClockTest, StrictV2AndMarkerRefusalMatrixLeavesOutputUnchanged) {
     EXPECT_EQ(clock.calendar(), WorldCalendar::Legacy());
     std::optional<WorldCalendar> marker;
     ASSERT_TRUE(WorldClock::read_render_calendar(metadata, marker, error));
-    ASSERT_TRUE(marker);
+    ASSERT_TRUE(marker.has_value());
     EXPECT_EQ(*marker, WorldCalendar{});
 }
 

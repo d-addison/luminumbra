@@ -1030,6 +1030,10 @@ TEST_F(WorldOpenRefusal, FreshRunnerBootAndAbsentLedgerReloadPreserveSchedulerId
 }
 
 TEST_F(WorldOpenRefusal, PersistedSchedulerIdentityRefusesDifferentAdmissionAndReplayRules) {
+    // Keep the calendar identical to fresh sessions so only scheduler rules differ.
+    auto metadata = nlohmann::json::parse(Read(save / "world_info.json"));
+    world::WorldClock{}.write_metadata(metadata);
+    Write(save / "world_info.json", metadata.dump());
     // Each field changes independently while both sessions start with default member storage.
     // Identity must observe the decoded ledger rather than that original storage.
     world::RegionSchedulerConfig work_limit, hold_ticks, reduced_shift;
@@ -1108,6 +1112,10 @@ TEST_F(WorldOpenRefusal, PersistedSchedulerIdentityRefusesDifferentAdmissionAndR
 }
 
 TEST_F(WorldOpenRefusal, LoadedSchedulerSurvivesTransientCreateAndAbsentLedgerReplacement) {
+    // Fresh and reloaded sessions must resolve the same calendar in this scheduler test.
+    auto metadata = nlohmann::json::parse(Read(save / "world_info.json"));
+    world::WorldClock{}.write_metadata(metadata);
+    Write(save / "world_info.json", metadata.dump());
     const world::RegionSchedulerConfig scheduler{10, 3, 2};
     world::ActiveRegionLedger persisted(scheduler);
     persisted.set_local_anchor(Vec3(8, 18, 8));
@@ -1139,6 +1147,9 @@ TEST_F(WorldOpenRefusal, LoadedSchedulerSurvivesTransientCreateAndAbsentLedgerRe
 }
 
 TEST_F(WorldOpenRefusal, ExplicitSchedulerConflictRefusesLoadAndRunnerBootWithoutWriting) {
+    auto metadata = nlohmann::json::parse(Read(save / "world_info.json"));
+    world::WorldClock{}.write_metadata(metadata);
+    Write(save / "world_info.json", metadata.dump());
     const world::RegionSchedulerConfig scheduler{10, 3, 2};
     world::ActiveRegionLedger persisted(scheduler);
     persisted.set_local_anchor(Vec3(8, 18, 8));

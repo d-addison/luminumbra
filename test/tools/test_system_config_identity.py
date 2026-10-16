@@ -17,8 +17,8 @@ SHIPPED = json.loads((ROOT / "data/common/systems.json").read_text(encoding="utf
 
 def canonical_bytes(document, *, finite_hydrology=True, rain_scale_mm=25,
                     region_work_limit=(1 << 64) - 1, region_hold_ticks=30,
-                    region_reduced_shift=1):
-    result = bytearray(b"system-config:v3:")
+                    region_reduced_shift=1, calendar=None):
+    result = bytearray(b"system-config:v4:")
     for key_id, key in enumerate(SCHEMA["keys"]):
         if key["section"] != "sim" and key["enum"] != "RenderCircadian":
             continue
@@ -50,6 +50,13 @@ def canonical_bytes(document, *, finite_hydrology=True, rain_scale_mm=25,
                                           int(resolved) if ticks else resolved))
     result.extend(struct.pack("<BiQIB", int(finite_hydrology), rain_scale_mm,
                               region_work_limit, region_hold_ticks, region_reduced_shift))
+    # A session without a world/marker uses the legacy presentation calendar
+    # when active regions are disabled. Booted sessions supply their calendar.
+    if calendar is None:
+        active = document.get("sim", {}).get("active_regions", {}).get("enabled", True)
+        calendar = (162000, 8, 2, 3, 8) if active else (216000, 8, 1, 2, 8)
+    result.extend(b"calendar-epoch:v1:")
+    result.extend(struct.pack("<IIIII", *calendar))
     return bytes(result)
 
 
@@ -81,8 +88,8 @@ class SystemConfigIdentityTest(unittest.TestCase):
         self.assertNotEqual(identity(historical), identity(SHIPPED))
 
     def test_exact_shipping_pin(self):
-        self.assertEqual(len(canonical_bytes(SHIPPED)), 297)
-        self.assertEqual(identity(SHIPPED), "60ab3c242d54ce89")
+        self.assertEqual(len(canonical_bytes(SHIPPED)), 335)
+        self.assertEqual(identity(SHIPPED), "49f694fd70645bcc")
         self.assertEqual(canonical_bytes({}), canonical_bytes(SHIPPED))
 
     def test_every_applied_flag_and_parameter(self):
@@ -135,6 +142,15 @@ class SystemConfigIdentityTest(unittest.TestCase):
         changed["render"]["moonlight"]["params"]["strength"] = 0.75
         changed["user"] = {"video": {"fov": 90}}
         self.assertEqual(identity(changed), identity(SHIPPED))
+
+    def test_each_resolved_calendar_field_changes_identity(self):
+        baseline = identity(SHIPPED)
+        for calendar in ((162001, 8, 2, 3, 8), (162000, 9, 2, 3, 8),
+                         (162000, 8, 1, 3, 8), (162000, 8, 2, 5, 8),
+                         (162000, 8, 2, 3, 9), (216000, 8, 1, 2, 8)):
+            with self.subTest(calendar=calendar):
+                self.assertNotEqual(identity(SHIPPED, calendar=calendar), baseline)
+        self.assertEqual(identity(SHIPPED, calendar=(162000, 8, 2, 3, 8)), baseline)
 
     def test_disabled_tuning_uses_compiled_default(self):
         disabled = {"sim": {"ecology": {"enabled": False}}}

@@ -881,6 +881,10 @@ bool WorldSaveService::save_metadata(const std::string& bytes,
             AddError(errors, clock_error);
             return false;
         }
+        if (!calendar.has_value()) {
+            AddError(errors, "Corrupt world metadata: missing renderCalendar.");
+            return false;
+        }
         metadata["renderCalendar"] = world::WorldClock(0, *calendar).calendar_metadata();
     }
     const std::string output_bytes =

@@ -9,19 +9,19 @@ Missing identities on either side always fail compatibility, including two empty
 
 The fields are the simulation keys and owned parameters in `ConfigSchema.json`, plus
 `render.circadian` amplitude, which reaches `RunCircadianOnTick`, and the session options
-for finite hydrology, weather rain scale and region scheduler configuration. The five
-registry gates are hydrology weather, weather events, aether state, water resolution and
-active regions.
+for finite hydrology, weather rain scale, region scheduler configuration and the resolved
+calendar. The five registry gates are hydrology weather, weather events, aether state,
+water resolution and active regions.
 Other key slots are normalized to enabled: their config flags select compiled fallback
 tuning rather than disable the session system; erosion has no session gate. Disabling
 such an override with default tuning therefore leaves the effective identity unchanged.
 Parameters come from current session storage, including clamped plant mutation and the
 integer reproduction counts resolved by `ApplySystemConfig`. Scheduler values come
-directly from the live active-region ledger's effective `config()`. Presentation and user
-settings are excluded. This contract covers effective session rules, rather than world
+directly from the live active-region ledger's effective `config()`. Other presentation and
+user settings are excluded. This contract covers effective session rules, rather than world
 content, initial rosters or per-tick inputs.
 
-Canonical bytes start with ASCII `system-config:v3:`. In generated schema order, each
+Canonical bytes start with ASCII `system-config:v4:`. In generated schema order, each
 included key emits its `SysKey` id as u8, then its effective enabled flag as u8. Each owned
 parameter emits its `SysParam` id as u8, then a scalar type tag and little-endian value:
 
@@ -30,11 +30,19 @@ parameter emits its `SysParam` id as u8, then a scalar type tag and little-endia
 - Tag 2: IEEE binary64 for the three foraging values.
 - Tag 3: u32 for reproduction maturity, cooldown and courtship tick counts.
 
-After the registry slots, v3 appends these fixed-width little-endian values without
+After the registry slots, v4 appends these fixed-width little-endian values without
 padding: finite hydrology (u8, 0 or 1), rain scale (i32, modulo-2^32 representation), region
 work limit (u64), hold ticks (u32) and reduced cadence shift (u8). All five values are
 included even when their associated feature is disabled. No float conversion loses
 adjacent integer values. The defaults append `0119000000ffffffffffffffff1e00000001`.
+Next comes ASCII `calendar-epoch:v1:`, followed by five little-endian u32 values:
+`dayLengthTicks`, `daysPerYear`, `daylightNumerator`, `daylightDenominator` and
+`lunarCycleDays`. Epoch v1 means tick zero is midnight on day zero in midwinter,
+with lunar phase zero. This epoch is fixed by WorldClock, rather than configurable in
+metadata. A future epoch change must change the tag. All resolved calendar fields enter
+the identity, including presentation calendars when active regions are disabled. The
+current simulation tick is mutable state and is excluded. Calendar encoding versions
+are excluded: equivalent resolved legacy/v2 calendars identify equally.
 The domain version changes so older identities cannot be mistaken for this encoding.
 This configuration encoding is independent of the resolved preset hash below.
 
@@ -43,7 +51,7 @@ and reproduction integers would lose adjacent values if converted to binary32. S
 zeros remain distinct. FNV-1a uses offset
 14695981039346656037 and prime 1099511628211, with unsigned 64-bit wraparound. The result
 is 16 lowercase hex digits emitted without locale formatting. Shipped defaults serialize
-to **297 bytes → `60ab3c242d54ce89`**. The independent stdlib computation in
+to **335 bytes → `49f694fd70645bcc`**. The independent stdlib computation in
 `test/tools/test_system_config_identity.py` resolves JSON inputs through binary32 as
 SystemConfig does, applies effective fallback/clamping/count conversion, encodes with
 `struct.pack('<f' / '<d' / '<I', value)`, and folds each byte as
@@ -51,8 +59,10 @@ SystemConfig does, applies effective fallback/clamping/count conversion, encodes
 
 ## Setter audit and pins
 
-`GameSession` supplies the current finite-hydrology boolean, signed rain scale, and all
-three live ledger `RegionSchedulerConfig` fields to the core encoder. The scheduler's work limit,
+`GameSession` supplies the current finite-hydrology boolean, signed rain scale, all
+three live ledger `RegionSchedulerConfig` fields and its resolved calendar to the core encoder.
+With active regions enabled, the clock supplies the calendar; otherwise a render marker
+supplies it, falling back to the legacy calendar when absent. The scheduler's work limit,
 hold ticks and reduced shift affect which regions tick or freeze; the server can override
 them through `--sim-budget-profile`. Runtime Hello construction and replay boot apply the
 same scheduler override as the runner. High-resolution water, weather rain/events,
@@ -78,12 +88,14 @@ Deliberate exclusions from the setter audit:
   simulation rule value. Worldgen content is bound separately by the preset identity below.
 
 The shipping pins in `SystemConfig_test.cpp`, `GameSessionHeadlessWorld_test.cpp`, this
-document and the independent Python encoder change from `da24cea9dbc5159b` to
-`60ab3c242d54ce89` because of the v3 domain and 18 appended bytes. Hardening tests' Hello
-and desync-record identity literals use the same new shipping value; their codec and
+document and the independent Python encoder change from `60ab3c242d54ce89` to
+`49f694fd70645bcc` because of the v4 domain, epoch tag and five calendar fields. Hardening
+tests' Hello and desync-record identity literals use the same new shipping value; their codec and
 record assertions are unchanged. `historical-defaults-off.json` contains configuration,
 not an identity pin, and needs no edit: its effective identity is now
-`74f285c5fa387d66`, with the independent session options still at their defaults.
+`1aaa90fa5312b089` before world boot, with the independent session options still at their
+defaults and the unmarked legacy presentation calendar. Newly created worlds record the
+new render calendar even when active regions are disabled, so identity follows that marker.
 The identity encoding change updates no world-state, terrain, water or replay checkpoint pins.
 
 The scheduler load correction changes no identity pins: compiled/default schedulers

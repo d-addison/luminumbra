@@ -269,6 +269,12 @@ std::string GameSession::SystemConfigIdentity() const {
     values.region_work_limit = scheduler.work_limit;
     values.region_hold_ticks = scheduler.hold_ticks;
     values.region_reduced_shift = scheduler.reduced_shift;
+    const auto calendar = GetRenderCalendar();
+    values.day_length_ticks = calendar.dayLengthTicks;
+    values.days_per_year = calendar.daysPerYear;
+    values.daylight_numerator = calendar.daylightNumerator;
+    values.daylight_denominator = calendar.daylightDenominator;
+    values.lunar_cycle_days = calendar.lunarCycleDays;
     // Tuning-only gates resolve to values in ApplySystemConfig; their flags are
     // normalized to true. Erosion has no session gate. Preserve the canonical slots.
     values.enabled[static_cast<std::size_t>(SysKey::SimHydrologyWeather)] = m_weatherRainEnabled;
@@ -1468,11 +1474,16 @@ bool GameSession::LoadWorld(const std::string& worldId) {
     return true;
 }
 
-bool GameSession::ClockConfigurationCompatible(const fs::path& save_dir) const {
+bool GameSession::ClockConfigurationCompatible(const fs::path& save_dir,
+                                               bool* has_render_calendar) const {
     WorldClock clock;
     bool required = false;
-    return Persistence::WorldSaveService::read_clock_metadata(save_dir, clock, required) &&
-           (!required || m_activeRegionsEnabled);
+    std::optional<WorldCalendar> render_calendar;
+    const bool valid = Persistence::WorldSaveService::read_clock_metadata(
+        save_dir, clock, required, nullptr, nullptr, &render_calendar);
+    if (has_render_calendar)
+        *has_render_calendar = render_calendar.has_value();
+    return valid && (!required || m_activeRegionsEnabled);
 }
 
 void GameSession::RunRegionScheduler(std::uint64_t current_tick) {
@@ -1616,6 +1627,25 @@ bool GameSession::SaveWorld() {
     return SaveWorldMetadataTo(GetWorldSaveDir());
 }
 
+bool GameSession::ReconcileWorldCalendarMetadataTo(const fs::path& save_dir,
+                                                   bool has_saved_render_calendar) {
+    if (m_activeRegionsEnabled || m_renderCalendar.has_value())
+        return SaveWorldMetadataTo(save_dir);
+    if (!has_saved_render_calendar)
+        return true;
+
+    // Legacy snapshots need only remove the destination's stale marker. Preserve
+    // its other metadata, including when the source is a transient preview.
+    nlohmann::json metadata;
+    {
+        std::ifstream input(save_dir / "world_info.json", std::ios::binary);
+        metadata = nlohmann::json::parse(input, nullptr, false);
+    }
+    if (!metadata.is_object() || metadata.erase("renderCalendar") != 1)
+        return false;
+    return Persistence::WorldSaveService::save_metadata(metadata.dump(4) + "\n", save_dir);
+}
+
 bool GameSession::SaveWorldMetadataTo(const fs::path& save_dir) {
     if (!IsSimulationTickBoundary() || save_dir.empty() ||
         !ClockConfigurationCompatible(save_dir) ||
@@ -1698,7 +1728,9 @@ bool GameSession::SaveWorldStateTo(const std::filesystem::path& save_dir,
     if (report) {
         *report = result;
     }
-    if (!IsSimulationTickBoundary() || !ClockConfigurationCompatible(save_dir) ||
+    bool has_saved_render_calendar = false;
+    if (!IsSimulationTickBoundary() ||
+        !ClockConfigurationCompatible(save_dir, &has_saved_render_calendar) ||
         !m_worldOpenError.empty() || !m_worldSystem || save_dir.empty() ||
         (m_activeRegionsEnabled && (m_transientWorld || m_metadata.worldId.empty()))) {
         return false;
@@ -1751,7 +1783,7 @@ bool GameSession::SaveWorldStateTo(const std::filesystem::path& save_dir,
         if (report) {
             *report = result;
         }
-        return (!m_activeRegionsEnabled && !m_renderCalendar) || SaveWorldMetadataTo(save_dir);
+        return ReconcileWorldCalendarMetadataTo(save_dir, has_saved_render_calendar);
     }
 
     Persistence::WorldSaveService service;
@@ -1805,8 +1837,8 @@ bool GameSession::SaveWorldStateTo(const std::filesystem::path& save_dir,
     for (const std::string& error : errors) {
         LUMINUMBRA_CORE_ERROR("World state save failed: {}", error);
     }
-    if (ok && (m_activeRegionsEnabled || m_renderCalendar))
-        ok = SaveWorldMetadataTo(save_dir);
+    if (ok)
+        ok = ReconcileWorldCalendarMetadataTo(save_dir, has_saved_render_calendar);
     if (ok) {
         result.saved = true;
         result.chunks_saved = result.chunks_total; // whole-snapshot layout

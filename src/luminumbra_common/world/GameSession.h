@@ -249,7 +249,7 @@ public:
     // catch). Defaults to the compiled constants -> byte-identical until a caller overrides it from
     // SystemConfig sim.ecology (ai::ResolveEcologyTuning). Set once after construction.
     void ApplySystemConfig(const luminumbra::core::SystemConfig& config);
-    // Computed on demand from the current effective simulation gates and tuning.
+    // Computed on demand from effective simulation gates, tuning and resolved calendar.
     [[nodiscard]] std::string SystemConfigIdentity() const;
     [[nodiscard]] const std::string& PresetContentHash() const {
         return m_presetContentHash;
@@ -476,7 +476,10 @@ private:
     void ResetWorldSystems();
     void RestoreWorldClock(const WorldClock& clock);
     bool SaveWorldMetadataTo(const std::filesystem::path& save_dir);
-    bool ClockConfigurationCompatible(const std::filesystem::path& save_dir) const;
+    bool ReconcileWorldCalendarMetadataTo(const std::filesystem::path& save_dir,
+                                          bool has_saved_render_calendar);
+    bool ClockConfigurationCompatible(const std::filesystem::path& save_dir,
+                                      bool* has_render_calendar = nullptr) const;
     WorldClock m_worldClock;
     // Presentation persistence bookkeeping; excluded from disabled simulation hashes.
     std::optional<WorldCalendar> m_renderCalendar;

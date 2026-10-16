@@ -40,6 +40,7 @@
 #include "luminumbra_common/core/JobSystem.h"
 #include "luminumbra_common/core/SystemConfig.h"
 #include "luminumbra_common/fields/EnergyFieldState.h"
+#include "luminumbra_common/net/LockstepSession.h"
 #include "luminumbra_common/persistence/WorldSaveService.h"
 #include "luminumbra_common/scripting/LuaState.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
@@ -1225,7 +1226,7 @@ TEST(GameSessionHeadlessWorldTest, RenderCalendarMarkerLifecycleAndSnapshotRepla
     const auto inspected = P::InspectSavedWorld(root.path(), id);
     ASSERT_TRUE(inspected.error.empty()) << inspected.error;
     EXPECT_FALSE(inspected.requires_active_regions);
-    ASSERT_TRUE(inspected.render_calendar);
+    ASSERT_TRUE(inspected.render_calendar.has_value());
     EXPECT_EQ(*inspected.render_calendar, Luminumbra::world::WorldCalendar{});
     ASSERT_TRUE(loaded.LoadWorld(id));
     EXPECT_EQ(loaded.GetRenderCalendar(), session.GetRenderCalendar());
@@ -1264,6 +1265,129 @@ TEST(GameSessionHeadlessWorldTest, RenderCalendarMarkerLifecycleAndSnapshotRepla
     // A transient presentation preview can also export an explicit snapshot.
     ASSERT_TRUE(loaded.CreateTransientWorld("Preview", "1337", "default"));
     ASSERT_TRUE(loaded.SaveWorldStateTo(root.path() / "preview-snapshot"));
+}
+
+TEST(GameSessionHeadlessWorldTest, UnmarkedSnapshotOverwriteRemovesRenderCalendarOnEverySavePath) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession marked;
+    marked.SetRootPath(root.root_string());
+    marked.SetJobSystem(&jobs);
+    marked.SetActiveRegionsEnabled(false);
+    ASSERT_TRUE(marked.CreateWorld("Marked calendar", "1337", "default"));
+
+    for (const bool transient : {false, true}) {
+        SCOPED_TRACE(transient);
+        GameSession legacy, loaded;
+        for (auto* session : {&legacy, &loaded}) {
+            session->SetRootPath(root.root_string());
+            session->SetJobSystem(&jobs);
+            session->SetActiveRegionsEnabled(false);
+        }
+        if (transient) {
+            ASSERT_TRUE(legacy.CreateTransientWorld("Legacy preview", "1337", "default"));
+        } else {
+            ASSERT_TRUE(legacy.CreateWorld("Legacy calendar", "1337", "default"));
+        }
+        ASSERT_TRUE(legacy.LoadWorldStateFrom(root.path() / "absent-calendar"));
+        ASSERT_EQ(legacy.GetRenderCalendar(), Luminumbra::world::WorldCalendar::Legacy());
+        ASSERT_TRUE(loaded.CreateTransientWorld("Calendar reader", "1337", "default"));
+        auto chunk = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3(0, 0, 0));
+        chunk->set_state(Luminumbra::ChunkState::Idle);
+
+        for (int save_path = 0; save_path < 3; ++save_path) {
+            SCOPED_TRACE(save_path);
+            const auto snapshot = root.path() / "calendar-overwrite";
+            fs::remove_all(snapshot);
+            ASSERT_TRUE(marked.SaveWorldStateTo(snapshot));
+            ASSERT_TRUE(nlohmann::json::parse(ReadClockTestFile(snapshot / "world_info.json"))
+                            .contains("renderCalendar"));
+            if (save_path != 0) {
+                chunk->mark_voxel_data_dirty();
+                if (save_path == 1) {
+                    ASSERT_TRUE(legacy.GetWorldSystem()->adopt_streamed_chunk(chunk));
+                }
+                if (save_path == 2) {
+                    Luminumbra::world::WorldStreamingState state;
+                    state.insert_chunk(chunk);
+                    ASSERT_TRUE(P::WorldSaveService{}.save_world(state, snapshot));
+                }
+            }
+            EXPECT_EQ(P::WorldSaveService::has_world_save(snapshot), save_path == 2);
+            Luminumbra::world::WorldStateSaveReport report;
+            ASSERT_TRUE(legacy.SaveWorldStateTo(snapshot, &report));
+            EXPECT_EQ(report.chunks_dirty, save_path == 0 ? 0u : 1u);
+            EXPECT_FALSE(nlohmann::json::parse(ReadClockTestFile(snapshot / "world_info.json"))
+                             .contains("renderCalendar"));
+            ASSERT_TRUE(loaded.LoadWorldStateFrom(snapshot));
+            EXPECT_EQ(loaded.GetRenderCalendar(), Luminumbra::world::WorldCalendar::Legacy());
+        }
+    }
+}
+
+TEST(GameSessionHeadlessWorldTest,
+     CalendarIdentityRejectsDifferentResolvedCalendarsBeforeAdmission) {
+    using Luminumbra::world::WorldCalendar;
+    using Luminumbra::world::WorldClock;
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession original;
+    original.SetRootPath(root.root_string());
+    original.SetJobSystem(&jobs);
+    original.SetActiveRegionsEnabled(false);
+    ASSERT_TRUE(original.CreateWorld("Calendar identity", "1337", "default"));
+    const auto snapshot = root.path() / "identity-calendar";
+    ASSERT_TRUE(original.SaveWorldStateTo(snapshot));
+    const auto metadata = nlohmann::json::parse(ReadClockTestFile(snapshot / "world_info.json"));
+    for (const bool active_regions : {false, true}) {
+        SCOPED_TRACE(active_regions);
+        GameSession first, second;
+        for (auto* session : {&first, &second}) {
+            session->SetRootPath(root.root_string());
+            session->SetJobSystem(&jobs);
+            session->SetActiveRegionsEnabled(active_regions);
+            ASSERT_TRUE(session->CreateTransientWorld("Admission", "1337", "default"));
+        }
+        for (const auto calendar : {WorldCalendar{},
+                                    WorldCalendar{162001, 8, 2, 3, 8},
+                                    WorldCalendar{162000, 9, 2, 3, 8},
+                                    WorldCalendar{162000, 8, 1, 3, 8},
+                                    WorldCalendar{162000, 8, 2, 5, 8},
+                                    WorldCalendar{162000, 8, 2, 3, 9},
+                                    WorldCalendar::Legacy()}) {
+            SCOPED_TRACE(WorldClock(0, calendar).calendar_metadata().dump());
+            ASSERT_TRUE(P::WorldSaveService::save_metadata(metadata.dump(), snapshot));
+            ASSERT_TRUE(first.LoadWorldStateFrom(snapshot));
+            auto changed_metadata = metadata;
+            changed_metadata["renderCalendar"] = WorldClock(0, calendar).calendar_metadata();
+            ASSERT_TRUE(P::WorldSaveService::save_metadata(changed_metadata.dump(), snapshot));
+            ASSERT_TRUE(second.LoadWorldStateFrom(snapshot));
+            const bool equal = calendar == WorldCalendar{};
+            EXPECT_EQ(first.SystemConfigIdentity() == second.SystemConfigIdentity(), equal);
+            Luminumbra::Net::HelloMsg local;
+            local.seed = 1337;
+            local.preset = "default";
+            local.preset_content_hash = first.PresetContentHash();
+            local.system_config_identity = first.SystemConfigIdentity();
+            auto peer = local;
+            peer.system_config_identity = second.SystemConfigIdentity();
+            Luminumbra::Net::HelloMsg decoded;
+            ASSERT_TRUE(Luminumbra::Net::DecodeHello(Luminumbra::Net::EncodeHello(peer), decoded));
+            EXPECT_EQ(Luminumbra::Net::HelloMatches(local, decoded), equal);
+            ASSERT_EQ(first.TickSimulation(first.GetSimulationClock().fixed_dt()), 1u);
+            EXPECT_EQ(first.SystemConfigIdentity(), local.system_config_identity);
+        }
+        // The resolved legacy calendar is identical with or without a v2 marker.
+        const auto legacy_identity = second.SystemConfigIdentity();
+        auto unmarked_metadata = metadata;
+        unmarked_metadata.erase("renderCalendar");
+        ASSERT_TRUE(P::WorldSaveService::save_metadata(unmarked_metadata.dump(), snapshot));
+        ASSERT_TRUE(second.LoadWorldStateFrom(snapshot));
+        EXPECT_EQ(second.GetRenderCalendar(), WorldCalendar::Legacy());
+        EXPECT_EQ(second.SystemConfigIdentity(), legacy_identity);
+    }
 }
 
 TEST(GameSessionHeadlessWorldTest, RenderCalendarActivatesOnNormalLoadAndNextSave) {
@@ -2652,7 +2776,7 @@ TEST(GameSessionHeadlessWorldTest, EffectiveIdentityUsesDefaultsAndCurrentSetter
     const auto baseline = direct.SystemConfigIdentity();
     EXPECT_FALSE(baseline.empty());
     EXPECT_EQ(baseline, applied.SystemConfigIdentity());
-    EXPECT_EQ(baseline, "60ab3c242d54ce89");
+    EXPECT_EQ(baseline, "49f694fd70645bcc");
     for (const auto& [name, identity] : Luminumbra::TestSupport::EffectiveIdentityMismatches()) {
         SCOPED_TRACE(name);
         EXPECT_NE(identity, baseline);
