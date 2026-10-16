@@ -105,7 +105,7 @@ jobs:
       CC: gcc
       CXX: g++
       CCACHE_COMPILERCHECK: content
-      CCACHE_MAXSIZE: 250M
+      CCACHE_MAXSIZE: 600M
     steps:
       - name: Reject draft pull requests
         shell: bash
