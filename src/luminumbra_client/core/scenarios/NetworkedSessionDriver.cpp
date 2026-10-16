@@ -342,7 +342,10 @@ bool NetworkedSessionDriver::Begin(Luminumbra::world::GameSession* client_sessio
         ch.system_config_identity = client_cfg.system_config_identity;
         ch.preset_content_hash = client_cfg.preset_content_hash;
         ch.simulation_content_identity = client_cfg.simulation_content_identity;
-        m_impl->client_transport->SendFrame(Luminumbra::Net::EncodeHello(ch));
+        if (!m_impl->client_transport->SendFrame(Luminumbra::Net::EncodeHello(ch))) {
+            m_failure_reason = "handshake_failed";
+            return false;
+        }
         Luminumbra::Net::HelloMsg hh;
         hh.seed = config.seed;
         hh.preset = config.preset;
@@ -351,7 +354,10 @@ bool NetworkedSessionDriver::Begin(Luminumbra::world::GameSession* client_sessio
         hh.system_config_identity = host_cfg.system_config_identity;
         hh.preset_content_hash = host_cfg.preset_content_hash;
         hh.simulation_content_identity = host_cfg.simulation_content_identity;
-        m_impl->host_transport->SendFrame(Luminumbra::Net::EncodeHello(hh));
+        if (!m_impl->host_transport->SendFrame(Luminumbra::Net::EncodeHello(hh))) {
+            m_failure_reason = "handshake_failed";
+            return false;
+        }
     }
     if (!m_impl->host->Handshake() || !m_impl->client->Handshake()) {
         m_failure_reason = "handshake_failed";

@@ -1,6 +1,8 @@
 #include "ModeHelpers.h"
 #include "Modes.h"
 
+#include "luminumbra_common/net/LockstepSession.h"
+
 namespace fs = std::filesystem;
 
 namespace {
@@ -148,7 +150,10 @@ int RunLockstepLoopback(const ServerCliOptions& options) {
         ph.system_config_identity = peer_cfg.system_config_identity;
         ph.preset_content_hash = peer_cfg.preset_content_hash;
         ph.simulation_content_identity = peer_cfg.simulation_content_identity;
-        peer_transport->SendFrame(Luminumbra::Net::EncodeHello(ph));
+        if (!peer_transport->SendFrame(Luminumbra::Net::EncodeHello(ph))) {
+            LUMINUMBRA_CORE_ERROR("lockstep: handshake send failed");
+            return 1;
+        }
         Luminumbra::Net::HelloMsg hh;
         hh.seed = seed_num;
         hh.preset = options.preset;
@@ -157,7 +162,10 @@ int RunLockstepLoopback(const ServerCliOptions& options) {
         hh.system_config_identity = host_cfg.system_config_identity;
         hh.preset_content_hash = host_cfg.preset_content_hash;
         hh.simulation_content_identity = host_cfg.simulation_content_identity;
-        host_transport->SendFrame(Luminumbra::Net::EncodeHello(hh));
+        if (!host_transport->SendFrame(Luminumbra::Net::EncodeHello(hh))) {
+            LUMINUMBRA_CORE_ERROR("lockstep: handshake send failed");
+            return 1;
+        }
     }
     if (!host.Handshake() || !peer.Handshake()) {
         LUMINUMBRA_CORE_ERROR("lockstep: handshake failed");
