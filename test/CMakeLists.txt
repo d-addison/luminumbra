@@ -19,6 +19,12 @@ target_compile_definitions(world_generation_test PRIVATE
     LUMINUMBRA_TEST_ARTIFACT_DIR="${CMAKE_BINARY_DIR}/test-artifacts"
 )
 
+add_executable(preset_schema_rev_test shield/preset_schema_rev_test.cpp)
+target_include_directories(preset_schema_rev_test PRIVATE ../src)
+target_link_libraries(preset_schema_rev_test PRIVATE luminumbra_common)
+luminumbra_configure_first_party_target(preset_schema_rev_test)
+add_test(NAME TerrainPresetSchemaRevision COMMAND preset_schema_rev_test)
+
 add_executable(worldgen_layer_snapshot_test
     shield/test_worldgen_layer_snapshots.cpp
     shield/worldgen_layers_hardening_test.cpp
@@ -144,6 +150,17 @@ target_link_libraries(far_pristine_field_test PRIVATE gtest_main luminumbra_comm
 luminumbra_configure_first_party_target(far_pristine_field_test)
 luminumbra_pin_fp_determinism(far_pristine_field_test)
 
+# Compile the shared socket implementation against an isolated fake SDK, without
+# requiring either SDK or replacing SDK symbols in the engine-linked test targets.
+add_executable(net_sockets_transport_test
+    net/net_sockets_transport_test.cpp
+    ../src/luminumbra_common/net/NetSocketsTransport.cpp
+)
+target_include_directories(net_sockets_transport_test PRIVATE support/net_sockets ../src)
+target_compile_definitions(net_sockets_transport_test PRIVATE LUMINUMBRA_ENABLE_GNS)
+target_link_libraries(net_sockets_transport_test PRIVATE gtest_main spdlog::spdlog)
+luminumbra_configure_first_party_target(net_sockets_transport_test)
+
 add_executable(common_tests
     common/Crc32_test.cpp
     rendering/shader_compositing_contract_test.cpp
@@ -237,7 +254,11 @@ add_executable(common_tests
     common/replication_scale_test.cpp
     common/lockstep_replay_hardening_test.cpp
     net/single_port_accept_test.cpp
+    net/tcp_frame_bounds_test.cpp
+    net/message_receive_queue_test.cpp
     net/single_port_host_client_integration_test.cpp
+    net/runtime_tcp_hello_test.cpp
+    ../src/luminumbra_server/modes/RuntimeTcpSlot.cpp
     common/world_streaming_hardening_test.cpp
     common/HydraulicErosion_test.cpp
     common/WorldStreamingState_test.cpp
@@ -337,6 +358,12 @@ target_include_directories(tree_lod_test PRIVATE
 target_link_libraries(tree_lod_test PRIVATE
     gtest_main
 )
+
+# Rendering defaults and override parsing are pure headers (no client/GL link).
+add_executable(rendering_defaults_test rendering/RenderingDefaults_test.cpp)
+target_include_directories(rendering_defaults_test PRIVATE ../src)
+target_link_libraries(rendering_defaults_test PRIVATE gtest_main)
+luminumbra_configure_first_party_target(rendering_defaults_test)
 
 #  far-field impostors: the hemi-octahedral view<->tile mapping math (GL-free,
 # the shared source of truth for the atlas bake + the impostor shader).
@@ -1783,10 +1810,12 @@ set(LUMINUMBRA_GTEST_TARGETS
     morph_asset_test
     game_assets_test
     common_tests
+    net_sockets_transport_test
     filesystem_path_test
     unique_temp_path_test
     skinned_test_assets_test
     tree_lod_test
+    rendering_defaults_test
     # the hemi-octa mapping test was built but never
     # registered — the atlas-bake/shader shared source of truth had zero
     # executing coverage. GL-free pure math, safe in the default lane.
@@ -2257,6 +2286,8 @@ if(NOT Python3_FOUND)
     message(FATAL_ERROR "RenderContractPython requires a Python3 interpreter")
 endif()
 add_test(NAME RenderContractPython COMMAND "${Python3_EXECUTABLE}" ${CMAKE_SOURCE_DIR}/tools/perf/test_render_contract.py)
+add_test(NAME SystemConfigIdentityPython COMMAND "${Python3_EXECUTABLE}" -B
+    ${CMAKE_SOURCE_DIR}/test/tools/test_system_config_identity.py)
 add_test(NAME RenderRunnerEvidencePython COMMAND "${Python3_EXECUTABLE}" ${CMAKE_SOURCE_DIR}/tools/perf/test_render_runner_evidence.py)
 set_tests_properties(RenderRunnerEvidencePython PROPERTIES TIMEOUT 60)
 add_test(NAME RenderSceneMatrixPython COMMAND "${Python3_EXECUTABLE}" -B ${CMAKE_SOURCE_DIR}/tools/rendering/acceptance/test_scene_matrix.py)
