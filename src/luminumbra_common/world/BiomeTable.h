@@ -30,6 +30,8 @@
 #include <string>
 #include <vector>
 
+#include "WorldgenFileReader.h"
+
 namespace Luminumbra::World {
 
 // Sentinel: the column matched no authored biome.
@@ -95,10 +97,11 @@ struct BiomeDefinition {
 class BiomeTable {
 public:
     // Loads and parses data/common/biomes.json. On any structural error the
-    // result is empty and errors carries human-readable messages. Unknown
-    // keys emit
-    // warnings, never errors (loader discipline matches TerrainPresetLoader).
-    static BiomeTable Load(const std::filesystem::path& table_path);
+    // result is empty and errors carries human-readable messages. Raw NUL bytes
+    // are refused before parsing. Unknown keys emit warnings, never errors
+    // (loader discipline matches TerrainPresetLoader).
+    static BiomeTable Load(const std::filesystem::path& table_path,
+                           const WorldgenFileReader& read_file = ReadWorldgenFile);
 
     bool ok() const {
         return m_ok;

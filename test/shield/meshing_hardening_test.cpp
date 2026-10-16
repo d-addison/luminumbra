@@ -1,3 +1,4 @@
+#include "../fixtures/TerrainFixtureParams.h"
 // =====================================================================================
 // ADVERSARIAL meshing + worldgen determinism hardening gate.
 //
@@ -69,7 +70,7 @@ std::uint64_t HashVec(const std::vector<T>& v) {
 // Param presets (copied from the siblings so we share their byte behaviour).
 // ----------------------------------------------------------------------------
 TerrainGenParams MakeFlatSurfaceParams() {
-    TerrainGenParams params;
+    TerrainGenParams params = Luminumbra::Test::SyntheticTerrainParams();
     params.base_amplitude = 0.0f;
     params.height_offset = 8.0f;
     params.caves_enabled = false;
@@ -77,7 +78,7 @@ TerrainGenParams MakeFlatSurfaceParams() {
 }
 
 TerrainGenParams MakeArchipelagoParams() {
-    TerrainGenParams params;
+    TerrainGenParams params = Luminumbra::Test::SyntheticTerrainParams();
     params.base_frequency = 0.004f;
     params.base_amplitude = 8.0f;
     params.octaves = 6;
@@ -90,7 +91,7 @@ TerrainGenParams MakeArchipelagoParams() {
 }
 
 TerrainGenParams MakeCaveParams() {
-    TerrainGenParams params;
+    TerrainGenParams params = Luminumbra::Test::SyntheticTerrainParams();
     params.base_amplitude = 0.0f;
     params.height_offset = 40.0f;
     params.caves_enabled = true;
@@ -633,7 +634,7 @@ TEST(MeshingHardening, SingleVoxelFeatureMeshesValidly) {
 // degenerate (repeated-index) triangle. Run across several presets.
 TEST(MeshingHardening, AllIndicesInRangeNoDegenerateTriangles) {
     struct Case {
-        TerrainGenParams params;
+        TerrainGenParams params = Luminumbra::Test::SyntheticTerrainParams();
         int seed;
     };
     const Case cases[] = {

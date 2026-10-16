@@ -58,7 +58,7 @@ FarWorldExperimentalLimits FarWorldDevelopmentLimits() noexcept;
 // clip-aware arrival are integrated; ray depth qualification is a later slice.
 class FarWorldRenderer {
 public:
-    explicit FarWorldRenderer(FarWorldMode requested = FarWorldMode::Legacy);
+    explicit FarWorldRenderer(FarWorldMode requested = FarWorldMode::Ladder);
     ~FarWorldRenderer();
     FarWorldRenderer(const FarWorldRenderer&) = delete;
     FarWorldRenderer& operator=(const FarWorldRenderer&) = delete;

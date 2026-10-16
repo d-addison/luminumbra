@@ -23,6 +23,9 @@ public:
     void destroy(RenderResourceRegistry& registry);
     void reset_shader();
     void invalidate_history();
+    bool history_valid() const {
+        return m_history_valid;
+    }
     void execute(const RenderContext& ctx, const TaauHistoryState* frozen = nullptr);
     TaauHistoryState history_state() const noexcept {
         return {{m_history[0], m_history[1]}, m_history_write, m_history_valid};
