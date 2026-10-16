@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "luminumbra_common/fields/EnergyFieldState.h"
+#include "luminumbra_common/systems/FieldEmitterSystem.h"
 
 namespace {
 
@@ -441,6 +442,154 @@ EnergyResult RegionalStep(EnergyFieldState& field,
     return result;
 }
 
+namespace Emitters = Luminumbra::Systems;
+namespace EmitterComp = Luminumbra::Components;
+entt::entity RegionalEmitter(entt::registry& registry,
+                             Luminumbra::Vec3 position,
+                             int radius = 0,
+                             std::uint32_t rate = 123) {
+    const auto entity = registry.create();
+    registry.emplace<EmitterComp::TransformComponent>(entity).position = position;
+    auto& emitter = registry.emplace<EmitterComp::FieldEmitterComponent>(entity);
+    emitter.rate_raw_per_tick = rate;
+    emitter.radius_cells = radius;
+    return entity;
+}
+
+TEST(RegionalEnergy, EmitterGatherSkipsNonfiniteAndOutOfWorldTransformsBeforeQuantizing) {
+    const auto nan = std::numeric_limits<float>::quiet_NaN();
+    const auto infinity = std::numeric_limits<float>::infinity();
+    const std::array invalid{Luminumbra::Vec3{nan, 0, 0},
+                             Luminumbra::Vec3{0, nan, 0},
+                             Luminumbra::Vec3{0, 0, nan},
+                             Luminumbra::Vec3{infinity, 0, 0},
+                             Luminumbra::Vec3{0, -infinity, 0},
+                             Luminumbra::Vec3{0, 0, -infinity},
+                             Luminumbra::Vec3{std::numeric_limits<float>::max(), 0, 0},
+                             Luminumbra::Vec3{0, 0, std::numeric_limits<float>::lowest()},
+                             Luminumbra::Vec3{16777216.0f, 0, 0},
+                             Luminumbra::Vec3{0, 0, -16777218.0f}};
+    for (const auto& position : invalid) {
+        entt::registry registry;
+        RegionalEmitter(registry, {0, 0, 0});
+        RegionalEmitter(registry, position);
+        EnergyFieldState field;
+        const auto gathered = Emitters::GatherRegionalFieldEmitterDeposits(registry, field);
+        EXPECT_TRUE(gathered.accepted);
+        EXPECT_EQ(gathered.invalid_emitters, 1u);
+        EXPECT_EQ(gathered.queued.emitters, 1u);
+        EXPECT_EQ(gathered.queued.deposits, 1u);
+        const std::array due{RegionKey{0, 0}};
+        RegionalStep(field, 1, TwoEnergyOwners(), due, {});
+        EnergyFieldState expected;
+        ASSERT_TRUE(expected.QueueRegionalDeposit(0, 0, 0, 0, 123));
+        RegionalStep(expected, 1, TwoEnergyOwners(), due, {});
+        EXPECT_EQ(field.CanonicalRegionalBytes(), expected.CanonicalRegionalBytes());
+        EXPECT_EQ(field.SerializeRegionalRecord(), expected.SerializeRegionalRecord());
+    }
+}
+
+TEST(RegionalEnergy, EmitterGatherSkipsInvalidRadiusChannelAndOutOfWorldFootprints) {
+    entt::registry registry;
+    for (const int radius :
+         {-1, 32, std::numeric_limits<int>::min(), std::numeric_limits<int>::max()})
+        RegionalEmitter(registry, {0, 0, 0}, radius);
+    RegionalEmitter(registry, {-16777216.0f, 0, 0}, 1);
+    RegionalEmitter(registry, {0, 0, 16777215.0f}, 1);
+    const auto bad_channel = RegionalEmitter(registry, {0, 0, 0});
+    registry.get<EmitterComp::FieldEmitterComponent>(bad_channel).channel = 1;
+    RegionalEmitter(registry, {0, 0, 0}, 31, std::numeric_limits<std::uint32_t>::max());
+    EnergyFieldState field;
+    const auto gathered = Emitters::GatherRegionalFieldEmitterDeposits(registry, field);
+    EXPECT_TRUE(gathered.accepted);
+    EXPECT_EQ(gathered.invalid_emitters, 7u);
+    EXPECT_EQ(gathered.queued.emitters, 1u);
+    EXPECT_EQ(gathered.queued.deposits, 63u * 63u);
+}
+
+// A maximum-radius emitter with all rate bits set contributes exactly 63^2
+// nonzero deposits. Fill the remainder with centre-only emitters: a small roster
+// exercises the actual gather cap without creating half a million entities.
+void FillRegionalEmitterCapacity(entt::registry& registry) {
+    constexpr std::size_t footprint = 63u * 63u;
+    for (std::size_t i = 0; i < EnergyFieldState::kMaxRegionalDeposits / footprint; ++i)
+        RegionalEmitter(registry, {0, 0, 0}, 31, std::numeric_limits<std::uint32_t>::max());
+    for (std::size_t i = 0; i < EnergyFieldState::kMaxRegionalDeposits % footprint; ++i)
+        RegionalEmitter(registry, {0, 0, 0});
+}
+
+TEST(RegionalEnergy, EmitterBatchAtCapSucceedsAndOverCapRefusalRecoversWithoutQueuedResidue) {
+    entt::registry registry;
+    FillRegionalEmitterCapacity(registry);
+    EnergyFieldState field;
+    const auto at_cap = Emitters::GatherRegionalFieldEmitterDeposits(registry, field);
+    ASSERT_TRUE(at_cap.accepted);
+    EXPECT_EQ(at_cap.queued.deposits, EnergyFieldState::kMaxRegionalDeposits);
+    // No due owners: consume and account the entire accepted queue as clipped.
+    const auto consumed = RegionalStep(field, 1, TwoEnergyOwners(), {}, {});
+    EXPECT_GT(consumed.clipped_raw, 0u);
+    EXPECT_FALSE(field.OwnsRegion({0, 0}));
+
+    // Keep this queue-retention probe inside its owner: cell 21 borders owner 0
+    // and exchanges on common phases even before an intrinsic diffusion fire.
+    ASSERT_TRUE(field.QueueRegionalDeposit(0, 22, 0, 0, 17));
+    const auto extra = RegionalEmitter(registry, {0, 0, 0});
+    const auto before = field.SerializeRegionalRecord();
+    const auto refused = Emitters::GatherRegionalFieldEmitterDeposits(registry, field);
+    EXPECT_FALSE(refused.accepted);
+    EXPECT_EQ(refused.queued.deposits, 0u);
+    EXPECT_EQ(field.SerializeRegionalRecord(), before);
+    EXPECT_FALSE(field.OwnsRegion({0, 0}));
+    EXPECT_TRUE(field.OwnsRegion({1, 0})); // prior queue retained, rejected batch absent
+    const std::array due{RegionKey{1, 0}};
+    const auto recovered = RegionalStep(field, 2, TwoEnergyOwners(), due, {});
+    EXPECT_EQ(field.at_cell(22, 0), 17u);
+    EXPECT_EQ(field.total_raw(), 17u);
+    registry.destroy(extra);
+    const auto retry = Emitters::GatherRegionalFieldEmitterDeposits(registry, field);
+    EXPECT_TRUE(retry.accepted);
+    EXPECT_EQ(retry.queued.deposits, EnergyFieldState::kMaxRegionalDeposits);
+    EXPECT_GT(RegionalStep(field, 3, TwoEnergyOwners(), {}, recovered.ages).clipped_raw, 0u);
+    EXPECT_EQ(field.total_raw(), 17u);
+}
+
+TEST(RegionalEnergy, BatchAdmissionIncludesPriorQueueAndRollsBackInvalidMiddleDeposit) {
+    EnergyFieldState field;
+    ASSERT_TRUE(field.QueueRegionalDeposit(1, 21, 0, 0, 17));
+    const std::array invalid_batch{EnergyFieldState::RegionalDeposit{2, 0, 0, 0, 123},
+                                   EnergyFieldState::RegionalDeposit{3, 0, 0, -1, 456}};
+    EXPECT_FALSE(field.QueueRegionalDeposits(invalid_batch));
+    EXPECT_FALSE(field.OwnsRegion({0, 0}));
+    EXPECT_TRUE(field.OwnsRegion({1, 0}));
+    entt::registry registry;
+    FillRegionalEmitterCapacity(registry);
+    EXPECT_FALSE(Emitters::GatherRegionalFieldEmitterDeposits(registry, field).accepted);
+    EXPECT_FALSE(field.OwnsRegion({0, 0}));
+    const std::array due{RegionKey{1, 0}};
+    RegionalStep(field, 1, TwoEnergyOwners(), due, {});
+    EXPECT_EQ(field.total_raw(), 17u);
+    EXPECT_TRUE(Emitters::GatherRegionalFieldEmitterDeposits(registry, field).accepted);
+}
+
+TEST(RegionalEnergy, RefusedTickRetainsGatherAndFollowingValidTickConsumesItExactlyOnce) {
+    entt::registry registry;
+    RegionalEmitter(registry, {0, 0, 0});
+    EnergyFieldState field;
+    ASSERT_TRUE(Emitters::GatherRegionalFieldEmitterDeposits(registry, field).accepted);
+    EnergyResult output;
+    output.clipped_raw = 91;
+    const std::array due{RegionKey{0, 0}};
+    const EnergyAges invalid_ages{{{0, 0}, WorldClock::kTickLimit - 1}};
+    EXPECT_FALSE(field.TickRegional(1, TwoEnergyOwners(), due, invalid_ages, output));
+    EXPECT_EQ(output.clipped_raw, 91u);
+    EXPECT_TRUE(field.CanonicalRegionalBytes().empty());
+    EXPECT_TRUE(field.OwnsRegion({0, 0}));
+    const auto recovered = RegionalStep(field, 2, TwoEnergyOwners(), due, {});
+    EXPECT_EQ(field.total_raw(), 123u);
+    RegionalStep(field, 3, TwoEnergyOwners(), due, recovered.ages);
+    EXPECT_EQ(field.total_raw(), 123u);
+}
+
 TEST(RegionalEnergy, CentreOwnershipSplitsOnePhysicalPageAndHandlesNegativeCells) {
     EXPECT_EQ(EnergyFieldState::OwnerOfCell(20, 0), (RegionKey{0, 0}));
     EXPECT_EQ(EnergyFieldState::OwnerOfCell(21, 0), (RegionKey{1, 0}));
@@ -760,8 +909,8 @@ TEST(RegionalEnergy, RegionalDepositAdmissionChecksChannelWorldAndPendingCapacit
     EXPECT_TRUE(field.OwnsRegion({0, 0}));
     EXPECT_FALSE(field.OwnsRegion({1, 0}));
     EXPECT_TRUE(field.SerializeRegionalRecord().empty());
-    // The shared legacy gatherer remains compatible, but TickRegional still
-    // refuses an oversized buffer before consuming any deposits.
+    // Direct legacy queue injection is still refused by TickRegional before
+    // consuming deposits; the enabled gatherer never uses that admission path.
     field.QueueDeposit(0, 21, 0, 0, 1);
     EnergyResult output;
     output.clipped_raw = 91;
