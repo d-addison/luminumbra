@@ -482,10 +482,13 @@ public:
     void set_authored_static_draws(std::shared_ptr<const StaticDrawSnapshot> draws) {
         m_authored_draws = std::move(draws);
     }
-    void set_taau_enabled(bool e) {
-        m_taau_enabled = e;
-    } // render.taau (client wires from SystemConfig)
-    //  route sky-view LUT (init + refresh) through GPU compute. render.sky_lut_gpu, default OFF.
+    void set_taau_enabled(bool e);
+    bool taau_enabled() const {
+        return m_taau_enabled;
+    }
+    bool taau_history_valid() const; // render.taau (client wires from SystemConfig)
+    //  route sky-view LUT (init + refresh) through GPU compute. render.sky_lut_gpu, enabled by
+    //  SystemConfig.
     void set_sky_lut_gpu_enabled(bool e) {
         m_sky_lut.set_gpu_skyview_enabled(e);
     }
@@ -628,7 +631,7 @@ public:
     // function of the tick (same tick -> same sun, independent of frame pacing).
     // Precedence unchanged: the photo-mode hold wins here, and scenario/scene pins
     // (set_time_of_day) run AFTER this in the frame, overwriting it. Paths that
-    // never call this keep the legacy wall-clock advance byte-identically.
+    // never call this keep the legacy wall-clock advance at the shared day length.
     void set_time_of_day_tick(std::uint64_t sim_tick);
     void set_world_clock(const world::WorldClock& clock);
     void set_day_length_ticks(std::uint64_t ticks) {
@@ -1148,14 +1151,14 @@ private:
     std::vector<glm::mat4> get_light_space_matrices(const Camera& camera);
 
     void update_time_of_day(float deltaTime);
-    float m_timeOfDay = 0.5f;     // Start at sunrise
-    bool m_timeOfDayHold = false; // freeze auto-advance for photo-mode TOD scrub
-    float m_dayDurationSeconds = 60.0f;
+    float m_timeOfDay = 0.5f;             // Start at sunrise
+    bool m_timeOfDayHold = false;         // freeze auto-advance for photo-mode TOD scrub
+    float m_dayDurationSeconds = 7200.0f; // 2 h/day, matching the world calendar
     // tick-authority state. m_todTickDriven marks "the sim tick fed TOD this
     // frame" so update_time_of_day skips the wall-clock advance; cleared every frame.
     std::optional<world::WorldClock> m_worldClock;
     bool m_dayLengthOverride = false;
-    std::uint64_t m_dayLengthTicks = 1800; // == TimeOfDayModel kDefaultDayLengthTicks
+    std::uint64_t m_dayLengthTicks = 216000; // == TimeOfDayModel kDefaultDayLengthTicks
     bool m_todTickDriven = false;
 
     u32 m_screen_width = 0;
@@ -1307,7 +1310,7 @@ private:
     std::unique_ptr<ParticlePass> m_particle_pass;          //
     std::unique_ptr<FoliagePass> m_foliage_pass;            //
     std::unique_ptr<PlantProcgenPass> m_plant_procgen_pass; //  (flag-gated)
-    std::unique_ptr<GroundDecalPass> m_ground_decal_pass;   //   pheromone trail (default-OFF)
+    std::unique_ptr<GroundDecalPass> m_ground_decal_pass; //   pheromone trail (enabled by default)
     std::unique_ptr<DebugViewPass>
         m_debug_view_pass; // render-only G-buffer debug overlay (default-OFF)
     std::unique_ptr<FinalBlitPass> m_final_blit_pass; // -T01: first pass on the RenderContext seam
@@ -1331,10 +1334,11 @@ private:
     // The aerial pass is the analytic aerial-perspective fullscreen term wiring
     // the previously dormant volumetric_lighting.frag. Render-only (documented design).
     SkyAtmosphereLut m_sky_lut;
-    //  TAAU resolve (render.taau, default OFF). Motion-reprojected temporal AA over the lit HDR
+    //  TAAU resolve (render.taau, enabled by default). Motion-reprojected temporal AA over the lit
+    //  HDR
     // color with a 3x3 neighborhood-clamp anti-ghost; ping-pong history. Flag OFF -> the pass never
     // runs and the lighting color blits through unchanged (byte-identical default render).
-    bool m_taau_enabled = false;
+    bool m_taau_enabled = true;
     std::shared_ptr<const StaticDrawSnapshot> m_authored_draws;
     std::unique_ptr<RenderView> m_authored_view;
     glm::vec2 m_taau_jitter_ndc =
@@ -1446,7 +1450,7 @@ private:
 
     // Froxel quality remains pipeline orchestration state; the pass owns both
     // compute programs and volumes and reads this value through RenderContext.
-    int m_volumetric_quality = 0;
+    int m_volumetric_quality = kDefaultVolumetricQuality;
 
     u32 m_terrainTextureArray = 0;
     // Per-material triplanar normal-map array. Same layer order as the
@@ -1473,9 +1477,9 @@ private:
     // the glow grade (defaults == the lighting_pass.frag initializers).
     glm::vec3 m_aetherGlowColor{0.30f, 0.55f, 0.95f};
     float m_aetherGlowIntensity = 2.0f;
-    float m_aetherMaterialModulation = 0.0f; // 0 = pixel-identical
-    bool m_aetherPolarityActive = false;     // dual-tap live?
-    bool m_aetherFieldTextureIsDual = false; // current alloc format
+    float m_aetherMaterialModulation = kDefaultAetherMaterialModulation; // 0 = pixel-identical
+    bool m_aetherPolarityActive = false;                                 // dual-tap live?
+    bool m_aetherFieldTextureIsDual = false;                             // current alloc format
     // render-only snow ground cover (0 = byte-identical default).
     float m_snowCover = 0.0f;
     size_t m_terrain_texture_fallback_layers = 0;

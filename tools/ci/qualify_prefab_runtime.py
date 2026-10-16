@@ -133,7 +133,7 @@ def main():
                     "--service", str(service), "--toolchain", str(toolchain),
                     "--consumer", str(consumer), "--output", str(output / "acceptance")], check=True)
     acceptance_path = output / "acceptance/receipt.json"
-    acceptance = json.loads(acceptance_path.read_text())
+    acceptance = json.loads(acceptance_path.read_text(encoding="utf-8"))
     receipt.update(passed=True, installed_checks=validate_acceptance(acceptance),
                    acceptance_receipt_sha256=sha(acceptance_path))
     receipt_path.write_text(json.dumps(receipt, indent=2) + "\n")

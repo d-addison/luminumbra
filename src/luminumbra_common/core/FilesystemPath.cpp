@@ -104,4 +104,21 @@ std::string GenericPathString(const std::filesystem::path& path) {
     return path.generic_string();
 }
 
+std::filesystem::path PathFromUtf8(std::string_view text) {
+    return std::filesystem::path(std::u8string(text.begin(), text.end()));
+}
+
+std::string GenericUtf8PathString(const std::filesystem::path& path) {
+#if defined(_WIN32) && !defined(__CYGWIN__)
+    if (IsWindowsUncPath(path)) {
+        const auto utf8 = path.u8string();
+        std::string native(utf8.begin(), utf8.end());
+        std::replace(native.begin(), native.end(), '\\', '/');
+        return native;
+    }
+#endif
+    const auto utf8 = path.generic_u8string();
+    return std::string(utf8.begin(), utf8.end());
+}
+
 } // namespace Luminumbra::Filesystem

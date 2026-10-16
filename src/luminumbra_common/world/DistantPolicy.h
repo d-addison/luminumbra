@@ -69,6 +69,7 @@ struct ContentReadResult {
     std::string bytes;
     std::string error;
 };
+// Optional absence applies only to a missing leaf in an existing readable parent directory.
 [[nodiscard]] ContentReadResult
 ReadSimulationDocument(const std::filesystem::path& path,
                        bool optional = false,

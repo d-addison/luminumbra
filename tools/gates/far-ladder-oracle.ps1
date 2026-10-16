@@ -75,7 +75,7 @@ function Get-FarLegacyWantedCount {
     return [int64](Invoke-FarOraclePython -Arguments @("legacy", "--", $X.ToString("R", $culture), $Z.ToString("R", $culture)))
 }
 function Assert-FarHorizonV2Artifact {
-    param([string]$Path, [ValidateSet("legacy", "ladder")][string]$Renderer,
+    param([string]$Path, [ValidateSet("legacy", "ladder")][string]$Renderer = "ladder",
           [string[]]$Stations = @("eye_yaw_000", "eye_yaw_090", "eye_yaw_180", "eye_yaw_270", "elevated"))
     # Keep #199's aggregate assertions AND the station validator on this path.
     # Ladder artifacts intentionally carry per-station evidence only.

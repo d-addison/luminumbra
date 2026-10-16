@@ -33,7 +33,9 @@ Luminumbra::Server::ServerWorldRunnerConfig ReplayBootConfig(const ServerCliOpti
     std::error_code error;
     if (!fs::exists(systems, error))
         systems = fs::path("data/common/systems.json");
-    const auto configuration = luminumbra::core::SystemConfig::LoadFromFile(systems.string());
+    const auto configuration = options.systems_config_override
+                                   ? *options.systems_config_override
+                                   : luminumbra::core::SystemConfig::LoadFromFile(systems.string());
     if (configuration.enabled(luminumbra::core::SysKey::SimActiveRegions))
         return RunnerConfigFrom(options);
     Luminumbra::Server::ServerWorldRunnerConfig config;
@@ -87,6 +89,8 @@ int RunRecord(const ServerCliOptions& options) {
     header.collision_radius = static_cast<std::uint32_t>(options.collision_radius);
     header.engine_version = std::string(luminumbra::core::GetEngineVersionString());
     header.start_world_hash = runner.ComputeWorldHash();
+    header.system_config_identity = runner.Session()->SystemConfigIdentity();
+    header.preset_content_hash = runner.Session()->PresetContentHash();
 
     Luminumbra::Replay::RegionScheduleTrace schedule_trace;
     Luminumbra::Replay::ReplayWriter writer;
@@ -170,7 +174,9 @@ int RunReplay(const ServerCliOptions& options) {
 
     auto contents = Luminumbra::Replay::ReadReplay(options.replay_path);
     if (!contents.has_value()) {
-        LUMINUMBRA_CORE_ERROR("replay: '{}' is not a valid LREC1 stream", options.replay_path);
+        LUMINUMBRA_CORE_ERROR("replay: '{}' is invalid or has an unsupported LREC1 version; "
+                              "requires v3 resolved preset identity",
+                              options.replay_path);
         return 1;
     }
     if (contents->truncated || !contents->trailer_present) {
@@ -194,6 +200,8 @@ int RunReplay(const ServerCliOptions& options) {
     // Population options construct the same admitted identity as recording.
     // start_world_hash rejects a changed identity before replay ticks execute.
     auto config = ReplayBootConfig(options);
+    config.systems_config_override = options.systems_config_override;
+    config.preset_json_override = options.preset_json_override;
     config.seed = header.seed_string;
     config.preset = header.preset;
     config.world_id.clear();
@@ -202,10 +210,19 @@ int RunReplay(const ServerCliOptions& options) {
     config.collision_radius = static_cast<int>(header.collision_radius);
     config.test_streaming_radius_cap = options.test_streaming_radius_cap;
     config.autosave_interval_ticks = 0;
+    config.region_scheduler = RunnerConfigFrom(options).region_scheduler;
 
     Luminumbra::Server::ServerWorldRunner runner(std::move(config));
     if (!runner.Boot()) {
         LUMINUMBRA_CORE_ERROR("replay: session failed to boot from header");
+        return 1;
+    }
+
+    if (!Luminumbra::Replay::ConfigurationMatches(header,
+                                                  runner.Session()->SystemConfigIdentity(),
+                                                  runner.Session()->PresetContentHash())) {
+        LUMINUMBRA_CORE_ERROR(
+            "replay: incompatible simulation configuration or resolved preset content hash");
         return 1;
     }
 
