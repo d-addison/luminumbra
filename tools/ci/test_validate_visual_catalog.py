@@ -187,7 +187,7 @@ class CatalogTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as outside, contextlib.ExitStack() as stack:
             external = Path(outside) / "source.json"
             external.write_text("{}", encoding="utf-8")
-            link = self.root / "linked.json"
+            link = self.root.resolve() / "linked.json"
             try:
                 link.symlink_to(external)
             except OSError as error:
@@ -206,6 +206,14 @@ class CatalogTests(unittest.TestCase):
                 self.rejected("linked evidence")
             finally:
                 link.unlink(missing_ok=True)
+
+    def test_symlink_evidence_refused_without_privilege_with_aliased_root(self):
+        # Exercise a different root spelling without requiring Windows short names.
+        alias = self.root / ".." / self.root.name
+        with mock.patch.object(self, "root", alias), mock.patch.object(
+            Path, "symlink_to", side_effect=PermissionError(errno.EACCES, "denied")
+        ):
+            self.test_symlink_does_not_publish_external_evidence()
 
     def packet(self, scenario_id="R12"):
         """Synthetic contract data only; deliberately never native acceptance."""

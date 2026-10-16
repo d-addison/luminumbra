@@ -168,16 +168,20 @@ def report_symlink(link: Path, target: Path):
                 raise
             original_lstat = os.lstat
             original_lexists = os.path.lexists
+            original_islink = os.path.islink
             def lstat(path, *args, **kwargs):
                 if Path(path) == link:
                     return mock.Mock(st_mode=stat.S_IFLNK)
                 return original_lstat(path, *args, **kwargs)
             def lexists(path):
                 return Path(path) == link or original_lexists(path)
+            def islink(path):
+                return Path(path) == link or original_islink(path)
             stack.enter_context(mock.patch.object(os, "lstat", new=lstat))
             stack.enter_context(mock.patch.object(Path, "lstat", new=lstat))
-            # Windows Python 3.13+ checks existence without calling lstat.
+            # Windows native existence and link queries can bypass lstat.
             stack.enter_context(mock.patch.object(os.path, "lexists", new=lexists))
+            stack.enter_context(mock.patch.object(os.path, "islink", new=islink))
         yield
 
 
@@ -547,23 +551,31 @@ class VerifyReleaseTests(unittest.TestCase):
     def test_dangling_symlink_report_refused_without_creating_target(self) -> None:
         self.out.mkdir(parents=True)
         target = Path(self.tmp.name) / "nowhere.json"
-        with report_symlink(verifier.report_path(self.out), target):
+        link = verifier.report_path(self.out)
+        with report_symlink(link, target):
             runner = FakeRunner(self.scenario)
-            with contextlib.redirect_stderr(io.StringIO()):
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr):
                 rc = verifier.main(self.cli_args(), runner=runner)
             self.assertEqual(rc, 2)
             self.assertEqual(runner.calls, [])
+            self.assertIn("symlink", stderr.getvalue())
+            self.assertTrue(link.is_symlink())
             self.assertFalse(target.exists())
 
     def test_symlinked_report_refused_without_symlink_privilege(self) -> None:
-        # Model native lexists, which cannot see the simulated lstat metadata.
+        # Model Windows Python 3.14 queries that bypass lstat, even on POSIX.
         with mock.patch.object(os, "symlink", side_effect=PermissionError(errno.EACCES, "denied")), \
-                mock.patch.object(os.path, "lexists", new=os.path.exists):
+                mock.patch.object(os.path, "lexists", new=os.path.exists), \
+                mock.patch.object(os.path, "islink", return_value=False), \
+                mock.patch.object(Path, "is_symlink", new=lambda path: os.path.islink(path)):
             self.test_symlinked_report_refused_before_network()
 
     def test_dangling_symlink_report_refused_without_symlink_privilege(self) -> None:
         with mock.patch.object(os, "symlink", side_effect=PermissionError(errno.EACCES, "denied")), \
-                mock.patch.object(os.path, "lexists", new=os.path.exists):
+                mock.patch.object(os.path, "lexists", new=os.path.exists), \
+                mock.patch.object(os.path, "islink", return_value=False), \
+                mock.patch.object(Path, "is_symlink", new=lambda path: os.path.islink(path)):
             self.test_dangling_symlink_report_refused_without_creating_target()
 
     def test_existing_regular_report_refused(self) -> None:
