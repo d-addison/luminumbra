@@ -161,8 +161,9 @@ parameters and compiled algorithms, without additional disk inputs. Runtime spec
 definitions are loaded separately by GameSession for creature behavior, not terrain
 generation; they are outside this worldgen manifest.
 
-The same string continues through protocol-v3 Hello, replay-header-v3, server modes and
-NetworkedSessionDriver; their wire layout is unchanged. Earlier JSON-only identities
+The same string continues through protocol-v4 Hello, replay-header-v3, server modes and
+NetworkedSessionDriver. Hello v4 appends negotiated lockstep admission limits; the
+configuration identity encoding and replay layout are unchanged. Earlier JSON-only identities
 will mismatch the expanded identity and refuse admission/verification.
 The older numeric replay `preset_hash` remains name
 provenance only; admission and verification require `preset_content_hash` as well.

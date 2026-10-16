@@ -167,6 +167,14 @@ int RunReplay(const ServerCliOptions& options) {
                               options.replay_path);
         return 1;
     }
+    if (contents->elided_through_tick != 0) {
+        LUMINUMBRA_CORE_ERROR("replay: '{}' is a diagnostic suffix; inputs through tick {} "
+                              "were elided (prefix digest={:016x}); cannot replay from seed",
+                              options.replay_path,
+                              contents->elided_through_tick,
+                              contents->elided_prefix_digest);
+        return 1;
+    }
 
     const Luminumbra::Replay::ReplayHeader& header = contents->header;
     // Refuse a version / engine mismatch loudly (Factorio replays break silently
@@ -444,6 +452,10 @@ int RunMutateReplayFixture(const ServerCliOptions& options) {
     if (!contents.has_value()) {
         LUMINUMBRA_CORE_ERROR("mutate: '{}' is not a valid LREC1 stream",
                               options.mutate_replay_fixture);
+        return 1;
+    }
+    if (contents->elided_through_tick != 0) {
+        LUMINUMBRA_CORE_ERROR("mutate: diagnostic suffix cannot be rewritten as a full replay");
         return 1;
     }
     if (contents->checkpoints.empty()) {

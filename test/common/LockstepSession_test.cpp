@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <functional>
+#include <limits>
 #include <optional>
 #include <string>
 #include <vector>
@@ -95,14 +96,10 @@ net::LockstepConfig MakeConfig(std::uint32_t local_id, std::uint32_t peer_id) {
 }
 
 bool SendPeerHello(net::ILockstepTransport& peer, const net::LockstepConfig& config) {
-    net::HelloMsg hello;
-    hello.seed = config.seed;
-    hello.preset = config.preset;
-    hello.tick_rate_hz = config.tick_rate_hz;
-    hello.client_id = config.peer_client_id;
-    hello.system_config_identity = config.system_config_identity;
-    hello.preset_content_hash = config.preset_content_hash;
-    return peer.SendFrame(net::EncodeHello(hello));
+    auto remote = config;
+    remote.local_client_id = config.peer_client_id;
+    remote.peer_client_id = config.local_client_id;
+    return peer.SendFrame(net::EncodeHello(net::MakeLockstepHello(remote)));
 }
 
 // Reject a selected message and report a disconnected peer. Buffered receive frames
@@ -197,6 +194,407 @@ struct BackpressuredTransport final : net::ILockstepTransport {
 };
 
 } // namespace
+
+TEST(LockstepSessionTest, PeerHelloMustMatchTheExpectedDistinctSlot) {
+    for (const std::uint32_t local_id : {0u, 1u}) {
+        for (const std::uint32_t claimed_id : {local_id, 42u}) {
+            auto [local, peer] = net::MakeLoopbackPair();
+            const auto config = MakeConfig(local_id, 1u - local_id);
+            FakeWorld world{0, "agree", 0};
+            net::LockstepSession session(config, local.get(), MakeHooks(&world));
+            auto claimed = config;
+            claimed.peer_client_id = claimed_id;
+            ASSERT_TRUE(SendPeerHello(*peer, claimed));
+            EXPECT_FALSE(session.Handshake());
+            EXPECT_FALSE(session.Status().handshaken);
+            EXPECT_EQ(session.Status().rejected_peer_messages, 1u);
+            EXPECT_EQ(session.AdmissionStatus().input_ticks, 0u);
+        }
+    }
+}
+
+TEST(LockstepSessionTest, BothRolesRejectSpoofedInputWithoutChangingTheAgreedInput) {
+    for (const std::uint32_t local_id : {0u, 1u}) {
+        auto [local, peer] = net::MakeLoopbackPair();
+        const auto config = MakeConfig(local_id, 1u - local_id);
+        FakeWorld world{0, "agree", 0};
+        net::LockstepSession session(config, local.get(), MakeHooks(&world));
+        ASSERT_TRUE(SendPeerHello(*peer, config));
+        ASSERT_TRUE(session.Handshake());
+        ASSERT_TRUE(peer->SendFrame(net::EncodeInput({1, local_id, {0xEE}})));
+        ASSERT_TRUE(peer->SendFrame(net::EncodeInput({1, 42, {0xFF}})));
+        ASSERT_TRUE(peer->SendFrame(net::EncodeInput({1, config.peer_client_id, {0xAB}})));
+        const auto result = session.PumpTick(10);
+        EXPECT_EQ(result.outcome, net::TickOutcome::Advanced);
+        EXPECT_EQ(result.local_inputs, (std::vector<std::uint8_t>{0xAB}));
+        EXPECT_EQ(session.Status().rejected_peer_messages, 2u);
+        EXPECT_FALSE(session.Status().desynced);
+        EXPECT_FALSE(session.Status().peer_disconnected);
+        EXPECT_EQ(session.AdmissionStatus().peer_inputs, 0u);
+    }
+}
+
+TEST(LockstepSessionTest, RejectsStaleAndFutureInputsAndHashesWithoutRetainingThem) {
+    auto [local, peer] = net::MakeLoopbackPair();
+    auto config = MakeConfig(0, 1);
+    config.hash_cadence_ticks = 1;
+    FakeWorld world{0, "agree", 0};
+    net::LockstepSession session(config, local.get(), MakeHooks(&world));
+    ASSERT_TRUE(SendPeerHello(*peer, config));
+    ASSERT_TRUE(session.Handshake());
+    net::HashMsg matching;
+    CaptureHashes(1, matching, &world);
+    ASSERT_TRUE(peer->SendFrame(net::EncodeInput({1, 1, {}})));
+    ASSERT_TRUE(peer->SendFrame(net::EncodeHash(matching)));
+    ASSERT_EQ(session.PumpTick(10).outcome, net::TickOutcome::Advanced);
+    ASSERT_EQ(session.AdmissionStatus().confirmed_hash_tick, 1u);
+    const auto too_far = session.AgreedTick() + std::uint64_t{2} * config.horizon_max + 1;
+    for (const auto tick : {std::uint64_t{0},
+                            std::uint64_t{1},
+                            too_far,
+                            (std::numeric_limits<std::uint64_t>::max)()}) {
+        ASSERT_TRUE(peer->SendFrame(net::EncodeInput({tick, 1, {0xFF}})));
+        matching.tick = tick;
+        ASSERT_TRUE(peer->SendFrame(net::EncodeHash(matching)));
+    }
+    EXPECT_EQ(session.PumpTick(10).outcome, net::TickOutcome::WaitingForPeer);
+    EXPECT_EQ(session.Status().rejected_peer_messages, 8u);
+    const auto retained = session.AdmissionStatus();
+    EXPECT_EQ(retained.peer_inputs, 0u);
+    EXPECT_EQ(retained.peer_hashes, 0u);
+    EXPECT_EQ(retained.retained_bytes, 0u);
+    EXPECT_LE(retained.input_ticks, config.horizon_max);
+    EXPECT_EQ(world.tick, 1u);
+}
+
+TEST(LockstepSessionTest, RetentionBudgetsMustFitAllNegotiatedTraffic) {
+    for (const bool byte_bound : {false, true}) {
+        auto [local, peer] = net::MakeLoopbackPair();
+        auto config = MakeConfig(0, 1);
+        if (byte_bound)
+            config.peer_retained_byte_limit = net::kMaxFramePayloadBytes;
+        else
+            config.peer_retained_message_limit = 2;
+        net::LockstepSession session(config, local.get(), {});
+        ASSERT_TRUE(SendPeerHello(*peer, config));
+        EXPECT_FALSE(session.Handshake());
+        EXPECT_EQ(session.Status().handshake_error,
+                  "lockstep retention budget cannot fit negotiated traffic");
+        EXPECT_EQ(session.AdmissionStatus().input_ticks, 0u);
+    }
+}
+
+TEST(LockstepSessionTest, ExactDerivedBudgetsFitAllPermittedInputAndHashSlots) {
+    auto config = MakeConfig(0, 1);
+    config.max_frame_payload_bytes = 128;
+    config.hash_cadence_ticks = 1;
+    auto [initial_local, initial_peer] = net::MakeLoopbackPair();
+    net::LockstepSession initial(config, initial_local.get(), {});
+    ASSERT_TRUE(SendPeerHello(*initial_peer, config));
+    ASSERT_TRUE(initial.Handshake());
+    const auto bounds = initial.AdmissionStatus();
+    config.peer_retained_byte_limit = bounds.byte_limit;
+    config.peer_retained_message_limit = bounds.message_limit;
+    auto [local, peer] = net::MakeLoopbackPair();
+    net::LockstepSession session(config, local.get(), {});
+    ASSERT_TRUE(SendPeerHello(*peer, config));
+    ASSERT_TRUE(session.Handshake());
+    const auto lead = std::uint64_t{2} * config.horizon_max;
+    // All unique future ticks in the negotiated input window, both message types
+    // at the exact maximum frame size, fit concurrently before execution.
+    for (std::uint64_t tick = 1; tick <= lead; ++tick) {
+        ASSERT_TRUE(peer->SendFrame(net::EncodeInput({tick, 1, std::vector<std::uint8_t>(107)})));
+        net::HashMsg hash;
+        hash.tick = tick;
+        hash.terrain.assign(99, 'h'); // 29-byte overhead + 99 bytes = 128.
+        ASSERT_TRUE(peer->SendFrame(net::EncodeHash(hash)));
+    }
+    ASSERT_EQ(session.PumpTick(lead).outcome, net::TickOutcome::Advanced);
+    EXPECT_EQ(session.AdmissionStatus().peer_inputs, lead - 1);
+    EXPECT_EQ(session.AdmissionStatus().peer_hashes, lead - 1);
+    EXPECT_LE(session.AdmissionStatus().retained_bytes, bounds.byte_limit);
+    for (std::uint64_t tick = 2; tick <= lead; ++tick)
+        ASSERT_EQ(session.PumpTick(lead).outcome,
+                  tick == lead ? net::TickOutcome::Finished : net::TickOutcome::Advanced);
+    EXPECT_EQ(session.AdmissionStatus().retained_bytes, 0u);
+    EXPECT_EQ(session.Status().rejected_peer_messages, 0u);
+}
+
+TEST(LockstepSessionTest, FloodBoundsContainersAndHonestTrafficRecovers) {
+    auto [local, peer] = net::MakeLoopbackPair();
+    auto config = MakeConfig(0, 1);
+    config.hash_cadence_ticks = 1;
+    FakeWorld world{0, "agree", 0};
+    net::LockstepSession session(config, local.get(), MakeHooks(&world));
+    ASSERT_TRUE(SendPeerHello(*peer, config));
+    ASSERT_TRUE(session.Handshake());
+    const auto lead = std::uint64_t{2} * config.horizon_max;
+    for (int batch = 0; batch < 8; ++batch) {
+        for (std::uint64_t tick = 2; tick <= lead + 32; ++tick) {
+            ASSERT_TRUE(peer->SendFrame(net::EncodeInput({tick, 1, {0xAB}})));
+            ASSERT_TRUE(peer->SendFrame(net::EncodeInput({tick, 42, {0xFF}})));
+            net::HashMsg hash;
+            CaptureHashes(tick, hash, &world);
+            ASSERT_TRUE(peer->SendFrame(net::EncodeHash(hash)));
+        }
+        EXPECT_EQ(session.PumpTick(100).outcome, net::TickOutcome::WaitingForPeer);
+        const auto retained = session.AdmissionStatus();
+        EXPECT_EQ(retained.peer_inputs, lead - 1);
+        EXPECT_EQ(retained.peer_hashes, lead - 1);
+        EXPECT_LE(retained.peer_inputs + retained.peer_hashes, retained.message_limit);
+        EXPECT_LE(retained.retained_bytes, retained.byte_limit);
+        EXPECT_LE(retained.input_ticks, lead);
+    }
+    EXPECT_GT(session.Status().rejected_peer_messages, 0u);
+    // The missing oldest tick was never displaced by later arrivals or the flood.
+    ASSERT_TRUE(peer->SendFrame(net::EncodeInput({1, 1, {0xAB}})));
+    net::HashMsg first;
+    CaptureHashes(1, first, &world);
+    ASSERT_TRUE(peer->SendFrame(net::EncodeHash(first)));
+    for (std::uint64_t tick = 1; tick <= lead; ++tick)
+        ASSERT_EQ(session.PumpTick(lead).outcome,
+                  tick == lead ? net::TickOutcome::Finished : net::TickOutcome::Advanced);
+    EXPECT_EQ(session.AdmissionStatus().confirmed_hash_tick, lead);
+    EXPECT_EQ(session.AdmissionStatus().peer_inputs, 0u);
+    EXPECT_EQ(session.AdmissionStatus().peer_hashes, 0u);
+    EXPECT_EQ(session.AdmissionStatus().retained_bytes, 0u);
+    EXPECT_FALSE(session.Status().desynced);
+    EXPECT_FALSE(session.Status().peer_disconnected);
+}
+
+TEST(LockstepSessionTest, ConsumedInputsAndConfirmedHashesReleaseTheirEntirePeerHistory) {
+    auto [local, peer] = net::MakeLoopbackPair();
+    auto config = MakeConfig(0, 1);
+    config.hash_cadence_ticks = 1;
+    FakeWorld world{0, "agree", 0};
+    net::LockstepSession session(config, local.get(), MakeHooks(&world));
+    ASSERT_TRUE(SendPeerHello(*peer, config));
+    ASSERT_TRUE(session.Handshake());
+    for (std::uint64_t tick = 1; tick <= 120; ++tick) {
+        ASSERT_TRUE(peer->SendFrame(net::EncodeInput({tick, 1, {0xAB}})));
+        net::HashMsg hash;
+        CaptureHashes(tick, hash, &world);
+        ASSERT_TRUE(peer->SendFrame(net::EncodeHash(hash)));
+        ASSERT_EQ(session.PumpTick(121).outcome, net::TickOutcome::Advanced);
+        const auto retained = session.AdmissionStatus();
+        EXPECT_EQ(retained.peer_inputs, 0u);
+        EXPECT_EQ(retained.peer_hashes, 0u);
+        EXPECT_EQ(retained.retained_bytes, 0u);
+        EXPECT_EQ(retained.confirmed_hash_tick, tick);
+        EXPECT_EQ(retained.input_ticks, config.horizon_start);
+    }
+    EXPECT_EQ(session.Status().rejected_peer_messages, 0u);
+    EXPECT_FALSE(session.Status().desynced);
+}
+
+TEST(LockstepSessionTest, ReorderedHashesConfirmOnlyAfterEarlierCheckpointsArrive) {
+    auto [local, peer] = net::MakeLoopbackPair();
+    auto config = MakeConfig(0, 1);
+    config.hash_cadence_ticks = 1;
+    FakeWorld world{0, "agree", 0};
+    net::LockstepSession session(config, local.get(), MakeHooks(&world));
+    ASSERT_TRUE(SendPeerHello(*peer, config));
+    ASSERT_TRUE(session.Handshake());
+    for (std::uint64_t tick = 1; tick <= 3; ++tick) {
+        ASSERT_TRUE(peer->SendFrame(net::EncodeInput({tick, 1, {}})));
+        ASSERT_EQ(session.PumpTick(10).outcome, net::TickOutcome::Advanced);
+    }
+    for (const std::uint64_t tick : {3u, 1u, 2u}) {
+        net::HashMsg hash;
+        CaptureHashes(tick, hash, &world);
+        ASSERT_TRUE(peer->SendFrame(net::EncodeHash(hash)));
+        ASSERT_EQ(session.PumpTick(10).outcome, net::TickOutcome::WaitingForPeer);
+        EXPECT_EQ(session.AdmissionStatus().confirmed_hash_tick,
+                  tick == 3   ? 0u
+                  : tick == 1 ? 1u
+                              : 3u);
+    }
+    EXPECT_EQ(session.AdmissionStatus().peer_hashes, 0u);
+    EXPECT_EQ(session.AdmissionStatus().retained_bytes, 0u);
+    EXPECT_EQ(session.Status().rejected_peer_messages, 0u);
+}
+
+TEST(LockstepSessionTest, LookaheadIncludesBothPeerHorizonsAndRejectsTheNextTick) {
+    auto [local, peer] = net::MakeLoopbackPair();
+    auto config = MakeConfig(0, 1);
+    // The scheduler also supports start/min above max; admission must agree.
+    config.horizon_start = config.horizon_min = 4;
+    config.horizon_max = 2;
+    config.hash_cadence_ticks = 1;
+    FakeWorld world{0, "agree", 0};
+    net::LockstepSession session(config, local.get(), MakeHooks(&world));
+    ASSERT_TRUE(SendPeerHello(*peer, config));
+    ASSERT_TRUE(session.Handshake());
+    const auto last = std::uint64_t{2} * config.horizon_start;
+    ASSERT_TRUE(peer->SendFrame(net::EncodeInput({last, 1, {0xAB}})));
+    ASSERT_TRUE(peer->SendFrame(net::EncodeInput({last + 1, 1, {0xFF}})));
+    net::HashMsg hash;
+    CaptureHashes(last, hash, &world);
+    ASSERT_TRUE(peer->SendFrame(net::EncodeHash(hash)));
+    hash.tick = last + 1;
+    ASSERT_TRUE(peer->SendFrame(net::EncodeHash(hash)));
+    EXPECT_EQ(session.PumpTick(10).outcome, net::TickOutcome::WaitingForPeer);
+    EXPECT_EQ(session.AdmissionStatus().peer_inputs, 1u);
+    EXPECT_EQ(session.AdmissionStatus().peer_hashes, 1u);
+    EXPECT_EQ(session.Status().rejected_peer_messages, 2u);
+}
+
+TEST(LockstepSessionTest, DuplicateInputsCannotReplaceTheFirstAdmittedBlob) {
+    auto [local, peer] = net::MakeLoopbackPair();
+    const auto config = MakeConfig(0, 1);
+    FakeWorld world{0, "agree", 0};
+    net::LockstepSession session(config, local.get(), MakeHooks(&world));
+    ASSERT_TRUE(SendPeerHello(*peer, config));
+    ASSERT_TRUE(session.Handshake());
+    const auto original = net::EncodeInput({2, 1, {0xAB}});
+    ASSERT_TRUE(peer->SendFrame(original));
+    ASSERT_TRUE(peer->SendFrame(original));
+    ASSERT_TRUE(peer->SendFrame(net::EncodeInput({2, 1, {0xFF, 0xFF}})));
+    ASSERT_EQ(session.PumpTick(10).outcome, net::TickOutcome::WaitingForPeer);
+    EXPECT_EQ(session.AdmissionStatus().peer_inputs, 1u);
+    EXPECT_EQ(session.AdmissionStatus().retained_bytes, original.size());
+    EXPECT_EQ(session.Status().rejected_peer_messages, 1u);
+    ASSERT_TRUE(peer->SendFrame(net::EncodeInput({1, 1, {}})));
+    ASSERT_EQ(session.PumpTick(10).outcome, net::TickOutcome::Advanced);
+    const auto result = session.PumpTick(10);
+    EXPECT_EQ(result.outcome, net::TickOutcome::Advanced);
+    EXPECT_EQ(result.local_inputs, (std::vector<std::uint8_t>{0xAB}));
+    EXPECT_EQ(session.AdmissionStatus().peer_inputs, 0u);
+    EXPECT_EQ(session.AdmissionStatus().retained_bytes, 0u);
+}
+
+TEST(LockstepSessionTest, AdmissionRejectsMalformedLengthsTrailingDataAndOffCadenceHashes) {
+    auto [local, peer] = net::MakeLoopbackPair();
+    auto config = MakeConfig(0, 1);
+    config.hash_cadence_ticks = 2;
+    FakeWorld world{0, "agree", 0};
+    net::LockstepSession session(config, local.get(), MakeHooks(&world));
+    ASSERT_TRUE(SendPeerHello(*peer, config));
+    ASSERT_TRUE(session.Handshake());
+    auto bad_input = net::EncodeInput({1, 1, {}});
+    bad_input.back() = 0xFF; // Blob length exceeds the complete frame.
+    ASSERT_TRUE(peer->SendFrame(bad_input));
+    auto trailing_input = net::EncodeInput({1, 1, {}});
+    trailing_input.push_back(0xFF);
+    ASSERT_TRUE(peer->SendFrame(trailing_input));
+    net::HashMsg hash;
+    CaptureHashes(2, hash, &world);
+    auto bad_hash = net::EncodeHash(hash);
+    bad_hash[13] = 0xFF; // First string length exceeds the complete frame.
+    ASSERT_TRUE(peer->SendFrame(bad_hash));
+    auto trailing_hash = net::EncodeHash(hash);
+    trailing_hash.push_back(0xFF);
+    ASSERT_TRUE(peer->SendFrame(trailing_hash));
+    for (const std::uint64_t tick : {0u, 1u}) {
+        hash.tick = tick;
+        ASSERT_TRUE(peer->SendFrame(net::EncodeHash(hash)));
+    }
+    EXPECT_EQ(session.PumpTick(10).outcome, net::TickOutcome::WaitingForPeer);
+    EXPECT_EQ(session.Status().rejected_peer_messages, 6u);
+    EXPECT_EQ(session.AdmissionStatus().peer_inputs, 0u);
+    EXPECT_EQ(session.AdmissionStatus().peer_hashes, 0u);
+    EXPECT_EQ(session.AdmissionStatus().retained_bytes, 0u);
+}
+
+TEST(LockstepSessionTest, ReorderedLaterMatchCannotHideAnEarlierDelayedDesync) {
+    auto [local, peer] = net::MakeLoopbackPair();
+    auto config = MakeConfig(0, 1);
+    config.hash_cadence_ticks = 1;
+    FakeWorld world{0, "agree", 0};
+    net::LockstepSession session(config, local.get(), MakeHooks(&world));
+    const auto dump = LockstepTempDir() / "desync-reordered-checkpoints.lrec1";
+    session.SetDumpPath(dump.string());
+    ASSERT_TRUE(SendPeerHello(*peer, config));
+    ASSERT_TRUE(session.Handshake());
+    for (std::uint64_t tick = 1; tick <= 3; ++tick) {
+        ASSERT_TRUE(peer->SendFrame(net::EncodeInput({tick, 1, {}})));
+        ASSERT_EQ(session.PumpTick(10).outcome, net::TickOutcome::Advanced);
+    }
+    net::HashMsg hash;
+    CaptureHashes(3, hash, &world);
+    ASSERT_TRUE(peer->SendFrame(net::EncodeHash(hash)));
+    ASSERT_EQ(session.PumpTick(10).outcome, net::TickOutcome::WaitingForPeer);
+    ASSERT_EQ(session.AdmissionStatus().confirmed_hash_tick, 0u);
+    FakeWorld mismatching{0, "different", 0};
+    CaptureHashes(1, hash, &mismatching);
+    ASSERT_TRUE(peer->SendFrame(net::EncodeHash(hash)));
+    EXPECT_EQ(session.PumpTick(10).outcome, net::TickOutcome::Desync);
+    EXPECT_EQ(session.Status().desync_tick, 1u);
+    const auto contents = replay::ReadReplay(dump.string());
+    if (!contents.has_value()) {
+        FAIL() << "desync replay could not be read";
+    }
+    const auto& replay_contents = *contents;
+    EXPECT_EQ(replay_contents.inputs.size(), 3u);
+    ASSERT_EQ(replay_contents.checkpoints.size(), 1u);
+    EXPECT_EQ(replay_contents.checkpoints.front().tick, 1u);
+    std::error_code ec;
+    fs::remove(dump, ec);
+}
+
+TEST(LockstepSessionTest, ClosureReleasesRetainedMessagesAfterDrainingBufferedInputs) {
+    for (const bool send_bye : {false, true}) {
+        SCOPED_TRACE(send_bye);
+        auto [local, peer] = net::MakeLoopbackPair();
+        auto config = MakeConfig(0, 1);
+        config.hash_cadence_ticks = 1;
+        FakeWorld world{0, "agree", 0};
+        net::LockstepSession session(config, local.get(), MakeHooks(&world));
+        ASSERT_TRUE(SendPeerHello(*peer, config));
+        ASSERT_TRUE(session.Handshake());
+        constexpr std::uint64_t ticks = 5; // Beyond the three pre-scheduled local slots.
+        for (std::uint64_t tick = 1; tick <= ticks; ++tick)
+            ASSERT_TRUE(peer->SendFrame(net::EncodeInput({tick, 1, {}})));
+        net::HashMsg hash;
+        CaptureHashes(ticks, hash, &world);
+        ASSERT_TRUE(peer->SendFrame(net::EncodeHash(hash)));
+        if (send_bye) {
+            ASSERT_TRUE(peer->SendFrame(net::EncodeBye({ticks})));
+        }
+        peer->Close();
+        for (std::uint64_t tick = 1; tick <= ticks; ++tick)
+            ASSERT_EQ(session.PumpTick(10).outcome, net::TickOutcome::Advanced);
+        EXPECT_EQ(world.tick, ticks);
+        std::vector<std::uint8_t> frame;
+        std::size_t frames_sent = 0;
+        while (peer->TryReceiveFrame(frame))
+            ++frames_sent;
+        EXPECT_EQ(frames_sent, 1u + config.horizon_start); // Hello and initial inputs only.
+        EXPECT_EQ(session.PumpTick(10).outcome, net::TickOutcome::PeerDisconnected);
+        EXPECT_FALSE(session.Status().desynced);
+        const auto retained = session.AdmissionStatus();
+        EXPECT_EQ(retained.input_ticks, 0u);
+        EXPECT_EQ(retained.peer_inputs, 0u);
+        EXPECT_EQ(retained.peer_hashes, 0u);
+        EXPECT_EQ(retained.retained_bytes, 0u);
+    }
+}
+
+TEST(LockstepSessionTest, DelayedHashAfterByeStillDetectsDesyncBeforeBufferedTicks) {
+    auto [local, peer] = net::MakeLoopbackPair();
+    auto config = MakeConfig(0, 1);
+    config.hash_cadence_ticks = 1;
+    FakeWorld world{0, "agree", 0};
+    net::LockstepSession session(config, local.get(), MakeHooks(&world));
+    const auto dump = LockstepTempDir() / "desync-delayed-after-bye.lrec1";
+    session.SetDumpPath(dump.string());
+    ASSERT_TRUE(SendPeerHello(*peer, config));
+    ASSERT_TRUE(session.Handshake());
+    for (std::uint64_t tick = 1; tick <= 5; ++tick)
+        ASSERT_TRUE(peer->SendFrame(net::EncodeInput({tick, 1, {}})));
+    ASSERT_TRUE(peer->SendFrame(net::EncodeBye({5})));
+    ASSERT_EQ(session.PumpTick(10).outcome, net::TickOutcome::Advanced);
+    FakeWorld mismatching{0, "different", 0};
+    net::HashMsg hash;
+    CaptureHashes(1, hash, &mismatching);
+    ASSERT_TRUE(peer->SendFrame(net::EncodeHash(hash)));
+    EXPECT_EQ(session.PumpTick(10).outcome, net::TickOutcome::Desync);
+    EXPECT_EQ(session.Status().desync_tick, 1u);
+    EXPECT_EQ(world.tick, 1u);
+    EXPECT_EQ(session.Status().rejected_peer_messages, 0u);
+    std::error_code ec;
+    fs::remove(dump, ec);
+}
 
 TEST(LockstepSessionTest, DisconnectFlushesQueuedFramesBeforeByeOrClosesWithoutBye) {
     for (const auto type : {net::MessageType::Input, net::MessageType::Hash}) {
@@ -939,6 +1337,552 @@ TEST(LockstepSessionTest, LargeHandshakeInputsStayConnectedAndArriveInOrder) {
     exercise(sim.A(), sim.B(), &sim);
 }
 
+TEST(LockstepSessionTest, DefaultHorizonsDeliverTwentyFourMiBFramesWithoutLoss) {
+    auto [ta, tb] = net::MakeLoopbackPair();
+    auto ca = MakeConfig(0, 1);
+    auto cb = MakeConfig(1, 0);
+    auto hooks = net::LockstepHooks{};
+    hooks.collect_local_input = [](std::uint64_t tick, void*) {
+        return std::vector<std::uint8_t>(24u * 1024u * 1024u, static_cast<std::uint8_t>(tick));
+    };
+    net::LockstepSession a(ca, ta.get(), hooks);
+    net::LockstepSession b(cb, tb.get(), hooks);
+    ASSERT_TRUE(SendPeerHello(*tb, ca));
+    ASSERT_TRUE(a.Handshake());
+    ASSERT_TRUE(b.Handshake());
+    for (std::uint64_t tick = 1; tick <= 4; ++tick) {
+        const auto ra = a.PumpTick(4);
+        const auto rb = b.PumpTick(4);
+        ASSERT_EQ(ra.outcome, tick == 4 ? net::TickOutcome::Finished : net::TickOutcome::Advanced);
+        ASSERT_EQ(rb.outcome, ra.outcome);
+        ASSERT_EQ(ra.local_inputs.size(), 48u * 1024u * 1024u);
+        EXPECT_EQ(ra.local_inputs, rb.local_inputs);
+        EXPECT_EQ(ra.local_inputs.front(), tick);
+        EXPECT_EQ(ra.local_inputs.back(), tick);
+        EXPECT_LE(a.AdmissionStatus().applied_input_bytes, net::kMaxFramePayloadBytes);
+        EXPECT_LE(b.AdmissionStatus().applied_input_bytes, net::kMaxFramePayloadBytes);
+    }
+    EXPECT_EQ(a.Status().rejected_peer_messages, 0u);
+    EXPECT_EQ(b.Status().rejected_peer_messages, 0u);
+}
+
+TEST(LockstepSessionTest, ThousandAndTwentyFiveTickHorizonCompletesWithoutLoss) {
+    auto [ta, tb] = net::MakeLoopbackPair();
+    auto ca = MakeConfig(0, 1);
+    auto cb = MakeConfig(1, 0);
+    ca.horizon_start = ca.horizon_min = ca.horizon_max = 1025;
+    cb.horizon_start = cb.horizon_min = cb.horizon_max = 1025;
+    net::LockstepSession a(ca, ta.get(), {});
+    net::LockstepSession b(cb, tb.get(), {});
+    ASSERT_TRUE(SendPeerHello(*tb, ca));
+    ASSERT_TRUE(a.Handshake());
+    ASSERT_TRUE(b.Handshake());
+    for (std::uint64_t tick = 1; tick <= 1026; ++tick) {
+        const auto ra = a.PumpTick(1026);
+        const auto rb = b.PumpTick(1026);
+        ASSERT_EQ(ra.outcome,
+                  tick == 1026 ? net::TickOutcome::Finished : net::TickOutcome::Advanced);
+        ASSERT_EQ(rb.outcome, ra.outcome);
+        EXPECT_LE(a.AdmissionStatus().peer_inputs, 2050u);
+        EXPECT_LE(b.AdmissionStatus().peer_inputs, 2050u);
+    }
+    EXPECT_EQ(a.AgreedTick(), 1026u);
+    EXPECT_EQ(b.AgreedTick(), 1026u);
+    EXPECT_EQ(a.Status().rejected_peer_messages, 0u);
+    EXPECT_EQ(b.Status().rejected_peer_messages, 0u);
+}
+
+TEST(LockstepSessionTest, DelayedFirstCheckpointAlwaysFitsAfterThousandLaterCheckpoints) {
+    auto [local, peer] = net::MakeLoopbackPair();
+    auto config = MakeConfig(0, 1);
+    config.hash_cadence_ticks = 1;
+    FakeWorld world{0, "agree", 0};
+    net::LockstepSession session(config, local.get(), MakeHooks(&world));
+    ASSERT_TRUE(SendPeerHello(*peer, config));
+    ASSERT_TRUE(session.Handshake());
+    for (std::uint64_t tick = 1; tick <= 1025; ++tick) {
+        ASSERT_TRUE(peer->SendFrame(net::EncodeInput({tick, 1, {}})));
+        if (tick > 1) {
+            net::HashMsg hash;
+            CaptureHashes(tick, hash, &world);
+            ASSERT_TRUE(peer->SendFrame(net::EncodeHash(hash)));
+        }
+        ASSERT_EQ(session.PumpTick(1026).outcome, net::TickOutcome::Advanced);
+    }
+    ASSERT_EQ(session.AdmissionStatus().peer_hashes, 1024u);
+    ASSERT_EQ(session.AdmissionStatus().confirmed_hash_tick, 0u);
+    net::HashMsg first;
+    CaptureHashes(1, first, &world);
+    ASSERT_TRUE(peer->SendFrame(net::EncodeHash(first)));
+    ASSERT_TRUE(peer->SendFrame(net::EncodeInput({1026, 1, {}})));
+    ASSERT_EQ(session.PumpTick(1026).outcome, net::TickOutcome::Finished);
+    EXPECT_EQ(session.AdmissionStatus().confirmed_hash_tick, 1025u);
+    EXPECT_EQ(session.AdmissionStatus().peer_hashes, 0u);
+    EXPECT_EQ(session.Status().rejected_peer_messages, 0u);
+}
+
+TEST(LockstepSessionTest, ConfirmationWindowPausesWithoutLosingTheNextInputAndResumes) {
+    auto [local, peer] = net::MakeLoopbackPair();
+    auto config = MakeConfig(0, 1);
+    config.hash_cadence_ticks = 1;
+    FakeWorld world{0, "agree", 0};
+    net::LockstepSession session(config, local.get(), MakeHooks(&world));
+    ASSERT_TRUE(SendPeerHello(*peer, config));
+    ASSERT_TRUE(session.Handshake());
+    const auto window = session.AdmissionStatus().checkpoint_window;
+    for (std::uint64_t tick = 1; tick <= window; ++tick) {
+        ASSERT_TRUE(peer->SendFrame(net::EncodeInput({tick, 1, {}})));
+        if (tick != 1) {
+            net::HashMsg hash;
+            CaptureHashes(tick, hash, &world);
+            ASSERT_TRUE(peer->SendFrame(net::EncodeHash(hash)));
+        }
+        ASSERT_EQ(session.PumpTick(window + 1).outcome, net::TickOutcome::Advanced);
+    }
+    ASSERT_TRUE(peer->SendFrame(net::EncodeInput({window + 1, 1, {0xAB}})));
+    for (int pump = 0; pump < 3; ++pump) {
+        ASSERT_EQ(session.PumpTick(window + 1).outcome, net::TickOutcome::WaitingForPeer);
+        EXPECT_EQ(session.AgreedTick(), window);
+        EXPECT_EQ(session.AdmissionStatus().peer_inputs, 1u);
+        EXPECT_EQ(session.AdmissionStatus().local_hashes, window);
+        EXPECT_EQ(session.AdmissionStatus().peer_hashes, window - 1);
+        EXPECT_EQ(session.AdmissionStatus().retained_bytes, (window - 1) * 29 + 22);
+    }
+    net::HashMsg first;
+    CaptureHashes(1, first, &world);
+    ASSERT_TRUE(peer->SendFrame(net::EncodeHash(first)));
+    const auto resumed = session.PumpTick(window + 1);
+    EXPECT_EQ(resumed.outcome, net::TickOutcome::Finished);
+    EXPECT_EQ(resumed.local_inputs, (std::vector<std::uint8_t>{0xAB}));
+    EXPECT_EQ(session.AdmissionStatus().confirmed_hash_tick, window);
+    EXPECT_EQ(session.AdmissionStatus().peer_hashes, 0u);
+    EXPECT_EQ(session.Status().rejected_peer_messages, 0u);
+}
+
+TEST(LockstepSessionTest, NegotiatedHelloRoundtripsAllAdmissionSettings) {
+    auto config = MakeConfig(1, 0);
+    config.horizon_start = 7;
+    config.horizon_min = 4;
+    config.horizon_max = 21;
+    config.hash_cadence_ticks = 17;
+    config.peer_retained_byte_limit = 123456;
+    config.peer_retained_message_limit = 789;
+    const auto hello = net::MakeLockstepHello(config, 1024);
+    net::HelloMsg decoded;
+    ASSERT_TRUE(net::DecodeHello(net::EncodeHello(hello), decoded));
+    EXPECT_EQ(decoded.horizon_start, config.horizon_start);
+    EXPECT_EQ(decoded.horizon_min, config.horizon_min);
+    EXPECT_EQ(decoded.horizon_max, config.horizon_max);
+    EXPECT_EQ(decoded.hash_cadence_ticks, config.hash_cadence_ticks);
+    EXPECT_EQ(decoded.max_frame_bytes, 1024u);
+    EXPECT_EQ(decoded.retained_byte_limit, config.peer_retained_byte_limit);
+    EXPECT_EQ(decoded.retained_message_limit, config.peer_retained_message_limit);
+    EXPECT_EQ(decoded.system_config_identity, config.system_config_identity);
+}
+
+TEST(LockstepSessionTest, IncompatibleHorizonsAndLimitsFailAtHandshake) {
+    for (const int setting : {0, 1, 2, 3, 4, 5}) {
+        auto [local, peer] = net::MakeLoopbackPair();
+        const auto config = MakeConfig(0, 1);
+        auto remote = config;
+        switch (setting) {
+            case 0:
+                remote.horizon_max = 21;
+                break;
+            case 1:
+                remote.horizon_start = 21;
+                break;
+            case 2:
+                remote.horizon_min = 21;
+                break;
+            case 3:
+                remote.hash_cadence_ticks = 1;
+                break;
+            case 4:
+                remote.peer_retained_byte_limit = 1;
+                break;
+            case 5:
+                remote.peer_retained_message_limit = 1;
+                break;
+        }
+        net::LockstepSession session(config, local.get(), {});
+        ASSERT_TRUE(SendPeerHello(*peer, remote));
+        EXPECT_FALSE(session.Handshake());
+        EXPECT_EQ(session.Status().handshake_error,
+                  "incompatible lockstep horizons, cadence or retention limits");
+        EXPECT_EQ(session.AdmissionStatus().input_ticks, 0u);
+    }
+}
+
+TEST(LockstepSessionTest, NegotiatesSmallerFramesAndRejectsOversizedTrafficBeforeRecovery) {
+    auto [ta, tb] = net::MakeLoopbackPair();
+    auto ca = MakeConfig(0, 1);
+    auto cb = MakeConfig(1, 0);
+    ca.max_frame_payload_bytes = 128;
+    cb.max_frame_payload_bytes = 1024;
+    ca.hash_cadence_ticks = cb.hash_cadence_ticks = 1;
+    FakeWorld wa{0, "agree", 0}, wb{0, "agree", 0};
+    net::LockstepSession a(ca, ta.get(), MakeHooks(&wa));
+    net::LockstepSession b(cb, tb.get(), MakeHooks(&wb));
+    ASSERT_TRUE(tb->SendFrame(net::EncodeHello(net::MakeLockstepHello(cb))));
+    ASSERT_TRUE(a.Handshake());
+    ASSERT_TRUE(b.Handshake());
+    const auto bounds = a.AdmissionStatus();
+    EXPECT_EQ(bounds.frame_limit, 128u);
+    EXPECT_EQ(b.AdmissionStatus().frame_limit, 128u);
+    EXPECT_EQ(bounds.byte_limit, bounds.message_limit * 128);
+    EXPECT_EQ(b.AdmissionStatus().byte_limit, bounds.byte_limit);
+    ASSERT_TRUE(tb->SendFrame(net::EncodeInput({1, 1, std::vector<std::uint8_t>(129 - 21)})));
+    net::HashMsg oversized;
+    oversized.tick = 1;
+    oversized.world_hash.assign(129 - 29, 'h');
+    ASSERT_TRUE(tb->SendFrame(net::EncodeHash(oversized)));
+    for (std::uint64_t tick = 1; tick <= 4; ++tick) {
+        const auto ra = a.PumpTick(4);
+        const auto rb = b.PumpTick(4);
+        ASSERT_EQ(ra.outcome, tick == 4 ? net::TickOutcome::Finished : net::TickOutcome::Advanced);
+        ASSERT_EQ(rb.outcome, ra.outcome);
+    }
+    EXPECT_EQ(a.Status().rejected_peer_messages, 2u);
+    EXPECT_EQ(b.Status().rejected_peer_messages, 0u);
+    EXPECT_FALSE(a.Status().desynced);
+    EXPECT_FALSE(b.Status().desynced);
+}
+
+TEST(LockstepSessionTest, HundredThousandTicksBoundAllHistoryAndStreamEveryAppliedTick) {
+    auto [ta, tb] = net::MakeLoopbackPair();
+    auto ca = MakeConfig(0, 1);
+    auto cb = MakeConfig(1, 0);
+    ca.hash_cadence_ticks = cb.hash_cadence_ticks = 1;
+    struct Counter {
+        std::uint64_t records = 0;
+        std::uint64_t checkpoints = 0;
+        std::uint64_t digest = 0;
+    } a_counter, b_counter;
+    const auto hooks_for = [](Counter& counter) {
+        net::LockstepHooks hooks;
+        hooks.collect_local_input = [](std::uint64_t tick, void*) {
+            return std::vector<std::uint8_t>{static_cast<std::uint8_t>(tick)};
+        };
+        hooks.record_replay_tick = [](std::uint64_t tick,
+                                      const std::vector<std::uint8_t>& merged,
+                                      const net::HashMsg* hash,
+                                      void* user) {
+            auto& output = *static_cast<Counter*>(user);
+            ++output.records;
+            output.checkpoints += hash != nullptr;
+            output.digest = output.digest * 31 + tick;
+            for (const auto byte : merged)
+                output.digest = output.digest * 31 + byte;
+        };
+        hooks.user = &counter;
+        return hooks;
+    };
+    net::LockstepSession a(ca, ta.get(), hooks_for(a_counter));
+    net::LockstepSession b(cb, tb.get(), hooks_for(b_counter));
+    ASSERT_TRUE(SendPeerHello(*tb, ca));
+    ASSERT_TRUE(a.Handshake());
+    ASSERT_TRUE(b.Handshake());
+    constexpr std::uint64_t ticks = 100000;
+    for (std::uint64_t tick = 1; tick <= ticks; ++tick) {
+        ASSERT_EQ(a.PumpTick(ticks).outcome,
+                  tick == ticks ? net::TickOutcome::Finished : net::TickOutcome::Advanced);
+        ASSERT_EQ(b.PumpTick(ticks).outcome,
+                  tick == ticks ? net::TickOutcome::Finished : net::TickOutcome::Advanced);
+        // Explicit persistence boundaries keep this accelerated simulation test
+        // independent of how the runner schedules recorder workers.
+        if (tick % 256 == 0) {
+            ASSERT_TRUE(a.FlushReplayRecorder());
+            ASSERT_TRUE(b.FlushReplayRecorder());
+        }
+        for (const auto retained : {a.AdmissionStatus(), b.AdmissionStatus()}) {
+            ASSERT_LE(retained.applied_inputs, net::kReceiveQueueFrameLimit);
+            ASSERT_LE(retained.applied_input_bytes, net::kMaxFramePayloadBytes);
+            ASSERT_LE(retained.local_hashes, net::kReceiveQueueFrameLimit + 1);
+            ASSERT_LE(retained.peer_inputs + retained.peer_hashes, retained.message_limit);
+            ASSERT_LE(retained.retained_bytes, retained.byte_limit);
+        }
+    }
+    EXPECT_EQ(a_counter.records, ticks);
+    EXPECT_EQ(b_counter.records, ticks);
+    EXPECT_EQ(a_counter.checkpoints, ticks);
+    EXPECT_EQ(b_counter.checkpoints, ticks);
+    // Whole-session identity belongs to the streaming consumer, which receives
+    // identical bytes on both peers without retaining the history in memory.
+    EXPECT_EQ(a_counter.digest, b_counter.digest);
+    EXPECT_EQ(a.Status().rejected_peer_messages, 0u);
+    EXPECT_EQ(b.Status().rejected_peer_messages, 0u);
+}
+
+TEST(LockstepSessionTest, MatchedOutOfOrderHashReleasesItsStringAllocation) {
+    auto [local, peer] = net::MakeLoopbackPair();
+    auto config = MakeConfig(0, 1);
+    config.hash_cadence_ticks = 1;
+    net::LockstepHooks hooks;
+    hooks.capture_hashes = [](std::uint64_t, net::HashMsg& hash, void*) {
+        hash.world_hash.assign(1024 * 1024, 'h');
+    };
+    net::LockstepSession session(config, local.get(), hooks);
+    ASSERT_TRUE(SendPeerHello(*peer, config));
+    ASSERT_TRUE(session.Handshake());
+    // Checkpoint 1 is deliberately missing, keeping checkpoint 2's marker alive.
+    for (std::uint64_t tick = 1; tick <= 2; ++tick) {
+        ASSERT_TRUE(peer->SendFrame(net::EncodeInput({tick, 1, {}})));
+        ASSERT_EQ(session.PumpTick(10).outcome, net::TickOutcome::Advanced);
+    }
+    net::HashMsg hash;
+    hash.tick = 2;
+    hash.world_hash.assign(1024 * 1024, 'h');
+    ASSERT_TRUE(peer->SendFrame(net::EncodeHash(hash)));
+    ASSERT_EQ(session.PumpTick(10).outcome, net::TickOutcome::WaitingForPeer);
+    ASSERT_EQ(session.AdmissionStatus().peer_hashes, 1u);
+    EXPECT_EQ(session.AdmissionStatus().confirmed_hash_tick, 0u);
+    const auto capacity = session.PeerHashStringCapacity(2);
+    if (!capacity.has_value()) {
+        FAIL() << "out-of-order confirmation marker was lost";
+    }
+    const net::HashMsg empty;
+    EXPECT_EQ(*capacity,
+              empty.world_hash.capacity() + empty.terrain.capacity() + empty.water.capacity() +
+                  empty.entities.capacity());
+    EXPECT_EQ(session.AdmissionStatus().retained_bytes, 29u); // encoded empty marker
+    hash.tick = 1;
+    ASSERT_TRUE(peer->SendFrame(net::EncodeHash(hash)));
+    ASSERT_EQ(session.PumpTick(10).outcome, net::TickOutcome::WaitingForPeer);
+    EXPECT_EQ(session.AdmissionStatus().confirmed_hash_tick, 2u);
+    EXPECT_EQ(session.AdmissionStatus().retained_bytes, 0u);
+    EXPECT_FALSE(session.PeerHashStringCapacity(2).has_value());
+}
+
+TEST(LockstepSessionTest, DumpDestinationCanBeSetAfterHandshakeBeforeFirstTick) {
+    auto [local, peer] = net::MakeLoopbackPair();
+    const auto config = MakeConfig(0, 1);
+    net::LockstepHooks hooks;
+    hooks.apply_and_step = [](std::uint64_t, const std::vector<std::uint8_t>&, void*) {
+        return false;
+    };
+    net::LockstepSession session(config, local.get(), hooks);
+    ASSERT_TRUE(SendPeerHello(*peer, config));
+    ASSERT_TRUE(session.Handshake());
+    const auto directory = LockstepTempDir() / "dump-after-handshake";
+    const auto dump = directory / "desync.lrec1";
+    session.SetDumpPath(dump.string());
+    ASSERT_TRUE(peer->SendFrame(net::EncodeInput({1, 1, {0xab}})));
+    ASSERT_EQ(session.PumpTick(10).outcome, net::TickOutcome::Desync);
+    ASSERT_EQ(session.Status().dump_path, dump.string());
+    const auto parsed = replay::ReadReplay(dump.string());
+    if (!parsed.has_value()) {
+        FAIL() << "destination set after handshake lost its artifact";
+    }
+    const auto& contents = *parsed;
+    EXPECT_FALSE(contents.truncated);
+    ASSERT_EQ(contents.inputs.size(), 1u);
+    EXPECT_EQ(contents.inputs.front().inputs, (std::vector<std::uint8_t>{0xab}));
+    fs::remove(dump);
+    EXPECT_TRUE(fs::is_empty(directory));
+    fs::remove(directory);
+}
+
+TEST(LockstepSessionTest, AutomaticReplaySurvivesLateDesyncAndReportsBothDriverPaths) {
+    for (const std::uint64_t divergence : {1050u, 100050u}) {
+        SCOPED_TRACE(divergence);
+        auto [ta, tb] = net::MakeLoopbackPair();
+        FakeWorld wa{0, "agree", 0}, wb{0, "agree", divergence};
+        auto ca = MakeConfig(0, 1);
+        auto cb = MakeConfig(1, 0);
+        ca.hash_cadence_ticks = cb.hash_cadence_ticks = 30;
+        auto ha = MakeHooks(&wa);
+        auto hb = MakeHooks(&wb);
+        ha.collect_local_input = hb.collect_local_input = [](std::uint64_t tick, void*) {
+            return std::vector<std::uint8_t>{static_cast<std::uint8_t>(tick)};
+        };
+        const auto dump =
+            LockstepTempDir() / ("late-desync-" + std::to_string(divergence) + ".lrec1");
+        const auto peer_dump = fs::path(dump.string() + ".peer");
+        std::error_code ec;
+        fs::remove(dump, ec);
+        fs::remove(peer_dump, ec);
+        net::LockstepSession a(ca, ta.get(), ha);
+        net::LockstepSession b(cb, tb.get(), hb);
+        a.SetDumpPath(dump.string());
+        b.SetDumpPath(peer_dump.string());
+        // No record_replay_tick hook: this is exactly how both drivers construct sessions.
+        ASSERT_TRUE(SendPeerHello(*tb, ca));
+        ASSERT_TRUE(a.Handshake());
+        ASSERT_TRUE(b.Handshake());
+        for (std::uint64_t tick = 1; tick <= divergence + 1; ++tick) {
+            const auto ra = a.PumpTick(divergence + 30);
+            const auto rb = b.PumpTick(divergence + 30);
+            if (tick <= divergence) {
+                ASSERT_EQ(ra.outcome, net::TickOutcome::Advanced);
+            } else {
+                ASSERT_EQ(ra.outcome, net::TickOutcome::Desync);
+            }
+            if (tick < divergence)
+                ASSERT_EQ(rb.outcome, net::TickOutcome::Advanced);
+            else
+                ASSERT_EQ(rb.outcome, net::TickOutcome::Desync);
+            if (tick % 256 == 0 && tick < divergence) {
+                ASSERT_TRUE(a.FlushReplayRecorder());
+                ASSERT_TRUE(b.FlushReplayRecorder());
+            }
+        }
+        const auto verify = [&](const net::LockstepSession& session,
+                                const FakeWorld& world,
+                                const fs::path& path) {
+            const auto status = session.Status();
+            EXPECT_TRUE(status.desynced);
+            EXPECT_EQ(status.desync_tick, divergence);
+            EXPECT_EQ(status.desync_section, "terrain");
+            ASSERT_EQ(status.dump_path, path.string());
+            ASSERT_TRUE(fs::exists(path)); // server's required artifact contract
+            const auto parsed = replay::ReadReplay(status.dump_path);
+            if (!parsed.has_value()) {
+                FAIL() << "late desync artifact could not be read";
+            }
+            const auto& contents = *parsed;
+            EXPECT_FALSE(contents.truncated);
+            EXPECT_TRUE(contents.trailer_present);
+            EXPECT_EQ(contents.tick_count, divergence);
+            EXPECT_EQ(contents.header.seed, ca.seed);
+            EXPECT_EQ(contents.header.preset, ca.preset);
+            EXPECT_EQ(contents.header.system_config_identity, ca.system_config_identity);
+            EXPECT_EQ(contents.header.preset_content_hash, ca.preset_content_hash);
+            ASSERT_FALSE(contents.inputs.empty());
+            EXPECT_EQ(contents.inputs.front().tick, contents.elided_through_tick + 1);
+            EXPECT_EQ(contents.inputs.back().tick, divergence);
+            for (const auto& input : contents.inputs) {
+                const auto byte = static_cast<std::uint8_t>(input.tick);
+                EXPECT_EQ(input.inputs, (std::vector<std::uint8_t>{byte, byte}));
+            }
+            ASSERT_FALSE(contents.checkpoints.empty());
+            EXPECT_EQ(contents.checkpoints.back().tick, divergence);
+            for (const auto& checkpoint : contents.checkpoints) {
+                EXPECT_EQ(checkpoint.terrain, world.HashAt(checkpoint.tick, "terrain"));
+                EXPECT_EQ(checkpoint.water, world.HashAt(checkpoint.tick, "water"));
+                EXPECT_EQ(checkpoint.entities, world.HashAt(checkpoint.tick, "entities"));
+                EXPECT_EQ(checkpoint.world_hash,
+                          replay::Fnv1a64Hex(checkpoint.terrain + checkpoint.water +
+                                             checkpoint.entities));
+            }
+            if (divergence == 1050)
+                EXPECT_EQ(contents.elided_through_tick, 0u);
+            else {
+                EXPECT_GT(contents.elided_through_tick, 0u);
+                EXPECT_NE(contents.elided_prefix_digest, 0u);
+                EXPECT_LE(contents.inputs.size(), 2 * replay::BoundedReplayRecorder::kSegmentTicks);
+            }
+            EXPECT_EQ(session.AdmissionStatus().replay_bytes, 0u);
+        };
+        verify(a, wa, dump);
+        verify(b, wb, peer_dump);
+        fs::remove(dump, ec);
+        fs::remove(peer_dump, ec);
+    }
+}
+
+TEST(LockstepSessionTest, AutomaticReplayPinsInputsForDelayedDivergencePastDiagnosticPruning) {
+    auto [local, peer] = net::MakeLoopbackPair();
+    auto config = MakeConfig(0, 1);
+    config.hash_cadence_ticks = 1;
+    FakeWorld world{0, "agree", 0};
+    net::LockstepSession session(config, local.get(), MakeHooks(&world));
+    const auto dump = LockstepTempDir() / "delayed-oldest-desync.lrec1";
+    session.SetDumpPath(dump.string());
+    ASSERT_TRUE(SendPeerHello(*peer, config));
+    ASSERT_TRUE(session.Handshake());
+    std::vector<std::uint8_t> frame;
+    constexpr std::uint64_t ticks = 1025;
+    for (std::uint64_t tick = 1; tick <= ticks; ++tick) {
+        ASSERT_TRUE(
+            peer->SendFrame(net::EncodeInput({tick, 1, {static_cast<std::uint8_t>(tick)}})));
+        if (tick > 1) {
+            net::HashMsg hash;
+            CaptureHashes(tick, hash, &world);
+            ASSERT_TRUE(peer->SendFrame(net::EncodeHash(hash)));
+        }
+        ASSERT_EQ(session.PumpTick(ticks + 1).outcome, net::TickOutcome::Advanced);
+        while (peer->TryReceiveFrame(frame)) {}
+    }
+    EXPECT_EQ(session.AdmissionStatus().confirmed_hash_tick, 0u);
+    EXPECT_EQ(session.AdmissionStatus().applied_inputs, 1024u);
+    FakeWorld mismatch{0, "different", 0};
+    net::HashMsg hash;
+    CaptureHashes(1, hash, &mismatch);
+    ASSERT_TRUE(peer->SendFrame(net::EncodeHash(hash)));
+    ASSERT_EQ(session.PumpTick(ticks + 1).outcome, net::TickOutcome::Desync);
+    ASSERT_EQ(session.Status().dump_path, dump.string());
+    const auto parsed = replay::ReadReplay(dump.string());
+    if (!parsed.has_value()) {
+        FAIL() << "delayed mismatch lost its replay";
+    }
+    const auto& contents = *parsed;
+    EXPECT_FALSE(contents.truncated);
+    EXPECT_EQ(contents.elided_through_tick, 0u);
+    ASSERT_EQ(contents.inputs.size(), ticks);
+    EXPECT_EQ(contents.inputs.front().tick, 1u);
+    EXPECT_EQ(contents.inputs.front().inputs, (std::vector<std::uint8_t>{1}));
+    ASSERT_EQ(contents.checkpoints.size(), 1u);
+    EXPECT_EQ(contents.checkpoints.front().tick, 1u);
+    std::error_code ec;
+    fs::remove(dump, ec);
+}
+
+TEST(LockstepSessionTest, CleanSessionsBoundDiskGrowthAndRemoveTheirWorkingSegments) {
+    const auto directory = LockstepTempDir() / "clean-recording";
+    ASSERT_TRUE(fs::create_directory(directory) || fs::is_empty(directory));
+    const auto dump = directory / "clean.lrec1";
+    {
+        auto [ta, tb] = net::MakeLoopbackPair();
+        auto ca = MakeConfig(0, 1);
+        auto cb = MakeConfig(1, 0);
+        ca.hash_cadence_ticks = cb.hash_cadence_ticks = 1;
+        net::LockstepSession a(ca, ta.get(), {});
+        net::LockstepSession b(cb, tb.get(), {});
+        a.SetDumpPath(dump.string());
+        b.SetDumpPath(dump.string() + ".peer");
+        ASSERT_TRUE(SendPeerHello(*tb, ca));
+        ASSERT_TRUE(a.Handshake());
+        ASSERT_TRUE(b.Handshake());
+        constexpr std::uint64_t ticks = 8192;
+        for (std::uint64_t tick = 1; tick <= ticks; ++tick) {
+            const auto expected =
+                tick == ticks ? net::TickOutcome::Finished : net::TickOutcome::Advanced;
+            ASSERT_EQ(a.PumpTick(ticks).outcome, expected);
+            ASSERT_EQ(b.PumpTick(ticks).outcome, expected);
+            if (tick % 256 == 0) {
+                ASSERT_TRUE(a.FlushReplayRecorder());
+                ASSERT_TRUE(b.FlushReplayRecorder());
+            }
+            for (const auto retained : {a.AdmissionStatus(), b.AdmissionStatus()}) {
+                ASSERT_LE(retained.replay_segments, 2u);
+                ASSERT_LE(retained.replay_bytes,
+                          2 * replay::BoundedReplayRecorder::kSegmentTicks * (17 + 29));
+                ASSERT_LE(retained.replay_bytes, retained.replay_byte_limit);
+            }
+        }
+        ASSERT_TRUE(a.FlushReplayRecorder());
+        ASSERT_TRUE(b.FlushReplayRecorder());
+        std::uintmax_t actual_bytes = 0;
+        std::size_t actual_segments = 0;
+        for (const auto& entry : fs::recursive_directory_iterator(directory)) {
+            if (entry.is_regular_file()) {
+                actual_bytes += entry.file_size();
+                ++actual_segments;
+            }
+        }
+        EXPECT_LE(actual_segments, 4u);
+        EXPECT_LE(actual_bytes,
+                  a.AdmissionStatus().replay_bytes + b.AdmissionStatus().replay_bytes);
+        EXPECT_FALSE(fs::exists(dump));
+        EXPECT_FALSE(fs::exists(dump.string() + ".peer"));
+        EXPECT_TRUE(a.Status().dump_path.empty());
+        EXPECT_TRUE(b.Status().dump_path.empty());
+    }
+    EXPECT_TRUE(fs::is_empty(directory));
+    fs::remove(directory);
+}
+
 // Both peers handshake successfully on matching params.
 TEST(LockstepSessionTest, HandshakeAccepts) {
     auto [ta, tb] = net::MakeLoopbackPair();
@@ -1039,13 +1983,64 @@ TEST(LockstepSessionTest, LegacyHelloWithoutPresetIdentityIsRefused) {
     hello.protocol_version = 2;
     hello.system_config_identity = Luminumbra::world::GameSession{}.SystemConfigIdentity();
     auto frame = net::EncodeHello(hello);
-    // Version 2 ended after system_config_identity, without a preset hash field.
-    frame.resize(frame.size() - 4);
+    // Version 2 ended after system_config_identity, without a preset hash field
+    // or the version 4 admission fields (three u32s and four u64s).
+    frame.resize(frame.size() - (3 * 4 + 4 * 8) - 4);
     const auto size = static_cast<std::uint32_t>(frame.size() - 5);
     for (unsigned i = 0; i < 4; ++i)
         frame[1u + i] = static_cast<std::uint8_t>((size >> (8u * i)) & 0xffu);
     net::HelloMsg decoded;
     EXPECT_FALSE(net::DecodeHello(frame, decoded));
+}
+
+TEST(LockstepSessionTest, LegacyVersionThreeHelloIsRefusedBeforeInputScheduling) {
+    // Genuine v3 wire layout: all three strings, ending at preset_content_hash.
+    // This fixture is independent of the v4 encoder and has no admission fields.
+    const std::vector<std::uint8_t> frame{
+        0x01, 42,  0,   0,   0,                // Hello tag and exact payload length
+        'L',  'S', 'T', 'P', '1',              // magic
+        3,    0,                               // protocol version
+        42,   0,   0,   0,   0,   0,   0,   0, // seed
+        30,   0,   1,   0,   0,   0,           // tick rate and client id
+        7,    0,   0,   0,   'd', 'e', 'f', 'a', 'u', 'l', 't', // preset
+        1,    0,   0,   0,   'i',                               // system_config_identity
+        1,    0,   0,   0,   'p'                                // preset_content_hash
+    };
+    ASSERT_EQ(frame.size(), 47u);
+    net::HelloMsg decoded;
+    EXPECT_FALSE(net::DecodeHello(frame, decoded));
+    auto [host_transport, peer_transport] = net::MakeLoopbackPair();
+    auto config = MakeConfig(0, 1);
+    config.seed = 42;
+    config.system_config_identity = "i";
+    config.preset_content_hash = "p";
+    struct Calls {
+        std::size_t collected = 0;
+        std::size_t stepped = 0;
+    } calls;
+    net::LockstepHooks hooks;
+    hooks.user = &calls;
+    hooks.collect_local_input = [](std::uint64_t, void* user) {
+        ++static_cast<Calls*>(user)->collected;
+        return std::vector<std::uint8_t>{};
+    };
+    hooks.apply_and_step = [](std::uint64_t, const std::vector<std::uint8_t>&, void* user) {
+        ++static_cast<Calls*>(user)->stepped;
+        return true;
+    };
+    net::LockstepSession host(config, host_transport.get(), hooks);
+    ASSERT_TRUE(peer_transport->SendFrame(frame));
+    EXPECT_FALSE(host.Handshake());
+    EXPECT_FALSE(host.Status().handshaken);
+    EXPECT_EQ(host.AgreedTick(), 0u);
+    EXPECT_EQ(calls.collected, 0u);
+    EXPECT_EQ(calls.stepped, 0u);
+    std::vector<std::uint8_t> outgoing;
+    ASSERT_TRUE(peer_transport->TryReceiveFrame(outgoing));
+    net::MessageType type{};
+    ASSERT_TRUE(net::PeekMessageType(outgoing, type));
+    EXPECT_EQ(type, net::MessageType::Hello);
+    EXPECT_FALSE(peer_transport->TryReceiveFrame(outgoing));
 }
 
 TEST(LockstepSessionTest, HandshakeRefusesMissingIdentityOnEitherSide) {
@@ -1081,10 +2076,10 @@ TEST(LockstepSessionTest, HandshakeRefusesHelloWithoutIdentityField) {
     peer.seed = local.seed;
     peer.preset = local.preset;
     peer.client_id = 1;
-    // Remove the trailing empty-string length to reproduce an absent wire field.
+    // Truncate at the identity fields, before version 4's admission settings.
     auto frame = net::EncodeHello(peer);
-    ASSERT_GE(frame.size(), 9u);
-    frame.resize(frame.size() - 4);
+    ASSERT_GE(frame.size(), 5u + (3 * 4 + 4 * 8) + 8u);
+    frame.resize(frame.size() - (3 * 4 + 4 * 8) - 8);
     const auto payload_size = static_cast<std::uint32_t>(frame.size() - 5);
     for (unsigned i = 0; i < 4; ++i)
         frame[1u + i] = static_cast<std::uint8_t>((payload_size >> (8u * i)) & 0xffu);

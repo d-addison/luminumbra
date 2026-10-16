@@ -28,10 +28,12 @@
 //
 // DESYNC ORACLE: peers exchange world_hash + authoritative sub-hashes at the 30-tick
 // checkpoint cadence (the same cadence the LREC1 replay uses). On a mismatch the
-// session HALTS and emits an LREC1 stream (via ReplayStream) of the local session up
-// to the divergence -- the dump's checkpoints carry the LOCAL hashes, and the divergent
+// session HALTS and finalizes the automatic bounded disk recording (via ReplayStream).
+// Long recordings carry an explicit elided-prefix digest and diagnostic suffix.
+// The dump's checkpoints carry the LOCAL hashes, and the divergent
 // tick + section (terrain/water/entities) is recorded. This is the desync-repro
-// artifact, identical in shape to the --replay path, so the existing tooling re-runs it.
+// artifact. Complete dumps can be re-run by --replay; rolled suffixes are explicitly
+// diagnostic and cannot reconstruct the world from the seed alone.
 //
 // CLEAN DISCONNECT (regression review): a peer Bye or a socket close ENDS the session
 // cleanly -- no hang, no crash, no infinite wait. The surviving side records the
@@ -52,6 +54,8 @@
 #include <string>
 #include <vector>
 
+#include "replay/ReplayStream.h"
+
 namespace Luminumbra::Net {
 
 // --- On-wire protocol (fixed-width little-endian; mirrors ReplayStream's discipline:
@@ -59,7 +63,7 @@ namespace Luminumbra::Net {
 // wire, NO float bit-twiddling -- hashes travel as their hex strings). ------------
 
 inline constexpr char kLockstepMagic[5] = {'L', 'S', 'T', 'P', '1'};
-inline constexpr std::uint16_t kLockstepProtocolVersion = 3;
+inline constexpr std::uint16_t kLockstepProtocolVersion = 4;
 
 // Message type tags (u8 on the wire).
 enum class MessageType : std::uint8_t {
@@ -81,6 +85,14 @@ struct HelloMsg {
     // Canonical resolved preset plus sorted data_root-relative dependency paths
     // and exact-byte file hashes (TerrainPresetLoadResult::preset_content_hash).
     std::string preset_content_hash;
+    // Lockstep pacing/admission settings. Replication uses the defaults.
+    std::uint32_t horizon_start = 3;
+    std::uint32_t horizon_min = 3;
+    std::uint32_t horizon_max = 10;
+    std::uint64_t hash_cadence_ticks = 30;
+    std::uint64_t max_frame_bytes = std::uint64_t{64} * 1024 * 1024;
+    std::uint64_t retained_byte_limit = 0;
+    std::uint64_t retained_message_limit = 0;
 };
 
 // Shared admission check for lockstep and TCP remote replication.
@@ -106,13 +118,9 @@ struct InputMsg {
 // The desync oracle exchange: a peer's authoritative hashes at a checkpoint tick. Mesh
 // is excluded (derived render artifact); authoritative = terrain/water/entities, with
 // the combined world_hash for the top-level compare.
-struct HashMsg {
-    std::uint64_t tick = 0;
-    std::string world_hash;
-    std::string terrain;
-    std::string water;
-    std::string entities;
-};
+// Replay and wire checkpoints have the same value contract. Sharing the immutable
+// value lets the recorder retain it without copying potentially large strings.
+using HashMsg = Replay::CheckpointRecord;
 
 // Clean disconnect marker carrying the tick the sender stopped at.
 struct ByeMsg {
@@ -429,7 +437,21 @@ struct LockstepConfig {
     // Desync-oracle hash exchange cadence (ticks). Reuses the LREC1 30-tick checkpoint
     // cadence so the dump's checkpoints line up with the recorded replay's.
     std::uint64_t hash_cadence_ticks = 30;
+
+    // Maximum encoded Input/Hash frame size to negotiate with the transport and
+    // remote. Smaller values allow a smaller derived retention budget.
+    std::size_t max_frame_payload_bytes = kMaxFramePayloadBytes;
+
+    // Zero derives the budget from the negotiated frame size, both input horizons,
+    // and checkpoint window. Nonzero budgets must fit ALL permitted messages or
+    // Handshake fails. One remote means per-peer and aggregate bounds are identical.
+    std::size_t peer_retained_byte_limit = 0;
+    std::size_t peer_retained_message_limit = 0;
 };
+
+// Construct the same negotiated Hello for sessions and single-process drivers.
+HelloMsg MakeLockstepHello(const LockstepConfig& config,
+                           std::size_t transport_frame_limit = kMaxFramePayloadBytes);
 
 // Outcome of a tick-advance attempt.
 enum class TickOutcome {
@@ -462,10 +484,32 @@ struct LockstepStatus {
     std::string dump_path;                 // LREC1 dump path on desync
     std::uint64_t late_input_events = 0;   // how many times the peer input arrived late
     std::uint32_t max_horizon_reached = 3; // peak horizon over the session
+    std::string handshake_error;
+    std::uint64_t rejected_peer_messages = 0; // invalid, stale or conflicting
+    std::string replay_error;                 // diagnostics only; never changes tick/hash outcomes
+};
+
+// Const diagnostics for all retained session history (no polling or I/O).
+struct LockstepAdmissionStatus {
+    std::size_t input_ticks = 0;
+    std::size_t peer_inputs = 0;
+    std::size_t peer_hashes = 0;
+    std::size_t retained_bytes = 0;
+    std::uint64_t confirmed_hash_tick = 0;
+    std::size_t frame_limit = 0;
+    std::size_t message_limit = 0;
+    std::size_t byte_limit = 0;
+    std::size_t applied_inputs = 0;
+    std::size_t applied_input_bytes = 0;
+    std::size_t local_hashes = 0;
+    std::uint64_t checkpoint_window = 0;
+    std::size_t replay_bytes = 0;
+    std::size_t replay_byte_limit = 0;
+    std::size_t replay_segments = 0;
 };
 
 // The host side provides per-tick local inputs and applies the agreed input set. These
-// are the only two callbacks into game/sim code; the session itself is engine-generic.
+// simulation callbacks and optional replay sink keep the session engine-generic.
 // (The headless server passes empty inputs and an apply that just steps the world.)
 struct LockstepHooks {
     // Returns the LOCAL client's opaque input blob for `tick` (empty allowed). Called
@@ -483,6 +527,15 @@ struct LockstepHooks {
     void (*capture_hashes)(std::uint64_t tick, HashMsg& out, void* user) = nullptr;
 
     void* user = nullptr;
+
+    // Optional additional replay sink, called once per executed tick. The hash
+    // pointer is nonnull at checkpoints. Append synchronously to a caller-owned,
+    // bounded streaming sink; do not accumulate records in memory. Never changes
+    // simulation state. Automatic bounded desync recording needs no hook installation.
+    void (*record_replay_tick)(std::uint64_t tick,
+                               const std::vector<std::uint8_t>& merged,
+                               const HashMsg* hash,
+                               void* user) = nullptr;
 };
 
 // --- LockstepSession ---------------------------------------------------------------
@@ -524,6 +577,12 @@ public:
     // Flushes pending frames, sends Bye only if drained, then closes. Idempotent.
     void Disconnect();
 
+    // Blocking recording barrier for explicit persistence/lifecycle boundaries.
+    // PumpTick never waits for recording. Returns false for an incomplete replay.
+    bool FlushReplayRecorder() {
+        return m_replay.Flush() && m_replay_open;
+    }
+
     [[nodiscard]] LockstepStatus Status() const {
         return m_status;
     }
@@ -533,12 +592,31 @@ public:
     [[nodiscard]] std::uint32_t Horizon() const {
         return m_horizon;
     }
+    [[nodiscard]] LockstepAdmissionStatus AdmissionStatus() const {
+        return {.input_ticks = m_inputs.size(),
+                .peer_inputs = m_peer_input_count,
+                .peer_hashes = m_peer_hashes.size(),
+                .retained_bytes = m_retained_peer_bytes,
+                .confirmed_hash_tick = m_confirmed_peer_hash_tick,
+                .frame_limit = m_frame_limit,
+                .message_limit = m_peer_message_limit,
+                .byte_limit = m_peer_byte_limit,
+                .applied_inputs = m_applied_inputs.size(),
+                .applied_input_bytes = m_applied_input_bytes,
+                .local_hashes = m_local_hashes.size(),
+                .checkpoint_window = m_checkpoint_window,
+                .replay_bytes = m_replay.RetainedBytes(),
+                .replay_byte_limit = m_replay.ByteLimit(),
+                .replay_segments = m_replay.SegmentCount()};
+    }
+
+    // Const allocation diagnostic for a retained checkpoint; includes the four
+    // strings' inline capacities. Lookup is logarithmic and never runs per frame.
+    [[nodiscard]] std::optional<std::size_t> PeerHashStringCapacity(std::uint64_t tick) const;
 
     // Where a desync dump is written. Defaults to a temp path; set before PumpTick to
     // direct the gate's dump to a known artifact location.
-    void SetDumpPath(const std::string& path) {
-        m_dump_path = path;
-    }
+    void SetDumpPath(const std::string& path);
 
 private:
     // Drains all currently-available peer messages into the input/hash buffers, flips
@@ -546,8 +624,20 @@ private:
     // at the same cadence tick). Returns false if a fatal (desync/disconnect) state was set.
     bool DrainPeerMessages();
 
-    // Compares a peer hash once its executed tick has a local cadence hash.
-    bool ComparePeerHash(const HashMsg& peer);
+    struct PeerCheckpoint {
+        HashMsg hash;
+        bool compared = false;
+    };
+    // Compares once, then releases strings while keeping the confirmation marker.
+    bool ComparePeerHash(PeerCheckpoint& checkpoint);
+
+    // Bounds use subtraction to avoid overflowing near the last representable tick.
+    [[nodiscard]] bool IsWithinPeerLookahead(std::uint64_t tick) const;
+    bool ConfigureRetention(const HelloMsg& mine, const HelloMsg& peer);
+    void PruneDiagnosticHistory();
+    void PruneConfirmedPeerHashes();
+    void PruneConsumedInputs();
+    void ReleaseRetainedMessages();
 
     // Schedules + sends the local input for `tick` (collect hook), buffering it locally.
     bool ScheduleLocalInput(std::uint64_t tick);
@@ -562,6 +652,10 @@ private:
 
     // Emits the LREC1 desync dump of the local session up to `divergence_tick`.
     void EmitDesyncDump(std::uint64_t divergence_tick, const std::string& section);
+    bool OpenReplayRecorder();
+    void RecordReplayTick(std::uint64_t tick,
+                          std::shared_ptr<const std::vector<std::uint8_t>> merged,
+                          std::shared_ptr<const HashMsg> hash);
 
     LockstepConfig m_config;
     ILockstepTransport* m_transport = nullptr;
@@ -582,17 +676,40 @@ private:
     // client id (ordered map => deterministic merge order). std::map (ORDERED) is used
     // deliberately so the merged-input concatenation order is stable -- an unordered_map
     // would be a hash-order desync hazard (the Factorio lesson).
+    // At most max(start, min, max horizon) local entries plus the shared peer entry
+    // budget; each tick admits only the configured local and remote client ids.
     std::map<std::uint64_t, std::map<std::uint32_t, std::vector<std::uint8_t>>> m_inputs;
+    std::size_t m_peer_input_count = 0;
+    std::size_t m_retained_peer_bytes = 0;
+    std::uint64_t m_confirmed_peer_hash_tick = 0;
 
-    // Local + peer hashes captured at cadence ticks, for the oracle compare and the dump.
-    std::map<std::uint64_t, HashMsg> m_local_hashes;
-    std::map<std::uint64_t, HashMsg> m_peer_hashes;
+    // Execution pauses at the checkpoint window until the oldest hash confirms.
+    // Admission additionally reserves both horizons of remote lead. All limits
+    // are checked for overflow before any scheduling/allocation at handshake.
+    std::uint64_t m_checkpoint_window = 0;
+    std::size_t m_peer_message_limit = 0;
+    std::size_t m_peer_byte_limit = 0;
+    std::size_t m_frame_limit = kMaxFramePayloadBytes;
 
-    // Recorded input stream for the desync dump (every applied tick's merged input).
-    std::vector<InputMsg> m_applied_inputs;
+    // Only unconfirmed checkpoints plus the bounded diagnostic suffix are kept.
+    std::map<std::uint64_t, std::shared_ptr<const HashMsg>> m_local_hashes;
+    std::map<std::uint64_t, PeerCheckpoint> m_peer_hashes;
+
+    // Diagnostic suffix: at most kReceiveQueueFrameLimit ticks and
+    // kMaxFramePayloadBytes payload bytes, independent of session duration.
+    // Before pruning, one merged tick adds at most two maximum frame payloads.
+    // Automatic replay recording streams to bounded disk segments instead.
+    static_assert(kMaxFramePayloadBytes <= (std::numeric_limits<std::size_t>::max)() / 3);
+    std::deque<InputMsg> m_applied_inputs;
+    std::size_t m_applied_input_bytes = 0;
+    Replay::QueuedReplayRecorder m_replay;
+    bool m_replay_open = false;
+    bool m_replay_failed = false;
 
     LockstepStatus m_status;
     std::string m_dump_path;
+    std::optional<std::uint64_t> m_received_bye_tick;
+    std::uint64_t m_bye_admission_tick = 0;
     bool m_handshaken = false;
     bool m_disconnected = false; // local end issued/observed a disconnect
 };

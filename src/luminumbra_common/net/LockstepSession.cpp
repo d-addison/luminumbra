@@ -30,9 +30,19 @@
 #include "net/LockstepSession.h"
 
 #include <algorithm>
+#include <array>
+#include <cstddef>
+#include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <limits>
+#include <memory>
+#include <optional>
+#include <string>
+#include <string_view>
 #include <utility>
+#include <vector>
 
 #include "core/EngineVersion.h"
 #include "core/Log.h"
@@ -180,6 +190,40 @@ bool OpenFrame(const std::vector<std::uint8_t>& frame, MessageType expected, Cur
     return true;
 }
 
+constexpr std::size_t kInputFrameOverhead = 1 + 4 + 8 + 4 + 4;
+constexpr std::size_t kHashFrameOverhead = 1 + 4 + 8 + 4 * 4;
+
+// Inspect untrusted lengths and routing fields without allocating decoded blobs or
+// strings. Session admission requires exactly one complete frame, with no trailing data.
+bool InspectInput(const std::vector<std::uint8_t>& frame,
+                  std::uint64_t& tick,
+                  std::uint32_t& client_id) {
+    Cursor c;
+    std::uint32_t bytes = 0;
+    return OpenFrame(frame, MessageType::Input, c) && c.size == frame.size() - 5 &&
+           c.GetU64(tick) && c.GetU32(client_id) && c.GetU32(bytes) && c.Remaining(bytes) &&
+           bytes == c.size - c.pos;
+}
+
+bool InspectHash(const std::vector<std::uint8_t>& frame, std::uint64_t& tick) {
+    Cursor c;
+    if (!OpenFrame(frame, MessageType::Hash, c) || c.size != frame.size() - 5 || !c.GetU64(tick))
+        return false;
+    for (int part = 0; part < 4; ++part) {
+        std::uint32_t bytes = 0;
+        if (!c.GetU32(bytes) || !c.Remaining(bytes))
+            return false;
+        c.pos += bytes;
+    }
+    return c.pos == c.size;
+}
+
+std::size_t HashFrameBytes(const HashMsg& hash) {
+    // Only called for peer hashes whose complete encoded size was checked before decode.
+    return kHashFrameOverhead + hash.world_hash.size() + hash.terrain.size() + hash.water.size() +
+           hash.entities.size();
+}
+
 } // namespace
 
 // --- Message encode/decode ---------------------------------------------------------
@@ -196,6 +240,13 @@ std::vector<std::uint8_t> EncodeHello(const HelloMsg& m) {
     PutString(p, m.preset);
     PutString(p, m.system_config_identity);
     PutString(p, m.preset_content_hash);
+    PutU32(p, m.horizon_start);
+    PutU32(p, m.horizon_min);
+    PutU32(p, m.horizon_max);
+    PutU64(p, m.hash_cadence_ticks);
+    PutU64(p, m.max_frame_bytes);
+    PutU64(p, m.retained_byte_limit);
+    PutU64(p, m.retained_message_limit);
     return Frame(MessageType::Hello, p);
 }
 
@@ -245,7 +296,8 @@ bool DecodeHello(const std::vector<std::uint8_t>& frame, HelloMsg& out) {
         return false;
     if (!c.GetU16(out.protocol_version))
         return false;
-    // Older Hellos have no resolved-preset identity and cannot be admitted safely.
+    // Older Hellos lack the complete identity/admission contract. In particular,
+    // v3 has preset identity but no negotiated horizon or retention settings.
     if (out.protocol_version != kLockstepProtocolVersion)
         return false;
     if (!c.GetU64(out.seed))
@@ -260,7 +312,10 @@ bool DecodeHello(const std::vector<std::uint8_t>& frame, HelloMsg& out) {
         return false;
     if (!c.GetString(out.preset_content_hash))
         return false;
-    return c.ok;
+    return c.GetU32(out.horizon_start) && c.GetU32(out.horizon_min) && c.GetU32(out.horizon_max) &&
+           c.GetU64(out.hash_cadence_ticks) && c.GetU64(out.max_frame_bytes) &&
+           c.GetU64(out.retained_byte_limit) && c.GetU64(out.retained_message_limit) &&
+           c.pos == c.size;
 }
 
 bool DecodeInput(const std::vector<std::uint8_t>& frame, InputMsg& out) {
@@ -1013,6 +1068,26 @@ void TcpListener::Close() {
 
 // --- LockstepSession ---------------------------------------------------------------
 
+HelloMsg MakeLockstepHello(const LockstepConfig& config, std::size_t transport_frame_limit) {
+    HelloMsg mine;
+    mine.protocol_version = kLockstepProtocolVersion;
+    mine.system_config_identity = config.system_config_identity;
+    mine.preset_content_hash = config.preset_content_hash;
+    mine.seed = config.seed;
+    mine.preset = config.preset;
+    mine.tick_rate_hz = config.tick_rate_hz;
+    mine.client_id = config.local_client_id;
+    mine.horizon_start = config.horizon_start;
+    mine.horizon_min = config.horizon_min;
+    mine.horizon_max = config.horizon_max;
+    mine.hash_cadence_ticks = config.hash_cadence_ticks;
+    mine.max_frame_bytes =
+        std::min({kMaxFramePayloadBytes, transport_frame_limit, config.max_frame_payload_bytes});
+    mine.retained_byte_limit = config.peer_retained_byte_limit;
+    mine.retained_message_limit = config.peer_retained_message_limit;
+    return mine;
+}
+
 LockstepSession::LockstepSession(LockstepConfig config,
                                  ILockstepTransport* transport,
                                  LockstepHooks hooks)
@@ -1034,14 +1109,7 @@ bool LockstepSession::Handshake() {
     // Hello must already be queued by the single-process driver). A mismatched
     // protocol/version/seed/preset/tick-rate/config identity is rejected loudly.
     // A mis-paired session would otherwise silently desync.
-    HelloMsg mine;
-    mine.protocol_version = kLockstepProtocolVersion;
-    mine.system_config_identity = m_config.system_config_identity;
-    mine.preset_content_hash = m_config.preset_content_hash;
-    mine.seed = m_config.seed;
-    mine.preset = m_config.preset;
-    mine.tick_rate_hz = m_config.tick_rate_hz;
-    mine.client_id = m_config.local_client_id;
+    const auto mine = MakeLockstepHello(m_config, m_transport->MaxFramePayloadBytes());
     if (!m_transport->SendFrame(EncodeHello(mine))) {
         LUMINUMBRA_CORE_ERROR("lockstep[{}]: handshake send failed (peer gone)",
                               m_config.local_client_id);
@@ -1065,7 +1133,7 @@ bool LockstepSession::Handshake() {
         }
         if (!DecodeHello(frame, peer)) {
             LUMINUMBRA_CORE_ERROR("lockstep[{}]: malformed or unsupported Hello version (requires "
-                                  "resolved preset identity)",
+                                  "Hello v4 identity and admission limits)",
                                   m_config.local_client_id);
             return false;
         }
@@ -1119,7 +1187,23 @@ bool LockstepSession::Handshake() {
         return false;
     }
 
-    m_config.peer_client_id = peer.client_id;
+    // This is a direct two-peer protocol, with no input relay role. Bind Hello to
+    // the caller's expected remote slot rather than letting the sender select it.
+    if (peer.client_id != m_config.peer_client_id || peer.client_id == m_config.local_client_id) {
+        ++m_status.rejected_peer_messages;
+        LUMINUMBRA_CORE_ERROR(
+            "lockstep[{}]: unexpected peer client id {}", m_config.local_client_id, peer.client_id);
+        return false;
+    }
+    if (!ConfigureRetention(mine, peer)) {
+        LUMINUMBRA_CORE_ERROR(
+            "lockstep[{}]: {}", m_config.local_client_id, m_status.handshake_error);
+        TransportDisconnected();
+        return false;
+    }
+    // Disk setup and worker startup belong to handshake, never the tick path.
+    // Recorder failure affects diagnostics only, not handshake or simulation.
+    OpenReplayRecorder();
     // Pre-schedule the local input for ticks [1.. horizon]: delay-based lockstep sends
     // inputs `horizon` ticks ahead, so the first `horizon` ticks' local inputs are in
     // flight before the first tick runs.
@@ -1138,7 +1222,7 @@ void LockstepSession::TransportDisconnected() {
     if (!m_status.desynced) {
         // A peer hash may have been buffered before its local tick was executed.
         // The local cadence hash is now captured before any post-step send.
-        for (const auto& entry : m_peer_hashes) {
+        for (auto& entry : m_peer_hashes) {
             if (!ComparePeerHash(entry.second))
                 break;
         }
@@ -1152,6 +1236,7 @@ void LockstepSession::TransportDisconnected() {
     m_status.peer_disconnected = true;
     m_pending_outbound.clear();
     m_pending_outbound_bytes = 0;
+    ReleaseRetainedMessages();
 }
 
 bool LockstepSession::SendOrQueueFrame(std::vector<std::uint8_t> frame) {
@@ -1204,62 +1289,256 @@ bool LockstepSession::ScheduleLocalInput(std::uint64_t tick) {
     }
     // Input frame: type + payload length + tick + client id + blob length + blob.
     constexpr std::size_t overhead = 1 + 4 + 8 + 4 + 4;
-    const auto limit = std::min(kMaxFramePayloadBytes, m_transport->MaxFramePayloadBytes());
+    const auto limit = std::min(m_frame_limit, m_transport->MaxFramePayloadBytes());
     if (limit < overhead || blob.size() > limit - overhead) {
         TransportDisconnected();
         return false;
     }
-    InputMsg msg;
-    msg.tick = tick;
-    msg.client_id = m_config.local_client_id;
-    msg.inputs = blob;
-    if (!SendOrQueueFrame(EncodeInput(msg))) {
-        return false;
+    // During closure, buffered remote inputs can outlast our scheduled horizon.
+    // Collect the remaining local slots without sending into a closed session.
+    const bool closing = m_handshaken && (m_received_bye_tick || !m_transport->IsPeerConnected());
+    if (!closing) {
+        const InputMsg msg{.tick = tick, .client_id = m_config.local_client_id, .inputs = blob};
+        if (!SendOrQueueFrame(EncodeInput(msg)))
+            return false;
     }
-    // Buffer locally once the frame is accepted or retained for reliable retry.
+    // Buffer locally once accepted/retained for reliable retry, or while draining.
     m_inputs[tick][m_config.local_client_id] = std::move(blob);
     m_local_input_scheduled_through = tick;
     return true;
 }
 
-bool LockstepSession::ComparePeerHash(const HashMsg& peer) {
-    const auto local = m_local_hashes.find(peer.tick);
-    if (local == m_local_hashes.end() || local->second.world_hash == peer.world_hash)
+bool LockstepSession::ComparePeerHash(PeerCheckpoint& checkpoint) {
+    if (checkpoint.compared)
         return true;
+    const auto& peer = checkpoint.hash;
+    const auto local = m_local_hashes.find(peer.tick);
+    if (local == m_local_hashes.end())
+        return true;
+    if (local->second->world_hash == peer.world_hash) {
+        // An out-of-order match needs only a tick marker until the missing prefix
+        // arrives. Do not keep peer-controlled strings for already compared ticks.
+        const auto payload_bytes = HashFrameBytes(peer) - kHashFrameOverhead;
+        // Move assignment of an empty string may retain the destination's heap
+        // allocation. Swap explicitly before discounting the payload storage.
+        std::string{}.swap(checkpoint.hash.world_hash);
+        std::string{}.swap(checkpoint.hash.terrain);
+        std::string{}.swap(checkpoint.hash.water);
+        std::string{}.swap(checkpoint.hash.entities);
+        m_retained_peer_bytes -= payload_bytes;
+        checkpoint.compared = true;
+        return true;
+    }
     // Localize via authoritative sub-hashes, then fall back to world_hash.
     std::string section = "world_hash";
-    if (local->second.terrain != peer.terrain)
+    if (local->second->terrain != peer.terrain)
         section = "terrain";
-    else if (local->second.water != peer.water)
+    else if (local->second->water != peer.water)
         section = "water";
-    else if (local->second.entities != peer.entities)
+    else if (local->second->entities != peer.entities)
         section = "entities";
     EmitDesyncDump(peer.tick, section);
     return false;
 }
 
+std::optional<std::size_t> LockstepSession::PeerHashStringCapacity(std::uint64_t tick) const {
+    const auto checkpoint = m_peer_hashes.find(tick);
+    if (checkpoint == m_peer_hashes.end())
+        return std::nullopt;
+    const auto& hash = checkpoint->second.hash;
+    return hash.world_hash.capacity() + hash.terrain.capacity() + hash.water.capacity() +
+           hash.entities.capacity();
+}
+
+bool LockstepSession::IsWithinPeerLookahead(std::uint64_t tick) const {
+    // The remote can have consumed all inputs we scheduled (one maximum horizon
+    // ahead), then scheduled its own next horizon. Include start/min because the
+    // existing scheduler permits either to exceed horizon_max.
+    const auto horizon =
+        std::max({m_config.horizon_start, m_config.horizon_min, m_config.horizon_max});
+    const auto lookahead = std::uint64_t{2} * horizon;
+    // Closure can execute buffered inputs, but must not open additional hash
+    // slots. Late oracle messages still use the window at receipt of Bye.
+    const auto anchor = m_received_bye_tick ? m_bye_admission_tick : m_agreed_tick;
+    return tick <= anchor || tick - anchor <= lookahead;
+}
+
+bool LockstepSession::ConfigureRetention(const HelloMsg& mine, const HelloMsg& peer) {
+    if (mine.horizon_start != peer.horizon_start || mine.horizon_min != peer.horizon_min ||
+        mine.horizon_max != peer.horizon_max ||
+        mine.hash_cadence_ticks != peer.hash_cadence_ticks ||
+        mine.retained_byte_limit != peer.retained_byte_limit ||
+        mine.retained_message_limit != peer.retained_message_limit) {
+        m_status.handshake_error = "incompatible lockstep horizons, cadence or retention limits";
+        return false;
+    }
+    const auto horizon = std::max({mine.horizon_start, mine.horizon_min, mine.horizon_max});
+    const auto frame_limit = std::min(mine.max_frame_bytes, peer.max_frame_bytes);
+    const auto required_overhead =
+        mine.hash_cadence_ticks == 0 ? kInputFrameOverhead : kHashFrameOverhead;
+    if (horizon == 0 || frame_limit < required_overhead ||
+        peer.max_frame_bytes > kMaxFramePayloadBytes) {
+        m_status.handshake_error = "invalid lockstep horizon or maximum frame size";
+        return false;
+    }
+    m_frame_limit = static_cast<std::size_t>(frame_limit);
+    const auto lead = std::uint64_t{2} * horizon;
+    // A receive queue of delayed checkpoints, both input horizons, and the next
+    // required checkpoint. Sender pacing bounds unconfirmed local history; the
+    // extra remote lead slots make admission lossless even with asymmetric delay.
+    const auto cadence = mine.hash_cadence_ticks;
+    const auto lead_checkpoints = cadence == 0 ? 0 : lead / cadence + (lead % cadence != 0);
+    m_checkpoint_window = cadence == 0 ? 0 : kReceiveQueueFrameLimit + lead_checkpoints + 1;
+    const auto hash_slots = m_checkpoint_window + lead_checkpoints;
+    const auto messages = lead + hash_slots;
+    const auto size_max = (std::numeric_limits<std::size_t>::max)();
+    if (messages > size_max / m_frame_limit) {
+        m_status.handshake_error = "lockstep retention size overflows this platform";
+        return false;
+    }
+    m_peer_message_limit = static_cast<std::size_t>(messages);
+    m_peer_byte_limit = m_peer_message_limit * m_frame_limit;
+    if ((mine.retained_message_limit != 0 && mine.retained_message_limit < messages) ||
+        (mine.retained_byte_limit != 0 && mine.retained_byte_limit < m_peer_byte_limit)) {
+        m_status.handshake_error = "lockstep retention budget cannot fit negotiated traffic";
+        return false;
+    }
+    // Include the last partial cadence interval and buffered closure inputs;
+    // pacing is disabled only while draining the already bounded peer lead.
+    const auto tick_max = (std::numeric_limits<std::uint64_t>::max)();
+    if (cadence != 0 && m_checkpoint_window > (tick_max - lead - cadence) / cadence) {
+        m_status.handshake_error = "lockstep replay retention size overflows this platform";
+        return false;
+    }
+    const auto unconfirmed_ticks =
+        cadence == 0 ? 0 : m_checkpoint_window * cadence + lead + cadence;
+    if (m_frame_limit > (size_max - 46) / 3 ||
+        !m_replay.Configure(3 * m_frame_limit + 46, unconfirmed_ticks)) {
+        m_status.handshake_error = "lockstep replay retention size overflows this platform";
+        return false;
+    }
+    return true;
+}
+
+void LockstepSession::PruneDiagnosticHistory() {
+    while (!m_applied_inputs.empty() && (m_applied_inputs.size() > kReceiveQueueFrameLimit ||
+                                         m_applied_input_bytes > kMaxFramePayloadBytes)) {
+        m_applied_input_bytes -= m_applied_inputs.front().inputs.size();
+        m_applied_inputs.pop_front();
+    }
+    // Never discard an unconfirmed oracle. Confirmed hashes need only the same
+    // bounded tick suffix as the input diagnostics (each entry is erased once).
+    const auto oldest =
+        m_agreed_tick > kReceiveQueueFrameLimit ? m_agreed_tick - kReceiveQueueFrameLimit : 0;
+    while (!m_local_hashes.empty() && m_local_hashes.begin()->first <= oldest &&
+           m_local_hashes.begin()->first <= m_confirmed_peer_hash_tick) {
+        m_local_hashes.erase(m_local_hashes.begin());
+    }
+}
+
+void LockstepSession::PruneConsumedInputs() {
+    // Each entry is removed once; no scan of the retained lookahead on each tick.
+    while (!m_inputs.empty() && m_inputs.begin()->first <= m_agreed_tick) {
+        const auto it = m_inputs.begin();
+        const auto peer = it->second.find(m_config.peer_client_id);
+        if (peer != it->second.end()) {
+            m_retained_peer_bytes -= kInputFrameOverhead + peer->second.size();
+            --m_peer_input_count;
+        }
+        m_inputs.erase(it);
+    }
+}
+
+void LockstepSession::PruneConfirmedPeerHashes() {
+    // Confirm only a contiguous prefix: a reordered later match must never make
+    // an earlier, still in-flight mismatch stale. Each retained entry is erased once.
+    const auto cadence = m_config.hash_cadence_ticks;
+    while (cadence != 0 && !m_peer_hashes.empty()) {
+        const auto it = m_peer_hashes.begin();
+        if (it->first > m_agreed_tick || it->first <= m_confirmed_peer_hash_tick ||
+            it->first - m_confirmed_peer_hash_tick != cadence)
+            break;
+        if (!ComparePeerHash(it->second))
+            return;
+        m_confirmed_peer_hash_tick = it->first;
+        m_retained_peer_bytes -= HashFrameBytes(it->second.hash);
+        m_peer_hashes.erase(it);
+    }
+}
+
+void LockstepSession::ReleaseRetainedMessages() {
+    // Called only after the receive drain and sticky closure reporting. Local
+    // diagnostics and any finalized disconnect-time desync artifact remain available.
+    m_inputs.clear();
+    m_peer_hashes.clear();
+    m_peer_input_count = 0;
+    m_retained_peer_bytes = 0;
+    m_replay.Close();
+    if (*m_replay.FailureReason() != '\0')
+        m_status.replay_error = m_replay.FailureReason();
+}
+
 bool LockstepSession::DrainPeerMessages() {
     std::vector<std::uint8_t> frame;
-    bool saw_bye = false;
-    std::uint64_t bye_tick = 0;
+    // Bye is terminal for new inputs. Drain this batch and keep accepting late
+    // hashes in the original window while buffered inputs are being consumed.
+    const bool peer_finished = m_received_bye_tick.has_value();
     while (!m_status.desynced && m_transport->TryReceiveFrame(frame)) {
         MessageType type;
         if (!PeekMessageType(frame, type))
             continue;
         switch (type) {
             case MessageType::Input: {
+                std::uint64_t tick = 0;
+                std::uint32_t client_id = 0;
+                if (peer_finished || frame.size() > m_frame_limit ||
+                    !InspectInput(frame, tick, client_id) || client_id != m_config.peer_client_id ||
+                    tick <= m_agreed_tick || !IsWithinPeerLookahead(tick)) {
+                    ++m_status.rejected_peer_messages;
+                    break;
+                }
+                const auto stored = m_inputs.find(tick);
+                if (stored != m_inputs.end()) {
+                    const auto peer = stored->second.find(client_id);
+                    if (peer != stored->second.end()) {
+                        // Exact retransmissions are idempotent; conflicting repeats
+                        // cannot replace an already admitted deterministic input.
+                        if (peer->second.size() != frame.size() - kInputFrameOverhead ||
+                            !std::equal(peer->second.begin(),
+                                        peer->second.end(),
+                                        frame.begin() + kInputFrameOverhead))
+                            ++m_status.rejected_peer_messages;
+                        break;
+                    }
+                }
                 InputMsg in;
                 if (DecodeInput(frame, in)) {
-                    m_inputs[in.tick][in.client_id] = in.inputs;
+                    m_inputs[in.tick][in.client_id] = std::move(in.inputs);
+                    ++m_peer_input_count;
+                    m_retained_peer_bytes += frame.size();
                 }
                 break;
             }
             case MessageType::Hash: {
+                std::uint64_t tick = 0;
+                if (frame.size() > m_frame_limit || !InspectHash(frame, tick) ||
+                    m_config.hash_cadence_ticks == 0 || tick == 0 ||
+                    tick % m_config.hash_cadence_ticks != 0 || tick <= m_confirmed_peer_hash_tick ||
+                    !IsWithinPeerLookahead(tick) ||
+                    m_peer_hashes.find(tick) != m_peer_hashes.end()) {
+                    ++m_status.rejected_peer_messages;
+                    break;
+                }
                 HashMsg h;
                 if (DecodeHash(frame, h)) {
-                    m_peer_hashes[h.tick] = h;
-                    // Compare immediately if we already hold the local hash for that tick.
-                    ComparePeerHash(h);
+                    const auto inserted =
+                        m_peer_hashes.emplace(tick, PeerCheckpoint{std::move(h), false});
+                    m_retained_peer_bytes += frame.size();
+                    // Late hashes still compare immediately, then retain only a
+                    // marker if an earlier checkpoint is outstanding.
+                    if (!ComparePeerHash(inserted.first->second))
+                        break;
+                    PruneConfirmedPeerHashes();
                 }
                 break;
             }
@@ -1268,9 +1547,10 @@ bool LockstepSession::DrainPeerMessages() {
                 DecodeBye(frame, bye);
                 // End cleanly after draining: a queued hash for an executed tick
                 // still takes precedence over this Bye.
-                if (!saw_bye)
-                    bye_tick = bye.tick;
-                saw_bye = true;
+                if (!m_received_bye_tick) {
+                    m_received_bye_tick = bye.tick;
+                    m_bye_admission_tick = m_agreed_tick;
+                }
                 break;
             }
             case MessageType::Hello:
@@ -1279,11 +1559,6 @@ bool LockstepSession::DrainPeerMessages() {
                 // unknown future message must not crash an older peer).
                 break;
         }
-    }
-    if (saw_bye) {
-        m_disconnected = true;
-        m_status.peer_disconnected = true;
-        m_status.disconnect_tick = bye_tick;
     }
     return !m_status.desynced && !m_status.peer_disconnected;
 }
@@ -1317,6 +1592,17 @@ TickResult LockstepSession::PumpTick(std::uint64_t budget_ticks) {
 
     const std::uint64_t want = m_agreed_tick + 1;
     result.tick = want;
+    // Keep all unconfirmed hashes without growing with session duration. Reliable
+    // receive continues while paused, so a delayed oldest checkpoint always fits
+    // and releases this wait. This is pacing only; applied bytes are unchanged.
+    if (m_transport->IsPeerConnected() && !m_received_bye_tick &&
+        m_config.hash_cadence_ticks != 0 &&
+        m_agreed_tick / m_config.hash_cadence_ticks -
+                m_confirmed_peer_hash_tick / m_config.hash_cadence_ticks >=
+            m_checkpoint_window) {
+        result.outcome = TickOutcome::WaitingForPeer;
+        return result;
+    }
 
     // 2) Do we have ALL peers' inputs for the wanted tick? (local + the one remote).
     auto it = m_inputs.find(want);
@@ -1325,7 +1611,11 @@ TickResult LockstepSession::PumpTick(std::uint64_t budget_ticks) {
     const bool have_peer =
         it != m_inputs.end() && it->second.find(m_config.peer_client_id) != it->second.end();
 
-    if (!have_peer && !m_transport->IsPeerConnected()) {
+    if (!have_peer && (m_received_bye_tick || !m_transport->IsPeerConnected())) {
+        if (m_received_bye_tick) {
+            m_status.peer_disconnected = true;
+            m_status.disconnect_tick = m_received_bye_tick.value();
+        }
         TransportDisconnected();
         return terminal_result();
     }
@@ -1371,10 +1661,25 @@ TickResult LockstepSession::PumpTick(std::uint64_t budget_ticks) {
 
     // 4) Merge the agreed inputs in ascending client-id order (deterministic: std::map is
     // ordered) and apply + step the world by exactly one tick.
-    std::vector<std::uint8_t> merged;
+    // Both slots are frame-bounded; check their exact sum before allocating.
+    std::size_t merged_bytes = 0;
     for (const auto& [client_id, blob] : it->second) {
-        merged.insert(merged.end(), blob.begin(), blob.end());
+        if (blob.size() > (std::numeric_limits<std::size_t>::max)() - merged_bytes) {
+            TransportDisconnected();
+            return terminal_result();
+        }
+        merged_bytes += blob.size();
     }
+    // The merged wire blob becomes immutable once assembled. Recording shares
+    // this allocation with the tick rather than copying its potentially large bytes.
+    std::vector<std::uint8_t> merged_inputs;
+    merged_inputs.reserve(merged_bytes);
+    for (const auto& [client_id, blob] : it->second) {
+        merged_inputs.insert(merged_inputs.end(), blob.begin(), blob.end());
+    }
+    const auto recorded_inputs =
+        std::make_shared<const std::vector<std::uint8_t>>(std::move(merged_inputs));
+    const auto& merged = *recorded_inputs;
     result.local_inputs = merged;
 
     bool stepped = true;
@@ -1384,24 +1689,26 @@ TickResult LockstepSession::PumpTick(std::uint64_t budget_ticks) {
     if (!stepped) {
         // A failed sim step is a fatal local error -- treat as a desync against ourselves
         // so the dump is emitted and the session halts rather than silently diverging.
+        RecordReplayTick(want, recorded_inputs, nullptr);
         EmitDesyncDump(want, "apply_and_step");
         result.outcome = TickOutcome::Desync;
         result.tick = want;
         return result;
     }
 
-    // Record the applied merged input for the desync dump's input stream.
+    // Record the applied merged input for the bounded diagnostic suffix.
     InputMsg applied;
     applied.tick = want;
     applied.client_id = 0; // merged set (not a single client)
     applied.inputs = merged;
+    m_applied_input_bytes += applied.inputs.size();
     m_applied_inputs.push_back(std::move(applied));
 
     m_agreed_tick = want;
     m_status.agreed_tick = want;
 
-    // Drop the consumed tick's inputs (bounded memory; we never re-run a tick -- no rollback).
-    m_inputs.erase(want);
+    // Remove the entire consumed prefix, including any past-tick entries.
+    PruneConsumedInputs();
 
     // 5) Capture the executed tick's LOCAL hash before any send can fail and drain
     // new peer hashes. Every available hash for this tick can then be compared.
@@ -1413,22 +1720,36 @@ TickResult LockstepSession::PumpTick(std::uint64_t budget_ticks) {
         if (m_hooks.capture_hashes) {
             m_hooks.capture_hashes(want, local, m_hooks.user);
         }
-        m_local_hashes[want] = local;
+        m_local_hashes[want] = std::make_shared<const HashMsg>(std::move(local));
     }
 
+    {
+        const auto hash = m_local_hashes.find(want);
+        RecordReplayTick(
+            want, recorded_inputs, hash == m_local_hashes.end() ? nullptr : hash->second);
+    }
+    if (m_hooks.record_replay_tick) {
+        const auto hash = m_local_hashes.find(want);
+        m_hooks.record_replay_tick(want,
+                                   merged,
+                                   hash == m_local_hashes.end() ? nullptr : hash->second.get(),
+                                   m_hooks.user);
+    }
+    PruneDiagnosticHistory();
+
     // 6) Schedule the local input that is now `horizon` ticks ahead of the new agreed tick.
-    bool send_failed =
-        m_transport->IsPeerConnected() && !ScheduleLocalInput(m_agreed_tick + m_horizon);
+    bool send_failed = !m_received_bye_tick && m_transport->IsPeerConnected() &&
+                       !ScheduleLocalInput(m_agreed_tick + m_horizon);
     if (m_status.desynced)
         return terminal_result();
 
     // 7) Send the cadence hash and compare any already-received peer hash for this tick.
     if (hash_due) {
-        const auto& local = m_local_hashes.at(want);
-        if (m_transport->IsPeerConnected()) {
+        const auto& local = *m_local_hashes.at(want);
+        if (!m_received_bye_tick && m_transport->IsPeerConnected()) {
             // Hash frame: type + payload length + tick + four string lengths/data.
             constexpr std::size_t overhead = 1 + 4 + 8 + 4 * 4;
-            const auto limit = std::min(kMaxFramePayloadBytes, m_transport->MaxFramePayloadBytes());
+            const auto limit = std::min(m_frame_limit, m_transport->MaxFramePayloadBytes());
             bool oversized = limit < overhead;
             std::size_t remaining = oversized ? 0 : limit - overhead;
             for (const auto* part :
@@ -1453,6 +1774,9 @@ TickResult LockstepSession::PumpTick(std::uint64_t budget_ticks) {
         auto peer = m_peer_hashes.find(want);
         if (peer != m_peer_hashes.end() && !ComparePeerHash(peer->second))
             return terminal_result();
+        PruneConfirmedPeerHashes();
+        if (m_status.desynced)
+            return terminal_result();
     }
 
     // A failed send must not hide a divergence in the tick we just executed.
@@ -1465,14 +1789,24 @@ TickResult LockstepSession::PumpTick(std::uint64_t budget_ticks) {
     return result;
 }
 
-void LockstepSession::EmitDesyncDump(std::uint64_t divergence_tick, const std::string& section) {
-    m_status.desynced = true;
-    m_status.desync_tick = divergence_tick;
-    m_status.desync_section = section;
+void LockstepSession::SetDumpPath(const std::string& path) {
+    m_dump_path = path;
+    // Preserve the caller's pre-PumpTick setup contract even after handshake has
+    // started the recorder. Reopening here keeps directory I/O out of PumpTick.
+    if (m_handshaken && m_agreed_tick == 0 && !m_status.desynced && !m_disconnected) {
+        m_replay.Close();
+        m_replay_open = false;
+        m_replay_failed = false;
+        m_status.replay_error.clear();
+        OpenReplayRecorder();
+    }
+}
 
-    // Emit an LREC1 stream of the LOCAL session up to the divergence so the existing
-    // --replay path can re-run it. The dump's checkpoints carry the LOCAL hashes (this is
-    // the desync-repro artifact: replaying it reconstructs exactly what this peer ran).
+bool LockstepSession::OpenReplayRecorder() {
+    if (m_replay_open)
+        return true;
+    if (m_replay_failed)
+        return false;
     Luminumbra::Replay::ReplayHeader header;
     header.version = Luminumbra::Replay::kLrec1Version;
     header.system_config_identity = m_config.system_config_identity;
@@ -1484,36 +1818,49 @@ void LockstepSession::EmitDesyncDump(std::uint64_t divergence_tick, const std::s
     header.preset_hash =
         std::strtoull(Luminumbra::Replay::Fnv1a64Hex(m_config.preset).c_str(), nullptr, 16);
     header.engine_version = std::string(luminumbra::core::GetEngineVersionString());
-    // start_world_hash: the first cadence hash if we captured one, else empty.
-    if (!m_local_hashes.empty()) {
-        header.start_world_hash = m_local_hashes.begin()->second.world_hash;
+    m_replay_open = m_replay.Open(m_dump_path, header);
+    m_replay_failed = !m_replay_open;
+    if (m_replay_failed) {
+        m_status.replay_error = "recorder setup failed";
+        LUMINUMBRA_CORE_ERROR("lockstep[{}]: cannot open bounded replay recorder for '{}'",
+                              m_config.local_client_id,
+                              m_dump_path);
     }
+    return m_replay_open;
+}
 
-    Luminumbra::Replay::ReplayWriter writer;
-    if (!writer.Open(m_dump_path, header)) {
-        LUMINUMBRA_CORE_ERROR(
-            "lockstep[{}]: failed to open desync dump '{}'", m_config.local_client_id, m_dump_path);
+void LockstepSession::RecordReplayTick(std::uint64_t tick,
+                                       std::shared_ptr<const std::vector<std::uint8_t>> merged,
+                                       std::shared_ptr<const HashMsg> hash) {
+    if (!m_replay_open || m_replay_failed)
+        return;
+    const auto confirmed = m_config.hash_cadence_ticks == 0 ? tick : m_confirmed_peer_hash_tick;
+    if (!m_replay.RecordTick(tick, std::move(merged), std::move(hash), confirmed)) {
+        m_replay_failed = true;
+        m_status.replay_error = m_replay.FailureReason();
+        // Do not wait, log to disk, or discard accepted work on the tick path.
+        // Finalize/Close drains it and reports the recorder's first failure.
+    }
+}
+
+void LockstepSession::EmitDesyncDump(std::uint64_t divergence_tick, const std::string& section) {
+    m_status.desynced = true;
+    m_status.desync_tick = divergence_tick;
+    m_status.desync_section = section;
+    if (!m_replay_open || !m_replay.Finalize(m_dump_path,
+                                             std::max(m_agreed_tick, divergence_tick),
+                                             divergence_tick)) {
+        if (*m_replay.FailureReason() != '\0')
+            m_status.replay_error = m_replay.FailureReason();
+        LUMINUMBRA_CORE_ERROR("lockstep[{}]: failed to finalize desync dump '{}' at tick {}",
+                              m_config.local_client_id,
+                              m_dump_path,
+                              divergence_tick);
+        m_replay.Close();
         return;
     }
-    // Input records: every applied tick's merged opaque input set.
-    for (const auto& applied : m_applied_inputs) {
-        writer.RecordInput(applied.tick, applied.inputs);
-    }
-    // Checkpoint records: every LOCAL cadence hash captured up to (and including) the
-    // divergence tick.
-    for (const auto& [tick, h] : m_local_hashes) {
-        if (tick > divergence_tick)
-            continue;
-        Luminumbra::Replay::CheckpointRecord cp;
-        cp.tick = tick;
-        cp.world_hash = h.world_hash;
-        cp.terrain = h.terrain;
-        cp.water = h.water;
-        cp.entities = h.entities;
-        writer.RecordCheckpoint(cp);
-    }
-    writer.Finalize(m_agreed_tick);
     m_status.dump_path = m_dump_path;
+    m_replay.Close();
 
     LUMINUMBRA_CORE_ERROR("lockstep[{}]: DESYNC at tick {} (section={}); LREC1 dump -> {}",
                           m_config.local_client_id,

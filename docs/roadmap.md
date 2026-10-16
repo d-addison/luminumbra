@@ -152,8 +152,8 @@ imply host migration, matchmaking or private Steam relay availability.
 Software releases remain source-only; art packs are separately versioned game
 content. Preset revision 7 retains revision 6 omission compatibility. LMR1 v2,
 FSD2 payload v3, canonical in-memory serialization and terrain-quality assertions
-remain the format contracts. Lockstep protocol and LREC1 replay layout are version 3;
-older layouts cannot bind resolved content and are refused.
+remain the format contracts. Lockstep Hello is version 4 and negotiates admission limits; LREC1 replay remains
+version 3. Older layouts are refused.
 Every shipping feature is enabled by default;
 obsolete-world migration and legacy save loading are not supported.
 

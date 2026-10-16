@@ -322,28 +322,18 @@ bool NetworkedSessionDriver::Begin(Luminumbra::world::GameSession* client_sessio
         host_cfg, m_impl->host_transport.get(), host_hooks);
     m_impl->client = std::make_unique<Luminumbra::Net::LockstepSession>(
         client_cfg, m_impl->client_transport.get(), client_hooks);
+    // Both sessions own bounded disk replay recorders, including the scenario
+    // path; late desyncs populate their existing status.dump_path automatically.
 
     // Handshake: queue both Hellos first, then complete both ends (single-process
     // driver order, exactly as RunLockstepLoopback does).
     {
-        Luminumbra::Net::HelloMsg ch;
-        ch.seed = config.seed;
-        ch.preset = config.preset;
-        ch.tick_rate_hz = 30;
-        ch.client_id = 1;
-        ch.system_config_identity = client_cfg.system_config_identity;
-        ch.preset_content_hash = client_cfg.preset_content_hash;
+        const auto ch = Luminumbra::Net::MakeLockstepHello(client_cfg);
         if (!m_impl->client_transport->SendFrame(Luminumbra::Net::EncodeHello(ch))) {
             m_failure_reason = "handshake_failed";
             return false;
         }
-        Luminumbra::Net::HelloMsg hh;
-        hh.seed = config.seed;
-        hh.preset = config.preset;
-        hh.tick_rate_hz = 30;
-        hh.client_id = 0;
-        hh.system_config_identity = host_cfg.system_config_identity;
-        hh.preset_content_hash = host_cfg.preset_content_hash;
+        const auto hh = Luminumbra::Net::MakeLockstepHello(host_cfg);
         if (!m_impl->host_transport->SendFrame(Luminumbra::Net::EncodeHello(hh))) {
             m_failure_reason = "handshake_failed";
             return false;
