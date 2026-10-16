@@ -18,6 +18,7 @@ def main():
         root = Path(directory)
         shutil.copytree(args.source / "data/common", root / "data/common")
         shutil.copytree(args.source / "worlds/atlas/presets", root / "worlds/atlas/presets")
+        (root / "data/common/sim").mkdir(exist_ok=True)
         systems_path = root / "data/common/systems.json"
         systems = json.loads(systems_path.read_text(encoding="utf-8-sig"))
         recording = root / "overwrite.lrec"

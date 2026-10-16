@@ -3,7 +3,10 @@
 // genome sampling from a species' per-gene ranges.
 #include <gtest/gtest.h>
 
+#include "../support/UniqueTempPath.h"
+
 #include <filesystem>
+#include <fstream>
 #include <string>
 #include <vector>
 
@@ -22,6 +25,44 @@ const char* const kWheat = R"({
   "id": "wheat", "render_archetype": "grass_crop", "perennial": false, "lifespan_ticks": 900,
   "genes": { "GrowthRate": [0.6, 0.9], "MaxScale": [0.15, 0.35], "Yield": [0.55, 0.90] }
 })";
+
+TEST(SpeciesRegistry, RawNulTextAndFilesRefuseWithoutChangingRegistry) {
+    F::SpeciesRegistry reg;
+    std::string error;
+    ASSERT_TRUE(reg.AddFromJsonText(kWheat, error)) << error;
+    const auto* original = reg.Find("wheat");
+    ASSERT_NE(original, nullptr);
+    const Luminumbra::TestSupport::ScopedTempFile file("species_bytes_", ".json");
+    for (const auto& invalid : {std::string(kWheat) + '\0',
+                                std::string(kWheat) + '\0' + "garbage",
+                                std::string(kWheat) + '\x1a' + '\0' + "garbage",
+                                '\0' + std::string(kWheat)}) {
+        EXPECT_FALSE(reg.AddFromJsonText(invalid, error));
+        EXPECT_NE(error.find("raw NUL"), std::string::npos);
+        EXPECT_EQ(reg.size(), 1u);
+        EXPECT_EQ(reg.Find("wheat"), original);
+        std::ofstream output(file.Path(), std::ios::binary | std::ios::trunc);
+        output << invalid;
+        output.close();
+        ASSERT_TRUE(output.good());
+        std::vector<std::string> errors;
+        EXPECT_EQ(reg.LoadFromDirectory(file.Path().parent_path(), errors), 0u);
+        ASSERT_EQ(errors.size(), 1u);
+        EXPECT_NE(errors.front().find("raw NUL"), std::string::npos);
+        EXPECT_EQ(reg.size(), 1u);
+        EXPECT_EQ(reg.Find("wheat"), original);
+    }
+    std::ofstream output(file.Path(), std::ios::binary | std::ios::trunc);
+    output << kWheat;
+    output.close();
+    ASSERT_TRUE(output.good());
+    F::SpeciesRegistry clean;
+    std::vector<std::string> errors;
+    EXPECT_EQ(clean.LoadFromDirectory(file.Path().parent_path(), errors), 1u);
+    EXPECT_TRUE(errors.empty());
+    ASSERT_EQ(clean.size(), 1u);
+    EXPECT_EQ(clean.all().front().id, original->id);
+}
 
 TEST(SpeciesRegistry, ParsesFieldsAndGeneRanges) {
     F::SpeciesRegistry reg;

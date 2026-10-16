@@ -274,7 +274,8 @@ struct Traversal {
         key("points");
         int count = 0;
         in >> count;
-        if (!in || count < 2 || count > 1024 || result.presetRevision != 6 ||
+        if (!in || count < 2 || count > 1024 ||
+            (result.presetRevision < 6 || result.presetRevision > 7) ||
             result.presetIdentity.size() != 16 ||
             result.presetIdentity.find_first_not_of("0123456789abcdef") != std::string::npos ||
             result.contentIdentity.empty() || result.contentIdentity.size() > 20 ||
