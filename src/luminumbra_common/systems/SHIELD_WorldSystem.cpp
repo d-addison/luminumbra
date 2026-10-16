@@ -1,4 +1,5 @@
 #include "SHIELD_WorldSystem.h"
+#include "../core/FilesystemPath.h"
 #include "../core/JobWatchdog.h" // opt-in named-phase wedge reporter for unbounded waits
 #include "../core/Log.h"
 #include "../world/FarLodStore.h"
@@ -381,6 +382,33 @@ void replace_chunk_collision(PhysicsSystem& physics_system, Luminumbra::Chunk& c
 }
 
 } // namespace
+
+void FinalizeTerrainContentHashes(TerrainGenParams& params,
+                                  const World::BiomeTable& biome_table,
+                                  std::span<const World::StructureTemplatePool> structure_pools) {
+    params.biome_table_content_hash = 0;
+    if (params.biomes_enabled && biome_table.ok() && !biome_table.empty())
+        params.biome_table_content_hash = biome_table.content_hash();
+
+    params.structures_content_hash = 0;
+    if (!params.structures_enabled || params.structures_data_dir.empty())
+        return;
+    u64 combined = 14695981039346656037ull; // fnv offset basis
+    bool accepted_pool = false;
+    for (const auto& pool : structure_pools) {
+        if (!pool.ok())
+            continue;
+        const u64 ch = pool.content_hash;
+        const auto* bytes = reinterpret_cast<const unsigned char*>(&ch);
+        for (std::size_t i = 0; i < sizeof(ch); ++i) {
+            combined ^= static_cast<u64>(bytes[i]);
+            combined *= 1099511628211ull;
+        }
+        accepted_pool = true;
+    }
+    if (accepted_pool)
+        params.structures_content_hash = combined;
+}
 
 SHIELD_WorldSystem::SHIELD_WorldSystem(JobSystem* job_system,
                                        WaterSystem* water_system,
@@ -966,9 +994,6 @@ void SHIELD_WorldSystem::reinitialize_noise(const TerrainGenParams* params,
     m_humidity_generator = {};
     m_biome_table = World::BiomeTable{};
     m_biomes_enabled = false;
-    // Stamp the table content hash into params (0 unless a table actually
-    // loads) so ComputeTerrainParamsHash mixes it into the far-LOD cache key.
-    m_params.biome_table_content_hash = 0;
     if (m_params.biomes_enabled) {
         auto temperature_fractal = NewWorldNoise<FastNoise::FractalFBm>();
         temperature_fractal->SetSource(NewWorldNoise<FastNoise::Simplex>());
@@ -980,7 +1005,10 @@ void SHIELD_WorldSystem::reinitialize_noise(const TerrainGenParams* params,
         humidity_fractal->SetOctaveCount(2);
         m_humidity_generator = humidity_fractal;
 
-        m_biome_table = World::BiomeTable::Load(m_params.biome_table_path);
+        m_biome_table =
+            m_params.worldgen_dependencies
+                ? m_params.worldgen_dependencies->biome_table
+                : World::BiomeTable::Load(Filesystem::PathFromUtf8(m_params.biome_table_path));
         if (!m_biome_table.ok() || m_biome_table.empty()) {
             for (const std::string& error : m_biome_table.errors()) {
                 LUMINUMBRA_CORE_WARN("biome table load error: {}", error);
@@ -993,7 +1021,6 @@ void SHIELD_WorldSystem::reinitialize_noise(const TerrainGenParams* params,
             m_biomes_enabled = false;
         } else {
             m_biomes_enabled = true;
-            m_params.biome_table_content_hash = m_biome_table.content_hash();
         }
     }
 
@@ -1003,24 +1030,34 @@ void SHIELD_WorldSystem::reinitialize_noise(const TerrainGenParams* params,
     // keys track template changes (ComputeTerrainParamsHash mixes it in).
     m_structure_pools.clear();
     m_structures_enabled = false;
-    m_params.structures_content_hash = 0;
     if (m_params.structures_enabled && !m_params.structures_data_dir.empty()) {
-        const std::filesystem::path structures_root(m_params.structures_data_dir);
-        std::error_code ec;
-        std::vector<std::filesystem::path> type_dirs;
-        if (std::filesystem::is_directory(structures_root, ec)) {
-            for (const auto& entry : std::filesystem::directory_iterator(structures_root, ec)) {
-                if (entry.is_directory()) {
-                    type_dirs.push_back(entry.path());
+        std::vector<World::StructureTemplatePool> pools;
+        if (m_params.worldgen_dependencies) {
+            pools = m_params.worldgen_dependencies->structure_pools;
+        } else {
+            // Direct generators without a preset retain filesystem loading.
+            const auto structures_root = Filesystem::PathFromUtf8(m_params.structures_data_dir);
+            std::error_code ec;
+            std::vector<std::filesystem::path> type_dirs;
+            if (std::filesystem::is_directory(structures_root, ec)) {
+                for (const auto& entry : std::filesystem::directory_iterator(structures_root, ec)) {
+                    if (entry.is_directory()) {
+                        type_dirs.push_back(entry.path());
+                    }
                 }
             }
+            // Match the manifest's UTF-8 order, including non-BMP type names.
+            std::sort(type_dirs.begin(), type_dirs.end(), [](const auto& a, const auto& b) {
+                return Filesystem::GenericUtf8PathString(a.filename()) <
+                       Filesystem::GenericUtf8PathString(b.filename());
+            });
+            for (const auto& type_dir : type_dirs) {
+                pools.push_back(World::LoadStructureTemplatePool(
+                    type_dir, Filesystem::GenericUtf8PathString(type_dir.filename())));
+            }
         }
-        // Sort by type name so the combined content hash is order-independent.
-        std::sort(type_dirs.begin(), type_dirs.end());
-        u64 combined = 14695981039346656037ull; // fnv offset basis
-        for (const auto& type_dir : type_dirs) {
-            const std::string type = type_dir.filename().string();
-            World::StructureTemplatePool pool = World::LoadStructureTemplatePool(type_dir, type);
+        for (auto& pool : pools) {
+            const auto& type = pool.type;
             for (const std::string& warn : pool.warnings) {
                 LUMINUMBRA_CORE_WARN("structure pool '{}': {}", type, warn);
             }
@@ -1030,19 +1067,13 @@ void SHIELD_WorldSystem::reinitialize_noise(const TerrainGenParams* params,
                 }
                 continue;
             }
-            const u64 ch = pool.content_hash;
-            const auto* bytes = reinterpret_cast<const unsigned char*>(&ch);
-            for (std::size_t i = 0; i < sizeof(ch); ++i) {
-                combined ^= static_cast<u64>(bytes[i]);
-                combined *= 1099511628211ull;
-            }
             m_structure_pools.push_back(std::move(pool));
         }
         if (!m_structure_pools.empty()) {
             m_structures_enabled = true;
-            m_params.structures_content_hash = combined;
         }
     }
+    FinalizeTerrainContentHashes(m_params, m_biome_table, m_structure_pools);
 }
 
 std::optional<World::StructureSite> SHIELD_WorldSystem::LocateStructure(
@@ -2685,6 +2716,7 @@ int SHIELD_WorldSystem::get_lod_step_for_level(int lod_level) const {
 }
 
 std::vector<IVec3> SHIELD_WorldSystem::GetInitialChunkLoadList(const Vec3& center_pos) const {
+    m_initial_load_plan_count.fetch_add(1, std::memory_order_relaxed);
     const IVec3 spawn_chunk_coords = world_to_chunk_coords(center_pos);
 
     const int INITIAL_LOAD_RADIUS = 12;
@@ -3705,6 +3737,7 @@ bool SHIELD_WorldSystem::update_chunk_activation(const std::vector<Vec3>& anchor
                 if (!dirty && m_durable_chunks.contains(id) && m_durable_chunk_loader) {
                     if (physics_system)
                         physics_system->remove_chunk_collision(id);
+                    m_resident_roster.clear();
                     m_streaming_state.chunks.erase(id);
                     shadow_note_evicted(id);
                     continue;
@@ -3730,6 +3763,7 @@ bool SHIELD_WorldSystem::update_chunk_activation(const std::vector<Vec3>& anchor
                 chunk->normalize_for_park();
                 m_parked[id] = ParkedChunk{chunk, bytes, m_persistence_tick};
                 m_parked_bytes += bytes;
+                m_resident_roster.clear();
                 m_streaming_state.chunks.erase(id);
                 shadow_note_evicted(id);
                 continue;
@@ -3738,6 +3772,7 @@ bool SHIELD_WorldSystem::update_chunk_activation(const std::vector<Vec3>& anchor
         if (physics_system) {
             physics_system->remove_chunk_collision(id);
         }
+        m_resident_roster.clear();
         m_streaming_state.chunks.erase(id);
         shadow_note_evicted(id);
     }
@@ -5626,6 +5661,7 @@ void SHIELD_WorldSystem::clear_world(PhysicsSystem* physics_system) {
             physics_system->remove_chunk_collision(id);
         }
     }
+    m_resident_roster.clear();
     m_streaming_state.chunks.clear();
     m_parked.clear();
     m_durable_chunks.clear();
@@ -5682,6 +5718,11 @@ void SHIELD_WorldSystem::wait_for_streaming_jobs() {
             "wait_for_streaming_jobs: promotion pipeline still pending after the "
             "sequenced drain — the activation queue same-tick settlement invariant is broken");
     }
+}
+
+std::span<const std::shared_ptr<Luminumbra::Chunk>>
+SHIELD_WorldSystem::resident_streamed_chunks() const {
+    return m_resident_roster.refresh(m_streaming_state.chunks);
 }
 
 std::vector<std::shared_ptr<Luminumbra::Chunk>>
@@ -5994,9 +6035,10 @@ bool SHIELD_WorldSystem::restore_authoritative_chunk(const IVec3& coords) {
         chunk->normalize_for_park();
         if (!adopt_streamed_chunk(chunk))
             throw std::runtime_error("duplicate durable chunk adoption");
-        // Water resolution is session configuration. Migrate restored truth on the owner
-        // thread before exposing it to seams/edits; matching resolutions do no work.
-        MigrateWaterSimResolution();
+        // Legacy sessions migrate on re-entry. Regional grids retain saved truth until
+        // preparation is charged to a successful budgeted fixed-tick visit.
+        if (m_water_system && !m_water_system->regional_scheduling())
+            MigrateWaterSimResolution();
         ++m_dirty_generation;
     } catch (const std::exception& error) {
         m_durable_read_failed = true;
@@ -6048,12 +6090,15 @@ SHIELD_WorldSystem::WaterAuthorityPublication
 SHIELD_WorldSystem::prepare_water_authority_publication(std::span<Chunk* const> chunks) {
     WaterAuthorityPublication publication;
     publication.lock = std::unique_lock<std::mutex>(m_far_lod_region_revision_mutex);
-    publication.revisions = m_far_lod_region_revisions;
     publication.revision = m_far_lod_authority_revision.load(std::memory_order_acquire);
     constexpr int per_region = World::kFarLodRegionSizeMeters / CHUNK_SIZE_X;
     for (const auto* chunk : chunks) {
         if (chunk->sdf_provenance() == ChunkSdfProvenance::LoadedOrEdited)
             continue;
+        if (!publication.changed) {
+            publication.revisions = m_far_lod_region_revisions;
+            publication.changed = true;
+        }
         if (publication.revision == std::numeric_limits<u64>::max())
             throw std::runtime_error("Water authority revision overflow");
         ++publication.revision;
@@ -6072,8 +6117,10 @@ SHIELD_WorldSystem::prepare_water_authority_publication(std::span<Chunk* const> 
 }
 
 void SHIELD_WorldSystem::publish_water_authority(WaterAuthorityPublication&& publication) noexcept {
-    m_far_lod_region_revisions.swap(publication.revisions);
-    m_far_lod_authority_revision.store(publication.revision, std::memory_order_release);
+    if (publication.changed) {
+        m_far_lod_region_revisions.swap(publication.revisions);
+        m_far_lod_authority_revision.store(publication.revision, std::memory_order_release);
+    }
 }
 
 void SHIELD_WorldSystem::sync_water_authority() {

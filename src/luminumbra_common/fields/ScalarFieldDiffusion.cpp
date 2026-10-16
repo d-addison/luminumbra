@@ -111,6 +111,19 @@ void ScalarFieldDiffusion::seal(const std::size_t x, const std::size_t y, const 
 ScalarDiffusionReport ScalarFieldDiffusion::diffuse(const std::size_t iterations,
                                                     const double diffusion_rate,
                                                     const EdgeGate& gate) {
+    return evolve<true>(iterations, diffusion_rate, gate);
+}
+
+void ScalarFieldDiffusion::advance(const std::size_t iterations,
+                                   const double diffusion_rate,
+                                   const EdgeGate& gate) {
+    (void)evolve<false>(iterations, diffusion_rate, gate);
+}
+
+template<bool Report>
+ScalarDiffusionReport ScalarFieldDiffusion::evolve(const std::size_t iterations,
+                                                   const double diffusion_rate,
+                                                   const EdgeGate& gate) {
     if (!finite(diffusion_rate) || diffusion_rate <= 0.0 || diffusion_rate > kMaximumStableRate) {
         throw std::invalid_argument(
             "scalar diffusion rate must be finite and in the stable range (0, 0.25]");
@@ -120,54 +133,63 @@ ScalarDiffusionReport ScalarFieldDiffusion::diffuse(const std::size_t iterations
     report.width = width_;
     report.height = height_;
     report.iterations = iterations;
-    report.initial_energy = total_energy();
-    report.steps.reserve(iterations);
+    if constexpr (Report) {
+        report.initial_energy = total_energy();
+        report.steps.reserve(iterations);
+    }
 
+    std::vector<double> next(energy_.size());
     for (std::size_t iteration = 0; iteration < iterations; ++iteration) {
-        std::vector<double> next = energy_;
+        std::copy(energy_.begin(), energy_.end(), next.begin());
         double max_delta = 0.0;
 
         const auto exchange = [&](const std::size_t lhs, const std::size_t rhs) {
-            if (!can_exchange(lhs, rhs) ||
-                (gate && !gate(lhs % width_, lhs / width_, rhs % width_, rhs / width_))) {
+            // The loop bounds prove these indices are in range. Keep the original
+            // horizontal-then-vertical edge order and floating-point operation order.
+            if (sealed_[lhs] != 0 || sealed_[rhs] != 0)
                 return;
-            }
-
-            const double conductance = edge_conductance(lhs, rhs);
+            if (!(std::min(permeability_[lhs], permeability_[rhs]) > 0.0) ||
+                (gate && !gate(lhs % width_, lhs / width_, rhs % width_, rhs / width_)))
+                return;
+            const double conductance = std::min(permeability_[lhs], permeability_[rhs]);
             const double delta = (energy_[lhs] - energy_[rhs]) * diffusion_rate * conductance;
             next[lhs] -= delta;
             next[rhs] += delta;
-            max_delta = std::max(max_delta, std::abs(delta));
+            if constexpr (Report)
+                max_delta = std::max(max_delta, std::abs(delta));
         };
 
         for (std::size_t y = 0; y < height_; ++y) {
             for (std::size_t x = 0; x + 1 < width_; ++x) {
-                exchange(index(x, y), index(x + 1, y));
+                exchange(y * width_ + x, y * width_ + x + 1);
             }
         }
         for (std::size_t y = 0; y + 1 < height_; ++y) {
             for (std::size_t x = 0; x < width_; ++x) {
-                exchange(index(x, y), index(x, y + 1));
+                exchange(y * width_ + x, (y + 1) * width_ + x);
             }
         }
 
-        energy_ = std::move(next);
-        const double total = total_energy();
-        const double conservation_error = std::abs(total - report.initial_energy);
-
-        report.steps.push_back(ScalarDiffusionStep{
-            iteration + 1,
-            total,
-            conservation_error,
-            max_delta,
-            conservation_error <= kConservationTolerance && finite(max_delta),
-        });
+        energy_.swap(next);
+        if constexpr (Report) {
+            const double total = total_energy();
+            const double conservation_error = std::abs(total - report.initial_energy);
+            report.steps.push_back(ScalarDiffusionStep{
+                iteration + 1,
+                total,
+                conservation_error,
+                max_delta,
+                conservation_error <= kConservationTolerance && finite(max_delta),
+            });
+        }
     }
 
-    report.final_energy = total_energy();
-    report.conservation_error = std::abs(report.final_energy - report.initial_energy);
-    report.maximum_cell_energy = maximum_cell_energy();
-    report.passed = ScalarDiffusionMeetsGate(report);
+    if constexpr (Report) {
+        report.final_energy = total_energy();
+        report.conservation_error = std::abs(report.final_energy - report.initial_energy);
+        report.maximum_cell_energy = maximum_cell_energy();
+        report.passed = ScalarDiffusionMeetsGate(report);
+    }
     return report;
 }
 
@@ -176,16 +198,6 @@ std::size_t ScalarFieldDiffusion::index(const std::size_t x, const std::size_t y
         throw std::out_of_range("scalar field coordinate out of range");
     }
     return y * width_ + x;
-}
-
-bool ScalarFieldDiffusion::can_exchange(const std::size_t lhs,
-                                        const std::size_t rhs) const noexcept {
-    return sealed_[lhs] == 0 && sealed_[rhs] == 0 && edge_conductance(lhs, rhs) > 0.0;
-}
-
-double ScalarFieldDiffusion::edge_conductance(const std::size_t lhs,
-                                              const std::size_t rhs) const noexcept {
-    return std::min(permeability_[lhs], permeability_[rhs]);
 }
 
 ScalarDiffusionReport RunScalarDiffusionFixture() {

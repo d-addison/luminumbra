@@ -2,6 +2,7 @@
 
 #include <filesystem>
 #include <string>
+#include <string_view>
 #include <system_error>
 
 namespace Luminumbra::Filesystem {
@@ -20,5 +21,9 @@ std::filesystem::path AbsolutePath(const std::filesystem::path& path);
 std::filesystem::path LexicallyNormalPath(const std::filesystem::path& path);
 /// Produces generic separators while retaining both leading UNC separators.
 std::string GenericPathString(const std::filesystem::path& path);
+
+// Explicit UTF-8 conversion, independent of the Windows active code page.
+std::filesystem::path PathFromUtf8(std::string_view text);
+std::string GenericUtf8PathString(const std::filesystem::path& path);
 
 } // namespace Luminumbra::Filesystem

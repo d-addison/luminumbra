@@ -6,8 +6,9 @@ from pathlib import Path
 import struct
 import tempfile
 import unittest
+from unittest import mock
 
-from validate_foliage_evidence import Refusal, fnv, validate
+from validate_foliage_evidence import Refusal, fnv, local, validate
 
 
 def matrix():
@@ -102,13 +103,33 @@ class EvidenceTests(unittest.TestCase):
     def check(self, mutate=None):
         report=copy.deepcopy(self.base)
         if mutate: mutate(report)
-        (self.root/'foliage-instancing-analysis.json').write_text(json.dumps(report))
+        (self.root/'foliage-instancing-analysis.json').write_text(json.dumps(report), encoding="utf-8")
         return validate(self.root)
 
     def test_complete_synthetic_fixture(self):
         result=self.check()
         self.assertTrue(result['passed']); self.assertFalse(result['visual_approved'])
         self.assertEqual(result['unique_gpu_frames'],64)
+
+    def test_rooted_drive_and_stream_paths_refuse_before_filesystem_access(self):
+        for name in ('/screenshots/calm.ppm', '//host/share/file.json', 'C:/file.json',
+                     'C:x', './C:x', 'safe/C:x', 'file.json:stream', '../file.json',
+                     'screenshots\\calm.ppm', '.', ''):
+            with self.subTest(name=name), mock.patch.object(Path, 'lstat') as lstat:
+                with self.assertRaisesRegex(Refusal, 'escaped artifact'):
+                    local(self.root, name, 1024)
+                lstat.assert_not_called()
+
+    def test_resolved_escape_refuses_before_walking_ancestors(self):
+        root = self.root.resolve()
+        candidate = root / 'screenshots/calm.ppm'
+        def resolve(path, *args, **kwargs):
+            return root.parent / 'outside.ppm' if path == candidate else path
+        with mock.patch.object(Path, 'resolve', new=resolve), \
+                mock.patch.object(Path, 'lstat') as lstat:
+            with self.assertRaisesRegex(Refusal, 'escaped artifact'):
+                local(root, 'screenshots/calm.ppm', 1024)
+            lstat.assert_not_called()
 
     def test_old_schema_refuses(self):
         with self.assertRaises(Refusal): self.check(lambda r:r.update(schema='luminumbra.foliage_instancing.v2'))

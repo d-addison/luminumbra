@@ -23,10 +23,32 @@ requirements but may not silently reduce the original contract.
 
 ## Reconciliation and execution
 
-The initial source audit is pinned to
-`945ecd295835a838eed0169ff709e7aabc134fa1`. Source reconciliation is a snapshot of
-that tree, separate from the source identities of historical captures. Refresh
-each row's reconciliation when implementation lands; keep old evidence intact.
+The October 14 source reconciliation is recorded against
+`6b5f955d928bc6c443fc79cc0ac4a06a38765b55`, with the v0.3.0 release scope in
+the [acceptance record](v0.3-acceptance.md). Updated rows distinguish implemented
+far-world infrastructure, the default Ladder request, clock/ledger/scheduler
+foundations, saved-world support and installed-authoring support from planned
+implementation and unproduced native packets. Normal presets still refuse
+Ladder for missing immutable authority and fall back to Legacy. Unchanged rows
+retain their earlier audit identity; historical captures retain their original
+executed-source and artifact identities. Source landing grants no visual approval.
+
+Indexed authority durability/rehydration, durable completed work and ground-object
+continuation, durable regional fields/weather/scent/energy, regional foliage/water
+continuation, strict distant policy and distant creatures (S8), remaining S9
+closure, and the committed-generation edited-SDF producer and FW S8 consumer are
+planned for v0.3.1. The render qualification tooling stack, acceptance-matrix
+completeness, developer console, asymmetric day/night and calendar-relative lunar
+cycle, GNS/Steam admission identity and MG2 E4 candidate directory are also planned
+for v0.3.1. Regional continuation performance/default enablement is planned for
+v0.4.0 as [issue #320](https://github.com/d-addison/luminumbra/issues/320).
+
+Complete render qualification, the refusing ladder horizon gate, authoritative
+ground/high/cave-air poses and fixed-view workloads, cave-walk and edited-world
+traversal producers, and outstanding acceptance capture/pinning are deferred to
+v0.3.1. Current-candidate Windows evidence remains pending. Required variants,
+performance targets and zero approvals remain unchanged. The scoped v0.3.0 owner
+Windows smoke is required separately from catalog completion.
 
 Runtime selectors and all ten shipped UI documents are mapped automatically.
 `forced_crash` is the explicit nonvisual selector exclusion. Lightning captures

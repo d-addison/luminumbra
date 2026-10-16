@@ -18,6 +18,7 @@
 #include <filesystem>
 #include <functional>
 #include <memory>
+#include <set>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -215,6 +216,7 @@ private:
     std::uint64_t m_txn_id = 0;
     std::uint64_t m_new_generation = 0;
     std::vector<Entry> m_entries;
+    std::set<std::string> m_protected_paths;
     std::vector<std::function<void()>> m_committed_actions;
     std::uint64_t m_next_undo = 0;
     bool m_registered = false;
