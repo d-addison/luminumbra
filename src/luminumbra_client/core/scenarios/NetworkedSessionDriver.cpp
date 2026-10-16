@@ -14,6 +14,7 @@
 #include "luminumbra_common/components/InstinctComponents.h"
 #include "luminumbra_common/core/Environment.h"
 #include "luminumbra_common/core/JobSystem.h"
+#include "luminumbra_common/core/SystemConfig.h"
 #include "luminumbra_common/ecs/EntitySnapshot.h"
 #include "luminumbra_common/persistence/WorldPersistenceRoundtrip.h"
 #include "luminumbra_common/persistence/WorldSaveService.h"
@@ -44,6 +45,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
+#include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <limits>
@@ -114,11 +116,16 @@ NetworkedSessionDriver::~NetworkedSessionDriver() {
 
 bool NetworkedSessionDriver::Begin(Luminumbra::world::GameSession* client_session,
                                    const Config& config) {
-    const Luminumbra::world::GameSession::NetworkHostConfig host_config{config.root_path,
-                                                                        std::to_string(config.seed),
-                                                                        config.preset,
-                                                                        config.surface_radius,
-                                                                        config.collision_radius};
+    const Luminumbra::world::GameSession::NetworkHostConfig host_config{
+        .root_path = config.root_path,
+        .seed = std::to_string(config.seed),
+        .preset = config.preset,
+        .surface_radius = config.surface_radius,
+        .collision_radius = config.collision_radius,
+        .systems_config_override =
+            config.systems_config_override ? &*config.systems_config_override : nullptr,
+        .preset_json_override =
+            config.preset_json_override ? &*config.preset_json_override : nullptr};
     if (!detail::BeginNetworkedSession(*m_impl,
                                        client_session,
                                        host_config,

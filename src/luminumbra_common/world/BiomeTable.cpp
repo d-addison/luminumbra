@@ -4,13 +4,13 @@
 #include <array>
 #include <bit>
 #include <cstring>
-#include <fstream>
 #include <initializer_list>
 #include <optional>
 #include <type_traits>
 
 #include "nlohmann/json.hpp"
 
+#include "../core/FilesystemPath.h"
 #include "../core/Log.h"
 
 namespace Luminumbra::World {
@@ -90,8 +90,8 @@ void WarnUnknownKeys(const nlohmann::json& object,
             }
         }
         if (!known) {
-            std::string warning = "biome table '" + table_path.string() + "' has unknown key " +
-                                  scope + "." + item.key();
+            std::string warning = "biome table '" + Filesystem::GenericUtf8PathString(table_path) +
+                                  "' has unknown key " + scope + "." + item.key();
             LUMINUMBRA_CORE_WARN("{}", warning);
             warnings.push_back(std::move(warning));
         }
@@ -115,26 +115,36 @@ BiomeClimateRange ParseRange(const nlohmann::json& climate, const char* key) {
 
 } // namespace
 
-BiomeTable BiomeTable::Load(const std::filesystem::path& table_path) {
+BiomeTable BiomeTable::Load(const std::filesystem::path& table_path,
+                            const WorldgenFileReader& read_file) {
     BiomeTable table;
 
-    std::ifstream file(table_path);
-    if (!file.is_open()) {
-        table.m_errors.push_back("failed to open biome table: " + table_path.string());
+    std::string bytes;
+    if (!read_file(table_path, bytes)) {
+        table.m_errors.push_back("failed to open biome table: " +
+                                 Filesystem::GenericUtf8PathString(table_path));
         return table;
     }
 
+    // The JSON lexer treats raw NUL as end-of-input and can ignore a trailing suffix.
+    if (bytes.find('\0') != std::string::npos) {
+        table.m_errors.push_back("failed to parse biome table JSON '" +
+                                 Filesystem::GenericUtf8PathString(table_path) +
+                                 "': raw NUL in content");
+        return table;
+    }
     nlohmann::json data;
     try {
-        data = nlohmann::json::parse(file);
+        data = nlohmann::json::parse(bytes);
     } catch (const nlohmann::json::parse_error& e) {
-        table.m_errors.push_back("failed to parse biome table JSON '" + table_path.string() +
-                                 "': " + e.what());
+        table.m_errors.push_back("failed to parse biome table JSON '" +
+                                 Filesystem::GenericUtf8PathString(table_path) + "': " + e.what());
         return table;
     }
 
     if (!data.is_object() || !data.contains("biomes") || !data["biomes"].is_array()) {
-        table.m_errors.push_back("biome table is missing array 'biomes': " + table_path.string());
+        table.m_errors.push_back("biome table is missing array 'biomes': " +
+                                 Filesystem::GenericUtf8PathString(table_path));
         return table;
     }
 

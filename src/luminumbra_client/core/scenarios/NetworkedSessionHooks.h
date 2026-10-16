@@ -192,9 +192,13 @@ BeginNetworkedSession(NetworkedSessionState& state,
     host_cfg.local_client_id = 0;
     host_cfg.peer_client_id = 1;
     host_cfg.hash_cadence_ticks = hash_cadence_ticks;
+    host_cfg.system_config_identity = state.host_session->SystemConfigIdentity();
+    host_cfg.preset_content_hash = state.host_session->PresetContentHash();
     Luminumbra::Net::LockstepConfig client_cfg = host_cfg;
     client_cfg.local_client_id = 1;
     client_cfg.peer_client_id = 0;
+    client_cfg.system_config_identity = client_session->SystemConfigIdentity();
+    client_cfg.preset_content_hash = client_session->PresetContentHash();
 
     const auto host_hooks = MakeNetworkedSessionHooks(state.host_ctx);
     const auto client_hooks = MakeNetworkedSessionHooks(state.client_ctx);
@@ -212,12 +216,16 @@ BeginNetworkedSession(NetworkedSessionState& state,
         ch.preset = host_config.preset;
         ch.tick_rate_hz = 30;
         ch.client_id = 1;
+        ch.system_config_identity = client_cfg.system_config_identity;
+        ch.preset_content_hash = client_cfg.preset_content_hash;
         state.client_transport->SendFrame(Luminumbra::Net::EncodeHello(ch));
         Luminumbra::Net::HelloMsg hh;
         hh.seed = seed;
         hh.preset = host_config.preset;
         hh.tick_rate_hz = 30;
         hh.client_id = 0;
+        hh.system_config_identity = host_cfg.system_config_identity;
+        hh.preset_content_hash = host_cfg.preset_content_hash;
         state.host_transport->SendFrame(Luminumbra::Net::EncodeHello(hh));
     }
     if (!state.host->Handshake() || !state.client->Handshake()) {

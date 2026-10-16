@@ -5,7 +5,10 @@
 // (never a blank). Pure: JSON text in, no filesystem, no world_hash.
 #include <gtest/gtest.h>
 
+#include "../support/UniqueTempPath.h"
+
 #include <filesystem>
+#include <fstream>
 #include <string>
 #include <vector>
 
@@ -25,6 +28,44 @@ const char* const kGrovestrider = R"({
 const char* const kStalker = R"({
   "id": "ridgeback_stalker", "display_name": "Ridgeback Stalker", "predator": true
 })";
+
+TEST(CreatureSpeciesRegistry, RawNulTextAndFilesRefuseWithoutChangingRegistry) {
+    CreatureSpeciesRegistry reg;
+    std::string error;
+    ASSERT_TRUE(reg.AddFromJsonText(kGrovestrider, error)) << error;
+    const auto* original = reg.FindByName("grovestrider");
+    ASSERT_NE(original, nullptr);
+    const Luminumbra::TestSupport::ScopedTempFile file("species_bytes_", ".json");
+    for (const auto& invalid : {std::string(kGrovestrider) + '\0',
+                                std::string(kGrovestrider) + '\0' + "garbage",
+                                std::string(kGrovestrider) + '\x1a' + '\0' + "garbage",
+                                '\0' + std::string(kGrovestrider)}) {
+        EXPECT_FALSE(reg.AddFromJsonText(invalid, error));
+        EXPECT_NE(error.find("raw NUL"), std::string::npos);
+        EXPECT_EQ(reg.size(), 1u);
+        EXPECT_EQ(reg.FindByName("grovestrider"), original);
+        std::ofstream output(file.Path(), std::ios::binary | std::ios::trunc);
+        output << invalid;
+        output.close();
+        ASSERT_TRUE(output.good());
+        std::vector<std::string> errors;
+        EXPECT_EQ(reg.LoadFromDirectory(file.Path().parent_path(), errors), 0u);
+        ASSERT_EQ(errors.size(), 1u);
+        EXPECT_NE(errors.front().find("raw NUL"), std::string::npos);
+        EXPECT_EQ(reg.size(), 1u);
+        EXPECT_EQ(reg.FindByName("grovestrider"), original);
+    }
+    std::ofstream output(file.Path(), std::ios::binary | std::ios::trunc);
+    output << kGrovestrider;
+    output.close();
+    ASSERT_TRUE(output.good());
+    CreatureSpeciesRegistry clean;
+    std::vector<std::string> errors;
+    EXPECT_EQ(clean.LoadFromDirectory(file.Path().parent_path(), errors), 1u);
+    EXPECT_TRUE(errors.empty());
+    ASSERT_EQ(clean.size(), 1u);
+    EXPECT_EQ(clean.all().front().id, original->id);
+}
 
 TEST(CreatureSpeciesRegistry, LoadsAndResolvesIdToDisplayNameAndMetadata) {
     CreatureSpeciesRegistry reg;

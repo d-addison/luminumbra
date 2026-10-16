@@ -1544,6 +1544,8 @@ TEST_F(CreatureHostAcceptance, FlagOffHostSaveFileCountHashAndArtifactBytesMatch
     header.surface_radius = 1;
     header.collision_radius = 1;
     header.engine_version = std::string(luminumbra::core::GetEngineVersionString());
+    header.system_config_identity = recording.Session()->SystemConfigIdentity();
+    header.preset_content_hash = recording.Session()->PresetContentHash();
     header.start_world_hash = recording.ComputeWorldHash();
     ServerCliOptions options;
     options.root = config.root_path;

@@ -170,7 +170,7 @@ def build_review(artifact_dir):
               "producer_failures": producer_failures,
               "derivation": "PPM decoded to RGB PNG; contact sheets contain aspect-preserving thumbnails and status labels.",
               "sheets": {name: hashlib.sha256((out_dir/name).read_bytes()).hexdigest() for name in sheets}}
-    (out_dir / "review.json").write_text(json.dumps(report, indent=2) + "\n")
+    (out_dir / "review.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     return report
 
 

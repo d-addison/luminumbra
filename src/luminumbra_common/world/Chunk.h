@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <limits>
 #include <mutex>
+#include <optional>
 #include <vector>
 
 namespace Luminumbra {
@@ -322,6 +323,15 @@ public:
     // re-evaluating the noise every tick. NOT serialized and NOT hashed (a derived accelerator);
     // size = resolution^2.
     std::vector<std::int32_t> water_src_mm;
+    // Regional staging may reuse the derived mask only for identical generator inputs.
+    // Not persisted or hashed; the vector size supplies the resolution part of the key.
+    struct WaterSourceInputs {
+        int seed;
+        bool rivers_enabled;
+        float frequency, pv_min, pv_max;
+        bool operator==(const WaterSourceInputs&) const = default;
+    };
+    std::optional<WaterSourceInputs> water_source_inputs;
     std::atomic<bool> has_water_sim{false};
     std::atomic<bool> water_mesh_generated{false};
     std::atomic<int> current_water_resolution{8}; // Current water grid resolution (4, 8, 16, or 32)

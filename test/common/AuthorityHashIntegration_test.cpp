@@ -1,5 +1,6 @@
 #include "../fixtures/smoke_artifact/FixedInputs.h"
 #include "../support/SimulationContentFixture.h"
+#include "../support/SystemConfigVariants.h"
 #include "../support/UniqueTempPath.h"
 #include "luminumbra_client/core/scenarios/NetworkedSessionHooks.h"
 #include "luminumbra_common/ai/EcologyHash.h"
@@ -246,6 +247,10 @@ TEST_F(AuthorityHashIntegration, AllHashEntryPointsUseSameAuthorityCapture) {
     auto [transport, remote] = N::MakeLoopbackPair();
     N::LockstepConfig lockstep_config;
     lockstep_config.hash_cadence_ticks = 1;
+    lockstep_config.system_config_identity = session->SystemConfigIdentity();
+    lockstep_config.preset_content_hash = session->PresetContentHash();
+    ASSERT_FALSE(lockstep_config.system_config_identity.empty());
+    ASSERT_FALSE(lockstep_config.preset_content_hash.empty());
     N::LockstepHooks hooks;
     hooks.apply_and_step = [](std::uint64_t, const std::vector<std::uint8_t>&, void*) {
         return true;
@@ -259,6 +264,8 @@ TEST_F(AuthorityHashIntegration, AllHashEntryPointsUseSameAuthorityCapture) {
     hello.preset = lockstep_config.preset;
     hello.tick_rate_hz = lockstep_config.tick_rate_hz;
     hello.client_id = lockstep_config.peer_client_id;
+    hello.system_config_identity = lockstep_config.system_config_identity;
+    hello.preset_content_hash = lockstep_config.preset_content_hash;
     remote->SendFrame(N::EncodeHello(hello));
     ASSERT_TRUE(lockstep.Handshake());
     remote->SendFrame(N::EncodeInput({1, lockstep_config.peer_client_id, {}}));
@@ -311,6 +318,10 @@ TEST_F(AuthorityHashIntegration, CaptureRefusalDisconnectReachesPeer) {
     auto [transport, remote] = N::MakeLoopbackPair();
     N::LockstepConfig host_config;
     host_config.hash_cadence_ticks = 1;
+    host_config.system_config_identity = W::GameSession{}.SystemConfigIdentity();
+    host_config.preset_content_hash = Luminumbra::TestSupport::PresetIdentityFixtureHash();
+    ASSERT_FALSE(host_config.system_config_identity.empty());
+    ASSERT_FALSE(host_config.preset_content_hash.empty());
     N::LockstepConfig peer_config = host_config;
     peer_config.local_client_id = host_config.peer_client_id;
     peer_config.peer_client_id = host_config.local_client_id;
@@ -325,6 +336,8 @@ TEST_F(AuthorityHashIntegration, CaptureRefusalDisconnectReachesPeer) {
     hello.preset = peer_config.preset;
     hello.tick_rate_hz = peer_config.tick_rate_hz;
     hello.client_id = peer_config.local_client_id;
+    hello.system_config_identity = peer_config.system_config_identity;
+    hello.preset_content_hash = peer_config.preset_content_hash;
     ASSERT_TRUE(remote->SendFrame(N::EncodeHello(hello)));
     ASSERT_TRUE(host.Handshake());
     ASSERT_TRUE(peer.Handshake());
@@ -399,6 +412,20 @@ TEST_F(AuthorityHashIntegration, NetworkCheckpointPeersShareEffectiveConfigurati
     // Begin uses this complete construction path, including configuration forwarding
     // and hook installation. Removing forwarding fails this assertion.
     ASSERT_EQ(host->GetSimulationConfiguration(), client.GetSimulationConfiguration());
+    // Handshake leaves each peer's generated Hello queued after the initial exchange.
+    // Inspect the production frames without consuming them before normal pumping.
+    N::HelloMsg host_hello, client_hello;
+    ASSERT_FALSE(network.host_to_client->queue.empty());
+    ASSERT_FALSE(network.client_to_host->queue.empty());
+    ASSERT_TRUE(N::DecodeHello(network.host_to_client->queue.front(), host_hello));
+    ASSERT_TRUE(N::DecodeHello(network.client_to_host->queue.front(), client_hello));
+    ASSERT_FALSE(host_hello.system_config_identity.empty());
+    ASSERT_FALSE(host_hello.preset_content_hash.empty());
+    EXPECT_EQ(host_hello.system_config_identity, host->SystemConfigIdentity());
+    EXPECT_EQ(host_hello.preset_content_hash, host->PresetContentHash());
+    EXPECT_EQ(client_hello.system_config_identity, client.SystemConfigIdentity());
+    EXPECT_EQ(client_hello.preset_content_hash, client.PresetContentHash());
+    EXPECT_TRUE(N::HelloMatches(host_hello, client_hello));
     ASSERT_TRUE(host->ActiveRegionsEnabled());
     ASSERT_TRUE(client.ActiveRegionsEnabled());
     ASSERT_TRUE(host->GetEnergyFieldState());
@@ -421,6 +448,9 @@ TEST_F(AuthorityHashIntegration, NetworkCheckpointPeersShareEffectiveConfigurati
     std::uint64_t host_checkpoint_frames = 0;
     std::uint64_t client_checkpoint_frames = 0;
     N::HashMsg host_checkpoint, client_checkpoint;
+    const auto disabled_configuration =
+        Config::FromJsonString(R"({"sim":{"active_regions":{"enabled":false}}})");
+    ASSERT_FALSE(disabled_configuration.enabled(luminumbra::core::SysKey::SimActiveRegions));
     for (std::uint64_t tick = 0; tick <= 3; ++tick) {
         SCOPED_TRACE(tick);
         if (tick != 0) {
@@ -481,7 +511,7 @@ TEST_F(AuthorityHashIntegration, NetworkCheckpointPeersShareEffectiveConfigurati
         EXPECT_EQ(host_hash, authority_hash);
         Same(host_sub, authority_sub);
         // A contradictory shared recipe refuses rather than silently selecting local state.
-        EXPECT_FALSE(host->ComputeNetworkWorldHashes(Config::Defaults(), host_hash, host_sub));
+        EXPECT_FALSE(host->ComputeNetworkWorldHashes(disabled_configuration, host_hash, host_sub));
         EXPECT_TRUE(host_hash.empty());
         EXPECT_TRUE(host_sub.regions.empty());
         EXPECT_TRUE(host_sub.terrain.empty());
@@ -714,7 +744,7 @@ TEST_F(AuthorityHashIntegration, FrameGroupingPreservesCheckpointHashes) {
     }
 }
 
-// Independent byte construction pins the unchanged little-endian wire contracts.
+// Independent byte construction pins the HashMsg and replay v3 little-endian wire contracts.
 void Integer(std::string& bytes, std::uint64_t value, unsigned width) {
     for (unsigned i = 0; i < width; ++i)
         bytes += static_cast<char>((value >> (8 * i)) & 255);
@@ -750,6 +780,8 @@ TEST_F(AuthorityHashIntegration, HashMsgAndLREC1EncodingUnchanged) {
     header.preset = "default";
     header.start_world_hash = "start";
     header.engine_version = "fixture";
+    header.system_config_identity = "configuration";
+    header.preset_content_hash = "resolved-preset";
     header.surface_radius = 1;
     header.collision_radius = 1;
     R::ReplayWriter writer;
@@ -760,14 +792,15 @@ TEST_F(AuthorityHashIntegration, HashMsgAndLREC1EncodingUnchanged) {
     ASSERT_TRUE(writer.Finalize(7));
     expected = "LREC1";
     Integer(expected, 0, 1);
-    Integer(expected, 1, 2);
+    Integer(expected, 3, 2);
     Integer(expected, 30, 2);
     Integer(expected, 7, 8);
     Integer(expected, 11, 8);
     Integer(expected, 13, 8);
     Integer(expected, 1, 4);
     Integer(expected, 1, 4);
-    for (const auto* text : {"11", "default", "start", "fixture"})
+    for (const auto* text :
+         {"11", "default", "start", "fixture", "configuration", "resolved-preset"})
         Text(expected, text);
     payload.clear();
     for (const auto* text : {"world", "terrain", "water", "entities"})

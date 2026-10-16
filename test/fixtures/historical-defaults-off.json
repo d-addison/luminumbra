@@ -1,0 +1,153 @@
+{
+  "_comment": "Historical compatibility workload: all simulation flags off, with the pre-change render settings. Terrain uses the frozen revision-6 default preset; the far-world ladder is render-only and excluded from the world hash.",
+  "sim": {
+    "plant_growth": {
+      "enabled": false,
+      "params": {
+        "mutation_rate": 0.05
+      }
+    },
+    "erosion": {
+      "enabled": false
+    },
+    "ecology": {
+      "enabled": false,
+      "params": {
+        "energy_drain_per_second": 0.006,
+        "energy_rest_recover": 0.08,
+        "energy_sleep_recover": 0.16,
+        "hunger_growth_per_second": 0.02,
+        "hunger_graze_sate": 0.5,
+        "stamina_rest_recover": 0.3,
+        "stamina_move_drain": 0.1,
+        "herd_weight": 0.8,
+        "alignment_weight": 0.5,
+        "catch_radius": 2.2,
+        "catch_satiation": 0.8,
+        "flock_neighbor_radius": 12.0,
+        "flock_separation_radius": 3.0,
+        "flock_cohesion_weight": 0.6,
+        "flock_separation_weight": 1.4
+      }
+    },
+    "wildlife_foliage": {
+      "enabled": false,
+      "params": {
+        "graze_radius": 3.0,
+        "graze_per_creature": 0.05,
+        "regrow_per_tick": 0.01,
+        "feed_per_graze": 0.02
+      }
+    },
+    "thirst": {
+      "enabled": false,
+      "params": {
+        "rise_rate_per_second": 0.04,
+        "drink_rate_per_second": 0.5,
+        "seek_threshold": 0.3
+      }
+    },
+    "scavenging": {
+      "enabled": false,
+      "params": {
+        "hunger_threshold": 0.3,
+        "feed_radius": 1.5,
+        "feed_rate_per_tick": 0.05
+      }
+    },
+    "reproduction": {
+      "enabled": false,
+      "params": {
+        "maturity_ticks": 90,
+        "cooldown_ticks": 300,
+        "healthy_stamina": 0.5,
+        "mate_seek_radius": 45.0,
+        "courtship_radius": 2.6,
+        "courtship_ticks": 90,
+        "spawn_radius": 1.2
+      }
+    },
+    "foraging": {
+      "enabled": false,
+      "params": {
+        "deposit": 1.0,
+        "trail_weight": 8.0,
+        "goal_weight": 1.0
+      }
+    },
+    "hydrology_weather": {
+      "enabled": false
+    },
+    "weather_events": {
+      "enabled": false
+    },
+    "aether_state": {
+      "enabled": false
+    },
+    "water_high_res": {
+      "enabled": false
+    },
+    "active_regions": {
+      "enabled": false
+    }
+  },
+  "render": {
+    "moonlight": {
+      "enabled": false,
+      "params": {
+        "strength": 0.0,
+        "color": [
+          0.6,
+          0.7,
+          1.0
+        ]
+      }
+    },
+    "tree_wind": {
+      "enabled": false
+    },
+    "plant_procgen": {
+      "enabled": true
+    },
+    "taau": {
+      "enabled": false
+    },
+    "sky_lut_gpu": {
+      "enabled": true
+    },
+    "circadian": {
+      "enabled": false,
+      "params": {
+        "amplitude": 1.0
+      }
+    },
+    "creature_spawn": {
+      "enabled": false,
+      "params": {
+        "herd_count": 12,
+        "predator_speed": 4.0,
+        "prey_speed": 2.6,
+        "initial_hunger": 0.2
+      }
+    },
+    "foraging_colony": {
+      "enabled": false,
+      "params": {
+        "ant_count": 24,
+        "food_amount": 1000000
+      }
+    },
+    "live_weather": {
+      "enabled": true
+    },
+    "aether_tap": {
+      "enabled": true
+    },
+    "snow_cover": {
+      "enabled": true
+    },
+    "far_world_ladder": {
+      "enabled": true
+    }
+  }
+}
