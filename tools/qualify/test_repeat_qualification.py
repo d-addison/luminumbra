@@ -1135,7 +1135,10 @@ class DumpSettleTest(unittest.TestCase):
         with self.windows_handles({old: (0x80000000, 1)}) as (kernel, reads):
             settled = self.settle(before=before, probe=rq.windows_dump_writer_closed,
                                   pause=appear, errors=errors)
-            copies = rq.copy_changed_files(self.folder, before, self.root / "collected", after=settled)
+            copies = rq.copy_changed_files(
+                self.folder, before, self.root / "collected", after=settled,
+                opener=lambda path: path.open("rb", buffering=0),
+            )
         self.assertEqual(self.now, 2.0)
         self.assertEqual(rq.changed_files(before, settled), [str(new)])
         self.assertEqual(copies, [str(self.root / "collected" / new.name)])
@@ -1319,6 +1322,74 @@ class DumpSettleTest(unittest.TestCase):
         self.settle(before=before, probe=probe)
         self.assertEqual(self.now, 3.0)
         self.assertEqual(probes.count(old), 4)
+
+    def test_empty_or_unchanged_inventory_returns_after_creation_grace(self) -> None:
+        for existing in (False, True):
+            with self.subTest(existing=existing):
+                self.now = 0.0
+                old = self.dump("old.dmp", size=128) if existing else None
+                before = rq.snapshot_files(self.folder, False)
+                probes = mock.Mock(return_value=True)
+                settled = rq.wait_for_dump_settle(
+                    self.folder, before, 30.0, probe=probes,
+                    clock=lambda: self.now, pause=self.pause, empty_grace=1.5,
+                )
+                self.assertEqual(self.now, 1.5)
+                self.assertEqual(settled, before)
+                self.assertEqual(rq.changed_files(before, settled), [])
+                self.assertEqual(probes.call_args_list, [mock.call(old)] * 3 if existing else [])
+
+    def test_busy_baseline_probe_defers_empty_inventory_return(self) -> None:
+        old = self.dump("old.dmp", size=128)
+        before = rq.snapshot_files(self.folder, False)
+        probes = []
+
+        def probe(path):
+            probes.append((path, self.now))
+            return self.now >= 3.0
+
+        settled = rq.wait_for_dump_settle(
+            self.folder, before, 30.0, probe=probe,
+            clock=lambda: self.now, pause=self.pause, empty_grace=1.5,
+        )
+        self.assertEqual(self.now, 4.5)
+        self.assertEqual(settled, before)
+        self.assertEqual(probes, [(old, tick) for tick in (0.0, 1.0, 2.0, 3.0, 4.0, 4.5)])
+
+    def test_failed_baseline_stat_never_makes_stale_dump_new(self) -> None:
+        old = self.dump("old.dmp", size=128)
+        real_stat = Path.stat
+
+        def denied_stat(path, *args, **kwargs):
+            if path == old:
+                raise PermissionError("baseline inspection denied")
+            return real_stat(path, *args, **kwargs)
+
+        for recursive in (False, True):
+            with self.subTest(recursive=recursive):
+                errors = []
+                with mock.patch.object(Path, "stat", denied_stat):
+                    before = rq.snapshot_files(self.folder, recursive, errors=errors)
+                self.assertEqual(len(errors), 1)
+                self.assertIn("baseline inspection denied", errors[0])
+                self.assertIn(str(old), before)
+                self.assertFalse(before[str(old)].read_complete)
+                self.assertFalse(before[str(old)].metadata_complete)
+                after = rq.snapshot_files(self.folder, recursive, baseline=before)
+                self.assertEqual(rq.changed_files(before, after), [])
+                self.assertEqual(rq.copy_changed_files(
+                    self.folder, before, self.root / "collected", recursive=recursive,
+                    after=after,
+                ), [])
+                new = self.dump("new.dmp", size=128)
+                settled = self.settle(before=before)
+                self.assertEqual(rq.changed_files(before, settled), [str(new)])
+                copies = rq.copy_changed_files(
+                    self.folder, before, self.root / "collected", recursive=recursive,
+                )
+                self.assertEqual(copies, [str(self.root / "collected" / new.name)])
+                self.assertEqual(Path(copies[0]).read_bytes(), new.read_bytes())
+                new.unlink()
 
     def test_coverage_change_does_not_copy_stale_dump_again(self) -> None:
         old = self.dump("old.dmp")
@@ -1688,6 +1759,8 @@ class DumpSettleTest(unittest.TestCase):
         with mock.patch.object(rq, "IS_WINDOWS", True), \
                 mock.patch.object(rq, "run_iteration", side_effect=child), \
                 mock.patch.object(rq, "dump_writer_closed", side_effect=probe) as writer, \
+                mock.patch.object(rq, "open_dump_for_copy",
+                                  side_effect=lambda path: path.open("rb", buffering=0)) as copy_open, \
                 mock.patch.object(rq.time, "monotonic", side_effect=lambda: self.now), \
                 mock.patch.object(rq.time, "sleep", side_effect=self.pause):
             entry = rq.run_locked_iteration(
@@ -1706,6 +1779,10 @@ class DumpSettleTest(unittest.TestCase):
         self.assertEqual(sorted(Path(path).name for path in entry["crash_artifacts"]),
                          ["child.dmp", "core"])
         self.assertTrue(all(Path(path).is_file() for path in entry["crash_artifacts"]))
+        # The probe API is mocked or unavailable throughout collection. Only
+        # source copying uses the portable opener; the actual probe still runs.
+        copy_open.assert_called_once_with(core_folder / "core")
+        self.assertEqual((run_dir / "iter-1" / "core" / "core").read_bytes(), b"core evidence")
         writer.assert_called_once()
         self.assertEqual(self.now, 0.0)
 
@@ -2060,7 +2137,7 @@ class DumpCopyTest(unittest.TestCase):
         self.assertIn("copy settle: TimeoutError: dump settle deadline expired", errors[0])
         self.assertEqual(list(self.destination.iterdir()), [])
 
-    def test_deadline_expiring_during_copy_discards_temporary_bytes(self) -> None:
+    def test_nearly_spent_settle_budget_does_not_expire_a_stable_copy(self) -> None:
         path = self.dump()
         after = self.settle()
 
@@ -2072,7 +2149,7 @@ class DumpCopyTest(unittest.TestCase):
                 def read(length):
                     data = reader.read(length)
                     if length == 8:
-                        self.now = 3.0
+                        self.now += 0.25
                     return data
 
                 wrapped.read.side_effect = read
@@ -2080,11 +2157,86 @@ class DumpCopyTest(unittest.TestCase):
 
         errors = []
         with mock.patch.object(rq, "COPY_CHUNK_BYTES", 8):
-            self.assertEqual(self.collect(after, opener=slow_reader, errors=errors, deadline=2.5), [])
-        self.assertEqual(len(errors), 1)
-        self.assertIn("TimeoutError: dump settle deadline expired", errors[0])
-        self.assertEqual(list(self.destination.iterdir()), [])
-        self.assertEqual(path.read_bytes(), b"a" * 128)
+            copies = self.collect(after, opener=slow_reader, errors=errors, deadline=1.25)
+        self.assertEqual(self.now, 9.0)  # Both full reads outlast the settle budget.
+        self.assertEqual(errors, [])
+        self.assertEqual(copies, [str(self.destination / path.name)])
+        self.assertEqual(Path(copies[0]).read_bytes(), path.read_bytes())
+        self.assertEqual(list(self.destination.glob(".*.tmp")), [])
+
+    def test_copy_budget_scales_with_size_and_has_a_floor_and_cap(self) -> None:
+        path = self.dump()
+        after = self.settle()
+        for size, seconds in ((128, 30.0), (1024 * 1024 * 1024, 64.0),
+                              (64 * 1024 * 1024 * 1024, 300.0)):
+            with self.subTest(size=size):
+                self.now = 29.5
+                sized = {str(path): after[str(path)]._replace(size=size)}
+                with mock.patch.object(rq, "copy_stable_file") as copy:
+                    self.assertEqual(self.collect(sized, deadline=30.0),
+                                     [str(self.destination / path.name)])
+                copy.assert_called_once_with(
+                    path, self.destination / path.name, sized[str(path)],
+                    opener=rq.open_dump_for_copy, deadline=29.5 + seconds, clock=mock.ANY,
+                )
+
+    def test_long_dump_basename_uses_short_temporary_name(self) -> None:
+        path = self.dump("a" * 236 + ".dmp")
+        after = self.settle()
+        real_replace = os.replace
+        temporary_names = []
+
+        def publish(source, target):
+            temporary_names.append(Path(source).name)
+            self.assertEqual(Path(source).parent, self.destination)
+            self.assertRegex(Path(source).name, r"^\.lumdump-[a-z0-9_]{8}\.tmp$")
+            self.assertLess(len(Path(source).name), 32)
+            self.assertEqual(target, self.destination / path.name)
+            return real_replace(source, target)
+
+        with mock.patch.object(rq.os, "replace", side_effect=publish):
+            copies = self.collect(after)
+        self.assertEqual(len(temporary_names), 1)
+        self.assertEqual(copies, [str(self.destination / path.name)])
+        self.assertEqual(Path(copies[0]).read_bytes(), path.read_bytes())
+        self.assertEqual(list(self.destination.glob(".*.tmp")), [])
+
+    def test_deadline_expiring_during_copy_discards_temporary_bytes(self) -> None:
+        path = self.dump()
+        after = self.settle()
+        for phase, stalled_length, stalled_read in (
+            ("fingerprint", 64, 1), ("copy", 8, 1), ("verification", 8, 17),
+            ("copy EOF", 1, 1), ("verification EOF", 1, 2),
+        ):
+            with self.subTest(phase=phase):
+                self.now = 1.0
+                reads = 0
+
+                @contextmanager
+                def slow_reader(source):
+                    with source.open("rb", buffering=0) as reader:
+                        wrapped = mock.Mock(wraps=reader)
+
+                        def read(length):
+                            nonlocal reads
+                            data = reader.read(length)
+                            if length == stalled_length:
+                                reads += 1
+                                if reads == stalled_read:
+                                    self.now += rq.DUMP_COPY_MIN_SECONDS + 1.0
+                            return data
+
+                        wrapped.read.side_effect = read
+                        yield wrapped
+
+                errors = []
+                with mock.patch.object(rq, "COPY_CHUNK_BYTES", 8):
+                    self.assertEqual(self.collect(after, opener=slow_reader, errors=errors, deadline=2.5), [])
+                self.assertEqual(reads, stalled_read)
+                self.assertEqual(len(errors), 1)
+                self.assertIn("TimeoutError: dump copy deadline expired", errors[0])
+                self.assertEqual(list(self.destination.iterdir()), [])
+                self.assertEqual(path.read_bytes(), b"a" * 128)
 
     def test_recursive_core_copy_race_uses_the_same_settle_policy(self) -> None:
         (self.folder / "nested").mkdir()
@@ -2155,6 +2307,53 @@ class DumpCopyTest(unittest.TestCase):
                     os.fstat(descriptors[0])
                 self.assertEqual(self.now, 2.0 if error else 1.0)
                 self.assertEqual(list(self.destination.glob(".*.tmp")), [])
+
+
+class WindowsCopyMockPortabilityTest(unittest.TestCase):
+    def test_api_mock_tests_copy_with_windows_platform_dispatch(self) -> None:
+        # Replace only the harness's os module: changing the host module would
+        # make pathlib select WindowsPath on POSIX. All filesystem calls stay real.
+        windows_os = ModuleType("os")
+        windows_os.__dict__.update(vars(os))
+        windows_os.name = "nt"
+        windows_os.O_BINARY = getattr(os, "O_BINARY", 0)
+        crt = ModuleType("msvcrt")
+        crt.open_osfhandle = mock.Mock(side_effect=OSError(errno.EBADF, "fake Windows handle"))
+        cases = (
+            (DumpSettleTest, "test_writer_busy_then_closes_before_fingerprinting"),
+            (DumpSettleTest, "test_writer_never_closes_without_attempting_fingerprint_reads"),
+            (DumpSettleTest, "test_reader_holding_baseline_dump_allows_successful_probes"),
+            (DumpSettleTest, "test_new_dump_appears_while_reader_holds_baseline_dump"),
+            (DumpSettleTest, "test_unavailable_windows_probe_keeps_completed_iteration"),
+            (DumpSettleTest, "test_windows_api_failures_keep_completed_iteration"),
+            (DumpSettleTest, "test_probe_error_cannot_recover_into_settled_evidence"),
+            (DumpCopyTest, "test_windows_copy_opener_retains_share_read_handle_and_retries_conflicts"),
+        )
+        with mock.patch.object(rq, "os", windows_os), \
+                mock.patch.dict(sys.modules, {"msvcrt": crt}):
+            # Verify the guard itself catches a fake handle before testing that
+            # collection avoids it. The opener contract test installs its own
+            # CRT adapter, which transfers ownership to a real descriptor.
+            import ctypes
+
+            kernel = mock.Mock()
+            kernel.CreateFileW.return_value = 123
+            kernel.CloseHandle.return_value = True
+            with mock.patch.object(ctypes, "WinDLL", create=True, return_value=kernel):
+                with self.assertRaisesRegex(OSError, "fake Windows handle"):
+                    with rq.open_dump_for_copy(Path("dump.dmp")):
+                        self.fail("fake handle was accepted")
+            crt.open_osfhandle.assert_called_once_with(123, os.O_RDONLY | windows_os.O_BINARY)
+            kernel.CloseHandle.assert_called_once_with(123)
+            crt.open_osfhandle.reset_mock()
+            for case, method in cases:
+                with self.subTest(test=method):
+                    result = unittest.TestResult()
+                    case(method).run(result)
+                    self.assertEqual(result.testsRun, 1)
+                    self.assertEqual(result.errors, [])
+                    self.assertEqual(result.failures, [])
+            crt.open_osfhandle.assert_not_called()
 
 
 class WindowsDumpLockTest(unittest.TestCase):
@@ -2603,6 +2802,33 @@ class QualificationSafetyTest(HarnessTestCase):
 
     def dump_query(self, folder: Path):
         return lambda key: (0, WerPreflightTest.reg_output(str(folder)))
+
+    def test_failed_child_without_a_new_wer_dump_returns_after_creation_grace(self) -> None:
+        folder = self.work / "dumps"
+        folder.mkdir()
+        old = folder / "old.dmp"
+        old.write_bytes(b"stale dump")
+        now = [0.0]
+
+        def failed_child(*arguments):
+            result = self.clean_child(*arguments)
+            result.update(status="exit:5", exit_code=5)
+            return result
+
+        with mock.patch.object(rq, "dump_writer_closed", return_value=True) as probe, \
+                mock.patch.object(rq.time, "monotonic", side_effect=lambda: now[0]), \
+                mock.patch.object(rq.time, "sleep", side_effect=lambda seconds: now.__setitem__(0, now[0] + seconds)):
+            code, _ = self.qualify(self.safety_args(count=1, folder=folder),
+                                   failed_child, self.dump_query(folder))
+        self.assertEqual(code, 1)
+        self.assertEqual(now[0], 2.0)
+        self.assertEqual(probe.call_args_list, [mock.call(old)] * 3)
+        entry = self.assert_finalized("failed")["iterations"][0]
+        self.assertEqual(entry["status"], "exit:5")
+        self.assertEqual(entry["failure_reason"], "exit:5")
+        self.assertEqual(entry["crash_artifacts"], [])
+        self.assertEqual(entry["collection_errors"], [])
+        self.assertFalse((Path(entry["crash_dir"]).parent / "wer").exists())
 
     def test_unsettled_wer_is_not_copied_after_deadline(self) -> None:
         folder = self.work / "dumps"

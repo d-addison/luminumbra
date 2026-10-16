@@ -66,6 +66,11 @@ DEFAULT_TIMEOUT_SECONDS = 120.0
 CLEANUP_TIMEOUT_SECONDS = 5.0
 DUMP_SETTLE_SECONDS = 30.0
 DUMP_STABLE_SECONDS = 1.0
+# Allow WER two seconds to create a dump when no candidate or busy writer exists.
+DUMP_EMPTY_GRACE_SECONDS = 2.0
+DUMP_COPY_MIN_SECONDS = 30.0
+DUMP_COPY_MAX_SECONDS = 300.0
+DUMP_COPY_BYTES_PER_SECOND = 16 * 1024 * 1024
 SNAPSHOT_FILE_READ_BYTES = 64 * 1024
 SNAPSHOT_TOTAL_READ_BYTES = 1024 * 1024
 COPY_CHUNK_BYTES = 1024 * 1024  # Bound every transient copy and verification buffer to 1 MiB.
@@ -226,6 +231,8 @@ class FileStamp(NamedTuple):
     fingerprints: tuple[tuple[int, int, str], ...]
     # Budget exhaustion is valid empty coverage; a failed read is not.
     read_complete: bool = True
+    # Failed stat entries retain the path without claiming any metadata evidence.
+    metadata_complete: bool = True
 
 
 class DumpWriterBusyError(OSError):
@@ -254,6 +261,8 @@ def snapshot_files(
     when they have no samples. Read those ranges first; their total already fits
     SNAPSHOT_TOTAL_READ_BYTES. Allocate the remainder in sorted path order.
     Deadline expiry always propagates, even when inspection errors are collected.
+    Failed stat entries retain their paths with unknown metadata, so a later
+    successful inspection cannot turn a baseline entry into a newly appeared file.
     When given, writer_probe must succeed for the inventory before any reads;
     busy handles are retryable, while probe errors and failed reads are fatal.
     """
@@ -302,6 +311,7 @@ def snapshot_files(
                 file_stat = path.stat()
             except OSError as exc:
                 inspection_error(path, exc)
+                result[str(path)] = FileStamp(0, 0, 0, (0, 0), (), False, False)
                 continue
             check_settle_deadline(deadline, clock)
             if stat.S_ISREG(file_stat.st_mode):
@@ -315,7 +325,9 @@ def snapshot_files(
         traversal_error(exc)
 
     if writer_probe is not None:
-        for source in result:
+        for source, stamp in result.items():
+            if not stamp.metadata_complete:
+                continue
             check_settle_deadline(deadline, clock)
             try:
                 closed = writer_probe(Path(source))
@@ -329,12 +341,15 @@ def snapshot_files(
 
     def pinned(path: str) -> bool:
         previous = baseline.get(path) if baseline is not None else None
-        return (previous is not None and previous.size == result[path].size and
+        return (previous is not None and previous.metadata_complete and
+                previous.size == result[path].size and
                 previous.identity == result[path].identity)
 
     for source in sorted(result, key=lambda path: (not pinned(path), path)):
         check_settle_deadline(deadline, clock)
         stamp = result[source]
+        if not stamp.metadata_complete:
+            continue
         if baseline is not None and pinned(source):
             ranges = [(offset, length) for offset, length, _digest in baseline[source].fingerprints]
         else:
@@ -573,7 +588,12 @@ def copy_stable_file(
     An opener must retain the same readable file through both passes. Windows'
     default opener additionally prevents writers from reopening during them.
     A temporary destination is closed before publication or removal on all hosts.
+    deadline bounds copying and verification independently of dump settling.
     """
+    def check_copy_deadline() -> None:
+        if clock() >= deadline:
+            raise TimeoutError("dump copy deadline expired")
+
     def metadata(info: os.stat_result) -> tuple[int, int, tuple[int, int]]:
         # These fields agree between path stat and handle fstat on every host.
         # Windows stat uses creation time for ctime, while fstat uses change time.
@@ -581,33 +601,39 @@ def copy_stable_file(
 
     temporary_path: Path | None = None
     try:
-        check_settle_deadline(deadline, clock)
+        check_copy_deadline()
         with opener(source) as reader:
             initial = os.fstat(reader.fileno())
+            check_copy_deadline()
             if metadata(initial) != (expected.size, expected.mtime_ns, expected.identity):
                 raise DumpWriterBusyError(f"{source}: dump changed before copy")
             # Validate the final snapshot's samples using the retained handle.
             for offset, length, digest in expected.fingerprints:
-                check_settle_deadline(deadline, clock)
+                check_copy_deadline()
                 reader.seek(offset)
-                if hashlib.sha256(reader.read(length)).hexdigest() != digest:
+                sample = reader.read(length)
+                check_copy_deadline()
+                if hashlib.sha256(sample).hexdigest() != digest:
                     raise DumpWriterBusyError(f"{source}: dump changed before copy")
             reader.seek(0)
             copied_digest = hashlib.sha256()
-            with tempfile.NamedTemporaryFile(dir=target.parent, prefix=f".{target.name}.",
+            with tempfile.NamedTemporaryFile(dir=target.parent, prefix=".lumdump-",
                                              suffix=".tmp", delete=False) as temporary:
                 temporary_path = Path(temporary.name)
                 remaining = initial.st_size
                 while remaining:
-                    check_settle_deadline(deadline, clock)
+                    check_copy_deadline()
                     chunk = reader.read(min(remaining, COPY_CHUNK_BYTES))
+                    check_copy_deadline()
                     if not chunk:
                         raise DumpWriterBusyError(f"{source}: dump shortened during copy")
                     if temporary.write(chunk) != len(chunk):
                         raise OSError(errno.EIO, "short dump copy write")
                     copied_digest.update(chunk)
                     remaining -= len(chunk)
-                if reader.read(1):
+                extra = reader.read(1)
+                check_copy_deadline()
+                if extra:
                     raise DumpWriterBusyError(f"{source}: dump grew during copy")
 
             # Hash the source again after the copy, through the same handle. A
@@ -618,19 +644,22 @@ def copy_stable_file(
             source_digest = hashlib.sha256()
             remaining = initial.st_size
             while remaining:
-                check_settle_deadline(deadline, clock)
+                check_copy_deadline()
                 chunk = reader.read(min(remaining, COPY_CHUNK_BYTES))
+                check_copy_deadline()
                 if not chunk:
                     raise DumpWriterBusyError(f"{source}: dump shortened after copy")
                 source_digest.update(chunk)
                 remaining -= len(chunk)
             final = os.fstat(reader.fileno())
-            if (reader.read(1) or
+            extra = reader.read(1)
+            check_copy_deadline()
+            if (extra or
                     any(metadata(info) != metadata(initial)
                         for info in (post_copy, final, source.stat())) or
                     source_digest.digest() != copied_digest.digest()):
                 raise DumpWriterBusyError(f"{source}: dump changed during copy")
-            check_settle_deadline(deadline, clock)
+            check_copy_deadline()
             os.utime(temporary_path, ns=(initial.st_atime_ns, initial.st_mtime_ns))
             os.replace(temporary_path, target)
     finally:
@@ -659,6 +688,7 @@ def copy_changed_files(
     the error propagates. Changed sources and incompatible writer handles restart
     settling within the original deadline; an unverified copy is never published.
     opener is the platform source opener, injectable for share-mode transports.
+    Each copy gets 30 seconds to five minutes, sized at 16 MiB/s, including validation.
     """
     clock = clock or time.monotonic
     deadline = deadline if deadline is not None else clock() + DUMP_SETTLE_SECONDS
@@ -681,8 +711,11 @@ def copy_changed_files(
         target = destination / relative
         try:
             target.parent.mkdir(parents=True, exist_ok=True)
+            copy_deadline = clock() + min(DUMP_COPY_MAX_SECONDS, max(
+                DUMP_COPY_MIN_SECONDS, after[source].size / DUMP_COPY_BYTES_PER_SECOND,
+            ))
             copy_stable_file(Path(source), target, after[source], opener=opener,
-                             deadline=deadline, clock=clock)
+                             deadline=copy_deadline, clock=clock)
         except DumpWriterBusyError:
             try:
                 # Keep probe-before-read ordering, including baseline entries,
@@ -1389,12 +1422,15 @@ def wait_for_dump_settle(
     clock: Callable[[], float] | None = None,
     pause: Callable[[float], None] | None = None,
     recursive: bool = False,
+    empty_grace: float = DUMP_EMPTY_GRACE_SECONDS,
 ) -> dict[str, FileStamp]:
     """Require closed writers and unchanged snapshots for the full stable window.
 
     Byte sampling alone cannot rule out a middle-only rewrite with deferred file
     timestamps. The writer probe is required on both ends of the stable window.
     Expiry during collection or probing must never be accepted as stability.
+    With no changed files or busy probes, return after a two-second creation
+    grace window (injectable). Busy baseline probes still require settling.
     """
     clock = clock or time.monotonic
     pause = pause or time.sleep
@@ -1402,7 +1438,8 @@ def wait_for_dump_settle(
     deadline = clock() + timeout
     previous: dict[str, FileStamp] | None = None
     stable_since: float | None = None
-    if any(not stamp.read_complete for stamp in before.values()):
+    empty_since: float | None = None
+    if any(not stamp.read_complete and stamp.metadata_complete for stamp in before.values()):
         raise OSError("incomplete baseline dump fingerprint coverage")
     while True:
         check_settle_deadline(deadline, clock)
@@ -1415,14 +1452,20 @@ def wait_for_dump_settle(
             snapshot = {}
             closed = False
         else:
-            if any(not stamp.read_complete for stamp in snapshot.values()):
+            if any(not stamp.read_complete and stamp.metadata_complete for stamp in snapshot.values()):
                 raise OSError("incomplete dump fingerprint coverage")
             closed = True
         current = {path: snapshot[path] for path in changed_files(before, snapshot)}
-        closed = closed and bool(current)
         check_settle_deadline(deadline, clock)
         now = clock()
-        if not closed:
+        if closed and not current:
+            if empty_since is None:
+                empty_since = now
+            if now - empty_since >= empty_grace:
+                return snapshot
+        else:
+            empty_since = None
+        if not closed or not current:
             stable_since = None
         elif current != previous or stable_since is None:
             stable_since = now
@@ -1430,7 +1473,10 @@ def wait_for_dump_settle(
             check_settle_deadline(deadline, clock)
             return snapshot
         previous = current
-        pause(min(DUMP_STABLE_SECONDS, max(0.0, deadline - clock())))
+        next_check = deadline
+        if empty_since is not None:
+            next_check = min(next_check, empty_since + empty_grace)
+        pause(min(DUMP_STABLE_SECONDS, max(0.0, next_check - clock())))
 
 
 def build_entry(

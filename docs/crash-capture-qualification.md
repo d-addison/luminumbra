@@ -101,6 +101,13 @@ middle-only rewrite. The portable test seam accepts an injected writer probe;
 the POSIX fallback uses an advisory file lock, which only detects cooperating
 writers.
 
+If scans find no new or changed dump and all observed baseline writer probes
+succeed, collection returns after a two-second creation grace window rather than
+waiting out the settle deadline. The grace window is injectable for tests.
+Busy baseline writers defer this return, so deferred timestamps and writes
+still require successful probes before collection can finish. A dump appearing
+during the grace window must pass the full stable window.
+
 Snapshots read at most 64 KiB per file and 1 MiB total, sampling the prefix and
 suffix. Every regular file retains its size, file times and identity even when
 the read budget is exhausted, so large dumps remain detectable. Fingerprints
@@ -109,12 +116,28 @@ in coverage alone does not make stale evidence eligible for copying. Reserved
 ranges, including reused baseline samples, consume the read budget even if an
 open or read fails. Failed or short reads are recorded and make that file
 ineligible for copying; incomplete fingerprint coverage aborts WER settling
-without retrying into apparent stability. The settle deadline is checked during
-enumeration, reads, writer probes and before accepting
-stability. Expiry or any writer probe exception (including an unavailable
+without retrying into apparent stability. A failed baseline `stat` retains an
+unknown entry for the observed path; later successful inspection cannot make
+that stale path appear new. Unknown metadata entries remain ineligible for
+copying and do not prevent collection of other readable dumps.
+The settle deadline is checked during enumeration, reads, writer probes and
+before accepting stability. Expiry or any writer probe exception (including an unavailable
 platform API) records a collection error and prevents WER copying for that
 iteration, preserving the child's crash classification and other artifacts.
 Successful settling supplies the snapshot used to select copies.
+
+Each file copy and its full source verification pass share a separate deadline,
+starting when that copy begins: the source size divided by 16 MiB/s, with a
+30-second floor and a five-minute cap. Settling does not consume this budget.
+A changed source or sharing conflict still retries settling within the original
+settle deadline; a copy deadline expiry records a collection error and discards
+the temporary bytes. Reads and verification retain the same source handle,
+including the Windows read-only handle that permits only read sharing.
+Destinations are staged in their target directory with short names of the form
+`.lumdump-<unique suffix>.tmp`, independent of the source basename. The closed
+temporary destination is atomically renamed to the final name only after
+verification, and temporary files are removed on failure.
+
 Stdlib regressions cover large, multiple, growing and middle-rewritten dumps,
 stale-file coverage changes and deadline expiry. Native WER production and
 share-mode behavior remain **NEEDS-NATIVE-RUN**.
